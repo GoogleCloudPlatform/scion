@@ -228,7 +228,7 @@ func TestCreateAgentProjectHubEndpointWhenDisabled(t *testing.T) {
 // hub-managed project (ProjectSlug set, no ProjectPath) correctly resolves the project
 // path and uses project settings hub.endpoint from the .scion subdirectory.
 func TestCreateAgentHubManagedProjectSettingsEndpoint(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.HubEndpoint = "http://localhost:9810" // broker's default (combo mode)
@@ -237,7 +237,7 @@ func TestCreateAgentHubManagedProjectSettingsEndpoint(t *testing.T) {
 
 	mgr := &envCapturingManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	// Set up a hub-managed project directory at the expected path.
 	globalDir, err := config.GetGlobalDir()
@@ -331,13 +331,63 @@ func TestResolveProjectSettingsDir(t *testing.T) {
 			t.Errorf("expected %q (original path), got %q", projectDir, result)
 		}
 	})
+
+	// A workspace root's own settings file is workspace content: with a
+	// .scion directory present, the .scion directory is the settings dir
+	// whether or not it holds a settings file, and the root's file is not
+	// read.
+	t.Run("hub-managed project - settings file at the workspace root is not used", func(t *testing.T) {
+		projectDir := t.TempDir()
+		scionDir := filepath.Join(projectDir, ".scion")
+		if err := os.MkdirAll(scionDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte("hub:\n  endpoint: https://root.example.com\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if got := resolveProjectSettingsDir(projectDir); got != scionDir {
+			t.Errorf("resolveProjectSettingsDir = %q, want %q", got, scionDir)
+		}
+		if ep := hubEndpointFromProjectSettings(projectDir); ep != "" {
+			t.Errorf("hub endpoint = %q from the workspace root's settings file, want none", ep)
+		}
+		if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte("hub:\n  endpoint: https://scion.example.com\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if ep := hubEndpointFromProjectSettings(projectDir); ep != "https://scion.example.com" {
+			t.Errorf("hub endpoint = %q, want the .scion settings value", ep)
+		}
+	})
+
+	t.Run("project marker file - resolves to the external dir", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		projectDir := filepath.Join(t.TempDir(), "proj")
+		if err := os.MkdirAll(projectDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		marker := &config.ProjectMarker{ProjectID: "11111111-2222-3333-4444-555555555555", ProjectName: "proj", ProjectSlug: "proj"}
+		if err := config.WriteProjectMarker(filepath.Join(projectDir, ".scion"), marker); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte("hub:\n  endpoint: https://root.example.com\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		want, err := config.ResolveProjectMarker(filepath.Join(projectDir, ".scion"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := resolveProjectSettingsDir(projectDir); got != want {
+			t.Errorf("resolveProjectSettingsDir = %q, want the external dir %q", got, want)
+		}
+	})
 }
 
 // TestCreateAgentContainerHubEndpointOverride tests that ContainerHubEndpoint
 // overrides the dispatcher-provided endpoint for container injection.
 func TestCreateAgentContainerHubEndpointOverride(t *testing.T) {
 	t.Run("container endpoint overrides request endpoint", func(t *testing.T) {
-		cfg := DefaultServerConfig()
+		cfg := testServerConfig()
 		cfg.BrokerID = "test-broker-id"
 		cfg.BrokerName = "test-host"
 		cfg.Debug = true
@@ -346,7 +396,7 @@ func TestCreateAgentContainerHubEndpointOverride(t *testing.T) {
 
 		mgr := &envCapturingManager{}
 		rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-		srv := New(cfg, mgr, rt)
+		srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 		body := `{
 			"name": "test-agent",
@@ -376,7 +426,7 @@ func TestCreateAgentContainerHubEndpointOverride(t *testing.T) {
 	})
 
 	t.Run("container endpoint overrides localhost even with project settings", func(t *testing.T) {
-		cfg := DefaultServerConfig()
+		cfg := testServerConfig()
 		cfg.BrokerID = "test-broker-id"
 		cfg.BrokerName = "test-host"
 		cfg.Debug = true
@@ -385,7 +435,7 @@ func TestCreateAgentContainerHubEndpointOverride(t *testing.T) {
 
 		mgr := &envCapturingManager{}
 		rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-		srv := New(cfg, mgr, rt)
+		srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 		// Create a project directory with settings.yaml containing hub.endpoint
 		projectDir := filepath.Join(t.TempDir(), ".scion")
@@ -447,7 +497,7 @@ hub:
 	})
 
 	t.Run("non-localhost endpoint is not overridden by container endpoint", func(t *testing.T) {
-		cfg := DefaultServerConfig()
+		cfg := testServerConfig()
 		cfg.BrokerID = "test-broker-id"
 		cfg.BrokerName = "test-host"
 		cfg.ContainerHubEndpoint = "http://host.containers.internal:8080"
@@ -455,7 +505,7 @@ hub:
 
 		mgr := &envCapturingManager{}
 		rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-		srv := New(cfg, mgr, rt)
+		srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 		body := `{
 			"name": "test-agent",
@@ -478,7 +528,7 @@ hub:
 	})
 
 	t.Run("kubernetes runtime skips container endpoint override", func(t *testing.T) {
-		cfg := DefaultServerConfig()
+		cfg := testServerConfig()
 		cfg.BrokerID = "test-broker-id"
 		cfg.BrokerName = "test-host"
 		cfg.ContainerHubEndpoint = "http://host.containers.internal:8080"
@@ -488,7 +538,7 @@ hub:
 		rt := &runtime.MockRuntime{
 			NameFunc: func() string { return "kubernetes" },
 		}
-		srv := New(cfg, mgr, rt)
+		srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 		// Create a project dir with kubernetes settings so resolveManagerForOpts
 		// matches the "kubernetes" runtime without trying to create a real manager.
@@ -561,13 +611,13 @@ runtimes:
 		if err := os.WriteFile(filepath.Join(dotScion, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
 			t.Fatal(err)
 		}
-		cfg := DefaultServerConfig()
+		cfg := testServerConfig()
 		cfg.BrokerID = "test-broker-id"
 		cfg.BrokerName = "test-host"
 		cfg.ForceRuntime = "kubernetes"
 		mgr := &envCapturingManager{}
 		rt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
-		return New(cfg, mgr, rt), mgr
+		return New(cfg, mgr, rt, config.RuntimeBuildRecord{}), mgr
 	}
 
 	assertAccepted := func(t *testing.T, w *httptest.ResponseRecorder, mgr *envCapturingManager) {
@@ -625,7 +675,7 @@ runtimes:
 // different hub in multi-hub setups).
 func TestCreateAgentConnectionHubEndpoint(t *testing.T) {
 	t.Run("connection endpoint used when request endpoint empty", func(t *testing.T) {
-		cfg := DefaultServerConfig()
+		cfg := testServerConfig()
 		cfg.BrokerID = "test-broker-id"
 		cfg.BrokerName = "test-host"
 		cfg.HubEndpoint = "http://localhost:8080" // broker's own local hub
@@ -634,7 +684,7 @@ func TestCreateAgentConnectionHubEndpoint(t *testing.T) {
 
 		mgr := &envCapturingManager{}
 		rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-		srv := New(cfg, mgr, rt)
+		srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 		// Register a remote hub connection (as would happen via control channel)
 		srv.hubMu.Lock()
@@ -666,14 +716,14 @@ func TestCreateAgentConnectionHubEndpoint(t *testing.T) {
 	})
 
 	t.Run("request endpoint takes priority over connection endpoint", func(t *testing.T) {
-		cfg := DefaultServerConfig()
+		cfg := testServerConfig()
 		cfg.BrokerID = "test-broker-id"
 		cfg.BrokerName = "test-host"
 		cfg.ForceRuntime = "mock"
 
 		mgr := &envCapturingManager{}
 		rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-		srv := New(cfg, mgr, rt)
+		srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 		srv.hubMu.Lock()
 		srv.hubConnections["hub-demo"] = &HubConnection{

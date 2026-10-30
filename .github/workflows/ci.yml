@@ -32,6 +32,8 @@ concurrency:
 permissions:
   contents: read
 
+# Fork CI gate (hack/check-fork-ci-gate.sh, cr-ci/workflows/README.md): on push
+# and schedule every job runs only in GoogleCloudPlatform/scion; forks stage PRs.
 jobs:
   # Path detection for jobs that only matter when specific files change
   # (ptone/scion#2845). Gating uses this job plus a job-level `if:` (or a
@@ -46,12 +48,14 @@ jobs:
   # If the diff itself fails, the outputs fall back to 'true' (fail open).
   changes:
     name: Detect changed paths
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     runs-on: ubuntu-latest
     outputs:
       single_node_vm: ${{ steps.diff.outputs.single_node_vm }}
       starter_hub: ${{ steps.diff.outputs.starter_hub }}
       web: ${{ steps.diff.outputs.web }}
       web_checks: ${{ steps.diff.outputs.web_checks }}
+      go: ${{ steps.diff.outputs.go }}
     steps:
       - name: Checkout code
         if: github.event_name == 'pull_request'
@@ -77,6 +81,7 @@ jobs:
               echo "starter_hub=true"
               echo "web=true"
               echo "web_checks=true"
+              echo "go=true"
             } >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -89,6 +94,7 @@ jobs:
               echo "starter_hub=true"
               echo "web=true"
               echo "web_checks=true"
+              echo "go=true"
             } >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -131,9 +137,86 @@ jobs:
           else
             echo "web_checks=false" >> "$GITHUB_OUTPUT"
           fi
+          # go gates the golangci-lint job (ptone/scion#4208): PRs that
+          # cannot change lint results skip it, which saves a runner for
+          # several minutes. (It was added when lint could exhaust the
+          # runner's memory; hack/golangci-lint-split.sh removed that, see the
+          # lint job.) Deliberately wide; it matches anything that
+          # can change what golangci-lint loads or reports:
+          #   - Go sources and modules (*.go, go.mod, go.sum, go.work, in any
+          #     directory, extras/ included) and cgo/assembly sources;
+          #   - golangci-lint config (.golangci*; none today, defaults apply);
+          #   - go:embed inputs of the root module: harnesses/ (all:*),
+          #     resources/, pkg/config/embeds/, pkg/config/schemas/ and
+          #     third_party/ (ateapi.proto). A removed embedded file fails
+          #     type-checking, which golangci-lint reports;
+          #   - web/dist/ (web/embed.go embeds all:dist/client; only its
+          #     .gitkeep is in git, the rest is a build output);
+          #   - this workflow and the Go cache actions the lint job uses;
+          #   - cr-ci/runner/golangci-lint/ build.sh, VERSIONS and *.patch
+          #     (the build script, pins and patch of the golangci-lint
+          #     binary the lint job runs; not its README.md);
+          #   - hack/golangci-lint-split.sh and its selftest (how the lint
+          #     job runs golangci-lint).
+          # Keep this regex in sync when a new go:embed reads files that do
+          # not match it.
+          if grep -qE '(\.(go|c|h|s|S|syso)$|(^|/)go\.(mod|sum|work)$|^\.golangci|^(harnesses|resources|third_party)/|^pkg/config/(embeds|schemas)/|^web/dist/|^\.github/actions/(setup|save)-go-cache/|^\.github/workflows/ci\.yml$|^cr-ci/runner/golangci-lint/(build\.sh|VERSIONS|[^/]*\.patch)$|^hack/(test-)?golangci-lint-split\.sh$)' <<<"$changed"; then
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Runner routing (hack/check-runner-routing.sh). A fork can route jobs to its
+  # cr-ci Cloud Run runner by setting the SCION_LARGE_RUNNER variable, which is
+  # unset here, so every job runs on ubuntu-latest. This keeps every routed
+  # runs-on byte-identical to the canonical, fork-PR-guarded expression, keeps
+  # jobs that cannot or must not run there (services, container, docker://
+  # steps, write permissions, pull_request_target, literal self-hosted labels)
+  # off it, and requires a timeout of at most 35 min. Its own job, so a failure
+  # here does not touch the path detection in changes (which fails open).
+  runner-routing-check:
+    name: Runner routing check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (github.event_name == 'pull_request') }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Check runner routing (selftest, then the workflows)
+        run: |
+          ./hack/check-runner-routing.sh --selftest
+          ./hack/check-runner-routing.sh
+
+  # Fork CI gate (hack/check-fork-ci-gate.sh, cr-ci/workflows/README.md). Forks
+  # are for staging PRs, so on push and schedule every job runs only in
+  # GoogleCloudPlatform/scion. This keeps every job of a push- or
+  # schedule-triggered workflow carrying the gate in its if:.
+  fork-ci-gate-check:
+    name: Fork CI gate check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (github.event_name == 'pull_request') }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Check the fork CI gate (selftest, then the workflows)
+        run: |
+          ./hack/check-fork-ci-gate.sh --selftest
+          ./hack/check-fork-ci-gate.sh
 
   build-and-test:
     name: Build & Test
+    # Stays on ubuntu-latest for now. Routed, it would add 15-20 runner-minutes
+    # to every run, more than the cr-ci runners (MAX_CONCURRENT_RUNNERS 4)
+    # absorb at the fork's peak hours. It moves to the cr-ci runner in its own
+    # change once capacity is raised (the 15-runner quota), with a warm-cache
+    # timing measurement (cr-ci-rev-16 O1).
     runs-on: ubuntu-latest
     # Sized from data (ptone/scion#3183): over the 267 successful upstream
     # runs of this job on 2026-10-04/05, the job took p50 13.4m / p95 14.4m /
@@ -169,7 +252,7 @@ jobs:
     # Build Web UI is NOT gated: web/embed.go embeds web/dist/client into
     # the Go build, and the Go tests and Build Binary below need it.
     needs: changes
-    if: ${{ !cancelled() }}
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (!cancelled()) }}
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -249,7 +332,7 @@ jobs:
       # attaches them.
       - name: Upload web source maps
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: web-sourcemaps
           path: web/dist/sourcemaps/
@@ -340,6 +423,11 @@ jobs:
             exit 1
           fi
 
+      # Bash only: the skipped-tests summary the shard jobs print
+      # (hack/hubshard/lib.sh run_skip_summary), with a fake test binary.
+      - name: Test the pkg/hub shard skip summary
+        run: make hubshard-skip-summary-selftest
+
       - name: Check Annotation Prefix
         run: make check-annotation-prefix
 
@@ -404,6 +492,46 @@ jobs:
             echo "::error title=Store delete callers::A direct store DeleteAgent or DeleteProject reference does not match hack/store-delete-callers-allowlist.txt. The store methods do not deactivate delegation edges or service-account assignments; remove agents and projects through the delete engine or ProjectDeletionService, or deactivate first and add an allowlist entry. If calls were removed, lower the allowlist count. Details are in the step log."
           elif [ "$rc" -ne 0 ]; then
             echo "::error title=Store delete callers NOT checked::check-store-delete-callers could not run (exit $rc) — nothing was analysed."
+          fi
+          exit "$rc"
+
+      - name: Check ent driver assertions
+        run: |
+          set +e
+          ./hack/check-entsql-driver-assert.sh --self-test
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            set -e
+            echo "::error title=Ent driver assertions NOT checked::check-entsql-driver-assert --self-test failed (exit $rc) — the guard itself is broken or could not run, so nothing was analysed."
+            exit "$rc"
+          fi
+          ./hack/check-entsql-driver-assert.sh
+          rc=$?
+          set -e
+          if [ "$rc" -eq 1 ]; then
+            echo "::error title=Ent driver assertions::A type assertion to *entsql.Driver fails when the store's driver is wrapped by the transaction diagnostics. Use entc.SQLDriver or entc.SQLDB, which unwrap. Details are in the step log."
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error title=Ent driver assertions NOT checked::check-entsql-driver-assert could not run (exit $rc) — nothing was analysed."
+          fi
+          exit "$rc"
+
+      - name: Check pkg/hub Scan Coverage
+        run: |
+          set +e
+          ./hack/check-scan-coverage.sh --self-test
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            set -e
+            echo "::error title=pkg/hub scan coverage NOT checked::check-scan-coverage --self-test failed (exit $rc) — the guard itself is broken or could not run, so nothing was analysed."
+            exit "$rc"
+          fi
+          ./hack/check-scan-coverage.sh
+          rc=$?
+          set -e
+          if [ "$rc" -eq 1 ]; then
+            echo "::error title=pkg/hub scan coverage::A pkg/hub source-scanning test enumerates files without a scan-covers claim that holds for every pkg/hub area. Route the scan through globGuardScanDirs or readGuardScanDirs and add a guardScanSubdirs claim, add a pkg/hub/... claim to a recursive walk, or exempt a call that reads no pkg/hub sources (hack/check-scan-coverage.sh). Details are in the step log."
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error title=pkg/hub scan coverage NOT checked::check-scan-coverage could not run (exit $rc) — nothing was analysed."
           fi
           exit "$rc"
 
@@ -559,6 +687,28 @@ jobs:
             0) ;;
             1) echo "::error title=SQLite test coverage::A package has //go:build !no_sqlite test files that no blocking CI job runs with SQLite. Add it to SQLITE_NONHUB_PKGS in the Makefile; the package list is in the step log above." ;;
             *) echo "::error title=SQLite test coverage NOT checked::check-sqlite-coverage.sh could not run (exit $rc) — NOTHING WAS ANALYSED. This is an environment failure, not a statement about the codebase." ;;
+          esac
+          exit "$rc"
+
+      # Windows file-protection guard: pure bash plus
+      # `go list` (no compile). Exit 1 = findings, 2 = tool or list error.
+      - name: Check Windows File Protection (winsec-guard)
+        run: |
+          set +e
+          bash hack/winsec-guard.sh --self-test
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            set -e
+            echo "::error title=winsec-guard NOT checked::winsec-guard --self-test failed (exit $rc) — the guard itself is broken, so nothing was analysed."
+            exit "$rc"
+          fi
+          bash hack/winsec-guard.sh
+          rc=$?
+          set -e
+          case "$rc" in
+            0) ;;
+            1) echo "::error title=winsec-guard::A Windows-reachable file uses Chmod as protection, string containment, a zero no-follow flag or a nil privacy check; see the step log and the header of hack/winsec-guard.sh." ;;
+            *) echo "::error title=winsec-guard NOT checked::winsec-guard could not run (exit $rc) — NOTHING WAS ANALYSED." ;;
           esac
           exit "$rc"
 
@@ -767,8 +917,52 @@ jobs:
           key: ${{ steps.go.outputs.cache-key }}
           cache-hit: ${{ steps.go.outputs.cache-hit }}
 
+  # The Windows CLI must keep compiling. This is its own ubuntu job rather
+  # than a step in Build & Test: in Build & Test the step measured 9m05s
+  # cold (GOOS=windows compiles pkg/hub and its dependencies with no cached
+  # objects, and only pushes to main save this workload's cache), which put
+  # that job at 28m of its 30m timeout. Non-test builds only (pkg/hub compiles as a dependency,
+  # never its test package), so no Web UI build is needed: web/dist/client
+  # holds a committed .gitkeep for the embed. winsec-guard runs in Build &
+  # Test. No needs/if and no path gating: it runs on every PR and push to
+  # main, so the check is always reported.
+  windows-cross-build:
+    name: Windows cross-build (guard)
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        id: go
+        uses: ./.github/actions/setup-go-cache
+        with:
+          workload: windows-cross-build
+
+      - name: Cross-build for Windows (guard)
+        env:
+          GOTOOLCHAIN: local
+          GOGC: '50'
+        run: |
+          GOOS=windows GOARCH=amd64 go build -buildvcs=false -o /dev/null ./cmd/scion
+          GOOS=windows GOARCH=arm64 go build -buildvcs=false -o /dev/null ./cmd/scion
+          # pkg/hub/maintenance: its unix-only symlink installer and tests
+          # must keep the package (tests included) compiling for Windows.
+          GOOS=windows GOARCH=amd64 go vet ./pkg/util/privatefs/... ./pkg/util/pathcanon/... ./pkg/util/filelock/... ./pkg/tunnelclient/... ./pkg/hub/maintenance/...
+
+      - name: Save Go cache
+        uses: ./.github/actions/save-go-cache
+        with:
+          key: ${{ steps.go.outputs.cache-key }}
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
+
   sqlite-nonhub-tests:
     name: SQLite Tests (non-hub)
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     runs-on: ubuntu-latest
     timeout-minutes: 70
     steps:
@@ -782,6 +976,17 @@ jobs:
         uses: ./.github/actions/setup-go-cache
         with:
           workload: sqlite-nonhub
+
+      # pkg/hub/attache2e attaches to a real tmux server; with
+      # SCION_TEST_REQUIRE_TMUX=1 it fails instead of skipping when tmux
+      # is missing (ptone/scion#3312).
+      - name: Install tmux
+        run: |
+          if ! command -v tmux &> /dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y tmux
+          fi
+          tmux -V
 
       # `make test-fast-ci` (Build & Test, above) uses -tags no_sqlite, which
       # leaves out every test file that carries `//go:build !no_sqlite`
@@ -800,6 +1005,8 @@ jobs:
       # timeout stays above it so a real hang still produces go's goroutine
       # dump.
       - name: Run SQLite-enabled tests (make test-sqlite-nonhub)
+        env:
+          SCION_TEST_REQUIRE_TMUX: "1"
         run: make test-sqlite-nonhub
 
       # internal/fixturegen's TestFixtureCoverage carries `//go:build
@@ -835,6 +1042,7 @@ jobs:
   # hack/hubshard (hub-shard-plan), so the shard count lives in one place.
   hub-shard-plan:
     name: pkg/hub shard plan
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -890,6 +1098,7 @@ jobs:
 
   hub-shard:
     name: pkg/hub shard ${{ matrix.shard }}/${{ needs.hub-shard-plan.outputs.count }}
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     needs: hub-shard-plan
     # The runner label comes from hub-shard-plan (outputs.runner), the
     # single place to change it for every pkg/hub shard job.
@@ -1010,6 +1219,7 @@ jobs:
   # one, so this job always has at least one shard.
   hub-shard-postgres-integration:
     name: pkg/hub shard ${{ matrix.shard }}/${{ needs.hub-shard-plan.outputs.count }} Postgres (integration)
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     needs: hub-shard-plan
     runs-on: ${{ needs.hub-shard-plan.outputs.runner }}
     timeout-minutes: 45
@@ -1072,7 +1282,7 @@ jobs:
   hub-sqlite-tests:
     name: pkg/hub SQLite Tests
     needs: [hub-shard-plan, hub-shard, hub-shard-postgres-integration]
-    if: ${{ always() }}
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (always()) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -1106,6 +1316,7 @@ jobs:
   # be 1..N in order (the run step checks part == job-index + 1).
   launch-store-postgres-entadapter:
     name: T1 Launch Store PostgreSQL Tests (entadapter ${{ matrix.part }}/${{ strategy.job-total }})
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     runs-on: ubuntu-latest
     # 90m: the whole entadapter suite took ~29-39m of the old single job on
     # main, but ~57m on a runner 2-3x slower than usual
@@ -1191,6 +1402,7 @@ jobs:
   # The T1 Postgres packages other than pkg/store/entadapter.
   launch-store-postgres-others:
     name: T1 Launch Store PostgreSQL Tests (other packages)
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     runs-on: ubuntu-latest
     # The old single job took ~20m, of which ~7m was this job's part; 45m
     # leaves room for a runner 2-3x slower than usual.
@@ -1278,7 +1490,7 @@ jobs:
   launch-store-postgres-tests:
     name: T1 Launch Store PostgreSQL Tests
     needs: [launch-store-postgres-entadapter, launch-store-postgres-others]
-    if: ${{ always() }}
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (always()) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -1294,6 +1506,7 @@ jobs:
 
   workstation-smoke:
     name: Workstation smoke test
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -1326,13 +1539,19 @@ jobs:
 
   lint:
     name: golangci-lint
-    runs-on: ubuntu-latest
-    # Bounds a hang only; the runner shutdowns in ptone/scion#4208 were not
-    # timeouts. Passing lint steps took up to ~22 min at the default
-    # concurrency (4); --concurrency=2 below can make that up to ~2x slower
-    # in the worst case, plus checkout and cache restore, so 60 leaves margin
-    # without falling back to the 360-minute default.
-    timeout-minutes: 60
+    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
+    # Bounds a hang only. With the patched golangci-lint and the two-pass
+    # split (hack/golangci-lint-split.sh) the whole job took 4m40s-4m53s on
+    # ubuntu-latest (lint step 166-177 s, plus a 46-58 s cold build of the
+    # binary on a cache miss); 20 is about 4x that, and leaves room for a PR
+    # that recompiles pkg/hub and its dependents.
+    timeout-minutes: 20
+    needs: changes
+    # Runs only when a PR changes Go-relevant files (changes.outputs.go, see
+    # the regex in the changes job), and always on push to main. Fails open:
+    # if the changes job did not succeed, lint runs anyway. A job skipped by
+    # its `if:` still reports the golangci-lint check, as success.
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.go == 'true')) }}
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -1351,44 +1570,74 @@ jobs:
         with:
           workload: lint
 
-      # The action only restores its analysis cache and installs the binary
-      # here (its post step still saves the cache); lint runs in the next
-      # step so that a memory sampler can log alongside it. The version is
-      # pinned so that a new golangci-lint release cannot change memory use
-      # unnoticed; bump it deliberately.
-      - name: Install golangci-lint
+      # golangci-lint is built from source with a patched honnef.co/go/tools
+      # (dominikh/go-tools#1839: `unused` is quadratic in package size and
+      # took 330-400 s on pkg/hub's test variant alone; the patch brings
+      # that to ~6 s with identical findings). The pins, the patch and the
+      # removal plan are in cr-ci/runner/golangci-lint/ (README.md); the
+      # cr-ci runner image is to build from it too (cr-ci fixup PR 2).
+      # build.sh verifies the pinned module checksums and the patch sha256,
+      # and skips the build when the restored binary's stamp matches its
+      # inputs and the Go version.
+      # The binary is cached on its own key; like the Go caches, only pushes
+      # to main save it. The build uses its own GOCACHE/GOMODCACHE so that
+      # golangci-lint's dependencies stay out of the lint workload's cache.
+      # The key includes runner.environment (github-hosted or self-hosted):
+      # the restored binary is executed, so a runner type only runs binaries
+      # it built itself (ptone/scion#5979). The Go build and module caches
+      # keep one key for both runner types (cr-ci/workflows/README.md, "Cache
+      # scope"), but the build cache is warm only for the type that saved it:
+      # the cr-ci image has no C compiler, so Go builds there with cgo off
+      # and its package keys differ from ubuntu-latest's.
+      - name: Restore patched golangci-lint
+        id: golangci-lint-bin
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/golangci-lint-patched
+          key: golangci-lint-patched-${{ runner.environment }}-${{ runner.os }}-${{ runner.arch }}-go${{ steps.go.outputs.go-version }}-${{ hashFiles('cr-ci/runner/golangci-lint/**', '!cr-ci/runner/golangci-lint/README.md') }}
+
+      - name: Build patched golangci-lint
+        shell: bash
+        env:
+          GOCACHE: ${{ runner.temp }}/golangci-lint-build/gocache
+          GOMODCACHE: ${{ runner.temp }}/golangci-lint-build/gomodcache
+        run: |
+          bin="$RUNNER_TEMP/golangci-lint-patched"
+          cr-ci/runner/golangci-lint/build.sh "$bin/golangci-lint"
+          echo "$bin" >> "$GITHUB_PATH"
+
+      - name: Save patched golangci-lint
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.golangci-lint-bin.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/golangci-lint-patched
+          key: ${{ steps.golangci-lint-bin.outputs.cache-primary-key }}
+
+      # The action only restores its analysis cache here (its post step
+      # still saves the cache); install-mode none makes it use the patched
+      # binary from PATH. Lint runs in a later step so that a memory
+      # sampler can log alongside it. The golangci-lint version is pinned
+      # in cr-ci/runner/golangci-lint/VERSIONS so that a new release cannot
+      # change memory use unnoticed; bump it deliberately.
+      - name: Restore golangci-lint analysis cache
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
-          version: v2.15.0
+          install-mode: none
           install-only: true
 
-      # Bound memory in the lint step so it cannot exhaust the ~16 GB
-      # runner, which shows up as "The runner has received a shutdown
-      # signal" with no lint output (ptone/scion#4208). golangci-lint
-      # loads packages through go list -export, which compiles each
-      # package for its export data in a separate compile process. The
-      # memory sampler measured one compile process at ~15 GB, while
-      # golangci-lint itself peaked at 5.6-5.7 GB.
-      # - GOFLAGS -gcflags=<pkg/hub>=-c=1 runs the compiler backend for
-      #   pkg/hub on one worker instead of up to four. This may lower
-      #   that compile's peak by the backend state of up to three
-      #   functions compiled at once; most of its memory is retained IR
-      #   and generated code, which -c does not change, so the effect
-      #   is expected to be modest. The package pattern limits the flag
-      #   to pkg/hub; without one it would apply to every package
-      #   matched by ./..., which golangci-lint loads. golangci-lint
-      #   passes its environment through to go list and sets no
-      #   -gcflags of its own.
-      # - --concurrency=2 (default: CPU count, 4) halves the packages
-      #   golangci-lint analyses at once, lowering its own memory; it
-      #   does not bound the compile processes.
-      # - GOGC=25 sets the heap target to 1.25x the live heap (default
-      #   2x; previously 1.5x), trading GC CPU for a lower peak. The
-      #   compile processes inherit it.
-      # - GOMEMLIMIT=8GiB is a soft limit: the GC runs harder near that
-      #   size but does not cap the heap if the live set is larger.
-      #   Close to the limit it holds the heap there rather than at
-      #   1.25x the live heap.
+      # golangci-lint runs in two passes (hack/golangci-lint-split.sh): every
+      # package except ./pkg/hub with tests, then ./pkg/hub with
+      # --tests=false. With tests, golangci-lint's package loading
+      # (go list -export -test) compiles pkg/hub's test variant for export
+      # data nothing reads; that one compile reached ~14.5 GB RSS on this
+      # 16 GB runner, ran 12-16 min and caused the runner shutdowns in
+      # ptone/scion#4208. Split, the lint step took 166-177 s and peaked at
+      # 6.6-6.8 GB used, so it runs at Go's and golangci-lint's defaults (no
+      # -c=1, GOGC, GOMEMLIMIT or --concurrency throttles any more). Trade-off:
+      # pkg/hub's _test.go files are no longer linted by errcheck,
+      # staticcheck, unused or ineffassign (govet is still covered: go vet
+      # checks them in the hub shard jobs); see hack/LINT-CONVENTIONS.md.
+      # The script's own tests run first (bash only, about a second).
       # GOLANGCI_LINT_CACHE is exported because the action sets it only
       # in its own process; it must match the path the action restores
       # and saves.
@@ -1399,13 +1648,14 @@ jobs:
       # arguments are passed as @file) and the response file's line
       # count, which tells a package from its test variant. It prints a
       # peak summary at the end and does not affect the step's result;
-      # the step exits with golangci-lint's exit code.
+      # the step exits with the split script's exit code.
+      # Called directly, not through make: the cr-ci runner image has no
+      # make, and a direct call keeps the selftest's exit code.
+      - name: Test the golangci-lint split script
+        run: ./hack/test-golangci-lint-split.sh
+
       - name: golangci-lint
         shell: bash
-        env:
-          GOGC: '25'
-          GOMEMLIMIT: 8GiB
-          GOFLAGS: '-gcflags=github.com/GoogleCloudPlatform/scion/pkg/hub=-c=1'
         run: |
           export GOLANGCI_LINT_CACHE="$HOME/.cache/golangci-lint"
           samples="$RUNNER_TEMP/lint-mem.log"
@@ -1423,7 +1673,7 @@ jobs:
           sampler=$!
           trap 'kill "$sampler" 2>/dev/null || true' EXIT
           rc=0
-          golangci-lint run --new-from-merge-base=origin/main --concurrency=2 || rc=$?
+          hack/golangci-lint-split.sh --new-from-merge-base=origin/main || rc=$?
           kill "$sampler" 2>/dev/null || true
           wait "$sampler" 2>/dev/null || true
           awk '{split($2,u,"="); split($3,a,"="); if (u[2]>max) max=u[2]; if (min=="" || a[2]<min) min=a[2]; n++}
@@ -1438,17 +1688,23 @@ jobs:
 
   shellcheck:
     name: shellcheck
-    runs-on: ubuntu-latest
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
+    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
 
+      # The cr-ci runner image has no sudo and ships Ubuntu 24.04's shellcheck,
+      # the version apt installs here; install only when it is missing.
       - name: Install shellcheck
         run: |
-          sudo apt-get update
-          sudo apt-get install -y shellcheck
+          if ! command -v shellcheck >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y shellcheck
+          fi
           shellcheck --version
 
       # Positive control -- this gate is not a no-op.
@@ -1569,7 +1825,8 @@ jobs:
 
   ent-generate-check:
     name: ent generated code drift
-    runs-on: ubuntu-latest
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
+    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - name: Checkout code
@@ -1637,7 +1894,7 @@ jobs:
     # Runs only when scripts/single-node-vm/** or this workflow changed, and
     # always on push to main. Fails open: if the changes job did not succeed,
     # the harness runs anyway.
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.single_node_vm == 'true') }}
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.single_node_vm == 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -1649,8 +1906,13 @@ jobs:
       # Never contacts GCP: a stub `gcloud` shadows any real one on PATH.
       # ubuntu-latest already ships bash >= 4 and python3; see
       # scripts/single-node-vm/tests/README.md for what this covers.
+      # python3-yaml lets test_install_layout.sh exercise scion-layout.sh's
+      # default (PyYAML) settings parser, the one the VM uses; without it
+      # that test is skipped.
       - name: Run scripts/single-node-vm/tests/run.sh
-        run: ./scripts/single-node-vm/tests/run.sh
+        run: |
+          python3 -c 'import yaml' 2>/dev/null || { sudo apt-get update && sudo apt-get install -y python3-yaml; }
+          ./scripts/single-node-vm/tests/run.sh
 
   starter-hub-tests:
     name: starter-hub script tests
@@ -1658,8 +1920,8 @@ jobs:
     # Runs only when scripts/starter-hub/** or this workflow changed, and
     # always on push to main. Fails open: if the changes job did not succeed,
     # the tests run anyway.
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.starter_hub == 'true') }}
-    runs-on: ubuntu-latest
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.starter_hub == 'true')) }}
+    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - name: Checkout code
@@ -1689,7 +1951,7 @@ jobs:
   chat-mobile-e2e:
     name: Chat mobile E2E (shard ${{ matrix.shard }}/2)
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.web == 'true') }}
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.web == 'true')) }}
     runs-on: ubuntu-latest
     # Above the config's CI globalTimeout (20m) plus setup (~2-4m), so a
     # slow or hung run stops inside Playwright, writes its report, and the
@@ -1735,7 +1997,7 @@ jobs:
       # flaky test passes the shard, and its retry trace is only in here.
       - name: Upload Playwright report
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: chat-mobile-e2e-shard-${{ matrix.shard }}
           path: |
@@ -1754,7 +2016,7 @@ jobs:
   chat-mobile-e2e-result:
     name: Chat mobile E2E
     needs: [changes, chat-mobile-e2e]
-    if: ${{ always() }}
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (always()) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -1785,7 +2047,7 @@ jobs:
   perf-budgets-web:
     name: Web perf budgets
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.web == 'true') }}
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.web == 'true')) }}
     runs-on: ubuntu-latest
     # Above the config's CI globalTimeout (15m) plus setup (npm ci and the
     # Chromium install), so a slow run stops inside Playwright with a report.

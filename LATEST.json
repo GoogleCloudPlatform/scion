@@ -6,14 +6,14 @@
       "url": ""
     },
     "preview": {
-      "version": "v0.3.0-preview.2",
-      "date": "2026-09-15T00:00:00Z",
-      "url": "https://github.com/GoogleCloudPlatform/scion/releases/tag/v0.3.0-preview.2"
+      "version": "v0.3.0-preview.4",
+      "date": "2026-10-24T00:21:09Z",
+      "url": "https://github.com/GoogleCloudPlatform/scion/releases/tag/v0.3.0-preview.4"
     },
     "nightly": {
-      "version": "nightly-20261021",
-      "date": "2026-10-21T02:10:11Z",
-      "url": "https://github.com/GoogleCloudPlatform/scion/releases/tag/nightly-20261021"
+      "version": "nightly-20261029",
+      "date": "2026-10-29T02:29:48Z",
+      "url": "https://github.com/GoogleCloudPlatform/scion/releases/tag/nightly-20261029"
     }
   }
 }

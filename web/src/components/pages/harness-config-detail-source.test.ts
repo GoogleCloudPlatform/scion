@@ -45,9 +45,7 @@ async function createElement(sourceUrl: string): Promise<ScionPageHarnessConfigD
     })
   );
   window.history.pushState({}, '', '/settings/harness-configs/hc-1');
-  const el = document.createElement(
-    'scion-page-harness-config-detail'
-  ) as ScionPageHarnessConfigDetail;
+  const el = document.createElement('scion-page-harness-config-detail');
   document.body.appendChild(el);
   for (let i = 0; i < 4; i++) {
     await new Promise((r) => setTimeout(r, 0));

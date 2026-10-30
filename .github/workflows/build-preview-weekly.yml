@@ -1,0 +1,102 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Weekly preview: fast-forward the latest release/vX.Y branch to the most
+# recent nightly tag whose CI passed, tag the next vX.Y.Z-preview.N there, and
+# build it. See docs/release-process.md.
+
+name: Weekly Preview Release
+
+on:
+  schedule:
+    - cron: '0 14 * * 5'   # Fridays at 14:00 UTC, after that day's 02:00 nightly
+  workflow_dispatch:
+    inputs:
+      nightly_tag:
+        description: 'Nightly tag to release, e.g. nightly-20261022 (default: newest nightly that passed CI)'
+        required: false
+        type: string
+        default: ''
+
+# Fork CI gate (hack/check-fork-ci-gate.sh, cr-ci/workflows/README.md): on push
+# and schedule every job runs only in GoogleCloudPlatform/scion; forks stage PRs.
+jobs:
+  select-and-tag:
+    name: Select Nightly and Tag Preview
+    runs-on: ubuntu-latest
+    if: github.repository == 'GoogleCloudPlatform/scion'
+    permissions:
+      contents: write    # Needed to push the release branch and tag
+      checks: read       # Needed for the Build & Test check-run lookup
+    outputs:
+      tagged: ${{ steps.push.outputs.tagged || 'false' }}
+      tag: ${{ steps.select.outputs.tag }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        with:
+          ref: main
+          fetch-depth: 0
+          # Blobless partial clone: selection needs only refs and commit
+          # ancestry, never file contents of older commits.
+          filter: blob:none
+          # The job pushes the release branch and tag with these credentials.
+          # It uploads no artifacts.
+          persist-credentials: true
+
+      - name: Fetch release branches and tags
+        run: |
+          git fetch --force --tags origin '+refs/heads/release/*:refs/remotes/origin/release/*'
+
+      - name: Select nightly and next preview tag
+        id: select
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NIGHTLY_TAG: ${{ inputs.nightly_tag }}
+        run: |
+          args=()
+          if [ -n "$NIGHTLY_TAG" ]; then
+            args+=(--nightly-tag "$NIGHTLY_TAG")
+          fi
+          ./scripts/release/select-weekly-preview.sh "${args[@]}"
+
+      - name: Fast-forward release branch and push tag
+        id: push
+        if: steps.select.outputs.selected == 'true'
+        env:
+          BRANCH: ${{ steps.select.outputs.branch }}
+          SHA: ${{ steps.select.outputs.sha }}
+          TAG: ${{ steps.select.outputs.tag }}
+        run: |
+          git tag "$TAG" "$SHA"
+          # A plain (non-force) push: the remote rejects it unless it is a
+          # fast-forward, so a branch that moved since the fetch fails here.
+          # --atomic updates the branch and the tag together or not at all,
+          # so a rejected tag cannot leave the branch moved without a tag.
+          git push --atomic origin "${SHA}:refs/heads/${BRANCH}" "refs/tags/${TAG}"
+          echo "tagged=true" >> "$GITHUB_OUTPUT"
+          echo "Pushed ${BRANCH} -> ${SHA} and tag ${TAG}" >> "$GITHUB_STEP_SUMMARY"
+
+  # Tags pushed with GITHUB_TOKEN do not start other workflows, so the
+  # release build is called directly, as build-nightly.yml does.
+  build:
+    name: Build Preview Release
+    needs: select-and-tag
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (needs.select-and-tag.outputs.tagged == 'true') }}
+    permissions:
+      contents: write
+      pull-requests: write    # Needed by update-manifest job
+    uses: ./.github/workflows/build-release.yml
+    with:
+      ref: ${{ needs.select-and-tag.outputs.tag }}

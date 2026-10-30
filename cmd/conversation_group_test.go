@@ -53,11 +53,13 @@ type tgCall struct {
 
 // fakeThreadGroupHub is an in-memory hub for the thread group commands.
 type fakeThreadGroupHub struct {
-	mu      sync.Mutex
+	mu sync.Mutex
+	// enabled false makes the fake an older hub with its
+	// thread groups experiment off: every thread group route is 404.
 	enabled bool
 	// rejectGroupOnCreate makes conversation create answer a
-	// threadGroupId with the hub's flag-off 400 while the thread group
-	// routes still answer, as during a flag flip between two calls.
+	// threadGroupId with such a hub's 400 while the thread group routes
+	// still answer, as during a flag flip between two calls.
 	rejectGroupOnCreate bool
 	groups              []hubclient.ThreadGroup
 	convs               []map[string]any // group conversations for #name resolution
@@ -602,10 +604,11 @@ func TestConversationGroupAddRemove(t *testing.T) {
 	assert.Len(t, hub.mutations(), before)
 }
 
-// With the experiment off every subcommand reports the clear message, and
+// Against an older hub with its thread groups experiment off
+// (ptone/scion#5546), every subcommand reports the clear message, and
 // --group on conversation create does too.
-func TestConversationGroup_FlagOff(t *testing.T) {
-	const want = "thread groups are not enabled on this hub (experiment hub.chat_thread_groups)"
+func TestConversationGroup_OlderHubWithoutThreadGroups(t *testing.T) {
+	const want = "this hub does not serve thread groups: upgrade the hub"
 	cases := []struct {
 		name string
 		fn   func(*cobra.Command, []string) error
@@ -655,7 +658,7 @@ func TestConversationGroup_FlagOff(t *testing.T) {
 		assert.Contains(t, err.Error(), want)
 	})
 
-	t.Run("conversation create answered with the hub's flag-off 400", func(t *testing.T) {
+	t.Run("conversation create answered with an older hub's 400", func(t *testing.T) {
 		hub := setupThreadGroupTest(t, tgProject)
 		hub.rejectGroupOnCreate = true
 		convCreateGroup = "Release"
@@ -666,8 +669,9 @@ func TestConversationGroup_FlagOff(t *testing.T) {
 	})
 }
 
-// A 404 for a missing group with the experiment on stays a not-found.
-func TestConversationGroupGet_MissingIDWithFlagOn(t *testing.T) {
+// A 404 for a missing group on a hub that serves thread groups stays a
+// not-found.
+func TestConversationGroupGet_MissingIDStaysNotFound(t *testing.T) {
 	setupThreadGroupTest(t, "")
 	_, err := runTG(t, runConversationGroupGet, "22222222-0000-0000-0000-0000000000aa")
 	require.Error(t, err)

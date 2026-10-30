@@ -173,15 +173,7 @@ func openBackfillStore(ctx context.Context, readOnly ...bool) (*entadapter.Compo
 	}
 
 	// --db flag overrides config.
-	if backfillDB != "" {
-		cfg.Database.URL = backfillDB
-		// Auto-detect driver from DSN.
-		if strings.HasPrefix(backfillDB, "postgres://") || strings.HasPrefix(backfillDB, "postgresql://") {
-			cfg.Database.Driver = "postgres"
-		} else {
-			cfg.Database.Driver = "sqlite"
-		}
-	}
+	maintenanceDBOverride(cfg, backfillDB)
 
 	if cfg.Database.URL == "" {
 		return nil, fmt.Errorf("no database configured: set --db, SCION_SERVER_DATABASE_URL env, or database.url in server config")
@@ -230,6 +222,22 @@ func openBackfillStore(ctx context.Context, readOnly ...bool) (*entadapter.Compo
 	}
 
 	return s, nil
+}
+
+// maintenanceDBOverride applies a maintenance command's --db flag to cfg:
+// a non-empty dsn replaces the configured URL, and the driver is detected
+// from its prefix (postgres:// or postgresql:// is Postgres, anything else
+// a SQLite path). An empty dsn leaves cfg as it is.
+func maintenanceDBOverride(cfg *config.GlobalConfig, dsn string) {
+	if dsn == "" {
+		return
+	}
+	cfg.Database.URL = dsn
+	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+		cfg.Database.Driver = "postgres"
+	} else {
+		cfg.Database.Driver = "sqlite"
+	}
 }
 
 // migrateMaintenanceDB runs the schema migration for the maintenance

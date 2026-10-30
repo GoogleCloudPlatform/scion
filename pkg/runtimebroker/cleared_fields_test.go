@@ -294,7 +294,23 @@ func observeStarts(mgr *provisionCapturingManager, projectDir, agentName, cfgPat
 
 // writeAgentInfo writes the agent's agent-info.json, which names its
 // template.
+// writeAgentInfo records info's template, template hash and profile as
+// provisioning does: in agent-info.json and in the agent's broker-side image
+// provenance record.
 func writeAgentInfo(t *testing.T, projectDir, agentName string, info api.AgentInfo) {
+	t.Helper()
+	writeHomeAgentInfo(t, projectDir, agentName, info)
+	data, err := json.Marshal(map[string]any{"version": 1, "profile": info.Profile, "template": info.Template, "templateHash": info.TemplateHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(config.GetAgentDir(projectDir, agentName, false), "image-provenance.json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeHomeAgentInfo writes only the agent's agent-info.json.
+func writeHomeAgentInfo(t *testing.T, projectDir, agentName string, info api.AgentInfo) {
 	t.Helper()
 	home := config.GetAgentHomePath(projectDir, agentName)
 	if err := os.MkdirAll(home, 0755); err != nil {
@@ -552,5 +568,62 @@ func TestStartAgent_ClearedLimitSurvivesTemplateRemoval(t *testing.T) {
 	postClearedAgentAction(t, srv, agentName, "start", clear)
 	if o := lastObservation(t, obs, 3); o.file.MaxTurns != 5 || o.effective.MaxTurns != 5 {
 		t.Fatalf("after the template is removed: file %d, effective %d; want 5 kept", o.file.MaxTurns, o.effective.MaxTurns)
+	}
+}
+
+// TestStartAgent_ClearedLimitInheritsFromRecordedTemplate: the value a
+// cleared limit reverts to comes from the template recorded in the agent's
+// broker-side image provenance ("limited", max_turns 5). An agent-info.json
+// naming another template ("planted", max_turns 7) does not change it. An
+// agent provisioned before that record existed keeps agent-info.json's
+// template.
+func TestStartAgent_ClearedLimitInheritsFromRecordedTemplate(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		legacy       bool
+		wantMaxTurns int
+	}{
+		{name: "provisioned agent", legacy: false, wantMaxTurns: 5},
+		{name: "agent without image provenance", legacy: true, wantMaxTurns: 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			srv, mgr := newTestServerWithProvisionCapture()
+			projectDir := filepath.Join(t.TempDir(), ".scion")
+			agentName := "recorded-template-agent"
+			for name, body := range map[string]string{"limited": "harness: claude\nmax_turns: 5\n", "planted": "harness: claude\nmax_turns: 7\n"} {
+				tplDir := filepath.Join(projectDir, "templates", name)
+				if err := os.MkdirAll(tplDir, 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte(body), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfgPath := writeAgentConfig(t, projectDir, agentName, api.ScionConfig{Harness: "claude", MaxTurns: 5})
+			writeAgentInfo(t, projectDir, agentName, api.AgentInfo{Template: "limited"})
+			writeHomeAgentInfo(t, projectDir, agentName, api.AgentInfo{Template: "planted"})
+			if tc.legacy {
+				if err := os.Remove(filepath.Join(config.GetAgentDir(projectDir, agentName, false), "image-provenance.json")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			obs := observeStarts(mgr, projectDir, agentName, cfgPath)
+			body := `{"projectPath": %q, "inlineConfig": {"max_turns": 9}}`
+			if tc.legacy {
+				body = `{"projectPath": %q, "profile": "", "inlineConfig": {"max_turns": 9}}`
+			}
+			postClearedAgentAction(t, srv, agentName, "start", fmt.Sprintf(body, projectDir))
+			lastObservation(t, obs, 1)
+
+			clearBody := `{"projectPath": %q, "inlineConfig": {"cleared_fields": ["max_turns"]}}`
+			if tc.legacy {
+				clearBody = `{"projectPath": %q, "profile": "", "inlineConfig": {"cleared_fields": ["max_turns"]}}`
+			}
+			postClearedAgentAction(t, srv, agentName, "start", fmt.Sprintf(clearBody, projectDir))
+			if o := lastObservation(t, obs, 2); o.file.MaxTurns != tc.wantMaxTurns {
+				t.Fatalf("clear: the start read %s, want max_turns %d", o.raw, tc.wantMaxTurns)
+			}
+		})
 	}
 }

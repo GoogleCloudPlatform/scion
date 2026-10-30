@@ -28,56 +28,104 @@ import (
 	"github.com/google/uuid"
 )
 
-// Agents and user-scoped data of a deleted user (ptone/scion#2769).
+// Agents, delegations and user-scoped data of a deleted user
+// (ptone/scion#2769, ptone/scion#2143).
 //
-// A user who still owns agents cannot be deleted: both delete paths
-// (DELETE /api/v1/users/{id} and the deprecated allow-list delete) refuse
-// with 409 conflict and list the agents in details.agents. On PostgreSQL the
-// delete locks the user row (FOR UPDATE) before the check, and agent create
-// and restore lock it shared (FOR KEY SHARE) and re-check that the user
-// exists, so a create racing a delete either commits first (and the delete
-// sees the agent) or fails. After a delete commits, the user's user-scope
-// secrets and env vars are removed as a best effort, and a startup sweep
-// removes any left behind for users that no longer exist.
+// A user cannot be deleted while agents or active delegations depend on the
+// user: both delete paths (DELETE /api/v1/users/{id} and the deprecated
+// allow-list delete) refuse with 409 user_delete_blocked and list the
+// blockers in details.agents and details.edges, at most
+// userDeleteBlockersLimit of each, with details.truncated set when more
+// exist. GET /api/v1/users/{id}/delete-blockers returns the same lists
+// without attempting the delete. On PostgreSQL the delete locks the user
+// row (FOR UPDATE) before the check, and agent create and restore lock it
+// shared (FOR KEY SHARE) and re-check that the user exists, so a create
+// racing a delete either commits first (and the delete sees the agent) or
+// fails. A delete that passes the check deactivates every edge with the
+// user as the delegator (cause delegator_deleted) in the same
+// transaction. After a delete commits, the user's user-scope secrets and
+// env vars are removed as a best effort, and a startup sweep removes any
+// left behind for users that do not exist.
+
+// userDeleteBlockersLimit caps each list (agents, edges) in a refusal or a
+// blocker listing. The check itself reads every blocker. It is a
+// variable so tests can lower it.
+var userDeleteBlockersLimit = 50
 
 // ownedAgentRef identifies an agent that blocks the deletion of its owner.
+// DeletionState is the agent's delete state ("" when no delete was asked
+// for, or deleting, finalizing or failed), so a caller can tell an agent
+// delete that is already under way.
 type ownedAgentRef struct {
-	ID        string `json:"id"`
-	Slug      string `json:"slug"`
-	ProjectID string `json:"projectId"`
+	ID            string `json:"id"`
+	Slug          string `json:"slug"`
+	ProjectID     string `json:"projectId"`
+	DeletionState string `json:"deletionState"`
 }
 
-// userOwnsAgentsDeleteError is returned by checkUserOwnsNoAgentsTx when the
-// user still owns agents. The surrounding transaction rolls back, so nothing
-// is changed.
-type userOwnsAgentsDeleteError struct {
-	agents []ownedAgentRef
+// delegatorEdgeRef identifies an active delegation edge, with the user as
+// the delegator, that blocks the user's deletion.
+type delegatorEdgeRef struct {
+	ID           string `json:"id"`
+	DelegateType string `json:"delegateType"`
+	DelegateID   string `json:"delegateId"`
+	ScopeType    string `json:"scopeType"`
+	ScopeID      string `json:"scopeId"`
 }
 
-func (e *userOwnsAgentsDeleteError) Error() string {
+// userDeleteBlockers lists what blocks the deletion of a user. It is the
+// body of GET /api/v1/users/{id}/delete-blockers and the details of the 409
+// user_delete_blocked refusal. Agents and Edges are never nil, so they
+// encode as [] when empty.
+type userDeleteBlockers struct {
+	Agents    []ownedAgentRef    `json:"agents"`
+	Edges     []delegatorEdgeRef `json:"edges"`
+	Truncated bool               `json:"truncated"`
+}
+
+func (b *userDeleteBlockers) empty() bool {
+	return len(b.Agents) == 0 && len(b.Edges) == 0
+}
+
+// userDeleteBlockedError is returned by checkUserDeleteBlockersTx when
+// agents or active delegations block the deletion. The surrounding
+// transaction rolls back, so nothing is changed.
+type userDeleteBlockedError struct {
+	blockers userDeleteBlockers
+}
+
+func (e *userDeleteBlockedError) Error() string {
+	if len(e.blockers.Agents) == 0 {
+		return userHasDelegationsDeleteMessage
+	}
 	return userOwnsAgentsDeleteMessage
 }
 
 const userOwnsAgentsDeleteMessage = "cannot delete a user who owns agents — delete their agents first, including agents started by those agents or by the user's schedules"
 
-// writeUserOwnsAgentsDeleteError writes the 409 conflict response for a user
-// deletion refused because the user owns agents; details.agents lists them.
-func writeUserOwnsAgentsDeleteError(w http.ResponseWriter, e *userOwnsAgentsDeleteError) {
-	writeError(w, http.StatusConflict, ErrCodeConflict, userOwnsAgentsDeleteMessage,
-		map[string]interface{}{"agents": e.agents})
+// userHasDelegationsDeleteMessage is the message when only edges block: the
+// user delegates to agents that exist.
+const userHasDelegationsDeleteMessage = "cannot delete a user who has active delegations — delete the agents the user delegates to first"
+
+// writeUserDeleteBlockedError writes the 409 user_delete_blocked response
+// for a user deletion refused because agents or active delegations depend
+// on the user; details carries the capped lists.
+func writeUserDeleteBlockedError(w http.ResponseWriter, e *userDeleteBlockedError) {
+	writeError(w, http.StatusConflict, ErrCodeUserDeleteBlocked, e.Error(),
+		map[string]interface{}{
+			"agents":    e.blockers.Agents,
+			"edges":     e.blockers.Edges,
+			"truncated": e.blockers.Truncated,
+		})
 }
 
 // ownedAgentsPageSize is the page size used when listing a user's agents. It
 // is a variable so tests can force several pages.
 var ownedAgentsPageSize = 100
 
-// checkUserOwnsNoAgentsTx refuses the deletion of userID while the user's
-// agents exist: agents with OwnerID == userID, agents started by those
-// agents (the user is the root of their ancestry), and agents the scheduler
-// dispatched for the user's schedules (OwnerID empty, CreatedBy == userID).
-// An agent the scheduler dispatched for a schedule an agent created records
-// no ancestry, so it is not counted (recording ancestry on that path belongs
-// to the scheduler rework). It runs inside the delete transaction.
+// checkUserDeleteBlockersTx refuses the deletion of userID while agents or
+// active delegations depend on the user (listUserDeleteBlockers). It runs
+// inside the delete transaction.
 //
 // It first locks the user row exclusively (SELECT ... FOR UPDATE on
 // PostgreSQL; see store.UserStore.LockUserRow). Agent create (including the
@@ -85,60 +133,264 @@ var ownedAgentsPageSize = 100
 // own transactions and re-check that the user exists (lockAgentGuardUserTx),
 // so an agent this check would count either commits before it runs (and is
 // listed) or waits for the delete and then fails. It returns
-// store.ErrNotFound if the user no longer exists.
+// store.ErrNotFound if the user does not exist, a
+// *userDeletionInProgressError while a forced deletion of the user is in
+// progress (its status is deleting, ptone/scion#2143), and a
+// *userDeleteBlockedError when anything blocks.
+func checkUserDeleteBlockersTx(ctx context.Context, tx store.Store, userID string) error {
+	return checkUserDeleteBlockersModeTx(ctx, tx, userID, false)
+}
+
+// checkUserDeleteBlockersModeTx is checkUserDeleteBlockersTx. completing is
+// set only by the completion of a forced deletion, which is the one delete
+// that accepts a user whose status is deleting.
+func checkUserDeleteBlockersModeTx(ctx context.Context, tx store.Store, userID string, completing bool) error {
+	// agents.owner_id is a UUID column, so a user ID that is not a UUID
+	// cannot own an agent, and it names no user row to lock.
+	if _, err := uuid.Parse(userID); err == nil {
+		if err := tx.LockUserRow(ctx, userID, true); err != nil {
+			return err
+		}
+		if !completing {
+			u, err := tx.GetUser(ctx, userID)
+			if err != nil {
+				return err
+			}
+			if u.Status == store.UserStatusDeleting {
+				return userDeletionInProgressFor(ctx, tx, userID)
+			}
+		}
+	}
+	b, err := listUserDeleteBlockers(ctx, tx, userID)
+	if err != nil {
+		return err
+	}
+	if b.empty() {
+		return nil
+	}
+	return &userDeleteBlockedError{blockers: *b}
+}
+
+// listUserDeleteBlockers returns what blocks the deletion of userID, read
+// from st (the delete transaction, or the store for the read-only listing;
+// it takes no lock). Each list is sorted by ID and capped at
+// userDeleteBlockersLimit, with Truncated set when either has more.
 //
-// Soft-deleted agents do not count: the agent list hides them by default
+// Agents are the user's agents: agents with OwnerID == userID, agents
+// started by those agents (the user is the root of their ancestry), and
+// agents the scheduler dispatched for the user's schedules (OwnerID empty,
+// CreatedBy == userID). An agent the scheduler dispatched for a schedule an
+// agent created records no ancestry, so it is not counted (recording
+// ancestry on that path belongs to the scheduler rework). Soft-deleted
+// agents do not count: the agent list hides them by default
 // (AgentFilter.IncludeDeleted is false), and they are purged later; restore
 // refuses an agent whose guard user (lockAgentGuardUserTx) no longer exists.
 // Every other agent counts whatever its phase, including a stopped agent or
 // one whose deletion is still in progress, since all of those still appear
 // in the agent list.
-func checkUserOwnsNoAgentsTx(ctx context.Context, tx store.Store, userID string) error {
-	// agents.owner_id is a UUID column, so a user ID that is not a UUID
-	// cannot own an agent (and the store rejects it as a filter value).
-	if _, err := uuid.Parse(userID); err != nil {
-		return nil
+//
+// Edges are the active delegation edges with the user as the delegator
+// whose delegate is an agent that exists and is not soft-deleted, and is not
+// one of those agents (each agent is listed once). An edge to an agent that
+// is gone grants nothing and nothing could be deleted to clear it, and an
+// edge to a user (no production path creates one) could be cleared only by
+// deleting that other user, so neither blocks; the delete deactivates them
+// (deactivateUserDelegatorEdgesTx). Agent delegation grants the user issued
+// do not block: their use-time checks deny a deleted issuer.
+func listUserDeleteBlockers(ctx context.Context, st store.Store, userID string) (*userDeleteBlockers, error) {
+	all, err := collectUserDeleteBlockers(ctx, st, userID)
+	if err != nil {
+		return nil, err
 	}
-	if err := tx.LockUserRow(ctx, userID, true); err != nil {
-		return err
+	agents := make([]ownedAgentRef, 0, len(all.agents))
+	for i := range all.agents {
+		a := &all.agents[i]
+		agents = append(agents, ownedAgentRef{ID: a.ID, Slug: a.Slug, ProjectID: a.ProjectID, DeletionState: a.DeletionState})
 	}
-	var owned []ownedAgentRef
+	b := &userDeleteBlockers{Agents: agents, Edges: all.edges}
+	if len(b.Agents) > userDeleteBlockersLimit {
+		b.Agents, b.Truncated = b.Agents[:userDeleteBlockersLimit], true
+	}
+	if len(b.Edges) > userDeleteBlockersLimit {
+		b.Edges, b.Truncated = b.Edges[:userDeleteBlockersLimit], true
+	}
+	return b, nil
+}
+
+// userDeleteBlockerSet is every blocker of a user deletion, uncapped: the
+// agents (whole rows, sorted by ID) and the edges (sorted by ID), chosen
+// as listUserDeleteBlockers describes. The forced delete needs the whole
+// set: it authorizes every agent, compares the set inside its transaction
+// and records one row per agent.
+type userDeleteBlockerSet struct {
+	agents []store.Agent
+	edges  []delegatorEdgeRef
+}
+
+func (b *userDeleteBlockerSet) empty() bool {
+	return len(b.agents) == 0 && len(b.edges) == 0
+}
+
+// agentIDs returns the IDs of the blocking agents as a set.
+func (b *userDeleteBlockerSet) agentIDs() map[string]bool {
+	ids := make(map[string]bool, len(b.agents))
+	for i := range b.agents {
+		ids[b.agents[i].ID] = true
+	}
+	return ids
+}
+
+// collectUserDeleteBlockers returns every blocker of the deletion of
+// userID, uncapped, read from st (see listUserDeleteBlockers for which
+// agents and edges block). It takes no lock.
+func collectUserDeleteBlockers(ctx context.Context, st store.Store, userID string) (*userDeleteBlockerSet, error) {
+	agents := []store.Agent{}
 	seen := map[string]bool{}
-	// Direct agents (OwnerID == userID) and agents whose ancestry contains
-	// the user, which are the agents started by the user's agents (and their
-	// descendants; a user ID only appears as the ancestry root). Agents the
-	// user created also record [userID] as their ancestry, so the two
-	// queries overlap; seen drops the duplicates. The OwnerID query still
-	// covers legacy agents with an empty ancestry. The CreatedBy query finds
-	// agents the scheduler dispatched for the user's schedules: they have no
-	// owner or ancestry and record the user only as created_by, so only
-	// those with an empty OwnerID count from it (an agent with an owner is
-	// counted, or not, by the other two queries).
-	for _, filter := range []store.AgentFilter{{OwnerID: userID}, {AncestorID: userID}, {CreatedBy: userID}} {
-		opts := store.ListOptions{Limit: ownedAgentsPageSize, SkipTotalCount: true}
-		for {
-			page, err := tx.ListAgents(ctx, filter, opts)
-			if err != nil {
-				return fmt.Errorf("list agents owned by user: %w", err)
-			}
-			for _, a := range page.Items {
-				if seen[a.ID] || (filter.CreatedBy != "" && a.OwnerID != "") {
-					continue
+	if _, err := uuid.Parse(userID); err == nil {
+		// Direct agents (OwnerID == userID) and agents whose ancestry
+		// contains the user, which are the agents started by the user's
+		// agents (and their descendants; a user ID only appears as the
+		// ancestry root). Agents the user created also record [userID] as
+		// their ancestry, so the two queries overlap; seen drops the
+		// duplicates. The OwnerID query also covers legacy agents with an
+		// empty ancestry. The CreatedBy query finds agents the scheduler
+		// dispatched for the user's schedules: they have no owner or
+		// ancestry and record the user only as created_by, so only those
+		// with an empty OwnerID count from it (an agent with an owner is
+		// counted, or not, by the other two queries).
+		for _, filter := range []store.AgentFilter{{OwnerID: userID}, {AncestorID: userID}, {CreatedBy: userID}} {
+			opts := store.ListOptions{Limit: ownedAgentsPageSize, SkipTotalCount: true}
+			for {
+				page, err := st.ListAgents(ctx, filter, opts)
+				if err != nil {
+					return nil, fmt.Errorf("list agents owned by user: %w", err)
 				}
-				seen[a.ID] = true
-				owned = append(owned, ownedAgentRef{ID: a.ID, Slug: a.Slug, ProjectID: a.ProjectID})
+				for _, a := range page.Items {
+					if seen[a.ID] || (filter.CreatedBy != "" && a.OwnerID != "") {
+						continue
+					}
+					seen[a.ID] = true
+					agents = append(agents, a)
+				}
+				if page.NextCursor == "" || len(page.Items) == 0 {
+					break
+				}
+				opts.Cursor = page.NextCursor
 			}
-			if page.NextCursor == "" || len(page.Items) == 0 {
-				break
-			}
-			opts.Cursor = page.NextCursor
 		}
 	}
-	if len(owned) == 0 {
-		return nil
+
+	edges := []delegatorEdgeRef{}
+	all, err := st.GetDelegationEdgesForDelegator(ctx, store.DelegationPrincipalUser, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list delegation edges of user: %w", err)
 	}
-	sort.Slice(owned, func(i, j int) bool { return owned[i].ID < owned[j].ID })
-	return &userOwnsAgentsDeleteError{agents: owned}
+	for _, e := range all {
+		if e.DelegateType == store.DelegationPrincipalAgent && seen[e.DelegateID] {
+			continue
+		}
+		blocks, err := delegateBlocks(ctx, st, e.DelegateType, e.DelegateID)
+		if err != nil {
+			return nil, err
+		}
+		if !blocks {
+			continue
+		}
+		edges = append(edges, delegatorEdgeRef{ID: e.ID, DelegateType: e.DelegateType, DelegateID: e.DelegateID, ScopeType: e.ScopeType, ScopeID: e.ScopeID})
+	}
+
+	sort.Slice(agents, func(i, j int) bool { return agents[i].ID < agents[j].ID })
+	sort.Slice(edges, func(i, j int) bool { return edges[i].ID < edges[j].ID })
+	return &userDeleteBlockerSet{agents: agents, edges: edges}, nil
+}
+
+// delegateBlocks reports whether the delegate of an edge makes the edge a
+// blocker: an agent that exists and is not soft-deleted. An edge whose
+// delegate is not an agent never blocks.
+func delegateBlocks(ctx context.Context, st store.Store, delegateType, delegateID string) (bool, error) {
+	if delegateType != store.DelegationPrincipalAgent {
+		return false, nil
+	}
+	a, err := st.GetAgent(ctx, delegateID)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("look up delegate agent %s: %w", delegateID, err)
+	}
+	return a.DeletedAt.IsZero(), nil
+}
+
+// deactivateUserDelegatorEdgesTx deactivates every active delegation edge
+// with userID as the delegator, recording cause delegator_deleted under one
+// new operation ID (the store records the time). A user delete calls it
+// inside its transaction after checkUserDeleteBlockersTx passed, so it
+// normally finds only edges that do not block (to an agent that is gone, or
+// to a user). It deactivates every edge that is active when the sweep runs,
+// including one reactivated after the check read but before the sweep. A
+// restore whose delegator is not the guard user does not take this lock;
+// serializing it is later-phase work.
+func deactivateUserDelegatorEdgesTx(ctx context.Context, tx store.Store, userID string) error {
+	d := store.Deactivation{Cause: store.EdgeDeactivationDelegatorDeleted, OpID: uuid.NewString()}
+	if _, err := tx.DeactivateDelegationEdgesForDelegator(ctx, store.DelegationPrincipalUser, userID, d); err != nil {
+		return fmt.Errorf("deactivate delegation edges of user: %w", err)
+	}
+	return nil
+}
+
+// cleanupOrphanedProvisionedUser deletes a user row the Google identity
+// resolver provisioned and then lost to a concurrent binding of the same
+// subject, only while nothing depends on it (ptone/scion#2143). In one
+// transaction it locks the row exclusively (so agent create and restore
+// for the user wait), and keeps the row, reporting false, when it has an
+// external identity binding, a role binding, or anything that blocks a
+// user delete (agents or delegations; collectUserDeleteBlockers).
+// Otherwise it deactivates every edge the user delegated (cause
+// delegator_deleted) and deletes the row. A row that is already gone
+// reports false with no error.
+func (s *Server) cleanupOrphanedProvisionedUser(ctx context.Context, userID string) (bool, error) {
+	deleted := false
+	err := s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := tx.LockUserRow(ctx, userID, true); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nil
+			}
+			return err
+		}
+		bindings, err := tx.GetExternalIdentitiesByUserID(ctx, userID)
+		if err != nil {
+			return fmt.Errorf("list external identities of user: %w", err)
+		}
+		if len(bindings) > 0 {
+			return nil
+		}
+		roles, err := tx.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+		if err != nil {
+			return fmt.Errorf("list role bindings of user: %w", err)
+		}
+		if len(roles) > 0 {
+			return nil
+		}
+		blockers, err := collectUserDeleteBlockers(ctx, tx, userID)
+		if err != nil {
+			return err
+		}
+		if !blockers.empty() {
+			return nil
+		}
+		if err := deactivateUserDelegatorEdgesTx(ctx, tx, userID); err != nil {
+			return err
+		}
+		if err := tx.DeleteUser(ctx, userID); err != nil {
+			return fmt.Errorf("delete user: %w", err)
+		}
+		deleted = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return deleted, nil
 }
 
 // errAgentOwnerUserMissing is returned when the guard principal of an agent
@@ -150,10 +402,23 @@ func checkUserOwnsNoAgentsTx(ctx context.Context, tx store.Store, userID string)
 // cannot be told apart from a deleted user; hence the neutral text.
 var errAgentOwnerUserMissing = errors.New("the user or agent this agent belongs to no longer exists")
 
+// errAgentOwnerUserDeleting is returned when the guard user of an agent
+// (see lockAgentGuardUserTx) is being deleted: its status is deleting
+// while a forced user delete stops its agents (ptone/scion#2143). Agent
+// create and restore for that user's tree are refused until the deletion
+// completes, after which errAgentOwnerUserMissing applies.
+var errAgentOwnerUserDeleting = errors.New("the user this agent belongs to is being deleted")
+
+// errAgentGuardUserLookup wraps a store error reading the locked guard
+// user's row (its status). Agent create and restore answer 503: the guard
+// could not be verified, and nothing was written.
+var errAgentGuardUserLookup = errors.New("could not read the user this agent belongs to")
+
 // lockUserPrincipalTx takes a shared lock on the row of principalID when it
-// names a user, and reports whether it did (ptone/scion#2769). It runs
+// names a user, and reports whether it did (ptone/scion#2769). It returns
+// errAgentOwnerUserDeleting when that user's status is deleting. It runs
 // inside an agent create or restore transaction, before the agent row is
-// written. Paired with the exclusive lock checkUserOwnsNoAgentsTx takes in
+// written. Paired with the exclusive lock checkUserDeleteBlockersTx takes in
 // the user delete transaction, it serializes the two on PostgreSQL.
 //
 // principalID is a polymorphic principal reference (a user or an agent). It
@@ -174,6 +439,17 @@ func lockUserPrincipalTx(ctx context.Context, tx store.Store, principalID string
 	}
 	err := tx.LockUserRow(ctx, principalID, false)
 	if err == nil {
+		// The row is locked shared, so a forced delete's transaction
+		// (which locks it exclusively before it writes the deleting
+		// status) has either committed, and the status reads deleting
+		// here, or waits for this transaction (ptone/scion#2143).
+		u, gerr := tx.GetUser(ctx, principalID)
+		if gerr != nil {
+			return false, fmt.Errorf("%w: %w", errAgentGuardUserLookup, gerr)
+		}
+		if u.Status == store.UserStatusDeleting {
+			return true, errAgentOwnerUserDeleting
+		}
 		return true, nil
 	}
 	if !errors.Is(err, store.ErrNotFound) {
@@ -188,7 +464,7 @@ func lockUserPrincipalTx(ctx context.Context, tx store.Store, principalID string
 }
 
 // lockAgentGuardUserTx takes a shared lock on the row of the user that
-// checkUserOwnsNoAgentsTx would count for the new agent a, and re-checks
+// listUserDeleteBlockers would count for the new agent a, and re-checks
 // that the user exists (ptone/scion#2769). That user is the first of these
 // that is a user:
 //
@@ -248,6 +524,9 @@ func (s *Server) removeUserScopedData(ctx context.Context, userID string) bool {
 	// context (best effort; one left behind fails at fire time and is
 	// purged later).
 	defer s.deleteScheduledMessagesOfSender(ctx, userID)
+	// So do the user's starred messages (best effort; upkeep purges any
+	// left behind, and a deleted user cannot read them).
+	defer s.deleteMessageStarsOfUser(ctx, userID)
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), userScopedDataCleanupTimeout)
 	defer cancel()
 	return s.removeUserScopedDataCtx(ctx, userID)

@@ -13,9 +13,7 @@ GKE:                        true
 Priority class:             agents-high
 Shared dir storage class:   standard-rwx
 Shared dir size:            40Gi
-Shared dir storage backend: nfs
-Shared dir backends:        cache=nfs, data=local
-Home storage backend:       nfs
+Placement:                  not reported
 Default harness config:     claude
 Image registry:             registry.example/team
 Clone depth:                full

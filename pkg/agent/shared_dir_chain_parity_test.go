@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// These tests exercise unix-only, Windows-gated agent storage code.
+//go:build unix
+
 package agent
 
 import (
@@ -21,7 +24,9 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -84,7 +89,7 @@ func TestSharedDirChainsParity(t *testing.T) {
 			f.shareID = ".."
 			orig := ensureSharedDirLeaf
 			t.Cleanup(func() { ensureSharedDirLeaf = orig })
-			ensureSharedDirLeaf = func(hostBase, rel string) (int, bool, error) {
+			ensureSharedDirLeaf = func(hostBase, rel string, owner shareddirs.Owner) (int, bool, error) {
 				t.Errorf("leaf walk ran for %q under %q", rel, hostBase)
 				return -1, false, os.ErrPermission
 			}
@@ -112,8 +117,8 @@ func TestSharedDirChainsParity(t *testing.T) {
 			}
 
 			fa := newFixture(t)
-			volumes, _, agentErr := resolveSharedDirs(sdCfgFor(fa), "/unused", fa.projectID, "docker",
-				[]api.SharedDir{{Name: fa.name}}, "/workspace", false)
+			volumes, _, agentErr := resolveSharedDirs(sdLayoutFor(t, sdCfgFor(fa)), false, "/unused", fa.projectID, "docker",
+				[]api.SharedDir{{Name: fa.name}}, "/workspace")
 
 			fp := newFixture(t)
 			gs := &config.VersionedSettings{Server: &config.V1ServerConfig{SharedDirStorage: sdCfgFor(fp)}}
@@ -139,6 +144,16 @@ func TestSharedDirChainsParity(t *testing.T) {
 			}
 			assert.Equal(t, rel(fa.mountRoot, volumes[0].Source), rel(fp.mountRoot, got.Path),
 				"both chains must resolve the same directory")
+			// The plugin result carries the layout authority's own answer
+			// (Resolved). It must name the same directory as Path: the
+			// invariant upstream #4092's dropped NFS-vs-Layout cross-check
+			// enforced, now pinned here.
+			assert.Equal(t, projectfs.BackendNFS, got.Resolved.Backend)
+			assert.Equal(t, filepath.Join(got.Resolved.HostBase, got.Resolved.RelPath), got.Resolved.HostPath,
+				"Resolved is internally consistent")
+			resolvedReal, err := filepath.EvalSymlinks(got.Resolved.HostPath)
+			require.NoError(t, err)
+			assert.Equal(t, got.Path, resolvedReal, "Resolved.HostPath and Path name the same directory")
 		})
 	}
 }
@@ -153,8 +168,8 @@ func TestResolveSharedDirs_NFS_BackstopRefusesSwappedLeaf(t *testing.T) {
 
 	orig := ensureSharedDirLeaf
 	t.Cleanup(func() { ensureSharedDirLeaf = orig })
-	ensureSharedDirLeaf = func(hostBase, rel string) (int, bool, error) {
-		fd, existed, err := orig(hostBase, rel)
+	ensureSharedDirLeaf = func(hostBase, rel string, owner shareddirs.Owner) (int, bool, error) {
+		fd, existed, err := orig(hostBase, rel, owner)
 		if err != nil {
 			return fd, existed, err
 		}
@@ -164,8 +179,8 @@ func TestResolveSharedDirs_NFS_BackstopRefusesSwappedLeaf(t *testing.T) {
 		return fd, existed, nil
 	}
 
-	volumes, realization, err := resolveSharedDirs(nfsSharedDirStorageCfg(mountRoot), "/unused", "pid-1", "docker",
-		[]api.SharedDir{{Name: "scratchpad"}}, "/workspace", false)
+	volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, nfsSharedDirStorageCfg(mountRoot)), false, "/unused", "pid-1", "docker",
+		[]api.SharedDir{{Name: "scratchpad"}}, "/workspace")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "resolves through a symlink")
 	assert.Nil(t, volumes)

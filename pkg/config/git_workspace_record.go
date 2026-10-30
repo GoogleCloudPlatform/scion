@@ -19,6 +19,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/GoogleCloudPlatform/scion/internal/writesonread"
 )
 
 // RecordGitWorkspace records, in the external config of the split-storage
@@ -111,7 +113,13 @@ var healedGitWorkspaces sync.Map
 // healGitWorkspaceOnce runs RecordGitWorkspace for projectDir at most once
 // per process, ignoring errors: it backfills the record for a project
 // initialized before it was written, when the CLI resolves the project.
+//
+// It does nothing while internal/writesonread is set: a read-only command
+// does not write the record.
 func healGitWorkspaceOnce(projectDir string) {
+	if writesonread.Disabled() {
+		return
+	}
 	if _, done := healedGitWorkspaces.LoadOrStore(projectDir, true); done {
 		return
 	}

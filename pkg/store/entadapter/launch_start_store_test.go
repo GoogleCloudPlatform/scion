@@ -359,6 +359,69 @@ func TestStartLaunch_EndsClearMemory(t *testing.T) {
 	}
 }
 
+// TestStartLaunch_SucceededClearsPriorExit pins that a start launch's
+// succeeded report, the new run's first running write, clears the previous
+// run's exit code and reason left on the starting row (ptone/scion#5384).
+func TestStartLaunch_SucceededClearsPriorExit(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a, launchID := beginStartKindLaunch(t, ctx, s, projectID, "start-clears-exit", store.LaunchKindStart, "stopped", "")
+	uid, err := parseUUID(a.ID)
+	require.NoError(t, err)
+	_, err = s.client.Agent.UpdateOneID(uid).SetExitCode(137).SetExitReason("crashed").Save(ctx)
+	require.NoError(t, err)
+
+	answer, _, err := s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, store.LaunchReport{
+		LaunchID: launchID, InstanceID: "i1", State: store.LaunchReportStateSucceeded,
+	})
+	require.NoError(t, err)
+	require.Equal(t, store.LaunchReportResultApplied, answer.Result)
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "running", got.Phase)
+	assert.Nil(t, got.ExitCode, "the succeeded report clears the previous run's exit code")
+	assert.Empty(t, got.ExitReason, "the succeeded report clears the previous run's exit reason")
+}
+
+// TestStartLaunch_ReportsOutsidePreRunningSucceededKeepExit pins the
+// launch reports that leave the exit fields alone: a succeeded report on a
+// row already running, and a failed report on a starting row.
+func TestStartLaunch_ReportsOutsidePreRunningSucceededKeepExit(t *testing.T) {
+	cases := []struct {
+		name      string
+		rowPhase  string
+		state     string
+		wantPhase string
+	}{
+		{"succeeded on a running row", "running", store.LaunchReportStateSucceeded, "running"},
+		{"failed on a starting row", "starting", store.LaunchReportStateFailed, "error"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			s, projectID := newTestAgentStore(t)
+			a, launchID := beginStartKindLaunch(t, ctx, s, projectID, "report-keeps-exit", store.LaunchKindStart, "starting", "")
+			uid, err := parseUUID(a.ID)
+			require.NoError(t, err)
+			_, err = s.client.Agent.UpdateOneID(uid).SetPhase(tc.rowPhase).SetExitCode(137).SetExitReason("crashed").Save(ctx)
+			require.NoError(t, err)
+
+			answer, _, err := s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, store.LaunchReport{
+				LaunchID: launchID, InstanceID: "i1", State: tc.state,
+				Step: "pod_create", Message: "boom", ErrorCode: "runtime_error",
+			})
+			require.NoError(t, err)
+			require.Equal(t, store.LaunchReportResultApplied, answer.Result)
+			got, err := s.GetAgent(ctx, a.ID)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantPhase, got.Phase)
+			require.NotNil(t, got.ExitCode)
+			assert.Equal(t, 137, *got.ExitCode)
+			assert.Equal(t, "crashed", got.ExitReason)
+		})
+	}
+}
+
 // TestStartLaunch_LateFailedAfterStoppedReapRefines pins that a broker's
 // failed report after the reaper ended a restart launch stopped still
 // refines the launch error (the reaper's failure phase for a restart is

@@ -249,7 +249,7 @@ func TestSweepStaleReincarnations_OrphanPendingUsesPendingBound(t *testing.T) {
 	after, err := s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.ReincarnationStateFailed, after.ReincarnationState)
-	assert.Contains(t, after.Message, reincarnationDidNotStartReason)
+	assert.Contains(t, after.Message, reincarnationOrphanDidNotStartReason)
 }
 
 // TestSweepStaleReincarnations_OrphanNonPendingKeepsGeneralBound: an agent

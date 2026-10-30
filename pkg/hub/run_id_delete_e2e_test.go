@@ -68,9 +68,10 @@ func TestRunID_E2E_StaleDeleteSparesRecreatedAgent(t *testing.T) {
 	// Real broker over HTTP.
 	mgr := &runLabelManager{}
 	cfg := runtimebroker.DefaultServerConfig()
+	cfg.BrokerAuthEnabled = false // no hub keys here: serve the broker API without auth
 	cfg.BrokerID = "e2e-broker"
 	cfg.BrokerName = "e2e-broker"
-	brokerSrv := runtimebroker.New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	brokerSrv := runtimebroker.New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	httpSrv := httptest.NewServer(brokerSrv.Handler())
 	defer httpSrv.Close()
 

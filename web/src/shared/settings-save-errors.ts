@@ -21,7 +21,8 @@
  *
  * The hub sends two envelopes:
  *
- * - flat: `{error: "<code>", message?, errors?, keys?, conflicted?}`, used by
+ * - flat: `{error: "<code>", message?, errors?, keys?, conflicted?,
+ *   applied_keys?, pending_restart?, skipped?}`, used by
  *   the server-config PUT for `validation_failed` (400, `errors` maps a
  *   settings section to `[{Path, Message}]`, where Path is a JSON pointer
  *   inside that section's document), `revision_conflict` (409) and
@@ -54,6 +55,12 @@ export interface SettingsConflict {
   current_revision?: number | undefined;
 }
 
+/** A key saved but not in use, with the reason (409 `skipped`). */
+export interface SettingsSkippedKey {
+  key: string;
+  reason: string;
+}
+
 export interface SettingsSaveError {
   kind: SettingsSaveErrorKind;
   status: number;
@@ -67,6 +74,14 @@ export interface SettingsSaveError {
   keys: string[];
   /** Conflicted sections (kind 'conflict'). */
   conflicted: SettingsConflict[];
+  /**
+   * Keys of the sections written before the conflict (kind 'conflict'),
+   * from the 409 body (ptone/scion#4467): applied to the running hub now,
+   * saved but taking effect only after a restart, and saved but not in use.
+   */
+  appliedKeys: string[];
+  pendingRestart: string[];
+  skipped: SettingsSkippedKey[];
 }
 
 export interface SettingsErrorContext {
@@ -104,6 +119,11 @@ export function sectionPathsFromSchema(body: unknown): Record<string, string[]> 
     if (strings.length > 0) out[name] = strings;
   }
   return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** The non-empty strings of v when it is an array, else []. */
+function stringList(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((k): k is string => typeof k === 'string' && k !== '') : [];
 }
 
 function str(v: unknown): string | null {
@@ -250,6 +270,9 @@ export function classifySettingsError(
     fieldErrors: [],
     keys: [],
     conflicted: [],
+    appliedKeys: [],
+    pendingRestart: [],
+    skipped: [],
   };
   if (!isRecord(body)) return result;
 
@@ -296,6 +319,14 @@ export function classifySettingsError(
           typeof c.expected_revision === 'number' ? c.expected_revision : undefined,
         current_revision: typeof c.current_revision === 'number' ? c.current_revision : undefined,
       }));
+    // The sections written before the conflict stay saved; their keys are
+    // reported like a successful save's (ptone/scion#4467).
+    result.appliedKeys = stringList(body.applied_keys);
+    result.pendingRestart = stringList(body.pending_restart);
+    result.skipped = (Array.isArray(body.skipped) ? body.skipped : [])
+      .filter(isRecord)
+      .filter((k) => typeof k.key === 'string' && k.key !== '')
+      .map((k) => ({ key: k.key as string, reason: typeof k.reason === 'string' ? k.reason : '' }));
     return result;
   }
 

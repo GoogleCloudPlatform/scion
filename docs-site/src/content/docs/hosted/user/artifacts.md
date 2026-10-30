@@ -74,6 +74,8 @@ Things to know before you publish:
 
 Open a project, go to its **Files** area and choose the **Artifacts** view. **New artifact** uploads a file, or a folder with a chosen entry file, with a title, an optional key and an optional note. The new artifact is homed in that project.
 
+You can also start from the **Artifacts** item in the sidebar. Its **New artifact** asks which project to home the artifact in. It offers only the projects where you may publish (for example, as owner, as a member with publish rights, or as an admin), and preselects the Hub's global project when you may publish there. If you may not publish in any project, the button is disabled and says so. After publishing, the new artifact's page opens.
+
 You can also start from chat: in a conversation that belongs to a project, when the **Attach artifact…** picker has nothing to list, it offers **New artifact**, and the new artifact is attached to your message.
 
 ## Publish new versions and get an artifact
@@ -161,6 +163,15 @@ On the current version of a Markdown artifact, choose **Review**. An editor open
 1. Select text and choose **Comment**, **Suggest**, **Insert** or **Delete** to add a mark. Marks cannot be nested, and the toolbar refuses a selection that falls inside code; a short hint says why.
 2. **Save review** publishes your marked-up copy as a version of kind *review*, with an optional note. It stays disabled until there is at least one mark, and while text outside your marks differs from the version you started from.
 3. If someone publishes a newer version while you review, your review is not saved. The editor restarts from the current version, and your text is shown read-only with **Copy** so you can redo your marks.
+
+:::note[Graphical review editor (experimental)]
+When the `web.artifact_review_editor` [experiment](/scion/reference/experiments/) is on (in addition to `hub.artifacts`), **Review** opens a graphical review editor with a **Graphical** and **Source** view toggle:
+- In **Graphical** view (**Track changes** is always on), you edit the rendered document directly — including prose inside paragraphs, headings, blockquotes, list items, and table cells — and typing, deleting, and replacing text are recorded inline as CriticMarkup suggestions, while **Comment** (`Ctrl+Alt+M` or `Cmd+Alt+M`) adds a note on the selection (`Enter` edits a comment you added in this review; comments from earlier reviews are read-only). Unedited list items, table rows, bullet markers, list numbering, alignment colons, and cell padding stay byte-for-byte as written.
+- Structural changes that cannot be recorded in the graphical view — formatting, adding or removing list items or table rows/columns, code blocks, paragraph breaks, multi-paragraph paste, or edits that would alter CriticMarkup token pairing or move an earlier comment — show a hint to switch to **Source** view.
+- **Large documents**: Markdown documents over **200 KB** (`200,000` UTF-8 bytes) or **4,000** top-level blocks open directly in **Source** view with a notice ("This document is large, so it opened in the Source view."), though you can still switch to **Graphical** view after confirming a prompt. Documents over **500 KB** (`500,000` bytes) or **10,000** top-level blocks open in **Source** view with the **Graphical** toggle disabled ("Too large for the graphical view.").
+- **Source** view uses the CriticMarkup source editor and toolbar (**Comment**, **Suggest**, **Insert**, **Delete**). Suggestions you made in the graphical view become read-only in the graphical view after you switch to **Source**, though you can still edit them in **Source**. Undo history is kept per view and resets when you switch, and your last chosen view is remembered in the browser.
+- Every save goes through the same review publish and Hub checks whether or not `web.artifact_review_editor` is on.
+:::
 
 While a review is the current version, the artifact shows a *Review pending* badge (also in the Artifacts list), and a banner names the reviewer and counts the marks. On a review, the preview's **Marks · Clean · Accepted** switch shows the marks, the text with every mark rejected, or the text with every mark accepted.
 
@@ -329,7 +340,7 @@ While `hub.artifacts` is off:
 - **CLI:** every artifact request answers `404`. `scion artifact publish` adds a hint that the experiment may be off; `get` lists it among the possible causes. Messages sent with `--artifact` lose their references, with a warning.
 - **Check.** Inside an agent, `scion whoami --full` lists the experiments that are on now, on its `Experiments:` line. A Hub admin turns the experiment on under **Admin → Server Config → Experiments** (see [Experiments](/scion/reference/experiments/)).
 
-If the experiment is on but artifacts are disabled in the Hub's settings, the web controls still appear, but every artifact request behind them, and every `scion artifact` command, answers `404` (ptone/scion#4932). Messages sent with `--artifact` lose their references, with a warning. Ask a Hub admin to check the Hub's `artifacts` settings.
+If the experiment is on but artifacts are disabled in the Hub's settings, the web controls still appear, but every artifact request behind them, and every `scion artifact` command, answers `404`. Messages sent with `--artifact` lose their references, with a warning. Ask a Hub admin to check the Hub's `artifacts` settings.
 
 ### A review is refused
 

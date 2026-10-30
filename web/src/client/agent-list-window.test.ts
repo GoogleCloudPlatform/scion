@@ -18,14 +18,18 @@
  * Covers the small and paged window states.
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, type Mock } from 'vitest';
 import type { Agent } from '../shared/types.js';
 import { AgentListWindow } from './agent-list-window.js';
 import type {
   AgentListViewState,
   AgentListWindowOptions,
+  PagedPageParams,
   PagedPageResult,
 } from './agent-list-window.js';
+
+/** What the fake page fetchers below read; the tests also call them directly. */
+type FakePageParams = Partial<PagedPageParams>;
 
 function agent(id: string, overrides: Partial<Agent> = {}): Agent {
   return {
@@ -128,7 +132,7 @@ describe('AgentListWindow — small state', () => {
   it('setSmall() resets pageIndex to 0 when the previous state was paged', async () => {
     const page0 = [agent('a'), agent('b')];
     const page1 = [agent('c'), agent('d')];
-    const fetchPage = vi.fn((params: { cursor?: string }) =>
+    const fetchPage = vi.fn((params: FakePageParams) =>
       Promise.resolve(
         !params.cursor
           ? pagedResult(page0, { nextCursor: 'c1', totalCount: 4 })
@@ -211,7 +215,7 @@ describe('AgentListWindow — paged state', () => {
   it('next()/prev() call fetchPage with the right cursor and update pageIndex/total', async () => {
     const page0 = [agent('a'), agent('b')];
     const page1 = [agent('c'), agent('d')];
-    const fetchPage = vi.fn((params: { cursor?: string }) => {
+    const fetchPage = vi.fn((params: FakePageParams) => {
       if (!params.cursor)
         return Promise.resolve(pagedResult(page0, { nextCursor: 'cursor-1', totalCount: 4 }));
       if (params.cursor === 'cursor-1')
@@ -248,7 +252,7 @@ describe('AgentListWindow — paged state', () => {
   it('steps back a page when a refetch returns empty (an emptied last page)', async () => {
     const page0 = [agent('a'), agent('b')];
     let secondCall = 0;
-    const fetchPage = vi.fn((params: { cursor?: string }) => {
+    const fetchPage = vi.fn((params: FakePageParams) => {
       if (!params.cursor)
         return Promise.resolve(pagedResult(page0, { nextCursor: 'c1', totalCount: 3 }));
       secondCall++;
@@ -590,7 +594,7 @@ describe('AgentListWindow — page-0 K-range chip predicate and off-page add-rul
   it('setViewState does not reset pageIndex or the current page while paged (a label keystroke must not desync them)', async () => {
     const page0 = [agent('a'), agent('b')];
     const page1 = [agent('c', { labels: { env: 'prod' } }), agent('d')];
-    const fetchPage = vi.fn((params: { cursor?: string }) =>
+    const fetchPage = vi.fn((params: FakePageParams) =>
       Promise.resolve(
         !params.cursor
           ? pagedResult(page0, { nextCursor: 'c1', totalCount: 4 })
@@ -764,7 +768,7 @@ describe('AgentListWindow — page-0 K-range chip predicate and off-page add-rul
   it('rangeStart tracks the real running offset, not pageIndex * pageSize, across a short page', async () => {
     const page0 = [agent('a'), agent('b'), agent('c')]; // a short page0: 3 rows at pageSize 3 (full)
     const page1 = [agent('d'), agent('e')]; // page1 is SHORT: only 2 rows (one race-dropped)
-    const fetchPage = vi.fn((params: { cursor?: string }) =>
+    const fetchPage = vi.fn((params: FakePageParams) =>
       Promise.resolve(
         !params.cursor
           ? pagedResult(page0, { nextCursor: 'c1', totalCount: 10 })
@@ -823,7 +827,7 @@ describe('AgentListWindow — cursor invalidation after a failed view-change', (
   it('invalidateCursors() clears hasNext/hasPrev while paged, until the next setPaged', async () => {
     const page0 = [agent('a'), agent('b')];
     const page1 = [agent('c'), agent('d')];
-    const fetchPage = vi.fn((params: { cursor?: string }) =>
+    const fetchPage = vi.fn((params: FakePageParams) =>
       Promise.resolve(
         !params.cursor
           ? pagedResult(page0, { nextCursor: 'c1', totalCount: 4 })
@@ -884,7 +888,7 @@ describe('AgentListWindow — refreshing a stranded page after an invalidation',
   it('invalidateCursors() also clears hasPrev on a page other than 0, and prev() makes 0 fetches', async () => {
     const page0 = [agent('a'), agent('b')];
     const page1 = [agent('c'), agent('d')];
-    const fetchPage = vi.fn((params: { cursor?: string }) =>
+    const fetchPage = vi.fn((params: FakePageParams) =>
       Promise.resolve(
         !params.cursor
           ? pagedResult(page0, { nextCursor: 'c1', totalCount: 4 })
@@ -914,24 +918,26 @@ describe('AgentListWindow — refreshing a stranded page after an invalidation',
     const page1 = [agent('c'), agent('d')];
     const page0Again = [agent('e', { phase: 'stopped' }), agent('f', { phase: 'stopped' })];
     const page1Again = [agent('g', { phase: 'stopped' }), agent('h', { phase: 'stopped' })];
-    const fetchPage = vi.fn((params: { cursor?: string }) => {
-      if (!params.cursor) {
-        // The second cursor-free call simulates the server now answering
-        // under the new (post-view-change) params.
-        return Promise.resolve(
-          fetchPage.mock.calls.length <= 1
-            ? pagedResult(page0, { nextCursor: 'c1', totalCount: 4 })
-            : pagedResult(page0Again, { nextCursor: 'c1-new', totalCount: 4 })
-        );
+    const fetchPage: Mock<(params: FakePageParams) => Promise<PagedPageResult>> = vi.fn(
+      (params: FakePageParams) => {
+        if (!params.cursor) {
+          // The second cursor-free call simulates the server now answering
+          // under the new (post-view-change) params.
+          return Promise.resolve(
+            fetchPage.mock.calls.length <= 1
+              ? pagedResult(page0, { nextCursor: 'c1', totalCount: 4 })
+              : pagedResult(page0Again, { nextCursor: 'c1-new', totalCount: 4 })
+          );
+        }
+        if (params.cursor === 'c1') return Promise.resolve(pagedResult(page1, { totalCount: 4 }));
+        // The fresh cursor minted by the page-0-again response: distinct from
+        // 'c1' (page 1's original, now-stale cursor), so a call with it
+        // proves `next()` is using the newly-minted one, not the old one.
+        if (params.cursor === 'c1-new')
+          return Promise.resolve(pagedResult(page1Again, { totalCount: 4 }));
+        return Promise.reject(new Error(`unexpected cursor: ${params.cursor}`));
       }
-      if (params.cursor === 'c1') return Promise.resolve(pagedResult(page1, { totalCount: 4 }));
-      // The fresh cursor minted by the page-0-again response: distinct from
-      // 'c1' (page 1's original, now-stale cursor), so a call with it
-      // proves `next()` is using the newly-minted one, not the old one.
-      if (params.cursor === 'c1-new')
-        return Promise.resolve(pagedResult(page1Again, { totalCount: 4 }));
-      return Promise.reject(new Error(`unexpected cursor: ${params.cursor}`));
-    });
+    );
     const { win } = createWindow({ viewState: makeViewState(), fetchPage });
     win.setPaged(await fetchPage({ cursor: undefined, limit: 2, wantStats: true }), '');
     await win.next();
@@ -1003,7 +1009,7 @@ describe('AgentListWindow — cursor invalidation vs. a concurrent window fetch'
     const pending = new Promise<PagedPageResult>((resolve) => {
       resolvePending = resolve;
     });
-    const fetchPage = vi.fn((params: { cursor?: string }) => {
+    const fetchPage = vi.fn((params: FakePageParams) => {
       if (!params.cursor) return pending; // the in-flight page-0 fetch below
       return Promise.resolve(pagedResult(page1, { nextCursor: 'c1', totalCount: 4 }));
     });

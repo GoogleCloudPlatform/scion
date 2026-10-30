@@ -161,6 +161,16 @@ func (c *Cache) Get(contentHash string) (string, bool) {
 // os.Root opened on the entry directory, so cache entries are only ever
 // created inside the cache directory.
 func (c *Cache) Put(contentHash string, files map[string][]byte) (string, error) {
+	return c.PutWithModes(contentHash, files, nil)
+}
+
+// PutWithModes is Put with a file mode per path: each file is written with
+// exactly the mode modes names for it (ptone/scion#5652), independent of
+// the process umask. A path modes does not name is written 0644, as Put
+// writes every file. Callers normalise modes first (transfer.NormalizeMode)
+// and key entries with EntryKey, which covers the modes, so an entry
+// written with other modes is not reused for them.
+func (c *Cache) PutWithModes(contentHash string, files map[string][]byte, modes map[string]os.FileMode) (string, error) {
 	if err := validateEntryName(contentHash); err != nil {
 		return "", fmt.Errorf("invalid contentHash: %w", err)
 	}
@@ -212,7 +222,7 @@ func (c *Cache) Put(contentHash string, files map[string][]byte) (string, error)
 		return "", fmt.Errorf("failed to create template directory: %w", err)
 	}
 
-	if err := writeFilesInDir(root, tmpName, files); err != nil {
+	if err := writeFilesInDir(root, tmpName, files, modes); err != nil {
 		_ = root.RemoveAll(tmpName)
 		return "", err
 	}
@@ -235,9 +245,38 @@ func (c *Cache) Put(contentHash string, files map[string][]byte) (string, error)
 	return templatePath, nil
 }
 
+// EntryKey returns the cache entry name for a resource with the given
+// files: transfer.ComputeContentHashV2 over each file's path, normalised
+// mode and content hash (ptone/scion#5658). Two file sets share an entry
+// only when they have the same paths, contents and executable bits, so a
+// rename-only or chmod-only change is never served from the entry of the
+// version before it.
+//
+// The broker computes the key itself, from the metadata manifest for a
+// lookup and from the downloaded files for a store, so it does not depend
+// on which content hash version the hub records (v1 while the
+// hub.content_hash_v2 experiment is off, on a hub before ptone/scion#5658,
+// or for a row not committed since; v2 otherwise). For the
+// same reason it replaces the interim key of ptone/scion#5652, which
+// derived a key from the hub's content hash and the executable paths.
+// Entries stored under the earlier keys (a bare v1 content hash, or that
+// interim key) are never looked up again; they stay until LRU eviction
+// removes them, so a lookup by an agent's recorded TemplateHash still
+// finds them meanwhile.
+//
+// The key has the "sha256:<64 hex>" form of a content hash
+// (transfer.IsContentHash), because the broker treats a hydrated template
+// directory's name as the template hash it records for the agent
+// (agent-info TemplateHash) and later looks up in this cache. That recorded
+// hash is therefore this key, which equals the hub's ContentHash only when
+// the hub records v2; it is only ever used as a cache key.
+func EntryKey(files []transfer.FileInfo) string {
+	return transfer.ComputeContentHashV2(files)
+}
+
 // writeFilesInDir writes files beneath the directory name inside parent,
 // through an os.Root opened from parent.
-func writeFilesInDir(parent *os.Root, name string, files map[string][]byte) error {
+func writeFilesInDir(parent *os.Root, name string, files map[string][]byte, modes map[string]os.FileMode) error {
 	dir, err := parent.OpenRoot(name)
 	if err != nil {
 		return fmt.Errorf("failed to open template directory: %w", err)
@@ -245,7 +284,11 @@ func writeFilesInDir(parent *os.Root, name string, files map[string][]byte) erro
 	defer func() { _ = dir.Close() }()
 
 	for relativePath, content := range files {
-		if err := transfer.WriteFileInRoot(dir, relativePath, content, 0644); err != nil {
+		mode, ok := modes[relativePath]
+		if !ok {
+			mode = transfer.ModeRegular
+		}
+		if err := transfer.WriteFileInRootMode(dir, relativePath, content, mode); err != nil {
 			return fmt.Errorf("failed to write file %s: %w", relativePath, err)
 		}
 	}

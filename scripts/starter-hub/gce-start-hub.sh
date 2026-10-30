@@ -20,16 +20,20 @@
 #
 #   Default (fast): pull → build → restart → health check
 #   --full:         Also uploads config files, installs Caddy, updates systemd/Caddy
-#   --no-tls:       Skip the Caddy/TLS step, for internal deployments without
-#                   certificates (env: SKIP_TLS=true). No Caddyfile is written,
-#                   Caddy is not installed or restarted, agents use
-#                   http://<HUB_DOMAIN>:8080 (override with HUB_BASE_URL), and
-#                   the HTTPS health check is skipped; the on-VM check still runs.
-#                   gce-certs.sh is not run in this mode, so nothing creates a
-#                   DNS record: HUB_DOMAIN must resolve to the VM through your
-#                   own DNS, or set HUB_BASE_URL to an address agents can reach.
-#                   Behind an upstream TLS terminator, set HUB_BASE_URL (or
-#                   SCION_SERVER_BASE_URL in hub.env) to the https:// URL.
+#   --no-tls:       Skip the Caddy/TLS step, for a hub behind an upstream TLS
+#                   terminator (env: SKIP_TLS=true). The base URL that takes
+#                   effect (SCION_SERVER_BASE_URL in hub.env if it sets one,
+#                   which must then agree with HUB_BASE_URL if that is set,
+#                   else HUB_BASE_URL) must be that terminator's https:// URL;
+#                   the script stops before doing anything otherwise, because
+#                   the hub refuses to start
+#                   with an http base URL on a non-loopback listener (OAuth
+#                   callbacks and session cookies would cross the network
+#                   unencrypted). No Caddyfile is written, Caddy is not
+#                   installed or restarted, and the HTTPS health check is
+#                   skipped; the on-VM check still runs. gce-certs.sh is not
+#                   run in this mode, so nothing creates a DNS record for the
+#                   terminator's name.
 #   --reset-db:     Deletes the hub database before starting (works in both modes)
 #   --branch <b>:   Checkout and build from a specific branch (default: current branch)
 #   --insecure-health-check:
@@ -126,9 +130,12 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Public base URL dispatched to agents (SCION_SERVER_BASE_URL in the unit).
+# Public base URL (SCION_SERVER_BASE_URL in the unit): the OAuth redirect
+# base and the URL dispatched to agents.
 if [[ "${SKIP_TLS}" == "true" ]]; then
-    HUB_BASE_URL="${HUB_BASE_URL:-http://${HUB_DOMAIN}:8080}"
+    # Without Caddy the hub needs the https:// URL of an upstream TLS
+    # terminator; checks the value that takes effect (hub.env included).
+    require_no_tls_https_base_url
 else
     HUB_BASE_URL="${HUB_BASE_URL:-https://${HUB_DOMAIN}}"
 fi

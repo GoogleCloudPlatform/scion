@@ -284,3 +284,21 @@ func TestGlobalLayoutMigration_CLIStderrOnlyUnderJSON(t *testing.T) {
 		t.Errorf("content through legacy path = %q, want %q", got, "hello")
 	}
 }
+
+// Legacy fixtures for the server preflight's no-write tests
+// (ptone/scion#5057, server_preflight_test.go): the legacy literals live in
+// this allow-listed compatibility test file.
+
+// legacyLayoutDir is the legacy global-layout directory under ~/.scion.
+const legacyLayoutDir = "groves"
+
+// legacyHubProjectIDYAML is a settings-file fragment holding the legacy hub
+// project ID key with value.
+func legacyHubProjectIDYAML(value string) string {
+	return "hub:\n  grove_id: \"" + value + "\"\n"
+}
+
+// legacyMarkerYAML is a .scion marker file holding the legacy project keys.
+func legacyMarkerYAML(id, slug string) string {
+	return "grove-id: " + id + "\ngrove-name: " + slug + "\ngrove-slug: " + slug + "\n"
+}

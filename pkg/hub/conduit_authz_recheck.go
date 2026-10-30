@@ -430,32 +430,33 @@ func (s *Server) authorizeConduitUserStream(ctx context.Context, req conduitUser
 	return conduitAuthzAllowed, "", nil
 }
 
-// conduitUserStatus is the user-status rule of a user principal: a local
-// user (conduitIdentityHasUserRow) whose row is gone or suspended is
-// denied, and a failed lookup is unavailable. Identities without a user row
-// are allowed. It reads no agent, so the tunnel path applies it before the
-// target is resolved.
+// conduitUserStatus is the user-status rule of a user principal: the
+// account-status rule (checkUserAccount) applied to a local user
+// (conduitIdentityHasUserRow), the development user included. A user whose
+// row is gone or not active is denied, and a failed lookup is unavailable.
+// Identities without a user row are allowed. It reads no agent, so the
+// tunnel path applies it before the target is resolved.
 func (s *Server) conduitUserStatus(ctx context.Context, identity Identity, userID string) (conduitAuthzVerdict, string) {
 	if !conduitIdentityHasUserRow(identity) {
 		return conduitAuthzAllowed, ""
 	}
-	u, err := s.store.GetUser(ctx, userID)
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-		return conduitAuthzDenied, "user not found"
-	case err != nil:
-		return conduitAuthzUnavailable, "user lookup failed"
-	case u.Status == store.UserStatusSuspended:
-		return conduitAuthzDenied, "user suspended"
+	user, err := checkUserAccount(ctx, s.store, PrincipalContext{Kind: PrincipalKindUser, ID: userID})
+	switch refusal := classifyUserAccount(user, err); refusal {
+	case accountAllowed:
+		return conduitAuthzAllowed, ""
+	case accountLookupFault:
+		return conduitAuthzUnavailable, accountRefusalReason(refusal)
+	default:
+		return conduitAuthzDenied, accountRefusalReason(refusal)
 	}
-	return conduitAuthzAllowed, ""
 }
 
 // conduitIdentityHasUserRow reports whether identity is a local user whose
-// store row decides whether it is still active (suspended or deleted).
+// store row decides whether it is still active. The development user has a
+// row like any other local user and is checked the same way.
 func conduitIdentityHasUserRow(identity Identity) bool {
 	switch identity.(type) {
-	case *AuthenticatedUser, *ScopedUserIdentity:
+	case *AuthenticatedUser, *ScopedUserIdentity, *DevUser:
 		return true
 	default:
 		return false

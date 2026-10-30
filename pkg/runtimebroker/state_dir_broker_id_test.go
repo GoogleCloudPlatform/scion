@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -72,7 +73,7 @@ func TestNew_BrokerIDNotPathElementRefusesStart(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.BrokerID = "../x"
 	cfg.ForceRuntime = "mock"
-	srv := New(cfg, &mockManager{}, rt)
+	srv := New(cfg, &mockManager{}, rt, config.RuntimeBuildRecord{})
 	endAsyncLaunchesAtCleanup(t, srv)
 	assert.Empty(t, srv.stateDir, "a state directory was derived from the broker ID")
 	err := srv.startServices(context.Background(), false)
@@ -81,7 +82,7 @@ func TestNew_BrokerIDNotPathElementRefusesStart(t *testing.T) {
 
 	explicit := t.TempDir()
 	cfg.StateDir = explicit
-	srv = New(cfg, &mockManager{}, rt)
+	srv = New(cfg, &mockManager{}, rt, config.RuntimeBuildRecord{})
 	endAsyncLaunchesAtCleanup(t, srv)
 	assert.Equal(t, explicit, srv.stateDir)
 	assert.NoError(t, srv.stateDirSetupErr)

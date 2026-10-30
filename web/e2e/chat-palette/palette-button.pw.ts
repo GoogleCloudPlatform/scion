@@ -13,10 +13,11 @@
 // limitations under the License.
 
 /**
- * Chromium, real <scion-chat-shell>: the header's quick-switcher button,
- * exercised through the production event path (header -> composed
- * CHAT_PALETTE_OPEN_REQUEST_EVENT -> chat.ts's document listener), not a
- * direct method call. Covers placement at desktop and touch widths, open/
+ * Chromium, real <scion-chat-shell>: the quick-switcher button pinned to the
+ * bottom of the chat page's spaces rail, exercised through the production
+ * event path (button -> composed CHAT_PALETTE_OPEN_REQUEST_EVENT ->
+ * chat.ts's document listener), not a direct method call. Covers placement
+ * at desktop and touch widths (and its absence from the header), open/
  * focus/dismiss behaviour, the button's "never closes, never cancels" open
  * semantics, the touch keyboard-affordance omissions, the phone layout, the
  * 320px header-fit guard, and axe at both widths/themes.
@@ -50,13 +51,23 @@ async function gotoShell(
   return requests;
 }
 
+/** The spaces rail's footer button: the one quick-switcher button on every width. */
 function paletteButton(page: Page) {
+  return page.locator('scion-page-chat .v2-rail > .palette-footer > .palette-footer-btn');
+}
+
+/** The members column's footer button, rendered in the phone layout only. */
+function membersPaletteButton(page: Page) {
+  return page.locator('scion-page-chat .v2-members > .palette-footer > .palette-footer-btn');
+}
+
+/** Any quick-switcher button left in the header. */
+function headerPaletteButton(page: Page) {
   return page.locator('scion-header .palette-button');
 }
 
-function paletteTooltip(page: Page) {
-  return page.locator('scion-header sl-tooltip:has(.palette-button)');
-}
+/** The rail's footer button, from inside the page, for in-page geometry reads. */
+const RAIL_BUTTON_IN_PAGE = '.v2-rail > .palette-footer > .palette-footer-btn';
 
 function paletteDialog(page: Page) {
   return page.locator('scion-quick-palette sl-dialog[label="Quick switcher"]');
@@ -85,11 +96,11 @@ async function paletteOpenState(page: Page): Promise<boolean> {
 }
 
 /**
- * Dispatches the exact event the header's click handler dispatches, without
+ * Dispatches the exact event the button's click handler dispatches, without
  * a real pointer click — used only where a genuine `.click()`/`.tap()` would
  * be unreliable because the dialog's own overlay is mid-animation (see the
  * queued-reopen tests below). Every other test in this file uses a real
- * click or tap so the production event path (including the header's own
+ * click or tap so the production event path (including the button's own
  * dispatch) is what's actually exercised.
  */
 async function dispatchOpenRequest(page: Page): Promise<void> {
@@ -129,37 +140,76 @@ async function assertAxeClean(page: Page): Promise<void> {
 // Desktop (default 1200x800 viewport from playwright.config.ts)
 // ---------------------------------------------------------------------------
 
-test('the button renders left of the inline header actions, on a v2 chat route', async ({
+test('the button is pinned full-width at the bottom of the spaces rail, on a v2 chat route', async ({
   page,
 }) => {
   await gotoShell(page);
   await expect(paletteButton(page)).toBeVisible();
   const buttonBox = await paletteButton(page).boundingBox();
-  const actionsBox = await page.locator('scion-header .wide-right').boundingBox();
+  const railBox = await page.locator('scion-page-chat .v2-rail').boundingBox();
   expect(buttonBox).not.toBeNull();
-  expect(actionsBox).not.toBeNull();
-  expect(buttonBox!.x).toBeLessThan(actionsBox!.x);
+  expect(railBox).not.toBeNull();
+  // Within the rail, at its bottom: only the footer's 0.375rem (6px)
+  // padding sits between the button and the rail's bottom and side edges.
+  expect(buttonBox!.x).toBeGreaterThanOrEqual(railBox!.x);
+  expect(buttonBox!.x + buttonBox!.width).toBeLessThanOrEqual(railBox!.x + railBox!.width);
+  expect(railBox!.y + railBox!.height - (buttonBox!.y + buttonBox!.height)).toBeLessThanOrEqual(8);
+  expect(buttonBox!.width).toBeGreaterThanOrEqual(railBox!.width - 14);
 });
 
-test('the button is absent on a non-chat route', async ({ page }) => {
+test('wide layout: the header and the members column have no quick-switcher button', async ({
+  page,
+}) => {
+  await gotoShell(page, `/chat/dm/${DM_KEY}`);
+  await expect(paletteButton(page)).toBeVisible();
+  await expect(headerPaletteButton(page)).toHaveCount(0);
+  await expect(membersPaletteButton(page)).toHaveCount(0);
+  await expect(page.locator('scion-page-chat .palette-footer-btn')).toHaveCount(1);
+});
+
+test('the header has no quick-switcher button on a non-chat route', async ({ page }) => {
+  // This fixture mounts the chat page whatever the route, so only the
+  // header is meaningful here; the app itself unmounts the page off chat.
   await setupApiMocks(page);
   await page.goto('/e2e/chat-palette/fixture.html?shell=1&route=%2Fprojects%2Fabc', {
     waitUntil: 'domcontentloaded',
   });
-  await expect(paletteButton(page)).toHaveCount(0);
+  await page.waitForFunction(() => !!document.querySelector('scion-page-chat'));
+  await expect(page.locator('scion-header')).toBeVisible();
+  await expect(headerPaletteButton(page)).toHaveCount(0);
 });
 
-test('at 900px (the medium/compact tier), the button still renders left of the mode control', async ({
+test('at 900px (the medium/compact tier), the button stays at the bottom of the rail and out of the header', async ({
   page,
 }) => {
   await page.setViewportSize({ width: 900, height: 800 });
   await gotoShell(page);
   await expect(paletteButton(page)).toBeVisible();
   const buttonBox = await paletteButton(page).boundingBox();
-  const compactRightBox = await page.locator('scion-header .compact-right').boundingBox();
-  expect(buttonBox).not.toBeNull();
-  expect(compactRightBox).not.toBeNull();
-  expect(buttonBox!.x).toBeLessThan(compactRightBox!.x);
+  const railBox = await page.locator('scion-page-chat .v2-rail').boundingBox();
+  expect(railBox!.y + railBox!.height - (buttonBox!.y + buttonBox!.height)).toBeLessThanOrEqual(8);
+  await expect(headerPaletteButton(page)).toHaveCount(0);
+});
+
+test('the button stays put while the spaces list scrolls', async ({ page }) => {
+  await gotoShell(page);
+  await expect(paletteButton(page)).toBeVisible();
+  const before = await paletteButton(page).boundingBox();
+
+  const scrolled = await page.locator('scion-chat-space-rail .rail-body').evaluate((body) => {
+    // A tall spacer makes the list overflow.
+    const spacer = document.createElement('div');
+    spacer.style.height = '3000px';
+    body.append(spacer);
+    body.scrollTop = body.scrollHeight;
+    return body.scrollTop;
+  });
+  expect(scrolled).toBeGreaterThan(0);
+
+  const after = await paletteButton(page).boundingBox();
+  expect(after).toEqual(before);
+  const viewport = page.viewportSize()!;
+  expect(after!.y + after!.height).toBeLessThanOrEqual(viewport.height);
 });
 
 test('the button also renders on a DM route, not just bare /chat', async ({ page }) => {
@@ -275,41 +325,30 @@ test('a double-click before the first-open lazy import settles leaves the palett
   // synchronous portion, before either's `await loadQuickPalette()` (or the
   // subsequent render) has had a chance to resolve.
   await gotoShell(page);
-  await page.evaluate(() => {
-    const header = document
-      .querySelector('scion-chat-shell')
-      ?.shadowRoot?.querySelector('scion-header');
-    const btn = header?.shadowRoot?.querySelector('.palette-button');
+  await page.evaluate((sel) => {
+    const btn = document.querySelector('scion-page-chat')?.shadowRoot?.querySelector(sel);
     if (!(btn instanceof HTMLElement)) throw new Error('palette button not found');
     btn.click();
     btn.click();
-  });
+  }, RAIL_BUTTON_IN_PAGE);
   await expect(paletteDialog(page)).toBeVisible();
   expect(await paletteOpenState(page)).toBe(true);
 });
 
 /**
- * `document.elementFromPoint` at the button's own screen position: whatever
- * document-scope element is topmost there right now. With the palette
- * closed this is the shell itself (document-scope hit-testing does not
- * pierce into a shadow tree's own internals without `elementFromPoint`
- * being called *on* that shadow root). Only establishes the closed-state
- * baseline — see `deepHitChainAtButton` below for what actually identifies
- * the palette's own dialog once open, since this alone can't distinguish
- * the dialog's overlay from any other element inside scion-page-chat's
- * shadow tree that might happen to cover the same point.
+ * Whether the topmost element at the button's centre, within the chat
+ * page's own shadow tree, is the button or something inside it (its icon
+ * or label), i.e. nothing else covers the button there.
  */
-async function documentHitTagAtButton(page: Page): Promise<string | null> {
-  return page.evaluate(() => {
-    const header = document
-      .querySelector('scion-chat-shell')
-      ?.shadowRoot?.querySelector('scion-header');
-    const btn = header?.shadowRoot?.querySelector('.palette-button');
-    if (!(btn instanceof Element)) return null;
+async function buttonOwnsItsCenter(page: Page): Promise<boolean> {
+  return page.evaluate((sel) => {
+    const root = document.querySelector('scion-page-chat')?.shadowRoot;
+    const btn = root?.querySelector(sel);
+    if (!root || !(btn instanceof Element)) return false;
     const rect = btn.getBoundingClientRect();
-    const el = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
-    return el?.tagName ?? null;
-  });
+    const el = root.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+    return !!el && btn.contains(el);
+  }, RAIL_BUTTON_IN_PAGE);
 }
 
 /**
@@ -318,17 +357,13 @@ async function documentHitTagAtButton(page: Page): Promise<string | null> {
  * boundary, not what's inside it, so this calls it again on that host's own
  * `shadowRoot` and repeats), returning one `TAGNAME.class.names` string per
  * level. Identifies the palette's own `<sl-dialog class="palette-dialog">`
- * specifically, not just "some element inside scion-page-chat" — a plain
- * tag check at the document level can't tell those apart, since several
- * real dialogs (the document preview, a future modal) could equally live in
- * that shadow tree.
+ * specifically once it is open, not just "some element inside
+ * scion-page-chat": several real dialogs (the document preview, a future
+ * modal) live in that shadow tree.
  */
 async function deepHitChainAtButton(page: Page): Promise<string[]> {
-  return page.evaluate(() => {
-    const header = document
-      .querySelector('scion-chat-shell')
-      ?.shadowRoot?.querySelector('scion-header');
-    const btn = header?.shadowRoot?.querySelector('.palette-button');
+  return page.evaluate((sel) => {
+    const btn = document.querySelector('scion-page-chat')?.shadowRoot?.querySelector(sel);
     if (!(btn instanceof Element)) return [];
     const rect = btn.getBoundingClientRect();
     const x = rect.x + rect.width / 2;
@@ -343,7 +378,7 @@ async function deepHitChainAtButton(page: Page): Promise<string[]> {
       root = el.shadowRoot;
     }
     return chain;
-  });
+  }, RAIL_BUTTON_IN_PAGE);
 }
 
 test('once open, the palette dialog itself intercepts pointer events at the button — a second activation cannot reach it', async ({
@@ -351,9 +386,10 @@ test('once open, the palette dialog itself intercepts pointer events at the butt
 }) => {
   await gotoShell(page);
   // Baseline: before anything opens, the button's own screen position
-  // genuinely belongs to the shell, not some other always-covering element
-  // — without this, "not SCION-PAGE-CHAT" after open would be meaningless.
-  expect(await documentHitTagAtButton(page)).toBe('SCION-CHAT-SHELL');
+  // genuinely belongs to the button, not some other always-covering
+  // element — without this, the dialog check after open would be
+  // meaningless.
+  expect(await buttonOwnsItsCenter(page)).toBe(true);
 
   await paletteButton(page).click();
   await expect(paletteDialog(page)).toBeVisible();
@@ -475,14 +511,16 @@ test('a button press while the page is hidden does nothing', async ({ page }) =>
   expect(await paletteOpenState(page)).toBe(false);
 });
 
-test('the tooltip reads the platform-appropriate shortcut and is not disabled on desktop', async ({
+test('the title and the inline hint read the platform-appropriate shortcut on desktop', async ({
   page,
 }) => {
   await gotoShell(page);
   // Headless Chromium here reports a non-Mac platform.
-  await expect(paletteTooltip(page)).toHaveAttribute('content', 'Quick switcher (Ctrl+K)');
-  await expect(paletteTooltip(page)).not.toHaveAttribute('disabled', '');
+  await expect(paletteButton(page)).toHaveAttribute('title', 'Quick switcher (Ctrl+K)');
   await expect(paletteButton(page)).toHaveAttribute('aria-keyshortcuts', 'Control+K');
+  await expect(paletteButton(page).locator('.palette-footer-label')).toHaveText('Quick switcher');
+  await expect(paletteButton(page).locator('.palette-footer-shortcut')).toBeVisible();
+  await expect(paletteButton(page).locator('.palette-footer-shortcut')).toHaveText('Ctrl+K');
 });
 
 test('aria-haspopup and aria-keyshortcuts actually reach the accessibility tree, not just the DOM', async ({
@@ -530,14 +568,41 @@ test.describe('touch', () => {
     expect(matches).toBe(true);
   });
 
-  test('the button renders left of the mode dropdown at 390px', async ({ page }) => {
+  test('the button sits full-width at the bottom of the spaces column at 390px, not in the header', async ({
+    page,
+  }) => {
     await gotoShell(page);
     await expect(paletteButton(page)).toBeVisible();
+    await expect(headerPaletteButton(page)).toHaveCount(0);
     const buttonBox = await paletteButton(page).boundingBox();
-    const dropdownBox = await page.locator('scion-header .compact-right').boundingBox();
     expect(buttonBox).not.toBeNull();
-    expect(dropdownBox).not.toBeNull();
-    expect(buttonBox!.x).toBeLessThan(dropdownBox!.x);
+    // The footer's 0.375rem (6px) padding on each side, and below it (the
+    // safe-area inset is 0 in this headless run).
+    expect(buttonBox!.width).toBeGreaterThanOrEqual(390 - 14);
+    expect(844 - (buttonBox!.y + buttonBox!.height)).toBeLessThanOrEqual(8);
+  });
+
+  test('the members column has its own button at the bottom, and it opens the palette', async ({
+    page,
+  }) => {
+    await gotoShell(page, `/chat/dm/${DM_KEY}`);
+    await page.locator('scion-page-chat .v2-thread-header .mobile-members').tap();
+    await expect(page.locator('scion-page-chat .v2-panels')).toHaveAttribute('data-panel', 'right');
+    await page.waitForTimeout(400); // let the panel transform transition settle
+
+    await expect(membersPaletteButton(page)).toBeVisible();
+    const buttonBox = await membersPaletteButton(page).boundingBox();
+    expect(buttonBox!.x).toBeGreaterThanOrEqual(0);
+    expect(buttonBox!.width).toBeGreaterThanOrEqual(390 - 14);
+    expect(844 - (buttonBox!.y + buttonBox!.height)).toBeLessThanOrEqual(8);
+    expect(Math.round(buttonBox!.height)).toBeGreaterThanOrEqual(44);
+
+    await membersPaletteButton(page).tap();
+    await expect(paletteDialog(page)).toBeVisible();
+    await expect(paletteInput(page)).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(paletteDialog(page)).toBeHidden();
+    await expect(membersPaletteButton(page)).toBeFocused();
   });
 
   test('tapping the button opens the palette with the query input focused', async ({ page }) => {
@@ -547,21 +612,20 @@ test.describe('touch', () => {
     await expect(paletteInput(page)).toBeFocused();
   });
 
-  test('no keyboard-help legend, no aria-describedby, no aria-keyshortcuts, and the tooltip stays disabled', async ({
+  test('no keyboard-help legend, no aria-describedby, no aria-keyshortcuts, no title and no shortcut hint', async ({
     page,
   }) => {
     await gotoShell(page);
     await expect(paletteButton(page)).not.toHaveAttribute('aria-keyshortcuts', /.+/);
-    await expect(paletteTooltip(page)).toHaveAttribute('disabled', '');
+    await expect(paletteButton(page)).not.toHaveAttribute('title', /.+/);
+    await expect(paletteButton(page).locator('.palette-footer-shortcut')).toBeHidden();
+    await expect(paletteButton(page)).toHaveAccessibleName('Open quick switcher');
 
     await paletteButton(page).tap();
     await expect(paletteDialog(page)).toBeVisible();
 
     await expect(page.locator('scion-quick-palette #palette-keyboard-help')).toHaveCount(0);
     await expect(paletteInput(page)).not.toHaveAttribute('aria-describedby', /.+/);
-    // Tooltip stays disabled (never shows) even once the button has been
-    // focused/tapped.
-    await expect(paletteTooltip(page)).toHaveAttribute('disabled', '');
   });
 
   test('tap targets are at least 44x44 on touch, and the 44px rule does not inflate a two-line row', async ({
@@ -757,7 +821,7 @@ test.describe('touch', () => {
           .shadowRoot!.querySelector('scion-header')!;
         const logo = header.shadowRoot!.querySelector('.logo') as HTMLElement;
         const title = header.shadowRoot!.querySelector('.logo-text h1') as HTMLElement;
-        const button = header.shadowRoot!.querySelector('.palette-button') as HTMLElement;
+        const paletteButtons = header.shadowRoot!.querySelectorAll('.palette-button').length;
         const modeDropdown = header.shadowRoot!.querySelector(
           '.compact-mode-dropdown'
         ) as HTMLElement;
@@ -785,10 +849,10 @@ test.describe('touch', () => {
           titleFontSizePx: parseFloat(getComputedStyle(title).fontSize),
           // Neither the height check above nor the per-control in-viewport
           // checks below would catch the title's own box visually painting
-          // over the button: that changes none of scrollWidth, the title's
-          // height, or whether each control's rect individually sits inside
-          // [0, innerWidth] — only a direct logo-vs-button edge comparison
-          // does. `titleClips` independently guards the other way a
+          // over the mode dropdown: that changes none of scrollWidth, the
+          // title's height, or whether each control's rect individually
+          // sits inside [0, innerWidth] — only a direct logo-vs-dropdown
+          // edge comparison does. `titleClips` independently guards the other way a
           // too-wide title could go unnoticed by the height check: a text
           // node that overflows its box but isn't actually clipped (no
           // ellipsis/hidden) renders past the box's edge without changing
@@ -797,7 +861,7 @@ test.describe('touch', () => {
           titleClips:
             title.scrollWidth <= title.clientWidth ||
             getComputedStyle(title).overflowX !== 'visible',
-          button: rectOf(button),
+          paletteButtons,
           modeDropdown: rectOf(modeDropdown),
           userDropdown: rectOf(userDropdown),
         };
@@ -809,8 +873,9 @@ test.describe('touch', () => {
       // measured, ~2.3x) — 1.5x the font-size sits in between either way.
       expect(geometry.titleHeight).toBeLessThanOrEqual(geometry.titleFontSizePx * 1.5);
       expect(geometry.titleClips).toBe(true);
-      expect(geometry.logo.right).toBeLessThanOrEqual(geometry.button.left);
-      for (const rect of [geometry.button, geometry.modeDropdown, geometry.userDropdown]) {
+      expect(geometry.paletteButtons).toBe(0);
+      expect(geometry.logo.right).toBeLessThanOrEqual(geometry.modeDropdown.left);
+      for (const rect of [geometry.modeDropdown, geometry.userDropdown]) {
         expect(rect.left).toBeGreaterThanOrEqual(0);
         expect(rect.right).toBeLessThanOrEqual(geometry.innerWidth);
       }

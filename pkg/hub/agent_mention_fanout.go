@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -125,6 +126,12 @@ type agentMentionFanoutInput struct {
 	// mention metadata as "mention_of".
 	ParentMessageID string
 
+	// ParentAttachments are the attachments stored as artifacts bound to
+	// the parent message (ptone/scion#4596). Each copy delivers them into
+	// its target's home, and the target is recorded as an addressee of
+	// the parent for them, immediately before the copy is dispatched.
+	ParentAttachments []AttachmentRef
+
 	// Channel is the delivery channel to stamp on mention deliveries.
 	Channel string
 
@@ -174,7 +181,6 @@ func (s *Server) fanOutAgentMentions(ctx context.Context, in agentMentionFanoutI
 	if len(names) == 0 {
 		return nil
 	}
-
 	primarySlug := ""
 	if in.Primary != nil && in.Primary.ProjectID == in.Sender.ProjectID {
 		primarySlug = in.Primary.Slug
@@ -225,6 +231,22 @@ func (s *Server) fanOutAgentMentions(ctx context.Context, in agentMentionFanoutI
 	results = s.dropHumanMentionResults(ctx, in.Sender.ProjectID, results, in.HumanMembers)
 	if len(results) == 0 {
 		return nil
+	}
+
+	// Only explicit mentions can name agents on a message without text. A
+	// copy of such a message (an attachment-only one, ptone/scion#6146) is
+	// still useful when it delivers the parent's artifact attachments
+	// (ParentAttachments); with none, it would reach the agents empty, so
+	// it is not made. Resolution has already dropped the primary, self- and
+	// human mentions and marked unknown names; each mention that would have
+	// been delivered reports why instead.
+	if in.Msg == "" && len(in.ParentAttachments) == 0 {
+		for i := range results {
+			if results[i].Status == "delivered" {
+				results[i].Status, results[i].Error = "error", errMentionCopyNeedsText
+			}
+		}
+		return results
 	}
 
 	// Bound the whole call well under a typical client's own request
@@ -362,11 +384,29 @@ func (s *Server) deliverAgentMentionCopy(ctx, aggregateCtx context.Context, in a
 		metadata["mention_of"] = in.ParentMessageID
 	}
 
+	// The parent's attachments stored as artifacts (ptone/scion#4596): the
+	// target is recorded as an addressee of the parent, in state pending,
+	// only now, after the pair limiter, the pairwise authorization and the
+	// conversation resolution, so a mention any of them stops records
+	// nothing; and before the copy is dispatched, so the delivery decision
+	// at dispatch already sees it.
+	var deliveries []messages.AttachmentDelivery
+	addresseeRow := ""
+	if len(in.ParentAttachments) > 0 && in.ParentMessageID != "" {
+		via := "body-mention"
+		if position == "default_agent" {
+			via = "default-agent"
+		}
+		addresseeRow = s.recordAttachmentAddressee(ctx, in.ParentMessageID, target.ID, via)
+		deliveries = attachmentDeliveries(in.ParentMessageID, in.ParentAttachments)
+	}
+
 	// Bound this one mention's delivery attempt inside the aggregate
 	// budget, so a single slow or unreachable recipient cannot consume
 	// the whole budget and starve every mention after it.
 	dispatchCtx, dispatchCancel := context.WithTimeout(aggregateCtx, mentionDispatchTimeout)
 	dmResult, dmErr := s.ExecuteAgentDM(dispatchCtx, &AgentDMInput{
+		Deliveries:     deliveries,
 		SenderAgent:    in.Sender,
 		SenderIdentity: in.SenderIdent,
 		TargetAgent:    target,
@@ -387,6 +427,11 @@ func (s *Server) deliverAgentMentionCopy(ctx, aggregateCtx context.Context, in a
 		SkipPhaseGate: true,
 	})
 	dispatchCancel()
+	if dmErr != nil {
+		s.finishAttachmentAddressee(context.WithoutCancel(ctx), addresseeRow, errors.New(dmErr.Message))
+	} else {
+		s.finishAttachmentAddressee(context.WithoutCancel(ctx), addresseeRow, nil)
+	}
 	if dmErr != nil {
 		s.mentionPairLimiter.Release(in.Sender.ID, target.ID)
 		switch dmErr.Code {

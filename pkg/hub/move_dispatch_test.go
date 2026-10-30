@@ -63,13 +63,13 @@ func TestDispatchAgentDeleteLocalOnly_RefusesBrokerWithoutAgentMove(t *testing.T
 // The move's provision carries the expected NFS workspace to the broker.
 func TestDispatchAgentProvisionForMove_CarriesExpectedWorkspace(t *testing.T) {
 	d, client, agent := newMoveDispatchFixture(t, &store.BrokerCapabilities{AgentMove: true})
-	require.NoError(t, d.DispatchAgentProvisionForMove(context.Background(), agent, "agent-dir"))
+	require.NoError(t, d.DispatchAgentProvisionForMove(context.Background(), agent, "agent-dir", ""))
 	require.NotNil(t, client.lastCreateReq)
 	assert.True(t, client.lastCreateReq.ProvisionOnly)
 	assert.False(t, client.lastCreateReq.Reprovision)
 	assert.Equal(t, "agent-dir", client.lastCreateReq.ExpectExistingNFSWorkspace)
 
-	err := d.DispatchAgentProvisionForMove(context.Background(), agent, "")
+	err := d.DispatchAgentProvisionForMove(context.Background(), agent, "", "")
 	require.Error(t, err)
 }
 
@@ -83,7 +83,7 @@ func TestDeleteAgentQuery_LocalOnly(t *testing.T) {
 // provision an empty one, so the move's provision is never sent to it.
 func TestDispatchAgentProvisionForMove_RefusesBrokerWithoutAgentMove(t *testing.T) {
 	d, client, agent := newMoveDispatchFixture(t, &store.BrokerCapabilities{Reprovision: true})
-	err := d.DispatchAgentProvisionForMove(context.Background(), agent, "agent-dir")
+	err := d.DispatchAgentProvisionForMove(context.Background(), agent, "agent-dir", "")
 	require.True(t, errors.Is(err, errBrokerLacksAgentMove), "err = %v", err)
 	assert.Nil(t, client.lastCreateReq, "nothing may be sent")
 }

@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
@@ -175,6 +176,53 @@ type AgentTokenConfig struct {
 type AgentTokenService struct {
 	config AgentTokenConfig
 	signer jose.Signer
+	// ring, when set, replaces config.SigningKey and signer: a keyring
+	// file's signing ring signs and verifies (ptone/scion#1530 Phase 3).
+	ring *ringJWTKeys
+	// now is the token clock (nil: time.Now).
+	now func() time.Time
+}
+
+// newRingAgentTokenService returns an agent token service that signs and
+// verifies with the signing ring's agent JWT purpose. cfg.SigningKey must
+// be empty (an explicit key is refused with a keyring file). now is the
+// clock of token times and ring deadlines (nil: time.Now).
+func newRingAgentTokenService(ring *keyring.SigningRing, cfg AgentTokenConfig, now func() time.Time) (*AgentTokenService, error) {
+	if len(cfg.SigningKey) > 0 {
+		return nil, errors.New("an explicit agent token signing key cannot be combined with a keyring file")
+	}
+	if cfg.TokenDuration == 0 {
+		cfg.TokenDuration = DefaultAgentTokenDuration
+	}
+	keys := &ringJWTKeys{ring: ring, purpose: agentJWTPurpose,
+		newSigner: func(key jose.SigningKey, opts *jose.SignerOptions) (jose.Signer, error) {
+			return jose.NewSigner(key, opts)
+		}}
+	return &AgentTokenService{config: cfg, ring: keys, now: now}, nil
+}
+
+// clock returns the service's current time.
+func (s *AgentTokenService) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
+}
+
+// signClaims serializes claims under the service's signing key.
+func (s *AgentTokenService) signClaims(claims any, now time.Time) (string, error) {
+	if s.ring != nil {
+		return s.ring.sign(claims, now)
+	}
+	return jwt.Signed(s.signer).Claims(claims).Serialize()
+}
+
+// verifyClaims checks tok's signature and decodes its claims into dst.
+func (s *AgentTokenService) verifyClaims(tok *jwt.JSONWebToken, now time.Time, dst any) error {
+	if s.ring != nil {
+		return s.ring.verify(tok, now, dst)
+	}
+	return tok.Claims(s.config.SigningKey, dst)
 }
 
 // hashJTI returns the SHA-256 hex hash of a JWT ID (JTI).
@@ -283,7 +331,7 @@ type AgentTokenGrant struct {
 // caller records the credential, and must not hand out the token unless
 // that record succeeded.
 func (s *AgentTokenService) SignAgentToken(grant AgentTokenGrant, runID string) (string, *store.AgentCredential, error) {
-	now := time.Now()
+	now := s.clock()
 
 	scopes := grant.Scopes
 	// Default to status update scope if none provided
@@ -310,7 +358,7 @@ func (s *AgentTokenService) SignAgentToken(grant AgentTokenGrant, runID string) 
 		RunID:       runID,
 	}
 
-	token, err := jwt.Signed(s.signer).Claims(claims).Serialize()
+	token, err := s.signClaims(claims, now)
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to sign token: %w", err)
 	}
@@ -332,8 +380,9 @@ func (s *AgentTokenService) ValidateAgentToken(tokenString string) (*AgentTokenC
 		return nil, fmt.Errorf("failed to parse token: %w", err)
 	}
 
+	now := s.clock()
 	var claims AgentTokenClaims
-	if err := token.Claims(s.config.SigningKey, &claims); err != nil {
+	if err := s.verifyClaims(token, now, &claims); err != nil {
 		return nil, fmt.Errorf("failed to verify token: %w", err)
 	}
 
@@ -341,7 +390,7 @@ func (s *AgentTokenService) ValidateAgentToken(tokenString string) (*AgentTokenC
 	expected := jwt.Expected{
 		Issuer:      AgentTokenIssuer,
 		AnyAudience: jwt.Audience{AgentTokenAudience},
-		Time:        time.Now(),
+		Time:        now,
 	}
 
 	if err := claims.Validate(expected); err != nil {

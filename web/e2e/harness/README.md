@@ -34,7 +34,7 @@ global-teardown.ts       ← Kills the hub, cleans up temp files
    - `--foreground` (no daemonization)
    - `--host 127.0.0.1` (loopback only — required for dev-auth)
    - `--web-port <ephemeral>` (random free port)
-   - `--dev-auth` (auto-login as admin on first page load)
+   - `--dev-auth` (the admin session comes from a dev sign-in link, `devSignInURL`)
    - `--enable-test-login` (programmatic session creation endpoint)
    - `--session-secret e2e-test-secret` (deterministic signing key)
    - `--db sqlite://<tmpdir>/e2e.db` (ephemeral database)
@@ -137,11 +137,12 @@ reference use.
 
 ### Hub settings and a co-located broker
 
-Two more `startHub()` options, both off by default:
+Four more `startHub()` options, all off by default:
 
 - `env`: extra environment of the hub process, for supported
-  configuration such as `SCION_SERVER_HUB_ASYNCAGENTLAUNCH: 'true'` or
-  `SCION_IMAGE_REGISTRY`. It is applied over the member-level hub's
+  configuration such as `SCION_IMAGE_REGISTRY` or
+  `SCION_SERVER_HUB_LAUNCHTIMEOUT`. Experiments are not environment
+  settings; use `experiments` or `startupExperiments`. It is applied over the member-level hub's
   `SCION_*`-free environment. Keys the harness sets itself
   (`HARNESS_OWNED_ENV`: `HOME`, `SCION_CLI_MODE`, the hub id and hub class,
   the broker host) and the test mode and test identity settings
@@ -153,6 +154,30 @@ Two more `startHub()` options, both off by default:
   its provider. The broker registers whether or not a container runtime
   works on the host; agents only start where one does. The broker needs an
   image registry setting (`SCION_IMAGE_REGISTRY` in `env`).
+- `startupExperiments`: names of experiments the hub reads only at process
+  start (for example `hub.conduit`, whose relay starts only if it is on
+  then). `startHub()` turns each one on through the admin experiments API
+  and restarts the hub on the same database, port, HOME and hub id. If
+  anything fails before the restarted hub is healthy, the hub process is
+  killed and `startHub()` throws.
+- `experiments`: names of experiments the suite needs on. Once the hub is
+  healthy (after any `startupExperiments` restart), `startHub()` turns
+  each one on through the admin experiments API, with no restart, and
+  reads the listing back. If one is not enabled, or a request fails, the
+  hub process is killed and `startHub()` throws, so a suite never runs
+  with an experiment silently off. The override is stored in the hub's
+  database, so it survives `restartHubWithoutDevAuth`. The async create
+  journeys use it for `hub.async_agent_launch`.
+
+`restartHubWithoutDevAuth(stateFile)` restarts a hub that `startHub()`
+started in the same process on the same database, port, HOME and hub id,
+with the same arguments except `--dev-auth`, so a request without
+credentials is not signed in, as on a hub in production. Do the setup that
+needs the dev token first (test identities and their web-login codes,
+memberships, fixtures): the dev token is not accepted afterwards, and the
+state file is rewritten with the new PID, an empty `devToken` and
+`devAuth: false`. Test identity web sessions, web-login codes and agent
+and broker credentials keep working across the restart.
 
 `E2E_KEEP_HUB_STATE=1` makes `stopHub()` keep the hub's temp dir (the
 SQLite database, the private HOME and the hub's files) and print its
@@ -170,7 +195,8 @@ const state = await startHub({
   testLogin: false,
   testIdentities: true,
   runtimeBroker: true,
-  env: { SCION_SERVER_HUB_ASYNCAGENTLAUNCH: 'true', SCION_IMAGE_REGISTRY: registry },
+  env: { SCION_IMAGE_REGISTRY: registry },
+  experiments: ['hub.async_agent_launch'],
   stateFile,
 });
 ```

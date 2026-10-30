@@ -1,0 +1,139 @@
+# Packages whose tests run on the windows-latest job (.github/workflows/windows.yml).
+# One package per line; '#' starts a comment. No wildcards ("./...").
+# NEVER ./pkg/hub itself (or a ./pkg/hub/... wildcard), and never a package
+# whose test binary links pkg/hub: the unsharded pkg/hub test compile needs
+# about 12 GiB (the job fails on a ./pkg/hub or ./pkg/hub/... line).
+# ./pkg/hub/<sub> packages that do not link pkg/hub are allowed. ./cmd is the
+# one exception: its test binary links pkg/hub production code (never pkg/hub's
+# tests), as on Linux, and it runs anchored tests only.
+# A package left off for a Windows-environment reason gets a one-line reason
+# here; nothing is skipped.
+# ./pkg/util: anchored to its Windows tests (the full suite is POSIX-bound):
+# host git runs no hooks (core.hooksPath=NUL), and RemoveAllSafe fails closed.
+./pkg/util -run=^(TestHostGitRunsNoHooksWindows|TestWindowsRemoveSymlinkSafe_FailsClosed|TestWindowsRemoveAllSafe_SymlinkFailsClosed|TestWindowsRemoveAllSafe_NoSymlinkRemoves)$
+./pkg/util/privatefs
+./pkg/util/pathcanon
+./pkg/util/filelock
+./pkg/tunnelclient
+./pkg/credentials
+./pkg/apiclient
+# ./pkg/config: anchored to its Windows private-file tests (the full suite
+# is POSIX-bound).
+./pkg/config -run=^(TestWindowsHubProjectsDir_AliasFormsAreUnder|TestWindowsHubProjectsDir_UnresolvableIsUnder|TestWindowsHubProjectsDir_UnknownHomeIsUnder|TestWindowsHubWorkspace_AliasFormsSkipProjectLayer|TestWindowsHubWorkspace_UnresolvableProjectsDirSkipsProjectLayer|TestWindowsAtomicWrite_PrivateReplacesTooOpenInheritInherits|TestWindowsAtomicWrite_PrivateReplacesSymlinkNotTarget|TestWindowsAtomicWrite_InheritKeepsOwnerOnlyTarget|TestWindowsAtomicWrite_InheritDecisionDoesNotFollowLink|TestWindowsPersistHubID_GlobalDirAndFilePrivate|TestWindowsSettingsLock_RefusesJunctionLockFile|TestWindowsUpdateCLIContext_Private|TestWindowsIntegrationConfig_Private|TestWindowsCurrentUserOwns|TestWindowsMigrateLegacyGlobalLayout_SkipsForeignOwnedEntry|TestWindowsMkdirLikeLegacyRoot_FollowsSourceACL|TestWindowsWriteConflictBackup_Private|TestWindowsCopySettingsBackup_FollowsSourceACL|TestWindowsCopySettingsBackup_DecisionFromReadHandle|TestWindowsProtectionForCheck_FailsClosed|TestWriteConflictBackup_PartialFileRemovedOnFailure)$
+# ./pkg/brokercredentials: the Windows-reachable read (the write path and
+# multistore are gated).
+./pkg/brokercredentials -run=^(TestWindowsBrokerCredentials_RefusesUsersReadableFile|TestWindowsBrokerCredentials_RefusesSymlink|TestWindowsBrokerCredentials_MissingIsNotFound|TestStore_Load|TestStore_LoadNotFound|TestStore_LoadValidation)$
+# ./pkg/agent: the GitHub resolution cache, host state, the git base config
+# refusal and the state directory removal (no podman unshare retry) only (the
+# rest is gated agent provisioning).
+./pkg/agent -run=^(TestWindowsResolutionCache_NewDirAndFilePrivate|TestWindowsResolutionCache_RepairsOwnedTooOpenFile|TestWindowsResolutionCache_ForeignOwnedFileWarnedNotRepaired|TestWindowsResolutionCache_TooOpenDirWarnedNotRepaired|TestWindowsHostState_Unsupported|TestWindowsGitBaseConfig_Unsupported|TestWindowsRetryRemovalInUserNamespace_ReturnsOriginal)$
+./pkg/hubprofile
+# ./pkg/runtime: anchored to the git-metadata bind refusal (the rest is
+# broker-side container runtime code).
+./pkg/runtime -run=^(TestWindowsGitBindSource_Unsupported|TestWindowsGitBindCallers_RegisterNoMount)$
+# ./cmd: anchored to the Windows-relevant tests (the full suite is
+# POSIX-bound). Never the attachment-writing
+# message tests.
+./cmd -run=^(TestSSHWrite_NewFilePrivate|TestSSHWrite_FollowsUserSymlinkAndRepairsOpenTarget|TestSSHWrite_RefusesForeignWritableParent|TestSSHWrite_RefusesForeignOwnedTarget|TestSSHWrite_RefusesHardLinkedTarget|TestSSHKnownHostsTempFilePrivate|TestSSHShellQuoteForCmd|TestSSHCmdQuote_RefusesShellSpecialChars|TestSSHEndpointURL_RefusesShellSpecialChars|TestSSHWindowsForm_RefusesEndpointShellSpecialChars|TestSSHWindowsForm_RefusesExePathShellSpecialChars|TestRenderSSHHostBlock_WindowsFormEndpointWithPath|TestRenderSSHHostBlock_WindowsFormIPv6Endpoint|TestVSCode_ValidatesArgumentsForCmdLauncher|TestCheckVSCodeBatchArgs|TestPrepareSSH_RefusalMakesNoTempDir|TestVSCodeFiles_PrivateOnWindows|TestLockVSCodeDir_TimesOut|TestLockVSCodeDir_WaitsForRelease|TestLockVSCodeDir_DefaultWait|TestHubTestIdentityOut_DescribesACL|TestResolveBrokerJoinToken_WarnsOnForeignACE|TestWindowsGate_RefusesServerAndBroker|TestWindowsGate_DropsFlagValidationOnGatedCommands|TestWindowsGate_RefusesBeforeProjectResolution|TestWindowsGate_HidesOnlyGatedCommands|TestWindowsGate_AllowlistEntriesExist|TestWindowsGate_NoopOnUnix|TestWindowsGate_AllowsUseOnlyUnderProject|TestWindowsGate_ClearsPersistentHooksOnGatedCommands|TestWindowsGate_RefusesDespitePersistentHook|TestWindowsGate_CompletionSkipsGatedCommands|TestWindowsGate_NoPersistentHooksOnAllowedAncestorsOfGatedCommands|TestWindowsGate_RefusesUngatePrerequisiteCommands|TestWindowsUse_SelectWritesPrivateContext|TestSSHAndVSCodeFollowLinksOutsideHome|TestSSHDirCallers_ForeignWritableLinkTargetRefused|TestSSHWrite_LinkToForeignOwnedTargetRefused|TestEnsureSSHDir_RefusesInvalidComponents|TestEnsureSSHDir_ShortNameStaysInside|TestSSHVSCodeWriteLeaves_RefuseHardLinks|TestEnsureSSHDirOnlyUsesTheHandleWalk|TestSSHPrepare_SpaceInTempWindows|TestSSHKnownHostsOptionValue|TestSSHDirRelsMatchPaths|TestSSHWrite_WarnsOnMutableLinkTargetParent|TestWriteSSHHubPlan_HardLinkedConfigWithIncludeLineUntouched|TestUpdateVSCodeFiles_HardLinkedSettingsUnchangedUntouched)$
+# Packages without Windows-specific code, run in full (triaged on this
+# job: every one passes with no skips).
+./cmd/internal/cliutil
+./hack/checkclitimezones
+./hack/hubshard
+./hack/hubshard/extract
+./internal/fixturegen
+./internal/settingslockhook
+./internal/writesonread
+./pkg/agent/state
+./pkg/agentkeys
+./pkg/artifacts/critic
+./pkg/artifacts/remotefetch
+./pkg/brokerclient
+./pkg/brokerownership
+./pkg/clitime
+./pkg/conduit
+./pkg/conduit/clock
+./pkg/conduit/envelope
+./pkg/conduit/grant
+./pkg/conduit/registry
+./pkg/conduit/relay
+./pkg/conduit/relayrole
+./pkg/conduit/relayrole/relayserver
+./pkg/conduit/router
+./pkg/conduit/target
+./pkg/conduit/transport
+./pkg/conduit/transport/ws
+./pkg/credentialmeta
+./pkg/delegationadoption
+./pkg/ent/entc
+./pkg/eventbus
+./pkg/experiments
+./pkg/ghauth
+./pkg/httpcompress
+./pkg/hub/auditevent
+./pkg/hub/auth
+./pkg/hub/capacityplan
+./pkg/hub/eventstreams
+./pkg/hub/githubapp
+./pkg/hub/imagecheck
+./pkg/hub/internal/hubtestutil
+./pkg/hub/permissions
+./pkg/labels
+./pkg/lifecyclehooks
+./pkg/messages
+./pkg/observability/dbmetrics
+./pkg/observability/dispatchmetrics
+./pkg/observability/hubexport
+./pkg/observability/hubmetrics
+./pkg/observability/hubtracing
+./pkg/observability/reapermetrics
+./pkg/observability/ssemetrics
+./pkg/plugin/grpcbroker
+./pkg/plugin/refbroker
+./pkg/runtime/substrate
+./pkg/sciontool/backoff
+./pkg/sciontool/control
+./pkg/sciontool/portforward
+./pkg/sciontool/startuplistener
+./pkg/secretmigration
+./pkg/store
+./pkg/store/agentsort
+./pkg/store/relaydb
+./pkg/store/storedtime
+./pkg/store/storetest
+./pkg/substratecaps
+./pkg/telemetrycontract
+./pkg/testutil
+./pkg/transportauth/adcsource
+./pkg/util/asyncwrite
+./pkg/util/cloudrunenv
+./pkg/util/gcp
+./pkg/util/logging
+./pkg/util/logging/loglevel
+./pkg/util/otlptls
+./pkg/util/urlredact
+./pkg/version/update
+./pkg/wsprotocol
+./resources
+# ./pkg/artifacts: anchored to the reference parsing and encoding that the
+# allowlisted message command uses (--artifact); full suite OFF, see below.
+./pkg/artifacts -run=^(TestParseRef|TestParseMessageRef|TestParseMessageRefsBoundsAndDedupes|TestEncodeMessageRefsRoundTrip)$
+# Left OFF after triage (Windows-environment reasons; nothing is skipped):
+# ./deploy/terraform/tools/settingscheck: test-only package (go build refuses it); Terraform deploy tooling, Linux-only.
+# ./hack/checktimeliterals: TestScanFixtures scans 11 fixture files instead of 10 on a Windows checkout; Linux-only repo guard.
+# ./harnesses: the Python harness tests are POSIX-bound (os.O_DIRECTORY, /run paths, ~ expansion), and the vendored-lib header check fails on a CRLF checkout.
+# ./pkg/artifacts (full suite): a testdata fixture compares unequal on a Windows checkout, and TestViewSandboxBrowserProbe skips without Chromium.
+# ./pkg/brokerregistration: broker instance-directory locking is unsupported on Windows (the broker is gated on Windows).
+# ./pkg/config/pgprovider: every test needs Postgres (-tags integration) and skips without it.
+# ./pkg/hub/authzop: the catalog report and mutation-classification guards compare unequal on a Windows checkout; Linux-only hub guard.
+# ./pkg/integration/runtime: links pkg/hub production code; server-side integration runtime, not on a windowsAllowed path.
+# ./pkg/projectfs/migrate: unix-only package (every file is unix-tagged; hub-side project storage migration).
+# ./pkg/k8s: the exec credential plugin test runs a #!/bin/sh script (POSIX-only); the Kubernetes runtime is broker-side.
+# ./pkg/preflight: TestProfilesCheck_BeforeViewWithoutRetention reports only dropped_unused_profile (active_profile_fallback missing) and TestProfilesCheck_RealBadSettingsFileNeverQuotesValue reports a warning instead of the undecodable-settings block (hub-side upgrade preflight; follow-up).
+# ./pkg/sciontool/autoexpose: TestReconciler_IPv6OnlyListenerRegisteredAsLoopback skips without /proc/net/tcp6 (in-container tool).
+# ./pkg/sciontool/conduit: the sciontool agent log cannot be opened on Windows (in-container tool), and the IPv6-only loopback fallback fails.
+# ./pkg/sciontool/log: the agent log cannot be opened on Windows by design (openLogFileNoFollow is ErrUnsupported; in-container tool).
+# ./pkg/sciontool/suppgroups: the tests do not build for Windows (Linux supplementary groups; in-container tool).
+# ./pkg/store/enttest: two Postgres-only tests skip without SCION_TEST_POSTGRES_URL.
+# ./pkg/testinfra: TestDelegate_ConcurrentLiveCapHolds_Postgres skips without Postgres.
+# ./pkg/wsclient: the pty reconnect tests fail on Windows TCP abort semantics (wsarecv); attach reconnect on Windows is a follow-up.

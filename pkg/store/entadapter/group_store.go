@@ -86,6 +86,17 @@ func parseUUID(s string) (uuid.UUID, error) {
 	return uid, nil
 }
 
+// parseCursorUUID parses an ID pagination cursor. A malformed one is
+// store.ErrInvalidCursor (which wraps store.ErrInvalidInput), so the hub
+// answers 400 invalid_cursor (ptone/scion#3062).
+func parseCursorUUID(s string) (uuid.UUID, error) {
+	uid, err := uuid.Parse(s)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("%w: invalid UUID %q", store.ErrInvalidCursor, s)
+	}
+	return uid, nil
+}
+
 // parseGetID parses a primary-key identifier for a get-by-id lookup. A malformed
 // identifier cannot match any UUID primary key, so it is reported as
 // store.ErrNotFound — matching the raw-SQL store, where such a lookup simply

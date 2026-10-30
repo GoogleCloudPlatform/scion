@@ -23,23 +23,16 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
-// Workspace records name which side populated a hub-managed project
-// workspace (~/.scion/projects/<slug>). Each record is a file named after the
-// project slug, holding exactly the hub project ID. The record directories
-// sit directly in the global directory, outside every workspace tree.
+// Broker workspace records name the hub-managed project workspaces
+// (~/.scion/projects/<slug>) a runtime broker populated from a workspace
+// upload. Each record is a file named after the project slug, holding
+// exactly the hub project ID. The record directory sits directly in the
+// global directory, outside every workspace tree.
 const (
-	// HubWorkspacesDir holds records written by a hub for the workspaces
-	// it keeps as its own.
-	HubWorkspacesDir = "hub-workspaces"
 	// BrokerWorkspacesDir holds records written by a runtime broker for
-	// the workspaces it populated from a hub workspace upload.
+	// the workspaces it populated from a workspace upload.
 	BrokerWorkspacesDir = "broker-workspaces"
 )
-
-// HubWorkspaceRecordPath returns <globalDir>/hub-workspaces/<slug>.
-func HubWorkspaceRecordPath(slug string) (string, error) {
-	return workspaceRecordPath(HubWorkspacesDir, slug)
-}
 
 // BrokerWorkspaceRecordPath returns <globalDir>/broker-workspaces/<slug>.
 func BrokerWorkspaceRecordPath(slug string) (string, error) {

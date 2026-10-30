@@ -29,12 +29,18 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 // Mounting the shells mounts the header and nav, whose trays fetch on
-// connect; stubbed so no real requests go out.
+// connect; stubbed so no real requests go out. The test-infra status
+// request (sent through apiFetch, ptone/scion#353) goes on to the real
+// helper and so to the fetch stub below, which answers it.
 vi.mock('../client/api.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../client/api.js')>();
   return {
     ...actual,
-    apiFetch: vi.fn(() => Promise.resolve(new Response('{}', { status: 200 }))),
+    apiFetch: vi.fn((path: string, options?: Parameters<typeof actual.apiFetch>[1]) =>
+      path.endsWith('/api/v1/test-infra/status')
+        ? actual.apiFetch(path, options)
+        : Promise.resolve(new Response('{}', { status: 200 }))
+    ),
   };
 });
 

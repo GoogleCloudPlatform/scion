@@ -13,7 +13,6 @@ import (
 	"testing"
 
 	"entgo.io/ent/dialect"
-	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/migrate"
 	"github.com/stretchr/testify/require"
@@ -21,7 +20,7 @@ import (
 
 func requireNoDecisionTable(t *testing.T, client *ent.Client) {
 	t.Helper()
-	db := client.Driver().(*entsql.Driver).DB()
+	db := SQLDB(client.Driver())
 	var count int
 	require.NoError(t, db.QueryRow("SELECT count(*) FROM sqlite_master WHERE name = 'decision_audits' OR name IN ('decisionaudit_timestamp', 'decisionaudit_principal_kind_principal_id', 'decisionaudit_credential_id', 'decisionaudit_route', 'decisionaudit_resource_type_resource_id', 'decisionaudit_result', 'decisionaudit_correlation_id', 'decisionaudit_denied_by')").Scan(&count))
 	require.Zero(t, count)
@@ -46,7 +45,7 @@ func TestDecisionAuditDrop_UpgradeRestart(t *testing.T) {
 		return client
 	}
 	client := open()
-	db := client.Driver().(*entsql.Driver).DB()
+	db := SQLDB(client.Driver())
 	createLegacyDecisionAuditFixture(t, db)
 	_, err := db.Exec("CREATE TABLE migration_sentinel (id TEXT PRIMARY KEY, payload BLOB)")
 	require.NoError(t, err)
@@ -62,7 +61,7 @@ func TestDecisionAuditDrop_UpgradeRestart(t *testing.T) {
 		requireNoDecisionTable(t, client)
 	}
 	var payload []byte
-	db = client.Driver().(*entsql.Driver).DB()
+	db = SQLDB(client.Driver())
 	require.NoError(t, db.QueryRow("SELECT payload FROM migration_sentinel WHERE id='keep'").Scan(&payload))
 	require.Equal(t, []byte{0, 1, 2, 255}, payload)
 	var count int

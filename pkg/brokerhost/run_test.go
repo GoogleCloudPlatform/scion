@@ -161,7 +161,7 @@ func TestHost_RunInstanceNotServingIsStopped(t *testing.T) {
 			sc.FlatInstance = &runtimebroker.FlatInstanceConfig{Identity: ic.Identity, Instance: ic.Instance,
 				RemoteCredentials: []brokercredentials.BrokerCredentials{{Name: "h", BrokerID: ic.Identity.RuntimeBrokerID,
 					SecretKey: "!!not-base64", HubEndpoint: "http://127.0.0.1:1"}}}
-			return runtimebroker.New(sc, ic.Manager, ic.Runtime), nil
+			return runtimebroker.New(sc, ic.Manager, ic.Runtime, config.RuntimeBuildRecord{}), nil
 		case "docker-c":
 			// No Hub connection at all.
 			sc := runtimebroker.DefaultServerConfig()
@@ -169,7 +169,7 @@ func TestHost_RunInstanceNotServingIsStopped(t *testing.T) {
 			sc.Host = "127.0.0.1"
 			sc.StateDir = t.TempDir()
 			sc.FlatInstance = &runtimebroker.FlatInstanceConfig{Identity: ic.Identity, Instance: ic.Instance, HubInProcess: true}
-			return runtimebroker.New(sc, ic.Manager, ic.Runtime), nil
+			return runtimebroker.New(sc, ic.Manager, ic.Runtime, config.RuntimeBuildRecord{}), nil
 		}
 		return authBuild(ic)
 	}

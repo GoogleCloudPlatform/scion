@@ -136,6 +136,15 @@ afterEach(() => {
   document.body.innerHTML = '';
 });
 
+/** Give a space project thread groups, as if loaded with its threads. */
+function setGroups(
+  el: any,
+  projectId: string,
+  groups: { id: string; name: string; threadIds: string[] }[]
+): void {
+  el.projectGroups = new Map(el.projectGroups).set(projectId, groups);
+}
+
 describe('space rail — unread filter also filters threads within a space', () => {
   it('hides read threads within a shown space, keeps unread ones', async () => {
     const unread = thread({ id: 't-unread', name: 'unread-thread', hasUnread: true });
@@ -168,12 +177,7 @@ describe('space rail — unread filter also filters threads within a space', () 
     const groupedRead = thread({ id: 't-grouped', name: 'grouped-thread', hasUnread: false });
     const ungroupedUnread = thread({ id: 't-unread', name: 'unread-thread', hasUnread: true });
     const el = await mount([groupedRead, ungroupedUnread]);
-    el.prefs = {
-      ...el.prefs,
-      threadGroups: {
-        [SPACE.projectId]: [{ id: 'g-1', name: 'My Group', threadIds: ['t-grouped'] }],
-      },
-    };
+    setGroups(el, SPACE.projectId, [{ id: 'g-1', name: 'My Group', threadIds: ['t-grouped'] }]);
 
     el.spaceFilter = 'unread';
     await el.updateComplete;
@@ -255,12 +259,9 @@ describe('space rail — unread filter also filters threads within a space', () 
       hasUnread: true,
     });
     const el = await mount([general, ungroupedRead, ungroupedUnread, groupedUnread]);
-    el.prefs = {
-      ...el.prefs,
-      threadGroups: {
-        [SPACE.projectId]: [{ id: 'g-1', name: 'My Group', threadIds: ['t-grouped-unread'] }],
-      },
-    };
+    setGroups(el, SPACE.projectId, [
+      { id: 'g-1', name: 'My Group', threadIds: ['t-grouped-unread'] },
+    ]);
 
     el.spaceFilter = 'unread';
     await el.updateComplete;
@@ -294,12 +295,7 @@ describe('space rail — unread filter also filters threads within a space', () 
   it('still shows the header of a collapsed group that has unread members', async () => {
     const unreadMember = thread({ id: 't-1', name: 'thread-one', hasUnread: true });
     const el = await mount([unreadMember]);
-    el.prefs = {
-      ...el.prefs,
-      threadGroups: {
-        [SPACE.projectId]: [{ id: 'g-1', name: 'My Group', threadIds: ['t-1'] }],
-      },
-    };
+    setGroups(el, SPACE.projectId, [{ id: 'g-1', name: 'My Group', threadIds: ['t-1'] }]);
     el.collapsedGroups = new Set(['g-1']);
 
     el.spaceFilter = 'unread';
@@ -318,20 +314,15 @@ describe('space rail — unread filter also filters threads within a space', () 
       hasUnread: false,
     });
     const el = await mount([groupedRead, ungroupedRead]);
-    el.prefs = {
-      ...el.prefs,
-      threadGroups: {
-        [SPACE.projectId]: [
-          { id: 'g-1', name: 'Read Group', threadIds: ['t-grouped'] },
-          // An empty group has no members with the filter off or on — it
-          // exists purely as a drag target (see "New thread group"). It
-          // must disappear only because the *filter* hides zero-member
-          // groups, not unconditionally — so it has to come back once the
-          // filter is off even though it is still, in fact, empty.
-          { id: 'g-2', name: 'Empty Group', threadIds: [] },
-        ],
-      },
-    };
+    setGroups(el, SPACE.projectId, [
+      { id: 'g-1', name: 'Read Group', threadIds: ['t-grouped'] },
+      // An empty group has no members with the filter off or on — it
+      // exists purely as a drag target (see "New thread group"). It
+      // must disappear only because the *filter* hides zero-member
+      // groups, not unconditionally — so it has to come back once the
+      // filter is off even though it is still, in fact, empty.
+      { id: 'g-2', name: 'Empty Group', threadIds: [] },
+    ]);
 
     el.spaceFilter = 'unread';
     await el.updateComplete;

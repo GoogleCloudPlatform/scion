@@ -30,9 +30,12 @@ import (
 // pkg/hub) that source-scanning guard tests scan in addition to pkg/hub
 // itself, so code moved out of package hub stays guarded. It is the single
 // source of truth for those scans: when an area moves out of pkg/hub, add its
-// directory here (and a pkgmove:scan-covers marker plus reason at each
-// scanning site). An entry may name a directory that does not exist yet (an
-// area that has not moved); guardScanDirs skips it until it exists.
+// directory here. Each scanning site carries one
+// "pkgmove:scan-covers guardScanSubdirs" marker plus reason, which pkgmove
+// resolves against this list, so the entry is the only change a move needs
+// here; keep the list a []string literal of string literals, since pkgmove
+// reads it from the source. An entry may name a directory that does not exist
+// yet (an area that has not moved); guardScanDirs skips it until it exists.
 var guardScanSubdirs = []string{
 	"apierr",
 	"internal/principal",

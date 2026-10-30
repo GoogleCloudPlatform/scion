@@ -15,9 +15,12 @@
 package entadapter
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
+	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -26,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/message"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -51,6 +55,10 @@ type MessageStore struct {
 	// publisher, when non-nil, is notified after each successful CreateMessage.
 	// See MessagePublisher.
 	publisher MessagePublisher
+	// pendingLogger receives the entered-pending line for a row that took the
+	// schema default dispatch_state (ptone/scion#4827). Nil means
+	// slog.Default(). Tests set it to capture the line.
+	pendingLogger *slog.Logger
 }
 
 // NewMessageStore creates a new Ent-backed MessageStore.
@@ -95,6 +103,8 @@ func entMessageToStore(e *ent.Message) *store.Message {
 		CreatedAt:             e.Created,
 		SenderProjectID:       senderProjectID,
 		RecipientProjectID:    recipientProjectID,
+		AuthorizingUserID:     derefString(e.AuthorizingUserID),
+		DelegationGrantID:     derefString(e.DelegationGrantID),
 		DispatchState:         e.DispatchState,
 		DispatchedAt:          e.DispatchedAt,
 		DispatchFailureReason: e.DispatchFailureReason,
@@ -112,8 +122,10 @@ func uuidPtrToStringPtr(u *uuid.UUID) *string {
 }
 
 // CreateMessage persists a new message and announces it via the publisher.
+// Msg may be empty: an attachment-only chat message has no text. Send
+// handlers decide whether a body is required.
 func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) error {
-	if msg.ID == "" || msg.ProjectID == "" || msg.Msg == "" {
+	if msg.ID == "" || msg.ProjectID == "" {
 		return store.ErrInvalidInput
 	}
 	uid, err := parseUUID(msg.ID)
@@ -169,9 +181,20 @@ func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) er
 		}
 		create.SetRecipientProjectID(rpid)
 	}
+	// Delegated-send attribution (.design/agent-delegation.md §14.5). An
+	// empty value persists as NULL.
+	if msg.AuthorizingUserID != "" {
+		create.SetAuthorizingUserID(msg.AuthorizingUserID)
+	}
+	if msg.DelegationGrantID != "" {
+		create.SetDelegationGrantID(msg.DelegationGrantID)
+	}
 	if msg.Type == "" {
 		create.SetType("instruction")
 	}
+	// An empty DispatchState takes the schema default ("pending"); that row is
+	// logged below once it is persisted.
+	defaulted := msg.DispatchState == ""
 	if msg.DispatchState != "" {
 		create.SetDispatchState(msg.DispatchState)
 	}
@@ -194,6 +217,9 @@ func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) er
 	msg.CreatedAt = created.Created
 	msg.Type = created.Type
 	msg.DispatchState = created.DispatchState
+	if defaulted && created.DispatchState == store.MessageDispatchPending {
+		s.logDefaultedPending(msg)
+	}
 
 	// Design-in: announce the new message for LISTEN/NOTIFY subscribers.
 	// Best-effort — a publish failure must not fail the write that succeeded.
@@ -263,23 +289,24 @@ func encodeCursor(created time.Time, id string) string {
 // decodeCursor is the inverse of encodeCursor. It returns the created timestamp and UUID
 // embedded in the cursor, or an error if the cursor is malformed.
 func decodeCursor(cursor string) (time.Time, uuid.UUID, error) {
-	// Every failure wraps store.ErrInvalidInput: a malformed cursor is caller
-	// error, which the hub maps to HTTP 400 rather than 500.
+	// Every failure wraps store.ErrInvalidCursor (and so store.ErrInvalidInput):
+	// a malformed cursor is caller error, which the hub maps to HTTP 400
+	// invalid_cursor rather than 500.
 	raw, err := base64.URLEncoding.DecodeString(cursor)
 	if err != nil {
-		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: base64 decode: %w", store.ErrInvalidInput, err)
+		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: base64 decode: %w", store.ErrInvalidCursor, err)
 	}
 	parts := strings.SplitN(string(raw), ",", 2)
 	if len(parts) != 2 {
-		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: expected 'timestamp,id' format", store.ErrInvalidInput)
+		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: expected 'timestamp,id' format", store.ErrInvalidCursor)
 	}
 	ts, err := time.Parse(time.RFC3339Nano, parts[0])
 	if err != nil {
-		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: parse timestamp: %w", store.ErrInvalidInput, err)
+		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: parse timestamp: %w", store.ErrInvalidCursor, err)
 	}
 	id, err := uuid.Parse(parts[1])
 	if err != nil {
-		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: parse id: %w", store.ErrInvalidInput, err)
+		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: parse id: %w", store.ErrInvalidCursor, err)
 	}
 	return ts, id, nil
 }
@@ -296,23 +323,24 @@ func encodeListCursor(created time.Time, id, binding string) string {
 }
 
 func decodeListCursor(cursor, binding string) (time.Time, uuid.UUID, error) {
-	// Every failure wraps store.ErrInvalidInput: a malformed or mismatched
-	// cursor is caller error, which the hub maps to HTTP 400 rather than 500.
+	// Every failure wraps store.ErrInvalidCursor (and so store.ErrInvalidInput):
+	// a malformed or mismatched cursor is caller error, which the hub maps to
+	// HTTP 400 invalid_cursor rather than 500.
 	raw, err := base64.URLEncoding.DecodeString(cursor)
 	if err != nil {
-		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: base64 decode: %w", store.ErrInvalidInput, err)
+		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: base64 decode: %w", store.ErrInvalidCursor, err)
 	}
 	parts := strings.SplitN(string(raw), ",", 3)
 	if len(parts) < 2 || (binding == "" && len(parts) != 2) || (binding != "" && (len(parts) != 3 || parts[2] != binding)) {
-		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: cursor does not match this list", store.ErrInvalidInput)
+		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: cursor does not match this list", store.ErrInvalidCursor)
 	}
 	ts, err := time.Parse(time.RFC3339Nano, parts[0])
 	if err != nil {
-		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: parse timestamp: %w", store.ErrInvalidInput, err)
+		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: parse timestamp: %w", store.ErrInvalidCursor, err)
 	}
 	id, err := uuid.Parse(parts[1])
 	if err != nil {
-		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: parse id: %w", store.ErrInvalidInput, err)
+		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: parse id: %w", store.ErrInvalidCursor, err)
 	}
 	return ts, id, nil
 }
@@ -377,11 +405,15 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 	if filter.SenderID != "" {
 		query.Where(message.SenderIDEQ(filter.SenderID))
 	}
+	// ParticipantID is recipient_id = X OR sender_id = X. The COUNT uses the
+	// OR directly (it needs no sort), but the page reads each branch as its
+	// own query; see participantPage.
+	var participantBranches []predicate.Message
 	if filter.ParticipantID != "" {
-		query.Where(message.Or(
+		participantBranches = []predicate.Message{
 			message.RecipientIDEQ(filter.ParticipantID),
 			message.SenderIDEQ(filter.ParticipantID),
-		))
+		}
 	}
 	if filter.Sender != "" {
 		query.Where(message.SenderEQ(filter.Sender))
@@ -421,7 +453,11 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 	var totalCount int
 	if !opts.SkipTotalCount {
 		var err error
-		totalCount, err = query.Clone().Count(ctx)
+		countQuery := query.Clone()
+		if participantBranches != nil {
+			countQuery.Where(message.Or(participantBranches...))
+		}
+		totalCount, err = countQuery.Count(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -473,11 +509,20 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 		createdOrder = entsql.OrderAsc()
 		idOrder = entsql.OrderAsc()
 	}
-	entities, err := query.
-		Order(message.ByCreated(createdOrder)).
-		Order(message.ByID(idOrder)).
-		Limit(limit + 1).
-		All(ctx)
+	page := func(q *ent.MessageQuery) ([]*ent.Message, error) {
+		return q.
+			Order(message.ByCreated(createdOrder)).
+			Order(message.ByID(idOrder)).
+			Limit(limit + 1).
+			All(ctx)
+	}
+	var entities []*ent.Message
+	var err error
+	if participantBranches == nil {
+		entities, err = page(query)
+	} else {
+		entities, err = participantPage(query, participantBranches, page, ascending, limit+1)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -496,6 +541,54 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 		result.Items = msgs
 	}
 	return result, nil
+}
+
+// participantPage returns the first n rows, in (created, id) order, of base
+// filtered by any of branches. Each branch is read as its own query, served
+// by its (column, created, id) index in index order, so each one stops after
+// n rows. With the OR in a single query, SQLite plans a multi-index OR plus
+// a temp B-tree sort, which fetches and sorts every row the participant has
+// and is slow for busy agents (ptone/scion#6572). The branches are merged
+// here and rows that match more than one branch are kept once.
+//
+// The merge compares created as time and id as UUID bytes. That is the
+// order the database uses, except for the legacy SQLite rows described in
+// ListMessages, whose stored created text sorts differently.
+func participantPage(
+	base *ent.MessageQuery,
+	branches []predicate.Message,
+	page func(*ent.MessageQuery) ([]*ent.Message, error),
+	ascending bool,
+	n int,
+) ([]*ent.Message, error) {
+	seen := make(map[uuid.UUID]bool)
+	var merged []*ent.Message
+	for _, branch := range branches {
+		rows, err := page(base.Clone().Where(branch))
+		if err != nil {
+			return nil, err
+		}
+		for _, e := range rows {
+			if !seen[e.ID] {
+				seen[e.ID] = true
+				merged = append(merged, e)
+			}
+		}
+	}
+	slices.SortFunc(merged, func(a, b *ent.Message) int {
+		c := a.Created.Compare(b.Created)
+		if c == 0 {
+			c = bytes.Compare(a.ID[:], b.ID[:])
+		}
+		if !ascending {
+			c = -c
+		}
+		return c
+	})
+	if len(merged) > n {
+		merged = merged[:n]
+	}
+	return merged, nil
 }
 
 // MarkMessageRead marks a message as read.
@@ -644,4 +737,22 @@ func (s *MessageStore) CountUnreachableUnbackfilledMessages(ctx context.Context)
 		return 0, mapError(err)
 	}
 	return count, nil
+}
+
+// logDefaultedPending writes the entered-pending line for a row whose writer
+// left DispatchState empty, so the schema default "pending" applied
+// (ptone/scion#4827). Only identifiers and routing fields are logged: never
+// the body, metadata or attachments.
+func (s *MessageStore) logDefaultedPending(msg *store.Message) {
+	log := s.pendingLogger
+	if log == nil {
+		log = slog.Default()
+	}
+	log.Warn(store.MessageEnteredPendingLogMsg,
+		"message_id", msg.ID,
+		"sender", msg.Sender,
+		"recipient", msg.Recipient,
+		"type", messages.LogType(msg.Type),
+		"creation_path", store.MessagePendingPathStoreDefault,
+	)
 }

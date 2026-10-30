@@ -42,6 +42,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
@@ -200,6 +201,7 @@ func attachAutoProvideBroker(t *testing.T, f *projectAgentAuthzFixture) {
 		ProjectID:  f.project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  fixtureProviderCheckout(t),
 		Status:     store.BrokerStatusOnline,
 	}))
 	f.project.DefaultRuntimeBrokerID = broker.ID
@@ -572,6 +574,11 @@ type reincarnateTestDispatcher struct {
 	// HarnessAuth, Image, Profile).
 	reprovisionEcho func(cfg *store.AgentAppliedConfig)
 	startEcho       func(cfg *store.AgentAppliedConfig)
+	// startAgentEcho, when set, runs on a successful start against the
+	// dispatched agent itself, simulating the agent-level echo
+	// applyBrokerResponse writes in place (Template, Runtime,
+	// RuntimeState, ContainerStatus).
+	startAgentEcho func(agent *store.Agent)
 
 	// rerenderErr is returned by every reprovision call after the first:
 	// the worker's best-effort re-render of the previous config
@@ -582,7 +589,33 @@ type reincarnateTestDispatcher struct {
 	moveProvisionErr     error
 	localOnlyDeleteCalls []string // "<brokerID>|<runID>"
 	localOnlyDeleteErr   map[string]error
-	startBrokers         []string
+	// recreatedDeleteCalls records a forced move's rollback deletes
+	// (DispatchAgentDeleteRecreated): "<brokerID>|<projectID>|<runID>".
+	recreatedDeleteCalls []string
+	recreatedDeleteErr   error
+	// recreateFiles, when non-nil, models each broker's files for the
+	// moved agent as a forced move sees them: a fresh-agent-dir provision
+	// to a broker holding some is refused with the broker's 409 (marked
+	// sent); one that proceeds creates them, even when it then fails with
+	// a moveProvisionErr marked sent (a partial provision); a
+	// moveProvisionErr not marked sent is returned before any of this,
+	// as a pre-send failure; a recreated-files delete
+	// removes them, and a localOnly delete does not (it leaves the
+	// workspace a move created on the export).
+	recreateFiles map[string]bool
+	// recreateOwner is the move marker (reincarnation ID) of the files a
+	// forced move's provision created on each broker; files a test put in
+	// recreateFiles itself have none, so a rollback delete is refused with
+	// move_marker_mismatch and removes nothing. moveProvisionFailsBeforeF4
+	// makes a sent moveProvisionErr a refusal from before the broker's
+	// absence check: nothing is created. moveProvisionIDs and
+	// recreatedDeleteIDs record the reincarnation IDs each call carried.
+	recreateOwner              map[string]string
+	moveProvisionFailsBeforeF4 bool
+	moveProvisionIDs           []string
+	recreatedDeleteIDs         []string
+
+	startBrokers []string
 	// runStore, when set, makes DispatchAgentStart mint and record a run
 	// on the row first, like the real dispatcher's beginRun, and record
 	// startPlacement (when set), like a target's start report.
@@ -987,17 +1020,40 @@ func setupCreateAgentProject(t *testing.T, s store.Store) *store.Project {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
+	// The broker has the hub-managed workspace at a local path (a
+	// co-located broker): since ptone/scion#5813 a remote broker that cannot reach the hub's
+	// workspace storage is refused with 409. Tests of that
+	// refusal, and of the CLI workspace bootstrap, clear it
+	// (clearCreateAgentProviderPath).
+	localPath, err := localProjectPath(project.Slug)
+	require.NoError(t, err)
 	provider := &store.ProjectProvider{
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
+		LocalPath:  localPath,
 	}
 	require.NoError(t, s.AddProjectProvider(ctx, provider))
 
 	project.DefaultRuntimeBrokerID = broker.ID
 	require.NoError(t, s.UpdateProject(ctx, project))
 	return project
+}
+
+// clearCreateAgentProviderPath makes the setupCreateAgentServer broker a
+// remote broker without a local path for project: the topology of the CLI
+// workspace bootstrap and of the remote-broker refusal.
+func clearCreateAgentProviderPath(t *testing.T, s store.Store, project *store.Project) {
+	t.Helper()
+	ctx := context.Background()
+	provider, err := s.GetProjectProvider(ctx, project.ID, project.DefaultRuntimeBrokerID)
+	require.NoError(t, err)
+	provider.LocalPath = ""
+	require.NoError(t, s.AddProjectProvider(ctx, provider))
+	got, err := s.GetProjectProvider(ctx, project.ID, project.DefaultRuntimeBrokerID)
+	require.NoError(t, err)
+	require.Empty(t, got.LocalPath, "fixture check: the provider must have no local path")
 }
 
 // postAgentStatusAsAgent POSTs a status update for agent using an agent
@@ -1718,7 +1774,7 @@ func doBrokerSignedRequest(t *testing.T, srv *Server, brokerID string, key []byt
 	if onBehalfOfEmail != "" {
 		req.Header.Set(HeaderOnBehalfOf, "user:"+onBehalfOfEmail)
 	}
-	require.NoError(t, srv.brokerAuthService.SignRequest(req, brokerID, key))
+	require.NoError(t, (&apiclient.HMACAuth{BrokerID: brokerID, SecretKey: key}).ApplyAuth(req))
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	return rec
@@ -3356,10 +3412,14 @@ func setupProjectWithBroker(t *testing.T, s store.Store, projectID, projectName 
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
+	// The broker is remote and serves the hub-managed project from its own
+	// checkout (LocalPath); a remote broker without one is refused at
+	// create (ptone/scion#5813).
 	provider := &store.ProjectProvider{
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  fixtureProviderCheckout(t),
 		Status:     store.BrokerStatusOnline,
 	}
 	require.NoError(t, s.AddProjectProvider(ctx, provider))
@@ -3912,6 +3972,15 @@ type projectAgentAuthzFixture struct {
 func projectAgentAuthzSetup(t *testing.T) *projectAgentAuthzFixture {
 	t.Helper()
 	srv, s := testServer(t)
+	return projectAgentAuthzSetupOn(t, srv, s)
+}
+
+// projectAgentAuthzSetupOn builds the projectAgentAuthzFixture on an existing
+// server and its raw store. Tests that need a store fault wrapper call
+// installStoreFault on srv first, so the wrapper is in place before any
+// audited setup step reads srv.store.
+func projectAgentAuthzSetupOn(t *testing.T, srv *Server, s store.Store) *projectAgentAuthzFixture {
+	t.Helper()
 	ctx := context.Background()
 	f := &projectAgentAuthzFixture{srv: srv, store: s}
 
@@ -5181,17 +5250,66 @@ func (d *reincarnateTestDispatcher) DispatchAgentReprovision(_ context.Context, 
 	}
 	return err
 }
-func (d *reincarnateTestDispatcher) DispatchAgentProvisionForMove(_ context.Context, agent *store.Agent, expect string) error {
+func (d *reincarnateTestDispatcher) DispatchAgentProvisionForMove(_ context.Context, agent *store.Agent, expect, moveID string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.moveProvisionCalls = append(d.moveProvisionCalls, agent.RuntimeBrokerID+"|"+expect)
+	d.moveProvisionIDs = append(d.moveProvisionIDs, moveID)
+	if d.moveProvisionErr != nil && (!errors.Is(d.moveProvisionErr, errProvisionSent) || d.moveProvisionFailsBeforeF4) {
+		// Failed on the hub before the request was sent (the real
+		// dispatcher marks only errors at or after the send), or refused
+		// by the broker before its absence check: nothing is created.
+		return d.moveProvisionErr
+	}
+	if d.recreateFiles != nil && expect == "fresh-agent-dir" {
+		if d.recreateFiles[agent.RuntimeBrokerID] {
+			return provisionSent(&brokerStatusError{StatusCode: http.StatusConflict, Body: freshAgentDirConflictBody})
+		}
+		d.recreateFiles[agent.RuntimeBrokerID] = true
+		if d.recreateOwner == nil {
+			d.recreateOwner = map[string]string{}
+		}
+		d.recreateOwner[agent.RuntimeBrokerID] = moveID
+	}
 	return d.moveProvisionErr
 }
+
+// moveMarkerMismatchBody is the broker's fixed, path-free 409 body for a
+// forced move's rollback delete of files the move did not create.
+const moveMarkerMismatchBody = `{"error":{"code":"move_marker_mismatch","message":"Failed to delete agent: its files on this broker were not created by this move; nothing was removed"}}`
+
+// freshAgentDirConflictBody is the broker's fixed, path-free 409 body for a
+// forced move's provision onto a broker that has files for the agent.
+const freshAgentDirConflictBody = `{"error":{"code":"move_target_not_fresh","message":"Failed to provision moved agent: the agent already has files on this broker; refusing to recreate over them"}}`
+
 func (d *reincarnateTestDispatcher) DispatchAgentDeleteLocalOnly(_ context.Context, agent *store.Agent) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.localOnlyDeleteCalls = append(d.localOnlyDeleteCalls, agent.RuntimeBrokerID+"|"+agent.RunID)
 	return d.localOnlyDeleteErr[agent.RuntimeBrokerID]
+}
+func (d *reincarnateTestDispatcher) DispatchAgentDeleteRecreated(_ context.Context, agent *store.Agent, moveID string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.recreatedDeleteCalls = append(d.recreatedDeleteCalls, agent.RuntimeBrokerID+"|"+agent.ProjectID+"|"+agent.RunID)
+	d.recreatedDeleteIDs = append(d.recreatedDeleteIDs, moveID)
+	if d.recreatedDeleteErr != nil {
+		return d.recreatedDeleteErr
+	}
+	if d.recreateFiles != nil && d.recreateFiles[agent.RuntimeBrokerID] {
+		// The broker removes only files marked by this move.
+		if d.recreateOwner[agent.RuntimeBrokerID] != moveID {
+			return &brokerStatusError{StatusCode: http.StatusConflict, Body: moveMarkerMismatchBody}
+		}
+		delete(d.recreateFiles, agent.RuntimeBrokerID)
+		delete(d.recreateOwner, agent.RuntimeBrokerID)
+	}
+	return nil
+}
+func (d *reincarnateTestDispatcher) recreatedDeletes() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.recreatedDeleteCalls...)
 }
 func (d *reincarnateTestDispatcher) moveSnapshot() (provisions, localDeletes, startBrokers []string) {
 	d.mu.Lock()
@@ -5200,7 +5318,9 @@ func (d *reincarnateTestDispatcher) moveSnapshot() (provisions, localDeletes, st
 }
 func (d *reincarnateTestDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) error {
 	d.mu.Lock()
-	if d.runStore != nil {
+	// A start the hub refused before sending (its run not begun, or the hub
+	// shutting down) records no run, as in production.
+	if d.runStore != nil && !errors.Is(d.startErr, errStartRunNotBegun) && !errors.Is(d.startErr, ErrHubShuttingDown) {
 		runID := fmt.Sprintf("run-%s-%d", agent.RuntimeBrokerID, len(d.startBrokers)+1)
 		if _, err := d.runStore.SetAgentRunID(ctx, agent.ID, runID, nil); err == nil {
 			agent.RunID = runID
@@ -5216,12 +5336,16 @@ func (d *reincarnateTestDispatcher) DispatchAgentStart(ctx context.Context, agen
 	err := d.startErr
 	image := d.startImage
 	echo := d.startEcho
+	agentEcho := d.startAgentEcho
 	d.mu.Unlock()
 	if err == nil && image != "" && agent.AppliedConfig != nil {
 		agent.AppliedConfig.Image = image
 	}
 	if err == nil && echo != nil && agent.AppliedConfig != nil {
 		echo(agent.AppliedConfig)
+	}
+	if err == nil && agentEcho != nil {
+		agentEcho(agent)
 	}
 	return err
 }
@@ -5988,6 +6112,20 @@ func (g *getProjectErrStore) GetProject(ctx context.Context, id string) (*store.
 func (s *countingBrokerLoadStore) UpdateRuntimeBroker(ctx context.Context, broker *store.RuntimeBroker) error {
 	s.updateRuntimeBrokerCalls++
 	return s.Store.UpdateRuntimeBroker(ctx, broker)
+}
+
+// RefreshRuntimeBrokerState is the heartbeat's broker write; a refresh that
+// reports a change and is stored counts as one broker row write.
+func (s *countingBrokerLoadStore) RefreshRuntimeBrokerState(ctx context.Context, id string, refresh func(*store.RuntimeBroker) bool) error {
+	wrote := false
+	err := s.Store.RefreshRuntimeBrokerState(ctx, id, func(b *store.RuntimeBroker) bool {
+		wrote = refresh(b)
+		return wrote
+	})
+	if err == nil && wrote {
+		s.updateRuntimeBrokerCalls++
+	}
+	return err
 }
 
 func (s *countingBrokerLoadStore) GetRuntimeBroker(ctx context.Context, id string) (*store.RuntimeBroker, error) {

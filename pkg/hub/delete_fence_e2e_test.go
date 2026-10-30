@@ -113,12 +113,13 @@ func newFenceE2E(t *testing.T) *fenceE2E {
 
 	mgr := &runLabelManager{}
 	cfg := runtimebroker.DefaultServerConfig()
+	cfg.BrokerAuthEnabled = false // no hub keys here: serve the broker API without auth
 	cfg.BrokerID = "fence-broker"
 	cfg.BrokerName = "fence-broker"
 	brokerNow := &atomic.Pointer[time.Time]{}
 	brokerNow.Store(&t0)
 	cfg.DeleteClock = func() time.Time { return *brokerNow.Load() }
-	broker := runtimebroker.New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	broker := runtimebroker.New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	httpSrv := httptest.NewServer(broker.Handler())
 	t.Cleanup(httpSrv.Close)
 

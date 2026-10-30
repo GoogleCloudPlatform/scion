@@ -69,16 +69,12 @@ func (p *threadGroupEventSpy) take() []threadGroupSpyEvent {
 
 // threadGroupFixture is the inbox fixture (projects A and B, an agent in
 // each, a super-admin, an owner and a member of A) with the webchat store
-// wired, the experiment set and an event spy installed.
+// wired and an event spy installed. No experiment is set: thread groups are
+// always on (ptone/scion#5546).
 type threadGroupFixture struct {
 	*inboxFixture
 	wcs WebChatStore
 	spy *threadGroupEventSpy
-}
-
-func setThreadGroupsExperiment(t *testing.T, srv *Server, enabled bool) {
-	t.Helper()
-	setThreadGroupsExperimentsDoc(t, srv, fmt.Sprintf(`{"overrides":{%q:%t}}`, experiments.ChatThreadGroups, enabled))
 }
 
 // setThreadGroupsExperimentsDoc installs operational settings whose stored
@@ -93,7 +89,7 @@ func setThreadGroupsExperimentsDoc(t *testing.T, srv *Server, raw string) {
 	srv.SetOperationalSettings(ops)
 }
 
-func newThreadGroupFixture(t *testing.T, enabled bool) *threadGroupFixture {
+func newThreadGroupFixture(t *testing.T) *threadGroupFixture {
 	t.Helper()
 	f := &threadGroupFixture{inboxFixture: newInboxFixture(t)}
 	dbProvider, ok := f.s.(interface{ DB() *sql.DB })
@@ -101,7 +97,6 @@ func newThreadGroupFixture(t *testing.T, enabled bool) *threadGroupFixture {
 	f.wcs = NewWebChatStore(dbProvider.DB(), "sqlite3")
 	require.NoError(t, f.wcs.Init())
 	f.srv.SetWebChatStore(f.wcs)
-	setThreadGroupsExperiment(t, f.srv, enabled)
 	grantAgentProjectAccess(t, f.s, f.agentA.ID, f.projA)
 	grantAgentProjectAccess(t, f.s, f.agentB.ID, f.projB)
 	f.spy = &threadGroupEventSpy{}
@@ -137,8 +132,7 @@ func (f *threadGroupFixture) mkGroup(t *testing.T, projectID, name string) *stor
 }
 
 // agentCall sends a request as agent (an agent token of projectID with
-// project:read) to the thread group handlers through their experiment gate,
-// or to handleCreateConversation.
+// project:read) to the thread group handlers or to handleCreateConversation.
 func (f *threadGroupFixture) agentCall(t *testing.T, agentID, projectID, method, path string, body interface{}) *httptest.ResponseRecorder {
 	t.Helper()
 	var raw []byte
@@ -153,11 +147,11 @@ func (f *threadGroupFixture) agentCall(t *testing.T, agentID, projectID, method,
 	rec := httptest.NewRecorder()
 	switch {
 	case strings.HasPrefix(path, "/api/v1/conversations"):
-		f.srv.handleCreateConversation(rec, req) // not gated; threadGroupId checks the flag itself
+		f.srv.handleCreateConversation(rec, req)
 	case strings.HasPrefix(path, "/api/v1/thread-groups/"):
-		f.srv.threadGroupsGate(f.srv.handleThreadGroupRoutes)(rec, req)
+		f.srv.handleThreadGroupRoutes(rec, req)
 	default:
-		f.srv.threadGroupsGate(f.srv.handleThreadGroups)(rec, req)
+		f.srv.handleThreadGroups(rec, req)
 	}
 	return rec
 }
@@ -195,67 +189,67 @@ func threadGroupOps(t *testing.T, projectID string, g *store.ThreadGroup, conv *
 	}
 }
 
-// Flag off: every route is 404, and threadGroupId on create is 400 with
-// nothing minted.
-func TestThreadGroups_FlagOffEveryRoute404(t *testing.T) {
-	f := newThreadGroupFixture(t, false)
-	conv, _ := f.thread(t, f.projA, "flag-off-thread")
-	g := f.mkGroup(t, f.projA, "Flag Off")
+// Thread groups are always on (ptone/scion#5546): a hub whose experiments
+// row still holds an override for a retired name (for example one that
+// turned the former thread groups experiment off before the upgrade) serves
+// every route and files a new conversation into a group.
+func TestThreadGroups_RetiredExperimentOverrideIgnored(t *testing.T) {
+	for _, stored := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stored_%t", stored), func(t *testing.T) {
+			f := newThreadGroupFixture(t)
+			setThreadGroupsExperimentsDoc(t, f.srv, retiredOverridesDoc(t, stored))
+			conv, _ := f.thread(t, f.projA, "override-thread")
+			g := f.mkGroup(t, f.projA, "Override")
 
-	got := threadGroupOps(t, f.projA, g, conv, func(method, path string, body interface{}) *httptest.ResponseRecorder {
-		return f.session(t, f.member, method, path, body)
-	})
-	for op, code := range got {
-		assert.Equal(t, http.StatusNotFound, code, "%s must be 404 while the experiment is off", op)
-	}
-	got = threadGroupOps(t, f.projA, g, conv, func(method, path string, body interface{}) *httptest.ResponseRecorder {
-		return f.agentCall(t, f.agentA.ID, f.projA, method, path, body)
-	})
-	for op, code := range got {
-		assert.Equal(t, http.StatusNotFound, code, "agent %s must be 404 while the experiment is off", op)
-	}
+			got := threadGroupOps(t, f.projA, g, conv, func(method, path string, body interface{}) *httptest.ResponseRecorder {
+				return f.agentCall(t, f.agentA.ID, f.projA, method, path, body)
+			})
+			assert.Equal(t, map[string]int{
+				"list": http.StatusOK, "get": http.StatusOK, "create": http.StatusCreated, "rename": http.StatusOK,
+				"add": http.StatusOK, "remove": http.StatusNoContent, "delete": http.StatusForbidden,
+			}, got)
 
-	rec := f.session(t, f.member, http.MethodPost, "/api/v1/conversations",
-		map[string]string{"displayName": "flag-off-create", "projectId": f.projA, "threadGroupId": g.ID})
-	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "thread groups are not enabled")
-	assertNoConversationNamed(t, f.s, "flag-off-create")
-	assert.Empty(t, f.spy.take())
+			rec := f.session(t, f.member, http.MethodPost, "/api/v1/conversations",
+				map[string]string{"displayName": "override-create", "projectId": f.projA, "threadGroupId": g.ID})
+			require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+			grp, err := f.s.GetThreadGroup(context.Background(), g.ID)
+			require.NoError(t, err)
+			require.Len(t, grp.Members, 1)
+		})
+	}
 }
 
-// A hub built with an injected registry that lacks hub.chat_thread_groups
+// retiredOverridesDoc returns a stored experiments row that sets every
+// retired experiment name to value.
+func retiredOverridesDoc(t *testing.T, value bool) string {
+	t.Helper()
+	retired := experiments.Default().Retired()
+	require.NotEmpty(t, retired)
+	overrides := make(map[string]bool, len(retired))
+	for _, name := range retired {
+		overrides[name] = value
+	}
+	raw, err := json.Marshal(map[string]any{"overrides": overrides})
+	require.NoError(t, err)
+	return string(raw)
+}
+
+// A hub built with an injected registry that has no thread groups entry
 // (as the experiments API tests build one) starts, and the thread group
-// routes fail closed with 404 instead of panicking.
-func TestThreadGroups_RegistryWithoutExperimentStartsAnd404s(t *testing.T) {
+// routes reach their handlers: the collection answers a user's missing
+// projectId with 400, and an unknown group ID is the handler's 404, not the
+// "route not found" of a gate.
+func TestThreadGroups_RegistryWithoutExperimentServesRoutes(t *testing.T) {
 	srv, _ := testServerWithOps(t, testRegistry(t))
-	for _, path := range []string{"/api/v1/thread-groups?projectId=" + uuid.NewString(), "/api/v1/thread-groups/" + uuid.NewString()} {
-		rec := doRequest(t, srv, http.MethodGet, path, nil)
-		assert.Equal(t, http.StatusNotFound, rec.Code, "%s: %s", path, rec.Body.String())
-		assert.Contains(t, rec.Body.String(), "route not found", "%s must be stopped by the gate, not the handler", path)
-	}
-}
 
-// A malformed stored experiments row fails closed for this server-layer
-// experiment (design section 6): every route is 404 and threadGroupId is 400,
-// even though the row also says the experiment is on.
-func TestThreadGroups_MalformedExperimentsRowFailsClosed(t *testing.T) {
-	f := newThreadGroupFixture(t, true)
-	conv, _ := f.thread(t, f.projA, "malformed-thread")
-	g := f.mkGroup(t, f.projA, "Malformed")
-	setThreadGroupsExperimentsDoc(t, f.srv, fmt.Sprintf(`{"overrides":{%q:true,"web.other":"not-a-bool"}}`, experiments.ChatThreadGroups))
-	require.False(t, f.srv.experimentEnabled(experiments.ChatThreadGroups))
-
-	got := threadGroupOps(t, f.projA, g, conv, func(method, path string, body interface{}) *httptest.ResponseRecorder {
-		return f.session(t, f.member, method, path, body)
-	})
-	for op, code := range got {
-		assert.Equal(t, http.StatusNotFound, code, "%s must be 404 with a malformed experiments row", op)
-	}
-	rec := f.session(t, f.member, http.MethodPost, "/api/v1/conversations",
-		map[string]string{"displayName": "malformed-create", "projectId": f.projA, "threadGroupId": g.ID})
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/thread-groups", nil)
 	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-	assertNoConversationNamed(t, f.s, "malformed-create")
-	assert.Empty(t, f.spy.take())
+	assert.Contains(t, rec.Body.String(), "projectId is required")
+
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/thread-groups/"+uuid.NewString(), nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "Thread group not found")
+	assert.NotContains(t, rec.Body.String(), "route not found")
 }
 
 func assertNoConversationNamed(t *testing.T, s store.Store, name string) {
@@ -271,7 +265,7 @@ func assertNoConversationNamed(t *testing.T, s store.Store, name string) {
 // A project member user can do every operation, and each mutation
 // publishes chat.thread_group with the full snapshot.
 func TestThreadGroups_MemberUserFullLifecycle(t *testing.T) {
-	f := newThreadGroupFixture(t, true)
+	f := newThreadGroupFixture(t)
 	conv, topicID := f.thread(t, f.projA, "release-notes")
 	conv2, topic2 := f.thread(t, f.projA, "changelog")
 
@@ -404,7 +398,7 @@ func TestThreadGroups_MemberUserFullLifecycle(t *testing.T) {
 // Adding a thread that is in another group moves it, and both groups are
 // published.
 func TestThreadGroups_AddMovesThreadAndPublishesBothGroups(t *testing.T) {
-	f := newThreadGroupFixture(t, true)
+	f := newThreadGroupFixture(t)
 	conv, _ := f.thread(t, f.projA, "mover")
 	from := f.mkGroup(t, f.projA, "From")
 	to := f.mkGroup(t, f.projA, "To")
@@ -427,7 +421,7 @@ func TestThreadGroups_AddMovesThreadAndPublishesBothGroups(t *testing.T) {
 
 // A same-project agent can do everything except delete (403).
 func TestThreadGroups_SameProjectAgentAllButDelete(t *testing.T) {
-	f := newThreadGroupFixture(t, true)
+	f := newThreadGroupFixture(t)
 	conv, _ := f.thread(t, f.projA, "agent-thread")
 	g := f.mkGroup(t, f.projA, "Agent Work")
 	call := func(method, path string, body interface{}) *httptest.ResponseRecorder {
@@ -455,7 +449,7 @@ func TestThreadGroups_SameProjectAgentAllButDelete(t *testing.T) {
 
 // An agent of another project gets 403 on everything.
 func TestThreadGroups_OtherProjectAgentForbidden(t *testing.T) {
-	f := newThreadGroupFixture(t, true)
+	f := newThreadGroupFixture(t)
 	conv, _ := f.thread(t, f.projA, "victim-thread")
 	g := f.mkGroup(t, f.projA, "Victim")
 
@@ -471,7 +465,7 @@ func TestThreadGroups_OtherProjectAgentForbidden(t *testing.T) {
 
 // A user who is not a project member gets 403 on everything.
 func TestThreadGroups_NonMemberUserForbidden(t *testing.T) {
-	f := newThreadGroupFixture(t, true)
+	f := newThreadGroupFixture(t)
 	conv, _ := f.thread(t, f.projA, "private-thread")
 	g := f.mkGroup(t, f.projA, "Private")
 	outsider := f.plainUser(t)
@@ -488,7 +482,7 @@ func TestThreadGroups_NonMemberUserForbidden(t *testing.T) {
 // A user access token without inbox:write can read but not mutate; with
 // inbox:write it can mutate.
 func TestThreadGroups_TokenWithoutInboxWriteReadsOnly(t *testing.T) {
-	f := newThreadGroupFixture(t, true)
+	f := newThreadGroupFixture(t)
 	conv, _ := f.thread(t, f.projA, "token-thread")
 	g := f.mkGroup(t, f.projA, "Tokens")
 
@@ -520,7 +514,7 @@ func TestThreadGroups_TokenWithoutInboxWriteReadsOnly(t *testing.T) {
 // conversations, #general and deleted threads; a threadId resolves within
 // the group's project only.
 func TestThreadGroups_AddThreadValidation(t *testing.T) {
-	f := newThreadGroupFixture(t, true)
+	f := newThreadGroupFixture(t)
 	ctx := context.Background()
 	g := f.mkGroup(t, f.projA, "Validation")
 	path := "/api/v1/thread-groups/" + g.ID + "/threads"
@@ -590,7 +584,7 @@ func TestThreadGroups_AddThreadValidation(t *testing.T) {
 
 // Reads skip a member whose topic was deleted behind the API's back.
 func TestThreadGroups_ReadSkipsDeletedTopicMember(t *testing.T) {
-	f := newThreadGroupFixture(t, true)
+	f := newThreadGroupFixture(t)
 	ctx := context.Background()
 	g := f.mkGroup(t, f.projA, "Skips")
 	live, _ := f.thread(t, f.projA, "live-thread")
@@ -608,7 +602,7 @@ func TestThreadGroups_ReadSkipsDeletedTopicMember(t *testing.T) {
 
 // The 100 groups per project and 500 threads per group limits are 422.
 func TestThreadGroups_Limits422(t *testing.T) {
-	f := newThreadGroupFixture(t, true)
+	f := newThreadGroupFixture(t)
 	ctx := context.Background()
 	for i := 0; i < store.MaxThreadGroupsPerProject; i++ {
 		f.mkGroup(t, f.projA, fmt.Sprintf("group-%03d", i))
@@ -633,7 +627,7 @@ func TestThreadGroups_Limits422(t *testing.T) {
 // threadGroupId on POST /api/v1/conversations: a valid group files the new
 // conversation; a wrong-project or missing group creates nothing.
 func TestCreateConversation_WithThreadGroup(t *testing.T) {
-	f := newThreadGroupFixture(t, true)
+	f := newThreadGroupFixture(t)
 	g := f.mkGroup(t, f.projA, "Filed")
 	foreign := f.mkGroup(t, f.projB, "Foreign")
 
@@ -708,7 +702,7 @@ func (f *threadGroupFixture) deleteTopic(t *testing.T, topicID string) *httptest
 // thread group, gets the message-mode denial (the join check runs before the
 // threadGroupId validation), and nothing is minted.
 func TestCreateConversation_ModeDenialBeforeThreadGroupValidation(t *testing.T) {
-	f := newThreadGroupFixture(t, true)
+	f := newThreadGroupFixture(t)
 	ctx := context.Background()
 	quiet := &store.Agent{ID: uuid.NewString(), Slug: "tg-quiet-agent", Name: "TG Quiet Agent", ProjectID: f.projA,
 		Phase: "running", MessageMode: store.MessageModeNone}
@@ -727,7 +721,7 @@ func TestCreateConversation_ModeDenialBeforeThreadGroupValidation(t *testing.T) 
 // handleTopicDelete takes the deleted thread out of its group and
 // publishes the group.
 func TestTopicDelete_RemovesThreadGroupMember(t *testing.T) {
-	f := newThreadGroupFixture(t, true)
+	f := newThreadGroupFixture(t)
 	ctx := context.Background()
 	g := f.mkGroup(t, f.projA, "Cleanup")
 	conv, topicID := f.thread(t, f.projA, "doomed-thread")
@@ -742,19 +736,4 @@ func TestTopicDelete_RemovesThreadGroupMember(t *testing.T) {
 	assert.Equal(t, g.ID, ev[0].group.ID)
 	assert.Equal(t, ThreadGroupEventUpdated, ev[0].action)
 	assert.Empty(t, ev[0].group.Threads)
-}
-
-// With the experiment off the cleanup still runs, but nothing is published.
-func TestTopicDelete_FlagOffStillCleansUpSilently(t *testing.T) {
-	f := newThreadGroupFixture(t, false)
-	ctx := context.Background()
-	g := f.mkGroup(t, f.projA, "Quiet")
-	conv, topicID := f.thread(t, f.projA, "quiet-thread")
-	f.thread(t, f.projA, "quiet-survivor")
-	require.NoError(t, f.s.SetThreadGroupMember(ctx, g.ID, conv.ID, f.admin))
-
-	rec := f.deleteTopic(t, topicID)
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.Zero(t, threadGroupMemberCount(t, f.s, conv.ID))
-	assert.Empty(t, f.spy.take())
 }

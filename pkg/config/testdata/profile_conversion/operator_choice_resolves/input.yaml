@@ -13,10 +13,10 @@ profiles:
   fast:
     runtime: cluster
     image_registry: reg.example/fast
-    shared_dir_storage_backend: nfs
+    shared_dir_storage_class: standard-rwx
     shared_dir_size: 40Gi
     clone_depth: full
   slow:
     runtime: cluster
     image_registry: reg.example/slow
-    shared_dir_storage_backend: local
+    shared_dir_storage_class: standard-rwo

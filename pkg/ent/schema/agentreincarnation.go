@@ -96,6 +96,14 @@ func (AgentReincarnation) Fields() []ent.Field {
 		// "failed:<reason>"; "" until attempted.
 		field.String("source_cleanup").
 			Optional(),
+		// transfer_mode is how a cross-broker move carries the workspace:
+		// "export" (the same directory, through a shared NFS export) or
+		// "recreate" (provisioned fresh on the target, `--force`). Empty
+		// for a plain reincarnation and for a move recorded before this
+		// field existed, which was always an export move.
+		field.String("transfer_mode").
+			Optional().
+			Immutable(),
 	}
 }
 

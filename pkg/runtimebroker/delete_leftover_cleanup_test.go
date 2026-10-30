@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -70,11 +71,11 @@ func newCleanupTestServer(t *testing.T, mgr agent.Manager) (*Server, string) {
 	}
 	t.Cleanup(func() { _ = os.Chdir(origWd) })
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
-	return New(cfg, mgr, rt), home
+	return New(cfg, mgr, rt, config.RuntimeBuildRecord{}), home
 }
 
 func assertCleanupCalls(t *testing.T, got []cleanupCall, want ...cleanupCall) {

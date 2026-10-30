@@ -17,6 +17,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -992,12 +993,10 @@ func newFakeAgentPodWithHomeDirAnnotation(name, homeDirPath string) *corev1.Pod 
 // the sync call to actually run.
 func TestSync_RejectsPersistedWorkspacePath(t *testing.T) {
 	for _, tt := range []struct {
-		name      string
-		direction SyncDirection
-		bad       string
+		name string
+		bad  string
 	}{
-		{name: "SyncTo with root", direction: SyncTo, bad: "/"},
-		{name: "SyncFrom with root", direction: SyncFrom, bad: "/"},
+		{name: "root", bad: "/"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			clientset := k8sfake.NewClientset()
@@ -1011,7 +1010,7 @@ func TestSync_RejectsPersistedWorkspacePath(t *testing.T) {
 			client := k8s.NewTestClient(fc, clientset)
 			r := NewKubernetesRuntime(client)
 
-			err := r.Sync(context.Background(), "test-agent", tt.direction)
+			err := r.Sync(context.Background(), "test-agent", SyncTo)
 			if err == nil {
 				t.Fatal("expected Sync to fail for a persisted workspace path of '/'")
 			}
@@ -1019,6 +1018,22 @@ func TestSync_RejectsPersistedWorkspacePath(t *testing.T) {
 				t.Errorf("expected the rejection to come from workspace source validation, got: %v", err)
 			}
 		})
+	}
+}
+
+// Sync from an agent is not supported on Kubernetes: it fails with a clear
+// error before making any API request.
+func TestSync_FromUnsupported(t *testing.T) {
+	rt, cs, _ := newTestK8sRuntime()
+	err := rt.Sync(context.Background(), "test-agent", SyncFrom)
+	if !errors.Is(err, errK8sSyncFromUnsupported) {
+		t.Fatalf("err = %v, want errK8sSyncFromUnsupported", err)
+	}
+	if !strings.Contains(err.Error(), "not supported") {
+		t.Errorf("err = %v, want a not-supported message", err)
+	}
+	if acts := cs.Actions(); len(acts) != 0 {
+		t.Errorf("Sync from made API requests: %v", acts)
 	}
 }
 
@@ -1046,14 +1061,11 @@ func TestSync_RejectsPersistedHomeDirPath(t *testing.T) {
 	}
 
 	for _, tt := range []struct {
-		name      string
-		direction SyncDirection
-		bad       string
+		name string
+		bad  string
 	}{
-		{name: "SyncTo with root", direction: SyncTo, bad: "/"},
-		{name: "SyncFrom with root", direction: SyncFrom, bad: "/"},
-		{name: "SyncTo with $HOME", direction: SyncTo, bad: home},
-		{name: "SyncFrom with $HOME", direction: SyncFrom, bad: home},
+		{name: "root", bad: "/"},
+		{name: "$HOME", bad: home},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			clientset := k8sfake.NewClientset()
@@ -1067,7 +1079,7 @@ func TestSync_RejectsPersistedHomeDirPath(t *testing.T) {
 			client := k8s.NewTestClient(fc, clientset)
 			r := NewKubernetesRuntime(client)
 
-			err := r.Sync(context.Background(), "test-agent", tt.direction)
+			err := r.Sync(context.Background(), "test-agent", SyncTo)
 			if err == nil {
 				t.Fatalf("expected Sync to fail for a persisted home directory path of %q", tt.bad)
 			}
@@ -1254,5 +1266,27 @@ func TestBuildPod_NK0_LegacyPlacementUnchanged(t *testing.T) {
 	}
 	if string(got) != string(want) {
 		t.Fatalf("pod spec differs from today's:\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// TestKubernetesRuntime_CopiesAgentHome (ptone/scion#5368): the Kubernetes
+// runtime declares CopiedAgentHomeRuntime, so Start keeps its agents at
+// starting until Run returns. Every other runtime does not declare it.
+func TestKubernetesRuntime_CopiesAgentHome(t *testing.T) {
+	if !CopiesAgentHome(&KubernetesRuntime{}) {
+		t.Error("CopiesAgentHome(KubernetesRuntime) = false, want true")
+	}
+	for name, rt := range map[string]Runtime{
+		"docker":           &DockerRuntime{},
+		"podman":           &PodmanRuntime{},
+		"apple":            &AppleContainerRuntime{},
+		"cloudrun":         &CloudRunRuntime{},
+		"cloudrun-sandbox": &CloudRunSandboxRuntime{},
+		"substrate":        &SubstrateRuntime{},
+		"mock":             &MockRuntime{},
+	} {
+		if CopiesAgentHome(rt) {
+			t.Errorf("CopiesAgentHome(%s) = true, want false", name)
+		}
 	}
 }

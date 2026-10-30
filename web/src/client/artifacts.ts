@@ -67,6 +67,11 @@ export interface Artifact {
   expiresAt?: string;
   createdAt: string;
   updatedAt: string;
+  /**
+   * The hub found the artifact's owner gone (a deleted agent or user;
+   * ptone/scion#4529). The artifact is otherwise unchanged.
+   */
+  ownerDeleted?: boolean;
 }
 
 export interface ArtifactResponse {
@@ -89,6 +94,24 @@ export interface ArtifactResponse {
    * super-admins. Never set with canManage.
    */
   canGrantReview?: boolean;
+  /**
+   * On a GET: the caller may share the artifact: canManage, or a steward of
+   * an artifact owned by an agent (design D25, ptone/scion#5144), who may
+   * change its expiry, revoke its links, remove grants and delete it, but
+   * not give admin access or move it.
+   */
+  canShare?: boolean;
+  /**
+   * On a GET, for a steward without canManage: the steward clause,
+   * "project_owner" or "delegator".
+   */
+  shareAuthority?: string;
+  /**
+   * On a GET: the caller may delete the artifact: the decision DELETE makes
+   * for the same request (the owner, an admin grantee, a steward, or an
+   * owner or admin of its home project).
+   */
+  canRetire?: boolean;
   /**
    * On a GET: the artifact's home project was deleted. Advisory: absent when
    * the hub cannot tell.
@@ -322,6 +345,176 @@ export async function listProjectArtifacts(
   return okJSON(
     await apiFetch(`/api/v1/artifacts?${params.toString()}`, { signal: opts.signal ?? null })
   );
+}
+
+// ---------------------------------------------------------------------------
+// Where the caller may publish (the hub Artifacts page's New artifact,
+// ptone/scion#5477)
+// ---------------------------------------------------------------------------
+
+/** The hub's global project's slug (pkg/hub globalProjectSlug). */
+export const GLOBAL_PROJECT_SLUG = 'global';
+
+/** A project offered as the home of a new artifact. */
+export interface ProjectChoice {
+  id: string;
+  name: string;
+  slug: string;
+}
+
+/** Projects requested per page when listing the projects the caller can see. */
+const READABLE_PROJECTS_PAGE = 200;
+/** Pages followed at most: the list stops at this many projects. */
+const READABLE_PROJECTS_MAX_PAGES = 10;
+/** The most projects listReadableProjects returns. */
+export const READABLE_PROJECTS_CAP = READABLE_PROJECTS_PAGE * READABLE_PROJECTS_MAX_PAGES;
+/** canCreate checks in flight at once. */
+export const PUBLISH_CHECK_CONCURRENCY = 6;
+
+/** The projects the caller can see, and whether the list stopped at the cap. */
+export interface ReadableProjects {
+  projects: ProjectChoice[];
+  truncated: boolean;
+}
+
+interface ProjectsPage {
+  projects?: Array<{ id: string; name?: string; slug?: string }>;
+  nextCursor?: string;
+}
+
+function toChoices(page: ProjectsPage): ProjectChoice[] {
+  return (page.projects ?? [])
+    .filter((p) => !!p.id)
+    .map((p) => ({ id: p.id, name: p.name || p.slug || p.id, slug: p.slug ?? '' }));
+}
+
+/**
+ * The hub's global project, when it exists and the caller can see it: one
+ * exact lookup by slug (GET /api/v1/projects?slug=global), so it never
+ * depends on paging. The project list is newest first, and global, made
+ * when the hub starts, is among the oldest.
+ */
+export async function findGlobalProject(signal?: AbortSignal): Promise<ProjectChoice | null> {
+  const params = new URLSearchParams({ slug: GLOBAL_PROJECT_SLUG, limit: '1' });
+  const page = await okJSON<ProjectsPage>(
+    await apiFetch(`/api/v1/projects?${params.toString()}`, { signal: signal ?? null })
+  );
+  return toChoices(page).find((p) => p.slug === GLOBAL_PROJECT_SLUG) ?? null;
+}
+
+/**
+ * The projects the caller can see (GET /api/v1/projects, paged), by name,
+ * leaving out the project with id skip. Not mine=true: on the hub that
+ * means projects the caller owns, and a member may publish too
+ * (agent-create.ts has the same note). canCreate decides; over-listing only
+ * costs checks. The list stops at READABLE_PROJECTS_CAP projects and says
+ * so (truncated).
+ */
+export async function listReadableProjects(
+  opts: { skip?: string | undefined; signal?: AbortSignal | undefined } = {}
+): Promise<ReadableProjects> {
+  const out: ProjectChoice[] = [];
+  let cursor = '';
+  for (let page = 0; page < READABLE_PROJECTS_MAX_PAGES; page++) {
+    const params = new URLSearchParams({ limit: String(READABLE_PROJECTS_PAGE) });
+    if (cursor) params.set('cursor', cursor);
+    const body = await okJSON<ProjectsPage>(
+      await apiFetch(`/api/v1/projects?${params.toString()}`, { signal: opts.signal ?? null })
+    );
+    out.push(...toChoices(body).filter((p) => p.id !== opts.skip));
+    cursor = body.nextCursor ?? '';
+    if (!cursor) break;
+  }
+  return { projects: sortProjectChoices(out), truncated: cursor !== '' };
+}
+
+/** Orders choices global first, then by name. */
+export function sortProjectChoices(projects: ProjectChoice[]): ProjectChoice[] {
+  return [...projects].sort((a, b) => {
+    const ga = a.slug === GLOBAL_PROJECT_SLUG;
+    const gb = b.slug === GLOBAL_PROJECT_SLUG;
+    if (ga !== gb) return ga ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+}
+
+/**
+ * Whether the caller may publish artifacts in project: the list's
+ * canCreate, which is the decision publish makes (pkg/artifacts canCreateIn).
+ * A list the caller may not read (403, 404) answers false; other failures
+ * throw. (A hub with no artifact routes at all also answers 404, but the
+ * callers only run with hub.artifacts on.)
+ */
+export async function canPublishIn(projectId: string, signal?: AbortSignal): Promise<boolean> {
+  const params = new URLSearchParams({ mine: '1', scope: projectId, limit: '1' });
+  const res = await apiFetch(`/api/v1/artifacts?${params.toString()}`, {
+    suppressAccessDeniedToast: true,
+    signal: signal ?? null,
+  });
+  if (res.status === 403 || res.status === 404) return false;
+  const body = await okJSON<ArtifactListResponse>(res);
+  return body.canCreate === true;
+}
+
+/**
+ * Checks projects in order, PUBLISH_CHECK_CONCURRENCY at a time, and
+ * returns the publishable ones in the order given. onUpdate gets that list
+ * so far (in order, only checked projects) each time a check passes, so a
+ * caller can render it progressively. With firstOnly no new check starts
+ * after the first pass, and the result holds that one project. Any failed
+ * check fails the whole call, so a hub error never looks like "nowhere to
+ * publish"; after a failure, or once signal aborts, no check starts and no
+ * update is reported. signal also cancels the checks in flight.
+ */
+export async function filterPublishable(
+  projects: ProjectChoice[],
+  opts: {
+    firstOnly?: boolean;
+    check?: (id: string, signal?: AbortSignal) => Promise<boolean>;
+    onUpdate?: (publishable: ProjectChoice[]) => void;
+    signal?: AbortSignal;
+  } = {}
+): Promise<ProjectChoice[]> {
+  const check = opts.check ?? canPublishIn;
+  const signal = opts.signal;
+  const allowed: boolean[] = projects.map(() => false);
+  const passed = (): ProjectChoice[] => projects.filter((_, i) => allowed[i]);
+  let next = 0;
+  let stop = false;
+  const halted = (): boolean => stop || signal?.aborted === true;
+  const worker = async (): Promise<void> => {
+    while (!halted() && next < projects.length) {
+      const i = next++;
+      let ok: boolean;
+      try {
+        ok = await check(projects[i].id, signal);
+      } catch (err) {
+        stop = true;
+        throw err;
+      }
+      if (!ok || halted()) continue;
+      allowed[i] = true;
+      if (opts.firstOnly) stop = true;
+      opts.onUpdate?.(passed());
+    }
+  };
+  const workers = Math.min(PUBLISH_CHECK_CONCURRENCY, projects.length);
+  await Promise.all(Array.from({ length: workers }, () => worker()));
+  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+  const out = passed();
+  return opts.firstOnly ? out.slice(0, 1) : out;
+}
+
+/**
+ * The project preselected for a new artifact: the global project when it
+ * is publishable (canCreate: owner, member with publish rights, or a role
+ * that grants artifact.create), or the only
+ * choice when there is exactly one; otherwise none.
+ */
+export function defaultProjectChoice(publishable: ProjectChoice[]): string {
+  const global = publishable.find((p) => p.slug === GLOBAL_PROJECT_SLUG);
+  if (global) return global.id;
+  return publishable.length === 1 ? publishable[0].id : '';
 }
 
 /** One page of an artifact's ready versions, newest first. */
@@ -801,6 +994,29 @@ export async function revokeLink(id: string, linkId: string): Promise<void> {
     method: 'DELETE',
   });
   if (!res.ok) throw new Error(await extractApiError(res, `HTTP ${res.status}`));
+}
+
+/**
+ * Deletes an artifact (DELETE /api/v1/artifacts/{id}, ptone/scion#4529). The
+ * hub answers 204; a 403 (the caller may read but not delete it) or a 404
+ * (gone, or moved meanwhile) throws with the hub's message.
+ */
+export async function deleteArtifact(id: string): Promise<void> {
+  const res = await apiFetch(artifactPath(id), { method: 'DELETE' });
+  if (!res.ok) {
+    throw new ArtifactDeleteError(await extractApiError(res, `HTTP ${res.status}`), res.status);
+  }
+}
+
+/** A refused or failed delete, with the hub's HTTP status. */
+export class ArtifactDeleteError extends Error {
+  constructor(
+    message: string,
+    readonly status: number
+  ) {
+    super(message);
+    this.name = 'ArtifactDeleteError';
+  }
 }
 
 /** Lists an artifact's grants, the home project's first. */

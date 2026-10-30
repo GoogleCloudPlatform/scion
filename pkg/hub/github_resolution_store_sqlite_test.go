@@ -29,17 +29,13 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubresolutioncache"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 )
 
 // TestGitHubResolutionStore_GetPut tests basic cache operations.
 func TestGitHubResolutionStore_GetPut(t *testing.T) {
-	client, err := entc.OpenSQLite("file:ent?mode=memory&cache=shared", entc.PoolConfig{})
-	require.NoError(t, err)
-	defer client.Close() //nolint:errcheck
-
+	client := enttest.NewClient(t)
 	ctx := context.Background()
-	err = entc.AutoMigrate(ctx, client)
-	require.NoError(t, err)
 
 	store := NewGitHubResolutionStore(client)
 
@@ -47,7 +43,7 @@ func TestGitHubResolutionStore_GetPut(t *testing.T) {
 	entry := GitHubCacheEntry{
 		CommitSHA: "abcdef1234567890abcdef1234567890abcdef12",
 		FileEntries: []GitHubFileEntry{
-			{Path: "SKILL.md", URL: "https://raw.githubusercontent.com/test/repo/main/SKILL.md", Hash: "sha256:abc", Size: 100},
+			{Path: "SKILL.md", URL: "https://raw.githubusercontent.com/test/repo/main/SKILL.md", Hash: "sha256:abc", Size: 100, Mode: "0755"},
 		},
 		BundleHash:  "sha256:bundlehash",
 		TokenScope:  "public",
@@ -56,7 +52,7 @@ func TestGitHubResolutionStore_GetPut(t *testing.T) {
 	}
 
 	// Put entry
-	err = store.Put(ctx, cacheKey, entry)
+	err := store.Put(ctx, cacheKey, entry)
 	require.NoError(t, err)
 
 	// Get entry (should hit)
@@ -66,6 +62,7 @@ func TestGitHubResolutionStore_GetPut(t *testing.T) {
 	require.Equal(t, entry.CommitSHA, retrieved.CommitSHA)
 	require.Equal(t, entry.BundleHash, retrieved.BundleHash)
 	require.Len(t, retrieved.FileEntries, 1)
+	require.Equal(t, "0755", retrieved.FileEntries[0].Mode, "the file mode must survive the JSON column")
 
 	// Get non-existent entry (should miss)
 	_, hit, err = store.Get(ctx, "nonexistent")
@@ -82,20 +79,15 @@ func TestGitHubResolutionStore_GetPut(t *testing.T) {
 // against SQLite — see TestGitHubResolutionStore_Put_ConflictTargetInSQL for
 // the generated-SQL assertion that would catch it on a dialect that doesn't).
 func TestGitHubResolutionStore_Put_UpsertUpdatesExistingRow(t *testing.T) {
-	client, err := entc.OpenSQLite("file:ent?mode=memory&cache=shared", entc.PoolConfig{})
-	require.NoError(t, err)
-	defer client.Close() //nolint:errcheck
-
+	client := enttest.NewClient(t)
 	ctx := context.Background()
-	err = entc.AutoMigrate(ctx, client)
-	require.NoError(t, err)
 
 	store := NewGitHubResolutionStore(client)
 	cacheKey := "upsert-key"
 
 	first := GitHubCacheEntry{
 		CommitSHA:   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com/a", Hash: "sha256:a", Size: 1}},
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com/a", Hash: "sha256:a", Size: 1, Mode: "0644"}},
 		BundleHash:  "sha256:first",
 		TokenScope:  "public",
 		ExpiresAt:   time.Now().Add(30 * time.Minute),
@@ -116,9 +108,9 @@ func TestGitHubResolutionStore_Put_UpsertUpdatesExistingRow(t *testing.T) {
 
 	// Exactly one row for this cache_key: a conflict-target-less upsert that
 	// instead fell back to always inserting (the failure mode this guards
-	// against) would leave two. Filtered by cache_key, not a bare Count(),
-	// since this DSN (file:ent?mode=memory&cache=shared) is shared across the
-	// package's tests and could otherwise pick up rows left by another test.
+	// against) would leave two. The test has its own database, so a bare
+	// Count() would also work today; the cache_key filter keeps the assertion
+	// about this key alone if a stray row ever lands in the table.
 	count, err := client.GitHubResolutionCache.Query().
 		Where(githubresolutioncache.CacheKeyEQ(cacheKey)).
 		Count(ctx)
@@ -142,7 +134,11 @@ func TestGitHubResolutionStore_Put_UpsertUpdatesExistingRow(t *testing.T) {
 // on every dialect, SQLite included.
 func TestGitHubResolutionStore_Put_ConflictTargetInSQL(t *testing.T) {
 	var captured []string
-	client, err := entc.OpenSQLite("file:ent?mode=memory&cache=shared", entc.PoolConfig{},
+	// enttest.NewClient takes no ent options, and this test needs ent.Log and
+	// ent.Debug to capture the SQL, so it opens its own database: in-memory,
+	// named after the test, and pinned to one connection like enttest's.
+	dsn := "file:" + strings.ReplaceAll(t.Name(), "/", "_") + "?mode=memory&cache=shared"
+	client, err := entc.OpenSQLite(dsn, entc.PoolConfig{MaxOpenConns: 1},
 		ent.Log(func(args ...any) { captured = append(captured, fmt.Sprint(args...)) }),
 		ent.Debug())
 	require.NoError(t, err)
@@ -154,7 +150,7 @@ func TestGitHubResolutionStore_Put_ConflictTargetInSQL(t *testing.T) {
 	store := NewGitHubResolutionStore(client)
 	entry := GitHubCacheEntry{
 		CommitSHA:   "abcdef1234567890abcdef1234567890abcdef12",
-		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:abc", Size: 100}},
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:abc", Size: 100, Mode: "0644"}},
 		BundleHash:  "sha256:bundlehash",
 		TokenScope:  "public",
 		ExpiresAt:   time.Now().Add(30 * time.Minute),
@@ -184,20 +180,15 @@ func TestGitHubResolutionStore_Put_ConflictTargetInSQL(t *testing.T) {
 
 // TestGitHubResolutionStore_Expiration tests TTL expiration.
 func TestGitHubResolutionStore_Expiration(t *testing.T) {
-	client, err := entc.OpenSQLite("file:ent?mode=memory&cache=shared", entc.PoolConfig{})
-	require.NoError(t, err)
-	defer client.Close() //nolint:errcheck
-
+	client := enttest.NewClient(t)
 	ctx := context.Background()
-	err = entc.AutoMigrate(ctx, client)
-	require.NoError(t, err)
 
 	store := NewGitHubResolutionStore(client)
 
 	cacheKey := "test-expired-key"
 	entry := GitHubCacheEntry{
 		CommitSHA:   "abcdef1234567890abcdef1234567890abcdef12",
-		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:abc", Size: 100}},
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:abc", Size: 100, Mode: "0644"}},
 		BundleHash:  "sha256:bundlehash",
 		TokenScope:  "public",
 		ExpiresAt:   time.Now().Add(-1 * time.Hour), // Already expired
@@ -205,7 +196,7 @@ func TestGitHubResolutionStore_Expiration(t *testing.T) {
 	}
 
 	// Put expired entry
-	err = store.Put(ctx, cacheKey, entry)
+	err := store.Put(ctx, cacheKey, entry)
 	require.NoError(t, err)
 
 	// Get should miss (expired)
@@ -216,13 +207,8 @@ func TestGitHubResolutionStore_Expiration(t *testing.T) {
 
 // TestGitHubResolutionStore_PurgeExpired tests TTL eviction.
 func TestGitHubResolutionStore_PurgeExpired(t *testing.T) {
-	client, err := entc.OpenSQLite("file:ent?mode=memory&cache=shared", entc.PoolConfig{})
-	require.NoError(t, err)
-	defer client.Close() //nolint:errcheck
-
+	client := enttest.NewClient(t)
 	ctx := context.Background()
-	err = entc.AutoMigrate(ctx, client)
-	require.NoError(t, err)
 
 	store := NewGitHubResolutionStore(client)
 
@@ -231,20 +217,20 @@ func TestGitHubResolutionStore_PurgeExpired(t *testing.T) {
 	expiredKey := "expired-key"
 	expiredEntry := GitHubCacheEntry{
 		CommitSHA:   "abcdef1234567890abcdef1234567890abcdef12",
-		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:abc", Size: 100}},
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:abc", Size: 100, Mode: "0644"}},
 		BundleHash:  "sha256:bundlehash",
 		TokenScope:  "public",
 		ExpiresAt:   time.Now().Add(-(agent.MaxResolutionStaleAge + time.Hour)),
 		OriginalURI: "gh://expired/repo/skill",
 	}
-	err = store.Put(ctx, expiredKey, expiredEntry)
+	err := store.Put(ctx, expiredKey, expiredEntry)
 	require.NoError(t, err)
 
 	// Add valid entry
 	validKey := "valid-key"
 	validEntry := GitHubCacheEntry{
 		CommitSHA:   "1234567890abcdef1234567890abcdef12345678",
-		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:def", Size: 200}},
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:def", Size: 200, Mode: "0644"}},
 		BundleHash:  "sha256:bundlehash2",
 		TokenScope:  "public",
 		ExpiresAt:   time.Now().Add(1 * time.Hour),
@@ -278,12 +264,8 @@ func TestGitHubResolutionStore_PurgeExpired(t *testing.T) {
 // row past MaxResolutionStaleAge confirms PurgeExpired still deletes rows
 // that are genuinely beyond anyone's stale horizon.
 func TestGitHubResolutionStore_PurgeExpired_KeepsStaleServableBranchRow(t *testing.T) {
-	client, err := entc.OpenSQLite("file:ent?mode=memory&cache=shared", entc.PoolConfig{})
-	require.NoError(t, err)
-	defer client.Close() //nolint:errcheck
-
+	client := enttest.NewClient(t)
 	ctx := context.Background()
-	require.NoError(t, entc.AutoMigrate(ctx, client))
 
 	store := NewGitHubResolutionStore(client)
 
@@ -294,7 +276,7 @@ func TestGitHubResolutionStore_PurgeExpired_KeepsStaleServableBranchRow(t *testi
 	staleServableKey := "stale-servable-key"
 	require.NoError(t, store.Put(ctx, staleServableKey, GitHubCacheEntry{
 		CommitSHA:   "1111111111111111111111111111111111111111",
-		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:a", Size: 1}},
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:a", Size: 1, Mode: "0644"}},
 		BundleHash:  "sha256:stale-servable",
 		TokenScope:  "public",
 		ExpiresAt:   time.Now().Add(-time.Hour),
@@ -306,7 +288,7 @@ func TestGitHubResolutionStore_PurgeExpired_KeepsStaleServableBranchRow(t *testi
 	tooOldKey := "too-old-key"
 	require.NoError(t, store.Put(ctx, tooOldKey, GitHubCacheEntry{
 		CommitSHA:   "2222222222222222222222222222222222222222",
-		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:b", Size: 1}},
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:b", Size: 1, Mode: "0644"}},
 		BundleHash:  "sha256:too-old",
 		TokenScope:  "public",
 		ExpiresAt:   time.Now().Add(-(agent.MaxResolutionStaleAge + time.Hour)),
@@ -344,11 +326,8 @@ func TestGitHubResolutionStore_PurgeExpired_KeepsStaleServableBranchRow(t *testi
 // minute gap between MaxJitteredTTL(30m) and the unjittered 30m is what the
 // one-minute margins below are sized to land on either side of.
 func TestGitHubResolutionStore_StaleCutoff_AccountsForTTLJitter(t *testing.T) {
-	client, err := entc.OpenSQLite("file:ent?mode=memory&cache=shared", entc.PoolConfig{})
-	require.NoError(t, err)
-	defer client.Close() //nolint:errcheck
+	client := enttest.NewClient(t)
 	ctx := context.Background()
-	require.NoError(t, entc.AutoMigrate(ctx, client))
 
 	store := NewGitHubResolutionStore(client)
 	cutoff := time.Now().Add(agent.MaxJitteredTTL(agent.DefaultResolutionCacheTTL) - agent.MaxResolutionStaleAge)
@@ -356,7 +335,7 @@ func TestGitHubResolutionStore_StaleCutoff_AccountsForTTLJitter(t *testing.T) {
 	justInsideKey := "just-inside"
 	require.NoError(t, store.Put(ctx, justInsideKey, GitHubCacheEntry{
 		CommitSHA:   "3333333333333333333333333333333333333333",
-		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:c", Size: 1}},
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:c", Size: 1, Mode: "0644"}},
 		BundleHash:  "sha256:just-inside",
 		TokenScope:  "public",
 		ExpiresAt:   cutoff.Add(time.Minute),
@@ -366,7 +345,7 @@ func TestGitHubResolutionStore_StaleCutoff_AccountsForTTLJitter(t *testing.T) {
 	justOutsideKey := "just-outside"
 	require.NoError(t, store.Put(ctx, justOutsideKey, GitHubCacheEntry{
 		CommitSHA:   "4444444444444444444444444444444444444444",
-		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:d", Size: 1}},
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:d", Size: 1, Mode: "0644"}},
 		BundleHash:  "sha256:just-outside",
 		TokenScope:  "public",
 		ExpiresAt:   cutoff.Add(-time.Minute),

@@ -104,9 +104,6 @@ async function setupChat(page: Page): Promise<void> {
     route.fulfill({ json: { agents: [], humans: [] } })
   );
 
-  // User prefs: one server-side thread group ("My Group") containing the
-  // grouped thread. Collapse state itself is NOT part of this payload — it
-  // is the client-only localStorage state under test.
   await page.route('**/api/v1/chat/user-prefs', (route) => {
     if (route.request().method() === 'PUT') {
       void route.fulfill({ json: {} });
@@ -118,12 +115,28 @@ async function setupChat(page: Page): Promise<void> {
         threadSortMode: 'activity',
         spaceOrder: '[]',
         threadOrder: '{}',
-        threadGroups: JSON.stringify({
-          [projectId]: [{ id: groupId, name: 'My Group', threadIds: [groupedThreadId] }],
-        }),
+        threadGroups: '{}',
       },
     });
   });
+
+  // One project thread group ("My Group") containing the grouped thread.
+  // Collapse state itself is NOT part of this payload — it is the
+  // client-only localStorage state under test.
+  await page.route(/\/api\/v1\/thread-groups(\?|$)/, (route) =>
+    route.fulfill({
+      json: {
+        threadGroups: [
+          {
+            id: groupId,
+            projectId,
+            name: 'My Group',
+            threads: [{ threadId: groupedThreadId, conversationId: `conv-${groupedThreadId}` }],
+          },
+        ],
+      },
+    })
+  );
 
   await page.route('**/api/v1/chat/dms**', (route) => {
     if (route.request().url().includes('/unread')) {

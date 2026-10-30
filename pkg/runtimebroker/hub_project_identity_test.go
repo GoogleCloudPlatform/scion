@@ -76,13 +76,6 @@ func writeBrokerRecord(t *testing.T, content string) {
 	require.NoError(t, config.WriteWorkspaceRecord(path, content))
 }
 
-func writeHubRecord(t *testing.T, content string) {
-	t.Helper()
-	path, err := config.HubWorkspaceRecordPath(brokerTestSlug)
-	require.NoError(t, err)
-	require.NoError(t, config.WriteWorkspaceRecord(path, content))
-}
-
 // brokerConfigRoot resolves the workspace's project config directory from
 // its .scion entry, as project resolution does.
 func brokerConfigRoot(t *testing.T, workspace string) string {
@@ -128,32 +121,6 @@ func TestRecordHubProjectIdentity_BrokerCopyUsesHubIDDir(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, hubIdentityMatching, outcome)
 	})
-}
-
-func TestRecordHubProjectIdentity_HubOwnWorkspaceUnchanged(t *testing.T) {
-	// A hub on this host (in the same process or a separate process with
-	// the same HOME) records its own workspaces under hub-workspaces.
-	for _, tc := range []struct {
-		name, brokerRecord string
-	}{
-		{"without broker record", ""},
-		{"with broker record", brokerTestHubID},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			identityForms(t, func(t *testing.T, markerForm bool) {
-				workspace, previous := seedBrokerWorkspace(t, brokerTestLocalID, markerForm)
-				writeHubRecord(t, brokerTestHubID)
-				if tc.brokerRecord != "" {
-					writeBrokerRecord(t, tc.brokerRecord)
-				}
-
-				outcome, err := recordHubProjectIdentity(workspace, brokerTestSlug, brokerTestHubID, notBusy)
-				require.NoError(t, err)
-				assert.Equal(t, hubIdentityNotBrokerCopy, outcome)
-				assert.Equal(t, previous, brokerConfigRoot(t, workspace))
-			})
-		})
-	}
 }
 
 func TestRecordHubProjectIdentity_RequiresExactBrokerRecord(t *testing.T) {
@@ -268,7 +235,7 @@ func TestOtherProjectAgentsInUse(t *testing.T) {
 		{"agent with empty ID", "self", []api.AgentInfo{{Phase: "running"}}, nil, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			srv := New(DefaultServerConfig(), &mockManager{agents: tc.agents, listErr: tc.err}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+			srv := New(DefaultServerConfig(), &mockManager{agents: tc.agents, listErr: tc.err}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 			got, _ := srv.otherProjectAgentsInUse(context.Background(), brokerTestHubID, tc.agentID)
 			assert.Equal(t, tc.want, got)
 		})
@@ -292,20 +259,12 @@ func TestRecordBrokerWorkspaceCopy(t *testing.T) {
 		require.NoError(t, err)
 		assert.NoFileExists(t, path)
 	})
-	t.Run("hub workspace on this host", func(t *testing.T) {
-		t.Setenv("HOME", t.TempDir())
-		writeHubRecord(t, brokerTestHubID)
-		require.NoError(t, recordBrokerWorkspaceCopy(brokerTestSlug, brokerTestHubID, false))
-		path, err := config.BrokerWorkspaceRecordPath(brokerTestSlug)
-		require.NoError(t, err)
-		assert.NoFileExists(t, path)
-	})
 }
 
 func TestAlignHubManagedProjectIdentity_StartPathUsesHubIDDir(t *testing.T) {
 	workspace, _ := seedBrokerWorkspace(t, brokerTestLocalID, false)
 	writeBrokerRecord(t, brokerTestHubID)
-	srv := New(DefaultServerConfig(), &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(DefaultServerConfig(), &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 
 	srv.alignHubManagedProjectIdentity(context.Background(), "agent-1", workspace, brokerTestSlug, brokerTestHubID)
 
@@ -382,22 +341,38 @@ func TestCreateAgent_NoBrokerRecordWhenDownloadFails(t *testing.T) {
 	assert.NoFileExists(t, brokerRecordPath(t))
 }
 
-func TestCreateAgent_HubWorkspaceKeepsIdentityAndGetsNoBrokerRecord(t *testing.T) {
+// TestCreateAgent_ExistingWorkspaceIsNotBootstrapped (ptone/scion#5815):
+// a project workspace that already exists
+// on the broker when the create arrives is never overwritten from the
+// uploaded files. Nothing is downloaded, its identity entry is kept, no
+// broker record is written, and the create answers with
+// bootstrapSkippedWarning.
+func TestCreateAgent_ExistingWorkspaceIsNotBootstrapped(t *testing.T) {
 	srv := newTestServer(t)
 	workspace, previous := seedBrokerWorkspace(t, brokerTestLocalID, true)
-	writeHubRecord(t, brokerTestHubID)
 	scionPath := filepath.Join(workspace, config.DotScion)
 	before, err := os.ReadFile(scionPath)
 	require.NoError(t, err)
 
-	w := createWithWorkspaceDownload(t, srv, downloadOK)
+	downloaded := false
+	w := createWithWorkspaceDownload(t, srv, func(ctx context.Context, bucket, prefix, localPath string) error {
+		downloaded = true
+		return downloadOK(ctx, bucket, prefix, localPath)
+	})
 	require.Less(t, w.Code, 300, w.Body.String())
 
+	assert.False(t, downloaded, "an existing project workspace is not downloaded into")
+	assert.NoFileExists(t, filepath.Join(workspace, "downloaded.txt"))
 	after, err := os.ReadFile(scionPath)
 	require.NoError(t, err)
-	assert.Equal(t, string(before), string(after), "the hub workspace marker is not rewritten")
+	assert.Equal(t, string(before), string(after), "the workspace marker is not rewritten")
 	assert.Equal(t, previous, brokerConfigRoot(t, workspace))
 	assert.NoFileExists(t, brokerRecordPath(t))
+
+	var resp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Agent)
+	assert.Contains(t, resp.Agent.Warnings, bootstrapSkippedWarning)
 }
 
 func TestRecordHubProjectIdentity_SymlinkedProjectDirSkips(t *testing.T) {
@@ -441,7 +416,7 @@ func TestAlignHubManagedProjectIdentity_FailureLogDescribesErrorWithoutPath(t *t
 	require.NoError(t, os.Remove(filepath.Join(scionPath, "project-id")))
 	require.NoError(t, os.MkdirAll(filepath.Join(scionPath, "project-id", "x"), 0o755))
 
-	srv := New(DefaultServerConfig(), &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(DefaultServerConfig(), &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	logs := captureLifecycleLog(srv)
 	srv.alignHubManagedProjectIdentity(context.Background(), "agent-1", workspace, brokerTestSlug, brokerTestHubID)
 
@@ -478,7 +453,7 @@ func TestAlignHubManagedProjectIdentity_UnexpectedFormLogOmitsRecordedValue(t *t
 	scionPath := filepath.Join(workspace, config.DotScion)
 	require.NoError(t, config.WriteProjectID(scionPath, "../../other"))
 
-	srv := New(DefaultServerConfig(), &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(DefaultServerConfig(), &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	logs := captureLifecycleLog(srv)
 	srv.alignHubManagedProjectIdentity(context.Background(), "agent-1", workspace, brokerTestSlug, brokerTestHubID)
 
@@ -498,4 +473,43 @@ func TestRecordHubProjectIdentity_UnreadableIdentityIsFailure(t *testing.T) {
 	_, err := recordHubProjectIdentity(workspace, brokerTestSlug, brokerTestHubID, notBusy)
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, config.ErrInvalidProjectID)
+}
+
+// TestBootstrapSkipsExistingWorkspace: only a project-level (slug)
+// bootstrap whose project path createAgent checked at admission and found
+// existing is skipped; a per-agent bootstrap (no slug) and a request that
+// names its project path (the global project: path and slug, never
+// checked at admission) are always applied.
+func TestBootstrapSkipsExistingWorkspace(t *testing.T) {
+	base := CreateAgentRequest{WorkspaceStoragePath: "workspaces/p/a"}
+	for _, tc := range []struct {
+		name string
+		req  func() CreateAgentRequest
+		want bool
+	}{
+		{"per-agent bootstrap", func() CreateAgentRequest { r := base; return r }, false},
+		{"slug, existed at admission", func() CreateAgentRequest {
+			r := base
+			r.ProjectSlug, r.workspaceAdmissionChecked = "p", true
+			return r
+		}, true},
+		{"slug, absent at admission", func() CreateAgentRequest {
+			r := base
+			r.ProjectSlug, r.workspaceAdmissionChecked, r.workspaceAbsentAtAdmission = "p", true, true
+			return r
+		}, false},
+		{"global project: path and slug, not checked", func() CreateAgentRequest {
+			r := base
+			r.ProjectSlug, r.ProjectPath = "global", "/home/u/.scion"
+			return r
+		}, false},
+		{"no bootstrap", func() CreateAgentRequest {
+			r := CreateAgentRequest{ProjectSlug: "p", workspaceAdmissionChecked: true}
+			return r
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, bootstrapSkipsExistingWorkspace(tc.req()))
+		})
+	}
 }

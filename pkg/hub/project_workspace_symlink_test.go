@@ -447,6 +447,64 @@ func TestSymlink_SharedDirBaseIsSymlink(t *testing.T) {
 	outside.assertIntact(t, before)
 }
 
+// The workspace base gets the same guard. Uploads and writes create the
+// workspace when it is absent, so that a first write materializes it; that
+// must not extend to adopting a symlink left in its place, because opening a
+// root on a link follows it and everything below would then be confined to
+// the link's target. Every verb of the file API and the archive is driven
+// against a workspace that is itself a link, and each must refuse.
+func TestSymlink_WorkspaceBaseIsSymlink(t *testing.T) {
+	srv, _ := testServer(t)
+	outside := newOutsideTree(t)
+	project, workspacePath := createTestHubManagedProject(t, srv, "Symlink WS Base")
+
+	// Stand the whole workspace up as a link to somewhere else.
+	require.NoError(t, os.MkdirAll(filepath.Dir(workspacePath), 0755))
+	require.NoError(t, os.RemoveAll(workspacePath))
+	require.NoError(t, os.Symlink(outside.dir, workspacePath))
+
+	filesURL := fmt.Sprintf("/api/v1/projects/%s/workspace/files", project.ID)
+	archiveURL := fmt.Sprintf("/api/v1/projects/%s/workspace/archive", project.ID)
+	before := outside.snapshot(t)
+
+	// Reading the listing must not enumerate the link's target.
+	rec := doRequest(t, srv, http.MethodGet, filesURL, nil)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, "list: %s", rec.Body.String())
+	assertNotLeaked(t, rec)
+	assert.NotContains(t, rec.Body.String(), "victim.txt", "the listing enumerated the link target")
+
+	// Nor may a single file be read out of it.
+	rec = doRequest(t, srv, http.MethodGet, filesURL+"/secret.txt", nil)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, "download: %s", rec.Body.String())
+	assertNotLeaked(t, rec)
+
+	// Nor archived: zip entry names are stored uncompressed, so a followed
+	// link would show its file names in the body.
+	rec = doRequest(t, srv, http.MethodGet, archiveURL, nil)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, "archive: %s", rec.Body.String())
+	assertNotLeaked(t, rec)
+	assert.NotContains(t, rec.Body.String(), "victim.txt", "the archive enumerated the link target")
+
+	// Nor written into. PUT and POST are the verbs that may create the
+	// workspace, so they are the ones that would adopt the link.
+	rec = doRequest(t, srv, http.MethodPut, filesURL+"/planted.txt",
+		ProjectWorkspaceWriteRequest{Content: "should never land"})
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, "write: %s", rec.Body.String())
+
+	rec = doMultipartRequest(t, srv, http.MethodPost, filesURL,
+		map[string][]byte{"uploaded.txt": []byte("should never land")})
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, "upload: %s", rec.Body.String())
+
+	// Nor deleted from.
+	rec = doRequest(t, srv, http.MethodDelete, filesURL+"/victim.txt", nil)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, "delete: %s", rec.Body.String())
+
+	outside.assertIntact(t, before)
+	fi, err := os.Lstat(workspacePath)
+	require.NoError(t, err)
+	assert.NotZero(t, fi.Mode()&os.ModeSymlink, "the workspace link should be left as it was")
+}
+
 // Reading a shared directory that does not exist yet must not bring it into
 // being. Browsing is not a provisioning operation, and creating the directory
 // meant the hub reached along a path it had not established was safe.

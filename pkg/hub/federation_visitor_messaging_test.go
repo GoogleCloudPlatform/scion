@@ -46,6 +46,8 @@ var expectedVisitorSubRoutes = []struct{ pattern, subPath, method string }{
 	{"/api/v1/chat/conversations/", "{dmKey}/messages", http.MethodGet},
 	{"/api/v1/chat/conversations/", "{dmKey}/read", http.MethodGet},
 	{"/api/v1/chat/conversations/", "{dmKey}/read", http.MethodPost},
+	{"/api/v1/projects/", "{projectId}/agents", http.MethodGet},
+	{"/api/v1/projects/", "{projectId}/agents/{agentId}", http.MethodGet},
 }
 
 func TestVisitorSubRoutes_AdmittedSetIsPinned(t *testing.T) {

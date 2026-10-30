@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -115,10 +116,12 @@ func pathStrictlyUnder(target, root string) bool {
 // agent directories.
 //
 // Guards: the path must pass nfsProjectPathGuard. On disk, the subpath root
-// must resolve (through any symlinks) to a directory strictly under the
-// resolved share host base, and the project directory itself must be a
-// real directory, not a symlink. Anything else is refused with an error and
-// nothing is removed.
+// is opened by the layout authority's confined walk
+// (projectfs.Layout.OpenProjectTree): no component of it may be a symlink
+// or a non-directory, so only the canonical <host base>/<subpath_root> is
+// used. The project directory itself must be a real directory, not a
+// symlink, and it is removed by name through the opened root. Anything else
+// is refused with an error and nothing is removed.
 //
 // Idempotent: a missing project directory, subpath root or share host base
 // is success (nothing to remove).
@@ -137,53 +140,55 @@ func CleanupNFSProject(cfg *config.V1NFSConfig, projectID string) error {
 		return fmt.Errorf("CleanupNFSProject: %w: %w", ErrNFSCleanupRefused, err)
 	}
 
-	// Resolve symlinks on the share base and the project's parent so a
-	// symlinked subpath root cannot redirect the removal outside the share.
-	realBase, err := filepath.EvalSymlinks(hostBase)
-	if errors.Is(err, os.ErrNotExist) {
-		slog.Debug("CleanupNFSProject: share host base does not exist; nothing to remove",
-			"project_id", projectID, "host_base", hostBase)
-		return nil
-	}
+	// The project tree is removed through the subpath root opened by the
+	// layout authority's confined walk (projectfs.Layout.OpenProjectTree):
+	// every component below the share's host base is opened without
+	// following a symlink, so only the canonical
+	// <host base>/<subpath_root>/<projectID> can be removed, and the removal
+	// acts by name through that root, never by a path string.
+	layout, err := config.NFSLayout(cfg)
 	if err != nil {
-		return fmt.Errorf("CleanupNFSProject: resolve share host base: %w", err)
+		return fmt.Errorf("CleanupNFSProject: %w: %w", ErrNFSCleanupRefused, err)
 	}
-	realParent, err := filepath.EvalSymlinks(filepath.Dir(projectDir))
-	if errors.Is(err, os.ErrNotExist) {
+	if layout.HostBase != hostBase {
+		return fmt.Errorf("CleanupNFSProject: %w: layout host base %q is not %q", ErrNFSCleanupRefused, layout.HostBase, hostBase)
+	}
+	parent, name, err := layout.OpenProjectTree(projectID)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		slog.Debug("CleanupNFSProject: share host base or subpath root does not exist; nothing to remove",
+			"project_id", projectID, "path", projectDir)
 		return nil
+	case errors.Is(err, shareddirs.ErrUnconfinedPath):
+		return fmt.Errorf("CleanupNFSProject: %w: %w", ErrNFSCleanupRefused, err)
+	case err != nil:
+		return fmt.Errorf("CleanupNFSProject: open subpath root: %w", err)
 	}
-	if err != nil {
-		return fmt.Errorf("CleanupNFSProject: resolve subpath root: %w", err)
-	}
-	if !pathStrictlyUnder(realParent, realBase) {
-		return fmt.Errorf("CleanupNFSProject: %w: subpath root resolves to %q, outside the share %q", ErrNFSCleanupRefused, realParent, realBase)
-	}
-	target := filepath.Join(realParent, filepath.Base(projectDir))
-	if !pathStrictlyUnder(target, realBase) {
-		return fmt.Errorf("CleanupNFSProject: %w: %q is not under the share %q", ErrNFSCleanupRefused, target, realBase)
-	}
+	defer func() { _ = parent.Close() }()
 
-	info, err := os.Lstat(target)
-	if errors.Is(err, os.ErrNotExist) {
+	info, err := parent.Lstat(name)
+	if errors.Is(err, fs.ErrNotExist) {
 		slog.Debug("CleanupNFSProject: project subtree does not exist (already cleaned)",
 			"project_id", projectID, "path", projectDir)
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("CleanupNFSProject: stat %s: %w", target, err)
+		return fmt.Errorf("CleanupNFSProject: stat %s: %w", projectDir, err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return fmt.Errorf("CleanupNFSProject: %w: %s is not a directory (mode %s)", ErrNFSCleanupRefused, target, info.Mode().Type())
+		return fmt.Errorf("CleanupNFSProject: %w: %s is not a directory (mode %s)", ErrNFSCleanupRefused, projectDir, info.Mode().Type())
 	}
 
 	slog.Info("CleanupNFSProject: removing project subtree",
-		"project_id", projectID, "path", target)
-	// os.RemoveAll unlinks symlinks inside the tree without following them.
-	if err := os.RemoveAll(target); err != nil {
-		return fmt.Errorf("CleanupNFSProject: remove %s: %w", target, err)
+		"project_id", projectID, "path", projectDir)
+	// Root.RemoveAll stays inside the opened subpath root: an entry that is
+	// swapped for a symlink after the Lstat above is removed as a link, and
+	// nothing outside the root is reached.
+	if err := parent.RemoveAll(name); err != nil {
+		return fmt.Errorf("CleanupNFSProject: remove %s: %w", projectDir, err)
 	}
 	slog.Info("CleanupNFSProject: project subtree removed",
-		"project_id", projectID, "path", target)
+		"project_id", projectID, "path", projectDir)
 	return nil
 }
 

@@ -27,7 +27,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -105,8 +107,29 @@ func (s *Server) wireAgentDelegation() {
 			return s.isTransportIdentity(email)
 		},
 		standing: s.agentStanding,
+		policy:   s.agentDelegationPolicyNarrowing,
 		now:      time.Now,
 	}
+}
+
+// agentDelegationPolicyNarrowing returns the hub's narrowing of the agent
+// delegation policy (the agent_delegation_policy operational settings
+// section). A hub without DB-backed settings narrows nothing. A stored
+// section the code cannot read is an error, and every caller denies on it.
+func (s *Server) agentDelegationPolicyNarrowing() (opsettings.AgentDelegationPolicySettings, error) {
+	ops := s.GetOperationalSettings()
+	if ops == nil {
+		return opsettings.AgentDelegationPolicySettings{}, nil
+	}
+	return ops.AgentDelegationPolicy()
+}
+
+// agentDelegableUnder reports whether permissionID may be delegated under a
+// grant of boundary kind kind: it is in the code-owned policy
+// (permissions.AgentDelegableRegistry) and the hub setting does not remove
+// it. The setting can only remove (.design/agent-delegation.md §10, §13).
+func agentDelegableUnder(narrowing opsettings.AgentDelegationPolicySettings, permissionID string, kind permissions.BoundaryKind) bool {
+	return permissions.AgentDelegable(permissionID, kind) && !narrowing.Removes(string(kind), permissionID)
 }
 
 // agentDelegationAudience is this hub's delegated-credential audience:

@@ -24,6 +24,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
@@ -77,7 +78,7 @@ func newDiscoveryTestServer(t *testing.T, defaultRuntimeName string) *Server {
 
 	cfg := DefaultServerConfig()
 	rt := &runtime.MockRuntime{NameFunc: func() string { return defaultRuntimeName }}
-	return New(cfg, &filteringMockManager{}, rt)
+	return New(cfg, &filteringMockManager{}, rt, config.RuntimeBuildRecord{})
 }
 
 func auxKeys(s *Server) []string {
@@ -119,10 +120,10 @@ runtimes:
 
 	rtA := fakeKubernetesRuntime("cluster-a", "ns-a")
 	rtB := fakeKubernetesRuntime("cluster-b", "ns-b")
-	srv.resolveAuxiliaryRuntime = stubResolver(t, map[string]runtime.Runtime{
+	srv.resolveAuxiliaryRuntime = withoutRecord(stubResolver(t, map[string]runtime.Runtime{
 		"aux-a": rtA,
 		"aux-b": rtB,
-	})
+	}))
 
 	srv.discoverAuxiliaryRuntimesForProjects([]string{projectDir})
 
@@ -172,10 +173,10 @@ runtimes:
     namespace: ns-a
 `)
 
-	srv.resolveAuxiliaryRuntime = stubResolver(t, map[string]runtime.Runtime{
+	srv.resolveAuxiliaryRuntime = withoutRecord(stubResolver(t, map[string]runtime.Runtime{
 		"aux-a":     fakeKubernetesRuntime("cluster-a", "ns-a"),
 		"aux-a-dup": fakeKubernetesRuntime("cluster-a", "ns-a"),
-	})
+	}))
 
 	srv.discoverAuxiliaryRuntimesForProjects([]string{projectDir})
 
@@ -213,12 +214,12 @@ runtimes:
 	// Docker identity is always the bare type name regardless of Host (see
 	// auxiliaryRuntimeIdentity), so this identity equals the MockRuntime
 	// default's.
-	srv.resolveAuxiliaryRuntime = func(_, _, profileFlag string) runtime.Runtime {
+	srv.resolveAuxiliaryRuntime = withoutRecord(func(_, _, profileFlag string) runtime.Runtime {
 		if profileFlag == "default-profile" {
 			return &runtime.DockerRuntime{}
 		}
 		return &runtime.ErrorRuntime{Err: fmt.Errorf("stub: profile %q not under test", profileFlag)}
-	}
+	})
 
 	srv.discoverAuxiliaryRuntimesForProjects([]string{projectDir})
 
@@ -255,10 +256,10 @@ runtimes:
     namespace: ns-a
 `)
 
-	srv.resolveAuxiliaryRuntime = stubResolver(t, map[string]runtime.Runtime{
+	srv.resolveAuxiliaryRuntime = withoutRecord(stubResolver(t, map[string]runtime.Runtime{
 		"aux-k8s":        fakeKubernetesRuntime("cluster-a", "ns-a"),
 		"aux-kubernetes": fakeKubernetesRuntime("cluster-a", "ns-a"),
-	})
+	}))
 
 	srv.discoverAuxiliaryRuntimesForProjects([]string{projectDir})
 
@@ -278,7 +279,7 @@ func TestDiscoverAuxiliaryRuntimes_DifferentInstanceOfDefaultTypeStillRegisters(
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", "")
 	defaultRT := fakeKubernetesRuntime("cluster-default", "ns-default")
-	srv := New(DefaultServerConfig(), &filteringMockManager{}, defaultRT)
+	srv := New(DefaultServerConfig(), &filteringMockManager{}, defaultRT, config.RuntimeBuildRecord{})
 
 	projectDir := t.TempDir()
 	writeProjectSettings(t, projectDir, `schema_version: "1"
@@ -298,10 +299,10 @@ runtimes:
     namespace: ns-other
 `)
 
-	srv.resolveAuxiliaryRuntime = stubResolver(t, map[string]runtime.Runtime{
+	srv.resolveAuxiliaryRuntime = withoutRecord(stubResolver(t, map[string]runtime.Runtime{
 		"same-as-default":   fakeKubernetesRuntime("cluster-default", "ns-default"),
 		"different-cluster": fakeKubernetesRuntime("cluster-other", "ns-other"),
-	})
+	}))
 
 	srv.discoverAuxiliaryRuntimesForProjects([]string{projectDir})
 
@@ -334,9 +335,9 @@ runtimes:
     host: unix:///var/run/docker.sock
 `)
 
-	srv.resolveAuxiliaryRuntime = stubResolver(t, map[string]runtime.Runtime{
+	srv.resolveAuxiliaryRuntime = withoutRecord(stubResolver(t, map[string]runtime.Runtime{
 		"explicit-host": &runtime.DockerRuntime{Host: "unix:///var/run/docker.sock"},
-	})
+	}))
 
 	srv.discoverAuxiliaryRuntimesForProjects([]string{projectDir})
 
@@ -379,10 +380,10 @@ runtimes:
 
 	for i := 0; i < 10; i++ {
 		srv := newDiscoveryTestServer(t, "docker")
-		srv.resolveAuxiliaryRuntime = stubResolver(t, map[string]runtime.Runtime{
+		srv.resolveAuxiliaryRuntime = withoutRecord(stubResolver(t, map[string]runtime.Runtime{
 			"aux-a": instanceA,
 			"aux-b": instanceB,
-		})
+		}))
 		srv.discoverAuxiliaryRuntimesForProjects([]string{projectDir})
 
 		keys := auxKeys(srv)
@@ -448,7 +449,7 @@ runtimes:
 	var first []string
 	for i := 0; i < 10; i++ {
 		srv := newDiscoveryTestServer(t, "docker")
-		srv.resolveAuxiliaryRuntime = stubResolver(t, byProfile)
+		srv.resolveAuxiliaryRuntime = withoutRecord(stubResolver(t, byProfile))
 		srv.discoverAuxiliaryRuntimesForProjects([]string{projectDir})
 
 		keys := auxKeys(srv)
@@ -480,7 +481,7 @@ func TestDiscoverAuxiliaryRuntimes_UnresolvedProfileLogLevel(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	s := newDiscoveryTestServer(t, "docker")
-	s.resolveAuxiliaryRuntime = stubResolver(t, nil) // every profile fails to resolve
+	s.resolveAuxiliaryRuntime = withoutRecord(stubResolver(t, nil)) // every profile fails to resolve
 	projectDir := filepath.Join(t.TempDir(), ".scion")
 	writeProjectSettings(t, projectDir, `schema_version: "1"
 active_profile: local

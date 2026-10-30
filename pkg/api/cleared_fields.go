@@ -16,6 +16,7 @@ package api
 
 import (
 	"reflect"
+	"sort"
 	"strings"
 )
 
@@ -102,4 +103,61 @@ func ApplyClearedFields(cfg *ScionConfig, paths []string, inherit *ScionConfig) 
 		}
 	}
 	return ignored
+}
+
+// rerenderableConfigKeys are the top-level ScionConfig json keys whose
+// values provisioning renders into files in the agent home (instructions,
+// system prompt, installed skills, the services file), so a start applies
+// a change to them only by rendering those files again. A
+// ScionConfig.ChangedFields entry names one of them.
+var rerenderableConfigKeys = map[string]bool{
+	"system_prompt":      true,
+	"agent_instructions": true,
+	"skills":             true,
+	"services":           true,
+}
+
+// RerenderableConfigKeys returns the keys a ScionConfig.ChangedFields entry
+// may name, sorted.
+func RerenderableConfigKeys() []string {
+	out := make([]string, 0, len(rerenderableConfigKeys))
+	for k := range rerenderableConfigKeys {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// RerenderableConfigKey reports whether key is a provision-rendered config
+// key (see RerenderableConfigKeys).
+func RerenderableConfigKey(key string) bool {
+	return rerenderableConfigKeys[key]
+}
+
+// RerenderConfigKeys returns the provision-rendered keys a start with the
+// hub inline config cfg re-renders: those cfg.ChangedFields lists, and
+// those cfg.ClearedFields lists (a cleared value is rendered again from
+// the template). Entries that are not rerenderable are dropped. The result
+// is sorted and nil when empty.
+func RerenderConfigKeys(cfg *ScionConfig) []string {
+	if cfg == nil {
+		return nil
+	}
+	set := map[string]bool{}
+	for _, list := range [][]string{cfg.ChangedFields, cfg.ClearedFields} {
+		for _, k := range list {
+			if rerenderableConfigKeys[k] {
+				set[k] = true
+			}
+		}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

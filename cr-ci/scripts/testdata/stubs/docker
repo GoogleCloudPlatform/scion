@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Test stub for docker: records argv and the stdin of "login".
+set -u
+calls="$STUB_DIR/calls"
+mkdir -p "$calls"
+n=$(find "$calls" -name '*.args' | wc -l)
+id=$(printf '%04d' $((n + 1)))
+printf '%s\0' docker "$@" >"$calls/$id.args"
+# Record the builder selection of "build" calls.
+if [[ ${1:-} == build ]]; then
+  printf 'DOCKER_BUILDKIT=%s\n' "${DOCKER_BUILDKIT:-}" >"$calls/$id.env"
+fi
+case " $* " in
+  *" version "*) echo "${STUB_DOCKER_VERSION:-24.0.7}" ;;
+  *" login "*) cat >"$calls/$id.stdin" ;;
+esac
+exit 0

@@ -12,6 +12,8 @@
   "include": [
     "./agent-store-count/*.ts",
     "./artifacts-access/*.ts",
+    "./artifacts-agent-owned/*.ts",
+    "./artifacts-review/*.ts",
     "./chat/*.ts",
     "./chat-file-preview/*.ts",
     "./chat-mobile/*.ts",
@@ -22,7 +24,9 @@
     "./terminal-pane/*.ts",
     "./terminal-workspace/*.ts",
     "./test-hub-banner/*.ts",
+    "./broker-area/*.ts",
     "./test-identity-session/*.ts",
+    "./page-policy/*.ts",
     "./iap-driver/*.ts",
     "./iap-journey/*.ts",
     "./harness-selftest/*.ts",

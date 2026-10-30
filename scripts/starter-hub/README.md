@@ -28,8 +28,8 @@ file paths from two primary variables:
 | `MACHINE_TYPE` | *(derived)* | Compute machine type to use (overrides `SIZE_CHOICE`) |
 | `CERT_EMAIL` | *(none, required)* | Contact address Let's Encrypt uses for certificate notices, for example `admin@example.com`. `gce-certs.sh` and `gce-demo-deploy.sh` stop with an error if it is empty (unless `SKIP_TLS=true`). |
 | `DNS_ZONE_DESCRIPTION` | `Scion Hub zone for <CERT_DOMAIN>` | Description `gce-certs.sh` sets on a new Cloud DNS zone |
-| `SKIP_TLS` | `false` | Set to `true` for an internal deployment without certificates: `gce-demo-deploy.sh` skips `gce-certs.sh`, and `gce-start-hub.sh` skips the Caddy/TLS step (same as `--no-tls`). Nothing then creates a DNS record, so `HUB_DOMAIN` must resolve to the VM through your own DNS, or set `HUB_BASE_URL` to an address agents can reach. |
-| `HUB_BASE_URL` | `https://<HUB_DOMAIN>`, or `http://<HUB_DOMAIN>:8080` with `SKIP_TLS=true` | Base URL `gce-start-hub.sh --full` writes into the systemd unit as `SCION_SERVER_BASE_URL`. A `SCION_SERVER_BASE_URL` in `hub.env` takes precedence. Behind an upstream TLS terminator, use the `https://` URL that clients use. |
+| `SKIP_TLS` | `false` | Set to `true` for a Hub behind an upstream TLS terminator: `gce-demo-deploy.sh` skips `gce-certs.sh`, and `gce-start-hub.sh` skips the Caddy/TLS step (same as `--no-tls`). The base URL that takes effect (a `SCION_SERVER_BASE_URL` in `hub.env`, which must agree with `HUB_BASE_URL` if both are set, else `HUB_BASE_URL`) must then be the terminator's `https://` URL: both scripts stop before provisioning or uploading anything otherwise, because the Hub refuses to start with an `http` base URL on a non-loopback listener. Nothing creates a DNS record in this mode. |
+| `HUB_BASE_URL` | `https://<HUB_DOMAIN>`; with `SKIP_TLS=true`, required (`https://`) unless `hub.env` sets an `https://` `SCION_SERVER_BASE_URL` | Base URL `gce-start-hub.sh --full` writes into the systemd unit as `SCION_SERVER_BASE_URL`. A `SCION_SERVER_BASE_URL` in `hub.env` takes precedence. Behind an upstream TLS terminator, use the `https://` URL that clients use. |
 | `HEALTH_CHECK_INSECURE` | `false` | Set to `true` to skip TLS certificate verification in the final HTTPS health check (same as `--insecure-health-check`). Only for a self-signed or test certificate. |
 
 To stand up a second hub (e.g., "staging"):
@@ -97,11 +97,13 @@ To also re-upload config files, update systemd/Caddy, and refresh GKE credential
 ./scripts/starter-hub/gce-start-hub.sh --full
 ```
 
-For an internal deployment without certificates, skip the Caddy/TLS step
-(no Caddyfile, no Caddy install, no HTTPS health check):
+Behind an upstream TLS terminator, skip the Caddy/TLS step (no Caddyfile, no
+Caddy install, no HTTPS health check) and give the terminator's `https://` URL;
+the script stops without it, because the Hub refuses an `http` base URL on a
+non-loopback listener:
 
 ```bash
-./scripts/starter-hub/gce-start-hub.sh --full --no-tls
+HUB_BASE_URL=https://hub.example.com ./scripts/starter-hub/gce-start-hub.sh --full --no-tls
 ```
 
 The final health check verifies the TLS certificate of `https://<HUB_DOMAIN>`.

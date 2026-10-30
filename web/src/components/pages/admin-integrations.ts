@@ -447,6 +447,42 @@ const PLATFORM_FIELDS: Record<string, PlatformFieldDef[]> = {
   ],
 };
 
+/**
+ * The settings to send in a config PUT (ptone/scion#3913): only the keys
+ * whose value differs from the stored one. The hub keeps every key the body
+ * omits, so a plugin default the page shows is never written unless the
+ * user sets the field to another value:
+ * - a key that is not stored and is left empty, or set to its field's
+ *   default, is not sent;
+ * - a stored key the user cleared ("") or reset to the default (removed
+ *   from edited) is sent as null, which deletes it, so the plugin's own
+ *   default applies again;
+ * - any other changed key is sent with its value.
+ */
+export function integrationSettingsPayload(
+  edited: Record<string, string>,
+  stored: Record<string, string>,
+  fields: ReadonlyArray<{ key: string; defaultValue: string }>
+): Record<string, string | null> {
+  const defaults = new Map(fields.map((f) => [f.key, f.defaultValue]));
+  const out: Record<string, string | null> = {};
+  for (const key of new Set([...Object.keys(stored), ...Object.keys(edited)])) {
+    const isStored = Object.prototype.hasOwnProperty.call(stored, key);
+    const hasEdit = Object.prototype.hasOwnProperty.call(edited, key);
+    const value = edited[key];
+    if (isStored) {
+      if (!hasEdit || (value === '' && stored[key] !== '')) {
+        out[key] = null;
+      } else if (value !== stored[key]) {
+        out[key] = value;
+      }
+    } else if (hasEdit && value !== '' && value !== defaults.get(key)) {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
 @customElement('scion-page-admin-integrations')
 export class ScionPageAdminIntegrations extends LitElement {
   @state() private loading = true;
@@ -920,11 +956,9 @@ export class ScionPageAdminIntegrations extends LitElement {
         return;
       }
       this.detail = (await res.json()) as IntegrationDetail;
-      const knownFields = PLATFORM_FIELDS[this.detail.platform] ?? [];
-      this.editedSettings = {
-        ...Object.fromEntries(knownFields.map((f) => [f.key, f.defaultValue])),
-        ...(this.detail.settings || {}),
-      };
+      // Only stored values fill the form; plugin defaults show as
+      // placeholders and are never saved (ptone/scion#3913).
+      this.editedSettings = { ...(this.detail.settings || {}) };
       this.editedSecrets = {};
 
       // For A2A integrations, fetch the project list for the projects editor.
@@ -958,8 +992,15 @@ export class ScionPageAdminIntegrations extends LitElement {
     this.saveError = null;
     this.successMessage = null;
     try {
-      const body: { settings: Record<string, string>; secrets?: Record<string, string> } = {
-        settings: this.editedSettings,
+      const body: {
+        settings: Record<string, string | null>;
+        secrets?: Record<string, string>;
+      } = {
+        settings: integrationSettingsPayload(
+          this.editedSettings,
+          this.detail.settings || {},
+          PLATFORM_FIELDS[resolvePlatform(this.detail.name)] ?? []
+        ),
       };
       const changedSecrets = Object.entries(this.editedSecrets).filter(([, v]) => v !== '');
       if (changedSecrets.length > 0) {
@@ -1528,6 +1569,9 @@ export class ScionPageAdminIntegrations extends LitElement {
   private renderFieldInput(field: PlatformFieldDef) {
     const fieldType = field.type ?? 'text';
 
+    // A select or switch shows the plugin default while the key is unset;
+    // that value is not saved unless the user picks another one, and
+    // "Use default" unsets a set key again (ptone/scion#3913).
     if (fieldType === 'select' && field.options) {
       const currentValue = this.editedSettings[field.key] ?? field.defaultValue;
       return html`
@@ -1544,6 +1588,7 @@ export class ScionPageAdminIntegrations extends LitElement {
             (opt) => html`<sl-option value=${opt.value}>${opt.label}</sl-option>`
           )}
         </sl-select>
+        ${this.renderUseDefault(field)}
       `;
     }
 
@@ -1560,13 +1605,14 @@ export class ScionPageAdminIntegrations extends LitElement {
             };
           }}
         ></sl-switch>
+        ${this.renderUseDefault(field)}
       `;
     }
 
-    // Default: text input
+    // Default: text input. The plugin default is only a placeholder.
     return html`
       <sl-input
-        .value=${this.editedSettings[field.key] ?? field.defaultValue}
+        .value=${this.editedSettings[field.key] ?? ''}
         placeholder=${field.placeholder ?? field.defaultValue}
         @sl-change=${(e: Event) => {
           this.editedSettings = {
@@ -1575,6 +1621,29 @@ export class ScionPageAdminIntegrations extends LitElement {
           };
         }}
       ></sl-input>
+    `;
+  }
+
+  /**
+   * "Use default" for a select or switch whose key is set: it unsets the
+   * key, so the save deletes a stored value and the plugin default applies.
+   */
+  private renderUseDefault(field: PlatformFieldDef) {
+    if (!Object.prototype.hasOwnProperty.call(this.editedSettings, field.key)) {
+      return nothing;
+    }
+    return html`
+      <sl-button
+        size="small"
+        variant="text"
+        data-use-default=${field.key}
+        @click=${() => {
+          const next = { ...this.editedSettings };
+          delete next[field.key];
+          this.editedSettings = next;
+        }}
+        >Use default</sl-button
+      >
     `;
   }
 

@@ -40,6 +40,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/daemon"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth/adcsource"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -2347,7 +2348,7 @@ func brokerRegistrationCapabilities() []string {
 	// (runtimebroker.StaticCapabilities), so the Hub knows them from the
 	// join on, before the first heartbeat (ptone/scion#2918,
 	// ptone/scion#4669).
-	return []string{"sync", "attach", "reprovision", "asyncLaunch", "asyncStart", "emptyPerAgentWorkspace", "agentMove", "reprovisionEmptyPerAgent"}
+	return []string{"sync", "attach", "reprovision", "asyncLaunch", "asyncStart", "emptyPerAgentWorkspace", "agentMove", "agentMoveRecreate", "reprovisionEmptyPerAgent"}
 }
 
 // buildBrokerProfiles builds BrokerProfile objects from settings.Profiles.
@@ -2490,7 +2491,7 @@ func getHubClientForConnection(name string) (hubclient.Client, error) {
 	var opts []hubclient.Option
 	switch creds.AuthMode {
 	case brokercredentials.AuthModeDevAuth:
-		opts = append(opts, hubclient.WithAutoDevAuth())
+		opts = append(opts, runtimebroker.DevAuthHubOptions(creds.HubEndpoint, name)...)
 	default:
 		if creds.SecretKey != "" {
 			secretKey, err := base64.StdEncoding.DecodeString(creds.SecretKey)
@@ -2499,7 +2500,7 @@ func getHubClientForConnection(name string) (hubclient.Client, error) {
 			}
 			opts = append(opts, hubclient.WithHMACAuth(creds.BrokerID, secretKey))
 		} else {
-			opts = append(opts, hubclient.WithAutoDevAuth())
+			opts = append(opts, runtimebroker.DevAuthHubOptions(creds.HubEndpoint, name)...)
 		}
 	}
 
@@ -2520,8 +2521,8 @@ func getHubClientForConnection(name string) (hubclient.Client, error) {
 	return client, nil
 }
 
-// BrokerHubConnectionsResponse mirrors runtimebroker.HubConnectionStatusResponse
-// for CLI use without importing the runtimebroker package.
+// BrokerHubConnectionsResponse mirrors the wire shape of
+// runtimebroker.HubConnectionStatusResponse for CLI use.
 type BrokerHubConnectionsResponse struct {
 	Connections []BrokerHubConnectionInfo `json:"connections"`
 	Mode        string                    `json:"mode"`

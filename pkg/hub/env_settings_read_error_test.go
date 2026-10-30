@@ -259,7 +259,7 @@ func TestEnvReadError_ReincarnateFailsAndRerenders(t *testing.T) {
 	calls, cfgs := disp.reprovisionSnapshot()
 	require.Equal(t, 2, calls, "one reprovision, one re-render of the previous config")
 	require.NotNil(t, r.PreviousAppliedConfig)
-	assert.Equal(t, *r.PreviousAppliedConfig, cfgs[1])
+	assert.Equal(t, *reincarnationRecoveryConfig(r.PreviousAppliedConfig, r.ToGeneration, r.Handoff, store.AgentReincarnationStateStarting), cfgs[1])
 
 	final, err := s.GetAgent(context.Background(), agent.ID)
 	require.NoError(t, err)

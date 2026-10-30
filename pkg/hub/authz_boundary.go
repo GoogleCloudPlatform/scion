@@ -794,8 +794,8 @@ func (a *AuthzService) requireActiveUser(ctx context.Context, principal Principa
 	if NormalizePrincipalType(string(principal.Kind)) != store.RoleBindingPrincipalUser {
 		return nil
 	}
-	user, err := a.store.GetUser(ctx, principal.ID)
-	return activeUserPredicate(principal, user, err)
+	_, err := checkUserAccount(ctx, a.store, principal)
+	return err
 }
 
 // activeUserPredicate is requireActiveUser's decision on an already
@@ -807,7 +807,7 @@ func activeUserPredicate(principal PrincipalContext, user *store.User, err error
 		return nil
 	}
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		return projectAccessLookupFault(fmt.Errorf("%w: user lookup failed: %v", ErrProjectAccessDenied, err))
+		return projectAccessLookupFault(fmt.Errorf("%w: user lookup failed: %w", ErrProjectAccessDenied, err))
 	}
 	if principal.Kind == PrincipalKindFederatedUser {
 		if err != nil {

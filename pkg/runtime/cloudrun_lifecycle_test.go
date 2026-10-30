@@ -620,9 +620,9 @@ func TestCloudRunList_FiltersByLabelsAndMapsAgentInfo(t *testing.T) {
 		if a.ContainerID != "agent-wanted-0000000000" {
 			t.Errorf("AgentInfo.ContainerID = %q, want the short instance ID", a.ContainerID)
 		}
-		// Characterization, not a normalization contract: List currently
-		// surfaces the raw Cloud Run condition string. A future status/Phase
-		// mapping fix is expected to change this assertion.
+		// List keeps the raw Cloud Run condition string as the container
+		// status; the phase mapping is covered by
+		// TestCloudRunList_MapsInstanceConditionToPhase.
 		if a.ContainerStatus != runpb.Condition_CONDITION_SUCCEEDED.String() {
 			t.Errorf("AgentInfo.ContainerStatus = %q, want %q", a.ContainerStatus, runpb.Condition_CONDITION_SUCCEEDED.String())
 		}

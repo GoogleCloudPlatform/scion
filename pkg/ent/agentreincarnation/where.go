@@ -125,6 +125,11 @@ func SourceCleanup(v string) predicate.AgentReincarnation {
 	return predicate.AgentReincarnation(sql.FieldEQ(FieldSourceCleanup, v))
 }
 
+// TransferMode applies equality check predicate on the "transfer_mode" field. It's identical to TransferModeEQ.
+func TransferMode(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldEQ(FieldTransferMode, v))
+}
+
 // AgentIDEQ applies the EQ predicate on the "agent_id" field.
 func AgentIDEQ(v string) predicate.AgentReincarnation {
 	return predicate.AgentReincarnation(sql.FieldEQ(FieldAgentID, v))
@@ -1018,6 +1023,81 @@ func SourceCleanupEqualFold(v string) predicate.AgentReincarnation {
 // SourceCleanupContainsFold applies the ContainsFold predicate on the "source_cleanup" field.
 func SourceCleanupContainsFold(v string) predicate.AgentReincarnation {
 	return predicate.AgentReincarnation(sql.FieldContainsFold(FieldSourceCleanup, v))
+}
+
+// TransferModeEQ applies the EQ predicate on the "transfer_mode" field.
+func TransferModeEQ(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldEQ(FieldTransferMode, v))
+}
+
+// TransferModeNEQ applies the NEQ predicate on the "transfer_mode" field.
+func TransferModeNEQ(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldNEQ(FieldTransferMode, v))
+}
+
+// TransferModeIn applies the In predicate on the "transfer_mode" field.
+func TransferModeIn(vs ...string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldIn(FieldTransferMode, vs...))
+}
+
+// TransferModeNotIn applies the NotIn predicate on the "transfer_mode" field.
+func TransferModeNotIn(vs ...string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldNotIn(FieldTransferMode, vs...))
+}
+
+// TransferModeGT applies the GT predicate on the "transfer_mode" field.
+func TransferModeGT(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldGT(FieldTransferMode, v))
+}
+
+// TransferModeGTE applies the GTE predicate on the "transfer_mode" field.
+func TransferModeGTE(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldGTE(FieldTransferMode, v))
+}
+
+// TransferModeLT applies the LT predicate on the "transfer_mode" field.
+func TransferModeLT(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldLT(FieldTransferMode, v))
+}
+
+// TransferModeLTE applies the LTE predicate on the "transfer_mode" field.
+func TransferModeLTE(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldLTE(FieldTransferMode, v))
+}
+
+// TransferModeContains applies the Contains predicate on the "transfer_mode" field.
+func TransferModeContains(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldContains(FieldTransferMode, v))
+}
+
+// TransferModeHasPrefix applies the HasPrefix predicate on the "transfer_mode" field.
+func TransferModeHasPrefix(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldHasPrefix(FieldTransferMode, v))
+}
+
+// TransferModeHasSuffix applies the HasSuffix predicate on the "transfer_mode" field.
+func TransferModeHasSuffix(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldHasSuffix(FieldTransferMode, v))
+}
+
+// TransferModeIsNil applies the IsNil predicate on the "transfer_mode" field.
+func TransferModeIsNil() predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldIsNull(FieldTransferMode))
+}
+
+// TransferModeNotNil applies the NotNil predicate on the "transfer_mode" field.
+func TransferModeNotNil() predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldNotNull(FieldTransferMode))
+}
+
+// TransferModeEqualFold applies the EqualFold predicate on the "transfer_mode" field.
+func TransferModeEqualFold(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldEqualFold(FieldTransferMode, v))
+}
+
+// TransferModeContainsFold applies the ContainsFold predicate on the "transfer_mode" field.
+func TransferModeContainsFold(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldContainsFold(FieldTransferMode, v))
 }
 
 // And groups predicates with the AND operator between them.

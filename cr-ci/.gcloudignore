@@ -1,0 +1,7 @@
+# gcloud builds submit (deploy-mediator.sh) uploads cr-ci/. ALLOWLIST: upload
+# nothing but what mediator/Dockerfile needs, so no stray file (config.env, a
+# key or a webhook secret file) can reach the staging bucket.
+/*
+!/go.mod
+!/mediator/
+/mediator/**/*_test.go

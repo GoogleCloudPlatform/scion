@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
@@ -189,7 +190,7 @@ func TestExecCommand_DefaultRuntimeMatch_DispatchesToDefaultRuntime(t *testing.T
 	}
 	mgr := agent.NewManager(rt)
 	t.Cleanup(mgr.Close)
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 	addAuxRuntime(t, srv, "aux-a", matchingAuxRuntimeExec("aux-a", "c-a", auxExec))
 
 	w := doExecLookupTest(srv)

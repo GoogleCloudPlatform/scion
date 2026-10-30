@@ -41,8 +41,13 @@ func TestClassifySandboxDelete(t *testing.T) {
 	}{
 		{name: "zero exit", script: "exit 0", want: sandboxDeleteDeleted},
 		{name: "exit 0 while ctx cancelled", script: "exit 0", cancel: true, want: sandboxDeleteDeleted},
-		{name: "not found", script: notFound + "; exit 1", want: sandboxDeleteGone},
-		{name: "does not exist", script: "echo 'sandbox does not exist'; exit 2", want: sandboxDeleteGone},
+		// ptone/scion#4776: the CLI has no verified "already gone" answer
+		// on delete (a missing sandbox's delete exits 0), so no output
+		// turns a non-zero exit into anything but failed.
+		{name: "not found", script: notFound + "; exit 1", want: sandboxDeleteFailed},
+		{name: "does not exist", script: "echo 'sandbox does not exist'; exit 2", want: sandboxDeleteFailed},
+		{name: "generic no such file or directory", script: "echo 'exec: /opt/sandbox/root: no such file or directory' >&2; exit 1", want: sandboxDeleteFailed},
+		{name: "not running wording on delete", script: "echo 'Error: sandbox sb is not running' >&2; exit 1", want: sandboxDeleteFailed},
 		{name: "other failure", script: "echo 'permission denied' >&2; exit 1", want: sandboxDeleteFailed},
 		{name: "non-zero exit, no output", script: "exit 1", want: sandboxDeleteFailed},
 		{name: "not found, killed by a signal", script: notFound + "; kill -9 $$", want: sandboxDeleteFailed},
@@ -62,7 +67,7 @@ func TestClassifySandboxDelete(t *testing.T) {
 			if tt.cancel {
 				cancel()
 			}
-			if got := classifySandboxDelete(ctx, out, err, tt.timedOut); got != tt.want {
+			if got := classifySandboxDelete(err, tt.timedOut); got != tt.want {
 				t.Errorf("classifySandboxDelete(out=%q, err=%v) = %s, want %s", out, err, got, tt.want)
 			}
 		})
@@ -89,11 +94,12 @@ func withDeleteWorkaround(t *testing.T, enabled bool) {
 	t.Cleanup(func() { deleteWorkaroundEnabled = prev })
 }
 
-// S0h: with the workaround off, a delete of an already-gone sandbox is a
-// success and removes the entry.
+// S0h: with the workaround off, a delete of an already-gone sandbox exits
+// 0 on the real CLI (ptone/scion#4776), which is a success that removes
+// the entry.
 func TestCloudRunSandboxDeletePlain_GoneIsSuccess(t *testing.T) {
 	withDeleteWorkaround(t, false)
-	rt := newWorkaroundTestRuntime(t, writeMockBin(t, `echo "Error: sandbox \"$3\" not found" >&2; exit 1`))
+	rt := newWorkaroundTestRuntime(t, writeMockBin(t, `exit 0`))
 	rt.state.add(&sandboxStateEntry{SandboxName: "sb-gone", AgentID: "agent-gone"})
 
 	if err := rt.Delete(context.Background(), RunRef{ID: "sb-gone"}); err != nil {
@@ -101,6 +107,31 @@ func TestCloudRunSandboxDeletePlain_GoneIsSuccess(t *testing.T) {
 	}
 	if rt.state.get("sb-gone") != nil {
 		t.Error("state entry still present after deleting an already-gone sandbox")
+	}
+}
+
+// ptone/scion#4776: with the workaround off, a delete that fails with a
+// generic "no such file or directory" (a missing runtime binary or root
+// directory, not a missing sandbox) is a failure: Delete returns an error
+// and the entry is kept, so a live sandbox is not left untracked. The same
+// holds for the old unverified not-found wording.
+func TestCloudRunSandboxDeletePlain_GenericNoSuchFileIsFailed(t *testing.T) {
+	for _, tc := range []struct{ name, script string }{
+		{"no such file or directory", `echo "exec: /opt/sandbox/root: no such file or directory" >&2; exit 1`},
+		{"unverified not found wording", `echo "Error: sandbox \"$3\" not found" >&2; exit 1`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withDeleteWorkaround(t, false)
+			rt := newWorkaroundTestRuntime(t, writeMockBin(t, tc.script))
+			rt.state.add(&sandboxStateEntry{SandboxName: "sb-live", AgentID: "agent-live"})
+
+			if err := rt.Delete(context.Background(), RunRef{ID: "sb-live"}); err == nil {
+				t.Fatal("Delete() error = nil, want the delete failure")
+			}
+			if rt.state.get("sb-live") == nil {
+				t.Error("state entry removed after a delete that failed with a generic error")
+			}
+		})
 	}
 }
 
@@ -136,8 +167,8 @@ func TestCloudRunSandboxDeletePlain_CancelledIsFailed(t *testing.T) {
 	}
 }
 
-// The workaround path's results are unchanged: a not-found exit is still
-// a success that removes the entry.
+// The workaround path's results are unchanged: a non-zero exit, whatever
+// its output, still removes the entry (only its logged result changes).
 func TestCloudRunSandboxDeleteWithTimeout_GoneOutputUnchanged(t *testing.T) {
 	withDeleteWorkaround(t, true)
 	rt := newWorkaroundTestRuntime(t, writeMockBin(t, `echo "Error: sandbox \"$3\" not found" >&2; exit 1`))

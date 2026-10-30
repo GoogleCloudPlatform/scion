@@ -10,6 +10,7 @@ import (
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
 )
 
 // LoggingHandler logs hook events to a file.
@@ -105,10 +106,17 @@ func (h *LoggingHandler) formatLogMessage(event *hooks.Event) string {
 		return "Tool execution started"
 
 	case hooks.EventToolEnd:
-		if event.Data.ToolName != "" {
-			return fmt.Sprintf("Tool %s completed", event.Data.ToolName)
+		result := "completed"
+		switch toolOutcome(event) {
+		case telemetry.ToolFailed:
+			result = "failed"
+		case telemetry.ToolInterrupted:
+			result = "interrupted"
 		}
-		return "Tool execution completed"
+		if event.Data.ToolName != "" {
+			return fmt.Sprintf("Tool %s %s", event.Data.ToolName, result)
+		}
+		return "Tool execution " + result
 
 	case hooks.EventModelStart:
 		return "LLM call started"

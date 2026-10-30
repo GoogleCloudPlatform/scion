@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -43,6 +44,10 @@ import (
 var (
 	conduitInternalListen     string
 	conduitInternalAdvertise  string
+	conduitInternalTLSCert    string
+	conduitInternalTLSKey     string
+	conduitInternalTLSCA      string
+	conduitInternalTLSName    string
 	conduitGrantKeyActivation string
 	conduitReconnectWindow    string
 	conduitAuthzRecheck       string
@@ -53,8 +58,12 @@ var (
 
 // registerConduitServerFlags registers the conduit flags of `server start`.
 func registerConduitServerFlags(f *pflag.FlagSet) {
-	f.StringVar(&conduitInternalListen, "internal-listen", "", "host:port of the internal conduit relay API listener (hub.conduit; multi-node hubs). Must be reachable only inside the cluster/VPC. TLS on this hop is recommended (e.g. a service mesh or TLS-terminating proxy, advertised as https://); plain http:// is accepted")
-	f.StringVar(&conduitInternalAdvertise, "internal-advertise", "", "Base URL other hub nodes use to reach the internal listener (default: POD_IP or the listen host). Prefer https:// (TLS on the internal hop); http:// is accepted")
+	f.StringVar(&conduitInternalListen, "internal-listen", "", "host:port of the internal conduit relay API listener (hub.conduit; multi-node hubs). Must be reachable only inside the cluster/VPC. Without --internal-tls-cert-file/--internal-tls-key-file it must be a loopback address")
+	f.StringVar(&conduitInternalAdvertise, "internal-advertise", "", "Base URL other hub nodes use to reach the internal listener (default: POD_IP or the listen host, https:// when the listener serves TLS). Must be https:// unless its host is loopback")
+	f.StringVar(&conduitInternalTLSCert, "internal-tls-cert-file", "", "PEM certificate chain the internal listener serves TLS with (with --internal-tls-key-file); re-read when the file changes")
+	f.StringVar(&conduitInternalTLSKey, "internal-tls-key-file", "", "PEM private key of --internal-tls-cert-file")
+	f.StringVar(&conduitInternalTLSCA, "internal-tls-ca-file", "", "PEM CA bundle internal hop clients verify peers with, replacing the system roots. A private or internal CA REQUIRES it")
+	f.StringVar(&conduitInternalTLSName, "internal-tls-server-name", "", "Name internal hop clients verify in peer certificates instead of the dialed host (one certificate for every node)")
 	f.StringVar(&conduitGrantKeyActivation, "conduit-grant-key-activation", "", "Publish-before-sign delay of a new conduit grant key (default 15m, minimum 1m)")
 	f.StringVar(&conduitReconnectWindow, "conduit-reconnect-window", "", "Jitter window targets redial in after a planned conduit close (default 5s, 0s-5m)")
 	f.StringVar(&conduitAuthzRecheck, "conduit-authz-recheck-interval", "", "Period of the authorization re-check sweep of open conduit user streams (default 60s, 1s-10m)")
@@ -73,6 +82,18 @@ func applyConduitFlagOverrides(cmd *cobra.Command, cfg *config.GlobalConfig) {
 	}
 	if f.Changed("internal-advertise") {
 		cfg.Hub.Conduit.InternalAdvertise = conduitInternalAdvertise
+	}
+	if f.Changed("internal-tls-cert-file") {
+		cfg.Hub.Conduit.InternalTLSCertFile = conduitInternalTLSCert
+	}
+	if f.Changed("internal-tls-key-file") {
+		cfg.Hub.Conduit.InternalTLSKeyFile = conduitInternalTLSKey
+	}
+	if f.Changed("internal-tls-ca-file") {
+		cfg.Hub.Conduit.InternalTLSCAFile = conduitInternalTLSCA
+	}
+	if f.Changed("internal-tls-server-name") {
+		cfg.Hub.Conduit.InternalTLSServerName = conduitInternalTLSName
 	}
 	if f.Changed("conduit-grant-key-activation") {
 		cfg.Hub.Conduit.GrantKeyActivation = conduitGrantKeyActivation
@@ -98,7 +119,7 @@ func applyConduitFlagOverrides(cmd *cobra.Command, cfg *config.GlobalConfig) {
 // --foreground daemon child.
 func appendConduitDaemonArgs(cmd *cobra.Command, args []string) []string {
 	f := cmd.Flags()
-	for _, name := range []string{"role", "internal-listen", "internal-advertise", "conduit-grant-key-activation", "conduit-reconnect-window", "conduit-authz-recheck-interval", "conduit-lifetime-cap", "conduit-stream-authz-max-user"} {
+	for _, name := range []string{"role", "internal-listen", "internal-advertise", "internal-tls-cert-file", "internal-tls-key-file", "internal-tls-ca-file", "internal-tls-server-name", "conduit-grant-key-activation", "conduit-reconnect-window", "conduit-authz-recheck-interval", "conduit-lifetime-cap", "conduit-stream-authz-max-user"} {
 		if f.Changed(name) {
 			args = append(args, fmt.Sprintf("--%s=%s", name, f.Lookup(name).Value.String()))
 		}
@@ -223,6 +244,23 @@ var (
 	conduitSetShutdownGrace = func(hubSrv *hub.Server, grace time.Duration) {
 		hubSrv.SetConduitShutdownGrace(grace)
 	}
+	// conduitIngressShutdownDrain is the ingress drain step's drain in
+	// external relay mode: ask the relays to drain this hub's proxied
+	// sessions, hold the proxied legs and close the ones left at the step
+	// deadline.
+	conduitIngressShutdownDrain = func(hubSrv *hub.Server, opts hub.ConduitIngressDrainOptions) {
+		hubSrv.DrainConduitIngressForShutdown(opts)
+	}
+	// conduitIngressProxyActive reports whether the hub proxies conduit
+	// dials to relays (external mode with proxy ingress serving).
+	conduitIngressProxyActive = func(hubSrv *hub.Server) bool {
+		return hubSrv.ConduitIngressProxyActive()
+	}
+	// conduitIngressStop stops the hub proxying conduit dials (the
+	// ingress stop step).
+	conduitIngressStop = func(hubSrv *hub.Server) {
+		hubSrv.BeginConduitIngressShutdown()
+	}
 	// serveConduitInternalListenerFn opens the internal listener that
 	// serves the internal relay API (serveConduitInternalListener).
 	serveConduitInternalListenerFn = serveConduitInternalListener
@@ -285,6 +323,53 @@ func registerConduitShutdownDrain(q *serverShutdownSequence, bound time.Duration
 	return q.addStep(shutdownPhaseDrain, boundedShutdownStep(q.clk, bound, "conduit drain", drain))
 }
 
+// shutdownPhaseIngressStop is the phase of the step that stops the hub
+// proxying conduit dials. It sorts before shutdownPhaseMark (the shutdown
+// runs steps in phase order), so the stop runs before the hub's mark
+// step: after the mark a broker-signed dial still passes the hub's
+// shutdown refusal, and it must already find proxying stopped (cause
+// ingress_terminating), whatever the registration order of the steps.
+const shutdownPhaseIngressStop = shutdownPhaseMark - 1
+
+// conduitIngressHTTPDrainMargin is how long before the shutdown's HTTP-drain
+// deadline the ingress hold ends, so the step returns and cancel starts
+// with time left for the HTTP drain (design v2.21.58).
+const conduitIngressHTTPDrainMargin = time.Second
+
+// conduitIngressHoldDeadline is the ingress drain's hold deadline H, the
+// absolute deadline handed to the hub drain (design v2.21.58): min(step
+// deadline, HTTP-drain deadline - conduitIngressHTTPDrainMargin), where the
+// HTTP-drain deadline is the shutdown's own (T0 + 3S/4, httpDrainEnd).
+// Without a budget there is no HTTP-drain deadline, and H is the step
+// deadline. With G = 10s: S = 8s, the HTTP-drain deadline is T0 + 6s and H
+// = T0 + 5s (the step deadline is T0 + 8s); with G = 30s, H is the step
+// deadline T0 + 12s.
+func conduitIngressHoldDeadline(b serverShutdownBudget, t0, stepDeadline time.Time) time.Time {
+	if !b.set {
+		return stepDeadline
+	}
+	if h := b.httpDrainEnd(t0).Add(-conduitIngressHTTPDrainMargin); h.Before(stepDeadline) {
+		return h
+	}
+	return stepDeadline
+}
+
+// registerConduitIngressShutdownDrain makes the ingress drain a pre-cancel
+// step of the process's single graceful shutdown, in the same phase and
+// with the same bound as the relay drain (registerConduitShutdownDrain);
+// a process registers one of the two. drain gets when the shutdown began
+// and the step's absolute deadline (step start plus bound on q's clock);
+// the caller derives the hold deadline from it (conduitIngressHoldDeadline). The step waits for drain at most bound.
+// It returns false, and the drain never runs from here, when the shutdown
+// has already begun.
+func registerConduitIngressShutdownDrain(q *serverShutdownSequence, bound time.Duration, drain func(signalAt, stepDeadline time.Time)) bool {
+	return q.addStep(shutdownPhaseDrain, func() {
+		start := q.clk.Now()
+		signalAt, _ := q.startedAt()
+		boundedShutdownStep(q.clk, bound, "conduit ingress drain", func() { drain(signalAt, start.Add(bound)) })()
+	})
+}
+
 // boundedShutdownStep returns step bounded to bound on clk: it runs step
 // in its own goroutine and returns when step does or when bound has
 // passed, whichever is first (the step then goes on in the background).
@@ -307,10 +392,12 @@ func boundedShutdownStep(clk clock.Clock, bound time.Duration, name string, step
 
 // conduitAdvertiseEndpoint derives the internal endpoint other hub nodes
 // use to reach this node: the configured internal_advertise, else
-// http://<host>:<port> where host is the listen host when it is a specific
-// address, else POD_IP. It returns "" (unaddressable) when no address is
-// known.
-func conduitAdvertiseEndpoint(advertise string, bound net.Addr, podIP string) string {
+// https://<host>:<port> when the listener serves TLS (servesTLS) and
+// http://<host>:<port> otherwise, where host is the listen host when it is
+// a specific address, else POD_IP. It returns "" (unaddressable) when no
+// address is known. The relay refuses an endpoint that breaks the
+// internal hop rule (config.CheckRelayTransport) when it registers.
+func conduitAdvertiseEndpoint(advertise string, bound net.Addr, podIP string, servesTLS bool) string {
 	if advertise != "" {
 		return advertise
 	}
@@ -327,7 +414,31 @@ func conduitAdvertiseEndpoint(advertise string, bound net.Addr, podIP string) st
 	if host == "" {
 		return ""
 	}
-	return "http://" + net.JoinHostPort(host, port)
+	scheme := "http://"
+	if servesTLS {
+		scheme = "https://"
+	}
+	return scheme + net.JoinHostPort(host, port)
+}
+
+// conduitHopTLS builds the TLS of the relay internal hop from the
+// operator settings (server.hub.conduit.internal_tls_*): server is the
+// internal listener's (nil without a certificate, when the listener must
+// be loopback), client the configuration every hop client verifies peers
+// with (the CA file, else the system roots, and the server name). A file
+// that does not load refuses startup.
+func conduitHopTLS(c config.HubConduitConfig) (server, client *tls.Config, err error) {
+	if c.InternalTLS() {
+		server, err = relay.NewHopServerTLS(c.InternalTLSCertFile, c.InternalTLSKeyFile, slog.Default())
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	client, err = relay.NewHopClientTLS(c.InternalTLSCAFile, c.InternalTLSServerName)
+	if err != nil {
+		return nil, nil, err
+	}
+	return server, client, nil
 }
 
 // conduitPeerAuthOptions builds the relay-peer auth options from config
@@ -401,12 +512,32 @@ func startConduit(ctx context.Context, q *serverShutdownSequence, cfg *config.Gl
 		return nil
 	}
 	if cfg.Hub.Conduit.ExternalRelay() {
-		// External relay mode: no relay here, so nothing to drain on
-		// shutdown (no step on q, no grace recorded). Its configuration
-		// was chosen explicitly, so every failure is fatal, in and
-		// outside hosted HA.
+		// External relay mode: no relay here, so no relay drain and no
+		// grace recorded. Its configuration was chosen explicitly, so
+		// every failure is fatal, in and outside hosted HA. With the
+		// ingress proxy serving, the shutdown stops proxying before it
+		// marks any server (shutdownPhaseIngressStop), and the ingress
+		// drain step asks the relays to drain the sessions this hub
+		// proxied, holds the proxied legs and closes the ones left at its
+		// deadline (design §3.9 "Drain through the proxy"). With the
+		// proxy off there are no steps.
 		if err := startConduitExternalFn(ctx, cfg, hubSrv, wg, errCh); err != nil {
 			return fmt.Errorf("conduit external relay mode: %w", err)
+		}
+		if conduitIngressProxyActive(hubSrv) {
+			grace, graceSet := conduitShutdownDrainSetting(cfg)
+			budget := serverShutdownBudgetFor(cfg)
+			bound := conduitDrainStepBound(budget)
+			q.addStep(shutdownPhaseIngressStop, func() { conduitIngressStop(hubSrv) })
+			registerConduitIngressShutdownDrain(q, bound, func(signalAt, stepDeadline time.Time) {
+				conduitIngressShutdownDrain(hubSrv, hub.ConduitIngressDrainOptions{
+					Clock:        q.clk,
+					SignalAt:     signalAt,
+					HoldDeadline: conduitIngressHoldDeadline(budget, signalAt, stepDeadline),
+					Grace:        grace,
+					GraceSet:     graceSet,
+				})
+			})
 		}
 		return nil
 	}
@@ -472,9 +603,13 @@ func startConduitRelay(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hu
 		slog.Info("Conduit relay: internal relay API not served on this node (server.hub.conduit.internal_listen is unset); requests to other relays are refused")
 	}
 
+	hopServerTLS, hopClientTLS, err := conduitHopTLS(cfg.Hub.Conduit)
+	if err != nil {
+		return err
+	}
 	var endpoint string
 	if listen := cfg.Hub.Conduit.InternalListen; listen != "" {
-		addr, closeListener, lerr := serveConduitInternalListenerFn(ctx, listen, hubSrv.ConduitInternalHandler(), wg, errCh)
+		addr, closeListener, lerr := serveConduitInternalListenerFn(ctx, listen, hopServerTLS, hubSrv.ConduitInternalHandler(), wg, errCh)
 		if lerr != nil {
 			return lerr
 		}
@@ -484,7 +619,7 @@ func startConduitRelay(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hu
 				closeListener()
 			}
 		}()
-		endpoint = conduitAdvertiseEndpoint(cfg.Hub.Conduit.InternalAdvertise, addr, os.Getenv("POD_IP"))
+		endpoint = conduitAdvertiseEndpoint(cfg.Hub.Conduit.InternalAdvertise, addr, os.Getenv("POD_IP"), hopServerTLS != nil)
 		slog.Info("Conduit internal listener started", "addr", addr.String(), "advertise", endpoint)
 	}
 
@@ -493,6 +628,7 @@ func startConduitRelay(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hu
 		InternalEndpoint: endpoint,
 		RequireHA:        requireHA,
 		PeerAuth:         auth,
+		HopTLS:           hopClientTLS,
 		ReconnectWindow:  conduitReconnectWindowSetting(cfg),
 		LifetimeCap:      conduitLifetimeCapSetting(cfg),
 	}); err != nil {
@@ -544,6 +680,10 @@ func startConduitExternal(ctx context.Context, cfg *config.GlobalConfig, hubSrv 
 	if err != nil {
 		return err
 	}
+	hopServerTLS, hopClientTLS, err := conduitHopTLS(cfg.Hub.Conduit)
+	if err != nil {
+		return err
+	}
 	if ingressOff != "" {
 		slog.Warn("Conduit ingress proxy is off: it requires HMAC relay-peer authentication; conduit dials get 503 conduit_not_serving",
 			"cause", ingressOff, "peer_auth", mode, "fix", "set server.hub.conduit.peer_auth to hmac, or upgrade to the release with the relay-peer ingress header")
@@ -551,13 +691,14 @@ func startConduitExternal(ctx context.Context, cfg *config.GlobalConfig, hubSrv 
 	if err := hubSrv.StartConduitExternal(ctx, hub.ConduitExternalOptions{
 		InstanceID:      id,
 		PeerAuth:        auth,
+		HopTLS:          hopClientTLS,
 		Ingress:         cfg.Hub.Conduit.IngressValue(),
 		IngressOffCause: ingressOff,
 		LifetimeCap:     conduitLifetimeCapSetting(cfg),
 	}); err != nil {
 		return err
 	}
-	addr, _, err := serveConduitInternalListenerFn(ctx, cfg.Hub.Conduit.InternalListen, hubSrv.ConduitInternalHandler(), wg, errCh)
+	addr, _, err := serveConduitInternalListenerFn(ctx, cfg.Hub.Conduit.InternalListen, hopServerTLS, hubSrv.ConduitInternalHandler(), wg, errCh)
 	if err != nil {
 		return err
 	}
@@ -597,13 +738,22 @@ func externalPeerAuthOptions(ctx context.Context, cfg *config.GlobalConfig, id s
 }
 
 // serveConduitInternalListener opens the internal listener on listen and
-// serves h on it until ctx ends (graceful shutdown, 10s). A serve error
-// after startup is reported on errCh. closeListener releases the port at
-// once, for a startup that fails after the listener opened.
-func serveConduitInternalListener(ctx context.Context, listen string, h http.Handler, wg *sync.WaitGroup, errCh chan<- error) (addr net.Addr, closeListener func(), err error) {
+// serves h on it until ctx ends (graceful shutdown, 10s), with TLS when
+// tlsConfig is set (conduitHopTLS). Without TLS, listen must be a loopback
+// address (config.CheckRelayInternalListen): the hop carries user and
+// agent credentials. A serve error after startup is reported on errCh.
+// closeListener releases the port at once, for a startup that fails after
+// the listener opened.
+func serveConduitInternalListener(ctx context.Context, listen string, tlsConfig *tls.Config, h http.Handler, wg *sync.WaitGroup, errCh chan<- error) (addr net.Addr, closeListener func(), err error) {
+	if err := config.CheckRelayInternalListen("server.hub.conduit.internal_listen", listen, tlsConfig != nil); err != nil {
+		return nil, nil, err
+	}
 	ln, err := net.Listen("tcp", listen)
 	if err != nil {
 		return nil, nil, fmt.Errorf("conduit internal listener %s: %w", listen, err)
+	}
+	if tlsConfig != nil {
+		ln = tls.NewListener(ln, tlsConfig)
 	}
 	srv := &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second}
 	wg.Add(2)

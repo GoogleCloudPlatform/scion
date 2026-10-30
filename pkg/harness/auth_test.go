@@ -68,6 +68,11 @@ func TestGatherAuth_GCPSharedFields(t *testing.T) {
 	// GatherAuth() with nil authMeta only populates GCP shared fields.
 	t.Setenv("GOOGLE_CLOUD_PROJECT", "my-project")
 	t.Setenv("GOOGLE_CLOUD_REGION", "us-central1")
+	// GOOGLE_CLOUD_LOCATION takes precedence over GOOGLE_CLOUD_REGION, and
+	// CLOUD_ML_REGION is the last fallback; clear both so an ambient value
+	// (agent containers export them) does not change the result.
+	t.Setenv("GOOGLE_CLOUD_LOCATION", "")
+	t.Setenv("CLOUD_ML_REGION", "")
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "/path/to/creds.json")
 
 	auth := GatherAuth()
@@ -101,6 +106,11 @@ func TestGatherAuthWithEnv_ConfigDrivenEnvVarsFromProcess(t *testing.T) {
 	t.Setenv("CODEX_API_KEY", "codex-key")
 	t.Setenv("GOOGLE_CLOUD_PROJECT", "my-project")
 	t.Setenv("GOOGLE_CLOUD_REGION", "us-central1")
+	// GOOGLE_CLOUD_LOCATION takes precedence over GOOGLE_CLOUD_REGION, and
+	// CLOUD_ML_REGION is the last fallback; clear both so an ambient value
+	// (agent containers export them) does not change the result.
+	t.Setenv("GOOGLE_CLOUD_LOCATION", "")
+	t.Setenv("CLOUD_ML_REGION", "")
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "/path/to/creds.json")
 
 	meta := testMultiHarnessAuthMeta()

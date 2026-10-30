@@ -377,12 +377,8 @@ func enclosingDeclName(f *ast.File, pos token.Pos) string {
 // with (or be mistaken for) one at the top level of pkg/hub.
 func scanDirForDecorationReferences(dir string) ([]decorationHit, error) {
 	var hits []decorationHit
-	// pkgmove:scan-covers pkg/hub/apierr
-	// recursive walk already includes pkg/hub/apierr.
-	// pkgmove:scan-covers pkg/hub/internal/principal
-	// recursive walk already includes pkg/hub/internal/principal; decorationGuardAllowed lists the carriage points at their new paths.
-	// pkgmove:scan-covers pkg/hub/maintenance
-	// recursive walk already includes pkg/hub/maintenance (skips only testdata and vendor).
+	// pkgmove:scan-covers pkg/hub/...
+	// recursive walk of pkg/hub: SkipDir only for testdata and vendor, so it covers every package directory below it; decorationGuardAllowed lists the carriage points at their new paths.
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			return walkErr

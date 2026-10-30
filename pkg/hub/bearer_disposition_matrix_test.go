@@ -79,6 +79,18 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "a token acts on membership only through its holder's project role, and the fixture super-admin holds no role in the fixture project. The dedicated test drives the route with real tokens on both boundaries and with the holder's session",
 		Pin:    "TestMembershipToken_SelectorAndBoundaryPerRoute",
 	},
+	{OperationID: "project.lifecycle.create", Method: "POST", Pattern: "/api/v1/projects"}: {
+		Reason: "the creator is bound to the seeded project-owner role, and a token must cover every permission of that role, some of which have no selector; the dedicated test narrows the owner role to permissions with selectors and drives the route with real tokens on both boundaries and with the holder's session",
+		Pin:    "TestProjectCreateToken_RequiresCreateSelectorAndHubBoundary",
+	},
+	{OperationID: "project.register", Method: "POST", Pattern: "/api/v1/projects/register"}: {
+		Reason: "the creator is bound to the seeded project-owner role, and a token must cover every permission of that role, some of which have no selector; the dedicated test narrows the owner role to permissions with selectors and drives the route with real tokens on both boundaries and with the holder's session",
+		Pin:    "TestProjectRegisterToken_EnforcesProjectCreate",
+	},
+	{OperationID: "project.clone", Method: "POST", Pattern: "/api/v1/projects/{id}/clone"}: {
+		Reason: "a clone needs project:read, project:clone and project:create together, the creator is bound to the seeded project-owner role (some of its permissions have no selector), and only a super-admin who is a member of the source project can mint project:clone; the dedicated test sets this up and drives the route with real tokens and with the holder's session",
+		Pin:    "TestProjectCloneToken_RequiresSourceReadCloneAndCreate",
+	},
 	{OperationID: "project.lifecycle.delete", Method: "DELETE", Pattern: "/api/v1/projects/{id}"}: {
 		Reason: "project.delete has no token selector, so a token is refused by the deletion service's base permission check (403 project_delete_forbidden) before its session-only credential step is reached; the session-only step and its IRREVERSIBLE_CASCADE reason are pinned at the service",
 		Pin:    "TestRS3_ProjectDeleteScopedUATDenied",
@@ -378,9 +390,25 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the matrix server enables no gs:// link experiment and configures no token generator, so every caller gets the same 404 before the message is looked up",
 		Pin:    "TestGCSObjectToken_ProjectGroupNeedsProjectRead",
 	},
+	{OperationID: "chat.star.state", Method: "GET", Pattern: "/api/v1/chat/stars/state"}: {
+		Reason: "the star state filters each message by the caller's current access to its thread instead of refusing the request, so a project token for another project gets 200 with no starred IDs rather than 403 or 404 (no existence oracle)",
+		Pin:    "TestChatStars_TokenSelectors",
+	},
+	{OperationID: "chat.star.conversations", Method: "GET", Pattern: "/api/v1/chat/starred-conversations"}: {
+		Reason: "the Starred rail filters each conversation by the caller's current access instead of refusing the request, so a project token for another project gets 200 with no rows rather than 403 or 404 (no existence oracle)",
+		Pin:    "TestChatStarredConversations_TokenSelectors",
+	},
+	{OperationID: "chat.star.remove", Method: "DELETE", Pattern: "/api/v1/chat/stars/{messageId}"}: {
+		Reason: "removing a star always answers an empty 204 (design: ownership-only, no target lookup); a project token removes a row only inside its boundary, and outside it the answer is the same empty 204 with nothing removed, so the boundary probe sees 204 rather than a refusal",
+		Pin:    "TestChatStars_TokenSelectors",
+	},
 	{OperationID: "web.events.stream", Method: "GET", Pattern: "/events"}: {
 		Reason: "the web server serves the event stream, not the hub API handler the matrix drives; the web server admits only a signed-in web session",
 		Pin:    "TestWebEventStream_RefusesUserAccessToken",
+	},
+	{OperationID: "user.admin.provision", Method: "POST", Pattern: "/api/v1/users"}: {
+		Reason: "the matrix server runs with dev authentication, and user provisioning is refused for every caller on such a hub (403 dev_auth_not_supported); the dedicated test drives the route on a hub without dev authentication with real tokens on both boundaries and with sessions",
+		Pin:    "TestProvisionToken_RequiresInviteSelectorAndHubBoundary",
 	},
 }
 
@@ -486,6 +514,13 @@ var bearerMatrixCompanionSelectors = map[authzop.OperationID][]string{
 	"chat.presence.update":                   {"project:read"},
 	"chat.search.dm":                         {"agent:read"},
 	"chat.conversation.promote":              {"project:read", "agent:read"},
+	"chat.star.add":                          {"project:read"},
+	"chat.star.read":                         {"project:read"},
+	"chat.star.state":                        {"project:read"},
+	"chat.star.list":                         {"project:read"},
+	"chat.conversation.history.starred":      {"project:read"},
+	"chat.star.remove":                       {"project:read"},
+	"chat.star.conversations":                {"project:read"},
 	"quota.brokersettings.update":            {"broker:read"},
 }
 
@@ -505,6 +540,7 @@ var bearerMatrixNotFoundRefusals = map[liveInventoryKey]string{
 	{"chat.conversation.mute.dm", http.MethodPut, "/api/v1/chat/conversations/{id}/mute"}:             "a conversation the caller may not use is answered as Thread not found",
 	{"chat.conversation.pin.topic", http.MethodPut, "/api/v1/chat/conversations/{id}/pin"}:            "a conversation the caller may not use is answered as Thread not found",
 	{"chat.conversation.pin.dm", http.MethodPut, "/api/v1/chat/conversations/{id}/pin"}:               "a conversation the caller may not use is answered as Thread not found",
+	{"chat.star.add", http.MethodPut, "/api/v1/chat/stars/{messageId}"}:                               "a message the caller may not star is answered as the shared Message not found",
 }
 
 // bearerMatrixRefusedAt reports whether status refuses a token on the
@@ -791,8 +827,8 @@ var bearerMatrixPositiveServerErrors = map[liveInventoryKey]bearerMatrixPositive
 		http.StatusServiceUnavailable, "the test server configures no agent dispatcher"},
 	{"agent.lifecycle.keys", http.MethodPost, "/api/v1/projects/{projectId}/agents/{id}/keys"}: {
 		http.StatusServiceUnavailable, "the test server configures no agent dispatcher"},
-	{"agent.portaccess", http.MethodGet, "/api/v1/agents/{id}/ports/{port}/proxy"}: {
-		http.StatusServiceUnavailable, "the fixture agent has no port tunnel"},
+	// GET of the bare .../proxy pattern is not listed: past authorization
+	// it gets the 308 to .../proxy/ (ptone/scion#5566), not a 5xx.
 	{"agent.portaccess", http.MethodPost, "/api/v1/agents/{id}/ports/{port}/proxy"}: {
 		http.StatusServiceUnavailable, "the fixture agent has no port tunnel"},
 	{"agent.portaccess", http.MethodPut, "/api/v1/agents/{id}/ports/{port}/proxy"}: {

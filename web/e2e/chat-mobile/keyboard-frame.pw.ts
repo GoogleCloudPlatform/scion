@@ -641,7 +641,11 @@ test.describe('the chat column fits the keyboard frame with a long draft', () =>
       page,
     }) => {
       await openThread(page);
-      const button = page.locator('scion-header .palette-button');
+      // On a phone the button sits at the bottom of the members column (and
+      // of the spaces column); the members column is one tap away here.
+      await page.locator('.mobile-members').click();
+      await expect(page.locator('.v2-panels')).toHaveAttribute('data-panel', 'right');
+      const button = page.locator('.v2-members > .palette-footer > .palette-footer-btn');
       await button.click();
       const input = page.locator('scion-quick-palette input');
       await expect(input).toBeFocused();

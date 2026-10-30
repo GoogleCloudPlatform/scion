@@ -111,15 +111,14 @@ func TestReincarnateForce_OldHubDryRunFails(t *testing.T) {
 }
 
 // A recreate verdict passes the handshake, and both requests carry
-// forceMove. (The hub refuses the real request until forced moves exist.)
+// forceMove; the hub accepts the forced move.
 func TestReincarnateForce_HandshakeThenRealRequest(t *testing.T) {
 	withBrokerFlags(t, "b2", false)
 	withForceFlag(t, true)
 	hubCtx, bodies := forceHub(t, http.StatusOK, recreateVerdictBody,
-		http.StatusNotImplemented, `{"error":{"code":"not_implemented","message":"forced moves are not enabled yet"}}`)
+		http.StatusAccepted, `{"agentId":"agent-1","generation":2,"state":"pending","plan":{},"sourceBrokerId":"b1","targetBrokerId":"b2","transferMode":"recreate"}`)
 	err := reincarnateAgentViaHub(hubCtx, "agent-1", "handoff", false)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "forced moves are not enabled yet")
+	require.NoError(t, err)
 	require.Len(t, *bodies, 2)
 	for i, b := range *bodies {
 		assert.Equal(t, true, b["forceMove"], "request %d carries forceMove", i)
@@ -293,10 +292,72 @@ func TestReincarnateForce_ExportVerdictSaysForceNotNeeded(t *testing.T) {
 	assert.NotContains(t, stdout, "will not survive")
 }
 
-// Brokers do not advertise forced moves until the move itself exists.
-func TestStaticCapabilities_AgentMoveRecreateNotAdvertised(t *testing.T) {
+// Brokers advertise forced moves in the static set, its names and the
+// registration list alike.
+func TestStaticCapabilities_AgentMoveRecreateAdvertised(t *testing.T) {
 	rt := runtime.NewDockerRuntime()
-	assert.False(t, runtimebroker.StaticCapabilities(rt, "").AgentMoveRecreate)
-	assert.False(t, slices.Contains(runtimebroker.StaticCapabilityNames(rt), "agentMoveRecreate"))
-	assert.False(t, slices.Contains(brokerRegistrationCapabilities(), "agentMoveRecreate"))
+	assert.True(t, runtimebroker.StaticCapabilities(rt, "").AgentMoveRecreate)
+	assert.True(t, slices.Contains(runtimebroker.StaticCapabilityNames(rt), "agentMoveRecreate"))
+	assert.True(t, slices.Contains(brokerRegistrationCapabilities(), "agentMoveRecreate"))
+}
+
+// moveRefusalBody is a refused move's 409 with forceWouldApply set as given.
+func moveRefusalBody(would bool) string {
+	w := ""
+	if would {
+		w = `,"forceWouldApply":true`
+	}
+	return `{"error":{"code":"conflict","message":"the workspace is not on a shared export","details":{"verdict":{"eligible":false,"sourceBroker":{"id":"b1"},"targetBroker":{"id":"b2"},
+		"checks":[{"name":"same_export","result":"failed","message":"m"},{"name":"workspace_recreatable","result":"not_evaluated"}]}` + w + `}}}`
+}
+
+// The pre-force handoff warning has this exact text.
+func TestMoveForceHint_Text(t *testing.T) {
+	assert.Equal(t, "A forced move does not preserve this agent's home or workspace: it restarts on the target with a fresh home and the target's workspace. "+
+		"Put anything worth keeping into the handoff, then re-run with --force (preview with --dry-run --force).", moveForceHint)
+}
+
+// A move refused without --force that --force could make prints the
+// handoff warning on stderr in both human and --json output; stdout carries
+// no part of it, and in --json mode no human verdict lines either. There
+// is no warning when the hub says --force would not apply, or with --force.
+func TestReincarnateMove_ForceWarningOnStderrInBothModes(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		json  bool
+		would bool
+		force bool
+		want  bool
+	}{
+		{"human, would apply", false, true, false, true},
+		{"json, would apply", true, true, false, true},
+		{"human, would not apply", false, false, false, false},
+		{"json, would not apply", true, false, false, false},
+		{"json, already forced", true, true, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withBrokerFlags(t, "b2", false)
+			withForceFlag(t, tc.force)
+			prevFormat := outputFormat
+			t.Cleanup(func() { outputFormat = prevFormat })
+			if tc.json {
+				outputFormat = "json"
+			} else {
+				outputFormat = ""
+			}
+			hubCtx, _ := forceHub(t, http.StatusConflict, moveRefusalBody(tc.would), http.StatusConflict, moveRefusalBody(tc.would))
+			var runErr error
+			stdout, stderr := captureStdoutStderr(t, func() { runErr = reincarnateAgentViaHub(hubCtx, "agent-1", "handoff", false) })
+			require.Error(t, runErr)
+			assert.NotContains(t, stdout, moveForceHint, "stdout never carries the warning")
+			if tc.want {
+				assert.Contains(t, stderr, moveForceHint)
+			} else {
+				assert.NotContains(t, stderr, moveForceHint)
+			}
+			if tc.json {
+				assert.NotContains(t, stdout, "same_export", "no human verdict lines in --json mode")
+			}
+		})
+	}
 }

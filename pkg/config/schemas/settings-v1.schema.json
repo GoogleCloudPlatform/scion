@@ -80,6 +80,7 @@
         "auth": { "$ref": "#/$defs/serverAuth" },
         "oauth": { "$ref": "#/$defs/serverOAuth" },
         "storage": { "$ref": "#/$defs/serverStorage" },
+        "project_storage": { "$ref": "#/$defs/serverProjectStorage" },
         "workspace_storage": { "$ref": "#/$defs/serverWorkspaceStorage" },
         "secrets": { "$ref": "#/$defs/serverSecrets" },
         "shared_dir_storage": { "$ref": "#/$defs/serverSharedDirStorage" },
@@ -95,6 +96,19 @@
           "type": "string",
           "enum": ["text", "json"],
           "description": "Deprecated and ignored: accepted so existing settings files still load, but nothing reads it. The log output format is chosen by the logging setup at startup (SCION_LOG_GCP selects Cloud Logging JSON). There is no environment-variable override.",
+          "x-since": "1"
+        },
+        "keyring_file": {
+          "type": "string",
+          "description": "Experimental: path of the server keyring file, a version-1 JSON document holding versioned signing and encryption keys. Read once at startup by the hub/web server process (never by --role relay); a keyring file together with --session-secret, SCION_SERVER_SESSION_SECRET or SESSION_SECRET refuses startup. Requires the server.secret_rotation experiment. In this release only web session cookies use the keyring; every other purpose uses its \"legacy\" entry unchanged. Never returned or accepted by the server-config API. Restart to apply.",
+          "x-sensitive": true,
+          "x-env-var": "SCION_SERVER_KEYRING_FILE",
+          "x-since": "1"
+        },
+        "keyring_file_allow_world_readable": {
+          "type": "boolean",
+          "description": "Experimental: operator override that admits a server keyring file whose world-read permission bit is set, with a warning. Default false: a world-readable keyring file refuses startup. World write or execute is always refused, and a group-readable file loads with a warning. Prefer mounting the file with mode 0400 (0440 when a group must read it). Never returned or accepted by the server-config API. Restart to apply.",
+          "x-env-var": "SCION_SERVER_KEYRING_FILE_ALLOW_WORLD_READABLE",
           "x-since": "1"
         },
         "scheduler": { "$ref": "#/$defs/serverScheduler" },
@@ -596,6 +610,29 @@
         "safe_to_evict": {
           "type": "boolean",
           "description": "Kubernetes only. Set to false to add the cluster-autoscaler.kubernetes.io/safe-to-evict: \"false\" annotation to agent pods using this runtime entry (on GKE Autopilot this requests extended run duration). true is accepted and adds nothing. A profile value wins over this; a template or agent kubernetes.safeToEvict wins over both. Ignored, with a warning, on other runtimes."
+        },
+        "node_selector": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Kubernetes only. Node selector labels (label key to value) added to agent pods started on the runtime this entry describes; a profile on this entry adds its own values over these. Keys may contain dots and slashes. Validated like the Kubernetes API server (qualified-name keys, label values)."
+        },
+        "tolerations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": { "type": "string" },
+              "operator": { "type": "string", "enum": ["", "Equal", "Exists"] },
+              "value": { "type": "string" },
+              "effect": { "type": "string", "enum": ["", "NoSchedule", "PreferNoSchedule", "NoExecute"] }
+            },
+            "additionalProperties": false
+          },
+          "description": "Kubernetes only. Tolerations added to agent pods started on the runtime this entry describes; a profile on this entry adds its own values over these. An empty key requires operator Exists; Exists requires an empty value."
+        },
+        "runtime_class_name": {
+          "type": "string",
+          "description": "Kubernetes only. RuntimeClass name (DNS-1123 subdomain) for agent pods started on the runtime this entry describes, for example a sandbox class such as gvisor. A profile on this entry that sets one wins."
         },
         "shared_dir_storage_backend": {
           "type": "string",
@@ -1168,6 +1205,29 @@
           "type": "boolean",
           "description": "Kubernetes only. Set to false to add the cluster-autoscaler.kubernetes.io/safe-to-evict: \"false\" annotation to agent pods under this profile (on GKE Autopilot this requests extended run duration). true is accepted and adds nothing. Wins over the runtime entry's value; a template or agent kubernetes.safeToEvict wins over this. Ignored, with a warning, on other runtimes."
         },
+        "node_selector": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Kubernetes only. Node selector labels (label key to value) added to agent pods whose runtime choice used this profile, over the runtime entry's values. Keys may contain dots and slashes. Validated like the Kubernetes API server (qualified-name keys, label values)."
+        },
+        "tolerations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": { "type": "string" },
+              "operator": { "type": "string", "enum": ["", "Equal", "Exists"] },
+              "value": { "type": "string" },
+              "effect": { "type": "string", "enum": ["", "NoSchedule", "PreferNoSchedule", "NoExecute"] }
+            },
+            "additionalProperties": false
+          },
+          "description": "Kubernetes only. Tolerations added to agent pods whose runtime choice used this profile, over the runtime entry's values. An empty key requires operator Exists; Exists requires an empty value."
+        },
+        "runtime_class_name": {
+          "type": "string",
+          "description": "Kubernetes only. RuntimeClass name (DNS-1123 subdomain) for agent pods whose runtime choice used this profile, for example a sandbox class such as gvisor. Wins over the runtime entry's value."
+        },
         "shared_dir_storage_backend": {
           "type": "string",
           "enum": ["", "local", "nfs"],
@@ -1283,7 +1343,7 @@
       "properties": {
         "hub_internal_url": {
           "type": "string",
-          "description": "Base URL of the hub internal API the relay calls for admission, RPCs and re-checks; any hub replica serves it (e.g. 'http://hub-internal.scion.svc:9811').",
+          "description": "Base URL of the hub internal API the relay calls for admission, RPCs and re-checks; any hub replica serves it (e.g. 'https://hub-internal.scion.svc:9811'). Must be https:// unless its host is a loopback IP literal (127.0.0.0/8 or ::1, not localhost).",
           "x-env-var": "SCION_SERVER_RELAY_HUBINTERNALURL",
           "x-since": "1"
         },
@@ -1291,6 +1351,12 @@
           "type": "string",
           "description": "The relay's own public URL, recorded as its relay_instances.public_endpoint.",
           "x-env-var": "SCION_SERVER_RELAY_PUBLICURL",
+          "x-since": "1"
+        },
+        "singleton": {
+          "type": "boolean",
+          "description": "Asserts a non-HA singleton relay: required on Cloud Run (K_SERVICE set), with max_instances=1, min_instances=1 and cpu_idle=false; allowed elsewhere, where it labels the relay non-HA. Read at startup.",
+          "x-env-var": "SCION_SERVER_RELAY_SINGLETON",
           "x-since": "1"
         }
       }
@@ -1309,7 +1375,7 @@
         "hub_name": {
           "type": "string",
           "pattern": "^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$",
-          "description": "Human-readable hub display name for HA deployments. All nodes in a cluster should share the same hub_name. Defaults to os.Hostname() if not set.",
+          "description": "Hub name for HA deployments: a lowercase DNS label (letters, digits and hyphens, at most 63 characters, starting with a letter and not ending with a hyphen), used in log labels, telemetry and secret labels. All nodes in a cluster should share the same hub_name. Defaults to the machine hostname if not set.",
           "x-env-var": "SCION_SERVER_HUB_HUBNAME",
           "x-scope": "global"
         },
@@ -1330,6 +1396,11 @@
           "type": "string",
           "description": "Deploy-time class of this hub. The only recognised value is \"test\"; unset means the hub is not a test hub. Read once at startup by the --test-mode gate: every level other than off requires \"test\". Settable only in the settings file or environment: the server-config API refuses this key in every mode.",
           "x-env-var": "SCION_SERVER_HUB_CLASS"
+        },
+        "gcp_project_id": {
+          "type": "string",
+          "description": "The hub's own GCP project: the project for service-account minting, the Policy Troubleshooter quota project, and the export project of the hub's metrics and traces (server.hub.observability). When unset, those uses fall back to the project of the Google Cloud metadata server where there is one. The environment variable wins over the settings file. Read once at startup; restart required to change. Settable only in the settings file or environment: the server-config API refuses this key in every mode.",
+          "x-env-var": "SCION_SERVER_HUB_GCPPROJECTID"
         },
         "test_identities": {
           "type": "object",
@@ -1431,6 +1502,13 @@
           "x-env-var": "SCION_SERVER_HUB_PERFTRACE",
           "x-since": "1"
         },
+        "csp_report_raw_samples": {
+          "type": "boolean",
+          "default": false,
+          "description": "Adds each browser policy report's sample to its csp_violation log record, off by default. A sample can hold the start of page content (for a Trusted Types report, the text passed to the sink, such as a chat message), so it is left out unless this is on. For a short diagnosis; turn it off afterwards. Restart required to change.",
+          "x-env-var": "SCION_SERVER_HUB_CSPREPORTRAWSAMPLES",
+          "x-since": "1"
+        },
         "membership_sweep_report_only": {
           "type": "boolean",
           "default": false,
@@ -1476,14 +1554,38 @@
             },
             "internal_listen": {
               "type": "string",
-              "description": "host:port of the internal relay API listener (multi-node deployments). It serves only the internal relay API and must be reachable only inside the cluster/VPC, never publicly. TLS on the internal hop is recommended (e.g. a service mesh or TLS-terminating proxy, advertised as https://); plain http:// is accepted.",
+              "description": "host:port of the internal relay API listener (multi-node deployments). It serves only the internal relay API and must be reachable only inside the cluster/VPC, never publicly. Without internal_tls_cert_file and internal_tls_key_file it must be a loopback IP literal (127.0.0.0/8 or ::1, not localhost; for example 127.0.0.1:<port> behind a same-host TLS terminator); a wildcard or network address refuses startup.",
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_INTERNALLISTEN",
               "x-since": "1"
             },
             "internal_advertise": {
               "type": "string",
-              "description": "Base URL (http(s)://host:port) other hub nodes use to reach this node's internal listener. Default: POD_IP with the listen port, else the listen host if it is not a wildcard. Prefer https:// (TLS on the internal hop); http:// is accepted.",
+              "description": "Base URL (http(s)://host:port) other hub nodes use to reach this node's internal listener. Default: POD_IP with the listen port, else the listen host if it is not a wildcard. Must be https:// unless its host is a loopback IP literal (127.0.0.0/8 or ::1, not localhost); derived as https:// when the listener serves TLS.",
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_INTERNALADVERTISE",
+              "x-since": "1"
+            },
+            "internal_tls_cert_file": {
+              "type": "string",
+              "description": "Path of the PEM certificate chain the internal relay listener serves TLS with. Set together with internal_tls_key_file. Re-read when the file changes.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_INTERNALTLSCERTFILE",
+              "x-since": "1"
+            },
+            "internal_tls_key_file": {
+              "type": "string",
+              "description": "Path of the PEM private key of internal_tls_cert_file. Set together with internal_tls_cert_file.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_INTERNALTLSKEYFILE",
+              "x-since": "1"
+            },
+            "internal_tls_ca_file": {
+              "type": "string",
+              "description": "Path of the PEM CA bundle every internal relay hop client verifies peers with. When set it replaces the system roots. A private or internal CA REQUIRES it: the system roots do not validate such a certificate, and the hop then fails closed.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_INTERNALTLSCAFILE",
+              "x-since": "1"
+            },
+            "internal_tls_server_name": {
+              "type": "string",
+              "description": "Name internal relay hop clients verify in the peer certificate instead of the dialed host, so one certificate (for example with the SAN scion-relay.internal) can serve every node dialed by pod IP. Default: the dialed host.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_INTERNALTLSSERVERNAME",
               "x-since": "1"
             },
             "peer_auth": {
@@ -1773,6 +1875,29 @@
               "type": ["boolean", "null"],
               "description": "Kubernetes only. This instance's safe_to_evict default: false adds the cluster-autoscaler.kubernetes.io/safe-to-evict: \"false\" annotation to agent pods; true is accepted and adds nothing; unset or null adds nothing. An agent's kubernetes.safeToEvict wins over it."
             },
+            "node_selector": {
+              "type": "object",
+              "additionalProperties": { "type": "string" },
+              "description": "Kubernetes only. Node selector labels (label key to value) for this instance's agent pods. Operator-owned: an agent may add other keys but cannot change one set here. Validated like the Kubernetes API server (qualified-name keys, label values)."
+            },
+            "tolerations": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "key": { "type": "string" },
+                  "operator": { "type": "string", "enum": ["", "Equal", "Exists"] },
+                  "value": { "type": "string" },
+                  "effect": { "type": "string", "enum": ["", "NoSchedule", "PreferNoSchedule", "NoExecute"] }
+                },
+                "additionalProperties": false
+              },
+              "description": "Kubernetes only. Tolerations for this instance's agent pods. An agent's own tolerations must each match one of these; when none are set, agent tolerations are refused. An empty key requires operator Exists; Exists requires an empty value. Never derived from node_selector."
+            },
+            "runtime_class_name": {
+              "type": "string",
+              "description": "Kubernetes only. RuntimeClass name (DNS-1123 subdomain) for this instance's agent pods. Operator-owned: an agent cannot choose or change it. The RuntimeClass must already exist on the cluster."
+            },
             "shared_dir_storage_backend": {
               "type": "string",
               "enum": ["", "local", "nfs"],
@@ -1809,6 +1934,9 @@
                 { "required": ["gke"], "properties": { "gke": { "const": true } } },
                 { "required": ["priority_class_name"], "properties": { "priority_class_name": { "minLength": 1 } } },
                 { "required": ["safe_to_evict"], "properties": { "safe_to_evict": { "type": "boolean" } } },
+                { "required": ["node_selector"], "properties": { "node_selector": { "minProperties": 1 } } },
+                { "required": ["tolerations"], "properties": { "tolerations": { "minItems": 1 } } },
+                { "required": ["runtime_class_name"], "properties": { "runtime_class_name": { "minLength": 1 } } },
                 { "required": ["home_storage_backend"], "properties": { "home_storage_backend": { "minLength": 1 } } },
                 { "required": ["home_storage_leaf"], "properties": { "home_storage_leaf": { "minLength": 1 } } }
               ]
@@ -1862,11 +1990,10 @@
     "corsConfig": {
       "type": "object",
       "properties": {
-        "enabled": { "type": "boolean", "default": true },
+        "enabled": { "type": "boolean" },
         "allowed_origins": {
           "type": "array",
-          "items": { "type": "string" },
-          "default": ["*"]
+          "items": { "type": "string" }
         },
         "allowed_methods": {
           "type": "array",
@@ -1905,6 +2032,33 @@
           "default": false,
           "description": "PostgreSQL only. By default the hub refuses to start, and the maintenance commands that migrate the hub database refuse to run, when current_schema() has no hub tables but a later schema on the connection's search_path does, because the migration would create a new, empty table set that hides the existing data. Set true to log a warning and continue anyway, creating the new table set in the current schema.",
           "x-env-var": "SCION_SERVER_DATABASE_ALLOWSHADOWEDSCHEMA"
+        },
+        "tx_diagnostics": {
+          "type": "object",
+          "description": "Transaction-hold and lock-wait diagnostics for the hub database. A transaction or connection checkout held past hold_warn_threshold, or a request that waited past lock_wait_warn_threshold for a connection, logs one WARN per call site and kind per warn_interval; hold and wait histograms are recorded when metrics export is on.",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Install the diagnostics. false leaves the database open path exactly as without them."
+            },
+            "hold_warn_threshold": {
+              "type": "string",
+              "default": "2s",
+              "description": "Log a transaction or connection held at least this long (Go duration). '0' turns these WARNs off; metrics are still recorded."
+            },
+            "lock_wait_warn_threshold": {
+              "type": "string",
+              "default": "1s",
+              "description": "Log a request that waited at least this long for a database connection (Go duration). '0' turns these WARNs off."
+            },
+            "warn_interval": {
+              "type": "string",
+              "default": "1m",
+              "description": "Rate-limit window: at most one WARN per call site and kind per interval (Go duration, positive)."
+            }
+          }
         }
       }
     },
@@ -2049,6 +2203,44 @@
         "bucket": { "type": "string", "description": "GCS bucket name.", "x-env-var": "SCION_SERVER_STORAGE_BUCKET" },
         "local_path": { "type": "string", "x-env-var": "SCION_SERVER_STORAGE_LOCALPATH" }
       }
+    },
+    "serverProjectStorage": {
+      "type": "object",
+      "description": "The one project storage block: backend places every project's workspace and shared dirs, homes places agent homes. Replaces workspace_storage, shared_dir_storage and home_storage (set it alone). Global-only, Layer-0 (restart to apply).",
+      "x-since": "1",
+      "properties": {
+        "backend": { "type": "string", "enum": ["", "local", "nfs", "cloudrun-volume", "gke-shared-volume"], "default": "local" },
+        "homes": { "type": "string", "enum": ["", "local", "nfs"], "default": "local", "description": "Where agent homes live: local (in the pod or on the broker host) or nfs (on the backend's share; needs backend nfs)." },
+        "nfs": { "$ref": "#/$defs/serverWorkspaceStorageNFS" },
+        "cloudrun_volume": {
+          "type": "object",
+          "properties": {
+            "volume_name": { "type": "string", "description": "Cloud Run volume declared in the service; mounted at /mnt/<volume_name>. Required when backend is cloudrun-volume." },
+            "subpath_root": { "type": "string", "default": "projects" }
+          }
+        },
+        "gke_shared_volume": {
+          "type": "object",
+          "properties": {
+            "volume_name": { "type": "string", "description": "Pod volume that mounts the shared PVC at /mnt/<volume_name>. Required when backend is gke-shared-volume." },
+            "pv_claim_name": { "type": "string" },
+            "subpath_root": { "type": "string", "default": "projects" }
+          }
+        },
+        "homes_options": {
+          "type": "object",
+          "description": "Operational knobs of agent homes on nfs (the former server.home_storage fields, unchanged meaning).",
+          "properties": {
+            "leaf": { "type": "string", "enum": ["", "pod", "broker"], "default": "pod" },
+            "stop_grace_seconds": { "type": "integer", "minimum": 0, "default": 30, "description": "Termination grace period of pods with an NFS home." },
+            "termination_wait_seconds": { "type": "integer", "minimum": 0, "default": 15, "description": "Extra time, beyond the grace period, a start waits for the agent's previous pod to stop." },
+            "skeleton_max_bytes": { "type": "integer", "minimum": 0, "default": 268435456, "description": "Largest image home skeleton copied into a new home." },
+            "allow_incomplete_phases": { "type": "boolean", "default": false, "description": "Development only. Allows nfs homes before the feature is complete." }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
     },
     "serverWorkspaceStorage": {
       "type": "object",
@@ -2487,10 +2679,11 @@
       "x-since": "1",
       "properties": {
         "deployment_tier": { "type": "string", "description": "Update strategy: \"source\" (git-based) or \"binary\" (release-based)." },
-        "release_channel": { "type": "string", "description": "Release channel to track: \"stable\" or \"preview\"." },
+        "release_channel": { "type": "string", "description": "Release channel to track: \"nightly\", \"preview\" or \"stable\". When unset, the running version's channel is used." },
         "update_policy": { "type": "string", "description": "Automatic update behavior: \"auto\", \"notify\", or \"disabled\". Unknown values are treated as \"notify\"." },
         "check_interval_hours": { "type": "integer", "minimum": 0, "description": "Hours between release checks." },
-        "github_repo": { "type": "string", "description": "GitHub repository (owner/name) to check for releases." }
+        "github_repo": { "type": "string", "description": "GitHub repository (owner/name) to check for releases." },
+        "install_root": { "type": "string", "description": "Versioned install root (releases/, current, previous) for release self-update. Default /opt/scion; SCION_MAINTENANCE_INSTALL_ROOT overrides it." }
       },
       "additionalProperties": false
     },

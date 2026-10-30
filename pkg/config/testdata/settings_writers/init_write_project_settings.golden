@@ -1,4 +1,3 @@
-active_profile: local
 cli:
     autohelp: true
 hub:

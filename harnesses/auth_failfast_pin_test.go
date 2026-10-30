@@ -189,7 +189,7 @@ func runPinDriver(t *testing.T, python, dir string, cases []pinCase) ([]pinMetho
 	// A minimal environment: no credential can come from the container
 	// environment, and HOME holds no credential file, matching the Go side's
 	// empty env and empty agent home.
-	cmd := exec.Command(python, "-I", driver, absDir, reqPath)
+	cmd := exec.Command(python, "-I", "-B", driver, absDir, reqPath)
 	cmd.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH"), "LANG=C.UTF-8", "PYTHONDONTWRITEBYTECODE=1"}
 	out, err := cmd.Output()
 	if err != nil {

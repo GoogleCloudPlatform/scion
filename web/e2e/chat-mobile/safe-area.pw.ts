@@ -582,38 +582,64 @@ test('in frame mode a window scroll is reset to the top', async ({ page }, testI
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
 });
 
-test('the rail and members lists clear the home indicator', async ({ page }, testInfo) => {
+test('the rail and members columns clear the home indicator', async ({ page }, testInfo) => {
   skipUnlessChromium(testInfo.project.name);
+  const mobile = testInfo.project.name !== 'desktop-1440';
   await openChatRail(page);
   const usual = await deepBoxRetrying(page, 'scion-chat-space-rail', '.rail-body');
   expect(usual.paddingBottom, '.rail-body padding-bottom with no inset').toBe(4);
 
   await forceSafeAreaInsets(page, PORTRAIT);
+  // The quick-switcher footer pinned below the rail list takes the inset,
+  // so the list keeps only its own 0.25rem and the inset is not paid twice.
   await expect
-    .poll(
-      async () => (await deepBoxRetrying(page, 'scion-chat-space-rail', '.rail-body')).paddingBottom
-    )
+    .poll(async () => (await deepBoxRetrying(page, '.v2-rail > .palette-footer')).paddingBottom)
     .toBe(PORTRAIT.bottom);
-  const members = await deepBoxRetrying(page, 'scion-chat-members', '.members-body');
-  expect(members.paddingBottom, '.members-body padding-bottom = bottom inset').toBe(
-    PORTRAIT.bottom
-  );
+  expect(
+    (await deepBoxRetrying(page, 'scion-chat-space-rail', '.rail-body')).paddingBottom,
+    '.rail-body padding-bottom under the footer'
+  ).toBe(4);
 
-  // Scrolled to the end, the last row of the rail sits above the inset.
-  await expandSpace(page);
+  // The members column has the footer on phones only; side by side, its
+  // list clears the indicator itself.
+  const members = await deepBoxRetrying(page, 'scion-chat-members', '.members-body');
+  if (mobile) {
+    const footer = await deepBoxRetrying(page, '.v2-members > .palette-footer');
+    expect(footer.paddingBottom, 'members footer padding-bottom = bottom inset').toBe(
+      PORTRAIT.bottom
+    );
+    expect(members.paddingBottom, '.members-body padding-bottom under the footer').toBe(0);
+  } else {
+    expect(members.paddingBottom, '.members-body padding-bottom = bottom inset').toBe(
+      PORTRAIT.bottom
+    );
+  }
+
+  // The footer's button sits above the inset at the bottom of the rail.
   const gap = await page.evaluate(() => {
-    const rail = document
-      .querySelector('scion-page-chat')!
-      .shadowRoot!.querySelector('scion-chat-space-rail')!;
+    const root = document.querySelector('scion-page-chat')!.shadowRoot!;
+    const rail = root.querySelector('.v2-rail')!;
+    const button = rail.querySelector('.palette-footer > .palette-footer-btn')!;
+    return rail.getBoundingClientRect().bottom - button.getBoundingClientRect().bottom;
+  });
+  expect(gap, 'space below the footer button').toBeGreaterThanOrEqual(PORTRAIT.bottom - 0.5);
+
+  // Scrolled to the end, the last row of the rail sits above the footer,
+  // not behind it.
+  await expandSpace(page);
+  const overlap = await page.evaluate(() => {
+    const root = document.querySelector('scion-page-chat')!.shadowRoot!;
+    const footer = root.querySelector('.v2-rail > .palette-footer')!;
+    const rail = root.querySelector('scion-chat-space-rail')!;
     const body = rail.shadowRoot!.querySelector('.rail-body') as HTMLElement;
     body.scrollTop = body.scrollHeight;
     const rows = [...body.querySelectorAll('*')].filter(
       (el) => el.getBoundingClientRect().height > 0
     );
     const lastBottom = Math.max(...rows.map((el) => el.getBoundingClientRect().bottom));
-    return body.getBoundingClientRect().bottom - lastBottom;
+    return lastBottom - footer.getBoundingClientRect().top;
   });
-  expect(gap, 'space below the last rail row').toBeGreaterThanOrEqual(PORTRAIT.bottom - 0.5);
+  expect(overlap, 'last rail row bottom minus footer top').toBeLessThanOrEqual(0.5);
 });
 
 test('profile-shell content clears the home indicator', async ({ page }, testInfo) => {

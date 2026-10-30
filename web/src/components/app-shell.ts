@@ -358,85 +358,82 @@ export class ScionApp extends LitElement {
   }
 
   /**
-   * Get the page title based on current path
+   * Get the page title based on current path. Matches on the pathname only:
+   * currentPath carries the query string (and may carry a hash), which must
+   * not turn a valid route into "Page Not Found".
    */
   private getPageTitle(): string {
+    const path = this.currentPath.split(/[?#]/, 1)[0];
     // Check for exact match
-    if (PAGE_TITLES[this.currentPath]) {
-      return PAGE_TITLES[this.currentPath];
+    if (PAGE_TITLES[path]) {
+      return PAGE_TITLES[path];
     }
 
     // Check for pattern matches
-    if (this.currentPath === '/projects/new') {
+    if (path === '/projects/new') {
       return 'Create Project';
     }
-    if (this.currentPath.match(/^\/projects\/[^/]+\/settings$/)) {
+    if (path.match(/^\/projects\/[^/]+\/settings$/)) {
       return 'Project Settings';
     }
-    if (this.currentPath.match(/^\/projects\/[^/]+\/schedules$/)) {
+    if (path.match(/^\/projects\/[^/]+\/schedules$/)) {
       return 'Schedules';
     }
-    if (this.currentPath.match(/^\/projects\/[^/]+\/metrics$/)) {
+    if (path.match(/^\/projects\/[^/]+\/metrics$/)) {
       return 'Project Metrics';
     }
-    if (
-      this.currentPath.match(/^\/projects\/[^/]+\/artifacts\/[^/]+$/) &&
-      isFeatureEnabled(ARTIFACTS_FLAG)
-    ) {
+    if (path.match(/^\/projects\/[^/]+\/artifacts\/[^/]+$/) && isFeatureEnabled(ARTIFACTS_FLAG)) {
       return 'Artifact';
     }
-    if (this.currentPath === '/artifacts' && isFeatureEnabled(ARTIFACTS_FLAG)) {
+    if (path === '/artifacts' && isFeatureEnabled(ARTIFACTS_FLAG)) {
       return 'Artifacts';
     }
-    if (this.currentPath.match(/^\/projects\/[^/]+\/templates\/[^/]+$/)) {
+    if (path.match(/^\/projects\/[^/]+\/templates\/[^/]+$/)) {
       return 'Template';
     }
-    if (this.currentPath.startsWith('/projects/')) {
+    if (path.startsWith('/projects/')) {
       return 'Project';
     }
-    if (this.currentPath === '/agents/new') {
+    if (path === '/agents/new') {
       return 'Create Agent';
     }
-    if (this.currentPath.match(/^\/agents\/[^/]+\/terminal$/)) {
+    if (path.match(/^\/agents\/[^/]+\/terminal$/)) {
       return 'Terminal';
     }
-    if (this.currentPath === '/terminals' || this.currentPath.match(/^\/terminals\/[^/]+$/)) {
+    if (path === '/terminals' || path.match(/^\/terminals\/[^/]+$/)) {
       return 'Terminals';
     }
-    if (this.currentPath.match(/^\/agents\/[^/]+\/configure$/)) {
-      return 'Configure Agent';
-    }
-    if (this.currentPath.match(/^\/agents\/[^/]+\/edit$/)) {
+    if (path.match(/^\/agents\/[^/]+\/edit$/)) {
       return 'Edit Agent';
     }
-    if (this.currentPath.startsWith('/agents/')) {
+    if (path.startsWith('/agents/')) {
       return 'Agent';
     }
-    if (this.currentPath.startsWith('/brokers/')) {
+    if (path.startsWith('/brokers/')) {
       return 'Broker';
     }
-    if (this.currentPath.match(/^\/settings\/harness-configs\/[^/]+$/)) {
+    if (path.match(/^\/settings\/harness-configs\/[^/]+$/)) {
       return 'Harness Config';
     }
-    if (this.currentPath.match(/^\/settings\/templates\/[^/]+$/)) {
+    if (path.match(/^\/settings\/templates\/[^/]+$/)) {
       return 'Template';
     }
-    if (this.currentPath.match(/^\/admin\/groups\/[^/]+$/)) {
+    if (path.match(/^\/admin\/groups\/[^/]+$/)) {
       return 'Group';
     }
-    if (this.currentPath === '/admin/maintenance') {
+    if (path === '/admin/maintenance') {
       return 'Maintenance';
     }
-    if (this.currentPath.match(/^\/admin\/integrations\/[^/]+$/)) {
+    if (path.match(/^\/admin\/integrations\/[^/]+$/)) {
       return 'Integration';
     }
-    if (this.currentPath === '/skills/new') {
+    if (path === '/skills/new') {
       return 'Create Skill';
     }
-    if (this.currentPath.startsWith('/skills/')) {
+    if (path.startsWith('/skills/')) {
       return 'Skill';
     }
-    if (this.currentPath.match(/^\/admin\/skill-registries\/[^/]+$/)) {
+    if (path.match(/^\/admin\/skill-registries\/[^/]+$/)) {
       return 'Skill Registry';
     }
 

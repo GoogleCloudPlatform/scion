@@ -138,7 +138,7 @@ func TestVSCode_KeepsOtherEntriesAndReportsHostKeyChange(t *testing.T) {
 	require.NoError(t, err)
 	otherKey := mustNormKey(t, testSSHPublicKey(t))
 	oldKey := mustNormKey(t, testSSHPublicKey(t))
-	require.NoError(t, ensureSSHDir(env.home, p.dir()))
+	require.NoError(t, ensureSSHDir(env.home, vscodeDirRel))
 	require.NoError(t, os.WriteFile(p.sshConfig(), []byte(renderVSCodeSSHConfig(map[string]string{other: otherBlock})), 0o600))
 	require.NoError(t, os.WriteFile(p.knownHosts(), []byte(renderKnownHosts(map[string]string{other: otherKey, host: oldKey})), 0o600))
 
@@ -161,7 +161,7 @@ func TestVSCode_KeepsOtherEntriesAndReportsHostKeyChange(t *testing.T) {
 func TestVSCode_ReusesIncludeFileLabel(t *testing.T) {
 	hub, env, fake := newVSCodeTest(t)
 	sp := sshPaths{home: env.home}
-	require.NoError(t, ensureSSHDir(env.home, sp.includeDir()))
+	require.NoError(t, ensureSSHDir(env.home, sshIncludeDirRel))
 	include := renderSSHIncludeFile(hub.endpoint(t), "custom", nil)
 	require.NoError(t, os.WriteFile(sp.includeFile("custom"), []byte(include), 0o600))
 	before := sshFilesSnapshot(t, filepath.Join(env.home, ".ssh"))
@@ -182,7 +182,7 @@ func TestUpdateVSCodeFiles_ConcurrentWritersKeepAllEntries(t *testing.T) {
 	p := vscodePaths{home: t.TempDir()}
 	const n = 8
 	userSettings := `{"editor.fontSize": 13, "terminal.integrated.profiles.linux": {"My shell": {"path": "/usr/bin/fish"}}}`
-	require.NoError(t, ensureSSHDir(p.home, filepath.Dir(p.settings())))
+	require.NoError(t, ensureSSHDir(p.home, vscodeSettingsDirRel))
 	require.NoError(t, os.WriteFile(p.settings(), []byte(userSettings), 0o600))
 	start := make(chan struct{})
 	errs := make(chan error, n)
@@ -253,7 +253,7 @@ func TestVSCode_Prune(t *testing.T) {
 			blocks[h] = b
 			keys[h] = mustNormKey(t, testSSHPublicKey(t))
 		}
-		require.NoError(t, ensureSSHDir(env.home, p.dir()))
+		require.NoError(t, ensureSSHDir(env.home, vscodeDirRel))
 		require.NoError(t, os.WriteFile(p.sshConfig(), []byte(renderVSCodeSSHConfig(blocks)), 0o600))
 		require.NoError(t, os.WriteFile(p.knownHosts(), []byte(renderKnownHosts(keys)), 0o600))
 		return gone, kept, other
@@ -348,7 +348,7 @@ func TestVSCode_CommentedSettingsStopBeforeSSHFiles(t *testing.T) {
 	_, env, fake := newVSCodeTest(t)
 	p := vscodePaths{home: env.home}
 	content := "{\n  // mine\n  \"editor.fontSize\": 14\n}\n"
-	require.NoError(t, ensureSSHDir(env.home, filepath.Dir(p.settings())))
+	require.NoError(t, ensureSSHDir(env.home, vscodeSettingsDirRel))
 	require.NoError(t, os.WriteFile(p.settings(), []byte(content), 0o600))
 
 	err := vscodeMain(context.Background(), env, "a/b-c", vscodeDefaultFolder, false)
@@ -434,7 +434,7 @@ func TestEnsureVSCodeSettings(t *testing.T) {
 	setup := func(t *testing.T, content string) vscodePaths {
 		p := vscodePaths{home: t.TempDir()}
 		if content != "" {
-			require.NoError(t, ensureSSHDir(p.home, filepath.Dir(p.settings())))
+			require.NoError(t, ensureSSHDir(p.home, vscodeSettingsDirRel))
 			require.NoError(t, os.WriteFile(p.settings(), []byte(content), 0o600))
 		}
 		return p
@@ -447,7 +447,7 @@ func TestEnsureVSCodeSettings(t *testing.T) {
 	for name, content := range map[string]string{"empty": "", "whitespace": " \n\t\n", "null": "null\n"} {
 		t.Run(name+" counts as an empty object", func(t *testing.T) {
 			p := vscodePaths{home: t.TempDir()}
-			require.NoError(t, ensureSSHDir(p.home, filepath.Dir(p.settings())))
+			require.NoError(t, ensureSSHDir(p.home, vscodeSettingsDirRel))
 			require.NoError(t, os.WriteFile(p.settings(), []byte(content), 0o600))
 			require.NoError(t, ensureVSCodeSettings(p))
 			assert.Equal(t, vscodeGolden(p), readTestFile(t, p.settings()))
@@ -499,7 +499,9 @@ func TestEnsureVSCodeSettings(t *testing.T) {
 		m["terminal.integrated.defaultProfile.linux"] = "Container shell"
 		m["terminal.integrated.sendKeybindingsToShell"] = false
 		m["terminal.integrated.profiles.linux"].(map[string]any)["Scion agent"].(map[string]any)["args"] = []any{"-c", "echo edited"}
-		require.NoError(t, writeVSCodeSettings(p.settings(), m))
+		data, err := encodeVSCodeSettings(m)
+		require.NoError(t, err)
+		require.NoError(t, writeVSCodeSettingsData(p.settings(), data))
 
 		require.NoError(t, ensureVSCodeSettings(p))
 		got, err := decodeVSCodeSettingsJSON([]byte(readTestFile(t, p.settings())))
@@ -517,7 +519,7 @@ func TestEnsureVSCodeSettings(t *testing.T) {
 	t.Run("comments with the managed values are kept", func(t *testing.T) {
 		p := vscodePaths{home: t.TempDir()}
 		content := "// mine\n" + strings.Replace(vscodeGolden(p), "{\n", "{\n  /* scion */\n", 1)
-		require.NoError(t, ensureSSHDir(p.home, filepath.Dir(p.settings())))
+		require.NoError(t, ensureSSHDir(p.home, vscodeSettingsDirRel))
 		require.NoError(t, os.WriteFile(p.settings(), []byte(content), 0o600))
 		require.NoError(t, ensureVSCodeSettings(p))
 		assert.Equal(t, content, readTestFile(t, p.settings()))
@@ -707,7 +709,7 @@ func TestVSCodeBlockHub(t *testing.T) {
 	assert.Equal(t, tunnelclient.NormalizeEndpoint("https://hub.example"), vscodeBlockHub(rendered))
 	quoted := "Host scion.h.p.a\n  ProxyCommand /s tunnel --stdio --ssh --hub 'https://Hub.Example:443/' --project p a\n"
 	assert.Equal(t, tunnelclient.NormalizeEndpoint("https://hub.example"), vscodeBlockHub(quoted))
-	assert.Equal(t, "https://h.example/a b'c%d", sshShellUnquote(sshShellQuote("https://h.example/a b'c%d")))
+	assert.Equal(t, "https://h.example/a b'c%d", sshShellUnquote(mustSSHShellQuote(t, "https://h.example/a b'c%d")))
 	assert.Empty(t, vscodeBlockHub("Host scion.h.p.a\n  HostKeyAlias scion.h.p.a\n"))
 }
 

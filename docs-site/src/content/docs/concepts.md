@@ -75,7 +75,15 @@ Agent state uses a **layered model** with three dimensions:
 
 - **Detail** — Freeform context about the current activity (tool name, message, task summary).
 
-This separation allows the UI and API consumers to distinguish between infrastructure lifecycle events (provisioning, stopping) and the agent's cognitive state (thinking, waiting for input). Activities like `completed`, `blocked`, and `limits_exceeded` are "sticky" — they persist until the agent is explicitly restarted or stopped. The `blocked` activity is set by agents themselves when they are intentionally waiting for an expected event (such as a child agent completing), which prevents the system from falsely marking them as stalled.
+This separation allows the UI and API consumers to distinguish between infrastructure lifecycle events (provisioning, stopping) and the agent's cognitive state (thinking, waiting for input). The `blocked` activity is set by agents themselves when they are intentionally waiting for an expected event (such as a child agent completing), which prevents the system from falsely marking them as stalled.
+
+#### Sticky activities
+
+The activities `waiting_for_input`, `blocked`, `completed`, `limits_exceeded`, and `crashed` are "sticky": routine harness events (model calls, tool runs, the end of a turn, sub-agent activity) do not replace them, except as listed below for `waiting_for_input`. A sticky activity is cleared by new work (a new prompt, or a new harness session), by an explicit status update from the agent (`sciontool status`), or by a lifecycle phase change such as stopping. Beyond that, each one has its own rules:
+
+- **`limits_exceeded` and `crashed`** are terminal: they record how the agent ended. A later notification, or a later question from the agent (a Claude Code `AskUserQuestion` or `ExitPlanMode`), does not replace them.
+- **`blocked` and `completed`** are kept through tool runs, which may follow `task_completed` as wrap-up. The agent asking the user (its own question, or a harness notification that asks the user) moves them to `waiting_for_input`. A sub-agent's question does not.
+- **`waiting_for_input`** set by the agent itself (`sciontool status ask_user`, or the agent's own `AskUserQuestion` or `ExitPlanMode`) is cleared when the agent starts its next tool, because the user has answered. A wait set by a harness prompt (for example a permission dialog) is also cleared when the prompted tool ends or the turn ends. While a sub-agent's question is open, the wait stays until that sub-agent's question is answered or the sub-agent ends, even if the parent agent answers its own question first.
 
 #### Suspended phase
 
@@ -139,7 +147,7 @@ Furthermore, agent identities are **strictly scoped by their project** (e.g., `p
 A **Workspace** is the working directory mounted into a single agent's container, at `/workspace`; in worktree-per-agent mode the agent instead works in its worktree under `/repo-root` (for a repository linked to the local workstation Hub, `/repo-root/.scion/agents/<name>/workspace`); scripts should use `$PWD` or `git rev-parse --show-toplevel`. How it is provisioned across a project's agents is set by the project's **workspace sharing mode**, chosen when the project is created. There are four modes:
 
 - **Shared-plain** — One workspace directory is mounted into every agent with no per-agent isolation. This is the model used for plain (non-git) projects.
-- **Worktree-per-agent** — Each agent gets its own [git worktree](https://git-scm.com/docs/git-worktree) over a shared checkout, isolating working trees while sharing one clone's history. Supported on repositories linked to the local workstation Hub (registered with this mode automatically; the worktrees are of your own checkout) and on Hub-managed git projects created with `worktree-per-agent` (see [Linked git projects](/scion/local/workspace/#linked-git-projects)); requires git 2.48 or later on the broker (on Kubernetes, only with NFS workspace storage).
+- **Worktree-per-agent** — Each agent gets its own [git worktree](https://git-scm.com/docs/git-worktree) over a shared checkout, isolating working trees while sharing one clone's history. Supported on repositories linked to the local workstation Hub (registered with this mode automatically; the worktrees are of your own checkout) and on Hub-managed git projects created with `worktree-per-agent` (see [Linked git projects](/scion/local/workspace/#linked-git-projects)); requires git 2.48 or later on the broker; not supported on Kubernetes.
 - **Clone-per-agent** — Each agent gets its own full git clone of the repository.
 - **Empty-per-agent** — For Hub-managed projects without git: each agent gets its own private directory that starts empty. Use [shared directories](/scion/local/workspaces-and-sharing/#2-the-shared-directories-invariant) to share or keep files.
 

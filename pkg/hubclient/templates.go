@@ -199,6 +199,10 @@ type DownloadURLInfo struct {
 	URL  string `json:"url"`
 	Size int64  `json:"size"`
 	Hash string `json:"hash,omitempty"`
+	// Mode is the file's normalised mode, "0755" (executable) or "0644"
+	// (ptone/scion#5652). Hubs before that do not send it: treat a missing
+	// mode as "0644" (transfer.NormalizeMode does).
+	Mode string `json:"mode,omitempty"`
 }
 
 // ValidationReport is the result of validating a resource's storage consistency.

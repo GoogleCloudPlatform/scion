@@ -1,8 +1,15 @@
 server:
   broker:
     instances:
-      - key: k8s-agents
-        name: k8s-agents
+      - key: k8s-agents-scratch
+        name: k8s-agents-scratch
         runtime_target:
           type: kubernetes
           namespace: agents
+          shared_dir_size: 50Gi
+      - key: k8s-agents-shared
+        name: k8s-agents-shared
+        runtime_target:
+          type: kubernetes
+          namespace: agents
+          shared_dir_size: 20Gi

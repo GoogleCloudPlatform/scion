@@ -2182,7 +2182,8 @@ func TestGenericDeleteBinding_SuperAdmin_LastAdmin(t *testing.T) {
 // up the state in which TestGenericDeleteBinding_SuperAdmin_LastAdmin gets
 // 409 last_admin, without a stub: the suspended dev user's own stored row
 // is what authorization reads. The account-status check refuses the request
-// with 403 before the last-admin guard runs, and the binding is kept.
+// with 403 user_suspended before the last-admin guard runs, and the binding
+// is kept.
 func TestGenericDeleteBinding_SuspendedActor_RefusedBeforeLastAdminGuard(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -2199,7 +2200,7 @@ func TestGenericDeleteBinding_SuspendedActor_RefusedBeforeLastAdminGuard(t *test
 
 	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/admin/role-bindings/"+targetBinding.ID, nil)
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), `"code":"forbidden"`)
+	assert.Contains(t, rec.Body.String(), `"code":"user_suspended"`)
 	assert.NotContains(t, rec.Body.String(), "last_admin")
 	_, err := s.GetRoleBinding(ctx, targetBinding.ID)
 	assert.NoError(t, err, "the target binding is kept")

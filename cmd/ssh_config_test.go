@@ -425,6 +425,7 @@ func TestSSHConfig_CredentialMissingOrRefused_ExitCredential(t *testing.T) {
 		env.token = ""
 		assert.Equal(t, tunnelclient.ExitCredential, runSSHConfig(context.Background(), env, nil, true))
 		assert.Contains(t, errb.String(), "no usable credential")
+		assert.Contains(t, errb.String(), "run scion hub auth login --hub "+tunnelclient.NormalizeEndpoint(hub.srv.URL))
 		assert.Empty(t, sshFilesSnapshot(t, home)[filepath.Join(home, ".ssh")])
 	})
 	t.Run("refused credential", func(t *testing.T) {
@@ -433,6 +434,7 @@ func TestSSHConfig_CredentialMissingOrRefused_ExitCredential(t *testing.T) {
 		env.token = "wrong"
 		assert.Equal(t, tunnelclient.ExitCredential, runSSHConfig(context.Background(), env, nil, true))
 		assert.Contains(t, errb.String(), "credential refused")
+		assert.Contains(t, errb.String(), "run scion hub auth login --hub "+tunnelclient.NormalizeEndpoint(hub.srv.URL))
 		assert.Empty(t, sshFilesSnapshot(t, home)[filepath.Join(home, ".ssh")])
 	})
 }
@@ -609,7 +611,7 @@ func TestSSHConfig_IncludeLineIdempotent(t *testing.T) {
 func TestSSHConfig_WarnsAboutUnreachableOtherHub(t *testing.T) {
 	home := t.TempDir()
 	p := sshPaths{home: home}
-	require.NoError(t, ensureSSHDir(home, p.includeDir()))
+	require.NoError(t, ensureSSHDir(home, sshIncludeDirRel))
 	other := p.includeFile("oldhub")
 	otherContent := renderSSHIncludeFile("https://oldhub.example.test", "oldhub", map[string]string{})
 	require.NoError(t, os.WriteFile(other, []byte(otherContent), 0o600))
@@ -648,7 +650,7 @@ func TestSSHConfig_ReusesRecordedLabel(t *testing.T) {
 	home := t.TempDir()
 	hub := twoProjectHub(t, "tok")
 	p := sshPaths{home: home}
-	require.NoError(t, ensureSSHDir(home, p.includeDir()))
+	require.NoError(t, ensureSSHDir(home, sshIncludeDirRel))
 	require.NoError(t, os.WriteFile(p.includeFile("myhub"),
 		[]byte(renderSSHIncludeFile(hub.endpoint(t), "myhub", map[string]string{})), 0o600))
 

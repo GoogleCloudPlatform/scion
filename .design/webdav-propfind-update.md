@@ -1,5 +1,7 @@
 # WebDAV PROPFIND Checksum Support
 
+> **Superseded (ptone/scion#5547):** this was never built, and the hub WebDAV endpoint it would extend has been removed, together with project-level `scion sync` and `pkg/projectsync`. Kept as history only.
+
 **Created:** 2026-04-01
 **Status:** Planned
 **Related:** `workspace-sync.md`, `pkg/hub/grove_webdav.go`, `pkg/grovesync/grovesync.go`

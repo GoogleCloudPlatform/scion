@@ -16,7 +16,7 @@
  * Async agent create from the web form (ptone/scion#4664), end to end.
  *
  * Acts as a member test identity on a hub with
- * server.hub.async_agent_launch on (a throwaway local hub by default; see
+ * the hub.async_agent_launch experiment on (a throwaway local hub by default; see
  * state.ts for E2E_TARGET_URL). In order, sharing one identity, one
  * browser context and one project:
  *

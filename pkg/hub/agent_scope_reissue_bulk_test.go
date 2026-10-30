@@ -282,6 +282,7 @@ func TestScopeReissueBulk_T13_NoTruncation(t *testing.T) {
 	t.Cleanup(func() { reissueBulkPageSize = prev })
 
 	prevFault := reissueBulkListFault
+	t.Cleanup(func() { reissueBulkListFault = prevFault })
 	reissueBulkListFault = func(page int) error {
 		if page == 2 {
 			return errors.New("injected page read fault")
@@ -293,7 +294,7 @@ func TestScopeReissueBulk_T13_NoTruncation(t *testing.T) {
 	require.ErrorIs(t, err, errReissueEnumeration)
 	assert.Equal(t, edges, f.allEdges(t, f.child), "a failed enumeration changes nothing")
 	assert.Empty(t, batchAudits(t, f.store), "never reported as a completed batch")
-	reissueBulkListFault = prevFault
+	reissueBulkListFault = prevFault // the rest of the test runs without the fault
 
 	resp := f.bulk(t, false)
 	assert.Equal(t, 7, resp.Total, "root, parent, child and four extras")

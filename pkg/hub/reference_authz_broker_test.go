@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"testing"
 	"time"
@@ -59,6 +60,23 @@ func TestBrokerUserMessage_LinksOnlySenderOwnedAttachments(t *testing.T) {
 	events := NewChannelEventPublisher()
 	t.Cleanup(events.Close)
 	proxy := NewMessageBrokerProxy(nil, s, events, func() AgentDispatcher { return dispatcher }, slog.Default())
+	published, unsubscribe := events.Subscribe("user." + owner.ID + ".message")
+	t.Cleanup(unsubscribe)
+	// eventAttachmentIDs returns the attachment ids of the one live event
+	// published for message msgID.
+	eventAttachmentIDs := func(msgID string) []string {
+		t.Helper()
+		evts := collectEvents(published)
+		require.Len(t, evts, 1)
+		var payload UserMessageEvent
+		require.NoError(t, json.Unmarshal(evts[0].Data, &payload))
+		require.Equal(t, msgID, payload.ID)
+		ids := make([]string, 0, len(payload.Attachments))
+		for _, a := range payload.Attachments {
+			ids = append(ids, a.ID)
+		}
+		return ids
+	}
 
 	deliver := func(subscriberStore WebChatStore, text string, refs ...AttachmentRef) string {
 		t.Helper()
@@ -96,7 +114,10 @@ func TestBrokerUserMessage_LinksOnlySenderOwnedAttachments(t *testing.T) {
 	msgID := deliver(wcs, "mixed files", own, ownDMUpload, otherProject, otherUsersUpload)
 	assert.ElementsMatch(t, []string{own.ID, ownDMUpload.ID}, linkedIDs(msgID),
 		"only the sender's own files are linked")
+	assert.ElementsMatch(t, []string{own.ID, ownDMUpload.ID}, eventAttachmentIDs(msgID),
+		"the live event carries the linked files, as history lists them (ptone/scion#5504)")
 
 	msgID = deliver(getAttachmentFaultWCS{WebChatStore: wcs}, "lookup fails", own)
 	assert.Empty(t, linkedIDs(msgID), "a lookup error links nothing")
+	assert.Empty(t, eventAttachmentIDs(msgID), "the live event carries no file that was not linked")
 }

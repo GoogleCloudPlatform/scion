@@ -25,7 +25,6 @@ import (
 	"strings"
 	"testing"
 
-	entsql "entgo.io/ent/dialect/sql"
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
@@ -34,7 +33,7 @@ import (
 // sqliteDB returns the *sql.DB behind an Ent client opened by OpenSQLite.
 func sqliteDB(t *testing.T, client *ent.Client) *sql.DB {
 	t.Helper()
-	drv, ok := client.Driver().(*entsql.Driver)
+	drv, ok := SQLDriver(client.Driver())
 	require.True(t, ok, "ent client driver does not expose a *sql.DB")
 	return drv.DB()
 }

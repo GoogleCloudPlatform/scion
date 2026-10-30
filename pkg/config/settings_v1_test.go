@@ -184,6 +184,41 @@ default_template: my-template
 		"global default_template should not be overridden by project defaults")
 }
 
+// TestLoadVersionedSettings_NewProjectInheritsGlobalActiveProfile verifies
+// that a project seeded from the embedded project defaults (scion init, and
+// the hub-native project seed) does not pin active_profile, so the merged
+// settings use the global active_profile (ptone/scion#3913).
+func TestLoadVersionedSettings_NewProjectInheritsGlobalActiveProfile(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("SCION_ACTIVE_PROFILE", "")
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
+	globalSettings := `
+schema_version: "1"
+active_profile: remote
+profiles:
+  remote:
+    runtime: docker
+`
+	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(globalSettings), 0644))
+
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, ensureProjectSettingsFile(projectDir, InitProjectOpts{SkipRuntimeCheck: true}))
+
+	seeded, err := os.ReadFile(filepath.Join(projectDir, "settings.yaml"))
+	require.NoError(t, err)
+	var seededSettings VersionedSettings
+	require.NoError(t, yaml.Unmarshal(seeded, &seededSettings))
+	assert.Empty(t, seededSettings.ActiveProfile, "the project seed must not set active_profile")
+
+	vs, err := LoadVersionedSettings(projectDir)
+	require.NoError(t, err)
+	assert.Equal(t, "remote", vs.ActiveProfile,
+		"a new project should inherit the global active_profile")
+}
+
 func TestLoadVersionedSettings_ProjectOverride(t *testing.T) {
 	tmpDir := t.TempDir()
 

@@ -74,6 +74,10 @@ A stored interactive login (from `scion hub auth login`) takes precedence over
 a dedicated OS user, an isolated `HOME`, or log out first (`scion hub auth logout`).
 :::
 
+User- and hub-scope `scion hub env` and `scion hub secret` commands (without `--project` or
+`--broker`) need an interactive login (`scion hub auth login`); the Hub refuses access tokens on
+them.
+
 Run `scion hub status` in the agent's environment to check which credential the CLI is
 using.
 

@@ -433,7 +433,9 @@ func (s *Server) handleTemplateFileUpload(w http.ResponseWriter, r *http.Request
 	// Apply total request body size limit
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadTotalSize)
 
-	if err := r.ParseMultipartForm(maxUploadTotalSize); err != nil {
+	cleanup, err := parseMultipartUpload(r, s.uploadFormMaxMemory())
+	defer cleanup()
+	if err != nil {
 		if err.Error() == "http: request body too large" {
 			BadRequest(w, "Request body exceeds 100MB limit")
 			return

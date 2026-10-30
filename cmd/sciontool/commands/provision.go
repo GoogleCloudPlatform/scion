@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -107,7 +108,7 @@ func runProvision(ctx context.Context) error {
 	}
 	cloneURL := os.Getenv("SCION_CLONE_URL")
 	cloneBranch := os.Getenv("SCION_CLONE_BRANCH")
-	projectID := os.Getenv("SCION_PROJECT_ID")
+	projectID := projectkeys.ProjectIDFromEnv(os.Getenv)
 	if projectID == "" {
 		projectID = "unknown"
 	}

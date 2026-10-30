@@ -663,6 +663,264 @@
             }
           }
         }
+      },
+      {
+        "xPos": 0,
+        "yPos": 112,
+        "width": 48,
+        "height": 4,
+        "widget": {
+          "title": "Events streams (browser live updates)",
+          "sectionHeader": {
+            "subtitle": "Open /events streams, their closes and lifetimes, and the events the hub publishes to them, per hub replica.",
+            "dividerBelow": true
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 116,
+        "width": 16,
+        "height": 16,
+        "widget": {
+          "title": "Open events streams (by kind)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"workload.googleapis.com/scion.hub.sse.streams\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_MAX",
+                      "crossSeriesReducer": "REDUCE_MAX",
+                      "groupByFields": [
+                        "metric.label.\"service_instance_id\"",
+                        "metric.label.\"kind\""
+                      ]
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "minAlignmentPeriod": "60s",
+                "legendTemplate": "${metric.labels.service_instance_id} kind=${metric.labels.kind}"
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "label": "streams",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 16,
+        "yPos": 116,
+        "width": 16,
+        "height": 16,
+        "widget": {
+          "title": "Users with an open events stream",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"workload.googleapis.com/scion.hub.sse.users\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_MAX",
+                      "crossSeriesReducer": "REDUCE_MAX",
+                      "groupByFields": [
+                        "metric.label.\"service_instance_id\""
+                      ]
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "minAlignmentPeriod": "60s",
+                "legendTemplate": "${metric.labels.service_instance_id}"
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "label": "users",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 32,
+        "yPos": 116,
+        "width": 16,
+        "height": 16,
+        "widget": {
+          "title": "Events stream closes (per second, by reason)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"workload.googleapis.com/scion.hub.sse.closes\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_RATE",
+                      "crossSeriesReducer": "REDUCE_SUM",
+                      "groupByFields": [
+                        "metric.label.\"service_instance_id\"",
+                        "metric.label.\"reason\""
+                      ]
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "minAlignmentPeriod": "60s",
+                "legendTemplate": "${metric.labels.service_instance_id} reason=${metric.labels.reason}"
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "label": "closes/s",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 132,
+        "width": 16,
+        "height": 16,
+        "widget": {
+          "title": "Events stream lifetime",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"workload.googleapis.com/scion.hub.sse.stream_duration\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
+                      "groupByFields": [
+                        "metric.label.\"service_instance_id\""
+                      ]
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "minAlignmentPeriod": "60s",
+                "legendTemplate": "p50 ${metric.labels.service_instance_id}"
+              },
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"workload.googleapis.com/scion.hub.sse.stream_duration\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_99",
+                      "groupByFields": [
+                        "metric.label.\"service_instance_id\""
+                      ]
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "minAlignmentPeriod": "60s",
+                "legendTemplate": "p99 ${metric.labels.service_instance_id}"
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "label": "s",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 16,
+        "yPos": 132,
+        "width": 16,
+        "height": 16,
+        "widget": {
+          "title": "Events written to streams (per second, by kind)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"workload.googleapis.com/scion.hub.sse.events_written\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_RATE",
+                      "crossSeriesReducer": "REDUCE_SUM",
+                      "groupByFields": [
+                        "metric.label.\"service_instance_id\"",
+                        "metric.label.\"kind\""
+                      ]
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "minAlignmentPeriod": "60s",
+                "legendTemplate": "${metric.labels.service_instance_id} kind=${metric.labels.kind}"
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "label": "events/s",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 32,
+        "yPos": 132,
+        "width": 16,
+        "height": 16,
+        "widget": {
+          "title": "Events published (per second, by trigger)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"workload.googleapis.com/scion.hub.events.published\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_RATE",
+                      "crossSeriesReducer": "REDUCE_SUM",
+                      "groupByFields": [
+                        "metric.label.\"service_instance_id\"",
+                        "metric.label.\"trigger\""
+                      ]
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "minAlignmentPeriod": "60s",
+                "legendTemplate": "${metric.labels.service_instance_id} trigger=${metric.labels.trigger}"
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "label": "events/s",
+              "scale": "LINEAR"
+            }
+          }
+        }
       }
     ]
   }

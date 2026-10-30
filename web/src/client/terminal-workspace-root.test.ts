@@ -2012,6 +2012,115 @@ describe('show() frame-mode ref counting', () => {
     expect(_appFrameRefCountForTests()).toBe(start);
   });
 });
+
+describe('an open on-screen keyboard collapses the chrome around the terminal (ptone/scion#5059)', () => {
+  let root: TerminalWorkspaceRoot;
+
+  /**
+   * Creates and shows the root with the keyboard up or not, as
+   * client/viewport.ts marks it. Each test reads one state only: happy-dom
+   * clears its computed-style cache on child-list mutations, not on
+   * attribute changes, so the state is set before the root is added and read.
+   */
+  function showRoot({ keyboard }: { keyboard: boolean }): void {
+    if (keyboard) document.documentElement.dataset['keyboard'] = 'open';
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    root.show(true);
+  }
+
+  afterEach(() => {
+    document.documentElement.removeAttribute('data-keyboard');
+    root.show(false);
+    root.dispose();
+    root.element.remove();
+  });
+
+  function part(selector: string): HTMLElement {
+    const el = root.element.querySelector<HTMLElement>(selector);
+    if (!el) throw new Error(`No ${selector} in the workspace`);
+    return el;
+  }
+
+  /** The workspace parts that are not terminal panes. */
+  function chrome(): Record<string, HTMLElement> {
+    return {
+      banner: part('.terminal-test-hub-banner'),
+      header: part('scion-header'),
+      rail: part('.terminal-rail'),
+      layoutBar: part('.terminal-layout-bar'),
+    };
+  }
+
+  function display(el: HTMLElement): string {
+    return getComputedStyle(el).display;
+  }
+
+  function shellGrid(): { columns: string; rows: string } {
+    const style = getComputedStyle(part('.terminal-workspace-shell'));
+    return { columns: style.gridTemplateColumns, rows: style.gridTemplateRows };
+  }
+
+  const ONE_CELL = 'minmax(0, 1fr)';
+
+  it('shows the chrome while no keyboard is up', () => {
+    showRoot({ keyboard: false });
+    for (const el of Object.values(chrome())) expect(display(el)).not.toBe('none');
+  });
+
+  it('hides the header, banner, Open terminals rail and Layout bar while the keyboard is up', () => {
+    showRoot({ keyboard: true });
+    for (const el of Object.values(chrome())) expect(display(el)).toBe('none');
+    // The terminal panes stay: the pane area takes the whole frame.
+    expect(display(part('.terminal-pane-area'))).not.toBe('none');
+    expect(display(part('.terminal-pane-host'))).not.toBe('none');
+  });
+
+  it('shows the chrome again once the keyboard has closed', () => {
+    // viewport.ts sets the attribute while the keyboard is up and removes it
+    // when the keyboard closes.
+    document.documentElement.dataset['keyboard'] = 'open';
+    delete document.documentElement.dataset['keyboard'];
+    showRoot({ keyboard: false });
+    for (const el of Object.values(chrome())) expect(display(el)).not.toBe('none');
+    expect(shellGrid().columns).not.toBe(ONE_CELL);
+  });
+
+  it('keeps the wide shell in two columns while no keyboard is up', () => {
+    showRoot({ keyboard: false });
+    expect(shellGrid().columns).not.toBe(ONE_CELL);
+  });
+
+  it('collapses the wide shell to one cell while the keyboard is up', () => {
+    // Otherwise the pane area, now the only grid item, drops into the rail column.
+    showRoot({ keyboard: true });
+    expect(shellGrid()).toEqual({ columns: ONE_CELL, rows: ONE_CELL });
+  });
+
+  it('collapses the narrow shell too: the keyboard rule follows and outranks the 760px rule', () => {
+    // happy-dom does not apply the (max-width: 760px) rule in this setup, so
+    // the narrow case is checked on the stylesheet text instead.
+    showRoot({ keyboard: false });
+    const css = root.element.querySelector('style')?.textContent ?? '';
+    const narrowStart = css.indexOf('@media (max-width: 760px) {');
+    const selector = "html[data-keyboard='open'] #terminal-workspace .terminal-workspace-shell";
+    const ruleStart = css.indexOf(`${selector} {`);
+    expect(narrowStart).toBeGreaterThan(-1);
+    expect(ruleStart).toBeGreaterThan(-1);
+
+    // Outside any @media block: every brace before it is closed.
+    const before = css.slice(0, ruleStart);
+    expect(before.split('{').length).toBe(before.split('}').length);
+    // After the 760px block, which sets .terminal-workspace-shell (0,1,0);
+    // the keyboard selector, (1,2,1), outranks it as well.
+    expect(ruleStart).toBeGreaterThan(narrowStart);
+    expect(css.slice(narrowStart, ruleStart)).toContain('.terminal-workspace-shell {');
+
+    const body = css.slice(ruleStart, css.indexOf('}', ruleStart));
+    expect(body).toMatch(/grid-template-columns:\s*minmax\(0, 1fr\);/);
+    expect(body).toMatch(/grid-template-rows:\s*minmax\(0, 1fr\);/);
+  });
+});
 // ────────────────────────────────────────────────────────────────────────────
 // "Jump to agent" palette
 // ────────────────────────────────────────────────────────────────────────────

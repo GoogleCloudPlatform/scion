@@ -30,6 +30,19 @@ type ToolCallStats struct {
 	Error   int `json:"error"`
 }
 
+// ToolOutcome is how a tool call ended.
+type ToolOutcome int
+
+const (
+	// ToolSucceeded is a tool call that ran and did not fail.
+	ToolSucceeded ToolOutcome = iota
+	// ToolFailed is a tool call that the harness reported as failed.
+	ToolFailed
+	// ToolInterrupted is a tool call the user interrupted. It is not a
+	// failure of the tool.
+	ToolInterrupted
+)
+
 // SessionSummary is the aggregated result of a completed session, ready to be
 // sent to the Hub as a MetricsPayload.
 type SessionSummary struct {
@@ -149,8 +162,9 @@ func (a *Aggregator) resetLocked(sessionID string) {
 	a.toolCalls = make(map[string]*ToolCallStats)
 }
 
-// RecordToolEnd records a completed tool call.
-func (a *Aggregator) RecordToolEnd(toolName string, errMsg string) {
+// RecordToolEnd records an ended tool call. An interrupted call counts as a
+// call but as neither a success nor an error.
+func (a *Aggregator) RecordToolEnd(toolName string, outcome ToolOutcome) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -160,9 +174,10 @@ func (a *Aggregator) RecordToolEnd(toolName string, errMsg string) {
 		a.toolCalls[toolName] = stats
 	}
 	stats.Calls++
-	if errMsg != "" {
+	switch outcome {
+	case ToolFailed:
 		stats.Error++
-	} else {
+	case ToolSucceeded:
 		stats.Success++
 	}
 }

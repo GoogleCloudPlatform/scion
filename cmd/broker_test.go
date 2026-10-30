@@ -138,6 +138,15 @@ func TestBrokerRegistrationCapabilities_IncludesAgentMove(t *testing.T) {
 	}
 }
 
+// TestBrokerRegistrationCapabilities_IncludesAgentMoveRecreate pins that
+// the broker CLI reports agentMoveRecreate at join, as its heartbeat does
+// (ptone/scion#5441); the hub refuses a forced move to a broker without it.
+func TestBrokerRegistrationCapabilities_IncludesAgentMoveRecreate(t *testing.T) {
+	if !slices.Contains(brokerRegistrationCapabilities(), "agentMoveRecreate") {
+		t.Errorf("brokerRegistrationCapabilities() = %v, want it to include agentMoveRecreate", brokerRegistrationCapabilities())
+	}
+}
+
 // TestBrokerRegistrationCapabilities_IncludesAsyncLaunch pins that the
 // broker CLI reports asyncLaunch at join, as its heartbeat does
 // (runtimebroker.StaticCapabilities), so the Hub knows it before the first

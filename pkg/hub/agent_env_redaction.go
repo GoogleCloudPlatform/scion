@@ -60,6 +60,14 @@ func redactAppliedConfigEnvForResponse(ac *store.AgentAppliedConfig, canAttach b
 	return ac.ResponseView(canAttach)
 }
 
+// redactAgentConfigsForResponse returns the response views of an agent's
+// applied config and pending config for a viewer with canAttach (see
+// redactAppliedConfigEnvForResponse): the pending config's env gets the same
+// gate as the applied config's (store.AgentPendingConfig.ResponseView).
+func redactAgentConfigsForResponse(ac *store.AgentAppliedConfig, pc *store.AgentPendingConfig, canAttach bool) (*store.AgentAppliedConfig, *store.AgentPendingConfig) {
+	return redactAppliedConfigEnvForResponse(ac, canAttach), pc.ResponseView(canAttach)
+}
+
 // canViewAgentEnv answers the same access-level question as
 // redactAppliedConfigEnvForResponse's canAttach parameter, for handlers that
 // serialize a raw *store.Agent without already computing a Capabilities set
@@ -89,7 +97,7 @@ func redactedAgentCopy(ctx context.Context, s *Server, agent *store.Agent) *stor
 		return agent
 	}
 	redacted := *agent
-	redacted.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
+	redacted.AppliedConfig, redacted.PendingConfig = redactAgentConfigsForResponse(agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
 	return &redacted
 }
 

@@ -286,6 +286,8 @@ var hubOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/migrations/{id}/run", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/update-available", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/update-available", Method: "DELETE"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/update-status", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/releases", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT},
@@ -379,9 +381,10 @@ var hubOperations = []OperationSpec{
 		AuthorityEval:    AuthorityEvalNone,
 		// conflict: email already on the list, user not in invited status,
 		// or (DELETE) the user's role bindings changed concurrently.
-		// last_owner: the DELETE entry point applies the same
-		// last-project-owner guard and binding cascade as user.admin.delete.
-		DenialCodes: []DenialCode{DenialForbidden, DenialLastOwner, DenialConflict},
+		// last_owner and user_delete_blocked: the DELETE entry point
+		// applies the same last-project-owner guard, binding cascade and
+		// blocker check as user.admin.delete.
+		DenialCodes: []DenialCode{DenialForbidden, DenialLastOwner, DenialUserDeleteBlocked, DenialConflict},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestAllowListReadToken_DoesNotAdmitWrites"},

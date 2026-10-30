@@ -23,6 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -64,7 +65,7 @@ func (m *hubDefaultsCapturingManager) Reprovision(ctx context.Context, opts api.
 }
 
 func newHubDefaultsWiringServer() (*Server, *hubDefaultsCapturingManager) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.ForceRuntime = "mock"
@@ -72,7 +73,7 @@ func newHubDefaultsWiringServer() (*Server, *hubDefaultsCapturingManager) {
 	mgr := &hubDefaultsCapturingManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 
-	return New(cfg, mgr, rt), mgr
+	return New(cfg, mgr, rt, config.RuntimeBuildRecord{}), mgr
 }
 
 // postCreateAgent drives the real HTTP handler, so the request travels the

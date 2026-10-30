@@ -23,33 +23,66 @@ import (
 	"time"
 )
 
-// Start-up reconcile of the sandbox state store (ptone/scion#3738): an
-// entry is dropped only when the liveness probe answers that the sandbox
-// does not exist. A slow or otherwise failing probe keeps the entry, so a
-// live sandbox is not orphaned from List, Stop and Delete.
+// Start-up reconcile of the sandbox state store (ptone/scion#3738,
+// ptone/scion#4776): a probed entry is never dropped. A failed probe keeps
+// the entry and logs a warning, which says whether the CLI reported this
+// sandbox not running (the verified wording, for the probed name only) or
+// failed some other way. A generic "no such file or directory" is never
+// read as a not-running answer.
+
+// Log fragments of the two reconcile warnings.
+const (
+	reconcileNotRunningLog = "reports the sandbox not running; keeping the entry"
+	reconcileGenericLog    = "without a not-running answer; keeping the entry"
+)
+
+// Every not-running fragment names the probed sandbox exactly once, as
+// "sandbox %s ...": a fragment without the name would match output about
+// any sandbox, or generic CLI errors.
+func TestSandboxNotRunningOutputs_NameAnchored(t *testing.T) {
+	if len(sandboxNotRunningOutputs) == 0 {
+		t.Fatal("sandboxNotRunningOutputs is empty")
+	}
+	for _, frag := range sandboxNotRunningOutputs {
+		if n := strings.Count(frag, "%s"); n != 1 || !strings.HasPrefix(frag, "sandbox %s ") {
+			t.Errorf("fragment %q: want it to start with \"sandbox %%s \" and hold exactly one %%s (has %d)", frag, n)
+		}
+		if frag != strings.ToLower(frag) {
+			t.Errorf("fragment %q: want lower case", frag)
+		}
+	}
+}
 
 func TestSandboxReconcile_ProbeOutcomes(t *testing.T) {
 	prevTimeout := sandboxReconcileProbeTimeout
 	sandboxReconcileProbeTimeout = 300 * time.Millisecond
 	t.Cleanup(func() { sandboxReconcileProbeTimeout = prevTimeout })
 
+	const (
+		none       = ""
+		notRunning = reconcileNotRunningLog
+		generic    = reconcileGenericLog
+	)
 	cases := []struct {
-		name     string
-		script   string
-		kept     bool
-		wantWarn bool
+		name    string
+		script  string
+		wantLog string
 	}{
-		{"probe succeeds", "exit 0", true, false},
-		{"pattern not found", `echo "Error: sandbox \"$2\" not found" >&2; exit 1`, false, false},
-		{"pattern no such", `echo "error: no such sandbox: $2" >&2; exit 1`, false, false},
-		{"pattern does not exist", `echo "Sandbox $2 does not exist"; exit 2`, false, false},
-		{"pattern in upper case", `echo "Sandbox NOT FOUND" >&2; exit 1`, false, false},
-		{"dead sandbox, non-matching output", `echo "exec: control socket closed" >&2; exit 1`, true, true},
-		{"probe times out", "exec sleep 5", true, true},
-		{"prints not found, then sleeps past the deadline", `echo "Error: sandbox \"$2\" not found" >&2; exec sleep 5`, true, true},
-		{"ambiguous failure", `echo "connection refused" >&2; exit 1`, true, true},
-		{"killed by a signal", `kill -9 $$`, true, true},
-		{"prints not found, then killed by a signal", `echo "Error: sandbox \"$2\" not found" >&2; kill -9 $$`, true, true},
+		{"probe succeeds", "exit 0", none},
+		{"verified not running wording", `echo "Error: sandbox $2 is not running" >&2; exit 1`, notRunning},
+		{"not running wording in upper case", `echo "ERROR: SANDBOX SB-LIVE IS NOT RUNNING" >&2; exit 1`, notRunning},
+		{"not running wording for another name", `echo "Error: sandbox proj--sb-live is not running" >&2; exit 1`, generic},
+		{"not running wording for a longer name", `echo "Error: sandbox sb-live-2 is not running" >&2; exit 1`, generic},
+		{"generic no such file or directory", `echo "exec: /opt/sandbox/root: no such file or directory" >&2; exit 1`, generic},
+		{"unverified not found", `echo "Error: sandbox \"$2\" not found" >&2; exit 1`, generic},
+		{"unverified no such sandbox", `echo "error: no such sandbox: $2" >&2; exit 1`, generic},
+		{"unverified does not exist", `echo "Sandbox $2 does not exist"; exit 2`, generic},
+		{"dead sandbox, non-matching output", `echo "exec: control socket closed" >&2; exit 1`, generic},
+		{"probe times out", "exec sleep 5", generic},
+		{"prints not running, then sleeps past the deadline", `echo "Error: sandbox $2 is not running" >&2; exec sleep 5`, generic},
+		{"ambiguous failure", `echo "connection refused" >&2; exit 1`, generic},
+		{"killed by a signal", `kill -9 $$`, generic},
+		{"prints not running, then killed by a signal", `echo "Error: sandbox $2 is not running" >&2; kill -9 $$`, generic},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -64,21 +97,23 @@ func TestSandboxReconcile_ProbeOutcomes(t *testing.T) {
 
 			ss.reconcile(bin)
 
-			if got := ss.get("sb-live") != nil; got != tc.kept {
-				t.Errorf("entry kept = %v, want %v (logs: %s)", got, tc.kept, logs.String())
+			if ss.get("sb-live") == nil {
+				t.Errorf("probed entry removed, want kept (logs: %s)", logs.String())
 			}
 			if ss.get("sb-stopped") != nil {
 				t.Errorf("stopped entry kept, want removed")
 			}
 			// The persisted state agrees with memory.
 			reloaded := newSandboxStateStore(statePath)
-			if got := reloaded.get("sb-live") != nil; got != tc.kept {
-				t.Errorf("persisted entry kept = %v, want %v", got, tc.kept)
+			if reloaded.get("sb-live") == nil {
+				t.Errorf("persisted probed entry removed, want kept")
 			}
-			warned := strings.Contains(logs.String(), "level=WARN") &&
-				strings.Contains(logs.String(), "keeping the entry")
-			if warned != tc.wantWarn {
-				t.Errorf("warn logged = %v, want %v (logs: %s)", warned, tc.wantWarn, logs.String())
+			for _, frag := range []string{notRunning, generic} {
+				want := frag == tc.wantLog
+				got := strings.Contains(logs.String(), "level=WARN") && strings.Contains(logs.String(), frag)
+				if got != want {
+					t.Errorf("warning %q logged = %v, want %v (logs: %s)", frag, got, want, logs.String())
+				}
 			}
 		})
 	}

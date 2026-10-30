@@ -287,10 +287,6 @@ var rcloneTransferImports = map[string]bool{
 var allowedRcloneTransferFiles = map[string]string{
 	// The workspace bucket helpers; their transfers all go through syncFiltered.
 	"pkg/gcp/storage.go": "filtered workspace bucket sync",
-	// Syncs a project with the hub's WebDAV endpoint, never with the
-	// workspace bucket. (Its own unanchored ".scion/**" exclude drops
-	// .scion directories at any depth, not a root .scion marker file.)
-	"pkg/projectsync/projectsync.go": "hub WebDAV project sync, not the workspace bucket",
 	// Fetches template directories from a remote URL; not a workspace.
 	"pkg/config/remote_templates.go": "remote template fetch",
 }

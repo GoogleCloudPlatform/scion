@@ -63,7 +63,8 @@ const (
 	// fork, no source, and any unknown source.
 	SessionNew SessionStartKind = iota
 	// SessionInPlace restarts a session inside a harness that was already
-	// running: clear and compact.
+	// running: clear, compact and reload (for example the pi harness's
+	// /reload command).
 	SessionInPlace
 )
 
@@ -79,6 +80,7 @@ var sessionStartSources = map[string]SessionStartKind{
 	"":        SessionNew,
 	"clear":   SessionInPlace,
 	"compact": SessionInPlace,
+	"reload":  SessionInPlace,
 }
 
 // ClassifySessionStart returns the kind of a session-start with source,

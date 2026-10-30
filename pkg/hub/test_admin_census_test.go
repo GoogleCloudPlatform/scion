@@ -253,6 +253,7 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"handlers_users_core.go:deleteSuperAdminBindingTx:ListRoleBindingsForPrincipal":                  "mutation: bindings being deleted",
 	"handlers_users_core.go:guardAndCascadeUserRoleBindingsTx:GetRoleBinding":                        "mutation: user-delete binding cascade",
 	"handlers_users_core.go:guardAndCascadeUserRoleBindingsTx:ListRoleBindingsForPrincipal":          "mutation: user-delete binding cascade",
+	"user_delete_data.go:cleanupOrphanedProvisionedUser:ListRoleBindingsForPrincipal":                "guard: keeps a provisioned user row that gained any binding (any binding only keeps the row; never admits)",
 	"handlers_users_core.go:superAdminBindingStateForUser:ListRoleBindingsForPrincipal":              "mutation: role-change target's own binding state; test identity targets are refused first",
 	"project_membership_service.go:RemoveMember:GetRoleBinding":                                      "mutation: the binding being removed",
 	"project_membership_service.go:UpdateMemberRole:GetRoleBinding":                                  "mutation: the binding being changed",
@@ -264,6 +265,13 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"project_owner_predicates.go:projectOwnerBindingCount:ListRoleBindingsForScope":                  "guard: last-project-owner count (project scope; project bindings are not clamped for any kind)",
 	"project_owner_predicates.go:usableOwnerPrincipals:ListRoleBindingsForScope":                     "guard: last-project-owner count (project scope; project bindings are not clamped for any kind)",
 	"handlers_groups.go:groupClosureAuthority:ListRoleBindingsForPrincipals":                         "group: the bindings a group closure carries, read to confirm a token's delegation check in the membership transaction; not a user's authority",
+
+	// Visitor admission (federated accounts only). Every caller passes the
+	// ID of a *VisitorIdentity, and resolveFederatedVisitor builds one only
+	// for a kind federated account (federation_visitor.go:98, before the one
+	// NewVisitorIdentity call at :118). A user's kind never changes and
+	// federated is no test identity kind, so the clamps would remove nothing.
+	"federation_visitor_agents.go:visitorGrantBindings:ListRoleBindingsForPrincipal": "visitor admission: the caller's own project-visitor grants (project scope only) for the visitor agent list and read routes and its own grant list; reached only with a *VisitorIdentity, built only for a kind federated account (federation_visitor.go:98), never a test identity; federated accounts only",
 
 	// Sign-in (every sign-in path refuses test identities).
 	"handlers_auth.go:hasUIPromotedBinding:ListRoleBindingsForPrincipal": "sign-in: admin_emails demotion protection; test identities never sign in",
@@ -314,7 +322,6 @@ var testAdminRoleAdminCensus = map[string]string{
 	"admin_mode.go:adminModeWebMiddleware":                                "role gate: admin only",
 	"gcp_iam_settings.go:gcpIAMHubAdmin":                                  "role gate: admin only",
 	"handlers_env_secrets.go:authorizeHubEnvVarList":                      "role gate: admin only",
-	"handlers_env_secrets.go:resolveEnvSecretAccess":                      "role gate: admin only",
 	"web.go:authorizeSSESubjects":                                         "role gate: admin only",
 	"federation_auth.go:extractUserClaims":                                "federation: a federated identity is never admin (coerced to viewer); federation is off while the tier is on",
 	"handlers_test_admin_identities.go:canIssueTestAdmin":                 "issuer check: the issuer's stored role, read from its row",

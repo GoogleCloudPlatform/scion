@@ -207,9 +207,15 @@ func (b *GCPBackend) fetchValue(ctx context.Context, meta SecretMeta) FetchResul
 		return FetchResult{Err: store.ErrNotFound}
 	}
 
-	var value string
+	// ref is the Secret Manager resource path the value was read from, in
+	// the form Resolve reports as SecretRef: the stored ref without its
+	// "gcpsm:" prefix, or projects/<project>/secrets/<name> for the name a
+	// record with no gcpsm ref resolved by. Brokers mount it by that path
+	// (the GKE Secrets Store CSI resourceName).
+	var value, ref string
 	if smPath, ok := extractGCPSMPath(s.SecretRef); ok {
 		value, err = b.AccessSecretValueByRef(ctx, smPath)
+		ref = smPath
 	} else {
 		// No stored ref: mirror Get's DB-less recovery path (tries the
 		// hub-prefixed name, then falls back to the legacy pre-prefix name
@@ -217,16 +223,20 @@ func (b *GCPBackend) fetchValue(ctx context.Context, meta SecretMeta) FetchResul
 		// so a record that predates ref-tracking and hasn't yet been
 		// touched by `migrate-names` or hub-boot copy-forward still
 		// resolves (ptone/scion#2152 / GoogleCloudPlatform/scion#2085 interaction).
-		value, _, err = b.accessSecretByComputedName(ctx, s.Key, s.Scope, s.ScopeID)
+		var smName string
+		value, smName, err = b.accessSecretByComputedName(ctx, s.Key, s.Scope, s.ScopeID)
+		ref = b.smSecretPath(smName)
 	}
 	if err != nil {
 		if status.Code(err) == codes.NotFound {
 			return FetchResult{Err: store.ErrNotFound}
 		}
+		// A Secret Manager access error matches ErrValueAccess, the
+		// failure Resolve skips for this backend.
 		if permErr := b.wrapGCPError(err, "access secret"); permErr != nil {
-			return FetchResult{Err: permErr}
+			return FetchResult{Err: fmt.Errorf("%w: %w", ErrValueAccess, permErr)}
 		}
-		return FetchResult{Err: err}
+		return FetchResult{Err: fmt.Errorf("%w: %w", ErrValueAccess, err)}
 	}
 
 	// Re-read the DB record and repeat the comparison. A metadata update,
@@ -245,7 +255,13 @@ func (b *GCPBackend) fetchValue(ctx context.Context, meta SecretMeta) FetchResul
 	if recordGenerationChanged(after, meta) {
 		return FetchResult{Err: store.ErrNotFound}
 	}
-	return FetchResult{Value: value}
+	return FetchResult{Value: value, Ref: ref}
+}
+
+// smSecretPath is the full Secret Manager resource path of the secret named
+// smName in the backend's project.
+func (b *GCPBackend) smSecretPath(smName string) string {
+	return fmt.Sprintf("projects/%s/secrets/%s", b.projectID, smName)
 }
 
 // extractGCPSMPath extracts the full GCP SM resource path from a stored SecretRef.
@@ -307,6 +323,15 @@ func (b *GCPBackend) Set(ctx context.Context, input *SetSecretInput) (bool, *Sec
 	secret := toStoreSecret(input)
 	secret.EncryptedValue = "" // Don't store value in DB
 	secret.SecretRef = "gcpsm:" + fullName
+	// A reference-only update of a Hub-internal record keeps its existing
+	// local backup ciphertext (ptone/scion#1530 §6): the Hub maintains that
+	// backup itself, and erasing it here would leave the key with no local
+	// copy until the Hub rewrites it. User secrets stay reference-only.
+	if secret.SecretType == store.SecretTypeInternal {
+		if existing, err := b.store.GetSecret(ctx, input.Name, input.Scope, input.ScopeID); err == nil && existing.EncryptedValue != "" {
+			secret.EncryptedValue = existing.EncryptedValue
+		}
+	}
 
 	created, err := b.store.UpsertSecret(ctx, secret)
 	if err != nil {
@@ -525,6 +550,13 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID st
 			if s.SecretType == store.SecretTypeInternal {
 				continue
 			}
+			// The owner path: a user-scope row of userID is held to the
+			// caller's UserScopeCheck before its value is read. A rejected
+			// row is skipped, so a lower-scope row with the same key stays
+			// in effect.
+			if sc.scope == store.ScopeUser && opts != nil && opts.UserScopeCheck != nil && !opts.UserScopeCheck(*fromStoreSecretMeta(&s)) {
+				continue
+			}
 
 			var value string
 			var secretRef string
@@ -534,7 +566,7 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID st
 			} else {
 				var smName string
 				value, smName, err = b.accessSecretByComputedName(ctx, s.Key, sc.scope, sc.scopeID)
-				secretRef = fmt.Sprintf("projects/%s/secrets/%s", b.projectID, smName)
+				secretRef = b.smSecretPath(smName)
 			}
 			if err != nil {
 				continue
@@ -607,7 +639,7 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID st
 			} else {
 				var smName string
 				value, smName, err = b.accessSecretByComputedName(ctx, s.Key, s.Scope, s.ScopeID)
-				secretRef = fmt.Sprintf("projects/%s/secrets/%s", b.projectID, smName)
+				secretRef = b.smSecretPath(smName)
 			}
 			if err != nil {
 				continue

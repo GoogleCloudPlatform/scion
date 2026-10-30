@@ -46,6 +46,16 @@ The proxy authenticator runs **after** higher-priority app-layer credentials:
 
 This means agents and brokers traversing IAP are identified by their own credentials, not by the IAP service-account assertion.
 
+### Browser requests that change state
+
+In proxy mode, state-changing API requests from browsers are checked for the Hub's expected request properties. Browser `POST` requests with a body are also checked for the expected content type (JSON, multipart on file upload routes, browser policy reports on the report route). Requests that do not match get `403 Forbidden` or `415 Unsupported Media Type`. Requests from Scion's own clients (agents, brokers and the CLI) are unaffected.
+
+The front proxy must pass the public `Host` header through unchanged. IAP does this by default.
+
+### Port proxy behind the front proxy
+
+Behind a front proxy, how the follow-on requests of a page opened through the [port proxy](/scion/hosted/user/port-forwarding/) are handled depends on the front proxy's configuration, so multi-file pages opened through the port proxy may not work reliably. Point users to `scion tunnel` for full-fidelity access.
+
 ### Configuration
 
 In `settings.yaml` (under the `server` key):

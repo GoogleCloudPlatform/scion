@@ -24,6 +24,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -321,6 +322,99 @@ func TestServerShutdown_BrokerThenListenerThenTeardown(t *testing.T) {
 		t.Fatal("Shutdown did not return")
 	}
 	assert.Error(t, srv.ctx.Err(), "the background teardown ran after the drain")
+}
+
+// ptone/scion#4668: WebServer.Shutdown keeps the same order as
+// Server.Shutdown. With the web front enabled the hub API is mounted on
+// the web server, so a co-located broker's reports (its launch drain's
+// broker_restarted reports among them) arrive on the web listener: the
+// web server waits for the broker (BeforeHTTPDrain) while its listener
+// still accepts, then closes the listener and drains in-flight requests,
+// and only then runs the mounted hub's teardown.
+func TestWebServerShutdown_BrokerThenListenerThenHubTeardown(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := ln.Addr().String()
+
+	inFlight, release := make(chan struct{}), make(chan struct{})
+	hs := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(inFlight)
+		<-release
+		w.WriteHeader(http.StatusOK)
+	}), ReadHeaderTimeout: 5 * time.Second}
+	go func() { _ = hs.Serve(ln) }()
+	var releaseOnce sync.Once
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(release) })
+		_ = hs.Close()
+	})
+
+	ws := NewWebServer(WebServerConfig{Host: "127.0.0.1"})
+	var hubTornDown atomic.Bool
+	ws.MountHubAPI(http.NotFoundHandler(), func(context.Context) error {
+		hubTornDown.Store(true)
+		return nil
+	})
+	ws.httpServer = hs
+
+	reqDone := make(chan int, 1)
+	go func() {
+		// Bounded, but well past the test's own waits (the listener
+		// close and the drain), so the timeout never fails the in-flight
+		// request before the test releases it.
+		client := &http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Get("http://" + addr + "/")
+		if err != nil {
+			reqDone <- 0
+			return
+		}
+		_ = resp.Body.Close()
+		reqDone <- resp.StatusCode
+	}()
+	select {
+	case <-inFlight:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the request never reached the handler")
+	}
+
+	var brokerWaited, listenerOpenInWait, tornDownInWait atomic.Bool
+	ws.SetShutdownHooks(ShutdownHooks{
+		BeforeHTTPDrain: func(context.Context) {
+			listenerOpenInWait.Store(shutdownTestDialable(addr))
+			tornDownInWait.Store(hubTornDown.Load())
+			brokerWaited.Store(true)
+		},
+	})
+	shutdownDone := make(chan struct{})
+	go func() {
+		_ = ws.Shutdown(context.Background())
+		close(shutdownDone)
+	}()
+
+	require.Eventually(t, func() bool { return !shutdownTestDialable(addr) }, 5*time.Second, 10*time.Millisecond, "the web listener did not close")
+	assert.True(t, brokerWaited.Load(), "web BeforeHTTPDrain did not run before the listener closed")
+	assert.True(t, listenerOpenInWait.Load(), "web listener closed before the broker wait")
+	assert.False(t, tornDownInWait.Load(), "the mounted hub was torn down before the broker wait")
+	assert.False(t, hubTornDown.Load(), "the mounted hub was torn down while a request was still draining")
+
+	releaseOnce.Do(func() { close(release) })
+	assert.Equal(t, http.StatusOK, <-reqDone, "the in-flight request completes")
+	select {
+	case <-shutdownDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("WebServer.Shutdown did not return")
+	}
+	assert.True(t, hubTornDown.Load(), "the mounted hub's teardown ran after the drain")
+}
+
+// shutdownTestDialable reports whether addr accepts a TCP connection.
+func shutdownTestDialable(addr string) bool {
+	conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 // The HTTP drain is bounded by HTTPDrainContext (cmd: the HTTP-drain

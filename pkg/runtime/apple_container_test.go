@@ -139,6 +139,9 @@ echo "$@"
 	if strings.Contains(out, "--cap-add") {
 		t.Errorf("Apple container args should not contain --cap-add, got %q", out)
 	}
+	if strings.Contains(out, "SCION_METADATA_INTERCEPTION=required") {
+		t.Errorf("Apple container args must not mark the interception as required without the capability, got %q", out)
+	}
 }
 
 // TestAppleContainerRuntime_Run_ContextCancelled_RollsBackWithKillThenRm covers

@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -187,40 +186,4 @@ func TestWorkspaceDownloadBucket(t *testing.T) {
 	require.Equal(t, "hub-bucket", workspaceDownloadBucket(gcs))
 	require.Empty(t, workspaceDownloadBucket(newMockStorage("local-bucket")), "local storage is not downloadable by a broker")
 	require.Empty(t, workspaceDownloadBucket(nil))
-}
-
-// TestCreateAgent_HubManagedUploadRecordsBucket covers the create path that
-// uploads a hub-managed project workspace for a remote broker: the bucket
-// it uploaded to is recorded with the storage path the dispatch sends.
-func TestCreateAgent_HubManagedUploadRecordsBucket(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-
-	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
-	srv, _, project := setupCreateAgentServer(t, disp) // hub-managed: no GitRemote.
-	srv.SetStorage(newGCSContentMockStorage("test-bucket"))
-	t.Cleanup(func() {
-		if p, err := hubManagedProjectPath(project.Slug); err == nil {
-			_ = os.RemoveAll(p)
-		}
-	})
-
-	var uploadedBucket string
-	previous := syncToGCSForWorkspaceUpload
-	syncToGCSForWorkspaceUpload = func(_ context.Context, _, bucket, _ string) error {
-		uploadedBucket = bucket
-		return nil
-	}
-	t.Cleanup(func() { syncToGCSForWorkspaceUpload = previous })
-
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:      "upload-bucket-agent",
-		ProjectID: project.ID,
-	})
-	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
-
-	require.Equal(t, "test-bucket", uploadedBucket, "fixture check: the upload must have run")
-	require.NotNil(t, disp.capturedAgent)
-	require.NotNil(t, disp.capturedAgent.AppliedConfig)
-	require.NotEmpty(t, disp.capturedAgent.AppliedConfig.WorkspaceStoragePath)
-	require.Equal(t, "test-bucket", disp.capturedAgent.AppliedConfig.WorkspaceStorageBucket)
 }

@@ -156,17 +156,19 @@ export function loadRecentUsers(): Promise<RecentUsersPage | null> {
 
 /**
  * Server-side user search (`GET /api/v1/users?search=`), matching email or
- * display name. Results seed the name cache. An abort by the caller
- * rejects; any other failure, including {@link USER_SEARCH_TIMEOUT_MS}
- * passing, resolves to an empty list.
+ * display name, optionally limited to one `status` (the hub filters by it).
+ * Results seed the name cache. An abort by the caller rejects; any other
+ * failure, including {@link USER_SEARCH_TIMEOUT_MS} passing, resolves to an
+ * empty list.
  */
 export async function searchUsers(
   query: string,
-  options: { signal?: AbortSignal; limit?: number } = {}
+  options: { signal?: AbortSignal; limit?: number; status?: string } = {}
 ): Promise<DirectoryUser[]> {
   const q = query.trim();
   if (!q) return [];
   const limit = options.limit ?? USER_SEARCH_LIMIT;
+  const status = options.status ? `&status=${encodeURIComponent(options.status)}` : '';
   // One signal for the request: the caller's abort and the timeout.
   const controller = new AbortController();
   const onCallerAbort = (): void => controller.abort();
@@ -174,9 +176,10 @@ export async function searchUsers(
   options.signal?.addEventListener('abort', onCallerAbort);
   const timer = setTimeout(() => controller.abort(), USER_SEARCH_TIMEOUT_MS);
   try {
-    const res = await apiFetch(`/api/v1/users?search=${encodeURIComponent(q)}&limit=${limit}`, {
-      signal: controller.signal,
-    });
+    const res = await apiFetch(
+      `/api/v1/users?search=${encodeURIComponent(q)}&limit=${limit}${status}`,
+      { signal: controller.signal }
+    );
     if (!res.ok) return [];
     const body = (await res.json()) as UsersBody | null;
     const users = (Array.isArray(body?.users) ? body.users : []).filter(isUserRow);

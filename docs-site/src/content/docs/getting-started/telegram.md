@@ -103,8 +103,9 @@ entirely from the browser — no config files to edit.
    from Step 1. There is also a **Webhook Secret** field. Leave it blank for a typical
    workstation setup in `poll` mode (see the note on inbound mode below). It is required
    if you set **Inbound Mode** to `webhook`.
-5. In the **Configuration** section:
-   - Leave **Inbound Mode** set to its default, `poll`.
+5. In the **Configuration** section (an empty field shows the plugin default as its
+   placeholder; the default is not saved, so the plugin keeps using its own default):
+   - Leave **Inbound Mode** empty to use its default, `poll`.
    - **Registration URL** (`register_url`): (Optional) Enter a public-facing URL (e.g., `https://scion.example.com`) used for user-facing registration links. If left empty, it defaults to the internal `hub_url`. This is useful when the Hub is behind an authentication proxy, or when mobile devices or external users need to register.
 
    :::tip[Poll vs. webhook on a workstation]

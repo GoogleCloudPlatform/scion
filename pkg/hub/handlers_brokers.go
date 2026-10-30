@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -226,20 +227,20 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 
 	// Log audit event, with the credential that carried the request and the
 	// issued join token's details.
-	operation := "register"
+	operation := auditevent.BrokerRegisterNew
 	if existingBroker != nil {
-		operation = "reregister"
+		operation = auditevent.BrokerRegisterReregister
 	}
 	details := brokerAuditCredentialDetails(r.Context())
 	for k, v := range joinTokenAuditDetails(resp) {
 		details[k] = v
 	}
-	kv := append([]string{"operation", operation}, keptSettingsAuditDetails(resp.KeptSettings)...)
+	kv := append([]string{"operation", string(operation)}, keptSettingsAuditDetails(resp.KeptSettings)...)
 	if resp.GCPHostSet {
 		kv = append(kv, "gcp_host_set", "true")
 	}
 	LogRegistrationEvent(r.Context(), s.auditLogger, resp.BrokerID, req.Name, user.ID(), getClientIP(r),
-		mergeBrokerAuditDetails(details, kv...))
+		operation, mergeBrokerAuditDetails(details, kv...))
 
 	writeJSON(w, http.StatusCreated, resp)
 }
@@ -676,7 +677,7 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 
 	// Test admin tier: only the co-located broker may complete a join.
 	if s.refuseTestAdminBrokerRegistration(w, req.BrokerID) {
-		LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), false, ErrTestAdminRemoteBrokerRefused.Error())
+		LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), false, ErrTestAdminRemoteBrokerRefused.Error(), auditevent.BrokerFailureRefused)
 		return
 	}
 
@@ -695,7 +696,7 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 	resp, err := s.brokerAuthService.CompleteBrokerJoin(r.Context(), req, hubEndpoint)
 	if err != nil {
 		// Log failed join attempt
-		LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), false, err.Error())
+		LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), false, err.Error(), brokerJoinFailureCode(err))
 
 		if writeRuntimeTargetRefusal(w, err) {
 			return
@@ -716,7 +717,7 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Log successful join
-	LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), true, "")
+	LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), true, "", "")
 	s.conduitBrokerCredentialChanged(req.BrokerID)
 	// Record the reservations of the agents the broker still runs (a broker
 	// registered again under the same ID), now that its row is written and

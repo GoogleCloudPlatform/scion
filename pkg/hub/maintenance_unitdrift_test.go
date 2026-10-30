@@ -80,22 +80,27 @@ func newRebuildUnitFixture(t *testing.T, installed string) *rebuildUnitFixture {
 	return f
 }
 
-func (f *rebuildUnitFixture) executor(locate unitdrift.Locator) *RebuildServerExecutor {
-	e := NewRebuildServerExecutor(RebuildServerOptions{
-		RepoPath:    f.repoDir,
-		RepoBranch:  "main",
-		BinaryDest:  filepath.Join(f.repoDir, "installed-scion"),
-		ServiceName: "scion-hub",
-	})
+// options returns the fixture's executor options; a nil locate reports the
+// fixture's unit file.
+func (f *rebuildUnitFixture) options(locate unitdrift.Locator) RebuildServerOptions {
 	if locate == nil {
 		unit := f.unit
 		locate = func(context.Context, string) (unitdrift.UnitInfo, error) {
 			return unitdrift.UnitInfo{FragmentPath: unit}, nil
 		}
 	}
-	e.unitLocator = locate
-	e.unitRevision = func(context.Context, string) (string, error) { return "abc1234", nil }
-	return e
+	return RebuildServerOptions{
+		RepoPath:     f.repoDir,
+		RepoBranch:   "main",
+		BinaryDest:   filepath.Join(f.repoDir, "installed-scion"),
+		ServiceName:  "scion-hub",
+		UnitLocator:  locate,
+		UnitRevision: func(context.Context, string) (string, error) { return "abc1234", nil },
+	}
+}
+
+func (f *rebuildUnitFixture) executor(locate unitdrift.Locator) *RebuildServerExecutor {
+	return NewRebuildServerExecutor(f.options(locate))
 }
 
 // restartIssued waits for the fire-and-forget restart stub to run and exit,
@@ -193,8 +198,9 @@ func TestRebuildServerExecutor_UnitCheckFailuresStillRestart(t *testing.T) {
 	for name, locate := range cases {
 		t.Run(name, func(t *testing.T) {
 			f := newRebuildUnitFixture(t, renderedRebuildUnit("ExecStartPre=/bin/true\n"))
-			e := f.executor(locate)
-			e.unitTimeout = 100 * time.Millisecond
+			o := f.options(locate)
+			o.UnitTimeout = 100 * time.Millisecond
+			e := NewRebuildServerExecutor(o)
 			var buf bytes.Buffer
 			if err := e.Run(context.Background(), &buf, nil); err != nil {
 				t.Fatalf("Run: %v", err)

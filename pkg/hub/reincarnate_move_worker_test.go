@@ -48,23 +48,51 @@ func prepareMoveWorkerFixture(t *testing.T, f *moveFixture) {
 	f.disp.startPlacement = api.WorkspacePlacementLocal
 }
 
-// waitForMoveSourceCleanup waits until a completed move has recorded its
-// source cleanup outcome, which the worker writes after the completion.
+// waitForMoveSourceCleanup waits until a settled move (completed or
+// failed) has recorded its source cleanup outcome, and returns the record.
+// On a timeout it names the reincarnation and the last record it read.
 func waitForMoveSourceCleanup(t *testing.T, s store.Store, reincarnationID string) *store.AgentReincarnation {
 	t.Helper()
-	var r *store.AgentReincarnation
-	require.Eventually(t, func() bool {
-		got, err := s.GetAgentReincarnation(context.Background(), reincarnationID)
-		if err != nil {
-			return false
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		r, err := s.GetAgentReincarnation(context.Background(), reincarnationID)
+		if err == nil && r.SourceCleanup != "" {
+			return r
 		}
-		r = got
-		return got.SourceCleanup != ""
-	}, 5*time.Second, 5*time.Millisecond, "the source cleanup outcome is recorded")
-	return r
+		if time.Now().After(deadline) {
+			if err != nil {
+				t.Fatalf("timed out waiting for the source cleanup outcome of reincarnation %s: last read failed: %v", reincarnationID, err)
+			}
+			t.Fatalf("timed out waiting for the source cleanup outcome of reincarnation %s: last record state %q, error %q",
+				reincarnationID, r.State, r.Error)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
-// startMove sends a real move as the agent itself and waits for the worker.
+// waitForMoveSettled is waitForReincarnationSettled for a move: it also
+// waits for the record's source cleanup outcome. On the completed and
+// failed-with-rollback paths that outcome is the worker's last write
+// (cleanUpMoveSource after a completed move; reconcileFailedMove after a
+// failed one, which records it only after ensureBrokerReservationOn has
+// put the source reservation back, a no-op when the rollback already did).
+// On the ambiguous-start path it is written before the record fails, and
+// the reconcile that follows writes nothing because the agent stays on the
+// target. A test that counts reservations as soon as the record and agent
+// row settle would otherwise read the count before the reservation is back
+// on the source. A record that is not a move
+// (no source broker) returns at once.
+func waitForMoveSettled(t *testing.T, s store.Store, agentID string) *store.AgentReincarnation {
+	t.Helper()
+	r := waitForReincarnationSettled(t, s, agentID)
+	if r.SourceBrokerID == "" {
+		return r
+	}
+	return waitForMoveSourceCleanup(t, s, r.ID)
+}
+
+// startMove sends a real move as the agent itself and waits for the worker,
+// up to its last write (waitForMoveSettled).
 func startMove(t *testing.T, f *moveFixture) (*store.AgentReincarnation, *store.Agent) {
 	t.Helper()
 	rec := f.reincarnate(t, ReincarnateAgentRequest{Handoff: "moving on", TargetBroker: f.dst.ID})
@@ -73,7 +101,7 @@ func startMove(t *testing.T, f *moveFixture) (*store.AgentReincarnation, *store.
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, f.src.ID, resp.SourceBrokerID)
 	assert.Equal(t, f.dst.ID, resp.TargetBrokerID)
-	r := waitForReincarnationSettled(t, f.s, f.agent.ID)
+	r := waitForMoveSettled(t, f.s, f.agent.ID)
 	a, err := f.s.GetAgent(context.Background(), f.agent.ID)
 	require.NoError(t, err)
 	return r, a
@@ -90,7 +118,6 @@ func TestReincarnateMove_CompletesOnTarget(t *testing.T) {
 
 	r, a := startMove(t, f)
 	require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
-	r = waitForMoveSourceCleanup(t, f.s, r.ID)
 	assert.Equal(t, f.src.ID, r.SourceBrokerID)
 	assert.Equal(t, f.dst.ID, r.TargetBrokerID)
 	assert.Equal(t, store.SourceCleanupDone, r.SourceCleanup)
@@ -141,7 +168,6 @@ func TestReincarnateMove_SourceCleanupFailureRecorded(t *testing.T) {
 
 	r, a := startMove(t, f)
 	require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
-	r = waitForMoveSourceCleanup(t, f.s, r.ID)
 	assert.Equal(t, f.dst.ID, a.RuntimeBrokerID)
 	assert.True(t, strings.HasPrefix(r.SourceCleanup, "failed:"), "sourceCleanup = %q", r.SourceCleanup)
 	assert.Contains(t, r.SourceCleanup, "source broker offline")
@@ -155,7 +181,10 @@ func assertRolledBackToSource(t *testing.T, f *moveFixture, r *store.AgentReinca
 	t.Helper()
 	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
 	// The failed move's reconcile (reservation, skipped cleanup) runs just
-	// after the agent row settles; wait for its last write.
+	// after the agent row settles; wait for its last write. A no-op after
+	// startMove, which already waited; the callers that settle with
+	// waitForReincarnationSettled directly (RollbackPerStep, the
+	// session-user and image moves) need it.
 	r = waitForMoveSourceCleanup(t, f.s, r.ID)
 	assert.Equal(t, f.src.ID, a.RuntimeBrokerID, "the agent stays on the source")
 	assert.Equal(t, "kubernetes", a.Runtime, "the source runtime is restored")
@@ -197,10 +226,19 @@ func TestReincarnateMove_TargetStartFailureRollsBack(t *testing.T) {
 	f := setupMoveFixture(t, true, nil)
 	prepareMoveWorkerFixture(t, f)
 	f.disp.startErr = fmt.Errorf("start refused by broker: %w", errStartRequestNotSent)
+	before, err := f.s.GetAgent(context.Background(), f.agent.ID)
+	require.NoError(t, err)
 
 	r, a := startMove(t, f)
 	assertRolledBackToSource(t, f, r, a)
 	assert.Contains(t, r.Error, "start failed")
+	// The rollback restores the recovery config on the source: the new
+	// handoff behind the recovery addendum (ptone/scion#5511). The
+	// record's PreviousAppliedConfig keeps the generation N Task.
+	require.NotEmpty(t, r.Handoff)
+	assert.Equal(t, reincarnationRecoveryTask(r.ToGeneration, r.Handoff, store.AgentReincarnationStateStarting), a.AppliedConfig.Task)
+	require.NotNil(t, r.PreviousAppliedConfig)
+	assert.Equal(t, before.AppliedConfig.Task, r.PreviousAppliedConfig.Task, "the record's PreviousAppliedConfig is not changed")
 }
 
 // A user moving an agent to a broker that does not yet serve the project
@@ -253,9 +291,9 @@ func TestReincarnateMove_SelfMoveRealPassthroughRefused(t *testing.T) {
 	f.assertNoMoveSideEffects(t, count)
 }
 
-// moveBrokerQuota: when the target has no room, the source reservation is
-// restored and the error returned.
-func TestMoveBrokerQuota_TargetFullRestoresSource(t *testing.T) {
+// moveBrokerQuota: when the target has no room, the error is returned and
+// the source reservation is kept.
+func TestMoveBrokerQuota_TargetFullKeepsSource(t *testing.T) {
 	f := setupMoveFixture(t, true, nil)
 	setBrokerAgentCeiling(t, f.s, 1)
 	reserveBrokerSlot(t, f.s, f.src, f.agent.ID)
@@ -263,7 +301,7 @@ func TestMoveBrokerQuota_TargetFullRestoresSource(t *testing.T) {
 
 	err := f.srv.moveBrokerQuota(context.Background(), f.agent, &reincarnationMove{SourceBrokerID: f.src.ID, TargetBrokerID: f.dst.ID})
 	require.Error(t, err)
-	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.src.ID), "the source reservation is restored")
+	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.src.ID), "the source reservation is kept")
 	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.dst.ID), "only the occupant")
 }
 
@@ -423,6 +461,10 @@ func TestReincarnationWorker_MoveRecheckFailsBeforeAnySideEffect(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, f.src.ID, after.RuntimeBrokerID)
 	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.src.ID))
+	// A pending-site failure restores the recovery config too
+	// (ptone/scion#5511).
+	require.NotNil(t, after.AppliedConfig)
+	assert.Equal(t, reincarnationRecoveryTask(2, "h", store.AgentReincarnationStatePending), after.AppliedConfig.Task)
 }
 
 // R-1: an ambiguous start on the target (a container may be running there)
@@ -492,6 +534,9 @@ func TestReincarnateMove_RollbackPerStep(t *testing.T) {
 		user     bool // a user moves the agent (so the target may be linked)
 		inject   func(m *moveFaultStore, f *moveFixture)
 		wantErr  string
+		// fromState is the step the rollback fails out of, which the
+		// restored recovery Task names (ptone/scion#5511).
+		fromState string
 	}{
 		{name: "provisioning write fails", provider: true, inject: func(m *moveFaultStore, f *moveFixture) {
 			m.failUpdate = func(a *store.Agent) error {
@@ -500,10 +545,10 @@ func TestReincarnateMove_RollbackPerStep(t *testing.T) {
 				}
 				return nil
 			}
-		}, wantErr: "failed to persist new applied config"},
+		}, wantErr: "failed to persist new applied config", fromState: store.AgentReincarnationStateProvisioning},
 		{name: "provider link fails", user: true, inject: func(m *moveFaultStore, _ *moveFixture) {
 			m.addProviderErr = boom
-		}, wantErr: "failed to link the target broker"},
+		}, wantErr: "failed to link the target broker", fromState: store.AgentReincarnationStateProvisioning},
 		{name: "advance to starting fails", provider: true, inject: func(m *moveFaultStore, _ *moveFixture) {
 			m.failAdvance = func(rec *store.AgentReincarnation, _ string) (bool, error, bool) {
 				if rec.State == store.AgentReincarnationStateStarting {
@@ -511,7 +556,7 @@ func TestReincarnateMove_RollbackPerStep(t *testing.T) {
 				}
 				return false, nil, false
 			}
-		}, wantErr: "failed to advance record to starting"},
+		}, wantErr: "failed to advance record to starting", fromState: store.AgentReincarnationStateProvisioning},
 		{name: "starting write fails", provider: true, inject: func(m *moveFaultStore, _ *moveFixture) {
 			m.failUpdate = func(a *store.Agent) error {
 				if a.ReincarnationState == store.ReincarnationStateStarting {
@@ -519,7 +564,7 @@ func TestReincarnateMove_RollbackPerStep(t *testing.T) {
 				}
 				return nil
 			}
-		}, wantErr: "failed to record starting state"},
+		}, wantErr: "failed to record starting state", fromState: store.AgentReincarnationStateStarting},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -548,6 +593,17 @@ func TestReincarnateMove_RollbackPerStep(t *testing.T) {
 			assert.Contains(t, r.Error, tc.wantErr)
 			_, _, starts := f.disp.moveSnapshot()
 			assert.Empty(t, starts, "the agent is not started")
+			// The rollback restores the recovery config on the source, or
+			// previous unchanged when the request carried no handoff
+			// (ptone/scion#5511). The record's PreviousAppliedConfig is not
+			// changed.
+			require.NotNil(t, r.PreviousAppliedConfig)
+			want := r.PreviousAppliedConfig.Task
+			if r.Handoff != "" {
+				want = reincarnationRecoveryTask(r.ToGeneration, r.Handoff, tc.fromState)
+			}
+			assert.Equal(t, want, a.AppliedConfig.Task)
+			assert.NotContains(t, r.PreviousAppliedConfig.Task, "[SCION RECOVERY HANDOFF]")
 		})
 	}
 }

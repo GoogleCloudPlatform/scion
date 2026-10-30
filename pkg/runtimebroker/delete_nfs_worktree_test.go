@@ -59,11 +59,11 @@ func newWorktreeRemovalServer(t *testing.T, mgr *worktreeRemovingManager) (*Serv
 	}
 	t.Cleanup(func() { _ = os.Chdir(origWd) })
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 	var logBuf bytes.Buffer
 	srv.agentLifecycleLog = slog.New(slog.NewTextHandler(&logBuf, nil))
 	return srv, home, &logBuf

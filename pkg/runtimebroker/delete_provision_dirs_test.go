@@ -164,10 +164,10 @@ func newProvisionDirsServerOnList(t *testing.T, entries *[]api.AgentInfo, delete
 			return nil
 		},
 	}
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
-	return New(cfg, agent.NewManager(rt), rt), home
+	return New(cfg, agent.NewManager(rt), rt, config.RuntimeBuildRecord{}), home
 }
 
 // A started agent of a hub-native project with git, provisioned where the

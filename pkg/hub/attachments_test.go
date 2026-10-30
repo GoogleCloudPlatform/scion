@@ -65,7 +65,7 @@ func TestSanitizeFilename_DangerousExtension(t *testing.T) {
 	for _, f := range dangerous {
 		_, err := SanitizeFilename(f)
 		require.Error(t, err, "should reject %s", f)
-		assert.Contains(t, err.Error(), "dangerous file extension")
+		assert.Equal(t, "files with a "+filepath.Ext(f)+" extension are not accepted", err.Error())
 	}
 }
 
@@ -133,7 +133,7 @@ func TestSanitizeFilename_TrailingCharactersDoNotDefeatTheBlocklist(t *testing.T
 	for _, v := range variants {
 		_, err := SanitizeFilename(v)
 		require.Error(t, err, "SanitizeFilename(%q) was accepted", v)
-		assert.Contains(t, err.Error(), "dangerous file extension", "for %q", v)
+		assert.Equal(t, "files with a .sh extension are not accepted", err.Error(), "for %q", v)
 	}
 }
 

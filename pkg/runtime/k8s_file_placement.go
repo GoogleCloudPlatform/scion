@@ -179,20 +179,23 @@ func checkK8sHomeFileTargets(placements []k8sFilePlacement) error {
 // placement's source to its target under home. Placement requires real
 // directories and does not follow symlinks: every directory between home and
 // the directory that holds the file is checked in turn, and a symlink or a
-// non-directory there, or a symlink at the target itself, stops placement.
-// A missing directory is created by the running user: the directory that
+// non-directory there, or a symlink at the target itself, stops placement. A
+// missing directory is created by the running user: the directory that
 // directly holds the file gets 0700, any missing ancestors get the default
-// mode (0777 masked by the umask). Existing directories are left as they
-// are. The holding directory must be writable. An existing regular file at
-// the target is replaced; anything else at the target stops placement. The
-// file is copied to a temporary file in the target's directory, given its
-// mode there, and renamed over the target, so the target is always either
-// the previous file or the complete new one with its final mode, and running
-// the script again gives the same result. The temporary file has a fixed
-// name, so a run that was cut off is cleaned up by the next one; anything
-// already at that name is removed first, never written through. A failed
-// step removes the temporary file. The script stops at the first failure
-// and writes the target path and the reason (never file contents) to stderr.
+// mode (0777 masked by the umask). Each directory the script creates is
+// checked again right after mkdir: it must be a real directory, not a symlink
+// or another file type, or placement stops before any file is written.
+// Existing directories are left as they are. The holding directory must be
+// writable. An existing regular file at the target is replaced; anything else
+// at the target stops placement. The file is copied to a temporary file in
+// the target's directory, given its mode there, and renamed over the target,
+// so the target is always either the previous file or the complete new one
+// with its final mode, and running the script again gives the same result.
+// The temporary file has a fixed name, so a run that was cut off is cleaned
+// up by the next one; anything already at that name is removed first, never
+// written through. A failed step removes the temporary file. The script stops
+// at the first failure and writes the target path and the reason (never file
+// contents) to stderr.
 //
 // The fixed name relies on placements into one directory never running
 // concurrently. That holds because: the script places its files one after
@@ -223,10 +226,17 @@ place() {
 			return 1
 		elif [ -e "$cur" ]; then
 			[ -d "$cur" ] || { fail "$cur is not a directory"; return 1; }
-		elif [ "$cur" = "$dir" ]; then
-			mkdir -m 0700 "$cur" || { fail "cannot create directory $cur"; return 1; }
 		else
-			mkdir "$cur" || { fail "cannot create directory $cur"; return 1; }
+			if [ "$cur" = "$dir" ]; then
+				mkdir -m 0700 "$cur" || { fail "cannot create directory $cur"; return 1; }
+			else
+				mkdir "$cur" || { fail "cannot create directory $cur"; return 1; }
+			fi
+			if [ -L "$cur" ]; then
+				fail "created directory $cur is a symbolic link; placement requires real directories"
+				return 1
+			fi
+			[ -d "$cur" ] || { fail "created directory $cur is not a directory"; return 1; }
 		fi
 	done
 	[ -w "$dir" ] || { fail "directory $dir is not writable"; return 1; }

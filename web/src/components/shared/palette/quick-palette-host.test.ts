@@ -281,6 +281,22 @@ describe('QuickPaletteHost: mount and load', () => {
     expect(attempt).toBe(2);
   });
 
+  it('ignores palette-query: a query edit neither reloads nor closes', async () => {
+    const load = vi.fn(() => Promise.resolve([candidate('a1', 'Alpha')]));
+    const h = createHost({ load });
+    const palette = await openReady(h);
+    const groups = palette.groups;
+
+    palette.dispatchEvent(
+      new CustomEvent('palette-query', { detail: { query: 'al' }, bubbles: true, composed: true })
+    );
+    await nextTask();
+
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(palette.open).toBe(true);
+    expect(palette.groups).toBe(groups);
+  });
+
   it('a load that settles after a close publishes nothing', async () => {
     const pending = deferred<PaletteCandidate[]>();
     const h = createHost({ load: () => pending.promise });

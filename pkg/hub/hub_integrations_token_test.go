@@ -309,12 +309,12 @@ func TestIntegrationTokenSettingsKeys_EveryKnownPluginClassified(t *testing.T) {
 	}
 	for name, mappings := range config.PluginSecretKeyMap {
 		for _, m := range mappings {
-			got := tokenRefusedIntegrationConfigKeys(name, IntegrationConfigUpdateRequest{Settings: map[string]string{m.ConfigKey: ""}})
+			got := tokenRefusedIntegrationConfigKeys(name, IntegrationConfigUpdateRequest{Settings: map[string]*string{m.ConfigKey: nil}})
 			assert.Equal(t, []string{"settings." + m.ConfigKey}, got, "%s %s", name, m.ConfigKey)
 		}
 	}
 	assert.Equal(t, []string{"settings.agent_cache_ttl"},
-		tokenRefusedIntegrationConfigKeys("not-an-integration", IntegrationConfigUpdateRequest{Settings: map[string]string{"agent_cache_ttl": "1m"}}))
+		tokenRefusedIntegrationConfigKeys("not-an-integration", IntegrationConfigUpdateRequest{Settings: map[string]*string{"agent_cache_ttl": nil}}))
 
 	rec := httptest.NewRecorder()
 	require.True(t, writeTokenRefusedIntegrationKeys(rec, context.Background(), []string{"secrets"}),

@@ -15,17 +15,19 @@
 # Scion Project Configuration (v1)
 #
 # Settings merge order: defaults -> global (~/.scion/) -> project (.scion/)
-# Project-level settings control per-project preferences like active profile,
-# default template, and hub connection details.
+# Project-level settings control per-project preferences like the default
+# template and hub connection details, and can override the global active
+# profile.
 #
 # Runtime profiles and runtimes are managed at the global/broker level
 # (~/.scion/settings.yaml) and are not defined here.
 
 schema_version: "1"
 
-# Active profile to use for this project (profile must be defined in global settings)
-# Env: SCION_ACTIVE_PROFILE
-active_profile: local
+# active_profile is not set here, so a new project uses the global
+# active_profile. To pin one for this project, add (the profile must be
+# defined in global settings; env: SCION_ACTIVE_PROFILE):
+#   active_profile: <name>
 
 # CLI behavior settings
 cli:

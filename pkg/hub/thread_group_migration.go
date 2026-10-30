@@ -24,7 +24,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -34,12 +33,11 @@ import (
 //
 // Personal groups live in webchat_user_prefs.thread_groups, a JSON document
 // {"<projectId>": [{"id", "name", "threadIds": [<topic ID>...]}]}. A
-// background sweeper copies them into project thread groups while the
-// hub.chat_thread_groups experiment is on. A pass reads every row whose
-// thread_groups is non-empty and whose thread_groups_migrated_at is NULL,
-// handles the rows one project at a time, then marks each user done. A
-// user's entries for a project count only if the user may read that project
-// now (rule 0, design section 3).
+// background sweeper copies them into project thread groups. A pass reads
+// every row whose thread_groups is non-empty and whose
+// thread_groups_migrated_at is NULL, handles the rows one project at a time,
+// then marks each user done. A user's entries for a project count only if
+// the user may read that project now (rule 0, design section 3).
 //
 // Every pass is deterministic and idempotent, so several hubs may run passes
 // at once: groups are matched on the unique (project_id, name_key) index,
@@ -201,8 +199,8 @@ type threadGroupMigrationRuntime struct {
 
 // startThreadGroupMigrationSweeper starts the migration sweeper: a pass at
 // once, then one every threadGroupMigrationTick, until ctx is cancelled or
-// stopThreadGroupMigrationSweeper runs. Each pass checks the experiment, so
-// turning it on starts the migration within one tick with no restart.
+// stopThreadGroupMigrationSweeper runs. A user is marked done once copied,
+// so later passes find nothing to do.
 func (s *Server) startThreadGroupMigrationSweeper(ctx context.Context) {
 	if !s.nativeChatEnabled() {
 		return
@@ -260,13 +258,9 @@ const (
 	tgmUserDeferred               // a store error: entries skipped, left unmarked, retried
 )
 
-// migrateThreadGroupsPass runs one migration pass and returns its counts. It
-// does nothing while hub.chat_thread_groups is off.
+// migrateThreadGroupsPass runs one migration pass and returns its counts.
 func (s *Server) migrateThreadGroupsPass(ctx context.Context) threadGroupMigrationStats {
 	var st threadGroupMigrationStats
-	if !s.experimentEnabled(experiments.ChatThreadGroups) {
-		return st
-	}
 	s.mu.RLock()
 	wcs := s.webChatStore
 	s.mu.RUnlock()

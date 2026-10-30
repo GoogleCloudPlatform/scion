@@ -200,6 +200,7 @@ func (t *brokerHTTPTransport) StartAgent(ctx context.Context, brokerID, brokerEn
 		endpoint += "?projectId=" + url.QueryEscape(projectID)
 	}
 	endpoint = withRunIDURL(endpoint, extras.RunID)
+	endpoint = withDispatchAgentIDURL(ctx, endpoint)
 	payload := map[string]interface{}{}
 	if task != "" {
 		payload["task"] = task
@@ -401,6 +402,14 @@ func (t *brokerHTTPTransport) MessageAgent(ctx context.Context, brokerID, broker
 	// buffered-delivery failure back against the right row.
 	if msgID := dispatchMessageIDFromContext(ctx); msgID != "" {
 		reqBody["message_id"] = msgID
+	}
+	// ptone/scion#4596: the attachments the broker downloads and writes into
+	// the agent's home before delivering the text.
+	if wire := dispatchAttachmentsFromContext(ctx); len(wire) > 0 {
+		reqBody["attachments"] = wire
+		if days := dispatchRetentionFromContext(ctx); days > 0 {
+			reqBody["attachment_retention_days"] = days
+		}
 	}
 
 	body, err := json.Marshal(reqBody)

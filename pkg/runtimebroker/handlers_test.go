@@ -26,6 +26,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -494,9 +495,9 @@ func TestHealthEndpointsConcurrentSwapRuntime(t *testing.T) {
 		defer wg.Done()
 		for i := 0; i < 200; i++ {
 			if i%2 == 0 {
-				srv.SwapRuntime(bad)
+				srv.SwapRuntime(bad, config.RuntimeBuildRecord{})
 			} else {
-				srv.SwapRuntime(good)
+				srv.SwapRuntime(good, config.RuntimeBuildRecord{})
 			}
 		}
 	}()

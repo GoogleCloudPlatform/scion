@@ -674,26 +674,28 @@ func (s *Server) renewConduitStream(ctx context.Context, req conduitRenewalReque
 // row that is gone wraps errConduitPrincipalInactive; a failed lookup wraps
 // errConduitAuthzUnavailable.
 func (s *Server) conduitRenewalIdentity(ctx context.Context, c *grant.RecheckClaims, userID string) (Identity, error) {
+	// The development user (design v2.21.40 §3.5, Dev user) is rebuilt as
+	// such only while development authentication is enabled on this hub,
+	// read now and never from the grant. With it off, the user id takes the
+	// normal path, and a missing row is an inactive principal. Either way
+	// the account-status rule (checkUserAccount) applies to the user row.
+	devUser := userID == DevUserID && s.authConfig.DevAuthEnabled
+	principal := PrincipalContext{Kind: PrincipalKindUser, ID: userID}
+	if devUser {
+		principal = devUserPrincipal()
+	}
+	user, err := checkUserAccount(ctx, s.store, principal)
+	switch refusal := classifyUserAccount(user, err); refusal {
+	case accountAllowed:
+	case accountLookupFault:
+		return nil, fmt.Errorf("%w: user lookup: %v", errConduitAuthzUnavailable, err)
+	default:
+		return nil, fmt.Errorf("%w: %s", errConduitPrincipalInactive, accountRefusalReason(refusal))
+	}
 	var ident UserIdentity
-	if userID == DevUserID && s.authConfig.DevAuthEnabled {
-		// The development user (design v2.21.40 §3.5, Dev user) is rebuilt
-		// as such only while development authentication is enabled on this
-		// hub, read now and never from the grant. With it off, the user id
-		// takes the normal path below, and a missing row is an inactive
-		// principal.
+	if devUser {
 		ident = NewDevUser(s.authConfig.DevUserCfg)
 	} else {
-		user, err := s.store.GetUser(ctx, userID)
-		switch {
-		case errors.Is(err, store.ErrNotFound):
-			return nil, fmt.Errorf("%w: user not found", errConduitPrincipalInactive)
-		case err != nil:
-			return nil, fmt.Errorf("%w: user lookup: %v", errConduitAuthzUnavailable, err)
-		case user == nil:
-			// The store returned neither a user nor an error: an internal
-			// inconsistency, not an inactive user and not a decision.
-			return nil, fmt.Errorf("%w: user lookup returned no user", errConduitAuthzUnavailable)
-		}
 		ident = NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "")
 	}
 	if c.Scope == nil {

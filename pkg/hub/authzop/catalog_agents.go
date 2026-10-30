@@ -331,6 +331,30 @@ var agentOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
+		ID:          "agent.update.pendingconfig.delete",
+		Domain:      "agent",
+		Description: "Discard an agent's pending config edits (behind hub.agent_edit_held; 404 while it is off)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/pending-config", Method: "DELETE", Response: ResponseCallerSpecific},
+		},
+		Principals:  []PrincipalKind{PrincipalUser},
+		Credentials: []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		// discardAgentPendingConfig also applies the optional stateVersion
+		// check. Discarding grants nothing: it only removes edits that were
+		// never applied.
+		ResourceResolver: "agent-from-url",
+		BasePermission:   "agent.update",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden, DenialConflict},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestAgentSubRoute_CatalogDrift"},
+			{Package: "pkg/hub", Function: "TestAgentPendingConfig_DiscardClearsAndAudits"},
+		},
+		Bearer: AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
+	},
+	{
 		ID:          "agent.status.update",
 		Domain:      "agent",
 		Description: "Report an agent's status: the agent itself, or a user who may update the agent",
@@ -493,9 +517,11 @@ var agentOperations = []OperationSpec{
 		},
 		// authorizeAgentMessage applies the recipient's message mode and,
 		// for a user access token, the agent:message selector and the token
-		// boundary before any piercing rule.
-		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
-		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		// boundary before any piercing rule. An agent delegated credential
+		// may send a direct message to the route's own agent only, and
+		// pierces no message mode (.design/agent-delegation.md §12.3).
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent, PrincipalAgentDelegated},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT, CredentialDelegatedAgent},
 		ResourceResolver: "agent-from-url",
 		BasePermission:   "agent.message",
 		Effects:          []SecurityEffect{EffectEmitExternal},
@@ -531,8 +557,11 @@ var agentOperations = []OperationSpec{
 			// pins this entry point to the live route.
 			{Kind: EntryPointWebSocket, Pattern: "/api/v1/agents/{id}/pty", Method: "GET"},
 		},
-		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
-		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		// An agent delegated credential is authorized at the handshake
+		// only, on the broker terminal path; its established session is
+		// not re-checked (.design/agent-delegation.md §16.6).
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent, PrincipalAgentDelegated},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT, CredentialDelegatedAgent},
 		ResourceResolver: "agent-from-url",
 		BasePermission:   "agent.attach",
 		Effects:          []SecurityEffect{EffectReadOne},

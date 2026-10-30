@@ -113,6 +113,19 @@ type ServerConfigResponse struct {
 	// on this node. Present in both file-mode and DB-mode responses so the
 	// admin UI can show env-pinned fields regardless of settings tier.
 	EnvOverrides []string `json:"env_overrides,omitempty"`
+
+	// EnvValues maps each key in EnvOverrides to the value the environment
+	// gives it on this node (masked like the rest of the body; withheld when
+	// it cannot be shown safely) and whether the hub runs with that value.
+	// Additive: EnvOverrides is unchanged.
+	EnvValues map[string]EnvKeyValue `json:"env_values,omitempty"`
+
+	// StorageOverrideErrors lists, read-only, the removed per-runtime or
+	// per-profile storage overrides the settings file (as read at startup)
+	// or the stored settings still carry, one message per source with the
+	// keys and the migration (ptone/scion#6371). Agents of those profiles
+	// are refused at start. There is no request field for it.
+	StorageOverrideErrors []string `json:"storage_override_errors,omitempty"`
 }
 
 // ServerConfigUpdateRequest is the payload for updating settings.
@@ -377,7 +390,7 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 
 // handleGetServerConfig reads and returns the global settings.yaml.
 func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
-	resp, err := buildServerConfigFileResponse()
+	resp, err := buildServerConfigFileResponse(s.config.StartupServerSettings)
 	if err != nil {
 		var ue *serverConfigReadError
 		if errors.As(err, &ue) {
@@ -387,13 +400,16 @@ func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read settings", nil)
 		return
 	}
+	resp.StorageOverrideErrors = s.removedStorageOverrideErrors()
 	writeJSON(w, http.StatusOK, resp)
 }
 
 // buildServerConfigFileResponse builds the file-mode GET
 // /api/v1/admin/server-config body (sensitive fields masked). The file-mode
-// PUT also uses it as the reference view for echo detection.
-func buildServerConfigFileResponse() (*ServerConfigResponse, error) {
+// PUT also uses it as the reference view for echo detection. startup is
+// ServerConfig.StartupServerSettings (nil when unset), which env_values
+// compares environment values with for the keys start-up overrides.
+func buildServerConfigFileResponse(startup *config.V1ServerConfig) (*ServerConfigResponse, error) {
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		return nil, &serverConfigReadError{"Failed to resolve settings directory", err}
@@ -411,10 +427,11 @@ func buildServerConfigFileResponse() (*ServerConfigResponse, error) {
 				SchemaVersion:  "1",
 			}
 			envK := config.LoadEnvKoanf()
-			if envOverrides := opsettings.DetectEnvOverrides(envK); len(envOverrides) > 0 {
+			if envOverrides := withoutNeverAPIWritableKeys(opsettings.DetectEnvOverrides(envK)); len(envOverrides) > 0 {
 				sort.Strings(envOverrides)
 				resp.EnvOverrides = envOverrides
 			}
+			resp.EnvValues = fileTierEnvValues(envK, resp.EnvOverrides, startup, nil)
 			return &resp, nil
 		}
 		return nil, &serverConfigReadError{"Failed to read settings file", err}
@@ -425,67 +442,26 @@ func buildServerConfigFileResponse() (*ServerConfigResponse, error) {
 		return nil, &serverConfigReadError{"Failed to parse settings file", err}
 	}
 
+	// The stored values, for env_values' saved_differs (taken before the
+	// view below hides or masks anything; never returned).
+	stored := fileStoredValues(&vs)
+
 	// Mask sensitive fields before sending to the client
-	resp := ServerConfigResponse{
-		ScionVersion:         version.Short(),
-		ScionCommit:          version.GetCommit(),
-		ScionBuildTime:       version.GetBuildTime(),
-		SettingsTier:         "file",
-		SchemaVersion:        vs.SchemaVersion,
-		ActiveProfile:        vs.ActiveProfile,
-		DefaultTemplate:      vs.DefaultTemplate,
-		DefaultHarnessConfig: vs.DefaultHarnessConfig,
-		ImageRegistry:        vs.ImageRegistry,
-		WorkspacePath:        vs.WorkspacePath,
-		Server:               vs.Server,
-		Telemetry:            vs.Telemetry,
-		Runtimes:             vs.Runtimes,
-		HarnessConfigs:       vs.HarnessConfigs,
-		Profiles:             vs.Profiles,
-		DefaultMaxTurns:      vs.DefaultMaxTurns,
-		DefaultMaxModelCalls: vs.DefaultMaxModelCalls,
-		DefaultMaxDuration:   vs.DefaultMaxDuration,
-		DefaultResources:     vs.DefaultResources,
-		DefaultModel:         vs.DefaultModel,
-		DefaultThinkingLevel: vs.DefaultThinkingLevel,
-		DefaultMaxAgentRole:  vs.DefaultMaxAgentRole,
-		DefaultAgentRole:     vs.DefaultAgentRole,
-		DefaultRuntimeBroker: vs.DefaultRuntimeBroker,
-		DefaultTimezone:      vs.DefaultTimezone,
-		AutoInjectGcloudADC:  vs.AutoInjectGcloudADC,
-		AutoExposePorts:      vs.AutoExposePorts,
-		Quotas:               vs.Quotas,
-		AgentSecrets:         vs.AgentSecrets,
-
-		DefaultGCPIdentityMode:             vs.DefaultGCPIdentityMode,
-		DefaultGCPIdentityServiceAccountID: vs.DefaultGCPIdentityServiceAccountID,
-	}
-
-	// Populate top-level federation field from the server config.
-	if vs.Server != nil && vs.Server.Federation != nil {
-		resp.Federation = vs.Server.Federation
-	}
-	// server.hub.class and server.hub.test_identities are never
-	// API-writable, so they are not shown either: a client that echoes
-	// this body back must not send them.
-	if resp.Server != nil && resp.Server.Hub != nil {
-		resp.Server.Hub.HubClass = ""
-		resp.Server.Hub.TestIdentities = nil
-		// Nor is the relay-peer secret, which is never returned.
-		if c := resp.Server.Hub.Conduit; c != nil {
-			c.PeerSecret = ""
-		}
-	}
-	// Likewise the proxy driver settings (WS2).
-	hideNeverAPIWritableProxyKeys(resp.Server)
+	resp := serverConfigResponseFromSettings(&vs)
+	resp.ScionVersion = version.Short()
+	resp.ScionCommit = version.GetCommit()
+	resp.ScionBuildTime = version.GetBuildTime()
+	resp.SettingsTier = "file"
+	hideNeverShownServerKeys(resp.Server)
 
 	// Env overrides — detect SCION_SERVER_* env vars so the admin UI can
-	// show env-pinned fields in file mode too (H1).
+	// show env-pinned fields in file mode too (H1), with their values.
 	envK := config.LoadEnvKoanf()
-	if envOverrides := opsettings.DetectEnvOverrides(envK); len(envOverrides) > 0 {
+	if envOverrides := withoutNeverAPIWritableKeys(opsettings.DetectEnvOverrides(envK)); len(envOverrides) > 0 {
 		sort.Strings(envOverrides)
 		resp.EnvOverrides = envOverrides
 	}
+	resp.EnvValues = fileTierEnvValues(envK, resp.EnvOverrides, startup, stored)
 
 	maskSensitiveFields(&resp)
 	return &resp, nil
@@ -524,7 +500,7 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// Gate-protected keys (server.hub.class always; federation while the
 	// test admin tier is on) are refused before anything is decoded.
 	// An empty relay-peer secret is ignored; any other value is refused.
-	rawBody = dropEmptyPeerSecret(rawBody)
+	rawBody = dropEmptySecretSettings(rawBody)
 	if s.rejectGateProtectedSettingsKeys(w, rawBody) {
 		return
 	}
@@ -563,10 +539,13 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// dotted "server.hub.x" key) is rejected with 422 before anything is
 	// written, unless it echoes the GET view (ptone/scion#3463). A key
 	// inside server.broker.instances was already decoded strictly above.
-	if rejectUnknownFileConfigKeys(w, rawBody) {
+	if rejectUnknownFileConfigKeys(w, rawBody, s.config.StartupServerSettings) {
 		return
 	}
 	if rejectInvalidThinkingLevel(w, req.DefaultThinkingLevel) {
+		return
+	}
+	if rejectNullFederation(w, rawBody) {
 		return
 	}
 
@@ -614,67 +593,28 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// home_storage_backend and home_storage_leaf on runtime and profile
-	// entries, and server.home_storage, must hold known values.
-	if errs := config.ValidateHomeStorageOverrides(req.Runtimes, req.Profiles); len(errs) > 0 {
+	// The per-runtime and per-profile storage overrides are removed
+	// (server.project_storage decides storage; volumes: replaces node-local
+	// overrides), and the storage blocks in the request must resolve to
+	// one server.project_storage.
+	if errs := config.RemovedStorageOverrideErrors(req.Runtimes, req.Profiles, nil); len(errs) > 0 {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, errs[0].Error(), nil)
+		return
+	}
+
+	// Resource quantities (ptone/scion#6581): a value that is not a
+	// Kubernetes quantity, memory or disk below 1Mi ("16" is 16 bytes) or a
+	// request above its limit is rejected, naming its key; a unitless byte
+	// count or low memory is accepted with a warning.
+	qErrs, qWarnings := config.ValidateResourceQuantities(req.DefaultResources, req.Profiles)
+	if len(qErrs) > 0 {
+		writeResourceQuantityError(w, http.StatusBadRequest, ErrCodeInvalidRequest, qErrs)
 		return
 	}
 	if req.Server != nil {
-		if err := req.Server.HomeStorage.Validate(); err != nil {
+		if _, _, err := config.SynthesizeProjectStorage(req.Server.ProjectStorage, req.Server.WorkspaceStorage, req.Server.SharedDirStorage, req.Server.HomeStorage); err != nil {
 			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
 			return
-		}
-	}
-
-	// shared_dir_storage_backend on runtime and profile entries must be
-	// "local" or "nfs", and "nfs" needs a complete
-	// server.shared_dir_storage.nfs block (from this request, else the
-	// current global settings). When the request changes
-	// server.shared_dir_storage, it is also checked against the runtimes
-	// and profiles already stored, so removing or emptying the nfs block
-	// cannot strand an existing nfs override. Configuration only; no mount
-	// is checked.
-	sdInRequest := req.Server != nil && req.Server.SharedDirStorage != nil
-	// Values and per-dir names do not depend on the current settings, so
-	// they are checked even when those cannot be read below.
-	if errs := config.ValidateSharedDirStorageBackendValues(req.Runtimes, req.Profiles); len(errs) > 0 {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, errs[0].Error(), nil)
-		return
-	}
-	if req.Runtimes != nil || req.Profiles != nil || sdInRequest {
-		runtimes, profiles := req.Runtimes, req.Profiles
-		var sdGlobal *config.V1SharedDirStorageConfig
-		if sdInRequest {
-			sdGlobal = req.Server.SharedDirStorage
-		}
-		sdKnown := true
-		if !sdInRequest || runtimes == nil || profiles == nil {
-			gs, _, gErr := config.LoadGlobalSettings()
-			switch {
-			case gErr != nil:
-				// The current settings cannot be read, so the merged
-				// result is unknown; validation at agent start still
-				// applies.
-				sdKnown = false
-			case gs != nil:
-				if sdInRequest {
-					if runtimes == nil {
-						runtimes = gs.Runtimes
-					}
-					if profiles == nil {
-						profiles = gs.Profiles
-					}
-				} else if gs.Server != nil {
-					sdGlobal = gs.Server.SharedDirStorage
-				}
-			}
-		}
-		if sdKnown {
-			if errs := config.ValidateSharedDirStorageBackends(runtimes, profiles, sdGlobal); len(errs) > 0 {
-				writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, errs[0].Error(), nil)
-				return
-			}
 		}
 	}
 
@@ -749,7 +689,7 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// server.broker.instances is kept unless the body set it explicitly.
 	storedInstances := storedBrokerInstances(raw)
 	rawServer := rawServerObject(rawBody)
-	applySettingsUpdatesFromBody(raw, &req, rawBody)
+	runtimeMergeWarnings := applySettingsUpdatesFromBody(raw, &req, rawBody)
 	carryOverBrokerInstances(raw, storedInstances, instancesPresent, instances)
 	// default_thinking_level is cleared by an explicit null, which the typed
 	// decode leaves as a nil pointer (indistinguishable from an omitted key).
@@ -833,6 +773,8 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 			saveWarnings = safeToEvictSaveWarnings(merged.Runtimes, merged.Profiles)
 		}
 	}
+	saveWarnings = append(saveWarnings, resourceQuantityWarnings(qWarnings)...)
+	saveWarnings = append(saveWarnings, runtimeMergeWarnings...)
 
 	if err := config.WriteSettingsFileLocked(settingsLock, settingsPath, newData); err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to write settings file", nil)
@@ -858,13 +800,11 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 // safeToEvictSaveWarnings returns, and logs, a warning for each runtime or
-// profile that sets safe_to_evict, or home_storage_backend "nfs", on a
-// non-Kubernetes runtime. The value is saved and ignored at agent start;
-// this is the same rule as config validate. Used by both the file-mode and
-// DB-mode PUT handlers.
+// profile that sets safe_to_evict on a non-Kubernetes runtime. The value is
+// saved and ignored at agent start; this is the same rule as config
+// validate. Used by both the file-mode and DB-mode PUT handlers.
 func safeToEvictSaveWarnings(runtimes map[string]config.V1RuntimeConfig, profiles map[string]config.V1ProfileConfig) []string {
 	warnings := config.SafeToEvictIgnoredWarnings(runtimes, profiles)
-	warnings = append(warnings, config.HomeStorageIgnoredWarnings(runtimes, profiles)...)
 	for _, msg := range warnings {
 		slog.Warn("Server config saved with an ignored setting", "warning", msg)
 	}
@@ -952,10 +892,12 @@ func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateReq
 }
 
 // applySettingsUpdatesFromBody is applySettingsUpdates with the raw PUT
-// body, whose "server" and "telemetry" objects tell mergeServerSettings
-// and mergeSettingsSection which fields the client sent. A nil rawBody
-// derives that from req.Server and req.Telemetry.
-func applySettingsUpdatesFromBody(raw map[string]interface{}, req *ServerConfigUpdateRequest, rawBody []byte) {
+// body, whose "server", "telemetry" and "federation" objects tell
+// mergeServerSettings and mergeSettingsSection which fields the client
+// sent. A nil rawBody derives that from req.Server, req.Telemetry and
+// req.Federation. It returns the warnings of the runtimes merge
+// (mergeRuntimeEntries).
+func applySettingsUpdatesFromBody(raw map[string]interface{}, req *ServerConfigUpdateRequest, rawBody []byte) []string {
 	if req.SchemaVersion != nil {
 		raw["schema_version"] = *req.SchemaVersion
 	}
@@ -976,8 +918,12 @@ func applySettingsUpdatesFromBody(raw map[string]interface{}, req *ServerConfigU
 	if req.Telemetry != nil {
 		mergeSettingsSection(raw, "telemetry", req.Telemetry, rawRequestObject(rawBody, "Telemetry"))
 	}
+	// runtimes: each sent entry is merged key by key on the stored one, so
+	// a stored key the body leaves out is kept (ptone/scion#6580;
+	// mergeRuntimeEntries). An entry the body leaves out is deleted.
+	var runtimeMergeWarnings []string
 	if req.Runtimes != nil {
-		raw["runtimes"] = marshalToMap(req.Runtimes)
+		raw["runtimes"], runtimeMergeWarnings = mergeRuntimesFile(raw["runtimes"], req.Runtimes, sentRuntimesObject(rawBody))
 	}
 	if req.HarnessConfigs != nil {
 		raw["harness_configs"] = marshalToMap(req.HarnessConfigs)
@@ -1089,8 +1035,17 @@ func applySettingsUpdatesFromBody(raw map[string]interface{}, req *ServerConfigU
 			serverMap = make(map[string]interface{})
 			raw["server"] = serverMap
 		}
-		serverMap["federation"] = marshalToMap(req.Federation)
+		// Merged field by field like telemetry, so a key the body omits
+		// keeps its stored value (the DB-mode merge does the same; the
+		// Federation page sends only the fields that changed). Lists such
+		// as trusted_issuers are replaced as a whole; null or a zero value
+		// clears a key.
+		mergeSettingsSection(serverMap, "federation", req.Federation, rawRequestObject(rawBody, "Federation"))
+		if len(serverMap) == 0 {
+			delete(raw, "server")
+		}
 	}
+	return runtimeMergeWarnings
 }
 
 // marshalToMap converts a struct to a map[string]interface{} via YAML round-trip.
@@ -1121,10 +1076,50 @@ func user(u UserIdentity) string {
 // clearing the value by accident (ptone/scion#3898). Shared by the DB-backed
 // and file-mode server-config PUT handlers.
 func rejectInvalidThinkingLevel(w http.ResponseWriter, level *int) bool {
-	if level == nil || (*level >= 1 && *level <= 100) {
+	return rejectInvalidDefaultThinkingLevel(w, "default_thinking_level", level)
+}
+
+// rejectInvalidDefaultThinkingLevel is the default thinking level check
+// shared by the server-config PUT and the project settings PUT
+// (ptone/scion#4052): one rule for every settings default, 1-100, with an
+// explicit null as the only clear. field is the request key named in the
+// message and in details.field.
+func rejectInvalidDefaultThinkingLevel(w http.ResponseWriter, field string, level *int) bool {
+	if level == nil || validDefaultThinkingLevel(*level) {
 		return false
 	}
 	writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-		fmt.Sprintf("invalid default_thinking_level %d: must be between 1 and 100; send null to clear it", *level), nil)
+		fmt.Sprintf("invalid %s %d: must be between 1 and 100; send null to clear it", field, *level),
+		map[string]interface{}{"field": field})
 	return true
+}
+
+// rejectNullFederation writes a 422 and returns true when a server-config
+// PUT sends the top-level federation member as null. A null section used to
+// answer 200 and change nothing (ptone/scion#4326). It is refused rather
+// than read as a clear because a clear is ambiguous (an empty section, or
+// back to the bootstrap value); the section reset route restores the
+// bootstrap value, and explicit field values (false, [], "") clear fields.
+// Shared by the DB-backed and file-mode server-config PUT handlers.
+func rejectNullFederation(w http.ResponseWriter, rawBody []byte) bool {
+	top, err := parseFieldPresence(rawBody)
+	if err != nil {
+		return false // the typed decode reports malformed bodies
+	}
+	if v, sent := top.sentFold("federation"); !sent || !isJSONNull(v) {
+		return false
+	}
+	writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+		"federation cannot be null: to restore the bootstrap federation settings use "+
+			"DELETE /api/v1/admin/server-config/sections/federation (database-backed hubs); "+
+			"to clear individual fields send them explicitly (false, [] or \"\")",
+		map[string]interface{}{"keys": []string{"federation"}})
+	return true
+}
+
+// validDefaultThinkingLevel reports whether n is in the range a settings
+// default thinking level may hold (1-100). An agent's own thinking_level
+// also accepts 0; a default does not, because 0 used to be sent for "unset".
+func validDefaultThinkingLevel(n int) bool {
+	return n >= 1 && n <= 100
 }

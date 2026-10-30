@@ -20,7 +20,6 @@ import (
 	"context"
 	"testing"
 
-	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -31,7 +30,7 @@ import (
 // disturbing existing rows, which read back with NULL provenance.
 func TestMessageProvenanceColumns_AdditiveUpgrade(t *testing.T) {
 	client := newTestClient(t)
-	driver, ok := client.Driver().(*entsql.Driver)
+	driver, ok := SQLDriver(client.Driver())
 	require.True(t, ok)
 	db := driver.DB()
 	ctx := context.Background()
@@ -72,4 +71,52 @@ func TestMessageProvenanceColumns_AdditiveUpgrade(t *testing.T) {
 	require.NotNil(t, got.RecipientProjectID)
 	require.Equal(t, senderProj, *got.SenderProjectID)
 	require.Equal(t, recipientProj, *got.RecipientProjectID)
+}
+
+// TestMessageDelegationAttributionColumns_AdditiveUpgrade: on a messages
+// table that predates the authorizing_user_id / delegation_grant_id columns
+// (.design/agent-delegation.md §14.5), AutoMigrate adds them as nullable
+// columns, a legacy row reads back with neither, and new values round-trip.
+func TestMessageDelegationAttributionColumns_AdditiveUpgrade(t *testing.T) {
+	client := newTestClient(t)
+	driver, ok := SQLDriver(client.Driver())
+	require.True(t, ok)
+	db := driver.DB()
+	ctx := context.Background()
+
+	for _, col := range []string{"authorizing_user_id", "delegation_grant_id"} {
+		_, err := db.ExecContext(ctx, "ALTER TABLE messages DROP COLUMN "+col)
+		require.NoError(t, err)
+	}
+	legacyID, projectID := uuid.New(), uuid.New()
+	_, err := db.ExecContext(ctx,
+		`INSERT INTO messages (id, project_id, sender, sender_id, recipient, recipient_id, msg, type, urgent, broadcasted, read, agent_id, group_id, dispatch_state, created)
+		 VALUES (?, ?, 'agent:a', 'a', 'agent:b', 'b', 'legacy', 'instruction', false, false, false, 'b', '', 'dispatched', CURRENT_TIMESTAMP)`,
+		legacyID, projectID)
+	require.NoError(t, err)
+
+	require.NoError(t, AutoMigrate(ctx, client))
+
+	legacy, err := client.Message.Get(ctx, legacyID)
+	require.NoError(t, err)
+	require.Equal(t, "legacy", legacy.Msg)
+	require.Nil(t, legacy.AuthorizingUserID)
+	require.Nil(t, legacy.DelegationGrantID)
+
+	issuer, grant := uuid.NewString(), uuid.NewString()
+	created, err := client.Message.Create().
+		SetProjectID(projectID).
+		SetSender("agent:a").
+		SetRecipient("agent:b").
+		SetMsg("delegated").
+		SetAuthorizingUserID(issuer).
+		SetDelegationGrantID(grant).
+		Save(ctx)
+	require.NoError(t, err)
+	got, err := client.Message.Get(ctx, created.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.AuthorizingUserID)
+	require.NotNil(t, got.DelegationGrantID)
+	require.Equal(t, issuer, *got.AuthorizingUserID)
+	require.Equal(t, grant, *got.DelegationGrantID)
 }

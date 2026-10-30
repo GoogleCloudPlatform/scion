@@ -257,9 +257,10 @@ type healthSchedAgentTypeIdentity struct{}
 func (healthSchedAgentTypeIdentity) ID() string   { return "hs-agent-type-only" }
 func (healthSchedAgentTypeIdentity) Type() string { return "agent" }
 
-// An agent caller sees the schedules of its own project only, and only
-// with project:read. An agent-type identity without agent claims, and an
-// empty project, are denied.
+// An agent caller sees a schedule only in its own project, only with
+// project:read, and only when it holds the row. An agent-type identity
+// without agent claims, a row with no project, and rows held by another
+// agent, a user or no recorded principal are denied.
 func TestHealthSummaryCanReadSchedules_AgentCaller(t *testing.T) {
 	srv, _ := testServer(t)
 	own, other := tid("hs-agent-own"), tid("hs-agent-other")
@@ -267,11 +268,19 @@ func TestHealthSummaryCanReadSchedules_AgentCaller(t *testing.T) {
 		r := httptest.NewRequest(http.MethodGet, "/api/v1/admin/health/summary", nil)
 		return r.WithContext(contextWithIdentity(r.Context(), id))
 	}
-	assert.True(t, srv.healthSummaryCanReadSchedules(req(authzHelperAgent(own, ScopeProjectRead)), own))
-	assert.False(t, srv.healthSummaryCanReadSchedules(req(authzHelperAgent(own, ScopeProjectRead)), other))
-	assert.False(t, srv.healthSummaryCanReadSchedules(req(authzHelperAgent(own)), own))
-	assert.False(t, srv.healthSummaryCanReadSchedules(req(healthSchedAgentTypeIdentity{}), own))
-	assert.False(t, srv.healthSummaryCanReadSchedules(req(authzHelperAgent(own, ScopeProjectRead)), ""))
+	row := func(projectID string, h agentScopeHolder) *store.Schedule {
+		return &store.Schedule{ProjectID: projectID, InitiatorAttribution: h.attribution()}
+	}
+	agent := authzHelperAgent(own, ScopeProjectRead)
+	assert.True(t, srv.healthSummaryCanReadSchedules(req(agent), row(own, holderCallerAgent)))
+	assert.False(t, srv.healthSummaryCanReadSchedules(req(agent), row(own, holderOtherAgent)))
+	assert.False(t, srv.healthSummaryCanReadSchedules(req(agent), row(own, holderUser)))
+	assert.False(t, srv.healthSummaryCanReadSchedules(req(agent), row(own, holderLegacy)))
+	assert.False(t, srv.healthSummaryCanReadSchedules(req(agent), row(other, holderCallerAgent)))
+	assert.False(t, srv.healthSummaryCanReadSchedules(req(authzHelperAgent(own)), row(own, holderCallerAgent)))
+	assert.False(t, srv.healthSummaryCanReadSchedules(req(healthSchedAgentTypeIdentity{}), row(own, holderCallerAgent)))
+	assert.False(t, srv.healthSummaryCanReadSchedules(req(agent), row("", holderCallerAgent)))
+	assert.False(t, srv.healthSummaryCanReadSchedules(req(agent), nil))
 }
 
 // The schedules API's denials keep their status and body after the access

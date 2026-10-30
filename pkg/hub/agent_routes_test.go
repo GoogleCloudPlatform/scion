@@ -80,6 +80,8 @@ func agentRouteCases() []agentRouteCase {
 		byID(http.MethodPut, "/secrets/MY_KEY", AgentRouteSecrets, "", AgentSubRouteSuffix{Opaque: "/MY_KEY"}),
 		byID(get, "/metrics/summary", AgentRouteMetricsSummary, opAgentMetricsRead, none),
 		byID(post, "/hold/lift", AgentRouteHoldLift, opAgentHoldLift, none),
+		byID(http.MethodDelete, "/pending-config", AgentRoutePendingConfig, opAgentPendingDiscard, none),
+		byID(get, "/pending-config", AgentRoutePendingConfig, "", none),
 		byID(post, "/delegations", AgentRouteDelegations, opAgentDelegationCreate, none),
 		byID(get, "/delegations", AgentRouteDelegations, opAgentDelegationList, none),
 		byID(http.MethodPut, "/delegations", AgentRouteDelegations, "", none),
@@ -90,6 +92,10 @@ func agentRouteCases() []agentRouteCase {
 		byID(get, "/delegations/g-1/credentials/c-1", AgentRouteDelegationCredential, "", AgentSubRouteSuffix{Param: "g-1", SecondParam: "c-1"}),
 		byID(post, "/delegations/g-1/exchange", AgentRouteDelegationExchange, opAgentDelegationExchange, AgentSubRouteSuffix{Param: "g-1"}),
 		byID(get, "/delegations/g-1/exchange", AgentRouteDelegationExchange, "", AgentSubRouteSuffix{Param: "g-1"}),
+		// revoke-all is its own row, matched before the grant item row.
+		byID(post, "/delegations/revoke-all", AgentRouteDelegationRevokeAll, opAgentDelegationRevokeAll, none),
+		byID(get, "/delegations/revoke-all", AgentRouteDelegationRevokeAll, "", none),
+		byID(http.MethodDelete, "/delegations/revoke-all", AgentRouteDelegationRevokeAll, "", none),
 		byID(post, "/status", AgentRouteActionStatus, opAgentStatusUpdate, none),
 		byID(post, "/start", AgentRouteActionStart, opAgentLifecycleControl, none),
 		byID(get, "/start", AgentRouteActionStart, "", none),
@@ -390,7 +396,7 @@ func TestAgentSubRoute_CatalogDrift(t *testing.T) {
 		opAgentTokenRefresh, opAgentOutboundMessage, opAgentMetricsReport,
 		opAgentStatusUpdate, opAgentLogsRead, opAgentMessagesRead, opAgentMetricsRead,
 		opAgentKeys, opAgentActionMessage, opAgentPortList, opAgentPortRegister,
-		opAgentPortTunnel, opAgentStopAllProject,
+		opAgentPortTunnel, opAgentStopAllProject, opAgentPendingDiscard,
 	} {
 		assert.NotEmpty(t, discovered[op], "operation %s has no resolver entry point", op)
 	}

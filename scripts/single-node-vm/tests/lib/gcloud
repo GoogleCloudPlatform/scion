@@ -237,11 +237,79 @@ case "${1:-} ${2:-}" in
       echo "${err_msg:-ERROR: (gcloud.projects.add-iam-policy-binding) PERMISSION_DENIED: simulated binding failure for role [${role}]}" >&2
       exit 1
     fi
+    # Recorded in the project policy fixture (see "projects
+    # get-iam-policy"), once per role+member like the real policy.
+    member="$(get_flag member "$@" || true)"
+    policy_file="${GCLOUD_STUB_STATE_DIR}/project-iam-policy.tsv"
+    if ! grep -qxF "${role}"$'\t'"${member}" "$policy_file" 2>/dev/null; then
+      printf '%s\t%s\n' "$role" "$member" >> "$policy_file"
+    fi
     # On success real gcloud prints the updated policy on stdout and a
     # status line on stderr.
     echo "Updated IAM policy for project [${3:-}]." >&2
     echo "bindings: []"
     exit 0
+    ;;
+  "projects get-iam-policy")
+    # The project policy is a plain fixture file, one "ROLE<TAB>MEMBER"
+    # line per unconditional binding member, or "ROLE<TAB>MEMBER<TAB>TITLE"
+    # for a conditional one, seeded by
+    # seed_project_iam_binding and kept up to date by add/remove below and
+    # by "iam service-accounts delete" (which turns a deleted SA's members
+    # into deleted:serviceAccount:...?uid= tombstones, as GCP does). Only
+    # the one shape deploy.sh asks for is answered: flattened per member,
+    # printed as value(bindings.role,bindings.members,
+    # bindings.condition.title,bindings.condition.expression),
+    # tab-separated, with empty trailing fields for an unconditional row.
+    want_format="value(bindings.role,bindings.members,bindings.condition.title,bindings.condition.expression)"
+    if [[ "$(get_flag flatten "$@" || true)" != "bindings[].members" \
+        || "$(get_flag format "$@" || true)" != "$want_format" ]]; then
+      echo "gcloud-stub: projects get-iam-policy only answers --flatten=bindings[].members --format=${want_format}: $*" >&2
+      exit 1
+    fi
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/project-get-iam-policy-fail" ]]; then
+      echo "ERROR: (gcloud.projects.get-iam-policy) PERMISSION_DENIED: simulated policy read failure on project [${3:-}]" >&2
+      exit 1
+    fi
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/project-iam-policy.tsv" ]]; then
+      while IFS=$'\t' read -r p_role p_member p_title; do
+        if [[ -n "$p_title" ]]; then
+          printf '%s\t%s\t%s\t%s\n' "$p_role" "$p_member" "$p_title" "request.time < timestamp(\"2030-01-01T00:00:00Z\")"
+        else
+          printf '%s\t%s\t\t\n' "$p_role" "$p_member"
+        fi
+      done < "${GCLOUD_STUB_STATE_DIR}/project-iam-policy.tsv"
+    fi
+    exit 0
+    ;;
+  "projects remove-iam-policy-binding")
+    # Same conditional-bindings policy as add-iam-policy-binding above.
+    if [[ "$(get_flag condition "$@" || true)" != "None" ]]; then
+      echo "ERROR: (gcloud.projects.remove-iam-policy-binding) Removing a binding without specifying a condition from a policy containing conditions is prohibited in non-interactive mode. Run the command again with \`--condition=None\` to remove a binding without condition or run command with \`--all\` to remove all bindings of the specified principal and role." >&2
+      exit 1
+    fi
+    require_flag role "$@"
+    require_flag member "$@"
+    role="$(get_flag role "$@")"
+    member="$(get_flag member "$@")"
+    fail_file="${GCLOUD_STUB_STATE_DIR}/project-binding-remove-fail/${role//\//_}"
+    if [[ -f "$fail_file" ]]; then
+      echo "ERROR: (gcloud.projects.remove-iam-policy-binding) PERMISSION_DENIED: simulated binding removal failure for role [${role}]" >&2
+      exit 1
+    fi
+    policy_file="${GCLOUD_STUB_STATE_DIR}/project-iam-policy.tsv"
+    if grep -qxF "${role}"$'\t'"${member}" "$policy_file" 2>/dev/null; then
+      grep -vxF "${role}"$'\t'"${member}" "$policy_file" > "${policy_file}.new" || true
+      mv "${policy_file}.new" "$policy_file"
+      echo "Updated IAM policy for project [${3:-}]." >&2
+      exit 0
+    fi
+    # Real gcloud raises IamPolicyBindingNotFound (exit 1) for a member
+    # and role not in the policy; it is not a no-op success. With
+    # --condition=None its text names the condition too
+    # (iam_util.RemoveBindingFromIamPolicyWithCondition, Cloud SDK 591.0.0).
+    echo "ERROR: (gcloud.projects.remove-iam-policy-binding) Policy binding with the specified principal, role, and condition not found!" >&2
+    exit 1
     ;;
   "projects get-ancestors")
     # Empty output = "could not read ancestry" in deploy.sh, which just
@@ -951,6 +1019,21 @@ json.dump({'email': email, 'description': desc}, open(path, 'w', encoding='utf-8
     fi
     if [[ -f "${GCLOUD_STUB_STATE_DIR}/service-accounts/${sa_email}.json" ]]; then
       rm -f "${GCLOUD_STUB_STATE_DIR}/service-accounts/${sa_email}.json"
+      # GCP keeps a deleted SA's project bindings as tombstones.
+      policy_file="${GCLOUD_STUB_STATE_DIR}/project-iam-policy.tsv"
+      if [[ -f "$policy_file" ]]; then
+        while IFS=$'\t' read -r p_role p_member p_title; do
+          if [[ "$p_member" == "serviceAccount:${sa_email}" ]]; then
+            p_member="deleted:serviceAccount:${sa_email}?uid=100000000000000000001"
+          fi
+          if [[ -n "$p_title" ]]; then
+            printf '%s\t%s\t%s\n' "$p_role" "$p_member" "$p_title"
+          else
+            printf '%s\t%s\n' "$p_role" "$p_member"
+          fi
+        done < "$policy_file" > "${policy_file}.new"
+        mv "${policy_file}.new" "$policy_file"
+      fi
       exit 0
     fi
     # Not otherwise seeded: a realistic "not found" error shape for a
@@ -1342,13 +1425,60 @@ STUBERR
       "uname -m")
         echo "${GCLOUD_STUB_SSH_ARCH:-x86_64}"
         ;;
+      "readlink /opt/scion/current 2>/dev/null || true")
+        # deploy.sh's read_current_release: the target of the VM's
+        # /opt/scion/current link (e.g. "releases/nightly-20261023").
+        # Empty by default -- a VM without the versioned layout yet.
+        # GCLOUD_STUB_SSH_CURRENT_LINK_SKIP=N answers empty for the first
+        # N calls (e.g. the Phase 1 probe missing the layout).
+        n_file="${GCLOUD_STUB_STATE_DIR}/current-link-calls"
+        n=$(( $(cat "$n_file" 2>/dev/null || echo 0) + 1 ))
+        echo "$n" > "$n_file"
+        if [[ -n "${GCLOUD_STUB_SSH_CURRENT_LINK:-}" && "$n" -gt "${GCLOUD_STUB_SSH_CURRENT_LINK_SKIP:-0}" ]]; then
+          echo "${GCLOUD_STUB_SSH_CURRENT_LINK}"
+        fi
+        ;;
       *"useradd -r -M -N -g scion"*)
         # The rendered NFS squash-identity script: its own docstring says
         # it prints exactly "SQUASH_UID:SCION_GID" on success.
         echo "${GCLOUD_STUB_SSH_SQUASH_IDS:-997:1001}"
         ;;
+      *"Image build started in background"*)
+        # Phase 3b's background image build start (it also mentions the
+        # status dir, so it must match before the poll cases below).
+        touch "${GCLOUD_STUB_STATE_DIR}/image-build-started"
+        echo "Image build started in background (PID 4242)"
+        ;;
+      "cat \"\$HOME/.scion-image-build/exit\" 2>/dev/null || echo running")
+        # The build poll: answers from GCLOUD_STUB_SSH_BUILD_EXIT_SEQ, one
+        # space-separated word per poll ("running running 0"); default 0.
+        n_file="${GCLOUD_STUB_STATE_DIR}/build-exit-polls"
+        n=$(( $(cat "$n_file" 2>/dev/null || echo 0) + 1 ))
+        echo "$n" > "$n_file"
+        read -r -a seq <<< "${GCLOUD_STUB_SSH_BUILD_EXIT_SEQ:-0}"
+        idx=$(( n <= ${#seq[@]} ? n - 1 : ${#seq[@]} - 1 ))
+        echo "${seq[$idx]}"
+        ;;
+      "tail -1 \"\$HOME/.scion-image-build/log\" 2>/dev/null || echo '(waiting...)'")
+        # The build progress line; %b so a test can inject escape bytes.
+        printf '%b\n' "${GCLOUD_STUB_SSH_BUILD_LOG_LINE:-building}"
+        ;;
+      *"sudo docker images | grep"*)
+        # The post-build image check: the point a Phase 3b test stops at.
+        touch "${GCLOUD_STUB_STATE_DIR}/images-verified"
+        ;;
+      "mktemp -d /tmp/scion-hubenv.XXXXXX")
+        # deploy.sh's private hub.env staging directory on the VM.
+        echo "${GCLOUD_STUB_SSH_HUBENV_DIR-/tmp/scion-hubenv.STUB01}"
+        ;;
       *"test -f /home/scion/.scion/hub.env"*)
-        echo "no"
+        # GCLOUD_STUB_HUB_ENV_EXISTS=true simulates a re-run on a VM that
+        # already has hub.env (the default is a fresh VM).
+        if [[ "${GCLOUD_STUB_HUB_ENV_EXISTS:-false}" == "true" ]]; then
+          echo "yes"
+        else
+          echo "no"
+        fi
         ;;
       *"schema_version"*"mode: proxy"*)
         # The settings.yaml Phase-5 proxy-mode (re)write: a later, distinct

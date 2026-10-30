@@ -87,7 +87,7 @@ func TestHydrateHarnessConfig_BlobLayoutMissesDirectRead(t *testing.T) {
 	}
 
 	content := []byte("harness: claude\nimage: blob:1\n")
-	hash := transfer.ComputeContentHash([]transfer.FileInfo{{Path: "config.yaml", Hash: transfer.HashBytes(content)}})
+	hash := transfer.ComputeContentHashV2([]transfer.FileInfo{{Path: "config.yaml", Hash: transfer.HashBytes(content)}})
 	if err := os.WriteFile(filepath.Join(blobsDir, transfer.HashBytes(content)[len(transfer.HashPrefix):]), content, 0o644); err != nil {
 		t.Fatal(err)
 	}

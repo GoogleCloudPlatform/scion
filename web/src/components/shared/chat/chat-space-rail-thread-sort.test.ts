@@ -26,7 +26,7 @@
  * order the instant anything elsewhere in the rail switches to custom.
  */
 
-import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { apiFetch } from '../../../client/api.js';
 import type { ChatSpace, ChatSpaceThread } from './chat-space-rail.js';
 import { requestBodyText } from '../../../client/__fixtures__/request-url.js';
@@ -71,6 +71,102 @@ function thread(overrides: Partial<ChatSpaceThread> = {}): ChatSpaceThread {
     hasUnreadMention: false,
     ...overrides,
   };
+}
+
+/** A project thread group as the in-test hub holds it. */
+interface HubGroup {
+  id: string;
+  name: string;
+  threadIds: string[];
+}
+
+/**
+ * The project thread groups of each space, as a small in-memory hub serves
+ * them on `/api/v1/thread-groups` (see `hubThreadGroups`). A member's
+ * conversation ID is `c-<thread ID>`.
+ */
+let hubGroups = new Map<string, HubGroup[]>();
+
+function wireGroup(projectId: string, g: HubGroup): unknown {
+  return {
+    id: g.id,
+    projectId,
+    name: g.name,
+    threads: g.threadIds.map((t) => ({ threadId: t, conversationId: `c-${t}`, name: t })),
+  };
+}
+
+function jsonResponse(body: unknown, status = 200): Promise<Response> {
+  return Promise.resolve(new Response(JSON.stringify(body), { status }));
+}
+
+/**
+ * Answer a `/api/v1/thread-groups` request from `hubGroups`, or return null
+ * for any other path. Filing a thread moves it out of every other group of
+ * the space and appends it, as the hub does.
+ */
+function hubThreadGroups(path: string, init?: RequestInit): Promise<Response> | null {
+  if (!path.startsWith('/api/v1/thread-groups')) return null;
+  const method = init?.method ?? 'GET';
+  const list = path.match(/^\/api\/v1\/thread-groups\?projectId=(.+)$/);
+  if (list && method === 'GET') {
+    const projectId = decodeURIComponent(list[1]);
+    return jsonResponse({
+      threadGroups: (hubGroups.get(projectId) ?? []).map((g) => wireGroup(projectId, g)),
+    });
+  }
+  if (path === '/api/v1/thread-groups' && method === 'POST') {
+    const body = JSON.parse(requestBodyText(init!.body)) as { projectId: string; name: string };
+    const g = { id: `srv-${body.name}`, name: body.name, threadIds: [] };
+    hubGroups.set(body.projectId, [...(hubGroups.get(body.projectId) ?? []), g]);
+    return jsonResponse(wireGroup(body.projectId, g), 201);
+  }
+  const item = path.match(/^\/api\/v1\/thread-groups\/([^/]+)(\/threads(?:\/(.+))?)?$/);
+  if (!item) return jsonResponse({ error: { message: 'not found' } }, 404);
+  const groupId = decodeURIComponent(item[1]);
+  for (const [projectId, groups] of hubGroups) {
+    const g = groups.find((x) => x.id === groupId);
+    if (!g) continue;
+    if (!item[2] && method === 'DELETE') {
+      hubGroups.set(
+        projectId,
+        groups.filter((x) => x.id !== groupId)
+      );
+      return Promise.resolve(new Response(null, { status: 204 }));
+    }
+    if (item[2] && !item[3] && method === 'POST') {
+      const { threadId } = JSON.parse(requestBodyText(init!.body)) as { threadId: string };
+      for (const x of groups) x.threadIds = x.threadIds.filter((t) => t !== threadId);
+      g.threadIds.push(threadId);
+      return jsonResponse(wireGroup(projectId, g));
+    }
+    if (item[3] && method === 'DELETE') {
+      const threadId = decodeURIComponent(item[3]).replace(/^c-/, '');
+      g.threadIds = g.threadIds.filter((t) => t !== threadId);
+      return Promise.resolve(new Response(null, { status: 204 }));
+    }
+  }
+  return jsonResponse({ error: { message: 'Thread group not found' } }, 404);
+}
+
+/**
+ * Give a space project thread groups: on the hub, and in the rail as if
+ * they had loaded with the space's threads.
+ */
+function setGroups(el: any, projectId: string, groups: HubGroup[]): void {
+  hubGroups.set(
+    projectId,
+    groups.map((g) => ({ ...g, threadIds: [...g.threadIds] }))
+  );
+  for (const g of groups) {
+    for (const t of g.threadIds) el._groupConversationIds.set(t, `c-${t}`);
+  }
+  el.projectGroups = new Map(el.projectGroups).set(projectId, groups);
+}
+
+/** The rail's project thread groups of a space. */
+function groupsIn(el: any, projectId: string): HubGroup[] {
+  return el.projectGroups.get(projectId) ?? [];
 }
 
 /** Mount a rail with one space holding the given threads. */
@@ -137,6 +233,8 @@ async function setThreadSortMode(el: any, mode: 'alpha' | 'activity'): Promise<v
  */
 function serveUserPrefsEcho(): void {
   apiFetchMock.mockImplementation((path: string, init?: RequestInit) => {
+    const hub = hubThreadGroups(path, init);
+    if (hub) return hub;
     if (path === '/api/v1/chat/user-prefs' && init?.method === 'PUT') {
       return Promise.resolve(new Response(requestBodyText(init.body), { status: 200 }));
     }
@@ -146,6 +244,14 @@ function serveUserPrefsEcho(): void {
 
 beforeAll(async () => {
   await import('./chat-space-rail.js');
+});
+
+beforeEach(() => {
+  hubGroups = new Map();
+  apiFetchMock.mockImplementation(
+    (path: string, init?: RequestInit) =>
+      hubThreadGroups(path, init) ?? Promise.resolve(new Response('{}', { status: 200 }))
+  );
 });
 
 afterEach(() => {
@@ -328,10 +434,7 @@ describe('space rail — recent-activity thread sort within a space', () => {
 
 describe('space rail — thread sort applies within a thread group', () => {
   function withGroup(el: any, threadIds: string[]): void {
-    el.prefs = {
-      ...el.prefs,
-      threadGroups: { [SPACE.projectId]: [{ id: 'g-1', name: 'My Group', threadIds }] },
-    };
+    setGroups(el, SPACE.projectId, [{ id: 'g-1', name: 'My Group', threadIds }]);
   }
 
   it("sorts a group's members alphabetically, independent of membership order", async () => {
@@ -370,7 +473,7 @@ describe('space rail — thread sort applies within a thread group', () => {
     // The group's own name sorts between the ungrouped thread's name and
     // nothing else, under alpha — this just confirms group-vs-ungrouped
     // ordering at the top level is untouched by the within-group fix.
-    el.prefs.threadGroups[SPACE.projectId][0].name = 'Alpha Group';
+    groupsIn(el, SPACE.projectId)[0].name = 'Alpha Group';
 
     await setThreadSortMode(el, 'alpha');
 
@@ -404,12 +507,7 @@ describe('space rail — thread sort applies within a thread group', () => {
       thread({ id: 't-p', name: 'rhino', pinned: true }),
       thread({ id: 't-g', name: 'alpha-group-member' }),
     ]);
-    el.prefs = {
-      ...el.prefs,
-      threadGroups: {
-        [SPACE.projectId]: [{ id: 'g-1', name: 'aaa-group', threadIds: ['t-g'] }],
-      },
-    };
+    setGroups(el, SPACE.projectId, [{ id: 'g-1', name: 'aaa-group', threadIds: ['t-g'] }]);
     await setThreadSortMode(el, 'alpha');
 
     // "rhino" is pinned, so it leads even though the group's name
@@ -455,12 +553,9 @@ describe('space rail — thread sort interacts correctly with the unread filter'
       thread({ id: 't-g-a', name: 'group-anchovy', hasUnread: true }),
       thread({ id: 't-g-read', name: 'group-read', hasUnread: false }),
     ]);
-    el.prefs = {
-      ...el.prefs,
-      threadGroups: {
-        [SPACE.projectId]: [{ id: 'g-1', name: 'My Group', threadIds: ['t-g-z', 't-g-a'] }],
-      },
-    };
+    setGroups(el, SPACE.projectId, [
+      { id: 'g-1', name: 'My Group', threadIds: ['t-g-z', 't-g-a'] },
+    ]);
     await setThreadSortMode(el, 'alpha');
     el.spaceFilter = 'unread';
     await el.updateComplete;
@@ -480,14 +575,12 @@ describe('space rail — a nudge or drag moves only the thread that moved', () =
     el.prefs = {
       ...el.prefs,
       threadSortMode: 'alpha',
-      threadGroups: {
-        // Raw storage order ('t-b' then 't-a') is reversed from the alpha
-        // display order ('Apple, banana') — using the raw array instead of
-        // the displayed order (the mutation this guards against) would do
-        // index math against the wrong sequence entirely.
-        [SPACE.projectId]: [{ id: 'g-1', name: 'My Group', threadIds: ['t-b', 't-a'] }],
-      },
     };
+    // Raw storage order ('t-b' then 't-a') is reversed from the alpha
+    // display order ('Apple, banana') — using the raw array instead of
+    // the displayed order (the mutation this guards against) would do
+    // index math against the wrong sequence entirely.
+    setGroups(el, SPACE.projectId, [{ id: 'g-1', name: 'My Group', threadIds: ['t-b', 't-a'] }]);
     await el.updateComplete;
     expect(threadNames(el)).toEqual(['Apple', 'banana']);
 
@@ -496,13 +589,13 @@ describe('space rail — a nudge or drag moves only the thread that moved', () =
     // The nudge gives this space its own threadOrder snapshot without
     // touching threadSortMode (see `hasExplicitOrder`).
     expect(el.prefs.threadSortMode).toBe('alpha');
-    expect(el.prefs.threadGroups[SPACE.projectId][0].threadIds).toEqual(['t-b', 't-a']);
+    expect(groupsIn(el, SPACE.projectId)[0].threadIds).toEqual(['t-b', 't-a']);
     expect(threadNames(el)).toEqual(['banana', 'Apple']);
 
     // Move it back down — a second nudge must act on the now-current
     // (explicit) order, not silently re-derive from scratch again.
     await el.moveThread('t-b', SPACE.projectId, 1);
-    expect(el.prefs.threadGroups[SPACE.projectId][0].threadIds).toEqual(['t-a', 't-b']);
+    expect(groupsIn(el, SPACE.projectId)[0].threadIds).toEqual(['t-a', 't-b']);
     expect(threadNames(el)).toEqual(['Apple', 'banana']);
   });
 
@@ -514,11 +607,9 @@ describe('space rail — a nudge or drag moves only the thread that moved', () =
     el.prefs = {
       ...el.prefs,
       threadSortMode: 'alpha',
-      threadGroups: {
-        // Raw order 't-b','t-a' is reversed from the displayed alpha order.
-        [SPACE.projectId]: [{ id: 'g-1', name: 'My Group', threadIds: ['t-b', 't-a'] }],
-      },
     };
+    // Raw order 't-b','t-a' is reversed from the displayed alpha order.
+    setGroups(el, SPACE.projectId, [{ id: 'g-1', name: 'My Group', threadIds: ['t-b', 't-a'] }]);
     await el.updateComplete;
     expect(threadNames(el)).toEqual(['Apple', 'banana']);
 
@@ -571,16 +662,14 @@ describe('space rail — a nudge or drag moves only the thread that moved', () =
     el.prefs = {
       ...el.prefs,
       threadSortMode: 'alpha',
-      threadGroups: {
-        [SPACE.projectId]: [
-          { id: 'g-1', name: 'beta-group', threadIds: ['g1-one', 'g1-two'] },
-          // Raw order reversed from alpha, so freezing this untouched group
-          // to its displayed order (rather than leaving its raw array as-is)
-          // is actually exercised.
-          { id: 'g-2', name: 'delta-group', threadIds: ['g2-y', 'g2-x'] },
-        ],
-      },
     };
+    setGroups(el, SPACE.projectId, [
+      { id: 'g-1', name: 'beta-group', threadIds: ['g1-one', 'g1-two'] },
+      // Raw order reversed from alpha, so freezing this untouched group
+      // to its displayed order (rather than leaving its raw array as-is)
+      // is actually exercised.
+      { id: 'g-2', name: 'delta-group', threadIds: ['g2-y', 'g2-x'] },
+    ]);
     await el.updateComplete;
     // Alpha display: alpha, beta-group[g-one,g-two], delta-group[g2-x,g2-y], zulu
     expect(threadNames(el)).toEqual(['alpha', 'g-one', 'g-two', 'g2-x', 'g2-y', 'zulu']);
@@ -605,23 +694,17 @@ describe('space rail — a nudge or drag moves only the thread that moved', () =
     el.prefs = {
       ...el.prefs,
       threadSortMode: 'alpha',
-      threadGroups: {
-        [SPACE.projectId]: [
-          { id: 'g-1', name: 'My Group', threadIds: ['t-a', 't-b', 'stale-deleted-id'] },
-        ],
-      },
     };
+    setGroups(el, SPACE.projectId, [
+      { id: 'g-1', name: 'My Group', threadIds: ['t-a', 't-b', 'stale-deleted-id'] },
+    ]);
     await el.updateComplete;
 
     await el.moveThread('t-b', SPACE.projectId, -1);
 
     // The stale id survives the nudge instead of being silently dropped.
-    expect(el.prefs.threadGroups[SPACE.projectId][0].threadIds).toContain('stale-deleted-id');
-    expect(el.prefs.threadGroups[SPACE.projectId][0].threadIds).toEqual([
-      't-b',
-      't-a',
-      'stale-deleted-id',
-    ]);
+    expect(groupsIn(el, SPACE.projectId)[0].threadIds).toContain('stale-deleted-id');
+    expect(groupsIn(el, SPACE.projectId)[0].threadIds).toEqual(['t-b', 't-a', 'stale-deleted-id']);
   });
 });
 
@@ -726,10 +809,8 @@ describe('space rail — creating or deleting a group does not fabricate an expl
       ...el.prefs,
       spaceSortMode: 'alpha',
       threadSortMode: 'alpha',
-      threadGroups: {
-        [SPACE_Q.projectId]: [{ id: 'g-1', name: 'Soon Gone', threadIds: ['q-mango'] }],
-      },
     };
+    setGroups(el, SPACE_Q.projectId, [{ id: 'g-1', name: 'Soon Gone', threadIds: ['q-mango'] }]);
     await el.updateComplete;
 
     const qNames = () => threadNames(el).filter((n) => ['apple', 'mango', 'zebra'].includes(n));
@@ -750,10 +831,7 @@ describe('space rail — creating or deleting a group does not fabricate an expl
 
 describe('space rail — drag-and-drop lands on the displayed position', () => {
   function withGroup(el: any, threadIds: string[], groupId = 'g-1', name = 'My Group'): void {
-    el.prefs = {
-      ...el.prefs,
-      threadGroups: { [SPACE.projectId]: [{ id: groupId, name, threadIds }] },
-    };
+    setGroups(el, SPACE.projectId, [{ id: groupId, name, threadIds }]);
   }
 
   async function drop(el: any, sourceId: string, targetId: string): Promise<void> {
@@ -793,24 +871,25 @@ describe('space rail — drag-and-drop lands on the displayed position', () => {
     el.prefs = {
       ...el.prefs,
       threadSortMode: 'alpha',
-      threadGroups: {
-        [SPACE.projectId]: [
-          { id: 'g-src', name: 'Source Group', threadIds: ['src'] },
-          // Raw storage order (c, a, b) differs from the displayed order
-          // (aa, bb, cc) under alpha.
-          { id: 'g-dst', name: 'Dest Group', threadIds: ['c', 'a', 'b'] },
-        ],
-      },
     };
+    setGroups(el, SPACE.projectId, [
+      { id: 'g-src', name: 'Source Group', threadIds: ['src'] },
+      // Raw storage order (c, a, b) differs from the displayed order
+      // (aa, bb, cc) under alpha.
+      { id: 'g-dst', name: 'Dest Group', threadIds: ['c', 'a', 'b'] },
+    ]);
     await el.updateComplete;
 
     // Move "source-thread" into the destination group, dropped onto "cc".
     await drop(el, 'src', 'c');
     await el.updateComplete;
 
-    const group = el.prefs.threadGroups[SPACE.projectId].find((g: any) => g.id === 'g-dst');
-    // Inserted immediately before "c" in the group's own storage order.
-    expect(group.threadIds).toEqual(['a', 'b', 'src', 'c']);
+    // The hub filed it; the user's order places it just before "cc",
+    // where it was dropped, with the other members in their displayed order.
+    expect(hubGroups.get(SPACE.projectId)!.find((g) => g.id === 'g-dst')!.threadIds).toContain(
+      'src'
+    );
+    expect(threadNames(el)).toEqual(['aa', 'bb', 'source-thread', 'cc']);
   });
 
   it('dragging a thread out of a sorted group onto an ungrouped thread leaves the rest of the group alone', async () => {
@@ -832,7 +911,7 @@ describe('space rail — drag-and-drop lands on the displayed position', () => {
     await drop(el, 'b', 'x');
     await el.updateComplete;
 
-    const group = el.prefs.threadGroups[SPACE.projectId].find((g: any) => g.id === 'g-1');
+    const group = groupsIn(el, SPACE.projectId).find((g: any) => g.id === 'g-1');
     // "bb" left; "aa" and "cc", never touched, keep their relative order
     // instead of swapping.
     expect(group.threadIds).toEqual(['a', 'c']);
@@ -859,14 +938,15 @@ describe('space rail — drag-and-drop lands on the displayed position', () => {
     // snapshot.
     await el.moveThread('y', SPACE.projectId, -1);
     await el.updateComplete;
-    expect(el.prefs.threadGroups[SPACE.projectId][0].threadIds).toEqual(['a', 'b', 'c']);
+    // The group's members are recorded in the user's order as displayed.
+    expect(el.prefs.threadOrder[SPACE.projectId]).toEqual(['y', 'x', 'g-1', 'a', 'b', 'c']);
     expect(threadNames(el)).toEqual(['yy', 'xx', 'aa', 'bb', 'cc']);
 
     // Drop one ungrouped thread onto the other — the group must still read
     // back its displayed order, not revert to the original raw array.
     await drop(el, 'x', 'y');
     await el.updateComplete;
-    expect(el.prefs.threadGroups[SPACE.projectId][0].threadIds).toEqual(['a', 'b', 'c']);
+    expect(el.prefs.threadOrder[SPACE.projectId]).toEqual(['x', 'y', 'g-1', 'a', 'b', 'c']);
     expect(threadNames(el)).toEqual(['xx', 'yy', 'aa', 'bb', 'cc']);
   });
 });
@@ -879,6 +959,8 @@ describe('space rail — a legacy threadOrder entry outside custom loads as an e
     // wire shape can't tell that apart from an order this build wrote, so it
     // loads as Q's explicit order rather than being dropped.
     apiFetchMock.mockImplementation((path: string, init?: RequestInit) => {
+      const hub = hubThreadGroups(path, init);
+      if (hub) return hub;
       if (path === '/api/v1/chat/user-prefs' && init?.method === 'PUT') {
         return Promise.resolve(new Response(requestBodyText(init.body), { status: 200 }));
       }
@@ -888,9 +970,6 @@ describe('space rail — a legacy threadOrder entry outside custom loads as an e
             JSON.stringify({
               threadSortMode: 'activity',
               threadOrder: JSON.stringify({ [SPACE_Q.projectId]: ['g-old'] }),
-              threadGroups: JSON.stringify({
-                [SPACE_Q.projectId]: [{ id: 'g-old', name: 'Old Group', threadIds: [] }],
-              }),
             }),
             { status: 200 }
           )
@@ -921,6 +1000,7 @@ describe('space rail — a legacy threadOrder entry outside custom loads as an e
     ]);
     el.collapsedSpaces = new Set<string>();
     el.loading = false;
+    setGroups(el, SPACE_Q.projectId, [{ id: 'g-old', name: 'Old Group', threadIds: [] }]);
 
     await el.loadPrefs();
     await el.updateComplete;
@@ -1038,9 +1118,9 @@ describe('space rail — an id missing from an explicit snapshot sorts after the
       // The space has a group, so the top level renders via
       // sortTopLevelItems/currentTopLevelOrder rather than getSortedThreads —
       // t-new still postdates the snapshot and has no entry there either.
-      threadGroups: { [SPACE.projectId]: [{ id: 'g-1', name: 'Group', threadIds: [] }] },
       threadOrder: { [SPACE.projectId]: ['t-b', 't-a', 'g-1'] },
     };
+    setGroups(el, SPACE.projectId, [{ id: 'g-1', name: 'Group', threadIds: [] }]);
     await el.updateComplete;
 
     expect(threadNames(el)).toEqual(['banana', 'Apple', 'new-thread']);

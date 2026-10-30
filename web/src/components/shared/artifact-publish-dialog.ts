@@ -19,6 +19,11 @@
  *
  * Uploads a file or a folder through the two-step publish API, either as a
  * new artifact homed in a project or as a new version of an artifact.
+ * With chooseProject (the hub Artifacts page, ptone/scion#5477) the user
+ * picks the home project from those where they may publish, the global
+ * project or the only choice preselected. Choices appear as their checks
+ * pass; when the load finishes, `artifact-publish-choices` reports how many
+ * there are ({ count }).
  * Fires `artifact-published` with the finalized ArtifactResponse, and
  * `artifact-publish-closed` whenever it closes; the parent owns `open`.
  */
@@ -29,11 +34,22 @@ import { customElement, property, query, state } from 'lit/decorators.js';
 
 import {
   PublishError,
+  canPublishIn,
+  defaultProjectChoice,
+  filterPublishable,
+  findGlobalProject,
   formatBytes,
+  listReadableProjects,
+  READABLE_PROJECTS_CAP,
   publishErrorMessage,
   publishFiles,
 } from '../../client/artifacts.js';
-import type { ArtifactResponse, PendingPublish, PublishFile } from '../../client/artifacts.js';
+import type {
+  ArtifactResponse,
+  PendingPublish,
+  ProjectChoice,
+  PublishFile,
+} from '../../client/artifacts.js';
 
 /** A file picked for upload, with its path inside the bundle. */
 export interface PickedFile {
@@ -81,6 +97,8 @@ export class ScionArtifactPublishDialog extends LitElement {
   /** Set to publish a new version of this artifact. */
   @property({ type: String }) artifactId = '';
   @property({ type: Boolean, reflect: true }) open = false;
+  /** Let the user pick the home project (projectId is then ignored). */
+  @property({ type: Boolean }) chooseProject = false;
 
   @state() private mode: 'file' | 'folder' = 'file';
   @state() private picked: PickedFile[] = [];
@@ -93,6 +111,20 @@ export class ScionArtifactPublishDialog extends LitElement {
   @state() private progress = '';
   @state() private error: string | null = null;
   @state() private dragOver = false;
+  /** The projects where the user may publish, with chooseProject. */
+  @state() private choices: ProjectChoice[] = [];
+  @state() private choicesLoading = false;
+  @state() private choicesError: string | null = null;
+  /** The picked home project, with chooseProject. */
+  @state() private chosen = '';
+  /** The project list stopped at READABLE_PROJECTS_CAP. */
+  @state() private choicesTruncated = false;
+  /** The user picked a project: no automatic choice replaces it. */
+  private userPicked = false;
+  /** Bumped per choices load, so a stale one is dropped. */
+  private choicesGen = 0;
+  /** Cancels the running choices load. */
+  private choicesAbort: AbortController | null = null;
   /** The version a failed attempt left pending; the next attempt resumes it. */
   private pending: PendingPublish | null = null;
 
@@ -144,6 +176,27 @@ export class ScionArtifactPublishDialog extends LitElement {
     sl-alert {
       margin-top: 0.75rem;
     }
+    .project {
+      padding-bottom: 0.75rem;
+      margin-bottom: 0.75rem;
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+    }
+    .project sl-alert {
+      margin-top: 0;
+    }
+    .project sl-alert sl-button {
+      margin-left: 0.5rem;
+    }
+    .choices-note {
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+      margin-top: 0.25rem;
+    }
+    .slug {
+      font-family: var(--scion-font-mono, monospace);
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+    }
     input[type='file'] {
       display: none;
     }
@@ -170,11 +223,122 @@ export class ScionArtifactPublishDialog extends LitElement {
   override updated(changed: Map<string, unknown>): void {
     if (changed.has('open') && this.open && !changed.get('open')) {
       this.reset();
+      if (this.chooseProject) void this.loadChoices();
+    } else if (changed.has('open') && !this.open) {
+      this.cancelChoices();
     }
+  }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this.cancelChoices();
+  }
+
+  /** Stops the running choices load, if any; its results are dropped. */
+  private cancelChoices(): void {
+    this.choicesGen++;
+    this.choicesAbort?.abort();
+    this.choicesAbort = null;
+  }
+
+  /** Loads the projects where the user may publish and preselects one. */
+  private async loadChoices(): Promise<void> {
+    this.cancelChoices();
+    const gen = this.choicesGen;
+    const abort = new AbortController();
+    this.choicesAbort = abort;
+    const signal = abort.signal;
+    this.choicesLoading = true;
+    this.choicesError = null;
+    this.choices = [];
+    this.chosen = '';
+    this.choicesTruncated = false;
+    this.userPicked = false;
+    try {
+      // Global is looked up on its own, so the cap never drops it, and is
+      // checked while the other projects are listed, so its preselect does
+      // not wait for the paging. The only-choice default waits for the end.
+      const global = await findGlobalProject(signal);
+      if (gen !== this.choicesGen) return;
+      let others: ProjectChoice[] = [];
+      let globalOk = false;
+      const withGlobal = (list: ProjectChoice[]): ProjectChoice[] =>
+        global && globalOk ? [global, ...list] : list;
+      // Nothing is written once the load is stale or aborted (a failure on
+      // either side aborts the other).
+      const live = (): boolean => gen === this.choicesGen && !signal.aborted;
+      const globalCheck = async (): Promise<void> => {
+        if (!global || !(await canPublishIn(global.id, signal))) return;
+        if (!live()) return;
+        globalOk = true;
+        this.choices = withGlobal(others);
+        if (!this.userPicked && !this.chosen) this.chosen = global.id;
+      };
+      const listAndFilter = async (): Promise<void> => {
+        const rest = await listReadableProjects({ skip: global?.id, signal });
+        if (!live()) return;
+        this.choicesTruncated = rest.truncated;
+        others = await filterPublishable(rest.projects, {
+          onUpdate: (sofar) => {
+            if (!live()) return;
+            others = sofar;
+            this.choices = withGlobal(sofar);
+          },
+          signal,
+        });
+      };
+      // The first failure on either side surfaces at once.
+      await Promise.all([globalCheck(), listAndFilter()]);
+      if (gen !== this.choicesGen) return;
+      const publishable = withGlobal(others);
+      this.choices = publishable;
+      if (!this.userPicked && !this.chosen) this.chosen = defaultProjectChoice(publishable);
+      this.dispatchEvent(
+        new CustomEvent<{ count: number }>('artifact-publish-choices', {
+          detail: { count: publishable.length },
+          bubbles: true,
+          composed: true,
+        })
+      );
+    } catch (err) {
+      if (gen !== this.choicesGen) return;
+      // Stop the other side, and keep Publish off while the error shows.
+      abort.abort();
+      this.chosen = '';
+      this.choicesError = err instanceof Error ? err.message : 'Could not load projects';
+    } finally {
+      if (gen === this.choicesGen) this.choicesLoading = false;
+      if (this.choicesAbort === abort) this.choicesAbort = null;
+    }
+  }
+
+  /**
+   * Retry after a failed load. The Retry button goes away with the error,
+   * so focus moves to the Project field (or back to Retry if it failed
+   * again) instead of falling to the dialog.
+   */
+  private async retryChoices(): Promise<void> {
+    const load = this.loadChoices();
+    // loadChoices sets its generation before its first await: read it
+    // rather than predict it.
+    const gen = this.choicesGen;
+    await load;
+    await this.updateComplete;
+    if (!this.open || gen !== this.choicesGen) return;
+    const target = this.choicesError
+      ? this.shadowRoot?.querySelector<HTMLElement>('.project sl-alert sl-button')
+      : this.shadowRoot?.querySelector<HTMLElement>('.project-select');
+    target?.focus();
+  }
+
+  /** The home project of a new artifact. */
+  private get scope(): string {
+    return this.chooseProject ? this.chosen : this.projectId;
   }
 
   /** Closes the dialog and tells the parent, which owns the open flag. */
   private close(): void {
+    this.cancelChoices();
     this.open = false;
     this.dispatchEvent(
       new CustomEvent('artifact-publish-closed', { bubbles: true, composed: true })
@@ -226,6 +390,7 @@ export class ScionArtifactPublishDialog extends LitElement {
       !this.busy &&
       this.picked.length > 0 &&
       this.entry !== '' &&
+      (this.isVersion || !this.chooseProject || this.chosen !== '') &&
       (this.isVersion || this.titleValue.trim() !== '')
     );
   }
@@ -239,7 +404,7 @@ export class ScionArtifactPublishDialog extends LitElement {
       const files: PublishFile[] = this.picked.map((p) => ({ path: p.path, data: p.file }));
       const res: ArtifactResponse = await publishFiles({
         artifactId: this.artifactId || undefined,
-        scope: this.projectId || undefined,
+        scope: this.scope || undefined,
         title: this.isVersion ? undefined : this.titleValue.trim(),
         key: this.isVersion ? undefined : this.key.trim() || undefined,
         note: this.note.trim() || undefined,
@@ -296,6 +461,61 @@ export class ScionArtifactPublishDialog extends LitElement {
     `;
   }
 
+  /** The Project field, with chooseProject on a new artifact. */
+  private renderProjectPicker(): TemplateResult | typeof nothing {
+    if (!this.chooseProject || this.isVersion) return nothing;
+    if (this.choicesError) {
+      return html`<div class="project">
+        <sl-alert variant="danger" open class="choices-error">
+          <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+          Could not load your projects: ${this.choicesError}
+          <sl-button size="small" @click=${(): void => void this.retryChoices()}>
+            <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+            Retry
+          </sl-button>
+        </sl-alert>
+      </div>`;
+    }
+    const none = !this.choicesLoading && this.choices.length === 0;
+    const empty = this.choices.length === 0;
+    return html`<div class="project">
+      <sl-select
+        class="project-select"
+        label="Project"
+        size="small"
+        required
+        hoist
+        placeholder=${this.choicesLoading && empty ? 'Loading projects…' : 'Choose a project'}
+        help-text=${none
+          ? "You can't publish in any of your projects."
+          : "The artifact's home. Members of this project can read it."}
+        ?disabled=${this.busy || empty}
+        .value=${this.chosen}
+        @sl-change=${(e: Event): void => {
+          this.chosen = (e.target as HTMLSelectElement).value;
+          this.userPicked = true;
+        }}
+      >
+        ${this.choices.map(
+          (p) =>
+            html`<sl-option value=${p.id}
+              >${p.name}${p.slug
+                ? html`<span slot="suffix" class="slug">${p.slug}</span>`
+                : nothing}</sl-option
+            >`
+        )}
+      </sl-select>
+      ${this.choicesLoading && !empty
+        ? html`<div class="choices-note checking">Checking more projects…</div>`
+        : nothing}
+      ${this.choicesTruncated
+        ? html`<div class="choices-note truncated">
+            Showing projects from the first ${READABLE_PROJECTS_CAP} you can see.
+          </div>`
+        : nothing}
+    </div>`;
+  }
+
   override render(): TemplateResult {
     const heading = this.isVersion ? 'Upload new version' : 'New artifact';
     return html`
@@ -309,6 +529,7 @@ export class ScionArtifactPublishDialog extends LitElement {
           if (e.target === e.currentTarget && this.open) this.close();
         }}
       >
+        ${this.renderProjectPicker()}
         <sl-radio-group
           class="mode"
           size="small"

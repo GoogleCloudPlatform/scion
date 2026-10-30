@@ -40,6 +40,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/brokercontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -62,9 +63,8 @@ import (
 var tracer = otel.Tracer("scion-broker")
 
 // matchesAgent checks whether an agent matches the given id and optional projectID.
-// When projectID is provided, it must match for uniqueness across projects.
-// When projectID is empty, matching falls back to name/containerID/slug only
-// (backward compatible with solo/CLI mode and pre-existing containers).
+// When projectID is provided, the entry must belong to it (matchesAgentProject).
+// When projectID is empty, matching is by name/containerID/slug only.
 func matchesAgent(a api.AgentInfo, id, projectID string) bool {
 	nameMatch := a.Name == id || a.ContainerID == id || a.Slug == id
 	if !nameMatch {
@@ -76,17 +76,13 @@ func matchesAgent(a api.AgentInfo, id, projectID string) bool {
 	return matchesAgentProject(a, projectID)
 }
 
+// matchesAgentProject reports whether an entry may stand for an agent of
+// projectID (agent.EntryInProject): positively identified as belonging to
+// it, or an entry with no project identity whose recorded path identifies
+// as projectID (legacyEntryInProject), the rule every project-scoped
+// operation applies.
 func matchesAgentProject(a api.AgentInfo, projectID string) bool {
-	// Check the runtime's project_id label first, then the ProjectID field.
-	if labelProjectID := projectkeys.ProjectIDFromLabels(a.Labels); labelProjectID != "" {
-		return labelProjectID == projectID
-	}
-	if a.ProjectID != "" {
-		return a.ProjectID == projectID
-	}
-	// No project_id on container — match anyway for backward compatibility
-	// with containers created before project_id labeling was added.
-	return true
+	return agent.EntryInProject(a, projectID)
 }
 
 // ============================================================================
@@ -131,6 +127,21 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 		if s.nfsHealthDegradesStatus() {
 			status = degradeHealthStatus(status)
 		}
+	}
+
+	// The project storage share on a shared Layout: not visible degrades
+	// the status (readiness is unaffected; stop, delete and status keep
+	// working). The value names configuration fields, never the path.
+	if v, notVisible, ok := s.shareHealthValue(); ok {
+		checks[shareHealthCheck] = v
+		if notVisible {
+			status = degradeHealthStatus(status)
+		}
+	}
+
+	if s.storageOverridesError() != nil {
+		checks[storageOverridesCheck] = storageOverridesCheckDegraded
+		status = degradeHealthStatus(status)
 	}
 
 	return &HealthResponse{
@@ -193,10 +204,15 @@ func (s *Server) nfsHealthDegradesStatus() bool {
 // NFSWarnOnlyRuntime reports whether name is a runtime type on which the
 // platform, not the broker, mounts the NFS export into the agent: the
 // Kubernetes family (the kubelet mounts the volume) and the Cloud Run
-// family. For these the broker never mounts a share and never refuses a
-// dispatch over NFS state; it logs a warning instead. When it is the
-// broker's default runtime the broker only verifies its shares, and
-// scion doctor reports an unmounted share as a warning.
+// family. For these the broker never mounts a share. Off a shared
+// project-storage Layout it never refuses a dispatch over NFS state and
+// logs a warning instead. On a shared Layout it refuses only when the
+// share's directory is not visible on the broker or the project
+// configuration there does not identify the project (shareVisible,
+// checkSharedProjectConfig); the exact mount-table source match is
+// advisory. When it is the broker's default runtime the broker only
+// verifies its shares (a verify-only reconciler), and scion doctor reports
+// an unmounted share as a warning.
 func NFSWarnOnlyRuntime(name string) bool {
 	if isKubernetesRuntimeName(name) {
 		return true
@@ -306,11 +322,20 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			EmptyPerAgentWorkspace: scionrt.HasEmptyPerAgentSupport(rt),
 			// This broker honours localOnly deletes and confirms a moved
 			// agent's NFS workspace before provisioning it (agent move).
-			AgentMove:      true,
-			StartsInFlight: s.startsInFlight != nil,
+			AgentMove: true,
+			// This broker can be the target of a forced move: it confirms
+			// it has no files for the agent before provisioning it with a
+			// fresh workspace (ptone/scion#5441).
+			AgentMoveRecreate: true,
+			StartsInFlight:    s.startsInFlight != nil,
 			// This broker's reprovision reuses an empty-per-agent
 			// workspace in place (miller79/scion#167).
 			ReprovisionEmptyPerAgent: true,
+			// Provision-rendered keys listed in changed_fields are
+			// re-rendered at start (ptone/scion#3982).
+			ChangedFields: true,
+			// cleared_fields is applied at start (ptone/scion#4890).
+			ClearedFields: true,
 			// Hub telemetry defaults and policy are separate tiers
 			// (ptone/scion#4218).
 			TemplateTiers: true,
@@ -342,7 +367,7 @@ func isLocalOnlyRuntime(runtimeType string) bool {
 // "k8s-staging" of type kubernetes) is advertised, and filtered, as the
 // type it actually runs.
 func (s *Server) buildInfoProfiles(defaultRuntimeType string) []BrokerProfile {
-	vs, _, err := config.LoadEffectiveSettings("")
+	vs, err := globalEffectiveSettings()
 	if err != nil || len(vs.Profiles) == 0 {
 		return []BrokerProfile{
 			{Name: "default", Type: defaultRuntimeType, Available: true, Attach: s.attachSupportedForProfile(defaultRuntimeType, defaultRuntimeType)},
@@ -390,6 +415,21 @@ func (s *Server) buildInfoProfiles(defaultRuntimeType string) []BrokerProfile {
 	}
 
 	return profiles
+}
+
+// globalEffectiveSettings loads the broker's effective settings from its
+// global settings directory: embedded defaults, the global settings file,
+// the environment and the DB overlay, but never a project found from the
+// process working directory. A request-time read must not depend on where
+// the broker process was started (ptone/scion#5363), as the server's
+// startup loads do not (ptone/scion#5362).
+func globalEffectiveSettings() (*config.VersionedSettings, error) {
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return nil, err
+	}
+	vs, _, err := config.LoadEffectiveSettings(globalDir)
+	return vs, err
 }
 
 // heartbeatProfileAttach returns the attach capability of each profile
@@ -765,9 +805,26 @@ func isSingleCleanPathElement(name string) bool {
 	return filepath.Clean(name) == name
 }
 
+// startSharerKey is the sharer key a failed start's file cleanup passes to
+// agent.DeleteStartFailureFiles: the hub agent ID the start provisioned the
+// agent's worktree under, or "" (the agent name) when the ID is not a
+// valid path element, which no worktree was provisioned under.
+func startSharerKey(agentID string) string {
+	if isSingleCleanPathElement(agentID) {
+		return agentID
+	}
+	return ""
+}
+
 func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	createStart := time.Now()
+	// A flat instance releases the create's slug reservation before any
+	// error response is written, and when the request unwinds without one
+	// (a panic), unless the request has started the agent by then
+	// (ptone/scion#5768).
+	w, ownedAbandon := s.wrapOwnedCreate(w, r)
+	defer s.finishOwnedCreate(r.Context(), w, ownedAbandon)
 
 	var req CreateAgentRequest
 	if err := readJSON(r, &req); err != nil {
@@ -824,6 +881,28 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		ValidationError(w, "invalid slug", nil)
 		return
 	}
+	// A forced move's reincarnation ID belongs only on its provision-only
+	// request (checked again there with the fresh-agent-dir expectation).
+	if req.MoveReincarnationID != "" && !req.ProvisionOnly {
+		ValidationError(w, "moveReincarnationId is only valid on a provision-only request", nil)
+		return
+	}
+	// No volume in the request may reach a Runtime Broker control path;
+	// refused before beginCreateAttempt, so the refusal has no side effect.
+	{
+		var cfgVols, inlineVols []api.VolumeMount
+		if req.Config != nil {
+			cfgVols = req.Config.Volumes
+		}
+		if req.InlineConfig != nil {
+			inlineVols = req.InlineConfig.Volumes
+		}
+		if err := checkRequestVolumes(cfgVols, inlineVols); err != nil {
+			span.SetStatus(codes.Error, brokercontrol.ErrorCode)
+			writeControlPathRefusal(w, err)
+			return
+		}
+	}
 
 	// Flat Runtime Broker target checks (target required, mismatch,
 	// explicit profile) run after decode and validation and before
@@ -838,6 +917,31 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// attempt, the registration and any file work (design wave 3 §1 C-e).
 	if s.refuseIfDraining(w, "create", req.ID) {
 		return
+	}
+
+	// A profile (or its runtime entry) that still carries a removed storage
+	// override is refused here, before the dispatch attempt and any
+	// preparation of the start: no workspace bootstrap, download or
+	// provisioning, and no cluster object (ptone/scion#6371). Manager.Start
+	// repeats the check as a backstop.
+	if err := agent.CheckProfileStorageRefusal(ctx, createRequestProfile(req)); err != nil {
+		if se, ok := storageMigrationRequiredFrom(err); ok {
+			span.SetStatus(codes.Error, ErrCodeStorageMigrationRequired)
+			s.writeStorageMigrationRequired(w, se, "create agent", req.ID, nil)
+			return
+		}
+	}
+
+	// A flat instance's placement is its operator's: the request's own
+	// kubernetes block is checked against it here, before the dispatch
+	// attempt and any preparation of the start. Provision-only creates
+	// start no pod.
+	if !req.ProvisionOnly {
+		if perr := s.checkFlatCreatePlacement(req); perr != nil {
+			span.SetStatus(codes.Error, perr.Error())
+			s.writeStartContextError(w, perr, "create agent", "agent_id", req.ID, "profile", createRequestProfile(req))
+			return
+		}
 	}
 
 	attemptKey := req.ID
@@ -922,6 +1026,62 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	var hubGlobalProject bool
 	req.ProjectSlug, hubGlobalProject = splitHubGlobalSlug(req.ProjectPath, req.ProjectSlug)
 
+	// A project path that is this broker's global directory, for a project
+	// other than the global one, is refused here, before anything reads or
+	// writes settings or templates: the env-gather preflight and the
+	// harness-config policy gate below resolve (and can hydrate) templates
+	// under HOME. buildStartContext repeats the check for every caller
+	// (ptone/scion#5432).
+	if req.ProjectPath != "" {
+		if msg := globalDirProjectConflict(req.ProjectPath, req.ProjectID, hubGlobalProject); msg != "" {
+			sce := &startContextError{Status: http.StatusConflict, Message: msg}
+			span.SetStatus(codes.Error, startContextSpanText(sce))
+			status := s.writeStartContextError(w, sce, "create agent", "agent_id", req.ID, "profile", createRequestProfile(req))
+			markAttemptFailed(status, sce.Error())
+			return
+		}
+	}
+
+	// On a shared storage backend a hub-managed project runs from the
+	// Layout's project root (sharedHubProjectPath). Its configuration is
+	// hub-seeded and never written here: the record of its .scion entry is
+	// checked and kept, nothing is aligned.
+	sharedProjectPath, sharedLayout, sharedErr := "", false, (*startContextError)(nil)
+	if req.ProjectSlug != "" && req.ProjectPath == "" {
+		sharedProjectPath, sharedLayout, sharedErr = s.sharedHubProjectPath(ctx, req.ProjectID)
+	}
+	if sharedErr != nil {
+		span.SetStatus(codes.Error, startContextSpanText(sharedErr))
+		status := s.writeStartContextError(w, sharedErr, "create agent", "agent_id", req.ID, "profile", createRequestProfile(req))
+		markAttemptFailed(status, sharedErr.Error())
+		return
+	}
+	if sharedLayout {
+		req.ProjectPath = sharedProjectPath
+		// A workspace bootstrap is skipped for a shared workspace that was
+		// already in use (provisioning sentinel, or any content) when the
+		// create was admitted; applySharedBootstrap checks again under the
+		// provisioning locks.
+		if ws, _, ok, wsErr := s.sharedBootstrapWorkspace(req); ok && wsErr == nil {
+			req.workspaceAdmissionChecked = true
+			req.workspaceAbsentAtAdmission = !sharedWorkspaceProvisioned(ws)
+		}
+		var checkErr error
+		if lockErr := s.withWorkspaceLock(ctx, func() {
+			checkErr = s.withCheckedWorkspaceConfig(req.ProjectPath, req.ProjectID, req.ProjectSlug, func() {})
+		}, req.ProjectPath); lockErr != nil {
+			s.writeRuntimeOpError(w, ctx, "create agent", lockErr, "agent_id", req.ID, "project_id", req.ProjectID)
+			return
+		}
+		if checkErr != nil {
+			sce := s.workspaceConfigStartContextError(checkErr, req.Name)
+			markAttemptFailed(sce.Status, "hub-managed workspace configuration check failed")
+			span.SetStatus(codes.Error, "hub-managed workspace configuration check failed")
+			writeError(w, sce.Status, ErrCodeConflict, sce.Message, nil)
+			return
+		}
+	}
+
 	// Resolve project path early for env-gather (needs settings access before buildStartContext)
 	if req.ProjectSlug != "" && req.ProjectPath == "" {
 		globalDir, err := config.GetGlobalDir()
@@ -936,16 +1096,44 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		req.ProjectPath = filepath.Join(globalDir, "projects", req.ProjectSlug)
+		req.workspaceAdmissionChecked = true
 		if _, statErr := os.Lstat(req.ProjectPath); os.IsNotExist(statErr) {
 			req.workspaceAbsentAtAdmission = true
 		}
 		// Record the hub project ID for a broker copy of a hub workspace
 		// before any project settings are read, under the process-wide
 		// workspace lock on the project.
+		// The workspace's .scion entry is checked against the broker's
+		// record first, and an identity the alignment rewrites is
+		// recorded in the same locked section
+		// (alignHubManagedProjectIdentityChecked).
+		var checkErr error
 		if lockErr := s.withWorkspaceLock(ctx, func() {
-			s.alignHubManagedProjectIdentity(ctx, req.ID, req.ProjectPath, req.ProjectSlug, req.ProjectID)
+			checkErr = s.alignHubManagedProjectIdentityChecked(ctx, req.ID, req.ProjectPath, req.ProjectSlug, req.ProjectID)
 		}, req.ProjectPath); lockErr != nil {
 			s.writeRuntimeOpError(w, ctx, "create agent", lockErr, "agent_id", req.ID, "project_id", req.ProjectID)
+			return
+		}
+		if checkErr != nil {
+			sce := s.workspaceConfigStartContextError(checkErr, req.Name)
+			markAttemptFailed(sce.Status, "hub-managed workspace configuration check failed")
+			span.SetStatus(codes.Error, "hub-managed workspace configuration check failed")
+			writeError(w, sce.Status, ErrCodeConflict, sce.Message, nil)
+			return
+		}
+	} else if req.ProjectPath != "" {
+		// A request that names the path of a hub-managed workspace
+		// directly gets the same check before its settings are read.
+		var checkErr error
+		if lockErr := s.withWorkspaceLock(ctx, func() { checkErr = checkWorkspaceConfigRecord(req.ProjectPath, req.ProjectID) }, req.ProjectPath); lockErr != nil {
+			s.writeRuntimeOpError(w, ctx, "create agent", lockErr, "agent_id", req.ID, "project_id", req.ProjectID)
+			return
+		}
+		if checkErr != nil {
+			sce := s.workspaceConfigStartContextError(checkErr, req.Name)
+			markAttemptFailed(sce.Status, "hub-managed workspace configuration check failed")
+			span.SetStatus(codes.Error, "hub-managed workspace configuration check failed")
+			writeError(w, sce.Status, ErrCodeConflict, sce.Message, nil)
 			return
 		}
 	}
@@ -956,7 +1144,22 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	if req.Config != nil && req.Config.SharedWorkspace {
 		// A marker naming an earlier ID of the same project (a re-link) is
 		// carried over to the current ID first (ptone/scion#4440).
-		if err := s.relinkSharedProjectIdentity(ctx, req.ProjectPath, req.ProjectSlug, req.ProjectID, req.Name); err != nil {
+		lockErr, checkErr, err := s.relinkSharedProjectIdentityChecked(ctx, req.ProjectPath, req.ProjectSlug, req.ProjectID, req.Name, req.PreviousProjectIDs, s.unrecordedRelinkAllowed(ctx, r))
+		if lockErr != nil {
+			s.writeRuntimeOpError(w, ctx, "create agent", lockErr, "agent_id", req.ID, "project_id", req.ProjectID)
+			return
+		}
+		if checkErr != nil {
+			if err != nil {
+				s.agentLifecycleLog.Warn("project re-link: the re-link also failed; returning the workspace record conflict", "agent", req.Name, "relink_error", err.Error())
+			}
+			sce := s.workspaceConfigStartContextError(checkErr, req.Name)
+			markAttemptFailed(sce.Status, "hub-managed workspace configuration check failed")
+			span.SetStatus(codes.Error, "hub-managed workspace configuration check failed")
+			writeError(w, sce.Status, ErrCodeConflict, sce.Message, nil)
+			return
+		}
+		if err != nil {
 			sce := projectRelinkStartContextError(err)
 			markAttemptFailed(sce.Status, "shared-workspace project re-link failed")
 			span.SetStatus(codes.Error, "shared-workspace project re-link failed")
@@ -1006,10 +1209,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// download (DefaultHydratorConfig's DownloadTimeout is 5 minutes)
 		// would fail creates here that launch would have completed.
 		//
-		// This hydration runs ahead of the global-project 409, the
-		// harness-config policy refusal, and the NFS check below, so a
-		// request those would otherwise reject can pay for a hub round trip
-		// first. Kept in this order to sit next to the harness-config
+		// This hydration runs ahead of the harness-config policy refusal
+		// and the NFS check below (the global-project 409 now comes before
+		// it, ptone/scion#5432), so a request those would otherwise reject
+		// can pay for a hub round trip first. Kept in this order to sit next to the harness-config
 		// hydration it mirrors; revisit if that ordering cost matters.
 		if req.Config != nil && (req.Config.TemplateID != "" || req.Config.TemplateHash != "") {
 			hubConn := s.resolveHubConnection(r)
@@ -1272,13 +1475,6 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// already refuses worktree-per-agent before dispatching (A2/A4); this is
 	// the broker's own independent defense, and it also keeps
 	// tryProvisionWorktree off the reprovision path entirely.
-	// A shared dir backend change is part of a reincarnation only.
-	if !req.Reprovision && (len(req.SharedDirBackendChanges) > 0 || req.AllowEmptySharedDir) {
-		markAttemptFailed(http.StatusBadRequest, "shared dir backend change without reprovision")
-		BadRequest(w, "a shared dir backend change is only supported on a reprovision request")
-		return
-	}
-
 	if req.Reprovision && req.WorkspaceMode == store.WorkspaceModeWorktreePerAgent {
 		const msg = "reprovision refused: worktree-per-agent workspaces are not supported by reincarnate"
 		// O-a (review p1b-r2): use the same dispatch-attempt message as the
@@ -1363,7 +1559,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	ownedHandoff := false
 	defer func() {
 		if sc != nil && !ownedHandoff {
-			s.releaseOwnedStart(sc.Opts.RunID)
+			// Only this request's own mirror: a same-run resend that
+			// installed its own keeps it.
+			s.releaseOwnedMirror(sc.Opts.RunID, sc.ownedStart)
 		}
 	}()
 	if testHookCreateBeforeBuildStartContext != nil {
@@ -1390,8 +1588,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		Attach:             req.Attach,
 		WorkspaceMode:      req.WorkspaceMode,
 		RunID:              req.RunID,
+		PreviousProjectIDs: req.PreviousProjectIDs,
 		HTTPRequest:        r,
 		Operation:          opCreate,
+		OwnedAbandon:       ownedAbandon,
 		// Threaded only for the workspace-source checks; the download
 		// itself runs after buildStartContext (below, or in runLaunch).
 		WorkspaceStoragePath: req.WorkspaceStoragePath,
@@ -1427,11 +1627,29 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// buildStartContext computed for opCreate.
 	if req.Reprovision {
 		opts.FreshProvision = false
-		opts.SharedDirBackendChanges = req.SharedDirBackendChanges
-		opts.AllowEmptySharedDir = req.AllowEmptySharedDir
 	}
 	s.agentLifecycleLog.Info("Agent dispatch: buildStartContext complete",
 		"agent_id", req.ID, "name", req.Name, "elapsed", time.Since(buildCtxStart).String())
+
+	// Kubernetes placement defaults, resolved once for the runtime
+	// buildStartContext chose, before any 201 (sync or async). The async
+	// worker uses this result and does not resolve again. Provision-only
+	// creates start no pod and skip it; a reprovision is always
+	// provision-only.
+	if !req.ProvisionOnly {
+		// On a flat instance this cannot refuse for a foreign runtime: a
+		// profile was refused (422) before the attempt, buildStartContext
+		// resolves only the instance's runtime, and checkFlatCreatePlacement
+		// already checked the policy and its target before the attempt.
+		rp, perr := s.placementForStart(ctx, sc.Resolution, opts.ProjectPath)
+		if perr != nil {
+			span.SetStatus(codes.Error, perr.Error())
+			status := s.writeStartContextError(w, perr, "create agent", "agent_id", req.ID, "profile", createRequestProfile(req))
+			markAttemptFailed(status, perr.Error())
+			return
+		}
+		opts.ResolvedPlacement, opts.PlacementResolved = rp, true
+	}
 
 	// Inject skill resolver from Hub connection for skill provisioning.
 	ctx = s.attachSkillResolver(ctx, r, skillResolverInputs{
@@ -1483,6 +1701,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			// runLaunch completes the ownership mirror only for an accepted
 			// launch; a refused one leaves it to the deferred release.
 			ownedHandoff = s.beginAsyncLaunch(w, r, ctx, req, opts, sc.Manager, sc.RuntimeType, ss, sc.ownedStart, attempt, markAttemptFailed, span, createStart)
+			if ownedHandoff {
+				ownedAbandon.handOff()
+			}
 			return
 		}
 	}
@@ -1505,10 +1726,15 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// through the async gate above (flag absent, ProvisionOnly, Reprovision,
 	// no LaunchID, or a too-small LaunchTimeoutSeconds), so an eligible async
 	// create never downloads twice.
+	var bootstrapSkipped bootstrapOutcome
 	if req.WorkspaceStoragePath != "" {
 		var attemptMsg, httpMessage string
 		var dlErr error
-		opts, attemptMsg, httpMessage, dlErr = s.downloadWorkspaceFromGCS(ctx, req, opts)
+		ownedAbandon.markWriting()
+		if testHookCreateBeforeWorkspaceDownload != nil {
+			testHookCreateBeforeWorkspaceDownload(opts)
+		}
+		opts, attemptMsg, httpMessage, dlErr = s.downloadWorkspaceFromGCS(context.WithValue(ctx, bootstrapOutcomeKey{}, &bootstrapSkipped), req, opts)
 		if dlErr != nil {
 			span.SetStatus(codes.Error, dlErr.Error())
 			if errors.Is(dlErr, errInvalidWorkspaceDir) {
@@ -1534,6 +1760,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// The marker lets the failure cleanup below confirm it still owns the
 	// name before removing files addressed by that name.
 	if ss != nil {
+		ownedAbandon.markWriting()
 		if err := ss.takeName(opts); err != nil {
 			s.agentLifecycleLog.Error("Agent create failed before start",
 				"agent_id", req.ID, "project_id", req.ProjectID,
@@ -1565,6 +1792,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// delete or newer start), by broker shutdown, or at the broker's
 		// own bound, not when the request ends (bind, ptone/scion#4817).
 		var startCtx, trackCtx context.Context
+		// From here the start belongs to Manager.Start and its own failure
+		// cleanup (completeOwnedStart): the reservation is no longer
+		// released by an error response.
+		ownedAbandon.disarm()
 		startCtx, unbindStart = ss.bind(ctx, s.syncStartMaxDuration)
 		trackCtx, finishTracked = s.startsInFlight.begin(startCtx, ss.key)
 		s.startsInFlight.setRunID(trackCtx, opts.RunID)
@@ -1573,12 +1804,47 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 
 	// Branch based on provision-only flag
 	if req.ProvisionOnly {
+		// A provision-only create (no start registration, so never
+		// disarmed above) may write agent files from here; its failures
+		// release the reservation only with the files proven absent.
+		ownedAbandon.markWriting()
 		// Provision only: set up dirs, worktree, templates without starting the container.
 		// Reprovision (reincarnation) forces a fresh render of an existing agent's
 		// config instead of reusing what's persisted — see Manager.Reprovision.
 		var cfg *api.ScionConfig
 		var err error
-		if req.ExpectExistingNFSWorkspace != "" {
+		if (req.MoveReincarnationID != "") != (req.ExpectExistingNFSWorkspace == agent.MoveWorkspaceFreshAgentDir) || req.Reprovision && req.MoveReincarnationID != "" {
+			markAttemptFailed(http.StatusBadRequest, "invalid forced move provision")
+			BadRequest(w, "a forced move's provision needs both the fresh-agent-dir expectation and the move reincarnation ID, on a provision that is not a reprovision")
+			return
+		}
+		if req.ExpectExistingNFSWorkspace == agent.MoveWorkspaceFreshAgentDir {
+			// A forced move recreates the workspace here: nothing for the
+			// agent may exist on this broker yet, so provision never adopts
+			// files it did not create. The provision marks the directory it
+			// creates with the move's reincarnation ID.
+			opts.MoveReincarnationID = req.MoveReincarnationID
+			checker, ok := sc.Manager.(moveWorkspaceAbsenceChecker)
+			if !ok {
+				markAttemptFailed(http.StatusConflict, "moved agent workspace not confirmed")
+				writeError(w, http.StatusConflict, api.BrokerErrCodeMoveTargetNotFresh, "this broker cannot confirm that a moved agent has no files here", nil)
+				return
+			}
+			if paths, chkErr := checker.CheckMoveWorkspaceAbsent(ctx, opts); chkErr != nil {
+				s.agentLifecycleLog.Warn("Agent move: refusing to recreate the agent over files on this broker",
+					"agent_id", req.ID, "project_id", req.ProjectID, "paths", paths, "error", chkErr)
+				markAttemptFailed(http.StatusConflict, "moved agent has files on this broker")
+				span.SetStatus(codes.Error, "moved agent has files on this broker")
+				// Fixed text: the paths are logged above, never returned
+				// (ptone/scion#3113).
+				msg := "Failed to provision moved agent: the agent already has files on this broker; refusing to recreate over them"
+				if !errors.Is(chkErr, agent.ErrMoveWorkspacePresent) {
+					msg = "Failed to provision moved agent: could not confirm that the agent has no files on this broker"
+				}
+				writeError(w, http.StatusConflict, api.BrokerErrCodeMoveTargetNotFresh, msg, nil)
+				return
+			}
+		} else if req.ExpectExistingNFSWorkspace != "" {
 			checker, ok := sc.Manager.(nfsMoveWorkspaceChecker)
 			if !ok {
 				markAttemptFailed(http.StatusConflict, "moved agent workspace not confirmed")
@@ -1696,8 +1962,6 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			// asked for it — the hub's dispatch fails closed when it asked
 			// for a reprovision and did not get this echo back.
 			Reprovisioned: req.Reprovision,
-			// Reprovision returned without error, so it recorded the change.
-			SharedDirBackendsChanged: req.Reprovision && len(req.SharedDirBackendChanges) > 0,
 		}
 		if attempt != nil {
 			s.dispatchAttemptsMu.Lock()
@@ -1710,6 +1974,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 
 	// Full start: provision and launch the container
 	startOpStart := time.Now()
+	ownedAbandon.markWriting()
 	agentInfo, err := sc.Manager.Start(ctx, opts)
 	err = s.completeOwnedStart(ctx, sc.Manager, opts.RunID, err, true)
 	if err != nil {
@@ -1727,17 +1992,22 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		isSkillErr := errors.As(err, &skillErr)
 		policyDecision, isPolicyErr := harnessPolicyRefusalFrom(err)
 		unusableErr, isUnusable := unusableProvisionerFrom(err)
+		storageErr, isStorageRefusal := storageMigrationRequiredFrom(err)
 		switch {
 		case isPolicyErr:
 			markAttemptFailed(policyDecision.HTTPStatus, policyDecision.detail())
 		case isUnusable:
 			markAttemptFailed(http.StatusUnprocessableEntity, unusableErr.PublicMessage())
+		case isStorageRefusal:
+			markAttemptFailed(http.StatusUnprocessableEntity, storageErr.PublicMessage())
 		case notFoundErr:
 			markAttemptFailed(http.StatusNotFound, "failed to create agent")
 		case isSkillErr:
 			markAttemptFailed(skillResolutionHTTPStatus(skillErr.Code), "failed to create agent")
 		case config.IsAgentStateConflict(err):
 			markAttemptFailed(http.StatusConflict, "failed to create agent")
+		case errors.Is(err, agent.ErrProjectShareNotMounted):
+			markAttemptFailed(http.StatusServiceUnavailable, projectShareNotMountedText())
 		default:
 			markAttemptFailed(http.StatusInternalServerError, "failed to create agent")
 		}
@@ -1791,12 +2061,19 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 					s.agentLifecycleLog.Info("Skipped agent file cleanup after start failure: the agent's files belong to another run",
 						"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name,
 						"run_id", opts.RunID, "files_run_id", owner)
-				} else if _, cleanupErr := agent.DeleteAgentFiles(opts.Name, opts.ProjectPath, true); cleanupErr != nil && !errors.Is(cleanupErr, agent.ErrAgentProjectUnresolved) {
+				} else if cleanupErr := agent.DeleteStartFailureFiles(opts.Name, startSharerKey(req.ID), opts.ProjectPath, opts.HubProjectID); cleanupErr != nil && !errors.Is(cleanupErr, agent.ErrAgentProjectUnresolved) {
 					s.agentLifecycleLog.Warn("Failed to clean up agent files after start failure",
 						"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name, "error", cleanupErr)
 				} else {
 					s.agentLifecycleLog.Info("Cleaned up provisioned agent files after start failure",
 						"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name)
+					// A flat instance retires the failed create's record
+					// once its run ended and its files are proven gone
+					// (ptone/scion#5768).
+					if ownedAbandon != nil && cleanupErr == nil {
+						removed := s.filesRemovedAfterCleanup(ownedAbandon.key.projectID, ownedAbandon.slug, opts.ProjectPath, opts.HubProjectID)
+						s.retireEndedCreate(ownedAbandon.key, removed, ownedAbandon.hold)
+					}
 				}
 			}()
 		}
@@ -1806,6 +2083,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			s.writeHarnessPolicyRefusal(w, policyDecision, "create agent", req.ID, nil)
 		case isUnusable:
 			s.writeUnusableProvisioner(w, unusableErr, "create agent", req.ID, nil)
+		case isStorageRefusal:
+			s.writeStorageMigrationRequired(w, storageErr, "create agent", req.ID, nil)
 		case errors.Is(err, agent.ErrContainerNameInUse):
 			// Fixed text, as restart and the async launch give: a wrapped
 			// error can carry runtime detail. The full error is logged above.
@@ -1823,6 +2102,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			SkillResolutionFailed(w, skillErr, createSkill.ref)
 		case config.IsAgentStateConflict(err):
 			writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to create agent: "+err.Error(), nil)
+		case errors.Is(err, agent.ErrProjectShareNotMounted):
+			// The start found no project storage share on this broker
+			// (the Kubernetes workspace leaves). err names the mount
+			// point and is logged above; the body names the fields.
+			writeError(w, http.StatusServiceUnavailable, ErrCodeProjectStorageUnavailable, projectShareNotMountedText(), nil)
 		default:
 			writeCreateRuntimeError(w, err)
 		}
@@ -1849,6 +2133,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	resp := CreateAgentResponse{
 		Agent:   agentInfoPtr(AgentInfoToResponse(*agentInfo)),
 		Created: true,
+	}
+	if (bootstrapSkipsExistingWorkspace(req) || bootstrapSkipped.skipped) && resp.Agent != nil {
+		resp.Agent.Warnings = append(resp.Agent.Warnings, bootstrapSkippedWarning)
 	}
 	if attempt != nil {
 		s.dispatchAttemptsMu.Lock()
@@ -1996,6 +2283,48 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 	}
 	defer unlockWorkspace()
 
+	// A project-level workspace that already existed when the create was
+	// admitted is in use (by earlier agents of the project): it is never
+	// overwritten from a laptop's upload. The agent uses it as it is and
+	// the create answers with bootstrapSkippedWarning (ptone/scion#5815). Nothing is downloaded, recorded or
+	// re-marked.
+	if bootstrapSkipsExistingWorkspace(req) {
+		s.agentLifecycleLog.Info("Workspace bootstrap skipped: the project workspace already exists on this broker",
+			"agent_id", req.ID, "project_id", req.ProjectID)
+		opts.Workspace = workspaceDir
+		return opts, "", "", nil
+	}
+
+	// A hub-managed project on the shared Layout: the upload is applied to
+	// the shared workspace under the project's provisioning locks, only
+	// when it is not in use yet (no sentinel and no content), and the
+	// sentinel is written after it. No broker-local record or workspace
+	// marker is written: the project's identity lives in its configuration
+	// at the project root.
+	if _, rel, shared, _ := s.sharedBootstrapWorkspace(req); shared {
+		skipped, applyErr := s.applySharedBootstrap(ctx, workspaceDir, rel, func(lockCtx context.Context) error {
+			if s.config.Debug {
+				s.agentLifecycleLog.Debug("Downloading workspace from GCS into the shared workspace", "agent_id", req.ID,
+					"bucket", bucket, "storagePath", req.WorkspaceStoragePath+"/files", "projectSlug", req.ProjectSlug)
+			}
+			return s.workspaceDownloader()(lockCtx, bucket, req.WorkspaceStoragePath+"/files", workspaceDir)
+		})
+		if applyErr != nil {
+			attemptMsg, httpMessage, err = s.workspaceBootstrapFailed(req, opDownloadWorkspace, applyErr)
+			return opts, attemptMsg, httpMessage, err
+		}
+		if skipped {
+			s.agentLifecycleLog.Info("Workspace bootstrap skipped: the shared project workspace came into use meanwhile",
+				"agent_id", req.ID, "project_id", req.ProjectID)
+			// The create answers with bootstrapSkippedWarning too.
+			if out, ok := ctx.Value(bootstrapOutcomeKey{}).(*bootstrapOutcome); ok {
+				out.skipped = true
+			}
+		}
+		opts.Workspace = workspaceDir
+		return opts, "", "", nil
+	}
+
 	if mkErr := os.MkdirAll(workspaceDir, 0755); mkErr != nil {
 		attemptMsg, httpMessage, err = s.workspaceBootstrapFailed(req, opCreateWorkspaceDir, mkErr)
 		return opts, attemptMsg, httpMessage, err
@@ -2029,14 +2358,36 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 
 	// Write a workspace marker so in-container CLI
 	// can discover the project context and use the Hub API.
-	// A workspace a hub keeps as its own on this host keeps the hub's
-	// identity entry.
-	if req.ProjectID != "" && req.ProjectSlug != "" && !hubWorkspaceRecordExists(req.ProjectSlug) {
+	if req.ProjectID != "" && req.ProjectSlug != "" {
 		if writeErr := config.WriteWorkspaceMarker(workspaceDir, req.ProjectID, req.ProjectSlug, req.ProjectSlug); writeErr != nil {
 			s.agentLifecycleLog.Warn("Failed to write workspace marker", "agent_id", req.ID, "project_id", req.ProjectID, "error", writeErr)
 		}
 	}
 	return opts, "", "", nil
+}
+
+// bootstrapOutcome records, for the synchronous create path, that the
+// workspace bootstrap was skipped because the shared workspace came into
+// use between admission and the provisioning locks, so the create answers
+// with bootstrapSkippedWarning as for a skip decided at admission. Carried
+// in the download's context under bootstrapOutcomeKey.
+type bootstrapOutcome struct{ skipped bool }
+
+type bootstrapOutcomeKey struct{}
+
+// bootstrapSkippedWarning is the create warning for a workspace bootstrap
+// whose upload was not applied because the project workspace already
+// existed on the broker (bootstrapSkipsExistingWorkspace).
+const bootstrapSkippedWarning = "The project workspace already exists on the runtime broker, so the uploaded files were not applied; use `scion sync to <agent>` to push changes"
+
+// bootstrapSkipsExistingWorkspace reports whether a create's workspace
+// bootstrap must leave the workspace alone: a project-level (slug)
+// bootstrap whose workspace directory createAgent found existing when it
+// admitted the create. Per-agent bootstrap directories, and a request
+// whose project path was not checked at admission (one that names its
+// project path, such as the global project), are always applied.
+func bootstrapSkipsExistingWorkspace(req CreateAgentRequest) bool {
+	return req.WorkspaceStoragePath != "" && req.ProjectSlug != "" && req.workspaceAdmissionChecked && !req.workspaceAbsentAtAdmission
 }
 
 // resolveGCSWorkspaceDir computes the directory a GCS workspace bootstrap
@@ -2051,7 +2402,18 @@ func (s *Server) resolveGCSWorkspaceDir(req CreateAgentRequest) (resolvedDir str
 	// ~/.scion/projects/<slug>/ instead of the worktree-based path.
 	var workspaceDir string
 	var workspaceRoot string
-	if req.ProjectSlug != "" {
+	sharedWS, _, shared, sharedErr := s.sharedBootstrapWorkspace(req)
+	switch {
+	case sharedErr != nil:
+		s.logWorkspaceBootstrapFailure(req, opValidateWorkspaceDir, sharedErr)
+		return "", "invalid workspace directory", invalidWorkspaceDirMessage,
+			fmt.Errorf("%w: %w", errInvalidWorkspaceDir, sharedErr)
+	case shared:
+		// A hub-managed project on the shared Layout: the project's
+		// workspace Mount on the share, below its project root.
+		workspaceRoot = req.ProjectPath
+		workspaceDir = sharedWS
+	case req.ProjectSlug != "":
 		globalDir, gdErr := config.GetGlobalDir()
 		if gdErr != nil {
 			return "", "failed to resolve global dir", failedOpText(opGetGlobalDir),
@@ -2059,7 +2421,7 @@ func (s *Server) resolveGCSWorkspaceDir(req CreateAgentRequest) (resolvedDir str
 		}
 		workspaceRoot = filepath.Join(globalDir, "projects")
 		workspaceDir = filepath.Join(workspaceRoot, req.ProjectSlug)
-	} else {
+	default:
 		workspaceRoot = s.config.WorktreeBase
 		workspaceDir = filepath.Join(workspaceRoot, req.Name, "workspace")
 	}
@@ -2472,6 +2834,16 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	if localOnly {
 		removeBranch = false
 	}
+	// moveReincarnationID marks a forced move's rollback delete: it removes
+	// nothing unless every agent directory that exists carries that move's
+	// marker (see the check after the target is resolved).
+	moveReincarnationID := query.Get(api.MoveReincarnationIDQueryParam)
+	if moveReincarnationID != "" && (!deleteFiles || localOnly || softDelete || removeBranch || projectID == "" ||
+		query.Get(api.PurgeRetainedQueryParam) == "true") {
+		span.SetStatus(codes.Error, "invalid forced move rollback delete")
+		ValidationError(w, "moveReincarnationId needs deleteFiles and projectId, without localOnly, softDelete, removeBranch or purgeRetained", nil)
+		return
+	}
 	// purgeRetained removes the retained files of a soft-deleted agent once
 	// the soft-delete retention window has passed (ptone/scion#4744). It is
 	// a files delete, never a soft one, and it removes nothing unless the
@@ -2516,16 +2888,27 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	runID := query.Get("runId")
 	span.SetAttributes(attribute.String("scion.agent.run_id", runID))
 	// agentId, when the hub sends it, is the hub's ID of the agent being
-	// deleted. It is only compared against the agent ID an in-flight launch
-	// on this broker was registered with, so a late delete for an old agent
+	// deleted. It is compared against the agent ID an in-flight launch on
+	// this broker was registered with, so a late delete for an old agent
 	// leaves alone the start of a newer agent of the same name
-	// (ptone/scion#2632). Without it, the cancel matches by name as before.
+	// (ptone/scion#2632), and against the runtime entry's agent_id label
+	// (deleteSharerKey). It is also the key the agent's worktree and sharer
+	// registry entry were provisioned under, so the file cleanup finds
+	// them (ptone/scion#3405). Without it, the cancel matches by name as
+	// before.
 	hubAgentID := query.Get(api.AgentIDQueryParam)
 	if runID != "" && scionrt.ValidateRunID(runID) != nil {
 		// A run ID is a label value on the runtime entry; anything else
 		// is a malformed request, not a runtime failure to retry.
 		span.SetStatus(codes.Error, "invalid runId")
 		ValidationError(w, "invalid runId", nil)
+		return
+	}
+	if hubAgentID != "" && !isSingleCleanPathElement(hubAgentID) {
+		// The ID names a directory under the shared base's worktrees
+		// directory, as at provisioning, which accepts no other form.
+		span.SetStatus(codes.Error, "invalid agentId")
+		ValidationError(w, "invalid agentId", nil)
 		return
 	}
 
@@ -2636,6 +3019,23 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	projectPath := target.projectPath
 	agentProjectID := target.projectID
 
+	// The runtime entry must be the agent the hub is deleting: an entry
+	// labelled with another agent's ID is a different agent that holds the
+	// name, so nothing is deleted. Checked before any side effect.
+	sharerKey, idMismatch := deleteSharerKey(hubAgentID, target.agentID, target.name)
+	if hubAgentID == "" && target.agentID != "" && !isSingleCleanPathElement(target.agentID) {
+		s.agentLifecycleLog.Warn("Agent delete: the runtime entry's agent_id label is not a valid path element; looking up the agent's worktree by name",
+			"agent_id", id, "project_id", agentProjectID, "container_id", target.containerID)
+	}
+	if idMismatch {
+		span.SetStatus(codes.Error, "agent ID mismatch")
+		s.agentLifecycleLog.Warn("Agent delete: the runtime entry belongs to another agent; nothing deleted",
+			"agent_id", id, "project_id", agentProjectID, "hub_agent_id", hubAgentID,
+			"entry_agent_id", target.agentID, "container_id", target.containerID)
+		Conflict(w, "Agent delete: the runtime entry with this name belongs to another agent; nothing was deleted")
+		return
+	}
+
 	// A delete that touches the agent's files (or its delete marks, or its
 	// ownership record's slug) holds the process-wide workspace lock on
 	// them from the file-ownership checks below through the last cleanup,
@@ -2665,6 +3065,37 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 			"agent_id", id, "project_id", ownedProject, "error", ownErr)
 		NotFound(w, "Agent")
 		return
+	}
+
+	// deleteHubProjectID is the Hub project ID the delete resolves the
+	// agent's hub-project state directory with; the forced move's rollback
+	// check below uses the same one.
+	deleteHubProjectID := projectID
+
+	// A forced move's rollback delete removes nothing unless every agent
+	// directory it would remove that exists carries that move's marker,
+	// checked under the files lock taken above. Anything else was not
+	// created by the move: 409, with a fixed message (the paths are
+	// logged here only). The check looks up the agent's worktree and sharer
+	// registry entry by the same sharer key the delete below uses, so a
+	// worktree provisioned under the hub agent ID is seen too.
+	if moveReincarnationID != "" {
+		checker, ok := target.mgr.(moveMarkerChecker)
+		var paths []string
+		chkErr := errors.New("this broker cannot check move markers")
+		if ok && projectPath != "" {
+			paths, chkErr = checker.CheckMoveMarkers(ctx, projectPath, agentProjectID, deleteHubProjectID, target.name, sharerKey, moveReincarnationID)
+		} else if ok {
+			chkErr = errors.New("no project path to check the move markers in")
+		}
+		if chkErr != nil {
+			s.agentLifecycleLog.Warn("Agent delete: refusing a forced move's rollback delete of files the move did not create",
+				"agent_id", id, "project_id", agentProjectID, "paths", paths, "error", chkErr)
+			span.SetStatus(codes.Error, "move marker mismatch")
+			writeError(w, http.StatusConflict, api.BrokerErrCodeMoveMarkerMismatch,
+				"Failed to delete agent: its files on this broker were not created by this move; nothing was removed", nil)
+			return
+		}
 	}
 
 	// Wake any local launch waiting on this agent (design §3.8.1): purely a
@@ -2822,7 +3253,10 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	s.agentLifecycleLog.Debug("Agent delete: resolved target",
 		"agent_id", id, "project_id", agentProjectID, "run_id", runID,
 		"container_id", target.containerID, "target_run_id", target.runID)
-	_, err = target.mgr.DeleteTarget(ctx, target.name, deleteRunRef(target, runID), filesToDelete, projectPath, removeBranch)
+	// The request's project ID is the Hub project ID the agent was started
+	// with (opts.HubProjectID); file deletion resolves the agent's state
+	// directory with it, as lookup does. Without one, nothing changes.
+	_, err = target.mgr.DeleteTarget(api.ContextWithHubProjectID(ctx, deleteHubProjectID), target.name, sharerKey, deleteRunRef(target, runID), filesToDelete, projectPath, removeBranch)
 	// A soft delete marks agent-info.json deleted only once the runtime
 	// entry is gone (ptone/scion#4766): some runtimes do not let the host
 	// write files in the container, so the host never writes the file while
@@ -3044,7 +3478,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	)
 
 	// id is joined onto a project directory as a single path segment by
-	// every file operation below (applyInlineConfigUpdate, GetSavedProfile,
+	// every file operation below (applyInlineConfigUpdate, ProvisionedProfile,
 	// GetSavedPhase, and ultimately GetAgentDir via mgr.Start), so it must be
 	// exactly that: reject anything that would join as more than one
 	// segment, or as ".." / ".", before any of those joins happens.
@@ -3059,6 +3493,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		Task               string                 `json:"task"`
 		ProjectPath        string                 `json:"projectPath"`
 		ProjectSlug        string                 `json:"projectSlug"`
+		PreviousProjectIDs []string               `json:"previousProjectIds,omitempty"`
 		HarnessConfig      string                 `json:"harnessConfig"`
 		HarnessConfigID    string                 `json:"harnessConfigId"`
 		HarnessConfigHash  string                 `json:"harnessConfigHash"`
@@ -3096,6 +3531,11 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		UserID               string                           `json:"userId,omitempty"`
 		ProvisionCredentials map[string]string                `json:"provisionCredentials,omitempty"`
 		PreResolvedSkills    *hubclient.ResolveSkillsResponse `json:"preResolvedSkills,omitempty"`
+		// Profile is the agent's settings profile as the Hub records it,
+		// sent on every start (even when empty); nil from an older Hub. It
+		// is used only for an agent without an image provenance record
+		// (hubSentProfile).
+		Profile *string `json:"profile,omitempty"`
 		// GitClone, Branch, and WorkspaceMode carry the workspace-recreation
 		// inputs the Hub sends on start (GoogleCloudPlatform/scion#1931), so
 		// an agent's workspace can be recreated on a runtime that does not
@@ -3232,13 +3672,6 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		}
 	}
 
-	// Parity with the create path: populate the dedicated AgentToken field from
-	// the hub-minted token in ResolvedEnv so buildStartContext treats it as an
-	// explicit token rather than relying on the resolvedEnv-kept fallback. The
-	// precedence in buildStartContext step 3 keeps this token regardless, but
-	// setting it here makes the start path behave like create.
-	startContextAgentToken := startReq.ResolvedEnv["SCION_AUTH_TOKEN"]
-
 	// The URL path segment (id) is the agent's slug, not the Hub UUID: the
 	// broker's own dispatch client sends agent.Slug there. It is also the
 	// stable on-disk identity: create keys the agent directory, container
@@ -3312,6 +3745,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		ProjectPathFromContainer: startProjectPathFromContainer,
 		ProjectSlug:              startReq.ProjectSlug,
 		HubGlobalProject:         startHubGlobalProject,
+		PreviousProjectIDs:       startReq.PreviousProjectIDs,
 		Config:                   cfg,
 		InlineConfig:             startReq.InlineConfig,
 		HubEndpoint:              startReq.HubEndpoint,
@@ -3319,13 +3753,13 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		EnvClassifications:       startReq.EnvClassifications,
 		ResolvedSecrets:          startReq.ResolvedSecrets,
 		SharedDirs:               startReq.SharedDirs,
-		AgentToken:               startContextAgentToken,
 		WorkspaceMode:            startReq.WorkspaceMode,
 		RunID:                    startReq.RunID,
 		TemplateName:             startReq.TemplateName,
 		TelemetryPolicy:          startReq.TelemetryPolicy,
 		TemplateID:               startReq.TemplateID,
 		TemplateHash:             startReq.TemplateHash,
+		HubProfile:               startReq.Profile,
 		HTTPRequest:              r,
 		Operation:                opHTTPStart,
 	})
@@ -3341,7 +3775,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 
 	// Once ProjectPath is resolved, confirm id's agent directory actually
 	// resolves under this project's agents root before applyInlineConfigUpdate,
-	// GetSavedProfile, or GetSavedPhase touch it below -- the same
+	// ProvisionedProfile, or GetSavedPhase touch it below -- the same
 	// defense-in-depth pairing checkAgentDirContained already provides
 	// against isSingleCleanPathElement inside ProvisionAgent and GetAgent.
 	if opts.ProjectPath != "" {
@@ -3367,12 +3801,12 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	// This runs before any side effect below (applyInlineConfigUpdate's
 	// scion-agent.json write), so a rejection here does not leave a partial
 	// update applied.
-	// A flat instance has no saved profile (profiles are refused there): only
-	// that read is skipped, never the consistency checks below.
-	if opts.ProjectPath != "" && !s.isFlat() {
-		opts.Profile = agent.GetSavedProfile(id, opts.ProjectPath)
-	}
-	runtimeOpts, provisioned, provErr := runtimeSelectionOpts(opts, opts.Name, false)
+	// The profile is the agent's provisioned one (broker-side image
+	// provenance), else the Hub-sent one (runtimeClassificationProfile);
+	// it is both the runtime-selection profile and the profile the start
+	// runs with. A flat instance has no profiles (they are refused there)
+	// and keeps opts.Profile; the consistency checks below still run.
+	runtimeOpts, provisioned, provErr := runtimeSelectionOpts(opts, opts.Name, false, s.startProfileSource(opts, opts.Name, startReq.Profile))
 	if provErr != nil {
 		if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
 			return
@@ -3380,11 +3814,15 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		s.writeImageProvenanceError(w, provErr, "start agent", id)
 		return
 	}
+	if !s.isFlat() {
+		opts.Profile = runtimeOpts.Profile
+	}
 	// A saved profile names the runtime this existing agent was created
 	// on; if settings cannot resolve it, fail rather than start the agent
-	// on the default runtime (ptone/scion#2709). buildStartContext already
-	// logged any recorded-runtime fallback at Warn, so log it at Debug here.
-	mgr, resolvedRuntimeType, err := s.resolveManagerForOptsStrict(runtimeOpts, existingAgentProfileResolution(runtimeOpts.Profile, provisioned), slog.LevelDebug)
+	// on the default runtime (ptone/scion#2709).
+	res, err := s.resolveManagerForOptsStrict(runtimeOpts, existingAgentProfileResolution(runtimeOpts.Profile, provisioned))
+	res = res.forExistingAgent(id)
+	mgr, resolvedRuntimeType := res.Manager, res.RuntimeType
 	if err != nil {
 		if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
 			return
@@ -3435,10 +3873,41 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		return
 	}
 
+	// Kubernetes placement defaults for the runtime this start uses, and
+	// the agent's own kubernetes block as the inline update below would
+	// leave it, checked before that update writes anything.
+	rp, perr := s.placementForStart(ctx, res, opts.ProjectPath)
+	if perr == nil {
+		perr = s.checkStartLegacyPlacement(id, opts.ProjectPath, startReq.InlineConfig, startReq.SharedWorkspace, rp)
+	}
+	if perr != nil {
+		if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
+			return
+		}
+		span.SetStatus(codes.Error, perr.Error())
+		s.writeStartContextError(w, perr, "start agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
+		return
+	}
+	opts.ResolvedPlacement, opts.PlacementResolved = rp, true
+
+	// No volume in the Hub's inline config may reach a Runtime Broker
+	// control path; refused before it is merged into scion-agent.json.
+	if startReq.InlineConfig != nil {
+		if err := checkRequestVolumes(startReq.InlineConfig.Volumes); err != nil {
+			span.SetStatus(codes.Error, brokercontrol.ErrorCode)
+			writeControlPathRefusal(w, err)
+			return
+		}
+	}
+
 	// Apply updated InlineConfig to scion-agent.json before starting.
 	if startReq.InlineConfig != nil && opts.ProjectPath != "" {
 		s.applyInlineConfigUpdate(ctx, id, opts.ProjectPath, startReq.InlineConfig, startReq.SharedWorkspace)
 	}
+	// The provision-rendered keys the hub changed or cleared since
+	// provisioning: the start renders their files again
+	// (ptone/scion#3982).
+	opts.RerenderKeys = api.RerenderConfigKeys(startReq.InlineConfig)
 
 	// The hub is the source of truth for resume intent: when it sets
 	// req.Resume the harness must continue its prior session. We still fall
@@ -3512,9 +3981,12 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		details := s.startFailureDetails(ctx, mgr, id, projectID, opts.RunID)
 		var skillErr *agent.SkillResolutionError
 		ue, unusable := unusableProvisionerFrom(err)
+		storageErr, isStorageRefusal := storageMigrationRequiredFrom(err)
 		switch {
 		case unusable:
 			s.writeUnusableProvisioner(w, ue, "start agent", id, details)
+		case isStorageRefusal:
+			s.writeStorageMigrationRequired(w, storageErr, "start agent", id, details)
 		case errors.Is(err, agent.ErrContainerNameInUse):
 			// Fixed text, as restart and the async launch give: a wrapped
 			// error can carry runtime detail. The full error is logged above.
@@ -3528,6 +4000,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			skillResolutionFailedWithDetails(w, skillErr, startSkill.ref, details)
 		case config.IsAgentStateConflict(err):
 			writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to start agent: "+err.Error(), details)
+		case errors.Is(err, agent.ErrProjectShareNotMounted):
+			// As on create: err names the mount point and is logged above.
+			writeError(w, http.StatusServiceUnavailable, ErrCodeProjectStorageUnavailable, projectShareNotMountedText(), details)
 		default:
 			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, runtimeOpError("start agent", err).Error(), details)
 		}
@@ -3574,6 +4049,37 @@ func restartAgentConfig(namesProject bool, harnessConfig, harnessConfigID, harne
 	}
 }
 
+// loadedAgentConfig is readAgentScionConfig's result: the parsed config,
+// the resolved project directory and the file's path, or, on error, the
+// stage that failed ("resolve", "read" or "parse").
+type loadedAgentConfig struct {
+	cfg        *api.ScionConfig
+	projectDir string
+	path       string
+	stage      string
+}
+
+// readAgentScionConfig reads and parses the agent's persisted
+// scion-agent.json, the file applyInlineConfigUpdate updates:
+// config.GetAgentDir(projectDir, agentName, sharedWorkspace)/scion-agent.json,
+// with projectDir resolved from projectPath.
+func readAgentScionConfig(agentName, projectPath string, sharedWorkspace bool) (loadedAgentConfig, error) {
+	projectDir, err := config.GetResolvedProjectDir(projectPath)
+	if err != nil {
+		return loadedAgentConfig{stage: "resolve"}, err
+	}
+	cfgPath := filepath.Join(config.GetAgentDir(projectDir, agentName, sharedWorkspace), "scion-agent.json")
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return loadedAgentConfig{projectDir: projectDir, path: cfgPath, stage: "read"}, err
+	}
+	var existing api.ScionConfig
+	if err := json.Unmarshal(data, &existing); err != nil {
+		return loadedAgentConfig{projectDir: projectDir, path: cfgPath, stage: "parse"}, err
+	}
+	return loadedAgentConfig{cfg: &existing, projectDir: projectDir, path: cfgPath}, nil
+}
+
 // applyInlineConfigUpdate merges the updated InlineConfig into the agent's
 // scion-agent.json. This ensures config changes made via the Hub (e.g. limits
 // set in the web configure form) are applied before the agent starts.
@@ -3582,25 +4088,20 @@ func restartAgentConfig(namesProject bool, harnessConfig, harnessConfigID, harne
 // scion-agent.json externally (~/.scion.project-configs/<slug>__<uuid>/.scion/
 // agents/<name>/) so siblings cannot read it via /workspace.
 func (s *Server) applyInlineConfigUpdate(ctx context.Context, agentName, projectPath string, inlineConfig *api.ScionConfig, sharedWorkspace bool) {
-	projectDir, err := config.GetResolvedProjectDir(projectPath)
-	if err != nil {
-		s.agentLifecycleLog.Warn("applyInlineConfigUpdate: failed to resolve project dir", "agent", agentName, "error", err)
-		return
-	}
-	agentDir := config.GetAgentDir(projectDir, agentName, sharedWorkspace)
-	cfgPath := filepath.Join(agentDir, "scion-agent.json")
-
 	// Load existing config
-	data, err := os.ReadFile(cfgPath)
+	loaded, err := readAgentScionConfig(agentName, projectPath, sharedWorkspace)
 	if err != nil {
-		s.agentLifecycleLog.Warn("applyInlineConfigUpdate: failed to read scion-agent.json", "agent", agentName, "path", cfgPath, "error", err)
+		switch loaded.stage {
+		case "resolve":
+			s.agentLifecycleLog.Warn("applyInlineConfigUpdate: failed to resolve project dir", "agent", agentName, "error", err)
+		case "read":
+			s.agentLifecycleLog.Warn("applyInlineConfigUpdate: failed to read scion-agent.json", "agent", agentName, "path", loaded.path, "error", err)
+		default:
+			s.agentLifecycleLog.Warn("applyInlineConfigUpdate: failed to parse scion-agent.json", "agent", agentName, "error", err)
+		}
 		return
 	}
-	var existing api.ScionConfig
-	if err := json.Unmarshal(data, &existing); err != nil {
-		s.agentLifecycleLog.Warn("applyInlineConfigUpdate: failed to parse scion-agent.json", "agent", agentName, "error", err)
-		return
-	}
+	projectDir, cfgPath, existing := loaded.projectDir, loaded.path, *loaded.cfg
 
 	// The Hub sends the agent's complete list of hub-, user- and
 	// project-scoped skills whenever it sends skills at all, so drop the
@@ -3625,11 +4126,14 @@ func (s *Server) applyInlineConfigUpdate(ctx context.Context, agentName, project
 	// the agent. Remove the paths the Hub lists as cleared, after the merge
 	// and before anything reads the config at start (ptone/scion#3906).
 	// MergeScionConfig itself stays non-zero-wins: provisioning and
-	// template layering depend on it. The list is never written to disk.
+	// template layering depend on it. Neither the cleared list nor the
+	// changed list (read by the start, StartOptions.RerenderKeys) is
+	// written to disk.
 	if inlineConfig != nil {
-		s.applyClearedFields(ctx, merged, projectPath, projectDir, agentName, inlineConfig.ClearedFields)
+		s.applyClearedFields(ctx, merged, projectPath, projectDir, filepath.Dir(cfgPath), agentName, inlineConfig.ClearedFields)
 	}
 	merged.ClearedFields = nil
+	merged.ChangedFields = nil
 
 	// Write back
 	updated, err := json.MarshalIndent(merged, "", "  ")
@@ -3717,19 +4221,17 @@ func isContainerStopTolerable(err error) bool {
 		strings.Contains(msg, "exit status 125")
 }
 
-// agentsWithoutProjectLabel returns the subset of agents that carry no
-// project identity: no scion.project_id label and no ProjectID field
-// (agentHasNoProjectIdentity). The project-scoped lookups fall back to a
-// slug-only search for backward compatibility with pre-existing / solo-mode
-// containers that predate project labels; that fallback must only match such
-// genuinely unlabeled containers. A container labeled for a *different*
-// project must never satisfy a project-scoped request, or same-slug agents
-// across projects would collide. The ProjectID field counts too, because
-// Cloud Run stores the label under its GCP-sanitized key (ptone/scion#5268).
-func agentsWithoutProjectLabel(agents []api.AgentInfo) []api.AgentInfo {
+// legacyAgentsInProject returns the entries that carry no project identity
+// but whose recorded project path identifies as projectID
+// (legacyEntryInProject). The project-scoped lookups fall back to these
+// when no entry is positively identified as belonging to projectID, for
+// containers that predate project labels. A same-named entry with no
+// project identity from another project, or with no recorded path, is not
+// returned, so every verb resolves such entries the way delete does.
+func legacyAgentsInProject(agents []api.AgentInfo, projectID string) []api.AgentInfo {
 	filtered := make([]api.AgentInfo, 0, len(agents))
 	for _, a := range agents {
-		if agentHasNoProjectIdentity(a) {
+		if legacyEntryInProject(a, projectID) {
 			filtered = append(filtered, a)
 		}
 	}
@@ -4319,6 +4821,8 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		RunID string `json:"runId,omitempty"`
 		// TemplateName mirrors the same field on the start path.
 		TemplateName string `json:"templateName,omitempty"`
+		// Profile mirrors the same field on the start path.
+		Profile *string `json:"profile,omitempty"`
 		// HubAgentDefaults mirrors the same field on the start path.
 		HubAgentDefaults *api.HubAgentDefaults `json:"hubAgentDefaults,omitempty"`
 		// TelemetryPolicy mirrors the same field on the start path.
@@ -4342,6 +4846,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		// as before.
 		ProjectPath          string              `json:"projectPath,omitempty"`
 		ProjectSlug          string              `json:"projectSlug,omitempty"`
+		PreviousProjectIDs   []string            `json:"previousProjectIds,omitempty"`
 		HarnessConfig        string              `json:"harnessConfig,omitempty"`
 		HarnessConfigID      string              `json:"harnessConfigId,omitempty"`
 		HarnessConfigHash    string              `json:"harnessConfigHash,omitempty"`
@@ -4424,12 +4929,14 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 			// below reads its saved profile from; nothing is stopped for it.
 			if !match.matched && len(cands) == 1 {
 				c := cands[0]
+				// Paired through runtimeOfManager, so no record: the
+				// zero value.
 				match = agentMatch{manager: c.mgr, runtime: s.runtimeOfManager(c.mgr), entry: c.entry, matched: true}
 				matchErr = &agentNotFoundError{slug: strings.ToLower(id)}
 			}
 		case 1:
 			c := containers[0]
-			if m, err := agentMatchFrom(strings.ToLower(id), []api.AgentInfo{c.entry}, c.mgr, s.runtimeOfManager(c.mgr)); err == nil {
+			if m, err := s.otherRuntimeMatch(strings.ToLower(id), c); err == nil {
 				match, matchErr = m, nil
 			}
 		default:
@@ -4469,7 +4976,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	// another.
 	var pin pinnedRuntime
 	if matchErr == nil && match.containerID != "" && match.manager != nil {
-		pin = pinnedRuntimeOf(match.manager, match.runtime, s.runtimeOfManager(match.manager))
+		pin = s.restartPin(match)
 	}
 
 	// A flat instance's ownership mirror installed by buildStartContext is
@@ -4490,6 +4997,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		ProjectPathFromContainer: projectPathFromContainer,
 		ProjectSlug:              restartProjectSlug,
 		HubGlobalProject:         restartHubGlobalProject,
+		PreviousProjectIDs:       restartReq.PreviousProjectIDs,
 		Config:                   restartCfg,
 		SharedDirs:               restartReq.SharedDirs,
 		WorkspaceMode:            restartReq.WorkspaceMode,
@@ -4499,6 +5007,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		ResolvedSecrets:          restartReq.ResolvedSecrets,
 		RunID:                    restartReq.RunID,
 		SharedWorkspace:          restartReq.SharedWorkspace,
+		HubProfile:               restartReq.Profile,
 		TemplateName:             restartReq.TemplateName,
 		TelemetryPolicy:          restartReq.TelemetryPolicy,
 		TemplateID:               restartReq.TemplateID,
@@ -4524,28 +5033,27 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		opts.Image = restartReq.Image
 	}
 
-	if opts.ProjectPath != "" && !s.isFlat() {
-		opts.Profile = agent.GetSavedProfile(id, opts.ProjectPath)
-	}
-
-	// Re-resolve manager after the profile update above, and re-run the
-	// hub-default-passthrough downgrade and the Kubernetes/block rejection
-	// against this later, authoritative resolution — before the stop below,
-	// a real side effect. A rejection here must leave the agent exactly as
-	// it was; running this after the stop would return 400 with the agent
-	// already stopped. See the identical re-check and comment in startAgent.
-	runtimeOpts, provisioned, provErr := runtimeSelectionOpts(opts, agentName, true)
+	// Resolve the profile as on start (provisioned, else Hub-sent; see
+	// runtimeClassificationProfile), re-resolve the manager against it, and
+	// re-run the hub-default-passthrough downgrade and the Kubernetes/block
+	// rejection against this later, authoritative resolution — before the
+	// stop below, a real side effect. A rejection here must leave the agent
+	// exactly as it was; running this after the stop would return 400 with
+	// the agent already stopped. See the identical re-check and comment in
+	// startAgent.
+	runtimeOpts, provisioned, provErr := runtimeSelectionOpts(opts, agentName, true, s.startProfileSource(opts, agentName, restartReq.Profile))
 	if provErr != nil {
 		s.writeImageProvenanceError(w, provErr, "restart agent", id)
 		return
 	}
+	if !s.isFlat() {
+		opts.Profile = runtimeOpts.Profile
+	}
 	// As in startAgent, an unresolvable saved profile fails before the
 	// stop below instead of falling back to the default runtime.
-	// The profile is read by id but the recorded-runtime fallback reads
-	// agent-info.json by opts.Name (the container's name). If they differ
-	// the fallback cannot fire and the 503 is returned, which fails safe.
-	// buildStartContext already logged any fallback at Warn; Debug here.
-	mgr, resolvedRuntimeType, err := s.resolveExistingAgentManager(runtimeOpts, existingAgentProfileResolution(runtimeOpts.Profile, provisioned), slog.LevelDebug, pin)
+	res, err := s.resolveExistingAgentManager(runtimeOpts, existingAgentProfileResolution(runtimeOpts.Profile, provisioned), pin)
+	res = res.forExistingAgent(id)
+	mgr, resolvedRuntimeType := res.Manager, res.RuntimeType
 	if err != nil {
 		writeProfileUnresolved(w, err)
 		return
@@ -4574,10 +5082,38 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	// Harness-config policy gate: runs on create, start and restart against
 	// the single hydrated harness-config launch will use (opts, as built by
 	// buildStartContext above), before the stop below.
-	if d := s.enforceHarnessConfigPolicy(harnessPolicyInputForStart(opts, id)); !d.OK {
+	if d := s.enforceHarnessConfigPolicy(harnessPolicyInputForStart(opts, agentName)); !d.OK {
 		trace.SpanFromContext(ctx).SetStatus(codes.Error, d.detail())
 		s.writeHarnessPolicyRefusal(w, d, "restart agent", id, nil)
 		return
+	}
+
+	// Kubernetes placement defaults for the runtime the restart starts on,
+	// and the agent's persisted kubernetes block, checked before this
+	// endpoint's stop: a refusal here leaves the agent running. (A restart
+	// the hub performs as its own stop followed by a start reaches the start
+	// handler, whose refusal leaves the agent stopped.)
+	rp, perr := s.placementForStart(ctx, res, opts.ProjectPath)
+	if perr == nil {
+		perr = s.checkRestartLegacyPlacement(id, opts.ProjectPath, restartReq.SharedWorkspace, rp)
+	}
+	if perr != nil {
+		trace.SpanFromContext(ctx).SetStatus(codes.Error, perr.Error())
+		s.writeStartContextError(w, perr, "restart agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
+		return
+	}
+	opts.ResolvedPlacement, opts.PlacementResolved = rp, true
+
+	// A profile (or its runtime entry) that still carries a removed storage
+	// override is refused before this endpoint's stop, with the profile the
+	// start resolved above: the refusal leaves the agent running
+	// (ptone/scion#6371). Manager.Start repeats the check as a backstop.
+	if err := agent.CheckProfileStorageRefusal(ctx, opts.Profile); err != nil {
+		if se, ok := storageMigrationRequiredFrom(err); ok {
+			trace.SpanFromContext(ctx).SetStatus(codes.Error, ErrCodeStorageMigrationRequired)
+			s.writeStorageMigrationRequired(w, se, "restart agent", id, nil)
+			return
+		}
 	}
 
 	// Stop then start — tolerate stop errors since the container may already
@@ -4645,6 +5181,10 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 			s.writeUnusableProvisioner(w, ue, "restart agent", id, details)
 			return
 		}
+		if se, ok := storageMigrationRequiredFrom(err); ok {
+			s.writeStorageMigrationRequired(w, se, "restart agent", id, details)
+			return
+		}
 		// Start can re-provision the agent: a required skill reference that
 		// cannot be resolved gets the same typed response as on start, and
 		// is checked before the "not found" text match so a skill cause
@@ -4658,6 +5198,11 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 			writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to restart agent: "+err.Error(), details)
 			return
 		}
+		if errors.Is(err, agent.ErrProjectShareNotMounted) {
+			// As on create: err names the mount point and is logged above.
+			writeError(w, http.StatusServiceUnavailable, ErrCodeProjectStorageUnavailable, projectShareNotMountedText(), details)
+			return
+		}
 		if errors.Is(err, agent.ErrContainerNameInUse) {
 			writeError(w, http.StatusConflict, ErrCodeConflict, agent.ErrContainerNameInUse.Error(), details)
 			return
@@ -4667,6 +5212,15 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 			// deleted nothing of it (ptone/scion#2550). Fixed text: the
 			// wrapped error carries identity (see runtimeOpError).
 			writeError(w, http.StatusConflict, ErrCodeConflict, scionrt.ErrRunConflict.Error(), details)
+			return
+		}
+		// A template or harness-config the restart's start could not
+		// resolve is reported as such, with the same 404 not_found text
+		// create uses (notFoundMessage), before the "not found" text match
+		// below, which would report the agent itself as missing although
+		// it exists (ptone/scion#5433).
+		if errors.Is(err, config.ErrHarnessConfigNotFound) || errors.Is(err, config.ErrTemplateNotFound) {
+			writeError(w, http.StatusNotFound, ErrCodeNotFound, notFoundMessage("restart agent", err, opts.TemplateName), details)
 			return
 		}
 		if strings.Contains(err.Error(), "not found") {
@@ -4779,7 +5333,17 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 			go s.reportMessageFailure(connName, f)
 		})
 	}
+	// Attachments (ptone/scion#4596): their capabilities are redeemed now,
+	// at receipt, on a context detached from this request; the files are
+	// written into the agent's home right before the text is delivered.
+	inbox := s.startInboxDelivery(r.Header.Get("X-Scion-Hub-Connection"), id, req.MessageID, req.AttachmentRetentionDays, req.Attachments)
+	if inbox != nil {
+		msgCtx = agent.WithPreDelivery(msgCtx, inbox)
+	}
 	if err := mgr.Message(msgCtx, id, projectID, deliveryText, req.Interrupt); err != nil {
+		if inbox != nil {
+			inbox.Discard()
+		}
 		if strings.Contains(err.Error(), "not found") {
 			span.SetStatus(codes.Error, err.Error())
 			NotFound(w, "Agent")
@@ -5717,7 +6281,7 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 		if len(hydratedHarnessConfigPath) > 0 {
 			hydratedHCPath = hydratedHarnessConfigPath[0]
 		}
-		if hcProjectDir := harnessConfigProjectDir(req.ProjectPath); hydratedHCPath != "" || hcProjectDir != "" {
+		if hcProjectDir := harnessConfigProjectTier(req.ProjectPath); hydratedHCPath != "" || hcProjectDir != "" {
 			if hcDir, err := config.ResolveHarnessConfigDir(hydratedHCPath, harnessConfigName, hcProjectDir, harnessConfigTemplatePaths...); err == nil && hcDir != nil {
 				harnessType = hcDir.Config.Harness
 				authType = hcDir.Config.AuthSelectedType
@@ -6388,7 +6952,7 @@ func (s *Server) resolveHarnessConfigForEnvGather(req CreateAgentRequest, settin
 	if cliFlag == "" && req.Config != nil && req.Config.Template != "" {
 		tpl := req.Config.Template
 		if req.ProjectPath != "" {
-			if _, err := config.FindHarnessConfigDir(tpl, req.ProjectPath); err == nil {
+			if _, err := config.FindHarnessConfigDir(tpl, harnessConfigProjectTier(req.ProjectPath)); err == nil {
 				cliFlag = tpl
 			}
 		}
@@ -6415,6 +6979,9 @@ func (s *Server) resolveHarnessConfigForEnvGather(req CreateAgentRequest, settin
 	return res.Name
 }
 
+// hasAgentInProjectOrUnlabeled reports whether any entry may stand for an
+// agent of projectID (matchesAgentProject): one identified as belonging to
+// it, or one with no project identity accepted by legacyEntryInProject.
 func hasAgentInProjectOrUnlabeled(agents []api.AgentInfo, projectID string) bool {
 	for _, info := range agents {
 		if matchesAgentProject(info, projectID) {
@@ -6456,7 +7023,8 @@ func (s *Server) resolveAgentRuntimeTarget(ctx context.Context, id, projectID st
 			return auxRuntimes[0].Manager, auxRuntimes[0].Runtime
 		}
 	}
-	return s.defaultPair()
+	mgr, rt, _ := s.defaultPair()
+	return mgr, rt
 }
 
 // findAgentRuntimeTarget searches the runtimes a request carrying ctx may
@@ -6488,7 +7056,7 @@ func (s *Server) findAgentRuntimeTarget(ctx context.Context, id, projectID strin
 	// A recorded runtime type (ptone/scion#2748) restricts the search to
 	// runtimes of that type; without one every runtime is searched.
 	useDefault := s.defaultRuntimeAllowed(ctx)
-	defMgr, defRT := s.defaultPair()
+	defMgr, defRT, _ := s.defaultPair()
 
 	// Try the default runtime first.
 	if useDefault {
@@ -6667,27 +7235,139 @@ func (s *Server) resolveRuntimeNameForOpts(opts api.StartOptions) string {
 // When opts.Profile is empty, the project's active profile (from settings.yaml)
 // is used. This ensures the broker respects the project's configured runtime
 // even when no explicit --profile flag is passed.
-func (s *Server) resolveManagerForOpts(opts api.StartOptions) (agent.Manager, string) {
-	mgr, runtimeType, _ := s.resolveManagerForOptsStrict(opts, profileLenient, slog.LevelWarn)
-	return mgr, runtimeType
+//
+// The result is resolveManagerForOptsStrict's, with its error dropped: on
+// the error-carrying returns it still holds the agent runtime's default manager.
+func (s *Server) resolveManagerForOpts(opts api.StartOptions) runtimeResolution {
+	res, _ := s.resolveManagerForOptsStrict(opts, profileLenient)
+	return res
+}
+
+// resolutionKind classifies the branch a runtime resolver returned
+// (Kubernetes placement defaults, ptone/scion#5085). It is carried in
+// runtimeResolution and not consulted by the resolvers or their callers.
+type resolutionKind int
+
+const (
+	// resolutionUnset: not classified. Profile resolution for an empty
+	// opts.Profile is left unset: the resolver cannot tell a create (whose
+	// project active profile is its selection profile) from an existing
+	// agent with no recorded profile. Choosing that signal is deferred to
+	// the change that consumes How.
+	resolutionUnset resolutionKind = iota
+	// resolutionProfile: a profile found in settings was resolved for a
+	// non-empty opts.Profile.
+	resolutionProfile
+	// resolutionUnrecorded: an existing agent with no recorded profile,
+	// started on the runtime its container was found on (the pin).
+	resolutionUnrecorded
+	// resolutionForced: the forced runtime (ServerConfig.ForceRuntime)
+	// resolved to a registered runtime.
+	resolutionForced
+	// resolutionFlat: a flat instance's single runtime.
+	resolutionFlat
+	// resolutionDefaultFallback: the agent runtime's default runtime, because
+	// there were no project settings (non-strict) or the default or
+	// requested profile did not resolve.
+	resolutionDefaultFallback
+	// resolutionErrorRuntime: the profile's runtime failed to build; the
+	// manager wraps the error runtime and is stored in no holder.
+	resolutionErrorRuntime
+)
+
+// String returns the kind's name.
+func (k resolutionKind) String() string {
+	switch k {
+	case resolutionProfile:
+		return "profile"
+	case resolutionUnrecorded:
+		return "unrecorded"
+	case resolutionForced:
+		return "forced"
+	case resolutionFlat:
+		return "flat"
+	case resolutionDefaultFallback:
+		return "defaultFallback"
+	case resolutionErrorRuntime:
+		return "errorRuntime"
+	default:
+		return "unset"
+	}
+}
+
+// runtimeResolution is a runtime resolver's result: the manager, the
+// runtime and the runtime's build record, all from one holder (a
+// defaultPair snapshot, an auxiliary runtime, the pin, or a fresh build),
+// with the runtime type name callers use. How, Profile and DispatchEntry
+// describe how it was chosen (Kubernetes placement defaults,
+// ptone/scion#5085); they are carried, not consulted.
+type runtimeResolution struct {
+	Manager agent.Manager
+	Runtime scionrt.Runtime
+	Record  config.RuntimeBuildRecord
+
+	// RuntimeType is the resolved runtime's name (runtime.Runtime.Name()).
+	RuntimeType string
+
+	How resolutionKind
+	// Profile is the selection profile resolved: opts.Profile, else the
+	// settings' active profile. DispatchEntry is the runtimes key that
+	// profile names, from the same settings read. Both are empty when no
+	// profile was resolved from settings. Cause is reserved for a fixed
+	// cause and is not set yet.
+	Profile, DispatchEntry, Cause string
+	// Agent names the agent in placement fixed causes; set by forCreate
+	// and forExistingAgent (placement_resolve.go), which also settle How
+	// for a profile resolution with an empty selection profile.
+	Agent string
+}
+
+// defaultResolution is a resolution to the default holder from one
+// defaultPair snapshot.
+func defaultResolution(mgr agent.Manager, rt scionrt.Runtime, rec config.RuntimeBuildRecord, how resolutionKind) runtimeResolution {
+	return runtimeResolution{Manager: mgr, Runtime: rt, Record: rec, RuntimeType: rt.Name(), How: how}
 }
 
 // pinnedRuntime is the runtime an existing agent's container was found
-// on, as a manager and its runtime name. The zero value pins nothing.
+// on, as a manager, its runtime, the runtime's name, and the runtime's
+// build record. The zero value pins nothing.
 type pinnedRuntime struct {
-	mgr  agent.Manager
-	name string
+	mgr    agent.Manager
+	rt     scionrt.Runtime
+	name   string
+	record config.RuntimeBuildRecord
 }
 
-// pinnedRuntimeOf returns the pin for mgr, named after the first non-nil
-// runtime given; the zero value when none is.
-func pinnedRuntimeOf(mgr agent.Manager, runtimes ...scionrt.Runtime) pinnedRuntime {
-	for _, rt := range runtimes {
-		if rt != nil {
-			return pinnedRuntime{mgr: mgr, name: rt.Name()}
-		}
+// pinnedRuntimeOf returns the pin for mgr on rt, with rt's build record;
+// the zero value when rt is nil. Restart passes match.runtime and
+// match.record; when match.runtime is nil it keeps today's fallback
+// rt = runtimeOfManager(mgr) (name from it) with a ZERO record, and the
+// zero pin when both are nil, as today (restartPin).
+func pinnedRuntimeOf(mgr agent.Manager, rt scionrt.Runtime, rec config.RuntimeBuildRecord) pinnedRuntime {
+	if rt == nil {
+		return pinnedRuntime{}
 	}
-	return pinnedRuntime{}
+	return pinnedRuntime{mgr: mgr, rt: rt, name: rt.Name(), record: rec}
+}
+
+// otherRuntimeMatch is the agent match a restart builds for the one
+// container its walk of the other runtimes found. The runtime is paired
+// with the candidate's manager through runtimeOfManager, so the record is
+// the zero value: a record is never paired through runtimeOfManager, and a
+// pin taken from this match carries no build record.
+func (s *Server) otherRuntimeMatch(slug string, c agentCandidate) (agentMatch, error) {
+	return agentMatchFrom(slug, []api.AgentInfo{c.entry}, c.mgr, s.runtimeOfManager(c.mgr), config.RuntimeBuildRecord{})
+}
+
+// restartPin is the pin a restart takes for the agent match it stops: the
+// match's runtime and record, or, when the match has no runtime, the
+// runtime behind its manager (runtimeOfManager) with a zero record, since a
+// record is never paired through runtimeOfManager. Both nil: the zero pin.
+func (s *Server) restartPin(match agentMatch) pinnedRuntime {
+	if match.runtime != nil {
+		return pinnedRuntimeOf(match.manager, match.runtime, match.record)
+	}
+	return pinnedRuntimeOf(match.manager, s.runtimeOfManager(match.manager), config.RuntimeBuildRecord{})
 }
 
 // resolveExistingAgentManager is resolveManagerForOptsStrict for an
@@ -6698,13 +7378,13 @@ func pinnedRuntimeOf(mgr agent.Manager, runtimes ...scionrt.Runtime) pinnedRunti
 // (ServerConfig.ForceRuntime) still takes precedence when it resolves to a
 // registered runtime; one that resolves to none is ignored by
 // resolveManagerForOptsStrict, so it does not drop the pin either.
-func (s *Server) resolveExistingAgentManager(opts api.StartOptions, mode profileResolution, fallbackLevel slog.Level, pin pinnedRuntime) (agent.Manager, string, error) {
+func (s *Server) resolveExistingAgentManager(opts api.StartOptions, mode profileResolution, pin pinnedRuntime) (runtimeResolution, error) {
 	if opts.Profile == "" && pin.mgr != nil && pin.name != "" {
 		if _, forced := s.forcedRuntime(); !forced {
-			return pin.mgr, pin.name, nil
+			return runtimeResolution{Manager: pin.mgr, Runtime: pin.rt, Record: pin.record, RuntimeType: pin.name, How: resolutionUnrecorded}, nil
 		}
 	}
-	return s.resolveManagerForOptsStrict(opts, mode, fallbackLevel)
+	return s.resolveManagerForOptsStrict(opts, mode)
 }
 
 // profileResolution selects how resolveManagerForOptsStrict treats a
@@ -6715,23 +7395,19 @@ const (
 	// profileLenient falls back to the broker's default runtime, as for a
 	// fresh start.
 	profileLenient profileResolution = iota
-	// profileStrict is for an existing agent's saved profile
-	// (agent-info.json). A profile that does not resolve returns
-	// errSavedProfileUnresolved, with one fallback: if the agent's recorded
-	// runtime (AgentInfo.Runtime) is the default runtime, the default is
-	// used. The fallback never applies to a profile missing from the hub's
-	// stored profiles.
+	// profileStrict is for an existing agent's Hub-sent profile (an agent
+	// without image provenance). A profile that does not resolve returns
+	// errSavedProfileUnresolved.
 	profileStrict
 	// profileStrictProvisioned is for the profile recorded in an agent's
-	// broker-side image provenance: errSavedProfileUnresolved, with no
-	// recorded-runtime fallback, since agent-info.json is not an input to
-	// such an agent's runtime selection.
+	// broker-side image provenance: errSavedProfileUnresolved, naming the
+	// provisioned profile and how to recover.
 	profileStrictProvisioned
 )
 
 // existingAgentProfileResolution returns the resolution mode for an existing
-// agent's start/restart: lenient without a profile, otherwise strict, with
-// the recorded-runtime fallback only for an agent without image provenance.
+// agent's start/restart: lenient without a profile, otherwise strict
+// (profileStrictProvisioned for a profile from image provenance).
 func existingAgentProfileResolution(profile string, provisioned bool) profileResolution {
 	switch {
 	case profile == "":
@@ -6779,14 +7455,9 @@ func (s *Server) loadRuntimeSettings(projectDir string) (*config.VersionedSettin
 // With a strict mode, used when opts.Profile is an existing agent's saved
 // or provisioned profile, a settings load failure, missing settings or a
 // profile/runtime the settings do not define returns
-// errSavedProfileUnresolved instead of the broker's default manager. Under
-// profileStrict only, when the agent's recorded runtime (AgentInfo.Runtime)
-// is the default runtime, the default is used instead
-// (savedProfileUnresolved) and logged at fallbackLevel, except for a
-// profile missing from the hub's stored profiles
-// (*config.StoredProfileNotFoundError), which always returns
-// errSavedProfileUnresolved. With
-// profileLenient those cases fall back to the default, as for a fresh start.
+// errSavedProfileUnresolved instead of the broker's default manager
+// (savedProfileUnresolved). With profileLenient those cases fall back to
+// the default, as for a fresh start.
 // In every mode, a dispatch with no profile whose default profile cannot be
 // resolved against the Hub's stored profiles (*config.ActiveProfileError:
 // active_profile is not one of them and they do not hold exactly one)
@@ -6799,13 +7470,15 @@ func (s *Server) loadRuntimeSettings(projectDir string) (*config.VersionedSettin
 // the profile and a fixed cause; it does not include file paths or
 // settings content. The full detail is logged here at Warn, once per
 // failure.
-func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profileResolution, fallbackLevel slog.Level) (agent.Manager, string, error) {
-	defMgr, defRT := s.defaultPair()
+func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profileResolution) (runtimeResolution, error) {
+	// Every default-holder return below uses this one snapshot, so its
+	// manager, runtime and record belong together.
+	defMgr, defRT, defRec := s.defaultPair()
 	// A flat instance serves exactly one runtime target: it never consults
 	// the saved agent profile or the settings active_profile, so it never
 	// fails strict saved-profile resolution either.
 	if s.isFlat() {
-		return defMgr, defRT.Name(), nil
+		return defaultResolution(defMgr, defRT, defRec, resolutionFlat), nil
 	}
 	strict := mode != profileLenient
 	if s.config.ForceRuntime != "" {
@@ -6814,10 +7487,10 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 			// here, bypassing the per-profile resolution below entirely —
 			// a second profile of the same runtime type with its own
 			// runtime config is not reachable under ForceRuntime.
-			return defMgr, defRT.Name(), nil
+			return defaultResolution(defMgr, defRT, defRec, resolutionForced), nil
 		}
 		if aux, ok := s.findAuxiliaryRuntimeByType(s.config.ForceRuntime); ok {
-			return aux.Manager, aux.Runtime.Name(), nil
+			return runtimeResolution{Manager: aux.Manager, Runtime: aux.Runtime, Record: aux.Record, RuntimeType: aux.Runtime.Name(), How: resolutionForced}, nil
 		}
 		s.agentLifecycleLog.Warn("ForceRuntime does not match default runtime, falling back to settings resolution", "force", s.config.ForceRuntime, "default", defRT.Name())
 	}
@@ -6830,7 +7503,7 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 	projectDir, _ := config.GetResolvedProjectDir(opts.ProjectPath)
 	vs, _, err := s.loadRuntimeSettings(projectDir)
 	if err != nil && strict {
-		return s.savedProfileUnresolved(opts, projectDir, mode, fallbackLevel, err,
+		return s.savedProfileUnresolved(opts, projectDir, mode, err,
 			fmt.Errorf("%w: agent %q profile %q: project settings could not be loaded",
 				errSavedProfileUnresolved, opts.Name, opts.Profile))
 	}
@@ -6844,11 +7517,11 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 		// project with no settings file reaches ResolveRuntime below and
 		// fails there with "profile not found" instead.
 		if strict {
-			return s.savedProfileUnresolved(opts, projectDir, mode, fallbackLevel, errors.New("no project settings found"),
+			return s.savedProfileUnresolved(opts, projectDir, mode, errors.New("no project settings found"),
 				fmt.Errorf("%w: agent %q profile %q: no project settings found",
 					errSavedProfileUnresolved, opts.Name, opts.Profile))
 		}
-		return defMgr, defRT.Name(), nil
+		return defaultResolution(defMgr, defRT, defRec, resolutionDefaultFallback), nil
 	}
 
 	// ResolveRuntime("") uses vs.ActiveProfile as the fallback. The
@@ -6877,7 +7550,7 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 		if opts.Profile == "" && errors.As(err, &ape) {
 			s.agentLifecycleLog.Warn("default profile cannot be resolved for this dispatch",
 				"agent", opts.Name, "projectDir", projectDir, "error", err)
-			return defMgr, defRT.Name(), fmt.Errorf("%w: agent %q: %v", errDefaultProfileUnresolved, opts.Name, err)
+			return defaultResolution(defMgr, defRT, defRec, resolutionDefaultFallback), fmt.Errorf("%w: agent %q: %v", errDefaultProfileUnresolved, opts.Name, err)
 		}
 		// The same for a profile named on a dispatch that is not an
 		// existing agent's saved one (a create): it is not one of the
@@ -6888,16 +7561,33 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 		if !strict && opts.Profile != "" && errors.As(err, &spe) {
 			s.agentLifecycleLog.Warn("requested profile is not one of the hub's stored profiles",
 				"agent", opts.Name, "profile", opts.Profile, "projectDir", projectDir, "error", err)
-			return defMgr, defRT.Name(), fmt.Errorf("%w: agent %q: %v", errProfileUnresolved, opts.Name, err)
+			return defaultResolution(defMgr, defRT, defRec, resolutionDefaultFallback), fmt.Errorf("%w: agent %q: %v", errProfileUnresolved, opts.Name, err)
 		}
 		if strict {
 			// ResolveRuntime's errors name only the profile and runtime
 			// ("profile %q not found", "runtime %q not found for profile %q").
-			return s.savedProfileUnresolved(opts, projectDir, mode, fallbackLevel, err,
+			return s.savedProfileUnresolved(opts, projectDir, mode, err,
 				fmt.Errorf("%w: agent %q: %v", errSavedProfileUnresolved, opts.Name, err))
 		}
 		// Profile or its runtime not found in settings; use default
-		return defMgr, defRT.Name(), nil
+		return defaultResolution(defMgr, defRT, defRec, resolutionDefaultFallback), nil
+	}
+
+	// The selection profile and the runtimes entry it names, from the same
+	// settings read: carried in the result, not consulted. With an empty
+	// opts.Profile, How stays unset (see resolutionUnset).
+	selProfile := opts.Profile
+	if selProfile == "" {
+		selProfile = vs.ActiveProfile
+	}
+	selEntry := vs.Profiles[selProfile].Runtime
+	selHow := resolutionUnset
+	if opts.Profile != "" {
+		selHow = resolutionProfile
+	}
+	fromProfile := func(res runtimeResolution) runtimeResolution {
+		res.Profile, res.DispatchEntry = selProfile, selEntry
+		return res
 	}
 
 	// Cheap pre-check: a profile matching the broker's own default runtime
@@ -6921,7 +7611,7 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 	// requested profile is the one the default runtime was built from; it
 	// relies on the capability instead.
 	if s.defaultRuntimeMatchesProfile(runtimeType, rtConfig) && !scionrt.HasPerProfileInstances(defRT) {
-		return defMgr, defRT.Name(), nil
+		return fromProfile(defaultResolution(defMgr, defRT, defRec, selHow)), nil
 	}
 
 	// Resolve the profile's runtime so its true identity can be compared
@@ -6942,15 +7632,15 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 	// that was just checked. When empty, GetRuntime falls back to settings
 	// the same way ResolveRuntime does.
 	//
-	// resolveAuxiliaryRuntime is set to agent.ResolveRuntime by New() and
+	// resolveAuxiliaryRuntime is set to agent.ResolveRuntimeWithRecord by New() and
 	// should never be nil in production; this falls back to the same
 	// function so a Server built without New() (e.g. a test literal)
 	// resolves identically to production instead of panicking.
 	resolver := s.resolveAuxiliaryRuntime
 	if resolver == nil {
-		resolver = agent.ResolveRuntime
+		resolver = agent.ResolveRuntimeWithRecord
 	}
-	resolved := resolver(opts.ProjectPath, opts.Name, opts.Profile)
+	resolved, rec := resolver(opts.ProjectPath, opts.Name, opts.Profile)
 
 	if s.config.Debug {
 		s.agentLifecycleLog.Debug("Resolved runtime for start options",
@@ -6965,8 +7655,9 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 		// Resolution failed outright (e.g. cluster unreachable): there is no
 		// identity to compare or register. Wrap it in a manager so the
 		// caller's calls surface the underlying error, the same contract
-		// callers get for any other runtime construction failure.
-		return agent.NewManager(resolved), resolved.Name(), nil
+		// callers get for any other runtime construction failure. The
+		// manager is stored in no holder, so its record is the zero value.
+		return fromProfile(runtimeResolution{Manager: agent.NewManager(resolved), Runtime: resolved, RuntimeType: resolved.Name(), How: resolutionErrorRuntime}), nil
 	}
 
 	// A PerProfileInstancesRuntime default never short-circuits here either,
@@ -6976,7 +7667,7 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 	// a runtime would otherwise collapse to one identity and incorrectly
 	// share the default manager.
 	if !scionrt.HasPerProfileInstances(defRT) && auxiliaryRuntimeIdentity(resolved) == auxiliaryRuntimeIdentity(defRT) {
-		return defMgr, defRT.Name(), nil
+		return fromProfile(defaultResolution(defMgr, defRT, defRec, selHow)), nil
 	}
 
 	// Keyed by resolved IDENTITY, not type (see auxiliaryRuntimeIdentity):
@@ -6985,53 +7676,28 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 	identity := auxiliaryRuntimeIdentity(resolved)
 	mgr := agent.NewManager(resolved)
 	s.auxiliaryRuntimesMu.Lock()
-	s.auxiliaryRuntimes[identity] = auxiliaryRuntime{Runtime: resolved, Manager: mgr}
+	s.auxiliaryRuntimes[identity] = auxiliaryRuntime{Runtime: resolved, Manager: mgr, Record: rec}
 	s.auxiliaryRuntimesMu.Unlock()
 
-	return mgr, resolved.Name(), nil
+	return fromProfile(runtimeResolution{Manager: mgr, Runtime: resolved, Record: rec, RuntimeType: resolved.Name(), How: selHow}), nil
 }
 
-// savedProfileUnresolved handles a strict resolution failure. If the
-// agent's agent-info.json records that it last ran on the broker's default
-// runtime, that runtime is still the right one, so it returns the default
-// manager and logs the fallback at level. Otherwise it logs cause and
-// returns clientErr, which handlers write as the 503.
-//
-// agent-info.json records only the runtime type, so the fallback applies
-// only where a type match is an identity match: not for Kubernetes (the
-// identity includes context and namespace, see auxiliaryRuntimeIdentity)
-// and not for runtimes with per-profile instances. Those get the 503.
+// savedProfileUnresolved handles a strict resolution failure: it logs
+// cause and returns clientErr, which handlers write as the 503. There is
+// no fallback to the default runtime: the broker keeps no record of the
+// runtime an existing agent last ran on outside the agent home.
 //
 // Under profileStrictProvisioned the profile is the one recorded in the
-// agent's image provenance; agent-info.json is not consulted, and the 503
-// names the provisioned profile and how to recover.
-//
+// agent's image provenance, and the error names it and how to recover.
 // A saved profile missing from the hub's stored profiles
-// (*config.StoredProfileNotFoundError) never takes the fallback either: the
-// stored profiles are authoritative, so the request gets the 503 naming the
-// available profiles rather than running on the default runtime
-// (ptone/scion#3907). Brokers without stored profiles keep the fallback.
-func (s *Server) savedProfileUnresolved(opts api.StartOptions, projectDir string, mode profileResolution, level slog.Level, cause, clientErr error) (agent.Manager, string, error) {
-	defMgr, defRT := s.defaultPair()
-	if mode == profileStrictProvisioned {
-		s.logSavedProfileUnresolved(opts, projectDir, cause)
-		return nil, "", fmt.Errorf("%w; it is the profile the agent was provisioned with, which no longer resolves on this broker: restore the profile in settings, or re-provision the agent (scion reincarnate, or delete and re-create it)", clientErr)
-	}
-	var spe *config.StoredProfileNotFoundError
-	if errors.As(cause, &spe) {
-		s.logSavedProfileUnresolved(opts, projectDir, cause)
-		return nil, "", clientErr
-	}
-	if recorded := agent.GetSavedRuntime(opts.Name, opts.ProjectPath); recorded != "" &&
-		recorded == defRT.Name() &&
-		!scionrt.HasPerProfileInstances(defRT) &&
-		auxiliaryRuntimeIdentity(defRT) == defRT.Name() {
-		s.agentLifecycleLog.Log(context.Background(), level, "saved runtime profile cannot be resolved; agent last ran on the broker default runtime, using it",
-			"agent", opts.Name, "profile", opts.Profile, "runtime", recorded, "projectDir", projectDir, "error", cause)
-		return defMgr, defRT.Name(), nil
-	}
+// (*config.StoredProfileNotFoundError) gets the 503 naming the available
+// profiles (ptone/scion#3907).
+func (s *Server) savedProfileUnresolved(opts api.StartOptions, projectDir string, mode profileResolution, cause, clientErr error) (runtimeResolution, error) {
 	s.logSavedProfileUnresolved(opts, projectDir, cause)
-	return nil, "", clientErr
+	if mode == profileStrictProvisioned {
+		return runtimeResolution{}, fmt.Errorf("%w; it is the profile the agent was provisioned with, which no longer resolves on this broker: restore the profile in settings, or re-provision the agent (scion reincarnate, or delete and re-create it)", clientErr)
+	}
+	return runtimeResolution{}, clientErr
 }
 
 // logSavedProfileUnresolved records why a saved profile could not be
@@ -7103,15 +7769,31 @@ func (s *Server) findAuxiliaryRuntimeByType(runtimeType string) (auxiliaryRuntim
 
 // resolveProjectSettingsDir returns the directory containing settings.yaml for a project.
 // For linked projects, projectPath already points to the .scion directory.
-// For hub-managed projects, projectPath is the workspace parent, so settings
-// live in the .scion subdirectory.
+// For hub-managed projects, projectPath is the workspace root, so settings
+// live in its .scion subdirectory (or the external directory a .scion
+// marker file names). A workspace root's own settings file is workspace
+// content, never project settings, so it is not read when the root has a
+// .scion entry (hubEndpointFromProjectSettings reports one it ignores).
 func resolveProjectSettingsDir(projectPath string) string {
-	if config.GetSettingsPath(projectPath) != "" {
+	if filepath.Base(projectPath) == config.DotScion {
 		return projectPath
 	}
-	candidate := filepath.Join(projectPath, ".scion")
-	if config.GetSettingsPath(candidate) != "" {
+	candidate := filepath.Join(projectPath, config.DotScion)
+	if info, err := os.Lstat(candidate); err == nil {
+		if !info.IsDir() {
+			if resolved, err := config.ResolveProjectMarker(candidate); err == nil {
+				return resolved
+			}
+		}
 		return candidate
+	}
+	if isHubManagedProjectPath(projectPath) {
+		// A hub-managed workspace root without a .scion entry has no
+		// project settings; its own settings file is workspace content.
+		return candidate
+	}
+	if config.GetSettingsPath(projectPath) != "" {
+		return projectPath
 	}
 	return projectPath // fallback to original
 }
@@ -7766,6 +8448,24 @@ type nfsMoveWorkspaceChecker interface {
 
 var _ nfsMoveWorkspaceChecker = (*agent.AgentManager)(nil)
 
+// moveWorkspaceAbsenceChecker is implemented by managers that can confirm,
+// before a forced move provisions an agent, that the broker has no files
+// for it yet (agent.AgentManager).
+type moveWorkspaceAbsenceChecker interface {
+	CheckMoveWorkspaceAbsent(ctx context.Context, opts api.StartOptions) ([]string, error)
+}
+
+var _ moveWorkspaceAbsenceChecker = (*agent.AgentManager)(nil)
+
+// moveMarkerChecker is implemented by managers that can confirm a forced
+// move's marker on the agent's directories before its rollback delete
+// (agent.AgentManager).
+type moveMarkerChecker interface {
+	CheckMoveMarkers(ctx context.Context, projectPath, projectID, hubProjectID, agentName, sharerKey, moveID string) ([]string, error)
+}
+
+var _ moveMarkerChecker = (*agent.AgentManager)(nil)
+
 // errAgentIdentityUnknown means a runtime process restart dropped the
 // in-memory record a runtime needs to tell "not found" apart from "exists,
 // but this process can no longer identify which project it belongs to," for
@@ -7871,8 +8571,39 @@ type deleteTarget struct {
 	name        string // agent directory / slug name used for file cleanup
 	containerID string // empty for a file-only (never started / container gone) agent
 	runID       string // the entry's scion.run_id label; empty for legacy or file-only entries
+	agentID     string // the entry's agent_id label; empty for file-only or unlabelled entries
 	projectPath string
 	projectID   string
+}
+
+// deleteSharerKey decides, for a delete, the key the agent's worktree and
+// sharer registry entry are found under (agent.DeleteHubAgentFiles; ""
+// means the agent name), from the hub's agent ID (hubAgentID, already
+// validated), the runtime entry's agent_id label (labelID, "" for a
+// file-only or unlabelled entry) and the agent name. mismatch reports a
+// runtime entry labelled with another agent's ID: the delete must then
+// touch nothing.
+//
+// A label equal to the agent name or its slug is the label of an agent
+// started outside hub dispatch (created locally and linked, or a
+// workstation's linked checkout), which is provisioned by name: that is no
+// mismatch, and the name is the key. An older hub sends no agent ID: a
+// label that is a valid path element is then the key, as it is the ID the
+// agent was provisioned under.
+func deleteSharerKey(hubAgentID, labelID, name string) (key string, mismatch bool) {
+	switch {
+	case labelID == "" || labelID == hubAgentID:
+		return hubAgentID, false
+	case labelID == name || labelID == api.Slugify(name):
+		return "", false
+	case hubAgentID == "":
+		if isSingleCleanPathElement(labelID) {
+			return labelID, false
+		}
+		return "", false
+	default:
+		return "", true
+	}
 }
 
 // agentNameMatches reports whether a runtime entry is the agent named id.
@@ -7881,20 +8612,18 @@ func agentNameMatches(a api.AgentInfo, id string) bool {
 		strings.TrimPrefix(a.Name, "/") == id
 }
 
-// agentInProjectStrict reports whether an entry is positively identified as
-// belonging to projectID (label first, then the ProjectID field). Unlike
-// matchesAgentProject, an entry with no project identity does not match.
+// agentInProjectStrict is agent.InProjectStrict. Unlike matchesAgentProject,
+// an entry with no project identity does not match.
 func agentInProjectStrict(a api.AgentInfo, projectID string) bool {
-	if labelProjectID := projectkeys.ProjectIDFromLabels(a.Labels); labelProjectID != "" {
-		return labelProjectID == projectID
-	}
-	return a.ProjectID != "" && a.ProjectID == projectID
+	return agent.InProjectStrict(a, projectID)
 }
 
-// agentHasNoProjectIdentity reports whether an entry carries no project ID in
-// either labels or fields (a pre-label legacy container).
-func agentHasNoProjectIdentity(a api.AgentInfo) bool {
-	return projectkeys.ProjectIDFromLabels(a.Labels) == "" && a.ProjectID == ""
+// legacyEntryInProject is agent.LegacyEntryInProject: an entry with no
+// project identity stands for an agent of projectID only if it is a
+// container whose recorded project path identifies as projectID. Every
+// project-scoped operation applies this one rule.
+func legacyEntryInProject(a api.AgentInfo, projectID string) bool {
+	return agent.LegacyEntryInProject(a, projectID)
 }
 
 // agentCandidate is a runtime entry for an agent name, with the manager
@@ -7971,8 +8700,7 @@ func (s *Server) collectAgentCandidates(ctx context.Context, managers []agent.Ma
 			// projectID; otherwise a same-named legacy container from another
 			// project could be deleted.
 			matches = collect(map[string]string{"scion.agent": "true"}, func(a api.AgentInfo) bool {
-				return a.ContainerID != "" && agentHasNoProjectIdentity(a) &&
-					pathIdentifiesAs(a.ProjectPath, projectID)
+				return legacyEntryInProject(a, projectID)
 			})
 		}
 	} else {
@@ -8091,6 +8819,7 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, runID, 
 			name:        id,
 			containerID: scionrt.AgentOperationID(m.entry),
 			runID:       m.entry.RunID,
+			agentID:     m.entry.Labels[api.LabelAgentID],
 			projectPath: m.entry.ProjectPath,
 			projectID:   m.entry.ProjectID,
 		}
@@ -8292,6 +9021,13 @@ func (s *Server) cleanupLeftoverAgentResources(ctx context.Context, agentName, p
 // equals projectID, so a stale or wrong hint can never redirect deletion to
 // another project's files.
 func (s *Server) findAgentProjectDir(agentName, projectID, projectPathHint string) (string, error) {
+	// A hub-managed project (no linked path hint) on the shared Layout is
+	// resolved there only, fail-closed, never by the broker-local scan.
+	if projectPathHint == "" {
+		if dir, handled, err := s.findAgentInSharedProject(context.Background(), agentName, projectID, true); handled {
+			return dir, err
+		}
+	}
 	resolved, err := findAgentInHubManagedProjects(agentName, projectID)
 	if err != nil || resolved != "" || projectID == "" {
 		return resolved, err
@@ -8330,96 +9066,17 @@ func linkedProjectAgentDir(path, agentName, projectID string) string {
 	return scionDir
 }
 
-// scionEntry returns the .scion entry for path, which may be the project root
-// or the .scion entry itself.
-func scionEntry(path string) string {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return ""
-	}
-	if filepath.Base(abs) == config.DotScion {
-		return abs
-	}
-	return filepath.Join(abs, config.DotScion)
-}
+// scionEntry is agent.ScionEntry.
+func scionEntry(path string) string { return agent.ScionEntry(path) }
 
-// projectIDAtPath returns the project identity recorded at path, or "".
-// For a .scion directory it is the project-id file. For a
-// .scion marker file (non-git linked project) it is the marker's project ID.
-// If path is a project's external config dir, which has no project-id file,
-// the result is "".
-func projectIDAtPath(path string) string {
-	if path == "" {
-		return ""
-	}
-	marker := scionEntry(path)
-	if marker == "" {
-		return ""
-	}
-	info, err := os.Stat(marker)
-	if err != nil {
-		return ""
-	}
-	if info.IsDir() {
-		id, _ := config.ReadProjectID(marker)
-		return id
-	}
-	if m, err := config.ReadProjectMarker(marker); err == nil {
-		return m.ProjectID
-	}
-	return ""
-}
+// projectIDAtPath is agent.ProjectIDAtPath.
+func projectIDAtPath(path string) string { return agent.ProjectIDAtPath(path) }
 
-// pathIdentifiesAs reports whether the project at path verifiably belongs to
-// projectID: either its recorded identity (projectIDAtPath) equals projectID,
-// or path is the project's external config dir
-// ~/.scion/project-configs/<slug>__<short-id>/.scion, whose name encodes the
-// project ID (non-git linked projects record that dir as the agent's project
-// path). A projectID outside the project ID format never matches.
-func pathIdentifiesAs(path, projectID string) bool {
-	if path == "" || config.ValidateProjectID(projectID) != nil {
-		return false
-	}
-	if projectIDAtPath(path) == projectID {
-		return true
-	}
-	short, ok := externalConfigShortID(path)
-	return ok && short == (config.ProjectMarker{ProjectID: projectID}).ShortUUID()
-}
+// pathIdentifiesAs is agent.PathIdentifiesAs.
+func pathIdentifiesAs(path, projectID string) bool { return agent.PathIdentifiesAs(path, projectID) }
 
-// externalConfigShortID returns the short project ID encoded in path if path
-// is an external project config dir ~/.scion/project-configs/<slug>__<short-id>/.scion.
-// path is resolved through symlinks before it is split, so a path reached
-// through a pre-rename entry (config.MigrateLegacyGlobalLayout leaves a
-// symlink at each individual entry it moves, e.g.
-// ~/.scion/grove-configs/<name> -> ../project-configs/<name>, while the
-// legacy root itself stays a real directory) still identifies as this
-// project's external config dir.
-func externalConfigShortID(path string) (string, bool) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return "", false
-	}
-	abs = projectkeys.ResolvePathForCompare(abs)
-	if filepath.Base(abs) != config.DotScion {
-		return "", false
-	}
-	globalDir, err := config.GetGlobalDir()
-	if err != nil {
-		return "", false
-	}
-	projectDir := filepath.Dir(abs)
-	parent := filepath.Dir(projectDir)
-	if !projectkeys.ResolvedPathEqual(parent, filepath.Join(globalDir, config.ProjectConfigsDir)) {
-		return "", false
-	}
-	name := filepath.Base(projectDir)
-	i := strings.LastIndex(name, "__")
-	if i <= 0 || i+2 >= len(name) {
-		return "", false
-	}
-	return name[i+2:], true
-}
+// externalConfigShortID is agent.ExternalConfigShortID.
+func externalConfigShortID(path string) (string, bool) { return agent.ExternalConfigShortID(path) }
 
 // trustedEntryProjectPath reports whether a project path taken from a runtime
 // entry may be used for file operations. With a projectID, the path must
@@ -8550,7 +9207,9 @@ func hubManagedProjectHasAgent(scionDir, agentName string) bool {
 // loopback address (localhost, 127.0.0.1, [::1], etc.). This is used to
 // decide whether the ContainerHubEndpoint bridge address should be
 // substituted — containers can reach external hosts directly but need a
-// bridge address to reach services on the host's loopback interface.
+// bridge address to reach services on the host's loopback interface. It is
+// also the rule for whether the broker's own hub connection may send the dev
+// token (DevAuthHubOptions); it matches the CLI's rule, hubsync.IsLocalhostEndpoint.
 func isLocalhostEndpoint(endpoint string) bool {
 	u, err := url.Parse(endpoint)
 	if err != nil {
@@ -8569,9 +9228,12 @@ func isLocalhostEndpoint(endpoint string) bool {
 // It is decided by the dispatch's resolved runtime, which is checked before
 // anything is mounted:
 //   - Kubernetes or Cloud Run (NFSWarnOnlyRuntime): the platform
-//     mounts the export into the agent. The broker reads the share's last
-//     recorded status, logs a warning if it is unhealthy, and continues; it
-//     never mounts and never refuses the dispatch.
+//     mounts the export into the agent, and the broker never mounts it. The
+//     broker reads the share's last recorded status. Off a shared
+//     project-storage Layout it logs a warning if the share is unhealthy and
+//     continues. On a shared Layout an unhealthy share refuses the dispatch,
+//     except on a verify-only reconciler, where the status is advisory and
+//     the share's directory being visible admits it (shareVisible).
 //   - Any other (local-container) runtime: the share is checked and, when
 //     the broker mounts shares, mounted. If it is not mounted the dispatch
 //     is refused, since the workspace would otherwise silently land on
@@ -8593,16 +9255,42 @@ func (s *Server) checkNFSForDispatch(ctx context.Context, name, projectPath, pro
 	// (runtime.NFSWorkspaceBackend), so that is the share a dispatch needs.
 	shareID := nfsCfg.Shares[0].ID
 
-	_, runtimeType := s.resolveManagerForOpts(api.StartOptions{
+	runtimeType := s.resolveManagerForOpts(api.StartOptions{
 		Name:        name,
 		ProjectPath: projectDir,
 		Profile:     profile,
-	})
+	}).RuntimeType
 	if NFSWarnOnlyRuntime(runtimeType) {
 		if st, ok := r.ShareStatus(shareID); !ok || !st.Healthy {
 			detail := "not checked yet"
 			if ok {
 				detail = st.Message
+			}
+			// The broker reads and creates project storage through its
+			// own view of the share: on a shared Layout a share that is not
+			// visible refuses the dispatch (ptone/scion#5823). For a
+			// verify-only reconciler the status above is advisory
+			// (shareVisible): a visible share directory admits the
+			// dispatch. A hub-managed dispatch then has the project tree's
+			// identity checked when its project root is resolved
+			// (sharedHubProjectPath). A dispatch that carries a project
+			// path (not hub-managed) is admitted on directory visibility
+			// alone, with no hub-seeded identity check, as before #4219.
+			var visibilityErr error
+			if s.config.StorageLayout.Backend.Shared() && r.VerifyOnly() {
+				if visibilityErr = shareVisible(ctx, s.config.StorageLayout, r); visibilityErr == nil {
+					s.agentLifecycleLog.Warn("NFS share check is advisory on this broker; the share directory is visible, continuing dispatch",
+						"agent", name, "runtime", runtimeType, "share", shareID, "detail", detail)
+					return nil
+				}
+			}
+			if s.config.StorageLayout.Backend.Shared() {
+				// The body names the configuration fields, not the path;
+				// the path and both checks' detail go to the log only.
+				s.agentLifecycleLog.Error("NFS share not visible on the broker; refusing dispatch",
+					"agent", name, "runtime", runtimeType, "share", shareID,
+					"host_base", s.config.StorageLayout.HostBase, "detail", detail, "visibility_error", visibilityErr)
+				return errors.New(scionrt.ProjectShareUnavailableText(scionrt.ProjectShareMountPathField, true))
 			}
 			s.agentLifecycleLog.Warn("NFS share not mounted on the broker; continuing dispatch, the runtime mounts the export into the agent",
 				"agent", name, "runtime", runtimeType, "share", shareID, "detail", detail)
@@ -8610,7 +9298,16 @@ func (s *Server) checkNFSForDispatch(ctx context.Context, name, projectPath, pro
 		return nil
 	}
 	// ctx (the request context) bounds the wait and any mount command.
-	return r.EnsureShareMounted(ctx, shareID)
+	// The reconciler's error names the share, its server and export, and
+	// the mount point: it goes to the broker log only, and the refusal
+	// (written into the response body) names configuration fields.
+	if err := r.EnsureShareMounted(ctx, shareID); err != nil {
+		s.agentLifecycleLog.Error("NFS share not mounted on the broker; refusing dispatch",
+			"agent", name, "runtime", runtimeType, "share", shareID, "error", err)
+		// auto_mount is on here (checked above): the mount failed.
+		return errors.New(scionrt.ProjectShareMountFailedText(scionrt.ProjectShareMountPathField))
+	}
+	return nil
 }
 
 // resolveDispatchProjectDir mirrors buildStartContext's hub-managed project
@@ -8637,8 +9334,8 @@ func dispatchUsesNFSWorkspace(projectDir string) bool {
 	if err != nil || vs == nil {
 		return true
 	}
-	return vs.Server != nil && vs.Server.WorkspaceStorage != nil &&
-		vs.Server.WorkspaceStorage.Backend == "nfs"
+	return vs.Server != nil && vs.Server.EffectiveWorkspaceStorage() != nil &&
+		vs.Server.EffectiveWorkspaceStorage().Backend == "nfs"
 }
 
 // preResolvedHubEndpoint picks the Hub base URL used to absolutize the

@@ -33,6 +33,7 @@ import { normalizeModelAlias } from '../../shared/model-utils.js';
 import type { RuntimeBroker, GCPServiceAccount } from '../../shared/types.js';
 import { formatInstantWithZone, isValidTimeZone } from '../../utils/time.js';
 import { isHttpUrl } from '../../utils/http-url.js';
+import { renderReleaseNotesLink } from '../../utils/release-notes-link.js';
 import '../shared/timezone-picker.js';
 import type { TimezoneChangeDetail } from '../shared/timezone-picker.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
@@ -43,10 +44,12 @@ import {
   readSettingsSaveError,
   sectionPathsFromSchema,
 } from '../../shared/settings-save-errors.js';
+import { diffPayload } from '../../shared/settings-diff.js';
 import type {
   SettingsConflict,
   SettingsFieldError,
   SettingsSaveError,
+  SettingsSkippedKey,
 } from '../../shared/settings-save-errors.js';
 import {
   renderConflictNotice,
@@ -56,6 +59,13 @@ import {
   settingsErrorStyles,
 } from '../shared/settings-error-views.js';
 import './admin-experiments.js';
+import { showConfirm } from '../shared/confirm-dialog.js';
+import {
+  issuesAt,
+  validateResourceSpec,
+  type QuantityIssues,
+  type ResourceSpecInput,
+} from '../../shared/resource-quantity.js';
 import {
   type ImageRegistryProvenance,
   hasOtherProfileEnvOverrides,
@@ -63,36 +73,34 @@ import {
   profileImageRegistryEnvLine,
   profileInheritedHint,
 } from './image-registry-provenance.js';
+import {
+  type EnvKeyValue,
+  envValueFor,
+  envValuesUnder,
+  formatEnvValue,
+  hasInEffect,
+} from './admin-server-config-env-values.js';
 
 /** GET /api/v1/admin/server-config returns this in place of each secret. */
 const MASKED_VALUE = '********';
 
+/** True when obj has a key whose value is not undefined (null counts). */
+function hasDefinedValue(obj: Record<string, unknown>): boolean {
+  return Object.values(obj).some((v) => v !== undefined);
+}
+
 /**
- * Returns the leaves of current that differ from base (plain objects are
- * compared key by key; arrays and scalars as whole values).
+ * Sets obj[key] to a tri-state switch value only when it differs from the
+ * loaded one; null (Use default) is sent as null, which clears the stored
+ * key (ptone/scion#3724).
  */
-function diffPayload(
-  current: Record<string, unknown>,
-  base: Record<string, unknown>
-): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(current)) {
-    const b = base[k];
-    if (
-      v &&
-      typeof v === 'object' &&
-      !Array.isArray(v) &&
-      b &&
-      typeof b === 'object' &&
-      !Array.isArray(b)
-    ) {
-      const sub = diffPayload(v as Record<string, unknown>, b as Record<string, unknown>);
-      if (Object.keys(sub).length > 0) out[k] = sub;
-    } else if (JSON.stringify(v) !== JSON.stringify(b)) {
-      out[k] = v;
-    }
-  }
-  return out;
+function putTriState(
+  obj: Record<string, unknown>,
+  key: string,
+  value: boolean | null,
+  loaded: boolean | null
+): void {
+  if (value !== loaded) obj[key] = value;
 }
 
 /**
@@ -360,9 +368,6 @@ interface V1RuntimeConfig {
   cloudrun?: V1CloudRunConfig;
   cloudrun_instances?: V1CloudRunInstancesConfig;
   safe_to_evict?: boolean;
-  shared_dir_storage_backend?: string;
-  home_storage_backend?: string;
-  home_storage_leaf?: string;
 }
 
 // Sets or clears one key in a runtime's Cloud Run block, and drops the
@@ -394,9 +399,6 @@ interface V1ProfileConfig {
   env?: Record<string, string>;
   resources?: ResourceSpec;
   safe_to_evict?: boolean;
-  shared_dir_storage_backend?: string;
-  home_storage_backend?: string;
-  home_storage_leaf?: string;
   [key: string]: unknown;
 }
 
@@ -447,6 +449,8 @@ interface ServerConfigResponse {
   // the PUT writes them to settings.yaml. False on hosted hubs.
   layer0_editable?: boolean;
   env_overrides?: string[];
+  /** Per env_overrides key: the environment value (masked) and whether it is in effect. */
+  env_values?: Record<string, EnvKeyValue>;
   public_url_status?: PublicURLStatus;
   observability_export?: HubObservabilityExport;
   /** Where the image_registry in effect comes from (read-only, ptone/scion#3916). */
@@ -465,10 +469,8 @@ interface HarnessConfigEntry {
   scope: string;
 }
 
-interface SkippedKey {
-  key: string;
-  reason: string;
-}
+/** A changed key that was saved but is not in use, with the reason. */
+type SkippedKey = SettingsSkippedKey;
 
 interface ReloadResult {
   applied?: string[];
@@ -553,6 +555,10 @@ interface DeprecatedEnvKeyInfo {
 interface ConflictInfo {
   message: string;
   conflicted: SettingsConflict[];
+  // Keys of the sections saved before the conflict (ptone/scion#4467).
+  appliedKeys: string[];
+  pendingRestart: string[];
+  skipped: SkippedKey[];
 }
 
 interface UpdateCommitInfo {
@@ -577,7 +583,6 @@ interface UpdateCheckResult {
   current_version?: string;
   latest_version?: string;
   channel?: string;
-  download_url?: string;
   release_url?: string;
 }
 
@@ -692,8 +697,16 @@ const KEYS_REJECTED_CODES = new Set([
   'unsaved_keys_rejected',
 ]);
 
-/** Why a field is read-only: hosted Layer-0, env-pinned, or workstation flag-managed. */
-type ReadOnlyReason = 'bootstrap' | 'env' | 'flag' | 'pinned';
+/** Why a field is read-only: hosted Layer-0, env-pinned, workstation flag-managed, pinned, or read only at startup (DB-backed hubs). */
+type ReadOnlyReason = 'bootstrap' | 'env' | 'flag' | 'pinned' | 'startup';
+
+/**
+ * The hub's direct Cloud Logging switch. The hub reads it only at startup,
+ * from SCION_CLOUD_LOGGING or settings.yaml, before the settings database is
+ * opened; a database-backed hub refuses a changed value (ptone/scion#5664),
+ * so the page shows it read-only there and never sends it.
+ */
+const CLOUD_LOGGING_KEY = 'telemetry.cloud.cloud_logging';
 
 /** The koanf key of the hub's public URL. */
 const PUBLIC_URL_KEY = 'server.hub.public_url';
@@ -729,6 +742,67 @@ const isUnsetBrokerHost = (host: string): boolean => host === '' || host === '0.
 /** Safe own-property check that won't match inherited keys on user-controlled objects. */
 const hasOwn = (obj: Record<string, unknown>, key: string): boolean =>
   Object.prototype.hasOwnProperty.call(obj, key);
+
+/**
+ * Storage overrides the hub no longer accepts on runtime and profile entries
+ * (server.project_storage places every agent's storage; a node-local
+ * directory is a volumes: entry). Dropped when settings are loaded, so a
+ * save never sends them back and is refused.
+ */
+const REMOVED_STORAGE_OVERRIDE_KEYS = [
+  'shared_dir_storage_backend',
+  'shared_dir_storage_backends',
+  'home_storage_backend',
+  'home_storage_leaf',
+];
+
+// Container and Kubernetes runtime fields, cleared when a runtime switches
+// to Cloud Run.
+const CONTAINER_RUNTIME_KEYS = [
+  'host',
+  'context',
+  'namespace',
+  'gke',
+  'list_all_namespaces',
+  'safe_to_evict',
+] as const;
+
+/**
+ * The runtime entry keys a switch to type clears: the container and
+ * Kubernetes fields and the other Cloud Run block when switching to a Cloud
+ * Run type, both Cloud Run blocks otherwise.
+ */
+export function runtimeTypeSwitchKeys(type: string): string[] {
+  if (type === 'cloudrun') return [...CONTAINER_RUNTIME_KEYS, 'cloudrun_instances'];
+  if (type === 'cloudrun-instances') return [...CONTAINER_RUNTIME_KEYS, 'cloudrun'];
+  return ['cloudrun', 'cloudrun_instances'];
+}
+
+/** The keys of rt holding a value that a switch to type would clear. */
+export function runtimeTypeSwitchClears(rt: object, type: string): string[] {
+  const entry = rt as Record<string, unknown>;
+  return runtimeTypeSwitchKeys(type).filter((k) => {
+    const v = entry[k];
+    if (v === undefined || v === null || v === '') return false;
+    // false is unset for the switches; safe_to_evict false is a value.
+    if (v === false && k !== 'safe_to_evict') return false;
+    if (typeof v === 'object' && Object.keys(v).length === 0) return false;
+    return true;
+  });
+}
+
+export function stripRemovedStorageOverrides<T extends object>(
+  entries: Record<string, T>
+): Record<string, T> {
+  for (const entry of Object.values(entries)) {
+    if (entry && typeof entry === 'object') {
+      for (const key of REMOVED_STORAGE_OVERRIDE_KEYS) {
+        delete (entry as Record<string, unknown>)[key];
+      }
+    }
+  }
+  return entries;
+}
 
 @customElement('scion-page-admin-server-config')
 export class ScionPageAdminServerConfig extends LitElement {
@@ -795,6 +869,10 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private defaultMaxAgentRole = '';
   @state() private defaultAgentRole = '';
   @state() private defaultRuntimeBroker = '';
+  // The loaded default runtime broker (as shown, see
+  // normalizeDefaultRuntimeBroker); a save sends the key only when the
+  // form value differs from it.
+  private loadedDefaultRuntimeBroker = '';
   @state() private runtimeBrokers: RuntimeBroker[] = [];
   // Agent container timezone (agent_defaults.default_timezone). Empty means UTC.
   @state() private defaultTimezone = '';
@@ -878,24 +956,37 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private secretsGCPProjectId = '';
   @state() private secretsGCPReplicationLocations = '';
 
+  // Tri-state switches (ptone/scion#3724, ptone/scion#3913): null means the
+  // key is unset (GET left it out), so the hub's default applies. Each has a
+  // loaded copy; a save sends a switch only when it differs from the loaded
+  // value, as null when the user chose "Use default". An untouched unset
+  // switch is therefore never written as an explicit false.
+
   // Auto-expose ports
-  @state() private autoExposePortsEnabled = false;
+  @state() private autoExposePortsEnabled: boolean | null = null;
+  private loadedAutoExposePortsEnabled: boolean | null = null;
 
-  // Quotas
-  @state() private enforceBrokerQuotas = true;
+  // Quotas (unset means enforced)
+  @state() private enforceBrokerQuotas: boolean | null = null;
+  private loadedEnforceBrokerQuotas: boolean | null = null;
 
-  // Agent Secrets
-  @state() private agentSecretsUserScopeOnly = false;
+  // Agent Secrets (unset means permissive)
+  @state() private agentSecretsUserScopeOnly: boolean | null = null;
+  private loadedAgentSecretsUserScopeOnly: boolean | null = null;
 
   // Telemetry
-  @state() private telemetryEnabled = false;
-  @state() private telemetryCloudEnabled = false;
+  @state() private telemetryEnabled: boolean | null = null;
+  private loadedTelemetryEnabled: boolean | null = null;
+  @state() private telemetryCloudEnabled: boolean | null = null;
+  private loadedTelemetryCloudEnabled: boolean | null = null;
   @state() private telemetryCloudEndpoint = '';
   @state() private telemetryCloudProtocol = '';
   @state() private telemetryCloudProvider = '';
   @state() private telemetryCloudGcpProjectId = '';
-  @state() private telemetryCloudCloudLogging = false;
-  @state() private telemetryHubEnabled = false;
+  @state() private telemetryCloudCloudLogging: boolean | null = null;
+  private loadedTelemetryCloudCloudLogging: boolean | null = null;
+  @state() private telemetryHubEnabled: boolean | null = null;
+  private loadedTelemetryHubEnabled: boolean | null = null;
   @state() private telemetryHubReportInterval = '';
   /**
    * Stored telemetry.local, kept only so a file-mode save (which replaces the
@@ -964,6 +1055,10 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   // Runtimes, Profiles & Harness Configs
   @state() private runtimes: Record<string, V1RuntimeConfig> = {};
+  // The runtimes as loaded. A save sends null for each key the form
+  // removed from a loaded entry, because the hub keeps a key a sent entry
+  // leaves out (ptone/scion#6580).
+  private loadedRuntimes: Record<string, V1RuntimeConfig> = {};
   @state() private profiles: Record<string, V1ProfileConfig> = {};
   @state() private harnessConfigsMap: Record<string, unknown> = {};
   @state() private harnessConfigsRaw: Record<string, string> = {};
@@ -977,6 +1072,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   // ── Settings-DB metadata (DB-backed hubs, any driver) ──
   @state() private envOverrides: string[] = [];
+  @state() private envValues: Record<string, EnvKeyValue> = {};
   @state() private publicUrlStatus: PublicURLStatus | null = null;
   @state() private imageRegistryProvenance: ImageRegistryProvenance | null = null;
   @state() private observabilityExport: HubObservabilityExport | null = null;
@@ -989,6 +1085,9 @@ export class ScionPageAdminServerConfig extends LitElement {
   private loadedHubTracingEnabled: boolean | null = null;
   @state() private sectionMetadata: Record<string, SectionMetadataInfo> | null = null;
   @state() private ignoredKeysNotice: string[] | null = null;
+  // Warnings the last save returned (accepted values worth a look, such
+  // as a memory value without a unit).
+  @state() private saveWarningsNotice: string[] | null = null;
   @state() private supersededKeys: Record<string, SupersededKeyInfo[]> | null = null;
   @state() private deprecatedEnvKeys: DeprecatedEnvKeyInfo[] | null = null;
   @state() private resetConfirmSection: string | null = null;
@@ -1486,6 +1585,26 @@ export class ScionPageAdminServerConfig extends LitElement {
       white-space: nowrap;
     }
 
+    .env-value-in-effect {
+      display: block;
+      font-size: 0.8125rem;
+      font-weight: 600;
+      margin: 0.25rem 0;
+    }
+
+    .env-value-saved-label,
+    .env-value-saved,
+    .env-value-configured-label,
+    .env-value-not-in-effect {
+      display: block;
+    }
+
+    .env-values-under {
+      margin: 0.25rem 0;
+      padding-left: 1.25rem;
+      font-size: 0.75rem;
+    }
+
     .env-badge sl-icon {
       font-size: 0.75rem;
     }
@@ -1673,6 +1792,16 @@ export class ScionPageAdminServerConfig extends LitElement {
       margin-bottom: 1rem;
     }
 
+    .field-warning {
+      display: block;
+      color: var(--sl-color-warning-700, #a16207);
+    }
+
+    .save-warnings-notice ul {
+      margin: 0.25rem 0 0;
+      padding-left: 1.25rem;
+    }
+
     .ignored-keys-notice code {
       font-family: var(--sl-font-mono, monospace);
       font-size: 0.75rem;
@@ -1787,6 +1916,22 @@ export class ScionPageAdminServerConfig extends LitElement {
       font-family: var(--sl-font-mono, monospace);
       font-size: 0.75rem;
     }
+
+    .conflict-saved {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+
+    .conflict-saved ul {
+      margin: 0.25rem 0 0;
+      padding-left: 1.25rem;
+    }
+
+    .conflict-saved code {
+      font-family: var(--sl-font-mono, monospace);
+      font-size: 0.75rem;
+    }
   `;
 
   override connectedCallback(): void {
@@ -1803,6 +1948,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.loading = true;
     this.error = null;
     this.ignoredKeysNotice = null;
+    this.saveWarningsNotice = null;
     try {
       const [res] = await Promise.all([
         apiFetch('/api/v1/admin/server-config'),
@@ -1925,123 +2071,114 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.defaultMaxAgentRole = data.default_max_agent_role || '';
     this.defaultAgentRole = data.default_agent_role || '';
     this.defaultRuntimeBroker = data.default_runtime_broker || '';
+    this.loadedDefaultRuntimeBroker = this.defaultRuntimeBroker;
+    this.normalizeDefaultRuntimeBroker();
     this.defaultTimezone = data.default_timezone || '';
     this.defaultGCPIdentityMode = data.default_gcp_identity_mode || '';
     this.defaultGCPIdentitySAID = data.default_gcp_identity_service_account_id || '';
     this.loadedGCPIdentitySAID = this.defaultGCPIdentitySAID;
 
-    // Server
-    const srv = data.server;
-    if (srv) {
-      this.serverMode = srv.mode || '';
-      this.logLevel = srv.log_level || '';
+    // Server. Every field is assigned on each load, from an empty block
+    // when GET left one out, so a reload after a save that removed a
+    // sub-block shows it as unset instead of the values from before the
+    // save (ptone/scion#3724).
+    const srv = data.server ?? {};
+    this.serverMode = srv.mode || '';
+    this.logLevel = srv.log_level || '';
 
-      // Hub
-      if (srv.hub) {
-        this.hubPort = srv.hub.port || 0;
-        this.hubHost = srv.hub.host || '';
-        this.hubPublicUrl = srv.hub.public_url || '';
-        this.hubMonitoringDashboardUrl = srv.hub.monitoring_dashboard_url || '';
-        this.loadedMonitoringDashboardUrl = this.hubMonitoringDashboardUrl;
-        this.monitoringDashboardUrlTouched = false;
-        this.hubReadTimeout = srv.hub.read_timeout || '';
-        this.hubWriteTimeout = srv.hub.write_timeout || '';
-        this.hubAdminEmails = (srv.hub.admin_emails || []).join(', ');
-        this.hubSoftDeleteRetention = srv.hub.soft_delete_retention || '';
-        this.hubSoftDeleteRetainFiles = srv.hub.soft_delete_retain_files || false;
-        this.hubAutoSuspendStalled = srv.hub.auto_suspend_stalled || false;
-        this.hubStalledThreshold = srv.hub.stalled_threshold || '';
-        this.hubGcpIamCheckMode = srv.hub.gcp_iam_check_mode || 'off';
-        this.hubGcpIamDenyUnknownPolicy = srv.hub.gcp_iam_deny_unknown_policy || 'fail-open';
-        this.loadedGcpIamCheckMode = this.hubGcpIamCheckMode;
-        this.loadedGcpIamDenyUnknownPolicy = this.hubGcpIamDenyUnknownPolicy;
-      }
+    // Hub
+    const hubBlock = srv.hub ?? {};
+    this.hubPort = hubBlock.port || 0;
+    this.hubHost = hubBlock.host || '';
+    this.hubPublicUrl = hubBlock.public_url || '';
+    this.hubMonitoringDashboardUrl = hubBlock.monitoring_dashboard_url || '';
+    this.loadedMonitoringDashboardUrl = this.hubMonitoringDashboardUrl;
+    this.monitoringDashboardUrlTouched = false;
+    this.hubReadTimeout = hubBlock.read_timeout || '';
+    this.hubWriteTimeout = hubBlock.write_timeout || '';
+    this.hubAdminEmails = (hubBlock.admin_emails || []).join(', ');
+    this.hubSoftDeleteRetention = hubBlock.soft_delete_retention || '';
+    this.hubSoftDeleteRetainFiles = hubBlock.soft_delete_retain_files || false;
+    this.hubAutoSuspendStalled = hubBlock.auto_suspend_stalled || false;
+    this.hubStalledThreshold = hubBlock.stalled_threshold || '';
+    this.hubGcpIamCheckMode = hubBlock.gcp_iam_check_mode || 'off';
+    this.hubGcpIamDenyUnknownPolicy = hubBlock.gcp_iam_deny_unknown_policy || 'fail-open';
+    this.loadedGcpIamCheckMode = this.hubGcpIamCheckMode;
+    this.loadedGcpIamDenyUnknownPolicy = this.hubGcpIamDenyUnknownPolicy;
 
-      // Broker
-      if (srv.broker) {
-        this.brokerEnabled = srv.broker.enabled || false;
-        this.brokerPort = srv.broker.port || 0;
-        this.brokerHost = srv.broker.host || '';
-        this.brokerHubEndpoint = srv.broker.hub_endpoint || '';
-        this.brokerContainerHubEndpoint = srv.broker.container_hub_endpoint || '';
-        this.brokerName = srv.broker.broker_name || '';
-        this.brokerNickname = srv.broker.broker_nickname || '';
-        // Absent means on (the server auto-provides when the key is unset).
-        this.brokerAutoProvide = srv.broker.auto_provide ?? true;
-      }
+    // Broker
+    const brokerBlock = srv.broker ?? {};
+    this.brokerEnabled = brokerBlock.enabled || false;
+    this.brokerPort = brokerBlock.port || 0;
+    this.brokerHost = brokerBlock.host || '';
+    this.brokerHubEndpoint = brokerBlock.hub_endpoint || '';
+    this.brokerContainerHubEndpoint = brokerBlock.container_hub_endpoint || '';
+    this.brokerName = brokerBlock.broker_name || '';
+    this.brokerNickname = brokerBlock.broker_nickname || '';
+    // Absent means on (the server auto-provides when the key is unset).
+    this.brokerAutoProvide = brokerBlock.auto_provide ?? true;
 
-      // Database
-      if (srv.database) {
-        this.dbDriver = srv.database.driver || '';
-        this.dbUrl = srv.database.url || '';
-      }
+    // Database
+    const dbBlock = srv.database ?? {};
+    this.dbDriver = dbBlock.driver || '';
+    this.dbUrl = dbBlock.url || '';
 
-      // Auth
-      if (srv.auth) {
-        this.authDevMode = srv.auth.dev_mode || false;
-        this.authDevToken = srv.auth.dev_token || '';
-        this.authAuthorizedDomains = (srv.auth.authorized_domains || []).join(', ');
-        this.authUserAccessMode = srv.auth.user_access_mode || 'open';
-        this.authDefaultUserRole = srv.auth.default_user_role || 'member';
-      }
+    // Auth
+    const authBlock = srv.auth ?? {};
+    this.authDevMode = authBlock.dev_mode || false;
+    this.authDevToken = authBlock.dev_token || '';
+    this.authAuthorizedDomains = (authBlock.authorized_domains || []).join(', ');
+    this.authUserAccessMode = authBlock.user_access_mode || 'open';
+    this.authDefaultUserRole = authBlock.default_user_role || 'member';
 
-      // Storage
-      if (srv.storage) {
-        this.storageProvider = srv.storage.provider || '';
-        this.storageBucket = srv.storage.bucket || '';
-        this.storageLocalPath = srv.storage.local_path || '';
-      }
+    // Storage
+    const storageBlock = srv.storage ?? {};
+    this.storageProvider = storageBlock.provider || '';
+    this.storageBucket = storageBlock.bucket || '';
+    this.storageLocalPath = storageBlock.local_path || '';
 
-      // Secrets
-      if (srv.secrets) {
-        this.secretsBackend = srv.secrets.backend || '';
-        this.secretsGCPProjectId = srv.secrets.gcp_project_id || '';
-        this.secretsGCPReplicationLocations = (srv.secrets.gcp_replication_locations || []).join(
-          ', '
-        );
-      }
+    // Secrets
+    const secretsBlock = srv.secrets ?? {};
+    this.secretsBackend = secretsBlock.backend || '';
+    this.secretsGCPProjectId = secretsBlock.gcp_project_id || '';
+    this.secretsGCPReplicationLocations = (secretsBlock.gcp_replication_locations || []).join(', ');
 
-      // Message Broker
-      if (srv.message_broker) {
-        this.messageBrokerEnabled = srv.message_broker.enabled || false;
-        this.messageBrokerType = srv.message_broker.type || '';
-      }
+    // Message Broker
+    const mbBlock = srv.message_broker ?? {};
+    this.messageBrokerEnabled = mbBlock.enabled || false;
+    this.messageBrokerType = mbBlock.type || '';
 
-      // Native Chat — an absent section or an absent key means enabled.
-      this.nativeChatEnabled = srv.native_chat?.enabled ?? true;
-    }
+    // Native Chat — an absent section or an absent key means enabled.
+    this.nativeChatEnabled = srv.native_chat?.enabled ?? true;
 
     // Telemetry
     const tel = data.telemetry;
     this.storedTelemetryLocal = tel?.local;
-    if (tel) {
-      this.telemetryEnabled = tel.enabled || false;
-      if (tel.cloud) {
-        this.telemetryCloudEnabled = tel.cloud.enabled || false;
-        this.telemetryCloudEndpoint = tel.cloud.endpoint || '';
-        this.telemetryCloudProtocol = tel.cloud.protocol || '';
-        this.telemetryCloudProvider = tel.cloud.provider || '';
-        this.telemetryCloudGcpProjectId = tel.cloud.gcp_project_id || '';
-        this.telemetryCloudCloudLogging = tel.cloud.cloud_logging || false;
-      }
-      if (tel.hub) {
-        this.telemetryHubEnabled = tel.hub.enabled || false;
-        this.telemetryHubReportInterval = tel.hub.report_interval || '';
-      }
-    }
+    this.telemetryEnabled = tel?.enabled ?? null;
+    this.telemetryCloudEnabled = tel?.cloud?.enabled ?? null;
+    this.telemetryCloudEndpoint = tel?.cloud?.endpoint || '';
+    this.telemetryCloudProtocol = tel?.cloud?.protocol || '';
+    this.telemetryCloudProvider = tel?.cloud?.provider || '';
+    this.telemetryCloudGcpProjectId = tel?.cloud?.gcp_project_id || '';
+    this.telemetryCloudCloudLogging = tel?.cloud?.cloud_logging ?? null;
+    this.telemetryHubEnabled = tel?.hub?.enabled ?? null;
+    this.telemetryHubReportInterval = tel?.hub?.report_interval || '';
+    this.loadedTelemetryEnabled = this.telemetryEnabled;
+    this.loadedTelemetryCloudEnabled = this.telemetryCloudEnabled;
+    this.loadedTelemetryCloudCloudLogging = this.telemetryCloudCloudLogging;
+    this.loadedTelemetryHubEnabled = this.telemetryHubEnabled;
 
     // Auto-expose ports
-    const aep = data.auto_expose_ports;
-    if (aep) {
-      this.autoExposePortsEnabled = aep.enabled || false;
-    }
+    this.autoExposePortsEnabled = data.auto_expose_ports?.enabled ?? null;
+    this.loadedAutoExposePortsEnabled = this.autoExposePortsEnabled;
 
     // Quotas — absent means enforced (fail-safe default).
-    const quotas = data.quotas;
-    this.enforceBrokerQuotas = quotas?.enforce_broker_quotas ?? true;
+    this.enforceBrokerQuotas = data.quotas?.enforce_broker_quotas ?? null;
+    this.loadedEnforceBrokerQuotas = this.enforceBrokerQuotas;
 
     // Agent Secrets — absent means permissive (agents may write project scope).
-    this.agentSecretsUserScopeOnly = data.agent_secrets?.user_scope_only ?? false;
+    this.agentSecretsUserScopeOnly = data.agent_secrets?.user_scope_only ?? null;
+    this.loadedAgentSecretsUserScopeOnly = this.agentSecretsUserScopeOnly;
 
     // Hub observability export switches — absent means unset.
     const obs = data.server?.hub?.observability;
@@ -2052,10 +2189,18 @@ export class ScionPageAdminServerConfig extends LitElement {
 
     // Runtimes, profiles, harness_configs — deep-copy into editable state
     this.runtimes = data.runtimes
-      ? (JSON.parse(JSON.stringify(data.runtimes)) as Record<string, V1RuntimeConfig>)
+      ? stripRemovedStorageOverrides(
+          JSON.parse(JSON.stringify(data.runtimes)) as Record<string, V1RuntimeConfig>
+        )
       : {};
+    this.loadedRuntimes = JSON.parse(JSON.stringify(this.runtimes)) as Record<
+      string,
+      V1RuntimeConfig
+    >;
     this.profiles = data.profiles
-      ? (JSON.parse(JSON.stringify(data.profiles)) as Record<string, V1ProfileConfig>)
+      ? stripRemovedStorageOverrides(
+          JSON.parse(JSON.stringify(data.profiles)) as Record<string, V1ProfileConfig>
+        )
       : {};
     this.harnessConfigsMap = data.harness_configs
       ? (JSON.parse(JSON.stringify(data.harness_configs)) as Record<string, unknown>)
@@ -2077,6 +2222,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.layer0Editable = data.layer0_editable === true;
     this.envOverrides = data.env_overrides || [];
     this.envKeys = new Set(this.envOverrides);
+    this.envValues = data.env_values || {};
     this.publicUrlStatus = data.public_url_status || null;
     this.imageRegistryProvenance = data.image_registry_provenance || null;
     this.observabilityExport = data.observability_export || null;
@@ -2109,22 +2255,35 @@ export class ScionPageAdminServerConfig extends LitElement {
       if (res.ok) {
         const data = (await res.json()) as { brokers?: RuntimeBroker[] } | RuntimeBroker[];
         this.runtimeBrokers = Array.isArray(data) ? data : data.brokers || [];
-        // Normalize: if the stored value is a name or slug, resolve it to the broker ID
-        // so the dropdown selection matches.
-        if (this.defaultRuntimeBroker && this.runtimeBrokers.length > 0) {
-          const match = this.runtimeBrokers.find(
-            (b) =>
-              b.id === this.defaultRuntimeBroker ||
-              (b.name && b.name.toLowerCase() === this.defaultRuntimeBroker.toLowerCase()) ||
-              (b.slug && b.slug.toLowerCase() === this.defaultRuntimeBroker.toLowerCase())
-          );
-          if (match && match.id !== this.defaultRuntimeBroker) {
-            this.defaultRuntimeBroker = match.id;
-          }
-        }
+        this.normalizeDefaultRuntimeBroker();
       }
     } catch {
       // Non-critical — dropdown falls back to free-text input
+    }
+  }
+
+  /**
+   * Shows a stored default runtime broker given by name or slug as the
+   * broker's ID, so the dropdown selection matches. The ID is display
+   * only: when the value was not edited, the loaded value moves along with
+   * it, so a save does not rewrite the operator's name or slug as an ID
+   * (ptone/scion#3913).
+   */
+  private normalizeDefaultRuntimeBroker(): void {
+    const current = this.defaultRuntimeBroker;
+    if (!current || this.runtimeBrokers.length === 0) return;
+    const lower = current.toLowerCase();
+    const match = this.runtimeBrokers.find(
+      (b) =>
+        b.id === current ||
+        (b.name && b.name.toLowerCase() === lower) ||
+        (b.slug && b.slug.toLowerCase() === lower)
+    );
+    if (match && match.id !== current) {
+      if (current === this.loadedDefaultRuntimeBroker) {
+        this.loadedDefaultRuntimeBroker = match.id;
+      }
+      this.defaultRuntimeBroker = match.id;
     }
   }
 
@@ -2168,6 +2327,75 @@ export class ScionPageAdminServerConfig extends LitElement {
       : this.harnessConfigSelection;
   }
 
+  /**
+   * The runtimes to send on save: each entry as edited, plus null for each
+   * key the form removed from a loaded entry, so the hub clears it (the hub
+   * keeps a key a sent entry leaves out). An entry the form removed is left
+   * out, which deletes it.
+   */
+  private runtimesPayload(): Record<string, Record<string, unknown>> {
+    const out: Record<string, Record<string, unknown>> = {};
+    for (const [name, rt] of Object.entries(this.runtimes)) {
+      const entry: Record<string, unknown> = { ...rt };
+      const loaded = hasOwn(this.loadedRuntimes, name) ? this.loadedRuntimes[name] : undefined;
+      if (loaded) {
+        for (const key of Object.keys(loaded)) {
+          if (!hasOwn(entry, key) || entry[key] === undefined) entry[key] = null;
+        }
+      }
+      out[name] = entry;
+    }
+    return out;
+  }
+
+  /** The default resources as the form would send them. */
+  private get defaultResourcesInput(): ResourceSpecInput {
+    return {
+      requests: { cpu: this.defaultResCpuReq, memory: this.defaultResMemReq },
+      limits: { cpu: this.defaultResCpuLim, memory: this.defaultResMemLim },
+      disk: this.defaultResDisk,
+    };
+  }
+
+  /**
+   * Resource quantity findings for default_resources and every profile's
+   * resources (the same rules as the hub's save check, ptone/scion#6581).
+   */
+  private get resourceQuantityIssues(): QuantityIssues {
+    const all: QuantityIssues = { errors: [], warnings: [] };
+    const add = (path: string, spec: ResourceSpecInput | undefined): void => {
+      const r = validateResourceSpec(path, spec);
+      all.errors.push(...r.errors);
+      all.warnings.push(...r.warnings);
+    };
+    add('default_resources', this.defaultResourcesInput);
+    for (const [name, profile] of Object.entries(this.profiles)) {
+      add(`profiles.${name}.resources`, profile.resources);
+      const overrides = profile['harness_overrides'] as
+        | Record<string, { resources?: ResourceSpecInput }>
+        | undefined;
+      for (const [harness, ho] of Object.entries(overrides ?? {})) {
+        add(`profiles.${name}.harness_overrides.${harness}.resources`, ho?.resources);
+      }
+    }
+    return all;
+  }
+
+  private get hasResourceQuantityErrors(): boolean {
+    return this.resourceQuantityIssues.errors.length > 0;
+  }
+
+  /** Inline resource quantity errors and warnings for one field path. */
+  private renderQuantityIssues(path: string): typeof nothing | TemplateResult {
+    const { errors, warnings } = issuesAt(this.resourceQuantityIssues, path);
+    if (errors.length === 0 && warnings.length === 0) return nothing;
+    return html`${errors.map(
+      (m) => html`<span class="field-error" data-quantity-error=${path}>${m}</span>`
+    )}${warnings.map(
+      (m) => html`<span class="hint field-warning" data-quantity-warning=${path}>${m}</span>`
+    )}`;
+  }
+
   private get hasHarnessConfigErrors(): boolean {
     return Object.keys(this.harnessConfigErrors).length > 0;
   }
@@ -2185,6 +2413,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     // The public URL is pinned by an operator setting on this node: the hub
     // uses that value and ignores a saved one (ptone/scion#3905).
     if (koanfKey === PUBLIC_URL_KEY && this.publicUrlStatus?.pinned_by) return 'pinned';
+    if (koanfKey === CLOUD_LOGGING_KEY && this.settingsTier === 'db') return 'startup';
     if (this.layer1Only) {
       return this.layer1Keys.has(koanfKey) ? null : 'bootstrap';
     }
@@ -2211,11 +2440,13 @@ export class ScionPageAdminServerConfig extends LitElement {
     const text =
       reason === 'pinned'
         ? `🔒 Set by ${this.publicUrlStatus?.pinned_by ?? 'an operator setting'}`
-        : reason === 'bootstrap'
-          ? '🔒 Managed via deployment configuration'
-          : reason === 'flag'
-            ? '🔒 Set by workstation startup defaults / server flags'
-            : '🔒 Set via environment variable';
+        : reason === 'startup'
+          ? '🔒 Read at startup from settings.yaml or SCION_CLOUD_LOGGING'
+          : reason === 'bootstrap'
+            ? '🔒 Managed via deployment configuration'
+            : reason === 'flag'
+              ? '🔒 Set by workstation startup defaults / server flags'
+              : '🔒 Set via environment variable';
     return html`<span class="read-only-badge">${text}</span>`;
   }
 
@@ -2261,14 +2492,100 @@ export class ScionPageAdminServerConfig extends LitElement {
     editableTemplate: ReturnType<typeof html>
   ): ReturnType<typeof html> {
     const reason = this.readOnlyReason(koanfKey);
+    // A read-only field whose key the environment sets on this node (any
+    // reason but a pinned public URL, whose read-only value is already the
+    // one in effect).
+    // A masked entry carries no in-effect state, so it keeps the field's
+    // plain rendering (hasInEffect).
+    const found = reason && reason !== 'pinned' ? envValueFor(this.envValues, [koanfKey]) : null;
+    const env = found && hasInEffect(found.ev) ? found : null;
+    if (reason && env && env.ev.in_effect) {
+      // The value in effect is the environment value; a stored value that
+      // differs is shown only as a secondary line, and only when one exists.
+      return html`${this.renderReadOnlyBadge(reason)}${this.envBadgeTemplate()}<span
+          class="read-only-value env-value-primary"
+          >${formatEnvValue(env.ev) || '—'}</span
+        >${env.ev.saved_differs
+          ? this.renderSavedNotInEffect(koanfKey, displayValue)
+          : nothing}${this.renderFieldErrors(koanfKey)}`;
+    }
+    if (reason && env) {
+      // The environment sets the key, but another value wins on this node,
+      // without the env lock text. Only a Layer-1 key on a DB-backed hub can
+      // lose to a saved value, which is the value shown and wins. Anything
+      // else loses to a start-up default or flag, whose value the page does
+      // not receive: the value shown is then only the configured one
+      // (settings.yaml or the default), labelled so it does not read as the
+      // value in effect.
+      const cause: ReadOnlyReason =
+        this.settingsTier === 'db' && this.layer1Keys.has(koanfKey) ? 'env' : 'flag';
+      const configuredLabel =
+        cause === 'flag'
+          ? html`<span class="hint env-value-configured-label"
+              >Configured value (settings.yaml or default), not the value in effect:</span
+            >`
+          : nothing;
+      return html`${reason === 'env'
+          ? nothing
+          : this.renderReadOnlyBadge(reason)}${this.envBadgeTemplate(
+          false,
+          cause
+        )}${configuredLabel}<span class="read-only-value">${displayValue || '—'}</span
+        >${this.renderEnvValueLine(env.ev, cause)}${this.renderFieldErrors(koanfKey)}`;
+    }
     if (reason) {
       return html`${this.renderReadOnlyBadge(reason)}<span class="read-only-value"
           >${displayValue || '—'}</span
         >${this.renderFieldErrors(koanfKey)}`;
     }
-    return html`${this.renderSupersededBadge(koanfKey)}${editableTemplate}${this.renderFieldErrors(
+    // A key whose environment value is in effect is not superseded by the
+    // saved value, whatever superseded_keys says.
+    const own = envValueFor(this.envValues, [koanfKey]);
+    const envInEffect = own !== null && hasInEffect(own.ev) && own.ev.in_effect;
+    return html`${envInEffect
+      ? nothing
+      : this.renderSupersededBadge(koanfKey)}${editableTemplate}${this.renderFieldErrors(
       koanfKey
     )}`;
+  }
+
+  /**
+   * A switch for a tri-state boolean setting (ptone/scion#3724). While the
+   * key is unset (value null) the switch is drawn as unsetChecked and the
+   * hint says it is not set; toggling an unset switch back to that state
+   * leaves it unset, and "Use default" unsets a set switch. The save sends
+   * the key only when it differs from the loaded value (putTriState).
+   */
+  private renderTriStateSwitch(opts: {
+    key: string;
+    label: string;
+    value: boolean | null;
+    loaded: boolean | null;
+    unsetChecked: boolean;
+    unsetLabel: string;
+    set: (v: boolean | null) => void;
+  }): ReturnType<typeof html> {
+    const { key, label, value, loaded, unsetChecked, unsetLabel, set } = opts;
+    const onToggle = (on: boolean) => set(loaded === null && on === unsetChecked ? null : on);
+    const display = value === null ? unsetLabel : value ? 'Enabled' : 'Disabled';
+    return this.renderFieldValue(
+      key,
+      display,
+      html`${this.renderEnvBadge(key)}<sl-switch
+          data-tristate=${key}
+          ?checked=${value ?? unsetChecked}
+          @sl-change=${(e: Event) => onToggle((e.target as HTMLInputElement).checked)}
+          >${label}</sl-switch
+        >${value !== null
+          ? html`<sl-button
+              size="small"
+              variant="text"
+              data-tristate-default=${key}
+              @click=${() => set(null)}
+              >Use default</sl-button
+            >`
+          : html`<span class="hint" data-tristate-unset=${key}>${unsetLabel}</span>`}`
+    );
   }
 
   /**
@@ -2349,7 +2666,10 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('default_thinking_level')) {
       payload.default_thinking_level = this.defaultThinkingLevel ?? null;
     }
-    if (ok('default_runtime_broker')) {
+    if (
+      ok('default_runtime_broker') &&
+      this.defaultRuntimeBroker !== this.loadedDefaultRuntimeBroker
+    ) {
       payload.default_runtime_broker = this.defaultRuntimeBroker || '';
     }
     if (ok('default_timezone')) {
@@ -2437,60 +2757,88 @@ export class ScionPageAdminServerConfig extends LitElement {
 
     if (Object.keys(server).length > 0) payload.server = server;
 
-    // Telemetry — all Layer-1
+    // Telemetry — all Layer-1. The tri-state switches go in only when
+    // changed (see putTriState).
     if (ok('telemetry.enabled')) {
-      const telemetry: Record<string, unknown> = {
-        enabled: this.telemetryEnabled,
-      };
+      const telemetry: Record<string, unknown> = {};
+      putTriState(telemetry, 'enabled', this.telemetryEnabled, this.loadedTelemetryEnabled);
       if (ok('telemetry.cloud.enabled')) {
-        telemetry.cloud = {
-          enabled: this.telemetryCloudEnabled,
+        const cloud: Record<string, unknown> = {
           endpoint: this.telemetryCloudEndpoint,
           protocol: this.telemetryCloudProtocol,
           provider: this.telemetryCloudProvider,
           // null clears a stored project ID; an omitted key would keep it,
           // because telemetry is merged key by key (ptone/scion#3717).
           gcp_project_id: this.telemetryCloudGcpProjectId || null,
-          cloud_logging: this.telemetryCloudCloudLogging,
         };
+        putTriState(cloud, 'enabled', this.telemetryCloudEnabled, this.loadedTelemetryCloudEnabled);
+        // cloud_logging is never sent here: the hub reads it only at
+        // startup, and a database-backed hub refuses a changed value
+        // (ptone/scion#5664).
+        telemetry.cloud = cloud;
       }
       if (ok('telemetry.hub.enabled')) {
-        telemetry.hub = {
-          enabled: this.telemetryHubEnabled,
+        const hub: Record<string, unknown> = {
           report_interval: this.telemetryHubReportInterval,
         };
+        putTriState(hub, 'enabled', this.telemetryHubEnabled, this.loadedTelemetryHubEnabled);
+        telemetry.hub = hub;
       }
       payload.telemetry = telemetry;
     }
 
-    // Auto-expose ports — Layer-1
-    if (ok('auto_expose_ports.enabled')) {
-      payload.auto_expose_ports = {
-        enabled: this.autoExposePortsEnabled,
-      };
-    }
-
-    // Quotas — Layer-1
-    if (ok('quotas.enforce_broker_quotas')) {
-      payload.quotas = {
-        enforce_broker_quotas: this.enforceBrokerQuotas,
-      };
-    }
-
-    // Agent Secrets — Layer-1
-    if (ok('agent_secrets.user_scope_only')) {
-      payload.agent_secrets = {
-        user_scope_only: this.agentSecretsUserScopeOnly,
-      };
-    }
+    // Auto-expose ports, quotas, agent secrets — Layer-1 tri-state switches.
+    this.putTriStateSections(payload, ok);
 
     // Runtimes, profiles, harness_configs — always send edited state (including
     // empty objects) so the backend can distinguish "no change" from "cleared".
-    if (ok('runtimes')) payload.runtimes = this.runtimes;
+    if (ok('runtimes')) payload.runtimes = this.runtimesPayload();
     if (ok('harness_configs')) payload.harness_configs = this.harnessConfigsMap;
     if (ok('profiles')) payload.profiles = this.profiles;
 
     return payload;
+  }
+
+  /**
+   * Adds the auto_expose_ports, quotas and agent_secrets sections, each
+   * only when its switch differs from the loaded value: null (Use default)
+   * clears the stored key, and an untouched unset switch is not written as
+   * an explicit false (ptone/scion#3724). ok is the caller's editability
+   * check.
+   */
+  private putTriStateSections(
+    payload: Record<string, unknown>,
+    ok: (key: string) => boolean
+  ): void {
+    const sections: Array<[string, string, string, boolean | null, boolean | null]> = [
+      [
+        'auto_expose_ports',
+        'enabled',
+        'auto_expose_ports.enabled',
+        this.autoExposePortsEnabled,
+        this.loadedAutoExposePortsEnabled,
+      ],
+      [
+        'quotas',
+        'enforce_broker_quotas',
+        'quotas.enforce_broker_quotas',
+        this.enforceBrokerQuotas,
+        this.loadedEnforceBrokerQuotas,
+      ],
+      [
+        'agent_secrets',
+        'user_scope_only',
+        'agent_secrets.user_scope_only',
+        this.agentSecretsUserScopeOnly,
+        this.loadedAgentSecretsUserScopeOnly,
+      ],
+    ];
+    for (const [section, field, key, value, loaded] of sections) {
+      if (!ok(key)) continue;
+      const block: Record<string, unknown> = {};
+      putTriState(block, field, value, loaded);
+      if (Object.keys(block).length > 0) payload[section] = block;
+    }
   }
 
   /**
@@ -2691,7 +3039,10 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('default_thinking_level')) {
       payload.default_thinking_level = this.defaultThinkingLevel ?? null;
     }
-    if (ok('default_runtime_broker')) {
+    if (
+      ok('default_runtime_broker') &&
+      this.defaultRuntimeBroker !== this.loadedDefaultRuntimeBroker
+    ) {
       payload.default_runtime_broker = this.defaultRuntimeBroker || '';
     }
     // Sent unconditionally (not `|| undefined`): an explicit "" clears the
@@ -2845,12 +3196,14 @@ export class ScionPageAdminServerConfig extends LitElement {
 
     payload.server = server;
 
-    // Telemetry
+    // Telemetry. The tri-state switches go in only when changed; the file
+    // save merges telemetry key by key, so an omitted key is kept.
     const telemetry: Record<string, unknown> = {};
-    if (ok('telemetry.enabled')) telemetry.enabled = this.telemetryEnabled;
+    if (ok('telemetry.enabled')) {
+      putTriState(telemetry, 'enabled', this.telemetryEnabled, this.loadedTelemetryEnabled);
+    }
     if (ok('telemetry.cloud.enabled')) {
-      telemetry.cloud = {
-        enabled: this.telemetryCloudEnabled,
+      const cloud: Record<string, unknown> = {
         endpoint: ok('telemetry.cloud.endpoint')
           ? this.telemetryCloudEndpoint || undefined
           : undefined,
@@ -2863,18 +3216,28 @@ export class ScionPageAdminServerConfig extends LitElement {
         gcp_project_id: ok('telemetry.cloud.gcp_project_id')
           ? this.telemetryCloudGcpProjectId || undefined
           : undefined,
-        cloud_logging: ok('telemetry.cloud.cloud_logging')
-          ? this.telemetryCloudCloudLogging
-          : undefined,
       };
+      putTriState(cloud, 'enabled', this.telemetryCloudEnabled, this.loadedTelemetryCloudEnabled);
+      if (ok('telemetry.cloud.cloud_logging')) {
+        putTriState(
+          cloud,
+          'cloud_logging',
+          this.telemetryCloudCloudLogging,
+          this.loadedTelemetryCloudCloudLogging
+        );
+      }
+      // An all-empty block is left out, so settings.yaml gets no empty
+      // cloud: {} section.
+      if (hasDefinedValue(cloud)) telemetry.cloud = cloud;
     }
     if (ok('telemetry.hub.enabled')) {
-      telemetry.hub = {
-        enabled: this.telemetryHubEnabled,
+      const hub: Record<string, unknown> = {
         report_interval: ok('telemetry.hub.report_interval')
           ? this.telemetryHubReportInterval || undefined
           : undefined,
       };
+      putTriState(hub, 'enabled', this.telemetryHubEnabled, this.loadedTelemetryHubEnabled);
+      if (hasDefinedValue(hub)) telemetry.hub = hub;
     }
     if (Object.keys(telemetry).length > 0) {
       // A file-mode save replaces the whole telemetry object, so echo the
@@ -2883,30 +3246,12 @@ export class ScionPageAdminServerConfig extends LitElement {
       payload.telemetry = telemetry;
     }
 
-    // Auto-expose ports
-    if (ok('auto_expose_ports.enabled')) {
-      payload.auto_expose_ports = {
-        enabled: this.autoExposePortsEnabled,
-      };
-    }
-
-    // Quotas
-    if (ok('quotas.enforce_broker_quotas')) {
-      payload.quotas = {
-        enforce_broker_quotas: this.enforceBrokerQuotas,
-      };
-    }
-
-    // Agent Secrets
-    if (ok('agent_secrets.user_scope_only')) {
-      payload.agent_secrets = {
-        user_scope_only: this.agentSecretsUserScopeOnly,
-      };
-    }
+    // Auto-expose ports, quotas, agent secrets (tri-state switches)
+    this.putTriStateSections(payload, ok);
 
     // Runtimes, profiles, harness_configs — always send edited state (including
     // empty objects) so the backend can distinguish "no change" from "cleared".
-    if (ok('runtimes')) payload.runtimes = this.runtimes;
+    if (ok('runtimes')) payload.runtimes = this.runtimesPayload();
     if (ok('harness_configs')) payload.harness_configs = this.harnessConfigsMap;
     if (ok('profiles')) payload.profiles = this.profiles;
 
@@ -2918,6 +3263,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.successMessage = null;
     this.reloadResult = null;
     this.ignoredKeysNotice = null;
+    this.saveWarningsNotice = null;
     this.validationErrors = null;
     this.conflictInfo = null;
     this.safetyNetKeys = null;
@@ -2949,6 +3295,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       const result = (await res.json()) as {
         reload?: ReloadResult;
         ignored_keys?: string[];
+        warnings?: string[];
       };
       this.reloadResult = result.reload ?? null;
       const ignoredKeys =
@@ -2959,6 +3306,8 @@ export class ScionPageAdminServerConfig extends LitElement {
       this.successMessage = 'Settings saved successfully';
       // Restore ignored_keys notice after loadConfig clears it
       this.ignoredKeysNotice = ignoredKeys;
+      this.saveWarningsNotice =
+        result.warnings && result.warnings.length > 0 ? result.warnings : null;
     } catch {
       this.error = 'Failed to save settings';
     } finally {
@@ -2985,6 +3334,9 @@ export class ScionPageAdminServerConfig extends LitElement {
         this.conflictInfo = {
           message: err.message || 'Settings have been changed since you loaded this page.',
           conflicted: err.conflicted,
+          appliedKeys: err.appliedKeys,
+          pendingRestart: err.pendingRestart,
+          skipped: err.skipped,
         };
         return;
 
@@ -3102,7 +3454,8 @@ export class ScionPageAdminServerConfig extends LitElement {
       ${this.loading ? nothing : this.renderEnvOverrideBanner()} ${this.renderDeprecatedEnvNotice()}
       ${this.renderSupersededPanel()} ${this.renderConflictBanner()}
       ${this.renderValidationErrors()} ${this.renderSafetyNetNotice()}
-      ${this.renderIgnoredKeysNotice()} ${this.renderResetConfirmDialog()}
+      ${this.renderIgnoredKeysNotice()} ${this.renderSaveWarningsNotice()}
+      ${this.renderResetConfirmDialog()}
       ${this.error ? html`<div class="status-message error">${this.error}</div>` : nothing}
       ${this.successMessage
         ? html`<div class="status-message success">
@@ -3143,7 +3496,58 @@ export class ScionPageAdminServerConfig extends LitElement {
    */
   private renderEnvBadge(...koanfKeys: string[]): typeof nothing | ReturnType<typeof html> {
     const overridden = koanfKeys.some((k) => this.envOverrides.includes(k));
-    return overridden ? this.envBadgeTemplate() : nothing;
+    if (!overridden) return nothing;
+    // With several keys, only the first one env_values reports is shown
+    // (envValueFor).
+    const env = envValueFor(this.envValues, koanfKeys);
+    // No entry, or a masked one (no in-effect state reported): the plain badge.
+    if (!env || !hasInEffect(env.ev)) return this.envBadgeTemplate();
+    return html`${this.envBadgeTemplate(env.ev.in_effect)}${this.renderEnvValueLine(env.ev)}`;
+  }
+
+  /**
+   * The environment value of an editable field. In effect: the primary
+   * "In effect on this node" line, and the control below holds the saved
+   * value, which is not in effect here. Not in effect: a secondary line, the
+   * saved value winning.
+   */
+  private renderEnvValueLine(ev: EnvKeyValue, reason?: ReadOnlyReason): ReturnType<typeof html> {
+    const text = formatEnvValue(ev) || '—';
+    if (ev.in_effect) {
+      // The control below holds the stored value; label it only when a
+      // stored value exists and differs (saved_differs), never a default or
+      // the environment value itself.
+      return html`<span class="env-value-in-effect"
+          >In effect on this node: <code>${text}</code> (environment variable)</span
+        >${ev.saved_differs
+          ? html`<span class="hint env-value-saved-label"
+              >Saved value below, not in effect on this node:</span
+            >`
+          : nothing}`;
+    }
+    const cause =
+      reason === 'flag' || reason === 'bootstrap'
+        ? 'a start-up default or flag wins'
+        : 'the saved value wins';
+    return html`<span class="hint env-value-not-in-effect"
+      >Environment value on this node, not in effect: <code>${text}</code> (${cause})</span
+    >`;
+  }
+
+  /**
+   * The stored value of a read-only field whose environment value is in
+   * effect, labelled as not in effect. Callers show it only when the server
+   * reports saved_differs. A Layer-1 key on a DB-backed hub is stored in the
+   * database; anything else in settings.yaml.
+   */
+  private renderSavedNotInEffect(koanfKey: string, displayValue: string): ReturnType<typeof html> {
+    const where =
+      this.settingsTier === 'db' && this.layer1Keys.has(koanfKey)
+        ? 'Saved value'
+        : 'settings.yaml value';
+    return html`<span class="hint env-value-saved"
+      >${where}, not in effect on this node: <code>${displayValue || '—'}</code></span
+    >`;
   }
 
   /**
@@ -3183,8 +3587,15 @@ export class ScionPageAdminServerConfig extends LitElement {
    */
   private renderProfilesEnvBadge(): typeof nothing | ReturnType<typeof html> {
     const registryLine = profileImageRegistryEnvLine(this.envOverrides);
+    // The other profile keys get the same in-effect list as the runtimes
+    // section (env_values), or the generic badge without it.
+    const others = envValuesUnder(this.envValues, 'profiles').filter(
+      (e) => !e.key.endsWith('.image_registry')
+    );
     const generic = hasOtherProfileEnvOverrides(this.envOverrides)
-      ? this.envBadgeTemplate()
+      ? others.length > 0
+        ? this.renderEnvValuesList(others)
+        : this.envBadgeTemplate()
       : nothing;
     if (!registryLine) return generic;
     return html`${generic}<span class="env-badge image-registry-badge">
@@ -3202,12 +3613,20 @@ export class ScionPageAdminServerConfig extends LitElement {
     return hint ? html`<span class="hint image-registry-inherited">${hint}</span>` : nothing;
   }
 
-  /** The env-override badge shared by renderEnvBadge and renderEnvBadgeUnder. */
-  private envBadgeTemplate(): ReturnType<typeof html> {
+  /**
+   * The env-override badge shared by renderEnvBadge and renderEnvBadgeUnder.
+   * inEffect false (the server reports that a saved value wins over the
+   * environment value) says so instead of claiming an override.
+   */
+  private envBadgeTemplate(inEffect = true, reason?: ReadOnlyReason): ReturnType<typeof html> {
+    const notInEffect =
+      reason === 'flag' || reason === 'bootstrap'
+        ? 'Environment value not in effect on this node'
+        : 'Environment value superseded by the saved setting';
     return html`
       <span class="env-badge">
         <sl-icon name="exclamation-triangle"></sl-icon>
-        Overridden by environment on this node
+        ${inEffect ? 'Overridden by environment on this node' : notInEffect}
       </span>
     `;
   }
@@ -3219,7 +3638,33 @@ export class ScionPageAdminServerConfig extends LitElement {
    */
   private renderEnvBadgeUnder(prefix: string): typeof nothing | ReturnType<typeof html> {
     const overridden = this.envOverrides.some((k) => k === prefix || k.startsWith(`${prefix}.`));
-    return overridden ? this.envBadgeTemplate() : nothing;
+    if (!overridden) return nothing;
+    const entries = envValuesUnder(this.envValues, prefix);
+    if (entries.length === 0) return this.envBadgeTemplate();
+    return this.renderEnvValuesList(entries);
+  }
+
+  /** The section badge and the list of env_values entries of a map section. */
+  private renderEnvValuesList(
+    entries: Array<{ key: string; ev: EnvKeyValue }>
+  ): ReturnType<typeof html> {
+    // Entries without an in-effect state (masked) make no claim; the badge
+    // says "not in effect" only when every reported state is false.
+    const known = entries.filter((e) => hasInEffect(e.ev));
+    return html`${this.envBadgeTemplate(known.length === 0 || known.some((e) => e.ev.in_effect))}
+      <ul class="env-values-under">
+        ${entries.map(
+          (e) =>
+            html`<li>
+              <code>${e.key}</code> = <code>${formatEnvValue(e.ev) || '—'}</code>
+              (${!hasInEffect(e.ev)
+                ? 'masked: whether it is in effect is not reported'
+                : e.ev.in_effect
+                  ? 'in effect on this node'
+                  : 'not in effect: the saved value wins'})
+            </li>`
+        )}
+      </ul>`;
   }
 
   /**
@@ -3467,6 +3912,19 @@ export class ScionPageAdminServerConfig extends LitElement {
     `;
   }
 
+  /** Renders the warnings the last save returned; the save went through. */
+  private renderSaveWarningsNotice(): typeof nothing | ReturnType<typeof html> {
+    if (!this.saveWarningsNotice || this.saveWarningsNotice.length === 0) return nothing;
+    return html`
+      <div class="ignored-keys-notice save-warnings-notice">
+        <strong>Saved with warnings:</strong>
+        <ul>
+          ${this.saveWarningsNotice.map((w) => html`<li>${w}</li>`)}
+        </ul>
+      </div>
+    `;
+  }
+
   private renderValidationErrors(): typeof nothing | ReturnType<typeof html> {
     if (!this.validationErrors || this.validationErrors.length === 0) return nothing;
     // Group by the section the server named; entries without one (a nested
@@ -3505,6 +3963,54 @@ export class ScionPageAdminServerConfig extends LitElement {
     `;
   }
 
+  /**
+   * The saved keys of a settings save, as the success notice and the 409
+   * conflict banner both list them: applied to the running hub now, saved
+   * but taking effect only after a restart, and saved but not in use. One
+   * renderer, so the two cannot drift apart. An empty list renders nothing.
+   */
+  private renderSavedKeyLists(
+    applied: string[],
+    pending: string[],
+    skipped: SkippedKey[]
+  ): ReturnType<typeof html> {
+    return html`
+      ${applied.length > 0
+        ? html`<div class="applied applied-keys">Applied now: ${applied.join(', ')}</div>`
+        : nothing}
+      ${pending.length > 0
+        ? html`<div class="restart pending-restart">
+            Saved; applies after restart: ${pending.join(', ')}
+          </div>`
+        : nothing}
+      ${skipped.length > 0
+        ? html`<div class="skipped skipped-keys">
+            Saved but not applied:
+            <ul>
+              ${skipped.map((s) => html`<li><code>${s.key}</code>: ${s.reason}</li>`)}
+            </ul>
+          </div>`
+        : nothing}
+    `;
+  }
+
+  /**
+   * The keys the sections written before a 409 conflict saved
+   * (ptone/scion#4467): those sections stay saved, so a restart-required key
+   * among them must still be shown.
+   */
+  private renderConflictSavedKeys(c: ConflictInfo): typeof nothing | ReturnType<typeof html> {
+    if (c.appliedKeys.length === 0 && c.pendingRestart.length === 0 && c.skipped.length === 0) {
+      return nothing;
+    }
+    return html`
+      <div class="conflict-saved">
+        <div>Changes to the other sections were saved before the conflict:</div>
+        ${this.renderSavedKeyLists(c.appliedKeys, c.pendingRestart, c.skipped)}
+      </div>
+    `;
+  }
+
   private renderConflictBanner(): typeof nothing | ReturnType<typeof html> {
     if (!this.conflictInfo) return nothing;
     return html`
@@ -3522,6 +4028,7 @@ export class ScionPageAdminServerConfig extends LitElement {
               Changed: ${this.conflictInfo.conflicted.map((c) => html` <code>${c.section}</code>`)}
             </div>`
           : nothing}
+        ${this.renderConflictSavedKeys(this.conflictInfo)}
         <div class="conflict-banner-actions">
           <sl-button
             size="small"
@@ -3569,22 +4076,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         ${reloaded.length > 0
           ? html`<div class="applied">Reloaded: ${reloaded.join(', ')}</div>`
           : nothing}
-        ${r.applied_keys && r.applied_keys.length > 0
-          ? html`<div class="applied applied-keys">Applied now: ${r.applied_keys.join(', ')}</div>`
-          : nothing}
-        ${r.pending_restart && r.pending_restart.length > 0
-          ? html`<div class="restart pending-restart">
-              Saved; applies after restart: ${r.pending_restart.join(', ')}
-            </div>`
-          : nothing}
-        ${r.skipped && r.skipped.length > 0
-          ? html`<div class="skipped skipped-keys">
-              Saved but not applied:
-              <ul>
-                ${r.skipped.map((s) => html`<li><code>${s.key}</code>: ${s.reason}</li>`)}
-              </ul>
-            </div>`
-          : nothing}
+        ${this.renderSavedKeyLists(r.applied_keys ?? [], r.pending_restart ?? [], r.skipped ?? [])}
         ${r.requires_restart && r.requires_restart.length > 0
           ? html`<div class="restart">Requires restart: ${r.requires_restart.join(', ')}</div>`
           : nothing}
@@ -3652,11 +4144,17 @@ export class ScionPageAdminServerConfig extends LitElement {
                   errors on the Runtimes &amp; Profiles tab before saving.
                 </div>`
               : nothing}
+            ${this.hasResourceQuantityErrors
+              ? html`<div class="error resource-quantity-blocked" style="margin-bottom:0.75rem;">
+                  Cannot save: fix the resource values marked as invalid
+                  (${this.resourceQuantityIssues.errors.map((e) => e.path).join(', ')}).
+                </div>`
+              : nothing}
             <div class="actions">
               <sl-button
                 variant="primary"
                 ?loading=${this.saving}
-                ?disabled=${this.hasHarnessConfigErrors}
+                ?disabled=${this.hasHarnessConfigErrors || this.hasResourceQuantityErrors}
                 @click=${() => {
                   void this.handleSave();
                 }}
@@ -3756,13 +4254,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                         ${r.release_url
                           ? html`<div class="release-field">
                               <span class="release-label">Release notes:</span>
-                              <a href="${r.release_url}" target="_blank" rel="noopener noreferrer">
-                                View Release Notes
-                                <sl-icon
-                                  name="box-arrow-up-right"
-                                  style="font-size: 0.75rem;"
-                                ></sl-icon>
-                              </a>
+                              ${renderReleaseNotesLink(r.release_url)}
                             </div>`
                           : nothing}
                       </div>
@@ -4002,31 +4494,27 @@ export class ScionPageAdminServerConfig extends LitElement {
                   )}
                 </div>
                 <div class="form-field full-width">
-                  ${this.renderFieldValue(
-                    'telemetry.enabled',
-                    this.telemetryEnabled ? 'Enabled' : 'Disabled',
-                    html`${this.renderEnvBadge('telemetry.enabled')}<sl-switch
-                        ?checked=${this.telemetryEnabled}
-                        @sl-change=${(e: Event) => {
-                          this.telemetryEnabled = (e.target as HTMLInputElement).checked;
-                        }}
-                        >Enable Telemetry</sl-switch
-                      >`
-                  )}
+                  ${this.renderTriStateSwitch({
+                    key: 'telemetry.enabled',
+                    label: 'Enable Telemetry',
+                    value: this.telemetryEnabled,
+                    loaded: this.loadedTelemetryEnabled,
+                    unsetChecked: false,
+                    unsetLabel: 'Not set (default applies)',
+                    set: (v) => (this.telemetryEnabled = v),
+                  })}
                   <span class="hint">Default opt-in state for new agents</span>
                 </div>
                 <div class="form-field full-width">
-                  ${this.renderFieldValue(
-                    'auto_expose_ports.enabled',
-                    this.autoExposePortsEnabled ? 'Enabled' : 'Disabled',
-                    html`${this.renderEnvBadge('auto_expose_ports.enabled')}<sl-switch
-                        ?checked=${this.autoExposePortsEnabled}
-                        @sl-change=${(e: Event) => {
-                          this.autoExposePortsEnabled = (e.target as HTMLInputElement).checked;
-                        }}
-                        >Enable Auto-Expose Ports</sl-switch
-                      >`
-                  )}
+                  ${this.renderTriStateSwitch({
+                    key: 'auto_expose_ports.enabled',
+                    label: 'Enable Auto-Expose Ports',
+                    value: this.autoExposePortsEnabled,
+                    loaded: this.loadedAutoExposePortsEnabled,
+                    unsetChecked: false,
+                    unsetLabel: 'Not set (default applies)',
+                    set: (v) => (this.autoExposePortsEnabled = v),
+                  })}
                   <span class="hint"
                     >Automatically detect and expose listening TCP ports in agent containers</span
                   >
@@ -4358,6 +4846,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                           this.defaultResCpuReq = (e.target as HTMLInputElement).value;
                         }}
                       ></sl-input>
+                      ${this.renderQuantityIssues('default_resources.requests.cpu')}
                     </div>
                     <div class="form-field">
                       <label>Memory Request</label>
@@ -4368,6 +4857,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                           this.defaultResMemReq = (e.target as HTMLInputElement).value;
                         }}
                       ></sl-input>
+                      ${this.renderQuantityIssues('default_resources.requests.memory')}
                     </div>
                     <div class="form-field">
                       <label>CPU Limit</label>
@@ -4378,6 +4868,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                           this.defaultResCpuLim = (e.target as HTMLInputElement).value;
                         }}
                       ></sl-input>
+                      ${this.renderQuantityIssues('default_resources.limits.cpu')}
                     </div>
                     <div class="form-field">
                       <label>Memory Limit</label>
@@ -4388,6 +4879,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                           this.defaultResMemLim = (e.target as HTMLInputElement).value;
                         }}
                       ></sl-input>
+                      ${this.renderQuantityIssues('default_resources.limits.memory')}
                     </div>
                     <div class="form-field full-width">
                       <label>Disk</label>
@@ -4398,6 +4890,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                           this.defaultResDisk = (e.target as HTMLInputElement).value;
                         }}
                       ></sl-input>
+                      ${this.renderQuantityIssues('default_resources.disk')}
                     </div>
                   </div>`
               )}
@@ -4437,17 +4930,15 @@ export class ScionPageAdminServerConfig extends LitElement {
         <h3 class="section-title">Quotas</h3>
         <div class="form-grid">
           <div class="form-field full-width">
-            ${this.renderFieldValue(
-              'quotas.enforce_broker_quotas',
-              this.enforceBrokerQuotas ? 'Enabled' : 'Disabled',
-              html`${this.renderEnvBadge('quotas.enforce_broker_quotas')}<sl-switch
-                  ?checked=${this.enforceBrokerQuotas}
-                  @sl-change=${(e: Event) => {
-                    this.enforceBrokerQuotas = (e.target as HTMLInputElement).checked;
-                  }}
-                  >Enforce broker agent quotas</sl-switch
-                >`
-            )}
+            ${this.renderTriStateSwitch({
+              key: 'quotas.enforce_broker_quotas',
+              label: 'Enforce broker agent quotas',
+              value: this.enforceBrokerQuotas,
+              loaded: this.loadedEnforceBrokerQuotas,
+              unsetChecked: true,
+              unsetLabel: 'Not set (default: on)',
+              set: (v) => (this.enforceBrokerQuotas = v),
+            })}
             <span class="hint"
               >When off, agents can be started on a broker beyond its max_agents_per_broker cap.
               Usage is still counted. Manage the per-broker cap from
@@ -4462,17 +4953,15 @@ export class ScionPageAdminServerConfig extends LitElement {
         <h3 class="section-title">Agent Secrets</h3>
         <div class="form-grid">
           <div class="form-field full-width">
-            ${this.renderFieldValue(
-              'agent_secrets.user_scope_only',
-              this.agentSecretsUserScopeOnly ? 'Enabled' : 'Disabled',
-              html`${this.renderEnvBadge('agent_secrets.user_scope_only')}<sl-switch
-                  ?checked=${this.agentSecretsUserScopeOnly}
-                  @sl-change=${(e: Event) => {
-                    this.agentSecretsUserScopeOnly = (e.target as HTMLInputElement).checked;
-                  }}
-                  >Restrict agent-written secrets to profile scope</sl-switch
-                >`
-            )}
+            ${this.renderTriStateSwitch({
+              key: 'agent_secrets.user_scope_only',
+              label: 'Restrict agent-written secrets to profile scope',
+              value: this.agentSecretsUserScopeOnly,
+              loaded: this.loadedAgentSecretsUserScopeOnly,
+              unsetChecked: false,
+              unsetLabel: 'Not set (default: off)',
+              set: (v) => (this.agentSecretsUserScopeOnly = v),
+            })}
             <span class="hint"
               >When on, agents (including Capture Auth) can only store secrets in the user's
               profile. Project-scope writes from agents are rejected. Existing project secrets are
@@ -4974,7 +5463,7 @@ export class ScionPageAdminServerConfig extends LitElement {
               value=${rt.type || ''}
               ?disabled=${readOnly}
               @sl-change=${(e: Event) => {
-                this.updateRuntimeField(name, 'type', (e.target as HTMLSelectElement).value);
+                void this.changeRuntimeType(name, e.target as HTMLSelectElement);
               }}
             >
               <sl-option value="docker">docker</sl-option>
@@ -4994,78 +5483,6 @@ export class ScionPageAdminServerConfig extends LitElement {
                 this.updateRuntimeField(name, 'sync', (e.target as HTMLInputElement).value);
               }}
             ></sl-input>
-          </div>
-          <div class="form-field">
-            <label>Shared Dir Storage</label>
-            <span class="hint"
-              >Backend for shared dirs of agents on this runtime. Empty uses the server setting; a
-              profile's own value wins.</span
-            >
-            <sl-select
-              class="shared-dir-storage-backend"
-              placeholder="Server setting"
-              clearable
-              value=${rt.shared_dir_storage_backend || ''}
-              ?disabled=${readOnly}
-              @sl-change=${(e: Event) => {
-                this.updateRuntimeField(
-                  name,
-                  'shared_dir_storage_backend',
-                  (e.target as HTMLSelectElement).value
-                );
-              }}
-            >
-              <sl-option value="local">local</sl-option>
-              <sl-option value="nfs">nfs</sl-option>
-            </sl-select>
-          </div>
-          <div class="form-field">
-            <label>Home Storage</label>
-            <span class="hint"
-              >Kubernetes only. Where the agent home lives for agents on this runtime. Empty uses
-              the server setting; a profile's own value wins.</span
-            >
-            <sl-select
-              class="home-storage-backend"
-              placeholder="Server setting"
-              clearable
-              value=${rt.home_storage_backend || ''}
-              ?disabled=${readOnly}
-              @sl-change=${(e: Event) => {
-                this.updateRuntimeField(
-                  name,
-                  'home_storage_backend',
-                  (e.target as HTMLSelectElement).value
-                );
-              }}
-            >
-              <sl-option value="local">local</sl-option>
-              <sl-option value="nfs">nfs</sl-option>
-            </sl-select>
-          </div>
-          <div class="form-field">
-            <label>Home Directory Creation</label>
-            <span class="hint"
-              >How an NFS home directory is created: pod (init container) or broker (broker's mount
-              of the export). Empty uses the server setting.</span
-            >
-            <sl-select
-              class="home-storage-leaf"
-              placeholder="Server setting"
-              clearable
-              value=${rt.home_storage_leaf || ''}
-              ?disabled=${readOnly}
-              @sl-change=${(e: Event) => {
-                this.updateRuntimeField(
-                  name,
-                  'home_storage_leaf',
-                  (e.target as HTMLSelectElement).value
-                );
-              }}
-            >
-              <sl-option value="pod">pod</sl-option>
-              <sl-option value="broker">broker</sl-option>
-            </sl-select>
           </div>
           ${!isCloudRun
             ? html`
@@ -5181,6 +5598,31 @@ export class ScionPageAdminServerConfig extends LitElement {
     `;
   }
 
+  /**
+   * Changes a runtime's type. When the switch would clear fields that hold
+   * a value (switching to or from Cloud Run clears the other group's
+   * fields), the fields are named and the change is confirmed first;
+   * Cancel puts the select back.
+   */
+  private async changeRuntimeType(name: string, select: HTMLSelectElement): Promise<void> {
+    const value = select.value;
+    const rt = this.runtimes[name];
+    if (!rt || (rt.type || '') === value) return;
+    const cleared = runtimeTypeSwitchClears(rt, value);
+    if (cleared.length > 0) {
+      const ok = await showConfirm(
+        `Changing runtime "${name}" to ${value} clears these fields:\n${cleared.join(', ')}\n\nThey are removed when you save.`,
+        { title: 'Change runtime type?', confirmText: 'Change type' }
+      );
+      if (!ok) {
+        select.value = rt.type || '';
+        this.requestUpdate();
+        return;
+      }
+    }
+    this.updateRuntimeField(name, 'type', value);
+  }
+
   private updateRuntimeField(name: string, field: keyof V1RuntimeConfig, value: string): void {
     const updated = { ...this.runtimes };
     const rt = { ...updated[name] };
@@ -5192,25 +5634,8 @@ export class ScionPageAdminServerConfig extends LitElement {
     // When switching type, clear fields that belong to the other type group
     // so stale values don't persist in the payload.
     if (field === 'type') {
-      const isCloudRun = value === 'cloudrun' || value === 'cloudrun-instances';
-      if (isCloudRun) {
-        // Switching to Cloud Run — clear container/k8s fields
-        delete rt.host;
-        delete rt.context;
-        delete rt.namespace;
-        delete rt.gke;
-        delete rt.list_all_namespaces;
-        delete rt.safe_to_evict;
-        // Each Cloud Run type reads its own block; drop the other one.
-        if (value === 'cloudrun-instances') {
-          delete rt.cloudrun;
-        } else {
-          delete rt.cloudrun_instances;
-        }
-      } else {
-        // Switching away from Cloud Run — clear both Cloud Run blocks
-        delete rt.cloudrun;
-        delete rt.cloudrun_instances;
+      for (const key of runtimeTypeSwitchKeys(value)) {
+        delete (rt as Record<string, unknown>)[key];
       }
     }
     updated[name] = rt;
@@ -5420,78 +5845,6 @@ export class ScionPageAdminServerConfig extends LitElement {
             </sl-select>
           </div>
           <div class="form-field">
-            <label>Shared Dir Storage</label>
-            <span class="hint"
-              >Backend for this profile's shared dirs. Empty uses the runtime's value, else the
-              server setting.</span
-            >
-            <sl-select
-              class="shared-dir-storage-backend"
-              placeholder="Runtime or server setting"
-              clearable
-              value=${profile.shared_dir_storage_backend || ''}
-              ?disabled=${readOnly}
-              @sl-change=${(e: Event) => {
-                this.updateProfileField(
-                  name,
-                  'shared_dir_storage_backend',
-                  (e.target as HTMLSelectElement).value
-                );
-              }}
-            >
-              <sl-option value="local">local</sl-option>
-              <sl-option value="nfs">nfs</sl-option>
-            </sl-select>
-          </div>
-          <div class="form-field">
-            <label>Home Storage</label>
-            <span class="hint"
-              >Kubernetes only. Where the agent home lives for this profile. Empty uses the
-              runtime's value, else the server setting.</span
-            >
-            <sl-select
-              class="home-storage-backend"
-              placeholder="Runtime or server setting"
-              clearable
-              value=${profile.home_storage_backend || ''}
-              ?disabled=${readOnly}
-              @sl-change=${(e: Event) => {
-                this.updateProfileField(
-                  name,
-                  'home_storage_backend',
-                  (e.target as HTMLSelectElement).value
-                );
-              }}
-            >
-              <sl-option value="local">local</sl-option>
-              <sl-option value="nfs">nfs</sl-option>
-            </sl-select>
-          </div>
-          <div class="form-field">
-            <label>Home Directory Creation</label>
-            <span class="hint"
-              >How an NFS home directory is created for this profile: pod or broker. Empty uses the
-              runtime's value, else the server setting.</span
-            >
-            <sl-select
-              class="home-storage-leaf"
-              placeholder="Runtime or server setting"
-              clearable
-              value=${profile.home_storage_leaf || ''}
-              ?disabled=${readOnly}
-              @sl-change=${(e: Event) => {
-                this.updateProfileField(
-                  name,
-                  'home_storage_leaf',
-                  (e.target as HTMLSelectElement).value
-                );
-              }}
-            >
-              <sl-option value="pod">pod</sl-option>
-              <sl-option value="broker">broker</sl-option>
-            </sl-select>
-          </div>
-          <div class="form-field">
             <label>Image Registry</label>
             <sl-input
               value=${profile.image_registry || ''}
@@ -5565,6 +5918,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                 );
               }}
             ></sl-input>
+            ${this.renderQuantityIssues(`profiles.${name}.resources.requests.cpu`)}
           </div>
           <div class="form-field">
             <label>Memory Request</label>
@@ -5581,6 +5935,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                 );
               }}
             ></sl-input>
+            ${this.renderQuantityIssues(`profiles.${name}.resources.requests.memory`)}
           </div>
           <div class="form-field">
             <label>CPU Limit</label>
@@ -5597,6 +5952,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                 );
               }}
             ></sl-input>
+            ${this.renderQuantityIssues(`profiles.${name}.resources.limits.cpu`)}
           </div>
           <div class="form-field">
             <label>Memory Limit</label>
@@ -5613,6 +5969,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                 );
               }}
             ></sl-input>
+            ${this.renderQuantityIssues(`profiles.${name}.resources.limits.memory`)}
           </div>
           <div class="form-field">
             <label>Disk</label>
@@ -5624,6 +5981,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                 this.updateProfileDisk(name, (e.target as HTMLInputElement).value);
               }}
             ></sl-input>
+            ${this.renderQuantityIssues(`profiles.${name}.resources.disk`)}
           </div>
         </div>
       </sl-card>
@@ -6309,17 +6667,15 @@ export class ScionPageAdminServerConfig extends LitElement {
         <h3 class="section-title">Cloud Export (OTLP)</h3>
         <div class="form-grid">
           <div class="form-field full-width">
-            ${this.renderFieldValue(
-              'telemetry.cloud.enabled',
-              this.telemetryCloudEnabled ? 'Enabled' : 'Disabled',
-              html`${this.renderEnvBadge('telemetry.cloud.enabled')}<sl-switch
-                  ?checked=${this.telemetryCloudEnabled}
-                  @sl-change=${(e: Event) => {
-                    this.telemetryCloudEnabled = (e.target as HTMLInputElement).checked;
-                  }}
-                  >Enable Cloud Export</sl-switch
-                >`
-            )}
+            ${this.renderTriStateSwitch({
+              key: 'telemetry.cloud.enabled',
+              label: 'Enable Cloud Export',
+              value: this.telemetryCloudEnabled,
+              loaded: this.loadedTelemetryCloudEnabled,
+              unsetChecked: false,
+              unsetLabel: 'Not set (default applies)',
+              set: (v) => (this.telemetryCloudEnabled = v),
+            })}
           </div>
           <div class="form-field full-width">
             <label>Endpoint</label>
@@ -6381,17 +6737,15 @@ export class ScionPageAdminServerConfig extends LitElement {
             )}
           </div>
           <div class="form-field">
-            ${this.renderFieldValue(
-              'telemetry.cloud.cloud_logging',
-              this.telemetryCloudCloudLogging ? 'Enabled' : 'Disabled',
-              html`${this.renderEnvBadge('telemetry.cloud.cloud_logging')}<sl-switch
-                  ?checked=${this.telemetryCloudCloudLogging}
-                  @sl-change=${(e: Event) => {
-                    this.telemetryCloudCloudLogging = (e.target as HTMLInputElement).checked;
-                  }}
-                  >Enable Cloud Logging</sl-switch
-                >`
-            )}
+            ${this.renderTriStateSwitch({
+              key: 'telemetry.cloud.cloud_logging',
+              label: 'Enable Cloud Logging',
+              value: this.telemetryCloudCloudLogging,
+              loaded: this.loadedTelemetryCloudCloudLogging,
+              unsetChecked: false,
+              unsetLabel: 'Not set (default applies)',
+              set: (v) => (this.telemetryCloudCloudLogging = v),
+            })}
           </div>
         </div>
       </div>
@@ -6400,17 +6754,15 @@ export class ScionPageAdminServerConfig extends LitElement {
         <h3 class="section-title">Hub Reporting</h3>
         <div class="form-grid">
           <div class="form-field">
-            ${this.renderFieldValue(
-              'telemetry.hub.enabled',
-              this.telemetryHubEnabled ? 'Enabled' : 'Disabled',
-              html`${this.renderEnvBadge('telemetry.hub.enabled')}<sl-switch
-                  ?checked=${this.telemetryHubEnabled}
-                  @sl-change=${(e: Event) => {
-                    this.telemetryHubEnabled = (e.target as HTMLInputElement).checked;
-                  }}
-                  >Enable Hub Reporting</sl-switch
-                >`
-            )}
+            ${this.renderTriStateSwitch({
+              key: 'telemetry.hub.enabled',
+              label: 'Enable Hub Reporting',
+              value: this.telemetryHubEnabled,
+              loaded: this.loadedTelemetryHubEnabled,
+              unsetChecked: false,
+              unsetLabel: 'Not set (default applies)',
+              set: (v) => (this.telemetryHubEnabled = v),
+            })}
           </div>
           <div class="form-field">
             <label>Report Interval</label>
@@ -7177,14 +7529,31 @@ export class ScionPageAdminServerConfig extends LitElement {
     `;
   }
 
+  /**
+   * update-binary params: the checked release tag when the check returned
+   * one, otherwise the latest release in the checked channel, which the hub
+   * resolves. The hub rejects any other param. Null when neither is known.
+   */
+  private updateBinaryParams(): Record<string, string> | null {
+    const r = this.updateCheckResult;
+    const target = r?.latest_version || (r?.channel ? `latest:${r.channel}` : '');
+    return target ? { target_version: target, pin: 'latest' } : null;
+  }
+
   private async triggerUpdate(): Promise<void> {
+    const opKey = this.deploymentTier === 'binary' ? 'update-binary' : 'rebuild-server';
+    const params = opKey === 'update-binary' ? this.updateBinaryParams() : {};
+    if (!params) {
+      this.updateCheckError =
+        'No update target is known. Run Check for Updates first, then update.';
+      return;
+    }
     this.updateRunning = true;
     try {
-      const opKey = this.deploymentTier === 'binary' ? 'update-binary' : 'rebuild-server';
       const res = await apiFetch(`/api/v1/admin/maintenance/operations/${opKey}/run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ params: {} }),
+        body: JSON.stringify({ params }),
       });
       if (!res.ok) {
         const errMsg = await extractApiError(res, `HTTP ${res.status}`);

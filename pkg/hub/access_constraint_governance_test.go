@@ -1517,10 +1517,10 @@ func lockoutSuspendDevUser(t *testing.T, srv *Server, s store.Store) {
 // TestConstraintAdminLockout_RoleBindingDeleteSuspendedActorRefused follows
 // TestConstraintAdminLockout_RoleBindingDeleteSystem without a stub: the
 // suspended dev user's own stored row is what authorization reads. The
-// account-status check refuses the request with 403 in both of that test's
-// states: with two hub-admin bindings (where it gets 204) and, after a is
-// removed directly in the store, with b as the last one (where it gets 409
-// constraint_admin_lockout). The bindings the requests name are kept.
+// account-status check refuses the request with 403 user_suspended in both
+// of that test's states: with two hub-admin bindings (where it gets 204)
+// and, after a is removed directly in the store, with b as the last one
+// (where it gets 409 constraint_admin_lockout). The bindings the requests name are kept.
 func TestConstraintAdminLockout_RoleBindingDeleteSuspendedActorRefused(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -1534,14 +1534,14 @@ func TestConstraintAdminLockout_RoleBindingDeleteSuspendedActorRefused(t *testin
 	// The would-be-204 state: two hub-admin bindings.
 	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/admin/role-bindings/"+a.ID, nil)
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.Equal(t, ErrCodeForbidden, decodeErrorCode(t, rec.Body.Bytes()))
+	assert.Equal(t, "user_suspended", decodeErrorCode(t, rec.Body.Bytes()))
 	requireBindingExists(t, s, a.ID, true)
 
 	// The would-be-409 state: b is the last hub-admin binding.
 	require.NoError(t, s.DeleteRoleBinding(ctx, a.ID))
 	rec = doRequest(t, srv, http.MethodDelete, "/api/v1/admin/role-bindings/"+b.ID, nil)
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.Equal(t, ErrCodeForbidden, decodeErrorCode(t, rec.Body.Bytes()))
+	assert.Equal(t, "user_suspended", decodeErrorCode(t, rec.Body.Bytes()))
 	requireBindingExists(t, s, b.ID, true)
 }
 

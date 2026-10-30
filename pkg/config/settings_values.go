@@ -66,9 +66,17 @@ func settingSourceKey(key string) string {
 	return key
 }
 
-// loadSettingValues loads projectPath's settings with their sources.
-func loadSettingValues(projectPath string) (*VersionedSettings, *versionedLoadResult, error) {
-	vs, res, err := loadVersionedSettings(projectPath, versionedLoadOptions{withDefaults: true, trackSources: true})
+// loadSettingValues loads projectPath's settings with their sources,
+// leaving out the SCION_* environment variables named in skipEnv.
+func loadSettingValues(projectPath string, skipEnv ...string) (*VersionedSettings, *versionedLoadResult, error) {
+	opts := versionedLoadOptions{withDefaults: true, trackSources: true}
+	if len(skipEnv) > 0 {
+		opts.skipEnv = make(map[string]bool, len(skipEnv))
+		for _, name := range skipEnv {
+			opts.skipEnv[name] = true
+		}
+	}
+	vs, res, err := loadVersionedSettings(projectPath, opts)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -121,6 +129,18 @@ func ResolveSettingValues(projectPath string) ([]SettingValue, error) {
 // "config get" shows it. key is any key GetVersionedSettingValue accepts.
 func ResolveSettingValue(projectPath, key string) (SettingValue, error) {
 	vs, res, err := loadSettingValues(projectPath)
+	if err != nil {
+		return SettingValue{}, err
+	}
+	return settingValueOf(vs, res, key)
+}
+
+// ResolveSettingValueIgnoringEnv is ResolveSettingValue as if the
+// environment variable envName were not set: the value and source the key
+// would have without it. config unset uses it to say what a key falls
+// back to when the variable that sets it applies to one command only.
+func ResolveSettingValueIgnoringEnv(projectPath, key, envName string) (SettingValue, error) {
+	vs, res, err := loadSettingValues(projectPath, envName)
 	if err != nil {
 		return SettingValue{}, err
 	}

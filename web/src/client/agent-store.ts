@@ -52,9 +52,9 @@
  *   reapplied on top of its REST rows, and tombstoned agents never return.
  * - While the feed is down, or an entry is stale, `ensure` revalidates
  *   rather than answering from memory.
- * - A retained hub or unfiltered project list is probed every 30s (±3s)
- *   while the page is visible, for changes SSE does not carry: one compact
- *   page of the 50 most recently active rows (by last activity time, else
+ * - A retained list, filtered or not, is probed every 30s (±3s) while the
+ *   page is visible, for changes SSE does not carry: one compact page of
+ *   the 50 most recently active rows matching its server filters (by last activity time, else
  *   `updated`), applied as a seeded merge. It walks once when it cannot
  *   catch up in five pages or when the server's count differs from the rows
  *   held. A probe never sets the completeness flag. A probe due five minutes
@@ -307,13 +307,10 @@ export function agentIndexOf(snapshot: AgentListSnapshot): ReadonlyMap<string, A
   return byId;
 }
 
-/** Probes cover the lists SSE adds to: the whole hub and unfiltered projects. */
-function isProbeable(q: AgentQuery): boolean {
-  if (q.label?.trim()) return false;
-  return q.scope !== 'hub' || !q.ownership;
-}
-
-/** The newest-first sorted page of a probeable list. */
+/**
+ * The newest-first sorted page of a list. It carries the list's own server
+ * filters (ownership, label), so a filtered list is probed for its own rows.
+ */
 function probePath(q: AgentQuery, cursor?: string): string {
   const params = new URLSearchParams({
     sort: 'updated',
@@ -321,6 +318,9 @@ function probePath(q: AgentQuery, cursor?: string): string {
     limit: String(AGENT_PROBE_LIMIT),
     view: 'compact',
   });
+  if (q.scope === 'hub' && q.ownership) params.set('scope', q.ownership);
+  const label = q.label?.trim();
+  if (label) params.set('label', label);
   if (cursor) params.set('cursor', cursor);
   const base =
     q.scope === 'hub'
@@ -428,6 +428,9 @@ export const PROJECT_COMPACT_KEYS: ReadonlySet<string> = new Set([
   'updated',
   'lastActivityEvent',
   '_capabilities',
+  // Agent badge fields (ptone/scion#5502), omitted when empty.
+  'harnessVendor',
+  'modelSize',
 ]);
 
 /** The keys of a compact row from the hub's agent list, which adds messageability. */
@@ -1176,7 +1179,7 @@ export class AgentStore {
 
   /**
    * Keep the entry's probe timer running exactly while it may probe: the
-   * entry is current, retained, loaded and probeable, and the page is
+   * entry is current, retained and loaded, and the page is
    * visible. Otherwise stop it. A probe the page hid before it was due
    * keeps its due time, so switching tabs does not put it off; one that
    * fell due while hidden is scheduled afresh. After the server refuses the
@@ -1187,8 +1190,7 @@ export class AgentStore {
     const probed =
       this.entries.get(entry.key) === entry &&
       entry.retainers.size > 0 &&
-      entry.fetchedAt !== undefined &&
-      isProbeable(entry.query);
+      entry.fetchedAt !== undefined;
     if (!probed || !this.isVisible()) {
       this.stopProbe(entry);
       return;
@@ -1573,7 +1575,8 @@ export class AgentStore {
   /**
    * Apply one coalesced feed flush to every entry, notifying each changed
    * entry once. With `only`, the rows came from that entry's own read: only
-   * it adds rows it lacks, and the others update rows they already hold.
+   * it adds rows it lacks (the server applied its filters, so a filtered
+   * list adds them too), and the others update rows they already hold.
    */
   private applyChange(feed: StateManager, rawChange: AgentsChangedDetail, only?: Entry): void {
     const change = this.withoutCarried(feed, rawChange);
@@ -1585,7 +1588,7 @@ export class AgentStore {
       const held = entry.agents;
       const next = mergeChanged(held, change, {
         getAgent: (id) => feed.getAgent(id),
-        shouldAdd: only && only !== entry ? (): boolean => false : shouldAddFor(entry.query),
+        shouldAdd: only ? (): boolean => only === entry : shouldAddFor(entry.query),
         scopeCapabilities: entry.scopeCapabilities,
       });
       if (next === held) continue;

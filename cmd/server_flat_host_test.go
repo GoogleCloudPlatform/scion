@@ -127,7 +127,7 @@ func newRemoteTestHost(t *testing.T, globalDir string, inst config.V1RuntimeBrok
 			cfg.StateDir = filepath.Join(globalDir, "state", ic.Identity.RuntimeBrokerID)
 			cfg.FlatInstance = &runtimebroker.FlatInstanceConfig{Identity: ic.Identity, Instance: ic.Instance,
 				RemoteCredentials: ic.Activation.RemoteCredentials}
-			return runtimebroker.New(cfg, ic.Manager, ic.Runtime), nil
+			return runtimebroker.New(cfg, ic.Manager, ic.Runtime, config.RuntimeBuildRecord{}), nil
 		},
 	})
 	require.NoError(t, err)
@@ -303,7 +303,7 @@ func colocatedTestHost(t *testing.T, hubSrv *hub.Server, globalDir string, insts
 			cfg.BrokerID = ic.Identity.RuntimeBrokerID
 			cfg.StateDir = filepath.Join(globalDir, "state", ic.Identity.RuntimeBrokerID)
 			cfg.FlatInstance = &runtimebroker.FlatInstanceConfig{Identity: ic.Identity, Instance: ic.Instance, HubInProcess: true}
-			return runtimebroker.New(cfg, ic.Manager, ic.Runtime), nil
+			return runtimebroker.New(cfg, ic.Manager, ic.Runtime, config.RuntimeBuildRecord{}), nil
 		},
 	})
 	require.NoError(t, err)
@@ -391,7 +391,7 @@ func TestFlatHost_HubTransportReachesPrefixedInstance(t *testing.T) {
 			cfg.HubEndpoint = "http://127.0.0.1:1"
 			cfg.InMemoryCredentials = ic.Activation.InMemoryCredentials
 			cfg.FlatInstance = &runtimebroker.FlatInstanceConfig{Identity: ic.Identity, Instance: ic.Instance, HubInProcess: true}
-			return runtimebroker.New(cfg, ic.Manager, ic.Runtime), nil
+			return runtimebroker.New(cfg, ic.Manager, ic.Runtime, config.RuntimeBuildRecord{}), nil
 		},
 	})
 	require.NoError(t, err)
@@ -490,7 +490,7 @@ func newCCTestRig(t *testing.T) *ccTestRig {
 		cfg.ControlChannelEnabled = true
 		cfg.InMemoryCredentials = ic.Activation.InMemoryCredentials
 		cfg.FlatInstance = &runtimebroker.FlatInstanceConfig{Identity: ic.Identity, Instance: ic.Instance, HubInProcess: true}
-		return runtimebroker.New(cfg, ic.Manager, ic.Runtime)
+		return runtimebroker.New(cfg, ic.Manager, ic.Runtime, config.RuntimeBuildRecord{})
 	}
 	h, err := brokerhost.New(brokerhost.Config{
 		GlobalDir: globalDir,

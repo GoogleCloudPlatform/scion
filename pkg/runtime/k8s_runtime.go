@@ -25,23 +25,25 @@ import (
 	"maps"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
+	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/termresize"
 	"github.com/google/uuid"
 	"golang.org/x/term"
 	corev1 "k8s.io/api/core/v1"
@@ -91,10 +93,10 @@ type KubernetesRuntime struct {
 	// (syncToPod). Tests use it to observe the order of the start steps.
 	homeSync func(ctx context.Context, namespace, podName, sourcePath, destPath string, excludes []string) error
 
-	// syncTransfer, when set, replaces the copies Sync performs (toPod is
-	// true for broker to pod). Tests use it to observe which paths Sync
-	// transfers.
-	syncTransfer func(ctx context.Context, namespace, podName, src, dest string, toPod bool) error
+	// syncTransfer, when set, replaces the broker-to-pod copies Sync and the
+	// start's workspace sync perform. Tests use it to observe which paths
+	// they transfer, and what they leave out.
+	syncTransfer func(ctx context.Context, namespace, podName, src, dest string, excludes []string) error
 
 	// nowFn and sinceFn, when set, replace time.Now and time.Since for the
 	// per-run object sweep and the start's verify trigger (see
@@ -114,6 +116,12 @@ type KubernetesRuntime struct {
 	// it as terminal is still reported with that reason (see
 	// k8s_pod_tombstones.go).
 	podTrack podTracker
+
+	// claimReadFallbackLogged and claimEventsFallbackLogged make the claim
+	// check before the pod (verifyPodClaims) log only once per runtime
+	// that it cannot read claims, or events, and so checks less.
+	claimReadFallbackLogged   atomic.Bool
+	claimEventsFallbackLogged atomic.Bool
 }
 
 // agentContainerName is the name of the primary scion agent container in
@@ -169,6 +177,14 @@ func (r *KubernetesRuntime) isGKEScheduling() bool {
 
 func (r *KubernetesRuntime) Name() string {
 	return "kubernetes"
+}
+
+// CopiesAgentHome implements CopiedAgentHomeRuntime. The pod never mounts the
+// host's agent home: Run fills the pod home (local or on the NFS export) by
+// exec-based sync from RunConfig.HomeDir, and the harness starts only after
+// the startup-gate touch, the last step of Run.
+func (r *KubernetesRuntime) CopiesAgentHome() bool {
+	return true
 }
 
 func (r *KubernetesRuntime) ExecUser() string {
@@ -510,6 +526,16 @@ func filterDescriptiveLabels(agentName string, labels map[string]string) map[str
 }
 
 func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName string, err error) {
+	// Refuse, at the single production entry point for every start / restart /
+	// wake / reincarnate, the Kubernetes shapes where agents in a project would
+	// share one repository (its .git) on the NFS export. Run is the only
+	// caller of buildPod, so this gate cannot be bypassed, and keeping it here
+	// rather than in buildPod leaves buildPod a pure pod constructor (the
+	// read-only .git narrowing it builds for that shape stays testable and ready
+	// for the follow-up that lifts this refusal).
+	if msg, refuse := k8sSharedRepoShapeRefusal(config); refuse {
+		return "", errors.New(msg)
+	}
 	fmt.Printf("Starting agent '%s' on Kubernetes...\n", config.Name)
 	namespace := r.runNamespace(config.Labels)
 
@@ -605,6 +631,10 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		}
 		config.Workspace = resolvedWorkspace
 	}
+
+	// The scion.* annotations below are added to a copy, so the caller's
+	// config.Annotations is not modified (ptone/scion#5970).
+	config.Annotations = maps.Clone(config.Annotations)
 
 	// Persist workspace path in annotations for later sync
 	if config.Workspace != "" {
@@ -799,23 +829,35 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		}
 	}
 
+	// NFS workspace provisioning is serialized by the file lock that
+	// sciontool provision takes on the export, inside the init container.
+	// buildPod only constructs the spec (no API calls, no files written),
+	// so it runs before the checkpoint below, letting the claim check see
+	// every claim the pod mounts.
+	pod, err := r.buildPod(namespace, config)
+	if err != nil {
+		return "", fmt.Errorf("failed to build pod spec: %w", err)
+	}
+
+	// Check every claim the pod mounts before the pod exists, so a start
+	// whose pod could never be scheduled fails with a reason. It only
+	// reads, and runs before the checkpoint because it can wait for a
+	// Pending claim: the checkpoint stays immediately before the create.
+	if err := r.verifyPodClaims(ctx, namespace, pod, podClaimSources(config)); err != nil {
+		return "", err
+	}
+
 	runtimeLog().Info("Pre-create setup complete", "agent", config.Name, "namespace", namespace,
 		"phase", "pre-create", "elapsed_ms", time.Since(preCreateStart).Milliseconds())
 
 	// The pod create's checkpoint can block for as long as the launch
 	// deadline while the Hub is unreachable. Between here and the pod create
-	// there is only local work (the pod spec), no API object creates.
+	// there is only local work (the debug file), no API object creates
+	// (verifyStartObjects only reads).
 	if err := hooks.checkpoint(ctx, CheckpointStepPodCreate); err != nil {
 		// The launch is over: create nothing further. The secrets this
 		// launch created are removed by its cleanup, by UID.
 		return "", err
-	}
-
-	// NFS workspace provisioning is serialized by the file lock that
-	// sciontool provision takes on the export, inside the init container.
-	pod, err := r.buildPod(namespace, config)
-	if err != nil {
-		return "", fmt.Errorf("failed to build pod spec: %w", err)
 	}
 
 	writeK8sRuntimeDebugFile(config, namespace, pod)
@@ -982,9 +1024,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		hooks.progress(api.LaunchStepWorkspaceSync)
 		fmt.Printf("  Syncing workspace (%s -> /workspace)...\n", config.Workspace)
 		workspaceSyncStart := time.Now()
-		err = r.syncWithRetry(ctx, func() error {
-			return r.syncToPod(ctx, namespace, createdPod.Name, config.Workspace, "/workspace")
-		})
+		err = r.syncWorkspaceToPod(ctx, namespace, createdPod, config.Workspace)
 		if err != nil {
 			return createdPod.Name, fmt.Errorf("failed to sync workspace: %w", err)
 		}
@@ -1888,49 +1928,6 @@ func (r *KubernetesRuntime) runNamespace(labels map[string]string) string {
 	return r.DefaultNamespace
 }
 
-// sharedDirsHaveOwnClaims reports whether the local shared dirs of config
-// get a claim of their own (createSharedDirPVCs creates or reuses one per
-// dir). They do not when the workspace is on nfs with a bound claim: they
-// are then served by subPath from the workspace claim.
-func sharedDirsHaveOwnClaims(config RunConfig) bool {
-	return config.WorkspaceBackendName != "nfs" || config.NFSPVClaimName == ""
-}
-
-// SharedDirUsesClaim implements SharedDirClaimChecker with the same rules
-// as createSharedDirPVCs: a dir served from the shared_dir_storage nfs
-// export has no claim of its own, and neither has any dir when
-// sharedDirsHaveOwnClaims is false.
-func (r *KubernetesRuntime) SharedDirUsesClaim(config RunConfig, dirName string) bool {
-	if config.SharedDirStorage.Serves(dirName) {
-		return false
-	}
-	return sharedDirsHaveOwnClaims(config)
-}
-
-// SharedDirClaimExists implements SharedDirClaimChecker: it looks up, by
-// name, the shared-dir PVC that createSharedDirPVCs would create or reuse
-// for dirName, in the namespace Run would use for config. Any error other
-// than NotFound is returned.
-func (r *KubernetesRuntime) SharedDirClaimExists(ctx context.Context, config RunConfig, dirName string) (bool, error) {
-	projectName := projectkeys.ProjectNameFromLabels(config.Labels)
-	if projectName == "" {
-		return false, fmt.Errorf("cannot look up the shared dir PVC: missing scion.project label")
-	}
-	if r.Client == nil || r.Client.Clientset == nil {
-		return false, fmt.Errorf("cannot look up the shared dir PVC: no Kubernetes client")
-	}
-	namespace := r.runNamespace(config.Labels)
-	pvcName := sharedDirPVCName(projectName, dirName)
-	_, err := r.Client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
-	if err == nil {
-		return true, nil
-	}
-	if k8serrors.IsNotFound(err) {
-		return false, nil
-	}
-	return false, fmt.Errorf("looking up shared dir PVC %s/%s: %w", namespace, pvcName, err)
-}
-
 // defaultSharedDirSize is the default PVC size when not specified in settings.
 const defaultSharedDirSize = "10Gi"
 
@@ -1938,40 +1935,19 @@ const defaultSharedDirSize = "10Gi"
 // PVCs are project-scoped and persist across agent restarts. If a PVC already
 // exists (from a previous agent in the same project), it is reused.
 //
-// When backend=nfs, shared dirs are served via NFS subPath from the workspace
-// PVC and do NOT require separate PVCs — this method is a no-op for NFS.
+// On a shared backend (RunConfig.SharedDirStorage) every shared dir is
+// served by subPath from the share's claim and needs no PVC of its own: this
+// method is then a no-op. Per-dir claims exist only on the local backend.
 func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace string, config RunConfig) error {
 	if len(config.SharedDirs) == 0 {
 		return nil
 	}
-
-	// server.shared_dir_storage backend=nfs: shared dirs use subPaths on the
-	// dedicated shared NFS PVC, no separate PVCs needed (design
-	// deploy-config-explore §3.2.4). Takes precedence over the
-	// workspace_storage:nfs branch below. With per-dir backends only the
-	// dirs the realization serves are skipped; the rest are handled below.
-	sharedDirs := config.SharedDirs
-	if config.SharedDirStorage != nil && config.SharedDirStorage.Backend == "nfs" {
-		sharedDirs = make([]api.SharedDir, 0, len(config.SharedDirs))
-		for _, sd := range config.SharedDirs {
-			if !config.SharedDirStorage.Serves(sd.Name) {
-				sharedDirs = append(sharedDirs, sd)
-			}
-		}
-		if len(sharedDirs) == 0 {
-			runtimeLog().Info("shared_dir_storage nfs: shared dirs served via NFS subPath, skipping PVC creation",
-				"shared_dir_count", len(config.SharedDirs))
-			return nil
-		}
-	}
-
-	// NFS backend: shared dirs use subPaths on the workspace NFS PVC,
-	// no separate PVCs needed (design §5.3).
-	if !sharedDirsHaveOwnClaims(config) {
-		runtimeLog().Info("NFS backend: shared dirs served via NFS subPath, skipping PVC creation",
-			"shared_dir_count", len(sharedDirs))
+	if config.SharedDirStorage.Shared() {
+		runtimeLog().Info("shared dirs served by subPath from the shared-dir storage claim, skipping PVC creation",
+			"backend", config.SharedDirStorage.Backend, "shared_dir_count", len(config.SharedDirs))
 		return nil
 	}
+	sharedDirs := config.SharedDirs
 
 	projectID := projectkeys.ProjectIDFromLabels(config.Labels)
 
@@ -1980,15 +1956,10 @@ func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace s
 		return fmt.Errorf("cannot create shared dir PVCs: missing scion.project label")
 	}
 
-	storageClass := ""
+	policy := sharedDirClaimPolicyFor(config.Kubernetes)
 	size := defaultSharedDirSize
-	if config.Kubernetes != nil {
-		if config.Kubernetes.SharedDirStorageClass != "" {
-			storageClass = config.Kubernetes.SharedDirStorageClass
-		}
-		if config.Kubernetes.SharedDirSize != "" {
-			size = config.Kubernetes.SharedDirSize
-		}
+	if config.Kubernetes != nil && config.Kubernetes.SharedDirSize != "" {
+		size = config.Kubernetes.SharedDirSize
 	}
 
 	storageQuantity, err := parseResourceSafe(size, "shared_dir_size")
@@ -1997,7 +1968,7 @@ func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace s
 	}
 
 	for _, sd := range sharedDirs {
-		if err := r.ensureProjectRWXClaim(ctx, namespace, projectName, projectID, sd.Name, storageClass, storageQuantity); err != nil {
+		if err := r.ensureProjectRWXClaim(ctx, namespace, projectName, projectID, sd.Name, policy, storageQuantity); err != nil {
 			return err
 		}
 	}
@@ -2031,9 +2002,17 @@ func warnOnStorageClassMismatch(pvc *corev1.PersistentVolumeClaim, requested str
 // ensureProjectRWXClaim is the idempotent get-or-create core for project-scoped
 // RWX PVCs. It creates a PVC with a deterministic name if one does not already
 // exist. Used by both shared-dir and (future) workspace claim paths.
+//
+// An existing claim is reused as it is, with no policy needed, unless it is
+// labelled for a different project, which refuses the start. An existing
+// claim without a project ID label (one made by hand) is reused with a
+// warning. A claim that does not exist is created only when policy allows
+// it (sharedDirClaimPolicy.createSpec); otherwise the start is refused with
+// an error naming the settings that fix it, and nothing is created.
 func (r *KubernetesRuntime) ensureProjectRWXClaim(
 	ctx context.Context,
-	namespace, projectName, projectID, dirName, storageClass string,
+	namespace, projectName, projectID, dirName string,
+	policy sharedDirClaimPolicy,
 	storageQuantity resource.Quantity,
 ) error {
 	pvcName := sharedDirPVCName(projectName, dirName)
@@ -2041,9 +2020,26 @@ func (r *KubernetesRuntime) ensureProjectRWXClaim(
 	// Check if PVC already exists (project-scoped, may have been created by another agent)
 	existing, err := r.Client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
 	if err == nil {
-		runtimeLog().Info("Project RWX PVC already exists, reusing", "pvc", pvcName, "dir", dirName)
-		warnOnStorageClassMismatch(existing, storageClass)
+		claimProjectID := projectkeys.ProjectIDFromLabels(existing.Labels)
+		switch {
+		case claimProjectID == "":
+			runtimeLog().Warn("Reusing shared-dir claim without a project ID label; it is used as is",
+				"pvc", pvcName, "namespace", namespace, "dir", dirName, "project_id", projectID)
+		case projectID != "" && claimProjectID != projectID:
+			return sharedDirClaimOtherProjectError(dirName, namespace, pvcName, claimProjectID, projectID)
+		default:
+			runtimeLog().Info("Project RWX PVC already exists, reusing", "pvc", pvcName, "dir", dirName)
+		}
+		warnOnStorageClassMismatch(existing, policy.Class)
 		return nil
+	}
+	if !k8serrors.IsNotFound(err) {
+		return fmt.Errorf("checking shared-dir claim %s/%s: %w", namespace, pvcName, err)
+	}
+
+	storageClass, err := policy.createSpec()
+	if err != nil {
+		return sharedDirClaimUnresolvedError(dirName, namespace, pvcName)
 	}
 
 	pvc := &corev1.PersistentVolumeClaim{
@@ -2073,9 +2069,7 @@ func (r *KubernetesRuntime) ensureProjectRWXClaim(
 		}
 	}
 
-	if storageClass != "" {
-		pvc.Spec.StorageClassName = &storageClass
-	}
+	pvc.Spec.StorageClassName = storageClass
 
 	runtimeLog().Info("Creating project RWX PVC", "pvc", pvcName, "dir", dirName, "storage", storageQuantity.String())
 	if _, err := r.Client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Create(ctx, pvc, metav1.CreateOptions{}); err != nil {
@@ -2113,6 +2107,10 @@ func applyKubernetesBlockIdentity(pod *corev1.Pod) {
 }
 
 func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev1.Pod, error) {
+	// The pod's annotations start from a copy, so the annotations added
+	// below do not modify the caller's config.Annotations.
+	config.Annotations = maps.Clone(config.Annotations)
+
 	// Command Resolution — see buildCommonRunArgs for the Docker/Podman
 	// equivalent. No-auth mode builds a raw shell command string to avoid
 	// the double-sh-c wrapping that previously caused the no-auth command
@@ -2572,6 +2570,42 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			{Name: "workspace", MountPath: "/repo-root/.git", SubPath: gitSubPath},
 			{Name: "workspace", MountPath: agentWorkingDir, SubPath: worktreeSubPath},
 		}
+		// Read-only narrowing of the shared .git admin surface for the agent
+		// container: hooks/info/objects-info/worktrees read-only, the agent's
+		// own worktrees/<name>/ read-write. This shape is gated by the refusal in
+		// Run today; the narrowing is kept here so the follow-up
+		// that lifts the refusal (adding the per-agent private .git/config on the
+		// export) needs no mount changes. The init container stays writable (it
+		// provisions: clone + worktree add) and is hardened by pkg/provision's
+		// SafeGitCommand/HostGitArgs instead.
+		agentVolumeMounts = append(agentVolumeMounts, k8sGitAdminReadOnlyMounts(gitSubPath, config.NFSWorktreeName)...)
+	}
+	// Keep the in-project agents root of a shared /workspace mount out of
+	// the agent's view (k8sWorkspaceAgentsExcluded). The worktree and
+	// agent-dir layouts do not mount the shared workspace at /workspace.
+	podVolumes := []corev1.Volume{workspaceVolume}
+	agentsExcluded := false
+	if !nfsAgentDir && !nfsWorktree {
+		var maskTarget string
+		nfsShared := config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != ""
+		agentsExcluded, maskTarget = k8sWorkspaceAgentsExcluded(config, nfsShared)
+		// An NFS-shared workspace is mounted directly, so its project
+		// configuration directory is mounted read-only over it, as on the
+		// local runtimes. The local backend's per-pod copy is private to
+		// the pod and is never synced back to the broker.
+		if nfsShared {
+			m, ok, err := k8sProjectConfigVolumeMount(config)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				agentVolumeMounts = append(agentVolumeMounts, m)
+			}
+		}
+		if maskTarget != "" {
+			podVolumes = append(podVolumes, k8sAgentsMaskPodVolume())
+			agentVolumeMounts = append(agentVolumeMounts, corev1.VolumeMount{Name: k8sAgentsMaskVolume, MountPath: maskTarget})
+		}
 	}
 
 	// NFS-home pods: the home volume and mount, and the home init
@@ -2594,7 +2628,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			Name:        config.Name,
 			Namespace:   namespace,
 			Labels:      config.Labels,
-			Annotations: withHomeStorageAnnotation(config.Annotations, nfsHome),
+			Annotations: withScionAnnotation(withScionAnnotation(config.Annotations, k8sHomeStorageAnnotation, HomeStorageNFS, nfsHome), k8sWorkspaceAgentsAnnotation, "true", agentsExcluded),
 		},
 		Spec: corev1.PodSpec{
 			SecurityContext: podSecurityContext,
@@ -2617,7 +2651,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 					VolumeMounts: agentVolumeMounts,
 				},
 			},
-			Volumes:       []corev1.Volume{workspaceVolume},
+			Volumes:       podVolumes,
 			RestartPolicy: corev1.RestartPolicyNever,
 		},
 	}
@@ -2665,16 +2699,15 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		// passed here either.
 		initCommand := nfsProvisionCommand(initGitClone, K8sContainerUID, fsGroupGID)
 
-		// F-111: shared dirs served from the workspace PVC by subPath
-		// (nfsSharedDirs below) are siblings of the workspace under the
-		// project root, but each is its OWN volume mount at the container
-		// level — the workspace mount alone doesn't give this init container
-		// filesystem access to them. Mirror the same volumes/targets the main
-		// container gets (by index, so the names match what the loop below
-		// creates) so `sciontool provision` can mkdir+chown them too. Out of
-		// scope here: dirs served by server.shared_dir_storage's own NFS
-		// mechanism (SharedDirStorage.Serves below) — a separate subsystem,
-		// not implicated in F-111.
+		// F-111: shared dirs served from the workspace PVC by subPath are
+		// siblings of the workspace under the project root, but each is its
+		// OWN volume mount at the container level — the workspace mount
+		// alone doesn't give this init container filesystem access to them.
+		// Mirror the same volumes/targets the main container gets (by index,
+		// so the names match what the loop below creates) so `sciontool
+		// provision` can mkdir+chown them too. Out of scope here: shared
+		// dirs on another claim (the legacy split shared-dir export), which
+		// the broker pre-creates itself (nfsSharedDirInitMounts).
 		initVolumeMounts := []corev1.VolumeMount{initWorkspaceMount}
 		// #2670: the sentinel and the provisioning lock live in the
 		// project's provisioning state directory, mounted next to the
@@ -2846,9 +2879,12 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// Process shared directories — mount shared-dir volumes.
 	// Build a set of shared dir targets so we can skip them in the regular volume loop.
 	//
-	// NFS backend (N2-5): shared dirs are served from the SAME workspace NFS PVC
-	// via subPath (e.g., "projects/<pid>/shared-dirs/<name>"), avoiding per-dir PVCs.
-	// The workspace volume is already defined; we add additional subPath mounts.
+	// Shared backend (RunConfig.SharedDirStorage: nfs, gke-shared-volume or
+	// cloudrun-volume): every shared dir is mounted by its resolved subPath
+	// ("<subpath root>/<pid>/shared-dirs/<name>") from the share's claim,
+	// the same tree the hub serves. K8s requires a separate Volume entry
+	// per unique (claimName, subPath) pair, so each dir gets its own volume
+	// name even when the claim is the workspace's.
 	//
 	// Local backend: each shared dir gets its own PVC (existing behavior, unchanged).
 	k8sContainerWorkspace := config.ContainerWorkspace
@@ -2856,68 +2892,24 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		k8sContainerWorkspace = "/workspace"
 	}
 	sharedDirTargets := make(map[string]bool, len(config.SharedDirs))
-	// server.shared_dir_storage backend=nfs takes precedence over the
-	// existing workspace_storage:nfs shared-dir branch when both are set
-	// (design deploy-config-explore §3.2.4). It applies per shared dir:
-	// with per-dir backends the realization serves only the dirs on nfs.
-	nfsSharedDirs := config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != ""
 	for i, sd := range config.SharedDirs {
 		target := fmt.Sprintf("/scion-volumes/%s", sd.Name)
 		if sd.InWorkspace {
 			target = fmt.Sprintf("%s/.scion-volumes/%s", k8sContainerWorkspace, sd.Name)
 		}
 		sharedDirTargets[target] = true
+		volName := fmt.Sprintf("shared-dir-%d", i)
 
-		if config.SharedDirStorage.Serves(sd.Name) {
-			// shared_dir_storage nfs: mount the dedicated shared PVC by
-			// subPath. Fail closed (design G5) rather than falling back to
-			// an unclaimed/EmptyDir volume when the claim name is missing.
-			if config.SharedDirStorage.PVClaimName == "" {
-				return nil, fmt.Errorf(
-					"shared dir %q: server.shared_dir_storage.nfs.shares[0].pv_name is empty; cannot mount shared dir", sd.Name)
-			}
-			sdSubPath, ok := config.SharedDirStorage.SubPaths[sd.Name]
-			if !ok || sdSubPath == "" {
-				return nil, fmt.Errorf("shared dir %q: no resolved subPath in server.shared_dir_storage", sd.Name)
-			}
-			volName := fmt.Sprintf("shared-dir-%d", i)
-
-			pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
-				Name: volName,
-				VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: config.SharedDirStorage.PVClaimName,
-						ReadOnly:  sd.ReadOnly,
-					},
-				},
-			})
-			pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
-				Name:      volName,
-				MountPath: target,
-				SubPath:   sdSubPath,
-				ReadOnly:  sd.ReadOnly,
-			})
-		} else if nfsSharedDirs {
-			// NFS backend: mount from the workspace PVC with a shared-dir subPath.
-			// SubPath root mirrors the nfsBackend.Resolve layout:
-			//   <SubPathRoot>/<projectID>/shared-dirs/<name>
-			// F-111 review (BLOCKING): nfsSharedDirSubPath validates sd.Name and
-			// the resulting path itself now — reject here too, independent of
-			// pkg/agent/shared_dir_storage.go's own gate.
-			sdSubPath, err := nfsSharedDirSubPath(config.NFSSubPath, sd.Name)
+		if config.SharedDirStorage.Shared() {
+			claim, sdSubPath, err := sharedDirClaimSubPath(config.SharedDirStorage, sd.Name)
 			if err != nil {
 				return nil, err
 			}
-			volName := fmt.Sprintf("shared-dir-%d", i)
-
-			// The volume source is the SAME NFS PVC as the workspace — but K8s
-			// requires a separate Volume entry per unique (claimName, subPath)
-			// pair in the pod spec, so we add the volume under a distinct name.
 			pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
 				Name: volName,
 				VolumeSource: corev1.VolumeSource{
 					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: config.NFSPVClaimName,
+						ClaimName: claim,
 						ReadOnly:  sd.ReadOnly,
 					},
 				},
@@ -2928,27 +2920,26 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 				SubPath:   sdSubPath,
 				ReadOnly:  sd.ReadOnly,
 			})
-		} else {
-			// Local backend: each shared dir gets its own PVC (existing behavior).
-			projectName := projectkeys.ProjectNameFromLabels(config.Labels)
-			pvcName := sharedDirPVCName(projectName, sd.Name)
-			volName := fmt.Sprintf("shared-dir-%d", i)
-
-			pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
-				Name: volName,
-				VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: pvcName,
-						ReadOnly:  sd.ReadOnly,
-					},
-				},
-			})
-			pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
-				Name:      volName,
-				MountPath: target,
-				ReadOnly:  sd.ReadOnly,
-			})
+			continue
 		}
+
+		// Local backend: each shared dir gets its own PVC (existing behavior).
+		projectName := projectkeys.ProjectNameFromLabels(config.Labels)
+		pvcName := sharedDirPVCName(projectName, sd.Name)
+		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+			Name: volName,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: pvcName,
+					ReadOnly:  sd.ReadOnly,
+				},
+			},
+		})
+		pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
+			Name:      volName,
+			MountPath: target,
+			ReadOnly:  sd.ReadOnly,
+		})
 	}
 
 	// Process Volumes
@@ -3238,6 +3229,21 @@ func podDisruptionReason(pod *corev1.Pod) string {
 	return ""
 }
 
+// podDisruptionStartError returns the pod_disrupted *LaunchFailure in step
+// for a pod the cluster preempted or evicted (reason, from
+// podDisruptionReason) while the start waited for it to become ready. The
+// text says which of the two happened and gives the Kubernetes reason, never
+// the pod's or the condition's message. A non-nil cause (the Kubernetes
+// NotFound error, or the terminal-phase error) is wrapped after the text, so
+// its text and its error chain are kept for callers that match on them.
+func podDisruptionStartError(podName, step, reason string, cause error) error {
+	text := fmt.Sprintf("pod %q was %s while starting (%s) — start the agent again", podName, PodDisruptionKind(reason), reason)
+	if cause == nil {
+		return newLaunchFailure(api.LaunchCodePodDisrupted, step, reason, errors.New(text))
+	}
+	return newLaunchFailure(api.LaunchCodePodDisrupted, step, reason, fmt.Errorf("%s: %w", text, cause))
+}
+
 // podDisruptedError returns a pod_disrupted *LaunchFailure in step when the
 // pod is being deleted, or nil. Only the deletion timestamp makes it
 // terminal: Kubernetes can clear a DisruptionTarget condition whose
@@ -3248,8 +3254,7 @@ func podDisruptedError(pod *corev1.Pod, podName, step string) error {
 		return nil
 	}
 	if reason := podDisruptionReason(pod); reason != "" {
-		return newLaunchFailure(api.LaunchCodePodDisrupted, step, reason,
-			fmt.Errorf("pod %q was disrupted while starting (%s) — the cluster preempted or evicted it; start the agent again", podName, reason))
+		return podDisruptionStartError(podName, step, reason, nil)
 	}
 	return newLaunchFailure(api.LaunchCodePodDisrupted, step, "",
 		fmt.Errorf("pod %q was deleted while starting — if you did not stop it, start the agent again", podName))
@@ -3392,6 +3397,10 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 	lastStatus := ""
 	lastStep := ""
 	autopilotWaitLogged := false
+	// lastDisruption is the disruption reason (podDisruptionReason) of the
+	// last pod read, so a pod that is gone by the next poll is still
+	// reported as preempted or evicted.
+	lastDisruption := ""
 
 	fmt.Printf("Waiting for pod '%s' to be ready...\n", podName)
 	for {
@@ -3415,10 +3424,14 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 				if k8serrors.IsNotFound(err) && parentCtx.Err() == nil {
 					// The pod was removed (preempted, evicted or deleted)
 					// before it became ready.
+					if lastDisruption != "" {
+						return podDisruptionStartError(podName, failStep(lastStep), lastDisruption, err)
+					}
 					return newLaunchFailure(api.LaunchCodePodDisrupted, failStep(lastStep), "", err)
 				}
 				return err
 			}
+			lastDisruption = podDisruptionReason(pod)
 
 			if step := podLaunchStep(pod, r.isGKEScheduling()); step != lastStep {
 				lastStep = step
@@ -3427,7 +3440,7 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 
 			// A pod being deleted never becomes usable: fail now rather than
 			// wait for it to disappear. A pod already in a terminal phase
-			// keeps its error text below.
+			// is reported below.
 			if pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed {
 				if err := podDisruptedError(pod, podName, failStep(lastStep)); err != nil {
 					runtimeLog().Error("Pod disrupted while starting", "pod", podName, "reason", podDisruptionReason(pod), "phase", "wait-schedule")
@@ -3500,9 +3513,9 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 					return classifyTerminalWaitingReason(podName, "", reason, message)
 				case "Unschedulable":
 					if r.isGKEScheduling() {
-						runtimeLog().Info("Pod unschedulable (GKE Autopilot will auto-provision nodes)", "pod", podName, "message", message, "phase", "scheduling")
+						runtimeLog().Info("Pod unschedulable (GKE Autopilot will auto-provision nodes)", append([]any{"pod", podName, "message", message, "phase", "scheduling"}, podPlacementLogAttrs(pod)...)...)
 					} else {
-						runtimeLog().Error("Pod unschedulable", "pod", podName, "message", message, "phase", "scheduling")
+						runtimeLog().Error("Pod unschedulable", append([]any{"pod", podName, "message", message, "phase", "scheduling"}, podPlacementLogAttrs(pod)...)...)
 						return newLaunchFailure(api.LaunchCodeUnschedulable, api.LaunchStepScheduling, reason,
 							fmt.Errorf("pod %q cannot be scheduled: %s — check node selectors, tolerations, and resource availability", podName, message))
 					}
@@ -3516,12 +3529,12 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 						// On GKE Autopilot, Unschedulable is transient — the cluster
 						// will auto-provision nodes. Continue waiting instead of failing.
 						if !autopilotWaitLogged {
-							runtimeLog().Info("Pod unschedulable (GKE Autopilot will auto-provision nodes)", "pod", podName, "message", cond.Message, "phase", "scheduling")
+							runtimeLog().Info("Pod unschedulable (GKE Autopilot will auto-provision nodes)", append([]any{"pod", podName, "message", cond.Message, "phase", "scheduling"}, podPlacementLogAttrs(pod)...)...)
 							fmt.Printf("  Waiting for GKE Autopilot to provision node capacity...\n")
 							autopilotWaitLogged = true
 						}
 					} else {
-						runtimeLog().Error("Pod unschedulable", "pod", podName, "message", cond.Message, "phase", "scheduling")
+						runtimeLog().Error("Pod unschedulable", append([]any{"pod", podName, "message", cond.Message, "phase", "scheduling"}, podPlacementLogAttrs(pod)...)...)
 						return newLaunchFailure(api.LaunchCodeUnschedulable, api.LaunchStepScheduling, cond.Reason,
 							fmt.Errorf("pod %q cannot be scheduled: %s — check node selectors, tolerations, and resource availability", podName, cond.Message))
 					}
@@ -3541,8 +3554,8 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 				if containerStatus != nil && containerStatus.State.Terminated != nil {
 					err = fmt.Errorf("pod failed to start: %s - %s", containerStatus.State.Terminated.Reason, containerStatus.State.Terminated.Message)
 				}
-				if reason := podDisruptionReason(pod); reason != "" {
-					return newLaunchFailure(api.LaunchCodePodDisrupted, failStep(lastStep), reason, err)
+				if lastDisruption != "" {
+					return podDisruptionStartError(podName, failStep(lastStep), lastDisruption, err)
 				}
 				return err
 			}
@@ -3679,75 +3692,6 @@ func (r *KubernetesRuntime) syncToPod(ctx context.Context, namespace, podName, s
 	fmt.Printf("  Sync to %s complete.\n", destPath)
 	runtimeLog().Info("Sync to pod complete", "pod", podName, "dest", destPath,
 		"elapsed_ms", time.Since(syncStart).Milliseconds(), "bytes", counted.count)
-	return nil
-}
-
-func (r *KubernetesRuntime) syncFromPod(ctx context.Context, namespace, podName, remotePath, localPath string) error {
-	if err := os.MkdirAll(localPath, 0755); err != nil {
-		return fmt.Errorf("failed to create local workspace directory: %w", err)
-	}
-	fmt.Printf("  Preparing remote tar archive from %s...\n", remotePath)
-
-	remoteCmd := fmt.Sprintf("tar -cz -C '%s' .", remotePath)
-	cmd := []string{"sh", "-c", remoteCmd}
-
-	req := r.Client.Clientset.CoreV1().RESTClient().Post().
-		Resource("pods").
-		Name(podName).
-		Namespace(namespace).
-		SubResource("exec")
-
-	option := &corev1.PodExecOptions{
-		Container: agentContainerName,
-		Command:   cmd,
-		Stdin:     false,
-		Stdout:    true,
-		Stderr:    true,
-		TTY:       false,
-	}
-
-	req.VersionedParams(
-		option,
-		scheme.ParameterCodec,
-	)
-
-	executor, err := remotecommand.NewSPDYExecutor(r.Client.Config, "POST", req.URL())
-	if err != nil {
-		return err
-	}
-
-	// Prepare local tar
-	tarCmd := exec.CommandContext(ctx, "tar", "-xz", "-m", "-C", localPath)
-	tarCmd.Env = append(os.Environ(), "COPYFILE_DISABLE=1")
-	stdin, err := tarCmd.StdinPipe()
-	if err != nil {
-		return err
-	}
-
-	if err := tarCmd.Start(); err != nil {
-		return err
-	}
-
-	fmt.Printf("  Streaming archive from pod '%s' (destination: %s)...\n", podName, localPath)
-	var stderr bytes.Buffer
-	err = executor.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdout: stdin,
-		Stderr: &stderr,
-	})
-
-	// Close stdin to tell local tar that stream is finished
-	_ = stdin.Close()
-	waitErr := tarCmd.Wait()
-
-	if err != nil {
-		return fmt.Errorf("stream failed: %w (remote stderr: %s)", err, stderr.String())
-	}
-
-	if waitErr != nil {
-		return fmt.Errorf("local tar failed: %w", waitErr)
-	}
-
-	fmt.Printf("  Sync from %s complete.\n", remotePath)
 	return nil
 }
 
@@ -3934,15 +3878,31 @@ func k8sDisruptionExitReason(pod *corev1.Pod) string {
 		if cond.Type != corev1.DisruptionTarget || cond.Status != corev1.ConditionTrue {
 			continue
 		}
-		if cond.Reason == corev1.PodReasonPreemptionByScheduler {
-			return string(state.ExitReasonPreempted)
-		}
-		// TerminationByKubelet, EvictionByEvictionAPI, or any other
-		// DisruptionTarget reason (for example a taint-manager or pod-GC
-		// removal) is reported as evicted.
-		return string(state.ExitReasonEvicted)
+		return string(disruptionExitReason(cond.Reason))
 	}
 	return ""
+}
+
+// disruptionExitReason maps a Kubernetes disruption reason to preempted or
+// evicted: PreemptionByScheduler is a preemption; TerminationByKubelet,
+// EvictionByEvictionAPI, the pod status reason Evicted, or any other
+// DisruptionTarget reason (for example a taint-manager or pod-GC removal)
+// is reported as evicted.
+func disruptionExitReason(reason string) state.ExitReason {
+	if reason == corev1.PodReasonPreemptionByScheduler {
+		return state.ExitReasonPreempted
+	}
+	return state.ExitReasonEvicted
+}
+
+// PodDisruptionKind returns "preempted" or "evicted" for the Kubernetes
+// disruption reason a pod_disrupted LaunchFailure carries in Reason, or ""
+// when reason is empty (the pod was deleted without a disruption signal).
+func PodDisruptionKind(reason string) string {
+	if reason == "" {
+		return ""
+	}
+	return string(disruptionExitReason(reason))
 }
 
 // k8sPodWorkspaceRecoverable reports whether a later start of the agent can
@@ -4260,12 +4220,12 @@ func (r *KubernetesRuntime) Attach(ctx context.Context, id string) error {
 	}
 
 	// Monitor for resize signals (SIGWINCH)
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGWINCH)
+	resized, stopResize := termresize.Notify(attachCtx, fd)
+	defer stopResize()
 	go func() {
 		for {
 			select {
-			case <-sigChan:
+			case <-resized:
 				if w, h, err := term.GetSize(fd); err == nil {
 					sizeQueue.resizeChan <- remotecommand.TerminalSize{Width: uint16(w), Height: uint16(h)}
 				}
@@ -4274,7 +4234,6 @@ func (r *KubernetesRuntime) Attach(ctx context.Context, id string) error {
 			}
 		}
 	}()
-	defer signal.Stop(sigChan)
 
 	// Trigger a "resize dance" to force TUI redraw. Some TUIs only redraw
 	// when they receive a SIGWINCH where the dimensions actually change.
@@ -4353,7 +4312,16 @@ func (r *KubernetesRuntime) PullImage(ctx context.Context, image string) error {
 	return nil
 }
 
+// errK8sSyncFromUnsupported is Sync's error for SyncFrom: the Kubernetes
+// runtime only copies from the broker to the pod. An agent's changes reach
+// the host only when the agent commits and pushes them to the remote.
+var errK8sSyncFromUnsupported = errors.New("kubernetes: syncing from an agent is not supported; the agent must commit and push its changes to the remote")
+
 func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncDirection) error {
+	if direction == SyncFrom {
+		return errK8sSyncFromUnsupported
+	}
+
 	// Find pod first
 	agents, err := r.List(ctx, map[string]string{"scion.name": id})
 	if err != nil {
@@ -4382,15 +4350,14 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 		return fmt.Errorf("agent '%s' does not have a workspace path recorded", id)
 	}
 
-	// Only a path that passes the fixed floors may be used here, as either a
-	// sync source (broker disk -> agent, SyncTo direction) or a sync
-	// destination (agent -> broker disk, SyncFrom direction). This is a
-	// value read straight from a persisted pod annotation, not freshly
-	// computed, so it needs this check independent of whatever validated it
-	// (or didn't) when it was first written. No per-project root is
-	// available at this call site — only agent annotations/labels are in
-	// scope, with no project directory or settings to derive one from — so
-	// only the fixed deny-set applies, not per-project root containment.
+	// Only a path that passes the fixed floors may be used here as the sync
+	// source (broker disk -> agent). This is a value read straight from a
+	// persisted pod annotation, not freshly computed, so it needs this check
+	// independent of whatever validated it (or didn't) when it was first
+	// written. No per-project root is available at this call site — only
+	// agent annotations/labels are in scope, with no project directory or
+	// settings to derive one from — so only the fixed deny-set applies, not
+	// per-project root containment.
 	resolvedWorkspacePath, err := ValidateWorkspaceSource(workspacePath, "")
 	if err != nil {
 		return err
@@ -4401,17 +4368,16 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 	username := agent.Annotations["scion.username"]
 
 	// Same reasoning as workspacePath above: homeDir is a host path read
-	// straight from a persisted annotation, used below as either a sync
-	// destination (SyncFrom) or a sync source (SyncTo), and needs the same
-	// check independent of whatever validated it when first written. This is
-	// an agent's home directory, not a workspace, so it goes through
-	// ValidateAgentHomeSource rather than ValidateWorkspaceSource: the two
-	// admit disjoint shapes under ~/.scion (see ValidateAgentHomeSource's
-	// doc comment). Agent homes under ~/.scion take one of three layouts
-	// (global, hub-managed, or externalized git project); a home outside
-	// ~/.scion entirely (a plain in-repo project's own agent home, for
-	// example) is subject to the fixed floors only, the same as any other
-	// source this function's sibling validates.
+	// straight from a persisted annotation, used below as the sync source,
+	// and needs the same check independent of whatever validated it when
+	// first written. This is an agent's home directory, not a workspace, so
+	// it goes through ValidateAgentHomeSource rather than
+	// ValidateWorkspaceSource: the two admit disjoint shapes under ~/.scion
+	// (see ValidateAgentHomeSource's doc comment). Agent homes under ~/.scion
+	// take one of three layouts (global, hub-managed, or externalized git
+	// project); a home outside ~/.scion entirely (a plain in-repo project's
+	// own agent home, for example) is subject to the fixed floors only, the
+	// same as any other source this function's sibling validates.
 	if homeDir != "" {
 		resolvedHomeDir, err := ValidateAgentHomeSource(homeDir, "")
 		if err != nil {
@@ -4433,6 +4399,11 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 		return fmt.Errorf("direction (to or from) must be specified for tar sync. Example: scion sync to %s", agent.ContainerID)
 	}
 
+	// A pod whose annotation excludes the in-project agents root keeps it
+	// out of the copy: a sync to the pod does not put it in the agent's
+	// view.
+	workspaceExcludes := k8sWorkspaceSyncExcludes(agent.Annotations)
+
 	// The home of an NFS-home agent is kept on the export across starts;
 	// it is not copied to or from the broker's copy.
 	if homeDir != "" && homeKeptOnExport(agent.Annotations) {
@@ -4440,28 +4411,9 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 		homeDir = ""
 	}
 
-	if direction == SyncFrom {
-		fmt.Printf("Syncing workspace (agent -> %s)...\n", workspacePath)
-		if err := r.syncWithRetry(ctx, func() error {
-			return r.syncTransferFn(ctx, namespace, agent.ContainerID, "/workspace", workspacePath, false)
-		}); err != nil {
-			return err
-		}
-		if homeDir != "" && username != "" {
-			destHome := util.GetHomeDir(username)
-			fmt.Printf("Syncing agent home (agent -> %s)...\n", homeDir)
-			if err := r.syncWithRetry(ctx, func() error {
-				return r.syncTransferFn(ctx, namespace, agent.ContainerID, destHome, homeDir, false)
-			}); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-
 	fmt.Printf("Syncing workspace (%s -> agent)...\n", workspacePath)
 	if err := r.syncWithRetry(ctx, func() error {
-		return r.syncTransferFn(ctx, namespace, agent.ContainerID, workspacePath, "/workspace", true)
+		return r.syncTransferFn(ctx, namespace, agent.ContainerID, workspacePath, "/workspace", workspaceExcludes)
 	}); err != nil {
 		return err
 	}
@@ -4469,7 +4421,7 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 		destHome := util.GetHomeDir(username)
 		fmt.Printf("Syncing agent home (%s -> agent)...\n", homeDir)
 		if err := r.syncWithRetry(ctx, func() error {
-			return r.syncTransferFn(ctx, namespace, agent.ContainerID, homeDir, destHome, true)
+			return r.syncTransferFn(ctx, namespace, agent.ContainerID, homeDir, destHome, nil)
 		}); err != nil {
 			return err
 		}
@@ -4477,16 +4429,22 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 	return nil
 }
 
-// syncTransferFn copies src to dest for Sync, from the broker to the pod
-// when toPod is true and back otherwise.
-func (r *KubernetesRuntime) syncTransferFn(ctx context.Context, namespace, podName, src, dest string, toPod bool) error {
+// syncWorkspaceToPod copies the broker's workspace src into a new pod's
+// /workspace, leaving out what the pod's annotations exclude
+// (k8sWorkspaceSyncExcludes).
+func (r *KubernetesRuntime) syncWorkspaceToPod(ctx context.Context, namespace string, pod *corev1.Pod, src string) error {
+	return r.syncWithRetry(ctx, func() error {
+		return r.syncTransferFn(ctx, namespace, pod.Name, src, "/workspace", k8sWorkspaceSyncExcludes(pod.Annotations))
+	})
+}
+
+// syncTransferFn copies src on the broker to dest in the pod for Sync and
+// the start's workspace sync.
+func (r *KubernetesRuntime) syncTransferFn(ctx context.Context, namespace, podName, src, dest string, excludes []string) error {
 	if r.syncTransfer != nil {
-		return r.syncTransfer(ctx, namespace, podName, src, dest, toPod)
+		return r.syncTransfer(ctx, namespace, podName, src, dest, excludes)
 	}
-	if toPod {
-		return r.syncToPod(ctx, namespace, podName, src, dest)
-	}
-	return r.syncFromPod(ctx, namespace, podName, src, dest)
+	return r.syncToPod(ctx, namespace, podName, src, dest, excludes...)
 }
 
 func (r *KubernetesRuntime) Exec(ctx context.Context, id string, cmd []string) (string, error) {
@@ -4669,43 +4627,47 @@ func (r *KubernetesRuntime) GetWorkspacePath(ctx context.Context, id string) (st
 	return "", fmt.Errorf("no workspace path found for pod %s", id)
 }
 
-// nfsSharedDirSubPath computes the NFS subPath for a shared directory given the
-// workspace subPath. The workspace subPath is like "projects/<pid>/workspace";
-// shared dirs are siblings: "projects/<pid>/shared-dirs/<name>".
+// sharedDirClaimSubPath returns the claim and subPath shared dir name is
+// mounted from on a shared backend, failing closed (design G5) when the
+// share has no claim or the dir has no resolved subPath, rather than
+// falling back to a per-dir claim or an EmptyDir.
 //
-// This mirrors the nfsBackend.Resolve layout (design §5.3).
-//
-// F-111 review (tf-lead/tf-review-nfsfix, BLOCKING): sharedDirName is data —
-// it can come from a cloned repo's in-repo settings.yaml — and
-// filepath.Join silently collapses ".." segments before Kubernetes' own
-// subPath escape check ever sees the resulting string. A name like
-// "../../<other-project>/workspace" would resolve to another project's real
-// workspace directory; since F-111 gave the provisioning init container CHOWN/
-// FOWNER/DAC_OVERRIDE, that's not just a data leak, it's a cross-project
-// ownership hijack (chown -R -h on someone else's tree). This is defense in
-// depth alongside pkg/agent/shared_dir_storage.go's own validation gate
-// (resolveSharedDirs, fails closed when workspace_storage.backend is nfs):
-// this function refuses to build a bad subPath at all, independently, in
-// case anything else ever reaches buildPod with unvalidated SharedDirs.
-//
-// Two independent checks, not one: api.ValidateSharedDirs rejects anything
-// that isn't a valid slug (lowercase alphanumeric + internal hyphens only —
-// which cannot produce a path separator or ".." by construction), and the
-// joined-path-prefix check below is a second, structurally different gate
-// that doesn't depend on the slug regex ever staying correct.
-func nfsSharedDirSubPath(workspaceSubPath, sharedDirName string) (string, error) {
+// The subPath was resolved by pkg/projectfs on the broker (Layout.Resolve
+// validates the name and confines the leaf to <subpath root>/<pid>/
+// shared-dirs/). This is a second, structurally different gate, so that a
+// pod spec is never built from an unchecked subPath: sharedDirName is data
+// (it can come from a cloned repo's in-repo settings.yaml), and the
+// provisioning init container that mounts these subPaths has CHOWN/FOWNER/
+// DAC_OVERRIDE (F-111), so an escaping subPath would be a cross-project
+// ownership hijack, not just a leak. The name must pass
+// api.ValidateSharedDirs (a slug: no separator, no ".." by construction)
+// and the subPath must be a clean relative path ending in
+// shared-dirs/<name>.
+func sharedDirClaimSubPath(r *SharedDirRealization, sharedDirName string) (claim, subPath string, err error) {
 	if err := api.ValidateSharedDirs([]api.SharedDir{{Name: sharedDirName}}); err != nil {
-		return "", fmt.Errorf("shared dir name %q: %w", sharedDirName, err)
+		return "", "", fmt.Errorf("shared dir name %q: %w", sharedDirName, err)
 	}
-	// workspaceSubPath is "projects/<pid>/workspace"
-	// We need "projects/<pid>/shared-dirs/<name>"
-	parent := filepath.Dir(workspaceSubPath) // "projects/<pid>"
-	wantDir := filepath.Join(parent, "shared-dirs")
-	joined := filepath.Join(wantDir, sharedDirName)
-	if !strings.HasPrefix(joined, wantDir+string(filepath.Separator)) {
-		return "", fmt.Errorf("shared dir name %q: resolved subPath %q escapes %s", sharedDirName, joined, wantDir)
+	if r.PVClaimName == "" {
+		return "", "", fmt.Errorf("shared dir %q: the %s shared-dir storage has no claim "+
+			"(server.project_storage nfs.shares[0].pv_name, or gke_shared_volume.pv_claim_name); cannot mount shared dir",
+			sharedDirName, r.Backend)
 	}
-	return joined, nil
+	subPath = r.SubPaths[sharedDirName]
+	if subPath == "" {
+		return "", "", fmt.Errorf("shared dir %q: no resolved subPath in the shared-dir storage", sharedDirName)
+	}
+	if !filepath.IsLocal(subPath) || filepath.Clean(subPath) != subPath ||
+		filepath.Base(subPath) != sharedDirName || filepath.Base(filepath.Dir(subPath)) != "shared-dirs" {
+		return "", "", fmt.Errorf("shared dir %q: resolved subPath %q is not <project>/shared-dirs/%s", sharedDirName, subPath, sharedDirName)
+	}
+	// The project component is a valid project ID and the realization's
+	// own project (pkg/agent always sets it; an empty one fails closed): a
+	// subPath can never name another project's tree.
+	project := filepath.Base(filepath.Dir(filepath.Dir(subPath)))
+	if r.ProjectID == "" || !shareddirs.ValidProjectID(project) || project != r.ProjectID {
+		return "", "", fmt.Errorf("shared dir %q: resolved subPath %q is not under this project's tree", sharedDirName, subPath)
+	}
+	return r.PVClaimName, subPath, nil
 }
 
 // nfsSharedDirMount pairs a shared dir's own name (config.SharedDirs[i].Name,
@@ -4722,17 +4684,19 @@ type nfsSharedDirMount struct {
 }
 
 // nfsSharedDirInitMounts returns the workspace-provision init container's
-// additional VolumeMounts for shared dirs served from the workspace NFS PVC
-// by subPath (F-111, design §9) — mirrors buildPod's own nfsSharedDirs branch
-// below exactly (same volume names, by index, same subPath/target
-// computation), so the volumes these mounts reference are guaranteed to
-// exist in pod.Spec.Volumes once that branch runs later in the same buildPod
-// call. Returns nil for any other shared-dir mechanism
-// (server.shared_dir_storage's own NFS backend, or the local per-dir-PVC
-// backend) — those are separate subsystems, not implicated in F-111.
+// additional VolumeMounts for shared dirs served from the workspace NFS
+// claim by subPath (F-111, design §9): the shared-dir storage is on the
+// same claim as the workspace. It mirrors buildPod's shared-dir loop
+// exactly (same volume names, by index, same subPath/target), so the
+// volumes these mounts reference are guaranteed to exist in
+// pod.Spec.Volumes once that loop runs later in the same buildPod call.
+// Returns nil when the shared dirs are on another claim (the legacy split
+// shared-dir export) or on the local backend: the init container does not
+// mount those.
 func nfsSharedDirInitMounts(config RunConfig) ([]nfsSharedDirMount, error) {
-	nfsSharedDirs := config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != ""
-	if !nfsSharedDirs || len(config.SharedDirs) == 0 {
+	onWorkspaceClaim := config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != "" &&
+		config.SharedDirStorage.Shared() && config.SharedDirStorage.PVClaimName == config.NFSPVClaimName
+	if !onWorkspaceClaim || len(config.SharedDirs) == 0 {
 		return nil, nil
 	}
 
@@ -4743,16 +4707,11 @@ func nfsSharedDirInitMounts(config RunConfig) ([]nfsSharedDirMount, error) {
 
 	var mounts []nfsSharedDirMount
 	for i, sd := range config.SharedDirs {
-		// A dir served by server.shared_dir_storage nfs is not on the
-		// workspace claim. The index stays the pod volume index.
-		if config.SharedDirStorage.Serves(sd.Name) {
-			continue
-		}
 		target := fmt.Sprintf("/scion-volumes/%s", sd.Name)
 		if sd.InWorkspace {
 			target = fmt.Sprintf("%s/.scion-volumes/%s", k8sContainerWorkspace, sd.Name)
 		}
-		subPath, err := nfsSharedDirSubPath(config.NFSSubPath, sd.Name)
+		_, subPath, err := sharedDirClaimSubPath(config.SharedDirStorage, sd.Name)
 		if err != nil {
 			return nil, err
 		}
@@ -4774,6 +4733,116 @@ func nfsSharedDirInitMounts(config RunConfig) ([]nfsSharedDirMount, error) {
 // runtimes use.
 func NFSWorktreeContainerPath(name string) string {
 	return "/repo-root/worktrees/" + name
+}
+
+// k8sSharedRepoShapeRefusal reports whether this Kubernetes pod would share one
+// repository's .git across the project's agents on the NFS export, and the
+// neutral end-state message to return if so. The shared-.git shapes are:
+//   - worktree-per-agent (NFSWorktreeName set): every agent mounts the shared
+//     .git at /repo-root/.git;
+//   - shared-workspace (the project's shared checkout, with its .git, mounted at
+//     /workspace for every agent), which includes pre-#3998 agents that stay on
+//     the shared checkout (nfsKeepSharedCheckout).
+//
+// Clone-per-agent (NFSAgentDirName set) and empty-per-agent (NFSAgentDirEmpty)
+// each get their own agent directory and do not share a .git; the local/emptyDir
+// backends do not either. Everything else on the NFS backend is a shared checkout.
+//
+// The shape is derived from the per-agent workspace fields re-sent on every
+// start — NFSWorktreeName, NFSAgentDirName, NFSAgentDirEmpty and the
+// SCION_WORKSPACE_GIT env hint; the ephemeral GitCloneForInit can only add a
+// refusal, never lift one. So the refusal fires on EVERY start of a shared-repo
+// agent, including a bare restart; and an NFS agent whose shape is unset/unknown is
+// refused fail-closed rather than brought up on a writable shared checkout.
+func k8sSharedRepoShapeRefusal(config RunConfig) (string, bool) {
+	if config.WorkspaceBackendName != "nfs" || config.NFSPVClaimName == "" {
+		return "", false
+	}
+	// worktree-per-agent: every agent mounts the shared .git.
+	if config.NFSWorktreeName != "" {
+		return k8sSharedRepoShapeRefusalText, true
+	}
+	// clone-per-agent and empty-per-agent get their own agent directory and do not
+	// share a repository.
+	if config.NFSAgentDirName != "" || config.NFSAgentDirEmpty {
+		return "", false
+	}
+	// Otherwise this NFS agent uses the project's shared checkout (shared-workspace).
+	// A git-backed shared checkout is the shared-repository shape and is refused on
+	// every start (create, restart, or an unset shape). A non-git shared workspace
+	// has no shared .git and is allowed — but only when the signals positively say
+	// non-git; if git-ness cannot be determined, refuse (fail closed).
+	if config.GitCloneForInit != nil {
+		return k8sSharedRepoShapeRefusalText, true
+	}
+	if v, present := runConfigEnvValue(config, "SCION_WORKSPACE_GIT"); present {
+		if b, ok := util.ParseBool(v); ok && !b {
+			return "", false // positively non-git
+		}
+	}
+	return k8sSharedRepoShapeRefusalText, true
+}
+
+// runConfigEnvValue returns the value of the given key in config.Env ("KEY=VALUE"
+// entries), and whether it was present.
+func runConfigEnvValue(config RunConfig, key string) (string, bool) {
+	for _, kv := range config.Env {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == key {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// k8sSharedRepoShapeRefusalText is the exact neutral end-state message returned
+// when a Kubernetes start is refused for the shared-repository shape.
+const k8sSharedRepoShapeRefusalText = "Kubernetes does not support agents that share one git repository on NFS: this agent is " +
+	"worktree-per-agent, or uses the project's shared workspace and the runtime broker cannot confirm " +
+	"that the shared workspace is not a git repository. Re-create the agent as clone-per-agent, " +
+	"or run it on a local or Docker broker. Work not pushed from the existing agent remains in " +
+	"the project's shared checkout on the workspace storage."
+
+// k8sGitAdminReadOnlyMounts returns the read-only subPath volumeMounts that
+// narrow the shared .git admin surface for a worktree-per-agent agent container.
+// The shared .git subPath itself is mounted read-write
+// elsewhere (objects and refs must be writable for commit); these layer
+// read-only over hooks/, info/, objects/info/ and worktrees/, with the agent's
+// own worktrees/<name>/ re-mounted read-write on top so it can still write its
+// own HEAD/index/logs. gitSubPath is the export-relative path of the shared
+// .git; ownWorktreeName is this agent's worktree admin dir name.
+//
+// Note: this does NOT make .git/config read-only — the per-agent private config
+// on Kubernetes needs the seeded copy on the export and is a tracked follow-up;
+// until it lands the shared config stays read-write (documented residual).
+func k8sGitAdminReadOnlyMounts(gitSubPath, ownWorktreeName string) []corev1.VolumeMount {
+	const base = "/repo-root/.git"
+	ro := func(rel string) corev1.VolumeMount {
+		return corev1.VolumeMount{
+			Name:      "workspace",
+			MountPath: path.Join(base, rel),
+			SubPath:   path.Join(gitSubPath, rel),
+			ReadOnly:  true,
+		}
+	}
+	mounts := []corev1.VolumeMount{
+		ro("hooks"),
+		ro("info"),
+		ro(path.Join("objects", "info")),
+		ro("worktrees"),
+	}
+	if ownWorktreeName != "" {
+		// The agent's own worktree admin dir is read-write on top of the
+		// read-only worktrees/ dir (its gitdir/config.worktree are not singled
+		// out read-only here — unlike the bind-mount runtimes; the shared-repo
+		// shape is refused at start and the shared-config follow-up adds the
+		// per-worktree file pins).
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      "workspace",
+			MountPath: path.Join(base, "worktrees", ownWorktreeName),
+			SubPath:   path.Join(gitSubPath, "worktrees", ownWorktreeName),
+		})
+	}
+	return mounts
 }
 
 // nfsWorktreeSubPaths returns the subPaths of the shared checkout's .git and
@@ -4882,14 +4951,15 @@ func nfsProvisionEnv(gc *api.GitCloneConfig) []corev1.EnvVar {
 	return envs
 }
 
-// sharedDirSupplementalGroups returns the nfs shared-dir leaf groups
+// sharedDirSupplementalGroups returns the shared-dir leaf groups
 // (RunConfig.SharedDirStorage.SupplementalGroups, already guarded by
 // pkg/agent) to add as pod supplementalGroups, so the agent can write files
 // other agent kinds create in the leaf's group (ptone/scion#3155). A gid
 // equal to fsGroup is skipped, since Kubernetes already adds fsGroup. Nil
-// when the agent mounts no nfs shared dir, leaving the pod spec unchanged.
+// when the agent mounts no shared dir from a shared backend, leaving the
+// pod spec unchanged.
 func sharedDirSupplementalGroups(config RunConfig, fsGroup int64) []int64 {
-	if config.SharedDirStorage == nil || config.SharedDirStorage.Backend != "nfs" || len(config.SharedDirs) == 0 {
+	if !config.SharedDirStorage.Shared() || len(config.SharedDirs) == 0 {
 		return nil
 	}
 	var out []int64
@@ -4922,4 +4992,133 @@ func withSupplementalGIDsEnv(env []corev1.EnvVar, groups []int64) []corev1.EnvVa
 		ids = append(ids, strconv.FormatInt(gid, 10))
 	}
 	return append(out, corev1.EnvVar{Name: SupplementalGIDsEnvVar, Value: strings.Join(ids, ",")})
+}
+
+// k8sWorkspaceAgentsAnnotation marks a pod whose workspace tar syncs leave
+// the in-project agents root out (ptone/scion#5513). buildPod sets it from
+// k8sWorkspaceAgentsExcluded only; a caller-supplied value is dropped.
+const k8sWorkspaceAgentsAnnotation = "scion.workspace_agents_excluded"
+
+// k8sAgentsMaskVolume names the pod volume that shadows the in-project
+// agents root of an NFS-shared workspace.
+const k8sAgentsMaskVolume = "agents-mask"
+
+// k8sAgentsMaskSizeLimit caps the memory-backed mask volume, which is meant
+// to stay empty (every tar sync leaves the path out). Where the kubelet
+// sizes memory-backed emptyDirs to their limit, writes past it fail with
+// ENOSPC in the container; otherwise the eviction manager evicts the pod
+// once usage exceeds it, and with RestartPolicy Never the agent stops.
+// Docker's tmpfs mask has no limit.
+const k8sAgentsMaskSizeLimit = "1Mi"
+
+// k8sWorkspaceAgentsExcluded decides how a pod that mounts the shared
+// workspace at /workspace keeps the in-project agents root out of the
+// agent's view. excluded: every workspace tar sync leaves the path out,
+// under the same condition as Docker's mask. That is the whole control on
+// the local backend, whose per-pod emptyDir is filled only by the sync.
+// maskTarget: on an NFS-shared workspace, which the pod mounts directly,
+// the path is also shadowed with an empty volume, but only when
+// <workspace>/.scion/agents already exists on the broker's view of the
+// export, so the mount point is never created there.
+func k8sWorkspaceAgentsExcluded(config RunConfig, nfsShared bool) (excluded bool, maskTarget string) {
+	target, ok := sharedWorkspaceAgentsMaskTarget(config, "/workspace", false)
+	if !ok {
+		return false, ""
+	}
+	// Workspace resolved to the repo root above, so checking the agents dir
+	// under it is the requireAgentsDir condition without resolving again.
+	if nfsShared {
+		if isDir(filepath.Join(config.RepoRoot, filepath.FromSlash(sharedWorkspaceAgentsDir))) {
+			maskTarget = target
+		} else {
+			runtimeLog().Debug("Not masking the in-project agents dir: it does not exist", "agent", config.Name)
+		}
+	}
+	return true, maskTarget
+}
+
+// k8sAgentsMaskPodVolume is the pod volume that shadows the in-project
+// agents root: an empty, memory-backed emptyDir, like Docker's tmpfs.
+func k8sAgentsMaskPodVolume() corev1.Volume {
+	limit := resource.MustParse(k8sAgentsMaskSizeLimit)
+	return corev1.Volume{
+		Name: k8sAgentsMaskVolume,
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: &limit},
+		},
+	}
+}
+
+// withScionAnnotation returns annotations with key set to value when set
+// is true and key removed otherwise. buildPod uses it for the annotations
+// it owns (k8sHomeStorageAnnotation, k8sWorkspaceAgentsAnnotation), so a
+// caller-supplied value never survives. The input map is not modified; it
+// is returned as is when no change is needed.
+func withScionAnnotation(annotations map[string]string, key, value string, set bool) map[string]string {
+	if _, has := annotations[key]; !set && !has {
+		return annotations
+	}
+	out := make(map[string]string, len(annotations)+1)
+	for k, v := range annotations {
+		out[k] = v
+	}
+	delete(out, key)
+	if set {
+		out[key] = value
+	}
+	return out
+}
+
+// k8sProjectConfigVolumeMount returns the read-only mount of the project
+// configuration directory (or .scion marker file) of an NFS-shared
+// workspace, whose broker-side view is config.Workspace, over the pod's
+// /workspace mount of the same export. ok is false when the workspace has
+// no .scion entry. A workspace the broker cannot see (including a symlink
+// whose target is unreachable), or a .scion entry it cannot check, is an
+// error: the pod is refused rather than built without the read-only mount.
+func k8sProjectConfigVolumeMount(config RunConfig) (corev1.VolumeMount, bool, error) {
+	// The NFS-shared pod mounts the project's shared workspace
+	// (config.Workspace, the export subPath) at /workspace, whatever repo
+	// root git metadata reports for it.
+	if config.Workspace == "" || config.AgentOwnWorkspace {
+		return corev1.VolumeMount{}, false, nil
+	}
+	// The broker must see the shared workspace to decide; a workspace it
+	// cannot check refuses the pod rather than omit the read-only mount.
+	if _, err := os.Stat(config.Workspace); err != nil {
+		return corev1.VolumeMount{}, false, fmt.Errorf("cannot check the shared workspace for project configuration to mount read-only: %w", err)
+	}
+	if _, _, ok, err := workspaceProjectConfigMount(config.Workspace, "/workspace", true); err != nil || !ok {
+		return corev1.VolumeMount{}, false, err
+	}
+	// The entry is realized through the layout authority as a pod mount of
+	// the workspace claim, by the workspace's subPath (design §P1a rule 3:
+	// the workspace's .scion entry, never the project root).
+	entry, err := projectfs.ProjectConfigEntry(projectfs.Resolved{
+		Backend: projectfs.BackendNFS, Kind: projectfs.KindWorkspace,
+		HostPath: config.Workspace, SubPath: config.NFSSubPath, Target: "/workspace",
+	})
+	if err != nil {
+		return corev1.VolumeMount{}, false, err
+	}
+	realized, err := projectfs.Layout{Backend: projectfs.BackendNFS, Share: projectfs.Share{PVName: config.NFSPVClaimName}}.Realize(entry, projectfs.RuntimePod)
+	if err != nil {
+		return corev1.VolumeMount{}, false, err
+	}
+	return corev1.VolumeMount{
+		Name:      "workspace",
+		MountPath: realized.Target,
+		SubPath:   realized.SubPath,
+		ReadOnly:  realized.ReadOnly,
+	}, true, nil
+}
+
+// k8sWorkspaceSyncExcludes returns the workspace paths a tar sync to a
+// pod with these annotations leaves out. The annotation records the
+// decision buildPod made, so no RepoRoot is needed.
+func k8sWorkspaceSyncExcludes(annotations map[string]string) []string {
+	if annotations[k8sWorkspaceAgentsAnnotation] == "true" {
+		return []string{sharedWorkspaceAgentsDir}
+	}
+	return nil
 }

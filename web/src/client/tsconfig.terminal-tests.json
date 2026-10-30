@@ -10,24 +10,7 @@
     "../../node_modules/@shoelace-style/shoelace/dist/components/alert/alert.d.ts",
     "../../node_modules/@shoelace-style/shoelace/dist/components/dialog/dialog.d.ts"
   ],
-  "include": [
-    "terminal-layout.test.ts",
-    "terminal-sessions.test.ts",
-    "terminal-metadata.test.ts",
-    "terminal-coordinator-teardown.test.ts",
-    "terminal-coordinator-ownership.test.ts",
-    "terminal-reconnect.test.ts",
-    "terminal-close-codes.test.ts",
-    "terminal-workspace-root.test.ts",
-    "terminal-workspace-bulk-actions.test.ts",
-    "terminal-foreground-reconnect.test.ts",
-    "terminal-persistence.test.ts",
-    "terminal-palette-data.test.ts",
-    "terminal-palette-open.test.ts",
-    "terminal-layout-open.test.ts",
-    "terminal-connect.smoke.test.ts",
-    "terminal-move.test.ts",
-    "terminal-workspace-loader.test.ts"
-  ],
+  // Every terminal unit test, by glob (ptone/scion#5335).
+  "include": ["terminal-*.test.ts"],
   "exclude": []
 }

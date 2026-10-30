@@ -267,6 +267,28 @@ func revisionCeilingConsistent(credentialKind string, c store.EffectCeiling) err
 	return nil
 }
 
+// scheduledUserAccount applies the account-status rule (checkUserAccount)
+// to a scheduled revision's user principal and returns its active users
+// row. A lookup fault is returned as a fault (not errScheduledAuthorityDenied).
+// Every other refusal, including a lookup that returns neither a row nor an
+// error, is errScheduledAuthorityDenied with reasonPrincipalInactive.
+func scheduledUserAccount(ctx context.Context, users userRowReader, principalID string) (*store.User, error) {
+	user, err := checkUserAccount(ctx, users, PrincipalContext{Kind: PrincipalKindUser, ID: principalID})
+	switch {
+	case err == nil:
+		return user, nil
+	case errors.Is(err, errUserLookupNoRow):
+		// Must precede the fault case: checkUserAccount reports a lookup
+		// with neither a row nor an error as a lookup fault, which the
+		// scheduled path refuses as an inactive principal.
+		return nil, fmt.Errorf("%w: %s", errScheduledAuthorityDenied, reasonPrincipalInactive)
+	case isProjectAccessLookupFault(err):
+		return nil, fmt.Errorf("scheduled authority: %w", err)
+	default:
+		return nil, fmt.Errorf("%w: %s", errScheduledAuthorityDenied, reasonPrincipalInactive)
+	}
+}
+
 // resolveScheduledUser applies rule 3 of resolveScheduledAuthority.
 func (s *Server) resolveScheduledUser(ctx context.Context, auth *ScheduledAuthority, projectID, permissionID string) (Identity, error) {
 	if auth.CredentialKind == store.InitiatorCredentialKindDevLocal {
@@ -281,15 +303,9 @@ func (s *Server) resolveScheduledUser(ctx context.Context, auth *ScheduledAuthor
 		return nil, fmt.Errorf("%w: agent credential on a user principal", errScheduledAuthorityDenied)
 	}
 
-	user, err := s.store.GetUser(ctx, auth.PrincipalID)
+	user, err := scheduledUserAccount(ctx, s.store, auth.PrincipalID)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return nil, fmt.Errorf("%w: %s", errScheduledAuthorityDenied, reasonPrincipalInactive)
-		}
-		return nil, fmt.Errorf("scheduled authority: user lookup: %w", err)
-	}
-	if user == nil || user.Status != store.UserStatusActive {
-		return nil, fmt.Errorf("%w: %s", errScheduledAuthorityDenied, reasonPrincipalInactive)
+		return nil, err
 	}
 	auth.user = user
 	userIdentity := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "scheduler")

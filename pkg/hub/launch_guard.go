@@ -256,6 +256,19 @@ func (s *Server) writeLaunchingAgent(ctx context.Context, w http.ResponseWriter,
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// writeLaunchAccepted answers a lifecycle start or restart whose start a
+// broker accepted as an asynchronous launch (ptone/scion#4669): 409
+// delete_in_progress when a delete won meanwhile, by deleteWonAfterLanding's
+// rule, as a synchronous start answers; otherwise 200 with the launching
+// agent (writeLaunchingAgent). The delete ends the launch itself.
+func (s *Server) writeLaunchAccepted(ctx context.Context, w http.ResponseWriter, agent *store.Agent, warnings []string) {
+	if s.deleteWonAfterLanding(ctx, agent.ID) {
+		writeDeleteWon(w, agent.ID, deletedWhileStartingMessage, warnings)
+		return
+	}
+	s.writeLaunchingAgent(ctx, w, agent, warnings)
+}
+
 // createRequestHasInputs reports whether a create/start request carried
 // inputs that a launching agent will not apply (template, task, config and
 // the like).
@@ -287,6 +300,9 @@ func lifecycleStartHasInputs(r *http.Request) bool {
 	if err := json.Unmarshal(body, &req); err != nil {
 		return true
 	}
+	// The asynchronous-start opt-in is not an input the launch ignores:
+	// the start is answered with the launching agent either way.
+	req.AcceptAsyncLaunch = false
 	return req != (AgentLifecycleStartRequest{})
 }
 
@@ -303,6 +319,22 @@ func (s *Server) writeExistingAgentLaunching(ctx context.Context, w http.Respons
 		resp.Warnings = []string{launchInFlightInputsWarning}
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// writeExistingAgentLaunchAccepted answers handleExistingAgent's 200 shape
+// for a start a broker accepted as an asynchronous launch
+// (ptone/scion#4669): the re-read agent (phase starting, with its active
+// launch) and the dispatch warnings. The client follows the launch.
+func (s *Server) writeExistingAgentLaunchAccepted(ctx context.Context, w http.ResponseWriter, agent *store.Agent, project *store.Project) {
+	current := agent
+	if fresh, err := s.store.GetAgent(ctx, agent.ID); err == nil {
+		current = fresh
+	}
+	s.enrichAgent(ctx, current, project, nil)
+	writeJSON(w, http.StatusOK, CreateAgentResponse{
+		Agent:    redactedAgentCopy(ctx, s, current),
+		Warnings: dispatchWarningsFromContext(ctx),
+	})
 }
 
 // writeExistingAgentGuardError answers a dispatcher start-guard error in

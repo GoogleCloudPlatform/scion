@@ -127,7 +127,7 @@ func newPodFixture(t *testing.T, key string, target config.V1RuntimeTargetConfig
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	cfg.ForceRuntime = "kubernetes"
-	f.srv = New(cfg, f.mgr, rt)
+	f.srv = New(cfg, f.mgr, rt, config.RuntimeBuildRecord{})
 	if !flat {
 		return f
 	}

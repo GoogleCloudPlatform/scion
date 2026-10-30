@@ -15,10 +15,12 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/internal/writesonread"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 )
 
@@ -51,6 +53,13 @@ func TestMain(m *testing.M) {
 	teardown := integrationTestSetup()
 	code := m.Run()
 	teardown()
+	// The no-write switch (internal/writesonread) is process-wide: a test
+	// that sets it without runPreflightForTest, whose isolation turns it
+	// off again, would leave later tests running without the migrations.
+	if writesonread.Disabled() {
+		fmt.Fprintln(os.Stderr, "a cmd test left the no-write switch on; set it only through runPreflightForTest")
+		code = 1
+	}
 	os.Exit(code)
 }
 

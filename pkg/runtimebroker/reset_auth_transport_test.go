@@ -29,6 +29,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
@@ -80,7 +81,7 @@ func doTransportResetAuth(t *testing.T, rec *resetAuthRecorder, body string) *ht
 	rt := rec.runtime()
 	mgr := agent.NewManager(rt)
 	t.Cleanup(mgr.Close)
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/dev/reset-auth", strings.NewReader(body))
 	srv.resetAuth(w, req, "dev", stopLookupProjectID)

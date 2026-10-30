@@ -51,6 +51,10 @@ var (
 	// hubFlagName is the hub nickname given with --hub, which
 	// resolveInvocationTarget replaced by its endpoint in hubEndpoint, or "".
 	hubFlagName string
+	// hubEntryName is the name of the hub entry resolveInvocationTarget took
+	// hubEndpoint from (the link entry's hub or the current hub), as in the
+	// context it loaded, or "". It is for messages only.
+	hubEntryName string
 	// contextWarned records that resolveInvocationTarget already warned
 	// about an unreadable context.yaml in this invocation.
 	contextWarned bool
@@ -197,6 +201,20 @@ var contextSkippedCommands = map[string]bool{
 	"scion runtime-broker start": true,
 }
 
+// contextReadOnlyCommands are the commands, by command path, that only read
+// settings. The one-time imports of hub settings apply to them in memory
+// only, so a read never creates or rewrites context.yaml or its lock
+// (ptone/scion#5483), and they still see the hub the import gives.
+var contextReadOnlyCommands = map[string]bool{
+	"scion config list":       true,
+	"scion config get":        true,
+	"scion config validate":   true,
+	"scion config schema":     true,
+	"scion config dir":        true,
+	"scion config cd-config":  true,
+	"scion config cd-project": true,
+}
+
 // contextProjectCommands are hub-only commands (see hubOnlyCommands), by
 // command path, that take the context's project like the project-scoped
 // commands do, although they need no local project. expose and unexpose
@@ -222,6 +240,10 @@ var importGlobalHubSettings = true
 type targetResolution struct {
 	stderr  io.Writer
 	imports bool
+	// noSave applies the one-time imports in memory only, for the
+	// read-only commands (contextReadOnlyCommands): they see the imported
+	// hub, and nothing is written.
+	noSave bool
 }
 
 // invocationResolution is the resolution of a command invocation: warnings
@@ -245,6 +267,9 @@ func (r targetResolution) loadContext() (*config.CLIContext, error) {
 	if !r.imports {
 		return config.LoadCLIContext()
 	}
+	if r.noSave {
+		return config.LoadCLIContextImportedInMemory(useHubBaseName)
+	}
 	c, err := config.LoadCLIContextImported(useHubBaseName)
 	if errors.Is(err, config.ErrCLIContextImport) {
 		_, _ = fmt.Fprintf(r.stderr, "Warning: %v\n", err)
@@ -254,16 +279,25 @@ func (r targetResolution) loadContext() (*config.CLIContext, error) {
 }
 
 // linkEntry returns the link entry of the filesystem project dir and its
-// hub entry, or nil and nil. When r imports, a linked project whose hub is
-// not in the hub list yet is imported once (see
-// config.LinkEntryForProject); a failure to save that import is a warning,
-// and the imported link is used anyway.
+// hub entry, or nil and nil. When r imports, a linked project without a
+// link entry is imported once (see config.LinkEntryForProject), for a hub
+// that is already in the hub list; for a hub that is not, a note says how
+// to add it. A failure to save the import is a warning, and the imported
+// link is used anyway. For a read-only command (noSave) the import is
+// applied to c in memory only, and nothing is printed.
 func (r targetResolution) linkEntry(c *config.CLIContext, dir string) (*config.KnownProject, *config.HubEntry) {
 	if !r.imports {
 		return c.LinkEntryFor(config.LinkPathForProject(dir))
 	}
-	p, h, err := config.LinkEntryForProject(c, dir, useHubBaseName)
-	if err != nil {
+	if r.noSave {
+		return config.LinkEntryForProjectInMemory(c, dir)
+	}
+	p, h, err := config.LinkEntryForProject(c, dir)
+	var notListed *config.ProjectHubNotListedError
+	switch {
+	case errors.As(err, &notListed):
+		_, _ = fmt.Fprintf(r.stderr, "Note: %v\n", err)
+	case err != nil:
 		_, _ = fmt.Fprintf(r.stderr, "Warning: %v\n", err)
 	}
 	return p, h
@@ -362,6 +396,7 @@ func resolveInvocationTargetWith(cmd *cobra.Command, mode CLIMode, r targetResol
 	contextProjectSlug = ""
 	contextWarned = false
 	hubFlagName = ""
+	hubEntryName = ""
 	if contextDisabled(mode) {
 		return nil
 	}
@@ -373,6 +408,11 @@ func resolveInvocationTargetWith(cmd *cobra.Command, mode CLIMode, r targetResol
 		// Read the hub list as it is: no one-time import, so nothing is
 		// written, and stderr gets no import warning.
 		r = targetResolution{stderr: stderr}
+	}
+	if contextReadOnlyCommands[cmd.CommandPath()] {
+		// The one-time imports apply in memory only: the command sees the
+		// hub the next saving command will import, and nothing is written.
+		r.noSave = true
 	}
 	ctx, err := r.loadContext()
 	if err != nil {
@@ -411,15 +451,17 @@ func resolveInvocationTargetWith(cmd *cobra.Command, mode CLIMode, r targetResol
 	}
 
 	if hubEndpoint == "" && envHub == "" && inFilesystemProject() {
-		if _, h := r.linkEntry(ctx, dir); h != nil {
+		if p, h := r.linkEntry(ctx, dir); h != nil {
 			hubEndpoint = h.Endpoint
 			hubSource = targetSourceDirectory
+			hubEntryName = p.Hub
 		}
 	}
 
 	if h := ctx.CurrentHubEntry(); h != nil && h.Endpoint != "" && hubEndpoint == "" && envHub == "" {
 		hubEndpoint = h.Endpoint
 		hubSource = targetSourceContext
+		hubEntryName = ctx.CurrentHub
 	}
 
 	if projectScoped {

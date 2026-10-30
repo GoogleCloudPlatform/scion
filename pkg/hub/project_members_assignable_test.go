@@ -358,6 +358,71 @@ func TestAssignableRoles_ConsistentWithPut(t *testing.T) {
 	assert.True(t, sawRefused, "fixture exercises refused roles")
 }
 
+// TestInviteBatchPreflight_ConsistentWithPut: for every fixture actor and
+// role, the batch invite preflight refuses a role exactly when a members
+// PUT by the same actor creating it on a fresh invited user is refused,
+// with the same denial code and details; when the preflight passes, the
+// PUT is accepted. Beside TestAssignableRoles_ConsistentWithPut so drift
+// between the batch and the PUT fails in one place.
+func TestInviteBatchPreflight_ConsistentWithPut(t *testing.T) {
+	f := setupMMRFixture(t)
+	hubOverride, manager := asgHubOverrideActor(t, f)
+	customManager, customManagerRole := asgManagerActor(t, f, "custommanager", false)
+
+	actors := []struct {
+		name string
+		user *store.User
+	}{
+		{"owner", f.owner},
+		{"admin", f.admin},
+		{"hub-override", hubOverride},
+		{"custom-manager", customManager},
+	}
+	fixtureRoles := []*store.RoleDefinition{
+		f.ownerRD, f.adminRD, f.memberRD,
+		f.withinCeiling, f.beyondCeiling, f.roleBindingCustom, manager, customManagerRole,
+	}
+
+	sawPass, sawRefused := false, false
+	for _, a := range actors {
+		// The context carries an interactive credential, as a request does.
+		ctx := mmrServiceCtx(a.user.ID, a.user.Email)
+		actor := mmrServiceIdentity(a.user.ID, a.user.Email)
+		for _, rd := range fixtureRoles {
+			t.Run(a.name+"/"+rd.Name, func(t *testing.T) {
+				refusals, err := f.srv.inviteBatchPreflight(ctx, actor,
+					[]inviteBatchProject{{ProjectID: f.projectID, RoleDefinitionIDs: []string{rd.ID}}})
+				require.NoError(t, err)
+				require.LessOrEqual(t, len(refusals), 1)
+
+				target := newInvitedUser(t, f.store, tid(t.Name()+"-invited"), tid(t.Name()+"-invited")+"@example.com")
+				rec := putMemberRoles(t, f.srv, a.user, f.projectID, "user", target.Email, []string{rd.ID}, &[]string{})
+				bindings := mmrBindingsFor(t, f.store, "user", target.ID, f.projectID)
+
+				if len(refusals) == 0 {
+					sawPass = true
+					assert.Equal(t, http.StatusCreated, rec.Code, "a preflight pass must match an accepted PUT: %s", rec.Body.String())
+					require.Len(t, bindings, 1)
+					assert.Equal(t, rd.ID, bindings[0].RoleDefinitionID)
+					return
+				}
+				sawRefused = true
+				r := refusals[0]
+				assert.Equal(t, inviteBatchReasonRoleNotGrantable, r.Reason, "every fixture role is a listed project role")
+				assert.GreaterOrEqual(t, rec.Code, 400, "a preflight refusal must match a refused PUT: %s", rec.Body.String())
+				assert.Less(t, rec.Code, 500)
+				var errBody ErrorResponse
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errBody))
+				assert.Equal(t, r.DenialCode, errBody.Error.Code, "same denial code as the PUT")
+				assert.Equal(t, asgJSONNormalize(t, r.Details), asgJSONNormalize(t, errBody.Error.Details), "same details as the PUT")
+				assert.Empty(t, bindings, "a refused PUT writes nothing")
+			})
+		}
+	}
+	assert.True(t, sawPass, "fixture exercises passing roles")
+	assert.True(t, sawRefused, "fixture exercises refused roles")
+}
+
 // TestAssignableRoles_CustomManagerWithNoProjectRole: an actor with no
 // built-in project role and no hub role_binding.* authority, who passes the
 // project.manage gate through a custom role, is refused every role. The

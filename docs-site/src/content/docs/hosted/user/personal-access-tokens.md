@@ -38,6 +38,9 @@ permissions). Available scopes:
 | `project:list` | List projects. A project token lists only its own project; on a hub token this scope can be selected only by holders of a hub-wide role that grants it |
 | `project:update` | Update project settings, configurations, and annotations |
 | `project:manage` | Manage project membership through your own project role, under the same governance rules as a signed-in session; hub role-binding authority is not used through a token. A role is granted only when the token also carries a scope for every permission of that role |
+| `project:create` | Create and register projects. Hub tokens only; your user must hold `project.create`, and the token must also carry a scope for every permission of the project owner role |
+| `project:chat_post` | Keep `project.chat_post` on the token so it can grant roles that include it, such as the built-in `project-member` role through `project:manage`. It does not post: a token posts in a project's chat threads with `inbox:write`, and your own account must hold `project.chat_post` there |
+| `project:clone` | Clone a project, together with `project:read` and `project:create` on a hub token; your user must be able to read the source project and hold `project.create`. Selecting this scope needs `project.clone`, which the built-in super-admin role carries |
 | `agent:create` | Create agents |
 | `agent:read` | Read agent status/metadata |
 | `agent:list` | List agents |
@@ -109,6 +112,8 @@ project is a hub-level resource; a project's own groups belong to that project.
 - A token is held to the group's own role hierarchy: only the group's owner, or an owner or admin
   member of the group, adds members, even when you are a super-admin.
 - The members of a project's agents group are the project's agents; no one adds members to it.
+- Removing a member from, or deleting, a group that is the subject of an access constraint is
+  session only: a token is refused with `403` and `details.reason` `GOV_PENDING`.
 
 ### Hub-boundary tokens for user administration
 
@@ -291,14 +296,28 @@ The same per-request checks apply, with these limits:
   sign-in, and every token is refused for them: writing integration secrets or integration
   settings that configure credentials, authentication, endpoints or host paths; installing or
   updating an integration; and changing the GitHub App configuration.
-- **Invitations and the allow list.** Inviting users (single or bulk) and managing invitation
-  codes admit only a hub token carrying `user:invite`. Reading the allow list and its domains
+- **Invitations and the allow list.** Inviting users (single or bulk), pre-registering a user
+  (`POST /api/v1/users`, `scion hub users provision`) and managing invitation codes admit only a
+  hub token carrying `user:invite`. On `POST /api/v1/users`, `user:read` on the token (together
+  with `user.read` on your user) controls whether an existing record's details are returned on a
+  repeat or conflict; without it, conflicts return `user_exists` and a repeat returns only
+  `{email, status}`. Creating a pre-registered user is audited as `user_provision` (recording the token as the credential; a repeat or conflict is not audited), and pre-registering is refused for every caller on a Hub running with dev authentication (`403`, `dev_auth_not_supported`). Reading the allow list and its domains
   needs `hub_allow_list:read`; adding, importing or removing allow-list entries needs
   `hub_allow_list:read` and `hub_allow_list:update`. Your user must also hold the matching hub
   permission. An invited user gets no role binding or group membership from the invitation.
   Removing an allow-list entry deletes the invited user together with that user's role bindings
-  and group memberships, and is refused with `409` while the invited user is a project's last
-  owner.
+  and group memberships, and is refused with `409` while agents or active agent delegations depend
+  on the user (`user_delete_blocked`) or while the user is a project's last owner (`last_owner`).
+- **Creating, registering and cloning projects.** Creating or registering a project admits only
+  a hub token carrying `project:create`, and your user must hold `project.create`. You become the
+  owner of the new project, so the token must also carry a selector for every permission of the
+  project owner role; with the built-in owner role, which includes permissions that have no
+  selector (such as `project.delete`), a token is refused and you create projects with an
+  interactive sign-in. Naming an existing project by id also needs `project:update` on it.
+  Registering a project with an embedded broker needs an interactive sign-in; a token registers
+  brokers with `POST /api/v1/brokers`.
+  Cloning a project also needs `project:read` on the source project and `project:clone`;
+  selecting `project:clone` needs `project.clone`, which the built-in super-admin role carries.
 - **Roles, role bindings and access constraints.** These admit only a hub token. Creating,
   importing or duplicating a custom role needs `role:create`, updating one `role:update`, and
   deleting one `role:delete`, each together with `role:read`. Creating or updating a role needs
@@ -369,6 +388,10 @@ A stored interactive login (from `scion hub auth login`) takes precedence over
 `SCION_HUB_TOKEN`. To run the CLI under a scoped token, use an environment with no stored login:
 a dedicated OS user, an isolated `HOME`, or log out first (`scion hub auth logout`).
 :::
+
+User- and hub-scope environment variables and secrets (`scion hub env` and `scion hub secret`
+without `--project` or `--broker`) need an interactive login (`scion hub auth login`); the Hub
+refuses access tokens on them, whatever their boundary or scopes.
 
 ### Scopes for CLI use
 
@@ -443,6 +466,7 @@ privilege boundaries:
   auto-injected by the Runtime Broker, and grants only the specific permissions that agent needs
   to function (e.g., reporting status, reading its own secrets).
 - **Usage**: Automatically used by the `sciontool` binary running inside the agent.
+- **Enforcement**: In Runtime Broker mode, the Runtime Broker populates `~/.scion/scion-token`, `SCION_AUTH_TOKEN`, and `SCION_HUB_TOKEN` solely from the Hub-issued token for that run. Any `SCION_AUTH_TOKEN` configured in an agent's or harness-config's `env` is stripped and ignored with a start warning (`SCION_AUTH_TOKEN is set in the agent's environment configuration and is ignored: the agent's hub credential is only the token the hub issues for it`), and a Hub-dispatched start or restart that lacks a Hub-issued token is refused with `500 runtime_error` before a container starts.
 
 :::danger[Privilege escalation risk]
 **Never inject a `SCION_HUB_TOKEN` (or a user-level UAT) into an agent container as the

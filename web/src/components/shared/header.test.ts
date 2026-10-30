@@ -201,28 +201,34 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('palette button: render conditions (chat route x user)', () => {
-  it('renders when signed in, on a chat route', async () => {
-    const el = await mountHeader();
-    expect(paletteButton(el)).not.toBeNull();
+describe('palette button: render conditions (route x graph availability x user)', () => {
+  const graphOwner = {};
+
+  afterEach(() => {
+    setGraphPaletteAvailable(graphOwner, false);
   });
 
-  it('renders on a DM route and a thread route, not just bare /chat', async () => {
-    let el = await mountHeader({ currentPath: '/chat/dm/some-key' });
-    expect(paletteButton(el)).not.toBeNull();
-    el.remove();
-
-    el = await mountHeader({ currentPath: '/chat/my-project/thread-123' });
-    expect(paletteButton(el)).not.toBeNull();
+  it('is absent on every chat route: the quick switcher opens from the spaces rail footer', async () => {
+    // The chat page pins its quick-switcher button to the bottom of the
+    // spaces rail (and of the members column on phones), so the header
+    // must not duplicate it on bare /chat, a DM route or a thread route,
+    // even while a graph elsewhere has reported the palette available.
+    setGraphPaletteAvailable(graphOwner, true);
+    for (const currentPath of ['/chat', '/chat/dm/some-key', '/chat/my-project/thread-123']) {
+      const el = await mountHeader({ currentPath });
+      expect(paletteButton(el)).toBeNull();
+      el.remove();
+    }
   });
 
-  it('is absent on a non-chat route', async () => {
+  it('is absent on a non-chat route while no graph offers the palette', async () => {
     const el = await mountHeader({ currentPath: '/projects/abc' });
     expect(paletteButton(el)).toBeNull();
   });
 
   it('is absent when no user is signed in', async () => {
-    const el = await mountHeader({ user: null });
+    setGraphPaletteAvailable(graphOwner, true);
+    const el = await mountHeader({ user: null, currentPath: '/agents' });
     expect(paletteButton(el)).toBeNull();
   });
 
@@ -231,6 +237,7 @@ describe('palette button: render conditions (chat route x user)', () => {
     // the bottom of its Open terminals column (TerminalWorkspaceRoot), so
     // the header must not duplicate it on /terminals, a per-agent route,
     // or the multi-pane URL form (whose currentPath keeps its query).
+    setGraphPaletteAvailable(graphOwner, true);
     for (const currentPath of [
       '/terminals',
       '/terminals/00000000-0000-0000-0000-000000000001',
@@ -240,11 +247,6 @@ describe('palette button: render conditions (chat route x user)', () => {
       expect(paletteButton(el)).toBeNull();
       el.remove();
     }
-  });
-
-  it('labels the chat route button "Quick switcher", not "Jump to agent"', async () => {
-    const el = await mountHeader();
-    expect(paletteButton(el)?.getAttribute('aria-label')).toBe('Open quick switcher');
   });
 });
 
@@ -304,21 +306,28 @@ describe('palette button: graph views', () => {
     expect(graphEvent!.composed).toBe(true);
   });
 
-  it('leaves chat and terminal routes to their own palettes', async () => {
+  it('calls focus() before dispatching the event, not after', async () => {
+    // Order matters, not just that both happen: the graph palette host
+    // captures the deep active element synchronously when it opens. On
+    // Safari, which does not focus a clicked button on its own, a
+    // dispatch-then-focus ordering would still capture whatever was
+    // focused *before* the click. A real click/focus round-trip can't
+    // distinguish the two orderings in Chromium (it focuses on click
+    // regardless), so this records call order directly instead.
     setGraphPaletteAvailable(graphOwner, true);
-    let el = await mountHeader({ currentPath: '/chat' });
-    expect(paletteButton(el)?.getAttribute('aria-label')).toBe('Open quick switcher');
-    el.remove();
+    const el = await mountHeader({ currentPath: '/agents' });
+    const button = paletteButton(el) as HTMLElement;
+    const order: string[] = [];
+    vi.spyOn(button, 'focus').mockImplementation(() => {
+      order.push('focus');
+    });
+    el.addEventListener(GRAPH_PALETTE_OPEN_REQUEST_EVENT, () => {
+      order.push('dispatch');
+    });
 
-    // The terminal view opens its palette from its own list footer.
-    el = await mountHeader({ currentPath: '/terminals' });
-    expect(paletteButton(el)).toBeNull();
-  });
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
 
-  it('is absent when no user is signed in', async () => {
-    setGraphPaletteAvailable(graphOwner, true);
-    const el = await mountHeader({ user: null, currentPath: '/agents' });
-    expect(paletteButton(el)).toBeNull();
+    expect(order).toEqual(['focus', 'dispatch']);
   });
 
   it('stops following availability once disconnected', async () => {
@@ -336,54 +345,16 @@ describe('palette button: graph views', () => {
   });
 });
 
-describe('palette button: click dispatch', () => {
-  it('focuses the button, then dispatches CHAT_PALETTE_OPEN_REQUEST_EVENT with bubbles and composed set', async () => {
-    const el = await mountHeader();
-    const button = paletteButton(el) as HTMLElement;
-    expect(button).not.toBeNull();
-    const focusSpy = vi.spyOn(button, 'focus');
-    let received: CustomEvent | undefined;
-    el.addEventListener(CHAT_PALETTE_OPEN_REQUEST_EVENT, (e) => {
-      received = e as CustomEvent;
-    });
-
-    button.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
-
-    expect(focusSpy).toHaveBeenCalledWith({ preventScroll: true });
-    expect(received).toBeDefined();
-    expect(received!.bubbles).toBe(true);
-    expect(received!.composed).toBe(true);
-  });
-
-  it('calls focus() before dispatching the event, not after', async () => {
-    // Order matters, not just that both happen: chat.ts's _openPalette
-    // captures the deep active element synchronously, before its own first
-    // await. On Safari, which does not focus a clicked button on its own, a
-    // dispatch-then-focus ordering would still capture whatever was focused
-    // *before* the click — possibly the composer — defeating the reason
-    // this call exists at all. A real click/focus round-trip can't
-    // distinguish the two orderings in Chromium (it focuses on click
-    // regardless), so this records call order directly instead.
-    const el = await mountHeader();
-    const button = paletteButton(el) as HTMLElement;
-    const order: string[] = [];
-    vi.spyOn(button, 'focus').mockImplementation(() => {
-      order.push('focus');
-    });
-    el.addEventListener(CHAT_PALETTE_OPEN_REQUEST_EVENT, () => {
-      order.push('dispatch');
-    });
-
-    button.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
-
-    expect(order).toEqual(['focus', 'dispatch']);
-  });
-});
-
 describe('palette button: tooltip and aria-keyshortcuts follow the mocked modality', () => {
+  const graphOwner = {};
   const originalPlatform = Object.getOwnPropertyDescriptor(window.navigator, 'platform');
 
+  beforeEach(() => {
+    setGraphPaletteAvailable(graphOwner, true);
+  });
+
   afterEach(() => {
+    setGraphPaletteAvailable(graphOwner, false);
     if (originalPlatform) {
       Object.defineProperty(window.navigator, 'platform', originalPlatform);
     }
@@ -395,7 +366,7 @@ describe('palette button: tooltip and aria-keyshortcuts follow the mocked modali
 
   it('on touch: tooltip is disabled and the button has no aria-keyshortcuts', async () => {
     stubTouchPrimary(true);
-    const el = await mountHeader();
+    const el = await mountHeader({ currentPath: '/agents' });
 
     expect(paletteTooltip(el)?.hasAttribute('disabled')).toBe(true);
     expect(paletteButton(el)?.hasAttribute('aria-keyshortcuts')).toBe(false);
@@ -404,32 +375,32 @@ describe('palette button: tooltip and aria-keyshortcuts follow the mocked modali
   it('on desktop (non-Mac): tooltip is enabled and reads "(Ctrl+K)"; aria-keyshortcuts is "Control+K"', async () => {
     setPlatform('Linux x86_64');
     stubTouchPrimary(false);
-    const el = await mountHeader();
+    const el = await mountHeader({ currentPath: '/agents' });
 
     const tooltip = paletteTooltip(el);
     expect(tooltip?.hasAttribute('disabled')).toBe(false);
-    expect(tooltip?.getAttribute('content')).toBe('Quick switcher (Ctrl+K)');
+    expect(tooltip?.getAttribute('content')).toBe('Jump to agent (Ctrl+K)');
     expect(paletteButton(el)?.getAttribute('aria-keyshortcuts')).toBe('Control+K');
   });
 
   it('on desktop (Mac): tooltip reads "(⌘K)"; aria-keyshortcuts is "Meta+K"', async () => {
     setPlatform('MacIntel');
     stubTouchPrimary(false);
-    const el = await mountHeader();
+    const el = await mountHeader({ currentPath: '/agents' });
 
     const tooltip = paletteTooltip(el);
-    expect(tooltip?.getAttribute('content')).toBe('Quick switcher (⌘K)');
+    expect(tooltip?.getAttribute('content')).toBe('Jump to agent (⌘K)');
     expect(paletteButton(el)?.getAttribute('aria-keyshortcuts')).toBe('Meta+K');
   });
 
   it('the button always has aria-haspopup="dialog", on both touch and desktop', async () => {
     stubTouchPrimary(true);
-    let el = await mountHeader();
+    let el = await mountHeader({ currentPath: '/agents' });
     expect(paletteButton(el)?.getAttribute('aria-haspopup')).toBe('dialog');
     el.remove();
 
     stubTouchPrimary(false);
-    el = await mountHeader();
+    el = await mountHeader({ currentPath: '/agents' });
     expect(paletteButton(el)?.getAttribute('aria-haspopup')).toBe('dialog');
   });
 });

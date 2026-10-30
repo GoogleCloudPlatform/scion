@@ -319,8 +319,14 @@ func TestUpdateSetting_LegacyKeepsConvertedV1Keys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadSettingsFromDir: %v", err)
 	}
-	if s.ProjectID != "proj-top-123" {
-		t.Errorf("project_id = %q, want proj-top-123", s.ProjectID)
+	// The converted file keeps the top-level project_id. The Settings view
+	// takes the project's own ID from the v1 file's hub.project_id, as
+	// LoadSettings does (settingsViewOf, ptone/scion#5427).
+	if m["project_id"] != "proj-top-123" {
+		t.Errorf("file project_id = %v, want proj-top-123", m["project_id"])
+	}
+	if s.ProjectID != "proj-hub-456" || s.GetHubProjectID() != "proj-hub-456" {
+		t.Errorf("ProjectID, GetHubProjectID() = %q, %q, want proj-hub-456 for both", s.ProjectID, s.GetHubProjectID())
 	}
 	if s.WorkspacePath != "/work/space" {
 		t.Errorf("workspace_path = %q, want /work/space", s.WorkspacePath)

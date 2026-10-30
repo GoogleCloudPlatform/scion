@@ -24,16 +24,33 @@ import (
 // (ptone/scion#4669).
 type StartDispatchOptions struct {
 	// Async asks for the start to be sent as an asynchronous launch when
-	// every eligibility rule holds; otherwise the start is synchronous.
-	// This release carries it but no dispatcher acts on it yet: every start
-	// stays synchronous.
+	// the dispatcher's own rules also hold (hub.async_agent_launch on, a
+	// launch timeout, a broker not known to lack AsyncStart); otherwise
+	// the start is synchronous. The caller has already checked the
+	// hub.async_agent_start experiment, the all-live-hubs rule
+	// (asyncStartAllowed), the request's opt-in and the prior phase.
 	Async bool
+	// Kind is the launch kind to begin: store.LaunchKindStart, or
+	// store.LaunchKindRestart for a restart's start leg. Empty means
+	// start.
+	Kind string
+	// PriorPhase is the effective resting phase the start was taken from
+	// (startDispatch.restingPhase), recorded as the launch's prior phase.
+	PriorPhase string
+}
+
+// launchKind returns o.Kind, defaulting to store.LaunchKindStart.
+func (o StartDispatchOptions) launchKind() string {
+	if o.Kind == store.LaunchKindRestart {
+		return store.LaunchKindRestart
+	}
+	return store.LaunchKindStart
 }
 
 // StartDispatchResult is what a start dispatch returns besides its error.
 // Launch is set when the broker accepted the start as an asynchronous
 // launch; the launch's end then settles the start. Nil (or a nil Launch)
-// means the start ran synchronously. This release never sets it.
+// means the start ran synchronously.
 type StartDispatchResult struct {
 	Launch *LaunchAccepted `json:"launch,omitempty"`
 }

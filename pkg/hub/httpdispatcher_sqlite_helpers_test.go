@@ -155,6 +155,7 @@ type mockRuntimeBrokerClient struct {
 	lastMessage                string
 	lastInterrupt              bool
 	lastResolvedEnv            map[string]string
+	lastStartResolvedSecrets   []ResolvedSecret
 	lastRestartResolvedEnv     map[string]string
 	lastStartExtras            StartExtras
 	lastRestartExtras          StartExtras
@@ -165,6 +166,8 @@ type mockRuntimeBrokerClient struct {
 		localOnly                 bool
 		runID                     string
 		notAfter                  time.Time
+		projectID                 string
+		moveReincarnationID       string
 	}
 	returnErr            error
 	cleanupErr           error
@@ -345,6 +348,7 @@ func (m *mockRuntimeBrokerClient) StartAgent(ctx context.Context, brokerID, brok
 	m.lastProjectPath = projectPath
 	m.lastProjectSlug = projectSlug
 	m.lastResolvedEnv = resolvedEnv
+	m.lastStartResolvedSecrets = resolvedSecrets
 	m.lastInlineConfig = inlineConfig
 	m.lastStartExtras = extras
 	m.startCallCount++
@@ -409,6 +413,8 @@ func (m *mockRuntimeBrokerClient) DeleteAgent(ctx context.Context, brokerID, bro
 	m.lastDeleteOpts.runID = opts.RunID
 	m.lastDeleteOpts.notAfter = opts.NotAfter
 	m.lastDeleteOpts.localOnly = opts.LocalOnly
+	m.lastDeleteOpts.projectID = projectID
+	m.lastDeleteOpts.moveReincarnationID = opts.MoveReincarnationID
 	return m.returnErr
 }
 

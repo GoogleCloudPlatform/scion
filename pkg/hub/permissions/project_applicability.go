@@ -47,15 +47,20 @@ var ProjectTargetApplicability = map[string]bool{
 	// Grant management is held on a project for grants bounded to it.
 	"agent.delegation.revoke": true, "agent.delegation.credential.revoke": true,
 	"agent.delegation.list": true, "agent.delegation.read": true,
+	"agent.delegation.revoke_all": true,
 
 	// project.* — read/update/delete/manage/set_messaging_policy target an
 	// existing project; create/register/clone/list are hub-level collection
-	// actions (create: no project exists yet; register/clone/list reviewed
-	// conservatively false — flagged for D.2 confirmation, not blocking).
+	// actions (create: no project exists yet). register and clone are false:
+	// their creation half is project.create on hub collection evidence, and
+	// a clone's source half is project.read on the source project. list is
+	// a collection list.
 	"project.create": false, "project.read": true, "project.update": true,
 	"project.delete": true, "project.manage": true, "project.register": false,
 	"project.set_messaging_policy": true, "project.clone": false, "project.list": false,
 	"project.manage_visitors": true,
+	// project.chat_post targets an existing project's chat threads.
+	"project.chat_post": true,
 
 	// skill.* — create/read/update/delete/list can target a project-scoped
 	// skill; create_global and register are explicitly hub-catalog actions.
@@ -222,9 +227,16 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	"agent.update": {BoundaryKindProject, BoundaryKindHub}, "agent.stop_all": {BoundaryKindProject, BoundaryKindHub}, "agent.set_message_mode": {BoundaryKindProject, BoundaryKindHub},
 	"project.read": {BoundaryKindProject, BoundaryKindHub}, "project.update": {BoundaryKindProject, BoundaryKindHub},
 	"project.manage": {BoundaryKindProject, BoundaryKindHub}, "project.clone": {BoundaryKindProject, BoundaryKindHub}, "project.set_messaging_policy": {BoundaryKindProject, BoundaryKindHub},
+	// project.chat_post's selector targets an existing project, like
+	// project.set_messaging_policy.
+	"project.chat_post": {BoundaryKindProject, BoundaryKindHub},
 	// project.list's selector lists projects on either boundary; a project
 	// token lists only its boundary project.
 	"project.list": {BoundaryKindProject, BoundaryKindHub},
+	// project.create provisions a project at the hub; a project boundary
+	// never covers a project that does not exist yet.
+	"project.create": {BoundaryKindHub},
+
 	"skill.create": {BoundaryKindProject, BoundaryKindHub}, "skill.read": {BoundaryKindProject, BoundaryKindHub},
 	"skill.update": {BoundaryKindProject, BoundaryKindHub}, "skill.delete": {BoundaryKindProject, BoundaryKindHub},
 	"skill.list": {BoundaryKindProject, BoundaryKindHub}, "skill.register": {BoundaryKindHub}, "skill.create_global": {BoundaryKindHub},
@@ -395,9 +407,14 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	// ProjectTargetApplicability) even though it is mintable.
 	"project.read": {TargetClassKindProjectScoped}, "project.update": {TargetClassKindProjectScoped},
 	"project.manage": {TargetClassKindProjectScoped}, "project.clone": {TargetClassKindHubResource}, "project.set_messaging_policy": {TargetClassKindProjectScoped},
+	// project.chat_post targets an existing project's chat threads.
+	"project.chat_post": {TargetClassKindProjectScoped},
 	// project.list is a hub-level collection action (false in
 	// ProjectTargetApplicability), so hub-boundary mint needs a system grant.
 	"project.list": {TargetClassKindHubResource},
+	// project.create is a hub-level collection action: no project exists
+	// yet, so hub-boundary mint needs a system grant.
+	"project.create": {TargetClassKindHubResource},
 
 	// artifact.* — project-homed, no scope-kind split and no global catalog.
 	"artifact.read": {TargetClassKindProjectScoped}, "artifact.create": {TargetClassKindProjectScoped},

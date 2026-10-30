@@ -1030,6 +1030,52 @@ func (s *ProjectStore) UpdateRuntimeBroker(ctx context.Context, b *store.Runtime
 	return store.ErrVersionConflict
 }
 
+// RefreshRuntimeBrokerState applies refresh to a fresh read of the broker
+// and writes back only the heartbeat-refreshed columns, conditioned on the
+// lock_version it read. Unlike UpdateRuntimeBroker, which writes the
+// caller's whole copy, a concurrent re-registration is never overwritten:
+// its write advances lock_version, the UPDATE matches no row, and refresh
+// is re-applied to the row the re-registration stored.
+func (s *ProjectStore) RefreshRuntimeBrokerState(ctx context.Context, id string, refresh func(b *store.RuntimeBroker) bool) error {
+	uid, err := parseGetID(id)
+	if err != nil {
+		return err
+	}
+	for attempt := 0; attempt < maxCASRetries; attempt++ {
+		cur, err := s.client.RuntimeBroker.Get(ctx, uid)
+		if err != nil {
+			return mapError(err)
+		}
+		b := entBrokerToStore(cur)
+		if !refresh(b) {
+			return nil
+		}
+		profiles, defaultProfile := b.Profiles, b.DefaultProfile
+		if b.IsFlat() {
+			// Profiles never persist on a flat row (see UpdateRuntimeBroker).
+			profiles, defaultProfile = nil, ""
+		}
+		affected, err := s.client.RuntimeBroker.Update().
+			Where(runtimebroker.IDEQ(uid), runtimebroker.LockVersionEQ(cur.LockVersion)).
+			SetCapabilities(marshalRawJSON(b.Capabilities)).
+			SetWorkspaceStorage(marshalRawJSON(b.WorkspaceStorage)).
+			SetDefaultProfile(defaultProfile).
+			SetHealth(marshalRawJSON(b.Health)).
+			SetRuntimes(marshalRawJSON(profiles)).
+			SetVersion(b.Version).
+			SetUpdated(time.Now()).
+			AddLockVersion(1).
+			Save(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		if affected == 1 {
+			return nil
+		}
+	}
+	return store.ErrVersionConflict
+}
+
 // SetRuntimeBrokerCreatedByIfEmpty atomically sets created_by on a runtime
 // broker, but only if it is currently empty. It is a plain conditional
 // update guarded by an empty-created_by precondition, rather than the

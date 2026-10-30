@@ -21,12 +21,14 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -132,6 +134,10 @@ type agentDeletionPlan struct {
 	// fallback: req was derived because the finalizing row had no usable
 	// stored request, so what its teardown kept is unknown.
 	fallback bool
+	// retriedRun: the runs of a delete intent that succeeded after it
+	// deleted the run the broker reported holding (finalizeInDoubtDelete),
+	// for the soft finish to record. Nil otherwise.
+	retriedRun *retriedRunIDs
 }
 
 // agentDeleteParams are the caller's request parameters.
@@ -371,7 +377,7 @@ func (s *Server) runAgentDeletion(reqCtx context.Context, plan *agentDeletionPla
 	done := make(chan deletionOutcome, 1)
 	base := context.WithoutCancel(reqCtx)
 	engineCtx, cancel := context.WithCancelCause(base)
-	e := &deletionEngine{s: s, plan: plan, base: base, ctx: engineCtx, cancel: cancel}
+	e := &deletionEngine{s: s, plan: plan, base: base, ctx: engineCtx, cancel: cancel, retriedRun: plan.retriedRun}
 	if plan.snapshot.DeletionLeaseAt != nil {
 		e.leaseUntil = *plan.snapshot.DeletionLeaseAt
 	}
@@ -394,6 +400,9 @@ func (s *Server) runAgentDeletion(reqCtx context.Context, plan *agentDeletionPla
 			}
 			e.stopRenewal()
 			cancel(nil)
+			// A forced user deletion that lists this agent records the
+			// outcome and moves on (ptone/scion#2143). Non-blocking.
+			s.noteUserDeletionAgentFinished(plan, out)
 			done <- out
 		}()
 		out = e.run()
@@ -417,6 +426,13 @@ type deletionEngine struct {
 	// finished is set once finish() has committed the soft or hard delete.
 	// Only the engine goroutine touches it.
 	finished bool
+
+	// retriedRun are the runs of the delete that removed the run the
+	// broker reported holding instead of the recorded one
+	// (retryReportedRunDelete, or the plan's for a re-claim after such a
+	// delete's intent succeeded), or nil. A soft finish records them on
+	// the row. Only the engine goroutine touches it.
+	retriedRun *retriedRunIDs
 
 	// The run intent dispatch recorded (stopped, at intentAt) and the
 	// intent it replaced, so a rollback can restore the prior intent.
@@ -847,17 +863,26 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 		return e.rollback(store.DeletionCodeConflict, refusal.Message), false
 	}
 	var refused *DeleteRunMismatchError
-	if errors.As(err, &refused) && refuseDeleteRunMismatch(req.Force, bestEffort) {
-		// The broker holds a different run of the agent than the row
-		// records, and deleted nothing (ptone/scion#3080): finalizing would
-		// leave that run's container running with no row. Fail the delete
-		// as a conflict and restore the prior phase, as for a broker 409.
-		// A retry sends the same run and is refused again until the row
-		// and the broker agree on the run.
-		s.agentLifecycleLog.Warn("delete engine: broker holds a different run than the hub recorded; not finalizing",
-			"agent_id", agent.ID, "claim", e.plan.claim, "hub_run_id", refused.RequestedRunID,
-			"broker_run_id", refused.CurrentRunID, "force", req.Force, "best_effort", bestEffort)
-		return e.rollback(store.DeletionCodeConflict, deleteRunMismatchMessage(refused)), false
+	if errors.As(err, &refused) {
+		if retry, why := retryReportedRun(req.Force, agent, refused); retry {
+			// Delete the run the broker reported holding, once
+			// (ptone/scion#5016): see retryReportedRun.
+			return e.retryReportedRunDelete(ctx, refused, why, startedAt, bestEffort)
+		}
+		if refuseDeleteRunMismatch(req.Force, bestEffort) {
+			// The broker holds a different run of the agent than the row
+			// records, and deleted nothing (ptone/scion#3080): finalizing
+			// would leave that run's container running with no row. Fail
+			// the delete as a conflict and restore the prior phase, as for
+			// a broker 409. A plain retry sends the same run and is
+			// refused again until the row and the broker agree on the
+			// run; a force delete deletes the reported run
+			// (retryReportedRun) when it is a valid run ID.
+			s.agentLifecycleLog.Warn("delete engine: broker holds a different run than the hub recorded; not finalizing",
+				"agent_id", agent.ID, "claim", e.plan.claim, "hub_run_id", refused.RequestedRunID,
+				"broker_run_id", refused.CurrentRunID, "force", req.Force, "best_effort", bestEffort)
+			return e.rollback(store.DeletionCodeConflict, engineRunMismatchMessage(refused, req.Force)), false
+		}
 	}
 	switch {
 	case bestEffort:
@@ -884,6 +909,12 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 // to return false, the refusal would fall through to the force or
 // best-effort handling, which finalizes as for any other dispatch error.
 //
+// It is asked only about a refusal the engine did not answer by deleting
+// the reported run instead (retryReportedRun, ptone/scion#5016); that
+// delete removes the other run's container, so it orphans nothing. The
+// env-gather recreate and the create-failure cleanup never delete the
+// reported run.
+//
 // Every hub delete caller that can finalize or remove an agent's row after
 // a broker delete (the engine here, env-gather recreate and the
 // create-failure cleanup) asks this one function (ptone/scion#2550 P5), so
@@ -905,6 +936,163 @@ var deleteRunMismatchPolicy = func(force, bestEffort bool) bool {
 func deleteRunMismatchMessage(refused *DeleteRunMismatchError) string {
 	return fmt.Sprintf("The runtime broker holds run %s of this agent, not run %s that the hub recorded; nothing was deleted",
 		refused.CurrentRunID, refused.RequestedRunID)
+}
+
+// Why the delete engine deletes the run the broker reported holding
+// (retryReportedRun).
+const (
+	retryReportedRunForce    = "force"
+	retryReportedRunPrevious = "previous_run"
+)
+
+// retryReportedRun decides whether the delete engine, refused because the
+// broker holds run refused.CurrentRunID of the agent rather than the run
+// its row records (ptone/scion#3080), deletes that reported run instead
+// (ptone/scion#5016). It does when the reported run is a valid run ID and
+// either:
+//   - the delete is forced: the caller asked for the agent to be removed,
+//     and deleting exactly the run the broker reports holding orphans no
+//     container; or
+//   - the reported run is one of the claim snapshot's previous runs
+//     (store.Agent.PreviousRunIDs): a run the hub itself started, which
+//     deletePreviousRuns deletes on any successful delete (ptone/scion#3097).
+//     A failed start or restart can leave the broker holding it while the
+//     row records the new run.
+//
+// A reported run that is not a valid run ID is never sent: the broker
+// would answer 400, and under force that error would otherwise count as
+// finalizable. A created row's best-effort dispatch is no consent on its
+// own: without force or membership, the refusal stands. The reason is
+// returned for logging.
+func retryReportedRun(force bool, snapshot *store.Agent, refused *DeleteRunMismatchError) (bool, string) {
+	if !reportedRunDeletable(refused) {
+		return false, ""
+	}
+	if force {
+		return true, retryReportedRunForce
+	}
+	if slices.Contains(snapshot.PreviousRunIDs, refused.CurrentRunID) {
+		return true, retryReportedRunPrevious
+	}
+	return false, ""
+}
+
+// reportedRunDeletable reports whether the run the broker reported holding
+// can be named in a run-scoped delete: set, other than the run the refused
+// delete named, and a valid run ID (the broker's own check).
+func reportedRunDeletable(refused *DeleteRunMismatchError) bool {
+	current := refused.CurrentRunID
+	return current != "" && current != refused.RequestedRunID && runtime.ValidateRunID(current) == nil
+}
+
+// engineRunMismatchMessage is the delete engine's message when it refuses
+// a run mismatch without having deleted the reported run. It adds that a
+// force delete removes the reported run only when one would
+// (retryReportedRun): never after a forced delete, and never for a
+// reported run that is not a valid run ID.
+func engineRunMismatchMessage(refused *DeleteRunMismatchError, force bool) string {
+	msg := deleteRunMismatchMessage(refused)
+	if !force && reportedRunDeletable(refused) {
+		msg += ". Force delete removes run " + refused.CurrentRunID + " that the broker holds, then the agent"
+	}
+	return msg
+}
+
+// retriedRunMismatchMessage is the failed delete's message when the
+// broker refused the delete of the run it had reported holding, because
+// yet another run holds the agent now.
+func retriedRunMismatchMessage(first, second *DeleteRunMismatchError) string {
+	return fmt.Sprintf("The runtime broker held run %s of this agent, not run %s that the hub recorded, and then refused the delete of run %s because it now holds run %s; nothing more was deleted. Retry the delete",
+		first.CurrentRunID, first.RequestedRunID, second.RequestedRunID, second.CurrentRunID)
+}
+
+// retryReportedRunDelete sends the delete of the run the broker reported
+// holding (first.CurrentRunID) once, after retryReportedRun allowed it,
+// and decides the engine's outcome from it. The dispatch is the claim
+// snapshot with only its runs changed: the reported run is the current
+// one, and the run the row records joins the previous runs
+// (retryPreviousRunIDs), so deletePreviousRuns then deletes the recorded
+// run's files, which the broker keeps with the reported run's container
+// when its run-owner record names the recorded run. The context is the
+// first dispatch's, with the same fence and budget; a cross-node dispatch
+// pins the runs (DeleteDispatchArgs).
+//
+//   - nil: the engine finalizes. A soft finish records the reported run on
+//     the row (see finish).
+//   - a stale dispatch: abandon, as for the first dispatch.
+//   - a placement refusal: conflict, as for the first dispatch.
+//   - another run mismatch, whichever run it names: conflict. There is
+//     no second retry, so a run that keeps changing cannot loop the
+//     engine; the next delete starts over.
+//   - any other error: classifyDispatchFailure, never the force or
+//     best-effort finalize. The broker has just reported an entry of that
+//     run, so finalizing after its delete failed would leave it running
+//     with no row (ptone/scion#3080).
+func (e *deletionEngine) retryReportedRunDelete(ctx context.Context, first *DeleteRunMismatchError, why string, startedAt time.Time, bestEffort bool) (deletionOutcome, bool) {
+	s := e.s
+	agent := e.plan.snapshot
+	req := e.plan.req
+	retry := *agent
+	retry.RunID = first.CurrentRunID
+	retry.PreviousRunIDs = retryPreviousRunIDs(agent.PreviousRunIDs, agent.RunID, first.CurrentRunID)
+	s.agentLifecycleLog.Warn("delete engine: broker holds a different run than the hub recorded; deleting the run it holds",
+		"agent_id", agent.ID, "claim", e.plan.claim, "hub_run_id", first.RequestedRunID,
+		"broker_run_id", first.CurrentRunID, "reason", why, "force", req.Force, "best_effort", bestEffort)
+	err := s.GetDispatcher().DispatchAgentDelete(ctx, &retry, req.DeleteFiles, req.RemoveBranch, req.Soft, startedAt)
+	if err == nil {
+		e.retriedRun = &retriedRunIDs{runID: retry.RunID, previous: retry.PreviousRunIDs}
+		s.agentLifecycleLog.Info("delete engine: deleted the run the broker held",
+			"agent_id", agent.ID, "claim", e.plan.claim, "hub_run_id", first.RequestedRunID, "broker_run_id", first.CurrentRunID)
+		return deletionOutcome{}, true
+	}
+	if e.isLost() {
+		return e.lost(), false
+	}
+	if isStaleDeleteDispatch(err) {
+		s.agentLifecycleLog.Warn("delete engine: delete of the run the broker held refused as stale; abandoning the claim",
+			"agent_id", agent.ID, "claim", e.plan.claim, "broker_run_id", first.CurrentRunID, "error", err)
+		return e.abandonWith(staleDispatchMessage), false
+	}
+	if refusal, ok := placementRefusalOf(err); ok {
+		s.agentLifecycleLog.Warn("delete engine: agent placement is inconsistent; the run the broker held was not deleted, not finalizing",
+			"agent_id", agent.ID, "claim", e.plan.claim, "code", refusal.Code, "force", req.Force)
+		return e.rollback(store.DeletionCodeConflict, refusal.Message), false
+	}
+	var second *DeleteRunMismatchError
+	if errors.As(err, &second) {
+		s.agentLifecycleLog.Warn("delete engine: broker refused the delete of the run it held; another run holds the agent; not finalizing",
+			"agent_id", agent.ID, "claim", e.plan.claim, "hub_run_id", first.RequestedRunID,
+			"broker_run_id", first.CurrentRunID, "now_run_id", second.CurrentRunID)
+		return e.rollback(store.DeletionCodeConflict, retriedRunMismatchMessage(first, second)), false
+	}
+	s.agentLifecycleLog.Error("Failed to delete the run the broker held",
+		"agent_id", agent.ID, "broker_run_id", first.CurrentRunID, "error", err)
+	return e.classifyDispatchFailure(err, startedAt)
+}
+
+// retryPreviousRunIDs is the previous-run list of the delete of the run
+// the broker reported holding (current), after the delete of requested
+// (the run the row records) was refused: prev in order without current,
+// then requested, each run once and no empty run. It is not capped at
+// store.MaxPreviousRunIDs, unlike store.AppendPreviousRunID: the refused
+// delete sent none of prev, so a run dropped here would never be deleted
+// and the finalize would leave its entry with no row.
+func retryPreviousRunIDs(prev []string, requested, current string) []string {
+	out := make([]string, 0, len(prev)+1)
+	for _, r := range append(slices.Clone(prev), requested) {
+		if r != "" && r != current && !slices.Contains(out, r) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// retriedRunIDs are the runs a delete named after it deleted the run the
+// broker reported holding instead of the recorded one (ptone/scion#5016):
+// runID is the reported run and previous the retry's previous runs.
+type retriedRunIDs struct {
+	runID    string
+	previous []string
 }
 
 // classifyDispatchFailure decides a non-force dispatch error from the
@@ -1166,6 +1354,24 @@ func (e *deletionEngine) finish() (deletionOutcome, bool) {
 			State: &none, Phase: &stopped, DeletedAt: &now,
 			Code: &empty, Error: &empty, Prior: &empty, Request: &empty,
 			ClearLeaseAt: true, ClearStartedAt: true, ClearFailedAt: true,
+		}
+		if r := e.retriedRun; r != nil {
+			// The dispatch deleted the run the broker held, not the one
+			// the row recorded (ptone/scion#5016): record that run, with
+			// the recorded one among the previous runs, so the retained
+			// files purge names the broker's run first and the recorded
+			// one after it, whichever the run-owner record assigns the
+			// files to. Only a plain delete is soft, and its retry
+			// deletes one of the previous runs, so the list stays within
+			// store.MaxPreviousRunIDs. A lease-expired re-claim of a
+			// finalizing row skips the dispatch and keeps the row's runs.
+			runID := r.runID
+			prev := slices.Clone(r.previous)
+			if prev == nil {
+				prev = []string{}
+			}
+			set.SoftFinishRunID = &runID
+			set.SoftFinishPreviousRunIDs = &prev
 		}
 		e.stopRenewal()
 		n, err := s.finalizeAgentDeletion(ctx, agent.ID, pred, store.DeletionFinalizeSoft, set)

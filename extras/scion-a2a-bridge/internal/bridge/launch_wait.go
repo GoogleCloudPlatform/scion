@@ -124,17 +124,22 @@ func launchProvisioningText(step string) string {
 	return "provisioning agent (" + step + ")"
 }
 
+// launchOutcomeLabel names a launch outcome for a launch failure text: its
+// code, or "phase: <phase>" when it has no code.
+func launchOutcomeLabel(out hubclient.LaunchOutcome) string {
+	if out.Code != "" {
+		return out.Code
+	}
+	return "phase: " + out.Phase
+}
+
 // launchFailureText describes, for an A2A client, why the wait for a
 // launching agent ended without the agent running.
 func launchFailureText(err error) string {
 	var notRunning *hubclient.LaunchNotRunningError
 	if errors.As(err, &notRunning) {
 		out := notRunning.Outcome
-		label := out.Code
-		if label == "" {
-			label = "phase: " + out.Phase
-		}
-		text := "Agent failed to start (" + label + ")"
+		text := "Agent failed to start (" + launchOutcomeLabel(out) + ")"
 		if out.Message != "" {
 			text += ": " + out.Message
 		}
@@ -144,6 +149,21 @@ func launchFailureText(err error) string {
 		return "Request cancelled while waiting for the agent to start"
 	}
 	return "Could not confirm that the agent started: " + err.Error()
+}
+
+// federatedUserLaunchFailureText is launchFailureText for a federated
+// user: the launch outcome code (or phase) only. The outcome message and
+// a read error come from the bridge's own read of the agent and are not
+// shown to a caller from another issuer.
+func federatedUserLaunchFailureText(err error) string {
+	var notRunning *hubclient.LaunchNotRunningError
+	if errors.As(err, &notRunning) {
+		return "Agent failed to start (" + launchOutcomeLabel(notRunning.Outcome) + ")"
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return "Request cancelled while waiting for the agent to start"
+	}
+	return "Could not confirm that the agent started"
 }
 
 // launchKeepAliveInterval is how often a legacy task waiting for a launch is

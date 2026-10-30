@@ -107,9 +107,8 @@ project.
 
 Known P1 limitation: the hub's project workspace surfaces still resolve to
 the hub project directory for empty-per-agent projects, although their
-agents never mount it. Those surfaces are WebDAV
-(`resolveProjectWebDAVPath`), the project workspace file API
-(`handleProjectWorkspace`) and cache refresh (`handleProjectCacheRefresh`).
+agents never mount it. Those surfaces are the project workspace file API
+(`handleProjectWorkspace`, through `resolveProjectWorkspacePath`) and cache refresh (`handleProjectCacheRefresh`).
 This is deliberately unguarded in P1; the web UI hides the Files tab for this
 mode (P5).
 

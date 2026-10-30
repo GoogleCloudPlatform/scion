@@ -27,6 +27,7 @@ import (
 
 	core "github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport/ws"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/control"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
@@ -185,7 +186,7 @@ func TestPortForwardingConduitGate(t *testing.T) {
 			env := map[string]string{
 				conduit.EnvHubExperiments: tt.experiments,
 				"SCION_HUB_CONDUIT":       tt.legacy,
-				envProjectID:              "project-1",
+				projectkeys.EnvProjectID:  "project-1",
 				conduit.EnvLaunchID:       "launch-1",
 			}
 			p := newPortForwarding(client, tt.disableConduit, conduit.PTYUser{}, nil, func(k string) string { return env[k] })
@@ -224,7 +225,7 @@ func TestPortForwardingConduitControl(t *testing.T) {
 	client := hub.NewClientWithConfig(h.srv.URL, "token-1", "agent-1")
 	env := map[string]string{
 		conduit.EnvHubExperiments: conduit.ExperimentConduit,
-		envProjectID:              "project-1",
+		projectkeys.EnvProjectID:  "project-1",
 		conduit.EnvLaunchID:       "launch-1",
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -283,7 +284,7 @@ func TestPortForwardingConduitAuthRefresh(t *testing.T) {
 	client := hub.NewClientWithConfig(h.srv.URL, "token-1", "agent-1")
 	env := map[string]string{
 		conduit.EnvHubExperiments: conduit.ExperimentConduit,
-		envProjectID:              "project-1",
+		projectkeys.EnvProjectID:  "project-1",
 		conduit.EnvLaunchID:       "launch-1",
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -371,7 +372,7 @@ func TestPortForwardingConduit4401WaitsForRefreshLoop(t *testing.T) {
 	client := hub.NewClientWithConfig(h.srv.URL, "token-1", "agent-1")
 	env := map[string]string{
 		conduit.EnvHubExperiments: conduit.ExperimentConduit,
-		envProjectID:              "project-1",
+		projectkeys.EnvProjectID:  "project-1",
 		conduit.EnvLaunchID:       "launch-1",
 	}
 	ctx, cancel := context.WithCancel(context.Background())

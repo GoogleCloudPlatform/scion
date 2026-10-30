@@ -92,8 +92,11 @@ A login never changes settings files. Credentials are stored in
 
 --hub accepts a hub nickname ('scion hub list'). A hub URL given with
 --hub that is not in the hub list yet is added to it after a successful
-login, with a nickname derived from its host; it does not become the
-current hub. To make it the current hub, run 'scion use --hub <name>'.
+login, with a nickname derived from its host. When no hub is current yet,
+the hub logged in to becomes the current hub (not one taken from
+SCION_HUB_ENDPOINT or SCION_HUB_URL).
+A login never switches a hub that is already current.
+To make hub <name> the current hub, run 'scion use --hub <name>'.
 
 Example:
   scion hub auth login
@@ -241,10 +244,15 @@ var errHubAlreadyListed = errors.New("hub already registered")
 // configuration.
 //
 //   - The current hub ('scion use') or the hub of the linked directory:
-//     one line saying which hub that was.
+//     one line saying which hub that was. The hub of the linked directory
+//     becomes the current hub when none is (selectLoginHubIfNoneCurrent),
+//     and one more line says so.
 //   - A URL given with --hub or --hub-url: added to the hub list when it
-//     has no entry (registerHubInList). A login never makes a hub current;
-//     when the hub is not the current hub, a hint says how to select it.
+//     has no entry (registerHubInList).
+//   - A hub given with --hub or --hub-url (URL or nickname): when no hub
+//     is current, it becomes the current hub (selectLoginHubIfNoneCurrent)
+//     and one line says so. A current hub is never switched; when the hub
+//     is not the current hub, a hint says how to select it.
 //   - A hub from the environment: nothing (it is a one-off override).
 func recordLoginHub(out, stderr io.Writer, hubURL string) {
 	if contextDisabled(resolveMode()) {
@@ -256,6 +264,7 @@ func recordLoginHub(out, stderr io.Writer, hubURL string) {
 		return
 	case hubAuthHubURL == "" && hubSource == targetSourceDirectory:
 		_, _ = fmt.Fprintf(out, "Logged in to %s (the hub this directory is linked to).\n", config.RedactURL(hubURL))
+		printLoginHubSelected(out, stderr, hubURL)
 		return
 	case hubAuthHubURL == "" && hubFlagEndpoint() == "":
 		return
@@ -263,14 +272,69 @@ func recordLoginHub(out, stderr io.Writer, hubURL string) {
 	if loginHubURLGivenExplicitly() {
 		registerHubInList(out, stderr, hubURL)
 	}
+	if printLoginHubSelected(out, stderr, hubURL) {
+		return
+	}
 	c, err := config.LoadCLIContext()
 	if err != nil {
 		return
 	}
 	if name, h := c.HubByEndpoint(hubURL); h != nil && name != c.CurrentHub {
-		_, _ = fmt.Fprintf(out, "To make it the current hub, run 'scion use --hub %s'.\n", name)
+		_, _ = fmt.Fprintf(out, "To make hub '%s' the current hub, run 'scion use --hub %s'.\n", name, name)
 	}
 }
+
+// printLoginHubSelected makes the hub at hubURL the current hub when none
+// is (selectLoginHubIfNoneCurrent) and prints one line when it did.
+func printLoginHubSelected(out, stderr io.Writer, hubURL string) bool {
+	name, endpoint, ok := selectLoginHubIfNoneCurrent(stderr, hubURL)
+	if ok {
+		_, _ = fmt.Fprintf(out, "Hub '%s' (%s) is now the current hub.\n", name, config.RedactURL(endpoint))
+	}
+	return ok
+}
+
+// selectLoginHubIfNoneCurrent makes the hub list entry for hubURL the
+// current hub when no hub is current, and returns the entry's name and
+// endpoint. It changes nothing, and returns false, when a hub is already
+// current or hubURL has no entry (for example when registerHubInList
+// refused it). A failure to update the hub list is a warning: the login
+// itself succeeded. A read-only look comes first, so a hub that is not
+// listed takes no lock and an unreadable file is not reported twice.
+func selectLoginHubIfNoneCurrent(stderr io.Writer, hubURL string) (name, endpoint string, ok bool) {
+	listed, err := config.LoadCLIContext()
+	if err != nil {
+		return "", "", false
+	}
+	if _, h := listed.HubByEndpoint(hubURL); h == nil {
+		return "", "", false
+	}
+	err = config.UpdateCLIContext(func(c *config.CLIContext) error {
+		if c.CurrentHub != "" {
+			return errLoginHubNotSelected
+		}
+		n, h := c.HubByEndpoint(hubURL)
+		if h == nil {
+			return errLoginHubNotSelected
+		}
+		name, endpoint = n, h.Endpoint
+		c.CurrentHub = n
+		return nil
+	})
+	switch {
+	case errors.Is(err, errLoginHubNotSelected):
+		return "", "", false
+	case err != nil:
+		_, _ = fmt.Fprintf(stderr, "Warning: could not make %s the current hub: %v\n", config.RedactURL(hubURL), err)
+		return "", "", false
+	}
+	return name, endpoint, true
+}
+
+// errLoginHubNotSelected stops the context update of
+// selectLoginHubIfNoneCurrent when there is nothing to change, so the file
+// is not rewritten.
+var errLoginHubNotSelected = errors.New("login hub not selected")
 
 func newDeviceFlowAuth(authSvc hubclient.AuthService, provider string) *auth.DeviceFlowAuth {
 	if strings.TrimSpace(provider) == "" {

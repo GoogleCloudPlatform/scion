@@ -355,11 +355,8 @@ func testAdminGranteeRefusal(ctx context.Context, users store.UserStore, cache *
 	if principalType != store.RoleBindingPrincipalUser || principalID == "" {
 		return ""
 	}
-	if store.IsTestAdminKind(store.TestIdentityEmailKind(principalID)) {
-		return testAdminGranteeReasonRefused
-	}
-	if store.IsFederatedSyntheticEmail(principalID) {
-		return federatedGranteeReasonRefused
+	if reason := granteeAddressRefusal(principalID); reason != "" {
+		return reason
 	}
 	if users == nil {
 		return testAdminGranteeReasonUnverified
@@ -372,6 +369,23 @@ func testAdminGranteeRefusal(ctx context.Context, users store.UserStore, cache *
 		return testAdminGranteeReasonRefused
 	}
 	if k.isFederated() {
+		return federatedGranteeReasonRefused
+	}
+	return ""
+}
+
+// granteeAddressRefusal is the address-shaped half of
+// testAdminGranteeRefusal: it returns a non-empty reason when address is in
+// an admin kind's reserved test-identity domain or has the federated
+// synthetic shape. It reads nothing. The batch invite address check
+// (inviteBatchAddressRefusal) calls it too, so an address the grantee
+// check would refuse is reported invalid before any membership step; the
+// two cannot drift apart.
+func granteeAddressRefusal(address string) string {
+	if store.IsTestAdminKind(store.TestIdentityEmailKind(address)) {
+		return testAdminGranteeReasonRefused
+	}
+	if store.IsFederatedSyntheticEmail(address) {
 		return federatedGranteeReasonRefused
 	}
 	return ""

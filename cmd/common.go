@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -39,6 +40,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -83,7 +85,38 @@ var (
 	messageModeFlag       string
 	serviceAccountFlag    string
 	agentLogLevelFlag     string
+	sendEnvFlag           bool
 )
+
+// sendEnvFlagName is the start/resume flag that allows a non-interactive
+// CLI, which cannot show the confirmation prompt, to send values from its
+// local environment to the hub when the hub asks for them.
+const sendEnvFlagName = "send-env"
+
+const sendEnvFlagUsage = "Allow sending values from the local environment that the Hub asks for to provision the agent (required when the confirmation prompt cannot be shown: no terminal, --non-interactive, or agent mode)"
+
+// envSendNeedsOptIn reports whether sending local environment values
+// requires the explicit --send-env opt-in: the CLI is non-interactive
+// (no terminal, --non-interactive, cli.interactive_disabled or agent
+// mode), so no confirmation prompt can be shown.
+func envSendNeedsOptIn() bool {
+	return nonInteractive || !isInteractiveTerminal()
+}
+
+// envSendOptInError names the keys (never their values) that the hub
+// asked for and the flag that allows sending them.
+func envSendOptInError(gathered map[string]string) error {
+	sorted := slices.Sorted(maps.Keys(gathered))
+	return fmt.Errorf("the Hub asked for %d environment value(s) found in the local environment (%s); a non-interactive start or resume sends local environment values only with --%s: rerun with --%s, or store them on the Hub with 'scion hub secret set' or 'scion hub env set'",
+		len(sorted), strings.Join(sorted, ", "), sendEnvFlagName, sendEnvFlagName)
+}
+
+// envSendNamesLine names the keys (never their values), sorted, that the
+// CLI sends to the hub.
+func envSendNamesLine(gathered map[string]string) string {
+	sorted := slices.Sorted(maps.Keys(gathered))
+	return fmt.Sprintf("Sending %d environment value(s) to the Hub: %s", len(sorted), strings.Join(sorted, ", "))
+}
 
 // agentLogLevelFlagName is the start/resume flag that sets SCION_LOG_LEVEL
 // in the agent's environment. Agents never inherit debug settings from the
@@ -301,7 +334,10 @@ func getHubAccessToken(endpoint string) string {
 		return token
 	}
 
-	// Priority 3: Dev auth token
+	// Priority 3: Dev auth token, for a loopback hub only (see scopeDevAuth)
+	if !isLocalhostEndpoint(endpoint) {
+		return ""
+	}
 	return apiclient.ResolveDevToken()
 }
 
@@ -420,7 +456,7 @@ func detectCrossProjectTarget(cmd *cobra.Command) string {
 		return ""
 	}
 	ownProjectSlug := os.Getenv("SCION_PROJECT")
-	ownProjectID := os.Getenv("SCION_PROJECT_ID")
+	ownProjectID := projectkeys.ProjectIDFromEnv(os.Getenv)
 	isSameProject := (ownProjectSlug != "" && projectPath == ownProjectSlug) ||
 		(ownProjectID != "" && projectPath == ownProjectID)
 	if isSameProject {
@@ -469,7 +505,7 @@ func CheckAgentsGitignore(projectPath string) error {
 		return nil
 	}
 
-	rel, err := filepath.Rel(root, projectDir)
+	rel, err := filepath.Rel(root, projectDir) //winsec:not-containment only RunAgent (start, create, resume) reaches it, and those are gated on Windows
 	if err != nil || strings.HasPrefix(rel, "..") {
 		return nil
 	}
@@ -805,24 +841,9 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		}
 	}
 
-	if modelFlag != "" {
-		normalizedModel := config.NormalizeModelAlias(modelFlag)
-		if inlineCfg == nil {
-			inlineCfg = &api.ScionConfig{}
-		}
-		inlineCfg.Model = normalizedModel
-	}
-	// An explicitly set --thinking-level is always parsed, so an empty
-	// value fails instead of being treated as unset.
-	if thinkingLevelFlag != "" || (cmd != nil && cmd.Flags().Changed("thinking-level")) {
-		val, err := parseThinkingLevel(thinkingLevelFlag)
-		if err != nil {
-			return err
-		}
-		if inlineCfg == nil {
-			inlineCfg = &api.ScionConfig{}
-		}
-		inlineCfg.ThinkingLevel = &val
+	inlineCfg, err = applyModelFlags(cmd, inlineCfg)
+	if err != nil {
+		return err
 	}
 
 	hubCtx, err := requireHub(projectPath)
@@ -831,6 +852,33 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	}
 
 	return startAgentViaHub(cmd, hubCtx, agentName, task, resume, inlineCfg)
+}
+
+// applyModelFlags writes --model and --thinking-level into the request's
+// inline config, creating it when either flag is set, and returns it. They
+// are explicit request values, the top of the hub's request > project >
+// template > hub order. --model is sent alias-normalized; the hub resolves
+// the alias. An explicitly set --thinking-level is always parsed, so an
+// empty value fails (a usage error) instead of being treated as unset.
+// Shared by scion start and scion create.
+func applyModelFlags(cmd *cobra.Command, inlineCfg *api.ScionConfig) (*api.ScionConfig, error) {
+	if modelFlag != "" {
+		if inlineCfg == nil {
+			inlineCfg = &api.ScionConfig{}
+		}
+		inlineCfg.Model = config.NormalizeModelAlias(modelFlag)
+	}
+	if thinkingLevelFlag != "" || (cmd != nil && cmd.Flags().Changed("thinking-level")) {
+		val, err := parseThinkingLevel(thinkingLevelFlag)
+		if err != nil {
+			return nil, err
+		}
+		if inlineCfg == nil {
+			inlineCfg = &api.ScionConfig{}
+		}
+		inlineCfg.ThinkingLevel = &val
+	}
+	return inlineCfg, nil
 }
 
 // applyServiceAccountFlag wires the --service-account CLI flag into a
@@ -1189,6 +1237,7 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 	// every file in the project directory, which is extremely expensive for
 	// large workspaces.
 	var workspaceFiles []transfer.FileInfo
+	var workspaceRoot *os.Root // opened at the collected directory; uploads read through it
 	if hubCtx.ProjectPath != "" && !hubCtx.IsGlobal && !config.IsHubContext() {
 		projectDir := filepath.Dir(hubCtx.ProjectPath) // parent of .scion
 		if _, statErr := os.Stat(projectDir); statErr == nil && !util.IsGitRepoDir(projectDir) {
@@ -1204,6 +1253,11 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 				return fmt.Errorf("failed to collect workspace files: %w", err)
 			}
 			if len(files) > 0 {
+				workspaceRoot, err = os.OpenRoot(projectDir)
+				if err != nil {
+					return fmt.Errorf("failed to open workspace directory %s: %w", projectDir, err)
+				}
+				defer func() { _ = workspaceRoot.Close() }()
 				req.WorkspaceFiles = files
 				workspaceFiles = files
 			}
@@ -1398,7 +1452,7 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 	if len(resp.UploadURLs) > 0 && len(workspaceFiles) > 0 {
 		statusf("Uploading workspace (%d files)...\n", len(workspaceFiles))
 		tc := transfer.NewClient(nil)
-		uploadErr := tc.UploadFiles(ctx, workspaceFiles, resp.UploadURLs, func(file transfer.FileInfo, bytesTransferred int64) error {
+		uploadErr := tc.UploadFiles(ctx, workspaceRoot, workspaceFiles, resp.UploadURLs, func(file transfer.FileInfo, bytesTransferred int64) error {
 			if bytesTransferred == file.Size {
 				statusf("  Uploaded: %s\n", file.Path)
 			}
@@ -1698,7 +1752,17 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 	})
 }
 
+// hubCreateRequestTimeout is the client timeout of the agent create request
+// that scion start and scion create send, and of the env submit that
+// carries the launch when the hub gathers env first. With async launch off,
+// the hub answers only once the runtime has created the agent, which can
+// take well over hubClientTimeout (a Cloud Run instance create, for
+// example), so these requests get a longer timeout. Other hub requests keep
+// theirs.
+var hubCreateRequestTimeout = 3 * time.Minute
+
 func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, projectID string, req *hubclient.CreateAgentRequest) (*hubclient.CreateAgentResponse, error) {
+	createCtx := apiclient.WithRequestTimeout(ctx, hubCreateRequestTimeout)
 	for {
 		if debugMode {
 			util.Debugf("[env-gather] createAgentWithBrokerResolution: sending create request to Hub (project=%s, agent=%s, broker=%s)", projectID, req.Name, req.RuntimeBrokerID)
@@ -1709,7 +1773,7 @@ func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, pr
 			}
 		}
 
-		resp, err := hubCtx.Client.ProjectAgents(projectID).Create(ctx, req)
+		resp, err := hubCtx.Client.ProjectAgents(projectID).Create(createCtx, req)
 		if err == nil {
 			if debugMode {
 				if resp.EnvGather != nil {
@@ -2045,10 +2109,17 @@ func gatherAndSubmitEnvGuarded(ctx context.Context, hubCtx *HubContext, projectI
 		return resp, nil
 	}
 
+	// A non-interactive CLI sends local environment values only with the
+	// explicit --send-env opt-in; without it nothing is sent.
+	if envSendNeedsOptIn() && !sendEnvFlag {
+		return nil, envSendOptInError(gatheredEnv)
+	}
+
 	// In interactive mode, confirm before sending env vars
-	if isInteractiveTerminal() && !autoConfirm {
+	prompted := isInteractiveTerminal() && !autoConfirm
+	if prompted {
 		reader := bufio.NewReader(os.Stdin)
-		fmt.Fprintf(os.Stderr, "\nSend %d environment variable(s) to use in provisioning this agent? (will not be stored) [Y/n]: ", len(gatheredEnv))
+		fmt.Fprintf(os.Stderr, "\nSend %d environment value(s) to use in provisioning this agent? (will not be stored) [Y/n]: ", len(gatheredEnv))
 		input, err := reader.ReadString('\n')
 		if err != nil {
 			return nil, fmt.Errorf("failed to read input: %w", err)
@@ -2059,7 +2130,14 @@ func gatherAndSubmitEnvGuarded(ctx context.Context, hubCtx *HubContext, projectI
 		}
 	}
 
-	statusf("Submitting %d gathered environment variable(s)...\n", len(gatheredEnv))
+	// The text-mode prompt follows the list of keys found locally. In
+	// every other case (--yes, --format json, a non-interactive send
+	// with --send-env) the keys are named here, on stderr only.
+	if prompted && !isJSONOutput() {
+		statusf("Submitting %d gathered environment value(s)...\n", len(gatheredEnv))
+	} else {
+		fmt.Fprintln(os.Stderr, envSendNamesLine(gatheredEnv))
+	}
 
 	// Submit gathered env to Hub. From here the Hub may launch the agent.
 	// A context that already ended sends nothing: report it as a failure
@@ -2070,7 +2148,9 @@ func gatherAndSubmitEnvGuarded(ctx context.Context, hubCtx *HubContext, projectI
 	if !cleanup.markSubmitted() {
 		return nil, errEnvGatherInterrupted
 	}
-	submitResp, err := hubCtx.Client.ProjectAgents(projectID).SubmitEnv(ctx, agentID, &hubclient.SubmitEnvRequest{
+	// The submit carries the launch, which the hub can run synchronously,
+	// so it gets the create request's longer timeout.
+	submitResp, err := hubCtx.Client.ProjectAgents(projectID).SubmitEnv(apiclient.WithRequestTimeout(ctx, hubCreateRequestTimeout), agentID, &hubclient.SubmitEnvRequest{
 		Env: gatheredEnv,
 	})
 	if err != nil {

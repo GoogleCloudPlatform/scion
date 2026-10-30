@@ -414,6 +414,7 @@ func (s *Server) initDecisionAuditLog() error {
 		return err
 	}
 	s.auditWriter = w
+	s.auditWriterHandler = h
 	s.decisionAuditLogger = &decisionAuditLogger{
 		sink:    sink,
 		handler: h,

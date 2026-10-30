@@ -337,7 +337,7 @@ func TestWorkspaceLocks_SharedAcrossServers(t *testing.T) {
 		cfg := DefaultServerConfig()
 		cfg.StateDir = t.TempDir()
 		cfg.WorkspaceLocks = locks
-		return New(cfg, &mockManager{}, nil)
+		return New(cfg, &mockManager{}, nil, config.RuntimeBuildRecord{})
 	}
 	a, b, solo := newServer(shared), newServer(shared), newServer(nil)
 	require.Same(t, shared, a.workspaceLocks)
@@ -456,7 +456,7 @@ func TestWorkspaceLocks_AgentFileLockPaths(t *testing.T) {
 			"another project's lock set includes the global project's agent entry %s", p)
 	}
 
-	s := New(DefaultServerConfig(), &mockManager{}, nil)
+	s := New(DefaultServerConfig(), &mockManager{}, nil, config.RuntimeBuildRecord{})
 	unlock, err := s.lockProjectWorkspace(context.Background(), filepath.Join(dir, "workspace"), dir)
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
@@ -526,7 +526,7 @@ func TestWorkspaceLocks_WorkspaceDownloadWaitsForProjectLock(t *testing.T) {
 		cfg := DefaultServerConfig()
 		cfg.StateDir = t.TempDir()
 		cfg.WorkspaceLocks = locks
-		return New(cfg, &mockManager{}, nil)
+		return New(cfg, &mockManager{}, nil, config.RuntimeBuildRecord{})
 	}
 	a, b := newSrv(), newSrv()
 	var downloads atomic.Int32
@@ -544,7 +544,8 @@ func TestWorkspaceLocks_WorkspaceDownloadWaitsForProjectLock(t *testing.T) {
 	go func() {
 		_, _, _, err := a.downloadWorkspaceFromGCS(context.Background(), CreateAgentRequest{
 			ID: "agent-dl", Name: "agent-dl", ProjectID: "proj-dl", ProjectSlug: "dl-proj",
-			WorkspaceStoragePath: "uploads/dl", WorkspaceStorageBucket: "bucket"}, api.StartOptions{})
+			WorkspaceStoragePath: "uploads/dl", WorkspaceStorageBucket: "bucket",
+			workspaceAbsentAtAdmission: true}, api.StartOptions{})
 		done <- err
 	}()
 	select {
@@ -577,7 +578,7 @@ func TestWorkspaceLocks_WorkspaceApplyWaitsForTheWorkspace(t *testing.T) {
 	mgr := &mockAgentManager{agents: []api.AgentInfo{{Name: "test-agent", ContainerID: "test-agent", ProjectPath: projectPath}}}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" },
 		GetWorkspacePathFunc: func(context.Context, string) (string, error) { return "", nil }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 	var downloads atomic.Int32
 	srv.SetWorkspaceDownloader(func(context.Context, string, string, string) error { downloads.Add(1); return nil })
 

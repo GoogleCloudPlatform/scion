@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 var update = flag.Bool("update", false, "rewrite the golden files under testdata")
@@ -505,6 +506,362 @@ func TestStrictAcceptsScanCovers(t *testing.T) {
 	}
 }
 
+// TestScanCoversGuardScanSubdirs checks the "pkgmove:scan-covers
+// guardScanSubdirs" marker: it covers the target exactly when the source
+// package's guardScanSubdirs list names the target (relative to -from), and
+// otherwise the HIGH stays (an error under -strict) and says why.
+func TestScanCoversGuardScanSubdirs(t *testing.T) {
+	requireGo(t)
+	const guard = "package hub\n\nimport (\n\t\"go/parser\"\n\t\"go/token\"\n\t\"os\"\n\t\"testing\"\n)\n\n" +
+		"func TestGuard(t *testing.T) {\n" +
+		"\t// pkgmove:scan-covers guardScanSubdirs\n" +
+		"\t// reads the package directory and every guardScanSubdirs entry.\n" +
+		"\tfor _, dir := range []string{\".\", \"sub\"} {\n" +
+		"\t\tentries, _ := os.ReadDir(dir)\n" +
+		"\t\tfor _, e := range entries {\n" +
+		"\t\t\t_, _ = parser.ParseFile(token.NewFileSet(), e.Name(), nil, 0)\n" +
+		"\t\t}\n\t}\n}\n"
+	const list = "package hub\n\nvar guardScanSubdirs = []string{\n\t\"apierr\",\n\t\"sub/\",\n}\n"
+	// mixed adds a recursive walk claiming hub/... to the same file: it
+	// must not clear the file while the guardScanSubdirs site misses the
+	// target.
+	const walk = "\nfunc TestWalk(t *testing.T) {\n" +
+		"\t// pkgmove:scan-covers hub/...\n" +
+		"\t// walks the package directory recursively.\n" +
+		"\t_ = filepath.WalkDir(\".\", nil)\n}\n"
+	mixed := strings.Replace(guard, "\t\"os\"\n", "\t\"os\"\n\t\"path/filepath\"\n", 1) + walk
+	for _, tc := range []struct {
+		name    string
+		helpers string // hub/helpers_test.go
+		dst     string // relative to hub
+		mixed   bool
+		wantErr bool
+		want    string
+	}{
+		{"listed", list, "sub", false, false,
+			`source-scanning test declares coverage of hub/sub (marker at hub/guard_test.go:11, through the guardScanSubdirs entry "sub" declared at hub/helpers_test.go:3; reason: "reads the package directory and every guardScanSubdirs entry.")`},
+		{"nested", "package hub\n\nvar guardScanSubdirs = []string{\"internal/sub\"}\n", "internal/sub", false, false,
+			`through the guardScanSubdirs entry "internal/sub" declared at hub/helpers_test.go:3`},
+		{"unlisted", list, "other", false, true,
+			`marker at hub/guard_test.go:11 claims the guardScanSubdirs entries, but the list (declared at hub/helpers_test.go:3) does not include other: add "other" to guardScanSubdirs`},
+		{"nolist", "package hub\n\nvar scanDirs = []string{\"sub\"}\n", "sub", false, true,
+			"marker at hub/guard_test.go:11 claims the guardScanSubdirs entries, but no test file of hub declares guardScanSubdirs"},
+		{"notliteral", "package hub\n\nvar guardScanSubdirs = append([]string{}, \"sub\")\n", "sub", false, true,
+			"but guardScanSubdirs at hub/helpers_test.go:3 is not a []string literal"},
+		{"badentry", "package hub\n\nvar guardScanSubdirs = []string{\"sub\", \"../x\"}\n", "sub", false, true,
+			"but guardScanSubdirs entry at hub/helpers_test.go:3 is not a string literal naming a subdirectory"},
+		{"mixedlisted", list, "sub", true, false,
+			`source-scanning test declares coverage of hub/sub (marker at hub/guard_test.go:12, through the guardScanSubdirs entry "sub"`},
+		{"mixedunlisted", list, "other", true, true,
+			`marker at hub/guard_test.go:12 claims the guardScanSubdirs entries, but the list (declared at hub/helpers_test.go:3) does not include other: add "other" to guardScanSubdirs; the marker at hub/guard_test.go:23 does not clear the file while the guardScanSubdirs marker at hub/guard_test.go:12 misses the target`},
+		// The helpers read each entry one level deep, so a listed parent does not cover a target below it.
+		{"belowentry", list, "sub/deeper", false, true,
+			`does not include sub/deeper: add "sub/deeper" to guardScanSubdirs`},
+		{"outsidefrom", list, "../other", false, true,
+			"marker at hub/guard_test.go:11 claims the guardScanSubdirs entries, but the target is not below the source directory"},
+		{"dotentry", "package hub\n\nvar guardScanSubdirs = []string{\"sub\", \".\"}\n", "sub", false, true,
+			"but guardScanSubdirs entry at hub/helpers_test.go:3 is not a string literal naming a subdirectory"},
+		{"recursiveentry", "package hub\n\nvar guardScanSubdirs = []string{\"sub/...\"}\n", "sub", false, true,
+			"but guardScanSubdirs entry at hub/helpers_test.go:3 is not a string literal naming a subdirectory"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := guard
+			if tc.mixed {
+				g = mixed
+			}
+			dir := t.TempDir()
+			writeTree(t, dir, map[string]string{
+				"go.mod":              "module example.com/fx\n\ngo 1.26\n",
+				"hub/move.go":         "package hub\n\nfunc Handler() {}\n",
+				"hub/stay.go":         "package hub\n\nconst version = 1\n",
+				"hub/helpers_test.go": tc.helpers,
+				"hub/guard_test.go":   g,
+			})
+			var buf bytes.Buffer
+			err := run(&Config{
+				SrcDir: filepath.Join(dir, "hub"), DstDir: filepath.Join(dir, "hub", filepath.FromSlash(tc.dst)),
+				Files: []string{"move.go"}, NoGit: true, DryRun: true, Strict: true, Stdout: &buf,
+			})
+			out := buf.String()
+			switch {
+			case tc.wantErr && !errors.Is(err, errPlan):
+				t.Fatalf("want errPlan, got %v\n%s", err, out)
+			case !tc.wantErr && err != nil:
+				t.Fatalf("want success under -strict, got %v\n%s", err, out)
+			}
+			if tc.wantErr && !strings.Contains(out, "hub/guard_test.go: -strict: source-scanning test does not cover the target") {
+				t.Errorf("missing the -strict error:\n%s", out)
+			}
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("missing %q:\n%s", tc.want, out)
+			}
+		})
+	}
+
+	// Two declarations (build-tag variants, so the package still compiles)
+	// and a listed target whose marker has no reason line: both stay HIGH.
+	for _, tc := range []struct {
+		name  string
+		files map[string]string
+		want  string
+	}{
+		{"duplicate", map[string]string{
+			"hub/helpers_test.go":             "//go:build !integration\n\npackage hub\n\nvar guardScanSubdirs = []string{\"sub\"}\n",
+			"hub/helpers_integration_test.go": "//go:build integration\n\npackage hub\n\nvar guardScanSubdirs = []string{\"sub\"}\n",
+			"hub/guard_test.go":               guard,
+		}, "but guardScanSubdirs is declared more than once (hub/helpers_integration_test.go:5, hub/helpers_test.go:5)"},
+		{"noreason", map[string]string{
+			"hub/helpers_test.go": list,
+			"hub/guard_test.go":   strings.Replace(guard, "\t// reads the package directory and every guardScanSubdirs entry.\n", "", 1),
+		}, "marker at hub/guard_test.go:11 has no reason line"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			files := map[string]string{
+				"go.mod":      "module example.com/fx\n\ngo 1.26\n",
+				"hub/move.go": "package hub\n\nfunc Handler() {}\n",
+				"hub/stay.go": "package hub\n\nconst version = 1\n",
+			}
+			for k, v := range tc.files {
+				files[k] = v
+			}
+			writeTree(t, dir, files)
+			var buf bytes.Buffer
+			err := run(&Config{
+				SrcDir: filepath.Join(dir, "hub"), DstDir: filepath.Join(dir, "hub", "sub"),
+				Files: []string{"move.go"}, NoGit: true, DryRun: true, Strict: true, Stdout: &buf,
+			})
+			out := buf.String()
+			if !errors.Is(err, errPlan) {
+				t.Fatalf("want errPlan, got %v\n%s", err, out)
+			}
+			for _, w := range []string{"hub/guard_test.go: -strict: source-scanning test does not cover the target", tc.want} {
+				if !strings.Contains(out, w) {
+					t.Errorf("missing %q:\n%s", w, out)
+				}
+			}
+		})
+	}
+}
+
+// TestOutsideRefs checks the outside-reference findings: references to a
+// moved file from outside the move set, by repo path, by path elements and by
+// base name, in Go string literals (the source package's staying tests
+// included), shell guards, the Makefile and workflows. The tree reproduces
+// the two references the maintenance move had to fix by hand: the authzop
+// MutationClassifications entry keyed on the repo path, and the logging
+// TestRequestPathSites table keyed on the base name.
+func TestOutsideRefs(t *testing.T) {
+	requireGo(t)
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		"go.mod":                           "module example.com/fx\n\ngo 1.26\n",
+		"pkg/hub/maintenance_executors.go": "package hub\n\n// CheckForReleaseUpdates is moved; \"maintenance_executors.go\" here is the moved file itself.\nfunc CheckForReleaseUpdates() string { return \"maintenance_executors.go\" }\n",
+		"pkg/hub/stay.go":                  "package hub\n\nconst version = 1\n",
+		"pkg/hub/stay_test.go": "package hub\n\n" +
+			"var censusSites = map[string]bool{\"maintenance_executors.go:Run:GetSecretValue\": true}\n\n" + // line 3: base name in a staying test
+			"// pkgmove:ref-ok the history table keeps the old path on purpose.\n" +
+			"var oldPath = \"pkg/hub/maintenance_executors.go\"\n\n" + // line 6: accepted
+			"// pkgmove:ref-ok\n" +
+			"var noReason = `maintenance_executors.go`\n", // line 9: marker without a reason
+		"pkg/hub/authzop/catalog.go": "package authzop\n\n" +
+			"type MutationClassification struct{ File, Function, Symbol, Scope string }\n\n" +
+			"var MutationClassifications = []MutationClassification{\n" +
+			"\t// pkg/hub/maintenance_executors.go - maintenance operations (a comment: not reported)\n" +
+			"\t{File: \"pkg/hub/maintenance_executors.go\", Function: \"Run\", Symbol: \"GetSecretValue\", Scope: \"pkg/hub/maintenance_executors.go\"},\n" + // line 7
+			"}\n",
+		"pkg/util/logging/request_path_sites_test.go": "package logging\n\nimport \"path/filepath\"\n\n" +
+			"var requestPathSites = []struct{ file, fn string }{\n" +
+			"\t{\"maintenance_executors.go\", \"CheckForReleaseUpdates\"},\n" + // line 6
+			"\t{\"premaintenance_executors.go\", \"Other\"},\n" +
+			"\t{\"maintenance_executors.gox\", \"Other\"},\n" +
+			"}\n\n" +
+			"var hubFiles, _ = filepath.Glob(filepath.Join(\"..\", \"..\", \"hub\", \"*.go\"))\n",
+		"pkg/secret/backend_test.go": "package secret\n\nimport \"path/filepath\"\n\n" +
+			"var keyFile = filepath.Join(\"pkg\", \"hub\",\n\t\"maintenance_executors.go\")\n", // line 5
+		"hack/check-guard.sh":      "#!/bin/sh\nexempt=\"pkg/hub/maintenance_executors.go\"\n# pkgmove:ref-ok fixture path for the guard's self-test.\nfixture=\"pkg/hub/maintenance_executors.go\"\n",
+		"Makefile":                 "check:\n\t@grep -q maintenance_executors.go pkg/hub/*.go\n",
+		".github/workflows/ci.yml": "jobs:\n  check:\n    steps:\n      - run: test -f pkg/hub/maintenance_executors.go\n",
+		"scripts/other.sh":         "echo pkg/hub/maintenance_executors.go\n",
+		// A base-name-only call argument (not path elements), an unparsable Go file (matched as text;
+		// testdata is scanned), skipped vendor and node_modules directories, and a base name after
+		// another directory (another file of the same name).
+		"pkg/hub/stay2_test.go":               "package hub\n\nimport \"os\"\n\nvar movedSrc, _ = os.ReadFile(\"maintenance_executors.go\")\n",
+		"pkg/util/logging/testdata/broken.go": "package broken\n\nfunc {\nvar f = \"pkg/hub/maintenance_executors.go\"\n",
+		"pkg/util/vendor/x.go":                "package vendor\n\nvar f = \"pkg/hub/maintenance_executors.go\"\n",
+		"web/node_modules/x/x.go":             "package x\n\nvar f = \"pkg/hub/maintenance_executors.go\"\n",
+		"pkg/other/other.go":                  "package other\n\nvar f = []string{\"src/maintenance_executors.go\", \"$fixture_dir/maintenance_executors.go\"}\n",
+		"docs/notes.md":                       "pkg/hub/maintenance_executors.go\n",
+		".design/x.go":                        "package x\n\nvar f = \"pkg/hub/maintenance_executors.go\"\n",
+		"docs-site/x.go":                      "package x\n\nvar f = \"pkg/hub/maintenance_executors.go\"\n",
+	})
+	cfg := func(strict bool, out *bytes.Buffer) *Config {
+		return &Config{
+			SrcDir: filepath.Join(dir, "pkg", "hub"), DstDir: filepath.Join(dir, "pkg", "hub", "maintenance"),
+			Files: []string{"maintenance_executors.go"}, NoGit: true, DryRun: true, Strict: strict, Stdout: out,
+		}
+	}
+	const dst = "update it to pkg/hub/maintenance/maintenance_executors.go"
+	const base = "check what it matches after the move"
+	high := []string{
+		`pkg/hub/authzop/catalog.go:7: Go string literal "pkg/hub/maintenance_executors.go" names moved pkg/hub/maintenance_executors.go by its repo path: after the move it no longer matches the file - ` + dst,
+		`pkg/util/logging/request_path_sites_test.go:6: Go string literal "maintenance_executors.go" names moved pkg/hub/maintenance_executors.go by its base name: after the move it no longer matches the file - ` + base,
+		`pkg/secret/backend_test.go:5: Go string literals "pkg", "hub", "maintenance_executors.go" names moved pkg/hub/maintenance_executors.go by its path elements: after the move it no longer matches the file - update the elements to pkg/hub/maintenance/maintenance_executors.go`,
+		`pkg/hub/stay_test.go:3: Go string literal "maintenance_executors.go:Run:GetSecretValue" names moved pkg/hub/maintenance_executors.go by its base name`,
+		"pkg/hub/stay_test.go:9: Go string literal `maintenance_executors.go` names moved pkg/hub/maintenance_executors.go by its base name: after the move it no longer matches the file - " + base,
+		"(the pkgmove:ref-ok marker at pkg/hub/stay_test.go:8 has no reason, so it accepts nothing)",
+		`hack/check-guard.sh:2: line "exempt=\"pkg/hub/maintenance_executors.go\"" names moved pkg/hub/maintenance_executors.go by its repo path: after the move it no longer matches the file - ` + dst,
+		`Makefile:2: line "@grep -q maintenance_executors.go pkg/hub/*.go" names moved pkg/hub/maintenance_executors.go by its base name`,
+		`.github/workflows/ci.yml:4: line "- run: test -f pkg/hub/maintenance_executors.go" names moved pkg/hub/maintenance_executors.go by its repo path`,
+		`pkg/hub/stay2_test.go:5: Go string literal "maintenance_executors.go" names moved pkg/hub/maintenance_executors.go by its base name`,
+		`pkg/util/logging/testdata/broken.go:4: line "var f = \"pkg/hub/maintenance_executors.go\"" names moved pkg/hub/maintenance_executors.go by its repo path`,
+	}
+	info := []string{
+		`pkg/hub/stay_test.go:6: Go string literal "pkg/hub/maintenance_executors.go" names moved pkg/hub/maintenance_executors.go by its repo path; ref-ok: "the history table keeps the old path on purpose."`,
+		`hack/check-guard.sh:4: line "fixture=\"pkg/hub/maintenance_executors.go\"" names moved pkg/hub/maintenance_executors.go by its repo path; ref-ok: "fixture path for the guard's self-test."`,
+	}
+	absent := []string{"catalog.go:6", "premaintenance", ".gox", "scripts/other.sh", "notes.md", ".design/", "docs-site/", "pkg/hub/maintenance_executors.go:4: Go string literal",
+		"vendor/x.go", "node_modules/", "pkg/other/"}
+
+	// Without -strict the references are HIGH findings and the plan stands.
+	var buf bytes.Buffer
+	if err := run(cfg(false, &buf)); err != nil {
+		t.Fatalf("dry run without -strict: %v\n%s", err, buf.String())
+	}
+	out := buf.String()
+	if n := strings.Count(out, "\n== HIGH: outside reference to a moved file ==\n"); n != 1 {
+		t.Errorf("want one HIGH outside-reference section, got %d:\n%s", n, out)
+	}
+	for _, w := range append(append(high, info...), "== INFO: outside reference to a moved file accepted (pkgmove:ref-ok) ==") {
+		if !strings.Contains(out, w) {
+			t.Errorf("missing %q:\n%s", w, out)
+		}
+	}
+	for _, w := range absent {
+		if strings.Contains(out, w) {
+			t.Errorf("unexpected %q:\n%s", w, out)
+		}
+	}
+	// Exactly the expected sites: 10 HIGH lines (one per line of code, the
+	// catalog entry's two literals included) and 2 INFO lines.
+	if got := strings.Count(out, "after the move it no longer matches the file"); got != 10 {
+		t.Errorf("got %d HIGH outside references, want 10:\n%s", got, out)
+	}
+	if got := strings.Count(out, "; ref-ok: "); got != 2 {
+		t.Errorf("got %d accepted outside references, want 2:\n%s", got, out)
+	}
+
+	// Under -strict each one is an error.
+	buf.Reset()
+	if err := run(cfg(true, &buf)); !errors.Is(err, errPlan) {
+		t.Fatalf("want errPlan under -strict, got %v\n%s", err, buf.String())
+	}
+	out = buf.String()
+	if got := strings.Count(out, ": -strict: outside reference to a moved file: "); got != 10 {
+		t.Errorf("got %d -strict outside-reference errors, want 10:\n%s", got, out)
+	}
+	if !strings.Contains(out, "pkg/hub/authzop/catalog.go:7: -strict: outside reference to a moved file: ") {
+		t.Errorf("missing the catalog error:\n%s", out)
+	}
+}
+
+// TestTruncateUTF8 checks that the report truncation (shortenRef, shorten)
+// never splits a multi-byte UTF-8 sequence, keeps its byte limit, and cuts
+// ASCII exactly at the limit.
+func TestTruncateUTF8(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		f    func(string) string
+		max  int
+	}{
+		{"shortenRef", shortenRef, 120},
+		{"shorten", shorten, 60},
+	} {
+		// ASCII: unchanged up to the limit; one byte more is cut to max-3 plus "...".
+		if a := strings.Repeat("a", tc.max); tc.f(a) != a {
+			t.Errorf("%s: %d ASCII bytes changed to %q", tc.name, tc.max, tc.f(a))
+		}
+		if a, want := strings.Repeat("a", tc.max+1), strings.Repeat("a", tc.max-3)+"..."; tc.f(a) != want {
+			t.Errorf("%s: %d ASCII bytes gave %q, want %q", tc.name, tc.max+1, tc.f(a), want)
+		}
+		for _, s := range []string{
+			strings.Repeat("é", 200), // 2-byte runes
+			strings.Repeat("a", tc.max-4) + strings.Repeat("日本語", 10), // a 3-byte rune across the cut at max-3
+			strings.Repeat("😀", 50),                                   // 4-byte runes
+			"x" + strings.Repeat("😀", 50),                             // 4-byte runes, offset by one
+		} {
+			got := tc.f(s)
+			if !utf8.ValidString(got) {
+				t.Errorf("%s(%q...) = %q: not valid UTF-8", tc.name, s[:8], got)
+			}
+			if len(got) > tc.max {
+				t.Errorf("%s: result is %d bytes, want at most %d", tc.name, len(got), tc.max)
+			}
+			if !strings.HasSuffix(got, "...") || !strings.HasPrefix(s, strings.TrimSuffix(got, "...")) {
+				t.Errorf("%s(%q...) = %q: want a prefix of the input plus \"...\"", tc.name, s[:8], got)
+			}
+			// The back-off to a rune boundary is at most 3 bytes.
+			if len(got) < tc.max-3 {
+				t.Errorf("%s: result is %d bytes, cut more than one rune short of %d", tc.name, len(got), tc.max)
+			}
+		}
+		if short := "日本"; tc.f(short) != short {
+			t.Errorf("%s(%q) = %q, want it unchanged", tc.name, short, tc.f(short))
+		}
+	}
+}
+
+func TestContainsBaseRef(t *testing.T) {
+	for _, tc := range []struct {
+		s    string
+		want bool
+	}{
+		{"x.go", true},
+		{"x.go:fn:callee", true},
+		{"../../hub/x.go", true},
+		{"hub/x.go", true},
+		{"src/x.go", false},
+		{"$fixture_dir/x.go", false},
+		{"pkg/hub/sub/x.go", false},
+		{"./x.go", false},
+		{"subhub/x.go", false},
+		{"src/x.go hub/x.go", true},
+		{"src/x.go, x.go", true},
+		{"fix.go", false},
+	} {
+		if got := containsBaseRef(tc.s, "x.go", "hub"); got != tc.want {
+			t.Errorf("containsBaseRef(%q) = %v, want %v", tc.s, got, tc.want)
+		}
+	}
+}
+
+func TestContainsPathElem(t *testing.T) {
+	for _, tc := range []struct {
+		s, p string
+		want bool
+	}{
+		{"x.go", "x.go", true},
+		{"hub/x.go", "x.go", true},
+		{"../../hub/x.go", "x.go", true},
+		{"x.go:fn:callee", "x.go", true},
+		{"a x.go b", "x.go", true},
+		{"fix.go", "x.go", false},
+		{"a-x.go", "x.go", false},
+		{"a.x.go", "x.go", false},
+		{"x.gox", "x.go", false},
+		{"x.go_test", "x.go", false},
+		{"fix.go x.go", "x.go", true},
+		{"pkg/hub/x.go", "pkg/hub/x.go", true},
+		{"./pkg/hub/x.go", "pkg/hub/x.go", true},
+		{"xpkg/hub/x.go", "pkg/hub/x.go", false},
+		{"pkg/hub/sub/x.go", "pkg/hub/x.go", false},
+	} {
+		if got := containsPathElem(tc.s, tc.p); got != tc.want {
+			t.Errorf("containsPathElem(%q, %q) = %v, want %v", tc.s, tc.p, got, tc.want)
+		}
+	}
+}
+
 func TestScanCoversMarker(t *testing.T) {
 	for _, tc := range []struct {
 		comment string
@@ -531,6 +888,9 @@ func TestScanCoversMarker(t *testing.T) {
 		{"// pkgmove:scan-covers pkg/../pkg/hub/sub", "pkg/hub/sub", false},
 		{"// pkgmove:scan-covers pkg/hub/*", "pkg/hub/sub", false},
 		{"// pkgmove:scan-covers pkg/.../sub", "pkg/hub/sub", false},
+		{"// pkgmove:scan-covers guardScanSubdirs", "pkg/hub/sub", false}, // list marker: resolved against the list, not as a directory
+		{"// pkgmove:scan-covers guardscansubdirs", "pkg/hub/guardscansubdirs", false},
+		{"// pkgmove:scan-covers guardscansubdirs", "guardscansubdirs", true}, // any other word is a directory
 	} {
 		src := "package p\n\n" + tc.comment + "\n"
 		fset := token.NewFileSet()
@@ -544,6 +904,9 @@ func TestScanCoversMarker(t *testing.T) {
 		}
 		if got := ms[0].covers(tc.target); got != tc.want {
 			t.Errorf("%q covers %q = %v, want %v", tc.comment, tc.target, got, tc.want)
+		}
+		if got, want := ms[0].list, strings.HasSuffix(tc.comment, " guardScanSubdirs"); got != want {
+			t.Errorf("%q list = %v, want %v", tc.comment, got, want)
 		}
 	}
 	// Not markers: block comments and other words.

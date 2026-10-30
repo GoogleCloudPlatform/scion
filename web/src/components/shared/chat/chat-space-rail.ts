@@ -55,17 +55,27 @@ import { TouchPrimaryController } from '../../../utils/input-modality.js';
 import { LongPressController, type LongPressPoint } from './long-press.js';
 import { PullToRefreshController, type PullState } from './pull-to-refresh.js';
 import {
+  MenuFocus,
   placeMenuInViewport,
-  renderMenuRows,
+  renderMenu,
   runMenuAction,
   shouldUseMenuSheet,
   type MenuAction,
 } from './context-menu.js';
 import type { ActionSheetSelectDetail } from './chat-action-sheet.js';
+import { stateManager } from '../../../client/state.js';
+import { chatStarsLocalChanges, starredMessagesEnabled } from '../../../client/chat-stars.js';
+import { FEATURE_FLAGS_CHANGED_EVENT } from '../../../utils/feature-flags.js';
+import {
+  STARRED_RAIL_RECONCILE_MS,
+  StarredRailController,
+  groupStarredRows,
+  starredRailSort,
+  type StarredConversationRow,
+} from '../../../client/chat-starred-rail.js';
 import './chat-action-sheet.js';
 import './chat-avatar.js';
 import { focusElement } from '../focus-moved.js';
-import { isFeatureEnabled } from '../../../utils/feature-flags.js';
 
 /** A space (project) in the rail. */
 export interface ChatSpace {
@@ -114,13 +124,6 @@ interface ThreadGroup {
   name: string;
   threadIds: string[];
 }
-
-/**
- * The experiment that switches the rail from personal thread groups
- * (`prefs.threadGroups`) to project thread groups served by
- * `/api/v1/thread-groups` (ptone/scion#4424, design section 5). Default off.
- */
-export const PROJECT_THREAD_GROUPS_FLAG = 'hub.chat_thread_groups';
 
 /**
  * A project thread group as the hub sends it, in the `/api/v1/thread-groups`
@@ -211,10 +214,9 @@ function safeJsonParse(value: unknown): unknown {
 /**
  * localStorage key for persisted thread-group collapse state (#1698 follow-up).
  *
- * Group IDs (`generateGroupId`) mix `Math.random()` with a timestamp, so they
- * are already unique across every space, not just within one — a flat set of
- * IDs is enough and there is no need to nest the key under a project/space
- * id.
+ * Project group IDs are hub-assigned UUIDs, so they are already unique
+ * across every space, not just within one — a flat set of IDs is enough and
+ * there is no need to nest the key under a project/space id.
  */
 const GROUP_COLLAPSE_STORAGE_KEY = 'scion-chat-group-collapse';
 
@@ -382,11 +384,11 @@ async function readGroupResponse(res: Response): Promise<ProjectThreadGroup | nu
  * The stored personal `threadGroups` document exactly as the server sent
  * it: '' when the field is absent or null (the hub omits an empty value,
  * and stores '' back as NULL), or undefined when it arrived as something
- * other than a string. With project thread groups on, the rail writes this
- * back byte for byte on every preferences save: the hub clears the
- * migration marker of a user whose stored `thread_groups` changes (design
- * section 5a), so even a re-serialisation of the same groups, or '{}' for
- * none, would queue them for migration again.
+ * other than a string. The rail writes this back byte for byte on every
+ * preferences save: the hub clears the migration marker of a user whose
+ * stored `thread_groups` changes (design section 5a), so even a
+ * re-serialisation of the same groups, or '{}' for none, would queue them
+ * for migration again.
  */
 function rawThreadGroups(payload: unknown): string | undefined {
   const value = (payload as { threadGroups?: unknown } | null | undefined)?.threadGroups;
@@ -454,6 +456,8 @@ export interface DMSelectDetail {
   peerId: string;
   peerKind: 'user' | 'agent';
   displayName: string;
+  /** 'starred' when chosen from the Starred rail: open the starred-only center. */
+  messageFilter?: 'starred';
 }
 
 /** Event detail for thread selection. */
@@ -463,6 +467,39 @@ export interface ThreadSelectDetail {
   projectSlug: string;
   threadName: string;
   defaultAgent: string;
+  /** 'starred' when chosen from the Starred rail: open the starred-only center. */
+  messageFilter?: 'starred';
+}
+
+/** The rail's conversation filter. */
+export type RailFilter = 'all' | 'unread' | 'starred';
+
+/** Detail of the rail's `rail-filter-change` event, sent when the user picks a filter. */
+export interface RailFilterChangeDetail {
+  filter: RailFilter;
+}
+
+/** localStorage key of the selected rail filter (the only thing persisted). */
+export const RAIL_FILTER_STORAGE_KEY = 'scion-chat-space-filter';
+
+/**
+ * The peer of a DM key for `userId` (the slot that is not the caller's user
+ * slot), or null for a malformed key.
+ */
+export function dmKeyPeer(
+  key: string,
+  userId: string
+): { kind: 'user' | 'agent'; id: string } | null {
+  const parts = key.split(':');
+  if (parts.length !== 5 || parts[0] !== 'dm') return null;
+  let kind = parts[1];
+  let id = parts[2];
+  if (kind === 'user' && id === userId) {
+    kind = parts[3];
+    id = parts[4];
+  }
+  if ((kind !== 'user' && kind !== 'agent') || !id) return null;
+  return { kind, id };
 }
 
 /**
@@ -508,6 +545,15 @@ export class ScionChatSpaceRail extends LitElement {
   @property({ attribute: false })
   dms: ChatDMListEntry[] = [];
 
+  /**
+   * The open conversation's center filter ('starred' for the starred-only
+   * center), from the page. A change keeps the rail consistent with it: a
+   * starred-only center shows the Starred rail, and leaving it for full
+   * context (a jump, Show all, a permalink) returns the rail to All.
+   */
+  @property({ attribute: false })
+  centerFilter: '' | 'starred' = '';
+
   @state() private spaces: ChatSpace[] = [];
   @state() private threadsBySpace = new Map<string, ChatSpaceThread[]>();
   /** Spaces whose thread list is being fetched (drives the per-space loading state). */
@@ -548,8 +594,17 @@ export class ScionChatSpaceRail extends LitElement {
   });
   @state() private renamingThread: string | null = null;
   @state() private renameValue = '';
-  /** Space filter: 'all' shows everything, 'unread' shows only spaces with unread. */
-  @state() private spaceFilter: 'all' | 'unread' = 'all';
+  /**
+   * Space filter: 'all' shows everything, 'unread' only spaces with unread,
+   * 'starred' the conversations with the user's stars (from the hub's
+   * starred-conversations endpoint, never from the loaded rail).
+   */
+  @state() private spaceFilter: RailFilter = 'all';
+  /** The Starred rail's rows and paging (active only under the Starred filter). */
+  private readonly starred = new StarredRailController();
+  /** Bumped by every Starred rail change, so the rail re-renders. */
+  @state() private starredVersion = 0;
+  private _starredPoll: ReturnType<typeof setInterval> | null = null;
   /** Project id of the space header currently being dragged, if any. */
   @state() private draggingSpaceId: string | null = null;
   /** Project id of the space header the drag is hovering over. */
@@ -601,10 +656,10 @@ export class ScionChatSpaceRail extends LitElement {
    * Whether `loadPrefs` has completed successfully at least once. On a cold
    * deep link, `selectedKey` is set as an attribute before `connectedCallback`
    * (chat.ts binds it that way), so the very first `updated()` fires and
-   * would otherwise lock in "no override" while `prefs.threadGroups` is
-   * simply not loaded yet — not "this user has no groups". Gating on this
-   * flag, rather than on `threadGroups` being defined, avoids that false
-   * signal (round-3 review, R4).
+   * would otherwise lock in "no override" while the preferences are simply
+   * not loaded yet. The auto-expand decision waits for this flag and for the
+   * selected thread's space's project groups (`groupsKnownForSelection`)
+   * (round-3 review, R4). `savePrefs` also never writes before it is set.
    */
   private _prefsLoaded = false;
   /** Group header id the drag is hovering over. */
@@ -619,13 +674,13 @@ export class ScionChatSpaceRail extends LitElement {
   /** When creating a thread, the target group to add it to (if any). */
   private _createThreadGroupId: string | null = null;
 
-  // --- Project thread groups (PROJECT_THREAD_GROUPS_FLAG on) ---
+  // --- Project thread groups ---
   /**
    * Project thread groups per space, from `/api/v1/thread-groups`, kept
    * current by the API answers to this rail's own edits and by
    * `chat.thread_group` events (see `applyThreadGroupEvent`). A space is
-   * absent until its groups have loaded once. Used only with the flag on;
-   * personal groups (`prefs.threadGroups`) are then hidden, never changed.
+   * absent until its groups have loaded once. The older personal groups
+   * (`prefs.threadGroups`) are hidden and never changed.
    */
   @state() private projectGroups = new Map<string, ThreadGroup[]>();
   /** Project group member thread (topic) ID to conversation ID. */
@@ -650,8 +705,8 @@ export class ScionChatSpaceRail extends LitElement {
    */
   private _groupsReconcile = new Set<string>();
   /**
-   * With project groups on: an event named a group that a space's stored
-   * order (explicit, see `hasExplicitOrder`) does not record, so the stored
+   * An event named a group that a space's stored order (explicit, see
+   * `hasExplicitOrder`) does not record, so the stored
    * `threadOrder` may have changed since it was read (the migration writes
    * each migrated group's position into it, design section 5a rule 6, also
    * for a group it reuses). Any space counts, loaded or not, because every
@@ -718,8 +773,10 @@ export class ScionChatSpaceRail extends LitElement {
       touch-action: var(--chat-touch-action, auto);
       padding: 0.25rem 0;
       /* The last row clears the home indicator (the page uses
-         viewport-fit=cover); the inset is 0 elsewhere. */
-      padding-bottom: max(0.25rem, env(safe-area-inset-bottom, 0px));
+         viewport-fit=cover); the inset is 0 elsewhere. A host that pins
+         its own footer below this list, which takes the inset, sets
+         --chat-list-inset-bottom to 0px (see chat.ts's .palette-footer). */
+      padding-bottom: max(0.25rem, var(--chat-list-inset-bottom, env(safe-area-inset-bottom, 0px)));
     }
 
     /* Space section */
@@ -1061,8 +1118,15 @@ export class ScionChatSpaceRail extends LitElement {
       color: var(--scion-text, #1e293b);
     }
 
-    .context-menu-item:hover {
+    .context-menu-item:hover,
+    .context-menu-item:focus {
       background: var(--scion-bg-subtle, #f1f5f9);
+      outline: none;
+    }
+
+    .context-menu-item:focus-visible {
+      outline: 2px solid var(--scion-primary, #3b82f6);
+      outline-offset: -2px;
     }
 
     .context-menu-item.danger {
@@ -1186,6 +1250,44 @@ export class ScionChatSpaceRail extends LitElement {
 
     .filter-toggle button sl-icon {
       font-size: var(--chat-fs-sm);
+    }
+
+    .filter-toggle button:focus-visible {
+      outline: 2px solid var(--scion-primary, #3b82f6);
+      outline-offset: -2px;
+    }
+
+    .starred-state {
+      padding: 0.75rem;
+      font-size: var(--chat-fs-sm);
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .starred-state p {
+      margin: 0 0 0.5rem;
+    }
+
+    .starred-empty-title {
+      font-size: var(--chat-fs-md);
+      color: var(--scion-text, #1e293b);
+      font-weight: 500;
+    }
+
+    .starred-refresh-error {
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+      flex-wrap: wrap;
+    }
+
+    .starred-more {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      padding: 0.5rem;
+      font-size: var(--chat-fs-sm);
+      color: var(--scion-text-muted, #64748b);
     }
 
     .sort-btn {
@@ -1319,9 +1421,21 @@ export class ScionChatSpaceRail extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
-    // Restore persisted filter/sort from localStorage
-    const savedFilter = localStorage.getItem('scion-chat-space-filter');
+    // Restore persisted filter/sort from localStorage. A stored Starred
+    // filter is ignored while the experiment is off.
+    const savedFilter = localStorage.getItem(RAIL_FILTER_STORAGE_KEY);
     if (savedFilter === 'unread') this.spaceFilter = 'unread';
+    if (savedFilter === 'starred' && starredMessagesEnabled()) this.spaceFilter = 'starred';
+    this.starred.addEventListener('change', this.handleStarredChange);
+    stateManager.addEventListener('chat-stars-updated', this.handleStarredInvalidate);
+    stateManager.addEventListener('connected', this.handleStarredInvalidate);
+    chatStarsLocalChanges.addEventListener('changed', this.handleStarredInvalidate);
+    // Returning to the tab refetches once (visibilitychange covers it; a
+    // window focus listener as well would refetch twice).
+    document.addEventListener('visibilitychange', this.handleStarredVisibility);
+    // A flag change re-runs syncStarredFilter (leaving Starred if it is off).
+    window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.handleFlagsChanged);
+    if (this.spaceFilter === 'starred') this.startStarred();
     // Collapsed thread-groups are restored in willUpdate, not here — see its
     // doc comment (round-4 review, N7).
     void this.loadData();
@@ -1350,6 +1464,7 @@ export class ScionChatSpaceRail extends LitElement {
       this._collapseLoadedFor = this.currentUserId;
       this.collapsedGroups = loadCollapsedGroupIds(this.currentUserId);
     }
+    this.syncStarredFilter(_changedProperties);
     // Expanding a space is asking for its threads: one whose last load
     // failed (and is out of automatic retries) tries again.
     const wasCollapsed = _changedProperties.get('collapsedSpaces') as Set<string> | undefined;
@@ -1372,10 +1487,9 @@ export class ScionChatSpaceRail extends LitElement {
 
   override updated(changedProperties: Map<string, unknown>): void {
     if ((this.contextMenuTarget || this.groupContextMenuTarget) && !this.menuAsSheet) {
-      placeMenuInViewport(
-        this.renderRoot.querySelector<HTMLElement>('.context-menu'),
-        this.contextMenuPos
-      );
+      const menu = this.renderRoot.querySelector<HTMLElement>('.context-menu');
+      placeMenuInViewport(menu, this.contextMenuPos);
+      this.menuFocus.afterRender(menu);
     }
     if (changedProperties.has('selectedProjectId') && this.selectedProjectId) {
       this.expandSpaceForSelectedKey();
@@ -1470,13 +1584,12 @@ export class ScionChatSpaceRail extends LitElement {
   }
 
   /**
-   * With project thread groups on, groups load per space: the auto-expand
-   * decision waits until the selected thread's space (from the route, or
-   * found in a loaded thread list) has its groups, for the same reason it
-   * waits for `_prefsLoaded`. Always true with the flag off.
+   * Project thread groups load per space: the auto-expand decision waits
+   * until the selected thread's space (from the route, or found in a loaded
+   * thread list) has its groups, for the same reason it waits for
+   * `_prefsLoaded`.
    */
   private groupsKnownForSelection(): boolean {
-    if (!this.projectGroupsEnabled()) return true;
     let projectId = this.selectedProjectId;
     if (!projectId) {
       for (const [id, threads] of this.threadsBySpace) {
@@ -1516,6 +1629,13 @@ export class ScionChatSpaceRail extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.pullToRefresh.detach();
+    this.starred.removeEventListener('change', this.handleStarredChange);
+    stateManager.removeEventListener('chat-stars-updated', this.handleStarredInvalidate);
+    stateManager.removeEventListener('connected', this.handleStarredInvalidate);
+    chatStarsLocalChanges.removeEventListener('changed', this.handleStarredInvalidate);
+    document.removeEventListener('visibilitychange', this.handleStarredVisibility);
+    window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.handleFlagsChanged);
+    this.stopStarred();
     if (this._pullAnnounceTimer) {
       clearTimeout(this._pullAnnounceTimer);
       this._pullAnnounceTimer = null;
@@ -1549,13 +1669,14 @@ export class ScionChatSpaceRail extends LitElement {
   private _outsideClickHandler: ((e: Event) => void) | null = null;
 
   private handleOutsideClick(): void {
-    if (this.contextMenuTarget) {
-      this.contextMenuTarget = null;
-    }
-    if (this.groupContextMenuTarget) {
-      this.groupContextMenuTarget = null;
-    }
+    if (!this.contextMenuTarget && !this.groupContextMenuTarget) return;
+    this.contextMenuTarget = null;
+    this.groupContextMenuTarget = null;
+    this.menuFocus.closed();
   }
+
+  /** Keyboard focus around the thread and group popup menus. */
+  private readonly menuFocus = new MenuFocus();
 
   /**
    * Reload all data (called externally when SSE events indicate changes).
@@ -1565,6 +1686,9 @@ export class ScionChatSpaceRail extends LitElement {
    * the call will do.
    */
   async reload(options: { startedAfter?: number } = {}): Promise<void> {
+    // Topic and activity changes reach the rail through reload: the Starred
+    // rail refetches too (coalesced by its controller).
+    if (this.spaceFilter === 'starred') void this.starred.refresh();
     await this.loadData(options.startedAfter);
   }
 
@@ -1606,6 +1730,15 @@ export class ScionChatSpaceRail extends LitElement {
       await this.visibleThreadLoads();
       return ok;
     })();
+    // Under the Starred filter a refresh refetches the starred conversations.
+    if (this.spaceFilter === 'starred') {
+      extra.push(
+        (async (): Promise<boolean> => {
+          await this.starred.refresh();
+          return this.starred.error === '';
+        })()
+      );
+    }
     const results = await Promise.allSettled([rail, ...extra]);
     if (!this.pullToRefresh.showingRefresh) return;
     const ok = results.every((r) => r.status === 'fulfilled' && r.value !== false);
@@ -1721,8 +1854,8 @@ export class ScionChatSpaceRail extends LitElement {
         this.loadSpaces(initial, startedAfter),
         this.loadPrefs(),
       ]);
-      // Pruning reads both this.spaces and this.prefs.threadGroups to decide
-      // what's stale, so it must not run unless both loaded cleanly in this
+      // Pruning reads this.spaces and each space's project groups to decide
+      // what's stale, so it must not run unless the load was clean in this
       // pass — see pruneCollapsedGroups' doc comment for what goes wrong
       // otherwise.
       if (spacesOk && prefsOk) {
@@ -1941,12 +2074,10 @@ export class ScionChatSpaceRail extends LitElement {
       this._threadLoadFailures.set(projectId, failures);
       if (failures <= THREAD_LOAD_AUTO_RETRIES) this._threadLoadEpoch.delete(projectId);
     };
-    // With project thread groups on, the space's groups load alongside its
-    // threads and land in the same update, so a grouped thread never shows
-    // ungrouped first (design section 5).
-    const groupsLoad = this.projectGroupsEnabled()
-      ? this.fetchProjectGroups(projectId, controller.signal)
-      : null;
+    // The space's project groups load alongside its threads and land in the
+    // same update, so a grouped thread never shows ungrouped first (design
+    // section 5).
+    const groupsLoad = this.fetchProjectGroups(projectId, controller.signal);
     const load = (async (): Promise<void> => {
       try {
         const res = await apiFetch(`/api/v1/chat/spaces/${encodeURIComponent(projectId)}/threads`, {
@@ -1958,11 +2089,9 @@ export class ScionChatSpaceRail extends LitElement {
         }
         const data = (await res.json()) as { threads?: ChatSpaceThread[] };
         if (controller.signal.aborted) return;
-        if (groupsLoad) {
-          const groups = await groupsLoad;
-          if (controller.signal.aborted) return;
-          this.commitProjectGroups(projectId, groups);
-        }
+        const groups = await groupsLoad;
+        if (controller.signal.aborted) return;
+        this.commitProjectGroups(projectId, groups);
         this._threadLoadFailures.delete(projectId);
         const threads = data.threads || [];
         const newMap = new Map(this.threadsBySpace);
@@ -1973,9 +2102,7 @@ export class ScionChatSpaceRail extends LitElement {
         if (this.selectedKey && !this.selectedProjectId) this.expandSpaceForSelectedKey();
         // Project groups: the space of a thread deep link without a routed
         // space is known only now (see `groupsKnownForSelection`).
-        if (this.selectedKey && this.projectGroupsEnabled()) {
-          this.maybeAutoExpandGroupForSelectedKey();
-        }
+        if (this.selectedKey) this.maybeAutoExpandGroupForSelectedKey();
       } catch {
         // A network failure, or an abort (by detach or an explicit newer
         // load), which is not a failure of this space.
@@ -2108,11 +2235,11 @@ export class ScionChatSpaceRail extends LitElement {
    * defaults blank modes, so its answer can differ from the request.
    */
   async savePrefs(update: Partial<RailPrefs>): Promise<void> {
-    if (this.projectGroupsEnabled() && !this._prefsLoaded) {
-      // Never written blind with project groups on: a save from defaults
-      // would replace the stored personal groups (hidden, and restored when
-      // the flag is turned off) and the user's order. The change is
-      // dropped; the preferences are read again for the next one.
+    if (!this._prefsLoaded) {
+      // Never written blind: a save from defaults would replace the stored
+      // personal groups (hidden, see `rawThreadGroups`) and the user's
+      // order. The change is dropped; the preferences are read again for
+      // the next one.
       showToast(SAVE_ORDER_FAILED, 'warning');
       void this.loadPrefs();
       return;
@@ -2122,7 +2249,7 @@ export class ScionChatSpaceRail extends LitElement {
     // thread-order paths read first themselves, since they compute their
     // order from the preferences before calling this. Fails closed: if the
     // read fails, nothing is written.
-    if (this.projectGroupsEnabled() && this._prefsStale && !(await this.freshPrefsForOrder())) {
+    if (this._prefsStale && !(await this.freshPrefsForOrder())) {
       return;
     }
     const previous = this.prefs;
@@ -2153,12 +2280,12 @@ export class ScionChatSpaceRail extends LitElement {
   }
 
   /**
-   * The `threadGroups` value a preferences save sends. With project thread
-   * groups on, personal groups are hidden and never edited, so the stored
-   * document goes back exactly as it was read (see `rawThreadGroups`).
+   * The `threadGroups` value a preferences save sends. Personal groups are
+   * hidden and never edited, so the stored document goes back exactly as it
+   * was read (see `rawThreadGroups`).
    */
   private personalGroupsForSave(prefs: RailPrefs): string {
-    if (this.projectGroupsEnabled() && this._threadGroupsRaw !== undefined) {
+    if (this._threadGroupsRaw !== undefined) {
       return this._threadGroupsRaw;
     }
     return JSON.stringify(prefs.threadGroups ?? {});
@@ -2361,7 +2488,7 @@ export class ScionChatSpaceRail extends LitElement {
     if (!this.hasExplicitOrder(projectId)) {
       const mode = this.prefs.threadSortMode;
       members.sort((a, b) => this.compareThreadsForSort(a, b, mode));
-    } else if (this.projectGroupsEnabled()) {
+    } else {
       // Project groups carry no order of their own (the hub lists members
       // by when they were added); a user's in-group order is their own,
       // recorded as the members' positions in the space's `threadOrder`
@@ -2501,17 +2628,10 @@ export class ScionChatSpaceRail extends LitElement {
     const order = topLevelOrder ?? this.currentTopLevelOrder(projectId);
     const groups =
       updatedGroups ?? this.freezeOtherGroupOrders(projectId, this.getGroups(projectId), new Set());
-    if (this.projectGroupsEnabled()) {
-      // Group membership is the hub's (the caller sends any membership
-      // change through the API); only this user's order is saved here.
-      if (updatedGroups) this.setProjectGroups(projectId, updatedGroups);
-      await this.saveProjectThreadOrder(projectId, this.expandGroupMembers(order, groups));
-      return;
-    }
-    await this.savePrefs({
-      threadOrder: { ...(this.prefs.threadOrder ?? {}), [projectId]: order },
-      threadGroups: { ...(this.prefs.threadGroups ?? {}), [projectId]: groups },
-    });
+    // Group membership is the hub's (the caller sends any membership
+    // change through the API); only this user's order is saved here.
+    if (updatedGroups) this.setProjectGroups(projectId, updatedGroups);
+    await this.saveProjectThreadOrder(projectId, this.expandGroupMembers(order, groups));
   }
 
   private handleThreadDragStart(e: DragEvent, threadId: string): void {
@@ -2543,13 +2663,11 @@ export class ScionChatSpaceRail extends LitElement {
     this.dragOverThreadId = null;
     this.dragOverGroupId = null;
     if (!sourceId || sourceId === targetThreadId) return;
-    if (this.projectGroupsEnabled() && this._prefsStale && !(await this.freshPrefsForOrder())) {
+    if (this._prefsStale && !(await this.freshPrefsForOrder())) {
       return;
     }
 
-    const groups = this.projectGroupsEnabled()
-      ? this.projectGroups.get(projectId)
-      : this.prefs.threadGroups?.[projectId];
+    const groups = this.projectGroups.get(projectId);
     const targetGroup = groups?.find((g) => g.threadIds.includes(targetThreadId));
     const sourceGroup = groups?.find((g) => g.threadIds.includes(sourceId));
 
@@ -2574,36 +2692,28 @@ export class ScionChatSpaceRail extends LitElement {
         }
         return g;
       });
-      if (this.projectGroupsEnabled()) {
-        // The membership change goes to the hub, and the drop shows at once
-        // (`updatedGroups`, optimistically). The drop position is this
-        // user's order: it is saved only once the hub has accepted the
-        // change, so a refused move leaves the order as it was. It is saved
-        // as a move (just before the target row) applied to the order as it
-        // is then, not as a snapshot from the drop, so a reorder made during
-        // the round trip is kept (see `saveDropPosition`).
-        const accepted = targetGroup
-          ? await this.addThreadToProjectGroup(
-              sourceId,
-              targetGroup.id,
-              projectId,
-              false,
-              updatedGroups
-            )
-          : await this.removeThreadFromProjectGroup(
-              sourceId,
-              sourceGroup!.id,
-              projectId,
-              updatedGroups
-            );
-        if (accepted) await this.saveDropPosition(projectId, sourceId, targetThreadId);
-        return;
-      }
-      const baseTopLevel = this.currentTopLevelOrder(projectId).filter((id) => id !== sourceId);
-      const topLevelOrder = targetGroup
-        ? baseTopLevel
-        : this.insertAdjacent(baseTopLevel, sourceId, targetThreadId);
-      await this.saveThreadOrder(projectId, topLevelOrder, updatedGroups);
+      // The membership change goes to the hub, and the drop shows at once
+      // (`updatedGroups`, optimistically). The drop position is this user's
+      // order: it is saved only once the hub has accepted the change, so a
+      // refused move leaves the order as it was. It is saved as a move (just
+      // before the target row) applied to the order as it is then, not as a
+      // snapshot from the drop, so a reorder made during the round trip is
+      // kept (see `saveDropPosition`).
+      const accepted = targetGroup
+        ? await this.addThreadToProjectGroup(
+            sourceId,
+            targetGroup.id,
+            projectId,
+            false,
+            updatedGroups
+          )
+        : await this.removeThreadFromProjectGroup(
+            sourceId,
+            sourceGroup!.id,
+            projectId,
+            updatedGroups
+          );
+      if (accepted) await this.saveDropPosition(projectId, sourceId, targetThreadId);
       return;
     }
 
@@ -2637,7 +2747,7 @@ export class ScionChatSpaceRail extends LitElement {
   /** Move a thread one slot up or down in its space. */
   private async moveThread(threadId: string, projectId: string, delta: -1 | 1): Promise<void> {
     if (!this.canReorderThreads()) return;
-    if (this.projectGroupsEnabled() && this._prefsStale && !(await this.freshPrefsForOrder())) {
+    if (this._prefsStale && !(await this.freshPrefsForOrder())) {
       return;
     }
 
@@ -2698,28 +2808,14 @@ export class ScionChatSpaceRail extends LitElement {
   // Thread groups
   // ---------------------------------------------------------------------------
 
-  /**
-   * Whether the rail shows project thread groups instead of personal ones.
-   * Read on every use, so a server flag value applied after the first
-   * render takes effect without a reload.
-   */
-  private projectGroupsEnabled(): boolean {
-    return isFeatureEnabled(PROJECT_THREAD_GROUPS_FLAG);
-  }
-
-  /**
-   * Get groups for a space, defaulting to empty array: the project groups
-   * with the flag on, otherwise the user's personal groups.
-   */
+  /** Get a space's project groups, defaulting to an empty array. */
   private getGroups(projectId: string): ThreadGroup[] {
-    if (this.projectGroupsEnabled()) return this.projectGroups.get(projectId) ?? [];
-    return this.prefs.threadGroups?.[projectId] ?? [];
+    return this.projectGroups.get(projectId) ?? [];
   }
 
   /** Every group the rail shows, across spaces (see `getGroups`). */
   private allGroups(): ThreadGroup[] {
-    if (this.projectGroupsEnabled()) return [...this.projectGroups.values()].flat();
-    return Object.values(this.prefs.threadGroups ?? {}).flat();
+    return [...this.projectGroups.values()].flat();
   }
 
   private toggleGroupCollapse(groupId: string): void {
@@ -2746,32 +2842,24 @@ export class ScionChatSpaceRail extends LitElement {
    * or belonging to a space the user lost access to).
    *
    * The caller (`loadData`) only invokes this after both `loadSpaces` and
-   * `loadPrefs` have succeeded in the same pass — `this.spaces` and
-   * `this.prefs.threadGroups` only reflect the *server's* current groups
-   * when both loaded cleanly. A failed `loadPrefs` in particular leaves
-   * `this.prefs` at its old (possibly still-default, all-undefined) value,
-   * which would make every stored ID look stale and wipe it permanently on
-   * the very first page load. The `this.spaces.length === 0` check here is
-   * an extra guard for the same failure mode, kept as defense in depth.
+   * `loadPrefs` have succeeded in the same pass, and it waits until every
+   * space's project groups have loaded (see below): an unloaded list would
+   * make every stored ID look stale and wipe it permanently on the very
+   * first page load. The `this.spaces.length === 0` check here is an extra
+   * guard for the same failure mode, kept as defense in depth.
    */
   private pruneCollapsedGroups(): void {
     if (this.spaces.length === 0 || this.collapsedGroups.size === 0) return;
     const validIds = new Set<string>();
-    if (this.projectGroupsEnabled()) {
-      // Project groups load per space, with its threads: until every space's
-      // have loaded, an unloaded space's groups would all look stale. The
-      // hidden personal groups stay valid too, so turning the flag off
-      // restores their collapse state with them. Groups load only for spaces
-      // whose threads load: every space under activity sort without
-      // per-space activity (background loads), otherwise only the spaces the
-      // user has opened. Until then pruning waits and the stored list only
-      // grows, up to GROUP_COLLAPSE_STORAGE_LIMIT. Pruning nothing is the
-      // safe failure (a collapse ID does not say which space it belongs to).
-      if (this.spaces.some((space) => !this.projectGroups.has(space.projectId))) return;
-      for (const group of Object.values(this.prefs.threadGroups ?? {}).flat()) {
-        validIds.add(group.id);
-      }
-    }
+    // Project groups load per space, with its threads: until every space's
+    // have loaded, an unloaded space's groups would all look stale. Groups
+    // load only for spaces whose threads load: every space under activity
+    // sort without per-space activity (background loads), otherwise only
+    // the spaces the user has opened. Until then pruning waits and the
+    // stored list only grows, up to GROUP_COLLAPSE_STORAGE_LIMIT. Pruning
+    // nothing is the safe failure (a collapse ID does not say which space it
+    // belongs to).
+    if (this.spaces.some((space) => !this.projectGroups.has(space.projectId))) return;
     for (const space of this.spaces) {
       for (const group of this.getGroups(space.projectId)) {
         validIds.add(group.id);
@@ -2783,59 +2871,9 @@ export class ScionChatSpaceRail extends LitElement {
     saveCollapsedGroupIds(this.currentUserId, next);
   }
 
-  /** Generate a simple unique id for a new group. */
-  private generateGroupId(): string {
-    return 'g-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
-  }
-
   /** Create a new thread group and optionally move a thread into it. */
   private async createGroup(projectId: string, name: string, threadId?: string): Promise<void> {
-    if (this.projectGroupsEnabled()) return this.createProjectGroup(projectId, name, threadId);
-    const currentGroups = this.getGroups(projectId);
-    if (currentGroups.length >= 20) {
-      showToast('Maximum 20 groups per space', 'warning');
-      return;
-    }
-    const newGroup: ThreadGroup = {
-      id: this.generateGroupId(),
-      name,
-      threadIds: threadId ? [threadId] : [],
-    };
-    // Remove thread from any existing group (immutably) and append the new group
-    const groups = threadId
-      ? [
-          ...currentGroups.map((g) => ({
-            ...g,
-            threadIds: g.threadIds.filter((id) => id !== threadId),
-          })),
-          newGroup,
-        ]
-      : [...currentGroups, newGroup];
-    const threadGroups = { ...(this.prefs.threadGroups ?? {}), [projectId]: groups };
-
-    // Only touch threadOrder for a space that already has its own snapshot
-    // (see `hasExplicitOrder`) — writing a first, membership-only entry here
-    // would itself become the explicit-order signal.
-    if (!this.hasExplicitOrder(projectId)) {
-      await this.savePrefs({ threadGroups });
-      return;
-    }
-
-    // Insert the group ID into threadOrder so it co-mingles with threads.
-    const currentOrder = [...(this.prefs.threadOrder?.[projectId] ?? [])];
-    if (threadId) {
-      // Replace the thread's position with the group ID
-      const idx = currentOrder.indexOf(threadId);
-      if (idx !== -1) {
-        currentOrder[idx] = newGroup.id;
-      } else {
-        currentOrder.push(newGroup.id);
-      }
-    } else {
-      currentOrder.push(newGroup.id);
-    }
-    const threadOrder = { ...(this.prefs.threadOrder ?? {}), [projectId]: currentOrder };
-    await this.savePrefs({ threadGroups, threadOrder });
+    return this.createProjectGroup(projectId, name, threadId);
   }
 
   /** Move a thread into an existing group. */
@@ -2844,77 +2882,27 @@ export class ScionChatSpaceRail extends LitElement {
     groupId: string,
     projectId: string
   ): Promise<void> {
-    if (this.projectGroupsEnabled()) {
-      await this.addThreadToProjectGroup(threadId, groupId, projectId);
-      return;
-    }
-    const groups = this.getGroups(projectId).map((g) => {
-      const filtered = g.threadIds.filter((id) => id !== threadId);
-      return g.id === groupId
-        ? { ...g, threadIds: [...filtered, threadId] }
-        : { ...g, threadIds: filtered };
-    });
-    const threadGroups = { ...(this.prefs.threadGroups ?? {}), [projectId]: groups };
-    await this.savePrefs({ threadGroups });
+    await this.addThreadToProjectGroup(threadId, groupId, projectId);
   }
 
   /** Remove a thread from its group (move to ungrouped). */
   private async removeThreadFromGroup(threadId: string, projectId: string): Promise<void> {
-    if (this.projectGroupsEnabled()) {
-      const group = this.getGroups(projectId).find((g) => g.threadIds.includes(threadId));
-      if (group) await this.removeThreadFromProjectGroup(threadId, group.id, projectId);
-      return;
-    }
-    const groups = this.getGroups(projectId).map((g) => ({
-      ...g,
-      threadIds: g.threadIds.filter((id) => id !== threadId),
-    }));
-    const threadGroups = { ...(this.prefs.threadGroups ?? {}), [projectId]: groups };
-    await this.savePrefs({ threadGroups });
+    const group = this.getGroups(projectId).find((g) => g.threadIds.includes(threadId));
+    if (group) await this.removeThreadFromProjectGroup(threadId, group.id, projectId);
   }
 
   /** Rename a thread group. */
   private async renameGroup(groupId: string, name: string, projectId: string): Promise<void> {
-    if (this.projectGroupsEnabled()) return this.renameProjectGroup(groupId, name, projectId);
-    const groups = this.getGroups(projectId).map((g) => (g.id === groupId ? { ...g, name } : g));
-    const threadGroups = { ...(this.prefs.threadGroups ?? {}), [projectId]: groups };
-    await this.savePrefs({ threadGroups });
+    return this.renameProjectGroup(groupId, name, projectId);
   }
 
   /** Delete a thread group, moving its threads to ungrouped. */
   private async deleteGroup(groupId: string, projectId: string): Promise<void> {
-    if (this.projectGroupsEnabled()) return this.deleteProjectGroup(groupId, projectId);
-    // Retrieve the group's thread IDs before deleting, so they can be
-    // re-inserted into the threadOrder at the position the group occupied.
-    const deletedGroup = this.getGroups(projectId).find((g) => g.id === groupId);
-    const groups = this.getGroups(projectId).filter((g) => g.id !== groupId);
-    const threadGroups = { ...(this.prefs.threadGroups ?? {}), [projectId]: groups };
-
-    // Without this space's own explicit snapshot (see `hasExplicitOrder`),
-    // there is no threadOrder entry to replace, and writing a partial one
-    // here would itself become the explicit-order signal.
-    if (!this.hasExplicitOrder(projectId)) {
-      await this.savePrefs({ threadGroups });
-      return;
-    }
-
-    // Replace the group ID in threadOrder with its former thread IDs,
-    // filtering out any that already exist elsewhere to avoid duplicates.
-    const currentOrder = [...(this.prefs.threadOrder?.[projectId] ?? [])];
-    const idx = currentOrder.indexOf(groupId);
-    if (idx !== -1) {
-      const deletedThreadIds = deletedGroup?.threadIds ?? [];
-      const existingIds = new Set(currentOrder);
-      existingIds.delete(groupId); // the group entry itself is being replaced
-      const newIds = deletedThreadIds.filter((id) => !existingIds.has(id));
-      currentOrder.splice(idx, 1, ...newIds);
-    }
-    const threadOrder = { ...(this.prefs.threadOrder ?? {}), [projectId]: currentOrder };
-    await this.savePrefs({ threadGroups, threadOrder });
+    return this.deleteProjectGroup(groupId, projectId);
   }
 
   // ---------------------------------------------------------------------------
-  // Project thread groups (PROJECT_THREAD_GROUPS_FLAG on; design section 5)
+  // Project thread groups (design section 5)
   // ---------------------------------------------------------------------------
 
   /** Replace a space's project groups. */
@@ -3034,7 +3022,6 @@ export class ScionChatSpaceRail extends LitElement {
    * (see `loadProjectGroups`). Called from `syncThreadLoads`.
    */
   private syncProjectGroupLoads(): void {
-    if (!this.projectGroupsEnabled()) return;
     for (const id of this.threadsBySpace.keys()) {
       if (!this._knownSpaceIds.has(id) || this.projectGroups.has(id)) continue;
       if (this._groupsLoading.has(id) || this.loadingThreads.has(id)) continue;
@@ -3087,7 +3074,6 @@ export class ScionChatSpaceRail extends LitElement {
    * groups have not loaded yet is left alone; its first load reads them.
    */
   applyThreadGroupEvent(projectId: string, action: string, group: unknown): void {
-    if (!this.projectGroupsEnabled()) return;
     const pg = parseProjectThreadGroup(group);
     if (!pg) return;
     if (pg.projectId && projectId && pg.projectId !== projectId) return;
@@ -3180,9 +3166,9 @@ export class ScionChatSpaceRail extends LitElement {
    * `order` with the space's hidden personal group IDs put back where they
    * were. The migration writes each project group's ID right after the
    * personal group ID it replaced (design section 5a, rule 6); keeping the
-   * personal IDs through flag-on saves keeps their positions for when the
-   * flag is turned off. Each one goes before the entry that followed it in
-   * the stored order, or last if none of those is left.
+   * personal IDs keeps that anchor for a user the migration has not reached
+   * yet. Each one goes before the entry that followed it in the stored
+   * order, or last if none of those is left.
    */
   private withHiddenPersonalIds(projectId: string, order: string[]): string[] {
     const stored = this.prefs.threadOrder?.[projectId] ?? [];
@@ -3217,13 +3203,13 @@ export class ScionChatSpaceRail extends LitElement {
   }
 
   /**
-   * With project groups on, read the preferences again before an order
-   * change is computed if they may be stale (see `_prefsStale`). Resolves
-   * to false, after a toast, if they are stale and cannot be read: the
-   * caller must then not save (fail closed).
+   * Read the preferences again before an order change is computed if they
+   * may be stale (see `_prefsStale`). Resolves to false, after a toast, if
+   * they are stale and cannot be read: the caller must then not save (fail
+   * closed).
    */
   private async freshPrefsForOrder(): Promise<boolean> {
-    if (!this.projectGroupsEnabled() || !this._prefsStale) return true;
+    if (!this._prefsStale) return true;
     if (await this.loadPrefs()) return true;
     showToast(SAVE_ORDER_FAILED, 'warning');
     return false;
@@ -3251,7 +3237,7 @@ export class ScionChatSpaceRail extends LitElement {
     await this.saveProjectThreadOrder(projectId, this.insertAdjacent(base, sourceId, targetId));
   }
 
-  /** Save a space's `threadOrder` with project groups on (see `withHiddenPersonalIds`). */
+  /** Save a space's `threadOrder` (see `withHiddenPersonalIds`). */
   private async saveProjectThreadOrder(projectId: string, order: string[]): Promise<void> {
     // The other spaces' orders are spread from `this.prefs`: read them
     // first if they may be stale, for any caller (see `_prefsStale`).
@@ -3286,7 +3272,7 @@ export class ScionChatSpaceRail extends LitElement {
       {
         fallback: 'Couldn’t create the group',
         hub400: true,
-        404: 'Thread groups are not enabled on this hub',
+        404: 'Couldn’t create the group: this hub doesn’t serve thread groups',
         409: 'A group with that name already exists in this space',
         422: 'This space has reached its group limit',
       }
@@ -3305,7 +3291,7 @@ export class ScionChatSpaceRail extends LitElement {
       ? await this.addThreadToProjectGroup(threadId, groupId, projectId, false)
       : false;
     // Only touch threadOrder for a space that already has its own snapshot
-    // (see `hasExplicitOrder`), as with personal groups.
+    // (see `hasExplicitOrder`).
     if (!this.hasExplicitOrder(projectId)) return;
     if (!(await this.freshPrefsForOrder())) return;
     const order = [...(this.prefs.threadOrder?.[projectId] ?? [])].filter((id) => id !== groupId);
@@ -3322,10 +3308,10 @@ export class ScionChatSpaceRail extends LitElement {
   /**
    * File a thread into a project group; the hub moves it out of any other
    * group. In a space with its own order the thread joins the end of the
-   * group, as with personal groups: unless the caller records the order
-   * itself (`recordOrder` false, a row drop), its ID moves to just after
-   * the group's last member in `threadOrder`, once the hub has accepted
-   * the change. `optimistic` replaces the default local change (append).
+   * group: unless the caller records the order itself (`recordOrder` false,
+   * a row drop), its ID moves to just after the group's last member in
+   * `threadOrder`, once the hub has accepted the change. `optimistic`
+   * replaces the default local change (append).
    * Resolves to whether the hub accepted it (or it was already done).
    */
   private async addThreadToProjectGroup(
@@ -3476,9 +3462,9 @@ export class ScionChatSpaceRail extends LitElement {
 
   /**
    * Delete a project group; its threads become ungrouped and are kept. In
-   * a space with its own order, the threads take the group's place, as
-   * with personal groups. The order is saved only once the hub has deleted
-   * the group, so a refused delete leaves the group where it was.
+   * a space with its own order, the threads take the group's place. The
+   * order is saved only once the hub has deleted the group, so a refused
+   * delete leaves the group where it was.
    */
   private async deleteProjectGroup(groupId: string, projectId: string): Promise<void> {
     const deleted = (this.projectGroups.get(projectId) ?? []).find((g) => g.id === groupId);
@@ -3718,6 +3704,7 @@ export class ScionChatSpaceRail extends LitElement {
     this.contextMenuTarget = { type: 'thread', thread, projectId };
     this.contextMenuPos = at;
     this.menuAsSheet = shouldUseMenuSheet();
+    if (!this.menuAsSheet) this.menuFocus.opened();
   }
 
   /** Close whichever row menu is open, popup or sheet. */
@@ -4381,20 +4368,32 @@ export class ScionChatSpaceRail extends LitElement {
   private renderToolbar() {
     return html`
       <div class="rail-toolbar">
-        <div class="filter-toggle">
+        <div class="filter-toggle" role="group" aria-label="Show conversations">
           <button
             class=${this.spaceFilter === 'all' ? 'active' : ''}
-            @click=${() => this.setSpaceFilter('all')}
+            aria-pressed=${this.spaceFilter === 'all' ? 'true' : 'false'}
+            @click=${() => this.setSpaceFilter('all', true)}
           >
             All
           </button>
           <button
             class=${this.spaceFilter === 'unread' ? 'active' : ''}
-            @click=${() => this.setSpaceFilter('unread')}
+            aria-pressed=${this.spaceFilter === 'unread' ? 'true' : 'false'}
+            @click=${() => this.setSpaceFilter('unread', true)}
           >
-            <sl-icon name="envelope"></sl-icon>
+            <sl-icon name="envelope" aria-hidden="true"></sl-icon>
             Unread
           </button>
+          ${starredMessagesEnabled()
+            ? html`<button
+                class=${this.spaceFilter === 'starred' ? 'active' : ''}
+                aria-pressed=${this.spaceFilter === 'starred' ? 'true' : 'false'}
+                @click=${() => this.setSpaceFilter('starred', true)}
+              >
+                <sl-icon name="star" aria-hidden="true"></sl-icon>
+                Starred
+              </button>`
+            : nothing}
         </div>
         <sl-dropdown>
           <sl-icon-button
@@ -4437,16 +4436,130 @@ export class ScionChatSpaceRail extends LitElement {
     `;
   }
 
-  /** Set space filter and persist to localStorage. */
-  private setSpaceFilter(filter: 'all' | 'unread'): void {
+  /**
+   * Set the space filter. `fromUser` is a pick in the filter control: only
+   * that is persisted to localStorage (the only thing the rail persists),
+   * and the page is told (`rail-filter-change`) so it can apply or clear
+   * the starred-only center of an open conversation. A change the page or
+   * the experiment drives (a full-context permalink, a jump, the
+   * experiment turning off) leaves the stored preference alone.
+   */
+  private setSpaceFilter(filter: RailFilter, fromUser = false): void {
+    if (filter === 'starred' && !starredMessagesEnabled()) filter = 'all';
     if (this.spaceFilter === filter) return;
     this.spaceFilter = filter;
-    if (filter === 'all') {
-      localStorage.removeItem('scion-chat-space-filter');
-    } else {
-      localStorage.setItem('scion-chat-space-filter', filter);
+    if (fromUser) {
+      if (filter === 'all') {
+        localStorage.removeItem(RAIL_FILTER_STORAGE_KEY);
+      } else {
+        localStorage.setItem(RAIL_FILTER_STORAGE_KEY, filter);
+      }
+    }
+    if (filter === 'starred') this.startStarred();
+    else this.stopStarred();
+    if (fromUser) {
+      this.dispatchEvent(
+        new CustomEvent<RailFilterChangeDetail>('rail-filter-change', {
+          detail: { filter },
+          bubbles: true,
+          composed: true,
+        })
+      );
     }
   }
+
+  /** The current filter (the page reads it to keep the center consistent). */
+  get filter(): RailFilter {
+    return this.spaceFilter;
+  }
+
+  /**
+   * Show every conversation: the page calls this when the open conversation
+   * leaves the starred-only center for full context.
+   */
+  showAllConversations(): void {
+    if (this.spaceFilter === 'starred') this.setSpaceFilter('all');
+  }
+
+  // ---------------------------------------------------------------------------
+  // Starred rail
+  // ---------------------------------------------------------------------------
+
+  private startStarred(): void {
+    void this.starred.start(starredRailSort(this.prefs.spaceSortMode));
+    if (!this._starredPoll) {
+      // Visibility-aware reconcile while the Starred rail shows; no request
+      // while the page is hidden.
+      this._starredPoll = setInterval(() => {
+        if (document.visibilityState === 'visible' && this.spaceFilter === 'starred') {
+          void this.starred.refresh();
+        }
+      }, STARRED_RAIL_RECONCILE_MS);
+    }
+  }
+
+  /**
+   * Keep the filter consistent with the page, reacting only to changes from
+   * the page (the open conversation or its center filter), never to the
+   * user's own pick: an open starred-only center shows the Starred rail;
+   * an open conversation in full context never does (it returns to All).
+   * A user switch restarts the Starred rail, and a sort preference loaded or
+   * changed after it started applies to it.
+   */
+  private syncStarredFilter(changed: Map<string, unknown>): void {
+    // The experiment turned off in this browser: Starred is no longer offered.
+    if (this.spaceFilter === 'starred' && !starredMessagesEnabled()) {
+      this.setSpaceFilter('all');
+      return;
+    }
+    if (changed.has('centerFilter') || changed.has('selectedKey')) {
+      if (this.selectedKey && this.centerFilter === 'starred' && this.spaceFilter !== 'starred') {
+        this.setSpaceFilter('starred');
+      } else if (this.selectedKey && this.centerFilter === '' && this.spaceFilter === 'starred') {
+        this.setSpaceFilter('all');
+      }
+    }
+    if (this.spaceFilter !== 'starred') return;
+    if (changed.has('currentUserId') && changed.get('currentUserId') !== undefined) {
+      this.starred.stop();
+      this.startStarred();
+      return;
+    }
+    if (changed.has('prefs')) {
+      const sort = starredRailSort(this.prefs.spaceSortMode);
+      if (sort !== this.starred.sort) void this.starred.start(sort);
+    }
+  }
+
+  private stopStarred(): void {
+    if (this._starredPoll) {
+      clearInterval(this._starredPoll);
+      this._starredPoll = null;
+    }
+    if (this.starred.isActive) this.starred.stop();
+  }
+
+  private handleStarredChange = (): void => {
+    // The hub turned the experiment off: leave Starred and stop polling.
+    if (this.starred.unavailable && this.spaceFilter === 'starred') {
+      this.setSpaceFilter('all');
+      return;
+    }
+    this.starredVersion++;
+  };
+
+  /** A stars invalidation, a local star change, reconnect or focus: refetch. */
+  private handleStarredInvalidate = (): void => {
+    if (this.spaceFilter === 'starred') void this.starred.refresh();
+  };
+
+  private handleFlagsChanged = (): void => {
+    this.requestUpdate();
+  };
+
+  private handleStarredVisibility = (): void => {
+    if (document.visibilityState === 'visible') this.handleStarredInvalidate();
+  };
 
   /**
    * Alphabetical/Recent is a single, rail-wide choice: it sets
@@ -4472,6 +4585,7 @@ export class ScionChatSpaceRail extends LitElement {
     // Space + thread sort modes
     if (value === 'activity' || value === 'alpha') {
       void this.savePrefs({ spaceSortMode: value, threadSortMode: value, threadOrder: {} });
+      if (this.spaceFilter === 'starred') void this.starred.start(value);
       return;
     }
     if (value === 'custom') {
@@ -4531,6 +4645,7 @@ export class ScionChatSpaceRail extends LitElement {
   }
 
   private renderSpaces() {
+    if (this.spaceFilter === 'starred') return this.renderStarred();
     const filtered = this.getFilteredSpaces();
     if (this.spaceFilter === 'unread') {
       const dmRows = railUnreadDMs(this.dms, this.selectedKey);
@@ -4596,6 +4711,217 @@ export class ScionChatSpaceRail extends LitElement {
         </div>
       </div>
     `;
+  }
+
+  /**
+   * The Starred rail: the DMs section and project headings of the
+   * conversations with the user's stars, from the hub's endpoint. Loading,
+   * a retryable error, a continuation (more rows, or more to scan) and the
+   * empty collection are distinct states.
+   */
+  private renderStarred() {
+    void this.starredVersion;
+    const st = this.starred;
+    if (st.status === 'idle' || st.status === 'loading') {
+      return html`<div class="loading-state" role="status">
+        <sl-spinner></sl-spinner><span class="sr-only">Loading starred conversations</span>
+      </div>`;
+    }
+    if (st.status === 'error') {
+      return html`<div class="starred-state" role="alert">
+        <p>Couldn’t load starred conversations.</p>
+        <sl-button size="small" @click=${() => void this.starred.refresh()}>Retry</sl-button>
+      </div>`;
+    }
+    if (st.rows.length === 0 && !st.nextCursor) {
+      return html`<div class="starred-state starred-empty">
+        <p class="starred-empty-title">No starred conversations yet</p>
+        <p>
+          Choose <strong>Star message</strong> in a message’s menu to save it. Its conversation
+          appears here.
+        </p>
+      </div>`;
+    }
+    const groups = groupStarredRows(st.rows, st.sort, {
+      byName: (a, b, ai, bi) => this.compareByName(a, b, ai, bi),
+      byActivity: (a, b, ai, bi) => this.compareByActivity(a, b, ai, bi),
+    });
+    const spaces = new Map(this.spaces.map((sp) => [sp.projectId, sp]));
+    return html`
+      ${st.error
+        ? html`<div class="starred-state starred-refresh-error" role="alert">
+            <span>Couldn’t refresh starred conversations.</span>
+            <sl-button size="small" variant="text" @click=${() => void this.starred.refresh()}
+              >Retry</sl-button
+            >
+          </div>`
+        : nothing}
+      ${groups.dms.length > 0
+        ? html`<div class="space-section dm-section">
+            <div class="space-header dm-header">
+              <span class="space-name">Direct messages</span>
+            </div>
+            <div class="thread-list">${groups.dms.map((row) => this.renderStarredDM(row))}</div>
+          </div>`
+        : nothing}
+      ${groups.projects.map((p) => {
+        const space = spaces.get(p.projectId);
+        return html`<div class="space-section" data-starred-project=${p.projectId}>
+          <div class="space-header starred-project-header">
+            ${space?.emoji ? html`<span class="space-emoji">${space.emoji}</span>` : nothing}
+            <span class="space-name">${space?.projectName || p.projectName}</span>
+          </div>
+          <div class="thread-list">
+            ${p.rows.map((row) => this.renderStarredThread(row, space?.projectSlug ?? ''))}
+          </div>
+        </div>`;
+      })}
+      ${st.rows.length === 0
+        ? html`<div class="starred-state" role="status">No starred conversations found yet.</div>`
+        : nothing}
+      ${st.nextCursor ? this.renderStarredMore() : nothing}
+    `;
+  }
+
+  private renderStarredMore() {
+    const st = this.starred;
+    if (st.moreStatus === 'error') {
+      return html`<div class="starred-more" role="alert">
+        <span>Couldn’t load more conversations.</span>
+        <sl-button size="small" @click=${() => void this.loadMoreStarred()}>Retry</sl-button>
+      </div>`;
+    }
+    return html`<div class="starred-more">
+      <sl-button
+        size="small"
+        ?loading=${st.moreStatus === 'loading'}
+        @click=${() => void this.loadMoreStarred()}
+        >Load more conversations</sl-button
+      >
+    </div>`;
+  }
+
+  /**
+   * Load the next Starred page, keeping the first visible row where it was:
+   * rows of the new page can be grouped above it.
+   */
+  private async loadMoreStarred(): Promise<void> {
+    const body = this.shadowRoot?.querySelector<HTMLElement>('.rail-body');
+    let anchorKey = '';
+    let anchorTop = 0;
+    if (body) {
+      const top = body.getBoundingClientRect().top;
+      for (const el of body.querySelectorAll<HTMLElement>('[data-starred-key]')) {
+        const r = el.getBoundingClientRect();
+        if (r.bottom > top) {
+          anchorKey = el.dataset.starredKey ?? '';
+          anchorTop = r.top;
+          break;
+        }
+      }
+    }
+    await this.starred.loadMore();
+    await this.updateComplete;
+    if (!body || !anchorKey) return;
+    const el = [...body.querySelectorAll<HTMLElement>('[data-starred-key]')].find(
+      (e) => e.dataset.starredKey === anchorKey
+    );
+    if (el) body.scrollTop += el.getBoundingClientRect().top - anchorTop;
+  }
+
+  private renderStarredThread(row: StarredConversationRow, projectSlug: string) {
+    const selected = row.conversationKey === this.selectedKey;
+    const projectId = row.projectId ?? '';
+    // The thread's existing menu, when the rail has loaded the thread (no
+    // conversation-wide star action is added).
+    const known = this.threadsBySpace.get(projectId)?.find((t) => t.id === row.conversationKey);
+    return html`<div
+      class="thread-item ${selected ? 'selected' : ''}"
+      role="button"
+      tabindex="0"
+      aria-current=${selected ? 'true' : nothing}
+      data-starred-key=${row.conversationKey}
+      @click=${() => this.handleStarredThreadClick(row, projectSlug)}
+      @keydown=${(e: KeyboardEvent) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        e.preventDefault();
+        this.handleStarredThreadClick(row, projectSlug);
+      }}
+      @pointerdown=${known
+        ? (e: PointerEvent): void =>
+            this.longPress.pointerDown(e, (at) => this.openThreadMenu(known, projectId, at))
+        : nothing}
+      @contextmenu=${known
+        ? (e: MouseEvent) => this.handleContextMenu(e, known, projectId)
+        : nothing}
+    >
+      <span class="hash">#</span>
+      <span class="thread-name">${row.conversationName}</span>
+    </div>`;
+  }
+
+  private renderStarredDM(row: StarredConversationRow) {
+    const selected = row.conversationKey === this.selectedKey;
+    const peer = dmKeyPeer(row.conversationKey, this.currentUserId);
+    const who = peer?.kind === 'agent' ? 'agent' : 'user';
+    return html`<div
+      class="thread-item dm-item ${selected ? 'selected' : ''}"
+      role="button"
+      tabindex="0"
+      aria-label=${`Direct message with ${who} ${row.conversationName}`}
+      aria-current=${selected ? 'true' : nothing}
+      data-starred-key=${row.conversationKey}
+      data-dm-key=${row.conversationKey}
+      @click=${() => this.handleStarredDMClick(row)}
+      @keydown=${(e: KeyboardEvent) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        e.preventDefault();
+        this.handleStarredDMClick(row);
+      }}
+    >
+      <sl-icon class="dm-icon" name=${peer?.kind === 'agent' ? 'robot' : 'person'}></sl-icon>
+      <span class="thread-name">${row.conversationName}</span>
+    </div>`;
+  }
+
+  /** A Starred thread row opens the conversation's starred-only center. */
+  private handleStarredThreadClick(row: StarredConversationRow, projectSlug: string): void {
+    const known = this.threadsBySpace
+      .get(row.projectId ?? '')
+      ?.find((t) => t.id === row.conversationKey);
+    this.dispatchEvent(
+      new CustomEvent<ThreadSelectDetail>('thread-select', {
+        detail: {
+          conversationKey: row.conversationKey,
+          projectId: row.projectId ?? '',
+          projectSlug,
+          threadName: row.conversationName,
+          defaultAgent: known?.defaultAgent ?? '',
+          messageFilter: 'starred',
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
+  }
+
+  /** A Starred DM row opens the DM's starred-only center. */
+  private handleStarredDMClick(row: StarredConversationRow): void {
+    const peer = dmKeyPeer(row.conversationKey, this.currentUserId);
+    if (!peer) return;
+    this.dispatchEvent(
+      new CustomEvent<DMSelectDetail>('dm-select', {
+        detail: {
+          conversationKey: row.conversationKey,
+          peerId: peer.id,
+          peerKind: peer.kind,
+          displayName: row.conversationName,
+          messageFilter: 'starred',
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
   }
 
   /** Enter or Space on a focused DM row opens it, as a click does. */
@@ -4854,6 +5180,7 @@ export class ScionChatSpaceRail extends LitElement {
     this.groupContextMenuTarget = { group, projectId };
     this.contextMenuPos = at;
     this.menuAsSheet = shouldUseMenuSheet();
+    if (!this.menuAsSheet) this.menuFocus.opened();
   }
 
   /**
@@ -5212,22 +5539,22 @@ export class ScionChatSpaceRail extends LitElement {
   private renderContextMenu() {
     if (!this.contextMenuTarget) return nothing;
     const { thread, projectId } = this.contextMenuTarget;
-    return html`
-      <div class="context-menu" @click=${(e: Event) => e.stopPropagation()}>
-        ${renderMenuRows(this.threadMenuActions(thread, projectId))}
-      </div>
-    `;
+    return renderMenu(this.threadMenuActions(thread, projectId), {
+      label: `Actions for #${thread.name}`,
+      focus: this.menuFocus,
+      close: () => this.closeRowMenus(),
+    });
   }
 
   /** Render context menu for a group header. */
   private renderGroupContextMenu() {
     if (!this.groupContextMenuTarget) return nothing;
     const { group, projectId } = this.groupContextMenuTarget;
-    return html`
-      <div class="context-menu" @click=${(e: Event) => e.stopPropagation()}>
-        ${renderMenuRows(this.groupMenuActions(group, projectId))}
-      </div>
-    `;
+    return renderMenu(this.groupMenuActions(group, projectId), {
+      label: `Actions for ${group.name}`,
+      focus: this.menuFocus,
+      close: () => this.closeRowMenus(),
+    });
   }
 
   /** The mobile presentation of the thread and group menus. */

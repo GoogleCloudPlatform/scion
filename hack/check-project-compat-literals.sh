@@ -100,10 +100,6 @@ allowed_paths=(
   # its storage path. The literal is the point of the negative tests.
   "^pkg/hub/harness_config_scope_validation_test.go$"
   "^pkg/hub/httpdispatcher_test.go$"
-  # Asserts the project cache/sync-status responses no longer emit a groveId
-  # key alongside projectId. The literal is the point of the negative tests.
-  "^pkg/hub/project_cache_test.go$"
-  "^pkg/hub/project_webdav_test.go$"
   # Regression test for SSE subject authorization default-deny: proves a
   # non-member is denied on the legacy grove.* subjects and other unknown
   # namespaces.
@@ -196,6 +192,10 @@ allowed_paths=(
   "^extras/scion-telegram/internal/telegram/broker_v2.go$"
 
   # Core compatibility adapters and bounded legacy protocol/storage surfaces.
+  # ExternalConfigShortID's comment names the pre-rename global entry
+  # (~/.scion/grove-configs/<name>) that config.MigrateLegacyGlobalLayout leaves
+  # as a symlink, which is why the path is resolved before it is split.
+  "^pkg/agent/project_identity.go$"
   "^pkg/config/koanf.go$"
   "^pkg/config/legacy_grove_migration.go$"
   "^pkg/config/project_marker.go$"
@@ -210,7 +210,12 @@ allowed_paths=(
   # already allowlisted above) so the read-only admin-dir mount narrowing
   # applies to both current and pre-migration hub-native project layouts.
   "^pkg/runtime/common.go$"
-  "^pkg/runtimebroker/handlers.go$"
+  # The retired object-storage workspace copy's directory name and the
+  # pre-rename project identity markers, read only by the one-shot project
+  # storage migration (deletion of the legacy objects; identity check of
+  # slug-keyed legacy trees, ptone/scion#5819); removed with it in
+  # ptone/scion#5839.
+  "^pkg/projectkeys/legacy_storage.go$"
   # Reserved-identity-attribute denylist: the three retired grove-named
   # telemetry keys (scion.grove, scion.grove.id, scion.grove_id) are kept
   # here so the receiver still strips them from user-supplied attributes,

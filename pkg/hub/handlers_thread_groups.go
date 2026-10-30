@@ -22,7 +22,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
@@ -43,10 +42,6 @@ import (
 //     checks, plus inbox:write for the project for a user access token
 //     (authorizeSelfScoped, as handleCreateConversation does). Delete is for
 //     users only; an agent gets 403, mirroring handleTopicDelete.
-//
-// Every handler is reached through threadGroupsGate, so the routes answer
-// 404 while the experiment is off, unregistered, or the stored experiments
-// row is malformed.
 
 // threadGroupListResponse is the body of GET /api/v1/thread-groups.
 type threadGroupListResponse struct {
@@ -71,23 +66,6 @@ type renameThreadGroupRequest struct {
 type addThreadGroupThreadRequest struct {
 	ConversationID string `json:"conversationId"`
 	ThreadID       string `json:"threadId"`
-}
-
-// threadGroupsGate makes a thread group route answer 404 while the
-// hub.chat_thread_groups experiment is off, unregistered, or the stored
-// experiments row is malformed (experimentEnabled fails closed for server
-// layers, design section 6). It checks per request, as artifactsGuard and
-// handleConduitGrantKeys do, and not with requireExperiment at route
-// registration, which panics in New for an injected registry without the
-// experiment (the experiments API tests build one).
-func (s *Server) threadGroupsGate(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !s.experimentEnabled(experiments.ChatThreadGroups) {
-			NotFound(w, "route")
-			return
-		}
-		next(w, r)
-	}
 }
 
 // handleThreadGroups serves /api/v1/thread-groups (list and create).
@@ -604,15 +582,11 @@ func (s *Server) handleRemoveThreadGroupThread(w http.ResponseWriter, r *http.Re
 
 // threadGroupForNewConversation validates the threadGroupId of a
 // POST /api/v1/conversations before the conversation is minted (design
-// section 2): the experiment must be on (400 otherwise), the group must
-// exist in projectID (404 otherwise, so another project's group is not
-// disclosed), and it must have room for one more thread (422). An agent
-// must belong to projectID (403). The caller has already authorized
-// projectID.
+// section 2): the group must exist in projectID (404 otherwise, so another
+// project's group is not disclosed), and it must have room for one more
+// thread (422). An agent must belong to projectID (403). The caller has
+// already authorized projectID.
 func (s *Server) threadGroupForNewConversation(ctx context.Context, threadGroupID, projectID string) (*store.ThreadGroup, *apiError) {
-	if !s.experimentEnabled(experiments.ChatThreadGroups) {
-		return nil, &apiError{status: http.StatusBadRequest, code: ErrCodeInvalidRequest, message: "thread groups are not enabled"}
-	}
 	// The strict agent same-project rule of every thread group mutation
 	// (design section 3): handleCreateConversation authorizes only
 	// project:read on the body project.
@@ -652,21 +626,16 @@ func (s *Server) fileNewConversation(ctx context.Context, g *store.ThreadGroup, 
 // removeDeletedTopicFromThreadGroups takes the conversation of a just
 // deleted topic out of its thread group (design section 7a). It is best
 // effort: a failure is logged, and reads skip a member whose topic is
-// deleted anyway. The cleanup runs whether or not the experiment is on, so
-// no stale row waits for the flag; the chat.thread_group event for the
-// group it leaves is published only while the experiment is on.
+// deleted anyway. The chat.thread_group event for the group it leaves is
+// published after the cleanup.
 func (s *Server) removeDeletedTopicFromThreadGroups(ctx context.Context, topic *WebChatTopic) {
 	if topic == nil || topic.ConversationID == "" {
 		return
 	}
-	var fromGroupID string
-	if s.experimentEnabled(experiments.ChatThreadGroups) {
-		id, err := s.store.GetThreadGroupIDForConversation(ctx, topic.ConversationID)
-		if err != nil {
-			slog.WarnContext(ctx, "handleTopicDelete: thread group lookup failed",
-				"topicID", topic.ID, "conversationID", topic.ConversationID, "error", err)
-		}
-		fromGroupID = id
+	fromGroupID, err := s.store.GetThreadGroupIDForConversation(ctx, topic.ConversationID)
+	if err != nil {
+		slog.WarnContext(ctx, "handleTopicDelete: thread group lookup failed",
+			"topicID", topic.ID, "conversationID", topic.ConversationID, "error", err)
 	}
 	if err := s.store.RemoveThreadGroupMembersForConversation(ctx, topic.ConversationID); err != nil {
 		slog.WarnContext(ctx, "handleTopicDelete: thread group member cleanup failed",

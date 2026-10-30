@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -155,6 +156,17 @@ func agentHomeRepairArgs(h agentHomeRepairHelper) ([]string, error) {
 	// is safe in a --mount form too.
 	if strings.ContainsAny(req.HomeDir, ":,") {
 		return nil, fmt.Errorf("agent home ownership repair: agent home path %q contains ':' or ','", req.HomeDir)
+	}
+	// The helper bind-mounts the home read-write, as root: it may not reach
+	// a Runtime Broker control path (checkBindSource), and the path it binds
+	// must already be the resolved one, so what was checked is what is
+	// mounted.
+	resolvedHome, err := checkBindSource(req.HomeDir)
+	if err != nil {
+		return nil, fmt.Errorf("agent home ownership repair: %w", err)
+	}
+	if resolvedHome != filepath.Clean(req.HomeDir) {
+		return nil, fmt.Errorf("agent home ownership repair: agent home path %q is not a resolved path (it resolves to %q)", req.HomeDir, resolvedHome)
 	}
 	if req.Image == "" || strings.HasPrefix(req.Image, "-") {
 		return nil, fmt.Errorf("agent home ownership repair: invalid image %q", req.Image)

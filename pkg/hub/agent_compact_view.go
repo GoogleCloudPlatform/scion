@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"net/http"
 	"net/url"
 	"time"
@@ -75,6 +76,11 @@ type AgentCompactItem struct {
 	// copied as is, so a graph loaded from the compact view shows the
 	// same deletion state as one loaded from the full view.
 	Deletion *store.DeletionInfo `json:"deletion"`
+	// HarnessVendor and ModelSize have the same types and tags as the full
+	// item's fields and are copied from it, so compact emits exactly what
+	// full emits, including omitting them when empty.
+	HarnessVendor string `json:"harnessVendor,omitempty"`
+	ModelSize     string `json:"modelSize,omitempty"`
 }
 
 // listAgentsCompactResponse is ListAgentsResponse with its agents replaced
@@ -93,8 +99,8 @@ type listAgentsCompactResponse struct {
 }
 
 // toCompact maps one fully built full-view list item (capabilities,
-// redaction and messageability already applied) to its compact form. It
-// makes no decision and reads nothing: it only copies fields.
+// redaction, messageability and badges already applied) to its compact
+// form. It makes no decision and reads nothing: it only copies fields.
 func toCompact(a AgentWithCapabilities) AgentCompactItem {
 	item := AgentCompactItem{
 		ID:                a.ID,
@@ -118,6 +124,8 @@ func toCompact(a AgentWithCapabilities) AgentCompactItem {
 		Cap:               a.Cap,
 		Messageability:    a.Messageability,
 		Deletion:          a.Deletion,
+		HarnessVendor:     a.HarnessVendor,
+		ModelSize:         a.ModelSize,
 	}
 	if a.AppliedConfig != nil {
 		item.CreatorName = a.AppliedConfig.CreatorName
@@ -155,8 +163,11 @@ func legacyAgentListView(query url.Values) string {
 // view. It is the last step of every agent list response on both
 // endpoints: everything that decides membership, order, cursors, counts,
 // stats and capabilities has already run, identically for both views, and
-// only the per-item shape differs.
-func writeAgentList(w http.ResponseWriter, view string, resp ListAgentsResponse) {
+// only the per-item shape differs. It first sets every item's harness
+// vendor and model size (setAgentListBadges), the same for both views, so
+// every list path carries them.
+func (s *Server) writeAgentList(ctx context.Context, w http.ResponseWriter, view string, resp ListAgentsResponse) {
+	s.setAgentListBadges(ctx, resp.Agents)
 	if view != agentListViewCompact {
 		writeJSON(w, http.StatusOK, resp)
 		return

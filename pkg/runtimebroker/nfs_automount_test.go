@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -222,7 +223,7 @@ func TestCheckNFSForDispatch_AutoMountOff_NoGate(t *testing.T) {
 
 func TestServer_New_UsesInjectedMountChecker(t *testing.T) {
 	mc := newSyncMountChecker()
-	srv := New(ServerConfig{Host: "127.0.0.1", NFSConfig: nfsCfg(true), NFSMountChecker: mc}, nil, nil)
+	srv := New(ServerConfig{Host: "127.0.0.1", NFSConfig: nfsCfg(true), NFSMountChecker: mc}, nil, nil, config.RuntimeBuildRecord{})
 	if srv.nfsMountReconciler == nil {
 		t.Fatal("expected reconciler")
 	}
@@ -232,7 +233,7 @@ func TestServer_New_UsesInjectedMountChecker(t *testing.T) {
 }
 
 func TestServer_New_NoNFSConfig_NoReconcileLoop(t *testing.T) {
-	srv := New(ServerConfig{Host: "127.0.0.1"}, nil, nil)
+	srv := New(ServerConfig{Host: "127.0.0.1"}, nil, nil, config.RuntimeBuildRecord{})
 	if srv.nfsMountReconciler != nil || srv.nfsStartupReconcileDone != nil || srv.nfsReconcileStopped != nil {
 		t.Fatal("expected no NFS reconciler state without NFS config")
 	}
@@ -296,7 +297,7 @@ func TestServer_Start_NFSReconcileInBackground_StartAndStop(t *testing.T) {
 	t.Cleanup(release)
 	port := freePort(t)
 	srv := New(ServerConfig{Host: "127.0.0.1", Port: port, NFSConfig: nfsCfg(true), NFSMountChecker: mc},
-		nil, &runtime.MockRuntime{NameFunc: func() string { return "mock" }})
+		nil, &runtime.MockRuntime{NameFunc: func() string { return "mock" }}, config.RuntimeBuildRecord{})
 
 	cancel, done := startTestBroker(t, srv)
 
@@ -346,7 +347,7 @@ func TestServer_Start_MountFailure_KeepsServing(t *testing.T) {
 	mc := newSyncMountChecker()
 	mc.mountErr = errors.New("mount.nfs: only root can do that")
 	srv := New(ServerConfig{Host: "127.0.0.1", Port: 0, NFSConfig: nfsCfg(true), NFSMountChecker: mc},
-		nil, &runtime.MockRuntime{NameFunc: func() string { return "mock" }})
+		nil, &runtime.MockRuntime{NameFunc: func() string { return "mock" }}, config.RuntimeBuildRecord{})
 
 	_, done := startTestBroker(t, srv)
 	waitClosed(t, srv.nfsStartupReconcileDone, "first reconcile pass")
@@ -376,7 +377,7 @@ func TestServer_Start_MountFailure_KeepsServing(t *testing.T) {
 // later turns nfs_mounts healthy, and the loop never mounts anything.
 func TestServer_ReconcileLoop_CheckOnly_PicksUpExternalMount(t *testing.T) {
 	mc := newSyncMountChecker()
-	srv := New(ServerConfig{Host: "127.0.0.1", NFSConfig: nfsCfg(false), NFSMountChecker: mc}, nil, nil)
+	srv := New(ServerConfig{Host: "127.0.0.1", NFSConfig: nfsCfg(false), NFSMountChecker: mc}, nil, nil, config.RuntimeBuildRecord{})
 	srv.nfsReconcileInterval = 10 * time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -461,12 +462,12 @@ func newGateServer(t *testing.T, nfs *config.V1NFSConfig, brokerRuntime, dispatc
 
 	mc := newSyncMountChecker()
 	mc.mountErr = errors.New("mount failed")
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.NFSConfig = nfs
 	cfg.NFSMountChecker = mc
 	cfg.ForceRuntime = dispatchRuntime
 	rt := &runtime.MockRuntime{NameFunc: func() string { return brokerRuntime }}
-	srv := New(cfg, &mockManager{}, rt)
+	srv := New(cfg, &mockManager{}, rt, config.RuntimeBuildRecord{})
 	if dispatchRuntime != brokerRuntime {
 		// ForceRuntime selects an auxiliary runtime of that type.
 		aux := &runtime.MockRuntime{NameFunc: func() string { return dispatchRuntime }}
@@ -496,7 +497,10 @@ func TestCheckNFSForDispatch(t *testing.T) {
 		{name: "docker broker, kubernetes dispatch: warned only, no mount", autoMount: true, brokerRuntime: "docker", runtime: "kubernetes", wantRefused: false, wantMounts: false},
 		{name: "kubernetes broker, docker dispatch: verify-only, refused without mounting", autoMount: true, brokerRuntime: "kubernetes", runtime: "docker", wantRefused: true, wantMounts: false},
 		{name: "cloudrun broker, docker dispatch: verify-only, refused without mounting", autoMount: true, brokerRuntime: "cloudrun", runtime: "docker", wantRefused: true, wantMounts: false},
-		{name: "auto_mount on, project on local backend: not gated", autoMount: true, runtime: "docker", localProj: true, wantRefused: false, wantMounts: false},
+		// The storage blocks are Layer-0: a project's settings.yaml naming
+		// workspace_storage local cannot take the project off the global
+		// nfs backend, so the dispatch is gated like any nfs project.
+		{name: "auto_mount on, project settings naming local: still gated", autoMount: true, runtime: "docker", localProj: true, wantRefused: true, wantMounts: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -591,7 +595,7 @@ func TestCheckNFSForDispatch_InvalidProjectSettings_StillGated(t *testing.T) {
 }
 
 func TestCheckNFSForDispatch_NoNFSConfig(t *testing.T) {
-	srv := New(ServerConfig{Host: "127.0.0.1"}, nil, nil)
+	srv := New(ServerConfig{Host: "127.0.0.1"}, nil, nil, config.RuntimeBuildRecord{})
 	if err := srv.checkNFSForDispatch(context.Background(), "a", "", "", ""); err != nil {
 		t.Fatalf("checkNFSForDispatch without NFS config = %v, want nil", err)
 	}
@@ -599,19 +603,39 @@ func TestCheckNFSForDispatch_NoNFSConfig(t *testing.T) {
 
 // TestCreateAgent_NFSGate_Returns503 drives the create handler: with
 // auto_mount on and a failing mount, an NFS-backed create on a
-// local-container runtime gets 503 nfs_unavailable.
+// local-container runtime gets 503 nfs_unavailable. On and off a shared
+// project-storage Layout, the body names configuration fields only: no
+// share ID, mount point or server:export (the reconciler's detail is
+// logged).
 func TestCreateAgent_NFSGate_Returns503(t *testing.T) {
-	srv, _ := gateTestServer(t, true, "mock")
-	projectPath := writeSettings(t, t.TempDir(), "schema_version: \"1\"\n")
+	for _, shared := range []bool{false, true} {
+		t.Run(fmt.Sprintf("shared=%v", shared), func(t *testing.T) {
+			srv, _ := gateTestServer(t, true, "mock")
+			if shared {
+				srv.config.StorageLayout = projectfs.Layout{Backend: projectfs.BackendNFS, HostBase: "/mnt/nfs/ws1", SubPathRoot: "projects", Share: projectfs.Share{ID: "ws1"}}
+			}
+			projectPath := writeSettings(t, t.TempDir(), "schema_version: \"1\"\n")
 
-	body := fmt.Sprintf(`{"name":"nfs-agent","id":"agent-nfs-1","projectPath":%q}`, filepath.Join(projectPath, ".scion"))
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
+			body := fmt.Sprintf(`{"name":"nfs-agent","id":"agent-nfs-1","projectPath":%q}`, filepath.Join(projectPath, ".scion"))
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "nfs_unavailable") {
-		t.Fatalf("create = %d %s, want 503 nfs_unavailable", rec.Code, rec.Body.String())
+			if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "nfs_unavailable") {
+				t.Fatalf("create = %d %s, want 503 nfs_unavailable", rec.Code, rec.Body.String())
+			}
+			// auto_mount is on and the mount failed: the mount-failure text,
+			// not the advice to set auto_mount.
+			if want := runtime.ProjectShareMountFailedText(runtime.ProjectShareMountPathField); !strings.Contains(rec.Body.String(), want) {
+				t.Errorf("body = %s, want it to contain %q", rec.Body.String(), want)
+			}
+			for _, v := range []string{"ws1", "/mnt/nfs", "10.0.0.2", "/scion-workspaces"} {
+				if strings.Contains(rec.Body.String(), v) {
+					t.Errorf("body carries %q: %s", v, rec.Body.String())
+				}
+			}
+		})
 	}
 }
 
@@ -637,7 +661,7 @@ func TestHealth_NFSDegradesOnlyWhenBrokerOwnsMounts(t *testing.T) {
 			mc.mountErr = errors.New("mount failed")
 			rtName := tc.runtime
 			srv := New(ServerConfig{Host: "127.0.0.1", NFSConfig: nfsCfg(tc.autoMount), NFSMountChecker: mc},
-				nil, &runtime.MockRuntime{NameFunc: func() string { return rtName }})
+				nil, &runtime.MockRuntime{NameFunc: func() string { return rtName }}, config.RuntimeBuildRecord{})
 			if !tc.pending {
 				_ = srv.nfsMountReconciler.Reconcile(context.Background())
 				close(srv.nfsStartupReconcileDone)
@@ -674,7 +698,7 @@ func TestHealth_NFSDegradedWithAnotherFailingCheck(t *testing.T) {
 	mc := newSyncMountChecker()
 	mc.mountErr = errors.New("mount failed")
 	// No runtime: the runtime check reports "unavailable".
-	srv := New(ServerConfig{Host: "127.0.0.1", NFSConfig: nfsCfg(true), NFSMountChecker: mc}, nil, nil)
+	srv := New(ServerConfig{Host: "127.0.0.1", NFSConfig: nfsCfg(true), NFSMountChecker: mc}, nil, nil, config.RuntimeBuildRecord{})
 	_ = srv.nfsMountReconciler.Reconcile(context.Background())
 	close(srv.nfsStartupReconcileDone)
 	if !srv.nfsHealthDegradesStatus() {
@@ -1054,7 +1078,7 @@ func TestServer_VerifyOnlyOnPlatformMountedRuntimes(t *testing.T) {
 			mc := newSyncMountChecker()
 			name := rtName
 			srv := New(ServerConfig{Host: "127.0.0.1", NFSConfig: nfsCfg(true), NFSMountChecker: mc},
-				nil, &runtime.MockRuntime{NameFunc: func() string { return name }})
+				nil, &runtime.MockRuntime{NameFunc: func() string { return name }}, config.RuntimeBuildRecord{})
 			_ = srv.nfsMountReconciler.Reconcile(context.Background())
 			mounts, mkdirs, _ := mc.counts()
 			wantMount := rtName == "docker"

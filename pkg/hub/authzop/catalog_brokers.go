@@ -218,6 +218,32 @@ var brokerOperations = []OperationSpec{
 		Bearer: NonUser(),
 	},
 	{
+		ID:          "broker.attachment.redeem",
+		Domain:      "broker",
+		Description: "Redeem an attachment delivery capability (ptone/scion#4596): the broker the hub issued it to downloads one attachment, once, before it expires, to write it into the recipient agent's home",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/attachment-deliveries/{token}", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalBroker},
+		Credentials:      []CredentialKind{CredentialBrokerToken},
+		ResourceResolver: "broker-self",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestDeliveryRedemption_WrongBrokerRefused"},
+			{Package: "pkg/hub", Function: "TestDeliveryRedemption_UniformRefusal"},
+		},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionInternalOnly,
+			Reason: "The broker authenticates with its own HMAC credential and presents a capability the hub signed for that broker and recipient under the attachment read decision; no user permission applies",
+			Scope:  "broker capability redemption",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: NonUser(),
+	},
+	{
 		ID:          "broker.controlchannel.call",
 		Domain:      "broker",
 		Description: "Carry a call between the hub and a connected broker over the control channel; each call runs under the operation that initiated it",

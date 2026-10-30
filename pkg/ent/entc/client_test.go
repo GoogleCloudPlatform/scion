@@ -31,7 +31,7 @@ import (
 // newTestClient creates an in-memory SQLite Ent client with auto-migration.
 func newTestClient(t *testing.T) *ent.Client {
 	t.Helper()
-	client, err := OpenSQLite("file:"+t.Name()+"?mode=memory&cache=shared", PoolConfig{})
+	client, err := OpenSQLite("file:"+t.Name()+"?mode=memory&cache=shared", PoolConfig{MaxOpenConns: 1})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close() })
 	require.NoError(t, AutoMigrate(context.Background(), client))
@@ -39,7 +39,7 @@ func newTestClient(t *testing.T) *ent.Client {
 }
 
 func TestOpenSQLite(t *testing.T) {
-	client, err := OpenSQLite("file:TestOpenSQLite?mode=memory&cache=shared", PoolConfig{})
+	client, err := OpenSQLite("file:TestOpenSQLite?mode=memory&cache=shared", PoolConfig{MaxOpenConns: 1})
 	require.NoError(t, err)
 	defer func() { _ = client.Close() }()
 	require.NoError(t, AutoMigrate(context.Background(), client))

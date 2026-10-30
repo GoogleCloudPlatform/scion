@@ -91,7 +91,7 @@ func TestStart_CheckpointsBeforeDeletingAnExistingAgent(t *testing.T) {
 			mockRT := &runtime.MockRuntime{
 				NameFunc: func() string { return "kubernetes" },
 				ListFunc: func(ctx context.Context, labels map[string]string) ([]api.AgentInfo, error) {
-					return []api.AgentInfo{{Name: "test-agent", ContainerID: "old-id", Phase: string(state.PhaseRunning)}}, nil
+					return []api.AgentInfo{{Name: "test-agent", ContainerID: "old-id", Phase: string(state.PhaseRunning), ProjectID: identityProjB}}, nil
 				},
 				DeleteFunc: func(ctx context.Context, ref runtime.RunRef) error {
 					events = append(events, "delete:"+ref.ID)
@@ -106,6 +106,7 @@ func TestStart_CheckpointsBeforeDeletingAnExistingAgent(t *testing.T) {
 				ProjectPath: f.projectScionDir,
 				NoAuth:      true,
 				Task:        "new task",
+				Env:         map[string]string{"SCION_PROJECT_ID": identityProjB},
 			}
 			if tc.checkpoint != nil {
 				opts.Checkpoint = func(ctx context.Context, step string) error {

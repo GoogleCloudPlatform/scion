@@ -21,7 +21,7 @@ import (
 )
 
 // ghStatusError is a non-OK GitHub API response from ghResolveCommitSHA or
-// ghListContents. Error() is the message those functions have always
+// ghListTree. Error() is the message those functions have always
 // returned; status lets callers tell a 404 apart without matching text.
 type ghStatusError struct {
 	status int

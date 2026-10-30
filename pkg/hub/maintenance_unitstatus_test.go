@@ -70,8 +70,9 @@ func TestRebuildServerExecutor_UnitStatusRecordedBeforeRestart(t *testing.T) {
 	st := newUnitStatusStore(t)
 	var buf syncBuffer
 	order := &orderingStore{Store: st, log: &buf, calls: f.calls}
-	e := f.executor(nil)
-	e.store = order
+	o := f.options(nil)
+	o.Store = order
+	e := NewRebuildServerExecutor(o)
 	if err := e.Run(context.Background(), &buf, nil); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -100,8 +101,9 @@ func TestRebuildServerExecutor_UnitStatusMatchReplacesDrift(t *testing.T) {
 	f := newRebuildUnitFixture(t, renderedRebuildUnit(""))
 	st := newUnitStatusStore(t)
 	seedDriftRecord(t, st)
-	e := f.executor(nil)
-	e.store = st
+	o := f.options(nil)
+	o.Store = st
+	e := NewRebuildServerExecutor(o)
 	var buf syncBuffer
 	if err := e.Run(context.Background(), &buf, nil); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -118,10 +120,11 @@ func TestRebuildServerExecutor_UnitStatusTransientSkipKeepsDrift(t *testing.T) {
 	f := newRebuildUnitFixture(t, renderedRebuildUnit(""))
 	st := newUnitStatusStore(t)
 	before := seedDriftRecord(t, st)
-	e := f.executor(func(context.Context, string) (unitdrift.UnitInfo, error) {
+	o := f.options(func(context.Context, string) (unitdrift.UnitInfo, error) {
 		return unitdrift.UnitInfo{}, errors.New("systemd not answering")
 	})
-	e.store = st
+	o.Store = st
+	e := NewRebuildServerExecutor(o)
 	var buf syncBuffer
 	if err := e.Run(context.Background(), &buf, nil); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -138,8 +141,9 @@ func TestRebuildServerExecutor_UnitStatusStructuralSkipClearsDrift(t *testing.T)
 	f := newRebuildUnitFixture(t, "[Unit]\nDescription=Not a starter hub\n")
 	st := newUnitStatusStore(t)
 	seedDriftRecord(t, st)
-	e := f.executor(nil)
-	e.store = st
+	o := f.options(nil)
+	o.Store = st
+	e := NewRebuildServerExecutor(o)
 	var buf syncBuffer
 	if err := e.Run(context.Background(), &buf, nil); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -182,8 +186,9 @@ func (failingUnitStatusStore) UpsertHubSetting(context.Context, string, json.Raw
 
 func TestRebuildServerExecutor_UnitStatusStoreErrorStillRestarts(t *testing.T) {
 	f := newRebuildUnitFixture(t, renderedRebuildUnit("ExecStartPre=/bin/true\n"))
-	e := f.executor(nil)
-	e.store = failingUnitStatusStore{newUnitStatusStore(t)}
+	o := f.options(nil)
+	o.Store = failingUnitStatusStore{newUnitStatusStore(t)}
+	e := NewRebuildServerExecutor(o)
 	var buf syncBuffer
 	if err := e.Run(context.Background(), &buf, nil); err != nil {
 		t.Fatalf("a store error must not fail the run: %v", err)

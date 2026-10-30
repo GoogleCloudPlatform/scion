@@ -137,6 +137,20 @@
   --scion-badge-neutral-bg: var(--scion-neutral-200);
   --scion-badge-neutral-text: var(--scion-neutral-800);
 
+  /* Review editor marks, comment badges and comment quotes: text on its own background (AA in both themes) */
+  --scion-review-ins-text: #166534;
+  --scion-review-ins-bg: #dcfce7;
+  --scion-review-ins-line: #16a34a;
+  --scion-review-del-text: #991b1b;
+  --scion-review-del-bg: #fee2e2;
+  --scion-review-del-line: #dc2626;
+  --scion-review-hl-text: #0f172a;
+  --scion-review-hl-bg: #fef08a;
+  --scion-review-hl-line: #ca8a04;
+  --scion-review-note-text: #6d28d9;
+  --scion-review-note-bg: #ede9fe;
+  --scion-review-note-line: #8b5cf6;
+
   /* Shadows */
   --scion-shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
   --scion-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
@@ -336,6 +350,20 @@
   --scion-badge-neutral-bg: rgba(100, 116, 139, 0.2);
   --scion-badge-neutral-text: #cbd5e1;
 
+  /* Review editor marks, comment badges and comment quotes: text on its own background (AA in both themes) */
+  --scion-review-ins-text: #bbf7d0;
+  --scion-review-ins-bg: #14532d;
+  --scion-review-ins-line: #4ade80;
+  --scion-review-del-text: #fecaca;
+  --scion-review-del-bg: #7f1d1d;
+  --scion-review-del-line: #f87171;
+  --scion-review-hl-text: #fef9c3;
+  --scion-review-hl-bg: #713f12;
+  --scion-review-hl-line: #facc15;
+  --scion-review-note-text: #ddd6fe;
+  --scion-review-note-bg: #4c1d95;
+  --scion-review-note-line: #a78bfa;
+
   /* Shadows - stronger opacity for dark mode */
   --scion-shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.3);
   --scion-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.4), 0 1px 2px -1px rgb(0 0 0 / 0.4);
@@ -444,5 +472,19 @@
     --scion-badge-primary-text: #93c5fd;
     --scion-badge-neutral-bg: rgba(100, 116, 139, 0.2);
     --scion-badge-neutral-text: #cbd5e1;
+
+    /* Review editor marks, comment badges and comment quotes: text on its own background (AA in both themes) */
+    --scion-review-ins-text: #bbf7d0;
+    --scion-review-ins-bg: #14532d;
+    --scion-review-ins-line: #4ade80;
+    --scion-review-del-text: #fecaca;
+    --scion-review-del-bg: #7f1d1d;
+    --scion-review-del-line: #f87171;
+    --scion-review-hl-text: #fef9c3;
+    --scion-review-hl-bg: #713f12;
+    --scion-review-hl-line: #facc15;
+    --scion-review-note-text: #ddd6fe;
+    --scion-review-note-bg: #4c1d95;
+    --scion-review-note-line: #a78bfa;
   }
 }

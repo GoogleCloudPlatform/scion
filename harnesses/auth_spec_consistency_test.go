@@ -120,7 +120,7 @@ func runAuthSpecDriver(t *testing.T, python, dir string) specReport {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(python, "-I", driver, absDir)
+	cmd := exec.Command(python, "-I", "-B", driver, absDir)
 	cmd.Env = []string{"HOME=" + tmp, "PATH=" + os.Getenv("PATH"), "LANG=C.UTF-8", "PYTHONDONTWRITEBYTECODE=1"}
 	out, err := cmd.Output()
 	if err != nil {

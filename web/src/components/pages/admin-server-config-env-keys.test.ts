@@ -27,14 +27,15 @@ import {
 /**
  * Badge keys that are not koanf paths, with the reason. The list may only
  * shrink: a new mismatch fails, and so does an entry that now matches or is
- * no longer rendered. ptone/scion#3911 drained the broker keys; the two
- * telemetry keys wait for their registry entries (ptone/scion#3723).
+ * no longer rendered. ptone/scion#3911 drained the broker keys and
+ * ptone/scion#3723 registered telemetry.cloud.gcp_project_id.
  */
 const KNOWN_MISMATCHES: Record<string, string> = {
-  // Not in the telemetry registry section, so the server never reports them
-  // (ptone/scion#3723).
-  'telemetry.cloud.gcp_project_id': 'not a registry koanf path (ptone/scion#3723)',
-  'telemetry.cloud.cloud_logging': 'not a registry koanf path (ptone/scion#3723)',
+  // Read only at hub startup, from settings.yaml or the environment, before
+  // the settings database opens, so it is not a registry koanf path
+  // (ptone/scion#5664).
+  'telemetry.cloud.cloud_logging':
+    'startup-only: read from settings.yaml or env before the DB opens (ptone/scion#5664)',
 };
 
 /** The page methods whose first argument(s) are env_overrides keys. */

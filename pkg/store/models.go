@@ -19,6 +19,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -109,6 +111,12 @@ type Agent struct {
 
 	// Applied configuration (stored as JSON)
 	AppliedConfig *AgentAppliedConfig `json:"appliedConfig,omitempty"`
+
+	// PendingConfig holds config edits the hub stored instead of applying
+	// (see AgentPendingConfig); nil when there are none. UpdateAgent writes
+	// it with the rest of the row; UpdateAgentConfig writes it with the
+	// applied config alone.
+	PendingConfig *AgentPendingConfig `json:"pendingConfig,omitempty"`
 
 	// Timestamps
 	Created           time.Time `json:"created"`
@@ -417,16 +425,6 @@ type AgentAppliedConfig struct {
 	Workspace     string              `json:"workspace,omitempty"` // Host path to mount as /workspace (overrides default project root)
 	GitClone      *api.GitCloneConfig `json:"gitClone,omitempty"`
 
-	// SharedDirBackendChanges and AllowEmptySharedDir are a reincarnation's
-	// explicit shared dir backend change (`scion reincarnate
-	// --shared-dir-backend`), set on that generation's config only and sent
-	// to the broker on its reprovision. They are one-shot: the hub drops
-	// them once the broker confirms the change (a stored config can still
-	// hold them after some failures), and neither a later reincarnation nor
-	// a re-render of this config sends them again.
-	SharedDirBackendChanges map[string]string `json:"sharedDirBackendChanges,omitempty"`
-	AllowEmptySharedDir     bool              `json:"allowEmptySharedDir,omitempty"`
-
 	// Template info for Runtime Broker hydration
 	TemplateID   string `json:"templateId,omitempty"`   // Hub template ID for fetching
 	TemplateHash string `json:"templateHash,omitempty"` // Content hash for cache validation
@@ -452,6 +450,21 @@ type AgentAppliedConfig struct {
 	// older broker, in which case the previously recorded value is kept.
 	// Observability only; never read by a decision path (ptone/scion#620).
 	HarnessConfigSource string `json:"harnessConfigSource,omitempty"`
+
+	// Harness is the harness type the hub resolved for the agent at create
+	// (for example "claude"; see resolveAgentHarnessType in pkg/hub), so
+	// agent lists and events can derive the harness vendor without a
+	// harness-config lookup per agent. Empty on agents created before it
+	// was recorded, and when the harness did not resolve. Display only;
+	// the harness is a fixed key, so it does not change after create.
+	Harness string `json:"harness,omitempty"`
+	// ModelSize is the model size alias (small, medium, large or
+	// extra-large; short forms normalized) that Model held before the hub
+	// resolved it to a concrete model ID, from whichever precedence layer
+	// (request > project > template > hub) supplied it. Empty when the
+	// model was an explicit ID or unset, and on agents created before it
+	// was recorded. Display only.
+	ModelSize string `json:"modelSize,omitempty"`
 
 	// CreatorName is the human-readable identity of who created this agent.
 	// For user-created agents, this is the user's email.
@@ -579,6 +592,11 @@ type AgentAppliedConfig struct {
 // caller's original agent object (which the persistence path may still
 // write from) must come out of this call unmodified.
 //
+// Each InlineConfig.MCPServers entry's env and headers maps and each
+// InlineConfig.Services entry's env map are cleared the same way (see
+// redactMCPServersForResponse and redactServicesForResponse), matching env:
+// the entries themselves stay in the response.
+//
 // CreateInputs.InlineConfig gets the same treatment as InlineConfig, through
 // a deep copy of CreateInputs (see redactCreateInputsForResponse).
 //
@@ -617,11 +635,14 @@ func redactCreateInputsForResponse(ci *AgentCreateInputs, canAttach bool) *Agent
 }
 
 // redactInlineConfigForResponse returns a deep copy of cfg suitable for a
-// response body: Env and the Telemetry cloud-export header map are cleared
-// unless canAttach is true, and GITHUB_TOKEN is stripped from Env
+// response body: Env, the Telemetry cloud-export header map, every MCP
+// server's env and headers and every service's env are cleared unless
+// canAttach is true, and
+// GITHUB_TOKEN is stripped from Env
 // unconditionally, mirroring AgentAppliedConfig's own top-level rule (see
-// ResponseView/MarshalJSON above). ClearedFields is dropped for every
-// viewer: it is hub-internal bookkeeping (ptone/scion#3906), its env.<KEY>
+// ResponseView/MarshalJSON above). ClearedFields and ChangedFields are
+// dropped for every viewer: they are hub-internal bookkeeping
+// (ptone/scion#3906, ptone/scion#3982), ClearedFields' env.<KEY>
 // entries name env keys a viewer without attach access must not learn, and
 // leaving it out means a GET echoed back into a PATCH never carries it. The
 // input is never mutated.
@@ -644,6 +665,7 @@ func redactInlineConfigForResponse(cfg *api.ScionConfig, canAttach bool) *api.Sc
 	}
 	copied := *cfg
 	copied.ClearedFields = nil
+	copied.ChangedFields = nil
 	if !canAttach {
 		copied.Env = nil
 	} else if len(cfg.Env) > 0 {
@@ -660,7 +682,63 @@ func redactInlineConfigForResponse(cfg *api.ScionConfig, canAttach bool) *api.Sc
 		copied.Env = env
 	}
 	copied.Telemetry = redactTelemetryForResponse(cfg.Telemetry, canAttach)
+	copied.MCPServers = redactMCPServersForResponse(cfg.MCPServers, canAttach)
+	copied.Services = redactServicesForResponse(cfg.Services, canAttach)
 	return &copied
+}
+
+// redactServicesForResponse returns a deep copy of services suitable for a
+// response body. Each service's env map gets the same default-closed
+// treatment as InlineConfig.Env: it is cleared unless canAttach is true.
+// Every other field of an entry (name, command, restart, ready_check) is
+// copied through, so the response still lists every service. canAttach is
+// ResponseView's own parameter, passed through unchanged by
+// redactInlineConfigForResponse. The input is never mutated.
+func redactServicesForResponse(services []api.ServiceSpec, canAttach bool) []api.ServiceSpec {
+	if services == nil {
+		return nil
+	}
+	copied := make([]api.ServiceSpec, len(services))
+	for i, svc := range services {
+		svc.Command = slices.Clone(svc.Command)
+		if svc.ReadyCheck != nil {
+			rc := *svc.ReadyCheck
+			svc.ReadyCheck = &rc
+		}
+		if canAttach {
+			svc.Env = maps.Clone(svc.Env)
+		} else {
+			svc.Env = nil
+		}
+		copied[i] = svc
+	}
+	return copied
+}
+
+// redactMCPServersForResponse returns a deep copy of servers suitable for a
+// response body. Each server's env and headers maps get the same
+// default-closed treatment as InlineConfig.Env: they are cleared unless
+// canAttach is true. Every other field of an entry (transport, command,
+// args, url, scope) is copied through, so the response still lists every
+// server. canAttach is ResponseView's own parameter, passed through
+// unchanged by redactInlineConfigForResponse. The input is never mutated.
+func redactMCPServersForResponse(servers map[string]api.MCPServerConfig, canAttach bool) map[string]api.MCPServerConfig {
+	if servers == nil {
+		return nil
+	}
+	copied := make(map[string]api.MCPServerConfig, len(servers))
+	for name, srv := range servers {
+		srv.Args = slices.Clone(srv.Args)
+		if canAttach {
+			srv.Env = maps.Clone(srv.Env)
+			srv.Headers = maps.Clone(srv.Headers)
+		} else {
+			srv.Env = nil
+			srv.Headers = nil
+		}
+		copied[name] = srv
+	}
+	return copied
 }
 
 // redactTelemetryForResponse returns a deep copy of cfg with the cloud-export
@@ -795,7 +873,24 @@ const (
 	// global project (value "true"), as the embedded registration creates it.
 	LabelSystemProject = "scion.io/system"
 	LabelGlobalProject = "scion.io/global"
+	// LabelProjectOrigin records how a project came to exist. It is
+	// server-owned: ProjectOriginLinked when the project is created by
+	// registration from an existing checkout (registerProject),
+	// ProjectOriginHub when it is created on the hub (create, clone).
+	// Projects created before the label existed have none. Clients cannot
+	// set, change or remove it. It distinguishes a linked project without a
+	// git remote from a hub-managed one, which provider records cannot when
+	// the only provider is a remote broker without a local path.
+	LabelProjectOrigin  = "scion.dev/project-origin"
+	ProjectOriginLinked = "linked"
+	ProjectOriginHub    = "hub"
 )
+
+// IsLinkedOrigin reports whether the project was created by registration
+// from an existing checkout (LabelProjectOrigin).
+func (p *Project) IsLinkedOrigin() bool {
+	return p != nil && p.Labels[LabelProjectOrigin] == ProjectOriginLinked
+}
 
 // Project members group marker annotations (ptone/scion#2556).
 const (
@@ -822,6 +917,14 @@ const (
 // with that slug, and the store agents group marker backfill writes it on
 // legitimate pre-upgrade groups.
 const AnnotationProjectAgentsGroup = "scion.io/project-agents-group"
+
+// AnnotationProjectActiveProfile is the project annotation that holds the
+// project's activeProfile setting. The hub writes it as a project setting
+// (pkg/hub keeps its own literal, projectSettingActiveProfile, which its
+// settings registry guard requires, and a pkg/hub test pins that the two
+// agree); readers outside pkg/hub, such as the rebuild preflight, use this
+// one.
+const AnnotationProjectActiveProfile = "scion.io/active-profile"
 
 // IsProjectMembersGroup reports whether g is a system project members group:
 // it belongs to a project and carries either members-group marker key with
@@ -1299,6 +1402,12 @@ type BrokerCapabilities struct {
 	// with a fresh workspace after confirming it has no files for the agent.
 	// The hub refuses a forced move onto a broker without it (412).
 	AgentMoveRecreate bool `json:"agentMoveRecreate,omitempty"`
+	// AttachmentDelivery indicates the broker can receive attachment
+	// deliveries: it redeems the capabilities of a message request's
+	// attachments field and writes the files into the agent's home before
+	// delivering the text (ptone/scion#4596). The hub issues capabilities
+	// only to brokers that report it.
+	AttachmentDelivery bool `json:"attachmentDelivery"`
 	// ReprovisionEmptyPerAgent indicates the broker's reprovision reuses an
 	// empty-per-agent agent's private workspace in place (same-broker
 	// `scion reincarnate`, miller79/scion#167). The hub refuses same-broker
@@ -1306,6 +1415,19 @@ type BrokerCapabilities struct {
 	// stopped. It says what the broker build can do; runtime suitability is
 	// a separate hub check.
 	ReprovisionEmptyPerAgent bool `json:"reprovisionEmptyPerAgent,omitempty"`
+	// ChangedFields indicates the broker re-renders, at start, the files
+	// provisioning wrote for the provision-rendered keys the hub lists in
+	// the inline config's changed_fields (ptone/scion#3982). Only for such
+	// a broker does the hub report an edit of those keys on a stopped,
+	// created or suspended agent as applied at the next start rather than
+	// held for a reincarnation.
+	ChangedFields bool `json:"changedFields,omitempty"`
+	// ClearedFields indicates the broker applies the inline config's
+	// cleared_fields at start (ptone/scion#3906, ptone/scion#4890). Only
+	// for such a broker does the hub report a clear of a key the broker
+	// applies (api.ClearableConfigPath, and env key removals) as applied
+	// at the next start rather than held for a reincarnation.
+	ClearedFields bool `json:"clearedFields,omitempty"`
 	// StartsInFlight indicates the broker reports the agent starts still
 	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
 	// then does the hub read a start's absence from that list as "no start
@@ -1785,6 +1907,13 @@ const (
 	// UserStatusPending is used only on UserKindFederated rows: the
 	// account was recorded before the user's first verified request.
 	UserStatusPending = "pending"
+	// UserStatusDeleting is the status of a user whose forced deletion is
+	// in progress (ptone/scion#2143; see UserDeletion). Only
+	// UserStore.MarkUserDeleting writes it; UpdateUser refuses to write it
+	// and refuses to change a row that has it (ErrUserDeleting), so the
+	// status leaves deleting only when the deletion completes and the row
+	// is removed. Every status check that requires active denies it.
+	UserStatusDeleting = "deleting"
 )
 
 // User kind constants.
@@ -2284,6 +2413,19 @@ const (
 	MessageDispatchNoRecipient = "no_recipient"
 )
 
+// MessageEnteredPendingLogMsg is the text of the one structured log line
+// written whenever a message row is persisted in dispatch_state "pending"
+// (ptone/scion#4827). The line carries message_id, sender, recipient, type
+// (messages.LogType) and creation_path, and never the body. The hub call
+// sites and the store-level default share this text so a row reported by
+// the stuck-pending sweep can be traced to its writer with one search.
+const MessageEnteredPendingLogMsg = "message dispatch: row entered pending"
+
+// MessagePendingPathStoreDefault is the creation_path logged when a writer
+// left Message.DispatchState empty and the store schema default ("pending")
+// applied. No current hub writer should reach it.
+const MessagePendingPathStoreDefault = "store_default"
+
 // MessageExpiredStuckPendingReason is the exact DispatchFailureReason the
 // stuck-message sweep (pkg/hub/sweep.go's brokerMessageSweepHandler) writes
 // when ExpireStuckPendingMessages flips a stuck-pending row to "failed". The
@@ -2393,6 +2535,13 @@ type Notification struct {
 	// stored before outcomes were recorded, whose Dispatched flag keeps its
 	// old meaning).
 	DispatchOutcome string `json:"dispatchOutcome"`
+	// DispatchReason says why a NotificationOutcomeFailed outcome was
+	// recorded (a NotificationReason* value). Empty for any other outcome
+	// and for rows stored before reasons were recorded.
+	DispatchReason string `json:"dispatchReason,omitempty"`
+	// NextAttemptAt is the earliest time the dispatch sweep may claim the
+	// notification again after a failed delivery; nil means at once.
+	NextAttemptAt *time.Time `json:"nextAttemptAt,omitempty"`
 }
 
 // Notification.DispatchOutcome values.
@@ -2406,6 +2555,57 @@ const (
 	// stays dispatched so the sweep does not retry it.
 	NotificationOutcomeFailed = "failed"
 )
+
+// Notification.DispatchReason values, recorded with
+// NotificationOutcomeFailed.
+const (
+	// NotificationReasonExpired: the notification was still undelivered
+	// when it reached the maximum retry age, for example because its
+	// subscriber stayed suspended or had no runtime broker.
+	NotificationReasonExpired = "expired"
+	// NotificationReasonSubscriptionGone: the subscription was deleted.
+	NotificationReasonSubscriptionGone = "subscription_gone"
+	// NotificationReasonSubscriberGone: the subscriber agent was deleted.
+	NotificationReasonSubscriberGone = "subscriber_gone"
+	// NotificationReasonWatchedAgentGone: the watched agent was deleted.
+	NotificationReasonWatchedAgentGone = "watched_agent_gone"
+)
+
+// ValidNotificationReason reports whether reason is a known
+// NotificationReason* value.
+func ValidNotificationReason(reason string) bool {
+	switch reason {
+	case NotificationReasonExpired, NotificationReasonSubscriptionGone,
+		NotificationReasonSubscriberGone, NotificationReasonWatchedAgentGone:
+		return true
+	}
+	return false
+}
+
+// Notification retry backoff bounds. The base equals the dispatch sweep
+// cadence (a shorter delay would have no effect); the cap keeps a
+// subscriber that recovers on its own reachable within an hour.
+const (
+	NotificationRetryBackoffBase = 5 * time.Minute
+	NotificationRetryBackoffMax  = time.Hour
+)
+
+// NotificationRetryBackoff returns how long the dispatch sweep waits
+// before retrying a notification whose latest delivery attempt failed.
+// attempts is the number of delivery attempts made so far, including the
+// failed one. The delay starts at NotificationRetryBackoffBase for the
+// first attempt and doubles with each further attempt, up to
+// NotificationRetryBackoffMax.
+func NotificationRetryBackoff(attempts int) time.Duration {
+	d := NotificationRetryBackoffBase
+	for i := 1; i < attempts; i++ {
+		d *= 2
+		if d >= NotificationRetryBackoffMax {
+			return NotificationRetryBackoffMax
+		}
+	}
+	return d
+}
 
 // ListOptions provides pagination and filtering for list operations.
 type ListOptions struct {
@@ -2584,11 +2784,11 @@ type Group struct {
 }
 
 // GroupMember represents membership in a group.
-// Members can be either users or other groups (for nested group support).
+// Members can be users, other groups (for nested group support), or agents.
 type GroupMember struct {
 	GroupID    string    `json:"groupId"`    // The group this membership belongs to
-	MemberType string    `json:"memberType"` // "user" or "group"
-	MemberID   string    `json:"memberId"`   // User ID or Group ID
+	MemberType string    `json:"memberType"` // "user", "group", or "agent"
+	MemberID   string    `json:"memberId"`   // User ID, Group ID, or Agent ID
 	Role       string    `json:"role"`       // "member", "admin", "owner"
 	AddedAt    time.Time `json:"addedAt"`
 	AddedBy    string    `json:"addedBy,omitempty"`
@@ -3139,12 +3339,33 @@ type Message struct {
 	SenderProjectID    *string `json:"senderProjectId,omitempty"`
 	RecipientProjectID *string `json:"recipientProjectId,omitempty"`
 
+	// AuthorizingUserID and DelegationGrantID attribute a message sent
+	// with an agent delegated credential (.design/agent-delegation.md
+	// §14.5): the user who issued the grant and the grant. Sender and
+	// SenderID name the actor agent, never the issuer. Empty for every
+	// other message.
+	AuthorizingUserID string `json:"authorizingUserId,omitempty"`
+	DelegationGrantID string `json:"delegationGrantId,omitempty"`
+
 	// DispatchState tracks cross-node delivery of the message to the broker:
 	// pending|dispatched|failed. The message row is its own durable dispatch
 	// intent (design §5.2/§6.1).
 	DispatchState         string     `json:"dispatchState,omitempty"`
 	DispatchedAt          *time.Time `json:"dispatchedAt,omitempty"`
 	DispatchFailureReason *string    `json:"dispatchFailureReason,omitempty"`
+
+	// DeferredAttachments is never stored. For a deferred message, the
+	// conversation messages route lists its attachments stored as
+	// artifacts here, to a reader only, so catch-up can say they were not
+	// delivered (ptone/scion#4596).
+	DeferredAttachments []DeferredAttachment `json:"deferredAttachments,omitempty"`
+}
+
+// DeferredAttachment names one attachment of a deferred message: its
+// reduced file name and size, and nothing else.
+type DeferredAttachment struct {
+	Name string `json:"name"`
+	Size int64  `json:"size"`
 }
 
 // MessageFilter defines query parameters for listing messages.
@@ -3366,6 +3587,12 @@ type ScheduledEventFilter struct {
 	EventType  string
 	Status     string
 	ScheduleID string // Filter events generated by a specific recurring schedule
+	// InitiatorAgentID, when set, keeps only rows whose current initiator
+	// principal is this agent with a recorded attribution (version 1 or
+	// later, credential kind neither empty nor legacy_unknown). It matches
+	// the hub's agent row decision, so an agent's list pages fill with the
+	// rows it holds.
+	InitiatorAgentID string
 }
 
 // =============================================================================
@@ -3450,6 +3677,12 @@ type ScheduleFilter struct {
 	// LastRunStatus, when set, keeps only schedules whose most recent run
 	// ended with this status (ScheduleRunSuccess or ScheduleRunError).
 	LastRunStatus string
+	// InitiatorAgentID, when set, keeps only rows whose current initiator
+	// principal is this agent with a recorded attribution (version 1 or
+	// later, credential kind neither empty nor legacy_unknown). It matches
+	// the hub's agent row decision, so an agent's list pages fill with the
+	// rows it holds.
+	InitiatorAgentID string
 	// SystemPausedOnly, when true, keeps only paused schedules with a
 	// non-empty StatusReason: schedules the hub paused itself. A schedule a
 	// user paused (empty reason) is left out.
@@ -3658,6 +3891,11 @@ const (
 	MaintenanceStatusRunning   = "running"
 	MaintenanceStatusCompleted = "completed"
 	MaintenanceStatusFailed    = "failed"
+	// MaintenanceStatusRestarting marks an operation run (update-binary)
+	// whose binary is installed and whose hub restart has been requested.
+	// It is written before the restart; boot reconciliation completes it.
+	// AbortRunningMaintenanceOps leaves it alone (it only aborts "running").
+	MaintenanceStatusRestarting = "restarting"
 )
 
 // =============================================================================
@@ -3705,6 +3943,7 @@ type SkillVersion struct {
 	Version            string         `json:"version"`
 	Status             string         `json:"status"`
 	ContentHash        string         `json:"contentHash,omitempty"`
+	ContentHashV2      string         `json:"contentHashV2,omitempty"` // skill content hash v2 (ptone/scion#5935): derived by the hub for responses while hub.skill_content_hash_v2 is on, never stored
 	Files              []TemplateFile `json:"files,omitempty"`
 	PublisherID        string         `json:"publisherId,omitempty"`
 	DeprecationMessage string         `json:"deprecationMessage,omitempty"`
@@ -3758,6 +3997,12 @@ type HubSetting struct {
 	Origin    string          `json:"origin,omitempty"`
 	CreatedAt time.Time       `json:"createdAt"`
 	UpdatedAt time.Time       `json:"updatedAt"`
+
+	// SettingsRevision is the operational-settings revision (see
+	// HubSettingsRevisionSection) after the write that returned this row:
+	// set by UpsertHubSetting for an operational section on a store that
+	// keeps the revision, 0 otherwise.
+	SettingsRevision int64 `json:"-"`
 }
 
 // =============================================================================
@@ -4154,7 +4399,8 @@ type EdgeDeactivationCause string
 const (
 	EdgeDeactivationAgentSoftDelete EdgeDeactivationCause = "agent_soft_delete"
 	EdgeDeactivationAgentHardDelete EdgeDeactivationCause = "agent_hard_delete"
-	// EdgeDeactivationDelegatorDeleted is reserved: no path records it.
+	// EdgeDeactivationDelegatorDeleted is recorded by a user delete on the
+	// edges where the deleted user is the delegator (ptone/scion#2143).
 	// Agent deletes deactivate only the edges where the agent is the
 	// delegate, and a project delete records agent_hard_delete on both
 	// sides. ValidEdgeDeactivationCause accepts it.
@@ -4172,6 +4418,14 @@ const (
 	// operator scope re-issue (ptone/scion#3652). The row is kept as
 	// evidence of the authority the agent held before.
 	EdgeDeactivationScopeReissueReplaced EdgeDeactivationCause = "scope_reissue_replaced"
+	// EdgeDeactivationUserDeleteCascade is recorded by a forced user
+	// delete (ptone/scion#2143), under the deletion's operation ID, on the
+	// edges where the user is the delegator and on the edges and
+	// service-account assignments of every agent it stops. A restore
+	// reactivates only agent_soft_delete rows, so it reactivates none of
+	// these. ValidEdgeDeactivationCause and
+	// ValidAssignmentDeactivationCause accept it.
+	EdgeDeactivationUserDeleteCascade EdgeDeactivationCause = "user_delete_cascade"
 )
 
 // ValidEdgeDeactivationCause reports whether c is a cause that may be
@@ -4182,7 +4436,8 @@ func ValidEdgeDeactivationCause(c EdgeDeactivationCause) bool {
 		EdgeDeactivationAgentHardDelete,
 		EdgeDeactivationDelegatorDeleted,
 		EdgeDeactivationCreateCompensation,
-		EdgeDeactivationReincarnateReplaced:
+		EdgeDeactivationReincarnateReplaced,
+		EdgeDeactivationUserDeleteCascade:
 		return true
 	}
 	return false
@@ -4197,6 +4452,17 @@ const (
 	// EdgeDeactivationSACleared marks an assignment ended by a write that
 	// removed the agent's assign-mode GCP identity.
 	EdgeDeactivationSACleared EdgeDeactivationCause = "sa_cleared"
+	// EdgeDeactivationReincarnateFailed marks the assignment a reincarnation
+	// claim recorded for a new account, ended when the reincarnation failed
+	// and the previous configuration was restored by the worker.
+	EdgeDeactivationReincarnateFailed EdgeDeactivationCause = "reincarnate_failed"
+	// EdgeDeactivationReincarnatePendingSwept is EdgeDeactivationReincarnateFailed
+	// for a reincarnation the sweep failed because its worker never started.
+	EdgeDeactivationReincarnatePendingSwept EdgeDeactivationCause = "reincarnate_pending_swept"
+	// EdgeDeactivationReincarnateStaleSwept is EdgeDeactivationReincarnateFailed
+	// for a reincarnation the sweep failed after its worker stopped
+	// reporting progress.
+	EdgeDeactivationReincarnateStaleSwept EdgeDeactivationCause = "reincarnate_stale_swept"
 )
 
 // ValidAssignmentDeactivationCause reports whether c is a cause that may be
@@ -4207,7 +4473,15 @@ func ValidAssignmentDeactivationCause(c EdgeDeactivationCause) bool {
 		EdgeDeactivationAgentHardDelete,
 		EdgeDeactivationCreateCompensation,
 		EdgeDeactivationSAReplaced,
-		EdgeDeactivationSACleared:
+		EdgeDeactivationSACleared,
+		// On an assignment, reincarnate_replaced marks the row a
+		// reincarnation claim replaced with one for another account; the
+		// claim's reincarnation ID is its operation ID.
+		EdgeDeactivationReincarnateReplaced,
+		EdgeDeactivationReincarnateFailed,
+		EdgeDeactivationReincarnatePendingSwept,
+		EdgeDeactivationReincarnateStaleSwept,
+		EdgeDeactivationUserDeleteCascade:
 		return true
 	}
 	return false
@@ -4235,6 +4509,9 @@ const (
 	SAAssignmentOriginScheduledProjectDefault        SAAssignmentOrigin = "scheduled_project_default"
 	SAAssignmentOriginScheduledHubDefault            SAAssignmentOrigin = "scheduled_hub_default"
 	SAAssignmentOriginHostPassthroughTranslation     SAAssignmentOrigin = "host_passthrough_translation"
+	// SAAssignmentOriginLegacyBackfill marks a row written by the boot
+	// backfill for an agent created before assignment rows were recorded.
+	SAAssignmentOriginLegacyBackfill SAAssignmentOrigin = "legacy_backfill"
 )
 
 // AgentServiceAccountAssignment records who authorized an agent's

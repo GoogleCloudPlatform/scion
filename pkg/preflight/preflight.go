@@ -112,6 +112,15 @@ type Registry struct {
 // NewRegistry returns an empty registry.
 func NewRegistry() *Registry { return &Registry{checks: map[string]Check{}} }
 
+// NewDefaultRegistry returns a registry holding every built-in check: the
+// checks "scion server preflight" runs. It is the one list to add a check
+// to.
+func NewDefaultRegistry() *Registry {
+	r := NewRegistry()
+	r.Register(ProfilesCheck())
+	return r
+}
+
 // Register adds c. It panics on a programming error: a name that is not
 // dotted lower case (for example "settings.profiles"), a duplicate name, a
 // timeout that is not positive, or a nil Run.

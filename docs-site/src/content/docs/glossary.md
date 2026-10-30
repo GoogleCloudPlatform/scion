@@ -75,7 +75,7 @@ How a project's workspace is provisioned across its agents. There are four canon
 A workspace sharing mode where one workspace directory is mounted into every agent with no per-agent isolation — the model used for plain (non-git) projects.
 
 ### Worktree-per-agent
-A workspace sharing mode where each agent gets its own git worktree over a shared checkout, isolating working trees while sharing one clone's history. Supported on repositories linked to the local workstation Hub (registered with this mode automatically; the worktrees are of your own checkout) and on Hub-managed git projects created with `worktree-per-agent` (see [Linked git projects](/scion/local/workspace/#linked-git-projects)); requires git 2.48 or later on the broker, and on Kubernetes it requires NFS workspace storage.
+A workspace sharing mode where each agent gets its own git worktree over a shared checkout, isolating working trees while sharing one clone's history (with the shared `.git` root mounted read-only into each container). Supported on repositories linked to the local workstation Hub (registered with this mode automatically; the worktrees are of your own checkout) and on Hub-managed git projects created with `worktree-per-agent` (see [Linked git projects](/scion/local/workspace/#linked-git-projects)); requires git 2.48 or later on the broker, and is not supported on Kubernetes.
 
 ### Clone-per-agent
 A workspace sharing mode where each agent gets its own full git clone of the repository. It is also what a Hub git project resolves to when it has no workspace mode set: only `shared` selects the shared checkout.
@@ -84,7 +84,7 @@ A workspace sharing mode where each agent gets its own full git clone of the rep
 A workspace sharing mode for Hub-managed projects without git, where each agent gets its own private directory that starts empty and is not a git repository. It is kept across suspend/resume where storage allows and deleted with the agent. Selected with workspace mode `per-agent` on a project without a git remote.
 
 ### Shared directory
-A persistent, mutable volume shared by the agents within one project. Backed by host filesystem directories (local) or Kubernetes PersistentVolumeClaims (K8s). In hosted deployments, `server.shared_dir_storage` can place them on a shared NFS export so they span Runtime Brokers.
+A persistent, mutable volume shared by the agents within one project. Backed by host filesystem directories (local) or Kubernetes PersistentVolumeClaims (K8s). In hosted deployments, `server.project_storage` can place them (with the workspaces) on a shared NFS export or volume so they span Runtime Brokers.
 
 ### Agent home
 The directory mounted as the container user's home folder, holding that agent's unique config and history.
@@ -260,7 +260,7 @@ A project-level setting (`crossProjectInbound`) that controls whether the projec
 A set of recipients addressed by a single send, correlated by a shared `group_id`, as opposed to a direct message to one recipient or a broadcast to all agents in a project. Distinct from **Group** (Hub users) and from a **Thread Group**.
 
 ### Thread Group
-A named set of a project's group conversations (threads), owned by the project and shared by every project member, user or agent. A thread is in at most one thread group; adding it to another moves it. Membership is shared, while each user keeps their own sidebar order. Managed with [`scion conversation group`](/scion/reference/cli/#scion-conversation-group), behind the `hub.chat_thread_groups` [experiment](/scion/reference/experiments/). Distinct from **Group** (Hub users) and from a **Message Group** (the recipients of one send).
+A named set of a project's group conversations (threads), owned by the project and shared by every project member, user or agent. A thread is in at most one thread group; adding it to another moves it. Membership is shared, while each user keeps their own sidebar order. Managed with [`scion conversation group`](/scion/reference/cli/#scion-conversation-group). Distinct from **Group** (Hub users) and from a **Message Group** (the recipients of one send).
 
 ### Notification
 An event delivered when an agent reaches a tracked trigger activity (e.g. `completed`, `waiting_for_input`, `limits_exceeded`). Recipients register a **Subscription** — scoped to a single agent or to a whole project, naming which trigger activities fire it and whether an agent or a user receives it. Backs `scion notifications` and the `--notify` flag on `scion start`.

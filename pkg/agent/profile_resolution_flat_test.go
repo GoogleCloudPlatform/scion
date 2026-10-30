@@ -138,13 +138,13 @@ func TestFlatProfileResolution_StartAndRestartSkipProfileTier(t *testing.T) {
 	r := newFlatResolutionRun(t)
 	cfg := r.start(t, flatCtx(), "flat-agent")
 	assertNoProfileTier(t, cfg)
-	assert.Empty(t, GetSavedProfile("flat-agent", r.fixture.projectScionDir), "no profile is recorded for a flat agent")
+	assert.Empty(t, savedInfoProfile("flat-agent", r.fixture.projectScionDir), "no profile is recorded for a flat agent")
 
 	// A later start (and the start leg of a restart) re-reads settings and
 	// still skips the profile tier.
 	cfg = r.start(t, flatCtx(), "flat-agent")
 	assertNoProfileTier(t, cfg)
-	assert.Empty(t, GetSavedProfile("flat-agent", r.fixture.projectScionDir))
+	assert.Empty(t, savedInfoProfile("flat-agent", r.fixture.projectScionDir))
 }
 
 func TestFlatProfileResolution_LegacyStartStillAppliesActiveProfile(t *testing.T) {
@@ -156,7 +156,7 @@ func TestFlatProfileResolution_LegacyStartStillAppliesActiveProfile(t *testing.T
 	require.NotNil(t, cfg.Resources, "legacy resolution applies the active profile's resources")
 	assert.Equal(t, "7777Mi", cfg.Resources.Requests.Memory)
 	assert.Equal(t, "from-settings-harness-config", env["GLOBAL_HC_ENV"])
-	assert.Equal(t, "batch", GetSavedProfile("legacy-agent", r.fixture.projectScionDir))
+	assert.Equal(t, "batch", savedInfoProfile("legacy-agent", r.fixture.projectScionDir))
 }
 
 func TestFlatProfileResolution_ProvisionSkipsProfileTier(t *testing.T) {
@@ -174,7 +174,7 @@ func TestFlatProfileResolution_ProvisionSkipsProfileTier(t *testing.T) {
 	// and the harness config's own image.
 	assert.Equal(t, "from-settings-harness-config", flatCfg.Env["GLOBAL_HC_ENV"], "the non-profile settings harness config still applies")
 	assert.Equal(t, "test-image:latest", flatCfg.Image, "the harness config's own image still applies")
-	assert.Empty(t, GetSavedProfile("flat-prov", r.fixture.projectScionDir))
+	assert.Empty(t, savedInfoProfile("flat-prov", r.fixture.projectScionDir))
 
 	// Legacy provisioning is unchanged.
 	_, _, legacyCfg, err := ProvisionAgent(context.Background(), "legacy-prov", "", "", "", r.fixture.projectScionDir, "", "created", "", "")
@@ -203,14 +203,21 @@ func TestFlatProfileResolution_StartUsesInstanceSharedDirDefaults(t *testing.T) 
 	})
 	start := func(ctx context.Context, name string, inline *api.ScionConfig) runtime.RunConfig {
 		t.Helper()
-		_, err := r.mgr.Start(ctx, api.StartOptions{
+		opts := api.StartOptions{
 			Name:         name,
 			ProjectPath:  r.fixture.projectScionDir,
 			NoAuth:       true,
 			Env:          map[string]string{"SCION_AGENT_ID": "agent-" + name, "SCION_PROJECT_ID": "pid-flat"},
 			SharedDirs:   []api.SharedDir{{Name: "scratchpad"}},
 			InlineConfig: inline,
-		})
+		}
+		if config.FlatInstancePolicyFrom(ctx) != nil {
+			// A flat Kubernetes start carries the instance's resolved
+			// (here empty) operator-owned placement, as the agent runtime
+			// server resolves it before every start.
+			opts.ResolvedPlacement, opts.PlacementResolved = &api.ResolvedPlacement{OperatorOwned: true}, true
+		}
+		_, err := r.mgr.Start(ctx, opts)
 		require.NoError(t, err)
 		return r.runs[len(r.runs)-1]
 	}

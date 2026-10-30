@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -56,11 +57,11 @@ func newSyncStartTestServer(t *testing.T) (*Server, *startFuncManager, string, s
 		mockManager: &mockManager{},
 		starts:      make(chan func(context.Context, api.StartOptions) (*api.AgentInfo, error), 4),
 	}
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	return New(cfg, mgr, rt), mgr, projectPath, agentDir
+	return New(cfg, mgr, rt, config.RuntimeBuildRecord{}), mgr, projectPath, agentDir
 }
 
 // createSync issues a synchronous create for "same-name" and returns the

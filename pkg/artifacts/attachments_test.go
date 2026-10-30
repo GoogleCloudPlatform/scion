@@ -42,13 +42,14 @@ type messageHost struct {
 	mmu           sync.Mutex
 	readers       map[string]map[string]bool
 	noMessageRead map[string]bool
+	noUploadRead  map[string]bool
 	asked         []string
 }
 
 var _ MessageScopeHost = (*messageHost)(nil)
 
 func newMessageHost() *messageHost {
-	return &messageHost{fakeHost: newFakeHost(), readers: map[string]map[string]bool{}, noMessageRead: map[string]bool{}}
+	return &messageHost{fakeHost: newFakeHost(), readers: map[string]map[string]bool{}, noMessageRead: map[string]bool{}, noUploadRead: map[string]bool{}}
 }
 
 func (h *messageHost) allowMessage(p principal, messageID string) {
@@ -77,7 +78,17 @@ func (h *messageHost) PermitsMessageRead(ctx context.Context) bool {
 	return !h.noMessageRead[PrincipalRef(kind, ref)]
 }
 
-func (h *messageHost) MayReadMessage(ctx context.Context, messageID string) bool {
+func (h *messageHost) PermitsUploadRead(ctx context.Context) bool {
+	kind, ref, _, ok := h.Principal(ctx)
+	if !ok {
+		return false
+	}
+	h.mmu.Lock()
+	defer h.mmu.Unlock()
+	return !h.noUploadRead[PrincipalRef(kind, ref)]
+}
+
+func (h *messageHost) MayReadMessage(ctx context.Context, messageID string, _ *string) bool {
 	kind, ref, _, ok := h.Principal(ctx)
 	if !ok {
 		return false
@@ -130,7 +141,7 @@ func (f *attachmentFixture) upload(p principal, name, mediaType string, body []b
 func (f *attachmentFixture) send(p principal, messageID string, body []byte) string {
 	f.t.Helper()
 	id := f.upload(p, "shot.png", "image/png", body)
-	if err := f.svc.BindAttachment(context.Background(), id, p.kind, p.ref, messageID); err != nil {
+	if err := f.svc.BindAttachment(context.Background(), id, p.kind, p.ref, messageID, ""); err != nil {
 		f.t.Fatalf("BindAttachment: %v", err)
 	}
 	return id
@@ -148,6 +159,20 @@ func (f *attachmentFixture) serve(p *principal, target, id string) (ServeOutcome
 }
 
 var pngBytes = []byte("\x89PNG\r\n\x1a\nnot-really-an-image")
+
+// TestAttachmentUpload_UploaderNeedsUploadRead (ptone/scion#4596, section
+// 9, clause 0): the uploader reads its unsent upload only when the host's
+// PermitsUploadRead allows its credential.
+func TestAttachmentUpload_UploaderNeedsUploadRead(t *testing.T) {
+	f := newAttachmentFixture(t, false)
+	id := f.upload(userU, "shot.png", "image/png", pngBytes)
+	f.mh.mmu.Lock()
+	f.mh.noUploadRead[PrincipalRef(userU.kind, userU.ref)] = true
+	f.mh.mmu.Unlock()
+	if out, rec := f.serve(&userU, "/api/v1/chat/attachments/"+id, id); out != ServeRefused || rec.Body.Len() != 0 {
+		t.Fatalf("uploader without upload read: outcome %d, body %q; want ServeRefused", out, rec.Body.String())
+	}
+}
 
 // TestAttachmentUploadReadableByUploaderOnly: an unsent upload is served
 // to its uploader and refused to everyone else, and nothing is written for
@@ -392,10 +417,10 @@ func TestUsableAttachment(t *testing.T) {
 	if _, state, err := f.svc.UsableAttachment(ctx, uuid.NewString(), userU.kind, userU.ref); err != nil || state != AttachmentAbsent {
 		t.Errorf("unknown id = %d, %v; want AttachmentAbsent", state, err)
 	}
-	if err := f.svc.BindAttachment(ctx, up, outside.kind, outside.ref, "msg-2"); !errors.Is(err, ErrAttachmentNotOwned) {
+	if err := f.svc.BindAttachment(ctx, up, outside.kind, outside.ref, "msg-2", ""); !errors.Is(err, ErrAttachmentNotOwned) {
 		t.Errorf("bind by another user = %v, want ErrAttachmentNotOwned", err)
 	}
-	if err := f.svc.BindAttachment(ctx, sent, userU.kind, userU.ref, "msg-2"); !errors.Is(err, ErrAttachmentBound) {
+	if err := f.svc.BindAttachment(ctx, sent, userU.kind, userU.ref, "msg-2", ""); !errors.Is(err, ErrAttachmentBound) {
 		t.Errorf("second bind = %v, want ErrAttachmentBound", err)
 	}
 }
@@ -633,5 +658,65 @@ func TestAttachmentRefusedUnderLockAnswers409(t *testing.T) {
 	a, err := f.store.GetAttachment(context.Background(), id)
 	if err != nil || a.ExpiresAt != nil || a.ScopeKind != ScopeKindMessage {
 		t.Errorf("attachment after refusals = %+v, %v", a, err)
+	}
+}
+
+// TestServeBoundAttachment: a bound attachment is streamed on the local
+// provider and redirected, with a DeliveryRedirectTTL lifetime, on an
+// object store; an attachment bound to another message, an unbound upload
+// and an unknown id answer ServeNotFound with nothing written
+// (ptone/scion#4596).
+func TestServeBoundAttachment(t *testing.T) {
+	serve := func(f *attachmentFixture, id, msg string) (ServeOutcome, *httptest.ResponseRecorder) {
+		rec := httptest.NewRecorder()
+		return f.svc.ServeBoundAttachment(rec, httptest.NewRequest(http.MethodGet, "/x", nil), id, msg), rec
+	}
+	f := newAttachmentFixture(t, false)
+	id := f.send(userU, "msg-1", pngBytes)
+	out, rec := serve(f, id, "msg-1")
+	if out != ServeWritten || rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), pngBytes) {
+		t.Fatalf("local stream = %v %d", out, rec.Code)
+	}
+	for name, c := range map[string][2]string{
+		"other message": {id, "msg-2"},
+		"unknown id":    {"00000000-0000-4000-8000-000000000000", "msg-1"},
+		"unbound":       {f.upload(userU, "u.png", "image/png", pngBytes), "msg-1"},
+	} {
+		out, rec := serve(f, c[0], c[1])
+		if out != ServeNotFound || rec.Body.Len() != 0 {
+			t.Errorf("%s: %v, %d bytes written", name, out, rec.Body.Len())
+		}
+	}
+
+	r := newAttachmentFixture(t, true)
+	rid := r.send(userU, "msg-1", pngBytes)
+	out, rec = serve(r, rid, "msg-1")
+	if out != ServeWritten || rec.Code != http.StatusFound || rec.Header().Get("Location") == "" {
+		t.Fatalf("object store = %v %d", out, rec.Code)
+	}
+	rs := r.blobs.(*redirectingStorage)
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	if rs.last.Expires != DeliveryRedirectTTL {
+		t.Errorf("redirect lifetime = %v, want %v", rs.last.Expires, DeliveryRedirectTTL)
+	}
+}
+
+// nilAttachmentStore answers (nil, nil) from GetAttachment, which no real
+// store does; a caller must not rely on that.
+type nilAttachmentStore struct{ Store }
+
+func (nilAttachmentStore) GetAttachment(context.Context, string) (*Artifact, error) { return nil, nil }
+
+// TestServeBoundAttachment_NilAttachmentNotFound: a (nil, nil) lookup
+// answers ServeNotFound with nothing written, the same as an unknown id.
+func TestServeBoundAttachment_NilAttachmentNotFound(t *testing.T) {
+	f := newAttachmentFixture(t, false)
+	id := f.send(userU, "msg-1", pngBytes)
+	f.svc.SetStore(nilAttachmentStore{Store: f.store})
+	rec := httptest.NewRecorder()
+	out := f.svc.ServeBoundAttachment(rec, httptest.NewRequest(http.MethodGet, "/x", nil), id, "msg-1")
+	if out != ServeNotFound || rec.Body.Len() != 0 {
+		t.Fatalf("nil attachment = %v, %d bytes written", out, rec.Body.Len())
 	}
 }

@@ -642,9 +642,25 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     isAlias: false,
   },
   {
+    value: 'project:chat_post',
+    label: 'project:chat_post',
+    description:
+      "Post messages into the project's chat threads (project owner/admin/member, hub admin). Checked on the account: a user access token posts with inbox:write. On a token, project:chat_post only lets the token grant roles that include this permission",
+    resource: 'project',
+    isAlias: false,
+  },
+  {
     value: 'project:clone',
     label: 'project:clone',
     description: 'Clone projects',
+    resource: 'project',
+    isAlias: false,
+  },
+  {
+    value: 'project:create',
+    label: 'project:create',
+    description:
+      'Create projects: project create, project register, and the new project of a clone',
     resource: 'project',
     isAlias: false,
   },

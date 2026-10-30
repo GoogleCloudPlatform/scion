@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/creack/pty"
 	"github.com/stretchr/testify/require"
@@ -59,7 +60,7 @@ func decodeErrorResponse(t *testing.T, rec *httptest.ResponseRecorder) ErrorResp
 func TestHandleAgentAttach_AgentNotFound(t *testing.T) {
 	mgr := &mockManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	rec := httptest.NewRecorder()
 	srv.handleAgentAttach(rec, newAttachTestRequest("missing-agent"))
@@ -76,7 +77,7 @@ func TestHandleAgentAttach_AgentNotFound(t *testing.T) {
 func TestHandleAgentAttach_RuntimeListUnavailable(t *testing.T) {
 	mgr := &mockManager{listErr: errors.New("docker ps failed: exit status 1")}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	rec := httptest.NewRecorder()
 	srv.handleAgentAttach(rec, newAttachTestRequest("some-agent"))
@@ -132,7 +133,7 @@ func TestHandleAgentAttach_DefaultRuntimeUnsupported_RejectsBeforeUpgrade(t *tes
 		MockRuntime:    &runtime.MockRuntime{NameFunc: func() string { return "fake" }},
 		supportsAttach: false,
 	}
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	rec := httptest.NewRecorder()
 	srv.handleAgentAttach(rec, newAttachTestRequest("some-agent"))
@@ -155,7 +156,7 @@ func TestHandleAgentAttach_DefaultRuntimeUnsupported_RejectsBeforeUpgrade(t *tes
 func TestHandleAgentAttach_AuxRuntimeUnsupported_RejectsBeforeUpgrade(t *testing.T) {
 	mgr := &mockManager{} // empty: no match on the default manager, forcing the aux fallback
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	auxMgr := &mockManager{agents: []api.AgentInfo{{Name: "some-agent", ID: "cid-1"}}}
 	auxRT := &attachCapableTestRuntime{
@@ -190,7 +191,7 @@ func TestHandleAgentAttach_AuxRuntimeUnsupported_RejectsBeforeUpgrade(t *testing
 func TestHandleAgentAttach_AttachSupported_ProceedsPastPreUpgradeGate(t *testing.T) {
 	mgr := &mockManager{agents: []api.AgentInfo{{Name: "some-agent", ID: "cid-1"}}}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }} // doesn't implement AttachCapableRuntime at all
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	rec := httptest.NewRecorder()
 	srv.handleAgentAttach(rec, newAttachTestRequest("some-agent"))

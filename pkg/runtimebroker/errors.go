@@ -112,6 +112,11 @@ const (
 	// agent the user started again. Nothing was done.
 	ErrCodeStaleDispatch = "stale_dispatch"
 
+	// ErrCodeProjectStorageUnavailable is the 503 code for a dispatch of a
+	// project on shared project storage whose share is not mounted on the
+	// broker (ptone/scion#5823); see api.BrokerErrCodeProjectStorageUnavailable.
+	ErrCodeProjectStorageUnavailable = api.BrokerErrCodeProjectStorageUnavailable
+
 	// ErrCodeRuntimeLogsUnsupported marks a logs request that a runtime
 	// declines to serve at all, rather than one that failed. The broker uses
 	// this for pkg/runtime.ErrLogsNotSupported (pkg/runtime/capabilities.go),
@@ -402,7 +407,14 @@ func (e *OpaqueError) Unwrap() error { return e.err }
 // going through writeRuntimeOpError — err's text still always reaches the
 // log on every path (through sanitizeFailureCause on the create and start
 // paths), just not through this one function.
+//
+// A start that failed with agent.ErrNoHubToken gets that error's fixed text
+// after the lead: it names the cause (the hub issued no agent token) and no
+// credential value, so the hub relays an actionable create or start error.
 func runtimeOpError(op string, err error) *OpaqueError {
+	if errors.Is(err, agent.ErrNoHubToken) {
+		return NewOpaqueError(failedOpText(op)+": "+agent.ErrNoHubToken.Error(), err)
+	}
 	return NewOpaqueError(failedOpText(op), err)
 }
 
@@ -798,6 +810,14 @@ func (s *Server) writeStartContextError(w http.ResponseWriter, err error, op str
 		s.logStartContextFailure("buildStartContext failed", op, startContextDiagnostic(sce), extra)
 		TemplateError(w, runtimeOpError(op, err).Error())
 		return http.StatusInternalServerError
+	}
+	if sce.Status == http.StatusServiceUnavailable && sce.Code == ErrCodeProjectStorageUnavailable {
+		// Its message is one of the path-free project storage texts
+		// (runtime.ProjectShareClientTexts): it names the mount point only
+		// as "its configured mount point" and gives the remedy; the path is
+		// in the broker log.
+		writeError(w, sce.Status, sce.Code, sce.Message, sce.Details)
+		return sce.Status
 	}
 	if sce.Status >= 400 && sce.Status < 500 {
 		code := sce.Code

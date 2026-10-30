@@ -98,7 +98,7 @@ A workspace sharing mode where one workspace directory is mounted into every age
 _Avoid_: shared mount, plain workspace
 
 **Worktree-per-agent**:
-A workspace sharing mode where each agent gets its own git worktree over a shared checkout, isolating working trees while sharing one clone's history. Supported on repositories linked to the local workstation Hub (registered with this mode automatically; the worktrees are of your own checkout) and on Hub-managed git projects created with `worktree-per-agent` (see "Linked git projects" in the docs); on Kubernetes it requires NFS workspace storage.
+A workspace sharing mode where each agent gets its own git worktree over a shared checkout, isolating working trees while sharing one clone's history (with the shared `.git` root mounted read-only into each container). Supported on repositories linked to the local workstation Hub (registered with this mode automatically; the worktrees are of your own checkout) and on Hub-managed git projects created with `worktree-per-agent` (see "Linked git projects" in the docs); not supported on Kubernetes.
 _Avoid_: worktree mode, shared checkout
 
 **Clone-per-agent**:
@@ -364,7 +364,7 @@ The default message mode. Any user with the `agent:message` permission in the pr
 _Avoid_: open mode, public mode
 
 **Thread Group**:
-A named set of a project's group conversations (threads), owned by the project and shared by every project member, user or agent. A thread is in at most one thread group; adding it to another moves it. Membership is shared, while each user keeps their own sidebar order. Served at `/api/v1/thread-groups` and managed with `scion conversation group`, behind the `hub.chat_thread_groups` experiment (ptone/scion#4424). It is not a permissions **Group** and not a **Message Group**. The older per-user groups in a user's chat preferences are *personal groups*.
+A named set of a project's group conversations (threads), owned by the project and shared by every project member, user or agent. A thread is in at most one thread group; adding it to another moves it. Membership is shared, while each user keeps their own sidebar order. Served at `/api/v1/thread-groups` and managed with `scion conversation group` (ptone/scion#4424). It is not a permissions **Group** and not a **Message Group**. The older per-user groups in a user's chat preferences are *personal groups*.
 _Avoid_: group (bare), folder, channel, conversation group, thread folder
 _See also_: Group (hub users, not threads), Message Group (recipients of one send, not threads), Native Web Chat
 

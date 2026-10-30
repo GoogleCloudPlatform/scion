@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -42,7 +43,7 @@ func newCacheTestServer(t *testing.T, brokerID, rtName string, sc *SharedCaches)
 	cfg.InMemoryCredentials = &brokercredentials.BrokerCredentials{BrokerID: brokerID, SecretKey: "c2VjcmV0", HubEndpoint: cfg.HubEndpoint}
 	cfg.TemplateCacheDir = filepath.Join(t.TempDir(), "own", "templates")
 	cfg.SharedCaches = sc
-	return New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return rtName }})
+	return New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return rtName }}, config.RuntimeBuildRecord{})
 }
 
 // TestSharedCaches_PartitionedPerInstanceAcrossScopes: two instances with

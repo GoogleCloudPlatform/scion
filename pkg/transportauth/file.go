@@ -22,7 +22,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
@@ -96,7 +95,7 @@ func ReadTransportTokenFile(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("transport token file %s: %w", path, err)
 	}
-	defer func() { _ = syscall.Close(dirFd) }()
+	defer func() { _ = dirfd.Close(dirFd) }()
 	data, err := dirfd.ReadAtNoFollow(dirFd, leaf, transportTokenFileMaxBytes)
 	if err != nil {
 		return "", fmt.Errorf("transport token file %s: %w", path, err)
@@ -180,6 +179,10 @@ type FileSource struct {
 	// lastGoodAt is when the read that produced fileToken started.
 	lastGoodAt time.Time
 	// fileExpiryParsed is true when fileExpiry was parsed from fileToken.
+	// fileExpiry and fileExpiryParsed are written together: fileExpiry is
+	// set to a non-zero value only with fileExpiryParsed true, and every
+	// other write sets them to zero and false. So while fileExpiryParsed is
+	// false, fileExpiry is zero.
 	fileExpiryParsed bool
 	// fileRetained is true while fileToken is kept from an earlier read
 	// because the file was being replaced.
@@ -412,6 +415,12 @@ func (s *FileSource) reloadLocked() {
 // may be kept at now: there is one, it was read at most keepMax ago, and its
 // expiry was parsed and has not passed. A value whose expiry could not be
 // parsed is never kept.
+//
+// The fileExpiryParsed check is defence in depth: while an unparsed expiry
+// is always zero (see fileExpiryParsed), now.Before(s.fileExpiry) is already
+// false without it. The "expiry not parsed" case of
+// TestFileSource_CanRetainLocked is the one test that covers the check on
+// its own, so keep it.
 func (s *FileSource) canRetainLocked(now time.Time) bool {
 	return s.fileToken != "" && !s.lastGoodAt.IsZero() &&
 		now.Sub(s.lastGoodAt) <= keepMax &&

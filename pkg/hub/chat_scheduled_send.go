@@ -414,7 +414,9 @@ func (s *Server) handleScheduledList(w http.ResponseWriter, r *http.Request, key
 		}
 		sms = s.scheduledMessageStore()
 	} else {
-		target, serr := s.authorizeChatSend(ctx, user, key)
+		// Listing reads the caller's own rows: read access to the thread
+		// is enough, so a sender who lost posting still sees its rows.
+		target, serr := s.authorizeChatSendRead(ctx, user, key)
 		if serr != nil {
 			serr.write(w)
 			return
@@ -1096,8 +1098,9 @@ func (s *Server) checkScheduledFire(ctx context.Context, m *ScheduledChatMessage
 }
 
 // checkScheduledTopicFire runs the topic checks of a claimed row: the
-// topic exists, and its current project exists and grants the sender read
-// access. done is false when every check passed.
+// topic exists, and its current project exists, grants the sender read
+// access and lets the sender's account post (chatMayPost). done is false
+// when every check passed.
 func (s *Server) checkScheduledTopicFire(ctx context.Context, user UserIdentity, m *ScheduledChatMessage) (scheduledFireCheck, bool) {
 	s.mu.RLock()
 	wcs := s.webChatStore
@@ -1120,6 +1123,9 @@ func (s *Server) checkScheduledTopicFire(ctx context.Context, user UserIdentity,
 		return scheduledFireCheck{transient: true}, true
 	}
 	if !s.authzService.CheckAccess(ctx, user, projectResource(project), ActionRead).Allowed {
+		return scheduledFireCheck{reason: ScheduledFailureNoAccess}, true
+	}
+	if !s.chatMayPost(ctx, user, project).Allowed {
 		return scheduledFireCheck{reason: ScheduledFailureNoAccess}, true
 	}
 	return scheduledFireCheck{}, false

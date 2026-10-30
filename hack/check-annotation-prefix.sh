@@ -88,7 +88,9 @@ allowed_paths=(
   # scion.io/project-members-group and the read-only legacy
   # scion.io/system-project-members-group, ptone/scion#2556) and the project
   # agents group marker scion.io/project-agents-group, so pkg/hub and
-  # pkg/store/entadapter import one definition. Also the existing
+  # pkg/store/entadapter import one definition. Also the project
+  # activeProfile annotation key scion.io/active-profile, for readers outside
+  # pkg/hub (the rebuild preflight; ptone/scion#5057). Also the existing
   # global-project label keys (scion.io/system, scion.io/global) used by the
   # Hub's embedded flat registration; cmd/server_broker.go still spells them
   # as literals.

@@ -75,6 +75,9 @@ func (f *fakeDispatchStore) CountBrokerDispatchHealth(_ context.Context, _, _ ti
 func (f *fakeDispatchStore) CountStuckPendingMessages(_ context.Context, _ time.Time) (int, error) {
 	return 0, nil
 }
+func (f *fakeDispatchStore) ListStuckPendingMessageIDs(_ context.Context, _ time.Time, _ int) ([]string, error) {
+	return nil, nil
+}
 func (f *fakeDispatchStore) ExpireStuckPendingMessages(_ context.Context, _ time.Time, _ string) (int, error) {
 	return 0, nil
 }

@@ -39,7 +39,7 @@ const (
 // look like a --hub or --project flag in the next.
 func resetContextTargets() {
 	hubEndpoint, projectPath = "", ""
-	hubSource, projectSource, contextProjectSlug, hubFlagName = "", "", "", ""
+	hubSource, projectSource, contextProjectSlug, hubFlagName, hubEntryName = "", "", "", "", ""
 	contextWarned = false
 }
 

@@ -129,3 +129,10 @@ func TestStartPoolSampler_ContextCancelStops(t *testing.T) {
 	}
 	cancel() // goroutine should observe ctx.Done and exit; no assertion beyond no-panic/no-leak
 }
+
+func TestPoolStatsFromCarriesWaitDuration(t *testing.T) {
+	got := poolStatsFrom(sql.DBStats{WaitCount: 3, WaitDuration: 2500 * time.Millisecond})
+	if got.WaitCount != 3 || got.WaitDuration != 2500*time.Millisecond {
+		t.Fatalf("poolStatsFrom = %+v", got)
+	}
+}

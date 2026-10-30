@@ -1158,8 +1158,8 @@ func (s *Server) revokeTestAdminIdentity(ctx context.Context, u *store.User, aud
 		return "deleted", nil
 	}
 	var lastOwnerErr *lastProjectOwnerDeleteError
-	var ownsAgentsErr *userOwnsAgentsDeleteError
-	if !errors.As(err, &lastOwnerErr) && !errors.As(err, &ownsAgentsErr) && !errors.Is(err, errUserRoleBindingsChanged) {
+	var blockedErr *userDeleteBlockedError
+	if !errors.As(err, &lastOwnerErr) && !errors.As(err, &blockedErr) && !errors.Is(err, errUserRoleBindingsChanged) {
 		return "", err
 	}
 	err = s.store.WithTx(ctx, func(tx store.Store) error {

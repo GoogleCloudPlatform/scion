@@ -149,7 +149,7 @@ You can also set `GITHUB_TOKEN` at the **user scope** if your token covers multi
 scion hub secret set GITHUB_TOKEN github_pat_xxxxxxxx
 ```
 
-Project-scoped secrets take priority over user-scoped ones (see [Secret Management](/scion/hosted/user/secrets/) for the full resolution hierarchy).
+User-scoped secrets take priority over project-scoped ones with the same name (see [Secret Management](/scion/hosted/user/secrets/) for the full resolution hierarchy).
 
 ### Web Dashboard Alternative
 

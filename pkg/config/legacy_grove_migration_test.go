@@ -3214,3 +3214,35 @@ func TestUnsetSetting_AliasFallbackKeepsKeyMigration(t *testing.T) {
 	assert.NotContains(t, got, "grove_id")
 	assert.Contains(t, got, "project_id: p-legacy")
 }
+
+// Legacy fixtures for the no-write switch tests (writes_on_read_test.go,
+// ptone/scion#5057): the legacy literals live in this allow-listed
+// compatibility test file.
+
+// legacyHubProjectIDYAMLForTest is a settings-file fragment holding the legacy
+// hub project ID key with value.
+func legacyHubProjectIDYAMLForTest(value string) string {
+	return "hub:\n  grove_id: \"" + value + "\"\n"
+}
+
+// legacyMarkerYAMLForTest is a .scion marker holding the legacy project keys.
+func legacyMarkerYAMLForTest(id, name, slug string) string {
+	return "grove-id: " + id + "\ngrove-name: " + name + "\ngrove-slug: " + slug + "\n"
+}
+
+// migrateLegacyHubProjectIDForTest runs the settings-file key migration of the
+// legacy hub project ID key on path.
+func migrateLegacyHubProjectIDForTest(path string, r Reporter) map[string]string {
+	return migrateLegacyYAMLKeys(path, hubGroveIDRename, r)
+}
+
+// writeLegacyGlobalLayoutForTest gives home a legacy global layout: a real
+// project directory and a leftover dangling back-link of an earlier
+// migration.
+func writeLegacyGlobalLayoutForTest(t *testing.T, home string) {
+	t.Helper()
+	writeFile(t, filepath.Join(home, "groves", "acme", "workspace.txt"), "hello")
+	if err := os.Symlink(filepath.Join("..", "projects", "gone"), filepath.Join(home, "groves", "gone")); err != nil {
+		t.Fatal(err)
+	}
+}

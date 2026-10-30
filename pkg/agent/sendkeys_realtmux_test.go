@@ -122,6 +122,7 @@ func TestRealTmuxSendKeys(t *testing.T) {
 			return []api.AgentInfo{{
 				ContainerID: "local",
 				Name:        "test-agent",
+				ProjectID:   "proj-1", // the project SendKeys is scoped to
 				Phase:       string(state.PhaseRunning),
 				Labels: map[string]string{
 					"scion.name": "test-agent",
@@ -322,6 +323,7 @@ func TestRealTmuxSendKeys_NoSessionIsTerminalNotReady(t *testing.T) {
 			return []api.AgentInfo{{
 				ContainerID: "local",
 				Name:        "test-agent",
+				ProjectID:   "proj-1", // the project SendKeys is scoped to
 				Phase:       string(state.PhaseRunning),
 				Labels: map[string]string{
 					"scion.name": "test-agent",
@@ -405,6 +407,7 @@ func TestRealTmuxSendKeys_DeliveryFailureAfterProbeIsAmbiguous(t *testing.T) {
 			return []api.AgentInfo{{
 				ContainerID: "local",
 				Name:        "test-agent",
+				ProjectID:   "proj-1", // the project SendKeys is scoped to
 				Phase:       string(state.PhaseRunning),
 				Labels: map[string]string{
 					"scion.name": "test-agent",

@@ -25,6 +25,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -194,7 +195,7 @@ func newTestServerWithProjectPath(t *testing.T, settingsYAML string) (*Server, *
 		}
 	}
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.Debug = true
@@ -205,7 +206,7 @@ func newTestServerWithProjectPath(t *testing.T, settingsYAML string) (*Server, *
 	// NameFunc returns "docker" so resolveManagerForOpts matches the settings-resolved runtime.
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 
-	return New(cfg, mgr, rt), mgr, projectDir
+	return New(cfg, mgr, rt, config.RuntimeBuildRecord{}), mgr, projectDir
 }
 
 // TestEnvGather_AllSatisfied tests the fast path: all required env keys are provided
@@ -444,7 +445,7 @@ profiles:
 
 func TestCreateAgent_IdempotentByRequestID(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.Debug = true
@@ -485,7 +486,7 @@ runtimes:
 	}
 
 	mgr := &envCapturingManager{}
-	srv := New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "mock" }})
+	srv := New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "mock" }}, config.RuntimeBuildRecord{})
 
 	body := fmt.Sprintf(`{
 		"requestId": "req-idempotent-1",
@@ -546,7 +547,7 @@ func newTestServerWithHarnessConfig(t *testing.T, harnessConfigName, configYAML,
 		}
 	}
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.Debug = true
@@ -557,7 +558,7 @@ func newTestServerWithHarnessConfig(t *testing.T, harnessConfigName, configYAML,
 	// NameFunc returns "docker" so resolveManagerForOpts matches the settings-resolved runtime.
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 
-	return New(cfg, mgr, rt), mgr, projectDir
+	return New(cfg, mgr, rt, config.RuntimeBuildRecord{}), mgr, projectDir
 }
 
 // unsetHostGCPEnv temporarily removes the broker process's own GCP env vars
@@ -2019,7 +2020,7 @@ profiles:
 	t.Setenv("HOME", fakeHome)
 	defer func() { _ = os.Setenv("HOME", origHome) }()
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.Debug = true
@@ -2027,7 +2028,7 @@ profiles:
 	mgr := &envCapturingManager{}
 	// NameFunc returns "docker" so resolveManagerForOpts matches the settings-resolved runtime.
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	// Send create request with NO projectPath — simulates a hub-only git project
 	body := `{

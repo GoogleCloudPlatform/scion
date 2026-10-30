@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
@@ -99,7 +100,7 @@ func TestProberAsAuxiliaryRuntime_DeleteFailsClosed(t *testing.T) {
 	}
 	mgr := agent.NewManager(rt)
 	t.Cleanup(mgr.Close)
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 	addAuxRuntime(t, srv, "substrate", &proberMockRuntime{
 		MockRuntime: &runtime.MockRuntime{
 			NameFunc: func() string { return "substrate" },

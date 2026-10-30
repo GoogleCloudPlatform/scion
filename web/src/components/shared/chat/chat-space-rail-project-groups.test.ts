@@ -16,20 +16,19 @@
 
 /**
  * Tests for project thread groups in the space rail (ptone/scion#4424,
- * design section 5 and section 8 phase 4), behind the
- * `hub.chat_thread_groups` experiment.
+ * design section 5 and section 8 phase 4). They are always on
+ * (ptone/scion#5546).
  *
  * A small in-memory hub answers the rail's requests: the spaces and thread
  * lists, per-user preferences, and the `/api/v1/thread-groups` resource
  * (list, create, rename, delete, add and remove a thread). Each phase 4
  * acceptance item has its own test:
- *   - flag off: the rail uses personal groups and never calls the new API;
- *   - flag on: a group created by another user or an agent shows without a
- *     reload (the `chat.thread_group` event);
+ *   - a group created by another user or an agent shows without a reload
+ *     (the `chat.thread_group` event);
  *   - drag-into-group, rename and delete persist on the hub;
  *   - one user's reorder does not change another user's order;
  *   - migrated groups keep their top-level positions (5a rule 6);
- *   - turning the flag off restores the personal groups.
+ *   - the older personal groups are hidden and never changed.
  */
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
@@ -48,7 +47,6 @@ vi.mock('../../../utils/toast.js', () => ({ showToast: vi.fn() }));
 const apiFetchMock = vi.mocked(apiFetch);
 const showToastMock = vi.mocked(showToast);
 
-const FLAG_KEY = 'scion:feature:hub.chat_thread_groups';
 const P = 'p-a';
 
 interface HubThread {
@@ -341,41 +339,7 @@ afterEach(() => {
   localStorage.clear();
 });
 
-describe('project thread groups — flag off', () => {
-  it('keeps personal groups and never calls the thread-groups API', async () => {
-    hub.prefs['user-a'] = personalPrefs({
-      [P]: [{ id: 'g-personal', name: 'Mine', threadIds: ['t1'] }],
-    });
-    hub.groups = [hubGroup('srv-x', 'Shared', ['t2'])];
-
-    const el = await mountAs('user-a');
-
-    expect(renderedGroupNames(el)).toEqual(['Mine']);
-    expect(groupsOf(el)).toEqual({ Mine: ['t1'] });
-
-    // Edits still go to the personal document.
-    await el.moveThreadToGroup('t3', 'g-personal', P);
-    await el.renameGroup('g-personal', 'Mine 2', P);
-    expect(threadGroupRequests()).toEqual([]);
-    const lastPut = prefsPuts().at(-1)!;
-    expect(JSON.parse(lastPut.threadGroups)).toEqual({
-      [P]: [{ id: 'g-personal', name: 'Mine 2', threadIds: ['t1', 't3'] }],
-    });
-  });
-
-  it('ignores chat.thread_group events', async () => {
-    const el = await mountAs('user-a');
-    el.applyThreadGroupEvent(P, 'created', wire(hubGroup('srv-1', 'Shared', ['t1'])));
-    await el.updateComplete;
-    expect(renderedGroupNames(el)).toEqual([]);
-  });
-});
-
-describe('project thread groups — flag on', () => {
-  beforeEach(() => {
-    localStorage.setItem(FLAG_KEY, 'true');
-  });
-
+describe('project thread groups', () => {
   it('loads the project groups with the space and hides personal groups', async () => {
     const personal = { [P]: [{ id: 'g-personal', name: 'Mine', threadIds: ['t1'] }] };
     hub.prefs['user-a'] = personalPrefs(personal);
@@ -628,7 +592,7 @@ describe('project thread groups — flag on', () => {
 
     expect(topLevel(el)).toEqual(['t3', '[Release]', 't1', 't4']);
 
-    // A flag-on reorder keeps the hidden personal ID where it was.
+    // A reorder keeps the hidden personal ID where it was.
     el.draggingThreadId = 't4';
     await el.handleThreadDrop({ preventDefault: vi.fn() }, 't3', P);
     await settle(el);
@@ -637,7 +601,7 @@ describe('project thread groups — flag on', () => {
     expect(order).toEqual(['t4', 't3', 'g-personal', 'srv-1', 't2', 't1']);
   });
 
-  it('turning the flag off restores the personal groups exactly', async () => {
+  it('edits and reorders never change the personal groups document', async () => {
     const personal = { [P]: [{ id: 'g-personal', name: 'Mine', threadIds: ['t1', 't4'] }] };
     const personalDoc = JSON.stringify(personal);
     hub.prefs['user-a'] = {
@@ -648,35 +612,12 @@ describe('project thread groups — flag on', () => {
     const el = await mountAs('user-a');
     expect(renderedGroupNames(el)).toEqual(['Shared']);
 
-    // Flag-on edits and reorders never touch the personal document.
     await el.moveThreadToGroup('t1', 'srv-1', P);
     await el.moveThread('t3', P, 1);
     await settle(el);
     expect(prefsPuts().length).toBeGreaterThan(0);
     for (const put of prefsPuts()) expect(put.threadGroups).toBe(personalDoc);
-
-    localStorage.setItem(FLAG_KEY, 'false');
-    el.requestUpdate();
-    await settle(el);
-
-    expect(renderedGroupNames(el)).toEqual(['Mine']);
-    expect(groupsOf(el)).toEqual({ Mine: ['t1', 't4'] });
     expect(el.prefs.threadGroups).toEqual(personal);
-    // The personal group is back at its own position.
-    expect(topLevel(el)[0]).toBe('[Mine]');
-  });
-
-  it('loads the groups once the flag turns on after the threads loaded', async () => {
-    localStorage.setItem(FLAG_KEY, 'false');
-    hub.groups = [hubGroup('srv-1', 'Shared', ['t1'])];
-    const el = await mountAs('user-a');
-    expect(threadGroupRequests()).toEqual([]);
-
-    localStorage.setItem(FLAG_KEY, 'true');
-    el.requestUpdate();
-    await settle(el);
-
-    expect(threadGroupRequests()).toEqual([`GET /api/v1/thread-groups?projectId=${P}`]);
     expect(renderedGroupNames(el)).toEqual(['Shared']);
   });
 

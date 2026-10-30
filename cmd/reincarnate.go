@@ -20,10 +20,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"os"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 
@@ -41,8 +39,6 @@ var (
 	reincarnateHandoffTemplate bool
 	reincarnateBroker          string
 	reincarnateForce           bool
-	reincarnateSharedDirs      []string
-	reincarnateAllowEmptySD    bool
 
 	// Patch flags (ptone/scion#3302).
 	reincarnateServiceAccount string
@@ -182,30 +178,7 @@ failing check (a broker you cannot see is reported as not found). Add
 project yet needs project update, plus broker read and dispatch unless the
 broker auto-provides; an agent can move itself only to a broker that
 already serves its project. Patch flags combine with --broker. See "Moving
-an Agent to Another Runtime Broker" in the multi-broker docs.
-
-Use --shared-dir-backend NAME=nfs to move a shared dir's recorded storage
-backend from local to nfs, and --shared-dir-backend NAME=local to move it
-back. Only this agent's record changes, while the directory belongs to the
-project: stop every agent that uses it, copy the directory's contents to
-the new backend keeping ownership, modes, the setgid bit and ACLs (for
-example rsync -aAX LOCAL/ NFS/, or NFS/ LOCAL/ to go back, then check the
-copy with getfacl), then reincarnate each of those agents with the flag.
-Neither directory is ever moved or deleted. The start refuses an empty
-directory on the new backend while the previous one is not empty. On
-Kubernetes a change to nfs is refused whenever the nfs directory is empty,
-and a change back to local whose nfs directory is not empty is refused
-when the shared dir's own volume claim does not exist (an existing claim's
-content is not checked). To start anyway, reincarnate with
---allow-empty-shared-dir. Otherwise, after a refused start, copy the data
-and run scion start again rather than reincarnating again. The shared dir
-flags cannot be combined with a move to another broker.
-
-The broker checks the change (the dir is one of the agent's shared dirs,
-for nfs the nfs settings are complete, the broker supports it) after the
-hub has stopped the agent. If the broker refuses, the reincarnation fails
-and the agent stays stopped with its record unchanged. --dry-run does not
-run these broker checks.`,
+an Agent to Another Runtime Broker" in the multi-broker docs.`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if len(args) > 1 {
 			return fmt.Errorf("accepts at most 1 argument (agent name)")
@@ -280,14 +253,6 @@ func resolveReincarnateTarget(args []string, selfName string, hasHandoffFile, dr
 }
 
 func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSelf bool) error {
-	// The shared dir flags are checked before any agent request.
-	sharedDirBackends, err := parseSharedDirBackendFlags(reincarnateSharedDirs, reincarnateAllowEmptySD)
-	if err != nil {
-		return err
-	}
-	if isSelf && len(sharedDirBackends) > 0 {
-		return fmt.Errorf("an agent cannot change its own shared dir backend; ask a user or another agent to run scion reincarnate --shared-dir-backend")
-	}
 	PrintUsingHub(hubCtx.Endpoint)
 
 	projectID, err := GetProjectID(hubCtx)
@@ -301,28 +266,23 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 	agentSvc := hubCtx.Client.ProjectAgents(projectID)
 
 	req := &hubclient.ReincarnateAgentRequest{
-		Handoff:             handoff,
-		DryRun:              reincarnateDryRun,
-		TargetBroker:        reincarnateBroker,
-		ForceMove:           reincarnateForce,
-		SharedDirBackends:   sharedDirBackends,
-		AllowEmptySharedDir: reincarnateAllowEmptySD,
+		Handoff:      handoff,
+		DryRun:       reincarnateDryRun,
+		TargetBroker: reincarnateBroker,
+		ForceMove:    reincarnateForce,
 	}
 	applyReincarnatePatchFlags(req)
 	wantPatched := requestedPatchFields(req)
 
-	// A real patched, --broker or shared dir request is preceded by a dry
-	// run of the same request (patch, target broker and shared dir change
-	// included). A hub that predates the patch fields ignores
-	// serviceAccount, role and thinkingLevel and would run an unpatched
-	// reincarnation; one that predates sharedDirBackends ignores those too;
-	// a hub that does not know --broker would ignore it and run a real
-	// in-place reincarnation. So the dry run must show the patch and the
-	// shared dir change applied, and for --broker come back as a move (a
-	// target broker, and a verdict when the target is another broker); a
-	// refused move prints its verdict.
-	wantSharedDirs := len(req.SharedDirBackends) > 0
-	if !reincarnateDryRun && (len(wantPatched) > 0 || reincarnateBroker != "" || wantSharedDirs) {
+	// A real patched or --broker request is preceded by a dry run of the
+	// same request (patch and target broker included). A hub that predates
+	// the patch fields ignores serviceAccount, role and thinkingLevel and
+	// would run an unpatched reincarnation; a hub that does not know
+	// --broker would ignore it and run a real in-place reincarnation. So
+	// the dry run must show the patch applied, and for --broker come back
+	// as a move (a target broker, and a verdict when the target is another
+	// broker); a refused move prints its verdict.
+	if !reincarnateDryRun && (len(wantPatched) > 0 || reincarnateBroker != "") {
 		probe := *req
 		probe.DryRun = true
 		if reincarnateBroker != "" {
@@ -332,8 +292,10 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 		if err != nil {
 			if v := moveVerdictFromError(err); v != nil && !isJSONOutput() {
 				printMoveVerdict(os.Stderr, v)
-				printMoveForceHint(os.Stderr, err, reincarnateForce)
 			}
+			// On stderr in both output modes: an agent moving itself
+			// usually runs with --json, and it must amend the handoff.
+			printMoveForceHint(os.Stderr, err, reincarnateForce)
 			if perr := patchNeedsUpdateError(err, wantPatched, hubCtx.CredentialKind); perr != nil {
 				return wrapHubError(perr)
 			}
@@ -343,9 +305,6 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 			return wrapHubError(fmt.Errorf("failed to reincarnate agent via Hub: %w", err))
 		}
 		if err := checkHubAppliedPatch(wantPatched, probeResp); err != nil {
-			return err
-		}
-		if err := checkHubAppliedSharedDirs(req, probeResp); err != nil {
 			return err
 		}
 		if err := checkMoveHandshakeResponse(reincarnateBroker, probeResp); err != nil {
@@ -368,8 +327,8 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 	if err != nil {
 		if v := moveVerdictFromError(err); v != nil && !isJSONOutput() {
 			printMoveVerdict(os.Stderr, v)
-			printMoveForceHint(os.Stderr, err, reincarnateForce)
 		}
+		printMoveForceHint(os.Stderr, err, reincarnateForce)
 		if apiclient.IsConflictError(err) && moveVerdictFromError(err) == nil {
 			return wrapHubError(fmt.Errorf("a reincarnation is already pending for '%s': %w", agentName, err))
 		}
@@ -398,14 +357,6 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 		}
 		return err
 	}
-	if err := checkHubAppliedSharedDirs(req, resp); err != nil {
-		if !reincarnateDryRun {
-			// As above: the probe passed, but the hub that accepted the
-			// real request ignored the shared dir change.
-			return fmt.Errorf("the reincarnation of '%s' started without the shared dir backend change: the hub that accepted it does not support --shared-dir-backend; upgrade the hub, then reincarnate again with the flag", agentName)
-		}
-		return err
-	}
 
 	if isJSONOutput() {
 		return outputJSON(resp)
@@ -429,36 +380,6 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 		fmt.Println("This container will be stopped shortly as part of the migration.")
 	}
 	return nil
-}
-
-// parseSharedDirBackendFlags parses repeated --shared-dir-backend
-// NAME=BACKEND values into a map. The backend is nfs or local, a name may
-// appear once, and --allow-empty-shared-dir needs at least one value.
-func parseSharedDirBackendFlags(values []string, allowEmpty bool) (map[string]string, error) {
-	if len(values) == 0 {
-		if allowEmpty {
-			return nil, fmt.Errorf("--allow-empty-shared-dir needs --shared-dir-backend NAME=nfs or NAME=local")
-		}
-		return nil, nil
-	}
-	out := make(map[string]string, len(values))
-	for _, v := range values {
-		name, backend, ok := strings.Cut(v, "=")
-		if !ok || name == "" {
-			return nil, fmt.Errorf("--shared-dir-backend %q: want NAME=nfs or NAME=local", v)
-		}
-		if err := api.ValidateSharedDirs([]api.SharedDir{{Name: name}}); err != nil {
-			return nil, fmt.Errorf("--shared-dir-backend %q: invalid shared dir name %q", v, name)
-		}
-		if backend != "nfs" && backend != "local" {
-			return nil, fmt.Errorf("--shared-dir-backend %q: the backend must be nfs or local", v)
-		}
-		if _, dup := out[name]; dup {
-			return nil, fmt.Errorf("--shared-dir-backend: shared dir %q given more than once", name)
-		}
-		out[name] = backend
-	}
-	return out, nil
 }
 
 // validateReincarnatePatchFlags checks the patch flag values locally, with
@@ -567,21 +488,6 @@ func checkHubAppliedPatch(want []string, resp *hubclient.ReincarnateAgentRespons
 	return nil
 }
 
-// checkHubAppliedSharedDirs reports an error when req asks for a shared dir
-// backend change and resp's plan does not echo it exactly. A hub that
-// predates the change ignores the request fields and plans a plain
-// reincarnation.
-func checkHubAppliedSharedDirs(req *hubclient.ReincarnateAgentRequest, resp *hubclient.ReincarnateAgentResponse) error {
-	if len(req.SharedDirBackends) == 0 {
-		return nil
-	}
-	if resp == nil || !maps.Equal(resp.Plan.SharedDirBackends, req.SharedDirBackends) ||
-		resp.Plan.AllowEmptySharedDir != req.AllowEmptySharedDir {
-		return fmt.Errorf("this hub does not support --shared-dir-backend; upgrade the hub")
-	}
-	return nil
-}
-
 // checkMoveHandshakeResponse checks the dry run that precedes a real
 // --broker request: the hub must support --broker (a target broker in the
 // answer, and a verdict for a target other than the agent's current
@@ -631,9 +537,12 @@ const (
 	moveTransferModeRecreate      = "recreate"
 )
 
-// moveForceHint is printed under a refused move's verdict when --force would
-// recreate the agent on the target instead.
-const moveForceHint = "--force recreates the agent on the target instead, giving up its local state (see --dry-run --force)."
+// moveForceHint is the warning printed, on stderr in both human and --json
+// output, when a move refused without --force could be made with it: a
+// forced move keeps only what the handoff carries, so the caller (often the
+// agent itself) can put what matters into the handoff before re-running.
+const moveForceHint = "A forced move does not preserve this agent's home or workspace: it restarts on the target with a fresh home and the target's workspace. " +
+	"Put anything worth keeping into the handoff, then re-run with --force (preview with --dry-run --force)."
 
 // printMoveForceHint prints moveForceHint when a move refused without
 // --force carries forceWouldApply in its error details: the hub decides
@@ -780,20 +689,6 @@ func printReincarnationPlan(plan hubclient.ReincarnationPlan) {
 	printPatch("Thinking", plan.ThinkingLevel)
 	printPatch("Harness auth", plan.HarnessAuth)
 	fmt.Printf("  %-14s %s\n", "Branch:", valueOrNone(plan.Branch))
-	if len(plan.SharedDirBackends) > 0 {
-		names := make([]string, 0, len(plan.SharedDirBackends))
-		for name := range plan.SharedDirBackends {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		for _, name := range names {
-			line := fmt.Sprintf("  Shared dir:    %s -> %s (record only; copy the data yourself)", name, plan.SharedDirBackends[name])
-			if plan.AllowEmptySharedDir {
-				line += fmt.Sprintf(", empty %s directory allowed", plan.SharedDirBackends[name])
-			}
-			fmt.Println(line)
-		}
-	}
 
 	if len(plan.EnvKeys.Added) > 0 {
 		fmt.Printf("  Env added:     %s\n", strings.Join(plan.EnvKeys.Added, ", "))
@@ -827,8 +722,6 @@ func init() {
 	reincarnateCmd.Flags().StringVar(&reincarnateBroker, "broker", "", "Move the agent to this runtime broker (name or ID); both brokers must mount the same NFS export. The move is dry-run first and refused if not eligible")
 	reincarnateCmd.Flags().BoolVar(&reincarnateForce, "force", false, "With --broker, move even when the workspace cannot travel through a shared NFS export: the workspace is recreated on the target and uncommitted or unpushed work, the home and the harness session are lost. Run with --dry-run first to see exactly what is kept and lost")
 	reincarnateCmd.Flags().BoolVar(&reincarnateHandoffTemplate, "handoff-template", false, "Print the handoff template and exit")
-	reincarnateCmd.Flags().StringArrayVar(&reincarnateSharedDirs, "shared-dir-backend", nil, "Change a shared dir's recorded storage backend, as NAME=nfs or NAME=local (repeatable). Only the record changes; copy the data to the new backend first")
-	reincarnateCmd.Flags().BoolVar(&reincarnateAllowEmptySD, "allow-empty-shared-dir", false, "With --shared-dir-backend, start even if the directory on the new backend is empty while the previous one is not")
 	reincarnateCmd.Flags().StringVar(&reincarnateServiceAccount, "service-account", "", "GCP service account for the new generation: its id, email or display name (same access checks as create)")
 	reincarnateCmd.Flags().StringVar(&reincarnateRole, "role", "", "Agent role for the new generation: none, readonly, baseline, full (same access checks as create)")
 	reincarnateCmd.Flags().StringVar(&reincarnateModel, "model", "", "Model for the new generation (aliases accepted)")

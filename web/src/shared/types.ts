@@ -83,7 +83,8 @@ export interface AdminUser {
   displayName: string;
   avatarUrl?: string;
   role: UserRole;
-  status: 'active' | 'suspended' | 'invited';
+  /** deleting: a forced deletion of the user is in progress. */
+  status: 'active' | 'suspended' | 'invited' | 'deleting';
   created: string;
   lastLogin?: string;
   lastSeen?: string;
@@ -144,6 +145,11 @@ export interface PageData {
   data?: Record<string, unknown> | undefined;
   /** Hub profiling readiness_marks setting; present (true) only when on, for a signed-in user */
   readinessMarks?: boolean | undefined;
+  /**
+   * The `experiments` map of GET /api/v1/experiments, as the hub answered
+   * the session user (ptone/scion#2489); present only for a signed-in shell
+   */
+  experiments?: Record<string, boolean> | undefined;
 }
 
 /**
@@ -832,6 +838,10 @@ export interface AgentAppliedConfig {
   harnessConfigId?: string;
   harnessConfigHash?: string;
   harnessConfigSource?: string;
+  /** The harness type the hub resolved at create; absent on older agents. */
+  harness?: string;
+  /** The model size alias the agent was created with; absent for an explicit model ID or no model. */
+  modelSize?: AgentModelSize;
   creatorName?: string;
   hubAccessScopes?: string[];
   agentRole?: string;
@@ -875,6 +885,20 @@ export interface AgentFieldEditState {
   reason?: string;
 }
 
+/**
+ * Edits the hub holds for an agent until a start or a reincarnation applies
+ * them. Provisional, from the ptone/scion#3976 issue text, which owns the
+ * final shape: the raw present-key PATCH object (a null means
+ * clear at apply) with who saved it and when.
+ */
+export interface AgentPendingConfig {
+  config?: Record<string, unknown>;
+  agentRole?: string;
+  gcp_identity?: unknown;
+  savedBy?: string;
+  savedAt?: string;
+}
+
 /** Per-field editability of an agent for the caller (GET /api/v1/agents/{id}). */
 export interface AgentEditability {
   phase: string;
@@ -901,6 +925,9 @@ export interface AgentUpdateDisposition {
   /** Keys stored now that take effect only at the next reincarnation. */
   heldForReincarnate: string[];
 }
+
+/** A model size alias (pkg/config KnownModelAliases). */
+export type AgentModelSize = 'small' | 'medium' | 'large' | 'extra-large';
 
 /**
  * Agent information from the Hub API
@@ -932,6 +959,21 @@ export interface Agent {
   harnessAuth?: string;
   resolvedHarness?: string;
   harnessCapabilities?: HarnessAdvancedCapabilities;
+  /**
+   * The harness vendor (pkg/harness Vendor): the model vendor of a
+   * single-vendor harness ("anthropic", "google", "openai", "xai", "meta"),
+   * the harness name of a multi-vendor one ("opencode", "copilot",
+   * "hermes"). Absent for a custom or unresolved harness. Set on list
+   * items (full and compact), the single-agent GET and SSE created/status
+   * events.
+   */
+  harnessVendor?: string;
+  /**
+   * The model size alias the agent was created with; absent when it has
+   * none. An SSE status event sends '' to clear it, so a merged row can
+   * hold ''. Test for truthiness, not presence.
+   */
+  modelSize?: AgentModelSize | '';
   runtimeBrokerId?: string;
   runtimeBrokerName?: string;
   /**
@@ -990,6 +1032,9 @@ export interface Agent {
 
   // Per-field editability for the caller; set on the single-agent GET only.
   editability?: AgentEditability;
+  // Edits the hub holds for the agent; absent until the hub stores held
+  // edits. Provisional: ptone/scion#3976 owns the final shape.
+  pendingConfig?: AgentPendingConfig | null;
   // Optimistic-concurrency version; send it back with a PATCH.
   stateVersion?: number;
 }
@@ -1192,6 +1237,11 @@ export interface SharedDir {
   name: string;
   read_only?: boolean;
   in_workspace?: boolean;
+  /**
+   * Container path agents mount the dir at, computed by the hub's layout
+   * authority. Present in GET /projects/{id}/shared-dirs responses only.
+   */
+  target?: string;
 }
 
 export type BrokerStatus = 'online' | 'offline' | 'degraded';
@@ -1252,6 +1302,33 @@ export interface PresentedTarget {
   sharedDirStorageBackend?: string;
   sharedDirStorageBackends?: Record<string, string>;
   homeStorageBackend?: string;
+  /**
+   * Kubernetes placement defaults (ptone/scion#5085). Optional: a Hub that
+   * does not publish them sends none, and the card then shows no
+   * Placement group.
+   */
+  nodeSelector?: Record<string, string>;
+  tolerations?: PresentedToleration[];
+  runtimeClassName?: string;
+  /**
+   * True only when the instance reports placement. Absent or false means
+   * "not reported" (an older instance), not "no placement".
+   */
+  placementReported?: boolean;
+}
+
+/**
+ * One Kubernetes toleration as presented. Only these four fields are ever
+ * rendered; any other key on the object is ignored.
+ */
+export interface PresentedToleration {
+  key?: string;
+  /** "Equal" or "Exists"; empty means Equal. */
+  operator?: string;
+  /** Empty for Exists. */
+  value?: string;
+  /** NoSchedule, PreferNoSchedule, NoExecute, or empty for any effect. */
+  effect?: string;
 }
 
 /** Resource quantities as the Hub sends them (Go `api.ResourceSpec`). */
@@ -1323,6 +1400,18 @@ export interface RuntimeBroker {
   runtimeTargetPresentation?: RuntimeTargetPresentation;
   /** When the Hub last saw runtimeTargetPresentation ("as reported at"). */
   runtimeTargetPresentationObservedAt?: string;
+  /**
+   * True when the broker runs in the process that answered the request
+   * (this server's co-located broker or one of its flat instances).
+   * Read-only and display-only; absent otherwise.
+   */
+  hostedByThisServer?: boolean;
+  /**
+   * The broker's version against the fleet hub version, compared by the
+   * hub: match, mismatch or unknown. Absent for a plugin record or from an
+   * older hub (shown as unknown).
+   */
+  versionStatus?: 'match' | 'mismatch' | 'unknown';
   autoProvide: boolean;
   endpoint?: string;
   labels?: Record<string, string>;
@@ -1330,6 +1419,8 @@ export interface RuntimeBroker {
   createdByName?: string;
   /** Configured GCP host service account (Go JSON tag is snake_case). */
   gcp_host_service_account_email?: string;
+  /** Configured GCP host project (read in snake_case; PATCH takes camelCase). */
+  gcp_host_project_id?: string;
   /** Creation and last-update times, as the hub sends them. */
   created?: string;
   updated?: string;
@@ -1379,6 +1470,41 @@ export interface RuntimeBroker {
    * for callers allowed to update the broker.
    */
   hostIdentity?: BrokerHostIdentity;
+  /**
+   * Where the broker places project storage, as it last reported it.
+   * Mirrors Go api.BrokerWorkspaceStorage (pkg/api/workspace_storage.go).
+   * Absent when the broker never reported it (an older broker).
+   */
+  workspaceStorage?: BrokerWorkspaceStorage;
+}
+
+/** Mirrors Go api.BrokerWorkspaceStorage (pkg/api/workspace_storage.go). */
+export interface BrokerWorkspaceStorage {
+  /** local, nfs, cloudrun-volume or gke-shared-volume. */
+  backend: string;
+  /** Set only for the nfs backend with a valid share. */
+  nfs?: BrokerNFSWorkspaceStorage;
+  /** Set only for the volume backends. */
+  volume?: BrokerVolumeWorkspaceStorage;
+  /** Where shared dirs are placed when that differs from backend; empty means with the workspace. */
+  sharedDirs?: string;
+  /** Where agent homes are placed: local or nfs; empty when the broker predates the field. */
+  homes?: string;
+}
+
+/** Mirrors Go api.BrokerNFSWorkspaceStorage. */
+export interface BrokerNFSWorkspaceStorage {
+  server: string;
+  export: string;
+  subPathRoot: string;
+  healthy: boolean;
+  exportId?: string;
+}
+
+/** Mirrors Go api.BrokerVolumeWorkspaceStorage. */
+export interface BrokerVolumeWorkspaceStorage {
+  claimName?: string;
+  subPathRoot: string;
 }
 
 /** Mirrors Go store.HostIdentityStatus (pkg/store/models.go). */
@@ -1510,6 +1636,14 @@ export interface Message {
   senderProjectId?: string;
   /** Server-derived recipient project ID for cross-project provenance. */
   recipientProjectId?: string;
+  /**
+   * The user who authorized a message sent with an agent delegated
+   * credential (.design/agent-delegation.md §14.5). The sender is still the
+   * agent. Absent on every other message.
+   */
+  authorizingUserId?: string;
+  /** The delegation grant of a message sent with an agent delegated credential. */
+  delegationGrantId?: string;
 }
 
 // ---------------------------------------------------------------------------

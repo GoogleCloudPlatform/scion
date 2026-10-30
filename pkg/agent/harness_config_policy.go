@@ -21,8 +21,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentplugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -160,6 +162,37 @@ func copyPluginsTree(srcDir, srcRel, dstDir, dstRel string) error {
 }
 
 func copyPluginsTreeWithLimits(srcDir, srcRel, dstDir, dstRel string, lim agentplugin.Limits) error {
+	var dstRoot *os.Root
+	defer func() {
+		if dstRoot != nil {
+			_ = dstRoot.Close()
+		}
+	}()
+	reset := func() error {
+		var err error
+		if dstRoot, err = os.OpenRoot(dstDir); err != nil {
+			return err
+		}
+		if err := dstRoot.RemoveAll(dstRel); err != nil {
+			return err
+		}
+		return dstRoot.MkdirAll(dstRel, 0o755)
+	}
+	install := func(srcRoot *os.Root, srcPlugin, name string) error {
+		_, err := agentplugin.CopyTree(srcRoot, srcPlugin, dstRoot, filepath.Join(dstRel, name), lim)
+		return err
+	}
+	return walkPluginsTree(srcDir, srcRel, reset, install)
+}
+
+// walkPluginsTree is the plugin-directory walk shared by both directions of
+// the Agent Plugins tree copy (snapshot: home to record, copyPluginsTree;
+// restore: record to home, restorePluginsTree). A missing source, or one
+// that is not a real directory, copies nothing. Otherwise reset prepares
+// the destination, and install copies each entry of srcRel that is a real
+// directory with a valid plugin name (srcPlugin is its path in srcRoot),
+// in name order; an install error names the plugin.
+func walkPluginsTree(srcDir, srcRel string, reset func() error, install func(srcRoot *os.Root, srcPlugin, name string) error) error {
 	srcRoot, err := os.OpenRoot(srcDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -172,15 +205,7 @@ func copyPluginsTreeWithLimits(srcDir, srcRel, dstDir, dstRel string, lim agentp
 	if ok, err := realDirChain(srcRoot, srcRel, true); err != nil || !ok {
 		return err
 	}
-	dstRoot, err := os.OpenRoot(dstDir)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = dstRoot.Close() }()
-	if err := dstRoot.RemoveAll(dstRel); err != nil {
-		return err
-	}
-	if err := dstRoot.MkdirAll(dstRel, 0o755); err != nil {
+	if err := reset(); err != nil {
 		return err
 	}
 	entries, err := readRootDir(srcRoot, srcRel)
@@ -199,7 +224,7 @@ func copyPluginsTreeWithLimits(srcDir, srcRel, dstDir, dstRel string, lim agentp
 		if !fi.IsDir() {
 			continue
 		}
-		if _, err := agentplugin.CopyTree(srcRoot, filepath.Join(srcRel, name), dstRoot, filepath.Join(dstRel, name), lim); err != nil {
+		if err := install(srcRoot, filepath.Join(srcRel, name), name); err != nil {
 			return fmt.Errorf("copy agent plugin %q: %w", name, err)
 		}
 	}
@@ -298,28 +323,104 @@ func resetControlPlaneInputsRecord(agentDir string) error {
 // recorded Agent Plugins tree inputs/plugins/. Without it plugins.json is
 // removed too, so the container sees no desired plugins and provision.py
 // removes the plugins Scion installed earlier.
+//
+// Every removal and write is confined to the agent home (pkg/agenthome),
+// through one handle opened on the home: inputs/ is cleared without
+// following a link, files are installed by a temporary file renamed over
+// the leaf (a link there is replaced, never written through), and a linked
+// directory component is refused.
 func restoreControlPlaneInputs(agentDir, agentHome string, includePlugins bool) error {
-	dst := stagedInputsDir(agentHome)
-	if err := os.RemoveAll(dst); err != nil {
+	home, err := agenthome.OpenCreate(agentHome, 0o755)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = home.Close() }()
+	if err := home.RemoveAll(agentplugin.InputsRel); err != nil {
 		return fmt.Errorf("clear staged inputs: %w", err)
+	}
+	if restoreInputsTestHook != nil {
+		restoreInputsTestHook("cleared")
 	}
 	src := filepath.Join(agentDir, controlPlaneInputsDirName)
 	if _, err := os.Stat(src); os.IsNotExist(err) {
 		return nil
 	}
-	if err := copyRegularFiles(src, dst); err != nil {
+	if err := copyRegularFilesToHome(src, home, agentplugin.InputsRel); err != nil {
 		return err
 	}
+	if restoreInputsTestHook != nil {
+		restoreInputsTestHook("files")
+	}
 	if !includePlugins {
-		if err := os.Remove(filepath.Join(dst, agentplugin.IndexFileName)); err != nil && !os.IsNotExist(err) {
+		return home.Remove(path.Join(agentplugin.InputsRel, agentplugin.IndexFileName))
+	}
+	return restorePluginsTree(src, agentplugin.PluginsDirName, home, path.Join(agentplugin.InputsRel, agentplugin.PluginsDirName))
+}
+
+// restoreInputsTestHook, when non-nil, is called by
+// restoreControlPlaneInputs after inputs/ is cleared ("cleared") and after
+// the top-level files are restored ("files"), so a test can change the home
+// between those operations. Always nil in production.
+var restoreInputsTestHook func(stage string)
+
+// copyRegularFilesToHome copies the regular files directly in src (a
+// control-plane record) into dstRel in the agent home (created 0755),
+// confined to the home. A missing src copies nothing.
+func copyRegularFilesToHome(src string, home *agenthome.Home, dstRel string) error {
+	entries, err := os.ReadDir(src)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err := home.MkdirAll(dstRel, 0o755); err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if !e.Type().IsRegular() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(src, e.Name()))
+		if err != nil {
 			return err
 		}
-		return nil
+		if err := home.WriteFile(path.Join(dstRel, e.Name()), data, 0o644); err != nil {
+			return err
+		}
 	}
-	if _, err := os.Stat(dst); os.IsNotExist(err) {
-		return nil
+	return nil
+}
+
+// restorePluginsTree restores the recorded Agent Plugins tree srcRel under
+// srcDir (one directory per plugin) to dstRel in the agent home, replacing
+// dstRel, confined to the home. Each plugin directory is installed with
+// agenthome.InstallTree under the per-plugin agentplugin.DefaultLimits. A
+// missing source, or one that is not a real directory, copies nothing;
+// entries that are not real directories with a valid plugin name are
+// skipped.
+func restorePluginsTree(srcDir, srcRel string, home *agenthome.Home, dstRel string) error {
+	return restorePluginsTreeWithLimits(srcDir, srcRel, home, dstRel, agentplugin.DefaultLimits)
+}
+
+func restorePluginsTreeWithLimits(srcDir, srcRel string, home *agenthome.Home, dstRel string, lim agentplugin.Limits) error {
+	reset := func() error {
+		if err := home.RemoveAll(dstRel); err != nil {
+			return err
+		}
+		return home.MkdirAll(dstRel, 0o755)
 	}
-	return copyPluginsTree(src, agentplugin.PluginsDirName, agentHome, filepath.Join(agentplugin.InputsRel, agentplugin.PluginsDirName))
+	homeLim := agenthome.Limits{MaxFiles: lim.MaxFiles, MaxBytes: lim.MaxBytes, MaxDepth: lim.MaxDepth}
+	install := func(srcRoot *os.Root, srcPlugin, name string) error {
+		err := home.InstallTree(srcRoot, srcPlugin, path.Join(dstRel, name), homeLim)
+		var le *agenthome.LimitError
+		if errors.As(err, &le) {
+			// Report a limit the way the snapshot direction does.
+			return &agentplugin.LimitError{Limit: le.Limit}
+		}
+		return err
+	}
+	return walkPluginsTree(srcDir, srcRel, reset, install)
 }
 
 // recordHasAgentPlugins reports whether the control-plane inputs record
@@ -357,9 +458,13 @@ func copyRegularFiles(src, dst string) error {
 	return nil
 }
 
+// stagedSecretsRel is the agent home's staged secrets directory, relative
+// to the home.
+const stagedSecretsRel = ".scion/harness/secrets"
+
 // stagedSecretsDir is the agent home's staged secrets directory.
 func stagedSecretsDir(agentHome string) string {
-	return filepath.Join(agentHome, ".scion", "harness", "secrets")
+	return filepath.Join(agentHome, filepath.FromSlash(stagedSecretsRel))
 }
 
 // ensureSecretsRecord creates an empty secrets record (mode 0700) in agentDir
@@ -387,6 +492,10 @@ func ensureSecretsRecord(agentDir string) error {
 // With no record (an agent provisioned before harness secrets were recorded),
 // nothing is restored, a warning names the agent, and an empty record is
 // created so the warning is not repeated.
+//
+// The writes into the home are confined to it (pkg/agenthome), through one
+// handle opened on the home: a link at a secret file is replaced, never
+// written through, and a linked directory component is refused.
 func restoreSecretsRecord(agentDir, agentHome, agentID string, current *harnessConfigIdentity) ([]string, error) {
 	record := filepath.Join(agentDir, config.HarnessSecretsRecordDirName)
 	entries, err := os.ReadDir(record)
@@ -404,7 +513,12 @@ func restoreSecretsRecord(agentDir, agentHome, agentID string, current *harnessC
 		}
 		return nil, nil
 	}
-	dst := stagedSecretsDir(agentHome)
+	var home *agenthome.Home
+	defer func() {
+		if home != nil {
+			_ = home.Close()
+		}
+	}()
 	var names []string
 	for _, e := range entries {
 		if !e.Type().IsRegular() || e.Name() == secretsIdentityFile {
@@ -414,10 +528,15 @@ func restoreSecretsRecord(agentDir, agentHome, agentID string, current *harnessC
 		if err != nil {
 			return nil, err
 		}
-		if err := os.MkdirAll(dst, 0o700); err != nil {
-			return nil, err
+		if home == nil {
+			if home, err = agenthome.OpenCreate(agentHome, 0o700); err != nil {
+				return nil, err
+			}
+			if err := home.MkdirAll(stagedSecretsRel, 0o700); err != nil {
+				return nil, err
+			}
 		}
-		if err := os.WriteFile(filepath.Join(dst, e.Name()), data, 0o600); err != nil {
+		if err := home.WriteFile(path.Join(stagedSecretsRel, e.Name()), data, 0o600); err != nil {
 			return nil, err
 		}
 		names = append(names, e.Name())

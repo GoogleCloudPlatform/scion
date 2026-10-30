@@ -139,7 +139,7 @@ func classifySSHHubError(endpoint string, err error) *tunnelclient.Error {
 	if errors.As(err, &apiErr) {
 		switch apiErr.StatusCode {
 		case http.StatusUnauthorized:
-			return tunnelclient.Errorf(tunnelclient.ExitCredential, "credential refused by hub %s; run scion hub auth login", endpoint)
+			return tunnelclient.Errorf(tunnelclient.ExitCredential, "credential refused by hub %s; run scion hub auth login --hub %s", endpoint, endpoint)
 		case http.StatusForbidden:
 			return tunnelclient.Errorf(tunnelclient.ExitForbidden, "not permitted by hub %s", endpoint)
 		case http.StatusBadGateway,

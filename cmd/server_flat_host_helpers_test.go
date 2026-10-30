@@ -104,7 +104,7 @@ func prepareFlatInstance(ctx context.Context, hubSrv *hub.Server, _ *runtime.Doc
 			cfg.BrokerID = ic.Identity.RuntimeBrokerID
 			cfg.StateDir = filepath.Join(globalDir, "state", ic.Identity.RuntimeBrokerID)
 			cfg.FlatInstance = &runtimebroker.FlatInstanceConfig{Identity: ic.Identity, Instance: ic.Instance, HubInProcess: true}
-			return runtimebroker.New(cfg, ic.Manager, ic.Runtime), nil
+			return runtimebroker.New(cfg, ic.Manager, ic.Runtime, config.RuntimeBuildRecord{}), nil
 		},
 	})
 	if err != nil {

@@ -807,12 +807,8 @@ func findDeleteProjectCallSites(t *testing.T) []callSite {
 	dirs := []string{"pkg/hub/", "pkg/store/entadapter/"}
 	for _, dir := range dirs {
 		fullDir := filepath.Join(repoRoot(t), dir)
-		// pkgmove:scan-covers pkg/hub/apierr
-		// scanned through guardScanSubdirs; guards DeleteProject call sites (pkg/hub only; pkg/store/entadapter is read alone).
-		// pkgmove:scan-covers pkg/hub/internal/principal
-		// scanned through guardScanSubdirs; guards DeleteProject call sites (pkg/hub only; pkg/store/entadapter is read alone).
-		// pkgmove:scan-covers pkg/hub/maintenance
-		// scanned through guardScanSubdirs once it exists; guards DeleteProject call sites (pkg/hub only; pkg/store/entadapter is read alone).
+		// pkgmove:scan-covers guardScanSubdirs
+		// scanned through guardScanSubdirs; guards DeleteProject call sites (pkg/hub and its guardScanSubdirs entries; pkg/store/entadapter is read alone).
 		read := os.ReadDir
 		if dir == "pkg/hub/" {
 			read = readGuardScanDirs
@@ -872,6 +868,7 @@ func findCallSitesInFile(t *testing.T, filePath, relPath, symbol string) []callS
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	// Walk up from the test file to find the repository root.
+	// scan-coverage:exempt locates the module root; enumerates no files.
 	dir, err := os.Getwd()
 	require.NoError(t, err)
 	for {

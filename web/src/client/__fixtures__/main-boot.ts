@@ -17,7 +17,8 @@
 /**
  * Boots the real client entry module (main.ts) in jsdom for route tests:
  * a fake EventSource, a fetch that answers the boot requests (a signed-in,
- * super-admin user), and the SSR page data for `path`. Mock the page modules
+ * super-admin user), and the SSR page data for `path` (plus any
+ * `extraPageData` fields, such as `experiments`). Mock the page modules
  * the test navigates to (see main-admin-status.test.ts) before calling it.
  */
 
@@ -50,7 +51,8 @@ export type BootFetchOverride = (pathname: string) => Promise<Response> | undefi
 
 export async function bootMainAt(
   path: string,
-  override?: BootFetchOverride
+  override?: BootFetchOverride,
+  extraPageData?: Record<string, unknown>
 ): Promise<typeof import('../main.js')> {
   vi.stubGlobal('EventSource', FakeEventSource);
   vi.stubGlobal(
@@ -76,6 +78,7 @@ export async function bootMainAt(
       path,
       title: 'Scion',
       user: { id: 'u1', email: 'u@example.com', name: 'U', role: 'member' },
+      ...extraPageData,
     }) +
     '</script>';
   return import('../main.js');

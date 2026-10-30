@@ -42,6 +42,72 @@ func canonicalHarnessName(name string) string {
 }
 
 func (s *Server) resolveHarnessTypeFromConfigRef(ctx context.Context, projectID, configRef string) string {
+	return s.resolveHarnessTypeFromConfigRefMemo(ctx, projectID, configRef, nil)
+}
+
+// harnessTypeMemo memoizes harness-config lookups for one request. A
+// project-scope result depends on the project and the reference, a
+// global-scope result on the reference alone, so a global harness-config
+// shared by agents in many projects is read once, not once per project.
+type harnessTypeMemo struct {
+	project map[harnessRefKey]string
+	global  map[string]string
+}
+
+// harnessRefKey identifies one project-scope harness-config lookup.
+type harnessRefKey struct{ projectID, ref string }
+
+func newHarnessTypeMemo() *harnessTypeMemo {
+	return &harnessTypeMemo{project: map[harnessRefKey]string{}, global: map[string]string{}}
+}
+
+// projectTable and globalTable return the memo's tables, nil for a nil memo.
+func (m *harnessTypeMemo) projectTable() map[harnessRefKey]string {
+	if m == nil {
+		return nil
+	}
+	return m.project
+}
+
+func (m *harnessTypeMemo) globalTable() map[string]string {
+	if m == nil {
+		return nil
+	}
+	return m.global
+}
+
+// memoized returns table[key], calling load and storing its result on a
+// miss. A nil table (no memo) always calls load and stores nothing.
+func memoized[K comparable](table map[K]string, key K, load func() string) string {
+	if table == nil {
+		return load()
+	}
+	if h, ok := table[key]; ok {
+		return h
+	}
+	h := load()
+	table[key] = h
+	return h
+}
+
+// harnessTypeOfConfig returns the harness type a stored harness-config
+// names, or "" for none (also for a lookup error or a missing record).
+func harnessTypeOfConfig(hc *store.HarnessConfig, err error) string {
+	if err != nil || hc == nil {
+		return ""
+	}
+	if h := canonicalHarnessName(hc.Harness); h != "" {
+		return h
+	}
+	if inferred := inferHarnessFromName(hc.Harness); inferred != "" {
+		return inferred
+	}
+	return hc.Harness
+}
+
+// resolveHarnessTypeFromConfigRefMemo is resolveHarnessTypeFromConfigRef
+// with an optional per-request memo (nil = no memo).
+func (s *Server) resolveHarnessTypeFromConfigRefMemo(ctx context.Context, projectID, configRef string, memo *harnessTypeMemo) string {
 	configRef = strings.TrimSpace(configRef)
 	if configRef == "" {
 		return ""
@@ -51,51 +117,57 @@ func (s *Server) resolveHarnessTypeFromConfigRef(ctx context.Context, projectID,
 	}
 
 	if projectID != "" {
-		hc, err := s.store.GetHarnessConfigBySlug(ctx, configRef, store.HarnessConfigScopeProject, projectID)
-		if err == nil && hc != nil {
-			if h := canonicalHarnessName(hc.Harness); h != "" {
-				return h
-			}
-			if inferred := inferHarnessFromName(hc.Harness); inferred != "" {
-				return inferred
-			}
-			if hc.Harness != "" {
-				return hc.Harness
-			}
-		}
-	}
-
-	hc, err := s.store.GetHarnessConfigBySlug(ctx, configRef, store.HarnessConfigScopeGlobal, "")
-	if err == nil && hc != nil {
-		if h := canonicalHarnessName(hc.Harness); h != "" {
+		h := memoized(memo.projectTable(), harnessRefKey{projectID, configRef}, func() string {
+			return harnessTypeOfConfig(s.store.GetHarnessConfigBySlug(ctx, configRef, store.HarnessConfigScopeProject, projectID))
+		})
+		if h != "" {
 			return h
 		}
-		if inferred := inferHarnessFromName(hc.Harness); inferred != "" {
-			return inferred
-		}
-		if hc.Harness != "" {
-			return hc.Harness
-		}
 	}
 
-	if inferred := inferHarnessFromName(configRef); inferred != "" {
-		return inferred
+	h := memoized(memo.globalTable(), configRef, func() string {
+		return harnessTypeOfConfig(s.store.GetHarnessConfigBySlug(ctx, configRef, store.HarnessConfigScopeGlobal, ""))
+	})
+	if h != "" {
+		return h
 	}
-	return ""
+
+	return inferHarnessFromName(configRef)
 }
 
+// resolveAgentHarnessType resolves the agent's harness type live: inline
+// harness, then its harness-config references. It does not read the
+// harness stamped at create (AppliedConfig.Harness), which every
+// harnessVendor (lists, events and the single-agent view, through
+// agentBadgeHarness) prefers; the two agree unless a harness-config's
+// harness type is changed in the catalog after the agent was created.
 func (s *Server) resolveAgentHarnessType(ctx context.Context, agent *store.Agent) string {
+	return s.resolveAgentHarnessTypeMemo(ctx, agent, nil)
+}
+
+// inlineHarnessType returns the harness named by ac's inline config,
+// canonicalized, or "".
+func inlineHarnessType(ac *store.AgentAppliedConfig) string {
+	if ac == nil || ac.InlineConfig == nil || ac.InlineConfig.Harness == "" {
+		return ""
+	}
+	if h := canonicalHarnessName(ac.InlineConfig.Harness); h != "" {
+		return h
+	}
+	return ac.InlineConfig.Harness
+}
+
+// resolveAgentHarnessTypeMemo is resolveAgentHarnessType with an optional
+// per-request memo of harness-config lookups (nil = no memo). With a memo,
+// agents that share a harness-config reference cost one lookup chain
+// between them, not one each.
+func (s *Server) resolveAgentHarnessTypeMemo(ctx context.Context, agent *store.Agent, memo *harnessTypeMemo) string {
 	if agent == nil {
 		return "generic"
 	}
 
-	if agent.AppliedConfig != nil && agent.AppliedConfig.InlineConfig != nil {
-		if h := canonicalHarnessName(agent.AppliedConfig.InlineConfig.Harness); h != "" {
-			return h
-		}
-		if agent.AppliedConfig.InlineConfig.Harness != "" {
-			return agent.AppliedConfig.InlineConfig.Harness
-		}
+	if h := inlineHarnessType(agent.AppliedConfig); h != "" {
+		return h
 	}
 
 	var refs []string
@@ -108,12 +180,93 @@ func (s *Server) resolveAgentHarnessType(ctx context.Context, agent *store.Agent
 	refs = append(refs, agent.HarnessConfig)
 
 	for _, ref := range refs {
-		if h := s.resolveHarnessTypeFromConfigRef(ctx, agent.ProjectID, ref); h != "" {
+		if h := s.resolveHarnessTypeFromConfigRefMemo(ctx, agent.ProjectID, ref, memo); h != "" {
 			return h
 		}
 	}
 
 	return "generic"
+}
+
+// storedAgentHarness returns the agent's harness type from its own record,
+// without a store lookup: the harness stamped at create
+// (AppliedConfig.Harness), else an inline harness, canonicalized as
+// resolveAgentHarnessType does. It returns "" when the record alone does
+// not name it, which is the case for an agent created before the stamp
+// that names its harness only through a harness-config reference.
+func storedAgentHarness(agent *store.Agent) string {
+	if agent == nil || agent.AppliedConfig == nil {
+		return ""
+	}
+	if agent.AppliedConfig.Harness != "" {
+		return agent.AppliedConfig.Harness
+	}
+	return inlineHarnessType(agent.AppliedConfig)
+}
+
+// stampAgentHarness records the agent's harness type on
+// AppliedConfig.Harness at create, unless already set: an inline harness
+// first (as resolveAgentHarnessType), then the harness of resolvedHC, the
+// hub harness-config create resolved and stamped by ID (the one the broker
+// hydrates, possibly from the template default), then
+// resolveAgentHarnessType. A harness that does not resolve (the "generic"
+// fallback) is not stamped, so a later read resolves it again.
+func (s *Server) stampAgentHarness(ctx context.Context, agent *store.Agent, resolvedHC *store.HarnessConfig) {
+	if agent == nil || agent.AppliedConfig == nil || agent.AppliedConfig.Harness != "" {
+		return
+	}
+	h := inlineHarnessType(agent.AppliedConfig)
+	if h == "" {
+		h = harnessTypeOfConfig(resolvedHC, nil)
+	}
+	if h == "" {
+		h = s.resolveAgentHarnessType(ctx, agent)
+	}
+	if h != "generic" {
+		agent.AppliedConfig.Harness = h
+	}
+}
+
+// agentBadgeHarness returns the harness the single-agent view derives its
+// vendor from: the record's harness (storedAgentHarness) when it names one,
+// as lists and events do, else the live resolved harness. So all three
+// agree for every agent.
+func agentBadgeHarness(agent *store.Agent, resolvedHarness string) string {
+	if h := storedAgentHarness(agent); h != "" {
+		return h
+	}
+	return resolvedHarness
+}
+
+// agentModelSize returns the model size alias recorded on the agent at
+// create (AppliedConfig.ModelSize), or "".
+func agentModelSize(agent *store.Agent) string {
+	if agent == nil || agent.AppliedConfig == nil {
+		return ""
+	}
+	return agent.AppliedConfig.ModelSize
+}
+
+// setAgentListBadges sets HarnessVendor and ModelSize on every item of an
+// agent list. The harness comes from the agent record when it names it
+// (storedAgentHarness, no lookup); otherwise from resolveAgentHarnessType
+// with a memo shared by the whole list, so the store is read at most once
+// per distinct project-scope (project, reference) and once per distinct
+// global-scope reference, never once per agent.
+func (s *Server) setAgentListBadges(ctx context.Context, agents []AgentWithCapabilities) {
+	var memo *harnessTypeMemo
+	for i := range agents {
+		a := &agents[i].Agent
+		var resolved string
+		if storedAgentHarness(a) == "" {
+			if memo == nil {
+				memo = newHarnessTypeMemo()
+			}
+			resolved = s.resolveAgentHarnessTypeMemo(ctx, a, memo)
+		}
+		agents[i].HarnessVendor = harness.Vendor(agentBadgeHarness(a, resolved))
+		agents[i].ModelSize = agentModelSize(a)
+	}
 }
 
 func (s *Server) resolveAgentHarnessCapabilities(ctx context.Context, agent *store.Agent) (string, api.HarnessAdvancedCapabilities) {

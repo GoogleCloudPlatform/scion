@@ -361,17 +361,6 @@ func WorkspaceStoragePath(hubID, projectID, agentID string) string {
 	return path
 }
 
-// ProjectWorkspaceStoragePath returns the storage path for a hub-managed project's shared workspace.
-// Hub-managed projects share a single workspace across agents (no per-agent worktrees),
-// so the path is project-level rather than agent-level.
-func ProjectWorkspaceStoragePath(hubID, projectID string) string {
-	path := "workspaces/" + projectID + "/grove-workspace"
-	if hubID != "" {
-		return "hubs/" + hubID + "/" + path
-	}
-	return path
-}
-
 // WorkspaceStorageURI returns the full storage URI for an agent's workspace.
 func WorkspaceStorageURI(hubID, bucket, projectID, agentID string) string {
 	path := WorkspaceStoragePath(hubID, projectID, agentID)

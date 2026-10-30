@@ -532,7 +532,9 @@ func TestFlatCreate_UnlinkedFlatBrokerNotAutoLinked(t *testing.T) {
 
 func TestFlatCreate_ExplicitLinkThenCreateWithBrokerIDOnly(t *testing.T) {
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true})
-	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects/"+f.project.ID+"/providers", AddProviderRequest{BrokerID: f.flat.ID})
+	// The link gives the remote broker its own checkout of the hub-managed
+	// project; one without a path is refused at create (ptone/scion#5813).
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects/"+f.project.ID+"/providers", AddProviderRequest{BrokerID: f.flat.ID, LocalPath: fixtureProviderCheckout(t)})
 	require.Truef(t, rec.Code == http.StatusOK || rec.Code == http.StatusCreated, "explicit link: %d %s", rec.Code, rec.Body.String())
 	assert.Contains(t, f.providerIDs(t, f.project.ID), f.flat.ID)
 

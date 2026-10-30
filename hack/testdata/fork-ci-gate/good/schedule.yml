@@ -1,0 +1,24 @@
+name: Nightly
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  tag:
+    if: github.repository == 'GoogleCloudPlatform/scion'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok
+  build:
+    needs: tag
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (needs.tag.outputs.tagged == 'true') }}
+    uses: ./.github/workflows/build-release.yml
+  cleanup:
+    needs: tag
+    if: ${{ github.repository == 'GoogleCloudPlatform/scion' }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok
+# Trailing comment and blank lines after the last job are fine.
+

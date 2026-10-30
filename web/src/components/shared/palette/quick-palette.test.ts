@@ -1156,6 +1156,38 @@ describe('scion-quick-palette: renders a grouped Agents list', () => {
     expect(retried).toBe('agents');
   });
 
+  it('dispatches palette-query with each query edit, and none for the first render', async () => {
+    const queries: string[] = [];
+    const el = document.createElement('scion-quick-palette');
+    el.addEventListener('palette-query', (e) => {
+      queries.push((e as CustomEvent<{ query: string }>).detail.query);
+    });
+    el.open = true;
+    el.groups = agentsGroup([{ peerId: 'a1', label: 'Alpha' }]);
+    document.body.appendChild(el);
+    await el.updateComplete;
+    expect(queries).toEqual([]);
+
+    await typeQuery(el, 'al');
+    await typeQuery(el, 'alp');
+    await typeQuery(el, '');
+    expect(queries).toEqual(['al', 'alp', '']);
+  });
+
+  it('reopening reports the reset to an empty query as a palette-query', async () => {
+    const el = await mountPalette(agentsGroup([{ peerId: 'a1', label: 'Alpha' }]));
+    await typeQuery(el, 'al');
+    const queries: string[] = [];
+    el.addEventListener('palette-query', (e) => {
+      queries.push((e as CustomEvent<{ query: string }>).detail.query);
+    });
+    el.open = false;
+    await el.updateComplete;
+    el.open = true;
+    await el.updateComplete;
+    expect(queries).toEqual(['']);
+  });
+
   it('reopening resets the query text', async () => {
     const el = await mountPalette(agentsGroup([{ peerId: 'a1', label: 'Alpha' }]));
     const input = el.shadowRoot?.querySelector('#palette-query-input') as HTMLInputElement;

@@ -131,7 +131,7 @@ func (s *Server) syncResourceFromStorage(
 		return nil, "", false, nil
 	}
 
-	contentHash = computeContentHash(updated)
+	contentHash = s.computeContentHash(updated)
 	return updated, contentHash, true, nil
 }
 

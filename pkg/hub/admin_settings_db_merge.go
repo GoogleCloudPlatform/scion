@@ -606,13 +606,11 @@ func modelledSectionKey(section, sentKey string) (string, bool) {
 // store their keys at the koanf path of the same name, either bare
 // (agent_defaults: default_template) or under the section name
 // (telemetry: telemetry.cloud); for those, the key is modelled when that
-// path is one of the section's registered koanf paths. The few keys that
-// follow neither rule are listed in sectionKeyKoanfPathExtra.
+// path is one of the section's registered koanf paths. Keys that follow
+// neither rule (notifications: notification_channels) are mapped in
+// opsettings.
 func sectionKeyKoanfPath(section, key string) string {
 	if p := opsettings.KoanfPathFromSectionKey(section, key); p != "" {
-		return p
-	}
-	if p := sectionKeyKoanfPathExtra[section][key]; p != "" {
 		return p
 	}
 	sec := opsettings.SectionByName(section)
@@ -625,14 +623,6 @@ func sectionKeyKoanfPath(section, key string) string {
 		}
 	}
 	return ""
-}
-
-// sectionKeyKoanfPathExtra maps the section keys whose koanf path follows
-// neither rule of sectionKeyKoanfPath and that opsettings does not map
-// (KoanfPathFromSectionKey): notifications stores notification_channels
-// at server.notification_channels.
-var sectionKeyKoanfPathExtra = map[string]map[string]string{
-	"notifications": {"notification_channels": "server.notification_channels"},
 }
 
 // dropEnvOverriddenSectionKeys removes the stored keys of a section whose

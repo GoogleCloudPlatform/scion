@@ -83,7 +83,10 @@ export interface HubPublicDefaults {
 /** What the overlay reads: only values the page fetched. */
 export interface InheritedSources {
   /** The chosen template, as the template list returns it. */
-  template?: { agentConfig?: TemplateAgentConfig | undefined } | null | undefined;
+  template?:
+    | { agentConfig?: TemplateAgentConfig | undefined; defaultHarnessConfig?: string | undefined }
+    | null
+    | undefined;
   projectSettings?: ProjectCreateDefaults | null | undefined;
   hubSettings?: HubPublicDefaults | null | undefined;
 }
@@ -111,6 +114,10 @@ const RESOURCE_KEYS: ReadonlyArray<{
  * The order per field follows the hub's create path
  * (pkg/hub/handlers_agent_create_helpers.go, project_settings_handlers.go,
  * hub_agent_defaults.go):
+ * - harness config: project, then the template's declared
+ *   default_harness_config (never its harness type, ptone/scion#601), then
+ *   hub (ptone/scion#3914). With none of these the Runtime Broker resolves it
+ *   from its own settings, which the page cannot read, so nothing is shown.
  * - model: project, then template, then hub (the hub's SCION_MODEL). The
  *   template's model is its agentConfig snapshot's (ptone/scion#4222).
  * - thinking level, harness auth, limits, resources: project. The
@@ -137,6 +144,15 @@ export function resolveInheritedPlaceholders(
   const tc = sources.template?.agentConfig;
   const ps = sources.projectSettings ?? {};
   const hub = sources.hubSettings ?? {};
+
+  const templateHarnessConfig = sources.template?.defaultHarnessConfig;
+  if (ps.defaultHarnessConfig) {
+    out.harnessConfig = { value: ps.defaultHarnessConfig, source: FROM_PROJECT };
+  } else if (templateHarnessConfig) {
+    out.harnessConfig = { value: templateHarnessConfig, source: FROM_TEMPLATE };
+  } else if (hub.defaultHarnessConfig) {
+    out.harnessConfig = { value: hub.defaultHarnessConfig, source: FROM_HUB };
+  }
 
   if (ps.defaultModel) out['config.model'] = { value: ps.defaultModel, source: FROM_PROJECT };
   else if (tc?.model) out['config.model'] = { value: tc.model, source: FROM_TEMPLATE };

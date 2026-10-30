@@ -79,7 +79,12 @@ function createHandler(
   };
 }
 
-async function createComponent(handler: Handler): Promise<HTMLElement> {
+/**
+ * Renders the page and, unless edit is false, changes the refresh interval:
+ * the page sends only changed fields (ptone/scion#3913), so a save with no
+ * edit sends no request.
+ */
+async function createComponent(handler: Handler, edit = true): Promise<HTMLElement> {
   vi.stubGlobal('fetch', vi.fn(handler.fetch));
   const el = document.createElement('scion-page-admin-federation') as InstanceType<
     typeof ScionPageAdminFederation
@@ -88,6 +93,10 @@ async function createComponent(handler: Handler): Promise<HTMLElement> {
   await el.updateComplete;
   await new Promise((resolve) => setTimeout(resolve, 100));
   await el.updateComplete;
+  if (edit) {
+    (el as any).refreshInterval = '2h';
+    await el.updateComplete;
+  }
   return el;
 }
 
@@ -309,12 +318,22 @@ describe('scion-page-admin-federation — structured save errors (ptone/scion#39
     expect(text(query(element, '.status-message.error'))).toBe('Failed to save federation config');
   });
 
-  it('the save payload is unchanged', async () => {
+  it('the save payload carries only the changed field (ptone/scion#3913)', async () => {
     const handler = createHandler({ status: 200, body: {} });
     element = await createComponent(handler);
 
     await clickSave(element);
 
-    expect(handler.puts).toEqual([makeConfig()]);
+    expect(handler.puts).toEqual([{ federation: { refresh_interval: '2h' } }]);
+  });
+
+  it('a save with no change sends no request (ptone/scion#3913)', async () => {
+    const handler = createHandler({ status: 200, body: {} });
+    element = await createComponent(handler, false);
+
+    await clickSave(element);
+
+    expect(handler.puts).toEqual([]);
+    expect(text(query(element, '.status-message.success'))).toBe('No changes to save');
   });
 });
