@@ -541,6 +541,16 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 
 	// -------------------------------------------------------------------------
+	// Port page view (behind the hub.port_view experiment). The route serves
+	// an agent's exposed port on the page link in its path only (the handler
+	// checks it, and the user's port access, on every request).
+	// -------------------------------------------------------------------------
+	"/api/v1/portview/": {
+		Pattern: "/api/v1/portview/", RouteID: "ports.view",
+		Classification: RoutePublic,
+	},
+
+	// -------------------------------------------------------------------------
 	// Policy: Skills
 	// -------------------------------------------------------------------------
 	"/api/v1/skills": {
@@ -826,6 +836,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 	"/api/v1/admin/maintenance/update-status": {
 		Pattern: "/api/v1/admin/maintenance/update-status", RouteID: "admin.maintenance.updateStatus",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.maintenance.execute", Resource: "hub", Action: "execute",
+	},
+	"/api/v1/admin/maintenance/releases": {
+		Pattern: "/api/v1/admin/maintenance/releases", RouteID: "admin.maintenance.releases",
 		Classification: RouteHubAdmin,
 		Permission:     "hub.maintenance.execute", Resource: "hub", Action: "execute",
 	},

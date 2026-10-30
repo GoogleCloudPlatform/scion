@@ -28,11 +28,13 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
@@ -166,8 +168,9 @@ type Config struct {
 	// InstanceID is this relay's instance id (the hub's instance id for an
 	// in-process relay). Required.
 	InstanceID string
-	// InternalEndpoint is the base URL (http://host:port) other relays use
-	// to reach this relay's internal API. "" means unaddressable: allowed
+	// InternalEndpoint is the base URL (https://host:port, or http:// to a
+	// loopback host: config.CheckRelayTransport) other relays use to reach
+	// this relay's internal API. "" means unaddressable: allowed
 	// only in single-node profiles; RequireSelfCheck refuses it.
 	InternalEndpoint string
 	// PublicEndpoint is optional (separate relay profiles).
@@ -202,9 +205,16 @@ type Config struct {
 	// PeerAuth authenticates internal API calls in both directions.
 	// Required for InternalHandler and for the self-check probe.
 	PeerAuth PeerAuth
-	// HTTPClient performs the self-check probe (default: a client with a
-	// 10s timeout).
+	// HTTPClient performs the self-check probe and this relay's calls to
+	// other relays (default: NewHopHTTPClientWithTimeout(nil, 10s), the
+	// system roots). A given client is used without redirects
+	// (hopClientWithoutRedirects); it is not modified.
 	HTTPClient *http.Client
+	// WSDialer dials internal stream hops to other relays (nil: gorilla
+	// defaults). With TLS on the internal hop it carries the hop client
+	// TLS configuration (NewHopWSDialer), as HTTPClient does
+	// (NewHopHTTPClient).
+	WSDialer *websocket.Dialer
 	// HeartbeatInterval defaults to DefaultHeartbeatInterval.
 	HeartbeatInterval time.Duration
 	// LifetimeHint is sent as Welcome.lifetime_hint_s (0 = none). With a
@@ -386,6 +396,14 @@ func New(cfg Config) (*Relay, error) {
 	if cfg.GrantKeys == nil {
 		return nil, errors.New("conduit relay: GrantKeys is required")
 	}
+	// Every relay profile registers its endpoint here, so this is the one
+	// place the advertised endpoint meets the internal hop rule: other
+	// relays and the hub ingress dial it as registered.
+	if cfg.InternalEndpoint != "" {
+		if err := config.CheckRelayTransport(cfg.InternalEndpoint); err != nil {
+			return nil, fmt.Errorf("conduit relay: InternalEndpoint: %w", err)
+		}
+	}
 	if cfg.LifetimeCap < 0 || (cfg.LifetimeCap > 0 && cfg.LifetimeCap <= LifetimeGoAwayLead) {
 		return nil, fmt.Errorf("conduit relay: LifetimeCap %s must be 0 or longer than the %s GoAway lead", cfg.LifetimeCap, LifetimeGoAwayLead)
 	}
@@ -417,7 +435,9 @@ func New(cfg Config) (*Relay, error) {
 		cfg.Logger = slog.Default()
 	}
 	if cfg.HTTPClient == nil {
-		cfg.HTTPClient = &http.Client{Timeout: 10 * time.Second}
+		cfg.HTTPClient = NewHopHTTPClientWithTimeout(nil, 10*time.Second)
+	} else {
+		cfg.HTTPClient = hopClientWithoutRedirects(cfg.HTTPClient)
 	}
 	return &Relay{
 		cfg:      cfg,

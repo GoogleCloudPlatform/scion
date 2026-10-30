@@ -2910,6 +2910,16 @@ func runGitClone(ctx context.Context, in ProvisionInput) error {
 		if scoped, ok := util.ScopedCredentialHelperEnv(env, gc.URL, token); ok {
 			env = scoped
 		}
+	} else if in.HostGitHardened && strings.HasPrefix(gc.URL, "https://") {
+		// A hardened host-side clone with no token offered, of an https URL
+		// that is not the project's recorded remote (CloneTokenRemote): git
+		// runs with no credential helper, no extra HTTP header and no
+		// askpass (util.NoCredentialHelperEnv), as the hub's local-backend
+		// clone and workspace pull do. The recorded remote itself keeps the
+		// host's own git authentication.
+		if _, bound := cloneTokenHost(in.CloneTokenRemote, gc.URL); !bound {
+			env = util.NoCredentialHelperEnv(env, gc.URL)
+		}
 	}
 	cmd.Env = env
 	output, err := cmd.CombinedOutput()

@@ -74,13 +74,14 @@ func TestRedactGitConfigSecrets(t *testing.T) {
 	}
 
 	// Noted key names are redacted — a credential.<url> subsection is always
-	// "<redacted>", and a url.<base> base with userinfo appears in its cleaned form.
+	// "<redacted>", and a url.<base> base with userinfo appears as scheme://host
+	// followed by "/<redacted>".
 	wantStripped := []string{
 		"credential.helper",
 		"credential.<redacted>.username",
 		"http.https://host.example.extraheader",
 		"remote.origin.url",
-		"url.https://mirror.example/.insteadof",
+		"url.https://mirror.example/<redacted>.insteadof",
 	}
 	got := append([]string(nil), stripped...)
 	sort.Strings(got)
@@ -562,16 +563,19 @@ func TestRedactGitConfigSecrets_ScpKeptAsRemoteAndBase(t *testing.T) {
 
 // TestRedactGitConfigSecrets_IncludeIfHasconfigNamesRedacted asserts that the noted
 // key name for an includeIf "hasconfig:remote.*.url:<url>" key never carries the
-// <url>'s userinfo — it is recorded as includeif.<redacted>.path — across an http(s)
-// password, an ssh password, a remote-helper-prefixed url, and an unparseable url.
+// <url>'s userinfo — the <url> is recorded as scheme://host/<redacted>, or as
+// <redacted> when it does not parse as one — across an http(s) password, an ssh
+// password, a remote-helper-prefixed url, and an unparseable url.
 func TestRedactGitConfigSecrets_IncludeIfHasconfigNamesRedacted(t *testing.T) {
-	cases := map[string]string{ // <url> after the prefix -> placeholder that must not leak
-		"https://iu:ip@ic.example/**":       "iu:ip",
-		"ssh://su:sp@sc.example/**":         "su:sp",
-		"http::https://hu:hp@hc.example/**": "hu:hp",
-		"https://zu:zp%zz@zc.example/**":    "zu:zp",
+	type hasconfigCase struct{ placeholder, noted string }
+	cases := map[string]hasconfigCase{ // <url> after the prefix -> placeholder that must not leak, expected noted name
+		"https://iu:ip@ic.example/**":       {"iu:ip", "includeif.hasconfig:remote.*.url:https://ic.example/<redacted>.path"},
+		"ssh://su:sp@sc.example/**":         {"su:sp", "includeif.hasconfig:remote.*.url:ssh://sc.example/<redacted>.path"},
+		"http::https://hu:hp@hc.example/**": {"hu:hp", "includeif.hasconfig:remote.*.url:<redacted>.path"},
+		"https://zu:zp%zz@zc.example/**":    {"zu:zp", "includeif.hasconfig:remote.*.url:<redacted>.path"},
 	}
-	for form, placeholder := range cases {
+	for form, tc := range cases {
+		placeholder := tc.placeholder
 		in := strings.Join([]string{
 			"[includeIf \"hasconfig:remote.*.url:" + form + "\"]",
 			"\tpath = /x/.gitconfig",
@@ -584,13 +588,13 @@ func TestRedactGitConfigSecrets_IncludeIfHasconfigNamesRedacted(t *testing.T) {
 		joined := strings.Join(stripped, "\n")
 		foundRedacted := false
 		for _, s := range stripped {
-			if s == "includeif.<redacted>.path" {
+			if s == tc.noted {
 				foundRedacted = true
 				break
 			}
 		}
 		if !foundRedacted {
-			t.Errorf("includeIf hasconfig noted name: unexpected userinfo in output: form %q gave stripped=%v, want includeif.<redacted>.path", form, stripped)
+			t.Errorf("includeIf hasconfig noted name: unexpected userinfo in output: form %q gave stripped=%v, want %s", form, stripped, tc.noted)
 		}
 		if strings.Contains(joined, placeholder) || strings.Contains(string(out), placeholder) {
 			t.Errorf("includeIf hasconfig noted name: unexpected userinfo in output: placeholder %q present for form %q (stripped=%v)", placeholder, form, stripped)

@@ -919,7 +919,8 @@ func (a portProxyStubAuthenticator) Authenticate(*http.Request) (*ProxyUserInfo,
 	return a.user, a.err
 }
 
-func (portProxyStubAuthenticator) Name() string { return "stub" }
+func (portProxyStubAuthenticator) Name() string               { return "stub" }
+func (portProxyStubAuthenticator) AssertionHeaders() []string { return nil }
 
 // TestRedirectToProxyRootLocationIsOneLine (ptone/scion#5566): whatever
 // bytes the raw query holds, the bare-URL redirect writes exactly one

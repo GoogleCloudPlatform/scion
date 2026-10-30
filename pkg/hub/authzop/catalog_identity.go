@@ -720,10 +720,18 @@ var identityOperations = []OperationSpec{
 		// that exist.
 		// conflict: last super-admin, self-delete, or the user's role
 		// bindings changed concurrently during the delete.
-		DenialCodes: []DenialCode{DenialForbidden, DenialLastOwner, DenialUserDeleteBlocked, DenialConflict},
+		// With force=true (hub.user_delete_force_cascade): the caller
+		// also needs agent.delete on every blocking agent
+		// (user_delete_force_forbidden otherwise); the agents may not
+		// change before the transaction (user_delete_blockers_changed).
+		// user_deletion_in_progress: a forced deletion of the user is in
+		// progress (a plain delete is refused; a forced one joins it).
+		DenialCodes: []DenialCode{DenialForbidden, DenialLastOwner, DenialUserDeleteBlocked, DenialConflict,
+			DenialUserDeleteForceForbidden, DenialUserDeleteBlockersChanged, DenialUserDeletionInProgress},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestDeleteUser_GuardOrder"},
+			{Package: "pkg/hub", Function: "TestForceDeleteUser_ForbiddenWritesNothing"},
 		},
 		Bearer: SessionOnly(ReasonGovernancePending),
 	},
@@ -746,6 +754,29 @@ var identityOperations = []OperationSpec{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestUserDeleteBlockers_RequiresUserDelete"},
 			{Package: "pkg/hub", Function: "TestSessionOnlyGate_ReasonIsReported"},
+		},
+		Bearer: SessionOnly(ReasonGovernancePending),
+	},
+	{
+		ID:          "user.admin.deletion",
+		Domain:      "user.admin",
+		Description: "Read the forced deletion of a user: its state and the outcome of each of the user's agents",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/{id}/deletion", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "user-from-url",
+		BasePermission:   "user.delete",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		// not_found: the user has no deletion, or
+		// hub.user_delete_force_cascade is off.
+		DenialCodes: []DenialCode{DenialForbidden, DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestUserDeletion_RequiresUserDelete"},
 		},
 		Bearer: SessionOnly(ReasonGovernancePending),
 	},

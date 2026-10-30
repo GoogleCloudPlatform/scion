@@ -79,3 +79,21 @@ func TestCheckResponse_Status(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckResponse_NilResponse(t *testing.T) {
+	if err := CheckResponse(nil); err == nil {
+		t.Error("CheckResponse(nil) want error, got nil")
+	}
+}
+
+func TestCheckResponse_NilBody(t *testing.T) {
+	resp200 := &http.Response{StatusCode: http.StatusOK}
+	if err := CheckResponse(resp200); err != nil {
+		t.Errorf("CheckResponse(200 with nil body) = %v, want nil", err)
+	}
+
+	resp500 := &http.Response{StatusCode: http.StatusInternalServerError}
+	if err := CheckResponse(resp500); err == nil {
+		t.Error("CheckResponse(500 with nil body) want error, got nil")
+	}
+}

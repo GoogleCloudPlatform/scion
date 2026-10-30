@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -25,10 +26,12 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/pgprovider"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
@@ -1535,6 +1538,38 @@ func releasePluginBuildLock(name string) {
 	}
 }
 
+// ensurePluginBroker creates the runtime broker row for the named broker
+// plugin when it does not exist, with the same fields server startup
+// (cmd/server_foreground.go) uses. A plugin activated or reconfigured
+// without a restart, or whose row was deleted, then has the live row its
+// HMAC secret authenticates against. A failure is logged, as at startup.
+func (s *Server) ensurePluginBroker(ctx context.Context, name, brokerID string) {
+	if s.store == nil {
+		return
+	}
+	if _, err := s.store.GetRuntimeBroker(ctx, brokerID); err == nil || !errors.Is(err, store.ErrNotFound) {
+		if err != nil {
+			slog.WarnContext(ctx, "Failed to look up plugin broker", "plugin", name, "brokerId", brokerID, "error", err)
+		}
+		return
+	}
+	now := time.Now()
+	b := &store.RuntimeBroker{
+		ID:              brokerID,
+		Name:            "plugin-" + name,
+		Slug:            api.Slugify("plugin-" + name),
+		Version:         "0.1.0",
+		Status:          store.BrokerStatusOnline,
+		ConnectionState: "embedded",
+		Labels:          map[string]string{pluginBrokerLabel: name},
+		Created:         now,
+		Updated:         now,
+	}
+	if err := s.store.CreateRuntimeBrokerClearingCredentials(ctx, b); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+		slog.WarnContext(ctx, "Failed to register broker entity for plugin", "plugin", name, "brokerId", brokerID, "error", err)
+	}
+}
+
 // getPluginHubCreds reconstructs the hub wiring credentials for a broker
 // plugin from live, authoritative sources — the same values that
 // server_foreground.go injects via ConfigureBroker at startup. This avoids
@@ -1554,7 +1589,10 @@ func (s *Server) getPluginHubCreds(ctx context.Context, name string) map[string]
 	creds["broker_id"] = brokerID
 
 	// hmac_key: from BrokerAuthService (idempotent — returns existing key).
+	// A broker secret authenticates only a live broker row, so the plugin's
+	// row is ensured first, as startup does.
 	if authSvc := s.GetBrokerAuthService(); authSvc != nil {
+		s.ensurePluginBroker(ctx, name, brokerID)
 		if secretKey, err := authSvc.GenerateAndStoreSecret(ctx, brokerID); err != nil {
 			slog.Error("Failed to generate or retrieve HMAC key", "plugin", name, "error", err)
 		} else {

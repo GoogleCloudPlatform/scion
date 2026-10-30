@@ -136,6 +136,10 @@ func TestSharedProjectName(t *testing.T) {
 // external config dir, and its settings.yaml wins over a broker-local
 // project-configs file of the same name.
 func TestSharedProjectConfigIsTheDirectory(t *testing.T) {
+	// The hub endpoint compared below comes from the settings files only:
+	// an endpoint in the test's environment (as inside an agent container)
+	// would override both. An empty value is dropped by the settings loader.
+	t.Setenv("SCION_HUB_ENDPOINT", "")
 	scionDir, home := sharedProjectFixture(t, "web")
 	if ext, err := GetGitProjectExternalConfigDir(scionDir); err != nil || ext != "" {
 		t.Fatalf("GetGitProjectExternalConfigDir = (%q, %v), want (\"\", nil)", ext, err)

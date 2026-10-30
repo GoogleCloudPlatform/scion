@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -56,6 +57,10 @@ const (
 	ParamChannel       = "channel"
 	ParamPin           = "pin"
 )
+
+// PinLatest is the pin of a hub that follows its channel's latest release
+// (and may be auto-updated); any other pin is a release tag.
+const PinLatest = "latest"
 
 // UpdateBinaryParams is the complete set of update-binary parameters. Any
 // other parameter is refused with CodeUnknownParam.
@@ -131,6 +136,8 @@ type PendingRestart struct {
 	To       string // installed release tag
 	Strategy string // Installer.Name()
 	Snapshot string // database snapshot path; always "" until snapshots exist
+	Channel  string // the installed release's channel
+	Pin      string // PinLatest or the installed tag (the pin parameter)
 }
 
 // BeforeRestartFunc runs after the new binary is activated and before the
@@ -153,20 +160,18 @@ type BinaryUpdateOptions struct {
 	// GitHubRepo is the release repository (owner/name); default
 	// DefaultGitHubRepo.
 	GitHubRepo string
-	// Channel is the configured release channel; empty means the running
-	// version's channel. latest:<channel> must name this channel.
-	Channel string
 	// Installer installs and restarts. nil means unsupported.
 	Installer Installer
 	// Releases resolves a tag to its release; default GitHub's API for
 	// GitHubRepo.
 	Releases ReleaseSource
-	// HTTPClient is the base client for LATEST.json and asset downloads
+	// Catalog resolves latest:<channel> to the channel's newest installable
+	// release. Default: a new Catalog for GitHubRepo over Releases (the hub
+	// passes its shared one).
+	Catalog CatalogSource
+	// HTTPClient is the base client for API requests and asset downloads
 	// (its redirect policy is replaced); default http.DefaultClient settings.
 	HTTPClient *http.Client
-	// ManifestURL is LATEST.json, used to resolve latest:<channel>; default
-	// https://raw.githubusercontent.com/<GitHubRepo>/main/LATEST.json.
-	ManifestURL string
 	// CurrentVersion is the running version; default version.Version.
 	CurrentVersion string
 	// CurrentBuildTime dates a running git build for cross-channel
@@ -184,8 +189,9 @@ type BinaryUpdateOptions struct {
 //
 //  1. validate params (target_version only; see ValidateParams);
 //  2. Installer.Preflight, before any network access;
-//  3. resolve the release with a single-tag API lookup and refuse same or
-//     older targets;
+//  3. resolve latest:<channel> through the release catalog, look the
+//     release up with a single-tag API lookup and refuse same or older
+//     targets;
 //  4. download the tarball and SHA256SUMS from the pinned release URL
 //     (redirects only to *.githubusercontent.com, size and time capped) and
 //     verify the tarball's own checksum line;
@@ -200,16 +206,15 @@ type BinaryUpdateOptions struct {
 //
 // It writes no hub settings itself.
 type BinaryUpdateExecutor struct {
-	repo        string
-	channel     string
-	installer   Installer
-	releases    ReleaseSource
-	httpClient  *http.Client
-	manifestURL string
-	current     string
-	buildTime   time.Time
-	maxBytes    int64
-	timeout     time.Duration
+	repo       string
+	installer  Installer
+	releases   ReleaseSource
+	catalog    CatalogSource
+	httpClient *http.Client
+	current    string
+	buildTime  time.Time
+	maxBytes   int64
+	timeout    time.Duration
 
 	// Per-step deadlines after the download phase.
 	preflightTimeout time.Duration
@@ -229,16 +234,15 @@ const (
 // NewBinaryUpdateExecutor returns a BinaryUpdateExecutor configured from opts.
 func NewBinaryUpdateExecutor(opts BinaryUpdateOptions) *BinaryUpdateExecutor {
 	e := &BinaryUpdateExecutor{
-		repo:        opts.GitHubRepo,
-		channel:     opts.Channel,
-		installer:   opts.Installer,
-		releases:    opts.Releases,
-		httpClient:  opts.HTTPClient,
-		manifestURL: opts.ManifestURL,
-		current:     opts.CurrentVersion,
-		buildTime:   opts.CurrentBuildTime,
-		maxBytes:    opts.MaxDownloadBytes,
-		timeout:     opts.DownloadTimeout,
+		repo:       opts.GitHubRepo,
+		installer:  opts.Installer,
+		releases:   opts.Releases,
+		catalog:    opts.Catalog,
+		httpClient: opts.HTTPClient,
+		current:    opts.CurrentVersion,
+		buildTime:  opts.CurrentBuildTime,
+		maxBytes:   opts.MaxDownloadBytes,
+		timeout:    opts.DownloadTimeout,
 	}
 	if e.repo == "" {
 		e.repo = DefaultGitHubRepo
@@ -255,8 +259,8 @@ func NewBinaryUpdateExecutor(opts BinaryUpdateOptions) *BinaryUpdateExecutor {
 		}
 		e.releases = gh
 	}
-	if e.manifestURL == "" {
-		e.manifestURL = fmt.Sprintf("https://raw.githubusercontent.com/%s/main/LATEST.json", e.repo)
+	if e.catalog == nil {
+		e.catalog = NewCatalog(CatalogOptions{Repo: e.repo, Lister: catalogLister(e.releases, e.repo)})
 	}
 	if e.current == "" {
 		e.current = version.Version
@@ -279,21 +283,15 @@ func NewBinaryUpdateExecutor(opts BinaryUpdateOptions) *BinaryUpdateExecutor {
 	return e
 }
 
-// effectiveChannel is the configured channel, else the running version's.
-func (e *BinaryUpdateExecutor) effectiveChannel() string {
-	if e.channel != "" {
-		return e.channel
-	}
-	return update.DetectChannel(e.current)
-}
-
 // ValidateParams implements ParamValidator. It needs no network, so a
 // handler can call it before creating a run:
 //   - only target_version, channel and pin are accepted (CodeUnknownParam);
-//   - target_version is a release tag, or latest:<channel> for the
-//     effective channel (CodeInvalidParam);
+//   - target_version is a release tag, or latest:<channel> for any release
+//     channel (CodeInvalidParam);
 //   - channel, when given, is the target's channel (CodeInvalidParam);
-//   - pin is accepted and ignored;
+//   - pin, when given, is "latest" or the target_version tag; a
+//     latest:<channel> target can only be pinned to "latest"
+//     (CodeInvalidParam). An absent pin means "latest";
 //   - a concrete target equal to the running version is CodeAlreadyRunning,
 //     an older one in the same channel CodeDowngradeNotYetSupported.
 //     Cross-channel order needs publish dates and is checked by Run.
@@ -306,19 +304,17 @@ func (e *BinaryUpdateExecutor) ValidateParams(params map[string]string) error {
 		return requestErrorf(CodeInvalidParam, "target_version is required")
 	}
 	channel := params[ParamChannel]
+	pin := params[ParamPin]
 
 	if ch, ok := strings.CutPrefix(target, LatestTargetPrefix); ok {
-		switch ch {
-		case "nightly", "preview", "stable":
-		default:
+		if !slices.Contains(catalogChannels[:], ch) {
 			return requestErrorf(CodeInvalidParam, "unknown channel %q in target_version %q", ch, target)
-		}
-		if eff := e.effectiveChannel(); ch != eff {
-			return requestErrorf(CodeInvalidParam,
-				"target_version %q: only the current channel (%q) can be targeted as latest; pass a release tag instead", target, eff)
 		}
 		if channel != "" && channel != ch {
 			return requestErrorf(CodeInvalidParam, "channel %q does not match target_version %q", channel, target)
+		}
+		if pin != "" && pin != PinLatest {
+			return requestErrorf(CodeInvalidParam, "pin %q: a %s target can only be pinned to %q", pin, target, PinLatest)
 		}
 		return nil
 	}
@@ -330,7 +326,19 @@ func (e *BinaryUpdateExecutor) ValidateParams(params map[string]string) error {
 		return requestErrorf(CodeInvalidParam, "channel %q does not match target_version %q (channel %q)",
 			channel, target, update.DetectChannel(target))
 	}
+	if pin != "" && pin != PinLatest && pin != target {
+		return requestErrorf(CodeInvalidParam, "pin %q must be %q or the target_version %q", pin, PinLatest, target)
+	}
 	return refuseClass(update.Compare(e.current, target), e.current, target)
+}
+
+// pinParam is the pin recorded for an update: the pin parameter, PinLatest
+// when it is absent.
+func pinParam(params map[string]string) string {
+	if pin := params[ParamPin]; pin != "" {
+		return pin
+	}
+	return PinLatest
 }
 
 // refuseClass maps classes that Phase 1 does not install to request errors.
@@ -476,7 +484,13 @@ func (e *BinaryUpdateExecutor) RunWithBeforeRestart(ctx context.Context, logger 
 	_, _ = fmt.Fprintf(logger, "\n==> Restarting hub: %s -> %s at %s\n",
 		displayVersion(e.current), target, time.Now().UTC().Format(time.RFC3339))
 	if before != nil {
-		p := PendingRestart{From: e.current, To: target, Strategy: e.installer.Name()}
+		p := PendingRestart{
+			From:     e.current,
+			To:       target,
+			Strategy: e.installer.Name(),
+			Channel:  update.DetectChannel(target),
+			Pin:      pinParam(params),
+		}
 		hookCtx, cancelHook := context.WithTimeout(ctx, e.hookTimeout)
 		err := before(hookCtx, p)
 		cancelHook()
@@ -524,23 +538,21 @@ func (e *BinaryUpdateExecutor) undoActivation(ctx context.Context, logger io.Wri
 	return fmt.Errorf("%w; %s was rolled back, nothing changed", cause, target)
 }
 
-// resolveLatest returns the latest release of channel from LATEST.json and
-// refuses it when it is not newer than the running version.
+// resolveLatest returns the newest installable release of channel in the
+// release catalog and refuses it when it is the running version or older
+// in the same channel (a cross-channel order is checked by checkOrder).
 func (e *BinaryUpdateExecutor) resolveLatest(ctx context.Context, channel string) (string, error) {
-	opts := []update.Option{update.WithManifestURL(e.manifestURL)}
-	if e.httpClient != nil {
-		opts = append(opts, update.WithHTTPClient(downloadClient(e.httpClient)))
-	}
-	manifest, err := update.FetchManifest(ctx, opts...)
+	snap, err := e.catalog.Get(ctx, false)
 	if err != nil {
 		return "", fmt.Errorf("resolve latest %s release: %w", channel, err)
 	}
-	tag := manifest.Channels[channel].Version
-	if tag == "" {
-		return "", fmt.Errorf("no %s release is published", channel)
+	rel, ok := snap.Latest(channel)
+	if !ok {
+		return "", fmt.Errorf("no installable %s release is published", channel)
 	}
+	tag := rel.Tag
 	if !update.IsReleaseTag(tag) || update.DetectChannel(tag) != channel {
-		return "", fmt.Errorf("release manifest lists %q as latest %s, which is not a %s release tag", tag, channel, channel)
+		return "", fmt.Errorf("release catalog lists %q as latest %s, which is not a %s release tag", tag, channel, channel)
 	}
 	if err := refuseClass(update.Compare(e.current, tag), e.current, tag); err != nil {
 		return "", err

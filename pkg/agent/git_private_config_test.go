@@ -19,12 +19,16 @@
 package agent
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 func TestSeedPrivateGitConfig_RedactsAndWritesRegularFile(t *testing.T) {
@@ -415,5 +419,354 @@ func TestSeedPrivateGitConfig_CloseErrorFailsClosed(t *testing.T) {
 	}
 	for _, e := range entries {
 		t.Errorf("leftover file after a close failure (temp not removed): %s", e.Name())
+	}
+}
+
+// A base that sets a command-running key refuses the seed: the error names the
+// key, never the value, and no copy is written.
+func TestSeedPrivateGitConfig_RefusesCommandKeys(t *testing.T) {
+	for _, tc := range []struct{ key, line string }{
+		{"core.sshcommand", "sshCommand = sshpass -p seedmarker-h1 ssh"},
+		{"core.hookspath", "hooksPath = /tmp/seedmarker-h1"},
+		{"core.fsmonitor", "fsmonitor = /tmp/seedmarker-h1"},
+		{"core.pager", "pager = /tmp/seedmarker-h1"},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			agentDir := t.TempDir()
+			base := filepath.Join(t.TempDir(), "config")
+			body := "[core]\n\tfilemode = true\n\t" + tc.line + "\n"
+			if err := os.WriteFile(base, []byte(body), 0644); err != nil {
+				t.Fatal(err)
+			}
+			dest, err := seedPrivateGitConfig(base, agentDir, "agent-x")
+			if err == nil {
+				t.Fatalf("seed accepted a base setting %s (dest %q)", tc.key, dest)
+			}
+			var refused *util.RepoConfigRefusedError
+			if !errors.As(err, &refused) || refused.Key != tc.key {
+				t.Fatalf("error = %v, want a refusal naming %s", err, tc.key)
+			}
+			if msg := err.Error(); !strings.Contains(msg, tc.key) || strings.Contains(msg, "seedmarker-h1") {
+				t.Errorf("error must name the key and not the value: %s", msg)
+			}
+			if !strings.Contains(err.Error(), "remove it from the repository's .git/config") || strings.Contains(err.Error(), "global") {
+				t.Errorf("error lacks the repository-config remedy: %s", err)
+			}
+			if _, statErr := os.Lstat(filepath.Join(agentDir, "git")); !os.IsNotExist(statErr) {
+				t.Errorf("a refused seed created the git dir (stat err %v)", statErr)
+			}
+		})
+	}
+}
+
+// A base written by earlier Scion versions still seeds, and the seed branch's
+// stale upstream is replaced by the broker's own.
+func TestSeedPrivateGitConfig_EarlierBaseSeeds(t *testing.T) {
+	agentDir := t.TempDir()
+	base := filepath.Join(t.TempDir(), "config")
+	body := strings.Join([]string{
+		"[core]",
+		"\trepositoryformatversion = 0",
+		"\tfilemode = true",
+		"\tbare = false",
+		"\tlogallrefupdates = true",
+		`[remote "origin"]`,
+		"\turl = https://github.com/o/r.git",
+		"\tfetch = +refs/heads/*:refs/remotes/origin/*",
+		`[branch "main"]`,
+		"\tremote = origin",
+		"\tmerge = refs/heads/main",
+		`[branch "agent-x"]`,
+		"\tremote = origin",
+		"\tmerge = refs/heads/stale",
+		"[push]",
+		"\tautoSetupRemote = true",
+		"[gc]",
+		"\tauto = 0",
+		"[maintenance]",
+		"\tauto = false",
+		"[credential]",
+		"\thelper = store",
+		"",
+	}, "\n")
+	if err := os.WriteFile(base, []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+	dest, err := seedPrivateGitConfig(base, agentDir, "agent-x")
+	if err != nil {
+		t.Fatalf("earlier base refused: %v", err)
+	}
+	b, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	for _, want := range []string{"https://github.com/o/r.git", `[branch "main"]`, "refs/heads/main", "merge = refs/heads/agent-x"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("seeded config lacks %q:\n%s", want, s)
+		}
+	}
+	for _, bad := range []string{"refs/heads/stale", "credential", "store"} {
+		if strings.Contains(s, bad) {
+			t.Errorf("seeded config keeps %q:\n%s", bad, s)
+		}
+	}
+	if n := strings.Count(s, `[branch "agent-x"]`); n != 1 {
+		t.Errorf("want one agent-x branch section, got %d:\n%s", n, s)
+	}
+}
+
+// The bytes written are exactly util.PrepareSeededGitConfig's output (the
+// serialization of the checked, filtered parse) followed by the broker's own
+// upstream pre-seed: nothing from the raw base is written directly.
+func TestSeedPrivateGitConfig_WritesPreparedBytes(t *testing.T) {
+	agentDir := t.TempDir()
+	base := filepath.Join(t.TempDir(), "config")
+	raw := []byte("# comment kept out of the copy\n[remote \"or\\\"ig\"]\n\turl = https://u:pw-h2@h.example/r.git\n[branch \"agent-x\"]\n\tremote = stale\n")
+	if err := os.WriteFile(base, raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+	dest, err := seedPrivateGitConfig(base, agentDir, "agent-x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, _, err := util.PrepareSeededGitConfig(raw, util.RepoPolicyLinked, staleUpstreamKey("agent-x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := string(prepared) + string(privateConfigUpstreamSeed("agent-x"))
+	if string(got) != want {
+		t.Errorf("written bytes differ from the prepared copy:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+	if strings.Contains(string(got), "pw-h2") || strings.Contains(string(got), "# comment") || strings.Contains(string(got), "stale") {
+		t.Errorf("raw base content reached the copy:\n%s", got)
+	}
+}
+
+// A base that does not parse fails closed: an error, and no copy or git dir.
+func TestSeedPrivateGitConfig_ParseErrorFailsClosed(t *testing.T) {
+	agentDir := t.TempDir()
+	base := filepath.Join(t.TempDir(), "config")
+	if err := os.WriteFile(base, []byte("[core\n\tbare = false\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	dest, err := seedPrivateGitConfig(base, agentDir, "agent-x")
+	if err == nil {
+		t.Fatalf("seed accepted a malformed base (dest %q)", dest)
+	}
+	var refused *util.RepoConfigRefusedError
+	if errors.As(err, &refused) {
+		t.Errorf("parse error reported as a policy refusal: %v", err)
+	}
+	if _, statErr := os.Lstat(filepath.Join(agentDir, "git")); !os.IsNotExist(statErr) {
+		t.Errorf("a failed seed created the git dir (stat err %v)", statErr)
+	}
+}
+
+// seedCheckedPrivateGitConfig checks the config.worktree layers before seeding:
+// a key planted in the agent's own config.worktree refuses the start, naming
+// the layer, and writes nothing; a clean repository seeds.
+func TestSeedCheckedPrivateGitConfig_ChecksWorktreeLayers(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1", "SCION_HOST_UID=",
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run(root, "init", "-q", "-b", "main", repo)
+	if err := os.WriteFile(filepath.Join(repo, "f"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(repo, "add", "f")
+	run(repo, "commit", "-q", "-m", "init")
+	ws := filepath.Join(root, "ws")
+	run(repo, "worktree", "add", "-q", "-b", "agent-x", ws)
+
+	agentDir := t.TempDir()
+	dest, err := seedCheckedPrivateGitConfig(context.Background(), repo, ws, agentDir, "agent-x")
+	if err != nil {
+		t.Fatalf("clean repository refused: %v", err)
+	}
+	if _, err := os.Stat(dest); err != nil {
+		t.Fatalf("clean seed wrote no copy: %v", err)
+	}
+
+	admin := filepath.Join(repo, ".git", "worktrees", filepath.Base(ws), "config.worktree")
+	if err := os.WriteFile(admin, []byte("[core]\n\tfsmonitor = /tmp/ownlayermarker-r1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	agentDir2 := t.TempDir()
+	_, err = seedCheckedPrivateGitConfig(context.Background(), repo, ws, agentDir2, "agent-x")
+	var refused *util.RepoConfigRefusedError
+	if !errors.As(err, &refused) || refused.Key != "core.fsmonitor" || refused.Layer == "" {
+		t.Fatalf("error = %v, want a refusal of core.fsmonitor in a layer", err)
+	}
+	if strings.Contains(err.Error(), "ownlayermarker-r1") {
+		t.Errorf("error leaks the value: %s", err)
+	}
+	if _, statErr := os.Lstat(filepath.Join(agentDir2, "git")); !os.IsNotExist(statErr) {
+		t.Errorf("a refused seed created the git dir (stat err %v)", statErr)
+	}
+}
+
+// A linked-worktree workspace whose broker-recorded admin dir does not resolve
+// is refused before anything is written: a back-link that names another path,
+// and a symlinked .git gitfile.
+func TestSeedCheckedPrivateGitConfig_UnresolvedWorktreeRefuses(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	for _, tc := range []string{"stale back-link", "symlinked gitfile"} {
+		t.Run(tc, func(t *testing.T) {
+			root := t.TempDir()
+			repo := filepath.Join(root, "repo")
+			run := func(dir string, args ...string) {
+				t.Helper()
+				cmd := exec.Command("git", args...)
+				cmd.Dir = dir
+				cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1", "SCION_HOST_UID=",
+					"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com")
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("git %v: %v\n%s", args, err, out)
+				}
+			}
+			run(root, "init", "-q", "-b", "main", repo)
+			if err := os.WriteFile(filepath.Join(repo, "f"), []byte("x\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			run(repo, "add", "f")
+			run(repo, "commit", "-q", "-m", "init")
+			ws := filepath.Join(root, "ws")
+			run(repo, "worktree", "add", "-q", "-b", "agent-x", ws)
+			switch tc {
+			case "stale back-link":
+				back := filepath.Join(repo, ".git", "worktrees", filepath.Base(ws), "gitdir")
+				if err := os.WriteFile(back, []byte(filepath.Join(root, "elsewhere", ".git")+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			case "symlinked gitfile":
+				real := filepath.Join(root, "real-gitfile")
+				if err := os.Rename(filepath.Join(ws, ".git"), real); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(real, filepath.Join(ws, ".git")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			agentDir := t.TempDir()
+			dest, err := seedCheckedPrivateGitConfig(context.Background(), repo, ws, agentDir, "agent-x")
+			if err == nil {
+				t.Fatalf("unresolved worktree admin dir accepted (dest %q)", dest)
+			}
+			if !strings.Contains(err.Error(), "cannot resolve the broker-recorded worktree admin directory") {
+				t.Errorf("error does not mirror the runtime refusal: %v", err)
+			}
+			if _, statErr := os.Lstat(filepath.Join(agentDir, "git")); !os.IsNotExist(statErr) {
+				t.Errorf("a refused seed created the git dir (stat err %v)", statErr)
+			}
+		})
+	}
+}
+
+// gitRepoWithCommit makes a repository with one commit under root and returns
+// its path.
+func gitRepoWithCommit(t *testing.T, root string) string {
+	t.Helper()
+	repo := filepath.Join(root, "repo")
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1", "SCION_HOST_UID=",
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run(root, "init", "-q", "-b", "main", repo)
+	if err := os.WriteFile(filepath.Join(repo, "f"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(repo, "add", "f")
+	run(repo, "commit", "-q", "-m", "init")
+	return repo
+}
+
+// A repository whose .git is a symlink (or a gitfile) is refused at the seed,
+// before anything is written.
+func TestCheckSeedSubmodules_SymlinkedDotGitRefuses(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	for _, tc := range []string{"symlink", "gitfile"} {
+		t.Run(tc, func(t *testing.T) {
+			root := t.TempDir()
+			repo := gitRepoWithCommit(t, root)
+			real := filepath.Join(root, "real-dot-git")
+			if err := os.Rename(filepath.Join(repo, ".git"), real); err != nil {
+				t.Fatal(err)
+			}
+			switch tc {
+			case "symlink":
+				if err := os.Symlink(real, filepath.Join(repo, ".git")); err != nil {
+					t.Fatal(err)
+				}
+			case "gitfile":
+				if err := os.WriteFile(filepath.Join(repo, ".git"), []byte("gitdir: "+real+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			agentDir := t.TempDir()
+			_, err := seedCheckedPrivateGitConfig(context.Background(), repo, repo, agentDir, "agent-x")
+			if err == nil || !strings.Contains(err.Error(), "must be a real directory") {
+				t.Fatalf("error = %v, want a refusal of the %s .git", err, tc)
+			}
+			if _, statErr := os.Lstat(filepath.Join(agentDir, "git")); !os.IsNotExist(statErr) {
+				t.Errorf("a refused seed created the git dir (stat err %v)", statErr)
+			}
+		})
+	}
+}
+
+// When the worktree admin name does not resolve, an Lstat of <ws>/.git that
+// fails with anything but "does not exist" refuses (here: no search
+// permission on the workspace).
+func TestSeedCheckedPrivateGitConfig_UncheckableWorkspaceGitRefuses(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions, so the Lstat cannot fail here")
+	}
+	root := t.TempDir()
+	repo := gitRepoWithCommit(t, root)
+	ws := filepath.Join(root, "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(ws, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(ws, 0o755) })
+	agentDir := t.TempDir()
+	_, err := seedCheckedPrivateGitConfig(context.Background(), repo, ws, agentDir, "agent-x")
+	if err == nil || !strings.Contains(err.Error(), "cannot resolve the broker-recorded worktree admin directory") {
+		t.Fatalf("error = %v, want a refusal", err)
+	}
+	if _, statErr := os.Lstat(filepath.Join(agentDir, "git")); !os.IsNotExist(statErr) {
+		t.Errorf("a refused seed created the git dir (stat err %v)", statErr)
 	}
 }

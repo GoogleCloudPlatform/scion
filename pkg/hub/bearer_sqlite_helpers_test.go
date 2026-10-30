@@ -280,6 +280,13 @@ func bearerMatrixBodyOverrides(f idFixtures) map[overrideKey]map[string]interfac
 			"roleDefinitionId": f.projectMemberRoleID, "principalType": "user", "principalId": f.user,
 		},
 		{"project.membership.transfer", "/api/v1/projects/{id}/transfer-ownership"}: {"newOwnerId": f.member},
+		// Env and secret writes validate the body (a value is required)
+		// before the scope's credential check: user scope is the default,
+		// and hub-level writes name the scope in the body.
+		{"env.user.write", "/api/v1/env/{key}"}:        {"value": "bdm"},
+		{"secret.user.write", "/api/v1/secrets/{key}"}: {"value": "YmRt"},
+		{"env.hub.write", "/api/v1/env/{key}"}:         {"scope": "hub", "value": "bdm"},
+		{"secret.hub.write", "/api/v1/secrets/{key}"}:  {"scope": "hub", "value": "YmRt"},
 		// The delegation ceiling applies to the role an agent is granted:
 		// a token carrying only agent:create covers no usable role, so the
 		// probe asks for agentRole "none", which every creator may grant.
@@ -358,6 +365,13 @@ func bearerMatrixQueryOverrides(f idFixtures) map[overrideKey]string {
 		{"chat.search.dm", "/api/v1/chat/search"}:      "q=chat&key=" + f.chat.dmAgent,
 		// The starred-only history variant.
 		{"chat.conversation.history.starred", "/api/v1/chat/conversations/{id}/messages"}: "starred=true",
+		// Hub-level env and secret variants (user scope is the default).
+		{"env.hub.list", "/api/v1/env"}:               "scope=hub",
+		{"env.hub.read", "/api/v1/env/{key}"}:         "scope=hub",
+		{"env.hub.write", "/api/v1/env/{key}"}:        "scope=hub",
+		{"secret.hub.read", "/api/v1/secrets"}:        "scope=hub",
+		{"secret.hub.read", "/api/v1/secrets/{key}"}:  "scope=hub",
+		{"secret.hub.write", "/api/v1/secrets/{key}"}: "scope=hub",
 	}
 }
 

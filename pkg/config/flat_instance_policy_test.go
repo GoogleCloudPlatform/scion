@@ -26,6 +26,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // Flat Runtime Broker instance policy
@@ -104,7 +106,12 @@ func TestNewFlatInstancePolicy_CopiesEveryReferenceField(t *testing.T) {
 			}
 			b := true
 			f.Set(reflect.ValueOf(&b))
-		case reflect.Slice, reflect.Interface, reflect.Chan, reflect.Func,
+		case reflect.Slice:
+			if f.Type().Elem() != reflect.TypeOf(api.K8sToleration{}) {
+				t.Fatalf("field %s: unsupported slice type %s; extend this test", name, f.Type())
+			}
+			f.Set(reflect.ValueOf([]api.K8sToleration{{Key: "k"}}))
+		case reflect.Interface, reflect.Chan, reflect.Func,
 			reflect.Struct, reflect.Array, reflect.UnsafePointer:
 			// A struct or array can hold a map or pointer of its own.
 			t.Fatalf("field %s: unsupported kind %s; extend this test", name, f.Kind())
@@ -128,13 +135,18 @@ func TestNewFlatInstancePolicy_CopiesEveryReferenceField(t *testing.T) {
 			if got := pv.FieldByName(name); got.IsNil() || !got.Elem().Bool() {
 				t.Errorf("field %s is shared between the policy and the entry", name)
 			}
+		case reflect.Slice:
+			f.Index(0).FieldByName("Key").SetString("changed")
+			if got := pv.FieldByName(name); got.Len() != 1 || got.Index(0).FieldByName("Key").String() != "k" {
+				t.Errorf("field %s is shared between the policy and the entry", name)
+			}
 		}
 	}
 	if len(refFields) == 0 {
 		t.Fatal("V1RuntimeTargetConfig has no reference field; the test checks nothing")
 	}
 	// Not vacuous for the known reference fields.
-	for _, want := range []string{"KubernetesServiceAccountMappings", "SafeToEvict", "SharedDirStorageBackends"} {
+	for _, want := range []string{"KubernetesServiceAccountMappings", "SafeToEvict", "SharedDirStorageBackends", "NodeSelector", "Tolerations"} {
 		if !slices.Contains(refFields, want) {
 			t.Fatalf("reference field %s was not checked (checked: %v)", want, refFields)
 		}

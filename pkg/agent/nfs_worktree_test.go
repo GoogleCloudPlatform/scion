@@ -193,24 +193,24 @@ func TestEnsureNFSWorktreeLeaf(t *testing.T) {
 	resolved := resolveTestNFSWorkspace(t, mountRoot)
 	wt := filepath.Join(resolved.HostPath, "worktrees", "agent-1")
 
-	ok, err := ensureNFSWorktreeLeaf("docker", resolved, "ws-pv", "agent-1")
+	ok, err := ensureNFSWorktreeLeaf("docker", resolved, runtime.NFSPodShare{ClaimName: "ws-pv"}, "agent-1")
 	require.NoError(t, err)
 	assert.False(t, ok)
 
 	// Export not mounted on the broker.
-	ok, err = ensureNFSWorktreeLeaf("kubernetes", resolved, "ws-pv", "agent-1")
+	ok, err = ensureNFSWorktreeLeaf("kubernetes", resolved, runtime.NFSPodShare{ClaimName: "ws-pv"}, "agent-1")
 	require.NoError(t, err)
 	assert.False(t, ok)
 
 	require.NoError(t, os.MkdirAll(resolved.HostPath, 0o770))
-	ok, err = ensureNFSWorktreeLeaf("kubernetes", resolved, "ws-pv", "agent-1")
+	ok, err = ensureNFSWorktreeLeaf("kubernetes", resolved, runtime.NFSPodShare{ClaimName: "ws-pv"}, "agent-1")
 	require.NoError(t, err)
 	assert.True(t, ok)
 	_, statErr := os.Stat(filepath.Join(resolved.HostPath, "worktrees"))
 	assert.True(t, os.IsNotExist(statErr), "nothing is created before the shared checkout is provisioned")
 
 	require.NoError(t, os.WriteFile(filepath.Join(resolved.HostPath, provision.ProvisionSentinelFile), []byte("x"), 0o644))
-	ok, err = ensureNFSWorktreeLeaf("kubernetes", resolved, "ws-pv", "agent-1")
+	ok, err = ensureNFSWorktreeLeaf("kubernetes", resolved, runtime.NFSPodShare{ClaimName: "ws-pv"}, "agent-1")
 	require.NoError(t, err)
 	assert.True(t, ok)
 	info, err := os.Stat(wt)
@@ -219,13 +219,13 @@ func TestEnsureNFSWorktreeLeaf(t *testing.T) {
 
 	marker := filepath.Join(wt, "work.txt")
 	require.NoError(t, os.WriteFile(marker, []byte("x"), 0o644))
-	_, err = ensureNFSWorktreeLeaf("kubernetes", resolved, "ws-pv", "agent-1")
+	_, err = ensureNFSWorktreeLeaf("kubernetes", resolved, runtime.NFSPodShare{ClaimName: "ws-pv"}, "agent-1")
 	require.NoError(t, err)
 	_, err = os.Stat(marker)
 	assert.NoError(t, err, "an existing directory is left alone")
 
 	for _, bad := range []string{"../x", "a/b", "Agent-1", ""} {
-		_, err = ensureNFSWorktreeLeaf("kubernetes", resolved, "ws-pv", bad)
+		_, err = ensureNFSWorktreeLeaf("kubernetes", resolved, runtime.NFSPodShare{ClaimName: "ws-pv"}, bad)
 		assert.Error(t, err, "name %q", bad)
 	}
 }

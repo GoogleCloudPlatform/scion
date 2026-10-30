@@ -1361,7 +1361,7 @@ func setupHubManagedBaseRepo(t *testing.T, agentName string) (repoRoot, workspac
 }
 
 // setupWorktreeAdmin creates .git/worktrees/<adminName>/gitdir (pointing at
-// <workspace>/.git) and the workspace's own .git gitfile, so trustedWorktreeAdminName
+// <workspace>/.git) and the workspace's own .git gitfile, so util.TrustedWorktreeAdminName
 // resolves <adminName> for <workspace>.
 func setupWorktreeAdmin(t *testing.T, repoRoot, adminName, workspace string) {
 	t.Helper()
@@ -1734,7 +1734,7 @@ func TestNarrowSharerRegistryMounts_LocalDocker(t *testing.T) {
 // directory name for that worktree (the last path element of the gitdir
 // pointer in <workspace>/.git) does not have to match agentName — `git
 // worktree add` appends a numeric suffix on a name collision, so
-// trustedWorktreeAdminName finds the real name by matching each
+// util.TrustedWorktreeAdminName finds the real name by matching each
 // worktrees/<name>/gitdir back-link against <workspace>/.git (never from the
 // agent-writable gitfile) rather than assuming filepath.Base(workspace). This test builds exactly that gitfile
 // (naming admin dir "workspace1", distinct from the agent name "agent-1")
@@ -1758,7 +1758,7 @@ func TestNarrowSharerRegistryMounts_LocalRealAgentLayout(t *testing.T) {
 	}
 
 	// The admin dir's resolved name ("workspace1") intentionally differs from
-	// the agent name ("agent-1") — this is what forces trustedWorktreeAdminName
+	// the agent name ("agent-1") — this is what forces util.TrustedWorktreeAdminName
 	// to resolve the name from the worktrees/<name>/gitdir back-link rather than
 	// assume the agent name.
 	adminDir := filepath.Join(gitDir, "worktrees", "workspace1")
@@ -2638,7 +2638,9 @@ func TestBuildCommonRunArgs_ProjectLabels_ExactSet(t *testing.T) {
 	var scionLabels []string
 	for i, arg := range args {
 		if arg == "--label" && i+1 < len(args) {
-			if v := args[i+1]; strings.HasPrefix(v, "scion.") {
+			// The bind-source record is not a project label
+			// (LabelBindSources); it is on every container.
+			if v := args[i+1]; strings.HasPrefix(v, "scion.") && !strings.HasPrefix(v, LabelBindSources+"=") {
 				scionLabels = append(scionLabels, v)
 			}
 		}

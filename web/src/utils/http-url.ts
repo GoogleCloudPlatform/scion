@@ -58,3 +58,15 @@ export function isHttpUrl(value: string | null | undefined): value is string {
   // new URL() accepts "http:host" and "http:/host"; require the "//" form.
   return /^https?:\/\/[^/]/i.test(value);
 }
+
+/**
+ * The value when it is an absolute https:// URL that passes isHttpUrl,
+ * otherwise null. For links whose target comes from outside the hub (for
+ * example a release manifest's release_url): render an <a href> only for a
+ * non-null result and plain text otherwise, so javascript:, data:, http:
+ * and relative values never become clickable.
+ */
+export function safeHttpsUrl(value: unknown): string | null {
+  if (typeof value !== 'string' || !isHttpUrl(value)) return null;
+  return /^https:/i.test(value) ? value : null;
+}

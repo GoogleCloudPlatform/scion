@@ -66,3 +66,45 @@ func TestBuildHubServerConfig_PortProxyResponseHeaderTimeout(t *testing.T) {
 	cfg.Hub.PortProxy.ResponseHeaderTimeout = "90s"
 	assert.Equal(t, 90*time.Second, buildHubServerConfig(cfg, "https://hub.example.com", "", nil, false, "", nil).PortProxyResponseHeaderTimeout)
 }
+
+// TestValidateServerPreflight_PortViewTTL: an out-of-range or malformed
+// server.hub.port_proxy.view_ttl fails hub startup with a message naming
+// the setting; an unset or in-range value starts.
+func TestValidateServerPreflight_PortViewTTL(t *testing.T) {
+	t.Cleanup(resetServerFlags)
+	for _, tc := range []struct {
+		value   string
+		wantErr string
+	}{
+		{value: ""},
+		{value: "15m"},
+		{value: "24h"},
+		{value: "14m", wantErr: "must be between 15m0s and 24h0m0s"},
+		{value: "25h", wantErr: "must be between 15m0s and 24h0m0s"},
+		{value: "later", wantErr: "invalid server.hub.port_proxy.view_ttl"},
+	} {
+		t.Run("value "+tc.value, func(t *testing.T) {
+			resetServerFlags()
+			enableHub = true
+			cfg := &config.GlobalConfig{}
+			cfg.Hub.PortProxy.ViewTTL = tc.value
+			err := validateServerPreflight(cfg)
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "server.hub.port_proxy.view_ttl")
+			assert.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
+}
+
+// TestBuildHubServerConfig_PortViewTTL: the setting reaches the hub
+// ServerConfig, defaulting to 2h.
+func TestBuildHubServerConfig_PortViewTTL(t *testing.T) {
+	cfg := &config.GlobalConfig{}
+	assert.Equal(t, 2*time.Hour, buildHubServerConfig(cfg, "https://hub.example.com", "", nil, false, "", nil).PortViewTTL)
+	cfg.Hub.PortProxy.ViewTTL = "30m"
+	assert.Equal(t, 30*time.Minute, buildHubServerConfig(cfg, "https://hub.example.com", "", nil, false, "", nil).PortViewTTL)
+}

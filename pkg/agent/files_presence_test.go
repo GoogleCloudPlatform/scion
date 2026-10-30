@@ -157,3 +157,71 @@ func TestFilesPresenceString(t *testing.T) {
 	var zero FilesPresence
 	assert.Equal(t, FilesUnknown, zero, "the zero value is never a proof")
 }
+
+// presenceScrubbedChild marks the child process
+// TestAgentFilesPresence_AllowListedEnv runs.
+const presenceScrubbedChild = "SCION_TEST_PRESENCE_SCRUBBED_CHILD"
+
+// TestAgentFilesPresence_AllowListedEnv runs TestAgentFilesPresence again in a
+// child process whose environment is only an allow-list (as env -i with a few
+// variables would give): present, absent and unknown come out the same.
+func TestAgentFilesPresence_AllowListedEnv(t *testing.T) {
+	if os.Getenv(presenceScrubbedChild) != "" {
+		t.Skip("already in the allow-listed child")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	exe, err := os.Executable()
+	require.NoError(t, err)
+	env := []string{presenceScrubbedChild + "=1", "HOME=" + t.TempDir()}
+	for _, k := range []string{"PATH", "TMPDIR", "SYSTEMROOT"} {
+		if v, ok := os.LookupEnv(k); ok {
+			env = append(env, k+"="+v)
+		}
+	}
+	cmd := exec.Command(exe, "-test.run=^TestAgentFilesPresence$", "-test.count=1", "-test.v")
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "allow-listed child failed:\n%s", out)
+	for _, sub := range []string{"nothing", "branch_named_after_the_agent", "worktree_entry_whose_directory_is_gone", "shared-base_worktree", "unknown"} {
+		assert.Contains(t, string(out), "--- PASS: TestAgentFilesPresence/"+sub, "subtest %s did not pass in the child", sub)
+	}
+}
+
+// A repository config the host-side git policy refuses makes the git-based
+// checks unknown, never absent: unknown is the fail-closed answer for an
+// absence proof.
+func TestAgentFilesPresence_RefusedRepoConfigIsUnknown(t *testing.T) {
+	t.Run("linked checkout", func(t *testing.T) {
+		root := presenceProject(t, true)
+		assert.Equal(t, FilesAbsent, AgentFilesPresence("worker", root, ""))
+		presenceGit(t, root, "config", "core.sshCommand", "ssh -v")
+		assert.Equal(t, FilesUnknown, AgentFilesPresence("worker", root, ""))
+	})
+	t.Run("shared base", func(t *testing.T) {
+		root := presenceProject(t, false)
+		base := filepath.Join(root, "workspace")
+		require.NoError(t, os.MkdirAll(base, 0o755))
+		presenceGit(t, base, "init", "-q", "-b", "main")
+		assert.Equal(t, FilesAbsent, AgentFilesPresence("worker", root, ""))
+		// A key the user's checkout may carry, but a Scion-managed shared base
+		// may not.
+		presenceGit(t, base, "config", "pull.rebase", "true")
+		assert.Equal(t, FilesUnknown, AgentFilesPresence("worker", root, ""))
+	})
+}
+
+// An inherited GIT_DIR naming another repository does not redirect the
+// checks: the branch there is not the agent's.
+func TestAgentFilesPresence_IgnoresInheritedGitDir(t *testing.T) {
+	other := t.TempDir()
+	presenceGit(t, other, "init", "-q", "-b", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(other, "f"), []byte("x"), 0o644))
+	presenceGit(t, other, "add", "f")
+	presenceGit(t, other, "commit", "-q", "-m", "init")
+	presenceGit(t, other, "branch", "worker")
+	root := presenceProject(t, true)
+	t.Setenv("GIT_DIR", filepath.Join(other, ".git"))
+	assert.Equal(t, FilesAbsent, AgentFilesPresence("worker", root, ""))
+}

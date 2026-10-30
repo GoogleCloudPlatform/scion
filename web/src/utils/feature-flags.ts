@@ -46,7 +46,11 @@ declare global {
  * Go-side consistency test extracts this set with a regex that only sees
  * literals.
  */
-const DEFAULT_ON_FLAGS = new Set(['web.native_chat', 'web.agent_edit']);
+const DEFAULT_ON_FLAGS = new Set([
+  'web.native_chat',
+  'web.agent_edit',
+  'web.chat_starred_messages',
+]);
 
 /**
  * The window event sent after the flag bag changes (server flags applied, or
@@ -212,3 +216,11 @@ export const SSE_HIDDEN_TAB_CLOSE_FLAG = 'web.sse_hidden_tab_close';
  * checks. Default OFF.
  */
 export const ARTIFACT_REVIEW_EDITOR_FLAG = 'web.artifact_review_editor';
+
+/**
+ * Force user delete (ptone/scion#2143): the admin users page offers to
+ * force-delete a user who has agents and shows a deletion in
+ * progress. Presentation only: the hub checks the experiment on the force
+ * request and on the deletion resource. Default OFF.
+ */
+export const USER_DELETE_FORCE_CASCADE_FLAG = 'hub.user_delete_force_cascade';

@@ -395,6 +395,11 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 					HTTPStatus: http.StatusPreconditionFailed,
 				}
 			}
+			if status, code, msg, ok := brokerProjectStorageRefusal(err); ok {
+				// The broker does not see the project storage share: its
+				// status and code, and only a known path-free message.
+				return nil, &AgentDMError{Code: code, Message: msg, HTTPStatus: status}
+			}
 			return nil, &AgentDMError{
 				Code:       ErrCodeRuntimeError,
 				Message:    "Failed to wake agent: " + err.Error(),

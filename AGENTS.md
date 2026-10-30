@@ -22,7 +22,7 @@ Alpha: changing or removing behavior needs no deprecation path.
 - Build with `go build -buildvcs=false`; worktrees fail VCS stamping.
 - Never compile the whole `pkg/hub` test package (about 12 GiB). Use `make test-hub-shard SHARD=K`; `hack/hubshard/hubshard.sh -locate TestName` finds the shard.
 - Scope `golangci-lint` to touched packages: `GOGC=40 golangci-lint run --new-from-rev=main --concurrency=1 ./pkg/foo/...`.
-- Never open an editor: `git config core.editor true`, `GIT_EDITOR=true git rebase --continue`, `git merge main --no-edit`, `git commit -m`.
+- Never open an editor: set the editor per command (`GIT_EDITOR=true git rebase --continue`, or `git -c core.editor=true <subcommand>`), `git merge main --no-edit`, `git commit -m`. Never write `core.editor` into the repository config: brokers refuse to start agents whose checkout sets it.
 - Local `main` is the source of truth. Don't check it out; use `git diff main...HEAD`, `git show main:path`, `git rebase main`. Use remotes only when asked; report remote failures instead of working around them.
 - In worktree-per-agent mode you work under `/repo-root`, not `/workspace`. Scripts use `$PWD` or `git rev-parse --show-toplevel`.
 - Project resolution: `--project`/`--global`, then the project `.scion`, then `scion use` (outside a project), then `~/.scion`.

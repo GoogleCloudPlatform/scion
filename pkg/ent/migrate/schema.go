@@ -1958,6 +1958,21 @@ var (
 				Unique:  false,
 				Columns: []*schema.Column{MessagesColumns[1], MessagesColumns[23], MessagesColumns[0]},
 			},
+			{
+				Name:    "message_sender_id_created_id",
+				Unique:  false,
+				Columns: []*schema.Column{MessagesColumns[3], MessagesColumns[23], MessagesColumns[0]},
+			},
+			{
+				Name:    "message_recipient_id_created_id",
+				Unique:  false,
+				Columns: []*schema.Column{MessagesColumns[5], MessagesColumns[23], MessagesColumns[0]},
+			},
+			{
+				Name:    "message_project_id_sender_created_id",
+				Unique:  false,
+				Columns: []*schema.Column{MessagesColumns[1], MessagesColumns[2], MessagesColumns[23], MessagesColumns[0]},
+			},
 		},
 	}
 	// MessageAddresseesColumns holds the columns for the "message_addressees" table.
@@ -3117,7 +3132,7 @@ var (
 		{Name: "display_name", Type: field.TypeString},
 		{Name: "avatar_url", Type: field.TypeString, Nullable: true},
 		{Name: "role", Type: field.TypeEnum, Enums: []string{"admin", "member", "viewer"}, Default: "member"},
-		{Name: "status", Type: field.TypeEnum, Enums: []string{"active", "suspended", "invited", "pending"}, Default: "active"},
+		{Name: "status", Type: field.TypeEnum, Enums: []string{"active", "suspended", "invited", "pending", "deleting"}, Default: "active"},
 		{Name: "preferences", Type: field.TypeJSON, Nullable: true},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "invited_by", Type: field.TypeString, Nullable: true},
@@ -3200,6 +3215,72 @@ var (
 				Name:    "useraccesstoken_project_id",
 				Unique:  false,
 				Columns: []*schema.Column{UserAccessTokensColumns[5]},
+			},
+		},
+	}
+	// UserDeletionsColumns holds the columns for the "user_deletions" table.
+	UserDeletionsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "user_id", Type: field.TypeUUID, Unique: true},
+		{Name: "state", Type: field.TypeString},
+		{Name: "requested_by_kind", Type: field.TypeString, Default: ""},
+		{Name: "requested_by_id", Type: field.TypeString, Default: ""},
+		{Name: "credential_kind", Type: field.TypeString, Default: ""},
+		{Name: "requested_at", Type: field.TypeTime},
+		{Name: "completed_at", Type: field.TypeTime, Nullable: true},
+		{Name: "last_reconciled_at", Type: field.TypeTime, Nullable: true},
+		{Name: "before_summary", Type: field.TypeString, Size: 2147483647, Default: ""},
+		{Name: "orphaned_by_revoke", Type: field.TypeString, Size: 2147483647, Default: ""},
+		{Name: "last_error", Type: field.TypeString, Size: 2147483647, Default: ""},
+	}
+	// UserDeletionsTable holds the schema information for the "user_deletions" table.
+	UserDeletionsTable = &schema.Table{
+		Name:       "user_deletions",
+		Columns:    UserDeletionsColumns,
+		PrimaryKey: []*schema.Column{UserDeletionsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "userdeletion_state",
+				Unique:  false,
+				Columns: []*schema.Column{UserDeletionsColumns[2]},
+			},
+		},
+	}
+	// UserDeletionAgentsColumns holds the columns for the "user_deletion_agents" table.
+	UserDeletionAgentsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "agent_id", Type: field.TypeUUID},
+		{Name: "slug", Type: field.TypeString, Default: ""},
+		{Name: "project_id", Type: field.TypeString, Default: ""},
+		{Name: "outcome", Type: field.TypeString},
+		{Name: "attempts", Type: field.TypeInt, Default: 0},
+		{Name: "last_error", Type: field.TypeString, Size: 2147483647, Default: ""},
+		{Name: "updated_at", Type: field.TypeTime},
+		{Name: "deletion_id", Type: field.TypeUUID},
+	}
+	// UserDeletionAgentsTable holds the schema information for the "user_deletion_agents" table.
+	UserDeletionAgentsTable = &schema.Table{
+		Name:       "user_deletion_agents",
+		Columns:    UserDeletionAgentsColumns,
+		PrimaryKey: []*schema.Column{UserDeletionAgentsColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "user_deletion_agents_user_deletions_agents",
+				Columns:    []*schema.Column{UserDeletionAgentsColumns[8]},
+				RefColumns: []*schema.Column{UserDeletionsColumns[0]},
+				OnDelete:   schema.Cascade,
+			},
+		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "userdeletionagent_deletion_id_agent_id",
+				Unique:  true,
+				Columns: []*schema.Column{UserDeletionAgentsColumns[8], UserDeletionAgentsColumns[1]},
+			},
+			{
+				Name:    "userdeletionagent_agent_id",
+				Unique:  false,
+				Columns: []*schema.Column{UserDeletionAgentsColumns[1]},
 			},
 		},
 	}
@@ -3339,6 +3420,8 @@ var (
 		UsageReservationsTable,
 		UsersTable,
 		UserAccessTokensTable,
+		UserDeletionsTable,
+		UserDeletionAgentsTable,
 		UserTerminalWorkspacesTable,
 		GroupChildGroupsTable,
 	}
@@ -3565,6 +3648,13 @@ func init() {
 	}
 	UserAccessTokensTable.Annotation.Checks = map[string]string{
 		"user_access_tokens_boundary_kind_check": "((boundary_kind = 'project' AND project_id IS NOT NULL) OR (boundary_kind = 'hub' AND project_id IS NULL))",
+	}
+	UserDeletionsTable.Annotation = &entsql.Annotation{
+		Table: "user_deletions",
+	}
+	UserDeletionAgentsTable.ForeignKeys[0].RefTable = UserDeletionsTable
+	UserDeletionAgentsTable.Annotation = &entsql.Annotation{
+		Table: "user_deletion_agents",
 	}
 	UserTerminalWorkspacesTable.ForeignKeys[0].RefTable = UsersTable
 	UserTerminalWorkspacesTable.Annotation = &entsql.Annotation{

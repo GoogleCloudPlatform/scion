@@ -93,7 +93,7 @@ func serverSigningRingFromFile() *keyring.SigningRing {
 }
 
 // keyringLegacySecret returns the keyring file's "legacy" signing entry,
-// which every purpose but the web session cookies still uses in this
+// which every purpose not yet on the signing ring still uses in this
 // release, or false without a keyring file.
 func keyringLegacySecret() (string, bool) {
 	if k := serverKeyringFromFile(); k != nil {

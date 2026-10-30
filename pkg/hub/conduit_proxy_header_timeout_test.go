@@ -364,7 +364,7 @@ func TestConduitProxyTimeoutClassification(t *testing.T) {
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				s.serveConduitProxy(rec, req, agent, 3000, "/x", conn)
+				s.serveConduitProxy(rec, req, agent, 3000, "/x", conn, portProxyPolicy{surface: portProxySurfacePath, caller: identityStringFromContext(req.Context())})
 			}()
 			select {
 			case <-done:

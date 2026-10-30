@@ -2994,6 +2994,7 @@ func isCompressBypassPath(path string) bool {
 		"/api/v1/admin/invites",
 		"/api/v1/artifacts/view/",
 		"/api/v1/artifacts/shared/",
+		"/api/v1/portview/",
 	} {
 		if strings.HasPrefix(path, prefix) {
 			return true
@@ -3665,10 +3666,10 @@ func (ws *WebServer) sessionAuthMiddleware(next http.Handler) http.Handler {
 			// server, a request without a session cookie carries it in
 			// the redirect instead (see keepsNoAnonymousSession).
 			if ws.keepsNoAnonymousSession(r) {
-				http.Redirect(w, r, ws.noSessionLoginLocation(r.URL.Path), http.StatusFound)
+				http.Redirect(w, r, ws.noSessionLoginLocation(r.URL.RequestURI()), http.StatusFound)
 				return
 			}
-			session.Values[sessKeyReturnTo] = localRedirectPath(r.URL.Path)
+			session.Values[sessKeyReturnTo] = localRedirectPath(r.URL.RequestURI())
 			_ = session.Save(r, w)
 			http.Redirect(w, r, "/auth/login", http.StatusFound)
 			return

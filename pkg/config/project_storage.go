@@ -191,7 +191,8 @@ func (p *V1ProjectStorageConfig) Validate() error {
 // section of the global settings.
 //
 //   - server.project_storage set: it is the block, after defaults and
-//     Validate. Setting it together with any of the blocks it replaces is
+//     ValidateProjectStorage (OriginFile); an invalid field is returned as
+//     a FieldErrorList naming it. Setting it together with any of the blocks it replaces is
 //     an error: exactly one storage block configures a hub.
 //   - otherwise the block is synthesized from server.workspace_storage
 //     (backend and backend blocks) and server.home_storage (backend ->
@@ -202,6 +203,9 @@ func (p *V1ProjectStorageConfig) Validate() error {
 //     backend, as one backend places both. Only the genuinely ambiguous cases are errors:
 //     two nfs blocks naming different trees, or nfs homes with no nfs share.
 //   - nothing set: nil (the local backend).
+//
+// A synthesized block passes the same field rules, reported under the
+// deprecated keys.
 func ResolveProjectStorage(srv *V1ServerConfig) (*V1ProjectStorageConfig, []string, error) {
 	if srv == nil {
 		return nil, nil, nil
@@ -231,7 +235,7 @@ func SynthesizeProjectStorage(ps *V1ProjectStorageConfig, ws *V1WorkspaceStorage
 		}
 		out := cloneProjectStorage(ps)
 		out.ApplyDefaults()
-		if err := out.Validate(); err != nil {
+		if err := fieldErrorsErr(ValidateProjectStorage(out, OriginFile)); err != nil {
 			return nil, nil, err
 		}
 		return out, nil, nil
@@ -309,6 +313,11 @@ func SynthesizeProjectStorage(ps *V1ProjectStorageConfig, ws *V1WorkspaceStorage
 	if err := out.Validate(); err != nil {
 		return nil, nil, err
 	}
+	// The field rules of ValidateProjectStorage, reported under the
+	// deprecated keys the values were read from.
+	if err := fieldErrorsErr(validateProjectStorageFields(out, OriginFile, workspaceStorageKey, sharedDirStorageKey)); err != nil {
+		return nil, nil, err
+	}
 	warnings = append([]string{legacyStorageWarning(legacy, out)}, warnings...)
 	return out, warnings, nil
 }
@@ -329,6 +338,15 @@ func placeLegacySharedDirs(ps *V1ProjectStorageConfig, sd *V1SharedDirStorageCon
 		nfs := *sd.NFS
 		nfs.Shares = append([]V1NFSShare(nil), sd.NFS.Shares...)
 		nfs.SubPathRoot = sdLayout.SubPathRoot
+		// The owner ids default as the workspace block's do
+		// (V1WorkspaceStorageConfig.ApplyNFSDefaults), so the shared-dir
+		// leaves a root creator makes get the nfs owner in this split too.
+		if nfs.UID == 0 {
+			nfs.UID = 1000
+		}
+		if nfs.GID == 0 {
+			nfs.GID = 1000
+		}
 		ps.LegacySharedDirsNFS = &nfs
 		return []string{fmt.Sprintf("%s is nfs but the workspace is %q (from %s): shared dirs stay on the shared_dir_storage export "+
 			"and workspaces stay where they are until %s is written. Writing it with backend \"nfs\" moves workspaces onto the export too "+
@@ -485,8 +503,10 @@ func ResolveGlobalProjectStorage(gc *GlobalConfig) (*V1ProjectStorageConfig, []s
 // the storage blocks: server.project_storage set with any block it
 // replaces, an invalid server.project_storage, and the synthesis errors of
 // SynthesizeProjectStorage (two nfs blocks naming different trees, nfs
-// homes with no nfs share). The deprecated blocks' own per-block value
-// checks are left to the process that uses them, as before.
+// homes with no nfs share), including the field rules of
+// ValidateProjectStorage on the block a valid set of deprecated blocks
+// synthesizes. A deprecated block that fails its own Validate is left to
+// the process that uses it, as before.
 func ValidateStorageBlocks(ps *V1ProjectStorageConfig, ws *V1WorkspaceStorageConfig, sd *V1SharedDirStorageConfig, hs *V1HomeStorageConfig) error {
 	if ps == nil {
 		if ws != nil {

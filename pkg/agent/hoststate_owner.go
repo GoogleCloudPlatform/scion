@@ -181,6 +181,11 @@ func isRealDir(path string) bool {
 //     the root is E. The marker's project ID must equal HubProjectID and
 //     its slug must equal the slug; E and E/.scion must be real
 //     directories. No E, or anything else, is refused.
+//   - <root>/.scion is a shared project configuration directory
+//     (config.IsSharedProjectConfigDir): the root holding the agent dir
+//     config.AgentDirForProject resolves (the external agents root, for
+//     every sharing mode, or the agent's legacy in-project dir); see
+//     sharedProjectHostStateRoot.
 //   - <root>/.scion is a directory and the agent is a shared-workspace
 //     agent (t.SharedWorkspace, or E/.scion/agents/<name>/scion-agent.json
 //     is a regular file, checked with Stat as effectiveSharedWorkspace
@@ -254,6 +259,17 @@ func HostStateRootFor(t RunOwnerTarget) (string, error) {
 		return ext, nil
 	}
 
+	// A shared project configuration (config.IsSharedProjectConfigDir: the
+	// hub's UUID-keyed tree on a shared Layout) keeps every agent's state,
+	// whatever its sharing mode, in the broker-local external agents root
+	// (config.AgentsRootForProject), or in the agent's legacy in-project dir
+	// for an agent provisioned before the configuration moved
+	// (config.AgentDirForProject's look-up fallback). The record goes to
+	// that same agent dir, never below the project root on the share.
+	if config.IsSharedProjectConfigDir(configDir) {
+		return sharedProjectHostStateRoot(configDir, t)
+	}
+
 	shared := t.SharedWorkspace
 	if !shared && ext != "" {
 		sf, err := os.Stat(filepath.Join(ext, config.DotScion, "agents", t.AgentName, "scion-agent.json"))
@@ -267,6 +283,29 @@ func HostStateRootFor(t RunOwnerTarget) (string, error) {
 			return "", refuseHostStateRoot("%s is not a real directory", ext)
 		}
 		return ext, nil
+	}
+	return root, nil
+}
+
+// sharedProjectHostStateRoot is HostStateRootFor for a shared project
+// configuration directory configDir: the root whose <root>/.scion/agents/
+// <name> is the agent dir config.AgentDirForProject resolves from the
+// broker-held identity (the hub project ID must name the configuration's
+// project). Anything else, or a root that is not a real directory, is
+// refused.
+func sharedProjectHostStateRoot(configDir string, t RunOwnerTarget) (string, error) {
+	agentDir, err := config.AgentDirForProject(configDir, t.AgentName, t.SharedWorkspace, t.HubProjectID)
+	if err != nil {
+		return "", refuseHostStateRoot("shared project configuration %s: %v", configDir, err)
+	}
+	agentsRoot := filepath.Dir(agentDir)
+	dotScion := filepath.Dir(agentsRoot)
+	if filepath.Base(agentDir) != t.AgentName || filepath.Base(agentsRoot) != "agents" || filepath.Base(dotScion) != config.DotScion {
+		return "", refuseHostStateRoot("shared project configuration %s: agent dir %s is not <root>/.scion/agents/%s", configDir, agentDir, t.AgentName)
+	}
+	root := filepath.Dir(dotScion)
+	if !isRealDir(root) {
+		return "", refuseHostStateRoot("%s is not a real directory", root)
 	}
 	return root, nil
 }

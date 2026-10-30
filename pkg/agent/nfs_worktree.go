@@ -100,8 +100,8 @@ func isNFSWorktreeName(name string) bool {
 // Kubernetes, no claim, export not mounted on the broker, or a directory
 // the broker is not allowed to create), and prepared has the same meaning.
 // An existing directory is left exactly as it is.
-func ensureNFSWorktreeLeaf(runtimeName string, resolved runtime.ResolvedWorkspace, pvClaimName, name string) (prepared bool, err error) {
-	if !isKubernetesRuntime(runtimeName) || resolved.Backend != "nfs" || pvClaimName == "" {
+func ensureNFSWorktreeLeaf(runtimeName string, resolved runtime.ResolvedWorkspace, share runtime.NFSPodShare, name string) (prepared bool, err error) {
+	if !isKubernetesRuntime(runtimeName) || resolved.Backend != "nfs" || !share.Mountable() {
 		return false, nil
 	}
 	if !isNFSWorktreeName(name) {
@@ -116,6 +116,9 @@ func ensureNFSWorktreeLeaf(runtimeName string, resolved runtime.ResolvedWorkspac
 	info, err := os.Stat(resolved.HostBase)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
+			if share.Inline() {
+				return false, inlineShareNotVisible(resolved.HostBase)
+			}
 			slog.Info("workspace_storage nfs: export not mounted on this broker; the node will create the agent's worktree directory "+
 				"when the pod starts, which requires an export that allows root to create directories (no_root_squash)",
 				"host_base", resolved.HostBase, "sub_path", leaf)
@@ -132,6 +135,9 @@ func ensureNFSWorktreeLeaf(runtimeName string, resolved runtime.ResolvedWorkspac
 	}
 
 	provisioned, err := nfsSharedCheckoutProvisioned(resolvedHostBase, rel)
+	if err != nil && isNFSLeafPermissionError(err) && share.Inline() {
+		return false, nfsInlineLeafRefusal(resolved.HostBase, leaf, err)
+	}
 	if err != nil && isNFSLeafPermissionError(err) {
 		// The broker cannot look into the state directory (for example one
 		// the node created and the init container gave to the agents' user
@@ -148,11 +154,17 @@ func ensureNFSWorktreeLeaf(runtimeName string, resolved runtime.ResolvedWorkspac
 	}
 	if !provisioned {
 		// First provisioning of this project: the init container
-		// clones the shared checkout and adds the worktree.
+		// clones the shared checkout and adds the worktree. This holds
+		// for an inline share too: the worktree-per-agent shape is
+		// refused on Kubernetes today (k8sSharedRepoShapeRefusal), so
+		// only the node fallbacks below change for it.
 		return true, nil
 	}
 
 	ok, err := ensureNFSLeaf(resolvedHostBase, leaf)
+	if err != nil && isNFSLeafPermissionError(err) && share.Inline() {
+		return false, nfsInlineLeafRefusal(resolved.HostBase, leaf, err)
+	}
 	if err != nil && isNFSLeafPermissionError(err) {
 		slog.Warn("workspace_storage nfs: the broker could not create the agent's worktree directory, so the node will create it "+
 			"when the pod starts, which requires an export that allows root to create directories (no_root_squash)",

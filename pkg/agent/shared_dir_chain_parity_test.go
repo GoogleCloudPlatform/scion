@@ -26,6 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -49,7 +50,11 @@ func TestSharedDirChainsParity(t *testing.T) {
 		// reason is a fragment of the refusal both chains must report,
 		// so the case is refused by the intended guard, not a later one.
 		reason string
-		setup  func(t *testing.T, f *fixture)
+		// pluginReason, when set, replaces reason for the plugin chain:
+		// it resolves the settings through config.SharedDirStorageLayout,
+		// whose field rules refuse the block before any path check.
+		pluginReason string
+		setup        func(t *testing.T, f *fixture)
 	}{
 		{desc: "valid shared dir", refused: false, setup: func(t *testing.T, f *fixture) {}},
 		{desc: "symlinked leaf", refused: true, reason: "is a symlink", setup: func(t *testing.T, f *fixture) {
@@ -73,9 +78,11 @@ func TestSharedDirChainsParity(t *testing.T) {
 		}},
 		// A host base that cleans to the filesystem root passes
 		// ConfineLeaf (the leaf still sits under its project subtree) and
-		// is refused only by ValidateNotExportRoot. Both chains must
-		// refuse it before any directory is touched.
-		{desc: "root host base", refused: true, reason: "is not under export root", setup: func(t *testing.T, f *fixture) {
+		// is refused only by ValidateNotExportRoot on the agent chain; the
+		// plugin chain resolves the settings, whose field rules refuse the
+		// ".." share id first. Both chains must refuse it before any
+		// directory is touched.
+		{desc: "root host base", refused: true, reason: "is not under export root", pluginReason: "must be a single path element", setup: func(t *testing.T, f *fixture) {
 			if os.Geteuid() == 0 {
 				// If the resolver check ever regressed, its leaf walk
 				// would run against the real root; only run this as an
@@ -88,7 +95,7 @@ func TestSharedDirChainsParity(t *testing.T) {
 			f.shareID = ".."
 			orig := ensureSharedDirLeaf
 			t.Cleanup(func() { ensureSharedDirLeaf = orig })
-			ensureSharedDirLeaf = func(hostBase, rel string) (int, bool, error) {
+			ensureSharedDirLeaf = func(hostBase, rel string, owner shareddirs.Owner) (int, bool, error) {
 				t.Errorf("leaf walk ran for %q under %q", rel, hostBase)
 				return -1, false, os.ErrPermission
 			}
@@ -127,7 +134,11 @@ func TestSharedDirChainsParity(t *testing.T) {
 				require.Error(t, agentErr, "agent start must refuse")
 				require.Error(t, pluginErr, "plugin resolver must refuse")
 				assert.Contains(t, agentErr.Error(), tc.reason)
-				assert.Contains(t, pluginErr.Error(), tc.reason)
+				pluginReason := tc.reason
+				if tc.pluginReason != "" {
+					pluginReason = tc.pluginReason
+				}
+				assert.Contains(t, pluginErr.Error(), pluginReason)
 				assert.Empty(t, got.Path)
 				assertDirEmpty(t, fa.outside)
 				assertDirEmpty(t, fp.outside)
@@ -167,8 +178,8 @@ func TestResolveSharedDirs_NFS_BackstopRefusesSwappedLeaf(t *testing.T) {
 
 	orig := ensureSharedDirLeaf
 	t.Cleanup(func() { ensureSharedDirLeaf = orig })
-	ensureSharedDirLeaf = func(hostBase, rel string) (int, bool, error) {
-		fd, existed, err := orig(hostBase, rel)
+	ensureSharedDirLeaf = func(hostBase, rel string, owner shareddirs.Owner) (int, bool, error) {
+		fd, existed, err := orig(hostBase, rel, owner)
 		if err != nil {
 			return fd, existed, err
 		}

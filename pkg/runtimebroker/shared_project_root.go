@@ -22,9 +22,11 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
+	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -44,13 +46,14 @@ import (
 // mode (config.AgentsRootForProject), and the ownership store and launch
 // journal are keyed by project ID and agent, never by the project path.
 
-// Refusal texts for a shared-backend dispatch (ptone/scion#5823). They name no host path except the share's mount point, which is
-// the operator's own configuration.
+// Refusal texts for a shared-backend dispatch (ptone/scion#5823). They name
+// no host path; a share that is not visible is refused with
+// scionrt.ProjectShareUnavailableText, which names the configuration
+// fields (scionrt.ProjectShareMountPathField) instead.
 const (
-	sharedProjectNoIDText     = "a hub-managed project on shared project storage needs the project ID; upgrade the Hub"
-	sharedProjectConfigText   = "project configuration missing or does not match; run project-storage-migrate"
-	sharedProjectNoSlugText   = "project configuration has no project-slug; run project-storage-migrate"
-	sharedProjectUnmountedFmt = "project storage share is not mounted on this broker (%s; mount it or set nfs.auto_mount)"
+	sharedProjectNoIDText   = "a hub-managed project on shared project storage needs the project ID; upgrade the Hub"
+	sharedProjectConfigText = "project configuration missing or does not match; run project-storage-migrate"
+	sharedProjectNoSlugText = "project configuration has no project-slug; run project-storage-migrate"
 )
 
 // sharedHubProjectPath returns the project path of a hub-managed project
@@ -74,17 +77,71 @@ func (s *Server) sharedHubProjectPath(ctx context.Context, projectID string) (pa
 		return "", true, &startContextError{Status: http.StatusConflict, Message: sharedProjectConfigText, OriginalErr: err}
 	}
 	if err := s.ensureLayoutShareMounted(ctx, layout); err != nil {
-		s.agentLifecycleLog.Error("Project storage share is not mounted on this broker", "project_id", projectID,
+		s.agentLifecycleLog.Error("Project storage share is not visible on this broker", "project_id", projectID,
 			"host_base", layout.HostBase, "error", err)
 		return "", true, &startContextError{Status: http.StatusServiceUnavailable, Code: ErrCodeProjectStorageUnavailable,
-			Message: fmt.Sprintf(sharedProjectUnmountedFmt, layout.HostBase), OriginalErr: err}
+			Message: s.shareMountCheckText(), OriginalErr: err}
+	}
+	// What the tree shows decides the refusal. A mount point without the
+	// subpath root (<HostBase>/<subpath_root>) is not the share: 503, the
+	// share is not visible, whatever the mount table says. With the subpath
+	// root present, a missing or foreign project configuration is a 409
+	// (checkSharedProjectConfig, unchanged). The reconciler's advisory
+	// mount-table detail goes to the log only, never into the body.
+	mountCheck := shareAdvisoryDetail(layout, s.nfsMountReconciler)
+	subRoot := filepath.Dir(root.HostPath)
+	if err := projectfs.ShareDirVisible(ctx, subRoot); err != nil {
+		s.agentLifecycleLog.Error("Project storage share is not visible on this broker: its mount point has no subpath root",
+			"project_id", projectID, "host_base", layout.HostBase, "subpath_root", subRoot, "mount_check", mountCheck, "error", err)
+		return "", true, &startContextError{Status: http.StatusServiceUnavailable, Code: ErrCodeProjectStorageUnavailable,
+			Message: s.shareUnavailableText(), OriginalErr: err}
 	}
 	if sce := checkSharedProjectConfig(root.HostPath, projectID); sce != nil {
 		s.agentLifecycleLog.Error("Shared project configuration refused", "project_id", projectID,
-			"path", root.HostPath, "reason", sce.Message)
+			"path", root.HostPath, "reason", sce.Message, "mount_check", mountCheck)
 		return "", true, sce
 	}
 	return root.HostPath, true, nil
+}
+
+// shareUnavailableText is the client-safe refusal for a share this broker
+// does not see: it names the configuration fields, never the path, and
+// gives the remedy for the broker's default runtime.
+func (s *Server) shareUnavailableText() string {
+	return scionrt.ProjectShareUnavailableText(scionrt.ProjectShareMountPathField, NFSWarnOnlyRuntime(s.RuntimeName()))
+}
+
+// shareMountCheckText is the client-safe refusal for a failed share check
+// (ensureLayoutShareMounted): on a broker that mounts its shares itself
+// (nfs.auto_mount on), the mount failed, so it is the mount-failure text,
+// not the advice to set auto_mount; otherwise shareUnavailableText.
+func (s *Server) shareMountCheckText() string {
+	if r := s.nfsMountReconciler; r != nil && r.MountsShares() {
+		return scionrt.ProjectShareMountFailedText(scionrt.ProjectShareMountPathField)
+	}
+	return s.shareUnavailableText()
+}
+
+// projectShareNotMountedText is the client text for a start refused with
+// agent.ErrProjectShareNotMounted (err). That refusal comes only from the
+// Kubernetes workspace leaves, a runtime that never mounts the share on
+// the broker, so the remedy is the broker's own container; a share without
+// a claim gets the inline variant (agent.ProjectShareClientText).
+func projectShareNotMountedText(err error) string {
+	return agent.ProjectShareClientText(err)
+}
+
+// shareAdvisoryDetail is the reconciler's last status message for the
+// layout's share when it is unhealthy (for example the expected and found
+// mount sources), or "". It is for logs and admin views only.
+func shareAdvisoryDetail(layout projectfs.Layout, r *NFSMountReconciler) string {
+	if layout.Backend != projectfs.BackendNFS || r == nil {
+		return ""
+	}
+	if st, ok := r.ShareStatus(layout.Share.ID); ok && !st.Healthy {
+		return st.Message
+	}
+	return ""
 }
 
 // checkSharedProjectConfig checks that projectRoot is a directory (not a
@@ -105,25 +162,47 @@ func checkSharedProjectConfig(projectRoot, projectID string) *startContextError 
 	return nil
 }
 
-// ensureLayoutShareMounted checks that the Layout's share is mounted at its
-// host base: for nfs through the broker's NFS mount reconciler when it has
-// one (EnsureShareMounted, which mounts only with auto_mount on), otherwise
-// by the host base being a directory. A broker without the mount refuses
-// shared-backend dispatches (ptone/scion#5823).
+// ensureLayoutShareMounted checks that the Layout's share is usable at its
+// host base (shareVisible). A broker without it refuses shared-backend
+// dispatches (ptone/scion#5823); the project tree's identity is checked by
+// the caller (checkSharedProjectConfig).
 func (s *Server) ensureLayoutShareMounted(ctx context.Context, layout projectfs.Layout) error {
-	if layout.Backend == projectfs.BackendNFS && s.nfsMountReconciler != nil {
-		if err := s.nfsMountReconciler.EnsureShareMounted(ctx, layout.Share.ID); err != nil {
-			return err
+	return shareVisible(ctx, layout, s.nfsMountReconciler)
+}
+
+// shareVisible is the share check for a shared Layout on this broker.
+//
+//   - A broker that never mounts (its default runtime is Kubernetes or Cloud
+//     Run, NFSWarnOnlyRuntime; its reconciler r is verify-only), or one with
+//     no reconciler: the share is visible when Layout.HostBase is a
+//     directory (projectfs.ShareDirVisible, bounded). The reconciler's
+//     mount-table source match is advisory: the share may be mounted into
+//     the broker's container from a source that differs from server:export
+//     only in form (a trailing slash, a host name for an IP address). A
+//     mismatch is logged as a warning and stays in the reconciler's status,
+//     so health and the descriptor's NFS.Healthy flag still show it; it is
+//     never a precondition.
+//   - A broker that mounts the share (auto_mount on, not verify-only): the
+//     exact source match stays a precondition (EnsureShareMounted), since
+//     the broker owns that mount, and then the directory must be visible.
+//
+// Callers prove the tree's identity afterwards (checkSharedProjectConfig:
+// the hub-seeded project-id under <ProjectRoot>/.scion names the project).
+func shareVisible(ctx context.Context, layout projectfs.Layout, r *NFSMountReconciler) error {
+	if layout.Backend == projectfs.BackendNFS && r != nil {
+		if err := r.EnsureShareMounted(ctx, layout.Share.ID); err != nil {
+			if !r.VerifyOnly() || ctx.Err() != nil {
+				return err
+			}
+			if dirErr := projectfs.ShareDirVisible(ctx, layout.HostBase); dirErr != nil {
+				return dirErr
+			}
+			r.log.Warn("Project storage share check is advisory on a broker that never mounts; the share directory is visible",
+				"host_base", layout.HostBase, "share", layout.Share.ID, "reason", r.VerifyOnlyReason(), "check", err)
+			return nil
 		}
 	}
-	info, err := os.Stat(layout.HostBase)
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("%s is not a directory", layout.HostBase)
-	}
-	return nil
+	return projectfs.ShareDirVisible(ctx, layout.HostBase)
 }
 
 // isSharedHubProjectRoot reports whether projectPath is a hub-managed
@@ -170,10 +249,8 @@ func (s *Server) findAgentInSharedProject(ctx context.Context, agentName, projec
 		mountCtx, cancel := context.WithTimeout(ctx, sharedLookupMountTimeout)
 		mountErr = s.ensureLayoutShareMounted(mountCtx, layout)
 		cancel()
-	} else if info, statErr := os.Stat(layout.HostBase); statErr != nil {
-		mountErr = statErr
-	} else if !info.IsDir() {
-		mountErr = fmt.Errorf("%s is not a directory", layout.HostBase)
+	} else {
+		mountErr = projectfs.ShareDirVisible(ctx, layout.HostBase)
 	}
 	if err := mountErr; err != nil {
 		s.agentLifecycleLog.Error("Agent look-up: project storage share is not mounted on this broker", "agent", agentName,
@@ -314,14 +391,9 @@ func (s *Server) applySharedBootstrap(ctx context.Context, ws, rel string, apply
 		return false, fmt.Errorf("resolve host base: %w", err)
 	}
 	stateRel := filepath.Join(filepath.Dir(rel), provision.ProvisionStateDirName)
-	for _, leaf := range []string{rel, stateRel} {
-		fd, _, err := shareddirs.EnsureLeaf(base, leaf)
-		if err != nil {
-			return false, fmt.Errorf("create %s: %w", filepath.Base(leaf), err)
-		}
-		if err := shareddirs.CloseFd(fd); err != nil {
-			return false, err
-		}
+	owner := shareddirs.Owner{UID: s.config.StorageLayout.UID, GID: s.config.StorageLayout.GID}
+	if err := ensureWorkspaceAndStateLeaves(base, rel, stateRel, owner); err != nil {
+		return false, err
 	}
 	wsPath := filepath.Join(base, rel)
 	err = provision.WithWorkspaceProvisionLocks(ctx, wsPath, func(lockCtx context.Context) error {
@@ -339,6 +411,29 @@ func (s *Server) applySharedBootstrap(ctx context.Context, ws, rel string, apply
 		return provision.MarkProvisioned(provision.ProjectStateDir(wsPath))
 	})
 	return skipped, err
+}
+
+// ensureWorkspaceAndStateLeaves creates (or verifies) a project's shared
+// workspace leaf wsRel and its provisioning state directory stateRel below
+// base with the broker's leaf contract (shareddirs.EnsureLeaf). A root
+// broker gives the workspace leaf, which agents use, the Layout's owner
+// (shareddirs.EnsureLeafOwned). The provisioning state directory keeps the
+// zero owner: it holds the provisioning locks and sentinel, only Scion
+// components write it, and it must never be agent-writable.
+func ensureWorkspaceAndStateLeaves(base, wsRel, stateRel string, owner shareddirs.Owner) error {
+	for _, leaf := range []struct {
+		rel   string
+		owner shareddirs.Owner
+	}{{wsRel, owner}, {stateRel, shareddirs.Owner{}}} {
+		fd, _, err := shareddirs.EnsureLeafOwned(base, leaf.rel, leaf.owner)
+		if err != nil {
+			return fmt.Errorf("create %s: %w", filepath.Base(leaf.rel), err)
+		}
+		if err := shareddirs.CloseFd(fd); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // localContainerRuntime reports whether runtimeName runs agents as local
@@ -362,11 +457,14 @@ func localContainerRuntime(runtimeName string) bool {
 // not fatal). An already provisioned workspace (sentinel present, as after
 // the hub's provisioning at project create) takes the reuse path; a lost
 // sentinel or a project from before that provisioning gets the clone, under
-// the provisioning lock. The clone gets the agent's git token only for the
-// clone URL's own host. It reports whether it provisioned (the caller then
-// suppresses the in-container clone); false with no error when the request
-// is not such a dispatch.
-func (s *Server) provisionSharedPlainWorkspace(ctx context.Context, in startContextInputs, env map[string]string) (bool, error) {
+// the provisioning lock. The clone gets no git token: the agent's token is
+// not passed to it and no token remote is set, so a private repository is
+// not cloned here and the start fails with the provisioner's "needs
+// credentials" error. It reports whether it
+// provisioned (the caller then suppresses the in-container clone); false
+// with no error when the request is not such a dispatch. The agent's
+// resolved environment (the third argument) is deliberately not read.
+func (s *Server) provisionSharedPlainWorkspace(ctx context.Context, in startContextInputs, _ map[string]string) (bool, error) {
 	layout := s.config.StorageLayout
 	if !layout.Backend.Shared() || !isSharedHubProjectRoot(in.ProjectPath) || in.Config == nil || in.Config.GitClone == nil {
 		return false, nil
@@ -384,14 +482,9 @@ func (s *Server) provisionSharedPlainWorkspace(ctx context.Context, in startCont
 		return false, fmt.Errorf("resolve host base: %w", err)
 	}
 	stateRel := filepath.Join(filepath.Dir(r.RelPath), provision.ProvisionStateDirName)
-	for _, leaf := range []string{r.RelPath, stateRel} {
-		fd, _, err := shareddirs.EnsureLeaf(base, leaf)
-		if err != nil {
-			return false, fmt.Errorf("create %s: %w", filepath.Base(leaf), err)
-		}
-		if err := shareddirs.CloseFd(fd); err != nil {
-			return false, err
-		}
+	// ProvisionShared below sets the workspace content's ownership as before.
+	if err := ensureWorkspaceAndStateLeaves(base, r.RelPath, stateRel, r.Owner()); err != nil {
+		return false, err
 	}
 	ws := filepath.Join(base, r.RelPath)
 	stateDir := provision.ProjectStateDir(ws)
@@ -406,8 +499,6 @@ func (s *Server) provisionSharedPlainWorkspace(ctx context.Context, in startCont
 		AgentID:             in.AgentID,
 		Mode:                store.SharingModeSharedPlain,
 		GitClone:            &gc,
-		CloneToken:          env[provision.GitTokenEnv],
-		CloneTokenRemote:    gc.URL,
 		HostGitHardened:     true,
 		NFSUID:              uid,
 		NFSGID:              gid,

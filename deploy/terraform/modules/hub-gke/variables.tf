@@ -124,11 +124,11 @@ variable "runtime_namespace" {
 # configuration.
 
 variable "nfs" {
-  description = "This hub's NFS share: { server, export, pv_name }. server is the Filestore server IP (shared.nfs.server); export is this hub's NFS export path, e.g. \"/scion/<hub_name>\" (agent-runtime-k8s output nfs_export); pv_name is the PersistentVolumeClaim name agent pods mount this share through (agent-runtime-k8s output pv_name). Rendered as the chart's workspaceStorage.nfs.server, .export and .pvName."
+  description = "This hub's NFS share: { server, export, pv_name }. server is the Filestore server IP (shared.nfs.server); export is this hub's NFS export path, e.g. \"/scion/<hub_name>\" (agent-runtime-k8s output nfs_export); pv_name is the PersistentVolumeClaim name agent pods mount this share through (agent-runtime-k8s output pv_name); optional: empty makes agent pods mount the share inline, one NFS volume per directory with no mount options, which needs the hub pod's mount of the export to be writable by hub_run_as_uid. Rendered as the chart's workspaceStorage.nfs.server, .export and .pvName."
   type = object({
     server  = string
     export  = string
-    pv_name = string
+    pv_name = optional(string, "")
   })
   nullable = false
 
@@ -147,8 +147,8 @@ variable "nfs" {
   }
 
   validation {
-    condition     = can(regex("^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$", try(trimspace(var.nfs.pv_name), "")))
-    error_message = "nfs.pv_name must be a non-empty Kubernetes object name: lower-case letters, digits, '-' and '.', starting and ending with a letter or digit (the chart's workspaceStorage.nfs.pvName guard)."
+    condition     = try(trimspace(var.nfs.pv_name), "") == "" || can(regex("^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$", try(trimspace(var.nfs.pv_name), "")))
+    error_message = "nfs.pv_name must be empty or a Kubernetes object name: lower-case letters, digits, '-' and '.', starting and ending with a letter or digit (the chart's workspaceStorage.nfs.pvName guard)."
   }
 }
 

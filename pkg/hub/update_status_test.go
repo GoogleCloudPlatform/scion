@@ -807,12 +807,12 @@ func TestRunReleaseUpdateCheck(t *testing.T) {
 		srv, s := newTestServerWithStore(t)
 		srv.config.MaintenanceConfig = MaintenanceConfig{DeploymentTier: "binary", UpdatePolicy: "auto",
 			ReleaseChannel: "nightly"}
-		// A configured channel that the executor does not consider current
-		// is refused before a run is created.
+		// A channel the executor does not know is refused before a run is
+		// created.
 		exec := maintenance.NewBinaryUpdateExecutor(maintenance.BinaryUpdateOptions{
-			Channel: "preview", CurrentVersion: "nightly-20261020", Installer: newTestInstaller(maintenance.StrategySymlink),
+			CurrentVersion: "nightly-20261020", Installer: newTestInstaller(maintenance.StrategySymlink),
 		})
-		srv.autoApplyUpdate(ctx, "nightly", exec)
+		srv.autoApplyUpdate(ctx, "beta", exec)
 		if runs, _ := s.ListMaintenanceRuns(ctx, "update-binary", 5); len(runs) != 0 {
 			t.Fatalf("a refused auto update created a run: %+v", runs)
 		}

@@ -261,13 +261,12 @@ function replaceMatches(
  * Run one link pass over the text nodes under `root`. An element `skip`
  * matches is stepped over together with everything inside it. `linkify`
  * returns the pieces that replace a text node's text, or null to leave it.
- * Returns whether anything changed.
  */
 function linkifyTextNodes(
   root: DocumentFragment,
   skip: (el: Element) => boolean,
   linkify: (text: string) => LinkPiece[] | null
-): boolean {
+): void {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
     acceptNode: (node) => {
       if (node.nodeType !== Node.ELEMENT_NODE) return NodeFilter.FILTER_ACCEPT;
@@ -277,14 +276,11 @@ function linkifyTextNodes(
   // Collect first: replacing a node while walking would move the walker.
   const texts: Text[] = [];
   for (let node = walker.nextNode(); node; node = walker.nextNode()) texts.push(node as Text);
-  let changed = false;
   for (const node of texts) {
     const pieces = linkify(node.data);
     if (!pieces) continue;
     node.replaceWith(...pieces.filter((p) => p !== ''));
-    changed = true;
   }
-  return changed;
 }
 
 /** A skip test for elements with any of these (lowercase) local names. */
@@ -580,31 +576,25 @@ function styleMentionsInText(text: string): LinkPiece[] | null {
  * - GitHub refs: code and existing links; a ref inside backticks is
  *   literal text.
  *
- * Returns the input unchanged when nothing was linked.
+ * Works in place on the nodes the markdown renderer returned, with DOM calls
+ * only: link text is set as text, never parsed as markup.
  */
-function linkifyRenderedHtml(htmlStr: string, opts: { artifacts: boolean; gcs: boolean }): string {
-  const tpl = document.createElement('template');
-  tpl.innerHTML = htmlStr;
-  const root = tpl.content;
+function linkifyRenderedFragment(
+  root: DocumentFragment,
+  opts: { artifacts: boolean; gcs: boolean }
+): void {
   const isCode = elementsNamed('pre', 'code');
-  let changed = false;
   const artifactLinks = new WeakSet<Element>();
   if (opts.artifacts) {
-    changed =
-      linkifyTextNodes(root, elementsNamed('pre', 'code', 'a'), (text) =>
-        styleArtifactLinksInText(text, artifactLinks)
-      ) || changed;
+    linkifyTextNodes(root, elementsNamed('pre', 'code', 'a'), (text) =>
+      styleArtifactLinksInText(text, artifactLinks)
+    );
   }
-  changed =
-    linkifyTextNodes(root, (el) => isCode(el) || artifactLinks.has(el), styleMentionsInText) ||
-    changed;
-  changed =
-    linkifyTextNodes(root, elementsNamed('pre', 'a'), (text) =>
-      styleEntityLinksInText(text, opts.gcs)
-    ) || changed;
-  changed =
-    linkifyTextNodes(root, elementsNamed('pre', 'a', 'code'), styleGithubRefsInText) || changed;
-  return changed ? tpl.innerHTML : htmlStr;
+  linkifyTextNodes(root, (el) => isCode(el) || artifactLinks.has(el), styleMentionsInText);
+  linkifyTextNodes(root, elementsNamed('pre', 'a'), (text) =>
+    styleEntityLinksInText(text, opts.gcs)
+  );
+  linkifyTextNodes(root, elementsNamed('pre', 'a', 'code'), styleGithubRefsInText);
 }
 
 /** True when the file is a Markdown document. */
@@ -716,8 +706,8 @@ export class ScionChatMessage extends LitElement {
    * Show the message's More actions button (web.chat_starred_messages):
    * the keyboard entry to the message menu. The thread makes one message's
    * button the list's single tab stop (`actionsTabIndex` 0, the others
-   * -1) and moves it with the arrow keys; it shows on hover and while
-   * focus is in the message.
+   * -1) and moves it with the arrow keys. It is always visible: bare dots
+   * in the upper-right corner inside the bubble.
    */
   @property({ type: Boolean })
   actionsEnabled = false;
@@ -876,8 +866,14 @@ export class ScionChatMessage extends LitElement {
   @property()
   currentUserId = '';
 
+  /**
+   * The rendered body: a `.md-content` element holding the markdown
+   * renderer's nodes, or null to show the body as plain text. Built once per
+   * body, and kept as one element so later renders move it rather than
+   * rebuild it.
+   */
   @state()
-  private renderedHtml = '';
+  private renderedContent: HTMLElement | null = null;
 
   /** Preview load state per attachment ID. Replaced, never mutated. */
   @state()
@@ -1720,47 +1716,52 @@ export class ScionChatMessage extends LitElement {
       color: var(--scion-neutral-400, #94a3b8);
     }
 
-    /* ---- More actions button: the keyboard entry to the message menu ---- */
+    /* ---- More actions button: the keyboard entry to the message menu ----
+       Always visible: bare dots in the upper-right corner inside the text
+       bubble. The bubble reserves a right-hand column for them, so they
+       never sit over the message text. An attachment-only message has no
+       text bubble: its bubble reserves the same column beside the
+       attachments. */
+    .bubble-content.has-actions,
+    .bubble.actions-corner {
+      position: relative;
+      padding-right: 2rem;
+    }
+
     .msg-actions {
       position: absolute;
-      bottom: 0;
-      right: calc(100% + 0.25rem);
+      top: 0.25rem;
+      right: 0.25rem;
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      width: 1.75rem;
-      height: 1.75rem;
+      /* The touch target; the glyph inside is smaller. */
+      width: 1.5rem;
+      height: 1.5rem;
       padding: 0;
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.375rem;
-      background: var(--scion-surface, #ffffff);
+      border: none;
+      border-radius: 0.25rem;
+      background: none;
       color: var(--scion-text-muted, #64748b);
       font-size: 0.875rem;
+      line-height: 1;
       cursor: pointer;
-      /* Hidden until hovered or focused, but still focusable. */
-      opacity: 0;
     }
 
-    .from-agent .msg-actions {
-      right: auto;
-      left: calc(100% + 0.25rem);
+    /* The reserved column counts toward the bubble's max-width, so an
+       attachment-only bubble is no wider than its text neighbours. */
+    .bubble.actions-corner {
+      box-sizing: border-box;
     }
 
-    /* A headerless starred row keeps its gutter star next to the bubble:
-       the button moves one step further out, so neither covers the other. */
-    .bubble.has-star-meta .msg-actions {
-      right: calc(100% + 1.25rem);
+    .bubble.actions-corner > .msg-actions {
+      top: 0;
     }
 
-    .from-agent .bubble.has-star-meta .msg-actions {
-      right: auto;
-      left: calc(100% + 1.25rem);
-    }
-
-    .message-wrapper:hover .msg-actions,
-    .message-wrapper:focus-within .msg-actions,
-    .msg-actions[aria-expanded='true'] {
-      opacity: 1;
+    @media (hover: hover) {
+      .msg-actions:hover {
+        color: var(--scion-text, #1e293b);
+      }
     }
 
     .msg-actions:focus {
@@ -1769,7 +1770,7 @@ export class ScionChatMessage extends LitElement {
 
     .msg-actions:focus-visible {
       outline: 2px solid var(--scion-primary, #3b82f6);
-      outline-offset: 1px;
+      outline-offset: 0;
     }
 
     /* The message whose action button has keyboard focus. */
@@ -1785,13 +1786,6 @@ export class ScionChatMessage extends LitElement {
       overflow: hidden;
       clip: rect(0 0 0 0);
       white-space: nowrap;
-    }
-
-    @media (hover: none) {
-      /* Touch opens the action sheet with a tap; no floating button. */
-      .msg-actions {
-        display: none;
-      }
     }
 
     /* ---- Starred indicator (shape plus accent, never colour alone) ---- */
@@ -2035,7 +2029,7 @@ export class ScionChatMessage extends LitElement {
     if (changed.has('body') || changed.has('plain')) {
       void this.renderContent();
     }
-    if (changed.has('renderedHtml')) {
+    if (changed.has('renderedContent')) {
       this.wrapTables();
       this.injectCopyButtons();
       this.injectSyntaxHighlighting();
@@ -2331,24 +2325,36 @@ export class ScionChatMessage extends LitElement {
 
   private async renderContent(): Promise<void> {
     if (!this.body || this.plain) {
-      this.renderedHtml = '';
+      this.renderedContent = null;
       return;
     }
     const taskId = ++this.renderTaskId;
     try {
       const renderer = await getMarkdownRenderer();
       if (taskId !== this.renderTaskId) return;
+      const fragment = renderer.renderFragment(this.body);
       // gs:// links are gated on the server-reported feature flag AND the
       // message being agent-sent — a user-sent message never links, however
       // the body happens to be spelled.
-      this.renderedHtml = linkifyRenderedHtml(renderer.render(this.body), {
+      linkifyRenderedFragment(fragment, {
         artifacts: isFeatureEnabled(ARTIFACTS_FLAG),
         gcs: this.senderIsAgent && isFeatureEnabled('web.gcs_links'),
       });
+      this.renderedContent = fragment.hasChildNodes() ? this.contentElement(fragment) : null;
     } catch {
       if (taskId !== this.renderTaskId) return;
-      this.renderedHtml = '';
+      this.renderedContent = null;
     }
+  }
+
+  /** Wraps rendered nodes in the clickable `.md-content` element. */
+  private contentElement(fragment: DocumentFragment): HTMLElement {
+    const content = document.createElement('div');
+    content.className = 'md-content';
+    content.addEventListener('click', (e) => this.handleContentClick(e));
+    content.addEventListener('auxclick', (e) => this.handleContentAuxClick(e));
+    content.append(fragment);
+    return content;
   }
 
   /**
@@ -2499,6 +2505,8 @@ export class ScionChatMessage extends LitElement {
     const attachmentOnly =
       !(this.body ?? '').trim() &&
       ((this.attachmentRefs?.length ?? 0) > 0 || (this.attachments?.length ?? 0) > 0);
+    // The More actions dots sit inside the text bubble, in a reserved corner.
+    const contentActions = this.actionsEnabled ? ' has-actions' : '';
 
     return html`
       <div
@@ -2513,7 +2521,11 @@ export class ScionChatMessage extends LitElement {
           : this.fromAgent
             ? html`<div class="avatar-spacer"></div>`
             : nothing}
-        <div class="bubble${this.showsStarMeta() ? ' has-star-meta' : ''}">
+        <div
+          class="bubble${attachmentOnly && !isDeleted && this.actionsEnabled
+            ? ' actions-corner'
+            : ''}"
+        >
           ${this.showHeader && this.fromAgent
             ? html`
                 <div class="bubble-header">
@@ -2546,17 +2558,22 @@ export class ScionChatMessage extends LitElement {
             : nothing}
           ${this.renderAuthorizedBy()} ${this.replyPreview ? this.renderReplyPreview() : nothing}
           ${isDeleted
-            ? html`<div class="bubble-content">
+            ? html`<div class="bubble-content${contentActions}">
                 <span class="deleted-message">This message was deleted</span>
+                ${this.renderActionsButton()}
               </div>`
             : attachmentOnly
               ? nothing
-              : html`<div class="bubble-content">${this.renderBody()}</div>`}
+              : html`<div class="bubble-content${contentActions}">
+                  ${this.renderBody()}${this.renderActionsButton()}
+                </div>`}
           ${isDeleted ? nothing : this.renderAttachments()}
           ${isDeleted ? nothing : this.renderArtifactChips()}
           ${isDeleted ? nothing : this.renderBadges()}
           ${isDeleted ? nothing : this.renderDeliveryState()}
-          ${this.showsStarMeta() ? this.renderStarMeta() : nothing} ${this.renderActionsButton()}
+          ${this.showsStarMeta() ? this.renderStarMeta() : nothing}
+          ${attachmentOnly && !isDeleted ? this.renderActionsButton() : nothing}
+          ${this.renderActionsHelp()}
         </div>
       </div>
       ${this.renderFullPreview()}
@@ -2581,29 +2598,36 @@ export class ScionChatMessage extends LitElement {
     const label = `More actions, message from ${who}, ${this.formatTime()}`;
     const active = this.actionsTabIndex === 0;
     return html`<button
-        type="button"
-        class="msg-actions"
-        tabindex=${this.actionsTabIndex}
-        aria-label=${label}
-        aria-haspopup="menu"
-        aria-expanded=${this.actionsExpanded ? 'true' : 'false'}
-        aria-describedby=${active ? 'actions-help' : nothing}
-        @click=${this.handleActionsClick}
-        @keydown=${this.handleActionsKeydown}
-        @focus=${(): void => {
-          this.actionsFocused = true;
-        }}
-        @blur=${(): void => {
-          this.actionsFocused = false;
-        }}
-      >
-        <sl-icon name="three-dots-vertical" aria-hidden="true"></sl-icon></button
-      >${active
-        ? html`<span class="actions-help" id="actions-help"
-            >Up and Down arrows move between messages. Shift+F10 also opens the menu. Tab leaves the
-            messages.</span
-          >`
-        : nothing}`;
+      type="button"
+      class="msg-actions"
+      tabindex=${this.actionsTabIndex}
+      aria-label=${label}
+      aria-haspopup="menu"
+      aria-expanded=${this.actionsExpanded ? 'true' : 'false'}
+      aria-describedby=${active ? 'actions-help' : nothing}
+      @click=${this.handleActionsClick}
+      @keydown=${this.handleActionsKeydown}
+      @focus=${(): void => {
+        this.actionsFocused = true;
+      }}
+      @blur=${(): void => {
+        this.actionsFocused = false;
+      }}
+    >
+      <sl-icon name="three-dots-vertical" aria-hidden="true"></sl-icon>
+    </button>`;
+  }
+
+  /**
+   * The tab stop's usage hint (the button's aria-describedby). It renders
+   * outside the text bubble so the bubble's text stays the message alone.
+   */
+  private renderActionsHelp(): TemplateResult | typeof nothing {
+    if (!this.actionsEnabled || this.actionsTabIndex !== 0) return nothing;
+    return html`<span class="actions-help" id="actions-help"
+      >Up and Down arrows move between messages. Shift+F10 also opens the menu. Tab leaves the
+      messages.</span
+    >`;
   }
 
   private handleActionsClick = (e: MouseEvent): void => {
@@ -2759,15 +2783,10 @@ export class ScionChatMessage extends LitElement {
   }
 
   private renderBody() {
-    if (this.plain || !this.renderedHtml) {
+    if (this.plain || !this.renderedContent) {
       return html`<div class="plain-text">${this.body}</div>`;
     }
-    return html`<div
-      class="md-content"
-      @click=${this.handleContentClick}
-      @auxclick=${(e: MouseEvent) => this.handleContentAuxClick(e)}
-      .innerHTML=${this.renderedHtml}
-    ></div>`;
+    return this.renderedContent;
   }
 
   private renderBadges() {

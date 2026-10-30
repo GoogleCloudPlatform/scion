@@ -44,9 +44,12 @@ on:
 permissions:
   contents: read
 
+# Fork CI gate (hack/check-fork-ci-gate.sh, cr-ci/workflows/README.md): on push
+# and schedule every job runs only in GoogleCloudPlatform/scion; forks stage PRs.
 jobs:
   test-full-suite:
     name: Full Test Suite (reporting only)
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     runs-on: ubuntu-latest
     continue-on-error: true
     timeout-minutes: 180

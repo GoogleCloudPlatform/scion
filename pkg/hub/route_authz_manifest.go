@@ -180,6 +180,7 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/admin/maintenance/update-available": "admin", // Update availability status
 	"/api/v1/admin/maintenance/restart":          "admin", // Restart hub
 	"/api/v1/admin/maintenance/update-status":    "admin", // Update status (version, installer, last update)
+	"/api/v1/admin/maintenance/releases":         "admin", // Release catalog per channel
 	"/api/v1/admin/scheduler":                    "admin", // Scheduler status
 	"/api/v1/admin/allow-list":                   "admin", // Allow list management
 	"/api/v1/admin/allow-list/":                  "admin", // Allow list by email
@@ -283,6 +284,9 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/artifacts/":        "authenticated", // Artifact by ID; service checks artifact.* through artifacts.Host; 404 when the experiment is off
 	"/api/v1/artifacts/shared/": "public",        // GET/HEAD: share-link read; the service resolves the link token in the path (hashed, one lookup) and answers 303 to the view route; rate limited; no session used; 404 when the experiment is off
 	"/api/v1/artifacts/view/":   "public",        // GET/HEAD: one version's files under a short-lived view capability in the path, verified by the service on every request (no session used); 404 when the experiment is off
+
+	// ── Port page view (hub.port_view experiment) ─────────────────────
+	"/api/v1/portview/": "public", // ANY: an agent's exposed port served on the short-lived page link in the path, checked with the user's port access on every request (no session used for access); 404 when the experiment is off
 
 	// ── Agent GCP identity ─────────────────────────────────────────────
 	"/api/v1/agent/gcp-token":          "agent-token", // Agent GCP access token

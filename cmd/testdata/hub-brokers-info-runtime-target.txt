@@ -13,6 +13,7 @@ GKE:                        true
 Priority class:             agents-high
 Shared dir storage class:   standard-rwx
 Shared dir size:            40Gi
+Placement:                  not reported
 Default harness config:     claude
 Image registry:             registry.example/team
 Clone depth:                full

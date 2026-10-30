@@ -88,8 +88,9 @@ func sharedDirsNotSharedWarning(sdLayout projectfs.Layout, split bool, runtimeNa
 // refused with EACCES/EPERM/EROFS, skips EnsureLeaf, the backstop and the
 // leaf-group read for that start (kubeletMayCreateSharedDirs, as
 // ensureNFSWorkspaceLeaf does for the workspace); the pod then mounts only
-// the leaf by the subPath sharedDirClaimSubPath checks. The plugin chain
-// always refuses. A change to either chain must be made to both;
+// the leaf by the subPath sharedDirClaimSubPath checks. When that share has
+// no claim (inline pod volumes, inlineSharedDirs), both cases refuse the
+// start instead. The plugin chain always refuses. A change to either chain must be made to both;
 // TestSharedDirChainsParity runs one table of refusals through both.
 func resolveSharedDirs(
 	sdLayout projectfs.Layout,
@@ -190,7 +191,12 @@ func resolveSharedDirs(
 		}
 		for i, d := range dirs {
 			rel := resolved[i].RelPath // relative to HostBase, e.g. projects/<pid>/shared-dirs/<name>
-			leafFd, _, walkErr := ensureSharedDirLeaf(resolvedHostBase, rel)
+			// A root broker gives the directories it creates the
+			// shared-dir Layout's owner (its nfs uid and gid).
+			leafFd, _, walkErr := ensureSharedDirLeaf(resolvedHostBase, rel, resolved[i].Owner())
+			if walkErr != nil && isNFSLeafPermissionError(walkErr) && inlineSharedDirs(runtimeName, sdLayout, split) {
+				return nil, nil, fmt.Errorf("shared dir %q: %w", d.Name, nfsInlineLeafRefusal(hostBase, rel, walkErr))
+			}
 			if walkErr != nil && isNFSLeafPermissionError(walkErr) && kubeletMayCreateSharedDirs(runtimeName, sdLayout, split) {
 				// As for the workspace directory on the same export
 				// (ensureNFSWorkspaceLeaf): the broker may not be allowed
@@ -230,6 +236,9 @@ func resolveSharedDirs(
 			volumes[i].Source = resolvedLeaf
 		}
 	} else if errors.Is(statErr, fs.ErrNotExist) {
+		if inlineSharedDirs(runtimeName, sdLayout, split) {
+			return nil, nil, fmt.Errorf("shared dir %q: %w", dirs[0].Name, inlineShareNotVisible(hostBase))
+		}
 		if !kubeletMayCreateSharedDirs(runtimeName, sdLayout, split) {
 			return nil, nil, fmt.Errorf(
 				"shared dirs on the %s backend require this broker to have the share mounted at %q "+
@@ -249,13 +258,29 @@ func resolveSharedDirs(
 	for i, d := range dirs {
 		subPaths[d.Name] = resolved[i].SubPath
 	}
-	return volumes, &runtime.SharedDirRealization{
+	realization := &runtime.SharedDirRealization{
 		Backend:            string(backend),
 		PVClaimName:        sdLayout.Share.PVName,
 		ProjectID:          projectID,
 		SubPaths:           subPaths,
 		SupplementalGroups: sharedDirLeafGroups(leafGIDs, sdLayout.GID),
-	}, nil
+	}
+	if sdLayout.Backend == projectfs.BackendNFS && !split {
+		// The Layout's own nfs share: a pod mounts it inline when it has
+		// no claim. The transitional split never gets these, so without
+		// its claim the pod fails closed as before.
+		realization.Server, realization.Export, realization.SubPathRoot = sdLayout.Share.Server, sdLayout.Share.Export, sdLayout.SubPathRoot
+	}
+	return volumes, realization, nil
+}
+
+// inlineSharedDirs reports whether a Kubernetes start mounts the shared
+// dirs as inline NFS volumes: they ride the Layout's own nfs share (no
+// legacy split) and it has no claim. The broker must then create every
+// shared-dir directory itself; nothing falls back to the node.
+func inlineSharedDirs(runtimeName string, sdLayout projectfs.Layout, split bool) bool {
+	return isKubernetesRuntime(runtimeName) && sdLayout.Backend == projectfs.BackendNFS && !split &&
+		sdLayout.Share.PVName == "" && sdLayout.Share.Server != "" && sdLayout.Share.Export != ""
 }
 
 // kubeletMayCreateSharedDirs reports whether a Kubernetes start may leave
@@ -271,9 +296,9 @@ func kubeletMayCreateSharedDirs(runtimeName string, sdLayout projectfs.Layout, s
 	return isKubernetesRuntime(runtimeName) && sdLayout.Backend == projectfs.BackendNFS && !split
 }
 
-// ensureSharedDirLeaf is shareddirs.EnsureLeaf, replaceable in tests to
-// replace a path component after the walk and reach the backstop check.
-var ensureSharedDirLeaf = shareddirs.EnsureLeaf
+// ensureSharedDirLeaf is shareddirs.EnsureLeafOwned, replaceable in tests
+// to replace a path component after the walk and reach the backstop check.
+var ensureSharedDirLeaf = shareddirs.EnsureLeafOwned
 
 // fdGID is shareddirs.FdGID, replaceable in tests to simulate a failed stat.
 var fdGID = shareddirs.FdGID

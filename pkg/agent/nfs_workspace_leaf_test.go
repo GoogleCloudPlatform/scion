@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -30,6 +31,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/stretchr/testify/assert"
@@ -76,7 +78,7 @@ func TestEnsureNFSWorkspaceLeaf_CreatesMissingDirectory(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share-1"), 0o755))
 	res := resolveTestNFSWorkspace(t, mountRoot)
 
-	preCreated, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, "ws-pv", nil)
+	preCreated, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, runtime.NFSPodShare{ClaimName: "ws-pv"}, nil)
 	require.NoError(t, err)
 	assert.True(t, preCreated)
 
@@ -95,7 +97,7 @@ func TestEnsureNFSWorkspaceLeaf_MatchesSharedDirLeafModeAndOwnership(t *testing.
 	require.NoError(t, os.MkdirAll(hostBase, 0o755))
 	res := resolveTestNFSWorkspace(t, mountRoot)
 
-	_, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, "ws-pv", nil)
+	_, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, runtime.NFSPodShare{ClaimName: "ws-pv"}, nil)
 	require.NoError(t, err)
 
 	// Shared-dir leaf in a second, independent tree so neither creation
@@ -151,7 +153,7 @@ func TestEnsureNFSWorkspaceLeaf_LeavesExistingDirectoryAlone(t *testing.T) {
 			require.Equal(t, uint32(tc.mode.Perm())|uint32(setgidBit(tc.mode)), before.Mode&0o7777, "fixture mode")
 
 			for i := 0; i < 2; i++ { // idempotent: a second call is also a no-op
-				prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, "ws-pv", nil)
+				prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, runtime.NFSPodShare{ClaimName: "ws-pv"}, nil)
 				require.NoError(t, err)
 				assert.Equal(t, tc.wantPrepared, prepared)
 			}
@@ -185,7 +187,7 @@ func TestEnsureNFSWorkspaceLeaf_ExportMountNotADirectory(t *testing.T) {
 		require.NoError(t, os.WriteFile(mountRoot, nil, 0o644))
 		res := resolveTestNFSWorkspace(t, mountRoot)
 
-		prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, "ws-pv", nil)
+		prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, runtime.NFSPodShare{ClaimName: "ws-pv"}, nil)
 		require.Error(t, err)
 		assert.False(t, prepared)
 		assert.True(t, errors.Is(err, unix.ENOTDIR), "want not a directory, got %v", err)
@@ -201,7 +203,7 @@ func TestEnsureNFSWorkspaceLeaf_ExportMountNotADirectory(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(mountRoot, "share-1"), nil, 0o644))
 		res := resolveTestNFSWorkspace(t, mountRoot)
 
-		prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, "ws-pv", nil)
+		prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, runtime.NFSPodShare{ClaimName: "ws-pv"}, nil)
 		require.Error(t, err)
 		assert.False(t, prepared)
 		assert.Contains(t, err.Error(), "check export mount")
@@ -238,7 +240,7 @@ func TestEnsureNFSWorkspaceLeaf_RejectsUnexpectedWorkspacePath(t *testing.T) {
 				ServerRelativePath: tc.rel,
 				HostPath:           tc.hostPath,
 			}
-			prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, "ws-pv", nil)
+			prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, runtime.NFSPodShare{ClaimName: "ws-pv"}, nil)
 			require.Error(t, err)
 			assert.False(t, prepared)
 			assert.Contains(t, err.Error(), "unexpected workspace path")
@@ -258,7 +260,7 @@ func TestEnsureNFSWorkspaceLeaf_CreatesClaimSharedDirs(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share-1"), 0o755))
 	res := resolveTestNFSWorkspace(t, mountRoot, "scratchpad", "cache")
 
-	prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, "ws-pv", []string{"scratchpad", "cache"})
+	prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, runtime.NFSPodShare{ClaimName: "ws-pv"}, []string{"scratchpad", "cache"})
 	require.NoError(t, err)
 	assert.True(t, prepared)
 	projectDir := filepath.Join(mountRoot, "share-1", "projects", testNFSWorkspaceProjectID)
@@ -278,7 +280,7 @@ func TestEnsureNFSWorkspaceLeaf_ExistingUnpreparedSharedDirStaysStrict(t *testin
 	sdPath := filepath.Join(filepath.Dir(res.HostPath), "shared-dirs", "scratchpad")
 	require.NoError(t, os.MkdirAll(sdPath, 0o755))
 
-	prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, "ws-pv", []string{"scratchpad"})
+	prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, runtime.NFSPodShare{ClaimName: "ws-pv"}, []string{"scratchpad"})
 	require.NoError(t, err)
 	assert.False(t, prepared)
 	assert.Equal(t, uint32(0o2775), statMode(t, res.HostPath).Mode&0o7777, "the workspace is still created")
@@ -293,7 +295,7 @@ func TestEnsureNFSWorkspaceLeaf_UnpreparedWorkspaceStillCreatesSharedDirs(t *tes
 	require.NoError(t, os.MkdirAll(res.HostPath, 0o755))
 	require.NoError(t, os.Chmod(res.HostPath, 0o755))
 
-	prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, "ws-pv", []string{"scratchpad"})
+	prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, runtime.NFSPodShare{ClaimName: "ws-pv"}, []string{"scratchpad"})
 	require.NoError(t, err)
 	assert.False(t, prepared)
 	assert.Equal(t, uint32(0o755), statMode(t, res.HostPath).Mode&0o7777, "the existing workspace is left alone")
@@ -320,7 +322,7 @@ func TestEnsureNFSWorkspaceLeaf_SharedDirMustMatchResolvedPath(t *testing.T) {
 			res := resolveTestNFSWorkspace(t, mountRoot, "scratchpad")
 			tc.edit(&res)
 
-			prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, "ws-pv", []string{"scratchpad"})
+			prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, runtime.NFSPodShare{ClaimName: "ws-pv"}, []string{"scratchpad"})
 			require.Error(t, err)
 			assert.False(t, prepared)
 			assert.Contains(t, err.Error(), "shared dir \"scratchpad\" resolves to")
@@ -344,7 +346,7 @@ func TestEnsureNFSWorkspaceLeaf_SharedDirFailures(t *testing.T) {
 		require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share-1"), 0o755))
 		res := resolveTestNFSWorkspace(t, mountRoot)
 
-		prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, "ws-pv", []string{"../other"})
+		prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, runtime.NFSPodShare{ClaimName: "ws-pv"}, []string{"../other"})
 		require.Error(t, err)
 		assert.False(t, prepared)
 		assert.Contains(t, err.Error(), "shared_dirs")
@@ -359,7 +361,7 @@ func TestEnsureNFSWorkspaceLeaf_SharedDirFailures(t *testing.T) {
 		require.NoError(t, os.MkdirAll(sdRoot, 0o755))
 		require.NoError(t, os.WriteFile(filepath.Join(sdRoot, "scratchpad"), nil, 0o644))
 
-		prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, "ws-pv", []string{"scratchpad"})
+		prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, runtime.NFSPodShare{ClaimName: "ws-pv"}, []string{"scratchpad"})
 		require.Error(t, err)
 		assert.False(t, prepared)
 		assert.Contains(t, err.Error(), "shared-dirs/scratchpad")
@@ -374,7 +376,7 @@ func TestEnsureNFSWorkspaceLeaf_CreateFailureReturnsExportError(t *testing.T) {
 		require.NoError(t, os.MkdirAll(filepath.Dir(res.HostPath), 0o755))
 		require.NoError(t, os.WriteFile(res.HostPath, nil, 0o644))
 
-		preCreated, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, "ws-pv", nil)
+		preCreated, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, runtime.NFSPodShare{ClaimName: "ws-pv"}, nil)
 		require.Error(t, err)
 		assert.False(t, preCreated)
 		assert.Contains(t, err.Error(), "not a directory")
@@ -388,7 +390,7 @@ func TestEnsureNFSWorkspaceLeaf_CreateFailureReturnsExportError(t *testing.T) {
 		target := t.TempDir()
 		require.NoError(t, os.Symlink(target, res.HostPath))
 
-		preCreated, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, "ws-pv", nil)
+		preCreated, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, runtime.NFSPodShare{ClaimName: "ws-pv"}, nil)
 		require.Error(t, err)
 		assert.False(t, preCreated)
 		assert.Contains(t, err.Error(), "symlink")
@@ -436,7 +438,7 @@ func TestEnsureNFSWorkspaceLeaf_PermissionDeniedLeavesDirectoryToNode(t *testing
 		require.NoError(t, os.Chmod(projectDir, 0o555))
 		t.Cleanup(func() { _ = os.Chmod(projectDir, 0o755) })
 
-		prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, "ws-pv", nil)
+		prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, runtime.NFSPodShare{ClaimName: "ws-pv"}, nil)
 		require.NoError(t, err)
 		assert.False(t, prepared)
 		_, statErr := os.Stat(res.HostPath)
@@ -458,7 +460,7 @@ func TestEnsureNFSWorkspaceLeaf_PermissionDeniedLeavesDirectoryToNode(t *testing
 		require.NoError(t, os.Chmod(projectDir, 0o555))
 		t.Cleanup(func() { _ = os.Chmod(projectDir, 0o755) })
 
-		prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, "ws-pv", []string{"scratchpad"})
+		prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, runtime.NFSPodShare{ClaimName: "ws-pv"}, []string{"scratchpad"})
 		require.NoError(t, err)
 		assert.False(t, prepared)
 		_, statErr := os.Stat(res.HostPath)
@@ -477,7 +479,7 @@ func TestEnsureNFSWorkspaceLeaf_PermissionDeniedLeavesDirectoryToNode(t *testing
 		require.NoError(t, os.Chmod(sdRoot, 0o555))
 		t.Cleanup(func() { _ = os.Chmod(sdRoot, 0o755) })
 
-		prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, "ws-pv", []string{"scratchpad"})
+		prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, runtime.NFSPodShare{ClaimName: "ws-pv"}, []string{"scratchpad"})
 		require.NoError(t, err)
 		assert.False(t, prepared)
 		assert.Equal(t, uint32(0o2775), statMode(t, res.HostPath).Mode&0o7777, "the workspace is still created")
@@ -506,7 +508,7 @@ func TestEnsureNFSWorkspaceLeaf_NoOpOutsideKubernetesNFS(t *testing.T) {
 			res := resolveTestNFSWorkspace(t, mountRoot)
 			res.Backend = tc.backend
 
-			preCreated, err := ensureNFSWorkspaceLeaf(tc.runtimeName, testNFSWorkspaceProjectID, res, tc.pvClaim, nil)
+			preCreated, err := ensureNFSWorkspaceLeaf(tc.runtimeName, testNFSWorkspaceProjectID, res, runtime.NFSPodShare{ClaimName: tc.pvClaim}, nil)
 			require.NoError(t, err)
 			assert.False(t, preCreated)
 			_, err = os.Stat(filepath.Join(mountRoot, "share-1", "projects"))
@@ -521,9 +523,11 @@ func TestEnsureNFSWorkspaceLeaf_ExportNotMountedRefuses(t *testing.T) {
 	mountRoot := filepath.Join(t.TempDir(), "not-mounted")
 	res := resolveTestNFSWorkspace(t, mountRoot)
 
-	preCreated, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, "ws-pv", nil)
+	preCreated, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, runtime.NFSPodShare{ClaimName: "ws-pv"}, nil)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrProjectShareNotMounted), "err = %v", err)
+	assert.Equal(t, runtime.ProjectShareUnavailableText(res.HostBase, true), err.Error())
+	assert.Equal(t, runtime.ProjectShareUnavailableText(runtime.ProjectShareMountPathField, true), ProjectShareClientText(err))
 	assert.False(t, preCreated)
 	_, err = os.Stat(mountRoot)
 	assert.True(t, os.IsNotExist(err), "the mount root must never be created")
@@ -534,7 +538,7 @@ func TestEnsureNFSWorkspaceLeaf_RejectsInvalidProjectID(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share-1"), 0o755))
 	res := resolveTestNFSWorkspace(t, mountRoot)
 
-	preCreated, err := ensureNFSWorkspaceLeaf("kubernetes", "../other", res, "ws-pv", nil)
+	preCreated, err := ensureNFSWorkspaceLeaf("kubernetes", "../other", res, runtime.NFSPodShare{ClaimName: "ws-pv"}, nil)
 	require.Error(t, err)
 	assert.False(t, preCreated)
 	assert.Contains(t, err.Error(), "invalid project ID")
@@ -769,4 +773,127 @@ func TestStartNFSWorkspace_OwnerIDRange(t *testing.T) {
 			assert.Equal(t, tt.wantGID, int64(got.NFSGID))
 		})
 	}
+}
+
+// inlineTestShare is a share with no claim: pods mount it inline.
+var inlineTestShare = runtime.NFSPodShare{Server: "10.0.0.2", Export: "/scion-workspaces"}
+
+// Inline (no pv_name), the broker creates the directories exactly as with
+// a claim when the export is mounted.
+func TestEnsureNFSWorkspaceLeaf_InlineCreatesDirectories(t *testing.T) {
+	mountRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share-1"), 0o755))
+	res := resolveTestNFSWorkspace(t, mountRoot)
+
+	prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, inlineTestShare, nil)
+	require.NoError(t, err)
+	assert.True(t, prepared)
+	assert.DirExists(t, res.HostPath)
+	assert.DirExists(t, filepath.Join(filepath.Dir(res.HostPath), provision.ProvisionStateDirName))
+}
+
+// Inline, the start is refused when the export is not mounted on the
+// broker (as with a claim, ErrProjectShareNotMounted, with the inline
+// remedy and a path-free client text) and when the broker may not create a
+// directory (with a claim, that is left to the node; the error names the
+// directory and the fix).
+func TestEnsureNFSWorkspaceLeaf_InlineRefusesNodeFallbacks(t *testing.T) {
+	t.Run("export not mounted", func(t *testing.T) {
+		mountRoot := filepath.Join(t.TempDir(), "nfs")
+		res := resolveTestNFSWorkspace(t, mountRoot)
+
+		prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, inlineTestShare, nil)
+		require.Error(t, err)
+		assert.False(t, prepared)
+		assert.Equal(t, runtime.ProjectShareInlineUnavailableText(res.HostBase), err.Error())
+		assert.True(t, errors.Is(err, ErrProjectShareNotMounted), "err = %v", err)
+		assert.Equal(t, runtime.ProjectShareInlineUnavailableText(runtime.ProjectShareMountPathField), ProjectShareClientText(err))
+		assert.NoDirExists(t, mountRoot)
+	})
+
+	t.Run("permission denied", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root bypasses directory permissions")
+		}
+		mountRoot := t.TempDir()
+		res := resolveTestNFSWorkspace(t, mountRoot)
+		projectDir := filepath.Dir(res.HostPath)
+		require.NoError(t, os.MkdirAll(projectDir, 0o755))
+		require.NoError(t, os.Chmod(projectDir, 0o555))
+		t.Cleanup(func() { _ = os.Chmod(projectDir, 0o755) })
+
+		_, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, inlineTestShare, nil)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, fs.ErrPermission), "got %v", err)
+		assert.Contains(t, err.Error(), filepath.Join("projects", testNFSWorkspaceProjectID, "workspace"))
+		assert.Contains(t, err.Error(), "mount the share's export at")
+
+		_, err = ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, runtime.NFSPodShare{ClaimName: "ws-pv"}, nil)
+		require.NoError(t, err, "with a claim the node still creates it")
+	})
+}
+
+// Inline, the worktree leaf's node fallback refuses too.
+func TestEnsureNFSWorktreeLeaf_InlineExportNotMountedRefused(t *testing.T) {
+	mountRoot := filepath.Join(t.TempDir(), "nfs")
+	res := resolveTestNFSWorkspace(t, mountRoot)
+	_, err := ensureNFSWorktreeLeaf("kubernetes", res, inlineTestShare, "agent-1")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrProjectShareNotMounted), "err = %v", err)
+	assert.Equal(t, runtime.ProjectShareInlineUnavailableText(res.HostBase), err.Error())
+	ok, err := ensureNFSWorktreeLeaf("kubernetes", res, runtime.NFSPodShare{ClaimName: "ws-pv"}, "agent-1")
+	require.NoError(t, err)
+	assert.False(t, ok)
+}
+
+// Inline, a permission error while checking whether the shared checkout is
+// provisioned, or while creating the worktree directory, refuses the start
+// with the directory and the fix; with a claim both are left to the node.
+func TestEnsureNFSWorktreeLeaf_InlinePermissionDeniedRefused(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	claim := runtime.NFSPodShare{ClaimName: "ws-pv"}
+	leaf := filepath.Join("workspace", "worktrees", "agent-1")
+
+	t.Run("provisioning check", func(t *testing.T) {
+		mountRoot := t.TempDir()
+		res := resolveTestNFSWorkspace(t, mountRoot)
+		stateDir := filepath.Join(res.HostBase, provision.ProjectStateDir(res.ServerRelativePath))
+		require.NoError(t, os.MkdirAll(stateDir, 0o755))
+		require.NoError(t, os.Chmod(stateDir, 0o000))
+		t.Cleanup(func() { _ = os.Chmod(stateDir, 0o755) })
+
+		_, err := ensureNFSWorktreeLeaf("kubernetes", res, inlineTestShare, "agent-1")
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, fs.ErrPermission), "got %v", err)
+		assert.Contains(t, err.Error(), leaf)
+		assert.Contains(t, err.Error(), "mount the share's export at \""+res.HostBase+"\"")
+
+		ok, err := ensureNFSWorktreeLeaf("kubernetes", res, claim, "agent-1")
+		require.NoError(t, err, "with a claim the node still creates it")
+		assert.False(t, ok)
+	})
+
+	t.Run("worktree directory", func(t *testing.T) {
+		mountRoot := t.TempDir()
+		res := resolveTestNFSWorkspace(t, mountRoot)
+		stateDir := filepath.Join(res.HostBase, provision.ProjectStateDir(res.ServerRelativePath))
+		require.NoError(t, os.MkdirAll(stateDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(stateDir, provision.ProvisionSentinelFile), nil, 0o644))
+		require.NoError(t, os.MkdirAll(res.HostPath, 0o755))
+		require.NoError(t, os.Chmod(res.HostPath, 0o555))
+		t.Cleanup(func() { _ = os.Chmod(res.HostPath, 0o755) })
+
+		_, err := ensureNFSWorktreeLeaf("kubernetes", res, inlineTestShare, "agent-1")
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, fs.ErrPermission), "got %v", err)
+		assert.Contains(t, err.Error(), leaf)
+		assert.Contains(t, err.Error(), "mount the share's export at \""+res.HostBase+"\"")
+		assert.NoDirExists(t, filepath.Join(res.HostPath, "worktrees"))
+
+		ok, err := ensureNFSWorktreeLeaf("kubernetes", res, claim, "agent-1")
+		require.NoError(t, err, "with a claim the node still creates it")
+		assert.False(t, ok)
+	})
 }

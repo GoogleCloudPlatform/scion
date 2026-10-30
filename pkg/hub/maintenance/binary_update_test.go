@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -34,8 +35,9 @@ import (
 
 const testRepo = "GoogleCloudPlatform/scion"
 
-// fakeGitHub serves the GitHub API, release downloads (github.com redirecting
-// to objects.githubusercontent.com) and LATEST.json, through an
+// fakeGitHub serves the GitHub API (single-tag lookups and the release list
+// the catalog reads) and release downloads (github.com redirecting to
+// objects.githubusercontent.com), through an
 // http.RoundTripper, so requests keep their real https URLs and the
 // executor's URL pinning and redirect policy are exercised unchanged.
 type fakeGitHub struct {
@@ -46,7 +48,11 @@ type fakeGitHub struct {
 
 	releases map[string]string // tag → release JSON
 	files    map[string][]byte // github.com download path → body
-	latest   string            // LATEST.json body
+	// unlisted tags are served by single-tag lookups but left out of the
+	// release list (an old release past the list's pages).
+	unlisted map[string]bool
+	// listStatus, when set, is the status of every release list request.
+	listStatus int
 	// redirectHost is where github.com download requests are redirected.
 	redirectHost string
 }
@@ -56,6 +62,7 @@ func newFakeGitHub(t *testing.T) *fakeGitHub {
 		t:            t,
 		releases:     map[string]string{},
 		files:        map[string][]byte{},
+		unlisted:     map[string]bool{},
 		redirectHost: "objects.githubusercontent.com",
 	}
 }
@@ -81,6 +88,24 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_, _ = w.Write([]byte(body))
+	case r.URL.Host == "api.github.com" && r.URL.Path == "/repos/"+testRepo+"/releases":
+		// One page with every listed release; the catalog orders them itself.
+		if f.listStatus != 0 {
+			http.Error(w, "list failed", f.listStatus)
+			return
+		}
+		tags := make([]string, 0, len(f.releases))
+		for tag := range f.releases {
+			if !f.unlisted[tag] {
+				tags = append(tags, tag)
+			}
+		}
+		sort.Strings(tags)
+		bodies := make([]string, 0, len(tags))
+		for _, tag := range tags {
+			bodies = append(bodies, f.releases[tag])
+		}
+		_, _ = w.Write([]byte("[" + strings.Join(bodies, ",") + "]"))
 	case r.URL.Host == "github.com":
 		if _, ok := f.files[r.URL.Path]; !ok {
 			http.NotFound(w, r)
@@ -95,8 +120,6 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_, _ = w.Write(body)
-	case r.URL.Host == "raw.githubusercontent.com" && r.URL.Path == "/"+testRepo+"/main/LATEST.json":
-		_, _ = w.Write([]byte(f.latest))
 	default:
 		f.t.Errorf("unexpected request %s", r.URL)
 		http.NotFound(w, r)
@@ -220,6 +243,9 @@ func TestBinaryUpdate_ValidateParams(t *testing.T) {
 		{"tag with channel and pin", map[string]string{"target_version": "nightly-20261023", "channel": "nightly", "pin": "latest"}, ""},
 		{"cross-channel tag (order checked at run time)", map[string]string{"target_version": "v0.3.0-preview.4"}, ""},
 		{"latest in current channel", map[string]string{"target_version": "latest:nightly"}, ""},
+		{"latest in another channel", map[string]string{"target_version": "latest:preview", "channel": "preview"}, ""},
+		{"latest pinned to latest", map[string]string{"target_version": "latest:stable", "pin": "latest"}, ""},
+		{"tag pinned to itself", map[string]string{"target_version": "nightly-20261023", "pin": "nightly-20261023"}, ""},
 		{"download_url", map[string]string{"target_version": "nightly-20261023", "download_url": "https://evil/x"}, CodeUnknownParam},
 		{"checksums_url", map[string]string{"target_version": "nightly-20261023", "checksums_url": "x"}, CodeUnknownParam},
 		{"current_version", map[string]string{"target_version": "nightly-20261023", "current_version": "dev"}, CodeUnknownParam},
@@ -229,7 +255,9 @@ func TestBinaryUpdate_ValidateParams(t *testing.T) {
 		{"not a tag", map[string]string{"target_version": "latest"}, CodeInvalidParam},
 		{"path in tag", map[string]string{"target_version": "nightly-../../x"}, CodeInvalidParam},
 		{"channel mismatch", map[string]string{"target_version": "nightly-20261023", "channel": "preview"}, CodeInvalidParam},
-		{"latest other channel", map[string]string{"target_version": "latest:preview"}, CodeInvalidParam},
+		{"latest pinned to a tag", map[string]string{"target_version": "latest:nightly", "pin": "nightly-20261023"}, CodeInvalidParam},
+		{"tag pinned to another tag", map[string]string{"target_version": "nightly-20261023", "pin": "nightly-20261024"}, CodeInvalidParam},
+		{"tag pinned to garbage", map[string]string{"target_version": "nightly-20261023", "pin": "newest"}, CodeInvalidParam},
 		{"latest unknown channel", map[string]string{"target_version": "latest:beta"}, CodeInvalidParam},
 		{"latest channel mismatch", map[string]string{"target_version": "latest:nightly", "channel": "preview"}, CodeInvalidParam},
 		{"same", map[string]string{"target_version": "nightly-20261022"}, CodeAlreadyRunning},
@@ -247,14 +275,6 @@ func TestBinaryUpdate_ValidateParams(t *testing.T) {
 			wantCode(t, err, tt.code)
 		})
 	}
-
-	t.Run("configured channel defines latest", func(t *testing.T) {
-		e := NewBinaryUpdateExecutor(BinaryUpdateOptions{CurrentVersion: "nightly-20261022", Channel: "preview"})
-		if err := e.ValidateParams(map[string]string{"target_version": "latest:preview"}); err != nil {
-			t.Fatal(err)
-		}
-		wantCode(t, e.ValidateParams(map[string]string{"target_version": "latest:nightly"}), CodeInvalidParam)
-	})
 
 	t.Run("status codes", func(t *testing.T) {
 		if (&RequestError{Code: CodeUnknownParam}).HTTPStatus() != http.StatusBadRequest ||
@@ -288,7 +308,8 @@ func TestBinaryUpdate_Success(t *testing.T) {
 	if strings.Join(inst.calls, ",") != strings.Join(want, ",") {
 		t.Fatalf("calls = %v, want %v", inst.calls, want)
 	}
-	if hooked == nil || *hooked != (PendingRestart{From: "nightly-20261022", To: "nightly-20261023", Strategy: "fake"}) {
+	if hooked == nil || *hooked != (PendingRestart{From: "nightly-20261022", To: "nightly-20261023", Strategy: "fake",
+		Channel: "nightly", Pin: PinLatest}) {
 		t.Fatalf("hook got %+v", hooked)
 	}
 	if !strings.Contains(string(inst.stagedBin), `"version":"nightly-20261023"`) {
@@ -306,7 +327,6 @@ func TestBinaryUpdate_PreflightFailureMakesNoRequest(t *testing.T) {
 	requireLinux(t)
 	gh := newFakeGitHub(t)
 	gh.addRelease("nightly-20261023", "2026-10-23T04:00:00Z", "nightly-20261023")
-	gh.latest = `{"channels":{"nightly":{"version":"nightly-20261023"}}}`
 
 	for _, target := range []string{"nightly-20261023", "latest:nightly"} {
 		inst := NewUnsupportedInstaller("binary not in /opt/scion", MigrateLayoutHint)
@@ -454,38 +474,119 @@ func TestBinaryUpdate_SizeCap(t *testing.T) {
 func TestBinaryUpdate_LatestChannel(t *testing.T) {
 	requireLinux(t)
 
-	t.Run("resolves through LATEST.json", func(t *testing.T) {
+	run := func(e *BinaryUpdateExecutor, params map[string]string) (*PendingRestart, error) {
+		var hooked *PendingRestart
+		err := e.RunWithBeforeRestart(context.Background(), &bytes.Buffer{}, params,
+			func(_ context.Context, p PendingRestart) error {
+				hooked = &p
+				return nil
+			})
+		return hooked, err
+	}
+
+	t.Run("resolves through the release catalog", func(t *testing.T) {
 		gh := newFakeGitHub(t)
-		gh.latest = `{"channels":{"nightly":{"version":"nightly-20261023"}}}`
+		gh.addRelease("nightly-20261022", "2026-10-22T04:00:00Z", "nightly-20261022")
 		gh.addRelease("nightly-20261023", "2026-10-23T04:00:00Z", "nightly-20261023")
 		inst := &fakeInstaller{}
-		e := newTestExecutor(gh, inst, "nightly-20261022")
-		if err := e.Run(context.Background(), &bytes.Buffer{}, map[string]string{"target_version": "latest:nightly"}); err != nil {
+		e := newTestExecutor(gh, inst, "nightly-20261021")
+		hooked, err := run(e, map[string]string{"target_version": "latest:nightly"})
+		if err != nil {
 			t.Fatalf("Run: %v", err)
 		}
-		if inst.calls[len(inst.calls)-1] != "restart" {
-			t.Fatalf("calls = %v", inst.calls)
+		if inst.calls[len(inst.calls)-1] != "restart" || hooked == nil || hooked.To != "nightly-20261023" {
+			t.Fatalf("calls = %v, hook = %+v", inst.calls, hooked)
+		}
+		if hooked.Channel != "nightly" || hooked.Pin != PinLatest {
+			t.Fatalf("hook channel/pin = %q/%q", hooked.Channel, hooked.Pin)
+		}
+		if !gh.requested("/repos/" + testRepo + "/releases?") {
+			t.Fatal("latest was not resolved through the release list")
+		}
+	})
+
+	t.Run("any channel, not only the running one", func(t *testing.T) {
+		gh := newFakeGitHub(t)
+		gh.addRelease("nightly-20261020", "2026-10-20T04:00:00Z", "nightly-20261020")
+		gh.addRelease("v0.3.0-preview.4", "2026-10-22T18:00:00Z", "v0.3.0-preview.4")
+		inst := &fakeInstaller{}
+		e := newTestExecutor(gh, inst, "nightly-20261020")
+		hooked, err := run(e, map[string]string{"target_version": "latest:preview", "channel": "preview"})
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if hooked == nil || hooked.To != "v0.3.0-preview.4" || hooked.Channel != "preview" {
+			t.Fatalf("hook = %+v", hooked)
+		}
+	})
+
+	t.Run("skips a newer release that is not installable", func(t *testing.T) {
+		gh := newFakeGitHub(t)
+		gh.addRelease("nightly-20261023", "2026-10-23T04:00:00Z", "nightly-20261023")
+		// nightly-20261024 has no SHA256SUMS line for the tarball.
+		gh.addRelease("nightly-20261024", "2026-10-24T04:00:00Z", "nightly-20261024")
+		gh.files[downloadPath("nightly-20261024", ChecksumsAssetName)] = []byte(emptySHA256 + "  SHA256SUMS\n")
+		e := newTestExecutor(gh, &fakeInstaller{}, "nightly-20261022")
+		hooked, err := run(e, map[string]string{"target_version": "latest:nightly"})
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if hooked == nil || hooked.To != "nightly-20261023" {
+			t.Fatalf("hook = %+v, want nightly-20261023", hooked)
+		}
+	})
+
+	t.Run("latest of another channel that is older is refused before download", func(t *testing.T) {
+		gh := newFakeGitHub(t)
+		gh.addRelease("nightly-20261023", "2026-10-23T04:00:00Z", "nightly-20261023")
+		gh.addRelease("v0.3.0-preview.4", "2026-10-22T18:00:00Z", "v0.3.0-preview.4")
+		inst := &fakeInstaller{}
+		e := newTestExecutor(gh, inst, "nightly-20261023")
+		hooked, err := run(e, map[string]string{"target_version": "latest:preview", "channel": "preview"})
+		wantCode(t, err, CodeDowngradeNotYetSupported)
+		if hooked != nil || len(inst.calls) != 1 {
+			t.Fatalf("installer calls = %v, hook = %+v; want preflight only", inst.calls, hooked)
+		}
+		if gh.requested("/releases/download/v0.3.0-preview.4/scion-") {
+			t.Fatal("the older release was downloaded")
 		}
 	})
 
 	t.Run("already on latest", func(t *testing.T) {
 		gh := newFakeGitHub(t)
-		gh.latest = `{"channels":{"nightly":{"version":"nightly-20261023"}}}`
+		gh.addRelease("nightly-20261023", "2026-10-23T04:00:00Z", "nightly-20261023")
 		e := newTestExecutor(gh, &fakeInstaller{}, "nightly-20261023")
-		err := e.Run(context.Background(), &bytes.Buffer{}, map[string]string{"target_version": "latest:nightly"})
+		_, err := run(e, map[string]string{"target_version": "latest:nightly"})
 		wantCode(t, err, CodeAlreadyRunning)
-		if gh.requested("api.github.com") {
-			t.Fatal("release looked up although already on latest")
+		if gh.requested("/releases/tags/") || gh.requested("/releases/download/nightly-20261023/scion-") {
+			t.Fatal("release looked up or downloaded although already on latest")
 		}
 	})
 
-	t.Run("manifest lists a bad tag", func(t *testing.T) {
+	t.Run("no installable release in the channel", func(t *testing.T) {
 		gh := newFakeGitHub(t)
-		gh.latest = `{"channels":{"nightly":{"version":"v1.0.0"}}}`
-		e := newTestExecutor(gh, &fakeInstaller{}, "nightly-20261022")
-		err := e.Run(context.Background(), &bytes.Buffer{}, map[string]string{"target_version": "latest:nightly"})
-		if err == nil || !strings.Contains(err.Error(), "not a nightly release tag") {
+		gh.addRelease("nightly-20261023", "2026-10-23T04:00:00Z", "nightly-20261023")
+		inst := &fakeInstaller{}
+		e := newTestExecutor(gh, inst, "nightly-20261022")
+		_, err := run(e, map[string]string{"target_version": "latest:stable"})
+		if err == nil || !strings.Contains(err.Error(), "no installable stable release") {
 			t.Fatalf("err = %v", err)
+		}
+		if len(inst.calls) != 1 {
+			t.Fatalf("installer calls = %v, want preflight only", inst.calls)
+		}
+	})
+
+	t.Run("pin is passed to the hook", func(t *testing.T) {
+		gh := newFakeGitHub(t)
+		gh.addRelease("nightly-20261023", "2026-10-23T04:00:00Z", "nightly-20261023")
+		e := newTestExecutor(gh, &fakeInstaller{}, "nightly-20261022")
+		hooked, err := run(e, map[string]string{"target_version": "nightly-20261023", "pin": "nightly-20261023"})
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if hooked == nil || hooked.Pin != "nightly-20261023" {
+			t.Fatalf("hook = %+v", hooked)
 		}
 	})
 }

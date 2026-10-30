@@ -3198,3 +3198,178 @@ func TestGCPBackend_Set_ReferenceOnlyKeepsInternalBackup(t *testing.T) {
 		})
 	}
 }
+
+// TestSecretFetch_RefMatchesResolve pins FetchResult.Ref to the SecretRef
+// Resolve reports for the same record, on both backends. Delivery callers
+// that switched from Resolve to FetchValues hand that reference to brokers;
+// on the GCP backend a broker mounts it as <ref>/versions/latest (the GKE
+// Secrets Store CSI resourceName), so it must be the bare Secret Manager
+// resource path, never the stored "gcpsm:" form, and a record with no
+// stored gcpsm ref must still report the computed name it was read by.
+func TestSecretFetch_RefMatchesResolve(t *testing.T) {
+	t.Run("gcp", func(t *testing.T) {
+		backend, mock := createTestGCPBackend(t)
+		ctx := context.Background()
+		smPrefix := "projects/" + backend.projectID + "/secrets/"
+
+		cases := []struct {
+			name string
+			// seed creates the record and its Secret Manager value under
+			// scope user / scopeID and returns the expected Ref.
+			seed func(t *testing.T, key, scopeID string) string
+		}{
+			{
+				name: "prefixed_stored_ref",
+				seed: func(t *testing.T, key, scopeID string) string {
+					_, meta, err := backend.Set(ctx, &SetSecretInput{
+						Name: key, Value: "v-" + key, SecretType: TypeFile, Target: "/etc/" + key,
+						Scope: ScopeUser, ScopeID: scopeID,
+					})
+					if err != nil {
+						t.Fatalf("Set failed: %v", err)
+					}
+					if !strings.HasPrefix(meta.SecretRef, "gcpsm:") {
+						t.Fatalf("expected a gcpsm stored ref, got %q", meta.SecretRef)
+					}
+					return strings.TrimPrefix(meta.SecretRef, "gcpsm:")
+				},
+			},
+			{
+				name: "empty_ref_prefixed_name",
+				seed: func(t *testing.T, key, scopeID string) string {
+					if err := backend.store.CreateSecret(ctx, &store.Secret{
+						ID: tid("ref-parity-" + key), Key: key, Scope: ScopeUser, ScopeID: scopeID,
+					}); err != nil {
+						t.Fatalf("failed to seed DB record: %v", err)
+					}
+					smName := backend.gcpSecretName(key, ScopeUser, scopeID)
+					seedMockSecret(t, mock, backend.projectID, smName, "v-"+key)
+					return smPrefix + smName
+				},
+			},
+			{
+				name: "empty_ref_legacy_name",
+				seed: func(t *testing.T, key, scopeID string) string {
+					if err := backend.store.CreateSecret(ctx, &store.Secret{
+						ID: tid("ref-parity-" + key), Key: key, Scope: ScopeUser, ScopeID: scopeID,
+					}); err != nil {
+						t.Fatalf("failed to seed DB record: %v", err)
+					}
+					smName := backend.legacyGCPSecretName(key, ScopeUser, scopeID)
+					seedMockSecret(t, mock, backend.projectID, smName, "v-"+key)
+					return smPrefix + smName
+				},
+			},
+			{
+				name: "unprefixed_stored_ref",
+				seed: func(t *testing.T, key, scopeID string) string {
+					// A stored ref without the gcpsm: prefix is not a Secret
+					// Manager ref; the record is read by its computed name.
+					if err := backend.store.CreateSecret(ctx, &store.Secret{
+						ID: tid("ref-parity-" + key), Key: key, Scope: ScopeUser, ScopeID: scopeID,
+						SecretRef: smPrefix + "unprefixed-" + scopeID,
+					}); err != nil {
+						t.Fatalf("failed to seed DB record: %v", err)
+					}
+					smName := backend.gcpSecretName(key, ScopeUser, scopeID)
+					seedMockSecret(t, mock, backend.projectID, smName, "v-"+key)
+					return smPrefix + smName
+				},
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				key := "REF_" + strings.ToUpper(tc.name)
+				scopeID := "ref-user-" + tc.name
+				want := tc.seed(t, key, scopeID)
+
+				resolved, err := backend.Resolve(ctx, scopeID, "", "", nil)
+				if err != nil {
+					t.Fatalf("Resolve failed: %v", err)
+				}
+				if len(resolved) != 1 || resolved[0].Name != key {
+					t.Fatalf("expected Resolve to return %s only, got %+v", key, resolved)
+				}
+				if resolved[0].SecretRef != want {
+					t.Fatalf("Resolve SecretRef = %q, want %q", resolved[0].SecretRef, want)
+				}
+
+				meta, err := backend.GetMeta(ctx, key, ScopeUser, scopeID)
+				if err != nil {
+					t.Fatalf("GetMeta failed: %v", err)
+				}
+				results, err := backend.FetchValues(ctx, []SecretMeta{*meta})
+				if err != nil {
+					t.Fatalf("FetchValues failed: %v", err)
+				}
+				res := results[meta.ID]
+				if res.Err != nil {
+					t.Fatalf("FetchValues item error: %v", res.Err)
+				}
+				if res.Value != resolved[0].Value {
+					t.Errorf("FetchValues value = %q, Resolve value = %q", res.Value, resolved[0].Value)
+				}
+				if res.Ref != resolved[0].SecretRef {
+					t.Errorf("FetchValues Ref = %q, Resolve SecretRef = %q", res.Ref, resolved[0].SecretRef)
+				}
+				if strings.HasPrefix(res.Ref, "gcpsm:") || !strings.HasPrefix(res.Ref, smPrefix) {
+					t.Errorf("FetchValues Ref %q is not a bare Secret Manager resource path", res.Ref)
+				}
+			})
+		}
+
+		t.Run("failed_item_has_no_ref", func(t *testing.T) {
+			_, meta, err := backend.Set(ctx, &SetSecretInput{
+				Name: "REF_GONE", Value: "v", SecretType: TypeEnvironment, Scope: ScopeUser, ScopeID: "ref-user-gone",
+			})
+			if err != nil {
+				t.Fatalf("Set failed: %v", err)
+			}
+			mock.mu.Lock()
+			delete(mock.versions, strings.TrimPrefix(meta.SecretRef, "gcpsm:"))
+			mock.mu.Unlock()
+			results, err := backend.FetchValues(ctx, []SecretMeta{*meta})
+			if err != nil {
+				t.Fatalf("FetchValues failed: %v", err)
+			}
+			if res := results[meta.ID]; res.Err == nil || res.Ref != "" {
+				t.Errorf("expected an item error and no Ref, got err=%v ref=%q", res.Err, res.Ref)
+			}
+		})
+	})
+
+	t.Run("local", func(t *testing.T) {
+		backend, s := createTestBackend(t)
+		ctx := context.Background()
+		for _, ref := range []string{"", "ext:some/ref"} {
+			scopeID := "ref-local-" + fmt.Sprint(len(ref))
+			seedSecret(t, s, &store.Secret{
+				ID: tid("ref-local-" + scopeID), Key: "LOCAL_REF", EncryptedValue: "local-value",
+				SecretType: store.SecretTypeEnvironment, Target: "LOCAL_REF",
+				Scope: store.ScopeUser, ScopeID: scopeID, SecretRef: ref,
+			})
+			resolved, err := backend.Resolve(ctx, scopeID, "", "", nil)
+			if err != nil {
+				t.Fatalf("Resolve failed: %v", err)
+			}
+			if len(resolved) != 1 {
+				t.Fatalf("expected one resolved secret, got %+v", resolved)
+			}
+			meta, err := backend.GetMeta(ctx, "LOCAL_REF", ScopeUser, scopeID)
+			if err != nil {
+				t.Fatalf("GetMeta failed: %v", err)
+			}
+			results, err := backend.FetchValues(ctx, []SecretMeta{*meta})
+			if err != nil {
+				t.Fatalf("FetchValues failed: %v", err)
+			}
+			res := results[meta.ID]
+			if res.Err != nil {
+				t.Fatalf("FetchValues item error: %v", res.Err)
+			}
+			if res.Ref != resolved[0].SecretRef || res.Ref != ref {
+				t.Errorf("ref %q: FetchValues Ref = %q, Resolve SecretRef = %q", ref, res.Ref, resolved[0].SecretRef)
+			}
+		}
+	})
+}

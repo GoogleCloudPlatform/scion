@@ -62,6 +62,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubtracing"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/reapermetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/ssemetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/txdiag"
 	scionplugin "github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin/grpcbroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
@@ -608,6 +609,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 				exit.addFlush(mp.Shutdown)
 
 				hubDBRec = wireHubCoreMetrics(hubSrv, mp)
+				attachTxDiagRecorder(entClient, hubDBRec)
 
 				if hubSrv.GetBrokerAuthService() != nil {
 					otelMetrics, otelAuthErr := hub.NewOTelMetricsRecorder(mp)
@@ -917,7 +919,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 									Created:         time.Now(),
 									Updated:         time.Now(),
 								}
-								if createErr := s.CreateRuntimeBroker(ctx, pluginBroker); createErr != nil {
+								if createErr := s.CreateRuntimeBrokerClearingCredentials(ctx, pluginBroker); createErr != nil {
 									log.Printf("Warning: failed to register broker entity for plugin %q: %v", bt, createErr)
 								}
 							}
@@ -1754,6 +1756,17 @@ func portProxyResponseHeaderTimeoutSetting(cfg *config.GlobalConfig) time.Durati
 	return d
 }
 
+// portViewTTLSetting returns the configured lifetime of a page view link
+// (default 2h). validateServerPreflight has already rejected a malformed
+// or out-of-range value.
+func portViewTTLSetting(cfg *config.GlobalConfig) time.Duration {
+	d, err := cfg.Hub.PortProxy.ViewTTLDuration()
+	if err != nil {
+		return config.PortProxyDefaultViewTTL
+	}
+	return d
+}
+
 // agentRunScopeSetting returns the parsed agent run-scope setting.
 // validateServerPreflight has already rejected an invalid value, so an
 // error here falls back to the default (off).
@@ -1890,6 +1903,11 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, *ent
 		ConnMaxLifetime: connMaxLifetime,
 		ConnMaxIdleTime: connMaxIdleTime,
 	}
+	diag, err := txDiagConfig(cfg.Database.TxDiagnostics)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid database config: %w", err)
+	}
+	pool.Diag = diag
 
 	var entClient *ent.Client
 	switch cfg.Database.Driver {
@@ -1970,6 +1988,38 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, *ent
 	}
 
 	return s, entClient, nil
+}
+
+// txDiagConfig returns the transaction diagnostics config for the hub
+// store's pool, or nil when tx_diagnostics.enabled is false (the pool then
+// opens exactly as without diagnostics).
+func txDiagConfig(c config.TxDiagnosticsConfig) (*txdiag.Config, error) {
+	s, err := c.Settings()
+	if err != nil {
+		return nil, err
+	}
+	if !s.Enabled {
+		return nil, nil
+	}
+	return &txdiag.Config{
+		HoldWarnThreshold:     s.HoldWarnThreshold,
+		LockWaitWarnThreshold: s.LockWaitWarnThreshold,
+		WarnInterval:          s.WarnInterval,
+		Logger:                logging.Subsystem("hub.db"),
+	}, nil
+}
+
+// attachTxDiagRecorder hands the hub DB metrics recorder to the store's
+// transaction diagnostics, when both exist. The Monitor itself is owned by
+// the store's connection pool and closes with it.
+func attachTxDiagRecorder(client *ent.Client, rec dbmetrics.Recorder) {
+	mon, ok := entc.DiagMonitor(client)
+	if !ok {
+		return
+	}
+	if tr, ok := rec.(txdiag.Recorder); ok {
+		mon.SetRecorder(tr)
+	}
 }
 
 // migrateStore runs the schema migration and seed data. On Postgres it is
@@ -2543,8 +2593,8 @@ func resolveHubNameFromEnv() string {
 // deprecated SESSION_SECRET). The same value backs both the web session cookie
 // store and the hub JWT signing keys so that all replicas behind the load
 // balancer agree. With a keyring file it is the keyring's "legacy" signing
-// entry, which every purpose but the web session cookies still uses
-// (ptone/scion#1530 Phase 1); the legacy inputs are then refused at startup.
+// entry, which every purpose not yet on the signing ring still uses
+// (ptone/scion#1530); the legacy inputs are then refused at startup.
 func resolveSessionSecret() string {
 	if legacy, ok := keyringLegacySecret(); ok {
 		return legacy
@@ -2874,6 +2924,8 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		NativeChatEnabled: cfg.NativeChat.EnabledSetting(),
 		// server.hub.port_proxy.response_header_timeout (validated at startup).
 		PortProxyResponseHeaderTimeout: portProxyResponseHeaderTimeoutSetting(cfg),
+		// server.hub.port_proxy.view_ttl (validated at startup).
+		PortViewTTL: portViewTTLSetting(cfg),
 	}
 }
 
@@ -3960,6 +4012,34 @@ func loadAndLogSharedDirStorageStartup(logf func(format string, args ...interfac
 	}
 	logSharedDirStorageStartup(globalSettings.Server, logf)
 	logHomeStorageStartup(globalSettings, logf)
+	logK8sNFSVolumeStartup(globalSettings, logf)
+}
+
+// logK8sNFSVolumeStartup logs, when the default runtime is Kubernetes and
+// project storage is nfs with no shares[0].pv_name, that agent pods mount
+// the share inline (one NFS volume per directory, by server path, with no
+// mount options), and that NFS homes are refused at agent start in that
+// case. It checks configuration only and never fails startup.
+func logK8sNFSVolumeStartup(gs *config.VersionedSettings, logf func(format string, args ...interface{})) {
+	if gs == nil || gs.Server == nil {
+		return
+	}
+	if _, rtType, err := gs.ResolveRuntime(""); err != nil || !kubernetesRuntimeType(rtType) {
+		return
+	}
+	ps, _, err := config.ResolveProjectStorage(gs.Server)
+	if err != nil {
+		return
+	}
+	layout, err := config.ProjectStorageLayout(ps, config.DefaultVolumeMountBase)
+	if err != nil || layout.Backend != projectfs.BackendNFS || layout.Share.PVName != "" {
+		return
+	}
+	logf("k8s NFS volumes: inline, by server path; no mount options; set shares[0].pv_name to use an operator PV " +
+		"(this broker must mount the export, writable, to create each directory before the pod starts)")
+	if gs.ResolveHomeStorage().Backend == config.HomeStorageBackendNFS {
+		logf("home_storage nfs: Kubernetes agent starts are refused while nfs.shares[0].pv_name is unset (inline pod volumes do not carry NFS homes yet)")
+	}
 }
 
 // logHomeStorageStartup logs a warning for an invalid server.home_storage
@@ -4278,14 +4358,18 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	var brokerNFS *config.V1NFSConfig
 	var workspaceStorageBackend string
 	brokerLayout := projectfs.Layout{Backend: projectfs.BackendLocal, Homes: projectfs.BackendLocal}
+	var brokerStorageErr error
 	if globalVS, _, gErr := config.LoadGlobalSettings(); gErr != nil {
 		log.Printf("WARNING: NFS mount checks disabled: loading global settings: %v", gErr)
 	} else {
 		workspaceStorageBackend = brokerWorkspaceStorageBackend(globalVS)
 		var layoutWarnings []string
-		brokerLayout, layoutWarnings = brokerStorageLayout(globalVS)
+		brokerLayout, layoutWarnings, brokerStorageErr = brokerStorageLayout(globalVS)
 		for _, w := range layoutWarnings {
 			log.Printf("WARNING: %s", w)
+		}
+		if brokerStorageErr != nil {
+			log.Printf("WARNING: %s", brokerStorageUnavailableWarning(brokerStorageErr))
 		}
 		var nfsWarning string
 		brokerNFS, nfsWarning = brokerNFSConfig(globalVS)
@@ -4329,6 +4413,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		StorageBucket:                 brokerStorageBucket(cfg.Storage),
 		WorkspaceStorageBackend:       workspaceStorageBackend,
 		StorageLayout:                 brokerLayout,
+		StorageError:                  brokerStorageErr,
 		DefaultProfile:                brokerDefaultProfile,
 		Debug:                         enableDebug,
 		SlowRequestThreshold:          cfg.SlowRequestThreshold,

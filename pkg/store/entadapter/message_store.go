@@ -15,10 +15,12 @@
 package entadapter
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -403,11 +405,15 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 	if filter.SenderID != "" {
 		query.Where(message.SenderIDEQ(filter.SenderID))
 	}
+	// ParticipantID is recipient_id = X OR sender_id = X. The COUNT uses the
+	// OR directly (it needs no sort), but the page reads each branch as its
+	// own query; see participantPage.
+	var participantBranches []predicate.Message
 	if filter.ParticipantID != "" {
-		query.Where(message.Or(
+		participantBranches = []predicate.Message{
 			message.RecipientIDEQ(filter.ParticipantID),
 			message.SenderIDEQ(filter.ParticipantID),
-		))
+		}
 	}
 	if filter.Sender != "" {
 		query.Where(message.SenderEQ(filter.Sender))
@@ -447,7 +453,11 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 	var totalCount int
 	if !opts.SkipTotalCount {
 		var err error
-		totalCount, err = query.Clone().Count(ctx)
+		countQuery := query.Clone()
+		if participantBranches != nil {
+			countQuery.Where(message.Or(participantBranches...))
+		}
+		totalCount, err = countQuery.Count(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -499,11 +509,20 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 		createdOrder = entsql.OrderAsc()
 		idOrder = entsql.OrderAsc()
 	}
-	entities, err := query.
-		Order(message.ByCreated(createdOrder)).
-		Order(message.ByID(idOrder)).
-		Limit(limit + 1).
-		All(ctx)
+	page := func(q *ent.MessageQuery) ([]*ent.Message, error) {
+		return q.
+			Order(message.ByCreated(createdOrder)).
+			Order(message.ByID(idOrder)).
+			Limit(limit + 1).
+			All(ctx)
+	}
+	var entities []*ent.Message
+	var err error
+	if participantBranches == nil {
+		entities, err = page(query)
+	} else {
+		entities, err = participantPage(query, participantBranches, page, ascending, limit+1)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -522,6 +541,54 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 		result.Items = msgs
 	}
 	return result, nil
+}
+
+// participantPage returns the first n rows, in (created, id) order, of base
+// filtered by any of branches. Each branch is read as its own query, served
+// by its (column, created, id) index in index order, so each one stops after
+// n rows. With the OR in a single query, SQLite plans a multi-index OR plus
+// a temp B-tree sort, which fetches and sorts every row the participant has
+// and is slow for busy agents (ptone/scion#6572). The branches are merged
+// here and rows that match more than one branch are kept once.
+//
+// The merge compares created as time and id as UUID bytes. That is the
+// order the database uses, except for the legacy SQLite rows described in
+// ListMessages, whose stored created text sorts differently.
+func participantPage(
+	base *ent.MessageQuery,
+	branches []predicate.Message,
+	page func(*ent.MessageQuery) ([]*ent.Message, error),
+	ascending bool,
+	n int,
+) ([]*ent.Message, error) {
+	seen := make(map[uuid.UUID]bool)
+	var merged []*ent.Message
+	for _, branch := range branches {
+		rows, err := page(base.Clone().Where(branch))
+		if err != nil {
+			return nil, err
+		}
+		for _, e := range rows {
+			if !seen[e.ID] {
+				seen[e.ID] = true
+				merged = append(merged, e)
+			}
+		}
+	}
+	slices.SortFunc(merged, func(a, b *ent.Message) int {
+		c := a.Created.Compare(b.Created)
+		if c == 0 {
+			c = bytes.Compare(a.ID[:], b.ID[:])
+		}
+		if !ascending {
+			c = -c
+		}
+		return c
+	})
+	if len(merged) > n {
+		merged = merged[:n]
+	}
+	return merged, nil
 }
 
 // MarkMessageRead marks a message as read.

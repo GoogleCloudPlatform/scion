@@ -43,6 +43,12 @@ const (
 	// the keys and the migration (ptone/scion#6371).
 	BrokerErrCodeStorageMigrationRequired = "storage_migration_required"
 
+	// BrokerErrCodeProjectStorageUnavailable marks an agent create, start
+	// or restart the broker refuses (503) because it does not see the
+	// project storage share. The message names configuration fields, never
+	// the path, and gives the remedy (ptone/scion#5823).
+	BrokerErrCodeProjectStorageUnavailable = "project_storage_unavailable"
+
 	// BrokerErrCodeIdentityNotMapped marks a dispatch in GCP identity mode
 	// "assign" on the Kubernetes runtime whose GCP service account has no
 	// kubernetes_service_account_mappings entry on the selected profile
@@ -80,6 +86,13 @@ const (
 	// shortly, against the restarted broker, is expected to succeed
 	// (ptone/scion#4668).
 	BrokerErrCodeBrokerDraining = "broker_draining"
+
+	// BrokerErrCodeStorageInvalid marks an agent create, start or restart
+	// refused because the broker's project storage settings are invalid
+	// (422). The broker started without storage; the operator must fix
+	// server.project_storage on the broker host and restart it. Stop and
+	// delete keep working.
+	BrokerErrCodeStorageInvalid = "storage_invalid"
 
 	// BrokerErrCodeLocalWorktreeRefused marks a worktree-per-agent dispatch
 	// for a linked checkout that the co-located broker refused because the

@@ -1851,6 +1851,16 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 				"cannot restore the agent: the user or agent it belongs to no longer exists", nil)
 			return
 		}
+		if errors.Is(err, errAgentOwnerUserDeleting) {
+			writeError(w, http.StatusConflict, ErrCodeConflict,
+				"cannot restore the agent: the user it belongs to is being deleted", nil)
+			return
+		}
+		if errors.Is(err, errAgentGuardUserLookup) {
+			slog.ErrorContext(ctx, "restore: guard user lookup failed", "agent_id", agent.ID, "error", err)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Could not verify the agent's owner; retry the restore", nil)
+			return
+		}
 		if errors.Is(err, errRestoreEdgeConflict) {
 			Conflict(w, "The agent already has an active delegation that conflicts with the one being restored")
 			return
@@ -2100,6 +2110,15 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 	messaging.RecordStep(ctx, "agent_loaded")
+
+	// A chat reference (surface and external_ref) resolves a conversation
+	// whose default agent is set to the recipient, so the recipient must be
+	// live. A soft-deleted recipient gets exactly this handler's answer for
+	// an unknown agent, before anything is dispatched or written.
+	if req.Surface != "" && req.ExternalRef != "" && (agent == nil || !agent.DeletedAt.IsZero()) {
+		writeErrorFromErr(w, store.ErrNotFound, "")
+		return
+	}
 
 	// Ownership check: verify the DM key IDs match the actual participants.
 	// The agent in the DM key must match the target agent; the user must match

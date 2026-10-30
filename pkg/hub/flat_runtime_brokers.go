@@ -296,7 +296,7 @@ func (s *Server) registerFlatRuntimeBroker(ctx context.Context, reg flatRegistra
 		if err := hostSAClaimWriteAllowed(hostSAClaim{}, hostSAClaimOf(b), reg.HostSAClaim); err != nil {
 			return nil, false, err
 		}
-		if err := s.store.CreateRuntimeBroker(ctx, b); err != nil {
+		if err := s.store.CreateRuntimeBrokerClearingCredentials(ctx, b); err != nil {
 			// A row that took the target after the check above.
 			var refusal *RuntimeTargetRefusal
 			if errors.Is(err, store.ErrAlreadyExists) && errors.As(s.refuseRuntimeTargetInUse(ctx, reg.Target.ID, reg.BrokerID), &refusal) {

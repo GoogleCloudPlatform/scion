@@ -27,7 +27,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
@@ -43,7 +42,6 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
-	"golang.org/x/sync/errgroup"
 )
 
 // permissionProjectSecretRead is the registry permission ID that governs an
@@ -214,6 +212,12 @@ type HTTPAgentDispatcher struct {
 	// principal triggers it (ptone/scion#1994). Nil = no creator-based
 	// resolution (start/restart carry no PreResolvedSkills, same as before).
 	creatorSkillPreResolver func(ctx context.Context, agent *store.Agent) *ResolveSkillsResponse
+
+	// skillRefLister returns the agent's merged skill references (inline
+	// and Hub template skills), from which the provision credential keys
+	// are derived (ghCredentialKeysForSkills). Nil = no references, so no
+	// provision credentials are sent.
+	skillRefLister func(ctx context.Context, agent *store.Agent) []api.SkillReference
 
 	// requiredStandingCheck refuses a start or restart of an agent that is
 	// not in good standing (ptone/scion#3433). It is required in
@@ -524,6 +528,13 @@ func (d *HTTPAgentDispatcher) SetCreatorSkillPreResolver(fn func(ctx context.Con
 	d.creatorSkillPreResolver = fn
 }
 
+// SetSkillRefLister registers the callback that returns an agent's merged
+// skill references. The provision credentials sent to the broker are limited
+// to the keys its gh:// references can use (resolveProvisionCredentials).
+func (d *HTTPAgentDispatcher) SetSkillRefLister(fn func(ctx context.Context, agent *store.Agent) []api.SkillReference) {
+	d.skillRefLister = fn
+}
+
 // SetRequiredStandingCheck registers the check DispatchAgentStart and
 // DispatchAgentRestart run before any broker call: a non-nil error refuses
 // the dispatch (ptone/scion#3433). Required in production; Server.SetDispatcher
@@ -687,92 +698,6 @@ func (d *HTTPAgentDispatcher) getProvisioningBrokerEndpoint(ctx context.Context,
 		}
 	}
 	return broker.Endpoint, nil
-}
-
-// resolveProvisionCredentials collects project-scope secrets for use by the
-// broker's provision-time credential resolution (skill resolution, URI
-// variable substitution, credential helpers). These are never forwarded to
-// the agent container environment. Shared by the create and start/restart
-// dispatch paths so that a required gh:// skill can resolve with the same
-// project credentials regardless of which path (re-)provisions the agent.
-// callerName prefixes every log message this function writes, at any level.
-func (d *HTTPAgentDispatcher) resolveProvisionCredentials(ctx context.Context, agent *store.Agent, callerName string) map[string]string {
-	if agent.ProjectID == "" || d.secretBackend == nil {
-		return nil
-	}
-	projectSecrets, listErr := d.secretBackend.List(ctx, secret.Filter{
-		Scope:   secret.ScopeProject,
-		ScopeID: agent.ProjectID,
-	})
-	if listErr != nil {
-		// Logged regardless of debug: without these credentials a private
-		// gh:// skill silently resolves with the default credential (or none).
-		d.log.Warn(callerName+": failed to list project secrets for ProvisionCredentials",
-			"agent_id", agent.ID, "project_id", agent.ProjectID, "error", listErr)
-		return nil
-	}
-	if len(projectSecrets) == 0 {
-		d.log.Info(callerName+": ProvisionCredentials resolved",
-			"agent_id", agent.ID, "project_id", agent.ProjectID, "count", 0)
-		return nil
-	}
-
-	type namedValue struct{ name, value string }
-	fetched := make([]namedValue, len(projectSecrets))
-
-	// interrupted counts secrets not fetched because ctx was cancelled or
-	// timed out. Those are reported once below rather than once per secret.
-	var interrupted atomic.Int64
-	g, gctx := errgroup.WithContext(ctx)
-	for i, sm := range projectSecrets {
-		if sm.SecretType == store.SecretTypeInternal {
-			continue
-		}
-		i, sm := i, sm // capture loop vars
-		g.Go(func() error {
-			if gctx.Err() != nil {
-				interrupted.Add(1)
-				return nil
-			}
-			sv, getErr := d.secretBackend.Get(gctx, sm.Name, secret.ScopeProject, agent.ProjectID)
-			if getErr != nil {
-				if ctx.Err() != nil || errors.Is(getErr, context.Canceled) || errors.Is(getErr, context.DeadlineExceeded) {
-					interrupted.Add(1)
-					return nil
-				}
-				// Secret name and project only; never the value.
-				d.log.Warn(callerName+": failed to get project secret for ProvisionCredentials",
-					"agent_id", agent.ID, "project_id", agent.ProjectID, "secret", sm.Name, "error", getErr)
-				return nil // don't fail the group for individual secrets
-			}
-			if sv != nil && sv.Value != "" {
-				fetched[i] = namedValue{sm.Name, sv.Value}
-			}
-			return nil
-		})
-	}
-	_ = g.Wait()
-	if n := interrupted.Load(); n > 0 {
-		cause := ctx.Err()
-		if cause == nil {
-			cause = context.Canceled
-		}
-		d.log.Warn(callerName+": ProvisionCredentials fetch stopped early; some project secrets were not fetched",
-			"agent_id", agent.ID, "project_id", agent.ProjectID, "not_fetched", n, "error", cause)
-	}
-
-	creds := make(map[string]string)
-	for _, nv := range fetched {
-		if nv.name != "" {
-			creds[nv.name] = nv.value
-		}
-	}
-	d.log.Info(callerName+": ProvisionCredentials resolved",
-		"agent_id", agent.ID, "project_id", agent.ProjectID, "count", len(creds))
-	if len(creds) == 0 {
-		return nil
-	}
-	return creds
 }
 
 // secretResolutionPolicy says what buildCreateRequest does when the secret
@@ -3215,21 +3140,33 @@ type startEnvResult struct {
 // mintSiteRestart; it names the site in the mint audit record and gives the
 // verb of the secrets-resolution failure (the agent was not <verb>). Any
 // other site is an error before any work is done. It returns an error only
-// for such a site, when the stored env settings read fails or the secret
-// backend returns a resolution error (a *secretResolutionError; absence of
-// stored settings or secrets is not an error), when the
+// for such a site, when the stored env settings read fails, the secret
+// backend returns a resolution error, or the delivery credential an
+// associated item needs cannot be minted (a *secretResolutionError; absence
+// of stored settings or secrets is not an error, and an item the delivery
+// decision refuses is simply not delivered), when the
 // agent's project cannot be loaded (both checked before any token is
 // minted), or when the agent token is not issued.
 func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Agent, caller string, site mintSite) (startEnvResult, error) {
 	var startedVerb string
+	var purpose MaterialPurpose
 	switch site {
 	case mintSiteStart:
 		startedVerb = "started"
+		purpose = PurposeDispatch
 	case mintSiteRestart:
 		startedVerb = "restarted"
+		purpose = PurposeRestart
 	default:
 		return startEnvResult{}, fmt.Errorf("%s: unsupported mint site %q for a start", caller, site)
 	}
+	// Launch material is selected under the delivery credential: every
+	// project-, hub- and broker-scope env var and secret is authorized
+	// (Decide *.deliver) before it is used, and no secret value is read
+	// before the credential is minted and the item admitted
+	// (material_delivery.go). The selector is per start, so nothing is
+	// cached from an earlier start.
+	sel := newDeliverySelector(d.authzService, agent, purpose)
 	resolvedEnv := make(map[string]string)
 	var envClassifications map[string]api.EnvKind
 
@@ -3263,7 +3200,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	// A read error (not an absence) fails the start/restart here, like a
 	// secret resolution error below: before any token is minted and before
 	// anything reaches the broker. Only the fixed message leaves the hub.
-	envFromStorage, envFromStoragePlain, err := d.resolveEnvFromStorage(ctx, agent)
+	envFromStorage, envFromStoragePlain, err := d.selectDeliveryEnv(ctx, sel, agent)
 	if err != nil {
 		d.log.WarnContext(ctx, caller+": failed to read stored env settings; agent not "+startedVerb,
 			"agent_id", agent.ID, "error", err)
@@ -3290,7 +3227,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	// lookup and before any agent or transport token is minted below, so
 	// nothing reaches the broker and there is nothing to revoke. Absence is
 	// not an error: an agent with no secrets resolves to an empty list.
-	resolvedSecrets, _, err := d.resolveSecrets(ctx, agent)
+	resolvedSecrets, err := d.selectDeliverySecrets(ctx, sel, agent)
 	if err != nil {
 		d.log.WarnContext(ctx, caller+": failed to resolve secrets; agent not "+startedVerb,
 			"agent_id", agent.ID, "error", err)
@@ -3689,15 +3626,6 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 	// so in the start response (ptone/scion#3982).
 	d.warnRerenderUnsupported(ctx, agent, inlineConfig)
 
-	// TODO(#1350): Thread envClassifications to broker via client.StartAgent.
-	// PRECONDITION for P3b: without this, the broker receives nil (state 3,
-	// "classification unavailable") on the start path. P3b must not land
-	// until #1350 is done — otherwise fail-closed + nil map = total outage.
-	// This includes SCION_GIT_CLONE_URL: the broker classifies it as
-	// EnvKindSecretInjected on its own side (start_context.go), but that
-	// classification does not reach the Hub until #1350 wires it back.
-	_ = envClassifications // avoid unused-variable error until #1350 wire threading
-
 	// Carry the same dispatch metadata the create path sends so that a
 	// re-provision reached via start (e.g. after the broker deletes a stale
 	// agent dir) can resolve required skills exactly as create does (#1960):
@@ -3737,6 +3665,12 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 	extras.RunID = runID
 	setStartEnvToken(resolvedEnv, &envClassifications, token)
 	issued = token != ""
+	// The broker accepts the issued credential from resolvedEnv only with
+	// its secret-bootstrap classification, so the classifications go with
+	// the start, as they do with a create. The reverse direction, the
+	// broker's own classifications (such as the clone URL's) reaching the
+	// hub, is still open under #1350.
+	extras.EnvClassifications = envClassifications
 
 	// send is one start send, including the hash-mismatch repair and
 	// resend, so one asynchronous launch spans both attempts (design L7).
@@ -3955,12 +3889,6 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	resolvedEnv := startEnv.env
 	envClassifications := startEnv.classifications
 
-	// TODO(#1350): Thread envClassifications to broker via client.RestartAgent.
-	// PRECONDITION for P3b: without this, the broker receives nil (state 3,
-	// "classification unavailable") on the restart path. P3b must not land
-	// until #1350 is done — otherwise fail-closed + nil map = total outage.
-	_ = envClassifications // avoid unused-variable error until #1350 wire threading
-
 	// Carry the same dispatch metadata as DispatchAgentStart (see comment
 	// there) so a re-provision reached via restart resolves required skills
 	// exactly as create does (#1960), always as the agent's creator
@@ -4019,6 +3947,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	}
 	extras.RunID = runID
 	setStartEnvToken(resolvedEnv, &envClassifications, token)
+	// As on start: the classifications carry the issued credential's
+	// secret-bootstrap kind, without which the broker drops it.
+	extras.EnvClassifications = envClassifications
 
 	resp, err := d.client.RestartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, resolvedEnv, extras)
 	if errors.Is(err, ErrLifecycleDeferred) {
@@ -4768,11 +4699,11 @@ func (d *HTTPAgentDispatcher) deferredLifecycleResult(
 }
 
 // startSecretResolveOpts builds the resolve options for a start-time
-// secret resolution. resolveSecrets (Dispatch, Restart and Probe) and
-// resolveAsNeededForKeys both use it, so the two authorize a user-scope
-// secret the same way. It returns nil when no authorization service is
-// configured; nothing is then resolved through the progeny path and the
-// owner path is unchecked.
+// secret resolution. resolveSecrets, resolveAsNeededForKeys and the start
+// and restart launch selection (selectDeliverySecrets) all use it, so they
+// authorize a user-scope secret the same way. It returns nil when no
+// authorization service is configured; nothing is then resolved through
+// the progeny path and the owner path is unchecked.
 //
 // Two user-scope paths are checked, both for one synthetic identity built
 // from the agent's stored role, scopes and ancestry:
@@ -4852,12 +4783,15 @@ func (d *HTTPAgentDispatcher) startSecretResolveOpts(ctx context.Context, agent 
 			Permission: secretUsePermission,
 		})
 	}
+	// A user-scope secret the start-time checks refuse is withheld from the
+	// start (resolveSecrets, resolveAsNeededForKeys and the launch selection
+	// all skip it; a lower-scope secret of the same name stays in effect).
+	// It is logged at Warn with its name, scope, path and reason, never its
+	// value, so an operator can see why an agent came up without it.
 	deny := func(path string, s secret.SecretMeta, reason string) {
-		if d.debug {
-			d.log.Debug("start-time secret denied by authz", "path", path,
-				"agent_id", agentID, "secret", s.Name, "secret_id", s.ID,
-				"reason", reason, "scopes", len(scopes))
-		}
+		d.log.WarnContext(ctx, "start-time secret withheld: denied by authz", "path", path,
+			"agent_id", agentID, "secret", s.Name, "secret_id", s.ID, "scope", s.Scope,
+			"reason", reason, "scopes", len(scopes))
 	}
 	// withheld logs, at Warn, a user-scope row that authorization keeps
 	// from the agent (on the owner path, the user secret parent ceiling).
@@ -4903,7 +4837,10 @@ func (d *HTTPAgentDispatcher) startSecretResolveOpts(ctx context.Context, agent 
 			if decision.Allowed && s.Scope == store.ScopeUser {
 				decision = secretUse(ident, s)
 				if !decision.Allowed {
+					// One line per refused user row: the rate-limited
+					// withheld record, not also the deny line below.
 					withheld("progeny", s, decision)
+					return false
 				}
 			}
 			if !decision.Allowed {

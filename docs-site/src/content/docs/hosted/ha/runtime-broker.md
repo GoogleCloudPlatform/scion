@@ -189,6 +189,8 @@ The user who registers a Runtime Broker becomes its owner. Registration admits a
 
 Registering a broker never associates it with a project. Brokers registered before ownership was recorded get an owner assigned automatically when the Hub boots.
 
+The deprecated embedded broker path of `POST /api/v1/projects/register` returns `secretKey` only when it creates the broker's first HMAC secret. When the broker already has a secret, the response leaves `secretKey` out and the stored secret is unchanged. To get a new secret, rotate it (`POST /api/v1/brokers/{id}/rotate-secret`) or register again with `POST /api/v1/brokers` and join with the new token.
+
 Register, re-register, rotate, link, unlink and update events in the audit log record the credential kind and credential ID next to the user, so you can tell whether a sign-in or a specific token was used.
 
 With the `hub.conduit` [experiment](/scion/reference/experiments/) on, each of the Runtime Broker's Conduit sessions is tied to the secret it was admitted with. Deregistering the Runtime Broker, rotating or replacing its secret, or a secret that is no longer active closes those sessions with `4401 authz_expired`. The Runtime Broker retries with backoff (1 to 60 seconds); after a rotation it is admitted again with its new secret. A session that cannot be checked (for example during a database error) stays open until the next check.
@@ -301,7 +303,11 @@ Each Runtime Broker also reports its binary `version` on registration, join, and
 To permanently remove a broker from the Hub, use the **Unregister** button on the broker detail page in the Web Dashboard. Unregistering a broker:
 
 - Removes the broker's registration from the Hub.
-- Cleans up associated HMAC secrets and join tokens.
+- Deletes the broker's HMAC secret and any unused join token, together with the registration.
+
+A Runtime Broker secret authenticates only while the broker's registration exists. When the Hub starts, it also deletes any HMAC secret or join token whose broker is no longer registered; if that cleanup fails, the Hub logs an error and starts anyway. A broker registration created with an ID that an earlier registration had (for example a plugin or co-located broker, whose ID is fixed) starts with no secret or join token from the earlier one.
+
+One case cannot be told apart: a secret left by a deregistration on an earlier Hub version, whose broker registration was re-created with the same ID before upgrading, belongs to a registered broker and is kept. To leave no such secret, an operator can [rotate the HMAC secret](/scion/reference/security/) of each Runtime Broker once after upgrading; this is optional.
 
 Only the broker's owner or a Hub admin can unregister it, and unregistering requires confirmation. After unregistering, the broker can no longer receive agent dispatch commands. Re-registration via `scion runtime-broker register` is required to reconnect.
 

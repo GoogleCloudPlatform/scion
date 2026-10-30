@@ -210,7 +210,7 @@ func assertNoCapabilityKeyMaterial(t *testing.T, out string, extra ...string) {
 	t.Helper()
 	for _, secret := range []string{krLegacySecret, krGen1Secret, krGen2Secret} {
 		assert.NotContains(t, out, secret)
-		for _, name := range []string{SecretKeyDownloadSigningKey, SecretKeyArtifactViewKey, SecretKeyListCursorKey, SecretKeyAttachmentDeliveryKey} {
+		for _, name := range []string{SecretKeyDownloadSigningKey, SecretKeyArtifactViewKey, SecretKeyListCursorKey, SecretKeyAttachmentDeliveryKey, SecretKeyPortViewKey} {
 			k := deriveSharedSigningKey(secret, name)
 			assert.NotContains(t, out, base64.StdEncoding.EncodeToString(k))
 			assert.NotContains(t, out, base64.RawURLEncoding.EncodeToString(k))
@@ -296,7 +296,7 @@ func TestNew_ReleaseCheckRefusesVersionedRing(t *testing.T) {
 func TestCapabilityKeys_GoldenBytes(t *testing.T) {
 	k := capKeyring(t, "gen1", "versioned", []string{"legacy"},
 		krEntry{id: "legacy", secret: krLegacySecret}, krEntry{id: "gen1", secret: krGen1Secret})
-	for _, name := range []string{SecretKeyDownloadSigningKey, SecretKeyArtifactViewKey, SecretKeyListCursorKey, SecretKeyAttachmentDeliveryKey} {
+	for _, name := range []string{SecretKeyDownloadSigningKey, SecretKeyArtifactViewKey, SecretKeyListCursorKey, SecretKeyAttachmentDeliveryKey, SecretKeyPortViewKey} {
 		c := capabilityKeys{ring: k.Signing(), purpose: sharedSecretPurpose(name)}
 		legacyKeys := c.candidates("legacy")
 		require.Len(t, legacyKeys, 1)
@@ -946,7 +946,7 @@ func TestCapabilityKeyring_RingModeKeySourceLabel(t *testing.T) {
 }
 
 // ringModeCapabilityKeys are the capability keys ring mode derives.
-var ringModeCapabilityKeys = []string{SecretKeyDownloadSigningKey, SecretKeyArtifactViewKey, SecretKeyListCursorKey, SecretKeyAttachmentDeliveryKey}
+var ringModeCapabilityKeys = []string{SecretKeyDownloadSigningKey, SecretKeyArtifactViewKey, SecretKeyListCursorKey, SecretKeyAttachmentDeliveryKey, SecretKeyPortViewKey}
 
 // ---------------------------------------------------------------------------
 // Attachment deliveries (addendum 01688eb9)
@@ -1357,7 +1357,7 @@ type aliasCountingStore struct {
 
 func capabilityKeyName(key string) bool {
 	switch key {
-	case SecretKeyDownloadSigningKey, SecretKeyArtifactViewKey, SecretKeyListCursorKey, SecretKeyAttachmentDeliveryKey:
+	case SecretKeyDownloadSigningKey, SecretKeyArtifactViewKey, SecretKeyListCursorKey, SecretKeyAttachmentDeliveryKey, SecretKeyPortViewKey:
 		return true
 	}
 	return false
@@ -1383,7 +1383,7 @@ func (s *aliasCountingStore) GetSecretValue(ctx context.Context, key, scope, sco
 // single-key records that legacy mode persisted (they are present), and
 // without switching to legacy mode. Legacy mode does read them.
 func TestCapabilityKeyring_UnusableRingRefusesWithoutAliasReads(t *testing.T) {
-	_, s := testServer(t) // legacy mode: persists the four records
+	_, s := testServer(t) // legacy mode: persists the capability key records
 	ctx := context.Background()
 	counting := &aliasCountingStore{Store: s}
 	srv := &Server{config: ServerConfig{Keyring: &keyring.Keyring{}}, store: counting, hubID: "test-hub-id"}
@@ -1392,13 +1392,14 @@ func TestCapabilityKeyring_UnusableRingRefusesWithoutAliasReads(t *testing.T) {
 		"view":       srv.initArtifactViewKey,
 		"cursor":     srv.initListCursorSealer,
 		"attachment": srv.initAttachmentDeliveryKey,
+		"port view":  srv.initPortViewKey,
 	} {
 		err := init(ctx)
 		require.Error(t, err, name)
 		assert.Contains(t, err.Error(), "no usable active generation", name)
 	}
 	assert.Zero(t, counting.reads.Load(), "ring mode read a retained single-key record")
-	assert.False(t, srv.downloadKeys.configured() || srv.artifactViewKeys.configured() || srv.attachmentDeliveryKeys.configured())
+	assert.False(t, srv.downloadKeys.configured() || srv.artifactViewKeys.configured() || srv.attachmentDeliveryKeys.configured() || srv.portViewKeys.configured())
 	assert.Nil(t, srv.listCursorSealer)
 
 	// The control: the same inits in legacy mode do read those records.

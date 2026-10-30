@@ -19,12 +19,14 @@
  *    running through the shipped harnesses' no-auth fallback.
  * 2. Starts a throwaway member-level test hub (class test, --test-mode
  *    member, marked database, pinned hub id, private HOME) with the
- *    co-located runtime broker and server.hub.async_agent_launch on, as the
- *    async create journey does.
+ *    co-located runtime broker and the hub.async_agent_launch and
+ *    hub.artifacts experiments on (startHub sets them through the admin
+ *    experiments API and reads them back), as the async create journey
+ *    does.
  * 3. With the hub's own issuer credential (the dev token, before the
- *    restart): turns hub.artifacts on through the admin experiments API,
- *    then issues the five member test identities and mints each one's
- *    single-use web-login code into a 0600 file in the private state dir.
+ *    restart): reads hub.artifacts back for the record, then issues the
+ *    five member test identities and mints each one's single-use web-login
+ *    code into a 0600 file in the private state dir.
  *    This is the recorded deviation: a local issuer, no workload
  *    delegation.
  * 4. Restarts the hub without development sign-in, as in production.
@@ -120,27 +122,20 @@ async function bearerRequest(
   return { status: res.status, text: await res.text() };
 }
 
-/** Turns hub.artifacts on through the admin experiments API and reads it back. */
-async function enableArtifacts(
+/**
+ * Reads hub.artifacts back from the admin experiments API (startHub has
+ * already turned it on and checked it): the value the suite records.
+ */
+async function readArtifactsExperiment(
   baseURL: string,
   devToken: string
 ): Promise<{ enabled: boolean | null; override: boolean | null }> {
-  type Listing = {
-    revision: number;
+  const res = await bearerRequest(baseURL, devToken, 'GET', '/api/v1/admin/experiments');
+  if (res.status !== 200) throw new Error(`GET /api/v1/admin/experiments answered ${res.status}`);
+  const listing = JSON.parse(res.text) as {
     experiments: Array<{ name: string; enabled: boolean; override: boolean | null }>;
   };
-  const read = async (): Promise<Listing> => {
-    const res = await bearerRequest(baseURL, devToken, 'GET', '/api/v1/admin/experiments');
-    if (res.status !== 200) throw new Error(`GET /api/v1/admin/experiments answered ${res.status}`);
-    return JSON.parse(res.text) as Listing;
-  };
-  const before = await read();
-  const put = await bearerRequest(baseURL, devToken, 'PUT', '/api/v1/admin/experiments', {
-    overrides: { [EXPERIMENT]: true },
-    expected_revision: before.revision,
-  });
-  if (put.status !== 200) throw new Error(`PUT /api/v1/admin/experiments answered ${put.status}`);
-  const entry = (await read()).experiments.find((e) => e.name === EXPERIMENT);
+  const entry = listing.experiments.find((e) => e.name === EXPERIMENT);
   return { enabled: entry?.enabled ?? null, override: entry?.override ?? null };
 }
 
@@ -191,16 +186,18 @@ async function setUp(suiteStateFile: string): Promise<void> {
     build: process.env.E2E_PREBUILT !== '1',
     stateFile: hubStateFile,
     env: {
-      SCION_SERVER_HUB_ASYNCAGENTLAUNCH: 'true',
       SCION_IMAGE_REGISTRY: imageRegistry,
     },
+    // Set explicitly, whatever the registry default, and read back by
+    // startHub: async create for the journey, and the artifact service.
+    experiments: ['hub.async_agent_launch', EXPERIMENT],
   });
   if (!hub.hubId) throw new Error('startHub returned no hub id (testIdentities is required)');
   // The only copy of the issuer credential this suite keeps; it lives in
   // this function's memory and is dropped with it.
   const devToken = hub.devToken;
 
-  const experimentAfterEnable = await enableArtifacts(hub.baseURL, devToken);
+  const experimentAfterEnable = await readArtifactsExperiment(hub.baseURL, devToken);
   if (experimentAfterEnable.enabled !== true) {
     throw new Error(`${EXPERIMENT} is not on after enabling it`);
   }

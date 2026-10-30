@@ -567,12 +567,14 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.AgentEditHeld:                testAdminPolicyDeny,
 	experiments.AttachmentArtifacts:          testAdminPolicyDeny,
 	experiments.AgentPlugins:                 testAdminPolicyDeny,
+	experiments.PortView:                     testAdminPolicyDeny,
 	experiments.AgentBadges:                  testAdminPolicyDeny,
 	experiments.SSEHiddenTabClose:            testAdminPolicyDeny,
 	experiments.SecretRotation:               testAdminPolicyDeny,
 	experiments.ContentHashV2:                testAdminPolicyDeny,
 	experiments.ArtifactReviewEditor:         testAdminPolicyDeny,
 	experiments.SkillContentHashV2:           testAdminPolicyDeny,
+	experiments.UserDeleteForceCascade:       testAdminPolicyDeny,
 }
 
 // testAdminPolicyInputs are the vocabularies the classification must cover.
@@ -931,7 +933,15 @@ func (d *HTTPAgentDispatcher) restrictTestAdminRootedSecrets(ctx context.Context
 		return resolved
 	}
 	restricted, allowed, root := d.testAdminRootScopes(ctx, agent)
-	if !restricted {
+	return d.applyTestAdminSecretScopes(ctx, agent, resolved, restricted, allowed, root)
+}
+
+// applyTestAdminSecretScopes is restrictTestAdminRootedSecrets with the
+// testAdminRootScopes result supplied by the caller (launch selection
+// decides it once, before it fetches any value): when restricted, it keeps
+// only secrets of an allowed scope and reports the withheld scopes.
+func (d *HTTPAgentDispatcher) applyTestAdminSecretScopes(ctx context.Context, agent *store.Agent, resolved []secret.SecretWithValue, restricted bool, allowed map[string]bool, root string) []secret.SecretWithValue {
+	if !restricted || len(resolved) == 0 {
 		return resolved
 	}
 	out := resolved[:0:0]
