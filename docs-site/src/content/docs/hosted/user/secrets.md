@@ -56,9 +56,9 @@ Store sensitive secrets at **User** scope, so that only your own agents receive 
 
 ### Start-Time Authorization
 
-When the Hub starts or restarts an agent, it authorizes each Project, Hub and Broker variable and secret for that agent before it reads any value. The check follows the agent's recorded delegation chain: the user or agent that delegated authority to it, and so on up to a user. An item the check refuses is left out of the start, and the start itself goes ahead. The Hub log has a `Warn` line for each item left out, with its name, scope and the reason, never its value.
+When the Hub starts or restarts an agent, it authorizes each User, Project, Hub, and Runtime Broker variable and secret for that agent **before** applying scope precedence (`runtime_broker < hub < project < user`) or reading any secret value from the secret backend. The check follows the agent's recorded delegation chain: the user or agent that delegated authority to it, and so on up to a user. An item the check refuses is left out before scope precedence runs, so a refused higher-scope entry yields to a permitted lower-scope entry with the same key rather than masking it, and the start itself goes ahead. The Hub log has a `Warn` line for each item left out, with its name, scope and the reason, never its value. Only the secrets that survive both authorization and scope precedence are read from the secret backend; if a selected secret's value cannot be read from the backend after authorization, the Hub refuses the start or restart with `503` (`agent secrets could not be resolved; the agent was not started`, or `... not created` on create) rather than starting the agent without it.
 
-Agents whose delegation chain contains legacy data may not have the recorded chain this check needs. This includes agents created before the chain was recorded, and agents created later under such an agent. The Hub keeps giving those agents their Project, Hub and Broker values, and logs a rate-limited `Warn` line naming the agent, the item and the group the agent falls in. Agents created from a user access token are served the same way for now. That is a product-gap exception, not legacy data: no token scope grants the delivery permissions yet. The groups, the exception and the cases that are still refused are listed under [Launch material for legacy agents](/scion/reference/delegation-provenance-adoption/#launch-material-for-legacy-agents).
+Agents whose delegation chain contains legacy data may not have the recorded chain this check needs. This includes agents created before the chain was recorded, and agents created later under such an agent. The Hub keeps giving those agents their Project, Hub and Runtime Broker values, and logs a rate-limited `Warn` line naming the agent, the item and the group the agent falls in. Agents created from a user access token are served the same way for now. That is a product-gap exception, not legacy data: no token scope grants the delivery permissions yet. The groups, the exception and the cases that are still refused are listed under [Launch material for legacy agents](/scion/reference/delegation-provenance-adoption/#launch-material-for-legacy-agents).
 
 ### Reserved Names
 
@@ -111,7 +111,7 @@ To explicitly enable propagation on a specific secret or variable, use the `--al
   ```
 
 #### How it Works Under the Hood
-Enabling progeny propagation dynamically registers implicit access policies (e.g. `progeny-secret-access:<id>` or `progeny-envvar-access:<id>`) on the Scion Hub. When an agent starts, restarts, or resumes (including `as_needed` secret resolution) or reads secrets at runtime, Scion walks the calling agent's ancestry and delegation chain: if the secret's owner is at the root of that ancestry tree and has enabled progeny permission, and — when the agent's delegation chain carries recorded provenance — every recorded delegation hop on the chain allows `secret.use`, every agent delegator on the chain is live and holds `project:secret:read`, and the root user is active, admitted to the project, not restricted from `secret.use` by an access constraint, and the recorded author of the secret, then the agent inherits the secret (if a user-scoped secret is withheld at start by this check, a lower-precedence project, broker, or hub secret with the same key still applies; see [Security & Audit Logging](#security--audit-logging)).
+Enabling progeny propagation dynamically registers implicit access policies (e.g. `progeny-secret-access:<id>` or `progeny-envvar-access:<id>`) on the Scion Hub. When an agent starts, restarts, or resumes (including `as_needed` secret resolution) or reads secrets at runtime, Scion walks the calling agent's ancestry and delegation chain: if the secret's owner is at the root of that ancestry tree and has enabled progeny permission, and — when the agent's delegation chain carries recorded provenance — every recorded delegation hop on the chain allows `secret.use`, every agent delegator on the chain is live and holds `project:secret:read`, and the root user is active, admitted to the project, not restricted from `secret.use` by an access constraint, and the recorded author of the secret, then the agent inherits the secret (if a user-scoped secret is withheld at start by this check, a lower-precedence project, Runtime Broker, or hub secret with the same key still applies; see [Security & Audit Logging](#security--audit-logging)).
 
 ---
 
@@ -119,7 +119,9 @@ Enabling progeny propagation dynamically registers implicit access policies (e.g
 
 Use the `scion hub env` command suite to manage non-sensitive configuration. Each agent environment variable carries **provenance metadata** (hub-injected, user-defined, or runtime-derived) to help you audit and debug the origin of specific values.
 
-Hub-scope variables are listed with `scope=hub` on `GET /api/v1/env`. Besides super-admins, a user who holds `hub.env_vars.read` (for example through the `hub-admin` role) can list them. That list is read-only and leaves out secrets; reading a single Hub-scope variable, writing one, and every secret endpoint still need a super-admin.
+User- and Hub-level environment variables and secrets (`scope=user`, the default when `--project` and `--broker` are omitted, and `scope=hub`) require an **interactive login** (`scion hub auth login`, a web session, or workstation dev auth). Scoped user access tokens (`scion_pat_*`) are refused on all User- and Hub-scope environment variable and secret operations—whatever their boundary or scopes—with `403 Forbidden`, `details.reason: "CREDENTIAL_MANAGEMENT"` (`details.credential: "session_required"`), and the message `"user- and hub-level environment variables and secrets require an interactive login (run 'scion hub auth login'); access tokens are not accepted"`. Project (`--project`) and Runtime Broker (`--broker`) scopes continue to accept appropriately scoped tokens.
+
+Hub-scope (`scope=hub`) environment variable and secret routes also require an unscoped local platform admin. As the one read-only exception, an interactive login holding `hub.env_vars.read` (for example through the `hub-admin` role) can list Hub-scope environment variables (`GET /api/v1/env?scope=hub`), with secret entries omitted; reading a single Hub-scope variable, writing or deleting one, and every Hub-scope secret endpoint require a super-admin on an interactive login. (Agents may still read Hub-scope items, and a federated caller may read—never write—its own User-scope variables and secrets.)
 
 ### Setting Variables
 ```bash
@@ -129,13 +131,13 @@ scion hub env set API_URL=https://api.example.com
 # Set a project-scoped variable (inferred from current directory)
 scion hub env set --project LOG_LEVEL=debug
 
-# Set a variable only for a specific broker
+# Set a variable only for a specific Runtime Broker
 scion hub env set --broker=my-gpu-node CUDA_VISIBLE_DEVICES=0
 ```
 
 ## Managing Secrets
 
-Secrets are write-only from host-level CLI commands and the Web Dashboard. Once set, their values cannot be read back by users. However, authorized agents running inside their containers can securely retrieve project-scoped secrets at runtime via the Hub API or the `scion secret` CLI commands (and write secrets via `sciontool secret set`).
+Secrets are write-only from host-level CLI commands and the Web Dashboard. Once set, their values cannot be read back by users. However, authorized agents running inside their containers can securely retrieve project-scoped secrets at runtime via the Hub API or the `scion secret` CLI commands (and write secrets via `sciontool secret set`). As with environment variables above, User- and Hub-scope secret operations (`scion hub secret` without `--project` or `--broker`, or with `--hub-scope`) require an interactive login (`scion hub auth login`) and refuse user access tokens with `403` (`details.reason: "CREDENTIAL_MANAGEMENT"`).
 
 ### Setting Secrets
 Secrets can be set manually via the CLI or Web Dashboard, or gathered interactively during agent creation.
@@ -409,7 +411,7 @@ Only GitHub folder URLs use a credential. Archive URLs (`.tar.gz`, `.tgz`, `.zip
 
 Convention-keyed GitHub secrets support the standard injection modes:
 
-- **As Needed** (recommended): The credential is used at provision time to fetch skills and templates but is **not** exposed inside the agent container. This is the minimum-privilege posture.
+- **As Needed** (recommended): The credential is used at provision time to fetch skills and templates but is **not** exposed inside the agent container. This is the minimum-privilege posture. When the Hub dispatches an agent to a Runtime Broker, `provisionCredentials` includes only the `as_needed` environment-type secrets referenced by `?token=SECRET_NAME` on a `gh://` skill URI of the agent or matching a `GH_{OWNER}` / `GH_{OWNER}__{REPO}` convention name for one of the agent's `gh://` skill URIs, plus `GITHUB_TOKEN` (from the resolved environment or an `as_needed` secret) when any `gh://` skill has no explicit or convention token. Unreferenced `as_needed` secrets, `always`-injected secrets (already in the agent environment), and `file` or `variable` secrets are not sent in `provisionCredentials`.
 
   ```bash
   scion hub secret set --project GH_ACME_CORP__PRIVATE_SKILLS github_pat_...
