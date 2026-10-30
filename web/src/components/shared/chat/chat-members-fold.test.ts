@@ -188,9 +188,24 @@ describe('scion-chat-members section folding', () => {
       throw new Error('quota exceeded');
     });
     const el = await mount();
-    toggle(el, 'people').click();
-    await el.updateComplete;
+    // A click listener that throws is reported (window error event and
+    // console.error), not rethrown, so watch both to prove the save swallows
+    // the storage error.
+    const reported: unknown[] = [];
+    const onError = (e: ErrorEvent): void => {
+      reported.push(e.error ?? e.message);
+    };
+    window.addEventListener('error', onError);
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      toggle(el, 'people').click();
+      await el.updateComplete;
+    } finally {
+      window.removeEventListener('error', onError);
+    }
     expect(setItem).toHaveBeenCalled();
+    expect(reported).toEqual([]);
+    expect(consoleError).not.toHaveBeenCalled();
     expect(toggle(el, 'people').getAttribute('aria-expanded')).toBe('false');
     expect(names(el)).toEqual(['Coder', 'Reviewer']);
   });
