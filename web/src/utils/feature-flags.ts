@@ -46,7 +46,23 @@ declare global {
  * Go-side consistency test extracts this set with a regex that only sees
  * literals.
  */
-const DEFAULT_ON_FLAGS = new Set(['web.native_chat', 'web.agent_edit']);
+const DEFAULT_ON_FLAGS = new Set([
+  'web.native_chat',
+  'web.agent_edit',
+  'web.chat_starred_messages',
+]);
+
+/**
+ * The window event sent after the flag bag changes (server flags applied, or
+ * a flag set), so mounted components can re-read flags they depend on.
+ */
+export const FEATURE_FLAGS_CHANGED_EVENT = 'scion-feature-flags-changed';
+
+function announceFlagsChanged(): void {
+  if (typeof window.dispatchEvent === 'function') {
+    window.dispatchEvent(new Event(FEATURE_FLAGS_CHANGED_EVENT));
+  }
+}
 
 /**
  * Snapshot of `window.__SCION_FEATURES__` taken the first time
@@ -79,6 +95,7 @@ export function setServerFlags(flags: Record<string, boolean>): void {
     next[name] = value;
   }
   window.__SCION_FEATURES__ = next;
+  announceFlagsChanged();
 }
 
 /**
@@ -158,6 +175,7 @@ function warnIfShadowed(name: string): void {
 export function setFeatureFlag(name: string, enabled: boolean): void {
   if (typeof window === 'undefined') return;
   window.__SCION_FEATURES__ = { ...window.__SCION_FEATURES__, [name]: enabled };
+  announceFlagsChanged();
 }
 
 /**
@@ -189,3 +207,20 @@ export const AGENT_BADGES_FLAG = 'web.agent_badges';
  * the hub behaves the same either way. Default OFF.
  */
 export const SSE_HIDDEN_TAB_CLOSE_FLAG = 'web.sse_hidden_tab_close';
+
+/**
+ * Graphical review editor (ptone/scion#5913): a Markdown artifact review
+ * opens in a graphical editor with marks inline, where typing is recorded
+ * as suggestions, with a Graphical and Source toggle. Presentation only:
+ * every save goes through the unchanged review publish, which the hub
+ * checks. Default OFF.
+ */
+export const ARTIFACT_REVIEW_EDITOR_FLAG = 'web.artifact_review_editor';
+
+/**
+ * Force user delete (ptone/scion#2143): the admin users page offers to
+ * force-delete a user who has agents and shows a deletion in
+ * progress. Presentation only: the hub checks the experiment on the force
+ * request and on the deletion resource. Default OFF.
+ */
+export const USER_DELETE_FORCE_CASCADE_FLAG = 'hub.user_delete_force_cascade';

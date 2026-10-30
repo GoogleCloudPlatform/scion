@@ -17,6 +17,7 @@ package transfer
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -52,6 +53,10 @@ func (c *Client) UploadFile(ctx context.Context, url UploadURLInfo, content io.R
 // UploadFileWithMethod uploads content to a signed URL with explicit method and headers.
 // Supports both file:// URLs (local filesystem) and HTTP(S) URLs (remote storage).
 func (c *Client) UploadFileWithMethod(ctx context.Context, signedURL, method string, headers map[string]string, content io.Reader) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	// Handle file:// URLs for local storage
 	if strings.HasPrefix(signedURL, "file://") {
 		return c.uploadToFile(signedURL, content)
@@ -117,6 +122,11 @@ func (c *Client) uploadToFile(fileURL string, content io.Reader) error {
 	defer func() { _ = f.Close() }()
 
 	if _, err := io.Copy(f, content); err != nil {
+		// No object is left for a failed write (for example content that
+		// fails its collected size or hash check at the end of the read).
+		// Removal is best-effort; the write error is returned.
+		_ = f.Close()
+		_ = os.Remove(path)
 		return fmt.Errorf("failed to write file %s: %w", path, err)
 	}
 
@@ -126,6 +136,10 @@ func (c *Client) uploadToFile(fileURL string, content io.Reader) error {
 // DownloadFile downloads content from a signed URL.
 // Supports both file:// URLs (local filesystem) and HTTP(S) URLs (remote storage).
 func (c *Client) DownloadFile(ctx context.Context, signedURL string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	// Handle file:// URLs for local storage
 	if strings.HasPrefix(signedURL, "file://") {
 		path := strings.TrimPrefix(signedURL, "file://")
@@ -173,9 +187,17 @@ func (c *Client) DownloadToFile(ctx context.Context, signedURL, destPath string)
 	return os.WriteFile(destPath, content, 0644)
 }
 
-// UploadFiles uploads multiple files to their respective signed URLs.
+// UploadFiles uploads collected files to their respective signed URLs.
+// root must be opened at the directory the files were collected from; each
+// file is read through it with OpenCollectedFile, so links that leave that
+// directory are refused, the entry must still be a regular file, and a file
+// whose size or content changed since collection fails its upload, which
+// stops the whole upload.
 // If progress is not nil, it is called after each file is uploaded.
-func (c *Client) UploadFiles(ctx context.Context, files []FileInfo, urls []UploadURLInfo, progress ProgressCallback) error {
+func (c *Client) UploadFiles(ctx context.Context, root *os.Root, files []FileInfo, urls []UploadURLInfo, progress ProgressCallback) error {
+	if root == nil {
+		return errors.New("upload files: no root opened at the collected directory")
+	}
 	// Build URL map for quick lookup
 	urlMap := make(map[string]UploadURLInfo)
 	for _, u := range urls {
@@ -187,10 +209,13 @@ func (c *Client) UploadFiles(ctx context.Context, files []FileInfo, urls []Uploa
 		if !ok {
 			continue // Skip files without URLs (may be existing)
 		}
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("failed to upload file %s: %w", file.Path, err)
+		}
 
-		f, err := os.Open(file.FullPath)
+		f, err := OpenCollectedFile(root, file)
 		if err != nil {
-			return fmt.Errorf("failed to open file %s: %w", file.Path, err)
+			return err
 		}
 
 		err = c.UploadFile(ctx, url, f)
@@ -213,6 +238,7 @@ func (c *Client) UploadFiles(ctx context.Context, files []FileInfo, urls []Uploa
 // Every entry path must be a canonical relative path (see ValidateRelPath), and
 // files are written through an os.Root opened on destDir, so downloaded files
 // are only ever written inside destDir.
+// A non-empty entry Hash is verified before writing the file.
 // If progress is not nil, it is called after each file is downloaded.
 func (c *Client) DownloadFiles(ctx context.Context, urls []DownloadURLInfo, destDir string, progress ProgressCallback) error {
 	for i, url := range urls {
@@ -222,6 +248,9 @@ func (c *Client) DownloadFiles(ctx context.Context, urls []DownloadURLInfo, dest
 	}
 	if len(urls) == 0 {
 		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	if err := os.MkdirAll(destDir, 0755); err != nil {
@@ -237,6 +266,11 @@ func (c *Client) DownloadFiles(ctx context.Context, urls []DownloadURLInfo, dest
 		content, err := c.DownloadFile(ctx, url.URL)
 		if err != nil {
 			return fmt.Errorf("failed to download file %s: %w", url.Path, err)
+		}
+		if url.Hash != "" {
+			if actualHash := HashBytes(content); actualHash != url.Hash {
+				return fmt.Errorf("hash mismatch for file %s: expected %s, got %s", url.Path, url.Hash, actualHash)
+			}
 		}
 		if err := WriteFileInRoot(root, url.Path, content, 0644); err != nil {
 			return fmt.Errorf("failed to download file %s: %w", url.Path, err)

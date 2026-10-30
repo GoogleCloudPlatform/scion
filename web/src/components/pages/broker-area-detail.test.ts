@@ -21,7 +21,8 @@
  * only with delete. After a PATCH, Configure re-reads the broker and the
  * page takes that record: the new name shows in the header and the form,
  * hostedByThisServer (carried by GET) stays, and cleared labels and GCP
- * fields stay cleared.
+ * fields stay cleared. The Default-for-project marker comes from isDefault
+ * on the broker's providers listing, with no per-project reads.
  */
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
@@ -37,11 +38,14 @@ import { loadAdminStatus } from '../../client/admin-status.js';
 import {
   FakeEventSource,
   FLAT_K8S,
+  LAYOUT_MISMATCH,
   LEGACY,
   adminStatus,
   healthSummary,
   jsonResponse,
+  nfsStorage,
   settle,
+  type HealthSummaryItem,
 } from './__fixtures__/broker-area.js';
 
 type Page = HTMLElement & { updateComplete: Promise<boolean> };
@@ -63,10 +67,15 @@ const SETTINGS = {
 
 let broker: RuntimeBroker;
 let summaryStatus = 200;
-let summaryItems: { id: string }[] = [];
+let summaryItems: HealthSummaryItem[] = [];
+let summaryTruncated = false;
+/** The summary answers 200 with a body that is not JSON. */
+let summaryBadJson = false;
 let patchResponse: Partial<RuntimeBroker> = {};
 /** What GET returns after a PATCH (the stored record); null = unchanged. */
 let afterPatch: RuntimeBroker | null = null;
+/** The providers listing GET /runtime-brokers/{id}/projects returns. */
+let providerProjects: Record<string, unknown>[] = [];
 let fetchMock: ReturnType<typeof vi.fn>;
 const mounted: HTMLElement[] = [];
 
@@ -99,8 +108,11 @@ describe('scion-page-broker-area-detail', () => {
     vi.stubGlobal('EventSource', FakeEventSource);
     summaryStatus = 200;
     summaryItems = [];
+    summaryTruncated = false;
+    summaryBadJson = false;
     patchResponse = {};
     afterPatch = null;
+    providerProjects = [];
     fetchMock = vi.fn((url: string, init?: RequestInit) => {
       const id = broker.id;
       if (url === `/api/v1/runtime-brokers/${id}` && init?.method === 'PATCH') {
@@ -108,14 +120,22 @@ describe('scion-page-broker-area-detail', () => {
         return jsonResponse(patchResponse);
       }
       if (url === `/api/v1/runtime-brokers/${id}`) return jsonResponse(broker);
-      if (url === `/api/v1/runtime-brokers/${id}/projects`) return jsonResponse({ projects: [] });
+      if (url === `/api/v1/runtime-brokers/${id}/projects`) {
+        return jsonResponse({ projects: providerProjects });
+      }
       if (url === `/api/v1/runtime-brokers/${id}/settings`) return jsonResponse(SETTINGS);
       if (url.startsWith('/api/v1/agents')) return jsonResponse({ agents: [] });
       if (url === '/api/v1/admin/health/summary') {
         if (summaryStatus !== 200) {
           return jsonResponse({ error: { code: 'forbidden', message: 'no' } }, summaryStatus);
         }
-        return jsonResponse(healthSummary(summaryItems));
+        if (summaryBadJson) {
+          return new Response('not json', {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return jsonResponse(healthSummary(summaryItems, summaryTruncated));
       }
       return jsonResponse({}, 404);
     });
@@ -158,6 +178,140 @@ describe('scion-page-broker-area-detail', () => {
     await health.updateComplete;
     expect(health.shadowRoot!.querySelector('.not-in-summary')).not.toBeNull();
     expect(health.shadowRoot!.textContent).not.toContain('healthy');
+  });
+
+  it('Project storage: the Overview tab shows the reported layout', async () => {
+    const el = await mount({ ...FLAT_K8S, workspaceStorage: nfsStorage() });
+    const card = el.shadowRoot!.querySelector(
+      'sl-tab-panel[name="overview"] scion-broker-storage-card'
+    ) as Page;
+    expect(card).not.toBeNull();
+    await card.updateComplete;
+    expect(card.shadowRoot!.querySelector('dl.storage-rows')?.textContent).toContain(
+      'filer.example.internal'
+    );
+    // Without hub.health.read the comparison is not known: no alert.
+    expect(card.shadowRoot!.querySelector('.storage-mismatch-alert')).toBeNull();
+    expect(card.shadowRoot!.querySelector('.storage-compare-note')).not.toBeNull();
+  });
+
+  it('Project storage: the hub-reported differences reach the card and the Health tab', async () => {
+    vi.mocked(loadAdminStatus).mockResolvedValue(adminStatus(true));
+    summaryItems = [{ id: FLAT_K8S.id, layout_mismatch: LAYOUT_MISMATCH }];
+    const el = await mount({ ...FLAT_K8S, workspaceStorage: nfsStorage() });
+    const card = el.shadowRoot!.querySelector('scion-broker-storage-card') as Page;
+    await card.updateComplete;
+    const cardLines = Array.from(card.shadowRoot!.querySelectorAll('.storage-mismatch-alert li'));
+    expect(cardLines.map((li) => li.textContent!.trim())).toEqual(LAYOUT_MISMATCH);
+    const health = el.shadowRoot!.querySelector('scion-broker-area-health') as Page;
+    await health.updateComplete;
+    const healthLines = Array.from(
+      health.shadowRoot!.querySelectorAll('.storage-layout-mismatch li')
+    );
+    expect(healthLines.map((li) => li.textContent!.trim())).toEqual(LAYOUT_MISMATCH);
+  });
+
+  it('Project storage: no differences listed when the summary reports none', async () => {
+    vi.mocked(loadAdminStatus).mockResolvedValue(adminStatus(true));
+    summaryItems = [{ id: FLAT_K8S.id }];
+    const el = await mount({ ...FLAT_K8S, workspaceStorage: nfsStorage() });
+    const card = el.shadowRoot!.querySelector('scion-broker-storage-card') as Page;
+    await card.updateComplete;
+    expect(card.shadowRoot!.querySelector('.storage-mismatch-alert')).toBeNull();
+    expect(card.shadowRoot!.querySelector('.storage-compare-note')).toBeNull();
+    const health = el.shadowRoot!.querySelector('scion-broker-area-health') as Page;
+    await health.updateComplete;
+    expect(health.shadowRoot!.querySelector('.storage-layout-mismatch')).toBeNull();
+  });
+
+  it('Project storage: comparison not available when a truncated summary has no row for the broker', async () => {
+    vi.mocked(loadAdminStatus).mockResolvedValue(adminStatus(true));
+    summaryItems = [{ id: 'other-broker', layout_mismatch: LAYOUT_MISMATCH }];
+    summaryTruncated = true;
+    const el = await mount({ ...FLAT_K8S, workspaceStorage: nfsStorage() });
+    const card = el.shadowRoot!.querySelector('scion-broker-storage-card') as Page;
+    await card.updateComplete;
+    expect(card.shadowRoot!.querySelector('.storage-mismatch-alert')).toBeNull();
+    expect(card.shadowRoot!.querySelector('.storage-compare-note')).not.toBeNull();
+  });
+
+  it('Project storage: comparison not available when the summary has no row for the broker', async () => {
+    vi.mocked(loadAdminStatus).mockResolvedValue(adminStatus(true));
+    summaryItems = [{ id: 'other-broker', layout_mismatch: LAYOUT_MISMATCH }];
+    const el = await mount({ ...FLAT_K8S, workspaceStorage: nfsStorage() });
+    const card = el.shadowRoot!.querySelector('scion-broker-storage-card') as Page;
+    await card.updateComplete;
+    expect(card.shadowRoot!.querySelector('.storage-mismatch-alert')).toBeNull();
+    expect(card.shadowRoot!.querySelector('.storage-compare-note')).not.toBeNull();
+  });
+
+  it('Project storage: comparison not available when the summary row has no workspace storage', async () => {
+    vi.mocked(loadAdminStatus).mockResolvedValue(adminStatus(true));
+    summaryItems = [{ id: FLAT_K8S.id, no_workspace_storage: true }];
+    const el = await mount({ ...FLAT_K8S });
+    const card = el.shadowRoot!.querySelector('scion-broker-storage-card') as Page;
+    await card.updateComplete;
+    expect(card.shadowRoot!.querySelector('.storage-none')).not.toBeNull();
+    expect(card.shadowRoot!.querySelector('.storage-mismatch-alert')).toBeNull();
+    expect(card.shadowRoot!.querySelector('.storage-compare-note')).not.toBeNull();
+  });
+
+  it('Project storage: comparison not available when the broker reports storage but its summary row has none', async () => {
+    vi.mocked(loadAdminStatus).mockResolvedValue(adminStatus(true));
+    summaryItems = [{ id: FLAT_K8S.id, no_workspace_storage: true }];
+    const el = await mount({ ...FLAT_K8S, workspaceStorage: nfsStorage() });
+    const card = el.shadowRoot!.querySelector('scion-broker-storage-card') as Page;
+    await card.updateComplete;
+    expect(card.shadowRoot!.querySelector('.storage-none')).toBeNull();
+    expect(card.shadowRoot!.querySelector('.storage-mismatch-alert')).toBeNull();
+    expect(card.shadowRoot!.querySelector('.storage-compare-note')).not.toBeNull();
+  });
+
+  it('Project storage: comparison not available when the summary request fails', async () => {
+    vi.mocked(loadAdminStatus).mockResolvedValue(adminStatus(true));
+    summaryStatus = 500;
+    const el = await mount({ ...FLAT_K8S, workspaceStorage: nfsStorage() });
+    expect(fetchMock.mock.calls.some(([u]) => u === '/api/v1/admin/health/summary')).toBe(true);
+    expect(tabs(el)).not.toContain('health');
+    const card = el.shadowRoot!.querySelector('scion-broker-storage-card') as Page;
+    await card.updateComplete;
+    expect(card.shadowRoot!.querySelector('.storage-mismatch-alert')).toBeNull();
+    expect(card.shadowRoot!.querySelector('.storage-compare-note')).not.toBeNull();
+  });
+
+  it('Project storage: comparison not available when the summary body is not JSON', async () => {
+    vi.mocked(loadAdminStatus).mockResolvedValue(adminStatus(true));
+    summaryBadJson = true;
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const el = await mount({ ...FLAT_K8S, workspaceStorage: nfsStorage() });
+      expect(fetchMock.mock.calls.some(([u]) => u === '/api/v1/admin/health/summary')).toBe(true);
+      expect(errorSpy).toHaveBeenCalledWith('Failed to load broker health:', expect.anything());
+      expect(tabs(el)).not.toContain('health');
+      const card = el.shadowRoot!.querySelector('scion-broker-storage-card') as Page;
+      await card.updateComplete;
+      expect(card.shadowRoot!.querySelector('.storage-mismatch-alert')).toBeNull();
+      expect(card.shadowRoot!.querySelector('.storage-compare-note')).not.toBeNull();
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('Default for project: taken from isDefault in the providers listing, with no project reads', async () => {
+    providerProjects = [
+      { projectId: 'p1', projectName: 'One', agentCount: 0, isDefault: false },
+      { projectId: 'p2', projectName: 'Two', agentCount: 0, isDefault: true },
+      { projectId: 'p3', projectName: 'Three', agentCount: 0 },
+    ];
+    const el = await mount(FLAT_K8S);
+    const agents = el.shadowRoot!.querySelector('scion-broker-area-agents') as HTMLElement & {
+      defaultFor: ReadonlySet<string>;
+    };
+    expect(agents).not.toBeNull();
+    expect([...agents.defaultFor]).toEqual(['p2']);
+    expect(
+      fetchMock.mock.calls.some(([u]) => typeof u === 'string' && u.startsWith('/api/v1/projects/'))
+    ).toBe(false);
   });
 
   it('Configure: absent without update or delete capability', async () => {

@@ -123,12 +123,13 @@ func TestLaunchProgress_EveryStepHasALabel(t *testing.T) {
 }
 
 // TestLaunchFailedError_EveryCodeHasALabel: every pkg/api launch code but
-// launch_stopped, and the broker's skill_resolution_failed, is followed by a
+// launch_stopped, and the broker's skill_resolution_failed and
+// storage_migration_required, is followed by a
 // label in the failure text, never only the raw code or its fallback.
 func TestLaunchFailedError_EveryCodeHasALabel(t *testing.T) {
 	_, codes := apiLaunchVocabulary(t)
 	assert.Contains(t, codes, "image_pull_failed")
-	codes = append(codes, "skill_resolution_failed")
+	codes = append(codes, "skill_resolution_failed", "storage_migration_required")
 	for _, code := range codes {
 		if code == "launch_stopped" {
 			continue // a stopped launch has its own neutral text (TestWaitForAgentLaunch_FailureNamesCodeAndStepLabels)
@@ -191,6 +192,18 @@ func TestWaitForAgentLaunch_FailureNamesCodeAndStepLabels(t *testing.T) {
 			want:   "agent 'a1' did not start (image_pull_failed) while preparing the container (image pull, volume mounts): container_create: the agent image could not be pulled (ImagePullBackOff)",
 		},
 		{
+			name:   "preempted pod: the label stays a prefix of the message, printed once",
+			launch: hubclient.AgentLaunch{Kind: "start", Error: "pod_disrupted", Step: "container_create"},
+			msg:    "container_create: the agent pod was preempted, evicted or deleted while starting: it was preempted (PreemptionByScheduler)",
+			want:   "agent 'a1' did not start (pod_disrupted) while preparing the container (image pull, volume mounts): container_create: the agent pod was preempted, evicted or deleted while starting: it was preempted (PreemptionByScheduler)",
+		},
+		{
+			name:   "evicted pod: the label is printed once",
+			launch: hubclient.AgentLaunch{Kind: "start", Error: "pod_disrupted", Step: "scheduling"},
+			msg:    "scheduling: the agent pod was preempted, evicted or deleted while starting: it was evicted (Evicted)",
+			want:   "agent 'a1' did not start (pod_disrupted) while waiting to be scheduled: scheduling: the agent pod was preempted, evicted or deleted while starting: it was evicted (Evicted)",
+		},
+		{
 			name:   "runtime cause",
 			launch: hubclient.AgentLaunch{Kind: "start", Error: "runtime_error", Cause: "runtime_forbidden", Step: "launching"},
 			msg:    "launching: Failed to create agent",
@@ -242,6 +255,7 @@ func launchCodeText(code string) string {
 	return map[string]string{
 		"image_pull_failed": "the agent image could not be pulled",
 		"launch_timeout":    "the launch timed out",
+		"pod_disrupted":     "the agent pod was preempted, evicted or deleted while starting",
 	}[code]
 }
 

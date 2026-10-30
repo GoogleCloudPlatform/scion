@@ -371,9 +371,9 @@ func TestFederationHeaderTransport(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	transport := &federationHeaderTransport{
-		base:  http.DefaultTransport,
-		token: "test-token-123",
+	transport, err := newFederationHeaderTransport(http.DefaultTransport, "test-token-123", srv.URL)
+	if err != nil {
+		t.Fatalf("newFederationHeaderTransport: %v", err)
 	}
 	client := &http.Client{Transport: transport}
 

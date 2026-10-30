@@ -323,7 +323,7 @@ func seedUncommittedTemplate(t *testing.T, srv *Server, s store.Store, id, name,
 	}
 	putObjects(t, srv.GetStorage(), tmpl.StoragePath, files)
 	tmpl.Files = commitManifest(files)
-	tmpl.ContentHash = computeContentHash(tmpl.Files)
+	tmpl.ContentHash = defaultContentHash(tmpl.Files)
 	if err := s.CreateTemplate(context.Background(), tmpl); err != nil {
 		t.Fatal(err)
 	}
@@ -429,7 +429,7 @@ func createTestTemplate(t *testing.T, s store.Store, stor *contentMockStorage, f
 		})
 	}
 	tmpl.Files = templateFiles
-	tmpl.ContentHash = computeContentHash(templateFiles)
+	tmpl.ContentHash = defaultContentHash(templateFiles)
 
 	if err := s.CreateTemplate(ctx, tmpl); err != nil {
 		t.Fatalf("failed to create test template: %v", err)

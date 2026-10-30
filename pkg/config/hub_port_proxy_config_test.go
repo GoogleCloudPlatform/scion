@@ -141,3 +141,85 @@ func TestPortProxyConfig_V1RoundTrip(t *testing.T) {
 
 	assert.Nil(t, ConvertGlobalToV1ServerConfig(&GlobalConfig{}).Hub.PortProxy, "an unset setting is not written")
 }
+
+func TestHubPortProxyConfig_ViewTTL(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		want    time.Duration
+		wantErr []string // substrings; nil = valid
+	}{
+		{name: "unset is the default", value: "", want: 2 * time.Hour},
+		{name: "at min", value: "15m", want: 15 * time.Minute},
+		{name: "at max", value: "24h", want: 24 * time.Hour},
+		{name: "typical", value: "4h", want: 4 * time.Hour},
+		{name: "below min", value: "14m59s", wantErr: []string{"server.hub.port_proxy.view_ttl", "between 15m0s and 24h0m0s"}},
+		{name: "above max", value: "24h1s", wantErr: []string{"view_ttl", "between 15m0s and 24h0m0s"}},
+		{name: "zero", value: "0s", wantErr: []string{"view_ttl"}},
+		{name: "negative", value: "-2h", wantErr: []string{"view_ttl"}},
+		{name: "malformed", value: "two hours", wantErr: []string{"view_ttl", "two hours"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := HubPortProxyConfig{ViewTTL: tt.value}
+			d, err := c.ViewTTLDuration()
+			verr := c.Validate()
+			if tt.wantErr == nil {
+				require.NoError(t, err)
+				require.NoError(t, verr)
+				assert.Equal(t, tt.want, d)
+				return
+			}
+			require.Error(t, err)
+			require.Error(t, verr)
+			for _, sub := range tt.wantErr {
+				assert.Contains(t, verr.Error(), sub)
+			}
+		})
+	}
+	assert.Equal(t, 2*time.Hour, PortProxyDefaultViewTTL)
+	assert.False(t, HubPortProxyConfig{ViewTTL: "1h"}.IsZero())
+}
+
+// TestPortProxyViewTTL_EnvMapping: SCION_SERVER_HUB_PORTPROXY_VIEWTTL is
+// the schema's env var for server.hub.port_proxy.view_ttl and overrides
+// the file.
+func TestPortProxyViewTTL_EnvMapping(t *testing.T) {
+	const env = "SCION_SERVER_HUB_PORTPROXY_VIEWTTL"
+	assert.Equal(t, env, portProxySchemaEnvVar(t, "view_ttl"))
+	assert.Equal(t, "server.hub.port_proxy.view_ttl", serverEnvToOpsettingsKey("HUB_PORTPROXY_VIEWTTL"))
+	assert.Equal(t, "hub.portProxy.viewTtl", envKeyToConfigKey("HUB_PORTPROXY_VIEWTTL"))
+
+	t.Setenv(env, "30m")
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	configPath := filepath.Join(tmpDir, "settings.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte("schema_version: \"1\"\nserver:\n  hub:\n    port_proxy:\n      view_ttl: 3h\n"), 0644))
+	cfg, err := LoadGlobalConfig(configPath)
+	require.NoError(t, err)
+	assert.Equal(t, "30m", cfg.Hub.PortProxy.ViewTTL, "the env var overrides the file")
+	d, err := cfg.Hub.PortProxy.ViewTTLDuration()
+	require.NoError(t, err)
+	assert.Equal(t, 30*time.Minute, d)
+}
+
+// TestLoadGlobalConfig_PortProxyViewTTL: the file value loads, survives
+// the V1 <-> global conversions, and an out-of-range value fails Validate.
+func TestLoadGlobalConfig_PortProxyViewTTL(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	configPath := filepath.Join(tmpDir, "settings.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte("schema_version: \"1\"\nserver:\n  hub:\n    port_proxy:\n      view_ttl: 25h\n"), 0644))
+	cfg, err := LoadGlobalConfig(configPath)
+	require.NoError(t, err)
+	assert.Equal(t, "25h", cfg.Hub.PortProxy.ViewTTL)
+	assert.ErrorContains(t, cfg.Hub.PortProxy.Validate(), "server.hub.port_proxy.view_ttl")
+
+	gc := &GlobalConfig{}
+	gc.Hub.PortProxy.ViewTTL = "45m"
+	v1 := ConvertGlobalToV1ServerConfig(gc)
+	require.NotNil(t, v1.Hub)
+	require.NotNil(t, v1.Hub.PortProxy)
+	assert.Equal(t, "45m", v1.Hub.PortProxy.ViewTTL)
+	assert.Equal(t, "45m", ConvertV1ServerToGlobalConfig(v1).Hub.PortProxy.ViewTTL)
+}

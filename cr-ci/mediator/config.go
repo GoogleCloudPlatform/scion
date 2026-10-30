@@ -43,12 +43,15 @@ const (
 	EnvAppPrivateKeySecretName = "GITHUB_APP_PRIVATE_KEY_SECRET_NAME"
 	EnvWebhookSecretName       = "GITHUB_WEBHOOK_SECRET_NAME"
 	EnvClaimTTL                = "CLAIM_TTL"
+	EnvRunnerIdleTimeout       = "RUNNER_IDLE_TIMEOUT"
+	EnvMediatorMinInstances    = "MEDIATOR_MIN_INSTANCES"
 	EnvRunnerBuildCacheInRAM   = "RUNNER_BUILD_CACHE_IN_RAM"
 )
 
 // Cloud Run limits and contract defaults.
 const (
 	maxOwnerLen            = 39
+	maxTargetRepos         = 100 // the runner entrypoint's GH_REPOS cap
 	maxCloudRunTaskTimeout = 168 * time.Hour
 	// maxEphemeralDiskGi: the per-volume maximum Cloud Run documents. Above
 	// 10 GiB per instance needs the per-instance quota
@@ -79,6 +82,8 @@ const (
 	defaultAppKeySecret      = "cr-runner-gh-app-private-key"
 	defaultWebhookSecret     = "cr-runner-gh-webhook-secret"
 	defaultClaimTTL          = "300s"
+	defaultRunnerIdleTimeout = "10m"
+	minRunnerIdleTimeout     = time.Minute
 	minClaimTTL              = 30 * time.Second
 	maxClaimTTL              = time.Hour
 )
@@ -133,7 +138,9 @@ type Config struct {
 	AppPrivateKeySecretName string
 	WebhookSecretName       string
 	ClaimTTL                time.Duration
-	RunnerBuildCacheInRAM   bool // used by deploy-job.sh and the runner entrypoint only
+	RunnerIdleTimeout       time.Duration // used by deploy-job.sh and the runner entrypoint only
+	MediatorMinInstances    int           // used by deploy-mediator.sh only: 0 or 1
+	RunnerBuildCacheInRAM   bool          // used by deploy-job.sh and the runner entrypoint only
 }
 
 // Defaults returns the default value of every optional variable. Required
@@ -169,6 +176,8 @@ func Defaults() map[string]string {
 		EnvAppPrivateKeySecretName: defaultAppKeySecret,
 		EnvWebhookSecretName:       defaultWebhookSecret,
 		EnvClaimTTL:                defaultClaimTTL,
+		EnvRunnerIdleTimeout:       defaultRunnerIdleTimeout,
+		EnvMediatorMinInstances:    "0",
 		EnvRunnerBuildCacheInRAM:   "false",
 	}
 }
@@ -186,7 +195,10 @@ func Keys() []string {
 
 var (
 	// GitHub user/org names: alphanumerics and single hyphens, no leading or
-	// trailing hyphen. The 39-character limit is checked separately.
+	// trailing hyphen. The 39-character limit is checked separately. The runner's
+	// shell checks (entrypoint.sh GH_REPOS, cr-ci-job-guard.sh) use the looser owner
+	// part [A-Za-z0-9-]+: config is the strict side, so every owner it accepts passes
+	// them (TestOwnerRuleWithinRunnerPattern pins this).
 	ownerRE = regexp.MustCompile(`^[A-Za-z0-9](?:-?[A-Za-z0-9])*$`)
 	repoRE  = regexp.MustCompile(`^[A-Za-z0-9._-]{1,100}$`)
 	// GCP project IDs: 6-30 chars, lowercase letter first, no trailing hyphen.
@@ -337,6 +349,15 @@ func Load(getenv func(string) string) (*Config, error) {
 	default:
 		fail(EnvRunnerBuildCacheInRAM, "%q must be true or false", raw)
 	}
+	// max-instances is always 1 (claims live in memory), so min-instances is 0
+	// (scale to zero) or 1 (always warm: no cold-start 429s on webhooks).
+	switch raw := get(EnvMediatorMinInstances); raw {
+	case "0":
+	case "1":
+		c.MediatorMinInstances = 1
+	default:
+		fail(EnvMediatorMinInstances, "%q must be 0 or 1 (max-instances is always 1)", raw)
+	}
 	// The in-RAM cache (~9.5 GB) comes on top of the lint's ~21 GB compile (P6 PoC
 	// run 4: 27.9 GB of 32 GiB), so only the 32 GiB shape has room for it.
 	if c.RunnerBuildCacheInRAM && c.RunnerMemoryMi != 0 && c.RunnerMemoryMi < maxCloudRunMemoryMi {
@@ -352,6 +373,23 @@ func Load(getenv func(string) string) (*Config, error) {
 			fail(EnvTaskTimeout, "%s must be between 1m and %s", d, maxCloudRunTaskTimeout)
 		default:
 			c.TaskTimeout = d
+		}
+	}
+
+	// An idle runner (no job started) stops after RUNNER_IDLE_TIMEOUT, so a job that
+	// GitHub hands to an already-running runner still inherits at least
+	// TASK_TIMEOUT - RUNNER_IDLE_TIMEOUT of the execution's budget.
+	if raw := get(EnvRunnerIdleTimeout); raw != "" {
+		d, err := time.ParseDuration(raw)
+		switch {
+		case err != nil:
+			fail(EnvRunnerIdleTimeout, "%q is not a duration (for example 10m)", raw)
+		case d < minRunnerIdleTimeout:
+			fail(EnvRunnerIdleTimeout, "%s must be at least %s", d, minRunnerIdleTimeout)
+		case c.TaskTimeout > 0 && d > c.TaskTimeout/2:
+			fail(EnvRunnerIdleTimeout, "%s must be at most half of TASK_TIMEOUT (%s), so a job taken by an idle runner keeps most of the budget", d, c.TaskTimeout)
+		default:
+			c.RunnerIdleTimeout = d
 		}
 	}
 
@@ -439,6 +477,9 @@ func parseRepos(raw string, fail func(string, ...any)) []Repo {
 		}
 		seen[key] = true
 		repos = append(repos, Repo{Owner: owner, Name: name})
+	}
+	if len(repos) > maxTargetRepos {
+		fail("%d repositories listed, at most %d (each runner's GH_REPOS allowlist carries them all in org scope)", len(repos), maxTargetRepos)
 	}
 	return repos
 }

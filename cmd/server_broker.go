@@ -255,7 +255,7 @@ func registerGlobalProjectAndBrokerPresence(ctx context.Context, s store.Store, 
 			ID:                         brokerID,
 			Name:                       brokerName,
 			Slug:                       api.Slugify(brokerName),
-			Version:                    "0.1.0",
+			Version:                    hub.HubBuildToken(),
 			Status:                     store.BrokerStatusOnline,
 			ConnectionState:            "connected",
 			Endpoint:                   endpoint,
@@ -270,7 +270,7 @@ func registerGlobalProjectAndBrokerPresence(ctx context.Context, s store.Store, 
 			Labels:                     brokerLabels,
 		}
 
-		if err := s.CreateRuntimeBroker(ctx, broker); err != nil {
+		if err := s.CreateRuntimeBrokerClearingCredentials(ctx, broker); err != nil {
 			return brokerID, fmt.Errorf("failed to create runtime broker: %w", err)
 		}
 	} else {
@@ -280,6 +280,9 @@ func registerGlobalProjectAndBrokerPresence(ctx context.Context, s store.Store, 
 		broker.Endpoint = endpoint
 		broker.AutoProvide = autoProvide
 		broker.LastHeartbeat = time.Now()
+		// The embedded broker runs in this hub binary, so its version is
+		// the hub's build token, refreshed on every start (ptone/scion#5972).
+		broker.Version = hub.HubBuildToken()
 		// Update profiles from settings (may have changed)
 		broker.Profiles = profiles
 		broker.DefaultProfile = defaultProfile

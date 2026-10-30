@@ -390,6 +390,7 @@ func TestAgentCreateAgent_WithScope(t *testing.T) {
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  fixtureProviderCheckout(t),
 		Status:     store.BrokerStatusOnline,
 	}
 	require.NoError(t, s.AddProjectProvider(ctx, contrib))
@@ -2682,6 +2683,7 @@ func TestCreateAgent_NotifyCreatesSubscription(t *testing.T) {
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  fixtureProviderCheckout(t),
 		Status:     store.BrokerStatusOnline,
 	}))
 	project.DefaultRuntimeBrokerID = broker.ID
@@ -2821,6 +2823,7 @@ func TestCreateAgent_NotifySubscriptionCascadeOnDelete(t *testing.T) {
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  fixtureProviderCheckout(t),
 		Status:     store.BrokerStatusOnline,
 	}))
 	project.DefaultRuntimeBrokerID = broker.ID
@@ -4216,6 +4219,7 @@ func TestCreateAgent_GCPPassthrough_BrokerOwnerAllowed(t *testing.T) {
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  fixtureProviderCheckout(t),
 		Status:     store.BrokerStatusOnline,
 	}))
 	project.DefaultRuntimeBrokerID = broker.ID
@@ -4368,6 +4372,7 @@ func TestCreateAgent_GCPPassthrough_AdminAllowed(t *testing.T) {
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  fixtureProviderCheckout(t),
 		Status:     store.BrokerStatusOnline,
 	}))
 	project.DefaultRuntimeBrokerID = broker.ID

@@ -86,6 +86,10 @@ type Tx struct {
 	GroupMembership *GroupMembershipClient
 	// HarnessConfig is the client for interacting with the HarnessConfig builders.
 	HarnessConfig *HarnessConfigClient
+	// HubEncryptionMigration is the client for interacting with the HubEncryptionMigration builders.
+	HubEncryptionMigration *HubEncryptionMigrationClient
+	// HubEncryptionPolicy is the client for interacting with the HubEncryptionPolicy builders.
+	HubEncryptionPolicy *HubEncryptionPolicyClient
 	// HubInstance is the client for interacting with the HubInstance builders.
 	HubInstance *HubInstanceClient
 	// HubSetting is the client for interacting with the HubSetting builders.
@@ -178,6 +182,10 @@ type Tx struct {
 	User *UserClient
 	// UserAccessToken is the client for interacting with the UserAccessToken builders.
 	UserAccessToken *UserAccessTokenClient
+	// UserDeletion is the client for interacting with the UserDeletion builders.
+	UserDeletion *UserDeletionClient
+	// UserDeletionAgent is the client for interacting with the UserDeletionAgent builders.
+	UserDeletionAgent *UserDeletionAgentClient
 	// UserTerminalWorkspace is the client for interacting with the UserTerminalWorkspace builders.
 	UserTerminalWorkspace *UserTerminalWorkspaceClient
 
@@ -348,6 +356,8 @@ func (tx *Tx) init() {
 	tx.Group = NewGroupClient(tx.config)
 	tx.GroupMembership = NewGroupMembershipClient(tx.config)
 	tx.HarnessConfig = NewHarnessConfigClient(tx.config)
+	tx.HubEncryptionMigration = NewHubEncryptionMigrationClient(tx.config)
+	tx.HubEncryptionPolicy = NewHubEncryptionPolicyClient(tx.config)
 	tx.HubInstance = NewHubInstanceClient(tx.config)
 	tx.HubSetting = NewHubSettingClient(tx.config)
 	tx.IntegrationConfig = NewIntegrationConfigClient(tx.config)
@@ -394,6 +404,8 @@ func (tx *Tx) init() {
 	tx.UsageReservation = NewUsageReservationClient(tx.config)
 	tx.User = NewUserClient(tx.config)
 	tx.UserAccessToken = NewUserAccessTokenClient(tx.config)
+	tx.UserDeletion = NewUserDeletionClient(tx.config)
+	tx.UserDeletionAgent = NewUserDeletionAgentClient(tx.config)
 	tx.UserTerminalWorkspace = NewUserTerminalWorkspaceClient(tx.config)
 }
 

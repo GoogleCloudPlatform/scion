@@ -30,6 +30,7 @@ import (
 const (
 	testRepo        = "example-owner/example-repo"
 	testLabel       = "scion-cr-8c32g"
+	testStackLabel  = "crci-stack-us-central1-cr-gh-runner-8c32g"
 	testMediatorURL = "https://mediator.example.com"
 	testProject     = "example-project"
 	testJob         = "projects/example-project/locations/us-central1/jobs/cr-gh-runner-8c32g"
@@ -95,6 +96,7 @@ type harnessOpts struct {
 	max       int
 	claimTTL  time.Duration
 	orgScope  bool
+	targets   []githubapp.Repo // default: example-owner/example-repo
 	mediator  string
 	reuseFrom *harness // share the fakes (simulates a mediator restart)
 }
@@ -145,10 +147,14 @@ func newHarness(t *testing.T, o harnessOpts) *harness {
 		},
 	})
 	h.claims = claim.NewStore(o.claimTTL, h.clock.Now)
+	if o.targets == nil {
+		o.targets = []githubapp.Repo{{Owner: "example-owner", Name: "example-repo"}}
+	}
 	h.srv = New(Options{
-		TargetRepos:   []githubapp.Repo{{Owner: "example-owner", Name: "example-repo"}},
+		TargetRepos:   o.targets,
 		OrgScope:      o.orgScope,
 		RunnerLabel:   testLabel,
+		StackLabel:    testStackLabel,
 		MaxConcurrent: o.max,
 		RunnerGroupID: 1,
 		MediatorURL:   o.mediator,
@@ -435,6 +441,14 @@ func TestForkGuard(t *testing.T) {
 		{"pull_request_target", testRepo, "pull_request_target"},
 		{"workflow_run", testRepo, "workflow_run"},
 		{"head repository missing", "", "pull_request"},
+		// Allowlist: every event but push and pull_request is refused.
+		{"issue_comment", testRepo, "issue_comment"},
+		{"repository_dispatch", testRepo, "repository_dispatch"},
+		{"workflow_dispatch", testRepo, "workflow_dispatch"},
+		{"schedule", testRepo, "schedule"},
+		{"merge_group", testRepo, "merge_group"},
+		{"unknown event", testRepo, "some_future_event"},
+		{"empty event", testRepo, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -469,8 +483,8 @@ func TestQueuedLaunchAndClaim(t *testing.T) {
 	if req["name"] != "cr-job-100" || req["runner_group_id"] != float64(1) || req["work_folder"] != "/home/runner/work" {
 		t.Errorf("jit request = %v", req)
 	}
-	if ls, _ := req["labels"].([]any); len(ls) != 1 || ls[0] != testLabel {
-		t.Errorf("jit labels = %v, want only %q", req["labels"], testLabel)
+	if ls, _ := req["labels"].([]any); len(ls) != 2 || ls[0] != testLabel || ls[1] != testStackLabel {
+		t.Errorf("jit labels = %v, want %q and the stack label %q", req["labels"], testLabel, testStackLabel)
 	}
 	ex := h.executions()
 	if len(ex) != 1 {
@@ -767,6 +781,40 @@ func TestReconcileReapsStaleRunners(t *testing.T) {
 	h.wantLog(logging.EventRunnerReaped)
 }
 
+// TestReconcileReapsOnlyItsOwnStack: during a region move two stacks serve
+// the same repo. Each reaps registrations with its own stack label, or with
+// none (made before stack labels), after ReapAfter; another stack's only after
+// TASK_TIMEOUT + ReapAfter offline.
+func TestReconcileReapsOnlyItsOwnStack(t *testing.T) {
+	if want := "crci-stack-us-central1-cr-gh-runner-8c32g"; testStackLabel != want {
+		t.Fatalf("StackLabel = %q, want %q", testStackLabel, want)
+	}
+	h := newHarness(t, harnessOpts{})
+	scope := "repo:" + testRepo
+	other := StackLabel("us-west2", "cr-gh-runner-8c32g")
+	h.gh.AddRunner(fakes.GitHubRunner{Name: "cr-job-1", Status: "offline", Scope: scope, Labels: []string{testLabel, other}})
+	h.gh.AddRunner(fakes.GitHubRunner{Name: "cr-job-2", Status: "offline", Scope: scope, Labels: []string{testLabel, testStackLabel}})
+	h.gh.AddRunner(fakes.GitHubRunner{Name: "cr-job-3", Status: "offline", Scope: scope, Labels: []string{testLabel}})
+	h.reconcile()
+	h.clock.Add(6 * time.Minute)
+	if res := h.reconcile(); res.RunnersReaped != 2 {
+		t.Fatalf("reaped %d, want 2 (own stack and unlabelled)", res.RunnersReaped)
+	}
+	if rs := h.gh.Runners(); len(rs) != 1 || rs[0].Name != "cr-job-1" {
+		t.Errorf("remaining runners = %+v, want only the other stack's cr-job-1", rs)
+	}
+	// Offline for TASK_TIMEOUT (45m) + ReapAfter, the other stack's registration
+	// cannot be live (a leftover of a torn-down stack) and is reaped too.
+	h.clock.Add(38 * time.Minute) // 44 min since first seen offline
+	if res := h.reconcile(); res.RunnersReaped != 0 {
+		t.Fatalf("reaped %d after 44 min, want 0 (other stack within its task budget)", res.RunnersReaped)
+	}
+	h.clock.Add(7 * time.Minute) // 51 min
+	if res := h.reconcile(); res.RunnersReaped != 1 || len(h.gh.Runners()) != 0 {
+		t.Fatalf("reaped %d, remaining %+v; want the other stack's leftover reaped", res.RunnersReaped, h.gh.Runners())
+	}
+}
+
 // TestReconcileKeepsColdStartingRunners: a runner launched by this process is
 // aged from its launch, but not reaped while its claim is still pending.
 func TestReconcileKeepsColdStartingRunners(t *testing.T) {
@@ -783,6 +831,67 @@ func TestReconcileKeepsColdStartingRunners(t *testing.T) {
 	if res := h.reconcile(); res.RunnersReaped != 1 {
 		t.Fatalf("reaped %d, want 1 once the claim expired", res.RunnersReaped)
 	}
+}
+
+// TestReconcileReapsIdleStoppedRunnerOnFirstPass: a runner the entrypoint stopped
+// for its idle timeout (RUNNER_IDLE_TIMEOUT, default 10m, longer than ReapAfter)
+// leaves an offline, never-busy registration; it is aged from its launch, so the
+// first reconcile after the stop deletes it.
+func TestReconcileReapsIdleStoppedRunnerOnFirstPass(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	h.addSameRepoRun(10, fakes.GitHubJob{ID: 100, Status: "queued", Labels: []string{testLabel}})
+	h.queued(100, 10)
+	tok := h.executions()[0].Env["RUNNER_CLAIM_TOKEN"]
+	if code, _, _ := h.claim(tok); code != http.StatusOK {
+		t.Fatalf("claim: %d", code)
+	}
+	// Job 100 is cancelled before GitHub hands it to the runner, which then sits idle.
+	h.gh.SetJob(10, fakes.GitHubJob{ID: 100, Status: "completed", Labels: []string{testLabel}})
+	h.gh.SetRunnerState("cr-job-100", "online", false)
+	h.clock.Add(10 * time.Minute)
+	h.gh.SetRunnerState("cr-job-100", "offline", false) // idle timeout: run.sh stopped
+	h.cr.Complete("100")
+	if res := h.reconcile(); res.RunnersReaped != 1 {
+		t.Fatalf("reaped %d on the first pass after the idle stop, want 1", res.RunnersReaped)
+	}
+	h.wantLog(logging.EventRunnerReaped)
+}
+
+// TestReconcileSkipsGitHubServerErrors: a GitHub 5xx on one run's jobs list
+// (ii3: a 502 failed two whole passes) skips that run only; the pass answers
+// 200, serves the other runs, and the next pass picks the skipped run up.
+// Other GitHub errors still fail the pass.
+func TestReconcileSkipsGitHubServerErrors(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	h.addSameRepoRun(10, fakes.GitHubJob{ID: 100, Status: "queued", Labels: []string{testLabel}})
+	h.addSameRepoRun(11, fakes.GitHubJob{ID: 110, Status: "queued", Labels: []string{testLabel}})
+	h.gh.FailListJobs = map[int64]int{10: http.StatusBadGateway}
+	res := h.reconcile() // fails the test unless 200
+	if res.Backfilled != 1 || h.activeFor("cr-job-110") != 1 {
+		t.Errorf("result %+v, want run 11 served despite run 10's 502", res)
+	}
+	if len(res.Errors) != 0 || len(res.Skipped) != 1 || !strings.Contains(res.Skipped[0], "list_jobs") {
+		t.Errorf("errors %q, skipped %q; want one skipped list_jobs", res.Errors, res.Skipped)
+	}
+	h.wantLog(logging.EventReconcileSkip)
+
+	h.gh.FailListJobs = nil
+	if res := h.reconcile(); res.Backfilled != 1 || h.activeFor("cr-job-100") != 1 || len(res.Skipped) != 0 {
+		t.Errorf("next pass: %+v, want run 10 served", res)
+	}
+
+	h.gh.FailListRuns = map[string]int{testRepo: http.StatusForbidden}
+	if code, res := h.reconcileWith(h.google.IDToken(testMediatorURL, schedulerEmail, h.clock.Now())); code != http.StatusInternalServerError || len(res.Errors) != 2 || len(res.Skipped) != 0 {
+		t.Errorf("403 on the runs list: %d %+v, want 500 with an error per status list", code, res)
+	}
+	// A 503 on every runs list of every repo: nothing could be discovered, so the
+	// pass is an error (a sustained outage must show), not just skips.
+	h.gh.FailListRuns = map[string]int{testRepo: http.StatusServiceUnavailable}
+	if code, res := h.reconcileWith(h.google.IDToken(testMediatorURL, schedulerEmail, h.clock.Now())); code != http.StatusInternalServerError ||
+		len(res.Skipped) != 2 || len(res.Errors) != 1 || !strings.HasPrefix(res.Errors[0], "all_skipped:") {
+		t.Errorf("503 on every runs list: %d %+v, want 500 with both lists skipped and all_skipped", code, res)
+	}
+	h.wantLog(logging.EventReconcileAllSkipped)
 }
 
 func TestReconcileBackfill(t *testing.T) {
@@ -853,6 +962,67 @@ func TestOrgScopeListsRunnersOncePerOwner(t *testing.T) {
 	rn, ok := h.gh.RunnerByName("cr-job-100")
 	if !ok || rn.Scope != "org:example-owner" {
 		t.Errorf("org scope registered %+v", rn)
+	}
+}
+
+// TestLaunchCarriesServedRepos: the launch env's GH_REPOS (the runner's job guard
+// allowlist) is the runner's registration scope: the repo alone in repo scope, every
+// target repo of the owner in org scope (an org runner may take any of their jobs).
+func TestLaunchCarriesServedRepos(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		org     bool
+		targets []githubapp.Repo
+		want    string
+	}{
+		{"repo scope", false, []githubapp.Repo{{Owner: "example-owner", Name: "example-repo"}, {Owner: "example-owner", Name: "second-repo"}}, "example-owner/example-repo"},
+		{"org scope", true, []githubapp.Repo{{Owner: "example-owner", Name: "example-repo"}, {Owner: "example-owner", Name: "second-repo"}}, "example-owner/example-repo,example-owner/second-repo"},
+		{"org scope, one repo", true, nil, "example-owner/example-repo"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, harnessOpts{orgScope: tc.org, targets: tc.targets})
+			h.addSameRepoRun(10)
+			h.queued(100, 10)
+			ex := h.executions()
+			if len(ex) != 1 {
+				t.Fatalf("executions = %d, want 1", len(ex))
+			}
+			if got := ex[0].Env[launcher.EnvRepos]; got != tc.want {
+				t.Errorf("GH_REPOS = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestOrgScopeServedReposForOtherTarget: in org scope, a job of a target repo that is
+// not the first gets a runner whose GH_REPOS includes that repo, and a job of a
+// same-owner repo that is not a target gets no runner at all. So servedRepos is only
+// ever called with a target repo, and the job guard's allowlist never has to add the
+// triggering repo itself (gemini on #4204, declined: it would only widen the guard).
+func TestOrgScopeServedReposForOtherTarget(t *testing.T) {
+	targets := []githubapp.Repo{{Owner: "example-owner", Name: "example-repo"}, {Owner: "example-owner", Name: "second-repo"}}
+	h := newHarness(t, harnessOpts{orgScope: true, targets: targets})
+
+	const second = "example-owner/second-repo"
+	h.gh.AddRun(fakes.GitHubRun{ID: 20, Repo: second, HeadRepo: second, Event: "push", Status: "queued"})
+	h.gh.EnsureJob(20, fakes.GitHubJob{ID: 200, Status: "queued", Labels: []string{testLabel}, CreatedAt: h.clock.Now()})
+	h.webhook(jobPayload("queued", 200, 20, second, []string{testLabel}, ""))
+	ex := h.executions()
+	if len(ex) != 1 {
+		t.Fatalf("executions = %d, want 1", len(ex))
+	}
+	if got, want := ex[0].Env[launcher.EnvRepos], "example-owner/example-repo,example-owner/second-repo"; got != want {
+		t.Errorf("GH_REPOS = %q, want %q", got, want)
+	}
+
+	const other = "example-owner/not-a-target"
+	h.gh.AddRun(fakes.GitHubRun{ID: 30, Repo: other, HeadRepo: other, Event: "push", Status: "queued"})
+	h.gh.EnsureJob(30, fakes.GitHubJob{ID: 300, Status: "queued", Labels: []string{testLabel}, CreatedAt: h.clock.Now()})
+	if code, out := h.webhook(jobPayload("queued", 300, 30, other, []string{testLabel}, "")); code != http.StatusOK || !strings.Contains(out, "ignored") {
+		t.Errorf("non-target repo's job: %d %q, want 200 ignored", code, out)
+	}
+	if n := len(h.executions()); n != 1 {
+		t.Errorf("executions = %d after a non-target repo's job, want still 1", n)
 	}
 }
 
@@ -930,4 +1100,60 @@ func TestNoSecretsInLogs(t *testing.T) {
 			t.Errorf("%s appears in the logs", name)
 		}
 	}
+}
+
+// TestForkReasonAllowlist: only push and same-repo pull_request runs may get a
+// runner; any other event, named or unknown, is refused fail-closed.
+func TestForkReasonAllowlist(t *testing.T) {
+	repo := githubapp.Repo{Owner: "example-owner", Name: "example-repo"}
+	same := &githubapp.RepoRef{FullName: "example-owner/example-repo"}
+	fork := &githubapp.RepoRef{FullName: "contributor/example-repo"}
+	run := func(event string, head *githubapp.RepoRef) *githubapp.Run {
+		return &githubapp.Run{Event: event, Repository: same, HeadRepository: head}
+	}
+	for _, tc := range []struct {
+		name string
+		run  *githubapp.Run
+		want string
+	}{
+		{"push", run("push", same), ""},
+		{"same-repo pull_request", run("pull_request", same), ""},
+		{"fork pull_request", run("pull_request", fork), "head_repository_differs"},
+		{"pull_request without head", run("pull_request", nil), "head_repository_missing"},
+		{"other repository", &githubapp.Run{Event: "push", Repository: fork, HeadRepository: fork}, "repository_mismatch"},
+		{"pull_request_target", run("pull_request_target", same), "event_not_allowed:pull_request_target"},
+		{"workflow_run", run("workflow_run", same), "event_not_allowed:workflow_run"},
+		{"issue_comment", run("issue_comment", same), "event_not_allowed:issue_comment"},
+		{"repository_dispatch", run("repository_dispatch", same), "event_not_allowed:repository_dispatch"},
+		{"workflow_dispatch", run("workflow_dispatch", same), "event_not_allowed:workflow_dispatch"},
+		{"schedule", run("schedule", same), "event_not_allowed:schedule"},
+		{"merge_group", run("merge_group", same), "event_not_allowed:merge_group"},
+		{"unknown", run("some_future_event", same), "event_not_allowed:some_future_event"},
+		{"empty", run("", same), "event_not_allowed:"},
+		{"case matters", run("Push", same), "event_not_allowed:Push"},
+	} {
+		if got := forkReason(tc.run, repo); got != tc.want {
+			t.Errorf("%s: forkReason = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestReconcileRefusesDisallowedEvents: reconcile backfill applies the same
+// allowlist: queued jobs of schedule/workflow_dispatch/issue_comment runs get
+// no runner.
+func TestReconcileRefusesDisallowedEvents(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	for i, ev := range []string{"schedule", "workflow_dispatch", "issue_comment"} {
+		id := int64(20 + i)
+		h.gh.AddRun(fakes.GitHubRun{ID: id, Repo: testRepo, HeadRepo: testRepo, Event: ev, Status: "queued",
+			Jobs: []fakes.GitHubJob{{ID: id * 10, Status: "queued", Labels: []string{testLabel}}}})
+	}
+	res := h.reconcile()
+	if res.Backfilled != 0 || h.jitCount() != 0 {
+		t.Errorf("reconcile %+v launched %d runners, want 0 for disallowed events", res, h.jitCount())
+	}
+	if res.ForkRunsRejected != 3 {
+		t.Errorf("ForkRunsRejected = %d, want 3", res.ForkRunsRejected)
+	}
+	h.wantLog(logging.EventRejectFork)
 }

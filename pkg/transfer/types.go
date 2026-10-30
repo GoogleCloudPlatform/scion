@@ -44,7 +44,8 @@ type Manifest struct {
 	// Version is the manifest format version.
 	Version string `json:"version"`
 
-	// ContentHash is the overall hash computed from all file hashes.
+	// ContentHash is the aggregate hash of the files (ComputeContentHashV2:
+	// paths, normalised modes and file hashes).
 	ContentHash string `json:"contentHash,omitempty"`
 
 	// Files is the list of files in the manifest.

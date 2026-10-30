@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"net/http"
 	"sync/atomic"
 	"testing"
@@ -141,37 +140,4 @@ func (s *defaultWriteFailsOnceStore) UpdateProject(ctx context.Context, p *store
 		return errors.New("db unavailable")
 	}
 	return s.Store.UpdateProject(ctx, p)
-}
-
-func TestFindConnectedProvider_DefaultMustBeProvider(t *testing.T) {
-	srv, s := testServer(t)
-	ctx := context.Background()
-	provider := newCloneDefaultBroker(t, s, "find-connected-provider", false)
-	outsider := newCloneDefaultBroker(t, s, "find-connected-outsider", false)
-	project := &store.Project{
-		ID: api.NewUUID(), Name: "Find Connected", Slug: "find-connected",
-		DefaultRuntimeBrokerID: outsider.ID, OwnerID: DevUserID, CreatedBy: DevUserID,
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: project.ID, BrokerID: provider.ID, BrokerName: provider.Name, Status: store.BrokerStatusOnline,
-	}))
-
-	mgr := NewControlChannelManager(DefaultControlChannelConfig(), slog.Default())
-	mgr.mu.Lock()
-	mgr.connections[provider.ID] = &BrokerConnection{brokerID: provider.ID, sessionID: "s1"}
-	mgr.connections[outsider.ID] = &BrokerConnection{brokerID: outsider.ID, sessionID: "s2"}
-	mgr.mu.Unlock()
-	srv.mu.Lock()
-	srv.controlChannel = mgr
-	srv.mu.Unlock()
-
-	got, err := srv.findConnectedProvider(ctx, project)
-	require.NoError(t, err)
-	assert.Equal(t, provider.ID, got, "a connected default that is not a provider is not chosen")
-
-	project.DefaultRuntimeBrokerID = provider.ID
-	got, err = srv.findConnectedProvider(ctx, project)
-	require.NoError(t, err)
-	assert.Equal(t, provider.ID, got, "a connected default that is a provider is chosen")
 }

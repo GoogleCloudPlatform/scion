@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -1295,15 +1296,83 @@ func (s *Server) authorizeTemplateReadRoute(w http.ResponseWriter, r *http.Reque
 	return s.authorizeRead(w, r, templateResource(template), "Template")
 }
 
-// computeContentHash computes the aggregate content hash for a set of resource
-// files. It is a thin adapter over transfer.ComputeContentHash — the single
-// canonical implementation also used by the broker-side hydrator, the transfer
-// collector, and the hubclient manifest builder. Routing every hub call site
-// through the same implementation guarantees the hub and the broker can never
-// compute divergent hashes for identical content (which would silently break
-// cache lookups). Per the resource-storage refactor (§7.3/§9), transfer owns
-// the canonical hash until a ResourceStore abstraction subsumes it.
-func computeContentHash(files []store.TemplateFile) string {
+// computeContentHash computes the content hash a template or harness-config
+// commit records for files. With the hub.content_hash_v2 experiment on it is
+// transfer.ComputeContentHashV2, which covers paths, normalised modes and
+// file hashes (ptone/scion#5658); while it is off (the default) it is
+// transfer.ComputeContentHashV1, which covers file hashes only, so a
+// rename-only or chmod-only re-upload is not visible to the expected-hash
+// check, as before. The experiment is read at every call, so toggling it
+// needs no restart. A nil server (no experiments) records v1.
+//
+// Rows keep the version they were last committed with until their next
+// commit rewrites it (no backfill). The commit compare-and-swap stays a
+// strict equality on the stored value, v1 or v2, so mixed rows are safe in
+// both directions; accepting a v1 value that matches the v1 hash of the
+// stored files would accept a stale commit over a rename-only or chmod-only
+// change, the change v2 exists to detect. Skill versions do not use this
+// hash: see computeSkillContentHash.
+func (s *Server) computeContentHash(files []store.TemplateFile) string {
+	return computeContentHashVersion(files, s != nil && s.experimentEnabled(experiments.ContentHashV2))
+}
+
+// computeContentHashVersion is the content hash of files: v2
+// (transfer.ComputeContentHashV2) when v2 is set, otherwise v1
+// (transfer.ComputeContentHashV1). It is a thin adapter over the canonical
+// transfer implementations, also used by the transfer collector and the
+// hubclient manifest builder, so the hub and its clients never compute
+// divergent hashes for identical content.
+func computeContentHashVersion(files []store.TemplateFile, v2 bool) string {
+	if v2 {
+		return transfer.ComputeContentHashV2(templateFileInfos(files))
+	}
+	return transfer.ComputeContentHashV1(templateFileInfos(files))
+}
+
+// computeSkillContentHash is the content hash of a skill version's files.
+// It stays transfer.ComputeContentHashV1, which ignores paths and modes:
+// published skill versions are immutable and pinned by this value (registry
+// pins, content-addressed version lookup), and brokers verify an installed
+// bundle by recomputing it. It is what skill_versions.content_hash records
+// and what every contentHash field carries; see computeSkillContentHashV2
+// for the hash that also covers paths and modes.
+func computeSkillContentHash(files []store.TemplateFile) string {
+	return transfer.ComputeContentHashV1(templateFileInfos(files))
+}
+
+// computeSkillContentHashV2 is skill content hash v2 (ptone/scion#5935):
+// transfer.ComputeContentHashV2 over a skill version's files, so a rename,
+// an executable-bit change and a content change each change it. It is
+// derived, never stored: a published version's file list is immutable, so
+// the value is stable, and versions published before v2 existed get one
+// too. A file with no recorded mode counts as "0644", the mode the broker
+// installs it with. The hub emits and accepts it only while the
+// hub.skill_content_hash_v2 experiment is on.
+func computeSkillContentHashV2(files []store.TemplateFile) string {
+	return transfer.ComputeContentHashV2(templateFileInfos(files))
+}
+
+// resolvedSkillContentHashes recomputes the v1 and v2 skill content hashes
+// of a resolved skill from its file list (path, per-file hash and mode),
+// the metadata the broker verifies the downloaded files against. ok is
+// false when there are no files or a file has no per-file hash, since the
+// bundle hashes then cannot be recomputed.
+func resolvedSkillContentHashes(files []DownloadURLInfo) (v1, v2 string, ok bool) {
+	if len(files) == 0 {
+		return "", "", false
+	}
+	infos := make([]transfer.FileInfo, len(files))
+	for i, f := range files {
+		if f.Hash == "" {
+			return "", "", false
+		}
+		infos[i] = transfer.FileInfo{Path: f.Path, Size: f.Size, Hash: f.Hash, Mode: f.Mode}
+	}
+	return transfer.ComputeContentHashV1(infos), transfer.ComputeContentHashV2(infos), true
+}
+
+// templateFileInfos converts manifest entries to transfer.FileInfo.
+func templateFileInfos(files []store.TemplateFile) []transfer.FileInfo {
 	fileInfos := make([]transfer.FileInfo, len(files))
 	for i, f := range files {
 		fileInfos[i] = transfer.FileInfo{
@@ -1313,5 +1382,5 @@ func computeContentHash(files []store.TemplateFile) string {
 			Mode: f.Mode,
 		}
 	}
-	return transfer.ComputeContentHash(fileInfos)
+	return fileInfos
 }

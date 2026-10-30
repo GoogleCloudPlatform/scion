@@ -15,6 +15,7 @@
 package config
 
 import (
+	"slices"
 	"sort"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -55,6 +56,14 @@ type FlatRuntimeTargetPresentation struct {
 	SharedDirStorageBackend  string            `json:"shared_dir_storage_backend,omitempty"`
 	SharedDirStorageBackends map[string]string `json:"shared_dir_storage_backends,omitempty"`
 	HomeStorageBackend       string            `json:"home_storage_backend,omitempty"`
+	// NodeSelector, Tolerations and RuntimeClassName are the instance's
+	// pod placement. PlacementReported is true when this build reports
+	// placement (a Kubernetes target), so a reader can tell "reported, none
+	// configured" from an older instance that does not report it.
+	NodeSelector      map[string]string   `json:"node_selector,omitempty"`
+	Tolerations       []api.K8sToleration `json:"tolerations,omitempty"`
+	RuntimeClassName  string              `json:"runtime_class_name,omitempty"`
+	PlacementReported bool                `json:"placement_reported,omitempty"`
 }
 
 // FlatAgentDefaultsPresentation is the publishable part of an instance's
@@ -120,6 +129,10 @@ func PresentInstance(inst V1RuntimeBrokerInstanceConfig) FlatInstancePresentatio
 			SharedDirStorageBackend:  t.SharedDirStorageBackend,
 			SharedDirStorageBackends: copyStringMap(t.SharedDirStorageBackends),
 			HomeStorageBackend:       t.HomeStorageBackend,
+			NodeSelector:             copyStringMap(t.NodeSelector),
+			Tolerations:              slices.Clone(t.Tolerations),
+			RuntimeClassName:         t.RuntimeClassName,
+			PlacementReported:        t.Type == RuntimeTargetTypeKubernetes,
 		}
 	}
 	if d := inst.AgentDefaults; d != nil {
@@ -199,6 +212,10 @@ func (p FlatInstancePresentation) API() api.RuntimeTargetPresentation {
 			SharedDirStorageBackend:  t.SharedDirStorageBackend,
 			SharedDirStorageBackends: copyStringMap(t.SharedDirStorageBackends),
 			HomeStorageBackend:       t.HomeStorageBackend,
+			NodeSelector:             copyStringMap(t.NodeSelector),
+			Tolerations:              slices.Clone(t.Tolerations),
+			RuntimeClassName:         t.RuntimeClassName,
+			PlacementReported:        t.PlacementReported,
 		}
 	}
 	if d := p.AgentDefaults; d != nil {

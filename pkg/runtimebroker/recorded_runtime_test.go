@@ -84,9 +84,9 @@ func (m *rrManager) Delete(ctx context.Context, agentID string, deleteFiles bool
 	return m.listCountingManager.Delete(ctx, agentID, deleteFiles, projectPath, projectID, removeBranch)
 }
 
-func (m *rrManager) DeleteTarget(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+func (m *rrManager) DeleteTarget(ctx context.Context, agentName, sharerKey string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	m.acts.Add(1)
-	return m.listCountingManager.DeleteTarget(ctx, agentName, ref, deleteFiles, projectPath, removeBranch)
+	return m.listCountingManager.DeleteTarget(ctx, agentName, sharerKey, ref, deleteFiles, projectPath, removeBranch)
 }
 
 func (m *rrManager) Message(ctx context.Context, agentID, projectID string, message string, interrupt bool) error {
@@ -140,7 +140,7 @@ func newRecordedRuntimeServer(t *testing.T, withK8s bool) (*Server, *rrManager, 
 	defaultMgr := &rrManager{}
 	defaultMgr.agents = []api.AgentInfo{rrAgentInfo("docker-container")}
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	srv := New(cfg, defaultMgr, newRRRuntime("docker", defaultMgr), config.RuntimeBuildRecord{})

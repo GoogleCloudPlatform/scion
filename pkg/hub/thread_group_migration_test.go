@@ -239,7 +239,7 @@ func (f *tgmFixture) setPrefs(user, threadGroups, threadOrder string) {
 
 func (f *tgmFixture) prefs(user string) *WebChatUserPrefs {
 	f.t.Helper()
-	return getPrefs(f.t, f.wcs, f.id(user))
+	return hubGetPrefs(f.t, f.wcs, f.id(user))
 }
 
 func (f *tgmFixture) pass() threadGroupMigrationStats {
@@ -1041,7 +1041,7 @@ func TestThreadGroupMigration_InactiveUserSkippedUnmarked(t *testing.T) {
 	assert.Zero(t, st.UsersMarked)
 	assert.Empty(t, f.groups(f.proj.ID))
 	assert.False(t, f.prefs("u-a").ThreadGroupsMigrated)
-	assert.False(t, getPrefs(t, f.wcs, missing).ThreadGroupsMigrated)
+	assert.False(t, hubGetPrefs(t, f.wcs, missing).ThreadGroupsMigrated)
 
 	u.Status = store.UserStatusActive
 	require.NoError(t, f.s.UpdateUser(ctx, u))

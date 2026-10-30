@@ -24,7 +24,9 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
 
 // healthSummaryBrokerLimit caps the runtime broker rows returned by the
@@ -177,6 +179,9 @@ type HealthSummaryBroker struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
 	Version string `json:"version"`
+	// VersionStatus compares Version with hub.version: match, mismatch or
+	// unknown (no version reported, or no single hub version).
+	VersionStatus string `json:"version_status"`
 	// Status is broker liveness: online, offline or degraded.
 	Status string `json:"status"`
 	// LastHeartbeat is null when the broker has never sent a heartbeat.
@@ -236,6 +241,12 @@ type HealthBrokerStorage struct {
 	Backend string `json:"backend"`
 	// NFSHealthy is set only when Backend is "nfs".
 	NFSHealthy *bool `json:"nfs_healthy,omitempty"`
+	// LayoutMismatch lists how the broker's reported storage layout
+	// disagrees with this hub's (projectfs.Layout.DescriptorIssues), when
+	// the hub's layout is shared and they disagree. The hub refuses
+	// shared-mode dispatches to such a broker. The values are shown to hub
+	// admins only; other readers get the differing fields by name.
+	LayoutMismatch []string `json:"layout_mismatch,omitempty"`
 }
 
 // HealthSummaryAgents is the agents section of the health summary. It
@@ -343,9 +354,22 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 		agentsSummary = &summary
 	}
 
+	// Hub instances, from the registry table only, read once and before
+	// the runtime brokers. A failed read leaves the section nil ("not
+	// reported"). The same rows give the fleet hub section, the hub version
+	// each runtime broker is compared with (so it is known before the
+	// broker list is capped) and the integrations section: every hub
+	// instance, this one included, reports its checks and its plugins'
+	// health through its own row, so the summary runs no probe of its own.
+	instanceRows, storeNow, instancesErr := s.store.ListHubInstances(ctx, hubInstanceDisplayWindow)
+	if instancesErr != nil {
+		slog.Error("health summary: failed to list hub instances", "error", instancesErr)
+	}
+	hubSummary := buildHealthSummaryFleetHub(instanceRows, storeNow, instancesErr == nil)
+
 	// One pass over the runtime broker table gives both the runtime broker
 	// rows and the plugin record names for the integrations section.
-	brokerList, pluginRecordNames, brokerErr := s.healthSummaryBrokers(ctx, agentAgg)
+	brokerList, pluginRecordNames, brokerErr := s.healthSummaryBrokers(ctx, agentAgg, hubSummary.Version)
 	if brokerErr != nil {
 		slog.Error("health summary: failed to list runtime brokers", "error", brokerErr)
 	}
@@ -357,16 +381,8 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 		slog.Error("health summary: failed to count dispatch health", "error", dispatchErr)
 	}
 
-	// Hub instances, from the registry table only. A failed read leaves
-	// the section nil ("not reported"). The same rows give the fleet hub
-	// section and the integrations section: every hub instance, this one
-	// included, reports its checks and its plugins' health through its own
-	// row, so the summary runs no probe of its own.
 	var hubInstances *HealthSummaryHubInstances
-	instanceRows, storeNow, instancesErr := s.store.ListHubInstances(ctx, hubInstanceDisplayWindow)
-	if instancesErr != nil {
-		slog.Error("health summary: failed to list hub instances", "error", instancesErr)
-	} else {
+	if instancesErr == nil {
 		hubInstances = buildHealthSummaryHubInstances(instanceRows, storeNow, s.InstanceID())
 	}
 	integrations := mergeHealthSummaryIntegrations(instanceRows, storeNow, instancesErr == nil, pluginRecordNames)
@@ -378,7 +394,6 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hubSummary := buildHealthSummaryFleetHub(instanceRows, storeNow, instancesErr == nil)
 	hubSummary.InstanceID = s.InstanceID()
 	hubSummary.TestIdentitiesEnabled = s.testIdentities.enabled
 	hubSummary.TestAdminIdentitiesEnabled = s.testAdminTierEnabled(testAdminKindHubAdmin)
@@ -537,17 +552,19 @@ func orderedPhaseCounts(byPhase map[string]int) []HealthPhaseCount {
 }
 
 // healthSummaryBrokers lists runtime brokers for the health summary,
-// excluding plugin records. Problem rows (see healthSummaryBrokerHasProblem)
-// are stably sorted ahead of the rest, so capping at
-// healthSummaryBrokerLimit never hides a problem broker behind healthy ones;
+// excluding plugin records. Each row's version_status is computed against
+// hubVersion before the cap. Problem rows and online version mismatches (see
+// healthSummaryBrokerKeepWhenCapped) are stably sorted ahead of the rest, so
+// capping at healthSummaryBrokerLimit never hides them behind healthy ones;
 // within each group store order is kept. Total is the full runtime broker
 // count. The same pass returns the plugin names of the plugin records, for
 // the integrations section. On a store error it returns an empty, non-nil
 // list marked NotReported, the plugin names read so far, and the error.
-func (s *Server) healthSummaryBrokers(ctx context.Context, agentAgg *store.AgentHealthAggregate) (HealthSummaryBrokers, []string, error) {
+func (s *Server) healthSummaryBrokers(ctx context.Context, agentAgg *store.AgentHealthAggregate, hubVersion string) (HealthSummaryBrokers, []string, error) {
 	list := HealthSummaryBrokers{Items: []HealthSummaryBroker{}}
 	var pluginNames []string
 	opts := store.ListOptions{Limit: healthSummaryBrokerPageSize}
+	hubLayout, layoutErr := s.projectStorageLayout()
 	for {
 		page, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, opts)
 		if err != nil {
@@ -561,7 +578,11 @@ func (s *Server) healthSummaryBrokers(ctx context.Context, agentAgg *store.Agent
 				}
 				continue
 			}
-			list.Items = append(list.Items, healthSummaryBroker(b, agentAgg))
+			row := healthSummaryBroker(b, agentAgg, hubVersion)
+			if layoutErr == nil && row.WorkspaceStorage != nil {
+				row.WorkspaceStorage.LayoutMismatch = projectfs.RenderLayoutIssues(hubLayout.DescriptorIssues(b.WorkspaceStorage, ""), s.storageIssueView(ctx))
+			}
+			list.Items = append(list.Items, row)
 		}
 		if page.NextCursor == "" || page.NextCursor == opts.Cursor {
 			break
@@ -569,7 +590,7 @@ func (s *Server) healthSummaryBrokers(ctx context.Context, agentAgg *store.Agent
 		opts.Cursor = page.NextCursor
 	}
 	sort.SliceStable(list.Items, func(i, j int) bool {
-		return healthSummaryBrokerHasProblem(list.Items[i]) && !healthSummaryBrokerHasProblem(list.Items[j])
+		return healthSummaryBrokerKeepWhenCapped(list.Items[i]) && !healthSummaryBrokerKeepWhenCapped(list.Items[j])
 	})
 	list.Total = len(list.Items)
 	if list.Total > healthSummaryBrokerLimit {
@@ -591,7 +612,23 @@ func healthSummaryBrokerHasProblem(b HealthSummaryBroker) bool {
 		return true
 	}
 	ws := b.WorkspaceStorage
-	return ws != nil && ws.NFSHealthy != nil && !*ws.NFSHealthy
+	return ws != nil && ((ws.NFSHealthy != nil && !*ws.NFSHealthy) || len(ws.LayoutMismatch) > 0)
+}
+
+// healthSummaryBrokerKeepWhenCapped is the sort key that decides which
+// runtime broker rows survive the healthSummaryBrokerLimit cap: problem rows
+// (healthSummaryBrokerHasProblem), and online rows whose version differs
+// from the hub's, so every broker_version_mismatch item has its row. A
+// version mismatch never changes the overall status.
+func healthSummaryBrokerKeepWhenCapped(b HealthSummaryBroker) bool {
+	return healthSummaryBrokerHasProblem(b) || healthSummaryBrokerVersionIsProblem(b)
+}
+
+// healthSummaryBrokerVersionIsProblem reports whether a runtime broker row
+// gets a broker_version_mismatch attention item: it is online and its
+// version differs from the hub's. Unknown never counts.
+func healthSummaryBrokerVersionIsProblem(b HealthSummaryBroker) bool {
+	return !healthSummaryBrokerStatusIsProblem(b.Status) && b.VersionStatus == string(version.BuildMatchDifferent)
 }
 
 // healthSummaryBrokerStatusIsProblem reports whether a broker status needs
@@ -611,11 +648,14 @@ func healthSummaryBrokerSelfIsProblem(h *HealthBrokerSelf) bool {
 }
 
 // healthSummaryBroker builds one runtime broker row of the health summary.
-func healthSummaryBroker(b *store.RuntimeBroker, agentAgg *store.AgentHealthAggregate) HealthSummaryBroker {
+// hubVersion is the fleet hub version its version is compared with.
+func healthSummaryBroker(b *store.RuntimeBroker, agentAgg *store.AgentHealthAggregate, hubVersion string) HealthSummaryBroker {
 	row := HealthSummaryBroker{
-		ID:               b.ID,
-		Name:             b.Name,
-		Version:          b.Version,
+		ID:   b.ID,
+		Name: b.Name,
+		// Bounded on read too, for rows stored before the bound existed.
+		Version:          brokerVersionToken(b.Version),
+		VersionStatus:    brokerVersionStatus(hubVersion, b.Version),
 		Status:           b.Status,
 		Runtime:          brokerRuntimeSummary(b),
 		WorkspaceStorage: brokerStorageSummary(b.WorkspaceStorage),

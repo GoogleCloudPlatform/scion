@@ -112,18 +112,16 @@ runtimes:
 | `gke` | bool | (Kubernetes) Enable GKE-specific features (e.g., Workload Identity, Autopilot scheduling). Default: `false`. |
 | `priority_class_name` | string | (Kubernetes) Default `priorityClassName` applied to agent pods using this runtime entry. Must name a `PriorityClass` that already exists on the cluster — Scion does not create one. An agent's inline config `kubernetes.priorityClassName` overrides this (a template's `kubernetes` block is ignored). Unset means no priority class (pods schedule at priority 0). |
 | `list_all_namespaces` | bool | (Kubernetes) List agents across all namespaces. Default: `false`. |
-| `shared_dir_storage_class` | string | (Kubernetes) Default StorageClass for shared-dir PVCs. Must support `ReadWriteMany`. A profile's value wins over this, and an agent's inline config `kubernetes.shared_dir_storage_class` wins over both (a template's value is ignored). Default: the cluster's default class. |
+| `shared_dir_storage_class` | string | (Kubernetes) Default StorageClass for shared-dir PVCs. Must support `ReadWriteMany`. A profile's value wins over this, and an agent's inline config `kubernetes.shared_dir_storage_class` wins over both (a template's value is ignored). No default: on the local backend, a start that needs a new shared-dir claim fails until a class is set (see [Kubernetes: starts that need a new claim](/scion/hosted/ha/kubernetes/#starts-that-need-a-new-claim)). |
 | `shared_dir_size` | string | (Kubernetes) Default size for each shared-dir PVC, as a positive Kubernetes quantity (e.g. `10Gi`, `1Ti`). Same precedence as `shared_dir_storage_class`. Default: `10Gi`. |
 | `safe_to_evict` | bool | (Kubernetes) Set to `false` to add the `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"` annotation to agent pods. Only `false` has an effect; unset or `true` adds nothing. A profile's value wins over this, and an agent's inline config `kubernetes.safeToEvict` wins over both (a template's value is ignored). Ignored, with a validation warning, on other runtime types. |
-| `shared_dir_storage_backend` | string | `local` or `nfs`. Overrides [`server.shared_dir_storage.backend`](/scion/reference/server-config/#per-profile-backend) for agents whose profile uses this runtime. A profile's value wins over this. Read from global settings only. |
-| `shared_dir_storage_backends` | map | Shared directory name to `local` or `nfs`, for agents whose profile uses this runtime. A directory it does not name uses `shared_dir_storage_backend`. A profile's values, single or per directory, win over this. See [per-directory backend](/scion/reference/server-config/#per-directory-backend). Read from global settings only. |
-| `home_storage_backend` | string | (Kubernetes) `local` or `nfs`. Overrides [`server.home_storage.backend`](/scion/reference/server-config/#agent-home-storage-serverhome_storage) for agents whose profile uses this runtime. A profile's value wins over this. Ignored, with a validation warning, on other runtime types. Read from global settings only. |
-| `home_storage_leaf` | string | (Kubernetes) `pod` or `broker`. Overrides `server.home_storage.leaf` for agents whose profile uses this runtime. A profile's value wins over this. |
 | `kubernetes_service_account_mappings` | map | (Kubernetes) Map of lowercase GCP service account email to Kubernetes ServiceAccount name, used by GCP identity mode `assign`: the agent pod runs as the mapped ServiceAccount through GKE Workload Identity. The ServiceAccount must already exist in this entry's namespace and be bound to the service account; Scion does not create or bind it. A profile's entry for the same email wins over this. Without an entry, the broker uses the one ServiceAccount in the namespace annotated `iam.gke.io/gcp-service-account` with the email, if there is exactly one; that discovery needs `list` on `serviceaccounts` in the namespace. Read from global settings only; a project's `settings.yaml` value is ignored. See [GCP identity mode "assign"](/scion/hosted/ha/kubernetes/#gcp-identity-mode-assign-workload-identity-mapping). |
 | `kubernetes_block_service_account` | string | (Kubernetes) Kubernetes ServiceAccount the agent pod runs as when its GCP identity mode is `block`. Use a dedicated ServiceAccount with no Workload Identity annotation and no IAM grants; Scion does not create or check it. Unset or empty: the pod runs as the namespace's default ServiceAccount. A profile's value wins over this. Read from global settings only. See [block](/scion/hosted/ha/kubernetes/#block). |
 | `env` | map | Environment variables to set for the runtime. |
 
-The `cloudrun` runtime needs an NFS (Filestore) workspace share: set [`server.workspace_storage.backend`](/scion/reference/server-config/#workspace-storage-serverworkspace_storage) to `nfs` with the share in `nfs.shares[0]`. Agent start on `cloudrun` with any other workspace backend is refused before an instance is created.
+Storage placement is not a per-runtime or per-profile setting. The former `shared_dir_storage_backend`, `shared_dir_storage_backends`, `home_storage_backend` and `home_storage_leaf` keys are removed: settings validation, the Hub admin settings API (`PUT /api/v1/admin/server-config`) and flat Runtime Broker instance loading reject them with an error that names [`server.project_storage`](/scion/reference/server-config/#project-storage-serverproject_storage), which places every agent's workspace, shared directories and home. If an existing settings file or stored runtime/profile still carries one of these keys, startup reports `storage_overrides` as degraded (`storage_override_errors` on `GET /api/v1/admin/server-config`) and starting an agent on that profile or runtime (or an agent whose legacy `shared-dir-storage.json` pins `nfs` while the project storage layout is not shared) is refused before anything is created with `422 storage_migration_required`. For a node-local directory, such as a build cache, use an ordinary `volumes:` entry instead.
+
+The `cloudrun` runtime needs an NFS (Filestore) workspace share: set [`server.project_storage.backend`](/scion/reference/server-config/#project-storage-serverproject_storage) to `nfs` with the share in `nfs.shares[0]`. Agent start on `cloudrun` with any other workspace backend is refused before an instance is created.
 
 :::note
 The `tmux` field is now deprecated. All agent sessions are wrapped in tmux by default.
@@ -244,12 +242,10 @@ profiles:
 | `shared_dir_size` | string | (Kubernetes) Size for each shared-dir PVC created under this profile. Same precedence as `shared_dir_storage_class`. |
 | `safe_to_evict` | bool | (Kubernetes) Safe-to-evict setting for agent pods created under this profile. Wins over the runtime entry's value; an agent's inline config `kubernetes.safeToEvict` wins over this (a template's value is ignored). |
 | `clone_depth` | string or int | Git clone depth for clone-per-agent workspaces of agents under this profile: `full` for a full (non-shallow) clone, or an integer N from 1 to 999999999 for a clone of depth N. A template or agent `clone_depth` wins over this. Unset (absent, null or empty) keeps the default shallow (depth 1) clone. Applies only when the workspace is cloned (a new agent, or a recreated workspace). |
-| `shared_dir_storage_backend` | string | `local` or `nfs`. Overrides [`server.shared_dir_storage.backend`](/scion/reference/server-config/#per-profile-backend) for agents using this profile. Wins over the runtime entry's value. Read from global settings only. |
-| `shared_dir_storage_backends` | map | Shared directory name to `local` or `nfs`, for agents using this profile. A directory it does not name uses `shared_dir_storage_backend`. Wins over the runtime entry's values. See [per-directory backend](/scion/reference/server-config/#per-directory-backend). Read from global settings only. |
-| `home_storage_backend` | string | (Kubernetes) `local` or `nfs`. Overrides [`server.home_storage.backend`](/scion/reference/server-config/#agent-home-storage-serverhome_storage) for agents using this profile. Wins over the runtime entry's value. Read from global settings only. |
-| `home_storage_leaf` | string | (Kubernetes) `pod` or `broker`. Overrides `server.home_storage.leaf` for agents using this profile. Wins over the runtime entry's value. |
 | `kubernetes_service_account_mappings` | map | (Kubernetes) Per-profile override of the runtime entry's `kubernetes_service_account_mappings`: for each service account email listed here, this ServiceAccount name wins over the runtime entry's. Other emails fall through to the runtime entry. Read from global settings only. |
 | `kubernetes_block_service_account` | string | (Kubernetes) Per-profile override of the runtime entry's `kubernetes_block_service_account`. Read from global settings only. |
+
+A profile cannot choose where its agents' storage lives: the removed `shared_dir_storage_backend`, `shared_dir_storage_backends`, `home_storage_backend` and `home_storage_leaf` keys are rejected by validation, reported as `storage_overrides` at startup, and refused at agent start with `422 storage_migration_required` (see the note under the runtime entry table above). Use `volumes` for a node-local directory.
 
 **Shared-dir PVC class and size (Kubernetes).** Each key is resolved separately, and the first source that sets it wins: the agent's inline config `kubernetes:` block (a template's is ignored), then the profile, then the profile's runtime entry, then the built-in default (the cluster's default class and `10Gi`). On GKE Autopilot, set an RWX class such as `standard-rwx`. See [Shared Directory PVCs](/scion/hosted/ha/kubernetes/#shared-directory-pvcs).
 
@@ -269,6 +265,55 @@ profiles:
 #### Removed: profile `timezone`
 
 The profile `timezone` field was removed. A request to `PUT /api/v1/admin/server-config` that still sends `profiles.<name>.timezone`, even as an empty string, is rejected with `422`. At startup a Postgres-backed Hub strips stored values from its profile settings. If exactly one zone was set and no Hub default existed, it is copied into `agent_defaults.default_timezone`, and `agent_defaults` then becomes admin-managed, so `settings.yaml` no longer seeds it on that Hub. A file-based Hub never rewrites `settings.yaml`; it logs each leftover key, and the `default_timezone: <zone>` line to add when one zone would have been copied.
+
+## Volume Source Restrictions
+
+A Runtime Broker refuses any agent mount whose host source reaches the broker host's own control files. This applies to every `volumes:` entry, whatever sets it (settings, profiles, harness configs, templates, flat Runtime Broker instance `agent_defaults`, or a create or start request from the Hub). It applies equally to read-only and read-write mounts. It also applies to shared directories, workspaces, agent homes and harness auth files.
+
+The protected paths are, in the Scion global directory (`~/.scion`):
+
+| Class | Paths |
+| :--- | :--- |
+| Credentials | `broker-credentials.json`, `hub-credentials/`, `dev-token`, `hub-profiles/`, `transport-token`, `scion-token` |
+| Local settings | `settings.yaml`, `settings.yml`, `settings.json`, `.settings.lock`, `server.yaml` |
+| Host identity and state | `runtime-brokers/`, `runtime-broker-state/`, `broker-workspaces/`, `hub-workspaces/`, `workspace-config-records/`, `server.pid`, `.scion` (the global project marker) |
+| Host plugins | `plugins/` |
+| Hub state | `hub-id`, and `hub.db` with its `-wal`, `-shm` and `-journal` files |
+
+The broker's configured state directory (`server.broker.state_dir`) and a co-located Hub's SQLite database file are protected wherever they are configured.
+
+A mount source is refused when:
+
+- it equals one of these paths, contains one, or lies inside a protected directory;
+- it is the Scion global directory itself, or contains it (for example `~` or `/`);
+- it lies inside the Scion global directory but outside the agent-data subtrees below. For `volumes:` and shared directories, only these are allowed:
+  - `~/.scion/workspace/...`
+  - `~/.scion/projects/<project>/workspace/...`
+  - `~/.scion/projects/<project>/worktrees/<name>/...`
+  - `~/.scion/projects/<project>/.scion/agents/<agent>/workspace/...`
+  - `~/.scion/project-configs/<dir>/.scion/agents/<agent>/workspace/...`
+  - `~/.scion/project-configs/<dir>/shared-dirs/<name>/...`
+
+  Harness auth files and `SCION_DEV_BINARIES` may not come from the Scion global directory at all.
+- it cannot be resolved: a relative path (other than a named volume), a dangling symbolic link, or a path the broker cannot read.
+
+Symbolic links are resolved on both sides before the comparison, and the resolved path is what gets mounted. The error a requester sees has the code `control_path_mount`. It names the source as configured and the class of path it reaches, never the resolved host path. The broker log adds the resolved paths.
+
+The check runs at each of these points:
+
+1. **Runtime Broker start.** The broker does not start when its worktree base or its NFS mount root (`nfs.mount_root` of the workspace storage settings) equals or contains a protected path. A flat Runtime Broker host does not start when an instance's `agent_defaults` or harness override volumes reach one.
+2. **Agent create and start.** A Hub request whose volumes reach a protected path is refused with `400`, before anything is saved. The agent's merged volumes are checked again before its configuration is written.
+3. **Container creation.** Every bind is checked just before the container is created, and the broker records the binds it requested on the container (the `scion.bind_sources` label). Right after creation, the binds the runtime reports must match that record exactly and are checked again. A refused or mismatching bind stops the container and fails the start.
+4. **Running agents.** The broker re-checks the binds of running agents on its default runtime and on every non-default Docker, Podman or Apple container runtime it has registered. At startup it registers the runtime profiles of Hub-managed projects, of shared-storage projects that have agents on this broker, and of the project it was started from. It registers other projects' runtime profiles once it has used them since it started. It does this at startup, every 60 seconds, and sooner when the protected paths resolve somewhere else. An agent with a refused or mismatching bind is stopped and marked `error`. An agent whose mounts cannot be verified twice in a row is stopped too. A Docker or Podman agent created before this check existed has no bind record. It keeps running only if its container runtime is reached over a local unix socket and every bind source the runtime reports exists on the host and passes the check. Otherwise it is stopped and must be started again. That covers a remote daemon, whether selected with `DOCKER_HOST`, a Docker context, `CONTAINER_HOST` or a Podman connection, and a locality that cannot be determined. Apple container agents created before this check existed are always stopped once. If a protected path cannot be resolved at all (for example a dangling symbolic link at `~/.scion/settings.yaml`), nothing can be verified, so every running agent on the host is stopped until it is fixed.
+
+**Limitations.**
+
+- **Remote Docker daemon.** These checks protect a broker whose container runtime runs on the same host. With a remote Docker daemon (`DOCKER_HOST` pointing at another machine), bind sources name paths on the daemon's host, which the broker cannot verify. The operator must keep the broker's control files off that host and out of every bind source.
+- **Apple container runtime.** The re-checks after creation and for running agents read only the binds the broker recorded on the container when it created it, not the runtime's own view of what it mounted.
+- **Non-default runtimes of other projects after a restart.** Take an agent created before this check existed, on a non-default runtime (for example Podman on a broker whose default is Docker), in a linked project the broker has not used since it started. That agent is not re-checked until the broker uses its project again. Every new agent is still checked when it is created.
+- **Agents created before this check existed.** For these agents only, the re-check trusts the bind sources the runtime reports, since there is no record to compare them with. A Docker Desktop path of the form `/host_mnt/<host path>` is judged as `<host path>`. Locality is judged by the daemon endpoint alone. A local unix socket that forwards to a daemon on another host or filesystem (for example an SSH-forwarded socket) is therefore treated as local.
+- **Runtime listing.** If the broker cannot list a runtime's containers, it cannot tell which agents to check, so it stops none and tries again at the next check.
+- **Hard links.** Directories are not walked. A hard link to a protected file, placed inside an allowed directory by a process on the host, is not detected. An agent cannot create such a link itself.
 
 ## Telemetry Configuration (`telemetry`)
 
@@ -300,6 +345,8 @@ Settings for forwarding telemetry to a cloud OTLP backend.
 | `enabled` | bool | `true` | Enable cloud forwarding. |
 | `endpoint` | string | — | Cloud OTLP endpoint URL. |
 | `protocol` | string | `grpc` | Transport protocol: `grpc` or `http`. |
+| `provider` | string | — | Cloud provider name (for example `gcp`). |
+| `cloud_logging` | bool | `false` | Send the Scion server's (Hub's) own logs directly to Google Cloud Logging. Read once at server startup; `SCION_CLOUD_LOGGING`, when set (even to `false`), takes precedence over the file. Agents do not use it: the value is carried into the agent's resolved telemetry config (`telemetry.cloud.cloud_logging`) but is not passed to the agent as an environment variable. On a database-backed Hub it cannot be changed through `PUT /api/v1/admin/server-config` (`422 startup_only_key_rejected`). |
 | `headers` | map | — | Additional headers for OTLP export (e.g., `Authorization`). |
 | `tls.enabled` | bool | `true` | Enable TLS for the connection. |
 | `tls.insecure_skip_verify` | bool | `false` | Skip TLS certificate verification (development only). |
@@ -371,6 +418,7 @@ Settings can be overridden using environment variables with the `SCION_` prefix.
 | `cli.autohelp` | `SCION_CLI_AUTOHELP` |
 | `telemetry.enabled` | `SCION_TELEMETRY_ENABLED` |
 | `telemetry.cloud.enabled` | `SCION_TELEMETRY_CLOUD_ENABLED` |
+| `telemetry.cloud.cloud_logging` (server process only) | `SCION_CLOUD_LOGGING` |
 | `telemetry.cloud.endpoint` | `SCION_OTEL_ENDPOINT` |
 | `telemetry.cloud.protocol` | `SCION_OTEL_PROTOCOL` |
 | `telemetry.cloud.tls.enabled` (inverted) | `SCION_OTEL_INSECURE` |

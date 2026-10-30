@@ -5,12 +5,18 @@
 # binding of BUILD_SA_NAME, and the four service accounts. APIs stay enabled
 # (the project may use them). Dry-run by default; --apply asks you to type
 # GCP_PROJECT (or pass --confirm GCP_PROJECT). Missing resources are skipped.
+# --regional-only deletes only the stack in REGION (scheduler job, mediator
+# service, runner job, Artifact Registry repo) and keeps everything
+# project-wide, for a region move or a second stack.
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-USAGE="Usage: teardown.sh [--keep-secrets] [--keep-images] [--confirm PROJECT] [--config FILE] [--dry-run | --apply]
+USAGE="Usage: teardown.sh [--regional-only] [--keep-secrets] [--keep-images] [--confirm PROJECT] [--config FILE] [--dry-run | --apply]
 
+  --regional-only    delete only REGION's scheduler job, mediator service, runner job
+                     and Artifact Registry repo; keep the service accounts, secrets,
+                     build staging bucket and project IAM binding (region move)
   --keep-secrets     keep the two secrets (and their versions); MEDIATOR_SA_NAME's
                      access bindings are removed before the account is deleted
   --keep-images      keep the Artifact Registry repo and its images
@@ -18,11 +24,16 @@ USAGE="Usage: teardown.sh [--keep-secrets] [--keep-images] [--confirm PROJECT] [
 
 $crci_common_help"
 
+REGIONAL_ONLY=0
 KEEP_SECRETS=0
 KEEP_IMAGES=0
 CONFIRM=""
 while (($#)); do
   case $1 in
+    --regional-only)
+      REGIONAL_ONLY=1
+      shift
+      ;;
     --keep-secrets)
       KEEP_SECRETS=1
       shift
@@ -48,9 +59,15 @@ crci_start
 P=${CFG[GCP_PROJECT]}
 R=${CFG[REGION]}
 
+if [[ $REGIONAL_ONLY == 1 && $KEEP_SECRETS == 1 ]]; then
+  crci_die "--keep-secrets has no effect with --regional-only (secrets are always kept)"
+fi
+scope="the cr-ci resources in project $P"
+[[ $REGIONAL_ONLY == 1 ]] && scope="the cr-ci stack in region $R of project $P (project-wide resources are kept)"
+
 if [[ $CRCI_MODE == apply ]]; then
   if [[ -z $CONFIRM ]]; then
-    printf 'This deletes the cr-ci resources in project %s. Type the project ID to confirm: ' "$P" >&2
+    printf 'This deletes %s. Type the project ID to confirm: ' "$scope" >&2
     IFS= read -r CONFIRM || CONFIRM=""
   fi
   [[ $CONFIRM == "$P" ]] || crci_die "confirmation does not match $P; nothing deleted"
@@ -83,6 +100,18 @@ delete_if_exists gcloud run services describe "${CFG[MEDIATOR_SERVICE_NAME]}" --
 crci_note "runner job ${CFG[RUNNER_JOB_NAME]}"
 delete_if_exists gcloud run jobs describe "${CFG[RUNNER_JOB_NAME]}" --region="$R" --project="$P" --format='value(name)' -- \
   gcloud run jobs delete "${CFG[RUNNER_JOB_NAME]}" --region="$R" --project="$P" --quiet
+
+if [[ $REGIONAL_ONLY == 1 ]]; then
+  if [[ $KEEP_IMAGES == 1 ]]; then
+    crci_note "keeping repository ${CFG[ARTIFACT_REPO]} in $R"
+  else
+    crci_note "repository ${CFG[ARTIFACT_REPO]} in $R and its images"
+    delete_if_exists gcloud artifacts repositories describe "${CFG[ARTIFACT_REPO]}" --location="$R" --project="$P" --format='value(name)' -- \
+      gcloud artifacts repositories delete "${CFG[ARTIFACT_REPO]}" --location="$R" --project="$P" --quiet
+  fi
+  crci_note "done (--regional-only); kept the service accounts, secrets, build staging bucket and project IAM binding; APIs were left enabled"
+  exit 0
+fi
 
 if [[ $KEEP_IMAGES == 1 ]]; then
   crci_note "keeping repository ${CFG[ARTIFACT_REPO]}; removing BUILD_SA_NAME's writer binding"

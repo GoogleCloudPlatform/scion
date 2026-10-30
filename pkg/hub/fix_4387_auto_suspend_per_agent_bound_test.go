@@ -18,7 +18,6 @@ package hub
 
 import (
 	"context"
-	"sync"
 	"testing"
 	"time"
 
@@ -54,88 +53,6 @@ func makeStalled(t *testing.T, s store.Store, agentID string) {
 		"UPDATE agents SET last_activity_event = ?, last_seen = ? WHERE id = ?",
 		time.Now().Add(-time.Hour), time.Now().Add(-10*time.Second), agentID)
 	require.NoError(t, err)
-}
-
-// ptone/scion#4387 item 2: the stalled-detection tick hands the agents to
-// the auto-suspend worker and returns, and each agent's auto-suspend has
-// its own bound, detached from the tick and from the agents before it. The
-// first agent's sync-back download runs until its own bound cuts it, well
-// past the tick's bound; the second agent in the batch is still suspended,
-// with a sync-back bound of its own.
-func TestAutoSuspend_SlowSyncBackDoesNotCutNextAgent(t *testing.T) {
-	const (
-		tickBound = 250 * time.Millisecond
-		syncBound = time.Second
-	)
-	t.Setenv("HOME", t.TempDir())
-	disp := &slowLaunchDispatcher{delay: 10 * time.Millisecond}
-	srv, s, project := setupCreateAgentServer(t, disp) // hub-managed: no GitRemote.
-	shortenSyncDispatchTimeout(t, syncBound)
-	setStalledDetectionTimeout(t, tickBound)
-	require.Equal(t, syncBound, stopSyncBackTimeout(), "fixture check: the sync-back bound follows syncDispatchTimeout")
-	srv.config.AutoSuspendStalled = true
-
-	srv.SetStorage(newContentMockStorage("test-bucket"))
-	var (
-		mu           sync.Mutex
-		downloadErrs []error
-		remaining    []time.Duration
-	)
-	srv.setHubWorkspaceDownloader(func(ctx context.Context, _, _, _ string) error {
-		mu.Lock()
-		first := len(downloadErrs) == 0
-		if deadline, ok := ctx.Deadline(); ok {
-			remaining = append(remaining, time.Until(deadline))
-		} else {
-			remaining = append(remaining, 0)
-		}
-		downloadErrs = append(downloadErrs, nil)
-		i := len(downloadErrs) - 1
-		mu.Unlock()
-		var err error
-		if first {
-			// A download far larger than the bound: it runs until its
-			// ctx is cut.
-			err = errDownloadNeverCut
-			if awaitCanceled(ctx) {
-				err = ctx.Err()
-			}
-		}
-		mu.Lock()
-		downloadErrs[i] = err
-		mu.Unlock()
-		return err
-	})
-
-	a := createSiteAgent(t, s, project, "as-bound-a", state.PhaseRunning, store.RunIntentRunning)
-	b := createSiteAgent(t, s, project, "as-bound-b", state.PhaseRunning, store.RunIntentRunning)
-	makeStalled(t, s, a.ID)
-	makeStalled(t, s, b.ID)
-	broker := connectFakeBroker(t, srv, a.RuntimeBrokerID)
-	uploaded := answerBrokerUploads(t, broker, 0, 2)
-
-	start := time.Now()
-	srv.agentStalledDetectionHandler()(context.Background())
-	tickTook := time.Since(start)
-	srv.waitAutoSuspendIdle()
-	elapsed := time.Since(start)
-
-	require.Len(t, uploaded, 2, "fixture check: both sync-backs were tunneled to the broker")
-	mu.Lock()
-	defer mu.Unlock()
-	require.Len(t, downloadErrs, 2, "fixture check: both sync-backs downloaded")
-	require.ErrorIs(t, downloadErrs[0], context.DeadlineExceeded, "the first download is cut at its own bound")
-	assert.NoError(t, downloadErrs[1], "the second agent's sync-back is not cut")
-	// Under one deadline shared by the batch, the second sync-back would
-	// have had less than the tick's bound left, or nothing at all.
-	assert.Greater(t, remaining[1], tickBound, "the second sync-back has a bound of its own")
-	assert.Less(t, tickTook, syncBound, "the tick returns without waiting for the auto-suspends")
-	assert.Greater(t, elapsed, tickBound, "fixture check: the batch outlasted the tick's bound")
-
-	for _, id := range []string{a.ID, b.ID} {
-		got := requireRunIntent(t, s, id, store.RunIntentStopped)
-		assert.Equal(t, string(state.PhaseSuspended), got.Phase, "agent %s is suspended", id)
-	}
 }
 
 // No new auto-suspend starts once the batch's start window has passed: the

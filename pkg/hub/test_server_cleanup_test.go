@@ -267,7 +267,7 @@ func TestTestServerCleanupStopsBackgroundGoroutines(t *testing.T) {
 var leakedServerGoroutineSigs = func() []string {
 	var sigs []string
 	for _, sig := range leakGuardSignatures {
-		if sig != leakGuardStoreSignature {
+		if sig != leakGuardStoreSignature && sig != leakGuardStoreDiagSignature {
 			sigs = append(sigs, sig)
 		}
 	}

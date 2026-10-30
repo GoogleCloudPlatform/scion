@@ -216,6 +216,11 @@ func AppliedConfig(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldAppliedConfig, v))
 }
 
+// PendingConfig applies equality check predicate on the "pending_config" field. It's identical to PendingConfigEQ.
+func PendingConfig(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldPendingConfig, v))
+}
+
 // HarnessConfig applies equality check predicate on the "harness_config" field. It's identical to HarnessConfigEQ.
 func HarnessConfig(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldHarnessConfig, v))
@@ -2484,6 +2489,81 @@ func AppliedConfigEqualFold(v string) predicate.Agent {
 // AppliedConfigContainsFold applies the ContainsFold predicate on the "applied_config" field.
 func AppliedConfigContainsFold(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldContainsFold(FieldAppliedConfig, v))
+}
+
+// PendingConfigEQ applies the EQ predicate on the "pending_config" field.
+func PendingConfigEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldPendingConfig, v))
+}
+
+// PendingConfigNEQ applies the NEQ predicate on the "pending_config" field.
+func PendingConfigNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldPendingConfig, v))
+}
+
+// PendingConfigIn applies the In predicate on the "pending_config" field.
+func PendingConfigIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldPendingConfig, vs...))
+}
+
+// PendingConfigNotIn applies the NotIn predicate on the "pending_config" field.
+func PendingConfigNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldPendingConfig, vs...))
+}
+
+// PendingConfigGT applies the GT predicate on the "pending_config" field.
+func PendingConfigGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldPendingConfig, v))
+}
+
+// PendingConfigGTE applies the GTE predicate on the "pending_config" field.
+func PendingConfigGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldPendingConfig, v))
+}
+
+// PendingConfigLT applies the LT predicate on the "pending_config" field.
+func PendingConfigLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldPendingConfig, v))
+}
+
+// PendingConfigLTE applies the LTE predicate on the "pending_config" field.
+func PendingConfigLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldPendingConfig, v))
+}
+
+// PendingConfigContains applies the Contains predicate on the "pending_config" field.
+func PendingConfigContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldPendingConfig, v))
+}
+
+// PendingConfigHasPrefix applies the HasPrefix predicate on the "pending_config" field.
+func PendingConfigHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldPendingConfig, v))
+}
+
+// PendingConfigHasSuffix applies the HasSuffix predicate on the "pending_config" field.
+func PendingConfigHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldPendingConfig, v))
+}
+
+// PendingConfigIsNil applies the IsNil predicate on the "pending_config" field.
+func PendingConfigIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldPendingConfig))
+}
+
+// PendingConfigNotNil applies the NotNil predicate on the "pending_config" field.
+func PendingConfigNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldPendingConfig))
+}
+
+// PendingConfigEqualFold applies the EqualFold predicate on the "pending_config" field.
+func PendingConfigEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldPendingConfig, v))
+}
+
+// PendingConfigContainsFold applies the ContainsFold predicate on the "pending_config" field.
+func PendingConfigContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldPendingConfig, v))
 }
 
 // HarnessConfigEQ applies the EQ predicate on the "harness_config" field.

@@ -16,7 +16,6 @@
 package hub
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -24,7 +23,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -32,6 +30,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -85,6 +84,18 @@ type BrokerAuthService struct {
 	// Server.testAdminBrokerAdmission, which refuses every broker other than
 	// the co-located one while the test admin tier is on.
 	brokerAdmission func(ctx context.Context, brokerID string) error
+	// deferNonce, when set and true for a request, makes
+	// ValidateBrokerSignature verify the request without recording its
+	// nonce. The hub sets it to Server.conduitIngressDefersBrokerNonce: a
+	// conduit dial the ingress forwards to a separate relay, whose Admit
+	// records the nonce instead (conduit_ingress_broker_nonce.go).
+	deferNonce func(r *http.Request) bool
+}
+
+// defersNonce reports whether ValidateBrokerSignature leaves r's nonce to
+// the hop that admits it (deferNonce).
+func (s *BrokerAuthService) defersNonce(r *http.Request) bool {
+	return s != nil && s.deferNonce != nil && s.deferNonce(r)
 }
 
 // admitBroker applies brokerAdmission, if any.
@@ -610,7 +621,7 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 		if err := hostSAClaimWriteAllowed(hostSAClaim{}, hostSAClaimOf(broker), hostSA); err != nil {
 			return nil, err
 		}
-		if err := s.store.CreateRuntimeBroker(ctx, broker); err != nil {
+		if err := s.store.CreateRuntimeBrokerClearingCredentials(ctx, broker); err != nil {
 			return nil, fmt.Errorf("failed to create runtime broker: %w", err)
 		}
 	}
@@ -835,7 +846,10 @@ func (s *BrokerAuthService) classifyUnconsumedJoinToken(ctx context.Context, tok
 // applyBrokerJoinRequest records the connection details a joining broker
 // reports on its broker record.
 func applyBrokerJoinRequest(broker *store.RuntimeBroker, req BrokerJoinRequest, now time.Time) {
-	broker.Version = req.Version
+	// Always stored, even when empty: an older broker sends "" on an
+	// untagged build, which must show as unknown rather than keep a stale
+	// token from an earlier join (ptone/scion#5972).
+	broker.Version = brokerVersionToken(req.Version)
 	broker.Status = store.BrokerStatusOnline
 	broker.ConnectionState = "connected"
 	broker.LastHeartbeat = now
@@ -870,8 +884,11 @@ func applyBrokerJoinRequest(broker *store.RuntimeBroker, req BrokerJoinRequest, 
 	}
 }
 
-// GenerateAndStoreSecret generates a new HMAC secret for an existing broker.
-// This is used for simplified registration flows where a join token is not required.
+// GenerateAndStoreSecret returns the broker's stored HMAC secret, or
+// generates and stores one when there is none. Its callers are in-process
+// (the co-located, flat-host and plugin brokers), which share one key
+// across restarts and instances; a response to a remote caller uses MintSecretIfAbsent
+// instead, which never returns a stored secret.
 // Returns the base64-encoded secret key.
 func (s *BrokerAuthService) GenerateAndStoreSecret(ctx context.Context, brokerID string) (string, error) {
 	if brokerID == "" {
@@ -905,6 +922,49 @@ func (s *BrokerAuthService) GenerateAndStoreSecret(ctx context.Context, brokerID
 	}
 
 	return base64.StdEncoding.EncodeToString(secretKey), nil
+}
+
+// MintSecretIfAbsent generates and stores a new HMAC secret for brokerID
+// only when the broker has no stored secret. It returns the new
+// base64-encoded secret and minted=true when it stored one, or "" and
+// minted=false when a secret already exists: unlike GenerateAndStoreSecret,
+// it never returns a stored secret. A secret created concurrently between
+// the check and the insert makes the insert fail with store.ErrAlreadyExists,
+// which is reported the same way as an existing secret ("" and
+// minted=false): the stored secret is not read and never returned.
+func (s *BrokerAuthService) MintSecretIfAbsent(ctx context.Context, brokerID string) (string, bool, error) {
+	if brokerID == "" {
+		return "", false, errors.New("brokerId is required")
+	}
+
+	existingSecret, err := s.store.GetBrokerSecret(ctx, brokerID)
+	if err == nil && existingSecret != nil {
+		return "", false, nil
+	}
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return "", false, fmt.Errorf("failed to look up broker secret: %w", err)
+	}
+
+	secretKey := make([]byte, s.config.SecretKeyLength)
+	if _, err := rand.Read(secretKey); err != nil {
+		return "", false, fmt.Errorf("failed to generate secret key: %w", err)
+	}
+
+	brokerSecret := &store.BrokerSecret{
+		BrokerID:  brokerID,
+		SecretKey: secretKey,
+		Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
+		CreatedAt: time.Now(),
+		Status:    store.BrokerSecretStatusActive,
+	}
+	if err := s.store.CreateBrokerSecret(ctx, brokerSecret); err != nil {
+		if errors.Is(err, store.ErrAlreadyExists) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("failed to store broker secret: %w", err)
+	}
+
+	return base64.StdEncoding.EncodeToString(secretKey), true, nil
 }
 
 // =============================================================================
@@ -949,7 +1009,39 @@ var (
 	errBrokerAuthSecretExpired    = errors.New("broker secret has expired")
 	errBrokerAuthInvalidSignature = errors.New("invalid signature")
 	errBrokerAuthNoValidSecrets   = errors.New("no valid secrets found")
+	errBrokerAuthBrokerLookup     = errors.New("failed to get runtime broker")
+	// errBrokerAuthBodyTooLarge reports a body over
+	// apiclient.MaxSignedRequestBodyBytes. Callers answer it with 413
+	// (writeBrokerAuthFailure), not 401.
+	errBrokerAuthBodyTooLarge = errors.New(apiclient.SignedBodyTooLargeMessage)
 )
+
+// requireLiveBroker refuses a request whose signature verified against a
+// stored secret when the broker's runtime_brokers row does not exist: a
+// secret authenticates only the live broker row with its ID, never an ID
+// whose row was deleted. It runs after the signature check, so a caller
+// without the secret learns nothing from it. A lookup failure is refused
+// (fail closed).
+func (s *BrokerAuthService) requireLiveBroker(ctx context.Context, brokerID string) error {
+	if _, err := s.store.GetRuntimeBroker(ctx, brokerID); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("%w: %s", errBrokerAuthUnknownBroker, brokerID)
+		}
+		return fmt.Errorf("%w: %w", errBrokerAuthBrokerLookup, err)
+	}
+	return nil
+}
+
+// limitBrokerAuthBody bounds r's body before the verifier reads it to build
+// the canonical string. The verifiers have no response writer, so the cap is
+// installed with a nil writer; an over-cap declared length is refused
+// without reading a byte.
+func limitBrokerAuthBody(r *http.Request) error {
+	if err := apiclient.LimitSignedRequestBody(nil, r); err != nil {
+		return errBrokerAuthBodyTooLarge
+	}
+	return nil
+}
 
 // ValidateBrokerSignature validates an HMAC-signed request from a Runtime Broker.
 func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http.Request) (BrokerIdentity, error) {
@@ -977,6 +1069,17 @@ func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http
 		return nil, errBrokerAuthMissingNonce
 	}
 
+	// Bound the body before anything reads it (the canonical string hashes
+	// it before the signature is compared).
+	if err := limitBrokerAuthBody(r); err != nil {
+		return nil, err
+	}
+
+	// A signed body must declare its length (before the nonce is recorded).
+	if err := apiclient.CheckSignedBodyFraming(r); err != nil {
+		return nil, err
+	}
+
 	// Parse and validate timestamp
 	ts, err := strconv.ParseInt(timestamp, 10, 64)
 	if err != nil {
@@ -990,26 +1093,6 @@ func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http
 	}
 	if clockSkew > s.config.MaxClockSkew {
 		return nil, fmt.Errorf("%w (skew: %v)", errBrokerAuthClockSkew, clockSkew)
-	}
-
-	// Validate nonce if enabled — use DB-backed store for multi-instance
-	// replay protection when configured; otherwise use in-memory cache.
-	// DB errors are fail-closed (request is rejected, not silently passed).
-	// Defence-in-depth: guard against empty nonce reaching the DB store.
-	if s.config.EnableNonceCache && nonce != "" {
-		if s.nonceStore != nil {
-			isNew, err := s.nonceStore.CheckAndStore(ctx, nonce, s.config.NonceCacheTTL)
-			if err != nil {
-				return nil, fmt.Errorf("%w: %w", errBrokerAuthNonceCheck, err)
-			}
-			if !isNew {
-				return nil, errBrokerAuthReplay
-			}
-		} else if s.nonces != nil {
-			if !s.nonces.Add(nonce) {
-				return nil, errBrokerAuthReplay
-			}
-		}
 	}
 
 	// Get the broker's secret
@@ -1040,88 +1123,57 @@ func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http
 		return nil, errBrokerAuthInvalidSignature
 	}
 
+	// The broker row must exist: checked after the signature verifies and
+	// before the nonce is recorded, so only a request that authenticates as
+	// a live broker records its nonce.
+	if err := s.requireLiveBroker(ctx, brokerID); err != nil {
+		return nil, err
+	}
+
+	// Record the nonce only for a request whose signature verified, so a
+	// request with a valid nonce and a bad signature leaves the nonce
+	// unused. A request deferNonce selects is verified here and has its
+	// nonce recorded by the hop that admits it.
+	if !s.defersNonce(r) {
+		if err := s.recordNonce(ctx, nonce); err != nil {
+			return nil, err
+		}
+	}
+
 	return NewBrokerIdentity(brokerID), nil
 }
 
-// buildCanonicalString builds the canonical string for HMAC signing.
-// Format: METHOD\nPATH\nQUERY\nTIMESTAMP\nNONCE\nSIGNED_HEADERS\nBODY_HASH
-func (s *BrokerAuthService) buildCanonicalString(r *http.Request, timestamp, nonce string) []byte {
-	var buf bytes.Buffer
-
-	// HTTP method
-	buf.WriteString(r.Method)
-	buf.WriteByte('\n')
-
-	// Request path
-	buf.WriteString(r.URL.Path)
-	buf.WriteByte('\n')
-
-	// Query string (sorted)
-	buf.WriteString(r.URL.RawQuery)
-	buf.WriteByte('\n')
-
-	// Timestamp
-	buf.WriteString(timestamp)
-	buf.WriteByte('\n')
-
-	// Nonce
-	buf.WriteString(nonce)
-	buf.WriteByte('\n')
-
-	// Signed headers (if specified)
-	signedHeaders := r.Header.Get(HeaderSignedHeaders)
-	if signedHeaders != "" {
-		// Headers are listed as semicolon-separated names
-		headerNames := strings.Split(signedHeaders, ";")
-		for _, name := range headerNames {
-			name = strings.TrimSpace(name)
-			value := r.Header.Get(name)
-			buf.WriteString(strings.ToLower(name))
-			buf.WriteByte(':')
-			buf.WriteString(strings.TrimSpace(value))
-			buf.WriteByte('\n')
-		}
+// recordNonce records nonce when the nonce cache is enabled, refusing a
+// nonce already recorded. It uses the DB-backed store for multi-instance
+// replay protection when configured, otherwise the in-memory cache. DB
+// errors are fail-closed (the request is rejected, not silently passed).
+// Defence-in-depth: an empty nonce never reaches the DB store.
+func (s *BrokerAuthService) recordNonce(ctx context.Context, nonce string) error {
+	if !s.config.EnableNonceCache || nonce == "" {
+		return nil
 	}
-
-	// Body hash (SHA-256 of request body)
-	if r.Body != nil && r.ContentLength > 0 {
-		// We need to read and restore the body
-		bodyBytes, err := io.ReadAll(r.Body)
-		if err == nil {
-			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-			bodyHash := sha256.Sum256(bodyBytes)
-			buf.WriteString(base64.StdEncoding.EncodeToString(bodyHash[:]))
+	if s.nonceStore != nil {
+		isNew, err := s.nonceStore.CheckAndStore(ctx, nonce, s.config.NonceCacheTTL)
+		if err != nil {
+			return fmt.Errorf("%w: %w", errBrokerAuthNonceCheck, err)
 		}
+		if !isNew {
+			return errBrokerAuthReplay
+		}
+		return nil
 	}
-
-	return buf.Bytes()
+	if s.nonces != nil && !s.nonces.Add(nonce) {
+		return errBrokerAuthReplay
+	}
+	return nil
 }
 
-// SignRequest signs an outgoing HTTP request with HMAC.
-// Used by Runtime Brokers when calling the Hub API.
-func (s *BrokerAuthService) SignRequest(r *http.Request, brokerID string, secret []byte) error {
-	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
-
-	// Generate nonce
-	nonceBytes := make([]byte, 16)
-	if _, err := rand.Read(nonceBytes); err != nil {
-		return fmt.Errorf("failed to generate nonce: %w", err)
-	}
-	nonce := base64.URLEncoding.EncodeToString(nonceBytes)
-
-	// Set headers
-	r.Header.Set(HeaderBrokerID, brokerID)
-	r.Header.Set(HeaderTimestamp, timestamp)
-	r.Header.Set(HeaderNonce, nonce)
-
-	// Build canonical string and compute signature
-	canonicalString := s.buildCanonicalString(r, timestamp, nonce)
-	sig := computeHMAC(secret, canonicalString)
-	sigB64 := base64.StdEncoding.EncodeToString(sig)
-
-	r.Header.Set(HeaderSignature, sigB64)
-
-	return nil
+// buildCanonicalString builds the canonical string for HMAC signing.
+// It delegates to apiclient.BuildCanonicalString, the single implementation
+// shared with the signer and the broker verifiers, so the two sides cannot
+// drift apart.
+func (s *BrokerAuthService) buildCanonicalString(r *http.Request, timestamp, nonce string) []byte {
+	return apiclient.BuildCanonicalString(r, timestamp, nonce)
 }
 
 // =============================================================================
@@ -1197,6 +1249,12 @@ func (s *BrokerAuthService) ValidateBrokerSignatureWithRotation(ctx context.Cont
 		return nil, err
 	}
 
+	// Bound the body before the secret lookup and before anything reads
+	// it; validateWithSecret repeats this (it is idempotent).
+	if err := limitBrokerAuthBody(r); err != nil {
+		return nil, err
+	}
+
 	// Get all active secrets for this broker
 	secrets, err := s.store.GetActiveSecrets(ctx, brokerID)
 	if err != nil {
@@ -1218,6 +1276,12 @@ func (s *BrokerAuthService) ValidateBrokerSignatureWithRotation(ctx context.Cont
 		identity, err := s.validateWithSecret(ctx, r, brokerID, secret.SecretKey)
 		if err == nil {
 			return identity, nil
+		}
+		// A signature that verified but whose broker row is missing (or
+		// could not be read) is refused at once, not masked by trying
+		// another secret.
+		if errors.Is(err, errBrokerAuthUnknownBroker) || errors.Is(err, errBrokerAuthBrokerLookup) {
+			return nil, err
 		}
 		lastErr = err
 	}
@@ -1245,6 +1309,17 @@ func (s *BrokerAuthService) validateWithSecret(ctx context.Context, r *http.Requ
 		return nil, errBrokerAuthMissingNonce
 	}
 
+	// Bound the body before anything reads it (the canonical string hashes
+	// it before the signature is compared).
+	if err := limitBrokerAuthBody(r); err != nil {
+		return nil, err
+	}
+
+	// A signed body must declare its length (before the nonce is recorded).
+	if err := apiclient.CheckSignedBodyFraming(r); err != nil {
+		return nil, err
+	}
+
 	// Parse and validate timestamp
 	ts, err := strconv.ParseInt(timestamp, 10, 64)
 	if err != nil {
@@ -1267,6 +1342,13 @@ func (s *BrokerAuthService) validateWithSecret(ctx context.Context, r *http.Requ
 
 	if !hmac.Equal([]byte(signature), []byte(expectedSigB64)) {
 		return nil, errBrokerAuthInvalidSignature
+	}
+
+	// The broker row must exist: checked after the signature verifies and
+	// before the nonce is recorded, in the same order as
+	// ValidateBrokerSignature.
+	if err := s.requireLiveBroker(ctx, brokerID); err != nil {
+		return nil, err
 	}
 
 	// Only add nonce to cache after successful validation — use DB-backed
@@ -1465,7 +1547,7 @@ func BrokerAuthMiddleware(svc *BrokerAuthService) func(http.Handler) http.Handle
 			// Validate HMAC signature
 			identity, err := svc.ValidateBrokerSignature(r.Context(), r)
 			if err != nil {
-				writeBrokerAuthError(w, err.Error())
+				writeBrokerAuthFailure(w, err)
 				return
 			}
 
@@ -1485,6 +1567,20 @@ func BrokerAuthMiddleware(svc *BrokerAuthService) func(http.Handler) http.Handle
 // writeBrokerAuthError writes a broker authentication error response.
 func writeBrokerAuthError(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusUnauthorized, ErrCodeBrokerAuthFailed, message, nil)
+}
+
+// writeBrokerAuthFailure answers a failed broker signature check: 413 for a
+// body over apiclient.MaxSignedRequestBodyBytes, otherwise the 401 of
+// writeBrokerAuthError.
+// The HTTP error code "payload_too_large" follows the hub's existing 413
+// responses; the audit failure code for the same refusal is "malformed"
+// (brokerAuthFailureCode). The two namespaces differ on purpose.
+func writeBrokerAuthFailure(w http.ResponseWriter, err error) {
+	if errors.Is(err, errBrokerAuthBodyTooLarge) {
+		writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large", err.Error(), nil)
+		return
+	}
+	writeBrokerAuthError(w, err.Error())
 }
 
 // registrationLabels returns a copy of a registration request's labels with

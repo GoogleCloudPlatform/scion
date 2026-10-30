@@ -64,7 +64,7 @@ A `RoleBinding` contains the following fields:
 * **Principal ID**: The identifier of the specific principal.
 * **Scope Type**: The scope bounds, either `system` (global permissions) or `project` (project-restricted permissions).
 * **Scope ID**: Empty for `system` scope, or the specific project ID for `project` scope.
-* **Activation Window (`not_before` / `expires_at`)**: Optional time bounds during which the binding is active. Outside its window a binding grants nothing, and membership checks (for example who counts as a project member for access and messaging) count only bindings inside their window. The project members list still shows bindings outside their window, so they can be managed.
+* **Activation Window (`not_before` / `expires_at`)**: Optional time bounds during which the binding is active. Outside its window a binding grants nothing, and membership checks (for example who counts as a project member for access and messaging) count only bindings inside their window. The project members list still shows bindings outside their window, so they can be managed. For a user principal, a binding (direct or via group membership) also grants authority only while the user's account is `active`; bindings held by an `invited` user take effect when the user signs in and the account becomes `active`, and bindings held by an `invited`, `suspended`, or removed user grant nothing.
 
 ### Agent Synthetic RoleBindings
 At runtime, agents do not require static RoleBindings to be manually created. Instead, the authorization engine dynamically extracts the agent's JWT claims and scopes and constructs **synthetic project-scoped role bindings** so that agent actions can be evaluated through the unified authorization pipeline.
@@ -113,7 +113,7 @@ Whenever an API request is made, the Hub's `Decide` endpoint processes the autho
 ```
 
 1. **Authentication**: The caller is authenticated, establishing their principal type, principal ID, group memberships, and credentials (such as token type/scope).
-2. **Retrieve Positive Grants**: The engine retrieves all active, time-valid RoleBindings that apply to the principal directly, or to any groups they belong to.
+2. **Retrieve Positive Grants**: The engine retrieves all active, time-valid RoleBindings that apply to the principal directly, or to any groups they belong to (for a user principal, only when the user's account is `active`; a federated user with no account record is decided by its bindings alone).
 3. **Union Allowed Permissions**: The union of all permission IDs granted by these bindings forms the positive "allowed permissions" set.
 4. **Load Applicable AccessConstraints**: The engine queries all active, non-disabled AccessConstraints that match the principal (by principal ID, group closure, or `all_principals`) within the targeted scope.
 5. **Intersect Permissions**: The effective permission set is calculated as the intersection of the positive set and the maximum permitted ceilings.

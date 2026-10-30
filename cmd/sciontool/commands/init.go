@@ -35,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/autoexpose"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/sshd"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/delegation"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
@@ -619,6 +620,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 	var telemetryPipeline *telemetry.Pipeline
 	telemetryCtx := context.Background()
 	if pipeline := telemetry.New(); pipeline != nil {
+		// Usage analytics outbox: the agent home, owned by the agent user
+		// (init runs as root; hooks write the same outbox as that user).
+		pipeline.SetAnalyticsOutbox(agentHome, targetUID, targetGID)
 		var telemetryCancel context.CancelFunc
 		telemetryCtx, telemetryCancel = context.WithCancel(context.Background())
 		if err := pipeline.Start(telemetryCtx); err != nil {
@@ -832,6 +836,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 		reportInitFailure(agentHome, overlayErr)
 		return 1
 	}
+	// Report the settled usage-source decision for the telemetry.health
+	// event (WP3); only SCION_USAGE_SOURCE is read from the overlay.
+	telemetryPipeline.SettleUsageSource(harnessEnvOverlay, nativeTelemetryPolicy)
 
 	// Configure git credentials for shared-workspace projects (git-workspace hybrid).
 	// The workspace is pre-cloned on the host; agents need credentials to push/pull.
@@ -952,8 +959,20 @@ func RunInit(args []string, opts InitRunOptions) int {
 		metadataServer = metadata.New(*metaCfg)
 		metaCtx := context.Background()
 		if err := runMetadataServerStart(metaCtx, metadataServer); err != nil {
-			log.Error("Failed to start metadata server: %v", err)
-			// Continue — metadata failure shouldn't block harness
+			if metaCfg.StartFailureIsFatal(err) {
+				// Fail closed: the harness must not run in block or assign
+				// mode without the metadata server and, where the runtime
+				// granted it, the interception.
+				log.Error("Failed to start metadata server (mode=%s); not starting the harness: %v", metaCfg.Mode, err)
+				if svcManager != nil {
+					svcShutdownCtx, svcShutdownCancel := context.WithTimeout(context.Background(), gracePeriod)
+					_ = runServicesShutdown(svcShutdownCtx, svcManager)
+					svcShutdownCancel()
+				}
+				reportInitFailure(agentHome, fmt.Errorf("GCP metadata server could not start in %s mode: %w", metaCfg.Mode, err))
+				return 1
+			}
+			log.Warn("Metadata server not started (mode=%s, host networking); continuing: %v", metaCfg.Mode, err)
 		} else {
 			log.Info("GCP metadata server started (mode=%s, port=%d)", metaCfg.Mode, metaCfg.Port)
 		}
@@ -1081,6 +1100,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 	var tokenRefreshDone <-chan struct{}
 	var ghTokenRefreshCancel context.CancelFunc
 	var ghTokenRefreshDone <-chan struct{}
+	var delegationHelper *delegation.Helper
 	var readyWatchCancel context.CancelFunc
 	var readyWatchDone chan struct{}
 
@@ -1266,6 +1286,10 @@ func RunInit(args []string, opts InitRunOptions) int {
 					},
 				})
 			}
+
+			// Serve the delegation socket, through which processes in the
+			// agent make hub requests with a delegation grant.
+			delegationHelper = startDelegationHelper(hubClient, targetUID, targetGID)
 		} else {
 			log.Debug("Hub client not configured - skipping status report")
 		}
@@ -1490,6 +1514,12 @@ waitLoop:
 		tokenRefreshCancel()
 		<-tokenRefreshDone
 		log.Debug("Token refresh loop stopped")
+	}
+	if delegationHelper != nil {
+		if err := delegationHelper.Close(); err != nil {
+			log.Debug("Delegation helper stop: %v", err)
+		}
+		log.Debug("Delegation helper stopped")
 	}
 	if heartbeatCancel != nil {
 		heartbeatCancel()
@@ -3132,8 +3162,10 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 		hubCancel()
 	}
 
-	// Build authenticated URL (never log this)
-	authURL := buildAuthenticatedURL(cloneURL, token)
+	// The remote URL carries no credential; the token is supplied to the fetch
+	// through a run-time credential helper (initTokenCredentialHelper) that reads
+	// GITHUB_TOKEN from the environment, so it is never in a git argv or .git/config.
+	cloneURLNoCredential := normalizeCloneURL(cloneURL)
 
 	// Determine the agent feature branch name early so we can try cloning it.
 	agentBranch := os.Getenv("SCION_AGENT_BRANCH")
@@ -3166,7 +3198,7 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 		}
 	}()
 
-	remoteCmd := exec.Command("git", "-C", workspacePath, "remote", "add", "origin", authURL)
+	remoteCmd := exec.Command("git", "-C", workspacePath, "remote", "add", "origin", cloneURLNoCredential)
 	setupGitCmd(remoteCmd)
 	if out, err := procreap.CombinedOutputManaged(remoteCmd); err != nil {
 		return fmt.Errorf("git remote add failed: %s", sanitizeGitOutput(string(out), token))
@@ -3176,7 +3208,10 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 	// When depth > 0, a shallow fetch is performed; depth 0 means full clone (no --depth flag).
 	// Returns sanitized stderr and whether the fetch succeeded.
 	fetchBranch := func(branchToFetch string) (string, bool) {
-		fetchArgs := []string{"-C", workspacePath, "fetch"}
+		// -c credential.<scheme>://<host>.helper=<run-time env-expansion helper>:
+		// the helper is scoped to the clone URL's host, and the token is read from
+		// GITHUB_TOKEN by the helper, never passed on the fetch argv.
+		fetchArgs := []string{"-c", scopedCredentialConfigArg(cloneURL), "-C", workspacePath, "fetch"}
 		if depth > 0 {
 			fetchArgs = append(fetchArgs, "--depth", depthStr)
 		}
@@ -3258,11 +3293,9 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 		}
 	}
 
-	// Sanitize the remote URL to remove the embedded token. The token was
-	// needed for the initial fetch, but ongoing auth is handled by the
-	// credential helper configured below. Leaving the token in the URL
-	// exposes it via `git remote -v`.
-	sanitizeCmd := exec.Command("git", "-C", workspacePath, "remote", "set-url", "origin", buildAuthenticatedURL(cloneURL, ""))
+	// Pin origin to the credential-free URL (defensive; the remote never carried a
+	// credential, and ongoing auth is the credential helper configured below).
+	sanitizeCmd := exec.Command("git", "-C", workspacePath, "remote", "set-url", "origin", normalizeCloneURL(cloneURL))
 	setupGitCmd(sanitizeCmd)
 	if out, err := procreap.CombinedOutputManaged(sanitizeCmd); err != nil {
 		log.Error("Failed to sanitize remote URL: %s %v", string(out), err)
@@ -3718,28 +3751,37 @@ func sanitizeGitOutput(output, token string) string {
 	return strings.ReplaceAll(output, token, "***")
 }
 
-// buildAuthenticatedURL constructs an HTTPS URL with embedded OAuth2 credentials.
-// If no token is provided, the original URL is returned unchanged.
-func buildAuthenticatedURL(cloneURL, token string) string {
-	// Ensure the URL has an https:// scheme. The clone URL may arrive
-	// without a scheme if it was stored from raw user input (e.g.
-	// "github.com/org/repo" instead of "https://github.com/org/repo").
-	normalized := cloneURL
-	if !strings.Contains(normalized, "://") {
-		normalized = "https://" + normalized
+// normalizeCloneURL returns the clone URL with an https:// scheme, without any
+// embedded credentials. The clone URL may arrive without a scheme if it was
+// stored from raw user input (e.g. "github.com/org/repo" instead of
+// "https://github.com/org/repo"). The token is supplied to git through a
+// run-time credential helper that reads it from the environment
+// (initTokenCredentialHelper), never embedded in the URL, so it never appears in
+// a git argv (visible in the host process list) or in .git/config.
+func normalizeCloneURL(cloneURL string) string {
+	if !strings.Contains(cloneURL, "://") {
+		return "https://" + cloneURL
 	}
+	return cloneURL
+}
 
-	if token == "" {
-		return normalized
+// initTokenCredentialHelper is the git credential helper the in-container clone
+// uses to authenticate. It is a constant that reads the token from GITHUB_TOKEN
+// at run time (the agent already holds it in its environment), so the token
+// appears in no argv and no config value — the same shape as
+// provision.GitTokenCredentialHelper.
+const initTokenCredentialHelper = `!f() { echo username=oauth2; echo "password=${GITHUB_TOKEN}"; }; f`
+
+// scopedCredentialConfigArg returns the `-c` config argument that installs
+// initTokenCredentialHelper scoped to the clone URL's host
+// (credential.<scheme>://<host>.helper), so the token is offered only to that
+// host and not to any other endpoint a step might reach. It falls back to the
+// unscoped key only if the URL has no parseable scheme and host.
+func scopedCredentialConfigArg(cloneURL string) string {
+	if u, err := url.Parse(normalizeCloneURL(cloneURL)); err == nil && u.Scheme != "" && u.Host != "" {
+		return fmt.Sprintf("credential.%s://%s.helper=%s", u.Scheme, u.Host, initTokenCredentialHelper)
 	}
-
-	parsed, err := url.Parse(normalized)
-	if err != nil || parsed.Scheme == "" {
-		return normalized
-	}
-
-	parsed.User = url.UserPassword("oauth2", token)
-	return parsed.String()
+	return "credential.helper=" + initTokenCredentialHelper
 }
 
 // isClaude returns true when the child command is for the Claude Code harness.

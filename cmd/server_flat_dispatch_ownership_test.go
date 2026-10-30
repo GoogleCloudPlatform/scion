@@ -106,10 +106,14 @@ func TestFlatOwnership_RealHubDispatchCarriesBothIDs(t *testing.T) {
 		return len(rec.Runs)
 	}
 
-	// Create: the dispatch may fail later in this fixture (no real
-	// workspace), but ownership is recorded first, keyed by both IDs.
+	// Create: the dispatch fails later in this fixture (no real
+	// workspace). Ownership is recorded first, keyed by both IDs, and the
+	// failed create then gives its run back (ptone/scion#5768). The agent's
+	// record is seeded so that both steps show in its revision.
+	rev := seedDispatchOwnership(t, records, project.ID, agent.ID)
 	_, _ = disp.DispatchAgentCreate(ctx, agent)
-	assert.Equal(t, 1, runs(), "create")
+	assert.Equal(t, 1, runs(), "create: its failed run is removed")
+	assertRevisedBy(t, records, project.ID, agent.ID, rev, 2, "create: its run was added and removed under both IDs")
 	_, slugKeyed, _ := records.Get(project.ID, "worker")
 	assert.False(t, slugKeyed, "the slug is never the ownership key")
 
@@ -118,6 +122,28 @@ func TestFlatOwnership_RealHubDispatchCarriesBothIDs(t *testing.T) {
 
 	_ = disp.DispatchAgentRestart(ctx, agent)
 	assert.Equal(t, 3, runs(), "restart carries both IDs")
+}
+
+// seedDispatchOwnership records the agent as owned by the instance, as an
+// earlier successful create would have, and returns the record revision.
+func seedDispatchOwnership(t *testing.T, records *runtimebroker.OwnershipStore, projectID, agentID string) int64 {
+	t.Helper()
+	require.NoError(t, records.BeginRun(projectID, agentID, "worker", "seed-run"))
+	require.NoError(t, records.SetRunState(projectID, agentID, "seed-run", runtimebroker.OwnershipStateCreated))
+	rec, ok, err := records.Get(projectID, agentID)
+	require.NoError(t, err)
+	require.True(t, ok)
+	return rec.Revision
+}
+
+// assertRevisedBy checks that the record was written exactly n times
+// since revision from.
+func assertRevisedBy(t *testing.T, records *runtimebroker.OwnershipStore, projectID, agentID string, from, n int64, msg string) {
+	t.Helper()
+	rec, ok, err := records.Get(projectID, agentID)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, from+n, rec.Revision, msg)
 }
 
 // storeSigner signs a broker request with the target broker's stored
@@ -155,8 +181,10 @@ func TestFlatOwnership_RealControlChannelDispatchCarriesBothIDs(t *testing.T) {
 		require.True(t, ok, "recorded under (project ID, Hub agent ID) over the control channel")
 		return len(rec.Runs)
 	}
+	rev := seedDispatchOwnership(t, records, project.ID, agent.ID)
 	_, _ = disp.DispatchAgentCreate(ctx, agent)
-	assert.Equal(t, 1, runs(), "create")
+	assert.Equal(t, 1, runs(), "create: its failed run is removed")
+	assertRevisedBy(t, records, project.ID, agent.ID, rev, 2, "create: its run was added and removed under both IDs")
 	_ = disp.DispatchAgentStart(ctx, agent, "", false)
 	assert.Equal(t, 2, runs(), "start")
 	_ = disp.DispatchAgentRestart(ctx, agent)

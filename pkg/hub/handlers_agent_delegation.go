@@ -432,52 +432,7 @@ func (s *Server) handleCreateAgentDelegation(w http.ResponseWriter, r *http.Requ
 		IssuanceAuditID:         uuid.New().String(),
 	}
 	err = s.store.WithTx(ctx, func(tx store.Store) error {
-		if err := tx.LockAgentRows(ctx, []string{agent.ID}); err != nil {
-			return fmt.Errorf("lock agent: %w", err)
-		}
-		locked, err := tx.GetAgent(ctx, agent.ID)
-		if err != nil {
-			return fmt.Errorf("re-read agent: %w", err)
-		}
-		if reincarnationInFlight(locked) || locked.StateVersion != agent.StateVersion ||
-			locked.Generation != agent.Generation || !locked.DeletedAt.IsZero() {
-			return errAgentDelegationAgentChanged
-		}
-		// Rule 8: at most 10 active grants per agent (counted under the
-		// agent row lock above) and 50 per issuer (under the issuer lock).
-		if err := tx.LockAgentDelegationIssuer(ctx, grant.IssuerUserID); err != nil {
-			return fmt.Errorf("lock issuer: %w", err)
-		}
-		perAgent, err := tx.CountActiveAgentDelegationGrants(ctx, store.AgentDelegationGrantFilter{AgentID: agent.ID}, now)
-		if err != nil {
-			return fmt.Errorf("count agent grants: %w", err)
-		}
-		perIssuer, err := tx.CountActiveAgentDelegationGrants(ctx, store.AgentDelegationGrantFilter{IssuerUserID: grant.IssuerUserID}, now)
-		if err != nil {
-			return fmt.Errorf("count issuer grants: %w", err)
-		}
-		if perAgent >= agentDelegationMaxActiveGrantsPerAgent || perIssuer >= agentDelegationMaxActiveGrantsPerIssuer {
-			return errAgentDelegationGrantLimit
-		}
-		if err := tx.CreateAgentDelegationGrant(ctx, grant); err != nil {
-			return fmt.Errorf("create grant: %w", err)
-		}
-		record := &store.MutationAuditRecord{
-			ID:                grant.IssuanceAuditID,
-			Timestamp:         now,
-			MutationType:      mutationAgentDelegationGrantCreate,
-			TargetType:        auditTargetAgentDelegationGrant,
-			TargetID:          grant.ID,
-			AfterSummary:      agentDelegationGrantSummary(grant),
-			ActorAgentID:      grant.AgentID,
-			AuthorizingUserID: grant.IssuerUserID,
-			SourceGrantID:     grant.ID,
-		}
-		auditActorFromContext(ctx).ApplyActor(record)
-		if err := tx.CreateMutationAudit(ctx, record); err != nil {
-			return fmt.Errorf("%w: %w", errAgentDelegationAuditFailed, err)
-		}
-		return nil
+		return writeAgentDelegationGrantTx(ctx, tx, agent, grant, auditActorFromContext(ctx), now)
 	})
 	if err != nil {
 		switch {
@@ -495,6 +450,66 @@ func (s *Server) handleCreateAgentDelegation(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeJSON(w, http.StatusCreated, agentDelegationGrantResponse(grant, now))
+}
+
+// writeAgentDelegationGrantTx is issuance rules 8-10 on tx (§6): it locks
+// the agent row, re-reads it, refuses with errAgentDelegationAgentChanged
+// when a reincarnation is in flight or the row changed since agent was
+// read (state version, generation, deletion), counts the active grants
+// under the agent row lock and the issuer lock (errAgentDelegationGrantLimit
+// past either cap), then writes grant and its mutation audit, attributed
+// to actor. An audit write failure wraps errAgentDelegationAuditFailed.
+// Because the agent row stays locked until the transaction ends, an
+// issuance and a reincarnation claim serialize: a claim that commits first
+// makes the re-read refuse, and a claim that commits after the issuance
+// revokes the new grant in its own transaction (§16.2).
+func writeAgentDelegationGrantTx(ctx context.Context, tx store.Store, agent *store.Agent, grant *store.AgentDelegationGrant, actor AuditActor, now time.Time) error {
+	if err := tx.LockAgentRows(ctx, []string{agent.ID}); err != nil {
+		return fmt.Errorf("lock agent: %w", err)
+	}
+	locked, err := tx.GetAgent(ctx, agent.ID)
+	if err != nil {
+		return fmt.Errorf("re-read agent: %w", err)
+	}
+	if reincarnationInFlight(locked) || locked.StateVersion != agent.StateVersion ||
+		locked.Generation != agent.Generation || !locked.DeletedAt.IsZero() {
+		return errAgentDelegationAgentChanged
+	}
+	// Rule 8: at most 10 active grants per agent (counted under the
+	// agent row lock above) and 50 per issuer (under the issuer lock).
+	if err := tx.LockAgentDelegationIssuer(ctx, grant.IssuerUserID); err != nil {
+		return fmt.Errorf("lock issuer: %w", err)
+	}
+	perAgent, err := tx.CountActiveAgentDelegationGrants(ctx, store.AgentDelegationGrantFilter{AgentID: agent.ID}, now)
+	if err != nil {
+		return fmt.Errorf("count agent grants: %w", err)
+	}
+	perIssuer, err := tx.CountActiveAgentDelegationGrants(ctx, store.AgentDelegationGrantFilter{IssuerUserID: grant.IssuerUserID}, now)
+	if err != nil {
+		return fmt.Errorf("count issuer grants: %w", err)
+	}
+	if perAgent >= agentDelegationMaxActiveGrantsPerAgent || perIssuer >= agentDelegationMaxActiveGrantsPerIssuer {
+		return errAgentDelegationGrantLimit
+	}
+	if err := tx.CreateAgentDelegationGrant(ctx, grant); err != nil {
+		return fmt.Errorf("create grant: %w", err)
+	}
+	record := &store.MutationAuditRecord{
+		ID:                grant.IssuanceAuditID,
+		Timestamp:         now,
+		MutationType:      mutationAgentDelegationGrantCreate,
+		TargetType:        auditTargetAgentDelegationGrant,
+		TargetID:          grant.ID,
+		AfterSummary:      agentDelegationGrantSummary(grant),
+		ActorAgentID:      grant.AgentID,
+		AuthorizingUserID: grant.IssuerUserID,
+		SourceGrantID:     grant.ID,
+	}
+	actor.ApplyActor(record)
+	if err := tx.CreateMutationAudit(ctx, record); err != nil {
+		return fmt.Errorf("%w: %w", errAgentDelegationAuditFailed, err)
+	}
+	return nil
 }
 
 var (

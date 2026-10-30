@@ -37,8 +37,11 @@ Preview releases are pre-release builds used to validate a prospective stable re
 built from a `release/vX.Y` branch rather than directly from a moving `main` branch.
 
 - Tags use `vX.Y.Z-preview.N`, such as `v0.3.0-preview.1`.
-- Incrementing `N` publishes another build after fixes have been cherry-picked to the release
-  branch.
+- Every Friday, CI fast-forwards the release branch to the most recent nightly that passed CI and
+  tags the next preview there (see [Weekly preview workflow](#weekly-preview-workflow)). `N` goes
+  up each week until the line is promoted to stable.
+- During a freeze before stable, fixes are cherry-picked to the release branch and previews are
+  tagged by hand with `bump-preview.sh`.
 - Release-candidate tags use `vX.Y.Z-rc.N` and are treated as preview-channel releases.
 - GitHub marks preview and release-candidate releases as pre-releases.
 - The `preview` branch is force-updated by CI to the commit for the latest preview or release
@@ -58,7 +61,7 @@ Stable releases are production-ready builds promoted from a tested preview.
 | Branch | Purpose | Lifetime |
 |--------|---------|----------|
 | `main` | Development branch | Permanent |
-| `release/vX.Y` | Stabilization branch for version X.Y | Until the release is end-of-life |
+| `release/vX.Y` | Release line for version X.Y; rolled forward to a nightly each week | Until the release is end-of-life |
 | `preview` | Points to the latest preview-channel release | Permanent; auto-updated by CI |
 | `stable` | Points to the latest stable release | Permanent; auto-updated by CI |
 | `nightly` | Points to the latest nightly build | Permanent; auto-updated by CI |
@@ -68,15 +71,19 @@ immutable identifiers for published builds.
 
 ## Release lifecycle
 
-1. Develop and merge changes on `main`.
-2. When the changes are ready for release testing, cut a preview from `main`. This creates the
-   next `release/vX.Y` branch and its first `vX.Y.0-preview.1` tag.
-3. Test the preview. Land fixes and cherry-pick the required commits to the release branch.
-4. Bump the preview number to build and test each updated release candidate.
-5. Once the latest preview is approved, promote it to stable. Promotion tags the exact tested
-   release-branch commit without a pre-release suffix.
-
-Development can continue on `main` while a release branch is stabilized.
+1. Develop and merge changes on `main`. Nightlies are tagged from `main` every day.
+2. Cut a new release line from `main` with `cut-preview.sh`. This creates the next
+   `release/vX.Y` branch and its first `vX.Y.0-preview.1` tag.
+3. Every Friday, the weekly preview workflow fast-forwards `release/vX.Y` to the most recent
+   nightly that passed CI and tags the next `vX.Y.0-preview.N`. The release branch is not frozen
+   when it is cut; it follows `main` one tested nightly at a time.
+4. To stabilize before stable, freeze the line: land fixes on `main` and cherry-pick them to the
+   release branch. A cherry-pick makes the branch diverge from `main`, so the weekly workflow
+   stops fast-forwarding it and fails loudly instead. During the freeze, tag each candidate with
+   `bump-preview.sh`.
+5. Once the latest preview is approved, promote it to stable with `promote-stable.sh`. Promotion
+   tags the exact tested release-branch commit without a pre-release suffix. Then cut the next
+   release line.
 
 ## Operator runbook
 
@@ -100,6 +107,30 @@ the selected branch, version, tag, and commit without creating or pushing releas
 4. Creates `vX.Y.0-preview.1` at that commit.
 5. Pushes the branch and tag to `origin`. The tag push starts the release build workflow.
 
+### Weekly preview roll-forward
+
+The [weekly preview workflow](#weekly-preview-workflow) normally runs on its own. To run it by
+hand, for example to release a specific nightly:
+
+```bash
+gh workflow run build-preview-weekly.yml -R GoogleCloudPlatform/scion
+gh workflow run build-preview-weekly.yml -R GoogleCloudPlatform/scion -f nightly_tag=nightly-20261022
+```
+
+A `nightly_tag` must match `nightly-YYYYMMDD` and exist. It skips the CI guard, but the
+fast-forward and tag rules still apply. The run summary records which nightly was picked and why.
+
+To preview the selection locally without changing anything, fetch first and then run the
+read-only selection script:
+
+```bash
+git fetch origin --tags '+refs/heads/release/*:refs/remotes/origin/release/*'
+./scripts/release/select-weekly-preview.sh [--nightly-tag nightly-YYYYMMDD] [--skip-ci-check]
+```
+
+The script uses `gh api` for the CI lookup. Its tests run with
+`./scripts/release/test-select-weekly-preview.sh`.
+
 ### Bump an existing preview
 
 ```bash
@@ -116,7 +147,8 @@ the selected branch, version, tag, and commit without creating or pushing releas
 4. Pushes the new tag to `origin`, starting the release build workflow.
 
 The script requires an existing preview tag. Use `cut-preview.sh` to create the first preview for
-a release line.
+a release line. Use this script to tag previews during a freeze, after cherry-picks have stopped the
+weekly fast-forward.
 
 ### Promote a preview to stable
 
@@ -208,6 +240,35 @@ only when new commits exist. That tag starts `build-release.yml`, which builds a
 nightly release. After creating a new nightly tag, the workflow deletes nightly GitHub releases
 and tags older than 14 days.
 
+### Weekly preview workflow
+
+[`build-preview-weekly.yml`](../.github/workflows/build-preview-weekly.yml) runs every Friday at
+14:00 UTC, after that day's nightly, or by manual dispatch with an optional `nightly_tag` input.
+The selection logic lives in
+[`select-weekly-preview.sh`](../scripts/release/select-weekly-preview.sh). The workflow:
+
+1. Picks the highest `release/vX.Y` branch, comparing versions numerically. It fails if none
+   exists.
+2. Picks a nightly. Without `nightly_tag`, it starts at the newest nightly tag that the release
+   branch does not already contain. **CI guard:** it reads the `Build & Test` check run on that
+   nightly's commit and walks back through older nightlies until it finds one whose conclusion is
+   `success`. Failed, pending and missing checks are skipped. It never picks a nightly the branch
+   already contains. If none of the newer nightlies passed, it logs a warning and tags nothing.
+3. Skips, with "no new nightly since last preview", when the chosen commit is already on the
+   release branch.
+4. Fails when the release branch head is not an ancestor of the chosen commit, i.e. the branch
+   has commits that are not on `main`. It never force-pushes. This is the normal state during a
+   freeze; use `bump-preview.sh` until the line is promoted.
+5. Computes the next tag from the highest `vX.Y.Z-preview.N` for the line: the highest patch `Z`
+   first, then the highest `N` within it, both compared numerically, or `vX.Y.0-preview.1` if
+   there is none. It fails if that tag exists or if that `vX.Y.Z` has already been promoted to
+   stable.
+6. Pushes the fast-forward of `release/vX.Y` and the new tag in one atomic push (a plain push,
+   which the remote rejects unless the branch update is a fast-forward).
+7. Calls `build-release.yml` with the tag, because tags pushed with `GITHUB_TOKEN` do not start
+   other workflows. The build publishes the pre-release, moves the `preview` branch and updates
+   `LATEST.json`.
+
 ## Build matrix
 
 The main `scion` binary is published for:
@@ -218,8 +279,11 @@ The main `scion` binary is published for:
 | `linux/arm64` | `scion-linux-arm64` |
 | `darwin/amd64` | `scion-darwin-amd64` |
 | `darwin/arm64` | `scion-darwin-arm64` |
+| `windows/amd64` | `scion-windows-amd64` |
+| `windows/arm64` | `scion-windows-arm64` |
 
-Release artifacts are gzip-compressed tar archives. The Telegram, Discord, Slack, and Teams
+Linux and macOS artifacts are gzip-compressed tar archives (`.tar.gz`) containing `scion`. Windows
+artifacts are zip archives (`.zip`) containing `scion.exe`. The Telegram, Discord, Slack, and Teams
 plugins are built for Linux on both amd64 and arm64; plugin builds are not published for macOS.
 
 ## Checksums

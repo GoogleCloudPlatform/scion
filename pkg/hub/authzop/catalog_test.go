@@ -291,6 +291,11 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"project.set_messaging_policy": "Inline admin/owner check in project_messaging_policy.go, not route-enforced",
 		"agent.grant_hub_mode":         "Inline authorization in authorize_message_mode_grant.go, not route-enforced",
 		"agent.lifecycle":              "Inline authorization in authorizeAgentLifecycle/handleAgentAction (start, stop, suspend, restart, restore) and authorizeAgentReincarnate (reincarnate), not route-enforced",
+		// project.chat_post is checked by chatMayPost inside the chat send
+		// and promote routes, whose base permission is inbox.write (the
+		// token selector); it is decided on the caller's account
+		// (ptone/scion#5518).
+		"project.chat_post": "Checked by chatMayPost within chat.conversation.send.topic and chat.conversation.promote, not a route base permission (ptone/scion#5518)",
 
 		// Admin test identities: the super-admin kind's capability is
 		// checked by testAdminIssuer inside testidentity.admin.create (whose
@@ -323,7 +328,12 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"env_var.deliver":         "Material delivery grant evaluation, NonRouteUse only (ptone/scion#2129)",
 		"skill_injection.deliver": "Material delivery grant evaluation, NonRouteUse only (ptone/scion#2129)",
 		"secret.use":              "Agent runtime secret retrieval, enforced in material_runtime.go, not route-enforced",
-		"gcp_service_account.use": "Agent GCP token-mint request, NonRouteUse only (ptone/scion#2129)",
+		// Hub-minted service account creation (mintGCPServiceAccount; the
+		// hub-scope route is an authentication-only exemption with an inline
+		// policy check) and the mint capability it reports; not a cataloged
+		// base permission. The agent GCP token
+		// mint (gcp.identity.mint) decides gcp_service_account.use instead.
+		"gcp_service_account.mint": "Creation of Hub-minted service accounts: inline policy check in the mint handler, not a catalog base permission",
 	}
 
 	var unconsumed []string

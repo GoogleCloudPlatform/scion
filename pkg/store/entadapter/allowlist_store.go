@@ -176,12 +176,12 @@ func (s *AllowListStore) ListAllowListEntries(ctx context.Context, opts store.Li
 
 // cursorLookupError maps the error from resolving an ID cursor to its row. A
 // well-formed cursor naming no row (deleted since, or never issued) is caller
-// error like any other malformed cursor: store.ErrInvalidInput (HTTP 400), not
+// error like any other malformed cursor: store.ErrInvalidCursor (HTTP 400), not
 // store.ErrNotFound, which would read as the listed resource itself being
 // missing (ptone/scion#1957). Other errors keep the usual mapping.
 func cursorLookupError(err error) error {
 	if ent.IsNotFound(err) {
-		return fmt.Errorf("%w: cursor names no row", store.ErrInvalidInput)
+		return fmt.Errorf("%w: cursor names no row", store.ErrInvalidCursor)
 	}
 	return mapError(err)
 }
@@ -189,7 +189,7 @@ func cursorLookupError(err error) error {
 // allowListCursorPredicate builds the keyset predicate for paginating after the
 // entry identified by cursor (an entry ID).
 func (s *AllowListStore) allowListCursorPredicate(ctx context.Context, cursor string) (predicate.AllowListEntry, error) {
-	cursorUID, err := parseUUID(cursor)
+	cursorUID, err := parseCursorUUID(cursor)
 	if err != nil {
 		return nil, fmt.Errorf("invalid cursor: %w", err)
 	}
@@ -458,7 +458,7 @@ func (s *AllowListStore) ListInviteCodes(ctx context.Context, opts store.ListOpt
 
 	query := s.client.InviteCode.Query()
 	if opts.Cursor != "" {
-		cursorUID, err := parseUUID(opts.Cursor)
+		cursorUID, err := parseCursorUUID(opts.Cursor)
 		if err != nil {
 			return nil, fmt.Errorf("invalid cursor: %w", err)
 		}

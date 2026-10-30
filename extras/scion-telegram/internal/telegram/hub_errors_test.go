@@ -203,7 +203,7 @@ func TestV2_GroupMessage_DeniedListShowsPermissionText(t *testing.T) {
 	hub.listAgentsErr = forbiddenListAgents()
 	linkTestUser(t, b.store, 456, "alice@example.com")
 
-	b.handleGroupMessage(plainGroupMessage(456, "hello"))
+	b.handleGroupMessage(b.gen, plainGroupMessage(456, "hello"))
 
 	sent := tgSrv.getSentMessages()
 	require.Len(t, sent, 1)
@@ -215,7 +215,7 @@ func TestV2_GroupMessage_StaleLinkShowsReregisterText(t *testing.T) {
 	hub.listAgentsErr = staleLinkError("on-behalf-of principal is not active (status: suspended)")
 	linkTestUser(t, b.store, 456, "alice@example.com")
 
-	b.handleGroupMessage(plainGroupMessage(456, "hello"))
+	b.handleGroupMessage(b.gen, plainGroupMessage(456, "hello"))
 
 	sent := tgSrv.getSentMessages()
 	require.Len(t, sent, 1)

@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/netip"
 	"strings"
@@ -27,6 +28,24 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util/urlredact/urlredacttest"
 )
+
+// jsonLoggerWithoutTime returns a JSON logger to w that leaves out each
+// record's time: the top-level "time" attribute when it holds a time (an
+// attribute of another kind under that key is still written). The time is
+// the one value in a record the code under test does not write, and its
+// digits (nanoseconds such as "...944958461Z") can hold a 4-byte part of a
+// masked value ("8461") by chance; every other value of the record
+// (message, level and attributes) is still written and checked.
+func jsonLoggerWithoutTime(w io.Writer) *slog.Logger {
+	return slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if len(groups) == 0 && a.Key == slog.TimeKey && a.Value.Kind() == slog.KindTime {
+				return slog.Attr{}
+			}
+			return a
+		},
+	}))
+}
 
 // No part of the credential of any shape shows in what a failed fetch logs
 // (every record and attribute of the JSON log, the url attribute that
@@ -49,7 +68,7 @@ func TestRedactURL_Shapes(t *testing.T) {
 			{"denied address", nil, map[string][]netip.Addr{"tKn7Qz": addrs("127.0.0.1"), "git.example.com": addrs("127.0.0.1")}},
 		} {
 			var logs bytes.Buffer
-			f := New(Config{Timeout: 5 * time.Second, AllowedHosts: cfg.allowed, Logger: slog.New(slog.NewJSONHandler(&logs, nil))})
+			f := New(Config{Timeout: 5 * time.Second, AllowedHosts: cfg.allowed, Logger: jsonLoggerWithoutTime(&logs)})
 			f.resolver = &fakeResolver{answers: cfg.answers}
 			_, err := f.FetchBytes(context.Background(), s.URL)
 			if err == nil {
@@ -105,7 +124,7 @@ func TestFetchDetail_HostNotShown(t *testing.T) {
 		{"password read as a port", "https://u:8461/Wx2@img.example.com/a.png", "8461/Wx2", nil, nil, ReasonPort},
 	} {
 		var logs bytes.Buffer
-		f := New(Config{Timeout: 5 * time.Second, AllowedHosts: tc.allowed, Logger: slog.New(slog.NewJSONHandler(&logs, nil))})
+		f := New(Config{Timeout: 5 * time.Second, AllowedHosts: tc.allowed, Logger: jsonLoggerWithoutTime(&logs)})
 		f.resolver = &fakeResolver{answers: tc.answers}
 		_, err := f.FetchBytes(context.Background(), tc.url)
 		var fe *Error

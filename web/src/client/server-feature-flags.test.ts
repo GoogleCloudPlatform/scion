@@ -197,6 +197,63 @@ describe('applyServerFeatureFlags: parallel boot fetch', () => {
   });
 });
 
+describe('applyServerFeatureFlags: embedded experiments (ptone/scion#2489)', () => {
+  function stubFetch(): ReturnType<typeof vi.fn> {
+    const spy = vi.fn((url: string) => {
+      if (url.includes('/api/v1/experiments'))
+        return Promise.resolve(jsonResponse({ experiments: { 'web.fixture_flag': true } }));
+      if (url.includes('/api/v1/settings/public'))
+        return Promise.resolve(jsonResponse({ nativeChatEnabled: false }));
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal('fetch', spy);
+    return spy;
+  }
+
+  function requestedUrls(spy: ReturnType<typeof vi.fn>): string[] {
+    return spy.mock.calls.map((call) => String(call[0]));
+  }
+
+  it('applies an embedded map without requesting /api/v1/experiments', async () => {
+    const spy = stubFetch();
+
+    await applyServerFeatureFlags({ 'web.embedded_flag': true });
+
+    expect(isFeatureEnabled('web.embedded_flag')).toBe(true);
+    // Nothing from the experiments response, which was never requested.
+    expect(isFeatureEnabled('web.fixture_flag')).toBe(false);
+    expect(requestedUrls(spy)).toEqual(['/api/v1/settings/public']);
+    // settings/public is still requested and applied.
+    expect(isFeatureEnabled('web.native_chat')).toBe(false);
+  });
+
+  it('an empty embedded map is used as is', async () => {
+    const spy = stubFetch();
+
+    await applyServerFeatureFlags({});
+
+    expect(requestedUrls(spy)).toEqual(['/api/v1/settings/public']);
+    expect(isFeatureEnabled('web.gcs_links')).toBe(false);
+  });
+
+  it.each([
+    ['absent', undefined],
+    ['null', null],
+    ['an array', ['web.fixture_flag']],
+    ['a string', 'web.fixture_flag'],
+    ['a boolean', true],
+  ])('falls back to the request when the embedded map is %s', async (_label, embedded) => {
+    const spy = stubFetch();
+
+    await applyServerFeatureFlags(embedded);
+
+    expect(requestedUrls(spy)).toContain('/api/v1/experiments');
+    // The fetched map applies.
+    expect(isFeatureEnabled('web.fixture_flag')).toBe(true);
+    expect(window.__SCION_FEATURES__ ?? {}).not.toHaveProperty('0');
+  });
+});
+
 describe('applyServerFeatureFlags: web.gcs_links (registered experiment, ptone/scion#2545)', () => {
   function stubFetch(experimentsBody: unknown, experimentsStatus = 200): void {
     vi.stubGlobal(

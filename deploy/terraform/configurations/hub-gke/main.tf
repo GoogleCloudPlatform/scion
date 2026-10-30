@@ -210,7 +210,7 @@ module "hub_gke" {
 
   # The same NFS share and claim agent_runtime_k8s sets up. The chart mounts
   # this export in the hub pod at <mount_root>/<hub_name> and renders
-  # server.workspace_storage from the same values; the nfs_workspace output
+  # server.project_storage from the same values; the nfs_workspace output
   # (outputs.tf) checks they agree with agent_runtime_k8s.
   nfs = {
     server  = module.shared_lookup.shared.nfs.server

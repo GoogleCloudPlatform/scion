@@ -74,9 +74,13 @@ describe('launch label vocabulary', () => {
     expect(codes.length).toBeGreaterThanOrEqual(19);
     const brokerCodes = goStringConstants(
       goSource('pkg/api/broker_error_codes.go'),
-      'BrokerErrCode(?:SkillResolution|HarnessConfigUnusable)'
+      'BrokerErrCode(?:SkillResolution|HarnessConfigUnusable|StorageMigrationRequired)'
     );
-    expect([...brokerCodes].sort()).toEqual(['harness_config_unusable', 'skill_resolution_failed']);
+    expect([...brokerCodes].sort()).toEqual([
+      'harness_config_unusable',
+      'skill_resolution_failed',
+      'storage_migration_required',
+    ]);
     expect([...codes, ...brokerCodes].filter((c) => !Object.hasOwn(LAUNCH_CODE_LABELS, c))).toEqual(
       []
     );

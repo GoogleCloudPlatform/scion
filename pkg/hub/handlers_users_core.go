@@ -24,6 +24,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -148,13 +149,38 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Sub-resource actions
-	if action == "revoke-sessions" {
+	// Sub-resource actions. Only the bare ID and the sub-routes named here
+	// are resources; any other sub-path, including a further segment below
+	// a known sub-route, answers 404 and never reaches the user handlers
+	// below.
+	switch action {
+	case "":
+		// The user itself: handled by the method switch below.
+	case "revoke-sessions":
 		if r.Method != http.MethodPost {
 			MethodNotAllowed(w, http.MethodPost)
 			return
 		}
 		s.revokeUserSessions(w, r, id)
+		return
+	case "delete-blockers":
+		if r.Method != http.MethodGet {
+			MethodNotAllowed(w, http.MethodGet)
+			return
+		}
+		s.getUserDeleteBlockers(w, r, id)
+		return
+	case "deletion":
+		if r.Method != http.MethodGet {
+			MethodNotAllowed(w, http.MethodGet)
+			return
+		}
+		s.requireExperiment(experiments.UserDeleteForceCascade, func(w http.ResponseWriter, r *http.Request) {
+			s.getUserDeletion(w, r, id)
+		})(w, r)
+		return
+	default:
+		NotFound(w, "User resource")
 		return
 	}
 
@@ -262,18 +288,26 @@ func updateUserSessionOnlyReason(ctx context.Context, id string) authzop.Session
 }
 
 // updateUserCredential checks the credential of PATCH /api/v1/users/{id}
-// and returns the acting user. A user access token (a token identity whose
-// request carries the user access token credential kind) is returned as
-// token too; its fields are checked by updateUserTokenFields, and its
-// permissions on the hub-level user record. A token identity with any
-// other credential kind is refused with the path's session-only reason.
-// Every other request must carry an interactive session or a dev
-// credential (requireSessionCredentialFor).
+// and returns the acting user (sessionOrUserTokenCredential, with the
+// path's session-only reason). A user access token is returned as token
+// too; updateUserTokenFields checks its fields, and the caller checks its
+// permissions on the hub-level user record.
 func (s *Server) updateUserCredential(w http.ResponseWriter, ctx context.Context, id string) (actor UserIdentity, token *ScopedUserIdentity, ok bool) {
+	return s.sessionOrUserTokenCredential(w, ctx, updateUserSessionOnlyReason(ctx, id))
+}
+
+// sessionOrUserTokenCredential admits an interactive session or dev
+// credential of a user (requireSessionCredentialFor), or a user access
+// token: a token identity whose request carries the user access token
+// credential kind. It returns the acting user, and for a token the token
+// identity too, so the caller can check the token's selectors and
+// boundary. A token identity with any other credential kind, and every
+// other credential kind, is refused with the session-only reason.
+func (s *Server) sessionOrUserTokenCredential(w http.ResponseWriter, ctx context.Context, reason authzop.SessionOnlyReason) (actor UserIdentity, token *ScopedUserIdentity, ok bool) {
 	identity := GetIdentityFromContext(ctx)
 	scoped, isToken := identity.(*ScopedUserIdentity)
 	if !isToken || isNilIdentity(identity) {
-		actor, ok = s.requireSessionCredentialFor(w, ctx, updateUserSessionOnlyReason(ctx, id))
+		actor, ok = s.requireSessionCredentialFor(w, ctx, reason)
 		return actor, nil, ok
 	}
 	if s.authzService == nil {
@@ -284,7 +318,7 @@ func (s *Server) updateUserCredential(w http.ResponseWriter, ctx context.Context
 	if kind := requestCredentialKind(ctx, identity); kind != CredentialKindUAT {
 		writeSessionOnlyDenial(w, ErrCodeForbidden,
 			fmt.Sprintf("this operation requires an interactive session; credential kind %q is not allowed", kind),
-			updateUserSessionOnlyReason(ctx, id))
+			reason)
 		return nil, nil, false
 	}
 	return scoped, scoped, true
@@ -733,7 +767,11 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	// Build actor audit metadata outside the transaction.
 	auditActor := s.buildAuditActorFromContext(ctx)
 
+	// suspended is set when the transaction changes the status to
+	// suspended.
+	suspended := false
 	err = s.store.WithTx(ctx, func(tx store.Store) error {
+		suspended = false
 		// Re-read user inside the transaction for consistency.
 		txUser, err := tx.GetUser(ctx, id)
 		if err != nil {
@@ -834,6 +872,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		}
 
 		if needsSuspend && beforeStatus != txUser.Status {
+			suspended = txUser.Status == store.UserStatusSuspended
 			mutationType := "user_suspend"
 			if txUser.Status == "active" {
 				mutationType = "user_reactivate"
@@ -861,6 +900,13 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		if writeConstraintAdminLockoutError(w, err) {
 			return
 		}
+		if errors.Is(err, store.ErrUserDeleting) {
+			// The user's forced deletion is in progress: its status
+			// leaves deleting only when the deletion completes
+			// (ptone/scion#2143).
+			writeUserDeletionInProgress(w, userDeletionInProgressFor(ctx, s.store, user.ID))
+			return
+		}
 		if errors.Is(err, errLastSuperAdmin) || errors.Is(err, errSelfDemotion) || errors.Is(err, errRoleOnInvitedUser) || errors.Is(err, errActivateInvitedUser) || errors.Is(err, errRoleOnTestFixture) {
 			writeError(w, http.StatusConflict, ErrCodeConflict, err.Error(), nil)
 		} else if errors.Is(err, errBindingStateDrift) {
@@ -874,6 +920,12 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 
 	if needsPromote || needsSuspend {
 		s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: user.ID})
+	}
+	// A suspended issuer's agent delegation grants end, best effort:
+	// exchange and use already deny them (.design/agent-delegation.md
+	// §16.3).
+	if suspended {
+		s.revokeAgentDelegationGrantsBestEffort(ctx, store.AgentDelegationGrantFilter{IssuerUserID: user.ID}, revokeReasonIssuerSuspended)
 	}
 
 	// This response applies the same per-viewer preferences visibility rule
@@ -1296,9 +1348,14 @@ func (s *Server) checkLastSuperAdminTx(
 // Guards: self-deletion and last-active-super-admin are prevented based on
 // bindings (not User.Role). All operations — last-admin check, skill cleanup,
 // user deletion, and audit — execute in a single atomic transaction (R4-C2).
-// A user who still owns agents is refused with 409 (ptone/scion#2769). The
-// user's user-scope secrets and env vars are removed after commit, best
-// effort.
+// A user whom agents or active delegations depend on is refused with
+// 409 user_delete_blocked (ptone/scion#2769, ptone/scion#2143); GET
+// /api/v1/users/{id}/delete-blockers lists the same blockers. The user's
+// user-scope secrets and env vars are removed after commit, best effort.
+// With force=true and hub.user_delete_force_cascade on, a blocked user is
+// deleted through the forced cascade instead (forceDeleteUser, 202 with
+// the deletion resource); while a forced deletion is in progress a plain
+// delete answers 409 user_deletion_in_progress.
 // ---------------------------------------------------------------------------
 
 func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
@@ -1309,6 +1366,8 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 	if !ok {
 		return
 	}
+	// force is parsed before any side effect (ptone/scion#2143).
+	force := s.forceUserDeletionEnabled(r)
 
 	// Self-deletion guard.
 	if actor.ID() == id {
@@ -1347,6 +1406,13 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 	if superAdminRD == nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"super-admin role definition not found", nil)
+		return
+	}
+
+	// A forced delete of a user whom agents or delegations depend on
+	// revokes and records a tombstone instead (forceDeleteUser); with
+	// nothing blocking, it falls through to the plain delete.
+	if force && s.forceDeleteUser(w, r, actor, user, superAdminRD) {
 		return
 	}
 
@@ -1402,14 +1468,82 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// ---------------------------------------------------------------------------
+// GET /api/v1/users/{id}/delete-blockers — what blocks a user deletion
+//
+// Authorization: the same as DELETE /api/v1/users/{id} (session credential,
+// then user.delete on the user). It returns the lists a plain delete would
+// refuse with (listUserDeleteBlockers): {agents, edges, truncated}, each
+// list capped. It reads outside a transaction, takes no lock and writes
+// nothing, so a delete can find a blocker added after the listing.
+// ---------------------------------------------------------------------------
+
+func (s *Server) getUserDeleteBlockers(w http.ResponseWriter, r *http.Request, id string) {
+	ctx := r.Context()
+
+	actor, ok := s.requireSessionCredentialFor(w, ctx, authzop.ReasonGovernancePending)
+	if !ok {
+		return
+	}
+	decision := s.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(actor),
+		Credential: credentialContextForIdentity(actor),
+		Resource:   Resource{Type: "user", ID: id},
+		Action:     Action("delete"),
+		Permission: "user.delete",
+	})
+	if !decision.Allowed {
+		writeForbiddenStructured(w, "requires user.delete permission", "user", Action("delete"))
+		return
+	}
+
+	user, err := s.store.GetUser(ctx, id)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	blockers, err := listUserDeleteBlockers(ctx, s.store, user.ID)
+	if err != nil {
+		slog.ErrorContext(ctx, "list user delete blockers failed", "user_id", user.ID, "error", err)
+		InternalError(w)
+		return
+	}
+	resp := userDeleteBlockersResponse{userDeleteBlockers: *blockers}
+	// A forced deletion in progress (ptone/scion#2143) is named, so a
+	// client can show it instead of offering a delete.
+	if d, err := s.store.GetUserDeletionByUser(ctx, user.ID); err == nil && d.State == store.UserDeletionStateStopping {
+		resp.InProgress = &userDeletionRef{DeletionID: d.ID, State: d.State}
+	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+		slog.ErrorContext(ctx, "read user deletion failed", "user_id", user.ID, "error", err)
+		InternalError(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// userDeletionRef names a forced deletion in progress.
+type userDeletionRef struct {
+	DeletionID string `json:"deletionId"`
+	State      string `json:"state"`
+}
+
+// userDeleteBlockersResponse is the body of GET
+// /api/v1/users/{id}/delete-blockers: the blockers, and the forced
+// deletion in progress (omitted when there is none, so the body is
+// unchanged for a user with no deletion).
+type userDeleteBlockersResponse struct {
+	userDeleteBlockers
+	InProgress *userDeletionRef `json:"inProgress,omitempty"`
+}
+
 // deleteUserRowCascadeTx deletes the user row of userID and what hangs off
 // it, inside the caller's transaction. It is the part of a user deletion
 // shared by DELETE /api/v1/users/{id} and DELETE
 // /api/v1/test-identities/{id}. In order it:
 //
-//   - refuses while the user owns agents (checkUserOwnsNoAgentsTx; returns
-//     *userOwnsAgentsDeleteError, and store.ErrNotFound when the user no
-//     longer exists);
+//   - refuses while agents or active delegations depend on the user
+//     (checkUserDeleteBlockersTx; returns *userDeleteBlockedError, and
+//     store.ErrNotFound when the user does not exist);
 //   - runs the last-project-owner guard and the role-binding cascade
 //     (guardAndCascadeUserRoleBindingsTx);
 //   - deletes the user-scope skill injections and the group memberships;
@@ -1419,9 +1553,19 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 // before it, writes its audit record after it in the same transaction, maps
 // errors with writeUserDeleteCascadeError, and calls afterUserDeleted once
 // the transaction commits.
-func deleteUserRowCascadeTx(ctx context.Context, tx store.Store, userID string, now time.Time) error {
-	// Refuse while the user owns agents (ptone/scion#2769).
-	if err := checkUserOwnsNoAgentsTx(ctx, tx, userID); err != nil {
+func deleteUserRowCascadeTx(ctx context.Context, tx store.Store, userID string, at time.Time) error {
+	return deleteUserRowCascadeModeTx(ctx, tx, userID, at, false)
+}
+
+// deleteUserRowCascadeModeTx is deleteUserRowCascadeTx. completing is set
+// only by the completion of a forced deletion (completeUserDeletion),
+// which deletes a user whose status is deleting; every other caller
+// refuses such a user with *userDeletionInProgressError.
+func deleteUserRowCascadeModeTx(ctx context.Context, tx store.Store, userID string, at time.Time, completing bool) error {
+	// Refuse while agents or active delegations depend on the user
+	// (ptone/scion#2769, ptone/scion#2143), or while a forced deletion
+	// of the user is in progress.
+	if err := checkUserDeleteBlockersModeTx(ctx, tx, userID, completing); err != nil {
 		return err
 	}
 
@@ -1431,7 +1575,7 @@ func deleteUserRowCascadeTx(ctx context.Context, tx store.Store, userID string, 
 	// user's bindings that commits before the cascade aborts the
 	// delete with 409 conflict (a concurrent revoke does not; residual
 	// race: ptone/scion#2769).
-	if err := guardAndCascadeUserRoleBindingsTx(ctx, tx, userID, now); err != nil {
+	if err := guardAndCascadeUserRoleBindingsTx(ctx, tx, userID, at); err != nil {
 		return err
 	}
 
@@ -1454,6 +1598,14 @@ func deleteUserRowCascadeTx(ctx context.Context, tx store.Store, userID string, 
 		return fmt.Errorf("delete group memberships: %w", err)
 	}
 
+	// Deactivate every edge with the user as the delegator that is active
+	// when the sweep runs: after the check passed, only edges that do not
+	// block, or one reactivated after the check read but before the sweep
+	// (deactivateUserDelegatorEdgesTx).
+	if err := deactivateUserDelegatorEdgesTx(ctx, tx, userID); err != nil {
+		return err
+	}
+
 	// Delete the user record.
 	if err := tx.DeleteUser(ctx, userID); err != nil {
 		return fmt.Errorf("delete user: %w", err)
@@ -1467,12 +1619,15 @@ func deleteUserRowCascadeTx(ctx context.Context, tx store.Store, userID string, 
 // any other error, which the caller answers itself.
 func writeUserDeleteCascadeError(w http.ResponseWriter, err error) bool {
 	var lastOwnerErr *lastProjectOwnerDeleteError
-	var ownsAgentsErr *userOwnsAgentsDeleteError
+	var blockedErr *userDeleteBlockedError
+	var inProgressErr *userDeletionInProgressError
 	switch {
 	case errors.As(err, &lastOwnerErr):
 		writeLastProjectOwnerDeleteError(w, lastOwnerErr)
-	case errors.As(err, &ownsAgentsErr):
-		writeUserOwnsAgentsDeleteError(w, ownsAgentsErr)
+	case errors.As(err, &blockedErr):
+		writeUserDeleteBlockedError(w, blockedErr)
+	case errors.As(err, &inProgressErr):
+		writeUserDeletionInProgress(w, inProgressErr)
 	case errors.Is(err, errUserRoleBindingsChanged):
 		writeUserRoleBindingsChangedError(w)
 	default:
@@ -1483,11 +1638,16 @@ func writeUserDeleteCascadeError(w http.ResponseWriter, err error) bool {
 
 // afterUserDeleted runs once a user deletion has committed: it tells
 // conduit subscribers the user's authorization changed, then removes the
-// user's user-scope secrets and env vars as a best effort
-// (ptone/scion#2769). Failures are logged, not returned.
+// user's user-scope secrets and env vars and revokes the agent delegation
+// grants the user issued, as a best effort (ptone/scion#2769). Failures are
+// logged, not returned.
 func (s *Server) afterUserDeleted(ctx context.Context, userID string) {
 	s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: userID})
 	s.removeUserScopedData(ctx, userID)
+	// The deleted issuer's agent delegation grants end, best effort: a
+	// grant never blocks the delete, and exchange and use deny a missing
+	// issuer (.design/agent-delegation.md §16.3).
+	s.revokeAgentDelegationGrantsBestEffort(ctx, store.AgentDelegationGrantFilter{IssuerUserID: userID}, revokeReasonIssuerDeleted)
 }
 
 // lastOwnerProjectRef identifies a project that deleting a user would leave

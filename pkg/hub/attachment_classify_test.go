@@ -539,7 +539,7 @@ func TestAttachmentUpload_FailureMessageIsASingleReason(t *testing.T) {
 		{uploadFile{name: "diagram.svg", mime: "image/svg+xml", content: "<svg/>"},
 			"files with a .svg extension are not accepted"},
 		{uploadFile{name: "bad.exe", mime: "application/octet-stream", content: "MZ binary"},
-			"dangerous file extension: .exe"},
+			"files with a .exe extension are not accepted"},
 		{uploadFile{name: "..", mime: "text/plain", content: "hi"},
 			"invalid filename"},
 	}
@@ -626,6 +626,9 @@ func TestAttachmentDownload_SetsNosniffAndDisposition(t *testing.T) {
 		}
 		if h := got.Header().Get("Content-Security-Policy"); h != untrustedContentSandboxCSP {
 			t.Errorf("%s: Content-Security-Policy = %q, want %q", att.Name, h, untrustedContentSandboxCSP)
+		}
+		if h := got.Header().Get("Permissions-Policy"); h != untrustedContentPermissionsPolicy {
+			t.Errorf("%s: Permissions-Policy = %q, want %q", att.Name, h, untrustedContentPermissionsPolicy)
 		}
 		if h := got.Header().Get("Content-Type"); h != expected.mime {
 			t.Errorf("%s: Content-Type = %q, want %q", att.Name, h, expected.mime)
@@ -782,7 +785,7 @@ func TestAttachmentUpload_InternalFailureBatchStatus(t *testing.T) {
 			wantStored: 0,
 			wantFailures: map[string]string{
 				"boom.log": "upload failed",
-				"bad.exe":  "dangerous file extension: .exe",
+				"bad.exe":  "files with a .exe extension are not accepted",
 			},
 		},
 		{
@@ -792,7 +795,7 @@ func TestAttachmentUpload_InternalFailureBatchStatus(t *testing.T) {
 			wantStatus: http.StatusInternalServerError,
 			wantStored: 0,
 			wantFailures: map[string]string{
-				"bad.exe":  "dangerous file extension: .exe",
+				"bad.exe":  "files with a .exe extension are not accepted",
 				"boom.log": "upload failed",
 			},
 		},
@@ -803,7 +806,7 @@ func TestAttachmentUpload_InternalFailureBatchStatus(t *testing.T) {
 			wantStatus: http.StatusBadRequest,
 			wantStored: 0,
 			wantFailures: map[string]string{
-				"bad.exe": "dangerous file extension: .exe",
+				"bad.exe": "files with a .exe extension are not accepted",
 			},
 		},
 	}

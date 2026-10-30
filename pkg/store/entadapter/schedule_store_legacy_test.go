@@ -42,6 +42,7 @@ func openLegacyTextDB(t *testing.T) *sql.DB {
 	enttest.SkipOnPostgres(t, "legacy created text only exists on SQLite")
 	db, err := sql.Open("sqlite", "file:"+t.Name()+"?mode=memory&cache=shared")
 	require.NoError(t, err)
+	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
 	return db
 }

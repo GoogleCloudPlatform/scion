@@ -37,6 +37,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -224,7 +225,7 @@ func TestSigningKeySource_EveryClassHubLocalAfterNew(t *testing.T) {
 		src := srv.signingKeySource(c.KeyName)
 		assert.True(t, signingKeySourceIsHubLocal(src), "%s source %q", c.Class, src)
 	}
-	for _, want := range []string{"user_jwt", "agent_token", "oidc", "download_url", "artifact_view_url", "attachment_delivery", "list_cursor", "conduit_grant", "web_session"} {
+	for _, want := range []string{"user_jwt", "agent_token", "oidc", "download_url", "artifact_view_url", "attachment_delivery", "port_view_url", "list_cursor", "conduit_grant", "web_session"} {
 		assert.True(t, got[want], "class %s is checked", want)
 	}
 	assert.Len(t, testAdminSigningKeyClasses(false), len(classes)-1, "OIDC is checked only when enabled")
@@ -235,7 +236,7 @@ func TestSigningKeySource_SharedAndPreconfiguredLabels(t *testing.T) {
 	cfg.SharedSigningSecret = "synthetic-test-secret"
 	srv, _, err := tiaNewServer(t, cfg)
 	require.NoError(t, err)
-	for _, k := range []string{SecretKeyUserSigningKey, SecretKeyAgentSigningKey, SecretKeyDownloadSigningKey, SecretKeyArtifactViewKey, SecretKeyAttachmentDeliveryKey, SecretKeyListCursorKey} {
+	for _, k := range []string{SecretKeyUserSigningKey, SecretKeyAgentSigningKey, SecretKeyDownloadSigningKey, SecretKeyArtifactViewKey, SecretKeyAttachmentDeliveryKey, SecretKeyListCursorKey, SecretKeyPortViewKey} {
 		assert.Equal(t, signingKeySourceSharedSecret, srv.signingKeySource(k), k)
 	}
 	assert.Equal(t, signingKeySourceUnresolved, srv.signingKeySource(SecretKeyOIDCSigningKey), "OIDC off: unresolved")
@@ -255,7 +256,7 @@ func TestSigningKeySource_SharedAndPreconfiguredLabels(t *testing.T) {
 // exists, else memory-only.
 func TestSigningKeySource_ConduitGrantRing(t *testing.T) {
 	assert.Equal(t, signingKeySourceEphemeral, conduitGrantKeySource(nil))
-	assert.Equal(t, signingKeySourceSharedScope, conduitGrantKeySource(bytes.Repeat([]byte{3}, 32)))
+	assert.Equal(t, signingKeySourceSharedScope, conduitGrantKeySource(secret.NewLegacyValueCipher("fake-test-shared-secret")))
 
 	tiaCaptureAudit(t)
 	srv, _, err := tiaNewServer(t, tiaGateServerConfig())
@@ -341,12 +342,8 @@ func TestTestAdminGate_NoExportedMutator(t *testing.T) {
 	// In production code the gate field is assigned exactly once, in New.
 	assignments := 0
 	fset := token.NewFileSet()
-	// pkgmove:scan-covers pkg/hub/apierr
+	// pkgmove:scan-covers guardScanSubdirs
 	// scanned through guardScanSubdirs; guards testAdminGate assignments.
-	// pkgmove:scan-covers pkg/hub/internal/principal
-	// scanned through guardScanSubdirs; guards testAdminGate assignments.
-	// pkgmove:scan-covers pkg/hub/maintenance
-	// scanned through guardScanSubdirs once it exists; guards testAdminGate assignments.
 	files, err := globGuardScanDirs(".", "*.go")
 	require.NoError(t, err)
 	for _, path := range files {
@@ -406,8 +403,8 @@ func TestTestInfraMarker_NoRouteOrHubCodeTouchesIt(t *testing.T) {
 	const bindingReader = "../store/entadapter/test_infra_binding_read.go"
 	sawBindingReader := false
 	for _, dir := range []string{".", "../store"} {
-		// pkgmove:scan-covers pkg/hub/maintenance
-		// recursive walk of "." already includes pkg/hub/maintenance (no SkipDir).
+		// pkgmove:scan-covers pkg/hub/...
+		// recursive walk of pkg/hub (".", no SkipDir; ../store is walked on its own): covers every directory below it.
 		err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return err
@@ -853,6 +850,7 @@ var tiaSecretKeyClasses = map[string]string{
 	"SecretKeyDownloadSigningKey":    "download_url",
 	"SecretKeyArtifactViewKey":       "artifact_view_url",
 	"SecretKeyAttachmentDeliveryKey": "attachment_delivery",
+	"SecretKeyPortViewKey":           "port_view_url",
 	"SecretKeyListCursorKey":         "list_cursor",
 	"SecretKeyOIDCSigningKey":        "oidc",
 	"SecretKeyOIDCKeyset":            "oidc", // the same manager's persisted keyset
@@ -879,6 +877,9 @@ var tiaKeyMaterialPrimitives = map[string]bool{
 	"github.com/gorilla/sessions.NewCookieStore":                        true,
 	"github.com/gorilla/securecookie.New":                               true,
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant.NewRingKey": true,
+	// keyring.CookieCodecs builds the web session cookie codecs (securecookie
+	// keys derived per keyring generation) outside pkg/hub (ptone/scion#1530).
+	"github.com/GoogleCloudPlatform/scion/pkg/keyring.CookieCodecs": true,
 }
 
 // tiaDefaultImportNames are the package names of the primitive import
@@ -891,6 +892,7 @@ var tiaDefaultImportNames = map[string]string{
 	"github.com/gorilla/sessions":                            "sessions",
 	"github.com/gorilla/securecookie":                        "securecookie",
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant": "grant",
+	"github.com/GoogleCloudPlatform/scion/pkg/keyring":       "keyring",
 }
 
 // tiaKeyMaterialSites maps "path:function:importpath.Func" (path relative
@@ -900,24 +902,30 @@ var tiaDefaultImportNames = map[string]string{
 var tiaKeyMaterialSites = map[string]string{
 	"agenttoken.go:NewAgentTokenService:github.com/go-jose/go-jose/v4.NewSigner":                    "agent_token",
 	"usertoken.go:NewUserTokenService:github.com/go-jose/go-jose/v4.NewSigner":                      "user_jwt",
+	"agenttoken.go:newRingAgentTokenService:github.com/go-jose/go-jose/v4.NewSigner":                "agent_token",
+	"usertoken.go:newRingUserTokenService:github.com/go-jose/go-jose/v4.NewSigner":                  "user_jwt",
 	"oidckeys.go:NewOIDCKeyManager:github.com/go-jose/go-jose/v4.NewSigner":                         "oidc",
 	"oidckeys.go:RotateKey:github.com/go-jose/go-jose/v4.NewSigner":                                 "oidc",
 	"oidckeys.go:refreshKeysFromDB:github.com/go-jose/go-jose/v4.NewSigner":                         "oidc",
 	"oidckeys.go:generateRSAKeyPair:crypto/rsa.GenerateKey":                                         "oidc",
 	"oidckeys.go:decodePEMPrivateKey:crypto/x509.ParsePKCS8PrivateKey":                              "oidc",
 	"download_signing.go:computeSkillFileHMAC:crypto/hmac.New":                                      "download_url",
+	"internal/portview/capability.go:mac:crypto/hmac.New":                                           "port_view_url",
+	"internal/portview/capability.go:macKeyed:crypto/hmac.New":                                      "port_view_url",
+	"download_signing.go:computeSkillFileHMACv2:crypto/hmac.New":                                    "download_url",
+	"attachment_delivery.go:deliveryMACv2:crypto/hmac.New":                                          "attachment_delivery",
 	"attachment_delivery.go:deliveryMAC:crypto/hmac.New":                                            "attachment_delivery",
-	"authorized_list.go:newListCursorSealer:crypto/aes.NewCipher":                                   "list_cursor",
-	"authorized_list.go:newListCursorSealer:crypto/cipher.NewGCM":                                   "list_cursor",
+	"authorized_list.go:listCursorAEAD:crypto/aes.NewCipher":                                        "list_cursor",
+	"authorized_list.go:listCursorAEAD:crypto/cipher.NewGCM":                                        "list_cursor",
 	"conduit_grants.go:bootstrap:github.com/GoogleCloudPlatform/scion/pkg/conduit/grant.NewRingKey": "conduit_grant",
 	"conduit_grants.go:rotate:github.com/GoogleCloudPlatform/scion/pkg/conduit/grant.NewRingKey":    "conduit_grant",
-	"web.go:NewWebServer:github.com/gorilla/sessions.NewCookieStore":                                "web_session",
+	"web.go:NewWebServer:github.com/GoogleCloudPlatform/scion/pkg/keyring.CookieCodecs":             "web_session",
 	"handlers_test_identity_web.go:newTestIdentityWebState:github.com/gorilla/securecookie.New":     "exempt: test identity web session marker key, hub-local by construction (generated at test-infra mark, stored with the DB marker, never derived from any shared secret; DEC-8)",
 	"brokerauth.go:computeHMAC:crypto/hmac.New":                                                     "exempt: per-broker HMAC secret, generated per broker; authenticates a broker to this hub, never a user",
 	"access_constraint_preview.go:issueToken:crypto/hmac.New":                                       "exempt: preview token key, random per process and memory-only",
 	"access_constraint_preview.go:ValidateToken:crypto/hmac.New":                                    "exempt: preview token key, random per process and memory-only",
-	"conduit_admission.go:conduitAdmissionAEAD:crypto/aes.NewCipher":                                "exempt: admission token key, derived only from the shared signing secret, which the test admin tier refuses (G7), so it is never live there; it seals relay admission tokens, never a credential a test identity could carry",
-	"conduit_admission.go:conduitAdmissionAEAD:crypto/cipher.NewGCM":                                "exempt: admission token key, derived only from the shared signing secret, which the test admin tier refuses (G7), so it is never live there; it seals relay admission tokens, never a credential a test identity could carry",
+	"conduit_admission.go:newConduitAdmissionAEAD:crypto/aes.NewCipher":                             "exempt: admission token key, derived only from the shared signing secret or the keyring signing ring (source keyring), both of which the test admin tier refuses (G7), so it is never live there; it seals relay admission tokens, never a credential a test identity could carry",
+	"conduit_admission.go:newConduitAdmissionAEAD:crypto/cipher.NewGCM":                             "exempt: admission token key, derived only from the shared signing secret or the keyring signing ring (source keyring), both of which the test admin tier refuses (G7), so it is never live there; it seals relay admission tokens, never a credential a test identity could carry",
 	"githubapp/githubapp.go:GenerateJWT:github.com/go-jose/go-jose/v4.NewSigner":                    "exempt: GitHub App key; signs requests to GitHub, never a hub credential",
 	"githubapp/githubapp.go:ParsePrivateKey:crypto/x509.ParsePKCS1PrivateKey":                       "exempt: GitHub App key; signs requests to GitHub, never a hub credential",
 	"githubapp/githubapp.go:ParsePrivateKey:crypto/x509.ParsePKCS8PrivateKey":                       "exempt: GitHub App key; signs requests to GitHub, never a hub credential",
@@ -945,8 +953,8 @@ func TestSigningKeySource_EveryKeySourceClassified(t *testing.T) {
 	fset := token.NewFileSet()
 	seenConst := map[string]bool{}
 	seenSite := map[string]bool{}
-	// pkgmove:scan-covers pkg/hub/maintenance
-	// recursive walk already includes pkg/hub/maintenance (no SkipDir for it).
+	// pkgmove:scan-covers pkg/hub/...
+	// recursive walk of pkg/hub (".", no SkipDir): covers every directory below it.
 	err := filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -1047,8 +1055,8 @@ func TestSigningKeySource_EveryKeySourceClassified(t *testing.T) {
 // definition names it.
 func TestRegisterInProcessPluginBroker_CalledOnlyFromCmd(t *testing.T) {
 	fset := token.NewFileSet()
-	// pkgmove:scan-covers pkg/hub/maintenance
-	// recursive walk already includes pkg/hub/maintenance (no SkipDir for it).
+	// pkgmove:scan-covers pkg/hub/...
+	// recursive walk of pkg/hub (".", no SkipDir): covers every directory below it.
 	err := filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err

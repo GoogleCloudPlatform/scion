@@ -35,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -309,7 +310,6 @@ type flatHostParams struct {
 	instances      []config.V1RuntimeBrokerInstanceConfig
 	hubEndpoint    string
 	hubEndpointSrc hubEndpointSource
-	devAuthToken   string
 	settings       *config.Settings
 	globalDir      string
 	autoProvide    bool
@@ -365,10 +365,20 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 
 	var brokerNFS *config.V1NFSConfig
 	var workspaceStorageBackend string
+	brokerLayout := projectfs.Layout{Backend: projectfs.BackendLocal, Homes: projectfs.BackendLocal}
+	var brokerStorageErr error
 	if globalVS, _, gErr := config.LoadGlobalSettings(); gErr != nil {
 		log.Printf("WARNING: NFS mount checks disabled: loading global settings: %v", gErr)
 	} else {
 		workspaceStorageBackend = brokerWorkspaceStorageBackend(globalVS)
+		var layoutWarnings []string
+		brokerLayout, layoutWarnings, brokerStorageErr = brokerStorageLayout(globalVS)
+		for _, w := range layoutWarnings {
+			log.Printf("WARNING: %s", w)
+		}
+		if brokerStorageErr != nil {
+			log.Printf("WARNING: %s", brokerStorageUnavailableWarning(brokerStorageErr))
+		}
 		var nfsWarning string
 		brokerNFS, nfsWarning = brokerNFSConfig(globalVS)
 		if nfsWarning != "" {
@@ -377,6 +387,7 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 		if warning := brokerWorkspaceStorageWarning(globalVS); warning != "" {
 			log.Printf("WARNING: %s", warning)
 		}
+		_ = reportRemovedStorageOverridesIn(log.Printf, config.GlobalSettingsSource, globalVS)
 	}
 	if warning := brokerInotifyWarning(hostedMode, brokerAgentsShareHostUser(p.instances, ""), hostlimits.DefaultReader()); warning != "" {
 		log.Printf("WARNING: %s", warning)
@@ -398,9 +409,10 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 		cfg:                     cfg,
 		mode:                    mode,
 		hubEndpoint:             hubEndpointForRH,
-		devAuthToken:            p.devAuthToken,
 		nfs:                     brokerNFS,
 		workspaceStorageBackend: workspaceStorageBackend,
+		storageLayout:           brokerLayout,
+		storageError:            brokerStorageErr,
 		workspaceLocks:          runtimebroker.NewWorkspaceLocks(),
 		containerHub:            containerHub,
 	}
@@ -582,6 +594,16 @@ func flatOwnershipPreflight(ctx context.Context, c brokerhost.Candidate) error {
 	if _, err := records.ReconcileAbsent(objects, absent, slog.Warn); err != nil {
 		return fmt.Errorf("ownership records cannot be reconciled with the execution scope: %w", err)
 	}
+	// Records of creates that failed before their agent existed, older
+	// builds' included, are retired when their files are proven absent
+	// (ptone/scion#5768).
+	targetType := ""
+	if c.Instance.RuntimeTarget != nil {
+		targetType = c.Instance.RuntimeTarget.Type
+	}
+	if _, err := records.RetireAbandonedRecords(runtimebroker.OwnershipFilesProof(targetType), slog.Warn); err != nil {
+		return fmt.Errorf("ownership records of failed creates cannot be retired: %w", err)
+	}
 	problems, err := records.RepairSlugIndex()
 	if err != nil {
 		return fmt.Errorf("ownership records cannot be read: %w", err)
@@ -620,9 +642,10 @@ type flatServerShared struct {
 	cfg                     *config.GlobalConfig
 	mode                    brokerhost.Mode
 	hubEndpoint             string
-	devAuthToken            string
 	nfs                     *config.V1NFSConfig
 	workspaceStorageBackend string
+	storageLayout           projectfs.Layout
+	storageError            error
 	// workspaceLocks is the one process-wide workspace lock service every
 	// instance shares.
 	workspaceLocks *runtimebroker.WorkspaceLocks
@@ -667,12 +690,13 @@ func flatInstanceServerConfig(sh flatServerShared, ic brokerhost.InstanceContext
 		NFSConfig:                     sh.nfs,
 		StorageBucket:                 brokerStorageBucket(cfg.Storage),
 		WorkspaceStorageBackend:       sh.workspaceStorageBackend,
+		StorageLayout:                 sh.storageLayout,
+		StorageError:                  sh.storageError,
 		WorkspaceLocks:                sh.workspaceLocks,
 		Debug:                         enableDebug,
 		SlowRequestThreshold:          cfg.SlowRequestThreshold,
 
 		HubEnabled:           hubOn,
-		HubToken:             sh.devAuthToken,
 		TemplateCacheDir:     templateCacheDir,
 		TemplateCacheMaxSize: templateCacheMax,
 
@@ -752,6 +776,10 @@ func installColocatedSettingsOverlay(cfg *config.GlobalConfig, hubSrv *hub.Serve
 	if ops := hubSrv.GetOperationalSettings(); ops != nil {
 		snap := ops.Snapshot()
 		overlay.Update(snap.Runtimes, snap.Profiles, snap.HarnessConfigs)
+		// Removed storage overrides in the stored runtimes and profiles are
+		// reported, not refused: they are fixed through the admin settings
+		// API, which needs a running hub (ptone/scion#6371).
+		_ = reportRemovedStorageOverrides(log.Printf, config.HubStoredSettingsSource, snap.Runtimes, snap.Profiles, nil)
 		// The startup ApplySnapshot ran before this install, so the
 		// image_registry layers are fed here too (ptone/scion#3916).
 		overlay.UpdateImageRegistryInputs(ops.ImageRegistryHubInputs())

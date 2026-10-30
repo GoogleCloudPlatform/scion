@@ -37,9 +37,25 @@ func TestHubConduitConfig_Validate(t *testing.T) {
 		{name: "zero", cfg: HubConduitConfig{}},
 		{name: "all valid", cfg: HubConduitConfig{
 			GrantKeyActivation: "15m", ReconnectWindow: "10s", TCPAllowedPorts: []int{22, 3000},
-			InternalListen: ":9810", InternalAdvertise: "http://10.0.0.5:9810", PeerAuth: "HMAC",
-			PeerServiceAccounts: []string{"hub@p.iam.gserviceaccount.com"}, PeerAudience: "aud",
+			InternalListen: ":9810", InternalAdvertise: "https://10.0.0.5:9810", PeerAuth: "HMAC",
+			InternalTLSCertFile: "/tls/tls.crt", InternalTLSKeyFile: "/tls/tls.key", InternalTLSCAFile: "/tls/ca.crt",
+			InternalTLSServerName: "scion-relay.internal",
+			PeerServiceAccounts:   []string{"hub@p.iam.gserviceaccount.com"}, PeerAudience: "aud",
 		}},
+		{name: "loopback listen without TLS", cfg: HubConduitConfig{InternalListen: "127.0.0.1:9810", InternalAdvertise: "http://127.0.0.1:9810"}},
+		{name: "loopback listen behind a same-host terminator", cfg: HubConduitConfig{InternalListen: "127.0.0.1:9810", InternalAdvertise: "https://10.0.0.5:9443"}},
+		{name: "wildcard listen without TLS", cfg: HubConduitConfig{InternalListen: ":9810"}, wantErr: []string{"internal_listen", "not a loopback address", "internal_tls_ca_file"}},
+		{name: "unspecified listen without TLS", cfg: HubConduitConfig{InternalListen: "0.0.0.0:9810"}, wantErr: []string{"internal_listen", "not a loopback address"}},
+		{name: "network listen without TLS", cfg: HubConduitConfig{InternalListen: "10.0.0.5:9810"}, wantErr: []string{"internal_listen", "not a loopback address"}},
+		{name: "localhost listen without TLS", cfg: HubConduitConfig{InternalListen: "localhost:9810"}, wantErr: []string{"internal_listen", "not a loopback address", "not localhost"}},
+		{name: "ipv6 loopback listen without TLS", cfg: HubConduitConfig{InternalListen: "[::1]:9810", InternalAdvertise: "http://[::1]:9810"}},
+		{name: "listen with cert but no key", cfg: HubConduitConfig{InternalListen: ":9810", InternalTLSCertFile: "/tls/tls.crt"}, wantErr: []string{"internal_tls_cert_file and internal_tls_key_file must be set together", "internal_listen"}},
+		{name: "key without cert", cfg: HubConduitConfig{InternalTLSKeyFile: "/tls/tls.key"}, wantErr: []string{"set together"}},
+		{name: "advertise plaintext to a network host", cfg: HubConduitConfig{InternalAdvertise: "http://10.0.0.5:9810"}, wantErr: []string{"internal_advertise", "not https:// and not loopback"}},
+		{name: "advertise plaintext to localhost", cfg: HubConduitConfig{InternalAdvertise: "http://localhost:9810"}, wantErr: []string{"internal_advertise", "not https:// and not loopback", "not localhost"}},
+		{name: "advertise plaintext with TLS listener", cfg: HubConduitConfig{InternalListen: ":9810", InternalTLSCertFile: "c", InternalTLSKeyFile: "k", InternalAdvertise: "http://10.0.0.5:9810"}, wantErr: []string{"internal_advertise"}},
+		{name: "server name with scheme", cfg: HubConduitConfig{InternalTLSServerName: "https://relay"}, wantErr: []string{"internal_tls_server_name"}},
+		{name: "server name with port", cfg: HubConduitConfig{InternalTLSServerName: "relay:9443"}, wantErr: []string{"internal_tls_server_name"}},
 		{name: "activation at minimum", cfg: HubConduitConfig{GrantKeyActivation: "1m"}},
 		{name: "activation below minimum", cfg: HubConduitConfig{GrantKeyActivation: "30s"}, wantErr: []string{"grant_key_activation", "at least 1m0s"}},
 		{name: "activation malformed", cfg: HubConduitConfig{GrantKeyActivation: "soon"}, wantErr: []string{"grant_key_activation"}},
@@ -83,9 +99,9 @@ func TestHubConduitConfig_Validate(t *testing.T) {
 			wantErr: []string{"stream_authz_max.user", "stream_authz_max.broker", "stream_authz_max.agent"}},
 		{name: "port out of range", cfg: HubConduitConfig{TCPAllowedPorts: []int{0, 65536}}, wantErr: []string{"port 0 is outside", "port 65536 is outside"}},
 		{name: "port duplicated", cfg: HubConduitConfig{TCPAllowedPorts: []int{22, 22}}, wantErr: []string{"port 22 is listed twice"}},
-		{name: "listen without port", cfg: HubConduitConfig{InternalListen: "10.0.0.5"}, wantErr: []string{"internal_listen"}},
-		{name: "listen bad port", cfg: HubConduitConfig{InternalListen: "10.0.0.5:http"}, wantErr: []string{"internal_listen"}},
-		{name: "listen port too big", cfg: HubConduitConfig{InternalListen: ":70000"}, wantErr: []string{"internal_listen"}},
+		{name: "listen without port", cfg: HubConduitConfig{InternalListen: "10.0.0.5", InternalTLSCertFile: "c", InternalTLSKeyFile: "k"}, wantErr: []string{"internal_listen"}},
+		{name: "listen bad port", cfg: HubConduitConfig{InternalListen: "10.0.0.5:http", InternalTLSCertFile: "c", InternalTLSKeyFile: "k"}, wantErr: []string{"internal_listen"}},
+		{name: "listen port too big", cfg: HubConduitConfig{InternalListen: ":70000", InternalTLSCertFile: "c", InternalTLSKeyFile: "k"}, wantErr: []string{"internal_listen"}},
 		{name: "advertise https", cfg: HubConduitConfig{InternalAdvertise: "https://relay.internal:9810/"}},
 		{name: "advertise no scheme", cfg: HubConduitConfig{InternalAdvertise: "10.0.0.5:9810"}, wantErr: []string{"internal_advertise"}},
 		{name: "advertise ws scheme", cfg: HubConduitConfig{InternalAdvertise: "ws://10.0.0.5:9810"}, wantErr: []string{"internal_advertise"}},
@@ -189,6 +205,10 @@ func TestHubConduitConfig_IsZero(t *testing.T) {
 		"ports":      {TCPAllowedPorts: []int{22}},
 		"listen":     {InternalListen: ":1"},
 		"advertise":  {InternalAdvertise: "http://h:1"},
+		"tls cert":   {InternalTLSCertFile: "c"},
+		"tls key":    {InternalTLSKeyFile: "k"},
+		"tls ca":     {InternalTLSCAFile: "ca"},
+		"tls name":   {InternalTLSServerName: "n"},
 		"peer auth":  {PeerAuth: "hmac"},
 		"peer SAs":   {PeerServiceAccounts: []string{"a@b"}},
 		"audience":   {PeerAudience: "a"},
@@ -209,8 +229,10 @@ func TestConduitConfig_V1RoundTrip(t *testing.T) {
 	gc := &GlobalConfig{}
 	gc.Hub.Conduit = HubConduitConfig{
 		GrantKeyActivation: "20m", TCPAllowedPorts: []int{22, 8080}, InternalListen: ":9810",
-		InternalAdvertise: "http://10.0.0.5:9810", PeerAuth: "oidc",
-		PeerServiceAccounts: []string{"hub@p.iam.gserviceaccount.com"}, PeerAudience: "aud", ReconnectWindow: "7s",
+		InternalAdvertise: "https://10.0.0.5:9810", PeerAuth: "oidc",
+		InternalTLSCertFile: "/tls/tls.crt", InternalTLSKeyFile: "/tls/tls.key", InternalTLSCAFile: "/tls/ca.crt",
+		InternalTLSServerName: "scion-relay.internal",
+		PeerServiceAccounts:   []string{"hub@p.iam.gserviceaccount.com"}, PeerAudience: "aud", ReconnectWindow: "7s",
 		InstanceID: "hub-0", AuthzRecheckInterval: "45s", LifetimeCap: "1800s", ShutdownGrace: "10s",
 		ProxySessionMaxAge: "20m", StreamAuthzMax: HubConduitStreamAuthzMax{User: "4h", Broker: "20h", Agent: "22h"},
 	}
@@ -249,6 +271,10 @@ server:
       grant_key_activation: 20m
       tcp_allowed_ports: [22, 3000]
       internal_listen: ":9810"
+      internal_tls_cert_file: /tls/tls.crt
+      internal_tls_key_file: /tls/tls.key
+      internal_tls_ca_file: /tls/ca.crt
+      internal_tls_server_name: scion-relay.internal
       peer_auth: hmac
       reconnect_window: 3s
       authz_recheck_interval: 30s
@@ -264,6 +290,11 @@ server:
 	assert.Equal(t, "20m", c.GrantKeyActivation)
 	assert.Equal(t, []int{22, 3000}, c.TCPAllowedPorts)
 	assert.Equal(t, ":9810", c.InternalListen)
+	assert.Equal(t, "/tls/tls.crt", c.InternalTLSCertFile)
+	assert.Equal(t, "/tls/tls.key", c.InternalTLSKeyFile)
+	assert.Equal(t, "/tls/ca.crt", c.InternalTLSCAFile)
+	assert.Equal(t, "scion-relay.internal", c.InternalTLSServerName)
+	assert.True(t, c.InternalTLS())
 	assert.Equal(t, "hmac", c.PeerAuth)
 	assert.Equal(t, "3s", c.ReconnectWindow)
 	assert.Equal(t, "30s", c.AuthzRecheckInterval)
@@ -285,6 +316,25 @@ server:
 		cfg, err := LoadGlobalConfig(configPath)
 		require.NoError(t, err)
 		assert.Equal(t, "120s", cfg.Hub.Conduit.LifetimeCap)
+	})
+
+	t.Run("internal tls env", func(t *testing.T) {
+		want := map[string]string{
+			"internal_tls_cert_file":   "/env/tls.crt",
+			"internal_tls_key_file":    "/env/tls.key",
+			"internal_tls_ca_file":     "/env/ca.crt",
+			"internal_tls_server_name": "relay.env",
+		}
+		for field, v := range want {
+			envVar := conduitSchemaEnvVar(t, field)
+			require.Equal(t, "SCION_SERVER_HUB_CONDUIT_"+strings.ToUpper(strings.ReplaceAll(field, "_", "")), envVar)
+			t.Setenv(envVar, v)
+		}
+		cfg, err := LoadGlobalConfig(configPath)
+		require.NoError(t, err)
+		c := cfg.Hub.Conduit
+		assert.Equal(t, []string{"/env/tls.crt", "/env/tls.key", "/env/ca.crt", "relay.env"},
+			[]string{c.InternalTLSCertFile, c.InternalTLSKeyFile, c.InternalTLSCAFile, c.InternalTLSServerName})
 	})
 
 	t.Run("env override", func(t *testing.T) {

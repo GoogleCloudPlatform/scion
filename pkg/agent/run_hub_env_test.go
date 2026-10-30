@@ -16,7 +16,9 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -111,7 +113,7 @@ profiles:
   endpoint: "http://localhost:9810"
 `), 0644)
 
-	// Write a dev-token file so the token resolution finds it
+	// A dev-token file on the host. No start ever hands it to the agent.
 	_ = os.WriteFile(filepath.Join(globalScionDir, "dev-token"), []byte("scion-dev-test-token-abc"), 0644)
 
 	// Capture the RunConfig
@@ -157,13 +159,9 @@ profiles:
 		t.Error("expected SCION_AUTH_TOKEN to NOT be in container env (should be in token file)")
 	}
 
-	// Verify the token was written to the agent home token file
-	tokenData, err := os.ReadFile(filepath.Join(capturedConfig.HomeDir, ".scion", "scion-token"))
-	if err != nil {
-		t.Fatalf("failed to read token file: %v", err)
-	}
-	if got := strings.TrimSpace(string(tokenData)); got != "scion-dev-test-token-abc" {
-		t.Errorf("token file = %q, want %q", got, "scion-dev-test-token-abc")
+	// The host dev token is not written to the agent's token file.
+	if _, err := os.Stat(filepath.Join(capturedConfig.HomeDir, ".scion", "scion-token")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("agent token file: stat err = %v, want not exist (the host dev token never reaches an agent)", err)
 	}
 }
 
@@ -691,7 +689,9 @@ func setupTrustedHubEndpointTestProject(t *testing.T, agentName, agentLevelHubEn
 // path directly (not just substrateEgressHostnames), so that capturing
 // callerHubEndpoint anywhere other than the top of Start — in particular,
 // after the agent-level Hub-config override applies — fails one of these
-// cases.
+// cases. The broker-mode cases are hub-dispatched starts, so each carries a
+// made-up hub-issued token in HubIssuedToken (a start without one fails, see
+// TestStartHubCredentialIsHubIssuedOnly).
 func TestStartTrustedHubEndpoint(t *testing.T) {
 	const (
 		brokerHubEndpoint      = "http://broker-hub:9810"
@@ -719,6 +719,7 @@ func TestStartTrustedHubEndpoint(t *testing.T) {
 			NoAuth:             true,
 			Env:                map[string]string{"SCION_HUB_ENDPOINT": brokerHubEndpoint},
 			TrustedHubEndpoint: brokerHubEndpoint,
+			HubIssuedToken:     fakeHubIssuedToken,
 		})
 		if err != nil {
 			t.Fatalf("Start failed: %v", err)
@@ -748,6 +749,7 @@ func TestStartTrustedHubEndpoint(t *testing.T) {
 			NoAuth:             true,
 			Env:                map[string]string{"SCION_HUB_ENDPOINT": brokerHubEndpoint},
 			TrustedHubEndpoint: brokerHubEndpoint,
+			HubIssuedToken:     fakeHubIssuedToken,
 		})
 		if err != nil {
 			t.Fatalf("Start failed: %v", err)
@@ -777,6 +779,7 @@ func TestStartTrustedHubEndpoint(t *testing.T) {
 			NoAuth:             true,
 			Env:                map[string]string{"SCION_HUB_ENDPOINT": brokerHubEndpoint},
 			TrustedHubEndpoint: brokerHubEndpoint,
+			HubIssuedToken:     fakeHubIssuedToken,
 		})
 		if err != nil {
 			t.Fatalf("Start failed: %v", err)
@@ -817,7 +820,10 @@ func TestStartTrustedHubEndpoint(t *testing.T) {
 			ProjectPath: projectScionDir,
 			BrokerMode:  true,
 			NoAuth:      true,
-			// No SCION_HUB_ENDPOINT in opts.Env at all.
+			// No SCION_HUB_ENDPOINT in opts.Env at all; the agent config's
+			// hub.endpoint makes it a hub-dispatched start, so it carries a
+			// hub-issued token.
+			HubIssuedToken: fakeHubIssuedToken,
 		})
 		if err != nil {
 			t.Fatalf("Start failed: %v", err)
@@ -856,7 +862,8 @@ func TestStartTrustedHubEndpoint(t *testing.T) {
 			// when every operator tier is empty — but TrustedHubEndpoint
 			// itself is left unset, as buildStartContext now does in that
 			// case.
-			Env: map[string]string{"SCION_HUB_ENDPOINT": "http://169.254.169.254"},
+			Env:            map[string]string{"SCION_HUB_ENDPOINT": "http://169.254.169.254"},
+			HubIssuedToken: fakeHubIssuedToken,
 		})
 		if err != nil {
 			t.Fatalf("Start failed: %v", err)

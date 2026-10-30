@@ -530,7 +530,7 @@ export class ScionPageAdminAccessBoundaryEditor extends LitElement {
           <sl-button
             variant="default"
             @click=${() => {
-              window.location.href = '/admin/access-boundaries';
+              navigateTo('/admin/access-boundaries');
             }}
           >
             Back to inventory

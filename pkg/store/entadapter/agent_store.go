@@ -222,6 +222,17 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		}
 		sa.AppliedConfig = cfg
 	}
+	if a.PendingConfig != nil {
+		pending, err := store.UnmarshalPendingConfigFromStorage(*a.PendingConfig)
+		if err != nil {
+			// Logged rather than returned, as for applied_config above: one
+			// corrupt row must not break a listing. The agent reads as having
+			// no pending edits.
+			slog.Error("agent store: pending_config could not be used as stored; ignoring it",
+				"agent_id", sa.ID, "error", err)
+		}
+		sa.PendingConfig = pending
+	}
 	return sa
 }
 
@@ -360,6 +371,13 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 	}
 	if cfg := marshalAppliedConfig(a.AppliedConfig); cfg != "" {
 		create.SetAppliedConfig(cfg)
+	}
+	pending, err := store.MarshalPendingConfigForStorage(a.PendingConfig)
+	if err != nil {
+		return fmt.Errorf("encode pending config: %w", err)
+	}
+	if pending != "" {
+		create.SetPendingConfig(pending)
 	}
 	// Always set, never leave NULL, even when harnessConfigOf returns "" (no
 	// harness configured). NULL is reserved to mean "never written by a
@@ -839,6 +857,9 @@ func buildAgentUpdate(ac *ent.AgentClient, uid uuid.UUID, a *store.Agent, expect
 	} else {
 		update.ClearAppliedConfig()
 	}
+	if err := setPendingConfig(update.Mutation(), a.PendingConfig); err != nil {
+		return nil, err
+	}
 	// Always set, never clear to NULL — see CreateAgent's identical comment
 	// and ReconcileHarnessConfigColumn's doc (ptone/scion#2146).
 	// AppliedConfig=nil (cleared above) still yields "" here, which is
@@ -1048,7 +1069,7 @@ func (s *AgentStore) ListAgents(ctx context.Context, filter store.AgentFilter, o
 	// than ignore it, so a caller that passes one (alone or alongside
 	// SortCursor) gets an error instead of a silently different page.
 	if opts.Cursor != "" {
-		return nil, fmt.Errorf("ListAgents: legacy cursor is not valid in sorted mode: %w", store.ErrInvalidInput)
+		return nil, fmt.Errorf("ListAgents: legacy cursor is not valid in sorted mode: %w", store.ErrInvalidCursor)
 	}
 	if opts.SortCursor != nil {
 		query.Where(agentAfterCursor(opts.SortBy, opts.SortDir, *opts.SortCursor))
@@ -1963,6 +1984,60 @@ func (s *AgentStore) SetAgentWorkspacePlacement(ctx context.Context, agentID, pl
 	}
 	if affected == 0 {
 		return store.ErrNotFound
+	}
+	return nil
+}
+
+// UpdateAgentConfig implements store.AgentStore.UpdateAgentConfig.
+func (s *AgentStore) UpdateAgentConfig(ctx context.Context, agentID string, expectedVersion int64, applied *store.AgentAppliedConfig, pending *store.AgentPendingConfig) (int64, error) {
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return 0, err
+	}
+	newVersion := expectedVersion + 1
+	update := s.client.Agent.Update().
+		Where(agent.IDEQ(uid), agent.StateVersionEQ(expectedVersion), agent.DeletedAtIsNil()).
+		SetStateVersion(newVersion).
+		SetUpdated(time.Now()).
+		// Always set, never NULL: see buildAgentUpdate.
+		SetHarnessConfig(harnessConfigOf(applied))
+	if cfg := marshalAppliedConfig(applied); cfg != "" {
+		update.SetAppliedConfig(cfg)
+	} else {
+		update.ClearAppliedConfig()
+	}
+	if err := setPendingConfig(update.Mutation(), pending); err != nil {
+		return 0, err
+	}
+	affected, err := update.Save(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	if affected == 0 {
+		row, err := s.client.Agent.Get(ctx, uid)
+		if err != nil {
+			return 0, mapError(err)
+		}
+		if row.DeletedAt != nil {
+			return 0, store.ErrNotFound
+		}
+		return 0, store.ErrVersionConflict
+	}
+	return newVersion, nil
+}
+
+// setPendingConfig sets the pending_config column of an agent update to
+// pending's storage encoding, or clears it to NULL when pending holds no
+// edit.
+func setPendingConfig(m *ent.AgentMutation, pending *store.AgentPendingConfig) error {
+	raw, err := store.MarshalPendingConfigForStorage(pending)
+	if err != nil {
+		return fmt.Errorf("encode pending config: %w", err)
+	}
+	if raw == "" {
+		m.ClearPendingConfig()
+	} else {
+		m.SetPendingConfig(raw)
 	}
 	return nil
 }

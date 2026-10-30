@@ -1592,7 +1592,7 @@ func TestProvisionAgent_SharedWorkspaceMigratesLegacyState(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(legacyDir, "scion-agent.json"), []byte(`{"harness":"claude"}`), 0644); err != nil {
 		t.Fatalf("write legacy scion-agent.json: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(legacyDir, sharedDirStorageRecordFile), []byte(`{"backend":"nfs"}`+"\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(legacyDir, legacySharedDirStorageRecordFile), []byte(`{"backend":"nfs"}`+"\n"), 0644); err != nil {
 		t.Fatalf("write legacy shared-dir storage record: %v", err)
 	}
 
@@ -1620,7 +1620,7 @@ func TestProvisionAgent_SharedWorkspaceMigratesLegacyState(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(legacyDir, "scion-agent.json")); err == nil {
 		t.Errorf("legacy in-project scion-agent.json still exists after migration")
 	}
-	if _, err := os.Stat(filepath.Join(legacyDir, sharedDirStorageRecordFile)); err == nil {
+	if _, err := os.Stat(filepath.Join(legacyDir, legacySharedDirStorageRecordFile)); err == nil {
 		t.Errorf("legacy in-project shared-dir storage record still exists after migration")
 	}
 
@@ -1633,13 +1633,10 @@ func TestProvisionAgent_SharedWorkspaceMigratesLegacyState(t *testing.T) {
 	if string(data) != "old task" {
 		t.Errorf("migrated prompt.md content = %q, want %q", string(data), "old task")
 	}
-	// The recorded shared-dir storage backend moves with the agent state.
-	recorded, err := readSharedDirStorageRecord(extAgentDir)
-	if err != nil {
-		t.Fatalf("reading the migrated shared-dir storage record: %v", err)
-	}
-	if recorded != "nfs" {
-		t.Errorf("migrated shared-dir storage backend = %q, want %q", recorded, "nfs")
+	// The legacy shared-dir storage record (no longer read) moves with the
+	// agent state, so the legacy directory can be removed.
+	if _, err := os.Stat(filepath.Join(extAgentDir, legacySharedDirStorageRecordFile)); err != nil {
+		t.Errorf("the legacy shared-dir storage record was not moved: %v", err)
 	}
 }
 
@@ -4212,6 +4209,64 @@ func TestPlatformSkillsHubEnabled(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := platformSkillsHubEnabled(tc.ctx, tc.settings); got != tc.want {
 				t.Errorf("platformSkillsHubEnabled = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestProvisionAgent_HubNativeWorktreeWorkspaceAccepted is the regression for
+// the broker worktree-per-agent path: the agent's worktree lives at
+// <project>/.scion/workspace/worktrees/<agent>, under .scion but not under
+// .scion/agents, and is passed as the explicit workspace. ProvisionAgent must
+// accept it (an earlier over-broad refusal of everything under .scion rejected
+// it).
+func TestProvisionAgent_HubNativeWorktreeWorkspaceAccepted(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	tmpDir := t.TempDir()
+	projectScionDir, _ := provisionAgentRepoRootScaffold(t, tmpDir)
+
+	// The hub-native base and the agent's worktree, both under .scion/workspace.
+	base := filepath.Join(projectScionDir, "workspace")
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	setupGitRepo(t, base)
+	worktree := createRealWorktree(t, base, "agent-a")
+	if want := filepath.Join(projectScionDir, "workspace", "worktrees", "agent-a"); worktree != want {
+		t.Fatalf("worktree at %q, want %q", worktree, want)
+	}
+
+	ctx := api.ContextWithProvisionedWorktreeRepoRoot(context.Background(), base)
+	if _, _, _, err := ProvisionAgent(ctx, "agent-a", "claude", "", "", projectScionDir, "", "", "", worktree); err != nil {
+		t.Fatalf("ProvisionAgent refused a hub-native .scion/workspace worktree: %v", err)
+	}
+}
+
+// TestProvisionAgent_ScionDirWorkspaceRefused is the companion of the
+// accepted case: an explicit workspace that is the project's .scion directory
+// itself holds agent state, not a workspace, and ProvisionAgent must refuse it
+// (the agents-tree mask does not cover .scion itself).
+func TestProvisionAgent_ScionDirWorkspaceRefused(t *testing.T) {
+	// Both spellings of the .scion directory reach it: the absolute path and
+	// the relative ".scion" route (resolved against the project root).
+	for _, tc := range []struct {
+		name      string
+		workspace func(projectScionDir string) string
+	}{
+		{name: "absolute", workspace: func(d string) string { return d }},
+		{name: "relative", workspace: func(string) string { return ".scion" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SCION_HOST_UID", "")
+			tmpDir := t.TempDir()
+			projectScionDir, _ := provisionAgentRepoRootScaffold(t, tmpDir)
+
+			_, _, _, err := ProvisionAgent(context.Background(), "agent-a", "claude", "", "", projectScionDir, "", "", "", tc.workspace(projectScionDir))
+			if err == nil {
+				t.Fatal("ProvisionAgent accepted the project's .scion directory as the workspace; want a refusal")
+			}
+			if !strings.Contains(err.Error(), "project's .scion directory") {
+				t.Fatalf("ProvisionAgent refused for an unexpected reason: %v", err)
 			}
 		})
 	}

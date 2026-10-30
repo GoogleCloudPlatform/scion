@@ -15,6 +15,8 @@
 package cmd
 
 import (
+	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -36,6 +38,7 @@ func TestResolveMaintenanceConfig_Defaults(t *testing.T) {
 	t.Setenv("SCION_MAINTENANCE_REPO_BRANCH", "")
 	t.Setenv("SCION_MAINTENANCE_BINARY_DEST", "")
 	t.Setenv("SCION_MAINTENANCE_SERVICE_NAME", "")
+	t.Setenv(config.EnvMaintenanceInstallRoot, "")
 
 	cfg := &config.GlobalConfig{}
 
@@ -46,9 +49,14 @@ func TestResolveMaintenanceConfig_Defaults(t *testing.T) {
 		t.Errorf("DeploymentTier = %q, want %q (no repo path → binary)", mc.DeploymentTier, "binary")
 	}
 
-	// Binary tier → auto update policy.
-	if mc.UpdatePolicy != "auto" {
-		t.Errorf("UpdatePolicy = %q, want %q (binary tier → auto)", mc.UpdatePolicy, "auto")
+	// Binary tier → notify update policy (design D7: no unattended
+	// self-update unless the operator chose auto).
+	if mc.UpdatePolicy != "notify" {
+		t.Errorf("UpdatePolicy = %q, want %q (binary tier → notify)", mc.UpdatePolicy, "notify")
+	}
+
+	if mc.InstallRoot != config.DefaultMaintenanceInstallRoot {
+		t.Errorf("InstallRoot = %q, want %q", mc.InstallRoot, config.DefaultMaintenanceInstallRoot)
 	}
 
 	if mc.CheckIntervalHours != 6 {
@@ -174,5 +182,54 @@ func TestMaintenanceConfigNewFields(t *testing.T) {
 	}
 	if mc.GitHubRepo != "org/repo" {
 		t.Errorf("GitHubRepo = %q, want %q", mc.GitHubRepo, "org/repo")
+	}
+}
+
+// writeMaintenanceSettings writes a global settings.yaml under a temp HOME
+// with the given server.maintenance section, and clears the env overrides.
+func writeMaintenanceSettings(t *testing.T, m *config.V1MaintenanceConfig) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, env := range []string{
+		"SCION_MAINTENANCE_IMAGE_REGISTRY", "SCION_MAINTENANCE_IMAGE_TAG",
+		"SCION_MAINTENANCE_RUNTIME", "SCION_MAINTENANCE_REPO_PATH",
+		"SCION_MAINTENANCE_REPO_BRANCH", "SCION_MAINTENANCE_BINARY_DEST",
+		"SCION_MAINTENANCE_SERVICE_NAME", config.EnvMaintenanceInstallRoot,
+	} {
+		t.Setenv(env, "")
+	}
+	vs := &config.VersionedSettings{
+		SchemaVersion: "1",
+		Server:        &config.V1ServerConfig{Maintenance: m},
+	}
+	if err := config.SaveVersionedSettings(filepath.Join(home, ".scion"), vs); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestResolveMaintenanceConfig_ExplicitAutoHonoured(t *testing.T) {
+	writeMaintenanceSettings(t, &config.V1MaintenanceConfig{DeploymentTier: "binary", UpdatePolicy: "auto"})
+	mc := resolveMaintenanceConfig(&config.GlobalConfig{})
+	if mc.DeploymentTier != "binary" || mc.UpdatePolicy != "auto" {
+		t.Errorf("tier/policy = %q/%q, want binary/auto", mc.DeploymentTier, mc.UpdatePolicy)
+	}
+}
+
+func TestResolveMaintenanceConfig_InstallRoot(t *testing.T) {
+	// "/srv/..." is not absolute on Windows (filepath.IsAbs), where the
+	// install root would be ignored; use a drive-rooted path there and keep
+	// the unix literals unchanged (ptone/scion#6332).
+	setting, env := "/srv/scion", "/srv/env"
+	if runtime.GOOS == "windows" {
+		setting, env = `C:\srv\scion`, `C:\srv\env`
+	}
+	writeMaintenanceSettings(t, &config.V1MaintenanceConfig{InstallRoot: setting})
+	if got := resolveMaintenanceConfig(&config.GlobalConfig{}).InstallRoot; got != setting {
+		t.Errorf("InstallRoot = %q, want the setting %s", got, setting)
+	}
+	t.Setenv(config.EnvMaintenanceInstallRoot, env)
+	if got := resolveMaintenanceConfig(&config.GlobalConfig{}).InstallRoot; got != env {
+		t.Errorf("InstallRoot = %q, want the env override %s", got, env)
 	}
 }

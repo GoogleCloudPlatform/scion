@@ -420,15 +420,20 @@ func TestAgentDelegation_RegisteredDefaultOff(t *testing.T) {
 }
 
 // TestFederationProjectVisitors_RegisteredDefaultOff pins
-// federation.project_visitors as a server-layer experiment that is off
-// unless an operator turns it on.
+// federation.project_visitors as an experiment that is off unless an
+// operator turns it on. It gates the web Visitors tab and admin switch and
+// the hub routes, so it needs both layers: GET /api/v1/experiments carries
+// only web-layer experiments.
 func TestFederationProjectVisitors_RegisteredDefaultOff(t *testing.T) {
 	entry, ok := Default().Lookup(FederationProjectVisitors)
 	if !ok {
 		t.Fatalf("compiled registry entry %q absent", FederationProjectVisitors)
 	}
-	if entry.Name != "federation.project_visitors" || entry.Default || len(entry.Layers) != 1 || entry.Layers[0] != LayerServer || entry.Stage != StageAlpha || entry.Issue != "ptone/scion#4603" {
+	if entry.Name != "federation.project_visitors" || entry.Default || entry.Stage != StageAlpha || entry.Issue != "ptone/scion#4603" {
 		t.Errorf("project visitors experiment metadata mismatch: %+v", entry)
+	}
+	if len(entry.Layers) != 2 || !entry.HasLayer(LayerWeb) || !entry.HasLayer(LayerServer) {
+		t.Errorf("Layers = %v, want exactly LayerWeb and LayerServer", entry.Layers)
 	}
 }
 
@@ -478,7 +483,7 @@ func TestAttachmentArtifacts_RegisteredDefaultOff(t *testing.T) {
 
 // TestAsyncAgentLaunchExperimentRegistered pins hub.async_agent_launch: it
 // changes what the hub sends to brokers, so it is server-layer only (the
-// web form opts in unconditionally), and it ships off.
+// web form opts in unconditionally), and it ships on (ptone/scion#6640).
 func TestAsyncAgentLaunchExperimentRegistered(t *testing.T) {
 	e, ok := Default().Lookup(AsyncAgentLaunch)
 	if !ok {
@@ -487,8 +492,8 @@ func TestAsyncAgentLaunchExperimentRegistered(t *testing.T) {
 	if AsyncAgentLaunch != "hub.async_agent_launch" {
 		t.Fatalf("frozen name changed: %q", AsyncAgentLaunch)
 	}
-	if e.Default {
-		t.Fatal("async agent launch must default to off")
+	if !e.Default {
+		t.Fatal("async agent launch must default to on")
 	}
 	if !e.HasLayer(LayerServer) || e.HasLayer(LayerWeb) {
 		t.Fatalf("must be a server-layer (only) experiment, got %v", e.Layers)
@@ -516,6 +521,51 @@ func TestAsyncAgentStartExperimentRegistered(t *testing.T) {
 		t.Fatalf("must be a server-layer (only) experiment, got %v", e.Layers)
 	}
 	if e.Issue != "ptone/scion#4669" || e.Stage != StageAlpha || e.Owner != "async-start" {
+		t.Fatalf("unexpected registration: %+v", e)
+	}
+}
+
+// TestAgentEditHeld_RegisteredDefaultOff pins hub.agent_edit_held
+// (ptone/scion#3976): it changes what the hub does with config edits of a
+// running agent, so it has LayerServer, and the web UI mirrors it, so it has
+// LayerWeb; it ships off, separately from the Edit page experiment.
+func TestAgentEditHeld_RegisteredDefaultOff(t *testing.T) {
+	entry, ok := Default().Lookup(AgentEditHeld)
+	if !ok {
+		t.Fatalf("compiled registry entry %q absent", AgentEditHeld)
+	}
+	if entry.Name != "hub.agent_edit_held" {
+		t.Errorf("Name = %q, want hub.agent_edit_held", entry.Name)
+	}
+	if entry.Default {
+		t.Error("Default = true, want false")
+	}
+	if len(entry.Layers) != 2 || !entry.HasLayer(LayerWeb) || !entry.HasLayer(LayerServer) {
+		t.Errorf("Layers = %v, want exactly LayerWeb and LayerServer", entry.Layers)
+	}
+	if entry.Stage != StageAlpha || entry.Issue != "ptone/scion#3952" {
+		t.Errorf("held edits experiment metadata mismatch: %+v", entry)
+	}
+}
+
+// TestSecretRotationExperimentRegistered pins server.secret_rotation
+// (ptone/scion#1530): it gates hub startup with a keyring file only, so it
+// is server-layer only, and it ships off.
+func TestSecretRotationExperimentRegistered(t *testing.T) {
+	e, ok := Default().Lookup(SecretRotation)
+	if !ok {
+		t.Fatalf("%s is not registered", SecretRotation)
+	}
+	if SecretRotation != "server.secret_rotation" {
+		t.Fatalf("frozen name changed: %q", SecretRotation)
+	}
+	if e.Default {
+		t.Fatal("secret rotation must default to off")
+	}
+	if !e.HasLayer(LayerServer) || e.HasLayer(LayerWeb) {
+		t.Fatalf("must be a server-layer (only) experiment, got %v", e.Layers)
+	}
+	if e.Issue != "ptone/scion#1530" || e.Stage != StageAlpha {
 		t.Fatalf("unexpected registration: %+v", e)
 	}
 }

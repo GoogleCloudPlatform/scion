@@ -742,7 +742,7 @@ func TestTemplateBlob_NestedLegacyCloneSurvivesParentMigration(t *testing.T) {
 		Files: commitManifest(cloneFiles),
 	}
 	clone.StoragePath = parent.StoragePath + "/" + clone.ID
-	clone.ContentHash = computeContentHash(clone.Files)
+	clone.ContentHash = defaultContentHash(clone.Files)
 	putObjects(t, stor, clone.StoragePath, cloneFiles)
 	if err := s.CreateTemplate(ctx, clone); err != nil {
 		t.Fatal(err)
@@ -847,7 +847,7 @@ func TestStorageMigration_TemplateLayouts(t *testing.T) {
 			Scope: store.TemplateScopeGlobal, Status: store.TemplateStatusActive,
 			StoragePath: path, Layout: layout, Files: commitManifest(files),
 		}
-		row.ContentHash = computeContentHash(row.Files)
+		row.ContentHash = defaultContentHash(row.Files)
 		if layout == store.TemplateLayoutBlobs {
 			putBlobs(t, srv, row, files)
 		} else {

@@ -324,10 +324,14 @@ func bypassAgentsSetup(t *testing.T) *bypassAgentsFixture {
 		Status:    store.BrokerSecretStatusActive,
 	}))
 	for _, p := range []*store.Project{f.proj, f.other} {
+		// The fixture broker is remote (not the embedded one) and serves the
+		// hub-managed project from its own checkout (LocalPath); a remote
+		// broker without one is refused at create (ptone/scion#5813).
 		require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
 			ProjectID:  p.ID,
 			BrokerID:   f.broker.ID,
 			BrokerName: f.broker.Name,
+			LocalPath:  fixtureProviderCheckout(t),
 			Status:     store.BrokerStatusOnline,
 		}))
 		p.DefaultRuntimeBrokerID = f.broker.ID
@@ -1279,6 +1283,18 @@ var relationshipCharacterizedAllowlist = map[relationshipAllowKey][]string{
 	// Current hub members may assign hub-scoped service accounts.
 	{"hub_member_sa_assign", "user", "gcp_service_account"}: {"gcp_service_account.assign"},
 
+	// Launch delivery of a project-, hub- or broker-scope secret or env var
+	// to the delivery credential's agent (ptone/scion#2129). The candidate
+	// is built only for a hub_delivery principal on a named delivery item
+	// (TestMaterialAssociation_* in material_delivery_test.go), so no
+	// characterization principal in this file reaches these cells.
+	{"project_association", "agent", "secret"}:  {"secret.deliver"},
+	{"project_association", "agent", "env_var"}: {"env_var.deliver"},
+	{"hub_association", "agent", "secret"}:      {"secret.deliver"},
+	{"hub_association", "agent", "env_var"}:     {"env_var.deliver"},
+	{"broker_association", "agent", "secret"}:   {"secret.deliver"},
+	{"broker_association", "agent", "env_var"}:  {"env_var.deliver"},
+
 	// An agent may read its origin user's personal (user-scoped) skills,
 	// through the same progeny relationship as opted-in secrets, keyed on
 	// the skill's owning bucket rather than a per-record creator field.
@@ -1367,8 +1383,8 @@ func grantProjectAccessOnly(t *testing.T, s store.Store, userID, projectID strin
 }
 
 // knownRelationshipNames lists every relationship name a row may use.
-// Association relationships are typed but have no rows until their
-// permissions are registered (TestRelationshipPolicy_AssociationRowsRequireRegistryIDs).
+// Association rows name only registered deliver permissions on their own
+// resource type (TestRelationshipPolicy_AssociationRowsRequireRegistryIDs).
 var knownRelationshipNames = map[string]bool{
 	"owner":                true,
 	"ancestor":             true,

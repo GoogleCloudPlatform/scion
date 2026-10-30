@@ -377,6 +377,55 @@ New work for the base repo:
    change what the broker's own git operations do against the shared base;
    see `pkg/provision/provision.go`'s `SafeGitCommand` and
    `pkg/runtime/common.go`'s `narrowGitAdminMounts`.
+8. **Host-side git runs without repository hooks or repository-defined
+   commands.** Every git command the broker or Hub runs on the host in a
+   repository agents can write (the shared base, a linked checkout, a
+   shared-workspace clone) goes through `pkg/util`'s `HostGitArgs` /
+   `HostGitCommand`: `core.hooksPath=/dev/null`, `core.fsmonitor=false`,
+   `core.pager=cat`, `protocol.ext.allow=never`; filter driver variables set
+   in the repository's own config are re-set to their global/system value
+   (or emptied); `submodule.recurse`/`fetch.recurseSubmodules`/
+   `merge.verifySignatures` are off; the environment drops `GIT_*` variables
+   that choose a repository or add config. The primary control is a
+   deny-by-default check: before each such command the repository config
+   (`.git/config`, `config.worktree`) is read as data (a parser in
+   `pkg/util`, never through git, which keeps a `=` inside a subsection as part
+   of the subsection name) and the command is refused, naming the key, on any
+   `include`/`includeIf` directive or any key outside an allow-list. A
+   managed repository (hub-native base, shared-workspace clone) allows only
+   the keys git and Scion write; a linked checkout allows a wider set of keys
+   that run no command and redirect no network, with value checks on
+   `filter.lfs.*` (standard git-lfs only), `submodule.*.update` and
+   `core.worktree`. After each command the config is read again and a change
+   is reported (`ErrRepoConfigChanged`). The runtime mounts (item 7, extended
+   to every runtime and base type) are what keep agents from writing the
+   config in the first place; in-container git stays flexible through the
+   per-agent private `.git/config` of that change.
+   Host-side checkouts also take the git-lfs endpoint from the configured
+   remote, never a tracked `.lfsconfig`: managed repos skip the LFS smudge
+   (agents fetch LFS in-container), linked checkouts pin `lfs.url` from the
+   `origin` remote when it is http(s) and otherwise skip-smudge with a
+   warning. The shared-workspace pull scopes any credential to the clone
+   URL's host. `extensions.partialClone`/`index.sparse` are refused
+   (fail-closed; may be lifted later). An operator-set `GIT_ALLOW_PROTOCOL`
+   overrides the `protocol.*.allow` pins.
+   Host-side git never embeds a token in a URL or leaves one in a repo's
+   `.git/config`: a token is supplied only through a credential helper scoped
+   to the clone URL's host (util.ScopedCredentialHelperEnv), which also resets
+   any other configured helper so nothing persists it. git-lfs: managed repos
+   and provisioning clones skip the smudge; linked checkouts pin lfs.url from
+   origin only when the committed .lfsconfig names no endpoint, else skip and
+   warn. git-lfs's own repo-config writes (lfs.repositoryformatversion,
+   lfs.<url>.access in {basic,none}, lfs.<url>.locksverify) are allowed;
+   post-command the policy is re-checked and a change to a value-sensitive key
+   (remote url/fetch, branch tracking, submodule url/update, core.worktree,
+   user.signingkey, gpg.format, filter.lfs.*) still fails
+   (ErrRepoConfigChanged). Global and system config
+   stay in effect, so a globally installed git-lfs filter still runs; the
+   git-lfs post-checkout hook (lockable files read-only) does not. Running
+   `git lfs post-checkout` explicitly instead was rejected: git-lfs reads
+   further repository config (`lfs.*`, including custom transfer agents),
+   which would reintroduce repository-defined commands.
 
 ---
 

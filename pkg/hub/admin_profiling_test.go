@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"sort"
 	"testing"
 
@@ -136,9 +137,14 @@ func TestProfilingClient_Response(t *testing.T) {
 	}
 }
 
+// shellNonce matches the script nonce attribute of a rendered shell.
+var shellNonce = regexp.MustCompile(`nonce="[A-Za-z0-9_-]+"`)
+
 // renderShell renders the SPA shell for path, as user (nil = signed out),
 // with the hub server as the profiling source (nil = none, the shell as
-// it was before the setting existed).
+// it was before the setting existed). The script nonce is fresh on every
+// response by design, so it is replaced with a fixed placeholder; every
+// other byte of two renders can then be compared.
 func renderShell(t *testing.T, provider ProfilingSettingsProvider, user *store.User, path string) string {
 	t.Helper()
 	ws := newTestWebServer(t, WebServerConfig{Host: "127.0.0.1"})
@@ -156,7 +162,8 @@ func renderShell(t *testing.T, provider ProfilingSettingsProvider, user *store.U
 	require.Equal(t, http.StatusOK, rec.Code)
 	body, err := io.ReadAll(rec.Result().Body)
 	require.NoError(t, err)
-	return string(body)
+	require.Len(t, shellNonce.FindAllIndex(body, -1), 1, "the shell carries one script nonce")
+	return shellNonce.ReplaceAllString(string(body), `nonce="N"`)
 }
 
 // TestShellReadinessMarks_Hydration: the shell's initial data carries

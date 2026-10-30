@@ -61,6 +61,63 @@ the permission registry or role scopes.
 New children of an adopted agent are created through the normal create path,
 so their ceilings stay within the adopted chain.
 
+### Legacy exception: the owner's own user secrets for adopted baseline and readonly agents
+
+The V1 table gives `secret.use` to `full` only, so the user secret parent
+ceiling refuses an adopted `baseline` or `readonly` agent its owner's
+progeny-shared user secrets. Before that ceiling applied to agent start and
+restart, these agents received them there. As a **legacy compatibility
+exception**, the Hub keeps that behaviour at start and restart for exactly
+this cohort:
+
+- the agent's own edge (no agent above it), delegated by the agent's owner;
+- written by adoption (source credential `system_migration`) and bounded;
+- whose ceiling is exactly the `baseline` or the `readonly` V1 row (with or
+  without the assigned service account permissions), and that row's role
+  does not rank above the edge's recorded role. Adoption ceilings an edge at
+  the lower of its role and the agent's applied role but keeps the edge's
+  role, so an edge recorded as `full` for an agent whose applied role is
+  `baseline` carries the `baseline` row and is in the cohort, reported as
+  `adopted_baseline`;
+- with an adoption record under policy V1 (`adopted` or `recognized`) for
+  that edge.
+
+This exception covers the owner's own user secrets, through `secret.use`. A
+separate fallback covers the Project, Hub and Broker variables and secrets of
+legacy agents, through the delivery permissions: see
+[Launch material for legacy agents](#launch-material-for-legacy-agents). Its
+`legacy_adopted_*` groups are keyed on the adopted edge's ceiling at any depth,
+so an agent can fall in that group and not in this one, or in both.
+
+For such an agent the ceiling lets the missing `secret.use` pass, and every
+other check still applies: a held or deleted agent, an agent-delegated chain,
+an edge recorded any other way, a terminal user who is inactive or not
+admitted to the project, and the secret source check (the secret must be the
+owner's own, shared with progeny and authored by the owner) all still deny.
+
+The runtime read (`scion secret get` inside the agent, the agent secret
+fetch) and the agent secret list are **not** restored for this cohort. Since
+ptone/scion#2072 every runtime read and list has required the agent token
+scope `project:secret:read`, and `baseline` and `readonly` tokens never
+carry it, so these agents are refused there (`capability_required`), as they
+were before the ceiling. To give such an agent its owner's secrets at
+runtime, reincarnate it as its owner with role `full`.
+
+An edge written later for such an agent, for example by a scope re-issue,
+keeps the `system_migration` source but has no adoption record of its own,
+so the agent leaves the cohort and its owner's shared secrets are withheld at
+start again (fail closed). Reincarnating the agent as its owner with role
+`full` restores them.
+
+Each use at start or restart is counted
+(`scion.hub.user_secret.legacy_adopted_fallback`, attributes `path` and
+`role`) and logged at warning level as `user secret allowed under the legacy
+adopted-agent fallback`, with the agent, the cohort (`adopted_baseline` or
+`adopted_readonly`), the edge and the secret name, never the value. The
+warning is logged at most once every 10 minutes per agent and secret. **The
+exception ends with the planned policy V2 backfill**, which is to re-ceiling
+these edges; the counter shows when it is no longer used.
+
 ## Which edges are adopted
 
 The planner examines the ancestor closure of every live agent (a stopped
@@ -164,6 +221,41 @@ with the new `retry_version` and counts. No new snapshot is taken and no
 admin step or database edit is needed. If a hop write fails during the pass,
 the marker is left as it was and the next start runs the pass again.
 
+## Service-account assignment backfill
+
+The GCP token mint and the GCS link proxy also require the agent's active
+**service-account assignment**: the row that records who authorized the
+agent's `assign`-mode service account, with that principal's frozen ceiling.
+Agent create, a service-account PATCH and reincarnation write it. An agent
+created before assignment rows were recorded has none, and its token
+requests are refused with `ceiling_provenance_missing`.
+
+A one-shot data migration at Hub start (marker
+`sa_assignment_legacy_backfill`, after schema migration and so after
+adoption) writes the missing row for every live `assign`-mode agent that has
+no active row. It copies the agent's single active delegation edge in its
+project, because agent create records the same provenance and ceiling on
+the edge and on the assignment:
+
+- An edge recorded from a session, access token, agent, local development
+  or schedule credential is copied as is.
+- An edge recorded by adoption (`system_migration`) is not an accepted
+  assignment source. The row records the edge's delegator as the source,
+  with credential kind `agent` for an agent and `session` for a user, and
+  the edge's ceiling.
+
+Rows carry origin `legacy_backfill`. The migration never replaces an existing
+row. It skips an agent, logging a warning with the reason, when the agent
+has no active edge or more than one (`no_active_edge`, `ambiguous_edges`),
+the edge is the migration sentinel or unrecorded
+(`migration_sentinel_edge`, `unrecorded_edge`), the edge's ceiling does not
+allow `gcp_service_account.assign` (`ceiling_lacks_assign`), or the delegator
+is deleted or not an active user (`delegator_missing`,
+`delegator_inactive`). A skipped agent keeps its denial. The usual
+remediation is to reincarnate it with the same role, as a user who holds
+`gcp_service_account.assign`. Skips do not block the marker, and a store
+error leaves the marker unwritten so the next start retries.
+
 ## Denial details
 
 A request denied because a hop is unrecorded keeps its existing message and
@@ -197,6 +289,47 @@ because its provenance version is not supported keeps the same denial
 without these keys, because adoption does not apply to it. So does a denial
 of a permission that no adopted ceiling carries, such as the artifact
 permissions, which unrecorded chains never held.
+
+## Launch material for legacy agents
+
+When the Hub starts or restarts an agent, it authorizes each Project, Hub and Broker variable and secret, and each Project secret it sends for the broker to fetch a `gh://` skill, with the delivery permissions above (`secret.deliver`, `env_var.deliver`, `skill_injection.deliver`), walking the agent's delegation chain. Agents whose chain fails that walk only because of legacy data keep receiving that material, as they did before the check existed. A hop is legacy when it is one of:
+
+| Group (`cohort` in the log) | The hop's agent has |
+| :--- | :--- |
+| `legacy_no_edge` | no active edge in the project |
+| `legacy_sentinel_edge` | only the backfill's migration edge (`user:system/migration`) |
+| `legacy_unadopted_edge` | only an edge with unrecorded provenance, including scheduled children with role `none`, which adoption skips |
+| `legacy_adopted_readonly`, `legacy_adopted_baseline`, `legacy_adopted_capped` | only an adopted edge (source `system_migration`) whose ceiling lacks the delivery permissions only because policy V1 capped it: the ceiling lies within the V1 row of the edge's own role. The group is named after the lowest V1 row the ceiling fits in (`readonly`, then `baseline`; `capped` if neither), whatever the edge role. Adoption keeps the edge role but caps the ceiling at the lower of the edge and applied roles, and intersects a child's ceiling with its adopted parent's. So an edge of role `full` can carry the `baseline` or `readonly` row, and it is served here. An edge re-issued by an agent delegator keeps the `system_migration` source and is judged the same way. |
+
+This fallback covers Project, Hub and Broker items only. The owner's own user secrets of adopted `baseline` and `readonly` agents follow their own exception, under different rules (an exact V1 row, an adoption record and the owner as delegator): see [Legacy exception: the owner's own user secrets for adopted baseline and readonly agents](#legacy-exception-the-owners-own-user-secrets-for-adopted-baseline-and-readonly-agents). One start can use both, each for its own items.
+
+Each item delivered this way is logged at `Warn` at most once an hour per agent and item, as `launch material delivered through the legacy fallback`. The line has the agent ID, the group, `exception` (`legacy`, or `product_gap` for the group below), and the item's name and scope. The Hub remembers the 16384 most recently logged items; beyond that it forgets the oldest first.
+
+### Product-gap exception: agents created from a user access token
+
+One more group is served the same way, although it is not legacy data:
+
+| Group (`cohort` in the log) | The hop's agent has |
+| :--- | :--- |
+| `uat_created_no_deliver_mapping` | only an edge recorded from a user access token, whose ceiling cannot hold the delivery permissions because no token scope grants them; or it is a descendant of such an agent whose own edge, recorded by its parent agent, lacks the delivery permissions only because the parent could not pass them down (every agent between the two must be of the same kind) |
+
+This covers agents created from a user access token today and in future, so it is a gap in the current product, not a migration leftover. It does not end with a later backfill. It ends only when a user access token scope grants the delivery permissions: from then on the Hub stops treating such edges as an exception by itself. Its removal is tracked as a follow-up issue. The `Warn` line marks it `exception=product_gap`, and the census counts it separately from the legacy groups.
+
+The fallback only ever admits the three delivery permissions. It grants nothing else, whatever group an agent falls in.
+
+The fallback never applies when:
+
+- any agent on the chain is held;
+- a delegator or ancestor agent is deleted, missing or held, or the root user is not active;
+- the agent has more than one active edge in the project. Such agents are withheld for now: the `Warn` line names the cause `ceiling_provenance_ambiguous`, and the census counts them as `duplicate_edges`. This will be revisited once census numbers from real Hubs are available;
+- a hop has local-development provenance and the Hub does not run dev auth;
+- a recorded hop that is not one of the groups above has a ceiling without the permission. Examples: an agent whose parent's ceiling does hold the permission, or an adopted edge whose ceiling is not within the V1 row of its role;
+- an earlier check (the item's association with the agent, an access constraint, the test-admin policy) refuses the item;
+- the chain is fully recorded, which leaves the root user's project admission as the deciding check.
+
+When the walk cannot follow edges past a hop (`legacy_no_edge`, `legacy_sentinel_edge`), the agent's stored ancestry stands in for the rest of the chain: its root user must be active and every ancestor agent must exist, not be deleted and not be held. An agent with no stored ancestry is refused. The root user's project membership is not checked for these agents, which is the behaviour before the check existed.
+
+The fallback applies to start and restart selection, to the skill-fetch credentials sent with them, and to the create-time check for whether a requested key exists. Other users of the delivery permissions get the strict walk. To find the affected agents before or after an upgrade, run the read-only census against a copy of the Hub database or a read replica: `go run ./hack/delivery-census -driver sqlite -db <hub.db>` (add `-dev-auth` for a workstation Hub), or `-driver postgres -db <url>`. It opens the database read-only and reports, per agent, the group it falls in and what a start delivers, with counts by group and by deny cause.
 
 ## Admin recovery API
 

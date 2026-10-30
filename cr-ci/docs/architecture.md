@@ -77,11 +77,15 @@ a runner's execution by its `RUNNER_NAME` env, never by job ID.
      `labels_unservable` (WARNING) and never minted for.
    - **Fork guard:** the mediator reads the run with
      `GET /repos/{o}/{r}/actions/runs/{run_id}` (never trusting the payload)
-     and refuses, logging `SECURITY_REJECT_FORK_PR` and answering 200, when
-     the run's event is `pull_request_target` or `workflow_run` (both run with
-     the base repo's privileges, typically on behalf of fork PRs), its
-     `head_repository` differs from its `repository` (or is missing), or its
-     repository is not the webhook's repository.
+     and refuses, logging `SECURITY_REJECT_FORK_PR` and answering 200, unless
+     the run's event is on the allowlist, `push` or `pull_request` (the two the
+     workflows' routing expression routes). Every other event, named or not
+     (`pull_request_target`, `workflow_run`, `issue_comment`,
+     `repository_dispatch`, `workflow_dispatch`, `schedule`, `merge_group`, ...),
+     is refused fail-closed (`reason=event_not_allowed:<event>`). It also refuses
+     a run whose `head_repository` differs from its `repository` (or is
+     missing), or whose repository is not the webhook's repository. The same
+     check guards reconcile backfill and the hijack guard (step 4).
    - **Duplicate check:** no action if a runner named `cr-job-<job_id>` is
      registered, or a running execution has that `RUNNER_NAME`, or serves the
      job (`GH_JOB_ID`) and has not been reassigned to another job. This rests
@@ -112,9 +116,11 @@ a runner's execution by its `RUNNER_NAME` env, never by job ID.
 3. **Runner start.** The entrypoint points the workspace, temp dirs and Go
    caches at `/scratch`, so they do not consume RAM. Cloud Run's root
    filesystem is in memory. The entrypoint exchanges the claim token for the
-   JIT config (contract below) and `exec`s `run.sh --jitconfig` as PID 1.
-   GitHub assigns exactly one job; the process exits; the execution ends and
-   billing stops.
+   JIT config (contract below) and starts `run.sh --jitconfig` as its child
+   (it forwards Cloud Run's SIGTERM and reports the runner's real exit code;
+   [runner README](../runner/README.md)). GitHub assigns exactly one job; the
+   process exits; the execution ends and billing stops. A runner that gets no
+   job within `RUNNER_IDLE_TIMEOUT` stops itself (step 4, inherited time budget).
 4. **Hijack guard (in progress or completed on a cr-ci runner).** For any
    `in_progress` or `completed` event whose `runner_name` is `cr-job-*`,
    whatever the job's labels, the mediator compares the job with the job the
@@ -133,6 +139,28 @@ a runner's execution by its `RUNNER_NAME` env, never by job ID.
      reassigned, and make sure the job that took it has a runner named for it
      (a no-op if it has one). That runner, idle, serves the displaced job.
      Runners and queued jobs stay one to one.
+
+   **Inherited time budget.** The job that takes a runner gets only what is left
+   of that execution's `TASK_TIMEOUT` (P6: a job taken by a 40-minute-old runner
+   was killed 5 minutes later). Two things bound this:
+   - **Idle timeout.** The entrypoint stops a runner that has not started a job
+     within `RUNNER_IDLE_TIMEOUT` (default 10m, at least 1m, at most half of
+     `TASK_TIMEOUT`) of the container start, gracefully (SIGTERM to `run.sh`), and
+     exits 0 with an `idle_timeout:` log line. (The check and the SIGTERM are not
+     atomic: a job assigned in between is cancelled, and the entrypoint then logs
+     `ERROR idle_timeout_raced_job` and exits 4, so that failure is visible.) So a
+     runner can only take a job
+     while it is young, and **every job gets at least
+     `TASK_TIMEOUT - RUNNER_IDLE_TIMEOUT`** (35 minutes with the defaults). The
+     offline registration is reaped by the next `/reconcile` (it is aged from its
+     launch, so with the default idle timeout it is already past the five-minute
+     reap age), which also re-serves the job it was launched for if that is still
+     queued.
+   - **Logging.** `runner_swap` carries `execution_age` and `inherited_budget`
+     (`TASK_TIMEOUT` minus the age, from the launch time in memory or, after a
+     restart, from the execution's creation time). Below 20 minutes a WARNING
+     `runner_swap_low_budget` follows. The taker is not moved: GitHub has already
+     started it there.
 
    `/reconcile` repeats this check for every `in_progress` job on a `cr-job-*`
    runner, which covers a missed webhook.
@@ -166,17 +194,30 @@ a runner's execution by its `RUNNER_NAME` env, never by job ID.
      every repo in `TARGET_REPOS` and their jobs;
    - the hijack guard for jobs running on `cr-job-*` runners (step 4);
    - drops expired claims;
-   - deletes offline, idle `cr-job-*` registrations older than five minutes
-     (`runner_reaped`), aged from the launch when this process launched the
-     runner and otherwise from the first reconcile that saw it offline. A
-     runner whose claim is still pending (slow cold start) is kept;
+   - deletes offline, idle `cr-job-*` registrations of **this stack** older
+     than five minutes (`runner_reaped`), aged from the launch when this
+     process launched the runner and otherwise from the first reconcile that
+     saw it offline. A runner whose claim is still pending (slow cold start)
+     is kept. Every runner is registered with `RUNNER_LABEL` plus a stack
+     label, `crci-stack-<REGION>-<RUNNER_JOB_NAME>` (unique per project); a
+     registration with another stack's label is reaped only after
+     `TASK_TIMEOUT` plus five minutes offline (it cannot be live then), one with
+     no stack label (made before stack labels) like this stack's own. So two stacks serving the same repo, during a
+     region move, do not reap each other's cold-starting runners
+     ([operations](operations.md#two-stacks-region-move));
    - cancels executions older than `TASK_TIMEOUT` plus five minutes, a safety
      net behind Cloud Run's own task timeout (`execution_reaped`);
    - backfills queued, servable jobs of runs that pass the fork guard, oldest
      first, through the same dispatch path as a webhook, listing runners and
      executions once for the whole pass, and stopping when capacity is full.
+     This is the only path that serves a job left queued for capacity, so
+     with cr-ci as the primary runner `RECONCILE_SCHEDULE` should be every
+     minute. (No in-process timer: request-based CPU throttles work done after
+     a response.)
 
-   It answers 200 with a JSON summary (500 if a step failed) and logs
+   It answers 200 with a JSON summary (500 if a step failed; a GitHub 5xx for
+   one repo, run or job only skips that item, `reconcile_skip`, unless every
+   repo was skipped, `reconcile_all_skipped`, which is a 500) and logs
    `reconcile`.
 
 ### Mediator-to-runner contract (claim contract v2)
@@ -184,9 +225,13 @@ a runner's execution by its `RUNNER_NAME` env, never by job ID.
 - One execution per runner, with exactly these env overrides:
   `RUNNER_CLAIM_TOKEN` (32 lowercase hex characters from `crypto/rand`, single
   use), `MEDIATOR_URL` (https origin, no trailing slash), `GH_JOB_ID` (the job
-  the runner is launched to serve) and `RUNNER_NAME` (normally
+  the runner is launched to serve), `RUNNER_NAME` (normally
   `cr-job-<GH_JOB_ID>`; after a swap or a hijack it carries another job's ID,
-  and the runner only logs the mismatch). The JIT config is never in env,
+  and the runner only logs the mismatch) and `GH_REPOS` (comma-separated
+  `owner/name` list of the repositories whose jobs the runner may be handed:
+  the one repository in repo scope, every `TARGET_REPOS` entry of the owner in
+  org scope, since org-level runners take any of those jobs; the runner's job
+  guard refuses a job of any other repository). The JIT config is never in env,
   args or labels: execution env overrides are visible to anyone with
   `roles/run.viewer`.
 - The runner fetches a Google ID token for itself from the metadata server
@@ -217,10 +262,29 @@ a runner's execution by its `RUNNER_NAME` env, never by job ID.
 
 A fork-PR job that targets `RUNNER_LABEL` is refused a runner of its own, but
 it stays queued (up to 24 h), and GitHub may hand it to the next idle cr-ci
-runner launched for another job. The hijack guard (step 4) kills that runner
-as soon as GitHub reports the job, with no extra App permissions. The kill
-lands within seconds, but **after** the job may have started, so a few steps
-of untrusted code can run. That window is bounded by the other layers:
+runner launched for another job.
+
+**The window is closed on the runner side by the job-started hook.** The
+entrypoint sets `ACTIONS_RUNNER_HOOK_JOB_STARTED` to `cr-ci-job-guard.sh`.
+Runner.Worker reads it from its own environment and runs the hook after the job
+is assigned and before any of its steps, checkout included. The hook allows only
+`push`, or `pull_request` whose head repository is the repository (the same
+allowlist as the routing expression and the fork guard), and only jobs of the
+repositories the runner serves (`GH_REPOS`: its registration scope). Anything else is a
+**hard stop**: the hook kills the worker and the runner's process group, so no
+step of the job runs. A failed hook alone would not do: the runner would still
+run steps marked `if: always()` or `failure()`. For the same reason the
+entrypoint does not start the runner at all (exit 2) unless the hook is the
+root-owned, read-only file whose sha256 was pinned at image build; its path is
+fixed in production. The entrypoint exits 5 on a refusal
+([runner README](../runner/README.md), "Job guard", which cites the actions/runner
+2.338.0 source for each of these points).
+
+The hijack guard (step 4) stays as the next layer: it kills a runner whose job does
+not match as soon as GitHub reports the job, with no extra App permissions, and
+deletes the registration. Before the hook, that kill landed within seconds but
+**after** the job may have started, so a few steps of untrusted code could run.
+That case and any gap in the hook are also bounded by the other layers:
 
 - the job only exists if a maintainer approved the fork PR's workflows
   (deploy precondition 1), and the `runs-on` expression already routes
@@ -249,14 +313,38 @@ repository and still races; org runner groups restricted to selected
 workflows do not exist at repo scope and block `pull_request` runs when
 pinned to a ref.
 
-**Future hardening: per-run composite label.** Workflows would target
+**Further hardening (optional): per-run composite label.** Workflows would target
 `<RUNNER_LABEL>-run-<run_id>` (for example
 `format('{0}-run-{1}', vars.SCION_LARGE_RUNNER, github.run_id)` in the
 `runs-on` expression), and the mediator would require that label on the job
 and mint each runner with only that label. A job of another run, including a
-fork run, could then never match a cr-ci runner, closing the window
-entirely. It costs a dynamic label in workflows, logs and reconcile matching,
-so it is deferred.
+fork run, could then never match a cr-ci runner at all (the job-started hook
+already refuses it before any step). It costs a dynamic label in workflows, logs
+and reconcile matching, so it is deferred.
+
+### Residual risk: job code can read the runner's credentials
+
+The entrypoint, `run.sh`, the runner listener and worker, and the job's steps all run as
+one uid (`runner`, 1001) in the execution, as on any non-containerized self-hosted
+runner. Job code can therefore read:
+- the JIT config on `run.sh`'s argv: this ephemeral runner's registration, usable to act
+  as that runner until GitHub removes the registration after the job;
+- the claim token in `/proc/1/environ`: already spent (single use).
+
+sec-review-3 rates it LOW (record `crci-img-651578be-v3.md`, re-rated for the job
+guard by its fork-guard record), on these conditions:
+- the window in which untrusted code could run on a cr-ci runner is closed by the
+  runner-side job-started hook (residual risk above), on top of the routing
+  expression's guard and the mediator's fork guard (step 2). **Residual:** a
+  compromised trusted job can still read its own runner's registration
+  (ptone/scion#5978);
+- one job runs per runner;
+- the hijack guard (step 4) and the reaper bound what a leaked registration could do.
+
+If untrusted code were ever routed to cr-ci, the risk would be Medium/High. The fork
+guards are therefore load-bearing for this, not only defense in depth. The structural
+fix is tracked in ptone/scion#5978: a runner-only uid with job steps dropped to another
+uid, or passing the JIT config by file and deleting it once the listener has started.
 
 ## Security model
 
@@ -273,16 +361,18 @@ so it is deferred.
   claim also needs the runner identity's ID token (claim contract v2). Keep
   `roles/run.viewer` narrow anyway.
 - **One job per runner,** in three layers: GitHub JIT runners take at most one
-  job; the entrypoint `exec`s `run.sh` as PID 1; the job uses
+  job; the entrypoint runs `run.sh` once and exits when it does; the job uses
   `--max-retries=0` and a hard `TASK_TIMEOUT`.
 - **Fork PRs on public repositories,** in three layers:
   1. The repo or org setting requires approval for **all** external
      contributors (a deploy precondition, not a suggestion).
   2. The `runs-on` expression routes cross-repo PRs to `ubuntu-latest`.
-  3. The mediator independently refuses fork-PR, `pull_request_target` and
-     `workflow_run` runs,
-     even if a PR edits the workflow to target the label, and kills any cr-ci
-     runner such a job manages to start on (the hijack guard; see the
+  3. The mediator independently refuses every run that is not a same-repo `push`
+     or `pull_request` (an allowlist), even if a PR edits the workflow to target
+     the label, and kills any cr-ci runner such a job manages to start on (the
+     hijack guard).
+  4. On the runner, the job-started hook refuses such a job before any of its
+     steps, with a hard stop (see the
      [residual risk](#residual-risk-label-matched-job-assignment)).
 
   GitHub warns that self-hosted runners on public repos are risky. The layered
@@ -308,9 +398,12 @@ so it is deferred.
   `RUNNER_DISK_GI` x running executions. The default 10 GiB is **not** enough
   for a warm golangci-lint: the P6 PoC measured about 15-20 GiB on disk
   (restored Go cache 4.8 GB growing to ~8-9.5 GB, workspace 1.1 GB, modules
-  ~1.3 GB, Go temp dirs up to ~2 GB), and runs with 10 GiB ran out of space. Raise
-  the per-instance quota and use about 25 GiB, and size the regional quota for
-  `MAX_CONCURRENT_RUNNERS` x `RUNNER_DISK_GI`: at 25 GiB the default 100 GiB
+  ~1.3 GB, Go temp dirs up to ~2 GB), and runs with 10 GiB ran out of space. An
+  on-disk build cache needs at least 20 GiB: P6b peaked at 16.5 GB on a 23 GiB
+  disk. Raise the per-instance quota first; the limit the server then enforces
+  depends on the region and the grant (us-west2 runs with `RUNNER_DISK_GI=23`, its
+  limit after the grant). Size the regional quota for
+  `MAX_CONCURRENT_RUNNERS` x `RUNNER_DISK_GI`: at 23-25 GiB the default 100 GiB
   allows `MAX_CONCURRENT_RUNNERS=4`, and a 5th runner would fail as
   `launch_failed` (`RESOURCE_EXHAUSTED`)
   ([gcp-setup.md, "Quotas"](gcp-setup.md#9-quotas)).

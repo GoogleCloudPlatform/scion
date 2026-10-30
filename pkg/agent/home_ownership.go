@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"syscall"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
@@ -78,18 +77,6 @@ func newAgentHomeOwnershipError(err, repairErr error) *AgentHomeOwnershipError {
 	return e
 }
 
-func pathOwner(path string) (uid, gid int, ok bool) {
-	fi, err := os.Lstat(path)
-	if err != nil {
-		return 0, 0, false
-	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok {
-		return 0, 0, false
-	}
-	return int(st.Uid), int(st.Gid), true
-}
-
 // agentHomeOwner is the owner the runtime advertises to the agent
 // container as SCION_HOST_UID and SCION_HOST_GID
 // (runtime.AdvertisedHostOwnerIDs), for the workspace backend this start
@@ -107,8 +94,8 @@ type agentHomeOwner struct {
 func advertisedAgentHomeOwner(settings *config.VersionedSettings) agentHomeOwner {
 	backend := ""
 	nfsUID, nfsGID := 0, 0
-	if settings != nil && settings.Server != nil && settings.Server.WorkspaceStorage != nil {
-		ws := settings.Server.WorkspaceStorage
+	if settings != nil && settings.Server != nil && settings.Server.EffectiveWorkspaceStorage() != nil {
+		ws := settings.Server.EffectiveWorkspaceStorage()
 		backend = ws.Backend
 		if ws.NFS != nil {
 			nfsUID, nfsGID = ws.NFS.UID, ws.NFS.GID

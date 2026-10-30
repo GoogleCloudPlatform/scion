@@ -58,8 +58,15 @@ type SetEnvVarResponse struct {
 // success, or writes an HTTP error and returns false on failure.
 //
 // For user scope: extracts the authenticated user's ID as scopeID (ignoring
-// any client-supplied value). No CheckAccess call needed — identity enforcement
-// is the access control.
+// any client-supplied value). The caller must use an interactive session or
+// dev credential; a user access token is refused (session-only,
+// CREDENTIAL_MANAGEMENT). A federated caller may read (never write) its own
+// user-level material, as before (federatedOwnUserRead).
+//
+// For hub scope: agents may read. A user must be an unscoped local platform
+// admin on an interactive session or dev credential; a user access token is
+// refused whatever its boundary or scopes (session-only,
+// CREDENTIAL_MANAGEMENT).
 //
 // For project scope: verifies the project exists, then checks authorization. Users
 // must pass CheckAccess (with owner bypass). Agents get read-only access to
@@ -81,7 +88,21 @@ func (s *Server) resolveEnvSecretAccess(w http.ResponseWriter, r *http.Request, 
 			Unauthorized(w)
 			return "", false
 		}
+		// A federated caller is never a profile writer: its writes are
+		// refused here, before the credential check, with the profile
+		// write refusal.
 		if isWrite && !requireProfileWriter(w, r) {
+			return "", false
+		}
+		// User-level variables and secrets need an interactive session or
+		// dev credential; every user access token is refused. The one
+		// exception is a federated caller's READ of its own user-level
+		// material, kept deliberately as it was before session-only: it is
+		// read-only (writes were refused above), limited to the caller's own
+		// ID (returned below, never a client-supplied one), and gives no hub
+		// scope (the hub branch requires an unscoped local admin).
+		if !sessionCredentialAllowed(ctx) && !federatedOwnUserRead(ctx, isWrite) {
+			writeEnvSecretSessionRequired(w)
 			return "", false
 		}
 		return userIdent.ID(), true
@@ -181,7 +202,14 @@ func (s *Server) resolveEnvSecretAccess(w http.ResponseWriter, r *http.Request, 
 			Forbidden(w)
 			return "", false
 		}
-		if userIdent.Role() != store.UserRoleAdmin {
+		// Hub-level variables and secrets need an unscoped admin on an
+		// interactive session or dev credential; every user access token is
+		// refused, whatever its boundary or scopes.
+		if !sessionCredentialAllowed(ctx) {
+			writeEnvSecretSessionRequired(w)
+			return "", false
+		}
+		if !IsUnscopedLocalPlatformAdmin(userIdent) {
 			Forbidden(w)
 			return "", false
 		}
@@ -197,6 +225,26 @@ func (s *Server) resolveEnvSecretAccess(w http.ResponseWriter, r *http.Request, 
 		BadRequest(w, "invalid scope: "+scope)
 		return "", false
 	}
+}
+
+// envSecretSessionRequiredMessage is the refusal message for a user access
+// token on user- or hub-level env and secret operations.
+const envSecretSessionRequiredMessage = "user- and hub-level environment variables and secrets require an interactive login (run 'scion hub auth login'); access tokens are not accepted"
+
+// federatedOwnUserRead reports whether the request is a federated caller's
+// read of its own user-level env or secret material: a read (not a write),
+// on a federation credential, by a federated identity. It admits nothing
+// else; in particular a user access token never matches.
+func federatedOwnUserRead(ctx context.Context, isWrite bool) bool {
+	return !isWrite &&
+		GetCredentialContextFromContext(ctx).Kind == CredentialKindFederation &&
+		isFederatedCaller(ctx)
+}
+
+// writeEnvSecretSessionRequired writes the session-only refusal for user-
+// and hub-level env and secret operations.
+func writeEnvSecretSessionRequired(w http.ResponseWriter) {
+	writeSessionOnlyDenial(w, ErrCodeForbidden, envSecretSessionRequiredMessage, authzop.ReasonCredentialManagement)
 }
 
 // authorizeHubEnvVarList decides read-only access to the hub-level
@@ -220,6 +268,13 @@ func (s *Server) authorizeHubEnvVarList(w http.ResponseWriter, r *http.Request, 
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
 	userIdent, isUser := identity.(UserIdentity)
+	// The hub-level list is session-only like the other hub-level env and
+	// secret operations: a user access token is refused here, before any
+	// role or permission check.
+	if isUser && !isNilIdentity(userIdent) && !sessionCredentialAllowed(ctx) {
+		writeEnvSecretSessionRequired(w)
+		return true, false, false
+	}
 	if !isUser || isNilIdentity(userIdent) || userIdent.Role() == store.UserRoleAdmin {
 		// Test identities with admin roles do not read hub environment
 		// variables (test-admin policy).
@@ -1635,56 +1690,12 @@ func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentI
 	}
 
 	if includeUser {
-		eligible, err := s.progenyEligibleSecretIDs(ctx, facts.Agent)
-		if err != nil {
+		var userOK bool
+		secrets, items, userOK = s.agentListUserSecrets(ctx, agentID, ident, facts, secrets, items)
+		if !userOK {
 			emitListExitItem(store.ScopeUser, facts.Root.ID, GrantProgeny, "")
 			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "failed to list secrets", nil)
 			return
-		}
-		metas, err := s.secretBackend.List(ctx, secret.Filter{
-			Scope:   store.ScopeUser,
-			ScopeID: facts.Root.ID,
-		})
-		if err != nil {
-			emitListExitItem(store.ScopeUser, facts.Root.ID, GrantProgeny, "")
-			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "failed to list secrets", nil)
-			return
-		}
-		for _, m := range metas {
-			if m.SecretType == store.SecretTypeInternal {
-				continue
-			}
-			if !m.AllowProgeny || !eligible[m.ID] {
-				continue
-			}
-			live, kind, _, lerr := s.progenySourceLive(ctx, m)
-			if lerr != nil {
-				// A liveness-check error is not the same as "not shared":
-				// logged distinctly so an operator is not left to guess
-				// which one occurred, and recorded as a per-row item so the
-				// audit event shows the row was skipped rather than simply
-				// absent.
-				slog.Error("agent list secrets: progeny source liveness check failed",
-					"agent_id", agentID, "key", m.Name, "err", lerr)
-				items = append(items, materialSelectionItem(ItemResult{
-					Candidate: Candidate{Kind: MaterialKindSecret, Key: m.Name, Scope: store.ScopeUser, ScopeID: facts.Root.ID, Grant: GrantProgeny, Meta: m},
-					Reason:    ReasonBackendError,
-				}, "", ""))
-				continue
-			}
-			if !live {
-				continue
-			}
-			var src *SourceRef
-			if kind != "" {
-				src = &SourceRef{Kind: kind, ID: m.CreatedBy}
-			}
-			secrets = append(secrets, AgentSecretMeta{Key: m.Name, Type: m.SecretType, Target: m.Target})
-			items = append(items, materialSelectionItem(ItemResult{
-				Candidate: Candidate{Kind: MaterialKindSecret, Key: m.Name, Scope: store.ScopeUser, ScopeID: facts.Root.ID, Grant: GrantProgeny, SharingSource: src, Meta: m},
-				Allowed:   true,
-				Reason:    ReasonAllowed,
-			}, "", ""))
 		}
 	}
 
@@ -2206,19 +2217,48 @@ func (s *Server) handleProjectSecretByKey(w http.ResponseWriter, r *http.Request
 // this way.
 const autoProvideLinkedBy = "auto-provide"
 
+// autoProvideBrokersPageSize is the page size autoLinkProviders lists
+// auto-provide brokers with; it follows the cursor through every page.
+const autoProvideBrokersPageSize = 100
+
+// listAutoProvideBrokers returns every broker with auto_provide enabled,
+// newest first, following the list cursor through all pages so a hub with
+// more brokers than one page links them all (ptone/scion#1998). A cursor
+// the store has already returned is an error rather than an endless loop.
+func (s *Server) listAutoProvideBrokers(ctx context.Context) ([]store.RuntimeBroker, error) {
+	autoProvideTrue := true
+	var all []store.RuntimeBroker
+	cursor := ""
+	seen := make(map[string]struct{})
+	for {
+		page, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{
+			AutoProvide: &autoProvideTrue,
+		}, store.ListOptions{Limit: autoProvideBrokersPageSize, Cursor: cursor, SkipTotalCount: true})
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, page.Items...)
+		if page.NextCursor == "" {
+			return all, nil
+		}
+		if _, ok := seen[page.NextCursor]; ok {
+			return nil, fmt.Errorf("listing auto-provide brokers: pagination returned repeated cursor %q", page.NextCursor)
+		}
+		seen[page.NextCursor] = struct{}{}
+		cursor = page.NextCursor
+	}
+}
+
 // autoLinkProviders links brokers with auto_provide enabled as providers for a project.
 // If the project has no default runtime broker, the first auto-provided broker is set as default.
 func (s *Server) autoLinkProviders(ctx context.Context, project *store.Project) {
-	autoProvideTrue := true
-	autoProviders, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{
-		AutoProvide: &autoProvideTrue,
-	}, store.ListOptions{})
+	autoProviders, err := s.listAutoProvideBrokers(ctx)
 	if err != nil {
 		s.envSecretLog.Warn("Failed to query auto-provide brokers", "project_id", project.ID, "error", err)
 		return
 	}
 
-	for _, autoBroker := range autoProviders.Items {
+	for _, autoBroker := range autoProviders {
 		// A flat Runtime Broker never receives an automatic link or
 		// default, whatever the experiment state: it is linked only by an
 		// explicit link action.

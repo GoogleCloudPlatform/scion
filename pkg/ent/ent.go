@@ -49,6 +49,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/group"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/harnessconfig"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubencryptionmigration"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubencryptionpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubinstance"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubsetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationconfig"
@@ -95,6 +97,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/userdeletion"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/userdeletionagent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userterminalworkspace"
 )
 
@@ -193,6 +197,8 @@ func checkColumn(t, c string) error {
 			group.Table:                         group.ValidColumn,
 			groupmembership.Table:               groupmembership.ValidColumn,
 			harnessconfig.Table:                 harnessconfig.ValidColumn,
+			hubencryptionmigration.Table:        hubencryptionmigration.ValidColumn,
+			hubencryptionpolicy.Table:           hubencryptionpolicy.ValidColumn,
 			hubinstance.Table:                   hubinstance.ValidColumn,
 			hubsetting.Table:                    hubsetting.ValidColumn,
 			integrationconfig.Table:             integrationconfig.ValidColumn,
@@ -239,6 +245,8 @@ func checkColumn(t, c string) error {
 			usagereservation.Table:              usagereservation.ValidColumn,
 			user.Table:                          user.ValidColumn,
 			useraccesstoken.Table:               useraccesstoken.ValidColumn,
+			userdeletion.Table:                  userdeletion.ValidColumn,
+			userdeletionagent.Table:             userdeletionagent.ValidColumn,
 			userterminalworkspace.Table:         userterminalworkspace.ValidColumn,
 		})
 	})

@@ -65,12 +65,8 @@ func loadReferenceConstants(t *testing.T) referenceConstants {
 		{"permissions", "permissions."},
 		{filepath.Join("..", "store"), "store."},
 	}
-	// pkgmove:scan-covers pkg/hub/apierr
+	// pkgmove:scan-covers guardScanSubdirs
 	// loadReferenceConstants reads the constants of each guardScanSubdirs directory (through parseNonTestGoFiles, under its package prefix) for the permission ID reference checks.
-	// pkgmove:scan-covers pkg/hub/internal/principal
-	// loadReferenceConstants reads the constants of each guardScanSubdirs directory (through parseNonTestGoFiles, under its package prefix) for the permission ID reference checks.
-	// pkgmove:scan-covers pkg/hub/maintenance
-	// loadReferenceConstants reads the constants of each guardScanSubdirs directory (through parseNonTestGoFiles, under its package prefix) for the permission ID reference checks, once the directory exists.
 	for _, rel := range mustGuardScanDirs(t, ".") {
 		if rel == "." {
 			continue
@@ -116,7 +112,6 @@ var pendingNonRouteRows = map[string]string{
 	"secret.deliver":          "decision rules exist; no production path requests it yet (ptone/scion#4171)",
 	"env_var.deliver":         "decision rules exist; no production path requests it yet (ptone/scion#4171)",
 	"skill_injection.deliver": "decision rules exist; no production path requests it yet (ptone/scion#4171)",
-	"gcp_service_account.use": "decision rules exist; token mint checks the per-account token scope (ptone/scion#4171)",
 }
 
 // parseNonTestGoFiles parses the non-test Go files in dir.
@@ -175,6 +170,12 @@ var nonRouteCallSites = map[string][]permissionCallSite{
 		{"conduit_agent_check.go", "conduitAgentScopeCheck"},
 	},
 	"agent.identity_token": {{"handlers_oidc.go", "Server.handleAgentIdentityToken"}},
+	// Both GCP token mint endpoints decide it through authorizeAgentGCPMint;
+	// the GCS link proxy decides it for the stored sending agent.
+	"gcp_service_account.use": {
+		{"handlers_gcp_identity_mint_authority.go", "Server.authorizeAgentGCPMint"},
+		{"authz_resource_parent_ceiling.go", "AuthzService.decideStoredAgentServiceAccountUse"},
+	},
 }
 
 // routeGuardPermissionIDs returns the permissions the RouteHubAdmin guard

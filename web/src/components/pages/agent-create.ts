@@ -455,7 +455,7 @@ export class ScionPageAgentCreate extends LitElement {
           // create an agent anywhere even though the API would have allowed it.
           // The unfiltered list is already scoped to what the caller may read.
           apiFetch('/api/v1/projects?limit=100'),
-          fetch('/api/v1/runtime-brokers?limit=100', { credentials: 'include' }),
+          apiFetch('/api/v1/runtime-brokers?limit=100', { authErrors: 'caller' }),
           // Caught on its own: a failed template page leaves the template
           // list empty with an inline error instead of failing the form.
           apiFetchAllPages<Template>(tmplUrl, 'templates').then(
@@ -834,8 +834,8 @@ export class ScionPageAgentCreate extends LitElement {
         projectId: this.projectId,
         notify: this.notify,
         // Take the hub's async launch path when it has it on (the
-        // hub.async_agent_launch experiment); a hub with it off ignores this
-        // and answers synchronously as before.
+        // hub.async_agent_launch experiment, on by default); a hub with it
+        // off ignores this and answers synchronously.
         acceptAsyncLaunch: true,
       };
 
@@ -858,9 +858,9 @@ export class ScionPageAgentCreate extends LitElement {
         if (gcpIdentity) body.gcp_identity = gcpIdentity;
       }
 
-      const response = await fetch('/api/v1/agents', {
+      const response = await apiFetch('/api/v1/agents', {
         method: 'POST',
-        credentials: 'include',
+        authErrors: 'caller',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
@@ -910,9 +910,9 @@ export class ScionPageAgentCreate extends LitElement {
         // outlives the navigation.
         let startError: string | null = null;
         try {
-          const startResp = await fetch(`/api/v1/agents/${agentId}/start`, {
+          const startResp = await apiFetch(`/api/v1/agents/${agentId}/start`, {
             method: 'POST',
-            credentials: 'include',
+            authErrors: 'caller',
           });
           if (!startResp.ok) {
             const fallback = `HTTP ${startResp.status}`;

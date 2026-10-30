@@ -17,9 +17,11 @@ package config
 import (
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"gopkg.in/yaml.v3"
 )
@@ -42,6 +44,11 @@ type ValidationError struct {
 	Path string
 	// Message describes the validation failure.
 	Message string
+	// StorageField marks a project storage field rule
+	// (ValidateProjectStorage). Path is then the field's settings path. A
+	// settings migration converts the file anyway and reports these as
+	// warnings, so the operator gets the file to fix.
+	StorageField bool
 }
 
 func (e ValidationError) Error() string {
@@ -68,7 +75,7 @@ func DetectSettingsFormat(data []byte) (version string, isLegacy bool) {
 
 	// Parse into a generic map to inspect top-level keys.
 	var raw map[string]interface{}
-	if err := yaml.Unmarshal(data, &raw); err != nil {
+	if err := unmarshalSettingsYAML(data, &raw); err != nil {
 		// Unparseable data is treated as neither versioned nor legacy.
 		return "", false
 	}
@@ -160,6 +167,8 @@ func ValidateSettings(data []byte, schemaVersion string) ([]ValidationError, err
 		Runtimes map[string]V1RuntimeConfig `yaml:"runtimes"`
 		Profiles map[string]V1ProfileConfig `yaml:"profiles"`
 		Server   struct {
+			ProjectStorage   *V1ProjectStorageConfig   `yaml:"project_storage"`
+			WorkspaceStorage *V1WorkspaceStorageConfig `yaml:"workspace_storage"`
 			SharedDirStorage *V1SharedDirStorageConfig `yaml:"shared_dir_storage"`
 			HomeStorage      *V1HomeStorageConfig      `yaml:"home_storage"`
 			Broker           struct {
@@ -169,17 +178,22 @@ func ValidateSettings(data []byte, schemaVersion string) ([]ValidationError, err
 	}
 	// A decode failure here (e.g. a wrongly typed field) is already
 	// reported by the schema pass above.
-	if yaml.Unmarshal(data, &vs) == nil {
+	if unmarshalSettingsYAML(data, &vs) == nil {
 		errs = append(errs, ValidateSharedDirSizes(vs.Runtimes, vs.Profiles)...)
-		errs = append(errs, ValidateSharedDirStorageBackends(vs.Runtimes, vs.Profiles, vs.Server.SharedDirStorage)...)
-		errs = append(errs, ValidateHomeStorageOverrides(vs.Runtimes, vs.Profiles)...)
-		errs = append(errs, ValidatePlacement(vs.Runtimes, vs.Profiles, LiteralSiblingGroups(vs.Runtimes))...)
-		if err := vs.Server.HomeStorage.Validate(); err != nil {
-			errs = append(errs, ValidationError{Path: "server.home_storage", Message: err.Error()})
+		errs = append(errs, RemovedStorageOverrideErrors(vs.Runtimes, vs.Profiles, RuntimeBrokerInstanceTargets(vs.Server.Broker.Instances))...)
+		if err := ValidateStorageBlocks(vs.Server.ProjectStorage, vs.Server.WorkspaceStorage, vs.Server.SharedDirStorage, vs.Server.HomeStorage); err != nil {
+			var fields FieldErrorList
+			if errors.As(err, &fields) {
+				for _, f := range fields {
+					errs = append(errs, ValidationError{Path: f.Path, Message: strings.TrimPrefix(strings.TrimPrefix(f.Error(), f.Path), ": "), StorageField: true})
+				}
+			} else {
+				errs = append(errs, ValidationError{Path: ProjectStorageKey, Message: err.Error()})
+			}
 		}
+		errs = append(errs, ValidatePlacement(vs.Runtimes, vs.Profiles, LiteralSiblingGroups(vs.Runtimes))...)
 		errs = append(errs, RuntimeBrokerInstanceDuplicateKeys(vs.Server.Broker.Instances)...)
 		errs = append(errs, RuntimeBrokerInstanceSharedDirSizes(vs.Server.Broker.Instances)...)
-		errs = append(errs, RuntimeBrokerInstanceNFSErrors(vs.Server.Broker.Instances, vs.Server.SharedDirStorage)...)
 	}
 	return errs, nil
 }
@@ -193,17 +207,24 @@ func SettingsWarnings(data []byte, schemaVersion string) []string {
 		return nil
 	}
 	var vs struct {
-		Runtimes map[string]V1RuntimeConfig `yaml:"runtimes"`
-		Profiles map[string]V1ProfileConfig `yaml:"profiles"`
-		Server   struct {
+		Runtimes         map[string]V1RuntimeConfig `yaml:"runtimes"`
+		Profiles         map[string]V1ProfileConfig `yaml:"profiles"`
+		DefaultResources *api.ResourceSpec          `yaml:"default_resources"`
+		Server           struct {
 			HomeStorage *V1HomeStorageConfig `yaml:"home_storage"`
 		} `yaml:"server"`
 	}
-	if yaml.Unmarshal(data, &vs) != nil {
+	if unmarshalSettingsYAML(data, &vs) != nil {
 		return nil
 	}
 	warnings := SafeToEvictIgnoredWarnings(vs.Runtimes, vs.Profiles)
-	warnings = append(warnings, HomeStorageIgnoredWarnings(vs.Runtimes, vs.Profiles)...)
+	// Resource quantities the server-config API rejects or warns about
+	// (ptone/scion#6581) are warnings here: a loaded file is never refused
+	// for them.
+	qErrs, qWarnings := ValidateResourceQuantities(vs.DefaultResources, vs.Profiles)
+	for _, e := range append(qErrs, qWarnings...) {
+		warnings = append(warnings, e.Error())
+	}
 	warnings = append(warnings, PlacementIgnoredWarnings(vs.Runtimes, vs.Profiles)...)
 	warnings = append(warnings, PlacementSettingsWarnings(vs.Runtimes, vs.Profiles)...)
 	return append(warnings, HomeStorageWindowWarnings(vs.Server.HomeStorage)...)
@@ -269,7 +290,7 @@ func validateAgainstSchema(data []byte, schemaVersion string, schemaFiles map[st
 
 	// Parse the input data from YAML to a generic structure.
 	var doc interface{}
-	if err := yaml.Unmarshal(data, &doc); err != nil {
+	if err := unmarshalSettingsYAML(data, &doc); err != nil {
 		return nil, fmt.Errorf("failed to parse settings: %w", err)
 	}
 

@@ -22,90 +22,94 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
+// sharedDirsNotSharedMessage is the dispatch warning of a start whose
+// runtime cannot mount the shared tree while the project's shared dirs are
+// on a shared backend: the agent gets node-local shared dirs (a runtime
+// capability gap, tracked in ptone/scion#5926), so it does not see what the
+// hub or other agents put there.
+const sharedDirsNotSharedMessage = "Warning: shared directories are not shared on this runtime; files uploaded through the hub or written by other agents are not visible here"
+
+// sharedDirsNotSharedWarning returns sharedDirsNotSharedMessage for a start
+// with shared dirs on a shared backend whose runtime type cannot mount the
+// shared tree (it is neither a local-container nor a Kubernetes runtime),
+// and "" otherwise. The legacy split is refused by resolveSharedDirs
+// instead.
+func sharedDirsNotSharedWarning(sdLayout projectfs.Layout, split bool, runtimeName string, dirs []api.SharedDir) string {
+	if len(dirs) == 0 || split || !sdLayout.Backend.Shared() {
+		return ""
+	}
+	if isLocalContainerRuntime(runtimeName) || isKubernetesRuntime(runtimeName) {
+		return ""
+	}
+	return sharedDirsNotSharedMessage
+}
+
 // resolveSharedDirs is the single resolution point for a project's shared
-// directories, used by both container runtimes (design
-// deploy-config-explore §3.2.2/§3.2.3): given one settings file, Docker's
-// bind-mount source and Kubernetes' PVC subPath must resolve to the same
-// projects/<pid>/shared-dirs/<name> path under the same base.
+// directories, for every runtime (design fs-cleanup §P2, one backend for workspaces and shared dirs): sdLayout is
+// the broker's shared-dir Layout (config.SharedDirStorageLayout over the
+// global-only settings), and Docker/Podman/Apple's bind-mount sources and
+// Kubernetes' subPaths both come from sdLayout.Resolve, so they name the
+// same <subpath_root>/<projectID>/shared-dirs/<name> tree the hub serves.
+// split reports the transitional legacy split (shared dirs on
+// server.shared_dir_storage's nfs export while workspaces are not on nfs).
 //
-// When sdCfg is nil or its Backend is "" / "local", behaviour is
-// byte-identical to today: shared dirs are ensured and mounted under the
-// broker-local layout, and errors are logged and swallowed rather than
-// failing agent start (matching the pre-existing run.go:952-972 behaviour).
+// On the local backend, behaviour is byte-identical to the pre-Layout
+// local layout: shared dirs are ensured and mounted under the broker-local
+// layout, and errors are logged and swallowed rather than failing agent
+// start. Runtimes that neither bind-mount host paths nor consume
+// RunConfig.SharedDirStorage (Cloud Run) also keep that behaviour, unless
+// the shared dirs are on the split legacy export, which they cannot mount.
 //
-// When sdCfg.Backend is "nfs", resolution fails closed (design G5): a
-// missing project ID or a missing NFS host base (on a local-container
-// runtime) return an error instead of silently falling back to local disk.
-// The returned SharedDirRealization is nil unless backend is "nfs"; it is
-// consumed by the Kubernetes runtime's buildPod to mount the shared PVC by
-// subPath instead of creating per-dir dynamic PVCs.
+// On a shared backend, resolution fails closed (design G5): a missing or
+// invalid hub project ID, an invalid shared-dir name, or a missing host
+// base on a local-container runtime return an error instead of silently
+// falling back to local disk. The returned SharedDirRealization is
+// non-nil exactly on a shared backend; the Kubernetes runtime's buildPod
+// mounts every dir from it by subPath.
 //
-// Keep the nfs branch in lockstep with runtime.ResolveSharedDirHostPath,
-// which chat plugins use to find the same directories: both apply the same
-// path checks (name and project ID validation, Resolve, ConfineLeaf,
+// Keep the shared-backend chain in lockstep with
+// runtime.ResolveSharedDirHostPath, which chat plugins use to find the same
+// directories: both apply the same path checks, in the same order (name
+// and project ID validation, Resolve with ConfineLeaf,
 // ValidateNotExportRoot, host-base stat refusal, EvalSymlinks of the host
-// base, EnsureLeaf, then the resolved-path backstop). Both chains now
-// call ValidateNotExportRoot right after ConfineLeaf: here via
-// NFSSharedDirsToVolumeMounts, there directly. A change to either chain
-// must be made to both; TestSharedDirChainsParity runs one table of
-// refusals through both.
+// base, EnsureLeaf, then the resolved-path backstop). One deliberate
+// difference: on Kubernetes, when the shared dirs ride the nfs workspace
+// export (no split), a host base this broker has not mounted, or a walk
+// refused with EACCES/EPERM/EROFS, skips EnsureLeaf, the backstop and the
+// leaf-group read for that start (kubeletMayCreateSharedDirs, as
+// ensureNFSWorkspaceLeaf does for the workspace); the pod then mounts only
+// the leaf by the subPath sharedDirClaimSubPath checks. When that share has
+// no claim (inline pod volumes, inlineSharedDirs), both cases refuse the
+// start instead. The plugin chain always refuses. A change to either chain must be made to both;
+// TestSharedDirChainsParity runs one table of refusals through both.
 func resolveSharedDirs(
-	sdCfg *config.V1SharedDirStorageConfig,
+	sdLayout projectfs.Layout,
+	split bool,
 	projectDir string,
 	projectID string,
 	runtimeName string,
 	dirs []api.SharedDir,
 	containerWorkspace string,
-	nfsWorkspaceBackend bool,
 ) ([]api.VolumeMount, *runtime.SharedDirRealization, error) {
 	if len(dirs) == 0 {
 		return nil, nil, nil
 	}
 
-	// Validate whenever a block is configured, regardless of backend, so an
-	// unrecognized value (a typo, wrong case, trailing space) fails closed
-	// instead of silently taking the local-layout branch below (design G5;
-	// round 1 review finding C2/T3).
-	if sdCfg != nil {
-		if err := sdCfg.Validate(); err != nil {
-			return nil, nil, fmt.Errorf("server.shared_dir_storage: %w", err)
-		}
-	}
-
-	if sdCfg == nil || sdCfg.Backend == "" || sdCfg.Backend == "local" {
-		// F-111 review (tf-lead/tf-review-nfsfix, BLOCKING): this branch also
-		// fires when server.shared_dir_storage is unset/"local" but
-		// server.workspace_storage.backend IS "nfs" — the OLDER, separate NFS
-		// mechanism the k8s runtime's nfsSharedDirs path (k8s_runtime.go)
-		// consumes directly from RunConfig.SharedDirs. Names there become NFS
-		// subPaths (nfsSharedDirSubPath) exactly the way names under
-		// server.shared_dir_storage=nfs do — and dirs can come from a cloned
-		// repo's in-repo settings.yaml — so the same path-escape risk that
-		// round 2's security review (F1, HIGH) fixed for the newer mechanism
-		// applied here too, unfixed, until now. Validate and fail closed when
-		// nfsWorkspaceBackend, since an invalid name there is a real subPath
-		// escape risk (F-111 additionally gave the winner init container
-		// CHOWN/FOWNER/DAC_OVERRIDE, turning an escape into a cross-project
-		// ownership hijack, not just a leak) — but keep the existing
-		// swallow-and-log behavior for every other case (local-container
-		// runtimes, or nfs disabled), to preserve design AC1 exactly as
-		// before for configurations this bug never affected.
-		if nfsWorkspaceBackend {
-			if err := api.ValidateSharedDirs(dirs); err != nil {
-				return nil, nil, fmt.Errorf("shared_dirs: %w", err)
-			}
-		}
-		// Default/unset/"local": today's local layout. Errors here are
-		// logged and swallowed, not propagated — this preserves exact
-		// pre-existing behaviour (design AC1).
+	mountsShare := isLocalContainerRuntime(runtimeName) || isKubernetesRuntime(runtimeName)
+	if !sdLayout.Backend.Shared() || (!mountsShare && !split) {
+		// The local layout. Errors here are logged and swallowed, not
+		// propagated — this preserves exact pre-existing behaviour (design
+		// AC1).
 		if err := config.EnsureSharedDirs(projectDir, dirs); err != nil {
 			util.Debugf("Start: failed to ensure shared dirs: %v", err)
 		}
@@ -116,196 +120,185 @@ func resolveSharedDirs(
 		}
 		return volumes, nil, nil
 	}
-
-	// sdCfg.Backend == "nfs" — Validate above already rejected every other
-	// value, so this is the only remaining case.
+	backend := sdLayout.Backend
 	if projectID == "" {
 		return nil, nil, fmt.Errorf(
-			"server.shared_dir_storage backend is \"nfs\" but no hub project ID is available; shared dirs cannot be resolved")
+			"shared dirs are on the %s backend (server.project_storage) but no hub project ID is available; shared dirs cannot be resolved", backend)
 	}
-	if !isLocalContainerRuntime(runtimeName) && !isKubernetesRuntime(runtimeName) {
-		// e.g. cloudrun/cloudrun-sandbox: neither bind-mounts a host path nor
-		// consumes RunConfig.SharedDirStorage, so silently succeeding would
-		// produce volumes/realizations nobody reads (design G5; round 1
-		// review finding C8/T11).
-		return nil, nil, fmt.Errorf("server.shared_dir_storage=nfs is not supported on runtime %q", runtimeName)
+	if !mountsShare {
+		// e.g. cloudrun/cloudrun-sandbox with the split legacy export:
+		// neither bind-mounts a host path nor consumes
+		// RunConfig.SharedDirStorage, so silently succeeding would produce
+		// volumes nobody reads (design G5).
+		return nil, nil, fmt.Errorf("shared dirs on the server.shared_dir_storage nfs export are not supported on runtime %q", runtimeName)
 	}
 
-	// Round 2 security review finding F1 (HIGH): shared-dir names and the
-	// project ID are both path segments in the NFS layout
-	// (<HostBase>/<subpath_root>/<projectID>/shared-dirs/<name>). Neither
-	// was validated before this fix, so a project's settings.SharedDirs
-	// (which can come from the in-repo settings.yaml of a cloned repo) or a
-	// crafted project ID could climb out of the project's own subtree —
-	// e.g. name "../../../projects" resolves to every project's shared
-	// dirs, and project ID "../victim" resolves into victim's tree. This
-	// must be checked here, before Resolve, for every runtime (not only
-	// local-container ones): the k8s subPath comes from the same Resolve
-	// call and inherits the same paths.
+	// Shared-dir names and the project ID are both path segments in the
+	// shared layout (<HostBase>/<subpath_root>/<projectID>/shared-dirs/
+	// <name>). A project's settings.SharedDirs can come from the in-repo
+	// settings.yaml of a cloned repo, and a crafted project ID could climb
+	// out of the project's own subtree (round 2 security review F1, HIGH).
+	// Checked here, before Resolve, for every runtime: the k8s subPath
+	// comes from the same Resolve call. Resolve validates both again and
+	// confines each leaf to this project's shared-dirs/ (ConfineLeaf).
 	if err := api.ValidateSharedDirs(dirs); err != nil {
-		return nil, nil, fmt.Errorf("server.shared_dir_storage: %w", err)
+		return nil, nil, fmt.Errorf("shared_dirs: %w", err)
 	}
 	if !shareddirs.ValidProjectID(projectID) {
-		return nil, nil, fmt.Errorf("server.shared_dir_storage: invalid hub project ID %q", projectID)
+		return nil, nil, fmt.Errorf("shared dirs: invalid hub project ID %q", projectID)
 	}
 
-	names := make([]string, 0, len(dirs))
-	for _, d := range dirs {
-		names = append(names, d.Name)
-	}
-
-	res, err := runtime.NewNFSBackend(sdCfg.NFS).Resolve(runtime.ResolveInput{
-		ProjectID:      projectID,
-		SharedDirNames: names,
-	})
-	if err != nil {
-		return nil, nil, fmt.Errorf("server.shared_dir_storage: resolve: %w", err)
-	}
-
-	// Defense in depth alongside the name/ID validation above, extracted
-	// into confineSharedDir so it can be tested independently of Resolve
-	// and the name/ID checks (round 3 review finding N1/T1 part 1): every
-	// resolved shared dir must sit directly under
-	// <HostBase>/<subpath_root>/<projectID>/shared-dirs — never anywhere
-	// else in the export, even if a name/ID somehow validated but Resolve
-	// computed something unexpected (round 2 review finding F1). This also
-	// protects the K8s subPath, since it comes from the same
-	// ServerRelativePath.
-	subPathRoot := config.SubPathRootOrDefault(sdCfg.NFS.SubPathRoot)
-	for _, name := range names {
-		sd, ok := res.SharedDirs[name]
-		if !ok {
-			return nil, nil, fmt.Errorf("server.shared_dir_storage: shared dir %q not found in NFS resolution", name)
+	// Resolve every dir and build the bind-mount shapes, with the
+	// export-root isolation guard (ValidateNotExportRoot), BEFORE touching
+	// the filesystem below: if any dir's resolved path would escape, the
+	// whole call fails here and no directory is ever created (round 1
+	// review finding C3/T4).
+	resolved := make([]projectfs.Resolved, len(dirs))
+	volumes := make([]api.VolumeMount, len(dirs))
+	for i, d := range dirs {
+		res, err := sdLayout.Resolve(projectfs.Project{ID: projectID}, "", projectfs.SharedDirMount(d, containerWorkspace))
+		if err != nil {
+			return nil, nil, fmt.Errorf("shared dir %q: %w", d.Name, err)
 		}
-		if err := shareddirs.ConfineLeaf(sd.HostPath, res.HostBase, subPathRoot, projectID, name); err != nil {
-			return nil, nil, fmt.Errorf("server.shared_dir_storage: %w", err)
+		if err := runtime.ValidateNotExportRoot(res.HostPath, res.HostBase); err != nil {
+			return nil, nil, fmt.Errorf("shared dir %q: %w", d.Name, err)
 		}
+		resolved[i] = res
+		volumes[i] = api.VolumeMount{Source: res.HostPath, Target: res.Target, ReadOnly: d.ReadOnly}
 	}
-
-	// Compute the Docker-shaped volumes — and, inside NFSSharedDirsToVolumeMounts,
-	// run the export-root isolation guard (ValidateNotExportRoot) — BEFORE
-	// touching the filesystem below. This function does no I/O, so if any
-	// shared dir's resolved path would escape the host base, the whole call
-	// fails here and no directory is ever created (round 1 review finding
-	// C3/T4). The confinement check above already covers escapes that stay
-	// inside the host base but outside the project's own subtree; this
-	// guard covers the base itself (round 2 review finding S-F5: the guard
-	// only ever bounded the host base, not the per-project subtree — that
-	// gap is closed by the confinement check above, not by this call).
-	// Sources are patched to the resolved real path below (disposition 7');
-	// this call only produces the Target/ReadOnly shape and runs the guard.
-	volumes, err := runtime.NFSSharedDirsToVolumeMounts(res, dirs, containerWorkspace)
-	if err != nil {
-		return nil, nil, fmt.Errorf("server.shared_dir_storage: %w", err)
-	}
+	hostBase := sdLayout.HostBase
 
 	// Local-container runtimes (Docker/Podman/Apple) bind-mount the resolved
 	// host path directly, so it must exist. Never create the host base
-	// itself (design §3.2.3) — only mkdir the per-shared-dir subtree, and
-	// only when the host base is present.
-	//
-	// This tier ships only the co-located-broker topology (T2, design
-	// §3.3) — a broker with local filesystem access to the NFS export. A
-	// missing host base must refuse, regardless of which of the two
-	// supported runtimes triggered it: kubelet auto-vivifies a missing
-	// subPath itself, under the export's SQUASHED anonymous identity on an
-	// all_squash export — exactly the identity the leaf's upper-directory
-	// hardening (mode + ACL) defends against.
+	// itself — only the per-shared-dir subtree, and only when the host base
+	// is present (a missing base means the share is not mounted here, and
+	// writing below it would land on local disk).
 	var leafGIDs []observedLeafGID
-	if _, statErr := os.Stat(res.HostBase); statErr == nil {
+	if _, statErr := os.Stat(hostBase); statErr == nil {
 		// mkdir and chmod are done via shareddirs.EnsureLeaf, which walks
-		// every component of `rel` with openat(O_NOFOLLOW|O_DIRECTORY) and
-		// mkdirat, refusing ANY symlink — leaf or intermediate, inside the
-		// export or outside it — before creating or touching anything past
-		// it. The O_NOFOLLOW walk refuses a symlink atomically as part of
-		// the open call, before any subsequent component — including the
-		// leaf — is ever created, so nothing is created or chmod'd
-		// anywhere outside the exact directory chain this call is
-		// resolving, regardless of any concurrent symlink swap. The walk
-		// itself lives in pkg/shareddirs so pkg/hub's file browser
-		// (§3.2.5) can reuse it without importing pkg/agent.
-		//
-		// EnsureLeaf is the single leaf-creation entry point shared by the
-		// broker (here) and the hub browser, so a shared dir either of
-		// them causes to exist always gets the same modes/ACL hardening
-		// (2755 intermediates, 2775 + default ACL on a leaf this call
-		// creates) and the same rollback-on-finalization-failure behavior.
-		resolvedHostBase, err := filepath.EvalSymlinks(res.HostBase)
+		// every component of the relative path with
+		// openat(O_NOFOLLOW|O_DIRECTORY) and mkdirat, refusing ANY symlink
+		// — leaf or intermediate, inside the share or outside it — before
+		// creating or touching anything past it. EnsureLeaf is the single
+		// leaf-creation entry point shared by the broker (here) and the
+		// hub browser, so a shared dir either of them causes to exist
+		// always gets the same modes/ACL hardening (2755 intermediates,
+		// 2775 + default ACL on a leaf this call creates) and the same
+		// rollback-on-finalization-failure behavior.
+		resolvedHostBase, err := filepath.EvalSymlinks(hostBase)
 		if err != nil {
-			return nil, nil, fmt.Errorf("server.shared_dir_storage: resolve host base symlinks: %w", err)
+			return nil, nil, fmt.Errorf("shared dirs: resolve host base symlinks: %w", err)
 		}
-
-		for i, name := range names {
-			sd := res.SharedDirs[name]
-			rel := sd.ServerRelativePath // relative to HostBase, e.g. projects/<pid>/shared-dirs/<name>
-
-			leafFd, _, walkErr := ensureSharedDirLeaf(resolvedHostBase, rel)
+		for i, d := range dirs {
+			rel := resolved[i].RelPath // relative to HostBase, e.g. projects/<pid>/shared-dirs/<name>
+			// A root broker gives the directories it creates the
+			// shared-dir Layout's owner (its nfs uid and gid).
+			leafFd, _, walkErr := ensureSharedDirLeaf(resolvedHostBase, rel, resolved[i].Owner())
+			if walkErr != nil && isNFSLeafPermissionError(walkErr) && inlineSharedDirs(runtimeName, sdLayout, split) {
+				return nil, nil, fmt.Errorf("shared dir %q: %w", d.Name, nfsInlineLeafRefusal(hostBase, rel, walkErr))
+			}
+			if walkErr != nil && isNFSLeafPermissionError(walkErr) && kubeletMayCreateSharedDirs(runtimeName, sdLayout, split) {
+				// As for the workspace directory on the same export
+				// (ensureNFSWorkspaceLeaf): the broker may not be allowed
+				// to create the directory even though the node is. The
+				// node creates it at pod start and the workspace
+				// provisioning container prepares it; no leaf group is
+				// read for it.
+				slog.Warn("shared dirs: the broker could not create the directory, so the node will create it "+
+					"when the pod starts, which requires an export that allows root to create directories (no_root_squash)",
+					"host_base", hostBase, "sub_path", rel, "error", walkErr)
+				continue
+			}
 			if walkErr != nil {
-				return nil, nil, fmt.Errorf("server.shared_dir_storage: shared dir %q: %w", name, walkErr)
+				return nil, nil, fmt.Errorf("shared dir %q: %w", d.Name, walkErr)
 			}
 			// Read the leaf's group from the fd the walk opened (never a
 			// path), at every start, so it follows the leaf as it is now.
 			gid, gidErr := fdGID(leafFd)
-			leafGIDs = append(leafGIDs, observedLeafGID{name: name, gid: gid, err: gidErr})
+			leafGIDs = append(leafGIDs, observedLeafGID{name: d.Name, gid: gid, err: gidErr})
 			_ = shareddirs.CloseFd(leafFd)
 
-			// Defense in depth, even though the component walk above should
-			// make it structurally impossible for a symlink to be
-			// involved: require the fully resolved path to equal the
-			// expected clean path under the resolved host base, as a
+			// Defense in depth: require the fully resolved path to equal
+			// the expected clean path under the resolved host base, as a
 			// backstop against a component renamed away between the walk
-			// completing and this check. This is not redundant with the
-			// walk, since the walk operates on file descriptors opened at
-			// walk time, while this re-resolves the path fresh.
+			// completing and this check (the walk works on descriptors
+			// opened at walk time; this re-resolves the path fresh).
 			wantResolvedLeaf := filepath.Join(resolvedHostBase, rel)
-			resolvedLeaf, err := filepath.EvalSymlinks(sd.HostPath)
+			resolvedLeaf, err := filepath.EvalSymlinks(resolved[i].HostPath)
 			if err != nil {
-				return nil, nil, fmt.Errorf("server.shared_dir_storage: resolve shared dir %q: %w", name, err)
+				return nil, nil, fmt.Errorf("shared dirs: resolve shared dir %q: %w", d.Name, err)
 			}
 			if resolvedLeaf != wantResolvedLeaf {
 				return nil, nil, fmt.Errorf(
-					"server.shared_dir_storage: shared dir %q resolves through a symlink to %q, want %q",
-					name, resolvedLeaf, wantResolvedLeaf)
+					"shared dirs: shared dir %q resolves through a symlink to %q, want %q",
+					d.Name, resolvedLeaf, wantResolvedLeaf)
 			}
 			volumes[i].Source = resolvedLeaf
 		}
 	} else if errors.Is(statErr, fs.ErrNotExist) {
-		// Reachable only for local-container or kubernetes runtimes (the
-		// unsupported-runtime check above already returned for anything
-		// else). Naming the actual resolved path makes this actionable
-		// regardless of which runtime hit it.
-		return nil, nil, fmt.Errorf(
-			"server.shared_dir_storage=nfs requires this broker to have the export mounted at %q "+
-				"so it can create the project chain safely (T2 topology) -- see docs/deploy/hybrid-tier.md",
-			res.HostBase)
+		if inlineSharedDirs(runtimeName, sdLayout, split) {
+			return nil, nil, fmt.Errorf("shared dir %q: %w", dirs[0].Name, inlineShareNotVisible(hostBase))
+		}
+		if !kubeletMayCreateSharedDirs(runtimeName, sdLayout, split) {
+			return nil, nil, fmt.Errorf(
+				"shared dirs on the %s backend require this broker to have the share mounted at %q "+
+					"so it can create the project chain safely (T2 topology) -- see docs/deploy/hybrid-tier.md",
+				backend, hostBase)
+		}
+		slog.Info("shared dirs: the nfs export is not mounted on this broker; the node creates the shared-dir directories "+
+			"when the pod starts and the workspace provisioning container prepares them",
+			"host_base", hostBase)
 	} else {
 		// Some other failure checking the host base (permissions, a stale
-		// mount, etc.) -- not simply "not provisioned yet". Include the
-		// underlying error rather than the fixed not-mounted wording, which
-		// would misdescribe the problem.
-		return nil, nil, fmt.Errorf("server.shared_dir_storage: check host base %q: %w", res.HostBase, statErr)
+		// mount, etc.) -- not simply "not provisioned yet".
+		return nil, nil, fmt.Errorf("shared dirs: check host base %q: %w", hostBase, statErr)
 	}
 
-	subPaths := make(map[string]string, len(names))
-	for _, name := range names {
-		subPaths[name] = res.SharedDirs[name].ServerRelativePath
+	subPaths := make(map[string]string, len(dirs))
+	for i, d := range dirs {
+		subPaths[d.Name] = resolved[i].SubPath
 	}
-	pvClaimName := ""
-	if len(sdCfg.NFS.Shares) > 0 {
-		pvClaimName = sdCfg.NFS.Shares[0].PVName
-	}
-
-	return volumes, &runtime.SharedDirRealization{
-		Backend:            "nfs",
-		PVClaimName:        pvClaimName,
+	realization := &runtime.SharedDirRealization{
+		Backend:            string(backend),
+		PVClaimName:        sdLayout.Share.PVName,
+		ProjectID:          projectID,
 		SubPaths:           subPaths,
-		SupplementalGroups: sharedDirLeafGroups(leafGIDs, sdCfg.NFS.GID),
-	}, nil
+		SupplementalGroups: sharedDirLeafGroups(leafGIDs, sdLayout.GID),
+	}
+	if sdLayout.Backend == projectfs.BackendNFS && !split {
+		// The Layout's own nfs share: a pod mounts it inline when it has
+		// no claim. The transitional split never gets these, so without
+		// its claim the pod fails closed as before.
+		realization.Server, realization.Export, realization.SubPathRoot = sdLayout.Share.Server, sdLayout.Share.Export, sdLayout.SubPathRoot
+	}
+	return volumes, realization, nil
 }
 
-// ensureSharedDirLeaf is shareddirs.EnsureLeaf, replaceable in tests to
-// replace a path component after the walk and reach the backstop check.
-var ensureSharedDirLeaf = shareddirs.EnsureLeaf
+// inlineSharedDirs reports whether a Kubernetes start mounts the shared
+// dirs as inline NFS volumes: they ride the Layout's own nfs share (no
+// legacy split) and it has no claim. The broker must then create every
+// shared-dir directory itself; nothing falls back to the node.
+func inlineSharedDirs(runtimeName string, sdLayout projectfs.Layout, split bool) bool {
+	return isKubernetesRuntime(runtimeName) && sdLayout.Backend == projectfs.BackendNFS && !split &&
+		sdLayout.Share.PVName == "" && sdLayout.Share.Server != "" && sdLayout.Share.Export != ""
+}
+
+// kubeletMayCreateSharedDirs reports whether a Kubernetes start may leave
+// missing shared-dir directories to the node when this broker has no mount
+// of the share: only when the shared dirs ride the nfs workspace export
+// (no legacy split), as the workspace directory itself does
+// (ensureNFSWorkspaceLeaf). The workspace provisioning init container then
+// mounts the dirs and prepares their ownership (F-111). Every other case
+// refuses: the kubelet would create the leaf under the export's squashed
+// anonymous identity with no one to fix it, exactly the identity the leaf
+// hardening (mode + ACL) defends against.
+func kubeletMayCreateSharedDirs(runtimeName string, sdLayout projectfs.Layout, split bool) bool {
+	return isKubernetesRuntime(runtimeName) && sdLayout.Backend == projectfs.BackendNFS && !split
+}
+
+// ensureSharedDirLeaf is shareddirs.EnsureLeafOwned, replaceable in tests
+// to replace a path component after the walk and reach the backstop check.
+var ensureSharedDirLeaf = shareddirs.EnsureLeafOwned
 
 // fdGID is shareddirs.FdGID, replaceable in tests to simulate a failed stat.
 var fdGID = shareddirs.FdGID
@@ -333,7 +326,7 @@ const minLeafGroupID = 1000
 //   - is below minLeafGroupID (system groups, including 0),
 //   - is an overflow/"nobody" id (65534, 4294967294) that NFSv4 idmapping
 //     reports when it cannot map the real group,
-//   - differs from allowGID, when shared_dir_storage.nfs.gid is set.
+//   - differs from allowGID, when the shared-dir Layout's nfs gid is set.
 func sharedDirLeafGroups(observed []observedLeafGID, allowGID int) []int64 {
 	var out []int64
 	seen := make(map[int64]bool)
@@ -352,7 +345,7 @@ func sharedDirLeafGroups(observed []observedLeafGID, allowGID int) []int64 {
 		case gid == 65534 || gid == 4294967294:
 			reason = "group id is an overflow (nobody) id"
 		case allowGID != 0 && gid != int64(allowGID):
-			reason = "group id does not match server.shared_dir_storage.nfs.gid"
+			reason = "group id does not match the shared-dir storage nfs.gid"
 		}
 		if reason != "" {
 			slog.Warn("Start: not adding a shared dir's group to the agent; "+
@@ -382,111 +375,14 @@ func isLocalContainerRuntime(name string) bool {
 }
 
 // isKubernetesRuntime reports whether name identifies the Kubernetes
-// runtime, the only other runtime that consumes shared_dir_storage=nfs (via
-// RunConfig.SharedDirStorage / buildPod's PVC-by-subPath branch).
+// runtime, the only other runtime that consumes shared dirs on a shared
+// backend (via RunConfig.SharedDirStorage / buildPod's subPath branch).
 func isKubernetesRuntime(name string) bool {
 	return name == "kubernetes"
 }
 
-// sharedDirStorageBackendName returns the backend a resolved shared-dir
-// storage config selects: "nfs", or "local" for nil, "" and "local".
-func sharedDirStorageBackendName(cfg *config.V1SharedDirStorageConfig) string {
-	if cfg != nil && cfg.Backend == "nfs" {
-		return "nfs"
-	}
-	return "local"
-}
-
-// sharedDirStorageRecordFile is the per-agent file, in the agent directory
-// next to scion-agent.json, that records the backend the agent's shared
-// dirs were first set up with. It is outside the agent home, so the
-// agent's container never mounts it, and reprovisioning the agent leaves
-// it in place.
-const sharedDirStorageRecordFile = "shared-dir-storage.json"
-
-// sharedDirStorageRecord is the content of sharedDirStorageRecordFile.
-// Backend applies to every shared dir that Dirs does not name, including a
-// dir added to the project after the record was written. Dirs names the
-// dirs whose backend differs from Backend. A record written before per-dir
-// backends existed has no Dirs, so Backend applies to every dir, exactly as
-// before.
-//
-// Previous names the dirs whose backend an explicit change (see
-// changeSharedDirBackends) moved, with the backend they had before. A
-// start checks each such dir once for an empty directory on its new
-// backend while the directory on its previous backend is not empty (see
-// checkChangedSharedDirs), then drops the entry.
-type sharedDirStorageRecord struct {
-	Backend  string            `json:"backend"`
-	Dirs     map[string]string `json:"dirs,omitempty"`
-	Previous map[string]string `json:"previous,omitempty"`
-}
-
-// backendFor returns the recorded backend of the shared dir name.
-func (r *sharedDirStorageRecord) backendFor(name string) string {
-	if b, ok := r.Dirs[name]; ok {
-		return b
-	}
-	return r.Backend
-}
-
-// loadSharedDirStorageRecord returns the shared-dir storage record of the
-// agent whose directory is agentDir, or nil when none is recorded (a first
-// start, or an agent created before the backend was recorded). A record
-// that exists but cannot be read or parsed, that names no backend, or
-// whose dirs entries are not valid shared dir names mapped to "local" or
-// "nfs" (previous entries included), is an error, so a damaged
-// record never silently falls back to the current settings.
-func loadSharedDirStorageRecord(agentDir string) (*sharedDirStorageRecord, error) {
-	if agentDir == "" {
-		return nil, nil
-	}
-	path := filepath.Join(agentDir, sharedDirStorageRecordFile)
-	data, err := os.ReadFile(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("reading the agent's shared-dir storage record: %w", err)
-	}
-	var rec sharedDirStorageRecord
-	if err := json.Unmarshal(data, &rec); err != nil {
-		return nil, fmt.Errorf("parsing the agent's shared-dir storage record %s: %w", path, err)
-	}
-	if rec.Backend == "" {
-		return nil, fmt.Errorf("the agent's shared-dir storage record %s names no backend", path)
-	}
-	for name, backend := range rec.Dirs {
-		if err := api.ValidateSharedDirs([]api.SharedDir{{Name: name}}); err != nil {
-			return nil, fmt.Errorf("the agent's shared-dir storage record %s names an invalid shared dir %q", path, name)
-		}
-		if backend != "local" && backend != "nfs" {
-			return nil, fmt.Errorf("the agent's shared-dir storage record %s records an unknown backend %q for shared dir %q", path, backend, name)
-		}
-	}
-	for name, backend := range rec.Previous {
-		if err := api.ValidateSharedDirs([]api.SharedDir{{Name: name}}); err != nil {
-			return nil, fmt.Errorf("the agent's shared-dir storage record %s names an invalid shared dir %q", path, name)
-		}
-		if backend != "local" && backend != "nfs" {
-			return nil, fmt.Errorf("the agent's shared-dir storage record %s records an unknown previous backend %q for shared dir %q", path, backend, name)
-		}
-	}
-	return &rec, nil
-}
-
-// saveSharedDirStorageRecord writes rec for the agent whose directory is
-// agentDir, through writeAgentRecordFile.
-func saveSharedDirStorageRecord(agentDir string, rec *sharedDirStorageRecord) error {
-	if agentDir == "" {
-		return fmt.Errorf("no agent directory to record the shared-dir storage backend in")
-	}
-	return writeAgentRecordFile(agentDir, sharedDirStorageRecordFile, rec)
-}
-
 // writeAgentRecordFile writes v as JSON to the file name in agentDir. It is
-// the single writer for the per-agent storage records (shared-dir storage
-// and home storage). The file is written to a temporary name and renamed
+// the single writer for the per-agent storage records (home storage). The file is written to a temporary name and renamed
 // into place, so a reader never sees a partial record. The file and the
 // directory are synced so the record survives a crash.
 func writeAgentRecordFile(agentDir, name string, v any) error {
@@ -535,245 +431,68 @@ func writeAgentRecordFile(agentDir, name string, v any) error {
 	return nil
 }
 
-// selectSharedDirStorage returns the shared-dir storage config for one
-// agent start. gs must come from config.LoadGlobalSettingsWithOverlay, so a
-// project's own settings never choose the backend.
-//
-// With a recorded backend that backend is kept, so a settings change never
-// moves an existing agent's shared dirs. The recorded backend is checked
-// first: a profile or runtime override that is now invalid only logs a
-// warning for such an agent, since the agent does not use it. A recorded
-// nfs backend whose server.shared_dir_storage.nfs block is no longer
-// complete is an error, returned before anything touches the filesystem.
-//
-// Without a recorded backend (a first start, or an agent created before
-// the backend was recorded) it is the per-profile resolution: the
-// profile's shared_dir_storage_backend, else its runtime entry's, else
-// server.shared_dir_storage.backend. An invalid override is an error that
-// names the key.
-func selectSharedDirStorage(gs *config.VersionedSettings, profile, recorded, agentName string) (*config.V1SharedDirStorageConfig, error) {
-	if gs == nil {
-		return nil, fmt.Errorf("no global settings to choose the shared-dir storage backend for agent %q from", agentName)
+// agentSharedDirs returns the agent's shared dirs: the project
+// settings' shared_dirs when set, else the dirs the hub dispatched.
+func agentSharedDirs(settings *config.VersionedSettings, opts api.StartOptions) []api.SharedDir {
+	if settings != nil && len(settings.SharedDirs) > 0 {
+		return settings.SharedDirs
 	}
-	current, source := gs.ResolveSharedDirStorage(profile)
-	var overrideErr error
-	if current != nil && source != config.SharedDirStorageGlobalSource {
-		// An override names its own key, so a bad value or an nfs
-		// override without an nfs block points at where it is set.
-		if err := current.Validate(); err != nil {
-			overrideErr = fmt.Errorf("%s: %w", source, err)
-		}
-	}
-	if recorded == "" {
-		if overrideErr != nil {
-			return nil, overrideErr
-		}
-		return current, nil
-	}
-	if overrideErr != nil {
-		slog.Warn("Start: ignoring an invalid shared-dir storage override; the agent keeps its recorded backend",
-			"agent", agentName, "recorded", recorded, "error", overrideErr)
-	} else if recorded != sharedDirStorageBackendName(current) {
-		slog.Warn("Start: settings now select a different shared-dir storage backend than the agent was created with; keeping the agent's backend",
-			"agent", agentName, "recorded", recorded, "current", sharedDirStorageBackendName(current), "source", source)
-	}
-	switch recorded {
-	case "local":
-		return &config.V1SharedDirStorageConfig{Backend: "local"}, nil
-	case "nfs":
-		out := &config.V1SharedDirStorageConfig{Backend: "nfs"}
-		if gs.Server != nil && gs.Server.SharedDirStorage != nil {
-			out.NFS = gs.Server.SharedDirStorage.NFS
-		}
-		if err := out.Validate(); err != nil {
-			return nil, fmt.Errorf("agent %q was created with the nfs shared-dir storage backend, but server.shared_dir_storage.nfs is no longer complete: %w", agentName, err)
-		}
-		return out, nil
-	default:
-		return nil, fmt.Errorf("agent %q records an unknown shared-dir storage backend %q", agentName, recorded)
-	}
+	return opts.SharedDirs
 }
 
-// selectSharedDirBackends returns the config for each shared dir in dirs
-// whose backend differs from defaultCfg, the config selectSharedDirStorage
-// chose for the agent. It is nil when every dir uses defaultCfg, which is
-// always the case without per-dir settings or a per-dir record.
-//
-// With a record (rec non-nil) each dir keeps its recorded backend: its
-// dirs entry, else the record's backend. A record without dirs entries
-// therefore gives every dir the default, as before per-dir backends. A
-// per-dir setting that differs from the record only logs a warning.
-//
-// Without a record (a first start) a dir whose backend comes from a
-// shared_dir_storage_backends entry (see
-// VersionedSettings.ResolveSharedDirStorageBackend) uses that entry. Any
-// other dir uses defaultCfg. An entry naming a dir the project does not
-// have is never looked up. An invalid entry, or an nfs entry without a
-// complete server.shared_dir_storage.nfs block, is an error that names
-// the key.
-func selectSharedDirBackends(gs *config.VersionedSettings, profile string, rec *sharedDirStorageRecord, defaultCfg *config.V1SharedDirStorageConfig, dirs []api.SharedDir, agentName string) (map[string]*config.V1SharedDirStorageConfig, error) {
-	if gs == nil {
-		return nil, nil
-	}
-	defaultName := sharedDirStorageBackendName(defaultCfg)
-	var out map[string]*config.V1SharedDirStorageConfig
-	for _, d := range dirs {
-		current, source, perDirSetting := gs.ResolveSharedDirStorageBackend(profile, d.Name)
-		backend := defaultName
-		if rec != nil {
-			backend = rec.backendFor(d.Name)
-			if perDirSetting && current != backend {
-				slog.Warn("Start: settings select a different shared-dir storage backend for a shared dir than the agent recorded; keeping the agent's backend",
-					"agent", agentName, "shared_dir", d.Name, "recorded", backend, "current", current, "source", source)
-			}
-		} else if perDirSetting {
-			backend = current
-		}
-		if backend == defaultName {
-			continue
-		}
-		var cfg *config.V1SharedDirStorageConfig
-		switch backend {
-		case "local":
-			cfg = &config.V1SharedDirStorageConfig{Backend: "local"}
-		case "nfs":
-			cfg = &config.V1SharedDirStorageConfig{Backend: "nfs"}
-			if gs.Server != nil && gs.Server.SharedDirStorage != nil {
-				cfg.NFS = gs.Server.SharedDirStorage.NFS
-			}
-			if err := cfg.Validate(); err != nil {
-				if rec != nil {
-					return nil, fmt.Errorf("agent %q records the nfs shared-dir storage backend for shared dir %q, but server.shared_dir_storage.nfs is no longer complete: %w", agentName, d.Name, err)
-				}
-				return nil, fmt.Errorf("%s: %w", source, err)
-			}
-		default:
-			if rec != nil {
-				return nil, fmt.Errorf("agent %q records an unknown shared-dir storage backend %q for shared dir %q", agentName, backend, d.Name)
-			}
-			return nil, fmt.Errorf("%s: must be \"local\" or \"nfs\" (got %q)", source, backend)
-		}
-		if out == nil {
-			out = make(map[string]*config.V1SharedDirStorageConfig)
-		}
-		out[d.Name] = cfg
-	}
-	return out, nil
-}
+// legacySharedDirStorageRecordFile is the per-agent shared-dir backend
+// record of earlier versions (shared-dir-storage.json). Nothing reads it:
+// server.project_storage places every agent's shared dirs. It is only
+// moved with the rest of a legacy agent directory (migrateLegacyAgentState).
+const legacySharedDirStorageRecordFile = "shared-dir-storage.json"
 
-// newSharedDirStorageRecord returns the record for an agent's first start:
-// the default backend, plus a dirs entry for each dir in overrides.
-func newSharedDirStorageRecord(defaultCfg *config.V1SharedDirStorageConfig, overrides map[string]*config.V1SharedDirStorageConfig) *sharedDirStorageRecord {
-	rec := &sharedDirStorageRecord{Backend: sharedDirStorageBackendName(defaultCfg)}
-	for name, cfg := range overrides {
-		if rec.Dirs == nil {
-			rec.Dirs = make(map[string]string, len(overrides))
-		}
-		rec.Dirs[name] = sharedDirStorageBackendName(cfg)
-	}
-	return rec
-}
+// retiredSharedDirRecordSuffix is appended to a retired per-agent shared-dir
+// backend record when it is moved aside.
+const retiredSharedDirRecordSuffix = ".retired"
 
-// resolveSharedDirsPerDir is resolveSharedDirs with a backend per shared
-// dir. overrides, from selectSharedDirBackends, maps a dir name to its
-// config when it differs from defaultCfg. Without overrides it is exactly
-// resolveSharedDirs(defaultCfg, ...). Otherwise the dirs are split into a
-// local set and an nfs set, resolveSharedDirs runs once per set, and the
-// volumes are returned in the order of dirs. The realization's LocalDirs
-// names the local dirs, so the Kubernetes runtime mounts only the nfs dirs
-// from the export. byName maps each mounted dir's name to its volume; a dir
-// whose local volume was dropped after a path error is not in it.
-func resolveSharedDirsPerDir(
-	defaultCfg *config.V1SharedDirStorageConfig,
-	overrides map[string]*config.V1SharedDirStorageConfig,
-	projectDir string,
-	projectID string,
-	runtimeName string,
-	dirs []api.SharedDir,
-	containerWorkspace string,
-	nfsWorkspaceBackend bool,
-) (volumes []api.VolumeMount, realization *runtime.SharedDirRealization, byName map[string]api.VolumeMount, err error) {
-	if len(overrides) == 0 {
-		volumes, realization, err = resolveSharedDirs(defaultCfg, projectDir, projectID, runtimeName, dirs, containerWorkspace, nfsWorkspaceBackend)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		// resolveSharedDirs returns one volume per dir, in order, or none
-		// when the local layout dropped them after a path error.
-		byName = make(map[string]api.VolumeMount, len(volumes))
-		if len(volumes) == len(dirs) {
-			for i, d := range dirs {
-				byName[d.Name] = volumes[i]
-			}
-		}
-		return volumes, realization, byName, nil
+// retireSharedDirRecord handles an agent's per-agent shared-dir backend
+// record from earlier versions, once: when it named another backend for any
+// of dirs than the one sdLayout now places them on, it returns a warning for
+// the start naming those dirs. The record is then moved aside, so the
+// warning is shown only on the first start after the upgrade. The agent now
+// follows the project's layout; node-local content is copied onto the shared
+// tree by the storage migration.
+func retireSharedDirRecord(agentDir string, sdLayout projectfs.Layout, dirs []api.SharedDir) string {
+	if agentDir == "" {
+		return ""
 	}
-	// The default is checked even when every dir is overridden, as
-	// resolveSharedDirs checks it whenever a block is configured.
-	if err := defaultCfg.Validate(); err != nil {
-		return nil, nil, nil, fmt.Errorf("server.shared_dir_storage: %w", err)
+	path := filepath.Join(agentDir, legacySharedDirStorageRecordFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
 	}
-
-	var localDirs, nfsDirs []api.SharedDir
-	var localCfg, nfsCfg *config.V1SharedDirStorageConfig
-	for _, d := range dirs {
-		cfg, ok := overrides[d.Name]
-		if !ok {
-			cfg = defaultCfg
-		}
-		if sharedDirStorageBackendName(cfg) == "nfs" {
-			nfsDirs = append(nfsDirs, d)
-			if nfsCfg == nil {
-				nfsCfg = cfg
+	var rec struct {
+		Backend string            `json:"backend"`
+		Dirs    map[string]string `json:"dirs,omitempty"`
+	}
+	current := "local"
+	if sdLayout.Backend.Shared() {
+		current = "nfs"
+	}
+	var changed []string
+	if json.Unmarshal(data, &rec) == nil {
+		for _, d := range dirs {
+			recorded := rec.Backend
+			if b, ok := rec.Dirs[d.Name]; ok {
+				recorded = b
 			}
-		} else {
-			localDirs = append(localDirs, d)
-			if localCfg == nil {
-				localCfg = cfg
+			if recorded != "" && recorded != current {
+				changed = append(changed, d.Name)
 			}
 		}
 	}
-
-	byName = make(map[string]api.VolumeMount, len(dirs))
-	if len(nfsDirs) > 0 {
-		vols, res, err := resolveSharedDirs(nfsCfg, projectDir, projectID, runtimeName, nfsDirs, containerWorkspace, nfsWorkspaceBackend)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		if len(vols) != len(nfsDirs) {
-			return nil, nil, nil, fmt.Errorf("server.shared_dir_storage: resolved %d volumes for %d nfs shared dirs", len(vols), len(nfsDirs))
-		}
-		for i, d := range nfsDirs {
-			byName[d.Name] = vols[i]
-		}
-		realization = res
+	if err := os.Rename(path, path+retiredSharedDirRecordSuffix); err != nil {
+		slog.Warn("Start: could not move the retired shared-dir storage record aside", "path", path, "error", err)
 	}
-	if len(localDirs) > 0 {
-		vols, _, err := resolveSharedDirs(localCfg, projectDir, projectID, runtimeName, localDirs, containerWorkspace, nfsWorkspaceBackend)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		if realization != nil {
-			realization.LocalDirs = make(map[string]bool, len(localDirs))
-			for _, d := range localDirs {
-				realization.LocalDirs[d.Name] = true
-			}
-		}
-		// The local layout logs and drops its volumes on a path error
-		// instead of failing the start; the dirs are then not mounted, as
-		// before per-dir backends.
-		if len(vols) == len(localDirs) {
-			for i, d := range localDirs {
-				byName[d.Name] = vols[i]
-			}
-		}
+	if len(changed) == 0 {
+		return ""
 	}
-
-	volumes = make([]api.VolumeMount, 0, len(byName))
-	for _, d := range dirs {
-		if v, ok := byName[d.Name]; ok {
-			volumes = append(volumes, v)
-		}
-	}
-	return volumes, realization, byName, nil
+	return fmt.Sprintf("Warning: this agent's shared dirs %s were pinned to another storage backend by an earlier version; "+
+		"they now follow the project's storage layout (server.project_storage), and earlier content stays where it was until it is moved: %s",
+		strings.Join(changed, ", "), config.ProjectStorageMigrationText)
 }

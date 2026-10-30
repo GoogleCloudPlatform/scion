@@ -71,6 +71,7 @@ func TestBootstrapCreate_DeleteWon_Answers409(t *testing.T) {
 	for i, del := range landingDeletes {
 		t.Run(del.name, func(t *testing.T) {
 			srv, s, project := setupCreateAgentServer(t, &createRaceDispatcher{})
+			clearCreateAgentProviderPath(t, s, project)
 			pub := recordCreatedEvents(t, srv)
 			var agentID string
 			// The upload URLs are signed after the row is written and

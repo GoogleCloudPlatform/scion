@@ -177,7 +177,7 @@ variables.tf`). The set of harnesses a user can pick is the `harnesses/`
 directory in the repo root, mirrored for the UI's fallback list in
 `web/src/shared/harness-utils.ts`'s `KNOWN_HARNESS_NAMES`: at the time of
 writing, `claude`, `codex`, `copilot`, `gemini-cli`, `opencode`,
-`antigravity`, `hermes`, `grok-build`, and `muse-code`.
+`antigravity`, `hermes`, `grok-build`, `muse-code`, and `pi`.
 
 The image pipeline (`image-build/`) must publish an image for every one of
 those harnesses into whatever registry `image_registry` points at — at
@@ -322,7 +322,7 @@ The hub exposes `/readyz` and `/healthz`, and `hub-cloudrun` wires up a
 probe.**
 
 - **`/readyz`** answers `{"status":"ready"}`/200 once `store.Ping` succeeds
-  and, because this module always sets `workspace_storage.backend: nfs`,
+  and, because this module always sets `project_storage.backend: nfs`,
   the NFS mount also checks healthy; otherwise it's 503 `not_ready` with a
   reason. This is what gates traffic to a fresh revision (the startup
   probe), and what "the hub is up" means operationally.

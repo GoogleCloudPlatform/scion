@@ -23,7 +23,6 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
-	"os"
 	"path"
 	"path/filepath"
 	"slices"
@@ -491,7 +490,7 @@ func writeUnusableProvisionerImportError(w http.ResponseWriter, err error) bool 
 func checkHarnessConfigDirsProvisioner(dirs []resourceDir) error {
 	var perrs []*harness.UnusableProvisionerError
 	for _, rd := range dirs {
-		data, err := os.ReadFile(filepath.Join(rd.path, "config.yaml"))
+		data, err := readLocalHarnessConfigFile(rd.path, "config.yaml")
 		if err != nil {
 			continue
 		}

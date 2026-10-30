@@ -12,12 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// These tests exercise unix-only, Windows-gated agent storage code.
+//go:build unix
+
 package agent
 
 import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -25,7 +29,10 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/brokercontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
@@ -87,7 +94,7 @@ func TestResolveSharedDirs_Unset_MatchesLegacyBehavior(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			projectDir := newTestProjectDir(t)
 
-			gotVolumes, gotRealization, err := resolveSharedDirs(tc.sdCfg, projectDir, "pid-1", "docker", dirs, "/workspace", false)
+			gotVolumes, gotRealization, err := resolveSharedDirs(sdLayoutFor(t, tc.sdCfg), false, projectDir, "pid-1", "docker", dirs, "/workspace")
 			require.NoError(t, err)
 			assert.Nil(t, gotRealization, "no SharedDirRealization for local/unset backend")
 
@@ -112,7 +119,7 @@ func TestResolveSharedDirs_Unset_MatchesLegacyBehavior(t *testing.T) {
 // existed before this change (no EnsureSharedDirs/SharedDirsToVolumeMounts
 // call, no SCION_VOLUMES env var to set).
 func TestResolveSharedDirs_NoDirs(t *testing.T) {
-	volumes, realization, err := resolveSharedDirs(nil, "/nonexistent", "pid-1", "docker", nil, "/workspace", false)
+	volumes, realization, err := resolveSharedDirs(localSharedDirLayout, false, "/nonexistent", "pid-1", "docker", nil, "/workspace")
 	require.NoError(t, err)
 	assert.Nil(t, volumes)
 	assert.Nil(t, realization)
@@ -130,6 +137,22 @@ func newResolvedTempDir(t *testing.T) string {
 	dir, err := filepath.EvalSymlinks(t.TempDir())
 	require.NoError(t, err)
 	return dir
+}
+
+// localSharedDirLayout is the local backend's shared-dir Layout.
+var localSharedDirLayout = projectfs.Layout{Backend: projectfs.BackendLocal}
+
+// sdLayoutFor is the shared-dir Layout a broker builds from a
+// shared_dir_storage block: the local Layout for nil, "" and "local", else
+// config.NFSLayout of its nfs block.
+func sdLayoutFor(t *testing.T, sdCfg *config.V1SharedDirStorageConfig) projectfs.Layout {
+	t.Helper()
+	if sdCfg == nil || sdCfg.Backend == "" || sdCfg.Backend == "local" {
+		return localSharedDirLayout
+	}
+	l, err := config.NFSLayout(sdCfg.NFS)
+	require.NoError(t, err)
+	return l
 }
 
 // nfsSharedDirStorageCfg returns a valid shared_dir_storage nfs config
@@ -155,86 +178,19 @@ func TestResolveSharedDirs_NFS_MissingProjectID_FailsClosed(t *testing.T) {
 	sdCfg.NFS.Shares[0].ID = filepath.Base(hostBase)
 
 	dirs := []api.SharedDir{{Name: "scratchpad"}}
-	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "" /* projectID */, "docker", dirs, "/workspace", false)
+	volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, "/unused", "" /* projectID */, "docker", dirs, "/workspace")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "hub project ID")
 	assert.Nil(t, volumes)
 	assert.Nil(t, realization)
 }
 
-// TestResolveSharedDirs_NFS_InvalidConfig_FailsClosed exercises
-// V1SharedDirStorageConfig.Validate() being consulted before any resolution
-// is attempted (AC4/AC5 — a broken shared_dir_storage block must error with
-// a message naming the problem, not silently resolve garbage paths). Round 1
-// review finding #7: assert the *specific* message, not just the common
-// "server.shared_dir_storage" prefix every error shares — otherwise removing
-// the Validate() call entirely (and letting Resolve's own, different error
-// through) would still pass.
-func TestResolveSharedDirs_NFS_InvalidConfig_FailsClosed(t *testing.T) {
-	dirs := []api.SharedDir{{Name: "scratchpad"}}
-
-	t.Run("nil NFS block", func(t *testing.T) {
-		sdCfg := &config.V1SharedDirStorageConfig{Backend: "nfs"} // no NFS block
-		_, _, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace", false)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "no nfs block is configured")
-	})
-
-	t.Run("unknown backend", func(t *testing.T) {
-		for _, backend := range []string{"nsf", "NFS ", "Nfs", "garbage"} {
-			t.Run(backend, func(t *testing.T) {
-				sdCfg := &config.V1SharedDirStorageConfig{Backend: backend}
-				_, _, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace", false)
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), "must be")
-			})
-		}
-	})
-}
-
-// TestResolveSharedDirs_NFS_ResolveLevelMisconfig_FailsClosed covers empty
-// mount_root and an empty shares[0].id: Validate() (called from
-// resolveSharedDirs before Resolve) does catch both of these, so they never
-// reach nfsBackend.Resolve, which would otherwise silently turn them into a
-// relative or malformed host path (round 1 review finding #7; comment
-// corrected per round 2 review finding C4, which noted Validate does catch
-// these — the "resolver-level" framing describes what Resolve would do if
-// this validation were ever skipped, not a gap in Validate itself).
-func TestResolveSharedDirs_NFS_ResolveLevelMisconfig_FailsClosed(t *testing.T) {
-	dirs := []api.SharedDir{{Name: "scratchpad"}}
-
-	t.Run("empty mount_root", func(t *testing.T) {
-		sdCfg := &config.V1SharedDirStorageConfig{
-			Backend: "nfs",
-			NFS: &config.V1NFSConfig{
-				MountRoot: "",
-				Shares:    []config.V1NFSShare{{ID: "scion-shared"}},
-			},
-		}
-		_, _, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace", false)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "mount_root is empty")
-	})
-
-	t.Run("empty shares[0].id", func(t *testing.T) {
-		sdCfg := &config.V1SharedDirStorageConfig{
-			Backend: "nfs",
-			NFS: &config.V1NFSConfig{
-				MountRoot: "/srv",
-				Shares:    []config.V1NFSShare{{ID: ""}},
-			},
-		}
-		_, _, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace", false)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "shares[0].id is empty")
-	})
-}
-
 // TestResolveSharedDirs_NFS_UnsupportedRuntime_FailsClosed is item C8/T11:
-// with backend=nfs, a runtime that neither bind-mounts a host path
-// (Docker/Podman/Apple) nor consumes RunConfig.SharedDirStorage
-// (Kubernetes) — e.g. cloudrun — must fail closed instead of silently
-// succeeding with unread volumes/realization (design G5).
+// with shared dirs on the split legacy shared_dir_storage export, a runtime
+// that neither bind-mounts a host path (Docker/Podman/Apple) nor consumes
+// RunConfig.SharedDirStorage (Kubernetes) — e.g. cloudrun — must fail
+// closed instead of silently succeeding with unread volumes/realization
+// (design G5).
 func TestResolveSharedDirs_NFS_UnsupportedRuntime_FailsClosed(t *testing.T) {
 	hostBase := t.TempDir()
 	sdCfg := nfsSharedDirStorageCfg(filepath.Dir(hostBase))
@@ -243,7 +199,7 @@ func TestResolveSharedDirs_NFS_UnsupportedRuntime_FailsClosed(t *testing.T) {
 
 	for _, runtimeName := range []string{"cloudrun", "cloudrun-sandbox", "unknown-runtime"} {
 		t.Run(runtimeName, func(t *testing.T) {
-			volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", runtimeName, dirs, "/workspace", false)
+			volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), true, "/unused", "pid-1", runtimeName, dirs, "/workspace")
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "not supported on runtime")
 			assert.Contains(t, err.Error(), runtimeName)
@@ -251,6 +207,25 @@ func TestResolveSharedDirs_NFS_UnsupportedRuntime_FailsClosed(t *testing.T) {
 			assert.Nil(t, realization)
 		})
 	}
+}
+
+// On a shared backend that is not the split legacy export, a runtime that
+// places shared dirs itself (Cloud Run) keeps the local layout, as it did
+// before the Layout (workspace_storage nfs never moved its shared dirs).
+func TestResolveSharedDirs_SharedBackend_OtherRuntimeKeepsLocalLayout(t *testing.T) {
+	projectDir := newTestProjectDir(t)
+	hostBase := t.TempDir()
+	sdCfg := nfsSharedDirStorageCfg(filepath.Dir(hostBase))
+	sdCfg.NFS.Shares[0].ID = filepath.Base(hostBase)
+	dirs := []api.SharedDir{{Name: "scratchpad"}}
+
+	volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, projectDir, "", "cloudrun", dirs, "/workspace")
+	require.NoError(t, err)
+	assert.Nil(t, realization)
+	want, err := config.SharedDirsToVolumeMounts(projectDir, dirs, "/workspace")
+	require.NoError(t, err)
+	assert.Equal(t, want, volumes)
+	assertDirEmpty(t, hostBase)
 }
 
 // TestResolveSharedDirs_NFS_TraversalProjectID_GuardBeforeMkdir is item
@@ -281,7 +256,7 @@ func TestResolveSharedDirs_NFS_TraversalProjectID_GuardBeforeMkdir(t *testing.T)
 	require.False(t, strings.HasPrefix(escapedPath, hostBase+string(filepath.Separator)),
 		"test fixture must actually escape hostBase, got %q", escapedPath)
 
-	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", traversalProjectID, "docker", dirs, "/workspace", false)
+	volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, "/unused", traversalProjectID, "docker", dirs, "/workspace")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid hub project ID")
 	assert.Nil(t, volumes)
@@ -306,11 +281,11 @@ func TestResolveSharedDirs_NFS_MissingHostBase_LocalContainerRuntime_FailsClosed
 	dirs := []api.SharedDir{{Name: "scratchpad"}}
 	for _, runtimeName := range []string{"docker", "podman", "container"} {
 		t.Run(runtimeName, func(t *testing.T) {
-			volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", runtimeName, dirs, "/workspace", false)
+			volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, "/unused", "pid-1", runtimeName, dirs, "/workspace")
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), missingBase)
 			// The fixed wording for the fs.ErrNotExist case.
-			assert.Contains(t, err.Error(), "requires this broker to have the export mounted")
+			assert.Contains(t, err.Error(), "require this broker to have the share mounted")
 			assert.Contains(t, err.Error(), "T2 topology")
 			assert.Nil(t, volumes)
 			assert.Nil(t, realization)
@@ -339,7 +314,7 @@ func TestResolveSharedDirs_NFS_HostBaseStatError_NotMissing_IncludesUnderlyingEr
 	sdCfg.NFS.Shares[0].ID = "not-a-dir/export"
 
 	dirs := []api.SharedDir{{Name: "scratchpad"}}
-	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace", false)
+	volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, "/unused", "pid-1", "docker", dirs, "/workspace")
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "T2 topology", "an unrelated stat failure must not claim the export is simply unmounted")
 	assert.Contains(t, err.Error(), hostBase)
@@ -347,10 +322,12 @@ func TestResolveSharedDirs_NFS_HostBaseStatError_NotMissing_IncludesUnderlyingEr
 	assert.Nil(t, realization)
 }
 
-// TestResolveSharedDirs_NFS_MissingHostBase_Kubernetes_FailsClosed: only the
-// co-located-broker topology (T2, design §3.3) is supported, so a missing
-// host base must refuse for kubernetes exactly like it does for a
-// local-container runtime, naming the actual missing path. kubelet
+// TestResolveSharedDirs_NFS_MissingHostBase_Kubernetes_FailsClosed: for
+// shared dirs on the split legacy shared_dir_storage export (and on the
+// volume backends) only the co-located-broker topology (T2, design §3.3)
+// is supported, so a missing host base must refuse for kubernetes exactly
+// like it does for a local-container runtime, naming the actual missing
+// path. kubelet
 // auto-vivifies a missing subPath as the export's SQUASHED anonymous
 // identity on an all_squash export — exactly the identity the
 // upper-directory hardening (mode + ACL) defends against.
@@ -361,16 +338,45 @@ func TestResolveSharedDirs_NFS_MissingHostBase_Kubernetes_FailsClosed(t *testing
 	sdCfg.NFS.Shares[0].ID = "does-not-exist"
 
 	dirs := []api.SharedDir{{Name: "scratchpad"}}
-	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "kubernetes", dirs, "/workspace", false)
+	volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), true, "/unused", "pid-1", "kubernetes", dirs, "/workspace")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), missingBase)
-	assert.Contains(t, err.Error(), "requires this broker to have the export mounted")
+	assert.Contains(t, err.Error(), "require this broker to have the share mounted")
 	assert.Contains(t, err.Error(), "T2 topology")
 	assert.Nil(t, volumes)
 	assert.Nil(t, realization)
 
 	_, statErr := os.Stat(missingBase)
 	assert.True(t, os.IsNotExist(statErr), "host base must not be created")
+}
+
+// On Kubernetes, shared dirs that ride the nfs workspace export (no legacy
+// split) may be left to the node when the broker has no mount of the
+// export, as the workspace directory itself is (ensureNFSWorkspaceLeaf):
+// the workspace provisioning container mounts and prepares them. Nothing
+// is created, and the pod still mounts every dir by subPath.
+func TestResolveSharedDirs_NFS_MissingHostBase_KubernetesUnifiedLeftToNode(t *testing.T) {
+	tmpDir := t.TempDir()
+	missingBase := filepath.Join(tmpDir, "does-not-exist")
+	sdCfg := nfsSharedDirStorageCfg(tmpDir)
+	sdCfg.NFS.Shares[0].ID = "does-not-exist"
+
+	dirs := []api.SharedDir{{Name: "scratchpad"}}
+	_, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, "/unused", "pid-1", "kubernetes", dirs, "/workspace")
+	require.NoError(t, err)
+	require.NotNil(t, realization)
+	assert.Equal(t, "projects/pid-1/shared-dirs/scratchpad", realization.SubPaths["scratchpad"])
+	assert.Empty(t, realization.SupplementalGroups)
+	_, statErr := os.Stat(missingBase)
+	assert.True(t, os.IsNotExist(statErr), "host base must not be created")
+
+	// A gke-shared-volume share is never left to the node.
+	gke := projectfs.Layout{Backend: projectfs.BackendGKESharedVolume, HostBase: missingBase, SubPathRoot: "projects",
+		Share: projectfs.Share{ID: "vol", PVName: "claim"}}
+	_, _, err = resolveSharedDirs(gke, false, "/unused", "pid-1", "kubernetes", dirs, "/workspace")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "require this broker to have the share mounted")
+
 }
 
 // TestResolveSharedDirs_NFS_HostBasePresent_MkdirsSharedDirs is a real
@@ -396,7 +402,7 @@ func TestResolveSharedDirs_NFS_HostBasePresent_MkdirsSharedDirs(t *testing.T) {
 	sdCfg.NFS.Shares[0].ID = shareID
 
 	dirs := []api.SharedDir{{Name: "scratchpad"}}
-	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-42", "docker", dirs, "/workspace", false)
+	volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, "/unused", "pid-42", "docker", dirs, "/workspace")
 	require.NoError(t, err)
 	require.Len(t, volumes, 1)
 
@@ -478,7 +484,7 @@ func TestResolveSharedDirs_NFS_ExistingParentChain_NewLeafGetsSetgid(t *testing.
 	sdCfg.NFS.Shares[0].ID = shareID
 	dirs := []api.SharedDir{{Name: "newdir"}}
 
-	volumes, _, err := resolveSharedDirs(sdCfg, "/unused", "pid-42", "docker", dirs, "/workspace", false)
+	volumes, _, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, "/unused", "pid-42", "docker", dirs, "/workspace")
 	require.NoError(t, err)
 	require.Len(t, volumes, 1)
 
@@ -523,7 +529,7 @@ func TestResolveSharedDirs_NFS_PreexistingSharedDir_NotChmoded(t *testing.T) {
 	sdCfg.NFS.Shares[0].ID = shareID
 	dirs := []api.SharedDir{{Name: "scratchpad"}}
 
-	_, _, err := resolveSharedDirs(sdCfg, "/unused", "pid-42", "docker", dirs, "/workspace", false)
+	_, _, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, "/unused", "pid-42", "docker", dirs, "/workspace")
 	require.NoError(t, err)
 
 	after, statErr := os.Stat(leaf)
@@ -558,7 +564,7 @@ func TestResolveSharedDirs_NFS_NewLeaf_GetsACL_IntermediatesAndPreexistingLeafDo
 	sdCfg.NFS.Shares[0].ID = shareID
 	dirs := []api.SharedDir{{Name: "scratchpad"}, {Name: "existing"}}
 
-	_, _, err := resolveSharedDirs(sdCfg, "/unused", "pid-42", "docker", dirs, "/workspace", false)
+	_, _, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, "/unused", "pid-42", "docker", dirs, "/workspace")
 	require.NoError(t, err)
 
 	getACL := func(path, attr string) ([]byte, error) {
@@ -652,7 +658,7 @@ func TestResolveSharedDirs_NFS_PoC_TraversalNamesAndProjectID(t *testing.T) {
 					dirs := []api.SharedDir{{Name: poc.dirName}}
 
 					volumes, realization, err := resolveSharedDirs(
-						sdCfg, "/unused", poc.projectID, runtimeName, dirs, "/workspace", false)
+						sdLayoutFor(t, sdCfg), false, "/unused", poc.projectID, runtimeName, dirs, "/workspace")
 					require.Error(t, err, "PoC input must be rejected")
 					assert.Contains(t, err.Error(), poc.wantErrSubs,
 						"expected the primary validation layer to catch this input, not just some layer")
@@ -662,42 +668,6 @@ func TestResolveSharedDirs_NFS_PoC_TraversalNamesAndProjectID(t *testing.T) {
 					assertDirEmpty(t, hostBase)
 				})
 			}
-		})
-	}
-}
-
-// TestResolveSharedDirs_LocalBranch_NFSWorkspaceBackend_RejectsTraversalNames
-// is the F-111 review fix (tf-lead/tf-review-nfsfix, BLOCKING): the SAME
-// class of vulnerability TestResolveSharedDirs_NFS_PoC_TraversalNamesAndProjectID
-// covers above for server.shared_dir_storage=nfs also applied to the local/
-// default branch whenever server.workspace_storage.backend is "nfs" — a
-// DIFFERENT, older config block the k8s runtime's nfsSharedDirs path
-// consumes directly. Names there become NFS subPaths via
-// nfsSharedDirSubPath, and can come from a cloned repo's in-repo
-// settings.yaml. With F-111's own change (the winner init container now has
-// CHOWN/FOWNER/DAC_OVERRIDE), an unvalidated escape isn't just a data leak —
-// it's a cross-project ownership hijack (chown -R -h on someone else's
-// tree). Covers the same traversal shapes as the existing PoC test, plus an
-// absolute path and "." per review.
-func TestResolveSharedDirs_LocalBranch_NFSWorkspaceBackend_RejectsTraversalNames(t *testing.T) {
-	badNames := []string{
-		"../../../projects",
-		"../../victim/shared-dirs/scratchpad",
-		"/etc/passwd",
-		".",
-	}
-
-	for _, name := range badNames {
-		t.Run(name, func(t *testing.T) {
-			projectDir := newTestProjectDir(t)
-			dirs := []api.SharedDir{{Name: name}}
-
-			volumes, realization, err := resolveSharedDirs(
-				nil /* sdCfg: local/default */, projectDir, "pid-1", "kubernetes", dirs, "/workspace", true /* nfsWorkspaceBackend */)
-			require.Error(t, err, "invalid shared-dir name must be rejected when workspace_storage.backend is nfs")
-			assert.Contains(t, err.Error(), "invalid name")
-			assert.Nil(t, volumes)
-			assert.Nil(t, realization)
 		})
 	}
 }
@@ -722,8 +692,7 @@ func TestResolveSharedDirs_LocalBranch_NonNFSWorkspaceBackend_PreservesAC1(t *te
 			projectDir := newTestProjectDir(t)
 			dirs := []api.SharedDir{{Name: name}}
 
-			_, _, err := resolveSharedDirs(
-				nil /* sdCfg: local/default */, projectDir, "pid-1", "docker", dirs, "/workspace", false /* nfsWorkspaceBackend */)
+			_, _, err := resolveSharedDirs(localSharedDirLayout, false, projectDir, "pid-1", "docker", dirs, "/workspace")
 			assert.NoError(t, err, "AC1: non-nfs workspace backend must keep swallowing errors, not start failing closed")
 		})
 	}
@@ -761,7 +730,7 @@ func TestResolveSharedDirs_NFS_SymlinkedLeaf_FailsClosed(t *testing.T) {
 	sdCfg.NFS.Shares[0].ID = shareID
 	dirs := []api.SharedDir{{Name: "scratchpad"}}
 
-	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace", false)
+	volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, "/unused", "pid-1", "docker", dirs, "/workspace")
 	require.Error(t, err, "a leaf symlink pointing outside the export must be refused")
 	// Round 4 review nit T4/S-N2 (still pinned after the round 5 rewrite):
 	// the component walk's openat(O_NOFOLLOW) on the leaf is what refuses
@@ -803,7 +772,7 @@ func TestResolveSharedDirs_NFS_SymlinkedIntermediate_FailsClosed(t *testing.T) {
 	sdCfg.NFS.Shares[0].ID = shareID
 	dirs := []api.SharedDir{{Name: "scratchpad"}}
 
-	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace", false)
+	volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, "/unused", "pid-1", "docker", dirs, "/workspace")
 	require.Error(t, err, "a symlinked intermediate component pointing outside the export must be refused")
 	// Round 4 review nit T4/S-N2 (still pinned after the round 5 rewrite):
 	// the component walk's O_NOFOLLOW open is the primary layer.
@@ -833,7 +802,7 @@ func TestResolveSharedDirs_NFS_SymlinkedShareDirsComponent_FailsClosed(t *testin
 	sdCfg.NFS.Shares[0].ID = shareID
 	dirs := []api.SharedDir{{Name: "scratchpad"}}
 
-	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace", false)
+	volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, "/unused", "pid-1", "docker", dirs, "/workspace")
 	require.Error(t, err, "a symlinked shared-dirs component pointing outside the export must be refused")
 	assert.Contains(t, err.Error(), "is a symlink")
 	assert.Nil(t, volumes)
@@ -860,7 +829,7 @@ func TestResolveSharedDirs_NFS_ComponentSymlinkToExportRoot_FailsClosed(t *testi
 	sdCfg.NFS.Shares[0].ID = shareID
 	dirs := []api.SharedDir{{Name: "scratchpad"}}
 
-	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace", false)
+	volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, "/unused", "pid-1", "docker", dirs, "/workspace")
 	require.Error(t, err, "a component symlinked to the export root must be refused")
 	assert.Contains(t, err.Error(), "is a symlink")
 	assert.Nil(t, volumes)
@@ -888,7 +857,7 @@ func TestResolveSharedDirs_NFS_SubPathRootComponentSymlinkToDot_FailsClosed(t *t
 	sdCfg.NFS.Shares[0].ID = shareID
 	dirs := []api.SharedDir{{Name: "scratchpad"}}
 
-	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace", false)
+	volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, "/unused", "pid-1", "docker", dirs, "/workspace")
 	require.Error(t, err, "a symlinked subpath_root (first walk component) resolving to the export root must be refused")
 	assert.Contains(t, err.Error(), "is a symlink")
 	assert.Nil(t, volumes)
@@ -915,7 +884,7 @@ func TestResolveSharedDirs_NFS_SubPathRootComponentSymlinkedOutside_FailsClosed(
 	sdCfg.NFS.Shares[0].ID = shareID
 	dirs := []api.SharedDir{{Name: "scratchpad"}}
 
-	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace", false)
+	volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, "/unused", "pid-1", "docker", dirs, "/workspace")
 	require.Error(t, err, "a symlinked subpath_root (first walk component) pointing outside the export must be refused")
 	assert.Contains(t, err.Error(), "is a symlink")
 	assert.Nil(t, volumes)
@@ -940,7 +909,7 @@ func TestResolveSharedDirs_NFS_PidComponentSymlinkToDotDot_FailsClosed(t *testin
 	sdCfg.NFS.Shares[0].ID = shareID
 	dirs := []api.SharedDir{{Name: "scratchpad"}}
 
-	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace", false)
+	volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, "/unused", "pid-1", "docker", dirs, "/workspace")
 	require.Error(t, err, "a pid component symlinked to \"..\" (the export root) must be refused")
 	assert.Contains(t, err.Error(), "is a symlink")
 	assert.Nil(t, volumes)
@@ -976,7 +945,7 @@ func TestResolveSharedDirs_NFS_InBaseSymlinkedLeaf_ToVictim_FailsClosed(t *testi
 	sdCfg.NFS.Shares[0].ID = shareID
 	dirs := []api.SharedDir{{Name: "scratchpad"}}
 
-	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace", false)
+	volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, "/unused", "pid-1", "docker", dirs, "/workspace")
 	require.Error(t, err, "a relative in-export symlink to another project's shared dir must be refused")
 	assert.Contains(t, err.Error(), "is a symlink")
 	assert.Nil(t, volumes)
@@ -1016,7 +985,7 @@ func TestResolveSharedDirs_NFS_InBaseSymlinkedIntermediate_ToVictim_FailsClosed(
 	sdCfg.NFS.Shares[0].ID = shareID
 	dirs := []api.SharedDir{{Name: "scratchpad"}}
 
-	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace", false)
+	volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, "/unused", "pid-1", "docker", dirs, "/workspace")
 	require.Error(t, err, "a relative in-export symlinked intermediate component must be refused")
 	assert.Contains(t, err.Error(), "is a symlink")
 	assert.Nil(t, volumes)
@@ -1058,7 +1027,7 @@ func TestResolveSharedDirs_NFS_InBaseSymlinkedIntermediate_ToVictim_NoLeaf_Fails
 	sdCfg.NFS.Shares[0].ID = shareID
 	dirs := []api.SharedDir{{Name: "scratchpad"}}
 
-	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace", false)
+	volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, "/unused", "pid-1", "docker", dirs, "/workspace")
 	require.Error(t, err, "a relative in-export symlinked intermediate component must be refused even with no pre-existing victim leaf")
 	assert.Contains(t, err.Error(), "is a symlink")
 	assert.Nil(t, volumes)
@@ -1090,7 +1059,7 @@ func TestResolveSharedDirs_NFS_InBaseSymlinkedSharedDirsComponent_ToVictim_NoLea
 	sdCfg.NFS.Shares[0].ID = shareID
 	dirs := []api.SharedDir{{Name: "scratchpad"}}
 
-	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace", false)
+	volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, "/unused", "pid-1", "docker", dirs, "/workspace")
 	require.Error(t, err, "a symlinked shared-dirs component pointing at a real victim project must be refused")
 	assert.Contains(t, err.Error(), "is a symlink")
 	assert.Nil(t, volumes)
@@ -1129,7 +1098,7 @@ func TestResolveSharedDirs_NFS_InBaseSymlinkedLeaf_ExistingVictimLeaf_ModeUnchan
 	sdCfg.NFS.Shares[0].ID = shareID
 	dirs := []api.SharedDir{{Name: "scratchpad"}}
 
-	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace", false)
+	volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, "/unused", "pid-1", "docker", dirs, "/workspace")
 	require.Error(t, err, "a relative in-export symlink to an existing victim leaf must be refused")
 	assert.Contains(t, err.Error(), "is a symlink")
 	assert.Nil(t, volumes)
@@ -1156,7 +1125,7 @@ func TestResolveSharedDirs_NFS_LeafIsRegularFile_FailsClosed(t *testing.T) {
 	sdCfg.NFS.Shares[0].ID = shareID
 	dirs := []api.SharedDir{{Name: "scratchpad"}}
 
-	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace", false)
+	volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, "/unused", "pid-1", "docker", dirs, "/workspace")
 	require.Error(t, err, "a regular file at the leaf must be refused")
 	assert.Contains(t, err.Error(), "not a directory")
 	assert.Nil(t, volumes)
@@ -1179,7 +1148,7 @@ func TestResolveSharedDirs_NFS_IntermediateIsRegularFile_FailsClosed(t *testing.
 	sdCfg.NFS.Shares[0].ID = shareID
 	dirs := []api.SharedDir{{Name: "scratchpad"}}
 
-	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace", false)
+	volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, "/unused", "pid-1", "docker", dirs, "/workspace")
 	require.Error(t, err, "a regular file at an intermediate component must be refused")
 	assert.Contains(t, err.Error(), "not a directory")
 	assert.Nil(t, volumes)
@@ -1205,7 +1174,7 @@ func TestResolveSharedDirs_NFS_SymlinkedHostBase_StillWorks(t *testing.T) {
 	sdCfg.NFS.Shares[0].ID = shareID
 	dirs := []api.SharedDir{{Name: "scratchpad"}}
 
-	volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", "docker", dirs, "/workspace", false)
+	volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, "/unused", "pid-1", "docker", dirs, "/workspace")
 	require.NoError(t, err)
 	require.Len(t, volumes, 1)
 	require.NotNil(t, realization)
@@ -1247,7 +1216,7 @@ func TestResolveSharedDirs_NFS_CustomSubPathRoot_StillWorks(t *testing.T) {
 			sdCfg.NFS.SubPathRoot = "shared"
 			dirs := []api.SharedDir{{Name: "scratchpad"}}
 
-			volumes, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-1", runtimeName, dirs, "/workspace", false)
+			volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, "/unused", "pid-1", runtimeName, dirs, "/workspace")
 			require.NoError(t, err)
 			require.NotNil(t, realization)
 			assert.Equal(t, "shared/pid-1/shared-dirs/scratchpad", realization.SubPaths["scratchpad"])
@@ -1280,38 +1249,34 @@ func TestIsKubernetesRuntime(t *testing.T) {
 	}
 }
 
-func TestSelectSharedDirStorage_NilSettingsIsError(t *testing.T) {
-	cfg, err := selectSharedDirStorage(nil, "", "", "a1")
-	require.Error(t, err)
-	assert.Nil(t, cfg)
-	assert.Contains(t, err.Error(), "a1")
-}
+// testRecordFile is the record name the writeAgentRecordFile tests use.
+const testRecordFile = "record.json"
 
 // sdsRecordTempFiles lists leftover temporary record files in dir.
 func sdsRecordTempFiles(t *testing.T, dir string) []string {
 	t.Helper()
-	matches, err := filepath.Glob(filepath.Join(dir, sharedDirStorageRecordFile+".tmp-*"))
+	matches, err := filepath.Glob(filepath.Join(dir, testRecordFile+".tmp-*"))
 	require.NoError(t, err)
 	return matches
 }
 
-func TestWriteSharedDirStorageRecord_LeavesNoTempFile(t *testing.T) {
+func TestWriteAgentRecordFile_LeavesNoTempFile(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, writeSharedDirStorageRecord(dir, "nfs"))
-	got, err := readSharedDirStorageRecord(dir)
+	require.NoError(t, writeAgentRecordFile(dir, testRecordFile, map[string]string{"backend": "nfs"}))
+	data, err := os.ReadFile(filepath.Join(dir, testRecordFile))
 	require.NoError(t, err)
-	assert.Equal(t, "nfs", got)
-	info, err := os.Stat(filepath.Join(dir, sharedDirStorageRecordFile))
+	assert.Equal(t, "{\"backend\":\"nfs\"}\n", string(data))
+	info, err := os.Stat(filepath.Join(dir, testRecordFile))
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o644), info.Mode().Perm())
 	assert.Empty(t, sdsRecordTempFiles(t, dir))
 }
 
-func TestWriteSharedDirStorageRecord_FailedRenameRemovesTempFile(t *testing.T) {
+func TestWriteAgentRecordFile_FailedRenameRemovesTempFile(t *testing.T) {
 	dir := t.TempDir()
 	// A non-empty directory at the record path makes the rename fail.
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, sharedDirStorageRecordFile, "x"), 0o755))
-	require.Error(t, writeSharedDirStorageRecord(dir, "nfs"))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, testRecordFile, "x"), 0o755))
+	require.Error(t, writeAgentRecordFile(dir, testRecordFile, map[string]string{"backend": "nfs"}))
 	assert.Empty(t, sdsRecordTempFiles(t, dir))
 }
 
@@ -1366,14 +1331,14 @@ func TestResolveSharedDirs_NFS_LeafGroupReadAtStart(t *testing.T) {
 			sdCfg := nfsSharedDirStorageCfg(mountRoot)
 			dirs := []api.SharedDir{{Name: "a"}, {Name: "b"}}
 
-			_, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-42", rt, dirs, "/workspace", false)
+			_, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, "/unused", "pid-42", rt, dirs, "/workspace")
 			require.NoError(t, err)
 			require.NotNil(t, realization)
 			assert.Equal(t, []int64{int64(gid)}, realization.SupplementalGroups, "one entry for two leaves in the same group")
 
 			// Allowlist: a different shared_dir_storage.nfs.gid drops it.
 			sdCfg.NFS.GID = gid + 1
-			_, realization, err = resolveSharedDirs(sdCfg, "/unused", "pid-42", rt, dirs, "/workspace", false)
+			_, realization, err = resolveSharedDirs(sdLayoutFor(t, sdCfg), false, "/unused", "pid-42", rt, dirs, "/workspace")
 			require.NoError(t, err)
 			assert.Empty(t, realization.SupplementalGroups)
 		})
@@ -1394,8 +1359,8 @@ func TestResolveSharedDirs_NFS_LeafGroupStatFails_StartsUnchanged(t *testing.T) 
 
 	mountRoot := newResolvedTempDir(t)
 	require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "scion-shared"), 0o775))
-	volumes, realization, err := resolveSharedDirs(nfsSharedDirStorageCfg(mountRoot), "/unused", "pid-42", "docker",
-		[]api.SharedDir{{Name: "a"}}, "/workspace", false)
+	volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, nfsSharedDirStorageCfg(mountRoot)), false, "/unused", "pid-42", "docker",
+		[]api.SharedDir{{Name: "a"}}, "/workspace")
 	require.NoError(t, err)
 	require.Len(t, volumes, 1)
 	require.NotNil(t, realization)
@@ -1404,4 +1369,144 @@ func TestResolveSharedDirs_NFS_LeafGroupStatFails_StartsUnchanged(t *testing.T) 
 	assert.Contains(t, logs.String(), "could not read the group of a shared dir")
 	assert.Contains(t, logs.String(), "fstat failed")
 	assert.NotContains(t, logs.String(), "below 1000")
+}
+
+// A gke-shared-volume Layout resolves like nfs: the leaf is created under
+// the mounted volume, and the realization carries the volume's claim and
+// the subPath the pod mounts.
+func TestResolveSharedDirs_GKESharedVolume(t *testing.T) {
+	hostBase := newResolvedTempDir(t)
+	layout := projectfs.Layout{Backend: projectfs.BackendGKESharedVolume, HostBase: hostBase, SubPathRoot: "projects",
+		Share: projectfs.Share{ID: "vol", PVName: "filestore-claim"}}
+	dirs := []api.SharedDir{{Name: "scratchpad", InWorkspace: true}}
+
+	volumes, realization, err := resolveSharedDirs(layout, false, "/unused", "pid-7", "kubernetes", dirs, "/workspace")
+	require.NoError(t, err)
+	require.NotNil(t, realization)
+	assert.Equal(t, "gke-shared-volume", realization.Backend)
+	assert.Equal(t, "filestore-claim", realization.PVClaimName)
+	assert.Equal(t, "projects/pid-7/shared-dirs/scratchpad", realization.SubPaths["scratchpad"])
+	require.Len(t, volumes, 1)
+	assert.Equal(t, filepath.Join(hostBase, "projects/pid-7/shared-dirs/scratchpad"), volumes[0].Source)
+	assert.Equal(t, "/workspace/.scion-volumes/scratchpad", volumes[0].Target)
+	info, err := os.Stat(volumes[0].Source)
+	require.NoError(t, err)
+	assert.True(t, info.IsDir())
+}
+
+// The realization carries the share's server, export and subpath root for
+// inline pod volumes only when the shared dirs are on the Layout's own nfs
+// share, never on the transitional split.
+func TestResolveSharedDirs_NFS_RealizationCarriesInlineShareUnlessSplit(t *testing.T) {
+	hostBase := t.TempDir()
+	sdCfg := nfsSharedDirStorageCfg(filepath.Dir(hostBase))
+	sdCfg.NFS.Shares[0].ID = filepath.Base(hostBase)
+	dirs := []api.SharedDir{{Name: "scratchpad"}}
+
+	_, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, "/unused", "pid-1", "kubernetes", dirs, "/workspace")
+	require.NoError(t, err)
+	require.NotNil(t, realization)
+	assert.Equal(t, "10.128.15.241", realization.Server)
+	assert.Equal(t, "/srv/scion-shared", realization.Export)
+	assert.Equal(t, "projects", realization.SubPathRoot)
+
+	_, realization, err = resolveSharedDirs(sdLayoutFor(t, sdCfg), true, "/unused", "pid-1", "kubernetes", dirs, "/workspace")
+	require.NoError(t, err)
+	require.NotNil(t, realization)
+	assert.Empty(t, realization.Server, "the split never mounts inline")
+	assert.Empty(t, realization.Export)
+}
+
+// Inline shared dirs (no pv_name, Kubernetes): the broker must create them,
+// so a host base it has not mounted refuses the start as a share the broker
+// does not see (inline remedy) instead of leaving the directories to the
+// node.
+func TestResolveSharedDirs_NFS_InlineMissingHostBaseRefused(t *testing.T) {
+	tmpDir := t.TempDir()
+	missingBase := filepath.Join(tmpDir, "does-not-exist")
+	sdCfg := nfsSharedDirStorageCfg(tmpDir)
+	sdCfg.NFS.Shares[0].ID = "does-not-exist"
+	sdCfg.NFS.Shares[0].PVName = ""
+
+	dirs := []api.SharedDir{{Name: "scratchpad"}}
+	volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, "/unused", "pid-1", "kubernetes", dirs, "/workspace")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrProjectShareNotMounted), "err = %v", err)
+	assert.Equal(t, `shared dir "scratchpad": `+runtime.ProjectShareInlineUnavailableText(missingBase), err.Error())
+	assert.Nil(t, volumes)
+	assert.Nil(t, realization)
+	_, statErr := os.Stat(missingBase)
+	assert.True(t, os.IsNotExist(statErr), "host base must not be created")
+}
+
+// Inline shared dirs (no pv_name, Kubernetes): a shared dir the broker is
+// not allowed to create refuses the start with the directory and the fix;
+// with a claim it is still left to the node.
+func TestResolveSharedDirs_NFS_InlinePermissionDeniedRefused(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	hostBase := t.TempDir()
+	projectDir := filepath.Join(hostBase, "projects", "pid-1")
+	require.NoError(t, os.MkdirAll(projectDir, 0o755))
+	require.NoError(t, os.Chmod(projectDir, 0o555))
+	t.Cleanup(func() { _ = os.Chmod(projectDir, 0o755) })
+	dirs := []api.SharedDir{{Name: "scratchpad"}}
+
+	inlineCfg := nfsSharedDirStorageCfg(filepath.Dir(hostBase))
+	inlineCfg.NFS.Shares[0].ID = filepath.Base(hostBase)
+	inlineCfg.NFS.Shares[0].PVName = ""
+	volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, inlineCfg), false, "/unused", "pid-1", "kubernetes", dirs, "/workspace")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, fs.ErrPermission), "got %v", err)
+	assert.Contains(t, err.Error(), `shared dir "scratchpad"`)
+	assert.Contains(t, err.Error(), "projects/pid-1/shared-dirs/scratchpad")
+	assert.Contains(t, err.Error(), "mount the share's export at \""+hostBase+"\"")
+	assert.Nil(t, volumes)
+	assert.Nil(t, realization)
+
+	claimCfg := nfsSharedDirStorageCfg(filepath.Dir(hostBase))
+	claimCfg.NFS.Shares[0].ID = filepath.Base(hostBase)
+	volumes, realization, err = resolveSharedDirs(sdLayoutFor(t, claimCfg), false, "/unused", "pid-1", "kubernetes", dirs, "/workspace")
+	require.NoError(t, err, "with a claim the node still creates it")
+	require.NotNil(t, realization)
+	assert.Equal(t, "scion-shared", realization.PVClaimName)
+	assert.Len(t, volumes, 1)
+	assert.NoDirExists(t, filepath.Join(projectDir, "shared-dirs"))
+}
+
+// Inline NFS shared dirs and the Runtime Broker control-path check
+// (brokercontrol, runtime.CheckVolumeSources): a shared-dir volume carries
+// the broker host path of its directory under the share's mount root (the
+// Kubernetes pod builder turns it into an nfs volume of the server path),
+// so the check judges that host path. A legitimate inline share passes;
+// a share whose mount root lies inside the Scion global directory, outside
+// its agent-data subtrees, is refused as a control-path mount.
+func TestResolveSharedDirs_NFS_InlineControlPathCheck(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	require.NoError(t, os.MkdirAll(filepath.Join(home, ".scion"), 0o755))
+	dirs := []api.SharedDir{{Name: "scratchpad"}}
+
+	hostBase := t.TempDir()
+	cfg := nfsSharedDirStorageCfg(filepath.Dir(hostBase))
+	cfg.NFS.Shares[0].ID = filepath.Base(hostBase)
+	cfg.NFS.Shares[0].PVName = ""
+	volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, cfg), false, "/unused", "pid-1", "kubernetes", dirs, "/workspace")
+	require.NoError(t, err)
+	require.NotNil(t, realization)
+	require.Len(t, volumes, 1)
+	require.NoError(t, runtime.CheckVolumeSources(volumes), "a legitimate inline share is not refused")
+
+	mountRoot := filepath.Join(home, ".scion", "nfs")
+	require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share"), 0o755))
+	ctl := nfsSharedDirStorageCfg(mountRoot)
+	ctl.NFS.Shares[0].ID = "share"
+	ctl.NFS.Shares[0].PVName = ""
+	volumes, _, err = resolveSharedDirs(sdLayoutFor(t, ctl), false, "/unused", "pid-1", "kubernetes", dirs, "/workspace")
+	require.NoError(t, err)
+	require.Len(t, volumes, 1)
+	err = runtime.CheckVolumeSources(volumes)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, brokercontrol.ErrControlPathMount), "got %v", err)
 }

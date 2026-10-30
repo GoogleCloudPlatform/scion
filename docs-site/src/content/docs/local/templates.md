@@ -328,6 +328,10 @@ scion templates sync --all
 scion --global templates sync code-reviewer
 scion templates sync code-reviewer --name team-reviewer
 
+# Sync a template directory by path (Hub name defaults to its base name)
+scion templates sync ./templates/code-reviewer
+cd templates/code-reviewer && scion templates sync .
+
 # Download a Hub template to the local filesystem
 scion templates pull code-reviewer --to .scion/templates/code-reviewer
 
@@ -335,11 +339,17 @@ scion templates pull code-reviewer --to .scion/templates/code-reviewer
 scion templates status
 ```
 
+`sync` and `push` accept a template name or a directory path. An argument that is `.` or `..`, is absolute, or contains a path separator (such as `./name`) is a path: that directory is synced as is, and the Hub name defaults to its base name unless `--name` is given. A bare name is looked up in the project and global templates directories as before.
+
+:::tip[Agents that share the project workspace]
+Agents that share the project workspace see the project's `.scion` directory read-only, so they cannot edit `.scion/templates/<name>` in place. Edit the template in another directory of the checkout and sync it by path, for example `scion templates sync ./templates/planner --name planner`.
+:::
+
 `sync` is content-aware: it hashes files and uploads only what changed, and templates carry a content hash for traceability (visible in `scion templates list`, `scion templates show`, and the Web UI). Syncing an existing template mirrors the local directory: files deleted locally are removed from the Hub copy, and sync lists them as it removes them.
 
 On the Hub, a template's files are stored as content-addressed blobs, and each commit swaps the template's file manifest in one compare-and-swap step. If another commit changes the same template first, the losing commit gets `409 template_conflict` and nothing is written; `scion templates sync` re-diffs against the new version and retries once (see the [API Reference](/scion/reference/api/)). Templates stored in the older layout keep working and move to blobs on their next commit. Blobs that are no longer referenced by any template are removed by a background collector after a grace period (24 hours by default), so an agent download that started from an older version still finds its files.
 
-Beyond the CLI, project templates are a **fully managed Hub-level resource** with full CRUD, SDK, and Web UI support. A connected Hub can import a whole repository of templates server-side via the **Load Templates** action in the Web UI, and imported templates can be browsed, edited, and deleted directly within the dashboard.
+Beyond the CLI, project templates are a **fully managed Hub-level resource** with full CRUD, SDK, and Web UI support. A connected Hub can import a whole repository of templates server-side via the **Load Templates** action in the Web UI, and imported templates can be browsed, edited, and deleted directly within the dashboard (when discovering or importing workspace templates for a linked project whose recorded provider path ends in `.scion`, the Hub resolves paths from the checkout root, the parent of `.scion`). When the Hub bootstraps or imports a template directory (or any bundled `harness-configs/<name>` subdirectory inside it), it opens the collected directory as a root, reads only the regular files recorded during collection without following symlinks or replaced directories, and verifies each file's size and SHA-256 digest on every read (`scion-agent.yaml`, `config.yaml`, and uploaded files).
 
 ### Refreshing a Hub template from its source
 

@@ -13,7 +13,8 @@ import (
 )
 
 // routingExpr is the one runs-on expression that routes CI jobs to cr-ci. It
-// must appear byte for byte in the snippet and in every doc that shows it.
+// must appear byte for byte in every doc that shows it. In the live workflows
+// (.github/workflows), hack/check-runner-routing.sh (added by PR-wf1) checks it.
 const routingExpr = "${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}"
 
 const (
@@ -67,11 +68,10 @@ func TestRoutingExpressionShape(t *testing.T) {
 	}
 }
 
-// TestRoutingExpressionEverywhere keeps the snippet and the docs in step: every
+// TestRoutingExpressionEverywhere keeps the docs in step: every
 // line that shows a routing runs-on carries exactly routingExpr.
 func TestRoutingExpressionEverywhere(t *testing.T) {
 	files := []string{
-		"ci-lint-routing.snippet.yml",
 		"README.md",
 		"../docs/architecture.md",
 		"../docs/github-setup.md",
@@ -89,27 +89,6 @@ func TestRoutingExpressionEverywhere(t *testing.T) {
 		}
 		if found == 0 {
 			t.Errorf("%s: no routing runs-on line found", f)
-		}
-	}
-}
-
-func TestSnippetLintEnv(t *testing.T) {
-	s := readFile(t, "ci-lint-routing.snippet.yml")
-	for i, l := range lines(s) {
-		if strings.Contains(l, "-c=1") && !strings.HasPrefix(strings.TrimSpace(l), "#") &&
-			!strings.Contains(l, "runner.environment != 'self-hosted' && ") {
-			t.Errorf("snippet:%d: the -c=1 throttle must apply only off the self-hosted runner: %s", i+1, l)
-		}
-	}
-	for _, want := range []string{
-		"GOFLAGS: ${{ runner.environment != 'self-hosted' && '-gcflags=github.com/GoogleCloudPlatform/scion/pkg/hub=-c=1' || '' }}",
-		`--concurrency="$LINT_CONCURRENCY"`,
-		"LINT_CONCURRENCY: ${{ runner.environment == 'self-hosted' && '4' || '2' }}",
-		"GOMEMLIMIT: ${{ runner.environment == 'self-hosted' && '24GiB' || '8GiB' }}",
-		"GOGC: '25'",
-	} {
-		if !strings.Contains(s, want) {
-			t.Errorf("snippet lacks %q", want)
 		}
 	}
 }
@@ -162,7 +141,10 @@ func TestPoCWorkflow(t *testing.T) {
 		"/sys/fs/cgroup/memory.peak", "df -h /scratch", "golangci-lint run ",
 		// memory.peak is NA under gVisor: the lint step samples memory and /scratch.
 		"/proc/meminfo", "df -k --output=used /scratch", "sample peaks:",
-		"LINT_CONCURRENCY: ${{ inputs.lint-concurrency || '4' }}",
+		"LINT_CONCURRENCY: ${{ inputs.lint-concurrency || '8' }}",
+		"GOGC: '100'", "GOMEMLIMIT: '24GiB'",
+		// P6b sampler: CPU from /proc/stat, the memory guard on the lint's process group, -v timings.
+		"/proc/stat", "setsid golangci-lint run -v ", `kill -TERM -- "-$lint"`, "min avail_mb=",
 		"id: restore",
 	} {
 		if !strings.Contains(s, want) {
@@ -178,11 +160,13 @@ func TestPoCWorkflow(t *testing.T) {
 	}
 }
 
-// TestCacheParityCheck: both templates start with a verify-only step, on the
-// self-hosted runner only, that checks the cache-parity contract (the
-// entrypoint sets it up; see README.md, "Cache sharing").
+// TestCacheParityCheck: the PoC template starts with a verify-only step, on
+// the self-hosted runner only, that checks the cache-parity contract (the
+// entrypoint sets it up; see README.md, "Cache sharing"). Routed jobs in the
+// live workflows get the same check from .github/actions/setup-go-cache (added
+// by PR-wf1).
 func TestCacheParityCheck(t *testing.T) {
-	for _, f := range []string{"cr-runner-poc.yml", "ci-lint-routing.snippet.yml"} {
+	for _, f := range []string{"cr-runner-poc.yml"} {
 		s := readFile(t, f)
 		first := regexp.MustCompile(`(?m)^ *steps:\n *- name: (.*)\n *if: (.*)$`).FindStringSubmatch(s)
 		if first == nil || first[1] != "Check cr-ci cache parity (cr-ci runner only)" ||

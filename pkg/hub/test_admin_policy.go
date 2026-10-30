@@ -97,6 +97,7 @@ var testAdminPermissionPolicy = map[string]testAdminPolicy{
 	"agent.delegation.credential.revoke": testAdminPolicyDeny,
 	"agent.delegation.list":              testAdminPolicyDeny,
 	"agent.delegation.read":              testAdminPolicyDeny,
+	"agent.delegation.revoke_all":        testAdminPolicyDeny,
 	// Agent-principal permissions: only agent credentials use them.
 	"agent.status_update":  testAdminPolicyAllow,
 	"agent.log_append":     testAdminPolicyAllow,
@@ -115,6 +116,9 @@ var testAdminPermissionPolicy = map[string]testAdminPolicy{
 	"project.set_messaging_policy": testAdminPolicyAllow,
 	"project.clone":                testAdminPolicyAllow,
 	"project.list":                 testAdminPolicyAllow,
+	// Posting into a project's chat threads, held by the built-in
+	// project roles.
+	"project.chat_post": testAdminPolicyAllow,
 	// Visitor access for federated accounts (ptone/scion#4603): deny. A
 	// test hub is not federated (A0 gate), like federation.project_visitors.
 	// Still grantable at project scope (testAdminGrantableAtProjectScope):
@@ -558,11 +562,19 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.Artifacts:                    testAdminPolicyDeny,
 	"hub.conduit":                            testAdminPolicyDeny,
 	experiments.ChatScheduledSend:            testAdminPolicyDeny,
+	experiments.ChatStarredMessages:          testAdminPolicyDeny,
 	experiments.AgentEdit:                    testAdminPolicyDeny,
+	experiments.AgentEditHeld:                testAdminPolicyDeny,
 	experiments.AttachmentArtifacts:          testAdminPolicyDeny,
 	experiments.AgentPlugins:                 testAdminPolicyDeny,
+	experiments.PortView:                     testAdminPolicyDeny,
 	experiments.AgentBadges:                  testAdminPolicyDeny,
 	experiments.SSEHiddenTabClose:            testAdminPolicyDeny,
+	experiments.SecretRotation:               testAdminPolicyDeny,
+	experiments.ContentHashV2:                testAdminPolicyDeny,
+	experiments.ArtifactReviewEditor:         testAdminPolicyDeny,
+	experiments.SkillContentHashV2:           testAdminPolicyDeny,
+	experiments.UserDeleteForceCascade:       testAdminPolicyDeny,
 }
 
 // testAdminPolicyInputs are the vocabularies the classification must cover.
@@ -921,7 +933,15 @@ func (d *HTTPAgentDispatcher) restrictTestAdminRootedSecrets(ctx context.Context
 		return resolved
 	}
 	restricted, allowed, root := d.testAdminRootScopes(ctx, agent)
-	if !restricted {
+	return d.applyTestAdminSecretScopes(ctx, agent, resolved, restricted, allowed, root)
+}
+
+// applyTestAdminSecretScopes is restrictTestAdminRootedSecrets with the
+// testAdminRootScopes result supplied by the caller (launch selection
+// decides it once, before it fetches any value): when restricted, it keeps
+// only secrets of an allowed scope and reports the withheld scopes.
+func (d *HTTPAgentDispatcher) applyTestAdminSecretScopes(ctx context.Context, agent *store.Agent, resolved []secret.SecretWithValue, restricted bool, allowed map[string]bool, root string) []secret.SecretWithValue {
+	if !restricted || len(resolved) == 0 {
 		return resolved
 	}
 	out := resolved[:0:0]

@@ -56,8 +56,8 @@ type fileDeletingRunManager struct {
 	runLabelManager
 }
 
-func (m *fileDeletingRunManager) DeleteTarget(ctx context.Context, name string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
-	if _, err := m.runLabelManager.DeleteTarget(ctx, name, ref, deleteFiles, projectPath, removeBranch); err != nil {
+func (m *fileDeletingRunManager) DeleteTarget(ctx context.Context, name, sharerKey string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+	if _, err := m.runLabelManager.DeleteTarget(ctx, name, sharerKey, ref, deleteFiles, projectPath, removeBranch); err != nil {
 		return false, err
 	}
 	if deleteFiles {
@@ -134,6 +134,7 @@ func TestRunID_E2E_LateGhostDeleteSparesRecreatedAgentFiles(t *testing.T) {
 
 			mgr := &fileDeletingRunManager{}
 			cfg := runtimebroker.DefaultServerConfig()
+			cfg.BrokerAuthEnabled = false // no hub keys here: serve the broker API without auth
 			cfg.BrokerID = "e2e-broker"
 			cfg.BrokerName = "e2e-broker"
 			brokerSrv := runtimebroker.New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})

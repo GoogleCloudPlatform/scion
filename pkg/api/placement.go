@@ -25,6 +25,13 @@ type ResolvedPlacement struct {
 	// Sources records, per field, the settings keys that contributed the
 	// value (for logs only).
 	Sources map[string][]string `json:"sources,omitempty"`
+	// OperatorOwned marks placement the operator owns: the agent's own
+	// kubernetes block may add node selector keys but not change the
+	// operator's keys or runtime class, its tolerations must be among the
+	// operator's (none when the operator sets none), and it is checked even
+	// when no placement is in effect (config.ApplyOperatorPlacement). Set
+	// for flat instance starts. Never sent or persisted.
+	OperatorOwned bool `json:"-"`
 }
 
 // InEffect reports whether placement is in effect: the placement is

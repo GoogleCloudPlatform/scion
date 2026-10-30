@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
 func TestModeOnlyChanges(t *testing.T) {
@@ -86,6 +87,74 @@ func TestModeOnlyChanges_SkippedWithoutLocalExecBits(t *testing.T) {
 		[]hubclient.DownloadURLInfo{{Path: "bin/x", Hash: "h", Mode: "0755"}})
 	if len(got) != 0 {
 		t.Errorf("modeOnlyChanges = %v, want none on a platform without exec bits", got)
+	}
+}
+
+// TestLocalMatchesHub covers the sync decision of ptone/scion#5658: local
+// files match the Hub's when paths, contents and executable bits agree,
+// whichever content hash version the Hub records.
+func TestLocalMatchesHub(t *testing.T) {
+	ha, hb := transfer.HashBytes([]byte("a")), transfer.HashBytes([]byte("b"))
+	local := []hubclient.FileInfo{
+		{Path: "a.md", Hash: ha, Mode: "0644"},
+		{Path: "run.sh", Hash: hb, Mode: "0755"},
+	}
+	infos := []transfer.FileInfo{{Path: "a.md", Hash: ha, Mode: "0644"}, {Path: "run.sh", Hash: hb, Mode: "0755"}}
+	v1, v2 := transfer.ComputeContentHashV1(infos), transfer.ComputeContentHashV2(infos)
+	same := []hubclient.TemplateFile{
+		{Path: "a.md", Hash: ha, Mode: "0644"},
+		{Path: "run.sh", Hash: hb, Mode: "0755"},
+	}
+
+	cases := []struct {
+		name   string
+		remote []hubclient.TemplateFile
+		hash   string
+		want   bool
+	}{
+		{"same files, v2 hub", same, v2, true},
+		{"same files, v1 hub", same, v1, true},
+		{"rename only", []hubclient.TemplateFile{
+			{Path: "a.md", Hash: ha, Mode: "0644"},
+			{Path: "bin/run.sh", Hash: hb, Mode: "0755"},
+		}, v1, false},
+		{"chmod only", []hubclient.TemplateFile{
+			{Path: "a.md", Hash: ha, Mode: "0644"},
+			{Path: "run.sh", Hash: hb, Mode: "0644"},
+		}, v1, false},
+		{"content change", []hubclient.TemplateFile{
+			{Path: "a.md", Hash: ha, Mode: "0644"},
+			{Path: "run.sh", Hash: ha, Mode: "0755"},
+		}, "", false},
+		{"hub has an extra file", append(append([]hubclient.TemplateFile(nil), same...),
+			hubclient.TemplateFile{Path: "extra", Hash: ha}), "", false},
+		{"hub sends no manifest, v2 hash", nil, v2, true},
+		{"hub sends no manifest, v1 hash", nil, v1, true},
+		{"hub sends no manifest, other hash", nil, transfer.HashBytes([]byte("x")), false},
+		{"hub sends nothing", nil, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := localMatchesHub(local, tc.remote, tc.hash); got != tc.want {
+				t.Errorf("localMatchesHub = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLocalMatchesHub_WithoutLocalExecBits: on Windows the Hub's
+// executable bits are kept, so an executable on the Hub is not reported as
+// a difference against a local copy with no exec bit to record.
+func TestLocalMatchesHub_WithoutLocalExecBits(t *testing.T) {
+	orig := localModesCarryExecBit
+	localModesCarryExecBit = func() bool { return false }
+	t.Cleanup(func() { localModesCarryExecBit = orig })
+
+	h := transfer.HashBytes([]byte("x"))
+	local := []hubclient.FileInfo{{Path: "bin/x", Hash: h, Mode: "0666"}}
+	remote := []hubclient.TemplateFile{{Path: "bin/x", Hash: h, Mode: "0755"}}
+	if !localMatchesHub(local, remote, transfer.ComputeContentHashV2([]transfer.FileInfo{{Path: "bin/x", Hash: h, Mode: "0755"}})) {
+		t.Error("localMatchesHub = false, want true on a platform without exec bits")
 	}
 }
 

@@ -22,11 +22,11 @@ import (
 	"testing"
 
 	"entgo.io/ent/dialect"
-	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 )
 
@@ -45,7 +45,7 @@ func TestServerPreflight_Postgres(t *testing.T) {
 		client, err := openPreflightClient("postgres", enttest.NewSchemaURL(t))
 		require.NoError(t, err)
 		defer func() { _ = client.Close() }()
-		db := client.Driver().(*entsql.Driver).DB()
+		db := entc.SQLDB(client.Driver())
 		tx, err := db.BeginTx(ctx, snapshotTxOptions(dialect.Postgres))
 		require.NoError(t, err)
 		defer func() { _ = tx.Rollback() }()
@@ -75,7 +75,7 @@ func TestServerPreflight_Postgres(t *testing.T) {
 		client, err := openPreflightClient("postgres", enttest.NewSchemaURL(t))
 		require.NoError(t, err)
 		defer func() { _ = client.Close() }()
-		assert.Equal(t, 2, client.Driver().(*entsql.Driver).DB().Stats().MaxOpenConnections)
+		assert.Equal(t, 2, entc.SQLDB(client.Driver()).Stats().MaxOpenConnections)
 	})
 
 	shadowed := func(t *testing.T) (dsn, empty, hub string) {

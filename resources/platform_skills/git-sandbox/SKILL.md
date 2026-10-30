@@ -34,7 +34,8 @@ You are operating in a restricted, non-interactive sandbox environment. Follow t
   - **Continue Rebase:** `GIT_EDITOR=true git rebase --continue`
   - **Standard Merge:** `git merge main --no-edit`
   - **Manual Commit:** `git commit -m "Your message" --no-edit`
-  - **Global Override:** If possible at the start of the session, run: `git config core.editor true`
+  - **Any Other Command:** Set the editor per command: `GIT_EDITOR=true git <subcommand>`, or `git -c core.editor=true <subcommand>`.
+  - **Never** run `git config core.editor ...` or otherwise write `core.editor` into the repository config: brokers refuse to start or resume an agent whose checkout sets it.
 
 ## 4. Conflict Resolution Loop
 

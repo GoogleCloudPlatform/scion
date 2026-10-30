@@ -33,11 +33,16 @@ type RelayServerConfig struct {
 	// PublicURL is the relay's own public URL (its
 	// relay_instances.public_endpoint).
 	PublicURL string `json:"publicUrl,omitempty" yaml:"publicUrl,omitempty" koanf:"publicUrl"`
+	// Singleton asserts a non-HA singleton relay (design §3.9 "Cloud Run
+	// singleton"): required on Cloud Run (K_SERVICE set), together with
+	// max_instances=1, min_instances=1 and cpu_idle=false; allowed
+	// elsewhere, where it labels the relay non-HA.
+	Singleton bool `json:"singleton,omitempty" yaml:"singleton,omitempty" koanf:"singleton"`
 }
 
 // IsZero reports whether nothing is configured.
 func (c RelayServerConfig) IsZero() bool {
-	return c.HubInternalURL == "" && c.PublicURL == ""
+	return c.HubInternalURL == "" && c.PublicURL == "" && !c.Singleton
 }
 
 // Validate checks the configured values. Whether a value is required
@@ -56,6 +61,13 @@ func (c RelayServerConfig) Validate() error {
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
 			errs = append(errs, fmt.Errorf("invalid %s: want an http(s) URL without query, fragment or credentials", f.key))
 		}
+	}
+	// The relay internal hop rule (CheckRelayTransport) for the hub
+	// internal API, named by key only. The public URL is client-facing,
+	// not the internal hop.
+	if c.HubInternalURL != "" && CheckRelayTransport(c.HubInternalURL) != nil {
+		errs = append(errs, fmt.Errorf("invalid server.relay.hub_internal_url: %w: it is neither https:// nor loopback; "+
+			"use the hub's TLS internal listener at an https:// URL (%s)", ErrPlaintextNonLoopback, relayTransportFix))
 	}
 	return errors.Join(errs...)
 }

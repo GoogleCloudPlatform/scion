@@ -1851,6 +1851,16 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 				"cannot restore the agent: the user or agent it belongs to no longer exists", nil)
 			return
 		}
+		if errors.Is(err, errAgentOwnerUserDeleting) {
+			writeError(w, http.StatusConflict, ErrCodeConflict,
+				"cannot restore the agent: the user it belongs to is being deleted", nil)
+			return
+		}
+		if errors.Is(err, errAgentGuardUserLookup) {
+			slog.ErrorContext(ctx, "restore: guard user lookup failed", "agent_id", agent.ID, "error", err)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Could not verify the agent's owner; retry the restore", nil)
+			return
+		}
 		if errors.Is(err, errRestoreEdgeConflict) {
 			Conflict(w, "The agent already has an active delegation that conflicts with the one being restored")
 			return
@@ -1948,6 +1958,26 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		}
 	}
 
+	// An agent delegated credential sends a direct text message to the
+	// route's own agent only (delegatedMessageRequestRefusal); every other
+	// field is refused before anything is looked up or written. The hub
+	// sets the timestamp.
+	if delegated := delegatedAgentIdentityFromContext(ctx); delegated != nil {
+		if field := delegatedMessageRequestRefusal(&req); field != "" {
+			ValidationError(w, field+" is not available to a delegated credential", map[string]interface{}{"field": field})
+			return
+		}
+		if req.StructuredMessage != nil {
+			req.StructuredMessage.Timestamp = ""
+		}
+		// A delegated send is an agent send: it is charged to the actor
+		// agent's send budget (AC-2), the same budget ExecuteAgentDM
+		// charges for the agent's own sends, before anything is written.
+		if !s.allowChatSend(w, delegated.ID(), chatSenderAgent) {
+			return
+		}
+	}
+
 	// The retired end-of-turn assistant-reply type is dropped here too, as
 	// in handleAgentOutboundMessage: accepted with 200 so a caller sees
 	// success, but never persisted, dispatched or published.
@@ -1988,6 +2018,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		if user := GetUserIdentityFromContext(ctx); user != nil {
 			structuredMsg.SenderID = user.ID()
 			structuredMsg.Sender = userSenderAddress(user)
+		} else if delegated := delegatedAgentIdentityFromContext(ctx); delegated != nil {
+			structuredMsg.Sender, structuredMsg.SenderID = s.delegatedSenderAddress(ctx, delegated)
 		} else if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 			structuredMsg.SenderID = agentIdent.ID()
 			senderSlug := agentIdent.ID() // fallback to UUID
@@ -2010,6 +2042,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		if user := GetUserIdentityFromContext(ctx); user != nil {
 			senderID = user.ID()
 			sender = userSenderAddress(user)
+		} else if delegated := delegatedAgentIdentityFromContext(ctx); delegated != nil {
+			sender, senderID = s.delegatedSenderAddress(ctx, delegated)
 		} else if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 			senderID = agentIdent.ID()
 			senderSlug := agentIdent.ID() // fallback to UUID
@@ -2076,6 +2110,15 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 	messaging.RecordStep(ctx, "agent_loaded")
+
+	// A chat reference (surface and external_ref) resolves a conversation
+	// whose default agent is set to the recipient, so the recipient must be
+	// live. A soft-deleted recipient gets exactly this handler's answer for
+	// an unknown agent, before anything is dispatched or written.
+	if req.Surface != "" && req.ExternalRef != "" && (agent == nil || !agent.DeletedAt.IsZero()) {
+		writeErrorFromErr(w, store.ErrNotFound, "")
+		return
+	}
 
 	// Ownership check: verify the DM key IDs match the actual participants.
 	// The agent in the DM key must match the target agent; the user must match
@@ -2328,7 +2371,20 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// migrating recipient, or when a wake finds another start in progress.
 	deferDelivery := reincarnationInFlight(agent)
 
-	if req.Wake && !senderIsAgent && !deferDelivery {
+	// A delegated send is an agent send: before anything is written, it
+	// gets the delivery checks ExecuteAgentDM applies to the actor agent's
+	// own send (dispatch availability, the target's hold and its phase),
+	// with the same refusals, in place of the user checks below. A
+	// delegated request never carries wake.
+	delegatedSender := delegatedAgentIdentityFromContext(ctx) != nil
+	if delegatedSender {
+		if dmErr := s.delegatedDeliveryRefusal(ctx, agent, deferDelivery); dmErr != nil {
+			WriteAgentDMError(w, dmErr)
+			return
+		}
+	}
+
+	if req.Wake && !senderIsAgent && !delegatedSender && !deferDelivery {
 		// The response waits on the resume and the readiness wait: extend
 		// this request's write deadline to cover them (ptone/scion#4178).
 		s.extendWriteDeadlineForDMWake(ctx, w)
@@ -2347,7 +2403,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 
 	// Reject messages to non-running agents when --wake is not set.
 	// For agent-to-agent DMs, phase validation is handled by ExecuteAgentDM.
-	if !req.Wake && !senderIsAgent && !deferDelivery {
+	if !req.Wake && !senderIsAgent && !delegatedSender && !deferDelivery {
 		switch state.Phase(agent.Phase) {
 		case state.PhaseRunning:
 			// OK — proceed to deliver
@@ -2484,10 +2540,13 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		storeMsg.RecipientProjectID = &recipientProjectID
 		// SenderProjectID is derived from the authenticated sender.
 		// For human senders, SenderProjectID remains nil (no project-level provenance).
-		if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-			senderProjID := agentIdent.ProjectID()
+		// A delegated send is an agent-sender row too: the actor agent's
+		// project, like every other agent-to-agent row.
+		if senderProjID, ok := senderAgentProject(ctx); ok {
 			storeMsg.SenderProjectID = &senderProjID
 		}
+		// A delegated send also names the issuer and the grant.
+		stampDelegatedMessageAttribution(ctx, storeMsg)
 
 		// Phase 5 dual-write: resolve-or-create conversation for user/agent → agent messages.
 		// If the CLI already resolved a conversation_id (S4 conversation references),
@@ -2946,6 +3005,12 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 
 		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 			s.messageLog.Error("Failed to persist message", "error", err)
+			if delegatedSender {
+				// As for the agent's own send (ExecuteAgentDM, AC-3), a
+				// delegated send that could not be stored is not dispatched.
+				WriteAgentDMError(w, persistFailedDMError())
+				return
+			}
 		} else {
 			persistedMsgID = storeMsg.ID
 			persistedConversationID = storeMsg.ConversationID
@@ -3140,10 +3205,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				if bp := s.GetMessageBrokerProxy(); bp != nil {
 					observerMsg := *structuredMsg
 					observerMsg.ObserverOnly = true
-					isCrossProjectObs := false
-					if senderAgent := GetAgentIdentityFromContext(ctx); senderAgent != nil {
-						isCrossProjectObs = senderAgent.ProjectID() != "" && senderAgent.ProjectID() != agent.ProjectID
-					}
+					senderProjectID := senderAgentProjectID(ctx)
+					isCrossProjectObs := senderProjectID != "" && senderProjectID != agent.ProjectID
 					if isCrossProjectObs {
 						sanitizeCrossProjectObserver(&observerMsg)
 					}
@@ -3845,6 +3908,13 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 		ValidationError(w, "structured_message is required", nil)
 		return
 	}
+	// A broadcast carries text: attachment ids are refused above, and the
+	// messages store accepts an empty body (attachment-only chat messages,
+	// ptone/scion#6146), so an empty one is refused here, before fan-out.
+	if req.StructuredMessage.Msg == "" {
+		ValidationError(w, "msg is required", nil)
+		return
+	}
 
 	// B5 SECURITY FIX: ALWAYS derive sender identity from the
 	// authenticated context, same as handleAgentMessage. Client-supplied
@@ -4233,6 +4303,19 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 	// Resolve mentions using the shared package.
 	results := messages.ResolveMentions(mentionSlugs, agentInfos, primaryAgent.Slug)
 
+	// A mention copy carries the text only, not the attachments, so a
+	// message without text (an attachment-only message, ptone/scion#6146)
+	// would reach the mentioned agents as an empty message. It is not
+	// copied; each resolved mention reports why.
+	if originalMsg.Msg == "" {
+		for i := range results {
+			if results[i].Status == "delivered" {
+				results[i].Status, results[i].Error = "error", errMentionCopyNeedsText
+			}
+		}
+		return results
+	}
+
 	// Phase 3 msg-authz: extract sender identity once for per-mention checks.
 	senderIdentity := GetIdentityFromContext(ctx)
 
@@ -4542,6 +4625,12 @@ func authenticatedSender(ctx context.Context) (kind, id string) {
 	}
 	if agent := GetAgentIdentityFromContext(ctx); agent != nil {
 		return "agent", agent.ID()
+	}
+	// An agent delegated credential sends as its actor agent
+	// (.design/agent-delegation.md §14.5). Its request shape is limited to
+	// a direct message to the route's agent (delegatedMessageRequestRefusal).
+	if delegated := delegatedAgentIdentityFromContext(ctx); delegated != nil {
+		return "agent", delegated.ID()
 	}
 	return "", ""
 }

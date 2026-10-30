@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // Broker-level tests for ptone/scion#2550 P2: a runtime whose handle is the
@@ -99,9 +100,9 @@ type k8sStyleManager struct {
 	real agent.Manager
 }
 
-func (m *k8sStyleManager) DeleteTarget(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
-	_, _ = m.mockManager.DeleteTarget(ctx, agentName, ref, deleteFiles, projectPath, removeBranch)
-	return m.real.DeleteTarget(ctx, agentName, ref, deleteFiles, projectPath, removeBranch)
+func (m *k8sStyleManager) DeleteTarget(ctx context.Context, agentName, sharerKey string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+	_, _ = m.mockManager.DeleteTarget(ctx, agentName, sharerKey, ref, deleteFiles, projectPath, removeBranch)
+	return m.real.DeleteTarget(ctx, agentName, sharerKey, ref, deleteFiles, projectPath, removeBranch)
 }
 
 // A delete for run-old resolves run-old's entry from a stale list, but the
@@ -286,7 +287,7 @@ func TestCreateAgent_RunConflictIs409(t *testing.T) {
 }
 
 func TestClassifyStartError_RunConflict(t *testing.T) {
-	code, _, msg := classifyStartError(context.Background(), errIdentityRunConflict, "", "")
+	code, _, msg := classifyStartError(context.Background(), errIdentityRunConflict, "", "", store.LaunchKindCreate)
 	if code != "name_in_use" {
 		t.Fatalf("code = %q, want name_in_use", code)
 	}
@@ -393,8 +394,8 @@ func TestRestart_NameInUse_409(t *testing.T) {
 // does).
 type filesFailManager struct{ k8sStyleManager }
 
-func (m *filesFailManager) DeleteTarget(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
-	if _, err := m.k8sStyleManager.DeleteTarget(ctx, agentName, ref, false, projectPath, removeBranch); err != nil {
+func (m *filesFailManager) DeleteTarget(ctx context.Context, agentName, sharerKey string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+	if _, err := m.k8sStyleManager.DeleteTarget(ctx, agentName, sharerKey, ref, false, projectPath, removeBranch); err != nil {
 		return false, err
 	}
 	return false, fmt.Errorf("%w: %w", agent.ErrAgentFilesDelete, errors.New("delete: FindBranchForAgent for dev: registry I/O error"))
@@ -479,7 +480,7 @@ func TestStartPaths_PreCleanRunMismatchIs409NoLeak(t *testing.T) {
 		})
 	}
 	t.Run("async launch", func(t *testing.T) {
-		code, _, msg := classifyStartError(context.Background(), errIdentityPreCleanMismatch, "", "")
+		code, _, msg := classifyStartError(context.Background(), errIdentityPreCleanMismatch, "", "", store.LaunchKindCreate)
 		if code != "name_in_use" {
 			t.Fatalf("code = %q, want name_in_use", code)
 		}

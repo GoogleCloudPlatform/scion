@@ -1082,10 +1082,25 @@ func (s *Server) handleAddParticipant(w http.ResponseWriter, r *http.Request, id
 			return
 		}
 
+		if agent == nil {
+			writeError(w, http.StatusNotFound, "not_found", "agent not found", nil)
+			return
+		}
+
 		// An agent of another project gets the same answer as an
-		// unknown agent; the reason is logged.
+		// unknown agent; the reason is logged. This runs before the
+		// soft-deleted check, so the reason is logged for a soft-deleted
+		// agent of another project too.
 		if conv.ProjectID != nil && agent.ProjectID != *conv.ProjectID {
 			logReferenceRefused(ctx, logging.RequestPath(r), "agent belongs to another project than the conversation", identity)
+			writeError(w, http.StatusNotFound, "not_found", "agent not found", nil)
+			return
+		}
+
+		// A soft-deleted agent is refused as an unknown agent, as group
+		// create and the default-agent path refuse it
+		// (validateDefaultAgent, handleSetDefaultAgent).
+		if !agent.DeletedAt.IsZero() {
 			writeError(w, http.StatusNotFound, "not_found", "agent not found", nil)
 			return
 		}

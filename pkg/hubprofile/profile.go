@@ -39,11 +39,14 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/pathcanon"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/urlredact"
 )
 
 const (
@@ -215,17 +218,26 @@ func ParseDelegations(values []string) (map[string]string, error) {
 // (lowercase scheme and host, no default port, no trailing slash, no
 // query, fragment or user info). https is required except for a loopback
 // host.
+//
+// An endpoint holding an '@' anywhere is refused: with one, a password
+// containing '/', '?' or '#' can parse as a host, port and path. Error
+// texts show the endpoint only by its scheme, host, port and path (see
+// displayEndpoint).
 func NormalizeEndpoint(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return "", errors.New("an endpoint is required (--endpoint)")
 	}
+	shown := displayEndpoint(raw)
+	if strings.Contains(raw, "@") {
+		return "", fmt.Errorf("invalid endpoint %s: no user info or '@'", shown)
+	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" {
-		return "", fmt.Errorf("invalid endpoint %q: must be an absolute URL", raw)
+		return "", fmt.Errorf("invalid endpoint %s: must be an absolute URL", shown)
 	}
 	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-		return "", fmt.Errorf("invalid endpoint %q: no user info, query or fragment", raw)
+		return "", fmt.Errorf("invalid endpoint %s: no user info, query or fragment", shown)
 	}
 	scheme := strings.ToLower(u.Scheme)
 	host := strings.ToLower(u.Hostname())
@@ -237,13 +249,13 @@ func NormalizeEndpoint(raw string) (string, error) {
 		}
 	case "http":
 		if !isLoopbackHost(host) {
-			return "", fmt.Errorf("invalid endpoint %q: https is required", raw)
+			return "", fmt.Errorf("invalid endpoint %s: https is required", shown)
 		}
 		if port == "80" {
 			port = ""
 		}
 	default:
-		return "", fmt.Errorf("invalid endpoint %q: https is required", raw)
+		return "", fmt.Errorf("invalid endpoint %s: https is required", shown)
 	}
 	hostport := host
 	if strings.Contains(host, ":") {
@@ -253,6 +265,20 @@ func NormalizeEndpoint(raw string) (string, error) {
 		hostport += ":" + port
 	}
 	return scheme + "://" + hostport + strings.TrimRight(u.EscapedPath(), "/"), nil
+}
+
+// endpointNotShown stands for an endpoint that error texts do not show.
+const endpointNotShown = "(endpoint not shown)"
+
+// displayEndpoint returns raw for an error text, quoted: by its scheme,
+// host, port and path only (urlredact.HostAndPath), or endpointNotShown
+// when raw does not parse or holds an '@' that HostAndPath cannot place.
+func displayEndpoint(raw string) string {
+	u, ok := urlredact.HostAndPath(raw)
+	if !ok {
+		return endpointNotShown
+	}
+	return strconv.Quote(u.String())
 }
 
 func isLoopbackHost(h string) bool {
@@ -351,7 +377,7 @@ func ownHubAddrs(getenv func(string) string) ([]hubAddr, error) {
 func CheckNotOwnHub(endpoint string, getenv func(string) string) error {
 	target, err := parseHubAddr(endpoint)
 	if err != nil {
-		return fmt.Errorf("invalid endpoint %q: %v", endpoint, err)
+		return fmt.Errorf("invalid endpoint %s: %v", displayEndpoint(endpoint), err)
 	}
 	owns, err := ownHubAddrs(getenv)
 	if err != nil {
@@ -410,49 +436,26 @@ func HomeDir() (string, error) {
 	return home, nil
 }
 
-// ensurePrivateDir creates dir, which must be base or below it, with mode
-// 0700. base is ~/.scion/hub-profiles: it and every component from it down
-// to dir is inspected with Lstat, created when missing, and refused when it
-// is a symlink or not a directory, so an existing directory below a
-// symlinked component is never followed. Components above base (such as
-// ~/.scion) are created with MkdirAll when missing and not inspected.
-func ensurePrivateDir(base, dir string) error {
-	rel, err := filepath.Rel(base, dir)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return fmt.Errorf("refusing %s: not below %s", dir, base)
+// privateRel returns dir relative to base, which must be base itself or
+// below it: the containment is decided by pathcanon.Within on canonical
+// forms, never by comparing strings. The result is "." for base itself.
+func privateRel(base, dir string) (string, error) {
+	// Rel is lexical: it only names the components to walk, and explains a
+	// refusal. It decides nothing.
+	rel, relErr := filepath.Rel(base, dir) //winsec:not-containment containment is decided by pathcanon.Within below
+	in, err := pathcanon.Within(base, dir)
+	if err != nil {
+		return "", fmt.Errorf("refusing %s: %w", dir, err)
 	}
-	if _, err := os.Lstat(base); errors.Is(err, os.ErrNotExist) {
-		if err := os.MkdirAll(filepath.Dir(base), 0o700); err != nil {
-			return err
+	if !in || relErr != nil || !filepath.IsLocal(rel) && rel != "." {
+		if relErr == nil && filepath.IsLocal(rel) {
+			// Lexically below base, canonically elsewhere: a component
+			// on the way is a link leading out.
+			return "", fmt.Errorf("refusing %s: a symlink or junction below %s leads outside it", dir, base)
 		}
+		return "", fmt.Errorf("refusing %s: not below %s", dir, base)
 	}
-	cur := base
-	parts := []string{}
-	if rel != "." {
-		parts = strings.Split(rel, string(filepath.Separator))
-	}
-	for i := -1; i < len(parts); i++ {
-		if i >= 0 {
-			cur = filepath.Join(cur, parts[i])
-		}
-		fi, err := os.Lstat(cur)
-		if errors.Is(err, os.ErrNotExist) {
-			if err := os.Mkdir(cur, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-				return err
-			}
-			fi, err = os.Lstat(cur)
-		}
-		if err != nil {
-			return err
-		}
-		if fi.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("refusing %s: it is a symlink", cur)
-		}
-		if !fi.IsDir() {
-			return fmt.Errorf("refusing %s: it is not a directory", cur)
-		}
-	}
-	return nil
+	return rel, nil
 }
 
 // profilePath returns the profile file path, validating the name.
@@ -475,9 +478,11 @@ func Save(home string, p *Profile, replace bool) error {
 	if err != nil {
 		return err
 	}
-	if err := ensurePrivateDir(Dir(home), Dir(home)); err != nil {
+	t, err := ensurePrivateDir(Dir(home), Dir(home))
+	if err != nil {
 		return err
 	}
+	_ = t.Close()
 	data, err := yaml.Marshal(p)
 	if err != nil {
 		return err
@@ -490,7 +495,7 @@ func Save(home string, p *Profile, replace bool) error {
 			return fmt.Errorf("profile %q already exists; remove it first or use --replace", p.Name)
 		}
 	}
-	return writeFileAtomic(path, data)
+	return writeFileAtomic(home, p.Name+profileFileExt, data)
 }
 
 // Load reads and validates the named profile.
@@ -499,7 +504,7 @@ func Load(home, name string) (*Profile, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, err := readPrivateFile(path)
+	data, err := readPrivateFile(home, name+profileFileExt, path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("hub profile %q not found (add it with 'scion hub profile add %s ...')", name, name)
 	}

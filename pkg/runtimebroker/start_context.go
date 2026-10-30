@@ -129,6 +129,9 @@ type startContextInputs struct {
 	ProjectPath string
 	ProjectSlug string
 	ProjectID   string
+	// PreviousProjectIDs are the Hub's earlier IDs of this project, for a
+	// git project's re-link (relinkSharedProjectIdentity).
+	PreviousProjectIDs []string
 	// ProjectPathFromContainer is set when ProjectPath was recovered from
 	// the agent's listed container rather than sent by the caller. That
 	// value is the resolved .scion directory the container recorded, not a
@@ -225,6 +228,12 @@ type startContextInputs struct {
 	// instead of hydrating again. Zero value (startAgent, restartAgent):
 	// hydrate here as usual.
 	Prehydrated prehydratedBundle
+
+	// OwnedAbandon, set by createAgent on a flat instance, receives the
+	// create's reservation (ptone/scion#5768): it is filled when the run is
+	// reserved, so a failure response can release it. Nil for start and
+	// restart, whose runs are never released this way.
+	OwnedAbandon *ownedCreateAbandon
 }
 
 // prehydratedBundle records hub hydration already performed for a dispatch.
@@ -282,26 +291,48 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		if agentID == "" {
 			agentID = in.OwnershipAgentID
 		}
-		if err := s.beginOwnedRun(in.ProjectID, agentID, slug, in.RunID, in.Operation == opCreate); err != nil {
+		ab := in.OwnedAbandon
+		if in.Operation != opCreate {
+			ab = nil
+		}
+		key := ownedRunKey{projectID: in.ProjectID, agentID: agentID, runID: in.RunID}
+		var hold *ownedHold
+		if ab != nil {
+			hold = s.holdOwnedRun(key)
+		}
+		began, err := s.beginOwnedRunInfo(in.ProjectID, agentID, slug, in.RunID, in.Operation == opCreate)
+		if err != nil {
+			hold.release()
 			span.SetStatus(codes.Error, err.Error())
-			msg := "The agent's ownership cannot be recorded by this Runtime Broker instance"
-			instance := s.ownership.RuntimeBrokerID()
-			var elsewhere *slugReservedElsewhereError
-			if errors.As(err, &elsewhere) {
-				instance = elsewhere.instance
-			}
-			switch {
-			case errors.Is(err, ErrOwnershipSlugPending):
-				msg = fmt.Sprintf("Agent slug %q is still reserved on Runtime Broker instance %s: the cleanup of an earlier delete of this slug is not yet confirmed", slug, instance)
-			case elsewhere != nil:
-				msg = fmt.Sprintf("Agent slug %q is reserved in this project by Runtime Broker instance %s of the same host", slug, instance)
-			}
-			return nil, &startContextError{Status: http.StatusConflict, Message: msg, OriginalErr: err}
+			return nil, s.ownershipStartContextError(err, slug)
+		}
+		if ab != nil {
+			*ab = ownedCreateAbandon{armed: true, key: key, slug: slug, name: in.Name,
+				projectPath: in.ProjectPath, hubProjectID: in.ProjectID, began: began, hold: hold}
 		}
 		ownedProjectID, ownedAgentID = in.ProjectID, agentID
 	}
 
 	// --- Hub-managed project path resolution ---
+	defer func() {
+		// The release proof looks for the agent's files where this
+		// dispatch puts them.
+		if in.OwnedAbandon != nil && in.OwnedAbandon.armed {
+			in.OwnedAbandon.projectPath = in.ProjectPath
+		}
+	}()
+	// On a shared storage backend: the Layout's project root
+	// (sharedHubProjectPath), checked, never written.
+	if in.ProjectSlug != "" && in.ProjectPath == "" {
+		sharedPath, shared, sce := s.sharedHubProjectPath(ctx, in.ProjectID)
+		if sce != nil {
+			span.SetStatus(codes.Error, startContextSpanText(sce))
+			return nil, sce
+		}
+		if shared {
+			in.ProjectPath = sharedPath
+		}
+	}
 	if in.ProjectSlug != "" && in.ProjectPath == "" {
 		globalDir, err := config.GetGlobalDir()
 		if err != nil {
@@ -350,7 +381,18 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	if in.SharedWorkspace || (in.Config != nil && in.Config.SharedWorkspace) {
 		// A marker naming an earlier ID of the same project (a re-link) is
 		// carried over to the current ID first (ptone/scion#4440).
-		if err := s.relinkSharedProjectIdentity(ctx, in.ProjectPath, in.ProjectSlug, in.ProjectID, in.Name); err != nil {
+		lockErr, checkErr, err := s.relinkSharedProjectIdentityChecked(ctx, in.ProjectPath, in.ProjectSlug, in.ProjectID, in.Name, in.PreviousProjectIDs, s.unrecordedRelinkAllowed(ctx, in.HTTPRequest))
+		if lockErr != nil {
+			return nil, fmt.Errorf("project workspace lock: %w", lockErr)
+		}
+		if checkErr != nil {
+			if err != nil {
+				s.agentLifecycleLog.Warn("project re-link: the re-link also failed; returning the workspace record conflict", "agent", in.Name, "relink_error", err.Error())
+			}
+			span.SetStatus(codes.Error, "hub-managed workspace configuration check failed")
+			return nil, s.workspaceConfigStartContextError(checkErr, in.Name)
+		}
+		if err != nil {
 			span.SetStatus(codes.Error, "shared-workspace project re-link failed")
 			return nil, projectRelinkStartContextError(err)
 		}
@@ -581,35 +623,34 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
-	// 3. Hub auth token. Precedence (highest first):
-	//   1. in.AgentToken — the explicit hub-provided dedicated field (create path).
-	//   2. an existing env["SCION_AUTH_TOKEN"] already populated from in.ResolvedEnv
-	//      above — on the start/resume path the hub mints the agent JWT into
-	//      resolvedEnv, so it is already present here and must be kept.
-	//   3. the broker's own dev SCION_AUTH_TOKEN — last resort only.
-	// The dev-token fallback must NOT clobber a token resolved from the hub:
-	// resume mints a valid JWT into resolvedEnv, and overwriting it with the
-	// broker's dev token caused 401s ("compact JWS format must have three parts").
-	if in.AgentToken != "" {
-		env["SCION_AUTH_TOKEN"] = in.AgentToken
-		// Bootstrap: NOT in argv. Diverted to ~/.scion/scion-token by
-		// pkg/agent/run.go:761-777; read by pkg/hubsync/sync.go:1329.
-		classifyBrokerEnv("SCION_AUTH_TOKEN", api.EnvKindSecretBootstrap)
-		if s.config.Debug {
-			s.agentLifecycleLog.Debug("SCION_AUTH_TOKEN set from agent token", "agent_id", in.AgentID, "length", len(in.AgentToken))
-		}
-	} else if env["SCION_AUTH_TOKEN"] != "" {
-		// Token already resolved from the hub via resolvedEnv (start/resume path); keep it.
-		if s.config.Debug {
-			s.agentLifecycleLog.Debug("SCION_AUTH_TOKEN kept from resolved env", "agent_id", in.AgentID, "length", len(env["SCION_AUTH_TOKEN"]))
-		}
-	} else if devToken := os.Getenv("SCION_AUTH_TOKEN"); devToken != "" {
-		env["SCION_AUTH_TOKEN"] = devToken
-		// Bootstrap: NOT in argv (same diversion as AgentToken path above).
-		classifyBrokerEnv("SCION_AUTH_TOKEN", api.EnvKindSecretBootstrap)
-		if s.config.Debug {
-			s.agentLifecycleLog.Debug("SCION_AUTH_TOKEN set from broker env", "agent_id", in.AgentID, "length", len(devToken))
-		}
+	// 3. Hub auth token. The agent's hub credential is only the token the
+	// hub issued for this start (opts.HubIssuedToken below):
+	//   - in.AgentToken, the dedicated field of a create request; or
+	//   - on start and restart, the resolved env SCION_AUTH_TOKEN, but only
+	//     when the hub classified it secret-bootstrap, which the hub does
+	//     only for the token it issued (setStartEnvToken). The resolved env
+	//     also carries the agent's config env (AppliedConfig.Env), so an
+	//     unclassified value there is not hub-issued.
+	// A SCION_AUTH_TOKEN from any other source (Config.Env, a config env
+	// value in the resolved env) is dropped from env and never reaches the
+	// agent. This process's own SCION_AUTH_TOKEN is never given to an agent,
+	// co-located hub or not. A hub-dispatched start without a hub-issued
+	// token fails in the agent manager with agent.ErrNoHubToken
+	// (pkg/agent/run.go), relayed to the hub as the start's error message.
+	hubIssuedToken := in.AgentToken
+	if hubIssuedToken == "" && in.EnvClassifications["SCION_AUTH_TOKEN"] == api.EnvKindSecretBootstrap {
+		hubIssuedToken = in.ResolvedEnv["SCION_AUTH_TOKEN"]
+	}
+	if v, ok := env["SCION_AUTH_TOKEN"]; ok && v != hubIssuedToken {
+		// Names no value.
+		s.agentLifecycleLog.Info("SCION_AUTH_TOKEN in the start env is not the hub-issued token; dropped", "agent_id", in.AgentID)
+	}
+	delete(env, "SCION_AUTH_TOKEN")
+	if envCls != nil {
+		delete(envCls, "SCION_AUTH_TOKEN")
+	}
+	if hubIssuedToken != "" && s.config.Debug {
+		s.agentLifecycleLog.Debug("hub-issued agent token present", "agent_id", in.AgentID, "length", len(hubIssuedToken))
 	}
 
 	// 4. Hub endpoint
@@ -851,6 +892,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		ProjectPath:        in.ProjectPath,
 		NoAuth:             in.NoAuth,
 		TrustedHubEndpoint: trustedHubEndpoint,
+		HubIssuedToken:     hubIssuedToken,
 		// FreshProvision is true only for a create dispatch: GetAgent wipes
 		// and re-clones an existing populated workspace only in that case,
 		// never on start or restart (GoogleCloudPlatform/scion#1931).
@@ -1069,6 +1111,14 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		case decision.Route:
 			linkedCheckout = true
 			opts.Workspace = ""
+			// Capture the recorded origin (the hub project's repository) from the
+			// requested clone config, so worktree creation can pin the git-lfs
+			// endpoint from it rather than the live, agent-writable
+			// remote.origin.url. opts.GitClone is not populated until later in this
+			// function, so read the source (in.Config.GitClone) here.
+			if in.Config != nil && in.Config.GitClone != nil {
+				opts.RecordedOriginURL = in.Config.GitClone.URL
+			}
 			opts.GitClone = nil
 			s.agentLifecycleLog.Info("Worktree-per-agent: using a local worktree of the linked checkout",
 				"agent_id", in.AgentID, "repo_root", decision.RepoRoot)
@@ -1091,6 +1141,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	var provisionedWorktreeRoot string
 	if !linkedCheckout && in.Config != nil && in.Config.GitClone != nil && in.WorkspaceMode == store.WorkspaceModeWorktreePerAgent {
 		var err error
+		in.OwnedAbandon.markWriting()
 		worktreeProvisioned, provisionedWorktreeRoot, err = s.tryProvisionWorktree(ctx, in, &opts, env, dispatchRuntimeType)
 		if err != nil {
 			span.SetStatus(codes.Error, err.Error())
@@ -1098,8 +1149,26 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
+	// --- Shared-plain provisioning backstop (shared storage) ---
+	// A git project's shared workspace on the broker's shared Layout is
+	// provisioned by the broker before a local container starts (reuse when
+	// already provisioned, clone otherwise), and the in-container clone is
+	// then not requested (provisionSharedPlainWorkspace).
+	sharedPlainProvisioned := false
+	if !worktreeProvisioned && !linkedCheckout && in.Config != nil && in.Config.GitClone != nil &&
+		(in.Config.SharedWorkspace || in.WorkspaceMode == store.WorkspaceModeShared) && localContainerRuntime(dispatchRuntimeType) {
+		provisioned, err := s.provisionSharedPlainWorkspace(ctx, in, env)
+		if err != nil {
+			s.agentLifecycleLog.Error("Shared workspace provisioning failed", "agent_id", in.AgentID, "project_id", in.ProjectID,
+				"error", sanitizeCloneErrorText(err.Error(), in.Config.GitClone.URL))
+			span.SetStatus(codes.Error, "shared workspace provisioning failed")
+			return nil, &startContextError{Status: http.StatusInternalServerError, Message: "the project's shared workspace could not be provisioned"}
+		}
+		sharedPlainProvisioned = provisioned
+	}
+
 	// --- Git clone mode ---
-	if !worktreeProvisioned && !linkedCheckout && in.Config != nil && in.Config.GitClone != nil {
+	if !worktreeProvisioned && !linkedCheckout && !sharedPlainProvisioned && in.Config != nil && in.Config.GitClone != nil {
 		gc := in.Config.GitClone
 		env["SCION_GIT_CLONE_URL"] = gc.URL
 		// Clone URL may embed credentials — the original #127 bug.
@@ -1168,14 +1237,26 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	if emptyPerAgent {
 		// Never git, whatever a stale resolvedEnv claims.
 		isGitWorkspace = false
-		delete(env, "SCION_WORKSPACE_GIT")
-		delete(envCls, "SCION_WORKSPACE_GIT")
 	}
-	if isGitWorkspace {
+	// The broker owns this key: a value from the hub's resolved env (project
+	// env included), the request's env or anywhere else is replaced by the
+	// value computed here. The Kubernetes runtime's shared-repository guard
+	// trusts it, and pkg/agent keeps it as computed here (Manager.Start).
+	delete(env, "SCION_WORKSPACE_GIT")
+	delete(envCls, "SCION_WORKSPACE_GIT")
+	switch {
+	case isGitWorkspace:
 		env["SCION_WORKSPACE_GIT"] = "true"
 		classifyBrokerEnv("SCION_WORKSPACE_GIT", api.EnvKindPlain)
+	case !emptyPerAgent && s.sharedWorkspaceKnownNotGit(ctx, in, &opts, worktreeProvisioned, linkedCheckout):
+		// Explicit only when the broker positively knows the shared
+		// workspace is not a git repository (sharedWorkspaceKnownNotGit).
+		env["SCION_WORKSPACE_GIT"] = "false"
+		classifyBrokerEnv("SCION_WORKSPACE_GIT", api.EnvKindPlain)
 	}
-	// Absent when false — avoids encoding a "false" string agents must parse.
+	// Otherwise absent: git-ness is not known, and readers treat absent as
+	// "not git" except the Kubernetes guard, which then refuses (fail
+	// closed). An empty-per-agent workspace is never git and stays absent.
 
 	// --- Env + telemetry + secrets ---
 	opts.Env = env
@@ -1265,6 +1346,10 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		// a mirroring failure stops further creates (Checkpoint) and is
 		// checked again when Start returns (completeOwnedStart).
 		owned = s.installOwnedStart(&opts, ownedProjectID, ownedAgentID)
+		if owned != nil && in.OwnedAbandon != nil && in.OwnedAbandon.armed {
+			// An async launch takes the create's hold over with the mirror.
+			owned.hold = in.OwnedAbandon.hold
+		}
 	}
 	sc := &startContext{
 		Opts:                        opts,
@@ -1606,7 +1691,11 @@ func cleanupPartialWorktree(ctx context.Context, projectRoot, worktreePath, agen
 		return
 	}
 	gitCmd := func(ctx context.Context, args ...string) (*exec.Cmd, error) {
-		return provision.SafeGitCommand(ctx, projectRoot, args...)
+		cmd, err := provision.SafeGitCommand(ctx, projectRoot, args...)
+		if err != nil {
+			return nil, err
+		}
+		return cmd.Cmd, nil
 	}
 	if err := util.RemoveWorktreeEntry(ctx, worktreePath, gitCmd); err != nil {
 		slog.Warn("worktree-per-agent: could not remove the partial worktree's git entry",
@@ -2291,7 +2380,8 @@ func ambiguousNonGitWorkspace(in startContextInputs, worktreeProvisioned bool) s
 	// from the slug before buildStartContext) is checked; a linked
 	// project's own ProjectPath keeps its existing resolution.
 	globalDir, err := config.GetGlobalDir()
-	if err != nil || filepath.Clean(in.ProjectPath) != filepath.Join(globalDir, "projects", in.ProjectSlug) {
+	hubManagedPath := err == nil && filepath.Clean(in.ProjectPath) == filepath.Join(globalDir, "projects", in.ProjectSlug)
+	if !hubManagedPath && !isSharedHubProjectRoot(in.ProjectPath) {
 		return ""
 	}
 	if in.WorkspaceStoragePath != "" {
@@ -2308,6 +2398,16 @@ func ambiguousNonGitWorkspace(in startContextInputs, worktreeProvisioned bool) s
 // project directory and creates its split storage directories. The caller
 // holds the workspace lock on in.ProjectPath.
 func (s *Server) recordHubProjectFiles(ctx context.Context, in startContextInputs) {
+	// A shared-backend project root's configuration is hub-seeded and
+	// never written by a broker (sharedHubProjectPath checked it). Only the
+	// broker-local external agents root is created.
+	if isSharedHubProjectRoot(in.ProjectPath) {
+		scionDir := filepath.Join(in.ProjectPath, config.DotScion)
+		if root, err := config.AgentsRootForProject(scionDir, false, in.ProjectID); err == nil {
+			_ = os.MkdirAll(root, 0755)
+		}
+		return
+	}
 	// A broker copy of a hub workspace (~/.scion/projects/<slug>)
 	// records the hub project ID as its identity; see
 	// recordHubProjectIdentity. Done before the checks below, which

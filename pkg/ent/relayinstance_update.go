@@ -126,6 +126,26 @@ func (_u *RelayInstanceUpdate) SetNillableDraining(v *bool) *RelayInstanceUpdate
 	return _u
 }
 
+// SetFeatures sets the "features" field.
+func (_u *RelayInstanceUpdate) SetFeatures(v string) *RelayInstanceUpdate {
+	_u.mutation.SetFeatures(v)
+	return _u
+}
+
+// SetNillableFeatures sets the "features" field if the given value is not nil.
+func (_u *RelayInstanceUpdate) SetNillableFeatures(v *string) *RelayInstanceUpdate {
+	if v != nil {
+		_u.SetFeatures(*v)
+	}
+	return _u
+}
+
+// ClearFeatures clears the value of the "features" field.
+func (_u *RelayInstanceUpdate) ClearFeatures() *RelayInstanceUpdate {
+	_u.mutation.ClearFeatures()
+	return _u
+}
+
 // AddSessionIDs adds the "sessions" edge to the ConduitSession entity by IDs.
 func (_u *RelayInstanceUpdate) AddSessionIDs(ids ...string) *RelayInstanceUpdate {
 	_u.mutation.AddSessionIDs(ids...)
@@ -226,6 +246,12 @@ func (_u *RelayInstanceUpdate) sqlSave(ctx context.Context) (_node int, err erro
 	}
 	if value, ok := _u.mutation.Draining(); ok {
 		_spec.SetField(relayinstance.FieldDraining, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.Features(); ok {
+		_spec.SetField(relayinstance.FieldFeatures, field.TypeString, value)
+	}
+	if _u.mutation.FeaturesCleared() {
+		_spec.ClearField(relayinstance.FieldFeatures, field.TypeString)
 	}
 	if _u.mutation.SessionsCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -389,6 +415,26 @@ func (_u *RelayInstanceUpdateOne) SetNillableDraining(v *bool) *RelayInstanceUpd
 	return _u
 }
 
+// SetFeatures sets the "features" field.
+func (_u *RelayInstanceUpdateOne) SetFeatures(v string) *RelayInstanceUpdateOne {
+	_u.mutation.SetFeatures(v)
+	return _u
+}
+
+// SetNillableFeatures sets the "features" field if the given value is not nil.
+func (_u *RelayInstanceUpdateOne) SetNillableFeatures(v *string) *RelayInstanceUpdateOne {
+	if v != nil {
+		_u.SetFeatures(*v)
+	}
+	return _u
+}
+
+// ClearFeatures clears the value of the "features" field.
+func (_u *RelayInstanceUpdateOne) ClearFeatures() *RelayInstanceUpdateOne {
+	_u.mutation.ClearFeatures()
+	return _u
+}
+
 // AddSessionIDs adds the "sessions" edge to the ConduitSession entity by IDs.
 func (_u *RelayInstanceUpdateOne) AddSessionIDs(ids ...string) *RelayInstanceUpdateOne {
 	_u.mutation.AddSessionIDs(ids...)
@@ -519,6 +565,12 @@ func (_u *RelayInstanceUpdateOne) sqlSave(ctx context.Context) (_node *RelayInst
 	}
 	if value, ok := _u.mutation.Draining(); ok {
 		_spec.SetField(relayinstance.FieldDraining, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.Features(); ok {
+		_spec.SetField(relayinstance.FieldFeatures, field.TypeString, value)
+	}
+	if _u.mutation.FeaturesCleared() {
+		_spec.ClearField(relayinstance.FieldFeatures, field.TypeString)
 	}
 	if _u.mutation.SessionsCleared() {
 		edge := &sqlgraph.EdgeSpec{

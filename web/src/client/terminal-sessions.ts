@@ -16,7 +16,7 @@
 
 import type { Agent } from '../shared/types.js';
 import { isTerminalAvailable } from '../shared/types.js';
-import { apiErrorMessageFromBody, extractApiError } from './api.js';
+import { apiErrorMessageFromBody, apiFetch, extractApiError } from './api.js';
 import { TerminalMetadata } from './terminal-metadata.js';
 import { AGENT_STOPPED_CLOSE_REASON, classifyPtyClose, PTY_CLOSE } from './terminal-close-codes.js';
 
@@ -704,7 +704,7 @@ class Session implements TerminalSession {
     try {
       if (!current()) return;
       const endpoint = new URL(`api/v1/agents/${this.state.agentId}`, this.hubUrl).href;
-      const response = await fetch(endpoint, { credentials: 'include', signal });
+      const response = await apiFetch(endpoint, { signal, authErrors: 'caller' });
       if (!current()) return;
       if (!response.ok) {
         const reason = classifyHttpStatus(response.status);
@@ -747,7 +747,7 @@ class Session implements TerminalSession {
         return;
       }
       // Preflight is authorization only; it cannot prove the broker attach succeeds.
-      const preflight = await fetch(`${endpoint}/pty`, { credentials: 'include', signal });
+      const preflight = await apiFetch(`${endpoint}/pty`, { signal, authErrors: 'caller' });
       if (!current()) return;
       if (!preflight.ok) {
         const body = await readJsonBody(preflight);

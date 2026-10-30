@@ -248,8 +248,8 @@ existing value.
 | `SCION_WORKSPACE_GIT` | `"true"` when the workspace is a git repository, absent otherwise | **Unconditional** — overwrites |
 | `SCION_TEMPLATE` | full template reference, for debugging | Set only when a template reference exists |
 | `SCION_BROKER_NAME` | broker name, defaults to `local` | **Guarded** — defers to an existing value |
-| `SCION_HARNESS` | harness name | **Guarded** — defers to an existing value |
-| `SCION_MODEL` | resolved model; also the harness's `--model` argument | **Guarded** — defers to an existing value (the hub-resolved model, or an explicit `--env`); a size alias in it is resolved |
+| `SCION_HARNESS` | the launched harness's name: the resolved harness-config's `harness:` name (for example `gemini-cli`) when the config has declarative metadata or a container script; with no harness-config, the stored harness name when a built-in harness has that name; otherwise `generic` (a harness-config with neither declarative metadata nor a container script, or no harness-config and no matching built-in harness). Not the harness name stored at provisioning when a harness-config resolves, which a harness-config switch leaves stale | **Guarded** — defers to an existing value: an explicit `SCION_HARNESS` from the request env or the settings `harness_configs.<name>.env` wins, and a warning naming both harnesses is logged when it differs from the launched one. An `env:` in the harness-config directory's `config.yaml` does not override it |
+| `SCION_MODEL` | resolved model; also the harness's `--model` argument | **Guarded** — defers to an existing value (the hub-resolved model, or an explicit `--env`); a size alias in it is resolved with the resolved harness-config's `model_aliases`, else the built-in aliases of the harness that config declares (or of the stored harness, when no harness-config resolves); an alias neither table resolves (for example, for a declared harness with no built-in alias table and no `model_aliases` of its own) is passed on in its normalized form, such as `large` |
 | `SCION_THINKING_LEVEL` | resolved thinking level | **Guarded** — defers to an existing value |
 | `SCION_CREATOR` | OS user who created the agent | **Guarded** — defers to an existing value |
 
@@ -1015,7 +1015,10 @@ digest), the registry rewrite, the pull policy or the profile override:
   with `409 Conflict`. The start's own profile (below) is this profile too.
 - `template`: the template the agent was provisioned from. When a start carries no absolute
   template path (every start or restart), the harness-config
-  directories searched for the file tier come from this template.
+  directories searched for the file tier, the template chain whose job keys `GetAgent` merges under
+  `scion-agent.json`, cleared-field inheritance (`clearedFieldsInheritance`), and the template
+  reported in the agent's `Info` come from this template (falling back to `agent-info.json` only
+  for agents provisioned before `image-provenance.json` existed).
 - `templateImage` / `templateImagePullPolicy`: read-only legacy fields. New agents record none,
   because a template no longer sets an image. For an agent provisioned before this release they
   hold the template chain's **own** values, with nothing else folded in, and `Start` replays them
@@ -1025,7 +1028,10 @@ digest), the registry rewrite, the pull policy or the profile override:
   the template's value.
 
 `agent-info.json` keeps display copies (`AgentInfo.Image`, `.ExplicitImage`,
-`.ExplicitImagePullPolicy`, `.Profile`, `.Template`) for listing and status only.
+`.ExplicitImagePullPolicy`, `.Profile`, `.Template`) for status inside the container only. `List`
+and the early harness-config policy check read the profile and template from `image-provenance.json`
+and the harness config from `scion-agent.json` in the broker-side agent directory, never from
+`agent-info.json`.
 
 If `image-provenance.json` exists but cannot be read or parsed, or lacks its version marker, the
 start or restart fails with an error asking you to re-provision the agent (`scion reincarnate`, or

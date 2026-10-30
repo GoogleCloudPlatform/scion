@@ -19,6 +19,7 @@ import (
 	"net/http"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 )
 
 // experimentRegistry returns the registry this server resolves experiments
@@ -56,7 +57,51 @@ func (s *Server) experimentEnabled(name string) bool {
 // snapshot and resolve every name from it, so a concurrent refresh cannot
 // produce a mixed answer (ptone/scion#2217).
 func (s *Server) experimentEnabledIn(snap ExperimentsSnapshot, name string) bool {
-	return s.experimentRegistry().Resolve(name, snap.Overrides, snap.Malformed)
+	overrides := snap.Overrides
+	if _, set := overrides[name]; !set {
+		if def, ok := s.deploymentExperimentDefault(name); ok {
+			// A deployment default stands in for the compiled default
+			// only; a stored override and a malformed document still win
+			// (Resolve's own precedence).
+			overrides = map[string]bool{name: def}
+		}
+	}
+	return s.experimentRegistry().Resolve(name, overrides, snap.Malformed)
+}
+
+// deploymentExperimentDefault returns the default of experiment name on
+// this deployment when it differs by deployment from the compiled default,
+// with ok true; otherwise ok is false and the compiled default applies.
+//
+// hub.attachment_artifacts defaults on wherever the artifact service is
+// ready (attachmentArtifactsReady), local blob storage included
+// (ptone/scion#5828), and on every hub whose resource storage is an object
+// store (ptone/scion#5827): uploads then go to the artifact service and
+// reach each recipient agent through inbox delivery, so a workstation or
+// single-node hub needs no object storage for attachments.
+func (s *Server) deploymentExperimentDefault(name string) (bool, bool) {
+	if name == experiments.AttachmentArtifacts && (s.objectStorageConfigured() || s.attachmentArtifactsReady()) {
+		return true, true
+	}
+	return false, false
+}
+
+// experimentDefault returns the default experiment exp resolves to on this
+// deployment when no override is stored.
+func (s *Server) experimentDefault(exp experiments.Experiment) bool {
+	if def, ok := s.deploymentExperimentDefault(exp.Name); ok {
+		return def
+	}
+	return exp.Default
+}
+
+// objectStorageConfigured reports whether the hub's resource storage is an
+// object store (not local disk).
+func (s *Server) objectStorageConfigured() bool {
+	s.mu.RLock()
+	st := s.storage
+	s.mu.RUnlock()
+	return st != nil && st.Provider() != storage.ProviderLocal
 }
 
 // resolvedExperiments returns the effective value of every registered
@@ -99,9 +144,10 @@ var dispatchExperimentNames = []string{experiments.K8sNFSHome, experiments.Agent
 
 // dispatchExperiments returns the dispatch experiments that are enabled
 // now, resolved from one snapshot, or nil when none is. hub.conduit is a
-// derived entry: it is included only while this node serves conduit (the
-// experiment is on in the same snapshot and the relay is running), so an
-// agent dials conduit only where a relay can admit it.
+// derived entry: it is included only while a relay can admit an agent that
+// dials this hub, with the experiment on in the same snapshot: the
+// in-process relay is running (conduitServingIn), or, in external relay
+// mode, the ingress serves and a relay is eligible (conduitIngressServingIn).
 func (s *Server) dispatchExperiments() []string {
 	snap := s.experimentsSnapshot()
 	var out []string
@@ -110,7 +156,7 @@ func (s *Server) dispatchExperiments() []string {
 			out = append(out, name)
 		}
 	}
-	if s.conduitServingIn(snap) {
+	if s.conduitServingIn(snap) || s.conduitIngressServingIn(snap) {
 		out = append(out, conduitExperiment)
 	}
 	return out

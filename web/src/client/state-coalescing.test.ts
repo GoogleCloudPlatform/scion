@@ -128,7 +128,7 @@ function fuzzEventToDelta(ev: FuzzEvent): Partial<Agent> {
     case 'status': {
       const delta: Partial<Agent> = {};
       if (ev.phase !== undefined) delta.phase = ev.phase as Agent['phase'];
-      if (ev.activity !== undefined) delta.activity = ev.activity as Agent['activity'];
+      if (ev.activity !== undefined) delta.activity = ev.activity as NonNullable<Agent['activity']>;
       if (ev.lastActivityEvent !== undefined) delta.lastActivityEvent = ev.lastActivityEvent;
       if (ev.detail !== undefined) delta.detail = ev.detail as AgentDetail;
       return delta;
@@ -867,7 +867,7 @@ describe('W2: tombstoned IDs are dropped outright, never buffered as unknown', (
     sm.setScope({ type: 'dashboard' });
     const created: unknown[] = [];
     sm.addEventListener('agent-created', ((e: CustomEvent<{ data: unknown }>) =>
-      created.push(e.detail.data)) as EventListener);
+      created.push(e.detail.data)) as unknown as EventListener);
 
     emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' });
     emit(sm, 'agent.a2.created', {

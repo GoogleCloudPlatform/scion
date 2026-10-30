@@ -30,7 +30,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"golang.org/x/sys/unix"
 )
 
 // nfsWorktreeSelection decides whether an agent on the NFS workspace backend
@@ -101,8 +100,8 @@ func isNFSWorktreeName(name string) bool {
 // Kubernetes, no claim, export not mounted on the broker, or a directory
 // the broker is not allowed to create), and prepared has the same meaning.
 // An existing directory is left exactly as it is.
-func ensureNFSWorktreeLeaf(runtimeName string, resolved runtime.ResolvedWorkspace, pvClaimName, name string) (prepared bool, err error) {
-	if !isKubernetesRuntime(runtimeName) || resolved.Backend != "nfs" || pvClaimName == "" {
+func ensureNFSWorktreeLeaf(runtimeName string, resolved runtime.ResolvedWorkspace, share runtime.NFSPodShare, name string) (prepared bool, err error) {
+	if !isKubernetesRuntime(runtimeName) || resolved.Backend != "nfs" || !share.Mountable() {
 		return false, nil
 	}
 	if !isNFSWorktreeName(name) {
@@ -117,6 +116,9 @@ func ensureNFSWorktreeLeaf(runtimeName string, resolved runtime.ResolvedWorkspac
 	info, err := os.Stat(resolved.HostBase)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
+			if share.Inline() {
+				return false, inlineShareNotVisible(resolved.HostBase)
+			}
 			slog.Info("workspace_storage nfs: export not mounted on this broker; the node will create the agent's worktree directory "+
 				"when the pod starts, which requires an export that allows root to create directories (no_root_squash)",
 				"host_base", resolved.HostBase, "sub_path", leaf)
@@ -133,6 +135,9 @@ func ensureNFSWorktreeLeaf(runtimeName string, resolved runtime.ResolvedWorkspac
 	}
 
 	provisioned, err := nfsSharedCheckoutProvisioned(resolvedHostBase, rel)
+	if err != nil && isNFSLeafPermissionError(err) && share.Inline() {
+		return false, nfsInlineLeafRefusal(resolved.HostBase, leaf, err)
+	}
 	if err != nil && isNFSLeafPermissionError(err) {
 		// The broker cannot look into the state directory (for example one
 		// the node created and the init container gave to the agents' user
@@ -149,11 +154,17 @@ func ensureNFSWorktreeLeaf(runtimeName string, resolved runtime.ResolvedWorkspac
 	}
 	if !provisioned {
 		// First provisioning of this project: the init container
-		// clones the shared checkout and adds the worktree.
+		// clones the shared checkout and adds the worktree. This holds
+		// for an inline share too: the worktree-per-agent shape is
+		// refused on Kubernetes today (k8sSharedRepoShapeRefusal), so
+		// only the node fallbacks below change for it.
 		return true, nil
 	}
 
 	ok, err := ensureNFSLeaf(resolvedHostBase, leaf)
+	if err != nil && isNFSLeafPermissionError(err) && share.Inline() {
+		return false, nfsInlineLeafRefusal(resolved.HostBase, leaf, err)
+	}
 	if err != nil && isNFSLeafPermissionError(err) {
 		slog.Warn("workspace_storage nfs: the broker could not create the agent's worktree directory, so the node will create it "+
 			"when the pod starts, which requires an export that allows root to create directories (no_root_squash)",
@@ -199,45 +210,6 @@ func nfsSharedCheckoutProvisioned(hostBase, rel string) (bool, error) {
 		return false, fmt.Errorf("workspace_storage nfs: check provisioning state of %q: %w", rel, permErr)
 	}
 	return false, nil
-}
-
-// nfsRemovalStateDir returns the provisioning state directory whose lock
-// RemoveNFSWorktree takes after the legacy lock in the workspace, the same
-// order as the provisioning init containers. The path is derived the same
-// way as the runtime's mount (runtime.NFSProvisionStateSubPath) and the
-// directory is created like before a pod starts (ensureNFSLeaf, no symlink
-// following).
-//
-// When the broker is not allowed to create, open or write in the directory
-// (a permission error, or no write and search access to an existing one),
-// it returns "" with a warning: the removal then takes only the legacy lock,
-// which every provisioning init container and broker takes first while
-// legacy support exists, so it still excludes them all. A symlink, a
-// regular file or any other unusable path is an error, and the worktree is
-// left in place.
-//
-// TODO(ptone/scion#2974): when the legacy lock is dropped, this fallback
-// must go: the state-directory lock is then the only lock, and a removal
-// that cannot take it must fail.
-func nfsRemovalStateDir(hostBase, rel, projectID string) (string, error) {
-	stateRel, err := runtime.NFSProvisionStateSubPath(rel, projectID)
-	if err != nil {
-		return "", fmt.Errorf("workspace_storage nfs: %w; left in place", err)
-	}
-	stateDir := filepath.Join(hostBase, stateRel)
-	_, err = ensureNFSLeaf(hostBase, stateRel)
-	if err == nil {
-		err = unix.Access(stateDir, unix.W_OK|unix.X_OK)
-	}
-	if err != nil && isNFSLeafPermissionError(err) {
-		slog.Warn("workspace_storage nfs: the broker cannot use the provisioning state directory; removing the worktree under the legacy provisioning lock only",
-			"path", stateDir, "error", err)
-		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("workspace_storage nfs: prepare the provisioning state directory %q: %w; left in place", stateRel, err)
-	}
-	return stateDir, nil
 }
 
 // nfsWorktreeSubPath is the export-relative path of an agent's worktree:
@@ -304,10 +276,10 @@ func nfsExportWorkspaceOnAnyRuntime(projectPath, projectID, agentName string) (r
 	if err != nil {
 		return "", "", fmt.Errorf("workspace_storage nfs: load settings: %w", err)
 	}
-	if settings == nil || settings.Server == nil || settings.Server.WorkspaceStorage == nil {
+	if settings == nil || settings.Server == nil || settings.Server.EffectiveWorkspaceStorage() == nil {
 		return "", "", nil
 	}
-	backend := nfsWorktreeBackend(settings.Server.WorkspaceStorage, store.SharingModeWorktreePerAgent)
+	backend := nfsWorktreeBackend(settings.Server.EffectiveWorkspaceStorage(), store.SharingModeWorktreePerAgent)
 	if backend.Name() != "nfs" {
 		return "", "", nil
 	}

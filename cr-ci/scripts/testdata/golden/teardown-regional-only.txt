@@ -1,0 +1,15 @@
+# cr-ci teardown.sh (dry-run) project=example-project region=us-central1
+# dry-run: nothing is changed; '?' lines are read-only checks, assumed to find nothing
+# reconciler cr-runner-reconciler
+? gcloud scheduler jobs describe cr-runner-reconciler --location=us-central1 --project=example-project '--format=value(name)'
++ gcloud scheduler jobs delete cr-runner-reconciler --location=us-central1 --project=example-project --quiet
+# mediator service cr-runner-mediator
+? gcloud run services describe cr-runner-mediator --region=us-central1 --project=example-project '--format=value(metadata.name)'
++ gcloud run services delete cr-runner-mediator --region=us-central1 --project=example-project --quiet
+# runner job cr-gh-runner-8c32g
+? gcloud run jobs describe cr-gh-runner-8c32g --region=us-central1 --project=example-project '--format=value(name)'
++ gcloud run jobs delete cr-gh-runner-8c32g --region=us-central1 --project=example-project --quiet
+# repository cr-runners in us-central1 and its images
+? gcloud artifacts repositories describe cr-runners --location=us-central1 --project=example-project '--format=value(name)'
++ gcloud artifacts repositories delete cr-runners --location=us-central1 --project=example-project --quiet
+# done (--regional-only); kept the service accounts, secrets, build staging bucket and project IAM binding; APIs were left enabled

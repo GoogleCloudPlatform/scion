@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -451,6 +452,80 @@ func (rt *flakyBodyRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 	}, nil
 }
 
+func TestDo_RetryLimits(t *testing.T) {
+	for _, limit := range []struct {
+		name        string
+		retries     int
+		failedCalls int
+	}{
+		{name: "min_int", retries: math.MinInt, failedCalls: 1},
+		{name: "negative_two", retries: -2, failedCalls: 1},
+		{name: "negative_one", retries: -1, failedCalls: 1},
+		{name: "zero", retries: 0, failedCalls: 1},
+		{name: "one", retries: 1, failedCalls: 2},
+		{name: "three", retries: 3, failedCalls: 3},
+		{name: "max_int", retries: math.MaxInt, failedCalls: 3},
+	} {
+		for _, outcome := range []struct {
+			name       string
+			failures   int
+			failStatus int
+		}{
+			{name: "success"},
+			{name: "network_error", failures: 2},
+			{name: "server_error", failures: 2, failStatus: http.StatusServiceUnavailable},
+		} {
+			t.Run(limit.name+"/"+outcome.name, func(t *testing.T) {
+				rt := &flakyBodyRoundTripper{failures: outcome.failures, failStatus: outcome.failStatus}
+				tr := NewTransport("http://hub.invalid",
+					WithHTTPClient(&http.Client{Transport: rt}),
+					WithRetry(limit.retries, 0))
+				const payload = `{"name":"test"}`
+				req, err := http.NewRequest(http.MethodPut, "http://hub.invalid/api/v1/resources/test", strings.NewReader(payload))
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				resp, err := tr.Do(t.Context(), req)
+				if resp != nil {
+					defer func() { _ = resp.Body.Close() }()
+				}
+				wantCalls := 1
+				if outcome.failures > 0 {
+					wantCalls = limit.failedCalls
+				}
+				if rt.calls != wantCalls {
+					t.Errorf("RoundTrip calls = %d, want %d", rt.calls, wantCalls)
+				}
+				for i, body := range rt.bodies {
+					if body != payload {
+						t.Errorf("attempt %d carried body %q, want %q", i+1, body, payload)
+					}
+				}
+				if wantCalls <= outcome.failures && outcome.failStatus == 0 {
+					if err == nil || !strings.Contains(err.Error(), "simulated connection reset") {
+						t.Errorf("Do error = %v, want the transport error", err)
+					}
+					if resp != nil {
+						t.Errorf("Do response = %v, want nil on transport error", resp)
+					}
+					return
+				}
+				if err != nil || resp == nil {
+					t.Fatalf("Do = (%v, %v), want a response without an error", resp, err)
+				}
+				wantStatus := http.StatusOK
+				if wantCalls <= outcome.failures {
+					wantStatus = outcome.failStatus
+				}
+				if resp.StatusCode != wantStatus {
+					t.Errorf("status = %d, want %d", resp.StatusCode, wantStatus)
+				}
+			})
+		}
+	}
+}
+
 // TestDo_RetryResendsFullBodyOn5xx_RoundTripper is the RoundTripper-level
 // twin of TestDo_RetryResendsFullBodyOn5xx. Over a real socket, Go's
 // *http.Transport can itself recover a drained body via GetBody on some
@@ -725,5 +800,26 @@ func TestWithRequestTimeout_OverridesClientTimeoutPerRequest(t *testing.T) {
 	}
 	if tr.HTTPClient.Timeout != 50*time.Millisecond {
 		t.Fatalf("Transport client timeout changed to %s", tr.HTTPClient.Timeout)
+	}
+}
+
+func TestWithTimeout_NilHTTPClient(t *testing.T) {
+	tr := NewTransport("http://hub.example", WithHTTPClient(nil), WithTimeout(5*time.Second))
+	if tr.HTTPClient == nil {
+		t.Fatal("HTTPClient is nil after WithTimeout")
+	}
+	if tr.HTTPClient.Timeout != 5*time.Second {
+		t.Errorf("HTTPClient.Timeout = %v, want 5s", tr.HTTPClient.Timeout)
+	}
+}
+
+func TestTransport_PrepareNilHeader(t *testing.T) {
+	tr := NewTransport("http://hub.example", WithUserAgent("custom-agent"))
+	req := &http.Request{}
+	if err := tr.prepare(req); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if got := req.Header.Get("User-Agent"); got != "custom-agent" {
+		t.Errorf("User-Agent = %q, want %q", got, "custom-agent")
 	}
 }

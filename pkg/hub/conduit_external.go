@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -23,6 +24,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
@@ -49,8 +51,9 @@ import (
 // (conduit_ingress.go). When no relay takes the dial, or the proxy is off
 // (IngressOffCause), it gets 503 unavailable with reason
 // conduit_not_serving, and the readiness gauge reports how many relays are
-// eligible, with the cause attribute while the proxy is off. The hub does not advertise
-// hub.conduit to agents (dispatchExperiments) in this mode.
+// eligible, with the cause attribute while the proxy is off. The hub
+// advertises hub.conduit to agents (dispatchExperiments) only while the
+// ingress serves and a relay is eligible (conduitIngressServingIn).
 
 // conduitRelayRecheckPeriod is how often the eligible-relay count of the
 // readiness gauge is refreshed (the relay heartbeat period).
@@ -69,6 +72,11 @@ type ConduitExternalOptions struct {
 	PeerAuth relay.PeerAuth
 	// HTTPClient performs the internal calls to relays (nil: default).
 	HTTPClient *http.Client
+	// HopTLS is the TLS client configuration of every internal hop call
+	// to the relays, the ingress proxy leg included (relay.NewHopClientTLS;
+	// nil: the system roots). Used when HTTPClient is nil. Verification is
+	// never skipped.
+	HopTLS *tls.Config
 	// Ingress is the conduit ingress mode (config.ConduitIngressProxy or
 	// config.ConduitIngressRedirect; "" = proxy). Startup refuses redirect
 	// for now, so only proxy serves dials; any other value refuses them.
@@ -150,7 +158,7 @@ func (s *Server) StartConduitExternal(ctx context.Context, opts ConduitExternalO
 		return errors.New("conduit already started")
 	}
 	// Admission tokens minted on one hub replica must open on every other.
-	if _, err := s.conduitAdmissionAEAD(); err != nil {
+	if err := s.checkConduitAdmissionKeys(); err != nil {
 		return fmt.Errorf("conduit external relay mode: %w", err)
 	}
 	if opts.PeerAuth == nil {
@@ -197,7 +205,15 @@ func (s *Server) StartConduitExternal(ctx context.Context, opts ConduitExternalO
 	if id == "" {
 		id = ConduitInstanceID("")
 	}
-	peers := &relay.PeerClient{HTTP: opts.HTTPClient, Auth: opts.PeerAuth}
+	httpClient := opts.HTTPClient
+	var hopWS *websocket.Dialer
+	if opts.HopTLS != nil {
+		hopWS = relay.NewHopWSDialer(opts.HopTLS)
+		if httpClient == nil {
+			httpClient = relay.NewHopHTTPClient(opts.HopTLS)
+		}
+	}
+	peers := &relay.PeerClient{HTTP: httpClient, WS: hopWS, Auth: opts.PeerAuth}
 	rtr, err := router.New(router.Config{
 		Registry: reg,
 		Store:    st,
@@ -226,8 +242,8 @@ func (s *Server) StartConduitExternal(ctx context.Context, opts ConduitExternalO
 	if rt.lifetimeCap <= 0 {
 		rt.lifetimeCap = config.ConduitDefaultLifetimeCap
 	}
-	if opts.HTTPClient != nil && opts.HTTPClient.Transport != nil {
-		rt.ingressTransport = newConduitIngressTransport(opts.HTTPClient.Transport, conduitIngressResponseHeaderTimeout)
+	if httpClient != nil && httpClient.Transport != nil {
+		rt.ingressTransport = newConduitIngressTransport(httpClient.Transport, conduitIngressResponseHeaderTimeout)
 	}
 	s.conduitEligibleRelays.Store(-1)
 	if !s.conduitExternal.CompareAndSwap(nil, rt) {
@@ -253,6 +269,32 @@ func (s *Server) StartConduitExternal(ctx context.Context, opts ConduitExternalO
 // ConduitExternal reports whether the hub runs in external relay mode.
 func (s *Server) ConduitExternal() bool {
 	return s.conduitExternal.Load() != nil
+}
+
+// ingressServing reports whether the conduit ingress proxies dials now:
+// proxy ingress, not kept off (IngressOffCause), and not terminating. It is
+// the one condition both handleConduit (whether a dial is proxied) and
+// conduitIngressServingIn (whether agents are told to dial) use.
+func (rt *conduitExternalRuntime) ingressServing() bool {
+	return rt.ingress == config.ConduitIngressProxy && rt.ingressOffCause == "" && !rt.terminating.Load()
+}
+
+// conduitIngressServingIn reports whether, in external relay mode, a relay
+// can admit an agent that dials this hub: hub.conduit is on in snap, the
+// ingress serves (ingressServing) and the last eligible-relay count
+// (conduitRelayRecheckPeriod) found at least one relay; an unknown count
+// (-1) or none (0) does not count. dispatchExperiments advertises hub.conduit
+// on it, so an agent dials conduit only when a relay can take the dial.
+//
+// The advertisement is read once per dispatch (create, start, restart) and
+// is fixed for the agent's run. An agent started while no relay is eligible
+// runs the port-forward tunnel until its next start. An agent told to dial
+// keeps redialing with backoff while no relay is eligible (the ingress
+// answers 503 conduit_not_serving, which sciontool retries) and is admitted
+// once a relay is eligible again.
+func (s *Server) conduitIngressServingIn(snap ExperimentsSnapshot) bool {
+	rt := s.conduitExternal.Load()
+	return rt != nil && s.experimentEnabledIn(snap, conduitExperiment) && rt.ingressServing() && s.conduitEligibleRelays.Load() > 0
 }
 
 // refreshConduitEligibleRelays counts the eligible relays for the readiness
@@ -294,8 +336,9 @@ func (s *Server) conduitRegistry() (*registry.Registry, registry.Store, func() t
 
 // conduitRoutable reports whether this node can route hub-originated
 // conduit traffic (port proxy, agent control, PTY) right now: hub.conduit
-// is on and a runtime, in-process or external, runs. conduitServing, which
-// also decides what agents are told to dial, stays in-process only.
+// is on and a runtime, in-process or external, runs. What agents are told to
+// dial is decided by conduitServingIn (in-process) and
+// conduitIngressServingIn (external relay mode), in dispatchExperiments.
 func (s *Server) conduitRoutable() bool {
 	return s.experimentEnabled(conduitExperiment) && s.conduitRouter() != nil
 }

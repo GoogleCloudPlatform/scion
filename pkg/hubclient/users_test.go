@@ -332,3 +332,151 @@ func TestUserService_InviteBatch_TypedRefusal(t *testing.T) {
 		})
 	}
 }
+
+// TestUserService_DeleteBlockers_RequestAndResponse verifies DeleteBlockers
+// sends GET /api/v1/users/{id}/delete-blockers and decodes the lists.
+func TestUserService_DeleteBlockers_RequestAndResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, "/api/v1/users/u-1/delete-blockers", r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"agents":[{"id":"a-1","slug":"worker","projectId":"p-1","deletionState":"failed"}],` +
+			`"edges":[{"id":"e-1","delegateType":"agent","delegateId":"a-2","scopeType":"project","scopeId":"p-2"}],"truncated":true}`))
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL)
+	require.NoError(t, err)
+
+	got, err := client.Users().DeleteBlockers(context.Background(), "u-1")
+	require.NoError(t, err)
+	assert.Equal(t, &UserDeleteBlockers{
+		Agents:    []UserDeleteBlockingAgent{{ID: "a-1", Slug: "worker", ProjectID: "p-1", DeletionState: "failed"}},
+		Edges:     []UserDeleteBlockingEdge{{ID: "e-1", DelegateType: "agent", DelegateID: "a-2", ScopeType: "project", ScopeID: "p-2"}},
+		Truncated: true,
+	}, got)
+}
+
+// TestUserService_DeleteBlockers_Forbidden verifies a 403 is returned as an
+// API error.
+func TestUserService_DeleteBlockers_Forbidden(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":{"code":"forbidden","message":"requires user.delete permission"}}`))
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL)
+	require.NoError(t, err)
+
+	_, err = client.Users().DeleteBlockers(context.Background(), "u-1")
+	var apiErr *apiclient.APIError
+	require.True(t, errors.As(err, &apiErr), "got %v", err)
+	assert.Equal(t, http.StatusForbidden, apiErr.StatusCode)
+	assert.Equal(t, "forbidden", apiErr.Code)
+}
+
+// TestUserService_ForceDelete_Accepted verifies the request and the decoded
+// deletion of a 202.
+func TestUserService_ForceDelete_Accepted(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodDelete, r.Method)
+		assert.Equal(t, "/api/v1/users/u-1", r.URL.Path)
+		assert.Equal(t, "true", r.URL.Query().Get("force"))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"deletionId":"d-1","userId":"u-1","state":"stopping","requestedAt":"2026-10-28T10:00:00Z",` +
+			`"requestedBy":{"kind":"user","id":"admin"},"completedAt":null,"lastReconciledAt":null,"lastError":"",` +
+			`"agents":[{"id":"a-1","slug":"worker","projectId":"p-1","outcome":"failed","attempts":2,"lastError":"broker unreachable"}],` +
+			`"counts":{"pending":0,"stopping":0,"failed":1,"stopped":0,"removed":0},"orphanedByRevoke":[{"agentId":"a-9","edgeId":"e-9"}]}`))
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL)
+	require.NoError(t, err)
+	got, err := client.Users().ForceDelete(context.Background(), "u-1")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "d-1", got.DeletionID)
+	assert.Equal(t, "stopping", got.State)
+	assert.Equal(t, UserDeletionPrincipal{Kind: "user", ID: "admin"}, got.RequestedBy)
+	assert.Equal(t, []UserDeletionAgent{{ID: "a-1", Slug: "worker", ProjectID: "p-1", Outcome: "failed", Attempts: 2, LastError: "broker unreachable"}}, got.Agents)
+	assert.Equal(t, UserDeletionCounts{Failed: 1}, got.Counts)
+	assert.Equal(t, []UserDeletionRevokedEdge{{AgentID: "a-9", EdgeID: "e-9"}}, got.OrphanedByRevoke)
+}
+
+// TestUserService_ForceDelete_NoContent verifies a 204 (nothing blocked)
+// returns no deletion and no error.
+func TestUserService_ForceDelete_NoContent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL)
+	require.NoError(t, err)
+	got, err := client.Users().ForceDelete(context.Background(), "u-1")
+	require.NoError(t, err)
+	assert.Nil(t, got)
+}
+
+// TestUserService_ForceDelete_Forbidden verifies a 403
+// user_delete_force_forbidden is returned as an API error.
+func TestUserService_ForceDelete_Forbidden(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":{"code":"user_delete_force_forbidden","message":"cannot force-delete this user","details":{"agents":[{"id":"a-1","projectId":"p-1"}]}}}`))
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL)
+	require.NoError(t, err)
+	_, err = client.Users().ForceDelete(context.Background(), "u-1")
+	var apiErr *apiclient.APIError
+	require.True(t, errors.As(err, &apiErr), "got %v", err)
+	assert.Equal(t, http.StatusForbidden, apiErr.StatusCode)
+	assert.Equal(t, "user_delete_force_forbidden", apiErr.Code)
+}
+
+// TestUserService_GetDeletion verifies the request path and the decoded
+// deletion.
+func TestUserService_GetDeletion(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, "/api/v1/users/u-1/deletion", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"deletionId":"d-1","userId":"u-1","state":"completed","requestedAt":"2026-10-28T10:00:00Z",` +
+			`"requestedBy":{"kind":"user","id":"admin"},"completedAt":"2026-10-28T10:05:00Z","agents":[],` +
+			`"counts":{"pending":0,"stopping":0,"failed":0,"stopped":2,"removed":1},"orphanedByRevoke":[]}`))
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL)
+	require.NoError(t, err)
+	got, err := client.Users().GetDeletion(context.Background(), "u-1")
+	require.NoError(t, err)
+	assert.Equal(t, "completed", got.State)
+	require.NotNil(t, got.CompletedAt)
+	assert.Equal(t, UserDeletionCounts{Stopped: 2, Removed: 1}, got.Counts)
+}
+
+// TestUserService_GetDeletion_NotFound verifies that a 404 (no deletion,
+// or the experiment off) is returned as an API error.
+func TestUserService_GetDeletion_NotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"User deletion not found"}}`))
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL)
+	require.NoError(t, err)
+	got, err := client.Users().GetDeletion(context.Background(), "u-1")
+	assert.Nil(t, got)
+	var apiErr *apiclient.APIError
+	require.True(t, errors.As(err, &apiErr), "got %v", err)
+	assert.Equal(t, http.StatusNotFound, apiErr.StatusCode)
+}

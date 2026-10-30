@@ -126,7 +126,7 @@ func createTestHarnessConfigWithFiles(t *testing.T, s store.Store, stor *content
 		})
 	}
 	hc.Files = hcFiles
-	hc.ContentHash = computeContentHash(hcFiles)
+	hc.ContentHash = defaultContentHash(hcFiles)
 
 	if err := s.CreateHarnessConfig(ctx, hc); err != nil {
 		t.Fatalf("failed to create test harness config: %v", err)
@@ -267,7 +267,7 @@ func localStorageHarnessConfig(t *testing.T, recordPaths, storedPaths []string) 
 	for _, p := range recordPaths {
 		hc.Files = append(hc.Files, store.TemplateFile{Path: p, Size: 2, Hash: "sha256:placeholder"})
 	}
-	hc.ContentHash = computeContentHash(hc.Files)
+	hc.ContentHash = defaultContentHash(hc.Files)
 	if err := s.CreateHarnessConfig(context.Background(), hc); err != nil {
 		t.Fatalf("CreateHarnessConfig: %v", err)
 	}

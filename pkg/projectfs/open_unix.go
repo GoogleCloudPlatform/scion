@@ -33,8 +33,9 @@ import (
 // On a shared backend the directory is reached by pkg/shareddirs' anchored
 // walk, which opens every component below HostBase with O_NOFOLLOW and
 // checks that the Root opened is the directory the walk saw. With create,
-// a missing leaf is first created by shareddirs.EnsureLeaf (its own
-// O_NOFOLLOW walk, which applies the leaf mode and ACL).
+// a missing leaf is first created by shareddirs.EnsureLeafOwned (its own
+// O_NOFOLLOW walk, which applies the leaf mode and ACL, and which gives a
+// root creator's new directories the Layout's owner, Resolved.Owner).
 //
 // On the local backend the directory itself must not be a symlink (rooting
 // at a symlink would confine to wherever it points); its parents are
@@ -44,14 +45,14 @@ import (
 // Without create, a missing directory is an fs.ErrNotExist-compatible error
 // and nothing is created.
 func (r Resolved) Open(create bool) (*os.Root, error) {
-	switch r.Backend {
-	case BackendNFS:
+	switch {
+	case r.Backend.Shared():
 		base, err := r.resolvedHostBase()
 		if err != nil {
 			return nil, err
 		}
 		if create {
-			leafFd, _, err := shareddirs.EnsureLeaf(base, r.RelPath)
+			leafFd, _, err := shareddirs.EnsureLeafOwned(base, r.RelPath, r.Owner())
 			if err != nil {
 				return nil, fmt.Errorf("create %s %q: %w", r.Kind, r.Name, err)
 			}
@@ -60,7 +61,7 @@ func (r Resolved) Open(create bool) (*os.Root, error) {
 			}
 		}
 		return shareddirs.OpenAnchoredRoot(base, r.RelPath)
-	case BackendLocal:
+	case r.Backend == BackendLocal:
 		return openConfinedDir(r.HostPath, create)
 	default:
 		return nil, fmt.Errorf("projectfs: cannot open a directory on backend %q", r.Backend)
@@ -83,7 +84,7 @@ func (r Resolved) resolvedHostBase() (string, error) {
 // ResolvedHostBase returns the shared backend's HostBase with symlinks
 // resolved, the base pkg/shareddirs' walks take.
 func (r Resolved) ResolvedHostBase() (string, error) {
-	if r.Backend != BackendNFS {
+	if !r.Backend.Shared() {
 		return "", fmt.Errorf("projectfs: backend %q has no host base", r.Backend)
 	}
 	return r.resolvedHostBase()
@@ -112,6 +113,63 @@ func (r Resolved) VerifyNoSymlinks() (string, error) {
 		return "", fmt.Errorf("%s %q resolves through a symlink to %q, want %q", r.Kind, r.Name, got, want)
 	}
 	return got, nil
+}
+
+// OpenProjectTree opens the directory that holds projectID's project tree on
+// a shared backend, <HostBase>/<subpath_root>, as an *os.Root, and returns it
+// with the name of the project's entry in it (the project ID). Operations
+// through the root never leave it, so a caller acts on the project tree by
+// that name through the root (Lstat, RemoveAll), never by a path string.
+//
+// The root is reached by pkg/shareddirs' anchored, open-only walk from the
+// resolved HostBase (OpenAnchoredRoot): every component of the subpath root
+// is opened without following a symlink, and the root opened must be the
+// directory the walk saw. A component that is a symlink or not a directory,
+// or a directory that changed in between, is refused with an error that
+// matches shareddirs.ErrUnconfinedPath. A missing HostBase or subpath root
+// gives an fs.ErrNotExist-compatible error. Nothing is created.
+func (l Layout) OpenProjectTree(projectID string) (*os.Root, string, error) {
+	pr, err := l.ProjectRoot(projectID)
+	if err != nil {
+		return nil, "", err
+	}
+	base, err := pr.ResolvedHostBase()
+	if err != nil {
+		return nil, "", err
+	}
+	parent, err := shareddirs.OpenAnchoredRoot(base, filepath.Dir(pr.RelPath))
+	if err != nil {
+		return nil, "", err
+	}
+	return parent, filepath.Base(pr.RelPath), nil
+}
+
+// EnsureProjectConfigDir creates (or verifies) a project's configuration
+// directory on a shared backend, <ProjectRoot(projectID)>/.scion (beside
+// workspace/, inside no Mount), through pkg/shareddirs'
+// O_NOFOLLOW component walk, and returns its host path. A newly created
+// directory gets mode 2755 and no default ACL: only Scion components write
+// it. Missing intermediates are created as the brokers create them. It
+// always keeps the zero owner (the creator's uid and gid), never the
+// Layout's nfs owner: the directory holds the project's identity
+// (project-id, project-slug) and must never be agent-writable.
+func (l Layout) EnsureProjectConfigDir(projectID string) (string, error) {
+	cfg, err := l.ProjectConfig(projectID)
+	if err != nil {
+		return "", err
+	}
+	base, err := cfg.ResolvedHostBase()
+	if err != nil {
+		return "", err
+	}
+	fd, _, err := shareddirs.EnsurePrivateDir(base, cfg.RelPath)
+	if err != nil {
+		return "", fmt.Errorf("create project configuration directory: %w", err)
+	}
+	if err := shareddirs.CloseFd(fd); err != nil {
+		return "", err
+	}
+	return cfg.HostPath, nil
 }
 
 // openConfinedDir opens dir as an *os.Root, refusing a dir whose own final

@@ -82,9 +82,16 @@ type TokenVerifier interface {
 
 // Options configures a Server.
 type Options struct {
-	TargetRepos   []githubapp.Repo
-	OrgScope      bool // runners are org-level: one runner list per owner
-	RunnerLabel   string
+	TargetRepos []githubapp.Repo
+	OrgScope    bool // runners are org-level: one runner list per owner
+	RunnerLabel string
+	// StackLabel is an extra label on every runner this stack registers
+	// (StackLabel(); region plus job name, unique per project). Reconcile
+	// reaps registrations with this label, or with no stack label at all,
+	// after ReapAfter; another stack's only after TaskTimeout + ReapAfter
+	// offline, so two stacks that serve the same repo (a region move) do not
+	// reap each other's live runners. Empty: no extra label.
+	StackLabel    string
 	MaxConcurrent int
 	RunnerGroupID int64
 	// MediatorURL is the public https origin. While it is empty the mediator
@@ -143,6 +150,11 @@ type Server struct {
 	cancelled   map[string]time.Time     // execution refs this process cancelled
 	offlineSeen map[string]time.Time     // runner name -> first seen offline
 	noticed     map[string]bool          // reconcile notices already logged (pruned each pass)
+	// hijacked: runners killed as hijacked whose registration GitHub has not let go
+	// yet (busy while it still shows the untrusted job running), -> first kill time.
+	// Later kills of the same runner log at WARNING; cleared once the registration is
+	// gone, or by reconcile after cancelledTTL.
+	hijacked map[string]time.Time
 }
 
 // New returns a Server.
@@ -168,6 +180,7 @@ func New(o Options) *Server {
 		cancelled:   map[string]time.Time{},
 		offlineSeen: map[string]time.Time{},
 		noticed:     map[string]bool{},
+		hijacked:    map[string]time.Time{},
 	}
 }
 
@@ -202,6 +215,29 @@ func detached(parent context.Context, d time.Duration) (context.Context, context
 // they run even if the operation they undo ran out of time.
 func cleanupContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), cleanupTimeout)
+}
+
+// stackLabelPrefix starts every stack label.
+const stackLabelPrefix = "crci-stack-"
+
+// StackLabel returns the label that marks the runners of the stack whose
+// runner job is job in region: crci-stack-<region>-<job>. Region and job names
+// are lowercase letters, digits and hyphens, valid in a runner label.
+func StackLabel(region, job string) string { return stackLabelPrefix + region + "-" + job }
+
+// otherStack reports whether a registration carries a stack label that is not
+// this stack's. Registrations without a stack label (made before stack labels
+// existed) count as this stack's.
+func (s *Server) otherStack(rn githubapp.Runner) bool {
+	if s.o.StackLabel == "" {
+		return false
+	}
+	for _, l := range rn.Labels {
+		if strings.HasPrefix(strings.ToLower(l.Name), stackLabelPrefix) && !strings.EqualFold(l.Name, s.o.StackLabel) {
+			return true
+		}
+	}
+	return false
 }
 
 // RunnerName is the runner name for a GitHub job ID.
@@ -268,6 +304,26 @@ func (s *Server) runnerRepo(fullName string) githubapp.Repo {
 	return githubapp.Repo{}
 }
 
+// servedRepos lists the repos whose jobs GitHub may hand a runner registered
+// through r (the runner's job guard allowlist, GH_REPOS): r alone in repo scope;
+// in org scope every target repo of r's owner, since org-level runners take any
+// of their jobs with the label.
+func (s *Server) servedRepos(r githubapp.Repo) []string {
+	if !s.o.OrgScope {
+		return []string{r.String()}
+	}
+	var out []string
+	for _, t := range s.o.TargetRepos {
+		if strings.EqualFold(t.Owner, r.Owner) {
+			out = append(out, t.String())
+		}
+	}
+	if len(out) == 0 {
+		out = []string{r.String()}
+	}
+	return out
+}
+
 // scopeKey identifies the runner list a repo's runners live in.
 func (s *Server) scopeKey(r githubapp.Repo) string {
 	if s.o.OrgScope {
@@ -283,13 +339,20 @@ func headRepo(run *githubapp.Run) string {
 	return run.HeadRepository.FullName
 }
 
-// forkReason returns why run must not get a runner, or "" if it may.
-// pull_request_target and workflow_run runs execute with the base repo's
-// privileges, typically on behalf of fork PRs, so both are refused.
+// allowedEvents are the only workflow-run events whose jobs may get a cr-ci
+// runner: the same two the workflows' routing expression routes (same-repo
+// push and pull_request). It is an allowlist, so any other event, named or
+// not yet known (pull_request_target, workflow_run, issue_comment,
+// repository_dispatch, workflow_dispatch, schedule, merge_group, ...), is
+// refused (fail closed), even if a workflow edit routes it.
+var allowedEvents = map[string]bool{"push": true, "pull_request": true}
+
+// forkReason returns why run must not get a runner, or "" if it may. It
+// guards dispatch (webhook and reconcile backfill) and the hijack guard.
 func forkReason(run *githubapp.Run, repo githubapp.Repo) string {
 	switch {
-	case run.Event == "pull_request_target" || run.Event == "workflow_run":
-		return run.Event
+	case !allowedEvents[run.Event]:
+		return "event_not_allowed:" + run.Event
 	case run.Repository == nil || !strings.EqualFold(run.Repository.FullName, repo.String()):
 		return "repository_mismatch"
 	case run.HeadRepository == nil:

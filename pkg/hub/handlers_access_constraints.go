@@ -658,7 +658,7 @@ func (s *Server) getAffectedPrincipals(w http.ResponseWriter, r *http.Request, i
 	if rawToken := r.URL.Query().Get("pageToken"); rawToken != "" {
 		decoded, err := base64.RawURLEncoding.DecodeString(rawToken)
 		if err != nil {
-			BadRequest(w, "invalid pageToken")
+			writeInvalidCursor(w)
 			return
 		}
 		cursorID = string(decoded)
@@ -750,7 +750,7 @@ func (s *Server) getConstraintAudit(w http.ResponseWriter, r *http.Request, id s
 
 	cursor, err := decodeConstraintAuditCursor(r.URL.Query().Get("pageToken"), id)
 	if err != nil {
-		BadRequest(w, "invalid pageToken")
+		writeInvalidCursor(w)
 		return
 	}
 

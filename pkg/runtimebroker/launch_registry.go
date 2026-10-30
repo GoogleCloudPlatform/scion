@@ -98,6 +98,9 @@ type launchRecord struct {
 	// after removing its objects (zero for a legacy Runtime Broker).
 	ownedRunMu sync.Mutex
 	ownedRun   ownedRunKey
+	// filesRemoved is set by cleanupLaunchFiles when it removed the
+	// agent's files and a flat instance's files proof then found none.
+	filesRemoved atomic.Bool
 	// done is closed once runLaunch (including any cleanup), or a create's
 	// registration (syncStart.finish), has fully finished. A later create
 	// for the same key waits on this before any name-addressed work
@@ -150,9 +153,14 @@ func (rec *launchRecord) CancelLocal() {
 }
 
 // launchRegistry tracks local launch bookkeeping keyed by (projectID, slug)
-// (design §3.8.1). It is a pure optimisation: a replica restart loses it
-// with no correctness impact, because the Hub always resolves the launch's
-// fate independently (the reaper, or the next report's answer).
+// (design §3.8.1). It is in memory only and a replica restart loses it.
+// That has no correctness impact: the Hub resolves each launch's fate
+// independently (the reaper, or the next report's answer). The launch
+// journal (launch_journal.go, under the broker's state directory) is a
+// separate, best-effort record: a restarted broker uses it to report each
+// unfinished launch's outcome (failed, or succeeded when that was already
+// decided) and to clean up what a failed launch created, never to resume a
+// launch.
 type launchRegistry struct {
 	mu      sync.Mutex
 	records map[launchKey]*launchRecord

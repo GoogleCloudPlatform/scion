@@ -144,9 +144,14 @@ func (s *Server) dispatchLocked(ctx context.Context, v *view, repo githubapp.Rep
 		return skip("not_queued", outNotQueue, "job_status", job.Status)
 	}
 
-	// Labels: RUNNER_LABEL only (see servable).
+	// Labels: RUNNER_LABEL (the only one jobs may ask for, see servable) and
+	// the stack label (reap scoping, see Options.StackLabel).
+	labels := []string{s.o.RunnerLabel}
+	if s.o.StackLabel != "" {
+		labels = append(labels, s.o.StackLabel)
+	}
 	runnerID, jit, err := s.o.GitHub.GenerateJITConfig(ctx, repo, githubapp.JITRequest{
-		Name: name, RunnerGroupID: s.o.RunnerGroupID, Labels: []string{s.o.RunnerLabel}, WorkFolder: WorkFolder,
+		Name: name, RunnerGroupID: s.o.RunnerGroupID, Labels: labels, WorkFolder: WorkFolder,
 	})
 	if err != nil {
 		if runnerID != 0 {
@@ -160,7 +165,7 @@ func (s *Server) dispatchLocked(ctx context.Context, v *view, repo githubapp.Rep
 		return fail("issue_claim", err)
 	}
 	ref, err := s.o.Launcher.Launch(ctx, launcher.LaunchSpec{
-		JobID: serve, RunID: runID, Repo: repo.String(), RunnerName: name, ClaimToken: token,
+		JobID: serve, RunID: runID, Repo: repo.String(), ServedRepos: s.servedRepos(repo), RunnerName: name, ClaimToken: token,
 	})
 	if err != nil {
 		s.o.Claims.DropJob(nameID)
@@ -190,7 +195,11 @@ func (s *Server) deleteAfterFailure(repo githubapp.Repo, runnerID int64, attrs [
 type stopResult struct {
 	busy                bool // registration busy and left alone (requireIdle)
 	registrationDeleted bool // registration deleted or already absent
-	ref                 string
+	// registrationErr is GitHub's refusal when a hijacked (not requireIdle) runner's
+	// registration could not be deleted because it is busy (422): GitHub keeps it
+	// until it times the untrusted job out, about 10 minutes (D11 live test).
+	registrationErr string
+	ref             string
 }
 
 // stopRunner deletes runner `name`'s registration and cancels its
@@ -228,6 +237,7 @@ func (s *Server) stopRunner(repo githubapp.Repo, name string, requireIdle bool) 
 					res.busy = true
 					return res, nil
 				}
+				res.registrationErr = err.Error()
 			default:
 				errs = append(errs, err)
 			}

@@ -21,7 +21,8 @@
  * is on (client/broker-routes.ts); the existing detail page renders
  * otherwise. Tabs (?tab=):
  *
- * - overview: runtime target card, capacity, capabilities, legacy profiles;
+ * - overview: runtime target card, capacity, capabilities, legacy profiles,
+ *   and the read-only project storage card;
  * - agents: the projects this broker provides for, with their agents;
  * - health: shown only to a user holding hub.health.read, exactly the set
  *   the health summary endpoint authorizes; also hidden on a 401/403;
@@ -52,9 +53,7 @@ import './broker-area-overview.js';
 import './broker-area-agents.js';
 import './broker-area-health.js';
 import './broker-area-configure.js';
-
-/** Parallel project reads for the Default-for-project marker. */
-const DEFAULTS_CONCURRENCY = 4;
+import '../shared/broker-storage-card.js';
 
 export type BrokerAreaTab = 'overview' | 'agents' | 'health' | 'configure';
 
@@ -147,6 +146,9 @@ export class ScionPageBrokerAreaDetail extends LitElement {
       if (projectsRes.ok) {
         const data = (await projectsRes.json()) as { projects?: BrokerAreaProject[] };
         this.projects = data.projects || [];
+        // The providers listing marks the projects whose default Runtime
+        // Broker is this broker (ptone/scion#5413).
+        this.defaultFor = new Set(this.projects.filter((p) => p.isDefault).map((p) => p.projectId));
       }
       if (agentsRes.ok) {
         const data = (await agentsRes.json()) as { agents?: Agent[] } | Agent[];
@@ -156,37 +158,12 @@ export class ScionPageBrokerAreaDetail extends LitElement {
         this.settings = (await settingsRes.json()) as BrokerSettingsResponse;
       }
       stateManager.seedBrokers([this.broker]);
-      void this.loadDefaults();
     } catch (err) {
       console.error('Failed to load broker:', err);
       this.error = err instanceof Error ? err.message : 'Failed to load broker';
     } finally {
       this.loading = false;
     }
-  }
-
-  /**
-   * Marks the projects whose default Runtime Broker is this broker: one GET per
-   * project, at most DEFAULTS_CONCURRENCY at a time (the providers listing does not
-   * carry the default; adding it there is ptone/scion#5413).
-   */
-  private async loadDefaults(): Promise<void> {
-    const queue = this.projects.map((p) => p.projectId);
-    const ids = new Set<string>();
-    const worker = async (): Promise<void> => {
-      for (let id = queue.shift(); id !== undefined; id = queue.shift()) {
-        try {
-          const res = await fetch(`/api/v1/projects/${id}`, { credentials: 'include' });
-          if (!res.ok) continue;
-          const project = (await res.json()) as { defaultRuntimeBrokerId?: string };
-          if (project.defaultRuntimeBrokerId === this.brokerId) ids.add(id);
-        } catch {
-          // A project that cannot be read simply gets no marker.
-        }
-      }
-    };
-    await Promise.all(Array.from({ length: DEFAULTS_CONCURRENCY }, () => worker()));
-    this.defaultFor = ids;
   }
 
   /**
@@ -198,7 +175,7 @@ export class ScionPageBrokerAreaDetail extends LitElement {
     const canReadHealth = hasAnyPermission(status, [HEALTH_READ_PERMISSION]);
     if (!canReadHealth) return;
     try {
-      const res = await fetch('/api/v1/admin/health/summary', { credentials: 'include' });
+      const res = await apiFetch('/api/v1/admin/health/summary', { authErrors: 'caller' });
       // A 401/403, or any other failure, leaves the Health tab hidden.
       if (!res.ok) return;
       const body = (await res.json()) as {
@@ -211,6 +188,20 @@ export class ScionPageBrokerAreaDetail extends LitElement {
     } catch (err) {
       console.error('Failed to load broker health:', err);
     }
+  }
+
+  /**
+   * The hub's layout comparison for this broker. null when the comparison is
+   * not available: the health summary is not available to this user, has no
+   * row for this broker (for example a truncated summary), or the row has no
+   * workspace storage (the hub compares only a reported layout). [] when the
+   * hub lists no difference; that is not a confirmed match, because the
+   * summary also omits the list when the hub's own layout is not shared or
+   * could not be read.
+   */
+  private get storageMismatch(): string[] | null {
+    if (!this.healthAvailable || !this.healthRow?.workspace_storage) return null;
+    return this.healthRow.workspace_storage.layout_mismatch ?? [];
   }
 
   private get configureVisible(): boolean {
@@ -369,6 +360,10 @@ export class ScionPageBrokerAreaDetail extends LitElement {
             .broker=${broker}
             .settings=${this.settings}
           ></scion-broker-area-overview>
+          <scion-broker-storage-card
+            .storage=${broker.workspaceStorage}
+            .mismatch=${this.storageMismatch}
+          ></scion-broker-storage-card>
         </sl-tab-panel>
         <sl-tab-panel name="agents">
           <scion-broker-area-agents

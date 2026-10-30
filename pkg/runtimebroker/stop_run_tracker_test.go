@@ -505,7 +505,7 @@ func newHookListServer(t *testing.T) (*Server, *hookListManager) {
 	t.Helper()
 	inner := &startFuncManager{mockManager: &mockManager{}, starts: make(chan func(context.Context, api.StartOptions) (*api.AgentInfo, error), 4)}
 	m := &hookListManager{startFuncManager: inner}
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	return New(cfg, m, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{}), m

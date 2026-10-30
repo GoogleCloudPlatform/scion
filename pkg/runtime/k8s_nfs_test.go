@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -1145,6 +1146,7 @@ func TestBuildPod_SharedDirs_NFSBackend_UsesNFSSubPaths(t *testing.T) {
 			{Name: "build-cache"},
 			{Name: "logs", ReadOnly: true},
 		},
+		SharedDirStorage: sharedDirsOnClaim("nfs", "scion-workspaces", "projects/proj-123", "build-cache", "logs"),
 	}
 
 	pod, err := r.buildPod("default", config)
@@ -1217,6 +1219,7 @@ func TestBuildPod_NFSBackend_InitContainer_MountsSharedDirs(t *testing.T) {
 			{Name: "scratchpad"},
 			{Name: "logs", ReadOnly: true},
 		},
+		SharedDirStorage: sharedDirsOnClaim("nfs", "scion-workspaces", "projects/proj-123", "scratchpad", "logs"),
 	}
 
 	pod, err := r.buildPod("default", config)
@@ -1288,6 +1291,7 @@ func TestBuildPod_NFSBackend_InitAndMainSharedDirMounts_MatchExactly(t *testing.
 			{Name: "logs", ReadOnly: true},
 			{Name: "nested-dir", InWorkspace: true},
 		},
+		SharedDirStorage: sharedDirsOnClaim("nfs", "scion-workspaces", "projects/proj-123", "scratchpad", "logs", "nested-dir"),
 	}
 
 	pod, err := r.buildPod("default", config)
@@ -1347,6 +1351,15 @@ func TestBuildPod_NFSBackend_RejectsTraversalSharedDirName(t *testing.T) {
 					{Name: "scratchpad"}, // valid, present alongside the bad one
 					{Name: name},
 				},
+				SharedDirStorage: &SharedDirRealization{
+					ProjectID:   "proj-123",
+					Backend:     "nfs",
+					PVClaimName: "scion-workspaces",
+					SubPaths: map[string]string{
+						"scratchpad": "projects/proj-123/shared-dirs/scratchpad",
+						name:         filepath.Join("projects/proj-123/shared-dirs", name),
+					},
+				},
 			}
 
 			pod, err := r.buildPod("default", config)
@@ -1358,9 +1371,9 @@ func TestBuildPod_NFSBackend_RejectsTraversalSharedDirName(t *testing.T) {
 }
 
 // TestBuildPod_NFSBackend_InitContainer_NoSharedDirMounts_WhenSharedDirStorageNFS
-// confirms the scope boundary: server.shared_dir_storage's own NFS mechanism
-// (a separate subsystem from workspace_storage:nfs) is not touched by this
-// fix — the init container gets only the workspace mount.
+// confirms the scope boundary: shared dirs on another claim than the
+// workspace (the legacy split shared-dir export) are not mounted in the
+// init container — it gets only the workspace mount.
 func TestBuildPod_NFSBackend_InitContainer_NoSharedDirMounts_WhenSharedDirStorageNFS(t *testing.T) {
 	r := newNFSTestK8sRuntime()
 	config := RunConfig{
@@ -1374,6 +1387,7 @@ func TestBuildPod_NFSBackend_InitContainer_NoSharedDirMounts_WhenSharedDirStorag
 			{Name: "scratchpad"},
 		},
 		SharedDirStorage: &SharedDirRealization{
+			ProjectID:   "proj-123",
 			Backend:     "nfs",
 			PVClaimName: "scion-shared-volumes",
 			SubPaths:    map[string]string{"scratchpad": "projects/proj-123/shared-dirs/scratchpad"},
@@ -1401,66 +1415,74 @@ func TestBuildPod_NFSBackend_InitContainer_NoSharedDirMounts_WhenSharedDirStorag
 	}
 }
 
-func TestNFSSharedDirSubPath(t *testing.T) {
-	tests := []struct {
-		workspaceSubPath string
-		sharedDirName    string
-		want             string
-	}{
-		{
-			workspaceSubPath: "projects/proj-123/workspace",
-			sharedDirName:    "build-cache",
-			want:             "projects/proj-123/shared-dirs/build-cache",
-		},
-		{
-			workspaceSubPath: "projects/proj-456/workspace",
-			sharedDirName:    "logs",
-			want:             "projects/proj-456/shared-dirs/logs",
-		},
-		{
-			workspaceSubPath: "custom-root/proj-789/workspace",
-			sharedDirName:    "data",
-			want:             "custom-root/proj-789/shared-dirs/data",
-		},
+// sharedDirsOnClaim is the realization pkg/agent builds for shared dirs on
+// a shared backend: every dir on claim at <projectRoot>/shared-dirs/<name>.
+func sharedDirsOnClaim(backend, claim, projectRoot string, names ...string) *SharedDirRealization {
+	r := &SharedDirRealization{Backend: backend, PVClaimName: claim, ProjectID: filepath.Base(projectRoot), SubPaths: map[string]string{}}
+	for _, n := range names {
+		r.SubPaths[n] = projectRoot + "/shared-dirs/" + n
 	}
+	return r
+}
 
-	for _, tt := range tests {
-		t.Run(tt.sharedDirName, func(t *testing.T) {
-			got, err := nfsSharedDirSubPath(tt.workspaceSubPath, tt.sharedDirName)
-			if err != nil {
-				t.Fatalf("nfsSharedDirSubPath(%q, %q) unexpected error: %v", tt.workspaceSubPath, tt.sharedDirName, err)
-			}
-			if got != tt.want {
-				t.Errorf("nfsSharedDirSubPath(%q, %q) = %q, want %q", tt.workspaceSubPath, tt.sharedDirName, got, tt.want)
-			}
-		})
+func TestSharedDirClaimSubPath(t *testing.T) {
+	r := sharedDirsOnClaim("nfs", "claim", "custom-root/proj-789", "data")
+	claim, subPath, err := sharedDirClaimSubPath(r, "data")
+	if err != nil || claim != "claim" || subPath != "custom-root/proj-789/shared-dirs/data" {
+		t.Fatalf("got (%q, %q, %v)", claim, subPath, err)
+	}
+	if _, _, err := sharedDirClaimSubPath(&SharedDirRealization{Backend: "nfs", SubPaths: r.SubPaths}, "data"); err == nil ||
+		!strings.Contains(err.Error(), "no claim") {
+		t.Fatalf("missing claim: got %v, want a fail-closed error", err)
+	}
+	if _, _, err := sharedDirClaimSubPath(r, "other"); err == nil {
+		t.Fatal("a dir with no resolved subPath must fail closed")
 	}
 }
 
-// TestNFSSharedDirSubPath_RejectsTraversalNames is the F-111 review fix
-// (tf-lead/tf-review-nfsfix, BLOCKING): filepath.Join silently collapses
-// ".." segments, so an unvalidated shared-dir name can resolve outside
-// projects/<pid>/shared-dirs/ entirely — onto another project's real
-// workspace, which the provisioning init container (CHOWN/FOWNER/DAC_OVERRIDE,
-// F-111) would then recursively re-own. Defense in depth alongside
-// pkg/agent/shared_dir_storage.go's own validation gate.
-func TestNFSSharedDirSubPath_RejectsTraversalNames(t *testing.T) {
-	badNames := []string{
-		"../../../projects",
-		"../../victim/shared-dirs/scratchpad",
-		"/etc/passwd",
-		".",
-	}
-	for _, name := range badNames {
+// TestSharedDirClaimSubPath_RejectsTraversal is the F-111 review fix
+// (tf-lead/tf-review-nfsfix, BLOCKING), kept on the shared-dir subPath
+// gate: an unvalidated name, or a subPath that is not
+// <project>/shared-dirs/<name>, never reaches a pod spec — the provisioning
+// init container (CHOWN/FOWNER/DAC_OVERRIDE, F-111) would re-own whatever
+// it names. Defense in depth alongside pkg/projectfs' own validation.
+func TestSharedDirClaimSubPath_RejectsTraversal(t *testing.T) {
+	for _, name := range []string{"../../../projects", "../../victim/shared-dirs/scratchpad", "/etc/passwd", "."} {
 		t.Run(name, func(t *testing.T) {
-			got, err := nfsSharedDirSubPath("projects/proj-123/workspace", name)
-			if err == nil {
-				t.Fatalf("nfsSharedDirSubPath(%q) = %q, want an error", name, got)
-			}
-			if got != "" {
-				t.Errorf("nfsSharedDirSubPath(%q) returned a non-empty path %q alongside an error", name, got)
+			r := &SharedDirRealization{Backend: "nfs", PVClaimName: "c",
+				SubPaths: map[string]string{name: filepath.Join("projects/proj-123/shared-dirs", name)}}
+			if _, got, err := sharedDirClaimSubPath(r, name); err == nil {
+				t.Fatalf("sharedDirClaimSubPath(%q) = %q, want an error", name, got)
 			}
 		})
+	}
+	for _, sub := range []string{"../projects/p/shared-dirs/notes", "/abs/shared-dirs/notes", "projects/p/workspace/notes", "projects/p/shared-dirs/other"} {
+		r := &SharedDirRealization{Backend: "nfs", PVClaimName: "c", SubPaths: map[string]string{"notes": sub}}
+		if _, _, err := sharedDirClaimSubPath(r, "notes"); err == nil {
+			t.Errorf("subPath %q must be refused", sub)
+		}
+	}
+	// The project component must be a valid project ID and the
+	// realization's own project.
+	other := &SharedDirRealization{Backend: "nfs", PVClaimName: "c", ProjectID: "proj-123",
+		SubPaths: map[string]string{"notes": "projects/proj-999/shared-dirs/notes"}}
+	if _, _, err := sharedDirClaimSubPath(other, "notes"); err == nil {
+		t.Error("a subPath under another project's tree must be refused")
+	}
+	own := &SharedDirRealization{Backend: "nfs", PVClaimName: "c", ProjectID: "proj-123",
+		SubPaths: map[string]string{"notes": "projects/proj-123/shared-dirs/notes"}}
+	if _, got, err := sharedDirClaimSubPath(own, "notes"); err != nil || got != "projects/proj-123/shared-dirs/notes" {
+		t.Errorf("own project subPath = %q, %v", got, err)
+	}
+	noProject := &SharedDirRealization{Backend: "nfs", PVClaimName: "c",
+		SubPaths: map[string]string{"notes": "projects/proj-123/shared-dirs/notes"}}
+	if _, _, err := sharedDirClaimSubPath(noProject, "notes"); err == nil {
+		t.Error("a realization without its project ID must fail closed")
+	}
+	invalid := &SharedDirRealization{Backend: "nfs", PVClaimName: "c", ProjectID: "-bad",
+		SubPaths: map[string]string{"notes": "projects/-bad/shared-dirs/notes"}}
+	if _, _, err := sharedDirClaimSubPath(invalid, "notes"); err == nil {
+		t.Error("an invalid project ID component must be refused")
 	}
 }
 
@@ -1497,6 +1519,7 @@ func TestCreateSharedDirPVCs_NFSBackend_SkipsPVCCreation(t *testing.T) {
 		SharedDirs: []api.SharedDir{
 			{Name: "build-cache"},
 		},
+		SharedDirStorage: sharedDirsOnClaim("nfs", "scion-workspaces", "projects/proj-123", "build-cache"),
 	}
 
 	err := r.createSharedDirPVCs(context.Background(), "default", config)
@@ -1531,6 +1554,7 @@ func TestCreateSharedDirPVCs_LocalBackend_CreatesPVCs(t *testing.T) {
 			{Name: "build-cache"},
 			{Name: "logs"},
 		},
+		Kubernetes: &api.KubernetesConfig{SharedDirStorageClass: "standard-rwx"},
 	}
 
 	err := r.createSharedDirPVCs(context.Background(), "default", config)

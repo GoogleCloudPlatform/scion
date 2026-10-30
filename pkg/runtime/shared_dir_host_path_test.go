@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 )
 
 const testSharedDirProjectID = "0123abcd-0000-4000-8000-000000000001"
@@ -89,7 +90,9 @@ func TestResolveSharedDirHostPath_NFS(t *testing.T) {
 	}
 }
 
-func TestResolveSharedDirHostPath_PerDirBackend(t *testing.T) {
+// The removed per-profile shared_dir_storage_backends override is never
+// consulted: placement comes from the storage block only.
+func TestResolveSharedDirHostPath_PerDirOverrideIgnored(t *testing.T) {
 	home := t.TempDir()
 	mountRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(mountRoot, "share1"), 0o755); err != nil {
@@ -101,14 +104,37 @@ func TestResolveSharedDirHostPath_PerDirBackend(t *testing.T) {
 	gs.Profiles = map[string]config.V1ProfileConfig{
 		"default": {SharedDirStorageBackends: map[string]string{"scratchpad": "nfs"}},
 	}
-
 	got, err := ResolveSharedDirHostPath(gs, home, "proj", testSharedDirProjectID, "scratchpad")
-	if err != nil || got.Backend != "nfs" {
-		t.Fatalf("scratchpad: got %+v, err %v; want nfs", got, err)
+	if err != nil || got.Backend != "local" {
+		t.Fatalf("scratchpad: got %+v, err %v; want local", got, err)
 	}
-	other, err := ResolveSharedDirHostPath(gs, home, "proj", testSharedDirProjectID, "other")
-	if err != nil || other.Backend != "local" {
-		t.Fatalf("other: got %+v, err %v; want local", other, err)
+}
+
+// server.project_storage nfs, and the deprecated server.workspace_storage
+// nfs alone, place shared dirs on the export with the workspace (one
+// backend, design OQ1), as agent start does.
+func TestResolveSharedDirHostPath_WorkspaceBackendPlacesSharedDirs(t *testing.T) {
+	home := t.TempDir()
+	mountRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(mountRoot, "share1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nfs := &config.V1NFSConfig{MountRoot: mountRoot, Shares: []config.V1NFSShare{{ID: "share1", Server: "10.0.0.2", Export: "/vol"}}}
+	resolvedRoot, _ := filepath.EvalSymlinks(mountRoot)
+	want := filepath.Join(resolvedRoot, "share1", "projects", testSharedDirProjectID, "shared-dirs", "scratchpad")
+	for name, srv := range map[string]*config.V1ServerConfig{
+		"project_storage":          {ProjectStorage: &config.V1ProjectStorageConfig{Backend: "nfs", NFS: nfs}},
+		"legacy workspace_storage": {WorkspaceStorage: &config.V1WorkspaceStorageConfig{Backend: "nfs", NFS: nfs}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := ResolveSharedDirHostPath(&config.VersionedSettings{Server: srv}, home, "proj", testSharedDirProjectID, "scratchpad")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got.Backend != "nfs" || got.Path != want {
+				t.Fatalf("got %+v, want nfs %q", got, want)
+			}
+		})
 	}
 }
 
@@ -257,8 +283,8 @@ func TestResolveSharedDirHostPath_NFSBackstopRefusesSwappedLeaf(t *testing.T) {
 
 	orig := ensureSharedDirLeaf
 	t.Cleanup(func() { ensureSharedDirLeaf = orig })
-	ensureSharedDirLeaf = func(hostBase, rel string) (int, bool, error) {
-		fd, existed, err := orig(hostBase, rel)
+	ensureSharedDirLeaf = func(hostBase, rel string, owner shareddirs.Owner) (int, bool, error) {
+		fd, existed, err := orig(hostBase, rel, owner)
 		if err != nil {
 			return fd, existed, err
 		}
@@ -285,15 +311,16 @@ func TestResolveSharedDirHostPath_NFSBackstopRefusesSwappedLeaf(t *testing.T) {
 }
 
 // TestResolveSharedDirHostPath_NFSRefusesRootHostBase uses a host base
-// that cleans to the filesystem root. ConfineLeaf accepts it, since the
-// leaf still sits under <base>/<subpath_root>/<project>/shared-dirs, but
-// ValidateNotExportRoot does not. The leaf walk is stubbed so the check
-// is shown to refuse before any directory is touched.
+// that cleans to the filesystem root (share id ".." under mount_root "/").
+// The project storage field rules now refuse that share id when the
+// settings are resolved, before ConfineLeaf or ValidateNotExportRoot run.
+// The leaf walk is stubbed so the refusal is shown to come before any
+// directory is touched.
 func TestResolveSharedDirHostPath_NFSRefusesRootHostBase(t *testing.T) {
 	orig := ensureSharedDirLeaf
 	t.Cleanup(func() { ensureSharedDirLeaf = orig })
 	walked := false
-	ensureSharedDirLeaf = func(hostBase, rel string) (int, bool, error) {
+	ensureSharedDirLeaf = func(hostBase, rel string, owner shareddirs.Owner) (int, bool, error) {
 		walked = true
 		return -1, false, errors.New("leaf walk must not run")
 	}
@@ -304,8 +331,8 @@ func TestResolveSharedDirHostPath_NFSRefusesRootHostBase(t *testing.T) {
 	if !errors.Is(err, ErrSharedDirStorageUnavailable) {
 		t.Fatalf("got %+v, err %v; want ErrSharedDirStorageUnavailable", got, err)
 	}
-	if !strings.Contains(err.Error(), "is not under export root") {
-		t.Fatalf("err = %v, want the ValidateNotExportRoot refusal", err)
+	if !strings.Contains(err.Error(), "must be a single path element") {
+		t.Fatalf("err = %v, want the share id field-rule refusal", err)
 	}
 	if got.Path != "" {
 		t.Fatalf("path = %q, want empty", got.Path)

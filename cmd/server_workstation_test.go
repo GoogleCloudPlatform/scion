@@ -50,6 +50,9 @@ func resetServerFlags() {
 	serverConfigPath = ""
 	dbURL = ""
 	webSessionSecret = ""
+	serverKeyringFile = ""
+	serverKeyringAllowWorldReadable = false
+	serverKeyring = nil
 }
 
 func TestWorkstationModeDefaults(t *testing.T) {

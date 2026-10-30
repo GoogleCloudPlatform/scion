@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// These tests exercise unix-only, Windows-gated agent storage code.
+//go:build unix
+
 package agent
 
 import (
@@ -22,6 +25,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -33,7 +37,7 @@ func TestEnsureNFSWorkspaceLeaf_CreatesProvisionStateDir(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share-1"), 0o755))
 	res := resolveTestNFSWorkspace(t, mountRoot)
 
-	prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, "ws-pv", nil)
+	prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, runtime.NFSPodShare{ClaimName: "ws-pv"}, nil)
 	require.NoError(t, err)
 	assert.True(t, prepared)
 	stateDir := provision.ProjectStateDir(res.HostPath)
@@ -53,7 +57,7 @@ func TestEnsureNFSWorkspaceLeaf_ProvisionStateDirSymlinkFails(t *testing.T) {
 	target := t.TempDir()
 	require.NoError(t, os.Symlink(target, stateDir))
 
-	_, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, "ws-pv", nil)
+	_, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, runtime.NFSPodShare{ClaimName: "ws-pv"}, nil)
 	require.Error(t, err)
 }
 
@@ -64,7 +68,7 @@ func TestEnsureNFSAgentWorkspaceLeaf_NoProvisionStateDir(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share-1"), 0o755))
 	res := resolveTestNFSWorkspace(t, mountRoot)
 
-	_, err := ensureNFSAgentWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, "ws-pv", nil, "agent-1")
+	_, err := ensureNFSAgentWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, runtime.NFSPodShare{ClaimName: "ws-pv"}, nil, "agent-1")
 	require.NoError(t, err)
 	assert.NoDirExists(t, provision.ProjectStateDir(res.HostPath))
 }
@@ -83,14 +87,14 @@ func TestEnsureNFSWorktreeLeaf_SentinelLocations(t *testing.T) {
 			require.NoError(t, os.MkdirAll(resolved.HostPath, 0o770))
 			wt := filepath.Join(resolved.HostPath, "worktrees", "agent-1")
 
-			_, err := ensureNFSWorktreeLeaf("kubernetes", resolved, "ws-pv", "agent-1")
+			_, err := ensureNFSWorktreeLeaf("kubernetes", resolved, runtime.NFSPodShare{ClaimName: "ws-pv"}, "agent-1")
 			require.NoError(t, err)
 			assert.NoDirExists(t, wt, "not provisioned yet")
 
 			dir := sentinelDir(resolved.HostPath)
 			require.NoError(t, os.MkdirAll(dir, 0o770))
 			require.NoError(t, os.WriteFile(filepath.Join(dir, provision.ProvisionSentinelFile), []byte("x"), 0o644))
-			ok, err := ensureNFSWorktreeLeaf("kubernetes", resolved, "ws-pv", "agent-1")
+			ok, err := ensureNFSWorktreeLeaf("kubernetes", resolved, runtime.NFSPodShare{ClaimName: "ws-pv"}, "agent-1")
 			require.NoError(t, err)
 			assert.True(t, ok)
 			assert.DirExists(t, wt)
@@ -154,7 +158,7 @@ func TestEnsureNFSWorktreeLeaf_StateDirUnreadable(t *testing.T) {
 	_, err = nfsSharedCheckoutProvisioned(hostBase, rel)
 	require.Error(t, err)
 	assert.True(t, isNFSLeafPermissionError(err), "%v", err)
-	ok, err := ensureNFSWorktreeLeaf("kubernetes", resolved, "ws-pv", "agent-1")
+	ok, err := ensureNFSWorktreeLeaf("kubernetes", resolved, runtime.NFSPodShare{ClaimName: "ws-pv"}, "agent-1")
 	require.NoError(t, err)
 	assert.False(t, ok, "left to the node")
 	assert.NoDirExists(t, wt)
@@ -164,7 +168,7 @@ func TestEnsureNFSWorktreeLeaf_StateDirUnreadable(t *testing.T) {
 	provisioned, err := nfsSharedCheckoutProvisioned(hostBase, rel)
 	require.NoError(t, err)
 	assert.True(t, provisioned)
-	ok, err = ensureNFSWorktreeLeaf("kubernetes", resolved, "ws-pv", "agent-1")
+	ok, err = ensureNFSWorktreeLeaf("kubernetes", resolved, runtime.NFSPodShare{ClaimName: "ws-pv"}, "agent-1")
 	require.NoError(t, err)
 	assert.True(t, ok)
 	assert.DirExists(t, wt)
@@ -270,7 +274,7 @@ func TestNFSSharedCheckoutProvisioned_StateDirAbsentLegacyPermissionError(t *tes
 	assert.True(t, isNFSLeafPermissionError(err), "%v", err)
 	assert.Contains(t, err.Error(), filepath.Join(ws, provision.ProvisionSentinelFile))
 
-	ok, err := ensureNFSWorktreeLeaf("kubernetes", resolved, "ws-pv", "agent-1")
+	ok, err := ensureNFSWorktreeLeaf("kubernetes", resolved, runtime.NFSPodShare{ClaimName: "ws-pv"}, "agent-1")
 	require.NoError(t, err)
 	assert.False(t, ok, "left to the node")
 }

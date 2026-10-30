@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -34,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
+	"github.com/gorilla/websocket"
 )
 
 // The hub's in-process conduit relay (design v2.4 §3.9: every hub process
@@ -84,6 +86,10 @@ type ConduitRelayOptions struct {
 	PeerAuth relay.PeerAuth
 	// HTTPClient performs the self-check probe (nil: relay default).
 	HTTPClient *http.Client
+	// HopTLS is the TLS client configuration of every internal hop call
+	// to other relays (relay.NewHopClientTLS: the operator CA and server
+	// name; nil: the system roots). Verification is never skipped.
+	HopTLS *tls.Config
 	// ReconnectWindow is GoAway.reconnect_after_ms, the jitter window
 	// targets draw their redial delay from (0 = the relay default, 5s).
 	ReconnectWindow time.Duration
@@ -140,7 +146,7 @@ func (s *Server) conduitServingIn(snap ExperimentsSnapshot) bool {
 // verifies with the same ring. Without it each node holds its own
 // in-memory ring, which hosted HA refuses (C8).
 func (s *Server) ConduitGrantRingShared() bool {
-	return len(s.encryptionKey) > 0
+	return s.cipher.Enabled()
 }
 
 // SetConduitRelayStartFailure records that the in-process relay failed to
@@ -218,6 +224,18 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 	if lifetimeCap == 0 {
 		lifetimeCap = config.ConduitDefaultLifetimeCap
 	}
+	// With HopTLS every hop client verifies peers with it; the clients
+	// keep the defaults they have without it (the relay's 10s client, the
+	// router's untimed one).
+	relayHTTPClient, peerHTTP := opts.HTTPClient, opts.HTTPClient
+	var hopWS *websocket.Dialer
+	if opts.HopTLS != nil {
+		hopWS = relay.NewHopWSDialer(opts.HopTLS)
+		if opts.HTTPClient == nil {
+			relayHTTPClient = relay.NewHopHTTPClientWithTimeout(opts.HopTLS, 10*time.Second)
+			peerHTTP = relay.NewHopHTTPClient(opts.HopTLS)
+		}
+	}
 	r, err := relay.New(relay.Config{
 		InstanceID:       id,
 		InternalEndpoint: opts.InternalEndpoint,
@@ -228,7 +246,8 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 		Revalidate:       s.conduitRevalidatePrincipal,
 		Refresh:          s.conduitAgentRefresh,
 		PeerAuth:         opts.PeerAuth,
-		HTTPClient:       opts.HTTPClient,
+		HTTPClient:       relayHTTPClient,
+		WSDialer:         hopWS,
 		Clock:            opts.Clock,
 		Session:          conduit.Config{WriteWait: opts.sessionWriteWait},
 		ReconnectWindow:  opts.ReconnectWindow,
@@ -246,7 +265,7 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 		Relay:    r,
 		Registry: reg,
 		Store:    st,
-		Peers:    &relay.PeerClient{HTTP: opts.HTTPClient, Auth: opts.PeerAuth},
+		Peers:    &relay.PeerClient{HTTP: peerHTTP, WS: hopWS, Auth: opts.PeerAuth},
 		Now:      now,
 		Brokers:  newLegacyBrokerResolver(s.controlChannel, id),
 	})
@@ -553,7 +572,7 @@ func (s *Server) handleConduit(w http.ResponseWriter, r *http.Request) {
 			NotFound(w, "route")
 		case r.Method != http.MethodGet:
 			MethodNotAllowed(w, http.MethodGet)
-		case rt.ingress == config.ConduitIngressProxy && rt.ingressOffCause == "" && !rt.terminating.Load():
+		case rt.ingressServing():
 			s.serveConduitIngress(w, r, rt)
 		default:
 			s.refuseConduitExternal(w, r, rt)

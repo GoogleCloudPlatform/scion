@@ -135,7 +135,6 @@ var PendingBearerDispositions = []PendingEntry{
 // to it until its disposition is recorded.
 var PendingBearerOperations = []OperationID{
 	"agent.message.send",
-	"env.hub.list",
 	"env.read",
 	"gcp.identity.assign",
 	"gcp.identity.create",

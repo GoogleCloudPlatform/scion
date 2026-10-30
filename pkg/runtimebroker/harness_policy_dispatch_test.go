@@ -35,16 +35,18 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
 // countingHCFetcher is a hub harness-config fetcher stub for
-// templatecache.NewResolver. Get reports the current bundle's content hash,
-// which is always present in the resolver's cache (so Resolve never
-// downloads), and counts calls: one per hydration.
+// templatecache.NewResolver. Get reports the current bundle's content hash and
+// file manifest, whose cache entry is always present in the resolver's cache
+// (so Resolve never downloads), and counts calls: one per hydration.
 type countingHCFetcher struct {
 	calls atomic.Int32
 	mu    sync.Mutex
 	hash  string
+	files []hubclient.TemplateFile
 	err   error
 }
 
@@ -55,7 +57,7 @@ func (f *countingHCFetcher) Get(_ context.Context, _ string) (string, string, []
 	if f.err != nil {
 		return "", "", nil, f.err
 	}
-	return "hc-id", f.hash, nil, nil
+	return "hc-id", f.hash, f.files, nil
 }
 
 func (f *countingHCFetcher) RequestDownloadURLs(context.Context, string) (*hubclient.DownloadResponse, error) {
@@ -81,12 +83,15 @@ func (h *hubHCStub) setBundle(configYAML string) string {
 	h.t.Helper()
 	h.n++
 	hash := fmt.Sprintf("sha256:hub-bundle-%d", h.n)
-	path, err := h.cache.Put(hash, map[string][]byte{"config.yaml": []byte(configYAML)})
+	files := []hubclient.TemplateFile{{Path: "config.yaml", Hash: transfer.HashBytes([]byte(configYAML))}}
+	key := templatecache.EntryKey([]transfer.FileInfo{{Path: "config.yaml", Hash: files[0].Hash}})
+	path, err := h.cache.Put(key, map[string][]byte{"config.yaml": []byte(configYAML)})
 	if err != nil {
 		h.t.Fatal(err)
 	}
 	h.f.mu.Lock()
 	h.f.hash = hash
+	h.f.files = files
 	h.f.mu.Unlock()
 	return path
 }

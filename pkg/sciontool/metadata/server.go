@@ -36,7 +36,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
 
@@ -72,6 +71,12 @@ type Config struct {
 	// When "host", iptables interception is skipped to avoid leaking
 	// redirect rules into the host's network namespace.
 	NetworkMode string
+	// InterceptionRequired is set when the runtime granted the container the
+	// capability for the metadata interception (InterceptionEnvVar is
+	// InterceptionRequired). Start then fails when the interception, or in
+	// block mode the filter rule, cannot be installed, instead of continuing
+	// with only the GCE_METADATA_HOST variables.
+	InterceptionRequired bool
 
 	// FetchGCPToken, if set, is called to obtain a GCP access token from the
 	// Hub instead of making a direct HTTP call. This allows the metadata
@@ -83,6 +88,19 @@ type Config struct {
 	// token from the Hub. Same motivation as FetchGCPToken.
 	FetchGCPIdentityToken func(ctx context.Context, audience string) (string, error)
 }
+
+// InterceptionEnvVar and its required value mirror
+// runtime.MetadataInterceptionEnvVar and runtime.MetadataInterceptionRequired
+// (pkg/runtime/common.go), which the Docker/Podman runtime sets from the same
+// decision that grants NET_ADMIN.
+const (
+	InterceptionEnvVar   = "SCION_METADATA_INTERCEPTION"
+	InterceptionRequired = "required"
+)
+
+// ErrInterceptionUnavailable is returned by Start when InterceptionRequired is
+// set and the metadata interception could not be installed.
+var ErrInterceptionUnavailable = errors.New("metadata interception unavailable")
 
 const (
 	modeBlock       = "block"
@@ -166,7 +184,33 @@ func ConfigFromEnv() *Config {
 		HubURL:      hubURL,
 		AuthToken:   os.Getenv("SCION_AUTH_TOKEN"),
 		NetworkMode: os.Getenv("SCION_NETWORK_MODE"),
+
+		InterceptionRequired: os.Getenv(InterceptionEnvVar) == InterceptionRequired,
 	}
+}
+
+// StartFailureIsFatal reports whether a Start error must stop the agent
+// start (fail closed) rather than let the harness run without the emulator:
+//
+//   - an unavailable required interception always;
+//   - any failure in assign mode, in any network mode;
+//   - any failure in block mode outside host networking.
+//
+// Block mode under host networking is the exception: every agent on the host
+// shares one loopback, so only the first block-mode emulator can bind the
+// port, and the others fall through to an emulator that also denies identity
+// requests (assign is refused under host networking by the broker).
+func (c Config) StartFailureIsFatal(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrInterceptionUnavailable) {
+		return true
+	}
+	if c.Mode == modeAssign {
+		return true
+	}
+	return c.NetworkMode != "host"
 }
 
 // Server is the metadata HTTP server.
@@ -189,12 +233,10 @@ type Server struct {
 	fetchDone     chan struct{}
 	fetchErr      error
 
-	// Singleflight for identity token fetches
-	idFetchMu       sync.Mutex
-	idFetchInFlight bool
-	idFetchDone     chan struct{}
-	idFetchErr      error
-	idFetchAudience string
+	// Singleflight for identity token fetches: the done channel of the
+	// in-flight fetch for each audience, guarded by idFetchMu.
+	idFetchMu sync.Mutex
+	idFetches map[string]chan struct{}
 
 	cancel             context.CancelFunc
 	iptablesConfigured bool        // whether iptables redirect was successfully set up
@@ -206,6 +248,19 @@ type Server struct {
 
 	shutdownToken     string
 	shutdownTokenPath string
+
+	// Hub refusals of the access token and of identity tokens (refusal.go).
+	accessRefusal *refusalState
+	idRefusal     *refusalState
+	// now, if set, replaces time.Now for the refusal windows (tests).
+	now func() time.Time
+	// afterRefusalCheck, if set, runs in the token handlers between the
+	// first refusal check and the singleflight lock (tests).
+	afterRefusalCheck func()
+	// afterFollowerJoin, if set, runs in handleIdentityToken when a request
+	// has joined another request's in-flight fetch for its audience, just
+	// before it waits (tests).
+	afterFollowerJoin func(audience string)
 }
 
 // authToken returns the current auth token, preferring the dynamic TokenFunc
@@ -349,6 +404,9 @@ func New(cfg Config) *Server {
 		config:         cfg,
 		client:         &http.Client{Timeout: 10 * time.Second},
 		cachedIDTokens: make(map[string]*cachedIDToken),
+		idFetches:      make(map[string]chan struct{}),
+		accessRefusal:  newRefusalState(),
+		idRefusal:      newRefusalState(),
 	}
 }
 
@@ -416,6 +474,33 @@ func (s *Server) Start(ctx context.Context) error {
 		_ = ln.Close()
 		return fmt.Errorf("metadata server shutdown token: %w", err)
 	}
+
+	// Set up network-level interception for the GCE metadata server IP.
+	//
+	// For block mode: we apply BOTH a REDIRECT (so GCP SDKs hitting the IP
+	// get a clean HTTP 403 from the sidecar) AND a filter-level REJECT as
+	// defense-in-depth.
+	//
+	// For assign mode: only the REDIRECT is needed.
+	//
+	// In non-root containers (notably hosted Kubernetes agents), iptables
+	// interception is not available. In that case the metadata env vars are the
+	// primary mechanism and we skip the interception setup entirely to avoid
+	// misleading warnings.
+	//
+	// This runs before the server starts serving, so a required interception
+	// that fails closes the listener here, synchronously, and Start leaves
+	// nothing bound behind it.
+	if err := s.configureMetadataInterception(os.Getuid()); err != nil {
+		s.cleanupInterception()
+		cancel()
+		_ = ln.Close()
+		if rmErr := os.Remove(s.shutdownTokenPath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+			log.Debug("Failed to remove metadata shutdown token file %s: %v", s.shutdownTokenPath, rmErr)
+		}
+		return err
+	}
+
 	s.srv = &http.Server{
 		Addr:    addr,
 		Handler: s.buildMux(),
@@ -433,20 +518,6 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}()
 
-	// Set up network-level interception for the GCE metadata server IP.
-	//
-	// For block mode: we apply BOTH a REDIRECT (so GCP SDKs hitting the IP
-	// get a clean HTTP 403 from the sidecar) AND a filter-level REJECT as
-	// defense-in-depth.
-	//
-	// For assign mode: only the REDIRECT is needed.
-	//
-	// In non-root containers (notably hosted Kubernetes agents), iptables
-	// interception is not available. In that case the metadata env vars are the
-	// primary mechanism and we skip the interception setup entirely to avoid
-	// misleading warnings.
-	s.configureMetadataInterception(os.Getuid())
-
 	// Start proactive refresh if in assign mode
 	if s.config.Mode == modeAssign {
 		go s.proactiveRefreshLoop(ctx)
@@ -456,12 +527,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	go func() {
 		<-ctx.Done()
-		if s.metadataBlocked != blockNone {
-			cleanupMetadataBlock(s.metadataBlocked)
-		}
-		if s.iptablesConfigured {
-			cleanupIPTablesRedirect(s.config.Port)
-		}
+		s.cleanupInterception()
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer shutdownCancel()
 		_ = s.srv.Shutdown(shutdownCtx)
@@ -477,18 +543,48 @@ func shouldAttemptMetadataInterception(uid int, networkMode string) bool {
 	return uid == 0
 }
 
-func (s *Server) configureMetadataInterception(uid int) {
+// Seams for tests: the iptables helpers need root and NET_ADMIN.
+var (
+	runSetupIPTablesRedirect = setupIPTablesRedirect
+	runSetupMetadataBlock    = setupMetadataBlock
+)
+
+// cleanupInterception removes whatever configureMetadataInterception
+// installed.
+func (s *Server) cleanupInterception() {
+	if s.metadataBlocked != blockNone {
+		cleanupMetadataBlock(s.metadataBlocked)
+		s.metadataBlocked = blockNone
+	}
+	if s.iptablesConfigured {
+		cleanupIPTablesRedirect(s.config.Port)
+		s.iptablesConfigured = false
+	}
+}
+
+// configureMetadataInterception installs the metadata IP interception. With
+// InterceptionRequired it returns an ErrInterceptionUnavailable error when
+// the interception, or outside assign mode the filter rule, is not in place;
+// otherwise those failures are logged and the env vars remain the only
+// mechanism.
+func (s *Server) configureMetadataInterception(uid int) error {
 	if !shouldAttemptMetadataInterception(uid, s.config.NetworkMode) {
+		if s.config.InterceptionRequired {
+			return fmt.Errorf("%w: process is not root or shares the host network namespace", ErrInterceptionUnavailable)
+		}
 		if s.config.NetworkMode == "host" {
-			log.Debug("Skipping metadata IP interception: host networking mode (iptables would leak to host namespace)")
+			log.Warn("Metadata IP interception is not installed under host networking; mode %q applies only to clients that use GCE_METADATA_HOST", s.config.Mode)
 		} else {
 			log.Debug("Skipping metadata IP interception: process is not running as root")
 		}
-		return
+		return nil
 	}
 
-	err := setupIPTablesRedirect(s.config.Port)
+	err := runSetupIPTablesRedirect(s.config.Port)
 	if err != nil {
+		if s.config.InterceptionRequired {
+			return fmt.Errorf("%w: redirect: %v", ErrInterceptionUnavailable, err)
+		}
 		// Non-fatal: iptables may not be available (no NET_ADMIN cap, non-Docker runtime).
 		// The GCE_METADATA_HOST / GCE_METADATA_ROOT env vars are the primary mechanism.
 		log.Debug("iptables redirect not available: %v", err)
@@ -504,19 +600,23 @@ func (s *Server) configureMetadataInterception(uid int) {
 	// the defence-in-depth block. Testing `!= modeBlock` instead meant an
 	// unrecognised mode skipped the hardening.
 	if s.config.Mode == modeAssign {
-		return
+		return nil
 	}
 
 	// Defense-in-depth: block traffic to the metadata IP at the filter level
 	// so that even if the nat REDIRECT fails or is bypassed, direct access to
 	// the real metadata server is denied.
-	method, err := setupMetadataBlock()
+	method, err := runSetupMetadataBlock()
 	if err != nil {
+		if s.config.InterceptionRequired {
+			return fmt.Errorf("%w: filter rule: %v", ErrInterceptionUnavailable, err)
+		}
 		log.Error("metadata block: failed to block metadata IP — direct access to %s may still be possible: %v", metadataIP, err)
-		return
+		return nil
 	}
 
 	s.metadataBlocked = method
+	return nil
 }
 
 // Stop gracefully shuts down the server. It closes the listener synchronously
@@ -621,56 +721,6 @@ func (s *Server) ensureShutdownToken() error {
 // fixed-length hex string plus a newline, so anything this long already
 // isn't the file writeShutdownToken produces.
 const shutdownTokenMaxBytes = 256
-
-// readShutdownToken reads the shutdown token writeShutdownToken wrote,
-// without following a symlink at any path component, without blocking on a
-// planted FIFO, and without treating anything but a single-link regular
-// file owned by this process as a source of trust: the token path is a
-// predictable name under os.TempDir(), so a shared, world-writable
-// directory lets another user plant something there before this process's
-// own writeShutdownToken has run (e.g. between init runs bootstrap
-// resets), and shutdownExisting sends whatever it reads here to another
-// process's authenticated endpoint. O_NONBLOCK keeps a FIFO's open(2) from
-// blocking forever waiting for a writer; the Nlink and Uid checks refuse a
-// hardlink to (or a file planted by) something other than this process.
-func readShutdownToken(path string) ([]byte, error) {
-	dirFd, leaf, err := dirfd.OpenParentNoFollow(path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = syscall.Close(dirFd) }()
-
-	f, err := dirfd.OpenAt(dirFd, leaf, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-
-	var st syscall.Stat_t
-	if err := syscall.Fstat(int(f.Fd()), &st); err != nil {
-		return nil, err
-	}
-	if st.Mode&syscall.S_IFMT != syscall.S_IFREG || st.Nlink != 1 || st.Uid != uint32(os.Geteuid()) {
-		return nil, fmt.Errorf("shutdown token path %s is not a single-link regular file owned by this process", path)
-	}
-	return io.ReadAll(io.LimitReader(f, shutdownTokenMaxBytes))
-}
-
-func writeShutdownToken(path, token string) error {
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0600)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-	if _, err := f.WriteString(token + "\n"); err != nil {
-		_ = os.Remove(path)
-		return err
-	}
-	return nil
-}
 
 func (s *Server) probeHealth() bool {
 	bindIP := s.resolvedBindIP
@@ -949,30 +999,49 @@ func (s *Server) handleServiceAccount(w http.ResponseWriter, r *http.Request, pa
 }
 
 func (s *Server) serveCachedToken(w http.ResponseWriter) bool {
+	body, ok := s.peekCachedToken()
+	if ok {
+		writeCachedToken(w, body)
+	}
+	return ok
+}
+
+// peekCachedToken reads the cached access token without writing a response:
+// the response body, and whether the token has more than 60 s left.
+func (s *Server) peekCachedToken() (map[string]interface{}, bool) {
 	s.mu.RLock()
 	cached := s.cachedToken
 	s.mu.RUnlock()
 
 	if cached == nil {
-		return false
+		return nil, false
 	}
 	elapsed := time.Since(cached.FetchedAt)
 	remaining := time.Duration(cached.ExpiresIn)*time.Second - elapsed
 	if remaining <= 60*time.Second {
-		return false
+		return nil, false
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+	return map[string]interface{}{
 		"access_token": cached.AccessToken,
 		"expires_in":   int(remaining.Seconds()),
 		"token_type":   cached.TokenType,
-	})
-	return true
+	}, true
+}
+
+func writeCachedToken(w http.ResponseWriter, body map[string]interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	if s.serveCachedToken(w) {
 		return
+	}
+	if s.serveRefusal(w, s.accessRefusal) {
+		return
+	}
+	if s.afterRefusalCheck != nil {
+		s.afterRefusalCheck()
 	}
 
 	// Singleflight: collapse concurrent fetches into one Hub request
@@ -984,7 +1053,25 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		if s.serveCachedToken(w) {
 			return
 		}
+		if s.serveRefusal(w, s.accessRefusal) {
+			return
+		}
 		http.Error(w, "token generation failed", http.StatusBadGateway)
+		return
+	}
+	// A request that passed the checks above before the previous leader
+	// finished must not become a new leader inside the window that leader
+	// opened (or after the token it cached): re-check both while holding
+	// fetchMu. Lock order: fetchMu, then refusalState.mu / mu; neither is
+	// held while fetchMu is taken.
+	if left, ok := s.refusalLeft(s.accessRefusal); ok {
+		s.fetchMu.Unlock()
+		writeRefusal(w, left)
+		return
+	}
+	if body, ok := s.peekCachedToken(); ok {
+		s.fetchMu.Unlock()
+		writeCachedToken(w, body)
 		return
 	}
 	s.fetchInFlight = true
@@ -1000,6 +1087,9 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	s.fetchMu.Unlock()
 
 	if err != nil {
+		if isHubRefusal(err) && s.serveRefusal(w, s.accessRefusal) {
+			return
+		}
 		log.Error("Failed to fetch GCP access token from Hub: %v", err)
 		http.Error(w, "token generation failed", http.StatusBadGateway)
 		return
@@ -1010,16 +1100,29 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) serveCachedIDToken(w http.ResponseWriter, audience string) bool {
+	tok, ok := s.peekCachedIDToken(audience)
+	if ok {
+		writeCachedIDToken(w, tok)
+	}
+	return ok
+}
+
+// peekCachedIDToken reads the cached identity token for audience without
+// writing a response, and whether it has more than 60 s left.
+func (s *Server) peekCachedIDToken(audience string) (string, bool) {
 	s.idTokenMu.RLock()
 	cached := s.cachedIDTokens[audience]
 	s.idTokenMu.RUnlock()
 
 	if cached == nil || !time.Now().Before(cached.ExpiresAt.Add(-60*time.Second)) {
-		return false
+		return "", false
 	}
+	return cached.Token, true
+}
+
+func writeCachedIDToken(w http.ResponseWriter, tok string) {
 	w.Header().Set("Content-Type", "text/plain")
-	_, _ = fmt.Fprint(w, cached.Token)
-	return true
+	_, _ = fmt.Fprint(w, tok)
 }
 
 func (s *Server) handleIdentityToken(w http.ResponseWriter, r *http.Request) {
@@ -1032,33 +1135,70 @@ func (s *Server) handleIdentityToken(w http.ResponseWriter, r *http.Request) {
 	if s.serveCachedIDToken(w, audience) {
 		return
 	}
+	if s.serveRefusal(w, s.idRefusal) {
+		return
+	}
+	if s.afterRefusalCheck != nil {
+		s.afterRefusalCheck()
+	}
 
-	// Singleflight: collapse concurrent fetches for the same audience
+	// Singleflight: collapse concurrent fetches for the same audience. Each
+	// audience has its own in-flight entry, so fetches for different
+	// audiences run independently.
 	s.idFetchMu.Lock()
-	if s.idFetchInFlight && s.idFetchAudience == audience {
-		done := s.idFetchDone
+	if done, ok := s.idFetches[audience]; ok {
 		s.idFetchMu.Unlock()
-		<-done
+		if s.afterFollowerJoin != nil {
+			s.afterFollowerJoin(audience)
+		}
+		select {
+		case <-done:
+		case <-r.Context().Done():
+			return // the client has gone; the leader still caches the token
+		}
 		if s.serveCachedIDToken(w, audience) {
+			return
+		}
+		if s.serveRefusal(w, s.idRefusal) {
 			return
 		}
 		http.Error(w, "identity token generation failed", http.StatusBadGateway)
 		return
 	}
-	s.idFetchInFlight = true
-	s.idFetchAudience = audience
-	s.idFetchDone = make(chan struct{})
+	// As in handleToken: re-check the window and the cache while holding
+	// idFetchMu before becoming the leader (lock order idFetchMu, then
+	// refusalState.mu / idTokenMu).
+	if left, ok := s.refusalLeft(s.idRefusal); ok {
+		s.idFetchMu.Unlock()
+		writeRefusal(w, left)
+		return
+	}
+	if tok, ok := s.peekCachedIDToken(audience); ok {
+		s.idFetchMu.Unlock()
+		writeCachedIDToken(w, tok)
+		return
+	}
+	done := make(chan struct{})
+	s.idFetches[audience] = done
 	s.idFetchMu.Unlock()
 
-	token, err := s.fetchIdentityToken(r.Context(), audience)
-
-	s.idFetchMu.Lock()
-	s.idFetchInFlight = false
-	s.idFetchErr = err
-	close(s.idFetchDone)
-	s.idFetchMu.Unlock()
+	token, err := func() (*cachedIDToken, error) {
+		// Close only this leader's own channel and remove only its own
+		// entry, also when the fetch panics, so the audience never keeps a
+		// dead leader that later requests would wait on.
+		defer func() {
+			s.idFetchMu.Lock()
+			delete(s.idFetches, audience)
+			close(done)
+			s.idFetchMu.Unlock()
+		}()
+		return s.fetchIdentityToken(r.Context(), audience)
+	}()
 
 	if err != nil {
+		if isHubRefusal(err) && s.serveRefusal(w, s.idRefusal) {
+			return
+		}
 		log.Error("Failed to fetch GCP identity token from Hub: %v", err)
 		http.Error(w, "identity token generation failed", http.StatusBadGateway)
 		return
@@ -1077,6 +1217,7 @@ func (s *Server) fetchAccessToken(ctx context.Context) (*GCPAccessTokenResponse,
 	} else {
 		token, err = s.fetchAccessTokenDirect(ctx)
 	}
+	s.noteFetchResult(s.accessRefusal, "access token", err)
 
 	if err != nil {
 		return nil, err
@@ -1114,7 +1255,7 @@ func (s *Server) fetchAccessTokenDirect(ctx context.Context) (*GCPAccessTokenRes
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("hub returned %d: %s", resp.StatusCode, string(respBody))
+		return nil, &hubStatusError{code: resp.StatusCode, body: string(respBody)}
 	}
 
 	var token GCPAccessTokenResponse
@@ -1138,6 +1279,7 @@ func (s *Server) fetchIdentityToken(ctx context.Context, audience string) (*cach
 	} else {
 		tokenStr, err = s.fetchIdentityTokenDirect(ctx, audience)
 	}
+	s.noteFetchResult(s.idRefusal, "identity token", err)
 
 	if err != nil {
 		return nil, err
@@ -1177,7 +1319,7 @@ func (s *Server) fetchIdentityTokenDirect(ctx context.Context, audience string) 
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("hub returned %d: %s", resp.StatusCode, string(respBody))
+		return "", &hubStatusError{code: resp.StatusCode, body: string(respBody)}
 	}
 
 	var result hubIDTokenResponse
@@ -1198,24 +1340,35 @@ func (s *Server) proactiveRefreshLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.mu.RLock()
-			cached := s.cachedToken
-			s.mu.RUnlock()
-
-			if cached == nil {
-				continue
-			}
-
-			elapsed := time.Since(cached.FetchedAt)
-			remaining := time.Duration(cached.ExpiresIn)*time.Second - elapsed
-			if remaining < 300*time.Second {
-				log.Debug("Proactively refreshing GCP access token (remaining: %v)", remaining)
-				refreshCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-				if _, err := s.fetchAccessToken(refreshCtx); err != nil {
-					log.Error("Proactive token refresh failed: %v", err)
-				}
-				cancel()
-			}
+			s.refreshTick(ctx)
 		}
+	}
+}
+
+// refreshTick is one tick of proactiveRefreshLoop: refresh the cached access
+// token when it has less than 5 minutes left, unless no token is cached or a
+// hub refusal window is open. A hub refusal is logged once, by its back-off
+// step (noteFetchResult); its body is not logged again here.
+func (s *Server) refreshTick(ctx context.Context) {
+	s.mu.RLock()
+	cached := s.cachedToken
+	s.mu.RUnlock()
+
+	if cached == nil {
+		return
+	}
+	if _, refusing := s.refusalLeft(s.accessRefusal); refusing {
+		return
+	}
+
+	elapsed := time.Since(cached.FetchedAt)
+	remaining := time.Duration(cached.ExpiresIn)*time.Second - elapsed
+	if remaining < 300*time.Second {
+		log.Debug("Proactively refreshing GCP access token (remaining: %v)", remaining)
+		refreshCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		if _, err := s.fetchAccessToken(refreshCtx); err != nil && !isHubRefusal(err) {
+			log.Error("Proactive token refresh failed: %v", err)
+		}
+		cancel()
 	}
 }

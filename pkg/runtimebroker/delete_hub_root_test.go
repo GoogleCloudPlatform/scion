@@ -162,11 +162,11 @@ type hubIDRecordingManager struct {
 	got []string
 }
 
-func (m *hubIDRecordingManager) DeleteTarget(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+func (m *hubIDRecordingManager) DeleteTarget(ctx context.Context, agentName, sharerKey string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	m.mu.Lock()
 	m.got = append(m.got, api.HubProjectIDFromContext(ctx))
 	m.mu.Unlock()
-	return m.Manager.DeleteTarget(ctx, agentName, ref, deleteFiles, projectPath, removeBranch)
+	return m.Manager.DeleteTarget(ctx, agentName, sharerKey, ref, deleteFiles, projectPath, removeBranch)
 }
 
 // The delete handler passes the request's project ID to the manager's
@@ -180,7 +180,7 @@ func TestDeleteAgent_PassesRequestProjectIDAsHubProjectID(t *testing.T) {
 	entries := []api.AgentInfo{}
 	rt := labelFilterRuntime(&entries, &deleted)
 	mgr := &hubIDRecordingManager{Manager: agent.NewManager(rt)}
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})

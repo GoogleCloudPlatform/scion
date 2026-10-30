@@ -500,6 +500,20 @@ func (_c *AgentCreate) SetNillableAppliedConfig(v *string) *AgentCreate {
 	return _c
 }
 
+// SetPendingConfig sets the "pending_config" field.
+func (_c *AgentCreate) SetPendingConfig(v string) *AgentCreate {
+	_c.mutation.SetPendingConfig(v)
+	return _c
+}
+
+// SetNillablePendingConfig sets the "pending_config" field if the given value is not nil.
+func (_c *AgentCreate) SetNillablePendingConfig(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetPendingConfig(*v)
+	}
+	return _c
+}
+
 // SetHarnessConfig sets the "harness_config" field.
 func (_c *AgentCreate) SetHarnessConfig(v string) *AgentCreate {
 	_c.mutation.SetHarnessConfig(v)
@@ -1789,6 +1803,10 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 		_spec.SetField(agent.FieldAppliedConfig, field.TypeString, value)
 		_node.AppliedConfig = value
 	}
+	if value, ok := _c.mutation.PendingConfig(); ok {
+		_spec.SetField(agent.FieldPendingConfig, field.TypeString, value)
+		_node.PendingConfig = &value
+	}
 	if value, ok := _c.mutation.HarnessConfig(); ok {
 		_spec.SetField(agent.FieldHarnessConfig, field.TypeString, value)
 		_node.HarnessConfig = value
@@ -2709,6 +2727,24 @@ func (u *AgentUpsert) UpdateAppliedConfig() *AgentUpsert {
 // ClearAppliedConfig clears the value of the "applied_config" field.
 func (u *AgentUpsert) ClearAppliedConfig() *AgentUpsert {
 	u.SetNull(agent.FieldAppliedConfig)
+	return u
+}
+
+// SetPendingConfig sets the "pending_config" field.
+func (u *AgentUpsert) SetPendingConfig(v string) *AgentUpsert {
+	u.Set(agent.FieldPendingConfig, v)
+	return u
+}
+
+// UpdatePendingConfig sets the "pending_config" field to the value that was provided on create.
+func (u *AgentUpsert) UpdatePendingConfig() *AgentUpsert {
+	u.SetExcluded(agent.FieldPendingConfig)
+	return u
+}
+
+// ClearPendingConfig clears the value of the "pending_config" field.
+func (u *AgentUpsert) ClearPendingConfig() *AgentUpsert {
+	u.SetNull(agent.FieldPendingConfig)
 	return u
 }
 
@@ -4373,6 +4409,27 @@ func (u *AgentUpsertOne) UpdateAppliedConfig() *AgentUpsertOne {
 func (u *AgentUpsertOne) ClearAppliedConfig() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearAppliedConfig()
+	})
+}
+
+// SetPendingConfig sets the "pending_config" field.
+func (u *AgentUpsertOne) SetPendingConfig(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetPendingConfig(v)
+	})
+}
+
+// UpdatePendingConfig sets the "pending_config" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdatePendingConfig() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdatePendingConfig()
+	})
+}
+
+// ClearPendingConfig clears the value of the "pending_config" field.
+func (u *AgentUpsertOne) ClearPendingConfig() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearPendingConfig()
 	})
 }
 
@@ -6360,6 +6417,27 @@ func (u *AgentUpsertBulk) UpdateAppliedConfig() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearAppliedConfig() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearAppliedConfig()
+	})
+}
+
+// SetPendingConfig sets the "pending_config" field.
+func (u *AgentUpsertBulk) SetPendingConfig(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetPendingConfig(v)
+	})
+}
+
+// UpdatePendingConfig sets the "pending_config" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdatePendingConfig() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdatePendingConfig()
+	})
+}
+
+// ClearPendingConfig clears the value of the "pending_config" field.
+func (u *AgentUpsertBulk) ClearPendingConfig() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearPendingConfig()
 	})
 }
 

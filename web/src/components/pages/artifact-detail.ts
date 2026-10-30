@@ -49,7 +49,7 @@ import type { PageData } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { navigateTo, stripBasePath } from '../../client/navigation.js';
-import { isFeatureEnabled } from '../../utils/feature-flags.js';
+import { ARTIFACT_REVIEW_EDITOR_FLAG, isFeatureEnabled } from '../../utils/feature-flags.js';
 import { formatInstant } from '../../utils/time.js';
 import { showToast } from '../../utils/toast.js';
 import {
@@ -107,6 +107,10 @@ import '../shared/artifact-delete-dialog.js';
 import { ownerDeletedBadge, ownerDeletedStyles } from '../shared/artifact-owner-deleted.js';
 import '../shared/code-editor.js';
 import './not-found.js';
+import { loadReviewEditor, preloadReviewEditor } from '../artifact-review/review-editor-loader.js';
+import { showConfirm } from '../shared/confirm-dialog.js';
+import { countTopLevelBlocks } from '../../utils/markdown-blocks.js';
+import type { ReviewEditorElement } from '../artifact-review/review-editor-loader.js';
 
 type Tab = 'preview' | 'files' | 'history';
 
@@ -147,6 +151,165 @@ export const WIDE_NOTES_QUERY = '(min-width: 1100px)';
  * mode, where the preview takes half the page.
  */
 export const WIDE_REVIEW_NOTES_QUERY = '(min-width: 1400px)';
+
+/** Where the graphical review page remembers the chosen view. */
+export const REVIEW_VIEW_KEY = 'scion:artifact-review-view';
+
+/** How long a refusal hint stays up without a new edit. */
+export const REVIEW_HINT_MS = 8000;
+
+/**
+ * Markdown over either of these (UTF-8 bytes, top-level blocks) opens
+ * Review in the Source view, with a notice: the graphical view takes a
+ * while to open for such documents. The reviewer can still switch to it,
+ * after a confirmation.
+ */
+export const LARGE_REVIEW_BYTES = 200_000;
+export const LARGE_REVIEW_BLOCKS = 4_000;
+
+/**
+ * Markdown over either of these is too large for the graphical view: it
+ * is not offered, since opening it could use more memory than the page
+ * has.
+ */
+export const MAX_GRAPHICAL_BYTES = 500_000;
+export const MAX_GRAPHICAL_BLOCKS = 10_000;
+
+/** How a document's size bears on the graphical review page. */
+export type ReviewSize = 'normal' | 'large' | 'too-large';
+
+/** The views of the graphical review page. */
+export type ReviewView = 'graphical' | 'source';
+
+/** Hints of the graphical review page (editor refusals and notices). */
+export type ReviewHint =
+  | 'format'
+  | 'code'
+  | 'image'
+  | 'list-table'
+  | 'break'
+  | 'paste-multi'
+  | 'earlier'
+  | 'moved'
+  | 'source-own'
+  | 'composing'
+  | 'code-run'
+  | 'generic'
+  | 'load-failed'
+  | 'large'
+  | 'too-large';
+
+/** Text of each hint: a bold first sentence and a second one. */
+export const REVIEW_HINT_TEXT: Record<ReviewHint, { title: string; body: string }> = {
+  format: {
+    title: "Formatting can't be suggested here.",
+    body: 'Use the Source view to change bold, italic, headings or lists.',
+  },
+  code: { title: "Code blocks can't take suggestions.", body: 'Edit code in the Source view.' },
+  image: {
+    title: 'Images can be added by publishing a new version.',
+    body: 'A review can only use images already in this version.',
+  },
+  'list-table': {
+    title: "List and table structure can't be changed in a suggestion.",
+    body: 'You can edit the text in them; use the Source view to add, remove or move items, rows or columns.',
+  },
+  break: {
+    title: "Paragraph breaks can't be suggested here yet.",
+    body: 'Use the Source view to split or join paragraphs.',
+  },
+  'paste-multi': {
+    title: "Pasting several paragraphs isn't supported here yet.",
+    body: 'Paste one paragraph at a time, or use the Source view.',
+  },
+  earlier: {
+    title: 'This suggestion is from an earlier review.',
+    body: 'You can comment on it.',
+  },
+  moved: {
+    title: 'This edit would move an earlier comment.',
+    body: 'Edit around it, or use the Source view.',
+  },
+  'source-own': {
+    title:
+      "Suggestions you've made so far become read-only in the graphical view after you switch to Source.",
+    body: 'You can still change them there.',
+  },
+  composing: {
+    title: "Finish the text you're typing first.",
+    body: 'Then save or switch views again.',
+  },
+  'code-run': {
+    title: 'That edit would change code that continues on the lines next to it.',
+    body: 'Use the Source view to change backticks here.',
+  },
+  generic: {
+    title: "That change can't be recorded as a suggestion.",
+    body: 'Use the Source view.',
+  },
+  'load-failed': {
+    title: 'The graphical view could not be loaded.',
+    body: 'It opened in the Source view.',
+  },
+  large: {
+    title: 'This document is large, so it opened in the Source view.',
+    body: '',
+  },
+  'too-large': {
+    title: 'This document is too large for the graphical view.',
+    body: '',
+  },
+};
+
+/** The confirmation before the graphical view opens a large document. */
+export const LARGE_REVIEW_CONFIRM =
+  'Opening the graphical view may take a few seconds for a document this size. Continue?';
+
+/** The view toggle's tooltip when the graphical view is not offered. */
+export const TOO_LARGE_TOOLTIP = 'Too large for the graphical view.';
+
+/** The view toggle's tooltip while the document's size is being checked. */
+export const SIZING_TOOLTIP = 'Checking the document size...';
+
+/**
+ * The size class of text for the graphical review page. Bytes are exact;
+ * blocks are counted by the app's Markdown lexer, which is close to the
+ * editor's own count but not always equal (approximate by design), and only
+ * for text within MAX_GRAPHICAL_BYTES. A count that fails counts as large:
+ * the Source view opens, and the reviewer can still switch.
+ */
+export async function reviewSize(
+  text: string,
+  countBlocks: (md: string) => Promise<number> = countTopLevelBlocks
+): Promise<ReviewSize> {
+  const bytes = new TextEncoder().encode(text).length;
+  if (bytes > MAX_GRAPHICAL_BYTES) return 'too-large';
+  let blocks: number;
+  try {
+    blocks = await countBlocks(text);
+  } catch {
+    return 'large';
+  }
+  if (blocks > MAX_GRAPHICAL_BLOCKS) return 'too-large';
+  return bytes > LARGE_REVIEW_BYTES || blocks > LARGE_REVIEW_BLOCKS ? 'large' : 'normal';
+}
+
+/** The view a reviewer last chose; graphical unless they chose source. */
+export function storedReviewView(): ReviewView {
+  try {
+    return window.localStorage.getItem(REVIEW_VIEW_KEY) === 'source' ? 'source' : 'graphical';
+  } catch {
+    return 'graphical';
+  }
+}
+
+function storeReviewView(v: ReviewView): void {
+  try {
+    window.localStorage.setItem(REVIEW_VIEW_KEY, v);
+  } catch {
+    // Storage unavailable: the choice lasts for this page only.
+  }
+}
 
 /** How long the Review preview waits after typing before it re-renders. */
 export const REVIEW_PREVIEW_DELAY_MS = 250;
@@ -223,6 +386,12 @@ export class ScionPageArtifactDetail extends LitElement {
   /** The version a failed Edit publish left pending; the next attempt resumes it. */
   private editPending: PendingPublish | null = null;
   @state() private reviewing = false;
+  /**
+   * Whether the current review opened in the graphical review page. Set
+   * when the review starts, so the page keeps its layout (and Save keeps
+   * taking the editor's text) even if the experiment changes mid-review.
+   */
+  @state() private reviewGraphical = false;
   @state() private reviewText = '';
   @state() private reviewNote = '';
   @state() private reviewBusy = false;
@@ -257,6 +426,27 @@ export class ScionPageArtifactDetail extends LitElement {
 
   @query('.untrusted') private untrustedFrame?: HTMLElement;
   @query('scion-code-editor.review-editor') private reviewEditor?: ScionCodeEditor;
+  @query('scion-review-editor') private graphicalEditor?: ReviewEditorElement;
+  /** The view of the graphical review page (experiment web.artifact_review_editor). */
+  @state() private reviewView: ReviewView = 'graphical';
+  /** The editor chunk: not requested, loading, loaded, or failed. */
+  @state() private editorLoad: 'idle' | 'loading' | 'ready' | 'failed' = 'idle';
+  /** The size class of the text under review; null while it is worked out. */
+  @state() private reviewSize: ReviewSize | null = null;
+  /** The reviewer confirmed opening this large document in the graphical view. */
+  private largeConfirmed = false;
+  /** Counts reviews started, so a size worked out for an earlier one is dropped. */
+  private reviewRuns = 0;
+  /** A choice of the graphical view is being sized or confirmed (one at a time). */
+  @state() private choosingGraphical = false;
+  /** Counts choices of the graphical view, so a stale one cannot release a newer one. */
+  private choiceToken = 0;
+  /** The too-large size came from the block count (the bytes are within the ceiling). */
+  private tooLargeByBlocks = false;
+  /** The hint shown under the toolbar of the graphical review page. */
+  @state() private graphicalHint: ReviewHint | null = null;
+  private hintTimer: ReturnType<typeof setTimeout> | null = null;
+  private preloaded = false;
 
   static override styles = [
     untrustedViewFrameStyles,
@@ -473,6 +663,140 @@ export class ScionPageArtifactDetail extends LitElement {
       sl-alert {
         margin-bottom: 0.75rem;
       }
+      /* Graphical review page (experiment web.artifact_review_editor). */
+      sl-badge.reviewing::part(base) {
+        background: var(--sl-color-violet-100, #ede9fe);
+        color: var(--sl-color-violet-700, #6d28d9);
+        border-color: var(--sl-color-violet-200, #ddd6fe);
+      }
+      .graphical-review {
+        margin-bottom: 0.25rem;
+      }
+      .g-toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.45rem 0.6rem;
+        background: var(--scion-surface, #fff);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: 0.45rem 0.45rem 0 0;
+      }
+      .g-toolbar .sep {
+        width: 1px;
+        align-self: stretch;
+        background: var(--scion-border, #e2e8f0);
+      }
+      .g-toolbar .spacer {
+        flex: 1;
+      }
+      .g-toolbar .hint {
+        font-size: 0.8125rem;
+        color: var(--sl-color-warning-700, #b45309);
+      }
+      .g-toolbar .narrow {
+        display: none;
+      }
+      .g-toolbar sl-switch {
+        font-size: 0.8125rem;
+      }
+      .view-toggle::part(form-control-label) {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+      }
+      .hint-strip {
+        display: flex;
+        gap: 0.6rem;
+        align-items: flex-start;
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-top: 3px solid var(--sl-color-neutral-500, #64748b);
+        border-radius: 0.35rem;
+        margin: 0.45rem 0.6rem;
+        padding: 0.5rem 0.75rem;
+        font-size: 0.8125rem;
+        background: var(--scion-surface, #fff);
+        color: var(--scion-text, #334155);
+      }
+      .hint-strip.warning {
+        border-top-color: var(--sl-color-warning-600, #d97706);
+      }
+      .hint-strip .hint-icon {
+        font-size: 1.05rem;
+        margin-top: 0.1rem;
+        color: var(--sl-color-neutral-500, #64748b);
+      }
+      .hint-strip .hint-text {
+        flex: 1;
+        min-width: 0;
+      }
+      .hint-actions {
+        margin-top: 0.3rem;
+      }
+      .g-work {
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-top: none;
+        border-radius: 0 0 0.45rem 0.45rem;
+        background: var(--scion-surface, #fff);
+        min-height: 20rem;
+      }
+      .g-work scion-code-editor {
+        display: block;
+      }
+      .skeleton {
+        padding: 1.2rem 2rem;
+      }
+      .skeleton div {
+        height: 0.8rem;
+        border-radius: 0.3rem;
+        background: var(--scion-border, #e2e8f0);
+        margin-bottom: 0.7rem;
+      }
+      .help-panel p {
+        margin: 0 0 0.5rem;
+      }
+      .help-panel .help-sub {
+        font-size: 0.6875rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--sl-color-neutral-600);
+        margin-top: 0.5rem;
+      }
+      .help-panel table {
+        border-collapse: collapse;
+        margin: 0.2rem 0;
+      }
+      .help-panel td {
+        padding: 0.1rem 0.75rem 0.1rem 0;
+      }
+      .help-panel kbd {
+        font-family: var(--scion-font-mono, monospace);
+        font-size: 0.6875rem;
+        border: 1px solid var(--scion-border, #cbd5e1);
+        border-bottom-width: 2px;
+        border-radius: 0.25rem;
+        padding: 0 0.3rem;
+      }
+      @media (max-width: 640px) {
+        .g-toolbar {
+          gap: 0.3rem;
+          padding: 0.4rem;
+        }
+        /* Visually hidden, still the buttons' accessible names. */
+        .g-toolbar .lbl {
+          position: absolute;
+          width: 1px;
+          height: 1px;
+          overflow: hidden;
+          clip: rect(0 0 0 0);
+          white-space: nowrap;
+        }
+        .g-toolbar .narrow {
+          display: inline;
+        }
+      }
       .download-state,
       .error-state,
       .loading-state {
@@ -560,6 +884,10 @@ export class ScionPageArtifactDetail extends LitElement {
       if (kind === 'html' && version && gen === this.loadGen) {
         void this.loadView(version.seq);
       }
+      if (gen === this.loadGen && this.graphicalReview && this.canReview && !this.preloaded) {
+        this.preloaded = true;
+        preloadReviewEditor();
+      }
     } catch (err) {
       if (gen !== this.loadGen) return;
       console.error('Failed to load artifact:', err);
@@ -614,6 +942,7 @@ export class ScionPageArtifactDetail extends LitElement {
     this.viewTimer = null;
     if (this.previewTimer) clearTimeout(this.previewTimer);
     this.previewTimer = null;
+    this.clearHint();
     this.wideQuery?.removeEventListener?.('change', this.onWideChange);
     this.wideQuery = null;
     this.wideReviewQuery?.removeEventListener?.('change', this.onWideReviewChange);
@@ -851,6 +1180,214 @@ export class ScionPageArtifactDetail extends LitElement {
     this.reviewError = null;
     this.criticView = 'marks';
     this.reviewing = true;
+    this.reviewGraphical = this.graphicalReview;
+    if (this.reviewGraphical) {
+      this.clearHint();
+      this.reviewView = storedReviewView();
+      this.reviewSize = null;
+      this.largeConfirmed = false;
+      this.releaseChoice();
+      void this.sizeReview(this.reviewText, ++this.reviewRuns);
+    }
+  };
+
+  /**
+   * Works out the size class of the text under review, then opens the
+   * remembered view: a large document opens in the Source view with a
+   * notice, and a too large one cannot use the graphical view. The view
+   * this picks is not stored, so the reviewer's own choice stays for other
+   * documents.
+   */
+  private async sizeReview(text: string, run: number): Promise<void> {
+    const size = await reviewSize(text);
+    if (run !== this.reviewRuns || !this.reviewing) return;
+    this.setReviewSize(size, text);
+    if (size === 'too-large') {
+      this.reviewView = 'source';
+      this.showHint('too-large');
+    } else if (size === 'large' && this.reviewView === 'graphical') {
+      this.reviewView = 'source';
+      this.showHint('large');
+    }
+    if (this.reviewView === 'graphical') void this.ensureEditor();
+  }
+
+  /**
+   * A view chosen with the toggle. The graphical view is sized by the text
+   * as it is now (Source view edits can make it larger): a large document
+   * opens after a confirmation (once per review), and a too large one does
+   * not open at all.
+   */
+  private chooseReviewView(next: ReviewView): void {
+    if (next !== 'graphical') {
+      this.setReviewView(next);
+      return;
+    }
+    // Not while the text is still being sized (a review starting or
+    // restarting), and one choice at a time: another click while one is
+    // sized or confirmed does nothing (no second confirmation).
+    if (this.reviewSize === null || this.choosingGraphical) return;
+    const token = ++this.choiceToken;
+    this.choosingGraphical = true;
+    void this.chooseGraphical().finally(() => {
+      if (token === this.choiceToken) this.choosingGraphical = false;
+    });
+  }
+
+  /** Ends any choice of the graphical view still pending (Cancel, a new or restarted review). */
+  private releaseChoice(): void {
+    this.choiceToken++;
+    this.choosingGraphical = false;
+  }
+
+  /** Records the size class of text, and whether a too-large one came from its blocks. */
+  private setReviewSize(size: ReviewSize, text: string): void {
+    this.reviewSize = size;
+    this.tooLargeByBlocks =
+      size === 'too-large' && new TextEncoder().encode(text).length <= MAX_GRAPHICAL_BYTES;
+  }
+
+  /** chooseReviewView('graphical'), sized by the current text. */
+  private async chooseGraphical(): Promise<void> {
+    const run = this.reviewRuns;
+    for (;;) {
+      const text = this.reviewText;
+      // Bytes first, without waiting: over the ceiling nothing else matters.
+      if (new TextEncoder().encode(text).length > MAX_GRAPHICAL_BYTES) {
+        this.setReviewSize('too-large', text);
+        this.showHint('too-large');
+        return;
+      }
+      const size = await reviewSize(text);
+      if (run !== this.reviewRuns || !this.reviewing) return;
+      // Edited while it was being sized: size the text as it is now.
+      if (this.reviewText !== text) continue;
+      this.setReviewSize(size, text);
+      if (size === 'too-large') {
+        this.showHint('too-large');
+        return;
+      }
+      if (size === 'large' && !this.largeConfirmed) {
+        const ok = await showConfirm(LARGE_REVIEW_CONFIRM, {
+          title: 'Large document',
+          confirmText: 'Open graphical view',
+          variant: 'primary',
+        });
+        if (!ok || run !== this.reviewRuns || !this.reviewing) return;
+        // Edited while the question was open: size it again.
+        if (this.reviewText !== text) continue;
+        this.largeConfirmed = true;
+      }
+      this.setReviewView('graphical');
+      return;
+    }
+  }
+
+  /**
+   * After a pause in typing in the Source view: the toggle follows the
+   * byte ceiling (disabled over it). Bytes only, so typing in a large
+   * document does not wait for a block count; blocks are counted when the
+   * graphical view is chosen. A too-large size that came from the block
+   * count is kept until the blocks are counted again, here: the toggle is
+   * disabled, so this is the only place that can find the text smaller.
+   * The view and the hints are left as they are.
+   */
+  private refreshReviewSize(text: string): void {
+    const bytes = new TextEncoder().encode(text).length;
+    if (bytes > MAX_GRAPHICAL_BYTES) {
+      this.setReviewSize('too-large', text);
+    } else if (this.reviewSize === 'too-large' && this.tooLargeByBlocks) {
+      const run = this.reviewRuns;
+      void reviewSize(text).then((size) => {
+        if (run !== this.reviewRuns || !this.reviewing || this.reviewText !== text) return;
+        this.setReviewSize(size, text);
+      });
+    } else if (this.reviewSize === 'too-large') {
+      this.setReviewSize(bytes > LARGE_REVIEW_BYTES ? 'large' : 'normal', text);
+    }
+  }
+
+  /** The graphical review page is on (experiment web.artifact_review_editor). */
+  private get graphicalReview(): boolean {
+    return isFeatureEnabled(ARTIFACT_REVIEW_EDITOR_FLAG);
+  }
+
+  /** Loads the editor chunk; on failure, falls back to the source view. */
+  private async ensureEditor(): Promise<void> {
+    if (this.editorLoad === 'ready') return;
+    this.editorLoad = 'loading';
+    try {
+      await loadReviewEditor();
+      this.editorLoad = 'ready';
+    } catch (err) {
+      console.error('Failed to load the review editor:', err);
+      this.editorFailed();
+    }
+  }
+
+  private editorFailed(): void {
+    this.editorLoad = 'failed';
+    this.reviewView = 'source';
+    this.showHint('load-failed');
+  }
+
+  private showHint(hint: ReviewHint): void {
+    this.clearHint();
+    this.graphicalHint = hint;
+    this.hintTimer = setTimeout(() => {
+      this.hintTimer = null;
+      this.graphicalHint = null;
+    }, REVIEW_HINT_MS);
+  }
+
+  private clearHint(): void {
+    if (this.hintTimer) clearTimeout(this.hintTimer);
+    this.hintTimer = null;
+    this.graphicalHint = null;
+  }
+
+  /**
+   * Takes the graphical editor's current text into reviewText. Returns
+   * false (and shows the hint) when the editor cannot write its document,
+   * so the caller stops and leaves the older text unused.
+   */
+  private takeGraphicalText(): boolean {
+    const ed = this.graphicalEditor;
+    if (!ed) return true;
+    const t = ed.flush();
+    if (t === null) {
+      // While an input method composition runs, its text is not written yet.
+      this.showHint(ed.isComposing() ? 'composing' : 'generic');
+      return false;
+    }
+    this.reviewText = t;
+    return true;
+  }
+
+  /** Switches between the graphical and source views, remembering the choice. */
+  private setReviewView(next: ReviewView): void {
+    if (next === this.reviewView) return;
+    // Own suggestions are the reviewer's only until the text returns from
+    // the Source view, where it is opened again (every mark then earlier).
+    let ownMarks = false;
+    if (next === 'source') {
+      ownMarks = this.graphicalEditor?.hasOwnMarks() ?? false;
+      if (!this.takeGraphicalText()) return;
+    } else {
+      void this.ensureEditor();
+    }
+    if (this.graphicalHint !== 'load-failed' || next === 'graphical') this.clearHint();
+    this.reviewView = next;
+    storeReviewView(next);
+    if (ownMarks) this.showHint('source-own');
+  }
+
+  /** Ctrl+Alt+M (and Cmd+Alt+M) comments in the source view too. */
+  private onReviewKeydown = (e: KeyboardEvent): void => {
+    if (this.reviewView !== 'source') return;
+    if (!(e.ctrlKey || e.metaKey) || !e.altKey || e.code !== 'KeyM') return;
+    e.preventDefault();
+    this.applyTool('comment');
   };
 
   private applyTool(tool: CriticTool): void {
@@ -872,6 +1409,8 @@ export class ScionPageArtifactDetail extends LitElement {
     const v = this.data?.version;
     const f = this.entry;
     if (!v || !f) return;
+    if (this.reviewGraphical && this.reviewView === 'graphical' && !this.takeGraphicalText())
+      return;
     this.reviewBusy = true;
     this.reviewError = null;
     try {
@@ -922,6 +1461,14 @@ export class ScionPageArtifactDetail extends LitElement {
     this.expandedGaps = new Set();
     this.versionsNext = 0;
     this.clearPreviewTimer();
+    // A size or confirmation still pending is for the text being
+    // discarded: drop it, and keep the graphical editor hidden until the
+    // reloaded text is sized.
+    if (this.reviewGraphical) {
+      this.reviewRuns++;
+      this.reviewSize = null;
+      this.releaseChoice();
+    }
     await this.load();
     if (!this.reviewing) return;
     // discarded is the buffer of the review just refused. After a second
@@ -937,6 +1484,12 @@ export class ScionPageArtifactDetail extends LitElement {
     this.reviewText = lfText(this.text);
     this.reviewPreview = this.reviewText;
     this.discardedReview = discarded;
+    // The current version may be larger: size it as a new review does.
+    if (this.reviewGraphical) {
+      this.reviewSize = null;
+      this.largeConfirmed = false;
+      void this.sizeReview(this.reviewText, ++this.reviewRuns);
+    }
   }
 
   /**
@@ -963,6 +1516,7 @@ export class ScionPageArtifactDetail extends LitElement {
   /** Leaves Review mode without saving. */
   private cancelReview = (): void => {
     this.clearPreviewTimer();
+    this.releaseChoice();
     this.reviewing = false;
     this.discardedReview = null;
   };
@@ -984,6 +1538,7 @@ export class ScionPageArtifactDetail extends LitElement {
     this.previewTimer = setTimeout(() => {
       this.previewTimer = null;
       this.reviewPreview = this.reviewText;
+      if (this.reviewGraphical) this.refreshReviewSize(this.reviewText);
     }, REVIEW_PREVIEW_DELAY_MS);
   }
 
@@ -1088,7 +1643,9 @@ export class ScionPageArtifactDetail extends LitElement {
       ${this.editing
         ? this.renderEditor()
         : this.reviewing
-          ? this.renderReview()
+          ? this.reviewGraphical
+            ? this.renderGraphicalReview()
+            : this.renderReview()
           : html`${this.renderReviewNotice()}${this.renderReviewBanner()}${this.renderTabs()}`}
       <scion-artifact-publish-dialog
         .artifactId=${this.artifactId}
@@ -1230,6 +1787,11 @@ export class ScionPageArtifactDetail extends LitElement {
             </sl-badge>`
           : nothing}
         ${a.ownerDeleted ? ownerDeletedBadge(a.ownerKind) : nothing}
+        ${this.reviewing && this.reviewGraphical
+          ? html`<sl-badge class="reviewing" pill>
+              <sl-icon name="chat-text"></sl-icon>&nbsp;Reviewing
+            </sl-badge>`
+          : nothing}
         <div slot="meta" class="meta">
           <span>Owner: ${a.ownerDeleted ? this.goneOwner(a.ownerKind, a.ownerRef) : owner}</span>
           ${a.key ? html`<span>Key: <code>${a.key}</code></span>` : nothing}
@@ -1816,6 +2378,279 @@ export class ScionPageArtifactDetail extends LitElement {
         ${this.reviewNotice}
       </sl-alert>
       ${this.renderDiscarded()}`;
+  }
+
+  /**
+   * The hint strip under the graphical review toolbar: an always-mounted
+   * live region (role=status), filled when there is a hint, so screen
+   * readers announce each one.
+   */
+  private renderGraphicalHint(): TemplateResult {
+    return html`<div class="hint-region" role="status" aria-live="polite">
+      ${this.renderHintStrip()}
+    </div>`;
+  }
+
+  /** The current hint, inside the live region. */
+  private renderHintStrip(): TemplateResult | typeof nothing {
+    const hint = this.graphicalHint;
+    if (!hint) return nothing;
+    const t = REVIEW_HINT_TEXT[hint];
+    const icon =
+      hint === 'image'
+        ? 'image'
+        : hint === 'load-failed'
+          ? 'exclamation-triangle'
+          : hint === 'source-own' || hint === 'large' || hint === 'too-large'
+            ? 'info-circle'
+            : 'slash-circle';
+    const action =
+      hint === 'image' ||
+      hint === 'load-failed' ||
+      hint === 'earlier' ||
+      hint === 'source-own' ||
+      hint === 'large' ||
+      hint === 'too-large'
+        ? nothing
+        : html`<div class="hint-actions">
+            <sl-button size="small" @click=${(): void => this.setReviewView('source')}>
+              <sl-icon slot="prefix" name="code-slash"></sl-icon>
+              Open Source view
+            </sl-button>
+          </div>`;
+    return html`<div class="hint-strip ${hint === 'load-failed' ? 'warning' : ''}">
+      <sl-icon class="hint-icon" name=${icon}></sl-icon>
+      <div class="hint-text"><strong>${t.title}</strong> ${t.body}${action}</div>
+      <sl-icon-button
+        name="x-lg"
+        label="Close"
+        @click=${(): void => this.clearHint()}
+      ></sl-icon-button>
+    </div>`;
+  }
+
+  /**
+   * Review on the graphical review page (experiment
+   * web.artifact_review_editor): one wide editor with a Graphical and
+   * Source toggle. Source is today's code editor and tool buttons; saving
+   * is today's Save review.
+   */
+  private renderGraphicalReview(): TemplateResult | typeof nothing {
+    const v = this.data?.version;
+    const f = this.entry;
+    if (!v || !f) return nothing;
+    const counts = countCritic(this.reviewText);
+    const marks = counts.suggestions + counts.comments + counts.highlights;
+    const marksOnly = onlyMarksChanged(this.reviewText, this.reviewBaseline);
+    const graphical = this.reviewView === 'graphical';
+    return html`
+      <div class="edit-bar">
+        Reviewing ${f.path}, based on
+        v${v.seq}.${graphical ? ' Your edits are recorded as suggestions.' : ''} Save review
+        publishes a new version as a review; v${v.seq} stays as it is.
+      </div>
+      <div class="graphical-review" @keydown=${this.onReviewKeydown}>
+        <div class="g-toolbar" role="toolbar" aria-label="Review tools">
+          ${graphical
+            ? html`<sl-tooltip content="A review records every edit as a suggestion">
+                  <!-- A disabled switch takes no focus: the wrapper does, so the
+                       tooltip is reachable by keyboard. -->
+                  <span
+                    class="track-wrap"
+                    tabindex="0"
+                    role="switch"
+                    aria-checked="true"
+                    aria-disabled="true"
+                    aria-label="Track changes: on. A review records every edit as a suggestion."
+                  >
+                    <sl-switch size="small" checked disabled class="track" aria-hidden="true">
+                      <span class="lbl">Track changes</span
+                      ><span class="narrow" aria-hidden="true">Track</span>
+                    </sl-switch>
+                  </span>
+                </sl-tooltip>
+                <span class="sep"></span>
+                <sl-tooltip content="Comment on the selection (Ctrl+Alt+M)">
+                  <sl-button
+                    size="small"
+                    class="comment"
+                    ?disabled=${this.editorLoad !== 'ready'}
+                    @click=${(): void => void this.graphicalEditor?.comment()}
+                  >
+                    <sl-icon slot="prefix" name="chat-text"></sl-icon>
+                    <span class="lbl">Comment</span>
+                  </sl-button>
+                </sl-tooltip>`
+            : html`<sl-tooltip content="Comment on the selection (Ctrl+Alt+M)">
+                  <sl-button size="small" @click=${(): void => this.applyTool('comment')}>
+                    <sl-icon slot="prefix" name="chat-text"></sl-icon>
+                    <span class="lbl">Comment</span>
+                  </sl-button>
+                </sl-tooltip>
+                <sl-tooltip content="Suggest a replacement for the selection">
+                  <sl-button size="small" @click=${(): void => this.applyTool('suggest')}>
+                    <sl-icon slot="prefix" name="arrow-left-right"></sl-icon>
+                    <span class="lbl">Suggest</span>
+                  </sl-button>
+                </sl-tooltip>
+                <sl-tooltip content="Suggest an insertion after the selection">
+                  <sl-button size="small" @click=${(): void => this.applyTool('insert')}>
+                    <sl-icon slot="prefix" name="plus-circle"></sl-icon>
+                    <span class="lbl">Insert</span>
+                  </sl-button>
+                </sl-tooltip>
+                <sl-tooltip content="Suggest deleting the selection">
+                  <sl-button size="small" @click=${(): void => this.applyTool('delete')}>
+                    <sl-icon slot="prefix" name="dash-circle"></sl-icon>
+                    <span class="lbl">Delete</span>
+                  </sl-button>
+                </sl-tooltip>
+                ${this.reviewHint ? html`<span class="hint">${this.reviewHint}</span>` : nothing}`}
+          <span class="spacer"></span>
+          <sl-tooltip
+            content=${this.reviewSize === 'too-large'
+              ? TOO_LARGE_TOOLTIP
+              : this.reviewSize === null || this.choosingGraphical
+                ? SIZING_TOOLTIP
+                : 'Undo history is kept per view and resets when you switch'}
+          >
+            <sl-radio-group
+              size="small"
+              label="View"
+              class="view-toggle"
+              value=${this.reviewView}
+              @sl-change=${(e: Event): void => {
+                const group = e.target as HTMLElement & { value: string };
+                this.chooseReviewView(group.value as ReviewView);
+                // A refused switch puts the control back.
+                if (group.value !== this.reviewView) group.value = this.reviewView;
+              }}
+            >
+              <sl-radio-button
+                value="graphical"
+                ?disabled=${this.reviewSize === null ||
+                this.reviewSize === 'too-large' ||
+                this.choosingGraphical}
+              >
+                <sl-icon slot="prefix" name="file-earmark-richtext"></sl-icon>
+                <span class="lbl">Graphical</span>
+              </sl-radio-button>
+              <sl-radio-button value="source">
+                <sl-icon slot="prefix" name="code-slash"></sl-icon>
+                <span class="lbl">Source</span>
+              </sl-radio-button>
+            </sl-radio-group>
+          </sl-tooltip>
+          <sl-dropdown placement="bottom-end" distance="4">
+            <sl-icon-button
+              slot="trigger"
+              name="question-circle"
+              label="About reviews and shortcuts"
+            ></sl-icon-button>
+            <div class="help-panel">
+              <p>
+                Edit the text directly: typing, deleting and replacing are recorded as suggestions.
+                Select text and choose Comment to leave a note. A review may change nothing outside
+                its marks.
+              </p>
+              <div class="help-sub">Shortcuts</div>
+              <table>
+                <tr>
+                  <td>Comment</td>
+                  <td><kbd>Ctrl+Alt+M</kbd></td>
+                </tr>
+                <tr>
+                  <td>Edit the selected comment</td>
+                  <td><kbd>Enter</kbd></td>
+                </tr>
+              </table>
+              <div class="help-sub">Changes that need the Source view</div>
+              <p>
+                Formatting, headings, lists, tables, code blocks and paragraph breaks are edited in
+                the Source view.
+              </p>
+            </div>
+          </sl-dropdown>
+        </div>
+        ${this.renderGraphicalHint()}
+        <div class="g-work">
+          ${graphical
+            ? this.editorLoad === 'ready' && this.reviewSize !== null
+              ? html`<scion-review-editor
+                  .content=${this.reviewText}
+                  .artifactId=${this.artifactId}
+                  .seq=${v.seq}
+                  .entryPath=${f.path}
+                  .files=${v.files}
+                  .noteAuthor=${this.createdBy(v)}
+                  @review-change=${(e: CustomEvent<{ text: string }>): void => {
+                    this.reviewText = e.detail.text;
+                    if (this.graphicalHint !== 'load-failed') this.clearHint();
+                  }}
+                  @review-hint=${(e: CustomEvent<{ kind: ReviewHint }>): void =>
+                    this.showHint(e.detail.kind)}
+                  @review-load-failed=${(): void => this.editorFailed()}
+                ></scion-review-editor>`
+              : html`<div
+                  class="skeleton"
+                  role="status"
+                  aria-busy="true"
+                  aria-label="Loading the editor"
+                >
+                  <div style="width:40%;height:1.3rem"></div>
+                  <div style="width:92%"></div>
+                  <div style="width:85%"></div>
+                  <div style="width:60%"></div>
+                  <div style="width:30%;height:1rem;margin-top:1.4rem"></div>
+                  <div style="width:88%"></div>
+                  <div style="width:70%"></div>
+                </div>`
+            : html`<scion-code-editor
+                class="review-editor"
+                .content=${this.reviewText}
+                .language=${getLanguageFromPath(f.path)}
+                @content-changed=${(e: CustomEvent<{ content: string }>): void =>
+                  this.onReviewInput(e.detail.content)}
+              ></scion-code-editor>`}
+        </div>
+      </div>
+      ${!marksOnly
+        ? html`<sl-alert variant="warning" open>
+            <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+            Text outside marks has changed. Undo those edits: a review may only add marks.
+          </sl-alert>`
+        : nothing}
+      ${this.reviewError
+        ? html`<sl-alert variant="danger" open>
+            <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+            ${this.reviewError}
+          </sl-alert>`
+        : nothing}
+      ${this.renderDiscarded()}
+      <div class="edit-footer">
+        <sl-input
+          size="small"
+          placeholder="Note for this review (optional)"
+          .value=${this.reviewNote}
+          @sl-input=${(e: Event): void => {
+            this.reviewNote = (e.target as HTMLInputElement).value;
+          }}
+        ></sl-input>
+        <sl-button size="small" ?disabled=${this.reviewBusy} @click=${this.cancelReview}
+          >Cancel</sl-button
+        >
+        <sl-button
+          size="small"
+          variant="primary"
+          ?loading=${this.reviewBusy}
+          ?disabled=${marks === 0 || !marksOnly || this.reviewText === lfText(this.text)}
+          @click=${(): void => void this.saveReview()}
+        >
+          <sl-icon slot="prefix" name="floppy"></sl-icon>
+          Save review
+        </sl-button>
+      </div>
+    `;
   }
 
   private renderReview(): TemplateResult | typeof nothing {

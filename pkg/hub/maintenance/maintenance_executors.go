@@ -19,13 +19,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path"
@@ -45,8 +42,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
-	"github.com/GoogleCloudPlatform/scion/pkg/version"
-	"github.com/GoogleCloudPlatform/scion/pkg/version/update"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
 
@@ -1397,521 +1392,52 @@ func CheckForUpdates(ctx context.Context, repoPath string) (*UpdateCheckResult, 
 	return result, nil
 }
 
-// ReleaseUpdateCheckResult contains the result of a release-based update check
-// for binary-tier deployments.
-type ReleaseUpdateCheckResult struct {
-	Tier            string `json:"tier"`
-	UpdateAvailable bool   `json:"update_available"`
-	CurrentVersion  string `json:"current_version"`
-	LatestVersion   string `json:"latest_version"`
-	Channel         string `json:"channel"`
-	DownloadURL     string `json:"download_url,omitempty"`
-	ChecksumsURL    string `json:"checksums_url,omitempty"`
-	ReleaseURL      string `json:"release_url,omitempty"`
-}
-
-// CheckForReleaseUpdates checks for available binary updates by fetching the
-// release manifest via pkg/version/update. It returns version comparison results
-// and download URLs for binary-tier deployments.
-func CheckForReleaseUpdates(ctx context.Context, currentVersion, channel, repo string) (*ReleaseUpdateCheckResult, error) {
-	log := logging.Subsystem("hub.maintenance.check-release-updates")
-
-	// Determine channel: explicit config takes precedence, then detect from version.
-	if channel == "" {
-		channel = update.DetectChannel(currentVersion)
-	}
-
-	result := &ReleaseUpdateCheckResult{
-		Tier:           "binary",
-		CurrentVersion: currentVersion,
-		Channel:        channel,
-	}
-
-	// If no channel can be determined (dev builds), return early.
-	if channel == "" {
-		log.Debug("No release channel detected, skipping update check", "version", currentVersion)
-		return result, nil
-	}
-
-	// Build the manifest URL for the configured repo.
-	manifestURL := fmt.Sprintf("https://raw.githubusercontent.com/%s/main/LATEST.json", repo)
-
-	manifest, err := update.FetchManifest(ctx, update.WithManifestURL(manifestURL))
-	if err != nil {
-		return nil, fmt.Errorf("fetch release manifest: %w", err)
-	}
-
-	latest, ok := manifest.Channels[channel]
-	if !ok || latest.Version == "" {
-		log.Debug("No version found for channel", "channel", channel)
-		return result, nil
-	}
-
-	result.LatestVersion = latest.Version
-	result.ReleaseURL = latest.URL
-
-	// Compare versions using the same logic as pkg/version/update.
-	info, err := update.CheckForUpdate(ctx, currentVersion,
-		update.WithManifestURL(manifestURL))
-	if err != nil {
-		return nil, fmt.Errorf("check for update: %w", err)
-	}
-	result.UpdateAvailable = info.UpdateAvailable
-
-	// If an update is available, resolve the download and checksums URLs
-	// from GitHub Releases.
-	if result.UpdateAvailable {
-		downloadURL, checksumsURL, err := resolveReleaseAssets(ctx, repo, result.LatestVersion)
-		if err != nil {
-			log.Warn("Failed to resolve download URL", "version", result.LatestVersion, "error", err)
-			// Non-fatal: we still know an update is available.
-		} else {
-			result.DownloadURL = downloadURL
-			result.ChecksumsURL = checksumsURL
-			if checksumsURL == "" {
-				// Not fatal here either: BinaryUpdateExecutor.Run fails
-				// closed on its own when it can't verify a checksum, but
-				// that decision belongs there, not in the check step.
-				log.Warn("Release has no SHA256SUMS asset; the binary update will fail closed",
-					"version", result.LatestVersion)
-			}
-		}
-	}
-
-	log.Info("Release update check complete",
-		"current", currentVersion,
-		"latest", result.LatestVersion,
-		"channel", channel,
-		"update_available", result.UpdateAvailable)
-
-	return result, nil
-}
-
-// resolveReleaseAssets queries the GitHub Releases API to find the download
-// URL for the platform-appropriate binary tarball in a given release tag,
-// along with the URL for that release's SHA256SUMS checksums asset (see
-// .github/workflows/build-release.yml). checksumsURL is returned empty,
-// not as an error, when the release predates checksum publishing --
-// callers that require a checksum decide how to handle that themselves
-// (BinaryUpdateExecutor.Run fails closed on it).
-func resolveReleaseAssets(ctx context.Context, repo, version string) (downloadURL, checksumsURL string, err error) {
-	// Query the GitHub Releases API for the tag.
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/releases/tags/%s", repo, version)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
-	if err != nil {
-		return "", "", fmt.Errorf("create GitHub release request: %w", err)
-	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", "", fmt.Errorf("fetch GitHub release: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("GitHub release API returned %s", resp.Status)
-	}
-
-	var release struct {
-		Assets []struct {
-			Name               string `json:"name"`
-			BrowserDownloadURL string `json:"browser_download_url"`
-		} `json:"assets"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return "", "", fmt.Errorf("decode GitHub release: %w", err)
-	}
-
-	// Look for the platform-appropriate tarball and the release's
-	// checksums asset.
-	wantName := fmt.Sprintf("scion-linux-%s.tar.gz", runtime.GOARCH)
-	for _, asset := range release.Assets {
-		switch asset.Name {
-		case wantName:
-			downloadURL = asset.BrowserDownloadURL
-		case "SHA256SUMS":
-			checksumsURL = asset.BrowserDownloadURL
-		}
-	}
-
-	if downloadURL == "" {
-		return "", "", fmt.Errorf("no asset matching %q found in release %s", wantName, version)
-	}
-
-	return downloadURL, checksumsURL, nil
-}
-
-// DeriveChecksumsURL derives a release's SHA256SUMS asset URL from one of
-// its own asset download URLs, by replacing the last path element. Used
-// when a caller supplies download_url directly (bypassing
-// CheckForReleaseUpdates, which already resolves both URLs together via
-// resolveReleaseAssets), so the checksum verification in
-// BinaryUpdateExecutor.Run still has somewhere to look.
-func DeriveChecksumsURL(downloadURL string) string {
-	idx := strings.LastIndex(downloadURL, "/")
-	if idx < 0 {
-		return ""
-	}
-	return downloadURL[:idx+1] + "SHA256SUMS"
-}
-
-// FetchExpectedChecksum downloads the release's SHA256SUMS asset and
-// returns the expected hash for assetName -- the tarball's filename *on
-// the release*, not any local path. Deliberately callable before the
-// (potentially large) release tarball itself is downloaded: this backs an
-// unattended updater that re-checks on a recurring schedule, and a release
-// with no checksums asset, or no entry for this asset, should fail
-// immediately rather than after downloading the whole tarball every cycle.
-// An empty checksumsURL, a download failure, and a missing entry are all
-// treated as equally fatal -- there is no "proceed anyway" path here (see
-// VerifyFileChecksum's doc comment for why this differs from deploy.sh's
-// own, operator-driven install-time tooling).
-func FetchExpectedChecksum(ctx context.Context, checksumsURL, assetName string, logger io.Writer) (string, error) {
-	if checksumsURL == "" {
-		return "", fmt.Errorf("no checksums URL available for %s", assetName)
-	}
-
-	tmpDir, err := os.MkdirTemp("", "scion-update-sums-*")
-	if err != nil {
-		return "", fmt.Errorf("create temp directory for checksums: %w", err)
-	}
-	defer func() { _ = os.RemoveAll(tmpDir) }()
-
-	sumsPath := filepath.Join(tmpDir, "SHA256SUMS")
-	if err := DownloadFile(ctx, checksumsURL, sumsPath, logger); err != nil {
-		return "", fmt.Errorf("download checksums: %w", err)
-	}
-
-	sumsData, err := os.ReadFile(sumsPath)
-	if err != nil {
-		return "", fmt.Errorf("read checksums file: %w", err)
-	}
-
-	for _, line := range strings.Split(string(sumsData), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) != 2 {
-			continue
-		}
-		// sha256sum's own output uses a "*name" prefix in binary mode,
-		// "name" in text mode (what build-release.yml's `sha256sum --`
-		// produces); accept either.
-		if strings.TrimPrefix(fields[1], "*") == assetName {
-			return fields[0], nil
-		}
-	}
-
-	return "", fmt.Errorf("no checksum entry for %q in SHA256SUMS", assetName)
-}
-
-// VerifyFileChecksum hashes the file at path and compares it against
-// expectedHash (as returned by FetchExpectedChecksum), failing closed on a
-// mismatch. This is an unattended background updater, not an interactive
-// install, so unlike deploy.sh's own preflight/verification there is no
-// override here: a mismatch always fails the update, with nothing swapped
-// in.
-func VerifyFileChecksum(path, assetName, expectedHash string, logger io.Writer) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return fmt.Errorf("open tarball for checksum: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return fmt.Errorf("hash tarball: %w", err)
-	}
-	actualHash := hex.EncodeToString(h.Sum(nil))
-
-	if !strings.EqualFold(actualHash, expectedHash) {
-		return fmt.Errorf("checksum mismatch for %q: expected %s, got %s", assetName, expectedHash, actualHash)
-	}
-
-	_, _ = fmt.Fprintf(logger, "Checksum verified for %s: %s\n", assetName, actualHash)
-	return nil
-}
-
-// BinaryUpdateExecutor downloads, verifies, and installs a new scion binary
-// from a GitHub Release, then restarts the systemd service.
-type BinaryUpdateExecutor struct {
-	serviceName string      // systemd service name (e.g., "scion-hub")
-	githubRepo  string      // GitHub repo for release lookups (e.g., "GoogleCloudPlatform/scion")
-	channel     string      // release channel override (empty = detect from current version)
-	store       store.Store // optional — used to clear system.update_available on success
-}
-
-// BinaryUpdateOptions configures a BinaryUpdateExecutor. Zero values are kept
-// as-is; Run applies its own defaults.
-type BinaryUpdateOptions struct {
-	ServiceName string      // systemd service name (e.g., "scion-hub")
-	GitHubRepo  string      // GitHub repo for release lookups (e.g., "GoogleCloudPlatform/scion")
-	Channel     string      // release channel override (empty = detect from current version)
-	Store       store.Store // optional — used to clear system.update_available on success
-}
-
-// NewBinaryUpdateExecutor returns a BinaryUpdateExecutor configured from opts.
-func NewBinaryUpdateExecutor(opts BinaryUpdateOptions) *BinaryUpdateExecutor {
-	return &BinaryUpdateExecutor{
-		serviceName: opts.ServiceName,
-		githubRepo:  opts.GitHubRepo,
-		channel:     opts.Channel,
-		store:       opts.Store,
-	}
-}
-
-func (e *BinaryUpdateExecutor) Run(ctx context.Context, logger io.Writer, params map[string]string) error {
-	log := logging.Subsystem("hub.maintenance.update-binary")
-
-	if runtime.GOOS != "linux" {
-		return fmt.Errorf("update-binary is only supported on Linux (requires systemd); current OS is %s", runtime.GOOS)
-	}
-
-	// ── Step 1: PRE-FLIGHT ──────────────────────────────────────────────
-
-	serviceName := e.serviceName
-	if serviceName == "" {
-		serviceName = "scion-hub"
-	}
-
-	binaryPath, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("failed to determine current binary path: %w", err)
-	}
-	binaryPath, err = filepath.EvalSymlinks(binaryPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve binary symlinks: %w", err)
-	}
-
-	_, _ = fmt.Fprintf(logger, "Current binary: %s\n", binaryPath)
-	_, _ = fmt.Fprintf(logger, "Service name: %s\n", serviceName)
-
-	// Get target version, download URL, and checksums URL — from params or
-	// by running a release check.
-	targetVersion := params["target_version"]
-	downloadURL := params["download_url"]
-	checksumsURL := params["checksums_url"]
-
-	if targetVersion == "" || downloadURL == "" {
-		_, _ = fmt.Fprintln(logger, "Checking for release updates...")
-		currentVersion := params["current_version"]
-		if currentVersion == "" {
-			currentVersion = version.Version
-		}
-		repo := e.githubRepo
-		if repo == "" {
-			repo = "GoogleCloudPlatform/scion"
-		}
-
-		result, err := CheckForReleaseUpdates(ctx, currentVersion, e.channel, repo)
-		if err != nil {
-			return fmt.Errorf("release update check failed: %w", err)
-		}
-		if !result.UpdateAvailable {
-			_, _ = fmt.Fprintf(logger, "No update available (current: %s, latest: %s, channel: %s)\n",
-				result.CurrentVersion, result.LatestVersion, result.Channel)
-			return nil
-		}
-		if targetVersion == "" {
-			targetVersion = result.LatestVersion
-		}
-		if downloadURL == "" {
-			downloadURL = result.DownloadURL
-		}
-		if checksumsURL == "" {
-			checksumsURL = result.ChecksumsURL
-		}
-	}
-
-	if downloadURL == "" {
-		return fmt.Errorf("no download URL available for version %s", targetVersion)
-	}
-	if checksumsURL == "" {
-		// A caller passed download_url directly without a matching
-		// checksums_url (e.g. a manually-triggered run) — derive it from
-		// the same release's own asset URL rather than treating "no
-		// checksums_url param" as "skip verification".
-		checksumsURL = DeriveChecksumsURL(downloadURL)
-	}
-
-	_, _ = fmt.Fprintf(logger, "Target version: %s\n", targetVersion)
-	_, _ = fmt.Fprintf(logger, "Download URL: %s\n", downloadURL)
-	log.Info("Starting binary update",
-		"target_version", targetVersion,
-		"download_url", downloadURL,
-		"binary_path", binaryPath)
-
-	// ── Step 1b: FETCH EXPECTED CHECKSUM ─────────────────────────────────
-	// Fetch and parse SHA256SUMS *before* downloading the (potentially
-	// large) release tarball below: this update check runs on a recurring
-	// schedule, and a release with no checksums asset, or no entry for
-	// this asset, should fail immediately rather than after a full
-	// download every cycle. Fails closed the same way the combined check
-	// used to — see FetchExpectedChecksum's doc comment for what's fatal
-	// and why there is no override here.
-
-	_, _ = fmt.Fprintf(logger, "\n==> Fetching expected checksum...\n")
-
-	assetName := path.Base(downloadURL)
-	expectedHash, err := FetchExpectedChecksum(ctx, checksumsURL, assetName, logger)
-	if err != nil {
-		return fmt.Errorf("checksum verification failed: %w", err)
-	}
-
-	// ── Step 2: DOWNLOAD ────────────────────────────────────────────────
-
-	// Create temp directory in the system default temp location (e.g., /tmp).
-	// The hub process runs as a non-root user and cannot write to the binary's
-	// directory (typically /usr/local/bin). The sudo install command handles
-	// the cross-filesystem copy, so same-filesystem is not required.
-	tmpDir, err := os.MkdirTemp("", "scion-update-*")
-	if err != nil {
-		return fmt.Errorf("failed to create temp directory: %w", err)
-	}
-	defer func() { _ = os.RemoveAll(tmpDir) }()
-
-	tarballPath := filepath.Join(tmpDir, "release.tar.gz")
-	_, _ = fmt.Fprintf(logger, "\n==> Downloading release asset...\n")
-
-	if err := DownloadFile(ctx, downloadURL, tarballPath, logger); err != nil {
-		return fmt.Errorf("download failed: %w", err)
-	}
-
-	// ── Step 2b: VERIFY CHECKSUM ─────────────────────────────────────────
-
-	_, _ = fmt.Fprintf(logger, "\n==> Verifying checksum...\n")
-
-	if err := VerifyFileChecksum(tarballPath, assetName, expectedHash, logger); err != nil {
-		return fmt.Errorf("checksum verification failed: %w", err)
-	}
-
-	// ── Step 3: VERIFY ──────────────────────────────────────────────────
-
-	_, _ = fmt.Fprintf(logger, "\n==> Extracting and verifying binary...\n")
-
-	extractedBinary, err := ExtractScionBinary(tarballPath, tmpDir, logger)
-	if err != nil {
-		return fmt.Errorf("extraction failed: %w", err)
-	}
-
-	if err := VerifyScionBinary(ctx, extractedBinary, targetVersion, logger); err != nil {
-		return fmt.Errorf("verification failed: %w", err)
-	}
-
-	// ── Step 4: SWAP ────────────────────────────────────────────────────
-
-	_, _ = fmt.Fprintf(logger, "\n==> Installing new binary...\n")
-
-	// Place backup in the temp directory — the hub user cannot write to the
-	// binary's directory (typically /usr/local/bin). Use sudo to read the
-	// binary into the backup location.
-	backupPath := filepath.Join(tmpDir, "scion.bak")
-	if err := BackupBinary(ctx, binaryPath, backupPath, logger); err != nil {
-		return fmt.Errorf("backup failed: %w", err)
-	}
-
-	installCmd := exec.CommandContext(ctx, "sudo", "install", "-m", "755", extractedBinary, binaryPath)
-	var installStderr bytes.Buffer
-	installCmd.Stdout = logger
-	installCmd.Stderr = io.MultiWriter(logger, &installStderr)
-	if err := installCmd.Run(); err != nil {
-		_, _ = fmt.Fprintf(logger, "Install failed, restoring backup...\n")
-		if restoreErr := RestoreBackup(backupPath, binaryPath, logger); restoreErr != nil {
-			log.Error("Failed to restore backup after install failure",
-				"install_error", err, "restore_error", restoreErr)
-			return fmt.Errorf("install failed (%w) AND backup restore failed (%v)", err, restoreErr)
-		}
-		_, _ = fmt.Fprintf(logger, "Backup restored successfully.\n")
-		errDetail := strings.TrimSpace(installStderr.String())
-		if errDetail != "" {
-			return fmt.Errorf("installing binary failed: %s", errDetail)
-		}
-		return fmt.Errorf("installing binary failed: %w", err)
-	}
-	_, _ = fmt.Fprintf(logger, "Binary installed to %s\n", binaryPath)
-
-	// ── Step 4b: CLEAR STALE NOTIFICATION ───────────────────────────────
-
-	// Clear system.update_available to prevent showing a stale notification
-	// after the update is applied. Best-effort: a failure here should not
-	// block the update itself.
-	if e.store != nil {
-		if delErr := e.store.DeleteHubSetting(ctx, HubSettingSectionUpdateAvailable); delErr != nil && delErr != store.ErrNotFound {
-			_, _ = fmt.Fprintf(logger, "Warning: failed to clear update_available setting: %v\n", delErr)
-			log.Warn("Failed to clear update_available setting", "error", delErr)
-		} else {
-			_, _ = fmt.Fprintf(logger, "Cleared update_available notification.\n")
-		}
-	}
-
-	// ── Step 5: RESTART ─────────────────────────────────────────────────
-
-	_, _ = fmt.Fprintf(logger, "\n==> Restarting service...\n")
-	_, _ = fmt.Fprintf(logger, "Update: %s -> %s\n", version.Version, targetVersion)
-	_, _ = fmt.Fprintf(logger, "Timestamp: %s\n", time.Now().UTC().Format(time.RFC3339))
-
-	log.Info("Binary update complete, initiating restart",
-		"old_version", version.Version,
-		"new_version", targetVersion,
-		"binary_path", binaryPath,
-		"service_name", serviceName)
-
-	// Fire-and-forget: start the restart but don't wait for it to finish.
-	// "systemctl restart" sends SIGTERM to this very process, so cmd.Run()
-	// would never return. Using cmd.Start() lets us return success so the
-	// calling goroutine can persist the completed run status to the DB
-	// before the process is killed. Same pattern as RebuildServerExecutor.
-	restartCmd := exec.Command("sudo", "systemctl", "restart", serviceName)
-	restartCmd.Stdout = logger
-	restartCmd.Stderr = logger
-	if err := restartCmd.Start(); err != nil {
-		log.Error("Failed to initiate service restart", "error", err)
-		return fmt.Errorf("restarting service failed: %w", err)
-	}
-
-	_, _ = fmt.Fprintln(logger, "\nBinary update complete, restart initiated.")
-	return nil
-}
-
-// DownloadFile fetches a URL and streams it to a local file, logging progress.
-func DownloadFile(ctx context.Context, url, destPath string, logger io.Writer) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return fmt.Errorf("create download request: %w", err)
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("download request failed: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download returned HTTP %s", resp.Status)
-	}
-
-	out, err := os.Create(destPath)
-	if err != nil {
-		return fmt.Errorf("create temp file: %w", err)
-	}
-	defer func() { _ = out.Close() }()
-
-	written, err := io.Copy(out, resp.Body)
-	if err != nil {
-		return fmt.Errorf("write download: %w", err)
-	}
-
-	_, _ = fmt.Fprintf(logger, "Downloaded %d bytes to %s\n", written, destPath)
-	return nil
-}
-
-// ExtractScionBinary extracts a .tar.gz archive and returns the path to the
-// scion binary found within it. It looks for a file named "scion" at any
-// depth in the archive.
+// DefaultMaxExtractBytes caps the decompressed size of a release tarball
+// read by ExtractScionBinary. It matches DefaultMaxDownloadBytes (512 MiB):
+// a release archive holds one scion binary of a few hundred MB at most, so
+// anything larger is refused instead of being inflated (gzip bomb).
+const DefaultMaxExtractBytes int64 = 512 << 20
+
+// ExtractScionBinary extracts the scion binary from a release .tar.gz into
+// destDir/extracted and returns its path. Release archives
+// (build-release.yml: tar -czf … -C dist scion) hold exactly one regular
+// file named "scion" at the archive root; that is the only accepted layout:
+//   - a second root-level scion entry, a scion entry in a subdirectory, or a
+//     root-level scion that is not a regular file is an error;
+//   - other entries are skipped, never written to disk;
+//   - a sparse scion entry is an error (its holes are not read from input);
+//   - reading stops with an error once more than DefaultMaxExtractBytes have
+//     been decompressed, a scion entry declaring more than that is refused
+//     before writing, and the written binary is bounded to it as well.
 func ExtractScionBinary(tarballPath, destDir string, logger io.Writer) (string, error) {
+	return extractScionBinary(tarballPath, destDir, logger, DefaultMaxExtractBytes)
+}
+
+// errExtractTooLarge reports a tarball that decompresses past the cap.
+var errExtractTooLarge = errors.New("release archive exceeds the extraction size limit")
+
+// cappedReader returns errExtractTooLarge once more than n bytes were read.
+type cappedReader struct {
+	r io.Reader
+	n int64 // bytes still allowed
+}
+
+func (c *cappedReader) Read(p []byte) (int, error) {
+	if c.n < 0 {
+		return 0, errExtractTooLarge
+	}
+	if int64(len(p)) > c.n+1 {
+		p = p[:c.n+1]
+	}
+	n, err := c.r.Read(p)
+	c.n -= int64(n)
+	if c.n < 0 {
+		return n, errExtractTooLarge
+	}
+	return n, err
+}
+
+func extractScionBinary(tarballPath, destDir string, logger io.Writer, maxBytes int64) (string, error) {
 	f, err := os.Open(tarballPath)
 	if err != nil {
 		return "", fmt.Errorf("open tarball: %w", err)
@@ -1924,74 +1450,103 @@ func ExtractScionBinary(tarballPath, destDir string, logger io.Writer) (string, 
 	}
 	defer func() { _ = gz.Close() }()
 
-	tr := tar.NewReader(gz)
+	tr := tar.NewReader(&cappedReader{r: gz, n: maxBytes})
 	extractDir := filepath.Join(destDir, "extracted")
 	if err := os.MkdirAll(extractDir, 0o755); err != nil {
 		return "", fmt.Errorf("create extract directory: %w", err)
 	}
+	binPath := filepath.Join(extractDir, "scion")
 
-	var scionBinaryPath string
-
+	found := false
 	for {
 		header, err := tr.Next()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
+			if errors.Is(err, errExtractTooLarge) {
+				return "", fmt.Errorf("%w (%d bytes)", errExtractTooLarge, maxBytes)
+			}
 			return "", fmt.Errorf("read tarball entry: %w", err)
 		}
 
-		// Sanitize: skip entries that try to escape the extract directory.
-		cleanName := filepath.Clean(header.Name)
-		if strings.HasPrefix(cleanName, "..") || strings.HasPrefix(cleanName, "/") {
-			continue
-		}
-
-		targetPath := filepath.Join(extractDir, cleanName)
-		if !strings.HasPrefix(targetPath, extractDir+string(os.PathSeparator)) && targetPath != extractDir {
-			continue
-		}
-
-		switch header.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(targetPath, 0o755); err != nil {
-				return "", fmt.Errorf("create directory %q: %w", cleanName, err)
+		name := path.Clean(strings.TrimPrefix(header.Name, "./"))
+		switch {
+		case name == "scion":
+			if found {
+				return "", fmt.Errorf("release archive has more than one %q entry", "scion")
 			}
-
-		case tar.TypeReg:
-			// Ensure parent directory exists.
-			if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
-				return "", fmt.Errorf("create parent for %q: %w", cleanName, err)
+			if header.Typeflag != tar.TypeReg {
+				return "", fmt.Errorf("release archive entry %q is not a regular file", header.Name)
 			}
-
-			outFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(header.Mode))
-			if err != nil {
-				return "", fmt.Errorf("create file %q: %w", cleanName, err)
+			// A sparse entry's holes are synthesized as zeros without
+			// reading input, so the stream cap does not bound it. Release
+			// binaries are never sparse.
+			if isSparseEntry(header) {
+				return "", fmt.Errorf("release archive entry %q is a sparse file; refusing it", header.Name)
 			}
-			if _, err := io.Copy(outFile, tr); err != nil {
-				_ = outFile.Close()
-				return "", fmt.Errorf("write file %q: %w", cleanName, err)
+			if header.Size > maxBytes {
+				return "", fmt.Errorf("%w: entry %q declares %d bytes (limit %d)", errExtractTooLarge, header.Name, header.Size, maxBytes)
 			}
-			_ = outFile.Close()
-
-			// Track the scion binary — look for a file named "scion" (base name).
-			if filepath.Base(cleanName) == "scion" {
-				scionBinaryPath = targetPath
-				_, _ = fmt.Fprintf(logger, "Found scion binary: %s\n", cleanName)
+			found = true
+			if err := writeExtracted(binPath, tr, maxBytes); err != nil {
+				if errors.Is(err, errExtractTooLarge) {
+					return "", fmt.Errorf("%w (%d bytes)", errExtractTooLarge, maxBytes)
+				}
+				return "", err
 			}
+			_, _ = fmt.Fprintf(logger, "Found scion binary: %s\n", header.Name)
+		case path.Base(name) == "scion":
+			return "", fmt.Errorf("release archive has a nested %q entry (%s); only a root-level scion is accepted", "scion", header.Name)
+		default:
+			// Not extracted. Its content is still read (and counted against
+			// the cap) by the next tr.Next.
 		}
 	}
 
-	if scionBinaryPath == "" {
-		return "", fmt.Errorf("no 'scion' binary found in tarball")
+	if !found {
+		return "", fmt.Errorf("no 'scion' binary found at the root of the tarball")
 	}
+	return binPath, nil
+}
 
-	// Ensure the extracted binary is executable.
-	if err := os.Chmod(scionBinaryPath, 0o755); err != nil {
-		return "", fmt.Errorf("chmod extracted binary: %w", err)
+// isSparseEntry reports whether hdr describes a GNU sparse file, in either
+// the old GNU format or the PAX GNU.sparse.* encoding (which archive/tar
+// presents as a regular file).
+func isSparseEntry(hdr *tar.Header) bool {
+	if hdr.Typeflag == tar.TypeGNUSparse {
+		return true
 	}
+	for k := range hdr.PAXRecords {
+		if strings.HasPrefix(k, "GNU.sparse.") {
+			return true
+		}
+	}
+	return false
+}
 
-	return scionBinaryPath, nil
+// writeExtracted writes r to dst with mode 0755, at most maxBytes: the
+// output is bounded on its own, independently of the input-side cap.
+func writeExtracted(dst string, r io.Reader, maxBytes int64) error {
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", dst, err)
+	}
+	n, err := io.CopyN(out, r, maxBytes+1)
+	if err != nil && err != io.EOF {
+		_ = out.Close()
+		_ = os.Remove(dst)
+		return fmt.Errorf("write %s: %w", dst, err)
+	}
+	if n > maxBytes {
+		_ = out.Close()
+		_ = os.Remove(dst)
+		return fmt.Errorf("%w: %s exceeds %d bytes", errExtractTooLarge, dst, maxBytes)
+	}
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", dst, err)
+	}
+	return os.Chmod(dst, 0o755)
 }
 
 // VerifyScionBinary runs the extracted binary to confirm it reports the
@@ -2021,30 +1576,6 @@ func VerifyScionBinary(ctx context.Context, binaryPath, expectedVersion string, 
 
 	_, _ = fmt.Fprintf(logger, "Version verified: %s\n", versionOutput.Version)
 	return nil
-}
-
-// BackupBinary copies the current binary to a backup path using sudo cp.
-// The source binary is typically owned by root (e.g., /usr/local/bin/scion),
-// so sudo is required to read it reliably.
-func BackupBinary(ctx context.Context, srcPath, backupPath string, logger io.Writer) error {
-	cmd := exec.CommandContext(ctx, "sudo", "cp", srcPath, backupPath)
-	cmd.Stdout = logger
-	cmd.Stderr = logger
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("backup copy failed: %w", err)
-	}
-
-	_, _ = fmt.Fprintf(logger, "Backed up current binary to %s\n", backupPath)
-	return nil
-}
-
-// RestoreBackup copies the backup binary back to the original path using
-// sudo install. This is the rollback mechanism when install fails.
-func RestoreBackup(backupPath, destPath string, logger io.Writer) error {
-	cmd := exec.Command("sudo", "install", "-m", "755", backupPath, destPath)
-	cmd.Stdout = logger
-	cmd.Stderr = logger
-	return cmd.Run()
 }
 
 // ParseMigrationParams extracts and validates migration-specific parameters from the request body.

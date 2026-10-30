@@ -53,6 +53,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -294,8 +295,8 @@ const webSessionKeyName = "web_session_key"
 // key ring. It uses the same predicate as conduitGrantKeySet: the ring is
 // persisted (under the fixed, not hub-id scoped "conduit" scope) exactly
 // when an encryption key exists, otherwise it is memory-only.
-func conduitGrantKeySource(encryptionKey []byte) string {
-	if _, err := newDBConduitGrantKeyStore(nil, encryptionKey); err == nil {
+func conduitGrantKeySource(c *secret.ValueCipher) string {
+	if _, err := newDBConduitGrantKeyStore(nil, c); err == nil {
 		return signingKeySourceSharedScope
 	}
 	return signingKeySourceEphemeral
@@ -349,8 +350,8 @@ type testAdminSigningKeyClass struct {
 
 // testAdminSigningKeyClasses lists every hub signing-key class: user JWTs,
 // agent tokens, signed download URLs, artifact view capability URLs,
-// attachment delivery capabilities, list
-// cursors, conduit stream grants and the web session cookie key. The OIDC
+// attachment delivery capabilities, port page view links, list cursors,
+// conduit stream grants and the web session cookie key. The OIDC
 // identity-token key is added when OIDC is enabled.
 func testAdminSigningKeyClasses(oidcEnabled bool) []testAdminSigningKeyClass {
 	classes := []testAdminSigningKeyClass{
@@ -358,6 +359,7 @@ func testAdminSigningKeyClasses(oidcEnabled bool) []testAdminSigningKeyClass {
 		{Class: "agent_token", KeyName: SecretKeyAgentSigningKey},
 		{Class: "download_url", KeyName: SecretKeyDownloadSigningKey},
 		{Class: "artifact_view_url", KeyName: SecretKeyArtifactViewKey},
+		{Class: "port_view_url", KeyName: SecretKeyPortViewKey},
 		{Class: "attachment_delivery", KeyName: SecretKeyAttachmentDeliveryKey},
 		{Class: "list_cursor", KeyName: SecretKeyListCursorKey},
 		{Class: "conduit_grant", KeyName: conduitGrantKeySecretName},

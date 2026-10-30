@@ -29,8 +29,9 @@
  * 4. Captures the `Set-Cookie` response headers and saves them as a
  *    Playwright-compatible `storageState` JSON file.
  *
- * For the default admin user, dev-auth auto-login works on first page load,
- * but test-login is used for consistency and to support non-admin identities.
+ * The default admin user can also sign in from a dev sign-in link
+ * (`devSignInURL`), but test-login is used for consistency and to support
+ * non-admin identities.
  */
 
 import * as crypto from 'node:crypto';
@@ -226,6 +227,27 @@ function extractCookies(res: Response, baseURL: string): Array<Record<string, un
   }
 
   return cookies;
+}
+
+/**
+ * Returns a single-use dev sign-in link for a hub running with dev auth:
+ * the URL a browser opens to get the dev admin's session cookie. The code
+ * is minted with the dev token (`POST /auth/dev-launch`), as
+ * `scion server open` does. A dev-auth hub signs no browser in without one.
+ */
+export async function devSignInURL(baseURL: string, devToken: string): Promise<string> {
+  const resp = await fetch(`${baseURL}/auth/dev-launch`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${devToken}` },
+  });
+  if (!resp.ok) {
+    throw new Error(`devSignInURL: /auth/dev-launch answered ${resp.status}, want 200`);
+  }
+  const body = (await resp.json()) as { signInPath?: string };
+  if (!body.signInPath?.startsWith('/')) {
+    throw new Error('devSignInURL: /auth/dev-launch returned no sign-in path');
+  }
+  return `${baseURL}${body.signInPath}`;
 }
 
 /**

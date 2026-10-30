@@ -31,10 +31,11 @@ import (
 // (ptone/scion#611). Nothing is logged when no local copy exists or the
 // contents match.
 //
-// Both copies are hashed with hubCompatibleContentHash: the hub's content
-// hash algorithm (transfer.ComputeContentHash) over line-ending-normalized
-// files, excluding transient files. The values are therefore comparable with
-// each other, but are not necessarily the hub record's stored content_hash
+// Both copies are hashed with hubCompatibleContentHash: the v2 content hash
+// algorithm (transfer.ComputeContentHashV2, which the hub records with the
+// hub.content_hash_v2 experiment on) over line-ending-normalized files,
+// excluding transient files. The values are therefore comparable with each
+// other, but are not necessarily the hub record's stored content_hash
 // (a record uploaded with CRLF content or transient files hashes
 // differently); dispatchHash, the record hash the dispatch carried, is
 // logged alongside when present.
@@ -43,8 +44,10 @@ import (
 //   - Only the project and global harness-configs/<name> directories are
 //     compared (FindHarnessConfigDir with no template paths); a copy bundled
 //     in a template is not.
-//   - The content hash covers file contents, not file paths (the hub's
-//     algorithm), so a difference that is only a rename does not WARN.
+//   - The content hash covers paths, file contents and the executable bit
+//     (ptone/scion#5658), so a rename-only or chmod-only difference WARNs.
+//     On a platform whose file modes carry no executable bit (Windows)
+//     every file hashes as 0644 on both sides.
 func (s *Server) warnHarnessConfigDrift(agentID, name, hydratedPath, projectPath, dispatchHash string) {
 	if hydratedPath == "" {
 		return
@@ -107,7 +110,7 @@ func hubCompatibleContentHash(dir string) (string, error) {
 		}
 		files[i].Hash = transfer.HashBytes(transfer.NormalizeFileContent(data))
 	}
-	return transfer.ComputeContentHash(files), nil
+	return transfer.ComputeContentHashV2(files), nil
 }
 
 func sameDir(a, b string) bool {

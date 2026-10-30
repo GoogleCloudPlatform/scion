@@ -352,6 +352,41 @@ func UpdateSetting(projectPath string, key string, value string, global bool) er
 	return updateVersionedSettingLocked(lock, dir, key, value)
 }
 
+// UpdateSettingInDir updates a project-level setting in the settings file
+// of dir itself, a project configuration directory (a ".scion" directory),
+// with the same key and value validation, settings lock and v1 update as
+// UpdateSetting. Unlike UpdateSetting it does not resolve dir through
+// GetProjectConfigDir, so a directory holding a project-id file is written
+// in place rather than redirected to the external git project config
+// directory. A missing settings file is created in the v1 format; a file in
+// the legacy format is refused (migrate it first).
+func UpdateSettingInDir(dir string, key string, value string) error {
+	if dir == "" {
+		return fmt.Errorf("settings directory required")
+	}
+	if err := ValidateSettingWrite(key, false); err != nil {
+		return err
+	}
+	if err := ValidateSettingValue(key, value); err != nil {
+		return err
+	}
+	lock, err := LockSettingsDir(dir)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
+	if existingPath := GetSettingsPath(dir); existingPath != "" {
+		data, err := os.ReadFile(existingPath)
+		if err != nil {
+			return err
+		}
+		if version, _ := DetectSettingsFormat(data); version == "" {
+			return fmt.Errorf("settings file %s uses the legacy format; migrate it first", existingPath)
+		}
+	}
+	return updateVersionedSettingLocked(lock, dir, key, value)
+}
+
 // GetHubEndpoint returns the Hub endpoint from settings, or empty string if not configured.
 func (s *Settings) GetHubEndpoint() string {
 	if s.Hub != nil {

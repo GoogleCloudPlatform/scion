@@ -222,12 +222,39 @@ func TestDeclaredSharedDir(t *testing.T) {
 }
 
 func TestBackendDurable(t *testing.T) {
-	if !BackendNFS.Durable() {
-		t.Error("nfs must be durable")
+	for _, b := range []Backend{BackendNFS, BackendCloudRunVolume, BackendGKESharedVolume} {
+		if !b.Durable() || !b.Shared() {
+			t.Errorf("%q must be shared and durable", b)
+		}
 	}
-	for _, b := range []Backend{BackendLocal, "", "cloudrun-volume", "bogus"} {
-		if b.Durable() {
-			t.Errorf("%q must not be durable", b)
+	for _, b := range []Backend{BackendLocal, "", "bogus"} {
+		if b.Durable() || b.Shared() {
+			t.Errorf("%q must be neither shared nor durable", b)
+		}
+	}
+}
+
+// The platform volume backends resolve the same UUID-keyed tree as nfs
+// under their mount point.
+func TestResolve_VolumeBackendsUseUUIDTree(t *testing.T) {
+	for _, b := range []Backend{BackendCloudRunVolume, BackendGKESharedVolume} {
+		l := Layout{Backend: b, HostBase: "/mnt/ws", SubPathRoot: "projects"}
+		ws, err := l.Resolve(Project{ID: testPID, Slug: "acme"}, "", WorkspaceMount(ModeSharedPlain, ""))
+		if err != nil {
+			t.Fatalf("%s: Resolve workspace: %v", b, err)
+		}
+		if want := "/mnt/ws/projects/" + testPID + "/workspace"; ws.HostPath != want || ws.Backend != b {
+			t.Errorf("%s: workspace = %+v, want HostPath %q", b, ws, want)
+		}
+		root, err := l.ProjectRoot(testPID)
+		if err != nil {
+			t.Fatalf("%s: ProjectRoot: %v", b, err)
+		}
+		if want := "/mnt/ws/projects/" + testPID; root.HostPath != want {
+			t.Errorf("%s: ProjectRoot = %q, want %q", b, root.HostPath, want)
+		}
+		if _, err := l.Resolve(Project{Slug: "acme"}, "", WorkspaceMount(ModeSharedPlain, "")); err == nil {
+			t.Errorf("%s: Resolve without a project ID must fail", b)
 		}
 	}
 }
@@ -238,5 +265,34 @@ func TestLocalConfigDirName(t *testing.T) {
 	}
 	if got := LocalConfigDirName("acme", "abc"); got != "acme__abc" {
 		t.Errorf("LocalConfigDirName short = %q", got)
+	}
+}
+
+// TestLayoutKey: the key is a value identity, equal for equal Layouts
+// including the SharedDirs split (a pointer), and different when any field
+// or the split differs.
+func TestLayoutKey(t *testing.T) {
+	mk := func() Layout {
+		sd := Layout{Backend: BackendLocal}
+		return Layout{Backend: BackendGKESharedVolume, HostBase: "/mnt/v", SubPathRoot: "projects", Share: Share{ID: "v", PVName: "c"}, SharedDirs: &sd}
+	}
+	a, b := mk(), mk()
+	if a.Key() != b.Key() {
+		t.Errorf("equal Layouts with distinct SharedDirs pointers must share a key: %q vs %q", a.Key(), b.Key())
+	}
+	c := mk()
+	c.SharedDirs = nil
+	if c.Key() == a.Key() {
+		t.Error("the split must be part of the key")
+	}
+	d := mk()
+	d.SharedDirs.Backend = BackendNFS
+	if d.Key() == a.Key() {
+		t.Error("the split's fields must be part of the key")
+	}
+	e := mk()
+	e.Share.Export = "/other"
+	if e.Key() == a.Key() {
+		t.Error("every field must be part of the key")
 	}
 }

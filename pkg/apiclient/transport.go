@@ -53,13 +53,17 @@ func WithHTTPClient(c *http.Client) TransportOption {
 // WithTimeout sets the default request timeout.
 func WithTimeout(d time.Duration) TransportOption {
 	return func(t *Transport) {
+		if t.HTTPClient == nil {
+			t.HTTPClient = &http.Client{}
+		}
 		t.HTTPClient.Timeout = d
 	}
 }
 
 // WithRetry configures automatic retry behavior for Do: up to maxRetries
 // further attempts after a transport error or a 5xx response, waiting wait
-// between attempts. Retries are off by default (MaxRetries 0). A retry
+// between attempts. Retries are off by default (MaxRetries 0); negative
+// values also disable retries, without skipping the initial request. A retry
 // replays the whole request, body included, so only enable this for
 // transports whose Do callers are idempotent; DoNoRetry is never retried.
 // Pinning non-idempotent callers is tracked in ptone/scion#2955.
@@ -153,8 +157,7 @@ func (t *Transport) Do(ctx context.Context, req *http.Request) (*http.Response, 
 		client.Timeout = d
 	}
 	canRewind := bodyRewindable(req)
-	attempts := t.MaxRetries + 1
-	for i := 0; i < attempts; i++ {
+	for i := 0; ; i++ {
 		if i > 0 {
 			timer := time.NewTimer(t.RetryWait)
 			select {
@@ -294,11 +297,21 @@ func bodyRewindable(req *http.Request) bool {
 // prepare applies the headers and authentication every send path (Do and
 // DoNoRetry) needs before handing req to an *http.Client.
 func (t *Transport) prepare(req *http.Request) error {
+	if req == nil {
+		return errors.New("apiclient: nil request")
+	}
+	if req.Header == nil {
+		req.Header = make(http.Header)
+	}
 	if t.UserAgent != "" {
 		req.Header.Set("User-Agent", t.UserAgent)
 	}
 	if t.Auth != nil {
 		if err := t.Auth.ApplyAuth(req); err != nil {
+			// The HTTP client will not receive req, so it cannot close the body.
+			if req.Body != nil {
+				_ = req.Body.Close()
+			}
 			return fmt.Errorf("failed to apply auth: %w", err)
 		}
 	}
@@ -484,10 +497,16 @@ type authRoundTripper struct {
 }
 
 func (rt *authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req == nil {
+		return nil, errors.New("apiclient: nil request")
+	}
 	// Headers are set on a clone so the caller's request is never changed.
 	// Redirect hops do not depend on this: net/http copies their headers
 	// from the initial request before the first send.
 	clone := req.Clone(req.Context())
+	if clone.Header == nil {
+		clone.Header = make(http.Header)
+	}
 	if rt.ua != "" && clone.Header.Get("User-Agent") == "" {
 		clone.Header.Set("User-Agent", rt.ua)
 	}
@@ -622,7 +641,7 @@ func (t *Transport) doJSONVia(ctx context.Context, send func(context.Context, *h
 }
 
 // DecodeResponse reads and decodes a JSON response body.
-// If the response indicates an error (status >= 400), it returns an APIError.
+// A non-2xx response returns an APIError.
 // A 204 No Content returns (nil, nil).
 func DecodeResponse[T any](resp *http.Response) (*T, error) {
 	return decode[T](resp, false)
@@ -645,7 +664,7 @@ func DecodeRequired[T any](resp *http.Response) (*T, error) {
 func decode[T any](resp *http.Response, required bool) (*T, error) {
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return nil, ParseErrorResponse(resp)
 	}
 
@@ -670,9 +689,14 @@ func decode[T any](resp *http.Response, required bool) (*T, error) {
 // CheckResponse checks if a response indicates an error.
 // Returns nil on success (2xx status codes), otherwise returns an APIError.
 func CheckResponse(resp *http.Response) error {
-	defer func() { _ = resp.Body.Close() }()
+	if resp == nil {
+		return errors.New("apiclient: nil response")
+	}
+	if resp.Body != nil {
+		defer func() { _ = resp.Body.Close() }()
+	}
 
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return ParseErrorResponse(resp)
 	}
 

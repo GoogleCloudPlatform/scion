@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/hook"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/txdiag"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/google/uuid"
@@ -157,6 +158,11 @@ func restoreTestStoreTemplate(ctx context.Context, s *entadapter.CompositeStore)
 	}
 	defer func() { _ = conn.Close() }()
 	return conn.Raw(func(dc any) error {
+		// Under the diagnostics wrapper, Raw yields the wrapper's conn;
+		// the modernc conn (which has NewRestore) is behind Unwrap.
+		if u, ok := dc.(interface{ Unwrap() driver.Conn }); ok {
+			dc = u.Unwrap()
+		}
 		r, ok := dc.(sqliteRestorer)
 		if !ok {
 			return fmt.Errorf("restore test store template: driver connection %T has no NewRestore", dc)
@@ -232,7 +238,9 @@ func openTestClient(dsn string) (*ent.Client, error) {
 	// "database is locked" errors under concurrent access (e.g. the parallel
 	// per-agent writes in stop-all). This mirrors the production pool config in
 	// cmd/server_foreground.go / pkg/config.
-	client, err := entc.OpenSQLite(dsn, entc.PoolConfig{MaxOpenConns: 1})
+	// Diag runs the test store through the transaction diagnostics
+	// wrapper, as in production (output discarded).
+	client, err := entc.OpenSQLite(dsn, entc.PoolConfig{MaxOpenConns: 1, Diag: txdiag.QuietConfig()})
 	if err != nil {
 		return nil, err
 	}

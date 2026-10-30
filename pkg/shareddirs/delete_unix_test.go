@@ -674,3 +674,62 @@ func TestDeleteSharedDir_SymlinkInsideLeaf_UnlinkedNotTraversed(t *testing.T) {
 	require.NoError(t, statErr, "the victim must be untouched")
 	assert.False(t, info.IsDir())
 }
+
+// TestDeleteProjectRoot_RemovesWholeTree: every entry under the project dir
+// (workspace, provisioning state, configuration, shared dirs, a symlink
+// pointing outside) is removed, the symlink is unlinked and never followed,
+// the project dir itself is gone, and sibling projects are untouched.
+func TestDeleteProjectRoot_RemovesWholeTree(t *testing.T) {
+	hostBase := t.TempDir()
+	root := filepath.Join(hostBase, "projects", "pid-1")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "workspace", ".git", "objects"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "workspace", "README.md"), []byte("x"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "provision"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "provision", ".lock"), nil, 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".scion"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "shared-dirs", "scratch"), 0o2775))
+	victim := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(victim, "keep.txt"), []byte("victim"), 0o644))
+	require.NoError(t, os.Symlink(victim, filepath.Join(root, "workspace", "out")))
+	sibling := filepath.Join(hostBase, "projects", "pid-2", "workspace")
+	require.NoError(t, os.MkdirAll(sibling, 0o755))
+
+	require.NoError(t, DeleteProjectRoot(hostBase, "projects", "pid-1"))
+
+	_, err := os.Lstat(root)
+	assert.True(t, os.IsNotExist(err), "the project dir is removed")
+	_, err = os.Stat(filepath.Join(victim, "keep.txt"))
+	assert.NoError(t, err, "a symlink target outside the tree is untouched")
+	assert.DirExists(t, sibling, "a sibling project is untouched")
+	assert.DirExists(t, filepath.Join(hostBase, "projects"), "the subpath root stays")
+
+	// Repeated or concurrent calls: nothing to do.
+	require.NoError(t, DeleteProjectRoot(hostBase, "projects", "pid-1"))
+	require.NoError(t, DeleteProjectRoot(hostBase, "absent-root", "pid-1"))
+}
+
+// TestDeleteProjectRoot_SymlinkedComponentsRefused: a symlinked project dir
+// or subpath root component is refused, not traversed, and left as is.
+func TestDeleteProjectRoot_SymlinkedComponentsRefused(t *testing.T) {
+	hostBase := t.TempDir()
+	subRoot := filepath.Join(hostBase, "projects")
+	require.NoError(t, os.MkdirAll(subRoot, 0o755))
+	victim := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(victim, "secret.txt"), []byte("victim data"), 0o644))
+	require.NoError(t, os.Symlink(victim, filepath.Join(subRoot, "pid-1")))
+
+	require.Error(t, DeleteProjectRoot(hostBase, "projects", "pid-1"), "a symlinked project dir is refused")
+	_, err := os.Stat(filepath.Join(victim, "secret.txt"))
+	require.NoError(t, err, "the victim is untouched")
+	target, err := os.Readlink(filepath.Join(subRoot, "pid-1"))
+	require.NoError(t, err)
+	assert.Equal(t, victim, target, "the symlink itself is left as is")
+
+	other := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(victim, "pid-3"), 0o755))
+	require.NoError(t, os.Symlink(victim, filepath.Join(other, "projects")))
+	require.Error(t, DeleteProjectRoot(other, "projects", "pid-3"), "a symlinked subpath root is refused")
+	assert.DirExists(t, filepath.Join(victim, "pid-3"))
+
+	require.Error(t, DeleteProjectRoot(hostBase, "projects", "../pid-1"), "an invalid project ID is refused")
+}

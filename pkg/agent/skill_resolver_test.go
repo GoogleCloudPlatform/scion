@@ -150,7 +150,7 @@ func TestInstallResolvedSkills_Success(t *testing.T) {
 	defer srv.Close()
 
 	// Compute bundle hash
-	bundleHash := transfer.ComputeContentHash([]transfer.FileInfo{
+	bundleHash := transfer.ComputeContentHashV1([]transfer.FileInfo{
 		{Path: "SKILL.md", Hash: contentHash},
 	})
 
@@ -293,7 +293,7 @@ func TestInstallResolvedSkills_DuplicateDestination(t *testing.T) {
 	// via scope-based precedence instead of producing a hard error.
 	content := []byte("# Winner Skill")
 	contentHash := transfer.HashBytes(content)
-	bundleHash := transfer.ComputeContentHash([]transfer.FileInfo{
+	bundleHash := transfer.ComputeContentHashV1([]transfer.FileInfo{
 		{Path: "SKILL.md", Hash: contentHash},
 	})
 
@@ -517,7 +517,7 @@ func TestInstallResolvedSkills_WithAsRename(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	bundleHash := transfer.ComputeContentHash([]transfer.FileInfo{
+	bundleHash := transfer.ComputeContentHashV1([]transfer.FileInfo{
 		{Path: "SKILL.md", Hash: contentHash},
 	})
 
@@ -577,7 +577,7 @@ func TestInstallResolvedSkills_NestedFiles(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	bundleHash := transfer.ComputeContentHash([]transfer.FileInfo{
+	bundleHash := transfer.ComputeContentHashV1([]transfer.FileInfo{
 		{Path: "SKILL.md", Hash: hash1},
 		{Path: "scripts/run.sh", Hash: hash2},
 	})
@@ -722,7 +722,7 @@ func TestEnumerateLocalSkills_NonExistentDir(t *testing.T) {
 func TestInstallResolvedSkills_OverridesExistingLocalSkill(t *testing.T) {
 	content := []byte("# Updated Skill")
 	contentHash := transfer.HashBytes(content)
-	bundleHash := transfer.ComputeContentHash([]transfer.FileInfo{
+	bundleHash := transfer.ComputeContentHashV1([]transfer.FileInfo{
 		{Path: "SKILL.md", Hash: contentHash},
 	})
 
@@ -794,7 +794,7 @@ func TestInstallOneSkill_GitBlobHashes(t *testing.T) {
 	defer srv.Close()
 
 	blobHash := transfer.GitBlobHashBytes([]byte(body))
-	bundleHash := transfer.ComputeContentHash([]transfer.FileInfo{
+	bundleHash := transfer.ComputeContentHashV1([]transfer.FileInfo{
 		{Path: "SKILL.md", Hash: blobHash},
 	})
 
@@ -1051,7 +1051,7 @@ func TestDeduplicateByDestName_NoCollision(t *testing.T) {
 func TestDeduplicateByDestName_CollisionRecordedInRecord(t *testing.T) {
 	content := []byte("# Skill")
 	contentHash := transfer.HashBytes(content)
-	bundleHash := transfer.ComputeContentHash([]transfer.FileInfo{
+	bundleHash := transfer.ComputeContentHashV1([]transfer.FileInfo{
 		{Path: "SKILL.md", Hash: contentHash},
 	})
 
