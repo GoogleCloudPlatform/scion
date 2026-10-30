@@ -684,15 +684,10 @@ func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 	// release requires that), audited as the sweep does (ptone/scion#3994).
 	s.releaseDeletedBrokerReservations(ctx, broker.ID)
 
-	// Clean up the broker's HMAC secret (best-effort, post-delete).
-	if err := s.store.DeleteBrokerSecret(ctx, id); err != nil && !errors.Is(err, store.ErrNotFound) {
-		slog.WarnContext(ctx, "failed to delete broker secret during deregistration", "brokerId", id, "error", err)
-	}
+	// DeleteRuntimeBroker removed the broker's HMAC secret and any
+	// unconsumed join token in the same transaction as the row; announce
+	// the credential change now that it is committed.
 	s.conduitBrokerCredentialChanged(id)
-	// Clean up any unconsumed join token (best-effort, post-delete).
-	if err := s.store.DeleteJoinToken(ctx, id); err != nil && !errors.Is(err, store.ErrNotFound) {
-		slog.WarnContext(ctx, "failed to delete broker join token during deregistration", "brokerId", id, "error", err)
-	}
 
 	// Log the deregistration event
 	LogDeregisterEvent(ctx, s.auditLogger, id, brokerName, actorID, clientIP)

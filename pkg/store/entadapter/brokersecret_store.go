@@ -26,6 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerjointoken"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -413,6 +414,52 @@ func (s *BrokerSecretStore) DeleteJoinToken(ctx context.Context, brokerID string
 		return mapError(err)
 	}
 	return nil
+}
+
+// DeleteOrphanBrokerCredentials removes every broker_secrets and
+// broker_join_tokens row whose broker ID has no runtime_brokers row (neither
+// table has an FK to it), in one transaction (the caller's, when called
+// inside store.WithTx), and returns how many of each it removed.
+func (s *BrokerSecretStore) DeleteOrphanBrokerCredentials(ctx context.Context) (int, int, error) {
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		if !errors.Is(err, ent.ErrTxStarted) {
+			return 0, 0, err
+		}
+		// Already inside store.WithTx: run on the caller's transaction.
+		return deleteOrphanBrokerCredentials(ctx, s.client)
+	}
+	secrets, tokens, err := deleteOrphanBrokerCredentials(ctx, tx.Client())
+	if err != nil {
+		_ = tx.Rollback()
+		return 0, 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, 0, fmt.Errorf("broker secret store: commit DeleteOrphanBrokerCredentials: %w", err)
+	}
+	return secrets, tokens, nil
+}
+
+// noRuntimeBrokerRow matches a row whose column col (the broker ID) is not
+// the ID of any runtime_brokers row. runtime_brokers.id is a non-null
+// primary key, so NOT IN has no NULL case.
+func noRuntimeBrokerRow(col string) func(*entsql.Selector) {
+	return func(s *entsql.Selector) {
+		s.Where(entsql.NotIn(s.C(col),
+			entsql.Select(runtimebroker.FieldID).From(entsql.Table(runtimebroker.Table))))
+	}
+}
+
+func deleteOrphanBrokerCredentials(ctx context.Context, client *ent.Client) (int, int, error) {
+	secrets, err := client.BrokerSecret.Delete().Where(noRuntimeBrokerRow(brokersecret.FieldID)).Exec(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("delete orphan broker secrets: %w", mapError(err))
+	}
+	tokens, err := client.BrokerJoinToken.Delete().Where(noRuntimeBrokerRow(brokerjointoken.FieldID)).Exec(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("delete orphan broker join tokens: %w", mapError(err))
+	}
+	return secrets, tokens, nil
 }
 
 // CleanExpiredJoinTokens removes all expired join tokens and returns how

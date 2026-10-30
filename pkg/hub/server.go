@@ -3268,6 +3268,13 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		seedDevUser(ctx, s, cfg.DevUserConfig)
 	}
 
+	// Remove broker secrets and join tokens that have no broker row, once,
+	// before anything re-creates a broker row with a fixed ID. Non-fatal;
+	// see sweepOrphanBrokerCredentials.
+	if s != nil {
+		_, _, _ = sweepOrphanBrokerCredentials(ctx, s)
+	}
+
 	// Remove user-scope secrets and env vars whose user no longer exists
 	// (ptone/scion#2769). Runs after seedDevUser so the dev user exists. The
 	// whole sweep, lookup and removal, runs in the background under one time

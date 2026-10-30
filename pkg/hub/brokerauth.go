@@ -621,7 +621,7 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 		if err := hostSAClaimWriteAllowed(hostSAClaim{}, hostSAClaimOf(broker), hostSA); err != nil {
 			return nil, err
 		}
-		if err := s.store.CreateRuntimeBroker(ctx, broker); err != nil {
+		if err := s.store.CreateRuntimeBrokerClearingCredentials(ctx, broker); err != nil {
 			return nil, fmt.Errorf("failed to create runtime broker: %w", err)
 		}
 	}
@@ -1009,11 +1009,28 @@ var (
 	errBrokerAuthSecretExpired    = errors.New("broker secret has expired")
 	errBrokerAuthInvalidSignature = errors.New("invalid signature")
 	errBrokerAuthNoValidSecrets   = errors.New("no valid secrets found")
+	errBrokerAuthBrokerLookup     = errors.New("failed to get runtime broker")
 	// errBrokerAuthBodyTooLarge reports a body over
 	// apiclient.MaxSignedRequestBodyBytes. Callers answer it with 413
 	// (writeBrokerAuthFailure), not 401.
 	errBrokerAuthBodyTooLarge = errors.New(apiclient.SignedBodyTooLargeMessage)
 )
+
+// requireLiveBroker refuses a request whose signature verified against a
+// stored secret when the broker's runtime_brokers row does not exist: a
+// secret authenticates only the live broker row with its ID, never an ID
+// whose row was deleted. It runs after the signature check, so a caller
+// without the secret learns nothing from it. A lookup failure is refused
+// (fail closed).
+func (s *BrokerAuthService) requireLiveBroker(ctx context.Context, brokerID string) error {
+	if _, err := s.store.GetRuntimeBroker(ctx, brokerID); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("%w: %s", errBrokerAuthUnknownBroker, brokerID)
+		}
+		return fmt.Errorf("%w: %w", errBrokerAuthBrokerLookup, err)
+	}
+	return nil
+}
 
 // limitBrokerAuthBody bounds r's body before the verifier reads it to build
 // the canonical string. The verifiers have no response writer, so the cap is
@@ -1104,6 +1121,13 @@ func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http
 
 	if !hmac.Equal([]byte(signature), []byte(expectedSigB64)) {
 		return nil, errBrokerAuthInvalidSignature
+	}
+
+	// The broker row must exist: checked after the signature verifies and
+	// before the nonce is recorded, so only a request that authenticates as
+	// a live broker records its nonce.
+	if err := s.requireLiveBroker(ctx, brokerID); err != nil {
+		return nil, err
 	}
 
 	// Record the nonce only for a request whose signature verified, so a
@@ -1253,6 +1277,12 @@ func (s *BrokerAuthService) ValidateBrokerSignatureWithRotation(ctx context.Cont
 		if err == nil {
 			return identity, nil
 		}
+		// A signature that verified but whose broker row is missing (or
+		// could not be read) is refused at once, not masked by trying
+		// another secret.
+		if errors.Is(err, errBrokerAuthUnknownBroker) || errors.Is(err, errBrokerAuthBrokerLookup) {
+			return nil, err
+		}
 		lastErr = err
 	}
 
@@ -1312,6 +1342,13 @@ func (s *BrokerAuthService) validateWithSecret(ctx context.Context, r *http.Requ
 
 	if !hmac.Equal([]byte(signature), []byte(expectedSigB64)) {
 		return nil, errBrokerAuthInvalidSignature
+	}
+
+	// The broker row must exist: checked after the signature verifies and
+	// before the nonce is recorded, in the same order as
+	// ValidateBrokerSignature.
+	if err := s.requireLiveBroker(ctx, brokerID); err != nil {
+		return nil, err
 	}
 
 	// Only add nonce to cache after successful validation — use DB-backed

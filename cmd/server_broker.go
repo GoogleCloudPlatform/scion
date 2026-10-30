@@ -270,7 +270,7 @@ func registerGlobalProjectAndBrokerPresence(ctx context.Context, s store.Store, 
 			Labels:                     brokerLabels,
 		}
 
-		if err := s.CreateRuntimeBroker(ctx, broker); err != nil {
+		if err := s.CreateRuntimeBrokerClearingCredentials(ctx, broker); err != nil {
 			return brokerID, fmt.Errorf("failed to create runtime broker: %w", err)
 		}
 	} else {
