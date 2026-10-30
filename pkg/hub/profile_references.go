@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -273,6 +274,9 @@ func (s *Server) countProfileReferences(ctx context.Context, brokerID, globalDir
 // agents that are unplaced or placed on it. other counts the agents placed
 // on any other broker, which are left out.
 func (s *Server) colocatedAgentRows(ctx context.Context, brokerID string) (in agent.ProfileRefInputs, other int, err error) {
+	if s.store == nil {
+		return agent.ProfileRefInputs{}, 0, errors.New("no store to list the co-located broker's agents")
+	}
 	if brokerID != "" {
 		providers, err := s.store.GetBrokerProjects(ctx, brokerID)
 		if err != nil {

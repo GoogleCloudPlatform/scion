@@ -171,6 +171,11 @@ func ScanColocatedLegacyPlacement(ctx context.Context, globalDir, colocatedBroke
 			r.AddIncomplete()
 			continue
 		}
+		if policy == nil {
+			// No operator policy to check against: incomplete, never clean.
+			r.AddIncomplete()
+			continue
+		}
 		AddLegacyAgentPlacement(&r, projectPath, a.Slug, pr.SharedWorkspace, policy)
 	}
 	return r

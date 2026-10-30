@@ -159,3 +159,16 @@ func TestPlacementPreflightFailureIsIncomplete(t *testing.T) {
 		t.Fatalf("view = %+v", view)
 	}
 }
+
+// Without operational settings or a store the report and its inputs fail
+// closed by an explicit check: configured runtimes are unknown (nil, every
+// entry counts), and the co-located agent rows cannot be listed.
+func TestPlacementPreflightNilInputsFailClosed(t *testing.T) {
+	if placementConfiguredRuntimes(nil) != nil {
+		t.Fatal("nil operational settings must give unknown configured runtimes")
+	}
+	srv := &Server{}
+	if _, _, err := srv.colocatedAgentRows(context.Background(), "broker-1"); err == nil {
+		t.Fatal("no store must be an error, not an empty listing")
+	}
+}

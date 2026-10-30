@@ -87,6 +87,10 @@ func (s *Server) placementPreflight(ctx context.Context, ops *OperationalSetting
 				config.PlacementPreflightReport{RecordsUnreadable: true})
 		}
 	}()
+	if ops == nil {
+		return placementPreflightView(config.SettingsPlacementReport{Unreadable: true},
+			config.PlacementPreflightReport{RecordsUnreadable: true})
+	}
 	snap := ops.Snapshot()
 	settings := config.ScanSettingsPlacement(snap.Runtimes, snap.Profiles)
 	for _, section := range []string{"runtimes", "profiles"} {
@@ -135,6 +139,9 @@ func (s *Server) placementPreflight(ctx context.Context, ops *OperationalSetting
 // Built-in default entries are not the operator's. nil (every entry) when
 // that cannot be told, which fails closed.
 func placementConfiguredRuntimes(ops *OperationalSettings) func(string) bool {
+	if ops == nil {
+		return nil
+	}
 	ops.mu.RLock()
 	state, stored := ops.cache["runtimes"]
 	ops.mu.RUnlock()
