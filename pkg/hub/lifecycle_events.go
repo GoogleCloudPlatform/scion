@@ -32,7 +32,6 @@ package hub
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -76,11 +75,6 @@ type lifecycleEventsRuntime struct {
 	// experiment reconcile leaves it alone.
 	testInstalled bool
 }
-
-// errLifecycleUnsupported reports a store without lifecycle support.
-//
-//nolint:unused // test hook: called only from pkg/hub tests
-var errLifecycleUnsupported = errors.New("lifecycle events: the store does not support the lifecycle observer")
 
 // SetLifecycleEventsSink sets the sink the lifecycle drainer delivers to
 // (Cloud Logging's scion-analytics in production) and the counters it
@@ -174,31 +168,6 @@ func (s *Server) setLifecycleStateLocked(state string) {
 	}
 	rt.state = state
 	rt.countersOrNop().ObserverState(state)
-}
-
-// installLifecycleObserver is the test hook that installs the observer
-// whatever the experiment says (the slice 1 hook). The experiment reconcile
-// leaves an observer installed this way alone. It returns the resulting
-// state.
-//
-//nolint:unused // test hook: called only from pkg/hub tests
-func (s *Server) installLifecycleObserver() (string, error) {
-	ls, ok := s.store.(lifecycleEventStore)
-	if !ok {
-		return "", errLifecycleUnsupported
-	}
-	rt := &s.lifecycleEvents
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	state, err := s.installObserverLocked(ls)
-	if err != nil {
-		return "", err
-	}
-	rt.testInstalled = state == telemetryemit.ObserverStateEnabled
-	if rt.started {
-		s.ensureDrainerLocked(s.lifecycleContext(context.Background()), ls)
-	}
-	return state, nil
 }
 
 // wakeLifecycleDrainer is the observer's post-commit signal.
