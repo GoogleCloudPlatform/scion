@@ -303,7 +303,11 @@ Each Runtime Broker also reports its binary `version` on registration, join, and
 To permanently remove a broker from the Hub, use the **Unregister** button on the broker detail page in the Web Dashboard. Unregistering a broker:
 
 - Removes the broker's registration from the Hub.
-- Cleans up associated HMAC secrets and join tokens.
+- Deletes the broker's HMAC secret and any unused join token, together with the registration.
+
+A Runtime Broker secret authenticates only while the broker's registration exists. When the Hub starts, it also deletes any HMAC secret or join token whose broker is no longer registered; if that cleanup fails, the Hub logs an error and starts anyway. A broker registration created with an ID that an earlier registration had (for example a plugin or co-located broker, whose ID is fixed) starts with no secret or join token from the earlier one.
+
+One case cannot be told apart: a secret left by a deregistration on an earlier Hub version, whose broker registration was re-created with the same ID before upgrading, belongs to a registered broker and is kept. To leave no such secret, an operator can [rotate the HMAC secret](/scion/reference/security/) of each Runtime Broker once after upgrading; this is optional.
 
 Only the broker's owner or a Hub admin can unregister it, and unregistering requires confirmation. After unregistering, the broker can no longer receive agent dispatch commands. Re-registration via `scion runtime-broker register` is required to reconnect.
 

@@ -919,7 +919,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 									Created:         time.Now(),
 									Updated:         time.Now(),
 								}
-								if createErr := s.CreateRuntimeBroker(ctx, pluginBroker); createErr != nil {
+								if createErr := s.CreateRuntimeBrokerClearingCredentials(ctx, pluginBroker); createErr != nil {
 									log.Printf("Warning: failed to register broker entity for plugin %q: %v", bt, createErr)
 								}
 							}
