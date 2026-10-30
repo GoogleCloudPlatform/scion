@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // TestAgentStateConflictMapsTo409 pins every broker path's mapping of an
@@ -65,10 +66,10 @@ func TestAgentStateConflictMapsTo409(t *testing.T) {
 // an unavailable state directory from an unusable state record.
 func TestClassifyStartError_AgentState(t *testing.T) {
 	ctx := context.Background()
-	if code, _, _ := classifyStartError(ctx, fmt.Errorf("%w: x", config.ErrAgentStateDirUnavailable), "", ""); code != LaunchErrCodeAgentStateUnavailable {
+	if code, _, _ := classifyStartError(ctx, fmt.Errorf("%w: x", config.ErrAgentStateDirUnavailable), "", "", store.LaunchKindCreate); code != LaunchErrCodeAgentStateUnavailable {
 		t.Errorf("unavailable dir: code %q", code)
 	}
-	if code, _, _ := classifyStartError(ctx, fmt.Errorf("%w: x", config.ErrAgentStateConflict), "", ""); code != LaunchErrCodeAgentStateConflict {
+	if code, _, _ := classifyStartError(ctx, fmt.Errorf("%w: x", config.ErrAgentStateConflict), "", "", store.LaunchKindCreate); code != LaunchErrCodeAgentStateConflict {
 		t.Errorf("unusable record: code %q", code)
 	}
 }
