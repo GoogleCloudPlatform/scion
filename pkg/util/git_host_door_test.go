@@ -129,11 +129,12 @@ var hostGitCeilingOffAllowlist = map[string]hostGitDoorEntry{
 	// --is-inside-work-tree). (i) It is a fail-closed guard probe: only a
 	// clean "not a git repository" reads as "not git", and that answer must
 	// also cover a repository enclosing the workspace, so discovery cannot be
-	// bounded at the directory. (ii) The directory and its ancestors are
+	// bounded at the directory. (ii) The directory's ancestors are host- or
 	// broker-owned (the project's workspace on the broker's share Layout),
-	// rev-parse runs no configured command, and hooks and fsmonitor are off
-	// through the door's HostGitArgs.
-	"pkg/runtimebroker/workspace_git.go:workspaceGitProbe": {1, "fail-closed guard probe: \"not git\" must cover an enclosing repository; broker-owned parents; hooks and fsmonitor off via the door"},
+	// and an enclosing repository can only yield git or an error (unknown),
+	// never "not git". rev-parse runs no configured command, and hooks and
+	// fsmonitor are off through the door's HostGitArgs.
+	"pkg/runtimebroker/workspace_git.go:workspaceGitProbe": {1, "fail-closed guard probe: \"not git\" must cover an enclosing repository; host- or broker-owned ancestors; an enclosing repository can only yield git or an error (unknown), never \"not git\"; hooks and fsmonitor off via the door"},
 }
 
 // TestHostGitGoesThroughOneDoor: host-side git runs through RunHostGit or

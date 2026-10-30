@@ -115,13 +115,16 @@ var workspaceGitTimeout = projectfs.ShareVisibleTimeout
 // as git, never as "not git". AudienceRemote keeps host paths out of the
 // door's refusals.
 //
-// ctx bounds the call (gitReportsNotARepository gives it
-// workspaceGitTimeout): the door's config read and the probe both run
-// under it, and the door's WaitDelay bounds the wait for git's pipes after
-// that. A git process stuck in uninterruptible NFS IO cannot be killed
-// until that IO returns, so the probe can still outlive the bound in that
-// case; ShareDirVisible, which runs first with its own bound, makes that
-// unlikely.
+// ctx bounds the git processes the door starts (gitReportsNotARepository
+// gives it workspaceGitTimeout): the door's config read (readFilterPins)
+// and the rev-parse both run under it, and the door's WaitDelay bounds the
+// wait for git's pipes after that. The door's discovery checks (Lstat of
+// dir/.git and dir/HEAD, before and after the run) are not bounded by ctx;
+// workspaceDirKnownNotGit already makes the same kind of Lstat on the share
+// before this. A git process stuck in uninterruptible NFS IO cannot be
+// killed until that IO returns, so the probe can still outlive the bound in
+// that case; ShareDirVisible, which runs first with its own bound, makes
+// that unlikely.
 var workspaceGitProbe = func(ctx context.Context, dir string) util.HostGitResult {
 	return util.RunHostGit(ctx, dir, util.HostGitOptions{
 		Ceiling:  util.CeilingOff,
