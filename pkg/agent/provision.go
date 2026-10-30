@@ -211,10 +211,11 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 	var repoRoot string
 	var externalAgentDir string
 	var hubAgentDir string // state dir resolved from hubProjectID, when distinct
-	// legacyAgentDir is the in-project state dir an agent of a shared
-	// project configuration had before the configuration moved to the
-	// project root (config.LegacySharedProjectAgentDir); removed with the
-	// agent so a later agent of the same name never resolves to it.
+	// legacyAgentDir is the retired in-project state dir an agent of a
+	// shared project configuration had before the configuration moved to
+	// the project root (config.LegacySharedProjectAgentDir); removed with
+	// the agent (ptone/scion#5835). Its state in the broker-local external
+	// root is externalAgentDir (layout.externalAgentsRoot).
 	var legacyAgentDir string
 	var worktreeDir string // worktree-per-agent: agent's worktree path
 	// ownWorktreePaths lists the paths where this agent's own worktree may
@@ -1334,6 +1335,16 @@ func reprovisionEmptyPerAgentPreflight(projectDir, agentName string, rt runtime.
 }
 
 func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	// A create over a legacy agent directory no agent owns is refused
+	// before anything runs. A project dir that does not resolve fails here
+	// too (fail closed), as GetAgent would.
+	projectDir, err := config.GetResolvedProjectDir(opts.ProjectPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := refuseRetiredLegacyAgent(projectDir, opts); err != nil {
+		return nil, err
+	}
 	// A forced move's provision never touches an agent directory it did not
 	// create: an existing one (even an empty leftover that GetAgent would
 	// clear as stale) refuses the provision before anything runs.
@@ -4368,6 +4379,11 @@ func removeCheckedAgentDir(agentDir, agentWorkspace string) {
 		_ = os.Chmod(path, 0755)
 		return nil
 	})
+	// The agent's scion-agent.json goes first (a link is removed, never
+	// followed): a removal that then fails part-way leaves a directory the
+	// legacy agent look-up (config.LegacySharedProjectAgentDir) no longer
+	// recognises as the agent's.
+	_ = os.Remove(filepath.Join(agentDir, "scion-agent.json"))
 	_ = os.RemoveAll(agentDir)
 	removeWorkspaceWorktreeEntry(agentWorkspace)
 }

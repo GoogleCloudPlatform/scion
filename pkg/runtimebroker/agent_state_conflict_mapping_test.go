@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -59,6 +60,39 @@ func TestAgentStateConflictMapsTo409(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestLegacyAgentStateRetiredMapsTo409: the refusal of a create over a
+// legacy agent directory no agent owns answers 409 with its actionable
+// message on every broker path, never an opaque 500.
+func TestLegacyAgentStateRetiredMapsTo409(t *testing.T) {
+	wrapped := fmt.Errorf("start: %w", agent.ErrLegacyAgentStateRetired)
+	for _, tc := range []struct {
+		name, path, body string
+		arm              func(*mockManager)
+	}{
+		{"sync create", "/api/v1/agents", `{"name": "state-agent", "config": {"template": "claude"}}`,
+			func(m *mockManager) { m.startErr = wrapped }},
+		{"provision-only create", "/api/v1/agents", `{"name": "state-agent", "provisionOnly": true, "config": {"template": "claude"}}`,
+			func(m *mockManager) { m.provisionErr = wrapped }},
+		{"start", "/api/v1/agents/test-agent-1/start", `{}`,
+			func(m *mockManager) { m.startErr = wrapped }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newTestServer(t)
+			tc.arm(srv.manager.(*mockManager))
+			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+			if w.Code != http.StatusConflict {
+				t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), "delete this agent") {
+				t.Errorf("the answer must carry the remedy: %s", w.Body.String())
+			}
+		})
 	}
 }
 

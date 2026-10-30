@@ -153,6 +153,11 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		hubDispatchedAgentID = opts.Env["SCION_AGENT_ID"]
 	}
 
+	// A create over a legacy agent directory no agent owns is refused
+	// before any side effect.
+	if err := refuseRetiredLegacyAgent(projectDir, opts); err != nil {
+		return nil, err
+	}
 	// Fail on an unusable image provenance record before any side effect
 	// (the container cleanup below, prompt.md), reading the same agent dir
 	// GetAgent will use (AgentStateDir, including its effective
