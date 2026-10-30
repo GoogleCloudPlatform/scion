@@ -151,6 +151,11 @@ func (s *Server) Reconcile(ctx context.Context) ReconcileResult {
 			delete(s.hijacked, name)
 		}
 	}
+	for name, at := range s.forgotten {
+		if now.Sub(at) > cancelledTTL {
+			delete(s.forgotten, name)
+		}
+	}
 
 	s.reapRunners(ctx, now, &res, addErr)
 

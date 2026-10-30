@@ -103,7 +103,7 @@ for waits until the stale registration is reaped. That happened in redeploy #2
 (2026-10-27), which updated the job first. `deploy-mediator.sh` notes when the
 job's image tag differs from the current `runner/` tree hash; deploy the job next.
 (The earlier rule, runner first, came from the mediator's `/home/runner/work`
-work folder, which needs a runner image that links it to `/scratch`; every image
+work folder, which needs a runner image that puts it on the disk; every image
 since PR-img does.) The mediator-first order assumes the job runs a runner image at or
 after PR-img; with an older one, deploy the job first.
 
@@ -204,7 +204,9 @@ All tool versions and checksums are pinned in one place, the `ARG` block of
    runs one no-op execution, so the first real job does not pay the image import.
    New executions use the new tag; running ones finish on the old image.
 
-**Rollback:** `scripts/deploy-job.sh --tag <previous tag> --apply`. Old tags
+**Rollback:** `scripts/deploy-job.sh --tag <previous tag> --apply`. Across the
+runner layout switch (below), run `deploy-job.sh` from the older commit: it sets
+the older volume mount together with the older tag. Old tags
 stay in `ARTIFACT_REPO` (list them with
 `gcloud artifacts docker tags list REGION-docker.pkg.dev/GCP_PROJECT/ARTIFACT_REPO/RUNNER_IMAGE_NAME`).
 
@@ -215,6 +217,37 @@ itself at start-up on every execution. Check
 `ACTIONS_RUNNER_VERSION` soon after each release. Keep `GO_VERSION` in step
 with `go.mod`. golangci-lint follows `runner/golangci-lint/VERSIONS`, which CI's
 lint job uses too: a change there changes both.
+
+## Runner layout switch
+
+cr-ci FIXUP-5 moved the runner's ephemeral disk from `/scratch` to HOME
+(`/home/runner`), with the work folder and caches as real directories on it and
+the runner installed at `/opt/actions-runner`
+([architecture](architecture.md#constraints), "Runner layout"). The image and the
+job's volume mount must match:
+- **A new image on a job that still mounts `/scratch`**, or an old image on a job
+  that mounts HOME, exits 2 at startup, before any claim (`/home/runner exists but
+  is not a mount point; ... run deploy-job.sh`, or the old image's `/scratch`
+  check). The job it was launched for waits until reconcile reaps the
+  registration.
+- **So switch with one `deploy-job.sh --apply --warm-up`** from the commit that
+  has the new layout: it updates the image tag and the mount in the same
+  `gcloud run jobs update`, and the warm-up execution checks the new layout
+  before the first real job. The mediator does not change.
+- **The parity check in `.github/actions/setup-go-cache` accepts both layouts**
+  for the switch: the old `/scratch` links, or real directories on a volume at
+  HOME. **Removal step:** once every cr-ci deployment runs an image with the new
+  layout (check the warm-up log and a routed job's "Check cr-ci cache parity"
+  step for `real directory` lines and no `old cr-ci runner layout` note), delete
+  the `if [ -L /home/runner/work ]` branch from that step in a cr-ci change.
+- **Live verification after the switch** (on a named companion GO): a routed
+  diagnostic job checks `pwd -P`, actions/setup-node's npm cache, a temp-directory
+  ancestor check, and single-node-vm's tests, and ii3 reads its memory and disk.
+  Also check the **peak memory of a routed extras-ci.yml `build-and-test`** run: with
+  `TMPDIR` unset its `t.TempDir()` files are in RAM.
+- After the switch, the first start logs `volume root /home/runner: owner uid N,
+  mode M`. Record it: if the runner's uid (1001) owns the root, the entrypoint
+  has set it to 0755; otherwise HOME stays world-writable (a documented residual).
 
 ## Capacity and quotas
 
@@ -267,6 +300,7 @@ logged (a unit test enforces this).
 | `SECURITY_REJECT_FORK_PR` | WARNING | A run outside the allowlist was refused a runner: a fork PR (`reason=head_repository_differs`), or any event but `push` and `pull_request` (`reason=event_not_allowed:<event>`). **Alert on this.** |
 | `SECURITY_KILL_HIJACKED_RUNNER` | ERROR / WARNING | An untrusted job started on a cr-ci runner minted for another job; the execution was cancelled and the registration deleted ([architecture](architecture.md#residual-risk-label-matched-job-assignment)). **Alert on the ERROR and review the run.** While GitHub still shows the untrusted job running it refuses to delete the busy registration: the ERROR then has `registration_deleted=false` and GitHub's 422 in `registration_error`, and every later guard pass retries at WARNING (`repeat=true`) until GitHub times the job out, about 10 minutes. The WARNING `hijacked runner's registration deleted` follows when GitHub's `completed` delivery for that job arrives (if it is lost, reconcile forgets the runner after an hour). The execution is gone from the first line on |
 | `runner_swap` | INFO | A runner started a different legitimate job; harmless. `inherited_budget` is the task time that job has left (`TASK_TIMEOUT` minus `execution_age`) |
+| `runner_rebind` | INFO | Follows `runner_swap`: the idle runner launched for the job that took the runner (`rebound_runner`) now serves the displaced job (`rebound_to_job_id`). In a chain of swaps the displaced job is handed on once per swap, so several runners can carry the same `served_job_id` over time; only the latest one serves it |
 | `runner_swap_low_budget` | WARNING | That job inherited less than 20 minutes; if it fails on the task timeout, re-run it. Frequent ones: lower `RUNNER_IDLE_TIMEOUT` or raise `TASK_TIMEOUT` ([architecture](architecture.md#flow)) |
 | `webhook_rejected` | WARNING | Bad signature, malformed payload or repo outside `TARGET_REPOS` |
 | `webhook_ignored` | INFO / DEBUG / WARNING | Not `workflow_job`, or job without `RUNNER_LABEL`; WARNING with `reason=labels_unservable` when a job has `RUNNER_LABEL` plus other labels a cr-ci runner cannot satisfy (fix its `runs-on`) |

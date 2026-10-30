@@ -163,10 +163,12 @@ runs:
     # other self-hosted runners skip it.
     # actions/cache stores paths relative to GITHUB_WORKSPACE, so entries
     # restore to the same place on ubuntu-latest and on the cr-ci runner
-    # only if the work folder and HOME match: the runner entrypoint links
-    # /home/runner/work to /scratch/_work and ~/.cache, ~/go to /scratch.
-    # If that ever breaks, the two runner types would silently keep separate
-    # caches (twice the Actions cache quota), so fail the job instead
+    # only if the work folder and HOME match. The cr-ci runner mounts its
+    # ephemeral-disk volume at HOME, and the entrypoint creates the work folder
+    # and ~/.cache, ~/go, ~/.npm as real directories on it (no links, so their
+    # physical paths are their logical ones). If that ever breaks, the two
+    # runner types would silently keep separate caches (twice the Actions
+    # cache quota), or the caches would land in RAM, so fail the job instead
     # (cr-ci/workflows/README.md, "Cache sharing").
     - name: Check cr-ci cache parity (cr-ci runner only)
       if: runner.environment == 'self-hosted' && startsWith(runner.name, 'cr-job-')
@@ -188,13 +190,41 @@ runs:
           fi
         }
         check HOME "$HOME" /home/runner
-        # Compare resolved paths (readlink -f) on both sides: a relative or chained link
-        # still has to land where /scratch's directory does. /scratch/.cache may itself
-        # be a link (the RAM build cache), so resolve the expected side too. A real
-        # directory in place of a link resolves to itself and fails.
-        check "work folder /home/runner/work" "$(readlink -f /home/runner/work)" "$(readlink -f /scratch/_work)"
-        check "HOME/.cache" "$(readlink -f "$HOME/.cache")" "$(readlink -f /scratch/.cache)"
-        check "HOME/go" "$(readlink -f "$HOME/go")" "$(readlink -f /scratch/go)"
+        if [ -L /home/runner/work ]; then
+          # SWITCH ONLY: the layout of cr-ci runner images before the volume moved to HOME
+          # (cr-ci FIXUP-5): HOME entries linked into /scratch, mirrored. Remove this branch
+          # once every cr-ci deployment runs the new image (cr-ci/docs/operations.md,
+          # "Runner layout switch").
+          echo "note: old cr-ci runner layout (/home/runner/work links into /scratch)"
+          check "work folder /home/runner/work" "$(readlink -f /home/runner/work)" "$(readlink -f /scratch/_work)"
+          check "HOME/.cache" "$(readlink -f "$HOME/.cache")" "$(readlink -f /scratch/.cache)"
+          check "HOME/go" "$(readlink -f "$HOME/go")" "$(readlink -f /scratch/go)"
+        else
+          # Real directories: each resolves to itself. ~/.cache may instead be a link to
+          # the entrypoint's RAM directory when the job sets RUNNER_BUILD_CACHE_IN_RAM=true
+          # (the same branch as cr-ci/workflows/cr-runner-poc.yml; templates_test.go keeps
+          # the two in step).
+          for d in /home/runner/work "$HOME/go" "$HOME/.npm"; do
+            check "real directory $d" "$(readlink -f "$d")" "$d"
+          done
+          if [ "${RUNNER_BUILD_CACHE_IN_RAM:-false}" = true ] && [ -L "$HOME/.cache" ]; then
+            check "HOME/.cache (RAM build cache)" "$(readlink -f "$HOME/.cache")" /tmp/cr-ci-build-cache
+          else
+            check "real directory ~/.cache" "$(readlink -f "$HOME/.cache")" /home/runner/.cache
+          fi
+          # On the volume, not on the root filesystem (in memory on Cloud Run).
+          home_dev=$(stat -c %d "$HOME" 2>/dev/null)
+          root_dev=$(stat -c %d / 2>/dev/null)
+          if [ -z "$home_dev" ] || [ "$home_dev" = "$root_dev" ]; then
+            echo "::error title=cr-ci cache parity::HOME is on the root filesystem (device '$home_dev'); the runner job must mount its volume at /home/runner"
+            fail=1
+          else
+            echo "ok   HOME is a volume (device $home_dev)"
+          fi
+          for d in /home/runner/work "$HOME/go" "$HOME/.npm"; do
+            check "device of $d" "$(stat -c %d "$d" 2>/dev/null)" "$home_dev"
+          done
+        fi
         check "go env GOCACHE" "$(go env GOCACHE)" /home/runner/.cache/go-build
         check "go env GOMODCACHE" "$(go env GOMODCACHE)" /home/runner/go/pkg/mod
         check "GITHUB_WORKSPACE parent" "${GITHUB_WORKSPACE%/*/*}" /home/runner/work
