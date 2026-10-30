@@ -6585,10 +6585,11 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 		return
 	}
 
-	// Backstop for a schedule whose authority agent was deleted by a path
-	// that did not pause it (ptone/scion#5403): pause it with status reason
+	// Backstop for a schedule whose authority agent or user was deleted
+	// (or the user is being deleted) by a path that did not pause it
+	// (ptone/scion#5403, ptone/scion#2143): pause it with status reason
 	// creator_deleted instead of firing it to be refused.
-	if s.pauseScheduleIfAuthorityAgentGone(ctx, sched, log) {
+	if s.pauseScheduleIfAuthorityGone(ctx, sched, log) {
 		return
 	}
 

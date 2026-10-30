@@ -1639,8 +1639,9 @@ func writeUserDeleteCascadeError(w http.ResponseWriter, err error) bool {
 // afterUserDeleted runs once a user deletion has committed: it tells
 // conduit subscribers the user's authorization changed, then removes the
 // user's user-scope secrets and env vars and revokes the agent delegation
-// grants the user issued, as a best effort (ptone/scion#2769). Failures are
-// logged, not returned.
+// grants the user issued, as a best effort (ptone/scion#2769), and pauses
+// the schedules whose recorded authority is the user (ptone/scion#2143).
+// Failures are logged, not returned.
 func (s *Server) afterUserDeleted(ctx context.Context, userID string) {
 	s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: userID})
 	s.removeUserScopedData(ctx, userID)
@@ -1648,6 +1649,10 @@ func (s *Server) afterUserDeleted(ctx context.Context, userID string) {
 	// grant never blocks the delete, and exchange and use deny a missing
 	// issuer (.design/agent-delegation.md §16.3).
 	s.revokeAgentDelegationGrantsBestEffort(ctx, store.AgentDelegationGrantFilter{IssuerUserID: userID}, revokeReasonIssuerDeleted)
+	// The user's schedules would be refused at every fire: pause them with
+	// creator_deleted (they never block the delete). The evaluator
+	// backstop pauses any left active.
+	s.pauseSchedulesAuthoredByUser(ctx, userID)
 }
 
 // lastOwnerProjectRef identifies a project that deleting a user would leave

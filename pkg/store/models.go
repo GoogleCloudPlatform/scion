@@ -3689,10 +3689,29 @@ type ScheduleFilter struct {
 	// the hub's agent row decision, so an agent's list pages fill with the
 	// rows it holds.
 	InitiatorAgentID string
+	// AuthorityPrincipal, when set, keeps only schedules whose recorded
+	// authority (the current initiator principal, with a recorded
+	// attribution as for InitiatorAgentID) is this principal. It matches the
+	// principal the schedule fires under, never CreatedBy. Kind and ID must
+	// both be set; one without the other is ErrInvalidInput.
+	AuthorityPrincipal ScheduleAuthorityPrincipal
 	// SystemPausedOnly, when true, keeps only paused schedules with a
 	// non-empty StatusReason: schedules the hub paused itself. A schedule a
 	// user paused (empty reason) is left out.
 	SystemPausedOnly bool
+}
+
+// ScheduleAuthorityPrincipal names the principal a schedule's recorded
+// authority resolves to: Kind is a DelegationPrincipal* value and ID the
+// principal's ID. The zero value means no principal filter.
+type ScheduleAuthorityPrincipal struct {
+	Kind string
+	ID   string
+}
+
+// IsZero reports whether p names no principal.
+func (p ScheduleAuthorityPrincipal) IsZero() bool {
+	return p.Kind == "" && p.ID == ""
 }
 
 // ToAPI converts a store.Agent to an api.AgentInfo for external consumption.
