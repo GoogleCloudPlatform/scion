@@ -219,11 +219,11 @@ func TestStart_EffectiveHarnessIsTheResolvedHarness(t *testing.T) {
 	if switched.Harness != "switched-h" || !switched.ConfigResolved {
 		t.Errorf("switched start: Harness = %q, ConfigResolved = %v; want the resolved harness switched-h", switched.Harness, switched.ConfigResolved)
 	}
-	// Known divergence (addendum v15 sections 5 and 18): the container's
-	// SCION_HARNESS (scion.harness on telemetry and usage points) is still
-	// the stored name, and selects the usage-parsing rules.
-	if containerHarness != "generic" {
-		t.Errorf("container SCION_HARNESS = %q; slice 3 leaves it the stored name (generic)", containerHarness)
+	// Since upstream #4281 (the fix for ptone/scion#5946) the container's
+	// SCION_HARNESS is the launched harness too, so it agrees with the
+	// effective harness the hub records.
+	if containerHarness != switched.Harness {
+		t.Errorf("container SCION_HARNESS = %q; want the launched harness %q (#4281)", containerHarness, switched.Harness)
 	}
 }
 
@@ -245,9 +245,10 @@ func TestStart_EffectiveHarnessGenericFallback(t *testing.T) {
 	if info.Harness != "generic" || !info.ConfigResolved {
 		t.Errorf("Generic fallback: Harness = %q, ConfigResolved = %v; want generic (the resolved Generic implementation), true", info.Harness, info.ConfigResolved)
 	}
-	// Known divergence (addendum v15): the container keeps the declared name.
-	if containerHarness != "named-h" {
-		t.Errorf("container SCION_HARNESS = %q; slice 3 leaves it the stored name (named-h)", containerHarness)
+	// Since upstream #4281 the container's SCION_HARNESS is the launched
+	// harness (generic), not the declared name.
+	if containerHarness != info.Harness {
+		t.Errorf("container SCION_HARNESS = %q; want the launched harness %q (#4281)", containerHarness, info.Harness)
 	}
 }
 
@@ -255,8 +256,8 @@ func TestStart_EffectiveHarnessGenericFallback(t *testing.T) {
 // legacy agent whose stored config names neither a harness nor a
 // harness-config, with no template or settings default, starts on
 // harness.New's Generic (the no-harness-config branch). It reports the
-// resolved Generic as its effective harness, with the marker set; the
-// container gets no SCION_HARNESS (the third divergent case, addendum v15).
+// resolved Generic as its effective harness, with the marker set. Since
+// upstream #4281 the container's SCION_HARNESS is that launched harness too.
 func TestStart_EffectiveHarnessLegacyNoHarnessConfig(t *testing.T) {
 	project := effectiveConfigFixture(t)
 	if first, _, _ := startEffective(t, api.StartOptions{Name: "eff-legacy", Template: "alpha", ProjectPath: project}); first.Harness != "generic" {
@@ -297,8 +298,10 @@ func TestStart_EffectiveHarnessLegacyNoHarnessConfig(t *testing.T) {
 	if info.Harness != "generic" || !info.ConfigResolved {
 		t.Errorf("legacy start: Harness = %q, ConfigResolved = %v; want generic, true", info.Harness, info.ConfigResolved)
 	}
-	if set {
-		t.Errorf("container SCION_HARNESS = %q; slice 3 sets none when no harness is stored", containerHarness)
+	// Since upstream #4281 the container gets the launched harness even
+	// when no harness is stored.
+	if !set || containerHarness != info.Harness {
+		t.Errorf("container SCION_HARNESS = %q (set %v); want the launched harness %q (#4281)", containerHarness, set, info.Harness)
 	}
 }
 

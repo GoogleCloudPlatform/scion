@@ -19,6 +19,7 @@ package entadapter
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,6 +42,29 @@ import (
 // active pre-running failure, now written by the same helper via
 // applyLaunchReportPreRunning, keeps its LaunchEnd hint and launch_failed
 // (TestLifecycleStore2_LaunchReports).
+
+// new4223Fixture is newS2Fixture with no live activity: makeAgent sets
+// Activity "thinking", and #4223's path 2 applies only to a row with no
+// live activity (failedAfterRunningObservedApplies), as upstream's
+// endRunningObserved helper arranges.
+func new4223Fixture(t *testing.T) (*lifecycleFixture, *store.Agent) {
+	t.Helper()
+	f := newLifecycleFixture(t)
+	a := f.create("s4223-"+strings.ToLower(t.Name()[len(t.Name())-6:]), func(a *store.Agent) {
+		a.Phase = "created"
+		a.Generation = 1
+		a.Activity = ""
+	})
+	return f, a
+}
+
+// requireNoLiveActivity checks path 2's activity precondition.
+func requireNoLiveActivity(t *testing.T, f *lifecycleFixture, id string) {
+	t.Helper()
+	got, err := f.cs.GetAgent(context.Background(), id)
+	require.NoError(t, err)
+	require.Empty(t, got.Activity, "setup: #4223 path 2 needs no live activity")
+}
 
 // failedAfterRunningObserved returns a failed report for the row's
 // current run, which applyLaunchReportEnded applies to a launch that
@@ -81,12 +105,13 @@ func requireNoTransition(t *testing.T, evs []*tc.LifecycleEvent, transition stri
 // stopped(error), and no launch_failed. The stored end reason is the
 // store's (failed), unchanged by the derivation.
 func TestLifecycleStore4223_FailedAfterRunningObservedOpenSegment(t *testing.T) {
-	f, a := newS2Fixture(t)
+	f, a := new4223Fixture(t)
 	ctx := context.Background()
 	launchID := runningObservedLaunch(t, f, a.ID)
 	before := f.events(a.ID)
 	require.Equal(t, tc.TransitionStarted, before[len(before)-1].Transition, lcFull(before))
 
+	requireNoLiveActivity(t, f, a.ID)
 	answer, _, err := f.cs.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, failedAfterRunningObserved(launchID, "R1"))
 	require.NoError(t, err)
 	require.Equal(t, store.LaunchReportResultApplied, answer.Result)
@@ -111,7 +136,7 @@ func TestLifecycleStore4223_FailedAfterRunningObservedOpenSegment(t *testing.T) 
 // is launch-report evidence, derives P7a: stopped(error, start_unobserved),
 // and no launch_failed.
 func TestLifecycleStore4223_FailedAfterRunningObservedNoSegment(t *testing.T) {
-	f, a := newS2Fixture(t)
+	f, a := new4223Fixture(t)
 	ctx := context.Background()
 	f.mint(a.ID, "R1")
 	launchID, err := f.cs.BeginLaunch(ctx, a.ID, store.LaunchKindCreate, time.Hour)
@@ -123,6 +148,7 @@ func TestLifecycleStore4223_FailedAfterRunningObservedNoSegment(t *testing.T) {
 	before := f.events(a.ID)
 	requireNoTransition(t, before, tc.TransitionStarted)
 
+	requireNoLiveActivity(t, f, a.ID)
 	answer, _, err := f.cs.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, failedAfterRunningObserved(launchID, "R1"))
 	require.NoError(t, err)
 	require.Equal(t, store.LaunchReportResultApplied, answer.Result)
@@ -139,12 +165,13 @@ func TestLifecycleStore4223_FailedAfterRunningObservedNoSegment(t *testing.T) {
 // heartbeat relayed the broker's error first, so the failed report's write
 // is error -> error (P1): it adds neither a stop nor a launch_failed.
 func TestLifecycleStore4223_FailedAfterRunningObservedAlreadyError(t *testing.T) {
-	f, a := newS2Fixture(t)
+	f, a := new4223Fixture(t)
 	ctx := context.Background()
 	launchID := runningObservedLaunch(t, f, a.ID)
 	f.status(ctx, a.ID, store.AgentStatusUpdate{Phase: "error"})
 	before := f.events(a.ID)
 
+	requireNoLiveActivity(t, f, a.ID)
 	answer, _, err := f.cs.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, failedAfterRunningObserved(launchID, "R1"))
 	require.NoError(t, err)
 	require.Equal(t, store.LaunchReportResultApplied, answer.Result)
@@ -172,7 +199,7 @@ func TestLifecycleStore4223_FailedAfterRunningObservedAlreadyError(t *testing.T)
 // after phase as stop kind: stopped(stopped, start_unobserved), and no
 // launch_failed.
 func TestLifecycleStore4223_FailedAfterRunningObservedStartKind(t *testing.T) {
-	f, a := newS2Fixture(t)
+	f, a := new4223Fixture(t)
 	ctx := context.Background()
 	f.status(ctx, a.ID, store.AgentStatusUpdate{Phase: "starting"})
 	f.mint(a.ID, "R1")
@@ -185,6 +212,7 @@ func TestLifecycleStore4223_FailedAfterRunningObservedStartKind(t *testing.T) {
 	before := f.events(a.ID)
 	requireNoTransition(t, before, tc.TransitionStarted)
 
+	requireNoLiveActivity(t, f, a.ID)
 	answer, _, err := f.cs.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, failedAfterRunningObserved(launchID, "R1"))
 	require.NoError(t, err)
 	require.Equal(t, store.LaunchReportResultApplied, answer.Result)
