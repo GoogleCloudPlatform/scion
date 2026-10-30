@@ -1150,7 +1150,8 @@ else
   # nightly-only message, and no refusal names a version floor.
   _rt_ph="$(mktemp -d)"
   _rt_ph_ok=0
-  if cp -r "$CHART" "$_rt_ph/c" \
+  # An empty _rt_ph (mktemp failed) must not copy to /c; the rows then FAIL.
+  if [ -n "$_rt_ph" ] && cp -r "$CHART" "$_rt_ph/c" \
     && sed '/define "scion-hub.relayTlsMinHub"/,/end/s/^version: ".*"$/version: ""/' "$_rt_ph/c/templates/_helpers.tpl" > "$_rt_ph/c/templates/_helpers.tpl.new" \
     && mv "$_rt_ph/c/templates/_helpers.tpl.new" "$_rt_ph/c/templates/_helpers.tpl"; then
     _rt_ph_ok=1
@@ -1275,7 +1276,10 @@ else
   _rt_warn='RELAY TLS: THE HUB IMAGE VERSION COULD NOT BE CHECKED'
   _rt_notes() { "$HELM" template t "$_rt_tmp/c" --debug "${BASE[@]}" "${RT_TAG[@]}" "$@" --show-only templates/zz-notes-probe.txt 2>/dev/null \
     | sed -n '/^# Source: .*zz-notes-probe\.txt$/,$p'; }
-  if cp -r "$CHART" "$_rt_tmp/c" && mv "$_rt_tmp/c/templates/NOTES.txt" "$_rt_tmp/c/templates/zz-notes-probe.txt"; then
+  # If the copy cannot be made (including an empty _rt_tmp when mktemp fails),
+  # the probes stay empty and every NOTES row below FAILs on the missing anchor.
+  _rt_n_latest="" _rt_n_ok="" _rt_n_extra="" _rt_n_extra_digest=""
+  if [ -n "$_rt_tmp" ] && cp -r "$CHART" "$_rt_tmp/c" && mv "$_rt_tmp/c/templates/NOTES.txt" "$_rt_tmp/c/templates/zz-notes-probe.txt"; then
     _rt_n_latest="$(_rt_notes --set-string image.tag=latest)"
     _rt_n_ok="$(_rt_notes --set-string "image.tag=${_rt_ok_tag}")"
     # The config.extra path (wiring off), on a tag and on a digest: rendered
