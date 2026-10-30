@@ -232,6 +232,15 @@ type ServerConfig struct {
 	// with its own (projectfs.Layout.DescriptorDiff).
 	StorageLayout projectfs.Layout
 
+	// StorageError, when set, is why the broker's project storage settings
+	// are unusable (an invalid server.project_storage block, reported with
+	// the fields at fault). The broker then has no storage: StorageLayout
+	// is the zero Layout, every agent start (create, start, restart) is
+	// refused with this error, the workspace storage descriptor is marked
+	// invalid and health is degraded. Stop, delete, logs and status keep
+	// working, so existing agents can still be managed.
+	StorageError error
+
 	// DefaultProfile is the broker's default (active) profile name from its
 	// settings (active_profile), reported to the hub on every heartbeat. A
 	// pointer to "" reports that the settings name no active profile; nil

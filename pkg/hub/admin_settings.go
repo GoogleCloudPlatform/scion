@@ -613,7 +613,7 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Server != nil {
 		if _, _, err := config.SynthesizeProjectStorage(req.Server.ProjectStorage, req.Server.WorkspaceStorage, req.Server.SharedDirStorage, req.Server.HomeStorage); err != nil {
-			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), projectStorageFieldErrorDetails(err))
 			return
 		}
 	}
@@ -703,7 +703,7 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// only in part is validated again as merged with the stored fields.
 	if req.Server != nil {
 		if err := validateMergedServerSections(raw, rawServer); err != nil {
-			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), projectStorageFieldErrorDetails(err))
 			return
 		}
 	}

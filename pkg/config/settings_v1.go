@@ -6589,6 +6589,13 @@ func writeVersionedSettingsFile(lock *SettingsLock, dir, targetPath string, vs *
 	return writeSettingsFileAtomic(lock, targetPath, data)
 }
 
+// storageFieldMigrationWarning is the migration warning for a project
+// storage field that breaks a rule: the file is still converted, but
+// `scion config validate` and a server start refuse it until it is fixed.
+func storageFieldMigrationWarning(ve ValidationError) string {
+	return fmt.Sprintf("%s; fix it before starting the server (scion config validate reports it, and a hub refuses to start)", ve.Error())
+}
+
 // MigrateSettingsFile migrates a single legacy settings file in dir to versioned format.
 // If a server.yaml exists in the same directory, it is also merged into the settings
 // under the "server" key and backed up.
@@ -6731,11 +6738,17 @@ func migrateSettingsFileLocked(lock *SettingsLock, dir string, dryRun bool) (*Mi
 	if err != nil {
 		return nil, fmt.Errorf("validation error: %w", err)
 	}
-	if len(validationErrors) > 0 {
-		var errMsgs []string
-		for _, ve := range validationErrors {
-			errMsgs = append(errMsgs, ve.Error())
+	var errMsgs []string
+	for _, ve := range validationErrors {
+		if ve.StorageField {
+			// The file is converted anyway, so the operator has the file
+			// to fix; validation and server start still refuse it.
+			result.Warnings = append(result.Warnings, storageFieldMigrationWarning(ve))
+			continue
 		}
+		errMsgs = append(errMsgs, ve.Error())
+	}
+	if len(errMsgs) > 0 {
 		return nil, fmt.Errorf("migrated settings failed validation: %s", strings.Join(errMsgs, "; "))
 	}
 
@@ -6761,6 +6774,10 @@ func migrateSettingsFileLocked(lock *SettingsLock, dir string, dryRun bool) (*Mi
 			return nil, fmt.Errorf("validation error: %w", err)
 		}
 		for _, ve := range carriedErrors {
+			if ve.StorageField {
+				result.Warnings = append(result.Warnings, storageFieldMigrationWarning(ve))
+				continue
+			}
 			result.Warnings = append(result.Warnings,
 				fmt.Sprintf("kept setting does not match the v1 schema: %s", ve.Error()))
 		}

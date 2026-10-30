@@ -738,14 +738,36 @@ The operational content of the deprecated sections still applies to the same fie
 
 #### Validation
 
-The Hub refuses to start, and `scion config validate` reports an error, when the conditions below hold. A Runtime Broker does not refuse to start: it logs the error and reports the local layout, and the Hub then refuses shared-mode dispatches to it (see [Layout identity](#layout-identity-check)).
+The Hub refuses to start, and `scion config validate` reports an error, when the conditions below hold. The error names the field at fault. `scion config migrate` still converts a file whose storage block breaks a [field rule](#field-rules), and reports each such field as a warning, so that you can fix the converted file.
+
+A Runtime Broker with an invalid block still starts, so that you can stop and delete its existing agents, but it has no storage. It does not fall back to the local layout. It logs the error at startup and refuses every agent create, start and restart with `422` and error code `storage_invalid`, naming the fields at fault. Its `GET /healthz` status is `degraded`, with the check `project_storage: unavailable`. Its storage descriptor is marked invalid, so the Hub also refuses shared-mode dispatches to it (see [Layout identity](#layout-identity-check)). Stop, delete, logs and status keep working. Fix the block and restart the broker.
+
+On a workstation Hub, the admin settings API (`PUT /api/v1/admin/server-config`) checks a storage block by the same rules before it writes anything. It refuses an invalid block with `400`, and the error's `details.fieldErrors` lists each field with its rule. Nothing is written, and nothing is reported as needing a restart.
 
 - `server.project_storage` is set together with any of `server.workspace_storage`, `server.shared_dir_storage` or `server.home_storage`. Exactly one storage block configures a deployment; the error names the blocks to remove.
 - the backend block is invalid, by the same rules as [`server.workspace_storage`](#startup-validation), reported under `server.project_storage`;
+- a field of the selected backend block breaks one of the [field rules](#field-rules) below;
 - `homes` is not `local` or `nfs`, or is `nfs` while `backend` is not `nfs`;
 - a `homes_options` value is invalid;
 - (Hub) the Hub cannot build its storage layout: for example, the share's host base is not an absolute path, because `nfs.mount_root` is empty or relative. The Hub serves files from its own mount, so it refuses to start rather than refuse every shared-directory request later;
 - (Hub) the global settings file, in any format, has a storage block key (`project_storage`, `workspace_storage`, `shared_dir_storage` or `home_storage`) as a parsed mapping key, but the block was not loaded: for example a block not under `server:`, a missing `schema_version: "1"`, or a server section that fails to decode. The Hub refuses to fall back to the local backend. A comment, or a key such as `shared_dir_storage_class` that only contains the name, never triggers this.
+
+#### Field rules
+
+These rules apply to the backend block that `backend` selects. They apply to a block synthesized from the deprecated blocks too, and its errors name the deprecated keys.
+
+| Field | Rule |
+| :--- | :--- |
+| `nfs.mount_root` | An absolute, clean path (no trailing `/`, no `.` or `..` components). |
+| `nfs.shares[].id` | Required, at most 63 bytes, and unique. It is used as one directory name under `mount_root`, so it must not contain `/`, `\`, whitespace, NUL or control characters, and must not be `.` or `..`. Existing ids such as `scion-hub1` stay valid. |
+| `nfs.shares[].server` | Required. An IPv4 address or an RFC 1123 hostname. No leading `-`, whitespace, `,` or `/`. IPv6 literals are not supported. |
+| `nfs.shares[].export` | Required. An absolute, clean path of at most 1024 bytes, without `..` components, whitespace, `,` or NUL. |
+| `nfs.mount_options` | Comma-separated options. Each is a lower-case name (letters, digits, `_`), optionally followed by `=` and a value made of letters, digits and `._:/+-`. Empty options are not allowed. `suid` and `dev` are refused, as is `nosuid`, `nodev` or `rw` with a value. Mount options are hardened separately. |
+| `nfs.shares[].pv_name`, `nfs.storage_class`, `gke_shared_volume.pv_claim_name` | Empty, or a DNS-1123 subdomain: lower-case letters, digits, `-` and `.`, at most 253 bytes. |
+| `cloudrun_volume.volume_name`, `gke_shared_volume.volume_name` | One directory name, by the same rule as `nfs.shares[].id`. |
+| `subpath_root`, `nfs.uid`, `nfs.gid` | As described for [`server.workspace_storage`](#startup-validation). |
+
+For the shared-directory export of a transitional split (see below), `server` and `export` are optional, because that export is never mounted by the broker. If you set them, they must follow the same rules.
 
 #### Migrating from the deprecated blocks
 
@@ -843,8 +865,9 @@ Agents no longer record their own shared-directory backend, and the operation th
 
 Every Runtime Broker reports its storage layout in its heartbeat descriptor: the backend, for `nfs` the share server, export, `subpath_root` and the export identity marker, and `homes`. When the Hub's own backend is shared (not `local`), it compares a broker's report with its own layout:
 
-- **Dispatch refusal**: the Hub refuses to dispatch an agent of a hub-native project in the shared-plain or worktree-per-agent sharing mode to a broker whose layout disagrees, with `409` and a message listing each difference (for example `nfs export: hub "/scion-projects", broker "/other"`) and asking for the same `server.project_storage` on the broker. A broker that reports no layout (an older version) is refused the same way; upgrade it. Linked projects, which the broker provides from its own path, and per-agent workspace modes are not checked.
-- **Health**: the admin health summary shows the differences as `layout_mismatch` in the broker's storage entry and counts the broker as a problem.
+- **Dispatch refusal**: the Hub refuses to dispatch an agent of a hub-native project in the shared-plain or worktree-per-agent sharing mode to a broker whose layout disagrees, with `409` and a message naming each differing field (for example `nfs export: differs`) and asking for the same `server.project_storage` on the broker. The refusal never includes the configured values; `details.storageLayoutDiff` lists the field names. The hub log has the full values. A broker that reports no layout (an older version) is refused the same way; upgrade it. Linked projects, which the broker provides from its own path, and per-agent workspace modes are not checked.
+- **Health**: the admin health summary shows the differences as `layout_mismatch` in the broker's storage entry and counts the broker as a problem. A hub admin sees the values on both sides; any other reader sees the differing fields by name only.
+- **Broker records**: `GET /api/v1/runtime-brokers` and `GET /api/v1/runtime-brokers/{id}` include the NFS server, export, subpath root and export identity marker, and the volume claim, of a broker's storage descriptor for hub admins only (and for the broker reading its own record). Other readers see the backend, homes and share health; the value fields are omitted and the descriptor carries `redacted: true`. The project registration response follows the same rule for the linked broker. Agent-move refusals between brokers on different exports also name the differing fields only.
 
 ### Workspace Storage (`server.workspace_storage`)
 
@@ -888,10 +911,7 @@ The Hub checks `workspace_storage` (or the backend fields of `project_storage`) 
 - `backend` is `"cloudrun-volume"` or `"gke-shared-volume"` and the matching `volume_name` is missing or empty;
 - the selected backend's `subpath_root` is invalid (see below).
 
-A Runtime Broker that runs without the Hub does not refuse to start. It only logs warnings:
-
-- If the `nfs` block is incomplete, the broker warns and skips its NFS mount checks (see [NFS Mounts on the Runtime Broker](#nfs-mounts-on-the-runtime-broker)).
-- If the selected backend's `subpath_root` is invalid, the broker warns at startup. Its NFS mount checks still run, because they do not use `subpath_root`. However, every agent start that uses that backend fails with a `subpath_root` error until the value is fixed. This includes values such as `projects/` or `./projects`, which earlier versions accepted and normalized.
+A Runtime Broker that runs without the Hub does not refuse to start. If the block is invalid by these rules or by the [field rules](#field-rules), including an incomplete `nfs` block or an invalid `subpath_root` (values such as `projects/` or `./projects`, which earlier versions accepted and normalized, are invalid), the broker logs the error, skips its NFS mount checks and refuses every agent start, as described under [Validation](#validation).
 
 The Hub's readiness check (`GET /readyz`) and its Cloud Run write guard still apply as further safeguards. A volume backend without a mount point fails readiness, and blocks workspace writes on Cloud Run.
 
@@ -901,7 +921,7 @@ The Hub's readiness check (`GET /readyz`) and its Cloud Run write guard still ap
 
 #### NFS Mounts on the Runtime Broker
 
-When `backend` is `nfs`, the Runtime Broker reads this block from its global `settings.yaml` (never from project settings) and checks each share at `<mount_root>/<share id>`. The block must have an absolute `mount_root`, and every share needs a unique single-segment `id`, a `server` (a hostname or IPv4 address, without whitespace or a leading `-`; IPv6 literals are not supported), and an absolute `export`. If the block is incomplete, the broker logs a warning and skips NFS handling. With any other backend, the broker does no NFS handling at all.
+When `backend` is `nfs`, the Runtime Broker reads this block from its global `settings.yaml` (never from project settings) and checks each share at `<mount_root>/<share id>`. The block must follow the [field rules](#field-rules): an absolute `mount_root`, and for every share a unique single-segment `id`, a `server` (a hostname or an IPv4 address), and an absolute `export`. If the block is invalid, the broker logs a warning, skips NFS handling and refuses agent starts (see [Validation](#validation)). With any other backend, the broker does no NFS handling at all.
 
 - **`auto_mount: false` (default)**: The Runtime Broker only checks. It reads the host mount table (`/proc/mounts`) to confirm each share is mounted from the expected `server:export`, at startup and then every minute. It never mounts or unmounts anything and never refuses agent creation on the `/proc/mounts` check alone. Mount each export on the host yourself, for example with `/etc/fstab`.
 - **`auto_mount: true`**: The Runtime Broker mounts missing shares in the background, and remounts a share that is mounted from the wrong source. The Runtime Broker must run as root: if it does not, it logs a warning at startup and only checks, without running `mount`. If the Runtime Broker's default runtime is Kubernetes or Cloud Run, it also only checks, because the platform mounts the export into the agent. Each mount command times out after 90 seconds, or sooner if the agent-create request ends.

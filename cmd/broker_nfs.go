@@ -21,7 +21,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -31,35 +30,32 @@ import (
 )
 
 // brokerNFSConfig returns the NFS settings for the runtime broker's
-// ServerConfig.NFSConfig, taken from server.workspace_storage in the
-// broker's global settings. It returns nil (NFS handling off, the broker
-// behaves exactly as without NFS) unless the backend is "nfs" and the block
-// is valid (see validateBrokerNFS). The returned value is a copy with the workspace
-// storage defaults applied; vs is not modified.
+// ServerConfig.NFSConfig: the nfs block of the broker's resolved project
+// storage (config.ResolveProjectStorage: server.project_storage, or the
+// block synthesized from server.workspace_storage), with defaults applied
+// and the field rules of config.ValidateProjectStorage passed. It returns
+// nil (NFS handling off, the broker behaves exactly as without NFS) unless
+// the backend is "nfs" and the block is valid. The returned value is a
+// copy; vs is not modified.
 //
 // The second return value is a warning for the caller to log, set when the
-// backend is "nfs" but the block is unusable.
+// backend is "nfs" but the block is unusable. The broker's agent starts are
+// then refused as well (brokerStorageLayout).
 func brokerNFSConfig(vs *config.VersionedSettings) (*config.V1NFSConfig, string) {
 	if vs == nil || vs.Server == nil || vs.Server.EffectiveWorkspaceStorage() == nil {
 		return nil, ""
 	}
-	ws := *vs.Server.EffectiveWorkspaceStorage()
-	if ws.Backend != "nfs" {
+	if vs.Server.EffectiveWorkspaceStorage().Backend != config.WorkspaceStorageBackendNFS {
 		return nil, ""
 	}
-	if ws.NFS != nil {
-		nfsCopy := *ws.NFS
-		nfsCopy.Shares = append([]config.V1NFSShare(nil), ws.NFS.Shares...)
-		ws.NFS = &nfsCopy
-	}
-	ws.ApplyNFSDefaults()
-	if err := ws.ValidateNFS(); err != nil {
+	ps, _, err := config.ResolveProjectStorage(vs.Server)
+	if err != nil {
 		return nil, "NFS mount checks disabled: " + err.Error()
 	}
-	if err := validateBrokerNFS(ws.NFS); err != nil {
-		return nil, "NFS mount checks disabled: " + err.Error()
+	if ps.EffectiveBackend() != config.WorkspaceStorageBackendNFS || ps.NFS == nil {
+		return nil, ""
 	}
-	return ws.NFS, ""
+	return ps.NFS, ""
 }
 
 // brokerWorkspaceStorageWarning returns a startup warning when the
@@ -97,7 +93,10 @@ func brokerWorkspaceStorageBackend(vs *config.VersionedSettings) string {
 func brokerRegistrationWorkspaceStorage(vs *config.VersionedSettings) *api.BrokerWorkspaceStorage {
 	nfs, _ := brokerNFSConfig(vs)
 	desc := runtimebroker.BuildWorkspaceStorageDescriptor(brokerWorkspaceStorageBackend(vs), nfs, nil)
-	layout, _ := brokerStorageLayout(vs)
+	layout, _, storageErr := brokerStorageLayout(vs)
+	if storageErr != nil {
+		return runtimebroker.InvalidStorageDescriptor(desc)
+	}
 	desc.Homes = runtimebroker.StorageHomes(layout)
 	desc.Volume = runtimebroker.StorageVolume(layout)
 	desc.SharedDirs = projectfs.SharedDirsPlacement(layout)
@@ -107,25 +106,36 @@ func brokerRegistrationWorkspaceStorage(vs *config.VersionedSettings) *api.Broke
 // brokerStorageLayout builds the broker's projectfs Layout from its global
 // settings: the same server.project_storage struct the hub builds its Layout
 // from (config.ResolveProjectStorage: the block as written, or synthesized
-// from the deprecated blocks), translated by config.ProjectStorageLayout.
-// The returned warnings are for the caller to log once at startup: the
-// synthesis warnings, or the reason the block is unusable (the broker then
-// reports the local Layout, which the hub refuses for shared-mode
-// dispatches on a shared hub; the broker does not refuse to start).
-func brokerStorageLayout(vs *config.VersionedSettings) (projectfs.Layout, []string) {
+// from the deprecated blocks, with the field rules of
+// config.ValidateProjectStorage), translated by config.ProjectStorageLayout.
+// The returned warnings are for the caller to log once at startup.
+//
+// When the block is unusable, storageErr says why and the Layout is the
+// zero Layout: the broker still starts, so its existing agents can be
+// stopped and deleted, but it reports its storage as invalid, refuses every
+// agent start with storageErr and reports degraded health
+// (runtimebroker.ServerConfig.StorageError). It never falls back to the
+// local layout, whose placement would differ from the configured one.
+func brokerStorageLayout(vs *config.VersionedSettings) (layout projectfs.Layout, warnings []string, storageErr error) {
 	local := projectfs.Layout{Backend: projectfs.BackendLocal, Homes: projectfs.BackendLocal}
 	if vs == nil {
-		return local, nil
+		return local, nil, nil
 	}
 	ps, warnings, err := config.ResolveProjectStorage(vs.Server)
 	if err != nil {
-		return local, []string{fmt.Sprintf("project storage settings are unusable, reporting the local layout: %v", err)}
+		return projectfs.Layout{}, nil, fmt.Errorf("invalid project storage settings: %w", err)
 	}
-	layout, err := config.ProjectStorageLayout(ps, config.DefaultVolumeMountBase)
+	layout, err = config.ProjectStorageLayout(ps, config.DefaultVolumeMountBase)
 	if err != nil {
-		return local, append(warnings, fmt.Sprintf("project storage settings are unusable, reporting the local layout: %v", err))
+		return projectfs.Layout{}, warnings, fmt.Errorf("invalid project storage settings: %w", err)
 	}
-	return layout, append(warnings, brokerSharedDirLayoutWarnings(layout, os.Stat)...)
+	return layout, append(warnings, brokerSharedDirLayoutWarnings(layout, os.Stat)...), nil
+}
+
+// brokerStorageUnavailableWarning is the startup warning for a broker whose
+// storage settings are unusable.
+func brokerStorageUnavailableWarning(err error) string {
+	return fmt.Sprintf("%v; this broker refuses agent starts until it is fixed and restarted (stop, delete and logs keep working)", err)
 }
 
 // brokerSharedDirLayoutWarnings returns startup warnings for a shared-dir
@@ -162,34 +172,6 @@ func loadBrokerRegistrationWorkspaceStorage() *api.BrokerWorkspaceStorage {
 		return nil
 	}
 	return brokerRegistrationWorkspaceStorage(vs)
-}
-
-// validateBrokerNFS checks the fields the broker uses to build each mount:
-// an absolute mount_root, and per share a unique id that is a single path
-// element, a server, and an absolute export.
-func validateBrokerNFS(nfs *config.V1NFSConfig) error {
-	if nfs.MountRoot == "" || !filepath.IsAbs(nfs.MountRoot) {
-		return fmt.Errorf("server.workspace_storage.nfs.mount_root must be an absolute path (got %q)", nfs.MountRoot)
-	}
-	seen := make(map[string]bool, len(nfs.Shares))
-	for i, share := range nfs.Shares {
-		switch {
-		case share.ID == "" || share.ID == "." || share.ID == ".." || strings.ContainsAny(share.ID, `/\`):
-			return fmt.Errorf("server.workspace_storage.nfs.shares[%d].id must be a single path element (got %q)", i, share.ID)
-		case seen[share.ID]:
-			return fmt.Errorf("server.workspace_storage.nfs.shares[%d].id %q is duplicated", i, share.ID)
-		case share.Server == "":
-			return fmt.Errorf("server.workspace_storage.nfs.shares[%d].server is empty", i)
-		case strings.IndexFunc(share.Server, unicode.IsSpace) >= 0 || strings.HasPrefix(share.Server, "-"):
-			return fmt.Errorf("server.workspace_storage.nfs.shares[%d].server must be a hostname or IPv4 address (got %q)", i, share.Server)
-		case strings.ContainsAny(share.Server, ":[]"):
-			return fmt.Errorf("server.workspace_storage.nfs.shares[%d].server %q looks like an IPv6 literal, which is not supported; use a hostname or IPv4 address", i, share.Server)
-		case !strings.HasPrefix(share.Export, "/") || strings.IndexFunc(share.Export, unicode.IsSpace) >= 0:
-			return fmt.Errorf("server.workspace_storage.nfs.shares[%d].export must be an absolute path without whitespace (got %q)", i, share.Export)
-		}
-		seen[share.ID] = true
-	}
-	return nil
 }
 
 // nfsDoctorProbe is the read-only system access the doctor NFS check needs.

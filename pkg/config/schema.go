@@ -17,6 +17,7 @@ package config
 import (
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -43,6 +44,11 @@ type ValidationError struct {
 	Path string
 	// Message describes the validation failure.
 	Message string
+	// StorageField marks a project storage field rule
+	// (ValidateProjectStorage). Path is then the field's settings path. A
+	// settings migration converts the file anyway and reports these as
+	// warnings, so the operator gets the file to fix.
+	StorageField bool
 }
 
 func (e ValidationError) Error() string {
@@ -176,7 +182,14 @@ func ValidateSettings(data []byte, schemaVersion string) ([]ValidationError, err
 		errs = append(errs, ValidateSharedDirSizes(vs.Runtimes, vs.Profiles)...)
 		errs = append(errs, RemovedStorageOverrideErrors(vs.Runtimes, vs.Profiles, RuntimeBrokerInstanceTargets(vs.Server.Broker.Instances))...)
 		if err := ValidateStorageBlocks(vs.Server.ProjectStorage, vs.Server.WorkspaceStorage, vs.Server.SharedDirStorage, vs.Server.HomeStorage); err != nil {
-			errs = append(errs, ValidationError{Path: ProjectStorageKey, Message: err.Error()})
+			var fields FieldErrorList
+			if errors.As(err, &fields) {
+				for _, f := range fields {
+					errs = append(errs, ValidationError{Path: f.Path, Message: strings.TrimPrefix(strings.TrimPrefix(f.Error(), f.Path), ": "), StorageField: true})
+				}
+			} else {
+				errs = append(errs, ValidationError{Path: ProjectStorageKey, Message: err.Error()})
+			}
 		}
 		errs = append(errs, ValidatePlacement(vs.Runtimes, vs.Profiles, LiteralSiblingGroups(vs.Runtimes))...)
 		errs = append(errs, RuntimeBrokerInstanceDuplicateKeys(vs.Server.Broker.Instances)...)

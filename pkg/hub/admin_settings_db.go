@@ -1699,7 +1699,12 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 				})
 				return
 			}
-			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+			var details map[string]interface{}
+			var valErr *serverConfigFileValidationError
+			if errors.As(err, &valErr) {
+				details = valErr.details
+			}
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), details)
 			return
 		}
 		fileTxn, err = prepareSettingsFileTxn(s.config.ConfigPath, func(gc *config.GlobalConfig, typed *config.VersionedSettings) []config.SettingsPathEdit {

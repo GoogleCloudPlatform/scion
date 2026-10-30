@@ -311,10 +311,11 @@ func TestResolveSharedDirHostPath_NFSBackstopRefusesSwappedLeaf(t *testing.T) {
 }
 
 // TestResolveSharedDirHostPath_NFSRefusesRootHostBase uses a host base
-// that cleans to the filesystem root. ConfineLeaf accepts it, since the
-// leaf still sits under <base>/<subpath_root>/<project>/shared-dirs, but
-// ValidateNotExportRoot does not. The leaf walk is stubbed so the check
-// is shown to refuse before any directory is touched.
+// that cleans to the filesystem root (share id ".." under mount_root "/").
+// The project storage field rules now refuse that share id when the
+// settings are resolved, before ConfineLeaf or ValidateNotExportRoot run.
+// The leaf walk is stubbed so the refusal is shown to come before any
+// directory is touched.
 func TestResolveSharedDirHostPath_NFSRefusesRootHostBase(t *testing.T) {
 	orig := ensureSharedDirLeaf
 	t.Cleanup(func() { ensureSharedDirLeaf = orig })
@@ -330,8 +331,8 @@ func TestResolveSharedDirHostPath_NFSRefusesRootHostBase(t *testing.T) {
 	if !errors.Is(err, ErrSharedDirStorageUnavailable) {
 		t.Fatalf("got %+v, err %v; want ErrSharedDirStorageUnavailable", got, err)
 	}
-	if !strings.Contains(err.Error(), "is not under export root") {
-		t.Fatalf("err = %v, want the ValidateNotExportRoot refusal", err)
+	if !strings.Contains(err.Error(), "must be a single path element") {
+		t.Fatalf("err = %v, want the share id field-rule refusal", err)
 	}
 	if got.Path != "" {
 		t.Fatalf("path = %q, want empty", got.Path)

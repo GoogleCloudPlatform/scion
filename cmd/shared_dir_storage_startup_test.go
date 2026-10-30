@@ -39,7 +39,7 @@ func TestLogSharedDirStorageStartup(t *testing.T) {
 	nfs := func(uid int) *config.V1NFSConfig {
 		return &config.V1NFSConfig{
 			MountRoot: "/srv",
-			Shares:    []config.V1NFSShare{{ID: "scion-shared", PVName: "scion-shared-pv"}},
+			Shares:    []config.V1NFSShare{{ID: "scion-shared", Server: "10.0.0.2", Export: "/export", PVName: "scion-shared-pv"}},
 			UID:       uid,
 		}
 	}
