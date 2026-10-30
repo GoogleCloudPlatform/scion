@@ -206,7 +206,8 @@ func TestBrokerMessageSweep_StuckLineNamesMessageIDs(t *testing.T) {
 
 // TestBrokerMessageSweep_StuckLineCapsMessageIDs pins the cap on the IDs the
 // sweep line names: the oldest stuckMessageLogIDCap rows, with
-// message_ids_truncated set and count still reporting every stuck row.
+// message_ids_truncated set and count still reporting every stuck row while
+// that number is below stuckMessageCountCap.
 func TestBrokerMessageSweep_StuckLineCapsMessageIDs(t *testing.T) {
 	srv, cs := newSweepTestServer(t)
 	logger, logs := newPendingLogCapture()
