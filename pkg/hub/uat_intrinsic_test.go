@@ -25,7 +25,7 @@ package hub
 // Ported from miller79/scion#199 (its test matrix, without the compiled
 // cutoff): TestUATIntrinsic_DeliversOwnerSharedSecrets,
 // TestUATIntrinsic_NoCutoff and TestUATIntrinsic_OtherClausesStillApply.
-// The start-time user-secret ceiling (A') composition cases are in
+// The start-time user-secret ceiling composition cases are in
 // start_delivery_user_secret_ceiling_test.go.
 
 import (
@@ -115,8 +115,8 @@ func TestUATIntrinsic_HopCeiling(t *testing.T) {
 }
 
 // TestUATIntrinsic_NotOtherHops: no intrinsic permission reaches a hop for
-// which uatRecordedHop is false: session, agent, scheduler (Q-K, including a
-// schedule written with a token), system_migration, dev_local, unrecorded
+// which uatRecordedHop is false: session, agent, scheduler (including a
+// schedule written with a token: scheduler-recorded hops are not token hops), system_migration, dev_local, unrecorded
 // provenance, a principal ceiling, or a uat source missing its user
 // principal.
 func TestUATIntrinsic_NotOtherHops(t *testing.T) {
@@ -205,18 +205,19 @@ func TestUATIntrinsic_RegistryTableNotWidened(t *testing.T) {
 // the package sources, EffectCeilingAllows and childRoleWithinCeiling are
 // called on an edge, hop, assignment or source ceiling only through
 // uatHopEffectCeiling. The listed exceptions read a fold (already built
-// from hop ceilings), a scheduler ceiling (Q-K), an agent-parent ceiling,
+// from hop ceilings), a scheduler ceiling (scheduler-recorded hops are not
+// token hops), an agent-parent ceiling,
 // or are the helpers themselves.
 func TestUATIntrinsic_CeilingReadersUseHopCeiling(t *testing.T) {
 	allowed := map[string]map[string]bool{
 		"EffectCeilingAllows": {
 			"uatIntrinsicDecides":           true, // compares the stored and the hop ceiling
 			"deliverIDsAllowedByChain":      true, // a chain fold
-			"authorizeScheduledMessageFire": true, // scheduler ceiling (Q-K)
+			"authorizeScheduledMessageFire": true, // scheduler ceiling: not a token hop
 		},
 		"childRoleWithinCeiling": {
 			"planAgentDelegatorReissue": true, // an agent parent's ceiling (agentRowEffectCeiling)
-			"dispatchAgentEventHandler": true, // scheduler edge ceiling with role none (Q-K)
+			"dispatchAgentEventHandler": true, // scheduler edge ceiling with role none: not a token hop
 		},
 	}
 	_, files := parseHubProduction(t)
@@ -339,7 +340,7 @@ func TestUATIntrinsic_NoCutoff(t *testing.T) {
 }
 
 // TestUATIntrinsic_OtherClausesStillApply ports the negative cases of
-// miller79#199's predicate: each is refused, or unaffected, through S3c's
+// miller79/scion#199's predicate: each is refused, or unaffected, through S3c's
 // other hops and clauses or the uatRecordedHop conditions.
 func TestUATIntrinsic_OtherClausesStillApply(t *testing.T) {
 	type out struct {
@@ -411,11 +412,11 @@ func TestUATIntrinsic_OtherClausesStillApply(t *testing.T) {
 	}
 }
 
-// ---- per site, #4338 ----------------------------------------------------------
+// ---- per site, classifications ----------------------------------------------------------
 
 // TestUATIntrinsic_PerSiteDispatch: the restored owner secret is delivered
 // on start, resume and restart and is classified SecretFetchable in
-// extras.EnvClassifications on each (#4338); create (resolveSecrets) and
+// extras.EnvClassifications on each (GoogleCloudPlatform/scion#4338); create (resolveSecrets) and
 // as_needed are covered by sdStartDelivery.
 func TestUATIntrinsic_PerSiteDispatch(t *testing.T) {
 	f := newSDFixture(t, "ui-sites")
@@ -510,7 +511,7 @@ func TestUATIntrinsic_LaunchMaterialStrictWalk(t *testing.T) {
 	assert.NotContains(t, buf.String(), "product_gap")
 }
 
-// TestUATIntrinsic_RootNotAdmittedWithheld (P0 amendment, pat-f-em): the
+// TestUATIntrinsic_RootNotAdmittedWithheld: the
 // strict walk applies the provenance root admission, as for a
 // session-created agent, so an agent created from a token by a user who is
 // no longer admitted to the project is withheld its launch material. The
@@ -565,7 +566,7 @@ func TestUATIntrinsic_NotUnlocked(t *testing.T) {
 	}
 	sort.Strings(all)
 	tokenCeiling := uatCeilingFromSelectors(t, all...)
-	require.NotContains(t, tokenCeiling.PermissionIDs, "project.secret_read", "no selector maps project.secret_read in P0")
+	require.NotContains(t, tokenCeiling.PermissionIDs, "project.secret_read", "no selector maps project.secret_read")
 
 	// Explicit full: refused at the delegation ceiling.
 	rec := f.create(t, f.uat(t, all...), CreateAgentRequest{Name: "ui-locked-full", AgentRole: string(AgentRoleFull)})
@@ -633,7 +634,7 @@ func TestUATIntrinsic_ProgenyPathStillRefused(t *testing.T) {
 // TestUATIntrinsic_LegacyData covers the stored shapes the rule meets:
 // token edges of both stored ceiling versions, a scope re-issued edge, a
 // --role reincarnate from a token, and agents created by a token before
-// #2355 (adopted edges, not uat).
+// GoogleCloudPlatform/scion#2355 (adopted edges, not uat).
 func TestUATIntrinsic_LegacyData(t *testing.T) {
 	t.Run("pre-ceiling token (Unspecified, normalized legacy list)", func(t *testing.T) {
 		f := newSDFixture(t, "ui-legacy-unspec")

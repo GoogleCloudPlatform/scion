@@ -25,7 +25,7 @@ package hub
 // still open the store read-only (hack/delivery-census does).
 //
 // For agents whose own edge was recorded from a user access token
-// (uatRecordedHop) it also reports the intrinsic set's effect (item U, P0):
+// (uatRecordedHop) it also reports the intrinsic set's effect:
 // the stored role against the role the chain lets its tokens carry, and how
 // many of the owner's progeny-shared user secrets the user secret parent
 // ceiling admits, and how many of those only through the intrinsic rule. It
@@ -80,8 +80,8 @@ type LaunchDeliveryEdgeFacts struct {
 	UATRecorded bool `json:"uatRecorded"`
 	// InitiatorCredentialKind is the edge's initiator credential kind. A
 	// scheduler-recorded edge with initiator "uat" carries a token's list
-	// but is not a uatRecordedHop (design section 7.3, Q-K): counted, and
-	// unchanged.
+	// but is not a uatRecordedHop: scheduler-recorded hops are not token
+	// hops. Counted, and unchanged.
 	InitiatorCredentialKind string `json:"initiatorCredentialKind,omitempty"`
 }
 
@@ -140,7 +140,8 @@ type LaunchDeliveryCensusRow struct {
 // UATRootNotAdmitted those withheld launch material because their root user
 // is not admitted to the project (cohort uat_root_not_admitted).
 // SchedulerUATInitiated counts scheduler-recorded own edges whose initiator
-// credential was a user access token (Q-K; unchanged by the intrinsic set).
+// credential was a user access token (scheduler-recorded hops are not token
+// hops, so the intrinsic set does not change them).
 type LaunchDeliveryCensusReport struct {
 	Agents                  int `json:"agents"`
 	Withheld                int `json:"withheld"`

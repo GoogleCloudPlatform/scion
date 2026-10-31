@@ -79,7 +79,7 @@ func TestLaunchDeliveryCensus_Cohorts(t *testing.T) {
 	hdEdge(t, f.store, store.DelegationPrincipalUser, f.memberNoneID, uatNonMember, alpha, uatEdge)
 
 	// A scheduler-recorded edge whose schedule was written with a token
-	// (Q-K): counted, and unchanged.
+	// counted, and unchanged: scheduler-recorded hops are not token hops.
 	schedUAT := tid("census-sched-uat")
 	hdAgent(t, f.store, schedUAT, alpha, []string{owner})
 	hdEdge(t, f.store, store.DelegationPrincipalUser, owner, schedUAT, alpha, func(e *store.DelegationEdge) {
@@ -210,7 +210,7 @@ func TestLaunchDeliveryCensus_SkipsDeletedAgents(t *testing.T) {
 // token-created agent. For every agent the delivered launch item set is the
 // one main delivered (pinned below: every agent received every deliver
 // permission); only the cohort labels change. Equivalence holds for agents
-// whose root user is admitted to the project (the P0 amendment; the
+// whose root user is admitted to the project (the
 // non-admitted case is TestUATIntrinsic_RootNotAdmittedWithheld).
 func TestLaunchDeliveryCensus_EquivalenceWithMain(t *testing.T) {
 	m := newLDFixture(t, "census-eq", ldOptions{noEdge: true})
@@ -237,7 +237,7 @@ func TestLaunchDeliveryCensus_EquivalenceWithMain(t *testing.T) {
 	grandchild := agentAt("uat-grandchild", []string{owner, uat, child}, store.DelegationPrincipalAgent, child, withBoundedCeiling("agent.read"))
 
 	// main's verdicts, pinned: every agent received every deliver
-	// permission; the cohort a start reported on main, and after P0.
+	// permission; the cohort a start reported on main, and now.
 	type pinned struct{ mainCohort, p0Cohort string }
 	want := map[string]pinned{
 		uat:        {"uat_created_no_deliver_mapping", "delivers"},
@@ -258,7 +258,7 @@ func TestLaunchDeliveryCensus_EquivalenceWithMain(t *testing.T) {
 		r, ok := rows[id]
 		require.True(t, ok, id)
 		for _, perm := range LaunchDeliveryCensusPermissions {
-			assert.True(t, r.Verdicts[perm].Allowed, "%s %s: delivered on main, delivered after P0", id, perm)
+			assert.True(t, r.Verdicts[perm].Allowed, "%s %s: delivered on main, delivered now", id, perm)
 		}
 		assert.Equal(t, p.p0Cohort, r.Cohort, "%s: only the label changes (main: %s)", id, p.mainCohort)
 
@@ -270,7 +270,7 @@ func TestLaunchDeliveryCensus_EquivalenceWithMain(t *testing.T) {
 	}
 	// Negative control (LEGACY DATA: a descendant of a token hop whose
 	// child edge narrowed deliver for another reason): below the token
-	// agent, an agent edge recorded after P0 carries deliver, and its child's
+	// agent, an agent edge recorded since carries deliver, and its child's
 	// edge lacks it. The hop above the narrowing allows the permission, so
 	// the narrowing is real and is denied, as on main.
 	carrying := agentAt("carrying", []string{owner, uat}, store.DelegationPrincipalAgent, uat,

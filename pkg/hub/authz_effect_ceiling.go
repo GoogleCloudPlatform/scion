@@ -92,8 +92,7 @@ var nonSelfOperationPermissionIDs = []string{
 var selfOperationSet = toPermissionSet(selfOperationPermissionIDs)
 
 // uatIntrinsicPermissionIDs are the agent-only permissions that a token's
-// permission list cannot express and does not narrow (ptone, item U, M2).
-// A session-created agent of the same role has their effect; each is still
+// permission list cannot express and does not narrow. A session-created agent of the same role has their effect; each is still
 // bound by a per-item relationship or ownership rule outside the ceiling.
 // project.secret_read and agent.identity_token are deliberately not here.
 var uatIntrinsicPermissionIDs = []string{

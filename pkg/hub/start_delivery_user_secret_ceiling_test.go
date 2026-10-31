@@ -725,9 +725,9 @@ func sdWarnRecordsFor(t *testing.T, raw, secretName string) []map[string]any {
 	return out
 }
 
-// TestStartDelivery_UATHopBoundedByCeiling (design item U, section 2.5,
-// sec-review-3 M1): the intrinsic secret.use of a hop recorded from a user
-// access token enters the start-time user-secret ceiling (A') only at S3c
+// TestStartDelivery_UATHopBoundedByCeiling: the intrinsic secret.use of a
+// hop recorded from a user access token enters the start-time user-secret
+// ceiling (EvaluateUserSecretParentCeiling) only at S3c
 // of that hop. Every case holds at create (resolveSecrets), as_needed
 // (resolveAsNeededForKeys) and the start and restart selection
 // (selectDeliverySecrets, inside sdStartDelivery), and agrees with the
