@@ -44,6 +44,39 @@ func Open(path string) (*Home, error) {
 	return &Home{path: path, root: root}, nil
 }
 
+// OpenBelow opens the directory rel below root and returns it as a Home;
+// see the unix version. On this platform each component of rel is checked
+// with Lstat inside an os.Root opened on root before the final directory is
+// opened as the Home's root. The check and the open are separate steps, so
+// a component swapped for a link between them is not caught here (the
+// os.Root still keeps the open inside root).
+func OpenBelow(root, rel string) (*Home, error) {
+	var parts []string
+	if rel != "" {
+		p, err := splitRel(rel)
+		if err != nil {
+			return nil, err
+		}
+		parts = p
+	}
+	r, err := Open(root)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = r.Close() }()
+	if err := r.checkDirs(parts, false, 0); err != nil {
+		return nil, err
+	}
+	if len(parts) == 0 {
+		return Open(root)
+	}
+	sub, err := r.root.OpenRoot(path.Join(parts...))
+	if err != nil {
+		return nil, pathErr("open", root, parts, err)
+	}
+	return &Home{path: filepath.Join(append([]string{root}, parts...)...), root: sub}, nil
+}
+
 // Path returns the broker-side path the home was opened with.
 func (h *Home) Path() string { return h.path }
 
