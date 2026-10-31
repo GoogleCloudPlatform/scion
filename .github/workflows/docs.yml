@@ -42,7 +42,11 @@ concurrency:
 jobs:
   build-docs:
     if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
-    runs-on: ubuntu-latest
+    # Routed to the cr-ci runner when SCION_LARGE_RUNNER is set
+    # (hack/check-runner-routing.sh). Held until the runner-layout switch: the
+    # old symlinked ~/work broke setup-node's npm cache (cr-ci followups v10).
+    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 30
     permissions:
       contents: read
       pages: read # configure-pages reads the Pages site config

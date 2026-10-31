@@ -1895,8 +1895,13 @@ jobs:
     # always on push to main. Fails open: if the changes job did not succeed,
     # the harness runs anyway.
     if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.single_node_vm == 'true')) }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Routed to the cr-ci runner when SCION_LARGE_RUNNER is set
+    # (hack/check-runner-routing.sh). Held until the runner-layout switch: the
+    # scion-layout tests refuse temp trees under a world-writable ancestor, and
+    # the old layout put them under /scratch, mode 777 (cr-ci followups v12).
+    # Hosted runs take 417-457 s, so 15 min leaves headroom on either runner.
+    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
