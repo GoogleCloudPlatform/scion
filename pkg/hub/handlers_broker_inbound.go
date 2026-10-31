@@ -197,6 +197,9 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		// Cache the resolved user ID so downstream DM-ownership and
 		// persistence blocks can reuse it without redundant DB lookups.
 		req.Message.SenderID = senderUser.ID
+		// The sender's profile time zone travels with the message (the
+		// reserved-key strip above removed any plugin-supplied value).
+		req.Message.Metadata = s.stampSenderTimezone(r.Context(), req.Message.Metadata, req.Message.Sender, senderUser.ID)
 		senderIdentity = NewAuthenticatedUser(senderUser.ID, senderUser.Email, senderUser.DisplayName, senderUser.Role, "integration")
 	} else {
 		// Non-user senders use the broker identity (non-nil by the HMAC

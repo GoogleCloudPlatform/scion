@@ -64,15 +64,19 @@ var offloadMetadataKeys = map[string]bool{
 // ptone/scion#4603) are reserved too: the hub sets them on a visitor's
 // message after this strip, so a value from any other source never reaches
 // an agent.
+//
+// messages.MetadataSenderTimezone is reserved for the same reason: the hub
+// sets it from a human sender's profile after this strip.
 var reservedMetadataKeys = map[string]bool{
-	MetaBodyOffloaded:              true,
-	MetaBodyChars:                  true,
-	MetaBodySHA256:                 true,
-	artifacts.MessageMetadataKey:   true,
-	messages.MetadataSenderVisitor: true,
-	messages.MetadataSenderEmail:   true,
-	messages.MetadataSenderIssuer:  true,
-	messages.MetadataSenderDisplay: true,
+	MetaBodyOffloaded:               true,
+	MetaBodyChars:                   true,
+	MetaBodySHA256:                  true,
+	artifacts.MessageMetadataKey:    true,
+	messages.MetadataSenderVisitor:  true,
+	messages.MetadataSenderEmail:    true,
+	messages.MetadataSenderIssuer:   true,
+	messages.MetadataSenderDisplay:  true,
+	messages.MetadataSenderTimezone: true,
 }
 
 // DefaultPreviewBudgetBytes is the compiled default preview byte budget
