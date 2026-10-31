@@ -1953,7 +1953,11 @@ func TestHostGitCommand_RefusesRootCommonDirRedirect(t *testing.T) {
 //     writes its PID to ./.fake-hold-pid, and exits 0;
 //   - fake-arm: creates ./.fake-armed and exits 0; from then on a config
 //     listing in that directory becomes sleep 120 (so the after-run check
-//     blocks).
+//     blocks);
+//   - fake-pwd: writes its physical working directory to $FAKE_PWD_FILE
+//     and exits 0;
+//   - with $FAKE_CONFIG_PWD_FILE set, every config listing appends its
+//     physical working directory to that file before running git.
 func fakeGitOnPath(t *testing.T) (log string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -1974,7 +1978,9 @@ func fakeGitOnPath(t *testing.T) (log string) {
 		"*' fake-block '*) touch .fake-started; exec sleep 30;;\n" +
 		"*' fake-hold '*) sleep 30 & echo $! > .fake-hold-pid; exit 0;;\n" +
 		"*' fake-arm '*) touch .fake-armed; exit 0;;\n" +
-		"*' config --show-scope '*) if [ -e .fake-armed ]; then exec sleep 120; fi;;\n" +
+		"*' fake-pwd '*) pwd -P > \"$FAKE_PWD_FILE\"; exit 0;;\n" +
+		"*' config --show-scope '*) if [ -e .fake-armed ]; then exec sleep 120; fi; " +
+		"if [ -n \"$FAKE_CONFIG_PWD_FILE\" ]; then pwd -P >> \"$FAKE_CONFIG_PWD_FILE\"; fi;;\n" +
 		"esac\n" +
 		"exec '" + realGit + "' \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755); err != nil {
@@ -2446,9 +2452,14 @@ func TestRunHostGit_CeilingLeafBecomesRepository(t *testing.T) {
 		t.Fatal(err)
 	}
 	fakeGitOnPath(t)
-	res = RunHostGit(context.Background(), leaf, HostGitOptions{Env: ceilingEnv()}, "fake-mkgit")
+	res = RunHostGit(context.Background(), leaf, HostGitOptions{Env: ceilingEnv()}, "rev-parse", "fake-mkgit")
 	if !errors.Is(res.Err, ErrRepoConfigChanged) {
 		t.Errorf("a .git created during the run: Err = %v, want ErrRepoConfigChanged", res.Err)
+	}
+	// The after-run .git check fired, not the resolved-elsewhere one.
+	// Mutant: removing the after-run .git check (no error at all).
+	if res.Err == nil || !strings.Contains(res.Err.Error(), "a repository appeared in the command's directory while it ran") {
+		t.Errorf("Err = %v, want the after-run repository-appeared refusal", res.Err)
 	}
 }
 
@@ -2524,5 +2535,167 @@ func TestHostGitCheckers_DoorListingsUseDoorEnv(t *testing.T) {
 				t.Errorf("discovery mode ran %d policy cross-checks, want 0 (nothing to check)", cross)
 			}
 		})
+	}
+}
+
+// The caller's first argument must be the subcommand: an option there
+// (including "--"), or no argument at all, is refused before git runs, in
+// repository and discovery mode, with an error that names no path. Options
+// after the subcommand run.
+// Mutant this catches: removing the first-argument check (the fake git
+// records the call, and the error is not errHostGitArgsOption).
+func TestRunHostGit_RefusesLeadingOption(t *testing.T) {
+	repo, _ := newHostGitRepo(t)
+	leaf := ceilingLeaf(t, ceilingFixture(t, false), "sub/leaf")
+	log := fakeGitOnPath(t)
+	refused := [][]string{
+		{"-C", "x", "status"},
+		{"-C/x", "status"},
+		{"--git-dir=x", "status"},
+		{"--git-dir", "x", "status"},
+		{"--work-tree=x", "status"},
+		{"-c", "k=v", "status"},
+		{"--", "status"},
+		{""},
+		{},
+	}
+	for mode, dir := range map[string]string{"repository": repo, "discovery": leaf} {
+		for _, args := range refused {
+			res := RunHostGit(context.Background(), dir, HostGitOptions{Env: ceilingEnv()}, args...)
+			if !errors.Is(res.Err, errHostGitArgsOption) {
+				t.Errorf("%s %q: Err = %v, want the leading-option refusal", mode, args, res.Err)
+				continue
+			}
+			if res.ExitCode != -1 || strings.Contains(res.Err.Error(), dir) {
+				t.Errorf("%s %q: exit %d, err %q; want -1 and no path", mode, args, res.ExitCode, res.Err)
+			}
+		}
+	}
+	if calls := fakeGitCalls(t, log); len(calls) != 0 {
+		t.Errorf("git ran %d times for refused arguments", len(calls))
+	}
+	for _, args := range [][]string{{"rev-parse", "--git-dir"}, {"worktree", "list", "--porcelain"}} {
+		if res := RunHostGit(context.Background(), repo, HostGitOptions{Env: ceilingEnv()}, args...); res.Err != nil || res.ExitCode != 0 {
+			t.Errorf("repository %q: exit %d, err %v; want it to run", args, res.ExitCode, res.Err)
+		}
+	}
+}
+
+// Discovery mode runs only rev-parse: other subcommands are refused before
+// git runs.
+// Mutant this catches: removing the discovery subcommand check (the fake git
+// records the refused subcommands).
+func TestRunHostGit_DiscoveryRunsOnlyRevParse(t *testing.T) {
+	leaf := ceilingLeaf(t, ceilingFixture(t, false), "sub/leaf")
+	log := fakeGitOnPath(t)
+	for _, sub := range []string{"init", "clone", "config", "status", "worktree"} {
+		res := RunHostGit(context.Background(), leaf, HostGitOptions{Env: ceilingEnv()}, sub)
+		if !errors.Is(res.Err, errHostGitDiscoverySubcommand) || res.ExitCode != -1 {
+			t.Errorf("%s: exit %d, err %v; want the discovery subcommand refusal", sub, res.ExitCode, res.Err)
+		}
+		if strings.Contains(res.Err.Error(), leaf) {
+			t.Errorf("%s: refusal names the directory: %q", sub, res.Err)
+		}
+	}
+	if calls := fakeGitCalls(t, log); len(calls) != 0 {
+		t.Errorf("git ran %d times for refused subcommands", len(calls))
+	}
+	res := RunHostGit(context.Background(), leaf, HostGitOptions{Env: ceilingEnv()}, "rev-parse", "--is-inside-work-tree")
+	if res.Err != nil || res.ExitCode != 128 || !strings.Contains(string(res.Stderr), "not a git repository") {
+		t.Errorf("rev-parse: exit %d, err %v, stderr %q; want it to run and report not a git repository", res.ExitCode, res.Err, res.Stderr)
+	}
+}
+
+// Discovery mode runs git, and its config listing, in the directory as
+// resolved before it starts: a symlink repointed right after resolution
+// (here from the hostGitAfterResolve test hook) does not move them, and the
+// after-run check fails the command because the directory now resolves
+// elsewhere.
+// Mutants this catches: cmd.Dir = dir (the command runs in B);
+// readFilterPins(ctx, dir, ...) instead of runDir (the listing runs in B);
+// verify not re-resolving (Err is nil).
+func TestRunHostGit_DiscoveryPinsResolvedDir(t *testing.T) {
+	hostGitTestEnv(t)
+	base := t.TempDir()
+	dirA := filepath.Join(base, "a")
+	dirB := filepath.Join(base, "b")
+	for _, d := range []string{dirA, dirB} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(dirA, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	wantA, err := filepath.EvalSymlinks(dirA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeGitOnPath(t)
+	pwdFile := filepath.Join(t.TempDir(), "pwd")
+	listingFile := filepath.Join(t.TempDir(), "listing-pwd")
+	t.Setenv("FAKE_PWD_FILE", pwdFile)
+	t.Setenv("FAKE_CONFIG_PWD_FILE", listingFile)
+	orig := hostGitAfterResolve
+	hostGitAfterResolve = func(string) {
+		if err := os.Remove(link); err != nil {
+			t.Errorf("fixture: %v", err)
+		}
+		if err := os.Symlink(dirB, link); err != nil {
+			t.Errorf("fixture: %v", err)
+		}
+	}
+	t.Cleanup(func() { hostGitAfterResolve = orig })
+	res := RunHostGit(context.Background(), link, HostGitOptions{Env: ceilingEnv()}, "rev-parse", "fake-pwd")
+	got, err := os.ReadFile(pwdFile)
+	if err != nil {
+		t.Fatalf("the command did not run: %v (Err %v)", err, res.Err)
+	}
+	if strings.TrimSpace(string(got)) != wantA {
+		t.Errorf("git ran in %q, want the resolved %q", strings.TrimSpace(string(got)), wantA)
+	}
+	listing, err := os.ReadFile(listingFile)
+	if err != nil {
+		t.Fatalf("no config listing ran: %v", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(listing)), "\n") {
+		if line != wantA {
+			t.Errorf("the config listing ran in %q, want the resolved %q", line, wantA)
+		}
+	}
+	if target, _ := os.Readlink(link); target != dirB {
+		t.Fatalf("fixture: the link was not repointed (now %q)", target)
+	}
+	if !errors.Is(res.Err, ErrRepoConfigChanged) {
+		t.Errorf("Err = %v, want ErrRepoConfigChanged after the directory resolved elsewhere", res.Err)
+	}
+}
+
+// A .git that appears in the resolved directory after the first discovery
+// check (here from the hostGitAfterResolve test hook) is refused before git
+// runs there.
+// Mutant this catches: removing the re-check of the resolved directory (the
+// fake git records the config listing and the command, and Err is not the
+// before-run refusal).
+func TestRunHostGit_DiscoveryRechecksResolvedDir(t *testing.T) {
+	leaf := ceilingLeaf(t, ceilingFixture(t, false), "sub/leaf")
+	log := fakeGitOnPath(t)
+	orig := hostGitAfterResolve
+	hostGitAfterResolve = func(resolved string) {
+		if err := os.Mkdir(filepath.Join(resolved, ".git"), 0o755); err != nil {
+			t.Errorf("fixture: %v", err)
+		}
+	}
+	t.Cleanup(func() { hostGitAfterResolve = orig })
+	res := RunHostGit(context.Background(), leaf, HostGitOptions{Env: ceilingEnv(), Audience: AudienceRemote}, "rev-parse", "--is-inside-work-tree")
+	if !errors.Is(res.Err, ErrRepoConfigChanged) || !strings.Contains(res.Err.Error(), "before it ran") {
+		t.Fatalf("Err = %v, want the before-run repository-appeared refusal", res.Err)
+	}
+	if res.ExitCode != -1 || strings.Contains(res.Err.Error(), leaf) {
+		t.Errorf("exit %d, err %q; want -1 and no path", res.ExitCode, res.Err)
+	}
+	if calls := fakeGitCalls(t, log); len(calls) != 0 {
+		t.Errorf("git ran %d times after the directory became a repository", len(calls))
 	}
 }
