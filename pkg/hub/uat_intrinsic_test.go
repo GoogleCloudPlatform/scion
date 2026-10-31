@@ -32,6 +32,7 @@ import (
 	"context"
 	"go/ast"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"sort"
 	"strings"
@@ -731,7 +732,7 @@ func TestUATIntrinsic_LegacyData(t *testing.T) {
 		require.Len(t, edges, 1)
 		now := time.Now()
 		_, err := f.Store.DeactivateDelegationEdgesForDelegate(context.Background(), store.DelegationPrincipalAgent, id,
-			store.Deactivation{Cause: store.EdgeDeactivationReincarnateReplaced, At: &now, OpID: "ui-reissue"})
+			store.Deactivation{Cause: store.EdgeDeactivationScopeReissueReplaced, At: &now, OpID: "ui-reissue"})
 		require.NoError(t, err)
 		f.recordEdge(t, store.DelegationPrincipalUser, f.UserID, id, edges[0].EffectCeiling, func(e *store.DelegationEdge) {
 			e.AuthorityProvenance = edges[0].AuthorityProvenance
@@ -748,8 +749,41 @@ func TestUATIntrinsic_LegacyData(t *testing.T) {
 			_, _, hopFits := childRoleWithinCeiling(hop, role, true)
 			assert.Equal(t, storedFits, hopFits, "%s: the intrinsic set does not change which role fits", role)
 		}
-		_, _, fullFits := childRoleWithinCeiling(hop, AgentRoleFull, true)
-		assert.False(t, fullFits, "the full role still needs project.secret_read")
+	})
+	t.Run("role reincarnate from a token through the handler", func(t *testing.T) {
+		srv, s, project, agent := reincarnateAuthzFixture(t)
+		seedAgentEdge(t, s, agent.OwnerID, agent)
+		user := newReincarnateAuthzUser(t, s, "ui-role-pat")
+		grantProjectRole(t, s, user.ID, project.ID, store.ProjectRoleOwner)
+		grantAgentLifecycleAtProject(t, s, user.ID, project.ID)
+		grantAgentDelegationAtProject(t, s, user.ID, project.ID)
+		identity := scopedIdentityFor(user, project.ID, append(minimalSelectors(t), "agent:lifecycle"))
+
+		// An explicit full role still does not fit the token's hop ceiling.
+		rec := httptest.NewRecorder()
+		srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, identity,
+			ReincarnateAgentRequest{Handoff: "h", Role: string(AgentRoleFull)}), agent.ID)
+		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "delegation_ceiling")
+
+		// A role change the token covers re-records the edge from the token.
+		rec = httptest.NewRecorder()
+		srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, identity,
+			ReincarnateAgentRequest{Handoff: "h", Role: string(AgentRoleReadOnly)}), agent.ID)
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+		waitForReincarnationSettled(t, s, agent.ID)
+		edges := activeEdgesFor(t, s, agent.ID)
+		require.Len(t, edges, 1)
+		require.Equal(t, user.ID, edges[0].DelegatorID)
+		require.True(t, uatRecordedHop(edges[0].AuthorityProvenance, edges[0].EffectCeiling), "the re-recorded edge is a token hop")
+		for _, p := range uatIntrinsicPermissionIDs {
+			assert.False(t, EffectCeilingAllows(edges[0].EffectCeiling, p, false), "the stored edge stays the token's list (%s)", p)
+		}
+		reincarnated, err := s.GetAgent(context.Background(), agent.ID)
+		require.NoError(t, err)
+		deliver, err := srv.authzService.parentDeliverEligibility(context.Background(), reincarnated)
+		require.NoError(t, err)
+		assert.ElementsMatch(t, hubDeliveryPermissionList, deliver, "the set applies to the re-recorded hop")
 	})
 	t.Run("agent created by a token before 2355: adopted edge, not uat", func(t *testing.T) {
 		f := newSDFixture(t, "ui-legacy-adopted")
