@@ -130,9 +130,10 @@ func (s *Server) dispatchLocked(ctx context.Context, v *view, repo githubapp.Rep
 			}
 		}
 	}
-	// Runner bookkeeping: a live record serving this job counts too (a
-	// rebound runner's GH_JOB_ID is its launch job). A record whose
-	// execution is done does not.
+	// A runner rebound to this job still has its launch job in GH_JOB_ID,
+	// so the loop above misses it: a live record serving this job counts
+	// too. A record whose execution is done does not, so a free slot is
+	// refilled.
 	for rn, rec := range s.runners {
 		if rec.serve != serve || rec.reassigned {
 			continue
@@ -186,7 +187,7 @@ func (s *Server) dispatchLocked(ctx context.Context, v *view, repo githubapp.Rep
 	}
 	now := s.o.Now()
 	s.runners[name] = &runnerRecord{repo: repo, serve: serve, runID: runID, ref: ref, runnerID: runnerID, at: now}
-	// Runner bookkeeping: the name is in use again.
+	// The name belongs to this runner now, not to an earlier one.
 	delete(s.forgotten, name)
 	runners[name] = githubapp.Runner{ID: runnerID, Name: name, Status: "offline"}
 	v.execs = append(v.execs, launcher.Execution{Ref: ref, JobID: serve, RunnerName: name, Created: now})
@@ -339,13 +340,13 @@ func (s *Server) recordLive(rn string, rec *runnerRecord, live, execs []launcher
 }
 
 // forgetRunner drops the record and claim of a runner whose job finished.
-// Runner bookkeeping: it acts only when runnerID (the webhook's runner_id) is
-// the recorded runner's.
+// Runner names are reused, so it acts only when runnerID (the webhook's
+// runner_id) is known and is the recorded registration ID.
 func (s *Server) forgetRunner(name string, runnerID int64, attrs []any) {
 	s.dispatchMu.Lock()
 	defer s.dispatchMu.Unlock()
 	rec := s.runners[name]
-	if rec == nil || rec.runnerID != runnerID {
+	if runnerID == 0 || rec == nil || rec.runnerID != runnerID {
 		recorded := int64(0)
 		if rec != nil {
 			recorded = rec.runnerID

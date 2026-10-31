@@ -10,7 +10,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/cr-ci/mediator/internal/logging"
 )
 
-// Runner bookkeeping tests.
+// Tests for runner records when runner names are reused.
 
 // onRunner sets workflow_job.runner_id in a webhook body.
 func onRunner(body []byte, runnerID int64) []byte {
@@ -252,4 +252,67 @@ func TestReconcileGuardsLiveReusedName(t *testing.T) {
 			t.Errorf("result %+v, cr-job-101 active %d; want the reused name checked and killed", res, h.activeFor("cr-job-101"))
 		}
 	})
+}
+
+// TestReboundRecordDoneAllowsRelaunch: after a restart, job 101 takes cr-job-100
+// while cr-job-101 is idle, so cr-job-101 gets a rebind-created record (no
+// execution ref) serving job 100. Once cr-job-101 is gone and its execution done,
+// that record must not block a runner for the still-queued job 100: a re-check
+// launches exactly one, and reconcile launches nothing more.
+func TestReboundRecordDoneAllowsRelaunch(t *testing.T) {
+	first := newHarness(t, harnessOpts{})
+	first.addSameRepoRun(10)
+	first.addSameRepoRun(11)
+	first.queued(100, 10)
+	first.queued(101, 11)
+	h := newHarness(t, harnessOpts{reuseFrom: first}) // fresh memory, same world
+	h.gh.SetJob(11, fakes.GitHubJob{ID: 101, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-100"})
+	if code, out := h.webhook(inProgress(101, 11, testRepo, "cr-job-100")); code != http.StatusOK || !strings.Contains(out, "swap") {
+		t.Fatalf("in_progress 101: %d %q", code, out)
+	}
+	rec, ok := h.record("cr-job-101")
+	if !ok || rec.serve != 100 || rec.reassigned || rec.ref != "" {
+		t.Fatalf("cr-job-101 record = %+v %v, want a rebind-created record (no ref) serving job 100", rec, ok)
+	}
+	h.gh.RemoveRunner("cr-job-101")
+	h.cr.CompleteRunner("cr-job-101")
+	execs := len(h.executions())
+
+	if code, _ := h.webhook(inProgress(101, 11, testRepo, "cr-job-100")); code != http.StatusOK {
+		t.Fatalf("in_progress 101 redelivered: %d", code)
+	}
+	if got := len(h.executions()); got != execs+1 || h.activeFor("cr-job-101") != 1 {
+		t.Fatalf("executions %d -> %d, cr-job-101 active %d; want exactly one relaunch for job 100", execs, got, h.activeFor("cr-job-101"))
+	}
+	if res := h.reconcile(); res.Backfilled != 0 {
+		t.Errorf("reconcile backfilled %d", res.Backfilled)
+	}
+	if got := len(h.executions()); got != execs+1 {
+		t.Errorf("executions = %d, want %d: exactly one relaunch", got, execs+1)
+	}
+}
+
+// TestCompletedWithoutRunnerIDKeepsRecord: a completed event without a runner_id
+// leaves the record, its claim and the name alone, even for a record whose
+// registration ID is unknown (0).
+func TestCompletedWithoutRunnerIDKeepsRecord(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	h.addSameRepoRun(10)
+	h.queued(100, 10)
+	h.srv.dispatchMu.Lock()
+	h.srv.runners["cr-job-100"].runnerID = 0
+	h.srv.dispatchMu.Unlock()
+
+	if code, _ := h.webhook(jobEvent("completed", 100, 10, testRepo, "success", "cr-job-100")); code != http.StatusOK {
+		t.Fatalf("completed: %d", code)
+	}
+	if _, ok := h.record("cr-job-100"); !ok {
+		t.Error("record deleted by a completed event without a runner_id")
+	}
+	if !h.claims.Pending(100) {
+		t.Error("claim dropped by a completed event without a runner_id")
+	}
+	if h.forgottenHas("cr-job-100") {
+		t.Error("cr-job-100 forgotten by a completed event without a runner_id")
+	}
 }
