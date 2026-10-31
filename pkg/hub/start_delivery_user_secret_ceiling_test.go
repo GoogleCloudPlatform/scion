@@ -820,6 +820,7 @@ func TestStartDelivery_UATHopBoundedByCeiling(t *testing.T) {
 			userSecretResource(meta.ID, meta.ScopeID), &steps)
 		require.False(t, d.Allowed)
 		assert.Equal(t, DenyCauseCeilingSourceNotAllowed, d.DenyCause, "S7 refuses; reason %q", d.Reason)
+		assert.Equal(t, "secret author is not its owner", d.Reason, "the S7 clause, not S8 (same cause)")
 		assert.True(t, slices.ContainsFunc(steps, func(s DecisionStep) bool { return s.Step == "secret_parent_ceiling_uat_intrinsic" }),
 			"the token hop passed S3c through the intrinsic rule before S7: %+v", steps)
 
