@@ -350,6 +350,242 @@ func recoverLocalBootstrapStages(parent, base string) error {
 	return err
 }
 
+// signedBootstrapInPlace is case C: a per-agent directory, or a project
+// path not checked at admission, which every dispatch applies. It downloads
+// everything into a stage beside W first, so a failed download leaves W as
+// it was, then applies the stage into W in place.
+func (s *Server) signedBootstrapInPlace(ctx context.Context, req CreateAgentRequest, w string) error {
+	parent, base := filepath.Dir(w), filepath.Base(w)
+	if err := os.MkdirAll(w, 0o755); err != nil {
+		return &signedCommitError{Class: signedCommitStage}
+	}
+	stage, err := newBootstrapStageName(base)
+	if err != nil {
+		return &signedCommitError{Class: signedCommitStage}
+	}
+	stagePath := filepath.Join(parent, stage)
+	if err := os.Mkdir(stagePath, 0o755); err != nil {
+		return &signedCommitError{Class: signedCommitStage}
+	}
+	written, err := s.signedWorkspaceDownload(ctx, req, stagePath)
+	if err != nil {
+		_ = os.RemoveAll(stagePath)
+		return err
+	}
+	if err := applyStageInPlace(parent, stage, base, written); err != nil {
+		if errors.Is(err, errSignedBootstrapCrash) {
+			return err
+		}
+		_ = os.RemoveAll(stagePath)
+		return err
+	}
+	if err := os.RemoveAll(stagePath); err != nil {
+		return &signedCommitError{Class: signedCommitApply}
+	}
+	return nil
+}
+
+// applyStageInPlace moves the files of the stage directory stage into the
+// workspace directory w, both entries of parent, and then removes every
+// entry of w outside the listed set, except the root identity entry. A W
+// entry whose type conflicts with the listed set (a file where a listed
+// path needs a directory, or a directory where a file is listed) is removed
+// first; the root identity entry is never touched. Each file is renamed into
+// place atomically; W is never emptied as a whole. All operations go through
+// an os.Root on parent.
+func applyStageInPlace(parent, stage, w string, files []string) error {
+	root, err := os.OpenRoot(parent)
+	if err != nil {
+		return &signedCommitError{Class: signedCommitApply}
+	}
+	defer func() { _ = root.Close() }()
+
+	listed := make(map[string]bool, len(files))
+	dirs := map[string]bool{}
+	for _, p := range files {
+		if transfer.ExcludeWorkspaceObject(p) != transfer.WorkspaceObjectKept {
+			return &signedCommitError{Class: signedCommitApply}
+		}
+		listed[p] = true
+		for d := path.Dir(p); d != "."; d = path.Dir(d) {
+			dirs[d] = true
+		}
+	}
+	sorted := append([]string(nil), files...)
+	sort.Strings(sorted)
+
+	for _, p := range sorted {
+		parts := strings.Split(p, "/")
+		for i := 1; i < len(parts); i++ {
+			if err := ensureApplyDir(root, w+"/"+strings.Join(parts[:i], "/")); err != nil {
+				return err
+			}
+		}
+		target := w + "/" + p
+		if fi, err := root.Lstat(target); err == nil && fi.IsDir() {
+			if err := root.RemoveAll(target); err != nil {
+				return &signedCommitError{Class: signedCommitApply}
+			}
+		}
+		if err := root.Rename(stage+"/"+p, target); err != nil {
+			return &signedCommitError{Class: signedCommitApply}
+		}
+		if err := signedBootstrapHook("apply_file"); err != nil {
+			return err
+		}
+	}
+
+	var extras []string
+	err = fs.WalkDir(root.FS(), w, func(name string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if name == w {
+			return nil
+		}
+		rel := strings.TrimPrefix(name, w+"/")
+		if first, _, _ := strings.Cut(rel, "/"); first == transfer.WorkspaceIdentityEntry {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			if !dirs[rel] {
+				extras = append(extras, name)
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !listed[rel] {
+			extras = append(extras, name)
+		}
+		return nil
+	})
+	if err != nil {
+		return &signedCommitError{Class: signedCommitApply}
+	}
+	for _, name := range extras {
+		if err := root.RemoveAll(name); err != nil {
+			return &signedCommitError{Class: signedCommitApply}
+		}
+	}
+	return nil
+}
+
+// ensureApplyDir makes name (relative to root) a real directory: an entry
+// of another type there (a file or a symlink) is removed first, then a
+// missing directory is created.
+func ensureApplyDir(root *os.Root, name string) error {
+	fi, err := root.Lstat(name)
+	switch {
+	case err == nil && fi.IsDir():
+		return nil
+	case err == nil:
+		if err := root.Remove(name); err != nil {
+			return &signedCommitError{Class: signedCommitApply}
+		}
+	case !errors.Is(err, fs.ErrNotExist):
+		return &signedCommitError{Class: signedCommitApply}
+	}
+	if err := root.Mkdir(name, 0o777); err != nil {
+		return &signedCommitError{Class: signedCommitApply}
+	}
+	return nil
+}
+
+// leafHasEntries reports whether the directory ws holds any entry at all,
+// provisioning artifacts included. An unreadable directory counts as
+// holding entries.
+func leafHasEntries(ws string) bool {
+	entries, err := os.ReadDir(ws)
+	return err != nil || len(entries) > 0
+}
+
+// applySharedSignedBootstrap is case B, the signed bootstrap of a
+// hub-managed project's shared workspace leaf (rel below the Layout's host
+// base). Under the provisioning locks it first removes any stale stage of
+// the leaf, then leaves an in-use leaf alone (skipped). A leaf holding only
+// provisioning artifacts fails closed with leaf_busy, touching nothing.
+// Otherwise it creates the stage with the leaf's owner, mode and default
+// ACL, downloads into it, re-checks that the leaf is still empty, renames
+// the stage over the empty leaf and writes the sentinel last.
+func (s *Server) applySharedSignedBootstrap(ctx context.Context, req CreateAgentRequest, rel string) (skipped bool, err error) {
+	base, err := filepath.EvalSymlinks(s.config.StorageLayout.HostBase)
+	if err != nil {
+		return false, fmt.Errorf("resolve host base: %w", err)
+	}
+	stateRel := filepath.Join(filepath.Dir(rel), provision.ProvisionStateDirName)
+	owner := shareddirs.Owner{UID: s.config.StorageLayout.UID, GID: s.config.StorageLayout.GID}
+	if err := ensureWorkspaceAndStateLeaves(base, rel, stateRel, owner); err != nil {
+		return false, err
+	}
+	wsPath := filepath.Join(base, rel)
+	parent, leaf := filepath.Dir(wsPath), filepath.Base(wsPath)
+	err = provision.WithWorkspaceProvisionLocks(ctx, wsPath, func(lockCtx context.Context) error {
+		// Every writer of a stage for this leaf holds these locks while the
+		// stage exists, so any stage seen here is stale.
+		if _, err := removeStaleBootstrapStages(parent, leaf); err != nil {
+			return err
+		}
+		if sharedWorkspaceProvisioned(wsPath) {
+			skipped = true
+			return nil
+		}
+		if leafHasEntries(wsPath) {
+			return &signedCommitError{Class: signedCommitLeafBusy}
+		}
+		stage, err := newBootstrapStageName(leaf)
+		if err != nil {
+			return &signedCommitError{Class: signedCommitStage}
+		}
+		stageRel := filepath.Join(filepath.Dir(rel), stage)
+		fd, existed, err := shareddirs.EnsureLeafOwned(base, stageRel, owner)
+		if err != nil {
+			return &signedCommitError{Class: signedCommitStage}
+		}
+		if err := shareddirs.CloseFd(fd); err != nil || existed {
+			return &signedCommitError{Class: signedCommitStage}
+		}
+		stagePath := filepath.Join(parent, stage)
+		if _, err := s.signedWorkspaceDownload(lockCtx, req, stagePath); err != nil {
+			_ = os.RemoveAll(stagePath)
+			return err
+		}
+		if err := signedBootstrapHook("before_rename"); err != nil {
+			return err
+		}
+		// Re-checked under the same locks: the rename only ever replaces a
+		// truly empty leaf.
+		if sharedWorkspaceProvisioned(wsPath) {
+			_ = os.RemoveAll(stagePath)
+			skipped = true
+			return nil
+		}
+		if leafHasEntries(wsPath) {
+			_ = os.RemoveAll(stagePath)
+			return &signedCommitError{Class: signedCommitLeafBusy}
+		}
+		if err := lockCtx.Err(); err != nil {
+			_ = os.RemoveAll(stagePath)
+			return fmt.Errorf("provisioning lock lost: %w", err)
+		}
+		if err := renameSiblingDir(parent, stage, leaf); err != nil {
+			_ = os.RemoveAll(stagePath)
+			return &signedCommitError{Class: signedCommitApply}
+		}
+		if err := signedBootstrapHook("after_rename"); err != nil {
+			return err
+		}
+		// The sentinel is irreversible: never write it under a lost lock.
+		if err := lockCtx.Err(); err != nil {
+			return fmt.Errorf("provisioning lock lost: %w", err)
+		}
+		return provision.MarkProvisioned(provision.ProjectStateDir(wsPath))
+	})
+	return skipped, err
+}
+
 // Fixed texts and ops of the signed bootstrap.
 const (
 	// opSelectWorkspaceDownload is the op logged for a refused download mode.
