@@ -37,7 +37,13 @@ import (
 //   - env.KEY for each env key the request removes, under the same rule
 //     removedConfigEntries uses (the caller can view the agent's env; the
 //     auto-expose keys and TZ are never counted as removed), and also when
-//     the request removes every key.
+//     the request removes every key;
+//   - resources.<sub-field> for each resources sub-field old stores that a
+//     request presenting resources with a value that is not empty leaves
+//     out (droppedResourceSubPaths, ptone/scion#5676). Each sub-field such a
+//     request sets is dropped from the list, and a recorded whole resources
+//     clear replaces every resources.<sub-field> entry, so the list never
+//     holds both.
 //
 // req is the decoded request with the fixed keys already dropped, so a
 // cleared_fields value a client sends is never taken. The result is sorted,
@@ -45,9 +51,11 @@ import (
 //
 // The PATCH dispositions and warnings report a recorded clear as applied at
 // the next start only when the agent's broker advertises clearedFields
-// (brokerStartSupport.heldClearEdits, ptone/scion#4890): a broker that
-// predates ClearedFields keeps the previous value, so for it the clear
-// still waits for the next reincarnation.
+// (brokerStartSupport.heldClearEdits, ptone/scion#4890), and a resources
+// sub-field clear only when it also advertises clearedResourceSubfields: an
+// older broker keeps the previous value, so for it the clear still waits
+// for the next reincarnation. The list is recorded whatever the broker
+// supports, so a broker upgraded later applies it.
 func nextClearedFields(old, req *api.ScionConfig, rawConfig map[string]json.RawMessage, cleared []string, canViewEnv bool) []string {
 	set := map[string]bool{}
 	if old != nil {
@@ -69,6 +77,13 @@ func nextClearedFields(old, req *api.ScionConfig, rawConfig map[string]json.RawM
 			delete(set, api.ClearedEnvPathPrefix+k)
 		}
 	}
+	if present["resources"] && req != nil && req.Resources != nil {
+		for _, p := range api.ResourceSubPaths() {
+			if *api.ResourceSubField(req.Resources, p) != "" {
+				delete(set, p)
+			}
+		}
+	}
 
 	for _, key := range cleared {
 		if k := strings.TrimPrefix(key, agentConfigKeyPrefix); api.ClearableConfigPath(k) {
@@ -86,6 +101,14 @@ func nextClearedFields(old, req *api.ScionConfig, rawConfig map[string]json.RawM
 			set[api.ClearedEnvPathPrefix+k] = true
 		}
 	}
+	for _, p := range droppedResourceSubPaths(old, req, present) {
+		set[p] = true
+	}
+	if set["resources"] {
+		for _, p := range api.ResourceSubPaths() {
+			delete(set, p)
+		}
+	}
 
 	if len(set) == 0 {
 		return nil
@@ -98,27 +121,37 @@ func nextClearedFields(old, req *api.ScionConfig, rawConfig map[string]json.RawM
 	return out
 }
 
+// droppedResourceSubPaths returns the resources sub-paths
+// (api.ResourceSubPaths, sorted) of the sub-fields old stores that the
+// request leaves out when it presents resources with a value that is not
+// empty. The start merge (config.MergeResourceSpec) applies only non-empty
+// sub-fields, so a dropped one keeps its previous value unless it is
+// recorded in cleared_fields (ptone/scion#5676). A resources value that is
+// empty as a whole is a whole clear, which reincarnateOnlyConfigEdits
+// reports, and gives nil here.
+func droppedResourceSubPaths(old, req *api.ScionConfig, present map[string]bool) []string {
+	if !present["resources"] || old == nil || old.Resources == nil || req == nil || req.Resources == nil || *req.Resources == (api.ResourceSpec{}) {
+		return nil
+	}
+	var out []string
+	for _, p := range api.ResourceSubPaths() {
+		if *api.ResourceSubField(old.Resources, p) != "" && *api.ResourceSubField(req.Resources, p) == "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // withDroppedResourcesSubField returns cleared (wire keys of cleared
 // container keys, from reincarnateOnlyConfigEdits) with config.resources
-// added, in sorted order, when the request presents resources with a value
-// that is not empty yet drops a sub-field old stores (requests or limits
-// cpu or memory, or disk). The start merge (config.MergeResourceSpec)
-// applies only non-empty sub-fields, so the dropped one keeps its previous
-// value until the next reincarnation, which is what the cleared warning
-// and the held disposition say (ptone/scion#5676). It is never recorded in
-// cleared_fields: that would revert the whole resources value, the
-// sub-fields the request sets included. A resources value that is empty
-// as a whole is a clear reincarnateOnlyConfigEdits already reports.
+// added, in sorted order, when the request drops a resources sub-field old
+// stores (droppedResourceSubPaths). nextClearedFields records each dropped
+// sub-field; whether the next start applies it depends on the broker
+// (brokerStartSupport.heldClearEdits). A resources value that is empty as a
+// whole is a clear reincarnateOnlyConfigEdits already reports.
 func withDroppedResourcesSubField(cleared []string, old, req *api.ScionConfig, present map[string]bool) []string {
 	const key = agentConfigKeyPrefix + "resources"
-	if !present["resources"] || old == nil || old.Resources == nil || req == nil || req.Resources == nil || slices.Contains(cleared, key) {
-		return cleared
-	}
-	o, r := old.Resources, req.Resources
-	dropped := func(oldV, newV string) bool { return oldV != "" && newV == "" }
-	if !dropped(o.Requests.CPU, r.Requests.CPU) && !dropped(o.Requests.Memory, r.Requests.Memory) &&
-		!dropped(o.Limits.CPU, r.Limits.CPU) && !dropped(o.Limits.Memory, r.Limits.Memory) &&
-		!dropped(o.Disk, r.Disk) {
+	if slices.Contains(cleared, key) || len(droppedResourceSubPaths(old, req, present)) == 0 {
 		return cleared
 	}
 	out := append(append([]string(nil), cleared...), key)

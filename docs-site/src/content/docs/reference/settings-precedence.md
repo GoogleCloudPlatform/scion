@@ -75,8 +75,10 @@ harnesses still rebuild their managed instruction block at every start). A start
 a clear the merge into the stored config keeps (an empty `agent_instructions` or `services`, an
 emptied skill list) or a removed skill; those wait for the next reincarnation. A cleared key
 reverts to the inherited value (`cleared_fields`) at the next start on a Runtime Broker with the
-`clearedFields` capability; a cleared `system_prompt` is rendered again from the template. With
-an older Runtime Broker these edits apply at the next reincarnation, as before. See `PATCH /:id`
+`clearedFields` capability; a cleared `system_prompt` is rendered again from the template. A
+`resources` edit that leaves out one sub-field clears just that sub-field, which the resource
+defaults fill again at the next start, on a Runtime Broker with the `clearedResourceSubfields`
+capability. With an older Runtime Broker these edits apply at the next reincarnation, as before. See `PATCH /:id`
 in the [API reference](/scion/reference/api/).
 
 ### The telemetry ladder

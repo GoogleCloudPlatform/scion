@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -196,26 +197,40 @@ func TestBrokerStartSupport_ClearAppliesAtStart(t *testing.T) {
 	}
 	cleared := []string{"config.max_turns", "config.model", "config.resources"}
 	recorded := []string{"max_turns", "resources"}
-	assert.Equal(t, []string{"config.model"}, with.heldClearEdits(cleared, recorded, nil), "a null count limit is a clear the broker applies")
-	assert.Equal(t, cleared, without.heldClearEdits(cleared, recorded, nil))
-	assert.Equal(t, cleared, with.heldClearEdits(cleared, nil, nil), "a clear that was not recorded is not applied")
+	assert.Equal(t, []string{"config.model"}, with.heldClearEdits(cleared, recorded, nil, nil), "a null count limit is a clear the broker applies")
+	assert.Equal(t, cleared, without.heldClearEdits(cleared, recorded, nil, nil))
+	assert.Equal(t, cleared, with.heldClearEdits(cleared, nil, nil, nil), "a clear that was not recorded is not applied")
 	// A recorded null clear of either count limit is applied by a broker
 	// with clearedFields. Their 0 (Unlimited) never reaches heldClearEdits:
 	// the start merge applies it, so it is not reported as cleared
 	// (ptone/scion#5605).
 	for _, key := range []string{"max_turns", "max_model_calls"} {
-		assert.Empty(t, with.heldClearEdits([]string{"config." + key}, []string{key}, nil), key)
-		assert.Equal(t, []string{"config." + key}, without.heldClearEdits([]string{"config." + key}, []string{key}, nil), key)
+		assert.Empty(t, with.heldClearEdits([]string{"config." + key}, []string{key}, nil, nil), key)
+		assert.Equal(t, []string{"config." + key}, without.heldClearEdits([]string{"config." + key}, []string{key}, nil, nil), key)
 	}
 	// env is applied only when every dropped key was recorded: a caller who
 	// cannot view env records none, and auto-expose and TZ keys are never
 	// recorded.
 	env := []string{"config.env"}
-	assert.Empty(t, with.heldClearEdits(env, []string{"env.A", "env.B"}, []string{"A", "B"}))
-	assert.Equal(t, env, with.heldClearEdits(env, []string{"env.A"}, []string{"A", "B"}))
-	assert.Equal(t, env, with.heldClearEdits(env, nil, []string{"A"}))
-	assert.Equal(t, env, with.heldClearEdits(env, nil, []string{"SCION_AUTO_EXPOSE_PORTS"}))
-	assert.Equal(t, env, without.heldClearEdits(env, []string{"env.A"}, []string{"A"}))
+	assert.Empty(t, with.heldClearEdits(env, []string{"env.A", "env.B"}, []string{"A", "B"}, nil))
+	assert.Equal(t, env, with.heldClearEdits(env, []string{"env.A"}, []string{"A", "B"}, nil))
+	assert.Equal(t, env, with.heldClearEdits(env, nil, []string{"A"}, nil))
+	assert.Equal(t, env, with.heldClearEdits(env, nil, []string{"SCION_AUTO_EXPOSE_PORTS"}, nil))
+	assert.Equal(t, env, without.heldClearEdits(env, []string{"env.A"}, []string{"A"}, nil))
+
+	// A resources edit that drops sub-fields is applied only by a broker
+	// with clearedFields and clearedResourceSubfields, and only when every
+	// dropped sub-path was recorded (ptone/scion#5676).
+	res := []string{"config.resources"}
+	dropped := []string{"resources.disk", "resources.limits.memory"}
+	subfields := brokerStartSupportFrom(&store.BrokerCapabilities{ClearedFields: true, ClearedResourceSubfields: true})
+	subfieldsOnly := brokerStartSupportFrom(&store.BrokerCapabilities{ClearedResourceSubfields: true})
+	assert.Empty(t, subfields.heldClearEdits(res, dropped, nil, dropped))
+	assert.Equal(t, res, subfields.heldClearEdits(res, dropped[:1], nil, dropped), "a dropped sub-path that was not recorded")
+	assert.Equal(t, res, with.heldClearEdits(res, dropped, nil, dropped), "clearedFields alone does not apply sub-paths")
+	assert.Equal(t, res, without.heldClearEdits(res, dropped, nil, dropped))
+	assert.Equal(t, res, subfieldsOnly.heldClearEdits(res, dropped, nil, dropped), "sub-paths need clearedFields too")
+	assert.Empty(t, with.heldClearEdits(res, []string{"resources"}, nil, nil), "a recorded whole clear follows the general rule")
 
 	removed := map[string][]string{"env": {"A"}, "volumes": {"/data"}}
 	assert.Equal(t, map[string][]string{"volumes": {"/data"}}, with.heldRemovals(removed, []string{"env.A"}))
@@ -266,6 +281,52 @@ func TestAgentEditability_ClearNeedsReincarnateByBroker(t *testing.T) {
 	}
 }
 
+// TestAgentEditability_SubfieldClearUnsupported: config.resources carries
+// subfieldClearUnsupported unless the agent's broker applies resources
+// sub-field clears (clearedFields and clearedResourceSubfields); no other
+// field ever carries it (ptone/scion#5676).
+func TestAgentEditability_SubfieldClearUnsupported(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sup  brokerStartSupport
+		want bool
+	}{
+		{"no broker", brokerStartSupport{}, true},
+		{"clearedFields only", brokerStartSupport{ClearedFields: true}, true},
+		{"clearedResourceSubfields only", brokerStartSupport{ClearedResourceSubfields: true}, true},
+		{"capable", brokerStartSupport{ClearedFields: true, ClearedResourceSubfields: true}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			access := agentEditAccess{CanUpdate: true, CanChangeRole: true, Broker: tc.sup}
+			for _, phase := range state.Phases() {
+				ed := buildAgentEditability(&store.Agent{Phase: string(phase)}, access)
+				for _, f := range agentEditFields {
+					want := tc.want && f.Key == "config.resources"
+					assert.Equal(t, want, ed.Fields[f.Key].SubfieldClearUnsupported, "%s in %s", f.Key, phase)
+				}
+			}
+		})
+	}
+	raw, err := json.Marshal(FieldEditState{SubfieldClearUnsupported: true})
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"subfieldClearUnsupported":true`)
+	raw, err = json.Marshal(FieldEditState{})
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "subfieldClearUnsupported")
+}
+
+// TestCapabilitiesFromStrings_ClearedResourceSubfields: the registration
+// name sets the stored capability, and brokerStartSupportFrom carries it.
+func TestCapabilitiesFromStrings_ClearedResourceSubfields(t *testing.T) {
+	for _, name := range []string{"clearedResourceSubfields", "cleared_resource_subfields"} {
+		caps := capabilitiesFromStrings([]string{name})
+		assert.True(t, caps.ClearedResourceSubfields, name)
+		assert.True(t, brokerStartSupportFrom(caps).ClearedResourceSubfields, name)
+	}
+	assert.False(t, capabilitiesFromStrings([]string{"clearedFields"}).ClearedResourceSubfields)
+	assert.False(t, brokerStartSupportFrom(nil).ClearedResourceSubfields)
+}
+
 // TestCapabilitiesFromStrings_ClearedFields: the registration name sets
 // the stored capability.
 func TestCapabilitiesFromStrings_ClearedFields(t *testing.T) {
@@ -276,9 +337,10 @@ func TestCapabilitiesFromStrings_ClearedFields(t *testing.T) {
 }
 
 // TestWithDroppedResourcesSubField: a resources edit that drops a stored
-// sub-field is counted as a clear for reporting (ptone/scion#5676); one that
-// keeps or replaces every stored sub-field, or an empty whole value
-// (already a clear), is not added again.
+// sub-field is counted as a clear of config.resources for reporting
+// (ptone/scion#5676), and droppedResourceSubPaths names the dropped
+// sub-paths; one that keeps or replaces every stored sub-field, or an
+// empty whole value (already a clear), is not added again.
 func TestWithDroppedResourcesSubField(t *testing.T) {
 	old := &api.ScionConfig{Resources: &api.ResourceSpec{
 		Requests: api.ResourceList{CPU: "1", Memory: "1Gi"},
@@ -287,23 +349,27 @@ func TestWithDroppedResourcesSubField(t *testing.T) {
 	}}
 	present := map[string]bool{"resources": true}
 	for _, tc := range []struct {
-		name string
-		req  *api.ResourceSpec
-		want []string
+		name      string
+		req       *api.ResourceSpec
+		want      []string
+		wantPaths []string
 	}{
-		{"drops requests.memory", &api.ResourceSpec{Requests: api.ResourceList{CPU: "2"}, Limits: api.ResourceList{Memory: "2Gi"}, Disk: "10Gi"}, []string{"config.max_turns", "config.resources"}},
-		{"drops limits.memory", &api.ResourceSpec{Requests: api.ResourceList{CPU: "1", Memory: "1Gi"}, Disk: "10Gi"}, []string{"config.max_turns", "config.resources"}},
-		{"drops disk", &api.ResourceSpec{Requests: api.ResourceList{CPU: "1", Memory: "1Gi"}, Limits: api.ResourceList{Memory: "2Gi"}}, []string{"config.max_turns", "config.resources"}},
-		{"changes cpu, keeps every other stored sub-field", &api.ResourceSpec{Requests: api.ResourceList{CPU: "2", Memory: "1Gi"}, Limits: api.ResourceList{Memory: "2Gi"}, Disk: "10Gi"}, []string{"config.max_turns"}},
-		{"replaces every stored sub-field", &api.ResourceSpec{Requests: api.ResourceList{CPU: "2", Memory: "2Gi"}, Limits: api.ResourceList{Memory: "4Gi", CPU: "1"}, Disk: "20Gi"}, []string{"config.max_turns"}},
+		{"drops requests.memory", &api.ResourceSpec{Requests: api.ResourceList{CPU: "2"}, Limits: api.ResourceList{Memory: "2Gi"}, Disk: "10Gi"}, []string{"config.max_turns", "config.resources"}, []string{"resources.requests.memory"}},
+		{"drops limits.memory", &api.ResourceSpec{Requests: api.ResourceList{CPU: "1", Memory: "1Gi"}, Disk: "10Gi"}, []string{"config.max_turns", "config.resources"}, []string{"resources.limits.memory"}},
+		{"drops disk", &api.ResourceSpec{Requests: api.ResourceList{CPU: "1", Memory: "1Gi"}, Limits: api.ResourceList{Memory: "2Gi"}}, []string{"config.max_turns", "config.resources"}, []string{"resources.disk"}},
+		{"drops all but one", &api.ResourceSpec{Limits: api.ResourceList{CPU: "4"}}, []string{"config.max_turns", "config.resources"}, []string{"resources.disk", "resources.limits.memory", "resources.requests.cpu", "resources.requests.memory"}},
+		{"changes cpu, keeps every other stored sub-field", &api.ResourceSpec{Requests: api.ResourceList{CPU: "2", Memory: "1Gi"}, Limits: api.ResourceList{Memory: "2Gi"}, Disk: "10Gi"}, []string{"config.max_turns"}, nil},
+		{"replaces every stored sub-field", &api.ResourceSpec{Requests: api.ResourceList{CPU: "2", Memory: "2Gi"}, Limits: api.ResourceList{Memory: "4Gi", CPU: "1"}, Disk: "20Gi"}, []string{"config.max_turns"}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := withDroppedResourcesSubField([]string{"config.max_turns"}, old, &api.ScionConfig{Resources: tc.req}, present)
 			assert.Equal(t, tc.want, got)
+			assert.Equal(t, tc.wantPaths, droppedResourceSubPaths(old, &api.ScionConfig{Resources: tc.req}, present))
 		})
 	}
 	already := []string{"config.resources"}
 	assert.Equal(t, already, withDroppedResourcesSubField(already, old, &api.ScionConfig{Resources: &api.ResourceSpec{}}, present), "a whole clear is already counted")
+	assert.Nil(t, droppedResourceSubPaths(old, &api.ScionConfig{Resources: &api.ResourceSpec{}}, present), "a whole clear drops no sub-path")
 	assert.Nil(t, withDroppedResourcesSubField(nil, old, &api.ScionConfig{Resources: &api.ResourceSpec{Requests: api.ResourceList{CPU: "2"}}}, map[string]bool{"model": true}), "resources not in the request")
 	assert.Nil(t, withDroppedResourcesSubField(nil, &api.ScionConfig{}, &api.ScionConfig{Resources: &api.ResourceSpec{Requests: api.ResourceList{CPU: "2"}}}, present), "nothing stored")
 }

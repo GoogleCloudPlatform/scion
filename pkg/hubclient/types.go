@@ -433,6 +433,11 @@ type BrokerCapabilities struct {
 	// (ptone/scion#5605; store.BrokerCapabilities.UnlimitedCountLimits is
 	// its counterpart).
 	UnlimitedCountLimits bool `json:"unlimitedCountLimits,omitempty"`
+	// ClearedResourceSubfields indicates the broker applies the resources
+	// sub-field entries of cleared_fields at start (ptone/scion#5676;
+	// store.BrokerCapabilities.ClearedResourceSubfields is its
+	// counterpart).
+	ClearedResourceSubfields bool `json:"clearedResourceSubfields,omitempty"`
 	// StartsInFlight indicates the broker reports the agent starts still
 	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
 	// then does the hub read a start's absence from that list as "no start

@@ -50,6 +50,18 @@ func TestClearableConfigPath(t *testing.T) {
 		"cleared_fields":    false,
 		"message_mode":      false,
 		"":                  false,
+		// Resources sub-fields (ptone/scion#5676); only the five leaves.
+		"resources.requests.cpu":    true,
+		"resources.requests.memory": true,
+		"resources.limits.cpu":      true,
+		"resources.limits.memory":   true,
+		"resources.disk":            true,
+		"resources.requests":        false,
+		"resources.limits":          false,
+		"resources.foo":             false,
+		"resources.":                false,
+		"resources.limits.gpu":      false,
+		"Resources.limits.cpu":      false,
 	} {
 		if got := ClearableConfigPath(path); got != want {
 			t.Errorf("ClearableConfigPath(%q) = %v, want %v", path, got, want)
@@ -108,6 +120,67 @@ func TestApplyClearedFields_Inherits(t *testing.T) {
 	}
 	if _, ok := cfg.Env["FOO"]; ok {
 		t.Errorf("env keys are removed, never copied: %v", cfg.Env)
+	}
+}
+
+// TestApplyClearedFields_ResourceSubPaths: a resources sub-path empties
+// that sub-field alone, keeps the others, never reads inherit, and is
+// idempotent; on a config with no resources it does nothing
+// (ptone/scion#5676).
+func TestApplyClearedFields_ResourceSubPaths(t *testing.T) {
+	full := func() *ResourceSpec {
+		return &ResourceSpec{
+			Requests: ResourceList{CPU: "1", Memory: "1Gi"},
+			Limits:   ResourceList{CPU: "2", Memory: "4Gi"},
+			Disk:     "10Gi",
+		}
+	}
+	for _, p := range ResourceSubPaths() {
+		for _, inherit := range []*ScionConfig{nil, {Resources: &ResourceSpec{Requests: ResourceList{CPU: "9", Memory: "9Gi"}, Limits: ResourceList{CPU: "9", Memory: "9Gi"}, Disk: "9Gi"}}} {
+			cfg := &ScionConfig{Resources: full()}
+			want := full()
+			*ResourceSubField(want, p) = ""
+			for i := 0; i < 2; i++ {
+				if ignored := ApplyClearedFields(cfg, []string{p}, inherit); ignored != nil {
+					t.Errorf("%s: ignored = %v", p, ignored)
+				}
+				if !reflect.DeepEqual(cfg.Resources, want) {
+					t.Errorf("%s (inherit %v, pass %d): resources = %+v, want %+v", p, inherit != nil, i+1, cfg.Resources, want)
+				}
+			}
+		}
+		cfg := &ScionConfig{}
+		ApplyClearedFields(cfg, []string{p}, nil)
+		if cfg.Resources != nil {
+			t.Errorf("%s: a config with no resources gained %+v", p, cfg.Resources)
+		}
+	}
+	cfg := &ScionConfig{Resources: full()}
+	ApplyClearedFields(cfg, []string{"resources.limits.memory", "resources.disk"}, nil)
+	want := &ResourceSpec{Requests: ResourceList{CPU: "1", Memory: "1Gi"}, Limits: ResourceList{CPU: "2"}}
+	if !reflect.DeepEqual(cfg.Resources, want) {
+		t.Errorf("two sub-paths: resources = %+v, want %+v", cfg.Resources, want)
+	}
+}
+
+// TestResourceSubPaths: the five sub-paths, sorted, each naming a distinct
+// sub-field.
+func TestResourceSubPaths(t *testing.T) {
+	want := []string{"resources.disk", "resources.limits.cpu", "resources.limits.memory", "resources.requests.cpu", "resources.requests.memory"}
+	if got := ResourceSubPaths(); !reflect.DeepEqual(got, want) {
+		t.Errorf("ResourceSubPaths() = %v, want %v", got, want)
+	}
+	r := &ResourceSpec{}
+	seen := map[*string]bool{}
+	for _, p := range want {
+		f := ResourceSubField(r, p)
+		if f == nil || seen[f] {
+			t.Errorf("%s: sub-field %p missing or shared", p, f)
+		}
+		seen[f] = true
+	}
+	if ResourceSubField(nil, want[0]) != nil || ResourceSubField(r, "resources") != nil {
+		t.Error("ResourceSubField: nil spec or a non-sub-path must give nil")
 	}
 }
 
