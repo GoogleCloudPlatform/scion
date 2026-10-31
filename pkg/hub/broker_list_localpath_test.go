@@ -80,25 +80,30 @@ func TestListRuntimeBrokers_LocalPathOnlyForProviderReaders(t *testing.T) {
 		assert.Empty(t, got[broker.ID])
 	})
 
-	t.Run("held same-project agent gets no LocalPath", func(t *testing.T) {
-		// The gate's agent branch is unit-tested in
-		// TestCallerMayReadProviders_AgentCallers; here the listing must
-		// not carry the path anywhere in its body.
-		heldID := tid("bll-held-agent")
-		require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-			ID: heldID, Slug: "bll-held-agent", Name: "bll-held-agent",
-			ProjectID: project.ID, OwnerID: alice.ID, Created: time.Now(), Updated: time.Now(),
-		}))
-		_, err := s.CreateAgentHolds(ctx, []*store.AgentHold{{
-			AgentID: heldID, ProjectID: project.ID, Cause: store.AgentHoldCauseOwnerAccessEnded,
-			RootPrincipalType: store.AgentHoldRootUser, RootPrincipalID: alice.ID,
-			Trigger: store.MembershipLossTriggerMemberRemove, ActorKind: "system", ActorID: "hub", CorrelationID: "test",
-		}})
-		require.NoError(t, err)
-		require.Equal(t, standingReasonAgentHeld, standingReason(srv.agentStanding(ctx, heldID)), "fixture: the agent is held")
-		rec := doRequestAsIdentity(t, srv, newTestAgentIdentity(heldID, project.ID, nil), http.MethodGet, path, nil)
-		assert.NotContains(t, rec.Body.String(), brokerListLocalPath)
-	})
+	// Agent callers: a runtime broker is a hub-level target
+	// (authz_boundary.go, the broker branch of ResolveTargetScope), which a
+	// project-bounded agent token may not read (authz_bearer.go,
+	// bearerReasonHubLevelResource), so the listing filters the broker out
+	// and the agent never reaches the LocalPath gate here. The gate's agent
+	// branch is tested in TestCallerMayReadProviders_GoodStandingAgent. If
+	// agents may ever list brokers, this subtest fails and must assert the
+	// gate's outcome instead. The absence is hub-scope confinement, not the
+	// LocalPath gate.
+	for _, tc := range []struct {
+		name, agent string
+		held        bool
+	}{
+		{"good-standing same-project agent", "bll-ok-agent", false},
+		{"held same-project agent", "bll-held-agent", true},
+	} {
+		t.Run(tc.name+" does not list the broker or see the LocalPath", func(t *testing.T) {
+			agentID := createProjectAgentForGate(t, srv, s, project.ID, alice.ID, tc.agent, tc.held)
+			rec := doRequestAsIdentity(t, srv, newTestAgentIdentity(agentID, project.ID, ScopesForRole(AgentRoleFull)), http.MethodGet, path, nil)
+			assert.NotContains(t, rec.Body.String(), brokerListLocalPath)
+			got := decodeBrokerListLocalPaths(t, rec) // requires 200
+			assert.NotContains(t, got, broker.ID, "a hub-level broker is not listed to a project-bounded agent")
+		})
+	}
 
 	t.Run("without projectId the response is unchanged", func(t *testing.T) {
 		rec := doRequestAsUser(t, srv, alice, http.MethodGet, "/api/v1/runtime-brokers", nil)
