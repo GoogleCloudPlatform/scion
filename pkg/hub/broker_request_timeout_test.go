@@ -17,6 +17,9 @@ package hub
 import (
 	"testing"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 )
 
 // TestBrokerRequestTimeout_OneLimit pins the hub-to-broker request limit at
@@ -45,7 +48,29 @@ func TestBrokerRequestTimeout_OneLimit(t *testing.T) {
 	if syncDispatchTimeout != brokerRequestTimeout {
 		t.Errorf("syncDispatchTimeout = %v, want %v: the dispatch bound must equal the request limit, or it fires first", syncDispatchTimeout, brokerRequestTimeout)
 	}
+	if got := (ControlChannelConfig{}).requestTimeout(); got != brokerRequestTimeout {
+		t.Errorf("control channel zero RequestTimeout falls back to %v, want %v", got, brokerRequestTimeout)
+	}
+	if got := (ControlChannelConfig{RequestTimeout: 7 * time.Second}).requestTimeout(); got != 7*time.Second {
+		t.Errorf("an explicit RequestTimeout = %v, want 7s kept", got)
+	}
 	if reincarnationRerenderTimeout < 2*brokerRequestTimeout+time.Minute {
 		t.Errorf("reincarnationRerenderTimeout = %v, want at least two broker round trips plus a minute (%v)", reincarnationRerenderTimeout, 2*brokerRequestTimeout+time.Minute)
+	}
+}
+
+// TestBrokerRequestTimeout_BrokerWriteTimeoutOutlastsIt pins that the broker
+// HTTP server's default write timeout leaves at least 30s above the
+// hub-to-broker request limit (ptone/scion#6829): broker handlers do not
+// extend their write deadline, so a lower default would cut off a direct-HTTP
+// answer the hub is still waiting for. Both the broker package default and the
+// settings default must hold it.
+func TestBrokerRequestTimeout_BrokerWriteTimeoutOutlastsIt(t *testing.T) {
+	floor := brokerRequestTimeout + 30*time.Second
+	if got := runtimebroker.DefaultServerConfig().WriteTimeout; got < floor {
+		t.Errorf("runtimebroker default WriteTimeout = %v, want at least %v", got, floor)
+	}
+	if got := config.DefaultGlobalConfig().RuntimeBroker.WriteTimeout; got < floor {
+		t.Errorf("settings default server.broker.write_timeout = %v, want at least %v", got, floor)
 	}
 }

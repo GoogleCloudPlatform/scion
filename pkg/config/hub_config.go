@@ -1417,7 +1417,7 @@ func DefaultGlobalConfig() GlobalConfig {
 			Port:                          9800,
 			Host:                          DefaultBrokerHost,
 			ReadTimeout:                   30 * time.Second,
-			WriteTimeout:                  120 * time.Second, // Longer for agent operations
+			WriteTimeout:                  210 * time.Second, // Outlasts the hub's 180s broker request limit (ptone/scion#6829)
 			CORSEnabled:                   false,             // off by default with no origins: nothing calls the broker from a browser (opt in with server.broker.cors)
 			CORSAllowedOrigins:            []string{},
 			CORSAllowedMethods:            []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
