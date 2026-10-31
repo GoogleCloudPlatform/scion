@@ -33,7 +33,8 @@ type OverlaySections struct {
 	// PlacementErrors lists, sorted, the settings paths whose Kubernetes
 	// placement is malformed or invalid in the runtimes and profiles the
 	// overlay would serve (ValidateRawPlacementEntry on a stored document,
-	// ValidatePlacementSettings on the result). The co-located Runtime
+	// then the field, sibling and cross-entry rules on the result; see
+	// checkOverlayPlacement). The co-located Runtime
 	// Broker refuses Kubernetes starts while it is not empty; the sections
 	// themselves still load.
 	PlacementErrors []string
@@ -185,9 +186,12 @@ func LoadServerBootstrapKoanf(serverConfigPath string, profileTimezones []Legacy
 // checkOverlayPlacement checks the Kubernetes placement of the runtimes and
 // profiles the overlay would serve: the raw keys of each stored document's
 // entries (ValidateRawPlacementEntry; a stored document that does not
-// decode as a map of entries is reported as a whole), then the typed pair
-// (ValidatePlacementSettings). Unknown keys that are not placement keys
-// are warnings. Paths only, never values.
+// decode as a map of entries is reported as a whole), then the typed pair:
+// every placement field and sibling runtime entries (ValidatePlacement),
+// and the rules across runtime entries and profiles (placementPairFindings,
+// the rules the save checks apply). Every finding counts, stored or not.
+// Unknown keys that are not placement keys are warnings. Paths only, never
+// values.
 func checkOverlayPlacement(dbSections map[string]json.RawMessage, runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig) (errs, warnings []string) {
 	known := map[string]map[string]bool{
 		"runtimes": knownYAMLKeys(V1RuntimeConfig{}),
@@ -227,7 +231,10 @@ func checkOverlayPlacement(dbSections map[string]json.RawMessage, runtimes map[s
 			}
 		}
 	}
-	for _, e := range ValidatePlacementSettings(runtimes, profiles) {
+	for _, e := range ValidatePlacement(runtimes, profiles, LiteralSiblingGroups(runtimes)) {
+		addErr(e.Path)
+	}
+	for _, e := range placementPairFindings(runtimes, profiles) {
 		addErr(e.Path)
 	}
 	sort.Strings(errs)
