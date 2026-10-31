@@ -204,7 +204,7 @@ func TestUATIntrinsic_RegistryTableNotWidened(t *testing.T) {
 // TestUATIntrinsic_CeilingReadersUseHopCeiling pins the reader sites: in
 // the package sources, EffectCeilingAllows and childRoleWithinCeiling are
 // called on an edge, hop, assignment or source ceiling only through
-// uatHopEffectCeiling. The listed exceptions read a fold (already built
+// uatHopEffectCeiling, and so is every .Frozen() fold of a ceiling. The listed exceptions read a fold (already built
 // from hop ceilings), a scheduler ceiling (scheduler-recorded hops are not
 // token hops), an agent-parent ceiling,
 // or are the helpers themselves.
@@ -220,6 +220,15 @@ func TestUATIntrinsic_CeilingReadersUseHopCeiling(t *testing.T) {
 			"dispatchAgentEventHandler": true, // scheduler edge ceiling with role none: not a token hop
 		},
 	}
+	// Functions whose .Frozen() receiver is a parameter (its callers pass a
+	// hop ceiling or a fold), a fold, or a scheduler or agent-row ceiling.
+	frozenAllowed := map[string]bool{
+		"EffectCeilingAllows":     true, // c: the callers pass uatHopEffectCeiling or a fold
+		"ceilingAllowsScope":      true, // c: a chain fold
+		"childEffectCeiling":      true, // source: agentRowEffectCeiling passes uatHopEffectCeiling
+		"foldWithChain":           true, // chain.Ceiling is a fold; the edge is wrapped
+		"intersectEffectCeilings": true, // scheduler revision and agent-row ceilings: not token hops
+	}
 	_, files := parseHubProduction(t)
 	seen := map[string]int{}
 	var bad []string
@@ -231,7 +240,22 @@ func TestUATIntrinsic_CeilingReadersUseHopCeiling(t *testing.T) {
 			}
 			ast.Inspect(fn, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
-				if !ok || len(call.Args) == 0 {
+				if !ok {
+					return true
+				}
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Frozen" && len(call.Args) == 0 {
+					seen["Frozen"]++
+					if inner, ok := sel.X.(*ast.CallExpr); ok {
+						if innerID, ok := inner.Fun.(*ast.Ident); ok && innerID.Name == "uatHopEffectCeiling" {
+							return true
+						}
+					}
+					if !frozenAllowed[fn.Name.Name] {
+						bad = append(bad, "Frozen in "+fn.Name.Name)
+					}
+					return true
+				}
+				if len(call.Args) == 0 {
 					return true
 				}
 				id, ok := call.Fun.(*ast.Ident)
@@ -255,6 +279,7 @@ func TestUATIntrinsic_CeilingReadersUseHopCeiling(t *testing.T) {
 	assert.Empty(t, bad, "these calls read a hop ceiling without uatHopEffectCeiling; wrap them or list the exception with its reason")
 	assert.GreaterOrEqual(t, seen["EffectCeilingAllows"], 8, "control: the scan finds the call sites")
 	assert.GreaterOrEqual(t, seen["childRoleWithinCeiling"], 5, "control: the scan finds the call sites")
+	assert.GreaterOrEqual(t, seen["Frozen"], 8, "control: the scan finds the .Frozen() folds")
 }
 
 // ---- owner shared secrets (ported from miller79/scion#199) --------------------
