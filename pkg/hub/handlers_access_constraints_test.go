@@ -694,8 +694,11 @@ func TestB7_PreviewTokenCodes_SameStatusOnCommitPath(t *testing.T) {
 			for _, spec := range gd.Specs {
 				vs := spec.(*ast.ValueSpec)
 				for i, name := range vs.Names {
-					if !strings.HasPrefix(name.Name, "ErrCodePreview") || i >= len(vs.Values) {
+					if !strings.HasPrefix(name.Name, "ErrCodePreview") {
 						continue
+					}
+					if i >= len(vs.Values) {
+						t.Fatalf("%s has no explicit value; preview codes must be string literals", name.Name)
 					}
 					lit, ok := vs.Values[i].(*ast.BasicLit)
 					require.True(t, ok && lit.Kind == token.STRING, "%s must be a string literal", name.Name)
