@@ -131,11 +131,13 @@ func (s *Server) serveConduitIngress(w http.ResponseWriter, r *http.Request, rt 
 			// ingress_terminating).
 			break
 		}
-		target, ok := s.pickConduitIngressRelay(r.Context(), rt, excluded)
+		target, release, ok := s.pickConduitIngressRelay(r.Context(), rt, excluded)
 		if !ok {
 			break
 		}
-		if !s.proxyConduitDial(w, r, rt, target) {
+		repick := s.proxyConduitDial(w, r, rt, target, release)
+		release()
+		if !repick {
 			return
 		}
 		if rt.terminating.Load() {
@@ -149,14 +151,16 @@ func (s *Server) serveConduitIngress(w http.ResponseWriter, r *http.Request, rt 
 
 // pickConduitIngressRelay picks a relay for a new conduit session: two
 // eligible relays not in excluded, sampled at random, then the one whose
-// current generation holds fewer sessions (a tie is random). When a count
-// fails, one of the two is picked at random and the failure is logged and
-// counted. It reports false when no eligible relay is left.
-func (s *Server) pickConduitIngressRelay(ctx context.Context, rt *conduitExternalRuntime, excluded map[string]bool) (registry.RelayInstance, bool) {
+// current generation holds fewer sessions, counting this hub's pending
+// placements on it (a tie is random). When a count fails, one of the two is
+// picked at random and the failure is logged and counted. It returns the
+// release of the pick's pending placement, and reports false when no
+// eligible relay is left.
+func (s *Server) pickConduitIngressRelay(ctx context.Context, rt *conduitExternalRuntime, excluded map[string]bool) (registry.RelayInstance, func(), bool) {
 	all, err := rt.registry.EligibleRelays(ctx, registry.TransportWS, rt.now())
 	if err != nil {
 		slog.Warn("Conduit ingress: listing eligible relays failed", "error", err)
-		return registry.RelayInstance{}, false
+		return registry.RelayInstance{}, nil, false
 	}
 	var candidates []registry.RelayInstance
 	for _, ri := range all {
@@ -165,31 +169,29 @@ func (s *Server) pickConduitIngressRelay(ctx context.Context, rt *conduitExterna
 		}
 	}
 	if len(candidates) == 0 {
-		return registry.RelayInstance{}, false
+		return registry.RelayInstance{}, nil, false
 	}
 	sample := sampleConduitIngressRelays(candidates)
 	if hook := s.conduitIngressSampleTestHook; hook != nil {
 		sample = hook(candidates)
 	}
 	if len(sample) == 1 {
-		return sample[0], true
+		return sample[0], rt.ingressPending.add(rt.now(), sample[0]), true
 	}
 	a, b := sample[0], sample[1]
+	// The counts are read outside the pending lock: a query never holds up
+	// the hub's other picks.
 	na, errA := rt.store.CountRelaySessions(ctx, a.InstanceID, a.Generation)
 	nb, errB := rt.store.CountRelaySessions(ctx, b.InstanceID, b.Generation)
 	if err := errors.Join(errA, errB); err != nil {
 		n := rt.ingressCountFailures.Add(1)
 		slog.Warn("Conduit ingress: counting relay sessions failed; picking one of the two at random",
 			"relays", []string{a.InstanceID, b.InstanceID}, "failures", n, "error", err)
-		return sample[rand.IntN(2)], true
+		pick := sample[rand.IntN(2)]
+		return pick, rt.ingressPending.add(rt.now(), pick), true
 	}
-	switch {
-	case na < nb:
-		return a, true
-	case nb < na:
-		return b, true
-	}
-	return sample[rand.IntN(2)], true
+	pick, release := rt.ingressPending.choose(rt.now(), a, b, na, nb)
+	return pick, release, true
 }
 
 // sampleConduitIngressRelays returns two distinct candidates at random, or
@@ -292,7 +294,11 @@ func (t *conduitIngressTransport) RoundTrip(req *http.Request) (*http.Response, 
 // the dial failed before the relay could have run Admit, so another relay
 // may be picked; otherwise the relay's answer (or the session, or a 502
 // when the leg failed after the request was written) went to the client.
-func (s *Server) proxyConduitDial(w http.ResponseWriter, r *http.Request, rt *conduitExternalRuntime, target registry.RelayInstance) (repick bool) {
+// release drops the dial's pending placement as soon as its outcome is
+// known: any answer other than the upgrade (no session), or the relay's
+// first byte after the upgrade (the Welcome, sent once the session row
+// exists, or the refusal). It may be called more than once.
+func (s *Server) proxyConduitDial(w http.ResponseWriter, r *http.Request, rt *conduitExternalRuntime, target registry.RelayInstance, release func()) (repick bool) {
 	endpoint, err := url.Parse(target.InternalEndpoint)
 	if err != nil || endpoint.Host == "" {
 		slog.Warn("Conduit ingress: the relay's internal endpoint is unusable", "relay_instance_id", target.InstanceID, "error", err)
@@ -350,9 +356,15 @@ func (s *Server) proxyConduitDial(w http.ResponseWriter, r *http.Request, rt *co
 			if conduitIngressRepickResponse(resp) {
 				return errConduitIngressRepick
 			}
+			if resp.StatusCode != http.StatusSwitchingProtocols {
+				release()
+			} else if body, ok := resp.Body.(io.ReadWriteCloser); ok {
+				resp.Body = &conduitIngressOutcomeBody{ReadWriteCloser: body, release: release}
+			}
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+			release()
 			if errors.Is(err, errConduitIngressRepick) || (transport.failed && !transport.wrote.Load()) {
 				repick = true
 				if signErr != nil {
@@ -373,4 +385,22 @@ func (s *Server) proxyConduitDial(w http.ResponseWriter, r *http.Request, rt *co
 	}
 	rp.ServeHTTP(w, r)
 	return repick
+}
+
+// conduitIngressOutcomeBody is the relay side of an upgraded proxied leg.
+// The relay's first byte after the upgrade is its answer to the dial's
+// Hello (the Welcome, sent after the session row is inserted, or a
+// refusal), so the dial's pending placement is released there.
+type conduitIngressOutcomeBody struct {
+	io.ReadWriteCloser
+	release func()
+}
+
+// Read implements io.Reader.
+func (b *conduitIngressOutcomeBody) Read(p []byte) (int, error) {
+	n, err := b.ReadWriteCloser.Read(p)
+	if n > 0 || err != nil {
+		b.release()
+	}
+	return n, err
 }
