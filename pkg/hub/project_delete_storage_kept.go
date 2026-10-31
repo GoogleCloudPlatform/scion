@@ -25,12 +25,14 @@ import (
 // The Hub is the only remover of a deleted project's tree on shared project
 // storage. When the Hub cannot see that storage, the tree is kept: a
 // project delete then answers 200 with a projectDeleteResult instead of an
-// unqualified 204, and Hub health reports project_storage_tree as degraded.
+// unqualified 204. Hub health reports it: on nfs the critical
+// workspace_storage check fails (the Hub is not ready); on the other shared
+// backends project_storage_tree is degraded.
 // The code and message are fixed strings: they never carry a path, an
 // export, a share or an ID.
 const (
 	projectDeleteSharedStorageKeptCode    = "shared-project-storage"
-	projectDeleteSharedStorageKeptMessage = "The Hub cannot see the shared project storage, so the deleted project's shared tree was kept. Hub health reports " + projectStorageTreeCheck + " as degraded."
+	projectDeleteSharedStorageKeptMessage = "The Hub cannot see the shared project storage, so the deleted project's shared tree was kept. Hub health reports the shared project storage as not ready on nfs and as degraded on the other shared backends."
 )
 
 // projectDeleteSharedStorageKeptReason is the fixed reason of the ERROR audit

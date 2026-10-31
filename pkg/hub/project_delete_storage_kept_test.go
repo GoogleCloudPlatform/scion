@@ -57,7 +57,7 @@ func requireSharedStorageKeptBody(t *testing.T, rec *httptest.ResponseRecorder) 
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got), "body: %s", rec.Body.String())
 	require.Len(t, got.StorageKept, 1, "body: %s", rec.Body.String())
 	assert.Equal(t, "shared-project-storage", got.StorageKept[0].Code)
-	assert.Equal(t, "The Hub cannot see the shared project storage, so the deleted project's shared tree was kept. Hub health reports project_storage_tree as degraded.", got.StorageKept[0].Message)
+	assert.Equal(t, "The Hub cannot see the shared project storage, so the deleted project's shared tree was kept. Hub health reports the shared project storage as not ready on nfs and as degraded on the other shared backends.", got.StorageKept[0].Message)
 }
 
 // When the Hub cannot see the shared project storage (the share is not
