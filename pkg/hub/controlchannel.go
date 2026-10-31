@@ -56,7 +56,7 @@ func DefaultControlChannelConfig() ControlChannelConfig {
 		PongWait:       60 * time.Second,
 		WriteWait:      10 * time.Second,
 		MaxMessageSize: 1024 * 1024, // 1MB — must be large enough to carry RemoteCreateAgentRequest payloads (see issue #165)
-		RequestTimeout: 120 * time.Second,
+		RequestTimeout: brokerRequestTimeout,
 		Debug:          false,
 	}
 }
@@ -790,7 +790,7 @@ func (hc *BrokerConnection) TunnelRequest(ctx context.Context, req *wsprotocol.R
 	// Wait for response with timeout
 	timeout := hc.config.RequestTimeout
 	if timeout == 0 {
-		timeout = 120 * time.Second
+		timeout = brokerRequestTimeout
 	}
 
 	select {

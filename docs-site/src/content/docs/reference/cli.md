@@ -160,10 +160,10 @@ as soon as the Hub answers, as before, possibly while the agent is still
 provisioning. A synchronous launch runs on the Hub independently of the CLI
 request: if the CLI gives up or you press Ctrl-C mid-dispatch, the Hub keeps
 going instead of rolling the agent back (`scion start` and `scion create` send
-the initial agent create request and any env-gather submission with a 3-minute
+the initial agent create request and any env-gather submission with a 4-minute
 client timeout instead of the standard 30-second client timeout so synchronous
 creates can complete). Each dispatch attempt is bounded at
-120 seconds, so a slow cold start (for example on Kubernetes) can still fail on
+180 seconds, so a slow cold start (for example on Kubernetes) can still fail on
 a synchronous launch; [asynchronous agent create](/scion/reference/server-config/#asynchronous-agent-create), on by default, avoids that limit. While waiting, each launch step is printed to stderr with a readable label, for example
 `my-agent: provisioning (waiting to be scheduled)` (nothing extra under `--format json`). If the
 launch fails, the error gives the failure code (with its label, unless the message already says
