@@ -147,8 +147,17 @@ func ParsePeerPublicKey(s string) (ed25519.PublicKey, error) {
 }
 
 // LoadPeerPrivateKey reads a PEM PKCS #8 Ed25519 private key from path.
-// The error names the path, never key material.
+// A file readable by group or other is refused, as SSH refuses such a key:
+// the key is the node's relay-peer identity. The error names the path,
+// never key material.
 func LoadPeerPrivateKey(path string) (ed25519.PrivateKey, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("conduit relay peer key %s: %w", path, err)
+	}
+	if perm := fi.Mode().Perm(); perm&0o077 != 0 {
+		return nil, fmt.Errorf("conduit relay peer key %s: mode %04o lets group or other read it; restrict it to the owner (chmod 600)", path, perm)
+	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("conduit relay peer key %s: %w", path, err)
