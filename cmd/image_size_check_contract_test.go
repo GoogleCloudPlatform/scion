@@ -15,9 +15,9 @@
 package cmd
 
 // Hermetic checks of image-build/scripts/check-image-size.sh: it reports the
-// delta of two images' summed layer sizes and fails only when the growth
-// exceeds the budget. docker is a fake on PATH that answers `history` from a
-// table.
+// size delta of two images (docker: summed layer sizes from history; podman:
+// image inspect) and fails only when the growth exceeds the budget. docker
+// and podman are fakes on PATH that answer from a table.
 
 import (
 	"os"
@@ -34,28 +34,69 @@ func TestCheckImageSize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bin := t.TempDir()
+	writeFake := func(dir, name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	// Invoked as: docker history --human=false --format {{.Size}} <ref>;
 	// prints one size per layer, empty layers included.
 	fakeDocker := `#!/bin/sh
 [ "$1" = history ] && [ "$2" = --human=false ] || { echo "fake docker: unexpected call: $*" >&2; exit 3; }
 case "$5" in
 base) printf '0\n1000000000\n48576000\n' ;;  # 1000 MiB over three layers
+blanks) printf '0\n\n1000000000\n\n48576000\n' ;;
 grew200) printf '0\n1000000000\n48576000\n209715200\n' ;;
+warned) echo "WARNING: image platform does not match" >&2; printf '1258291200\n' ;;
 grew600) printf '1048576000\n629145600\n' ;;
 junk) printf '1000000000\n493MB\n' ;;
 nolayers) ;;
 *) echo "Error: No such image: $5" >&2; exit 1 ;;
 esac
 `
-	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte(fakeDocker), 0o755); err != nil {
-		t.Fatal(err)
+	// Invoked as: podman image inspect --format {{.Size}} <ref>. podman
+	// history prints sizes human-formatted only, so it must never be called.
+	fakePodman := `#!/bin/sh
+[ "$1" = image ] && [ "$2" = inspect ] && [ "$3" = --format ] || { echo "fake podman: unexpected call: $*" >&2; exit 3; }
+case "$5" in
+base) echo 1048576000 ;;
+grew200) echo 1258291200 ;;
+human) echo "1.05GB" ;;
+*) echo "Error: base: image not known: $5" >&2; exit 125 ;;
+esac
+`
+	// Both engines, then the system tools.
+	both := t.TempDir()
+	writeFake(both, "docker", fakeDocker)
+	writeFake(both, "podman", fakePodman)
+	bothPath := both + ":/usr/bin:/bin"
+
+	// podman only: PATH holds the fake and links to the few tools the
+	// script runs, so a docker installed on the test host cannot be found.
+	podmanOnly := t.TempDir()
+	writeFake(podmanOnly, "podman", fakePodman)
+	for _, tool := range []string{"awk", "basename", "cat", "mktemp", "rm"} {
+		p, err := exec.LookPath(tool)
+		if err != nil {
+			t.Skipf("%s not found", tool)
+		}
+		if err := os.Symlink(p, filepath.Join(podmanOnly, tool)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	noEngine := t.TempDir()
+	for _, tool := range []string{"awk", "basename", "cat", "mktemp", "rm"} {
+		p, _ := exec.LookPath(tool)
+		if err := os.Symlink(p, filepath.Join(noEngine, tool)); err != nil {
+			t.Fatal(err)
+		}
 	}
 
-	run := func(env []string, args ...string) (string, int) {
+	run := func(path string, env []string, args ...string) (string, int) {
 		t.Helper()
 		cmd := exec.Command("bash", append([]string{script}, args...)...)
-		cmd.Env = append([]string{"PATH=" + bin + ":/usr/bin:/bin", "LC_ALL=C"}, env...)
+		cmd.Env = append([]string{"PATH=" + path, "LC_ALL=C"}, env...)
 		out, err := cmd.CombinedOutput()
 		code := 0
 		if err != nil {
@@ -70,41 +111,66 @@ esac
 
 	cases := []struct {
 		name     string
+		path     string // PATH; bothPath when empty
 		env      []string
 		args     []string
 		wantCode int
 		wants    []string
 	}{
-		{"sums every layer", nil, []string{"base", "grew200"}, 0,
+		{"sums every layer", "", nil, []string{"base", "grew200"}, 0,
 			[]string{"sum of uncompressed layer sizes (docker history):", "1000.0 MiB  base", "1200.0 MiB  grew200"}},
-		{"within default budget", nil, []string{"base", "grew200"}, 0,
+		{"blank lines between layers", "", nil, []string{"blanks", "grew200"}, 0,
+			[]string{"1000.0 MiB  blanks", "200.0 MiB", "ok: within budget"}},
+		{"engine stderr is not parsed", "", nil, []string{"base", "warned"}, 0,
+			[]string{"1200.0 MiB  warned", "ok: within budget"}},
+		{"within default budget", "", nil, []string{"base", "grew200"}, 0,
 			[]string{"delta", "200.0 MiB", "(budget 550 MiB)", "ok: within budget"}},
-		{"over default budget", nil, []string{"base", "grew600"}, 1,
+		{"over default budget", "", nil, []string{"base", "grew600"}, 1,
 			[]string{"600.0 MiB", "FAIL: grew600 grew by 600.0 MiB over base, above the 550 MiB budget"}},
-		{"flag raises budget", nil, []string{"--budget-mib", "700", "base", "grew600"}, 0,
+		{"flag raises budget", "", nil, []string{"--budget-mib", "700", "base", "grew600"}, 0,
 			[]string{"(budget 700 MiB)", "ok: within budget"}},
-		{"env sets budget", []string{"IMAGE_SIZE_BUDGET_MIB=100"}, []string{"base", "grew200"}, 1,
+		{"env sets budget", "", []string{"IMAGE_SIZE_BUDGET_MIB=100"}, []string{"base", "grew200"}, 1,
 			[]string{"above the 100 MiB budget"}},
-		{"shrinking passes", nil, []string{"grew600", "base"}, 0,
+		{"shrinking passes", "", nil, []string{"grew600", "base"}, 0,
 			[]string{"-600.0 MiB", "ok: within budget"}},
-		{"missing image", nil, []string{"base", "nope"}, 2,
-			[]string{"cannot read the layers of nope with docker", "No such image"}},
-		{"non-numeric layer size", nil, []string{"base", "junk"}, 2,
-			[]string{"unexpected layer size for junk from docker: '493MB'"}},
-		{"no layers", nil, []string{"base", "nolayers"}, 2,
-			[]string{"no layers reported for nolayers by docker"}},
-		{"leading-zero budget is decimal", nil, []string{"--budget-mib", "0300", "base", "grew200"}, 0,
+		{"missing image", "", nil, []string{"base", "nope"}, 2,
+			[]string{"cannot read the layers of nope with docker: Error: No such image: nope"}},
+		{"non-numeric layer size", "", nil, []string{"base", "junk"}, 2,
+			[]string{"unexpected size for junk from docker: '493MB'"}},
+		{"no layers", "", nil, []string{"base", "nolayers"}, 2,
+			[]string{"no size reported for nolayers by docker"}},
+		{"leading-zero budget is decimal", "", nil, []string{"--budget-mib", "0300", "base", "grew200"}, 0,
 			[]string{"(budget 300 MiB)", "ok: within budget"}},
-		{"budget 08 is not octal", nil, []string{"--budget-mib", "08", "base", "grew200"}, 1,
+		{"budget 08 is not octal", "", nil, []string{"--budget-mib", "08", "base", "grew200"}, 1,
 			[]string{"above the 8 MiB budget"}},
-		{"bad budget", nil, []string{"--budget-mib", "lots", "base", "grew200"}, 2,
+		{"bad budget", "", nil, []string{"--budget-mib", "lots", "base", "grew200"}, 2,
 			[]string{"budget must be a whole number of MiB"}},
-		{"wrong arg count", nil, []string{"base"}, 2,
+		{"budget digits bounded", "", nil, []string{"--budget-mib", "1234567", "base", "grew200"}, 2,
+			[]string{"budget must be at most 6 digits of MiB"}},
+		{"six-digit budget", "", nil, []string{"--budget-mib", "999999", "base", "grew600"}, 0,
+			[]string{"(budget 999999 MiB)", "ok: within budget"}},
+		{"wrong arg count", "", nil, []string{"base"}, 2,
 			[]string{"usage:"}},
+		{"podman via IMAGE_TOOL", "", []string{"IMAGE_TOOL=podman"}, []string{"base", "grew200"}, 0,
+			[]string{"unpacked image size (podman image inspect):", "1000.0 MiB  base", "1200.0 MiB  grew200", "ok: within budget"}},
+		{"podman when docker is absent", podmanOnly, nil, []string{"base", "grew200"}, 0,
+			[]string{"unpacked image size (podman image inspect):", "200.0 MiB", "ok: within budget"}},
+		{"podman missing image", podmanOnly, nil, []string{"base", "nope"}, 2,
+			[]string{"cannot inspect nope with podman: Error: base: image not known: nope"}},
+		{"podman non-numeric size", podmanOnly, nil, []string{"base", "human"}, 2,
+			[]string{"unexpected size for human from podman: '1.05GB'"}},
+		{"no engine", noEngine, nil, []string{"base", "grew200"}, 2,
+			[]string{"neither docker nor podman found; set IMAGE_TOOL"}},
+		{"unknown IMAGE_TOOL", "", []string{"IMAGE_TOOL=nerdctl"}, []string{"base", "grew200"}, 2,
+			[]string{"IMAGE_TOOL must be docker or podman, got 'nerdctl'"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			out, code := run(c.env, c.args...)
+			path := c.path
+			if path == "" {
+				path = bothPath
+			}
+			out, code := run(path, c.env, c.args...)
 			expectOutput(t, c.name, out, code, c.wantCode, c.wants...)
 		})
 	}

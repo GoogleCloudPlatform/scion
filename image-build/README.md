@@ -81,24 +81,30 @@ All image-related scripts live under `scripts/`. GitHub Actions workflows remain
 
 ### Image size budget
 
-`scripts/check-image-size.sh <baseline> <candidate>` compares two images in the
-local docker (or podman) store by the sum of uncompressed layer sizes (docker
-history), prints both and the delta, and exits 1 when the candidate grew by
-more than the budget. It does not use `image inspect`'s `.Size`: with docker's
-containerd image store that reports more than the layers (it also counts the
-compressed content blobs).
+`scripts/check-image-size.sh <baseline> <candidate>` compares the
+uncompressed sizes of two images in the local store, prints both and the delta,
+and exits 1 when the candidate grew by more than the budget. With docker it
+sums the layer sizes from `docker history`; it does not use `image inspect`'s
+`.Size`, which with docker's containerd image store also counts the content
+blobs and so changes with how the image entered the store. With podman (used
+when docker is absent, or with `IMAGE_TOOL=podman`) it reads
+`podman image inspect`'s `.Size`, because `podman history` prints sizes only
+in human-readable form.
 
 ```bash
 # Build core-base before and after a change, then:
 image-build/scripts/check-image-size.sh core-base:before core-base:after
-image-build/scripts/check-image-size.sh --budget-mib 300 core-base:before core-base:after
+image-build/scripts/check-image-size.sh --budget-mib 300 \
+  core-base:before core-base:after
 ```
 
 The default budget (`DEFAULT_BUDGET_MIB` in the script, overridable with
-`IMAGE_SIZE_BUDGET_MIB` or `--budget-mib`) is 550 MiB: the measured 471.8 MiB
-that core-base's Playwright WebKit and Firefox system libraries add (layer sum,
-core-base from d087626, playwright-core 1.62.1's list), plus about 15%. The script is not wired into Cloud Build:
-doing so would mean pulling a baseline image inside the pipeline.
+`IMAGE_SIZE_BUDGET_MIB` or `--budget-mib`, at most 6 digits) is 550 MiB: the
+measured 471.8 MiB that core-base's Playwright WebKit and Firefox system
+libraries add (docker layer sum, core-base on Debian 13, amd64, built
+2026-10-31, playwright-core 1.62.1's list), plus about 15%. The script is not
+wired into Cloud Build: doing so would mean pulling a baseline image inside the
+pipeline.
 
 ### Playwright browser libraries
 
