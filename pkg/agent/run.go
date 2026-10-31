@@ -153,6 +153,13 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		hubDispatchedAgentID = opts.Env["SCION_AGENT_ID"]
 	}
 
+	// A plain project's explicit path must hold its .scion entry: create,
+	// start and restart are refused before any side effect
+	// (checkExplicitProjectPath).
+	if err := checkExplicitProjectPath(opts.ProjectPath, projectDir, opts.Workspace,
+		opts.GitClone != nil || isEmptyPerAgentStart(opts) || opts.SharedWorkspace); err != nil {
+		return nil, err
+	}
 	// A create over a legacy agent directory no agent owns is refused
 	// before any side effect.
 	if err := refuseRetiredLegacyAgent(projectDir, opts); err != nil {

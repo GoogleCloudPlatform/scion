@@ -1844,6 +1844,12 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if err != nil {
 		return "", "", nil, err
 	}
+	// A plain project's explicit path must hold its .scion entry, checked
+	// before anything is written under it (checkExplicitProjectPath).
+	ownWorkspace := api.GitCloneFromContext(ctx) != nil || api.IsEmptyPerAgentWorkspaceFromContext(ctx) || api.IsSharedWorkspaceFromContext(ctx)
+	if err := checkExplicitProjectPath(projectPath, projectDir, workspace, ownWorkspace); err != nil {
+		return "", "", nil, err
+	}
 
 	settings, warnings, _ := config.LoadEffectiveSettingsFor(ctx, projectDir)
 	config.PrintDeprecationWarnings(warnings)
@@ -2312,6 +2318,14 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 				return "", "", nil, fmt.Errorf("failed to create workspace directory: %w", err)
 			}
 		} else {
+			// The workspace is the directory holding projectDir, so
+			// projectDir must be a .scion directory: never mount the
+			// parent of a bare directory (checkExplicitProjectPath refused
+			// an explicit path above; this keeps every other way here
+			// fail-closed).
+			if filepath.Base(projectDir) != config.DotScion {
+				return "", "", nil, &ProjectPathNotInitializedError{Path: projectPathForError(projectPath, projectDir)}
+			}
 			workspaceSource = plainProjectWorkspaceSource(projectDir)
 		}
 	}

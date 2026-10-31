@@ -1065,6 +1065,9 @@ func classifyStartErrorCode(err error, templateSlug, op string) (code, message s
 		return api.LaunchCodeTemplateNotFound, notFoundMessage(op, err, templateSlug)
 	case errors.Is(err, config.ErrAgentStateDirUnavailable):
 		return LaunchErrCodeAgentStateUnavailable, err.Error()
+	case errors.Is(err, agent.ErrProjectPathNotInitialized):
+		// Before the generic agent-state conflict it also unwraps to.
+		return ErrCodeProjectPathNotInitialized, err.Error()
 	case errors.Is(err, config.ErrAgentStateConflict):
 		return LaunchErrCodeAgentStateConflict, err.Error()
 	case errors.Is(err, agent.ErrProjectShareNotMounted):
