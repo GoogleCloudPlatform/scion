@@ -1293,10 +1293,16 @@ func TestGovernance_UpdateTokenBoundToItsConstraint(t *testing.T) {
 	b := govCreateAndCommit(t, gs, ps, draft("gov-cid-bind-upd-b", "agent.read", "agent.create"), actor)
 	require.Equal(t, a.Revision, b.Revision, "only the constraint ID may differ")
 
-	update := draft("gov-cid-bind-upd-tight", "agent.read")
+	// The same proposed content, addressed to a given constraint (the update
+	// applies to the draft's ID, as the handler sets it from the path).
+	update := func(id string) *store.AccessConstraint {
+		d := draft("gov-cid-bind-upd-tight", "agent.read")
+		d.ID = id
+		return d
+	}
 	preview, err := ps.GeneratePreview(ctx, PreviewRequest{
 		Operation:    "update",
-		Draft:        update,
+		Draft:        update(a.ID),
 		ConstraintID: a.ID,
 		BaseRevision: a.Revision,
 		Actor:        actor,
@@ -1305,7 +1311,7 @@ func TestGovernance_UpdateTokenBoundToItsConstraint(t *testing.T) {
 
 	_, err = gs.CommitBoundaryChange(ctx, CommitRequest{
 		Operation:    "update",
-		Draft:        update,
+		Draft:        update(b.ID),
 		ConstraintID: b.ID,
 		BaseRevision: b.Revision,
 		PreviewToken: preview.PreviewToken,
@@ -1321,7 +1327,7 @@ func TestGovernance_UpdateTokenBoundToItsConstraint(t *testing.T) {
 
 	_, err = gs.CommitBoundaryChange(ctx, CommitRequest{
 		Operation:    "update",
-		Draft:        update,
+		Draft:        update(a.ID),
 		ConstraintID: a.ID,
 		BaseRevision: a.Revision,
 		PreviewToken: preview.PreviewToken,
