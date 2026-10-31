@@ -19,7 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"path"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -57,12 +57,26 @@ func projectPathRefusalText(brokerName, localPath string) string {
 	if localPath == "" {
 		return fmt.Sprintf("the project path configured for this project on %s is not initialized as a project; a project or broker admin must create a .scion directory inside the project path (not a symlink to another location) and retry", brokerName)
 	}
-	scionDir := localPath
-	if path.Base(localPath) != ".scion" {
-		scionDir = path.Join(localPath, ".scion")
-	}
 	return fmt.Sprintf("the project path configured for this project on %s is not initialized as a project (no .scion directory or marker inside it); a project or broker admin must create %s as a directory (not a symlink to another location) and retry",
-		brokerName, scionDir)
+		brokerName, brokerScionDir(localPath))
+}
+
+// brokerScionDir is the .scion directory of a provider LocalPath as the
+// broker names it. The path is the broker host's, which may use another
+// separator than the hub's, so it is handled as text: a path that already
+// ends in .scion (after either separator) is kept, and otherwise .scion is
+// appended with the separator the path uses (a backslash for a path with a
+// backslash and no forward slash, else a forward slash).
+func brokerScionDir(localPath string) string {
+	sep := "/"
+	if strings.Contains(localPath, `\`) && !strings.Contains(localPath, "/") {
+		sep = `\`
+	}
+	trimmed := strings.TrimRight(localPath, `/\`)
+	if trimmed[strings.LastIndexAny(trimmed, `/\`)+1:] == ".scion" {
+		return trimmed
+	}
+	return trimmed + sep + ".scion"
 }
 
 // relayProjectPathRefusal answers a runtime broker's 409
