@@ -12479,9 +12479,9 @@
 |------|--------|---------|
 | broker_call | — | `TunnelRequest:controlchannel` |
 | broker_call | — | `OpenStream:controlchannel` |
-| broker_call | — | `SendStreamData:controlchannel` |
-| broker_call | — | `ResizeStream:controlchannel` |
-| broker_call | — | `CloseStream:controlchannel` |
+| broker_call | — | `SendStreamData:brokerconnection` |
+| broker_call | — | `ResizeStream:brokerconnection` |
+| broker_call | — | `CloseStream:brokerconnection` |
 | broker_call | — | `handleResponse:controlchannel` |
 | broker_call | — | `handleStreamData:controlchannel` |
 | broker_call | — | `handleStreamClose:controlchannel` |

@@ -155,6 +155,7 @@ export const KNOWN_LAUNCH_ERROR_CODES = [
   'harness_config_policy',
   'agent_state_unavailable',
   'agent_state_conflict',
+  'project_path_not_initialized',
   'image_pull_failed',
   'invalid_image',
   'container_config',
