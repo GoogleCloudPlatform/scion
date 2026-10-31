@@ -519,6 +519,9 @@ func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
 		// The experiments registry (Registry.Resolve), not a user or
 		// transport resolver.
 		"experimentEnabledIn s.experimentRegistry()",
+		// The conduit router (router.Resolve: which session would carry a
+		// page view stream), not a user or transport resolver.
+		"portViewConduitRoute rtr",
 		// The project storage layout authority (pkg/projectfs), not a
 		// user or transport resolver.
 		"projectRecordSharedDirPath localLayout",
