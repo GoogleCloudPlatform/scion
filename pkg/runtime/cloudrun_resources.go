@@ -20,6 +20,7 @@ import (
 
 	"cloud.google.com/go/run/apiv2/runpb"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -55,7 +56,11 @@ var cloudRunCPUMemoryBands = []struct {
 // neither CPU nor memory, so the instance keeps the platform defaults.
 //
 // Cloud Run has limits only, so each resource takes its limit, or its
-// request when no limit is set. Values are checked against the Cloud Run
+// request when no limit is set. On a real start the agent's resolution
+// always sets limits.cpu (config.ApplyBuiltinDefaultResources: the
+// built-in default of 2, raised to requests.cpu when that is larger), so
+// requests.cpu takes effect only above 2; the request fallback for CPU
+// applies to specs resolved without those defaults. Values are checked against the Cloud Run
 // vCPU and memory table, including the memory range each vCPU count
 // allows; a resource left unset is checked at its platform default. CPU is
 // sent as a whole vCPU count and memory as "<n>Mi" or "<n>M" (see
@@ -158,9 +163,16 @@ func cloudRunMemory(q resource.Quantity) (int64, string, error) {
 }
 
 // cloudRunResourceSource names where a checked value came from, for errors.
+//
+// A limits.cpu equal to the built-in default may have been set by the
+// agent's resolution rather than by the user (the provenance does not reach
+// the runtime), so it is named as either.
 func cloudRunResourceSource(value, field string) string {
 	if value == "" {
 		return "platform default"
+	}
+	if field == "resources.limits.cpu" && value == config.BuiltinDefaultResources().Limits.CPU {
+		return "from resources.limits.cpu or the built-in default " + value
 	}
 	return "from " + field
 }

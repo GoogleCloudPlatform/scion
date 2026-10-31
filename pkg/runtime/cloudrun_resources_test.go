@@ -92,6 +92,16 @@ func TestCloudRunContainerResources(t *testing.T) {
 			wantErr: []string{"2 vCPU (from resources.requests.cpu)", "16384Mi (from resources.requests.memory)", "set resources.limits.cpu or resources.limits.memory"},
 		},
 		{
+			name:    "built-in default cpu named as a possible source",
+			spec:    &api.ResourceSpec{Limits: limits("2", "16Gi")},
+			wantErr: []string{"2 vCPU (from resources.limits.cpu or the built-in default 2)"},
+		},
+		{
+			name:    "explicit non-default cpu names only the field",
+			spec:    &api.ResourceSpec{Limits: limits("1", "6Gi")},
+			wantErr: []string{"1 vCPU (from resources.limits.cpu)"},
+		},
+		{
 			name:    "memory above the cpu band",
 			spec:    &api.ResourceSpec{Limits: limits("2", "16Gi")},
 			wantErr: []string{"2 vCPU", "512Mi to 8192Mi", "16384Mi"},
