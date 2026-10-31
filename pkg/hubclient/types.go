@@ -242,8 +242,11 @@ type ProjectSettings struct {
 	AutoExposePortsEnabled *bool   `json:"autoExposePortsEnabled,omitempty"`
 
 	// Default agent limits
-	DefaultMaxTurns      int                  `json:"defaultMaxTurns,omitempty"`
-	DefaultMaxModelCalls int                  `json:"defaultMaxModelCalls,omitempty"`
+	// DefaultMaxTurns and DefaultMaxModelCalls: nil inherits (no project
+	// value), 0 is an explicit "no limit" (Unlimited) and n >= 1 a limit.
+	// On the settings PUT, null clears them (ptone/scion#3925).
+	DefaultMaxTurns      *int                 `json:"defaultMaxTurns,omitempty"`
+	DefaultMaxModelCalls *int                 `json:"defaultMaxModelCalls,omitempty"`
 	DefaultMaxDuration   string               `json:"defaultMaxDuration,omitempty"`
 	DefaultResources     *ProjectResourceSpec `json:"defaultResources,omitempty"`
 
