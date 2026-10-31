@@ -54,6 +54,11 @@ func TestWarnRelaySessionSecret(t *testing.T) {
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 	t.Cleanup(func() { slog.SetDefault(prev) })
+	// sessionSecretValue also reads the flag, the captured env value and a
+	// keyring file: clear them so only the env below decides.
+	prevFlag, prevCaptured, prevKeyring := webSessionSecret, capturedSessionSecret, serverKeyring
+	webSessionSecret, capturedSessionSecret, serverKeyring = "", "", nil
+	t.Cleanup(func() { webSessionSecret, capturedSessionSecret, serverKeyring = prevFlag, prevCaptured, prevKeyring })
 
 	t.Setenv(sessionSecretEnv, "")
 	t.Setenv(legacySessionSecretEnv, "")

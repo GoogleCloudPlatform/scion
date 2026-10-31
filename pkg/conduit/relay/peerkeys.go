@@ -23,6 +23,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strconv"
@@ -151,14 +152,21 @@ func ParsePeerPublicKey(s string) (ed25519.PublicKey, error) {
 // the key is the node's relay-peer identity. The error names the path,
 // never key material.
 func LoadPeerPrivateKey(path string) (ed25519.PrivateKey, error) {
-	fi, err := os.Stat(path)
+	// The mode is checked on the open file and the key read from the same
+	// descriptor, so both apply to one inode.
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("conduit relay peer key %s: %w", path, err)
+	}
+	defer f.Close()
+	fi, err := f.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("conduit relay peer key %s: %w", path, err)
 	}
 	if perm := fi.Mode().Perm(); perm&0o077 != 0 {
-		return nil, fmt.Errorf("conduit relay peer key %s: mode %04o lets group or other read it; restrict it to the owner (chmod 600)", path, perm)
+		return nil, fmt.Errorf("conduit relay peer key %s: mode %04o: group or other has access to it; chmod 600", path, perm)
 	}
-	b, err := os.ReadFile(path)
+	b, err := io.ReadAll(io.LimitReader(f, 64<<10))
 	if err != nil {
 		return nil, fmt.Errorf("conduit relay peer key %s: %w", path, err)
 	}

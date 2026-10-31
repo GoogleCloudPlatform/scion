@@ -115,7 +115,7 @@ func TestLoadPeerPrivateKey_RefusesGroupOrOtherReadable(t *testing.T) {
 	if _, err := LoadPeerPrivateKey(path); err != nil {
 		t.Fatalf("owner-only key: %v", err)
 	}
-	for _, mode := range []os.FileMode{0o640, 0o604, 0o644} {
+	for _, mode := range []os.FileMode{0o640, 0o604, 0o644, 0o620} {
 		if err := os.Chmod(path, mode); err != nil {
 			t.Fatal(err)
 		}
