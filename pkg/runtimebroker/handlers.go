@@ -155,12 +155,54 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 		status = degradeHealthStatus(status)
 	}
 
+	if s.addHubTransportRefusalChecks(checks) {
+		status = degradeHealthStatus(status)
+	}
+
 	return &HealthResponse{
 		Status:  status,
 		Version: s.version,
 		Uptime:  time.Since(s.startTime).Round(time.Second).String(),
 		Checks:  checks,
 	}
+}
+
+// Health checks reported while a hub refuses this broker's command paths
+// under its transport policy.
+const (
+	healthCheckControlChannel = "control_channel"
+	healthCheckConduit        = "conduit"
+)
+
+// addHubTransportRefusalChecks sets control_channel and conduit to
+// unhealthy when the last dial of a hub connection's control channel or
+// conduit was refused by the hub's transport policy (the hub requires TLS
+// or a proxy it trusts), and reports whether it set either. The heartbeat
+// carries them, so the hub's health summary shows a broker that is online
+// but cannot receive commands.
+func (s *Server) addHubTransportRefusalChecks(checks map[string]string) bool {
+	s.hubMu.RLock()
+	conns := make([]*HubConnection, 0, len(s.hubConnections))
+	for _, hc := range s.hubConnections {
+		conns = append(conns, hc)
+	}
+	s.hubMu.RUnlock()
+
+	set := false
+	for _, hc := range conns {
+		hc.mu.RLock()
+		cc, cd := hc.ControlChannel, hc.conduitDialer
+		hc.mu.RUnlock()
+		if cc != nil && cc.TransportRefused() {
+			checks[healthCheckControlChannel] = api.BrokerHealthUnhealthy
+			set = true
+		}
+		if cd != nil && cd.TransportRefused() {
+			checks[healthCheckConduit] = api.BrokerHealthUnhealthy
+			set = true
+		}
+	}
+	return set
 }
 
 // heartbeatHealthReport returns the broker's health for the heartbeat,
