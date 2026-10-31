@@ -54,11 +54,13 @@ import (
 //     outside a small allowlist is refused. It checks again after the
 //     command that the repository config it depended on did not change.
 //
-// Global and system config are the host user's and stay in effect: git-lfs
-// installs its filter there, so LFS content is still checked out. Command
-// line settings (-c) take precedence over every config file, including
-// files pulled in with include.path, which is why pinning works without
-// rewriting the repository config.
+// For local commands, global and system config are the host user's and stay
+// in effect: git-lfs installs its filter there, so LFS content is still
+// checked out. A command that talks to a remote reads neither, and offers no
+// host credential (HostGitRemoteEnv). Command line settings (-c) take
+// precedence over every config file, including files pulled in with
+// include.path, which is why pinning works without rewriting the repository
+// config.
 //
 // The repository config these commands read can still be written by agents
 // on runtimes where it is mounted read-write. The check after each command
@@ -81,6 +83,9 @@ import (
 //     part of the checks here, and never fetches from submodule URLs.
 //   - merge.verifySignatures=false, commit.gpgsign=false, tag.gpgsign=false:
 //     no git invocation runs gpg.program to verify or make a signature.
+//   - http.emptyAuth=false: git never starts Negotiate/NTLM authentication
+//     with empty credentials, so a Kerberos ticket or NTLM identity of the
+//     host user is not offered on an http(s) remote operation.
 //   - protocol.file.allow=user: the file:// and local-path transports are
 //     allowed for a top-level operation the user drives directly (git treats
 //     those as GIT_PROTOCOL_FROM_USER=1), which includes a hub clone URL that is
@@ -99,6 +104,7 @@ func HostGitArgs() []string {
 		"-c", "merge.verifySignatures=false",
 		"-c", "commit.gpgsign=false",
 		"-c", "tag.gpgsign=false",
+		"-c", "http.emptyAuth=false",
 	}
 }
 
@@ -141,10 +147,30 @@ var hostGitEnvKept = map[string]bool{
 	"GIT_TEST_ASSUME_DIFFERENT_OWNER": true,
 }
 
+// hostGitEnvDropped are the non-GIT_* variables HostGitEnv drops: host
+// authentication sources (the ssh agent and askpass program, a netrc path,
+// the GSS proxy switch and the Kerberos credential cache and client keytab)
+// that no host-side git call relies on, and the marker of HostGitRemoteEnv's
+// layer. Remote commands also get HostGitRemoteEnv, which points HOME and the
+// Kerberos variables at nothing: dropping KRB5CCNAME alone would fall back to
+// the default credential cache, and libcurl reads $HOME/.netrc, not NETRC.
+var hostGitEnvDropped = map[string]bool{
+	"SSH_AUTH_SOCK":       true,
+	"SSH_ASKPASS":         true,
+	"NETRC":               true,
+	"GSS_USE_PROXY":       true,
+	"KRB5CCNAME":          true,
+	"KRB5_CLIENT_KTNAME":  true,
+	hostGitRemoteLayerEnv: true,
+}
+
 // HostGitEnv returns env without GIT_* variables other than hostGitEnvKept:
 // no inherited GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR, GIT_INDEX_FILE,
 // GIT_CONFIG_COUNT/KEY/VALUE, GIT_CONFIG_PARAMETERS, GIT_EXEC_PATH, editor or
-// pager variables. Callers append the GIT_* variables they set themselves.
+// pager variables, and no TLS client certificate (GIT_SSL_CERT, GIT_SSL_KEY,
+// GIT_SSL_CERT_PASSWORD_PROTECTED) or GIT_SSL_NO_VERIFY. It also drops the
+// host authentication variables in hostGitEnvDropped. Callers append the
+// GIT_* variables they set themselves.
 //
 // It also drops any inherited LC_ALL entry and appends LC_ALL=C, so git
 // reports in the C locale whatever the user's locale: callers match git's
@@ -162,7 +188,7 @@ func HostGitEnv(env []string) []string {
 		if strings.HasPrefix(k, "GIT_") && !hostGitEnvKept[k] {
 			continue
 		}
-		if k == "LC_ALL" {
+		if k == "LC_ALL" || hostGitEnvDropped[k] {
 			continue
 		}
 		// Drop any inherited scoped-credential variable so it never reaches a host
@@ -202,9 +228,16 @@ type HostGitOptions struct {
 	// A caller that sets it starts from HostGitEnv itself.
 	Env []string
 	// Network marks a command that fetches from or pushes to a remote. It
-	// has no effect on the policy check (deny-by-default applies either way);
-	// it only widens the before/after snapshot to every repository key.
+	// has no effect on the policy check (deny-by-default applies either way).
+	// It widens the before/after snapshot to every repository key, adds the
+	// transport allow-list, and selects the remote authentication layer:
+	// the command runs with HostGitRemoteEnv for Remote. A network command
+	// without Remote is refused.
 	Network bool
+	// Remote is the remote a Network command talks to and the project
+	// credential offered to it (NewHostGitRemote). It is required with
+	// Network and refused without it.
+	Remote *HostGitRemote
 	// Policy selects the deny-by-default allow-list the repository config is
 	// checked against before the command runs. The zero value,
 	// RepoPolicyManaged, is the strict list for a Scion-managed repository;
@@ -454,12 +487,21 @@ func HostGitCommand(ctx context.Context, dir string, opts HostGitOptions, args .
 	default:
 		return nil, errHostGitCeilingInvalid
 	}
+	switch {
+	case opts.Network && opts.Remote == nil:
+		return nil, errHostGitRemoteRequired
+	case !opts.Network && opts.Remote != nil:
+		return nil, errHostGitRemoteWithoutNetwork
+	}
 	env := opts.Env
 	if env == nil {
 		env = HostGitEnv(os.Environ())
 	}
 	if opts.SkipLFSSmudge {
 		env = append(env, "GIT_LFS_SKIP_SMUDGE=1")
+	}
+	if opts.Network {
+		env = HostGitRemoteEnv(env, opts.Remote.url, opts.Remote.token)
 	}
 	discover, err := hostGitDiscovers(dir, env, opts.Audience)
 	if err != nil {
@@ -833,7 +875,8 @@ func ScopedCredentialHelperEnv(base []string, cloneURL, token string) (env []str
 //     with GIT_TERMINAL_PROMPT=0 git then fails instead of prompting.
 //
 // It does not change other git authentication sources, for example
-// ~/.netrc, TLS client certificates (http.sslCert) or Kerberos/Negotiate.
+// ~/.netrc, TLS client certificates (http.sslCert), Kerberos/Negotiate or
+// ssh; HostGitRemoteEnv, which applies it, covers those.
 func NoCredentialHelperEnv(base []string, cloneURL string) []string {
 	start := existingConfigCount(base)
 	return append(base,

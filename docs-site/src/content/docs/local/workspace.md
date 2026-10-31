@@ -352,6 +352,14 @@ the agent start or workspace pull rather than being ignored.
   Runtime Broker reaches its backstop clone path because the Hub's provisioning sentinel is missing,
   it passes no git token and sets no token remote, so a private repository fails with the "needs
   credentials" error until provisioned through the Hub.
+- **Host credentials:** a host-side command that talks to a remote (a clone, a shared-workspace
+  fetch, a template import) offers no credential of the host's own. It runs without the host user's
+  global and system git config, `~/.netrc`, Kerberos tickets, and ssh agent, keys and ssh config.
+  Without a project git token it runs anonymously; with one, the token is the only credential. Over
+  ssh it offers no identity and checks the server's host key strictly against the host user's and the
+  system's `known_hosts`, without writing them; a project token never authenticates ssh. To trust a
+  private CA, set `GIT_SSL_CAINFO` (or use the system trust store); for a proxy, set
+  `https_proxy`/`no_proxy` in the Hub or Runtime Broker environment.
 - **Updating a shared workspace** (pull) re-validates the project's stored `gitRepo` URL, verifies
   that the checkout's `origin` remote URL matches `gitRepo` (`origin remote mismatch` otherwise), and
   fetches from `gitRepo` (passing `GITHUB_TOKEN` only for HTTPS `github.com` / `*.github.com` URLs),
