@@ -37,25 +37,55 @@ func TestCSPReportLimiterPerClientIP(t *testing.T) {
 	l.global.nowFunc = func() time.Time { return now }
 
 	for i := 0; i < cspReportBurst; i++ {
-		if ok, _ := l.Allow(cspLimiterRequest("192.0.2.1:1234")); !ok {
+		if !l.Allow(cspLimiterRequest("192.0.2.1:1234")) {
 			t.Fatalf("request %d within the burst was refused", i+1)
 		}
 	}
-	ok, retry := l.Allow(cspLimiterRequest("192.0.2.1:1234"))
-	if ok {
+	if l.Allow(cspLimiterRequest("192.0.2.1:1234")) {
 		t.Fatal("request past the per-IP burst was allowed")
 	}
-	if retry < 1 {
-		t.Errorf("retry after = %d, want at least 1", retry)
-	}
 	// Positive control: another client is unaffected.
-	if ok, _ := l.Allow(cspLimiterRequest("192.0.2.2:1234")); !ok {
+	if !l.Allow(cspLimiterRequest("192.0.2.2:1234")) {
 		t.Fatal("another client IP was refused")
 	}
 	// And the first client is served again once its bucket refills.
 	now = now.Add(time.Duration(float64(time.Second) / cspReportRatePerSecond))
-	if ok, _ := l.Allow(cspLimiterRequest("192.0.2.1:1234")); !ok {
+	if !l.Allow(cspLimiterRequest("192.0.2.1:1234")) {
 		t.Fatal("the first client was still refused after the refill interval")
+	}
+}
+
+// TestCSPReportLimiterReadCeiling: the read ceiling gives one client its
+// burst, then refuses it, while another client is served; it refills at
+// its rate, and it is charged apart from the per-client budget.
+func TestCSPReportLimiterReadCeiling(t *testing.T) {
+	l := newCSPReportLimiter(nil)
+	now := time.Unix(1_700_000_000, 0)
+	l.read.nowFunc = func() time.Time { return now }
+	l.perIP.nowFunc = func() time.Time { return now }
+
+	if cspReportReadRatePerSecond <= cspReportRatePerSecond || cspReportReadBurst <= cspReportBurst {
+		t.Fatalf("the read ceiling (%v/s, burst %d) must be above the per-client budget (%v/s, burst %d)",
+			cspReportReadRatePerSecond, cspReportReadBurst, cspReportRatePerSecond, cspReportBurst)
+	}
+	for i := 0; i < cspReportReadBurst; i++ {
+		if !l.AllowRead(cspLimiterRequest("192.0.2.1:1234")) {
+			t.Fatalf("read %d within the burst was refused", i+1)
+		}
+	}
+	if l.AllowRead(cspLimiterRequest("192.0.2.1:1234")) {
+		t.Fatal("a read past the burst was allowed")
+	}
+	if !l.AllowRead(cspLimiterRequest("192.0.2.2:1234")) {
+		t.Fatal("another client was refused")
+	}
+	// The per-client budget is untouched by reads.
+	if !l.Allow(cspLimiterRequest("192.0.2.1:1234")) {
+		t.Fatal("the per-client budget was charged by reads")
+	}
+	now = now.Add(time.Duration(float64(time.Second) / cspReportReadRatePerSecond))
+	if !l.AllowRead(cspLimiterRequest("192.0.2.1:1234")) {
+		t.Fatal("the read ceiling did not refill")
 	}
 }
 
@@ -69,24 +99,20 @@ func TestCSPReportLimiterHubWide(t *testing.T) {
 	l.global.nowFunc = func() time.Time { return now }
 
 	for i := 0; i < cspReportGlobalBurst; i++ {
-		if ok, _ := l.AllowRecord(); !ok {
+		if !l.AllowRecord() {
 			t.Fatalf("record %d within the hub-wide burst was refused", i+1)
 		}
 	}
-	ok, retry := l.AllowRecord()
-	if ok {
+	if l.AllowRecord() {
 		t.Fatal("a record past the hub-wide burst was allowed")
 	}
-	if retry < 1 {
-		t.Errorf("retry after = %d, want at least 1", retry)
-	}
 	// Positive control: a client request still passes its own bucket.
-	if ok, _ := l.Allow(cspLimiterRequest("192.0.2.200:80")); !ok {
+	if !l.Allow(cspLimiterRequest("192.0.2.200:80")) {
 		t.Fatal("a client request was refused by the exhausted record budget")
 	}
 	// And the record budget refills at its rate.
 	now = now.Add(time.Duration(float64(time.Second) / cspReportGlobalRatePerSecond))
-	if ok, _ := l.AllowRecord(); !ok {
+	if !l.AllowRecord() {
 		t.Fatal("the record budget did not refill")
 	}
 }
@@ -102,15 +128,15 @@ func TestCSPReportLimiterGroupsIPv6By64(t *testing.T) {
 
 	for i := 0; i < cspReportBurst; i++ {
 		addr := fmt.Sprintf("[2001:db8:1:2::%x]:443", i+1)
-		if ok, _ := l.Allow(cspLimiterRequest(addr)); !ok {
+		if !l.Allow(cspLimiterRequest(addr)) {
 			t.Fatalf("request %d within the burst was refused", i+1)
 		}
 	}
-	if ok, _ := l.Allow(cspLimiterRequest("[2001:db8:1:2:ffff::1]:443")); ok {
+	if l.Allow(cspLimiterRequest("[2001:db8:1:2:ffff::1]:443")) {
 		t.Fatal("another address in the same /64 got a fresh bucket")
 	}
 	// Positive control: an address in another /64 is served.
-	if ok, _ := l.Allow(cspLimiterRequest("[2001:db8:1:3::1]:443")); !ok {
+	if !l.Allow(cspLimiterRequest("[2001:db8:1:3::1]:443")) {
 		t.Fatal("an address in another /64 was refused")
 	}
 	if got := l.perIP.Len(); got != 2 {
