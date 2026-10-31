@@ -322,3 +322,22 @@ func TestCompletedWithoutRunnerIDKeepsRecord(t *testing.T) {
 		t.Errorf("no reason=runner_id_missing line:\n%s", h.logs.String())
 	}
 }
+
+// TestCompletedWithoutRecordLogsNoRecord: after a restart there is no record for
+// the runner, so a completed event with its runner_id changes nothing and says so.
+func TestCompletedWithoutRecordLogsNoRecord(t *testing.T) {
+	first := newHarness(t, harnessOpts{})
+	first.addSameRepoRun(10)
+	first.queued(100, 10)
+	h := newHarness(t, harnessOpts{reuseFrom: first}) // fresh memory, same world
+
+	if code, _ := h.webhook(onRunner(jobEvent("completed", 100, 10, testRepo, "success", "cr-job-100"), h.registeredID("cr-job-100"))); code != http.StatusOK {
+		t.Fatalf("completed: %d", code)
+	}
+	if !strings.Contains(h.logs.String(), `"reason":"no_record"`) {
+		t.Errorf("no reason=no_record line:\n%s", h.logs.String())
+	}
+	if h.forgottenHas("cr-job-100") {
+		t.Error("cr-job-100 forgotten without a record")
+	}
+}
