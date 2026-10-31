@@ -353,9 +353,12 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 		<-retired.pollDone
 	}
 	if retired != nil {
+		// Read the logger here: the goroutine outlives Configure and must
+		// not touch broker fields.
+		log := b.log
 		go func() {
 			defer b.retiring.Done()
-			retired.shutdown(b.log)
+			retired.shutdown(log)
 		}()
 	}
 	return err
