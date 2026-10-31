@@ -212,3 +212,25 @@ func TestEnvScopeFilters_MatchesPrecedenceAndDispatcher(t *testing.T) {
 		t.Errorf("envScopeFilters(no IDs) = %v, want only the hub scope", got)
 	}
 }
+
+// envScopeID answers for a nil agent: the hub scope is keyed by the hub ID
+// alone, and every agent-keyed scope does not apply.
+func TestEnvScopeID_NilAgent(t *testing.T) {
+	for _, scope := range envScopePrecedence {
+		want := ""
+		if scope == store.ScopeHub {
+			want = provenanceHubID
+		}
+		if got := envScopeID(scope, nil, provenanceHubID); got != want {
+			t.Errorf("envScopeID(%s, nil) = %q, want %q", scope, got, want)
+		}
+	}
+}
+
+// A nil agent gets the "hub" fallback label rather than a panic.
+func TestEnvGatherSourceLabel_NilAgent(t *testing.T) {
+	srv, _ := testServer(t)
+	if got := srv.envGatherSourceLabel(context.Background(), nil, nil, "K"); got != "hub" {
+		t.Errorf("label for a nil agent = %q, want %q", got, "hub")
+	}
+}

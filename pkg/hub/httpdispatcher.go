@@ -2526,11 +2526,16 @@ var envScopePrecedence = []string{
 
 // envScopeID returns the ID the given scope is keyed by for this agent, or ""
 // if the scope does not apply (e.g. an agent with no project). The hub scope is
-// keyed by the hub's own instance ID, not by anything on the agent.
+// keyed by the hub's own instance ID, not by anything on the agent, so it
+// is returned even for a nil agent; every other scope is "" then.
 func envScopeID(scope string, agent *store.Agent, hubID string) string {
-	switch scope {
-	case store.ScopeHub:
+	if scope == store.ScopeHub {
 		return hubID
+	}
+	if agent == nil {
+		return ""
+	}
+	switch scope {
 	case store.ScopeProject:
 		return agent.ProjectID
 	case store.ScopeUser:

@@ -3282,7 +3282,13 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 // It deliberately does not apply the admin-kind test identity scope filter
 // (envScopesForDispatch): it labels keys the broker already reported as
 // supplied by the Hub, and decides nothing about what is dispatched.
+//
+// A nil agent gets the "hub" fallback. buildEnvGatherResponse, the only
+// caller, reads agent.ID first, so this is defensive only.
 func (s *Server) envGatherSourceLabel(ctx context.Context, agent *store.Agent, envFilters []store.EnvVarFilter, key string) string {
+	if agent == nil {
+		return "hub"
+	}
 	if agent.AppliedConfig != nil && agent.AppliedConfig.Env[key] != "" {
 		return "config"
 	}
@@ -3309,13 +3315,17 @@ func (s *Server) envGatherSourceLabel(ctx context.Context, agent *store.Agent, e
 // envGatherStoredScope returns the label of the highest-precedence env var
 // storage scope in envFilters (lowest precedence first) that holds key, and
 // whether any does. With skipAsNeeded, a scope holding the key only as an
-// as_needed row does not count. A scope whose read fails is skipped.
+// as_needed row does not count. A scope whose read fails is logged and
+// skipped: provenance is advisory, so a failed read only costs the label
+// (or the warning) for that scope, never the response.
 func (s *Server) envGatherStoredScope(ctx context.Context, envFilters []store.EnvVarFilter, key string, skipAsNeeded bool) (string, bool) {
 	for i := len(envFilters) - 1; i >= 0; i-- {
 		filter := envFilters[i]
 		filter.Key = key
 		vars, err := s.store.ListEnvVars(ctx, filter)
 		if err != nil {
+			slog.WarnContext(ctx, "env-gather provenance: reading stored env vars failed; skipping this scope",
+				"scope", filter.Scope, "error", err)
 			continue
 		}
 		for _, v := range vars {
