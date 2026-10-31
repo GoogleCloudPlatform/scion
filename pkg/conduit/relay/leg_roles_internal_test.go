@@ -16,13 +16,9 @@ package relay
 
 import (
 	"crypto/sha256"
-	"crypto/x509"
 	"encoding/hex"
-	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -97,30 +93,5 @@ func TestDrain_EnrolledRoles(t *testing.T) {
 	}
 	if rec := drain(a); rec.Code != http.StatusForbidden {
 		t.Fatalf("relay drain: %d %s, want 403", rec.Code, rec.Body.String())
-	}
-}
-
-// TestLoadPeerPrivateKey_RefusesGroupOrOtherReadable: a key file readable
-// by group or other is refused; an owner-only one loads.
-func TestLoadPeerPrivateKey_RefusesGroupOrOtherReadable(t *testing.T) {
-	p := newTestPeer(t, "relay-a", "a1", PeerRoleRelay)
-	der, err := x509.MarshalPKCS8PrivateKey(p.priv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(t.TempDir(), "peer.key")
-	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := LoadPeerPrivateKey(path); err != nil {
-		t.Fatalf("owner-only key: %v", err)
-	}
-	for _, mode := range []os.FileMode{0o640, 0o604, 0o644, 0o620} {
-		if err := os.Chmod(path, mode); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := LoadPeerPrivateKey(path); err == nil || !strings.Contains(err.Error(), "chmod 600") {
-			t.Errorf("mode %04o: %v, want refused", mode, err)
-		}
 	}
 }

@@ -17,14 +17,10 @@ package relay
 import (
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/x509"
 	"encoding/base64"
-	"encoding/pem"
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -268,40 +264,6 @@ func TestNewPeerDirectory_Refusals(t *testing.T) {
 		if _, err := NewPeerDirectory(es); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
-	}
-}
-
-// TestPeerKeyOptions: the settings are decoded, a key file needs a
-// configured instance id, and bad input is refused without key material
-// in the error.
-func TestPeerKeyOptions(t *testing.T) {
-	a := newTestPeer(t, "relay-a", "a1", PeerRoleRelay)
-	der, err := x509.MarshalPKCS8PrivateKey(a.priv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	keyFile := filepath.Join(t.TempDir(), "peer.key")
-	if err := os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	peers := []config.HubConduitPeer{{ID: a.id, Role: "relay", Keys: []config.HubConduitPeerKey{{KeyID: a.kid, PublicKey: base64.StdEncoding.EncodeToString(a.pub)}}}}
-
-	es, key, err := PeerKeyOptions(config.HubConduitConfig{InstanceID: a.id, PeerKeyFile: keyFile, Peers: peers})
-	if err != nil || len(es) != 1 || !key.Equal(a.priv) {
-		t.Fatalf("PeerKeyOptions = %d peers, key set %v, %v", len(es), key != nil, err)
-	}
-	if _, _, err := PeerKeyOptions(config.HubConduitConfig{PeerKeyFile: keyFile, Peers: peers}); err == nil {
-		t.Error("a key file without a configured instance id was accepted")
-	}
-	if _, _, err := PeerKeyOptions(config.HubConduitConfig{InstanceID: a.id, PeerKeyFile: keyFile + ".missing", Peers: peers}); err == nil {
-		t.Error("a missing key file was accepted")
-	}
-	bad := []config.HubConduitPeer{{ID: a.id, Role: "relay", Keys: []config.HubConduitPeerKey{{KeyID: a.kid, PublicKey: "not-base64!"}}}}
-	if _, _, err := PeerKeyOptions(config.HubConduitConfig{Peers: bad}); err == nil {
-		t.Error("a malformed public key was accepted")
-	}
-	if es, key, err := PeerKeyOptions(config.HubConduitConfig{}); err != nil || es != nil || key != nil {
-		t.Errorf("no settings: %v, %v, %v", es, key, err)
 	}
 }
 

@@ -23,9 +23,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"os"
 	"strconv"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -147,28 +145,16 @@ func ParsePeerPublicKey(s string) (ed25519.PublicKey, error) {
 	return ed25519.PublicKey(b), nil
 }
 
-// LoadPeerPrivateKey reads a PEM PKCS #8 Ed25519 private key from path.
-// A file readable by group or other is refused, as SSH refuses such a key:
-// the key is the node's relay-peer identity. The error names the path,
-// never key material.
+// LoadPeerPrivateKey reads a PEM PKCS #8 Ed25519 private key from path
+// (readPeerKeyFile). Off Windows a file group or other can access is
+// refused, as SSH refuses such a key: the key is the node's relay-peer
+// identity. On Windows key files are not supported (the server does not
+// run there) and every path is refused. The error names the path, never
+// key material.
 func LoadPeerPrivateKey(path string) (ed25519.PrivateKey, error) {
-	// The mode is checked on the open file and the key read from the same
-	// descriptor, so both apply to one inode.
-	f, err := os.Open(path)
+	b, err := readPeerKeyFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("conduit relay peer key %s: %w", path, err)
-	}
-	defer func() { _ = f.Close() }()
-	fi, err := f.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("conduit relay peer key %s: %w", path, err)
-	}
-	if perm := fi.Mode().Perm(); perm&0o077 != 0 {
-		return nil, fmt.Errorf("conduit relay peer key %s: mode %04o: group or other has access to it; chmod 600", path, perm)
-	}
-	b, err := io.ReadAll(io.LimitReader(f, 64<<10))
-	if err != nil {
-		return nil, fmt.Errorf("conduit relay peer key %s: %w", path, err)
+		return nil, err
 	}
 	blk, _ := pem.Decode(b)
 	if blk == nil || blk.Type != "PRIVATE KEY" {
