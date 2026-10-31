@@ -1299,10 +1299,11 @@ func TestGovernance_WindowChangeNeedsRelaxationAuthority(t *testing.T) {
 }
 
 // TestGovernance_WindowSubSecondChange pins how time-window bounds are
-// compared: exactly, with no rounding. A session update that echoes the
-// stored window as read back from the store (sub-second instants included)
-// does not change the window and needs no relaxation authority; moving
-// ExpiresAt by one millisecond is a window change and does.
+// compared: exactly, with no rounding, as instants. A session update that
+// echoes the stored window as read back from the store (sub-second instants
+// included), or the same instant in another time zone, does not change the
+// window and needs no relaxation authority; moving ExpiresAt by one
+// millisecond is a window change and does.
 func TestGovernance_WindowSubSecondChange(t *testing.T) {
 	gs, ps, _, s := govTestSetup(t)
 	ctx := context.Background()
@@ -1356,6 +1357,12 @@ func TestGovernance_WindowSubSecondChange(t *testing.T) {
 	require.NoError(t, err, "echoing the stored sub-second window is not a window change")
 	require.True(t, got.ExpiresAt.Equal(expiresAt))
 
+	// Echo the same instant in another time zone: not a window change.
+	shifted := got.ExpiresAt.In(time.FixedZone("UTC+05:30", 5*3600+1800))
+	got, err = commit(partialID, got, draft("purpose edited again", &shifted))
+	require.NoError(t, err, "the same instant in another zone is not a window change")
+	require.True(t, got.ExpiresAt.Equal(expiresAt))
+
 	// Move ExpiresAt by one millisecond: a window change.
 	moved := got.ExpiresAt.Add(time.Millisecond)
 	_, err = commit(partialID, got, draft("purpose edited", &moved))
@@ -1366,6 +1373,58 @@ func TestGovernance_WindowSubSecondChange(t *testing.T) {
 	got, err = commit(fullID, got, draft("purpose edited", &moved))
 	require.NoError(t, err, "the full admin moves the bound")
 	assert.True(t, got.ExpiresAt.Equal(moved), "got %v, want %v", *got.ExpiresAt, moved)
+}
+
+// hiddenConstraintStore reports store.ErrNotFound for one constraint ID,
+// as if the row were deleted after the preview token was validated.
+type hiddenConstraintStore struct {
+	store.Store
+	hiddenID string
+}
+
+func (s hiddenConstraintStore) GetAccessConstraint(ctx context.Context, id string) (*store.AccessConstraint, error) {
+	if id == s.hiddenID {
+		return nil, store.ErrNotFound
+	}
+	return s.Store.GetAccessConstraint(ctx, id)
+}
+
+// TestGovernance_CommitStoredConstraintNotFound pins that a delete commit
+// whose stored constraint cannot be loaded after the preview token is
+// validated fails with an error that wraps store.ErrNotFound, and deletes
+// nothing.
+func TestGovernance_CommitStoredConstraintNotFound(t *testing.T) {
+	gs, ps, authz, s := govTestSetup(t)
+	ctx := context.Background()
+
+	adminID := govSeedAdminUser(t, s, "gov-admin-stored-missing")
+	userID := govSeedNonAdminUser(t, s, "gov-user-stored-missing")
+	actor := pvTestActor(adminID)
+	created := govCreateAndCommit(t, gs, ps, &store.AccessConstraint{
+		Name:                 "gov-stored-missing",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
+		SubjectPrincipalType: pvStrPtr("user"),
+		SubjectPrincipalID:   pvStrPtr(userID),
+		ScopeType:            store.RoleScopeSystem,
+		MaximumPermissions:   []string{"agent.read"},
+		Purpose:              "stored constraint not found",
+		CreatedBy:            adminID,
+	}, actor)
+
+	preview, err := ps.GeneratePreview(ctx, PreviewRequest{
+		Operation: "delete", ConstraintID: created.ID, BaseRevision: created.Revision, Actor: actor,
+	})
+	require.NoError(t, err)
+
+	hidden := NewGovernanceService(hiddenConstraintStore{Store: s, hiddenID: created.ID}, ps, authz, slog.Default())
+	hidden.nowFunc = gs.nowFunc
+	_, err = hidden.CommitBoundaryChange(ctx, CommitRequest{
+		Operation: "delete", ConstraintID: created.ID, BaseRevision: created.Revision,
+		PreviewToken: preview.PreviewToken, Actor: actor,
+	})
+	require.ErrorIs(t, err, store.ErrNotFound)
+	_, err = s.GetAccessConstraint(ctx, created.ID)
+	require.NoError(t, err, "nothing is deleted")
 }
 
 // ---------------------------------------------------------------------------

@@ -235,7 +235,11 @@ func (e *GovernanceError) Error() string {
 //	f. Re-authorize the actor: verify they still hold access_constraint.admin
 //	g. For relaxations and time-window changes: verify the actor holds
 //	   authority over the permissions the change requires (server
-//	   classification and the stored window choose the path)
+//	   classification and the stored window choose the path). Order: a
+//	   relaxation sent with a user access token is refused as session only;
+//	   then the stored constraint of an update or delete is loaded once;
+//	   then a token update whose window does not cover the stored one is
+//	   refused as session only; then the authority check runs
 //	h. Enforce lockout: at least one active direct user retains
 //	   access_constraint.admin at the relevant scope
 //	i. Apply the mutation (create/update/delete)
@@ -272,6 +276,14 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 		return nil, fmt.Errorf("classification failed: %w", err)
 	}
 
+	// Step g: For relaxations and time-window changes, verify the actor has
+	// sufficient authority. A relaxation sent with a user access token is
+	// refused first: it needs a session.
+	relaxes := classification == ClassificationRelax || classification == ClassificationMixed
+	if relaxes && commitSentWithToken(ctx, req) {
+		return nil, errTokenRelaxationSessionOnly
+	}
+
 	// The stored constraint of an update or delete, loaded once for the
 	// time-window and authority checks below.
 	var stored *store.AccessConstraint
@@ -282,14 +294,6 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 		}
 	}
 	windowUpdate := req.Operation == "update" && req.Draft != nil && stored != nil
-
-	// Step g: For relaxations, verify the actor has sufficient authority.
-	// A relaxation sent with a user access token is refused: it needs a
-	// session.
-	relaxes := classification == ClassificationRelax || classification == ClassificationMixed
-	if relaxes && commitSentWithToken(ctx, req) {
-		return nil, errTokenRelaxationSessionOnly
-	}
 
 	// A user access token may not narrow or add a constraint's time window:
 	// the constraint is inactive outside its window, so an update whose
@@ -604,10 +608,10 @@ func (gs *GovernanceService) checkRelaxationAuthority(ctx context.Context, req C
 	}
 
 	// Determine which permissions the change requires authority over.
-	var restoredPerms []string
+	var requiredPerms []string
 	if req.Operation == "delete" {
 		// Delete restores all permissions the boundary was removing. Ideally
-		// restoredPerms would contain every permission NOT in the boundary's
+		// requiredPerms would contain every permission NOT in the boundary's
 		// max set (the permissions the boundary was restricting), but we lack
 		// a full permission registry to enumerate "everything else."
 		//
@@ -618,7 +622,7 @@ func (gs *GovernanceService) checkRelaxationAuthority(ctx context.Context, req C
 		// the permissions the boundary explicitly allows, they should not be
 		// able to remove the boundary.
 		if stored != nil {
-			restoredPerms = append(restoredPerms, stored.MaximumPermissions...)
+			requiredPerms = append(requiredPerms, stored.MaximumPermissions...)
 		}
 	} else if req.Operation == "update" && req.Draft != nil && stored != nil {
 		// Permissions being added to the max set are being "relaxed" (restored).
@@ -628,7 +632,7 @@ func (gs *GovernanceService) checkRelaxationAuthority(ctx context.Context, req C
 		}
 		for _, p := range req.Draft.MaximumPermissions {
 			if _, ok := storedSet[p]; !ok {
-				restoredPerms = append(restoredPerms, p)
+				requiredPerms = append(requiredPerms, p)
 			}
 		}
 		// Any change to the time window, in either direction, needs the
@@ -637,13 +641,13 @@ func (gs *GovernanceService) checkRelaxationAuthority(ctx context.Context, req C
 		// boundary applies; a narrowed or added window lifts the boundary
 		// outside it, and a widened or removed window re-times it.
 		if constraintWindowChanged(req.Draft, stored) {
-			restoredPerms = append(restoredPerms, stored.MaximumPermissions...)
+			requiredPerms = append(requiredPerms, stored.MaximumPermissions...)
 		}
 	}
 
 	// The actor must hold each permission the change requires.
 	var missingPerms []string
-	for _, p := range restoredPerms {
+	for _, p := range requiredPerms {
 		if _, ok := actorPermSet[p]; !ok {
 			missingPerms = append(missingPerms, p)
 		}
