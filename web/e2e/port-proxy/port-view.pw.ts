@@ -13,8 +13,9 @@
 // limitations under the License.
 
 /**
- * Page view journeys (ptone/scion#5569), run by playwright.view.config.ts
- * on a hub with hub.port_view on and the conduit agent only.
+ * Page view journeys (ptone/scion#5569, ptone/scion#5570), run by
+ * playwright.view.config.ts on a hub with hub.port_view on, with one agent
+ * on a conduit session and one on the legacy port-forward tunnel.
  *
  * Signed-in browser contexts hold only their session cookie (never a
  * bearer token): the member (project-owner of the fixture project), a peer
@@ -28,6 +29,11 @@
  * - Journey 4: what a page opened this way can reach, how a copied page
  *   link behaves for other signed-in users, and what an open page gets
  *   after its user loses access or its link stops being valid.
+ * - Journey 5: journey 3 for the agent on the legacy tunnel: the port's
+ *   link lands on a page link; the stylesheet, module script, image and
+ *   relative fetch work, and the WebSocket check fails, because the tunnel
+ *   does not carry WebSockets.
+ * Journeys 3 and 4 use the conduit agent.
  */
 
 import {
@@ -73,15 +79,15 @@ function safePath(url: string): string {
 /** How long beforeAll waits for the agent to serve its port again after the hub restart. */
 const READY_TIMEOUT_MS = 150_000;
 
-function agentId(): string {
-  const agent = suite.agents.find((a) => a.transport === 'conduit');
-  if (!agent) throw new Error('no conduit fixture agent');
+function agentId(transport = 'conduit'): string {
+  const agent = suite.agents.find((a) => a.transport === transport);
+  if (!agent) throw new Error(`no ${transport} fixture agent`);
   return agent.id;
 }
 
-/** The port's link root, without the trailing slash. */
-function portLink(): string {
-  return `${hub.baseURL}/api/v1/agents/${agentId()}/ports/${suite.port}/proxy`;
+/** The port's link root for the agent on transport, without the trailing slash. */
+function portLink(transport = 'conduit'): string {
+  return `${hub.baseURL}/api/v1/agents/${agentId(transport)}/ports/${suite.port}/proxy`;
 }
 
 function ctx(name: string): BrowserContext {
@@ -125,9 +131,9 @@ async function newSignedInContext(
   contexts.set(name, c);
 }
 
-/** Waits until the agent's port answers single.html through the port link for the member. */
-async function waitServed(): Promise<void> {
-  const url = `${portLink()}/single.html`;
+/** Waits until the agent's port on transport answers single.html through the port link for the member. */
+async function waitServed(transport = 'conduit'): Promise<void> {
+  const url = `${portLink(transport)}/single.html`;
   const deadline = Date.now() + READY_TIMEOUT_MS;
   let last = 'no answer';
   while (Date.now() < deadline) {
@@ -142,7 +148,9 @@ async function waitServed(): Promise<void> {
     }
     await new Promise((r) => setTimeout(r, 1000));
   }
-  throw new Error(`the agent did not serve its port within ${READY_TIMEOUT_MS}ms: ${last}`);
+  throw new Error(
+    `the ${transport} agent did not serve its port within ${READY_TIMEOUT_MS}ms: ${last}`
+  );
 }
 
 /** Opens url in a new page of context name and records the page link responses by sub-path. */
@@ -178,7 +186,7 @@ async function pageFetch(
 test.describe.configure({ mode: 'serial' });
 
 test.beforeAll(async ({ browser }) => {
-  test.setTimeout(60_000 + READY_TIMEOUT_MS);
+  test.setTimeout(60_000 + 2 * READY_TIMEOUT_MS);
   const h = readHubState(hubStateFile());
   const s = readSuiteState();
   if (!h || !s) throw new Error('global setup did not record the hub and suite state');
@@ -190,7 +198,8 @@ test.beforeAll(async ({ browser }) => {
   await newSignedInContext(browser, suite.member, 'member');
   await newSignedInContext(browser, suite.peer, 'peer');
   await newSignedInContext(browser, suite.outsider, 'outsider');
-  await waitServed();
+  await waitServed('conduit');
+  await waitServed('legacy');
 });
 
 test.afterAll(async () => {
@@ -247,6 +256,35 @@ test('journey 3: a page using a root-relative script does not run it', async () 
   for (const res of rootScripts) {
     const body = await res.text().catch(() => '');
     expect(body, '/app.js is not the fixture script').not.toContain('checkFetch');
+  }
+  await page.close();
+});
+
+test('journey 5: a multi-file page on the legacy tunnel loads its relative resources', async () => {
+  const link = portLink('legacy');
+  const { page, nav, subs } = await open('member', `${link}/index.html?from=hub`);
+  expect(nav?.status()).toBe(200);
+  const parts = viewParts(page.url());
+  expect(parts, `landed on ${safePath(page.url())}`).not.toBeNull();
+  expect(parts?.sub).toBe('index.html');
+  expect(new URL(page.url()).search).toBe('?from=hub');
+  const first = nav?.request().redirectedFrom();
+  expect(first?.url()).toBe(`${link}/index.html?from=hub`);
+  expect((await first?.response())?.status()).toBe(302);
+
+  // The fetch check passes; the WebSocket check fails, as the tunnel
+  // answers a WebSocket with 501.
+  await expect(page.locator('#probe')).toHaveText('fail:ws(ws error)', { timeout: 20_000 });
+  await expect(page.locator('#title')).toHaveCSS('color', 'rgb(0, 0, 255)');
+  await expect
+    .poll(() => page.locator('#dot').evaluate((img: HTMLImageElement) => img.naturalWidth))
+    .toBeGreaterThan(0);
+  for (const name of SUBRESOURCES) {
+    const res = subs.get(name);
+    expect.soft(res?.status(), `${name} status`).toBe(200);
+    const sent = await res?.request().allHeaders();
+    // Compare presence only, so a failure never prints a cookie value.
+    expect.soft(sent?.['cookie'] !== undefined, `${name} request sent a cookie`).toBe(false);
   }
   await page.close();
 });

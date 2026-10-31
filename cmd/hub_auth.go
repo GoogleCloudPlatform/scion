@@ -160,7 +160,9 @@ func runHubAuthLogin(cmd *cobra.Command, args []string) error {
 func hubAuthLoginFlow(cmd *cobra.Command, hubURL, provider string, extra ...hubclient.Option) (*hubclient.CLITokenResponse, error) {
 	// Create hub client (unauthenticated for initial OAuth)
 	opts := append([]hubclient.Option{hubclient.WithTimeout(30 * time.Second)}, extra...)
-	client, err := hubclient.New(hubURL, opts...)
+	// The login receives the user's new token: the transport rule applies
+	// before the flow starts.
+	client, err := newUserHubClient(hubURL, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Hub client: %w", err)
 	}

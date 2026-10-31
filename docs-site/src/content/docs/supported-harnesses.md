@@ -388,7 +388,8 @@ A harness for the [pi](https://pi.dev) multi-provider terminal coding agent. Opt
 With no credentials the agent drops to a shell — run `pi` and use `/login`.
 
 ### Configuration
-- **Config directory**: `~/.pi/agent/` (`settings.json`, `AGENTS.md`, `APPEND_SYSTEM.md`).
+- **Config directory**: `~/.pi/agent/` (`settings.json`, `AGENTS.md`, `APPEND_SYSTEM.md`), staged by the container-script harness bundle (pinned to pi `1.3.0`).
+- **Model selection**: `SCION_MODEL` (and `SCION_PI_PROVIDER`) populate `defaultProvider` and `defaultModel` in `~/.pi/agent/settings.json`. Model IDs containing colons (such as Ollama tags like `ollama/qwen3:8b`, Bedrock `-v2:0` versions, or OpenRouter `:free` variants) are preserved intact; only a trailing pi thinking-level suffix (`:off`, `:minimal`, `:low`, `:medium`, `:high`, `:xhigh`, `:max`) is stripped from `defaultModel`.
 - **System prompt**: written to `~/.pi/agent/APPEND_SYSTEM.md`, which pi appends to its default system prompt (it does not replace it). With `SCION_PI_PROJECT_TRUST=always`, a repository's `.pi/APPEND_SYSTEM.md` can override Scion's prompt.
 - **Project trust**: defaults to `never` (`SCION_PI_PROJECT_TRUST=never|ask|always`).
 - **Interrupt key**: `Escape`.

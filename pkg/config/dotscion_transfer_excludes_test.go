@@ -39,3 +39,12 @@ func TestTransferDefaultExcludes_DotScion(t *testing.T) {
 		t.Errorf("DefaultExcludePatterns contains bare %q, which also matches nested entries", DotScion)
 	}
 }
+
+// TestTransferWorkspaceIdentityEntry_DotScion keeps the literal identity
+// entry name in transfer.ExcludeWorkspaceObject's rule table (the signed-URL
+// workspace download filter) equal to DotScion.
+func TestTransferWorkspaceIdentityEntry_DotScion(t *testing.T) {
+	if transfer.WorkspaceIdentityEntry != DotScion {
+		t.Fatalf("transfer.WorkspaceIdentityEntry = %q, config.DotScion = %q", transfer.WorkspaceIdentityEntry, DotScion)
+	}
+}

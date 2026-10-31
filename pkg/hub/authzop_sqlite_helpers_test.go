@@ -1157,16 +1157,17 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/env/{key}": {"key": f.envVarKey},
 
 		// --- runtime broker family ---
-		"/api/v1/runtime-brokers/{id}":                         {"id": f.runtimeBroker},
-		"/api/v1/runtime-brokers/{id}/settings":                {"id": f.runtimeBroker},
-		"/api/v1/runtime-brokers/{id}/heartbeat":               {"id": f.runtimeBroker},
-		"/api/v1/runtime-brokers/{id}/projects":                {"id": f.runtimeBroker},
-		"/api/v1/runtime-brokers/{id}/env":                     {"id": f.runtimeBroker},
-		"/api/v1/runtime-brokers/{id}/env/{key}":               {"id": f.runtimeBroker, "key": f.brokerEnvKey},
-		"/api/v1/runtime-brokers/{id}/secrets":                 {"id": f.runtimeBroker},
-		"/api/v1/runtime-brokers/{id}/secrets/{key}":           {"id": f.runtimeBroker, "key": f.brokerSecretKey},
-		"/api/v1/runtime-brokers/{id}/message-failures":        {"id": f.runtimeBroker},
-		"/api/v1/runtime-brokers/{id}/agents/{agentId}/launch": {"id": f.runtimeBroker, "agentId": f.agent},
+		"/api/v1/runtime-brokers/{id}":                                     {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/settings":                            {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/heartbeat":                           {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/projects":                            {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/env":                                 {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/env/{key}":                           {"id": f.runtimeBroker, "key": f.brokerEnvKey},
+		"/api/v1/runtime-brokers/{id}/secrets":                             {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/secrets/{key}":                       {"id": f.runtimeBroker, "key": f.brokerSecretKey},
+		"/api/v1/runtime-brokers/{id}/message-failures":                    {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/agents/{agentId}/launch":             {"id": f.runtimeBroker, "agentId": f.agent},
+		"/api/v1/runtime-brokers/{id}/agents/{agentId}/workspace-download": {"id": f.runtimeBroker, "agentId": f.agent},
 
 		// --- github app family ---
 		"/api/v1/github-app/installations/{id}": {"id": f.githubInstallationID},

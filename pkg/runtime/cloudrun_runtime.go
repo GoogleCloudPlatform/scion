@@ -461,6 +461,9 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 	var volumes []*runpb.Volume
 	var volumeMounts []*runpb.VolumeMount
 
+	// Cloud Run NFS volumes take no mount options, so the nosuid,nodev a
+	// Runtime Broker adds to its own NFS mounts are not set here: Cloud Run
+	// instances run sandboxed, and that is the boundary relied on.
 	if nfsPaths != nil {
 		workspaceMount := cfg.ContainerWorkspace
 		if workspaceMount == "" {

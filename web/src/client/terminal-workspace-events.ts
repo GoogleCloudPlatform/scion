@@ -27,3 +27,11 @@ export interface TerminalPaletteNewAgentDetail {
  * still happens inside `create()`, not here).
  */
 export const TERMINAL_PALETTE_NEW_AGENT_EVENT = 'scion:terminal-palette-new-agent';
+
+/**
+ * Dispatched (bubbling, composed) by a `scion-terminal-pane` when one of its
+ * own dialogs opens. Those dialogs render already open, so they fire no
+ * `sl-show`; `TerminalWorkspaceRoot` listens for this instead, to close the
+ * "Jump to agent" palette so the two modals are never open together.
+ */
+export const TERMINAL_PANE_DIALOG_OPEN_EVENT = 'scion:terminal-pane-dialog-open';

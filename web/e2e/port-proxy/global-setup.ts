@@ -33,8 +33,8 @@
  *    storage state (0600, state dir) that every browser context loads.
  *
  * The page view suite (playwright.view.config.ts, E2E_PP_VIEW=1) also turns
- * hub.port_view on from process start, serves the port from the conduit
- * agent only, makes the member project-owner, and adds a peer
+ * hub.port_view on from process start, serves the port from both agents
+ * (conduit and legacy tunnel), makes the member project-owner, and adds a peer
  * (project-admin) and an outsider (no project role), each signed in the
  * same way.
  *
@@ -198,8 +198,7 @@ async function setUp(dir: string): Promise<void> {
       '-ready-file',
       helperReady,
       '-transports',
-      // The page view journeys use the conduit transport only (ptone/scion#5569).
-      viewMode() ? 'conduit' : TRANSPORTS.join(','),
+      TRANSPORTS.join(','),
       '-probe-path',
       'single.html',
       '-probe-text',

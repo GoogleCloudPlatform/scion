@@ -104,7 +104,7 @@ const (
 // mintJoinToken sends the request 'hub brokers join-token create' sends.
 func mintJoinToken(t *testing.T, srv *Server, user *store.User, name string, ttlSeconds int) *httptest.ResponseRecorder {
 	t.Helper()
-	return doRequestAsUser(t, srv, user, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	return doRequestAsUserLoopback(t, srv, user, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name:                name,
 		JoinTokenTTLSeconds: ttlSeconds,
 		PreserveSettings:    true,

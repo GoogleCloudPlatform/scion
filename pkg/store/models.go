@@ -1434,6 +1434,14 @@ type BrokerCapabilities struct {
 	// for such a broker does the hub accept a change of a count limit to
 	// Unlimited; an older broker would keep the inherited limit.
 	UnlimitedCountLimits bool `json:"unlimitedCountLimits,omitempty"`
+	// ClearedResourceSubfields indicates the broker applies the resources
+	// sub-field entries of cleared_fields (resources.requests.cpu and the
+	// like, api.ResourceSubPaths) at start, so a resources edit that drops
+	// one sub-field restores its inherited value while keeping the others
+	// (ptone/scion#5676). Only for such a broker does the hub report that
+	// drop as applied at the next start; an older broker ignores the
+	// entries and keeps the previous value until a reincarnation.
+	ClearedResourceSubfields bool `json:"clearedResourceSubfields,omitempty"`
 	// StartsInFlight indicates the broker reports the agent starts still
 	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
 	// then does the hub read a start's absence from that list as "no start

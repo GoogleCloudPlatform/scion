@@ -21,7 +21,7 @@
  * via the session registry and Hub PTY endpoint.
  */
 
-import { LitElement, html, css, nothing, unsafeCSS } from 'lit';
+import { LitElement, html, css, nothing, unsafeCSS, type PropertyValues } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import type {
@@ -46,7 +46,10 @@ import '../shared/status-badge.js';
 import { showToast } from '../../utils/toast.js';
 import { buildAgentDMKey, chatConversationPath } from '../../client/chat-routes.js';
 import { isFeatureEnabled } from '../../utils/feature-flags.js';
-import { TERMINAL_DRAG_MIME } from '../../client/terminal-workspace-events.js';
+import {
+  TERMINAL_DRAG_MIME,
+  TERMINAL_PANE_DIALOG_OPEN_EVENT,
+} from '../../client/terminal-workspace-events.js';
 import { navigateTo } from '../../client/navigation.js';
 
 /** Back to Agent in a compact pane header (U+1F916 ROBOT FACE). */
@@ -868,6 +871,22 @@ export class ScionTerminalPane extends LitElement {
     this.removeWindowListeners();
     this.terminal?.blur();
     this.cancelResize();
+  }
+
+  /**
+   * Announces each capture-auth dialog as it opens, with
+   * TERMINAL_PANE_DIALOG_OPEN_EVENT. The dialogs render already open, so
+   * they fire no `sl-show` a surface outside the pane could observe.
+   */
+  protected override updated(changed: PropertyValues): void {
+    super.updated(changed);
+    const opened = (key: 'captureAuthConflicts' | 'captureAuthScopeDialogOpen'): boolean =>
+      changed.has(key) && !changed.get(key) && Boolean(this[key]);
+    if (opened('captureAuthConflicts') || opened('captureAuthScopeDialogOpen')) {
+      this.dispatchEvent(
+        new CustomEvent(TERMINAL_PANE_DIALOG_OPEN_EVENT, { bubbles: true, composed: true })
+      );
+    }
   }
 
   /** Recompute and push the combined frontmost signal. */

@@ -150,6 +150,24 @@ const (
 	conduitCauseRenewalPrincipalUnsupported = "renewal_principal_unsupported"
 )
 
+// conduitRenewalPathRefusal is the condition of
+// conduitRenewalPathUnavailable: whether the open is refused, and the
+// cause. It logs and records nothing, so a caller can ask before any
+// stream is opened.
+func (s *Server) conduitRenewalPathRefusal(identity Identity, targetRenews, canRenew bool) (string, bool) {
+	if !conduitStampsDeadline(identity, targetRenews) ||
+		s.conduitTargetStreamDeadlines() != config.ConduitTargetStreamDeadlinesEnforce {
+		return "", false
+	}
+	if _, unsupported := conduitRenewalUnsupportedPrincipal(identity); unsupported {
+		return conduitCauseRenewalPrincipalUnsupported, true
+	}
+	if !canRenew {
+		return conduitCauseRenewalRouteUnavailable, true
+	}
+	return "", false
+}
+
 // conduitRenewalPathUnavailable is the one decision behind
 // stream_renewal_unavailable (contracts v2.21.36, Renewal path
 // unavailable): target-side deadlines are enforced, the stream's open grant
@@ -161,19 +179,13 @@ const (
 // the backstop for a re-resolution onto another row. A refusal is logged
 // with the route and cause and counted by route, reason and cause.
 func (s *Server) conduitRenewalPathUnavailable(ctx context.Context, identity Identity, targetRenews, canRenew bool, route, agentID string) bool {
-	if !conduitStampsDeadline(identity, targetRenews) ||
-		s.conduitTargetStreamDeadlines() != config.ConduitTargetStreamDeadlinesEnforce {
+	cause, refused := s.conduitRenewalPathRefusal(identity, targetRenews, canRenew)
+	if !refused {
 		return false
 	}
 	attrs := []any{"route", route, "agent_id", agentID, "reason", conduitReasonStreamRenewalUnavailable}
-	var cause string
 	if kind, unsupported := conduitRenewalUnsupportedPrincipal(identity); unsupported {
-		cause = conduitCauseRenewalPrincipalUnsupported
 		attrs = append(attrs, "principal_kind", kind)
-	} else if !canRenew {
-		cause = conduitCauseRenewalRouteUnavailable
-	} else {
-		return false
 	}
 	attrs = append(attrs, "cause", cause)
 	slog.WarnContext(ctx, "Conduit stream open refused: the hub cannot keep this stream authorized", attrs...)

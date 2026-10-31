@@ -37,6 +37,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/google/uuid"
@@ -178,6 +179,10 @@ type HTTPAgentDispatcher struct {
 	// storageLayout is the hub's projectfs Layout source for
 	// storageLayoutPrecheck (SetStorageLayout); nil disables the check.
 	storageLayout func() (projectfs.Layout, error)
+	// workspaceStorage returns the hub's current storage backend
+	// (SetWorkspaceStorage); buildCreateRequestFor asks for the signed-URL
+	// workspace download only when it is GCS. Nil means no storage.
+	workspaceStorage func() storage.Storage
 
 	// attachmentIssuer issues the attachment delivery capabilities of a
 	// message on every dispatch attempt (ptone/scion#4596). Nil issues none.
@@ -790,6 +795,14 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 	if agent.AppliedConfig != nil && agent.AppliedConfig.WorkspaceStoragePath != "" {
 		req.WorkspaceStoragePath = agent.AppliedConfig.WorkspaceStoragePath
 		req.WorkspaceStorageBucket = agent.AppliedConfig.WorkspaceStorageBucket
+		// A GCS hub serves the broker-self workspace download, so the
+		// broker fetches per-file signed URLs from it and needs no storage
+		// credential of its own. The URLs are never in this request: the
+		// broker asks for them when it downloads. The bucket is still sent
+		// for brokers that predate the field.
+		if d.workspaceStorageIsGCS() {
+			req.WorkspaceDownloadMode = api.WorkspaceDownloadModeSignedURLs
+		}
 	}
 
 	if d.debug {
@@ -1145,23 +1158,9 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 	if d.githubAppMinter != nil && agent.ProjectID != "" {
 		project, projectErr := d.store.GetProject(ctx, agent.ProjectID)
 		if projectErr == nil {
-			// Determine which project to use for GitHub App token minting.
-			// Prefer the agent's own project; fall back to a source project
-			// referenced by label (e.g. for template-sync agents loading
-			// from an external repo whose git project has the app installed).
+			// The token is minted only for the agent's own project: no label
+			// or other agent-supplied value selects a different project.
 			mintProject := project
-			if project.GitHubInstallationID == nil {
-				if sourceProjectID := agent.Labels["scion.dev/github-token-source-project"]; sourceProjectID != "" {
-					if sg, sgErr := d.store.GetProject(ctx, sourceProjectID); sgErr == nil && sg.GitHubInstallationID != nil {
-						mintProject = sg
-						if d.debug {
-							d.log.Debug("buildCreateRequest: using source project for GitHub App token",
-								"sourceProjectID", sourceProjectID,
-								"installationID", *sg.GitHubInstallationID)
-						}
-					}
-				}
-			}
 			if mintProject.GitHubInstallationID != nil {
 				if req.ResolvedEnv != nil && req.ResolvedEnv["GITHUB_TOKEN"] != "" {
 					// User already has a GITHUB_TOKEN from secrets/env.
@@ -1193,9 +1192,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 						// A test pins this ordering dependency.
 						req.ResolvedEnv["GITHUB_TOKEN"] = token
 						classifyEnv(&req.EnvClassifications, "GITHUB_TOKEN", api.EnvKindSecretInjected)
-						if mintProject.ID == project.ID {
-							req.githubAppToken = token
-						}
+						req.githubAppToken = token
 						req.ResolvedEnv["SCION_GITHUB_APP_ENABLED"] = "true"
 						classifyEnv(&req.EnvClassifications, "SCION_GITHUB_APP_ENABLED", api.EnvKindPlain)
 						req.ResolvedEnv["SCION_GITHUB_TOKEN_EXPIRY"] = expiry
@@ -2530,24 +2527,18 @@ func (d *HTTPAgentDispatcher) deferredFinalizeEnv(ctx context.Context, agent *st
 // while an empty one is a passthrough marker that deliberately yields to
 // storage.
 //
-// The three consumers in THIS file derive their order from this list — the
-// resolver (resolveEnvFromStorage), the provenance reporter that tells the CLI
-// where a value came from (buildEnvSources), and the startup shadow warning
-// (WarnOutrankedBrokerEnvKeys). For those three, changing the order here is the
-// only edit required, and it is a user-visible behaviour change for any
-// deployment that defines the same key in two scopes.
+// Every consumer derives its order from this list: the resolver
+// (resolveEnvFromStorage), the provenance reporter that tells the CLI where a
+// value came from (buildEnvSources), the startup shadow warning
+// (WarnOutrankedBrokerEnvKeys), and the env-gather provenance reporter
+// (Server.buildEnvGatherResponse in handlers_agents_core.go, through
+// envScopeFilters). Changing the order here is the only edit required, and it
+// is a user-visible behaviour change for any deployment that defines the same
+// key in two scopes.
 //
-// THAT IS NOT THE SAME AS "everywhere", AND THE DIFFERENCE IS LOAD-BEARING.
-// Server.buildEnvGatherResponse in handlers_agents_core.go answers the same
-// "where did this value come from" question for the env-gather path from its
-// own hardcoded chain: it defaults the reported scope to hub, then checks user,
-// project, config and secret, and never consults runtime_broker at all — so a
-// broker-only key is reported there as "hub". It does not reference this list,
-// and its user-before-project order agrees with this one by coincidence rather
-// than by construction. Reordering here does not reach it. That reporter is
-// tracked as a separate follow-up and is deliberately not changed by phase 10;
-// what matters here is that you must not read this list as the only place a
-// scope order is written down.
+// The env-gather reporter can also answer "config" (a non-empty explicit
+// agent config value, which outranks every scope here) and "secret"; those
+// are labels for sources outside this ladder, not further storage scopes.
 var envScopePrecedence = []string{
 	store.ScopeRuntimeBroker,
 	store.ScopeHub,
@@ -2557,11 +2548,16 @@ var envScopePrecedence = []string{
 
 // envScopeID returns the ID the given scope is keyed by for this agent, or ""
 // if the scope does not apply (e.g. an agent with no project). The hub scope is
-// keyed by the hub's own instance ID, not by anything on the agent.
-func (d *HTTPAgentDispatcher) envScopeID(scope string, agent *store.Agent) string {
+// keyed by the hub's own instance ID, not by anything on the agent, so it
+// is returned even for a nil agent; every other scope is "" then.
+func envScopeID(scope string, agent *store.Agent, hubID string) string {
+	if scope == store.ScopeHub {
+		return hubID
+	}
+	if agent == nil {
+		return ""
+	}
 	switch scope {
-	case store.ScopeHub:
-		return d.hubID
 	case store.ScopeProject:
 		return agent.ProjectID
 	case store.ScopeUser:
@@ -2585,13 +2581,29 @@ func (d *HTTPAgentDispatcher) envScopesInPrecedenceOrder(agent *store.Agent) []s
 	if agent == nil {
 		return nil
 	}
-	filters := make([]store.EnvVarFilter, 0, len(envScopePrecedence))
-	for _, scope := range envScopePrecedence {
-		scopeID := d.envScopeID(scope, agent)
-		if scopeID == "" && scope != store.ScopeHub {
-			if d.debug {
+	if d.debug {
+		for _, scope := range envScopePrecedence {
+			if scope != store.ScopeHub && envScopeID(scope, agent, d.hubID) == "" {
 				d.log.Debug("env scope does not apply to agent (empty scope ID)", "scope", scope, "agent_id", agent.ID)
 			}
+		}
+	}
+	return envScopeFilters(agent, d.hubID)
+}
+
+// envScopeFilters is envScopesInPrecedenceOrder for a caller that holds the
+// hub ID but not the dispatcher: the env var storage queries that apply to
+// agent, lowest precedence first, with the same omission rule. The
+// env-gather provenance reporter (Server.buildEnvGatherResponse) walks it so
+// its scope order cannot drift from the resolver's.
+func envScopeFilters(agent *store.Agent, hubID string) []store.EnvVarFilter {
+	if agent == nil {
+		return nil
+	}
+	filters := make([]store.EnvVarFilter, 0, len(envScopePrecedence))
+	for _, scope := range envScopePrecedence {
+		scopeID := envScopeID(scope, agent, hubID)
+		if scopeID == "" && scope != store.ScopeHub {
 			continue
 		}
 		filters = append(filters, store.EnvVarFilter{Scope: scope, ScopeID: scopeID})
@@ -2622,11 +2634,9 @@ func envScopeSourceLabel(scope string) string {
 // and an empty slice if nothing outranks it.
 //
 // This is derived from the ordering list rather than hard-coded so that moving
-// an entry in envScopePrecedence changes who outranks whom for all three
-// consumers in this file at once — the same property that keeps the resolver
-// and the `scion hub env list` provenance reporter from drifting apart. It says
-// nothing about reporters that do not read the list; see envScopePrecedence for
-// the one that does not.
+// an entry in envScopePrecedence changes who outranks whom for every consumer
+// at once — the same property that keeps the resolver and the provenance
+// reporters (`scion hub env list` and env-gather) from drifting apart.
 func envScopesOutranking(order []string, scope string) []string {
 	at := slices.Index(order, scope)
 	if at < 0 {
@@ -3067,14 +3077,9 @@ func (d *HTTPAgentDispatcher) injectLifecycleGitHubToken(
 	if err != nil {
 		return ""
 	}
+	// The token is minted only for the agent's own project: no label or
+	// other agent-supplied value selects a different project.
 	mintProject := project
-	if project.GitHubInstallationID == nil {
-		if sourceProjectID := agent.Labels["scion.dev/github-token-source-project"]; sourceProjectID != "" {
-			if sourceProject, sourceErr := d.store.GetProject(ctx, sourceProjectID); sourceErr == nil && sourceProject.GitHubInstallationID != nil {
-				mintProject = sourceProject
-			}
-		}
-	}
 	if mintProject.GitHubInstallationID == nil {
 		return ""
 	}
@@ -3108,10 +3113,7 @@ func (d *HTTPAgentDispatcher) injectLifecycleGitHubToken(
 	classifyEnv(envClassifications, "SCION_GITHUB_TOKEN_EXPIRY", api.EnvKindPlain)
 	resolvedEnv["SCION_GITHUB_TOKEN_PATH"] = "/tmp/.github-token"
 	classifyEnv(envClassifications, "SCION_GITHUB_TOKEN_PATH", api.EnvKindPlain)
-	if mintProject.ID == project.ID {
-		return token
-	}
-	return ""
+	return token
 }
 
 // startEnvResult bundles everything buildStartEnv assembles. DispatchAgentStart
@@ -4922,6 +4924,9 @@ func (d *HTTPAgentDispatcher) startSecretResolveOpts(ctx context.Context, agent 
 			ceiling := d.authzService.EvaluateUserSecretParentCeiling(ctx, ident, userSecretResource(s.ID, s.ScopeID))
 			if ceiling.Allowed && ceiling.legacyFallback != nil {
 				d.authzService.recordLegacyAdoptedFallback(ctx, legacyFallbackPathStart, ceiling.legacyFallback, agentID, s.ScopeID, s.ID, s.Name)
+			}
+			if ceiling.Allowed && ceiling.uatIntrinsic {
+				d.authzService.recordUATIntrinsic(ctx, secretUsePermission, uatIntrinsicPathOwnerSecret)
 			}
 			if !ceiling.Allowed {
 				withheld("owner", s, Decision{DenyCause: ceiling.DenyCause, Reason: ceiling.Reason})

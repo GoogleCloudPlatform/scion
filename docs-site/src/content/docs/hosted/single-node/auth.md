@@ -107,7 +107,7 @@ After a user is deleted, that user's tokens stop working immediately. Requests t
 
 Behind the `hub.user_delete_force_cascade` [experiment](/scion/reference/experiments/) (off by default), an admin can delete a user whom agents or delegations depend on, instead of deleting those agents one by one. On **Admin > Users**, the delete dialog of such a user offers **Force delete**, which asks for confirmation naming how many agents it stops; the API is `DELETE /api/v1/users/{id}?force=true`. While the experiment is off, `force=true` is ignored and the delete is refused as described above.
 
-A forced delete needs `user.delete` on the user and, for every one of the user's agents, the same permission an agent delete needs (`agent.delete` on that agent). If you may not delete one or more of them, the request is refused with `403 user_delete_force_forbidden`, `details.agents` lists those agents (`id`, `projectId`), and nothing changes. It needs a sign-in session, like a plain delete. The last super-admin, admin lockout and last-owner guards apply as for a plain delete. If nothing blocks the delete, a forced delete is a plain delete (`204`).
+A forced delete needs `user.delete` on the user and, for every one of the user's agents, the same permission an agent delete needs (`agent.delete` on that agent). If you may not delete one or more of them, the request is refused with `403 user_delete_force_forbidden`, `details.agents` lists those agents (`id`, `projectId`), and nothing changes. Like a plain delete, `GET /api/v1/users/{id}/delete-blockers`, and `GET /api/v1/users/{id}/deletion`, it accepts an interactive sign-in session or a hub-boundary user access token carrying `user:delete` (a token is refused with `403` and `details.reason` `system_role_binding_held` when the target user holds a direct system-scope role binding other than `viewer`; see [Hub-boundary tokens for user administration](/scion/hosted/user/personal-access-tokens/#hub-boundary-tokens-for-user-administration)). The last super-admin, admin lockout and last-owner guards apply as for a plain delete. If nothing blocks the delete, a forced delete is a plain delete (`204`).
 
 Otherwise the delete runs in two steps:
 
@@ -136,6 +136,8 @@ export SCION_SERVER_OAUTH_WEB_GOOGLE_CLIENTSECRET="your-client-secret"
 export SCION_SERVER_OAUTH_WEB_GITHUB_CLIENTID="your-client-id"
 export SCION_SERVER_OAUTH_WEB_GITHUB_CLIENTSECRET="your-client-secret"
 ```
+
+On the web server, only `/assets/*`, `/shoelace/*`, and the exact root-level files shipped in `web/public/` (`/apple-touch-icon.png`, `/favicon.ico`, `/favicon.svg`, `/icon-192.png`, `/icon-512.png`, `/icon-maskable-512.png`, `/manifest.webmanifest`, and `/scion-notification-icon.png`) skip the web session check so the sign-in page can render. Every other root-level path (with or without a file extension, including `/robots.txt` and any path containing a backslash) requires a session, sending browsers to sign-in and returning `401` to other clients.
 
 ### CLI OAuth Setup
 
@@ -353,7 +355,7 @@ server:
   - `hub`: Identifies requests originating from federated partner Hubs. A partner Hub marks each credential it signs with `scion_token_kind`: `agent` for agent identity tokens, `user` for user access credentials. Agent identity tokens, and credentials without the claim from Hubs that predate it, are read as agents, as before. A user access credential is accepted only when the issuer has `accept_user_tokens: true` and the `federation.project_visitors` experiment is on; it must carry a verified email and no agent claims, and must pass `allowed_emails` and `allowed_domains`. Any other `scion_token_kind` value is refused. A refused credential gets the same `401` as any other credential that fails verification.
   - `service_account`: Authenticates automated workloads via GCP Service Accounts.
   - `user`: Maps OIDC tokens to standard user identities, with domain restrictions using wildcards (e.g. `allowed_emails: ["*@example.com"]`). The `default_role` key is deprecated: it is accepted and has no effect on what a federated user can do (it is also separate from `server.auth.default_user_role`, which applies to users who sign in through OAuth, OIDC login or an auth proxy).
-- **Write limits for federated callers**: A federated caller keeps visitor rights on the resources it has been granted, but the Hub refuses its writes to profile and other non-agent resources: user-scope templates, skills and harness configs, imports, env vars and secrets, chat preferences, presence, and attachments outside a project. Federated callers also cannot redeem invites.
+- **Write limits for federated callers**: A federated caller keeps visitor rights on the resources it has been granted (and may read its own User-scope environment variables and secret metadata), but the Hub refuses its writes to profile and other non-agent resources (user-scope templates, skills and harness configs, imports, env vars and secrets, chat preferences, presence, and attachments outside a project) and refuses all Hub-scope (`scope=hub`) environment variable and secret operations. Federated callers also cannot redeem invites.
 
 ### External Bearer Tokens (Google credential pass-through)
 
@@ -470,14 +472,14 @@ A shared secret is established during the `scion runtime-broker register` flow a
 
 ### Provider Authorization
 
-The Hub enforces a "Provider" model for authorization. Even if a broker is authenticated, it will only receive agent dispatch requests for **Projects** that it has been explicitly registered to provide for. This prevents a compromised broker from accessing projects it shouldn't have access to.
+The Hub enforces a "Provider" model for authorization. Even if a Runtime Broker is authenticated, it will only receive agent dispatch requests for **Projects** that it has been explicitly registered to provide for. This prevents a compromised Runtime Broker from accessing projects it shouldn't have access to.
 
 ### Secret Management
 
-Brokers never store agent secrets (like API keys) on disk.
-1. The Hub resolves secrets from all applicable scopes (user, project, broker) via the configured secrets backend (e.g., GCP Secret Manager).
-2. The Hub includes the resolved secrets in the `CreateAgent` command sent to the Broker over the TLS-secured control channel.
-3. The Broker projects secrets into the agent container based on their type (environment variable, JSON file, or filesystem path).
+Runtime Brokers never store agent secrets (like API keys) on disk.
+1. The Hub resolves secrets from all applicable scopes (user, project, Runtime Broker) via the configured secrets backend (e.g., GCP Secret Manager).
+2. The Hub includes the resolved secrets in the `CreateAgent` command sent to the Runtime Broker over the TLS-secured control channel.
+3. The Runtime Broker projects secrets into the agent container based on their type (environment variable, JSON file, or filesystem path).
 4. When the agent is deleted, the secrets are purged from the host.
 
 For details on configuring and managing secrets, see [Secret Management](/scion/hosted/user/secrets/).
@@ -495,12 +497,12 @@ When creating an agent, you can configure its **GCP Identity Mode**:
   - The agent's `sciontool` sidecar intercepts requests to the metadata server.
   - Token requests are proxied to the Scion Hub, which checks both the calling agent's live `gcp_service_account.use` authority and the recorded assigner's live `gcp_service_account.assign` authority on that Service Account (within the recorded permission ceiling; see [Token-Request Authority](/scion/hosted/ha/permissions/#token-request-authority)) before using its own permissions to generate a short-lived access or identity token (via `iam.serviceAccounts.getAccessToken` or `generateIdToken`).
   - The token is then returned to the agent, allowing it to use standard GCP SDKs (Application Default Credentials) as that specific Service Account.
-- **Passthrough**: Requests are allowed to reach the actual host metadata server. Use with caution as this allows the agent to assume the identity of the underlying node. Security is tightened by restricting GCP identity passthrough to broker owners and admin-role users on embedded (co-located) brokers.
+- **Passthrough**: Requests are allowed to reach the actual host metadata server. Use with caution as this allows the agent to assume the identity of the underlying node. Security is tightened by restricting GCP identity passthrough to Runtime Broker owners and admin-role users on embedded (co-located) Runtime Brokers.
 
 :::caution[Passthrough does not work in Cloud Run Sandboxes]
 GCP identity passthrough mode does not work inside Cloud Run Sandbox (gVisor) runtimes because the real GCE metadata server is unreachable.
 
-While the Hub automatically translates passthrough to assign mode at agent creation and PATCH time (using the broker's host service account), explicitly configuring assign mode is recommended for clarity and consistency.
+While the Hub automatically translates passthrough to assign mode at agent creation and PATCH time (using the Runtime Broker's host service account), explicitly configuring assign mode is recommended for clarity and consistency.
 :::
 
 #### Host networking on Docker and Podman
@@ -583,5 +585,6 @@ For programmatic access (e.g., CI/CD pipelines), the Hub supports **user access 
 - Tokens can be generated via the Web Dashboard or CLI (`scion hub token create`).
 - Tokens are prefixed with `scion_pat_` (a legacy artifact of the older "personal access token" name).
 - Use the `Authorization: Bearer <token>` header in your requests.
+- User- and Hub-level environment variables and secrets (`scope=user` and `scope=hub`) require an interactive login (`scion hub auth login` or a web session) and refuse user access tokens with `403 Forbidden` (`details.reason: "CREDENTIAL_MANAGEMENT"`).
 
 See [User Access Tokens](/scion/hosted/user/personal-access-tokens/) for the full user-facing guide.

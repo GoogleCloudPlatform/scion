@@ -384,7 +384,7 @@ func TestRequireHubClient_AgentHubContext_HubNotEnabledInSettings(t *testing.T) 
 	defer orig.restore()
 	clearHubContextEnv(t)
 
-	t.Setenv("SCION_HUB_ENDPOINT", "http://hub.internal.example")
+	t.Setenv("SCION_HUB_ENDPOINT", "https://hub.internal.example")
 	t.Setenv("SCION_PROJECT_ID", "agent-project-id")
 	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
 
