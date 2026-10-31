@@ -1339,6 +1339,70 @@ func TestGovernance_UpdateTokenBoundToItsConstraint(t *testing.T) {
 	assert.Equal(t, []string{"agent.read"}, got.MaximumPermissions)
 }
 
+// TestGovernance_UpdateDraftMustNameTarget pins that an update commit whose
+// draft names a constraint other than req.ConstraintID (or none) is refused
+// with invalid_request before any check or write, both constraints are left
+// as stored, and the preview token is not consumed: the well-formed request
+// then commits with the same token.
+func TestGovernance_UpdateDraftMustNameTarget(t *testing.T) {
+	gs, ps, _, s := govTestSetup(t)
+	ctx := context.Background()
+
+	adminID := govSeedAdminUser(t, s, "gov-admin-draft-target")
+	userID := govSeedNonAdminUser(t, s, "gov-user-draft-target")
+	actor := pvTestActor(adminID)
+
+	draft := func(name string, perms ...string) *store.AccessConstraint {
+		return &store.AccessConstraint{
+			Name:                 name,
+			SubjectKind:          store.ConstraintSubjectPrincipal,
+			SubjectPrincipalType: pvStrPtr("user"),
+			SubjectPrincipalID:   pvStrPtr(userID),
+			ScopeType:            store.RoleScopeSystem,
+			MaximumPermissions:   perms,
+			Purpose:              "draft names target",
+			CreatedBy:            adminID,
+		}
+	}
+	a := govCreateAndCommit(t, gs, ps, draft("gov-draft-target-a", "agent.read", "agent.create"), actor)
+	b := govCreateAndCommit(t, gs, ps, draft("gov-draft-target-b", "agent.read", "agent.create"), actor)
+
+	update := func(id string) *store.AccessConstraint {
+		d := draft("gov-draft-target-tight", "agent.read")
+		d.ID = id
+		return d
+	}
+	preview, err := ps.GeneratePreview(ctx, PreviewRequest{
+		Operation: "update", Draft: update(a.ID), ConstraintID: a.ID, BaseRevision: a.Revision, Actor: actor,
+	})
+	require.NoError(t, err)
+
+	for label, d := range map[string]*store.AccessConstraint{"draft names B": update(b.ID), "draft names none": update("")} {
+		_, err = gs.CommitBoundaryChange(ctx, CommitRequest{
+			Operation: "update", Draft: d, ConstraintID: a.ID, BaseRevision: a.Revision,
+			PreviewToken: preview.PreviewToken, Actor: actor,
+		})
+		var ge *GovernanceError
+		require.ErrorAs(t, err, &ge, label)
+		assert.Equal(t, ErrCodeInvalidRequest, ge.Code, label)
+	}
+	for _, c := range []*store.AccessConstraint{a, b} {
+		got, err := s.GetAccessConstraint(ctx, c.ID)
+		require.NoError(t, err)
+		assert.Equal(t, c.Revision, got.Revision, "%s must be left as stored", c.Name)
+		assert.ElementsMatch(t, []string{"agent.read", "agent.create"}, got.MaximumPermissions)
+	}
+
+	_, err = gs.CommitBoundaryChange(ctx, CommitRequest{
+		Operation: "update", Draft: update(a.ID), ConstraintID: a.ID, BaseRevision: a.Revision,
+		PreviewToken: preview.PreviewToken, Actor: actor,
+	})
+	require.NoError(t, err, "the token is not consumed by the refusal")
+	got, err := s.GetAccessConstraint(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"agent.read"}, got.MaximumPermissions)
+}
+
 // ---------------------------------------------------------------------------
 // 14c. Scheduled lockout blocks RoleBinding change
 // ---------------------------------------------------------------------------
