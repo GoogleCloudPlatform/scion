@@ -2487,6 +2487,12 @@ func getHubClientForConnection(name string) (hubclient.Client, error) {
 	if creds.HubEndpoint == "" {
 		return nil, fmt.Errorf("hub connection '%s' has no endpoint configured", name)
 	}
+	// The hub-broker transport rule (as for the broker process's own
+	// connections): stored credentials written before it existed may name a
+	// plain http network hub.
+	if err := config.CheckHubTransport(creds.HubEndpoint); err != nil {
+		return nil, fmt.Errorf("hub connection '%s': %w", name, err)
+	}
 
 	var opts []hubclient.Option
 	switch creds.AuthMode {

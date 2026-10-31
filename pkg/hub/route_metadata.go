@@ -921,6 +921,15 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Permission:     "hub.config.update", Resource: "hub", Action: "update",
 		SessionOnly: authzop.ReasonHostOperations,
 	},
+	// Chat message retention settings (DB-only "chat_retention" section,
+	// behind hub.chat_retention). Session only: the window decides what is
+	// deleted, irreversibly, across every user's history.
+	"/api/v1/admin/chat-retention": {
+		Pattern: "/api/v1/admin/chat-retention", RouteID: "admin.chatRetention",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.config.update", Resource: "hub", Action: "update",
+		SessionOnly: authzop.ReasonIrreversibleCascade,
+	},
 	// Conduit grant key rotation, behind hub.conduit. Returns kids and
 	// timestamps only.
 	"/api/v1/admin/conduit/grant-keys/rotate": {

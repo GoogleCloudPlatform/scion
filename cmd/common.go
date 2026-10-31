@@ -422,7 +422,7 @@ func requireHubWith(projectPath string, skipProjectLink bool) (*HubContext, erro
 
 	hubCtx, err := hubsync.EnsureHubReady(projectPath, opts)
 	if err != nil {
-		return nil, err
+		return nil, hubTransportRefusal(invocationHubEndpoint(), err)
 	}
 
 	// Convert hubsync.HubContext to cmd.HubContext

@@ -678,12 +678,12 @@ func TestTestAdminBroker_RemoteRegistrationRefusedWhileTierOn(t *testing.T) {
 		{"name": "remote-broker"},
 		{"name": "remote-broker", "brokerId": tiaRemoteBrokerID},
 	} {
-		rec := doRequest(t, srv, http.MethodPost, "/api/v1/brokers", body)
+		rec := doRequestLoopback(t, srv, http.MethodPost, "/api/v1/brokers", body)
 		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 		assert.Contains(t, rec.Body.String(), ErrCodeTestAdminRemoteBrokerRefused)
 	}
 
-	rec := doRequestNoAuth(t, srv, http.MethodPost, "/api/v1/brokers/join",
+	rec := doRequestNoAuthLoopback(t, srv, http.MethodPost, "/api/v1/brokers/join",
 		map[string]interface{}{"brokerId": tiaRemoteBrokerID, "joinToken": "synthetic-join-token"})
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), ErrCodeTestAdminRemoteBrokerRefused)
@@ -702,7 +702,7 @@ func TestTestAdminBroker_ColocatedRegistrationAllowed(t *testing.T) {
 
 	// Through the HTTP route the co-located id passes the gate (whatever
 	// the registration itself then answers, it is not the gate refusal).
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/brokers",
+	rec := doRequestLoopback(t, srv, http.MethodPost, "/api/v1/brokers",
 		map[string]interface{}{"name": "colocated", "brokerId": tiaColocatedBrokerID})
 	assert.NotContains(t, rec.Body.String(), ErrCodeTestAdminRemoteBrokerRefused, rec.Body.String())
 }
@@ -711,7 +711,7 @@ func TestTestAdminBroker_RegistrationUnaffectedWhileTierOff(t *testing.T) {
 	srv, _ := testServer(t)
 	rr := httptest.NewRecorder()
 	assert.False(t, srv.refuseTestAdminBrokerRegistration(rr, tiaRemoteBrokerID))
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/brokers", map[string]interface{}{"name": "remote-broker"})
+	rec := doRequestLoopback(t, srv, http.MethodPost, "/api/v1/brokers", map[string]interface{}{"name": "remote-broker"})
 	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 }
 
@@ -1107,7 +1107,7 @@ func TestReservedPluginLabelNeverStoredFromClient(t *testing.T) {
 	assert.Equal(t, map[string]string{"team": "b", pluginBrokerLabel: "chat"}, b.Labels)
 
 	// Registration: the label is not stored.
-	rec = doRequest(t, srv, http.MethodPost, "/api/v1/brokers",
+	rec = doRequestLoopback(t, srv, http.MethodPost, "/api/v1/brokers",
 		map[string]interface{}{"name": "labelled-broker", "labels": map[string]string{"team": "c", pluginBrokerLabel: "x"}})
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	var resp CreateBrokerRegistrationResponse

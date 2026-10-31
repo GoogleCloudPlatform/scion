@@ -158,6 +158,14 @@ func (Message) Indexes() []ent.Index {
 		// The inter-agent view's legacy lookup filters on project_id and
 		// the sender text ("agent:<slug>") and orders by created, id.
 		index.Fields("project_id", "sender", "created", "id"),
+		// The stuck-pending sweep filters on dispatch_state = 'pending' AND
+		// created < cutoff and orders by created, id. Pending rows are a
+		// tiny fraction of the table, so a partial index keeps the sweep
+		// proportional to the pending rows instead of every row older than
+		// the cutoff. The WHERE must match the query's literal for the
+		// planner to pick the index (store.MessageDispatchPending).
+		index.Fields("created", "id").
+			Annotations(entsql.IndexWhere("dispatch_state = 'pending'")),
 	}
 }
 

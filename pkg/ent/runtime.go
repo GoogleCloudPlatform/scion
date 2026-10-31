@@ -28,6 +28,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokertargetinventory"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatretentioncursor"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatretentionrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitprincipalepoch"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitsession"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
@@ -888,6 +890,26 @@ func init() {
 	chatlinkcodeDescID := chatlinkcodeFields[0].Descriptor()
 	// chatlinkcode.DefaultID holds the default value on creation for the id field.
 	chatlinkcode.DefaultID = chatlinkcodeDescID.Default.(func() uuid.UUID)
+	chatretentioncursorFields := schema.ChatRetentionCursor{}.Fields()
+	_ = chatretentioncursorFields
+	// chatretentioncursorDescCursorID is the schema descriptor for cursor_id field.
+	chatretentioncursorDescCursorID := chatretentioncursorFields[2].Descriptor()
+	// chatretentioncursor.DefaultCursorID holds the default value on creation for the cursor_id field.
+	chatretentioncursor.DefaultCursorID = chatretentioncursorDescCursorID.Default.(string)
+	// chatretentioncursorDescID is the schema descriptor for id field.
+	chatretentioncursorDescID := chatretentioncursorFields[0].Descriptor()
+	// chatretentioncursor.IDValidator is a validator for the "id" field. It is called by the builders before save.
+	chatretentioncursor.IDValidator = chatretentioncursorDescID.Validators[0].(func(string) error)
+	chatretentionrunFields := schema.ChatRetentionRun{}.Fields()
+	_ = chatretentionrunFields
+	// chatretentionrunDescDryRun is the schema descriptor for dry_run field.
+	chatretentionrunDescDryRun := chatretentionrunFields[2].Descriptor()
+	// chatretentionrun.DefaultDryRun holds the default value on creation for the dry_run field.
+	chatretentionrun.DefaultDryRun = chatretentionrunDescDryRun.Default.(bool)
+	// chatretentionrunDescID is the schema descriptor for id field.
+	chatretentionrunDescID := chatretentionrunFields[0].Descriptor()
+	// chatretentionrun.DefaultID holds the default value on creation for the id field.
+	chatretentionrun.DefaultID = chatretentionrunDescID.Default.(func() uuid.UUID)
 	conduitprincipalepochFields := schema.ConduitPrincipalEpoch{}.Fields()
 	_ = conduitprincipalepochFields
 	// conduitprincipalepochDescPrincipalKind is the schema descriptor for principal_kind field.

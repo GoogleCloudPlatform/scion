@@ -158,9 +158,9 @@ func TestCredentialReload_InEffectMatchesConnectionAfterFailedStep(t *testing.T)
 	t.Setenv(transportauth.EnvTransportAudience, "")
 
 	const name = "hub-partial"
-	oldCreds := makeTestCreds(name, "broker-1", "http://hub1.example.com")
+	oldCreds := makeTestCreds(name, "broker-1", "https://hub1.example.com")
 	newCreds := *oldCreds
-	newCreds.SecretKey = makeTestCreds(name+"-rotated", "broker-1", "http://hub1.example.com").SecretKey
+	newCreds.SecretKey = makeTestCreds(name+"-rotated", "broker-1", "https://hub1.example.com").SecretKey
 	newCreds.TransportMode = "iap"
 
 	credDir := filepath.Join(t.TempDir(), "hub-credentials")
@@ -258,9 +258,9 @@ func testRetriesFailedReinitialize(t *testing.T, otherChanged bool) {
 	t.Setenv(transportauth.EnvTransportAudience, "")
 
 	const name = "hub-retry"
-	oldCreds := makeTestCreds(name, "broker-1", "http://hub1.example.com")
+	oldCreds := makeTestCreds(name, "broker-1", "https://hub1.example.com")
 	newCreds := *oldCreds
-	newCreds.SecretKey = makeTestCreds(name+"-rotated", "broker-1", "http://hub1.example.com").SecretKey
+	newCreds.SecretKey = makeTestCreds(name+"-rotated", "broker-1", "https://hub1.example.com").SecretKey
 
 	credDir := filepath.Join(t.TempDir(), "hub-credentials")
 	if err := os.MkdirAll(credDir, 0o700); err != nil {
@@ -345,7 +345,7 @@ func testRetriesFailedReinitialize(t *testing.T, otherChanged bool) {
 		// in which this connection's set compares unchanged. Resetting the
 		// last scan time makes the change visible whatever the file
 		// system's timestamp granularity.
-		writeCreds(makeTestCreds("hub-other", "broker-1", "http://hub2.example.com"))
+		writeCreds(makeTestCreds("hub-other", "broker-1", "https://hub2.example.com"))
 		srv.credLastScan = time.Time{}
 	}
 	if err := srv.checkAndReloadCredentials(ctx); err != nil {
@@ -369,7 +369,7 @@ func testRetriesFailedReinitialize(t *testing.T, otherChanged bool) {
 	conn.mu.RUnlock()
 	if otherChanged {
 		// Make the further tick take the changed-files path again.
-		writeCreds(makeTestCreds("hub-other", "broker-1", "http://hub2.example.com"))
+		writeCreds(makeTestCreds("hub-other", "broker-1", "https://hub2.example.com"))
 		srv.credLastScan = time.Time{}
 	}
 	if err := srv.checkAndReloadCredentials(ctx); err != nil {

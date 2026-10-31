@@ -255,7 +255,7 @@ func TestHybridBrokerClient_ExecuteKeys_NeverDispatchedIsUnavailableOnEveryRoute
 	}{
 		{
 			name:      "routeHTTP/stateless local broker",
-			endpoint:  "http://broker.invalid:9800",
+			endpoint:  stubBrokerEndpoint,
 			wantRoute: routeHTTP,
 			build: func(t *testing.T) (*HybridBrokerClient, func() int) {
 				httpClient, dials := pendingDialKeysClient(t, 0)
@@ -266,7 +266,7 @@ func TestHybridBrokerClient_ExecuteKeys_NeverDispatchedIsUnavailableOnEveryRoute
 		},
 		{
 			name:      "routeHTTP/no control-channel session, no live affinity owner",
-			endpoint:  "http://broker.invalid:9800",
+			endpoint:  stubBrokerEndpoint,
 			wantRoute: routeHTTP,
 			build: func(t *testing.T) (*HybridBrokerClient, func() int) {
 				httpClient, dials := pendingDialKeysClient(t, 0)

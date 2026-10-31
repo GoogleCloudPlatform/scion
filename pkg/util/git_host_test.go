@@ -123,6 +123,7 @@ func TestHostGitArgs(t *testing.T) {
 		"-c", "merge.verifySignatures=false",
 		"-c", "commit.gpgsign=false",
 		"-c", "tag.gpgsign=false",
+		"-c", "http.emptyAuth=false",
 	}
 	if got := HostGitArgs(); !reflect.DeepEqual(got, want) {
 		t.Errorf("HostGitArgs() = %q, want %q", got, want)
@@ -235,7 +236,11 @@ func TestHostGitCommand_PolicyRefuses(t *testing.T) {
 				t.Run(name, func(t *testing.T) {
 					repo, _ := newHostGitRepo(t)
 					hostRunGit(t, repo, "config", c.key, c.value)
-					_, err := HostGitCommand(context.Background(), repo, HostGitOptions{Policy: mode, Network: network}, "status")
+					opts := HostGitOptions{Policy: mode, Network: network}
+					if network {
+						opts.Remote = NewHostGitRemote("https://git.example.test/r.git", "")
+					}
+					_, err := HostGitCommand(context.Background(), repo, opts, "status")
 					var refused *RepoConfigRefusedError
 					if !errors.As(err, &refused) {
 						t.Fatalf("error = %v, want *RepoConfigRefusedError", err)
@@ -354,7 +359,7 @@ func TestHostGitCommand_GlobalKeysNotChecked(t *testing.T) {
 	hostRunGit(t, repo, "config", "--file", global, "url.https://mirror.example/.insteadOf", "https://github.com/")
 	hostRunGit(t, repo, "config", "--file", global, "credential.helper", "store")
 	hostRunGit(t, repo, "config", "--file", global, "core.sshCommand", "ssh -v")
-	if _, err := HostGitCommand(context.Background(), repo, HostGitOptions{Policy: RepoPolicyManaged, Network: true}, "fetch"); err != nil {
+	if _, err := HostGitCommand(context.Background(), repo, HostGitOptions{Policy: RepoPolicyManaged, Network: true, Remote: NewHostGitRemote("https://git.example.test/r.git", "")}, "fetch"); err != nil {
 		t.Fatalf("global keys triggered a refusal: %v", err)
 	}
 }
@@ -634,7 +639,11 @@ func TestCreateWorktree_WorktreeSupportsCommitPushFetchRebase(t *testing.T) {
 func TestHostGitCommand_CarriesFixedArgs(t *testing.T) {
 	repo, _ := newHostGitRepo(t)
 	for _, network := range []bool{false, true} {
-		cmd, err := HostGitCommand(context.Background(), repo, HostGitOptions{Network: network}, "merge", "--ff-only", "HEAD")
+		opts := HostGitOptions{Network: network}
+		if network {
+			opts.Remote = NewHostGitRemote("https://git.example.test/r.git", "")
+		}
+		cmd, err := HostGitCommand(context.Background(), repo, opts, "merge", "--ff-only", "HEAD")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -732,6 +741,29 @@ func TestHostGitEnv(t *testing.T) {
 	want := []string{"HOME=/h", "PATH=/bin", "GIT_CONFIG_GLOBAL=/g", "GIT_CONFIG_NOSYSTEM=1", "GIT_SSH_COMMAND=ssh", "GIT_TERMINAL_PROMPT=0", "LC_ALL=C"}
 	if got := HostGitEnv(in); !reflect.DeepEqual(got, want) {
 		t.Errorf("HostGitEnv = %q, want %q", got, want)
+	}
+}
+
+// HostGitEnv drops every host authentication variable no host-side git call
+// relies on, one row each, and the TLS client certificate variables (GIT_*,
+// not kept).
+// Mutants this catches, one per row: deleting the SSH_AUTH_SOCK, SSH_ASKPASS,
+// NETRC, GSS_USE_PROXY, KRB5CCNAME, KRB5_CLIENT_KTNAME or remote-layer marker
+// entry from hostGitEnvDropped; adding GIT_SSL_CERT, GIT_SSL_KEY,
+// GIT_SSL_CERT_PASSWORD_PROTECTED or GIT_SSL_NO_VERIFY to hostGitEnvKept.
+func TestHostGitEnv_DropsHostAuthVariables(t *testing.T) {
+	for _, key := range []string{
+		"SSH_AUTH_SOCK", "SSH_ASKPASS", "NETRC", "GSS_USE_PROXY", "KRB5CCNAME", "KRB5_CLIENT_KTNAME",
+		hostGitRemoteLayerEnv,
+		"GIT_SSL_CERT", "GIT_SSL_KEY", "GIT_SSL_CERT_PASSWORD_PROTECTED", "GIT_SSL_NO_VERIFY",
+	} {
+		t.Run(key, func(t *testing.T) {
+			got := HostGitEnv([]string{"PATH=/bin", key + "=x", "LC_ALL=de_DE.UTF-8"})
+			want := []string{"PATH=/bin", "LC_ALL=C"}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("HostGitEnv = %q, want %q (%s dropped, LC_ALL=C kept)", got, want, key)
+			}
+		})
 	}
 }
 
@@ -958,7 +990,7 @@ func TestHostGitCommand_ChecksMainWorktreeConfig(t *testing.T) {
 // A remote operation carries the transport allow-list.
 func TestHostGitCommand_NetworkTransportAllowlist(t *testing.T) {
 	repo, _ := newHostGitRepo(t)
-	cmd, err := HostGitCommand(context.Background(), repo, HostGitOptions{Network: true}, "fetch")
+	cmd, err := HostGitCommand(context.Background(), repo, HostGitOptions{Network: true, Remote: NewHostGitRemote("https://git.example.test/r.git", "")}, "fetch")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1284,7 +1316,7 @@ func TestSafeGitCommandBuilderSkipsLFSSmudge(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !slices.Contains(cmd.Env, "GIT_LFS_SKIP_SMUDGE=1") {
-		t.Errorf("env lacks GIT_LFS_SKIP_SMUDGE=1: %v", cmd.Env)
+		t.Errorf("env lacks GIT_LFS_SKIP_SMUDGE=1 (env not printed: it is the real process environment)")
 	}
 }
 

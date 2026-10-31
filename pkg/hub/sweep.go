@@ -30,6 +30,13 @@ const stuckMessageExpireTTL = 24 * time.Hour
 // message_ids_truncated on the line says when more rows were stuck.
 const stuckMessageLogIDCap = 20
 
+// stuckMessageCountCap bounds the stuck-pending count the sweep reports on
+// its line and on the scion.dispatch.message.stuck gauge. The sweep reads at
+// most this many rows plus one, so a reported value of stuckMessageCountCap
+// means "at least this many" (count_capped on the line). A var (not const)
+// so tests can shrink it.
+var stuckMessageCountCap = 1000
+
 // defaultFailedMessageRetentionDays is the fallback retention window (in days)
 // for dispatch_state="failed" messages when
 // Server.Config.FailedMessageRetentionDays is unset or non-positive.
@@ -40,7 +47,8 @@ const defaultFailedMessageRetentionDays = 7
 const missingRecipientFailureReason = "recipient agent no longer exists"
 
 // brokerMessageSweepHandler returns a handler that counts messages still in
-// dispatch_state='pending' beyond the stuck threshold and logs/emits metrics.
+// dispatch_state='pending' beyond the stuck threshold, up to
+// stuckMessageCountCap, and logs/emits metrics.
 // Messages stuck beyond stuckMessageExpireTTL are transitioned to failed.
 // After Phase 4 (no-queuing delivery), the only writer of pending rows is
 // ExecuteAgentDM: it persists the row "pending" for the length of its
@@ -59,25 +67,28 @@ func (s *Server) brokerMessageSweepHandler() func(ctx context.Context) {
 		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
 
+		// The gauge is a bounded count (ptone/scion#6648): the sweep reads at
+		// most stuckMessageCountCap+1 stuck IDs from the partial pending index
+		// instead of running a full COUNT every run, so a large backlog cannot
+		// hold the database connection. The oldest stuckMessageLogIDCap IDs
+		// are named on the line (ptone/scion#4827).
 		cutoff := time.Now().UTC().Add(-stuckMessageThreshold)
-		count, err := s.store.CountStuckPendingMessages(ctx, cutoff)
+		ids, err := s.store.ListStuckPendingMessageIDs(ctx, cutoff, stuckMessageCountCap+1)
 		if err != nil {
-			s.agentLifecycleLog.Error("sweep: count stuck pending messages failed", "error", err)
+			s.agentLifecycleLog.Error("sweep: list stuck pending messages failed", "error", err)
 			return
+		}
+		count, countCapped := len(ids), len(ids) > stuckMessageCountCap
+		if countCapped {
+			count = stuckMessageCountCap
 		}
 
 		if count > 0 {
-			// Name the stuck rows (ptone/scion#4827) so each can be matched to
-			// its "row entered pending" line. The ID lookup is best-effort: a
-			// failure is logged on the line and does not stop the sweep.
-			attrs := []any{"count", count, "threshold", stuckMessageThreshold.String()}
-			ids, idsErr := s.store.ListStuckPendingMessageIDs(ctx, cutoff, stuckMessageLogIDCap)
-			if idsErr != nil {
-				attrs = append(attrs, "message_ids_error", idsErr)
-			} else {
-				attrs = append(attrs, "message_ids", ids, "message_ids_truncated", count > len(ids))
-			}
-			s.agentLifecycleLog.Warn("sweep: stuck pending messages detected", attrs...)
+			named := ids[:min(count, stuckMessageLogIDCap)]
+			s.agentLifecycleLog.Warn("sweep: stuck pending messages detected",
+				"count", count, "count_capped", countCapped,
+				"threshold", stuckMessageThreshold.String(),
+				"message_ids", named, "message_ids_truncated", len(ids) > len(named))
 		}
 
 		if rec := s.dispatchMetrics; rec != nil {

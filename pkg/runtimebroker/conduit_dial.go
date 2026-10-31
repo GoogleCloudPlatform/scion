@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport/ws"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
@@ -160,15 +161,20 @@ func NewConduitDialer(cfg ConduitDialConfig) (*ConduitDialer, error) {
 }
 
 // conduitEndpointURL returns the ws(s) URL of the hub's conduit endpoint.
+// The endpoint must pass config.CheckHubTransport (ws only to a loopback
+// hub), since the session carries broker RPCs with agent secrets.
 func conduitEndpointURL(hubEndpoint string) (string, error) {
+	if err := config.CheckHubTransport(hubEndpoint); err != nil {
+		return "", fmt.Errorf("conduit: refusing the hub endpoint: %w", err)
+	}
 	u, err := url.Parse(hubEndpoint)
 	if err != nil {
 		return "", fmt.Errorf("conduit: invalid hub endpoint: %w", err)
 	}
-	switch u.Scheme {
+	switch strings.ToLower(u.Scheme) {
 	case "https", "wss":
 		u.Scheme = "wss"
-	default:
+	default: // http or ws on a loopback host (CheckHubTransport)
 		u.Scheme = "ws"
 	}
 	// The path replaces any path of the endpoint, as on the control

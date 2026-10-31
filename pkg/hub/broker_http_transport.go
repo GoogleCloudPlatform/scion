@@ -33,6 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -80,12 +81,50 @@ type brokerHTTPTransport struct {
 	signer     brokerRequestSigner
 }
 
+// brokerEndpointTransportError applies the hub-broker transport policy to a
+// broker endpoint before anything is sent: requests to a broker carry agent
+// tokens, secrets and keystrokes, so they are never sent over plain http to
+// a non-loopback endpoint (for example another hub replica's co-located
+// broker registered with a non-loopback server.broker.host). Every sender in
+// this file (doRequest, ExecuteKeys) calls it, and the redirect check
+// (checkBrokerRedirect) applies the same rule to each hop.
+func brokerEndpointTransportError(brokerID, endpoint string) error {
+	if err := config.CheckHubTransport(endpoint); err != nil {
+		return fmt.Errorf("runtime broker %q: refusing its HTTP endpoint: %w", brokerID, err)
+	}
+	return nil
+}
+
+// checkBrokerRedirect is the main broker client's redirect policy. A
+// redirect is followed only to the host of the original request, never from
+// https to another scheme (even on a loopback host, where the transport
+// policy alone would accept http), and only when the target passes the
+// transport policy. So a broker response cannot make the hub resend a signed
+// request body (agent tokens, secrets) to another host, over a downgraded
+// scheme, or over plain http to a network host.
+func checkBrokerRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	if len(via) > 0 && strings.EqualFold(via[0].URL.Scheme, "https") && !strings.EqualFold(req.URL.Scheme, "https") {
+		return fmt.Errorf("refusing a broker redirect that downgrades https to %s", req.URL.Scheme)
+	}
+	if len(via) > 0 && !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
+		return fmt.Errorf("refusing a broker redirect to another host (%s)", req.URL.Host)
+	}
+	if err := config.CheckHubTransport(req.URL.Scheme + "://" + req.URL.Host); err != nil {
+		return fmt.Errorf("refusing a broker redirect: %w", err)
+	}
+	return nil
+}
+
 func newBrokerHTTPTransport(debug bool, signer brokerRequestSigner) *brokerHTTPTransport {
 	transport := otelhttp.NewTransport(http.DefaultTransport)
 	return &brokerHTTPTransport{
 		client: &http.Client{
-			Transport: transport,
-			Timeout:   120 * time.Second,
+			Transport:     transport,
+			Timeout:       120 * time.Second,
+			CheckRedirect: checkBrokerRedirect,
 		},
 		keysClient: &http.Client{
 			Transport: transport,
@@ -102,6 +141,11 @@ func newBrokerHTTPTransport(debug bool, signer brokerRequestSigner) *brokerHTTPT
 func (t *brokerHTTPTransport) doRequest(ctx context.Context, brokerID, method, endpoint string, body []byte) (*http.Response, error) {
 	if endpoint == "" || !strings.Contains(endpoint, "://") {
 		return nil, fmt.Errorf("runtime broker %q has no HTTP endpoint configured (control channel may be required): %w", brokerID, errStartRequestNotSent)
+	}
+	// Transport policy (brokerEndpointTransportError). Nothing is sent, so
+	// the request is reported as not sent.
+	if err := brokerEndpointTransportError(brokerID, endpoint); err != nil {
+		return nil, fmt.Errorf("%w (%w)", err, errStartRequestNotSent)
 	}
 
 	var reader io.Reader
@@ -446,6 +490,12 @@ const maxKeysResponseBodyBytes = 64 * 1024
 func (t *brokerHTTPTransport) ExecuteKeys(ctx context.Context, brokerID, brokerEndpoint, agentSlug string, req agentkeys.BrokerRequest) (agentkeys.BrokerResult, error) {
 	if brokerEndpoint == "" || !strings.Contains(brokerEndpoint, "://") {
 		return agentkeys.BrokerResult{}, fmt.Errorf("%w: runtime broker %q has no HTTP endpoint configured (control channel may be required)", agentkeys.ErrNotDispatched, brokerID)
+	}
+	// Transport policy (brokerEndpointTransportError): keystrokes can carry
+	// typed secrets. Nothing is sent, so the keys are reported not
+	// dispatched.
+	if err := brokerEndpointTransportError(brokerID, brokerEndpoint); err != nil {
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: %w", agentkeys.ErrNotDispatched, err)
 	}
 
 	// The broker compares ExecuteBefore against its own UTC clock; a caller

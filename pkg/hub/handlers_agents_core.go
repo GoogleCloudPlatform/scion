@@ -1419,7 +1419,9 @@ func (s *Server) applyCreateEffectCeiling(
 		return store.EffectCeiling{}, store.AuthorityProvenance{}, "", false
 	}
 
-	capped, cause, allowed := childRoleWithinCeiling(ceiling, role, roleExplicit)
+	// The role cap reads the hop's ceiling as every walk does
+	// (uatHopEffectCeiling); the stored ceiling stays the token's verbatim.
+	capped, cause, allowed := childRoleWithinCeiling(uatHopEffectCeiling(prov.SourcePrincipalKind, prov.SourcePrincipalID, prov, ceiling), role, roleExplicit)
 	if !allowed {
 		msg := reasonNoUsableRole
 		if roleExplicit {
@@ -4150,11 +4152,11 @@ func (s *Server) agentEditAccessFor(ctx context.Context, identity Identity, agen
 	// credential scopes must cover the role. A lookup error counts as not
 	// allowed. The role actually requested is checked again, with the
 	// rest of the authority rules, when the reincarnation is asked for.
-	ceiling, _, err := s.authzService.sourceEffectCeiling(ctx, identity)
+	ceiling, prov, err := s.authzService.sourceEffectCeiling(ctx, identity)
 	if err != nil {
 		return access
 	}
-	_, _, access.CanChangeRole = childRoleWithinCeiling(ceiling, role, true)
+	_, _, access.CanChangeRole = childRoleWithinCeiling(uatHopEffectCeiling(prov.SourcePrincipalKind, prov.SourcePrincipalID, prov, ceiling), role, true)
 	return access
 }
 

@@ -1664,10 +1664,12 @@ func ExtractOrgRepo(gitURL string) (org, repo string) {
 // for use as a shared workspace project. It configures git identity and
 // optionally authenticates with a token.
 //
-// The token is never embedded in the clone URL (which would persist it in the
-// workspace .git/config, readable by agents). Instead it is supplied through a
-// credential helper scoped to the clone URL's host (ScopedCredentialHelperEnv),
-// and only for an http(s) URL; for any other URL the token is ignored. The
+// The clone offers no host credential (HostGitRemoteEnv); without a token it
+// runs anonymously. The token is never embedded in the clone URL (which would
+// persist it in the workspace .git/config, readable by agents). Instead it is
+// supplied through a credential helper scoped to the clone URL's host
+// (ScopedCredentialHelperEnv), and only for an http(s) URL; for any other URL
+// the token is ignored. The
 // clone runs with the LFS smudge skipped, so git-lfs never contacts an endpoint
 // from a tracked .lfsconfig with the host's credentials.
 //
@@ -1686,9 +1688,9 @@ type HostGitHardening struct {
 	Config []string
 	// Env is appended to the command environment.
 	Env []string
-	// NoCredentialHelpers runs git with no credential helper, no configured
-	// extra HTTP header and no askpass (NoCredentialHelperEnv); the token is
-	// not used.
+	// NoCredentialHelpers runs git anonymously: the token is not offered,
+	// and, as on every clone and fetch, no host credential is
+	// (HostGitRemoteEnv).
 	NoCredentialHelpers bool
 }
 
@@ -1711,16 +1713,13 @@ func cloneSharedWorkspace(workspacePath, cloneURL, branch, token string, h HostG
 	gitArgs := h.configArgs()
 	baseEnv := append(HostGitEnv(os.Environ()), "GIT_TERMINAL_PROMPT=0", "GIT_LFS_SKIP_SMUDGE=1")
 	baseEnv = append(baseEnv, h.Env...)
-	env := baseEnv
+	// The clone offers the token, if one is offered at all, and no host
+	// credential (HostGitRemoteEnv). A non-http(s) URL ignores the token.
+	offered := token
 	if h.NoCredentialHelpers {
-		env = NoCredentialHelperEnv(baseEnv, cloneURL)
-	} else if token != "" {
-		if scoped, ok := ScopedCredentialHelperEnv(baseEnv, cloneURL, token); ok {
-			env = scoped
-		}
-		// Non-http(s) URL: the token is ignored, matching the previous
-		// behaviour where it was only ever injected for https.
+		offered = ""
 	}
+	env := HostGitRemoteEnv(baseEnv, cloneURL, offered)
 
 	runClone := func(args ...string) ([]byte, error) {
 		cmd := hostGit(args...)
@@ -1841,22 +1840,24 @@ func pullSharedWorkspace(workspacePath, cloneURL, token string, h HostGitHardeni
 
 	baseEnv := append(HostGitEnv(os.Environ()), "GIT_TERMINAL_PROMPT=0")
 
-	// The fetch talks to the clone URL and may need the token. Scope the
-	// credential helper to that URL's host only, so git never offers the
-	// token to any other endpoint — in particular an LFS endpoint a tracked
-	// .lfsconfig might name. The merge/checkout step below gets no credential
-	// config at all and skips the LFS smudge, so no host-side checkout can
-	// leak the token to an agent-chosen endpoint.
+	// The fetch talks to the clone URL and may need the token. The door adds
+	// the remote authentication layer (HostGitRemoteEnv): no host credential,
+	// and the token, if offered, only through a credential helper scoped to
+	// the clone URL's host, so git never offers it to any other endpoint (in
+	// particular an LFS endpoint a tracked .lfsconfig might name). An
+	// ssh/scp or local-path URL ignores the token. The merge/checkout step
+	// below gets no credential config at all and skips the LFS smudge, so no
+	// host-side checkout can leak the token to an agent-chosen endpoint.
 	fetchEnv := append(append([]string{}, baseEnv...), h.Env...)
+	// The fetch reads no host global config, so the host user's
+	// safe.directory list does not reach it. The local commands below run
+	// under that list and accept the workspace first; the fetch, and the
+	// door's checks of the workspace config, trust exactly the workspace
+	// path, nothing wider.
+	fetchEnv = appendConfigEnv(fetchEnv, "safe.directory", workspacePath)
+	offered := token
 	if h.NoCredentialHelpers {
-		fetchEnv = NoCredentialHelperEnv(fetchEnv, cloneURL)
-	} else if token != "" {
-		// Only an http(s) clone URL can carry a host-scoped credential helper.
-		// For an ssh/scp or local-path URL the token is ignored (git uses its
-		// own transport auth), rather than failing the pull.
-		if scoped, ok := ScopedCredentialHelperEnv(fetchEnv, cloneURL, token); ok {
-			fetchEnv = scoped
-		}
+		offered = ""
 	}
 
 	branchOut, err := hostGit("-C", workspacePath, "symbolic-ref", "--quiet", "--short", "HEAD").CombinedOutput()
@@ -1880,7 +1881,9 @@ func pullSharedWorkspace(workspacePath, cloneURL, token string, h HostGitHardeni
 	oldHeadStr := strings.TrimSpace(string(oldHead))
 
 	ctx := context.Background()
-	fetch, err := HostGitCommand(ctx, workspacePath, HostGitOptions{Env: fetchEnv, Network: true, Config: h.Config},
+	fetch, err := HostGitCommand(ctx, workspacePath, HostGitOptions{
+		Env: fetchEnv, Network: true, Remote: NewHostGitRemote(cloneURL, offered), Config: h.Config,
+	},
 		"fetch", "--no-tags", "--", cloneURL, "+refs/heads/"+remoteBranch+":"+trackingRef)
 	if err != nil {
 		return nil, pullErr(err.Error())

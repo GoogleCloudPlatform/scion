@@ -25,6 +25,7 @@ package relayserver
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -88,6 +89,11 @@ type Config struct {
 	// PublicListener, when set, is the public listener, already bound
 	// (PublicListen is then unused).
 	PublicListener net.Listener
+	// TrustedProxies is server.trusted_proxies, parsed
+	// (config.ParseTrustedProxies): the TLS-terminating proxies whose
+	// forwarded protocol the public listener trusts. Empty (the default):
+	// none, so only a TLS or loopback arrival is admitted.
+	TrustedProxies []*net.IPNet
 	// Advertise returns the internal endpoint other nodes reach this relay
 	// at, given the internal listener's bound address (nil:
 	// https://<bound address> with InternalTLS, else http://<bound
@@ -384,7 +390,9 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	}
 	s.PublicAddr = publicLn.Addr()
 	mux := http.NewServeMux()
-	mux.Handle(relayrole.ConduitPath, role)
+	mux.Handle(relayrole.ConduitPath, requireConfidentialArrival(role, cfg.TrustedProxies, log))
+	// /healthz carries no credential and no state, so it is served
+	// without the arrival check, for load balancer and platform probes.
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	s.public = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go s.serve(s.public, publicLn, "relay public listener")
@@ -462,4 +470,33 @@ func (s *Server) Shutdown(ctx context.Context, capDrain bool, drainCap time.Dura
 	_ = s.public.Shutdown(ctx)
 	_ = s.internal.Shutdown(ctx)
 	return err
+}
+
+// ErrCodeTransportNotConfidential is the error code of a public listener
+// dial refused because it did not arrive confidentially.
+const ErrCodeTransportNotConfidential = "transport_not_confidential"
+
+// requireConfidentialArrival serves next only for a dial that reached the
+// public listener over TLS, from this host, or from a trusted proxy that
+// terminated TLS (config.ConfidentialArrival with trusted). Every other
+// dial is refused with 403 before admission or upgrade, whatever the
+// principal: the dial carries the client's credentials (bearer tokens,
+// agent tokens, broker signature headers, cookies) and then its whole
+// session.
+func requireConfidentialArrival(next http.Handler, trusted []*net.IPNet, log *slog.Logger) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if config.ConfidentialArrival(r, trusted) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		log.Warn("Conduit relay: refused a dial that did not arrive over TLS or from this host",
+			"remote_addr", r.RemoteAddr, "trusted_proxies_configured", len(trusted) > 0)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{
+			"code": ErrCodeTransportNotConfidential,
+			"message": "Conduit dials must reach the relay over TLS or from this host. Use the relay's https:// URL. " +
+				"If TLS ends at a proxy in front of the relay, list the proxy's addresses in " + config.TrustedProxiesKey + ".",
+		}})
+	})
 }

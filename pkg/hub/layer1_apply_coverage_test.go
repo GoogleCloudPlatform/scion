@@ -303,6 +303,8 @@ func layer1LiveProbes(t *testing.T) map[string]layer1LiveProbe {
 			observe: func(_ *Server, o *OperationalSettings) any { return o.Artifacts() }},
 		"profiling": {section: "profiling", doc: `{"readiness_marks":true}`,
 			observe: func(_ *Server, o *OperationalSettings) any { return o.ReadinessMarks() }},
+		"chat_retention": {section: "chat_retention", doc: `{"enabled":true,"messages_retention_days":30}`,
+			observe: func(_ *Server, o *OperationalSettings) any { return o.ChatRetention() }},
 		"agent_delegation_policy": {section: "agent_delegation_policy", doc: `{"remove":{"hub":["agent.read"]}}`,
 			observe: func(_ *Server, o *OperationalSettings) any {
 				p, err := o.AgentDelegationPolicy()

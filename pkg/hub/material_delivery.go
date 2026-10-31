@@ -189,7 +189,7 @@ func (s *deliverySelector) warnLegacyFallback(ctx context.Context, kind Material
 	}
 	s.logger().WarnContext(ctx, "launch material delivered through the legacy fallback",
 		"agent_id", s.agent.ID, "purpose", string(s.purpose), "cohort", o.legacyCohort,
-		"exception", deliveryFallbackException(o.legacyCohort),
+		"exception", "legacy",
 		"kind", string(kind), "key", key, "scope", scope, "scope_id", scopeID,
 		"reason", o.reason)
 }

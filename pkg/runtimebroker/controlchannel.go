@@ -23,10 +23,12 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
@@ -314,6 +316,11 @@ func NewControlChannelClient(config ControlChannelConfig, handlers http.Handler,
 
 // Connect establishes the WebSocket connection to the Hub.
 func (c *ControlChannelClient) Connect(ctx context.Context) error {
+	// A hub URL the transport rule refuses never becomes valid by retrying,
+	// so it ends Connect at once instead of entering the reconnect loop.
+	if err := config.CheckHubTransport(c.config.HubEndpoint); err != nil {
+		return fmt.Errorf("refusing to open the control channel: %w", err)
+	}
 	c.mu.Lock()
 	if c.connected {
 		c.mu.Unlock()
@@ -460,21 +467,23 @@ func (c *ControlChannelClient) doConnect() error {
 }
 
 // buildWebSocketURL constructs the WebSocket URL from the Hub endpoint.
+// The endpoint must pass config.CheckHubTransport: the channel carries
+// agent secrets, so a plaintext (ws) URL is built only for a loopback hub,
+// and any other scheme is refused instead of being mapped to ws.
 func (c *ControlChannelClient) buildWebSocketURL() (string, error) {
+	if err := config.CheckHubTransport(c.config.HubEndpoint); err != nil {
+		return "", fmt.Errorf("refusing to open the control channel: %w", err)
+	}
 	u, err := url.Parse(c.config.HubEndpoint)
 	if err != nil {
 		return "", err
 	}
 
 	// Convert http(s) to ws(s)
-	switch u.Scheme {
-	case "https":
+	switch strings.ToLower(u.Scheme) {
+	case "https", "wss":
 		u.Scheme = "wss"
-	case "http":
-		u.Scheme = "ws"
-	case "wss", "ws":
-		// Already WebSocket scheme
-	default:
+	default: // http or ws on a loopback host (CheckHubTransport)
 		u.Scheme = "ws"
 	}
 

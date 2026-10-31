@@ -2505,3 +2505,25 @@ func (o *OperationalSettings) AttachmentInboxRetentionDays() int {
 	}
 	return *ms.AttachmentInboxRetentionDays
 }
+
+// ChatRetention returns the resolved chat retention settings (the
+// "chat_retention" section). It returns opsettings.DefaultChatRetentionConfig
+// (retention off, no window) when the section is absent, and fails closed
+// to the same disabled config when the stored document is unreadable or
+// holds an invalid value, so a bad document never purges anything.
+//
+// Hot-reloadable: reads from the DB-backed cache.
+func (o *OperationalSettings) ChatRetention() opsettings.ChatRetentionConfig {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	state, ok := o.cache[opsettings.ChatRetentionSectionName]
+	if !ok || state.Malformed {
+		return opsettings.DefaultChatRetentionConfig()
+	}
+	cfg, err := opsettings.ParseChatRetentionDoc(state.Value)
+	if err != nil {
+		return opsettings.DefaultChatRetentionConfig()
+	}
+	return cfg
+}

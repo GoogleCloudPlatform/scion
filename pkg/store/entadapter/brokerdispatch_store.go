@@ -19,6 +19,7 @@ import (
 	"errors"
 	"time"
 
+	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerdispatch"
@@ -332,6 +333,30 @@ func (s *BrokerDispatchStore) CountBrokerDispatchHealth(ctx context.Context, stu
 	return stuck, failed, nil
 }
 
+// stuckPendingMessage returns the predicates every stuck-pending sweep query
+// shares: dispatch_state 'pending', created before the cutoff, and an agent
+// recipient. dispatch_state is compared with the literal 'pending' rather
+// than a bound parameter so the predicate textually implies the WHERE of the
+// partial index on (created, id) WHERE dispatch_state = 'pending'. SQLite
+// and a Postgres generic plan can only use a partial index when the query
+// proves its WHERE without knowing parameter values.
+func stuckPendingMessage(before time.Time) []predicate.Message {
+	return []predicate.Message{
+		messageDispatchPendingLiteral(),
+		message.CreatedLT(before),
+		message.RecipientHasPrefix("agent:"),
+	}
+}
+
+// messageDispatchPendingLiteral matches dispatch_state = 'pending' with the
+// value inlined as a literal, so the query can use the partial pending index
+// (see stuckPendingMessage).
+func messageDispatchPendingLiteral() predicate.Message {
+	return func(s *entsql.Selector) {
+		s.Where(entsql.ExprP(s.C(message.FieldDispatchState) + " = '" + store.MessageDispatchPending + "'"))
+	}
+}
+
 // CountStuckPendingMessages returns the number of messages still in
 // dispatch_state='pending' whose created timestamp is before the given
 // cutoff. Scoped to agent recipients only (message.RecipientHasPrefix
@@ -342,11 +367,7 @@ func (s *BrokerDispatchStore) CountBrokerDispatchHealth(ctx context.Context, stu
 // expired here.
 func (s *BrokerDispatchStore) CountStuckPendingMessages(ctx context.Context, before time.Time) (int, error) {
 	n, err := s.client.Message.Query().
-		Where(
-			message.DispatchStateEQ(store.MessageDispatchPending),
-			message.CreatedLT(before),
-			message.RecipientHasPrefix("agent:"),
-		).
+		Where(stuckPendingMessage(before)...).
 		Count(ctx)
 	if err != nil {
 		return 0, mapError(err)
@@ -362,11 +383,7 @@ func (s *BrokerDispatchStore) ListStuckPendingMessageIDs(ctx context.Context, be
 		return nil, nil
 	}
 	ids, err := s.client.Message.Query().
-		Where(
-			message.DispatchStateEQ(store.MessageDispatchPending),
-			message.CreatedLT(before),
-			message.RecipientHasPrefix("agent:"),
-		).
+		Where(stuckPendingMessage(before)...).
 		Order(ent.Asc(message.FieldCreated), ent.Asc(message.FieldID)).
 		Limit(limit).
 		IDs(ctx)
@@ -385,11 +402,7 @@ func (s *BrokerDispatchStore) ListStuckPendingMessageIDs(ctx context.Context, be
 // expired. Scoped to agent recipients only — see CountStuckPendingMessages.
 func (s *BrokerDispatchStore) ExpireStuckPendingMessages(ctx context.Context, before time.Time, reason string) (int, error) {
 	affected, err := s.client.Message.Update().
-		Where(
-			message.DispatchStateEQ(store.MessageDispatchPending),
-			message.CreatedLT(before),
-			message.RecipientHasPrefix("agent:"),
-		).
+		Where(stuckPendingMessage(before)...).
 		SetDispatchState(store.MessageDispatchFailed).
 		SetNillableDispatchFailureReason(&reason).
 		Save(ctx)
@@ -406,9 +419,11 @@ func (s *BrokerDispatchStore) ExpireStuckPendingMessages(ctx context.Context, be
 // are left untouched — a lookup miss there does not mean the recipient is
 // gone. Returns the number of messages transitioned.
 func (s *BrokerDispatchStore) FailPendingMessagesWithMissingRecipient(ctx context.Context, reason string) (int, error) {
+	// The literal lets this read scan the partial pending index instead of
+	// the whole table.
 	pending, err := s.client.Message.Query().
 		Where(
-			message.DispatchStateEQ(store.MessageDispatchPending),
+			messageDispatchPendingLiteral(),
 			message.RecipientHasPrefix("agent:"),
 			message.RecipientIDNEQ(""),
 		).
@@ -503,11 +518,7 @@ func (s *BrokerDispatchStore) ExpireAndListStuckPendingMessages(ctx context.Cont
 // which must be a transactional client.
 func expireAndListStuckPending(ctx context.Context, c *ent.Client, before time.Time, reason string) ([]store.ExpiredPendingMessage, error) {
 	candidates, err := c.Message.Query().
-		Where(
-			message.DispatchStateEQ(store.MessageDispatchPending),
-			message.CreatedLT(before),
-			message.RecipientHasPrefix("agent:"),
-		).
+		Where(stuckPendingMessage(before)...).
 		Order(ent.Asc(message.FieldCreated), ent.Asc(message.FieldID)).
 		Limit(expirePageSize).
 		Select(message.FieldID, message.FieldRecipient, message.FieldCreated).

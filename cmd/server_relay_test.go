@@ -396,3 +396,29 @@ func TestRelayMetrics_UnsetWithAProjectExports(t *testing.T) {
 	assert.Nil(t, mp, "explicitly off: no export even with a project")
 	assert.Equal(t, 1, built)
 }
+
+// TestRelayServerConfigTrustedProxies: the relay's public listener trusts
+// a forwarded protocol only from server.trusted_proxies. The default is
+// empty (no proxy trusted, so only TLS or loopback dials are admitted),
+// and an invalid or catch-all entry refuses startup.
+func TestRelayServerConfigTrustedProxies(t *testing.T) {
+	db := &relaydb.DB{Settings: &relaydb.SettingsReader{}}
+	rcfg, err := relayServerConfig(context.Background(), relayRoleTestConfig(), db)
+	require.NoError(t, err)
+	assert.Empty(t, rcfg.TrustedProxies, "no trusted proxy by default")
+
+	cfg := relayRoleTestConfig()
+	cfg.TrustedProxies = []string{"10.20.0.0/16"}
+	rcfg, err = relayServerConfig(context.Background(), cfg, db)
+	require.NoError(t, err)
+	require.Len(t, rcfg.TrustedProxies, 1)
+	assert.Equal(t, "10.20.0.0/16", rcfg.TrustedProxies[0].String())
+
+	for _, bad := range []string{"0.0.0.0/0", "not-an-ip"} {
+		cfg := relayRoleTestConfig()
+		cfg.TrustedProxies = []string{bad}
+		_, err := relayServerConfig(context.Background(), cfg, db)
+		require.Error(t, err, bad)
+		assert.Contains(t, err.Error(), config.TrustedProxiesKey)
+	}
+}

@@ -93,7 +93,7 @@ The keys in this section are **ignored in templates**, with a warning. They take
 | Field | Type | Description | Set it instead in |
 | :--- | :--- | :--- | :--- |
 | `image` | string | Container image for this agent. | The harness-config's `config.yaml` `image`; settings `harness_configs.<name>.image`; a profile `harness_overrides.<name>.image`; `--image` |
-| `volumes` | list | Additional volume mounts. | Settings `harness_configs.<name>.volumes`; the harness-config |
+| `volumes` | list | Additional volume mounts. Subject to [Volume Source Restrictions](/scion/reference/orchestrator-settings/#volume-source-restrictions). | Settings `harness_configs.<name>.volumes`; the harness-config |
 | `resources` | object | Container resource requests/limits (see below). | Settings `default_resources`, profile `resources` and `harness_overrides`; hub `agent_defaults.resources`; project resource defaults |
 | `kubernetes` | object | Kubernetes runtime overrides (see below). | Settings runtimes and profiles |
 | `hub` | object | Hub endpoint override (see below). | Broker settings |

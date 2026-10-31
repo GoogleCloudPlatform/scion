@@ -137,6 +137,10 @@ scion tunnel my-agent --port 5173 --local-port 5173
 
 Then open `http://127.0.0.1:5173/` in your browser. The app behaves as it does on its own machine.
 
+### Port page view (`hub.port_view` experiment)
+
+When an administrator enables the `hub.port_view` [experiment](/scion/reference/experiments/) (alpha, off by default) on a Hub with `hub.conduit` enabled, opening an exposed port from the Hub (`GET /api/v1/agents/{id}/ports/{port}/view`) mints a short-lived page link (default TTL [`server.hub.port_proxy.view_ttl`](/scion/reference/server-config/#port-proxy-serverhubport_proxy), `2h`) so a multi-file page's relative scripts (including module scripts), stylesheets, images, same-app `fetch()`/XHR calls, and WebSockets load in the browser without `scion tunnel`. Pages opened through a port view link must use relative URLs (not root-relative URLs starting with `/`), and browser storage, cookies, and web workers are unavailable inside the sandboxed page. Keep `hub.port_view` off on a Hub behind an authenticating front proxy (such as IAP).
+
 ### Behind an authenticating front proxy
 
 When the Hub runs behind an authenticating front proxy, for example Google IAP or another [proxy-auth](/scion/hosted/ha/auth-proxy-iap/) deployment (`auth.mode: proxy`), the front proxy sits in front of every request, including the requests a page opened through the proxy URL makes back to its app. Depending on how the front proxy is configured, some of those requests may be answered by the front proxy's own sign-in flow instead of by the app, so a multi-file page can behave unpredictably: the page opens, and some of its parts load while others do not.

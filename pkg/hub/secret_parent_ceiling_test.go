@@ -36,6 +36,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -459,10 +460,14 @@ func TestUserSecretParentCeiling_SingleFaultDenies(t *testing.T) {
 			f.replaceAgentEdge(t, f.agentID, func(e *store.DelegationEdge) { e.EffectCeiling = boundedCeiling("project.read", "agent.read") })
 			return base(f)
 		}, DenyCauseCeilingEffectExceeded, "effect_exceeded"},
-		{"uat-created child", func(t *testing.T, f *uspFixture) (AgentIdentity, Resource) {
+		// secret.use is intrinsic to a hop recorded from a user access token
+		// (uatHopEffectCeiling), but a ceiling version Allows does not
+		// interpret still denies every permission.
+		{"uat-created child, ceiling version not interpreted", func(t *testing.T, f *uspFixture) (AgentIdentity, Resource) {
 			f.replaceAgentEdge(t, f.agentID, func(e *store.DelegationEdge) {
 				e.SourceCredentialKind = store.SourceCredentialUAT
 				e.EffectCeiling = boundedCeiling("project.read", "project.secret_read")
+				e.EffectCeiling.Version = permissions.CeilingVersion(99)
 			})
 			return base(f)
 		}, DenyCauseCeilingEffectExceeded, "effect_exceeded"},

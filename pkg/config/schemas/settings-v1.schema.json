@@ -111,6 +111,13 @@
           "x-env-var": "SCION_SERVER_KEYRING_FILE_ALLOW_WORLD_READABLE",
           "x-since": "1"
         },
+        "trusted_proxies": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "IP addresses or CIDR ranges of the TLS-terminating proxies in front of the hub. The hub trusts X-Forwarded-Proto: https only on a request whose immediate peer is in this list; with the list empty (the default) the header is never trusted. A hub whose TLS ends at a proxy must list the proxy's source addresses here, or remote Runtime Broker registration and join-token minting, join, secret rotation, control channel and conduit connections are refused; the proxy must overwrite X-Forwarded-Proto rather than append to it. Used only for that transport check (not for proxy header login or client IP rate limits). Each entry is an IP (taken as /32 or /128) or a CIDR; an entry that is neither, or wider than an IPv4 /8 or an IPv6 /16, refuses startup. Comma-separated values are accepted. Never returned or accepted by the server-config API. Restart to apply.",
+          "x-env-var": "SCION_SERVER_TRUSTEDPROXIES",
+          "x-since": "1"
+        },
         "scheduler": { "$ref": "#/$defs/serverScheduler" },
         "mode": {
           "type": "string",

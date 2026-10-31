@@ -817,6 +817,27 @@ var (
 // token was consumed; the reason is worked out afterwards.
 var errJoinTokenNotConsumed = errors.New("join token not consumed")
 
+// RevokeExposedJoinToken consumes the pending join token of brokerID when
+// joinToken is that token (same hash, same broker, not expired), and does
+// nothing otherwise. A join refused because it arrived unencrypted over the
+// network calls it: the token has crossed the network in the clear, so it
+// must not stay usable for a later join over TLS. A token that does not
+// match is left alone, so a request with a wrong token cannot revoke the
+// broker's real one. It reports whether a token was revoked.
+func (s *BrokerAuthService) RevokeExposedJoinToken(ctx context.Context, brokerID, joinToken string) (bool, error) {
+	if brokerID == "" || joinToken == "" {
+		return false, nil
+	}
+	err := s.store.ConsumeJoinToken(ctx, sha256Hash(joinToken), brokerID, time.Now())
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to revoke join token: %w", err)
+	}
+	return true, nil
+}
+
 // classifyUnconsumedJoinToken explains why ConsumeJoinToken matched no row,
 // with a read outside the join transaction. The read only selects the error
 // returned; a concurrent change can at most change which of the three join
