@@ -178,9 +178,8 @@ func TestServerKeysStatus_NotReadyReportIsExit0(t *testing.T) {
 	assert.Equal(t, []string{"signing_issuance_closed"}, got.Readiness.Reasons)
 }
 
-// Review item 6: in legacy mode status says which secret its audit uses.
-// Without a session secret in its environment it runs no audit, instead of
-// reporting every row unreadable.
+// Review item 6 / N9: in legacy mode status says which secret its audit
+// uses; without one it audits as a Hub without a secret does.
 func TestServerKeysStatus_LegacyModeAuditNote(t *testing.T) {
 	home := keysTestEnv(t)
 	dbPath, _ := keysStatusDBFixture(t, home, writeCmdKeyring(t, nil))
@@ -189,9 +188,10 @@ func TestServerKeysStatus_LegacyModeAuditNote(t *testing.T) {
 	require.NoError(t, err, out)
 	assert.Equal(t, 0, code)
 	assert.Contains(t, out, "no session secret in this environment")
+	assert.Contains(t, out, "this audit assumes the Hub also runs without a session secret; if the Hub was started with --session-secret, counts may differ")
 	assert.Contains(t, out, "--session-secret")
 	assert.Contains(t, out, "Keyring: source legacy")
-	assert.Contains(t, out, "Audit: not run")
+	assert.Contains(t, out, "Audit (fresh")
 
 	t.Setenv(sessionSecretEnv, "test-only-cmd-other-legacy-secret")
 	out, err, code = runKeys(t, "status", "--db", dbPath)

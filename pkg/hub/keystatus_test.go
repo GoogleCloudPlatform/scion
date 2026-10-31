@@ -697,11 +697,13 @@ func TestCheckKeyringFile_ParityWithValidateKeyringConfig(t *testing.T) {
 			[]any{ksEntry("gen1", krGen1Secret, nil, nil)}, []any{"gen1"})),
 		"active not a legacy reader": ksFile(t, ksPilotDoc("rev-r", "gen1",
 			[]any{ksEntry("legacy", krLegacySecret, nil, nil), ksEntry("gen1", krGen1Secret, nil, nil)}, []any{"legacy"})),
-		"legacy adapter":   keyring.Legacy(krLegacySecret),
-		"no keyring":       nil,
-		"zero keyring":     {},
-		"issuance closed":  ksFile(t, ksPilotDoc("rev-c", "legacy", []any{ksEntry("legacy", krLegacySecret, krTime(-2*time.Hour), krTime(-time.Hour))}, []any{"legacy"})),
-		"deadlines active": ksKeyringB(t),
+		"legacy adapter":  keyring.Legacy(krLegacySecret),
+		"no keyring":      nil,
+		"zero keyring":    {},
+		"issuance closed": ksFile(t, ksPilotDoc("rev-c", "legacy", []any{ksEntry("legacy", krLegacySecret, krTime(-2*time.Hour), krTime(-time.Hour))}, []any{"legacy"})),
+		"active with future deadlines": ksFile(t, ksPilotDoc("rev-f", "legacy",
+			[]any{ksEntry("legacy", krLegacySecret, krTime(time.Hour), krTime(48*time.Hour)), ksEntry("gen1", krGen1Secret, nil, nil)},
+			[]any{"legacy", "gen1"})),
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg := DefaultServerConfig()
@@ -750,29 +752,41 @@ func TestKeyStatus_SigningReasonParityWithReadyz(t *testing.T) {
 	assert.Equal(t, readyReasonSigningIssuanceClosed, srv.signingNotReadyReason())
 }
 
-// Review item 6: a disabled cipher (legacy mode without a session secret)
-// authenticates nothing, so the local report runs no audit rather than
-// counting every row unreadable; the policy is still read.
-func TestLocalKeyStatus_DisabledCipherRunsNoAudit(t *testing.T) {
+// Review item 6 / N9: in legacy mode without a session secret, the local
+// report audits like a Hub started without one, so the endpoint and the CLI
+// agree (instance identity and audit timing aside).
+func TestKeyStatus_SecretlessLegacyParity(t *testing.T) {
 	st := encStore(t)
+	cfg := testServerConfig()
+	cfg.HubID = encTestHubID
+	cfg.KeyringNow = (&krClock{t: krT0}).now
+	start := func() *Server {
+		srv, err := newTestHubServer(t, cfg, st)
+		require.NoError(t, err)
+		srv.SetHubID(encTestHubID)
+		waitUserScopedDataSweep(t, srv)
+		ksSetExperiment(t, srv, true)
+		return srv
+	}
+	srv := start()
+	// One row a secretless Hub cannot read (sealed under a real secret), so
+	// the counts are not trivially empty.
 	sealed, err := secret.NewLegacyValueCipher(krLegacySecret).Encrypt("ks-synthetic-legacy-payload")
 	require.NoError(t, err)
 	_, err = st.UpsertSecret(context.Background(), &store.Secret{ID: ksRecordLegacy, Key: "KS_RECORD_KEY_LEGACY", EncryptedValue: sealed,
 		Scope: store.ScopeUser, ScopeID: "ks-user", SecretType: store.SecretTypeEnvironment})
 	require.NoError(t, err)
+	require.NoError(t, srv.Shutdown(context.Background()))
+	srv = start()
 
-	r, err := LocalKeyStatus(context.Background(), nil, secret.NewLegacyValueCipher(""), st, krT0)
-	require.NoError(t, err)
-	assert.False(t, r.Audit.Ran)
-	assert.Zero(t, r.Audit.Scanned)
-	assert.Zero(t, r.Audit.Unreadable)
-	assert.Nil(t, r.Audit.CompletedAt)
+	endpoint, _ := ksGet(t, srv)
+	require.True(t, endpoint.Audit.Ran)
+	assert.Positive(t, endpoint.Audit.Scanned)
 
-	// With the secret, the same row is audited and readable.
-	r, err = LocalKeyStatus(context.Background(), nil, secret.NewLegacyValueCipher(krLegacySecret), st, krT0)
+	local, err := LocalKeyStatus(context.Background(), nil, secret.NewLegacyValueCipher(""), st, krT0)
 	require.NoError(t, err)
-	assert.True(t, r.Audit.Ran)
-	assert.Equal(t, 1, r.Audit.Readable)
+	assert.True(t, local.Audit.Ran)
+	assert.Equal(t, ksJSON(t, withoutInstance(endpoint)), ksJSON(t, withoutInstance(local)))
 }
 
 // ksFailingPolicyStore is the real store whose encryption policy read

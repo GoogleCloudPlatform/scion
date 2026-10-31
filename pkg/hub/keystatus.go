@@ -423,15 +423,16 @@ func (s *Server) KeyStatus(ctx context.Context) (KeyStatusReport, error) {
 // LocalKeyStatus builds the key status report for a locally loaded keyring
 // (nil: legacy mode) and its cipher. With a store it reads the encryption
 // policy and runs the same authenticated audit a starting Hub runs; st may
-// be nil. A disabled cipher (legacy mode without a session secret) can
-// authenticate nothing, so no audit runs and audit.ran is false. It never
-// writes to the store.
+// be nil. In legacy mode without a session secret the cipher is disabled,
+// as it is in a Hub started without one; the audit still runs, exactly as
+// that Hub's startup audit does, so the two reports agree. It never writes
+// to the store.
 func LocalKeyStatus(ctx context.Context, k *keyring.Keyring, c *secret.ValueCipher, st store.Store, now time.Time) (KeyStatusReport, error) {
 	if k != nil && k.Source() != keyring.SourceFile {
 		k = nil
 	}
 	audit := EncryptionAudit{}
-	if st != nil && c.Enabled() {
+	if st != nil {
 		a, err := runEncryptionAudit(ctx, st, c)
 		if err != nil {
 			return KeyStatusReport{}, err

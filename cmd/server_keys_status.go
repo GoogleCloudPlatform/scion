@@ -53,9 +53,9 @@ identifiers.
 
 In legacy mode (no keyring file) the audit uses the session secret from
 SCION_SERVER_SESSION_SECRET (or SESSION_SECRET) in this command's
-environment. A Hub started with --session-secret, or with a different
-secret, audits with that secret instead, so the counts can differ; without
-a session secret here no audit runs.
+environment; without one, it assumes the Hub also runs without a secret.
+A Hub started with --session-secret, or with a different secret, audits
+with that secret instead, so the counts can differ.
 
 Use --format json for the versioned JSON report.
 
@@ -137,8 +137,9 @@ func printLegacyAuditNote(w io.Writer, haveSecret bool) {
 			"a Hub started with --session-secret or another secret can report different counts.\n", sessionSecretEnv, legacySessionSecretEnv)
 		return
 	}
-	_, _ = fmt.Fprintf(w, "Note: legacy mode (no keyring file) and no session secret in this environment (%s/%s): the audit is skipped; "+
-		"a Hub started with --session-secret audits with that secret.\n", sessionSecretEnv, legacySessionSecretEnv)
+	_, _ = fmt.Fprintf(w, "Note: legacy mode (no keyring file) and no session secret in this environment (%s/%s): "+
+		"this audit assumes the Hub also runs without a session secret; if the Hub was started with --session-secret, counts may differ.\n",
+		sessionSecretEnv, legacySessionSecretEnv)
 }
 
 // printKeyStatus renders the report for a terminal.
@@ -168,7 +169,7 @@ func printKeyStatus(w io.Writer, r hub.KeyStatusReport) {
 		p("Migration: %s, state %s, target %s", r.Migration.ID, r.Migration.State, r.Migration.TargetKID)
 	}
 	if !r.Audit.Ran {
-		p("Audit: not run (no database, or no session secret in legacy mode)")
+		p("Audit: not run (no database)")
 	} else {
 		p("Audit (%s, completed %s): %d scanned, %d reference-only, %d readable, %d unreadable (%d infrastructure backups)",
 			r.Audit.Scope, keysDeadline(r.Audit.CompletedAt), r.Audit.Scanned, r.Audit.ReferenceOnly, r.Audit.Readable, r.Audit.Unreadable, r.Audit.BackupUnreadable)
