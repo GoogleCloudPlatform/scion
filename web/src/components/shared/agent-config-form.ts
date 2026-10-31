@@ -625,11 +625,12 @@ const TZ_ENV_KEY = 'TZ';
 
 /**
  * Why Unlimited is disabled on a count limit whose editability sets
- * unlimitedUnsupported: the hub's refusal reason for such a change
- * (unlimitedNotSupportedByBroker, pkg/hub/agent_config_unlimited.go).
+ * unlimitedUnsupported (a bare flag): the hub's refusal reasons for such a
+ * change, unlimited_not_supported_by_broker and broker_unknown
+ * (pkg/hub/agent_config_unlimited.go), in one text.
  */
 export const UNLIMITED_UNSUPPORTED_REASON =
-  "Unlimited is not available: this agent's runtime broker cannot apply Unlimited over an inherited limit. Upgrade the broker to set it.";
+  'Unlimited is not available for this agent: its runtime broker cannot apply Unlimited over an inherited limit, or it has no runtime broker.';
 
 /** Why the env fields are locked for a caller the hub does not show the env to. */
 export const ENV_HIDDEN_REASON =
@@ -1201,7 +1202,9 @@ export class ScionAgentConfigForm extends LitElement {
    */
   private unlimitedUnsupported(f: AgentConfigFieldDef): boolean {
     return (
-      this.mode === 'edit' && f.control === 'limit-count' && !!this.fieldState(f).unlimitedUnsupported
+      this.mode === 'edit' &&
+      f.control === 'limit-count' &&
+      !!this.fieldState(f).unlimitedUnsupported
     );
   }
 
@@ -1772,20 +1775,23 @@ export class ScionAgentConfigForm extends LitElement {
       ${this.resourcesRemoveStored()
         ? html`<div class="status">
             <span class="clear-note" data-testid="clear-note"
-              >Removing a value takes effect at the next reincarnation; a plain start keeps the
-              previous value.</span
+              >Clearing a resource limit takes effect at the next reincarnation; a plain start keeps
+              the previous value.</span
             >
           </div>`
         : nothing}`;
   }
 
   /**
-   * Edit mode: the user emptied a resource value the agent stores. A start
-   * merges resources value by value and keeps one the request leaves out, so
-   * the removal reaches the agent only at its next reincarnation.
+   * Edit mode: the user emptied a resource value the agent stores, and the
+   * hub reports (subfieldClearUnsupported on config.resources) that the
+   * agent's broker keeps a value the request leaves out at a start, so the
+   * removal reaches the agent only at its next reincarnation. Without the
+   * flag the broker applies the removal at the next start.
    */
   private resourcesRemoveStored(): boolean {
     if (this.mode !== 'edit') return false;
+    if (!this.editability?.fields['config.resources']?.subfieldClearUnsupported) return false;
     return RESOURCE_FIELDS.some((r) => {
       const draft = this.resourceDrafts[r.sub];
       return draft !== undefined && draft.trim() === '' && !!r.get(this.values?.resources);

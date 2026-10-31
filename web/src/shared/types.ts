@@ -886,6 +886,12 @@ export interface AgentFieldEditState {
    * hub refuses a change to it (unlimitedCountLimits capability).
    */
   unlimitedUnsupported?: boolean;
+  /**
+   * On config.resources: the agent's broker does not apply a removed
+   * resources sub-field at a start (clearedResourceSubfields capability), so
+   * the removal takes effect only at the next reincarnation.
+   */
+  subfieldClearUnsupported?: boolean;
   /** Why a locked field is locked. */
   reason?: string;
 }

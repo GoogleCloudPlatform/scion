@@ -190,6 +190,9 @@ describe('scion-agent-config-form stored Unlimited count limit', () => {
 
   it('offers Clear on a stored 0 and sends null for it, as for unchecking it', async () => {
     const cleared = await mount({ values: { max_turns: 0 } });
+    expect(
+      field(cleared, 'config.max_turns').querySelector('sl-button.clear')!.hasAttribute('disabled')
+    ).toBe(false);
     await clear(cleared, 'config.max_turns');
     expect(cleared.collectConfigPatch()).toEqual({ max_turns: null });
     document.body.innerHTML = '';
@@ -202,9 +205,9 @@ describe('scion-agent-config-form stored Unlimited count limit', () => {
   it('does not show an absent count limit as Unlimited', async () => {
     const el = await mount({ values: {} });
     expect(unlimitedBox(el, 'config.max_turns').hasAttribute('checked')).toBe(false);
-    expect(field(el, 'config.max_turns').querySelector('sl-button.clear')!.hasAttribute('disabled')).toBe(
-      true
-    );
+    expect(
+      field(el, 'config.max_turns').querySelector('sl-button.clear')!.hasAttribute('disabled')
+    ).toBe(true);
   });
 });
 
@@ -223,10 +226,11 @@ describe('scion-agent-config-form unlimitedUnsupported', () => {
       'Unlimited'
     );
     expect(f.querySelector('[data-testid="unlimited-unsupported"]')!.textContent).toContain(
-      "this agent's runtime broker cannot apply Unlimited"
+      'cannot apply Unlimited over an inherited limit, or it has no runtime broker'
     );
     expect(el.collectConfigPatch()).toEqual({});
     // Clear stays available: a clear is not refused on such a broker.
+    expect(f.querySelector('sl-button.clear')!.hasAttribute('disabled')).toBe(false);
     await clear(el, 'config.max_turns');
     expect(el.collectConfigPatch()).toEqual({ max_turns: null });
   });
@@ -242,7 +246,10 @@ describe('scion-agent-config-form unlimitedUnsupported', () => {
   });
 
   it('only affects the field the hub flags', async () => {
-    const el = await mount({ values: { max_turns: 0, max_duration: '0' }, editability: UNSUPPORTED });
+    const el = await mount({
+      values: { max_turns: 0, max_duration: '0' },
+      editability: UNSUPPORTED,
+    });
     const d = field(el, 'config.max_duration');
     expect(d.querySelector('sl-checkbox.unlimited')!.hasAttribute('disabled')).toBe(false);
     expect(d.querySelector('[data-testid="unlimited-unsupported"]')).toBeNull();
