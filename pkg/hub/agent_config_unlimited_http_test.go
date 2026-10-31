@@ -629,8 +629,10 @@ func TestAgentConfigPatch_UnlimitedEchoOnOldBroker(t *testing.T) {
 // (no unlimitedCountLimits) decodes a count limit of 0 as unset; the start
 // merge (config.MergeScionConfig) lays the inline config over the agent's
 // persisted config; a broker with clearedFields restores each cleared key
-// from the template chain (inherit); then the default limits fill what is
-// still unset (config.FillDefaultLimits). It returns the effective config.
+// from the template chain (inherit), the resources sub-field entries only
+// when it also has clearedResourceSubfields (an older broker ignores them,
+// ptone/scion#5676); then the default limits fill what is still unset
+// (config.FillDefaultLimits). It returns the effective config.
 func simulateBrokerStart(persisted *api.ScionConfig, inline api.ScionConfig, caps store.BrokerCapabilities, inherit *api.ScionConfig, hub *api.HubAgentDefaults) *api.ScionConfig {
 	in := inline
 	if !caps.UnlimitedCountLimits {
@@ -643,7 +645,16 @@ func simulateBrokerStart(persisted *api.ScionConfig, inline api.ScionConfig, cap
 	}
 	merged := config.MergeScionConfig(persisted, &in)
 	if caps.ClearedFields {
-		api.ApplyClearedFields(merged, in.ClearedFields, inherit)
+		paths := in.ClearedFields
+		if !caps.ClearedResourceSubfields {
+			paths = nil
+			for _, p := range in.ClearedFields {
+				if !api.IsResourceSubPath(p) {
+					paths = append(paths, p)
+				}
+			}
+		}
+		api.ApplyClearedFields(merged, paths, inherit)
 	}
 	out := *merged
 	config.FillDefaultLimits(&out, hub, 0, 0, "")
