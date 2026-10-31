@@ -59,6 +59,9 @@ func OpenBelow(root, rel string) (*Home, error) {
 		}
 		parts = p
 	}
+	if len(parts) == 0 {
+		return Open(root)
+	}
 	r, err := Open(root)
 	if err != nil {
 		return nil, err
@@ -66,9 +69,6 @@ func OpenBelow(root, rel string) (*Home, error) {
 	defer func() { _ = r.Close() }()
 	if err := r.checkDirs(parts, false, 0); err != nil {
 		return nil, err
-	}
-	if len(parts) == 0 {
-		return Open(root)
 	}
 	sub, err := r.root.OpenRoot(path.Join(parts...))
 	if err != nil {

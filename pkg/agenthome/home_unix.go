@@ -69,6 +69,9 @@ func OpenBelow(root, rel string) (*Home, error) {
 		}
 		parts = p
 	}
+	if len(parts) == 0 {
+		return Open(root)
+	}
 	r, err := Open(root)
 	if err != nil {
 		return nil, err
