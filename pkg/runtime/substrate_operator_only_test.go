@@ -557,3 +557,86 @@ func TestGetRuntime_UnresolvedSubstrateProfileNameIsInvalidProfile(t *testing.T)
 		t.Errorf("substrate runtime built %d time(s): %+v, want none", len(*built), *built)
 	}
 }
+
+// TestGetRuntime_EmptyProfileNameComparesSameOperatorProfile checks that,
+// for an empty effective profile name, the operator-side comparison uses
+// the operator's profile stored under that same empty name, not the
+// operator's own active_profile.
+func TestGetRuntime_EmptyProfileNameComparesSameOperatorProfile(t *testing.T) {
+	rows := []struct {
+		name             string
+		operatorSettings string
+		projectSettings  string
+		wantRefused      bool
+	}{
+		{
+			// The operator stores the substrate profile under the empty
+			// name but keeps the default active_profile ("local"); the
+			// project only selects the empty name.
+			name: "operator empty-name substrate selected by project",
+			operatorSettings: `schema_version: "1"
+runtimes:
+  substrate-prod:
+    type: substrate
+    substrate:
+      api_endpoint: api.operator.example.com:443
+      router_endpoint: http://router.operator.example.com:80
+profiles:
+  "":
+    runtime: substrate-prod
+`,
+			projectSettings: `schema_version: "1"
+active_profile: ""
+`,
+			wantRefused: false,
+		},
+		{
+			// The operator's active_profile is its named substrate profile
+			// and it stores nothing under the empty name; the project
+			// stores its own copy of the operator's runtime under the empty
+			// name.
+			name:             "project empty-name copy of operator default substrate",
+			operatorSettings: operatorSubstrateSettingsYAML + "active_profile: substrate\n",
+			projectSettings: `schema_version: "1"
+active_profile: ""
+runtimes:
+  project-copy:
+    type: substrate
+    substrate:
+      api_endpoint: api.operator.example.com:443
+      router_endpoint: http://router.operator.example.com:80
+profiles:
+  "":
+    runtime: project-copy
+`,
+			wantRefused: true,
+		},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			built := recordSubstrateBuilds(t)
+			projectDir := writeYAMLSettings(t, row.operatorSettings, row.projectSettings)
+
+			rt := GetRuntime(projectDir, "")
+			if row.wantRefused {
+				er, ok := rt.(*ErrorRuntime)
+				if !ok {
+					t.Fatalf("GetRuntime = %T, want *ErrorRuntime", rt)
+				}
+				if !errors.Is(er.Err, ErrSubstrateProfileInvalid) {
+					t.Errorf("ErrorRuntime.Err = %v, want it to match ErrSubstrateProfileInvalid", er.Err)
+				}
+				if len(*built) != 0 {
+					t.Errorf("substrate runtime built %d time(s) from a refused profile: %+v", len(*built), *built)
+				}
+				return
+			}
+			if _, ok := rt.(*SubstrateRuntime); !ok {
+				t.Fatalf("GetRuntime = %T (%v), want *SubstrateRuntime", rt, rt)
+			}
+			if len(*built) != 1 || (*built)[0].APIEndpoint != "api.operator.example.com:443" {
+				t.Errorf("built configs = %+v, want exactly one, from the operator's definition", *built)
+			}
+		})
+	}
+}
