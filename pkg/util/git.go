@@ -1085,17 +1085,21 @@ func DeleteBranchIn(repoRoot, branchName string) bool {
 // empty string if not found. The lookup runs against repoRoot, never the
 // process's current directory, so it gives the same answer whether the caller
 // runs inside the repository (a local CLI) or outside it (a runtime broker).
+// The lookup runs through the host-git door with the linked-checkout config
+// policy, so a repository whose config the policy refuses yields an error.
 func FindWorktreeByBranchIn(repoRoot, branchName string) (string, error) {
 	if repoRoot == "" {
 		return "", fmt.Errorf("find worktree for branch %q: no repository directory given", branchName)
 	}
-	cmd := hostGit("-C", repoRoot, "worktree", "list", "--porcelain")
-	output, err := cmd.Output()
-	if err != nil {
-		return "", err
+	res := RunHostGit(context.Background(), repoRoot, hostGitLookupOptions, "worktree", "list", "--porcelain")
+	if res.Err != nil {
+		return "", res.Err
+	}
+	if res.ExitCode != 0 {
+		return "", fmt.Errorf("git worktree list: git exited with code %d", res.ExitCode)
 	}
 
-	blocks := strings.Split(string(output), "\n\n")
+	blocks := strings.Split(string(res.Stdout), "\n\n")
 	targetRef := "refs/heads/" + branchName
 
 	for _, block := range blocks {
@@ -1121,9 +1125,21 @@ func FindWorktreeByBranchIn(repoRoot, branchName string) (string, error) {
 	return "", nil
 }
 
+// splitPorcelainRecords splits git porcelain-format output into its
+// blank-line-separated records, normalizing CRLF line endings to LF first.
+// A "\r\n\r\n" blank-line separator contains no "\n\n" substring (the two
+// newlines have a "\r" between them), so splitting on "\n\n" without this
+// normalization would silently fail to separate records at all when git's
+// output uses CRLF, and a surviving "\r" on a "worktree <path>" line would
+// end up as a trailing byte on the parsed path.
+func splitPorcelainRecords(output string) []string {
+	normalized := strings.ReplaceAll(output, "\r\n", "\n")
+	return strings.Split(normalized, "\n\n")
+}
+
 // IsRegisteredWorktree reports whether path is one of the worktrees git
 // itself has registered for the repository at repoRoot, via
-// `git -C repoRoot worktree list --porcelain`. Matching is by resolved
+// `git worktree list --porcelain` run in repoRoot. Matching is by resolved
 // (symlink-free) equality against each registered worktree path — not a
 // path-prefix guess — because `git worktree add` accepts any destination
 // the caller names and there is no fixed location every worktree must live
@@ -1139,19 +1155,9 @@ func FindWorktreeByBranchIn(repoRoot, branchName string) (string, error) {
 // A failure listing worktrees (repoRoot is not a git repository, git is
 // unavailable, and so on) returns (false, err). Callers must treat that as
 // "membership could not be verified," never as "verified true" — this
-// function does not fail open.
-// splitPorcelainRecords splits git porcelain-format output into its
-// blank-line-separated records, normalizing CRLF line endings to LF first.
-// A "\r\n\r\n" blank-line separator contains no "\n\n" substring (the two
-// newlines have a "\r" between them), so splitting on "\n\n" without this
-// normalization would silently fail to separate records at all when git's
-// output uses CRLF, and a surviving "\r" on a "worktree <path>" line would
-// end up as a trailing byte on the parsed path.
-func splitPorcelainRecords(output string) []string {
-	normalized := strings.ReplaceAll(output, "\r\n", "\n")
-	return strings.Split(normalized, "\n\n")
-}
-
+// function does not fail open. The listing runs through the host-git door
+// with the linked-checkout config policy, so a repository whose config the
+// policy refuses yields an error.
 func IsRegisteredWorktree(repoRoot, path string) (bool, error) {
 	resolvedPath, err := filepath.EvalSymlinks(path)
 	if err != nil {
@@ -1167,11 +1173,14 @@ func IsRegisteredWorktree(repoRoot, path string) (bool, error) {
 	}
 	worktreesDir := filepath.Join(resolvedCommonDir, "worktrees")
 
-	cmd := hostGit("-C", repoRoot, "worktree", "list", "--porcelain")
-	output, err := cmd.Output()
-	if err != nil {
-		return false, fmt.Errorf("git worktree list: %w", err)
+	res := RunHostGit(context.Background(), repoRoot, hostGitLookupOptions, "worktree", "list", "--porcelain")
+	if res.Err != nil {
+		return false, fmt.Errorf("git worktree list: %w", res.Err)
 	}
+	if res.ExitCode != 0 {
+		return false, fmt.Errorf("git worktree list: git exited with code %d", res.ExitCode)
+	}
+	output := res.Stdout
 
 	// Porcelain records are separated by a blank line; each holds a
 	// "worktree <path>" line and, for one that git considers a candidate
@@ -1290,15 +1299,25 @@ func isLinkedWorktreeOf(wtPath, worktreesDir string) bool {
 
 // BranchExistsIn returns true if the branch exists in the repository at
 // repoRoot. Like FindWorktreeByBranchIn, it never consults the process's
-// current directory; an empty repoRoot reports false.
+// current directory; an empty repoRoot reports false. The lookup runs
+// through the host-git door with the linked-checkout config policy, so a
+// repository whose config the policy refuses reports false.
 func BranchExistsIn(repoRoot, branchName string) bool {
 	if repoRoot == "" {
 		return false
 	}
-	cmd := hostGit("-C", repoRoot, "show-ref", "--verify", "--quiet", "refs/heads/"+branchName)
-	err := cmd.Run()
-	return err == nil
+	res := RunHostGit(context.Background(), repoRoot, hostGitLookupOptions, "show-ref", "--verify", "--quiet", "refs/heads/"+branchName)
+	return res.Err == nil && res.ExitCode == 0
 }
+
+// hostGitLookupOptions are the door options for the read-only worktree and
+// branch lookups (FindWorktreeByBranchIn, IsRegisteredWorktree,
+// BranchExistsIn). These read the user's own checkout, or a Scion-managed
+// repository's root, before or outside any agent, so they use the
+// linked-checkout list, as base-repository reads before an agent exists do.
+// The audience is remote because runtime broker callers reach them, so a
+// policy refusal names no host path; callers add their own context.
+var hostGitLookupOptions = HostGitOptions{Policy: RepoPolicyLinked, Audience: AudienceRemote}
 
 // GetGitRemote returns the origin remote URL of the current repository.
 // Returns empty string if not in a git repo or no origin remote exists.
