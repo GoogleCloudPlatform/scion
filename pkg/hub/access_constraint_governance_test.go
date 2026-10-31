@@ -1238,6 +1238,7 @@ func TestGovernance_WindowChangeNeedsRelaxationAuthority(t *testing.T) {
 		{"notBefore added", window{expiresAt: at(72 * time.Hour)}, window{notBefore: at(24 * time.Hour), expiresAt: at(72 * time.Hour)}},
 		{"widened", window{notBefore: at(time.Hour), expiresAt: at(48 * time.Hour)}, window{notBefore: at(time.Hour), expiresAt: at(96 * time.Hour)}},
 		{"removed", window{notBefore: at(time.Hour), expiresAt: at(48 * time.Hour)}, window{}},
+		{"shifted", window{notBefore: at(time.Hour), expiresAt: at(48 * time.Hour)}, window{notBefore: at(24 * time.Hour), expiresAt: at(96 * time.Hour)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			name := "gov-window-" + strings.ReplaceAll(tc.name, " ", "-")
@@ -1295,6 +1296,76 @@ func TestGovernance_WindowChangeNeedsRelaxationAuthority(t *testing.T) {
 			assert.True(t, timeBoundEqual(got.ExpiresAt, tc.proposed.expiresAt), "expiresAt")
 		})
 	}
+}
+
+// TestGovernance_WindowSubSecondChange pins how time-window bounds are
+// compared: exactly, with no rounding. A session update that echoes the
+// stored window as read back from the store (sub-second instants included)
+// does not change the window and needs no relaxation authority; moving
+// ExpiresAt by one millisecond is a window change and does.
+func TestGovernance_WindowSubSecondChange(t *testing.T) {
+	gs, ps, _, s := govTestSetup(t)
+	ctx := context.Background()
+
+	partialID := pvSeedUser(t, s, "gov-window-subsec-partial")
+	partialRD := createTestRoleDefinition(t, s, "partial-admin-role-window-subsec", store.RoleScopeSystem,
+		[]string{PermissionConstraintAdmin, "agent.read", "agent.create"})
+	pvSeedRoleBinding(t, s, partialRD.ID, "user", partialID, store.RoleScopeSystem, "")
+	fullID := govSeedAdminUser(t, s, "gov-window-subsec-full")
+	userID := govSeedNonAdminUser(t, s, "gov-window-subsec-target")
+
+	expiresAt := gs.nowFunc().UTC().Truncate(time.Second).Add(72*time.Hour + 250*time.Millisecond)
+	draft := func(purpose string, expires *time.Time) *store.AccessConstraint {
+		return &store.AccessConstraint{
+			Name:                 "gov-window-subsec",
+			SubjectKind:          store.ConstraintSubjectPrincipal,
+			SubjectPrincipalType: pvStrPtr("user"),
+			SubjectPrincipalID:   pvStrPtr(userID),
+			ScopeType:            store.RoleScopeSystem,
+			MaximumPermissions:   []string{"agent.read", "agent.delete"},
+			ExpiresAt:            expires,
+			Purpose:              purpose,
+			CreatedBy:            fullID,
+		}
+	}
+	created := govCreateAndCommit(t, gs, ps, draft("window sub-second", &expiresAt), pvTestActor(fullID))
+	require.NotNil(t, created.ExpiresAt)
+	require.True(t, created.ExpiresAt.Equal(expiresAt), "the store keeps the sub-second bound: got %v", *created.ExpiresAt)
+
+	commit := func(actorID string, c *store.AccessConstraint, proposed *store.AccessConstraint) (*store.AccessConstraint, error) {
+		t.Helper()
+		proposed.ID = c.ID
+		preview, err := ps.GeneratePreview(ctx, PreviewRequest{
+			Operation: "update", Draft: proposed, ConstraintID: c.ID, BaseRevision: c.Revision, Actor: pvTestActor(actorID),
+		})
+		require.NoError(t, err)
+		_, err = gs.CommitBoundaryChange(ctx, CommitRequest{
+			Operation: "update", Draft: proposed, ConstraintID: c.ID, BaseRevision: c.Revision,
+			PreviewToken: preview.PreviewToken, Actor: pvTestActor(actorID),
+		})
+		if err != nil {
+			return nil, err
+		}
+		got, getErr := s.GetAccessConstraint(ctx, c.ID)
+		require.NoError(t, getErr)
+		return got, nil
+	}
+
+	// Echo the stored window: not a window change, so the partial admin commits.
+	got, err := commit(partialID, created, draft("purpose edited", created.ExpiresAt))
+	require.NoError(t, err, "echoing the stored sub-second window is not a window change")
+	require.True(t, got.ExpiresAt.Equal(expiresAt))
+
+	// Move ExpiresAt by one millisecond: a window change.
+	moved := got.ExpiresAt.Add(time.Millisecond)
+	_, err = commit(partialID, got, draft("purpose edited", &moved))
+	var ge *GovernanceError
+	require.ErrorAs(t, err, &ge, "a one-millisecond move is a window change")
+	assert.Equal(t, ErrCodeInsufficientRelaxationAuthority, ge.Code)
+
+	got, err = commit(fullID, got, draft("purpose edited", &moved))
+	require.NoError(t, err, "the full admin moves the bound")
+	assert.True(t, got.ExpiresAt.Equal(moved), "got %v, want %v", *got.ExpiresAt, moved)
 }
 
 // ---------------------------------------------------------------------------

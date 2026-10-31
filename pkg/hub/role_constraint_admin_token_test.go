@@ -928,11 +928,11 @@ func TestConstraintRelaxToken_SessionOnly(t *testing.T) {
 
 // TestConstraintWindowToken_NeedsRelaxationAuthority pins that a token
 // update changing a constraint's time window needs relaxation authority over
-// the stored constraint's maximum permissions: a widened window is refused
-// with insufficient_relaxation_authority when the token does not carry
-// agent:read and admitted when it does, and the constraint is kept as stored
-// on refusal. A window added by token stays session only even with the
-// authority.
+// the stored constraint's maximum permissions: a widened or removed window is
+// refused with insufficient_relaxation_authority when the token does not
+// carry agent:read and admitted when it does, and the constraint is kept as
+// stored on refusal. A window added by token stays session only even with
+// the authority.
 func TestConstraintWindowToken_NeedsRelaxationAuthority(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -948,29 +948,41 @@ func TestConstraintWindowToken_NeedsRelaxationAuthority(t *testing.T) {
 		return &v
 	}
 	stored := &constraintConditionReq{NotBefore: at(time.Hour), ExpiresAt: at(48 * time.Hour)}
-	widened := &constraintConditionReq{NotBefore: at(time.Hour), ExpiresAt: at(96 * time.Hour)}
+	for _, tc := range []struct {
+		name     string
+		proposed *constraintConditionReq
+	}{
+		{"widened", &constraintConditionReq{NotBefore: at(time.Hour), ExpiresAt: at(96 * time.Hour)}},
+		{"removed", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var nb, ea *time.Time
+			if tc.proposed != nil {
+				nb, ea = tc.proposed.NotBefore, tc.proposed.ExpiresAt
+			}
+			c := rcaCreateConstraintWindow(t, srv, s, session, "rca-cw-"+tc.name, subject.ID, stored, "agent.read")
+			rec := rcaUpdateConstraintWindow(t, srv, without, c, subject.ID, tc.proposed, "agent.read")
+			require.Equal(t, http.StatusForbidden, rec.Code, "%s window without agent:read: %s", tc.name, rec.Body.String())
+			var errResp ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+			assert.Equal(t, ErrCodeInsufficientRelaxationAuthority, errResp.Error.Code)
+			got, err := s.GetAccessConstraint(ctx, c.ID)
+			require.NoError(t, err)
+			assert.Equal(t, c.Revision, got.Revision, "the refused update changes nothing")
+			rcaRequireWindow(t, got, c.NotBefore, c.ExpiresAt)
 
-	c := rcaCreateConstraintWindow(t, srv, s, session, "rca-cw-widen", subject.ID, stored, "agent.read")
-	rec := rcaUpdateConstraintWindow(t, srv, without, c, subject.ID, widened, "agent.read")
-	require.Equal(t, http.StatusForbidden, rec.Code, "widened window without agent:read: %s", rec.Body.String())
-	var errResp ErrorResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
-	assert.Equal(t, ErrCodeInsufficientRelaxationAuthority, errResp.Error.Code)
-	got, err := s.GetAccessConstraint(ctx, c.ID)
-	require.NoError(t, err)
-	assert.Equal(t, c.Revision, got.Revision, "the refused update changes nothing")
-	rcaRequireWindow(t, got, c.NotBefore, c.ExpiresAt)
-
-	rec = rcaUpdateConstraintWindow(t, srv, with, got, subject.ID, widened, "agent.read")
-	require.Equal(t, http.StatusOK, rec.Code, "widened window with agent:read: %s", rec.Body.String())
-	got, err = s.GetAccessConstraint(ctx, c.ID)
-	require.NoError(t, err)
-	rcaRequireWindow(t, got, widened.NotBefore, widened.ExpiresAt)
+			rec = rcaUpdateConstraintWindow(t, srv, with, got, subject.ID, tc.proposed, "agent.read")
+			require.Equal(t, http.StatusOK, rec.Code, "%s window with agent:read: %s", tc.name, rec.Body.String())
+			got, err = s.GetAccessConstraint(ctx, c.ID)
+			require.NoError(t, err)
+			rcaRequireWindow(t, got, nb, ea)
+		})
+	}
 
 	added := rcaCreateConstraint(t, srv, s, session, "rca-cw-added", subject.ID, "agent.read")
-	rec = rcaUpdateConstraintWindow(t, srv, with, added, subject.ID, &constraintConditionReq{ExpiresAt: at(72 * time.Hour)}, "agent.read")
+	rec := rcaUpdateConstraintWindow(t, srv, with, added, subject.ID, &constraintConditionReq{ExpiresAt: at(72 * time.Hour)}, "agent.read")
 	requireSessionOnlyRefusal(t, rec, authzop.ReasonGovernancePending, "window added by token")
-	got, err = s.GetAccessConstraint(ctx, added.ID)
+	got, err := s.GetAccessConstraint(ctx, added.ID)
 	require.NoError(t, err)
 	rcaRequireWindow(t, got, nil, nil)
 }
@@ -1030,7 +1042,7 @@ func TestConstraintCommit_AppliesTokenSelectors(t *testing.T) {
 	relax := func(credential Identity) error {
 		return srv.governanceService.checkRelaxationAuthority(ctx, CommitRequest{
 			Operation: "delete", ConstraintID: existing.ID, Actor: actor, Credential: credential,
-		}, store.RoleScopeSystem, "")
+		}, existing, store.RoleScopeSystem, "")
 	}
 	err = relax(token("access_constraint:admin"))
 	require.ErrorAs(t, err, &ge, "a token credential without agent:read")
