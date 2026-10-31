@@ -36,17 +36,23 @@ func TestSenderTimezone_NativeChatSend(t *testing.T) {
 	require.NoError(t, f.wcs.UpdateTopic(context.Background(), f.topicA, TopicUpdate{DefaultAgent: &f.target.Slug}))
 	agentDM := dmKeyFor(t, "user", f.ua.ID, "agent", f.target.ID)
 
-	for _, key := range []string{agentDM, f.topicA} {
+	for route, key := range map[string]string{"agent DM": agentDM, "topic": f.topicA} {
+		content := "hello via " + route
+		before := len(f.disp.getCalls())
 		got := f.send(t, f.ua, key, map[string]interface{}{
-			"content":  "hello",
+			"content":  content,
 			"metadata": map[string]string{messages.MetadataSenderTimezone: "Pacific/Fake"},
 		})
-		require.Equal(t, http.StatusCreated, got.status, "%s: %s", key, got.body)
+		require.Equal(t, http.StatusCreated, got.status, "%s: %s", route, got.body)
+		require.Greater(t, len(f.disp.getCalls()), before, "%s: the send reached the agent", route)
 		sm := f.lastDispatch(t, f.target).StructuredMessage
-		require.NotNil(t, sm, key)
-		assert.Equal(t, "Asia/Tokyo", sm.Metadata[messages.MetadataSenderTimezone], key)
-		assert.NotContains(t, sm.DeliveryText, "Pacific/Fake", key)
-		assert.NotContains(t, messages.FormatForDelivery(sm), "Pacific/Fake", key)
+		require.NotNil(t, sm, route)
+		require.Equal(t, content, sm.Msg, "%s: this route's own dispatch", route)
+		assert.Equal(t, "Asia/Tokyo", sm.Metadata[messages.MetadataSenderTimezone], route)
+		require.NotEmpty(t, sm.DeliveryText, "%s: the envelope switch is on", route)
+		assert.Contains(t, sm.DeliveryText, `"sender_timezone": "Asia/Tokyo"`, route)
+		assert.NotContains(t, sm.DeliveryText, "Pacific/Fake", route)
+		assert.NotContains(t, messages.FormatForDelivery(sm), "Pacific/Fake", route)
 	}
 }
 
