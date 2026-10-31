@@ -19,6 +19,8 @@ import { setupChatMobileMocks, PROJECT_A } from './mock-api.js';
 
 /**
  * Install the mocks and land on the rail for PROJECT_A (mobilePanel defaults to 'left').
+ * On desktop, return once PROJECT_A's #general has opened on the page element
+ * that stays, so callers never measure an element the router is about to replace.
  *
  * `overrideMocks`, when given, runs after the shared mocks are installed and
  * before navigation, so any route it adds takes precedence over the shared
@@ -37,10 +39,75 @@ export async function openChatRail(
   // opens #general with a navigateTo, which does replace the page element.
   // Waiting for the URL to settle to the readable form first keeps callers
   // off the page before the space has opened.
+  if (isWideLayout(page)) {
+    await waitForDesktopGeneralThread(page);
+    return;
+  }
   await page.waitForURL(/\/chat\/[^/]+$/, { timeout: 15_000 });
-  await expect(page.locator('.space-header', { hasText: PROJECT_A.name })).toBeVisible({
-    timeout: 15_000,
+  await expect(
+    page.locator('.space-header', { hasText: PROJECT_A.name }),
+    'the space header shows on the rail'
+  ).toBeVisible({ timeout: 15_000 });
+}
+
+/**
+ * The chat page's phone breakpoint: MOBILE_BREAKPOINT_PX in
+ * src/components/pages/chat.ts, where a width at or below it is a phone.
+ */
+const CHAT_MOBILE_BREAKPOINT_PX = 768;
+
+/** Is the viewport above the chat page's phone breakpoint? */
+function isWideLayout(page: Page): boolean {
+  return (page.viewportSize()?.width ?? 0) > CHAT_MOBILE_BREAKPOINT_PX;
+}
+
+/**
+ * A thread URL in PROJECT_A: /chat/{slug}/{thread id}. Anchored on the slug
+ * because the legacy landing URL /chat/space/{id} has the same shape.
+ */
+const THREAD_PATH = new RegExp(`^/chat/${PROJECT_A.slug}/[^/?#]+$`);
+
+/** The path the router last rendered a page for, without query or hash. */
+async function renderedPath(page: Page): Promise<string> {
+  return page.evaluate(() => {
+    const shell = document.querySelector('scion-chat-shell') as unknown as {
+      currentPath?: string;
+    } | null;
+    return (shell?.currentPath ?? '').split(/[?#]/)[0];
   });
+}
+
+/**
+ * Wait for the desktop landing to finish opening #general.
+ *
+ * chat.ts's selectSpaceBySlug opens #general on the page element that
+ * handled the legacy URL, then calls navigateTo with the thread URL. The
+ * router pushes the URL first and swaps in a new page element after an
+ * await, so the URL and the thread header can both show before the swap.
+ * The shell's currentPath is set in the same step as the swap, so once it
+ * names the thread the page in the DOM is the one that stays.
+ */
+async function waitForDesktopGeneralThread(page: Page): Promise<void> {
+  await expect
+    .poll(() => new URL(page.url()).pathname, {
+      message: 'the URL names a thread in the space',
+      timeout: 15_000,
+    })
+    .toMatch(THREAD_PATH);
+  await expect
+    .poll(() => renderedPath(page), {
+      message: 'the router renders the thread URL on a new page element',
+      timeout: 15_000,
+    })
+    .toMatch(THREAD_PATH);
+  await expect(
+    page.locator('.space-header', { hasText: PROJECT_A.name }),
+    'the space header shows on the new page element'
+  ).toBeVisible({ timeout: 15_000 });
+  await expect(
+    page.locator('.v2-thread-header'),
+    'the #general thread header shows on the new page element'
+  ).toBeVisible({ timeout: 15_000 });
 }
 
 /**
