@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -125,4 +126,79 @@ func TestRelayProjectPathRefusal_ProviderReaders(t *testing.T) {
 		assert.False(t, srv.relayProjectPathRefusal(userCtx(alice), w, agent, other))
 		assert.False(t, strings.Contains(w.Body.String(), projectPathNotInitializedErrorCode))
 	})
+}
+
+// TestDispatchFailureText_ProjectPathNotInitialized: the recorded text of a
+// provision-only create warning or a reincarnation state carries the code and
+// the hub's path-free text, never the broker's message.
+func TestDispatchFailureText_ProjectPathNotInitialized(t *testing.T) {
+	got := dispatchFailureText(brokerProjectPathRefusal())
+	assert.Contains(t, got, projectPathNotInitializedErrorCode)
+	assert.Contains(t, got, projectPathRefusalGeneric)
+	assert.NotContains(t, got, projectPathLocalPath)
+	assert.NotContains(t, got, projectPathResolvedTarget)
+}
+
+// TestCallerMayReadProviders_AgentCallers: an agent caller passes the
+// reader gate only as handleProjectProviders admits it, so an agent of
+// another project, or one whose standing fails, never sees the path.
+func TestCallerMayReadProviders_AgentCallers(t *testing.T) {
+	srv, s, alice, _, project := setupTemplateAuthzTest(t)
+	ctx := context.Background()
+	other := contextWithIdentity(context.Background(), newTestAgentIdentity(tid("pp-other-agent"), tid("pp-other-project"), nil))
+	assert.False(t, srv.callerMayReadProviders(other, project.ID), "an agent of another project")
+	missing := contextWithIdentity(context.Background(), newTestAgentIdentity(tid("pp-missing-agent"), project.ID, nil))
+	assert.False(t, srv.callerMayReadProviders(missing, project.ID), "an agent whose standing cannot be established")
+
+	// A same-project agent out of standing: held. The hold is checked before
+	// the root user's admission, so the fixture pins the hold as the cause.
+	heldID := tid("pp-held-agent")
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: heldID, Slug: "pp-held-agent", Name: "pp-held-agent",
+		ProjectID: project.ID, OwnerID: alice.ID, Created: time.Now(), Updated: time.Now(),
+	}))
+	_, err := s.CreateAgentHolds(ctx, []*store.AgentHold{{
+		AgentID: heldID, ProjectID: project.ID, Cause: store.AgentHoldCauseOwnerAccessEnded,
+		RootPrincipalType: store.AgentHoldRootUser, RootPrincipalID: alice.ID,
+		Trigger: store.MembershipLossTriggerMemberRemove, ActorKind: "system", ActorID: "hub", CorrelationID: "test",
+	}})
+	require.NoError(t, err)
+	require.Equal(t, standingReasonAgentHeld, standingReason(srv.agentStanding(ctx, heldID)), "fixture: the agent is held")
+	brokerID := tid("pp-held-broker")
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID: brokerID, Name: "pp-held-broker", Slug: "pp-held-broker", Status: store.BrokerStatusOnline,
+		Created: time.Now(), Updated: time.Now(),
+	}))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: project.ID, BrokerID: brokerID, BrokerName: "pp-held-broker", LocalPath: projectPathLocalPath,
+	}))
+	held := contextWithIdentity(ctx, newTestAgentIdentity(heldID, project.ID, nil))
+	assert.False(t, srv.callerMayReadProviders(held, project.ID), "a same-project agent out of standing")
+	w := httptest.NewRecorder()
+	require.True(t, srv.relayProjectPathRefusal(held, w, &store.Agent{ID: heldID, ProjectID: project.ID, RuntimeBrokerID: brokerID}, brokerProjectPathRefusal()))
+	assert.NotContains(t, requireProjectPathRefusal(t, w), projectPathLocalPath, "a held agent gets no path")
+}
+
+// TestAgentLifecycle_StartRelaysProjectPathRefusal pins the call site: a
+// start or restart whose broker answers 409 project_path_not_initialized
+// reaches the client as 409 with the code through relayProjectPathRefusal
+// (the provider path appears only through it), not as a 502, and without
+// the broker's own text.
+func TestAgentLifecycle_StartRelaysProjectPathRefusal(t *testing.T) {
+	for _, action := range []string{"start", "restart"} {
+		t.Run(action, func(t *testing.T) {
+			disp := &skillFailDispatcher{startErr: brokerProjectPathRefusal()}
+			srv, s, project := setupCreateAgentServer(t, disp)
+			agent := createLifecycleTestAgent(t, s, project, "pp-lc-"+action, state.PhaseStopped)
+			provider, err := s.GetProjectProvider(context.Background(), project.ID, agent.RuntimeBrokerID)
+			require.NoError(t, err)
+			require.NotEmpty(t, provider.LocalPath)
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/"+action, nil)
+
+			body := requireProjectPathRefusal(t, rec)
+			assert.Contains(t, body, provider.LocalPath, "the provider reader sees the stored LocalPath")
+			assert.NotContains(t, body, projectPathLocalPath, "the broker's own text is not relayed")
+		})
+	}
 }

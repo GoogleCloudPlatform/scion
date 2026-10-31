@@ -2900,11 +2900,7 @@ func (s *Server) createAgentInProject(
 					// as a full create does.
 					s.agentLifecycleLog.Warn("Provision-only create failed: agent token not issued",
 						"agent_id", agent.ID, "agent", agent.Name, "broker", agent.RuntimeBrokerID, "error", err)
-					failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() {
-						if !s.relayProjectPathRefusal(ctx, w, agent, err) {
-							dispatchCreateErrorResponse(w, err, agent.ID)
-						}
-					})
+					failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
 					return
 				}
 				if isSkillResolutionDispatchError(err) {
@@ -2917,11 +2913,7 @@ func (s *Server) createAgentInProject(
 					// provision failures stay warnings.
 					s.agentLifecycleLog.Warn("Provision-only create failed: required skill could not be resolved",
 						"agent_id", agent.ID, "agent", agent.Name, "broker", agent.RuntimeBrokerID, "error", err)
-					failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() {
-						if !s.relayProjectPathRefusal(ctx, w, agent, err) {
-							dispatchCreateErrorResponse(w, err, agent.ID)
-						}
-					})
+					failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
 					return
 				}
 				// A Kubernetes identity mapping refusal reads as the

@@ -96,15 +96,20 @@ func (s *Server) projectPathRefusalFor(ctx context.Context, agent *store.Agent) 
 }
 
 // callerMayReadProviders reports whether the caller in ctx passes the check
-// that gates reading projectID's provider records (read access to the
-// project, as handleProjectProviders checks it).
+// that gates reading projectID's provider records, as handleProjectProviders
+// checks it: an agent caller's project and standing, then read access to the
+// project.
 func (s *Server) callerMayReadProviders(ctx context.Context, projectID string) bool {
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil || projectID == "" || s.authzService == nil {
 		return false
 	}
-	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil && agentIdent.ProjectID() != projectID {
-		return false
+	// An agent caller passes only as handleProjectProviders admits it: its
+	// own project, and its standing (agentStanding) intact.
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		if agentIdent.ProjectID() != projectID || s.agentStanding(ctx, agentIdent.ID()) != nil {
+			return false
+		}
 	}
 	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil || project == nil {
