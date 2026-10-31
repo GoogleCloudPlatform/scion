@@ -40,6 +40,11 @@ import (
 // together.
 var placementSections = []string{"profiles", "runtimes"}
 
+// placementSnapshotHook, when set (tests only), runs right after a
+// placement save or reset has read the guard revisions and the snapshot
+// its checks use.
+var placementSnapshotHook func()
+
 // rejectRepeatedPlacementSections writes a 400 validation_failed when the
 // JSON object body sends runtimes or profiles under a name that matches
 // only without regard to case: the typed decode would still read it, so
@@ -87,9 +92,9 @@ func rejectRepeatedPlacementSections(w http.ResponseWriter, rawBody []byte) (don
 }
 
 // placementPair is the plan of a save that sends runtimes or profiles:
-// whether it does, and for a section it leaves out, the revision of the
-// value the save checks used (the cached one, ops.Snapshot; 0 when there
-// is no row), which the write compares.
+// whether it does, and for a section it leaves out, the cached revision
+// read before the snapshot the save checks use (0 when there is no row),
+// which the write compares: a value newer than the one read answers 409.
 type placementPair struct {
 	active bool
 	reads  map[string]int64
@@ -150,9 +155,11 @@ func placementReadConflicts(ctx context.Context, ops *OperationalSettings, reads
 // (DELETE /api/v1/admin/server-config/sections/{name}). The placement save
 // checks run on the pair the reset leaves (the bootstrap value of the
 // section and the current other section): a problem the reset introduces
-// answers 422 naming the section. The row is then deleted in a guarded
-// transaction that also compares the other section's revision, answering
-// 409 on a change. ok is false when an error response has been written.
+// answers 422 in the form of a save's (the first finding's path in field,
+// every finding in errors). The row is then deleted in a guarded
+// transaction that also compares the other section's revision, read
+// before the snapshot the checks use, answering 409 on a change. ok is
+// false when an error response has been written.
 func (s *Server) resetPlacementSection(ctx context.Context, w http.ResponseWriter, ops *OperationalSettings, section string) bool {
 	row, err := ops.store.GetHubSetting(ctx, section)
 	if errors.Is(err, store.ErrNotFound) {
@@ -164,24 +171,28 @@ func (s *Server) resetPlacementSection(ctx context.Context, w http.ResponseWrite
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to reset section", nil)
 		return false
 	}
-	snap := ops.Snapshot()
-	boot, _ := config.OverlayMapSections(nil, ops.bootstrapKoanf)
-	runtimes, profiles := snap.Runtimes, snap.Profiles
 	other := "profiles"
 	if section == "profiles" {
-		profiles, other = boot.Profiles, "runtimes"
+		other = "runtimes"
+	}
+	reads := map[string]int64{other: ops.SectionRevision(other)}
+	snap := ops.Snapshot()
+	if placementSnapshotHook != nil {
+		placementSnapshotHook()
+	}
+	boot, _ := config.OverlayMapSections(nil, ops.bootstrapKoanf)
+	runtimes, profiles := snap.Runtimes, snap.Profiles
+	if section == "profiles" {
+		profiles = boot.Profiles
 	} else {
 		runtimes = boot.Runtimes
 	}
 	errs, _ := config.RuntimeSaveChecks(snap.Runtimes, runtimes, snap.Profiles, profiles)
 	pairErrs, _ := config.PlacementPairSaveChecks(snap.Runtimes, runtimes, snap.Profiles, profiles)
 	if errs = append(errs, pairErrs...); len(errs) > 0 {
-		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-			fmt.Sprintf("Resetting %s would leave Kubernetes placement in runtimes or profiles not valid (%d findings); fix the named settings first", section, len(errs)),
-			map[string]interface{}{"section": section, "errors": errs})
+		writeResourceQuantityError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, errs)
 		return false
 	}
-	reads := map[string]int64{other: ops.SectionRevision(other)}
 	err = ops.deleteGuarded(ctx, section, row.Revision, reads)
 	switch {
 	case errors.Is(err, store.ErrRevisionConflict):

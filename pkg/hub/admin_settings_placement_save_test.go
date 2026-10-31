@@ -299,8 +299,9 @@ func resetPlacementSectionDB(srv *Server, section string) *httptest.ResponseReco
 
 // Resetting runtimes or profiles runs the placement save checks on the
 // pair the reset leaves: a reset that would leave a profile's placement
-// without its runtime entry is refused with 422 naming the section, and
-// the row stays; a reset that leaves a valid pair removes the row.
+// without its runtime entry is refused with a 422 in the form of a save's
+// (the finding's path in field, every finding in errors), and the row
+// stays; a reset that leaves a valid pair removes the row.
 func TestResetPlacementSectionChecksPair(t *testing.T) {
 	tempSettingsHome(t)
 	srv, fake, ops := newTestDBServer(t)
@@ -315,18 +316,16 @@ func TestResetPlacementSectionChecksPair(t *testing.T) {
 		Error struct {
 			Code    string `json:"code"`
 			Details struct {
-				Section string `json:"section"`
-				Errors  []struct {
-					Path string `json:"path"`
-				} `json:"errors"`
+				Field  string   `json:"field"`
+				Errors []string `json:"errors"`
 			} `json:"details"`
 		} `json:"error"`
 	}
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), rr.Body.String())
 	assert.Equal(t, ErrCodeValidationError, resp.Error.Code)
-	assert.Equal(t, "runtimes", resp.Error.Details.Section)
+	assert.Equal(t, "profiles.fast.runtime", resp.Error.Details.Field)
 	require.Len(t, resp.Error.Details.Errors, 1, rr.Body.String())
-	assert.Equal(t, "profiles.fast.runtime", resp.Error.Details.Errors[0].Path)
+	assert.Contains(t, resp.Error.Details.Errors[0], "profiles.fast.runtime")
 	requirePlacementRow(t, fake, "runtimes", 1, `{"pool-rt":{"type":"kubernetes","namespace":"agents"}}`)
 
 	// Without the profile's placement the same reset is valid.
@@ -376,4 +375,73 @@ func TestResetPlacementSectionGuardedBatchUnsupported(t *testing.T) {
 	rr := resetPlacementSectionDB(srv, "profiles")
 	require.Equal(t, http.StatusInternalServerError, rr.Code, rr.Body.String())
 	requirePlacementRow(t, fake, "profiles", 1, `{"plain":{"runtime":"k8s"}}`)
+}
+
+// setPlacementSnapshotHook sets placementSnapshotHook for one test.
+func setPlacementSnapshotHook(t *testing.T, fn func()) {
+	t.Helper()
+	old := placementSnapshotHook
+	placementSnapshotHook = fn
+	t.Cleanup(func() { placementSnapshotHook = old })
+}
+
+// writeProfilesAfterSnapshot makes another writer store profiles, and the
+// Hub cache take it, right after a save or reset took the snapshot its
+// checks use.
+func writeProfilesAfterSnapshot(t *testing.T, fake *fakeHubSettingStore, ops *OperationalSettings, doc string) {
+	t.Helper()
+	setPlacementSnapshotHook(t, func() {
+		_, err := fake.UpsertHubSetting(context.Background(), "profiles", json.RawMessage(doc), "other@example.com", -1, "managed")
+		require.NoError(t, err)
+		_, err = ops.Refresh(context.Background())
+		require.NoError(t, err)
+	})
+}
+
+// The guard revision of an omitted section is the one read before the
+// snapshot the save checks: a write landing after the snapshot (here a
+// profile placement on the runtime entry the save makes non-Kubernetes)
+// makes the save a 409 that lists the section as read, and nothing is
+// written.
+func TestPutSettingsPlacementGuardReadBeforeSnapshot(t *testing.T) {
+	tempSettingsHome(t)
+	srv, fake, ops := newTestDBServer(t)
+	seedPlacement(t, fake, ops, map[string]string{"profiles": `{"plain":{"runtime":"pool-rt"}}`})
+	writeProfilesAfterSnapshot(t, fake, ops, `{"plain":{"runtime":"pool-rt"},"late":{"runtime":"pool-rt","runtime_class_name":"gvisor"}}`)
+
+	rr := putServerConfigDB(t, srv, ops, `{"runtimes":{"pool-rt":{"type":"docker"}}}`)
+	require.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
+	var resp struct {
+		Conflicted []map[string]interface{} `json:"conflicted"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Len(t, resp.Conflicted, 2, rr.Body.String())
+	assert.Equal(t, map[string]interface{}{
+		"section": "profiles", "expected_revision": float64(1), "current_revision": float64(2), "read": true,
+	}, resp.Conflicted[1])
+	requireNoPlacementRow(t, fake, "runtimes")
+}
+
+// A reset reads the other section's guard revision before the snapshot
+// its checks use: a write landing after the snapshot (here a profile
+// placement that needs the runtime entry being reset) makes the reset a
+// 409, and the row stays.
+func TestResetPlacementSectionGuardReadBeforeSnapshot(t *testing.T) {
+	tempSettingsHome(t)
+	srv, fake, ops := newTestDBServer(t)
+	seedPlacement(t, fake, ops, map[string]string{
+		"runtimes": `{"pool-rt":{"type":"kubernetes","namespace":"agents"}}`,
+		"profiles": `{"fast":{"runtime":"pool-rt"}}`,
+	})
+	writeProfilesAfterSnapshot(t, fake, ops, `{"fast":{"runtime":"pool-rt","runtime_class_name":"gvisor"}}`)
+
+	rr := resetPlacementSectionDB(srv, "runtimes")
+	require.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
+	var resp struct {
+		Conflicted []map[string]interface{} `json:"conflicted"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Len(t, resp.Conflicted, 2, rr.Body.String())
+	assert.Equal(t, true, resp.Conflicted[1]["read"])
+	requirePlacementRow(t, fake, "runtimes", 1, `{"pool-rt":{"type":"kubernetes","namespace":"agents"}}`)
 }
