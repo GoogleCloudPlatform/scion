@@ -335,3 +335,39 @@ func TestLocalListPages(t *testing.T) {
 		t.Errorf("pages = %v, want %v", got, want)
 	}
 }
+
+// ResourceRootPaths covers every path ResourceStoragePath gives a template,
+// in every scope and with or without a hub namespace, and no workspace path.
+func TestResourceRootPaths(t *testing.T) {
+	under := func(p string, roots []string) bool {
+		for _, r := range roots {
+			if strings.HasPrefix(p, r+"/") {
+				return true
+			}
+		}
+		return false
+	}
+	if got := ResourceRootPaths("", ResourceKindTemplate); len(got) != 1 || got[0] != "templates" {
+		t.Fatalf("ResourceRootPaths(\"\", template) = %v, want [templates]", got)
+	}
+	if got := ResourceRootPaths("hub-1", ResourceKindTemplate); len(got) != 2 || got[0] != "templates" || got[1] != "hubs/hub-1/templates" {
+		t.Fatalf("ResourceRootPaths(hub-1, template) = %v, want [templates hubs/hub-1/templates]", got)
+	}
+	for _, hubID := range []string{"", "hub-1"} {
+		roots := ResourceRootPaths(hubID, ResourceKindTemplate)
+		for _, scope := range []string{"global", "project", "user", "weird"} {
+			if p := TemplateStoragePath(hubID, scope, "s-1", "t1"); !under(p, roots) {
+				t.Errorf("template path %q is not under %v", p, roots)
+			}
+		}
+		for _, p := range []string{
+			WorkspaceStoragePath(hubID, "p-1", "a-1"),
+			HarnessConfigStoragePath(hubID, "global", "", "h1"),
+			SkillStoragePath(hubID, "global", "", "s1"),
+		} {
+			if under(p, roots) {
+				t.Errorf("non-template path %q is under the template roots %v", p, roots)
+			}
+		}
+	}
+}

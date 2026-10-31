@@ -72,6 +72,7 @@ func TestProvisionAgent_ExecTemplateCacheEntryKeepsHashAndName(t *testing.T) {
 	scionDir := filepath.Join(tmpDir, "project", ".scion")
 	_ = os.MkdirAll(scionDir, 0o755)
 	ctx := api.ContextWithTemplateName(context.Background(), "plugin-template")
+	allowHydratedTemplate(t, cacheDir)
 	agentHome, _, _, err := ProvisionAgent(ctx, "exec-agent", cacheDir, "", "", scionDir, "", "", "", "")
 	if err != nil {
 		t.Fatalf("ProvisionAgent: %v", err)

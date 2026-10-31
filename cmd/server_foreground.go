@@ -4489,6 +4489,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	// hydrated over HTTP. A non-local backend is left for cache-based hydration.
 	if inMemoryCreds != nil && hubSrv != nil {
 		rhCfg.ColocatedStorage = hubSrv.GetStorage()
+		rhCfg.ColocatedHubID = hubSrv.HubID()
 	}
 
 	// In co-located mode on any DB-backed Hub, install the global settings

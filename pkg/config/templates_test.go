@@ -577,7 +577,19 @@ func TestFindTemplateInProjectPath(t *testing.T) {
 		}
 	})
 
-	t.Run("absolute path bypasses project resolution", func(t *testing.T) {
+	t.Run("absolute path outside the hydration roots is refused", func(t *testing.T) {
+		// A project-scoped lookup does not accept an arbitrary absolute
+		// directory: the request's template value is never a host path.
+		withHydrationRoots(t)
+		if _, err := FindTemplateInProjectPath(globalTplDir, projectPath); !errors.Is(err, ErrTemplateRefNotAllowed) {
+			t.Fatalf("FindTemplateInProjectPath(absolute, no roots) error = %v, want ErrTemplateRefNotAllowed", err)
+		}
+	})
+
+	t.Run("absolute path below a hydration root bypasses project resolution", func(t *testing.T) {
+		// Below a registered hydration root (the broker's template cache),
+		// an absolute directory is the template, without project lookup.
+		withHydrationRoots(t, filepath.Dir(globalTplDir))
 		tpl, err := FindTemplateInProjectPath(globalTplDir, projectPath)
 		if err != nil {
 			t.Fatalf("FindTemplateInProjectPath failed: %v", err)
@@ -2274,6 +2286,8 @@ func TestFindTemplateContentHashDirHasNoName(t *testing.T) {
 	finders := map[string]func(string) (*Template, error){
 		"FindTemplate": FindTemplate,
 		"FindTemplateInProjectPath": func(name string) (*Template, error) {
+			// root is a registered hydration root, as the broker's cache.
+			withHydrationRoots(t, root)
 			return FindTemplateInProjectPath(name, projectPath)
 		},
 	}

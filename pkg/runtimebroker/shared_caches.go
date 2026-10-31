@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 )
 
@@ -159,6 +160,8 @@ func (c *SharedCaches) forInstance(brokerID string) (fileCaches, error) {
 	if err != nil {
 		return fileCaches{}, err
 	}
+	// This broker instance's hydrated templates are written below dir.
+	config.AddTemplateHydrationRoot(dir)
 	c.instances[brokerID] = fc
 	slog.Info("Broker caches initialized", "cache", dir, "broker_id", brokerID)
 	return fc, nil
