@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
@@ -127,6 +128,7 @@ func SecretEncryptionConformance(t *testing.T, factory Factory) {
 	t.Run("PolicyFence", func(t *testing.T) { fenceConformance(t, factory(t)) })
 	t.Run("ReferenceOnlyPayload", func(t *testing.T) { refOnlyConformance(t, factory(t)) })
 	t.Run("TransitionAfterFencedWrite", func(t *testing.T) { transitionInTxConformance(t, factory(t)) })
+	t.Run("PolicyCreationAfterFencedWrite", func(t *testing.T) { policyCreationAfterWriteConformance(t, factory(t)) })
 }
 
 func scanConformance(t *testing.T, s store.Store) {
@@ -745,97 +747,78 @@ func refOnlyConformance(t *testing.T, s store.Store) {
 // with ErrPolicyTransitionAfterFencedWrite, and the transaction rolls back.
 // A transition before any fenced write, or outside a caller-supplied
 // transaction, runs.
+//
+// Every refusal subtest is self-contained: the fixtures are created before
+// the subtests, each subtest derives its transition from the current state
+// (so the transition would apply if it were not refused), uses its own keys
+// and values, and compares against a snapshot taken at its start. With the
+// refusal removed, each one therefore fails at its require.ErrorIs (the
+// transition returns nil), not at a setup step.
 func transitionInTxConformance(t *testing.T, s store.Store) {
 	ctx := context.Background()
 	const scope, scopeID = store.ScopeHub, "transition-tx-hub"
+	const valueKey, refKey = "TX_VALUE_ROW", "TX_REF_ROW"
 	const ref = "gcpsm:projects/fake/secrets/t"
-	gone := func(t *testing.T, key string) {
-		t.Helper()
-		_, err := s.GetSecret(ctx, key, scope, scopeID)
-		assert.ErrorIs(t, err, store.ErrNotFound, "the refused transaction committed its write")
-	}
 
-	t.Run("policy creation after a fenced write", func(t *testing.T) {
-		err := s.WithTx(ctx, func(tx store.Store) error {
-			if err := encCreate(ctx, tx, encSecret("TX_BEFORE_CREATE", scope, scopeID, v1Value(70), "")); err != nil {
-				return err
-			}
-			_, err := encSetPolicy(ctx, tx, 0, fencePolicy(1, "k2"))
-			return err
-		})
-		require.ErrorIs(t, err, store.ErrPolicyTransitionAfterFencedWrite)
-		_, err = s.GetEncryptionPolicy(ctx)
-		assert.ErrorIs(t, err, store.ErrNotFound, "the refused transition created the policy")
-		gone(t, "TX_BEFORE_CREATE")
-	})
-
-	t.Run("a transition before fenced writes runs", func(t *testing.T) {
-		err := s.WithTx(ctx, func(tx store.Store) error {
-			applied, err := encSetPolicy(ctx, tx, 0, fencePolicy(1, "k2"))
-			if err != nil {
-				return err
-			}
-			require.True(t, applied)
-			// The write in the same transaction sees the new policy.
-			if err := encCreate(ctx, tx, encSecret("TX_AFTER_PLAIN", scope, scopeID, "fake-plain", "")); !errors.Is(err, store.ErrEncryptionPolicyMismatch) {
-				t.Errorf("a write after the transition was not fenced by it: %v", err)
-			}
-			return encCreate(ctx, tx, encSecret("TX_AFTER_CREATE", scope, scopeID, v2Value("k2", 71), ""))
-		})
-		require.NoError(t, err)
-		got, err := s.GetEncryptionPolicy(ctx)
-		require.NoError(t, err)
-		assert.Equal(t, int64(1), got.Generation)
-		_, err = s.GetSecret(ctx, "TX_AFTER_CREATE", scope, scopeID)
-		require.NoError(t, err)
-	})
-
-	require.NoError(t, encCreate(ctx, s, encSecret("TX_REF_ROW", scope, scopeID, "", ref)))
+	applied, err := encSetPolicy(ctx, s, 0, fencePolicy(1, "k2"))
+	require.NoError(t, err)
+	require.True(t, applied)
+	require.NoError(t, encCreate(ctx, s, encSecret(valueKey, scope, scopeID, v2Value("k2", 70), "")))
+	require.NoError(t, encCreate(ctx, s, encSecret(refKey, scope, scopeID, "", ref)))
 	mig := &store.EncryptionMigration{ID: uuid.NewString(), TargetKID: "k3", State: store.EncryptionMigrationRunning}
 	require.NoError(t, encCreateMigration(ctx, s, mig))
 
-	writes := map[string]func(tx store.Store) error{
-		"CreateSecret": func(tx store.Store) error {
-			return encCreate(ctx, tx, encSecret("TX_W_CREATE", scope, scopeID, v2Value("k2", 72), ""))
+	// otherState is the migration state a transition moves to from cur.
+	otherState := func(cur store.EncryptionMigrationState) store.EncryptionMigrationState {
+		if cur == store.EncryptionMigrationRunning {
+			return store.EncryptionMigrationInterrupted
+		}
+		return store.EncryptionMigrationRunning
+	}
+
+	// Each write takes the subtest number n for its own keys and values.
+	writes := map[string]func(tx store.Store, n int) error{
+		"CreateSecret": func(tx store.Store, n int) error {
+			return encCreate(ctx, tx, encSecret(fmt.Sprintf("TX_W_CREATE_%02d", n), scope, scopeID, v2Value("k2", byte(n)), ""))
 		},
-		"UpsertSecret": func(tx store.Store) error {
-			_, err := encUpsert(ctx, tx, encSecret("TX_W_UPSERT", scope, scopeID, v2Value("k2", 73), ""))
+		"UpsertSecret": func(tx store.Store, n int) error {
+			_, err := encUpsert(ctx, tx, encSecret(fmt.Sprintf("TX_W_UPSERT_%02d", n), scope, scopeID, v2Value("k2", byte(n)), ""))
 			return err
 		},
-		"UpdateSecret": func(tx store.Store) error {
-			cur, err := tx.GetSecret(ctx, "TX_AFTER_CREATE", scope, scopeID)
+		"UpdateSecret": func(tx store.Store, n int) error {
+			cur, err := tx.GetSecret(ctx, valueKey, scope, scopeID)
 			if err != nil {
 				return err
 			}
-			cur.EncryptedValue = v2Value("k2", 74)
+			cur.EncryptedValue = v2Value("k2", byte(100+n))
 			return encUpdate(ctx, tx, cur)
 		},
-		"UpdateSecretValueIfVersion": func(tx store.Store) error {
-			cur, err := tx.GetSecret(ctx, "TX_AFTER_CREATE", scope, scopeID)
+		"UpdateSecretValueIfVersion": func(tx store.Store, n int) error {
+			cur, err := tx.GetSecret(ctx, valueKey, scope, scopeID)
 			if err != nil {
 				return err
 			}
-			_, err = encValueIfVersion(ctx, tx, cur.Key, scope, scopeID, cur.Version, v2Value("k2", 75))
+			_, err = encValueIfVersion(ctx, tx, cur.Key, scope, scopeID, cur.Version, v2Value("k2", byte(130+n)))
 			return err
 		},
-		"ReplaceSecretCiphertext": func(tx store.Store) error {
-			cur, err := tx.GetSecret(ctx, "TX_AFTER_CREATE", scope, scopeID)
+		"ReplaceSecretCiphertext": func(tx store.Store, n int) error {
+			cur, err := tx.GetSecret(ctx, valueKey, scope, scopeID)
 			if err != nil {
 				return err
 			}
-			_, err = encReplace(ctx, tx, cur.ID, cur.Version, cur.EncryptedValue, v2Value("k2", 76))
+			_, err = encReplace(ctx, tx, cur.ID, cur.Version, cur.EncryptedValue, v2Value("k2", byte(160+n)))
 			return err
 		},
-		"UpdateSecretRefIfMatches": func(tx store.Store) error {
-			cur, err := tx.GetSecret(ctx, "TX_REF_ROW", scope, scopeID)
+		"UpdateSecretRefIfMatches": func(tx store.Store, n int) error {
+			cur, err := tx.GetSecret(ctx, refKey, scope, scopeID)
 			if err != nil {
 				return err
 			}
-			_, err = tx.UpdateSecretRefIfMatches(ctx, cur.Key, scope, scopeID, ref, cur.Version, ref+"2")
+			_, err = tx.UpdateSecretRefIfMatches(ctx, cur.Key, scope, scopeID, cur.SecretRef, cur.Version, fmt.Sprintf("%s-%02d", ref, n))
 			return err
 		},
-		"a refused CreateSecret": func(tx store.Store) error {
-			err := encCreate(ctx, tx, encSecret("TX_W_REFUSED", scope, scopeID, "fake-plain", ""))
+		"a refused CreateSecret": func(tx store.Store, n int) error {
+			err := encCreate(ctx, tx, encSecret(fmt.Sprintf("TX_W_REFUSED_%02d", n), scope, scopeID, "fake-plain", ""))
 			if !errors.Is(err, store.ErrEncryptionPolicyMismatch) {
 				return err
 			}
@@ -844,66 +827,136 @@ func transitionInTxConformance(t *testing.T, s store.Store) {
 	}
 	transitions := map[string]func(tx store.Store) error{
 		"UpdateEncryptionPolicy": func(tx store.Store) error {
-			_, err := encSetPolicy(ctx, tx, 1, fencePolicy(2, "k3"))
+			cur, err := tx.GetEncryptionPolicy(ctx)
+			if err != nil {
+				return err
+			}
+			_, err = encSetPolicy(ctx, tx, cur.Generation, fencePolicy(cur.Generation+1, "k2"))
 			return err
 		},
 		"CreateEncryptionMigration": func(tx store.Store) error {
 			return encCreateMigration(ctx, tx, &store.EncryptionMigration{ID: uuid.NewString(), TargetKID: "k3", State: store.EncryptionMigrationRunning})
 		},
 		"UpdateEncryptionMigration": func(tx store.Store) error {
-			next := *mig
-			next.State = store.EncryptionMigrationInterrupted
-			_, err := encUpdateMigration(ctx, tx, &next, store.EncryptionMigrationRunning)
+			cur, err := tx.GetEncryptionMigration(ctx, mig.ID)
+			if err != nil {
+				return err
+			}
+			next := *cur
+			next.State = otherState(cur.State)
+			_, err = encUpdateMigration(ctx, tx, &next, cur.State)
 			return err
 		},
 	}
-	writeNames := sortedKeys(writes)
+
+	n := 0
 	for _, tn := range sortedKeys(transitions) {
-		for _, wn := range writeNames {
-			tn, wn := tn, wn
+		for _, wn := range sortedKeys(writes) {
+			n++
+			tn, wn, n := tn, wn, n
 			t.Run(tn+" after "+wn, func(t *testing.T) {
-				refRow, err := s.GetSecret(ctx, "TX_REF_ROW", scope, scopeID)
+				policy, err := s.GetEncryptionPolicy(ctx)
 				require.NoError(t, err)
-				valueRow, err := s.GetSecret(ctx, "TX_AFTER_CREATE", scope, scopeID)
+				m, err := s.GetEncryptionMigration(ctx, mig.ID)
 				require.NoError(t, err)
+				var rows []*store.Secret
+				for _, key := range []string{valueKey, refKey} {
+					row, err := s.GetSecret(ctx, key, scope, scopeID)
+					require.NoError(t, err)
+					rows = append(rows, row)
+				}
+
 				err = s.WithTx(ctx, func(tx store.Store) error {
-					if err := writes[wn](tx); err != nil {
+					if err := writes[wn](tx, n); err != nil {
 						return err
 					}
 					return transitions[tn](tx)
 				})
 				require.ErrorIs(t, err, store.ErrPolicyTransitionAfterFencedWrite)
+
 				// Nothing committed: the policy, the migration and the rows
-				// are as before.
-				p, err := s.GetEncryptionPolicy(ctx)
+				// are as at the start, and no new key exists.
+				after, err := s.GetEncryptionPolicy(ctx)
 				require.NoError(t, err)
-				assert.Equal(t, int64(1), p.Generation)
-				m, err := s.GetEncryptionMigration(ctx, mig.ID)
+				assert.Equal(t, policy.Generation, after.Generation)
+				am, err := s.GetEncryptionMigration(ctx, mig.ID)
 				require.NoError(t, err)
-				assert.Equal(t, store.EncryptionMigrationRunning, m.State)
-				for _, before := range []*store.Secret{refRow, valueRow} {
-					after, err := s.GetSecret(ctx, before.Key, scope, scopeID)
+				assert.Equal(t, m.State, am.State)
+				for _, before := range rows {
+					got, err := s.GetSecret(ctx, before.Key, scope, scopeID)
 					require.NoError(t, err)
-					assert.Equal(t, before.Version, after.Version, before.Key)
-					assert.True(t, after.EncryptedValue == before.EncryptedValue, before.Key)
-					assert.Equal(t, before.SecretRef, after.SecretRef, before.Key)
+					assert.Equal(t, before.Version, got.Version, before.Key)
+					assert.True(t, got.EncryptedValue == before.EncryptedValue, before.Key)
+					assert.Equal(t, before.SecretRef, got.SecretRef, before.Key)
 				}
-				gone(t, "TX_W_CREATE")
-				gone(t, "TX_W_UPSERT")
+				for _, key := range []string{fmt.Sprintf("TX_W_CREATE_%02d", n), fmt.Sprintf("TX_W_UPSERT_%02d", n)} {
+					_, err := s.GetSecret(ctx, key, scope, scopeID)
+					assert.ErrorIs(t, err, store.ErrNotFound, "the refused transaction committed %s", key)
+				}
 			})
 		}
 	}
 
+	t.Run("a transition before fenced writes runs", func(t *testing.T) {
+		cur, err := s.GetEncryptionPolicy(ctx)
+		require.NoError(t, err)
+		err = s.WithTx(ctx, func(tx store.Store) error {
+			applied, err := encSetPolicy(ctx, tx, cur.Generation, fencePolicy(cur.Generation+1, "k3"))
+			if err != nil {
+				return err
+			}
+			if !applied {
+				return errors.New("the transition did not apply")
+			}
+			// The write in the same transaction sees the new policy.
+			if err := encCreate(ctx, tx, encSecret("TX_AFTER_PLAIN", scope, scopeID, v2Value("k2", 200), "")); !errors.Is(err, store.ErrEncryptionPolicyMismatch) {
+				return fmt.Errorf("a k2 write after the transition to k3 was not fenced by it: %v", err)
+			}
+			return encCreate(ctx, tx, encSecret("TX_AFTER_TRANSITION", scope, scopeID, v2Value("k3", 201), ""))
+		})
+		require.NoError(t, err)
+		got, err := s.GetEncryptionPolicy(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, cur.Generation+1, got.Generation)
+		_, err = s.GetSecret(ctx, "TX_AFTER_TRANSITION", scope, scopeID)
+		require.NoError(t, err)
+	})
+
 	t.Run("transitions outside a caller transaction run", func(t *testing.T) {
-		applied, err := encSetPolicy(ctx, s, 1, fencePolicy(2, "k3"))
+		cur, err := s.GetEncryptionPolicy(ctx)
+		require.NoError(t, err)
+		applied, err := encSetPolicy(ctx, s, cur.Generation, fencePolicy(cur.Generation+1, "k3"))
 		require.NoError(t, err)
 		assert.True(t, applied)
-		next := *mig
-		next.State = store.EncryptionMigrationInterrupted
-		applied, err = encUpdateMigration(ctx, s, &next, store.EncryptionMigrationRunning)
+		m, err := s.GetEncryptionMigration(ctx, mig.ID)
+		require.NoError(t, err)
+		next := *m
+		next.State = otherState(m.State)
+		applied, err = encUpdateMigration(ctx, s, &next, m.State)
 		require.NoError(t, err)
 		assert.True(t, applied)
 	})
+}
+
+// policyCreationAfterWriteConformance: creating the policy (no policy yet)
+// inside a WithTx transaction after a fenced write is refused, and neither
+// the policy nor the write commits. It runs on a store of its own, so with
+// the refusal removed it fails at its require.ErrorIs.
+func policyCreationAfterWriteConformance(t *testing.T, s store.Store) {
+	ctx := context.Background()
+	const scope, scopeID = store.ScopeHub, "transition-tx-hub"
+	err := s.WithTx(ctx, func(tx store.Store) error {
+		if err := encCreate(ctx, tx, encSecret("TX_BEFORE_CREATE", scope, scopeID, v1Value(70), "")); err != nil {
+			return err
+		}
+		_, err := encSetPolicy(ctx, tx, 0, fencePolicy(1, "k2"))
+		return err
+	})
+	require.ErrorIs(t, err, store.ErrPolicyTransitionAfterFencedWrite)
+	_, err = s.GetEncryptionPolicy(ctx)
+	assert.ErrorIs(t, err, store.ErrNotFound, "the refused transition created the policy")
+	_, err = s.GetSecret(ctx, "TX_BEFORE_CREATE", scope, scopeID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "the refused transaction committed its write")
 }
 
 func sortedKeys[V any](m map[string]V) []string {
