@@ -241,6 +241,99 @@ step_chromium() {
   apt_cleanup
 }
 
+# Playwright WebKit and Firefox system libraries. Agents run as non-root and
+# cannot apt-install, so `npx playwright install webkit firefox` only yields a
+# browser that starts if the libraries are already in the image. The browsers
+# themselves are not baked in: their revision follows each project's own
+# Playwright version.
+#
+# This step deliberately keys on the distro release, unlike the capability
+# tests elsewhere in this file: the list is Playwright's own, and Playwright
+# publishes it per release. A suite with no list here is skipped, so a base
+# without one (thick-prep's Ubuntu) is left unchanged rather than half-served.
+#
+# Derived from npm playwright-core@1.62.1 (webkit revision 2336, firefox 1538),
+# lib/coreBundle.js, the bundled
+# packages/playwright-core/src/server/registry/nativeDeps.ts entries
+# deps["debian13-x64"].tools + .webkit + .firefox, de-duplicated.
+# deps["debian13-arm64"] reuses the same arrays. "tools" is included because
+# `playwright install-deps <browser>` always adds that group. Regenerate with
+#   docker run --rm node:24-trixie-slim \
+#     npx -y playwright@<version> install-deps --dry-run webkit firefox
+# which prints the exact apt-get line, and update the version named above.
+#
+# One divergence from Playwright's list: it names libasound2 (firefox group),
+# which trixie no longer ships as a real package; libasound2t64 replaces it.
+# It is listed here by its real name instead of relying on apt's choice of a
+# provider for the virtual name.
+PLAYWRIGHT_DEPS_DEBIAN13="
+  xvfb fonts-noto-color-emoji fonts-unifont libfontconfig1 libfreetype6
+  xfonts-scalable fonts-liberation fonts-ipafont-gothic fonts-wqy-zenhei
+  fonts-tlwg-loma-otf fonts-freefont-ttf
+  libsoup-3.0-0 gstreamer1.0-libav gstreamer1.0-plugins-bad
+  gstreamer1.0-plugins-base gstreamer1.0-plugins-good libatk-bridge2.0-0t64
+  libatk1.0-0t64 libcairo2 libdbus-1-3 libdrm2 libegl1 libenchant-2-2
+  libepoxy0 libevdev2 libgbm1 libgdk-pixbuf-2.0-0 libgles2 libglib2.0-0t64
+  libglx0 libgstreamer-gl1.0-0 libgstreamer-plugins-base1.0-0
+  libgstreamer1.0-0 libgtk-4-1 libgudev-1.0-0 libharfbuzz-icu0 libharfbuzz0b
+  libhyphen0 libicu76 libjpeg62-turbo liblcms2-2 libmanette-0.2-0 libnotify4
+  libopengl0 libopenjp2-7 libopus0 libpango-1.0-0 libpng16-16t64 libproxy1v5
+  libsecret-1-0 libwayland-client0 libwayland-egl1 libwayland-server0 libwebp7
+  libwebpdemux2 libwoff1 libx11-6 libxcomposite1 libxdamage1 libxkbcommon0
+  libxml2 libxslt1.1 libatomic1 libevent-2.1-7t64 libavif16
+  libasound2t64 libavcodec61 libcairo-gobject2 libdbus-glib-1-2
+  libgtk-3-0t64 libpangocairo-1.0-0 libx11-xcb1 libxcb-shm0 libxcb1
+  libxcursor1 libxext6 libxfixes3 libxi6 libxrandr2 libxrender1 libxtst6
+"
+
+# Overridable so the hermetic test can present a different distro.
+OS_RELEASE_FILE="${OS_RELEASE_FILE:-/etc/os-release}"
+
+# playwright_deps_for_os — print the package list for this distro release, or
+# nothing when there is none. verify-base-contract.sh keys its sentinel check
+# on the same ID/VERSION_ID pair; keep the two in step.
+playwright_deps_for_os() {
+  local id version_id
+  # shellcheck source=/dev/null
+  id="$(. "$OS_RELEASE_FILE" 2>/dev/null && printf '%s' "${ID:-}")"
+  # shellcheck source=/dev/null
+  version_id="$(. "$OS_RELEASE_FILE" 2>/dev/null && printf '%s' "${VERSION_ID:-}")"
+  case "${id}${version_id}" in
+  debian13) printf '%s\n' "$PLAYWRIGHT_DEPS_DEBIAN13" ;;
+  esac
+}
+
+step_playwright_deps() {
+  local pkgs
+  pkgs="$(playwright_deps_for_os)"
+  if [ -z "${pkgs//[[:space:]]/}" ]; then
+    local pretty
+    # shellcheck source=/dev/null
+    pretty="$(. "$OS_RELEASE_FILE" 2>/dev/null && printf '%s' "${PRETTY_NAME:-unknown}")"
+    skip "no Playwright WebKit/Firefox library list for ${pretty:-unknown}"
+    return 0
+  fi
+  ensure_apt_updated
+
+  # Same pre-flight as apt-common: a package renamed between suites fails the
+  # build with its name, not as an anonymous resolver error.
+  # shellcheck disable=SC2086
+  if ! apt-get install -s --no-install-recommends $pkgs >/dev/null 2>&1; then
+    local missing="" p
+    for p in $pkgs; do
+      apt_installable "$p" || missing="$missing $p"
+    done
+    echo "FAIL: apt cannot install these Playwright libraries:${missing:- (set resolves individually but not together)}" >&2
+    echo "      Regenerate the list from the Playwright version named above step_playwright_deps." >&2
+    exit 1
+  fi
+
+  log "installing Playwright WebKit and Firefox system libraries"
+  # shellcheck disable=SC2086
+  apt-get install -y --no-install-recommends $pkgs
+  apt_cleanup
+}
+
 # Go. Floor, not pin: a base shipping something newer keeps it. Only install
 # when Go is absent or older than the floor.
 step_go() {
@@ -515,6 +608,7 @@ main() {
   case "$step" in
   apt-common) step_apt_common "$@" ;;
   chromium) step_chromium "$@" ;;
+  playwright-deps) step_playwright_deps "$@" ;;
   go) step_go "$@" ;;
   gcsfuse) step_gcsfuse "$@" ;;
   gcloud) step_gcloud "$@" ;;
@@ -527,7 +621,7 @@ main() {
   free-uid-1000) step_free_uid_1000 "$@" ;;
   *)
     echo "unknown step: $step" >&2
-    echo "steps: apt-common chromium go gcsfuse gcloud kubectl gh helm golangci-lint npm-global npm-tools free-uid-1000" >&2
+    echo "steps: apt-common chromium playwright-deps go gcsfuse gcloud kubectl gh helm golangci-lint npm-global npm-tools free-uid-1000" >&2
     exit 2
     ;;
   esac
