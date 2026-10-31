@@ -810,7 +810,9 @@ func TestStartDelivery_UATHopBoundedByCeiling(t *testing.T) {
 		assert.True(t, got.private, "the unshared row is unchanged")
 		d := f.ceiling(t, id, sdAlwaysKey)
 		require.False(t, d.Allowed)
-		assert.Equal(t, DenyCauseCeilingSourceNotAllowed, d.DenyCause, "reason %q", d.Reason)
+		// Such rows are outside the lineage's progeny set (S5/S6) before S7
+		// is reached; either way the token hop does not admit them.
+		assert.Contains(t, []DenyCause{DenyCauseCeilingResourceMissing, DenyCauseCeilingSourceNotAllowed}, d.DenyCause, "reason %q", d.Reason)
 	})
 
 	t.Run("row not shared with progeny: unchanged", func(t *testing.T) {

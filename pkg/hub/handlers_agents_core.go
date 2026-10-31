@@ -1421,7 +1421,7 @@ func (s *Server) applyCreateEffectCeiling(
 
 	// The role cap reads the hop's ceiling as every walk does
 	// (uatHopEffectCeiling); the stored ceiling stays the token's verbatim.
-	capped, cause, allowed := childRoleWithinCeiling(uatHopEffectCeiling(prov, ceiling), role, roleExplicit)
+	capped, cause, allowed := childRoleWithinCeiling(uatHopEffectCeiling(prov.SourcePrincipalKind, prov.SourcePrincipalID, prov, ceiling), role, roleExplicit)
 	if !allowed {
 		msg := reasonNoUsableRole
 		if roleExplicit {
@@ -4117,7 +4117,7 @@ func (s *Server) agentEditAccessFor(ctx context.Context, identity Identity, agen
 	if err != nil {
 		return access
 	}
-	_, _, access.CanChangeRole = childRoleWithinCeiling(uatHopEffectCeiling(prov, ceiling), role, true)
+	_, _, access.CanChangeRole = childRoleWithinCeiling(uatHopEffectCeiling(prov.SourcePrincipalKind, prov.SourcePrincipalID, prov, ceiling), role, true)
 	return access
 }
 

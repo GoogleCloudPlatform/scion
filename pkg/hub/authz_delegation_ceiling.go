@@ -275,7 +275,7 @@ func descendantReadPassesHop(edge *store.DelegationEdge, permissionID string, de
 	if !descendantRead || permissionID != permissionAgentRead || edge == nil || edge.Kind != store.EffectCeilingBounded {
 		return false
 	}
-	frozen, ok := uatHopEffectCeiling(edge.AuthorityProvenance, edge.EffectCeiling).Frozen()
+	frozen, ok := uatHopEffectCeiling(edge.DelegatorType, edge.DelegatorID, edge.AuthorityProvenance, edge.EffectCeiling).Frozen()
 	if !ok {
 		return false
 	}
@@ -695,7 +695,7 @@ func hopEffectCeilingDenyFor(edge *store.DelegationEdge, permissionID string, re
 			return "", ""
 		}
 		selfTarget := resource.Type == "agent" && resource.ID != "" && resource.ID == actingAgentID
-		if !EffectCeilingAllows(uatHopEffectCeiling(edge.AuthorityProvenance, edge.EffectCeiling), permissionID, selfTarget) {
+		if !EffectCeilingAllows(uatHopEffectCeiling(edge.DelegatorType, edge.DelegatorID, edge.AuthorityProvenance, edge.EffectCeiling), permissionID, selfTarget) {
 			return DenyCauseCeilingEffectExceeded, fmt.Sprintf("delegation ceiling: %s is outside the frozen effect ceiling", permissionID)
 		}
 		return "", ""

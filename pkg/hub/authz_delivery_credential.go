@@ -667,7 +667,7 @@ func (a *AuthzService) hubDeliveryWalkObserved(ctx context.Context, startAgentID
 			// An unrecorded edge has no ceiling to apply; its delegator is
 			// still checked below and the walk goes on.
 			hopCohort = legacyDeliveryCohortUnadoptedEdge
-		case edge.Kind == store.EffectCeilingBounded && !EffectCeilingAllows(uatHopEffectCeiling(edge.AuthorityProvenance, edge.EffectCeiling), permissionID, false):
+		case edge.Kind == store.EffectCeilingBounded && !EffectCeilingAllows(uatHopEffectCeiling(edge.DelegatorType, edge.DelegatorID, edge.AuthorityProvenance, edge.EffectCeiling), permissionID, false):
 			exceeded := fmt.Sprintf("delegation ceiling: %s is outside the frozen effect ceiling", permissionID)
 			if legacy != nil {
 				hopCohort = legacyBoundedEdgeCohort(edge, permissionID)
@@ -680,9 +680,9 @@ func (a *AuthzService) hubDeliveryWalkObserved(ctx context.Context, startAgentID
 				pendingReason = exceeded
 				hopCohort = legacyDeliveryCohortUATDescendant
 			}
-		case uatRecordedHop(edge.AuthorityProvenance, edge.EffectCeiling):
+		case uatRecordedHop(edge.DelegatorType, edge.DelegatorID, edge.AuthorityProvenance, edge.EffectCeiling):
 			uatHop = true
-			if uatIntrinsicDecides(edge.AuthorityProvenance, edge.EffectCeiling, permissionID) {
+			if uatIntrinsicDecides(edge.DelegatorType, edge.DelegatorID, edge.AuthorityProvenance, edge.EffectCeiling, permissionID) {
 				addStep("delegation_ceiling_delivery_uat_intrinsic",
 					fmt.Sprintf("edge %s: recorded from a user access token; %s is intrinsic to the hop", edge.ID, permissionID))
 				intrinsic = true

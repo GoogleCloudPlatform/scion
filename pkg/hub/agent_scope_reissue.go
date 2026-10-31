@@ -477,7 +477,7 @@ func (s *Server) planAgentDelegatorReissue(ctx context.Context, plan *scopeReiss
 	}
 
 	// The scopes a mint issues once E' commits: E' folded with P's chain.
-	after, err := a.reissueFilteredScopes(ctx, candidates, edge.AuthorityProvenance, ceiling, parent)
+	after, err := a.reissueFilteredScopes(ctx, candidates, edge, ceiling, parent)
 	if err != nil {
 		return reissueErrorFromChain(err)
 	}
@@ -564,7 +564,7 @@ func (s *Server) planUserDelegatorReissue(ctx context.Context, plan *scopeReissu
 	if err != nil {
 		return reissueErrorFromChain(err)
 	}
-	capped, cause, ok := childRoleWithinCeiling(uatHopEffectCeiling(prov, ceiling), role, false)
+	capped, cause, ok := childRoleWithinCeiling(uatHopEffectCeiling(prov.SourcePrincipalKind, prov.SourcePrincipalID, prov, ceiling), role, false)
 	if !ok {
 		return reissueRefusal(cause, fmt.Errorf("no agent role fits the delegator's current ceiling"))
 	}
@@ -594,7 +594,7 @@ func (s *Server) planUserDelegatorReissue(ctx context.Context, plan *scopeReissu
 		ceiling = ceilingWithout(ceiling, faulted)
 	}
 
-	after, err := a.reissueFilteredScopes(ctx, candidates, edge.AuthorityProvenance, ceiling, nil)
+	after, err := a.reissueFilteredScopes(ctx, candidates, edge, ceiling, nil)
 	if err != nil {
 		return reissueErrorFromChain(err)
 	}
@@ -820,12 +820,12 @@ func reissueWithholdCause(scope AgentTokenScope, liveDenied map[string]string) s
 }
 
 // reissueFilteredScopes returns the candidates a mint issues once the
-// agent's edge carries edgeCeiling, recorded with edgeProv (the stored
-// edge's provenance, which the re-issued edge keeps): the mint filter
+// agent's edge carries edgeCeiling, recorded as the stored edge (whose
+// delegator and provenance the re-issued edge keeps): the mint filter
 // (filterScopes) over the fold of edgeCeiling with the delegator agent's
 // chain, loaded through loadScopeCeilings like every other mint. A nil
 // delegator is a user: the edge is the whole chain.
-func (a *AuthzService) reissueFilteredScopes(ctx context.Context, candidates []AgentTokenScope, edgeProv store.AuthorityProvenance, edgeCeiling store.EffectCeiling, delegator *store.Agent) ([]AgentTokenScope, error) {
+func (a *AuthzService) reissueFilteredScopes(ctx context.Context, candidates []AgentTokenScope, edge *store.DelegationEdge, edgeCeiling store.EffectCeiling, delegator *store.Agent) ([]AgentTokenScope, error) {
 	chain := ChainCeiling{Ceiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal}}
 	var sc ScopeCeilings
 	if delegator != nil {
@@ -836,15 +836,16 @@ func (a *AuthzService) reissueFilteredScopes(ctx context.Context, candidates []A
 		}
 		chain = sc.Chain
 	}
-	return filterScopes(candidates, foldWithChain(edgeProv, edgeCeiling, chain), sc), nil
+	return filterScopes(candidates, foldWithChain(edge, edgeCeiling, chain), sc), nil
 }
 
 // foldWithChain folds a bounded edge ceiling with the chain ceiling above
 // it, the way chainEffectCeiling folds the hops: the edge contributes its hop
-// ceiling (uatHopEffectCeiling with edgeProv).
-func foldWithChain(edgeProv store.AuthorityProvenance, edgeCeiling store.EffectCeiling, chain ChainCeiling) store.EffectCeiling {
+// ceiling (uatHopEffectCeiling with the stored edge's delegator and
+// provenance).
+func foldWithChain(edge *store.DelegationEdge, edgeCeiling store.EffectCeiling, chain ChainCeiling) store.EffectCeiling {
 	var bounded []permissions.FrozenPermissionCeiling
-	if f, ok := uatHopEffectCeiling(edgeProv, edgeCeiling).Frozen(); ok {
+	if f, ok := uatHopEffectCeiling(edge.DelegatorType, edge.DelegatorID, edge.AuthorityProvenance, edgeCeiling).Frozen(); ok {
 		bounded = append(bounded, f)
 	}
 	if f, ok := chain.Ceiling.Frozen(); ok {

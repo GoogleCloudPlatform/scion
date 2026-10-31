@@ -74,7 +74,7 @@ package hub
 //     a descendant hop whose parent's ceiling does allow the permission is a
 //     real narrowing and still denies. Edges recorded since carry the
 //     deliver permissions (parentDeliverEligibility) and need no exception.
-//     Unlike the other cohorts, it still requires the root user's project
+//     Unlike the other cohorts, it still requires the provenance root
 //     admission (uatDescendantRootDenied), as its token-created ancestor
 //     does on the strict walk.
 //     The census counts this cohort until it reads zero, and then it is
@@ -346,30 +346,23 @@ func (a *AuthzService) hubDeliveryLegacyFallback(
 }
 
 // uatDescendantRootDenied applies the provenance root admission to a chain
-// the tolerant walk passed under uat_descendant_legacy. It returns the deny
-// and true when the root user is not admitted to the agent's project, when
-// the root user or an agent on the chain is no longer active
-// (ErrProvenanceInactive), or when the admission cannot be evaluated (a
-// lookup fault fails closed); the strict walk denies the token-created
-// ancestor in each case. Any other outcome returns false and the fallback
-// goes on: the tolerant walk has already read every hop of such a chain as
-// recorded.
+// the tolerant walk passed under uat_descendant_legacy, exactly as the strict
+// walk applies it to the token-created ancestor: any ResolveProvenanceRoot
+// error denies, with its cause (root user not admitted, inactive, a chain
+// mismatch, a lookup fault failing closed, and so on). It returns the deny and
+// true, or false when the admission passes.
 func (a *AuthzService) uatDescendantRootDenied(ctx context.Context, agentID, permissionID string, explain *[]DecisionStep) (hubDeliveryAdmissionOutcome, bool) {
 	_, err := a.ResolveProvenanceRoot(ctx, agentID, ResolveProvenanceOptions{PermissionID: permissionID})
 	if err == nil {
 		return hubDeliveryAdmissionOutcome{}, false
 	}
-	var reason string
 	cause := DenyCauseForProvenanceError(err)
+	reason := "delivery provenance root denied: " + err.Error()
 	switch {
 	case errors.Is(err, ErrProvenanceNotAdmitted):
 		reason = deliveryRootNotAdmittedReason + ": " + err.Error()
-	case errors.Is(err, ErrProvenanceInactive):
-		reason = "delivery provenance root denied: " + err.Error()
 	case cause == DenyCauseCeilingError:
 		reason = "delivery ceiling check failed (fail-closed): " + err.Error()
-	default:
-		return hubDeliveryAdmissionOutcome{}, false
 	}
 	if explain != nil {
 		*explain = append(*explain, DecisionStep{Step: "delegation_ceiling_delivery_denied", Detail: reason})

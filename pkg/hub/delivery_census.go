@@ -374,7 +374,7 @@ func (a *AuthzService) launchDeliveryEdgeFacts(ctx context.Context, ag *store.Ag
 	f.SourceCredentialKind = string(e.SourceCredentialKind)
 	f.CeilingKind = string(e.Kind)
 	f.Sentinel = isMigrationSentinel(e)
-	f.UATRecorded = uatRecordedHop(e.AuthorityProvenance, e.EffectCeiling)
+	f.UATRecorded = uatRecordedHop(e.DelegatorType, e.DelegatorID, e.AuthorityProvenance, e.EffectCeiling)
 	f.InitiatorCredentialKind = e.InitiatorCredentialKind
 	if e.DelegatorType == store.DelegationPrincipalAgent {
 		parent, perr := a.store.GetAgent(ctx, e.DelegatorID)

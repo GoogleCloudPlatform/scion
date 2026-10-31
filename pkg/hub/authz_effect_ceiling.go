@@ -103,13 +103,19 @@ var uatIntrinsicPermissionIDs = []string{
 var uatIntrinsicPermissionSet = toPermissionSet(uatIntrinsicPermissionIDs)
 
 // uatRecordedHop reports whether a recorded edge's bounded ceiling was copied
-// from a user access token.
-func uatRecordedHop(prov store.AuthorityProvenance, c store.EffectCeiling) bool {
+// from a user access token of the edge's own delegator. delegatorType and
+// delegatorID are the edge's delegator (for a credential not yet recorded on
+// an edge, the requester, which is the source principal). Every writer
+// records a token edge with that user as its delegator; an edge whose
+// delegator is anyone else is inconsistent and gets no intrinsic permission.
+func uatRecordedHop(delegatorType, delegatorID string, prov store.AuthorityProvenance, c store.EffectCeiling) bool {
 	return c.Kind == store.EffectCeilingBounded &&
 		knownProvenanceVersion(prov.ProvenanceVersion) &&
 		prov.SourceCredentialKind == store.SourceCredentialUAT &&
 		prov.SourcePrincipalKind == store.DelegationPrincipalUser &&
-		prov.SourcePrincipalID != ""
+		prov.SourcePrincipalID != "" &&
+		delegatorType == store.DelegationPrincipalUser &&
+		delegatorID == prov.SourcePrincipalID
 }
 
 // uatHopEffectCeiling is the ceiling a recorded hop applies: the stored ceiling,
@@ -118,8 +124,8 @@ func uatRecordedHop(prov store.AuthorityProvenance, c store.EffectCeiling) bool 
 // is kept, so a version FrozenPermissionCeiling.Allows does not interpret
 // still denies every permission. Every reader of a hop's ceiling goes through
 // it (TestUATIntrinsic_CeilingReadersUseHopCeiling pins the sites).
-func uatHopEffectCeiling(prov store.AuthorityProvenance, c store.EffectCeiling) store.EffectCeiling {
-	if !uatRecordedHop(prov, c) {
+func uatHopEffectCeiling(delegatorType, delegatorID string, prov store.AuthorityProvenance, c store.EffectCeiling) store.EffectCeiling {
+	if !uatRecordedHop(delegatorType, delegatorID, prov, c) {
 		return c
 	}
 	ids := make([]string, 0, len(c.PermissionIDs)+len(uatIntrinsicPermissionIDs))
@@ -134,10 +140,10 @@ func uatHopEffectCeiling(prov store.AuthorityProvenance, c store.EffectCeiling) 
 // permissionID on a hop: its stored ceiling denies it and
 // uatHopEffectCeiling allows it. Explain steps and the
 // scion.hub.authz.uat_intrinsic counter use it.
-func uatIntrinsicDecides(prov store.AuthorityProvenance, c store.EffectCeiling, permissionID string) bool {
+func uatIntrinsicDecides(delegatorType, delegatorID string, prov store.AuthorityProvenance, c store.EffectCeiling, permissionID string) bool {
 	return uatIntrinsicPermissionSet[permissionID] &&
 		!EffectCeilingAllows(c, permissionID, false) &&
-		EffectCeilingAllows(uatHopEffectCeiling(prov, c), permissionID, false)
+		EffectCeilingAllows(uatHopEffectCeiling(delegatorType, delegatorID, prov, c), permissionID, false)
 }
 
 // recordedProvenanceRequiredIDs are the permissions whose effect is issuing,
@@ -582,7 +588,7 @@ walk:
 		case store.EffectCeilingBounded:
 			// The intrinsic additions of a token hop enter before the fold,
 			// so a narrower hop anywhere on the chain still bounds them.
-			frozen, _ := uatHopEffectCeiling(edge.AuthorityProvenance, edge.EffectCeiling).Frozen()
+			frozen, _ := uatHopEffectCeiling(edge.DelegatorType, edge.DelegatorID, edge.AuthorityProvenance, edge.EffectCeiling).Frozen()
 			bounded = append(bounded, frozen)
 		case store.EffectCeilingPrincipal, store.EffectCeilingUnrecorded:
 		default:
@@ -796,7 +802,7 @@ func assignmentAllowsGCPScope(sc ScopeCeilings, scope AgentTokenScope) bool {
 	if !knownProvenanceVersion(row.ProvenanceVersion) || row.Kind == store.EffectCeilingUnrecorded {
 		return false
 	}
-	if !EffectCeilingAllows(uatHopEffectCeiling(row.AuthorityProvenance, row.EffectCeiling), gcpServiceAccountAssignPermission, false) {
+	if !EffectCeilingAllows(uatHopEffectCeiling(row.SourcePrincipalKind, row.SourcePrincipalID, row.AuthorityProvenance, row.EffectCeiling), gcpServiceAccountAssignPermission, false) {
 		return false
 	}
 	if assignmentHasDevLocalProvenance(row) && !sc.DevLocalUsable {
@@ -1093,7 +1099,7 @@ func (a *AuthzService) agentRowEffectCeiling(ctx context.Context, parent *store.
 		deliver       []string
 	)
 	if len(active) == 1 {
-		parentCeiling = uatHopEffectCeiling(active[0].AuthorityProvenance, active[0].EffectCeiling)
+		parentCeiling = uatHopEffectCeiling(active[0].DelegatorType, active[0].DelegatorID, active[0].AuthorityProvenance, active[0].EffectCeiling)
 		deliver, err = a.parentDeliverEligibility(ctx, parent)
 		if err != nil {
 			return store.EffectCeiling{}, err

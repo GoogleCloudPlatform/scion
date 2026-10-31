@@ -311,7 +311,7 @@ func (a *AuthzService) EvaluateServiceAccountParentCeiling(ctx context.Context, 
 	}
 
 	// 5. The recorded effect ceiling.
-	if !EffectCeilingAllows(uatHopEffectCeiling(row.AuthorityProvenance, row.EffectCeiling), gcpServiceAccountAssignPermission, false) {
+	if !EffectCeilingAllows(uatHopEffectCeiling(row.SourcePrincipalKind, row.SourcePrincipalID, row.AuthorityProvenance, row.EffectCeiling), gcpServiceAccountAssignPermission, false) {
 		return parentCeilingDeny(DenyCauseCeilingEffectExceeded, "recorded ceiling does not allow assigning the service account", proof)
 	}
 
@@ -1003,11 +1003,11 @@ func (a *AuthzService) userSecretChainVerdict(ctx context.Context, principal Age
 		// access token applies uatHopEffectCeiling: secret.use is intrinsic
 		// to it, and every other clause, on every hop and on the terminal
 		// user, still applies.
-		if edge.Kind == store.EffectCeilingBounded && uatIntrinsicDecides(edge.AuthorityProvenance, edge.EffectCeiling, secretUsePermission) {
+		if edge.Kind == store.EffectCeilingBounded && uatIntrinsicDecides(edge.DelegatorType, edge.DelegatorID, edge.AuthorityProvenance, edge.EffectCeiling, secretUsePermission) {
 			secretParentStep(explain, "uat_intrinsic", fmt.Sprintf("edge %s: recorded from a user access token; secret.use is intrinsic to the hop", edge.ID))
 			chain.uatIntrinsic = true
 		}
-		if edge.Kind == store.EffectCeilingBounded && !EffectCeilingAllows(uatHopEffectCeiling(edge.AuthorityProvenance, edge.EffectCeiling), secretUsePermission, false) {
+		if edge.Kind == store.EffectCeilingBounded && !EffectCeilingAllows(uatHopEffectCeiling(edge.DelegatorType, edge.DelegatorID, edge.AuthorityProvenance, edge.EffectCeiling), secretUsePermission, false) {
 			fb, err := a.legacyAdoptedSecretUseFallback(ctx, agent, edge, depth)
 			if err != nil {
 				secretParentStep(explain, "error", "adoption record lookup failed")

@@ -84,16 +84,16 @@ func TestUATIntrinsic_HopCeiling(t *testing.T) {
 
 	for _, v := range []permissions.CeilingVersion{permissions.CeilingVersionUnspecified, permissions.CeilingVersionV1} {
 		stored := store.EffectCeiling{Kind: store.EffectCeilingBounded, Version: v, PermissionIDs: []string{"project.read", "agent.create"}}
-		require.True(t, uatRecordedHop(prov, stored))
-		hop := uatHopEffectCeiling(prov, stored)
+		require.True(t, uatRecordedHop(store.DelegationPrincipalUser, owner, prov, stored))
+		hop := uatHopEffectCeiling(store.DelegationPrincipalUser, owner, prov, stored)
 		for _, p := range uatIntrinsicPermissionIDs {
 			assert.False(t, EffectCeilingAllows(stored, p, false), "version %d: the stored list lacks %s", v, p)
 			assert.True(t, EffectCeilingAllows(hop, p, false), "version %d: %s is intrinsic", v, p)
-			assert.True(t, uatIntrinsicDecides(prov, stored, p), "version %d: %s", v, p)
+			assert.True(t, uatIntrinsicDecides(store.DelegationPrincipalUser, owner, prov, stored, p), "version %d: %s", v, p)
 		}
 		for _, p := range []string{"project.read", "agent.create"} {
 			assert.True(t, EffectCeilingAllows(hop, p, false), "the token's own list still applies")
-			assert.False(t, uatIntrinsicDecides(prov, stored, p), "%s is the token's, not the rule's", p)
+			assert.False(t, uatIntrinsicDecides(store.DelegationPrincipalUser, owner, prov, stored, p), "%s is the token's, not the rule's", p)
 		}
 		assert.Equal(t, v, hop.Version, "the stored version is kept")
 		assert.Equal(t, []string{"project.read", "agent.create"}, stored.PermissionIDs, "the stored ceiling is never changed")
@@ -101,7 +101,19 @@ func TestUATIntrinsic_HopCeiling(t *testing.T) {
 
 	unknown := store.EffectCeiling{Kind: store.EffectCeilingBounded, Version: permissions.CeilingVersion(99), PermissionIDs: []string{"project.read"}}
 	for _, p := range append([]string{"project.read"}, uatIntrinsicPermissionIDs...) {
-		assert.False(t, EffectCeilingAllows(uatHopEffectCeiling(prov, unknown), p, false), "an uninterpreted version still denies %s", p)
+		assert.False(t, EffectCeilingAllows(uatHopEffectCeiling(store.DelegationPrincipalUser, owner, prov, unknown), p, false), "an uninterpreted version still denies %s", p)
+	}
+
+	// An inconsistent edge: the delegator is not the token's user (another
+	// user, or an agent). Writers never record it; it gets no intrinsic
+	// permission, so it is refused as on main.
+	consistent := store.EffectCeiling{Kind: store.EffectCeilingBounded, Version: permissions.CeilingVersionV1, PermissionIDs: []string{"project.read"}}
+	for name, d := range map[string][2]string{
+		"another user": {store.DelegationPrincipalUser, uuid.NewString()},
+		"an agent":     {store.DelegationPrincipalAgent, owner},
+	} {
+		assert.False(t, uatRecordedHop(d[0], d[1], prov, consistent), name)
+		assert.Equal(t, consistent, uatHopEffectCeiling(d[0], d[1], prov, consistent), name)
 	}
 
 	assert.ElementsMatch(t, []string{"secret.deliver", "env_var.deliver", "skill_injection.deliver", "secret.use"}, uatIntrinsicPermissionIDs)
@@ -153,11 +165,11 @@ func TestUATIntrinsic_NotOtherHops(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			assert.False(t, uatRecordedHop(tc.prov, tc.c))
-			assert.Equal(t, tc.c, uatHopEffectCeiling(tc.prov, tc.c), "the ceiling is returned unchanged")
+			assert.False(t, uatRecordedHop(tc.prov.SourcePrincipalKind, tc.prov.SourcePrincipalID, tc.prov, tc.c))
+			assert.Equal(t, tc.c, uatHopEffectCeiling(tc.prov.SourcePrincipalKind, tc.prov.SourcePrincipalID, tc.prov, tc.c), "the ceiling is returned unchanged")
 			if tc.c.Kind == store.EffectCeilingBounded {
 				for _, p := range uatIntrinsicPermissionIDs {
-					assert.False(t, EffectCeilingAllows(uatHopEffectCeiling(tc.prov, tc.c), p, false), p)
+					assert.False(t, EffectCeilingAllows(uatHopEffectCeiling(tc.prov.SourcePrincipalKind, tc.prov.SourcePrincipalID, tc.prov, tc.c), p, false), p)
 					edge := &store.DelegationEdge{DelegatorType: store.DelegationPrincipalUser, DelegatorID: tc.prov.SourcePrincipalID,
 						AuthorityProvenance: tc.prov, EffectCeiling: tc.c}
 					cause, _ := hopEffectCeilingDeny(edge, p, Resource{Type: "secret"}, "", true)
@@ -179,14 +191,14 @@ func TestUATIntrinsic_RegistryTableNotWidened(t *testing.T) {
 	edge := &store.DelegationEdge{DelegatorType: store.DelegationPrincipalUser, DelegatorID: user,
 		AuthorityProvenance: prov, EffectCeiling: stored}
 	fold := foldCeilings([]permissions.FrozenPermissionCeiling{func() permissions.FrozenPermissionCeiling {
-		f, _ := uatHopEffectCeiling(prov, stored).Frozen()
+		f, _ := uatHopEffectCeiling(store.DelegationPrincipalUser, user, prov, stored).Frozen()
 		return f
 	}()}, 0)
 	checked := 0
 	for _, perm := range permissions.Registry {
 		inSet := uatIntrinsicPermissionSet[perm.ID]
 		inList := slices.Contains(uiTokenList, perm.ID)
-		hop := uatHopEffectCeiling(prov, stored)
+		hop := uatHopEffectCeiling(store.DelegationPrincipalUser, user, prov, stored)
 		cause, _ := hopEffectCeilingDeny(edge, perm.ID, Resource{Type: "project"}, "", true)
 		if inSet || inList {
 			assert.True(t, EffectCeilingAllows(hop, perm.ID, false), perm.ID)
@@ -678,6 +690,78 @@ func TestUATIntrinsic_DescendantInactiveRootWithheld(t *testing.T) {
 	}
 }
 
+// TestUATIntrinsic_InconsistentEdgeGetsNoIntrinsic: a token-sourced edge
+// whose delegator is not the token's user (delegator U, source principal X)
+// is inconsistent data no writer records. It gets no intrinsic permission at
+// S3c (withheld, as on main), in the chain fold, in the hub delivery walk
+// and in the role cap.
+func TestUATIntrinsic_InconsistentEdgeGetsNoIntrinsic(t *testing.T) {
+	f := newSDFixture(t, "ui-inconsistent")
+	other := tid("ui-inconsistent-source")
+	createDCUser(t, f.Store, other, "ui-inconsistent-source@test.com", f.ProjectID, store.ProjectRoleOwner)
+	id, _ := f.uiDirect(t, "inconsistent", func(e *store.DelegationEdge) { e.SourcePrincipalID = other })
+	edge := activeEdgesFor(t, f.Store, id)[0]
+	require.False(t, uatRecordedHop(edge.DelegatorType, edge.DelegatorID, edge.AuthorityProvenance, edge.EffectCeiling))
+	ctx := context.Background()
+
+	// S3c: withheld.
+	d := f.ceiling(t, id, sdAlwaysKey)
+	require.False(t, d.Allowed)
+	assert.Equal(t, DenyCauseCeilingEffectExceeded, d.DenyCause, "reason %q", d.Reason)
+	assert.False(t, sdStartDelivery(t, f.disp, f.Store, id).always)
+
+	// The fold: no deliver permission, so a child's edge carries none.
+	agent, err := f.Store.GetAgent(ctx, id)
+	require.NoError(t, err)
+	deliver, err := f.Server.authzService.parentDeliverEligibility(ctx, agent)
+	require.NoError(t, err)
+	assert.Empty(t, deliver)
+
+	// The hub delivery walk: the strict walk refuses, and no fallback cohort
+	// serves it.
+	h := hdIdentity(t, f.Server.authzService, id)
+	h.legacyFallback = true
+	o := f.Server.authzService.hubDeliveryAdmissionOutcomeFor(ctx, h, "env_var.deliver", id, nil)
+	assert.False(t, o.ok, "reason %q", o.reason)
+	assert.Equal(t, DenyCauseCeilingEffectExceeded, o.cause)
+	assert.Empty(t, o.legacyCohort)
+
+	// The role cap: the ceiling it reads is the stored one.
+	assert.Equal(t, edge.EffectCeiling, uatHopEffectCeiling(edge.DelegatorType, edge.DelegatorID, edge.AuthorityProvenance, edge.EffectCeiling))
+	assert.Equal(t, edge.EffectCeiling, uatHopEffectCeiling(store.DelegationPrincipalUser, f.UserID, uiProv(other), edge.EffectCeiling),
+		"a requester other than the token's user gets the stored ceiling")
+}
+
+// TestUATIntrinsic_DescendantRootErrorWithheld: any provenance root error
+// withholds a uat_descendant_legacy chain, as the strict walk withholds its
+// token-created ancestor. Here the child's agent edge records a source kind
+// that does not match its delegator (a mismatch the tolerant walk does not
+// read but the root admission does).
+func TestUATIntrinsic_DescendantRootErrorWithheld(t *testing.T) {
+	const parentName = "ui-mismatch-token-parent"
+	m := newLDFixture(t, "ui-mismatch-child", ldOptions{noEdge: true, ancestry: func(f *goldenFixture) []string {
+		return []string{f.projectOwnerID, tid(parentName)}
+	}})
+	p := tid(parentName)
+	hdAgent(t, m.store, p, m.agent.ProjectID, []string{m.projectOwnerID})
+	hdEdge(t, m.store, store.DelegationPrincipalUser, m.projectOwnerID, p, m.agent.ProjectID, uiUATEdge(uiTokenList...))
+	hdEdge(t, m.store, store.DelegationPrincipalAgent, p, m.agent.ID, m.agent.ProjectID, func(e *store.DelegationEdge) {
+		withBoundedCeiling("agent.read")(e)
+		e.SourcePrincipalKind = store.DelegationPrincipalUser
+	})
+	ctx := context.Background()
+	_, rootErr := m.authz.ResolveProvenanceRoot(ctx, m.agent.ID, ResolveProvenanceOptions{PermissionID: "env_var.deliver"})
+	require.ErrorIs(t, rootErr, ErrProvenanceMismatch, "control: the root admission reads the mismatch")
+
+	lh := hdIdentity(t, m.authz, m.agent.ID)
+	lh.legacyFallback = true
+	o := m.authz.hubDeliveryAdmissionOutcomeFor(ctx, lh, "env_var.deliver", m.agent.ID, nil)
+	require.False(t, o.ok, "reason %q", o.reason)
+	assert.Equal(t, legacyDeliveryCohortUATDescendant, o.deniedCohort)
+	assert.Equal(t, DenyCauseCeilingOrphaned, o.cause)
+	assert.True(t, strings.HasPrefix(o.reason, "delivery provenance root denied"), "the deny names the cause: %q", o.reason)
+}
+
 // ---- not unlocked ---------------------------------------------------------------
 
 // TestUATIntrinsic_NotUnlocked: the rule does not open the runtime read or
@@ -688,11 +772,14 @@ func TestUATIntrinsic_DescendantInactiveRootWithheld(t *testing.T) {
 func TestUATIntrinsic_NotUnlocked(t *testing.T) {
 	f := newUATCreateFixture(t, "ui-locked")
 	f.setProjectAnnotation(t, projectSettingDefaultAgentRole, string(AgentRoleFull))
-	all := make([]string, 0, len(permissions.UATValidScopes()))
-	for s := range permissions.UATValidScopes() {
-		all = append(all, s)
+	// Every per-permission selector (aliases expand to these).
+	var all []string
+	for _, p := range permissions.Registry {
+		if p.UATScope != "" {
+			all = append(all, p.UATScope)
+		}
 	}
-	sort.Strings(all)
+	all = sortedUniqueIDs(all)
 	tokenCeiling := uatCeilingFromSelectors(t, all...)
 	require.NotContains(t, tokenCeiling.PermissionIDs, "project.secret_read", "no selector maps project.secret_read")
 
@@ -705,7 +792,7 @@ func TestUATIntrinsic_NotUnlocked(t *testing.T) {
 	rec = f.create(t, f.uat(t, all...), CreateAgentRequest{Name: "ui-locked-default"})
 	agent, edge := f.createdAgent(t, rec, "ui-locked-default")
 	assert.Equal(t, string(AgentRoleBaseline), agent.AppliedConfig.AgentRole, "a defaulted role is still capped")
-	require.True(t, uatRecordedHop(edge.AuthorityProvenance, edge.EffectCeiling))
+	require.True(t, uatRecordedHop(edge.DelegatorType, edge.DelegatorID, edge.AuthorityProvenance, edge.EffectCeiling))
 	assert.Equal(t, tokenCeiling.PermissionIDs, edge.PermissionIDs, "the stored edge is the token's list verbatim")
 
 	// A stored role raised to full still mints without project:secret:read.
@@ -784,9 +871,10 @@ func TestUATIntrinsic_LegacyData(t *testing.T) {
 		edges := activeEdgesFor(t, f.Store, id)
 		require.Len(t, edges, 1)
 		now := time.Now()
-		_, err := f.Store.DeactivateDelegationEdgesForDelegate(context.Background(), store.DelegationPrincipalAgent, id,
-			store.Deactivation{Cause: store.EdgeDeactivationScopeReissueReplaced, At: &now, OpID: "ui-reissue"})
+		ok, err := f.Store.DeactivateDelegationEdgeGuarded(context.Background(), edges[0].ID, store.DelegationEdgeDeactivateGuard{},
+			store.EdgeDeactivationScopeReissueReplaced, "ui-reissue")
 		require.NoError(t, err)
+		require.True(t, ok)
 		f.recordEdge(t, store.DelegationPrincipalUser, f.UserID, id, edges[0].EffectCeiling, func(e *store.DelegationEdge) {
 			e.AuthorityProvenance = edges[0].AuthorityProvenance
 			e.CreatedAt = now.Add(time.Minute)
@@ -796,7 +884,7 @@ func TestUATIntrinsic_LegacyData(t *testing.T) {
 	t.Run("role reincarnate from a token: the role cap reads the hop ceiling", func(t *testing.T) {
 		prov := uiProv(uuid.NewString())
 		stored := boundedCeiling(uatCeilingFromSelectors(t, minimalSelectors(t)...).PermissionIDs...)
-		hop := uatHopEffectCeiling(prov, stored)
+		hop := uatHopEffectCeiling(prov.SourcePrincipalKind, prov.SourcePrincipalID, prov, stored)
 		for _, role := range []AgentRole{AgentRoleFull, AgentRoleBaseline, AgentRoleReadOnly} {
 			_, _, storedFits := childRoleWithinCeiling(stored, role, true)
 			_, _, hopFits := childRoleWithinCeiling(hop, role, true)
@@ -810,7 +898,9 @@ func TestUATIntrinsic_LegacyData(t *testing.T) {
 		grantProjectRole(t, s, user.ID, project.ID, store.ProjectRoleOwner)
 		grantAgentLifecycleAtProject(t, s, user.ID, project.ID)
 		grantAgentDelegationAtProject(t, s, user.ID, project.ID)
-		identity := scopedIdentityFor(user, project.ID, append(minimalSelectors(t), "agent:lifecycle"))
+		grantPermissionViaRoleBinding(t, s, user.ID, "agent.update", store.RoleScopeProject, project.ID)
+		// --role is a patch flag: it needs agent.update and the agent:update scope.
+		identity := scopedIdentityFor(user, project.ID, append(minimalSelectors(t), "agent:lifecycle", "agent:update"))
 
 		// An explicit full role still does not fit the token's hop ceiling.
 		rec := httptest.NewRecorder()
@@ -828,7 +918,7 @@ func TestUATIntrinsic_LegacyData(t *testing.T) {
 		edges := activeEdgesFor(t, s, agent.ID)
 		require.Len(t, edges, 1)
 		require.Equal(t, user.ID, edges[0].DelegatorID)
-		require.True(t, uatRecordedHop(edges[0].AuthorityProvenance, edges[0].EffectCeiling), "the re-recorded edge is a token hop")
+		require.True(t, uatRecordedHop(edges[0].DelegatorType, edges[0].DelegatorID, edges[0].AuthorityProvenance, edges[0].EffectCeiling), "the re-recorded edge is a token hop")
 		for _, p := range uatIntrinsicPermissionIDs {
 			assert.False(t, EffectCeilingAllows(edges[0].EffectCeiling, p, false), "the stored edge stays the token's list (%s)", p)
 		}
@@ -845,7 +935,7 @@ func TestUATIntrinsic_LegacyData(t *testing.T) {
 			e.SourceCredentialKind = store.SourceCredentialSystemMigration
 		})
 		edge := activeEdgesFor(t, f.Store, id)[0]
-		assert.False(t, uatRecordedHop(edge.AuthorityProvenance, edge.EffectCeiling))
+		assert.False(t, uatRecordedHop(edge.DelegatorType, edge.DelegatorID, edge.AuthorityProvenance, edge.EffectCeiling))
 		d := f.ceiling(t, id, sdAlwaysKey)
 		assert.False(t, d.uatIntrinsic, "its own cohort decides; reason %q", d.Reason)
 	})

@@ -124,6 +124,11 @@ func TestLaunchDeliveryCensus_Cohorts(t *testing.T) {
 		devLocal:     "dev_local_edge",
 	}
 
+	// Both token-created agents store the full role, which their token's
+	// list does not fit.
+	setAgentRole(t, f.store, uat, AgentRoleFull)
+	setAgentRole(t, f.store, uatNonMember, AgentRoleFull)
+
 	rep, err := f.authz.LaunchDeliveryCensus(ctx, false)
 	require.NoError(t, err)
 	rows := map[string]LaunchDeliveryCensusRow{}
@@ -172,6 +177,7 @@ func TestLaunchDeliveryCensus_Cohorts(t *testing.T) {
 	}
 	assert.Equal(t, store.InitiatorCredentialKindUAT, rows[schedUAT].Edge.InitiatorCredentialKind)
 	// The token's list (agent.read) fits no role: the stored role is filtered.
+	assert.Equal(t, string(AgentRoleFull), rows[uat].UAT.StoredRole)
 	assert.Equal(t, string(AgentRoleNone), rows[uat].UAT.FilteredRole)
 	assert.Equal(t, 2, rep.UATRoleFiltered)
 
