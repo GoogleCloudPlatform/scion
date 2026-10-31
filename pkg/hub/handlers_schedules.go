@@ -597,12 +597,13 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 	// Ruling Q2: a fully reauthorized mutation that changes future dispatch
 	// (payload/target/type/timing including the time zone, or an enable
 	// transition) replaces the attribution and bumps authorization_revision
-	// atomically in the same write. A metadata-only edit (name, an unchanged cron/type/payload
-	// resent as-is, or a status change other than an enable, e.g. pause)
-	// does not re-attribute, and attribution is passed to the store only
-	// when it changed. Deriving this from the field mask itself (rather
-	// than from req's presence checks) is what keeps the two in sync: a
-	// dispatch field only re-attributes when the field mask also writes it.
+	// atomically in the same write. A metadata-only edit (name, an
+	// unchanged cron/type/payload resent as-is, or a status change other
+	// than an enable, e.g. pause) does not re-attribute, and attribution is
+	// passed to the store only when it changed. Deriving this from the field
+	// mask itself (rather than from req's presence checks) is what keeps the
+	// two in sync: a dispatch field only re-attributes when the field mask
+	// also writes it.
 	changesFutureDispatch := fields.CronExpr || fields.TimeZone || fields.EventType || fields.Payload || enabling
 
 	// The write is conditioned on the revision this handler just read,

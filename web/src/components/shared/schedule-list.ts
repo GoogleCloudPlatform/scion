@@ -36,7 +36,7 @@ interface Schedule {
   projectId: string;
   name: string;
   cronExpr: string;
-  /** IANA zone the cron expression is evaluated in; absent or empty means UTC. */
+  /** IANA zone the cron expression is evaluated in; empty means UTC. */
   timeZone?: string;
   eventType: string;
   payload: string;
@@ -84,7 +84,7 @@ export function hasCronZonePrefix(expr: string): boolean {
   return expr.startsWith('CRON_TZ=') || expr.startsWith('TZ=');
 }
 
-/** Returns the zone shown for a schedule's cron expression: its IANA name, or UTC. */
+/** The zone shown for a schedule's cron expression: its IANA name, or UTC. */
 export function scheduleZoneLabel(timeZone: string | undefined): string {
   return timeZone ? timeZone : 'UTC';
 }
