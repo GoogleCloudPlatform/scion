@@ -19,6 +19,7 @@ import { _appFrameRefCountForTests } from '../components/shared/app-frame.js';
 import {
   TERMINAL_DRAG_MIME,
   TERMINAL_PALETTE_NEW_AGENT_EVENT,
+  TERMINAL_PANE_DIALOG_OPEN_EVENT,
   type TerminalPaletteNewAgentDetail,
 } from './terminal-workspace-events.js';
 import type { ScionQuickPalette } from '../components/shared/palette/quick-palette.js';
@@ -3221,6 +3222,114 @@ describe('"Jump to agent" palette: palette and focus lifecycle', () => {
 
     await vi.waitFor(() => expect(palette.groups.agents?.status).toBe('error'));
     expect(palette.groups.agents?.error).toBe('agents list failed');
+  });
+});
+
+// ptone/scion#2612: a pane dialog that opens while the palette is open or
+// pending closes the palette, so two modals are never open together.
+describe('"Jump to agent" palette: a pane dialog opening under it', () => {
+  let root: TerminalWorkspaceRoot;
+  let reg: TerminalSessionRegistry;
+  let invoker: HTMLButtonElement;
+
+  beforeEach(async () => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    stubFetchForPalette([{ id: AGENT_A }, { id: AGENT_NEW }]);
+    stubWebSocketAndEventSource();
+    reg = new TerminalSessionRegistry({ hubUrl: window.location.origin, accountId: 'r2612' });
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    root.show(true);
+    root.create(reg, AGENT_A);
+    await flush();
+    invoker = document.createElement('button');
+    document.body.appendChild(invoker);
+  });
+
+  afterEach(() => {
+    invoker.remove();
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  /** Dispatches the pane's dialog-open event, as the pane does when a dialog renders. */
+  function paneDialogOpens(pane: ScionTerminalPane): void {
+    pane.dispatchEvent(
+      new CustomEvent(TERMINAL_PANE_DIALOG_OPEN_EVENT, { bubbles: true, composed: true })
+    );
+  }
+
+  /** Opens the palette from `invoker`, then moves focus off it, so a refocus is observable. */
+  async function openFromInvoker(): Promise<ScionQuickPalette> {
+    invoker.focus();
+    root['openPalette']();
+    const palette = await waitForPalette(root);
+    await vi.waitFor(() => expect(palette.open).toBe(true));
+    invoker.blur();
+    return palette;
+  }
+
+  it('closes the open palette and refocuses nothing', async () => {
+    const pane = paneFor(root, AGENT_A);
+    expect(pane.hidden).toBe(false);
+    const palette = await openFromInvoker();
+
+    paneDialogOpens(pane);
+    fireFromDialog(palette, 'sl-hide');
+    fireFromDialog(palette, 'sl-after-hide');
+    await nextTask();
+
+    expect(root['paletteHost'].isOpen).toBe(false);
+    expect(palette.open).toBe(false);
+    expect(document.activeElement).not.toBe(invoker);
+  });
+
+  it('cancels a pending open, so the palette never shows, and refocuses nothing', async () => {
+    const pane = paneFor(root, AGENT_A);
+    invoker.focus();
+    root['openPalette']();
+    expect(root['paletteHost'].isOpen).toBe(true);
+    // The palette module and element are still loading: the open is pending.
+    expect(root.element.querySelector('scion-quick-palette')?.open ?? false).toBe(false);
+    invoker.blur();
+
+    paneDialogOpens(pane);
+    const palette = await waitForPalette(root);
+    await nextTask();
+
+    expect(root['paletteHost'].isOpen).toBe(false);
+    expect(palette.open).toBe(false);
+    expect(document.activeElement).not.toBe(invoker);
+  });
+
+  it('a dialog in an off-screen pane leaves the palette open', async () => {
+    // A background restore creates the pane without showing it.
+    root.create(reg, AGENT_NEW, { deferConnect: true });
+    await flush();
+    const hiddenPane = paneFor(root, AGENT_NEW);
+    expect(hiddenPane.closest('[hidden]')).not.toBeNull();
+    const palette = await openFromInvoker();
+
+    paneDialogOpens(hiddenPane);
+    await nextTask();
+
+    expect(root['paletteHost'].isOpen).toBe(true);
+    expect(palette.open).toBe(true);
+  });
+
+  it('does nothing while the palette is closed: a later open still shows', async () => {
+    paneDialogOpens(paneFor(root, AGENT_A));
+    expect(root['paletteHost'].isOpen).toBe(false);
+
+    const palette = await openFromInvoker();
+
+    expect(root['paletteHost'].isOpen).toBe(true);
+    expect(palette.open).toBe(true);
   });
 });
 

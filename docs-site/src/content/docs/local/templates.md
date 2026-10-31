@@ -69,7 +69,7 @@ Common fields:
 | `services`, `max_turns`, `max_model_calls`, `max_duration`, `thinking_level`, `command_args`, `task_flag` | Further job settings. |
 | `message_mode` | Hub only: the initial message mode for agents created from the template. |
 
-A `max_turns` or `max_model_calls` of `0` means no limit and overrides the hub and broker default limits; leave the key out to inherit them. Older versions accepted `0` silently and treated it as "inherit".
+A `max_turns` or `max_model_calls` of `0` means no limit and overrides the hub and broker default limits (taking effect on Runtime Brokers that advertise the `unlimitedCountLimits` capability); leave the key out to inherit them. Older versions accepted `0` silently and treated it as "inherit", and the Runtime Broker logs each template that sets a count limit to `0` when provisioning an agent.
 
 The full field reference is [Agent Configuration (`scion-agent.yaml`)](/scion/reference/agent-config/).
 
