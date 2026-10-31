@@ -197,7 +197,7 @@ func TestServerKeysCheck_ExitCodes(t *testing.T) {
 	}
 }
 
-// Review N5: the text output renders deadlines in the display zone
+// The text output renders deadlines in the display zone
 // (--tz/--utc), like every other CLI time.
 func TestPrintKeyStatus_DeadlinesUseDisplayZone(t *testing.T) {
 	ny, err := time.LoadLocation("America/New_York")

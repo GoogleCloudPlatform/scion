@@ -155,7 +155,7 @@ func TestServerKeysStatus_InvalidKeyringIsExit2(t *testing.T) {
 	assert.Equal(t, keysExitInvalid, code)
 }
 
-// Review item 7 (EM ruling): status exits 0 whenever it produced a report,
+// Status exits 0 whenever it produced a report,
 // a NOT READY one included; readiness is report content, not a failure.
 func TestServerKeysStatus_NotReadyReportIsExit0(t *testing.T) {
 	keysTestEnv(t)
@@ -178,7 +178,7 @@ func TestServerKeysStatus_NotReadyReportIsExit0(t *testing.T) {
 	assert.Equal(t, []string{"signing_issuance_closed"}, got.Readiness.Reasons)
 }
 
-// Review item 6 / N9: in legacy mode status says which secret its audit
+// In legacy mode status says which secret its audit
 // uses; without one it audits as a Hub without a secret does.
 func TestServerKeysStatus_LegacyModeAuditNote(t *testing.T) {
 	home := keysTestEnv(t)

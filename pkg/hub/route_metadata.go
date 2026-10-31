@@ -946,7 +946,7 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Permission:     "hub.conduit_grant_keys.execute", Resource: "hub", Action: "execute",
 		SessionOnly: authzop.ReasonCredentialManagement,
 	},
-	// Server key status (ptone/scion#1530 Phase 6), behind
+	// Server key status, behind
 	// server.secret_rotation. Deliberately no registered permission: the
 	// guard falls back to requireAdmin, so only an unscoped platform admin
 	// on a session or dev credential reads it, and it cannot be delegated.

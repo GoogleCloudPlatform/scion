@@ -27,13 +27,13 @@ import (
 	"github.com/spf13/pflag"
 )
 
-// The `scion server keys` group (ptone/scion#1530 Phase 6): operator
+// The `scion server keys` group: operator
 // commands for the Hub server keyring. They run on the server host, read
 // the server configuration and keyring file directly, and never start
 // services. Human mode only (not in agentAllowed: the whole server tree is
 // hidden in agent mode) and not on Windows (not in windowsAllowed).
 //
-// Exit codes, shared by every keys subcommand (EM ruling on T0 review item 7):
+// Exit codes, shared by every keys subcommand:
 //
 //	0  the command did its job; for status, a report was produced, NOT
 //	   READY included (readiness is report content, not a failure)

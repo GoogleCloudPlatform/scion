@@ -33,7 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// Key status (ptone/scion#1530 Phase 6, T0): one read-only, versioned
+// Key status: one read-only, versioned
 // report of a Hub instance's server key configuration. The admin endpoint
 // GET /api/v1/admin/keys/status builds it from the serving process's own
 // loaded keyring, cipher, store and startup audit; `scion server keys
@@ -67,8 +67,8 @@ const (
 // release accepts (keyring.Keyring.CheckSessionPilot), the active
 // encryption key is derived from the legacy signing secret, so a digest
 // would be an offline oracle for a weak legacy secret. The digest is
-// omitted until the legacy signing-secret dependence is removed (P6 T7/T10,
-// sec-review-3 ruling on Q3).
+// omitted until the encryption key no longer depends on the legacy signing
+// secret.
 const MaterialDigestOmittedPendingLegacyIndependence = "pending_legacy_independence"
 
 // readyReasonEncryptionPolicyMismatch is the key status readiness reason
@@ -496,29 +496,28 @@ func (s *Server) adminKeyStatusHandler() http.HandlerFunc {
 // Material digest (not wired into the report; see
 // MaterialDigestOmittedPendingLegacyIndependence).
 
-// materialDigestDomain is the label the digest input starts with (P6 plan
-// r2 erratum E1); it separates the digest from every other hash of the
-// same bytes.
+// materialDigestDomain is the label the digest input starts with; it
+// separates the digest from every other hash of the same bytes.
 //
-//nolint:unused // unwired until P6 T7: erratum E1 / plan note-2
+//nolint:unused // unwired until the material digest is reported
 const materialDigestDomain = "scion-keyring-material-v1\n"
 
 // materialDigestSecretPurpose hands each signing generation's secret to
 // keyringMaterialDigest, which hashes it at once.
 //
-//nolint:unused // unwired until P6 T7: erratum E1 / plan note-2
+//nolint:unused // unwired until the material digest is reported
 var materialDigestSecretPurpose = keyring.NewPurpose("material_digest", func(s []byte) []byte { return slices.Clone(s) })
 
 // keyringMaterialDigest is SHA-256 over the label materialDigestDomain
 // followed by a length-prefixed canonical serialization of the whole parsed
-// keyring (P6 plan r2 erratum E1): source, revision, both
+// keyring: source, revision, both
 // rings' active ID, emit or write format, every entry's ID and material
 // (signing deadlines included) and the legacy reader lists. It is the
 // recommended construction for fleet material equality; it must not be
 // published while any reported keyring state can lack a random encryption
 // key.
 //
-//nolint:unused // unwired until P6 T7: erratum E1 / plan note-2
+//nolint:unused // unwired until the material digest is reported
 func keyringMaterialDigest(k *keyring.Keyring) string {
 	return materialDigestWithDomain(materialDigestDomain, k)
 }
@@ -526,7 +525,7 @@ func keyringMaterialDigest(k *keyring.Keyring) string {
 // materialDigestWithDomain is keyringMaterialDigest under domain (a
 // parameter so a test can prove the domain separates the digest).
 //
-//nolint:unused // unwired until P6 T7: erratum E1 / plan note-2
+//nolint:unused // unwired until the material digest is reported
 func materialDigestWithDomain(domain string, k *keyring.Keyring) string {
 	h := sha256.New()
 	field := func(b []byte) {

@@ -42,7 +42,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// Key status (ptone/scion#1530 Phase 6 T0): the admin endpoint and the
+// Key status: the admin endpoint and the
 // local builder over real SQLite stores, real hub servers and synthetic
 // keyring files loaded with the real loader. Every secret here is a
 // synthetic fixture.
@@ -608,7 +608,7 @@ func TestKeyStatus_MaterialDigestNeverReported(t *testing.T) {
 	}
 }
 
-// Why the digest is omitted (sec-review-3's Q3 condition): in legacy mode
+// Why the digest is omitted: in legacy mode
 // and in every keyring file this release accepts, the only guaranteed
 // encryption key is derived from the legacy signing secret, so it adds no
 // entropy a weak legacy secret lacks.
@@ -700,10 +700,9 @@ func TestCheckKeyringFile(t *testing.T) {
 	assert.ErrorContains(t, CheckKeyringFile(notReader), "legacy_read_ids")
 }
 
-// Review item 1: `scion server keys check` (CheckKeyringFile) and startup
-// (validateKeyringConfig) accept and refuse the same keyring files. The
-// shared refactor is deferred to T7 (pkg/hub/keyring.go is T6/T7's file);
-// until then this table pins the two together.
+// `scion server keys check` (CheckKeyringFile) and startup
+// (validateKeyringConfig) accept and refuse the same keyring files. Until
+// the two share one implementation, this table pins them together.
 func TestCheckKeyringFile_ParityWithValidateKeyringConfig(t *testing.T) {
 	for name, k := range map[string]*keyring.Keyring{
 		"pilot active legacy": ksKeyringA(t),
@@ -733,9 +732,9 @@ func TestCheckKeyringFile_ParityWithValidateKeyringConfig(t *testing.T) {
 	}
 }
 
-// Review item 2: the report's signing readiness reason equals /readyz's
-// (signingNotReadyReason) for every keyring state and clock. The shared
-// refactor is deferred to T7, like item 1.
+// The report's signing readiness reason equals /readyz's
+// (signingNotReadyReason) for every keyring state and clock, until the two
+// share one implementation.
 func TestKeyStatus_SigningReasonParityWithReadyz(t *testing.T) {
 	closing := ksFile(t, ksPilotDoc("rev-s", "legacy",
 		[]any{ksEntry("legacy", krLegacySecret, krTime(time.Hour), krTime(48*time.Hour))}, []any{"legacy"}))
@@ -768,7 +767,7 @@ func TestKeyStatus_SigningReasonParityWithReadyz(t *testing.T) {
 	assert.Equal(t, readyReasonSigningIssuanceClosed, srv.signingNotReadyReason())
 }
 
-// Review item 6 / N9: in legacy mode without a session secret, the local
+// In legacy mode without a session secret, the local
 // report audits like a Hub started without one, so the endpoint and the CLI
 // agree (instance identity and audit timing aside).
 func TestKeyStatus_SecretlessLegacyParity(t *testing.T) {
@@ -834,7 +833,7 @@ func (s *ksFailingPolicyStore) GetEncryptionPolicy(ctx context.Context) (*store.
 	return s.Store.GetEncryptionPolicy(ctx)
 }
 
-// Review item 8: a store failure answers 503 with a generic message, and
+// A store failure answers 503 with a generic message, and
 // the store error reaches only the server log.
 func TestKeyStatus_StoreFailureIs503(t *testing.T) {
 	logs := captureLogs(t)
