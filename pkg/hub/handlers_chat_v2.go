@@ -3133,7 +3133,9 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	writeJSON(w, http.StatusOK, s.chatHistoryPage(ctx, wcs, key, historyConvID, result, canPost))
+	page := s.chatHistoryPage(ctx, wcs, key, historyConvID, result, canPost)
+	page.Retention = s.chatHistoryRetentionMarker(ctx, result, historyConvID, topic)
+	writeJSON(w, http.StatusOK, page)
 }
 
 // chatHistoryPage enriches one page of conversation history for the
@@ -3217,8 +3219,21 @@ func (s *Server) chatHistoryPage(ctx context.Context, wcs WebChatStore, key, his
 				}
 
 				refMsgs, err := s.store.GetMessagesByIDs(ctx, replyToIDs)
-				if err == nil && len(refMsgs) > 0 {
-					replyPreviews = make(map[string]chatReplyPreview, len(refMsgs))
+				if err == nil {
+					replyPreviews = make(map[string]chatReplyPreview, len(replyToIDs))
+					// A reply target that no longer exists (removed by
+					// chat retention or any other hard delete) gets a
+					// preview marked unavailable, so the client can show
+					// a muted quote instead of dropping it.
+					for _, id := range replyToIDs {
+						if _, ok := refMsgs[id]; !ok {
+							replyPreviews[id] = chatReplyPreview{
+								MessageID:   id,
+								Content:     chatReplyUnavailablePreview,
+								Unavailable: true,
+							}
+						}
+					}
 					for id, refMsg := range refMsgs {
 						// A preview shows only a message of this
 						// conversation, also for reply rows stored
@@ -5863,6 +5878,16 @@ type chatHistoryResponse struct {
 	MessageArtifactsUnavailable []string                      `json:"messageArtifactsUnavailable,omitempty"`
 	MessageExtensions           map[string]*WebChatMessageExt `json:"messageExtensions,omitempty"` // Phase-3: keyed by message ID
 	ReplyPreviews               map[string]chatReplyPreview   `json:"replyPreviews,omitempty"`     // Phase-3: keyed by reply-to message ID
+	// Retention marks where the conversation's history now starts because
+	// of the hub's chat retention policy (hub.chat_retention). Set only on
+	// the oldest page (no nextCursor); see chatHistoryRetentionMarker.
+	Retention *chatHistoryRetention `json:"retention,omitempty"`
+}
+
+// chatHistoryRetention is the history page's retention marker: messages
+// before PurgedBefore are removed by the hub's retention policy.
+type chatHistoryRetention struct {
+	PurgedBefore time.Time `json:"purgedBefore"`
 }
 
 // chatReplyPreview provides a truncated preview of the message being replied to.
@@ -5870,7 +5895,15 @@ type chatReplyPreview struct {
 	MessageID  string `json:"messageId"`
 	SenderName string `json:"senderName"`
 	Content    string `json:"content"` // truncated to 100 chars
+	// Unavailable is true when the replied-to message no longer exists
+	// (for example removed by chat retention). SenderName is then empty
+	// and Content is chatReplyUnavailablePreview.
+	Unavailable bool `json:"unavailable,omitempty"`
 }
+
+// chatReplyUnavailablePreview is the content of a reply preview whose
+// target message no longer exists.
+const chatReplyUnavailablePreview = "[no longer available]"
 
 type chatDMListResponse struct {
 	DMs []chatDMEntry `json:"dms"`

@@ -153,6 +153,11 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		hubDispatchedAgentID = opts.Env["SCION_AGENT_ID"]
 	}
 
+	// A create over a legacy agent directory no agent owns is refused
+	// before any side effect.
+	if err := refuseRetiredLegacyAgent(projectDir, opts); err != nil {
+		return nil, err
+	}
 	// Fail on an unusable image provenance record before any side effect
 	// (the container cleanup below, prompt.md), reading the same agent dir
 	// GetAgent will use (AgentStateDir, including its effective
@@ -1482,11 +1487,13 @@ authDone:
 
 	// Inject agent limit env vars from scion config
 	if finalScionCfg != nil {
-		if finalScionCfg.MaxTurns > 0 {
-			opts.Env["SCION_MAX_TURNS"] = strconv.Itoa(finalScionCfg.MaxTurns)
+		// An unset count limit was filled from the defaults above; an
+		// explicit 0 ("no limit", ptone/scion#5605) sets no env var.
+		if n, ok := finalScionCfg.TurnLimit(); ok {
+			opts.Env["SCION_MAX_TURNS"] = strconv.Itoa(n)
 		}
-		if finalScionCfg.MaxModelCalls > 0 {
-			opts.Env["SCION_MAX_MODEL_CALLS"] = strconv.Itoa(finalScionCfg.MaxModelCalls)
+		if n, ok := finalScionCfg.ModelCallLimit(); ok {
+			opts.Env["SCION_MAX_MODEL_CALLS"] = strconv.Itoa(n)
 		}
 		if finalScionCfg.MaxDuration != "" {
 			opts.Env["SCION_MAX_DURATION"] = finalScionCfg.MaxDuration

@@ -113,7 +113,7 @@ export interface HealthSummarySchedules {
 
 /** Fixed text per known pause reason code. */
 const PAUSED_REASON_LABELS: Readonly<Record<string, string>> = {
-  creator_deleted: 'the agent that created it was deleted',
+  creator_deleted: 'the agent or user it runs under was deleted',
   cron_zone_unsupported: 'its cron expression names a time zone, which is not supported',
 };
 

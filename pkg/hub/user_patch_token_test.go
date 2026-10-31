@@ -62,7 +62,8 @@ func upProjectCredential(t *testing.T, srv *Server, s store.Store, adminID, name
 }
 
 // upTokenRefusal returns the response body of the PATCH /api/v1/users/{id}
-// refusal for a token that may use neither user.update nor user.suspend.
+// refusal for a token that may use none of user.update, user.suspend and
+// user.promote.
 func upTokenRefusal() string {
 	rec := httptest.NewRecorder()
 	writeUserPatchTokenRefusal(rec)
@@ -199,42 +200,13 @@ func TestUserPatchToken_StatusRequiresSuspendSelector(t *testing.T) {
 	assert.Equal(t, store.UserStatusSuspended, upUser(t, s, target).Status)
 }
 
-// TestUserPatchToken_RoleFieldRefused pins that a PATCH naming role by a
-// token that may use user.update or user.suspend on the user is refused as
-// session-only (GOV_PENDING), whatever the role value, and writes nothing.
-// A token that may use neither gets the fixed refusal
-// (TestUserPatchToken_RefusalSameForEveryUserID). A session changes the
-// role.
-func TestUserPatchToken_RoleFieldRefused(t *testing.T) {
-	srv, s := testServer(t)
-	admin := hubConfigTokenUser(t, s, "up-role-super", store.SystemRoleSuperAdmin)
-	target := upTarget(t, s, "up-role-target")
-	path := "/api/v1/users/" + target
-
-	key := mintHubConfigToken(t, srv, admin, hubBoundary(), "user:read", "user:suspend", "user:update")
-	for _, body := range []map[string]interface{}{
-		{"role": store.UserRoleAdmin},
-		{"role": store.UserRoleMember},
-		{"role": "not-a-role"},
-		{"role": store.UserRoleViewer, "displayName": "With Role"},
-	} {
-		rec := doRequestWithToken(t, srv, key, http.MethodPatch, path, body)
-		requireSessionOnlyRefusal(t, rec, authzop.ReasonGovernancePending, "role field")
-	}
-	got := upUser(t, s, target)
-	assert.Equal(t, store.UserRoleMember, got.Role)
-	assert.NotEqual(t, "With Role", got.DisplayName)
-
-	rec := doRequestAsUser(t, srv, upUser(t, s, admin), http.MethodPatch, path, map[string]string{"role": store.UserRoleViewer})
-	require.Equal(t, http.StatusOK, rec.Code, "session: %s", rec.Body.String())
-	assert.Equal(t, store.UserRoleViewer, upUser(t, s, target).Role)
-}
-
 // TestUserPatchToken_MixedFieldsAllOrNothing pins that a token PATCH
 // naming several fields needs the permission of every field before any
 // write: status with a profile field needs user:suspend and user:update,
 // and missing either writes nothing; with both, every field is written;
-// with a role field added, nothing is written.
+// with a role field added, the token also needs user:promote, and without
+// it nothing is written (TestUserPatchToken_MixedRoleAndStatusAllOrNothing
+// pins the role field with user:promote).
 func TestUserPatchToken_MixedFieldsAllOrNothing(t *testing.T) {
 	srv, s := testServer(t)
 	admin := hubConfigTokenUser(t, s, "up-mixed-super", store.SystemRoleSuperAdmin)
@@ -255,7 +227,8 @@ func TestUserPatchToken_MixedFieldsAllOrNothing(t *testing.T) {
 	both := mintHubConfigToken(t, srv, admin, hubBoundary(), "user:suspend", "user:update")
 	withRole := map[string]interface{}{"status": store.UserStatusSuspended, "displayName": "Mixed Rename", "role": store.UserRoleViewer}
 	rec := doRequestWithToken(t, srv, both, http.MethodPatch, path, withRole)
-	requireSessionOnlyRefusal(t, rec, authzop.ReasonGovernancePending, "mixed fields with role")
+	assert.Equal(t, http.StatusForbidden, rec.Code, "mixed fields with role, no user:promote: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "requires user.promote permission")
 	got := upUser(t, s, target)
 	assert.Equal(t, store.UserStatusActive, got.Status)
 	assert.Equal(t, original, got.DisplayName)
@@ -436,13 +409,13 @@ func upAuditShape(t *testing.T, records []*store.DecisionAuditRecord, id, label 
 }
 
 // TestUserPatchToken_RefusalDecisionAudited pins that the refusal of a
-// PATCH of another user by a token that may use neither user.update nor
-// user.suspend comes from authorization decisions on the hub-level user
-// record that are audited as denies, one for user.update and one for
-// user.suspend, and that the records have the same shape whether or not
-// the user exists: for a super-admin's token with no user selector and
-// for a token with both selectors whose holder holds neither
-// permission.
+// PATCH of another user by a token that may use none of user.update,
+// user.suspend and user.promote comes from authorization decisions on the
+// hub-level user record that are audited as denies, one for each of
+// user.update, user.suspend and user.promote, and that the records have
+// the same shape whether or not the user exists: for a super-admin's token
+// with no user selector and for a token with user:update and user:suspend
+// whose holder holds neither permission.
 func TestUserPatchToken_RefusalDecisionAudited(t *testing.T) {
 	srv, s := testServer(t)
 	admin := hubConfigTokenUser(t, s, "up-audit-super", store.SystemRoleSuperAdmin)
@@ -477,7 +450,7 @@ func TestUserPatchToken_RefusalDecisionAudited(t *testing.T) {
 					userDenies = append(userDenies, r.PermissionID)
 				}
 			}
-			assert.Equal(t, []string{"user.update", "user.suspend"}, userDenies, "%s %s: audited decisions", c.label, id)
+			assert.Equal(t, []string{"user.update", "user.suspend", "user.promote"}, userDenies, "%s %s: audited decisions", c.label, id)
 			shapes[i] = upAuditShape(t, emitter.records, id, c.label)
 		}
 		assert.Equal(t, bodies[0], bodies[1], "%s: body", c.label)

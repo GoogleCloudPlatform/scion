@@ -391,6 +391,9 @@ func TestRunGitClone_TokenBoundToRecordedRemoteAndNoRedirects(t *testing.T) {
 
 // A clone of a non-https URL never gets the token or a credential helper,
 // even when it names the recorded remote; the matching https URL gets both.
+// Every clone carries the remote layer's three credential resets
+// (credential.helper, http.extraHeader and its URL-scoped form); the scoped
+// helper adds two more entries (its own reset and the helper).
 func TestRunGitClone_TokenNotUsedForNonHTTPS(t *testing.T) {
 	depth := 0
 	clone := func(cloneURL string) string {
@@ -409,10 +412,10 @@ func TestRunGitClone_TokenNotUsedForNonHTTPS(t *testing.T) {
 	}
 	got := clone("http://git.example.com/org/repo.git")
 	assert.Contains(t, got, "SCOPED=\n", "a non-https URL gets no token")
-	assert.Contains(t, got, "CFG=\n", "no credential helper")
+	assert.Contains(t, got, "CFG=3\n", "no credential helper: the resets only")
 	assert.Contains(t, got, "TOKEN=\n", "the token never rides in GITHUB_TOKEN")
 	got = clone("https://git.example.com/org/repo.git")
 	assert.Contains(t, got, "SCOPED="+testCloneToken+"\n", "fixture check: the matching https URL gets the token via the scoped helper env")
-	assert.Contains(t, got, "CFG=2\n", "the host-scoped credential helper is installed")
+	assert.Contains(t, got, "CFG=5\n", "the host-scoped credential helper is installed after the resets")
 	assert.Contains(t, got, "TOKEN=\n", "the token is delivered via the scoped helper, never GITHUB_TOKEN")
 }

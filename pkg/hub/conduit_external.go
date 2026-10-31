@@ -158,7 +158,7 @@ func (s *Server) StartConduitExternal(ctx context.Context, opts ConduitExternalO
 		return errors.New("conduit already started")
 	}
 	// Admission tokens minted on one hub replica must open on every other.
-	if _, err := s.conduitAdmissionAEAD(); err != nil {
+	if err := s.checkConduitAdmissionKeys(); err != nil {
 		return fmt.Errorf("conduit external relay mode: %w", err)
 	}
 	if opts.PeerAuth == nil {

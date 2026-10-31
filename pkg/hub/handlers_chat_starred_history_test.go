@@ -259,13 +259,26 @@ func TestChatStarredHistory_CursorBinding(t *testing.T) {
 	next := decodeHistory(t, f.session(t, f.admin, http.MethodGet, starredHistoryPath(f.topicA, "limit=5", "cursor="+c), nil))
 	assert.Equal(t, []string{ids[1], ids[0]}, historyIDs(next))
 
+	// Tamper a character in the middle of the cursor's base64 body. Changing
+	// the last characters can leave the decoded bytes unchanged (the decoder
+	// ignores trailing bits), and the cursor would still be valid.
+	tampered := []byte(first.NextCursor)
+	mid := strings.LastIndex(first.NextCursor, ".") + 1
+	mid += (len(tampered) - mid) / 2
+	if tampered[mid] == 'A' {
+		tampered[mid] = 'B'
+	} else {
+		tampered[mid] = 'A'
+	}
+	require.NotEqual(t, first.NextCursor, string(tampered))
+
 	for _, c := range []struct {
 		name, user, path string
 	}{
 		{"another caller", f.owner, starredHistoryPath(f.topicA, "cursor="+c)},
 		{"another conversation", f.admin, starredHistoryPath(f.topicB, "cursor="+c)},
 		{"an ordinary history cursor", f.admin, starredHistoryPath(f.topicA, "cursor="+nc)},
-		{"a tampered cursor", f.admin, starredHistoryPath(f.topicA, "cursor="+url.QueryEscape(first.NextCursor[:len(first.NextCursor)-2]+"AA"))},
+		{"a tampered cursor", f.admin, starredHistoryPath(f.topicA, "cursor="+url.QueryEscape(string(tampered)))},
 	} {
 		rec := f.session(t, c.user, http.MethodGet, c.path, nil)
 		assert.Equal(t, http.StatusBadRequest, rec.Code, "%s: %s", c.name, rec.Body.String())

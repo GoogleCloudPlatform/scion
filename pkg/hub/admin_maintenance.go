@@ -405,10 +405,11 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 		log.Debug("Resolved update-binary executor",
 			"installer", installer.Name(), "github_repo", mc.GitHubRepo)
 		return NewBinaryUpdateExecutor(BinaryUpdateOptions{
-			GitHubRepo: mc.GitHubRepo,
-			Installer:  installer,
-			Releases:   s.updateReleaseSource(),
-			Catalog:    s.updateReleaseCatalog(),
+			GitHubRepo:  mc.GitHubRepo,
+			Installer:   installer,
+			Releases:    s.updateReleaseSource(),
+			Catalog:     s.updateReleaseCatalog(),
+			Snapshotter: s.updateSnapshotter(context.Background()),
 		}), nil
 	default:
 		return nil, fmt.Errorf("no executor registered for operation %q", key)
@@ -498,6 +499,25 @@ func (s *Server) executeOperation(w http.ResponseWriter, r *http.Request, key st
 			log.Debug("Rejected: invalid parameters", maintenanceLogAttrs(key, "error", err)...)
 			writeMaintenanceRequestError(w, err)
 			return
+		}
+	}
+
+	// Checks that need a release lookup (cross-channel order, the floor of
+	// a preview or stable target, the confirmation of an older target) are
+	// answered here too, so the 409 downgrade_requires_confirmation and its
+	// risk list reach the caller instead of a failed run. A lookup that
+	// fails is not a refusal: the run repeats every check.
+	if c, ok := executor.(maintenance.TargetChecker); ok {
+		checkCtx, cancel := context.WithTimeout(ctx, maintenanceTargetCheckTimeout)
+		err := c.CheckTarget(checkCtx, params)
+		cancel()
+		if _, refused := maintenance.IsRequestError(err); refused {
+			log.Debug("Rejected: target refused", maintenanceLogAttrs(key, "error", err)...)
+			writeMaintenanceRequestError(w, err)
+			return
+		} else if err != nil {
+			log.Warn("Could not check the target before the run; the run checks it again",
+				maintenanceLogAttrs(key, "error", err)...)
 		}
 	}
 

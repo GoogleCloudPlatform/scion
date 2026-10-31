@@ -6,7 +6,7 @@ ephemeral GitHub Actions JIT runner. That runner takes one job and then exits.
 | File | Purpose |
 | :--- | :--- |
 | [`Dockerfile`](Dockerfile) | Image: Ubuntu 24.04, GitHub Actions runner, Go, golangci-lint, git (built from pinned source, >= 2.48), jq, curl, zstd, ca-certificates, and the tools routed CI jobs expect preinstalled (make, procps, python3 + python3-yaml, ripgrep, tmux, shellcheck 0.9.0, openssh-client); non-root `runner` user (uid 1001, `HOME=/home/runner`) |
-| [`entrypoint.sh`](entrypoint.sh) | PID 1: checks `/scratch`, redirects caches, does the claim exchange, then runs `./run.sh --jitconfig` as a child, forwards signals and exits with the runner's real exit code |
+| [`entrypoint.sh`](entrypoint.sh) | PID 1: checks the volume at HOME, creates the work and cache directories on it, does the claim exchange, then runs `./run.sh --jitconfig` as a child, forwards signals and exits with the runner's real exit code |
 | [`entrypoint_test.go`](entrypoint_test.go) | Offline harness: runs `entrypoint.sh` against a fake claim server on loopback with a stub `run.sh` |
 
 ## Build arguments
@@ -65,15 +65,20 @@ therefore shared in both directions only if all of these hold:
   `GOCACHE=$HOME/.cache/go-build`, `GOMODCACHE=$HOME/go/pkg/mod`,
   `GOPATH=$HOME/go` and `GOLANGCI_LINT_CACHE=$HOME/.cache/golangci-lint`, and
   leaves `XDG_CACHE_HOME` unset.
-- **Bytes on the disk:** the entrypoint links `~/work`, `~/.cache` and `~/go`
-  into `/scratch` (step 3). The link targets mirror `$HOME` under `/scratch`
-  (`/scratch/_work`, `/scratch/.cache`, `/scratch/go`), because the kernel
-  resolves `..` physically. From the physical workspace
-  `/scratch/_work/<repo>/<repo>`, an entry `../../../.cache/X` lands in
-  `/scratch/.cache/X`, which is exactly where `~/.cache/X` points. A
-  non-mirrored target such as `/scratch/cache` would restore entries next to
-  Go's cache, not into it. `TestEntrypointCacheTarRoundTrip` reproduces the
-  round trip in both directions.
+- **Bytes on the disk:** the Cloud Run Job mounts its ephemeral-disk volume at
+  HOME (`/home/runner`), and the entrypoint creates `~/work`, `~/.cache`, `~/go`
+  and `~/.npm` as **real directories** on it (step 3). There are no symlinks, so
+  every physical path is the logical one: an entry `../../../.cache/X` from the
+  workspace lands in `~/.cache/X`, and a whole-directory archive (the member
+  `../../../.npm/` that actions/setup-node's npm cache produces) restores onto
+  the real `~/.npm`. A symlink there would be replaced by GNU tar with a real
+  directory (it does that for a directory member unless `--keep-directory-symlink`,
+  which actions/cache does not pass), and would also make an action's
+  `process.cwd()` differ from `GITHUB_WORKSPACE` (actions/setup-node's lock-file
+  hashing then finds nothing). `TestEntrypointCacheTarRoundTrip` and
+  `TestEntrypointCacheTarWholeDirectory` reproduce the round trips.
+  (Runner images before cr-ci FIXUP-5 mounted the volume at `/scratch` and
+  linked these paths into it; see docs/operations.md, "Runner layout switch".)
 
 The workflow templates' self-hosted step only verifies this layout; it
 creates nothing. Parity holds for any routed workflow.
@@ -109,59 +114,66 @@ this, in order:
    exactly 32 lowercase hex chars (the mediator uses `hex.EncodeToString`;
    uppercase is rejected). `MEDIATOR_URL` must be an https origin; plain http is
    accepted only for `127.0.0.1` and `localhost`, which the test harness uses.
-2. **Checks `/scratch`.** `/scratch` must exist, be a mount point, and be
-   writable. If any check fails, it exits 2 before the token is spent. Cloud
-   Run's root filesystem is in memory, so a missing volume would silently turn
-   the caches into RAM use. The mount check first looks for `/scratch` in
-   `/proc/self/mountinfo`. If it is not listed there, or the table cannot be
-   read, the fallback accepts `/scratch` when `stat -c %d` reports a different
-   device for it than for its parent directory. The log line
-   `/scratch is a mount (<fstype>): ...` says which check matched. If
-   `/scratch` is tmpfs (an in-memory volume), it logs a warning.
+2. **Checks the volume at HOME.** HOME (`/home/runner`) must exist, be a mount
+   point, and be writable. If any check fails, it exits 2 before the token is
+   spent. Cloud Run's root filesystem is in memory, so a missing volume would
+   silently turn the caches into RAM use. The mount check first looks for HOME
+   in `/proc/self/mountinfo`. If it is not listed there, or the table cannot be
+   read, the fallback accepts HOME when `stat -c %d` reports a different device
+   for it than for its parent directory. The log line
+   `/home/runner is a mount (<fstype>): ...` says which check matched. If the
+   volume is tmpfs (in memory), it logs a warning. A job definition that still
+   mounts the volume at `/scratch` (an image/job mismatch) fails here: exit 2,
+   with a hint to run `deploy-job.sh`, which updates the image and the mount
+   together.
 
-   **P6 PoC checkpoint:** neither check has run on Cloud Run's gVisor yet.
-   Confirm from the execution log that one of them matches the ephemeral-disk
-   at `/scratch` (ideally `listed in /proc/self/mountinfo`). If neither does,
-   every execution exits 2.
-3. **Links HOME into `/scratch`** (see "Cache parity" above). Each link is
-   handled as follows: a correct link is kept; a missing path is created as
-   the link; a real file or directory, or a link to anywhere else, exits 2
-   before the token is spent. The links are the parents of the cached paths,
-   so tar never replaces one.
+   It also logs the volume root's owner and mode
+   (`volume root /home/runner: owner uid N, mode M`). Cloud Run creates the
+   volume "so that any user can read or write to it"; the entrypoint sets it to
+   0755 only if this uid owns it, and otherwise leaves it. A world-writable HOME
+   is a documented residual ([architecture](../docs/architecture.md#constraints)).
+3. **Creates the work and cache directories on the volume** (see "Cache parity"
+   above). Each of `~/work`, `~/.cache`, `~/go` and `~/.npm` is created as a real
+   directory, or kept if it already is one; a symlink or a non-directory there
+   exits 2 before the token is spent.
 
-   | Link | Target | Holds |
-   | :--- | :--- | :--- |
-   | `~/work` | `/scratch/_work` | the runner work folder (`work_folder` = `/home/runner/work`) |
-   | `~/.cache` | `/scratch/.cache` | `GOCACHE`, `GOLANGCI_LINT_CACHE`, any XDG cache |
-   | `~/go` | `/scratch/go` | `GOPATH`, `GOMODCACHE` |
-   | `~/.npm` | `/scratch/.npm` | npm's cache (actions/setup-node's npm cache step also needs the directory to exist) |
+   | Directory | Holds |
+   | :--- | :--- |
+   | `~/work` | the runner work folder (`work_folder` = `/home/runner/work`) |
+   | `~/.cache` | `GOCACHE`, `GOLANGCI_LINT_CACHE`, any XDG cache |
+   | `~/go` | `GOPATH`, `GOMODCACHE` |
+   | `~/.npm` | npm's cache (actions/setup-node's npm cache step also needs the directory to exist) |
 
    **RAM build cache.** With `RUNNER_BUILD_CACHE_IN_RAM=true` (set on the job by
-   `deploy-job.sh` from `config.env`), `/scratch/.cache` is itself a link to a
-   directory on the in-memory root filesystem (`/tmp/cr-ci-build-cache`), made by
-   the same rules before `~/.cache` is linked to it. `~/.cache` still reads
-   `/scratch/.cache`, so the parity above holds and archive entries land in RAM.
-   The cache then counts against the memory limit
+   `deploy-job.sh` from `config.env`), `~/.cache` is instead a link to a
+   directory on the in-memory root filesystem (`/tmp/cr-ci-build-cache`). Archive
+   entries under `~/.cache/...` still land in RAM (tar follows a link in a leading
+   component), but a whole-`~/.cache` archive would replace the link. The cache
+   then counts against the memory limit
    ([architecture](../docs/architecture.md#constraints)). Any other value than
    `true` or `false` exits 2.
 
    It exports `GOCACHE`, `GOMODCACHE`, `GOPATH` and `GOLANGCI_LINT_CACHE` as
-   on ubuntu-latest, leaves `XDG_CACHE_HOME` unset, and exports
-   `RUNNER_WORKSPACE=$HOME/work` and `RUNNER_TEMP`/`TMPDIR=/scratch/_temp`.
-   For job steps, the runner sets `RUNNER_WORKSPACE` and `RUNNER_TEMP` itself,
-   under its work folder. The runner's `_diag` directory (its own logs, and
-   the job's step logs under `_diag/pages`, which grow with the job's output:
-   about 1 MB for the P6 lint job) is deliberately **not** on `/scratch`: it stays on the root
-   filesystem, so a job that fills `/scratch` cannot crash the runner and lose the
-   job log with it (P6 PoC run 2). The image also keeps a
-   `_work` symlink to `/scratch/_work` in the runner directory, for a JIT
-   config that names the default `_work`.
+   on ubuntu-latest, leaves `XDG_CACHE_HOME` and `TMPDIR` unset (temp files go
+   to `/tmp`, root-owned and sticky, as on ubuntu-latest; tools that check a
+   temp directory's ancestors accept it), exports `GOTMPDIR=~/.cr-ci/go-tmp`
+   (Go's build and test temp work stays on the volume), and exports
+   `RUNNER_WORKSPACE=$HOME/work` and `RUNNER_TEMP=$HOME/work/_temp`. For job
+   steps, the runner sets `RUNNER_WORKSPACE` and `RUNNER_TEMP` itself, under its
+   work folder. Other temp files (Go tests' `t.TempDir()`, npm) now use `/tmp`,
+   that is RAM: measure before routing temp-heavy jobs such as build-and-test.
+   The runner is installed at `/opt/actions-runner`, not under HOME (the mount
+   would hide it), so its `_diag` directory (its own logs, and the job's step
+   logs under `_diag/pages`, which grow with the job's output: about 1 MB for
+   the P6 lint job) stays on the root filesystem: a job that fills the volume
+   cannot crash the runner and lose the job log with it (P6 PoC run 2). The image
+   also keeps a `_work` symlink to `/home/runner/work` in the runner directory,
+   for a JIT config that names the default `_work`.
 
-   **P6 PoC checkpoint:** the runner builds the work directory with
-   `Path.GetFullPath(Path.Combine(root, work_folder))`, which on Unix does not
-   resolve symlinks, so `GITHUB_WORKSPACE` should read
-   `/home/runner/work/...`. Confirm it in the PoC log, and confirm
-   `go env GOCACHE` is `/home/runner/.cache/go-build`.
+   The work folder is a real directory, so `GITHUB_WORKSPACE`
+   (`/home/runner/work/<repo>/<repo>`) is also the physical path, and
+   `go env GOCACHE` is `/home/runner/.cache/go-build`; the setup-go-cache parity
+   step checks both on every routed Go job.
 4. **Claims the JIT config** (claim contract v2,
    `gs://scion-xproject-exchange/cr-ci/claim-contract-v2.md`). The claim is
    bound to the execution's workload identity, so a principal that can read
@@ -199,7 +211,7 @@ this, in order:
 
 5. **Runs the runner and reports its real exit code.** It unsets
    `RUNNER_CLAIM_TOKEN` and starts `./run.sh --jitconfig <config>` in
-   `/home/runner/actions-runner` as a **child** (not `exec`), for two reasons:
+   `/opt/actions-runner` as a **child** (not `exec`), for two reasons:
    - **Exit code.** In actions/runner (checked in v2.338.0), `run-helper.sh`
      maps every Runner.Listener exit code it does not know, an abort's 134
      included, to exit 0 after printing `Exiting with unknown error code: N`.
@@ -237,7 +249,7 @@ this, in order:
      `run.sh` exits.
 
    The output goes through FIFOs in a private temp dir under `/tmp`, small and
-   on the root filesystem, never on `/scratch`. A watcher process that does not
+   on the root filesystem, never on the volume. A watcher process that does not
    finish within 5 s of `run.sh`'s exit is abandoned, so a stray process holding
    the pipe cannot keep the execution alive.
 
@@ -245,7 +257,7 @@ Exit codes: the runner's (above) once `run.sh` has started, 0 for an idle stop,
 **4** when an idle stop raced a job start, and **5** when the job guard refused the
 assigned job (above). A 4 can also be the runner's own
 code passed through; the `ERROR idle_timeout_raced_job` log line tells them apart. Before that, **2** for a configuration error (env,
-`HOME`, `/scratch`, a HOME link, missing `run.sh`) and **3** for a failed claim. Neither path starts
+`HOME`, the volume at HOME, a work or cache directory, missing `run.sh`) and **3** for a failed claim. Neither path starts
 `run.sh`. If a claim is lost (for example, the mediator restarted and its
 in-memory claims are gone), the runner exits 3. `/reconcile` then deletes the
 orphaned `cr-job-*` registration and relaunches the job if it is still queued.
@@ -367,9 +379,9 @@ cd cr-ci && go test ./runner/
 
 The harness needs `bash`, `curl`, `jq`, `awk` and `tar`, and no network or GCP
 access. It uses throwaway random tokens and configs. Test-only overrides
-point the script at a temp scratch directory, a fake mount table, a stub
-runner directory, a zero retry backoff, and a fake metadata server on
-loopback: `CR_SCRATCH_DIR`, `CR_MOUNTINFO`, `CR_RUNNER_DIR`,
+point the script at a fake mount table (which lists the temp HOME as the
+volume), a stub runner directory, a zero retry backoff, and a fake metadata
+server on loopback: `CR_MOUNTINFO`, `CR_RUNNER_DIR`,
 `CR_CLAIM_BACKOFF_SECONDS` and `CR_METADATA_URL`. `CR_EXPECTED_HOME` (default
 `/home/runner`) lets the harness use a temp dir as `HOME`. `CR_METADATA_URL` defaults
 to `http://metadata.google.internal` and accepts only that value or a
@@ -394,7 +406,7 @@ covers:
   `format=full`. The claim carries `Bearer <ID token>` and
   `X-Runner-Claim: <claim token>`. `run.sh` gets `--jitconfig <config>`, is
   the entrypoint's child with SIGINT not ignored, runs in the runner dir, and
-  sees the `/scratch` env but no token. The claim token, the ID token and the config appear on neither
+  sees the volume env (`RUNNER_TEMP` under `~/work`, `GOTMPDIR`, no `TMPDIR`) but no token. The claim token, the ID token and the config appear on neither
   stdout nor stderr. A RUNNER_NAME/GH_JOB_ID mismatch only warns.
 - **Identity.** A claim 401 exits 3 without retrying. Two metadata 5xx
   responses and then a token leads to a normal start on attempt 3. Five
@@ -410,24 +422,25 @@ covers:
   empty or non-string `jit_config` exits 3 without retrying. The retry delays
   are 1, 2, 4, 8 s by default, and they double from a fractional base too
   (checked with a `sleep` stub).
-- **`/scratch` problems.** A missing directory, a directory that is not a
-  mount point by either check, or a read-only `/scratch` exits 2 without
+- **Volume problems.** A missing HOME, a HOME that is not a mount point by
+  either check (including a job that mounts the volume at `/scratch`), or a
+  read-only volume exits 2 without
   contacting the mediator. tmpfs only logs a warning. The device fallback
   accepts a mount that is missing from the table, or used when the table is
   unreadable (checked with a `stat` stub).
-- **Cache parity.** Success leaves `~/work`, `~/.cache` and `~/go` linked to
-  their mirrored targets, and `run.sh` sees the ubuntu-latest Go paths and no
-  `XDG_CACHE_HOME`. Correct existing links are kept. A real `~/.cache` or
-  `~/work`, a `~/go` link elsewhere, a `~/.cache` link to the old
-  non-mirrored target, a wrong `HOME` or an unset `HOME` exits 2 without
-  contacting the mediator. A tar round trip with actions/cache's scheme
-  (`-P -C` the workspace, entries `../../../.cache/...` and
-  `../../../go/pkg/mod/...`) restores an ubuntu-latest archive to where Go
-  reads, with the bytes on the scratch disk and the links intact. The same
-  round trip restores a cr-ci archive under a plain ubuntu `HOME`. A
-  whole-directory archive (`../../../.cache`, directory entries included)
-  restores into `~/.cache` without replacing the link. A `HOME` where the
-  links cannot be created exits 2 without contacting the mediator.
+- **Cache parity.** Success leaves `~/work`, `~/.cache`, `~/go` and `~/.npm`
+  as real directories on the volume (or `~/.cache` a link to RAM in RAM mode),
+  and `run.sh` sees the ubuntu-latest Go paths and no `XDG_CACHE_HOME` or
+  `TMPDIR`. Existing directories are kept with their contents. A symlink at any
+  of them (the old `/scratch` layout included), a non-directory, a wrong `HOME`
+  or an unset `HOME` exits 2 without contacting the mediator. The volume root's
+  owner and mode are logged, and a root this uid owns is set to 0755. A tar
+  round trip with actions/cache's scheme (`-P -C` the workspace, entries
+  `../../../.cache/...` and `../../../go/pkg/mod/...`) restores an ubuntu-latest
+  archive to where Go reads, with the bytes on the volume. The same round trip
+  restores a cr-ci archive under a plain ubuntu `HOME`. Whole-directory archives
+  (`../../../.npm` and `../../../.cache`, directory entries included) restore
+  onto the real directories, physically on the volume.
 - **Bad env.** Any missing variable, a malformed (short or uppercase) token,
   a non-numeric job ID, a non-https or path-bearing URL, a non-loopback
   `CR_METADATA_URL`, or a missing `run.sh` exits 2 without contacting the

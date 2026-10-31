@@ -137,7 +137,7 @@ func New(mp metric.MeterProvider) (Recorder, error) {
 	if r.msgStuck, err = meter.Int64Gauge(
 		MetricMessageStuck,
 		metric.WithUnit("{message}"),
-		metric.WithDescription("Number of messages stuck in pending state beyond threshold"),
+		metric.WithDescription("Number of messages stuck in pending state beyond threshold, capped by the sweep (a value at the cap means at least that many)"),
 	); err != nil {
 		return nil, fmt.Errorf("registering %s: %w", MetricMessageStuck, err)
 	}

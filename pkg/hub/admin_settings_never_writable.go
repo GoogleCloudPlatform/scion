@@ -37,8 +37,9 @@ import (
 // project, which selects the service-account minting project
 // (ptone/scion#4942), and the server keyring file path (ptone/scion#1530:
 // the keyring is a deploy-time secret input read once at startup) and its
-// operator-only world-readable override. A key matches itself and every key
-// nested under it.
+// operator-only world-readable override, and server.trusted_proxies (the
+// transport policy's trust set). A key matches itself and every key nested
+// under it.
 var neverAPIWritableSettingsKeys = []string{
 	config.HubClassKey,
 	config.HubGCPProjectIDKey,
@@ -48,6 +49,10 @@ var neverAPIWritableSettingsKeys = []string{
 	config.ConduitPeerSecretKey,
 	config.KeyringFileKey,
 	config.KeyringFileAllowWorldReadableKey,
+	// The hub-broker transport policy's trusted proxy list: it decides
+	// whose X-Forwarded-Proto is trusted, so its trust set must not grow
+	// through the API.
+	config.TrustedProxiesKey,
 }
 
 // withoutNeverAPIWritableKeys returns keys without every never-API-writable

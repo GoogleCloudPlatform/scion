@@ -183,11 +183,11 @@ func TestRequireHubClient_ProjectFlagPrecedence(t *testing.T) {
 			tmpHome := t.TempDir()
 			globalDir := filepath.Join(tmpHome, ".scion")
 			require.NoError(t, os.MkdirAll(globalDir, 0755))
-			settings := "project_id: " + globalLocalID + "\nhub:\n  enabled: true\n  endpoint: http://hub.invalid\n"
+			settings := "project_id: " + globalLocalID + "\nhub:\n  enabled: true\n  endpoint: https://hub.invalid\n"
 			require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(settings), 0644))
 
 			t.Setenv("HOME", tmpHome)
-			setOrUnsetTestEnv(t, "SCION_HUB_ENDPOINT", "http://hub.invalid")
+			setOrUnsetTestEnv(t, "SCION_HUB_ENDPOINT", "https://hub.invalid")
 			setOrUnsetTestEnv(t, "SCION_HUB_URL", "")
 			setOrUnsetTestEnv(t, "SCION_HUB_PROJECT_ID", "")
 			setOrUnsetTestEnv(t, "SCION_PROJECT_ID", envProjectID)
@@ -282,13 +282,13 @@ func TestTemplateSyncHubContext(t *testing.T) {
 		globalLocalID = "global-local-id"
 		linkedID      = "linked-project-id"
 	)
-	setupFlagPrecedenceHome(t, "http://hub.invalid", globalLocalID, envProjectID)
+	setupFlagPrecedenceHome(t, "https://hub.invalid", globalLocalID, envProjectID)
 	setProjectFlagForTest(t, "global")
 
 	globalDir, err := config.GetResolvedProjectDir("global")
 	require.NoError(t, err)
 
-	hubCtx, err := templateSyncHubContext(globalDir, "http://hub.invalid", linkedID, true)
+	hubCtx, err := templateSyncHubContext(globalDir, "https://hub.invalid", linkedID, true)
 	require.NoError(t, err)
 	require.NotNil(t, hubCtx.Client)
 	assert.Equal(t, linkedID, hubCtx.ProjectID)
@@ -306,16 +306,16 @@ func TestTemplateSyncHubContext(t *testing.T) {
 // template sync targets a regular project directory.
 func TestTemplateSyncHubContext_NonGlobalProject(t *testing.T) {
 	const linkedID = "linked-project-id"
-	setupFlagPrecedenceHome(t, "http://hub.invalid", "", "")
+	setupFlagPrecedenceHome(t, "https://hub.invalid", "", "")
 
 	projectDir := filepath.Join(t.TempDir(), "proj", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"),
-		[]byte("hub:\n  enabled: true\n  endpoint: http://hub.invalid\n"), 0644))
+		[]byte("hub:\n  enabled: true\n  endpoint: https://hub.invalid\n"), 0644))
 	resolvedDir, err := filepath.EvalSymlinks(projectDir)
 	require.NoError(t, err)
 
-	hubCtx, err := templateSyncHubContext(resolvedDir, "http://hub.invalid", linkedID, false)
+	hubCtx, err := templateSyncHubContext(resolvedDir, "https://hub.invalid", linkedID, false)
 	require.NoError(t, err)
 	assert.False(t, hubCtx.IsGlobal, "a regular project path must not be reported as global")
 	assert.Equal(t, linkedID, hubCtx.ProjectID)
@@ -327,7 +327,7 @@ func TestTemplateSyncHubContext_NonGlobalProject(t *testing.T) {
 // than re-resolving the path, which follows the symlink and reports false.
 func TestTemplateSyncHubContext_SymlinkedGlobalDir(t *testing.T) {
 	const linkedID = "linked-project-id"
-	setupFlagPrecedenceHome(t, "http://hub.invalid", "global-local-id", "")
+	setupFlagPrecedenceHome(t, "https://hub.invalid", "global-local-id", "")
 	home := os.Getenv("HOME")
 	realDir := filepath.Join(t.TempDir(), "real-scion")
 	require.NoError(t, os.Rename(filepath.Join(home, ".scion"), realDir))
@@ -337,7 +337,7 @@ func TestTemplateSyncHubContext_SymlinkedGlobalDir(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, isGlobal, "hub link resolves the global dir as global")
 
-	hubCtx, err := templateSyncHubContext(resolvedPath, "http://hub.invalid", linkedID, isGlobal)
+	hubCtx, err := templateSyncHubContext(resolvedPath, "https://hub.invalid", linkedID, isGlobal)
 	require.NoError(t, err)
 	assert.True(t, hubCtx.IsGlobal, "template sync keeps the caller's isGlobal")
 	assert.Equal(t, resolvedPath, hubCtx.ProjectPath)

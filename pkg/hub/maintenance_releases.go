@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/GoogleCloudPlatform/scion/pkg/version/update"
 )
 
@@ -202,15 +203,28 @@ func newReleasesEntry(r maintenance.CatalogRelease, class string) releasesEntry 
 	return e
 }
 
+// releaseClassBelowFloor is the releases API class of a release older than
+// the running binary's downgrade floor.
+const releaseClassBelowFloor = "below-floor"
+
 // releaseClass classifies a catalog release against the running version
 // cur. A running git build is compared by its build time, so every release
 // is a switch-newer or switch-older (design D3). An order that cannot be
 // decided (no date on one side of a cross-channel comparison) is reported
 // as switch-older: the update executor refuses such a target as a possible
-// downgrade, so the picker must not offer it. below-floor is not produced
-// before Phase 3.
-func releaseClass(cur update.Ref, r maintenance.CatalogRelease) string {
-	c := update.CompareRefs(cur, update.Ref{Version: r.Tag, Date: r.PublishedAt})
+// downgrade, so the picker must offer it only behind the typed
+// confirmation. A release older than floor (version.DowngradeFloor) is
+// below-floor whatever its order: the executor refuses it
+// (below_downgrade_floor). A release whose floor order cannot be decided
+// (no publish date) keeps its class; the executor decides.
+func releaseClass(cur update.Ref, r maintenance.CatalogRelease, floor string) string {
+	tgt := update.Ref{Version: r.Tag, Date: r.PublishedAt}
+	c := update.CompareRefs(cur, tgt)
+	if c != update.ClassSame {
+		if below, known := update.BelowFloor(floor, tgt); known && below {
+			return releaseClassBelowFloor
+		}
+	}
 	if c == update.ClassUnknown {
 		return string(update.ClassSwitchOlder)
 	}
@@ -245,7 +259,7 @@ func (s *Server) buildReleasesResponse(ctx context.Context, cur runningBuild, re
 			out.Latest = &latest
 		}
 		for _, r := range ch.Releases {
-			out.Releases = append(out.Releases, newReleasesEntry(r, releaseClass(running, r)))
+			out.Releases = append(out.Releases, newReleasesEntry(r, releaseClass(running, r, version.DowngradeFloor)))
 		}
 		resp.Channels[name] = out
 	}

@@ -124,6 +124,7 @@ The per-harness login and capture details:
 | **OpenCode** | `opencode auth login` | `OPENCODE_AUTH` (file `~/.local/share/opencode/auth.json`) |
 | **Copilot** | `copilot login` | `COPILOT_CONFIG` (file `~/.copilot/config.json`) |
 | **Hermes** | `hermes setup` | *(none — Hermes is API-key only; provide the key up front)* |
+| **Pi** | `pi`, then `/login` | `PI_AUTH` (file `~/.pi/agent/auth.json`) |
 | **Antigravity** | `agy` | `AGY_TOKEN` (file `~/.gemini/antigravity-cli/antigravity-oauth-token`, with a gnome-keyring fallback) |
 
 ---

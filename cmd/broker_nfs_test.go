@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 )
 
 func nfsSettings(autoMount bool, shares ...config.V1NFSShare) *config.VersionedSettings {
@@ -238,7 +239,10 @@ func TestServerForeground_WiresBrokerNFSConfig(t *testing.T) {
 }
 
 type fakeNFSProbe struct {
-	mounts  map[string]string
+	mounts map[string]string
+	// options maps a mounted path to its mount table options; unset shows
+	// "rw,nosuid,nodev,relatime".
+	options map[string]string
 	mntErr  error
 	dialErr map[string]error
 	dialed  []string
@@ -246,12 +250,19 @@ type fakeNFSProbe struct {
 
 func (f *fakeNFSProbe) probe() nfsDoctorProbe {
 	return nfsDoctorProbe{
-		mountSource: func(path string) (string, bool, error) {
+		mountEntry: func(path string) (runtimebroker.MountEntry, bool, error) {
 			if f.mntErr != nil {
-				return "", false, f.mntErr
+				return runtimebroker.MountEntry{}, false, f.mntErr
 			}
 			src, ok := f.mounts[path]
-			return src, ok, nil
+			if !ok {
+				return runtimebroker.MountEntry{}, false, nil
+			}
+			opts, set := f.options[path]
+			if !set {
+				opts = "rw,nosuid,nodev,relatime"
+			}
+			return runtimebroker.MountEntry{Source: src, Options: opts}, true, nil
 		},
 		dial: func(addr string) error {
 			f.dialed = append(f.dialed, addr)
@@ -329,6 +340,15 @@ func TestCheckDoctorNFSMounts(t *testing.T) {
 			wantStatus: "fail", wantMessage: []string{"mounted from 10.9.9.9:/x"}},
 		{name: "wrong source", vs: nfsSettings(false, share1), probe: fakeNFSProbe{mounts: map[string]string{"/mnt/nfs/ws1": "10.9.9.9:/x"}},
 			wantStatus: "fail", wantMessage: []string{"mounted from 10.9.9.9:/x, expected 10.0.0.2:/scion-workspaces"}},
+		{name: "mounted without nosuid,nodev, auto_mount off: fail", vs: nfsSettings(false, share1),
+			probe:      fakeNFSProbe{mounts: good, options: map[string]string{"/mnt/nfs/ws1": "rw,relatime,vers=3"}},
+			wantStatus: "fail", wantMessage: []string{"mounted without nosuid,nodev", "remount it with nosuid,nodev"}},
+		{name: "mounted without nodev, auto_mount on: warn", vs: nfsSettings(true, share1),
+			probe:      fakeNFSProbe{mounts: good, options: map[string]string{"/mnt/nfs/ws1": "rw,nosuid,relatime"}},
+			wantStatus: "warn", wantMessage: []string{"mounted without nodev", "the broker remounts it"}},
+		{name: "mounted without nosuid,nodev, kubernetes default runtime: pass", vs: withDefaultRuntime(nfsSettings(true, share1), "gke", "kubernetes"),
+			probe:      fakeNFSProbe{mounts: good, options: map[string]string{"/mnt/nfs/ws1": "rw,relatime"}},
+			wantStatus: "pass", wantMessage: []string{"1 share(s) mounted and reachable"}},
 		{name: "server unreachable", vs: nfsSettings(false, share1),
 			probe:      fakeNFSProbe{mounts: good, dialErr: map[string]error{"10.0.0.2:2049": errors.New("refused")}},
 			wantStatus: "fail", wantMessage: []string{"server 10.0.0.2 unreachable on port 2049"}},
@@ -360,9 +380,9 @@ func TestDefaultNFSDoctorProbe_ReadsMountTable(t *testing.T) {
 	if _, err := os.Stat("/proc/mounts"); err != nil {
 		t.Skip("no /proc/mounts")
 	}
-	_, mounted, err := defaultNFSDoctorProbe().mountSource("/")
+	_, mounted, err := defaultNFSDoctorProbe().mountEntry("/")
 	if err != nil || !mounted {
-		t.Fatalf("mountSource(/) = %v, %v; want mounted", mounted, err)
+		t.Fatalf("mountEntry(/) = %v, %v; want mounted", mounted, err)
 	}
 }
 

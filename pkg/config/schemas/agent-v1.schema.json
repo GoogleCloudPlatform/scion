@@ -35,14 +35,14 @@
     "resources": { "$ref": "#/$defs/resourceSpec" },
     "max_turns": {
       "type": "integer",
-      "minimum": 1,
-      "description": "Maximum number of LLM turns before the agent is stopped.",
+      "minimum": 0,
+      "description": "Maximum number of LLM turns before the agent is stopped. 0 means no limit and overrides any inherited or default limit; omit the key to inherit.",
       "x-since": "1"
     },
     "max_model_calls": {
       "type": "integer",
-      "minimum": 1,
-      "description": "Maximum number of LLM model API calls before the agent is stopped.",
+      "minimum": 0,
+      "description": "Maximum number of LLM model API calls before the agent is stopped. 0 means no limit and overrides any inherited or default limit; omit the key to inherit.",
       "x-since": "1"
     },
     "clone_depth": {

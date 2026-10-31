@@ -15,6 +15,7 @@
     "startsInFlight",
     "sync",
     "templateTiers",
+    "unlimitedCountLimits",
     "webPty"
   ]
 }
