@@ -157,7 +157,7 @@ User-scoped secrets take priority over project-scoped ones with the same name (s
 
 A personal token (a user-scoped `GITHUB_TOKEN`, a token from the agent's own environment, or one collected from your shell) is offered to git only when the project's git remote is on the GitHub host: `github.com`, or the host of `github_app.api_base_url` when it is set for GitHub Enterprise.
 
-For a private repository on any other host, set `GITHUB_TOKEN` as a project secret: the Hub then clones and fetches it with that secret, and without a project secret it clones unauthenticated.
+For a private repository on any other host, set `GITHUB_TOKEN` as a project secret: the Hub and Runtime Broker then clone and fetch the project's recorded HTTPS remote with that secret, and without a project secret they run unauthenticated (never falling back to the host's git credential helpers, `~/.netrc`, or SSH keys). Hub-host clones and pulls of an SSH repository URL (`ssh://`, `git+ssh://`, `ssh+git://`, or `git@host:path`) also require a project git secret (`an ssh repository URL requires a project git secret`).
 
 ### Web Dashboard Alternative
 
