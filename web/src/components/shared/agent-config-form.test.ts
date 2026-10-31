@@ -245,6 +245,21 @@ describe('scion-agent-config-form unlimitedUnsupported', () => {
     expect(el.collectConfigPatch()).toEqual({ max_turns: 30 });
   });
 
+  it('gives the reason on a held count limit too', async () => {
+    const el = await mount({
+      values: { max_turns: 20 },
+      editability: editability('running', {
+        'config.max_turns': { ...NOW, disposition: 'held', unlimitedUnsupported: true },
+      }),
+    });
+    const f = field(el, 'config.max_turns');
+    expect(f.dataset.disposition).toBe('held');
+    expect(f.querySelector('sl-checkbox.unlimited')!.hasAttribute('disabled')).toBe(true);
+    expect(f.querySelector('[data-testid="unlimited-unsupported"]')!.textContent).toContain(
+      'cannot apply Unlimited over an inherited limit, or it has no runtime broker'
+    );
+  });
+
   it('only affects the field the hub flags', async () => {
     const el = await mount({
       values: { max_turns: 0, max_duration: '0' },

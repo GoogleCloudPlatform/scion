@@ -1337,7 +1337,7 @@ export class ScionAgentConfigForm extends LitElement {
                 keeps the previous value.</span
               >`
             : nothing}
-          ${this.notSaveableNote(st)}
+          ${this.unlimitedUnsupportedNote(f)}${this.notSaveableNote(st)}
         </div>`;
       case 'reincarnate':
         return html`<div class="status">
@@ -1356,17 +1356,21 @@ export class ScionAgentConfigForm extends LitElement {
                 value.</span
               >`
             : nothing;
-        const unlimitedNote = this.unlimitedUnsupported(f)
-          ? html`<span class="unlimited-note" data-testid="unlimited-unsupported">
-              ${UNLIMITED_UNSUPPORTED_REASON}</span
-            >`
-          : nothing;
+        const unlimitedNote = this.unlimitedUnsupportedNote(f);
         const help = f.help ? `${f.help} ` : '';
         return html`<div class="status help">
           <span>${help}${this.applyText(st)}${session}.</span>${clearNote}${unlimitedNote}
         </div>`;
       }
     }
+  }
+
+  /** Why the Unlimited control is disabled, wherever that control is shown. */
+  private unlimitedUnsupportedNote(f: AgentConfigFieldDef) {
+    if (!this.unlimitedUnsupported(f)) return nothing;
+    return html`<span class="unlimited-note" data-testid="unlimited-unsupported">
+      ${UNLIMITED_UNSUPPORTED_REASON}</span
+    >`;
   }
 
   /** Under a held or reincarnate-only field whose disposition cannot be saved yet. */

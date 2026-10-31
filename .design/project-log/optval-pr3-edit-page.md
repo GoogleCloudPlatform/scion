@@ -18,6 +18,10 @@ All changes are in `web/src/components/shared/agent-config-form.ts`, plus the tw
 - **Reincarnation notes.** `keptByStart` is a clear only, so neither the default nor the held status says Unlimited waits for a reincarnation.
 - **Resources removal note.** It shows only when `subfieldClearUnsupported === true`, with the held wording kept for a held edit.
 
+## Review fix: held reason
+
+A held count limit flagged `unlimitedUnsupported` (for example `max_turns` on a running agent) had a disabled Unlimited box with no reason, because only the default status showed the note. The note is now one helper, `unlimitedUnsupportedNote`, used by both the held and default statuses. Tests: a held `unlimitedUnsupported` field shows the disabled box and the reason. A held resources removal without `subfieldClearUnsupported` shows no note, which guards the flag check.
+
 ## Flag contract
 
 Agreed with the hub side:

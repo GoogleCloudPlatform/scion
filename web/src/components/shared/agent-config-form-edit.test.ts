@@ -771,6 +771,17 @@ describe('Resources: removing a stored value', () => {
     expect(note(el)!.textContent).not.toContain('next start');
   });
 
+  it('a held removal shows no note when the broker applies it at the next start', async () => {
+    const el = await mount('stopped', { values: stored });
+    await setSub(el, 'limits.cpu', '');
+    el.editability = hubEditability('running', {
+      'config.resources': { tier: 'T1', disposition: 'held' },
+    });
+    await el.updateComplete;
+    expect(field(el, 'config.resources').dataset.disposition).toBe('held');
+    expect(note(el)).toBeNull();
+  });
+
   it('changing or adding a value shows no note', async () => {
     const el = await mount('stopped', { values: stored }, unsupported);
     await setSub(el, 'limits.cpu', '8');
