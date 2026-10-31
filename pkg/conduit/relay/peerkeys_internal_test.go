@@ -83,15 +83,15 @@ func keyedRequest(t *testing.T, signer PeerAuth) *http.Request {
 	return req
 }
 
-// forgeV3 signs req as asserted with key under kid: a per-peer key
-// signature a node holding key makes for another peer's id.
-func forgeV3(t *testing.T, req *http.Request, asserted, kid string, key ed25519.PrivateKey) {
+// signV3As sets the per-peer key headers of req by hand: peer asserted,
+// key ID kid, and a signature made with key.
+func signV3As(t *testing.T, req *http.Request, asserted, kid string, key ed25519.PrivateKey) {
 	t.Helper()
 	ts := "0"
 	if v := req.Header.Get(HeaderPeerTimestamp); v != "" {
 		ts = v
 	}
-	nonce := "forged-nonce-0001"
+	nonce := "test-nonce-0001"
 	req.Header.Set(HeaderPeerID, asserted)
 	req.Header.Set(HeaderPeerTimestamp, ts)
 	req.Header.Set(HeaderPeerNonce, nonce)
@@ -130,28 +130,28 @@ func TestKeyedPeerAuth_BindsIDToKey(t *testing.T) {
 	}
 	t.Run("A's key and kid asserting B", func(t *testing.T) {
 		req := keyedRequest(t, keyedAuth(t, a.id, a.priv, dir, now))
-		forgeV3(t, req, b.id, a.kid, a.priv)
+		signV3As(t, req, b.id, a.kid, a.priv)
 		refused(t, req)
 	})
 	t.Run("A's key under B's kid", func(t *testing.T) {
 		req := keyedRequest(t, keyedAuth(t, a.id, a.priv, dir, now))
-		forgeV3(t, req, b.id, b.kid, a.priv)
+		signV3As(t, req, b.id, b.kid, a.priv)
 		refused(t, req)
 	})
 	t.Run("A's key asserting the hub", func(t *testing.T) {
 		req := keyedRequest(t, keyedAuth(t, a.id, a.priv, dir, now))
-		forgeV3(t, req, hub.id, hub.kid, a.priv)
+		signV3As(t, req, hub.id, hub.kid, a.priv)
 		refused(t, req)
 	})
 	t.Run("unknown kid", func(t *testing.T) {
 		req := keyedRequest(t, keyedAuth(t, a.id, a.priv, dir, now))
-		forgeV3(t, req, a.id, "zz", a.priv)
+		signV3As(t, req, a.id, "zz", a.priv)
 		refused(t, req)
 	})
 	t.Run("unenrolled id", func(t *testing.T) {
 		c := newTestPeer(t, "relay-c", "c1", PeerRoleRelay)
 		req := keyedRequest(t, keyedAuth(t, a.id, a.priv, dir, now))
-		forgeV3(t, req, c.id, c.kid, c.priv)
+		signV3As(t, req, c.id, c.kid, c.priv)
 		refused(t, req)
 	})
 	t.Run("tampered request", func(t *testing.T) {
