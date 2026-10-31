@@ -123,7 +123,7 @@ var requestPathSites = []requestPathSite{
 	{"perftrace_middleware.go", "perfHeadersAllowed", "URL.Path", 1, "comparison: decides whether timing headers may be added"},
 	{"port_view.go", "Server.handlePortView", "URL.EscapedPath", 1, "routing: cuts the escaped sub-path for the redirect to the port link; never logged"},
 	{"port_view.go", "Server.handlePortView", "URL.Path", 1, "routing: cuts the page link and the sub-path forwarded to the agent port; never logged"},
-	{"port_view.go", "Server.redirectToPortView", "URL.EscapedPath", 2, "routing: builds the relative Location of the page link from the port link's escaped path; never logged"},
+	{"port_view.go", "Server.portViewRedirect", "URL.EscapedPath", 2, "routing: builds the relative Location of the page link from the port link's escaped path; never logged"},
 	{"port_view.go", "isPortViewRequest", "URL.EscapedPath", 1, "comparison: checks the shape of a credential-less page view request on both path forms"},
 	{"port_view.go", "isPortViewRequest", "URL.Path", 1, "comparison: checks the shape of a credential-less page view request on both path forms"},
 	{"port_view.go", "redirectToPortLink", "URL.EscapedPath", 1, "routing: builds the relative Location of the port link; never logged"},
