@@ -117,21 +117,36 @@ project is a hub-level resource; a project's own groups belong to that project.
 
 ### Hub-boundary tokens for user administration
 
-A hub token can change another user's account through `PATCH /api/v1/users/{id}`. Each
-field is checked on the hub-level user record, and your user must also hold the matching
-permission:
+A hub token can change another user's account through `PATCH /api/v1/users/{id}`, and
+delete a user through `DELETE /api/v1/users/{id}`. Each request is checked on the hub-level
+user record, and your user must also hold the matching permission:
 
 | Scope | Boundary | Grants |
 |-------|----------|--------|
-| `user:update` | Hub only | Change another user's display name and preferences. A token PATCH of another user that names no `status` field is checked as a profile update, so it needs this scope. |
+| `user:update` | Hub only | Change another user's display name and preferences. A token PATCH of another user that names neither `status` nor `role` is checked as a profile update, so it needs this scope. |
 | `user:suspend` | Hub only | Suspend or reactivate another user (the `status` field). |
+| `user:promote` | Hub only | Change another user between the `member` and `viewer` roles (the `role` field). |
+| `user:delete` | Hub only | Delete another user, including with `force=true`, and read `GET /api/v1/users/{id}/delete-blockers` and `GET /api/v1/users/{id}/deletion`. |
 
 - A request that names several fields is written only if every field passes its check;
   otherwise nothing is written.
-- A token that cannot use either scope on that user gets the same `403` for every user ID,
-  including one that does not exist.
-- Changing a user's role, and changing your own profile, still need a sign-in. No credential can
-  change your own status or activate an invited user.
+- A token that cannot use any of `user:update`, `user:suspend` and `user:promote` on that user
+  gets the same `403` from `PATCH` for every user ID, including one that does not exist.
+- A token never makes a user `admin`, and never changes or deletes a user who holds the
+  super-admin role: every change that involves a super-admin role binding is refused with
+  `403`.
+- A token deletes a user only if the user holds no direct system-scope role binding other than
+  the one that represents the `viewer` role. Otherwise the delete is refused with `403` and
+  `details.reason` `system_role_binding_held`, with or without `force=true`. If such a binding
+  is added while the delete runs, it answers `409 conflict` with `details.reason`
+  `binding_state_drift` and deletes nothing. A forced deletion requested with a token does not
+  complete while the user holds such a binding; `GET /api/v1/users/{id}/deletion` shows it in
+  `lastError` until the binding is removed.
+- A forced delete with a token also needs `agent.delete` on each of the user's agents through
+  the token: the token's scopes must include `agent:delete`.
+- Changing your own profile or role still needs a sign-in. No credential can change your own
+  status, delete your own account, or activate an invited user. The last super-admin,
+  last-project-owner and blocker rules of a delete apply to tokens as to sign-in sessions.
 
 ### Scopes are restrictions, not grants
 
