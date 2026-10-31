@@ -320,27 +320,107 @@ func TestNonTxMutationIsNamedByItsCaller(t *testing.T) {
 	}
 }
 
+// realClockSmokeOp is the op of realClockSmokeTx's transaction: the hold
+// line's stable marker, so the smoke test judges only its own transaction.
+const realClockSmokeOp = "txdiag_test.realClockSmokeTx"
+
+// realClockSmokeTx holds a write transaction for d of real time.
+func realClockSmokeTx(ctx context.Context, e *env, d time.Duration) error {
+	tx, err := e.client.Tx(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := newSetting(ctx, tx.Client(), "smoke"); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	time.Sleep(d)
+	return tx.Commit()
+}
+
+// ownHoldLine returns the single hold line whose op is op, or an error when
+// there is not exactly one or it held for less than minMs. Lines from other
+// transactions are ignored: on a slow runner the fixture's own setup
+// transaction (openEnv's migration, hundreds of statements) can cross the
+// threshold too (ptone/scion#6906), and it must neither fail the test nor
+// stand in for the line under test.
+func ownHoldLine(lines []txdiag.LogLine, op string, minMs int64) (txdiag.LogLine, error) {
+	var own []txdiag.LogLine
+	for _, l := range lines {
+		if l.Str("op") == op {
+			own = append(own, l)
+		}
+	}
+	if len(own) != 1 {
+		return txdiag.LogLine{}, fmt.Errorf("got %d hold lines with op %q among %+v, want exactly one", len(own), op, lines)
+	}
+	if got := own[0].Int("hold_ms"); got < minMs {
+		return txdiag.LogLine{}, fmt.Errorf("hold line %+v has hold_ms %d, want >= %d", own[0], got, minMs)
+	}
+	return own[0], nil
+}
+
+// TestRealClockSmoke runs the hold detector on the real clock (Now nil): a
+// transaction held for 300 ms of real time against a 200 ms threshold must
+// produce one hold line for that transaction.
 func TestRealClockSmoke(t *testing.T) {
 	e := openEnv(t, func(c *txdiag.Config) {
 		c.Now = nil
 		c.HoldWarnThreshold = 200 * time.Millisecond
 	})
-	ctx := context.Background()
-	tx, err := e.client.Tx(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := newSetting(ctx, tx.Client(), "smoke"); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(300 * time.Millisecond)
-	if err := tx.Commit(); err != nil {
+	if err := realClockSmokeTx(context.Background(), e, 300*time.Millisecond); err != nil {
 		t.Fatal(err)
 	}
 	e.flush(t)
-	lines := e.h.Lines(txdiag.MsgHold)
-	if len(lines) != 1 || lines[0].Int("hold_ms") < 300 {
-		t.Fatalf("got %+v, want one hold line with hold_ms >= 300", lines)
+	l, err := ownHoldLine(e.h.Lines(txdiag.MsgHold), realClockSmokeOp, 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.Str("kind") != txdiag.KindTx || l.Str("outcome") != txdiag.OutcomeCommit {
+		t.Errorf("hold line %+v, want kind %q and outcome %q", l, txdiag.KindTx, txdiag.OutcomeCommit)
+	}
+}
+
+// TestRealClockSmokeFailsWithoutTheHold is the negative control for
+// TestRealClockSmoke, on the same real-clock path: when the transaction's
+// hold is not reported (the threshold is above it), the check must fail,
+// even though other hold lines may be present.
+func TestRealClockSmokeFailsWithoutTheHold(t *testing.T) {
+	e := openEnv(t, func(c *txdiag.Config) {
+		c.Now = nil
+		c.HoldWarnThreshold = time.Hour
+	})
+	if err := realClockSmokeTx(context.Background(), e, 300*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	e.flush(t)
+	if l, err := ownHoldLine(e.h.Lines(txdiag.MsgHold), realClockSmokeOp, 300); err == nil {
+		t.Fatalf("ownHoldLine accepted %+v although the hold was not reported", l)
+	}
+}
+
+// TestOwnHoldLineIgnoresOtherTransactions pins the #6906 case without a
+// clock: a long setup-transaction line alone must not satisfy the check,
+// and next to the line under test it must not break it.
+func TestOwnHoldLineIgnoresOtherTransactions(t *testing.T) {
+	line := func(op string, holdMs int64) txdiag.LogLine {
+		return txdiag.LogLine{Msg: txdiag.MsgHold, Attrs: map[string]slog.Value{
+			"op": slog.StringValue(op), "hold_ms": slog.Int64Value(holdMs), "stmts": slog.Int64Value(310),
+		}}
+	}
+	setup := line("entc.AutoMigrate", 394)
+	own := line(realClockSmokeOp, 374)
+	if _, err := ownHoldLine([]txdiag.LogLine{setup}, realClockSmokeOp, 300); err == nil {
+		t.Error("the fixture's setup line alone satisfied the check")
+	}
+	if l, err := ownHoldLine([]txdiag.LogLine{setup, own}, realClockSmokeOp, 300); err != nil || l.Int("hold_ms") != 374 {
+		t.Errorf("setup plus own line: got %+v, %v; want the own line", l, err)
+	}
+	if _, err := ownHoldLine([]txdiag.LogLine{line(realClockSmokeOp, 120)}, realClockSmokeOp, 300); err == nil {
+		t.Error("a short own hold satisfied the check")
+	}
+	if _, err := ownHoldLine([]txdiag.LogLine{own, own}, realClockSmokeOp, 300); err == nil {
+		t.Error("two own lines satisfied the check")
 	}
 }
 
