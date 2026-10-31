@@ -102,8 +102,9 @@ const (
 	verdictWrite verdict = iota
 	// verdictRepeat: a repeat within the interval; counted, not logged.
 	verdictRepeat
-	// verdictRefused: the record limiter refused; nothing is recorded, so
-	// a later report of the same violation is still logged.
+	// verdictRefused: the per-client or the record budget refused;
+	// nothing is recorded, so a later report of the same violation is
+	// still logged.
 	verdictRefused
 	// verdictDropped: not a repeat, but the request may write no more
 	// records; nothing is recorded and the limiter is not asked.
@@ -111,21 +112,20 @@ const (
 )
 
 // admit decides whether the report v is written. A report that is not a
-// repeat is dropped when canWrite is false; otherwise allowRecord is asked
-// (under the Dedupe lock: it must not block or call back into the handler).
-// On verdictRefused, retry is the limiter's Retry-After. summaries holds
-// the repeat summaries of the violations whose interval was found over, or
-// that were removed, during this call; they are returned with every
-// verdict.
-func (d *Dedupe) admit(v Violation, canWrite bool, allowRecord func() (bool, int)) (vd verdict, summaries []repeatSummary, retry int) {
+// repeat is dropped when canWrite is false; otherwise allow is asked
+// (under the Dedupe lock: it must not block or call back into the
+// handler). summaries holds the repeat summaries of the violations whose
+// interval was found over, or that were removed, during this call; they
+// are returned with every verdict.
+func (d *Dedupe) admit(v Violation, canWrite bool, allow func() bool) (vd verdict, summaries []repeatSummary) {
 	if d == nil {
 		if !canWrite {
-			return verdictDropped, nil, 0
+			return verdictDropped, nil
 		}
-		if ok, retry := allowRecord(); !ok {
-			return verdictRefused, nil, retry
+		if !allow() {
+			return verdictRefused, nil
 		}
-		return verdictWrite, nil, 0
+		return verdictWrite, nil
 	}
 	key := v.key()
 	d.mu.Lock()
@@ -142,15 +142,15 @@ func (d *Dedupe) admit(v Violation, canWrite bool, allowRecord func() (bool, int
 			// The sample is never kept: it is logged, at most, with the
 			// report's own record.
 			e.latest.Sample = ""
-			return verdictRepeat, summaries, 0
+			return verdictRepeat, summaries
 		}
 		summaries = d.remove(key, e, summaries)
 	}
 	if !canWrite {
-		return verdictDropped, summaries, 0
+		return verdictDropped, summaries
 	}
-	if ok, retry := allowRecord(); !ok {
-		return verdictRefused, summaries, retry
+	if !allow() {
+		return verdictRefused, summaries
 	}
 	if len(d.entries) >= d.maxKeys {
 		summaries = d.removeFinished(now, summaries)
@@ -159,7 +159,7 @@ func (d *Dedupe) admit(v Violation, canWrite bool, allowRecord func() (bool, int
 		summaries = d.removeOldest(summaries)
 	}
 	d.entries[key] = &dedupeEntry{logged: now}
-	return verdictWrite, summaries, 0
+	return verdictWrite, summaries
 }
 
 // removeFinished removes every entry whose interval is over, appending the

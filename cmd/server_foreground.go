@@ -3084,6 +3084,10 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		hubSrv.SetPortViewMetrics(portViewRec)
 	}
 
+	if err := hubSrv.RegisterCSPReportMetrics(mp); err != nil {
+		log.Printf("WARNING: hub browser policy report metrics disabled: %v", err)
+	}
+
 	runScopeRec, runScopeErr := hub.NewOTelAgentRunScopeMetrics(mp)
 	if runScopeErr != nil {
 		log.Printf("WARNING: hub agent run-scope metrics disabled: %v", runScopeErr)
