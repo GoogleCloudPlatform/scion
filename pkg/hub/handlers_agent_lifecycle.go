@@ -1212,6 +1212,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		if relayIdentityMappingError(w, dispatchErr) {
 			return
 		}
+		if s.relayProjectPathRefusal(ctx, w, agent, dispatchErr) {
+			return
+		}
 		if relayBrokerRefusal(w, dispatchErr) {
 			return
 		}

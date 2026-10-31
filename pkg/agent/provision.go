@@ -1611,6 +1611,17 @@ func plainProjectWorkspaceSource(projectDir string) string {
 	return filepath.Dir(projectDir)
 }
 
+// checkedPlainProjectWorkspaceSource is plainProjectWorkspaceSource for
+// provisioning: it refuses a projectDir that is not a .scion directory, so a
+// plain workspace is never the parent of a bare directory. The delete guard
+// keeps the unchecked form, where protecting the parent is the safe side.
+func checkedPlainProjectWorkspaceSource(projectDir string) (string, error) {
+	if filepath.Base(projectDir) != config.DotScion {
+		return "", ErrProjectPathNotInitialized
+	}
+	return plainProjectWorkspaceSource(projectDir), nil
+}
+
 // resolveProjectRoot determines the project root directory on this broker.
 // Used for resolving relative --workspace paths against the project's logical root.
 func resolveProjectRoot(settings *config.VersionedSettings, projectDir string) string {
@@ -2323,10 +2334,11 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			// parent of a bare directory (checkExplicitProjectPath refused
 			// an explicit path above; this keeps every other way here
 			// fail-closed).
-			if filepath.Base(projectDir) != config.DotScion {
+			src, err := checkedPlainProjectWorkspaceSource(projectDir)
+			if err != nil {
 				return "", "", nil, &ProjectPathNotInitializedError{Path: projectPathForError(projectPath, projectDir)}
 			}
-			workspaceSource = plainProjectWorkspaceSource(projectDir)
+			workspaceSource = src
 		}
 	}
 

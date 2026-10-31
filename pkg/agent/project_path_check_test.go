@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -299,4 +300,58 @@ func TestStartRefusesUninitializedProjectPath(t *testing.T) {
 		t.Fatal("the runtime was called for a refused start")
 	}
 	requireDirEmpty(t, bare)
+}
+
+// TestCheckedPlainProjectWorkspaceSource pins the provisioning backstop: a
+// plain workspace is derived only from a .scion directory, never from a bare
+// directory, whatever path led there.
+func TestCheckedPlainProjectWorkspaceSource(t *testing.T) {
+	root := t.TempDir()
+	if got, err := checkedPlainProjectWorkspaceSource(filepath.Join(root, config.DotScion)); err != nil || got != root {
+		t.Fatalf("a .scion directory: got %q, %v; want %q", got, err, root)
+	}
+	if _, err := checkedPlainProjectWorkspaceSource(root); !errors.Is(err, ErrProjectPathNotInitialized) {
+		t.Fatalf("a bare directory: want ErrProjectPathNotInitialized, got %v", err)
+	}
+}
+
+// TestCheckExplicitProjectPath_Exemptions pins the paths the check leaves
+// alone because their agents never take the parent of projectDir as the
+// workspace: the global project (by keyword or directory) and a git work
+// tree.
+func TestCheckExplicitProjectPath_Exemptions(t *testing.T) {
+	p := newHermeticProject(t)
+	if err := config.InitGlobal(getTestHarnesses()); err != nil {
+		t.Fatalf("InitGlobal: %v", err)
+	}
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"global", "home", globalDir} {
+		projectDir, err := config.GetResolvedProjectDir(path)
+		if err != nil {
+			t.Fatalf("resolve %s: %v", path, err)
+		}
+		if err := checkExplicitProjectPath(path, projectDir, "", false); err != nil {
+			t.Errorf("%s: expected the global project to be exempt, got %v", path, err)
+		}
+	}
+
+	gitBin, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not available")
+	}
+	work := filepath.Join(p.home, "git-work-tree")
+	mkdirs(t, work)
+	if out, err := exec.Command(gitBin, "-C", work, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	projectDir, err := config.GetResolvedProjectDir(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkExplicitProjectPath(work, projectDir, "", false); err != nil {
+		t.Errorf("a git work tree without .scion is out of scope and exempt, got %v", err)
+	}
 }

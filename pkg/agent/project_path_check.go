@@ -19,12 +19,13 @@ import (
 	"fmt"
 	"path/filepath"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
 // ProjectPathNotInitializedCode is the stable error code a Runtime Broker
 // answers ErrProjectPathNotInitialized with.
-const ProjectPathNotInitializedCode = "project_path_not_initialized"
+const ProjectPathNotInitializedCode = api.BrokerErrCodeProjectPathNotInitialized
 
 // ErrProjectPathNotInitialized refuses an agent create, start or restart of a
 // plain (non-git) project whose explicit project path does not hold the

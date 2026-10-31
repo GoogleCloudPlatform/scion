@@ -148,7 +148,7 @@ func TestBuildStartContext_ReusesPrehydratedTemplate(t *testing.T) {
 // whose explicit project path holds no .scion entry answers 409 with the
 // stable code project_path_not_initialized and a message naming the
 // configured path, on every broker path, and the async launch report
-// carries the same code.
+// carries the same code with a fixed text that omits the path.
 func TestProjectPathNotInitializedMapsTo409(t *testing.T) {
 	const configured = "/srv/local-path"
 	refusal := fmt.Errorf("start: %w", &agent.ProjectPathNotInitializedError{Path: configured})
@@ -184,7 +184,9 @@ func TestProjectPathNotInitializedMapsTo409(t *testing.T) {
 			}
 		})
 	}
-	if code, _, msg := classifyStartError(context.Background(), refusal, "", "", store.LaunchKindCreate); code != ErrCodeProjectPathNotInitialized || !strings.Contains(msg, configured) {
-		t.Errorf("launch report: code %q, message %q; want %q naming %q", code, msg, ErrCodeProjectPathNotInitialized, configured)
+	// The launch report is stored by the hub and shown to clients: the code,
+	// and a fixed text without the host path.
+	if code, _, msg := classifyStartError(context.Background(), refusal, "", "", store.LaunchKindCreate); code != ErrCodeProjectPathNotInitialized || strings.Contains(msg, configured) {
+		t.Errorf("launch report: code %q, message %q; want %q without the path %q", code, msg, ErrCodeProjectPathNotInitialized, configured)
 	}
 }
