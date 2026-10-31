@@ -235,6 +235,13 @@ func TestSecretEncryptionFence_Postgres(t *testing.T) {
 			EncryptedValue: "", SecretRef: ref1, Scope: scope, ScopeID: scopeID}))
 		before, err := cs.GetSecret(ctx, key, scope, scopeID)
 		require.NoError(t, err)
+		// The raw transition below moves generation 4 (k5) to 5 (k6); pin
+		// the starting state so the subtest does not silently depend on the
+		// earlier subtests' transitions.
+		start, err := cs.GetEncryptionPolicy(ctx)
+		require.NoError(t, err)
+		require.Equal(t, int64(4), start.Generation)
+		require.Equal(t, []string{"k5"}, start.AllowedWriteKIDs)
 
 		tx, err := client.Tx(ctx)
 		require.NoError(t, err)
