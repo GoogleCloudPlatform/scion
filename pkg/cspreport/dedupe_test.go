@@ -193,9 +193,9 @@ func dedupeHandler(buf *bytes.Buffer, clock *fakeClock, interval time.Duration, 
 	return &Handler{
 		Log:    recordingLog(buf),
 		Dedupe: d,
-		AllowRecord: func() (bool, int) {
+		AllowRecord: func() bool {
 			asked++
-			return true, 0
+			return true
 		},
 	}, &asked
 }
@@ -482,11 +482,11 @@ func TestRefusedRecordIsNotCountedAsSeen(t *testing.T) {
 	h := &Handler{
 		Log:         recordingLog(&buf),
 		Dedupe:      d,
-		AllowRecord: func() (bool, int) { return allow, 3 },
+		AllowRecord: func() bool { return allow },
 	}
 	rec := post(h, "application/csp-report", safariReportToBody)
-	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") != "3" {
-		t.Fatalf("refused: status = %d, Retry-After %q, want 429 and 3", rec.Code, rec.Header().Get("Retry-After"))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("refused: status = %d, want 204", rec.Code)
 	}
 	if d.size() != 0 {
 		t.Fatalf("a refused report is tracked")
@@ -495,8 +495,14 @@ func TestRefusedRecordIsNotCountedAsSeen(t *testing.T) {
 	if rec := post(h, "application/csp-report", safariReportToBody); rec.Code != http.StatusNoContent {
 		t.Fatalf("allowed: status = %d, want 204", rec.Code)
 	}
-	if got := records(t, &buf); len(got) != 1 {
-		t.Fatalf("%d records, want 1", len(got))
+	n := 0
+	for _, r := range records(t, &buf) {
+		if r["msg"] == LogMessage {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("%d report records, want 1", n)
 	}
 }
 
@@ -663,7 +669,7 @@ func TestFinishedIntervalsAreCheckedOncePerInterval(t *testing.T) {
 }
 
 // TestSummaryOnRefusedAndDroppedReports: a summary found while handling a
-// report that is then refused (429) or dropped (past the per-request
+// report that is then refused or dropped (past the per-request
 // bound) is still written.
 func TestSummaryOnRefusedAndDroppedReports(t *testing.T) {
 	start := time.Unix(1_700_000_000, 0)
@@ -673,14 +679,14 @@ func TestSummaryOnRefusedAndDroppedReports(t *testing.T) {
 		d := NewDedupe(10*time.Minute, 16)
 		d.now = clock.now
 		allow := true
-		h := &Handler{Log: recordingLog(&buf), Dedupe: d, AllowRecord: func() (bool, int) { return allow, 1 }}
+		h := &Handler{Log: recordingLog(&buf), Dedupe: d, AllowRecord: func() bool { return allow }}
 		post(h, "application/csp-report", pageReport("a"))
 		post(h, "application/csp-report", pageReport("a"))
 		records(t, &buf)
 		clock.t = start.Add(10 * time.Minute)
 		allow = false
-		if rec := post(h, "application/csp-report", pageReport("b")); rec.Code != http.StatusTooManyRequests {
-			t.Fatalf("status = %d, want 429", rec.Code)
+		if rec := post(h, "application/csp-report", pageReport("b")); rec.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204", rec.Code)
 		}
 		if got := summaryPaths(t, &buf); len(got) != 1 || got[0] != "/projects/p1/chat/a" {
 			t.Fatalf("summaries = %v, want a's", got)
