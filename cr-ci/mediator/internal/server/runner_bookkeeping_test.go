@@ -117,6 +117,9 @@ func TestLateCompletedAfterSameNameRelaunchKeepsRecord(t *testing.T) {
 	if h.forgottenHas("cr-job-101") {
 		t.Error("cr-job-101 forgotten while #2 is live")
 	}
+	if got := strings.Count(h.logs.String(), `"reason":"runner_id_mismatch"`); got != 2 {
+		t.Errorf("reason=runner_id_mismatch lines = %d, want 2 (guard and forget)", got)
+	}
 }
 
 // TestStaleRunnerIDUntrustedJobStillKilled: an event whose runner_id is #1's for a
@@ -314,5 +317,8 @@ func TestCompletedWithoutRunnerIDKeepsRecord(t *testing.T) {
 	}
 	if h.forgottenHas("cr-job-100") {
 		t.Error("cr-job-100 forgotten by a completed event without a runner_id")
+	}
+	if !strings.Contains(h.logs.String(), `"reason":"runner_id_missing"`) {
+		t.Errorf("no reason=runner_id_missing line:\n%s", h.logs.String())
 	}
 }

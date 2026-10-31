@@ -89,7 +89,7 @@ func (s *Server) checkRunnerJobLocked(ctx context.Context, v *view, repoFull str
 		if runnerID != 0 && rec != nil && rec.runnerID != 0 && runnerID != rec.runnerID {
 			// The event is for an earlier runner with this name (names are
 			// reused); the record is the current runner's.
-			s.log().Info("runner bookkeeping left unchanged", append(attrs, "event", logging.EventWebhookIgnored, "reason", "runner_id_not_recorded")...)
+			s.log().Info("runner bookkeeping left unchanged", append(attrs, "event", logging.EventWebhookIgnored, "reason", "runner_id_mismatch")...)
 			return "ok", nil
 		}
 		if rec == nil {

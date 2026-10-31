@@ -347,12 +347,18 @@ func (s *Server) forgetRunner(name string, runnerID int64, attrs []any) {
 	defer s.dispatchMu.Unlock()
 	rec := s.runners[name]
 	if runnerID == 0 || rec == nil || rec.runnerID != runnerID {
-		recorded := int64(0)
+		reason, recorded := "runner_id_mismatch", int64(0)
+		switch {
+		case runnerID == 0:
+			reason = "runner_id_missing"
+		case rec == nil:
+			reason = "no_record"
+		}
 		if rec != nil {
 			recorded = rec.runnerID
 		}
 		s.log().Info("runner bookkeeping left unchanged", append(attrs, "event", logging.EventWebhookIgnored,
-			"reason", "runner_id_not_recorded", "recorded_runner_id", recorded)...)
+			"reason", reason, "recorded_runner_id", recorded)...)
 		return
 	}
 	delete(s.runners, name)
