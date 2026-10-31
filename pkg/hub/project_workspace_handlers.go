@@ -1723,7 +1723,7 @@ func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Reque
 	if localFixture {
 		pullResult, err = util.PullSharedWorkspace(workspacePath, cloneURL, "")
 	} else {
-		if refuseErr := s.refuseSSHWithoutProjectSecret(ctx, project, cloneURL); refuseErr != nil {
+		if refuseErr := s.refuseSSHCloneURL(ctx, project, cloneURL); refuseErr != nil {
 			writeError(w, http.StatusUnprocessableEntity, ErrCodeInvalidRequest, refuseErr.Error(), nil)
 			return
 		}

@@ -1354,8 +1354,10 @@ func writeSharedCloneSourceRefused(w http.ResponseWriter, err error) bool {
 	switch {
 	case errors.Is(err, provision.ErrHostCloneURLRefused):
 		writeError(w, http.StatusUnprocessableEntity, ErrCodeInvalidRequest, provision.ErrHostCloneURLRefused.Error(), nil)
-	case errors.Is(err, errSSHCloneURLNeedsProjectSecret):
-		writeError(w, http.StatusUnprocessableEntity, ErrCodeInvalidRequest, errSSHCloneURLNeedsProjectSecret.Error(), nil)
+	case errors.Is(err, errSSHCloneURLUnsupported):
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeInvalidRequest, errSSHCloneURLUnsupported.Error(), nil)
+	case errors.Is(err, errSSHCloneURLProjectSecretHTTPSOnly):
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeInvalidRequest, errSSHCloneURLProjectSecretHTTPSOnly.Error(), nil)
 	default:
 		return false
 	}
@@ -1411,8 +1413,8 @@ func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Pr
 	if cloneToken == "" {
 		tokenRemote = ""
 	}
-	// An ssh clone URL without a project credential is refused before any
-	// filesystem work.
+	// An ssh clone URL is refused before any filesystem work, with or
+	// without a project credential (which only picks the message).
 	if cloneCfg != nil {
 		if err := sshCloneURLRefused(cloneCfg.URL, cloneToken != ""); err != nil {
 			return err
@@ -1681,7 +1683,7 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 	if localFixture {
 		cloneErr = util.CloneSharedWorkspace(workspacePath, cloneURL, defaultBranch, "")
 	} else {
-		if err := s.refuseSSHWithoutProjectSecret(ctx, project, cloneURL); err != nil {
+		if err := s.refuseSSHCloneURL(ctx, project, cloneURL); err != nil {
 			return err
 		}
 		token, hardening := s.hostGitAccess(ctx, project, cloneURL)
