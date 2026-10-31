@@ -179,6 +179,7 @@ func storeBrokerCapabilities(c *hubclient.BrokerCapabilities) *store.BrokerCapab
 		ChangedFields:            c.ChangedFields,
 		ClearedFields:            c.ClearedFields,
 		UnlimitedCountLimits:     c.UnlimitedCountLimits,
+		ClearedResourceSubfields: c.ClearedResourceSubfields,
 		StartsInFlight:           c.StartsInFlight,
 		AttachmentDelivery:       c.AttachmentDelivery,
 		NodeImageRegistry:        c.NodeImageRegistry,

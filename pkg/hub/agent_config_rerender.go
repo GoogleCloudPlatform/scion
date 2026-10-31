@@ -54,6 +54,11 @@ type brokerStartSupport struct {
 	// (ptone/scion#5605). Without it the hub refuses a change of a count
 	// limit to 0 (unlimitedCountRefusal).
 	UnlimitedCountLimits bool
+	// ClearedResourceSubfields: the broker applies the resources
+	// sub-field entries of cleared_fields (api.ResourceSubPaths) at start,
+	// so a resources edit that drops a sub-field restores its inherited
+	// value at the next start (ptone/scion#5676).
+	ClearedResourceSubfields bool
 }
 
 // brokerStartSupportFrom reads a broker's capabilities.
@@ -61,7 +66,12 @@ func brokerStartSupportFrom(caps *store.BrokerCapabilities) brokerStartSupport {
 	if caps == nil {
 		return brokerStartSupport{}
 	}
-	return brokerStartSupport{ChangedFields: caps.ChangedFields, ClearedFields: caps.ClearedFields, UnlimitedCountLimits: caps.UnlimitedCountLimits}
+	return brokerStartSupport{
+		ChangedFields:            caps.ChangedFields,
+		ClearedFields:            caps.ClearedFields,
+		UnlimitedCountLimits:     caps.UnlimitedCountLimits,
+		ClearedResourceSubfields: caps.ClearedResourceSubfields,
+	}
 }
 
 // agentBrokerStartSupport is brokerStartSupportFrom for the agent's
@@ -166,11 +176,21 @@ func (sup brokerStartSupport) clearAppliesAtStart(key string) bool {
 	return ok && sup.ClearedFields && (k == "env" || api.ClearableConfigPath(k))
 }
 
+// resourceSubfieldClearAppliesAtStart reports whether the broker applies a
+// resources sub-field entry of cleared_fields at the next start: it
+// applies cleared_fields and accepts the sub-field entries
+// (ptone/scion#5676).
+func (sup brokerStartSupport) resourceSubfieldClearAppliesAtStart() bool {
+	return sup.ClearedFields && sup.ClearedResourceSubfields
+}
+
 // heldClearEdits returns the entries of cleared (wire keys of cleared
-// container keys, from reincarnateOnlyConfigEdits) that still wait for a
-// reincarnation with this broker. recorded is the cleared paths the PATCH
-// recorded (the new ClearedFields), and envDropped the env keys the request
-// drops (droppedEnvKeys).
+// container keys, from reincarnateOnlyConfigEdits and
+// withDroppedResourcesSubField) that still wait for a reincarnation with
+// this broker. recorded is the cleared paths the PATCH recorded (the new
+// ClearedFields), envDropped the env keys the request drops
+// (droppedEnvKeys), and resDropped the resources sub-paths it drops
+// (droppedResourceSubPaths).
 //
 // A clear is reported applied only when the broker applies cleared_fields
 // and the PATCH actually recorded it: the key itself, or, for env, an
@@ -178,11 +198,16 @@ func (sup brokerStartSupport) clearAppliesAtStart(key string) bool {
 // agent's env records no env entries, and the auto-expose and TZ keys are
 // never recorded, so such an env edit stays held.
 //
+// A resources edit that drops a sub-field (resDropped not empty) is
+// reported applied only when the broker applies the sub-field entries
+// (resourceSubfieldClearAppliesAtStart) and every dropped sub-path was
+// recorded; a whole resources clear follows the general rule.
+//
 // A count limit's 0 (Unlimited) never reaches here: it is a set value the
 // start merge applies, so reincarnateOnlyConfigEdits does not report it as
 // cleared, and the hub accepts it only for a broker with
 // UnlimitedCountLimits (unlimitedCountRefusal, ptone/scion#5605).
-func (sup brokerStartSupport) heldClearEdits(cleared, recorded, envDropped []string) []string {
+func (sup brokerStartSupport) heldClearEdits(cleared, recorded, envDropped, resDropped []string) []string {
 	var out []string
 	for _, key := range cleared {
 		k := strings.TrimPrefix(key, agentConfigKeyPrefix)
@@ -191,6 +216,8 @@ func (sup brokerStartSupport) heldClearEdits(cleared, recorded, envDropped []str
 		case !sup.ClearedFields:
 		case k == "env":
 			applied = envKeysRecorded(envDropped, recorded)
+		case k == "resources" && len(resDropped) > 0 && !slices.Contains(recorded, k):
+			applied = sup.resourceSubfieldClearAppliesAtStart() && pathsRecorded(resDropped, recorded)
 		default:
 			applied = sup.clearAppliesAtStart(key) && slices.Contains(recorded, k)
 		}
@@ -199,6 +226,16 @@ func (sup brokerStartSupport) heldClearEdits(cleared, recorded, envDropped []str
 		}
 	}
 	return out
+}
+
+// pathsRecorded reports whether every path in paths is in recorded.
+func pathsRecorded(paths, recorded []string) bool {
+	for _, p := range paths {
+		if !slices.Contains(recorded, p) {
+			return false
+		}
+	}
+	return true
 }
 
 // envKeysRecorded reports whether every key in keys has an env.KEY entry

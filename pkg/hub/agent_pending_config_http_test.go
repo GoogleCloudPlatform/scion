@@ -1129,7 +1129,7 @@ func TestAgentPendingConfig_HeldSaveUsesTheStartRules(t *testing.T) {
 		assert.Nil(t, pendingReloadAgent(t, s, agent.ID).PendingConfig)
 	})
 
-	t.Run("a resources edit that drops a sub-field needs a reincarnation", func(t *testing.T) {
+	t.Run("a resources edit that drops a sub-field needs a reincarnation without clearedResourceSubfields", func(t *testing.T) {
 		srv, _, _, agent := heldFilterFixture(t, &store.BrokerCapabilities{Reprovision: true, ClearedFields: true})
 		resp := patchPending(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{
 			"resources": map[string]interface{}{"requests": map[string]string{"cpu": "1"}},

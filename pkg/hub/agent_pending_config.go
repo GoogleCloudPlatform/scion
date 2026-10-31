@@ -272,9 +272,10 @@ func (s *Server) holdAgentConfigPatch(ctx context.Context, agent *store.Agent, p
 	provision, cleared := reincarnateOnlyConfigEdits(p.raw, &cmp, applied)
 	removed := removedConfigEntries(applied, &cmp, p.present, canAttachEnv)
 	recorded := nextClearedFields(applied, &cmp, p.raw, cleared, canAttachEnv)
+	resDropped := droppedResourceSubPaths(applied, &cmp, p.present)
 	cleared = withDroppedResourcesSubField(cleared, applied, &cmp, p.present)
 	provision = sup.heldProvisionEdits(provision, applied, &cmp, recorded)
-	cleared = sup.heldClearEdits(cleared, recorded, droppedEnvKeys(applied, &cmp, p.present))
+	cleared = sup.heldClearEdits(cleared, recorded, droppedEnvKeys(applied, &cmp, p.present), resDropped)
 	removed = sup.heldRemovals(removed, recorded)
 	isChanged := make(map[string]bool, len(changed))
 	for _, k := range changed {

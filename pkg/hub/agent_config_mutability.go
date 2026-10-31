@@ -316,6 +316,14 @@ type FieldEditState struct {
 	// inherited limit, so a PATCH that changes the field to 0 is refused
 	// (ptone/scion#5605). The Edit page disables its Unlimited control.
 	UnlimitedUnsupported bool `json:"unlimitedUnsupported,omitempty"`
+	// SubfieldClearUnsupported is set on resources when the agent's broker
+	// does not advertise clearedResourceSubfields (or the agent has none):
+	// no start would apply a resources edit that leaves out a sub-field the
+	// agent stores (requests or limits cpu or memory, or disk), so such a
+	// clear takes effect only at the next reincarnation and the PATCH
+	// reports it in heldForReincarnate (ptone/scion#5676). The Edit page
+	// says so before a save.
+	SubfieldClearUnsupported bool `json:"subfieldClearUnsupported,omitempty"`
 	// Reason explains a locked field.
 	Reason string `json:"reason,omitempty"`
 }
@@ -405,6 +413,9 @@ func buildAgentEditability(agent *store.Agent, access agentEditAccess) *AgentEdi
 		}
 		if unlimitedCountFieldKeys[f.Key] && !access.Broker.UnlimitedCountLimits {
 			st.UnlimitedUnsupported = true
+		}
+		if f.Key == agentConfigKeyPrefix+"resources" && !access.Broker.resourceSubfieldClearAppliesAtStart() {
+			st.SubfieldClearUnsupported = true
 		}
 		// A resume continues the harness's conversation: whether a changed
 		// model, or a re-rendered prompt, instructions file, skill or
