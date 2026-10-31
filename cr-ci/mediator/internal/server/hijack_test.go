@@ -70,7 +70,7 @@ func TestCancelledOnRunnerTakesNoAction(t *testing.T) {
 	h.addSameRepoRun(10)
 	h.queued(100, 10)
 	h.gh.SetRunnerState("cr-job-100", "online", true)
-	code, _ := h.webhook(jobEvent("completed", 100, 10, testRepo, "cancelled", "cr-job-100"))
+	code, _ := h.webhook(onRunner(jobEvent("completed", 100, 10, testRepo, "cancelled", "cr-job-100"), h.registeredID("cr-job-100")))
 	if code != http.StatusOK {
 		t.Fatalf("completed: %d", code)
 	}
@@ -808,7 +808,7 @@ func TestReconcileSkipsForgottenRunner(t *testing.T) {
 	if code, out := h.webhook(inProgress(101, 11, testRepo, "cr-job-100")); code != http.StatusOK || !strings.Contains(out, "swap") {
 		t.Fatalf("in_progress: %d %q", code, out)
 	}
-	h.webhook(jobEvent("completed", 101, 11, testRepo, "success", "cr-job-100"))
+	h.webhook(onRunner(jobEvent("completed", 101, 11, testRepo, "success", "cr-job-100"), h.registeredID("cr-job-100")))
 	swaps, execs := h.countEvent(logging.EventRunnerSwap), len(h.executions())
 	h.gh.SetRunnerState("cr-job-100", "online", true)
 	if res := h.reconcile(); res.HijacksKilled != 0 {

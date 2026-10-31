@@ -20,12 +20,12 @@ import (
 //   - passes (swap): harmless; the job that took the runner gets a runner
 //     named for it if it has none, and that runner serves the displaced job.
 //
-// run may be nil (it is fetched). The result is a short status for the
-// HTTP response.
-func (s *Server) checkRunnerJob(ctx context.Context, repoFull string, jobID, runID int64, runnerName string, run *githubapp.Run, source string) (string, error) {
+// run may be nil (it is fetched). runnerID is the event's runner_id, 0 if
+// unknown. The result is a short status for the HTTP response.
+func (s *Server) checkRunnerJob(ctx context.Context, repoFull string, jobID, runID int64, runnerName string, runnerID int64, run *githubapp.Run, source string) (string, error) {
 	s.dispatchMu.Lock()
 	defer s.dispatchMu.Unlock()
-	return s.checkRunnerJobLocked(ctx, newView(), repoFull, jobID, runID, runnerName, run, source)
+	return s.checkRunnerJobLocked(ctx, newView(), repoFull, jobID, runID, runnerName, runnerID, run, source)
 }
 
 // checkRunnerJobLocked is checkRunnerJob for a caller that holds dispatchMu
@@ -33,7 +33,7 @@ func (s *Server) checkRunnerJob(ctx context.Context, repoFull string, jobID, run
 // Reconcile shares one view across its whole guard loop, under one lock hold,
 // so the lists are fetched once per pass (dispatchLocked adds its own launches
 // to the view; nothing else can launch while the lock is held).
-func (s *Server) checkRunnerJobLocked(ctx context.Context, v *view, repoFull string, jobID, runID int64, runnerName string, run *githubapp.Run, source string) (string, error) {
+func (s *Server) checkRunnerJobLocked(ctx context.Context, v *view, repoFull string, jobID, runID int64, runnerName string, runnerID int64, run *githubapp.Run, source string) (string, error) {
 	nameID, ok := parseRunnerName(runnerName)
 	if !ok {
 		return "ok", nil
@@ -56,6 +56,12 @@ func (s *Server) checkRunnerJobLocked(ctx context.Context, v *view, repoFull str
 		return "ok", nil // that job passed the fork guard at dispatch
 	}
 	attrs := []any{"source", source, "repo", repoFull, "job_id", jobID, "run_id", runID, "runner", runnerName, "served_job_id", served}
+	if runnerID != 0 {
+		attrs = append(attrs, "runner_id", runnerID)
+	}
+	if rec != nil && rec.runnerID != 0 {
+		attrs = append(attrs, "recorded_runner_id", rec.runnerID)
+	}
 
 	repo, targeted := s.targetRepo(repoFull)
 	reason := ""
@@ -80,6 +86,12 @@ func (s *Server) checkRunnerJobLocked(ctx context.Context, v *view, repoFull str
 		serveRepo = rec.repo
 	}
 	if reason == "" {
+		if runnerID != 0 && rec != nil && rec.runnerID != 0 && runnerID != rec.runnerID {
+			// Runner bookkeeping: the event is from an earlier runner with
+			// this name.
+			s.log().Info("runner bookkeeping left unchanged", append(attrs, "event", logging.EventWebhookIgnored, "reason", "runner_id_not_recorded")...)
+			return "ok", nil
+		}
 		if rec == nil {
 			rec = &runnerRecord{repo: repo, serve: served, at: s.launchedAt(ctx, v, runnerName)}
 			s.runners[runnerName] = rec
@@ -93,6 +105,9 @@ func (s *Server) checkRunnerJobLocked(ctx context.Context, v *view, repoFull str
 		// one is now idle and serves the displaced job: rebind its record,
 		// so that cancelling the displaced job while queued stops it.
 		out, err := s.dispatchLocked(ctx, v, serveRepo, served, rec.runID, jobID, "swap")
+		if rec.runnerID == 0 {
+			rec.runnerID = s.registeredID(v, serveRepo, runnerName)
+		}
 		if err != nil {
 			return "", err
 		}
@@ -100,11 +115,15 @@ func (s *Server) checkRunnerJobLocked(ctx context.Context, v *view, repoFull str
 			taker := RunnerName(jobID)
 			switch tr := s.runners[taker]; {
 			case tr == nil:
-				s.runners[taker] = &runnerRecord{repo: serveRepo, serve: served, runID: rec.runID, at: s.launchedAt(ctx, v, taker)}
-				s.logRebind(attrs, taker, served, jobID)
+				tr = &runnerRecord{repo: serveRepo, serve: served, runID: rec.runID, runnerID: s.registeredID(v, serveRepo, taker), at: s.launchedAt(ctx, v, taker)}
+				s.runners[taker] = tr
+				s.logRebind(attrs, taker, tr.runnerID, served, jobID)
 			case !tr.reassigned:
 				tr.serve, tr.runID = served, rec.runID
-				s.logRebind(attrs, taker, served, jobID)
+				if tr.runnerID == 0 {
+					tr.runnerID = s.registeredID(v, serveRepo, taker)
+				}
+				s.logRebind(attrs, taker, tr.runnerID, served, jobID)
 			}
 		}
 		return "swap", nil
@@ -181,9 +200,20 @@ func (s *Server) logSwap(rec *runnerRecord, attrs []any) {
 
 // logRebind logs that runner (launched for fromJob, which took another runner) now
 // serves the displaced job served, so that a chain of swaps reads as hand-offs.
-func (s *Server) logRebind(attrs []any, runner string, served, fromJob int64) {
+func (s *Server) logRebind(attrs []any, runner string, runnerID, served, fromJob int64) {
 	s.log().Info("idle runner handed the displaced job",
-		append(attrs, "event", logging.EventRunnerRebind, "rebound_runner", runner, "rebound_to_job_id", served, "rebound_from_job_id", fromJob)...)
+		append(attrs, "event", logging.EventRunnerRebind, "rebound_runner", runner, "rebound_to_job_id", served, "rebound_from_job_id", fromJob,
+			"rebound_runner_id", runnerID)...)
+}
+
+// registeredID returns the registration ID of runner name from the view's
+// cached runner list, 0 if the list is not cached or lacks it. It makes no
+// call.
+func (s *Server) registeredID(v *view, repo githubapp.Repo, name string) int64 {
+	if m, ok := v.runners[s.scopeKey(repo)]; ok {
+		return m[name].ID
+	}
+	return 0
 }
 
 // launchedAt returns when runnerName's execution was created, for a runner this

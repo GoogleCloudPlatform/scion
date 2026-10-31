@@ -116,7 +116,7 @@ func (s *Server) Reconcile(ctx context.Context) ReconcileResult {
 	defer s.dispatchMu.Unlock()
 	gv := newView()
 	for _, rj := range onRunners {
-		out, err := s.checkRunnerJobLocked(ctx, gv, rj.repo.String(), rj.job.ID, rj.run.ID, rj.job.RunnerName, &rj.run, "reconcile")
+		out, err := s.checkRunnerJobLocked(ctx, gv, rj.repo.String(), rj.job.ID, rj.run.ID, rj.job.RunnerName, 0, &rj.run, "reconcile")
 		if err != nil {
 			addErr("runner_check "+rj.job.RunnerName, err)
 		}

@@ -93,6 +93,17 @@ func (c *CloudRun) Complete(jobID string) {
 	}
 }
 
+// CompleteRunner marks the executions with RUNNER_NAME name as completed.
+func (c *CloudRun) CompleteRunner(name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, e := range c.executions {
+		if e.Env["RUNNER_NAME"] == name {
+			e.Completed = true
+		}
+	}
+}
+
 func (c *CloudRun) serve(w http.ResponseWriter, r *http.Request) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

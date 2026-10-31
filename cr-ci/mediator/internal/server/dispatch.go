@@ -130,6 +130,17 @@ func (s *Server) dispatchLocked(ctx context.Context, v *view, repo githubapp.Rep
 			}
 		}
 	}
+	// Runner bookkeeping: a live record serving this job counts too (a
+	// rebound runner's GH_JOB_ID is its launch job). A record whose
+	// execution is done does not.
+	for rn, rec := range s.runners {
+		if rec.serve != serve || rec.reassigned {
+			continue
+		}
+		if ref, ok := s.recordLive(rn, rec, live, execs); ok {
+			return skip("record", outSkipped, "serving_runner", rn, "execution", ref)
+		}
+	}
 	if used := len(live) + unlisted; used >= s.o.MaxConcurrent {
 		s.log().Info("capacity full; job left queued", append(attrs, "event", logging.EventCapacityFull, "active", used, "max", s.o.MaxConcurrent)...)
 		return outQueued, nil
@@ -175,9 +186,14 @@ func (s *Server) dispatchLocked(ctx context.Context, v *view, repo githubapp.Rep
 	}
 	now := s.o.Now()
 	s.runners[name] = &runnerRecord{repo: repo, serve: serve, runID: runID, ref: ref, runnerID: runnerID, at: now}
+	// Runner bookkeeping: the name is in use again.
+	delete(s.forgotten, name)
 	runners[name] = githubapp.Runner{ID: runnerID, Name: name, Status: "offline"}
 	v.execs = append(v.execs, launcher.Execution{Ref: ref, JobID: serve, RunnerName: name, Created: now})
-	s.log().Info("runner launched", append(attrs, "event", logging.EventDispatch, "execution", ref, "runner_id", runnerID, "active", len(live)+unlisted+1)...)
+	// GitHub gives the runner whichever queued job it likes, so the job it
+	// is launched for is not necessarily the job it runs.
+	s.log().Info("runner launched; GitHub assigns the job it runs", append(attrs, "event", logging.EventDispatch,
+		"dispatch_for_job_id", serve, "execution", ref, "runner_id", runnerID, "active", len(live)+unlisted+1)...)
 	return outLaunched, nil
 }
 
@@ -299,10 +315,45 @@ func (s *Server) stopUnusedRunners(ctx context.Context, repo githubapp.Repo, job
 	return errors.Join(errs...)
 }
 
+// recordLive reports whether the runner of record rec (named rn) is still
+// running: its execution is live, or it was launched too recently to be
+// listed. It returns the execution ref, if known.
+func (s *Server) recordLive(rn string, rec *runnerRecord, live, execs []launcher.Execution) (string, bool) {
+	for _, e := range live {
+		if (rec.ref != "" && e.Ref == rec.ref) || (rec.ref == "" && e.RunnerName == rn) {
+			return e.Ref, true
+		}
+	}
+	if rec.ref == "" || s.o.Now().Sub(rec.at) >= launchListLag {
+		return "", false
+	}
+	if _, gone := s.cancelled[rec.ref]; gone {
+		return "", false
+	}
+	for _, e := range execs {
+		if e.Ref == rec.ref {
+			return "", false // listed, and not live
+		}
+	}
+	return rec.ref, true
+}
+
 // forgetRunner drops the record and claim of a runner whose job finished.
-func (s *Server) forgetRunner(name string) {
+// Runner bookkeeping: it acts only when runnerID (the webhook's runner_id) is
+// the recorded runner's.
+func (s *Server) forgetRunner(name string, runnerID int64, attrs []any) {
 	s.dispatchMu.Lock()
 	defer s.dispatchMu.Unlock()
+	rec := s.runners[name]
+	if rec == nil || rec.runnerID != runnerID {
+		recorded := int64(0)
+		if rec != nil {
+			recorded = rec.runnerID
+		}
+		s.log().Info("runner bookkeeping left unchanged", append(attrs, "event", logging.EventWebhookIgnored,
+			"reason", "runner_id_not_recorded", "recorded_runner_id", recorded)...)
+		return
+	}
 	delete(s.runners, name)
 	s.forgotten[name] = s.o.Now()
 	if id, ok := parseRunnerName(name); ok {
