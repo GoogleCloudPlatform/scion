@@ -37,6 +37,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/google/uuid"
@@ -178,6 +179,10 @@ type HTTPAgentDispatcher struct {
 	// storageLayout is the hub's projectfs Layout source for
 	// storageLayoutPrecheck (SetStorageLayout); nil disables the check.
 	storageLayout func() (projectfs.Layout, error)
+	// workspaceStorage returns the hub's current storage backend
+	// (SetWorkspaceStorage); buildCreateRequestFor asks for the signed-URL
+	// workspace download only when it is GCS. Nil means no storage.
+	workspaceStorage func() storage.Storage
 
 	// attachmentIssuer issues the attachment delivery capabilities of a
 	// message on every dispatch attempt (ptone/scion#4596). Nil issues none.
@@ -790,6 +795,14 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 	if agent.AppliedConfig != nil && agent.AppliedConfig.WorkspaceStoragePath != "" {
 		req.WorkspaceStoragePath = agent.AppliedConfig.WorkspaceStoragePath
 		req.WorkspaceStorageBucket = agent.AppliedConfig.WorkspaceStorageBucket
+		// A GCS hub serves the broker-self workspace download, so the
+		// broker fetches per-file signed URLs from it and needs no storage
+		// credential of its own. The URLs are never in this request: the
+		// broker asks for them when it downloads. The bucket is still sent
+		// for brokers that predate the field.
+		if d.workspaceStorageIsGCS() {
+			req.WorkspaceDownloadMode = api.WorkspaceDownloadModeSignedURLs
+		}
 	}
 
 	if d.debug {
