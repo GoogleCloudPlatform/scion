@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
@@ -191,11 +192,13 @@ func keysList(s []string) string {
 	return "[" + strings.Join(s, ", ") + "]"
 }
 
+// keysDeadline renders a deadline in the display zone (--tz/--utc); JSON
+// output keeps RFC 3339.
 func keysDeadline(t *time.Time) string {
 	if t == nil {
 		return "none"
 	}
-	return t.UTC().Format(time.RFC3339)
+	return clitime.Format(*t, clitime.Full)
 }
 
 func keysCounts(m map[string]int) string {

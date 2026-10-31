@@ -21,8 +21,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -192,4 +195,22 @@ func TestServerKeysCheck_ExitCodes(t *testing.T) {
 			assert.NotContains(t, err.Error(), "test-only-env-secret")
 		})
 	}
+}
+
+// Review N5: the text output renders deadlines in the display zone
+// (--tz/--utc), like every other CLI time.
+func TestPrintKeyStatus_DeadlinesUseDisplayZone(t *testing.T) {
+	ny, err := time.LoadLocation("America/New_York")
+	require.NoError(t, err)
+	old := clitime.Zone()
+	clitime.SetZone(ny)
+	t.Cleanup(func() { clitime.SetZone(old) })
+	signUntil := time.Date(2026, 10, 30, 14, 0, 0, 0, time.UTC)
+	verifyUntil := signUntil.Add(48 * time.Hour)
+	var out bytes.Buffer
+	printKeyStatus(&out, hub.KeyStatusReport{Signing: hub.KeyStatusSigning{
+		Generations: []hub.KeyStatusGeneration{{ID: "legacy", SignUntil: &signUntil, VerifyUntil: &verifyUntil}, {ID: "gen1"}},
+	}})
+	assert.Contains(t, out.String(), "legacy: sign_until 2026-10-30 10:00:00 EDT, verify_until 2026-11-01 09:00:00 EST")
+	assert.Contains(t, out.String(), "gen1: sign_until none, verify_until none")
 }
