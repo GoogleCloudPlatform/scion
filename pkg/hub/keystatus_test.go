@@ -49,6 +49,20 @@ import (
 
 const keyStatusPath = "/api/v1/admin/keys/status"
 
+// ksSecretOwner creates the user the seeded user-scope secrets belong to.
+// The Hub's startup sweep (startUserScopedDataSweep) deletes user-scope
+// secrets whose user does not exist, after the startup audit has run; a
+// fixture under a made-up scope ID would vanish between the endpoint's
+// startup audit and a later local audit.
+func ksSecretOwner(t *testing.T, st store.Store) string {
+	t.Helper()
+	ctx := context.Background()
+	u := &store.User{ID: tid("user-ks-secret-owner"), Email: "ks-secret-owner@test.com", DisplayName: "KS Secret Owner",
+		Role: store.UserRoleMember, Status: "active", Created: time.Now()}
+	require.NoError(t, st.CreateUser(ctx, u))
+	return u.ID
+}
+
 // Seeded secret record IDs (secret IDs are UUIDs).
 const (
 	ksRecordLegacy     = "6b0f2f1e-5a4b-4c3d-8e2f-00000000a001"
@@ -375,14 +389,15 @@ func TestKeyStatus_PolicyAndMigration(t *testing.T) {
 // deadlines, from the endpoint and the local builder alike.
 func TestKeyStatus_LegacyModeEndpoint(t *testing.T) {
 	st := encStore(t)
+	owner := ksSecretOwner(t, st)
 	clk := &krClock{t: krT0}
-	// A legacy-mode Hub derives its signing keys from the shared secret and
-	// stores no backups, so seed one user secret for the audit to read.
+	// Seed one user secret (of a real user, see ksSecretOwner) so the
+	// audit counts are not trivially empty.
 	srv := ksServer(t, st, nil, clk)
 	sealed, err := secret.NewLegacyValueCipher(krLegacySecret).Encrypt("ks-synthetic-legacy-payload")
 	require.NoError(t, err)
 	_, err = st.UpsertSecret(context.Background(), &store.Secret{ID: ksRecordLegacy, Key: "KS_RECORD_KEY_LEGACY", EncryptedValue: sealed,
-		Scope: store.ScopeUser, ScopeID: "ks-user", SecretType: store.SecretTypeEnvironment})
+		Scope: store.ScopeUser, ScopeID: owner, SecretType: store.SecretTypeEnvironment})
 	require.NoError(t, err)
 	srv = ksRestart(t, srv, st, nil, clk)
 
@@ -513,6 +528,7 @@ func TestKeyStatus_Authorization(t *testing.T) {
 func TestKeyStatus_NoLeak(t *testing.T) {
 	logs := captureLogs(t)
 	st := encStore(t)
+	owner := ksSecretOwner(t, st)
 	clk := &krClock{t: krT0}
 	ka := ksKeyringA(t)
 	srv := ksServer(t, st, ka, clk)
@@ -527,7 +543,7 @@ func TestKeyStatus_NoLeak(t *testing.T) {
 		{ID: ksRecordReadable, Key: "KS_RECORD_KEY_READABLE", EncryptedValue: readable},
 		{ID: ksRecordUnreadable, Key: "KS_RECORD_KEY_UNREADABLE", EncryptedValue: sealForeign(t, "legacy", "ks-synthetic-payload-foreign")},
 	} {
-		row.Scope, row.ScopeID, row.SecretType = store.ScopeUser, "ks-user", store.SecretTypeEnvironment
+		row.Scope, row.ScopeID, row.SecretType = store.ScopeUser, owner, store.SecretTypeEnvironment
 		_, err := st.UpsertSecret(ctx, row)
 		require.NoError(t, err)
 	}
@@ -757,6 +773,7 @@ func TestKeyStatus_SigningReasonParityWithReadyz(t *testing.T) {
 // agree (instance identity and audit timing aside).
 func TestKeyStatus_SecretlessLegacyParity(t *testing.T) {
 	st := encStore(t)
+	owner := ksSecretOwner(t, st)
 	cfg := testServerConfig()
 	cfg.HubID = encTestHubID
 	cfg.KeyringNow = (&krClock{t: krT0}).now
@@ -774,7 +791,7 @@ func TestKeyStatus_SecretlessLegacyParity(t *testing.T) {
 	sealed, err := secret.NewLegacyValueCipher(krLegacySecret).Encrypt("ks-synthetic-legacy-payload")
 	require.NoError(t, err)
 	_, err = st.UpsertSecret(context.Background(), &store.Secret{ID: ksRecordLegacy, Key: "KS_RECORD_KEY_LEGACY", EncryptedValue: sealed,
-		Scope: store.ScopeUser, ScopeID: "ks-user", SecretType: store.SecretTypeEnvironment})
+		Scope: store.ScopeUser, ScopeID: owner, SecretType: store.SecretTypeEnvironment})
 	require.NoError(t, err)
 	require.NoError(t, srv.Shutdown(context.Background()))
 	srv = start()
