@@ -3322,12 +3322,14 @@ describe('"Jump to agent" palette: a pane dialog opening under it', () => {
     expect(palette.open).toBe(true);
   });
 
-  it('does nothing while the palette is closed', async () => {
-    const hide = vi.spyOn(root['paletteHost'], 'hide');
-
+  it('does nothing while the palette is closed: a later open still shows', async () => {
     paneDialogOpens(paneFor(root, AGENT_A));
+    expect(root['paletteHost'].isOpen).toBe(false);
 
-    expect(hide).not.toHaveBeenCalled();
+    const palette = await openFromInvoker();
+
+    expect(root['paletteHost'].isOpen).toBe(true);
+    expect(palette.open).toBe(true);
   });
 });
 

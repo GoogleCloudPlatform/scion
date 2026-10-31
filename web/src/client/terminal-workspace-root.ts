@@ -786,6 +786,7 @@ export class TerminalWorkspaceRoot {
     window.removeEventListener(TEST_INFRA_STATUS_EVENT, this.handleTestInfraStatus);
     document.removeEventListener('keydown', this.handleGlobalKeydown);
     document.removeEventListener('focusin', this.handleGlobalFocusIn);
+    this.element.removeEventListener(TERMINAL_PANE_DIALOG_OPEN_EVENT, this.handlePaneDialogOpen);
     this.releasePaletteAgents();
     this.touchQuery?.removeEventListener?.('change', this.handleTouchQueryChange);
     this.paletteHost.dispose();
@@ -1029,9 +1030,9 @@ export class TerminalWorkspaceRoot {
   /**
    * A pane dialog that opens while the palette is open or pending (such as
    * the secret-conflict dialog, when a capture request returns) closes the
-   * palette, so two modals are never open together. The palette moves focus
-   * nowhere: the pane dialog holds it. A dialog in an off-screen pane is not
-   * visible, so it leaves the palette open, as
+   * palette, so two modals are never open together. The close does not
+   * refocus the palette's invoker: the pane dialog takes focus. A dialog in
+   * an off-screen pane is not visible, so it leaves the palette open, as
    * {@link QuickPaletteHost.hasUnrelatedModalOpen} ignores it.
    */
   private readonly handlePaneDialogOpen = (e: Event): void => {
