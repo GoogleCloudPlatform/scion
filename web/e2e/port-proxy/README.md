@@ -25,9 +25,9 @@ cd web
 E2E_PREBUILT=1 npx playwright test -c e2e/port-proxy/playwright.config.ts
 ```
 
-The page view journeys (3 and 4, ptone/scion#5569; see the header of
-`port-view.pw.ts`) need `hub.port_view` on from hub start, so they run on a
-second hub of the same rig under their own config:
+The page view journeys (3, 4 and 5, ptone/scion#5569 and ptone/scion#5570;
+see the header of `port-view.pw.ts`) need `hub.port_view` on from hub start,
+so they run on a second hub of the same rig under their own config:
 
 ```bash
 cd web
@@ -35,8 +35,8 @@ npx playwright test -c e2e/port-proxy/playwright.view.config.ts
 ```
 
 That config sets `E2E_PP_VIEW=1` for global setup, which then starts the
-hub with `hub.port_view` on as well, serves the port from the conduit agent
-only, makes the member project-owner of the fixture project, and signs in
+hub with `hub.port_view` on as well, serves the port from both agents
+(conduit and legacy tunnel), makes the member project-owner of the fixture project, and signs in
 two more test identities: a peer (project-admin) and an outsider (no
 project role). The default config skips `port-view.pw.ts`.
 
