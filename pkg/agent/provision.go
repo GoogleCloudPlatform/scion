@@ -5019,8 +5019,9 @@ func injectPromptFiles(h api.Harness, agentHome string, chain []*config.Template
 		// where a template author creates the file but forgets to reference it
 		// in scion-agent.yaml.
 		if finalScionCfg.AgentInstructions == "" {
-			conventionPath := filepath.Join(lastTpl.Path, "agents.md")
-			if _, err := os.Stat(conventionPath); err == nil {
+			// Detected only as a plain file inside the template directory,
+			// looked up as the content read will read it (no link followed).
+			if config.TemplateHasContentFile(lastTpl, "agents.md") {
 				util.Debugf("ProvisionAgent: agent_instructions not set in config, auto-detected agents.md in template %s", lastTpl.Path)
 				finalScionCfg.AgentInstructions = "agents.md"
 			}
@@ -5061,8 +5062,9 @@ func injectPromptFiles(h api.Harness, agentHome string, chain []*config.Template
 		// Step 5: Inject system prompt
 		// Convention-based auto-detection for system prompt as well.
 		if finalScionCfg.SystemPrompt == "" {
-			conventionPath := filepath.Join(lastTpl.Path, "system-prompt.md")
-			if _, err := os.Stat(conventionPath); err == nil {
+			// Detected only as a plain file inside the template directory,
+			// looked up as the content read will read it (no link followed).
+			if config.TemplateHasContentFile(lastTpl, "system-prompt.md") {
 				util.Debugf("ProvisionAgent: system_prompt not set in config, auto-detected system-prompt.md in template %s", lastTpl.Path)
 				finalScionCfg.SystemPrompt = "system-prompt.md"
 			}
