@@ -274,6 +274,7 @@ func (f *chatRetentionHubFixture) dms() map[string]chatDMEntry {
 func TestChatRetention_ListsAndUnreadAfterPurgeSQLite(t *testing.T) {
 	f := newChatRetentionHubFixture(t)
 	setChatRetentionSettings(t, f.srv, true, `{"enabled":true,"messages_retention_days":30,"sweep":{"pause_ms":0}}`)
+	require.True(t, f.srv.GetOperationalSettings().ConversationEnvelopeSwitch(), "the DM list reads by conversation")
 	now := time.Now().UTC()
 	old := now.Add(-40 * 24 * time.Hour)
 
@@ -282,16 +283,21 @@ func TestChatRetention_ListsAndUnreadAfterPurgeSQLite(t *testing.T) {
 	keyNew, err := messages.DMConversationKey("agent", api.NewUUID(), "user", f.alice.ID)
 	require.NoError(t, err)
 	peerOf := func(key string) string { return strings.Split(key, ":")[2] }
+	// The DM list reads a DM's last message through its conversation (the
+	// conversation envelope switch is on by default), so each DM has its
+	// native conversation and its messages carry it.
+	convGone := seedConversation(t, f.s, "native", keyGone, "direct")
+	convNew := seedConversation(t, f.s, "native", keyNew, "direct")
 
-	g1 := f.message(chatRetentionSeed{created: old, channel: "web", thread: keyGone})
-	g2 := f.message(chatRetentionSeed{created: old.Add(time.Minute), channel: "web", thread: keyGone})
+	g1 := f.message(chatRetentionSeed{created: old, channel: "web", conv: convGone, thread: keyGone})
+	g2 := f.message(chatRetentionSeed{created: old.Add(time.Minute), channel: "web", conv: convGone, thread: keyGone})
 	goneActivity := old.Add(time.Minute).Truncate(time.Millisecond)
 	require.NoError(t, f.wcs.UpsertDM(f.ctx, WebChatDM{ConversationKey: keyGone, ParticipantID: f.alice.ID,
 		PeerID: peerOf(keyGone), PeerKind: "agent", LastMessageID: g2, LastActivityAt: goneActivity}))
 	require.NoError(t, f.wcs.SetReadState(f.ctx, f.alice.ID, keyGone, g1))
 
-	n1 := f.message(chatRetentionSeed{created: old, channel: "web", thread: keyNew})
-	n2 := f.message(chatRetentionSeed{created: now.Add(-time.Hour), channel: "web", thread: keyNew})
+	n1 := f.message(chatRetentionSeed{created: old, channel: "web", conv: convNew, thread: keyNew})
+	n2 := f.message(chatRetentionSeed{created: now.Add(-time.Hour), channel: "web", conv: convNew, thread: keyNew})
 	require.NoError(t, f.wcs.UpsertDM(f.ctx, WebChatDM{ConversationKey: keyNew, ParticipantID: f.alice.ID,
 		PeerID: peerOf(keyNew), PeerKind: "agent", LastMessageID: n2, LastActivityAt: now.Add(-time.Hour)}))
 	require.NoError(t, f.wcs.SetReadState(f.ctx, f.alice.ID, keyNew, n1))
