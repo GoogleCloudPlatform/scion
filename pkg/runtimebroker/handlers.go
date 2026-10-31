@@ -1952,6 +1952,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			span.SetStatus(codes.Error, spanErrorText(err))
+			if errors.Is(err, agent.ErrProjectPathNotInitialized) {
+				markAttemptFailed(http.StatusConflict, err.Error())
+				writeError(w, http.StatusConflict, ErrCodeProjectPathNotInitialized, err.Error(), nil)
+				return
+			}
 			if config.IsAgentStateConflict(err) {
 				markAttemptFailed(http.StatusConflict, "failed to provision agent")
 				writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to provision agent: "+err.Error(), nil)
@@ -2065,6 +2070,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			markAttemptFailed(http.StatusNotFound, "failed to create agent")
 		case isSkillErr:
 			markAttemptFailed(skillResolutionHTTPStatus(skillErr.Code), "failed to create agent")
+		case errors.Is(err, agent.ErrProjectPathNotInitialized):
+			markAttemptFailed(http.StatusConflict, err.Error())
 		case config.IsAgentStateConflict(err):
 			markAttemptFailed(http.StatusConflict, "failed to create agent")
 		case errors.Is(err, agent.ErrProjectShareNotMounted):
@@ -2161,6 +2168,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, ErrCodeNotFound, notFoundMessage(opCreateAgent, err, opts.TemplateName), nil)
 		case isSkillErr:
 			SkillResolutionFailed(w, skillErr, createSkill.ref)
+		case errors.Is(err, agent.ErrProjectPathNotInitialized):
+			writeError(w, http.StatusConflict, ErrCodeProjectPathNotInitialized, err.Error(), nil)
 		case config.IsAgentStateConflict(err):
 			writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to create agent: "+err.Error(), nil)
 		case errors.Is(err, agent.ErrProjectShareNotMounted):
@@ -4084,6 +4093,8 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			writeError(w, http.StatusConflict, ErrCodeConflict, scionrt.ErrRunConflict.Error(), details)
 		case errors.As(err, &skillErr):
 			skillResolutionFailedWithDetails(w, skillErr, startSkill.ref, details)
+		case errors.Is(err, agent.ErrProjectPathNotInitialized):
+			writeError(w, http.StatusConflict, ErrCodeProjectPathNotInitialized, err.Error(), details)
 		case config.IsAgentStateConflict(err):
 			writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to start agent: "+err.Error(), details)
 		case errors.Is(err, agent.ErrProjectShareNotMounted):
@@ -5291,6 +5302,10 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		var skillErr *agent.SkillResolutionError
 		if errors.As(err, &skillErr) {
 			skillResolutionFailedWithDetails(w, skillErr, restartSkill.ref, details)
+			return
+		}
+		if errors.Is(err, agent.ErrProjectPathNotInitialized) {
+			writeError(w, http.StatusConflict, ErrCodeProjectPathNotInitialized, err.Error(), details)
 			return
 		}
 		if config.IsAgentStateConflict(err) {

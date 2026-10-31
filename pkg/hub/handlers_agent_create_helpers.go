@@ -1529,6 +1529,8 @@ func (s *Server) handleExistingAgent(
 				// 412 already written (design #2703 D3).
 			case relayDispatchRefusal(w, err):
 				// Required-skill resolution failure relayed with the broker's status.
+			case s.relayProjectPathRefusal(ctx, w, existingAgent, err):
+				// The broker's project path is not initialized (ptone/scion#6647).
 			case relayBrokerRefusal(w, err):
 				// Broker refusal relayed with the broker's status.
 			case relayIdentityMappingError(w, err):
@@ -1687,6 +1689,8 @@ func (s *Server) handleExistingAgent(
 					// 412 already written (design #2703 D3).
 				case relayDispatchRefusal(w, err):
 					// Required-skill resolution failure relayed with the broker's status.
+				case s.relayProjectPathRefusal(ctx, w, existingAgent, err):
+					// The broker's project path is not initialized (ptone/scion#6647).
 				case relayBrokerRefusal(w, err):
 					// Broker refusal relayed with the broker's status.
 				case relayIdentityMappingError(w, err):
@@ -1939,6 +1943,8 @@ func (s *Server) handleExistingAgent(
 				// 412 already written (design #2703 D3).
 			case relayDispatchRefusal(w, err):
 				// Required-skill resolution failure relayed with the broker's status.
+			case s.relayProjectPathRefusal(ctx, w, existingAgent, err):
+				// The broker's project path is not initialized (ptone/scion#6647).
 			case relayBrokerRefusal(w, err):
 				// Broker refusal relayed with the broker's status.
 			case relayIdentityMappingError(w, err):

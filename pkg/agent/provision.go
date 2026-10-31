@@ -1611,6 +1611,17 @@ func plainProjectWorkspaceSource(projectDir string) string {
 	return filepath.Dir(projectDir)
 }
 
+// checkedPlainProjectWorkspaceSource is plainProjectWorkspaceSource for
+// provisioning: it refuses a projectDir that is not a .scion directory, so a
+// plain workspace is never the parent of a bare directory. The delete guard
+// keeps the unchecked form, where protecting the parent is the safe side.
+func checkedPlainProjectWorkspaceSource(projectDir string) (string, error) {
+	if filepath.Base(projectDir) != config.DotScion {
+		return "", ErrProjectPathNotInitialized
+	}
+	return plainProjectWorkspaceSource(projectDir), nil
+}
+
 // resolveProjectRoot determines the project root directory on this broker.
 // Used for resolving relative --workspace paths against the project's logical root.
 func resolveProjectRoot(settings *config.VersionedSettings, projectDir string) string {
@@ -1842,6 +1853,12 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// 1. Prepare agent directories
 	projectDir, err := config.GetResolvedProjectDir(projectPath)
 	if err != nil {
+		return "", "", nil, err
+	}
+	// A plain project's explicit path must hold its .scion entry, checked
+	// before anything is written under it (checkExplicitProjectPath).
+	ownWorkspace := api.GitCloneFromContext(ctx) != nil || api.IsEmptyPerAgentWorkspaceFromContext(ctx) || api.IsSharedWorkspaceFromContext(ctx)
+	if err := checkExplicitProjectPath(projectPath, projectDir, workspace, ownWorkspace); err != nil {
 		return "", "", nil, err
 	}
 
@@ -2312,7 +2329,16 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 				return "", "", nil, fmt.Errorf("failed to create workspace directory: %w", err)
 			}
 		} else {
-			workspaceSource = plainProjectWorkspaceSource(projectDir)
+			// The workspace is the directory holding projectDir, so
+			// projectDir must be a .scion directory: never mount the
+			// parent of a bare directory (checkExplicitProjectPath refused
+			// an explicit path above; this keeps every other way here
+			// fail-closed).
+			src, err := checkedPlainProjectWorkspaceSource(projectDir)
+			if err != nil {
+				return "", "", nil, &ProjectPathNotInitializedError{Path: projectPathForError(projectPath, projectDir)}
+			}
+			workspaceSource = src
 		}
 	}
 
