@@ -35,7 +35,9 @@ import (
 //     cloned .lfsconfig with the host's credentials);
 //   - GIT_* variables that choose a repository or add config are scrubbed
 //     (util.HostGitEnv), e.g. a GIT_DIR in the broker environment does not reach
-//     the clone.
+//     the clone;
+//   - the remote authentication layer is applied (util.HostGitRemoteEnv): no
+//     host credential is offered.
 //
 // The scoped credential helper (no unscoped credential.helper, no token in the
 // URL) is covered by TestRunGitClone_UsesScopedHelperNotUnscoped; the no-endpoint
@@ -75,4 +77,7 @@ func TestProvisioningClone_UsesHardenedEnv(t *testing.T) {
 		assert.NotEqual(t, "GIT_DIR=/tmp/should-be-scrubbed", line,
 			"HostGitEnv must scrub GIT_DIR from the provisioning clone env")
 	}
+	// The clone offers no host credential (the remote layer, no token here),
+	// and still succeeds without the host global config.
+	checkRemoteLayerEnv(t, strings.Split(strings.TrimSuffix(recorded, "\n"), "\n"), "", "")
 }
