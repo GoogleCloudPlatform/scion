@@ -16,6 +16,7 @@ package api
 
 import (
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -61,15 +62,20 @@ var resourceSubPaths = map[string]func(*ResourceSpec) *string{
 	"resources.disk":            func(r *ResourceSpec) *string { return &r.Disk },
 }
 
+// resourceSubPathList is resourceSubPaths' keys, sorted, built once.
+// TestResourceSubPaths pins that the two hold the same paths.
+var resourceSubPathList = []string{
+	"resources.disk",
+	"resources.limits.cpu",
+	"resources.limits.memory",
+	"resources.requests.cpu",
+	"resources.requests.memory",
+}
+
 // ResourceSubPaths returns the resources sub-field ClearedFields entries,
-// sorted.
+// sorted. The result is a copy the caller may change.
 func ResourceSubPaths() []string {
-	out := make([]string, 0, len(resourceSubPaths))
-	for p := range resourceSubPaths {
-		out = append(out, p)
-	}
-	sort.Strings(out)
-	return out
+	return slices.Clone(resourceSubPathList)
 }
 
 // IsResourceSubPath reports whether path names one resources sub-field
@@ -87,6 +93,16 @@ func ResourceSubField(r *ResourceSpec, path string) *string {
 		return nil
 	}
 	return f(r)
+}
+
+// ResourceSubFieldValue returns the value of the sub-field of r that the
+// resources sub-path path names, or "" when path is not one or r is nil
+// (ResourceSubField returns nil), so callers never dereference nil.
+func ResourceSubFieldValue(r *ResourceSpec, path string) string {
+	if f := ResourceSubField(r, path); f != nil {
+		return *f
+	}
+	return ""
 }
 
 // ClearableConfigPath reports whether path is a ScionConfig.ClearedFields

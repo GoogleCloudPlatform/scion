@@ -17,6 +17,7 @@ package api
 import (
 	"encoding/json"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -181,6 +182,46 @@ func TestResourceSubPaths(t *testing.T) {
 	}
 	if ResourceSubField(nil, want[0]) != nil || ResourceSubField(r, "resources") != nil {
 		t.Error("ResourceSubField: nil spec or a non-sub-path must give nil")
+	}
+	// The static sorted list and the accessor map hold the same paths, so
+	// they cannot drift apart.
+	keys := make([]string, 0, len(resourceSubPaths))
+	for p := range resourceSubPaths {
+		keys = append(keys, p)
+	}
+	sort.Strings(keys)
+	if !reflect.DeepEqual(keys, resourceSubPathList) {
+		t.Errorf("resourceSubPathList %v != the accessor map's sorted keys %v", resourceSubPathList, keys)
+	}
+	// The result is a copy: changing it does not change the next call.
+	got := ResourceSubPaths()
+	got[0] = "changed"
+	if ResourceSubPaths()[0] != want[0] {
+		t.Error("ResourceSubPaths returned a shared slice")
+	}
+}
+
+// TestResourceSubFieldValue: the nil-safe accessor returns the sub-field's
+// value, and "" for a nil spec or a path that is not a sub-path.
+func TestResourceSubFieldValue(t *testing.T) {
+	r := &ResourceSpec{Requests: ResourceList{CPU: "1"}, Limits: ResourceList{Memory: "4Gi"}, Disk: "10Gi"}
+	for p, want := range map[string]string{
+		"resources.requests.cpu":    "1",
+		"resources.requests.memory": "",
+		"resources.limits.memory":   "4Gi",
+		"resources.disk":            "10Gi",
+		"resources":                 "",
+		"resources.limits":          "",
+		"max_turns":                 "",
+	} {
+		if got := ResourceSubFieldValue(r, p); got != want {
+			t.Errorf("ResourceSubFieldValue(r, %q) = %q, want %q", p, got, want)
+		}
+	}
+	for _, p := range ResourceSubPaths() {
+		if got := ResourceSubFieldValue(nil, p); got != "" {
+			t.Errorf("ResourceSubFieldValue(nil, %q) = %q, want \"\"", p, got)
+		}
 	}
 }
 

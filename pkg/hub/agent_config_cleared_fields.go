@@ -79,7 +79,7 @@ func nextClearedFields(old, req *api.ScionConfig, rawConfig map[string]json.RawM
 	}
 	if present["resources"] && req != nil && req.Resources != nil {
 		for _, p := range api.ResourceSubPaths() {
-			if *api.ResourceSubField(req.Resources, p) != "" {
+			if api.ResourceSubFieldValue(req.Resources, p) != "" {
 				delete(set, p)
 			}
 		}
@@ -135,7 +135,7 @@ func droppedResourceSubPaths(old, req *api.ScionConfig, present map[string]bool)
 	}
 	var out []string
 	for _, p := range api.ResourceSubPaths() {
-		if *api.ResourceSubField(old.Resources, p) != "" && *api.ResourceSubField(req.Resources, p) == "" {
+		if api.ResourceSubFieldValue(old.Resources, p) != "" && api.ResourceSubFieldValue(req.Resources, p) == "" {
 			out = append(out, p)
 		}
 	}
