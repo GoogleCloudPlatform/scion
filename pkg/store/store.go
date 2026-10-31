@@ -3617,6 +3617,38 @@ type HubSettingRevisionDeleter interface {
 	DeleteHubSettingRevision(ctx context.Context, section string) (int64, error)
 }
 
+// HubSettingWrite is one section write of a guarded batch
+// (HubSettingGuardedBatchWriter). ExpectedRevision has UpsertHubSetting's
+// meaning: -1 unconditional, 0 create-only, >0 the current revision. A
+// Delete write removes the row instead (Value unused): the row must exist,
+// at ExpectedRevision unless that is -1 (a missing row is then
+// ErrNotFound), and its returned HubSetting has only Section and
+// SettingsRevision set.
+type HubSettingWrite struct {
+	Section          string
+	Value            json.RawMessage
+	ExpectedRevision int64
+	Delete           bool
+}
+
+// HubSettingGuardedBatchWriter is an optional HubSettingStore method: write
+// several sections in one transaction, guarded by the revisions of other
+// sections the caller read to validate the write. Guarded batches are
+// serialized against each other (on Postgres by a transaction-scoped
+// advisory lock, which also covers a read section with no row), every
+// existing written and read row is locked, and all are compared inside the
+// transaction: a read section must still be at its given revision (0: it
+// must not exist), and each write's ExpectedRevision must hold. Any
+// mismatch returns ErrRevisionConflict and writes nothing. The
+// operational-settings revision is bumped once for the batch and returned
+// in every row's SettingsRevision. A section may appear once, as a write
+// or as a read; HubSettingsRevisionSection may not appear. The rows are
+// returned in the order of writes.
+type HubSettingGuardedBatchWriter interface {
+	UpsertHubSettingsGuarded(ctx context.Context, writes []HubSettingWrite, reads map[string]int64,
+		updatedBy, origin string) ([]HubSetting, error)
+}
+
 // HubSettingStore defines persistence operations for operational hub settings.
 // Each setting is a section (e.g. "access", "telemetry") with a JSON value.
 type HubSettingStore interface {

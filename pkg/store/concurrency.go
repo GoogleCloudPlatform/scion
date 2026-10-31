@@ -264,6 +264,14 @@ const (
 	// gap of the range, so it does not collide with a key added next to
 	// the highest one.
 	LockAgentDelegatedCredentialPurge AdvisoryLockKey = 0x5C10001E
+
+	// LockHubSettingsGuardedBatch serializes guarded hub settings batches
+	// (HubSettingGuardedBatchWriter): a transaction-scoped
+	// pg_advisory_xact_lock taken before the batch reads and locks its
+	// rows, so a read guard on a section with no row (which FOR UPDATE
+	// cannot lock) still holds against a concurrent batch. A value in an
+	// unused gap of the range.
+	LockHubSettingsGuardedBatch AdvisoryLockKey = 0x5C10001F
 )
 
 // AdvisoryLocker is implemented by backends that can take a cluster-wide
