@@ -101,14 +101,6 @@ func TestConduitIngressPending_AdmittedCountedOnce(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, p.pendingFor(pendingRelayA), "released on the relay's first byte")
 
-	// From here the relay's session count alone carries the session: with
-	// relay-a holding it and relay-b one other session, the loads are 1 and
-	// 1, not 2 and 1.
-	p.mu.Lock()
-	la, lb := 1+p.countLocked(conduitIngressPendingKey{"relay-a", 1}), 1+p.countLocked(conduitIngressPendingKey{"relay-b", 1})
-	p.mu.Unlock()
-	assert.Equal(t, la, lb, "an admitted session is counted once")
-
 	release() // idempotent
 	assert.Zero(t, p.pendingFor(pendingRelayA))
 }

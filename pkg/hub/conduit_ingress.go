@@ -359,6 +359,8 @@ func (s *Server) proxyConduitDial(w http.ResponseWriter, r *http.Request, rt *co
 			if resp.StatusCode != http.StatusSwitchingProtocols {
 				release()
 			} else if body, ok := resp.Body.(io.ReadWriteCloser); ok {
+				// net/http gives a 101 response a ReadWriteCloser body (the
+				// upgraded connection), which ReverseProxy requires too.
 				resp.Body = &conduitIngressOutcomeBody{ReadWriteCloser: body, release: release}
 			}
 			return nil
