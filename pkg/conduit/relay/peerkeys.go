@@ -158,7 +158,7 @@ func LoadPeerPrivateKey(path string) (ed25519.PrivateKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("conduit relay peer key %s: %w", path, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	fi, err := f.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("conduit relay peer key %s: %w", path, err)

@@ -15,9 +15,6 @@
 package cmd
 
 import (
-	"bytes"
-	"log/slog"
-	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -44,31 +41,5 @@ func TestRelayPeerAuthOptions_NoSessionSecret(t *testing.T) {
 	}
 	if opts.PeerSecret == "" {
 		t.Error("the relay's peer auth options lack the peer secret")
-	}
-}
-
-// TestWarnRelaySessionSecret: a relay with a session secret configured
-// logs the warning; without one it logs nothing.
-func TestWarnRelaySessionSecret(t *testing.T) {
-	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-	// sessionSecretValue also reads the flag, the captured env value and a
-	// keyring file: clear them so only the env below decides.
-	prevFlag, prevCaptured, prevKeyring := webSessionSecret, capturedSessionSecret, serverKeyring
-	webSessionSecret, capturedSessionSecret, serverKeyring = "", "", nil
-	t.Cleanup(func() { webSessionSecret, capturedSessionSecret, serverKeyring = prevFlag, prevCaptured, prevKeyring })
-
-	t.Setenv(sessionSecretEnv, "")
-	t.Setenv(legacySessionSecretEnv, "")
-	warnRelaySessionSecret()
-	if buf.Len() != 0 {
-		t.Fatalf("warned without a session secret: %s", buf.String())
-	}
-	t.Setenv(sessionSecretEnv, "session-secret-0123456789abcdefghijklmn")
-	warnRelaySessionSecret()
-	if !strings.Contains(buf.String(), "session secret is set on --role relay") {
-		t.Fatalf("no warning with a session secret: %q", buf.String())
 	}
 }

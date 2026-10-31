@@ -1864,7 +1864,7 @@ func conduitPeersFromV1(in []V1ServerHubConduitPeer) []HubConduitPeer {
 	for _, p := range in {
 		hp := HubConduitPeer{ID: p.ID, Role: p.Role}
 		for _, k := range p.Keys {
-			hp.Keys = append(hp.Keys, HubConduitPeerKey{KeyID: k.KeyID, PublicKey: k.PublicKey})
+			hp.Keys = append(hp.Keys, HubConduitPeerKey(k))
 		}
 		out = append(out, hp)
 	}
@@ -1880,7 +1880,7 @@ func conduitPeersToV1(in []HubConduitPeer) []V1ServerHubConduitPeer {
 	for _, p := range in {
 		vp := V1ServerHubConduitPeer{ID: p.ID, Role: p.Role}
 		for _, k := range p.Keys {
-			vp.Keys = append(vp.Keys, V1ServerHubConduitPeerKey{KeyID: k.KeyID, PublicKey: k.PublicKey})
+			vp.Keys = append(vp.Keys, V1ServerHubConduitPeerKey(k))
 		}
 		out = append(out, vp)
 	}

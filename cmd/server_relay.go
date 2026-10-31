@@ -162,15 +162,6 @@ func relayPeerAuthOptions(cfg *config.GlobalConfig, id string, onGCP bool) (rela
 	}, nil
 }
 
-// warnRelaySessionSecret warns when a session secret is configured on
-// --role relay: the session secret is hub-only, a relay never uses it, and
-// it must not be provisioned to one.
-func warnRelaySessionSecret() {
-	if sessionSecretValue() != "" {
-		slog.Warn("A session secret is set on --role relay; the relay does not use it, and it should not be provisioned to relays")
-	}
-}
-
 // openRelayDB opens the relay's database access (a var for tests).
 var openRelayDB = relaydb.Open
 
@@ -192,7 +183,6 @@ func relayServerConfig(ctx context.Context, cfg *config.GlobalConfig, db *relayd
 			opts.OwnServiceAccount = email
 		}
 	}
-	warnRelaySessionSecret()
 	auth, mode, err := relay.NewConduitPeerAuth(opts)
 	if err != nil {
 		return relayserver.Config{}, err
