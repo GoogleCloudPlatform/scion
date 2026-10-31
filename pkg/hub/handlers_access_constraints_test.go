@@ -20,9 +20,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -662,6 +667,50 @@ func TestB7_GovernanceErrorStatus(t *testing.T) {
 		t.Run(tt.code, func(t *testing.T) {
 			assert.Equal(t, tt.expected, governanceErrorStatus(tt.code))
 		})
+	}
+}
+
+// TestB7_PreviewTokenCodes_SameStatusOnCommitPath pins that every preview
+// token error code (each ErrCodePreview* constant declared in the package's
+// non-test sources) answers the same status on the governance commit path as
+// on the token error path, and never 500, so a new code cannot be left out
+// of governanceErrorStatus.
+func TestB7_PreviewTokenCodes_SameStatusOnCommitPath(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	require.NoError(t, err)
+	fset := token.NewFileSet()
+	codes := map[string]string{}
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, f, nil, parser.SkipObjectResolution)
+		require.NoError(t, err, f)
+		for _, decl := range file.Decls {
+			gd, ok := decl.(*ast.GenDecl)
+			if !ok || gd.Tok != token.CONST {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				vs := spec.(*ast.ValueSpec)
+				for i, name := range vs.Names {
+					if !strings.HasPrefix(name.Name, "ErrCodePreview") || i >= len(vs.Values) {
+						continue
+					}
+					lit, ok := vs.Values[i].(*ast.BasicLit)
+					require.True(t, ok && lit.Kind == token.STRING, "%s must be a string literal", name.Name)
+					code, err := strconv.Unquote(lit.Value)
+					require.NoError(t, err)
+					codes[name.Name] = code
+				}
+			}
+		}
+	}
+	require.Contains(t, codes, "ErrCodePreviewConstraintMismatch", "the source scan must find the preview codes")
+	for name, code := range codes {
+		got := governanceErrorStatus(code)
+		assert.Equal(t, tokenErrorStatus(code), got, "%s (%s)", name, code)
+		assert.NotEqual(t, http.StatusInternalServerError, got, "%s (%s)", name, code)
 	}
 }
 

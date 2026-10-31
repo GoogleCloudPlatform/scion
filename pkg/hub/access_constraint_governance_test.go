@@ -1265,6 +1265,74 @@ func TestGovernance_DeleteTokenBoundToItsConstraint(t *testing.T) {
 	require.ErrorIs(t, err, store.ErrNotFound)
 }
 
+// TestGovernance_UpdateTokenBoundToItsConstraint pins that an update commit
+// is refused when the preview token was issued for another constraint, the
+// other constraint is left as stored, and the token still commits the update
+// of the constraint it was issued for.
+func TestGovernance_UpdateTokenBoundToItsConstraint(t *testing.T) {
+	gs, ps, _, s := govTestSetup(t)
+	ctx := context.Background()
+
+	adminID := govSeedAdminUser(t, s, "gov-admin-cid-bind-upd")
+	userID := govSeedNonAdminUser(t, s, "gov-user-cid-bind-upd")
+	actor := pvTestActor(adminID)
+
+	draft := func(name string, perms ...string) *store.AccessConstraint {
+		return &store.AccessConstraint{
+			Name:                 name,
+			SubjectKind:          store.ConstraintSubjectPrincipal,
+			SubjectPrincipalType: pvStrPtr("user"),
+			SubjectPrincipalID:   pvStrPtr(userID),
+			ScopeType:            store.RoleScopeSystem,
+			MaximumPermissions:   perms,
+			Purpose:              "token binding",
+			CreatedBy:            adminID,
+		}
+	}
+	a := govCreateAndCommit(t, gs, ps, draft("gov-cid-bind-upd-a", "agent.read", "agent.create"), actor)
+	b := govCreateAndCommit(t, gs, ps, draft("gov-cid-bind-upd-b", "agent.read", "agent.create"), actor)
+	require.Equal(t, a.Revision, b.Revision, "only the constraint ID may differ")
+
+	update := draft("gov-cid-bind-upd-tight", "agent.read")
+	preview, err := ps.GeneratePreview(ctx, PreviewRequest{
+		Operation:    "update",
+		Draft:        update,
+		ConstraintID: a.ID,
+		BaseRevision: a.Revision,
+		Actor:        actor,
+	})
+	require.NoError(t, err)
+
+	_, err = gs.CommitBoundaryChange(ctx, CommitRequest{
+		Operation:    "update",
+		Draft:        update,
+		ConstraintID: b.ID,
+		BaseRevision: b.Revision,
+		PreviewToken: preview.PreviewToken,
+		Actor:        actor,
+	})
+	var ge *GovernanceError
+	require.ErrorAs(t, err, &ge, "a token for A must not update B")
+	assert.Equal(t, ErrCodePreviewConstraintMismatch, ge.Code)
+	got, err := s.GetAccessConstraint(ctx, b.ID)
+	require.NoError(t, err)
+	assert.Equal(t, b.Revision, got.Revision, "B must be left as stored")
+	assert.ElementsMatch(t, []string{"agent.read", "agent.create"}, got.MaximumPermissions)
+
+	_, err = gs.CommitBoundaryChange(ctx, CommitRequest{
+		Operation:    "update",
+		Draft:        update,
+		ConstraintID: a.ID,
+		BaseRevision: a.Revision,
+		PreviewToken: preview.PreviewToken,
+		Actor:        actor,
+	})
+	require.NoError(t, err, "the token must still commit the update of A")
+	got, err = s.GetAccessConstraint(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"agent.read"}, got.MaximumPermissions)
+}
+
 // ---------------------------------------------------------------------------
 // 14c. Scheduled lockout blocks RoleBinding change
 // ---------------------------------------------------------------------------
