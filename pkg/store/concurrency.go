@@ -252,6 +252,12 @@ const (
 	// expired identities' agents and purges what each one created.
 	LockTestIdentityReaper AdvisoryLockKey = 0x5C10002D
 
+	// LockChatRetention guards the chat message retention sweeper
+	// ("chat-retention"), so one replica per tick walks and purges messages
+	// older than the hub-wide retention window. The sweep cursor lives in the
+	// database, so a failover resumes where the last holder stopped.
+	LockChatRetention AdvisoryLockKey = 0x5C10002E
+
 	// LockAgentDelegatedCredentialPurge guards the hourly purge of agent
 	// delegated credential rows that expired more than the retention
 	// period ago (.design/agent-delegation.md §18.1). A value in an unused

@@ -38,6 +38,7 @@
         "experiments.hub.agent_edit_held:boolean",
         "experiments.hub.artifacts:boolean",
         "experiments.hub.attachment_artifacts:boolean",
+        "experiments.hub.chat_retention:boolean",
         "experiments.hub.flat_runtime_brokers:boolean",
         "experiments.hub.user_delete_force_cascade:boolean",
         "experiments.web.agent_badges:boolean",

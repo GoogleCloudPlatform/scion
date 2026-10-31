@@ -77,6 +77,19 @@ export interface AttachmentRefInfo {
   height?: number;
 }
 
+/**
+ * A reply preview: the message a reply quotes. `unavailable` is set when
+ * that message no longer exists (for example removed by the hub's chat
+ * retention policy); `content` is then a placeholder and `senderName` is
+ * empty.
+ */
+export interface ReplyPreviewInfo {
+  messageId: string;
+  senderName: string;
+  content: string;
+  unavailable?: boolean;
+}
+
 /** The largest box an inline image thumbnail is drawn in, in CSS px. */
 export const IMAGE_THUMB_MAX_WIDTH_PX = 320;
 export const IMAGE_THUMB_MAX_HEIGHT_PX = 240;
@@ -832,7 +845,7 @@ export class ScionChatMessage extends LitElement {
 
   /** Reply preview data: the message this one is replying to. */
   @property({ type: Object })
-  replyPreview: { messageId: string; senderName: string; content: string } | null = null;
+  replyPreview: ReplyPreviewInfo | null = null;
 
   /** When set, indicates the message was edited at this timestamp. */
   @property()
@@ -1698,6 +1711,17 @@ export class ScionChatMessage extends LitElement {
       background: var(--scion-surface-100, #f1f5f9);
     }
 
+    .reply-preview.unavailable {
+      cursor: default;
+      border-left-color: var(--scion-border, #e2e8f0);
+      color: var(--scion-neutral-400, #94a3b8);
+      font-style: italic;
+    }
+
+    .reply-preview.unavailable:hover {
+      background: var(--scion-surface-50, #f8fafc);
+    }
+
     .reply-preview .reply-sender {
       font-weight: 600;
       color: var(--scion-primary-600, #2563eb);
@@ -2477,7 +2501,15 @@ export class ScionChatMessage extends LitElement {
   /** Render the reply preview block above the bubble content. */
   private renderReplyPreview() {
     if (!this.replyPreview) return nothing;
-    const { messageId, senderName, content } = this.replyPreview;
+    const { messageId, senderName, content, unavailable } = this.replyPreview;
+    if (unavailable) {
+      // The quoted message is gone: a muted quote with nothing to jump to.
+      return html`
+        <div class="reply-preview unavailable">
+          <span class="reply-content">${content || '[no longer available]'}</span>
+        </div>
+      `;
+    }
     return html`
       <div class="reply-preview" @click=${() => this.handleScrollToMessage(messageId)}>
         <span class="reply-sender">${senderName}</span>
