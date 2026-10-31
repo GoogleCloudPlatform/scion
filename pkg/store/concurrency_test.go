@@ -109,6 +109,7 @@ func TestAdvisoryLockKeys_NonOverlapping(t *testing.T) {
 		LockTestIdentityIssuance,
 		LockTestIdentityReaper,
 		LockAgentDelegatedCredentialPurge,
+		LockChatRetention,
 	}
 
 	seen := make(map[AdvisoryLockKey]bool, len(singletonKeys)+2)
@@ -208,6 +209,7 @@ func TestAdvisoryLockKeys_AllUnique(t *testing.T) {
 		{"LockTestIdentityIssuance", LockTestIdentityIssuance},
 		{"LockTestIdentityReaper", LockTestIdentityReaper},
 		{"LockAgentDelegatedCredentialPurge", LockAgentDelegatedCredentialPurge},
+		{"LockChatRetention", LockChatRetention},
 	}
 
 	// --- Check 1: value uniqueness ---

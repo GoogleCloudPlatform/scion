@@ -16,9 +16,12 @@ package cmd
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"embed"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	goast "go/ast"
 	goparser "go/parser"
 	gotoken "go/token"
@@ -32,6 +35,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
 // brokerConnTestHub starts a fake hub on 127.0.0.1 that records the
@@ -39,9 +43,29 @@ import (
 // "<authorization>|<broker id>".
 func brokerConnTestHub(t *testing.T) (*httptest.Server, func() []string) {
 	t.Helper()
+	return brokerConnTestHubWith(t, httptest.NewServer)
+}
+
+// brokerConnRemoteHost is the non-loopback name a remote hub gets in these
+// tests: one of the names in httptest's TLS certificate.
+const brokerConnRemoteHost = "example.com"
+
+// brokerConnTestHubFor is brokerConnTestHub for a hub addressed as host: a
+// plain http hub for a loopback host, a TLS hub otherwise (a plain http hub
+// on a network host is refused by config.CheckHubTransport).
+func brokerConnTestHubFor(t *testing.T, host string) (*httptest.Server, func() []string) {
+	t.Helper()
+	if config.IsLoopbackHost(host) {
+		return brokerConnTestHub(t)
+	}
+	return brokerConnTestHubWith(t, httptest.NewTLSServer)
+}
+
+func brokerConnTestHubWith(t *testing.T, newServer func(http.Handler) *httptest.Server) (*httptest.Server, func() []string) {
+	t.Helper()
 	var mu sync.Mutex
 	var seen []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		seen = append(seen, r.Header.Get("Authorization")+"|"+r.Header.Get(apiclient.HeaderBrokerID))
 		mu.Unlock()
@@ -74,6 +98,13 @@ func brokerConnHubURLAs(t *testing.T, srv *httptest.Server, host string) string 
 	}
 	tr := base.Clone()
 	tr.Proxy = nil
+	scheme := "http"
+	if cert := srv.Certificate(); cert != nil {
+		pool := x509.NewCertPool()
+		pool.AddCert(cert)
+		tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+		scheme = "https"
+	}
 	prevDial := base.DialContext
 	if prevDial == nil {
 		var d net.Dialer
@@ -87,7 +118,7 @@ func brokerConnHubURLAs(t *testing.T, srv *httptest.Server, host string) string 
 	}
 	http.DefaultTransport = tr
 	t.Cleanup(func() { http.DefaultTransport = orig })
-	return "http://" + hostPort
+	return scheme + "://" + hostPort
 }
 
 // writeBrokerConnection stores creds as a named hub connection under home.
@@ -131,13 +162,13 @@ func TestGetHubClientForConnection_DevTokenOnlyForLoopbackHub(t *testing.T) {
 		{"devauth-ipv4", "127.0.0.1", brokercredentials.AuthModeDevAuth, secret, "Bearer placeholder-dev-token|"},
 		{"devauth-localhost", "localhost", brokercredentials.AuthModeDevAuth, secret, "Bearer placeholder-dev-token|"},
 		{"devauth-ipv6", "::1", brokercredentials.AuthModeDevAuth, secret, "Bearer placeholder-dev-token|"},
-		{"devauth-remote", "hub.example.test", brokercredentials.AuthModeDevAuth, secret, "|"},
+		{"devauth-remote", brokerConnRemoteHost, brokercredentials.AuthModeDevAuth, secret, "|"},
 		{"nosecret-local", "127.0.0.1", "", "", "Bearer placeholder-dev-token|"},
-		{"nosecret-remote", "hub.example.test", "", "", "|"},
-		{"hmac-remote", "hub.example.test", "", secret, "|rb-test"},
+		{"nosecret-remote", brokerConnRemoteHost, "", "", "|"},
+		{"hmac-remote", brokerConnRemoteHost, "", secret, "|rb-test"},
 	}
 	for _, tc := range cases {
-		srv, seen := brokerConnTestHub(t)
+		srv, seen := brokerConnTestHubFor(t, tc.host)
 		endpoint := brokerConnHubURLAs(t, srv, tc.host)
 		writeBrokerConnection(t, home, brokercredentials.BrokerCredentials{
 			Name: tc.name, BrokerID: "rb-test", SecretKey: tc.secret, HubEndpoint: endpoint, AuthMode: tc.mode,
@@ -154,6 +185,28 @@ func TestGetHubClientForConnection_DevTokenOnlyForLoopbackHub(t *testing.T) {
 		if got[0] != tc.want {
 			t.Errorf("%s: hub saw %q, want %q", tc.name, got[0], tc.want)
 		}
+	}
+}
+
+// A stored connection naming a plain http hub on a network host (credentials
+// written before the transport rule) gets no client: nothing is sent.
+func TestGetHubClientForConnection_RefusesPlaintextNonLoopbackHub(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	srv, seen := brokerConnTestHub(t)
+	endpoint := brokerConnHubURLAs(t, srv, "hub.example.test")
+	writeBrokerConnection(t, home, brokercredentials.BrokerCredentials{
+		Name: "old-plaintext", BrokerID: "rb-test", SecretKey: base64.StdEncoding.EncodeToString([]byte("made-up-secret")), HubEndpoint: endpoint,
+	})
+	client, err := getHubClientForConnection("old-plaintext")
+	if !errors.Is(err, config.ErrPlaintextNonLoopback) {
+		t.Fatalf("getHubClientForConnection error = %v, want config.ErrPlaintextNonLoopback", err)
+	}
+	if client != nil {
+		t.Error("a client was returned for a refused hub")
+	}
+	if got := seen(); len(got) != 0 {
+		t.Errorf("the hub received %q, want nothing", got)
 	}
 }
 

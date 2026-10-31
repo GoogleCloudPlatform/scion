@@ -726,9 +726,19 @@ func hubClientAndAuthSourceForEndpoint(settings *config.Settings, endpoint strin
 	util.Debugf("Hub client auth: %s (source: %s)", info.Method, info.Source)
 	util.Debugf("Hub endpoint: %s", config.RedactURL(endpoint))
 
+	// The transport rule (newUserHubClient) applies to every credential.
+	// The one exception is the broker-injected agent token sent to exactly
+	// the broker-injected endpoint inside a hub-managed agent
+	// (hubsync.NewInjectedAgentHubClient checks all of that itself).
+	if source == hubAuthSourceAgentTokenFile || source == hubAuthSourceEnvAuthToken {
+		if c, ok := hubsync.NewInjectedAgentHubClient(endpoint, hubClientTimeout); ok {
+			return c, source, nil
+		}
+	}
+
 	opts = append(opts, hubclient.WithTimeout(hubClientTimeout))
 
-	c, err := hubclient.New(endpoint, opts...)
+	c, err := newUserHubClient(endpoint, opts...)
 	return c, source, err
 }
 
