@@ -85,11 +85,13 @@ All image-related scripts live under `scripts/`. GitHub Actions workflows remain
 uncompressed sizes of two images in the local store, prints both and the delta,
 and exits 1 when the candidate grew by more than the budget. With docker it
 sums the layer sizes from `docker history`; it does not use `image inspect`'s
-`.Size`, which with docker's containerd image store also counts the content
-blobs and so changes with how the image entered the store. With podman (used
+`.Size`, which with docker's containerd image store depends on how the image
+entered the store (larger than the layer sum for a local build, about the
+compressed size for a pull). With podman (used
 when docker is absent, or with `IMAGE_TOOL=podman`) it reads
 `podman image inspect`'s `.Size`, because `podman history` prints sizes only
-in human-readable form.
+in human-readable form. If `docker` is podman's docker shim (podman-docker),
+set `IMAGE_TOOL=podman`.
 
 ```bash
 # Build core-base before and after a change, then:

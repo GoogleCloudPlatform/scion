@@ -51,6 +51,7 @@ grew200) printf '0\n1000000000\n48576000\n209715200\n' ;;
 warned) echo "WARNING: image platform does not match" >&2; printf '1258291200\n' ;;
 grew600) printf '1048576000\n629145600\n' ;;
 junk) printf '1000000000\n493MB\n' ;;
+shim) printf '328.6MB\n36.9kB\n' ;;  # podman-docker ignores --human=false
 nolayers) ;;
 *) echo "Error: No such image: $5" >&2; exit 1 ;;
 esac
@@ -72,25 +73,32 @@ esac
 	writeFake(both, "podman", fakePodman)
 	bothPath := both + ":/usr/bin:/bin"
 
-	// podman only: PATH holds the fake and links to the few tools the
-	// script runs, so a docker installed on the test host cannot be found.
-	podmanOnly := t.TempDir()
-	writeFake(podmanOnly, "podman", fakePodman)
-	for _, tool := range []string{"awk", "basename", "cat", "mktemp", "rm"} {
-		p, err := exec.LookPath(tool)
-		if err != nil {
-			t.Skipf("%s not found", tool)
+	// PATH-restricted directories: only the given fakes plus links to the
+	// few tools the script runs, so an engine installed on the test host
+	// cannot be found. "" when a tool is missing here; cases using such a
+	// directory are then skipped, the others still run.
+	restricted := func(fakes map[string]string) string {
+		t.Helper()
+		dir := t.TempDir()
+		for _, tool := range []string{"awk", "basename", "cat", "mktemp", "rm"} {
+			p, err := exec.LookPath(tool)
+			if err != nil {
+				return ""
+			}
+			if err := os.Symlink(p, filepath.Join(dir, tool)); err != nil {
+				t.Fatal(err)
+			}
 		}
-		if err := os.Symlink(p, filepath.Join(podmanOnly, tool)); err != nil {
-			t.Fatal(err)
+		for name, body := range fakes {
+			writeFake(dir, name, body)
 		}
+		return dir
 	}
-	noEngine := t.TempDir()
-	for _, tool := range []string{"awk", "basename", "cat", "mktemp", "rm"} {
-		p, _ := exec.LookPath(tool)
-		if err := os.Symlink(p, filepath.Join(noEngine, tool)); err != nil {
-			t.Fatal(err)
-		}
+	podmanOnly := restricted(map[string]string{"podman": fakePodman})
+	noEngine := restricted(nil)
+	const restrictedUnavailable = "restricted-path-unavailable"
+	if podmanOnly == "" {
+		podmanOnly, noEngine = restrictedUnavailable, restrictedUnavailable
 	}
 
 	run := func(path string, env []string, args ...string) (string, int) {
@@ -137,6 +145,8 @@ esac
 			[]string{"cannot read the layers of nope with docker: Error: No such image: nope"}},
 		{"non-numeric layer size", "", nil, []string{"base", "junk"}, 2,
 			[]string{"unexpected size for junk from docker: '493MB'"}},
+		{"docker that is podman's shim", "", nil, []string{"base", "shim"}, 2,
+			[]string{"unexpected size for shim from docker: '328.6MB' (if docker is podman's docker shim, set IMAGE_TOOL=podman)"}},
 		{"no layers", "", nil, []string{"base", "nolayers"}, 2,
 			[]string{"no size reported for nolayers by docker"}},
 		{"leading-zero budget is decimal", "", nil, []string{"--budget-mib", "0300", "base", "grew200"}, 0,
@@ -167,6 +177,9 @@ esac
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			path := c.path
+			if path == restrictedUnavailable {
+				t.Skip("a tool the PATH-restricted cases link to is missing on this host")
+			}
 			if path == "" {
 				path = bothPath
 			}

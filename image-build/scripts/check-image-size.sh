@@ -24,10 +24,10 @@
 #
 #   docker  the sum of its uncompressed layer sizes (docker history
 #           --human=false). Not `image inspect`'s .Size: with docker's
-#           containerd image store that also counts the content blobs, so it
-#           changes with how the image entered the store (larger than the
-#           layers for a local build, smaller for a pull) and overstated
-#           core-base's growth by about 40%.
+#           containerd image store it depends on how the image entered the
+#           store (larger than the layer sum for a local build, about the
+#           compressed size for a pull), and it overstated core-base's
+#           growth by about 40%.
 #   podman  `podman image inspect` .Size, the unpacked size in podman's own
 #           store. `podman history` always prints .Size human-formatted,
 #           whatever --human says (cmd/podman/images/history.go,
@@ -119,14 +119,17 @@ podman) measure="unpacked image size (podman image inspect)" ;;
   ;;
 esac
 
-errf="$(mktemp)"
+errf="$(mktemp)" || {
+  echo "cannot create a temp file" >&2
+  exit 2
+}
 trap 'rm -f "$errf"' EXIT
 
 # image_size <ref> — the image's uncompressed size in bytes (see the header).
 # The engine's stderr is kept apart from the sizes being parsed, and shown
 # only when the engine fails.
 image_size() {
-  local out line total=0 seen=0
+  local out line hint total=0 seen=0
   if [ "$tool" = podman ]; then
     if ! out="$(podman image inspect --format '{{.Size}}' "$1" 2>"$errf")"; then
       echo "cannot inspect $1 with podman: $(cat "$errf")" >&2
@@ -141,7 +144,10 @@ image_size() {
     [ -n "$line" ] || continue
     case "$line" in
     *[!0-9]*)
-      echo "unexpected size for $1 from $tool: '$line'" >&2
+      hint=""
+      [ "$tool" = docker ] &&
+        hint=" (if docker is podman's docker shim, set IMAGE_TOOL=podman)"
+      echo "unexpected size for $1 from $tool: '$line'$hint" >&2
       exit 2
       ;;
     esac
