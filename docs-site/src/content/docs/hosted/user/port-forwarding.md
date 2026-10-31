@@ -93,7 +93,12 @@ Open the base URL with its trailing slash. A `GET` or `HEAD` of the URL without 
 
 ## Multi-file apps
 
-A proxy URL opened in a browser serves **one self-contained page** well. The page itself loads, but the requests that page makes back to the app are not served: separate scripts (including module scripts), stylesheets, images, `fetch()` and XHR calls, and WebSockets. Each of those requests gets `401 Unauthorized` with a short plain-text explanation, which you can see in the browser's developer tools (Network tab):
+What a page opened in a browser through a proxy URL can load depends on whether the Hub has the `hub.port_view` [experiment](/scion/reference/experiments/) (page view) on:
+
+- **Page view on**: opening the proxy URL from the Hub takes you to a short-lived page link when a transport can serve the agent's port for you, and the page's relative URLs load. See [With page view on](#with-page-view-on).
+- **Page view off**: the proxy URL serves **one self-contained page** well, as described below.
+
+With page view off, the page itself loads, but the requests that page makes back to the app are not served: separate scripts (including module scripts), stylesheets, images, `fetch()` and XHR calls, and WebSockets. Each of those requests gets `401 Unauthorized` with a short plain-text explanation, which you can see in the browser's developer tools (Network tab):
 
 ```
 HTTP/1.1 401 Unauthorized
@@ -106,7 +111,21 @@ X-Scion-Proxy-Hint: sandboxed-subresource
 
 A request made with your own credential, for example with `curl` and an agent token or a [personal access token](/scion/hosted/user/personal-access-tokens/), is served for any path. That shows the app answers, not that the page works for a person who opens the link; check the page in a browser.
 
-### What works today
+### With page view on
+
+When you open an exposed port's link from the Hub in your browser and the agent's port can be served for you, the Hub sends you to a page link under `/api/v1/portview/`, valid for [`server.hub.port_proxy.view_ttl`](/scion/reference/server-config/#port-proxy-serverhubport_proxy) (2 hours by default). Opening the port's link from the Hub again gives a new one. On the page link:
+
+- Relative URLs work: separate scripts (including module scripts), stylesheets, images and fonts, and `fetch()`, XHR and `EventSource` calls to the app.
+- A WebSocket opened by relative URL works when the agent is connected over Conduit (the `hub.conduit` experiment). Over the port-forward tunnel, a WebSocket gets `501 Not Implemented`.
+- URLs that start with `/` (for example `/app.js`) do not work: they leave the page link.
+- Requests the page makes with an `Authorization` header or with cookies are not carried to the app.
+- Browser storage, cookies and web workers are not available to the page.
+- Hash routing (URLs like `#/settings`) works. A path the page sets with the history API is not kept when the page is reloaded outside the page link.
+- The page link grants access: do not log it, paste it into tickets or chats, or send it anywhere. Share the port's own link instead; each person who opens it from the Hub gets their own page link.
+
+With Vite, set `base: './'` so a build refers to its files relatively.
+
+### What works with page view off
 
 | App | Through the proxy URL in a browser |
 | :--- | :--- |
@@ -118,7 +137,7 @@ A request made with your own credential, for example with `curl` and an agent to
 
 ### Single-file fallback
 
-To share a working page through the proxy URL, build it as one self-contained HTML file:
+To share a page that works whether or not page view is on, build it as one self-contained HTML file:
 
 - Put the styles in a `<style>` element and the scripts in `<script>` elements, and turn images into `data:` URLs.
 - If the app has a client-side router, use hash routing (URLs like `#/settings`), not path-based routing.
@@ -146,6 +165,10 @@ When an administrator enables the `hub.port_view` [experiment](/scion/reference/
 When the Hub runs behind an authenticating front proxy, for example Google IAP or another [proxy-auth](/scion/hosted/ha/auth-proxy-iap/) deployment (`auth.mode: proxy`), the front proxy sits in front of every request, including the requests a page opened through the proxy URL makes back to its app. Depending on how the front proxy is configured, some of those requests may be answered by the front proxy's own sign-in flow instead of by the app, so a multi-file page can behave unpredictably: the page opens, and some of its parts load while others do not.
 
 For anything beyond a single self-contained page in such a deployment, use [`scion tunnel`](#tunnels-from-your-machine-scion-tunnel), which does not go through the browser and is not affected.
+
+Keep page view (`hub.port_view`) off in such a deployment until it has been verified with one (ptone/scion#5989).
+
+Apps served through an agent's port never receive the Hub's own credential headers, the Hub federation token (`X-Scion-Federation-Token`), or the forwarded-user identity headers (`X-Forwarded-User-Id`, `-Email`, `-Name`, `-Role`), on either transport.
 
 With the IAP provider, apps served through an agent's port do not receive the IAP assertion or the IAP user email and ID headers. With the JWT provider, they do not receive the configured assertion header. The Hub reads only that header, so configure the front proxy not to add other user identity headers, such as email or ID headers.
 
