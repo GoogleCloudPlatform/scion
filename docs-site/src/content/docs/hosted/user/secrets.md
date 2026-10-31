@@ -58,7 +58,15 @@ Store sensitive secrets at **User** scope, so that only your own agents receive 
 
 When the Hub starts or restarts an agent, it authorizes each Project, Hub and Broker variable and secret for that agent before it reads any value. The check follows the agent's recorded delegation chain: the user or agent that delegated authority to it, and so on up to a user. An item the check refuses is left out of the start, and the start itself goes ahead. The Hub log has a `Warn` line for each item left out, with its name, scope and the reason, never its value.
 
-Agents whose delegation chain contains legacy data may not have the recorded chain this check needs. This includes agents created before the chain was recorded, and agents created later under such an agent. The Hub keeps giving those agents their Project, Hub and Broker values, and logs a rate-limited `Warn` line naming the agent, the item and the group the agent falls in. Agents created from a user access token are served the same way for now. That is a product-gap exception, not legacy data: no token scope grants the delivery permissions yet. The groups, the exception and the cases that are still refused are listed under [Launch material for legacy agents](/scion/reference/delegation-provenance-adoption/#launch-material-for-legacy-agents).
+Agents whose delegation chain contains legacy data may not have the recorded chain this check needs. This includes agents created before the chain was recorded, and agents created later under such an agent. The Hub keeps giving those agents their Project, Hub and Broker values, and logs a rate-limited `Warn` line naming the agent, the item and the group the agent falls in. The groups and the cases that are still refused are listed under [Launch material for legacy agents](/scion/reference/delegation-provenance-adoption/#launch-material-for-legacy-agents).
+
+### Agents created from a user access token
+
+An agent created from a [user access token](/scion/hosted/user/personal-access-tokens/) receives your shared secrets and its launch material the way an agent created from a sign-in does. The token's scopes narrow the API actions the agent may take, but they do not narrow the delivery of material to it at start, resume and restart: Project, Hub and Broker values, the secrets sent for skill fetches, and your user-scoped secrets shared with progeny (`--allow-progeny`). Every other check still applies to each item, including the item's association with the agent, access constraints, and the user-scoped secret checks described under [How it Works Under the Hood](#how-it-works-under-the-hood).
+
+As for any agent, launch material reaches the agent only while the user who created it is still a member of the project. A token-created agent whose creator has left the project starts without it, and the `Warn` line for each item names the cause, `root user not admitted to the project`.
+
+Reading secrets at runtime (`sciontool secret get`, the agent secret endpoints) is not covered: the agent token the Hub issues to such an agent does not carry `project:secret:read`, so runtime reads and lists are refused. The full agent role is not available from a token for the same reason.
 
 ### Reserved Names
 

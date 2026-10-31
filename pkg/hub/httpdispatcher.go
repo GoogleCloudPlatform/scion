@@ -4923,6 +4923,9 @@ func (d *HTTPAgentDispatcher) startSecretResolveOpts(ctx context.Context, agent 
 			if ceiling.Allowed && ceiling.legacyFallback != nil {
 				d.authzService.recordLegacyAdoptedFallback(ctx, legacyFallbackPathStart, ceiling.legacyFallback, agentID, s.ScopeID, s.ID, s.Name)
 			}
+			if ceiling.Allowed && ceiling.uatIntrinsic {
+				d.authzService.recordUATIntrinsic(ctx, secretUsePermission, uatIntrinsicPathOwnerSecret)
+			}
 			if !ceiling.Allowed {
 				withheld("owner", s, Decision{DenyCause: ceiling.DenyCause, Reason: ceiling.Reason})
 			}

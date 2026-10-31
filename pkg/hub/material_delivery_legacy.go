@@ -63,21 +63,23 @@ package hub
 //     baseline); legacy_adopted_capped is a ceiling within the edge role's
 //     row that fits in neither.
 //
-// One more cohort is served the same way although it is not legacy:
+//   - uat_descendant_legacy: an agent-recorded edge (agent delegator, agent
+//     credential) that lacks the deliver permission only because its
+//     parent chain did not allow it when the edge was recorded: an ancestor
+//     was created from a user access token, before the deliver permissions
+//     were intrinsic to such a hop (uatHopEffectCeiling), so the parent
+//     could not pass them down (legacyInheritsUATGap). It is let through
+//     when every hop above it, up to a hop recorded from a user access token
+//     whose uatHopEffectCeiling allows the permission, is of the same kind;
+//     a descendant hop whose parent's ceiling does allow the permission is a
+//     real narrowing and still denies. Edges recorded since carry the
+//     deliver permissions (parentDeliverEligibility) and need no exception.
+//     The census counts this cohort until it reads zero, and then it is
+//     removed.
 //
-//   - uat_created_no_deliver_mapping: the hop's only active edge was
-//     recorded from a user access token (source uat), whose bounded ceiling
-//     cannot carry the deliver permission because no token scope maps it.
-//     This is a current product gap, not legacy data: it covers agents
-//     created from a token today and in future, and it ends only when a
-//     token scope maps the deliver permissions (uatCarriesPermission turns
-//     it off by itself then). A descendant agent's recorded agent edge that
-//     lacks the permission only because of that ancestor
-//     (legacyInheritsUATGap) is let through under the same cohort when every
-//     hop between them is of the same kind; a descendant hop whose parent's
-//     ceiling does allow the permission is a real narrowing and still
-//     denies. The Warn and the census name it separately from the legacy
-//     cohorts.
+// A hop recorded from a user access token is not a legacy hop: the deliver
+// permissions are intrinsic to it (uatIntrinsicPermissionIDs), so the strict
+// walk admits it, exactly as for a session-created agent.
 //
 // Everything else is enforced as before, on the strict and tolerant walk
 // alike: a held agent at any hop, a deleted, missing or held delegator or
@@ -117,9 +119,7 @@ const (
 	legacyDeliveryCohortAdoptedBaseline = "legacy_adopted_baseline"
 	legacyDeliveryCohortAdoptedReadOnly = "legacy_adopted_readonly"
 	legacyDeliveryCohortAdoptedCapped   = "legacy_adopted_capped"
-	// deliveryCohortUATNoDeliverMapping is the product-gap exception, not a
-	// legacy cohort (see the file comment).
-	deliveryCohortUATNoDeliverMapping = "uat_created_no_deliver_mapping"
+	legacyDeliveryCohortUATDescendant   = "uat_descendant_legacy"
 )
 
 // Fallback Warn rate limit: one line per agent, cohort and item per window,
@@ -130,16 +130,6 @@ const (
 	legacyDeliveryLogDedupSize   = 16384
 )
 
-// deliveryFallbackException names, for the Warn, what kind of exception a
-// cohort is: "product_gap" for uat_created_no_deliver_mapping, "legacy"
-// otherwise.
-func deliveryFallbackException(cohort string) string {
-	if cohort == deliveryCohortUATNoDeliverMapping {
-		return "product_gap"
-	}
-	return "legacy"
-}
-
 // legacyFallbackCauses are the strict walk's deny causes a legacy hop
 // produces. A strict deny with any other cause (held agent, ambiguous
 // edges, local-development provenance, an inactive delegator, a lookup
@@ -148,7 +138,7 @@ var legacyFallbackCauses = map[DenyCause]bool{
 	DenyCauseCeilingProvenanceMissing: true, // no edge
 	DenyCauseCeilingOrphaned:          true, // sentinel edge (or a real orphan, which the tolerant walk denies again)
 	DenyCauseCeilingUnrecorded:        true, // unadopted edge
-	DenyCauseCeilingEffectExceeded:    true, // adopted baseline/readonly, UAT-created
+	DenyCauseCeilingEffectExceeded:    true, // adopted baseline/readonly, UAT descendant
 }
 
 // legacyFallbackPermission reports whether permissionID is one the fallback
@@ -198,13 +188,8 @@ func legacyBoundedEdgeCohort(edge *store.DelegationEdge, permissionID string) st
 	if !legacyFallbackPermission(permissionID) {
 		return ""
 	}
-	switch edge.SourceCredentialKind {
-	case store.SourceCredentialSystemMigration:
+	if edge.SourceCredentialKind == store.SourceCredentialSystemMigration {
 		return legacyAdoptedCohort(edge)
-	case store.SourceCredentialUAT:
-		if !uatCarriesPermission(permissionID) {
-			return deliveryCohortUATNoDeliverMapping
-		}
 	}
 	return ""
 }
@@ -248,39 +233,18 @@ func withinCompatibilityV1Row(ids []string, role AgentRole) bool {
 }
 
 // legacyInheritsUATGap reports whether a recorded bounded edge whose ceiling
-// does not allow permissionID may only inherit the uat_created_no_deliver_mapping gap:
-// it was recorded by an agent delegator from an agent credential, and no
-// user access token scope maps permissionID, so a UAT-created ancestor
-// could not have passed the permission down. The tolerant walk admits such
-// a hop only when the hops above reach a uat_created_no_deliver_mapping hop through
-// hops of the same kind (hubDeliveryWalk, pendingUAT); otherwise its own
-// deny stands.
+// does not allow permissionID, one of the deliver permissions, may only
+// inherit the gap a token-created ancestor left before the deliver
+// permissions were intrinsic to its hop (uat_descendant_legacy): it was
+// recorded by an agent delegator from an agent credential. The tolerant
+// walk admits such a hop only when the hops above reach a hop recorded from
+// a user access token whose uatHopEffectCeiling allows the permission,
+// through hops of the same kind (hubDeliveryWalk, pendingUAT); otherwise
+// its own deny stands.
 func legacyInheritsUATGap(edge *store.DelegationEdge, permissionID string) bool {
-	return edge.SourceCredentialKind == store.SourceCredentialAgent &&
-		edge.DelegatorType == store.DelegationPrincipalAgent &&
-		!uatCarriesPermission(permissionID)
-}
-
-// uatPermissionIDs is every permission some user access token scope or
-// alias maps to (permissions.ResolveSelector).
-var uatPermissionIDs = sync.OnceValue(func() map[string]bool {
-	out := make(map[string]bool)
-	for scope := range permissions.UATValidScopes() {
-		if m, ok := permissions.ResolveSelector(scope); ok {
-			for _, id := range m.PermissionIDs {
-				out[id] = true
-			}
-		}
-	}
-	return out
-})
-
-// uatCarriesPermission reports whether a user access token can carry
-// permissionID. The UAT-created cohort exists only while it cannot: once a
-// scope maps a deliver permission, a UAT-created edge that lacks it is an
-// ordinary ceiling deny.
-func uatCarriesPermission(permissionID string) bool {
-	return uatPermissionIDs()[permissionID]
+	return legacyFallbackPermission(permissionID) &&
+		edge.SourceCredentialKind == store.SourceCredentialAgent &&
+		edge.DelegatorType == store.DelegationPrincipalAgent
 }
 
 // hubDeliveryLegacyAncestry ends a tolerant walk at agentID, whose chain
@@ -340,8 +304,11 @@ func (a *AuthzService) hubDeliveryLegacyFallback(
 	if !legacyFallbackCauses[strict.cause] || !legacyFallbackPermission(permissionID) {
 		return strict
 	}
-	var note hubDeliveryLegacyNote
-	ok, _, _ := a.hubDeliveryWalk(ctx, agentID, h.projectID, permissionID, nil, &note)
+	var (
+		note hubDeliveryLegacyNote
+		obs  hubDeliveryWalkObservation
+	)
+	ok, _, _ := a.hubDeliveryWalkObserved(ctx, agentID, h.projectID, permissionID, nil, &note, &obs)
 	if !ok || note.cohort == "" {
 		return strict
 	}
@@ -352,7 +319,7 @@ func (a *AuthzService) hubDeliveryLegacyFallback(
 	if explain != nil {
 		*explain = append(*explain, DecisionStep{Step: "delegation_ceiling_delivery_legacy_fallback", Detail: reason})
 	}
-	return hubDeliveryAdmissionOutcome{ok: true, reason: reason, legacyCohort: note.cohort}
+	return hubDeliveryAdmissionOutcome{ok: true, reason: reason, legacyCohort: note.cohort, uatIntrinsic: obs.uatIntrinsic}
 }
 
 // deliveryLogDedup remembers recently logged keys for the fallback Warn: a

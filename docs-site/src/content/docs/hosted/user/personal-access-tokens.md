@@ -448,6 +448,23 @@ owner or administrator shortcuts, require an unscoped sign-in (CLI or Web UI log
   named Runtime Broker (`broker_id`) needs dispatch authority on that broker, which no UAT
   scope carries, so a UAT is denied even on an auto-provide broker.
 
+### Agents created with a token
+
+An agent you create with a token records the token's scopes as the upper bound of its own
+authority. What that bound does and does not narrow:
+
+- **It narrows the agent's API actions and role.** The agent's role is capped to what the
+  token's scopes cover, an explicit role the scopes do not cover is refused, and the agent's
+  own Hub token carries only the scopes the token allows.
+- **It does not narrow material delivered to the agent.** At start, resume and restart the agent
+  receives Project, Hub and Broker variables and secrets, and your user-scoped secrets shared
+  with progeny, as an agent created from a sign-in does. Each item is still checked on its own
+  (see [Agents created from a user access token](/scion/hosted/user/secrets/#agents-created-from-a-user-access-token)).
+  The delivery permissions and `secret.use` have no token scope, and need none.
+- **Reading secrets at runtime is not included.** No token scope grants `project.secret_read`,
+  so the agent's Hub token does not carry `project:secret:read` and the full agent role is not
+  available from a token.
+
 ## Trust level separation
 
 It is crucial to distinguish how **users** authenticate with the Hub from how **agents**

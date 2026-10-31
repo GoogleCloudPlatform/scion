@@ -3075,6 +3075,12 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		hubSrv.SetLegacyAdoptedFallbackMetrics(legacyFallbackRec)
 	}
 
+	if uatIntrinsicRec, err := hub.NewOTelUATIntrinsicMetrics(mp); err != nil {
+		log.Printf("WARNING: hub uat intrinsic metrics disabled: %v", err)
+	} else {
+		hubSrv.SetUATIntrinsicMetrics(uatIntrinsicRec)
+	}
+
 	// Decision logging (remaining-audit P1): the audit writer's
 	// scion.logging.* series and the decision-log disposition counter.
 	// The same instruments carry writer=cloud (P2): the Cloud Logging

@@ -560,11 +560,11 @@ func (s *Server) planUserDelegatorReissue(ctx context.Context, plan *scopeReissu
 	if !decision.Allowed {
 		return reissueRefusal(DenyCauseCeilingDelegatorLacksPermission, fmt.Errorf("delegator user %s cannot delegate role %q: %s", user.ID, role, decision.Reason))
 	}
-	ceiling, _, err := a.sourceEffectCeiling(ctx, actor)
+	ceiling, prov, err := a.sourceEffectCeiling(ctx, actor)
 	if err != nil {
 		return reissueErrorFromChain(err)
 	}
-	capped, cause, ok := childRoleWithinCeiling(ceiling, role, false)
+	capped, cause, ok := childRoleWithinCeiling(uatHopEffectCeiling(prov, ceiling), role, false)
 	if !ok {
 		return reissueRefusal(cause, fmt.Errorf("no agent role fits the delegator's current ceiling"))
 	}
