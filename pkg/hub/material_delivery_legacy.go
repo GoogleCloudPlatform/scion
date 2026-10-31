@@ -312,7 +312,17 @@ func (a *AuthzService) hubDeliveryLegacyFallback(
 		note hubDeliveryLegacyNote
 		obs  hubDeliveryWalkObservation
 	)
-	ok, _, _ := a.hubDeliveryWalkObserved(ctx, agentID, h.projectID, permissionID, nil, &note, &obs)
+	ok, walkReason, walkCause := a.hubDeliveryWalkObserved(ctx, agentID, h.projectID, permissionID, nil, &note, &obs)
+	if !ok && note.cohort == legacyDeliveryCohortUATDescendant {
+		// The tolerant walk reached the token-created ancestor and refused a
+		// later check there (for example an inactive creating user). Return
+		// that deny, which names the cause, as the strict walk does for the
+		// token-created agent itself.
+		if explain != nil {
+			*explain = append(*explain, DecisionStep{Step: "delegation_ceiling_delivery_denied", Detail: walkReason})
+		}
+		return hubDeliveryAdmissionOutcome{reason: walkReason, cause: walkCause, deniedCohort: legacyDeliveryCohortUATDescendant}
+	}
 	if !ok || note.cohort == "" {
 		return strict
 	}
@@ -337,9 +347,13 @@ func (a *AuthzService) hubDeliveryLegacyFallback(
 
 // uatDescendantRootDenied applies the provenance root admission to a chain
 // the tolerant walk passed under uat_descendant_legacy. It returns the deny
-// and true when the root user is not admitted to the agent's project, or when
-// the admission cannot be evaluated (a lookup fault fails closed). Any other
-// outcome returns false and the fallback goes on.
+// and true when the root user is not admitted to the agent's project, when
+// the root user or an agent on the chain is no longer active
+// (ErrProvenanceInactive), or when the admission cannot be evaluated (a
+// lookup fault fails closed); the strict walk denies the token-created
+// ancestor in each case. Any other outcome returns false and the fallback
+// goes on: the tolerant walk has already read every hop of such a chain as
+// recorded.
 func (a *AuthzService) uatDescendantRootDenied(ctx context.Context, agentID, permissionID string, explain *[]DecisionStep) (hubDeliveryAdmissionOutcome, bool) {
 	_, err := a.ResolveProvenanceRoot(ctx, agentID, ResolveProvenanceOptions{PermissionID: permissionID})
 	if err == nil {
@@ -350,6 +364,8 @@ func (a *AuthzService) uatDescendantRootDenied(ctx context.Context, agentID, per
 	switch {
 	case errors.Is(err, ErrProvenanceNotAdmitted):
 		reason = deliveryRootNotAdmittedReason + ": " + err.Error()
+	case errors.Is(err, ErrProvenanceInactive):
+		reason = "delivery provenance root denied: " + err.Error()
 	case cause == DenyCauseCeilingError:
 		reason = "delivery ceiling check failed (fail-closed): " + err.Error()
 	default:

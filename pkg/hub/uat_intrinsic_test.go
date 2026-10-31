@@ -117,9 +117,9 @@ func TestUATIntrinsic_HopCeiling(t *testing.T) {
 
 // TestUATIntrinsic_NotOtherHops: no intrinsic permission reaches a hop for
 // which uatRecordedHop is false: session, agent, scheduler (including a
-// schedule written with a token: scheduler-recorded hops are not token hops), system_migration, dev_local, unrecorded
-// provenance, a principal ceiling, or a uat source missing its user
-// principal.
+// schedule written with a token: scheduler-recorded hops are not token
+// hops), system_migration, dev_local, unrecorded provenance, a principal
+// ceiling, or a uat source missing its user principal.
 func TestUATIntrinsic_NotOtherHops(t *testing.T) {
 	user := uuid.NewString()
 	bounded := boundedCeiling(uiTokenList...)
@@ -205,10 +205,10 @@ func TestUATIntrinsic_RegistryTableNotWidened(t *testing.T) {
 // TestUATIntrinsic_CeilingReadersUseHopCeiling pins the reader sites: in
 // the package sources, EffectCeilingAllows and childRoleWithinCeiling are
 // called on an edge, hop, assignment or source ceiling only through
-// uatHopEffectCeiling, and so is every .Frozen() fold of a ceiling. The listed exceptions read a fold (already built
-// from hop ceilings), a scheduler ceiling (scheduler-recorded hops are not
-// token hops), an agent-parent ceiling,
-// or are the helpers themselves.
+// uatHopEffectCeiling, and so is every .Frozen() fold of a ceiling. The
+// listed exceptions read a fold (already built from hop ceilings), a
+// scheduler ceiling (scheduler-recorded hops are not token hops), an
+// agent-parent ceiling, or are the helpers themselves.
 func TestUATIntrinsic_CeilingReadersUseHopCeiling(t *testing.T) {
 	allowed := map[string]map[string]bool{
 		"EffectCeilingAllows": {
@@ -622,6 +622,59 @@ func TestUATIntrinsic_RootNotAdmittedWithheld(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestUATIntrinsic_DescendantInactiveRootWithheld: a sub-agent of a
+// token-created agent, recorded before the deliver permissions were
+// intrinsic to the token hop, is withheld when the creating user is
+// suspended, as its token-created parent is on the strict walk. The deny
+// names the cause.
+func TestUATIntrinsic_DescendantInactiveRootWithheld(t *testing.T) {
+	const parentName = "ui-inactive-token-parent"
+	m := newLDFixture(t, "ui-inactive-child", ldOptions{noEdge: true, ancestry: func(f *goldenFixture) []string {
+		return []string{f.projectOwnerID, tid(parentName)}
+	}})
+	p := tid(parentName)
+	hdAgent(t, m.store, p, m.agent.ProjectID, []string{m.projectOwnerID})
+	hdEdge(t, m.store, store.DelegationPrincipalUser, m.projectOwnerID, p, m.agent.ProjectID, uiUATEdge(uiTokenList...))
+	hdEdge(t, m.store, store.DelegationPrincipalAgent, p, m.agent.ID, m.agent.ProjectID, withBoundedCeiling("agent.read"))
+	m.env(t, "UI_INACTIVE_ENV", "ui-inactive-value", store.ScopeProject, m.agent.ProjectID, false)
+	ctx := context.Background()
+
+	lh := hdIdentity(t, m.authz, m.agent.ID)
+	lh.legacyFallback = true
+	control := m.authz.hubDeliveryAdmissionOutcomeFor(ctx, lh, "env_var.deliver", m.agent.ID, nil)
+	require.True(t, control.ok, "control: served while the creator is active; reason %q", control.reason)
+	assert.Equal(t, legacyDeliveryCohortUATDescendant, control.legacyCohort)
+
+	setUserStatus(t, m.store, m.projectOwnerID, store.UserStatusSuspended)
+
+	parent := m.authz.hubDeliveryChainAdmission(ctx, hdIdentity(t, m.authz, p), "env_var.deliver", p, nil)
+	require.False(t, parent.ok, "the token-created parent is withheld on the strict walk")
+
+	lh = hdIdentity(t, m.authz, m.agent.ID)
+	lh.legacyFallback = true
+	o := m.authz.hubDeliveryAdmissionOutcomeFor(ctx, lh, "env_var.deliver", m.agent.ID, nil)
+	require.False(t, o.ok, "the descendant is withheld like its parent; reason %q", o.reason)
+	assert.Empty(t, o.legacyCohort)
+	assert.Equal(t, legacyDeliveryCohortUATDescendant, o.deniedCohort)
+	assert.Equal(t, parent.cause, o.cause, "parent and descendant agree")
+	assert.Contains(t, o.reason, string(store.UserStatusSuspended), "the deny names the cause")
+
+	buf := lgLogger(m)
+	require.NoError(t, m.d.DispatchAgentRestart(ctx, m.agent))
+	assert.Empty(t, m.client.lastRestartResolvedEnv["UI_INACTIVE_ENV"], "withheld")
+	assert.Empty(t, warnRecords(t, buf.Bytes(), lgFallbackMsg), "no fallback serves it")
+
+	rep, err := m.authz.LaunchDeliveryCensus(ctx, false)
+	require.NoError(t, err)
+	for _, r := range rep.Rows {
+		if r.AgentID == m.agent.ID {
+			v := r.Verdicts["env_var.deliver"]
+			assert.False(t, v.Allowed)
+			assert.Contains(t, v.Reason, string(store.UserStatusSuspended), "the census names the cause")
+		}
 	}
 }
 

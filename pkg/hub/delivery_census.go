@@ -25,11 +25,11 @@ package hub
 // still open the store read-only (hack/delivery-census does).
 //
 // For agents whose own edge was recorded from a user access token
-// (uatRecordedHop) it also reports the intrinsic set's effect:
-// the stored role against the role the chain lets its tokens carry, and how
-// many of the owner's progeny-shared user secrets the user secret parent
-// ceiling admits, and how many of those only through the intrinsic rule. It
-// counts rows by ID and never decrypts or prints a value or a row name.
+// (uatRecordedHop) it also reports the intrinsic set's effect: the stored
+// role against the role the chain lets its tokens carry, and how many of the
+// owner's progeny-shared user secrets the user secret parent ceiling admits,
+// and how many of those only through the intrinsic rule. It counts rows by
+// ID and never decrypts or prints a value or a row name.
 
 import (
 	"context"
