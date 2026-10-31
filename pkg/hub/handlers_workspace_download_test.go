@@ -256,6 +256,7 @@ func TestWorkspaceDownload_PagesThroughNextOffset(t *testing.T) {
 		pages++
 		require.LessOrEqual(t, len(out.Files), api.WorkspaceDownloadPageSize)
 		assert.WithinDuration(t, time.Now().Add(SignedURLExpiry), out.Expires, time.Minute)
+		assert.Equal(t, 900, out.ExpiresInSeconds, "the relative TTL lets the broker measure expiry on its own clock")
 		for _, file := range out.Files {
 			require.False(t, got[file.Path], "object %s repeated", file.Path)
 			got[file.Path] = true
@@ -435,4 +436,32 @@ func TestCreateRequest_CarriesNoSignedURL(t *testing.T) {
 			assert.Empty(t, signedURLLeaks(logs.String(), wf.stor.issued), "dispatcher debug lines")
 		})
 	}
+}
+
+// failingListStorage fails List with an error whose text names the bucket
+// and the object prefix.
+type failingListStorage struct{ *pagingWorkspaceStorage }
+
+func (f *failingListStorage) List(_ context.Context, opts storage.ListOptions) (*storage.ListResult, error) {
+	return nil, fmt.Errorf("googleapi: listing gs://ws-bucket/%s: permission denied", opts.Prefix)
+}
+
+// TestWorkspaceDownload_StorageErrorsLoggedAsClasses: a storage failure is
+// logged as a fixed class, never with the storage error's text (which names
+// the bucket and object path). Control: the error text does carry the path.
+func TestWorkspaceDownload_StorageErrorsLoggedAsClasses(t *testing.T) {
+	f := newWorkspaceDownloadFixture(t)
+	f.srv.SetStorage(&failingListStorage{f.stor})
+	var logs bytes.Buffer
+	f.srv.workspaceLog = slog.New(slog.NewTextHandler(&logs, nil))
+	rr := f.post(t, http.MethodPost, f.broker, f.agent.ID+"/workspace-download", f.broker, nil)
+	require.Equal(t, http.StatusBadGateway, rr.Code, rr.Body.String())
+	_, raw := (&failingListStorage{}).List(context.Background(), storage.ListOptions{Prefix: f.prefix + "/files/"})
+	require.Contains(t, raw.Error(), "gs://ws-bucket/", "control: the raw error names the bucket")
+	assert.Contains(t, logs.String(), "error_class=storage_error")
+	assert.NotContains(t, logs.String(), "gs://")
+	assert.NotContains(t, logs.String(), f.prefix)
+	assert.NotContains(t, rr.Body.String(), f.prefix)
+	assert.Equal(t, "not_found", workspaceStorageErrorClass(storage.ErrNotFound))
+	assert.Equal(t, "timeout", workspaceStorageErrorClass(context.DeadlineExceeded))
 }

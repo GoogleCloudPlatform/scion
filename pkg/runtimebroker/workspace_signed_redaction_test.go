@@ -17,6 +17,7 @@ package runtimebroker
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -87,11 +88,49 @@ func filesText(t *testing.T, dir string) string {
 	return b.String()
 }
 
+// rawUnmappedFailure performs the scenario's failing step without the
+// downloader's mapping and returns the raw text a naive implementation would
+// have logged: the page request's error, else the object GET's *url.Error,
+// its body read error, or its error response body.
+func rawUnmappedFailure(t *testing.T, srv *Server, fetch func(context.Context, CreateAgentRequest, string) (*api.WorkspaceDownloadResponse, error)) string {
+	t.Helper()
+	resp, err := fetch(context.Background(), CreateAgentRequest{}, "")
+	if err != nil {
+		return err.Error()
+	}
+	if len(resp.Files) == 0 {
+		t.Fatal("the page lists no file")
+	}
+	client := srv.signedDownload.client
+	if client == nil {
+		client = newSignedDownloadClient()
+	}
+	r, err := client.Get(resp.Files[0].URL)
+	if err != nil {
+		return err.Error()
+	}
+	defer func() { _ = r.Body.Close() }()
+	body, rerr := io.ReadAll(r.Body)
+	if rerr != nil {
+		return rerr.Error()
+	}
+	if r.StatusCode != http.StatusOK {
+		return string(body)
+	}
+	return ""
+}
+
 // leakScenario injects one failure into the signed download. setup returns
 // the page source and the URLs it issues.
 type leakScenario struct {
 	name  string
 	setup func(t *testing.T, srv *Server) (func(context.Context, CreateAgentRequest, string) (*api.WorkspaceDownloadResponse, error), *[]string)
+	// rawNoURL marks the one scenario whose raw failure carries no URL by
+	// net/http's design: a body read error after the response headers is
+	// io.ErrUnexpectedEOF itself, not a *url.Error. It still exercises the
+	// class mapping (reset); the leak path for a reset is covered by "reset
+	// before response".
+	rawNoURL bool
 }
 
 // signedPage returns a page source with one file at base+"/o/a" carrying a
@@ -107,7 +146,7 @@ func signedPage(base string) (func(context.Context, CreateAgentRequest, string) 
 
 func leakScenarios() []leakScenario {
 	return []leakScenario{
-		{"closed listener", func(t *testing.T, srv *Server) (func(context.Context, CreateAgentRequest, string) (*api.WorkspaceDownloadResponse, error), *[]string) {
+		{name: "closed listener", setup: func(t *testing.T, srv *Server) (func(context.Context, CreateAgentRequest, string) (*api.WorkspaceDownloadResponse, error), *[]string) {
 			l, err := net.Listen("tcp", "127.0.0.1:0")
 			if err != nil {
 				t.Fatal(err)
@@ -116,7 +155,7 @@ func leakScenarios() []leakScenario {
 			_ = l.Close()
 			return signedPage("http://" + addr)
 		}},
-		{"mid-body reset", func(t *testing.T, srv *Server) (func(context.Context, CreateAgentRequest, string) (*api.WorkspaceDownloadResponse, error), *[]string) {
+		{name: "mid-body reset", setup: func(t *testing.T, srv *Server) (func(context.Context, CreateAgentRequest, string) (*api.WorkspaceDownloadResponse, error), *[]string) {
 			obj := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Length", "100")
 				w.WriteHeader(http.StatusOK)
@@ -132,8 +171,22 @@ func leakScenarios() []leakScenario {
 			}))
 			t.Cleanup(obj.Close)
 			return signedPage(obj.URL)
+		}, rawNoURL: true},
+		{name: "reset before response", setup: func(t *testing.T, srv *Server) (func(context.Context, CreateAgentRequest, string) (*api.WorkspaceDownloadResponse, error), *[]string) {
+			obj := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if hj, ok := w.(http.Hijacker); ok {
+					if c, _, err := hj.Hijack(); err == nil {
+						if tc, ok := c.(*net.TCPConn); ok {
+							_ = tc.SetLinger(0)
+						}
+						_ = c.Close()
+					}
+				}
+			}))
+			t.Cleanup(obj.Close)
+			return signedPage(obj.URL)
 		}},
-		{"context timeout", func(t *testing.T, srv *Server) (func(context.Context, CreateAgentRequest, string) (*api.WorkspaceDownloadResponse, error), *[]string) {
+		{name: "context timeout", setup: func(t *testing.T, srv *Server) (func(context.Context, CreateAgentRequest, string) (*api.WorkspaceDownloadResponse, error), *[]string) {
 			obj := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				select {
 				case <-r.Context().Done():
@@ -144,14 +197,14 @@ func leakScenarios() []leakScenario {
 			srv.signedDownload.client = &http.Client{Timeout: 100 * time.Millisecond}
 			return signedPage(obj.URL)
 		}},
-		{"object store 403", func(t *testing.T, srv *Server) (func(context.Context, CreateAgentRequest, string) (*api.WorkspaceDownloadResponse, error), *[]string) {
+		{name: "object store 403", setup: func(t *testing.T, srv *Server) (func(context.Context, CreateAgentRequest, string) (*api.WorkspaceDownloadResponse, error), *[]string) {
 			obj := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "<Error>SignatureDoesNotMatch "+r.URL.String()+"</Error>", http.StatusForbidden)
 			}))
 			t.Cleanup(obj.Close)
 			return signedPage(obj.URL)
 		}},
-		{"hub endpoint 5xx", func(t *testing.T, srv *Server) (func(context.Context, CreateAgentRequest, string) (*api.WorkspaceDownloadResponse, error), *[]string) {
+		{name: "hub endpoint 5xx", setup: func(t *testing.T, srv *Server) (func(context.Context, CreateAgentRequest, string) (*api.WorkspaceDownloadResponse, error), *[]string) {
 			u := "https://storage.googleapis.com/b/o?X-Goog-Signature=from-endpoint-body"
 			issued := &[]string{u}
 			return func(context.Context, CreateAgentRequest, string) (*api.WorkspaceDownloadResponse, error) {
@@ -233,6 +286,20 @@ func TestSignedDownload_NoURLLeaks(t *testing.T) {
 			srv.signedDownload.sleep = noSleep
 			fetch, issued := sc.setup(t, srv)
 			srv.signedDownload.fetchPage = fetch
+			// Positive control per scenario: the raw failure, before the
+			// mapping, carries the URL, so this scenario exercises a real
+			// leak path and the mapping is what keeps it out.
+			raw := rawUnmappedFailure(t, srv, fetch)
+			if raw == "" {
+				t.Fatal("the scenario must fail")
+			}
+			if sc.rawNoURL {
+				if len(urlLeaks(raw, *issued)) != 0 {
+					t.Fatalf("expected a URL-free raw body read error, got %q", raw)
+				}
+			} else if len(urlLeaks(raw, *issued)) == 0 {
+				t.Fatalf("the raw failure must carry the URL for this scenario to prove anything: %q", raw)
+			}
 			req := CreateAgentRequest{ID: "agent-ret", Name: "agent-ret", WorkspaceStoragePath: "p", WorkspaceDownloadMode: api.WorkspaceDownloadModeSignedURLs}
 			_, attempt, msg, err := srv.downloadWorkspaceFromGCS(context.Background(), req, api.StartOptions{})
 			if err == nil {

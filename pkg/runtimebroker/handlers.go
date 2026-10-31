@@ -2391,7 +2391,7 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 	}
 
 	if signed {
-		skipped, signedErr := s.signedBootstrapLocal(ctx, req, workspaceDir)
+		skipped, populated, signedErr := s.signedBootstrapLocal(ctx, req, workspaceDir)
 		if signedErr != nil {
 			attemptMsg, httpMessage, err = s.workspaceBootstrapFailed(req, signedBootstrapOp(signedErr), signedErr)
 			return opts, attemptMsg, httpMessage, err
@@ -2406,6 +2406,12 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 			}
 			opts.Workspace = workspaceDir
 			return opts, "", "", nil
+		}
+		if populated {
+			// A marker-only project directory (left by an earlier failed
+			// attempt) counts as absent in the signed mode, so this
+			// bootstrap created the broker copy: record it.
+			req.workspaceAbsentAtAdmission = true
 		}
 		return s.finishWorkspaceBootstrap(req, opts, workspaceDir), "", "", nil
 	}

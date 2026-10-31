@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -134,7 +135,8 @@ func (s *Server) handleWorkspaceDownload(w http.ResponseWriter, r *http.Request,
 		StartOffset: cursor,
 	})
 	if err != nil {
-		s.workspaceLog.Error("Workspace download: failed to list the workspace files", "agent_id", agentID, "broker_id", brokerID, "error", err)
+		s.workspaceLog.Error("Workspace download: failed to list the workspace files", "agent_id", agentID, "broker_id", brokerID,
+			"error_class", workspaceStorageErrorClass(err))
 		RuntimeError(w, workspaceDownloadListFailedMessage)
 		return
 	}
@@ -153,9 +155,10 @@ func (s *Server) handleWorkspaceDownload(w http.ResponseWriter, r *http.Request,
 			Expires: SignedURLExpiry,
 		})
 		if err != nil || signed == nil {
-			// The signing error names no URL; it is logged for the operator
-			// and the broker gets the fixed text.
-			s.workspaceLog.Error("Workspace download: failed to sign a download URL", "agent_id", agentID, "broker_id", brokerID, "error", err)
+			// Logged as a fixed class: storage errors can name the bucket
+			// and object path. The broker gets the fixed text.
+			s.workspaceLog.Error("Workspace download: failed to sign a download URL", "agent_id", agentID, "broker_id", brokerID,
+				"error_class", workspaceStorageErrorClass(err))
 			RuntimeError(w, workspaceDownloadSignFailedMessage)
 			return
 		}
@@ -171,9 +174,10 @@ func (s *Server) handleWorkspaceDownload(w http.ResponseWriter, r *http.Request,
 	s.workspaceLog.Info("Workspace download page issued", "agent_id", agentID, "broker_id", brokerID,
 		"files", len(files), "excluded", excluded, "more", nextCursor != "", "expires", expires.UTC().Format(time.RFC3339))
 	writeJSON(w, http.StatusOK, api.WorkspaceDownloadResponse{
-		Files:      files,
-		NextCursor: nextCursor,
-		Expires:    expires,
+		Files:            files,
+		NextCursor:       nextCursor,
+		Expires:          expires,
+		ExpiresInSeconds: int(SignedURLExpiry / time.Second),
 	})
 }
 
@@ -202,4 +206,21 @@ func readWorkspaceDownloadCursor(w http.ResponseWriter, r *http.Request) (string
 // of an agent assigned to it at any phase until a delete begins.
 func workspaceDownloadAgentDeleting(agent *store.Agent) bool {
 	return !agent.DeletedAt.IsZero() || agent.DeletionState != store.DeletionStateNone
+}
+
+// workspaceStorageErrorClass is the fixed class a workspace download logs
+// for a storage list or sign failure. A storage error's text can name the
+// bucket and object path, so it is never logged.
+func workspaceStorageErrorClass(err error) string {
+	switch {
+	case err == nil:
+		return "no_url"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, storage.ErrNotFound):
+		return "not_found"
+	}
+	return "storage_error"
 }

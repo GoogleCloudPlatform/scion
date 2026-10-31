@@ -1095,14 +1095,16 @@ Checks, in order, all failing closed:
 {
   "files": [{"path": "src/main.go", "url": "<signed GET URL>", "size": 123}],
   "nextCursor": "string",   // empty on the last page; a page can be empty while nextCursor is set
-  "expires": "2026-01-01T00:15:00Z"
+  "expires": "2026-01-01T00:15:00Z",  // on the Hub's clock
+  "expiresInSeconds": 900   // the same lifetime, relative; the broker measures it on its own clock
 }
 ```
 
 A page lists at most 500 objects. Names are filtered by one shared rule table
 (`transfer.ExcludeWorkspaceObject`): the root `.scion` entry and everything
-under it, directory objects and invalid relative paths are left out, and the
-broker applies the same table again. URLs expire after 15 minutes; the broker
+under it (in any letter case, because a case-insensitive filesystem resolves
+`.SCION` to the same entry), directory objects and invalid relative paths are
+left out, and the broker applies the same table again, also when it writes. URLs expire after 15 minutes; the broker
 fetches a page again with the same cursor when they expire or are refused.
 
 ## 6. Template Endpoints

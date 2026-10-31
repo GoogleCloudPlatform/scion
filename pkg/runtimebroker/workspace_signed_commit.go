@@ -74,6 +74,9 @@ const (
 	// signedCommitAmbiguous: more than one complete stage; nothing is
 	// touched.
 	signedCommitAmbiguous = "recovery_ambiguous"
+	// signedCommitIdentityRestore: a failed case A commit could not put the
+	// identity entry back; the stage holding it is kept for recovery.
+	signedCommitIdentityRestore = "identity_restore"
 )
 
 // signedCommitError is a staging or commit failure of the signed bootstrap.
@@ -170,12 +173,16 @@ func removeStaleBootstrapStages(parent, base string) (int, error) {
 // skip is decided here, not at admission: case A skips a workspace that
 // holds any entry other than its root identity entry, and applies to one
 // that is absent or holds only that entry, so an attempt that failed
-// cleanly earlier is applied again.
-func (s *Server) signedBootstrapLocal(ctx context.Context, req CreateAgentRequest, w string) (skipped bool, err error) {
+// cleanly earlier is applied again. populated reports a completed case A
+// bootstrap, which created the project directory's content.
+func (s *Server) signedBootstrapLocal(ctx context.Context, req CreateAgentRequest, w string) (skipped, populated bool, err error) {
 	if req.ProjectSlug != "" && req.workspaceAdmissionChecked {
-		return s.signedBootstrapAbsent(ctx, req, w)
+		skipped, err := s.signedBootstrapAbsent(ctx, req, w)
+		// Case A applies only to an absent or marker-only workspace, so a
+		// completed case A bootstrap populated the project directory.
+		return skipped, !skipped && err == nil, err
 	}
-	return false, s.signedBootstrapInPlace(ctx, req, w)
+	return false, false, s.signedBootstrapInPlace(ctx, req, w)
 }
 
 // workspaceHoldsOnlyIdentity reports whether the directory w holds no entry
@@ -188,7 +195,7 @@ func workspaceHoldsOnlyIdentity(w string) (bool, error) {
 		return false, err
 	}
 	for _, e := range entries {
-		if e.Name() != transfer.WorkspaceIdentityEntry {
+		if !transfer.IsWorkspaceIdentityName(e.Name()) {
 			return false, nil
 		}
 	}
@@ -251,11 +258,16 @@ func (s *Server) signedBootstrapAbsent(ctx context.Context, req CreateAgentReque
 			return false, err
 		}
 	}
-	if err := renameSiblingDir(parent, stage, base); err != nil {
+	if err := renameSiblingDirFn(parent, stage, base); err != nil {
 		// Put the identity entry back before removing the stage, so w is
-		// left as it was.
+		// left as it was. (A concurrent create of the same project can
+		// rewrite w's identity entry meanwhile, and the rename then fails
+		// with ENOTEMPTY.) If the identity entry cannot be put back, the
+		// stage is kept, so the entry is never lost: recovery restores it.
 		if exists {
-			_ = moveIdentityBack(parent, base, stage)
+			if err := moveIdentityBackFn(parent, base, stage); err != nil {
+				return false, &signedCommitError{Class: signedCommitIdentityRestore}
+			}
 		}
 		_ = os.RemoveAll(stagePath)
 		return false, &signedCommitError{Class: signedCommitApply}
@@ -284,6 +296,13 @@ func moveIdentityIntoStage(parent, w, stage string) error {
 	}
 	return nil
 }
+
+// renameSiblingDirFn and moveIdentityBackFn are the case A commit's rename
+// steps, replaced only by tests to inject failures.
+var (
+	renameSiblingDirFn = renameSiblingDir
+	moveIdentityBackFn = moveIdentityBack
+)
 
 // moveIdentityBack undoes moveIdentityIntoStage.
 func moveIdentityBack(parent, w, stage string) error {
@@ -339,10 +358,21 @@ func recoverLocalBootstrapStages(parent, base string) error {
 		return &signedCommitError{Class: signedCommitAmbiguous}
 	}
 	if len(complete) == 1 {
-		entries, err := os.ReadDir(filepath.Join(parent, base))
-		if errors.Is(err, fs.ErrNotExist) || (err == nil && len(entries) == 0) {
+		w := filepath.Join(parent, base)
+		entries, err := os.ReadDir(w)
+		switch {
+		case errors.Is(err, fs.ErrNotExist) || (err == nil && len(entries) == 0):
 			if err := renameSiblingDir(parent, complete[0], base); err != nil {
 				return &signedCommitError{Class: signedCommitRecover}
+			}
+		case err == nil:
+			// W has entries but no identity entry of its own: a failed
+			// commit kept the stage because it could not put the identity
+			// entry back. Restore it before the stage is removed.
+			if _, lerr := os.Lstat(filepath.Join(w, transfer.WorkspaceIdentityEntry)); errors.Is(lerr, fs.ErrNotExist) {
+				if err := moveIdentityBack(parent, base, complete[0]); err != nil {
+					return &signedCommitError{Class: signedCommitRecover}
+				}
 			}
 		}
 	}
@@ -444,7 +474,7 @@ func applyStageInPlace(parent, stage, w string, files []string) error {
 			return nil
 		}
 		rel := strings.TrimPrefix(name, w+"/")
-		if first, _, _ := strings.Cut(rel, "/"); first == transfer.WorkspaceIdentityEntry {
+		if first, _, _ := strings.Cut(rel, "/"); transfer.IsWorkspaceIdentityName(first) {
 			if d.IsDir() {
 				return fs.SkipDir
 			}

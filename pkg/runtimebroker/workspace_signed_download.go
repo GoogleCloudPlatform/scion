@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -113,6 +114,9 @@ type signedDownloadSettings struct {
 	fileBackoff []time.Duration
 	// concurrency is the number of concurrent object GETs.
 	concurrency int
+	// stallTimeout ends an object GET whose body delivers no bytes for this
+	// long (class timeout).
+	stallTimeout time.Duration
 }
 
 const (
@@ -124,6 +128,11 @@ const (
 	// signedDownloadMaxIdleRefreshes is the most consecutive page refreshes
 	// with no file completed since the previous refresh.
 	signedDownloadMaxIdleRefreshes = 2
+	// signedDownloadStallTimeout ends an object GET whose body stalls.
+	signedDownloadStallTimeout = 2 * time.Minute
+	// signedDownloadHeaderTimeout bounds the wait for an object GET's
+	// response headers.
+	signedDownloadHeaderTimeout = time.Minute
 )
 
 var (
@@ -133,9 +142,18 @@ var (
 	// defaultSignedFileBackoff: an object GET is tried up to 3 times on a
 	// transport error or a 5xx.
 	defaultSignedFileBackoff = []time.Duration{time.Second, 2 * time.Second}
-	// defaultSignedDownloadClient is a plain client with no instrumentation.
-	defaultSignedDownloadClient = &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()}
+	// defaultSignedDownloadClient is a plain client with no instrumentation
+	// and a bounded wait for response headers.
+	defaultSignedDownloadClient = newSignedDownloadClient()
 )
+
+// newSignedDownloadClient returns the plain object client: the default
+// transport with a response header timeout, and no instrumentation.
+func newSignedDownloadClient() *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.ResponseHeaderTimeout = signedDownloadHeaderTimeout
+	return &http.Client{Transport: tr}
+}
 
 // resolved returns the settings with defaults filled in.
 func (st signedDownloadSettings) resolved() signedDownloadSettings {
@@ -156,6 +174,9 @@ func (st signedDownloadSettings) resolved() signedDownloadSettings {
 	}
 	if st.concurrency <= 0 {
 		st.concurrency = signedDownloadConcurrency
+	}
+	if st.stallTimeout <= 0 {
+		st.stallTimeout = signedDownloadStallTimeout
 	}
 	return st
 }
@@ -319,8 +340,9 @@ func (d *signedDownloader) downloadPage(ctx context.Context, page int, cursor st
 	done := make(map[string]bool, len(resp.Files))
 	idleRefreshes := 0
 	completedSinceRefresh := 0
+	deadline := pageDeadline(resp, d.st.now())
 	for {
-		needRefresh := resp.Expires.Sub(d.st.now()) < signedDownloadRefreshMargin
+		needRefresh := deadline.Sub(d.st.now()) < signedDownloadRefreshMargin
 		if !needRefresh {
 			completed, refresh, err := d.round(ctx, page, resp, done)
 			if err != nil {
@@ -348,7 +370,19 @@ func (d *signedDownloader) downloadPage(ctx context.Context, page int, cursor st
 			return &signedDownloadError{Stage: "page", Page: page, File: -1, Class: signedClassListingChanged}
 		}
 		resp = fresh
+		deadline = pageDeadline(resp, d.st.now())
 	}
+}
+
+// pageDeadline is when a page's URLs expire, on this broker's clock: the
+// page's relative lifetime measured from its receipt, so clock skew between
+// the Hub and the broker does not shorten it. A page without a relative
+// lifetime (an older Hub) falls back to its absolute expiry.
+func pageDeadline(resp *api.WorkspaceDownloadResponse, received time.Time) time.Time {
+	if resp.ExpiresInSeconds > 0 {
+		return received.Add(time.Duration(resp.ExpiresInSeconds) * time.Second)
+	}
+	return resp.Expires
 }
 
 // sameListing reports whether a refreshed page lists exactly the paths and
@@ -466,7 +500,9 @@ func (d *signedDownloader) getFile(ctx context.Context, page, index int, f api.W
 // without a response), an error class ("" on success) and whether the
 // failure may be retried.
 func (d *signedDownloader) getOnce(ctx context.Context, f api.WorkspaceDownloadFile) (int, string, bool) {
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, f.URL, nil)
+	reqCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodGet, f.URL, nil)
 	if err != nil {
 		return 0, signedClassInvalidEntry, false
 	}
@@ -482,16 +518,56 @@ func (d *signedDownloader) getOnce(ctx context.Context, f api.WorkspaceDownloadF
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
 		return resp.StatusCode, "http_" + strconv.Itoa(resp.StatusCode), resp.StatusCode >= 500
 	}
-	if class := d.writeFile(f, resp.Body); class != "" {
+	body := newStallReader(resp.Body, d.st.stallTimeout, cancel)
+	defer body.stop()
+	class := d.writeFile(f, body)
+	if class != "" && body.stalled() {
+		class = signedClassTimeout
+	}
+	if class != "" {
 		return resp.StatusCode, class, class == signedClassReset || class == signedClassTimeout || class == signedClassTransport
 	}
 	return resp.StatusCode, "", false
 }
 
+// stallReader cancels a GET whose body delivers no bytes for the stall
+// timeout. Every read that returns bytes restarts the timer.
+type stallReader struct {
+	r       io.Reader
+	timeout time.Duration
+	timer   *time.Timer
+	fired   atomic.Bool
+}
+
+func newStallReader(r io.Reader, timeout time.Duration, cancel context.CancelFunc) *stallReader {
+	s := &stallReader{r: r, timeout: timeout}
+	s.timer = time.AfterFunc(timeout, func() {
+		s.fired.Store(true)
+		cancel()
+	})
+	return s
+}
+
+func (s *stallReader) Read(p []byte) (int, error) {
+	n, err := s.r.Read(p)
+	if n > 0 {
+		s.timer.Reset(s.timeout)
+	}
+	return n, err
+}
+
+func (s *stallReader) stop()         { s.timer.Stop() }
+func (s *stallReader) stalled() bool { return s.fired.Load() }
+
 // writeFile streams body into a temporary file next to f.Path inside the
 // root, checks its length against f.Size, and renames it into place. It
 // returns an error class, "" on success.
 func (d *signedDownloader) writeFile(f api.WorkspaceDownloadFile, body io.Reader) string {
+	// The write side checks the name again, so no path can reach the root
+	// identity entry in any letter case, whatever the page validation did.
+	if transfer.ExcludeWorkspaceObject(f.Path) != transfer.WorkspaceObjectKept {
+		return signedClassInvalidEntry
+	}
 	name := filepath.FromSlash(f.Path)
 	if dir := filepath.Dir(name); dir != "." {
 		// The modes match the rclone download's (0777 directories, 0666

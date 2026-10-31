@@ -47,9 +47,13 @@ type WorkspaceDownloadFile struct {
 }
 
 // WorkspaceDownloadResponse is one page of a workspace download. NextCursor
-// is empty on the last page. Expires is when this page's URLs expire.
+// is empty on the last page. Expires is when this page's URLs expire, on the
+// Hub's clock. ExpiresInSeconds is the same lifetime relative to the
+// response, so the broker can measure it on its own clock and clock skew
+// between the two hosts does not shorten it.
 type WorkspaceDownloadResponse struct {
-	Files      []WorkspaceDownloadFile `json:"files"`
-	NextCursor string                  `json:"nextCursor"`
-	Expires    time.Time               `json:"expires"`
+	Files            []WorkspaceDownloadFile `json:"files"`
+	NextCursor       string                  `json:"nextCursor"`
+	Expires          time.Time               `json:"expires"`
+	ExpiresInSeconds int                     `json:"expiresInSeconds,omitempty"`
 }

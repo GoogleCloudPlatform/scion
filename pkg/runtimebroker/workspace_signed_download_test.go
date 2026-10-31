@@ -246,7 +246,7 @@ func TestSignedDownload_ContinuesPastEmptyPage(t *testing.T) {
 // traversal or a directory object in a page fails closed and writes nothing
 // outside the stage.
 func TestSignedDownload_RefusesInvalidEntries(t *testing.T) {
-	for _, name := range []string{".scion", ".scion/x", "../escape", "/abs", "./.scion", "d/"} {
+	for _, name := range []string{".scion", ".scion/x", ".SCION/x", ".Scion", "../escape", "/abs", "./.scion", "d/"} {
 		t.Run(name, func(t *testing.T) {
 			h := newFakeSignedHub(t, map[string]string{"ok.txt": "1"})
 			h.extraFiles = func(int) []api.WorkspaceDownloadFile {
@@ -540,5 +540,111 @@ func TestTransportClass(t *testing.T) {
 		if got := transportClass(tc.err); got != tc.want {
 			t.Errorf("transportClass(%v) = %q, want %q", tc.err, got, tc.want)
 		}
+	}
+}
+
+// TestSignedDownload_PageExpiryUsesBrokerClock: a page's lifetime is
+// measured on the broker's clock from its relative TTL, so a Hub clock far
+// behind (an absolute expiry already past here) does not force refreshes.
+// Control: the same page without a relative TTL is refreshed.
+func TestSignedDownload_PageExpiryUsesBrokerClock(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		ttl       int
+		wantCalls int
+	}{
+		{"relative TTL", 900, 1},
+		{"control: absolute only", 0, 1 + signedDownloadMaxIdleRefreshes},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newFakeSignedHub(t, map[string]string{"a.txt": "1"})
+			h.expires = func(int) time.Time { return time.Now().Add(-time.Hour) }
+			inner := h.fetch
+			fetch := func(ctx context.Context, req CreateAgentRequest, cursor string) (*api.WorkspaceDownloadResponse, error) {
+				resp, err := inner(ctx, req, cursor)
+				if resp != nil {
+					resp.ExpiresInSeconds = tc.ttl
+				}
+				return resp, err
+			}
+			_, _, err := runSignedDownload(t, h, func(st *signedDownloadSettings) { st.fetchPage = fetch })
+			if tc.ttl > 0 && err != nil {
+				t.Fatalf("a skewed Hub clock must not fail the download: %v", err)
+			}
+			if tc.ttl == 0 {
+				requireSignedClass(t, err, signedClassExpired)
+			}
+			if h.pageCalls != tc.wantCalls {
+				t.Fatalf("page calls = %d, want %d", h.pageCalls, tc.wantCalls)
+			}
+		})
+	}
+}
+
+// TestSignedDownload_StalledBodyTimesOut: an object GET whose body stops
+// delivering bytes is ended after the stall timeout (class timeout), not
+// held until the create's deadline.
+func TestSignedDownload_StalledBodyTimesOut(t *testing.T) {
+	release := make(chan struct{})
+	obj := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "10")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("x"))
+		w.(http.Flusher).Flush()
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer obj.Close()
+	defer close(release)
+	fetch := func(context.Context, CreateAgentRequest, string) (*api.WorkspaceDownloadResponse, error) {
+		return &api.WorkspaceDownloadResponse{Files: []api.WorkspaceDownloadFile{{Path: "a", URL: obj.URL + "/a", Size: 10}}, ExpiresInSeconds: 900}, nil
+	}
+	start := time.Now()
+	dir := t.TempDir()
+	srv := &Server{signedDownload: signedDownloadSettings{fetchPage: fetch, sleep: noSleep, stallTimeout: 200 * time.Millisecond, fileBackoff: []time.Duration{}}}
+	_, err := srv.signedWorkspaceDownload(context.Background(), CreateAgentRequest{}, dir)
+	requireSignedClass(t, err, signedClassTimeout)
+	if d := time.Since(start); d > 10*time.Second {
+		t.Fatalf("a stalled GET took %v to end", d)
+	}
+}
+
+// TestNewSignedDownloadClient_HeaderTimeout: the default object client
+// bounds the wait for response headers and carries no instrumentation.
+func TestNewSignedDownloadClient_HeaderTimeout(t *testing.T) {
+	c := newSignedDownloadClient()
+	tr, ok := c.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport is %T, want a plain *http.Transport", c.Transport)
+	}
+	if tr.ResponseHeaderTimeout != signedDownloadHeaderTimeout {
+		t.Fatalf("ResponseHeaderTimeout = %v", tr.ResponseHeaderTimeout)
+	}
+}
+
+// TestSignedDownload_WriteSideRefusesIdentityAnyCase: the write step itself
+// refuses a root identity name in any letter case, so nothing can reach the
+// identity entry on a case-insensitive filesystem even past page checks.
+// Control: an ordinary name is written.
+func TestSignedDownload_WriteSideRefusesIdentityAnyCase(t *testing.T) {
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	d := &signedDownloader{root: root}
+	for _, p := range []string{".scion/x", ".SCION/x", ".Scion", ".sCiOn/settings.yaml"} {
+		if class := d.writeFile(api.WorkspaceDownloadFile{Path: p, Size: 1}, strings.NewReader("x")); class != signedClassInvalidEntry {
+			t.Errorf("writeFile(%q) class = %q, want %q", p, class, signedClassInvalidEntry)
+		}
+	}
+	if got := readTree(t, dir); len(got) != 0 {
+		t.Fatalf("nothing may be written: %v", got)
+	}
+	if class := d.writeFile(api.WorkspaceDownloadFile{Path: "a/.SCION", Size: 1}, strings.NewReader("x")); class != "" {
+		t.Fatalf("control: a nested name is ordinary content, class %q", class)
 	}
 }

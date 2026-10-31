@@ -47,9 +47,11 @@ const (
 //     covers traversal, absolute names and non-canonical forms such as
 //     "./.scion";
 //   - the root identity entry and everything under it (".scion",
-//     ".scion/x"). A nested identity-named entry such as "a/.scion" is
-//     ordinary content and is kept, as the rclone sync's root-anchored
-//     exclude rules keep it.
+//     ".scion/x"), in any letter case (".SCION/x"), because a
+//     case-insensitive filesystem resolves those to the same entry. A
+//     nested identity-named entry such as "a/.scion" is ordinary content
+//     and is kept, as the rclone sync's root-anchored exclude rules keep
+//     it.
 //
 // The hub applies it when it lists the objects it signs URLs for, and the
 // Runtime Broker applies it again to every name it is about to write, so
@@ -62,8 +64,16 @@ func ExcludeWorkspaceObject(name string) WorkspaceObjectExclusion {
 		return WorkspaceObjectInvalidPath
 	}
 	first, _, _ := strings.Cut(name, "/")
-	if first == WorkspaceIdentityEntry {
+	if IsWorkspaceIdentityName(first) {
 		return WorkspaceObjectIdentity
 	}
 	return WorkspaceObjectKept
+}
+
+// IsWorkspaceIdentityName reports whether a single path element names the
+// root identity entry. The comparison ignores case: on a case-insensitive
+// filesystem (the default on macOS) ".SCION" or ".Scion" is the same
+// directory entry as ".scion". The name is ASCII, so EqualFold is exact.
+func IsWorkspaceIdentityName(elem string) bool {
+	return strings.EqualFold(elem, WorkspaceIdentityEntry)
 }

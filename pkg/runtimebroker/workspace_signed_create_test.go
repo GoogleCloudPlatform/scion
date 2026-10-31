@@ -281,6 +281,81 @@ func TestSignedCaseA_AbsentWorkspace(t *testing.T) {
 	if got := readTree(t, f.w); got["a.txt"] != "A" {
 		t.Fatalf("tree = %v", got)
 	}
+	requireBrokerCopyRecord(t, f)
+}
+
+// TestSignedCaseA_FailedRenameKeepsIdentity: when the commit's rename fails
+// (as with ENOTEMPTY after a concurrent create rewrote the identity entry),
+// the identity entry is put back into the workspace before the stage is
+// removed. If it cannot be put back, the stage holding it is kept and the
+// next attempt's recovery brings it back, so it is never lost.
+func TestSignedCaseA_FailedRenameKeepsIdentity(t *testing.T) {
+	failRename := func(t *testing.T) {
+		old := renameSiblingDirFn
+		renameSiblingDirFn = func(string, string, string) error { return errors.New("rename: directory not empty") }
+		t.Cleanup(func() { renameSiblingDirFn = old })
+	}
+	t.Run("identity moved back", func(t *testing.T) {
+		f := newCaseAFixture(t, map[string]string{"a.txt": "A"})
+		f.writeMarker(t, "orig")
+		failRename(t)
+		_, err := f.run()
+		var ce *signedCommitError
+		if !errors.As(err, &ce) || ce.Class != signedCommitApply {
+			t.Fatalf("err = %v, want class %s", err, signedCommitApply)
+		}
+		wantTree(t, f.w, map[string]string{".scion": "orig"})
+		if s := stagesOf(t, f.w); len(s) != 0 {
+			t.Fatalf("stages left: %v", s)
+		}
+	})
+	t.Run("identity cannot be moved back: stage kept, recovered next time", func(t *testing.T) {
+		f := newCaseAFixture(t, map[string]string{"a.txt": "A"})
+		f.writeMarker(t, "orig")
+		failRename(t)
+		oldBack := moveIdentityBackFn
+		moveIdentityBackFn = func(string, string, string) error { return errors.New("rename back failed") }
+		t.Cleanup(func() { moveIdentityBackFn = oldBack })
+		_, err := f.run()
+		var ce *signedCommitError
+		if !errors.As(err, &ce) || ce.Class != signedCommitIdentityRestore {
+			t.Fatalf("err = %v, want class %s", err, signedCommitIdentityRestore)
+		}
+		stages := stagesOf(t, f.w)
+		if len(stages) != 1 {
+			t.Fatalf("stages = %v, want the one holding the identity entry", stages)
+		}
+		if b, err := os.ReadFile(filepath.Join(filepath.Dir(f.w), stages[0], ".scion")); err != nil || string(b) != "orig" {
+			t.Fatalf("the kept stage must hold the identity entry: %q %v", b, err)
+		}
+		// The next attempt: the workspace is empty and the stage is
+		// complete, so recovery rolls it forward and nothing is lost.
+		renameSiblingDirFn = renameSiblingDir
+		moveIdentityBackFn = oldBack
+		if _, err := f.run(); err != nil {
+			t.Fatal(err)
+		}
+		wantTree(t, f.w, map[string]string{".scion": "orig", "a.txt": "A"})
+	})
+}
+
+// TestRecoverLocalBootstrapStages_RestoresIdentityIntoPopulatedWorkspace: a
+// kept stage holding the identity entry, beside a workspace that has
+// entries but no identity entry, gives the entry back before the stage is
+// removed.
+func TestRecoverLocalBootstrapStages_RestoresIdentityIntoPopulatedWorkspace(t *testing.T) {
+	parent := t.TempDir()
+	w := filepath.Join(parent, "notes")
+	writeFiles(t, w, map[string]string{"other.txt": "o"})
+	stage, _ := newBootstrapStageName("notes")
+	writeFiles(t, filepath.Join(parent, stage), map[string]string{".scion": "orig", "a.txt": "A"})
+	if err := recoverLocalBootstrapStages(parent, "notes"); err != nil {
+		t.Fatal(err)
+	}
+	wantTree(t, w, map[string]string{"other.txt": "o", ".scion": "orig"})
+	if s := stagesOf(t, w); len(s) != 0 {
+		t.Fatalf("stages left: %v", s)
+	}
 }
 
 // TestSignedCaseA_FailedPageLeavesMarkerOnlyAndRetryApplies: a failure on
@@ -336,7 +411,27 @@ func TestSignedCaseA_FailedPageLeavesMarkerOnlyAndRetryApplies(t *testing.T) {
 				t.Fatalf("retry = (skipped %v, err %v); a marker-only workspace counts as absent", skipped, err)
 			}
 			wantTree(t, f.w, map[string]string{".scion": "*", "1": "a", "2": "b", "3": "c"})
+			// The re-applied marker-only workspace is a broker copy of the
+			// hub workspace: its record is written.
+			requireBrokerCopyRecord(t, f)
 		})
+	}
+}
+
+// requireBrokerCopyRecord asserts the broker workspace record for the
+// fixture's project, and that the workspace counts as a broker copy.
+func requireBrokerCopyRecord(t *testing.T, f *caseAFixture) {
+	t.Helper()
+	rec, err := config.BrokerWorkspaceRecordPath(f.req.ProjectSlug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := config.ReadWorkspaceRecord(rec)
+	if err != nil || got != f.req.ProjectID {
+		t.Fatalf("broker workspace record = %q (err %v), want %q", got, err, f.req.ProjectID)
+	}
+	if !brokerCopyOfHubWorkspace(f.w, f.req.ProjectSlug, f.req.ProjectID) {
+		t.Fatal("the bootstrapped workspace must count as a broker copy of the hub workspace")
 	}
 }
 
