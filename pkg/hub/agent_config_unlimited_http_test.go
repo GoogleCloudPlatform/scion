@@ -225,7 +225,9 @@ func TestAgentConfigPatch_HeldUnlimitedCount(t *testing.T) {
 // typed, the way the store loads it, and stores it on the agent.
 func legacyPendingRow(t *testing.T, s store.Store, agent *store.Agent, rawConfig string) *store.Agent {
 	t.Helper()
-	pc, err := store.UnmarshalPendingConfigFromStorage(`{"config":` + rawConfig + `,"savedAt":"2026-10-01T00:00:00Z","baseGeneration":1,"baseStateVersion":1}`)
+	// A legacy row names its saver in SavedBy only: here the dev user, in
+	// the "user:" form rows were written with (ptone/scion#5864).
+	pc, err := store.UnmarshalPendingConfigFromStorage(`{"config":` + rawConfig + `,"savedBy":"user:` + DevUserID + `","savedAt":"2026-10-01T00:00:00Z","baseGeneration":1,"baseStateVersion":1}`)
 	require.NoError(t, err)
 	stored := pendingReloadAgent(t, s, agent.ID)
 	_, err = s.UpdateAgentConfig(context.Background(), agent.ID, stored.StateVersion, stored.AppliedConfig, pc)
@@ -240,6 +242,10 @@ func legacyPendingRow(t *testing.T, s store.Store, agent *store.Agent, rawConfig
 func TestAgentPendingConfig_LegacyCountClear(t *testing.T) {
 	t.Run("held save of another key keeps the clear", func(t *testing.T) {
 		srv, s, disp, agent := heldEditsFixture(t, state.PhaseRunning)
+		// A broker that applies cleared_fields, so the start applies the
+		// clear (an older broker keeps it pending: ptone/scion#5864,
+		// TestPendingFold_LegacyClearOldBrokerStaysPending).
+		setBrokerCapabilities(t, s, agent.RuntimeBrokerID, &store.BrokerCapabilities{Reprovision: true, ClearedFields: true})
 		agent = legacyPendingRow(t, s, agent, `{"max_turns":0}`)
 		patchPending(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{"model": "x"}})
 		stored := pendingReloadAgent(t, s, agent.ID)

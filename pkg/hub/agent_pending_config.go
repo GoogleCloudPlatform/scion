@@ -53,6 +53,12 @@ import (
 //     clears pending edits, so they stay pending, and pending T1 keys are
 //     still applied at the next start after a reincarnation. The experiment
 //     stays off until that lands.
+//   - A start applies only what it brings into effect (planPendingFold):
+//     a held key whose edit only a reincarnation brings into effect (a
+//     clear or removal the broker does not apply at start, a dropped
+//     resources sub-field) stays pending as a whole, the parts a start
+//     could apply included, and is not written into the applied config
+//     (ptone/scion#5864).
 //
 // Applying a held edit runs applyAgentConfigPatch, the code the live PATCH
 // runs, so held and immediate edits have one meaning (clears, present-key
@@ -82,6 +88,12 @@ const (
 // agent_pending_config_discarded record for pending keys a config edit
 // written through (held edits off) replaced.
 const pendingDiscardTriggerSuperseded = "superseded"
+
+// pendingDiscardTriggerExperimentOff is the trigger of an
+// agent_pending_config_discarded record for pending keys cleared while
+// hub.agent_edit_held is off: lazily, at the agent's next start or config
+// edit (ptone/scion#5864).
+const pendingDiscardTriggerExperimentOff = "experiment_off"
 
 // pendingDiscardTriggerUnappliable is the trigger of an
 // agent_pending_config_discarded record for stored pending keys a fold
@@ -125,6 +137,22 @@ func (s *Server) heldEditsEnabled() bool {
 	return s.experimentEnabled(experiments.AgentEditHeld)
 }
 
+// heldEditsClearable reports whether stored pending edits may be cleared
+// as inert: hub.agent_edit_held reads off from loaded, well-formed
+// operational settings. Any off read means pending edits are not applied
+// or returned, but a malformed experiments document (or settings not
+// loaded) also reads a server-layer experiment as off, and clearing then
+// would turn a transient misconfiguration into the loss of every agent's
+// held edits. So the lazy clear runs only on a positive, well-formed off
+// (ptone/scion#5864); otherwise the rows stay inert, as before.
+func (s *Server) heldEditsClearable() bool {
+	if s.GetOperationalSettings() == nil {
+		return false
+	}
+	snap := s.experimentsSnapshot()
+	return !snap.Malformed && !s.experimentEnabledIn(snap, experiments.AgentEditHeld)
+}
+
 // startApplies reports whether a start, with this broker, applies a
 // pending edit of f: a container-creation (T1) config key, or a
 // provision-rendered key the broker re-renders at start (not secrets).
@@ -157,9 +185,13 @@ type heldConfigUpdate struct {
 	unappliable []string
 	// superseded lists pending keys the request wrote now (a phase with no
 	// container) that the fold had left pending: a waiting Unlimited
-	// (foldKeep). They are removed, so a stale pending value is never
-	// applied later over the newer one.
+	// (foldKeep), a key only a reincarnation brings into effect, or a key
+	// maintenance mode deferred. They are removed, so a stale pending
+	// value is never applied later over the newer one.
 	superseded []string
+	// drops are the pending keys the fold dropped because their saver's
+	// re-check did not allow them, by discard trigger.
+	drops map[string][]string
 }
 
 // applyAgentConfigUpdateHeld is the agent PATCH's config step with held
@@ -200,22 +232,37 @@ func (s *Server) applyAgentConfigUpdateHeld(ctx context.Context, w http.Response
 	}
 
 	if !live {
-		keep, waiting := sup.foldKeep(agent.PendingConfig)
-		out.folded, out.unappliable = s.foldPendingConfig(ctx, agent, keep)
+		// The same fold plan as a start's (planPendingFold): keys only a
+		// reincarnation brings into effect stay pending, and each key's
+		// saver is re-checked. A saver that cannot be re-checked refuses
+		// the PATCH before anything is written.
+		plan, err := s.planPendingFold(ctx, agent, sup)
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "unavailable", pendingReauthUnavailableMessage, nil)
+			return out, false
+		}
+		out.folded, out.unappliable = s.foldPendingConfig(ctx, agent, plan)
+		out.drops = plan.drops
+		waiting, deferred := plan.waiting, plan.deferred
 		if !nowPart.empty() {
 			res := s.applyAgentConfigPatch(ctx, agent, nowPart, canAttachEnv)
 			out.warnings = append(out.warnings, res.warnings...)
 			out.applied = res.applied
 			out.heldForReincarnate = res.heldForReincarnate
-			// A waiting key the request writes now is superseded: the
-			// fold used to drain every pending container key before the
-			// request, and must still leave none older than this write.
-			out.superseded = dropPendingKeysNamed(agent, waitingKeysNamed(waiting, nowPart.present))
+			// A pending key the fold left pending (waiting, held for
+			// reincarnation, or deferred) that the request writes now is
+			// superseded: the fold used to drain every pending container
+			// key before the request, and must still leave none older
+			// than this write, so a stale value is never applied over it.
+			stay := sortedUnion(sortedUnion(waiting, plan.reincarnate), deferred)
+			out.superseded = dropPendingKeysNamed(agent, waitingKeysNamed(stay, nowPart.present))
 			waiting = stringsWithout(waiting, out.superseded)
+			deferred = stringsWithout(deferred, out.superseded)
 		}
 		if w := unlimitedWaitsWarning(waiting); w != "" {
 			out.warnings = append(out.warnings, w)
 		}
+		out.warnings = append(out.warnings, pendingFoldWarnings(plan.drops, deferred)...)
 	}
 	if !heldPart.empty() {
 		h := s.holdAgentConfigPatch(ctx, agent, heldPart, canAttachEnv, sup)
@@ -269,37 +316,104 @@ func (s *Server) holdAgentConfigPatch(ctx context.Context, agent *store.Agent, p
 	if agent.AppliedConfig != nil {
 		applied = agent.AppliedConfig.InlineConfig
 	}
-	provision, cleared := reincarnateOnlyConfigEdits(p.raw, &cmp, applied)
-	removed := removedConfigEntries(applied, &cmp, p.present, canAttachEnv)
-	recorded := nextClearedFields(applied, &cmp, p.raw, cleared, canAttachEnv)
-	resDropped := droppedResourceSubPaths(applied, &cmp, p.present)
-	cleared = withDroppedResourcesSubField(cleared, applied, &cmp, p.present)
-	provision = sup.heldProvisionEdits(provision, applied, &cmp, recorded)
-	cleared = sup.heldClearEdits(cleared, recorded, droppedEnvKeys(applied, &cmp, p.present), resDropped)
-	removed = sup.heldRemovals(removed, recorded)
-	isChanged := make(map[string]bool, len(changed))
-	for _, k := range changed {
-		isChanged[k] = true
+	c := classifyHeldEdits(applied, &cmp, p.raw, p.present, canAttachEnv, sup, changed)
+	out.held, out.heldForReincarnate = c.held, c.heldForReincarnate
+	out.warnings = append(out.warnings, heldEditWarnings(c.provision, c.cleared, c.removed, sup)...)
+	out.saved = sortedUnion(out.held, out.heldForReincarnate)
+	if len(out.saved) == 0 {
+		return out
 	}
-	onlyChanged := func(keys []string) []string {
+
+	raw := canonicalConfigRaw(p)
+	saver := pendingSaverRef(ctx)
+	pending := agent.PendingConfig.Clone()
+	if pending == nil {
+		pending = &store.AgentPendingConfig{}
+	}
+	if pending.Config == nil {
+		pending.Config = map[string]json.RawMessage{}
+	}
+	for _, key := range out.saved {
+		k := strings.TrimPrefix(key, agentConfigKeyPrefix)
+		v, ok := raw[k]
+		if !ok {
+			continue
+		}
+		pending.Config[k] = v
+		// The only writer of KeySavers: this save passed agent.update
+		// (applyAgentUpdate authorizes before it holds anything), and a
+		// fold re-checks this saver's current grants before applying k.
+		if pending.KeySavers == nil {
+			pending.KeySavers = map[string]string{}
+		}
+		pending.KeySavers[k] = saver
+	}
+	pending.SavedBy, pending.SavedByName = pendingSaver(ctx)
+	pending.SavedAt = time.Now().UTC()
+	pending.BaseGeneration = agent.Generation
+	pending.BaseStateVersion = agent.StateVersion
+	agent.PendingConfig = pending
+	return out
+}
+
+// heldEditClass is how classifyHeldEdits split a set of candidate keys.
+type heldEditClass struct {
+	// held and heldForReincarnate are the candidates (sorted wire keys,
+	// in candidate order) a start applies, and those it does not bring
+	// into effect, so they wait for a reincarnation.
+	held, heldForReincarnate []string
+	// provision, cleared and removed are the reasons, for heldEditWarnings.
+	provision, cleared []string
+	removed            map[string][]string
+}
+
+// classifyHeldEdits splits candidates, wire keys of the config patch
+// (raw, present) decoded as cmp (the model alias resolved), by whether a
+// start with this broker (sup) brings each into effect when applied to
+// applied: by applyAgentConfigPatch's rules, with the clears that
+// application would record (canAttachEnv decides whether env removals are
+// recorded) and the broker's filters. It is pure: no store access and no
+// authorization. The save (holdAgentConfigPatch) and the fold
+// (planPendingFold) both use it, so a key is reported held for
+// reincarnation at save exactly when the fold leaves it pending.
+//
+// The unit is the whole key: a collection key (env, skills, mcp_servers,
+// volumes, resources) any part of whose edit a start does not apply is
+// held for reincarnation as a whole, including the parts a start could
+// apply (ptone/scion#5864).
+func classifyHeldEdits(applied, cmp *api.ScionConfig, raw map[string]json.RawMessage, present map[string]bool, canAttachEnv bool, sup brokerStartSupport, candidates []string) heldEditClass {
+	var out heldEditClass
+	provision, cleared := reincarnateOnlyConfigEdits(raw, cmp, applied)
+	removed := removedConfigEntries(applied, cmp, present, canAttachEnv)
+	recorded := nextClearedFields(applied, cmp, raw, cleared, canAttachEnv)
+	resDropped := droppedResourceSubPaths(applied, cmp, present)
+	cleared = withDroppedResourcesSubField(cleared, applied, cmp, present)
+	provision = sup.heldProvisionEdits(provision, applied, cmp, recorded)
+	cleared = sup.heldClearEdits(cleared, recorded, droppedEnvKeys(applied, cmp, present), resDropped)
+	removed = sup.heldRemovals(removed, recorded)
+	isCandidate := make(map[string]bool, len(candidates))
+	for _, k := range candidates {
+		isCandidate[k] = true
+	}
+	onlyCandidates := func(keys []string) []string {
 		var out []string
 		for _, k := range keys {
-			if isChanged[k] {
+			if isCandidate[k] {
 				out = append(out, k)
 			}
 		}
 		return out
 	}
-	provision, cleared = onlyChanged(provision), onlyChanged(cleared)
+	provision, cleared = onlyCandidates(provision), onlyCandidates(cleared)
 	for k := range removed {
-		if !isChanged[agentConfigKeyPrefix+k] {
+		if !isCandidate[agentConfigKeyPrefix+k] {
 			delete(removed, k)
 		}
 	}
-	// A changed key a start never applies on this broker (a provision key
-	// it does not re-render; secrets always) stays pending whatever it is
-	// set to, even back to its applied value: it waits for a reincarnation.
-	for _, k := range changed {
+	// A candidate a start never applies on this broker (a provision key it
+	// does not re-render; secrets always) stays pending whatever it is set
+	// to, even back to its applied value: it waits for a reincarnation.
+	for _, k := range candidates {
 		if f, ok := agentEditFieldByKey[k]; ok && !sup.startApplies(f) && !slices.Contains(provision, k) {
 			provision = append(provision, k)
 		}
@@ -315,52 +429,31 @@ func (s *Server) holdAgentConfigPatch(ctx context.Context, agent *store.Agent, p
 	for k := range removed {
 		notApplied[agentConfigKeyPrefix+k] = true
 	}
-	for _, k := range changed {
+	for _, k := range candidates {
 		if notApplied[k] {
 			out.heldForReincarnate = append(out.heldForReincarnate, k)
 		} else {
 			out.held = append(out.held, k)
 		}
 	}
-	out.warnings = append(out.warnings, heldEditWarnings(provision, cleared, removed, sup)...)
-	out.saved = sortedUnion(out.held, out.heldForReincarnate)
-	if len(out.saved) == 0 {
-		return out
-	}
-
-	raw := canonicalConfigRaw(p)
-	pending := agent.PendingConfig.Clone()
-	if pending == nil {
-		pending = &store.AgentPendingConfig{}
-	}
-	if pending.Config == nil {
-		pending.Config = map[string]json.RawMessage{}
-	}
-	for _, key := range out.saved {
-		k := strings.TrimPrefix(key, agentConfigKeyPrefix)
-		v, ok := raw[k]
-		if !ok {
-			continue
-		}
-		pending.Config[k] = v
-		if k == "env" {
-			pending.EnvSaverCanViewEnv = canAttachEnv
-		}
-	}
-	pending.SavedBy, pending.SavedByName = pendingSaver(ctx)
-	pending.SavedAt = time.Now().UTC()
-	pending.BaseGeneration = agent.Generation
-	pending.BaseStateVersion = agent.StateVersion
-	agent.PendingConfig = pending
+	out.provision, out.cleared, out.removed = provision, cleared, removed
 	return out
 }
 
+// heldWholeKeyNote is the PATCH warning for held provision-rendered keys
+// the broker re-renders at start but whose change a start does not apply.
+const heldWholeKeyNote = "the whole key's change is kept pending, including any part a start could apply, until a reincarnation applies pending edits (a start does not apply a clear or a removed skill)"
+
+// heldClearNote is the PATCH warning for held clears a start does not apply.
+const heldClearNote = "the clear is kept pending until a reincarnation applies pending edits; the agent keeps its current value (a start does not apply a cleared value)"
+
 // heldEditWarnings returns the PATCH warnings for held keys a start does
-// not bring into effect: provision-rendered keys the broker (sup) does not
-// re-render at start (which stay pending), those it re-renders but whose
-// change a start does not apply (a clear, a removed skill: written at the
-// next start, applied by a reincarnation), and T1 clears and removals
-// (written at the next start, but not applied by it).
+// not bring into effect, all of which stay pending, whole, through a start
+// (ptone/scion#5864): provision-rendered keys the broker (sup) does not
+// re-render at start, those it re-renders but whose change a start does
+// not apply (a clear, a removed skill), and T1 clears and removals. A
+// collection edit that removes anything stays pending as a whole, its
+// additions included.
 func heldEditWarnings(provision, cleared []string, removed map[string][]string, sup brokerStartSupport) []string {
 	var out []string
 	var pending, written []string
@@ -380,16 +473,16 @@ func heldEditWarnings(provision, cleared []string, removed map[string][]string, 
 		out = append(out, strings.Join(pending, ", ")+": "+note)
 	}
 	if len(written) > 0 {
-		out = append(out, strings.Join(written, ", ")+": the change is held and written at the next start; it takes effect at a reincarnation after that (a start does not apply a clear or a removed skill)")
+		out = append(out, strings.Join(written, ", ")+": "+heldWholeKeyNote)
 	}
 	if len(cleared) > 0 {
-		out = append(out, strings.Join(cleared, ", ")+": the clear is held and written at the next start; the agent keeps its previous value until a reincarnation after that (a start does not apply a cleared value)")
+		out = append(out, strings.Join(cleared, ", ")+": "+heldClearNote)
 	}
 	for _, w := range []struct{ key, what string }{
 		{"env", "variables"}, {"mcp_servers", "MCP servers"}, {"volumes", "volumes"},
 	} {
 		if r := removed[w.key]; len(r) > 0 {
-			out = append(out, "config."+w.key+": the removal of "+strings.Join(r, ", ")+" is held and written at the next start; the agent keeps those "+w.what+" until a reincarnation after that (a start does not remove them)")
+			out = append(out, "config."+w.key+": the edit removes "+strings.Join(r, ", ")+", so the whole edit, additions included, is kept pending until a reincarnation applies pending edits; the agent keeps its current "+w.what+" (a start does not remove them)")
 		}
 	}
 	return out
@@ -473,7 +566,130 @@ func pendingConfigPatch(pc *store.AgentPendingConfig) configPatch {
 	return p
 }
 
-// foldPendingConfig applies the pending config's keys that keep accepts to
+// pendingFoldPlan is what a fold of an agent's pending config applies,
+// decided once per compare-and-set attempt on the row that attempt read
+// (planPendingFold). Both fold sites use it: the start fold and the fold of
+// a PATCH to an agent with no container.
+type pendingFoldPlan struct {
+	// keep accepts the keys the fold applies now: foldKeep ∧ ¬reincarnate
+	// ∧ ¬dropped ∧ ¬deferred.
+	keep func(agentEditField) bool
+	// waiting: count limits pending as Unlimited the broker cannot apply
+	// (foldKeep). reincarnate: keys only a reincarnation brings into
+	// effect (classifyHeldEdits). deferred: keys of savers maintenance
+	// mode holds back. All three stay pending, and are disjoint.
+	waiting, reincarnate, deferred []string
+	// drops are the keys removed because their saver's re-check did not
+	// allow them, by discard trigger (sorted wire keys).
+	drops map[string][]string
+	// envCanView is the env saver's current env-view decision: whether the
+	// fold applies env removals.
+	envCanView bool
+}
+
+// dropped returns every key the plan drops, sorted.
+func (p pendingFoldPlan) dropped() []string {
+	var out []string
+	for _, keys := range p.drops {
+		out = append(out, keys...)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// planPendingFold decides what a fold of stored's pending config applies
+// with the agent's broker (sup), in this order:
+//  1. foldKeep: a pending Unlimited the broker cannot apply waits.
+//  2. The env key's saver is resolved and its current env-view decision
+//     taken (canIdentityViewAgentEnv): the classifier needs it, because
+//     env removals depend on it.
+//  3. classifyHeldEdits, against the current applied config and broker as
+//     a save classifies: the keys only a reincarnation brings into effect
+//     stay pending, whole, and are never written into the applied config
+//     or the create inputs (ptone/scion#5864).
+//  4. Each remaining key's saver is re-checked against its current grants
+//     (pendingSaverMayApply): a key whose saver may not apply it is
+//     dropped, by trigger; during maintenance a non-admin saver's keys are
+//     deferred. Keys that stay pending are re-checked when applied.
+//
+// A saver that cannot be re-checked (a lookup or authorization fault)
+// returns errPendingReauthIndeterminate: the caller drops and writes
+// nothing.
+func (s *Server) planPendingFold(ctx context.Context, stored *store.Agent, sup brokerStartSupport) (pendingFoldPlan, error) {
+	pc := stored.PendingConfig
+	keep0, waiting := sup.foldKeep(pc)
+	plan := pendingFoldPlan{keep: keep0, waiting: waiting}
+	if pc.IsEmpty() {
+		return plan, nil
+	}
+	p := pendingConfigPatch(pc).subset(keep0)
+	if p.empty() {
+		return plan, nil
+	}
+	savers := newPendingSaverCache(s, stored)
+	if p.present["env"] {
+		ref, legacy := pendingKeySaverRef(pc, "env")
+		d, err := savers.resolve(ctx, ref, legacy)
+		if err != nil {
+			return plan, err
+		}
+		if d.out == saverApply {
+			allowed, indeterminate := canIdentityViewAgentEnv(ctx, s, d.identity, stored)
+			if indeterminate {
+				return plan, errPendingReauthIndeterminate
+			}
+			plan.envCanView = allowed
+		}
+	}
+	var candidates []string
+	for _, f := range configPatchKeys(p.raw) {
+		candidates = append(candidates, f.Key)
+	}
+	// cmp is the pending patch as the fold applies it: the model alias
+	// resolved, as at save.
+	cmp := *p.cfg
+	if cmp.Model != "" {
+		cmp.Model = s.resolveModelAliasForAgent(ctx, stored, cmp.Model)
+	}
+	var applied *api.ScionConfig
+	if stored.AppliedConfig != nil {
+		applied = stored.AppliedConfig.InlineConfig
+	}
+	c := classifyHeldEdits(applied, &cmp, p.raw, p.present, plan.envCanView, sup, candidates)
+	plan.reincarnate = c.heldForReincarnate
+	skip := make(map[string]bool, len(candidates))
+	for _, k := range c.heldForReincarnate {
+		skip[k] = true
+	}
+	for _, k := range c.held {
+		ref, legacy := pendingKeySaverRef(pc, strings.TrimPrefix(k, agentConfigKeyPrefix))
+		d, err := savers.mayApply(ctx, ref, legacy)
+		if err != nil {
+			return plan, err
+		}
+		switch d.out {
+		case saverApply:
+			continue
+		case saverDeferred:
+			plan.deferred = append(plan.deferred, k)
+		default:
+			if plan.drops == nil {
+				plan.drops = map[string][]string{}
+			}
+			trigger := d.out.trigger()
+			plan.drops[trigger] = append(plan.drops[trigger], k)
+			// The specific cause goes to this log line only: the audit
+			// record carries the trigger.
+			slog.WarnContext(ctx, "pending config: dropping a held edit whose saver may not apply it",
+				"agent_id", stored.ID, "key", k, "trigger", trigger, "reason", d.reason)
+		}
+		skip[k] = true
+	}
+	plan.keep = func(f agentEditField) bool { return keep0(f) && !skip[f.Key] }
+	return plan, nil
+}
+
+// foldPendingConfig applies the pending config's keys that plan.keep accepts to
 // agent's applied config, through applyAgentConfigPatch, and removes them
 // from the pending config, in memory: the caller persists the agent. A
 // stored key that can never be applied (it no longer decodes, or the edit
@@ -481,7 +697,9 @@ func pendingConfigPatch(pc *store.AgentPendingConfig) configPatch {
 // the removed unappliable keys, each as sorted wire keys (nil when none).
 // A caller that persists the result audits and logs the removed keys
 // (auditUnappliablePendingKeys); one that reads a scratch copy ignores them.
-func (s *Server) foldPendingConfig(ctx context.Context, agent *store.Agent, keep func(agentEditField) bool) (folded, unappliable []string) {
+// Env removals are applied as plan.envCanView decides. The keys plan drops
+// are removed too, unapplied.
+func (s *Server) foldPendingConfig(ctx context.Context, agent *store.Agent, plan pendingFoldPlan) (folded, unappliable []string) {
 	if agent.PendingConfig.IsEmpty() {
 		return nil, nil
 	}
@@ -496,15 +714,21 @@ func (s *Server) foldPendingConfig(ctx context.Context, agent *store.Agent, keep
 		}
 	}
 	sort.Strings(unappliable)
-	p := full.subset(keep)
+	p := full.subset(plan.keep)
 	if !p.empty() {
-		s.applyAgentConfigPatch(ctx, agent, p, agent.PendingConfig.EnvSaverCanViewEnv)
+		s.applyAgentConfigPatch(ctx, agent, p, plan.envCanView)
 		for _, f := range configPatchKeys(p.raw) {
 			folded = append(folded, f.Key)
 			delete(rest.Config, strings.TrimPrefix(f.Key, agentConfigKeyPrefix))
 		}
 	}
-	if len(folded) > 0 || len(unappliable) > 0 {
+	// Keys whose saver may not apply them are removed: dropped, never
+	// applied (the caller audits them by trigger).
+	dropped := plan.dropped()
+	for _, k := range dropped {
+		delete(rest.Config, strings.TrimPrefix(k, agentConfigKeyPrefix))
+	}
+	if len(folded) > 0 || len(unappliable) > 0 || len(dropped) > 0 {
 		agent.PendingConfig = restOrNil(rest)
 	}
 	return folded, unappliable
@@ -522,11 +746,17 @@ func (s *Server) auditUnappliablePendingKeys(ctx context.Context, agentID string
 }
 
 // restOrNil returns rest, a pending config some keys were removed from, as
-// the agent's new pending config: nil when no key is left, and without the
-// env saver flag when env is gone.
+// the agent's new pending config: nil when no key is left. Every path that
+// removes keys from a pending config ends here, so the savers of removed
+// keys are removed with them (and KeySavers is dropped when empty).
 func restOrNil(rest *store.AgentPendingConfig) *store.AgentPendingConfig {
-	if _, ok := rest.Config["env"]; !ok {
-		rest.EnvSaverCanViewEnv = false
+	for k := range rest.KeySavers {
+		if _, ok := rest.Config[k]; !ok {
+			delete(rest.KeySavers, k)
+		}
+	}
+	if len(rest.KeySavers) == 0 {
+		rest.KeySavers = nil
 	}
 	if rest.IsEmpty() {
 		return nil
@@ -588,9 +818,14 @@ func startFoldTrigger(opts StartOpts) string {
 // foldPendingConfigAtStart applies the agent's pending T1 keys before a
 // start is dispatched: startAgentCore calls it under the start claim, after
 // the fence check, so every start path (start, restart, resume and wake,
-// and the starts of create-on-existing) dispatches them. It returns the
-// keys that stay pending (T2), for the start's warning. With
-// hub.agent_edit_held off it does nothing: stored pending edits stay inert.
+// and the starts of create-on-existing) dispatches them. Only the keys a
+// start brings into effect are applied (planPendingFold): a key whose edit
+// only a reincarnation brings into effect stays pending, whole, and is not
+// written into the applied config (ptone/scion#5864). It returns the keys
+// that stay pending for a reincarnation, for the start's warning. With
+// hub.agent_edit_held off nothing is applied: stored pending edits are
+// inert, and are cleared (clearPendingConfigExperimentOff) when the off is
+// a well-formed one (heldEditsClearable).
 //
 // The fold runs twice, with the same pending keys. On the stored row, read
 // here: its result is persisted with the state_version compare-and-set
@@ -601,46 +836,70 @@ func startFoldTrigger(opts StartOpts) string {
 // they are neither lost nor written early. The caller's copy takes the new
 // state version only if it was current; a stale copy keeps its version, so
 // its later whole-row write still fails its compare-and-set as before.
-func (s *Server) foldPendingConfigAtStart(ctx context.Context, agent *store.Agent, trigger string) ([]string, error) {
-	if !s.heldEditsEnabled() || agent.PendingConfig.IsEmpty() {
-		return nil, nil
+func (s *Server) foldPendingConfigAtStart(ctx context.Context, agent *store.Agent, trigger string) (startPendingOutcome, error) {
+	var none startPendingOutcome
+	if agent.PendingConfig.IsEmpty() {
+		return none, nil
+	}
+	if !s.heldEditsEnabled() {
+		if s.heldEditsClearable() {
+			s.clearPendingConfigExperimentOff(ctx, agent)
+		}
+		return none, nil
 	}
 	// Container keys are applied at every start; provision-rendered keys
 	// too when the agent's broker re-renders them at start (changedFields,
 	// ptone/scion#3982): applyAgentConfigPatch then lists them in
 	// changed_fields. Other pending keys stay pending.
 	sup := s.agentBrokerStartSupport(ctx, agent)
+	lastErr := store.ErrVersionConflict
 	for attempt := 0; attempt < pendingFoldAttempts; attempt++ {
 		stored, err := s.store.GetAgent(ctx, agent.ID)
 		if err != nil {
-			return nil, fmt.Errorf("%w: %w", errPendingConfigFold, err)
+			return none, fmt.Errorf("%w: %w", errPendingConfigFold, err)
 		}
 		st := *stored
 		st.AppliedConfig = cloneAppliedConfig(stored.AppliedConfig)
 		st.PendingConfig = stored.PendingConfig.Clone()
 		// A pending Unlimited the broker cannot apply stays pending
 		// (foldKeep, ptone/scion#5605), with its own start warning rather
-		// than the held-for-reincarnation one.
-		keep, waiting := sup.foldKeep(stored.PendingConfig)
-		folded, unappliable := s.foldPendingConfig(ctx, &st, keep)
-		if len(folded) == 0 && len(unappliable) == 0 {
-			// Nothing to apply or remove now (another start applied it, or
-			// it was discarded): the caller's copy follows the stored row.
+		// than the held-for-reincarnation one; a key only a reincarnation
+		// brings into effect stays pending too, and each key's saver is
+		// re-checked (planPendingFold).
+		plan, err := s.planPendingFold(ctx, stored, sup)
+		if err != nil {
+			// A saver that could not be re-checked counts as a failed
+			// attempt: nothing is dropped or written.
+			lastErr = err
+			continue
+		}
+		folded, unappliable := s.foldPendingConfig(ctx, &st, plan)
+		// Deferred keys are neither applied nor reported as held for
+		// reincarnation: they wait for maintenance to end.
+		stay := sortedUnion(plan.waiting, plan.deferred)
+		if len(folded) == 0 && len(unappliable) == 0 && len(plan.drops) == 0 {
+			// Nothing to apply or remove now (another start applied it,
+			// it was discarded, or every key stays pending): the caller's
+			// copy follows the stored row.
 			agent.PendingConfig = stored.PendingConfig
-			addUnlimitedWaitsWarning(ctx, waiting)
-			return stringsWithout(pendingConfigKeys(stored.PendingConfig), waiting), nil
+			addUnlimitedWaitsWarning(ctx, plan.waiting)
+			return startPendingOutcome{
+				held:     stringsWithout(pendingConfigKeys(stored.PendingConfig), stay),
+				deferred: plan.deferred,
+			}, nil
 		}
 		version, err := s.store.UpdateAgentConfig(ctx, agent.ID, stored.StateVersion, st.AppliedConfig, st.PendingConfig)
 		if errors.Is(err, store.ErrVersionConflict) {
+			lastErr = err
 			continue
 		}
 		if err != nil {
-			return nil, fmt.Errorf("%w: %w", errPendingConfigFold, err)
+			return none, fmt.Errorf("%w: %w", errPendingConfigFold, err)
 		}
 		mem := *agent
 		mem.AppliedConfig = cloneAppliedConfig(agent.AppliedConfig)
 		mem.PendingConfig = stored.PendingConfig.Clone()
-		s.foldPendingConfig(ctx, &mem, keep)
+		s.foldPendingConfig(ctx, &mem, plan)
 		agent.AppliedConfig = mem.AppliedConfig
 		agent.PendingConfig = st.PendingConfig
 		if agent.StateVersion == stored.StateVersion {
@@ -650,10 +909,74 @@ func (s *Server) foldPendingConfigAtStart(ctx context.Context, agent *store.Agen
 			s.auditPendingConfig(ctx, agent.ID, mutationTypeAgentPendingConfigApplied, folded, trigger)
 		}
 		s.auditUnappliablePendingKeys(ctx, agent.ID, unappliable)
-		addUnlimitedWaitsWarning(ctx, waiting)
-		return stringsWithout(pendingConfigKeys(st.PendingConfig), waiting), nil
+		s.auditDroppedPendingKeys(ctx, agent.ID, plan.drops)
+		addUnlimitedWaitsWarning(ctx, plan.waiting)
+		return startPendingOutcome{
+			held:     stringsWithout(pendingConfigKeys(st.PendingConfig), stay),
+			drops:    plan.drops,
+			deferred: plan.deferred,
+		}, nil
 	}
-	return nil, fmt.Errorf("%w: %w", errPendingConfigFold, store.ErrVersionConflict)
+	return none, fmt.Errorf("%w: %w", errPendingConfigFold, lastErr)
+}
+
+// clearPendingConfigExperimentOff clears the agent's stored pending config
+// at a start with hub.agent_edit_held off, where it is inert: written with
+// the state_version compare-and-set (UpdateAgentConfig, which leaves the
+// status columns alone) and audited as experiment_off. A conflict re-reads
+// the row and retries up to pendingFoldAttempts; failing is not fatal to
+// the start (the rows stay inert) and is logged. On success the caller's
+// copy drops its pending config and takes the new state version only if
+// it was current, as the fold hands it over; on failure it is untouched.
+func (s *Server) clearPendingConfigExperimentOff(ctx context.Context, agent *store.Agent) {
+	for attempt := 0; attempt < pendingFoldAttempts; attempt++ {
+		stored, err := s.store.GetAgent(ctx, agent.ID)
+		if err != nil {
+			slog.WarnContext(ctx, "pending config: reading the agent to clear inert pending edits failed", "agent_id", agent.ID, "error", err)
+			return
+		}
+		keys := pendingConfigKeys(stored.PendingConfig)
+		if len(keys) == 0 {
+			agent.PendingConfig = nil
+			return
+		}
+		version, err := s.store.UpdateAgentConfig(ctx, agent.ID, stored.StateVersion, stored.AppliedConfig, nil)
+		if errors.Is(err, store.ErrVersionConflict) {
+			continue
+		}
+		if err != nil {
+			slog.WarnContext(ctx, "pending config: clearing inert pending edits failed", "agent_id", agent.ID, "error", err)
+			return
+		}
+		agent.PendingConfig = nil
+		if agent.StateVersion == stored.StateVersion {
+			agent.StateVersion = version
+		}
+		s.auditPendingConfig(ctx, agent.ID, mutationTypeAgentPendingConfigDiscarded, keys, pendingDiscardTriggerExperimentOff)
+		return
+	}
+	slog.WarnContext(ctx, "pending config: clearing inert pending edits kept conflicting; they stay inert", "agent_id", agent.ID)
+}
+
+// startPendingOutcome is what a start fold left for the start to report:
+// the keys held for reincarnation, the keys dropped (by discard trigger)
+// and the keys deferred by maintenance mode.
+type startPendingOutcome struct {
+	held     []string
+	drops    map[string][]string
+	deferred []string
+}
+
+// auditDroppedPendingKeys audits the keys a persisted fold dropped because
+// their saver's re-check did not allow them: one
+// agent_pending_config_discarded record per trigger, in the fold's own
+// sink only.
+func (s *Server) auditDroppedPendingKeys(ctx context.Context, agentID string, drops map[string][]string) {
+	for _, trigger := range pendingDropTriggers {
+		if keys := drops[trigger]; len(keys) > 0 {
+			s.auditPendingConfig(ctx, agentID, mutationTypeAgentPendingConfigDiscarded, keys, trigger)
+		}
+	}
 }
 
 // heldForReincarnateWarning is the start warning (and status message) for
@@ -671,20 +994,35 @@ func heldForReincarnateWarning(keys []string) string {
 	return heldReincarnateWarningPrefix + strings.Join(labels, ", ") + heldReincarnateWarningSuffix
 }
 
-// noteHeldForReincarnate reports the keys a start left pending: a start
-// warning, and the agent's status message. Called after the start's own
-// status write, so the message is not cleared by it; a later status report
-// replaces it as usual.
-func (s *Server) noteHeldForReincarnate(ctx context.Context, agent *store.Agent, keys []string) {
-	msg := heldForReincarnateWarning(keys)
-	if msg == "" {
+// noteStartPendingOutcome reports what a start fold left (o): the keys
+// held for reincarnation, the dropped keys and the deferred keys, as start
+// warnings and as one status message joining them, written when any of the
+// three is non-empty. Called after the start's own status write, so the
+// message is not cleared by it; a later status report replaces it as
+// usual. A start with no caller (a hub-internal wake) has no one to warn,
+// so the status message is where its drops are seen.
+func (s *Server) noteStartPendingOutcome(ctx context.Context, agent *store.Agent, o startPendingOutcome) {
+	var msgs []string
+	if w := heldForReincarnateWarning(o.held); w != "" {
+		msgs = append(msgs, w)
+	}
+	msgs = append(msgs, pendingFoldWarnings(o.drops, o.deferred)...)
+	if len(msgs) == 0 {
 		return
 	}
-	addDispatchWarnings(ctx, msg)
+	addDispatchWarnings(ctx, msgs...)
+	sentences := make([]string, 0, len(msgs))
+	for _, m := range msgs {
+		if !strings.HasSuffix(m, ".") {
+			m += "."
+		}
+		sentences = append(sentences, m)
+	}
+	msg := strings.Join(sentences, " ")
 	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	if err := s.store.UpdateAgentStatus(wctx, agent.ID, store.AgentStatusUpdate{Message: msg}); err != nil {
-		slog.Warn("start: recording the held-for-reincarnation message failed", "agent_id", agent.ID, "error", err)
+		slog.Warn("start: recording the pending config message failed", "agent_id", agent.ID, "error", err)
 		return
 	}
 	agent.Message = msg
@@ -767,7 +1105,11 @@ func (s *Server) effectiveNextRun(ctx context.Context, agent *store.Agent) *stor
 	scratch := *agent
 	scratch.AppliedConfig = cloneAppliedConfig(agent.AppliedConfig)
 	scratch.PendingConfig = agent.PendingConfig.Clone()
-	_, _ = s.foldPendingConfig(ctx, &scratch, func(agentEditField) bool { return true })
+	// Keep all, with no saver re-check: a read by one principal must not
+	// record authorization decisions about another (the savers). So env
+	// removals are not shown; the next start applies them if the env
+	// saver may still view env.
+	_, _ = s.foldPendingConfig(ctx, &scratch, pendingFoldPlan{keep: func(agentEditField) bool { return true }})
 	if scratch.AppliedConfig != nil {
 		scratch.AppliedConfig.CreateInputs = nil
 	}

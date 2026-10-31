@@ -4088,10 +4088,11 @@ func (s *Server) writeAgentGetResponse(w http.ResponseWriter, r *http.Request, a
 		resp.TimezoneSource = &tz.Source
 	}
 
-	resp.AppliedConfig, resp.PendingConfig = redactAgentConfigsForResponse(resp.AppliedConfig, resp.PendingConfig, s.envViewAllowed(ctx, GetIdentityFromContext(ctx), agent, resp.Cap))
-	if r.URL.Query().Get("view") == agentViewEdit {
+	resp.AppliedConfig, resp.PendingConfig = s.redactAgentConfigsForResponse(resp.AppliedConfig, resp.PendingConfig, s.envViewAllowed(ctx, GetIdentityFromContext(ctx), agent, resp.Cap))
+	if r.URL.Query().Get("view") == agentViewEdit && s.heldEditsEnabled() {
 		// The applied config with every pending key applied, as the
 		// edit form shows it; the same env gate as the applied config.
+		// With held edits off, pending edits are inert and not shown.
 		next := s.effectiveNextRun(ctx, agent)
 		if next == agent.AppliedConfig {
 			next = cloneAppliedConfig(next)
@@ -4355,6 +4356,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 	// applyAgentConfigUpdateHeld keeps such edits as the agent's pending
 	// config instead (agent_pending_config.go).
 	var configHeld, pendingSaved, pendingFolded, pendingSuperseded, pendingUnappliable []string
+	var pendingDrops map[string][]string
 	if updates.Config != nil {
 		if !agent.DeletedAt.IsZero() {
 			Conflict(w, "Config cannot be updated for deleted agents")
@@ -4369,6 +4371,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			configApplied, configHeld, configHeldForReincarnate = out.applied, out.held, out.heldForReincarnate
 			pendingSaved, pendingFolded, pendingUnappliable = out.saved, out.folded, out.unappliable
 			pendingSuperseded = out.superseded
+			pendingDrops = out.drops
 		} else {
 			if !configPatchPhase(agent.Phase) {
 				Conflict(w, configPatchPhaseMessage)
@@ -4384,6 +4387,18 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			// applied later over the value written now.
 			pendingSuperseded = dropPendingKeysNamed(agent, presentConfigKeys)
 		}
+	}
+	// With held edits off, stored pending edits are inert: every PATCH
+	// that persists the row clears them in the same whole-row
+	// compare-and-set (ptone/scion#5864), so a later turn of the
+	// experiment never applies edits saved under an earlier one. The keys
+	// the request named are audited as superseded above; the rest as
+	// experiment_off. Only a well-formed off clears (heldEditsClearable):
+	// a malformed experiments document leaves them inert.
+	var pendingExperimentOff []string
+	if !heldEdits && !agent.PendingConfig.IsEmpty() && s.heldEditsClearable() {
+		pendingExperimentOff = pendingConfigKeys(agent.PendingConfig)
+		agent.PendingConfig = nil
 	}
 
 	// Apply GCP identity update (only allowed for agents in 'created' phase)
@@ -4601,8 +4616,12 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		s.auditPendingConfig(ctx, agent.ID, mutationTypeAgentPendingConfigSaved, pendingSaved, "")
 	}
 	s.auditUnappliablePendingKeys(ctx, agent.ID, pendingUnappliable)
+	s.auditDroppedPendingKeys(ctx, agent.ID, pendingDrops)
 	if len(pendingSuperseded) > 0 {
 		s.auditPendingConfig(ctx, agent.ID, mutationTypeAgentPendingConfigDiscarded, pendingSuperseded, pendingDiscardTriggerSuperseded)
+	}
+	if len(pendingExperimentOff) > 0 {
+		s.auditPendingConfig(ctx, agent.ID, mutationTypeAgentPendingConfigDiscarded, pendingExperimentOff, pendingDiscardTriggerExperimentOff)
 	}
 
 	tz := s.agentTZ(ctx, agent)
