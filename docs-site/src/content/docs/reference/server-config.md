@@ -1448,6 +1448,25 @@ Earlier releases started the web server with an `http` base URL on any listener,
 - A base URL with a trailing `/` (for example `--base-url https://hub.example.com/`) used to produce a redirect URI with a double slash (`https://hub.example.com//auth/callback/<provider>`). The trailing slash is now removed, so an OAuth client registered with the double-slash URI must be updated.
 :::
 
+### Runtime Broker transport and trusted proxies
+
+The Runtime Broker join and secret rotation responses carry the broker's HMAC secret, Runtime Broker registration and join-token re-mint (`POST /api/v1/brokers`, used by `scion runtime-broker register` and `scion hub brokers join-token create`) return a join token, and the control channel and the broker's conduit session carry the secrets of the agents it runs. The Hub answers these requests only when they reach it over TLS or from the Hub's own host:
+
+- **Over TLS:** if TLS ends at a proxy in front of the Hub (a load balancer, an ingress, Caddy, nginx), the Hub cannot see the TLS connection. It trusts the proxy's forwarded protocol only when the request comes straight from an address listed in `server.trusted_proxies`: a single `X-Forwarded-Proto: https`, or a single RFC 7239 `Forwarded` element with `proto=https` (when both headers are present they must agree). With the list empty (the default), neither header is ever trusted. Cloud Run's front end cannot be listed: its source addresses and its handling of `X-Forwarded-Proto` are not documented, so a Cloud Run-hosted Hub serves only its co-located Runtime Broker.
+- **From the Hub's host:** a request from a loopback address with no forwarding headers, such as the co-located Runtime Broker or a CLI on the same machine.
+
+Any other request gets `403` with the error code `transport_not_confidential`. A refused registration mints or replaces no join token. A refused join also invalidates the join token it presented, because the token has crossed the network unencrypted; mint a new one. **A Hub whose TLS ends at a proxy must list the proxy's addresses in `server.trusted_proxies`**, or remote Runtime Brokers cannot register, join, rotate their secret or connect, and users cannot mint join tokens through it.
+
+`server.trusted_proxies` (`SCION_SERVER_TRUSTEDPROXIES`, comma-separated) is a list of IP addresses (taken as single hosts) or CIDR ranges: the addresses the proxy connects to the Hub from. The proxy must overwrite `X-Forwarded-Proto` (and any `Forwarded` header), not append to it: a header with more than one value is not trusted. Only the immediate peer address is compared; `X-Forwarded-For` is not used. An entry that is not an IP address or CIDR range, or that is wider than an IPv4 `/8` or an IPv6 `/16` (so `0.0.0.0/0` and `::/0` are refused), stops the server at startup. The list is used for this check only: it does not enable proxy header login or change how client addresses are rate limited. It is restart-bound and never returned or accepted by the admin API.
+
+```yaml
+server:
+  trusted_proxies:
+    - 10.20.0.0/16   # the ingress controller's pod range
+```
+
+The Runtime Broker applies the same rule from its side: `scion runtime-broker register` and `join`, and the Runtime Broker process, refuse a plain `http://` Hub URL whose host is not loopback (`localhost`, `127.0.0.0/8` or `::1`; names are never resolved). Use the Hub's `https://` URL, or a loopback address such as an SSH port forward (`http://127.0.0.1:<port>`). The Hub likewise never sends requests to a Runtime Broker's HTTP endpoint that is plain `http://` on a non-loopback address.
+
 ## Notification channels
 
 Notification channels deliver agent messages to external systems. Configure them
@@ -1622,6 +1641,7 @@ Settings required before the database connection exists, or that are restart-bou
 | Identity/mode | `mode`, `env`, `hub.hub_id`, `hub.gcp_project_id` |
 | Logging | `log_level`, `log_format` (`log_format` is accepted but ignored) |
 | Server keyring | `keyring_file`, `keyring_file_allow_world_readable` (experimental; never returned or accepted by the admin API) |
+| Runtime Broker transport | `trusted_proxies` (never returned or accepted by the admin API) |
 | CORS | `hub.cors.*`, `broker.cors` |
 | Messaging/plugins | `message_broker.*`, `plugins.*` |
 | Async agent create | `hub.launch_timeout`, `hub.launch_keepalive_seconds` |

@@ -18,11 +18,14 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -36,9 +39,13 @@ import (
 // is owned by the caller's user. Re-registration additionally requires that
 // user to be the broker's creator, or a super-admin presenting an
 // interactive session or dev credential. Turning on auto-provide
-// additionally requires broker.auto_provide. Registration never associates
-// the broker with a project. The route is RouteBrokerHMAC, so these checks
-// run in the handler.
+// additionally requires broker.auto_provide. Because the response carries a
+// join token, the request must also arrive over TLS, from this host, or from a
+// listed proxy reporting https (requireConfidentialArrival, after the
+// authorization checks and before any lookup or mutation); otherwise it gets
+// 403 transport_not_confidential and no token is minted or replaced.
+// Registration never associates the broker with a project. The route is
+// RouteBrokerHMAC, so these checks run in the handler.
 func (s *Server) handleBrokersEndpoint(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w, http.MethodPost)
@@ -75,6 +82,14 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 	// owner/super-admin check below, which applies only to the re-register
 	// case and is evaluated after this credential restriction.
 	if !s.authorizeBrokerCreate(w, r) {
+		return
+	}
+
+	// Transport policy: the response carries a join token, so a request
+	// that did not arrive over TLS or from this host
+	// (confidentialArrival) is refused before any lookup or mutation. No
+	// token is minted or replaced for it.
+	if !s.requireConfidentialArrival(w, r) {
 		return
 	}
 
@@ -675,6 +690,22 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Transport policy: the response carries the broker's HMAC secret, so a
+	// join that did not arrive over TLS or from this host is refused before
+	// the token is consumed. Its token has crossed the network in the clear,
+	// so it is revoked when it is the broker's pending token (and only
+	// then: a wrong token revokes nothing).
+	if !config.ConfidentialArrival(r, s.transportTrustedNets) {
+		revoked, revokeErr := s.brokerAuthService.RevokeExposedJoinToken(r.Context(), req.BrokerID, req.JoinToken)
+		if revokeErr != nil {
+			slog.Error("Failed to revoke a join token sent without TLS", "brokerID", req.BrokerID, "error", revokeErr)
+		}
+		LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), false,
+			fmt.Sprintf("refused: not over TLS or from this host (join token revoked: %t)", revoked), auditevent.BrokerFailureRefused)
+		s.requireConfidentialArrival(w, r)
+		return
+	}
+
 	// Test admin tier: only the co-located broker may complete a join.
 	if s.refuseTestAdminBrokerRegistration(w, req.BrokerID) {
 		LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), false, ErrTestAdminRemoteBrokerRefused.Error(), auditevent.BrokerFailureRefused)
@@ -771,6 +802,11 @@ func (s *Server) handleBrokerRotateSecret(w http.ResponseWriter, r *http.Request
 	if s.brokerAuthService == nil {
 		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
 			"broker authentication service not configured", nil)
+		return
+	}
+
+	// Transport policy: the response carries the broker's new HMAC secret.
+	if !s.requireConfidentialArrival(w, r) {
 		return
 	}
 

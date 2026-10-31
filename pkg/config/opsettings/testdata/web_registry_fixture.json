@@ -135,6 +135,7 @@
   "layer0_prefixes": [
     "server.keyring_file",
     "server.keyring_file_allow_world_readable",
+    "server.trusted_proxies",
     "server.database",
     "server.hub.port",
     "server.hub.host",

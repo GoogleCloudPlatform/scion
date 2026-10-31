@@ -235,6 +235,16 @@ type ServerConfig struct {
 	ProxyDriverPrincipals []string
 	// TrustedProxies is a list of trusted proxy IPs/CIDRs for forwarded headers.
 	TrustedProxies []string
+	// TransportTrustedProxies is server.trusted_proxies: the IPs/CIDRs of
+	// the TLS-terminating proxies whose X-Forwarded-Proto the hub-broker
+	// transport policy trusts (config.ConfidentialArrival). It is read by that
+	// policy only, never by TrustedProxies' users (proxy header login,
+	// client IP rate limits). Empty means a forwarded protocol is never
+	// trusted. The server command validates it at startup
+	// (config.ParseTrustedProxies); New drops an invalid list (logged),
+	// which only narrows what is accepted. Startup config only; never
+	// API-writable.
+	TransportTrustedProxies []string
 	// Debug enables verbose debug logging.
 	Debug bool
 	// OAuthConfig holds OAuth provider credentials for CLI authentication.
@@ -2549,6 +2559,10 @@ type Server struct {
 	cspReports       *cspreport.Handler
 	cspReportLimiter *cspReportLimiter
 
+	// transportTrustedNets is ServerConfig.TransportTrustedProxies, parsed
+	// once in New (config.ConfidentialArrival).
+	transportTrustedNets []*net.IPNet
+
 	// experiments is the compiled feature-flag registry (pkg/experiments).
 	// Nil in production and in most tests; always read through the
 	// nil-safe experimentRegistry() accessor, never directly.
@@ -3565,6 +3579,12 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	srv.authConfig.ExternalBearerLimiter = srv.externalBearerRateLimiter
 
 	srv.cspReportLimiter = newCSPReportLimiter(cfg.TrustedProxies)
+
+	if nets, err := config.ParseTrustedProxies(cfg.TransportTrustedProxies); err != nil {
+		slog.Error("Ignoring an invalid trusted proxy list; X-Forwarded-Proto is not trusted from any peer", "error", err)
+	} else {
+		srv.transportTrustedNets = nets
+	}
 	srv.cspReports = newCSPReportHandler(srv.cspReportLimiter, cfg.CSPReportRawSamples)
 	if cfg.CSPReportRawSamples {
 		slog.Warn("Browser policy report samples are logged (server.hub.csp_report_raw_samples); samples can hold page content")
@@ -8109,6 +8129,10 @@ func (s *Server) handleRuntimeBrokerConnect(w http.ResponseWriter, r *http.Reque
 	// Verify this is a WebSocket upgrade request
 	if !isWebSocketUpgrade(r) {
 		writeError(w, 400, ErrCodeInvalidRequest, "WebSocket upgrade required", nil)
+		return
+	}
+	// Transport policy: the control channel carries agent secrets.
+	if !s.requireConfidentialArrival(w, r) {
 		return
 	}
 
