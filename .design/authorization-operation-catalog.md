@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 368
+**Operations:** 369
 
 ## Table of Contents
 
@@ -333,6 +333,7 @@
 - [broker.delete](#brokerdelete) — Deregister a runtime broker: unlink it from every project, clear project defaults that name it, and remove its credentials. A user needs an interactive session and broker.delete on the broker
 - [broker.heartbeat](#brokerheartbeat) — Record a broker heartbeat: broker liveness and the state of the agents it runs. The broker sends its own; a user needs an interactive session and broker.update on the broker from a role binding (the owner relationship does not apply)
 - [broker.agent.launchreport](#brokeragentlaunchreport) — Record a broker's launch report for an agent it runs
+- [broker.agent.workspacedownload](#brokeragentworkspacedownload) — Issue signed download URLs for the uploaded workspace files of an agent the broker runs
 - [broker.messagefailures.report](#brokermessagefailuresreport) — Record buffered message delivery failures reported by a broker
 - [broker.attachment.redeem](#brokerattachmentredeem) — Redeem an attachment delivery capability (ptone/scion#4596): the broker the hub issued it to downloads one attachment, once, before it expires, to write it into the recipient agent's home
 - [broker.controlchannel.call](#brokercontrolchannelcall) — Carry a call between the hub and a connected broker over the control channel; each call runs under the operation that initiated it
@@ -12351,6 +12352,40 @@
 ### Exemptions
 
 - **internal_only:** The broker authenticates with its own HMAC credential for its own record; no user permission applies (scope: broker self access) — waives: `base_permission`
+
+---
+
+## broker.agent.workspacedownload
+
+**Domain:** broker
+
+**Description:** Issue signed download URLs for the uploaded workspace files of an agent the broker runs
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/runtime-brokers/{id}/agents/{agentId}/workspace-download` |
+
+**Principals:** `broker`
+
+**Credentials:** `broker_token`
+
+**Bearer:** `non_user`
+
+**Resource Resolver:** broker-self
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDisposition_EveryRoutePatternCovered`
+
+### Exemptions
+
+- **internal_only:** The broker authenticates with its own HMAC credential for an agent assigned to it in a project it still provides for; no user permission applies (scope: broker self access) — waives: `base_permission`
 
 ---
 

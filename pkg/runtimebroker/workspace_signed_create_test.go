@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
@@ -290,7 +291,8 @@ func TestSignedCaseA_FailedPageLeavesMarkerOnlyAndRetryApplies(t *testing.T) {
 	f.h.pageSize = 1
 	f.h.pageErr = func(call int) error {
 		if call == 2 {
-			return errors.New("page 2 failed")
+			// A 404 is not retried, so the bootstrap fails on page 2.
+			return &apiclient.APIError{StatusCode: http.StatusNotFound}
 		}
 		return nil
 	}
