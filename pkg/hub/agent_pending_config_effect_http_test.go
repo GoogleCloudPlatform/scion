@@ -1987,3 +1987,31 @@ func TestPendingFlagOff_MalformedExperimentsKeepsPending(t *testing.T) {
 	assert.Nil(t, pendingReloadAgent(t, s, agent.ID).PendingConfig, "a well-formed off clears: experiment_off")
 	assert.Equal(t, map[string][]string{pendingDiscardTriggerExperimentOff: {"config.model"}}, effectDiscards(t, s, agent.ID, 1))
 }
+
+// TestPendingFlagOff_NoOperationalSettingsKeepsPending (review r2 option):
+// with no operational settings loaded (file mode, or before the first
+// load), an off experiment is not a well-formed off: held edits are not
+// applied, but a start and a config PATCH do not clear them. Positive
+// control: heldEditsClearable reports true once settings are loaded.
+func TestPendingFlagOff_NoOperationalSettingsKeepsPending(t *testing.T) {
+	srv, s, disp, agent := heldEditsFixture(t, state.PhaseStopped)
+	effectSeedPending(t, s, agent.ID, map[string]string{"model": `"held-model"`}, map[string]string{"model": "dev:" + DevUserID}, "")
+	setHeldEditsExperiment(t, srv, false)
+	ops := srv.GetOperationalSettings()
+	require.NotNil(t, ops)
+	require.True(t, srv.heldEditsClearable(), "positive control: a loaded, well-formed off is clearable")
+	srv.operationalSettings.Store(nil)
+	t.Cleanup(func() { srv.operationalSettings.Store(ops) })
+	require.False(t, srv.heldEditsClearable(), "no operational settings: not a well-formed off")
+	before, _ := effectStoredPending(t, s, agent.ID)
+
+	pendingLifecycleWarnings(t, srv, agent.ID, "start")
+	starts := disp.snapshot()
+	require.Len(t, starts, 1)
+	assert.Equal(t, "old-model", starts[0].model, "not applied while the experiment reads off")
+	pendingLifecycleWarnings(t, srv, agent.ID, "stop")
+	patchPending(t, srv, agent.ID, map[string]interface{}{"name": "renamed"})
+	after, _ := effectStoredPending(t, s, agent.ID)
+	assert.Equal(t, before, after, "neither the start nor the PATCH clears held edits without loaded settings")
+	effectAssertNoDiscard(t, s, agent.ID)
+}
