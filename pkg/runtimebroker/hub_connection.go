@@ -41,6 +41,9 @@ const (
 	ConnectionStatusConnected ConnectionStatus = "connected"
 	// ConnectionStatusDisconnected indicates the connection is not active.
 	ConnectionStatusDisconnected ConnectionStatus = "disconnected"
+	// ConnectionStatusConnecting indicates the control channel has not
+	// completed its first handshake yet (it is dialing, or its dials fail).
+	ConnectionStatusConnecting ConnectionStatus = "connecting"
 	// ConnectionStatusReconnecting indicates the control channel dropped and is attempting to reconnect.
 	ConnectionStatusReconnecting ConnectionStatus = "reconnecting"
 	// ConnectionStatusError indicates the connection encountered an error.
@@ -174,6 +177,8 @@ type hubConnectionSnapshot struct {
 	SecretKey         []byte
 	Heartbeat         *HeartbeatService
 	HasControlChannel bool
+	ControlChannel    *ControlChannelClient
+	ConduitDialer     *ConduitDialer
 }
 
 // snapshot returns a copy of the concurrently read fields, taken under hc.mu.
@@ -188,6 +193,8 @@ func (hc *HubConnection) snapshot() hubConnectionSnapshot {
 		SecretKey:         hc.SecretKey,
 		Heartbeat:         hc.Heartbeat,
 		HasControlChannel: hc.ControlChannel != nil,
+		ControlChannel:    hc.ControlChannel,
+		ConduitDialer:     hc.conduitDialer,
 	}
 }
 
@@ -241,6 +248,9 @@ func (hc *HubConnection) start(ctx context.Context, server *Server) error {
 			}
 
 			hb := server.newHeartbeatService(hc.HubClient.RuntimeBrokers(), hc.BrokerID, hc.HubEndpoint, interval)
+			// This hub is told only about its own control channel and
+			// conduit, never another connection's.
+			hb.health = server.heartbeatHealthReportFor(hc)
 			hc.mu.Lock()
 			hc.Heartbeat = hb
 			hc.mu.Unlock()
@@ -250,6 +260,7 @@ func (hc *HubConnection) start(ctx context.Context, server *Server) error {
 	}
 
 	// Start control channel if enabled
+	channelStarted := false
 	if server.config.ControlChannelEnabled && hc.HubEndpoint != "" && hc.BrokerID != "" {
 		if !hasValidCredentials {
 			slog.Warn("Skipping control channel for connection: no valid credentials", "name", hc.Name)
@@ -282,7 +293,12 @@ func (hc *HubConnection) start(ctx context.Context, server *Server) error {
 			hc.mu.Lock()
 			hc.ControlChannel = cc
 			hc.ccCancel = ccCancel
+			// Connected only once the handshake completes
+			// (OnConnectionStateChange); set before Connect starts, so
+			// the callback is never overwritten.
+			hc.Status = ConnectionStatusConnecting
 			hc.mu.Unlock()
+			channelStarted = true
 			// Capture cc locally so the goroutine doesn't race with Stop()
 			// nil-ing hc.ControlChannel out from under it.
 			hc.ccWg.Add(1)
@@ -293,6 +309,7 @@ func (hc *HubConnection) start(ctx context.Context, server *Server) error {
 						slog.Info("Control channel stopped", "name", hc.Name)
 					} else {
 						slog.Error("Control channel error", "name", hc.Name, "error", err)
+						hc.setStatus(ConnectionStatusError)
 					}
 				}
 			}()
@@ -301,7 +318,11 @@ func (hc *HubConnection) start(ctx context.Context, server *Server) error {
 		}
 	}
 
-	hc.setStatus(ConnectionStatusConnected)
+	// Without a control channel the connection's services (heartbeat) are
+	// running; with one, its handshake decides the status.
+	if !channelStarted {
+		hc.setStatus(ConnectionStatusConnected)
+	}
 	return nil
 }
 
