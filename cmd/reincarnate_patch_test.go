@@ -308,3 +308,26 @@ func TestReincarnatePatch_ForbiddenPatchSessionNeedsUpdate(t *testing.T) {
 	// A 403 without patch flags is not rewritten.
 	assert.Nil(t, patchNeedsUpdateError(fmt.Errorf("x"), nil, hubsync.CredentialKindOAuth))
 }
+
+// TestReincarnate_ConflictKeepsHubReason: the hub answers 409 for several
+// reasons. The CLI keeps the hub's reason and does not claim that a
+// reincarnation is pending when the hub said a start is in progress.
+func TestReincarnate_ConflictKeepsHubReason(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":{"code":"conflict","message":"a start is in progress for this agent; retry once it completes"}}`))
+	}))
+	t.Cleanup(srv.Close)
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: srv.URL, ProjectID: "proj-1"}
+	setReincarnatePatchFlags(t, "", "", "", -1, "", "")
+	reincarnateBroker, reincarnateDryRun = "", false
+
+	err = reincarnateAgentViaHub(hubCtx, "agent-1", "handoff", false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot reincarnate 'agent-1' now")
+	assert.Contains(t, err.Error(), "a start is in progress for this agent")
+	assert.NotContains(t, err.Error(), "already pending")
+}
