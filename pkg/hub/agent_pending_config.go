@@ -137,6 +137,22 @@ func (s *Server) heldEditsEnabled() bool {
 	return s.experimentEnabled(experiments.AgentEditHeld)
 }
 
+// heldEditsClearable reports whether stored pending edits may be cleared
+// as inert: hub.agent_edit_held reads off from loaded, well-formed
+// operational settings. Any off read means pending edits are not applied
+// or returned, but a malformed experiments document (or settings not
+// loaded) also reads a server-layer experiment as off, and clearing then
+// would turn a transient misconfiguration into the loss of every agent's
+// held edits. So the lazy clear runs only on a positive, well-formed off
+// (ptone/scion#5864); otherwise the rows stay inert, as before.
+func (s *Server) heldEditsClearable() bool {
+	if s.GetOperationalSettings() == nil {
+		return false
+	}
+	snap := s.experimentsSnapshot()
+	return !snap.Malformed && !s.experimentEnabledIn(snap, experiments.AgentEditHeld)
+}
+
 // startApplies reports whether a start, with this broker, applies a
 // pending edit of f: a container-creation (T1) config key, or a
 // provision-rendered key the broker re-renders at start (not secrets).
@@ -807,7 +823,8 @@ func startFoldTrigger(opts StartOpts) string {
 // written into the applied config (ptone/scion#5864). It returns the keys
 // that stay pending for a reincarnation, for the start's warning. With
 // hub.agent_edit_held off nothing is applied: stored pending edits are
-// inert, and are cleared (clearPendingConfigExperimentOff).
+// inert, and are cleared (clearPendingConfigExperimentOff) when the off is
+// a well-formed one (heldEditsClearable).
 //
 // The fold runs twice, with the same pending keys. On the stored row, read
 // here: its result is persisted with the state_version compare-and-set
@@ -824,7 +841,9 @@ func (s *Server) foldPendingConfigAtStart(ctx context.Context, agent *store.Agen
 		return none, nil
 	}
 	if !s.heldEditsEnabled() {
-		s.clearPendingConfigExperimentOff(ctx, agent)
+		if s.heldEditsClearable() {
+			s.clearPendingConfigExperimentOff(ctx, agent)
+		}
 		return none, nil
 	}
 	// Container keys are applied at every start; provision-rendered keys

@@ -35,6 +35,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1938,4 +1939,51 @@ func TestPendingSaverDrop_TriggersAreDistinct(t *testing.T) {
 		assert.Contains(t, warnings, effectDropWarning(trigger, key))
 	}
 	effectAssertNoAppliedAudit(t, s, agent.ID)
+}
+
+// TestPendingFlagOff_MalformedExperimentsKeepsPending (review M-1): a
+// malformed experiments document reads hub.agent_edit_held as off, so held
+// edits are neither applied nor returned, but they are NOT cleared: a
+// start and a config PATCH leave them intact with no experiment_off audit.
+// Positive control: once the document is well-formed with the experiment
+// off, the next start clears them (experiment_off).
+func TestPendingFlagOff_MalformedExperimentsKeepsPending(t *testing.T) {
+	ctx := context.Background()
+	srv, s, disp, agent := heldEditsFixture(t, state.PhaseStopped)
+	effectSeedPending(t, s, agent.ID, map[string]string{"model": `"held-model"`}, map[string]string{"model": "dev:" + DevUserID}, "")
+	ops := srv.GetOperationalSettings()
+	require.NotNil(t, ops, "the test server loads operational settings")
+	_, err := s.UpsertHubSetting(ctx, "experiments",
+		json.RawMessage(`{"overrides":{"`+experiments.AgentEditHeld+`":"yes"}}`), "other-replica", 0, "managed")
+	require.NoError(t, err)
+	_, err = ops.Refresh(ctx)
+	require.NoError(t, err)
+	require.True(t, ops.ExperimentsSnapshot().Malformed, "fixture must be malformed")
+	require.False(t, srv.heldEditsEnabled(), "a malformed document reads the server-layer experiment as off")
+	require.False(t, srv.heldEditsClearable())
+	before, _ := effectStoredPending(t, s, agent.ID)
+
+	pendingLifecycleWarnings(t, srv, agent.ID, "start")
+	starts := disp.snapshot()
+	require.Len(t, starts, 1)
+	assert.Equal(t, "old-model", starts[0].model, "not applied while the experiment reads off")
+	after, _ := effectStoredPending(t, s, agent.ID)
+	assert.Equal(t, before, after, "the start does not clear held edits on a malformed off")
+
+	pendingLifecycleWarnings(t, srv, agent.ID, "stop")
+	resp := patchPending(t, srv, agent.ID, map[string]interface{}{"name": "renamed"})
+	assert.Nil(t, resp.PendingConfig, "nor returned")
+	after, _ = effectStoredPending(t, s, agent.ID)
+	assert.Equal(t, before, after, "the PATCH does not clear held edits on a malformed off")
+	effectAssertNoDiscard(t, s, agent.ID)
+
+	// Positive control: a well-formed off clears at the next start.
+	rev := ops.ExperimentsSnapshot().Revision
+	_, err = ops.Update(ctx, "experiments", json.RawMessage(`{"overrides":{"`+experiments.AgentEditHeld+`":false}}`), "test", rev, "managed")
+	require.NoError(t, err)
+	require.False(t, ops.ExperimentsSnapshot().Malformed)
+	require.True(t, srv.heldEditsClearable())
+	pendingLifecycleWarnings(t, srv, agent.ID, "start")
+	assert.Nil(t, pendingReloadAgent(t, s, agent.ID).PendingConfig, "a well-formed off clears: experiment_off")
+	assert.Equal(t, map[string][]string{pendingDiscardTriggerExperimentOff: {"config.model"}}, effectDiscards(t, s, agent.ID, 1))
 }

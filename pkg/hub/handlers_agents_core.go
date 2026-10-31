@@ -4382,9 +4382,10 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 	// compare-and-set (ptone/scion#5864), so a later turn of the
 	// experiment never applies edits saved under an earlier one. The keys
 	// the request named are audited as superseded above; the rest as
-	// experiment_off.
+	// experiment_off. Only a well-formed off clears (heldEditsClearable):
+	// a malformed experiments document leaves them inert.
 	var pendingExperimentOff []string
-	if !heldEdits && !agent.PendingConfig.IsEmpty() {
+	if !heldEdits && !agent.PendingConfig.IsEmpty() && s.heldEditsClearable() {
 		pendingExperimentOff = pendingConfigKeys(agent.PendingConfig)
 		agent.PendingConfig = nil
 	}

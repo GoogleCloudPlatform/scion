@@ -375,8 +375,9 @@ var pendingFoldDenyCauses = map[DenyCause]pendingFoldDenyResult{
 
 // pendingFoldDenyIndeterminate reports whether a deny leaves the re-check
 // undecided: Decision.IsIndeterminate, or a cause mapped as a fault. A
-// cause added later and not yet mapped counts as determinate only when
-// IsIndeterminate says so.
+// cause added later and not yet mapped is determinate unless
+// IsIndeterminate reports it (TestPendingReauth_DenyCauseMapExhaustive
+// fails until it is mapped).
 func pendingFoldDenyIndeterminate(d Decision) bool {
 	return d.IsIndeterminate() || pendingFoldDenyCauses[d.DenyCause] == pendingFoldDenyFault
 }
