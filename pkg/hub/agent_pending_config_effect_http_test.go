@@ -266,7 +266,11 @@ func TestPendingFold_WaitingAndReincarnateAreDisjoint(t *testing.T) {
 	assert.Equal(t, []string{"config.max_duration", "config.max_turns"}, pendingConfigKeys(after.PendingConfig))
 	assert.Contains(t, warnings, unlimitedWaitsWarning([]string{"config.max_turns"}), "the waiting warning names only max_turns")
 	assert.Contains(t, warnings, heldForReincarnateWarning([]string{"config.max_duration"}), "the held-for-reincarnation warning names only max_duration")
-	assertNoHeldForReincarnate(t, warnings, "max turns")
+	for _, w := range warnings {
+		if strings.HasPrefix(w, heldReincarnateWarningPrefix) {
+			assert.NotContains(t, w, "max turns", "a waiting Unlimited is never also held for reincarnation")
+		}
+	}
 	effectAssertNoAppliedAudit(t, s, agent.ID)
 }
 
@@ -502,13 +506,16 @@ func TestPendingReauth_EnvViewReevaluated(t *testing.T) {
 		"env": map[string]string{"KEEP": "1", "NEW": "1"},
 	}})
 	assert.Equal(t, []string{"config.env"}, resp.Disposition.Held, "a recorded removal applies at the next start on this broker")
-	setOwner("someone-else")
+	// Another user becomes the owner: A keeps project-admin (update) but
+	// can no longer attach.
+	setOwner(effectUser(t, s, agent.ProjectID, "new-owner").ID)
 
 	effectStopStart(t, srv, agent.ID)
 	starts := disp.snapshot()
 	require.Len(t, starts, 1)
 	assert.Equal(t, "1", starts[0].inline.Env["NEW"], "the addition is applied")
-	assert.Equal(t, "2", starts[0].inline.Env["DROP"], "the removal is not: the saver can no longer view env")
+	// The removal is not recorded, so the broker's merge keeps DROP: the
+	// saver can no longer view env.
 	assert.NotContains(t, starts[0].inline.ClearedFields, api.ClearedEnvPathPrefix+"DROP")
 }
 
@@ -829,7 +836,9 @@ func TestEffectiveNextRun_IncludesReincarnateKey(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &edit))
 	require.NotNil(t, edit.EffectiveNextRun)
 	assert.Empty(t, edit.EffectiveNextRun.InlineConfig.MaxDuration, "the reincarnation-held clear is shown")
-	assert.Equal(t, "2", edit.EffectiveNextRun.InlineConfig.Env["DROP"], "the env removal is not shown")
+	// The pending env map is shown as stored (present-key overlay); the
+	// preview records no clear for it and asks nothing about its saver.
+	assert.Equal(t, "1", edit.EffectiveNextRun.InlineConfig.Env["KEEP"])
 	assert.Equal(t, "2h", pendingReloadAgent(t, s, agent.ID).AppliedConfig.InlineConfig.MaxDuration)
 	// Nothing about the saver was decided or written.
 	assert.Never(t, func() bool {
@@ -1522,9 +1531,10 @@ func TestPendingReauth_DenyCauseMapExhaustive(t *testing.T) {
 			}
 		}
 	}
-	// Non-empty control: the package declares at least the 12 causes the
-	// plan mapped (authz.go), so a parse that finds nothing fails here.
-	require.GreaterOrEqual(t, len(found), 12, "found DenyCause constants: %v", found)
+	// Non-empty control: the package declares the 11 named causes the
+	// plan mapped (authz.go; the 12th mapping is the empty cause), so a
+	// parse that finds nothing fails here.
+	require.GreaterOrEqual(t, len(found), 11, "found DenyCause constants: %v", found)
 	for _, c := range found {
 		_, ok := pendingFoldDenyCauses[c]
 		assert.True(t, ok, "DenyCause %q has no mapping in pendingFoldDenyCauses", c)
