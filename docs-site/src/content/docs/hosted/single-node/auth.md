@@ -107,7 +107,7 @@ After a user is deleted, that user's tokens stop working immediately. Requests t
 
 Behind the `hub.user_delete_force_cascade` [experiment](/scion/reference/experiments/) (off by default), an admin can delete a user whom agents or delegations depend on, instead of deleting those agents one by one. On **Admin > Users**, the delete dialog of such a user offers **Force delete**, which asks for confirmation naming how many agents it stops; the API is `DELETE /api/v1/users/{id}?force=true`. While the experiment is off, `force=true` is ignored and the delete is refused as described above.
 
-A forced delete needs `user.delete` on the user and, for every one of the user's agents, the same permission an agent delete needs (`agent.delete` on that agent). If you may not delete one or more of them, the request is refused with `403 user_delete_force_forbidden`, `details.agents` lists those agents (`id`, `projectId`), and nothing changes. It needs a sign-in session, like a plain delete. The last super-admin, admin lockout and last-owner guards apply as for a plain delete. If nothing blocks the delete, a forced delete is a plain delete (`204`).
+A forced delete needs `user.delete` on the user and, for every one of the user's agents, the same permission an agent delete needs (`agent.delete` on that agent). If you may not delete one or more of them, the request is refused with `403 user_delete_force_forbidden`, `details.agents` lists those agents (`id`, `projectId`), and nothing changes. Like a plain delete, `GET /api/v1/users/{id}/delete-blockers`, and `GET /api/v1/users/{id}/deletion`, it accepts an interactive sign-in session or a hub-boundary user access token carrying `user:delete` (a token is refused with `403` and `details.reason` `system_role_binding_held` when the target user holds a direct system-scope role binding other than `viewer`; see [Hub-boundary tokens for user administration](/scion/hosted/user/personal-access-tokens/#hub-boundary-tokens-for-user-administration)). The last super-admin, admin lockout and last-owner guards apply as for a plain delete. If nothing blocks the delete, a forced delete is a plain delete (`204`).
 
 Otherwise the delete runs in two steps:
 
@@ -136,6 +136,8 @@ export SCION_SERVER_OAUTH_WEB_GOOGLE_CLIENTSECRET="your-client-secret"
 export SCION_SERVER_OAUTH_WEB_GITHUB_CLIENTID="your-client-id"
 export SCION_SERVER_OAUTH_WEB_GITHUB_CLIENTSECRET="your-client-secret"
 ```
+
+On the web server, only `/assets/*`, `/shoelace/*`, and the exact root-level files shipped in `web/public/` (`/apple-touch-icon.png`, `/favicon.ico`, `/favicon.svg`, `/icon-192.png`, `/icon-512.png`, `/icon-maskable-512.png`, `/manifest.webmanifest`, and `/scion-notification-icon.png`) skip the web session check so the sign-in page can render. Every other root-level path (with or without a file extension, including `/robots.txt` and any path containing a backslash) requires a session, sending browsers to sign-in and returning `401` to other clients.
 
 ### CLI OAuth Setup
 
