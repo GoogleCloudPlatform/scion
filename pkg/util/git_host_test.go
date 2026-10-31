@@ -2699,3 +2699,96 @@ func TestRunHostGit_DiscoveryRechecksResolvedDir(t *testing.T) {
 		t.Errorf("git ran %d times after the directory became a repository", len(calls))
 	}
 }
+
+// The after-run check in discovery mode looks for a repository in the
+// resolved directory, where git ran, not in the caller's directory: a .git
+// that git creates in A is still found when the caller's symlink is
+// repointed to B (here from the hostGitBeforeVerifyDiscover test hook)
+// between the resolve comparison and the .git check.
+// Mutant this catches: verify calling hostGitDiscovers(dir, ...) (it would
+// inspect B, find no .git and pass, so Err would be nil).
+func TestRunHostGit_DiscoveryVerifyChecksResolvedDir(t *testing.T) {
+	setup := func(t *testing.T) (link, dirA, dirB string) {
+		t.Helper()
+		hostGitTestEnv(t)
+		base := t.TempDir()
+		dirA = filepath.Join(base, "a")
+		dirB = filepath.Join(base, "b")
+		for _, d := range []string{dirA, dirB} {
+			if err := os.MkdirAll(d, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		link = filepath.Join(base, "link")
+		if err := os.Symlink(dirA, link); err != nil {
+			t.Skipf("symlink: %v", err)
+		}
+		fakeGitOnPath(t)
+		return link, dirA, dirB
+	}
+	// repoint swaps link to dirB from the hook, between the resolve
+	// comparison and the .git check, with an atomic rename.
+	repoint := func(t *testing.T, link, dirB string) {
+		t.Helper()
+		orig := hostGitBeforeVerifyDiscover
+		hostGitBeforeVerifyDiscover = func(string) {
+			tmp := link + ".new"
+			if err := os.Symlink(dirB, tmp); err != nil {
+				t.Errorf("fixture: %v", err)
+				return
+			}
+			if err := os.Rename(tmp, link); err != nil {
+				t.Errorf("fixture: %v", err)
+			}
+		}
+		t.Cleanup(func() { hostGitBeforeVerifyDiscover = orig })
+	}
+
+	t.Run("repository appears in the resolved directory", func(t *testing.T) {
+		link, dirA, dirB := setup(t)
+		repoint(t, link, dirB)
+		res := RunHostGit(context.Background(), link, HostGitOptions{Env: ceilingEnv(), Audience: AudienceRemote}, "rev-parse", "fake-mkgit")
+		if target, _ := os.Readlink(link); target != dirB {
+			t.Fatalf("fixture: the link was not repointed (now %q)", target)
+		}
+		if _, err := os.Lstat(filepath.Join(dirA, ".git")); err != nil {
+			t.Fatalf("fixture: the fake git did not create A/.git: %v", err)
+		}
+		if !errors.Is(res.Err, ErrRepoConfigChanged) || !strings.Contains(res.Err.Error(), "a repository appeared in the command's directory while it ran") {
+			t.Fatalf("Err = %v, want the after-run repository-appeared refusal", res.Err)
+		}
+		for _, p := range []string{link, dirA, dirB} {
+			if strings.Contains(res.Err.Error(), p) {
+				t.Errorf("Err %q names the host path %q for a remote audience", res.Err, p)
+			}
+		}
+	})
+
+	// Negative control: the same repoint with a fake git that creates
+	// nothing. The repoint alone does not fail the command, so the failure
+	// above comes from the .git created in A.
+	t.Run("repoint alone does not fail the command", func(t *testing.T) {
+		link, dirA, dirB := setup(t)
+		wantA, err := filepath.EvalSymlinks(dirA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pwdFile := filepath.Join(t.TempDir(), "pwd")
+		t.Setenv("FAKE_PWD_FILE", pwdFile)
+		repoint(t, link, dirB)
+		res := RunHostGit(context.Background(), link, HostGitOptions{Env: ceilingEnv(), Audience: AudienceRemote}, "rev-parse", "fake-pwd")
+		if res.Err != nil || res.ExitCode != 0 {
+			t.Errorf("exit %d, err %v; want success", res.ExitCode, res.Err)
+		}
+		if target, _ := os.Readlink(link); target != dirB {
+			t.Errorf("fixture: the link was not repointed (now %q)", target)
+		}
+		got, err := os.ReadFile(pwdFile)
+		if err != nil {
+			t.Fatalf("the command did not run: %v", err)
+		}
+		if strings.TrimSpace(string(got)) != wantA {
+			t.Errorf("git ran in %q, want the resolved %q", strings.TrimSpace(string(got)), wantA)
+		}
+	})
+}

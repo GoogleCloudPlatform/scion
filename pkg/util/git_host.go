@@ -426,9 +426,9 @@ func (c *HostGitCmd) after(runErr error) error {
 // repository above dir, whose config is not checked here. In either ceiling
 // mode, a directory that cannot be resolved is refused. A dir that git
 // would itself treat as a git directory (it holds a HEAD entry) is refused.
-// A .git or HEAD created in dir while the command runs is seen only after it
-// has run, and fails the command (ErrRepoConfigChanged), as does dir
-// resolving elsewhere after the run.
+// A .git or HEAD created in the resolved directory while the command runs is
+// seen only after it has run, and fails the command (ErrRepoConfigChanged),
+// as does dir resolving elsewhere after the run.
 //
 // In every mode the caller's first argument must be the subcommand: no
 // arguments, an empty first argument, or a first argument that starts with
@@ -509,9 +509,12 @@ func HostGitCommand(ctx context.Context, dir string, opts HostGitOptions, args .
 			if again != resolved {
 				return fmt.Errorf("%w: the command's directory resolved elsewhere after it ran", ErrRepoConfigChanged)
 			}
-			// Nothing was read before the command; it must still find no
-			// repository at dir afterwards.
-			stillNone, err := hostGitDiscovers(dir, env, opts.Audience)
+			hostGitBeforeVerifyDiscover(resolved)
+			// Nothing was read before the command; the resolved directory,
+			// where git ran, must still hold no repository afterwards. The
+			// check uses the resolved path, as the before-run check does,
+			// because dir may be repointed after the comparison above.
+			stillNone, err := hostGitDiscovers(resolved, env, opts.Audience)
 			if err != nil {
 				return fmt.Errorf("%w: %v", ErrRepoConfigChanged, err)
 			}
@@ -638,6 +641,13 @@ var hostGitDiscoverySubcommands = map[string]bool{
 // directory and checking it again. It does nothing; it is a variable so a
 // test can change the directory in that window.
 var hostGitAfterResolve = func(resolved string) {}
+
+// hostGitBeforeVerifyDiscover runs in discovery mode after the after-run
+// check has found that the command's directory still resolves to where git
+// ran, and before that directory is checked for a repository. It does
+// nothing; it is a variable so a test can repoint the directory in that
+// window.
+var hostGitBeforeVerifyDiscover = func(resolved string) {}
 
 // errHostGitArgsOption refuses caller arguments that are missing, start with
 // an empty argument or start with an option: the first argument must be the
