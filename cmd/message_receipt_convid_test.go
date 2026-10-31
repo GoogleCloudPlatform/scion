@@ -33,6 +33,10 @@ import (
 
 const receiptConvProject = "project-receipt-conv"
 
+// receiptConvDeferredSlug is the agent the receipt fake hub answers with a
+// deferred send.
+const receiptConvDeferredSlug = "agent-def"
+
 // newReceiptConvHub is a fake hub whose send endpoints answer with a message
 // ID and a conversation ID derived from the recipient.
 func newReceiptConvHub(t *testing.T) *HubContext {
@@ -60,9 +64,16 @@ func newReceiptConvHub(t *testing.T) *HubContext {
 			})
 		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, projectPrefix) && strings.HasSuffix(r.URL.Path, "/message"):
 			slug := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, projectPrefix), "/message")
+			status := "delivered"
+			if slug == receiptConvDeferredSlug {
+				// The recipient is reincarnating: the hub saved the message
+				// for catch-up (202 deferred).
+				status = "deferred"
+				w.WriteHeader(http.StatusAccepted)
+			}
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"message_id": "msg-" + slug, "conversation_id": "conv-" + slug,
-				"status": "delivered", "agent": slug,
+				"status": status, "agent": slug,
 			})
 		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/v1/agents/"):
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -155,11 +166,13 @@ func TestSendReceipt_GroupLinesNameConversation(t *testing.T) {
 	hubCtx := newReceiptConvHub(t)
 	recips := []messages.GroupRecipient{
 		{Kind: messages.RecipientAgent, Name: "agent-a"},
+		{Kind: messages.RecipientAgent, Name: receiptConvDeferredSlug},
 		{Kind: messages.RecipientUser, Name: "alice"},
 	}
 	var err error
 	out := captureStdout(t, func() { err = sendGroupMessageViaHub(hubCtx, recips, "hi", false) })
 	require.NoError(t, err)
 	assert.Contains(t, out, "  Accepted: agent:agent-a (conversation conv-agent-a, message msg-agent-a)\n")
+	assert.Contains(t, out, "  Deferred: agent:agent-def (agent is reincarnating; saved) (conversation conv-agent-def, message msg-agent-def)\n")
 	assert.Contains(t, out, "  Accepted: user:alice (conversation conv-out, message msg-out)\n")
 }
