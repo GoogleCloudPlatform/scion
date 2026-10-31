@@ -84,7 +84,12 @@ func TestCloudRunContainerResources(t *testing.T) {
 		{
 			name:    "cpu needing more than the default memory",
 			spec:    &api.ResourceSpec{Limits: limits("4", "")},
-			wantErr: []string{"4 vCPU (from resources.limits.cpu)", "2048Mi to 16384Mi", "512Mi (platform default)"},
+			wantErr: []string{"4 vCPU (from resources.limits.cpu)", "2048Mi to 16384Mi", "512Mi (platform default)", "set resources.limits.cpu or resources.limits.memory"},
+		},
+		{
+			name:    "band error from requests names the request",
+			spec:    &api.ResourceSpec{Requests: limits("2", "16Gi")},
+			wantErr: []string{"2 vCPU (from resources.requests.cpu)", "16384Mi (from resources.requests.memory)", "set resources.limits.cpu or resources.limits.memory"},
 		},
 		{
 			name:    "memory above the cpu band",

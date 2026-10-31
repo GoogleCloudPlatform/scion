@@ -114,7 +114,7 @@ func cloudRunContainerResources(spec *api.ResourceSpec) (*runpb.ResourceRequirem
 			continue
 		}
 		if memBytes < b.minMiB*cloudRunMiB || memBytes > b.maxMiB*cloudRunMiB {
-			return nil, fmt.Errorf("cloudrun: %d vCPU (%s) allows memory %dMi to %dMi, got %s (%s); adjust resources.limits.cpu or resources.limits.memory",
+			return nil, fmt.Errorf("cloudrun: %d vCPU (%s) allows memory %dMi to %dMi, got %s (%s); set resources.limits.cpu or resources.limits.memory",
 				cpu, cloudRunResourceSource(cpuValue, cpuField), b.minMiB, b.maxMiB, memShown, cloudRunResourceSource(memValue, memField))
 		}
 		break
