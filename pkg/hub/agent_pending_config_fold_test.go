@@ -110,15 +110,21 @@ func TestPlanPendingFold_KeepsReincarnateKeysPending(t *testing.T) {
 			"model":           json.RawMessage(`"new-model"`),
 		}},
 	}
-	plan := (&Server{}).planPendingFold(context.Background(), agent, brokerStartSupport{})
+	plan, err := (&Server{}).planPendingFold(context.Background(), agent, brokerStartSupport{})
+	assert.NoError(t, err)
 	assert.Equal(t, []string{"config.max_model_calls"}, plan.waiting)
 	assert.Equal(t, []string{"config.max_duration"}, plan.reincarnate)
-	assert.True(t, plan.keep(agentEditFieldByKey["config.model"]))
+	// The row names no saver, so the one key the fold would apply is
+	// dropped (saver_unresolvable), not applied; the waiting and
+	// reincarnation-held keys are never re-checked.
+	assert.Equal(t, map[string][]string{pendingDiscardTriggerSaverUnresolvable: {"config.model"}}, plan.drops)
+	assert.False(t, plan.keep(agentEditFieldByKey["config.model"]))
 	assert.False(t, plan.keep(agentEditFieldByKey["config.max_duration"]))
 	assert.False(t, plan.keep(agentEditFieldByKey["config.max_model_calls"]))
 
 	folded, _ := (&Server{}).foldPendingConfig(context.Background(), agent, plan)
-	assert.Equal(t, []string{"config.model"}, folded)
+	assert.Empty(t, folded)
+	assert.Equal(t, "old-model", agent.AppliedConfig.InlineConfig.Model, "the dropped key is not applied")
 	assert.Equal(t, "2h", agent.AppliedConfig.InlineConfig.MaxDuration, "the clear is not applied")
 	assert.Equal(t, []string{"config.max_duration", "config.max_model_calls"}, pendingConfigKeys(agent.PendingConfig))
 }

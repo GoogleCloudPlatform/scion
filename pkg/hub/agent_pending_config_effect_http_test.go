@@ -518,7 +518,7 @@ func TestPendingReauth_EnvViewReevaluated(t *testing.T) {
 func TestPendingReauth_UnresolvableSaverDropped(t *testing.T) {
 	srv, s, disp, agent := heldEditsFixture(t, state.PhaseStopped)
 	effectSeedPending(t, s, agent.ID,
-		map[string]string{"model": `"bogus-model"`, "max_turns": `7`, "thinking_level": `"high"`},
+		map[string]string{"model": `"bogus-model"`, "max_turns": `7`, "thinking_level": `3`},
 		map[string]string{"model": "bogus:x", "max_turns": "", "thinking_level": "dev:" + DevUserID}, "")
 
 	warnings := pendingLifecycleWarnings(t, srv, agent.ID, "start")
@@ -526,7 +526,7 @@ func TestPendingReauth_UnresolvableSaverDropped(t *testing.T) {
 	require.Len(t, starts, 1)
 	assert.Equal(t, "old-model", starts[0].model)
 	assert.Equal(t, api.IntPtr(3), starts[0].inline.MaxTurns)
-	assert.Equal(t, "high", string(starts[0].inline.ThinkingLevel), "the dev saver's key folds")
+	assert.Equal(t, api.IntPtr(3), starts[0].inline.ThinkingLevel, "the dev saver's key folds")
 	assert.Contains(t, warnings, effectDropWarning(pendingDiscardTriggerSaverUnresolvable, "config.max_turns", "config.model"))
 	assert.Equal(t, map[string][]string{pendingDiscardTriggerSaverUnresolvable: {"config.max_turns", "config.model"}}, effectDiscards(t, s, agent.ID, 1))
 }
@@ -590,7 +590,7 @@ func TestPendingReauth_DelegatedSaverDroppedAuditedAndWarned(t *testing.T) {
 	t.Run("no-container PATCH fold", func(t *testing.T) {
 		srv, s, _, agent := heldEditsFixture(t, state.PhaseStopped)
 		seed(t, s, agent.ID)
-		resp := patchPending(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{"thinking_level": "low"}})
+		resp := patchPending(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{"thinking_level": 2}})
 		assert.Contains(t, resp.Warnings, effectDropWarning(pendingDiscardTriggerSaverDelegated, "config.model"))
 		after := pendingReloadAgent(t, s, agent.ID)
 		assert.Equal(t, "old-model", after.AppliedConfig.Model)
@@ -680,7 +680,7 @@ func TestPendingFold_PatchFoldKeepsReincarnateAndSupersedes(t *testing.T) {
 	patchPending(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{"max_turns": nil, "model": "held-model"}})
 	effectSetPhase(t, s, agent.ID, state.PhaseStopped)
 
-	resp := patchPending(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{"thinking_level": "low"}})
+	resp := patchPending(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{"thinking_level": 2}})
 	assert.Equal(t, []string{"config.max_turns"}, pendingConfigKeys(resp.PendingConfig), "the reincarnation-only clear stays pending")
 	after := pendingReloadAgent(t, s, agent.ID)
 	assert.Equal(t, "held-model", after.AppliedConfig.Model, "the other key folds")
