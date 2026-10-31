@@ -747,8 +747,9 @@ func skillResolutionFailedWithDetails(w http.ResponseWriter, err *agent.SkillRes
 // this package): a plain error still gets the pre-existing generic 500
 // behavior. The exceptions are errSavedProfileUnresolved (a saved profile
 // that no longer resolves), errDefaultProfileUnresolved (a dispatch needing
-// a default profile the Hub's stored profiles lack) and
-// errProfileUnresolved (a named profile the Hub's stored profiles lack),
+// a default profile the Hub's stored profiles lack),
+// errProfileUnresolved (a named profile the Hub's stored profiles lack) and
+// errProfileRuntimeUnresolved (a stored profile whose runtime is missing),
 // which are checked ahead of every other case and written as the retryable
 // 503 from writeProfileUnresolved; their text is client-safe by
 // construction.
@@ -784,8 +785,9 @@ func (s *Server) writeStartContextError(w http.ResponseWriter, err error, op str
 	// errSavedProfileUnresolved's text names only the agent, the profile
 	// and a fixed or ResolveRuntime cause, and is client-safe as is;
 	// errDefaultProfileUnresolved's and errProfileUnresolved's also name
-	// the stored profile names.
-	if errors.Is(err, errSavedProfileUnresolved) || errors.Is(err, errDefaultProfileUnresolved) || errors.Is(err, errProfileUnresolved) {
+	// the stored profile names, and errProfileRuntimeUnresolved's the
+	// stored runtime names.
+	if errors.Is(err, errSavedProfileUnresolved) || errors.Is(err, errDefaultProfileUnresolved) || errors.Is(err, errProfileUnresolved) || errors.Is(err, errProfileRuntimeUnresolved) {
 		writeProfileUnresolved(w, err)
 		return http.StatusServiceUnavailable
 	}
