@@ -17,7 +17,6 @@ package runtime
 import (
 	"context"
 	"reflect"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -103,6 +102,11 @@ func TestCloudRunContainerResources(t *testing.T) {
 			wantErr: []string{"resources.limits.cpu", `"500m"`, "1, 2, 4, 6 or 8 vCPU"},
 		},
 		{
+			name:    "fractional cpu above 1",
+			spec:    &api.ResourceSpec{Limits: limits("1500m", "")},
+			wantErr: []string{"resources.limits.cpu", `"1500m"`, "1, 2, 4, 6 or 8 vCPU"},
+		},
+		{
 			name:    "unsupported whole cpu",
 			spec:    &api.ResourceSpec{Limits: limits("3", "")},
 			wantErr: []string{"1, 2, 4, 6 or 8 vCPU"},
@@ -168,27 +172,35 @@ func TestCloudRunContainerResources(t *testing.T) {
 				t.Errorf("limits = %v, want %v", got.GetLimits(), tc.want)
 			}
 			if got.GetCpuIdle() {
-				t.Error("CpuIdle = true, want CPU allocated for the instance lifetime")
+				t.Error("CpuIdle = true, want it left unset")
 			}
 		})
 	}
 }
 
-// TestCloudRunContainerResources_EveryBandEdgeAccepted pins the table: each
-// supported vCPU count accepts the lowest and highest memory of its band.
-func TestCloudRunContainerResources_EveryBandEdgeAccepted(t *testing.T) {
-	if len(cloudRunCPUMemoryBands) != 5 {
-		t.Fatalf("got %d vCPU bands, want 5", len(cloudRunCPUMemoryBands))
+// TestCloudRunContainerResources_BandEdges pins the Cloud Run vCPU and
+// memory table with literal values, independent of cloudRunCPUMemoryBands:
+// each vCPU count accepts the lowest and highest memory of its range and
+// rejects memory just outside it.
+func TestCloudRunContainerResources_BandEdges(t *testing.T) {
+	tests := []struct {
+		cpu, memory string
+		ok          bool
+	}{
+		{"1", "512Mi", true}, {"1", "4Gi", true}, {"1", "511Mi", false}, {"1", "4097Mi", false},
+		{"2", "512Mi", true}, {"2", "8Gi", true}, {"2", "511Mi", false}, {"2", "8193Mi", false},
+		{"4", "2Gi", true}, {"4", "16Gi", true}, {"4", "2047Mi", false}, {"4", "16385Mi", false},
+		{"6", "4Gi", true}, {"6", "24Gi", true}, {"6", "3Gi", false}, {"6", "4095Mi", false}, {"6", "25Gi", false}, {"6", "24577Mi", false},
+		{"8", "4Gi", true}, {"8", "32Gi", true}, {"8", "4095Mi", false}, {"8", "32769Mi", false},
 	}
-	for _, b := range cloudRunCPUMemoryBands {
-		for _, mib := range []int64{b.minMiB, b.maxMiB} {
-			spec := &api.ResourceSpec{Limits: api.ResourceList{
-				CPU:    strconv.FormatInt(b.cpu, 10),
-				Memory: strconv.FormatInt(mib, 10) + "Mi",
-			}}
-			if _, err := cloudRunContainerResources(spec); err != nil {
-				t.Errorf("%d vCPU with %dMi: %v", b.cpu, mib, err)
-			}
+	for _, tc := range tests {
+		spec := &api.ResourceSpec{Limits: api.ResourceList{CPU: tc.cpu, Memory: tc.memory}}
+		_, err := cloudRunContainerResources(spec)
+		if tc.ok && err != nil {
+			t.Errorf("%s vCPU with %s: %v, want accepted", tc.cpu, tc.memory, err)
+		}
+		if !tc.ok && err == nil {
+			t.Errorf("%s vCPU with %s accepted, want rejected", tc.cpu, tc.memory)
 		}
 	}
 }

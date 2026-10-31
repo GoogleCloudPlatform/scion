@@ -62,9 +62,10 @@ var cloudRunCPUMemoryBands = []struct {
 // cloudRunMemory), forms the API accepts whatever quantity syntax the spec
 // used.
 //
-// CPU stays allocated for the instance's lifetime (CpuIdle false): an
-// agent works without serving requests. resources.disk is not mapped
-// here.
+// CpuIdle is left unset. It selects request-based CPU allocation on
+// services; Cloud Run Instances keep CPU allocated for their whole
+// lifetime either way (confirmed on a live instance), so it is not what
+// keeps an agent's CPU allocated. resources.disk is not mapped here.
 func cloudRunContainerResources(spec *api.ResourceSpec) (*runpb.ResourceRequirements, error) {
 	if spec == nil {
 		return nil, nil
