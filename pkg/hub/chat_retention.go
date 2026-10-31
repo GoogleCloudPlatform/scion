@@ -126,6 +126,11 @@ type chatRetentionState struct {
 	// marker; cutoffAt is when it was read (zero = never).
 	cutoff   *time.Time
 	cutoffAt time.Time
+
+	// pendingFailed holds failed-message purge counts per project that
+	// could not be added to the open sweep run while a tick held it
+	// (addFailedPurgeToSweepRun); a later tick or purge adds them.
+	pendingFailed map[string]store.ChatRetentionCounts
 }
 
 // SetChatRetentionStore wires the chat retention store. Without one the
@@ -206,6 +211,13 @@ func (s *Server) chatRetentionHandler() func(ctx context.Context) {
 		if res.LastAppliedCutoff != nil {
 			s.noteChatRetentionCutoff(*res.LastAppliedCutoff, time.Now())
 		}
+		// Failed-message purge counts kept while a tick held the run row
+		// go into it now, while this handler holds the guard and the lock.
+		fctx, fcancel := context.WithTimeout(context.WithoutCancel(ctx), chatRetentionFinalWriteTimeout)
+		if _, ferr := s.flushPendingFailedCounts(fctx, st, time.Now()); ferr != nil {
+			slog.Error("chat retention: record failed-message purge counts", "error", ferr)
+		}
+		fcancel()
 		if err != nil {
 			slog.Error("chat retention: tick failed", "error", err, "chunks", res.Chunks, "purged", res.Purged.Main)
 			return
@@ -223,6 +235,8 @@ type chatRetentionSweeper struct {
 	store store.ChatRetentionStore
 	now   func() time.Time
 	sleep func(ctx context.Context, d time.Duration) error
+	// scanCap overrides chatRetentionFailedScanCap when positive (tests).
+	scanCap int
 }
 
 func newChatRetentionSweeper(st store.ChatRetentionStore) *chatRetentionSweeper {

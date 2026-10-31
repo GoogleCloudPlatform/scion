@@ -204,27 +204,63 @@ func (s *ChatRetentionStore) PurgeChatMessages(ctx context.Context, ids []string
 func countMain(c *store.ChatRetentionCounts) *int64   { return &c.Main }
 func countFailed(c *store.ChatRetentionCounts) *int64 { return &c.Failed }
 
-// SelectFailedMessages implements store.ChatRetentionStore. The filters are
-// those of the former unbounded failed-message DELETE; the order and the
-// cursor are those of SelectChatRetentionCandidates, so the created index
-// serves it.
-func (s *ChatRetentionStore) SelectFailedMessages(ctx context.Context, cutoff time.Time, after store.ChatRetentionPosition, limit int) ([]store.ChatRetentionCandidate, error) {
+// SelectFailedMessages implements store.ChatRetentionStore. The statement
+// walks the (created, id) index from the cursor and stops after scanLimit
+// rows, so its work is bounded even when failed rows are sparse (messages
+// has no dispatch_state index). Eligibility is computed in SQL with the
+// filters of the former unbounded failed-message DELETE, so LIKE behaves as
+// it did there on each dialect; the rows are filtered here so the scan
+// reports how far it got.
+func (s *ChatRetentionStore) SelectFailedMessages(ctx context.Context, cutoff time.Time, after store.ChatRetentionPosition, scanLimit, limit int) (store.FailedMessageScan, error) {
+	out := store.FailedMessageScan{Next: after}
 	if err := s.requireDB(); err != nil {
-		return nil, err
+		return out, err
 	}
-	if limit <= 0 {
-		return nil, nil
+	if scanLimit <= 0 || limit <= 0 {
+		return out, nil
 	}
-	query := `SELECT id, created, project_id, conversation_id FROM messages WHERE created < ?`
-	args := []any{cutoff.UTC()}
+	query := `SELECT id, created, project_id, conversation_id,
+  CASE WHEN dispatch_state = ? AND recipient LIKE 'agent:%' THEN 1 ELSE 0 END
+  FROM messages WHERE created < ?`
+	args := []any{store.MessageDispatchFailed, cutoff.UTC()}
 	if !after.IsStart() {
 		c := after.Created.UTC()
 		query += ` AND created >= ? AND (created > ? OR id > ?)`
 		args = append(args, c, c, after.ID)
 	}
-	query += ` AND dispatch_state = ? AND recipient LIKE 'agent:%' ORDER BY created, id LIMIT ?`
-	args = append(args, store.MessageDispatchFailed, limit)
-	return s.selectCandidates(ctx, "failed messages", query, args, limit)
+	query += ` ORDER BY created, id LIMIT ?`
+	args = append(args, scanLimit)
+
+	rows, err := s.db.QueryContext(ctx, s.rebind(query), args...)
+	if err != nil {
+		return out, fmt.Errorf("chat retention: select failed messages: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	scanned, truncated := 0, false
+	for rows.Next() {
+		var c store.ChatRetentionCandidate
+		var conv sql.NullString
+		var eligible int
+		if err := rows.Scan(&c.ID, &c.Created, &c.ProjectID, &conv, &eligible); err != nil {
+			return out, fmt.Errorf("chat retention: scan failed messages: %w", err)
+		}
+		c.Created = c.Created.UTC()
+		c.ConversationID = conv.String
+		scanned++
+		out.Next = store.ChatRetentionPosition{Created: c.Created, ID: c.ID}
+		if eligible == 1 {
+			out.Candidates = append(out.Candidates, c)
+			if len(out.Candidates) == limit {
+				truncated = true
+				break
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return out, fmt.Errorf("chat retention: select failed messages: %w", err)
+	}
+	out.Exhausted = !truncated && scanned < scanLimit
+	return out, nil
 }
 
 // PurgeFailedMessages implements store.ChatRetentionStore.

@@ -54,7 +54,14 @@ type fakeChatRetentionStore struct {
 	msgs      []fakeChatRetentionMsg
 	cursor    store.ChatRetentionCursor
 	hasCursor bool
-	runs      []*store.ChatRetentionRun
+	// failedCursor is the cursor of phase "failed"; failedSaves counts
+	// its writes.
+	failedCursor    store.ChatRetentionCursor
+	hasFailedCursor bool
+	failedSaves     int
+	// failedScanned holds the rows each failed-message scan read.
+	failedScanned []int
+	runs          []*store.ChatRetentionRun
 
 	purgeCost func(call int) time.Duration
 	purgeErr  error
@@ -118,26 +125,32 @@ func (f *fakeChatRetentionStore) PurgeChatMessages(ctx context.Context, ids []st
 	return res, nil
 }
 
-func (f *fakeChatRetentionStore) SelectFailedMessages(ctx context.Context, cutoff time.Time, after store.ChatRetentionPosition, limit int) ([]store.ChatRetentionCandidate, error) {
+func (f *fakeChatRetentionStore) SelectFailedMessages(ctx context.Context, cutoff time.Time, after store.ChatRetentionPosition, scanLimit, limit int) (store.FailedMessageScan, error) {
 	f.selectCalls++
 	f.lastSelect = after
-	var out []store.ChatRetentionCandidate
+	out := store.FailedMessageScan{Next: after}
+	scanned, truncated := 0, false
 	for _, m := range f.msgs {
-		if !m.created.Before(cutoff) {
+		if !m.created.Before(cutoff) || scanned == scanLimit {
 			break
 		}
 		if !after.IsStart() && (m.created.Before(after.Created) || (m.created.Equal(after.Created) && m.id <= after.ID)) {
 			continue
 		}
-		f.scanned++
+		scanned++
+		out.Next = store.ChatRetentionPosition{Created: m.created, ID: m.id}
 		if m.state != store.MessageDispatchFailed || (m.recipient != "" && !strings.HasPrefix(m.recipient, "agent:")) {
 			continue
 		}
-		out = append(out, store.ChatRetentionCandidate{ID: m.id, Created: m.created, ProjectID: m.project})
-		if len(out) == limit {
+		out.Candidates = append(out.Candidates, store.ChatRetentionCandidate{ID: m.id, Created: m.created, ProjectID: m.project})
+		if len(out.Candidates) == limit {
+			truncated = true
 			break
 		}
 	}
+	f.scanned += scanned
+	f.failedScanned = append(f.failedScanned, scanned)
+	out.Exhausted = !truncated && scanned < scanLimit
 	return out, nil
 }
 
@@ -184,6 +197,12 @@ func (f *fakeChatRetentionStore) purge(ctx context.Context, ids []string, call i
 }
 
 func (f *fakeChatRetentionStore) GetChatRetentionCursor(ctx context.Context, phase string) (store.ChatRetentionCursor, error) {
+	if phase == store.ChatRetentionPhaseFailed {
+		if !f.hasFailedCursor {
+			return store.ChatRetentionCursor{Phase: phase}, nil
+		}
+		return f.failedCursor, nil
+	}
 	if !f.hasCursor {
 		return store.ChatRetentionCursor{Phase: phase}, nil
 	}
@@ -193,6 +212,11 @@ func (f *fakeChatRetentionStore) GetChatRetentionCursor(ctx context.Context, pha
 func (f *fakeChatRetentionStore) SaveChatRetentionCursor(ctx context.Context, c store.ChatRetentionCursor) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if c.Phase == store.ChatRetentionPhaseFailed {
+		f.failedCursor, f.hasFailedCursor = c, true
+		f.failedSaves++
+		return nil
 	}
 	f.cursor, f.hasCursor = c, true
 	return nil

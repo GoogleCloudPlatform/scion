@@ -23,6 +23,11 @@ import (
 // the oldest-first walk of messages over the created index.
 const ChatRetentionPhaseMain = "main"
 
+// ChatRetentionPhaseFailed is the cursor phase of the failed-message purge
+// (messaging.failed_message_retention_days): its walk over the created
+// index. It never carries a last applied cutoff.
+const ChatRetentionPhaseFailed = "failed"
+
 // Chat retention run triggers and statuses (chat_retention_runs).
 const (
 	ChatRetentionTriggerSweep = "sweep"
@@ -119,6 +124,18 @@ func (r ChatRetentionPurgeResult) Total() ChatRetentionCounts {
 	return t
 }
 
+// FailedMessageScan is the outcome of one capped failed-message scan.
+type FailedMessageScan struct {
+	// Candidates are the failed agent messages found, oldest first.
+	Candidates []ChatRetentionCandidate
+	// Next is where the next scan resumes: the last candidate when the
+	// limit cut the scan short, else the last row scanned. It equals the
+	// position scanned from when the scan found no row.
+	Next ChatRetentionPosition
+	// Exhausted is true when no row below the cutoff remains after Next.
+	Exhausted bool
+}
+
 // ChatRetentionPolicy is the policy a run applied, recorded on its row.
 type ChatRetentionPolicy struct {
 	MessagesRetentionDays int       `json:"messages_retention_days"`
@@ -160,13 +177,15 @@ type ChatRetentionStore interface {
 	// already gone counts nothing.
 	PurgeChatMessages(ctx context.Context, ids []string, projectOf map[string]string, cursor ChatRetentionCursor) (ChatRetentionPurgeResult, error)
 
-	// SelectFailedMessages returns up to limit messages in
-	// dispatch_state "failed" with an agent recipient ("agent:" prefix),
-	// created before cutoff and after the position after, oldest first in
-	// (created, id) order. It is served by the created index. A "user:"
-	// recipient row is never returned: it reaches "failed" only by the
-	// stuck-pending expiry, and is real chat history.
-	SelectFailedMessages(ctx context.Context, cutoff time.Time, after ChatRetentionPosition, limit int) ([]ChatRetentionCandidate, error)
+	// SelectFailedMessages scans at most scanLimit messages created before
+	// cutoff and after the position after, oldest first in (created, id)
+	// order over the created index, and returns those of them in
+	// dispatch_state "failed" with an agent recipient ("agent:" prefix), up
+	// to limit. The scan cap bounds the work of one statement however
+	// sparse failed rows are. A "user:" recipient row is never returned: it
+	// reaches "failed" only by the stuck-pending expiry, and is real chat
+	// history.
+	SelectFailedMessages(ctx context.Context, cutoff time.Time, after ChatRetentionPosition, scanLimit, limit int) (FailedMessageScan, error)
 
 	// PurgeFailedMessages deletes the given messages with the same
 	// dependent rows as PurgeChatMessages, in one transaction, and counts

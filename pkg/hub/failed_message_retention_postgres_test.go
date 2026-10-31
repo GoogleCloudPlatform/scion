@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"testing"
 	"time"
@@ -27,6 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
@@ -36,8 +38,9 @@ import (
 // TestFailedMessageRetention_Postgres_SameRowsNoOrphans runs the
 // failed-message purge handler on Postgres against the real web chat
 // tables: exactly the failed agent messages older than the default 7-day
-// window are purged, never pending, deferred, delivered or "user:"
-// recipient rows, and no dependent row is orphaned.
+// window are purged over several chunks, never pending, deferred,
+// delivered or "user:" recipient rows, no dependent row is orphaned, and
+// the purge keeps its cursor.
 func TestFailedMessageRetention_Postgres_SameRowsNoOrphans(t *testing.T) {
 	requirePG(t)
 	ctx := context.Background()
@@ -54,6 +57,14 @@ func TestFailedMessageRetention_Postgres_SameRowsNoOrphans(t *testing.T) {
 
 	srv := &Server{store: cs, agentLifecycleLog: slog.Default()}
 	srv.SetChatRetentionStore(cs.ChatRetention())
+	// The smallest chunk and no pause, so the 60 failed rows take three
+	// chunks end to end.
+	settings := newFakeHubSettingStore()
+	settings.seed(opsettings.ChatRetentionSectionName, json.RawMessage(`{"sweep":{"chunk_size":25,"pause_ms":0}}`))
+	ops := NewOperationalSettings(settings, emptyKoanf(), emptyKoanf())
+	_, err = ops.Refresh(ctx)
+	require.NoError(t, err)
+	srv.SetOperationalSettings(ops)
 
 	project := api.NewUUID()
 	now := time.Now().UTC()
@@ -77,7 +88,7 @@ func TestFailedMessageRetention_Postgres_SameRowsNoOrphans(t *testing.T) {
 	}
 
 	var purge []string
-	for i := 0; i < 30; i++ {
+	for i := 0; i < 60; i++ {
 		purge = append(purge, seed(old.Add(time.Duration(i)*time.Second), store.MessageDispatchFailed, "agent:b"))
 	}
 	keep := []string{
@@ -104,4 +115,5 @@ func TestFailedMessageRetention_Postgres_SameRowsNoOrphans(t *testing.T) {
 		assert.Equal(t, len(keep), count(`SELECT COUNT(*) FROM `+table), table)
 	}
 	assert.Equal(t, 0, count(`SELECT COUNT(*) FROM chat_retention_runs`), "chat retention off: no run is opened")
+	assert.Equal(t, 1, count(`SELECT COUNT(*) FROM chat_retention_cursors WHERE phase = $1`, store.ChatRetentionPhaseFailed))
 }

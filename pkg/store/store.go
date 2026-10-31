@@ -1958,8 +1958,9 @@ type BrokerDispatchStore interface {
 	// "pending", or "failed" with reason == expiredReason, by the pre-fix
 	// nc-promote-busy bug (a storeMsg persisted without stamping
 	// DispatchState). The exact complement of ExpireStuckPendingMessages'
-	// and ChatRetentionStore.SelectFailedMessages' agent-only scoping: only an agent recipient
-	// is ever legitimately in either state. Returns the number repaired.
+	// and ChatRetentionStore.SelectFailedMessages' agent-only scoping: only
+	// an agent recipient is ever legitimately in either state. Returns the
+	// number repaired.
 	BackfillNonAgentDispatchState(ctx context.Context, expiredReason string) (int, error)
 }
 

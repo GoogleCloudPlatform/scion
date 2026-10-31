@@ -137,9 +137,10 @@ func (s *Server) failedMessageRetentionDays() int {
 //
 // It filters strictly on dispatch_state and an agent recipient, so
 // delivered history and "user:" rows are never touched, and deletes in
-// paced chunks with the chat retention cascade (see PurgeFailed), so the
-// dependent rows of every deleted message go with it. The counts are added
-// to the open chat retention sweep run when there is one, and logged.
+// paced, capped steps from a persisted cursor with the chat retention
+// cascade (see PurgeFailed), so the dependent rows of every deleted message
+// go with it. The counts are added to the open chat retention sweep run
+// when there is one (see addFailedPurgeToSweepRun), and logged.
 func (s *Server) failedMessageRetentionHandler() func(ctx context.Context) {
 	return func(ctx context.Context) {
 		ctx, cancel := context.WithTimeout(ctx, failedMessageRetentionTimeout)
@@ -157,13 +158,13 @@ func (s *Server) failedMessageRetentionHandler() func(ctx context.Context) {
 
 		res, err := newChatRetentionSweeper(st).PurgeFailed(ctx, cutoff, s.chatRetentionConfig())
 		total := res.Total()
-		var recorded bool
+		var inRun string
 		if total.Failed > 0 {
 			// The run update must still happen when the purge stopped at
 			// the handler's deadline.
 			wctx, wcancel := context.WithTimeout(context.WithoutCancel(ctx), chatRetentionFinalWriteTimeout)
 			var rerr error
-			recorded, rerr = s.addFailedPurgeToSweepRun(wctx, st, res.ByProject, time.Now())
+			inRun, rerr = s.addFailedPurgeToSweepRun(wctx, st, res.ByProject, time.Now())
 			wcancel()
 			if rerr != nil {
 				s.agentLifecycleLog.Error("failed-message-retention: record counts in chat retention run failed", "error", rerr)
@@ -171,8 +172,8 @@ func (s *Server) failedMessageRetentionHandler() func(ctx context.Context) {
 		}
 		attrs := []any{"count", total.Failed, "addressees", total.Addressees, "mentions", total.Mentions,
 			"stars", total.Stars, "ext", total.Ext, "attachments", total.Attachments,
-			"chunks", res.Chunks, "done", res.Done, "max_tx_ms", res.MaxTx.Milliseconds(),
-			"recorded_in_run", recorded, "retentionDays", retentionDays, "cutoff", cutoff}
+			"chunks", res.Chunks, "scans", res.Scans, "done", res.Done, "max_tx_ms", res.MaxTx.Milliseconds(),
+			"chat_retention_run", inRun, "retentionDays", retentionDays, "cutoff", cutoff}
 		switch {
 		case err != nil:
 			s.agentLifecycleLog.Error("failed-message-retention: purge failed", append([]any{"error", err}, attrs...)...)

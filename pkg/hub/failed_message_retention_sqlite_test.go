@@ -66,7 +66,8 @@ func TestFailedMessageRetention_SameRowsNoOrphansSQLite(t *testing.T) {
 		assert.Equal(t, len(keep), f.count(`SELECT COUNT(*) FROM `+table), table)
 	}
 	assert.Equal(t, 0, f.count(`SELECT COUNT(*) FROM chat_retention_runs`), "chat retention off: no run is opened")
-	assert.Equal(t, 0, f.count(`SELECT COUNT(*) FROM chat_retention_cursors`), "the failed purge writes no cursor")
+	assert.Equal(t, 0, f.count(`SELECT COUNT(*) FROM chat_retention_cursors WHERE phase = ?`, store.ChatRetentionPhaseMain), "the main cursor is not written")
+	assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM chat_retention_cursors WHERE phase = ?`, store.ChatRetentionPhaseFailed), "the failed purge keeps its own cursor")
 }
 
 // TestFailedMessageRetention_WindowChangeWithoutRestartSQLite: a PUT of
@@ -111,7 +112,7 @@ func TestFailedMessageRetention_AddsToOpenSweepRunSQLite(t *testing.T) {
 	require.Equal(t, int64(1), run.Counts[f.project.ID].Main)
 
 	// Within the 30-day window, so only the failed purge deletes it.
-	_ = f.message(chatRetentionSeed{created: now.Add(-8 * 24 * time.Hour), state: store.MessageDispatchFailed})
+	_ = f.message(chatRetentionSeed{created: now.Add(-8*24*time.Hour + time.Minute), state: store.MessageDispatchFailed})
 	f.srv.failedMessageRetentionHandler()(f.ctx)
 
 	after, err := f.crs.LatestChatRetentionRun(f.ctx, store.ChatRetentionTriggerSweep, now.Add(-time.Hour))
@@ -123,6 +124,49 @@ func TestFailedMessageRetention_AddsToOpenSweepRunSQLite(t *testing.T) {
 	}, after.Counts[f.project.ID])
 	assert.Equal(t, run.Status, after.Status)
 	assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM chat_retention_runs`))
+	assert.Equal(t, chatRetentionNoOrphans(), chatRetentionOrphans(t, f.db))
+}
+
+// TestFailedMessageRetention_DeferredCountsReachRunSQLite: counts of a purge
+// that ran while a chat retention tick held the run row are kept, and the
+// next chat retention tick adds them to the open run; counts kept again are
+// added by the next failed purge, with its own.
+func TestFailedMessageRetention_DeferredCountsReachRunSQLite(t *testing.T) {
+	f := newChatRetentionHubFixture(t)
+	setChatRetentionSettings(t, f.srv, true, `{"enabled":true,"messages_retention_days":30,"sweep":{"pause_ms":0}}`)
+	now := time.Now().UTC()
+	_ = f.message(chatRetentionSeed{created: now.Add(-40 * 24 * time.Hour)})
+	f.srv.chatRetentionHandler()(f.ctx) // opens the day's run
+	failedCount := func() int64 {
+		run, err := f.crs.LatestChatRetentionRun(f.ctx, store.ChatRetentionTriggerSweep, now.Add(-time.Hour))
+		require.NoError(t, err)
+		require.NotNil(t, run)
+		return run.Counts[f.project.ID].Failed
+	}
+
+	// A tick holds the guard: the counts are kept, not recorded.
+	_ = f.message(chatRetentionSeed{created: now.Add(-8 * 24 * time.Hour), state: store.MessageDispatchFailed})
+	f.srv.chatRetention.running.Store(true)
+	f.srv.failedMessageRetentionHandler()(f.ctx)
+	f.srv.chatRetention.running.Store(false)
+	assert.Equal(t, int64(0), failedCount())
+	require.Equal(t, int64(1), f.srv.chatRetention.pendingFailed[f.project.ID].Failed)
+
+	// The next tick (skipped by its interval gate) still adds them.
+	f.srv.chatRetentionHandler()(f.ctx)
+	assert.Equal(t, int64(1), failedCount())
+	assert.Nil(t, f.srv.chatRetention.pendingFailed)
+
+	// Kept again; this time the next failed purge adds them with its own.
+	_ = f.message(chatRetentionSeed{created: now.Add(-8*24*time.Hour + time.Minute), state: store.MessageDispatchFailed})
+	f.srv.chatRetention.running.Store(true)
+	f.srv.failedMessageRetentionHandler()(f.ctx)
+	f.srv.chatRetention.running.Store(false)
+	assert.Equal(t, int64(1), failedCount())
+	_ = f.message(chatRetentionSeed{created: now.Add(-8*24*time.Hour + 2*time.Minute), state: store.MessageDispatchFailed})
+	f.srv.failedMessageRetentionHandler()(f.ctx)
+	assert.Equal(t, int64(3), failedCount())
+	assert.Nil(t, f.srv.chatRetention.pendingFailed)
 	assert.Equal(t, chatRetentionNoOrphans(), chatRetentionOrphans(t, f.db))
 }
 

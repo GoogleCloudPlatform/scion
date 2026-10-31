@@ -240,9 +240,9 @@ func TestChatRetentionStore_SelectCandidates(t *testing.T) {
 	require.Empty(t, got)
 }
 
-// TestChatRetentionStore_SelectFailedMessages: the failed-message
-// selection returns the rows the former unbounded DELETE removed (failed,
-// agent recipient, created strictly before the cutoff), oldest first in
+// TestChatRetentionStore_SelectFailedMessages: the failed-message scan
+// returns the rows the former unbounded DELETE removed (failed, agent
+// recipient, created strictly before the cutoff), oldest first in
 // (created, id) order, and never a pending, deferred, delivered or "user:"
 // recipient row; the limit and the cursor bound and resume it.
 func TestChatRetentionStore_SelectFailedMessages(t *testing.T) {
@@ -268,26 +268,79 @@ func TestChatRetentionStore_SelectFailedMessages(t *testing.T) {
 	sort.Strings(ties)
 	want := []string{oldFailed, oldFailedDiscord, ties[0], ties[1]}
 
-	got, err := f.st.SelectFailedMessages(f.ctx, cutoff, store.ChatRetentionPosition{}, 100)
+	got, err := f.st.SelectFailedMessages(f.ctx, cutoff, store.ChatRetentionPosition{}, 100, 100)
 	require.NoError(t, err)
-	require.Equal(t, want, candidateIDs(got))
-	assert.Equal(t, project.String(), got[0].ProjectID)
-	assert.True(t, got[0].Created.Equal(at(72)), "created %v", got[0].Created)
+	require.Equal(t, want, candidateIDs(got.Candidates))
+	assert.True(t, got.Exhausted)
+	assert.Equal(t, ties[1], got.Next.ID, "the scan rests at the last row below the cutoff")
+	assert.Equal(t, project.String(), got.Candidates[0].ProjectID)
+	assert.True(t, got.Candidates[0].Created.Equal(at(72)), "created %v", got.Candidates[0].Created)
 
-	got, err = f.st.SelectFailedMessages(f.ctx, cutoff, store.ChatRetentionPosition{}, 3)
+	// The limit cuts the scan at the last candidate.
+	got, err = f.st.SelectFailedMessages(f.ctx, cutoff, store.ChatRetentionPosition{}, 100, 3)
 	require.NoError(t, err)
-	require.Equal(t, want[:3], candidateIDs(got))
+	require.Equal(t, want[:3], candidateIDs(got.Candidates))
+	assert.False(t, got.Exhausted)
+	assert.Equal(t, ties[0], got.Next.ID)
 
-	got, err = f.st.SelectFailedMessages(f.ctx, cutoff, store.ChatRetentionPosition{Created: tieAt, ID: ties[0]}, 100)
+	got, err = f.st.SelectFailedMessages(f.ctx, cutoff, store.ChatRetentionPosition{Created: tieAt, ID: ties[0]}, 100, 100)
 	require.NoError(t, err)
-	require.Equal(t, []string{ties[1]}, candidateIDs(got))
-	got, err = f.st.SelectFailedMessages(f.ctx, cutoff, store.ChatRetentionPosition{Created: tieAt, ID: ties[1]}, 100)
+	require.Equal(t, []string{ties[1]}, candidateIDs(got.Candidates))
+	got, err = f.st.SelectFailedMessages(f.ctx, cutoff, store.ChatRetentionPosition{Created: tieAt, ID: ties[1]}, 100, 100)
 	require.NoError(t, err)
-	require.Empty(t, got)
+	require.Empty(t, got.Candidates)
+	assert.True(t, got.Exhausted)
+	assert.Equal(t, ties[1], got.Next.ID, "an empty scan stays where it started")
 
-	got, err = f.st.SelectFailedMessages(f.ctx, cutoff, store.ChatRetentionPosition{}, 0)
+	got, err = f.st.SelectFailedMessages(f.ctx, cutoff, store.ChatRetentionPosition{}, 100, 0)
 	require.NoError(t, err)
-	require.Empty(t, got)
+	require.Empty(t, got.Candidates)
+}
+
+// TestChatRetentionStore_SelectFailedMessagesScanCap: with failed rows
+// sparse among delivered ones, each scan reads at most scanLimit rows and
+// moves the position to the last row it read, so a walk of capped scans
+// finds every failed row and no other.
+func TestChatRetentionStore_SelectFailedMessagesScanCap(t *testing.T) {
+	f := newChatRetentionFixture(t)
+	project := uuid.New()
+	cutoff := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	base := cutoff.Add(-48 * time.Hour)
+	var failed []string
+	for i := 0; i < 45; i++ {
+		state := "dispatched"
+		if i%20 == 13 {
+			state = "failed"
+		}
+		id := f.message(chatRetentionMsg{project: project, created: base.Add(time.Duration(i) * time.Minute), state: state})
+		if state == "failed" {
+			failed = append(failed, id)
+		}
+	}
+
+	// The first scan of 10 rows holds no failed row: no candidate, but the
+	// position moves past the 10 rows read.
+	first, err := f.st.SelectFailedMessages(f.ctx, cutoff, store.ChatRetentionPosition{}, 10, 100)
+	require.NoError(t, err)
+	assert.Empty(t, first.Candidates)
+	assert.False(t, first.Exhausted)
+	assert.True(t, first.Next.Created.Equal(base.Add(9*time.Minute)), "next %v", first.Next.Created)
+
+	var found []string
+	pos, scans := store.ChatRetentionPosition{}, 0
+	for {
+		got, err := f.st.SelectFailedMessages(f.ctx, cutoff, pos, 10, 100)
+		require.NoError(t, err)
+		scans++
+		require.LessOrEqual(t, scans, 10, "the walk ends")
+		found = append(found, candidateIDs(got.Candidates)...)
+		pos = got.Next
+		if got.Exhausted {
+			break
+		}
+	}
+	assert.Equal(t, failed, found)
+	assert.Equal(t, 5, scans, "45 rows in scans of 10, the last one short")
 }
 
 // TestChatRetentionStore_PurgeFailedMessages: the failed-message purge
@@ -320,7 +373,7 @@ func TestChatRetentionStore_PurgeFailedMessages(t *testing.T) {
 	for _, table := range []string{"message_addressees", "webchat_message_ext", "webchat_mention", "webchat_message_star", "webchat_message_attachment"} {
 		assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM `+table+` WHERE message_id = ?`, keep), table)
 	}
-	assert.Equal(t, 0, f.count(`SELECT COUNT(*) FROM chat_retention_cursors`), "the failed-message purge writes no cursor")
+	assert.Equal(t, 0, f.count(`SELECT COUNT(*) FROM chat_retention_cursors`), "the purge transaction writes no cursor")
 
 	res, err = f.st.PurgeFailedMessages(f.ctx, []string{m1, m2}, nil)
 	require.NoError(t, err)
