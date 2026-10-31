@@ -1026,7 +1026,7 @@ func launchOp(kind string) string {
 
 // projectPathNotInitializedLaunchText is the launch report's fixed text for
 // agent.ErrProjectPathNotInitialized (no host path).
-const projectPathNotInitializedLaunchText = "the project path on the Runtime Broker is not initialized as a project (no .scion directory or marker); a project or broker admin must initialize the project path and retry"
+const projectPathNotInitializedLaunchText = "the project path on the Runtime Broker is not initialized as a project (no .scion directory or marker inside it); a project or broker admin must create a .scion directory inside the project path (not a symlink to another location) and retry"
 
 // classifyStartErrorCode is classifyStartError's cases that do not depend on
 // the launch step or a runtime-typed failure. It returns "" when none

@@ -355,3 +355,18 @@ func TestCheckExplicitProjectPath_Exemptions(t *testing.T) {
 		t.Errorf("a git work tree without .scion is out of scope and exempt, got %v", err)
 	}
 }
+
+// TestProjectPathNotInitializedErrorText: the message names the configured
+// path and its .scion directory (once, also for a path naming .scion), and
+// says the .scion must be a directory, not a symlink elsewhere.
+func TestProjectPathNotInitializedErrorText(t *testing.T) {
+	for _, tc := range []struct{ path, want string }{
+		{"/srv/proj", "create /srv/proj/.scion as a directory"},
+		{"/srv/proj/.scion", "create /srv/proj/.scion as a directory"},
+	} {
+		msg := (&ProjectPathNotInitializedError{Path: tc.path}).Error()
+		if !strings.Contains(msg, tc.want) || !strings.Contains(msg, "not a symlink to another location") || strings.Contains(msg, ".scion/.scion") {
+			t.Errorf("Path %q: message %q, want it to contain %q and the symlink note", tc.path, msg, tc.want)
+		}
+	}
+}

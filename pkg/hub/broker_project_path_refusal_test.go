@@ -73,8 +73,13 @@ func TestProjectPathRefusalText(t *testing.T) {
 	withPath := projectPathRefusalText("edge-1", projectPathLocalPath)
 	assert.Contains(t, withPath, "Runtime Broker edge-1")
 	assert.Contains(t, withPath, projectPathLocalPath+"/.scion")
+	assert.Contains(t, withPath, "not a symlink to another location")
+	suffixed := projectPathRefusalText("edge-1", projectPathLocalPath+"/.scion")
+	assert.Contains(t, suffixed, projectPathLocalPath+"/.scion as a directory")
+	assert.NotContains(t, suffixed, "/.scion/.scion")
 	without := projectPathRefusalText("edge-1", "")
 	assert.Contains(t, without, "Runtime Broker edge-1")
+	assert.Contains(t, without, "not a symlink to another location")
 	assert.NotContains(t, without, "/")
 }
 

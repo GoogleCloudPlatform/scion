@@ -46,8 +46,17 @@ type ProjectPathNotInitializedError struct {
 }
 
 func (e *ProjectPathNotInitializedError) Error() string {
-	return fmt.Sprintf("project path %s has no .scion directory or marker; initialize it as a project (create %s) and retry",
-		e.Path, filepath.Join(e.Path, config.DotScion))
+	return fmt.Sprintf("project path %s has no .scion directory or marker inside it; create %s as a directory (not a symlink to another location) and retry",
+		e.Path, scionDirFor(e.Path))
+}
+
+// scionDirFor is the .scion directory of a configured project path, which
+// may name the project root or its .scion directory.
+func scionDirFor(projectPath string) string {
+	if filepath.Base(projectPath) == config.DotScion {
+		return projectPath
+	}
+	return filepath.Join(projectPath, config.DotScion)
 }
 
 // Is reports ErrProjectPathNotInitialized.

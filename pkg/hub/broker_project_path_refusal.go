@@ -35,7 +35,7 @@ const projectPathNotInitializedErrorCode = api.BrokerErrCodeProjectPathNotInitia
 // project_path_not_initialized refusal when no path may be shown. The
 // broker's own message is never relayed: it is broker text, and it names a
 // host path.
-const projectPathRefusalGeneric = "the project path configured for this project on the Runtime Broker is not initialized as a project; a project or broker admin must initialize the project path and retry"
+const projectPathRefusalGeneric = "the project path configured for this project on the Runtime Broker is not initialized as a project; a project or broker admin must create a .scion directory inside the project path (not a symlink to another location) and retry"
 
 // isProjectPathNotInitialized reports whether err is a runtime broker's 409
 // project_path_not_initialized.
@@ -55,10 +55,14 @@ func projectPathRefusalText(brokerName, localPath string) string {
 		brokerName = "Runtime Broker " + brokerName
 	}
 	if localPath == "" {
-		return fmt.Sprintf("the project path configured for this project on %s is not initialized as a project; a project or broker admin must initialize the project path and retry", brokerName)
+		return fmt.Sprintf("the project path configured for this project on %s is not initialized as a project; a project or broker admin must create a .scion directory inside the project path (not a symlink to another location) and retry", brokerName)
 	}
-	return fmt.Sprintf("the project path configured for this project on %s is not initialized as a project (no .scion directory or marker); a project or broker admin must create %s and retry",
-		brokerName, path.Join(localPath, ".scion"))
+	scionDir := localPath
+	if path.Base(localPath) != ".scion" {
+		scionDir = path.Join(localPath, ".scion")
+	}
+	return fmt.Sprintf("the project path configured for this project on %s is not initialized as a project (no .scion directory or marker inside it); a project or broker admin must create %s as a directory (not a symlink to another location) and retry",
+		brokerName, scionDir)
 }
 
 // relayProjectPathRefusal answers a runtime broker's 409
