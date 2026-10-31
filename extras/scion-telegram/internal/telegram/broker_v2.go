@@ -354,7 +354,7 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 	}
 	if retired != nil {
 		// Read the logger here: the goroutine outlives Configure and must
-		// not touch broker fields.
+		// not read mutable broker fields.
 		log := b.log
 		go func() {
 			defer b.retiring.Done()
