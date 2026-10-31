@@ -17,6 +17,7 @@ package runtimebroker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -284,30 +285,59 @@ func TestSignedCaseA_AbsentWorkspace(t *testing.T) {
 
 // TestSignedCaseA_FailedPageLeavesMarkerOnlyAndRetryApplies: a failure on
 // page 2 of 3 leaves the workspace holding only its identity entry and no
-// stage; the next attempt is applied, not skipped.
+// stage; the next attempt is applied, not skipped. Both failure paths are
+// covered: a 404, which fails at once, and a transport error on every
+// attempt, which exhausts the bounded retries (1, 2 and 4 s, injected here
+// so the test does not sleep) and then fails closed.
 func TestSignedCaseA_FailedPageLeavesMarkerOnlyAndRetryApplies(t *testing.T) {
-	f := newCaseAFixture(t, map[string]string{"1": "a", "2": "b", "3": "c"})
-	f.writeMarker(t, "m")
-	f.h.pageSize = 1
-	f.h.pageErr = func(call int) error {
-		if call == 2 {
-			// A 404 is not retried, so the bootstrap fails on page 2.
-			return &apiclient.APIError{StatusCode: http.StatusNotFound}
-		}
-		return nil
+	for _, tc := range []struct {
+		name string
+		err  error
+		// wantCalls is the page requests of the failed run: page 1, then
+		// page 2's attempts.
+		wantCalls int
+		wantWaits []time.Duration
+	}{
+		{"fail fast on 404", &apiclient.APIError{StatusCode: http.StatusNotFound}, 2, nil},
+		{"retry exhaustion on transport error", errors.New("connection reset by peer"), 1 + 1 + len(defaultSignedPageBackoff), defaultSignedPageBackoff},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newCaseAFixture(t, map[string]string{"1": "a", "2": "b", "3": "c"})
+			var waits []time.Duration
+			f.srv.signedDownload.sleep = func(ctx context.Context, d time.Duration) error {
+				waits = append(waits, d)
+				return ctx.Err()
+			}
+			f.writeMarker(t, "m")
+			f.h.pageSize = 1
+			f.h.pageErr = func(call int) error {
+				if call >= 2 {
+					return tc.err
+				}
+				return nil
+			}
+			if _, err := f.run(); err == nil {
+				t.Fatal("a failed page must fail the bootstrap")
+			}
+			if f.h.pageCalls != tc.wantCalls {
+				t.Fatalf("page calls = %d, want %d", f.h.pageCalls, tc.wantCalls)
+			}
+			if len(waits) != len(tc.wantWaits) || (len(waits) > 0 && fmt.Sprint(waits) != fmt.Sprint(tc.wantWaits)) {
+				t.Fatalf("backoff waits = %v, want %v", waits, tc.wantWaits)
+			}
+			wantTree(t, f.w, map[string]string{".scion": "m"})
+			if s := stagesOf(t, f.w); len(s) != 0 {
+				t.Fatalf("stages left: %v", s)
+			}
+			f.h.mu.Lock()
+			f.h.pageErr = nil
+			f.h.mu.Unlock()
+			if skipped, err := f.run(); err != nil || skipped {
+				t.Fatalf("retry = (skipped %v, err %v); a marker-only workspace counts as absent", skipped, err)
+			}
+			wantTree(t, f.w, map[string]string{".scion": "*", "1": "a", "2": "b", "3": "c"})
+		})
 	}
-	if _, err := f.run(); err == nil {
-		t.Fatal("a failed page must fail the bootstrap")
-	}
-	wantTree(t, f.w, map[string]string{".scion": "m"})
-	if s := stagesOf(t, f.w); len(s) != 0 {
-		t.Fatalf("stages left: %v", s)
-	}
-	f.h.pageErr = nil
-	if skipped, err := f.run(); err != nil || skipped {
-		t.Fatalf("retry = (skipped %v, err %v); a marker-only workspace counts as absent", skipped, err)
-	}
-	wantTree(t, f.w, map[string]string{".scion": "*", "1": "a", "2": "b", "3": "c"})
 }
 
 func TestSignedCaseA_SkipsWorkspaceWithContent(t *testing.T) {
