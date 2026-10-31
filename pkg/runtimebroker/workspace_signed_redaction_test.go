@@ -59,12 +59,12 @@ func recordedSpansText(rec *tracetest.SpanRecorder) string {
 	for _, s := range rec.Ended() {
 		fmt.Fprintf(&b, "%s|%s|", s.Name(), s.Status().Description)
 		for _, a := range s.Attributes() {
-			fmt.Fprintf(&b, "%s=%s;", a.Key, a.Value.Emit())
+			fmt.Fprintf(&b, "%s=%s;", a.Key, a.Value.String())
 		}
 		for _, e := range s.Events() {
 			fmt.Fprintf(&b, "event %s:", e.Name)
 			for _, a := range e.Attributes {
-				fmt.Fprintf(&b, "%s=%s;", a.Key, a.Value.Emit())
+				fmt.Fprintf(&b, "%s=%s;", a.Key, a.Value.String())
 			}
 		}
 	}

@@ -146,12 +146,6 @@ func (h *fakeSignedHub) getCount(p string) int {
 	return h.gets[p]
 }
 
-func (h *fakeSignedHub) issuedURLs() []string {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return append([]string(nil), h.issued...)
-}
-
 // noSleep makes retries immediate in tests.
 func noSleep(ctx context.Context, _ time.Duration) error { return ctx.Err() }
 
@@ -169,14 +163,21 @@ func runSignedDownload(t *testing.T, h *fakeSignedHub, tweak func(*signedDownloa
 	return dir, written, err
 }
 
-func requireSignedClass(t *testing.T, err error, class string) *signedDownloadError {
+func requireSignedClass(t *testing.T, err error, class string) {
+	t.Helper()
+	de := signedErrorOf(t, err)
+	if de.Class != class {
+		t.Fatalf("class = %q, want %q (error %v)", de.Class, class, err)
+	}
+}
+
+// signedErrorOf returns err as a signedDownloadError, failing the test if
+// it is not one.
+func signedErrorOf(t *testing.T, err error) *signedDownloadError {
 	t.Helper()
 	var de *signedDownloadError
 	if !errors.As(err, &de) {
 		t.Fatalf("error %v (%T) is not a signedDownloadError", err, err)
-	}
-	if de.Class != class {
-		t.Fatalf("class = %q, want %q (error %v)", de.Class, class, err)
 	}
 	return de
 }
@@ -304,7 +305,8 @@ func TestSignedDownload_ObjectNotFoundFailsWithoutRefresh(t *testing.T) {
 	h := newFakeSignedHub(t, map[string]string{"a.txt": "1"})
 	h.objectStatus = func(string, int) int { return http.StatusNotFound }
 	_, _, err := runSignedDownload(t, h, nil)
-	de := requireSignedClass(t, err, "http_404")
+	requireSignedClass(t, err, "http_404")
+	de := signedErrorOf(t, err)
 	if de.Status != http.StatusNotFound || h.pageCalls != 1 || h.getCount("a.txt") != 1 {
 		t.Fatalf("status %d, page calls %d, gets %d; want one page and one GET", de.Status, h.pageCalls, h.getCount("a.txt"))
 	}

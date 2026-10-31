@@ -536,7 +536,6 @@ func TestSignedCaseA_RecoveryAmbiguousTouchesNothing(t *testing.T) {
 	if err := os.MkdirAll(f.w, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	var names []string
 	for i := 0; i < 2; i++ {
 		name, err := newBootstrapStageName(filepath.Base(f.w))
 		if err != nil {
@@ -549,7 +548,6 @@ func TestSignedCaseA_RecoveryAmbiguousTouchesNothing(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(stage, ".scion"), []byte("m"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		names = append(names, name)
 	}
 	_, err := f.run()
 	var ce *signedCommitError

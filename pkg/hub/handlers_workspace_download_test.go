@@ -231,6 +231,7 @@ func TestWorkspaceDownload_EndpointAuthzMatrix(t *testing.T) {
 		assert.True(t, workspaceDownloadAgentDeleting(&store.Agent{DeletedAt: time.Now()}))
 		assert.False(t, workspaceDownloadAgentDeleting(&store.Agent{}))
 	})
+	t.Run("a storage failure is logged as a fixed class", checkWorkspaceDownloadStorageErrorsLoggedAsClasses)
 	t.Run("a broker that no longer provides for the project gets 403", func(t *testing.T) {
 		require.NoError(t, f.s.RemoveProjectProvider(ctx, f.project.ID, f.broker))
 		assert.Equal(t, http.StatusForbidden, f.post(t, http.MethodPost, f.broker, path, f.broker, nil).Code)
@@ -446,10 +447,11 @@ func (f *failingListStorage) List(_ context.Context, opts storage.ListOptions) (
 	return nil, fmt.Errorf("googleapi: listing gs://ws-bucket/%s: permission denied", opts.Prefix)
 }
 
-// TestWorkspaceDownload_StorageErrorsLoggedAsClasses: a storage failure is
+// checkWorkspaceDownloadStorageErrorsLoggedAsClasses: a storage failure is
 // logged as a fixed class, never with the storage error's text (which names
 // the bucket and object path). Control: the error text does carry the path.
-func TestWorkspaceDownload_StorageErrorsLoggedAsClasses(t *testing.T) {
+// It runs as a subtest of TestWorkspaceDownload_EndpointAuthzMatrix.
+func checkWorkspaceDownloadStorageErrorsLoggedAsClasses(t *testing.T) {
 	f := newWorkspaceDownloadFixture(t)
 	f.srv.SetStorage(&failingListStorage{f.stor})
 	var logs bytes.Buffer
