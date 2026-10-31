@@ -184,6 +184,12 @@ func (r *Relay) serveDrain(w http.ResponseWriter, req *http.Request, peer string
 		http.Error(w, "ingress_instance is not the authenticated peer", http.StatusForbidden)
 		return
 	}
+	// Only a hub drains its own ingress sessions: a peer enrolled as a
+	// relay may not.
+	if err := RequirePeerRole(r.cfg.PeerAuth, peer, PeerRoleHub); err != nil {
+		http.Error(w, "relay-peer is not enrolled as a hub", http.StatusForbidden)
+		return
+	}
 	n := r.DrainIngress(dr.IngressInstance, drainRequestDeadline(dr.DrainDeadlineMs))
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(DrainResponse{GoAwaySent: n})
