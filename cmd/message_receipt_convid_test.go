@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -146,4 +147,19 @@ func TestSendReceipt_ConfirmationsNameConversation(t *testing.T) {
 			assert.Equal(t, tc.want, lastLine(out))
 		})
 	}
+}
+
+// A group send prints the conversation and message of each recipient's copy.
+func TestSendReceipt_GroupLinesNameConversation(t *testing.T) {
+	msgID3881State(t, "sender-agent")
+	hubCtx := newReceiptConvHub(t)
+	recips := []messages.GroupRecipient{
+		{Kind: messages.RecipientAgent, Name: "agent-a"},
+		{Kind: messages.RecipientUser, Name: "alice"},
+	}
+	var err error
+	out := captureStdout(t, func() { err = sendGroupMessageViaHub(hubCtx, recips, "hi", false) })
+	require.NoError(t, err)
+	assert.Contains(t, out, "  Accepted: agent:agent-a (conversation conv-agent-a, message msg-agent-a)\n")
+	assert.Contains(t, out, "  Accepted: user:alice (conversation conv-out, message msg-out)\n")
 }

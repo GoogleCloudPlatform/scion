@@ -502,13 +502,11 @@ func TestVisitorSubRoutes_AgentListAndReadShapes(t *testing.T) {
 	}
 }
 
-// Only a visitor sender gets the conversation fields in the send response.
-func TestVisitorDeliveryConversation_VisitorOnly(t *testing.T) {
+// Only a visitor sender gets the DM key in the send response.
+func TestVisitorDMKey_VisitorOnly(t *testing.T) {
 	agent := &store.Agent{ID: tid("delivery-agent")}
 	visitor := NewVisitorIdentity(tid("delivery-visitor"), visitorTestUserIssuer, "sub", "v@corp.com", "V")
-	id, key := visitorDeliveryConversation(visitor, agent, "conv-1")
-	assert.Equal(t, "conv-1", id)
-	assert.Equal(t, "dm:agent:"+agent.ID+":user:"+visitor.ID(), key)
+	assert.Equal(t, "dm:agent:"+agent.ID+":user:"+visitor.ID(), visitorDMKey(visitor, agent))
 
 	for name, identity := range map[string]Identity{
 		"local user":        NewDevUser(DevUserConfig{}),
@@ -516,9 +514,7 @@ func TestVisitorDeliveryConversation_VisitorOnly(t *testing.T) {
 		"no identity":       nil,
 		"typed nil visitor": (*VisitorIdentity)(nil),
 	} {
-		id, key := visitorDeliveryConversation(identity, agent, "conv-1")
-		assert.Empty(t, id, name)
-		assert.Empty(t, key, name)
+		assert.Empty(t, visitorDMKey(identity, agent), name)
 	}
 }
 

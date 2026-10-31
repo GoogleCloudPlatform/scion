@@ -228,8 +228,7 @@ type AgentDMResult struct {
 	RecipientID string
 
 	// ConversationID is the conversation the message was persisted in.
-	// Empty when conversation resolution was skipped or failed, and when
-	// Outcome is AgentDMFailed.
+	// Empty when conversation resolution was skipped or failed.
 	ConversationID string
 
 	// DispatchErr is non-nil when Outcome is AgentDMAmbiguous. It

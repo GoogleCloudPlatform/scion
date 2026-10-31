@@ -2472,8 +2472,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// to "dispatched" (no new pending rows per delivery policy).
 	var persistedMsgID string
 	// persistedConversationID is the conversation the persisted message
-	// landed in; the response reports it to a project visitor only
-	// (visitorDeliveryConversation).
+	// landed in; the response reports it to every sender.
 	var persistedConversationID string
 	// artifactWarning reports artifact references not attached on the
 	// non-agent-sender path below (admitMessageArtifacts).
@@ -3269,7 +3268,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// Every sender learns the conversation its message landed in, so it
 	// can reply there. A project visitor also learns its DM key, which the
 	// visitor DM read routes take.
-	_, visitorConvKey := visitorDeliveryConversation(GetIdentityFromContext(ctx), agent, persistedConversationID)
+	visitorConvKey := visitorDMKey(GetIdentityFromContext(ctx), agent)
 
 	if deferDelivery {
 		w.Header().Set("Content-Type", "application/json")

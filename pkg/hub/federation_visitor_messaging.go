@@ -450,21 +450,20 @@ func userSenderAddress(user UserIdentity) string {
 	return "user:" + user.ID()
 }
 
-// visitorDeliveryConversation returns the conversation ID and DM key a
-// message send reports to its sender: for a *VisitorIdentity, convID (the
-// conversation the message was persisted in, "" when it was not) and the
-// visitor's DM key with agent; for any other identity, "" for both, so
-// no other sender's response changes.
-func visitorDeliveryConversation(identity Identity, agent *store.Agent, convID string) (string, string) {
+// visitorDMKey returns the DM key a message send reports to a project
+// visitor sender: for a *VisitorIdentity, the visitor's DM key with agent,
+// which the visitor DM read routes take; for any other identity, "". (The
+// conversation ID is reported to every sender.)
+func visitorDMKey(identity Identity, agent *store.Agent) string {
 	visitor, ok := identity.(*VisitorIdentity)
 	if !ok || visitor == nil || agent == nil {
-		return "", ""
+		return ""
 	}
 	key, err := messages.DMConversationKey("agent", agent.ID, "user", visitor.ID())
 	if err != nil {
-		key = ""
+		return ""
 	}
-	return convID, key
+	return key
 }
 
 // stampVisitorSender returns md with the visitor sender metadata set when

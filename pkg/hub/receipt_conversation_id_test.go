@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -52,4 +53,29 @@ func TestSendReceipt_CarriesConversationID(t *testing.T) {
 				"the receipt names the conversation the message was persisted in")
 		})
 	}
+}
+
+// A deferred send (the recipient is mid-reincarnation) still names the
+// conversation the stored message landed in.
+func TestSendReceipt_DeferredCarriesConversationID(t *testing.T) {
+	srv, s := testServer(t)
+	_, primaryID, _ := setupR1TestAgents(t, s)
+	srv.SetDispatcher(&brokerMockDispatcher{})
+
+	body := map[string]interface{}{
+		"structured_message": &messages.StructuredMessage{
+			Sender: "user:test", Recipient: "agent:r1-primary",
+			Msg: "deferred receipt", Type: messages.TypeInstruction,
+		},
+	}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+primaryID+"/message", body)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	var resp MessageDeliveryResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Equal(t, "deferred", resp.Status)
+	require.NotEmpty(t, resp.MessageID)
+	stored, err := s.GetMessage(context.Background(), resp.MessageID)
+	require.NoError(t, err)
+	require.NotEmpty(t, stored.ConversationID)
+	assert.Equal(t, stored.ConversationID, resp.ConversationID)
 }

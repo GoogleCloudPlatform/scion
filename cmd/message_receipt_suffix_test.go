@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -44,4 +45,27 @@ func TestGroupRecipientResult_ConversationIDInJSON(t *testing.T) {
 func captureLastLine(t *testing.T, fn func()) string {
 	t.Helper()
 	return lastLine(captureStdout(t, fn))
+}
+
+// A group send's JSON results carry each recipient's conversation.
+func TestSendReceipt_GroupJSONCarriesConversationID(t *testing.T) {
+	msgID3881State(t, "sender-agent")
+	outputFormat = "json" // restored by msgID3881State's cleanup
+	hubCtx := newReceiptConvHub(t)
+	recips := []messages.GroupRecipient{
+		{Kind: messages.RecipientAgent, Name: "agent-a"},
+		{Kind: messages.RecipientUser, Name: "alice"},
+	}
+	var sendErr error
+	out := captureStdout(t, func() { sendErr = sendGroupMessageViaHub(hubCtx, recips, "hi", false) })
+	require.NoError(t, sendErr)
+	var got groupSendResult
+	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+	require.Len(t, got.Results, 2)
+	byRecipient := map[string]string{}
+	for _, r := range got.Results {
+		byRecipient[r.Recipient] = r.ConversationID
+	}
+	assert.Equal(t, "conv-agent-a", byRecipient["agent:agent-a"])
+	assert.Equal(t, "conv-out", byRecipient["user:alice"])
 }
