@@ -36,7 +36,7 @@ interface Schedule {
   projectId: string;
   name: string;
   cronExpr: string;
-  /** IANA zone the cron expression is evaluated in; empty means UTC. */
+  /** IANA zone the cron is evaluated in; absent or empty means UTC. */
   timeZone?: string;
   eventType: string;
   payload: string;
