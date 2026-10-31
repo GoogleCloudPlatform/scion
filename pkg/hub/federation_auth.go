@@ -433,8 +433,8 @@ func (a *FederationAuthenticator) AuthenticateWithOptions(tokenString string, op
 		// an email domainOf cannot parse is refused. A service account
 		// identity is not subject to it.
 		if uid, ok := identity.(*FederatedUserIdentity); ok && len(entry.config.AllowedDomains) > 0 {
-			domain, ok := domainOf(uid.Email())
-			if !ok || !containsFold(entry.config.AllowedDomains, domain) {
+			domain, parsed := domainOf(uid.Email())
+			if !parsed || !containsFold(entry.config.AllowedDomains, domain) {
 				return nil, fmt.Errorf("federation: email domain of %q not in allowed_domains", uid.Email())
 			}
 		}

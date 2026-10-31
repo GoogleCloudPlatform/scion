@@ -17,6 +17,8 @@
 package hub
 
 import (
+	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -457,8 +459,11 @@ func TestFederationPrincipalCheck_UserIssuerAllowedDomains(t *testing.T) {
 // Parity: for the same issuer allowed_domains, the external bearer path
 // (Google ID token), the hub user access credential path (peer hub issuer
 // with accept_user_tokens) and the federation-token path (Google user
-// issuer) admit and refuse the same user emails.
+// issuer) admit and refuse the same user emails. Each path's refusal is
+// also checked for its allowed_domains cause, since the middleware answers
+// every refusal with the same 401.
 func TestFederationPrincipalCheck_AllowedDomainsParity(t *testing.T) {
+	const causeDomains = "not in allowed_domains"
 	f := newPeerTokFixture(t, nil)
 	for _, tc := range []struct {
 		name     string
@@ -492,23 +497,44 @@ func TestFederationPrincipalCheck_AllowedDomainsParity(t *testing.T) {
 			claims["aud"] = externalBearerTestAudience
 			claims["email"] = tc.email
 			claims["hd"] = domain
-			w, result := doExternalBearerRequest(g.cfg, signIDToken(kp, claims))
+			idToken := signIDToken(kp, claims)
+			w, result := doExternalBearerRequest(g.cfg, idToken)
 			externalBearer := w.Code == http.StatusOK && result.reached
 
 			// Federation token: a Google user credential in the
 			// federation-token header, same issuer configuration.
-			rec, reached := g.through(t, g.token(t, "google-sub", tc.email))
+			fedToken := g.token(t, "google-sub", tc.email)
+			rec, reached := g.through(t, fedToken)
 			federationToken := rec.Code == http.StatusOK && reached
 
 			// Hub user token: a peer hub user access credential, the same
 			// allowed_domains on the peer issuer.
 			f.configure(t, func(c *config.TrustedIssuerConfig) { c.AllowedDomains = tc.domains })
-			_, _, hubRec := f.through(t, f.signAsPeer(t, peerUserClaims("sub-parity", tc.email)))
+			hubToken := f.signAsPeer(t, peerUserClaims("sub-parity", tc.email))
+			_, _, hubRec := f.through(t, hubToken)
 			hubUserToken := hubRec.Code == http.StatusOK
 
 			assert.Equal(t, tc.admitted, externalBearer, "external bearer: %s", w.Body.String())
 			assert.Equal(t, tc.admitted, hubUserToken, "hub user token: %s", hubRec.Body.String())
 			assert.Equal(t, tc.admitted, federationToken, "federation token: %s", rec.Body.String())
+			if tc.admitted {
+				return
+			}
+
+			// The refusal cause on each path is allowed_domains.
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+			_, _, ebErr := authenticateExternalBearer(context.Background(), req, idToken, g.cfg)
+			assert.True(t, errors.Is(ebErr, errDomainNotAllowed), "external bearer cause: %v", ebErr)
+
+			_, fedErr := g.auth.Authenticate(fedToken)
+			require.Error(t, fedErr, "federation token")
+			assert.Contains(t, fedErr.Error(), causeDomains, "federation token cause")
+
+			hubAuth := f.srv.federationAuth.Load()
+			require.NotNil(t, hubAuth)
+			_, hubErr := hubAuth.Authenticate(hubToken, FederationAuthOptions{AcceptHubUserTokens: true})
+			require.Error(t, hubErr, "hub user token")
+			assert.Contains(t, hubErr.Error(), causeDomains, "hub user token cause")
 		})
 	}
 }
