@@ -122,3 +122,30 @@ func TestPlanPendingFold_KeepsReincarnateKeysPending(t *testing.T) {
 	assert.Equal(t, "2h", agent.AppliedConfig.InlineConfig.MaxDuration, "the clear is not applied")
 	assert.Equal(t, []string{"config.max_duration", "config.max_model_calls"}, pendingConfigKeys(agent.PendingConfig))
 }
+
+// TestLegacySaverKind_VisitorCannotPassNativeAllow (ruling B, N1 proof):
+// only a native row (kind "" or human) passes the legacy native allow; a
+// federated (visitor) row, every test identity kind and an unknown kind do
+// not. legacySaverKind maps the legacy references as ruled.
+func TestLegacySaverKind_VisitorCannotPassNativeAllow(t *testing.T) {
+	for _, kind := range []string{store.UserKindFederated, store.UserKindTestFixture, store.UserKindTestHubAdmin, store.UserKindTestSuperAdmin, "bogus"} {
+		assert.False(t, legacyUserRowNative(&store.User{ID: "u1", Kind: kind}), "kind %q must not pass", kind)
+	}
+	for _, kind := range []string{"", store.UserKindHuman} {
+		assert.True(t, legacyUserRowNative(&store.User{ID: "u1", Kind: kind}), "kind %q passes", kind)
+	}
+	assert.False(t, legacyUserRowNative(nil))
+
+	for _, tc := range []struct{ ref, kind, id string }{
+		{"user:" + DevUserID, "dev", DevUserID},
+		{"user:https://iss.example.com:sub", "federated_user", "https://iss.example.com:sub"},
+		{"user:u1", "user", "u1"},
+		{"agent:https://iss.example.com:a1", "federated_agent", "https://iss.example.com:a1"},
+		{"agent:a1", "agent", "a1"},
+		{"", "", ""},
+	} {
+		kind, id := legacySaverKind(tc.ref)
+		assert.Equal(t, tc.kind, kind, tc.ref)
+		assert.Equal(t, tc.id, id, tc.ref)
+	}
+}

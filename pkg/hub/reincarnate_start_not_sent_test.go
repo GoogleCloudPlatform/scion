@@ -33,13 +33,19 @@ import (
 // (its run could not be begun, or the hub is shutting down) left no
 // container, so a reincarnation treats it as definitive.
 
-// startNotSentErrs are the two hub-side refusals as the dispatcher returns
-// them: a run not begun wraps its cause, and the shutdown gate's error is
-// returned bare.
+// startNotSentErrs are the hub-side refusals as the dispatcher returns
+// them: a run not begun wraps its cause, the shutdown gate's error is
+// returned bare, and a pending config fold refused before the dispatch
+// wraps its cause (a store error, or the compare-and-set conflicts that
+// exhausted its retries). The reincarnation start does not fold pending
+// config until ptone/scion#3978, so the fold refusals are injected through
+// the test dispatcher (ptone/scion#5864).
 func startNotSentErrs() map[string]error {
 	return map[string]error{
-		"run not begun":     fmt.Errorf("%w: %w", errStartRunNotBegun, errors.New("store unavailable")),
-		"hub shutting down": ErrHubShuttingDown,
+		"run not begun":                     fmt.Errorf("%w: %w", errStartRunNotBegun, errors.New("store unavailable")),
+		"hub shutting down":                 ErrHubShuttingDown,
+		"pending fold refused: store error": fmt.Errorf("%w: %w", errPendingConfigFold, errors.New("store unavailable")),
+		"pending fold refused: conflicts":   fmt.Errorf("%w: %w", errPendingConfigFold, store.ErrVersionConflict),
 	}
 }
 
@@ -54,6 +60,24 @@ func TestReincarnationStartLeftNoContainer_StartNotSent(t *testing.T) {
 	assert.False(t, reincarnationStartLeftNoContainer(fmt.Errorf("%w: %w", errStartRunNotBegun, store.ErrDeleteInProgress)),
 		"a run not begun because a delete holds the row stays ambiguous")
 	assert.False(t, reincarnationStartLeftNoContainer(fmt.Errorf("start: %w", ErrLifecycleDeferred)), "a deferred start stays ambiguous")
+	assert.False(t, reincarnationStartLeftNoContainer(fmt.Errorf("%w: %w", errPendingConfigFold, store.ErrDeleteInProgress)),
+		"a pending fold refused because a delete holds the row stays ambiguous")
+}
+
+// Both classifiers agree on a refused pending config fold
+// (ptone/scion#5864): definitive, except under a delete.
+func TestPendingFoldRefusal_ClassifiersAgree(t *testing.T) {
+	for _, err := range []error{
+		fmt.Errorf("%w: %w", errPendingConfigFold, errors.New("store unavailable")),
+		fmt.Errorf("%w: %w", errPendingConfigFold, store.ErrVersionConflict),
+		fmt.Errorf("%w: %w", errPendingConfigFold, errPendingReauthIndeterminate),
+	} {
+		assert.True(t, startDidNotHappen(err), "%v", err)
+		assert.True(t, reincarnationStartLeftNoContainer(err), "%v", err)
+	}
+	deleting := fmt.Errorf("%w: %w", errPendingConfigFold, store.ErrDeleteInProgress)
+	assert.False(t, startDidNotHappen(deleting))
+	assert.False(t, reincarnationStartLeftNoContainer(deleting))
 }
 
 // An export move whose target start the hub refused before sending rolls

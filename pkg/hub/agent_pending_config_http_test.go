@@ -501,7 +501,7 @@ func TestAgentPendingConfig_FlagOffKeepsTodayBehaviour(t *testing.T) {
 		assert.Nil(t, resp.PendingConfig)
 	})
 
-	t.Run("an edit written through removes the pending keys it names", func(t *testing.T) {
+	t.Run("an edit written through clears the pending keys", func(t *testing.T) {
 		srv, s, disp, stopped := off(t, state.PhaseStopped)
 		cur := pendingReloadAgent(t, s, stopped.ID)
 		cur.PendingConfig = &store.AgentPendingConfig{Config: map[string]json.RawMessage{
@@ -513,12 +513,21 @@ func TestAgentPendingConfig_FlagOffKeepsTodayBehaviour(t *testing.T) {
 			"config": map[string]interface{}{"model": "newer-model"},
 		})
 		assert.Equal(t, []string{"config.model"}, resp.Disposition.Applied)
-		require.NotNil(t, resp.PendingConfig)
-		assert.Equal(t, []string{"config.system_prompt"}, pendingConfigKeys(resp.PendingConfig), "only the key the edit named is removed")
-		discarded := pendingAudits(t, s, stopped.ID, mutationTypeAgentPendingConfigDiscarded, 1)
-		keys, trigger := pendingAuditSummary(t, discarded[0])
-		assert.Equal(t, []string{"config.model"}, keys)
-		assert.Equal(t, pendingDiscardTriggerSuperseded, trigger)
+		assert.Nil(t, resp.PendingConfig, "with the experiment off no response carries pending edits")
+		// Every pending key is cleared in the same write (ptone/scion#5864):
+		// the one the edit named as superseded, the others as
+		// experiment_off.
+		assert.Nil(t, pendingReloadAgent(t, s, stopped.ID).PendingConfig)
+		discarded := pendingAudits(t, s, stopped.ID, mutationTypeAgentPendingConfigDiscarded, 2)
+		byTrigger := map[string][]string{}
+		for _, rec := range discarded {
+			keys, trigger := pendingAuditSummary(t, rec)
+			byTrigger[trigger] = keys
+		}
+		assert.Equal(t, map[string][]string{
+			pendingDiscardTriggerSuperseded:    {"config.model"},
+			pendingDiscardTriggerExperimentOff: {"config.system_prompt"},
+		}, byTrigger)
 
 		// Turned back on, the next start runs the newer value.
 		setHeldEditsExperiment(t, srv, true)
@@ -546,7 +555,7 @@ func TestAgentPendingConfig_FlagOffKeepsTodayBehaviour(t *testing.T) {
 		assert.Nil(t, after.AppliedConfig.CreateInputs.InlineConfig.MaxTurns, "recorded as an explicit clear, as before")
 	})
 
-	t.Run("stored pending config stays inert at start", func(t *testing.T) {
+	t.Run("stored pending config is not applied at start, and is cleared", func(t *testing.T) {
 		srv, s, disp, stopped := off(t, state.PhaseStopped)
 		cur := pendingReloadAgent(t, s, stopped.ID)
 		cur.PendingConfig = &store.AgentPendingConfig{Config: map[string]json.RawMessage{"model": json.RawMessage(`"pending-model"`)}}
@@ -555,7 +564,7 @@ func TestAgentPendingConfig_FlagOffKeepsTodayBehaviour(t *testing.T) {
 		starts := disp.snapshot()
 		require.Len(t, starts, 1)
 		assert.Equal(t, "old-model", starts[0].model)
-		assert.NotNil(t, pendingReloadAgent(t, s, stopped.ID).PendingConfig)
+		assert.Nil(t, pendingReloadAgent(t, s, stopped.ID).PendingConfig, "cleared lazily (ptone/scion#5864)")
 	})
 }
 
@@ -802,7 +811,7 @@ func TestAgentPendingConfig_UndecodableStoredKeyIsRemovedAtStart(t *testing.T) {
 	cur.PendingConfig = &store.AgentPendingConfig{Config: map[string]json.RawMessage{
 		"model":     json.RawMessage(`"good-model"`),
 		"max_turns": json.RawMessage(`"not a number"`),
-	}}
+	}, SavedBy: "user:" + DevUserID}
 	require.NoError(t, s.UpdateAgent(context.Background(), cur))
 
 	warnings := pendingLifecycleWarnings(t, srv, agent.ID, "start")
@@ -914,7 +923,7 @@ func TestAgentPendingConfig_AsyncStartAppliesHeldEdits(t *testing.T) {
 
 	a := f.addAgent("as-held", string(state.PhaseStopped), "")
 	cur := pendingReloadAgent(t, f.s, a.ID)
-	cur.PendingConfig = &store.AgentPendingConfig{Config: map[string]json.RawMessage{"model": json.RawMessage(`"async-held-model"`)}}
+	cur.PendingConfig = &store.AgentPendingConfig{Config: map[string]json.RawMessage{"model": json.RawMessage(`"async-held-model"`)}, SavedBy: "user:" + DevUserID}
 	require.NoError(t, f.s.UpdateAgent(context.Background(), cur))
 
 	// The agent the dispatcher received: the model it was dispatched with.

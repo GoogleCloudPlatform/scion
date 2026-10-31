@@ -29,8 +29,8 @@ func pendingWithSecrets() *AgentPendingConfig {
 			"env":       json.RawMessage(`{"API_KEY":"secret","GITHUB_TOKEN":"ghp","PLAIN":"x"}`),
 			"telemetry": json.RawMessage(`{"enabled":true,"cloud":{"endpoint":"https://otel","headers":{"Authorization":"Bearer t"}}}`),
 		},
-		SavedBy:            "user:u1",
-		EnvSaverCanViewEnv: true,
+		SavedBy:   "user:u1",
+		KeySavers: map[string]string{"model": "user:u1", "env": "dev:dev-user"},
 	}
 }
 
@@ -43,11 +43,12 @@ func decodeObject(t *testing.T, b []byte) map[string]json.RawMessage {
 
 func TestAgentPendingConfig_MarshalJSONFailsClosed(t *testing.T) {
 	// Without ResponseView, a response never carries env or the telemetry
-	// headers, and never the internal saver flag.
+	// headers, and never the per-key savers.
 	b, err := json.Marshal(pendingWithSecrets())
 	require.NoError(t, err)
 	out := decodeObject(t, b)
-	assert.NotContains(t, out, "envSaverCanViewEnv")
+	assert.NotContains(t, out, "keySavers")
+	assert.NotContains(t, string(b), "dev-user")
 	cfg := decodeObject(t, out["config"])
 	assert.NotContains(t, cfg, "env")
 	assert.JSONEq(t, `"m"`, string(cfg["model"]))
@@ -72,7 +73,7 @@ func TestAgentPendingConfig_ResponseView(t *testing.T) {
 		cfg := decodeObject(t, decodeObject(t, b)["config"])
 		assert.JSONEq(t, `{"API_KEY":"secret","PLAIN":"x"}`, string(cfg["env"]), "GITHUB_TOKEN is never returned")
 		assert.Contains(t, string(cfg["telemetry"]), "Bearer t")
-		assert.NotContains(t, decodeObject(t, b), "envSaverCanViewEnv")
+		assert.NotContains(t, decodeObject(t, b), "keySavers")
 	})
 	t.Run("a stored null env is shown as null", func(t *testing.T) {
 		pc := &AgentPendingConfig{Config: map[string]json.RawMessage{"env": json.RawMessage(`null`)}}
@@ -95,12 +96,23 @@ func TestAgentPendingConfig_StorageRoundTrip(t *testing.T) {
 	got, err := UnmarshalPendingConfigFromStorage(raw)
 	require.NoError(t, err)
 	require.NotNil(t, got)
-	assert.True(t, got.EnvSaverCanViewEnv)
+	assert.Equal(t, pendingWithSecrets().KeySavers, got.KeySavers, "storage keeps the per-key savers")
 	assert.JSONEq(t, string(pendingWithSecrets().Config["env"]), string(got.Config["env"]))
 
 	empty, err := MarshalPendingConfigForStorage(&AgentPendingConfig{SavedBy: "user:u1"})
 	require.NoError(t, err)
 	assert.Equal(t, "", empty, "a pending config without keys clears the column")
+	// A row written before KeySavers existed loads with none, and its
+	// envSaverCanViewEnv is ignored (ptone/scion#5864).
+	legacy, err := UnmarshalPendingConfigFromStorage(`{"config":{"env":{"A":"1"}},"savedBy":"user:u1","envSaverCanViewEnv":true}`)
+	require.NoError(t, err)
+	require.NotNil(t, legacy)
+	assert.Nil(t, legacy.KeySavers)
+	assert.Equal(t, "user:u1", legacy.SavedBy)
+	reencoded, err := MarshalPendingConfigForStorage(legacy)
+	require.NoError(t, err)
+	assert.NotContains(t, reencoded, "envSaverCanViewEnv")
+
 	none, err := UnmarshalPendingConfigFromStorage("")
 	require.NoError(t, err)
 	assert.Nil(t, none)
@@ -113,8 +125,11 @@ func TestAgentPendingConfig_CloneIsDeep(t *testing.T) {
 	c := p.Clone()
 	c.Config["model"][1] = 'X'
 	delete(c.Config, "env")
+	c.KeySavers["model"] = "user:other"
+	delete(c.KeySavers, "env")
 	assert.JSONEq(t, `"m"`, string(p.Config["model"]))
 	assert.Contains(t, p.Config, "env")
+	assert.Equal(t, map[string]string{"model": "user:u1", "env": "dev:dev-user"}, p.KeySavers, "KeySavers is not aliased")
 	assert.Nil(t, (*AgentPendingConfig)(nil).Clone())
 	assert.True(t, (*AgentPendingConfig)(nil).IsEmpty())
 }
@@ -188,6 +203,13 @@ func TestAgentPendingConfig_LimitsFormat(t *testing.T) {
 	assert.Equal(t, "null", string(got.Config["Max_Model_Calls"]))
 	assert.Equal(t, `"m"`, string(got.Config["model"]))
 	assert.Equal(t, `"0"`, string(got.Config["max_duration"]), "only the count limits are normalized")
+
+	// Normalizing changes values, never keys, so the per-key savers stay
+	// valid (ptone/scion#5864).
+	withSavers, err := UnmarshalPendingConfigFromStorage(`{"config":{"max_turns":0},"keySavers":{"max_turns":"user:u1"},"savedAt":"2026-10-01T00:00:00Z"}`)
+	require.NoError(t, err)
+	assert.Equal(t, "null", string(withSavers.Config["max_turns"]))
+	assert.Equal(t, map[string]string{"max_turns": "user:u1"}, withSavers.KeySavers)
 
 	typed := `{"config":{"max_turns":0,"max_model_calls":null},"limitsFormat":2,"savedAt":"2026-10-01T00:00:00Z","baseGeneration":1,"baseStateVersion":3}`
 	got, err = UnmarshalPendingConfigFromStorage(typed)
