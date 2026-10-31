@@ -74,6 +74,8 @@ case "$budget" in
   exit 2
   ;;
 esac
+# Base 10 explicitly: bash arithmetic reads a leading zero ("08") as octal.
+budget=$((10#$budget))
 
 tool="${IMAGE_TOOL:-}"
 if [ -z "$tool" ]; then

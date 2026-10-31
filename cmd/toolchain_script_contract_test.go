@@ -225,11 +225,14 @@ func TestToolchainPlaywrightDeps(t *testing.T) {
 		}
 		return p
 	}
-	// apt-get is stubbed: every call is logged; the simulate pre-flight
-	// succeeds unless APT_SIM_FAIL names a package in the set. apt_cleanup is
-	// stubbed too, so the test never removes /var/lib/apt/lists even as root.
-	const stubs = `apt-get() {
-  echo "APT $*"
+	// apt-get is stubbed: every call is logged on fd 3, which the step does
+	// not redirect, so the simulate pre-flight (run with its output sent to
+	// /dev/null) is visible too. The pre-flight succeeds unless APT_SIM_FAIL
+	// names a package in the set. apt_cleanup is stubbed too, so the test
+	// never removes /var/lib/apt/lists even as root.
+	const stubs = `exec 3>&1
+apt-get() {
+  echo "APT $*" >&3
   if [ "$1" = install ] && [ "$2" = -s ] && [ -n "${APT_SIM_FAIL:-}" ]; then
     case " $* " in *" $APT_SIM_FAIL "*) return 100 ;; esac
   fi
@@ -243,6 +246,7 @@ apt_cleanup() { echo "APT-CLEANUP"; }
 	out, code := e.run(systemPath, stubs+`OS_RELEASE_FILE="`+trixie+`"; step_playwright_deps`)
 	expectOutput(t, "debian 13", out, code, 0,
 		"installing Playwright WebKit and Firefox system libraries",
+		"APT install -s --no-install-recommends",
 		"APT install -y --no-install-recommends",
 		" libasound2t64 ", " libgtk-4-1 ", " gstreamer1.0-plugins-bad ", " libicu76 ", " libavcodec61 ",
 		"APT-CLEANUP")
@@ -254,6 +258,12 @@ apt_cleanup() { echo "APT-CLEANUP"; }
 	expectOutput(t, "ubuntu 24.04", out, code, 0, "skip: no Playwright WebKit/Firefox library list for Ubuntu 24.04.3 LTS")
 	if strings.Contains(out, "APT ") {
 		t.Errorf("ubuntu 24.04: touched apt on a suite with no list; output:\n%s", out)
+	}
+
+	out, code = e.run(systemPath, stubs+`OS_RELEASE_FILE="`+filepath.Join(t.TempDir(), "missing")+`"; step_playwright_deps`)
+	expectOutput(t, "missing os-release", out, code, 0, "skip: no Playwright WebKit/Firefox library list for unknown")
+	if strings.Contains(out, "APT ") {
+		t.Errorf("missing os-release: touched apt; output:\n%s", out)
 	}
 
 	out, code = e.run(systemPath, stubs+`APT_SIM_FAIL=libicu76; apt_installable() { [ "$1" != libicu76 ]; }

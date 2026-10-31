@@ -255,12 +255,19 @@ step_chromium() {
 # Derived from npm playwright-core@1.62.1 (webkit revision 2336, firefox 1538),
 # lib/coreBundle.js, the bundled
 # packages/playwright-core/src/server/registry/nativeDeps.ts entries
-# deps["debian13-x64"].tools + .webkit + .firefox, de-duplicated.
+# deps["debian13-x64"].tools + .webkit + .firefox, de-duplicated in that order.
 # deps["debian13-arm64"] reuses the same arrays. "tools" is included because
-# `playwright install-deps <browser>` always adds that group. Regenerate with
-#   docker run --rm node:24-trixie-slim \
-#     npx -y playwright@<version> install-deps --dry-run webkit firefox
-# which prints the exact apt-get line, and update the version named above.
+# `playwright install-deps <browser>` always adds that group. Regenerate from
+# the published package (no docker or apt needed), then apply the libasound2
+# rename below and update the version named above:
+#   npm pack playwright-core@<version> && tar xzf playwright-core-<version>.tgz
+#   node -e 'const s=require("fs").readFileSync(process.argv[1],"utf8");
+#     const b=s.slice(s.indexOf("\"debian13-x64\": {"));
+#     const g=k=>JSON.parse(b.match(new RegExp(k+": (\\[[^\\]]*\\])"))[1]);
+#     console.log([...new Set(["tools","webkit","firefox"].flatMap(g))].join(" "))' \
+#     package/lib/coreBundle.js
+# (`install-deps --dry-run` is not a substitute: it prints only the packages
+# missing on the host it runs on, after apt's transitive resolution.)
 #
 # One divergence from Playwright's list: it names libasound2 (firefox group),
 # which trixie no longer ships as a real package; libasound2t64 replaces it.
@@ -295,9 +302,9 @@ OS_RELEASE_FILE="${OS_RELEASE_FILE:-/etc/os-release}"
 playwright_deps_for_os() {
   local id version_id
   # shellcheck source=/dev/null
-  id="$(. "$OS_RELEASE_FILE" 2>/dev/null && printf '%s' "${ID:-}")"
+  id="$(. "$OS_RELEASE_FILE" 2>/dev/null && printf '%s' "${ID:-}")" || id=""
   # shellcheck source=/dev/null
-  version_id="$(. "$OS_RELEASE_FILE" 2>/dev/null && printf '%s' "${VERSION_ID:-}")"
+  version_id="$(. "$OS_RELEASE_FILE" 2>/dev/null && printf '%s' "${VERSION_ID:-}")" || version_id=""
   case "${id}${version_id}" in
   debian13) printf '%s\n' "$PLAYWRIGHT_DEPS_DEBIAN13" ;;
   esac
@@ -309,7 +316,7 @@ step_playwright_deps() {
   if [ -z "${pkgs//[[:space:]]/}" ]; then
     local pretty
     # shellcheck source=/dev/null
-    pretty="$(. "$OS_RELEASE_FILE" 2>/dev/null && printf '%s' "${PRETTY_NAME:-unknown}")"
+    pretty="$(. "$OS_RELEASE_FILE" 2>/dev/null && printf '%s' "${PRETTY_NAME:-unknown}")" || pretty=unknown
     skip "no Playwright WebKit/Firefox library list for ${pretty:-unknown}"
     return 0
   fi
