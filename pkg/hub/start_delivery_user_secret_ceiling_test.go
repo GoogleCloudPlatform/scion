@@ -40,6 +40,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -791,8 +792,11 @@ func TestStartDelivery_UATHopBoundedByCeiling(t *testing.T) {
 	}
 
 	// S7: the owner's shared rows are attributed to another author. The
-	// fixture writes them that way from the start (an update keeps the
-	// recorded creator).
+	// author is in the agent's ancestry (as in the secret parent ceiling's
+	// T13), so S5 and S6 find the row and S7 is the clause that refuses it;
+	// the explain trace shows the token hop passed S3c first. The fixture
+	// writes the rows that way from the start (an update keeps the recorded
+	// creator).
 	t.Run("secret author is not its owner (S7)", func(t *testing.T) {
 		base := &userScopeCeilingFixture{materialFixture: newMaterialFixture(t, "sd-ub-s7")}
 		setBackfillCompleted(t, base.Store)
@@ -801,18 +805,27 @@ func TestStartDelivery_UATHopBoundedByCeiling(t *testing.T) {
 		backend := base.Server.secretBackend
 		usaSetUserSecret(t, backend, base.UserID, sdAlwaysKey, sdAlwaysValue, other, true, store.InjectionModeAlways)
 		usaSetUserSecret(t, backend, base.UserID, sdAsNeededKey, sdAsNeededValue, other, true, store.InjectionModeAsNeeded)
-		usaSetUserSecret(t, backend, base.UserID, sdPrivateKey, sdPrivateValue, base.UserID, false, store.InjectionModeAlways)
 		f := &sdFixture{userScopeCeilingFixture: base, disp: sdDispatcher(base.Server, base.Store)}
-		id, _ := f.uiDirect(t, "ub-s7", nil)
-		got := sdStartDelivery(t, f.disp, f.Store, id)
-		assert.False(t, got.always)
-		assert.False(t, got.asNeeded)
-		assert.True(t, got.private, "the unshared row is unchanged")
-		d := f.ceiling(t, id, sdAlwaysKey)
+		id, _ := f.agent(t, "ub-s7", []string{base.UserID, other})
+		f.recordEdge(t, store.DelegationPrincipalUser, base.UserID, id, boundedCeiling(uiTokenList...), uiUATEdge(uiTokenList...))
+
+		ctx := context.Background()
+		agent, err := f.Store.GetAgent(ctx, id)
+		require.NoError(t, err)
+		meta, err := backend.GetMeta(ctx, sdAlwaysKey, store.ScopeUser, base.UserID)
+		require.NoError(t, err)
+		var steps []DecisionStep
+		d, _ := f.Server.authzService.evaluateUserSecretParentCeiling(ctx,
+			newFullAgentIdentity(id, f.ProjectID, agent.Ancestry, []AgentTokenScope{ScopeProjectSecretRead}),
+			userSecretResource(meta.ID, meta.ScopeID), &steps)
 		require.False(t, d.Allowed)
-		// Such rows are outside the lineage's progeny set (S5/S6) before S7
-		// is reached; either way the token hop does not admit them.
-		assert.Contains(t, []DenyCause{DenyCauseCeilingResourceMissing, DenyCauseCeilingSourceNotAllowed}, d.DenyCause, "reason %q", d.Reason)
+		assert.Equal(t, DenyCauseCeilingSourceNotAllowed, d.DenyCause, "S7 refuses; reason %q", d.Reason)
+		assert.True(t, slices.ContainsFunc(steps, func(s DecisionStep) bool { return s.Step == "secret_parent_ceiling_uat_intrinsic" }),
+			"the token hop passed S3c through the intrinsic rule before S7: %+v", steps)
+
+		got := sdStartDelivery(t, f.disp, f.Store, id)
+		assert.False(t, got.always, "withheld at start")
+		assert.False(t, got.asNeeded, "withheld at as_needed")
 	})
 
 	t.Run("row not shared with progeny: unchanged", func(t *testing.T) {
