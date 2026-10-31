@@ -117,21 +117,36 @@ project is a hub-level resource; a project's own groups belong to that project.
 
 ### Hub-boundary tokens for user administration
 
-A hub token can change another user's account through `PATCH /api/v1/users/{id}`. Each
-field is checked on the hub-level user record, and your user must also hold the matching
-permission:
+A hub token can change another user's account through `PATCH /api/v1/users/{id}`, and
+delete a user through `DELETE /api/v1/users/{id}`. Each request is checked on the hub-level
+user record, and your user must also hold the matching permission:
 
 | Scope | Boundary | Grants |
 |-------|----------|--------|
-| `user:update` | Hub only | Change another user's display name and preferences. A token PATCH of another user that names no `status` field is checked as a profile update, so it needs this scope. |
+| `user:update` | Hub only | Change another user's display name and preferences. A token PATCH of another user that names neither `status` nor `role` is checked as a profile update, so it needs this scope. |
 | `user:suspend` | Hub only | Suspend or reactivate another user (the `status` field). |
+| `user:promote` | Hub only | Change another user between the `member` and `viewer` roles (the `role` field). |
+| `user:delete` | Hub only | Delete another user, including with `force=true`, and read `GET /api/v1/users/{id}/delete-blockers` and `GET /api/v1/users/{id}/deletion`. |
 
 - A request that names several fields is written only if every field passes its check;
   otherwise nothing is written.
-- A token that cannot use either scope on that user gets the same `403` for every user ID,
-  including one that does not exist.
-- Changing a user's role, and changing your own profile, still need a sign-in. No credential can
-  change your own status or activate an invited user.
+- A token that cannot use any of `user:update`, `user:suspend` and `user:promote` on that user
+  gets the same `403` from `PATCH` for every user ID, including one that does not exist.
+- A token never makes a user `admin`, and never changes or deletes a user who holds the
+  super-admin role: every change that involves a super-admin role binding is refused with
+  `403`.
+- A token deletes a user only if the user holds no direct system-scope role binding other than
+  the one that represents the `viewer` role. Otherwise the delete is refused with `403` and
+  `details.reason` `system_role_binding_held`, with or without `force=true`. If such a binding
+  is added while the delete runs, it answers `409 conflict` with `details.reason`
+  `binding_state_drift` and deletes nothing. A forced deletion requested with a token does not
+  complete while the user holds such a binding; `GET /api/v1/users/{id}/deletion` shows it in
+  `lastError` until the binding is removed.
+- A forced delete with a token also needs `agent.delete` on each of the user's agents through
+  the token: the token's scopes must include `agent:delete`.
+- Changing your own profile or role still needs a sign-in. No credential can change your own
+  status, delete your own account, or activate an invited user. The last super-admin,
+  last-project-owner and blocker rules of a delete apply to tokens as to sign-in sessions.
 
 ### Scopes are restrictions, not grants
 
@@ -342,7 +357,9 @@ The same per-request checks apply, with these limits:
   delete, together with `harness_config:read`. Importing or discovering templates or harness
   configurations for your user scope needs `template:create` or `harness_config:create`. A
   project token is refused for all of these, because these records belong to no project. Any
-  token can list your injected skills.
+  token can list your injected skills. User- and Hub-scope environment variables and secrets
+  (`scope=user` and `scope=hub` on `/api/v1/env` and `/api/v1/secrets`) never accept a token of
+  any boundary or scope: they require an interactive login (`403`, `details.reason: "CREDENTIAL_MANAGEMENT"`).
 - **Global catalog and skill registries.** Creating a global skill needs `skill:create_global`,
   and managing skill registries needs `skill:register`; both can be selected only on a hub
   token. Importing or discovering templates or harness configurations for the global catalog
@@ -390,8 +407,11 @@ a dedicated OS user, an isolated `HOME`, or log out first (`scion hub auth logou
 :::
 
 User- and hub-scope environment variables and secrets (`scion hub env` and `scion hub secret`
-without `--project` or `--broker`) need an interactive login (`scion hub auth login`); the Hub
-refuses access tokens on them, whatever their boundary or scopes.
+without `--project` or `--broker`, or with `--hub-scope`) need an interactive login (`scion hub auth login`); the Hub
+refuses access tokens on them, whatever their boundary or scopes, with `403 Forbidden`,
+`details.reason: "CREDENTIAL_MANAGEMENT"` (`details.credential: "session_required"`), and the message
+`"user- and hub-level environment variables and secrets require an interactive login (run 'scion hub auth login'); access tokens are not accepted"`.
+Project (`--project`) and Runtime Broker (`--broker`) scopes continue to accept appropriately scoped tokens.
 
 ### Scopes for CLI use
 
@@ -429,6 +449,7 @@ To use the CLI from a coding agent running on your machine, see
 Because a UAT is scoped, some operations that must be re-checked later, or that rely on
 owner or administrator shortcuts, require an unscoped sign-in (CLI or Web UI login) instead:
 
+- **User- and Hub-level environment variables and secrets**: reading, listing, setting, updating, or deleting `scope=user` (the default) or `scope=hub` environment variables and secrets requires an interactive login (`403`, `details.reason: "CREDENTIAL_MANAGEMENT"`).
 - **Chat scheduled messages**: creating, listing, sending now, dismissing or cancelling a message
   scheduled in a chat conversation.
 - **Runtime Broker registration**: creating a Runtime Broker (`POST /api/v1/brokers` and the
@@ -438,15 +459,32 @@ owner or administrator shortcuts, require an unscoped sign-in (CLI or Web UI log
   such a token works only for a Runtime Broker your user created: a UAT does not satisfy the
   super-admin shortcut. See
   [Runtime Broker](/scion/hosted/ha/runtime-broker/#broker-registration-permission).
-- **Broker secret rotation and association**: no UAT can rotate a Runtime Broker's HMAC
-  secret or carry the broker owner's consent to associate a broker with a project. See
+- **Runtime Broker secret rotation and association**: no UAT can rotate a Runtime Broker's HMAC
+  secret or carry the Runtime Broker owner's consent to associate a Runtime Broker with a project. See
   [Runtime Broker](/scion/hosted/ha/runtime-broker/#broker-ownership).
 - **Runtime Broker changes**: updating or deregistering a Runtime Broker, writing its
   environment variables or secrets, and sending a heartbeat on its behalf need a sign-in; a UAT
   is denied with `403` and `details.reason` naming why.
 - **Image operations on a Runtime Broker**: pulling or removing a harness-config image on a
-  named Runtime Broker (`broker_id`) needs dispatch authority on that broker, which no UAT
-  scope carries, so a UAT is denied even on an auto-provide broker.
+  named Runtime Broker (`broker_id`) needs dispatch authority on that Runtime Broker, which no UAT
+  scope carries, so a UAT is denied even on an auto-provide Runtime Broker.
+
+### Agents created with a token
+
+An agent you create with a token records the token's scopes as the upper bound of its own
+authority. What that bound does and does not narrow:
+
+- **It narrows the agent's API actions and role.** The agent's role is capped to what the
+  token's scopes cover, an explicit role the scopes do not cover is refused, and the agent's
+  own Hub token carries only the scopes the token allows.
+- **It does not narrow material delivered to the agent.** At start, resume and restart the agent
+  receives Project, Hub and Broker variables and secrets, and your user-scoped secrets shared
+  with progeny, as an agent created from a sign-in does. Each item is still checked on its own
+  (see [Agents created from a user access token](/scion/hosted/user/secrets/#agents-created-from-a-user-access-token)).
+  The delivery permissions and `secret.use` have no token scope, and need none.
+- **Reading secrets at runtime is not included.** No token scope grants `project.secret_read`,
+  so the agent's Hub token does not carry `project:secret:read` and the full agent role is not
+  available from a token.
 
 ## Trust level separation
 

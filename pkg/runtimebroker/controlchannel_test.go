@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -28,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"github.com/gorilla/websocket"
 )
@@ -757,9 +759,14 @@ func TestBuildWebSocketURL_Normalization(t *testing.T) {
 			expectedURL: "wss://hub.scion.dev/api/v1/runtime-brokers/connect",
 		},
 		{
-			name:        "http endpoint",
-			endpoint:    "http://hub.scion.dev",
-			expectedURL: "ws://hub.scion.dev/api/v1/runtime-brokers/connect",
+			name:        "loopback http endpoint",
+			endpoint:    "http://127.0.0.1:8080",
+			expectedURL: "ws://127.0.0.1:8080/api/v1/runtime-brokers/connect",
+		},
+		{
+			name:        "localhost http endpoint",
+			endpoint:    "http://localhost:8080/",
+			expectedURL: "ws://localhost:8080/api/v1/runtime-brokers/connect",
 		},
 	}
 
@@ -774,6 +781,41 @@ func TestBuildWebSocketURL_Normalization(t *testing.T) {
 				t.Errorf("Expected URL %q, got %q", tc.expectedURL, wsURL)
 			}
 		})
+	}
+}
+
+// TestBuildWebSocketURL_RefusesPlaintextNonLoopback: the control channel
+// carries agent secrets, so it is never opened as ws:// to a network host,
+// and an unknown scheme is refused instead of being mapped to ws.
+func TestBuildWebSocketURL_RefusesPlaintextNonLoopback(t *testing.T) {
+	for _, endpoint := range []string{
+		"http://hub.scion.dev",
+		"http://192.0.2.10:8080",
+		"ws://hub.scion.dev",
+		"ftp://hub.scion.dev",
+		"http://0.0.0.0:8080",
+	} {
+		client := NewControlChannelClient(ControlChannelConfig{HubEndpoint: endpoint}, nil, nil, "", slog.Default())
+		wsURL, err := client.buildWebSocketURL()
+		if err == nil {
+			t.Errorf("buildWebSocketURL(%q) = %q, want a refusal", endpoint, wsURL)
+			continue
+		}
+		if !errors.Is(err, config.ErrPlaintextNonLoopback) {
+			t.Errorf("buildWebSocketURL(%q) error = %v, want config.ErrPlaintextNonLoopback", endpoint, err)
+		}
+	}
+}
+
+// TestControlChannelConnect_RefusesPlaintextNonLoopbackWithoutDialing:
+// Connect returns the refusal and never dials.
+func TestControlChannelConnect_RefusesPlaintextNonLoopbackWithoutDialing(t *testing.T) {
+	client := NewControlChannelClient(ControlChannelConfig{HubEndpoint: "http://192.0.2.10:8080", BrokerID: "b1"}, nil, nil, "", slog.Default())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := client.Connect(ctx)
+	if !errors.Is(err, config.ErrPlaintextNonLoopback) {
+		t.Fatalf("Connect error = %v, want config.ErrPlaintextNonLoopback", err)
 	}
 }
 

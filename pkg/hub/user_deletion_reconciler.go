@@ -432,6 +432,32 @@ func (s *Server) noteUserDeletionAgentFinished(plan *agentDeletionPlan, out dele
 	}()
 }
 
+// errTokenDeletionSystemBindingHeld is returned by the completion of a
+// forced deletion that a user access token requested while the user holds
+// a direct system-scope role binding the token's delete rule refuses
+// (tokenRefusedSystemBinding): a token's deletion removes no such binding,
+// so the deletion stays stopping until the binding is removed.
+var errTokenDeletionSystemBindingHeld = errors.New("the user holds a system-scope role binding, which a deletion requested with a user access token does not remove; remove the binding to complete the deletion")
+
+// completionBindingsCheck returns the check the completion of deletion d
+// runs on the bindings its cascade deletes: for a deletion a user access
+// token requested, the token's system-binding rule, which returns
+// errTokenDeletionSystemBindingHeld; nil otherwise.
+func completionBindingsCheck(d *store.UserDeletion) userBindingsCheck {
+	if d.CredentialKind != userDeletionTokenCredentialKind {
+		return nil
+	}
+	return func(ctx context.Context, tx store.Store, userID string, bindings []*store.RoleBinding) error {
+		if err := tokenDeleteBindingsCheck(ctx, tx, userID, bindings); err != nil {
+			if errors.Is(err, errBindingStateDrift) {
+				return errTokenDeletionSystemBindingHeld
+			}
+			return err
+		}
+		return nil
+	}
+}
+
 // completeUserDeletion is the completion transaction of a forced deletion.
 // Under the user row lock it re-lists the blockers: an agent that blocks
 // again (for example one restored, or created through a path that does not
@@ -546,7 +572,7 @@ func (s *Server) completeUserDeletion(ctx context.Context, d *store.UserDeletion
 			if _, err := tx.DeactivateDelegationEdgesForDelegator(ctx, store.DelegationPrincipalUser, d.UserID, deact); err != nil {
 				return fmt.Errorf("deactivate delegation edges of user: %w", err)
 			}
-			if err := deleteUserRowCascadeModeTx(ctx, tx, d.UserID, s.membershipNow(), true); err != nil {
+			if err := deleteUserRowCascadeModeTx(ctx, tx, d.UserID, s.membershipNow(), true, completionBindingsCheck(d)); err != nil {
 				return err
 			}
 			b, err := json.Marshal(map[string]string{"email": u.Email, "role": u.Role, "status": u.Status})

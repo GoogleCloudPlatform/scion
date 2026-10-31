@@ -31,6 +31,16 @@ import (
 type mockMountChecker struct {
 	// mountpoints maps path → server:export. Present = mounted.
 	mountpoints map[string]string
+	// mountOptions maps path → the options the mount table shows. A
+	// mountpoint without an entry shows mockTableOptions (with nosuid and
+	// nodev); Mount records the options it was given.
+	mountOptions map[string]string
+	// remountCalls records targets passed to RemountRequiredFlags.
+	remountCalls []string
+	remountErr   error
+	// remountNoEffect makes a successful RemountRequiredFlags leave the
+	// mount table options unchanged.
+	remountNoEffect bool
 
 	// mountCalls records (server, export, target, options) for each Mount call.
 	mountCalls []mountCall
@@ -61,6 +71,7 @@ type mountCall struct {
 func newMockMountChecker() *mockMountChecker {
 	return &mockMountChecker{
 		mountpoints:      make(map[string]string),
+		mountOptions:     make(map[string]string),
 		isMountpointErr:  make(map[string]error),
 		kernelOnlyMounts: make(map[string]bool),
 	}
@@ -82,10 +93,18 @@ func (m *mockMountChecker) ReadMountTable() (MountTable, error) {
 	}
 	t := MountTable{}
 	for path, src := range m.mountpoints {
-		t[filepath.Clean(path)] = src
+		opts, ok := m.mountOptions[path]
+		if !ok {
+			opts = mockTableOptions
+		}
+		t[filepath.Clean(path)] = MountEntry{Source: src, Options: opts}
 	}
 	return t, nil
 }
+
+// mockTableOptions are the mount table options of a fake mountpoint that
+// sets none: a mount with nosuid and nodev.
+const mockTableOptions = "rw,nosuid,nodev,relatime"
 
 func (m *mockMountChecker) Mount(_ context.Context, server, export, target, options string) error {
 	m.mountCalls = append(m.mountCalls, mountCall{server, export, target, options})
@@ -93,6 +112,18 @@ func (m *mockMountChecker) Mount(_ context.Context, server, export, target, opti
 		return m.mountErr
 	}
 	m.mountpoints[target] = fmt.Sprintf("%s:%s", server, export)
+	m.mountOptions[target] = "rw,relatime," + options
+	return nil
+}
+
+func (m *mockMountChecker) RemountRequiredFlags(_ context.Context, target string) error {
+	m.remountCalls = append(m.remountCalls, target)
+	if m.remountErr != nil {
+		return m.remountErr
+	}
+	if !m.remountNoEffect {
+		m.mountOptions[target] = HardenNFSMountOptions(m.mountOptions[target])
+	}
 	return nil
 }
 
@@ -151,8 +182,8 @@ func TestReconcile_MountAbsent_MkdirAndMount(t *testing.T) {
 		t.Errorf("mount call = %+v, want server=10.0.0.2, export=/scion-workspaces, target=%s",
 			call, wantTarget)
 	}
-	if call.Options != "vers=3,hard,nconnect=4,_netdev" {
-		t.Errorf("mount options = %q, want default NFS options", call.Options)
+	if call.Options != "vers=3,hard,nconnect=4,_netdev,nosuid,nodev" {
+		t.Errorf("mount options = %q, want default NFS options with nosuid,nodev", call.Options)
 	}
 
 	// Should be healthy
@@ -451,8 +482,8 @@ func TestReconcile_DefaultMountOptions(t *testing.T) {
 	if len(mc.mountCalls) != 1 {
 		t.Fatalf("mountCalls = %d, want 1", len(mc.mountCalls))
 	}
-	if mc.mountCalls[0].Options != "vers=3,hard,nconnect=4,_netdev" {
-		t.Errorf("options = %q, want default NFS options", mc.mountCalls[0].Options)
+	if mc.mountCalls[0].Options != "vers=3,hard,nconnect=4,_netdev,nosuid,nodev" {
+		t.Errorf("options = %q, want default NFS options with nosuid,nodev", mc.mountCalls[0].Options)
 	}
 }
 

@@ -155,13 +155,13 @@ func TestHubConnection_RequestedReinitializeAppliesLatest(t *testing.T) {
 	cfg.BrokerAuthEnabled = false
 	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 
-	first := makeTestCreds("hub-latest", "broker-1", "http://hub1.example.com")
+	first := makeTestCreds("hub-latest", "broker-1", "https://hub1.example.com")
 	conn, err := srv.createHubConnection("hub-latest", first)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second := makeTestCreds("hub-latest", "broker-2", "http://hub2.example.com")
-	third := makeTestCreds("hub-latest", "broker-3", "http://hub3.example.com")
+	second := makeTestCreds("hub-latest", "broker-2", "https://hub2.example.com")
+	third := makeTestCreds("hub-latest", "broker-3", "https://hub3.example.com")
 	conn.requestReinitialize(second)
 	conn.requestReinitialize(third)
 

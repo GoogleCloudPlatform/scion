@@ -1246,6 +1246,15 @@ type GlobalConfig struct {
 	// the settings API.
 	KeyringFileAllowWorldReadable bool `json:"keyringFileAllowWorldReadable,omitempty" yaml:"keyringFileAllowWorldReadable,omitempty" koanf:"keyringFileAllowWorldReadable"`
 
+	// TrustedProxies lists the IPs or CIDRs of the TLS-terminating proxies
+	// in front of the hub (server.trusted_proxies;
+	// SCION_SERVER_TRUSTEDPROXIES, comma-separated). The hub trusts
+	// X-Forwarded-Proto: https only from a peer in this list, and only for
+	// its hub-broker transport check; empty means never. Validated at
+	// startup (ParseTrustedProxies). Operator-controlled only: never
+	// returned or accepted by the settings API.
+	TrustedProxies []string `json:"trustedProxies,omitempty" yaml:"trustedProxies,omitempty" koanf:"trustedProxies"`
+
 	// Admin mode settings
 	AdminMode          bool   `json:"adminMode" yaml:"adminMode" koanf:"adminMode"`
 	MaintenanceMessage string `json:"maintenanceMessage" yaml:"maintenanceMessage" koanf:"maintenanceMessage"`
@@ -2532,6 +2541,10 @@ func normalizeListSettings(gc *GlobalConfig) {
 	} {
 		*list = normalizeCORSList(*list)
 	}
+	// server.trusted_proxies: each item split on commas and trimmed, as the
+	// CORS lists are, so a comma-separated env value or file entry works.
+	// ParseTrustedProxies checks the result at startup.
+	gc.TrustedProxies = normalizeCORSList(gc.TrustedProxies)
 }
 
 // normalizeCORSList splits every item on commas, trims it and drops empty
@@ -2843,3 +2856,8 @@ const KeyringFileKey = "server.keyring_file"
 // keyring file override (GlobalConfig.KeyringFileAllowWorldReadable). No
 // settings API reads or writes it.
 const KeyringFileAllowWorldReadableKey = "server.keyring_file_allow_world_readable"
+
+// TrustedProxiesKey is the settings key of the TLS-terminating proxy
+// allowlist (GlobalConfig.TrustedProxies). No settings API reads or writes
+// it.
+const TrustedProxiesKey = "server.trusted_proxies"

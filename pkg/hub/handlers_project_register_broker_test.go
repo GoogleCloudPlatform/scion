@@ -74,7 +74,7 @@ func TestProjectRegisterEmbeddedBroker_IDMatchNonOwnerDenied(t *testing.T) {
 	quotaBefore := countProjectQuotaReservations(t, s, nonOwner.ID)
 	gitRemote := "https://github.com/register-broker-test/nonowner-a"
 
-	rec := doRequestAsUser(t, srv, nonOwner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+	rec := doRequestAsUserLoopback(t, srv, nonOwner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
 		Name:      "register-broker-project-a",
 		GitRemote: gitRemote,
 		Broker: &RegisterProjectBrokerInfo{
@@ -114,7 +114,7 @@ func TestProjectRegisterEmbeddedBroker_NameOnlyMismatchFallsThrough(t *testing.T
 	// requester supplies no ID — only a name that happens to collide with
 	// owner's broker (e.g. same hostname). Denied by name alone must NOT
 	// 403; it must fall through to create requester's own new broker.
-	rec := doRequestAsUser(t, srv, requester, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+	rec := doRequestAsUserLoopback(t, srv, requester, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
 		Name: "register-broker-project-e",
 		Broker: &RegisterProjectBrokerInfo{
 			Name:    broker.Name,
@@ -147,7 +147,7 @@ func TestProjectRegisterEmbeddedBroker_OwnerAllowed(t *testing.T) {
 	owner := newHubMemberUser(t, s, "register-broker-owner-b")
 	broker := registerBrokerTestExistingBroker(t, s, "register-broker-name-b", owner.ID)
 
-	rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+	rec := doRequestAsUserLoopback(t, srv, owner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
 		Name: "register-broker-project-b",
 		Broker: &RegisterProjectBrokerInfo{
 			ID:      broker.ID,
@@ -174,7 +174,7 @@ func TestProjectRegisterEmbeddedBroker_SuperAdminAllowed(t *testing.T) {
 	admin := newSuperAdminUser(t, s, "register-broker-admin-c")
 	broker := registerBrokerTestExistingBroker(t, s, "register-broker-name-c", owner.ID)
 
-	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+	rec := doRequestAsUserLoopback(t, srv, admin, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
 		Name: "register-broker-project-c",
 		Broker: &RegisterProjectBrokerInfo{
 			ID:      broker.ID,
@@ -215,7 +215,7 @@ func TestProjectRegisterEmbeddedBroker_NewBrokerSetsOwnership(t *testing.T) {
 	srv, s := testServer(t)
 	requester := newHubMemberUser(t, s, "register-broker-newuser-d")
 
-	rec := doRequestAsUser(t, srv, requester, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+	rec := doRequestAsUserLoopback(t, srv, requester, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
 		Name: "register-broker-project-d",
 		Broker: &RegisterProjectBrokerInfo{
 			Name:    "a brand new embedded broker name never seen before",
@@ -288,7 +288,7 @@ func TestProjectRegisterEmbeddedBroker_ExistingSecretNotReturned(t *testing.T) {
 			if tc.byName {
 				info.ID = ""
 			}
-			rec := doRequestAsUser(t, srv, caller, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+			rec := doRequestAsUserLoopback(t, srv, caller, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
 				Name:   "register-secret-project",
 				Broker: info,
 			})
@@ -328,7 +328,7 @@ func TestProjectRegisterEmbeddedBroker_LeftoverSecretNotReturned(t *testing.T) {
 	brokerID := tid("register-leftover-broker")
 	encoded, raw := storeKnownBrokerSecret(t, s, brokerID)
 
-	rec := doRequestAsUser(t, srv, requester, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+	rec := doRequestAsUserLoopback(t, srv, requester, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
 		Name: "register-leftover-project",
 		Broker: &RegisterProjectBrokerInfo{
 			ID:      brokerID,
@@ -353,7 +353,7 @@ func TestProjectRegisterEmbeddedBroker_LostSecretInsertIsKeyless(t *testing.T) {
 	require.NotNil(t, srv.brokerAuthService)
 	srv.brokerAuthService.store = race
 
-	rec := doRequestAsUser(t, srv, requester, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+	rec := doRequestAsUserLoopback(t, srv, requester, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
 		Name: "register-lost-insert-project",
 		Broker: &RegisterProjectBrokerInfo{
 			Name:    "register lost insert broker",
@@ -385,7 +385,7 @@ func TestProjectRegisterEmbeddedBroker_DeniedResponseIsKeyless(t *testing.T) {
 	broker := registerBrokerTestExistingBroker(t, s, "register-denied-broker", owner.ID)
 	encoded, raw := storeKnownBrokerSecret(t, s, broker.ID)
 
-	rec := doRequestAsUser(t, srv, nonOwner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+	rec := doRequestAsUserLoopback(t, srv, nonOwner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
 		Name:   "register-denied-project",
 		Broker: &RegisterProjectBrokerInfo{ID: broker.ID, Name: broker.Name, Version: "1.0.0"},
 	})
@@ -401,7 +401,7 @@ func TestProjectRegisterEmbeddedBroker_FirstRegistrationReturnsStoredSecret(t *t
 	srv, s := testServer(t)
 	requester := newHubMemberUser(t, s, "register-first-requester")
 
-	rec := doRequestAsUser(t, srv, requester, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+	rec := doRequestAsUserLoopback(t, srv, requester, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
 		Name:   "register-first-project",
 		Broker: &RegisterProjectBrokerInfo{Name: "register first broker never seen before", Version: "1.0.0"},
 	})

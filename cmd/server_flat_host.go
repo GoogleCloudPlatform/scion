@@ -344,6 +344,7 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 	if cfg.RuntimeBroker.Host == "0.0.0.0" {
 		rhEndpoint = fmt.Sprintf("http://localhost:%d", cfg.RuntimeBroker.Port)
 	}
+	warnColocatedBrokerEndpointTransport(rhEndpoint)
 
 	// The container Hub endpoint depends on the instance's runtime type, so
 	// it is computed per instance (once per type).

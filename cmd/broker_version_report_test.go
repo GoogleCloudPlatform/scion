@@ -88,7 +88,7 @@ func TestCompleteJoinAndPersist_SendsBuildToken(t *testing.T) {
 // TestBrokerRegisterInstance_SendsBuildToken: 'scion broker register
 // --instance' hands registration version.Short().
 func TestBrokerRegisterInstance_SendsBuildToken(t *testing.T) {
-	setupRegisterInstanceTest(t, "http://hub.example:8080")
+	setupRegisterInstanceTest(t, "https://hub.example:8080")
 	pinBuildCommit(t)
 	brokerRegisterInstance = "remote-docker"
 	orig := registerFlatInstance

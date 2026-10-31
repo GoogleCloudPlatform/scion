@@ -82,7 +82,7 @@ func setupHostSAReg(t *testing.T, name string, checker store.CallerPermissionChe
 
 func (f *hostSARegFixture) register(t *testing.T, req CreateBrokerRegistrationRequest) (int, string) {
 	t.Helper()
-	rec := doRequestAsUser(t, f.srv, f.user, http.MethodPost, "/api/v1/brokers", req)
+	rec := doRequestAsUserLoopback(t, f.srv, f.user, http.MethodPost, "/api/v1/brokers", req)
 	return rec.Code, rec.Body.String()
 }
 
@@ -141,7 +141,7 @@ func TestBrokerRegistration_HostSA_CallerWithActAs_Allowed(t *testing.T) {
 	checker := store.NewFakeCallerPermissionChecker().AllowTarget(hostSARegNew)
 	f := setupHostSAReg(t, "hsa-reg-allow", checker)
 
-	rec := doRequestAsUser(t, f.srv, f.user, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestAsUserLoopback(t, f.srv, f.user, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name:                       "hsa-reg-allow-broker",
 		GCPHostServiceAccountEmail: "Reg-New@host-project.iam.gserviceaccount.com",
 		GCPHostProjectID:           "host-project",
@@ -235,7 +235,7 @@ func TestBrokerRegistration_HostSA_CheckModeOff_AllowedAndAudited(t *testing.T) 
 	f := setupHostSAReg(t, "hsa-reg-off", nil)
 	require.Equal(t, SAAssignCheckOff, f.srv.saAssignCheckModeValue())
 
-	rec := doRequestAsUser(t, f.srv, f.user, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestAsUserLoopback(t, f.srv, f.user, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name:                       "hsa-reg-off-broker",
 		GCPHostServiceAccountEmail: hostSARegNew,
 	})
@@ -429,7 +429,7 @@ func TestReregistration_FillOfUnsetRow_ChecksActAs(t *testing.T) {
 			enforceSAAssign(f.srv, checker)
 			fault.Arm()
 
-			rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/brokers", f.req(func(r *CreateBrokerRegistrationRequest) {
+			rec := doRequestAsUserLoopback(t, f.srv, f.owner, http.MethodPost, "/api/v1/brokers", f.req(func(r *CreateBrokerRegistrationRequest) {
 				withGCPHost(ownedEmailA, ownedProjectA)(r)
 				r.Labels = map[string]string{"zone": "x"}
 			}))
@@ -536,7 +536,7 @@ func TestReregistration_RowBecameFillableAfterDecision_Conflict(t *testing.T) {
 		enforceSAAssign(f.srv, checker)
 		fault.Arm()
 
-		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/brokers", f.req(withGCPHost(ownedEmailB, ownedProjectB)))
+		rec := doRequestAsUserLoopback(t, f.srv, f.owner, http.MethodPost, "/api/v1/brokers", f.req(withGCPHost(ownedEmailB, ownedProjectB)))
 
 		assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 		assert.Zero(t, checker.CallCount(), "the row read for the decision would not be filled")

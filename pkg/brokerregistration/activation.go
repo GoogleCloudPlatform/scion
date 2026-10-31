@@ -24,6 +24,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokeridentity"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
@@ -95,6 +96,12 @@ func ValidateActivation(ctx context.Context, client hubclient.Client, id *broker
 		return brokeridentity.CheckActivationAck(id, brokeridentity.PhaseActivate, creds.BrokerID, nil)
 	}
 	if client == nil {
+		// The hub-broker transport rule applies to saved credentials
+		// before a client is built from them, as for the broker's other
+		// hub clients (HubClientForCredentials).
+		if err := config.CheckHubTransport(creds.HubEndpoint); err != nil {
+			return fmt.Errorf("flat Runtime Broker %s: instance credentials %q: %w", id.RuntimeBrokerID, creds.Name, err)
+		}
 		secret, err := base64.StdEncoding.DecodeString(creds.SecretKey)
 		if err != nil {
 			return fmt.Errorf("flat Runtime Broker %s: instance credentials %q have an invalid secret: %w", id.RuntimeBrokerID, creds.Name, err)

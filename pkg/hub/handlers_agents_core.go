@@ -1419,7 +1419,9 @@ func (s *Server) applyCreateEffectCeiling(
 		return store.EffectCeiling{}, store.AuthorityProvenance{}, "", false
 	}
 
-	capped, cause, allowed := childRoleWithinCeiling(ceiling, role, roleExplicit)
+	// The role cap reads the hop's ceiling as every walk does
+	// (uatHopEffectCeiling); the stored ceiling stays the token's verbatim.
+	capped, cause, allowed := childRoleWithinCeiling(uatHopEffectCeiling(prov.SourcePrincipalKind, prov.SourcePrincipalID, prov, ceiling), role, roleExplicit)
 	if !allowed {
 		msg := reasonNoUsableRole
 		if roleExplicit {
@@ -3203,56 +3205,20 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 		Needs:     brokerReqs.Needs,
 	}
 
-	// Build hubHas with scope info
-	// Try to determine the scope for each key the Hub provided
+	// The env var storage scopes that apply to this agent, in the order the
+	// dispatch resolver applies them (lowest precedence first), from the
+	// single envScopePrecedence list. Both the hubHas labels and the needs
+	// cross-check below walk it, so neither can drift from resolution.
+	envFilters := envScopeFilters(agent, s.HubID())
+
+	// Label each key the Hub provided with the source whose value won.
 	for _, key := range brokerReqs.HubHas {
 		if key == agentTZEnvKey {
 			// TZ is labelled with the rung of the agent TZ chain.
 			resp.HubHas = append(resp.HubHas, EnvSource{Key: key, Scope: s.agentTZ(ctx, agent).Source})
 			continue
 		}
-		source := EnvSource{Key: key, Scope: "hub"}
-
-		// Check if we can determine a more specific scope
-		if agent.OwnerID != "" {
-			vars, err := s.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: "user", ScopeID: agent.OwnerID, Key: key})
-			if err == nil && len(vars) > 0 {
-				source.Scope = "user"
-			}
-		}
-		if source.Scope == "hub" && agent.ProjectID != "" {
-			vars, err := s.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: "project", ScopeID: agent.ProjectID, Key: key})
-			if err == nil && len(vars) > 0 {
-				source.Scope = "project"
-			}
-		}
-		if source.Scope == "hub" {
-			// Check if it came from config
-			if agent.AppliedConfig != nil {
-				if _, ok := agent.AppliedConfig.Env[key]; ok {
-					source.Scope = "config"
-				}
-			}
-		}
-		if source.Scope == "hub" && s.secretBackend != nil {
-			if agent.OwnerID != "" {
-				metas, err := s.secretBackend.List(ctx, secret.Filter{
-					Scope: "user", ScopeID: agent.OwnerID, Name: key,
-				})
-				if err == nil && len(metas) > 0 {
-					source.Scope = "secret"
-				}
-			}
-			if source.Scope == "hub" && agent.ProjectID != "" {
-				metas, err := s.secretBackend.List(ctx, secret.Filter{
-					Scope: "project", ScopeID: agent.ProjectID, Name: key,
-				})
-				if err == nil && len(metas) > 0 {
-					source.Scope = "secret"
-				}
-			}
-		}
-		resp.HubHas = append(resp.HubHas, source)
+		resp.HubHas = append(resp.HubHas, EnvSource{Key: key, Scope: s.envGatherSourceLabel(ctx, agent, envFilters, key)})
 	}
 
 	// Relay SecretInfo from broker
@@ -3272,31 +3238,12 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 	// found, this indicates a resolution mismatch — the dispatch should have
 	// included it but didn't.
 	for _, key := range brokerReqs.Needs {
-		// Check env_vars table
-		if agent.OwnerID != "" {
-			vars, err := s.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: "user", ScopeID: agent.OwnerID, Key: key})
-			if err == nil && len(vars) > 0 {
-				resp.HubWarnings = append(resp.HubWarnings,
-					fmt.Sprintf("%s is stored in Hub env storage (user scope) but was not included in the dispatch — this may indicate a resolution issue", key))
-				continue
-			}
-		}
-		if agent.ProjectID != "" {
-			vars, err := s.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: "project", ScopeID: agent.ProjectID, Key: key})
-			if err == nil && len(vars) > 0 {
-				resp.HubWarnings = append(resp.HubWarnings,
-					fmt.Sprintf("%s is stored in Hub env storage (project scope) but was not included in the dispatch — this may indicate a resolution issue", key))
-				continue
-			}
-		}
-		// Check hub-scope env_vars
-		if hubID := s.HubID(); hubID != "" {
-			vars, err := s.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: "hub", ScopeID: hubID, Key: key})
-			if err == nil && len(vars) > 0 {
-				resp.HubWarnings = append(resp.HubWarnings,
-					fmt.Sprintf("%s is stored in Hub env storage (hub scope) but was not included in the dispatch — injection_mode may be as_needed", key))
-				continue
-			}
+		// Check env_vars table, highest-precedence scope first.
+		// as_needed rows count here: they are the usual reason a stored key
+		// was left out of the first dispatch pass.
+		if label, ok := s.envGatherStoredScope(ctx, envFilters, key, false); ok {
+			resp.HubWarnings = append(resp.HubWarnings, envGatherNotDispatchedWarning(key, label))
+			continue
 		}
 		// Check secret backend
 		if s.secretBackend != nil {
@@ -3329,6 +3276,100 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 	}
 
 	return resp
+}
+
+// envGatherSourceLabel names where the value the Hub supplied for key came
+// from, for the env-gather hubHas list. It follows the dispatch merge in
+// buildCreateRequest, so the label names the value that actually won:
+//
+//  1. A non-empty explicit agent config value ("config"): it outranks every
+//     storage scope. An empty config value is a passthrough marker that
+//     yields to storage, so it is not reported here.
+//  2. The highest-precedence env var storage scope holding the key, from
+//     envFilters (envScopePrecedence, walked from the top), labelled with
+//     envScopeSourceLabel ("user", "project", "hub" or "broker"). as_needed
+//     rows are skipped: hubHas reports the first dispatch pass, which
+//     resolveEnvFromStorage builds without them.
+//  3. A user- or project-scope secret of that name ("secret"): environment
+//     secrets only fill keys config and storage left unset.
+//  4. "hub" when none of the above matched (an empty config value with no
+//     stored value, for instance). This fallback is not a lookup result.
+//
+// It deliberately does not apply the admin-kind test identity scope filter
+// (envScopesForDispatch): it labels keys the broker already reported as
+// supplied by the Hub, and decides nothing about what is dispatched.
+//
+// A nil agent gets the "hub" fallback. buildEnvGatherResponse, the only
+// caller, reads agent.ID first, so this is defensive only.
+func (s *Server) envGatherSourceLabel(ctx context.Context, agent *store.Agent, envFilters []store.EnvVarFilter, key string) string {
+	if agent == nil {
+		return "hub"
+	}
+	if agent.AppliedConfig != nil && agent.AppliedConfig.Env[key] != "" {
+		return "config"
+	}
+	if label, ok := s.envGatherStoredScope(ctx, envFilters, key, true); ok {
+		return label
+	}
+	if s.secretBackend != nil {
+		if agent.OwnerID != "" {
+			metas, err := s.secretBackend.List(ctx, secret.Filter{Scope: "user", ScopeID: agent.OwnerID, Name: key})
+			if err == nil && len(metas) > 0 {
+				return "secret"
+			}
+		}
+		if agent.ProjectID != "" {
+			metas, err := s.secretBackend.List(ctx, secret.Filter{Scope: "project", ScopeID: agent.ProjectID, Name: key})
+			if err == nil && len(metas) > 0 {
+				return "secret"
+			}
+		}
+	}
+	return "hub"
+}
+
+// envGatherStoredScope returns the label of the highest-precedence env var
+// storage scope in envFilters (lowest precedence first) that holds key, and
+// whether any does. With skipAsNeeded, a scope holding the key only as an
+// as_needed row does not count. A scope whose read fails is logged and
+// skipped: provenance is advisory, so a failed read only costs the label
+// (or the warning) for that scope, never the response.
+func (s *Server) envGatherStoredScope(ctx context.Context, envFilters []store.EnvVarFilter, key string, skipAsNeeded bool) (string, bool) {
+	for i := len(envFilters) - 1; i >= 0; i-- {
+		filter := envFilters[i]
+		filter.Key = key
+		vars, err := s.store.ListEnvVars(ctx, filter)
+		if err != nil {
+			slog.WarnContext(ctx, "env-gather provenance: reading stored env vars failed; skipping this scope",
+				"scope", filter.Scope, "error", err)
+			continue
+		}
+		for _, v := range vars {
+			if skipAsNeeded && v.InjectionMode == store.InjectionModeAsNeeded {
+				continue
+			}
+			return envScopeSourceLabel(filter.Scope), true
+		}
+	}
+	return "", false
+}
+
+// envGatherNotDispatchedWarning is the hub warning for a key the broker
+// needs that is stored at the given env var scope label but was not in the
+// dispatch. A user- or project-scope value should always be dispatched, so it
+// points at a resolution issue; a hub- or broker-scope value is commonly
+// as_needed.
+func envGatherNotDispatchedWarning(key, label string) string {
+	scope := label
+	if label == "broker" {
+		scope = store.ScopeRuntimeBroker
+	}
+	switch label {
+	case "hub", "broker":
+		return fmt.Sprintf("%s is stored in Hub env storage (%s scope) but was not included in the dispatch — injection_mode may be as_needed", key, scope)
+	default:
+		return fmt.Sprintf("%s is stored in Hub env storage (%s scope) but was not included in the dispatch — this may indicate a resolution issue", key, scope)
+	}
 }
 
 // submitAgentEnv handles POST /api/v1/projects/{projectId}/agents/{agentId}/env
@@ -4111,11 +4152,11 @@ func (s *Server) agentEditAccessFor(ctx context.Context, identity Identity, agen
 	// credential scopes must cover the role. A lookup error counts as not
 	// allowed. The role actually requested is checked again, with the
 	// rest of the authority rules, when the reincarnation is asked for.
-	ceiling, _, err := s.authzService.sourceEffectCeiling(ctx, identity)
+	ceiling, prov, err := s.authzService.sourceEffectCeiling(ctx, identity)
 	if err != nil {
 		return access
 	}
-	_, _, access.CanChangeRole = childRoleWithinCeiling(ceiling, role, true)
+	_, _, access.CanChangeRole = childRoleWithinCeiling(uatHopEffectCeiling(prov.SourcePrincipalKind, prov.SourcePrincipalID, prov, ceiling), role, true)
 	return access
 }
 

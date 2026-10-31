@@ -301,6 +301,15 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 			"use DELETE /api/v1/admin/experiments", nil)
 		return
 	}
+	// The "chat_retention" section is written only through PUT
+	// /api/v1/admin/chat-retention, which is gated on hub.chat_retention,
+	// compare-and-sets the revision and writes the mutation audit record.
+	// This route does none of that, so it must not be a second write path.
+	if sectionName == opsettings.ChatRetentionSectionName {
+		writeError(w, http.StatusBadRequest, "validation_failed",
+			"use PUT /api/v1/admin/chat-retention with explicit nulls to reset its fields", nil)
+		return
+	}
 	// While the test admin tier is on, federation settings are refused on
 	// every write path, resets included (G8).
 	if sectionName == "federation" && s.testAdminTierOn() {
@@ -644,11 +653,18 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 
 	// Load existing settings to merge with updates
 	var raw map[string]interface{}
+	// The stored runtimes and profiles, typed, for the placement and
+	// identity save checks below (RuntimeSaveChecks).
+	var stored struct {
+		Runtimes map[string]config.V1RuntimeConfig `yaml:"runtimes"`
+		Profiles map[string]config.V1ProfileConfig `yaml:"profiles"`
+	}
 	if data, err := os.ReadFile(settingsPath); err == nil {
 		if err := yamlv3.Unmarshal(data, &raw); err != nil {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to parse existing settings", nil)
 			return
 		}
+		_ = yamlv3.Unmarshal(data, &stored)
 	}
 	if raw == nil {
 		raw = make(map[string]interface{})
@@ -771,6 +787,17 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		if yamlv3.Unmarshal(newData, &merged) == nil {
 			saveWarnings = safeToEvictSaveWarnings(merged.Runtimes, merged.Profiles)
+			// Kubernetes placement and identity fields (ptone/scion#6580):
+			// a problem this save causes is refused, nothing is written; one
+			// already stored that the save does not touch is a warning.
+			pErrs, pWarnings := config.RuntimeSaveChecks(stored.Runtimes, merged.Runtimes, stored.Profiles, merged.Profiles)
+			if len(pErrs) > 0 {
+				writeResourceQuantityError(w, http.StatusBadRequest, ErrCodeInvalidRequest, pErrs)
+				return
+			}
+			saveWarnings = append(saveWarnings, resourceQuantityWarnings(pWarnings)...)
+			saveWarnings = append(saveWarnings, config.PlacementIgnoredWarnings(merged.Runtimes, merged.Profiles)...)
+			saveWarnings = append(saveWarnings, config.PlacementSettingsWarnings(merged.Runtimes, merged.Profiles)...)
 		}
 	}
 	saveWarnings = append(saveWarnings, resourceQuantityWarnings(qWarnings)...)

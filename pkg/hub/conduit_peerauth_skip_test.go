@@ -138,6 +138,7 @@ func TestConduitRelayNotRunning503_AgentAndBrokerPaths(t *testing.T) {
 		f.srv.SetConduitRelayStartFailure(key)
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/conduit", nil)
 		req.Header = f.signedHeader(t, "/api/v1/conduit", nil)
+		req.RemoteAddr = tpLoopbackPeer // the transport policy admits a client on the hub host
 		rec := httptest.NewRecorder()
 		_, ok := f.srv.decideConduitBroker(rec, req, false)
 		require.False(t, ok)

@@ -23,6 +23,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -172,18 +173,35 @@ func browserAutoOpenAllowedFor(noBrowserEnv string, interactive, headless bool) 
 	return noBrowserEnv == "" && interactive && !headless
 }
 
+// quickstartStatusAllowed reports whether the onboarding status request,
+// which carries the server's dev or settings token, may be sent to baseURL:
+// only when the hub transport rule accepts it (a loopback or TLS URL).
+func quickstartStatusAllowed(baseURL string) bool {
+	return hubsync.CheckUserHubTransport(baseURL) == nil
+}
+
 // Test seams for printWorkstationQuickstart, so unit tests never wait on or
 // talk to a real server.
 var (
 	quickstartWaitReady        = waitForServerReady
 	quickstartReadyTimeout     = 20 * time.Second
-	quickstartOnboardingStatus = func(baseURL, token string) (onboardingStatusResult, error) {
-		return fetchOnboardingStatus(&http.Client{Timeout: 5 * time.Second}, baseURL, token)
-	}
 	quickstartBrowserAllowed   = browserAutoOpenAllowed
 	quickstartOpenBrowser      = util.OpenBrowser
 	quickstartStdoutIsTerminal = stdoutIsTerminal
-	quickstartDevSignIn        = func(baseURL, token, next string) (devSignInLink, error) {
-		return requestDevSignInLink(&http.Client{Timeout: 5 * time.Second}, baseURL, token, next)
-	}
 )
+
+// quickstartDevSignIn sends the server's dev token to baseURL. It does not
+// apply the transport rule itself; its caller checks quickstartStatusAllowed
+// first (the hub constructor source scan in hub_transport_policy_test.go
+// keeps it so).
+var quickstartDevSignIn = func(baseURL, token, next string) (devSignInLink, error) {
+	return requestDevSignInLink(&http.Client{Timeout: 5 * time.Second}, baseURL, token, next)
+}
+
+// quickstartOnboardingStatus sends the server's token to baseURL. It does not
+// apply the transport rule itself; its caller checks quickstartStatusAllowed
+// first (the hub constructor source scan in hub_transport_policy_test.go keeps
+// it so).
+var quickstartOnboardingStatus = func(baseURL, token string) (onboardingStatusResult, error) {
+	return fetchOnboardingStatus(&http.Client{Timeout: 5 * time.Second}, baseURL, token)
+}

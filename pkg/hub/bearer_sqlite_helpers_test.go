@@ -98,7 +98,12 @@ func newBearerMatrixFixture(t *testing.T) *bearerMatrixFixture {
 	agent.MessageMode = store.MessageModeProject
 	require.NoError(t, s.UpdateAgent(ctx, agent))
 
-	return &bearerMatrixFixture{srv: srv, store: s, ids: ids, adminID: adminID, otherProject: other, tokens: map[string]string{}}
+	// The user the user delete row removes: a member with no role binding,
+	// so a token's delete passes the system-scope binding rule.
+	userDelete := tid("bdm-user-delete")
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: userDelete, Email: userDelete + "@test.com", DisplayName: "BDM User Delete", Role: "member", Status: "active"}))
+
+	return &bearerMatrixFixture{srv: srv, store: s, ids: ids, adminID: adminID, otherProject: other, userDelete: userDelete, tokens: map[string]string{}}
 }
 
 // sessionOnlyDetailsOf returns details.reason and details.credential of an
@@ -125,7 +130,9 @@ type bearerMatrixFixture struct {
 	ids          idFixtures
 	adminID      string
 	otherProject string
-	tokens       map[string]string
+	// userDelete is the user the user delete row removes.
+	userDelete string
+	tokens     map[string]string
 	// tokenIDs are the tokens mint and tryMint created since the last
 	// releaseTokens.
 	tokenIDs []string
@@ -346,12 +353,14 @@ func bearerMatrixBodyOverrides(f idFixtures) map[overrideKey]map[string]interfac
 	}
 }
 
-// callerPatternOverrides holds per-operation path parameters that name the
-// matrix's own super-admin, for entry points told apart by whether the path
-// names the caller's own record.
+// callerPatternOverrides holds per-operation path parameters that name
+// records the matrix fixture seeds itself: the matrix's own super-admin,
+// for entry points told apart by whether the path names the caller's own
+// record, and the user the user delete row removes.
 func (m *bearerMatrixFixture) callerPatternOverrides() map[overrideKey]map[string]string {
 	return map[overrideKey]map[string]string{
-		{"user.self.update", "/api/v1/users/{id}"}: {"id": m.adminID},
+		{"user.self.update", "/api/v1/users/{id}"}:  {"id": m.adminID},
+		{"user.admin.delete", "/api/v1/users/{id}"}: {"id": m.userDelete},
 	}
 }
 

@@ -253,7 +253,7 @@ func (s *Server) createUserTemplate(w http.ResponseWriter, r *http.Request) {
 	// commits them.
 	if len(req.Files) > 0 && stor != nil {
 		uploadID := api.NewUUID()
-		uploadURLs, err := s.generateTemplateUploadURLs(ctx, stor, template, req.Files, uploadID, requestBaseURL(r))
+		uploadURLs, err := s.generateTemplateUploadURLs(ctx, stor, template, req.Files, uploadID, s.requestBaseURL(r))
 		if err == nil {
 			response.UploadURLs = uploadURLs
 			response.UploadID = uploadID
