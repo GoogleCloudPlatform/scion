@@ -67,6 +67,12 @@ func Resolve(_ context.Context, opts ResolveOptions) (*ResolvedHarness, error) {
 
 	declared := declaredConfig(opts.Name, hcDir, opts.Settings, opts.ProfileName)
 	entry := withBundleReady(declared)
+	// config.yaml's agent-home path fields are checked when it is parsed;
+	// the merged entry (settings overlay applied) is checked again here so
+	// a future overlay field cannot bypass that check.
+	if err := config.ValidateHarnessHomePaths(entry); err != nil {
+		return nil, fmt.Errorf("harness-config %q: %w", opts.Name, err)
+	}
 
 	// 1. Container-script harness (provisioner block present)
 	if entry.Provisioner != nil {
