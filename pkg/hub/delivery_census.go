@@ -239,9 +239,9 @@ func (rep *LaunchDeliveryCensusReport) addUATFacts(row LaunchDeliveryCensusRow) 
 }
 
 // launchDeliveryCohortUATRootNotAdmitted names an agent whose own edge was
-// recorded from a user access token and whose launch material is withheld
-// because its root user is not admitted to the agent's project, as for a
-// session-created agent.
+// recorded from a user access token, or a uat_descendant_legacy agent, whose
+// launch material is withheld because its root user is not admitted to the
+// agent's project, as for a session-created agent.
 const launchDeliveryCohortUATRootNotAdmitted = "uat_root_not_admitted"
 
 func (a *AuthzService) launchDeliveryCensusRow(ctx context.Context, ag *store.Agent) LaunchDeliveryCensusRow {
@@ -300,7 +300,8 @@ func launchDeliveryOutcomeCohort(f LaunchDeliveryEdgeFacts, o hubDeliveryAdmissi
 	// hubDeliveryChainAdmission prefixes a provenance-root refusal (the walk
 	// passed) with this text.
 	walkPassed := strings.HasPrefix(o.reason, "delivery provenance root denied")
-	if walkPassed && f.UATRecorded && strings.HasPrefix(o.reason, deliveryRootNotAdmittedReason) {
+	tokenChain := f.UATRecorded || o.deniedCohort == legacyDeliveryCohortUATDescendant
+	if walkPassed && tokenChain && strings.HasPrefix(o.reason, deliveryRootNotAdmittedReason) {
 		return launchDeliveryCohortUATRootNotAdmitted
 	}
 	targetHeld := o.reason == "agent "+agentID+" is held"

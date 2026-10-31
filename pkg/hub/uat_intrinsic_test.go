@@ -517,12 +517,42 @@ func TestUATIntrinsic_LaunchMaterialStrictWalk(t *testing.T) {
 // no longer admitted to the project is withheld its launch material. The
 // withheld Warn names the cause, and no fallback serves it.
 func TestUATIntrinsic_RootNotAdmittedWithheld(t *testing.T) {
-	for name, edge := range map[string]func(*store.DelegationEdge){
-		"token":   uiUATEdge(uiTokenList...),
-		"session": nil, // the comparator: a session-created agent in the same state
-	} {
-		t.Run(name, func(t *testing.T) {
-			m := newLDFixture(t, "ui-root-"+name, ldOptions{rootMemberNone: true, edge: edge})
+	const parentName = "ui-root-token-parent"
+	cases := []struct {
+		name string
+		opts ldOptions
+		// after builds the rest of the chain; nil for a direct agent.
+		after func(t *testing.T, m *ldFixture)
+		// fallback is true for a chain the strict walk refuses before the
+		// root admission and the fallback then refuses at it.
+		fallback bool
+	}{
+		{name: "token", opts: ldOptions{rootMemberNone: true, edge: uiUATEdge(uiTokenList...)}},
+		// The comparator: a session-created agent in the same state.
+		{name: "session", opts: ldOptions{rootMemberNone: true}},
+		// A child of a token-created agent, recorded before the deliver
+		// permissions were intrinsic to the token hop (uat_descendant_legacy):
+		// withheld like its parent.
+		{
+			name: "pre-existing child of a token-created agent",
+			opts: ldOptions{noEdge: true, rootMemberNone: true, ancestry: func(f *goldenFixture) []string {
+				return []string{f.memberNoneID, tid(parentName)}
+			}},
+			after: func(t *testing.T, m *ldFixture) {
+				p := tid(parentName)
+				hdAgent(t, m.store, p, m.agent.ProjectID, []string{m.memberNoneID})
+				hdEdge(t, m.store, store.DelegationPrincipalUser, m.memberNoneID, p, m.agent.ProjectID, uiUATEdge(uiTokenList...))
+				hdEdge(t, m.store, store.DelegationPrincipalAgent, p, m.agent.ID, m.agent.ProjectID, withBoundedCeiling("agent.read"))
+			},
+			fallback: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newLDFixture(t, "ui-root-"+strings.ReplaceAll(tc.name, " ", "-"), tc.opts)
+			if tc.after != nil {
+				tc.after(t, m)
+			}
 			m.env(t, "UI_ROOT_ENV", "ui-root-value", store.ScopeProject, m.agent.ProjectID, false)
 			buf := lgLogger(m)
 			ctx := context.Background()
@@ -530,6 +560,15 @@ func TestUATIntrinsic_RootNotAdmittedWithheld(t *testing.T) {
 			h := hdIdentity(t, m.authz, m.agent.ID)
 			o := m.authz.hubDeliveryChainAdmission(ctx, h, "env_var.deliver", m.agent.ID, nil)
 			require.False(t, o.ok)
+			if tc.fallback {
+				assert.Equal(t, DenyCauseCeilingEffectExceeded, o.cause, "the strict walk refuses the child's own edge; reason %q", o.reason)
+				lh := hdIdentity(t, m.authz, m.agent.ID)
+				lh.legacyFallback = true
+				o = m.authz.hubDeliveryAdmissionOutcomeFor(ctx, lh, "env_var.deliver", m.agent.ID, nil)
+				require.False(t, o.ok, "the fallback applies the root admission; reason %q", o.reason)
+				assert.Empty(t, o.legacyCohort)
+				assert.Equal(t, legacyDeliveryCohortUATDescendant, o.deniedCohort)
+			}
 			assert.Equal(t, DenyCauseCeilingDelegatorLacksPermission, o.cause)
 			assert.True(t, strings.HasPrefix(o.reason, deliveryRootNotAdmittedReason), "reason %q", o.reason)
 
@@ -546,6 +585,16 @@ func TestUATIntrinsic_RootNotAdmittedWithheld(t *testing.T) {
 				}
 			}
 			assert.True(t, named, "the withheld Warn names the cause; log: %s", buf.String())
+
+			if tc.fallback {
+				rep, err := m.authz.LaunchDeliveryCensus(ctx, false)
+				require.NoError(t, err)
+				for _, r := range rep.Rows {
+					if r.AgentID == m.agent.ID {
+						assert.Equal(t, launchDeliveryCohortUATRootNotAdmitted, r.Cohort, "the census lists it")
+					}
+				}
+			}
 		})
 	}
 }

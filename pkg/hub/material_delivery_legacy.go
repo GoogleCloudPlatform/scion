@@ -74,6 +74,9 @@ package hub
 //     a descendant hop whose parent's ceiling does allow the permission is a
 //     real narrowing and still denies. Edges recorded since carry the
 //     deliver permissions (parentDeliverEligibility) and need no exception.
+//     Unlike the other cohorts, it still requires the root user's project
+//     admission (uatDescendantRootDenied), as its token-created ancestor
+//     does on the strict walk.
 //     The census counts this cohort until it reads zero, and then it is
 //     removed.
 //
@@ -103,6 +106,7 @@ package hub
 import (
 	"container/list"
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -312,6 +316,15 @@ func (a *AuthzService) hubDeliveryLegacyFallback(
 	if !ok || note.cohort == "" {
 		return strict
 	}
+	if note.cohort == legacyDeliveryCohortUATDescendant {
+		// A descendant of a token-created agent is admitted as its
+		// token-created ancestor is: the root user must still be admitted to
+		// the project (ResolveProvenanceRoot), as on the strict walk. The
+		// other legacy cohorts keep their behaviour from before the check.
+		if denied, ok := a.uatDescendantRootDenied(ctx, agentID, permissionID, explain); ok {
+			return denied
+		}
+	}
 	reason := "delivery legacy fallback: " + note.cohort
 	if note.depth > 0 {
 		reason += fmt.Sprintf(" at depth %d", note.depth)
@@ -320,6 +333,32 @@ func (a *AuthzService) hubDeliveryLegacyFallback(
 		*explain = append(*explain, DecisionStep{Step: "delegation_ceiling_delivery_legacy_fallback", Detail: reason})
 	}
 	return hubDeliveryAdmissionOutcome{ok: true, reason: reason, legacyCohort: note.cohort, uatIntrinsic: obs.uatIntrinsic}
+}
+
+// uatDescendantRootDenied applies the provenance root admission to a chain
+// the tolerant walk passed under uat_descendant_legacy. It returns the deny
+// and true when the root user is not admitted to the agent's project, or when
+// the admission cannot be evaluated (a lookup fault fails closed). Any other
+// outcome returns false and the fallback goes on.
+func (a *AuthzService) uatDescendantRootDenied(ctx context.Context, agentID, permissionID string, explain *[]DecisionStep) (hubDeliveryAdmissionOutcome, bool) {
+	_, err := a.ResolveProvenanceRoot(ctx, agentID, ResolveProvenanceOptions{PermissionID: permissionID})
+	if err == nil {
+		return hubDeliveryAdmissionOutcome{}, false
+	}
+	var reason string
+	cause := DenyCauseForProvenanceError(err)
+	switch {
+	case errors.Is(err, ErrProvenanceNotAdmitted):
+		reason = deliveryRootNotAdmittedReason + ": " + err.Error()
+	case cause == DenyCauseCeilingError:
+		reason = "delivery ceiling check failed (fail-closed): " + err.Error()
+	default:
+		return hubDeliveryAdmissionOutcome{}, false
+	}
+	if explain != nil {
+		*explain = append(*explain, DecisionStep{Step: "delegation_ceiling_delivery_denied", Detail: reason})
+	}
+	return hubDeliveryAdmissionOutcome{reason: reason, cause: cause, deniedCohort: legacyDeliveryCohortUATDescendant}, true
 }
 
 // deliveryLogDedup remembers recently logged keys for the fallback Warn: a

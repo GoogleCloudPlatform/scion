@@ -64,7 +64,7 @@ Agents whose delegation chain contains legacy data may not have the recorded cha
 
 An agent created from a [user access token](/scion/hosted/user/personal-access-tokens/) receives your shared secrets and its launch material the way an agent created from a sign-in does. The token's scopes narrow the API actions the agent may take, but they do not narrow the delivery of material to it at start, resume and restart: Project, Hub and Broker values, the secrets sent for skill fetches, and your user-scoped secrets shared with progeny (`--allow-progeny`). Every other check still applies to each item, including the item's association with the agent, access constraints, and the user-scoped secret checks described under [How it Works Under the Hood](#how-it-works-under-the-hood).
 
-As for any agent, launch material reaches the agent only while the user who created it is still a member of the project. A token-created agent whose creator has left the project starts without it, and the `Warn` line for each item names the cause, `root user not admitted to the project`.
+As for any agent, launch material reaches the agent only while the user who created it is still a member of the project. A token-created agent, or one of its sub-agents, whose creator has left the project starts without it, and the `Warn` line for each item names the cause, `root user not admitted to the project`.
 
 Reading secrets at runtime (`sciontool secret get`, the agent secret endpoints) is not covered: the agent token the Hub issues to such an agent does not carry `project:secret:read`, so runtime reads and lists are refused. The full agent role is not available from a token for the same reason.
 

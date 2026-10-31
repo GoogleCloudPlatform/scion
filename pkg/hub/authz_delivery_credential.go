@@ -106,6 +106,9 @@ type hubDeliveryAdmissionOutcome struct {
 	// legacyCohort is set when the outcome is an allow by the legacy
 	// fallback: the cohort (legacyDeliveryCohort*) of the first legacy hop.
 	legacyCohort string
+	// deniedCohort is set on a deny the fallback returned for a chain of
+	// that cohort (uat_descendant_legacy whose root user is not admitted).
+	deniedCohort string
 	// uatIntrinsic is set on an allow whose walk passed a hop recorded from
 	// a user access token only through the intrinsic rule
 	// (uatIntrinsicDecides).
