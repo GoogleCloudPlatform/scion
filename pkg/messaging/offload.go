@@ -158,8 +158,9 @@ func Qualifies(persistedBody string, plain bool, p OffloadPolicy) bool {
 }
 
 // StripReservedMetadata returns md unchanged if it has none of the
-// hub-reserved keys (the three offload keys, the artifact reference key
-// and the visitor sender keys). Otherwise it returns a NEW map without
+// hub-reserved keys (reservedMetadataKeys: the three offload keys, the
+// artifact reference key, the visitor sender keys and the sender time zone
+// key). Otherwise it returns a NEW map without
 // them. It never mutates md, so it is safe on aliased maps. Callers
 // assign the result:
 // sm.Metadata = messaging.StripReservedMetadata(sm.Metadata).
