@@ -28,6 +28,9 @@ import (
 	"testing"
 	"time"
 
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/cspreport"
 )
 
@@ -67,6 +70,23 @@ func cspRecordCount(t *testing.T, buf *bytes.Buffer) int {
 			t.Fatalf("decoding log record: %v", err)
 		}
 		if rec["msg"] == cspreport.LogMessage {
+			n++
+		}
+	}
+	return n
+}
+
+// cspMessageCount counts the records with message msg in buf.
+func cspMessageCount(t *testing.T, buf *bytes.Buffer, msg string) int {
+	t.Helper()
+	n := 0
+	dec := json.NewDecoder(bytes.NewReader(buf.Bytes()))
+	for dec.More() {
+		var rec map[string]any
+		if err := dec.Decode(&rec); err != nil {
+			t.Fatalf("decoding log record: %v", err)
+		}
+		if rec["msg"] == msg {
 			n++
 		}
 	}
@@ -141,8 +161,9 @@ func signedOutGet(h http.Handler, path string) *httptest.ResponseRecorder {
 	return rec
 }
 
-// TestCSPReportRouteRateLimited: one client is refused with 429 past its
-// burst and nothing more is logged; the requests before it (each its own
+// TestCSPReportRouteRateLimited: past its burst, one client's report is
+// refused: it is answered 204 like any other, is not logged, and shows in
+// one refusal summary record; the requests before it (each its own
 // violation) were logged.
 func TestCSPReportRouteRateLimited(t *testing.T) {
 	var buf bytes.Buffer
@@ -160,15 +181,104 @@ func TestCSPReportRouteRateLimited(t *testing.T) {
 	if n := cspRecordCount(t, &buf); n != cspReportBurst {
 		t.Fatalf("%d records logged within the burst, want %d", n, cspReportBurst)
 	}
+	buf.Reset()
 	rec := postCSPReport(srv.Handler(), "192.0.2.20:5000", routedCSPReportN(cspReportBurst))
-	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("past the burst: status = %d, want 429", rec.Code)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("past the burst: status = %d, want 204", rec.Code)
 	}
-	if rec.Header().Get("Retry-After") == "" {
-		t.Error("429 without Retry-After")
+	if n := cspRecordCount(t, &buf); n != 0 {
+		t.Fatalf("%d records for the refused report, want none", n)
 	}
-	if n := cspRecordCount(t, &buf); n != cspReportBurst {
-		t.Fatalf("%d records after the refusal, want still %d", n, cspReportBurst)
+	if n := cspMessageCount(t, &buf, cspreport.RefusedLogMessage); n != 1 {
+		t.Fatalf("%d refusal summary records, want 1", n)
+	}
+	if c := srv.cspReports.Counts(); c.RefusedReports != 1 {
+		t.Fatalf("counts = %+v, want one refused report", c)
+	}
+}
+
+// TestCSPReportRouteRepeatFloodIsNotCharged: one client sends a read
+// ceiling's worth of one identical report, as a page that repeats a
+// violation does. Every request gets 204 and one record is written; the
+// repeats are not charged to the client's budget, so its next distinct
+// reports are still logged.
+func TestCSPReportRouteRepeatFloodIsNotCharged(t *testing.T) {
+	var buf bytes.Buffer
+	srv := routedCSPServer(t, &buf)
+	now := time.Unix(1_700_000_000, 0)
+	readNow := now
+	srv.cspReportLimiter.read.nowFunc = func() time.Time { return readNow }
+	srv.cspReportLimiter.perIP.nowFunc = func() time.Time { return now }
+	srv.cspReportLimiter.global.nowFunc = func() time.Time { return now }
+
+	const flood = cspReportReadBurst
+	if flood <= cspReportBurst {
+		t.Fatalf("test setup: the flood (%d) must exceed the per-client burst (%d)", flood, cspReportBurst)
+	}
+	for i := 0; i < flood; i++ {
+		rec := postCSPReportAs(srv.Handler(), "192.0.2.70:5000", "application/csp-report", safariCSPReport)
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("report %d: status = %d, want 204", i+1, rec.Code)
+		}
+	}
+	if n := cspRecordCount(t, &buf); n != 1 {
+		t.Fatalf("%d records for %d identical reports, want 1", n, flood)
+	}
+	if c := srv.cspReports.Counts(); c.Collapsed != flood-1 || c.RefusedReports != 0 || c.RefusedRequests != 0 {
+		t.Fatalf("counts = %+v, want %d collapsed and none refused", c, flood-1)
+	}
+	// The flood took one request of the client's budget. The read ceiling
+	// refills (its clock moves on); the per-client budget does not.
+	readNow = readNow.Add(time.Minute)
+	buf.Reset()
+	for i := 0; i < cspReportBurst-1; i++ {
+		if rec := postCSPReport(srv.Handler(), "192.0.2.70:5000", routedCSPReportN(i)); rec.Code != http.StatusNoContent {
+			t.Fatalf("distinct report %d: status = %d, want 204", i+1, rec.Code)
+		}
+	}
+	if n := cspRecordCount(t, &buf); n != cspReportBurst-1 {
+		t.Fatalf("%d distinct reports logged after the flood, want %d", n, cspReportBurst-1)
+	}
+	// Positive control: the budget is now used up.
+	buf.Reset()
+	postCSPReport(srv.Handler(), "192.0.2.70:5000", routedCSPReportN(cspReportBurst))
+	if n := cspRecordCount(t, &buf); n != 0 {
+		t.Fatalf("a report past the budget was logged")
+	}
+}
+
+// TestCSPReportRouteReadCeiling: past its read ceiling, a client's request
+// is answered 204 without being read, even one that would otherwise get
+// 400, and is counted in the refusal summary; another client is served.
+func TestCSPReportRouteReadCeiling(t *testing.T) {
+	var buf bytes.Buffer
+	srv := routedCSPServer(t, &buf)
+	now := time.Unix(1_700_000_000, 0)
+	srv.cspReportLimiter.read.nowFunc = func() time.Time { return now }
+	srv.cspReportLimiter.perIP.nowFunc = func() time.Time { return now }
+	srv.cspReportLimiter.global.nowFunc = func() time.Time { return now }
+
+	for i := 0; i < cspReportReadBurst; i++ {
+		rec := postCSPReportAs(srv.Handler(), "192.0.2.80:5000", "application/csp-report", safariCSPReport)
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("report %d: status = %d, want 204", i+1, rec.Code)
+		}
+	}
+	buf.Reset()
+	// Within the ceiling this body gets 400 (TestCSPReportRouteBodyCapAndMalformed).
+	rec := postCSPReport(srv.Handler(), "192.0.2.80:5000", `{"not":"a report"}`)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("past the read ceiling: status = %d, want 204", rec.Code)
+	}
+	if n := cspMessageCount(t, &buf, cspreport.RefusedLogMessage); n != 1 {
+		t.Fatalf("%d refusal summary records, want 1", n)
+	}
+	if c := srv.cspReports.Counts(); c.RefusedRequests != 1 {
+		t.Fatalf("counts = %+v, want one refused request", c)
+	}
+	// Positive control: another client is served, and its bad body gets 400.
+	if rec := postCSPReport(srv.Handler(), "192.0.2.81:5000", `{"not":"a report"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("another client: status = %d, want 400", rec.Code)
 	}
 }
 
@@ -248,11 +358,11 @@ func TestCSPReportRouteChargesHubWidePerRecord(t *testing.T) {
 	const written = 11
 	left := cspReportGlobalBurst - written
 	for i := 0; i < left; i++ {
-		if ok, _ := srv.cspReportLimiter.AllowRecord(); !ok {
+		if !srv.cspReportLimiter.AllowRecord() {
 			t.Fatalf("hub-wide token %d of the %d left was refused", i+1, left)
 		}
 	}
-	if ok, _ := srv.cspReportLimiter.AllowRecord(); ok {
+	if srv.cspReportLimiter.AllowRecord() {
 		t.Fatalf("more than %d hub-wide tokens were left: the request was not charged per record", left)
 	}
 }
@@ -287,11 +397,11 @@ func TestCSPReportRouteCollapsesOnePageLoad(t *testing.T) {
 	// Repeats take no hub-wide record token: only the one record did.
 	left := cspReportGlobalBurst - 1
 	for i := 0; i < left; i++ {
-		if ok, _ := srv.cspReportLimiter.AllowRecord(); !ok {
+		if !srv.cspReportLimiter.AllowRecord() {
 			t.Fatalf("hub-wide token %d of the %d left was refused", i+1, left)
 		}
 	}
-	if ok, _ := srv.cspReportLimiter.AllowRecord(); ok {
+	if srv.cspReportLimiter.AllowRecord() {
 		t.Fatal("more hub-wide tokens than the burst minus one record")
 	}
 }
@@ -301,5 +411,139 @@ func TestCSPReportRouteCollapsesOnePageLoad(t *testing.T) {
 func TestCSPReportHandlerCollapsesRepeats(t *testing.T) {
 	if newCSPReportHandler(newCSPReportLimiter(nil), false).Dedupe == nil {
 		t.Fatal("the report handler logs every repeat")
+	}
+}
+
+// TestCSPReportMetricsExportCounts: the report endpoint's refused and
+// collapsed totals are read by the OTel counters at collection time.
+func TestCSPReportMetricsExportCounts(t *testing.T) {
+	var buf bytes.Buffer
+	srv := routedCSPServer(t, &buf)
+	now := time.Unix(1_700_000_000, 0)
+	srv.cspReportLimiter.read.nowFunc = func() time.Time { return now }
+	srv.cspReportLimiter.perIP.nowFunc = func() time.Time { return now }
+	srv.cspReportLimiter.global.nowFunc = func() time.Time { return now }
+
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+	if err := srv.RegisterCSPReportMetrics(mp); err != nil {
+		t.Fatalf("RegisterCSPReportMetrics: %v", err)
+	}
+	collect := func() map[string]int64 {
+		t.Helper()
+		var rm metricdata.ResourceMetrics
+		if err := reader.Collect(context.Background(), &rm); err != nil {
+			t.Fatalf("collect: %v", err)
+		}
+		out := map[string]int64{}
+		for _, sm := range rm.ScopeMetrics {
+			for _, m := range sm.Metrics {
+				sum, ok := m.Data.(metricdata.Sum[int64])
+				if !ok || !strings.HasPrefix(m.Name, "scion.hub.csp_reports.") {
+					continue
+				}
+				if !sum.IsMonotonic {
+					t.Errorf("%s is not a monotonic counter", m.Name)
+				}
+				for _, dp := range sum.DataPoints {
+					out[m.Name] += dp.Value
+				}
+			}
+		}
+		return out
+	}
+
+	// Three identical reports (two collapsed), then the client's budget
+	// used up with distinct reports, then one refused report.
+	for i := 0; i < 3; i++ {
+		postCSPReportAs(srv.Handler(), "192.0.2.90:5000", "application/csp-report", safariCSPReport)
+	}
+	for i := 0; i < cspReportBurst-1; i++ {
+		postCSPReport(srv.Handler(), "192.0.2.90:5000", routedCSPReportN(i))
+	}
+	postCSPReport(srv.Handler(), "192.0.2.90:5000", routedCSPReportN(cspReportBurst))
+	got := collect()
+	want := map[string]int64{
+		"scion.hub.csp_reports.refused_requests": 0,
+		"scion.hub.csp_reports.refused_reports":  1,
+		"scion.hub.csp_reports.collapsed":        2,
+	}
+	for name, v := range want {
+		if g, ok := got[name]; !ok || g != v {
+			t.Errorf("%s = %d (present %v), want %d", name, g, ok, v)
+		}
+	}
+	if err := srv.RegisterCSPReportMetrics(nil); err == nil {
+		t.Error("a nil MeterProvider was accepted")
+	}
+}
+
+// TestCSPReportPendingRefusalsWrittenOnCleanup: the hub's background
+// cleanup closes the report handler, which writes the refusals still
+// pending.
+func TestCSPReportPendingRefusalsWrittenOnCleanup(t *testing.T) {
+	var buf bytes.Buffer
+	srv := routedCSPServer(t, &buf)
+	now := time.Unix(1_700_000_000, 0)
+	srv.cspReportLimiter.read.nowFunc = func() time.Time { return now }
+	srv.cspReportLimiter.perIP.nowFunc = func() time.Time { return now }
+	srv.cspReportLimiter.global.nowFunc = func() time.Time { return now }
+
+	for i := 0; i < cspReportBurst; i++ {
+		postCSPReport(srv.Handler(), "192.0.2.95:5000", routedCSPReportN(i))
+	}
+	// Two refusals: the first is summarized at once, the second is left
+	// pending for up to a minute.
+	postCSPReport(srv.Handler(), "192.0.2.95:5000", routedCSPReportN(cspReportBurst))
+	postCSPReport(srv.Handler(), "192.0.2.95:5000", routedCSPReportN(cspReportBurst+1))
+	if n := cspMessageCount(t, &buf, cspreport.RefusedLogMessage); n != 1 {
+		t.Fatalf("%d refusal summaries before cleanup, want 1", n)
+	}
+	if err := srv.CleanupBackgroundResources(context.Background()); err != nil {
+		t.Fatalf("CleanupBackgroundResources: %v", err)
+	}
+	if n := cspMessageCount(t, &buf, cspreport.RefusedLogMessage); n != 2 {
+		t.Fatalf("%d refusal summaries after cleanup, want 2 (the pending refusal written)", n)
+	}
+}
+
+// TestCSPReportRefusalsDuringTheDrainWrittenAfterIt: combined mode runs the
+// background cleanup (which closes the report handler) before the HTTP
+// drain; a refusal counted during the drain is written by the after-drain
+// close (CloseAuditWriter), once.
+func TestCSPReportRefusalsDuringTheDrainWrittenAfterIt(t *testing.T) {
+	var buf bytes.Buffer
+	srv := routedCSPServer(t, &buf)
+	now := time.Unix(1_700_000_000, 0)
+	srv.cspReportLimiter.read.nowFunc = func() time.Time { return now }
+	srv.cspReportLimiter.perIP.nowFunc = func() time.Time { return now }
+	srv.cspReportLimiter.global.nowFunc = func() time.Time { return now }
+
+	for i := 0; i < cspReportBurst; i++ {
+		postCSPReport(srv.Handler(), "192.0.2.96:5000", routedCSPReportN(i))
+	}
+	postCSPReport(srv.Handler(), "192.0.2.96:5000", routedCSPReportN(cspReportBurst)) // summarized at once
+	if err := srv.CleanupBackgroundResources(context.Background()); err != nil {
+		t.Fatalf("CleanupBackgroundResources: %v", err)
+	}
+	buf.Reset()
+	// During the drain: refused and counted, left pending (within the minute).
+	postCSPReport(srv.Handler(), "192.0.2.96:5000", routedCSPReportN(cspReportBurst+1))
+	if n := cspMessageCount(t, &buf, cspreport.RefusedLogMessage); n != 0 {
+		t.Fatalf("%d refusal summaries during the drain, want 0", n)
+	}
+	if err := srv.CloseAuditWriter(context.Background()); err != nil {
+		t.Fatalf("CloseAuditWriter: %v", err)
+	}
+	if n := cspMessageCount(t, &buf, cspreport.RefusedLogMessage); n != 1 {
+		t.Fatalf("%d refusal summaries after the drain, want 1", n)
+	}
+	_ = srv.CloseAuditWriter(context.Background())
+	if n := cspMessageCount(t, &buf, cspreport.RefusedLogMessage); n != 1 {
+		t.Fatalf("%d refusal summaries after a second close, want still 1", n)
+	}
+	if c := srv.cspReports.Counts(); c.RefusedReports != 2 {
+		t.Fatalf("counts = %+v, want 2 refused reports", c)
 	}
 }
