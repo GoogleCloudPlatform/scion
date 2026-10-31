@@ -957,7 +957,7 @@ func (s *Server) reincarnateAuthorityFor(w http.ResponseWriter, r *http.Request,
 		writeForbiddenDenial(w, ceilingSourceDenialMessage(cause), DeniedByDelegationCeiling)
 		return nil, false
 	}
-	if _, cause, allowed := childRoleWithinCeiling(ceiling, role, true); !allowed {
+	if _, cause, allowed := childRoleWithinCeiling(uatHopEffectCeiling(prov.SourcePrincipalKind, prov.SourcePrincipalID, prov, ceiling), role, true); !allowed {
 		msg := fmt.Sprintf("the credential's scopes do not cover the agent's role %q", role)
 		logAuthzDenial(r, identity, resource, ActionLifecycle,
 			"effect ceiling denied: "+string(cause)+": "+msg)
