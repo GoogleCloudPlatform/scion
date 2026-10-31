@@ -927,8 +927,10 @@ func TestReadOnlyGitRoot_OutsideRootLayout(t *testing.T) {
 	}
 }
 
-// On the outside-root path, an Apple agent on the fallback path is
-// refused when the repository config holds credentials, and starts on a clean one.
+// On the outside-root path, an Apple agent starts on a clean repository
+// config. A credential section added to the repository config after the
+// worktree was created is refused by the repository config check before the
+// Apple-specific check is reached.
 func TestAppleRepoConfigWithSecrets_OutsideRoot(t *testing.T) {
 	repoRoot, workspace := setupOutsideRootWorktree(t)
 	cfgPath := filepath.Join(repoRoot, ".git", "config")
@@ -941,8 +943,9 @@ func TestAppleRepoConfigWithSecrets_OutsideRoot(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("clean config must start on Apple outside-root, got: %v", err)
 	}
-	// Add a credential -> refused, naming the section.
-	if err := os.WriteFile(cfgPath, append(base, []byte("[credential]\n\thelper = store\n")...), 0o644); err != nil {
+	// Add a credential carrying a sentinel value -> refused, naming the key and
+	// never the value.
+	if err := os.WriteFile(cfgPath, append(base, []byte("[credential]\n\thelper = \"store --file=/nonexistent/"+outsideRootSentinel+"\"\n")...), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	_, err := buildCommonRunArgs(RunConfig{
@@ -950,9 +953,85 @@ func TestAppleRepoConfigWithSecrets_OutsideRoot(t *testing.T) {
 		Image: "scion-agent:latest", RuntimeName: appleContainerRuntimeName,
 		RepoRoot: repoRoot, Workspace: workspace,
 	})
-	if err == nil || !strings.Contains(err.Error(), "holds credentials") {
-		t.Errorf("Apple outside-root must refuse a credential-bearing config, got: %v", err)
-	} else if _, sections, named := strings.Cut(err.Error(), "section(s) "); !named || !strings.Contains(sections, "credential") {
-		t.Errorf("refusal must name the credential section in the section(s) list, got: %v", err)
+	// Mutant: common.go discarding regErr and returning
+	// errOutsideRootNotRegistered (the error would not carry the refusal).
+	assertOutsideRootConfigRefusal(t, err, func(key string) bool { return strings.HasPrefix(key, "credential.") }, "credential.*")
+}
+
+// outsideRootSentinel is planted in refused repository config values; no
+// refusal may print it.
+const outsideRootSentinel = "SCIONSENTINEL7f3a"
+
+// assertOutsideRootConfigRefusal checks that an outside-root start was
+// refused by the repository config check for a key keyOK accepts, that it is
+// not reported as an unregistered worktree, and that the error does not print
+// the planted value.
+func assertOutsideRootConfigRefusal(t *testing.T, err error, keyOK func(string) bool, want string) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("outside-root start with a refused repository config key succeeded, want a refusal")
+	}
+	var refused *util.RepoConfigRefusedError
+	if !errors.As(err, &refused) || !keyOK(refused.Key) {
+		t.Errorf("error = %v, want a *util.RepoConfigRefusedError naming a %s key", err, want)
+	}
+	if errors.Is(err, errOutsideRootNotRegistered) {
+		t.Errorf("error = %v, want it not to report the workspace as not registered", err)
+	}
+	if strings.Contains(err.Error(), outsideRootSentinel) {
+		t.Errorf("error %q prints the refused value", err)
+	}
+}
+
+// On the outside-root path (docker), an http extraheader added to the
+// repository config after the worktree was created refuses the start with the
+// repository config refusal, naming the key and never the value; before this,
+// such a start succeeded. A workspace that is not registered is still refused as not
+// registered.
+func TestOutsideRootRepoConfigRefusal_DockerNamesKey(t *testing.T) {
+	repoRoot, workspace := setupOutsideRootWorktree(t)
+	gitDir := filepath.Join(repoRoot, ".git")
+	cfgPath := filepath.Join(gitDir, "config")
+	clean, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := func() error {
+		_, err := buildCommonRunArgs(RunConfig{
+			Harness: &harness.Generic{}, Name: "test-agent", UnixUsername: "scion",
+			Image: "scion-agent:latest", RuntimeName: "docker", RepoRoot: repoRoot,
+			Workspace: workspace, PrivateGitConfigSource: seedTestPrivateGitConfig(t),
+		})
+		return err
+	}
+
+	// (a) A clean config starts.
+	if err := start(); err != nil {
+		t.Fatalf("clean config must start on docker outside-root, got: %v", err)
+	}
+
+	// (b) An http extraheader added after the create: refused, naming the key.
+	// Mutant: common.go discarding regErr and returning
+	// errOutsideRootNotRegistered.
+	extra := "[http \"https://example.invalid/\"]\n\textraheader = Authorization: Bearer " + outsideRootSentinel + "\n"
+	if err := os.WriteFile(cfgPath, append(append([]byte{}, clean...), []byte(extra)...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	assertOutsideRootConfigRefusal(t, start(), func(key string) bool { return strings.HasSuffix(key, ".extraheader") }, "*.extraheader")
+
+	// (c) Control: a clean config and a worktree whose admin entry is gone is
+	// still refused as not registered.
+	if err := os.WriteFile(cfgPath, clean, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	name, ok := util.TrustedWorktreeAdminName(gitDir, workspace)
+	if !ok {
+		t.Fatal("fixture: cannot resolve the worktree admin name")
+	}
+	if err := os.RemoveAll(filepath.Join(gitDir, "worktrees", name)); err != nil {
+		t.Fatal(err)
+	}
+	if err := start(); !errors.Is(err, errOutsideRootNotRegistered) {
+		t.Errorf("unregistered workspace: error = %v, want errOutsideRootNotRegistered", err)
 	}
 }
