@@ -850,7 +850,9 @@ func baseRepoGitDir(repoRoot string) (string, error) {
 // GIT_CEILING_DIRECTORIES, ...) and LC_ALL=C is set (HostGitEnv); core.hooksPath points at an empty
 // location (os.DevNull), so hook files in the repository are not run; and
 // the file-system monitor is off. It returns an error, and no command, when
-// repoRoot is not a main repository (baseRepoGitDir).
+// repoRoot is not a main repository (baseRepoGitDir), and, as HostGitCommand
+// does, when args is empty or its first argument is empty or an option
+// (errHostGitArgsOption).
 //
 // git still reads the repository's own configuration. core.hooksPath does
 // not cover hooks defined in configuration (hook.<name>.command with
@@ -859,6 +861,9 @@ func baseRepoGitDir(repoRoot string) (string, error) {
 // (for example reference-transaction on branch -D). Making the repository
 // configuration read-only from agent containers is a follow-up.
 func BaseRepoGitCommand(ctx context.Context, repoRoot string, args ...string) (*exec.Cmd, error) {
+	if len(args) == 0 || args[0] == "" || strings.HasPrefix(args[0], "-") {
+		return nil, errHostGitArgsOption
+	}
 	gitDir, err := baseRepoGitDir(repoRoot)
 	if err != nil {
 		return nil, err

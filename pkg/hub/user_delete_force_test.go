@@ -448,7 +448,7 @@ func TestForceDeleteUser_BlockersChangedWritesNothing(t *testing.T) {
 	actor := NewAuthenticatedUser(DevUserID, "dev@test.com", "Dev", "admin", string(ClientTypeAPI))
 
 	err := f.s.WithTx(ctx, func(tx store.Store) error {
-		_, _, err := f.srv.forceDeleteUserTx(ctx, tx, actor, f.dave, map[string]bool{a.ID: true}, AuditActor{})
+		_, _, err := f.srv.forceDeleteUserTx(ctx, tx, actor, false, f.dave, map[string]bool{a.ID: true}, AuditActor{})
 		return err
 	})
 	require.ErrorIs(t, err, errUserDeleteBlockersChanged, "agent %s blocks but was not authorized", late.Slug)
@@ -515,7 +515,8 @@ func TestForceDeleteUser_LastOwnerStillRefused(t *testing.T) {
 	assert.True(t, mustGetAgent(t, s, a.ID).DeletedAt.IsZero())
 }
 
-// A token credential is refused with force, as without it.
+// An identity that is not a token identity but carries the user access
+// token credential kind is refused with force, as without it.
 func TestForceDeleteUser_TokenCredentialRefused(t *testing.T) {
 	f := newForceDelFixture(t, time.Hour)
 	f.agent(t, "tok-a", nil)
