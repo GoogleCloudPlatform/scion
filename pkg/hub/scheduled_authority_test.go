@@ -660,8 +660,11 @@ func TestSchedChildProvenanceParityWithRequestCreate(t *testing.T) {
 
 // An agent-authored revision of an agent with a principal chain carries the
 // three deliver IDs, and so does the child's edge. Once the agent's own
-// edge is replaced by a bounded edge without them (the shape a token
-// reincarnation records), the next fire's child carries none.
+// edge is replaced by a bounded edge without them (an adopted edge here),
+// the next fire's child carries none. When the replacement is recorded from
+// a user access token (the shape a token reincarnation records), the deliver
+// IDs are intrinsic to that hop (uatHopEffectCeiling), so the child carries
+// them again.
 func TestSchedAgentDeliverIDsIntersect(t *testing.T) {
 	f := newSchedFire(t, "sched-deliver")
 	ctx := context.Background()
@@ -676,33 +679,35 @@ func TestSchedAgentDeliverIDsIntersect(t *testing.T) {
 		assert.Contains(t, edge.PermissionIDs, d)
 	}
 
-	// Replace P's edge with a UAT-sourced bounded edge (no deliver ID).
-	now := time.Now()
-	_, err := f.store.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, parent.ID,
-		store.Deactivation{Cause: store.EdgeDeactivationReincarnateReplaced, At: &now, OpID: api.NewUUID()})
-	require.NoError(t, err)
 	// A bounded edge without any deliver ID, covering the agent's stored
-	// role otherwise (store-seeded; the shape a reincarnation by a token
-	// records, since no token selector covers a deliver permission).
+	// role otherwise (store-seeded).
 	var noDeliver []string
 	for _, p := range permissions.Registry {
 		if !slices.Contains(hubDeliveryPermissionList, p.ID) {
 			noDeliver = append(noDeliver, p.ID)
 		}
 	}
-	require.NoError(t, f.store.CreateDelegationEdge(ctx, &store.DelegationEdge{
-		DelegatorType: store.DelegationPrincipalUser, DelegatorID: f.creator.ID,
-		DelegateType: store.DelegationPrincipalAgent, DelegateID: parent.ID,
-		ScopeType: store.RoleScopeProject, ScopeID: f.proj.ID, Role: parent.AppliedConfig.AgentRole, Active: true,
-		AuthorityProvenance: store.AuthorityProvenance{
-			ProvenanceVersion: store.ProvenanceVersionV1, SourcePrincipalKind: store.DelegationPrincipalUser,
-			SourcePrincipalID: f.creator.ID, SourceCredentialKind: store.SourceCredentialUAT, SourceCredentialID: "uat-reinc",
-		},
-		EffectCeiling: store.EffectCeiling{Kind: store.EffectCeilingBounded, Version: permissions.CeilingVersionV1, PermissionIDs: sortedUniqueIDs(noDeliver)},
-	}))
+	replaceParentEdge := func(source store.SourceCredentialKind, credID string) {
+		t.Helper()
+		now := time.Now()
+		_, err := f.store.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, parent.ID,
+			store.Deactivation{Cause: store.EdgeDeactivationReincarnateReplaced, At: &now, OpID: api.NewUUID()})
+		require.NoError(t, err)
+		require.NoError(t, f.store.CreateDelegationEdge(ctx, &store.DelegationEdge{
+			DelegatorType: store.DelegationPrincipalUser, DelegatorID: f.creator.ID,
+			DelegateType: store.DelegationPrincipalAgent, DelegateID: parent.ID,
+			ScopeType: store.RoleScopeProject, ScopeID: f.proj.ID, Role: parent.AppliedConfig.AgentRole, Active: true,
+			AuthorityProvenance: store.AuthorityProvenance{
+				ProvenanceVersion: store.ProvenanceVersionV1, SourcePrincipalKind: store.DelegationPrincipalUser,
+				SourcePrincipalID: f.creator.ID, SourceCredentialKind: source, SourceCredentialID: credID,
+			},
+			EffectCeiling: store.EffectCeiling{Kind: store.EffectCeilingBounded, Version: permissions.CeilingVersionV1, PermissionIDs: sortedUniqueIDs(noDeliver)},
+		}))
+	}
 
 	// The revision recorded earlier holds the deliver IDs; the fire
 	// intersects it with P's current chain, which holds none.
+	replaceParentEdge(store.SourceCredentialSystemMigration, "")
 	evt2 := evt
 	evt2.ID = api.NewUUID()
 	evt2.Payload = `{"agentName":"sched-deliver-c2"}`
@@ -712,6 +717,19 @@ func TestSchedAgentDeliverIDsIntersect(t *testing.T) {
 		assert.NotContains(t, edge2.PermissionIDs, d)
 	}
 	assert.Contains(t, edge2.PermissionIDs, "agent.create")
+
+	// The same list recorded from a user access token: P's chain now holds
+	// the deliver IDs through the intrinsic set, so the child carries them.
+	replaceParentEdge(store.SourceCredentialUAT, "uat-reinc")
+	evt3 := evt
+	evt3.ID = api.NewUUID()
+	evt3.Payload = `{"agentName":"sched-deliver-c3"}`
+	require.NoError(t, f.fire(t, evt3), "guard: the fire creates the child")
+	_, edge3 := f.child(t, "sched-deliver-c3")
+	for _, d := range hubDeliveryPermissionList {
+		assert.Contains(t, edge3.PermissionIDs, d)
+	}
+	assert.Contains(t, edge3.PermissionIDs, "agent.create")
 }
 
 // --- dispatch failure ----------------------------------------------------------

@@ -268,7 +268,7 @@ The profile `timezone` field was removed. A request to `PUT /api/v1/admin/server
 
 ## Volume Source Restrictions
 
-A Runtime Broker refuses any agent mount whose host source reaches the broker host's own control files. This applies to every `volumes:` entry, whatever sets it (settings, profiles, harness configs, templates, flat Runtime Broker instance `agent_defaults`, or a create or start request from the Hub). It applies equally to read-only and read-write mounts. It also applies to shared directories, workspaces, agent homes and harness auth files.
+A Runtime Broker refuses any agent mount whose host source reaches the Runtime Broker host's own control files. This applies to every `volumes:` entry, whatever sets it (settings, profiles, harness configs, templates, flat Runtime Broker instance `agent_defaults`, or a create or start request from the Hub). It applies equally to read-only and read-write mounts. It also applies to shared directories, workspaces, agent homes and harness auth files.
 
 The protected paths are, in the Scion global directory (`~/.scion`):
 
@@ -280,7 +280,7 @@ The protected paths are, in the Scion global directory (`~/.scion`):
 | Host plugins | `plugins/` |
 | Hub state | `hub-id`, and `hub.db` with its `-wal`, `-shm` and `-journal` files |
 
-The broker's configured state directory (`server.broker.state_dir`) and a co-located Hub's SQLite database file are protected wherever they are configured.
+The Runtime Broker's configured state directory (`server.broker.state_dir`) and a co-located Hub's SQLite database file are protected wherever they are configured.
 
 A mount source is refused when:
 
@@ -295,24 +295,24 @@ A mount source is refused when:
   - `~/.scion/project-configs/<dir>/shared-dirs/<name>/...`
 
   Harness auth files and `SCION_DEV_BINARIES` may not come from the Scion global directory at all.
-- it cannot be resolved: a relative path (other than a named volume), a dangling symbolic link, or a path the broker cannot read.
+- it cannot be resolved: a relative path (other than a named volume), a dangling symbolic link, or a path the Runtime Broker cannot read.
 
-Symbolic links are resolved on both sides before the comparison, and the resolved path is what gets mounted. The error a requester sees has the code `control_path_mount`. It names the source as configured and the class of path it reaches, never the resolved host path. The broker log adds the resolved paths.
+Symbolic links are resolved on both sides before the comparison, and the resolved path is what gets mounted. The error a requester sees has the code `control_path_mount`. It names the source as configured and the class of path it reaches, never the resolved host path. The Runtime Broker log adds the resolved paths.
 
 The check runs at each of these points:
 
-1. **Runtime Broker start.** The broker does not start when its worktree base or its NFS mount root (`nfs.mount_root` of the workspace storage settings) equals or contains a protected path. A flat Runtime Broker host does not start when an instance's `agent_defaults` or harness override volumes reach one.
+1. **Runtime Broker start.** The Runtime Broker does not start when its worktree base or its NFS mount root (`nfs.mount_root` of the workspace storage settings) equals or contains a protected path. A flat Runtime Broker host does not start when an instance's `agent_defaults` or harness override volumes reach one.
 2. **Agent create and start.** A Hub request whose volumes reach a protected path is refused with `400`, before anything is saved. The agent's merged volumes are checked again before its configuration is written.
-3. **Container creation.** Every bind is checked just before the container is created, and the broker records the binds it requested on the container (the `scion.bind_sources` label). Right after creation, the binds the runtime reports must match that record exactly and are checked again. A refused or mismatching bind stops the container and fails the start.
-4. **Running agents.** The broker re-checks the binds of running agents on its default runtime and on every non-default Docker, Podman or Apple container runtime it has registered. At startup it registers the runtime profiles of Hub-managed projects, of shared-storage projects that have agents on this broker, and of the project it was started from. It registers other projects' runtime profiles once it has used them since it started. It does this at startup, every 60 seconds, and sooner when the protected paths resolve somewhere else. An agent with a refused or mismatching bind is stopped and marked `error`. An agent whose mounts cannot be verified twice in a row is stopped too. A Docker or Podman agent created before this check existed has no bind record. It keeps running only if its container runtime is reached over a local unix socket and every bind source the runtime reports exists on the host and passes the check. Otherwise it is stopped and must be started again. That covers a remote daemon, whether selected with `DOCKER_HOST`, a Docker context, `CONTAINER_HOST` or a Podman connection, and a locality that cannot be determined. Apple container agents created before this check existed are always stopped once. If a protected path cannot be resolved at all (for example a dangling symbolic link at `~/.scion/settings.yaml`), nothing can be verified, so every running agent on the host is stopped until it is fixed.
+3. **Container creation.** Every bind is checked just before the container is created, and the Runtime Broker records the binds it requested on the container (the `scion.bind_sources` label). Right after creation, the binds the runtime reports must match that record exactly and are checked again. A refused or mismatching bind stops the container and fails the start.
+4. **Running agents.** The Runtime Broker re-checks the binds of running agents on its default runtime and on every non-default Docker, Podman or Apple container runtime it has registered. At startup it registers the runtime profiles of Hub-managed projects, of shared-storage projects that have agents on this Runtime Broker, and of the project it was started from. It registers other projects' runtime profiles once it has used them since it started. It does this at startup, every 60 seconds, and sooner when the protected paths resolve somewhere else. An agent with a refused or mismatching bind is stopped and marked `error`. An agent whose mounts cannot be verified twice in a row is stopped too. A Docker or Podman agent created before this check existed has no bind record. It keeps running only if its container runtime is reached over a local unix socket and every bind source the runtime reports exists on the host and passes the check. Otherwise it is stopped and must be started again. That covers a remote daemon, whether selected with `DOCKER_HOST`, a Docker context, `CONTAINER_HOST` or a Podman connection, and a locality that cannot be determined. Apple container agents created before this check existed are always stopped once. If a protected path cannot be resolved at all (for example a dangling symbolic link at `~/.scion/settings.yaml`), nothing can be verified, so every running agent on the host is stopped until it is fixed.
 
 **Limitations.**
 
-- **Remote Docker daemon.** These checks protect a broker whose container runtime runs on the same host. With a remote Docker daemon (`DOCKER_HOST` pointing at another machine), bind sources name paths on the daemon's host, which the broker cannot verify. The operator must keep the broker's control files off that host and out of every bind source.
-- **Apple container runtime.** The re-checks after creation and for running agents read only the binds the broker recorded on the container when it created it, not the runtime's own view of what it mounted.
-- **Non-default runtimes of other projects after a restart.** Take an agent created before this check existed, on a non-default runtime (for example Podman on a broker whose default is Docker), in a linked project the broker has not used since it started. That agent is not re-checked until the broker uses its project again. Every new agent is still checked when it is created.
+- **Remote Docker daemon.** These checks protect a Runtime Broker whose container runtime runs on the same host. With a remote Docker daemon (`DOCKER_HOST` pointing at another machine), bind sources name paths on the daemon's host, which the Runtime Broker cannot verify. The operator must keep the Runtime Broker's control files off that host and out of every bind source.
+- **Apple container runtime.** The re-checks after creation and for running agents read only the binds the Runtime Broker recorded on the container when it created it, not the runtime's own view of what it mounted.
+- **Non-default runtimes of other projects after a restart.** Take an agent created before this check existed, on a non-default runtime (for example Podman on a Runtime Broker whose default is Docker), in a linked project the Runtime Broker has not used since it started. That agent is not re-checked until the Runtime Broker uses its project again. Every new agent is still checked when it is created.
 - **Agents created before this check existed.** For these agents only, the re-check trusts the bind sources the runtime reports, since there is no record to compare them with. A Docker Desktop path of the form `/host_mnt/<host path>` is judged as `<host path>`. Locality is judged by the daemon endpoint alone. A local unix socket that forwards to a daemon on another host or filesystem (for example an SSH-forwarded socket) is therefore treated as local.
-- **Runtime listing.** If the broker cannot list a runtime's containers, it cannot tell which agents to check, so it stops none and tries again at the next check.
+- **Runtime listing.** If the Runtime Broker cannot list a runtime's containers, it cannot tell which agents to check, so it stops none and tries again at the next check.
 - **Hard links.** Directories are not walked. A hard link to a protected file, placed inside an allowed directory by a process on the host, is not detected. An agent cannot create such a link itself.
 
 ## Telemetry Configuration (`telemetry`)

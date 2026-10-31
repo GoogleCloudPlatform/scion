@@ -1732,6 +1732,13 @@ func (c *CompositeStore) DB() *sql.DB {
 	return clientDB(c.client)
 }
 
+// ChatRetention returns the chat retention store over this store's
+// database (raw SQL on the same *sql.DB as the ent client and the web chat
+// tables, see ChatRetentionStore).
+func (c *CompositeStore) ChatRetention() store.ChatRetentionStore {
+	return NewChatRetentionStore(c.client)
+}
+
 // Dialect returns the ent dialect of the underlying driver (for example
 // dialect.SQLite or dialect.Postgres).
 func (c *CompositeStore) Dialect() string {

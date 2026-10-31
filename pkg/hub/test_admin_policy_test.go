@@ -217,6 +217,7 @@ var tsaDenyRoutes = []struct {
 	{http.MethodPut, "/api/v1/admin/messaging", map[string]any{}, false},
 	{http.MethodPut, "/api/v1/admin/project-defaults", map[string]any{}, false},
 	{http.MethodPut, "/api/v1/admin/profiling", map[string]any{}, false},
+	{http.MethodPut, "/api/v1/admin/chat-retention", map[string]any{}, false},
 	{http.MethodGet, "/api/v1/github-app", nil, false},
 	{http.MethodGet, "/api/v1/env?scope=hub", nil, true},
 	{http.MethodGet, "/api/v1/admin/maintenance/operations", nil, false},

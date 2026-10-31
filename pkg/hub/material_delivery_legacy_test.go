@@ -196,19 +196,21 @@ func TestDispatchDelivery_LegacyCohortsDeliveredWithWarn(t *testing.T) {
 			wantCohort: legacyDeliveryCohortUnadoptedEdge,
 			wantDepth:  true,
 		},
-		{name: "uat_created", opts: ldOptions{edge: lgUATCreated}, wantCohort: deliveryCohortUATNoDeliverMapping},
+		// An agent created from a token is not a legacy cohort: the deliver
+		// permissions are intrinsic to its hop and the strict walk admits it
+		// (TestUATIntrinsic_LaunchMaterialStrictWalk).
 		{
-			// The child of a UAT-created agent: its recorded agent edge
-			// lacks the permission only because its parent could not pass
-			// it down.
+			// The child of a UAT-created agent, recorded before the deliver
+			// permissions were intrinsic to the token hop: its recorded agent
+			// edge lacks the permission only because its parent could not
+			// pass it down (uat_descendant_legacy, noted at the child's hop).
 			name: "recorded_child_of_uat_created_agent", opts: ldOptions{noEdge: true},
 			after: func(t *testing.T, m *ldFixture) {
 				p := lgParent(t, m, "uat-parent")
 				hdEdge(t, m.store, store.DelegationPrincipalUser, m.projectOwnerID, p, m.agent.ProjectID, lgUATCreated)
 				hdEdge(t, m.store, store.DelegationPrincipalAgent, p, m.agent.ID, m.agent.ProjectID, withBoundedCeiling("agent.read"))
 			},
-			wantCohort: deliveryCohortUATNoDeliverMapping,
-			wantDepth:  true,
+			wantCohort: legacyDeliveryCohortUATDescendant,
 		},
 		{
 			// Two inheriting hops below the UAT-created agent.
@@ -220,8 +222,7 @@ func TestDispatchDelivery_LegacyCohortsDeliveredWithWarn(t *testing.T) {
 				hdEdge(t, m.store, store.DelegationPrincipalAgent, gp, p, m.agent.ProjectID, withBoundedCeiling("agent.read"))
 				hdEdge(t, m.store, store.DelegationPrincipalAgent, p, m.agent.ID, m.agent.ProjectID, withBoundedCeiling("agent.read"))
 			},
-			wantCohort: deliveryCohortUATNoDeliverMapping,
-			wantDepth:  true,
+			wantCohort: legacyDeliveryCohortUATDescendant,
 		},
 		{
 			// The agent's own recorded edge passes; its parent's edge is
@@ -262,7 +263,7 @@ func TestDispatchDelivery_LegacyCohortsDeliveredWithWarn(t *testing.T) {
 				require.True(t, ok, "no fallback Warn for %s; log: %s", k, buf.String())
 				assert.Equal(t, m.agent.ID, rec["agent_id"])
 				assert.Equal(t, r.wantCohort, rec["cohort"])
-				assert.Equal(t, deliveryFallbackException(r.wantCohort), rec["exception"])
+				assert.Equal(t, "legacy", rec["exception"], "every fallback cohort is a legacy exception")
 				assert.Equal(t, string(PurposeRestart), rec["purpose"])
 				assert.NotEmpty(t, rec["scope"])
 				assert.NotEmpty(t, rec["kind"])
@@ -575,7 +576,7 @@ func TestLegacyDeliveryFallback_Scope(t *testing.T) {
 		assert.False(t, legacyFallbackCauses[c], "cause %q must never take the fallback", c)
 	}
 	for _, p := range LaunchDeliveryCensusPermissions {
-		assert.False(t, uatCarriesPermission(p), "%s: the UAT-created cohort assumes no token scope maps it", p)
+		assert.True(t, uatIntrinsicPermissionSet[p], "%s is intrinsic to a token-recorded hop, so uat_descendant_legacy can reach it", p)
 	}
 }
 
@@ -687,7 +688,7 @@ func TestLegacyDeliveryFallback_OnlyDeliverPermissions(t *testing.T) {
 	}
 	for _, p := range LaunchDeliveryCensusPermissions {
 		assert.Equal(t, legacyDeliveryCohortAdoptedBaseline, legacyBoundedEdgeCohort(adopted, p), p)
-		assert.Equal(t, deliveryCohortUATNoDeliverMapping, legacyBoundedEdgeCohort(uat, p), p)
+		assert.Empty(t, legacyBoundedEdgeCohort(uat, p), "%s: a token-recorded edge is never a legacy cohort", p)
 	}
 	// Permissions outside the deliver set, in and out of the V1 rows.
 	for _, p := range []string{"secret.use", "project.secret_read", "gcp_service_account.use", "agent.identity_token", "agent.create"} {

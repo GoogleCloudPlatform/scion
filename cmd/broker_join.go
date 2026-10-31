@@ -434,11 +434,17 @@ func persistBrokerHubSettings(w io.Writer, globalDir, endpoint, brokerID, hubNam
 }
 
 // checkBrokerHubURL applies the hub list's rule (config.ValidateHubURL)
-// to the hub URL of a broker registration, before anything is sent or
-// saved.
+// and the hub-broker transport rule (config.CheckHubTransport) to the hub
+// URL of a broker registration, before anything is sent or saved. The
+// registration sends the join token and receives the broker's HMAC secret,
+// so it is refused for a hub that would be reached unencrypted over the
+// network.
 func checkBrokerHubURL(endpoint string) error {
 	if err := config.ValidateHubURL(endpoint); err != nil {
 		return fmt.Errorf("%w; pass a plain http(s) hub URL (no user info, query or fragment)", err)
+	}
+	if err := config.CheckHubTransport(endpoint); err != nil {
+		return fmt.Errorf("refusing to register the broker with this hub: %w", err)
 	}
 	return nil
 }

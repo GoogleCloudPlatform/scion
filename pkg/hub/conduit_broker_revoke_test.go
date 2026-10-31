@@ -218,7 +218,7 @@ func brokerChanges() []brokerChange {
 		{
 			name: "rotate secret",
 			viaHub: func(t *testing.T, f *brokerConduitFixture, srv *Server) {
-				rec := doRequest(t, srv, http.MethodPost, "/api/v1/brokers/"+f.brokerID+"/rotate-secret", nil)
+				rec := doRequestLoopback(t, srv, http.MethodPost, "/api/v1/brokers/"+f.brokerID+"/rotate-secret", nil)
 				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 			},
 			inStore: func(t *testing.T, f *brokerConduitFixture) {
@@ -364,7 +364,7 @@ func TestConduitBrokerRevoke_ExpiredSecretCloses(t *testing.T) {
 func TestConduitBrokerRevoke_NewCredentialSessionStays(t *testing.T) {
 	f := newBrokerRevokeFixture(t, nil)
 	ls := f.dialSettled(t, f.brokerID, f.secret)
-	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/brokers/"+f.brokerID+"/rotate-secret", nil)
+	rec := doRequestLoopback(t, f.srv, http.MethodPost, "/api/v1/brokers/"+f.brokerID+"/rotate-secret", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var resp RotateSecretResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
@@ -389,6 +389,7 @@ func TestConduitBrokerRevoke_SessionBindsToVerifiedSecret(t *testing.T) {
 	f := newBrokerRevokeFixture(t, nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/conduit", nil)
 	req.Header = f.signedHeader(t, "/api/v1/conduit", nil)
+	req.RemoteAddr = tpLoopbackPeer // the transport policy admits a client on the hub host
 	// The broker's identity, as the broker authentication middleware
 	// installs it once the signature verified.
 	req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity(f.brokerID)))
@@ -534,7 +535,7 @@ func TestConduitBrokerRevoke_CrossNode(t *testing.T) {
 	nodeA.SetEventPublisher(bus)
 	require.Nil(t, nodeA.conduitBrokerRevoke.Load(), "node A runs no broker session re-check")
 
-	rec := doRequest(t, nodeA, http.MethodPost, "/api/v1/brokers/"+b.brokerID+"/rotate-secret", nil)
+	rec := doRequestLoopback(t, nodeA, http.MethodPost, "/api/v1/brokers/"+b.brokerID+"/rotate-secret", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Equal(t, conduit.CloseUnauthenticated, waitSessionClosed(t, ls))
 	b.metrics.wait(t, "notify/closed/broker", 1)
@@ -651,7 +652,7 @@ func TestConduitBrokerRevoke_ExperimentOff(t *testing.T) {
 	_, err := srv.brokerAuthService.GenerateAndStoreSecret(ctx, id)
 	require.NoError(t, err)
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/brokers/"+id+"/rotate-secret", nil)
+	rec := doRequestLoopback(t, srv, http.MethodPost, "/api/v1/brokers/"+id+"/rotate-secret", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	rec = doRequest(t, srv, http.MethodDelete, "/api/v1/runtime-brokers/"+id, nil)
 	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())

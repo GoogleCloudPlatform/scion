@@ -81,6 +81,8 @@ var dbFileOnlyRequestPaths = [][]string{
 	{"server", "keyring_file"},
 	// Likewise its operator-only world-readable override.
 	{"server", "keyring_file_allow_world_readable"},
+	// Likewise server.trusted_proxies (never API-writable).
+	{"server", "trusted_proxies"},
 	{"server", "auth", "username"},
 	{"server", "auth", "display_name"},
 	{"server", "auth", "email"},

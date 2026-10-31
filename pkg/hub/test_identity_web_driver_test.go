@@ -519,6 +519,10 @@ func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
 		// The experiments registry (Registry.Resolve), not a user or
 		// transport resolver.
 		"experimentEnabledIn s.experimentRegistry()",
+		// The chat_retention settings document's bounds check
+		// (opsettings.ChatRetentionSettings.Resolve), not a user or
+		// transport resolver.
+		"handlePutChatRetention settings",
 		// The project storage layout authority (pkg/projectfs), not a
 		// user or transport resolver.
 		"projectRecordSharedDirPath localLayout",

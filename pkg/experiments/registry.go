@@ -160,6 +160,16 @@ const ChatScheduledSend = "web.chat_scheduled_send"
 // history variant (404 while off). Stored stars are kept while it is off.
 const ChatStarredMessages = "web.chat_starred_messages"
 
+// ChatRetention gates hub-wide chat message retention: the
+// chat_retention operational-settings section and its admin API (404 while
+// off), the chat-retention sweeper, which purges nothing while it is off,
+// and the history "retention" marker. It has both layers: the hub checks it
+// in the settings handlers, the sweeper and the history handler; the web
+// layer only shows the settings panel and the history divider. Turning it
+// on deletes nothing until an admin also enables the sweep and sets a
+// window.
+const ChatRetention = "hub.chat_retention"
+
 // AuthorizationDecisionAuditV2 gates decision logging (remaining-audit P1).
 // It is the only activation control and stays default-off; turning it on
 // needs explicit owner approval.
@@ -477,6 +487,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#5797",
 		Owner:       "native-chat",
 		ReviewBy:    "2027-01-31",
+	},
+	{
+		Name:        ChatRetention,
+		Title:       "Chat message retention",
+		Description: "Lets a hub admin bound how long chat history is kept, with one hub-wide age window: a background sweep hard-deletes messages older than the window, with their mentions, stars, reply metadata and attachment links, in small paced batches. Gates the Chat retention settings section and its admin API (404 while off), the sweep and the history marker (LayerServer) and the settings panel and history divider (LayerWeb). Turning it on deletes nothing until an admin also enables the sweep and sets a window; turning it off stops the sweep. Take a database backup before enabling.",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#6596",
+		Owner:       "native-chat",
+		ReviewBy:    "2027-03-31",
 	},
 	{
 		Name:        AgentEdit,
