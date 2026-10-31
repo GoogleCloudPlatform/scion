@@ -887,6 +887,10 @@ const (
 	// ErrCodePreviewOperationMismatch is returned when the operation does not match.
 	ErrCodePreviewOperationMismatch = "preview_operation_mismatch"
 
+	// ErrCodePreviewConstraintMismatch is returned when an update or delete
+	// targets a constraint other than the one the token was issued for.
+	ErrCodePreviewConstraintMismatch = "preview_constraint_mismatch"
+
 	// ErrCodePreviewDraftModified is returned when the draft hash does not match.
 	ErrCodePreviewDraftModified = "preview_draft_modified"
 

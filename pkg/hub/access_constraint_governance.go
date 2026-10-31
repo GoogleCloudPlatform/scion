@@ -246,7 +246,7 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 	// Step a: Validate the preview token.
 	if err := gs.preview.ValidateToken(
 		ctx, req.PreviewToken, req.Actor, req.Operation,
-		req.Draft, req.BaseRevision,
+		req.ConstraintID, req.Draft, req.BaseRevision,
 	); err != nil {
 		if tve, ok := err.(*TokenValidationError); ok {
 			return nil, &GovernanceError{

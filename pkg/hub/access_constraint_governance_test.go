@@ -1201,6 +1201,71 @@ func TestGovernance_DeleteRelaxationAuthority_InsufficientAuthority(t *testing.T
 }
 
 // ---------------------------------------------------------------------------
+// 14b2. A delete preview token commits only for its own constraint
+// ---------------------------------------------------------------------------
+
+// TestGovernance_DeleteTokenBoundToItsConstraint pins that a delete commit
+// is refused when the preview token was issued for another constraint, the
+// other constraint is left in place, and the token still commits for the
+// constraint it was issued for.
+func TestGovernance_DeleteTokenBoundToItsConstraint(t *testing.T) {
+	gs, ps, _, s := govTestSetup(t)
+	ctx := context.Background()
+
+	adminID := govSeedAdminUser(t, s, "gov-admin-cid-bind")
+	userID := govSeedNonAdminUser(t, s, "gov-user-cid-bind")
+	actor := pvTestActor(adminID)
+
+	create := func(name string) *store.AccessConstraint {
+		return govCreateAndCommit(t, gs, ps, &store.AccessConstraint{
+			Name:                 name,
+			SubjectKind:          store.ConstraintSubjectPrincipal,
+			SubjectPrincipalType: pvStrPtr("user"),
+			SubjectPrincipalID:   pvStrPtr(userID),
+			ScopeType:            store.RoleScopeSystem,
+			MaximumPermissions:   []string{"agent.read"},
+			Purpose:              "token binding",
+			CreatedBy:            adminID,
+		}, actor)
+	}
+	a := create("gov-cid-bind-a")
+	b := create("gov-cid-bind-b")
+	require.Equal(t, a.Revision, b.Revision, "only the constraint ID may differ")
+
+	preview, err := ps.GeneratePreview(ctx, PreviewRequest{
+		Operation:    "delete",
+		ConstraintID: a.ID,
+		BaseRevision: a.Revision,
+		Actor:        actor,
+	})
+	require.NoError(t, err)
+
+	_, err = gs.CommitBoundaryChange(ctx, CommitRequest{
+		Operation:    "delete",
+		ConstraintID: b.ID,
+		BaseRevision: b.Revision,
+		PreviewToken: preview.PreviewToken,
+		Actor:        actor,
+	})
+	var ge *GovernanceError
+	require.ErrorAs(t, err, &ge, "a token for A must not delete B")
+	assert.Equal(t, ErrCodePreviewConstraintMismatch, ge.Code)
+	_, err = s.GetAccessConstraint(ctx, b.ID)
+	require.NoError(t, err, "B must remain")
+
+	_, err = gs.CommitBoundaryChange(ctx, CommitRequest{
+		Operation:    "delete",
+		ConstraintID: a.ID,
+		BaseRevision: a.Revision,
+		PreviewToken: preview.PreviewToken,
+		Actor:        actor,
+	})
+	require.NoError(t, err, "the token must still commit for A")
+	_, err = s.GetAccessConstraint(ctx, a.ID)
+	require.ErrorIs(t, err, store.ErrNotFound)
+}
+
+// ---------------------------------------------------------------------------
 // 14c. Scheduled lockout blocks RoleBinding change
 // ---------------------------------------------------------------------------
 

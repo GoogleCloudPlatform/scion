@@ -665,6 +665,7 @@ func TestB7_TokenErrorStatus(t *testing.T) {
 		{ErrCodePreviewTokenReplay, http.StatusConflict},
 		{ErrCodePreviewActorMismatch, http.StatusForbidden},
 		{ErrCodePreviewOperationMismatch, http.StatusBadRequest},
+		{ErrCodePreviewConstraintMismatch, http.StatusBadRequest},
 		{ErrCodePreviewDraftModified, http.StatusConflict},
 		{ErrCodePreviewRevisionMismatch, http.StatusConflict},
 		{ErrCodePreviewStateMismatch, http.StatusConflict},

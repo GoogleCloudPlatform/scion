@@ -1938,6 +1938,8 @@ func tokenErrorStatus(code string) int {
 		return http.StatusForbidden
 	case ErrCodePreviewOperationMismatch:
 		return http.StatusBadRequest
+	case ErrCodePreviewConstraintMismatch:
+		return http.StatusBadRequest
 	case ErrCodePreviewDraftModified:
 		return http.StatusConflict
 	case ErrCodePreviewRevisionMismatch:
