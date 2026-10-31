@@ -110,6 +110,12 @@ func (s *Server) serveHubInternal(w http.ResponseWriter, r *http.Request, rt *co
 		http.Error(w, "relay-peer identity required", http.StatusUnauthorized)
 		return
 	}
+	// The hub internal API serves relays: a peer enrolled as a hub may not
+	// call it.
+	if err := relay.RequirePeerRole(rt.peerAuth, peer, relay.PeerRoleRelay); err != nil {
+		http.Error(w, "relay-peer is not enrolled as a relay", http.StatusForbidden)
+		return
+	}
 	if r.Header.Get(relay.HeaderPeerTarget) != relay.HubPeerTarget || r.Header.Get(relay.HeaderPeerTargetGeneration) != "0" {
 		w.Header().Set(relay.HeaderStaleReason, "relay_target_mismatch")
 		http.Error(w, "request is not for the hub", http.StatusConflict)

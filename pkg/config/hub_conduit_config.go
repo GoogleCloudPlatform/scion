@@ -223,7 +223,41 @@ type HubConduitConfig struct {
 	// PeerSecretValue() (one trailing newline removed), never this raw
 	// field; only IsZero looks at the raw value.
 	PeerSecret string `json:"peerSecret,omitempty" yaml:"peerSecret,omitempty" koanf:"peerSecret"`
+	// PeerKeyFile is this node's relay-peer private key file (a PEM
+	// PKCS #8 Ed25519 key, readable only by the server). When set, the
+	// node signs relay-peer calls with it, and its instance id must be
+	// set and listed in Peers with the matching public key; startup is
+	// refused otherwise ("" = unset: the node signs as before).
+	PeerKeyFile string `json:"peerKeyFile,omitempty" yaml:"peerKeyFile,omitempty" koanf:"peerKeyFile"`
+	// Peers lists the relay peers enrolled with their own keys: each
+	// peer's instance id, role (relay or hub) and public keys. A peer's
+	// key verifies only calls made under that peer's id. Read at startup.
+	Peers []HubConduitPeer `json:"peers,omitempty" yaml:"peers,omitempty" koanf:"peers"`
 }
+
+// HubConduitPeer is one enrolled relay peer (server.hub.conduit.peers).
+type HubConduitPeer struct {
+	// ID is the peer's instance id (its server.hub.conduit.instance_id).
+	ID string `json:"id,omitempty" yaml:"id,omitempty" koanf:"id"`
+	// Role is relay or hub.
+	Role string `json:"role,omitempty" yaml:"role,omitempty" koanf:"role"`
+	// Keys are the peer's public keys; more than one during a rotation.
+	Keys []HubConduitPeerKey `json:"keys,omitempty" yaml:"keys,omitempty" koanf:"keys"`
+}
+
+// HubConduitPeerKey is one enrolled public key of a relay peer.
+type HubConduitPeerKey struct {
+	// KeyID names the key ([A-Za-z0-9_-]{1,32}, unique per peer).
+	KeyID string `json:"keyId,omitempty" yaml:"keyId,omitempty" koanf:"keyId"`
+	// PublicKey is the Ed25519 public key, standard base64.
+	PublicKey string `json:"publicKey,omitempty" yaml:"publicKey,omitempty" koanf:"publicKey"`
+}
+
+// ConduitPeerRoleRelay and ConduitPeerRoleHub are the HubConduitPeer roles.
+const (
+	ConduitPeerRoleRelay = "relay"
+	ConduitPeerRoleHub   = "hub"
+)
 
 // HubConduitStreamAuthzMax holds the stream authorization interval per
 // originating principal kind (server.hub.conduit.stream_authz_max). Each
@@ -257,7 +291,7 @@ func (c HubConduitConfig) IsZero() bool {
 		c.ShutdownGrace == "" && c.ProxySessionMaxAge == "" && c.StreamAuthzMax.IsZero() &&
 		c.RelayMode == "" && c.Ingress == "" && c.TargetStreamDeadlines == "" && c.PeerSecret == "" &&
 		c.InternalTLSCertFile == "" && c.InternalTLSKeyFile == "" && c.InternalTLSCAFile == "" &&
-		c.InternalTLSServerName == ""
+		c.InternalTLSServerName == "" && c.PeerKeyFile == "" && len(c.Peers) == 0
 }
 
 // InternalTLS reports whether the internal listener serves TLS (a
@@ -569,7 +603,46 @@ func (c HubConduitConfig) Validate() error {
 	if err := ValidatePeerSecret(c.PeerSecret); err != nil {
 		errs = append(errs, err)
 	}
+	errs = append(errs, validateConduitPeers(c.Peers)...)
 	return errors.Join(errs...)
+}
+
+// validateConduitPeers checks the shape of server.hub.conduit.peers: each
+// entry has an id (once), a role of relay or hub, and at least one key with
+// a key id (once per peer) and a public key. The keys themselves are
+// decoded when relay-peer auth is built.
+func validateConduitPeers(peers []HubConduitPeer) []error {
+	var errs []error
+	ids := map[string]bool{}
+	for i, p := range peers {
+		switch {
+		case p.ID == "":
+			errs = append(errs, fmt.Errorf("server.hub.conduit.peers[%d]: id is required", i))
+			continue
+		case ids[p.ID]:
+			errs = append(errs, fmt.Errorf("server.hub.conduit.peers: id %q is listed twice", p.ID))
+			continue
+		}
+		ids[p.ID] = true
+		if p.Role != ConduitPeerRoleRelay && p.Role != ConduitPeerRoleHub {
+			errs = append(errs, fmt.Errorf("server.hub.conduit.peers %q: role %q: want relay or hub", p.ID, p.Role))
+		}
+		if len(p.Keys) == 0 {
+			errs = append(errs, fmt.Errorf("server.hub.conduit.peers %q: at least one key is required", p.ID))
+		}
+		kids := map[string]bool{}
+		for _, k := range p.Keys {
+			if k.KeyID == "" || k.PublicKey == "" {
+				errs = append(errs, fmt.Errorf("server.hub.conduit.peers %q: every key needs keyId and publicKey", p.ID))
+				continue
+			}
+			if kids[k.KeyID] {
+				errs = append(errs, fmt.Errorf("server.hub.conduit.peers %q: key id %q is listed twice", p.ID, k.KeyID))
+			}
+			kids[k.KeyID] = true
+		}
+	}
+	return errs
 }
 
 // validateInternalTLS checks the internal hop TLS settings: the

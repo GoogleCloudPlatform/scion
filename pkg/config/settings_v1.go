@@ -1831,6 +1831,60 @@ type V1ServerHubConduitConfig struct {
 	// database, returned by the server-config API or logged. Read at
 	// startup.
 	PeerSecret string `json:"peer_secret,omitempty" yaml:"peer_secret,omitempty" koanf:"peer_secret"`
+	// PeerKeyFile is this node's relay-peer private key file (PEM PKCS #8
+	// Ed25519). When set, the node signs relay-peer calls with it; its
+	// instance_id must be set and listed in peers with the matching public
+	// key. Read at startup.
+	PeerKeyFile string `json:"peer_key_file,omitempty" yaml:"peer_key_file,omitempty" koanf:"peer_key_file"`
+	// Peers lists the relay peers enrolled with their own keys. Read at
+	// startup.
+	Peers []V1ServerHubConduitPeer `json:"peers,omitempty" yaml:"peers,omitempty" koanf:"peers"`
+}
+
+// V1ServerHubConduitPeer is one enrolled relay peer
+// (server.hub.conduit.peers).
+type V1ServerHubConduitPeer struct {
+	ID   string                      `json:"id,omitempty" yaml:"id,omitempty" koanf:"id"`
+	Role string                      `json:"role,omitempty" yaml:"role,omitempty" koanf:"role"`
+	Keys []V1ServerHubConduitPeerKey `json:"keys,omitempty" yaml:"keys,omitempty" koanf:"keys"`
+}
+
+// V1ServerHubConduitPeerKey is one enrolled public key of a relay peer.
+type V1ServerHubConduitPeerKey struct {
+	KeyID     string `json:"key_id,omitempty" yaml:"key_id,omitempty" koanf:"key_id"`
+	PublicKey string `json:"public_key,omitempty" yaml:"public_key,omitempty" koanf:"public_key"`
+}
+
+// conduitPeersFromV1 converts server.hub.conduit.peers to HubConduitPeer.
+func conduitPeersFromV1(in []V1ServerHubConduitPeer) []HubConduitPeer {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]HubConduitPeer, 0, len(in))
+	for _, p := range in {
+		hp := HubConduitPeer{ID: p.ID, Role: p.Role}
+		for _, k := range p.Keys {
+			hp.Keys = append(hp.Keys, HubConduitPeerKey{KeyID: k.KeyID, PublicKey: k.PublicKey})
+		}
+		out = append(out, hp)
+	}
+	return out
+}
+
+// conduitPeersToV1 converts HubConduitPeer to server.hub.conduit.peers.
+func conduitPeersToV1(in []HubConduitPeer) []V1ServerHubConduitPeer {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]V1ServerHubConduitPeer, 0, len(in))
+	for _, p := range in {
+		vp := V1ServerHubConduitPeer{ID: p.ID, Role: p.Role}
+		for _, k := range p.Keys {
+			vp.Keys = append(vp.Keys, V1ServerHubConduitPeerKey{KeyID: k.KeyID, PublicKey: k.PublicKey})
+		}
+		out = append(out, vp)
+	}
+	return out
 }
 
 // V1ServerRelayConfig holds the settings of a separate relay process,
@@ -4321,6 +4375,8 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				InternalTLSKeyFile:    c.InternalTLSKeyFile,
 				InternalTLSCAFile:     c.InternalTLSCAFile,
 				InternalTLSServerName: c.InternalTLSServerName,
+				PeerKeyFile:           c.PeerKeyFile,
+				Peers:                 conduitPeersFromV1(c.Peers),
 			}
 			if m := c.StreamAuthzMax; m != nil {
 				gc.Hub.Conduit.StreamAuthzMax = HubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
@@ -4721,6 +4777,8 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			InternalTLSKeyFile:    c.InternalTLSKeyFile,
 			InternalTLSCAFile:     c.InternalTLSCAFile,
 			InternalTLSServerName: c.InternalTLSServerName,
+			PeerKeyFile:           c.PeerKeyFile,
+			Peers:                 conduitPeersToV1(c.Peers),
 		}
 		if m := c.StreamAuthzMax; !m.IsZero() {
 			v1Hub.Conduit.StreamAuthzMax = &V1ServerHubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
