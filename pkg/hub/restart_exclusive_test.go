@@ -134,7 +134,11 @@ func TestHubRestartReservation_RefusesHubBinaryRuns(t *testing.T) {
 
 	srv, s := newTestServerWithStore(t)
 	srv.config.MaintenanceConfig = MaintenanceConfig{DeploymentTier: "binary", UpdatePolicy: "auto",
-		Installer: newTestInstaller(maintenance.StrategySudoInstall)}
+		Installer: newTestInstaller(maintenance.StrategySudoInstall),
+		// The POST checks the target with a release lookup first; keep it
+		// off the network.
+		ReleaseSource: &countingReleaseSource{rels: map[string]time.Time{
+			"nightly-20261024": time.Date(2026, 10, 24, 4, 0, 0, 0, time.UTC)}}}
 	if rr := postRestart(t, srv); rr.Code != http.StatusOK {
 		t.Fatalf("restart = %d %s", rr.Code, rr.Body.String())
 	}

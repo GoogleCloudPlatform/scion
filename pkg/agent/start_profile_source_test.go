@@ -125,8 +125,8 @@ func TestGetAgent_TemplateChainFromBrokerRecord(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if cfg.MaxTurns != tc.wantMaxTurns {
-				t.Errorf("max_turns = %d, want %d", cfg.MaxTurns, tc.wantMaxTurns)
+			if !api.IntPtrEqual(cfg.MaxTurns, wantCount(tc.wantMaxTurns)) {
+				t.Errorf("max_turns = %s, want %d", api.FormatCountLimit(cfg.MaxTurns), tc.wantMaxTurns)
 			}
 			if cfg.Info == nil || cfg.Info.Template != tc.wantTemplate {
 				t.Errorf("Info template = %v, want %q", cfg.Info, tc.wantTemplate)

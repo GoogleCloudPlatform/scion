@@ -88,8 +88,8 @@ func CheckGitRepoDir(dir string) (bool, error) {
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	// Force untranslated git messages so the stderr match is locale-stable.
-	cmd.Env = append(HostGitEnv(os.Environ()), "LC_ALL=C")
+	// hostGit's environment (HostGitEnv) sets LC_ALL=C, so the stderr match is
+	// locale-stable.
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err == nil {
@@ -329,10 +329,11 @@ func CreateWorktreeWithOrigin(path, branch, recordedOrigin string) error {
 
 	// git worktree add --relative-paths -b <branch> <path>
 	// We run from root to ensure --relative-paths are calculated from root.
-	// LC_ALL=C keeps git's messages in English, so the matches below hold.
-	// The checkout runs without repository hooks or repository-defined
-	// filter commands (HostGitCommand): agents can write this repository.
-	gitEnv := append(HostGitEnv(os.Environ()), "LC_ALL=C")
+	// HostGitEnv sets LC_ALL=C, which keeps git's messages in English, so the
+	// matches below hold. The checkout runs without repository hooks or
+	// repository-defined filter commands (HostGitCommand): agents can write
+	// this repository.
+	gitEnv := HostGitEnv(os.Environ())
 	ctx := context.Background()
 	// git-lfs on a host-side checkout would otherwise take its endpoint from
 	// a tracked .lfsconfig; pin the endpoint from the trusted (broker-recorded)
@@ -846,10 +847,12 @@ func baseRepoGitDir(repoRoot string) (string, error) {
 // from the process are dropped except the set HostGitEnv keeps (the host
 // user's own config and transport/auth — GIT_CONFIG_GLOBAL/SYSTEM/NOSYSTEM,
 // GIT_SSH*, GIT_ASKPASS, GIT_SSL_CA*, GIT_ALLOW_PROTOCOL,
-// GIT_CEILING_DIRECTORIES, ...) and LC_ALL=C is set; core.hooksPath points at an empty
+// GIT_CEILING_DIRECTORIES, ...) and LC_ALL=C is set (HostGitEnv); core.hooksPath points at an empty
 // location (os.DevNull), so hook files in the repository are not run; and
 // the file-system monitor is off. It returns an error, and no command, when
-// repoRoot is not a main repository (baseRepoGitDir).
+// repoRoot is not a main repository (baseRepoGitDir), and, as HostGitCommand
+// does, when args is empty or its first argument is empty or an option
+// (errHostGitArgsOption).
 //
 // git still reads the repository's own configuration. core.hooksPath does
 // not cover hooks defined in configuration (hook.<name>.command with
@@ -858,6 +861,9 @@ func baseRepoGitDir(repoRoot string) (string, error) {
 // (for example reference-transaction on branch -D). Making the repository
 // configuration read-only from agent containers is a follow-up.
 func BaseRepoGitCommand(ctx context.Context, repoRoot string, args ...string) (*exec.Cmd, error) {
+	if len(args) == 0 || args[0] == "" || strings.HasPrefix(args[0], "-") {
+		return nil, errHostGitArgsOption
+	}
 	gitDir, err := baseRepoGitDir(repoRoot)
 	if err != nil {
 		return nil, err
@@ -866,11 +872,12 @@ func BaseRepoGitCommand(ctx context.Context, repoRoot string, args ...string) (*
 	// scrubbed environment every host git call uses (HostGitArgs/HostGitEnv): no
 	// hooks, no fsmonitor, and credential helpers supplied through the environment
 	// are dropped, with the repository pinned by GIT_DIR/GIT_COMMON_DIR rather than
-	// by anything the worktree can rewrite. LC_ALL=C keeps porcelain output parseable.
+	// by anything the worktree can rewrite. HostGitEnv's LC_ALL=C keeps porcelain
+	// output parseable.
 	full := append(append(HostGitArgs(), "-C", repoRoot), args...)
 	cmd := exec.CommandContext(ctx, "git", full...)
 	cmd.WaitDelay = 5 * time.Second
-	cmd.Env = append(HostGitEnv(os.Environ()), "GIT_DIR="+gitDir, "GIT_COMMON_DIR="+gitDir, "LC_ALL=C")
+	cmd.Env = append(HostGitEnv(os.Environ()), "GIT_DIR="+gitDir, "GIT_COMMON_DIR="+gitDir)
 	return cmd, nil
 }
 
@@ -917,7 +924,8 @@ func RemoveWorktreeEntryIn(repoRoot, path string) error {
 // example with extra -c settings or environment for a shared checkout).
 // newCmd builds the git command for the given arguments, already pointed
 // at the repository; RemoveWorktreeEntry never adds -C itself. It appends
-// LC_ALL=C to the command's environment so git's messages can be matched.
+// LC_ALL=C to the command's environment so git's messages can be matched,
+// whatever environment newCmd built (one from HostGitEnv already has it).
 //
 // It acts only when path is absent (Lstat reports it does not exist), runs
 // "git worktree remove <path>" without --force, first with the cleaned path
@@ -976,6 +984,8 @@ func removeWorktreeEntryAt(ctx context.Context, newCmd func(ctx context.Context,
 	if cmd.Env == nil {
 		cmd.Env = os.Environ()
 	}
+	// newCmd may build any environment, so LC_ALL=C is appended here as well
+	// (os/exec keeps the last of duplicate entries).
 	cmd.Env = append(cmd.Env, "LC_ALL=C")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -1654,10 +1664,12 @@ func ExtractOrgRepo(gitURL string) (org, repo string) {
 // for use as a shared workspace project. It configures git identity and
 // optionally authenticates with a token.
 //
-// The token is never embedded in the clone URL (which would persist it in the
-// workspace .git/config, readable by agents). Instead it is supplied through a
-// credential helper scoped to the clone URL's host (ScopedCredentialHelperEnv),
-// and only for an http(s) URL; for any other URL the token is ignored. The
+// The clone offers no host credential (HostGitRemoteEnv); without a token it
+// runs anonymously. The token is never embedded in the clone URL (which would
+// persist it in the workspace .git/config, readable by agents). Instead it is
+// supplied through a credential helper scoped to the clone URL's host
+// (ScopedCredentialHelperEnv), and only for an http(s) URL; for any other URL
+// the token is ignored. The
 // clone runs with the LFS smudge skipped, so git-lfs never contacts an endpoint
 // from a tracked .lfsconfig with the host's credentials.
 //
@@ -1676,9 +1688,9 @@ type HostGitHardening struct {
 	Config []string
 	// Env is appended to the command environment.
 	Env []string
-	// NoCredentialHelpers runs git with no credential helper, no configured
-	// extra HTTP header and no askpass (NoCredentialHelperEnv); the token is
-	// not used.
+	// NoCredentialHelpers runs git anonymously: the token is not offered,
+	// and, as on every clone and fetch, no host credential is
+	// (HostGitRemoteEnv).
 	NoCredentialHelpers bool
 }
 
@@ -1701,16 +1713,13 @@ func cloneSharedWorkspace(workspacePath, cloneURL, branch, token string, h HostG
 	gitArgs := h.configArgs()
 	baseEnv := append(HostGitEnv(os.Environ()), "GIT_TERMINAL_PROMPT=0", "GIT_LFS_SKIP_SMUDGE=1")
 	baseEnv = append(baseEnv, h.Env...)
-	env := baseEnv
+	// The clone offers the token, if one is offered at all, and no host
+	// credential (HostGitRemoteEnv). A non-http(s) URL ignores the token.
+	offered := token
 	if h.NoCredentialHelpers {
-		env = NoCredentialHelperEnv(baseEnv, cloneURL)
-	} else if token != "" {
-		if scoped, ok := ScopedCredentialHelperEnv(baseEnv, cloneURL, token); ok {
-			env = scoped
-		}
-		// Non-http(s) URL: the token is ignored, matching the previous
-		// behaviour where it was only ever injected for https.
+		offered = ""
 	}
+	env := HostGitRemoteEnv(baseEnv, cloneURL, offered)
 
 	runClone := func(args ...string) ([]byte, error) {
 		cmd := hostGit(args...)
@@ -1831,22 +1840,24 @@ func pullSharedWorkspace(workspacePath, cloneURL, token string, h HostGitHardeni
 
 	baseEnv := append(HostGitEnv(os.Environ()), "GIT_TERMINAL_PROMPT=0")
 
-	// The fetch talks to the clone URL and may need the token. Scope the
-	// credential helper to that URL's host only, so git never offers the
-	// token to any other endpoint — in particular an LFS endpoint a tracked
-	// .lfsconfig might name. The merge/checkout step below gets no credential
-	// config at all and skips the LFS smudge, so no host-side checkout can
-	// leak the token to an agent-chosen endpoint.
+	// The fetch talks to the clone URL and may need the token. The door adds
+	// the remote authentication layer (HostGitRemoteEnv): no host credential,
+	// and the token, if offered, only through a credential helper scoped to
+	// the clone URL's host, so git never offers it to any other endpoint (in
+	// particular an LFS endpoint a tracked .lfsconfig might name). An
+	// ssh/scp or local-path URL ignores the token. The merge/checkout step
+	// below gets no credential config at all and skips the LFS smudge, so no
+	// host-side checkout can leak the token to an agent-chosen endpoint.
 	fetchEnv := append(append([]string{}, baseEnv...), h.Env...)
+	// The fetch reads no host global config, so the host user's
+	// safe.directory list does not reach it. The local commands below run
+	// under that list and accept the workspace first; the fetch, and the
+	// door's checks of the workspace config, trust exactly the workspace
+	// path, nothing wider.
+	fetchEnv = appendConfigEnv(fetchEnv, "safe.directory", workspacePath)
+	offered := token
 	if h.NoCredentialHelpers {
-		fetchEnv = NoCredentialHelperEnv(fetchEnv, cloneURL)
-	} else if token != "" {
-		// Only an http(s) clone URL can carry a host-scoped credential helper.
-		// For an ssh/scp or local-path URL the token is ignored (git uses its
-		// own transport auth), rather than failing the pull.
-		if scoped, ok := ScopedCredentialHelperEnv(fetchEnv, cloneURL, token); ok {
-			fetchEnv = scoped
-		}
+		offered = ""
 	}
 
 	branchOut, err := hostGit("-C", workspacePath, "symbolic-ref", "--quiet", "--short", "HEAD").CombinedOutput()
@@ -1870,7 +1881,9 @@ func pullSharedWorkspace(workspacePath, cloneURL, token string, h HostGitHardeni
 	oldHeadStr := strings.TrimSpace(string(oldHead))
 
 	ctx := context.Background()
-	fetch, err := HostGitCommand(ctx, workspacePath, HostGitOptions{Env: fetchEnv, Network: true, Config: h.Config},
+	fetch, err := HostGitCommand(ctx, workspacePath, HostGitOptions{
+		Env: fetchEnv, Network: true, Remote: NewHostGitRemote(cloneURL, offered), Config: h.Config,
+	},
 		"fetch", "--no-tags", "--", cloneURL, "+refs/heads/"+remoteBranch+":"+trackingRef)
 	if err != nil {
 		return nil, pullErr(err.Error())

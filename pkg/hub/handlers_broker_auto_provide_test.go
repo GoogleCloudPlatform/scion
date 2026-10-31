@@ -48,7 +48,7 @@ func TestBrokerAutoProvide_HubMemberSessionDeniedForNewBroker(t *testing.T) {
 	member := newHubMemberUser(t, s, "autoprovide-member-new")
 
 	const name = "autoprovide-member-new-broker"
-	rec := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestAsUserLoopback(t, srv, member, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name:        name,
 		AutoProvide: true,
 	})
@@ -60,7 +60,7 @@ func TestBrokerAutoProvide_HubMemberSessionDeniedForNewBroker(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound, "a denied registration must not create a broker record")
 
 	// The same member registers without auto-provide.
-	rec = doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: name})
+	rec = doRequestAsUserLoopback(t, srv, member, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: name})
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 }
 
@@ -70,7 +70,7 @@ func TestBrokerAutoProvide_HubMemberOwnerDeniedTurningOnForOwnBroker(t *testing.
 	owner := newHubMemberUser(t, s, "autoprovide-owner-turnon")
 	broker := createReregistrationTestBroker(t, s, "autoprovide-owner-turnon-broker", owner.ID)
 
-	rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestAsUserLoopback(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name:        broker.Name,
 		AutoProvide: true,
 		Labels:      map[string]string{"env": "updated"},
@@ -91,7 +91,7 @@ func TestBrokerAutoProvide_PreserveSettingsOwnerReissueLeavesSettingOff(t *testi
 	owner := newHubMemberUser(t, s, "autoprovide-owner-preserve")
 	broker := createReregistrationTestBroker(t, s, "autoprovide-owner-preserve-broker", owner.ID)
 
-	rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestAsUserLoopback(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name:             broker.Name,
 		AutoProvide:      true,
 		PreserveSettings: true,
@@ -119,7 +119,7 @@ func TestBrokerAutoProvide_PreserveSettingsNonOwnerDeniedForOthersBroker(t *test
 	minted := decodeRegistration(t, ownerRec)
 	require.Equal(t, broker.ID, minted.BrokerID)
 
-	rec := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestAsUserLoopback(t, srv, member, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name:             broker.Name,
 		AutoProvide:      true,
 		PreserveSettings: true,
@@ -146,7 +146,7 @@ func TestBrokerAutoProvide_SuperAdminSessionAllowed(t *testing.T) {
 	srv, s := testServer(t)
 	admin := newSuperAdminUser(t, s, "autoprovide-admin-session")
 
-	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestAsUserLoopback(t, srv, admin, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name:        "autoprovide-admin-session-broker",
 		AutoProvide: true,
 	})
@@ -164,7 +164,7 @@ func TestBrokerAutoProvide_OwnerKeepsExistingSetting(t *testing.T) {
 	broker := createReregistrationTestBroker(t, s, "autoprovide-owner-keep-broker", owner.ID)
 	setBrokerAutoProvide(t, s, broker.ID, true)
 
-	rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestAsUserLoopback(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name:        broker.Name,
 		AutoProvide: true,
 	})
@@ -181,7 +181,7 @@ func TestBrokerAutoProvide_OwnerTurnsOff(t *testing.T) {
 	broker := createReregistrationTestBroker(t, s, "autoprovide-owner-off-broker", owner.ID)
 	setBrokerAutoProvide(t, s, broker.ID, true)
 
-	rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestAsUserLoopback(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name: broker.Name,
 	})
 
@@ -205,7 +205,7 @@ func TestBrokerAutoProvide_SuperAdminHubTokenDenied(t *testing.T) {
 	require.NoError(t, err)
 
 	const name = "autoprovide-admin-uat-broker"
-	rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestWithTokenLoopback(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name:        name,
 		AutoProvide: true,
 	})

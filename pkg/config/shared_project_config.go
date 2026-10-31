@@ -177,9 +177,11 @@ func sharedProjectExternalAgentsDir(projectDir string) (dir string, ok bool, err
 // <name>, when that directory holds a regular scion-agent.json and the
 // legacy .scion directory names the same project. It is a look-up
 // fallback for agents provisioned before the move: no new agent is ever
-// provisioned there (temporary; ptone/scion#5835). Every component below
-// the global dir is checked with Lstat (no symlink is followed). "" when
-// there is none.
+// provisioned there, a create of a new agent over it is refused, and the
+// fallback ends for each agent when that agent is deleted, which removes
+// the directory (ptone/scion#5835). The code path itself is removed in a
+// later release (ptone/scion#5839). Every component below the global dir
+// is checked with Lstat (no symlink is followed). "" when there is none.
 func LegacySharedProjectAgentDir(projectDir, agentName string) string {
 	id, ok := sharedProjectConfigID(projectDir)
 	if !ok || agentName == "" || agentName != filepath.Base(agentName) || agentName == "." || agentName == ".." {
@@ -215,6 +217,16 @@ func LegacySharedProjectAgentDir(projectDir, agentName string) string {
 	return dir
 }
 
+// HasExternalAgentState reports whether dir, an agent's state directory in
+// the broker-local external agents root of a shared project configuration,
+// holds the agent's state: a regular scion-agent.json, checked with Lstat
+// (a symlink does not count). It is the one predicate the look-up and the
+// create refusal of a legacy agent directory use, so they always agree.
+func HasExternalAgentState(dir string) bool {
+	info, err := os.Lstat(filepath.Join(dir, "scion-agent.json"))
+	return err == nil && info.Mode().IsRegular()
+}
+
 // sharedProjectAgentDir resolves an agent's broker-side state directory
 // for a shared project configuration directory: the external agents root,
 // or, when the agent has no scion-agent.json there, its legacy in-project
@@ -233,7 +245,7 @@ func sharedProjectAgentDir(projectDir, agentName string) (dir string, ok bool, e
 		return filepath.Join(root, agentName), true, err
 	}
 	ext := filepath.Join(root, agentName)
-	if info, err := os.Lstat(filepath.Join(ext, "scion-agent.json")); err == nil && info.Mode().IsRegular() {
+	if HasExternalAgentState(ext) {
 		return ext, true, nil
 	}
 	if legacy := LegacySharedProjectAgentDir(projectDir, agentName); legacy != "" {

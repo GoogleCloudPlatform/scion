@@ -9,10 +9,13 @@
 #   - a runs-on that mentions vars.SCION_LARGE_RUNNER is not exactly the
 #     canonical expression below (the fork-PR guard keeps forks,
 #     pull_request_target, schedule and workflow_dispatch on ubuntu-latest);
-#   - a routed job cannot or must not run there: it has services:, container:
-#     or a uses: docker:// step (no Docker on Cloud Run), its permissions (its
-#     own, or the workflow's when it has none) grant write, or its workflow is
-#     triggered by pull_request_target;
+#   - a routed job cannot or must not run there: it has services:, container:,
+#     a uses: docker:// step or a docker command in a step (docker run, build,
+#     buildx, compose, pull, push, exec, login, create, start, also after global
+#     options such as -H host or --log-level debug, or docker-compose; no Docker
+#     on Cloud Run; other uses of the word, such as "Dockerfile", do not match),
+#     its permissions (its own, or the workflow's when it has none) grant write,
+#     or its workflow is triggered by pull_request_target;
 #   - a routed job has no timeout-minutes, or one outside 1-35 (the runner's
 #     task timeout is 45 min, minus its 10 min idle timeout). A job whose
 #     hosted runs need longer may use the guarded form
@@ -67,6 +70,7 @@ check_file() {
       if (job == "" || !routed) return
       if (svc != "") printf "%s: job %s is routed to the cr-ci runner but has %s (no Docker on Cloud Run); keep it on ubuntu-latest\n", file, job, svc
       if (dock) printf "%s: job %s is routed to the cr-ci runner but has a uses: docker:// step (no Docker on Cloud Run); keep it on ubuntu-latest\n", file, job
+      if (dcmd) printf "%s:%d: job %s is routed to the cr-ci runner but runs docker (no Docker on Cloud Run); keep it on ubuntu-latest\n", file, dcmd, job
       if (wperm) printf "%s: job %s is routed to the cr-ci runner but its permissions grant write; keep it on a GitHub-hosted runner\n", file, job
       else if (!hasperm && topw) printf "%s: job %s is routed to the cr-ci runner but inherits the workflow permissions, which grant write; keep it on a GitHub-hosted runner\n", file, job
       if (prt) printf "%s: job %s is routed to the cr-ci runner but its workflow runs on pull_request_target; keep it on a GitHub-hosted runner\n", file, job
@@ -87,7 +91,7 @@ check_file() {
     /^  [A-Za-z0-9_-]+:[[:space:]]*$/ {
       flush()
       job = $0; sub(/^  /, "", job); sub(/:.*/, "", job)
-      routed = 0; svc = ""; dock = 0; wperm = 0; hasperm = 0; tmo = ""; inperm = 0; inrunson = 0
+      routed = 0; svc = ""; dock = 0; dcmd = 0; wperm = 0; hasperm = 0; tmo = ""; inperm = 0; inrunson = 0
       next
     }
     /^[[:space:]]*#/ { next }
@@ -97,6 +101,15 @@ check_file() {
       printf "%s:%d: job %s names a self-hosted runner literally; route it only through the canonical expression:\n    %s\n", file, NR, job, canon
     }
     /uses:[[:space:]]*["\047]?docker:\/\// { dock = 1 }
+    # A docker command anywhere in the job (comment lines were skipped above); the
+    # first one is reported. Global options may come between docker and the
+    # subcommand (docker -H host run, docker --log-level debug build,
+    # docker --context x compose up, docker -D pull): each is a token starting with
+    # "-", optionally followed by one value token that does not. A false match only
+    # keeps a job on ubuntu-latest. Known gap: a quoted option value that contains
+    # whitespace (docker --config "/a b" run x) is not matched, because the value
+    # token ends at the space; such a job would fail on the runner (no Docker).
+    !dcmd && /(^|[;&|(`[:space:]])docker([[:space:]]+-[^[:space:]]+([[:space:]]+[^-[:space:]][^[:space:]]*)?)*[[:space:]]+(run|build|buildx|compose|pull|push|exec|login|create|start)([[:space:]]|$)|(^|[;&|(`[:space:]])docker-compose([[:space:]]|$)/ { dcmd = NR }
     /^    runs-on:.*vars\.SCION_LARGE_RUNNER/ {
       line = $0; sub(/[[:space:]]+$/, "", line)
       if (line == "    " canon) routed = 1

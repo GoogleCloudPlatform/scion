@@ -4,7 +4,7 @@
 ? gcloud artifacts docker images describe us-central1-docker.pkg.dev/example-project/cr-runners/gh-runner:golden --project=example-project '--format=value(image_summary.digest)'
 # C8: runner job cr-gh-runner-8c32g
 ? gcloud run jobs describe cr-gh-runner-8c32g --region=us-central1 --project=example-project '--format=value(name)'
-+ gcloud run jobs create cr-gh-runner-8c32g --image=us-central1-docker.pkg.dev/example-project/cr-runners/gh-runner:golden --region=us-central1 --project=example-project --service-account=cr-runner-exec-sa@example-project.iam.gserviceaccount.com --cpu=8 --memory=32Gi --tasks=1 --parallelism=1 --max-retries=0 --task-timeout=2700s --labels=managed-by=cr-ci --set-env-vars=RUNNER_BUILD_CACHE_IN_RAM=false,RUNNER_IDLE_TIMEOUT_SECONDS=600 --add-volume=name=scratch,type=ephemeral-disk,size=10Gi --add-volume-mount=volume=scratch,mount-path=/scratch
++ gcloud run jobs create cr-gh-runner-8c32g --image=us-central1-docker.pkg.dev/example-project/cr-runners/gh-runner:golden --region=us-central1 --project=example-project --service-account=cr-runner-exec-sa@example-project.iam.gserviceaccount.com --cpu=8 --memory=32Gi --tasks=1 --parallelism=1 --max-retries=0 --task-timeout=2700s --labels=managed-by=cr-ci --set-env-vars=RUNNER_BUILD_CACHE_IN_RAM=false,RUNNER_IDLE_TIMEOUT_SECONDS=600 --add-volume=name=scratch,type=ephemeral-disk,size=10Gi --add-volume-mount=volume=scratch,mount-path=/home/runner
 # C10: MEDIATOR_SA_NAME may run and cancel executions of this job only
 + gcloud run jobs add-iam-policy-binding cr-gh-runner-8c32g --region=us-central1 --project=example-project --member=serviceAccount:cr-runner-mediator-sa@example-project.iam.gserviceaccount.com --role=roles/run.developer --format=none
 # check: EXEC_SA_NAME holds no project roles

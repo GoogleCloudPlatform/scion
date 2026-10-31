@@ -16,7 +16,9 @@ name: Nightly Release
 
 on:
   schedule:
-    - cron: '0 2 * * *'   # Daily at 2:00 AM UTC
+    # 03:00 UTC = 7:00 PM Pacific (PST). GitHub cron is UTC-only: use '0 2 * * *'
+    # while Pacific daylight time is in effect (March to November).
+    - cron: '0 3 * * *'   # Daily at 3:00 AM UTC
   workflow_dispatch:        # Allow manual trigger
 
 # Fork CI gate (hack/check-fork-ci-gate.sh, cr-ci/workflows/README.md): on push

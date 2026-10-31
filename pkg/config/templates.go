@@ -1060,8 +1060,11 @@ func MergeScionConfig(base, override *api.ScionConfig) *api.ScionConfig {
 		}
 		result.MCPServers = merged
 	}
-	if override.MaxTurns > 0 {
-		result.MaxTurns = override.MaxTurns
+	// Count limits are *int (ptone/scion#5605): a set override wins, 0
+	// ("no limit") included, so an explicit Unlimited overrides an
+	// inherited limit. Copy the pointee, as for ThinkingLevel.
+	if override.MaxTurns != nil {
+		result.MaxTurns = api.CloneIntPtr(override.MaxTurns)
 	}
 	if override.MaxDuration != "" {
 		result.MaxDuration = override.MaxDuration
@@ -1104,8 +1107,8 @@ func MergeScionConfig(base, override *api.ScionConfig) *api.ScionConfig {
 	if override.Branch != "" {
 		result.Branch = override.Branch
 	}
-	if override.MaxModelCalls > 0 {
-		result.MaxModelCalls = override.MaxModelCalls
+	if override.MaxModelCalls != nil {
+		result.MaxModelCalls = api.CloneIntPtr(override.MaxModelCalls)
 	}
 	if override.Info != nil {
 		if result.Info == nil {

@@ -36,6 +36,7 @@ func TestVendor(t *testing.T) {
 		{"opencode", "opencode"},
 		{"copilot", "copilot"},
 		{"hermes", "hermes"},
+		{"pi", "pi"},
 		{"Claude", VendorAnthropic},
 		{" codex ", VendorOpenAI},
 		{"generic", ""},

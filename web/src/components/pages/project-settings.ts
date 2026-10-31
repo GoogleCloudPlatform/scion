@@ -42,6 +42,24 @@ import { projectVisitorsVisible } from '../../shared/project-visitors.js';
 import { isBrokerKubernetesOnly } from '../../shared/runtime-kind.js';
 import { KUBERNETES_BLOCK_HINT } from '../../shared/gcp-identity-state.js';
 import { projectServiceAccountListUrl } from '../../shared/gcp-sa-assign-status.js';
+import {
+  PROFILE_DEFAULTS_FIELD,
+  effectiveIdentityForProfile,
+  knownProfiles,
+  mapFromRows,
+  profileErrorsFromBody,
+  profileOptionsForRow,
+  profilesMissingDefault,
+  rowProblem,
+  rowsFromMap,
+  sameProfileMap,
+  serviceAccountOptionsForProfile,
+  splitProfileWarnings,
+  type EffectiveIdentity,
+  type KnownProfile,
+  type ProfileDefaultRow,
+  type ProfileMessages,
+} from '../../shared/gcp-profile-defaults.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import type { AccessBoundarySummary } from '../../shared/access-boundaries.js';
@@ -90,6 +108,7 @@ interface ProjectSettings {
   defaultResources?: ProjectResourceSpec | undefined;
   defaultGCPIdentityMode?: string | undefined;
   defaultGCPIdentityServiceAccountID?: string | undefined;
+  defaultGCPIdentityServiceAccountIDByProfile?: Record<string, string> | undefined;
   defaultModel?: string | undefined;
   defaultThinkingLevel?: number | null | undefined;
   maxAgentRole?: string | undefined;
@@ -242,6 +261,26 @@ export class ScionPageProjectSettings extends LitElement {
 
   @state()
   private configDefaultGCPIdentitySAID = '';
+
+  /**
+   * Per-profile default service account rows
+   * (defaultGCPIdentityServiceAccountIDByProfile, ptone/scion#3947).
+   */
+  @state()
+  private profileDefaultRows: ProfileDefaultRow[] = [];
+
+  /** The stored map the rows were loaded from, to tell whether they changed. */
+  private profileDefaultsStored: Record<string, string> = {};
+
+  private profileDefaultRowKey = 0;
+
+  /** Inline errors from the last failed save, by profile and for the map. */
+  @state()
+  private profileDefaultErrors: ProfileMessages = { byProfile: {}, general: [] };
+
+  /** Warnings from the last successful save, by profile and the rest. */
+  @state()
+  private profileDefaultWarnings: ProfileMessages = { byProfile: {}, general: [] };
 
   // Agent authorization
   @state()
@@ -643,6 +682,49 @@ export class ScionPageProjectSettings extends LitElement {
       vertical-align: middle;
       margin-left: 0.25rem;
       cursor: help;
+    }
+
+    .profile-default-rows {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+
+    .profile-default-row {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+
+    .profile-default-inputs {
+      display: grid;
+      grid-template-columns: minmax(8rem, 1fr) minmax(12rem, 2fr) auto;
+      gap: 0.5rem;
+      align-items: end;
+    }
+
+    .profile-effective {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+      margin-top: 0.5rem;
+    }
+
+    .profile-effective-title {
+      font-size: 0.8125rem;
+      font-weight: 600;
+    }
+
+    .profile-effective-table {
+      border-collapse: collapse;
+      font-size: 0.8125rem;
+    }
+
+    .profile-effective-table th,
+    .profile-effective-table td {
+      text-align: left;
+      padding: 0.25rem 0.5rem;
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
     }
 
     .config-field.hub-inherited {
@@ -1338,6 +1420,7 @@ export class ScionPageProjectSettings extends LitElement {
       this.configDefaultResDisk = res?.disk || '';
       this.configDefaultGCPIdentityMode = this.settings.defaultGCPIdentityMode || '';
       this.configDefaultGCPIdentitySAID = this.settings.defaultGCPIdentityServiceAccountID || '';
+      this.loadProfileDefaultRows(this.settings.defaultGCPIdentityServiceAccountIDByProfile);
       this.configMaxAgentRole = this.settings.maxAgentRole || '';
       this.configDefaultAgentRole = this.settings.defaultAgentRole || '';
       if (this.settings.defaultModel) {
@@ -1543,6 +1626,314 @@ export class ScionPageProjectSettings extends LitElement {
     return nothing;
   }
 
+  private loadProfileDefaultRows(map: Record<string, string> | null | undefined): void {
+    this.profileDefaultsStored = { ...(map ?? {}) };
+    this.profileDefaultRows = rowsFromMap(map, () => ++this.profileDefaultRowKey);
+  }
+
+  /** Whether the per-profile rows differ from the stored map. */
+  private get profileDefaultsDirty(): boolean {
+    const rows = this.profileDefaultRows;
+    const complete = mapFromRows(rows);
+    // An incomplete row is an edit even though it maps to nothing yet.
+    if (Object.keys(complete).length !== rows.length) return true;
+    return !sameProfileMap(complete, this.profileDefaultsStored);
+  }
+
+  /** The profiles this project's linked brokers report. */
+  private get knownBrokerProfiles(): KnownProfile[] {
+    return knownProfiles(this.brokers);
+  }
+
+  private updateProfileDefaultRow(key: number, patch: Partial<ProfileDefaultRow>): void {
+    this.profileDefaultRows = this.profileDefaultRows.map((row) =>
+      row.key === key ? { ...row, ...patch } : row
+    );
+  }
+
+  private addProfileDefaultRow(): void {
+    const free = profileOptionsForRow(
+      { key: -1, profile: '', serviceAccountId: '' },
+      this.profileDefaultRows,
+      this.knownBrokerProfiles
+    );
+    this.profileDefaultRows = [
+      ...this.profileDefaultRows,
+      {
+        key: ++this.profileDefaultRowKey,
+        profile: free.length === 1 ? (free[0] ?? '') : '',
+        serviceAccountId: '',
+      },
+    ];
+  }
+
+  private removeProfileDefaultRow(key: number): void {
+    this.profileDefaultRows = this.profileDefaultRows.filter((row) => row.key !== key);
+  }
+
+  private serviceAccountLabel(id: string): string {
+    const sa = this.gcpServiceAccounts.find((s) => s.id === id);
+    return sa ? sa.displayName || sa.email : id;
+  }
+
+  /** The hub default mode and account, when the resolved endpoint reports them. */
+  private get hubGCPIdentityDefault(): { mode: string; serviceAccountId: string } {
+    const mode = this.resolvedSettings['scion.io/default-gcp-identity-mode'];
+    const sa = this.resolvedSettings['scion.io/default-gcp-identity-service-account-id'];
+    return {
+      mode: mode?.hubDefault === 'present' && mode.hubValue ? String(mode.hubValue) : '',
+      serviceAccountId: sa?.hubDefault === 'present' && sa.hubValue ? String(sa.hubValue) : '',
+    };
+  }
+
+  private describeEffectiveIdentity(e: EffectiveIdentity, kubernetes: boolean): string {
+    const what =
+      e.mode === 'assign'
+        ? `Assign ${this.serviceAccountLabel(e.serviceAccountId)}`
+        : e.mode === 'passthrough'
+          ? 'Passthrough'
+          : e.mode === 'block'
+            ? 'Block'
+            : kubernetes
+              ? 'No identity set (the Kubernetes runtime applies its default)'
+              : 'No identity set (the runtime applies its default)';
+    switch (e.source) {
+      case 'profile':
+        return `${what} (this profile's default)`;
+      case 'project':
+        return `${what} (project default)`;
+      case 'hub':
+        return `${what} (hub default)`;
+      default:
+        return what;
+    }
+  }
+
+  private renderProfileDefaultMessages(
+    messages: readonly string[],
+    kind: 'error' | 'warning'
+  ): TemplateResult[] {
+    return messages.map((m) =>
+      kind === 'error'
+        ? html`<span class="field-help field-help-error profile-default-error" role="alert"
+            >${m}</span
+          >`
+        : html`<sl-alert class="profile-default-warning" variant="warning" open>
+            <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+            ${m}
+          </sl-alert>`
+    );
+  }
+
+  /**
+   * The per-profile default service account editor and the identity each
+   * known profile resolves to (ptone/scion#3947).
+   */
+  private renderProfileDefaults(canEdit: boolean): TemplateResult {
+    const rows = this.profileDefaultRows;
+    const known = this.knownBrokerProfiles;
+    const knownNames = new Set(known.map((p) => p.name));
+    const errors = this.profileDefaultErrors;
+    const warnings = this.profileDefaultWarnings;
+    const missing = profilesMissingDefault(rows, known);
+    const dirty = this.profileDefaultsDirty;
+    const canAdd =
+      canEdit &&
+      profileOptionsForRow({ key: -1, profile: '', serviceAccountId: '' }, rows, known).length > 0;
+    const project = {
+      mode: this.configDefaultGCPIdentityMode,
+      serviceAccountId:
+        this.configDefaultGCPIdentityMode === 'assign' ? this.configDefaultGCPIdentitySAID : '',
+    };
+    const hub = this.hubGCPIdentityDefault;
+    const currentMap = mapFromRows(rows);
+    // The effective view lists every reported profile, plus any profile a
+    // row names that no broker reports.
+    const effectiveProfiles: KnownProfile[] = [
+      ...known,
+      ...rows
+        .filter((r) => r.profile && !knownNames.has(r.profile))
+        .map((r) => ({ name: r.profile, types: [], kubernetes: false })),
+    ];
+
+    return html`
+      <div class="config-field profile-defaults" data-field=${PROFILE_DEFAULTS_FIELD}>
+        <label id="profile-defaults-label">Per-profile default service accounts</label>
+        <span class="field-help"
+          >A default for one runtime profile wins over the project default above for agents that run
+          under that profile and choose no identity. Only verified service accounts are
+          offered.</span
+        >
+        ${rows.length > 0
+          ? html`
+              <div
+                class="profile-default-rows"
+                role="group"
+                aria-labelledby="profile-defaults-label"
+              >
+                ${rows.map((row) => this.renderProfileDefaultRow(row, canEdit, dirty))}
+              </div>
+            `
+          : html`<span class="field-help profile-defaults-empty"
+              >No per-profile defaults. Every profile uses the project default.</span
+            >`}
+        ${this.renderProfileDefaultMessages(errors.general, 'error')}
+        ${this.renderProfileDefaultMessages(warnings.general, 'warning')}
+        ${missing.length > 0
+          ? html`<sl-alert class="profile-default-sibling-warning" variant="warning" open>
+              <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+              ${missing.length === 1
+                ? html`Kubernetes profile "${missing[0]}" has no per-profile default while another
+                  profile has one, so its agents use the project default. That identity may not be
+                  mapped on that profile's cluster.`
+                : html`Kubernetes profiles ${missing.map((p) => `"${p}"`).join(', ')} have no
+                  per-profile default while another profile has one, so their agents use the project
+                  default. That identity may not be mapped on those clusters.`}
+            </sl-alert>`
+          : nothing}
+        <div>
+          <sl-button
+            class="profile-default-add"
+            size="small"
+            ?disabled=${!canAdd}
+            @click=${() => this.addProfileDefaultRow()}
+          >
+            <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+            Add profile default
+          </sl-button>
+        </div>
+        ${effectiveProfiles.length > 0
+          ? html`
+              <div class="profile-effective">
+                <span class="profile-effective-title">Effective default identity per profile</span>
+                <table class="profile-effective-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">Profile</th>
+                      <th scope="col">New agents get</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${effectiveProfiles.map(
+                      (p) => html`
+                        <tr data-profile=${p.name}>
+                          <td>${p.name}</td>
+                          <td>
+                            ${this.describeEffectiveIdentity(
+                              effectiveIdentityForProfile(p.name, currentMap, project, hub),
+                              p.kubernetes
+                            )}
+                          </td>
+                        </tr>
+                      `
+                    )}
+                  </tbody>
+                </table>
+                <span class="field-help"
+                  >For agents that choose no identity. Unsaved edits are included.</span
+                >
+              </div>
+            `
+          : nothing}
+      </div>
+    `;
+  }
+
+  private renderProfileDefaultRow(
+    row: ProfileDefaultRow,
+    canEdit: boolean,
+    dirty: boolean
+  ): TemplateResult {
+    const rows = this.profileDefaultRows;
+    const known = this.knownBrokerProfiles;
+    const problem = rowProblem(row, rows);
+    const rowErrors = row.profile ? (this.profileDefaultErrors.byProfile[row.profile] ?? []) : [];
+    const rowWarnings = row.profile
+      ? (this.profileDefaultWarnings.byProfile[row.profile] ?? [])
+      : [];
+    const options = profileOptionsForRow(row, rows, known);
+    const saOptions = serviceAccountOptionsForProfile(this.gcpServiceAccounts, row.profile);
+    const savedSAMissing =
+      row.serviceAccountId !== '' && !saOptions.some((sa) => sa.id === row.serviceAccountId);
+    const reported = known.some((k) => k.name === row.profile);
+    return html`
+      <div class="profile-default-row" data-profile=${row.profile}>
+        <div class="profile-default-inputs">
+          <sl-select
+            class="profile-default-profile"
+            label="Profile"
+            placeholder="Select a profile"
+            value=${row.profile}
+            ?disabled=${!canEdit}
+            @sl-change=${(e: Event) => {
+              this.updateProfileDefaultRow(row.key, {
+                profile: (e.target as HTMLSelectElement).value,
+              });
+            }}
+          >
+            ${options.map((name) => {
+              const p = known.find((k) => k.name === name);
+              const note = p
+                ? p.types.length > 0
+                  ? html` <small>(${p.types.join(', ')})</small>`
+                  : nothing
+                : html` <small>(not reported by any broker)</small>`;
+              return html`<sl-option value=${name}>${name}${note}</sl-option>`;
+            })}
+          </sl-select>
+          <sl-select
+            class="profile-default-sa"
+            label="Service account"
+            placeholder="Select a verified service account"
+            value=${row.serviceAccountId}
+            ?disabled=${!canEdit}
+            @sl-change=${(e: Event) => {
+              this.updateProfileDefaultRow(row.key, {
+                serviceAccountId: (e.target as HTMLSelectElement).value,
+              });
+            }}
+          >
+            ${saOptions.map(
+              (sa) => html`
+                <sl-option value=${sa.id}>
+                  ${sa.displayName || sa.email}
+                  <small>(${sa.email})</small>${sa.scope === 'hub' ? ' (Hub)' : ''}
+                </sl-option>
+              `
+            )}
+            ${savedSAMissing
+              ? html`<sl-option value=${row.serviceAccountId}
+                  >${row.serviceAccountId}
+                  <small>(not a verified account in this project)</small></sl-option
+                >`
+              : nothing}
+          </sl-select>
+          <sl-icon-button
+            class="profile-default-remove"
+            name="trash"
+            label=${row.profile
+              ? `Remove the default for profile ${row.profile}`
+              : 'Remove this row'}
+            ?disabled=${!canEdit}
+            @click=${() => this.removeProfileDefaultRow(row.key)}
+          ></sl-icon-button>
+        </div>
+        ${row.profile && !reported && known.length > 0
+          ? html`<span class="field-help"
+              >No broker linked to this project reports profile "${row.profile}".</span
+            >`
+          : nothing}
+        ${problem && dirty
+          ? html`<span class="field-help field-help-error profile-default-problem"
+              >${problem}</span
+            >`
+          : nothing}
+        ${this.renderProfileDefaultMessages(rowErrors, 'error')}
+        ${this.renderProfileDefaultMessages(rowWarnings, 'warning')}
+      </div>
+    `;
+  }
+
   private async loadHarnessConfigs(): Promise<void> {
     try {
       const response = await apiFetch(
@@ -1612,9 +2003,21 @@ export class ScionPageProjectSettings extends LitElement {
   }
 
   private async handleSaveConfig(): Promise<void> {
-    this.settingsSaving = true;
     this.settingsError = null;
     this.settingsSuccess = null;
+    this.profileDefaultErrors = { byProfile: {}, general: [] };
+    this.profileDefaultWarnings = { byProfile: {}, general: [] };
+
+    const profileDefaultsDirty = this.profileDefaultsDirty;
+    if (
+      profileDefaultsDirty &&
+      this.profileDefaultRows.some((row) => rowProblem(row, this.profileDefaultRows))
+    ) {
+      this.settingsError = 'Complete or remove the incomplete per-profile default rows.';
+      return;
+    }
+
+    this.settingsSaving = true;
 
     try {
       // Build default resources if any field is set
@@ -1652,8 +2055,10 @@ export class ScionPageProjectSettings extends LitElement {
       // The PUT keeps any field the body leaves out, so every field this
       // page manages is sent: "" / 0 / {} clears it, and null resets a
       // tri-state field (telemetry, auto-expose, thinking level) to inherit.
-      // Fields this page does not manage (activeProfile, the per-profile
-      // service account map) are left out so a save keeps them.
+      // activeProfile, which this page does not manage, is left out so a
+      // save keeps it. The per-profile service account map is replaced as a
+      // whole when present, so it is sent only when its rows changed ({}
+      // clears it); otherwise it is left out and kept as stored.
       const body: ProjectSettings = {
         defaultTemplate: this.configDefaultTemplate || '',
         defaultHarnessConfig: this.configDefaultHarnessConfig || '',
@@ -1674,6 +2079,9 @@ export class ScionPageProjectSettings extends LitElement {
         maxAgentRole: this.configMaxAgentRole || '',
         defaultAgentRole: this.configDefaultAgentRole || '',
       };
+      if (profileDefaultsDirty) {
+        body.defaultGCPIdentityServiceAccountIDByProfile = mapFromRows(this.profileDefaultRows);
+      }
 
       const response = await apiFetch(`/api/v1/projects/${this.projectId}/settings`, {
         method: 'PUT',
@@ -1682,11 +2090,28 @@ export class ScionPageProjectSettings extends LitElement {
       });
 
       if (!response.ok) {
+        if (profileDefaultsDirty) {
+          try {
+            this.profileDefaultErrors = profileErrorsFromBody(await response.clone().json());
+          } catch {
+            // Not JSON: the page-level message below still reports it.
+          }
+        }
         throw new Error(await extractApiError(response, `Failed to save: HTTP ${response.status}`));
       }
 
-      this.settings = (await response.json()) as ProjectSettings;
-      this.settingsSuccess = 'Configuration saved.';
+      const saved = (await response.json()) as ProjectSettings & { warnings?: unknown };
+      const { warnings, ...savedSettings } = saved;
+      this.settings = savedSettings;
+      this.loadProfileDefaultRows(savedSettings.defaultGCPIdentityServiceAccountIDByProfile);
+      this.profileDefaultWarnings = splitProfileWarnings(warnings);
+      const warningCount =
+        Object.values(this.profileDefaultWarnings.byProfile).flat().length +
+        this.profileDefaultWarnings.general.length;
+      this.settingsSuccess =
+        warningCount > 0
+          ? 'Configuration saved, with warnings (see above).'
+          : 'Configuration saved.';
     } catch (err) {
       console.error('Failed to save project settings:', err);
       this.settingsError = err instanceof Error ? err.message : 'Failed to save settings';
@@ -2634,6 +3059,7 @@ export class ScionPageProjectSettings extends LitElement {
                     </div>
                   `
                 : ''}
+              ${this.renderProfileDefaults(canEdit)}
             </div>
           </sl-tab-panel>
 

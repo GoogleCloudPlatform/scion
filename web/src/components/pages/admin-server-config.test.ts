@@ -3592,6 +3592,163 @@ describe('scion-page-admin-server-config', () => {
     });
   });
 
+  describe('Kubernetes placement and identity fields (ptone/scion#6580)', () => {
+    const k8s = {
+      type: 'kubernetes',
+      namespace: 'agents',
+      node_selector: { 'scion.dev/pool': 'agents' },
+      tolerations: [
+        { key: 'scion.dev/pool', operator: 'Equal', value: 'agents', effect: 'NoSchedule' },
+      ],
+      kubernetes_service_account_mappings: { 'sa@p.iam.gserviceaccount.com': 'agent-ksa' },
+    };
+
+    async function save(el: HTMLElement): Promise<void> {
+      await (el as any).updateComplete;
+      const btn = queryAll(el, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      ) as HTMLElement;
+      btn.click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+
+    function saveDisabled(el: HTMLElement): boolean {
+      const btn = queryAll(el, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      ) as HTMLElement;
+      return btn.hasAttribute('disabled');
+    }
+
+    function load(runtimes: Record<string, unknown>, onPut?: (b: Record<string, any>) => void) {
+      return createComponent(
+        createFetchHandler(makeBaseConfig({ runtimes }), {
+          putHandler: (body) => {
+            if ('runtimes' in body && onPut) onPut(body as Record<string, any>);
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+    }
+
+    it('renders only for Kubernetes runtimes, with the stored values', async () => {
+      element = await load({ gke: k8s, local: { type: 'docker' } });
+      await (element as any).updateComplete;
+      const sections = queryAll(element, 'details.k8s-placement');
+      expect(sections.length).toBe(1);
+      expect(sections[0].hasAttribute('open')).toBe(true);
+      const keys = queryAll(element, '[data-k8s-field="node_selector"] sl-input.k8s-key');
+      expect(keys.map((k) => k.getAttribute('value'))).toEqual(['scion.dev/pool']);
+      const gsa = queryAll(
+        element,
+        '[data-k8s-field="kubernetes_service_account_mappings"] sl-input.k8s-key'
+      );
+      expect(gsa.map((k) => k.getAttribute('value'))).toEqual(['sa@p.iam.gserviceaccount.com']);
+      expect(queryAll(element, 'sl-input.tol-key').map((k) => k.getAttribute('value'))).toEqual([
+        'scion.dev/pool',
+      ]);
+    });
+
+    it('editing rows updates the payload; removing the last row sends null', async () => {
+      let captured: Record<string, any> | null = null;
+      element = await load({ gke: k8s }, (b) => (captured = b));
+      const value = query(
+        element,
+        '[data-k8s-field="node_selector"] sl-input.k8s-value'
+      ) as HTMLElement & { value: string };
+      value.value = 'batch';
+      value.dispatchEvent(new Event('sl-input'));
+      (query(element, '[data-k8s-field="node_selector"] sl-button.k8s-add') as HTMLElement).click();
+      await (element as any).updateComplete;
+      const keys = queryAll(
+        element,
+        '[data-k8s-field="node_selector"] sl-input.k8s-key'
+      ) as (HTMLElement & {
+        value: string;
+      })[];
+      const values = queryAll(
+        element,
+        '[data-k8s-field="node_selector"] sl-input.k8s-value'
+      ) as (HTMLElement & {
+        value: string;
+      })[];
+      keys[1].value = 'zone';
+      keys[1].dispatchEvent(new Event('sl-input'));
+      values[1].value = 'us-west2';
+      values[1].dispatchEvent(new Event('sl-input'));
+      const rm = query(
+        element,
+        '[data-k8s-field="kubernetes_service_account_mappings"] sl-icon-button.k8s-remove'
+      ) as HTMLElement;
+      rm.click();
+      await save(element);
+      expect(captured!.runtimes.gke.node_selector).toEqual({
+        'scion.dev/pool': 'batch',
+        zone: 'us-west2',
+      });
+      expect(captured!.runtimes.gke.kubernetes_service_account_mappings).toBeNull();
+      expect(captured!.runtimes.gke.tolerations).toEqual(k8s.tolerations);
+    });
+
+    it('a toleration can be added and the runtime class set', async () => {
+      let captured: Record<string, any> | null = null;
+      element = await load({ gke: { type: 'kubernetes' } }, (b) => (captured = b));
+      (query(element, '[data-k8s-field="tolerations"] sl-button.k8s-add') as HTMLElement).click();
+      await (element as any).updateComplete;
+      const op = query(element, 'sl-select.tol-operator') as HTMLElement & { value: string };
+      op.value = 'Exists';
+      op.dispatchEvent(new Event('sl-change'));
+      const cls = query(element, 'sl-input.k8s-runtime_class_name') as HTMLElement & {
+        value: string;
+      };
+      cls.value = 'gvisor';
+      cls.dispatchEvent(new Event('sl-input'));
+      await save(element);
+      expect(captured!.runtimes.gke.tolerations).toEqual([{ operator: 'Exists' }]);
+      expect(captured!.runtimes.gke.runtime_class_name).toBe('gvisor');
+    });
+
+    it('an invalid value the form sets blocks Save', async () => {
+      element = await load({ gke: { type: 'kubernetes' } });
+      const cls = query(element, 'sl-input.k8s-runtime_class_name') as HTMLElement & {
+        value: string;
+      };
+      cls.value = 'Not_Valid';
+      cls.dispatchEvent(new Event('sl-input'));
+      await (element as any).updateComplete;
+      expect(
+        query(element, '[data-placement-error="runtimes.gke.runtime_class_name"]')
+      ).not.toBeNull();
+      expect(saveDisabled(element)).toBe(true);
+      expect(query(element, '.placement-blocked')).not.toBeNull();
+    });
+
+    it('a stored invalid value the form does not touch is a warning and Save stays enabled', async () => {
+      element = await load({ gke: { type: 'kubernetes', runtime_class_name: 'Not_Valid' } });
+      await (element as any).updateComplete;
+      expect(
+        query(element, '[data-placement-warning="runtimes.gke.runtime_class_name"]')
+      ).not.toBeNull();
+      expect(query(element, '[data-placement-error]')).toBeNull();
+      expect(saveDisabled(element)).toBe(false);
+    });
+
+    it('a type switch to Cloud Run names the Kubernetes keys it clears', async () => {
+      element = await load({ gke: k8s });
+      vi.mocked(showConfirm).mockClear();
+      vi.mocked(showConfirm).mockResolvedValueOnce(false);
+      const typeSelect = queryAll(element, 'sl-select').find((s) =>
+        s.querySelector('sl-option[value="cloudrun-instances"]')
+      ) as HTMLElement & { value: string };
+      typeSelect.value = 'cloudrun';
+      typeSelect.dispatchEvent(new Event('sl-change'));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const msg = vi.mocked(showConfirm).mock.calls[0][0] as string;
+      for (const k of ['node_selector', 'tolerations', 'kubernetes_service_account_mappings']) {
+        expect(msg).toContain(k);
+      }
+    });
+  });
+
   describe('Regression ptone/scion#1871 — masked secrets are not sent back', () => {
     const maskedServer = {
       notification_channels: [{ type: 'slack', params: { webhook_url: '********' } }],

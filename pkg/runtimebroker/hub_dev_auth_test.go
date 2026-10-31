@@ -17,6 +17,8 @@ package runtimebroker
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"log/slog"
 	"net"
 	"net/http"
@@ -27,6 +29,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
@@ -42,9 +45,32 @@ type recordedRequest struct {
 // headers of every request it receives.
 func devAuthTestHub(t *testing.T) (*httptest.Server, func() []recordedRequest) {
 	t.Helper()
+	return devAuthTestHubWith(t, httptest.NewServer)
+}
+
+// remoteHubHost is the non-loopback name the tests give a remote hub. It is
+// one of the names in httptest's TLS certificate, so a TLS fake hub serves it
+// with a certificate the client accepts (hubURLAs trusts it).
+const remoteHubHost = "example.com"
+
+// devAuthTestHubFor is devAuthTestHub for a hub addressed as host: a
+// loopback host gets a plain http hub, any other host a TLS hub, since the
+// broker refuses a plain http hub on a network host
+// (config.CheckHubTransport) and these tests are about what reaches a hub
+// the broker does connect to.
+func devAuthTestHubFor(t *testing.T, host string) (*httptest.Server, func() []recordedRequest) {
+	t.Helper()
+	if config.IsLoopbackHost(host) {
+		return devAuthTestHub(t)
+	}
+	return devAuthTestHubWith(t, httptest.NewTLSServer)
+}
+
+func devAuthTestHubWith(t *testing.T, newServer func(http.Handler) *httptest.Server) (*httptest.Server, func() []recordedRequest) {
+	t.Helper()
 	var mu sync.Mutex
 	var seen []recordedRequest
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		seen = append(seen, recordedRequest{
 			authorization: r.Header.Get("Authorization"),
@@ -82,6 +108,15 @@ func hubURLAs(t *testing.T, srv *httptest.Server, host string) string {
 	}
 	tr := base.Clone()
 	tr.Proxy = nil
+	scheme := "http"
+	if cert := srv.Certificate(); cert != nil {
+		// A TLS fake hub: trust its certificate (it names example.com,
+		// 127.0.0.1 and ::1).
+		pool := x509.NewCertPool()
+		pool.AddCert(cert)
+		tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+		scheme = "https"
+	}
 	prevDial := base.DialContext
 	if prevDial == nil {
 		var d net.Dialer
@@ -95,7 +130,7 @@ func hubURLAs(t *testing.T, srv *httptest.Server, host string) string {
 	}
 	http.DefaultTransport = tr
 	t.Cleanup(func() { http.DefaultTransport = orig })
-	return "http://" + hostPort
+	return scheme + "://" + hostPort
 }
 
 // devTokenEnv sets a made-up dev token and clears every other source of a
@@ -247,12 +282,12 @@ func TestCreateHubConnectionFromConfig_DevTokenOnlyForLoopbackHub(t *testing.T) 
 		{"127.0.0.1", "", "Bearer " + testDevToken},
 		{"localhost", "", "Bearer " + testDevToken},
 		{"::1", "", "Bearer " + testDevToken},
-		{"hub.example.test", "", ""},
-		{"hub.example.test", "made-up-hub-token", "Bearer made-up-hub-token"},
+		{remoteHubHost, "", ""},
+		{remoteHubHost, "made-up-hub-token", "Bearer made-up-hub-token"},
 		{"127.0.0.1", "made-up-hub-token", "Bearer made-up-hub-token"},
 	}
 	for _, tc := range cases {
-		srv, seen := devAuthTestHub(t)
+		srv, seen := devAuthTestHubFor(t, tc.host)
 		endpoint := hubURLAs(t, srv, tc.host)
 		s := &Server{config: ServerConfig{HubEndpoint: endpoint, HubToken: tc.hubToken}}
 		conn, err := s.createHubConnectionFromConfig()
@@ -281,15 +316,19 @@ func TestCreateHubConnection_DevTokenOnlyForLoopbackHub(t *testing.T) {
 		want       string
 	}{
 		{"creds-local", "127.0.0.1", "localhost", brokercredentials.AuthModeDevAuth, "Bearer " + testDevToken},
-		{"creds-remote", "hub.example.test", "", brokercredentials.AuthModeDevAuth, ""},
-		{"creds-remote-config-local", "hub.example.test", "localhost", brokercredentials.AuthModeDevAuth, ""},
+		{"creds-remote", remoteHubHost, "", brokercredentials.AuthModeDevAuth, ""},
+		{"creds-remote-config-local", remoteHubHost, "localhost", brokercredentials.AuthModeDevAuth, ""},
 		{"config-local", "", "localhost", brokercredentials.AuthModeDevAuth, "Bearer " + testDevToken},
-		{"config-remote", "", "hub.example.test", brokercredentials.AuthModeDevAuth, ""},
+		{"config-remote", "", remoteHubHost, brokercredentials.AuthModeDevAuth, ""},
 		{"creds-local-nosecret", "::1", "localhost", "", "Bearer " + testDevToken},
-		{"config-remote-nosecret", "", "hub.example.test", "", ""},
+		{"config-remote-nosecret", "", remoteHubHost, "", ""},
 	}
 	for _, tc := range cases {
-		srv, seen := devAuthTestHub(t)
+		dialed := tc.credsHost
+		if dialed == "" {
+			dialed = tc.configHost
+		}
+		srv, seen := devAuthTestHubFor(t, dialed)
 		creds := &brokercredentials.BrokerCredentials{Name: tc.name, BrokerID: "rb-test", AuthMode: tc.mode}
 		s := &Server{}
 		if tc.credsHost != "" {
@@ -322,13 +361,13 @@ func TestCreateHubConnectionFromConfig_DevHubTokenOnlyForLoopbackHub(t *testing.
 		hubToken string
 		want     string
 	}{
-		{"dev-remote", "hub.example.test", testDevToken, ""},
+		{"dev-remote", remoteHubHost, testDevToken, ""},
 		{"dev-ipv4", "127.0.0.1", testDevToken, "Bearer " + testDevToken},
 		{"dev-localhost", "localhost", testDevToken, "Bearer " + testDevToken},
-		{"operator-remote", "hub.example.test", "made-up-hub-token", "Bearer made-up-hub-token"},
+		{"operator-remote", remoteHubHost, "made-up-hub-token", "Bearer made-up-hub-token"},
 	}
 	for _, tc := range cases {
-		srv, seen := devAuthTestHub(t)
+		srv, seen := devAuthTestHubFor(t, tc.host)
 		s := &Server{config: ServerConfig{HubEndpoint: hubURLAs(t, srv, tc.host), HubToken: tc.hubToken}}
 		conn, err := s.createHubConnectionFromConfig()
 		if err != nil {
@@ -359,11 +398,11 @@ func TestCreateHubConnectionFromConfig_PrefixedHubTokenOnlyForLoopbackHub(t *tes
 		host string
 		want string
 	}{
-		{"prefixed-remote", "hub.example.test", ""},
+		{"prefixed-remote", remoteHubHost, ""},
 		{"prefixed-localhost", "localhost", "Bearer " + tok},
 	}
 	for _, tc := range cases {
-		srv, seen := devAuthTestHub(t)
+		srv, seen := devAuthTestHubFor(t, tc.host)
 		s := &Server{config: ServerConfig{HubEndpoint: hubURLAs(t, srv, tc.host), HubToken: tok}}
 		conn, err := s.createHubConnectionFromConfig()
 		if err != nil {

@@ -604,11 +604,14 @@ BROKER_RESERVATION_TRANSFER_POSTGRES_TESTS := TestMoveBrokerQuota_SourceAtCapTar
 # USER_DELETION_POSTGRES_TESTS are the forced user delete concurrency tests
 # (ptone/scion#2143): a restore racing the delete request, a restore racing
 # the completion, two hub processes completing one deletion, and a finalize
-# racing the completion's reopen of a blocking agent.
+# racing the completion's reopen of a blocking agent; and a token's user
+# delete refused in its transaction for a system-scope binding the
+# pre-check did not see.
 USER_DELETION_POSTGRES_TESTS := TestForceDeleteUser_RestoreRacesRequest_Postgres \
 	TestForceDeleteUser_RestoreRacesCompletion_Postgres \
 	TestForceDeleteUser_TwoReconcilersOneCompletion_Postgres \
-	TestForceDeleteUser_FinalizeRacesCompletionReopen_Postgres
+	TestForceDeleteUser_FinalizeRacesCompletionReopen_Postgres \
+	TestUserDeleteToken_InTransactionBindingRefused_Postgres
 
 # HUB_INTEGRATION_POSTGRES_TESTS are the pkg/hub Postgres tests that need
 # -tags integration (the integration TestMain sets up the ent test
@@ -618,7 +621,8 @@ USER_DELETION_POSTGRES_TESTS := TestForceDeleteUser_RestoreRacesRequest_Postgres
 # test database), the agent delegation issuance vs reincarnation claim
 # race, the broker reservation transfer tests
 # (BROKER_RESERVATION_TRANSFER_POSTGRES_TESTS) and the forced user delete
-# tests (USER_DELETION_POSTGRES_TESTS).
+# tests (USER_DELETION_POSTGRES_TESTS), and the chat retention cascade and
+# replica race test.
 # Each must print a PASS line, and any skip fails (shard.sh postgres).
 HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock \
 	TestScheduledSend_TwoHubReplicasPostgres_OneDelivery \
@@ -628,7 +632,8 @@ HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock
 	$(TEST_IDENTITY_POSTGRES_TESTS) \
 	$(BROKER_RESERVATION_TRANSFER_POSTGRES_TESTS) \
 	$(USER_DELETION_POSTGRES_TESTS) \
-	TestHubInternal_ReplayAcrossHubReplicas
+	TestHubInternal_ReplayAcrossHubReplicas \
+	TestChatRetention_Postgres_CascadeAndReplicaRace
 
 ## test-hub-postgres: Run the pkg/hub Postgres tests of shard SHARD=K (SHARD=all: every shard holding one)
 # Requires SCION_TEST_POSTGRES_URL (integration tests) and

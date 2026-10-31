@@ -94,7 +94,7 @@ func newEditTestAgent(t *testing.T, s store.Store, project *store.Project, broke
 		a.AppliedConfig.InlineConfig = &api.ScionConfig{
 			Harness:  "claude",
 			Model:    "old-model",
-			MaxTurns: 3,
+			MaxTurns: api.IntPtr(3),
 			Volumes:  []api.VolumeMount{{Source: "/host/data", Target: "/data"}},
 		}
 	})
@@ -145,7 +145,7 @@ func TestAgentConfigPatch_SuspendedAgentResumeDispatchesEdit(t *testing.T) {
 	assert.True(t, starts[0].resume, "a start of a suspended agent resumes it")
 	assert.Equal(t, "new-model", starts[0].inline.Model)
 	assert.Equal(t, "new-model", starts[0].model)
-	assert.Equal(t, 7, starts[0].inline.MaxTurns)
+	assert.Equal(t, api.IntPtr(7), starts[0].inline.MaxTurns)
 	assert.Equal(t, []api.VolumeMount{{Source: "/host/data", Target: "/data"}}, starts[0].inline.Volumes, "unmentioned keys are kept")
 }
 
@@ -169,7 +169,7 @@ func TestAgentConfigPatch_ErrorAgentFreshStartDispatchesEdit(t *testing.T) {
 	starts := disp.snapshot()
 	require.Len(t, starts, 1)
 	assert.False(t, starts[0].resume, "an error-phase agent starts fresh unless it asks to resume")
-	assert.Equal(t, 9, starts[0].inline.MaxTurns)
+	assert.Equal(t, api.IntPtr(9), starts[0].inline.MaxTurns)
 	assert.Equal(t, "2h", starts[0].inline.MaxDuration)
 	assert.Equal(t, "old-model", starts[0].inline.Model)
 }
@@ -194,12 +194,12 @@ func TestAgentConfigPatch_PhaseGate(t *testing.T) {
 			require.NoError(t, err)
 			if accepted[phase] {
 				require.Equal(t, http.StatusOK, code, body)
-				assert.Equal(t, 11, after.AppliedConfig.InlineConfig.MaxTurns)
+				assert.Equal(t, api.IntPtr(11), after.AppliedConfig.InlineConfig.MaxTurns)
 				return
 			}
 			require.Equal(t, http.StatusConflict, code, body)
 			assert.Contains(t, body, "'created', 'stopped', 'error' or 'suspended'")
-			assert.Equal(t, 3, after.AppliedConfig.InlineConfig.MaxTurns)
+			assert.Equal(t, api.IntPtr(3), after.AppliedConfig.InlineConfig.MaxTurns)
 			assert.Equal(t, agent.StateVersion, after.StateVersion)
 		})
 	}
@@ -225,7 +225,7 @@ func TestAgentConfigPatch_StaleStateVersionConflicts(t *testing.T) {
 	require.Equal(t, http.StatusConflict, code, body)
 	after, err := s.GetAgent(context.Background(), agent.ID)
 	require.NoError(t, err)
-	assert.Equal(t, 4, after.AppliedConfig.InlineConfig.MaxTurns)
+	assert.Equal(t, api.IntPtr(4), after.AppliedConfig.InlineConfig.MaxTurns)
 }
 
 // TestAgentConfigPatch_ReincarnateOnlyWarnings: a PATCH that writes a
@@ -238,7 +238,7 @@ func TestAgentConfigPatch_ReincarnateOnlyWarnings(t *testing.T) {
 	agent := newEditTestAgent(t, s, project, broker, state.PhaseStopped)
 
 	resp, code, body := patchAgentBody(t, srv, agent.ID, map[string]interface{}{
-		"config":      map[string]interface{}{"system_prompt": "be brief", "max_turns": 0, "max_duration": nil},
+		"config":      map[string]interface{}{"system_prompt": "be brief", "max_turns": nil, "max_duration": nil},
 		"name":        "Renamed Agent",
 		"annotations": map[string]string{"k": "v"},
 	})
@@ -251,7 +251,7 @@ func TestAgentConfigPatch_ReincarnateOnlyWarnings(t *testing.T) {
 	assert.Contains(t, resp.Warnings[1], "config.max_turns: cleared now")
 	assert.NotContains(t, resp.Warnings[1], "config.max_duration")
 	assert.Equal(t, "be brief", resp.AppliedConfig.InlineConfig.SystemPrompt)
-	assert.Equal(t, 0, resp.AppliedConfig.InlineConfig.MaxTurns)
+	assert.Nil(t, resp.AppliedConfig.InlineConfig.MaxTurns)
 }
 
 // TestAgentConfigPatch_CreatedAgentDispositionByEffect: on a created agent,
@@ -357,7 +357,9 @@ func TestGetAgent_Editability(t *testing.T) {
 		agent := newEditTestAgent(t, s, project, broker, state.PhaseStopped)
 		ed := getAgentEditability(t, srv, nil, agent.ID)
 		assert.Equal(t, "stopped", ed.Phase)
-		assert.Equal(t, FieldEditState{Tier: EditTierContainer, Disposition: EditNow, ClearNeedsReincarnate: true}, ed.Fields["config.max_turns"])
+		// The test broker does not advertise unlimitedCountLimits, so the
+		// count limit is flagged UnlimitedUnsupported (ptone/scion#5605).
+		assert.Equal(t, FieldEditState{Tier: EditTierContainer, Disposition: EditNow, ClearNeedsReincarnate: true, UnlimitedUnsupported: true}, ed.Fields["config.max_turns"])
 		assert.Equal(t, EditReincarnate, ed.Fields["agentRole"].Disposition)
 		assert.Equal(t, EditTierPrincipal, ed.Fields["agentRole"].Tier)
 		assert.Equal(t, EditReincarnate, ed.Fields["config.system_prompt"].Disposition)
@@ -448,7 +450,7 @@ func TestAgentConfigPatch_FixedKeysRefused(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, agent.StateVersion, after.StateVersion, "nothing is written")
 			assert.Equal(t, agent.Name, after.Name)
-			assert.Equal(t, 3, after.AppliedConfig.InlineConfig.MaxTurns)
+			assert.Equal(t, api.IntPtr(3), after.AppliedConfig.InlineConfig.MaxTurns)
 			assert.Equal(t, "claude", after.AppliedConfig.InlineConfig.Harness)
 			assert.Empty(t, after.AppliedConfig.InlineConfig.Branch)
 
@@ -460,7 +462,7 @@ func TestAgentConfigPatch_FixedKeysRefused(t *testing.T) {
 			require.Equal(t, http.StatusOK, code, body)
 			assert.Equal(t, []string{"config.max_turns"}, resp.Disposition.Applied, "echoed fixed keys are ignored, not applied")
 			assert.Empty(t, resp.Warnings, "an echo changes nothing to warn about")
-			assert.Equal(t, 8, resp.AppliedConfig.InlineConfig.MaxTurns)
+			assert.Equal(t, api.IntPtr(8), resp.AppliedConfig.InlineConfig.MaxTurns)
 		})
 	}
 }
@@ -615,24 +617,31 @@ func TestAgentEditGoldens(t *testing.T) {
 		// notWarned are keys no warning may name: Unlimited on Max duration
 		// ("0") applies at the next start, so it is not "cleared".
 		notWarned []string
+		// unlimitedBroker gives the agent's broker unlimitedCountLimits,
+		// without which a change of a count limit to 0 is refused
+		// (ptone/scion#5605; the refusal is
+		// TestAgentConfigPatch_UnlimitedCountByBroker).
+		unlimitedBroker bool
 	}{
 		{name: "untouched", applied: []string{}, check: func(t *testing.T, inline *api.ScionConfig) {
 			assert.Equal(t, "old-model", inline.Model)
-			assert.Equal(t, 3, inline.MaxTurns)
+			assert.Equal(t, api.IntPtr(3), inline.MaxTurns)
 		}},
 		{name: "clear", applied: []string{}, heldForReincarnate: []string{"config.max_turns", "config.model"}, warnings: 1, check: func(t *testing.T, inline *api.ScionConfig) {
 			assert.Empty(t, inline.Model)
-			assert.Zero(t, inline.MaxTurns)
+			assert.Nil(t, inline.MaxTurns)
 			assert.Empty(t, inline.MaxDuration)
 		}},
-		{name: "unlimited", applied: []string{"config.max_duration"}, heldForReincarnate: []string{"config.max_turns"}, warnings: 1, notWarned: []string{"config.max_duration"}, check: func(t *testing.T, inline *api.ScionConfig) {
-			assert.Zero(t, inline.MaxTurns)
+		// Unlimited on Max turns (0) is a value the start merge applies
+		// (ptone/scion#5605), like Unlimited on Max duration ("0").
+		{name: "unlimited", unlimitedBroker: true, applied: []string{"config.max_duration", "config.max_turns"}, notWarned: []string{"config.max_duration", "config.max_turns"}, check: func(t *testing.T, inline *api.ScionConfig) {
+			assert.Equal(t, api.IntPtr(0), inline.MaxTurns)
 			assert.Equal(t, "0", inline.MaxDuration)
 			assert.Zero(t, inline.ParseMaxDuration(), `"0" is no duration limit`)
 		}},
 		{name: "typed", applied: []string{"config.max_duration", "config.max_turns", "config.model"}, check: func(t *testing.T, inline *api.ScionConfig) {
 			assert.Equal(t, "claude-sonnet", inline.Model)
-			assert.Equal(t, 40, inline.MaxTurns)
+			assert.Equal(t, api.IntPtr(40), inline.MaxTurns)
 			assert.Equal(t, "2h", inline.MaxDuration)
 		}},
 		// The Edit page's metadata, timezone, env and task edits
@@ -669,6 +678,9 @@ func TestAgentEditGoldens(t *testing.T) {
 
 			disp := &inlineCaptureDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher()}
 			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+			if tc.unlimitedBroker {
+				setBrokerCapabilities(t, s, broker.ID, &store.BrokerCapabilities{Reprovision: true, UnlimitedCountLimits: true})
+			}
 			agent := newEditTestAgent(t, s, project, broker, phase)
 			body["stateVersion"] = agent.StateVersion
 
@@ -755,7 +767,7 @@ func TestAgentPatch_RefusalPrecedence(t *testing.T) {
 				if tc.deleted {
 					a.DeletedAt = time.Now()
 				}
-				a.AppliedConfig.InlineConfig = &api.ScionConfig{Harness: "claude", MaxTurns: 3}
+				a.AppliedConfig.InlineConfig = &api.ScionConfig{Harness: "claude", MaxTurns: api.IntPtr(3)}
 			})
 			_, code, body := patchAgentBody(t, srv, agent.ID, map[string]interface{}{"config": tc.config})
 			require.Equal(t, tc.code, code, body)
@@ -783,7 +795,7 @@ func TestAgentConfigPatch_FixedKeyEchoOfAppliedValue(t *testing.T) {
 		a.Phase = string(state.PhaseStopped)
 		a.AppliedConfig.Branch = "scion/live"
 		a.AppliedConfig.HarnessConfig = "hc-live"
-		a.AppliedConfig.InlineConfig = &api.ScionConfig{Harness: "claude", MaxTurns: 3}
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{Harness: "claude", MaxTurns: api.IntPtr(3)}
 	})
 
 	resp, code, body := patchAgentBody(t, srv, agent.ID, map[string]interface{}{
@@ -796,7 +808,7 @@ func TestAgentConfigPatch_FixedKeyEchoOfAppliedValue(t *testing.T) {
 	// into CreateInputs, where a reincarnation would replay it as a pin.
 	after, err := s.GetAgent(context.Background(), agent.ID)
 	require.NoError(t, err)
-	assert.Equal(t, 4, after.AppliedConfig.InlineConfig.MaxTurns)
+	assert.Equal(t, api.IntPtr(4), after.AppliedConfig.InlineConfig.MaxTurns)
 	assert.Empty(t, after.AppliedConfig.InlineConfig.Branch)
 	assert.Empty(t, after.AppliedConfig.InlineConfig.HarnessConfig)
 	assert.Equal(t, "scion/live", after.AppliedConfig.Branch)
@@ -815,14 +827,13 @@ func TestAgentConfigPatch_FixedKeyEchoOfAppliedValue(t *testing.T) {
 }
 
 // TestAgentConfigPatch_NoWarningsForUnchangedValues: the Configure page's
-// untouched body, sent to an agent whose prompts, limits and user are
+// untouched body (less its count limits), sent to an agent whose prompts, limits and user are
 // already empty, changes nothing and so warns about nothing; a real clear
 // does warn.
 func TestAgentConfigPatch_NoWarningsForUnchangedValues(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("testdata", "configure-untouched-body.json"))
-	require.NoError(t, err)
-	var cfg map[string]interface{}
-	require.NoError(t, json.Unmarshal(raw, &cfg))
+	// Without the body's count limits: their 0 is Unlimited now, a real
+	// change (TestAgentConfigPatch_RetiredConfigureBodyMeansUnlimited).
+	cfg := configureUntouchedBody(t)
 
 	disp := &inlineCaptureDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher()}
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)

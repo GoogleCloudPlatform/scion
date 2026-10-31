@@ -21,6 +21,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 )
 
 // The project storage migration engine (pkg/projectfs/migrate) walks and
@@ -38,4 +40,10 @@ func (e *ProjectStorageMigrateExecutor) Run(ctx context.Context, w io.Writer, pa
 // platform.
 func (s *Server) planStorageMigration(ctx context.Context) (map[string]string, error) {
 	return nil, fmt.Errorf("project storage migration plan: %w on this platform", errors.ErrUnsupported)
+}
+
+// deleteLegacyProjectTrees always fails with errors.ErrUnsupported on this
+// platform.
+func deleteLegacyProjectTrees(layout projectfs.Layout, globalDir, slug, projectID string) ([]projectfs.Deletion, error) {
+	return nil, fmt.Errorf("delete legacy project trees: %w on this platform", errors.ErrUnsupported)
 }

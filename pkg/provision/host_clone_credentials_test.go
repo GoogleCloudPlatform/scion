@@ -34,16 +34,20 @@ import (
 
 // hostCloneTrace is an https endpoint answering every request 401 (Basic)
 // that records decoded Authorization credentials and X-Ambient header
-// values. The host user's git config (GIT_CONFIG_GLOBAL) trusts it and holds
-// ambient credentials for it: a credential store answering
-// ambient:ambient-secret, and an X-Ambient extra header at the generic,
-// host and full-URL scopes. GIT_ASKPASS names a script that logs its runs.
+// values. GIT_SSL_CAINFO trusts it. The host user's git config
+// (GIT_CONFIG_GLOBAL) holds ambient credentials for it: a credential store
+// answering ambient:ambient-secret, and an X-Ambient extra header at the
+// generic, host and full-URL scopes. GIT_ASKPASS names a script that logs
+// its runs.
 type hostCloneTrace struct {
 	srv        *httptest.Server
 	mu         sync.Mutex
 	auth       []string
 	headers    []string
 	askpassLog string
+	// reqs counts every request, so a no-credential assertion can first show
+	// git reached the server.
+	reqs int
 }
 
 func newHostCloneTrace(t *testing.T) *hostCloneTrace {
@@ -55,6 +59,7 @@ func newHostCloneTrace(t *testing.T) *hostCloneTrace {
 	tr := &hostCloneTrace{}
 	tr.srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tr.mu.Lock()
+		tr.reqs++
 		if h := r.Header.Get("Authorization"); h != "" {
 			decoded := h
 			if b, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(h, "Basic ")); err == nil {
@@ -75,11 +80,12 @@ func newHostCloneTrace(t *testing.T) *hostCloneTrace {
 	store := filepath.Join(dir, "credentials")
 	require.NoError(t, os.WriteFile(store, []byte(strings.Replace(tr.srv.URL, "https://", "https://ambient:ambient-secret@", 1)+"\n"), 0o600))
 	cfg := filepath.Join(dir, "gitconfig")
-	body := "[http]\n\tsslCAInfo = " + ca + "\n\textraHeader = X-Ambient: generic\n" +
+	body := "[http]\n\textraHeader = X-Ambient: generic\n" +
 		"[http \"" + tr.srv.URL + "/\"]\n\textraHeader = X-Ambient: host\n" +
 		"[http \"" + tr.url() + "\"]\n\textraHeader = X-Ambient: full\n" +
 		"[credential]\n\thelper = store --file=" + store + "\n"
 	require.NoError(t, os.WriteFile(cfg, []byte(body), 0o600))
+	t.Setenv("GIT_SSL_CAINFO", ca)
 	t.Setenv("GIT_CONFIG_GLOBAL", cfg)
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	tr.askpassLog = filepath.Join(dir, "askpass.log")
@@ -110,54 +116,82 @@ func (tr *hostCloneTrace) seen() (auth, headers []string, askpass string) {
 	return append([]string(nil), tr.auth...), append([]string(nil), tr.headers...), string(b)
 }
 
-// A hardened clone (the hub's shared-backend clone) of an https URL that is
-// not the project's recorded remote offers no credential from the host's
-// helpers, sends none of its extra headers at any URL scope, and runs no
-// askpass.
+// assertNothingOffered fails t if the trace saw any credential, ambient
+// header or askpass run.
+func (tr *hostCloneTrace) assertNothingOffered(t *testing.T) {
+	t.Helper()
+	tr.mu.Lock()
+	reqs := tr.reqs
+	tr.mu.Unlock()
+	require.Positive(t, reqs, "git never reached the trace server; a no-credential assertion would be vacuous")
+	auth, headers, askpass := tr.seen()
+	assert.Empty(t, auth, "no credential may be offered")
+	assert.Empty(t, headers, "no ambient extra header may be sent")
+	assert.Empty(t, askpass, "askpass must not run")
+}
+
+// Control: plain host git offers the trace's ambient credential and sends
+// its extra headers, so the no-credential assertions below are not vacuous.
+func TestHostCloneTrace_PlainGitOffersAmbient(t *testing.T) {
+	tr := newHostCloneTrace(t)
+	cmd := exec.Command("git", "clone", "-q", "--", tr.url(), filepath.Join(t.TempDir(), "dest"))
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	_ = cmd.Run()
+	auth, headers, _ := tr.seen()
+	require.NotEmpty(t, auth)
+	assert.Equal(t, "ambient:ambient-secret", auth[0])
+	assert.Subset(t, headers, []string{"generic", "host", "full"})
+}
+
+// A hardened clone (the hub's shared-backend clone) with no token offered
+// offers no credential from the host's helpers, sends none of its extra
+// headers at any URL scope, and runs no askpass, whether or not the URL is
+// the project's recorded remote. The environment git runs with, captured at
+// exec, is the remote layer with no credential helper in effect.
 func TestRunGitClone_HardenedUnboundOffersNoHostCredentials(t *testing.T) {
-	for _, remote := range []string{"github.com/org/repo", ""} {
-		t.Run("recorded remote "+remote, func(t *testing.T) {
+	for _, tc := range []struct{ name, remote string }{
+		{"other recorded remote", "github.com/org/repo"},
+		{"no recorded remote", ""},
+		{"bound recorded remote, no token", "self"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			tr := newHostCloneTrace(t)
-			tr.clone(t, ProvisionInput{HostGitHardened: true, CloneTokenRemote: remote})
-			auth, headers, askpass := tr.seen()
-			assert.Empty(t, auth, "no credential may be offered")
-			assert.Empty(t, headers, "no ambient extra header may be sent")
-			assert.Empty(t, askpass, "askpass must not run")
+			remote := tc.remote
+			if remote == "self" {
+				remote = tr.url()
+			}
+			in := ProvisionInput{HostGitHardened: true, CloneTokenRemote: remote}
+			tr.clone(t, in)
+			tr.assertNothingOffered(t)
+
+			env := captureCloneEnv(t, in, tr.url())
+			checkRemoteLayerEnv(t, env, "", "")
 		})
 	}
 }
 
-// The recorded remote gets the project's token only; with no token it keeps
-// the host's own git authentication (unchanged behaviour).
-func TestRunGitClone_HardenedBoundUnchanged(t *testing.T) {
-	t.Run("token", func(t *testing.T) {
-		tr := newHostCloneTrace(t)
-		tr.clone(t, ProvisionInput{HostGitHardened: true, CloneTokenRemote: tr.url(), CloneToken: "project-token"})
-		auth, _, askpass := tr.seen()
-		require.NotEmpty(t, auth)
-		for _, a := range auth {
-			assert.Equal(t, "oauth2:project-token", a)
-		}
-		assert.Empty(t, askpass)
-	})
-	t.Run("no token", func(t *testing.T) {
-		tr := newHostCloneTrace(t)
-		tr.clone(t, ProvisionInput{HostGitHardened: true, CloneTokenRemote: tr.url()})
-		auth, _, _ := tr.seen()
-		require.NotEmpty(t, auth)
-		assert.Equal(t, "ambient:ambient-secret", auth[0])
-	})
+// The recorded remote gets the project's token only.
+func TestRunGitClone_HardenedBoundOffersTokenOnly(t *testing.T) {
+	tr := newHostCloneTrace(t)
+	tr.clone(t, ProvisionInput{HostGitHardened: true, CloneTokenRemote: tr.url(), CloneToken: "project-token"})
+	auth, headers, askpass := tr.seen()
+	require.NotEmpty(t, auth)
+	for _, a := range auth {
+		assert.Equal(t, "oauth2:project-token", a)
+	}
+	assert.Empty(t, headers)
+	assert.Empty(t, askpass)
 }
 
-// A clone that is not hardened (broker-side provisioning) is unchanged: the
-// host's helpers still answer.
-func TestRunGitClone_NotHardenedUnchanged(t *testing.T) {
+// A clone that is not hardened (broker-side provisioning, and `sciontool
+// provision` in the Kubernetes init container) offers no host credential
+// either.
+func TestRunGitClone_NotHardenedOffersNoHostCredentials(t *testing.T) {
 	tr := newHostCloneTrace(t)
-	tr.clone(t, ProvisionInput{CloneTokenRemote: "github.com/org/repo"})
-	auth, headers, _ := tr.seen()
-	require.NotEmpty(t, auth)
-	assert.Equal(t, "ambient:ambient-secret", auth[0])
-	assert.NotEmpty(t, headers, "the host's extra headers still apply")
+	in := ProvisionInput{CloneTokenRemote: "github.com/org/repo"}
+	tr.clone(t, in)
+	tr.assertNothingOffered(t)
+	checkRemoteLayerEnv(t, captureCloneEnv(t, in, tr.url()), "", "")
 }
 
 // For a URL git cannot normalize (a "/../" segment above the root) git
@@ -166,8 +200,5 @@ func TestRunGitClone_NotHardenedUnchanged(t *testing.T) {
 func TestRunGitClone_HardenedUnboundUnnormalizedURL(t *testing.T) {
 	tr := newHostCloneTrace(t)
 	tr.cloneURL(t, ProvisionInput{HostGitHardened: true, CloneTokenRemote: "github.com/org/repo"}, tr.srv.URL+"/../org/repo.git")
-	auth, headers, askpass := tr.seen()
-	assert.Empty(t, auth)
-	assert.Empty(t, headers)
-	assert.Empty(t, askpass)
+	tr.assertNothingOffered(t)
 }

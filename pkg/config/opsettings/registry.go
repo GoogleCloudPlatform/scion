@@ -80,45 +80,32 @@ func DurationKeys(section string) []DurationKey {
 	return out
 }
 
-// dns1123SubdomainOrEmptyPattern mirrors the pattern used for
-// priority_class_name / priorityClassName in settings-v1.schema.json and
-// agent-v1.schema.json: a DNS-1123 subdomain (the Kubernetes PriorityClass
-// name format), or the empty string, which means unset to the runtime and
-// would otherwise fail the strict subdomain pattern.
-const dns1123SubdomainOrEmptyPattern = `^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
-
 // dns1123LabelOrEmptyPattern mirrors the runtime namespace pattern in
 // settings-v1.schema.json: a DNS-1123 label (the Kubernetes namespace name
 // format, at most 63 characters), or the empty string for the runtime's
 // default namespace.
 const dns1123LabelOrEmptyPattern = `^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 
-// kubernetesServiceAccountMappingsSchema mirrors
-// kubernetes_service_account_mappings in settings-v1.schema.json: lowercase
-// GCP service account email keys, Kubernetes ServiceAccount name values
-// (DNS-1123 subdomain, at most 253 characters).
+// kubernetesServiceAccountMappingsSchema is the JSON type of
+// kubernetes_service_account_mappings (an object of string values). The
+// value rules of settings-v1.schema.json (lowercase GCP service account
+// email keys, Kubernetes ServiceAccount name values) are checked on save
+// by config.RuntimeSaveChecks, which refuses a value the save sets and only
+// warns about one already stored (ptone/scion#6580), so they are not in
+// the section schema: there they would refuse every save that carries a
+// stored invalid value.
 func kubernetesServiceAccountMappingsSchema() map[string]interface{} {
 	return map[string]interface{}{
-		"type": "object",
-		"propertyNames": map[string]interface{}{
-			"pattern": `^[a-z0-9]([a-z0-9-]*[a-z0-9])?@([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+gserviceaccount\.com$`,
-		},
-		"additionalProperties": map[string]interface{}{
-			"type":      "string",
-			"pattern":   `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`,
-			"maxLength": 253,
-		},
+		"type":                 "object",
+		"additionalProperties": map[string]interface{}{"type": "string"},
 	}
 }
 
-// kubernetesBlockServiceAccountSchema mirrors kubernetes_block_service_account
-// in settings-v1.schema.json: empty, or a Kubernetes ServiceAccount name.
+// kubernetesBlockServiceAccountSchema is the JSON type of
+// kubernetes_block_service_account; its name rule is a save check, as for
+// kubernetesServiceAccountMappingsSchema.
 func kubernetesBlockServiceAccountSchema() map[string]interface{} {
-	return map[string]interface{}{
-		"type":      "string",
-		"pattern":   `^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`,
-		"maxLength": 253,
-	}
+	return map[string]interface{}{"type": "string"}
 }
 
 // profileCloneDepthSchema returns profileConfig.clone_depth from the
@@ -371,6 +358,15 @@ func init() {
 			Name:       AgentDelegationPolicySectionName,
 			KoanfPaths: nil,
 			New:        func() any { return &AgentDelegationPolicySettings{} },
+		},
+		{
+			// chat_retention is durable via DB but has no settings.yaml
+			// representation; it is written through PUT
+			// /api/v1/admin/chat-retention. Absent DB row = retention off,
+			// no window. Seeding skips this section (KoanfPaths nil).
+			Name:       ChatRetentionSectionName,
+			KoanfPaths: nil,
+			New:        func() any { return &ChatRetentionSettings{} },
 		},
 	}
 
@@ -627,6 +623,9 @@ func compileSchemas() {
 		// agent_delegation_policy schema is hand-written -- runtime state
 		// with no $defs in settings-v1.schema.json.
 		AgentDelegationPolicySectionName: agentDelegationPolicySchema(),
+		// chat_retention schema is hand-written -- runtime state with no
+		// $defs in settings-v1.schema.json.
+		ChatRetentionSectionName: chatRetentionSchema(),
 		"artifacts": {
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -697,7 +696,7 @@ func compileSchemas() {
 					"sync":                        map[string]interface{}{"type": "string"},
 					"gke":                         map[string]interface{}{"type": "boolean"},
 					"list_all_namespaces":         map[string]interface{}{"type": "boolean"},
-					"priority_class_name":         map[string]interface{}{"type": "string", "maxLength": 253, "pattern": dns1123SubdomainOrEmptyPattern},
+					"priority_class_name":         map[string]interface{}{"type": "string"}, // name rule: config.RuntimeSaveChecks
 					"cloudrun":                    map[string]interface{}{"type": "object"},
 					"shared_dir_storage_class":    map[string]interface{}{"type": "string"},
 					"shared_dir_size":             map[string]interface{}{"type": "string"},
@@ -709,6 +708,19 @@ func compileSchemas() {
 
 					// GCP identity "assign" on Kubernetes.
 					"kubernetes_service_account_mappings": kubernetesServiceAccountMappingsSchema(),
+
+					// Kubernetes placement and identity (ptone/scion#6580): the
+					// JSON types of settings-v1.schema.json's runtimeConfig
+					// (pinned by TestRuntimesSectionSchema_KubernetesFieldTypes).
+					// The value rules (label syntax, toleration operators and
+					// effects, DNS-1123 names) are checked on save by
+					// config.RuntimeSaveChecks, which refuses a value the save
+					// sets and only warns about one already stored, so a stored
+					// value never blocks an unrelated save.
+					"node_selector":                    map[string]interface{}{"type": "object", "additionalProperties": map[string]interface{}{"type": "string"}},
+					"tolerations":                      map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "object"}},
+					"runtime_class_name":               map[string]interface{}{"type": "string"},
+					"kubernetes_block_service_account": map[string]interface{}{"type": "string"},
 				},
 			},
 		},

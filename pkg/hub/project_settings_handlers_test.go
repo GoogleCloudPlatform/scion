@@ -590,7 +590,25 @@ func TestApplyProjectDefaults_ResourcesMerge(t *testing.T) {
 		require.NotNil(t, ac.InlineConfig.Resources)
 		assert.Equal(t, "1Gi", ac.InlineConfig.Resources.Disk)
 		assert.Empty(t, ac.InlineConfig.Resources.Requests.CPU)
-		assert.Equal(t, 5, ac.InlineConfig.MaxTurns)
+		assert.Equal(t, api.IntPtr(5), ac.InlineConfig.MaxTurns)
+	})
+
+	// An inline count limit of 0 is the request's explicit "no limit"
+	// (ptone/scion#5605): the project default does not overwrite it, and
+	// fills only an unset one.
+	t.Run("project default limit keeps an inline Unlimited", func(t *testing.T) {
+		project := &store.Project{Annotations: map[string]string{
+			"scion.io/default-max-turns":       "5",
+			"scion.io/default-max-model-calls": "6",
+		}}
+		ac := &store.AgentAppliedConfig{InlineConfig: &api.ScionConfig{MaxTurns: api.IntPtr(0)}}
+		applyProjectDefaults(ac, project)
+		assert.Equal(t, api.IntPtr(0), ac.InlineConfig.MaxTurns)
+		assert.Equal(t, api.IntPtr(6), ac.InlineConfig.MaxModelCalls)
+
+		unset := &store.AgentAppliedConfig{InlineConfig: &api.ScionConfig{}}
+		applyProjectDefaults(unset, project)
+		assert.Equal(t, api.IntPtr(5), unset.InlineConfig.MaxTurns)
 	})
 
 	// The merge must not alias the project's spec into the agent's config:

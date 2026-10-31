@@ -18,6 +18,7 @@ section covers the `ready` and `delivery` blocks.
 |--------|-------------|---------|
 | [opencode](opencode/README.md) | [OpenCode](https://opencode.ai) AI coding assistant | `scion harness-config install harnesses/opencode` |
 | [codex](codex/README.md) | [Codex](https://github.com/openai/codex) OpenAI coding agent CLI | `scion harness-config install harnesses/codex` |
+| [pi](pi/README.md) | [pi](https://pi.dev) terminal coding agent (multi-provider) | `scion harness-config install harnesses/pi` |
 | [antigravity](antigravity/README.md) | [Antigravity](https://github.com/ptone/scion-antigravity) Gemini-based coding agent via OAuth | `scion harness-config install harnesses/antigravity` |
 
 Or install directly from GitHub (no local checkout needed):

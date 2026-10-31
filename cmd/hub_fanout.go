@@ -122,7 +122,7 @@ func hubClientFor(settings *config.Settings, endpoint string, fanOut bool) (hubc
 	if err != nil {
 		return nil, err
 	}
-	return hubclient.New(endpoint,
+	return newUserHubClient(endpoint,
 		hubclient.WithBearerToken(token),
 		hubclient.WithTransportAuth(src, mode),
 		hubclient.WithTimeout(30*time.Second))

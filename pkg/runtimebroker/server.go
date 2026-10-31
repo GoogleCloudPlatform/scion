@@ -317,10 +317,6 @@ type Server struct {
 	// servicesStarted is set once startServices begins (Started).
 	servicesStarted bool
 
-	// nfsCleanupWG tracks background NFS project tree removals started by
-	// project delete (startNFSProjectTreeCleanup), so tests can wait for them.
-	nfsCleanupWG sync.WaitGroup
-
 	// workspaceDownload replaces gcp.SyncFromGCS for the GCS workspace
 	// bootstrap (create-time and handleWorkspaceApply) when set (see
 	// SetWorkspaceDownloader).
@@ -1095,6 +1091,12 @@ func (s *Server) createHubConnection(name string, creds *brokercredentials.Broke
 	if hubEndpoint == "" {
 		hubEndpoint = s.config.HubEndpoint
 	}
+	// No client is built for a hub this broker would reach unencrypted over
+	// the network: the connection carries the broker's credentials and,
+	// through the control channel and conduit, agent secrets.
+	if err := config.CheckHubTransport(hubEndpoint); err != nil {
+		return nil, fmt.Errorf("hub connection %q: %w", name, err)
+	}
 
 	// Build hub client options
 	opts := buildHubClientOpts(creds, secretKey, hubEndpoint)
@@ -1152,6 +1154,11 @@ func (s *Server) createHubConnection(name string, creds *brokercredentials.Broke
 // token reaches the hub only through DevAuthHubOptions (loopback hubs only);
 // a HubToken that is the dev token gets the same loopback rule.
 func (s *Server) createHubConnectionFromConfig() (*HubConnection, error) {
+	// The same transport rule as createHubConnection: the configured bearer
+	// token is never sent unencrypted to a network host.
+	if err := config.CheckHubTransport(s.config.HubEndpoint); err != nil {
+		return nil, fmt.Errorf("hub connection from config: %w", err)
+	}
 	var opts []hubclient.Option
 
 	switch {
