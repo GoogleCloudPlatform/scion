@@ -58,7 +58,7 @@ var governanceWriteSelectorPins = map[string][]string{
 	"role_binding:delete": {"TestRoleBindingDeleteToken_SuperAdminBindingDenied", "TestRoleBindingDeleteToken_SystemBindingNeedsDeleteSelector",
 		"TestRoleBindingToken_ChangeAndAuditCommitTogether"},
 	"access_constraint:admin": {"TestConstraintAdminToken_RequiresConstraintAdminSelector", "TestConstraintRelaxToken_SessionOnly",
-		"TestConstraintCommit_AppliesTokenSelectors"},
+		"TestConstraintCommit_AppliesTokenSelectors", "TestConstraintWindowToken_NeedsRelaxationAuthority"},
 }
 
 // TestGovernanceWriteSelectors_EachPinnedByTest requires every mintable
@@ -924,6 +924,55 @@ func TestConstraintRelaxToken_SessionOnly(t *testing.T) {
 			rcaRequireWindow(t, got, nb, ea)
 		})
 	}
+}
+
+// TestConstraintWindowToken_NeedsRelaxationAuthority pins that a token
+// update changing a constraint's time window needs relaxation authority over
+// the stored constraint's maximum permissions: a widened window is refused
+// with insufficient_relaxation_authority when the token does not carry
+// agent:read and admitted when it does, and the constraint is kept as stored
+// on refusal. A window added by token stays session only even with the
+// authority.
+func TestConstraintWindowToken_NeedsRelaxationAuthority(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	sa := mtSuperAdmin(t, s, "sa")
+	subject := rcaUser(t, s, "cw-subject")
+	session := rcaSessionKey(t, srv, sa)
+	without := mtMint(t, srv, sa.ID, hubBoundary(), "access_constraint:admin", "access_constraint:read")
+	with := mtMint(t, srv, sa.ID, hubBoundary(), "access_constraint:admin", "access_constraint:read", "agent:read")
+
+	base := srv.governanceService.nowFunc().UTC().Truncate(time.Second)
+	at := func(d time.Duration) *time.Time {
+		v := base.Add(d)
+		return &v
+	}
+	stored := &constraintConditionReq{NotBefore: at(time.Hour), ExpiresAt: at(48 * time.Hour)}
+	widened := &constraintConditionReq{NotBefore: at(time.Hour), ExpiresAt: at(96 * time.Hour)}
+
+	c := rcaCreateConstraintWindow(t, srv, s, session, "rca-cw-widen", subject.ID, stored, "agent.read")
+	rec := rcaUpdateConstraintWindow(t, srv, without, c, subject.ID, widened, "agent.read")
+	require.Equal(t, http.StatusForbidden, rec.Code, "widened window without agent:read: %s", rec.Body.String())
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+	assert.Equal(t, ErrCodeInsufficientRelaxationAuthority, errResp.Error.Code)
+	got, err := s.GetAccessConstraint(ctx, c.ID)
+	require.NoError(t, err)
+	assert.Equal(t, c.Revision, got.Revision, "the refused update changes nothing")
+	rcaRequireWindow(t, got, c.NotBefore, c.ExpiresAt)
+
+	rec = rcaUpdateConstraintWindow(t, srv, with, got, subject.ID, widened, "agent.read")
+	require.Equal(t, http.StatusOK, rec.Code, "widened window with agent:read: %s", rec.Body.String())
+	got, err = s.GetAccessConstraint(ctx, c.ID)
+	require.NoError(t, err)
+	rcaRequireWindow(t, got, widened.NotBefore, widened.ExpiresAt)
+
+	added := rcaCreateConstraint(t, srv, s, session, "rca-cw-added", subject.ID, "agent.read")
+	rec = rcaUpdateConstraintWindow(t, srv, with, added, subject.ID, &constraintConditionReq{ExpiresAt: at(72 * time.Hour)}, "agent.read")
+	requireSessionOnlyRefusal(t, rec, authzop.ReasonGovernancePending, "window added by token")
+	got, err = s.GetAccessConstraint(ctx, added.ID)
+	require.NoError(t, err)
+	rcaRequireWindow(t, got, nil, nil)
 }
 
 // rcaRequireWindow asserts that c's stored time window is

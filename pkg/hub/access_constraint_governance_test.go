@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -1198,6 +1199,102 @@ func TestGovernance_DeleteRelaxationAuthority_InsufficientAuthority(t *testing.T
 	var ge *GovernanceError
 	require.ErrorAs(t, err, &ge)
 	assert.Equal(t, ErrCodeInsufficientRelaxationAuthority, ge.Code)
+}
+
+// ---------------------------------------------------------------------------
+// 14b3. A time-window change needs relaxation authority
+// ---------------------------------------------------------------------------
+
+// TestGovernance_WindowChangeNeedsRelaxationAuthority pins that a session
+// update which adds, changes or removes a constraint's time window, with
+// the maximum permissions unchanged, needs relaxation authority over every
+// permission in the stored constraint's maximum set: an actor lacking one of
+// them is refused with insufficient_relaxation_authority and the constraint
+// is kept as stored; an actor holding them all commits the same change.
+func TestGovernance_WindowChangeNeedsRelaxationAuthority(t *testing.T) {
+	gs, ps, _, s := govTestSetup(t)
+	ctx := context.Background()
+
+	// partialID administers constraints but lacks agent.delete.
+	partialID := pvSeedUser(t, s, "gov-window-partial")
+	partialRD := createTestRoleDefinition(t, s, "partial-admin-role-window", store.RoleScopeSystem,
+		[]string{PermissionConstraintAdmin, "agent.read", "agent.create"})
+	pvSeedRoleBinding(t, s, partialRD.ID, "user", partialID, store.RoleScopeSystem, "")
+	fullID := govSeedAdminUser(t, s, "gov-window-full")
+	userID := govSeedNonAdminUser(t, s, "gov-window-target")
+
+	base := gs.nowFunc().UTC().Truncate(time.Second)
+	at := func(d time.Duration) *time.Time {
+		v := base.Add(d)
+		return &v
+	}
+	type window struct{ notBefore, expiresAt *time.Time }
+	for _, tc := range []struct {
+		name             string
+		stored, proposed window
+	}{
+		{"added", window{}, window{expiresAt: at(72 * time.Hour)}},
+		{"narrowed", window{expiresAt: at(72 * time.Hour)}, window{expiresAt: at(time.Hour)}},
+		{"notBefore added", window{expiresAt: at(72 * time.Hour)}, window{notBefore: at(24 * time.Hour), expiresAt: at(72 * time.Hour)}},
+		{"widened", window{notBefore: at(time.Hour), expiresAt: at(48 * time.Hour)}, window{notBefore: at(time.Hour), expiresAt: at(96 * time.Hour)}},
+		{"removed", window{notBefore: at(time.Hour), expiresAt: at(48 * time.Hour)}, window{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			name := "gov-window-" + strings.ReplaceAll(tc.name, " ", "-")
+			draft := func(w window) *store.AccessConstraint {
+				return &store.AccessConstraint{
+					Name:                 name,
+					SubjectKind:          store.ConstraintSubjectPrincipal,
+					SubjectPrincipalType: pvStrPtr("user"),
+					SubjectPrincipalID:   pvStrPtr(userID),
+					ScopeType:            store.RoleScopeSystem,
+					MaximumPermissions:   []string{"agent.read", "agent.delete"},
+					NotBefore:            w.notBefore,
+					ExpiresAt:            w.expiresAt,
+					Purpose:              "window authority",
+					CreatedBy:            fullID,
+				}
+			}
+			created := govCreateAndCommit(t, gs, ps, draft(tc.stored), pvTestActor(fullID))
+
+			commit := func(actorID string) error {
+				proposed := draft(tc.proposed)
+				proposed.ID = created.ID
+				preview, err := ps.GeneratePreview(ctx, PreviewRequest{
+					Operation:    "update",
+					Draft:        proposed,
+					ConstraintID: created.ID,
+					BaseRevision: created.Revision,
+					Actor:        pvTestActor(actorID),
+				})
+				require.NoError(t, err)
+				_, err = gs.CommitBoundaryChange(ctx, CommitRequest{
+					Operation:    "update",
+					Draft:        proposed,
+					ConstraintID: created.ID,
+					BaseRevision: created.Revision,
+					PreviewToken: preview.PreviewToken,
+					Actor:        pvTestActor(actorID),
+				})
+				return err
+			}
+
+			err := commit(partialID)
+			var ge *GovernanceError
+			require.ErrorAs(t, err, &ge, "window %s without authority over agent.delete", tc.name)
+			assert.Equal(t, ErrCodeInsufficientRelaxationAuthority, ge.Code)
+			assert.Equal(t, []string{"agent.delete"}, ge.Details["missingPermissionIds"])
+			got, err := s.GetAccessConstraint(ctx, created.ID)
+			require.NoError(t, err)
+			assert.Equal(t, created.Revision, got.Revision, "the refused update changes nothing")
+
+			require.NoError(t, commit(fullID), "window %s with authority", tc.name)
+			got, err = s.GetAccessConstraint(ctx, created.ID)
+			require.NoError(t, err)
+			assert.True(t, timeBoundEqual(got.NotBefore, tc.proposed.notBefore), "notBefore")
+			assert.True(t, timeBoundEqual(got.ExpiresAt, tc.proposed.expiresAt), "expiresAt")
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------
