@@ -43,9 +43,9 @@ const hostGitTestToken = "project-git-token-value"
 
 // hostGitTrace is an https git endpoint that answers every request 401
 // (Basic) and records the decoded user:password of every Authorization
-// header it receives. The host user's git config (GIT_CONFIG_GLOBAL, system
-// config off) trusts its certificate and carries an ambient credential store
-// holding "ambient:ambient-secret" for it.
+// header it receives. GIT_SSL_CAINFO trusts its certificate. The host user's
+// git config (GIT_CONFIG_GLOBAL, system config off) carries an ambient
+// credential store holding "ambient:ambient-secret" for it.
 type hostGitTrace struct {
 	srv  *httptest.Server
 	mu   sync.Mutex
@@ -91,12 +91,13 @@ func newHostGitTrace(t *testing.T) *hostGitTrace {
 	creds := filepath.Join(dir, "credentials")
 	require.NoError(t, os.WriteFile(creds, []byte(strings.Replace(tr.srv.URL, "https://", "https://ambient:ambient-secret@", 1)+"\n"), 0o600))
 	cfg := filepath.Join(dir, "gitconfig")
-	body := "[http]\n\tsslCAInfo = " + ca + "\n\textraHeader = X-Ambient: generic\n" +
+	body := "[http]\n\textraHeader = X-Ambient: generic\n" +
 		"[http \"" + tr.srv.URL + "/\"]\n\textraHeader = X-Ambient: host\n" +
 		"[http \"" + tr.url("org/repo") + "\"]\n\textraHeader = X-Ambient: full\n" +
 		"[http \"" + tr.url("other/repo") + "\"]\n\textraHeader = X-Ambient: full\n" +
 		"[credential]\n\thelper = store --file=" + creds + "\n"
 	require.NoError(t, os.WriteFile(cfg, []byte(body), 0o600))
+	t.Setenv("GIT_SSL_CAINFO", ca)
 	t.Setenv("GIT_CONFIG_GLOBAL", cfg)
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	tr.askpassLog = filepath.Join(dir, "askpass.log")
@@ -450,7 +451,8 @@ func hostGitDumbRepo(t *testing.T, source string, requireToken bool) string {
 	ca := filepath.Join(dir, "ca.pem")
 	require.NoError(t, os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0o600))
 	cfg := filepath.Join(dir, "gitconfig")
-	require.NoError(t, os.WriteFile(cfg, []byte("[http]\n\tsslCAInfo = "+ca+"\n"), 0o600))
+	require.NoError(t, os.WriteFile(cfg, nil, 0o600))
+	t.Setenv("GIT_SSL_CAINFO", ca)
 	t.Setenv("GIT_CONFIG_GLOBAL", cfg)
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	return srv.URL + "/org/repo.git"
