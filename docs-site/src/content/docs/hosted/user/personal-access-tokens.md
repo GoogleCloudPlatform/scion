@@ -357,7 +357,9 @@ The same per-request checks apply, with these limits:
   delete, together with `harness_config:read`. Importing or discovering templates or harness
   configurations for your user scope needs `template:create` or `harness_config:create`. A
   project token is refused for all of these, because these records belong to no project. Any
-  token can list your injected skills.
+  token can list your injected skills. User- and Hub-scope environment variables and secrets
+  (`scope=user` and `scope=hub` on `/api/v1/env` and `/api/v1/secrets`) never accept a token of
+  any boundary or scope: they require an interactive login (`403`, `details.reason: "CREDENTIAL_MANAGEMENT"`).
 - **Global catalog and skill registries.** Creating a global skill needs `skill:create_global`,
   and managing skill registries needs `skill:register`; both can be selected only on a hub
   token. Importing or discovering templates or harness configurations for the global catalog
@@ -405,8 +407,11 @@ a dedicated OS user, an isolated `HOME`, or log out first (`scion hub auth logou
 :::
 
 User- and hub-scope environment variables and secrets (`scion hub env` and `scion hub secret`
-without `--project` or `--broker`) need an interactive login (`scion hub auth login`); the Hub
-refuses access tokens on them, whatever their boundary or scopes.
+without `--project` or `--broker`, or with `--hub-scope`) need an interactive login (`scion hub auth login`); the Hub
+refuses access tokens on them, whatever their boundary or scopes, with `403 Forbidden`,
+`details.reason: "CREDENTIAL_MANAGEMENT"` (`details.credential: "session_required"`), and the message
+`"user- and hub-level environment variables and secrets require an interactive login (run 'scion hub auth login'); access tokens are not accepted"`.
+Project (`--project`) and Runtime Broker (`--broker`) scopes continue to accept appropriately scoped tokens.
 
 ### Scopes for CLI use
 
@@ -444,6 +449,7 @@ To use the CLI from a coding agent running on your machine, see
 Because a UAT is scoped, some operations that must be re-checked later, or that rely on
 owner or administrator shortcuts, require an unscoped sign-in (CLI or Web UI login) instead:
 
+- **User- and Hub-level environment variables and secrets**: reading, listing, setting, updating, or deleting `scope=user` (the default) or `scope=hub` environment variables and secrets requires an interactive login (`403`, `details.reason: "CREDENTIAL_MANAGEMENT"`).
 - **Chat scheduled messages**: creating, listing, sending now, dismissing or cancelling a message
   scheduled in a chat conversation.
 - **Runtime Broker registration**: creating a Runtime Broker (`POST /api/v1/brokers` and the
@@ -453,15 +459,15 @@ owner or administrator shortcuts, require an unscoped sign-in (CLI or Web UI log
   such a token works only for a Runtime Broker your user created: a UAT does not satisfy the
   super-admin shortcut. See
   [Runtime Broker](/scion/hosted/ha/runtime-broker/#broker-registration-permission).
-- **Broker secret rotation and association**: no UAT can rotate a Runtime Broker's HMAC
-  secret or carry the broker owner's consent to associate a broker with a project. See
+- **Runtime Broker secret rotation and association**: no UAT can rotate a Runtime Broker's HMAC
+  secret or carry the Runtime Broker owner's consent to associate a Runtime Broker with a project. See
   [Runtime Broker](/scion/hosted/ha/runtime-broker/#broker-ownership).
 - **Runtime Broker changes**: updating or deregistering a Runtime Broker, writing its
   environment variables or secrets, and sending a heartbeat on its behalf need a sign-in; a UAT
   is denied with `403` and `details.reason` naming why.
 - **Image operations on a Runtime Broker**: pulling or removing a harness-config image on a
-  named Runtime Broker (`broker_id`) needs dispatch authority on that broker, which no UAT
-  scope carries, so a UAT is denied even on an auto-provide broker.
+  named Runtime Broker (`broker_id`) needs dispatch authority on that Runtime Broker, which no UAT
+  scope carries, so a UAT is denied even on an auto-provide Runtime Broker.
 
 ### Agents created with a token
 
