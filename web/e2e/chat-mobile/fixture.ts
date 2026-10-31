@@ -36,13 +36,15 @@ export async function openChatRail(
   // The legacy /chat/space/{id} URL is rewritten in place to the readable
   // slug URL once spaces load (parseV2Route's legacySpaceMatch ->
   // replaceRoute), on the same page element. On desktop the space then
-  // opens #general with a navigateTo, which does replace the page element.
-  // Waiting for the URL to settle to the readable form first keeps callers
-  // off the page before the space has opened.
+  // opens #general with a navigateTo, which does replace the page element;
+  // waitForDesktopGeneralThread waits for that replacement.
   if (isWideLayout(page)) {
     await waitForDesktopGeneralThread(page);
     return;
   }
+  // On a phone the space opens on the rail. Waiting for the URL to settle to
+  // the readable form first keeps callers off the page before the space has
+  // opened.
   await page.waitForURL(/\/chat\/[^/]+$/, { timeout: 15_000 });
   await expect(
     page.locator('.space-header', { hasText: PROJECT_A.name }),
@@ -84,8 +86,10 @@ async function renderedPath(page: Page): Promise<string> {
  * handled the legacy URL, then calls navigateTo with the thread URL. The
  * router pushes the URL first and swaps in a new page element after an
  * await, so the URL and the thread header can both show before the swap.
- * The shell's currentPath is set in the same step as the swap, so once it
- * names the thread the page in the DOM is the one that stays.
+ * renderRoute sets the shell's currentPath in the same synchronous step that
+ * removes the old page element, and the landing's in-place rewrite to
+ * /chat/{slug} does not match THREAD_PATH, so once currentPath names the
+ * thread the page in the DOM is the one that stays.
  */
 async function waitForDesktopGeneralThread(page: Page): Promise<void> {
   await expect
