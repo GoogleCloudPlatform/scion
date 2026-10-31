@@ -222,14 +222,8 @@ func TestAttachEndToEnd(t *testing.T) {
 			c := f.ccMgr.GetConnection(f.brokerID)
 			return c != nil && c != before
 		}, 20*time.Second, 50*time.Millisecond, "the broker should reconnect its control channel")
-		// A registered session can still fail the broker's handshake and be
-		// dropped until the broker's next retry, a hub race tracked in
-		// https://github.com/ptone/scion/issues/5869. Until that is fixed, a
-		// 503 "Runtime broker not connected" is retried until the broker is
-		// back.
-		again := f.dialWhileBrokerUnavailable(t, 20*time.Second, 80, 24)
+		again := f.attach(t, 80, 24)
 		defer closeQuietly(again)
-		f.awaitAttached(t, again, 80, 24)
 	})
 }
 
@@ -458,44 +452,9 @@ func (f *fixture) dialOK(t *testing.T, cols, rows int) *websocket.Conn {
 func (f *fixture) attach(t *testing.T, cols, rows int) *websocket.Conn {
 	t.Helper()
 	conn := f.dialOK(t, cols, rows)
-	f.awaitAttached(t, conn, cols, rows)
-	return conn
-}
-
-// awaitAttached reads the first terminal output on an upgraded attach
-// WebSocket and waits until the tmux client is attached at the given size.
-func (f *fixture) awaitAttached(t *testing.T, conn *websocket.Conn, cols, rows int) {
-	t.Helper()
 	readUntil(t, conn, firstDataTimeout, "the first terminal output", func(out string) bool { return out != "" })
 	f.requireClientSize(t, fmt.Sprintf("%dx%d", cols, rows))
-}
-
-// dialWhileBrokerUnavailable opens the attach WebSocket, retrying while the
-// hub answers 503 because the broker's control channel is not connected. Any
-// other failure, or a 503 that outlasts timeout, fails the test.
-func (f *fixture) dialWhileBrokerUnavailable(t *testing.T, timeout time.Duration, cols, rows int) *websocket.Conn {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for {
-		conn, resp, err := f.dial(cols, rows)
-		if err == nil {
-			return conn
-		}
-		status, body := 0, ""
-		if resp != nil {
-			status = resp.StatusCode
-			if resp.Body != nil {
-				b, _ := io.ReadAll(resp.Body)
-				_ = resp.Body.Close()
-				body = string(b)
-			}
-		}
-		unavailable := status == http.StatusServiceUnavailable && strings.Contains(body, hub.ErrCodeRuntimeBrokerUnavail)
-		if !unavailable || time.Now().After(deadline) {
-			t.Fatalf("attach upgrade failed: %v (HTTP %d: %s)", err, status, body)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	return conn
 }
 
 // readUntil reads data frames, accumulating their bytes, until done reports
