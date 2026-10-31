@@ -606,6 +606,55 @@ test("Meta+K does not open the palette over a terminal pane's own open dialog", 
   await expect(paneDialog).toBeVisible();
 });
 
+// ptone/scion#2612: the secret-conflict dialog renders already open when a
+// capture request returns, so it can appear while the palette is open. The
+// palette closes under it, and Tab stays in the pane dialog.
+test("a terminal pane's dialog that opens under the open palette closes the palette", async ({
+  page,
+}) => {
+  const { attaches } = await setup(page, { [agentA]: fixture(agentA, 'Alice-bot') });
+  await page.goto(`/terminals/${agentA}`);
+  await expect.poll(() => attaches()).toBeGreaterThan(0);
+  await paletteButton(page).click();
+  await expect(paletteDialog(page)).toBeVisible();
+
+  await page.locator('#terminal-workspace scion-terminal-pane').evaluate((pane) => {
+    (pane as HTMLElement & { captureAuthConflicts: string[] | null }).captureAuthConflicts = [
+      'API_KEY',
+    ];
+  });
+  const paneDialog = page.locator('scion-terminal-pane sl-dialog[label*="API_KEY"]');
+  await expect(paneDialog).toBeVisible();
+
+  await expect(paletteDialog(page)).toBeHidden();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => (document.querySelector('scion-quick-palette') as { open?: boolean } | null)?.open
+      )
+    )
+    .toBe(false);
+
+  await page.keyboard.press('Tab');
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        let el: Element | null = document.activeElement;
+        while (el?.shadowRoot?.activeElement) el = el.shadowRoot.activeElement;
+        // Walk out through shadow hosts to the pane's dialog.
+        for (let node: Node | null = el; node; ) {
+          if (node instanceof Element && node.matches('sl-dialog')) {
+            return node.getAttribute('label');
+          }
+          const parent: Node | null = node.parentNode;
+          node = parent instanceof ShadowRoot ? parent.host : parent;
+        }
+        return null;
+      })
+    )
+    .toBe('Secret "API_KEY" already exists');
+});
+
 test('Ctrl+K inside a pane still reaches the PTY and does not open the palette', async ({
   page,
 }) => {
