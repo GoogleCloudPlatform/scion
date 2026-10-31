@@ -351,6 +351,8 @@ func capabilitiesFromStrings(names []string) *store.BrokerCapabilities {
 			caps.ChangedFields = true
 		case "clearedfields", "cleared_fields":
 			caps.ClearedFields = true
+		case "unlimitedcountlimits", "unlimited_count_limits":
+			caps.UnlimitedCountLimits = true
 		case "startsinflight", "starts_in_flight":
 			caps.StartsInFlight = true
 		case "templatetiers", "template_tiers":

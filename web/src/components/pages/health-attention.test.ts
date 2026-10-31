@@ -309,7 +309,7 @@ const pausedItem: HealthAttentionItem = {
   kind: 'schedule',
   subject: { type: 'schedule', id: 'sc 2', name: 'weekly', project_id: 'p 1' },
   message:
-    'Scheduled event alpha / weekly was paused by the hub: the agent that created it was deleted',
+    'Scheduled event alpha / weekly was paused by the hub: the agent or user it runs under was deleted',
 };
 
 const pausedRow: HealthPausedSchedule = {
@@ -334,7 +334,7 @@ describe('scion-health-attention hub-paused schedules', () => {
     expect(li.querySelector('a')!.getAttribute('href')).toBe('/projects/p%201/schedules');
     expect(li.querySelector('a')!.textContent).toBe(pausedItem.message);
     const detail = li.querySelector('.paused-detail')!.textContent!;
-    expect(detail).toContain('Paused by the hub: the agent that created it was deleted');
+    expect(detail).toContain('Paused by the hub: the agent or user it runs under was deleted');
     expect(detail).toContain('Target: worker');
     expect(detail).toContain('updated ');
     expect(li.querySelector('.last-error')).toBeNull();
@@ -380,7 +380,9 @@ describe('scion-health-attention hub-paused schedules', () => {
 
 describe('pausedReasonLabel', () => {
   it('maps known codes to fixed text and anything else to the generic label', () => {
-    expect(pausedReasonLabel('creator_deleted')).toBe('the agent that created it was deleted');
+    expect(pausedReasonLabel('creator_deleted')).toBe(
+      'the agent or user it runs under was deleted'
+    );
     expect(pausedReasonLabel('cron_zone_unsupported')).toBe(
       'its cron expression names a time zone, which is not supported'
     );

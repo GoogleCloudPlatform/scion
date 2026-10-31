@@ -317,10 +317,6 @@ type Server struct {
 	// servicesStarted is set once startServices begins (Started).
 	servicesStarted bool
 
-	// nfsCleanupWG tracks background NFS project tree removals started by
-	// project delete (startNFSProjectTreeCleanup), so tests can wait for them.
-	nfsCleanupWG sync.WaitGroup
-
 	// workspaceDownload replaces gcp.SyncFromGCS for the GCS workspace
 	// bootstrap (create-time and handleWorkspaceApply) when set (see
 	// SetWorkspaceDownloader).

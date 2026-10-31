@@ -32,15 +32,17 @@ variables below at every start and writes `~/.pi/agent/settings.json`; the
 bridge extension reads `SCION_PI_NO_AUTO_COMPLETE` and `SCION_HOOK_DEBUG`
 (and also `SCION_PI_PROJECT_TRUST`) from pi's environment at runtime, so
 `settings.json` cannot set those two.
-Other pi settings can also be edited in `settings.json` directly, except
-`defaultProjectTrust`, which is rewritten from `SCION_PI_PROJECT_TRUST` on
-every start.
+Other pi settings can also be edited in `settings.json` directly, except the
+keys provisioning overwrites at every start: `defaultProjectTrust` (always,
+from `SCION_PI_PROJECT_TRUST`), `defaultProvider` and `defaultModel` (when
+`SCION_PI_PROVIDER` or a concrete `SCION_MODEL` is set), and any key set in
+`SCION_PI_SETTINGS`.
 
 | Setting | Env var | Default | Notes |
 |---------|---------|---------|-------|
 | Project trust | `SCION_PI_PROJECT_TRUST` = `never` \| `ask` \| `always` | `never` | Wins over `SCION_PI_SETTINGS` and over a value left in `settings.json`; recomputed on every start (unset means `never`). Invalid values fail provisioning |
 | Provider | `SCION_PI_PROVIDER` | unset | Sets `defaultProvider` in `settings.json`, over a provider taken from `SCION_MODEL`. A `--model provider/id` names its own provider and overrides it; with no `--model`, `defaultProvider` applies. How pi treats a provider-less `--model` value (a fuzzy ID match) is pi's own resolution; this bundle does not pin it |
-| Model | `SCION_MODEL` | unset | A `provider/id[:thinking]` value sets `defaultModel` to `id` (a `:thinking` suffix is not written; it takes effect through `--model`) and `defaultProvider` to `provider` unless `SCION_PI_PROVIDER` is set. Scion resolves size tiers (`small`/`medium`/`large`/`extra-large`) through `model_aliases` in `config.yaml` before the agent starts, so the resolved pattern (e.g. `anthropic/sonnet`) is written the same way. Scion also starts pi with `--model <resolved>` whenever the agent has an effective model: the Hub-resolved model, a `SCION_MODEL` in the start request or in the settings harness-config env, or the configuration's model (`resolveEffectiveModel` in pkg/agent/run.go). pi uses that instead of `defaultModel`. When pi starts without `--model` (no effective model, for example a `SCION_MODEL` set only in a harness-config directory's `config.yaml` `env:`, which the effective model does not read), `defaultProvider`/`defaultModel` decide the model. A template cannot set `SCION_MODEL`: `SCION_*` keys in a template's `env:` are ignored with a warning |
+| Model | `SCION_MODEL` | unset | A `provider/id[:thinking]` value sets `defaultModel` to `id` (a trailing pi thinking-level suffix, `:off` to `:max`, is not written; it takes effect through `--model`. Any other colon is part of the ID and is kept, e.g. `ollama/qwen3:8b`) and `defaultProvider` to `provider` unless `SCION_PI_PROVIDER` is set. Scion resolves size tiers (`small`/`medium`/`large`/`extra-large`) through `model_aliases` in `config.yaml` before the agent starts, so the resolved pattern (e.g. `anthropic/sonnet`) is written the same way. Scion also starts pi with `--model <resolved>` whenever the agent has an effective model: the Hub-resolved model, a `SCION_MODEL` in the start request or in the settings harness-config env, or the configuration's model (`resolveEffectiveModel` in pkg/agent/run.go). pi uses that instead of `defaultModel`. When pi starts without `--model` (no effective model, for example a `SCION_MODEL` set only in a harness-config directory's `config.yaml` `env:`, which the effective model does not read), `defaultProvider`/`defaultModel` decide the model. A template cannot set `SCION_MODEL`: `SCION_*` keys in a template's `env:` are ignored with a warning |
 | Other pi settings | `SCION_PI_SETTINGS` (JSON object) | unset | Deep-merged into `settings.json`. Keys that look like credentials are rejected; it cannot change auth handling |
 | Auto task completion | `SCION_PI_NO_AUTO_COMPLETE=1` | off | Bridge stops signalling `task_completed` on settle |
 | Bridge debug | `SCION_HOOK_DEBUG=1` | off | Logs bridge failures to stderr |
@@ -106,12 +108,12 @@ What the policy does and does not cover (pi v1.3.0,
 | `input` (human/RPC) | `prompt-submit` |
 | `tool_execution_start` / `_end` | `tool-start` / `tool-end` |
 | `agent_end` | `agent-end` (carries a provider error) |
-| `agent_settled`, not aborted, no error, and the agent has not run `sciontool status` `ask_user`/`blocked`/`limits_exceeded`/`task_completed` itself since the last human input | `sciontool status task_completed -- <summary>` |
+| `agent_settled`, not aborted, no error, and the agent has not run `sciontool status` `ask_user`/`blocked`/`limits_exceeded`/`task_completed` itself since the last human/RPC input | `sciontool status task_completed -- <summary>` |
 
 `ask_user` and `blocked` are not pi events. Instruct the agent to run
 `sciontool status ask_user "<question>"` or `sciontool status blocked "<reason>"`
 through its bash tool; the bridge sees that command on `tool_execution_start`
-and skips the automatic `task_completed` until the next human input.
+and skips the automatic `task_completed` until the next human/RPC input.
 The same applies when the agent runs `sciontool status task_completed "<summary>"`
 itself: the bridge skips its own call, so the agent's summary is kept.
 The call must be in command position: at the start of the command or of a

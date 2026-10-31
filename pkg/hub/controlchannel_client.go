@@ -491,13 +491,16 @@ func (c *ControlChannelBrokerClient) CleanupProject(ctx context.Context, brokerI
 	if projectID != "" {
 		path += "?project_id=" + url.QueryEscape(projectID)
 	}
-	resp, err := c.doRequest(ctx, brokerID, "DELETE", path, "", nil)
+	// doRequestRaw, not doRequest: doRequest turns every status >= 400 into
+	// an error, 404 included. A 404 is success for an idempotent cleanup, as
+	// over HTTP (brokerHTTPTransport.CleanupProject); any other error status
+	// is the broker's answer (a 409 keeps its project directory).
+	resp, err := c.doRequestRaw(ctx, brokerID, "DELETE", path, "", nil)
 	if err != nil {
 		return err
 	}
-	// Allow 404 for idempotent cleanup
-	if resp.StatusCode == http.StatusNotFound {
-		return nil
+	if resp.StatusCode >= 400 && resp.StatusCode != http.StatusNotFound {
+		return &brokerStatusError{StatusCode: resp.StatusCode, Body: string(resp.Body), RetryAfter: resp.Headers["Retry-After"]}
 	}
 	return nil
 }

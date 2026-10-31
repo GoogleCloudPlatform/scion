@@ -177,3 +177,24 @@ func refDate(r Ref) time.Time {
 	}
 	return time.Time{}
 }
+
+// BelowFloor reports whether target is older than the release floor (a
+// release tag; "" means no floor). A target in the floor's channel compares
+// by version; a target in another channel by its publish date against the
+// floor's date (a nightly floor carries its date in the tag). known is false
+// when the order cannot be decided (target is not a release tag, or no
+// date is available for a cross-channel comparison); callers that enforce
+// the floor must then refuse.
+func BelowFloor(floor string, target Ref) (below, known bool) {
+	if floor == "" {
+		return false, true
+	}
+	switch CompareRefs(Ref{Version: floor}, target) {
+	case ClassSame, ClassUpgrade, ClassSwitchNewer:
+		return false, true
+	case ClassDowngrade, ClassSwitchOlder:
+		return true, true
+	default:
+		return false, false
+	}
+}

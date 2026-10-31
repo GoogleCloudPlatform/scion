@@ -1469,6 +1469,14 @@ STUBERR
         ;;
       "mktemp -d /tmp/scion-hubenv.XXXXXX")
         # deploy.sh's private hub.env staging directory on the VM.
+        # deploy.sh has just written its local 0600 hub.env copy. With
+        # GCLOUD_STUB_HUBENV_MKTEMP_BLOCKS=true the call touches the
+        # hubenv-mktemp-started sentinel and then holds deploy.sh here
+        # until the test interrupts it (ptone/scion#6612 cleanup tests).
+        if [[ "${GCLOUD_STUB_HUBENV_MKTEMP_BLOCKS:-false}" == "true" ]]; then
+          touch "${GCLOUD_STUB_STATE_DIR}/hubenv-mktemp-started"
+          sleep 60
+        fi
         echo "${GCLOUD_STUB_SSH_HUBENV_DIR-/tmp/scion-hubenv.STUB01}"
         ;;
       *"test -f /home/scion/.scion/hub.env"*)
@@ -1491,6 +1499,18 @@ STUBERR
         # The settings.yaml dev-mode write: this is the point create-mode
         # wiring tests that opt into GCLOUD_STUB_SSH_SUCCEEDS stop at.
         touch "${GCLOUD_STUB_STATE_DIR}/settings-yaml-dev-mode-written"
+        ;;
+      *"sudo tee /etc/systemd/system/scion-hub.service"*)
+        # The systemd unit install (with the boot-failure guard before
+        # it), in the create path and in migrate-layout: a sentinel for
+        # tests that stop once the unit is written.
+        touch "${GCLOUD_STUB_STATE_DIR}/hub-unit-installed"
+        # GCLOUD_STUB_UNIT_INSTALL_BLOCKS=true holds deploy.sh inside this
+        # call until the test stops it, so it never runs on into later
+        # phases (and their temp files) while being stopped.
+        if [[ "${GCLOUD_STUB_UNIT_INSTALL_BLOCKS:-false}" == "true" ]]; then
+          sleep 60
+        fi
         ;;
       "curl -s http://localhost:8080/healthz")
         # deploy.sh's wait_for_hub_health poll. GCLOUD_STUB_HEALTHZ_BODY

@@ -16,6 +16,8 @@ package hub
 
 import (
 	"context"
+	"errors"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -30,9 +32,12 @@ import (
 // plus protocol.http.allow=never over the fetch's network allow-list, and
 // GIT_ALLOW_PROTOCOL). The project's token is offered only when cloneURL
 // resolves to the project's recorded git remote over https
-// (provision.CloneTokenBound); it is not even resolved otherwise. For any
-// other URL git runs without the token, with the hub host user's credential
-// helpers and extra HTTP headers reset and askpass disabled
+// (provision.CloneTokenBound); it is not even resolved otherwise, and the
+// creator's personal token only for a remote on the GitHub host
+// (resolveCloneToken). Whenever no project credential is offered (any other
+// URL, or the recorded remote itself with none resolved), git runs
+// anonymously: the hub host user's credential helpers and extra HTTP headers
+// are reset and askpass is disabled, on every host
 // (util.HostGitHardening.NoCredentialHelpers; see util.NoCredentialHelperEnv
 // for what it does not cover).
 func (s *Server) hostGitAccess(ctx context.Context, project *store.Project, cloneURL string) (string, util.HostGitHardening) {
@@ -44,5 +49,57 @@ func (s *Server) hostGitAccess(ctx context.Context, project *store.Project, clon
 		h.NoCredentialHelpers = true
 		return "", h
 	}
-	return s.resolveCloneToken(ctx, project), h
+	token := s.resolveCloneToken(ctx, project)
+	if token == "" {
+		// No project credential: the fetch runs anonymously. The hub host's
+		// own git authentication (credential helpers of any scope, extra
+		// headers, askpass) is never offered, on any host.
+		h.NoCredentialHelpers = true
+	}
+	return token, h
+}
+
+// errSSHCloneURLNeedsProjectSecret refuses a hub-host clone or fetch of an ssh
+// repository URL when the project has no git credential. Over ssh, git would
+// authenticate with the hub host's own ssh identity (its agent and keys), and
+// git operations without a project secret use no host credentials. The text
+// names no URL.
+var errSSHCloneURLNeedsProjectSecret = errors.New("an ssh repository URL requires a project git secret")
+
+// isSSHCloneURL reports whether cloneURL uses the ssh transport: an ssh://
+// URL or one of the scheme aliases git also runs over ssh (git+ssh://,
+// ssh+git://), in any letter case, or an scp-style [user@]host:path address
+// (the only scheme-less form provision.CheckHostCloneURL accepts). Other
+// forms git could reach a remote with (ext::, file://, local paths) are
+// refused by CheckHostCloneURL before this is consulted.
+func isSSHCloneURL(cloneURL string) bool {
+	u := strings.TrimSpace(cloneURL)
+	if scheme, _, ok := strings.Cut(u, "://"); ok {
+		switch strings.ToLower(scheme) {
+		case "ssh", "git+ssh", "ssh+git":
+			return true
+		}
+		return false
+	}
+	return strings.Contains(u, ":")
+}
+
+// sshCloneURLRefused returns errSSHCloneURLNeedsProjectSecret for an ssh clone
+// URL when the project has no git credential (haveCredential false), and nil
+// otherwise.
+func sshCloneURLRefused(cloneURL string, haveCredential bool) error {
+	if isSSHCloneURL(cloneURL) && !haveCredential {
+		return errSSHCloneURLNeedsProjectSecret
+	}
+	return nil
+}
+
+// refuseSSHWithoutProjectSecret applies sshCloneURLRefused to a hub-host
+// clone or fetch of project from cloneURL, resolving the project's git
+// credential only for an ssh URL.
+func (s *Server) refuseSSHWithoutProjectSecret(ctx context.Context, project *store.Project, cloneURL string) error {
+	if !isSSHCloneURL(cloneURL) {
+		return nil
+	}
+	return sshCloneURLRefused(cloneURL, s.resolveCloneToken(ctx, project) != "")
 }

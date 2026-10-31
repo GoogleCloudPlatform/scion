@@ -152,7 +152,10 @@ func (s *deliverySelector) authorize(ctx context.Context, kind MaterialKind, rec
 		// with the item's name, scope and the deny cause, never its value, so
 		// an operator can see why an agent came up without it. The create-time
 		// availability probe decides nothing for delivery and stays quiet.
-		if s.purpose == PurposeDispatch || s.purpose == PurposeRestart {
+		// Not logged once the request has ended: a decision under a
+		// cancelled or expired ctx is the caller's cancel, not a refusal
+		// worth an operator's attention.
+		if (s.purpose == PurposeDispatch || s.purpose == PurposeRestart) && ctx.Err() == nil {
 			s.logger().WarnContext(ctx, "launch material withheld: not authorized for delivery",
 				"agent_id", s.agent.ID, "purpose", string(s.purpose), "kind", string(kind),
 				"key", key, "scope", scope, "scope_id", scopeID,
@@ -169,9 +172,11 @@ func (s *deliverySelector) authorize(ctx context.Context, kind MaterialKind, rec
 // item (AuthzService.legacyDeliveryLog), an item delivered only through the legacy
 // fallback (material_delivery_legacy.go): names and cohort, never a value.
 // The admission memo holds the outcome step 10 used for this permission.
-// The availability probe delivers nothing and stays quiet.
+// The availability probe delivers nothing and stays quiet. Once the request
+// has ended nothing is logged and the rate-limit slot is not used, so a
+// later live delivery of the item is still logged.
 func (s *deliverySelector) warnLegacyFallback(ctx context.Context, kind MaterialKind, key, scope, scopeID string) {
-	if s.purpose == PurposeAvailabilityProbe || s.ident == nil || s.ident.admission == nil {
+	if s.purpose == PurposeAvailabilityProbe || s.ident == nil || s.ident.admission == nil || ctx.Err() != nil {
 		return
 	}
 	o, ok := s.ident.admission.load(deliverPermissionForKind(kind))
@@ -387,7 +392,8 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 		}
 	}
 
-	if sel.denied > 0 {
+	// Not logged once the request has ended (see authorize).
+	if sel.denied > 0 && ctx.Err() == nil {
 		d.log.WarnContext(ctx, "launch material withheld: items not authorized for delivery", "agent_id", agent.ID, "purpose", string(sel.purpose), "count", sel.denied)
 	}
 	if len(kept) == 0 {

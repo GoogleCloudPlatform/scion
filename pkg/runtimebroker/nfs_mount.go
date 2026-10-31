@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -49,6 +50,11 @@ type MountChecker interface {
 	// mount command.
 	Mount(ctx context.Context, server, export, target, options string) error
 
+	// RemountRequiredFlags applies nosuid and nodev to the mount at target
+	// in place, without unmounting it. Requires mount privilege. ctx bounds
+	// the command.
+	RemountRequiredFlags(ctx context.Context, target string) error
+
 	// Unmount unmounts the given mountpoint so it can be remounted.
 	Unmount(ctx context.Context, target string) error
 
@@ -71,6 +77,14 @@ type MountChecker interface {
 //   - Mounting: AutoMount true and not verify-only. A share that is not
 //     mounted is mounted, and one mounted from the wrong source is
 //     remounted.
+//
+// Every mount the reconciler makes carries nosuid and nodev as its last
+// options (effectiveNFSMountOptions). A share counts as mounted correctly
+// only when the mount table also shows both flags. A share mounted from the
+// right source without them is remounted in place in mounting mode, and
+// reported unhealthy with reason mount_flags otherwise. A verify-only
+// reconciler (the platform mounts the export) logs this once and does not
+// mark the share unhealthy for it.
 //
 // Deploy note: auto-mount requires the broker process to run as root: the
 // mount.nfs helper checks uid 0, so CAP_SYS_ADMIN alone is not enough (see
@@ -95,6 +109,9 @@ type NFSMountReconciler struct {
 
 	mu       sync.RWMutex
 	statuses map[string]ShareMountStatus // keyed by share ID
+	// flagsWarned records the shares whose missing nosuid/nodev a
+	// verify-only reconciler has already logged.
+	flagsWarned map[string]bool
 }
 
 // AutoMount reports whether auto_mount is set in the configuration. See
@@ -150,7 +167,14 @@ type ShareMountStatus struct {
 	Target  string `json:"target"`
 	Healthy bool   `json:"healthy"`
 	Message string `json:"message,omitempty"`
+	// Reason is a stable code for some unhealthy states
+	// (ShareReasonMountFlags); empty otherwise.
+	Reason string `json:"reason,omitempty"`
 }
+
+// ShareReasonMountFlags is the ShareMountStatus reason of a share mounted
+// without nosuid or nodev that the broker did not remount.
+const ShareReasonMountFlags = "mount_flags"
 
 // NewNFSMountReconciler creates a reconciler for the given NFS config.
 // The checker abstracts mount syscalls for testability.
@@ -163,6 +187,7 @@ func NewNFSMountReconciler(cfg *config.V1NFSConfig, checker MountChecker, log *s
 		checker:      checker,
 		log:          log,
 		statuses:     make(map[string]ShareMountStatus),
+		flagsWarned:  make(map[string]bool),
 		reconcileSem: make(chan struct{}, 1),
 	}
 }
@@ -173,7 +198,9 @@ func NewNFSMountReconciler(cfg *config.V1NFSConfig, checker MountChecker, log *s
 // already-correct state.
 //
 // For each configured share (target = <MountRoot>/<share.ID>):
-//   - mounted from the expected server:export → healthy
+//   - mounted from the expected server:export with nosuid,nodev → healthy
+//   - mounted from the expected server:export without them → remount in
+//     place (mounting mode), else unhealthy (mount_flags)
 //   - not mounted → mountpoint(1) guard → mkdir -p target → mount
 //   - mounted from another source → unmount → mount
 //
@@ -188,12 +215,7 @@ func (r *NFSMountReconciler) Reconcile(ctx context.Context) error {
 		return fmt.Errorf("no NFS shares configured")
 	}
 
-	mountOpts := r.cfg.MountOptions
-	if mountOpts == "" {
-		mountOpts = "vers=3,hard,nconnect=4,_netdev"
-	}
-
-	return r.reconcileShares(ctx, r.cfg.Shares, mountOpts)
+	return r.reconcileShares(ctx, r.cfg.Shares, effectiveNFSMountOptions(r.cfg))
 }
 
 // reconcileShares reconciles shares as one pass: it holds the reconcile
@@ -221,7 +243,7 @@ func (r *NFSMountReconciler) reconcileShares(ctx context.Context, shares []confi
 }
 
 func (r *NFSMountReconciler) reconcileShareLocked(ctx context.Context, share config.V1NFSShare, mountOpts string, table MountTable, tableErr error) {
-	target := filepath.Join(r.cfg.MountRoot, share.ID)
+	target := NFSShareTarget(r.cfg.MountRoot, share.ID)
 	wantServerExport := fmt.Sprintf("%s:%s", share.Server, share.Export)
 	mounts := r.MountsShares()
 
@@ -229,14 +251,15 @@ func (r *NFSMountReconciler) reconcileShareLocked(ctx context.Context, share con
 	// or the loop at shutdown) is done: a step cut short by the caller says
 	// nothing about the share, so the previous status is kept. The exec
 	// timeout does not cancel ctx, so a timed-out command is recorded.
-	fail := func(msg string) {
+	failReason := func(reason, msg string) {
 		if ctx.Err() != nil {
 			r.log.Debug("NFS share check interrupted; status unchanged",
 				"shareID", share.ID, "target", target, "reason", msg)
 			return
 		}
-		r.setStatus(share.ID, target, false, msg)
+		r.setStatusReason(share.ID, target, false, reason, msg)
 	}
+	fail := func(msg string) { failReason("", msg) }
 
 	r.log.Debug("Reconciling NFS share",
 		"shareID", share.ID, "target", target,
@@ -247,10 +270,16 @@ func (r *NFSMountReconciler) reconcileShareLocked(ctx context.Context, share con
 		fail(fmt.Sprintf("failed to read mount table: %v", tableErr))
 		return
 	}
-	currentServerExport, mounted := table.Lookup(target)
+	entry, mounted := table.LookupEntry(target)
+	currentServerExport := entry.Source
 
 	if mounted && currentServerExport == wantServerExport {
-		r.setStatus(share.ID, target, true, "already mounted correctly")
+		missing := MissingNFSMountFlags(entry.Options)
+		if len(missing) == 0 {
+			r.setStatus(share.ID, target, true, "already mounted correctly")
+			return
+		}
+		r.reconcileMountFlagsLocked(ctx, share, target, wantServerExport, missing, failReason)
 		return
 	}
 
@@ -319,6 +348,65 @@ func (r *NFSMountReconciler) reconcileShareLocked(ctx context.Context, share con
 	r.log.Info("NFS share remounted", "shareID", share.ID, "target", target)
 }
 
+// reconcileMountFlagsLocked handles a share mounted from the expected
+// source whose mount table entry lacks the flags in missing (nosuid,
+// nodev). A verify-only reconciler logs it once and keeps the share
+// healthy: the platform mounts the export and cannot set options. In
+// mounting mode the share is remounted in place and healthy only once the
+// mount table shows both flags. Otherwise it is unhealthy with reason
+// mount_flags, which refuses the dispatches that need it.
+func (r *NFSMountReconciler) reconcileMountFlagsLocked(ctx context.Context, share config.V1NFSShare, target, wantServerExport string, missing []string, failReason func(reason, msg string)) {
+	missingList := strings.Join(missing, ",")
+	if r.verifyOnlyReason != "" {
+		r.mu.Lock()
+		warned := r.flagsWarned[share.ID]
+		r.flagsWarned[share.ID] = true
+		r.mu.Unlock()
+		if !warned {
+			r.log.Warn("NFS share mounted without nosuid,nodev; not remounted because the platform mounts the export",
+				"shareID", share.ID, "target", target, "missing", missingList)
+		}
+		r.setStatus(share.ID, target, true, "mounted by the platform without "+missingList+
+			" (not remounted here; dispatches to local-container runtimes are refused)")
+		return
+	}
+	if !r.MountsShares() {
+		failReason(ShareReasonMountFlags, fmt.Sprintf("mounted from %s without %s (%s, so it is not remounted)",
+			wantServerExport, missingList, r.noMountReason()))
+		return
+	}
+	if err := r.mountPrivilegeError(); err != nil {
+		failReason(ShareReasonMountFlags, fmt.Sprintf("mounted from %s without %s, and auto_mount cannot remount it: %v",
+			wantServerExport, missingList, err))
+		return
+	}
+
+	r.log.Warn("NFS share mounted without nosuid,nodev, remounting",
+		"shareID", share.ID, "target", target, "missing", missingList)
+	if err := r.checker.RemountRequiredFlags(ctx, target); err != nil {
+		failReason(ShareReasonMountFlags, fmt.Sprintf("mounted from %s without %s, and the remount failed: %v",
+			wantServerExport, missingList, err))
+		return
+	}
+	table, err := r.checker.ReadMountTable()
+	if err != nil {
+		failReason(ShareReasonMountFlags, fmt.Sprintf("remounted with nosuid,nodev, but the mount table could not be read: %v", err))
+		return
+	}
+	entry, mounted := table.LookupEntry(target)
+	if !mounted || entry.Source != wantServerExport {
+		failReason(ShareReasonMountFlags, fmt.Sprintf("remounted with nosuid,nodev, but %s is no longer mounted from %s", target, wantServerExport))
+		return
+	}
+	if still := MissingNFSMountFlags(entry.Options); len(still) > 0 {
+		failReason(ShareReasonMountFlags, fmt.Sprintf("remounted with nosuid,nodev, but the mount table still shows it without %s",
+			strings.Join(still, ",")))
+		return
+	}
+	r.setStatus(share.ID, target, true, "remounted with nosuid,nodev")
+	r.log.Info("NFS share remounted with nosuid,nodev", "shareID", share.ID, "target", target)
+}
+
 // mountPrivilegeError returns why this process cannot mount, when the
 // checker can tell in advance; nil otherwise.
 func (r *NFSMountReconciler) mountPrivilegeError() error {
@@ -333,6 +421,11 @@ func (r *NFSMountReconciler) mountPrivilegeError() error {
 // problem again) is not, so a persistently failing share does not flood
 // the log.
 func (r *NFSMountReconciler) setStatus(shareID, target string, healthy bool, message string) {
+	r.setStatusReason(shareID, target, healthy, "", message)
+}
+
+// setStatusReason is setStatus with a reason code (ShareMountStatus.Reason).
+func (r *NFSMountReconciler) setStatusReason(shareID, target string, healthy bool, reason, message string) {
 	r.mu.Lock()
 	prev, had := r.statuses[shareID]
 	next := ShareMountStatus{
@@ -340,6 +433,7 @@ func (r *NFSMountReconciler) setStatus(shareID, target string, healthy bool, mes
 		Target:  target,
 		Healthy: healthy,
 		Message: message,
+		Reason:  reason,
 	}
 	r.statuses[shareID] = next
 	r.mu.Unlock()
@@ -526,6 +620,81 @@ func (r *NFSMountReconciler) HealthCheckCodes() string {
 	return "unhealthy: " + strings.Join(unhealthy, "; ")
 }
 
+// CheckShareMountFlags confirms, from a fresh read of the mount table, that
+// every mount at or below the share's target carries nosuid and nodev. It is
+// called before each NFS-backed dispatch to a local-container runtime,
+// whatever the reconciler's mode, and never trusts a recorded status.
+//
+// It returns an error when ctx is already done or ends while waiting for
+// the reconcile semaphore, when the mount table cannot be read, or when the
+// target, or any mount below it, is mounted (from any source) without
+// either flag. A target mounted from its expected source without them is
+// recorded as mount_flags, except on a verify-only reconciler. A target
+// that is not mounted returns nil (with no mount below it): whether that
+// refuses the dispatch is decided by EnsureShareMounted. Which source the
+// target is mounted from is also left to EnsureShareMounted. It never
+// mounts.
+func (r *NFSMountReconciler) CheckShareMountFlags(ctx context.Context, shareID string) error {
+	if r.cfg == nil {
+		return fmt.Errorf("NFS config is nil")
+	}
+	var share config.V1NFSShare
+	found := false
+	for _, s := range r.cfg.Shares {
+		if s.ID == shareID {
+			share, found = s, true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("NFS share %q not found in config", shareID)
+	}
+	// A done ctx refuses even when the semaphore is free: select picks at
+	// random between ready cases.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("NFS share %q: nosuid,nodev not confirmed: %w", shareID, err)
+	}
+	select {
+	case r.reconcileSem <- struct{}{}:
+	case <-ctx.Done():
+		return fmt.Errorf("NFS share %q: nosuid,nodev not confirmed: %w", shareID, ctx.Err())
+	}
+	defer func() { <-r.reconcileSem }()
+
+	table, err := r.checker.ReadMountTable()
+	if err != nil {
+		return fmt.Errorf("NFS share %q: nosuid,nodev not confirmed: failed to read mount table: %w", shareID, err)
+	}
+	target := NFSShareTarget(r.cfg.MountRoot, share.ID)
+	want := share.Server + ":" + share.Export
+	if entry, mounted := table.LookupEntry(target); mounted {
+		if missing := MissingNFSMountFlags(entry.Options); len(missing) > 0 {
+			msg := fmt.Sprintf("mounted from %s without %s", entry.Source, strings.Join(missing, ","))
+			if r.verifyOnlyReason == "" && entry.Source == want {
+				r.setStatusReason(share.ID, target, false, ShareReasonMountFlags, msg)
+			}
+			return fmt.Errorf("NFS share %q is unhealthy: %s", shareID, msg)
+		}
+	}
+	// A mount below the target (where workspaces live) carries its own
+	// flags and is what a bind of a path under it gets.
+	var nested []string
+	for path := range table {
+		if strings.HasPrefix(path, target+string(filepath.Separator)) {
+			nested = append(nested, path)
+		}
+	}
+	sort.Strings(nested)
+	for _, path := range nested {
+		entry := table[path]
+		if missing := MissingNFSMountFlags(entry.Options); len(missing) > 0 {
+			return fmt.Errorf("NFS share %q is unhealthy: %s is mounted from %s without %s",
+				shareID, path, entry.Source, strings.Join(missing, ","))
+		}
+	}
+	return nil
+}
+
 // EnsureShareMounted re-reconciles the share with the given ID before a
 // dispatch and reports whether it is healthy: mounted at its target from
 // exactly the configured server:export, mounting it when MountsShares is
@@ -544,11 +713,7 @@ func (r *NFSMountReconciler) EnsureShareMounted(ctx context.Context, shareID str
 		return fmt.Errorf("NFS config is nil")
 	}
 
-	mountOpts := r.cfg.MountOptions
-	if mountOpts == "" {
-		mountOpts = "vers=3,hard,nconnect=4,_netdev"
-	}
-
+	mountOpts := effectiveNFSMountOptions(r.cfg)
 	for _, share := range r.cfg.Shares {
 		if share.ID == shareID {
 			if err := r.reconcileShares(ctx, []config.V1NFSShare{share}, mountOpts); err != nil {

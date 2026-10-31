@@ -77,6 +77,8 @@ interface Options {
   updateAvailable?: Json | (() => Json | number | 'down');
   /** Response to POST update-binary/run. */
   run?: { status: number; body: Json };
+  /** Responses to successive POST update-binary/run calls; overrides run. */
+  runs?: Array<{ status: number; body: Json }>;
   /** Operations list; may change between calls. 'down' rejects the fetch. */
   operations?: () => Json[] | 'down' | Promise<Json[]>;
   /** Body of POST check-updates, or an HTTP status to fail with. */
@@ -141,7 +143,8 @@ function handler(opts: Options) {
     }
     if (method === 'POST' && path.endsWith('/run')) {
       runBodies.push(JSON.parse(init?.body as string));
-      const r = opts.run ?? { status: 200, body: { runId: 'run-1', status: 'running' } };
+      const r = opts.runs?.[runBodies.length - 1] ??
+        opts.run ?? { status: 200, body: { runId: 'run-1', status: 'running' } };
       return json(r.body, r.status);
     }
     if (path === '/api/v1/admin/maintenance/restart' && opts.restart) {
@@ -303,7 +306,8 @@ describe('Server Version & Updates', () => {
   it.each([
     ['verified', 'verified', 'completed'],
     ['failed', 'failed', 'failed'],
-    ['rolled_back', 'rolled back', 'pending'],
+    // A rollback means the update failed: the danger badge.
+    ['rolled_back', 'rolled back', 'failed'],
   ])('renders lastUpdate status %s', async (status, label, badgeClass) => {
     el = await mount({
       status: updateStatus({
@@ -463,7 +467,9 @@ describe('Apply update', () => {
 
   it.each([
     ['already_running', 409, 'already running nightly-20261023'],
-    ['downgrade_not_yet_supported', 409, 'downgrades are not supported yet'],
+    ['below_downgrade_floor', 409, "older than this hub's downgrade floor"],
+    ['downgrade_unsupported_driver', 409, 'cannot be snapshotted for a rollback'],
+    ['invalid_param', 400, 'invalid parameter'],
     ['unknown_param', 400, 'unknown parameter'],
     ['preflight_failed', 409, 'could not start'],
   ])('shows %s readably and keeps the dialog open', async (code, status, text) => {
@@ -1234,6 +1240,45 @@ describe('Reconnect after an update restart', () => {
       expect(showToast).toHaveBeenCalledWith('Update to nightly-20261023 failed.', 'warning');
     });
 
+    it('treats a rolled-back update as not verified: the check result and banner stay', async () => {
+      await updateAndComeBack(
+        () => NOTIFIED,
+        (hub) => {
+          // The boot-failure guard restored the previous release.
+          hub.setOps(withRun('failed'));
+          hub.setStatus(
+            updateStatus({
+              lastUpdate: {
+                runId: 'run-1',
+                from: 'nightly-20261022',
+                to: 'nightly-20261023',
+                status: 'rolled_back',
+                at: '2026-10-24T00:06:00Z',
+              },
+            })
+          );
+          return {
+            ok: false,
+            observed: { version: 'nightly-20261022', uptime: '5s', uptimeSeconds: 5 },
+          };
+        }
+      );
+
+      expect(notices(el!).updateCheckResult).toEqual(CHECK_AVAILABLE);
+      expect(availableFetchCount()).toBe(2);
+      expect(banner(el!)?.textContent).toContain('nightly-20261023');
+      expect(showToast).toHaveBeenCalledWith(
+        'Rolled back to nightly-20261022 after nightly-20261023 failed to start.',
+        'warning'
+      );
+      expect(
+        versionSection(el!)
+          .querySelector('.last-update-rollback')
+          ?.textContent?.replace(/\s+/g, ' ')
+      ).toBe('Rolled back to nightly-20261022 after nightly-20261023 failed to start');
+      expect(versionSection(el!).querySelector('sl-alert.update-reconnect-error')).toBeNull();
+    });
+
     it('resolves an unknown before-version from lastUpdate for a run adopted on first load', async () => {
       // The operations list answers before update-status, so the running
       // run is adopted with no version known.
@@ -1337,7 +1382,7 @@ describe('Reconnect after an update restart', () => {
             at: '2026-10-24T00:01:00Z',
           },
         },
-        'Update to nightly-20261023 rolled back.',
+        'Rolled back to nightly-20261022 after nightly-20261023 failed to start.',
       ],
     ] as Array<[string, Json, string]>)(
       'keeps the check result when the new binary answers but the run is %s',
@@ -1704,5 +1749,461 @@ describe('Release picker updates', () => {
         (c) => pathOf(c[0] as string) === '/api/v1/admin/maintenance/releases'
       )
     ).toBe(false);
+  });
+});
+
+describe('Downgrade confirmation', () => {
+  const RISKS = [
+    'The database schema is not migrated down.',
+    'Settings keys unknown to the target may be dropped.',
+  ];
+
+  function needsConfirmation(target: string, cls = 'downgrade'): { status: number; body: Json } {
+    return {
+      status: 409,
+      body: {
+        error: {
+          code: 'downgrade_requires_confirmation',
+          message: `${target} is older than the running version`,
+          details: {
+            target,
+            current: 'nightly-20261022',
+            class: cls,
+            floor: 'nightly-20261009',
+            snapshotPath: '/opt/scion/snapshots',
+            risks: RISKS,
+          },
+        },
+      },
+    };
+  }
+
+  const STARTED = { status: 200, body: { runId: 'run-1', status: 'running' } };
+
+  const CATALOG: Json = {
+    repo: 'GoogleCloudPlatform/scion',
+    fetchedAt: '2026-10-23T10:00:00Z',
+    stale: false,
+    channels: {
+      nightly: {
+        latest: 'nightly-20261022',
+        releases: [
+          { tag: 'nightly-20261022', installable: true, class: 'same' },
+          { tag: 'nightly-20261020', installable: true, class: 'downgrade' },
+        ],
+      },
+      preview: { latest: null, releases: [] },
+      stable: {
+        latest: 'v0.2.0',
+        releases: [{ tag: 'v0.2.0', installable: true, class: 'switch-older' }],
+      },
+    },
+  };
+
+  type Select = HTMLElement & { value: string };
+
+  async function pick(e: Page, cls: string, value: string): Promise<void> {
+    const sel = cardRoot(e).querySelector<Select>(`sl-select.${cls}`)!;
+    sel.value = value;
+    sel.dispatchEvent(new Event('sl-change'));
+    await settle(e);
+  }
+
+  function dialog(e: Page): HTMLElement | null {
+    return root(e).querySelector<HTMLElement>('sl-dialog.downgrade-confirm');
+  }
+
+  function confirmButton(e: Page): HTMLElement {
+    return dialog(e)!.querySelector<HTMLElement>('sl-button.confirm-downgrade')!;
+  }
+
+  async function type(e: Page, text: string): Promise<void> {
+    const input = dialog(e)!.querySelector<HTMLElement & { value: string }>(
+      'sl-input.downgrade-typed'
+    )!;
+    input.value = text;
+    input.dispatchEvent(new Event('sl-input'));
+    await settle(e);
+  }
+
+  /** Picks nightly-20261020 (a downgrade) and confirms the first dialog. */
+  async function pickDowngradeAndConfirm(opts: Options): Promise<Page> {
+    const e = await mount({ releases: CATALOG, ...opts });
+    await pick(e, 'release-select', 'nightly-20261020');
+    cardRoot(e).querySelector<HTMLElement>('sl-button.update-release')!.click();
+    await settle(e);
+    const text = root(e).querySelector('sl-dialog[label="Update Hub"]')?.textContent ?? '';
+    expect(text.replace(/\s+/g, ' ')).toContain(
+      'nightly-20261020 is older than the running version'
+    );
+    confirmUpdate(e);
+    await settle(e);
+    return e;
+  }
+
+  it('opens the typed confirmation from the 409 details, then re-posts with confirm_downgrade', async () => {
+    el = await pickDowngradeAndConfirm({
+      runs: [needsConfirmation('nightly-20261020'), STARTED],
+    });
+
+    // The first request carries no confirmation; the refusal is not a toast.
+    expect(runBodies).toEqual([
+      {
+        params: {
+          target_version: 'nightly-20261020',
+          channel: 'nightly',
+          pin: 'nightly-20261020',
+        },
+      },
+    ]);
+    expect(showToast).not.toHaveBeenCalled();
+    expect(root(el).querySelector('sl-dialog[label="Update Hub"]')).toBeNull();
+    const d = dialog(el)!;
+    expect(d.getAttribute('label')).toBe('Confirm Downgrade');
+    // Rendered closed, then opened after its first update (focus: see
+    // admin-maintenance-downgrade-focus.test.ts).
+    expect(d.hasAttribute('open')).toBe(true);
+    // The hub's risks are the single source; the floor is added.
+    expect(
+      Array.from(d.querySelectorAll('.downgrade-risks li')).map((li) => li.textContent)
+    ).toEqual(RISKS);
+    expect(d.querySelector('.downgrade-versions')).toBeNull();
+    expect(d.querySelector('.downgrade-floor')?.textContent).toContain('nightly-20261009');
+
+    const input = d.querySelector('sl-input.downgrade-typed')!;
+    expect(input.getAttribute('label')).toBe('Type nightly-20261020 to confirm');
+    expect(confirmButton(el).hasAttribute('disabled')).toBe(true);
+
+    await type(el, 'nightly-20261020');
+    expect(confirmButton(el).hasAttribute('disabled')).toBe(false);
+    confirmButton(el).click();
+    await settle(el);
+
+    expect(runBodies[1]).toEqual({
+      params: {
+        target_version: 'nightly-20261020',
+        channel: 'nightly',
+        pin: 'nightly-20261020',
+        confirm_downgrade: 'nightly-20261020',
+      },
+    });
+    expect(dialog(el)).toBeNull();
+    expect(el.updateConfirmTarget).toBeNull();
+    expect(showToast).toHaveBeenCalledWith(
+      'Update to nightly-20261020 started. The hub will restart when it is installed.',
+      'success'
+    );
+  });
+
+  it.each([
+    ['empty', ''],
+    ['a prefix', 'nightly-2026102'],
+    ['trailing space', 'nightly-20261020 '],
+    ['other case', 'NIGHTLY-20261020'],
+    ['the running version', 'nightly-20261022'],
+  ])('keeps Confirm disabled and posts nothing for a mismatch (%s)', async (_name, typed) => {
+    el = await pickDowngradeAndConfirm({
+      runs: [needsConfirmation('nightly-20261020'), STARTED],
+    });
+    await type(el, typed);
+    expect(confirmButton(el).hasAttribute('disabled')).toBe(true);
+    // A click or Enter that reaches the handler anyway does nothing.
+    confirmButton(el).click();
+    dialog(el)!
+      .querySelector('sl-input.downgrade-typed')!
+      .dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+    await settle(el);
+    expect(runBodies).toHaveLength(1);
+    expect(dialog(el)).not.toBeNull();
+  });
+
+  it('spells out the versions only when the hub sends no risks', async () => {
+    const bare = needsConfirmation('nightly-20261020');
+    const details = (bare.body['error'] as { details: Json }).details;
+    details['risks'] = [];
+    el = await pickDowngradeAndConfirm({ runs: [bare, STARTED] });
+    const d = dialog(el)!;
+    expect(d.querySelector('.downgrade-risks')).toBeNull();
+    expect(d.querySelector('.downgrade-versions')?.textContent?.replace(/\s+/g, ' ')).toContain(
+      'Install nightly-20261020, which is older than the running version nightly-20261022'
+    );
+  });
+
+  it('falls back to a toast when the 409 details lack the target', async () => {
+    el = await pickDowngradeAndConfirm({
+      runs: [
+        {
+          status: 409,
+          body: {
+            error: {
+              code: 'downgrade_requires_confirmation',
+              message: 'confirm it',
+              details: { class: 'downgrade', risks: RISKS },
+            },
+          },
+        },
+      ],
+    });
+    expect(dialog(el)).toBeNull();
+    expect(showToast).toHaveBeenCalledTimes(1);
+    const msg = vi.mocked(showToast).mock.calls[0][0];
+    expect(msg).toContain('nightly-20261020 is older than the running version');
+    expect(msg).toContain('needs a typed confirmation');
+    expect(msg).toContain('confirm it');
+    // The Update Hub dialog stays open, as for other refusals.
+    expect(root(el).querySelector('sl-dialog[label="Update Hub"]')).not.toBeNull();
+    expect(runBodies).toHaveLength(1);
+  });
+
+  it('asks again without the "now resolves" toast when the hub repeats the same tag', async () => {
+    el = await pickDowngradeAndConfirm({
+      runs: [needsConfirmation('nightly-20261020'), needsConfirmation('nightly-20261020')],
+    });
+    await type(el, 'nightly-20261020');
+    confirmButton(el).click();
+    await settle(el);
+    expect(runBodies).toHaveLength(2);
+    expect(showToast).not.toHaveBeenCalled();
+    expect(dialog(el)).not.toBeNull();
+    expect(confirmButton(el).hasAttribute('disabled')).toBe(true);
+  });
+
+  it('confirms with Enter once the tag matches', async () => {
+    el = await pickDowngradeAndConfirm({
+      runs: [needsConfirmation('nightly-20261020'), STARTED],
+    });
+    await type(el, 'nightly-20261020');
+    dialog(el)!
+      .querySelector('sl-input.downgrade-typed')!
+      .dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+    await settle(el);
+    expect(runBodies).toHaveLength(2);
+    expect((runBodies[1] as { params: Json }).params['confirm_downgrade']).toBe('nightly-20261020');
+  });
+
+  it('cancel closes the confirmation without another request', async () => {
+    el = await pickDowngradeAndConfirm({
+      runs: [needsConfirmation('nightly-20261020'), STARTED],
+    });
+    await type(el, 'nightly-20261020');
+    dialog(el)!.querySelector<HTMLElement>('sl-button.downgrade-cancel')!.click();
+    await settle(el);
+    expect(dialog(el)).toBeNull();
+    expect(root(el).querySelector('sl-dialog[label="Update Hub"]')).toBeNull();
+    expect(el.updateConfirmTarget).toBeNull();
+    expect(runBodies).toHaveLength(1);
+  });
+
+  it('closing the dialog (Escape, overlay) also sends nothing', async () => {
+    el = await pickDowngradeAndConfirm({
+      runs: [needsConfirmation('nightly-20261020'), STARTED],
+    });
+    dialog(el)!.dispatchEvent(new Event('sl-request-close', { cancelable: true }));
+    await settle(el);
+    expect(dialog(el)).toBeNull();
+    expect(runBodies).toHaveLength(1);
+  });
+
+  it('a new update after a cancelled confirmation starts without the old confirmation', async () => {
+    el = await pickDowngradeAndConfirm({
+      runs: [needsConfirmation('nightly-20261020'), needsConfirmation('nightly-20261020')],
+    });
+    dialog(el)!.querySelector<HTMLElement>('sl-button.downgrade-cancel')!.click();
+    await settle(el);
+    cardRoot(el).querySelector<HTMLElement>('sl-button.update-release')!.click();
+    await settle(el);
+    expect(root(el).querySelector('sl-dialog[label="Update Hub"]')).not.toBeNull();
+    expect(dialog(el)).toBeNull();
+    confirmUpdate(el);
+    await settle(el);
+    expect((runBodies[1] as { params: Json }).params['confirm_downgrade']).toBeUndefined();
+    expect(confirmButton(el).hasAttribute('disabled')).toBe(true);
+  });
+
+  it('a new update request drops a confirmation left open for an earlier target', async () => {
+    el = await pickDowngradeAndConfirm({
+      runs: [needsConfirmation('nightly-20261020'), STARTED],
+    });
+    expect(dialog(el)).not.toBeNull();
+    // Another update request arrives (for example from the card) while the
+    // confirmation is open.
+    root(el)
+      .querySelector('scion-admin-maintenance-update-card')!
+      .dispatchEvent(
+        new CustomEvent('update-request', {
+          detail: {
+            target: 'nightly-20261022',
+            channel: 'nightly',
+            pin: 'latest',
+            releaseClass: 'same',
+          },
+          bubbles: true,
+          composed: true,
+        })
+      );
+    await settle(el);
+    expect(dialog(el)).toBeNull();
+    expect(root(el).querySelector('sl-dialog[label="Update Hub"]')).not.toBeNull();
+    expect(el.updateConfirmTarget).toBe('nightly-20261022');
+    expect(runBodies).toHaveLength(1);
+  });
+
+  it('confirms an older Latest with the tag the hub resolved, not latest:<channel>', async () => {
+    el = await mount({
+      releases: CATALOG,
+      runs: [needsConfirmation('v0.2.0', 'switch-older'), STARTED],
+    });
+    await pick(el, 'channel-select', 'stable');
+    await pick(el, 'release-select', 'latest');
+    cardRoot(el).querySelector<HTMLElement>('sl-button.update-release')!.click();
+    await settle(el);
+    confirmUpdate(el);
+    await settle(el);
+    expect(dialog(el)?.getAttribute('label')).toBe('Confirm Older Release');
+    await type(el, 'v0.2.0');
+    confirmButton(el).click();
+    await settle(el);
+    expect(runBodies).toEqual([
+      { params: { target_version: 'v0.2.0', channel: 'stable', pin: 'latest' } },
+      {
+        params: {
+          target_version: 'v0.2.0',
+          channel: 'stable',
+          pin: 'latest',
+          confirm_downgrade: 'v0.2.0',
+        },
+      },
+    ]);
+  });
+
+  it('confirms a banner latest:<channel> target with the resolved tag', async () => {
+    el = await mount({ runs: [needsConfirmation('nightly-20261020'), STARTED] });
+    el.updateConfirmTarget = 'latest:nightly';
+    await settle(el);
+    confirmUpdate(el);
+    await settle(el);
+    await type(el, 'latest:nightly');
+    expect(confirmButton(el).hasAttribute('disabled')).toBe(true);
+    await type(el, 'nightly-20261020');
+    confirmButton(el).click();
+    await settle(el);
+    expect(runBodies[1]).toEqual({
+      params: {
+        target_version: 'latest:nightly',
+        pin: 'latest',
+        confirm_downgrade: 'nightly-20261020',
+      },
+    });
+    // The restart wait expects the confirmed tag, not "any version".
+    const tracked = (el as unknown as { trackedUpdate: { expectVersion: string | null } | null })
+      .trackedUpdate;
+    expect(tracked?.expectVersion).toBe('nightly-20261020');
+  });
+
+  it('asks again when the hub resolves the target to another tag on the re-post', async () => {
+    el = await pickDowngradeAndConfirm({
+      runs: [needsConfirmation('nightly-20261020'), needsConfirmation('nightly-20261019')],
+    });
+    await type(el, 'nightly-20261020');
+    confirmButton(el).click();
+    await settle(el);
+    expect(showToast).toHaveBeenCalledWith(
+      'The hub now resolves the update to nightly-20261019; type that tag to confirm.',
+      'warning'
+    );
+    expect(dialog(el)?.querySelector('sl-input.downgrade-typed')?.getAttribute('label')).toBe(
+      'Type nightly-20261019 to confirm'
+    );
+    expect(confirmButton(el).hasAttribute('disabled')).toBe(true);
+  });
+
+  it.each([
+    [
+      'below_downgrade_floor',
+      { target: 'nightly-20261020', floor: 'nightly-20261021' },
+      "nightly-20261020 is older than this hub's downgrade floor (nightly-20261021) and cannot be installed.",
+    ],
+    [
+      'downgrade_unsupported_driver',
+      { target: 'nightly-20261020', class: 'downgrade', reason: 'postgres' },
+      "nightly-20261020 is older than the running version, and this hub's database cannot be snapshotted for a rollback",
+    ],
+  ])('shows %s from the re-post and keeps the confirmation open', async (code, details, text) => {
+    el = await pickDowngradeAndConfirm({
+      runs: [
+        needsConfirmation('nightly-20261020'),
+        { status: 409, body: { error: { code, message: 'hub says no', details } } },
+      ],
+    });
+    await type(el, 'nightly-20261020');
+    confirmButton(el).click();
+    await settle(el);
+    expect(showToast).toHaveBeenCalledTimes(1);
+    const msg = vi.mocked(showToast).mock.calls[0][0];
+    expect(msg).toContain(text);
+    expect(msg).toContain('hub says no');
+    expect(dialog(el)).not.toBeNull();
+    expect(runBodies).toHaveLength(2);
+  });
+
+  it('shows below_downgrade_floor with its floor on the first request', async () => {
+    el = await pickDowngradeAndConfirm({
+      runs: [
+        {
+          status: 409,
+          body: {
+            error: {
+              code: 'below_downgrade_floor',
+              message: 'below floor',
+              details: { target: 'nightly-20261020', floor: 'nightly-20261021' },
+            },
+          },
+        },
+      ],
+    });
+    expect(vi.mocked(showToast).mock.calls[0][0]).toContain('downgrade floor (nightly-20261021)');
+    expect(dialog(el)).toBeNull();
+    expect(root(el).querySelector('sl-dialog[label="Update Hub"]')).not.toBeNull();
+  });
+
+  it('notes the database snapshot in the update dialog when the hub takes them', async () => {
+    el = await mount({
+      releases: CATALOG,
+      status: updateStatus({ downgrade: { floor: 'nightly-20261009', snapshotsSupported: true } }),
+    });
+    await pick(el, 'release-select', 'nightly-20261020');
+    cardRoot(el).querySelector<HTMLElement>('sl-button.update-release')!.click();
+    await settle(el);
+    expect(
+      root(el).querySelector('sl-dialog[label="Update Hub"] .confirm-snapshot')
+    ).not.toBeNull();
+  });
+});
+
+describe('lastUpdateMessage', () => {
+  type Mod = { lastUpdateMessage(last: Json): string };
+  const last = (over: Json): Json => ({
+    runId: 'run-1',
+    from: 'nightly-20261022',
+    to: 'nightly-20261023',
+    status: 'rolled_back',
+    at: '2026-10-24T00:01:00Z',
+    ...over,
+  });
+
+  it('names the restored release of a rollback, else from', async () => {
+    const { lastUpdateMessage } = (await import('./admin-maintenance.js')) as unknown as Mod;
+    expect(lastUpdateMessage(last({ restored: 'nightly-20261021' }))).toBe(
+      'Rolled back to nightly-20261021 after nightly-20261023 failed to start.'
+    );
+    expect(lastUpdateMessage(last({}))).toBe(
+      'Rolled back to nightly-20261022 after nightly-20261023 failed to start.'
+    );
+    expect(lastUpdateMessage(last({ status: 'verified' }))).toBe(
+      'Hub updated to nightly-20261023 (verified).'
+    );
+    expect(lastUpdateMessage(last({ status: 'failed' }))).toBe(
+      'Update to nightly-20261023 failed.'
+    );
   });
 });

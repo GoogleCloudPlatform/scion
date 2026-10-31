@@ -21,12 +21,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 const workspaceGitProjectID = "1a2b3c4d-0000-4000-8000-00000000c0de"
@@ -209,8 +211,8 @@ func TestBuildStartContext_WorkspaceGitOnSharedLayout(t *testing.T) {
 		})
 	}
 	t.Run("hub-native project, git cannot be run: absent", func(t *testing.T) {
-		stubWorkspaceGitProbe(t, func(context.Context, string) (string, error) {
-			return "", &exec.Error{Name: "git", Err: exec.ErrNotFound}
+		stubWorkspaceGitProbe(t, func(context.Context, string) util.HostGitResult {
+			return util.HostGitResult{ExitCode: -1, Err: &exec.Error{Name: "git", Err: exec.ErrNotFound}}
 		})
 		f := newWorkspaceGitFixture(t)
 		f.mkLeaf(t)
@@ -229,7 +231,7 @@ func TestBuildStartContext_WorkspaceGitOnSharedLayout(t *testing.T) {
 }
 
 // stubWorkspaceGitProbe replaces workspaceGitProbe for the rest of the test.
-func stubWorkspaceGitProbe(t *testing.T, probe func(context.Context, string) (string, error)) {
+func stubWorkspaceGitProbe(t *testing.T, probe func(context.Context, string) util.HostGitResult) {
 	t.Helper()
 	prev := workspaceGitProbe
 	workspaceGitProbe = probe
@@ -241,8 +243,8 @@ func stubWorkspaceGitProbe(t *testing.T, probe func(context.Context, string) (st
 func TestGitReportsNotARepository(t *testing.T) {
 	plain := t.TempDir()
 	t.Run("missing git binary: unknown", func(t *testing.T) {
-		stubWorkspaceGitProbe(t, func(context.Context, string) (string, error) {
-			return "", &exec.Error{Name: "git", Err: exec.ErrNotFound}
+		stubWorkspaceGitProbe(t, func(context.Context, string) util.HostGitResult {
+			return util.HostGitResult{ExitCode: -1, Err: &exec.Error{Name: "git", Err: exec.ErrNotFound}}
 		})
 		if gitReportsNotARepository(context.Background(), plain) {
 			t.Fatal("an exec error must be unknown, not \"not git\"")
@@ -251,21 +253,27 @@ func TestGitReportsNotARepository(t *testing.T) {
 			t.Fatal("workspaceDirKnownNotGit must be false when git cannot be run")
 		}
 	})
-	t.Run("IO error with the message: unknown", func(t *testing.T) {
-		stubWorkspaceGitProbe(t, func(context.Context, string) (string, error) {
-			return "fatal: not a git repository (or any of the parent directories): .git", errors.New("read |0: input/output error")
+	t.Run("door error with a clean exit and the message: unknown", func(t *testing.T) {
+		// A door error (an IO error, a refusal, a repository that appeared
+		// while git ran) wins over the exit code and the message.
+		stubWorkspaceGitProbe(t, func(context.Context, string) util.HostGitResult {
+			return util.HostGitResult{
+				ExitCode: 128,
+				Stderr:   []byte("fatal: not a git repository (or any of the parent directories): .git\n"),
+				Err:      errors.New("read |0: input/output error"),
+			}
 		})
 		if gitReportsNotARepository(context.Background(), plain) {
-			t.Fatal("an error that is not a clean git exit must be unknown")
+			t.Fatal("a door error must be unknown")
 		}
 	})
 	t.Run("timeout: unknown", func(t *testing.T) {
 		prev := workspaceGitTimeout
 		workspaceGitTimeout = 20 * time.Millisecond
 		t.Cleanup(func() { workspaceGitTimeout = prev })
-		stubWorkspaceGitProbe(t, func(ctx context.Context, _ string) (string, error) {
+		stubWorkspaceGitProbe(t, func(ctx context.Context, _ string) util.HostGitResult {
 			<-ctx.Done()
-			return "fatal: not a git repository", ctx.Err()
+			return util.HostGitResult{ExitCode: -1, Stderr: []byte("fatal: not a git repository\n"), Err: ctx.Err()}
 		})
 		start := time.Now()
 		if gitReportsNotARepository(context.Background(), plain) {
@@ -273,6 +281,18 @@ func TestGitReportsNotARepository(t *testing.T) {
 		}
 		if d := time.Since(start); d > 5*time.Second {
 			t.Fatalf("the git call was not bounded: took %s", d)
+		}
+	})
+	t.Run("clean exit 128 with the message after the bound expired: unknown", func(t *testing.T) {
+		prev := workspaceGitTimeout
+		workspaceGitTimeout = 20 * time.Millisecond
+		t.Cleanup(func() { workspaceGitTimeout = prev })
+		stubWorkspaceGitProbe(t, func(ctx context.Context, _ string) util.HostGitResult {
+			<-ctx.Done()
+			return util.HostGitResult{ExitCode: 128, Stderr: []byte("fatal: not a git repository\n")}
+		})
+		if gitReportsNotARepository(context.Background(), plain) {
+			t.Fatal("an answer that arrives after the bound expired must be unknown")
 		}
 	})
 	t.Run("real git", func(t *testing.T) {
@@ -290,23 +310,30 @@ func TestGitReportsNotARepository(t *testing.T) {
 	})
 }
 
-// shProbe returns a workspaceGitProbe stand-in that runs script under sh, a
-// real process, so its result is a genuine *exec.ExitError (or nil).
-func shProbe(t *testing.T, script string) func(context.Context, string) (string, error) {
+// fakeGitOnPath puts a fake git first on PATH for the rest of the test. It
+// answers the door's own config read (any call without rev-parse) with an
+// empty listing and exit 0, and runs script under sh for the probe's
+// rev-parse, so the real door (util.RunHostGit) and its ExitCode and Err
+// mapping are exercised with a real process.
+func fakeGitOnPath(t *testing.T, script string) {
 	t.Helper()
-	if _, err := exec.LookPath("sh"); err != nil {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
 		t.Skip("sh not installed")
 	}
-	return func(ctx context.Context, _ string) (string, error) {
-		return runWorkspaceGitProbe(exec.CommandContext(ctx, "sh", "-c", script))
+	bin := t.TempDir()
+	body := "#!" + sh + "\n" +
+		"for a in \"$@\"; do if [ \"$a\" = rev-parse ]; then\n" + script + "\nfi; done\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(body), 0o755); err != nil {
+		t.Fatal(err)
 	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
-// Real processes for every branch of the decision: only a positive exit
-// code with a stderr line that starts with git's "fatal: not a git
-// repository" reads as "not git".
+// Real processes through the real door for every branch of the decision:
+// only a positive exit code with a stderr line that starts with git's
+// "fatal: not a git repository", and no door error, reads as "not git".
 func TestGitReportsNotARepository_RealProcesses(t *testing.T) {
-	dir := t.TempDir()
 	cases := []struct {
 		name   string
 		script string
@@ -321,24 +348,59 @@ func TestGitReportsNotARepository_RealProcesses(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			stubWorkspaceGitProbe(t, shProbe(t, tc.script))
-			if got := gitReportsNotARepository(context.Background(), dir); got != tc.want {
+			fakeGitOnPath(t, tc.script)
+			if got := gitReportsNotARepository(context.Background(), t.TempDir()); got != tc.want {
 				t.Fatalf("gitReportsNotARepository = %v, want %v", got, tc.want)
 			}
 		})
 	}
-	t.Run("clean exit 128 with the message after the bound expired", func(t *testing.T) {
-		prev := workspaceGitTimeout
-		workspaceGitTimeout = 20 * time.Millisecond
-		t.Cleanup(func() { workspaceGitTimeout = prev })
-		realProbe := shProbe(t, `echo "fatal: not a git repository" >&2; exit 128`)
-		stubWorkspaceGitProbe(t, func(ctx context.Context, d string) (string, error) {
-			<-ctx.Done()
-			// A genuine ExitError, obtained without the expired context.
-			return realProbe(context.Background(), d)
-		})
-		if gitReportsNotARepository(context.Background(), dir) {
-			t.Fatal("an answer that arrives after the bound expired must be unknown")
+	t.Run("no git on PATH: unknown", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		if gitReportsNotARepository(context.Background(), t.TempDir()) {
+			t.Fatal("git that cannot be started must be unknown")
 		}
 	})
+}
+
+// A directory inside a parent repository's work tree, with no .git entry of
+// its own, is inside a work tree: the probe runs with CeilingOff, so git
+// finds the enclosing repository and the directory is never "not git".
+func TestGitReportsNotARepository_LeafInsideParentRepo(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	parent := t.TempDir()
+	gitInitDir(t, parent)
+	leaf := filepath.Join(parent, "projects", "p1", "workspace")
+	if err := os.MkdirAll(leaf, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	res := workspaceGitProbe(context.Background(), leaf)
+	if res.Err != nil || res.ExitCode != 0 || strings.TrimSpace(string(res.Stdout)) != "true" {
+		t.Fatalf("probe in a leaf inside a repository: exit %d, stdout %q, stderr %q, err %v; want exit 0 and \"true\"",
+			res.ExitCode, res.Stdout, res.Stderr, res.Err)
+	}
+	if gitReportsNotARepository(context.Background(), leaf) {
+		t.Fatal("a directory inside a parent repository must not be reported as not a git repository")
+	}
+	if workspaceDirKnownNotGit(context.Background(), leaf) {
+		t.Fatal("workspaceDirKnownNotGit must be false for a directory inside a parent repository")
+	}
+}
+
+// A workspace directory holding a HEAD entry may itself be a git directory:
+// the door refuses to run git there, so the probe is unknown and the guard
+// stays closed.
+func TestGitReportsNotARepository_HEADEntryRefused(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := workspaceGitProbe(context.Background(), dir)
+	if res.Err == nil {
+		t.Fatalf("probe in a directory with a HEAD entry: exit %d, err nil; want the door's refusal", res.ExitCode)
+	}
+	if gitReportsNotARepository(context.Background(), dir) {
+		t.Fatal("a directory with a HEAD entry must be unknown, not \"not git\"")
+	}
 }

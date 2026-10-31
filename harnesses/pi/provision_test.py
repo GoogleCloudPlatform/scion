@@ -281,6 +281,59 @@ class SettingsTest(unittest.TestCase):
             s = read_json(tmp, *SETTINGS)
         self.assertNotIn("defaultModel", s)
 
+    def _model_settings_for(self, model: str) -> dict:
+        with tempfile.TemporaryDirectory() as tmp, env(tmp, SCION_MODEL=model):
+            invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
+            return read_json(tmp, *SETTINGS)
+
+    def test_model_colon_in_id_kept(self) -> None:
+        # Colons that are part of the model ID (Ollama tags, Bedrock
+        # versions, OpenRouter variants) are not thinking suffixes.
+        cases = [
+            ("ollama/qwen3:8b", "ollama", "qwen3:8b"),
+            (
+                "amazon-bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0",
+                "amazon-bedrock",
+                "anthropic.claude-3-5-sonnet-20241022-v2:0",
+            ),
+            (
+                "openrouter/meta-llama/llama-3.3-70b-instruct:free",
+                "openrouter",
+                "meta-llama/llama-3.3-70b-instruct:free",
+            ),
+        ]
+        for model, provider, model_id in cases:
+            with self.subTest(model=model):
+                s = self._model_settings_for(model)
+                self.assertEqual(s["defaultProvider"], provider)
+                self.assertEqual(s["defaultModel"], model_id)
+
+    def test_model_thinking_suffix_stripped_every_level(self) -> None:
+        # pi 1.3.0's thinking levels (VALID_THINKING_LEVELS in its cli/args).
+        for level in ("off", "minimal", "low", "medium", "high", "xhigh", "max"):
+            with self.subTest(level=level):
+                s = self._model_settings_for(f"anthropic/claude-sonnet-4-5:{level}")
+                self.assertEqual(s["defaultModel"], "claude-sonnet-4-5")
+
+    def test_model_thinking_suffix_after_real_colon(self) -> None:
+        s = self._model_settings_for("ollama/qwen3:8b:high")
+        self.assertEqual(s["defaultModel"], "qwen3:8b")
+
+    def test_model_suffix_not_a_level_kept(self) -> None:
+        # Like pi, only the last segment is checked, case-sensitively, and an
+        # empty suffix is not a level.
+        for model_id in ("qwen3:HIGH", "qwen3:", "qwen3:high:8b"):
+            with self.subTest(model_id=model_id):
+                s = self._model_settings_for(f"ollama/{model_id}")
+                self.assertEqual(s["defaultModel"], model_id)
+
+    def test_model_without_provider(self) -> None:
+        for model, model_id in (("qwen3:8b", "qwen3:8b"), ("sonnet:high", "sonnet")):
+            with self.subTest(model=model):
+                s = self._model_settings_for(model)
+                self.assertEqual(s["defaultModel"], model_id)
+                self.assertNotIn("defaultProvider", s)
+
 
 class TrustPolicyTest(unittest.TestCase):
     """pi v1.3.0 resolves trust: CLI override, user extension, trust.json, then
@@ -393,8 +446,10 @@ class CaptureAuthTest(unittest.TestCase):
             }
             if conflict:
                 child_env["FAKE_CONFLICT"] = "1"
+            # -B: child_env drops PYTHONDONTWRITEBYTECODE, and the child imports
+            # scion_harness from this directory; keep its bytecode out of the tree.
             proc = subprocess.run(
-                [sys.executable, os.path.join(HERE, "capture_auth.py"), *args],
+                [sys.executable, "-B", os.path.join(HERE, "capture_auth.py"), *args],
                 env=child_env, capture_output=True, text=True, timeout=60,
             )
             calls = []

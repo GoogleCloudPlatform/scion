@@ -428,6 +428,11 @@ type BrokerCapabilities struct {
 	// cleared_fields at start (ptone/scion#3906, ptone/scion#4890;
 	// store.BrokerCapabilities.ClearedFields is its counterpart).
 	ClearedFields bool `json:"clearedFields,omitempty"`
+	// UnlimitedCountLimits indicates the broker honours an explicit
+	// max_turns or max_model_calls of 0 as "no limit" over an inherited one
+	// (ptone/scion#5605; store.BrokerCapabilities.UnlimitedCountLimits is
+	// its counterpart).
+	UnlimitedCountLimits bool `json:"unlimitedCountLimits,omitempty"`
 	// StartsInFlight indicates the broker reports the agent starts still
 	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
 	// then does the hub read a start's absence from that list as "no start

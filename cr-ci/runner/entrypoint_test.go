@@ -41,7 +41,8 @@ pwd > "$out/cwd"
 {
   echo "RUNNER_WORKSPACE=${RUNNER_WORKSPACE:-}"
   echo "RUNNER_TEMP=${RUNNER_TEMP:-}"
-  echo "TMPDIR=${TMPDIR:-}"
+  echo "TMPDIR_SET=${TMPDIR+yes}"
+  echo "GOTMPDIR=${GOTMPDIR:-}"
   echo "GOPATH=${GOPATH:-}"
   echo "GOCACHE=${GOCACHE:-}"
   echo "GOMODCACHE=${GOMODCACHE:-}"
@@ -215,11 +216,11 @@ func respondRaw(contentType, body string) func(http.ResponseWriter) {
 	}
 }
 
-// harness is one prepared entrypoint run: a fake scratch mount, a mount
+// harness is one prepared entrypoint run: HOME as a fake volume mount, a mount
 // table that lists it, a runner dir with the stub run.sh, and the env.
 type harness struct {
 	t                  *testing.T
-	scratch, mountinfo string
+	vol, mountinfo     string // vol is HOME, the fake ephemeral-disk mount point
 	runnerDir, stubOut string
 	token, jit         string
 	idToken, audience  string
@@ -236,7 +237,7 @@ func newHarness(t *testing.T, mediatorURL string) *harness {
 	root := t.TempDir()
 	h := &harness{
 		t:         t,
-		scratch:   filepath.Join(root, "scratch"),
+		vol:       root,
 		mountinfo: filepath.Join(root, "mountinfo"),
 		runnerDir: filepath.Join(root, "actions-runner"),
 		stubOut:   filepath.Join(root, "stub-out"),
@@ -247,7 +248,7 @@ func newHarness(t *testing.T, mediatorURL string) *harness {
 		audience:  strings.TrimSuffix(mediatorURL, "/"),
 	}
 	h.meta = newMetadataServer(t, h.audience, respondIDToken(h.idToken))
-	for _, d := range []string{h.scratch, h.runnerDir, h.stubOut} {
+	for _, d := range []string{h.runnerDir, h.stubOut} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -276,7 +277,6 @@ func newHarness(t *testing.T, mediatorURL string) *harness {
 		"MEDIATOR_URL":             mediatorURL,
 		"GH_JOB_ID":                "4242",
 		"RUNNER_NAME":              "cr-job-4242",
-		"CR_SCRATCH_DIR":           h.scratch,
 		"CR_MOUNTINFO":             h.mountinfo,
 		"CR_RUNNER_DIR":            h.runnerDir,
 		"CR_CLAIM_BACKOFF_SECONDS": "0",
@@ -292,7 +292,7 @@ func newHarness(t *testing.T, mediatorURL string) *harness {
 // the entrypoint's PATH.
 func (h *harness) stubCommand(name, script string) {
 	h.t.Helper()
-	bin := filepath.Join(filepath.Dir(h.scratch), "stub-bin")
+	bin := filepath.Join(h.home, "stub-bin")
 	if err := os.MkdirAll(bin, 0o755); err != nil {
 		h.t.Fatal(err)
 	}
@@ -307,7 +307,7 @@ func (h *harness) stubCommand(name, script string) {
 func (h *harness) writeMountinfo(fstype string) {
 	h.t.Helper()
 	content := "22 1 0:21 / / rw,relatime - overlay overlay rw\n" +
-		fmt.Sprintf("36 22 8:16 / %s rw,relatime shared:7 - %s /dev/sdb rw\n", h.scratch, fstype)
+		fmt.Sprintf("36 22 8:16 / %s rw,relatime shared:7 - %s /dev/sdb rw\n", h.vol, fstype)
 	if err := os.WriteFile(h.mountinfo, []byte(content), 0o644); err != nil {
 		h.t.Fatal(err)
 	}
@@ -406,8 +406,9 @@ func TestEntrypointSuccess(t *testing.T) {
 	env := h.stubFile("env")
 	for _, want := range []string{
 		"RUNNER_WORKSPACE=" + h.home + "/work",
-		"RUNNER_TEMP=" + h.scratch + "/_temp",
-		"TMPDIR=" + h.scratch + "/_temp",
+		"RUNNER_TEMP=" + h.home + "/work/_temp",
+		"TMPDIR_SET=",
+		"GOTMPDIR=" + h.home + "/.cr-ci/go-tmp",
 		"GOPATH=" + h.home + "/go",
 		"GOCACHE=" + h.home + "/.cache/go-build",
 		"GOMODCACHE=" + h.home + "/go/pkg/mod",
@@ -422,14 +423,16 @@ func TestEntrypointSuccess(t *testing.T) {
 			t.Errorf("run.sh env lacks %q; got:\n%s", want, env)
 		}
 	}
-	h.checkHomeLinks()
-	// The runner's _diag must stay off /scratch (F-D).
-	if _, err := os.Lstat(filepath.Join(h.scratch, "_diag")); !os.IsNotExist(err) {
-		t.Errorf("%s/_diag exists (err %v); the runner's logs must not go to /scratch", h.scratch, err)
+	h.checkHomeDirs()
+	// The runner's _diag must stay off the volume (F-D): it lives in the runner dir.
+	for _, d := range []string{"_diag", "work/_diag"} {
+		if _, err := os.Lstat(filepath.Join(h.vol, d)); !os.IsNotExist(err) {
+			t.Errorf("%s/%s exists (err %v); the runner's logs must not go to the volume", h.vol, d, err)
+		}
 	}
-	for _, d := range []string{"_work", "_temp", ".cache/go-build", ".cache/golangci-lint", "go/pkg/mod"} {
-		if fi, err := os.Stat(filepath.Join(h.scratch, d)); err != nil || !fi.IsDir() {
-			t.Errorf("%s/%s was not created: %v", h.scratch, d, err)
+	for _, d := range []string{"work/_temp", ".cache/go-build", ".cache/golangci-lint", "go/pkg/mod", ".cr-ci/go-tmp"} {
+		if fi, err := os.Lstat(filepath.Join(h.vol, d)); err != nil || !fi.IsDir() {
+			t.Errorf("%s/%s was not created as a real directory: %v", h.vol, d, err)
 		}
 	}
 
@@ -547,27 +550,33 @@ func TestEntrypointNonRetryableResponses(t *testing.T) {
 	}
 }
 
-func TestEntrypointScratchChecks(t *testing.T) {
+// setMissingHome points HOME (and CR_EXPECTED_HOME) at a directory that does not exist.
+func (h *harness) setMissingHome() {
+	missing := filepath.Join(h.home, "no-such-home")
+	h.env["HOME"], h.env["CR_EXPECTED_HOME"] = missing, missing
+}
+
+func TestEntrypointVolumeChecks(t *testing.T) {
 	cases := []struct {
 		name    string
 		mutate  func(h *harness)
 		wantMsg string
 	}{
-		{"missing", func(h *harness) { os.RemoveAll(h.scratch) }, "does not exist"},
+		{"missing", func(h *harness) { h.setMissingHome() }, "does not exist"},
 		{"not a mount point", func(h *harness) {
 			if err := os.WriteFile(h.mountinfo, []byte("22 1 0:21 / / rw - overlay overlay rw\n"), 0o644); err != nil {
 				h.t.Fatal(err)
 			}
 		}, "is not a mount point"},
-		{"mount table unreadable, same device as parent", func(h *harness) { h.env["CR_MOUNTINFO"] = filepath.Join(h.scratch, "no-such-file") }, "is not a mount point"},
+		{"mount table unreadable, same device as parent", func(h *harness) { h.env["CR_MOUNTINFO"] = filepath.Join(h.vol, "no-such-file") }, "is not a mount point"},
 		{"not writable", func(h *harness) {
 			if os.Geteuid() == 0 {
 				h.t.Skip("root ignores directory permissions")
 			}
-			if err := os.Chmod(h.scratch, 0o555); err != nil {
+			if err := os.Chmod(h.vol, 0o555); err != nil {
 				h.t.Fatal(err)
 			}
-			h.t.Cleanup(func() { os.Chmod(h.scratch, 0o755) })
+			h.t.Cleanup(func() { os.Chmod(h.vol, 0o755) })
 		}, "not writable"},
 	}
 	for _, tc := range cases {
@@ -581,6 +590,101 @@ func TestEntrypointScratchChecks(t *testing.T) {
 				t.Errorf("claim requests = %d, want 0 (token must not be spent)", n)
 			}
 		})
+	}
+}
+
+// E: a job definition from before this image mounts the volume at /scratch, so HOME is
+// a plain directory of the root filesystem. The entrypoint must fail closed (exit 2,
+// no claim) and say how to fix it.
+func TestEntrypointOldJobLayoutFailsClosed(t *testing.T) {
+	cs := newClaimServer(t, respondStatus(http.StatusOK))
+	h := newHarness(t, cs.URL)
+	old := filepath.Join(t.TempDir(), "scratch")
+	if err := os.MkdirAll(old, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	content := "22 1 0:21 / / rw,relatime - overlay overlay rw\n" +
+		fmt.Sprintf("36 22 8:16 / %s rw,relatime shared:7 - ext4 /dev/sdb rw\n", old)
+	if err := os.WriteFile(h.mountinfo, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := h.run()
+	expectFailure(t, h, res, 2, "is not a mount point")
+	if !strings.Contains(res.stderr, "a job still mounting it at /scratch is from before this image") {
+		t.Errorf("stderr lacks the old-layout hint:\n%s", res.stderr)
+	}
+	if n := len(cs.recorded()); n != 0 {
+		t.Errorf("claim requests = %d, want 0 (token must not be spent)", n)
+	}
+	if h.stubStarted() {
+		t.Error("run.sh was started")
+	}
+}
+
+// C (probe): the volume root's owner and mode are logged at every start, and a root
+// owned by this uid that is group- or world-writable is tightened to 0755.
+func TestEntrypointVolumeRootProbe(t *testing.T) {
+	h := newSuccessHarness(t)
+	if err := os.Chmod(h.vol, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(h.vol, 0o755) })
+	res := h.run()
+	if res.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr:\n%s", res.exitCode, res.stderr)
+	}
+	want := fmt.Sprintf("volume root %s: owner uid %d, mode 777; set to 0755", h.vol, os.Getuid())
+	if !strings.Contains(res.stderr, want) {
+		t.Errorf("stderr lacks %q:\n%s", want, res.stderr)
+	}
+	if fi, err := os.Stat(h.vol); err != nil || fi.Mode().Perm() != 0o755 {
+		t.Errorf("volume root mode = %v (%v), want 0755", modeOf(fi), err)
+	}
+
+	h2 := newSuccessHarness(t)
+	if err := os.Chmod(h2.vol, 0o755); err != nil { // t.TempDir is 0700
+		t.Fatal(err)
+	}
+	res = h2.run()
+	want = fmt.Sprintf("volume root %s: owner uid %d, mode 755\n", h2.vol, os.Getuid())
+	if !strings.Contains(res.stderr, want) {
+		t.Errorf("stderr lacks %q (no chmod needed):\n%s", want, res.stderr)
+	}
+
+	// The production-likely case: a world-writable volume root owned by another uid
+	// (root on Cloud Run). This uid cannot chmod it, so the entrypoint only logs it and
+	// leaves the mode alone. A stub stat reports another uid (this uid + 1, so the case
+	// also holds when the tests run as root) and mode 777 for the owner/mode query on the
+	// volume root only (the job guard's own stat calls, on other paths, see the real stat).
+	other := os.Getuid() + 1
+	h3 := newSuccessHarness(t)
+	if err := os.Chmod(h3.vol, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	realStat, err := exec.LookPath("stat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h3.stubCommand("stat", fmt.Sprintf(`#!/usr/bin/env bash
+if [[ ${!#} == %q && " $* " == *" %%u %%a "* ]]; then
+  echo "%d 777"
+  exit 0
+fi
+exec %q "$@"
+`, h3.vol, other, realStat))
+	res = h3.run()
+	if res.exitCode != 0 {
+		t.Fatalf("777 root owned by uid %d: exit code = %d, want 0; stderr:\n%s", other, res.exitCode, res.stderr)
+	}
+	want = fmt.Sprintf("volume root %s: owner uid %d, mode 777\n", h3.vol, other)
+	if !strings.Contains(res.stderr, want) {
+		t.Errorf("stderr lacks %q:\n%s", want, res.stderr)
+	}
+	if strings.Contains(res.stderr, "set to 0755") || strings.Contains(res.stderr, "chmod 0755 failed") {
+		t.Errorf("the entrypoint tried to change a volume root it does not own:\n%s", res.stderr)
+	}
+	if fi, err := os.Stat(h3.vol); err != nil || fi.Mode().Perm() != 0o755 {
+		t.Errorf("volume root mode = %v (%v), want it left as found (0755 here)", modeOf(fi), err)
 	}
 }
 
@@ -648,7 +752,7 @@ if [[ ${!#} == %q ]]; then
   exit 0
 fi
 exec %q "$@"
-`, h.scratch, realStat))
+`, h.vol, realStat))
 }
 
 func TestEntrypointScratchDeviceFallback(t *testing.T) {
@@ -661,7 +765,7 @@ func TestEntrypointScratchDeviceFallback(t *testing.T) {
 				h.t.Fatal(err)
 			}
 		}},
-		{"mount table unreadable", func(h *harness) { h.env["CR_MOUNTINFO"] = filepath.Join(h.scratch, "no-such-file") }},
+		{"mount table unreadable", func(h *harness) { h.env["CR_MOUNTINFO"] = filepath.Join(h.vol, "no-such-file") }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -689,7 +793,7 @@ func TestEntrypointScratchMountTableLogged(t *testing.T) {
 	cs := newClaimServer(t, func(w http.ResponseWriter) { respondJIT(h.jit)(w) })
 	h = newHarness(t, cs.URL)
 	res := h.run()
-	if want := h.scratch + " is a mount (ext4): listed in " + h.mountinfo; !strings.Contains(res.stderr, want) {
+	if want := h.vol + " is a mount (ext4): listed in " + h.mountinfo; !strings.Contains(res.stderr, want) {
 		t.Errorf("stderr lacks %q:\n%s", want, res.stderr)
 	}
 }
@@ -736,9 +840,9 @@ func TestEntrypointScratchStatFailure(t *testing.T) {
 	h.stubCommand("stat", fmt.Sprintf(`#!/usr/bin/env bash
 case ${!#} in %q | %q) echo 'stat: simulated failure' >&2; exit 1 ;; esac
 exec %q "$@"
-`, h.scratch, filepath.Dir(h.scratch), realStat))
+`, h.vol, filepath.Dir(h.vol), realStat))
 	res := h.run()
-	expectFailure(t, h, res, 2, "cannot stat "+h.scratch+" to verify that it is a mount")
+	expectFailure(t, h, res, 2, "cannot stat "+h.vol+" to verify that it is a mount")
 	if n := len(cs.recorded()); n != 0 {
 		t.Errorf("claim requests = %d, want 0 (token must not be spent)", n)
 	}
@@ -910,36 +1014,49 @@ func TestEntrypointIDTokenTrailingNewline(t *testing.T) {
 	}
 }
 
-// checkHomeLinks asserts the cache-parity layout: ~/work, ~/.cache, ~/go and
-// ~/.npm are symlinks whose literal targets mirror HOME under the scratch dir.
-func (h *harness) checkHomeLinks() {
+// checkHomeDirs asserts the cache-parity layout: ~/work, ~/.cache, ~/go and ~/.npm
+// are REAL directories on the volume (HOME), not symlinks, so their physical paths are
+// their logical ones (actions/setup-node's lock-file hashing, whole-directory caches).
+func (h *harness) checkHomeDirs() {
 	h.t.Helper()
-	for link, target := range map[string]string{
-		"work":   h.scratch + "/_work",
-		".cache": h.scratch + "/.cache",
-		"go":     h.scratch + "/go",
-		".npm":   h.scratch + "/.npm",
-	} {
-		got, err := os.Readlink(filepath.Join(h.home, link))
-		if err != nil || got != target {
-			h.t.Errorf("~/%s -> %q (err %v), want a symlink to %s", link, got, err, target)
+	for _, d := range []string{"work", ".cache", "go", ".npm"} {
+		fi, err := os.Lstat(filepath.Join(h.home, d))
+		if err != nil || !fi.IsDir() {
+			h.t.Errorf("~/%s: %v (mode %v), want a real directory", d, err, modeOf(fi))
 		}
 	}
 }
 
-func TestEntrypointHomeLinksKeptWhenCorrect(t *testing.T) {
+func modeOf(fi os.FileInfo) os.FileMode {
+	if fi == nil {
+		return 0
+	}
+	return fi.Mode()
+}
+
+// Directories already present (for example from an earlier step in the same execution)
+// are kept with their contents.
+func TestEntrypointHomeDirsKeptWhenPresent(t *testing.T) {
 	var h *harness
 	cs := newClaimServer(t, func(w http.ResponseWriter) { respondJIT(h.jit)(w) })
 	h = newHarness(t, cs.URL)
-	for link, target := range map[string]string{"work": "/_work", ".cache": "/.cache", "go": "/go", ".npm": "/.npm"} {
-		if err := os.Symlink(h.scratch+target, filepath.Join(h.home, link)); err != nil {
+	for _, d := range []string{"work", ".cache", "go", ".npm"} {
+		if err := os.MkdirAll(filepath.Join(h.home, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(h.home, d, "keep"), []byte(d), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if res := h.run(); res.exitCode != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr:\n%s", res.exitCode, res.stderr)
 	}
-	h.checkHomeLinks()
+	h.checkHomeDirs()
+	for _, d := range []string{"work", ".cache", "go", ".npm"} {
+		if b, err := os.ReadFile(filepath.Join(h.home, d, "keep")); err != nil || string(b) != d {
+			t.Errorf("~/%s/keep lost: %v", d, err)
+		}
+	}
 }
 
 func TestEntrypointHomeLinkConflicts(t *testing.T) {
@@ -948,26 +1065,26 @@ func TestEntrypointHomeLinkConflicts(t *testing.T) {
 		mutate  func(h *harness)
 		wantMsg string
 	}{
-		{"real ~/.cache dir", func(h *harness) {
-			if err := os.Mkdir(filepath.Join(h.home, ".cache"), 0o755); err != nil {
+		{"~/work is a symlink (the old /scratch layout)", func(h *harness) {
+			if err := os.Symlink("/scratch/_work", filepath.Join(h.home, "work")); err != nil {
 				h.t.Fatal(err)
 			}
-		}, ".cache exists and is not a symlink"},
-		{"real ~/work dir", func(h *harness) {
-			if err := os.Mkdir(filepath.Join(h.home, "work"), 0o755); err != nil {
+		}, "work is a symlink; want a real directory"},
+		{"~/.cache is a symlink", func(h *harness) {
+			if err := os.Symlink(filepath.Join(h.home, "elsewhere"), filepath.Join(h.home, ".cache")); err != nil {
 				h.t.Fatal(err)
 			}
-		}, "work exists and is not a symlink"},
-		{"~/go links elsewhere", func(h *harness) {
-			if err := os.Symlink(h.scratch+"/gopath", filepath.Join(h.home, "go")); err != nil {
+		}, ".cache is a symlink; want a real directory"},
+		{"~/go is a file", func(h *harness) {
+			if err := os.WriteFile(filepath.Join(h.home, "go"), nil, 0o644); err != nil {
 				h.t.Fatal(err)
 			}
-		}, "go is a symlink to "},
-		{"~/.cache links to the old non-mirrored target", func(h *harness) {
-			if err := os.Symlink(h.scratch+"/cache", filepath.Join(h.home, ".cache")); err != nil {
+		}, "go exists and is not a directory"},
+		{"~/.npm is a symlink", func(h *harness) {
+			if err := os.Symlink("/scratch/.npm", filepath.Join(h.home, ".npm")); err != nil {
 				h.t.Fatal(err)
 			}
-		}, ".cache is a symlink to "},
+		}, ".npm is a symlink; want a real directory"},
 		{"HOME is not the expected home", func(h *harness) { h.env["CR_EXPECTED_HOME"] = "/home/runner" }, "want /home/runner"},
 		{"HOME unset", func(h *harness) { delete(h.env, "HOME") }, "HOME is not set"},
 	}
@@ -999,8 +1116,8 @@ func tarCommand(args ...string) *exec.Cmd {
 // directions. GITHUB_WORKSPACE is <home>/work/scion/scion on both.
 func TestEntrypointCacheTarRoundTrip(t *testing.T) { cacheTarRoundTrip(t, false) }
 
-// With RUNNER_BUILD_CACHE_IN_RAM=true, /scratch/.cache is a link to a RAM dir; the
-// same archives must restore where Go reads, with the ~/.cache bytes in RAM.
+// With RUNNER_BUILD_CACHE_IN_RAM=true, ~/.cache is a link to a RAM dir; the same
+// (subdirectory) archives must restore where Go reads, with the ~/.cache bytes in RAM.
 func TestEntrypointCacheTarRoundTripRAM(t *testing.T) { cacheTarRoundTrip(t, true) }
 
 func cacheTarRoundTrip(t *testing.T, inRAM bool) {
@@ -1008,7 +1125,7 @@ func cacheTarRoundTrip(t *testing.T, inRAM bool) {
 	cs := newClaimServer(t, func(w http.ResponseWriter) { respondJIT(h.jit)(w) })
 	h = newHarness(t, cs.URL)
 	ramDir := filepath.Join(t.TempDir(), "ram-build-cache")
-	cacheRoot := filepath.Join(h.scratch, ".cache") // where ~/.cache bytes physically land
+	cacheRoot := filepath.Join(h.vol, ".cache") // where ~/.cache bytes physically land (a real dir)
 	if inRAM {
 		h.env["RUNNER_BUILD_CACHE_IN_RAM"] = "true"
 		h.env["CR_RAM_CACHE_DIR"] = ramDir
@@ -1018,7 +1135,7 @@ func cacheTarRoundTrip(t *testing.T, inRAM bool) {
 		t.Fatalf("exit code = %d, want 0; stderr:\n%s", res.exitCode, res.stderr)
 	}
 	crWorkspace := filepath.Join(h.home, "work", "scion", "scion")
-	if err := os.MkdirAll(crWorkspace, 0o755); err != nil { // creates it under scratch/_work
+	if err := os.MkdirAll(crWorkspace, 0o755); err != nil { // a real path under the real ~/work
 		t.Fatal(err)
 	}
 	entries := []string{"../../../.cache/go-build/ab/obj", "../../../go/pkg/mod/cache/download/m/@v/v1.zip", "../../../.cache/golangci-lint/x"}
@@ -1066,7 +1183,7 @@ func cacheTarRoundTrip(t *testing.T, inRAM bool) {
 	tarRun("-xPf", ubuntuTar, "-C", crWorkspace)
 	for logical, physical := range map[string]string{
 		filepath.Join(h.home, ".cache/go-build/ab/obj"):                filepath.Join(cacheRoot, "go-build/ab/obj"),
-		filepath.Join(h.home, "go/pkg/mod/cache/download/m/@v/v1.zip"): filepath.Join(h.scratch, "go/pkg/mod/cache/download/m/@v/v1.zip"),
+		filepath.Join(h.home, "go/pkg/mod/cache/download/m/@v/v1.zip"): filepath.Join(h.vol, "go/pkg/mod/cache/download/m/@v/v1.zip"),
 		filepath.Join(h.home, ".cache/golangci-lint/x"):                filepath.Join(cacheRoot, "golangci-lint/x"),
 	} {
 		if b, err := os.ReadFile(logical); err != nil || string(b) != "from-ubuntu" {
@@ -1076,11 +1193,12 @@ func cacheTarRoundTrip(t *testing.T, inRAM bool) {
 			t.Errorf("restored bytes are not physically at %s: %v", physical, err)
 		}
 	}
-	h.checkHomeLinks() // tar must not have replaced a link
 	if inRAM {
-		if got, err := os.Readlink(filepath.Join(h.scratch, ".cache")); err != nil || got != ramDir {
-			t.Errorf("%s/.cache = %q (%v), want a link to %s after the restore", h.scratch, got, err, ramDir)
+		if got, err := os.Readlink(filepath.Join(h.home, ".cache")); err != nil || got != ramDir {
+			t.Errorf("~/.cache = %q (%v), want a link to %s after the restore", got, err, ramDir)
 		}
+	} else {
+		h.checkHomeDirs() // tar must not have changed the real directories
 	}
 
 	// cr-ci -> ubuntu-latest: an archive saved through the links restores under the
@@ -1104,69 +1222,58 @@ func cacheTarRoundTrip(t *testing.T, inRAM bool) {
 	}
 }
 
-// A whole-directory cache path (actions/cache path: ~/.cache) archives directory
-// entries such as ../../../.cache/ itself. Extracting them must not replace the
-// ~/.cache link with a real directory: tar resolves ".." physically, so the entry
-// lands on /scratch/.cache (a real dir), and the link is never walked.
+// A whole-directory cache path (actions/cache path: ~/.npm, as actions/setup-node's npm
+// cache saves it, or ~/.cache) archives the directory member itself, such as
+// ../../../.npm/. GNU tar replaces an existing symlink to a directory with a real
+// directory when it extracts such a member (unless --keep-directory-symlink, which
+// actions/cache does not pass), so these must be real directories: the archive then
+// restores in place, on the volume, exactly as on ubuntu-latest.
 func TestEntrypointCacheTarWholeDirectory(t *testing.T) {
-	var h *harness
-	cs := newClaimServer(t, func(w http.ResponseWriter) { respondJIT(h.jit)(w) })
-	h = newHarness(t, cs.URL)
-	if res := h.run(); res.exitCode != 0 {
-		t.Fatalf("exit code = %d, want 0; stderr:\n%s", res.exitCode, res.stderr)
-	}
-	crWorkspace := filepath.Join(h.home, "work", "scion", "scion")
-	if err := os.MkdirAll(crWorkspace, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	ubuntuHome := filepath.Join(t.TempDir(), "home", "runner")
-	ubuntuWorkspace := filepath.Join(ubuntuHome, "work", "scion", "scion")
-	for _, d := range []string{ubuntuWorkspace, filepath.Join(ubuntuHome, ".cache", "go-build", "ab")} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(ubuntuHome, ".cache", "go-build", "ab", "obj"), []byte("whole-dir"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	archive := filepath.Join(t.TempDir(), "whole.tar")
-	for _, args := range [][]string{
-		{"-cPf", archive, "-C", ubuntuWorkspace, "../../../.cache"},
-		{"-xPf", archive, "-C", crWorkspace},
-	} {
-		if out, err := tarCommand(args...).CombinedOutput(); err != nil {
-			t.Fatalf("tar %v: %v\n%s", args, err, out)
-		}
-	}
-	if out, err := tarCommand("-tPf", archive).Output(); err != nil || !strings.Contains(string(out), "../../../.cache/\n") {
-		t.Fatalf("archive lacks the ../../../.cache/ directory entry (err %v):\n%s", err, out)
-	}
-	h.checkHomeLinks() // the directory entry must not have replaced the link
-	if b, err := os.ReadFile(filepath.Join(h.home, ".cache", "go-build", "ab", "obj")); err != nil || string(b) != "whole-dir" {
-		t.Errorf("whole-directory archive did not restore to ~/.cache/go-build: %v", err)
-	}
-	if _, err := os.Lstat(filepath.Join(h.scratch, ".cache", "go-build", "ab", "obj")); err != nil {
-		t.Errorf("restored bytes are not on the scratch disk: %v", err)
-	}
-}
-
-// If a HOME link cannot be created, the entrypoint exits 2 before the claim.
-func TestEntrypointHomeLinkCreateFails(t *testing.T) {
-	cs := newClaimServer(t, respondStatus(http.StatusOK))
-	h := newHarness(t, cs.URL)
-	if os.Geteuid() == 0 {
-		h.t.Skip("root ignores directory permissions")
-	}
-	// HOME read-only: ln -s into it fails, while the scratch dir (a subdirectory with
-	// its own permissions) stays writable for the earlier checks.
-	if err := os.Chmod(h.home, 0o555); err != nil {
-		t.Fatal(err)
-	}
-	h.t.Cleanup(func() { os.Chmod(h.home, 0o755) })
-	res := h.run()
-	expectFailure(t, h, res, 2, "cannot create symlink "+h.home+"/work -> "+h.scratch+"/_work")
-	if n := len(cs.recorded()); n != 0 {
-		t.Errorf("claim requests = %d, want 0 (token must not be spent)", n)
+	for _, dir := range []string{".npm", ".cache"} {
+		t.Run(dir, func(t *testing.T) {
+			var h *harness
+			cs := newClaimServer(t, func(w http.ResponseWriter) { respondJIT(h.jit)(w) })
+			h = newHarness(t, cs.URL)
+			if res := h.run(); res.exitCode != 0 {
+				t.Fatalf("exit code = %d, want 0; stderr:\n%s", res.exitCode, res.stderr)
+			}
+			crWorkspace := filepath.Join(h.home, "work", "scion", "scion")
+			if err := os.MkdirAll(crWorkspace, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			ubuntuHome := filepath.Join(t.TempDir(), "home", "runner")
+			ubuntuWorkspace := filepath.Join(ubuntuHome, "work", "scion", "scion")
+			inner := filepath.Join(dir, "sub", "obj")
+			for _, d := range []string{ubuntuWorkspace, filepath.Join(ubuntuHome, filepath.Dir(inner))} {
+				if err := os.MkdirAll(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(ubuntuHome, inner), []byte("whole-dir"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			member := "../../../" + dir
+			archive := filepath.Join(t.TempDir(), "whole.tar")
+			for _, args := range [][]string{
+				{"-cPf", archive, "-C", ubuntuWorkspace, member},
+				{"-xPf", archive, "-C", crWorkspace},
+			} {
+				if out, err := tarCommand(args...).CombinedOutput(); err != nil {
+					t.Fatalf("tar %v: %v\n%s", args, err, out)
+				}
+			}
+			if out, err := tarCommand("-tPf", archive).Output(); err != nil || !strings.Contains(string(out), member+"/\n") {
+				t.Fatalf("archive lacks the %s/ directory entry (err %v):\n%s", member, err, out)
+			}
+			h.checkHomeDirs() // still real directories
+			if b, err := os.ReadFile(filepath.Join(h.home, inner)); err != nil || string(b) != "whole-dir" {
+				t.Errorf("whole-directory archive did not restore to ~/%s: %v", inner, err)
+			}
+			// No link anywhere on the way: the restored path is physically where it reads.
+			if got, err := filepath.EvalSymlinks(filepath.Join(h.home, inner)); err != nil || got != filepath.Join(h.vol, inner) {
+				t.Errorf("~/%s resolves to %q (%v), want the volume path %s", inner, got, err, filepath.Join(h.vol, inner))
+			}
+		})
 	}
 }
 
@@ -1362,14 +1469,12 @@ func TestEntrypointWarmUp(t *testing.T) {
 	if !strings.Contains(res.stderr, "warm-up OK") {
 		t.Errorf("stderr lacks the warm-up result:\n%s", res.stderr)
 	}
-	h.checkHomeLinks() // the checks still ran
+	h.checkHomeDirs() // the checks still ran
 }
 
 func TestEntrypointWarmUpStillChecks(t *testing.T) {
 	h, _ := warmupHarness(t)
-	if err := os.RemoveAll(h.scratch); err != nil {
-		t.Fatal(err)
-	}
+	h.setMissingHome()
 	expectFailure(t, h, h.run(), 2, "does not exist")
 
 	h2, _ := warmupHarness(t)
@@ -1392,10 +1497,14 @@ func TestEntrypointBuildCacheInRAMLinks(t *testing.T) {
 	if res.exitCode != 0 {
 		t.Fatalf("exit code = %d; stderr:\n%s", res.exitCode, res.stderr)
 	}
-	if got, err := os.Readlink(filepath.Join(h.scratch, ".cache")); err != nil || got != ramDir {
-		t.Errorf("%s/.cache = %q (%v), want a link to %s", h.scratch, got, err, ramDir)
+	if got, err := os.Readlink(filepath.Join(h.home, ".cache")); err != nil || got != ramDir {
+		t.Errorf("~/.cache = %q (%v), want a link to %s", got, err, ramDir)
 	}
-	h.checkHomeLinks() // ~/.cache still -> /scratch/.cache (parity)
+	for _, d := range []string{"work", "go", ".npm"} { // the rest stay real directories
+		if fi, err := os.Lstat(filepath.Join(h.home, d)); err != nil || !fi.IsDir() {
+			t.Errorf("~/%s: %v, want a real directory", d, err)
+		}
+	}
 	for _, d := range []string{"go-build", "golangci-lint"} {
 		if fi, err := os.Stat(filepath.Join(ramDir, d)); err != nil || !fi.IsDir() {
 			t.Errorf("%s/%s was not created in RAM: %v", ramDir, d, err)

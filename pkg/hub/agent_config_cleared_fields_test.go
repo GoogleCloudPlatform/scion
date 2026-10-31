@@ -45,7 +45,7 @@ func TestNextClearedFields(t *testing.T) {
 	stored := func() *api.ScionConfig {
 		return &api.ScionConfig{
 			Harness:       "claude",
-			MaxTurns:      5,
+			MaxTurns:      api.IntPtr(5),
 			ThinkingLevel: clearedTestIntPtr(2),
 			Resources:     &api.ResourceSpec{Requests: api.ResourceList{CPU: "1"}},
 			SystemPrompt:  "be terse",
@@ -56,8 +56,20 @@ func TestNextClearedFields(t *testing.T) {
 	}
 
 	t.Run("clears are recorded", func(t *testing.T) {
-		got := clearedFieldsFor(t, stored(), `{"max_turns":0,"thinking_level":null,"resources":null,"system_prompt":"","env":{"BAR":"2"}}`, true)
+		got := clearedFieldsFor(t, stored(), `{"max_turns":null,"thinking_level":null,"resources":null,"system_prompt":"","env":{"BAR":"2"}}`, true)
 		assert.Equal(t, []string{"env.FOO", "max_turns", "resources", "system_prompt", "thinking_level"}, got)
+	})
+
+	// A count limit of 0 is Unlimited, a value rather than a clear
+	// (ptone/scion#5605): it is not recorded, and it takes an earlier clear
+	// of the key off the list, since the broker applies cleared_fields
+	// after the merge and would otherwise restore the inherited limit.
+	t.Run("unlimited is a value, not a clear", func(t *testing.T) {
+		assert.Nil(t, clearedFieldsFor(t, stored(), `{"max_turns":0,"max_model_calls":0}`, true))
+		old := stored()
+		old.MaxTurns = nil
+		old.ClearedFields = []string{"max_turns"}
+		assert.Nil(t, clearedFieldsFor(t, old, `{"max_turns":0}`, true))
 	})
 
 	t.Run("an edit that sets values records nothing", func(t *testing.T) {
@@ -72,7 +84,7 @@ func TestNextClearedFields(t *testing.T) {
 
 	t.Run("setting a cleared field again drops it", func(t *testing.T) {
 		old := stored()
-		old.MaxTurns = 0
+		old.MaxTurns = nil
 		old.ThinkingLevel = nil
 		old.ClearedFields = []string{"env.FOO", "max_turns", "thinking_level"}
 		got := clearedFieldsFor(t, old, `{"max_turns":4,"thinking_level":0,"env":{"FOO":"x","BAR":"2"}}`, true)
@@ -110,7 +122,7 @@ func clearedTestIntPtr(v int) *int { return &v }
 // no clears, and the live config is not changed.
 func TestLegacyCreateInputsDropClearedFields(t *testing.T) {
 	old := &store.AgentAppliedConfig{InlineConfig: &api.ScionConfig{
-		MaxTurns:      4,
+		MaxTurns:      api.IntPtr(4),
 		ClearedFields: []string{"env.FOO", "resources"},
 		ChangedFields: []string{"system_prompt"},
 	}}
@@ -120,7 +132,7 @@ func TestLegacyCreateInputsDropClearedFields(t *testing.T) {
 	assert.Nil(t, ci.InlineConfig.ClearedFields)
 	// changed_fields is reset by a reincarnation too (ptone/scion#3982).
 	assert.Nil(t, ci.InlineConfig.ChangedFields)
-	assert.Equal(t, 4, ci.InlineConfig.MaxTurns)
+	assert.Equal(t, api.IntPtr(4), ci.InlineConfig.MaxTurns)
 	assert.Equal(t, []string{"env.FOO", "resources"}, old.InlineConfig.ClearedFields)
 	assert.Equal(t, []string{"system_prompt"}, old.InlineConfig.ChangedFields)
 }

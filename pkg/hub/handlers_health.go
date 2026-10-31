@@ -16,12 +16,14 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
@@ -191,6 +193,9 @@ func (s *Server) healthChecks(ctx context.Context) map[string]string {
 	// Legacy storage blocks still in use (non-critical).
 	s.checkProjectStorageConfig(checks)
 
+	// The project tree on a shared backend's mount (non-critical).
+	s.checkProjectStorageTree(checks)
+
 	// Removed per-runtime/per-profile storage overrides (non-critical).
 	s.checkRemovedStorageOverrides(checks)
 
@@ -212,6 +217,51 @@ func (s *Server) checkProjectStorageConfig(checks map[string]string) {
 		return
 	}
 	checks[projectStorageConfigCheck] = "degraded: legacy storage blocks in use; write server.project_storage (the hub startup log prints the block)"
+}
+
+// projectStorageTreeCheck is the health check key of a shared backend
+// whose mount point has no project tree: the share is not mounted (only
+// the mount point is), so the hub, the one deleter of project trees on the
+// share, cannot remove them. Not critical: degraded, never unhealthy.
+const projectStorageTreeCheck = "project_storage_tree"
+
+// projectStorageTreeProbe runs the tree check; a variable so tests can
+// make it hang.
+var projectStorageTreeProbe = func(l projectfs.Layout) error { return l.CheckTreesMounted() }
+
+// checkProjectStorageTree reports, on a shared backend, a mount point
+// without the project tree below it (projectfs.Layout.CheckTreesMounted),
+// before any delete needs it. The probe is bounded by
+// workspaceHealthTimeout, so a hung mount cannot block the health endpoint.
+func (s *Server) checkProjectStorageTree(checks map[string]string) {
+	layout, err := s.projectStorageLayout()
+	if err != nil || (!layout.Backend.Shared() && !layout.SharedDirLayout().Backend.Shared()) {
+		return
+	}
+	done := make(chan error, 1)
+	go func() { done <- projectStorageTreeProbe(layout) }()
+	timer := time.NewTimer(workspaceHealthTimeout)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		// The tree appears with the first project: a hub with no projects
+		// yet has a mount point without it, which is not a missing mount.
+		if errors.Is(err, projectfs.ErrNoProjectTree) {
+			// The store read is bounded by the health timeout too.
+			ctx, cancel := context.WithTimeout(context.Background(), workspaceHealthTimeout)
+			if !s.hubHasProjects(ctx) {
+				err = nil
+			}
+			cancel()
+		}
+		if err != nil {
+			checks[projectStorageTreeCheck] = "degraded: the shared project storage has no project tree; the share may not be mounted"
+			return
+		}
+		checks[projectStorageTreeCheck] = HealthStatusHealthy
+	case <-timer.C:
+		checks[projectStorageTreeCheck] = "degraded: the project tree check timed out"
+	}
 }
 
 // healthStats counts running agents, projects and online runtime brokers

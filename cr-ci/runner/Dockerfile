@@ -150,17 +150,18 @@ COPY --from=golangci-lint --chmod=0755 /out/golangci-lint /usr/local/bin/golangc
 
 # GitHub Actions runner. installdependencies.sh ships in the verified tarball
 # and installs the .NET runtime libraries (libicu, libssl, ...) via apt.
-# _diag (the runner's logs and the job's step logs under _diag/pages; about 1 MB for
-# the P6 lint job, more for jobs with large output) stays a plain directory on the
-# root filesystem, NOT on /scratch: when a job fills /scratch, the runner must still be
-# able to write its logs and report the failure (P6 PoC run 2 lost the runner, and the
-# job's log, to ENOSPC on _diag).
-# The work folder is /home/runner/work (the mediator's JIT work_folder), which
-# entrypoint.sh links to /scratch/_work; the _work symlink here only covers a JIT
-# config that names the default _work. Nothing here may create /home/runner/work,
-# /home/runner/.cache, /home/runner/go or /home/runner/.npm: the entrypoint creates
-# them as links.
-WORKDIR /home/runner/actions-runner
+# The runner is installed at /opt/actions-runner, NOT under HOME: the job's
+# ephemeral-disk volume is mounted at HOME (/home/runner), which hides whatever the image
+# has there. _diag (the runner's logs and the job's step logs under _diag/pages; about
+# 1 MB for the P6 lint job, more for jobs with large output) therefore stays a plain
+# directory on the root filesystem, not on the volume: when a job fills the volume, the
+# runner must still be able to write its logs and report the failure (P6 PoC run 2 lost
+# the runner, and the job's log, to ENOSPC on _diag).
+# The work folder is /home/runner/work (the mediator's JIT work_folder), a real
+# directory the entrypoint creates on the volume; the _work symlink here only covers a
+# JIT config that names the default _work. Nothing here may create anything under
+# /home/runner: it is hidden by the mount.
+WORKDIR /opt/actions-runner
 RUN curl -fsSL -o /tmp/actions-runner.tgz \
       "https://github.com/actions/runner/releases/download/v${ACTIONS_RUNNER_VERSION}/actions-runner-linux-x64-${ACTIONS_RUNNER_VERSION}.tar.gz" \
  && echo "${ACTIONS_RUNNER_SHA256}  /tmp/actions-runner.tgz" | sha256sum -c - \
@@ -168,9 +169,9 @@ RUN curl -fsSL -o /tmp/actions-runner.tgz \
  && rm /tmp/actions-runner.tgz \
  && ./bin/installdependencies.sh \
  && rm -rf /var/lib/apt/lists/* \
- && ln -s /scratch/_work _work \
+ && ln -s /home/runner/work _work \
  && mkdir -p _diag \
- && chown -R runner:runner /home/runner
+ && chown -R runner:runner /opt/actions-runner /home/runner
 
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
 # The job-started hook (entrypoint.sh exports ACTIONS_RUNNER_HOOK_JOB_STARTED to it):
