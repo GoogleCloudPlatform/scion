@@ -528,6 +528,24 @@ func TestAgentPendingConfig_FlagOffKeepsTodayBehaviour(t *testing.T) {
 		assert.Equal(t, "newer-model", starts[0].model)
 	})
 
+	// The start fold's whole-key keep (ptone/scion#5864) runs only with
+	// held edits on: a clear written through with them off still reaches
+	// the applied config and the create inputs now.
+	t.Run("a clear written through still reaches the applied config", func(t *testing.T) {
+		srv, s, _, stopped := off(t, state.PhaseStopped)
+		effectSetCreateInputsMaxTurns(t, s, stopped.ID, 3)
+		resp := patchPending(t, srv, stopped.ID, map[string]interface{}{
+			"config": map[string]interface{}{"max_turns": nil},
+		})
+		assert.Equal(t, []string{"config.max_turns"}, resp.Disposition.HeldForReincarnate)
+		assert.Nil(t, resp.PendingConfig)
+		after := pendingReloadAgent(t, s, stopped.ID)
+		assert.Nil(t, after.AppliedConfig.InlineConfig.MaxTurns, "written through, as before")
+		require.NotNil(t, after.AppliedConfig.CreateInputs)
+		require.NotNil(t, after.AppliedConfig.CreateInputs.InlineConfig)
+		assert.Nil(t, after.AppliedConfig.CreateInputs.InlineConfig.MaxTurns, "recorded as an explicit clear, as before")
+	})
+
 	t.Run("stored pending config stays inert at start", func(t *testing.T) {
 		srv, s, disp, stopped := off(t, state.PhaseStopped)
 		cur := pendingReloadAgent(t, s, stopped.ID)
@@ -1096,7 +1114,7 @@ func heldFilterFixture(t *testing.T, caps *store.BrokerCapabilities) (*Server, s
 // with the rules a written-through edit gets (ptone/scion#3982, #4890,
 // #5676).
 func TestAgentPendingConfig_HeldSaveUsesTheStartRules(t *testing.T) {
-	t.Run("re-rendering broker: a clear or skill removal is written at the next start but needs a reincarnation", func(t *testing.T) {
+	t.Run("re-rendering broker: a clear or skill removal is kept pending whole until a reincarnation", func(t *testing.T) {
 		srv, _, _, agent := heldFilterFixture(t, &store.BrokerCapabilities{Reprovision: true, ChangedFields: true})
 		resp := patchPending(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{
 			"agent_instructions": "",
@@ -1105,7 +1123,7 @@ func TestAgentPendingConfig_HeldSaveUsesTheStartRules(t *testing.T) {
 		assert.Empty(t, resp.Disposition.Held)
 		assert.Equal(t, []string{"config.agent_instructions", "config.skills"}, resp.Disposition.HeldForReincarnate)
 		require.Len(t, resp.Warnings, 1, "%v", resp.Warnings)
-		assert.Equal(t, "config.agent_instructions, config.skills: the change is held and written at the next start; it takes effect at a reincarnation after that (a start does not apply a clear or a removed skill)", resp.Warnings[0])
+		assert.Equal(t, "config.agent_instructions, config.skills: "+heldWholeKeyNote, resp.Warnings[0])
 	})
 
 	t.Run("clearing broker: a clear and an env removal are held and reach cleared_fields at the next start", func(t *testing.T) {
@@ -1208,7 +1226,7 @@ func TestAgentPendingConfig_HeldSaveUsesTheStartRules(t *testing.T) {
 	})
 
 	t.Run("a skill removal pending from an earlier save is still reported against the applied config", func(t *testing.T) {
-		srv, _, _, agent := heldFilterFixture(t, &store.BrokerCapabilities{Reprovision: true, ChangedFields: true})
+		srv, s, disp, agent := heldFilterFixture(t, &store.BrokerCapabilities{Reprovision: true, ChangedFields: true})
 		first := patchPending(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{
 			"skills": []map[string]interface{}{{"uri": "hub://skills/review"}},
 		}})
@@ -1222,6 +1240,21 @@ func TestAgentPendingConfig_HeldSaveUsesTheStartRules(t *testing.T) {
 		assert.Empty(t, second.Disposition.Held, "the start will not apply the removal")
 		assert.Equal(t, []string{"config.skills"}, second.Disposition.HeldForReincarnate)
 		require.Len(t, second.Warnings, 1, "%v", second.Warnings)
-		assert.Contains(t, second.Warnings[0], "written at the next start")
+		assert.Contains(t, second.Warnings[0], "the whole key's change is kept pending, including any part a start could apply")
+
+		// The start keeps the whole skills edit pending, the added skill
+		// included (ptone/scion#5864): the applied skills are unchanged and
+		// the start names config.skills once.
+		pendingLifecycleWarnings(t, srv, agent.ID, "stop")
+		warnings := pendingLifecycleWarnings(t, srv, agent.ID, "start")
+		assert.Contains(t, warnings, heldForReincarnateWarning([]string{"config.skills"}))
+		starts := disp.snapshot()
+		require.Len(t, starts, 1)
+		assert.NotContains(t, starts[0].inline.ChangedFields, "skills")
+		after := pendingReloadAgent(t, s, agent.ID)
+		assert.Equal(t, []api.SkillReference{{URI: "hub://skills/review"}, {URI: "hub://skills/test"}}, after.AppliedConfig.InlineConfig.Skills)
+		require.NotNil(t, after.PendingConfig)
+		assert.Equal(t, []string{"config.skills"}, pendingConfigKeys(after.PendingConfig))
+		effectAssertNoAppliedAudit(t, s, agent.ID)
 	})
 }
