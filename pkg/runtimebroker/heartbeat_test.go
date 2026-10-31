@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"reflect"
 	"sync"
 	"testing"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
@@ -53,6 +55,9 @@ type mockRuntimeBrokerService struct {
 	// launchSender call site built (e.g. its deadline) without needing the
 	// call to fail or time out.
 	ctxHook func(ctx context.Context)
+	// workspaceDownloadFunc, when set, answers WorkspaceDownload; when nil
+	// it answers a 404 (a Hub without the route).
+	workspaceDownloadFunc func(ctx context.Context, brokerID, agentID string, req *api.WorkspaceDownloadRequest) (*api.WorkspaceDownloadResponse, error)
 }
 
 // mockLaunchReportCall records one ReportAgentLaunch invocation.
@@ -115,6 +120,16 @@ func (m *mockRuntimeBrokerService) ReportMessageFailures(ctx context.Context, br
 	defer m.mu.Unlock()
 	m.messageFailureReports = append(m.messageFailureReports, req)
 	return nil
+}
+
+func (m *mockRuntimeBrokerService) WorkspaceDownload(ctx context.Context, brokerID, agentID string, req *api.WorkspaceDownloadRequest) (*api.WorkspaceDownloadResponse, error) {
+	m.mu.Lock()
+	fn := m.workspaceDownloadFunc
+	m.mu.Unlock()
+	if fn == nil {
+		return nil, &apiclient.APIError{StatusCode: http.StatusNotFound}
+	}
+	return fn(ctx, brokerID, agentID, req)
 }
 
 func (m *mockRuntimeBrokerService) getHeartbeatCalls() []mockHeartbeatCall {
