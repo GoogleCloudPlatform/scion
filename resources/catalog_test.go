@@ -157,7 +157,8 @@ func TestPlatformSkillsFS_ScionAgentManageLifecycleDescribesMove(t *testing.T) {
 // get, so it fails if the skill or its web-apps reference is not embedded,
 // is gated to a subset of agents, or loses its guidance: scion expose
 // and the URL as printed, what the proxy carries, scion tunnel for full apps,
-// and for pages one self-contained file and an honest browser check.
+// and for pages one self-contained file (relative URLs only with the Hub's
+// page view on) and an honest browser check.
 func TestPlatformSkillsFS_ScionWebServing(t *testing.T) {
 	read := func(name string) string {
 		t.Helper()
@@ -232,6 +233,12 @@ func TestPlatformSkillsFS_ScionWebServing(t *testing.T) {
 			"Does not work: client-side routing by path",
 			"`HashRouter`, `createWebHashHistory`",
 			"Search your SOURCE (not the build) for `BrowserRouter`, `createBrowserRouter` and `createWebHistory`",
+			"If you do not know, build **one self-contained HTML file**: it works either way.",
+			"Does not work: URLs that start with `/`",
+			"## With the Hub's page view on",
+			"never `/app.js`",
+			"On the port-forward tunnel it is refused.",
+			"The page link grants access: do not log it, paste it into tickets or chats, or send it anywhere.",
 		}},
 	}
 	for _, p := range pins {
@@ -242,21 +249,39 @@ func TestPlatformSkillsFS_ScionWebServing(t *testing.T) {
 		}
 	}
 
-	// Pages served through the link cannot load separate files today, so
-	// neither file may tell agents that relative URLs or a relative base
-	// make a multi-file app work.
-	for _, p := range pins {
-		lower := strings.ToLower(p.content)
+	// Relative URLs and a relative build base make a multi-file page work
+	// only with the Hub's page view on. So that guidance may appear only in
+	// the web-apps reference's page view section, and nowhere else in
+	// either file.
+	pageView := ""
+	if _, rest, ok := strings.Cut(webRaw, "\n## With the Hub's page view on\n"); ok {
+		pageView, _, _ = strings.Cut(rest, "\n## ")
+	}
+	if pageView == "" {
+		t.Fatalf("embedded scion-web-serving/references/web-apps.md has no page view section")
+	}
+	outside := map[string]string{
+		"SKILL.md":               skillRaw,
+		"references/web-apps.md": strings.Replace(webRaw, pageView, "", 1),
+	}
+	for file, raw := range outside {
+		lower := strings.ToLower(strings.Join(strings.Fields(raw), " "))
 		for _, unwanted := range []string{
 			"relative urls work",
 			"only what the page can reach with relative urls",
+			"base: './'",
 			"base './'",
 			"--base ./",
 			`"homepage": "."`,
 		} {
 			if strings.Contains(lower, unwanted) {
-				t.Errorf("embedded scion-web-serving/%s contains %q, guidance that does not hold for pages opened through the link today", p.file, unwanted)
+				t.Errorf("embedded scion-web-serving/%s contains %q outside the page view section, guidance that holds only with the Hub's page view on", file, unwanted)
 			}
+		}
+	}
+	for _, want := range []string{"Relative URLs work", "base: './'"} {
+		if !strings.Contains(pageView, want) {
+			t.Errorf("the page view section of web-apps.md does not contain %q", want)
 		}
 	}
 }

@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 
 	sciontoolhub "github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
@@ -121,6 +122,7 @@ func TestExpose_RegistersPort(t *testing.T) {
 	assert.Equal(t, "127.0.0.1", hub.lastRegister["host"])
 	assert.Contains(t, out, "Port 8080 exposed.")
 	assert.Contains(t, out, "URL: "+srv.URL+"/api/v1/agents/"+exposeTestAgentID+"/ports/8080/proxy/")
+	assert.True(t, strings.HasSuffix(out, "\n"+exposeBrowserHint+"\n"), "the browser hint follows the URL: %q", out)
 }
 
 func TestExpose_AlreadyExposedIsSuccess(t *testing.T) {
@@ -135,6 +137,7 @@ func TestExpose_AlreadyExposedIsSuccess(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, out, "Port 8080 is already exposed.")
 	assert.Contains(t, out, "URL: "+srv.URL+"/p/8080/")
+	assert.True(t, strings.HasSuffix(out, "\n"+exposeBrowserHint+"\n"), "the browser hint follows the URL: %q", out)
 }
 
 // On a 409 the command succeeds even when the port is missing from the
@@ -149,6 +152,7 @@ func TestExpose_AlreadyExposedFallback(t *testing.T) {
 	out, err := runExposeTest(t, runExpose, "8080")
 	require.NoError(t, err)
 	assert.Equal(t, "Port 8080 is already exposed.\n", out)
+	assert.NotContains(t, out, exposeBrowserHint, "no URL, so no browser hint")
 }
 
 func TestExpose_AlreadyExposedListFails(t *testing.T) {
@@ -165,6 +169,7 @@ func TestExpose_AlreadyExposedListFails(t *testing.T) {
 	out, err := runExposeTest(t, runExpose, "8080")
 	require.NoError(t, err)
 	assert.Equal(t, "Port 8080 is already exposed.\n", out)
+	assert.NotContains(t, out, exposeBrowserHint, "no URL, so no browser hint")
 }
 
 func TestExpose_HubErrorReturned(t *testing.T) {
