@@ -523,6 +523,9 @@ func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
 		// (opsettings.ChatRetentionSettings.Resolve), not a user or
 		// transport resolver.
 		"handlePutChatRetention settings",
+		// The conduit router (router.Resolve: which session would carry a
+		// page view stream), not a user or transport resolver.
+		"portViewConduitRoute rtr",
 		// The project storage layout authority (pkg/projectfs), not a
 		// user or transport resolver.
 		"projectRecordSharedDirPath localLayout",
