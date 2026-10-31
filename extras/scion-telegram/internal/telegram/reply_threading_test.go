@@ -45,6 +45,19 @@ func TestV2_ErrorReplies_ThreadToSenderWithoutParseMode(t *testing.T) {
 		requireThreadedPlainReply(t, tgSrv, "Couldn't fetch the agent list", msg.MessageID)
 	})
 
+	t.Run("sender denied by the hub", func(t *testing.T) {
+		b, tgSrv, hub := newRoutingTestBroker(t)
+		hub.listAgentsErr = forbiddenListAgents()
+		linkTestUser(t, b.store, 456, "alice@example.com")
+
+		// Addresses the bot without naming an agent, so the message
+		// resolves to no target and the denial is reported.
+		msg := botMentionMessage(456, "hello")
+		b.handleGroupMessage(b.gen, msg)
+
+		requireThreadedPlainReply(t, tgSrv, "doesn't have permission to list agents", msg.MessageID)
+	})
+
 	t.Run("delivery failed", func(t *testing.T) {
 		hubSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
