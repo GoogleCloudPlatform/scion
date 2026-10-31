@@ -879,8 +879,13 @@ export interface AgentFieldEditState {
   sessionSensitive?: boolean;
   /** "session" for a session-sensitive field of a suspended agent. */
   note?: string;
-  /** Clearing or zeroing the field takes effect only at the next reincarnation. */
+  /** Clearing the field takes effect only at the next reincarnation. */
   clearNeedsReincarnate?: boolean;
+  /**
+   * On a count limit: the agent's broker cannot apply Unlimited (0), so the
+   * hub refuses a change to it (unlimitedCountLimits capability).
+   */
+  unlimitedUnsupported?: boolean;
   /** Why a locked field is locked. */
   reason?: string;
 }
