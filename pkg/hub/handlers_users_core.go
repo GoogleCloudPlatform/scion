@@ -217,11 +217,11 @@ func (s *Server) revokeUserSessions(w http.ResponseWriter, r *http.Request, id s
 	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
 }
 
-// getUser answers GET /api/v1/users/{id}. A user access token reads a user
-// only with user.read on the hub-level user record (hubScopedResource), the
-// check each row of the users list passes for a token. The decision uses
-// only the path id, so a refused token gets the same 403 whether or not
-// user id exists.
+// getUser answers GET /api/v1/users/{id}. A scoped token (a user access
+// token or any other ScopedUserIdentity) reads a user only with user.read on
+// the hub-level user record (hubScopedResource), the check each row of the
+// users list passes for a token. The decision uses only the path id, so a
+// refused token gets the same 403 whether or not user id exists.
 func (s *Server) getUser(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 	token, isToken := GetIdentityFromContext(ctx).(*ScopedUserIdentity)

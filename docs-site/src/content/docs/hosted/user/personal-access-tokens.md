@@ -382,7 +382,9 @@ The same per-request checks apply, with these limits:
   selected only on a hub token (for writes to roles, role bindings and access constraints, see
   **Roles, role bindings and access constraints** above). Listing users
   needs `user:list` together with `user:read`, and the list holds only users the token may read;
-  among the built-in roles, only super-admin holds the `user.list` permission. Redeeming an invitation code and linking a chat account
+  among the built-in roles, only super-admin holds the `user.list` permission. A token reads a user
+  through `GET /api/v1/users/{id}` with `user:read` on a hub boundary; without it, or on a project
+  boundary, it gets `403` for every id, and it reads its own record at `/api/v1/auth/me`. Redeeming an invitation code and linking a chat account
   always need a sign-in.
 - **Runtime Broker registration.** The `broker:create` scope can be selected only on a hub token.
   A project token cannot create or re-register a Runtime Broker (see
