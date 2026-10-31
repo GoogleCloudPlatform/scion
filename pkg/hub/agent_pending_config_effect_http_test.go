@@ -26,7 +26,6 @@ import (
 	"go/token"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -181,6 +180,21 @@ func effectStoredPending(t *testing.T, s store.Store, agentID string) (string, i
 // trigger.
 func effectDropWarning(trigger string, keys ...string) string {
 	return pendingFoldWarnings(map[string][]string{trigger: keys}, nil)[0]
+}
+
+// effectLoadOperationalSettings attaches DB-backed operational settings,
+// read from s, to srv, as a hub with a database has them. The flag-off
+// clear needs them: without operational settings an off experiment is not
+// a well-formed off (heldEditsClearable), and the test servers run
+// without them.
+func effectLoadOperationalSettings(t *testing.T, srv *Server, s store.Store) *OperationalSettings {
+	t.Helper()
+	ops := NewOperationalSettings(s, emptyKoanf(), emptyKoanf())
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+	srv.SetOperationalSettings(ops)
+	require.False(t, ops.ExperimentsSnapshot().Malformed)
+	return ops
 }
 
 // TestPendingFold_CountClearOldBrokerStaysPending (C1): a held count-limit
@@ -448,6 +462,7 @@ func TestPendingFold_MixedEditFlagOffUnchanged(t *testing.T) {
 
 	t.Run("stored pending row is not applied, and is cleared", func(t *testing.T) {
 		srv, s, disp, agent := heldFilterFixture(t, &store.BrokerCapabilities{Reprovision: true, ChangedFields: true})
+		effectLoadOperationalSettings(t, srv, s)
 		patchPending(t, srv, agent.ID, body)
 		setHeldEditsExperiment(t, srv, false)
 		effectStopStart(t, srv, agent.ID)
@@ -707,6 +722,7 @@ func TestPendingFold_PatchFoldKeepsReincarnateAndSupersedes(t *testing.T) {
 func TestPendingFlagOff_StartClears(t *testing.T) {
 	t.Run("cleared", func(t *testing.T) {
 		srv, s, disp, agent := heldEditsFixture(t, state.PhaseStopped)
+		effectLoadOperationalSettings(t, srv, s)
 		effectSeedPending(t, s, agent.ID, map[string]string{"model": `"leftover"`}, map[string]string{"model": "dev:" + DevUserID}, "")
 		setHeldEditsExperiment(t, srv, false)
 		pendingLifecycleWarnings(t, srv, agent.ID, "start")
@@ -726,6 +742,8 @@ func TestPendingFlagOff_StartClears(t *testing.T) {
 			return &effectFailingConfigWrites{Store: inner, fault: f}
 		})
 		setHeldEditsExperiment(t, srv, false)
+		effectLoadOperationalSettings(t, srv, s)
+		require.True(t, srv.heldEditsClearable(), "the clear is attempted: a well-formed off")
 		agent := newEditTestAgent(t, s, project, broker, state.PhaseStopped)
 		effectSeedPending(t, s, agent.ID, map[string]string{"model": `"leftover"`}, nil, "user:"+DevUserID)
 		fault.Arm()
@@ -755,6 +773,7 @@ func (f *effectFailingConfigWrites) UpdateAgentConfig(ctx context.Context, agent
 // experiment_off. (A PATCH without config clears too.)
 func TestPendingFlagOff_PatchClearsAll(t *testing.T) {
 	srv, s, _, agent := heldEditsFixture(t, state.PhaseStopped)
+	effectLoadOperationalSettings(t, srv, s)
 	effectSeedPending(t, s, agent.ID, map[string]string{"model": `"m"`, "max_turns": `4`}, nil, "user:"+DevUserID)
 	setHeldEditsExperiment(t, srv, false)
 	resp := patchPending(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{"model": "now"}})
@@ -766,6 +785,7 @@ func TestPendingFlagOff_PatchClearsAll(t *testing.T) {
 	}, effectDiscards(t, s, agent.ID, 2))
 
 	srv2, s2, _, agent2 := heldEditsFixture(t, state.PhaseRunning)
+	effectLoadOperationalSettings(t, srv2, s2)
 	effectSeedPending(t, s2, agent2.ID, map[string]string{"model": `"m"`}, nil, "user:"+DevUserID)
 	setHeldEditsExperiment(t, srv2, false)
 	patchPending(t, srv2, agent2.ID, map[string]interface{}{"name": "renamed"})
@@ -1500,7 +1520,9 @@ func gateAAdvanceClocks(srv *Server, d time.Duration) {
 // package, found by parsing its non-test sources, has a fold mapping, and
 // every cause Decision.IsIndeterminate reports is mapped as a fault.
 func TestPendingReauth_DenyCauseMapExhaustive(t *testing.T) {
-	files, err := filepath.Glob("*.go")
+	// pkgmove:scan-covers guardScanSubdirs
+	// scanned through guardScanSubdirs; finds every typed DenyCause constant in the package's non-test sources.
+	files, err := globGuardScanDirs(".", "*.go")
 	require.NoError(t, err)
 	fset := token.NewFileSet()
 	var found []DenyCause
@@ -1951,8 +1973,7 @@ func TestPendingFlagOff_MalformedExperimentsKeepsPending(t *testing.T) {
 	ctx := context.Background()
 	srv, s, disp, agent := heldEditsFixture(t, state.PhaseStopped)
 	effectSeedPending(t, s, agent.ID, map[string]string{"model": `"held-model"`}, map[string]string{"model": "dev:" + DevUserID}, "")
-	ops := srv.GetOperationalSettings()
-	require.NotNil(t, ops, "the test server loads operational settings")
+	ops := effectLoadOperationalSettings(t, srv, s)
 	_, err := s.UpsertHubSetting(ctx, "experiments",
 		json.RawMessage(`{"overrides":{"`+experiments.AgentEditHeld+`":"yes"}}`), "other-replica", 0, "managed")
 	require.NoError(t, err)
@@ -1997,8 +2018,7 @@ func TestPendingFlagOff_NoOperationalSettingsKeepsPending(t *testing.T) {
 	srv, s, disp, agent := heldEditsFixture(t, state.PhaseStopped)
 	effectSeedPending(t, s, agent.ID, map[string]string{"model": `"held-model"`}, map[string]string{"model": "dev:" + DevUserID}, "")
 	setHeldEditsExperiment(t, srv, false)
-	ops := srv.GetOperationalSettings()
-	require.NotNil(t, ops)
+	ops := effectLoadOperationalSettings(t, srv, s)
 	require.True(t, srv.heldEditsClearable(), "positive control: a loaded, well-formed off is clearable")
 	srv.operationalSettings.Store(nil)
 	t.Cleanup(func() { srv.operationalSettings.Store(ops) })

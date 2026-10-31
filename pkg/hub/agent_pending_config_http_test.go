@@ -460,6 +460,9 @@ func TestAgentPendingConfig_DiscardClearsAndAudits(t *testing.T) {
 func TestAgentPendingConfig_FlagOffKeepsTodayBehaviour(t *testing.T) {
 	off := func(t *testing.T, phase state.Phase) (*Server, store.Store, *inlineCaptureDispatcher, *store.Agent) {
 		srv, s, disp, agent := heldEditsFixture(t, phase)
+		// A well-formed off (loaded operational settings) clears inert
+		// pending edits (heldEditsClearable).
+		effectLoadOperationalSettings(t, srv, s)
 		setHeldEditsExperiment(t, srv, false)
 		return srv, s, disp, agent
 	}
