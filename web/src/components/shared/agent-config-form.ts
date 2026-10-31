@@ -1791,7 +1791,8 @@ export class ScionAgentConfigForm extends LitElement {
    */
   private resourcesRemoveStored(): boolean {
     if (this.mode !== 'edit') return false;
-    if (!this.editability?.fields['config.resources']?.subfieldClearUnsupported) return false;
+    if (this.editability?.fields['config.resources']?.subfieldClearUnsupported !== true)
+      return false;
     return RESOURCE_FIELDS.some((r) => {
       const draft = this.resourceDrafts[r.sub];
       return draft !== undefined && draft.trim() === '' && !!r.get(this.values?.resources);
