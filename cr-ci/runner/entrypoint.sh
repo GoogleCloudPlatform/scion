@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # cr-ci runner entrypoint (PID 1 of every runner execution).
 #
-#   1. Verify that /scratch is a mounted, writable volume (the Cloud Run
+#   1. Verify that HOME (/home/runner) is a mounted, writable volume (the Cloud Run
 #      ephemeral-disk). The container root filesystem is in memory on Cloud
-#      Run, so running without /scratch would silently eat RAM. Fail loudly.
-#   2. Link ~/work, ~/.cache, ~/go and ~/.npm into /scratch and export ubuntu-latest's cache
-#      paths, so actions/cache entries restore identically on both runner types while
-#      the bytes land on the ephemeral disk (see section 3).
+#      Run, so running without it would silently eat RAM. Fail loudly.
+#   2. Create ~/work, ~/.cache, ~/go and ~/.npm as real directories on that volume and
+#      export ubuntu-latest's cache paths, so actions/cache entries restore identically on
+#      both runner types while the bytes land on the ephemeral disk (see section 3).
 #   3. Exchange the one-time RUNNER_CLAIM_TOKEN with the mediator for the JIT
 #      runner config (claim contract v2): fetch this execution's Google ID
 #      token (audience MEDIATOR_URL) from the metadata server, then
@@ -24,12 +24,13 @@
 # shell memory.
 #
 # Warm-up: RUNNER_WARMUP=1 (deploy-job.sh --warm-up) runs only the checks in
-# sections 1-3 (HOME, the job guard files, /scratch, HOME links, run.sh present) and
+# sections 1-3 (HOME, the job guard files, the volume at HOME, the work and cache
+# directories, run.sh present) and
 # exits 0 before any claim; none of the required env below is needed then.
 #
 # Optional env (set on the job by deploy-job.sh from config.env):
 #   RUNNER_BUILD_CACHE_IN_RAM  true: keep ~/.cache (Go build cache, analysis cache) in
-#                              RAM instead of on /scratch (section 3); default false
+#                              RAM instead of on the volume (section 3); default false
 #   RUNNER_IDLE_TIMEOUT_SECONDS stop the runner (exit 0) if it has not started a job within
 #                              this many seconds of the container start (default 600; section 5)
 #
@@ -45,9 +46,10 @@
 #
 # Exit codes:
 #   2  configuration error: missing or invalid env (HOME included), the job-started hook
-#      not the pinned, root-owned, read-only file (section 1, "Job guard"), /scratch
-#      missing or not writable, a HOME link (~/work, ~/.cache, ~/go, ~/.npm) that is not
-#      the expected symlink
+#      not the pinned, root-owned, read-only file (section 1, "Job guard"), HOME not a
+#      mounted, writable volume (including a job that still mounts it at /scratch), a
+#      work or cache directory (~/work, ~/.cache, ~/go, ~/.npm) that is a symlink or not a
+#      directory
 #   3  claim failed: 401, 410, other non-retryable response (mediator or
 #      metadata server), or retries exhausted; run.sh not started
 #   128+n  SIGTERM (143) or SIGINT (130) received before run.sh started; run.sh not started
@@ -63,16 +65,15 @@
 # Overrides, for the offline test harness (runner/entrypoint_test.go) only. They take
 # effect only in test mode, CR_TEST_MODE=1 with this script not PID 1, which production
 # (always PID 1) cannot enable; otherwise they are logged and ignored (section 1):
-#   CR_SCRATCH_DIR           scratch mount point          (default /scratch)
 #   CR_MOUNTINFO             mount table to check against (default /proc/self/mountinfo)
-#   CR_RUNNER_DIR            directory holding run.sh     (default /home/runner/actions-runner)
+#   CR_RUNNER_DIR            directory holding run.sh     (default /opt/actions-runner)
 #   CR_CLAIM_BACKOFF_SECONDS first retry delay, doubled per retry (default 1)
 #   CR_EXPECTED_HOME         required value of HOME       (default /home/runner)
 #   CR_METADATA_URL          metadata server origin       (default http://metadata.google.internal;
 #                            otherwise only http://127.0.0.1[:port] or http://localhost[:port])
 #   CR_FIFO_TMPDIR           where the runner-output FIFOs go (default /tmp)
 # (RUNNER_IDLE_TIMEOUT_SECONDS, below, is set on the job by deploy-job.sh; tests use small values.)
-#   CR_RAM_CACHE_DIR         RAM target of /scratch/.cache when RUNNER_BUILD_CACHE_IN_RAM=true
+#   CR_RAM_CACHE_DIR         RAM target of ~/.cache when RUNNER_BUILD_CACHE_IN_RAM=true
 #                            (default /tmp/cr-ci-build-cache)
 #   CR_WATCHER_GRACE_SECONDS how long to wait for the output watcher (default 5)
 #   CR_JOB_GUARD_HOOK        the job-started hook   (default /usr/local/bin/cr-ci-job-guard.sh)
@@ -131,7 +132,7 @@ exit_if_signalled() {
 # them: this script's environment is the Cloud Run Job execution's (deploy-job.sh and the
 # mediator's overrides), and it has finished its checks and exported the job guard's
 # settings before run.sh, and so any job, exists.
-readonly TEST_OVERRIDES=(CR_SCRATCH_DIR CR_MOUNTINFO CR_RUNNER_DIR CR_CLAIM_BACKOFF_SECONDS
+readonly TEST_OVERRIDES=(CR_MOUNTINFO CR_RUNNER_DIR CR_CLAIM_BACKOFF_SECONDS
   CR_EXPECTED_HOME CR_METADATA_URL CR_FIFO_TMPDIR CR_RAM_CACHE_DIR CR_WATCHER_GRACE_SECONDS
   CR_JOB_GUARD_HOOK CR_JOB_GUARD_SHA_FILE CR_JOB_GUARD_OWNER_UID)
 test_mode=0
@@ -148,9 +149,8 @@ fi
 unset CR_TEST_MODE
 readonly test_mode
 
-scratch=${CR_SCRATCH_DIR:-/scratch}
 mountinfo=${CR_MOUNTINFO:-/proc/self/mountinfo}
-runner_dir=${CR_RUNNER_DIR:-/home/runner/actions-runner}
+runner_dir=${CR_RUNNER_DIR:-/opt/actions-runner}
 backoff=${CR_CLAIM_BACKOFF_SECONDS:-1}
 metadata_base=${CR_METADATA_URL:-http://metadata.google.internal}
 expected_home=${CR_EXPECTED_HOME:-/home/runner}
@@ -166,7 +166,7 @@ job_guard_owner=${CR_JOB_GUARD_OWNER_UID:-0}
 # --- 1. Required env ----------------------------------------------------------
 
 # Warm-up mode (deploy-job.sh --warm-up): an execution with RUNNER_WARMUP=1 and no
-# claim env pulls and imports the image, runs the /scratch and HOME checks below,
+# claim env pulls and imports the image, runs the volume and HOME checks below,
 # and exits 0 before any claim, so the first real job does not pay the image import.
 warmup=0
 case ${RUNNER_WARMUP:-} in
@@ -282,7 +282,7 @@ if [[ ! $backoff =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
 fi
 
 if ((warmup)); then
-  log "warm-up execution: checking the image, /scratch and the HOME links; no claim"
+  log "warm-up execution: checking the image, the volume at HOME and the work and cache directories; no claim"
 else
   if [[ $RUNNER_NAME != "cr-job-$GH_JOB_ID" ]]; then
     log "warning: RUNNER_NAME '$RUNNER_NAME' does not match cr-job-$GH_JOB_ID"
@@ -290,13 +290,17 @@ else
   log "starting runner $RUNNER_NAME for job $GH_JOB_ID"
 fi
 
-# --- 2. /scratch must be a mounted, writable volume ---------------------------
+# --- 2. HOME must be a mounted, writable volume ------------------------------
+# The Cloud Run Job mounts its ephemeral-disk volume at HOME (/home/runner; deploy-job.sh
+# --add-volume-mount=volume=scratch,mount-path=/home/runner). The runner install and its
+# _diag are at /opt/actions-runner, on the root filesystem, so the mount hides nothing
+# the runner needs and a full disk still lets the runner write its logs.
 
 # Prints the filesystem type of the mount whose mount point is exactly $1, or
 # nothing if $1 is not a mount point. mountinfo field 5 is the mount point
 # and the field after the " - " separator is the filesystem type. Mount
 # points containing whitespace are octal-escaped there and never match,
-# which is fine for the fixed /scratch path.
+# which is fine for the fixed HOME path.
 mount_fstype() {
   awk -v mp="$1" '
     $5 == mp {
@@ -306,62 +310,97 @@ mount_fstype() {
   ' "$mountinfo"
 }
 
-if [[ ! -d $scratch ]]; then
-  die "$EXIT_CONFIG" "$scratch does not exist; the Cloud Run Job must mount an ephemeral-disk volume there (--add-volume=name=scratch,type=ephemeral-disk,size=<N>Gi --add-volume-mount=volume=scratch,mount-path=$scratch). Refusing to run on the in-memory root filesystem."
+vol=$HOME
+mount_hint="the Cloud Run Job must mount its ephemeral-disk volume at $vol (--add-volume=name=scratch,type=ephemeral-disk,size=<N>Gi --add-volume-mount=volume=scratch,mount-path=$vol; a job still mounting it at /scratch is from before this image: run deploy-job.sh)"
+if [[ ! -d $vol ]]; then
+  die "$EXIT_CONFIG" "$vol does not exist; $mount_hint. Refusing to run on the in-memory root filesystem."
 fi
-# Primary check: /scratch is listed as a mount point in the mount table.
-# Fallback: /scratch sits on a different device than its parent directory,
+# Primary check: HOME is listed as a mount point in the mount table.
+# Fallback: HOME sits on a different device than its parent directory,
 # which holds for any mount point even if the sandbox kernel (gVisor on Cloud
 # Run) were to present the mount table differently. Which check matched is
-# logged so the P6 PoC can confirm the primary one works on Cloud Run.
-scratch_fstype=""
+# logged so the live verification can confirm the primary one works on Cloud Run.
+vol_fstype=""
 if [[ -r $mountinfo ]]; then
-  scratch_fstype=$(mount_fstype "$scratch")
+  vol_fstype=$(mount_fstype "$vol")
   mount_check="listed in $mountinfo"
 else
-  log "warning: cannot read $mountinfo; falling back to the device check for $scratch"
+  log "warning: cannot read $mountinfo; falling back to the device check for $vol"
 fi
-if [[ -z $scratch_fstype ]]; then
-  scratch_dev=$(stat -c %d -- "$scratch") ||
-    die "$EXIT_CONFIG" "cannot stat $scratch to verify that it is a mount"
-  parent_dev=$(stat -c %d -- "$(dirname -- "$scratch")") ||
-    die "$EXIT_CONFIG" "cannot stat the parent of $scratch to verify that it is a mount"
-  if [[ $scratch_dev == "$parent_dev" ]]; then
-    die "$EXIT_CONFIG" "$scratch exists but is not a mount point; the Cloud Run Job must mount an ephemeral-disk volume there. Refusing to run on the in-memory root filesystem."
+if [[ -z $vol_fstype ]]; then
+  vol_dev=$(stat -c %d -- "$vol") ||
+    die "$EXIT_CONFIG" "cannot stat $vol to verify that it is a mount"
+  parent_dev=$(stat -c %d -- "$(dirname -- "$vol")") ||
+    die "$EXIT_CONFIG" "cannot stat the parent of $vol to verify that it is a mount"
+  if [[ $vol_dev == "$parent_dev" ]]; then
+    die "$EXIT_CONFIG" "$vol exists but is not a mount point; $mount_hint. Refusing to run on the in-memory root filesystem."
   fi
-  scratch_fstype=$(stat -f -c %T -- "$scratch") || scratch_fstype=unknown
-  mount_check="device $scratch_dev differs from parent device $parent_dev"
+  vol_fstype=$(stat -f -c %T -- "$vol") || vol_fstype=unknown
+  mount_check="device $vol_dev differs from parent device $parent_dev"
 fi
-log "$scratch is a mount ($scratch_fstype): $mount_check"
-if [[ $scratch_fstype == tmpfs ]]; then
-  log "warning: $scratch is tmpfs (in-memory); use type=ephemeral-disk so caches do not consume RAM"
+log "$vol is a mount ($vol_fstype): $mount_check"
+if [[ $vol_fstype == tmpfs ]]; then
+  log "warning: $vol is tmpfs (in-memory); use type=ephemeral-disk so caches do not consume RAM"
 fi
 
-probe="$scratch/.cr-ci-write-probe.$$"
+# The volume root's owner and mode (Cloud Run creates it "so that any user can read or
+# write to it"). Logged at every start; tightened to 0755, as HOME is on ubuntu-latest,
+# only if this uid owns it (a non-owner cannot chmod it). A world-writable HOME is a
+# documented residual (docs/architecture.md, "Constraints").
+vol_meta=$(stat -c '%u %a' -- "$vol" 2>/dev/null) || vol_meta=""
+read -r vol_owner vol_mode <<<"$vol_meta"
+if [[ ${vol_owner:-} =~ ^[0-9]+$ && ${vol_mode:-} =~ ^[0-7]+$ ]]; then
+  if [[ $vol_owner == "$my_uid" ]] && ((8#$vol_mode & 8#022)); then
+    if chmod 0755 -- "$vol" 2>/dev/null; then
+      log "volume root $vol: owner uid $vol_owner, mode $vol_mode; set to 0755"
+    else
+      log "volume root $vol: owner uid $vol_owner, mode $vol_mode; chmod 0755 failed, left as is"
+    fi
+  else
+    log "volume root $vol: owner uid $vol_owner, mode $vol_mode"
+  fi
+else
+  log "volume root $vol: owner and mode unknown"
+fi
+
+probe="$vol/.cr-ci-write-probe.$$"
 if ! : >"$probe" 2>/dev/null; then
-  die "$EXIT_CONFIG" "$scratch is mounted ($scratch_fstype) but not writable by uid $(id -u)"
+  die "$EXIT_CONFIG" "$vol is mounted ($vol_fstype) but not writable by uid $my_uid"
 fi
 rm -f -- "$probe"
 
-# --- 3. Redirect workspace, temp dirs and caches to /scratch ------------------
+# --- 3. Workspace and caches: real directories on the volume ------------------
 # Cache parity with ubuntu-latest (gs://scion-xproject-exchange/cr-ci/cache-parity.md).
-# actions/cache stores paths relative to GITHUB_WORKSPACE and extracts them with
-# tar -P -C "$GITHUB_WORKSPACE". So the work folder must read /home/runner/work, and
-# GOCACHE, GOMODCACHE and GOPATH must read as on ubuntu-latest ($HOME/.cache/go-build,
-# $HOME/go/pkg/mod, $HOME/go). The bytes must still land on /scratch, which is why the
-# three HOME entries are symlinks into /scratch. Their targets MIRROR $HOME under
-# /scratch: the kernel resolves ".." physically, so from the physical workspace
-# /scratch/_work/<repo>/<repo>, an archive entry ../../../.cache/X lands in
-# /scratch/.cache/X, which therefore has to be what ~/.cache points to.
-#   ~/work   -> /scratch/_work   (the mediator's JIT work_folder is /home/runner/work)
-#   ~/.cache -> /scratch/.cache  (GOCACHE, GOLANGCI_LINT_CACHE, any XDG cache)
-#   ~/go     -> /scratch/go      (GOPATH, GOMODCACHE)
-#   ~/.npm   -> /scratch/.npm    (npm's cache; actions/setup-node's npm cache step also
-#                                 requires the directory to exist, as on ubuntu-latest)
-# The links are the parents of the cached paths, so tar never replaces a link.
+# actions/cache stores paths relative to GITHUB_WORKSPACE (/home/runner/work/<repo>/<repo>)
+# and extracts them with tar -P -C "$GITHUB_WORKSPACE". With HOME itself on the volume,
+# the work folder and the cache homes are REAL directories at ubuntu-latest's paths:
+#   ~/work   (the mediator's JIT work_folder)
+#   ~/.cache (GOCACHE, GOLANGCI_LINT_CACHE, any XDG cache)
+#   ~/go     (GOPATH, GOMODCACHE)
+#   ~/.npm   (npm's cache; actions/setup-node's npm cache step also requires it to exist)
+# There are no symlinks, so the physical path of every directory is its logical path:
+# an action's process.cwd() reads /home/runner/work/..., as GITHUB_WORKSPACE does
+# (actions/setup-node's lock-file hashing relies on that), and an archive's directory
+# member such as ../../../.npm/ (a whole-directory cache) lands on the real ~/.npm
+# instead of replacing a link to it.
 # XDG_CACHE_HOME stays unset, as on ubuntu-latest; tools then default to ~/.cache.
-# The runner sets its own RUNNER_WORKSPACE and RUNNER_TEMP for job steps; the
-# exports below cover the listener and anything that runs before the job.
+# TMPDIR is unset too, as on ubuntu-latest: temp files go to /tmp (root, mode 1777),
+# which tools that check a temp directory's ancestors accept. Go's own temp work (build
+# and test binaries, GOTMPDIR) stays on the volume. The runner sets its own
+# RUNNER_WORKSPACE and RUNNER_TEMP for job steps; the exports below cover the listener
+# and anything that runs before the job.
+
+# ensure_dir <path>: <path> must end up a real directory (not a symlink). An absent path
+# is created; a symlink or a non-directory exits 2 before the claim token is spent.
+ensure_dir() {
+  local path=$1
+  if [[ -L $path ]]; then
+    die "$EXIT_CONFIG" "$path is a symlink; want a real directory on the volume (cache parity)"
+  elif [[ -e $path && ! -d $path ]]; then
+    die "$EXIT_CONFIG" "$path exists and is not a directory (cache parity)"
+  fi
+  mkdir -p -- "$path" || die "$EXIT_CONFIG" "cannot create directory $path"
+}
 
 # ensure_link <path> <target>: <path> must end up a symlink whose literal target is
 # <target>. A correct link is kept, an absent path is created, and anything else (a
@@ -373,43 +412,48 @@ ensure_link() {
     local current
     current=$(readlink -- "$path")
     [[ $current == "$target" ]] ||
-      die "$EXIT_CONFIG" "$path is a symlink to $current, want $target (cache parity)"
+      die "$EXIT_CONFIG" "$path is a symlink to $current, want $target (RAM build cache)"
   elif [[ -e $path ]]; then
-    die "$EXIT_CONFIG" "$path exists and is not a symlink; want a symlink to $target (cache parity)"
+    die "$EXIT_CONFIG" "$path exists and is not a symlink; want a symlink to $target (RAM build cache)"
   else
     ln -s -- "$target" "$path" || die "$EXIT_CONFIG" "cannot create symlink $path -> $target"
   fi
 }
 
-ensure_link "$HOME/work" "$scratch/_work"
+ensure_dir "$HOME/work"
 if ((cache_in_ram)); then
-  # Optional RAM build cache (RUNNER_BUILD_CACHE_IN_RAM=true) for a small /scratch:
-  # /scratch/.cache itself becomes a link to a directory on the in-memory root
-  # filesystem. ~/.cache still points to /scratch/.cache, so cache parity holds:
-  # tar follows links in parent components, and an archive entry
-  # ../../../.cache/go-build/X lands in RAM. Everything under ~/.cache (the Go build
-  # cache, golangci-lint's analysis cache) then counts against the container's
+  # Optional RAM build cache (RUNNER_BUILD_CACHE_IN_RAM=true) for a small volume: ~/.cache
+  # is a link to a directory on the in-memory root filesystem. An archive entry
+  # ../../../.cache/go-build/X still lands in RAM (tar follows a link in a leading
+  # component), but a whole-~/.cache archive (directory member ../../../.cache/) would
+  # replace the link with a real directory on the volume. Everything under ~/.cache (the
+  # Go build cache, golangci-lint's analysis cache) counts against the container's
   # memory limit; see docs/architecture.md, "Constraints".
-  ensure_link "$scratch/.cache" "$ram_cache_dir"
-  log "build cache in RAM: $scratch/.cache -> $ram_cache_dir (counts against the memory limit)"
+  ensure_link "$HOME/.cache" "$ram_cache_dir"
+  log "build cache in RAM: $HOME/.cache -> $ram_cache_dir (counts against the memory limit)"
+else
+  ensure_dir "$HOME/.cache"
 fi
-ensure_link "$HOME/.cache" "$scratch/.cache"
-ensure_link "$HOME/go" "$scratch/go"
-ensure_link "$HOME/.npm" "$scratch/.npm"
+ensure_dir "$HOME/go"
+ensure_dir "$HOME/.npm"
 unset XDG_CACHE_HOME
+unset TMPDIR
 
 export RUNNER_WORKSPACE="$HOME/work"
-export RUNNER_TEMP="$scratch/_temp"
-export TMPDIR="$scratch/_temp"
+export RUNNER_TEMP="$HOME/work/_temp"
 export GOPATH="$HOME/go"
 export GOCACHE="$HOME/.cache/go-build"
 export GOMODCACHE="$HOME/go/pkg/mod"
 export GOLANGCI_LINT_CACHE="$HOME/.cache/golangci-lint"
+# Go's temp work (WORK dirs, linked test binaries) on the volume, not in RAM; outside
+# ~/.cache, so no cache archive picks it up, and outside RUNNER_TEMP, which the runner
+# empties when the job starts.
+export GOTMPDIR="$HOME/.cr-ci/go-tmp"
 
-# The runner's _diag (its own logs) is NOT on /scratch (see Dockerfile): a job that
-# fills /scratch must not take the runner, and the job's log, down with it.
-mkdir -p -- "$RUNNER_TEMP" "$GOCACHE" "$GOMODCACHE" "$GOLANGCI_LINT_CACHE"
-log "work folder, temp and caches on $scratch ($scratch_fstype) via $HOME/{work,.cache,go,.npm}"
+# The runner's _diag (its own logs) is NOT on the volume (see Dockerfile): a job that
+# fills the volume must not take the runner, and the job's log, down with it.
+mkdir -p -- "$RUNNER_TEMP" "$GOCACHE" "$GOMODCACHE" "$GOLANGCI_LINT_CACHE" "$GOTMPDIR"
+log "work folder, temp and caches on $vol ($vol_fstype): $HOME/{work,.cache,go,.npm} are real directories"
 
 # Check the runner before spending the single-use token.
 if [[ ! -x $runner_dir/run.sh ]]; then
@@ -418,7 +462,7 @@ fi
 cd -- "$runner_dir"
 
 if ((warmup)); then
-  log "warm-up OK: image imported, $scratch mounted and writable, HOME links in place; exiting 0 before any claim"
+  log "warm-up OK: image imported, $vol mounted and writable, work and cache directories in place; exiting 0 before any claim"
   exit 0
 fi
 

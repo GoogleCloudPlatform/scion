@@ -276,6 +276,7 @@ type WebServer struct {
 	hubShutdown    func(context.Context) error // Hub resource cleanup, or nil
 	shutdownMark   shutdownState               // BeginShutdown mark (ptone/scion#5054)
 	shutdownHooks  ShutdownHooks               // optional shutdown seams (SetShutdownHooks)
+	onListening    func()                      // optional hook once the listener is bound (SetOnListening)
 	maintenance    *MaintenanceState           // runtime maintenance mode state (shared with Hub)
 	demotionSafe   *atomic.Bool                // shared with Hub; nil-safe (nil = false = don't demote)
 	authzService   *AuthzService               // authorization service for SSE subject checks
@@ -2928,16 +2929,27 @@ func isPublicRoute(path string) bool {
 	}
 }
 
-// isRootLevelStaticFile returns true for root-level paths that look like
-// static file requests (e.g. /favicon.ico, /scion-notification-icon.png,
-// /robots.txt). These are files placed in web/public/ and served at the
-// root by Vite. They have a file extension and no sub-path segments.
+// rootStaticFiles are the files in web/public/, which Vite copies to the
+// root of the built client. They are the only root-level paths served
+// without a session (browsers fetch the app icons and the web app manifest
+// without credentials, see appIconPaths). Any other root-level path, with
+// or without a file extension, takes the normal session check. The match
+// is exact, so a path holding a backslash (such as /\evil.example, from
+// /%5Cevil.example) or any other spelling of a listed name never matches.
+var rootStaticFiles = map[string]bool{
+	"/apple-touch-icon.png":        true,
+	"/favicon.ico":                 true,
+	"/favicon.svg":                 true,
+	"/icon-192.png":                true,
+	"/icon-512.png":                true,
+	"/icon-maskable-512.png":       true,
+	"/manifest.webmanifest":        true,
+	"/scion-notification-icon.png": true,
+}
+
+// isRootLevelStaticFile reports whether path is one of rootStaticFiles.
 func isRootLevelStaticFile(path string) bool {
-	// Must start with / and have no further slashes (root-level only).
-	if len(path) < 2 || strings.Count(path, "/") != 1 {
-		return false
-	}
-	return filepath.Ext(path) != ""
+	return rootStaticFiles[path]
 }
 
 // isBrowserRequest returns true if the request appears to come from a browser.
@@ -4375,9 +4387,15 @@ func (ws *WebServer) Start(ctx context.Context) error {
 
 	ws.logger().Info("Web frontend server starting", "host", ws.config.Host, "port", ws.config.Port, "h2c", true)
 
+	// Bind first, so the on-listening hook (SetOnListening) runs only once
+	// the port is ours; then serve.
+	ln, err := listenThenNotify(ws.httpServer.Addr, ws.onListening)
+	if err != nil {
+		return err
+	}
 	errCh := make(chan error, 1)
 	go func() {
-		if err := ws.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := ws.httpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
 		close(errCh)

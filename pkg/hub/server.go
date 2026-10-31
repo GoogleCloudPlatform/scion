@@ -17,7 +17,6 @@ package hub
 import (
 	"bufio"
 	"context"
-	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -67,7 +66,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubexport"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/reapermetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/ssemetrics"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -638,6 +636,9 @@ type MaintenanceConfig struct {
 	// implements maintenance.ReleaseLister, backs the default catalog).
 	// nil: GitHub's API for GitHubRepo.
 	ReleaseSource maintenance.ReleaseSource
+	// DBSnapshotter takes the database snapshot before each update. nil:
+	// derived from the store (see updateSnapshotter).
+	DBSnapshotter maintenance.DBSnapshotter
 }
 
 // GitHubAppServerConfig holds the GitHub App configuration for the Hub server.
@@ -1468,6 +1469,15 @@ type RemoteCreateAgentRequest struct {
 	// request (hub-side only, never sent). The dispatch signs it for the
 	// request's run and records its credential before setting AgentToken.
 	tokenGrant *AgentTokenGrant
+	// projectGitRemote is the project's recorded git remote, githubAppToken
+	// the App installation token minted for the agent's own project in this
+	// dispatch, and noAuthProjectToken the project-scope GITHUB_TOKEN the
+	// no-auth path put into ResolvedEnv ("" when none); hub-side only, never
+	// sent. restrictCreateRequestTokenRemote decides the token remote from
+	// them.
+	projectGitRemote   string
+	githubAppToken     string
+	noAuthProjectToken string
 	// CreatorName is the human-readable identity of who created this agent.
 	// Injected as the SCION_CREATOR environment variable in the agent container.
 	CreatorName string `json:"creatorName,omitempty"`
@@ -1802,9 +1812,11 @@ type Server struct {
 	// hubSAMappingCache holds the hub-wide Kubernetes mapping view behind
 	// hubSAMappingWarnings for a short window (see gcp_sa_mapping_warnings.go).
 	hubSAMappingCache hubSAMappingViewCache
-	// nfsCleanupWG tracks background NFS project tree removals started by
-	// project delete (startHubNFSProjectTreeCleanup), so tests can wait.
-	nfsCleanupWG sync.WaitGroup
+	// storageCleanupWG tracks the background project and agent storage
+	// removals started by project and agent deletes
+	// (startProjectStorageCleanup, startAgentStorageCleanup), so tests can
+	// wait for them.
+	storageCleanupWG sync.WaitGroup
 	// projectConfigIdentity records shared-backend projects whose
 	// <ProjectRoot>/.scion/project-id names another project
 	// (project_config_identity health check).
@@ -1886,12 +1898,6 @@ type Server struct {
 	// conduit registry read failed and fell back to the legacy signals
 	// (broker_presence.go).
 	brokerPresenceRegistryFallbacks atomic.Int64
-	// conduitAdmissionAEADv is the admission token cipher
-	// (conduit_admission.go), derived once; conduitAdmissionKeyErr is why
-	// it could not be.
-	conduitAdmissionKeyOnce sync.Once
-	conduitAdmissionAEADv   cipher.AEAD
-	conduitAdmissionKeyErr  error
 	// conduitStreamRenewer is the renewal path of relay-held streams
 	// (conduit_renewal.go); nil until StartConduitExternal installs it.
 	conduitStreamRenewer atomic.Pointer[conduitStreamRenewer]
@@ -2390,6 +2396,10 @@ type Server struct {
 	// asyncStartGate caches whether every live hub instance advertises
 	// async_start_v1 (async_start_gate.go). The zero value reads false.
 	asyncStartGate asyncStartGate
+
+	// onListening runs once Start has bound the hub API listener
+	// (SetOnListening; guarded by mu).
+	onListening func()
 
 	// Subsystem loggers for handler methods
 	agentLifecycleLog *slog.Logger
@@ -3155,12 +3165,6 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		s, srv.authzService,
 		logging.Subsystem("hub.project-deletion"),
 	)
-	// Project delete removes the project's shared-dir tree from the hub's
-	// in-memory shared-dir Layout (server.project_storage).
-	srv.deletionService.sharedDirLayout = func() (projectfs.Layout, error) {
-		layout, _, err := srv.sharedDirLayout()
-		return layout, err
-	}
 
 	// RS4: Initialize user access token service with authorization, audit, and
 	// transactional support via the bounded domain service pattern.
@@ -5227,6 +5231,9 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	if s.config.GitHubAppConfig.AppID != 0 {
 		dispatcher.SetGitHubAppMinter(s)
 	}
+	// Personal git tokens go only to the GitHub host, which follows the
+	// configured GitHub API base URL whether or not an App is configured.
+	dispatcher.SetGitHubWebHostProvider(s.personalTokenGitHubHost)
 
 	// Wire cross-node lifecycle dispatch deps (B4-2) so the dispatcher
 	// can handle ErrLifecycleDeferred from route-gated Start/Stop/Restart
@@ -5596,6 +5603,10 @@ func (s *Server) purgeHandler() func(ctx context.Context) {
 				slog.Info("Scheduler: purged soft-deleted agents", "count", purged, "cutoff", cutoff)
 			}
 		}
+
+		// Remove the project trees whose deferred deletion is due (forced
+		// project deletes, and removals that failed and are retried).
+		s.sweepDeferredProjectDeletions(ctx)
 
 		// Purge scheduled events that are no longer pending (failed
 		// included) and completed more than scheduledEventRetention ago, on
@@ -6592,10 +6603,11 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 		return
 	}
 
-	// Backstop for a schedule whose authority agent was deleted by a path
-	// that did not pause it (ptone/scion#5403): pause it with status reason
+	// Backstop for a schedule whose authority agent or user was deleted
+	// (or the user is being deleted) by a path that did not pause it
+	// (ptone/scion#5403, ptone/scion#2143): pause it with status reason
 	// creator_deleted instead of firing it to be refused.
-	if s.pauseScheduleIfAuthorityAgentGone(ctx, sched, log) {
+	if s.pauseScheduleIfAuthorityGone(ctx, sched, log) {
 		return
 	}
 
@@ -6976,15 +6988,22 @@ func (s *Server) Start(ctx context.Context) error {
 		ReadTimeout:  s.config.ReadTimeout,
 		WriteTimeout: s.config.WriteTimeout,
 	}
+	onListening := s.onListening
 	s.mu.Unlock()
 
 	s.StartBackgroundServices(ctx)
 
 	slog.Info("Hub API server starting", "host", s.config.Host, "port", s.config.Port)
 
+	// Bind first, so the on-listening hook (SetOnListening) runs only once
+	// the port is ours; then serve.
+	ln, err := listenThenNotify(s.httpServer.Addr, onListening)
+	if err != nil {
+		return err
+	}
 	errCh := make(chan error, 1)
 	go func() {
-		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := s.httpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
 		close(errCh)

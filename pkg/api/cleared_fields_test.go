@@ -72,7 +72,7 @@ func clearedTestConfig() *ScionConfig {
 	return &ScionConfig{
 		Harness:       "claude",
 		Model:         "m",
-		MaxTurns:      9,
+		MaxTurns:      IntPtr(9),
 		MaxDuration:   "2h",
 		ThinkingLevel: &level,
 		Resources:     &ResourceSpec{Requests: ResourceList{CPU: "2"}},
@@ -95,10 +95,10 @@ func TestApplyClearedFields_Zeroes(t *testing.T) {
 
 func TestApplyClearedFields_Inherits(t *testing.T) {
 	cfg := clearedTestConfig()
-	inherit := &ScionConfig{MaxTurns: 5, Resources: &ResourceSpec{Limits: ResourceList{Memory: "1Gi"}}, Env: map[string]string{"FOO": "template"}}
+	inherit := &ScionConfig{MaxTurns: IntPtr(5), Resources: &ResourceSpec{Limits: ResourceList{Memory: "1Gi"}}, Env: map[string]string{"FOO": "template"}}
 	ApplyClearedFields(cfg, []string{"max_turns", "resources", "thinking_level", "max_duration", "env.FOO"}, inherit)
-	if cfg.MaxTurns != 5 {
-		t.Errorf("max_turns = %d, want the inherited 5", cfg.MaxTurns)
+	if !IntPtrEqual(cfg.MaxTurns, IntPtr(5)) {
+		t.Errorf("max_turns = %s, want the inherited 5", FormatCountLimit(cfg.MaxTurns))
 	}
 	if !reflect.DeepEqual(cfg.Resources, inherit.Resources) {
 		t.Errorf("resources = %+v, want the inherited value", cfg.Resources)

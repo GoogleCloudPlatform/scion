@@ -1658,18 +1658,22 @@ func TestMapSectionsSchemaValidation(t *testing.T) {
 		t.Errorf("expected valid priority_class_name to pass, got errors: %v", errs)
 	}
 
-	// An empty priority_class_name means unset and must also pass — this
-	// route (the admin settings API) has no DNS-1123 check of its own
-	// before buildPod, so the schema is the only gate.
+	// An empty priority_class_name means unset and must also pass.
 	errs = Validate("runtimes", json.RawMessage(`{"k8s": {"type": "kubernetes", "priority_class_name": ""}}`))
 	if len(errs) > 0 {
 		t.Errorf("expected empty priority_class_name to pass, got errors: %v", errs)
 	}
 
-	// Invalid priority_class_name must fail.
+	// The section schema carries priority_class_name's type only: its name
+	// rule is a save check (config.RuntimeSaveChecks refuses an invalid
+	// value a save sets; ptone/scion#6580). A non-string still fails.
 	errs = Validate("runtimes", json.RawMessage(`{"k8s": {"type": "kubernetes", "priority_class_name": "Not_A_Valid_Name"}}`))
+	if len(errs) > 0 {
+		t.Errorf("expected a type-correct priority_class_name to pass the section schema, got: %v", errs)
+	}
+	errs = Validate("runtimes", json.RawMessage(`{"k8s": {"type": "kubernetes", "priority_class_name": 5}}`))
 	if len(errs) == 0 {
-		t.Error("expected invalid priority_class_name to fail validation")
+		t.Error("expected a non-string priority_class_name to fail validation")
 	}
 
 	// Valid profiles doc.
@@ -1854,7 +1858,10 @@ func TestCloneDepthSchemaFromSettingsSchema(t *testing.T) {
 
 // TestKubernetesAssignSettingsSchemaValidation checks the runtimes and
 // profiles section schemas for kubernetes_service_account_mappings and the
-// runtime namespace, which use the same patterns as settings-v1.schema.json.
+// runtime namespace. The mappings carry their JSON type only (an object of
+// strings); their key and value rules are save checks
+// (config.RuntimeSaveChecks, ptone/scion#6580). The namespace keeps the
+// settings-v1.schema.json pattern.
 func TestKubernetesAssignSettingsSchemaValidation(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -1866,16 +1873,20 @@ func TestKubernetesAssignSettingsSchemaValidation(t *testing.T) {
 			doc: `{"k8s": {"type": "kubernetes", "kubernetes_service_account_mappings": {"agent-worker@my-project.iam.gserviceaccount.com": "agent-worker-ksa"}}}`},
 		{name: "profile mapping", section: "profiles", wantValid: true,
 			doc: `{"prod": {"runtime": "k8s", "kubernetes_service_account_mappings": {"agent-worker@my-project.iam.gserviceaccount.com": "profile-ksa"}}}`},
-		{name: "runtime mapping key not a GSA email", section: "runtimes",
+		{name: "runtime mapping key not a GSA email (type-correct; a save check)", wantValid: true, section: "runtimes",
 			doc: `{"k8s": {"kubernetes_service_account_mappings": {"not-a-gsa-email": "agent-worker-ksa"}}}`},
-		{name: "profile mapping uppercase key", section: "profiles",
+		{name: "profile mapping uppercase key (type-correct; a save check)", wantValid: true, section: "profiles",
 			doc: `{"prod": {"kubernetes_service_account_mappings": {"Agent-Worker@my-project.iam.gserviceaccount.com": "agent-worker-ksa"}}}`},
-		{name: "runtime mapping invalid KSA name", section: "runtimes",
+		{name: "runtime mapping invalid KSA name (type-correct; a save check)", wantValid: true, section: "runtimes",
 			doc: `{"k8s": {"kubernetes_service_account_mappings": {"agent-worker@my-project.iam.gserviceaccount.com": "Not_A_Valid_KSA"}}}`},
-		{name: "profile mapping empty KSA name", section: "profiles",
+		{name: "profile mapping empty KSA name (type-correct; a save check)", wantValid: true, section: "profiles",
 			doc: `{"prod": {"kubernetes_service_account_mappings": {"agent-worker@my-project.iam.gserviceaccount.com": ""}}}`},
-		{name: "runtime mapping KSA name too long", section: "runtimes",
+		{name: "runtime mapping KSA name too long (type-correct; a save check)", wantValid: true, section: "runtimes",
 			doc: `{"k8s": {"kubernetes_service_account_mappings": {"agent-worker@my-project.iam.gserviceaccount.com": "` + strings.Repeat("a", 254) + `"}}}`},
+		{name: "runtime mapping value not a string", section: "runtimes",
+			doc: `{"k8s": {"kubernetes_service_account_mappings": {"agent-worker@my-project.iam.gserviceaccount.com": 5}}}`},
+		{name: "profile mappings not an object", section: "profiles",
+			doc: `{"prod": {"runtime": "k8s", "kubernetes_service_account_mappings": ["a"]}}`},
 		{name: "runtime namespace label", section: "runtimes", wantValid: true,
 			doc: `{"k8s": {"type": "kubernetes", "namespace": "scion-agents"}}`},
 		{name: "runtime namespace empty means unset", section: "runtimes", wantValid: true,

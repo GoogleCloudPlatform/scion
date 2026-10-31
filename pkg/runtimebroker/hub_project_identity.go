@@ -177,8 +177,7 @@ func recordHubProjectIdentity(projectPath, slug, projectID string, inUse func() 
 
 // otherProjectAgentsInUse reports whether an agent of projectID other than
 // agentID is known to this broker in any phase other than stopped or error.
-// The starting agent is matched by agentKey, as in newProjectAgentsInUseReason,
-// because AgentInfo.ID can be empty or a pod name. A listing failure counts
+// The starting agent is matched by agentKey because AgentInfo.ID can be empty or a pod name. A listing failure counts
 // as in use.
 //
 // A flat Runtime Broker instance lists only its own objects, so for one
@@ -215,9 +214,9 @@ func (s *Server) otherProjectAgentsInUse(ctx context.Context, projectID, agentID
 	return false, nil
 }
 
-// agentKey identifies a listed agent across lists for the NFS tree
-// cleanup: the hub agent ID from the "agent_id" label (new for every agent a
-// re-registered project creates, even with a reused name), else the
+// agentKey identifies a listed agent across lists: the hub agent ID from
+// the "agent_id" label (new for every agent a re-registered project
+// creates, even with a reused name), else the
 // runtime's operation ID (scionrt.AgentOperationID, from the container or
 // pod name), else AgentInfo.ID. Runtimes do not fill AgentInfo.ID, so it is
 // only a last resort. It returns "" when none is set.
@@ -229,85 +228,6 @@ func agentKey(a api.AgentInfo) string {
 		return id
 	}
 	return a.ID
-}
-
-// projectAgentIDs returns the keys (agentKey) of the agents of
-// projectID known to this broker, in any phase. Agents without a key are
-// left out. Without a manager it returns an empty set.
-func (s *Server) projectAgentIDs(ctx context.Context, projectID string) (map[string]bool, error) {
-	ids := map[string]bool{}
-	if s.manager == nil {
-		return ids, nil
-	}
-	agents, err := s.manager.List(ctx, map[string]string{"scion.agent": "true", "scion.project_id": projectID})
-	if err != nil {
-		return ids, err
-	}
-	for _, a := range agents {
-		if label, ok := a.Labels["scion.project_id"]; ok && label != projectID {
-			continue
-		}
-		if key := agentKey(a); key != "" {
-			ids[key] = true
-		}
-	}
-	return ids, nil
-}
-
-// Reasons newProjectAgentsInUseReason gives for a project in use.
-const (
-	projectInUseHere           = "a new agent of the project is in use on this Runtime Broker instance"
-	projectInUseSibling        = "another Runtime Broker instance of this host has live agents in the project"
-	projectInUseSiblingUnknown = "cannot tell: another Runtime Broker instance's records cannot be read"
-	projectInUseListingFailed  = "cannot tell: the project's agents could not be listed"
-)
-
-// newProjectAgentsInUseReason reports whether an agent of projectID whose
-// key (agentKey) is not in known is known to this broker in any phase other
-// than stopped or error, and why (one of the reasons above, or "" when the
-// project is not in use). An agent without a key counts as new (fail
-// closed). It is otherProjectAgentsInUse with a set of excluded agents. A
-// listing failure counts as in use. Without a manager no agents are known,
-// so it reports false.
-//
-// For a flat Runtime Broker instance, which lists only its own objects, the
-// project also counts as in use while another instance of this host sharing
-// its workspace lock service has live agents in it (or cannot say), as in
-// otherProjectAgentsInUse. A project delete is refused while another
-// instance has agents in the project, so any such agent seen later is a new
-// one.
-func (s *Server) newProjectAgentsInUseReason(ctx context.Context, projectID string, known map[string]bool) (bool, string, error) {
-	if s.ownership != nil {
-		used, unreadable := s.locks().projectUseByOthers(s, projectID)
-		switch {
-		case used:
-			return true, projectInUseSibling, nil
-		case unreadable:
-			return true, projectInUseSiblingUnknown, nil
-		}
-	}
-	if s.manager == nil {
-		// A broker without a manager runs no agents, so none can be in use.
-		return false, "", nil
-	}
-	agents, err := s.manager.List(ctx, map[string]string{"scion.agent": "true", "scion.project_id": projectID})
-	if err != nil {
-		return true, projectInUseListingFailed, err
-	}
-	for _, a := range agents {
-		if label, ok := a.Labels["scion.project_id"]; ok && label != projectID {
-			continue
-		}
-		if key := agentKey(a); key != "" && known[key] {
-			continue
-		}
-		switch state.Phase(a.Phase) {
-		case state.PhaseStopped, state.PhaseError, state.PhaseHalted:
-		default:
-			return true, projectInUseHere, nil
-		}
-	}
-	return false, "", nil
 }
 
 // alignHubManagedProjectIdentity applies recordHubProjectIdentity for an

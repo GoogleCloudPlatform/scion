@@ -50,6 +50,7 @@
 // Design: ptone/scion#1530 ("Safe rotation of the Hub server secret"),
 // §1-§3. This release uses the signing ring for web session cookies
 // (Phase 1) and for the hub's skill file URLs, artifact views, list cursors
-// and attachment deliveries (Phase 4); every other purpose still uses the
-// ring's "legacy" entry.
+// and attachment deliveries (Phase 4), and for conduit admission tokens and
+// shared-secret relay-peer signatures (Phase 5); every other purpose still
+// uses the ring's "legacy" entry.
 package keyring

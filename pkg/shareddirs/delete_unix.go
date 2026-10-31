@@ -19,7 +19,9 @@ package shareddirs
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -39,12 +41,12 @@ var maxDeleteTreeDepth = 4096
 
 // DeleteProjectRoot removes <hostBase>/<subPathRoot>/<projectID> and
 // everything under it (workspace, provisioning state, configuration, shared
-// dirs), via the same symlink-safe, fd-based openat/unlinkat walk as
-// DeleteProjectTree. It is for a project root its caller has just created
+// dirs), via the symlink-safe, fd-based openat/unlinkat walk of
+// removeTreeContents. It is for a project root its caller has just created
 // and must roll back (a failed shared workspace provisioning at project
-// create), not for project deletion, which keeps everything but shared-dirs.
+// create); project deletion goes through DeleteTree (projectfs).
 //
-// Errors and tolerated cases are as for DeleteProjectTree: an unusable
+// Errors and tolerated cases: an unusable
 // hostBase is an error; an absent subPathRoot or project dir is nothing to
 // do; a structural component (subPathRoot or projectID) that is not a plain
 // directory, most notably a symlink, is refused. Entries under the project
@@ -90,97 +92,9 @@ func DeleteProjectRoot(hostBase, subPathRoot, projectID string) error {
 	return nil
 }
 
-// DeleteProjectTree removes <hostBase>/<subPathRoot>/<projectID>/shared-dirs
-// entirely (every shared dir and its contents), then removes
-// <subPathRoot>/<projectID> itself if it is left empty afterward, via a
-// symlink-safe, fd-based openat/unlinkat walk. Used by project deletion
-// (ptone/scion#1802, Phase 2 item 3) to remove a deleted project's
-// shared-dir tree from the NFS export.
-//
-// Returns an error, naming the offending path, if hostBase itself doesn't
-// exist or can't be opened — an operator/deployment problem, not a
-// tolerable "nothing to do" case. Returns nil (nothing to do) if
-// subPathRoot or projectID doesn't exist under an existing hostBase, which
-// makes concurrent or repeated deletion calls tolerant of a prior call's
-// success. Returns
-// an error, naming the offending component, if any STRUCTURAL component
-// (subPathRoot — including an intermediate path component of a
-// multi-component subpath_root — projectID, or "shared-dirs" itself) exists
-// but is not a plain directory — most notably a symlink — refusing rather
-// than guessing, matching every fail-closed check elsewhere in this
-// package. Content INSIDE a shared dir's leaf (arbitrary agent-written
-// files, directories, or symlinks) is removed regardless of type: a symlink
-// there is unlinked directly, exactly like any other entry, and is never
-// traversed/followed, so whatever it points at is left untouched.
-func DeleteProjectTree(hostBase, subPathRoot, projectID string) error {
-	if !ValidProjectID(projectID) {
-		return fmt.Errorf("invalid project ID %q", projectID)
-	}
-
-	baseFd, err := unix.Open(hostBase, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
-	if err != nil {
-		if errors.Is(err, unix.ENOENT) {
-			return fmt.Errorf("host base %q does not exist", hostBase)
-		}
-		return fmt.Errorf("open host base %q: %w", hostBase, err)
-	}
-	defer func() { _ = unix.Close(baseFd) }()
-
-	// subPathRoot may be a multi-component relative path (e.g. "a/b" --
-	// config.ValidateSubPathRoot allows it); openExistingDirPathNoFollow
-	// walks it one component at a time, refusing a symlink at any of them,
-	// not just the last.
-	subRootFd, existed, err := openExistingDirPathNoFollow(baseFd, subPathRoot)
-	if err != nil {
-		return fmt.Errorf("subpath_root %q: %w", subPathRoot, err)
-	}
-	if !existed {
-		return nil // nothing under subpath_root at all -- nothing to do
-	}
-	defer func() { _ = unix.Close(subRootFd) }()
-
-	projectFd, existed, err := openExistingDirNoFollow(subRootFd, projectID)
-	if err != nil {
-		return fmt.Errorf("project dir %q: %w", projectID, err)
-	}
-	if !existed {
-		return nil // project never had shared dirs, or already cleaned up
-	}
-
-	sharedDirsFd, existed, err := openExistingDirNoFollow(projectFd, "shared-dirs")
-	if err != nil {
-		_ = unix.Close(projectFd)
-		return fmt.Errorf("shared-dirs for project %q: %w", projectID, err)
-	}
-	if existed {
-		if err := removeTreeContents(sharedDirsFd, 0); err != nil {
-			_ = unix.Close(sharedDirsFd)
-			_ = unix.Close(projectFd)
-			return fmt.Errorf("remove shared-dirs contents for project %q: %w", projectID, err)
-		}
-		_ = unix.Close(sharedDirsFd)
-		if err := unix.Unlinkat(projectFd, "shared-dirs", unix.AT_REMOVEDIR); err != nil && !errors.Is(err, unix.ENOENT) {
-			_ = unix.Close(projectFd)
-			return fmt.Errorf("remove shared-dirs dir for project %q: %w", projectID, err)
-		}
-	}
-	_ = unix.Close(projectFd)
-
-	// Remove the now-hopefully-empty project dir. ENOTEMPTY (something
-	// else legitimately still lives under it — we only ever touch
-	// shared-dirs/) and ENOENT (already gone, e.g. a concurrent deletion)
-	// are both fine: "the pid dir if it's then empty", not "force it
-	// empty".
-	if err := unix.Unlinkat(subRootFd, projectID, unix.AT_REMOVEDIR); err != nil &&
-		!errors.Is(err, unix.ENOENT) && !errors.Is(err, unix.ENOTEMPTY) {
-		return fmt.Errorf("remove project dir %q: %w", projectID, err)
-	}
-	return nil
-}
-
 // DeleteSharedDir removes exactly one shared dir's leaf --
 // <hostBase>/<subPathRoot>/<projectID>/shared-dirs/<name> -- and its
-// contents, via the same symlink-safe openat/unlinkat walk DeleteProjectTree
+// contents, via the same symlink-safe openat/unlinkat walk DeleteTree
 // uses. It never touches shared-dirs/ itself or any sibling shared dir under
 // it -- only the one named leaf.
 //
@@ -245,6 +159,335 @@ func DeleteSharedDir(hostBase, subPathRoot, projectID, name string) error {
 		return fmt.Errorf("remove shared dir %q: %w", name, err)
 	}
 	return nil
+}
+
+// ErrTreeRefused marks a DeleteTree error raised before anything was
+// removed: an invalid path, an unusable host base, or a component that is a
+// symlink or not a directory. Retrying cannot help with such an error;
+// other errors (a removal that failed part-way, for example because a
+// process was still writing) may clear on a retry.
+var ErrTreeRefused = errors.New("tree deletion refused")
+
+// DeleteTree removes <hostBase>/<relPath> and everything under it, via
+// the symlink-safe, fd-based openat/unlinkat walk of removeTreeContents.
+// relPath is a relative path of one or more components,
+// none of them empty, "." or "..". Every component of relPath must be a
+// plain directory: a symlink (or any other non-directory) at any of them is
+// refused, never followed. Entries under the leaf are removed regardless of
+// type, and a symlink there is unlinked, never followed.
+//
+// existed reports whether the leaf directory was there to remove. An
+// absent component is nothing to do (existed false, no error), so repeated
+// or concurrent calls converge. An unusable hostBase is an error: a missing
+// mount must never look like a successful delete.
+func DeleteTree(hostBase, relPath string) (existed bool, err error) {
+	comps, err := splitRelPath(relPath)
+	if err != nil {
+		return false, fmt.Errorf("%w: %w", ErrTreeRefused, err)
+	}
+	baseFd, err := unix.Open(hostBase, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return false, fmt.Errorf("%w: host base %q does not exist", ErrTreeRefused, hostBase)
+		}
+		return false, fmt.Errorf("%w: open host base %q: %w", ErrTreeRefused, hostBase, err)
+	}
+	defer func() { _ = unix.Close(baseFd) }()
+
+	parentFd := baseFd
+	if len(comps) > 1 {
+		fd, ok, err := openExistingDirPathNoFollow(baseFd, strings.Join(comps[:len(comps)-1], "/"))
+		if err != nil {
+			return false, fmt.Errorf("%w: %q: %w", ErrTreeRefused, relPath, err)
+		}
+		if !ok {
+			return false, nil
+		}
+		parentFd = fd
+		defer func() { _ = unix.Close(fd) }()
+	}
+	leaf := comps[len(comps)-1]
+	leafFd, ok, err := openExistingDirNoFollow(parentFd, leaf)
+	if err != nil {
+		return false, fmt.Errorf("%w: %q: %w", ErrTreeRefused, relPath, err)
+	}
+	if !ok {
+		return false, nil
+	}
+	walkErr := removeTreeContents(leafFd, 0)
+	_ = unix.Close(leafFd)
+	if walkErr != nil {
+		return true, fmt.Errorf("remove contents of %q: %w", relPath, walkErr)
+	}
+	if err := unix.Unlinkat(parentFd, leaf, unix.AT_REMOVEDIR); err != nil && !errors.Is(err, unix.ENOENT) {
+		return true, fmt.Errorf("remove %q: %w", relPath, err)
+	}
+	return true, nil
+}
+
+// RemoveDirIfEmpty removes the directory <hostBase>/<relPath> only when it
+// is empty, walking every component without following a symlink (a symlink
+// or non-directory at any component, the leaf included, is refused with
+// ErrTreeRefused). existed reports whether the directory was there; notEmpty
+// that it was kept because it still has entries. Nothing below it is ever
+// removed.
+func RemoveDirIfEmpty(hostBase, relPath string) (existed, notEmpty bool, err error) {
+	comps, err := splitRelPath(relPath)
+	if err != nil {
+		return false, false, fmt.Errorf("%w: %w", ErrTreeRefused, err)
+	}
+	baseFd, err := unix.Open(hostBase, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return false, false, fmt.Errorf("%w: host base %q does not exist", ErrTreeRefused, hostBase)
+		}
+		return false, false, fmt.Errorf("%w: open host base %q: %w", ErrTreeRefused, hostBase, err)
+	}
+	defer func() { _ = unix.Close(baseFd) }()
+
+	parentFd := baseFd
+	if len(comps) > 1 {
+		fd, ok, err := openExistingDirPathNoFollow(baseFd, strings.Join(comps[:len(comps)-1], "/"))
+		if err != nil {
+			return false, false, fmt.Errorf("%w: %q: %w", ErrTreeRefused, relPath, err)
+		}
+		if !ok {
+			return false, false, nil
+		}
+		parentFd = fd
+		defer func() { _ = unix.Close(fd) }()
+	}
+	leaf := comps[len(comps)-1]
+	leafFd, ok, err := openExistingDirNoFollow(parentFd, leaf)
+	if err != nil {
+		return false, false, fmt.Errorf("%w: %q: %w", ErrTreeRefused, relPath, err)
+	}
+	if !ok {
+		return false, false, nil
+	}
+	_ = unix.Close(leafFd)
+	if err := unix.Unlinkat(parentFd, leaf, unix.AT_REMOVEDIR); err != nil {
+		switch {
+		case errors.Is(err, unix.ENOENT):
+			return true, false, nil
+		case errors.Is(err, unix.ENOTEMPTY), errors.Is(err, unix.EEXIST):
+			return true, true, nil
+		default:
+			return true, false, fmt.Errorf("remove %q: %w", relPath, err)
+		}
+	}
+	return true, false, nil
+}
+
+// WriteFileInTree writes data to <hostBase>/<relDir>/<name>, replacing the
+// file, without following a symlink at any component: every component of
+// relDir but the last must exist as a plain directory; the last is created
+// (mode 0o755) when createLast is set and it is absent. name must be one
+// plain path element; an existing name that is not a regular file is
+// refused. Errors raised before anything was written are ErrTreeRefused.
+func WriteFileInTree(hostBase, relDir, name string, data []byte, createLast bool) error {
+	dirFd, err := openTreeDir(hostBase, relDir, createLast)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = unix.Close(dirFd) }()
+	if err := checkFileName(name); err != nil {
+		return err
+	}
+	tmp := "." + name + ".tmp"
+	_ = unix.Unlinkat(dirFd, tmp, 0)
+	fd, err := unix.Openat(dirFd, tmp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o644)
+	if err != nil {
+		return fmt.Errorf("create %s/%s: %w", relDir, tmp, err)
+	}
+	f := os.NewFile(uintptr(fd), tmp)
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = unix.Unlinkat(dirFd, tmp, 0)
+		return fmt.Errorf("write %s/%s: %w", relDir, tmp, err)
+	}
+	if err := f.Close(); err != nil {
+		_ = unix.Unlinkat(dirFd, tmp, 0)
+		return fmt.Errorf("close %s/%s: %w", relDir, tmp, err)
+	}
+	var st unix.Stat_t
+	if err := unix.Fstatat(dirFd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err == nil && st.Mode&unix.S_IFMT != unix.S_IFREG {
+		_ = unix.Unlinkat(dirFd, tmp, 0)
+		return fmt.Errorf("%w: %s/%s exists and is not a regular file", ErrTreeRefused, relDir, name)
+	}
+	if err := unix.Renameat(dirFd, tmp, dirFd, name); err != nil {
+		_ = unix.Unlinkat(dirFd, tmp, 0)
+		return fmt.Errorf("rename %s/%s: %w", relDir, name, err)
+	}
+	return nil
+}
+
+// ReadFileInTree reads the small regular file <hostBase>/<relDir>/<name>
+// (at most maxBytes) without following a symlink at any component. ok is
+// false when any component or the file is absent. A file that is not a
+// regular file, or is larger than maxBytes, is ErrTreeRefused.
+func ReadFileInTree(hostBase, relDir, name string, maxBytes int64) (data []byte, ok bool, err error) {
+	if err := checkFileName(name); err != nil {
+		return nil, false, err
+	}
+	dirFd, err := openTreeDir(hostBase, relDir, false)
+	if errors.Is(err, errTreeAbsent) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	defer func() { _ = unix.Close(dirFd) }()
+	fd, err := unix.Openat(dirFd, name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	if err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("%w: open %s/%s: %w", ErrTreeRefused, relDir, name, err)
+	}
+	f := os.NewFile(uintptr(fd), name)
+	defer func() { _ = f.Close() }()
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return nil, false, err
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG || st.Size > maxBytes {
+		return nil, false, fmt.Errorf("%w: %s/%s is not a small regular file", ErrTreeRefused, relDir, name)
+	}
+	data, err = io.ReadAll(io.LimitReader(f, maxBytes))
+	if err != nil {
+		return nil, false, err
+	}
+	return data, true, nil
+}
+
+// RemoveFileInTree removes the file <hostBase>/<relDir>/<name> without
+// following a symlink at any directory component (a symlink at name itself
+// is unlinked, never followed). An absent file or directory is nothing to
+// do.
+func RemoveFileInTree(hostBase, relDir, name string) error {
+	if err := checkFileName(name); err != nil {
+		return err
+	}
+	dirFd, err := openTreeDir(hostBase, relDir, false)
+	if errors.Is(err, errTreeAbsent) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer func() { _ = unix.Close(dirFd) }()
+	if err := unix.Unlinkat(dirFd, name, 0); err != nil && !errors.Is(err, unix.ENOENT) {
+		return fmt.Errorf("remove %s/%s: %w", relDir, name, err)
+	}
+	return nil
+}
+
+// ListDirInTree lists the entry names of the directory <hostBase>/<relDir>
+// without following a symlink at any component. ok is false when a
+// component is absent.
+func ListDirInTree(hostBase, relDir string) (names []string, ok bool, err error) {
+	dirFd, err := openTreeDir(hostBase, relDir, false)
+	if errors.Is(err, errTreeAbsent) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	defer func() { _ = unix.Close(dirFd) }()
+	names, err = readDirNames(dirFd)
+	if err != nil {
+		return nil, false, err
+	}
+	return names, true, nil
+}
+
+// DirExistsInTree reports whether <hostBase>/<relDir> exists as a plain
+// directory, reached without following a symlink at any component.
+func DirExistsInTree(hostBase, relDir string) (bool, error) {
+	dirFd, err := openTreeDir(hostBase, relDir, false)
+	if errors.Is(err, errTreeAbsent) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	_ = unix.Close(dirFd)
+	return true, nil
+}
+
+// errTreeAbsent is openTreeDir's "a component does not exist".
+var errTreeAbsent = errors.New("tree component absent")
+
+// openTreeDir opens the directory <hostBase>/<relDir> without following a
+// symlink at any component, creating the last component when createLast is
+// set. An absent component (when not created) is errTreeAbsent; an unusable
+// host base or a refused component is ErrTreeRefused.
+func openTreeDir(hostBase, relDir string, createLast bool) (int, error) {
+	comps, err := splitRelPath(relDir)
+	if err != nil {
+		return -1, fmt.Errorf("%w: %w", ErrTreeRefused, err)
+	}
+	baseFd, err := unix.Open(hostBase, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, fmt.Errorf("%w: open host base %q: %w", ErrTreeRefused, hostBase, err)
+	}
+	defer func() { _ = unix.Close(baseFd) }()
+	parentFd := baseFd
+	if len(comps) > 1 {
+		fd, ok, err := openExistingDirPathNoFollow(baseFd, strings.Join(comps[:len(comps)-1], "/"))
+		if err != nil {
+			return -1, fmt.Errorf("%w: %q: %w", ErrTreeRefused, relDir, err)
+		}
+		if !ok {
+			return -1, errTreeAbsent
+		}
+		parentFd = fd
+		defer func() { _ = unix.Close(fd) }()
+	}
+	leaf := comps[len(comps)-1]
+	fd, ok, err := openExistingDirNoFollow(parentFd, leaf)
+	if err != nil {
+		return -1, fmt.Errorf("%w: %q: %w", ErrTreeRefused, relDir, err)
+	}
+	if ok {
+		return fd, nil
+	}
+	if !createLast {
+		return -1, errTreeAbsent
+	}
+	if err := unix.Mkdirat(parentFd, leaf, 0o755); err != nil && !errors.Is(err, unix.EEXIST) {
+		return -1, fmt.Errorf("create %q: %w", relDir, err)
+	}
+	fd, ok, err = openExistingDirNoFollow(parentFd, leaf)
+	if err != nil || !ok {
+		return -1, fmt.Errorf("%w: %q: created but not openable: %v", ErrTreeRefused, relDir, err)
+	}
+	return fd, nil
+}
+
+// checkFileName refuses a name that is not one plain path element.
+func checkFileName(name string) error {
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\x00") {
+		return fmt.Errorf("%w: invalid file name %q", ErrTreeRefused, name)
+	}
+	return nil
+}
+
+// splitRelPath splits a relative path into its components, refusing an
+// absolute path and an empty, "." or ".." component.
+func splitRelPath(relPath string) ([]string, error) {
+	slashed := filepath.ToSlash(relPath)
+	if slashed == "" || strings.HasPrefix(slashed, "/") || filepath.IsAbs(relPath) {
+		return nil, fmt.Errorf("path %q is not a relative path", relPath)
+	}
+	comps := strings.Split(slashed, "/")
+	for _, c := range comps {
+		if c == "" || c == "." || c == ".." {
+			return nil, fmt.Errorf("path %q is not a clean relative path", relPath)
+		}
+	}
+	return comps, nil
 }
 
 // openExistingDirNoFollow opens the existing directory component `comp`

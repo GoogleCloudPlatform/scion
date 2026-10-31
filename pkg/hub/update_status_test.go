@@ -243,13 +243,13 @@ func TestReconcilePendingUpdate(t *testing.T) {
 
 func TestUpdateOutcome(t *testing.T) {
 	p := PendingUpdate{To: "v0.3.0-preview.4"}
-	if got := updateOutcome(p, "v0.3.0-preview.4"); got != LastUpdateVerified {
+	if got := updateOutcome(p, "v0.3.0-preview.4", nil); got != LastUpdateVerified {
 		t.Errorf("match = %q", got)
 	}
-	if got := updateOutcome(p, "nightly-20261023"); got != LastUpdateFailed {
+	if got := updateOutcome(p, "nightly-20261023", nil); got != LastUpdateFailed {
 		t.Errorf("mismatch = %q", got)
 	}
-	if got := updateOutcome(PendingUpdate{}, ""); got != LastUpdateFailed {
+	if got := updateOutcome(PendingUpdate{}, "", nil); got != LastUpdateFailed {
 		t.Errorf("empty target = %q", got)
 	}
 }

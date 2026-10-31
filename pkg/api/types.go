@@ -523,8 +523,8 @@ type ScionConfig struct {
 	// are the transport-agnostic config translated by each harness's
 	// container-side provisioner into native format.
 	MCPServers    map[string]MCPServerConfig `json:"mcp_servers,omitempty" yaml:"mcp_servers,omitempty"`
-	MaxTurns      int                        `json:"max_turns,omitempty" yaml:"max_turns,omitempty"`
-	MaxModelCalls int                        `json:"max_model_calls,omitempty" yaml:"max_model_calls,omitempty"`
+	MaxTurns      *int                       `json:"max_turns,omitempty" yaml:"max_turns,omitempty"`             // nil inherits, 0 is no limit (limits.go)
+	MaxModelCalls *int                       `json:"max_model_calls,omitempty" yaml:"max_model_calls,omitempty"` // nil inherits, 0 is no limit (limits.go)
 	MaxDuration   string                     `json:"max_duration,omitempty" yaml:"max_duration,omitempty"`
 	Hub           *AgentHubConfig            `json:"hub,omitempty" yaml:"hub,omitempty"`
 	Telemetry     *TelemetryConfig           `json:"telemetry,omitempty" yaml:"telemetry,omitempty"`
@@ -962,7 +962,23 @@ type GitCloneConfig struct {
 	URL    string `json:"url"`              // HTTPS clone URL (without credentials)
 	Branch string `json:"branch,omitempty"` // Branch to clone (default: main)
 	Depth  *int   `json:"depth,omitempty"`  // Clone depth (nil/omitted = shallow depth 1, 0 = full clone, >0 = that depth)
+
+	// TokenRemote is the project's recorded git remote (the hub's
+	// project.GitRemote, host/owner/repo), set by the hub on every dispatch
+	// from the project record, never from the clone URL or a label. The
+	// project's git token is offered to the clone only when URL is https and
+	// names this remote's host and owner/repo (provision.CloneTokenAllowed);
+	// when it is empty no token is offered. Brokers and runtimes relay it
+	// unchanged: to the agent container and to the Kubernetes provisioning
+	// init container as EnvGitTokenRemote.
+	TokenRemote string `json:"tokenRemote,omitempty"`
 }
+
+// EnvGitTokenRemote is the container environment variable that carries
+// GitCloneConfig.TokenRemote to sciontool (init's in-container clone and the
+// provision init container's clone). Without it no git token is offered to
+// the clone.
+const EnvGitTokenRemote = "SCION_GIT_TOKEN_REMOTE"
 
 type gitCloneContextKey struct{}
 
@@ -1041,6 +1057,24 @@ func ContextWithSharedWorkspace(ctx context.Context) context.Context {
 func IsSharedWorkspaceFromContext(ctx context.Context) bool {
 	v, _ := ctx.Value(sharedWorkspaceContextKey{}).(bool)
 	return v
+}
+
+type gitTokenRemoteContextKey struct{}
+
+// ContextWithGitTokenRemote attaches the project's recorded git remote of a
+// shared-plain workspace (StartOptions.SharedWorkspaceClone.TokenRemote, as
+// the hub sent it). Provisioning scopes the agent's git credential helper to
+// this remote's host (provision.TokenRemoteCredentialScope), never to the
+// clone-url label or the workspace's own git config.
+func ContextWithGitTokenRemote(ctx context.Context, remote string) context.Context {
+	return context.WithValue(ctx, gitTokenRemoteContextKey{}, remote)
+}
+
+// GitTokenRemoteFromContext returns the remote ContextWithGitTokenRemote
+// attached, or "" when there is none.
+func GitTokenRemoteFromContext(ctx context.Context) string {
+	s, _ := ctx.Value(gitTokenRemoteContextKey{}).(string)
+	return s
 }
 
 type hubProjectIDContextKey struct{}

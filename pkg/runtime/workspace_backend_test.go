@@ -1008,11 +1008,4 @@ func TestWorkspaceBackends_RejectInvalidSubPathRoot(t *testing.T) {
 		})
 	}
 
-	if err := CleanupNFSProject(&config.V1NFSConfig{
-		MountRoot:   "/mnt/nfs",
-		Shares:      []config.V1NFSShare{{ID: "share1"}},
-		SubPathRoot: "../escape",
-	}, "proj-1"); err == nil {
-		t.Error("CleanupNFSProject: expected an error for an invalid subpath_root")
-	}
 }

@@ -41,6 +41,16 @@ export interface LastUpdate {
   to: string;
   status: 'verified' | 'failed' | 'rolled_back' | (string & {});
   at: string;
+  /**
+   * The release the boot-failure guard restored; only on rolled_back, and
+   * absent from hubs that do not report it (then from is shown).
+   */
+  restored?: string;
+}
+
+/** The release a rolled-back update returned to: restored, else from. */
+export function rollbackTarget(last: LastUpdate): string {
+  return last.restored || last.from || 'the previous release';
 }
 
 /** An update whose hub restart is pending, from system.pending_update. */
@@ -137,11 +147,24 @@ export const LAST_UPDATE_LABELS: Record<string, string> = {
   rolled_back: 'rolled back',
 };
 
-/**
- * Classes the hub installs in this phase. Older releases (downgrade,
- * switch-older) stay disabled until downgrade safety lands.
- */
-const SELECTABLE_CLASSES = new Set(['same', 'upgrade', 'switch-newer']);
+/** Older than the running version: the hub asks for a typed confirmation. */
+const OLDER_CLASSES = new Set(['downgrade', 'switch-older']);
+
+/** Classes the hub installs; older ones only after a typed confirmation. */
+const SELECTABLE_CLASSES = new Set(['same', 'upgrade', 'switch-newer', ...OLDER_CLASSES]);
+
+/** Whether a release class is older than the running version. */
+export function isOlderClass(cls: string | undefined): boolean {
+  return !!cls && OLDER_CLASSES.has(cls);
+}
+
+/** Why an older release cannot be picked on a hub without database snapshots. */
+export const NO_SNAPSHOTS_REASON =
+  "Older than the running version: this hub's database cannot be snapshotted, so it cannot roll back";
+
+/** The tooltip of an older entry that can be picked. */
+const OLDER_TOOLTIP =
+  'Older than the running version: installing it asks you to confirm the risks by typing its tag';
 
 const CHANNEL_SOURCE_DESCRIPTIONS: Record<string, string> = {
   selection: "chosen by an administrator's update",
@@ -178,11 +201,16 @@ export function isReleasesResponse(data: unknown): data is ReleasesResponse {
 }
 
 /**
- * Why a release cannot be picked, or null when it can. Not-installable,
- * below-floor and older releases are disabled; so is a class the page
- * does not know.
+ * Why a release cannot be picked, or null when it can. Not-installable and
+ * below-floor releases are disabled; so is a class the page does not know,
+ * and an older release when the hub reports that it cannot take database
+ * snapshots (snapshotsSupported false, a Postgres hub).
  */
-export function releaseDisabledReason(r: CatalogRelease, floor?: string): string | null {
+export function releaseDisabledReason(
+  r: CatalogRelease,
+  floor?: string,
+  snapshotsSupported = true
+): string | null {
   if (!r.installable) {
     return `Not installable: ${r.reason || 'the release has no verifiable binary'}`;
   }
@@ -193,7 +221,7 @@ export function releaseDisabledReason(r: CatalogRelease, floor?: string): string
         : "Below this hub's downgrade floor";
     case 'downgrade':
     case 'switch-older':
-      return 'Older than the running version: rolling back is not supported yet';
+      if (!snapshotsSupported) return NO_SNAPSHOTS_REASON;
   }
   if (!r.class || !SELECTABLE_CLASSES.has(r.class)) {
     return 'The hub did not say how this release compares to the running version';
@@ -209,12 +237,20 @@ export interface ReleaseBadge {
 }
 
 /** The badges of a release entry: Current, Local, Older, Not installable, Below floor. */
-export function releaseBadges(r: CatalogRelease, floor?: string): ReleaseBadge[] {
+export function releaseBadges(
+  r: CatalogRelease,
+  floor?: string,
+  snapshotsSupported = true
+): ReleaseBadge[] {
   const badges: ReleaseBadge[] = [];
   if (r.class === 'same') badges.push({ label: 'Current', variant: 'primary' });
   if (r.local) badges.push({ label: 'Local', variant: 'neutral' });
-  if (r.class === 'downgrade' || r.class === 'switch-older') {
-    badges.push({ label: 'Older', variant: 'warning', tooltip: releaseDisabledReason(r) ?? '' });
+  if (isOlderClass(r.class)) {
+    badges.push({
+      label: 'Older',
+      variant: 'warning',
+      tooltip: releaseDisabledReason(r, floor, snapshotsSupported) ?? OLDER_TOOLTIP,
+    });
   }
   if (!r.installable) {
     badges.push({
@@ -470,6 +506,10 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
       color: var(--scion-text-muted, #64748b);
     }
 
+    .older-note {
+      color: var(--sl-color-warning-700, #a16207);
+    }
+
     sl-option sl-badge {
       margin-left: 0.25rem;
     }
@@ -556,6 +596,15 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
     return this.status?.downgrade?.floor || undefined;
   }
 
+  /** False only when the hub says it cannot snapshot its database. */
+  private get snapshotsSupported(): boolean {
+    return this.status?.downgrade?.snapshotsSupported !== false;
+  }
+
+  private disabledReason(r: CatalogRelease): string | null {
+    return releaseDisabledReason(r, this.floor, this.snapshotsSupported);
+  }
+
   /** The release a picker value stands for in the selected channel. */
   private releaseFor(value: string): CatalogRelease | undefined {
     const ch = this.channelOf(this.selectedChannel);
@@ -568,14 +617,19 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
   private latestDisabledReason(): string | null {
     const latest = this.releaseFor(LATEST_VALUE);
     if (!latest) return 'The latest release is not in the list';
-    return releaseDisabledReason(latest, this.floor);
+    return this.disabledReason(latest);
   }
 
-  /** The picked release, else Latest when it can be picked, else nothing. */
+  /**
+   * The picked release, else Latest when it can be picked and is not
+   * older than the running version (a downgrade is never preselected),
+   * else nothing.
+   */
   private get selectedValue(): string {
     if (this.pickedRelease) return this.pickedRelease;
     const ch = this.channelOf(this.selectedChannel);
-    return ch?.latest && !this.latestDisabledReason() ? LATEST_VALUE : '';
+    if (!ch?.latest || this.latestDisabledReason()) return '';
+    return isOlderClass(this.releaseFor(LATEST_VALUE)?.class) ? '' : LATEST_VALUE;
   }
 
   /** Why Update is disabled for the current pick, or null when it is enabled. */
@@ -588,7 +642,7 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
     const r = value ? this.releaseFor(value) : undefined;
     if (!r) return 'Pick a release';
     if (r.class === 'same') return `The hub is already running ${r.tag}`;
-    return releaseDisabledReason(r, this.floor);
+    return this.disabledReason(r);
   }
 
   private onChannelChange(e: Event): void {
@@ -746,12 +800,20 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
   private renderLastUpdate(last: LastUpdate): TemplateResult {
     const label = LAST_UPDATE_LABELS[last.status] ?? last.status;
     const badge =
-      last.status === 'verified' ? 'completed' : last.status === 'failed' ? 'failed' : 'pending';
+      last.status === 'verified'
+        ? 'completed'
+        : last.status === 'failed' || last.status === 'rolled_back'
+          ? 'failed'
+          : 'pending';
     return html`
       <div class="release-field last-update">
         <span class="release-label">Last update:</span>
         <span>
-          ${last.from ? html`${last.from} &rarr; ` : nothing}${last.to}
+          ${last.status === 'rolled_back'
+            ? html`<span class="last-update-rollback"
+                >Rolled back to ${rollbackTarget(last)} after ${last.to} failed to start</span
+              >`
+            : html`${last.from ? html`${last.from} &rarr; ` : nothing}${last.to}`}
           <span class="status-badge ${badge}">${label}</span>
           ${last.at ? html`${this.formatRelativeTime(last.at)}` : nothing}
           ${last.runId
@@ -876,6 +938,12 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
             Update
           </sl-button>
           ${blocked ? html`<span class="update-blocked">${blocked}</span>` : nothing}
+          ${!blocked && isOlderClass(selected?.class)
+            ? html`<span class="older-note"
+                >${selected?.tag} is older than the running version: the hub lists the risks and
+                asks you to type the tag before it installs it.</span
+              >`
+            : nothing}
           ${selected?.notesUrl ? renderReleaseNotesLink(selected.notesUrl) : nothing}
         </div>
       </div>
@@ -908,7 +976,7 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
       `);
     }
     for (const r of ch.releases) {
-      const reason = releaseDisabledReason(r, this.floor);
+      const reason = this.disabledReason(r);
       const date = this.formatDate(r.publishedAt);
       options.push(html`
         <sl-option
@@ -918,7 +986,7 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
           ?disabled=${!!reason}
           title=${reason ?? ''}
           >${r.tag}${date ? html`<span slot="suffix" class="release-date">${date}</span>` : nothing}
-          ${releaseBadges(r, this.floor).map((b) =>
+          ${releaseBadges(r, this.floor, this.snapshotsSupported).map((b) =>
             b.tooltip
               ? html`<sl-tooltip slot="suffix" content=${b.tooltip}
                   ><sl-badge variant=${b.variant} pill class="release-badge">${b.label}</sl-badge>

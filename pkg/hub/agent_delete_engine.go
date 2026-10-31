@@ -427,6 +427,14 @@ type deletionEngine struct {
 	// Only the engine goroutine touches it.
 	finished bool
 
+	// teardownConfirmed is set when the broker confirmed the agent's
+	// teardown (its delete dispatch succeeded, or a re-claimed finalizing
+	// row whose teardown already ran). A forced continuation after a broker
+	// failure, an unreachable best-effort broker, or no broker leaves it
+	// false. It decides the reason the agent storage cleanup gives for an
+	// agent directory it keeps. Only the engine goroutine touches it.
+	teardownConfirmed bool
+
 	// retriedRun are the runs of the delete that removed the run the
 	// broker reported holding instead of the recorded one
 	// (retryReportedRunDelete, or the plan's for a re-claim after such a
@@ -638,6 +646,8 @@ func (e *deletionEngine) run() deletionOutcome {
 		if out, ok := e.dispatch(); !ok {
 			return out
 		}
+	} else {
+		e.teardownConfirmed = true
 	}
 
 	// CAS deleting → finalizing.
@@ -696,6 +706,15 @@ func (e *deletionEngine) run() deletionOutcome {
 
 	if out, ok := e.finish(); !ok {
 		return out
+	}
+
+	// A hard delete that deletes the agent's files also removes the
+	// agent's storage the hub owns (its agents/<slug> directory on the
+	// shared project storage and its object-storage prefix), in the
+	// background and audited (ptone/scion#5835). A soft delete keeps it
+	// until the retained-files purge.
+	if agentStorageOnDelete(e.plan.req) {
+		e.tailStep("remove agent storage", func() { s.startAgentStorageCleanup(agent, e.teardownConfirmed) })
 	}
 
 	// Persist and deliver only after the row change succeeded. Each tail
@@ -836,6 +855,7 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 		"agent_id", agent.ID, "claim", e.plan.claim, "not_after", notAfter.UTC().Format(time.RFC3339))
 	err := dispatcher.DispatchAgentDelete(ctx, agent, req.DeleteFiles, req.RemoveBranch, req.Soft, startedAt)
 	if err == nil {
+		e.teardownConfirmed = true
 		return deletionOutcome{}, true
 	}
 	if e.isLost() {
@@ -1040,6 +1060,7 @@ func (e *deletionEngine) retryReportedRunDelete(ctx context.Context, first *Dele
 		"broker_run_id", first.CurrentRunID, "reason", why, "force", req.Force, "best_effort", bestEffort)
 	err := s.GetDispatcher().DispatchAgentDelete(ctx, &retry, req.DeleteFiles, req.RemoveBranch, req.Soft, startedAt)
 	if err == nil {
+		e.teardownConfirmed = true
 		e.retriedRun = &retriedRunIDs{runID: retry.RunID, previous: retry.PreviousRunIDs}
 		s.agentLifecycleLog.Info("delete engine: deleted the run the broker held",
 			"agent_id", agent.ID, "claim", e.plan.claim, "hub_run_id", first.RequestedRunID, "broker_run_id", first.CurrentRunID)
@@ -1124,6 +1145,7 @@ func (e *deletionEngine) classifyDispatchFailure(dispatchErr error, since time.T
 	case completed:
 		s.agentLifecycleLog.Info("delete engine: deferred delete completed after the wait exited",
 			"agent_id", agentID, "dispatch_error", dispatchErr)
+		e.teardownConfirmed = true
 		return deletionOutcome{}, true
 	}
 

@@ -150,11 +150,14 @@ By default, git projects use a shallow clone with `depth=1` for fast startup.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `SCION_GIT_CLONE_URL` | HTTPS URL of the repository to clone | *(required)* |
+| `SCION_GIT_CLONE_URL` | URL of the repository to clone. Set by the broker from the project's clone settings only; a value in agent, settings or harness-config env is ignored | *(set by the broker)* |
 | `SCION_GIT_BRANCH` | Branch to clone | `main` |
 | `SCION_GIT_DEPTH` | Clone depth (set to `0` for full clone, omission defaults to shallow depth `1`) | `1` |
+| `SCION_GIT_TOKEN_REMOTE` | The project's git remote, as the Hub recorded it. Set by the broker only | *(none)* |
 
-Authentication is handled via the `GITHUB_TOKEN` environment variable, injected from the project's secrets or your local environment through the env-gather flow.
+Authentication is handled via the `GITHUB_TOKEN` environment variable, injected from the project's secrets or your local environment through the env-gather flow. The clone uses the token only when the clone URL is HTTPS and names the project's git remote (the same host and owner/repository as `SCION_GIT_TOKEN_REMOTE`). A clone URL that names another host or repository, for example through a `scion.dev/clone-url` label, is cloned without the token, and no credential helper is configured for it. The same rule applies to the Kubernetes workspace-provisioning init container.
+
+The clone URL must use `https`, `ssh` (including the `git@host:path` form) or `git`. A local path, a `file://` or `http://` URL, a `<transport>::<address>` form, or a URL starting with `-` is refused: the agent is not started. A create request answers HTTP 422, and a start fails with the same fixed message; neither repeats the URL.
 
 ### Linked git projects
 

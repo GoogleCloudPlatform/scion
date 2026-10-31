@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -180,9 +179,10 @@ func loadBrokerRegistrationWorkspaceStorage() *api.BrokerWorkspaceStorage {
 // nfsDoctorProbe is the read-only system access the doctor NFS check needs.
 // Tests replace it with fakes.
 type nfsDoctorProbe struct {
-	// mountSource returns the source device (server:export for NFS) mounted
-	// at path, and whether path is a mountpoint at all.
-	mountSource func(path string) (source string, mounted bool, err error)
+	// mountEntry returns the mount table entry at path (the source,
+	// server:export for NFS, and the mount options), and whether path is a
+	// mountpoint at all.
+	mountEntry func(path string) (entry runtimebroker.MountEntry, mounted bool, err error)
 	// dial checks TCP reachability of addr (host:port).
 	dial func(addr string) error
 }
@@ -192,7 +192,7 @@ const nfsServerPort = "2049"
 
 func defaultNFSDoctorProbe() nfsDoctorProbe {
 	return nfsDoctorProbe{
-		mountSource: runtimebroker.ProcMountSource,
+		mountEntry: runtimebroker.ProcMountEntry,
 		dial: func(addr string) error {
 			conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
 			if err != nil {
@@ -270,11 +270,12 @@ func checkDoctorNFSMounts(vs *config.VersionedSettings, probe nfsDoctorProbe) sc
 	var ok, problems []string
 	failed := false
 	for i, share := range nfsCfg.Shares {
-		target := filepath.Join(nfsCfg.MountRoot, share.ID)
+		target := runtimebroker.NFSShareTarget(nfsCfg.MountRoot, share.ID)
 		want := share.Server + ":" + share.Export
 		var issues []string
 
-		source, mounted, err := probe.mountSource(target)
+		entry, mounted, err := probe.mountEntry(target)
+		source := entry.Source
 		switch {
 		case err != nil:
 			issues = append(issues, fmt.Sprintf("mount state unknown (%v)", err))
@@ -296,6 +297,21 @@ func checkDoctorNFSMounts(vs *config.VersionedSettings, probe nfsDoctorProbe) sc
 		case source != want:
 			issues = append(issues, fmt.Sprintf("%s is mounted from %s, expected %s", target, source, want))
 			failed = true
+		case verifyOnlyRuntime != "":
+			// The platform mounts the export and cannot set options; the
+			// broker does not require nosuid,nodev here.
+		default:
+			// As the broker's health: a mount without nosuid,nodev is
+			// remounted by a broker with auto_mount on, and refused
+			// (mount_flags) otherwise.
+			if missing := runtimebroker.MissingNFSMountFlags(entry.Options); len(missing) > 0 {
+				if nfsCfg.AutoMount {
+					issues = append(issues, fmt.Sprintf("%s is mounted without %s (the broker remounts it with nosuid,nodev when it runs as root; otherwise it refuses NFS dispatches)", target, strings.Join(missing, ",")))
+				} else {
+					issues = append(issues, fmt.Sprintf("%s is mounted without %s (auto_mount is off: remount it with nosuid,nodev, or the broker refuses NFS dispatches)", target, strings.Join(missing, ",")))
+					failed = true
+				}
+			}
 		}
 
 		if err := probe.dial(net.JoinHostPort(share.Server, nfsServerPort)); err != nil {

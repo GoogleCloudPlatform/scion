@@ -42,8 +42,8 @@ import (
 //     mounts the export into their agents, and they keep their own
 //     verify-only check, which never mounts.
 //   - Incompatible requirements (one share ID from two different sources,
-//     or different mount roots or mount options, which would put two
-//     sources on one mount path or mount one path two ways) are refused:
+//     or different mount roots or mount options as mounted, which would put
+//     two sources on one mount path or mount one path two ways) are refused:
 //     the registering instance does not serve.
 //   - Nothing is unmounted at shutdown, so stopping one instance (or the
 //     host) never removes a mount another instance or a running agent
@@ -109,7 +109,9 @@ func (m *HostNFSMounter) Register(instanceKey, runtimeName string, req *config.V
 		if req.MountRoot != m.cfg.MountRoot {
 			return nil, fmt.Errorf("%w: instance %q mounts under %q, another instance under %q", ErrNFSRequirementIncompatible, instanceKey, req.MountRoot, m.cfg.MountRoot)
 		}
-		if req.MountOptions != m.cfg.MountOptions {
+		// Compared as mounted: defaulted and hardened, so options that
+		// differ only by nosuid/nodev (always added) are compatible.
+		if effectiveNFSMountOptions(req) != effectiveNFSMountOptions(m.cfg) {
 			return nil, fmt.Errorf("%w: instance %q mounts with options %q, another instance with %q", ErrNFSRequirementIncompatible, instanceKey, req.MountOptions, m.cfg.MountOptions)
 		}
 	}

@@ -155,6 +155,11 @@ type heldConfigUpdate struct {
 	// unappliable lists stored pending keys the fold removed because they
 	// can never be applied.
 	unappliable []string
+	// superseded lists pending keys the request wrote now (a phase with no
+	// container) that the fold had left pending: a waiting Unlimited
+	// (foldKeep). They are removed, so a stale pending value is never
+	// applied later over the newer one.
+	superseded []string
 }
 
 // applyAgentConfigUpdateHeld is the agent PATCH's config step with held
@@ -195,12 +200,21 @@ func (s *Server) applyAgentConfigUpdateHeld(ctx context.Context, w http.Response
 	}
 
 	if !live {
-		out.folded, out.unappliable = s.foldPendingConfig(ctx, agent, sup.startApplies)
+		keep, waiting := sup.foldKeep(agent.PendingConfig)
+		out.folded, out.unappliable = s.foldPendingConfig(ctx, agent, keep)
 		if !nowPart.empty() {
 			res := s.applyAgentConfigPatch(ctx, agent, nowPart, canAttachEnv)
 			out.warnings = append(out.warnings, res.warnings...)
 			out.applied = res.applied
 			out.heldForReincarnate = res.heldForReincarnate
+			// A waiting key the request writes now is superseded: the
+			// fold used to drain every pending container key before the
+			// request, and must still leave none older than this write.
+			out.superseded = dropPendingKeysNamed(agent, waitingKeysNamed(waiting, nowPart.present))
+			waiting = stringsWithout(waiting, out.superseded)
+		}
+		if w := unlimitedWaitsWarning(waiting); w != "" {
+			out.warnings = append(out.warnings, w)
 		}
 	}
 	if !heldPart.empty() {
@@ -260,7 +274,7 @@ func (s *Server) holdAgentConfigPatch(ctx context.Context, agent *store.Agent, p
 	recorded := nextClearedFields(applied, &cmp, p.raw, cleared, canAttachEnv)
 	cleared = withDroppedResourcesSubField(cleared, applied, &cmp, p.present)
 	provision = sup.heldProvisionEdits(provision, applied, &cmp, recorded)
-	cleared = sup.heldClearEdits(cleared, p.raw, recorded, droppedEnvKeys(applied, &cmp, p.present))
+	cleared = sup.heldClearEdits(cleared, recorded, droppedEnvKeys(applied, &cmp, p.present))
 	removed = sup.heldRemovals(removed, recorded)
 	isChanged := make(map[string]bool, len(changed))
 	for _, k := range changed {
@@ -603,12 +617,17 @@ func (s *Server) foldPendingConfigAtStart(ctx context.Context, agent *store.Agen
 		st := *stored
 		st.AppliedConfig = cloneAppliedConfig(stored.AppliedConfig)
 		st.PendingConfig = stored.PendingConfig.Clone()
-		folded, unappliable := s.foldPendingConfig(ctx, &st, sup.startApplies)
+		// A pending Unlimited the broker cannot apply stays pending
+		// (foldKeep, ptone/scion#5605), with its own start warning rather
+		// than the held-for-reincarnation one.
+		keep, waiting := sup.foldKeep(stored.PendingConfig)
+		folded, unappliable := s.foldPendingConfig(ctx, &st, keep)
 		if len(folded) == 0 && len(unappliable) == 0 {
 			// Nothing to apply or remove now (another start applied it, or
 			// it was discarded): the caller's copy follows the stored row.
 			agent.PendingConfig = stored.PendingConfig
-			return pendingConfigKeys(stored.PendingConfig), nil
+			addUnlimitedWaitsWarning(ctx, waiting)
+			return stringsWithout(pendingConfigKeys(stored.PendingConfig), waiting), nil
 		}
 		version, err := s.store.UpdateAgentConfig(ctx, agent.ID, stored.StateVersion, st.AppliedConfig, st.PendingConfig)
 		if errors.Is(err, store.ErrVersionConflict) {
@@ -620,7 +639,7 @@ func (s *Server) foldPendingConfigAtStart(ctx context.Context, agent *store.Agen
 		mem := *agent
 		mem.AppliedConfig = cloneAppliedConfig(agent.AppliedConfig)
 		mem.PendingConfig = stored.PendingConfig.Clone()
-		s.foldPendingConfig(ctx, &mem, sup.startApplies)
+		s.foldPendingConfig(ctx, &mem, keep)
 		agent.AppliedConfig = mem.AppliedConfig
 		agent.PendingConfig = st.PendingConfig
 		if agent.StateVersion == stored.StateVersion {
@@ -630,7 +649,8 @@ func (s *Server) foldPendingConfigAtStart(ctx context.Context, agent *store.Agen
 			s.auditPendingConfig(ctx, agent.ID, mutationTypeAgentPendingConfigApplied, folded, trigger)
 		}
 		s.auditUnappliablePendingKeys(ctx, agent.ID, unappliable)
-		return pendingConfigKeys(st.PendingConfig), nil
+		addUnlimitedWaitsWarning(ctx, waiting)
+		return stringsWithout(pendingConfigKeys(st.PendingConfig), waiting), nil
 	}
 	return nil, fmt.Errorf("%w: %w", errPendingConfigFold, store.ErrVersionConflict)
 }

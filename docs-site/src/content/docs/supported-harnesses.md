@@ -26,7 +26,7 @@ harness-config, pull it with `scion harness-config pull <name>`, repair it, and 
 for details.
 
 `antigravity` and `gemini-cli` are installed by default. `opencode`, `codex`, `copilot`, `hermes`,
-`grok-build`, and `muse-code` are opt-in bundles you add via a [harness-config](/scion/reference/harness-settings/#managing-harness-configs).
+`grok-build`, `muse-code`, and `pi` are opt-in bundles you add via a [harness-config](/scion/reference/harness-settings/#managing-harness-configs).
 :::
 
 ## 1. Gemini CLI (`gemini-cli`)
@@ -375,35 +375,56 @@ then capture the credential with the container's `capture_auth.py`
 - **No project-scoped MCP**.
 - **OAuth/Vertex AI/Auth File**: not supported — Meta API key auth only.
 
+## 10. pi (`pi`)
+
+A harness for the [pi](https://pi.dev) multi-provider terminal coding agent. Opt-in bundle; not yet exercised against a live pi under Scion (see `harnesses/pi/README.md`).
+
+### Authentication
+| Mode | Credential | Setup |
+|---|---|---|
+| API Key (default) | `ANTHROPIC_API_KEY` or another provider key listed in `harnesses/pi/config.yaml` | Set env var |
+| Auth File | `~/.pi/agent/auth.json` (secret `PI_AUTH`) | Written once, never overwritten (pi refreshes tokens in place) |
+
+With no credentials the agent drops to a shell — run `pi` and use `/login`.
+
+### Configuration
+- **Config directory**: `~/.pi/agent/` (`settings.json`, `AGENTS.md`, `APPEND_SYSTEM.md`).
+- **System prompt**: written to `~/.pi/agent/APPEND_SYSTEM.md`, which pi appends to its default system prompt (it does not replace it). With `SCION_PI_PROJECT_TRUST=always`, a repository's `.pi/APPEND_SYSTEM.md` can override Scion's prompt.
+- **Project trust**: defaults to `never` (`SCION_PI_PROJECT_TRUST=never|ask|always`).
+- **Interrupt key**: `Escape`.
+
+See `harnesses/pi/README.md` for the full settings table and known limits.
+
 ---
 
 ## Feature Capability Matrix
 
 The following table summarizes the capabilities supported by each agent harness within Scion.
 
-| Capability | Gemini | Claude | OpenCode | Codex | Copilot | Hermes | Antigravity | Grok Build | Muse Code |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Resume** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ◐ |
-| With Prompt | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ |
-| Custom Session ID | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| **Interject** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Interrupt Key | C-c | C-c | Esc / C-c | C-c | C-c | C-c | C-c | C-c | Esc |
-| **Enqueue** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Hooks** | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ |
-| Support | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ |
-| **OpenTelemetry** | ✅ | ✅  | ❌ | ✅  | ✅ | ❌ | ❌ | ✅ | ❌ |
-| **System Prompt Override** | ✅ | ✅ | ❌ | ❌ | ◐ | ◐ | ◐ | ✅ | ◐ |
-| **Auth: API Key** | ✅ | ✅ | ✅ | ✅ | ✅¹ | ✅ | ❌ | ✅ | ✅ |
-| **Auth: OAuth Token** | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| **Auth: Auth File** | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅² | ✅ | ❌ |
-| **Auth: Vertex AI** | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ |
+| Capability | Gemini | Claude | OpenCode | Codex | Copilot | Hermes | Antigravity | Grok Build | Muse Code | Pi³ |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Resume** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ◐ | ✅ |
+| With Prompt | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ? |
+| Custom Session ID | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Interject** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ? |
+| Interrupt Key | C-c | C-c | Esc / C-c | C-c | C-c | C-c | C-c | C-c | Esc | Esc |
+| **Enqueue** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ? |
+| **Hooks** | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| Support | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ? |
+| **OpenTelemetry** | ✅ | ✅  | ❌ | ✅  | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ |
+| **System Prompt Override** | ✅ | ✅ | ❌ | ❌ | ◐ | ◐ | ◐ | ✅ | ◐ | ◐ |
+| **Auth: API Key** | ✅ | ✅ | ✅ | ✅ | ✅¹ | ✅ | ❌ | ✅ | ✅ | ✅ |
+| **Auth: OAuth Token** | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Auth: Auth File** | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅² | ✅ | ❌ | ✅ |
+| **Auth: Vertex AI** | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ |
 
 * **Resume with Prompt**: Ability to provide a new task/prompt when resuming an existing session.
 * **Interject** (pending feature): Key used to interrupt the agent (e.g., stop generation).
 * **Enqueue**: Ability to send messages to the agent while it's running (supported via the built-in Tmux session).
 * **Hooks**: Support for lifecycle hooks (e.g., `SessionStart`, `AfterTool`).
 * **OpenTelemetry**: Specific events vary by harness and native emitter schema.
-* **System Prompt Override**: Support for providing a custom system prompt to the agent (e.g. via `system_prompt.md`). The `gemini-cli` harness has full support via `~/.gemini/system_prompt.md`. ◐ = *partial* — the harness has no native system-prompt flag, so Scion prepends the system prompt to the harness's instructions file: `AGENTS.md` for Hermes and Muse Code, `GEMINI.md` for Antigravity, and `copilot-instructions.md` for Copilot.
+* **System Prompt Override**: Support for providing a custom system prompt to the agent (e.g. via `system_prompt.md`). The `gemini-cli` harness has full support via `~/.gemini/system_prompt.md`. ◐ = *partial* — the harness has no native system-prompt flag, so Scion prepends the system prompt to the harness's instructions file: `AGENTS.md` for Hermes and Muse Code, `GEMINI.md` for Antigravity, and `copilot-instructions.md` for Copilot. pi is also ◐ for a different reason: it reads the system prompt natively from `~/.pi/agent/APPEND_SYSTEM.md`, which pi *appends to its own default system prompt* rather than replacing it.
 * **Auth types**: The universal auth types (`api-key`, `oauth-token`, `auth-file`, `vertex-ai`) each harness accepts. Set an explicit type with `--harness-auth` or `auth_selectedType`; otherwise Scion auto-detects. See [Harness Authentication](/scion/local/agent-credentials/).
     * ¹ **Copilot** authenticates with a **GitHub token** (`COPILOT_GITHUB_TOKEN` / `GH_TOKEN` / `GITHUB_TOKEN`) under the `api-key` type, not an LLM-provider key.
     * ² **Antigravity**'s `oauth-token` default type is a **file-based** OAuth token (`AGY_TOKEN` at `~/.gemini/antigravity-cli/antigravity-oauth-token`), captured under the auth-file capability — it does not accept a raw injected OAuth token the way Claude does.
+* ³ **Pi column**: taken from `harnesses/pi/config.yaml` and the bundle's unit tests; none of it has yet been verified against a live pi under Scion. `?` marks cells that need that live check (interjecting with Escape, enqueueing through terminal paste/Enter delivery, resuming with a new prompt, and hook support beyond the bridge's unit-tested events).
