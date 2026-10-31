@@ -15,8 +15,9 @@
 package cmd
 
 // Hermetic checks of image-build/scripts/check-image-size.sh: it reports the
-// size delta between two images and fails only when the growth exceeds the
-// budget. docker is a fake on PATH that answers `image inspect` from a table.
+// delta of two images' summed layer sizes and fails only when the growth
+// exceeds the budget. docker is a fake on PATH that answers `history` from a
+// table.
 
 import (
 	"os"
@@ -34,13 +35,16 @@ func TestCheckImageSize(t *testing.T) {
 		t.Fatal(err)
 	}
 	bin := t.TempDir()
-	// Invoked as: docker image inspect --format {{.Size}} <ref>
+	// Invoked as: docker history --human=false --format {{.Size}} <ref>;
+	// prints one size per layer, empty layers included.
 	fakeDocker := `#!/bin/sh
+[ "$1" = history ] && [ "$2" = --human=false ] || { echo "fake docker: unexpected call: $*" >&2; exit 3; }
 case "$5" in
-base) echo 1048576000 ;;  # 1000 MiB
-grew200) echo 1258291200 ;;
-grew600) echo 1677721600 ;;
-junk) echo "not-a-number" ;;
+base) printf '0\n1000000000\n48576000\n' ;;  # 1000 MiB over three layers
+grew200) printf '0\n1000000000\n48576000\n209715200\n' ;;
+grew600) printf '1048576000\n629145600\n' ;;
+junk) printf '1000000000\n493MB\n' ;;
+nolayers) ;;
 *) echo "Error: No such image: $5" >&2; exit 1 ;;
 esac
 `
@@ -71,10 +75,12 @@ esac
 		wantCode int
 		wants    []string
 	}{
+		{"sums every layer", nil, []string{"base", "grew200"}, 0,
+			[]string{"sum of uncompressed layer sizes (docker history):", "1000.0 MiB  base", "1200.0 MiB  grew200"}},
 		{"within default budget", nil, []string{"base", "grew200"}, 0,
-			[]string{"delta", "200.0 MiB", "(budget 500 MiB)", "ok: within budget"}},
+			[]string{"delta", "200.0 MiB", "(budget 550 MiB)", "ok: within budget"}},
 		{"over default budget", nil, []string{"base", "grew600"}, 1,
-			[]string{"600.0 MiB", "FAIL: grew600 grew by 600.0 MiB over base, above the 500 MiB budget"}},
+			[]string{"600.0 MiB", "FAIL: grew600 grew by 600.0 MiB over base, above the 550 MiB budget"}},
 		{"flag raises budget", nil, []string{"--budget-mib", "700", "base", "grew600"}, 0,
 			[]string{"(budget 700 MiB)", "ok: within budget"}},
 		{"env sets budget", []string{"IMAGE_SIZE_BUDGET_MIB=100"}, []string{"base", "grew200"}, 1,
@@ -82,9 +88,11 @@ esac
 		{"shrinking passes", nil, []string{"grew600", "base"}, 0,
 			[]string{"-600.0 MiB", "ok: within budget"}},
 		{"missing image", nil, []string{"base", "nope"}, 2,
-			[]string{"cannot inspect nope with docker", "No such image"}},
-		{"unparseable size", nil, []string{"base", "junk"}, 2,
-			[]string{"unexpected size for junk"}},
+			[]string{"cannot read the layers of nope with docker", "No such image"}},
+		{"non-numeric layer size", nil, []string{"base", "junk"}, 2,
+			[]string{"unexpected layer size for junk from docker: '493MB'"}},
+		{"no layers", nil, []string{"base", "nolayers"}, 2,
+			[]string{"no layers reported for nolayers by docker"}},
 		{"leading-zero budget is decimal", nil, []string{"--budget-mib", "0300", "base", "grew200"}, 0,
 			[]string{"(budget 300 MiB)", "ok: within budget"}},
 		{"budget 08 is not octal", nil, []string{"--budget-mib", "08", "base", "grew200"}, 1,

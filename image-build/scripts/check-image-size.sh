@@ -19,13 +19,19 @@
 # Usage: check-image-size.sh [--budget-mib N] <baseline-image> <candidate-image>
 #
 # Both images must be in the local engine's store (docker, or podman when
-# docker is absent; override with IMAGE_TOOL). Sizes are the engine's
-# uncompressed image size. The budget is in MiB and defaults to
+# docker is absent; override with IMAGE_TOOL). An image's size here is the sum
+# of its uncompressed layer sizes (docker history), not `image inspect`'s
+# .Size: with docker's containerd image store, .Size reports more than the
+# layers (it also counts the compressed content blobs), so it differs by store
+# and overstated core-base's growth by about 40%. The budget is in MiB and defaults to
 # IMAGE_SIZE_BUDGET_MIB, else DEFAULT_BUDGET_MIB below. A candidate smaller
 # than the baseline always passes.
 #
-# DEFAULT_BUDGET_MIB covers core-base growth from the Playwright WebKit and
-# Firefox system libraries (install-core-toolchain.sh playwright-deps).
+# DEFAULT_BUDGET_MIB is the measured growth of core-base from the Playwright
+# WebKit and Firefox system libraries (install-core-toolchain.sh
+# playwright-deps, playwright-core 1.62.1's Debian 13 list): 471.8 MiB of
+# layer sum over a core-base built from d087626 (amd64), almost all of it the
+# ~470 MiB playwright-deps layer, plus about 15% headroom for package updates.
 # Raising it is a deliberate decision about image weight; do it in the same
 # change that adds the weight, and say why.
 #
@@ -33,7 +39,7 @@
 
 set -euo pipefail
 
-DEFAULT_BUDGET_MIB=500
+DEFAULT_BUDGET_MIB=550
 
 usage() {
   echo "usage: $(basename "$0") [--budget-mib N] <baseline-image> <candidate-image>" >&2
@@ -89,20 +95,27 @@ if [ -z "$tool" ]; then
   fi
 fi
 
-# image_size <ref> — uncompressed size in bytes.
+# image_size <ref> — sum of the image's uncompressed layer sizes, in bytes.
 image_size() {
-  local out
-  if ! out="$("$tool" image inspect --format '{{.Size}}' "$1" 2>&1)"; then
-    echo "cannot inspect $1 with $tool: $out" >&2
+  local out line total=0
+  if ! out="$("$tool" history --human=false --format '{{.Size}}' "$1" 2>&1)"; then
+    echo "cannot read the layers of $1 with $tool: $out" >&2
     exit 2
   fi
-  case "$out" in
-  '' | *[!0-9]*)
-    echo "unexpected size for $1 from $tool: '$out'" >&2
+  [ -n "$out" ] || {
+    echo "no layers reported for $1 by $tool" >&2
     exit 2
-    ;;
-  esac
-  printf '%s\n' "$out"
+  }
+  while IFS= read -r line; do
+    case "$line" in
+    '' | *[!0-9]*)
+      echo "unexpected layer size for $1 from $tool: '$line'" >&2
+      exit 2
+      ;;
+    esac
+    total=$((total + 10#$line))
+  done <<<"$out"
+  printf '%s\n' "$total"
 }
 
 mib() { awk -v b="$1" 'BEGIN { printf "%.1f", b / 1048576 }'; }
@@ -112,6 +125,7 @@ cand_bytes="$(image_size "$candidate")"
 delta_bytes=$((cand_bytes - base_bytes))
 budget_bytes=$((budget * 1048576))
 
+echo "sum of uncompressed layer sizes ($tool history):"
 printf 'baseline   %10s MiB  %s\n' "$(mib "$base_bytes")" "$baseline"
 printf 'candidate  %10s MiB  %s\n' "$(mib "$cand_bytes")" "$candidate"
 printf 'delta      %10s MiB  (budget %s MiB)\n' "$(mib "$delta_bytes")" "$budget"

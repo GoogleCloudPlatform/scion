@@ -81,9 +81,12 @@ All image-related scripts live under `scripts/`. GitHub Actions workflows remain
 
 ### Image size budget
 
-`scripts/check-image-size.sh <baseline> <candidate>` compares the uncompressed
-sizes of two images in the local docker (or podman) store, prints both and the
-delta, and exits 1 when the candidate grew by more than the budget:
+`scripts/check-image-size.sh <baseline> <candidate>` compares two images in the
+local docker (or podman) store by the sum of uncompressed layer sizes (docker
+history), prints both and the delta, and exits 1 when the candidate grew by
+more than the budget. It does not use `image inspect`'s `.Size`: with docker's
+containerd image store that reports more than the layers (it also counts the
+compressed content blobs).
 
 ```bash
 # Build core-base before and after a change, then:
@@ -92,8 +95,9 @@ image-build/scripts/check-image-size.sh --budget-mib 300 core-base:before core-b
 ```
 
 The default budget (`DEFAULT_BUDGET_MIB` in the script, overridable with
-`IMAGE_SIZE_BUDGET_MIB` or `--budget-mib`) is sized for core-base's Playwright
-WebKit and Firefox system libraries. The script is not wired into Cloud Build:
+`IMAGE_SIZE_BUDGET_MIB` or `--budget-mib`) is 550 MiB: the measured 471.8 MiB
+that core-base's Playwright WebKit and Firefox system libraries add (layer sum,
+core-base from d087626, playwright-core 1.62.1's list), plus about 15%. The script is not wired into Cloud Build:
 doing so would mean pulling a baseline image inside the pipeline.
 
 ### Playwright browser libraries
