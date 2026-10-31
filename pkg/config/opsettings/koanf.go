@@ -36,6 +36,9 @@ var layer0Prefixes = []string{
 	"server.keyring_file",
 	// Operator override for a world-readable keyring file: restart-bound.
 	"server.keyring_file_allow_world_readable",
+	// TLS-terminating proxy allowlist for the hub-broker transport check:
+	// operator-only and read once at startup.
+	"server.trusted_proxies",
 	// Database
 	"server.database",
 	// Listeners

@@ -150,7 +150,7 @@ var hubResponds = func(endpoint string, fanOut bool) error {
 		}
 		opts = append(opts, hubclient.WithTransportAuth(src, mode))
 	}
-	client, err := hubclient.New(endpoint, opts...)
+	client, err := newUserHubClient(endpoint, opts...)
 	if err != nil {
 		return err
 	}
@@ -163,6 +163,12 @@ var hubResponds = func(endpoint string, fanOut bool) error {
 // printUnreachableHub prints the warning for a hub at endpoint that did not
 // respond to the health check of 'hub add' or 'config set hub.endpoint'.
 func printUnreachableHub(stderr io.Writer, endpoint string, err error) {
+	if errors.Is(err, config.ErrPlaintextNonLoopback) {
+		// Nothing was sent: the hub was not asked, and every command that
+		// sends a credential to it will refuse it the same way.
+		_, _ = fmt.Fprintf(stderr, "Warning: the hub at %s was not checked, and commands that send credentials to it will refuse it: %v\n", config.RedactURL(endpoint), err)
+		return
+	}
 	_, _ = fmt.Fprintf(stderr, "Warning: the hub at %s did not respond: %v\n", endpoint, err)
 }
 
@@ -222,7 +228,7 @@ var hubAccepts = func(endpoint, token string, fanOut bool) (accepted, ok bool) {
 		}
 		opts = append(opts, hubclient.WithTransportAuth(src, mode))
 	}
-	client, err := hubclient.New(endpoint, opts...)
+	client, err := newUserHubClient(endpoint, opts...)
 	if err != nil {
 		return false, false
 	}
@@ -325,9 +331,12 @@ func hubList(out, stderr io.Writer, check bool) error {
 	}
 
 	var reachable []bool
+	// refused marks a hub the transport rule refused: it was not asked.
+	var refused []bool
 	var verified []*bool
 	if check {
 		reachable = make([]bool, len(names))
+		refused = make([]bool, len(names))
 		verified = make([]*bool, len(names))
 		var wg sync.WaitGroup
 		for i, name := range names {
@@ -338,7 +347,9 @@ func hubList(out, stderr io.Writer, check bool) error {
 			wg.Add(1)
 			go func(i int, endpoint string, fanOut bool) {
 				defer wg.Done()
-				reachable[i] = hubResponds(endpoint, fanOut) == nil
+				err := hubResponds(endpoint, fanOut)
+				reachable[i] = err == nil
+				refused[i] = errors.Is(err, config.ErrPlaintextNonLoopback)
 				if !reachable[i] {
 					return
 				}
@@ -391,7 +402,11 @@ func hubList(out, stderr io.Writer, check bool) error {
 		}
 		line := fmt.Sprintf("%s\t%s\t%s\t%s", mark, row.Name, row.Endpoint, hubAuthLabel(infos[i]))
 		if check {
-			line += "\t" + yesNo(*row.Reachable) + "\t" + verifiedLabel(row.Verified)
+			reach := yesNo(*row.Reachable)
+			if refused[i] {
+				reach = "refused (plain http)"
+			}
+			line += "\t" + reach + "\t" + verifiedLabel(row.Verified)
 		}
 		_, _ = fmt.Fprintln(w, line)
 	}

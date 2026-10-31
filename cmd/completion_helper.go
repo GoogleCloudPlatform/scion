@@ -163,7 +163,7 @@ func fetchHubAgents(ctx context.Context, endpoint string, settings *config.Setti
 		opts = append(opts, hubclient.WithAutoDevAuth())
 	}
 
-	client, err := hubclient.New(endpoint, opts...)
+	client, err := newUserHubClient(endpoint, opts...)
 	if err != nil {
 		return nil, err
 	}

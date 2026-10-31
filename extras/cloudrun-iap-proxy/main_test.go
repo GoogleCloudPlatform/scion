@@ -15,6 +15,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -189,5 +190,70 @@ func TestProxyErrorReturns502(t *testing.T) {
 
 	if rr.Code != http.StatusBadGateway {
 		t.Fatalf("expected 502 Bad Gateway, got %d", rr.Code)
+	}
+}
+
+// No client-supplied forwarding header reaches the backend: the proxy sets
+// X-Forwarded-Proto to the scheme of this connection, X-Forwarded-For to the
+// immediate peer and X-Forwarded-Host to the served host, and drops
+// Forwarded, whatever the client sent.
+func TestProxyReplacesClientForwardingHeaders(t *testing.T) {
+	for name, tc := range map[string]struct {
+		tls  bool
+		want string
+	}{
+		"plain http connection (Cloud Run)": {want: "http"},
+		"proxy terminated TLS":              {tls: true, want: "https"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var gotProto, gotForwarded, gotFor, gotHost []string
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotProto = r.Header.Values("X-Forwarded-Proto")
+				gotForwarded = r.Header.Values("Forwarded")
+				gotFor = r.Header.Values("X-Forwarded-For")
+				gotHost = r.Header.Values("X-Forwarded-Host")
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer backend.Close()
+			backendURL, err := url.Parse(backend.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/brokers/join", nil)
+			req.TLS = nil
+			if tc.tls {
+				req.TLS = &tls.ConnectionState{}
+			}
+			// What a client might send to claim TLS it did not use, or to
+			// contradict the proxy.
+			req.Header.Add("X-Forwarded-Proto", "https")
+			req.Header.Add("X-Forwarded-Proto", "ftp")
+			req.Header.Set("Forwarded", "for=198.51.100.7;proto=https")
+			req.Header.Set("X-Forwarded-For", "198.51.100.7")
+			req.Header.Set("X-Forwarded-Host", "attacker.example")
+			// A client naming the proxy's own headers as hop-by-hop must not
+			// be able to strip them.
+			req.Header.Set("Connection", "X-Forwarded-Proto, X-Forwarded-Host, X-Forwarded-For")
+			req.Host = "hub.example.com"
+			req.RemoteAddr = "203.0.113.9:4321"
+			rr := httptest.NewRecorder()
+			newMux(backendURL).ServeHTTP(rr, req)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d", rr.Code)
+			}
+			if len(gotProto) != 1 || gotProto[0] != tc.want {
+				t.Errorf("backend X-Forwarded-Proto = %q, want exactly [%q]", gotProto, tc.want)
+			}
+			if len(gotForwarded) != 0 {
+				t.Errorf("backend Forwarded = %q, want none (client value dropped)", gotForwarded)
+			}
+			if len(gotFor) != 1 || gotFor[0] != "203.0.113.9" {
+				t.Errorf("backend X-Forwarded-For = %q, want exactly the immediate peer [203.0.113.9]", gotFor)
+			}
+			if len(gotHost) != 1 || gotHost[0] != "hub.example.com" {
+				t.Errorf("backend X-Forwarded-Host = %q, want exactly the served host [hub.example.com]", gotHost)
+			}
+		})
 	}
 }

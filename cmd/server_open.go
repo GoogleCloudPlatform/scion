@@ -27,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/daemon"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -114,6 +115,10 @@ func serverDevToken(cfg *config.GlobalConfig, globalDir string) string {
 	return readDevTokenFile(devTokenFilePath(cfg.Auth.TokenFile, globalDir))
 }
 
+// readServerDevToken reads the server's dev token (serverDevToken); a test
+// seam, so tests can check that a refused request never reads it.
+var readServerDevToken = serverDevToken
+
 // stdoutIsTerminal reports whether stdout is a terminal. A sign-in link is
 // printed only to a terminal (or on an explicit --print), so a redirected
 // stdout or a log does not record the single-use code.
@@ -124,12 +129,31 @@ func stdoutIsTerminal() bool {
 // Test seams for runServerOpen.
 var (
 	serverOpenStdoutIsTerminal = stdoutIsTerminal
-	serverOpenRequestLink      = func(baseURL, token, next string) (devSignInLink, error) {
-		return requestDevSignInLink(&http.Client{Timeout: 5 * time.Second}, baseURL, token, next)
+	serverOpenBrowserAllowed   = browserAutoOpenAllowed
+	serverOpenBrowser          = func(u string) error { return quickstartOpenBrowser(u) }
+	serverOpenWebBase          = func(globalDir string, running bool) string {
+		webBase, _, _ := serverStatusBaseURLs(globalDir, running)
+		return webBase
 	}
-	serverOpenBrowserAllowed = browserAutoOpenAllowed
-	serverOpenBrowser        = func(u string) error { return quickstartOpenBrowser(u) }
 )
+
+// serverOpenRequestLink sends the server's dev token to baseURL. It does not
+// apply the transport rule itself; runServerOpen checks devSignInAllowed
+// first (the hub constructor source scan in hub_transport_policy_test.go
+// keeps it so).
+var serverOpenRequestLink = func(baseURL, token, next string) (devSignInLink, error) {
+	return requestDevSignInLink(&http.Client{Timeout: 5 * time.Second}, baseURL, token, next)
+}
+
+// devSignInAllowed applies the hub transport rule to a sign-in link request,
+// which carries the server's dev token: it may be sent to baseURL only over
+// a loopback or TLS connection. It returns the refusal, or nil.
+func devSignInAllowed(baseURL string) error {
+	if err := hubsync.CheckUserHubTransport(baseURL); err != nil {
+		return fmt.Errorf("a sign-in link is requested with the server's dev token, so only over a loopback or TLS connection: %w", err)
+	}
+	return nil
+}
 
 var serverOpenPrintOnly bool
 
@@ -172,8 +196,13 @@ func runServerOpen(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to get global directory: %w", err)
 	}
 	running, _, _ := daemon.StatusComponent(serverDaemonComponent, globalDir)
-	webBase, _, _ := serverStatusBaseURLs(globalDir, running)
-	token := serverDevToken(serverOpenConfig(globalDir, running), globalDir)
+	webBase := serverOpenWebBase(globalDir, running)
+	// The transport rule, before the token is read: the dev token is sent
+	// only over a loopback or TLS connection.
+	if err := devSignInAllowed(webBase); err != nil {
+		return err
+	}
+	token := readServerDevToken(serverOpenConfig(globalDir, running), globalDir)
 	if token == "" {
 		return errors.New("no dev token found for the local server; sign-in links need the workstation server's dev token (start it with 'scion server start')")
 	}
