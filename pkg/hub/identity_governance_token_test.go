@@ -151,6 +151,43 @@ func TestUserListToken_RequiresUserListAndHubBoundary(t *testing.T) {
 	assert.Contains(t, ids, listed, "a session lists users")
 }
 
+// TestUserReadToken_RequiresHubUserRead pins GET /api/v1/users/{id} for
+// tokens: user:read on a hub boundary reads another user; a token without
+// user:read is refused with 403, for another user, for its holder's own id
+// and for an id that does not exist alike; a project-boundary credential
+// carrying user:read is refused. A session reads users as it does without
+// these rules.
+func TestUserReadToken_RequiresHubUserRead(t *testing.T) {
+	srv, s := testServer(t)
+	admin := hubConfigTokenUser(t, s, "ig-read-super", store.SystemRoleSuperAdmin)
+	target := hubConfigTokenUser(t, s, "ig-read-target", store.SystemRoleHubMember)
+	path := func(id string) string { return "/api/v1/users/" + id }
+
+	readKey := mintHubConfigToken(t, srv, admin, hubBoundary(), "user:read")
+	rec := doRequestWithToken(t, srv, readKey, http.MethodGet, path(target), nil)
+	require.Equal(t, http.StatusOK, rec.Code, "user:read: %s", rec.Body.String())
+	var got UserWithCapabilities
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Equal(t, target, got.ID)
+
+	listOnly := mintHubConfigToken(t, srv, admin, hubBoundary(), "user:list")
+	for label, id := range map[string]string{"another user": target, "own id": admin, "unknown id": tid("ig-read-unknown")} {
+		rec = doRequestWithToken(t, srv, listOnly, http.MethodGet, path(id), nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "without user:read, %s: %s", label, rec.Body.String())
+	}
+
+	project := igProject(t, s, "ig-read-project")
+	igProjectBinding(t, s, admin, project, store.ProjectRoleOwner)
+	adminUser := NewAuthenticatedUser(admin, admin+"@test.com", admin, "admin", "api")
+	projectCredential := NewScopedUserIdentityWithBoundaryAndDecoration(adminUser, projectBoundary(project),
+		[]string{"user:read"}, tid("ig-read-project-cred"), bearerCeiling(t, "user:read"), nil)
+	rec = doRequestAsIdentity(t, srv, projectCredential, http.MethodGet, path(target), nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "project boundary: %s", rec.Body.String())
+
+	rec = doRequest(t, srv, http.MethodGet, path(target), nil)
+	assert.Equal(t, http.StatusOK, rec.Code, "a session reads users: %s", rec.Body.String())
+}
+
 // TestRoleReadToken_DoesNotAdmitRoleWrites pins that role:read and
 // role_binding:read admit the role definition, permission registry and role
 // binding reads on a hub boundary, each read needs its own selector, the
