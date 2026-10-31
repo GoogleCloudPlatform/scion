@@ -1922,6 +1922,14 @@ func governanceErrorStatus(code string) int {
 		return http.StatusConflict
 	case ErrCodeInvalidRequest:
 		return http.StatusBadRequest
+	case ErrCodePreviewTokenExpired, ErrCodePreviewTokenReplay,
+		ErrCodePreviewActorMismatch, ErrCodePreviewOperationMismatch,
+		ErrCodePreviewConstraintMismatch, ErrCodePreviewDraftModified,
+		ErrCodePreviewRevisionMismatch, ErrCodePreviewStateMismatch,
+		ErrCodePreviewTokenInvalid:
+		// A preview-token refusal carried by a governance error answers
+		// the same status as on the token error path.
+		return tokenErrorStatus(code)
 	default:
 		return http.StatusInternalServerError
 	}
