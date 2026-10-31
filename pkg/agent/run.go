@@ -1913,6 +1913,12 @@ authDone:
 		// root, which workspaceSourceRoots derives, need not contain it, so
 		// skip deriving them (and any error doing so) entirely.
 		roots = []string{emptyPerAgentWorkspace}
+	} else if cloudRunLocalClonePerAgentStart(m.Runtime.Name(), opts, explicitWorkspace) {
+		// Contained in itself too: a Cloud Run clone-per-agent agent clones
+		// into an instance-local /workspace, so this broker-local
+		// workspace is never mounted. On a shared Layout it lies outside
+		// the project's root on the share (sharedLayoutAgentWorkspace).
+		roots = []string{effectiveWorkspace}
 	} else {
 		var rootsErr error
 		roots, rootsErr = workspaceSourceRoots(explicitWorkspace, effectiveWorkspace, settings, projectDir)

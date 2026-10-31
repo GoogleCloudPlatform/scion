@@ -66,6 +66,15 @@ func isClonePerAgentStart(opts api.StartOptions) bool {
 		store.ResolveWorkspaceSharingMode(opts.Env["SCION_WORKSPACE_MODE"]) == store.SharingModeClonePerAgent
 }
 
+// cloudRunLocalClonePerAgentStart reports whether a start is a Cloud Run
+// clone-per-agent start whose workspace the broker chose (no explicit
+// workspace). The cloudrun runtime gives such an agent an instance-local
+// in-memory /workspace that it clones itself, and mounts nothing from the
+// broker-local <agentDir>/workspace.
+func cloudRunLocalClonePerAgentStart(runtimeName string, opts api.StartOptions, explicitWorkspace bool) bool {
+	return runtimeName == "cloudrun" && !explicitWorkspace && isClonePerAgentStart(opts)
+}
+
 // contextWithClonePerAgentWorkspace marks ctx when opts asks for a
 // clone-per-agent workspace (isClonePerAgentStart).
 func contextWithClonePerAgentWorkspace(ctx context.Context, opts api.StartOptions) context.Context {
