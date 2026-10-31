@@ -32,9 +32,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // urlLeaks returns the signed-URL material found in text: an X-Goog- query
@@ -231,13 +233,40 @@ func TestSignedDownload_NoURLLeaks(t *testing.T) {
 	if len(urlLeaks("log line "+planted, nil)) == 0 || len(urlLeaks(fmt.Errorf("err: %s", planted).Error(), nil)) == 0 {
 		t.Fatal("detector control: planted values must be found")
 	}
-	plantedRec := tracetest.NewSpanRecorder()
-	ptp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(plantedRec))
-	_, ps := ptp.Tracer("t").Start(context.Background(), "planted")
-	ps.SetStatus(codes.Error, "status "+planted)
-	ps.End()
-	if len(urlLeaks(recordedSpansText(plantedRec), nil)) == 0 {
-		t.Fatal("detector control: a planted span status must be found")
+	// Span controls, one surface per span so each is proven on its own: a
+	// planted status, attribute value and event attribute value are each
+	// found, and a clean span is not.
+	for _, pc := range []struct {
+		name  string
+		plant func(s trace.Span)
+		want  bool
+	}{
+		{"status only detected", func(s trace.Span) { s.SetStatus(codes.Error, "status "+planted) }, true},
+		{"attribute only detected", func(s trace.Span) { s.SetAttributes(attribute.String("planted.url", "https://h/o?"+planted)) }, true},
+		{"event attribute only detected", func(s trace.Span) {
+			s.AddEvent("planted", trace.WithAttributes(attribute.String("planted.url", "https://h/o?"+planted)))
+		}, true},
+		{"clean span not detected", func(s trace.Span) {
+			s.SetStatus(codes.Error, "status fixed")
+			s.SetAttributes(attribute.String("k", "v"))
+			s.AddEvent("e", trace.WithAttributes(attribute.String("k", "v")))
+		}, false},
+	} {
+		t.Run("detector control/"+pc.name, func(t *testing.T) {
+			rec := tracetest.NewSpanRecorder()
+			ptp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+			_, ps := ptp.Tracer("t").Start(context.Background(), "planted")
+			pc.plant(ps)
+			ps.End()
+			got := len(urlLeaks(recordedSpansText(rec), nil)) > 0
+			if got != pc.want {
+				t.Fatalf("found %v, want %v (text %q)", got, pc.want, recordedSpansText(rec))
+			}
+			t.Logf("detected=%v", got)
+		})
+	}
+	if t.Failed() {
+		t.FailNow()
 	}
 
 	for _, sc := range leakScenarios() {
