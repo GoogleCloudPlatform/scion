@@ -2759,7 +2759,11 @@ func (s *Server) createAgentInProject(
 					// trigger spurious sync-registration attempts. No revoke here:
 					// DispatchAgentCreateWithGather already revoked any credential
 					// it minted on this error return.
-					failCreate(createRollback{Stage: createStageDispatchEnvGather, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
+					failCreate(createRollback{Stage: createStageDispatchEnvGather, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() {
+						if !s.relayProjectPathRefusal(ctx, w, agent, err) {
+							dispatchCreateErrorResponse(w, err, agent.ID)
+						}
+					})
 					return
 				} else if created.AcceptedLaunch() != nil {
 					// Accepted for asynchronous launch: the row is already
@@ -2850,7 +2854,11 @@ func (s *Server) createAgentInProject(
 					// trigger spurious sync-registration attempts. No revoke here:
 					// DispatchAgentCreateWithGather already revoked any credential
 					// it minted on this error return.
-					failCreate(createRollback{Stage: createStageDispatch, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
+					failCreate(createRollback{Stage: createStageDispatch, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() {
+						if !s.relayProjectPathRefusal(ctx, w, agent, err) {
+							dispatchCreateErrorResponse(w, err, agent.ID)
+						}
+					})
 					return
 				} else if created.AcceptedLaunch() != nil {
 					// Accepted for asynchronous launch: the row is already
@@ -3511,6 +3519,9 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 			return
 		}
 		if relayIdentityMappingError(w, err) {
+			return
+		}
+		if s.relayProjectPathRefusal(ctx, w, agent, err) {
 			return
 		}
 		if relayBrokerRefusal(w, err) {
@@ -5859,6 +5870,12 @@ func relayBrokerRefusal(w http.ResponseWriter, err error) bool {
 		// built before those texts put the host mount path in the message,
 		// so anything else is replaced by a fixed text.
 		writeError(w, se.StatusCode, code, projectStorageRefusalMessage(se.brokerErrorMessage()), nil)
+		return true
+	case se.StatusCode == http.StatusConflict && code == projectPathNotInitializedErrorCode:
+		// The broker's text names a host path: answer with the hub's own
+		// path-free text. Callers that hold the agent use
+		// relayProjectPathRefusal first, which may add the provider path.
+		writeError(w, se.StatusCode, code, projectPathRefusalGeneric, nil)
 		return true
 	case se.StatusCode == http.StatusConflict && code == ErrCodeConflict:
 	case se.StatusCode == http.StatusForbidden && code == ErrCodeForbidden:

@@ -239,12 +239,18 @@ type ServerConfig struct {
 	// the TLS-terminating proxies whose X-Forwarded-Proto the hub-broker
 	// transport policy trusts (config.ConfidentialArrival). It is read by that
 	// policy only, never by TrustedProxies' users (proxy header login,
-	// client IP rate limits). Empty means a forwarded protocol is never
-	// trusted. The server command validates it at startup
-	// (config.ParseTrustedProxies); New drops an invalid list (logged),
-	// which only narrows what is accepted. Startup config only; never
-	// API-writable.
+	// client IP rate limits). New resolves it with
+	// TransportTrustedProxiesSet (config.TransportTrustedProxies): when the
+	// setting is not set, a proxy on this host (loopback) is trusted; set to
+	// an empty list, a forwarded protocol is never trusted. The server
+	// command validates it at startup (config.ParseTrustedProxies); New
+	// drops an invalid list (logged), which only narrows what is accepted.
+	// Startup config only; never API-writable.
 	TransportTrustedProxies []string
+	// TransportTrustedProxiesSet reports whether server.trusted_proxies is
+	// set in any source, even as an empty list
+	// (config.GlobalConfig.TrustedProxiesSet).
+	TransportTrustedProxiesSet bool
 	// Debug enables verbose debug logging.
 	Debug bool
 	// OAuthConfig holds OAuth provider credentials for CLI authentication.
@@ -2565,9 +2571,14 @@ type Server struct {
 	cspReports       *cspreport.Handler
 	cspReportLimiter *cspReportLimiter
 
-	// transportTrustedNets is ServerConfig.TransportTrustedProxies, parsed
-	// once in New (config.ConfidentialArrival).
+	// transportTrustedNets is ServerConfig.TransportTrustedProxies,
+	// resolved once in New (config.TransportTrustedProxies) for
+	// config.ConfidentialArrival.
 	transportTrustedNets []*net.IPNet
+	// transportProxyRefusals records refused broker requests from a proxy
+	// on this host (transport_policy.go): the rate-limited ERROR log and
+	// the broker_transport_proxy health check read it.
+	transportProxyRefusals transportProxyRefusals
 
 	// experiments is the compiled feature-flag registry (pkg/experiments).
 	// Nil in production and in most tests; always read through the
@@ -3586,10 +3597,13 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 
 	srv.cspReportLimiter = newCSPReportLimiter(cfg.TrustedProxies)
 
-	if nets, err := config.ParseTrustedProxies(cfg.TransportTrustedProxies); err != nil {
+	if nets, usedDefault, err := config.TransportTrustedProxies(cfg.TransportTrustedProxies, cfg.TransportTrustedProxiesSet); err != nil {
 		slog.Error("Ignoring an invalid trusted proxy list; X-Forwarded-Proto is not trusted from any peer", "error", err)
 	} else {
 		srv.transportTrustedNets = nets
+		if usedDefault {
+			slog.Warn(config.TransportTrustedProxiesDefaultWarning)
+		}
 	}
 	srv.cspReports = newCSPReportHandler(srv.cspReportLimiter, cfg.CSPReportRawSamples)
 	if cfg.CSPReportRawSamples {

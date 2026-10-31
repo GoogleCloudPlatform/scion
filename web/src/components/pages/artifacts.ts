@@ -238,7 +238,7 @@ export class ScionPageArtifacts extends LitElement {
 
   private onPublished(e: CustomEvent<ArtifactResponse>): void {
     this.publishOpen = false;
-    navigateTo(artifactPagePath(e.detail.artifact));
+    navigateTo(artifactPagePath(e.detail.artifact, 0, 'artifacts'));
   }
 
   override disconnectedCallback(): void {
@@ -620,7 +620,7 @@ export class ScionPageArtifacts extends LitElement {
   }
 
   private renderRow(a: ArtifactListItem): TemplateResult {
-    const href = artifactPagePath(a);
+    const href = artifactPagePath(a, 0, 'artifacts');
     return html`
       <tr class="clickable" @click=${(): void => navigateTo(href)}>
         <td>

@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -126,7 +127,14 @@ type ConduitDialer struct {
 	// Run's goroutine.
 	session *conduit.Backoff
 	probe   *conduit.Backoff
+	// transportRefused is set while the last upgrade was refused by the
+	// hub's transport policy, and cleared when a session is established.
+	transportRefused atomic.Bool
 }
+
+// TransportRefused reports whether the last upgrade was refused by the
+// hub's transport policy and no session has been established since.
+func (d *ConduitDialer) TransportRefused() bool { return d.transportRefused.Load() }
 
 // errConduitForbidden stops the dialer after a 4403 close (terminal per
 // the close-code table). The control channel is unaffected.
@@ -196,6 +204,7 @@ func (d *ConduitDialer) Run(ctx context.Context) error {
 		Config: cfg,
 		Hello:  d.hello,
 		OnSession: func(_ context.Context, _ conduit.Session, w *conduitv1.Welcome) {
+			d.transportRefused.Store(false)
 			d.log.Info("Conduit session established alongside the control channel",
 				"session_id", w.GetSessionId(), "relay", w.GetRelayInstanceId(), "incarnation", w.GetEndpointIncarnation())
 		},
@@ -289,6 +298,8 @@ func (d *ConduitDialer) decide(end conduit.End, delay time.Duration) (time.Durat
 
 // fallback logs a pre-upgrade refusal and returns the re-probe delay.
 func (d *ConduitDialer) fallback(e *conduitPreUpgradeError) time.Duration {
+	refusal := parseHubRefusal(e.StatusCode, []byte(e.Body))
+	d.transportRefused.Store(refusal.transportPolicy())
 	switch {
 	case e.StatusCode == http.StatusNotFound:
 		d.log.Info("Conduit: hub does not serve conduit sessions (HTTP 404); using the control channel only", "retry_in", conduitProbeMax)
@@ -298,9 +309,13 @@ func (d *ConduitDialer) fallback(e *conduitPreUpgradeError) time.Duration {
 		return conduitProbeMax
 	}
 	delay := d.probe.Next()
-	if e.StatusCode == http.StatusUnauthorized || e.StatusCode == http.StatusForbidden {
+	switch {
+	case refusal.transportPolicy():
+		d.log.Error(refusal.logMessage("conduit")+" Using the control channel only.",
+			"reason", refusal.Reason, "setting", refusal.Setting, "status", e.StatusCode, "retry_in", delay)
+	case e.StatusCode == http.StatusUnauthorized || e.StatusCode == http.StatusForbidden:
 		d.log.Error("Conduit: hub refused the broker credentials; using the control channel only", "status", e.StatusCode, "error", e.Err, "retry_in", delay)
-	} else {
+	default:
 		d.log.Warn("Conduit: connect failed; using the control channel only", "error", e.DialError, "retry_in", delay)
 	}
 	return delay
@@ -406,6 +421,7 @@ func (hc *HubConnection) startConduit(ctx context.Context, server *Server) {
 	cctx, cancel := context.WithCancel(ctx)
 	hc.mu.Lock()
 	hc.conduitCancel = cancel
+	hc.conduitDialer = d
 	hc.mu.Unlock()
 	exitHook := hc.conduitExitHook
 	hc.conduitWg.Add(1)
@@ -425,6 +441,7 @@ func (hc *HubConnection) stopConduit() {
 	hc.mu.Lock()
 	cancel := hc.conduitCancel
 	hc.conduitCancel = nil
+	hc.conduitDialer = nil
 	hc.mu.Unlock()
 	if cancel != nil {
 		cancel()

@@ -334,6 +334,23 @@ func TestDeriveHealthSummaryStatus_Rules(t *testing.T) {
 				Message: "Service account assignment check cannot run on instance hub-1",
 			}},
 		},
+		{
+			name: "refused local proxy broker connections degrade and name the setting",
+			mutate: func(r *HealthSummaryResponse) {
+				setPolicyFleet(r, policyRow("1", HealthStatusDegraded, time.Second,
+					map[string]string{"database": "healthy", transportProxyHealthCheck: "degraded: refused"}))
+			},
+			wantStatus: HealthStatusDegraded,
+			wantItems: []HealthAttentionItem{{
+				Severity: HealthAttentionWarning, Kind: HealthAttentionHubInstance,
+				Subject: HealthAttentionSubject{Type: HealthSubjectHub},
+				Message: "0 of 1 hub instances healthy",
+			}, {
+				Severity: HealthAttentionWarning, Kind: HealthAttentionHubCheck,
+				Subject: HealthAttentionSubject{Type: HealthSubjectHub, ID: "1", Name: "hub-1"},
+				Message: "Runtime brokers cannot connect through the local proxy on instance hub-1: set server.trusted_proxies (see the hub log)",
+			}},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

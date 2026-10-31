@@ -250,9 +250,9 @@ var brokerOperations = []OperationSpec{
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointBrokerCall, Pattern: "TunnelRequest:controlchannel"},
 			{Kind: EntryPointBrokerCall, Pattern: "OpenStream:controlchannel"},
-			{Kind: EntryPointBrokerCall, Pattern: "SendStreamData:controlchannel"},
-			{Kind: EntryPointBrokerCall, Pattern: "ResizeStream:controlchannel"},
-			{Kind: EntryPointBrokerCall, Pattern: "CloseStream:controlchannel"},
+			{Kind: EntryPointBrokerCall, Pattern: "SendStreamData:brokerconnection"},
+			{Kind: EntryPointBrokerCall, Pattern: "ResizeStream:brokerconnection"},
+			{Kind: EntryPointBrokerCall, Pattern: "CloseStream:brokerconnection"},
 			{Kind: EntryPointBrokerCall, Pattern: "handleResponse:controlchannel"},
 			{Kind: EntryPointBrokerCall, Pattern: "handleStreamData:controlchannel"},
 			{Kind: EntryPointBrokerCall, Pattern: "handleStreamClose:controlchannel"},

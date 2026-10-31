@@ -153,6 +153,13 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		hubDispatchedAgentID = opts.Env["SCION_AGENT_ID"]
 	}
 
+	// A plain project's explicit path must hold its .scion entry: create,
+	// start and restart are refused before any side effect
+	// (checkExplicitProjectPath).
+	if err := checkExplicitProjectPath(opts.ProjectPath, projectDir, opts.Workspace,
+		opts.GitClone != nil || isEmptyPerAgentStart(opts) || opts.SharedWorkspace); err != nil {
+		return nil, err
+	}
 	// A create over a legacy agent directory no agent owns is refused
 	// before any side effect.
 	if err := refuseRetiredLegacyAgent(projectDir, opts); err != nil {
@@ -1773,6 +1780,22 @@ authDone:
 	}
 	warnings = append(warnings, envWarnings...)
 
+	// The --add-host entries the container gets. Only the broker
+	// (opts.ExtraHosts, colocatedExtraHosts) and the runtime bridge mapping
+	// build them, so the hub transport check below may read them; RunConfig
+	// uses this same list.
+	runExtraHosts := mergeExtraHosts(opts.ExtraHosts, runtime.BridgeExtraHosts(m.Runtime.Name(), agentEnv))
+
+	// Hub endpoint transport policy, on the final env (after the agent-level
+	// hub config, the config env layer and host networking's rewrite), before
+	// any container work: an agent is never started with a hub endpoint that
+	// would carry its hub credential unencrypted off the container's host.
+	if err := checkAgentHubTransport(opts.Name, m.Runtime.Name(), runExtraHosts, agentEnv); err != nil {
+		slog.Warn("Start: refusing agent start: unencrypted hub endpoint that is not host-local",
+			"agent", opts.Name, "runtime", m.Runtime.Name())
+		return nil, err
+	}
+
 	// Host networking and the GCP metadata mode: refuse assign, warn the
 	// user for block. Decided on the merged env, before any container work.
 	var relayedWarnings []string
@@ -2668,7 +2691,7 @@ authDone:
 		Debug:                util.DebugEnabled(),
 		Resume:               opts.Resume,
 		MetadataInterception: metadataInterceptionGranted(m.Runtime.Name(), networkMode, agentEnv),
-		ExtraHosts:           mergeExtraHosts(opts.ExtraHosts, runtime.BridgeExtraHosts(m.Runtime.Name(), agentEnv)),
+		ExtraHosts:           runExtraHosts,
 		NetworkMode:          networkMode,
 		Labels: func() map[string]string {
 			l := map[string]string{

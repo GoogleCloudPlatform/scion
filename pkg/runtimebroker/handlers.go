@@ -155,12 +155,54 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 		status = degradeHealthStatus(status)
 	}
 
+	if s.addHubTransportRefusalChecks(checks) {
+		status = degradeHealthStatus(status)
+	}
+
 	return &HealthResponse{
 		Status:  status,
 		Version: s.version,
 		Uptime:  time.Since(s.startTime).Round(time.Second).String(),
 		Checks:  checks,
 	}
+}
+
+// Health checks reported while a hub refuses this broker's command paths
+// under its transport policy.
+const (
+	healthCheckControlChannel = "control_channel"
+	healthCheckConduit        = "conduit"
+)
+
+// addHubTransportRefusalChecks sets control_channel and conduit to
+// unhealthy when the last dial of a hub connection's control channel or
+// conduit was refused by the hub's transport policy (the hub requires TLS
+// or a proxy it trusts), and reports whether it set either. The heartbeat
+// carries them, so the hub's health summary shows a broker that is online
+// but cannot receive commands.
+func (s *Server) addHubTransportRefusalChecks(checks map[string]string) bool {
+	s.hubMu.RLock()
+	conns := make([]*HubConnection, 0, len(s.hubConnections))
+	for _, hc := range s.hubConnections {
+		conns = append(conns, hc)
+	}
+	s.hubMu.RUnlock()
+
+	set := false
+	for _, hc := range conns {
+		hc.mu.RLock()
+		cc, cd := hc.ControlChannel, hc.conduitDialer
+		hc.mu.RUnlock()
+		if cc != nil && cc.TransportRefused() {
+			checks[healthCheckControlChannel] = api.BrokerHealthUnhealthy
+			set = true
+		}
+		if cd != nil && cd.TransportRefused() {
+			checks[healthCheckConduit] = api.BrokerHealthUnhealthy
+			set = true
+		}
+	}
+	return set
 }
 
 // heartbeatHealthReport returns the broker's health for the heartbeat,
@@ -1913,6 +1955,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			span.SetStatus(codes.Error, spanErrorText(err))
+			if errors.Is(err, agent.ErrProjectPathNotInitialized) {
+				markAttemptFailed(http.StatusConflict, err.Error())
+				writeError(w, http.StatusConflict, ErrCodeProjectPathNotInitialized, err.Error(), nil)
+				return
+			}
 			if config.IsAgentStateConflict(err) {
 				markAttemptFailed(http.StatusConflict, "failed to provision agent")
 				writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to provision agent: "+err.Error(), nil)
@@ -2026,6 +2073,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			markAttemptFailed(http.StatusNotFound, "failed to create agent")
 		case isSkillErr:
 			markAttemptFailed(skillResolutionHTTPStatus(skillErr.Code), "failed to create agent")
+		case errors.Is(err, agent.ErrProjectPathNotInitialized):
+			markAttemptFailed(http.StatusConflict, err.Error())
 		case config.IsAgentStateConflict(err):
 			markAttemptFailed(http.StatusConflict, "failed to create agent")
 		case errors.Is(err, agent.ErrProjectShareNotMounted):
@@ -2122,6 +2171,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, ErrCodeNotFound, notFoundMessage(opCreateAgent, err, opts.TemplateName), nil)
 		case isSkillErr:
 			SkillResolutionFailed(w, skillErr, createSkill.ref)
+		case errors.Is(err, agent.ErrProjectPathNotInitialized):
+			writeError(w, http.StatusConflict, ErrCodeProjectPathNotInitialized, err.Error(), nil)
 		case config.IsAgentStateConflict(err):
 			writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to create agent: "+err.Error(), nil)
 		case errors.Is(err, agent.ErrProjectShareNotMounted):
@@ -4045,6 +4096,8 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			writeError(w, http.StatusConflict, ErrCodeConflict, scionrt.ErrRunConflict.Error(), details)
 		case errors.As(err, &skillErr):
 			skillResolutionFailedWithDetails(w, skillErr, startSkill.ref, details)
+		case errors.Is(err, agent.ErrProjectPathNotInitialized):
+			writeError(w, http.StatusConflict, ErrCodeProjectPathNotInitialized, err.Error(), details)
 		case config.IsAgentStateConflict(err):
 			writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to start agent: "+err.Error(), details)
 		case errors.Is(err, agent.ErrProjectShareNotMounted):
@@ -5252,6 +5305,10 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		var skillErr *agent.SkillResolutionError
 		if errors.As(err, &skillErr) {
 			skillResolutionFailedWithDetails(w, skillErr, restartSkill.ref, details)
+			return
+		}
+		if errors.Is(err, agent.ErrProjectPathNotInitialized) {
+			writeError(w, http.StatusConflict, ErrCodeProjectPathNotInitialized, err.Error(), details)
 			return
 		}
 		if config.IsAgentStateConflict(err) {
