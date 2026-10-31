@@ -499,10 +499,14 @@ func (s *Server) adminKeyStatusHandler() http.HandlerFunc {
 // materialDigestDomain is the label the digest input starts with (P6 plan
 // r2 erratum E1); it separates the digest from every other hash of the
 // same bytes.
+//
+//nolint:unused // unwired until P6 T7: erratum E1 / plan note-2
 const materialDigestDomain = "scion-keyring-material-v1\n"
 
 // materialDigestSecretPurpose hands each signing generation's secret to
 // keyringMaterialDigest, which hashes it at once.
+//
+//nolint:unused // unwired until P6 T7: erratum E1 / plan note-2
 var materialDigestSecretPurpose = keyring.NewPurpose("material_digest", func(s []byte) []byte { return slices.Clone(s) })
 
 // keyringMaterialDigest is SHA-256 over the label materialDigestDomain
@@ -513,12 +517,16 @@ var materialDigestSecretPurpose = keyring.NewPurpose("material_digest", func(s [
 // recommended construction for fleet material equality; it must not be
 // published while any reported keyring state can lack a random encryption
 // key.
+//
+//nolint:unused // unwired until P6 T7: erratum E1 / plan note-2
 func keyringMaterialDigest(k *keyring.Keyring) string {
 	return materialDigestWithDomain(materialDigestDomain, k)
 }
 
 // materialDigestWithDomain is keyringMaterialDigest under domain (a
 // parameter so a test can prove the domain separates the digest).
+//
+//nolint:unused // unwired until P6 T7: erratum E1 / plan note-2
 func materialDigestWithDomain(domain string, k *keyring.Keyring) string {
 	h := sha256.New()
 	field := func(b []byte) {

@@ -75,9 +75,9 @@ func keysTestTree() *cobra.Command {
 	return root
 }
 
-// runKeys runs `scion server keys <args>` and returns stdout, the error and
-// the exit status Execute would use.
-func runKeys(t *testing.T, args ...string) (string, error, int) {
+// runKeys runs `scion server keys <args>` and returns stdout, the exit
+// status Execute would use and the error.
+func runKeys(t *testing.T, args ...string) (string, int, error) {
 	t.Helper()
 	root := keysTestTree()
 	var out bytes.Buffer
@@ -85,7 +85,7 @@ func runKeys(t *testing.T, args ...string) (string, error, int) {
 	root.SetErr(&out)
 	root.SetArgs(append([]string{"server", "keys"}, args...))
 	err := root.Execute()
-	return out.String(), err, exitStatusOf(err)
+	return out.String(), exitStatusOf(err), err
 }
 
 func exitStatusOf(err error) int {
@@ -131,14 +131,14 @@ func TestServerKeys_CLIModeCensus(t *testing.T) {
 func TestServerKeysCheck_ExitCodes(t *testing.T) {
 	t.Run("legacy mode", func(t *testing.T) {
 		keysTestEnv(t)
-		out, err, code := runKeys(t, "check")
+		out, code, err := runKeys(t, "check")
 		require.NoError(t, err)
 		assert.Equal(t, 0, code)
 		assert.Contains(t, out, "legacy single-secret mode")
 	})
 	t.Run("valid file", func(t *testing.T) {
 		keysTestEnv(t)
-		out, err, code := runKeys(t, "check", "--keyring-file", writeCmdKeyring(t, nil))
+		out, code, err := runKeys(t, "check", "--keyring-file", writeCmdKeyring(t, nil))
 		require.NoError(t, err)
 		assert.Equal(t, 0, code)
 		assert.Contains(t, out, `revision "cmd-test-rev"`)
@@ -147,7 +147,7 @@ func TestServerKeysCheck_ExitCodes(t *testing.T) {
 	t.Run("valid file from the environment", func(t *testing.T) {
 		keysTestEnv(t)
 		t.Setenv(keyringFileEnv, writeCmdKeyring(t, nil))
-		out, err, code := runKeys(t, "check")
+		out, code, err := runKeys(t, "check")
 		require.NoError(t, err)
 		assert.Equal(t, 0, code)
 		assert.Contains(t, out, "Keyring file is valid")
@@ -188,7 +188,7 @@ func TestServerKeysCheck_ExitCodes(t *testing.T) {
 	for name, args := range invalid {
 		t.Run(name, func(t *testing.T) {
 			keysTestEnv(t)
-			out, err, code := runKeys(t, append([]string{"check"}, args(t)...)...)
+			out, code, err := runKeys(t, append([]string{"check"}, args(t)...)...)
 			require.Error(t, err)
 			assert.Equal(t, keysExitInvalid, code, err.Error())
 			assertNoCmdKRSecret(t, out+err.Error())

@@ -80,7 +80,7 @@ func TestServerKeysStatus_JSONMatchesBuilder(t *testing.T) {
 	t.Cleanup(func() { keysStatusNow = old })
 	outputFormat = "json"
 
-	out, err, code := runKeys(t, "status", "--keyring-file", path, "--db", dbPath)
+	out, code, err := runKeys(t, "status", "--keyring-file", path, "--db", dbPath)
 	require.NoError(t, err, out)
 	require.Equal(t, 0, code)
 
@@ -122,7 +122,7 @@ func TestServerKeysStatus_TextAndNoStore(t *testing.T) {
 	keysTestEnv(t)
 	path := writeCmdKeyring(t, nil)
 
-	out, err, code := runKeys(t, "status", "--keyring-file", path, "--no-store")
+	out, code, err := runKeys(t, "status", "--keyring-file", path, "--no-store")
 	require.NoError(t, err, out)
 	assert.Equal(t, 0, code)
 	assert.Contains(t, out, "Keyring: source file, revision cmd-test-rev")
@@ -137,7 +137,7 @@ func TestServerKeysStatus_TextAndNoStore(t *testing.T) {
 func TestServerKeysStatus_MissingDatabaseNotCreated(t *testing.T) {
 	home := keysTestEnv(t)
 	dbPath := filepath.Join(home, ".scion", "absent.db")
-	_, err, code := runKeys(t, "status", "--keyring-file", writeCmdKeyring(t, nil), "--db", dbPath)
+	_, code, err := runKeys(t, "status", "--keyring-file", writeCmdKeyring(t, nil), "--db", dbPath)
 	require.Error(t, err)
 	assert.Equal(t, keysExitFailure, code)
 	_, statErr := os.Stat(dbPath)
@@ -150,7 +150,7 @@ func TestServerKeysStatus_InvalidKeyringIsExit2(t *testing.T) {
 	path := writeCmdKeyring(t, func(doc map[string]any) {
 		doc["encryption"].(map[string]any)["write_format"] = "v2"
 	})
-	_, err, code := runKeys(t, "status", "--keyring-file", path, "--no-store")
+	_, code, err := runKeys(t, "status", "--keyring-file", path, "--no-store")
 	require.Error(t, err)
 	assert.Equal(t, keysExitInvalid, code)
 }
@@ -170,7 +170,7 @@ func TestServerKeysStatus_NotReadyReportIsExit0(t *testing.T) {
 	t.Cleanup(func() { keysStatusNow = old })
 	outputFormat = "json"
 
-	out, err, code := runKeys(t, "status", "--keyring-file", path, "--no-store")
+	out, code, err := runKeys(t, "status", "--keyring-file", path, "--no-store")
 	require.NoError(t, err, out)
 	assert.Equal(t, 0, code)
 	var got hub.KeyStatusReport
@@ -184,7 +184,7 @@ func TestServerKeysStatus_LegacyModeAuditNote(t *testing.T) {
 	home := keysTestEnv(t)
 	dbPath, _ := keysStatusDBFixture(t, home, writeCmdKeyring(t, nil))
 
-	out, err, code := runKeys(t, "status", "--db", dbPath)
+	out, code, err := runKeys(t, "status", "--db", dbPath)
 	require.NoError(t, err, out)
 	assert.Equal(t, 0, code)
 	assert.Contains(t, out, "no session secret in this environment")
@@ -194,7 +194,7 @@ func TestServerKeysStatus_LegacyModeAuditNote(t *testing.T) {
 	assert.Contains(t, out, "Audit (fresh")
 
 	t.Setenv(sessionSecretEnv, "test-only-cmd-other-legacy-secret")
-	out, err, code = runKeys(t, "status", "--db", dbPath)
+	out, code, err = runKeys(t, "status", "--db", dbPath)
 	require.NoError(t, err, out)
 	assert.Equal(t, 0, code)
 	assert.Contains(t, out, "the audit uses the session secret from "+sessionSecretEnv)
