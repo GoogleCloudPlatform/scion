@@ -41,14 +41,13 @@ import (
 var placementSections = []string{"profiles", "runtimes"}
 
 // rejectRepeatedPlacementSections writes a 400 validation_failed when the
-// JSON object body sends runtimes or profiles more than once, or under a
-// name that matches only without regard to case: the typed decode matches
-// member names without regard to case and merges a repeated member, so
-// such a body would save something other than what any one member says.
-// done is true when the response has been written.
+// JSON object body sends runtimes or profiles under a name that matches
+// only without regard to case: the typed decode would still read it, so
+// the section would be saved under a name the save checks do not see. A
+// repeated member is refused earlier (rejectRepeatedJSONMembers). done is
+// true when the response has been written.
 func rejectRepeatedPlacementSections(w http.ResponseWriter, rawBody []byte) (done bool) {
 	bad := map[string]bool{}
-	seen := map[string]bool{}
 	dec := json.NewDecoder(bytes.NewReader(rawBody))
 	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
 		return false // the typed decode reports a malformed body
@@ -61,10 +60,9 @@ func rejectRepeatedPlacementSections(w http.ResponseWriter, rawBody []byte) (don
 		name, _ := tok.(string)
 		for _, section := range placementSections {
 			if strings.EqualFold(name, section) {
-				if name != section || seen[section] {
+				if name != section {
 					bad[section] = true
 				}
-				seen[section] = true
 			}
 		}
 		var skip json.RawMessage
@@ -78,7 +76,7 @@ func rejectRepeatedPlacementSections(w http.ResponseWriter, rawBody []byte) (don
 	errs := map[string][]config.ValidationError{}
 	for _, section := range placementSections {
 		if bad[section] {
-			errs[section] = []config.ValidationError{{Path: section, Message: section + ": send the section once, spelt in lower case"}}
+			errs[section] = []config.ValidationError{{Path: section, Message: section + ": spell the section name in lower case"}}
 		}
 	}
 	writeJSON(w, http.StatusBadRequest, map[string]interface{}{

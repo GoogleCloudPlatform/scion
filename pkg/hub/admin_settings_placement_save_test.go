@@ -59,21 +59,23 @@ func seedPlacement(t *testing.T, f *fakeHubSettingStore, ops *OperationalSetting
 	require.NoError(t, err)
 }
 
-// A body that sends runtimes or profiles twice, or spelt in another case,
-// is refused before the typed decode can merge the members, and nothing is
-// written.
+// A body that sends runtimes or profiles spelt in another case, or twice,
+// is refused before the typed decode reads it, and nothing is written: a
+// case variant by the placement check (validation_failed), a repeated
+// member by the earlier repeated-member check (invalid_request).
 func TestPutSettingsRepeatedPlacementSectionRefused(t *testing.T) {
 	tempSettingsHome(t)
-	for _, body := range []string{
-		`{"Runtimes":{"d":{"type":"docker"}}}`,
-		`{"PROFILES":{"p":{"runtime":"docker"}}}`,
-		`{"runtimes":{"k":{"type":"kubernetes"}},"runtimes":{"d":{"type":"docker"}}}`,
+	for _, tc := range []struct{ body, code string }{
+		{`{"Runtimes":{"d":{"type":"docker"}}}`, "validation_failed"},
+		{`{"PROFILES":{"p":{"runtime":"docker"}}}`, "validation_failed"},
+		{`{"runtimes":{"k":{"type":"kubernetes"}},"runtimes":{"d":{"type":"docker"}}}`, ErrCodeInvalidRequest},
+		{`{"runtimes":{"k":{"type":"kubernetes"}},"Runtimes":{"d":{"type":"docker"}}}`, ErrCodeInvalidRequest},
 	} {
-		t.Run(body, func(t *testing.T) {
+		t.Run(tc.body, func(t *testing.T) {
 			srv, fake, ops := newTestDBServer(t)
-			rr := putServerConfigDB(t, srv, ops, body)
+			rr := putServerConfigDB(t, srv, ops, tc.body)
 			require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
-			assert.Contains(t, rr.Body.String(), "validation_failed")
+			assert.Contains(t, rr.Body.String(), tc.code)
 			requireNoPlacementRow(t, fake, "runtimes")
 			requireNoPlacementRow(t, fake, "profiles")
 		})
