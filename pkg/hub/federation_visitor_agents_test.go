@@ -148,8 +148,8 @@ func TestVisitorAgents_ListAndReadProjected(t *testing.T) {
 }
 
 // A member's list and read responses are unchanged: the full agent record,
-// not the visitor view. An owner's send response carries no conversation
-// fields.
+// not the visitor view. An owner's send response names the conversation the
+// message landed in, as every sender's does, but carries no visitor DM key.
 func TestVisitorAgents_MemberResponsesUnchanged(t *testing.T) {
 	f := newVisitorMessagingFixture(t)
 	populated := f.populatedAgent(t)
@@ -168,7 +168,13 @@ func TestVisitorAgents_MemberResponsesUnchanged(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var sent map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &sent))
-	assert.NotContains(t, sent, "conversation_id")
+	var ownerSent MessageDeliveryResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &ownerSent))
+	require.NotEmpty(t, ownerSent.MessageID)
+	stored, err := f.st.GetMessage(context.Background(), ownerSent.MessageID)
+	require.NoError(t, err)
+	require.NotEmpty(t, stored.ConversationID)
+	assert.Equal(t, stored.ConversationID, ownerSent.ConversationID)
 	assert.NotContains(t, sent, "conversation_key")
 
 	// The visitor-only routes answer 404 for a member.

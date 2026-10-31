@@ -894,6 +894,10 @@ type MessageResponse struct {
 	// mid-`scion reincarnate` (design agent-reincarnate §3.7). The message
 	// was saved to conversation history but not dispatched.
 	Deferred string `json:"deferred,omitempty"`
+	// ConversationID is the conversation the message was recorded in, so
+	// the sender can reply into it. Empty on hubs that predate this field,
+	// or when the message was not recorded in a conversation.
+	ConversationID string `json:"conversation_id,omitempty"`
 	// MentionResults reports the outcome of server-side @mention fan-out,
 	// one entry per resolved mention name. Empty when the message had no
 	// mentions, or on hubs that predate this field.
@@ -1067,8 +1071,8 @@ type OutboundMessageResult struct {
 	// Deferred is set only when Status == "deferred".
 	Deferred string `json:"deferred,omitempty"`
 	// ConversationID is the conversation the message was recorded in. It is
-	// empty on hubs that predate this field, and on paths that do not report
-	// it (for example, a send to another agent).
+	// empty on hubs that predate this field, or when the message was not
+	// recorded in a conversation.
 	ConversationID string `json:"conversation_id,omitempty"`
 	// MentionResults reports the outcome of server-side @mention fan-out,
 	// one entry per resolved mention name. Empty when the message had no
