@@ -53,7 +53,7 @@ func urlLeaks(text string, issued []string) []string {
 
 // spanText collects every span's status description, attributes and events
 // as text.
-func spanText(rec *tracetest.SpanRecorder) string {
+func recordedSpansText(rec *tracetest.SpanRecorder) string {
 	var b strings.Builder
 	for _, s := range rec.Ended() {
 		fmt.Fprintf(&b, "%s|%s|", s.Name(), s.Status().Description)
@@ -183,7 +183,7 @@ func TestSignedDownload_NoURLLeaks(t *testing.T) {
 	_, ps := ptp.Tracer("t").Start(context.Background(), "planted")
 	ps.SetStatus(codes.Error, "status "+planted)
 	ps.End()
-	if len(urlLeaks(spanText(plantedRec), nil)) == 0 {
+	if len(urlLeaks(recordedSpansText(plantedRec), nil)) == 0 {
 		t.Fatal("detector control: a planted span status must be found")
 	}
 
@@ -215,7 +215,7 @@ func TestSignedDownload_NoURLLeaks(t *testing.T) {
 					t.Fatal("the scenario must issue at least one URL")
 				}
 				surfaces["broker log"] = logs.String()
-				surfaces["spans"] = spanText(recorder)
+				surfaces["spans"] = recordedSpansText(recorder)
 				surfaces["broker state files"] = filesText(t, os.Getenv("HOME"))
 				if !strings.Contains(logs.String(), "signed workspace download") && !strings.Contains(logs.String(), "signed workspace bootstrap") {
 					t.Fatalf("the failure cause must still be logged (URL-free): %s", logs.String())
