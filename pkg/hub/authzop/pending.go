@@ -94,13 +94,7 @@ var PendingBearerDispositions = []PendingEntry{
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/delegation-adoption/previews", Method: "POST", Area: AreaHub},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/operations/{key}/runs", Method: "GET", Area: AreaHub},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/operations/{key}/runs/{runId}", Method: "GET", Area: AreaHub},
-	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/conduit/grant-keys", Method: "GET", Area: AreaHub},
-	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/experiments", Method: "GET", Area: AreaHub},
-	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/profiling", Method: "GET", Area: AreaHub},
-	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/hub/settings/injected-skills", Method: "GET", Area: AreaHub},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/metrics/session/{id}", Method: "GET", Area: AreaHub},
-	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/pre-start-hooks", Method: "GET", Area: AreaHub},
-	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/pre-start-hooks/{id}", Method: "GET", Area: AreaHub},
 	// --- catalog_resources ---
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs/{id}/local-image", Method: "DELETE", Area: AreaCatalogResources},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs/{id}/pull-image", Method: "POST", Area: AreaCatalogResources},
@@ -117,12 +111,10 @@ var PendingBearerDispositions = []PendingEntry{
 // Bearer value, and Validate does not apply the credentials agreement rule
 // to it until its disposition is recorded.
 var PendingBearerOperations = []OperationID{
-	"agent.message.send",
 	"env.read",
 	"gcp.identity.assign",
 	"gcp.identity.create",
 	"gcp.identity.delete",
-	"gcp.identity.mint",
 	"gcp.identity.read",
 	"gcp.identity.verify",
 	"group.read",

@@ -110,6 +110,7 @@ type idFixtures struct {
 	integrationName         string
 	lifecycleHook           string
 	hubPreStartHook         string
+	hubPreStartHookDel      string
 	chatTopic               string
 	agentLifecycle          string
 	agentRestore            string
@@ -685,6 +686,18 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	})
 	require.NoError(t, err)
 	f.hubPreStartHook = hubHook.ID
+	// A disposable second hub hook for the update and delete routes, so the
+	// fixture hook above is never deleted and stays readable by GET
+	// /api/v1/pre-start-hooks/{id}. Creating it archives the fixture hook
+	// (a new hub hook archives the active one in the same scope); the walk's
+	// POST /api/v1/pre-start-hooks/{id}/activate entry re-activates the
+	// fixture hook before the DELETE, and the GET reads either state.
+	hubHookDel, err := s.CreateHubPreStartHook(ctx, &store.ProjectPreStartHook{
+		Scope: store.PreStartHookScopeHub, Name: "li-hub-pre-start-hook-del", Slug: "li-hub-pre-start-hook-del",
+		Script: "#!/bin/sh\necho li-del\n", CreatedBy: "li@test.com", UpdatedBy: "li@test.com",
+	})
+	require.NoError(t, err)
+	f.hubPreStartHookDel = hubHookDel.ID
 
 	// Artifact service: on (experiment, store, blob storage) with one
 	// single-file artifact owned by the dev user, homed in f.project.
@@ -858,6 +871,7 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 		{"agent.lifecycle.delete", "/api/v1/projects/{projectId}/agents/{id}"}:          {"projectId": f.project, "id": f.agentDelProject},
 		{"agent.port.register", "/api/v1/agents/{id}/ports"}:                            {"id": f.agentPorts},
 		{"project.lifecycle.delete", "/api/v1/projects/{id}"}:                           {"id": f.projectDel},
+		{"hub.lifecyclehooks.update", "/api/v1/pre-start-hooks/{id}"}:                   {"id": f.hubPreStartHookDel},
 		{"group.delete", "/api/v1/groups/{id}"}:                                         {"id": f.groupDel},
 		{"user.admin.delete", "/api/v1/users/{id}"}:                                     {"id": f.userDel},
 		{"testidentity.delete", "/api/v1/test-identities/{id}"}:                         {"id": f.testIdentityDel},
