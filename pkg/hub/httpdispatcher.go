@@ -2505,24 +2505,18 @@ func (d *HTTPAgentDispatcher) deferredFinalizeEnv(ctx context.Context, agent *st
 // while an empty one is a passthrough marker that deliberately yields to
 // storage.
 //
-// The three consumers in THIS file derive their order from this list — the
-// resolver (resolveEnvFromStorage), the provenance reporter that tells the CLI
-// where a value came from (buildEnvSources), and the startup shadow warning
-// (WarnOutrankedBrokerEnvKeys). For those three, changing the order here is the
-// only edit required, and it is a user-visible behaviour change for any
-// deployment that defines the same key in two scopes.
+// Every consumer derives its order from this list: the resolver
+// (resolveEnvFromStorage), the provenance reporter that tells the CLI where a
+// value came from (buildEnvSources), the startup shadow warning
+// (WarnOutrankedBrokerEnvKeys), and the env-gather provenance reporter
+// (Server.buildEnvGatherResponse in handlers_agents_core.go, through
+// envScopeFilters). Changing the order here is the only edit required, and it
+// is a user-visible behaviour change for any deployment that defines the same
+// key in two scopes.
 //
-// THAT IS NOT THE SAME AS "everywhere", AND THE DIFFERENCE IS LOAD-BEARING.
-// Server.buildEnvGatherResponse in handlers_agents_core.go answers the same
-// "where did this value come from" question for the env-gather path from its
-// own hardcoded chain: it defaults the reported scope to hub, then checks user,
-// project, config and secret, and never consults runtime_broker at all — so a
-// broker-only key is reported there as "hub". It does not reference this list,
-// and its user-before-project order agrees with this one by coincidence rather
-// than by construction. Reordering here does not reach it. That reporter is
-// tracked as a separate follow-up and is deliberately not changed by phase 10;
-// what matters here is that you must not read this list as the only place a
-// scope order is written down.
+// The env-gather reporter can also answer "config" (a non-empty explicit
+// agent config value, which outranks every scope here) and "secret"; those
+// are labels for sources outside this ladder, not further storage scopes.
 var envScopePrecedence = []string{
 	store.ScopeRuntimeBroker,
 	store.ScopeHub,
@@ -2533,10 +2527,10 @@ var envScopePrecedence = []string{
 // envScopeID returns the ID the given scope is keyed by for this agent, or ""
 // if the scope does not apply (e.g. an agent with no project). The hub scope is
 // keyed by the hub's own instance ID, not by anything on the agent.
-func (d *HTTPAgentDispatcher) envScopeID(scope string, agent *store.Agent) string {
+func envScopeID(scope string, agent *store.Agent, hubID string) string {
 	switch scope {
 	case store.ScopeHub:
-		return d.hubID
+		return hubID
 	case store.ScopeProject:
 		return agent.ProjectID
 	case store.ScopeUser:
@@ -2560,13 +2554,29 @@ func (d *HTTPAgentDispatcher) envScopesInPrecedenceOrder(agent *store.Agent) []s
 	if agent == nil {
 		return nil
 	}
-	filters := make([]store.EnvVarFilter, 0, len(envScopePrecedence))
-	for _, scope := range envScopePrecedence {
-		scopeID := d.envScopeID(scope, agent)
-		if scopeID == "" && scope != store.ScopeHub {
-			if d.debug {
+	if d.debug {
+		for _, scope := range envScopePrecedence {
+			if scope != store.ScopeHub && envScopeID(scope, agent, d.hubID) == "" {
 				d.log.Debug("env scope does not apply to agent (empty scope ID)", "scope", scope, "agent_id", agent.ID)
 			}
+		}
+	}
+	return envScopeFilters(agent, d.hubID)
+}
+
+// envScopeFilters is envScopesInPrecedenceOrder for a caller that holds the
+// hub ID but not the dispatcher: the env var storage queries that apply to
+// agent, lowest precedence first, with the same omission rule. The
+// env-gather provenance reporter (Server.buildEnvGatherResponse) walks it so
+// its scope order cannot drift from the resolver's.
+func envScopeFilters(agent *store.Agent, hubID string) []store.EnvVarFilter {
+	if agent == nil {
+		return nil
+	}
+	filters := make([]store.EnvVarFilter, 0, len(envScopePrecedence))
+	for _, scope := range envScopePrecedence {
+		scopeID := envScopeID(scope, agent, hubID)
+		if scopeID == "" && scope != store.ScopeHub {
 			continue
 		}
 		filters = append(filters, store.EnvVarFilter{Scope: scope, ScopeID: scopeID})
@@ -2597,11 +2607,9 @@ func envScopeSourceLabel(scope string) string {
 // and an empty slice if nothing outranks it.
 //
 // This is derived from the ordering list rather than hard-coded so that moving
-// an entry in envScopePrecedence changes who outranks whom for all three
-// consumers in this file at once — the same property that keeps the resolver
-// and the `scion hub env list` provenance reporter from drifting apart. It says
-// nothing about reporters that do not read the list; see envScopePrecedence for
-// the one that does not.
+// an entry in envScopePrecedence changes who outranks whom for every consumer
+// at once — the same property that keeps the resolver and the provenance
+// reporters (`scion hub env list` and env-gather) from drifting apart.
 func envScopesOutranking(order []string, scope string) []string {
 	at := slices.Index(order, scope)
 	if at < 0 {

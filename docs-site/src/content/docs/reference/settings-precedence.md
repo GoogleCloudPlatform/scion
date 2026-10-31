@@ -336,42 +336,26 @@ is the top of the chain, and it is not — see [A2](#a2-the-config-rung-sits-abo
 runtime_broker  <  hub  <  project  <  user
 ```
 
-The order is stated in one place in the code, the `envScopePrecedence` list, and **the three
-consumers in that file** derive their order from it: the resolver (`resolveEnvFromStorage`), the
-provenance reporter that tells `scion hub env list` where a value came from (`buildEnvSources`),
-and the startup shadow warning (`WarnOutrankedBrokerEnvKeys`). For those three, changing the list
-is the only edit needed to change the **resolution** order.
+The order is stated in one place in the code, the `envScopePrecedence` list, and **every consumer**
+derives its order from it: the resolver (`resolveEnvFromStorage`), the provenance reporter that
+tells `scion hub env list` where a value came from (`buildEnvSources`), the startup shadow warning
+(`WarnOutrankedBrokerEnvKeys`), and the env-gather provenance reporter
+(`Server.buildEnvGatherResponse`). Changing the list is the only edit needed to change the
+**resolution** order and both provenance labels.
 
-:::caution[That is not the same as *everywhere*, and the difference is load-bearing]
-A **fourth** provenance surface does not read this list. `Server.buildEnvGatherResponse`, in
-`pkg/hub/handlers_agents_core.go`, answers the same "where did this value come from" question for
-the env-gather path from its own hardcoded probe order: it defaults the reported scope to `hub`,
-then checks `user`, `project`, `config` and `secret`, and **never consults `runtime_broker` at
-all.**
+The env-gather reporter labels each key the Hub supplied with the source whose value won the
+dispatch merge:
 
-**This is not a second precedence ladder, and reading it as one is the trap.** It is a *labeller*,
-not a *resolver* — it never decides which value wins, only what to call the value it was already
-handed. The ranking above is still the whole story for **resolution**. What this function can get
-wrong is the **name** attached to a value, which is a reporting bug, not a precedence bug.
+1. **`config`**: a non-empty explicit agent config value, which outranks every storage scope. An
+   empty config value is a passthrough marker that yields to storage, so it is not reported as
+   `config`.
+2. The highest storage scope in the ladder above that holds the key: **`user`**, **`project`**,
+   **`hub`** or **`broker`** (for `runtime_broker`). Entries with `injection_mode: as_needed` are
+   skipped, because they are not part of the first dispatch.
+3. **`secret`**: a user- or project-scope secret of that name.
 
-So the two surfaces disagree today, in both directions:
-
-- A value set only at `runtime_broker` scope is reported as **`broker`** by `scion hub env list`
-  and as **`hub`** by the env-gather API. Same key, same value, two answers — and the second one
-  is not a lookup result. `"hub"` is the value the field is *initialised* to, and the code then
-  tests `Scope == "hub"` to mean "not resolved yet". A broker-only key matches no probe, so it
-  keeps the initial value and is reported as `hub` **not because it was found at hub scope, but
-  because it was found nowhere** — and here "nowhere" is spelled the same as a real answer.
-- The env-gather API can also answer **`config`** or **`secret`**, which are not env scopes in
-  this ladder at all and cannot be set with `scion hub env set`.
-
-Its `user`-before-`project` order agrees with this one **by coincidence rather than by
-construction**, so reordering the list does not reach it — it has to be changed by hand. That
-reporter is tracked as a separate follow-up.
-
-Read the ranking above as governing **which value wins**, and the label that `scion hub env list`
-prints. Do not read it as the only place a scope order is written down.
-:::
+If nothing matches, the label falls back to `hub`. `config` and `secret` are not env scopes in this
+ladder and cannot be set with `scion hub env set`.
 
 :::caution[`hub`, not `global`]
 The scope is called **`hub`** (`store.ScopeHub = "hub"`). Do not call it `global`. That word is an
