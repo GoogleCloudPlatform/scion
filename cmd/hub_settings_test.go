@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -43,6 +44,9 @@ type fakeSettingsHub struct {
 	// with a default body.
 	putStatus int
 	putBody   string
+
+	experiments string
+	defaults    string
 }
 
 type fakeSettingsWrite struct {
@@ -53,7 +57,10 @@ type fakeSettingsWrite struct {
 
 func newFakeSettingsHub(t *testing.T) (*fakeSettingsHub, hubclient.AdminSettingsService) {
 	t.Helper()
-	f := &fakeSettingsHub{}
+	f := &fakeSettingsHub{
+		experiments: `{"revision":4,"malformed":false,"experiments":[{"name":"alpha","stage":"beta","default":false,"override":null,"enabled":false},{"name":"beta","stage":"alpha","default":true,"override":false,"enabled":false,"review_overdue":true}],"unknown_overrides":{"gone":true}}`,
+		defaults:    `{"default_scratchpad":true}`,
+	}
 	schema, err := json.Marshal(map[string]interface{}{"sections": testSettingsSchema()})
 	require.NoError(t, err)
 	cfg, err := json.Marshal(testServerConfig(t))
@@ -67,6 +74,10 @@ func newFakeSettingsHub(t *testing.T) (*fakeSettingsHub, hubclient.AdminSettings
 				_, _ = w.Write(schema)
 			case "/api/v1/admin/server-config":
 				_, _ = w.Write(cfg)
+			case "/api/v1/admin/experiments":
+				_, _ = io.WriteString(w, f.experiments)
+			case "/api/v1/admin/project-defaults":
+				_, _ = io.WriteString(w, f.defaults)
 			default:
 				w.WriteHeader(http.StatusNotFound)
 			}
@@ -87,6 +98,10 @@ func newFakeSettingsHub(t *testing.T) (*fakeSettingsHub, hubclient.AdminSettings
 		switch r.URL.Path {
 		case "/api/v1/admin/server-config":
 			_, _ = io.WriteString(w, `{"status":"saved","reload":{"applied":["agent_defaults"],"requires_restart":[],"applied_keys":["default_max_turns"],"pending_restart":["server.hub.public_url"],"skipped":[{"key":"image_registry","reason":"not used by this hub"}],"file_applied":[]},"unchanged":["endpoints"],"warnings":["check the value"]}`)
+		case "/api/v1/admin/experiments":
+			_, _ = io.WriteString(w, f.experiments)
+		case "/api/v1/admin/project-defaults":
+			_, _ = io.WriteString(w, `{"default_scratchpad":false}`)
 		default:
 			w.WriteHeader(http.StatusNoContent)
 		}
@@ -356,7 +371,7 @@ func TestHubSettingsSchema(t *testing.T) {
 	var out bytes.Buffer
 	require.NoError(t, runHubSettingsSchema(context.Background(), svc, &out, ""))
 	assert.Contains(t, out.String(), "  server.hub.public_url  (restart)")
-	assert.Contains(t, out.String(), "project_defaults  (project defaults: not part of the server configuration)")
+	assert.Contains(t, out.String(), "project_defaults  (use 'scion hub project-defaults')")
 	assert.Contains(t, out.String(), "experiments  (not in the server configuration")
 	require.Error(t, runHubSettingsSchema(context.Background(), svc, &out, "nope"))
 }
@@ -371,6 +386,112 @@ func TestHubSettingsReset(t *testing.T) {
 	assert.Equal(t, "/api/v1/admin/server-config/sections/telemetry", f.writes[0].Path)
 }
 
+func TestProjectDefaults_SetAndUnset(t *testing.T) {
+	withTextOutput(t)
+	f, svc := newFakeSettingsHub(t)
+	var out, errw bytes.Buffer
+	require.NoError(t, runProjectDefaultsWrite(context.Background(), svc, &out, &errw,
+		[]settingsChange{{Key: "project_defaults.default_scratchpad", Value: false}}))
+	require.NoError(t, runProjectDefaultsWrite(context.Background(), svc, &out, &errw,
+		[]settingsChange{{Key: "default_scratchpad", Unset: true}}))
+	require.Len(t, f.writes, 2)
+	assert.JSONEq(t, `false`, string(f.writes[0].Body["default_scratchpad"]))
+	assert.JSONEq(t, `null`, string(f.writes[1].Body["default_scratchpad"]))
+	assert.Contains(t, out.String(), "default_scratchpad: false")
+
+	// An unknown key would be ignored by the Hub, so it is refused here.
+	err := runProjectDefaultsWrite(context.Background(), svc, &out, &errw,
+		[]settingsChange{{Key: "default_scrachpad", Value: false}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "known: default_scratchpad")
+	assert.Len(t, f.writes, 2)
+}
+
+func TestProjectDefaults_ConflictIsReported(t *testing.T) {
+	withTextOutput(t)
+	f, svc := newFakeSettingsHub(t)
+	f.putStatus = http.StatusConflict
+	f.putBody = `{"error":{"code":"conflict","message":"Project defaults changed concurrently; retry"}}`
+	var out, errw bytes.Buffer
+	err := runProjectDefaultsWrite(context.Background(), svc, &out, &errw,
+		[]settingsChange{{Key: "default_scratchpad", Value: false}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "changed concurrently")
+	// Today's form names no conflicted section: the Hub's message alone.
+	assert.NotContains(t, errw.String(), "--revision")
+
+	// The structured form lists the conflicted section: the project
+	// defaults guidance, which names no --revision (these commands take
+	// none).
+	f.putBody = `{"error":{"code":"revision_conflict","message":"Project defaults changed concurrently; retry","details":{"conflicted":[{"section":"project_defaults","expected_revision":2,"current_revision":3}]}}}`
+	errw.Reset()
+	err = runProjectDefaultsWrite(context.Background(), svc, &out, &errw,
+		[]settingsChange{{Key: "default_scratchpad", Value: false}})
+	require.Error(t, err)
+	assert.Contains(t, errw.String(), "section project_defaults: expected revision 2, current revision 3")
+	assert.Contains(t, errw.String(), "The project defaults changed while the Hub saved them.")
+	assert.NotContains(t, errw.String(), "--revision")
+}
+
+func TestExperiments_ListAndOverride(t *testing.T) {
+	withTextOutput(t)
+	f, svc := newFakeSettingsHub(t)
+	var out, errw bytes.Buffer
+	require.NoError(t, runExperimentsList(context.Background(), svc, &out, &errw))
+	assert.Contains(t, out.String(), "revision 4")
+	assert.Regexp(t, `beta\s+alpha\s+on\s+off\s+off\s+review overdue`, out.String())
+	assert.Contains(t, errw.String(), "gone")
+
+	on := true
+	out.Reset()
+	require.NoError(t, runExperimentsOverride(context.Background(), svc, &out, &errw, []string{"alpha"}, &on, nil))
+	require.Len(t, f.writes, 1)
+	assert.JSONEq(t, `{"alpha":true}`, string(f.writes[0].Body["overrides"]))
+	assert.JSONEq(t, `4`, string(f.writes[0].Body["expected_revision"]))
+
+	pinned := int64(2)
+	require.NoError(t, runExperimentsOverride(context.Background(), svc, &out, &errw, []string{"beta", "gone"}, nil, &pinned))
+	assert.JSONEq(t, `{"beta":null,"gone":null}`, string(f.writes[1].Body["overrides"]), "an unknown override can be cleared")
+	assert.JSONEq(t, `2`, string(f.writes[1].Body["expected_revision"]))
+
+	err := runExperimentsOverride(context.Background(), svc, &out, &errw, []string{"gone"}, &on, nil)
+	require.Error(t, err, "an unknown experiment cannot be turned on")
+	err = runExperimentsOverride(context.Background(), svc, &out, &errw, []string{"nope"}, nil, nil)
+	require.Error(t, err)
+	assert.Len(t, f.writes, 2)
+}
+
+func TestExperiments_ResetAll(t *testing.T) {
+	withTextOutput(t)
+	f, svc := newFakeSettingsHub(t)
+	var out, errw bytes.Buffer
+	require.NoError(t, runExperimentsResetAll(context.Background(), svc, &out, &errw, nil, false, true))
+	require.Len(t, f.writes, 1)
+	assert.Equal(t, http.MethodDelete, f.writes[0].Method)
+	assert.JSONEq(t, `4`, string(f.writes[0].Body["expected_revision"]))
+
+	f.experiments = strings.Replace(f.experiments, `"malformed":false`, `"malformed":true`, 1)
+	err := runExperimentsResetAll(context.Background(), svc, &out, &errw, nil, false, true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--confirm-malformed")
+	require.NoError(t, runExperimentsResetAll(context.Background(), svc, &out, &errw, nil, true, true))
+	assert.JSONEq(t, `true`, string(f.writes[1].Body["confirm_reset_malformed"]))
+}
+
+func TestExperiments_ConflictIsReported(t *testing.T) {
+	withTextOutput(t)
+	f, svc := newFakeSettingsHub(t)
+	f.putStatus = http.StatusConflict
+	f.putBody = `{"error":{"code":"revision_conflict","message":"The experiment settings were modified concurrently. Please refresh and retry."}}`
+	on := true
+	var out, errw bytes.Buffer
+	err := runExperimentsOverride(context.Background(), svc, &out, &errw, []string{"alpha"}, &on, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "modified concurrently")
+	assert.Contains(t, errw.String(), "pin the revision with --revision N.")
+	assert.NotContains(t, errw.String(), "SECTION=N")
+}
+
 // TestHubAdminSettingsCommands_ModeAndPlatformGates pins the gate decisions
 // for these commands: none is available in agent mode (agents are refused
 // by the Hub on every one of these endpoints), and all run on Windows (Hub
@@ -378,6 +499,8 @@ func TestHubSettingsReset(t *testing.T) {
 func TestHubAdminSettingsCommands_ModeAndPlatformGates(t *testing.T) {
 	paths := []string{
 		"hub.settings", "hub.settings.get", "hub.settings.set", "hub.settings.unset", "hub.settings.schema",
+		"hub.project-defaults", "hub.project-defaults.get", "hub.project-defaults.set", "hub.project-defaults.unset",
+		"hub.experiments", "hub.experiments.list", "hub.experiments.enable", "hub.experiments.disable", "hub.experiments.reset",
 	}
 	for _, p := range paths {
 		assert.False(t, agentAllowed[p], "%s must not be available in agent mode", p)
@@ -436,4 +559,44 @@ func TestHubSettingsGet_UpdatedFollowsDisplayZone(t *testing.T) {
 	assert.Contains(t, want, "2026-10-31 08:30", "the display zone moves the clock")
 	assert.Contains(t, out.String(), want)
 	assert.NotContains(t, out.String(), "2026-10-30T23:30:00Z", "no fixed UTC layout")
+}
+
+// TestExperiments_MalformedRefusesPerNameChanges pins the local refusal of a
+// per-name change while the stored overrides are unreadable: nothing is sent,
+// and the message names the reset that clears them.
+func TestExperiments_MalformedRefusesPerNameChanges(t *testing.T) {
+	withTextOutput(t)
+	f, svc := newFakeSettingsHub(t)
+	f.experiments = strings.Replace(f.experiments, `"malformed":false`, `"malformed":true`, 1)
+	on := true
+	var out, errw bytes.Buffer
+	for name, value := range map[string]*bool{"enable": &on, "reset": nil} {
+		err := runExperimentsOverride(context.Background(), svc, &out, &errw, []string{"alpha"}, value, nil)
+		require.Error(t, err, name)
+		assert.Contains(t, err.Error(), "reset --all --confirm-malformed", name)
+	}
+	assert.Empty(t, f.writes, "nothing is sent")
+}
+
+// TestExperiments_NegativeRevisionRefused pins the --revision check: a
+// negative revision is refused before any request.
+func TestExperiments_NegativeRevisionRefused(t *testing.T) {
+	withTextOutput(t)
+	f, svc := newFakeSettingsHub(t)
+	on := true
+	neg := int64(-1)
+	var out, errw bytes.Buffer
+	err := runExperimentsOverride(context.Background(), svc, &out, &errw, []string{"alpha"}, &on, &neg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "non-negative")
+	err = runExperimentsResetAll(context.Background(), svc, &out, &errw, &neg, false, true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "non-negative")
+	assert.Empty(t, f.writes, "nothing is sent")
+
+	// Control: zero is a valid revision and is sent.
+	zero := int64(0)
+	require.NoError(t, runExperimentsOverride(context.Background(), svc, &out, &errw, []string{"alpha"}, &on, &zero))
+	require.Len(t, f.writes, 1)
+	assert.JSONEq(t, `0`, string(f.writes[0].Body["expected_revision"]))
 }

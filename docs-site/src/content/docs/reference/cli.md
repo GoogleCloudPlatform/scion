@@ -1353,7 +1353,13 @@ scion hub test-identity delete "$FIXTURE_ID" --purge
     - `unset KEY [KEY ...]`: Clear keys, so the Hub uses its default. A key below a listed key (`runtimes.old`) is removed from the current value. The GCP permission-check keys and the agent role defaults cannot be cleared this way. `--section NAME --reset` deletes the section's saved values instead, so the Hub uses its startup configuration for the section (asks for confirmation; `--yes` answers it).
     - `schema [SECTION]`: List the sections and their keys (keys that apply only after a Hub restart are marked); with `SECTION`, print its JSON schema.
     - Flags on `set` and `unset`: `--revision SECTION=N` (repeatable; pin a section's expected revision), `--dry-run` (print the request body without sending it; values of secret keys are masked), `--no-validate` (send keys the schema does not list and let the Hub decide).
-- `scion hub settings` is not available in agent mode.
+- `scion hub project-defaults`: View and change the Hub's defaults for new projects (for example `default_scratchpad`) over `/api/v1/admin/project-defaults`: `get [KEY]`, `set KEY VALUE ...`, `unset KEY ...`. Unknown keys are refused, since the Hub would ignore them. Needs a Hub admin login, or a hub-boundary access token with `hub_project_defaults:read` or `hub_project_defaults:update`.
+- `scion hub experiments`: View and override the Hub's [experiments](/scion/reference/experiments/) over `/api/v1/admin/experiments`. Needs a Hub admin login, or a hub-boundary access token with `hub_experiments:update` (also needed to list them).
+    - `list` (alias `ls`): Show each experiment's stage, default, override and whether it is on, with the settings revision.
+    - `enable NAME ...` / `disable NAME ...`: Override experiments on or off hub-wide.
+    - `reset NAME ...`: Remove overrides, returning experiments to their defaults. `--all` removes every override, including those of experiments the Hub no longer knows (asks for confirmation; `--yes` answers it); when the stored overrides are unreadable it also needs `--confirm-malformed`.
+    - `--revision N` on `enable`, `disable` and `reset` pins the expected settings revision (default: the revision just read).
+- None of `scion hub settings`, `scion hub project-defaults` or `scion hub experiments` is available in agent mode.
 
 ### `scion service-accounts`
 
