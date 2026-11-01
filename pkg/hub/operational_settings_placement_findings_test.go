@@ -42,7 +42,11 @@ func TestApplySnapshotRecordsPlacementFindings(t *testing.T) {
 	ctx := context.Background()
 	fake := newFakeHubSettingStore()
 	ops := NewOperationalSettings(fake, emptyKoanf(), emptyKoanf())
+	// The production shape: the server holds its operational settings, so
+	// ApplySnapshot also takes its image_registry feed, which activates the
+	// overlay as on a real co-located Hub.
 	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	srv.SetOperationalSettings(ops)
 	apply := func(runtimes string) []string {
 		t.Helper()
 		_, err := fake.UpsertHubSetting(ctx, "runtimes", json.RawMessage(runtimes), "test", -1, "managed")
