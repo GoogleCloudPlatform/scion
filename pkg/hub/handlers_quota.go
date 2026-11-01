@@ -729,6 +729,12 @@ func (s *Server) getUsageSummary(w http.ResponseWriter, r *http.Request) {
 		var listErr error
 		if def.Name == store.LimitMaxAgentsPerBroker {
 			count, listErr = s.countBrokerScopedActiveReservations(ctx, def.ID)
+		} else if def.Name == store.LimitMaxAgentsPerProject {
+			// Project reservations are stored at store.QuotaScopeProject,
+			// one scope per project, never at store.QuotaScopeSystem: sum
+			// every project's with one aggregate query, never one per
+			// project (ptone/scion#6033).
+			count, listErr = s.countProjectScopedActiveReservations(ctx, def.ID)
 		} else {
 			var reservations []*store.UsageReservation
 			reservations, listErr = s.store.ListActiveReservations(ctx, def.ID, store.QuotaScopeSystem, "")
@@ -771,6 +777,10 @@ func (s *Server) getUsageByLimit(w http.ResponseWriter, r *http.Request, limitID
 	var reservations, unlisted []*store.UsageReservation
 	if def.Name == store.LimitMaxAgentsPerBroker {
 		reservations, unlisted, err = s.brokerScopedActiveReservations(ctx, def.ID)
+	} else if def.Name == store.LimitMaxAgentsPerProject {
+		// Every project's reservations, as getUsageSummary counts them
+		// (ptone/scion#6033).
+		reservations, err = s.store.ListActiveReservationsByScopeType(ctx, def.ID, store.QuotaScopeProject)
 	} else {
 		reservations, err = s.store.ListActiveReservations(ctx, limitID, store.QuotaScopeSystem, "")
 	}
@@ -905,6 +915,22 @@ func (s *Server) countBrokerScopedActiveReservations(ctx context.Context, limitD
 	total := 0
 	for _, broker := range brokers.Items {
 		total += int(counts[broker.ID])
+	}
+	return total, nil
+}
+
+// countProjectScopedActiveReservations returns the number of active
+// project-scoped reservations for limitDefinitionID summed across every
+// project, in one aggregate query. Like getUsageByLimit, it counts every
+// project's rows.
+func (s *Server) countProjectScopedActiveReservations(ctx context.Context, limitDefinitionID string) (int, error) {
+	counts, err := s.store.CountActiveReservationsByScope(ctx, limitDefinitionID, store.QuotaScopeProject)
+	if err != nil {
+		return 0, fmt.Errorf("count active project-scoped reservations: %w", err)
+	}
+	total := 0
+	for _, n := range counts {
+		total += int(n)
 	}
 	return total, nil
 }

@@ -57,7 +57,16 @@ func TestCreateAgent_ProjectLimitRefusal_ReleasesBrokerReservation(t *testing.T)
 	require.Equal(t, http.StatusTooManyRequests, rec2.Code, rec2.Body.String())
 	var errResp ErrorResponse
 	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &errResp))
-	require.Equal(t, quotaExceededMessage(store.LimitMaxAgentsPerProject), errResp.Error.Message,
+	wantMessage, _ := quotaRefusal(store.LimitMaxAgentsPerProject, &QuotaExceededError{
+		Limit:     store.LimitMaxAgentsPerProject,
+		ScopeType: store.QuotaScopeProject,
+		ScopeID:   project.ID,
+		Count:     1,
+		Max:       1,
+	})
+	require.Equal(t, projectRefusalMessage(project.ID, 1, 1), wantMessage,
+		"quotaRefusal builds the documented project-limit message")
+	require.Equal(t, wantMessage, errResp.Error.Message,
 		"the refusal must come from the project limit, after the broker reservation succeeded")
 
 	require.Equal(t, []string{first.ID},
