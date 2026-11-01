@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -139,4 +140,20 @@ func TestKeyringReleaseSeam_RelaxedKeepsOtherChecks(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The exported test hook refuses to relax the release check outside a test
+// binary. The guard's own branch is driven here through the injected
+// predicate: inside any test binary testing.Testing() is true, so only a
+// non-test binary could exercise the real predicate's false value.
+func TestRelaxKeyringReleaseForTest_RefusesOutsideTests(t *testing.T) {
+	assert.PanicsWithValue(t, "hub.RelaxKeyringReleaseForTest called outside a test binary", func() {
+		relaxKeyringRelease(func() bool { return false })
+	})
+	assert.Equal(t, reflect.ValueOf(releaseKeyringCheck).Pointer(), reflect.ValueOf(keyringReleaseCheck).Pointer(), "a refused call leaves the production check in place")
+
+	restore := RelaxKeyringReleaseForTest()
+	require.NoError(t, keyringReleaseCheck(seamNoLegacyKeyring(t), nil), "inside a test binary the hook relaxes the check")
+	restore()
+	assert.Equal(t, reflect.ValueOf(releaseKeyringCheck).Pointer(), reflect.ValueOf(keyringReleaseCheck).Pointer(), "restore reinstates the production check")
 }
