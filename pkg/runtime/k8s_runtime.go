@@ -4701,10 +4701,11 @@ func sharedDirClaimSubPath(r *SharedDirRealization, sharedDirName string) (claim
 	if r.ProjectID == "" || !shareddirs.ValidProjectID(project) || project != r.ProjectID {
 		return "", "", fmt.Errorf("shared dir %q: resolved subPath %q is not under this project's tree", sharedDirName, subPath)
 	}
-	// With the subpath root known (the shared dirs are on the layout's own
-	// share), the subPath must also be in this project's tree below it
-	// (checkNFSMountScope). On the transitional split the realization
-	// carries no subpath root, and the shape check above is the check.
+	// With the subpath root known (the shared dirs are on the Layout's own
+	// nfs share), the subPath must also be in this project's tree below it
+	// (checkNFSMountScope). Shared dirs not on the Layout's own nfs share
+	// (the transitional split, gke-shared-volume, cloudrun-volume) carry no
+	// subpath root, and the shape check above is the check.
 	if r.SubPathRoot != "" {
 		if err := checkNFSMountScope(filepath.ToSlash(subPath), r.SubPathRoot, r.ProjectID); err != nil {
 			return "", "", fmt.Errorf("shared dir %q: %w", sharedDirName, err)

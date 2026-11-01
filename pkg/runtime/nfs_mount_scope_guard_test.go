@@ -107,7 +107,8 @@ func TestNewNFSBindScope(t *testing.T) {
 		// Not the project workspace itself.
 		{WorkspaceBackendName: "nfs", ProjectID: scopeProjectID, Workspace: ws + "/sub"},
 		{WorkspaceBackendName: "nfs", ProjectID: scopeProjectID, Workspace: "/mnt/scion/share1/" + scopeRel("agents", scopeAgent, "workspace")},
-		{WorkspaceBackendName: "nfs", ProjectID: scopeProjectID, Workspace: scopeRel("workspace")},
+		// Relative, but with the right suffix: refused as not absolute.
+		{WorkspaceBackendName: "nfs", ProjectID: scopeProjectID, Workspace: "rel/" + scopeRel("workspace")},
 	} {
 		if _, err := newNFSBindScope(cfg); !errors.Is(err, errNFSMountScope) {
 			t.Errorf("newNFSBindScope(%+v) = %v, want refusal", cfg, err)
