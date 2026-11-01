@@ -53,20 +53,33 @@ type settingsFieldError struct {
 	Message string `json:"message"`
 }
 
+// settingsValidationFallbackMessage is the top-level message of a
+// validation error that names no entry and was given no message.
+const settingsValidationFallbackMessage = "settings validation failed"
+
 // writeSettingsValidation writes a 422 validation_error for entries. The
 // top-level message is message when set, otherwise the first entry's
 // "<field>: <message>". extra adds members to details (for example keys).
-// entries must not be empty.
+// Every caller passes at least one entry; an empty list still answers 422,
+// with an empty details.errors, no details.field and the fallback message
+// when none is given, rather than failing.
 func writeSettingsValidation(w http.ResponseWriter, message string, entries []settingsFieldError, extra map[string]interface{}) {
+	if entries == nil {
+		entries = []settingsFieldError{}
+	}
 	if message == "" {
-		message = entries[0].Message
-		if entries[0].Field != "" {
+		switch {
+		case len(entries) == 0:
+			message = settingsValidationFallbackMessage
+		case entries[0].Field != "":
 			message = entries[0].Field + ": " + entries[0].Message
+		default:
+			message = entries[0].Message
 		}
 	}
-	details := map[string]interface{}{
-		"field":  entries[0].Field,
-		"errors": entries,
+	details := map[string]interface{}{"errors": entries}
+	if len(entries) > 0 {
+		details["field"] = entries[0].Field
 	}
 	for k, v := range extra {
 		details[k] = v
@@ -113,7 +126,11 @@ func settingsKeyField(key string) string {
 // writeSettingsValidationErrors writes a 422 for config validation errors
 // whose Path is already a koanf path (the config package validators).
 func writeSettingsValidationErrors(w http.ResponseWriter, errs []config.ValidationError) {
-	writeSettingsValidation(w, errs[0].Error(), configValidationEntries(errs, ""), nil)
+	message := ""
+	if len(errs) > 0 {
+		message = errs[0].Error()
+	}
+	writeSettingsValidation(w, message, configValidationEntries(errs, ""), nil)
 }
 
 // configValidationEntries converts config validation errors whose Path is
@@ -252,14 +269,28 @@ func sectionKoanfRoot(sec *opsettings.Section) string {
 	return root
 }
 
-// pointerSegments splits a JSON pointer or dotted path, decoding pointer
-// escapes.
+// pointerSegments splits a location into its segments. A JSON pointer
+// ("/a/b", or the relative "a/b" some validators report) splits on "/" only,
+// each segment unescaped ("~1" is "/", "~0" is "~"), so a key that contains
+// a dot stays one segment. A path without "/" is a dotted path and splits on
+// "." only. Empty segments are dropped.
 func pointerSegments(p string) []string {
 	var out []string
-	for _, s := range strings.FieldsFunc(p, func(r rune) bool { return r == '/' || r == '.' }) {
-		s = strings.ReplaceAll(s, "~1", "/")
-		s = strings.ReplaceAll(s, "~0", "~")
-		out = append(out, s)
+	if strings.Contains(p, "/") {
+		for _, s := range strings.Split(p, "/") {
+			if s == "" {
+				continue
+			}
+			s = strings.ReplaceAll(s, "~1", "/")
+			s = strings.ReplaceAll(s, "~0", "~")
+			out = append(out, s)
+		}
+		return out
+	}
+	for _, s := range strings.Split(p, ".") {
+		if s != "" {
+			out = append(out, s)
+		}
 	}
 	return out
 }

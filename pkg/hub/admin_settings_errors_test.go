@@ -207,3 +207,96 @@ func TestSettingsRevisionConflictEnvelope(t *testing.T) {
 		t.Error("extra details member applied missing")
 	}
 }
+
+// An empty entry list (no caller passes one today) still answers 422 with an
+// empty details.errors and the fallback message, and never panics.
+func TestSettingsValidationEmptyEntries(t *testing.T) {
+	for name, entries := range map[string][]settingsFieldError{"nil": nil, "empty": {}} {
+		t.Run(name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			writeSettingsValidation(rr, "", entries, nil)
+			if rr.Code != 422 {
+				t.Fatalf("status = %d, want 422", rr.Code)
+			}
+			var env struct {
+				Error struct {
+					Code    string                     `json:"code"`
+					Message string                     `json:"message"`
+					Details map[string]json.RawMessage `json:"details"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(rr.Body.Bytes(), &env); err != nil {
+				t.Fatalf("decode: %v: %s", err, rr.Body.String())
+			}
+			if env.Error.Code != ErrCodeValidationError || env.Error.Message != settingsValidationFallbackMessage {
+				t.Errorf("code %q message %q, want %q %q", env.Error.Code, env.Error.Message, ErrCodeValidationError, settingsValidationFallbackMessage)
+			}
+			if got := string(env.Error.Details["errors"]); got != "[]" {
+				t.Errorf("details.errors = %s, want []", got)
+			}
+			if _, ok := env.Error.Details["field"]; ok {
+				t.Errorf("details.field present for an empty entry list: %s", rr.Body.String())
+			}
+		})
+	}
+	// A caller message is kept.
+	rr := httptest.NewRecorder()
+	writeSettingsValidation(rr, "explicit", nil, nil)
+	if m := settingsErrorFields(t, rr.Body.Bytes())["message"]; m != "explicit" {
+		t.Errorf("message = %v, want explicit", m)
+	}
+	// writeSettingsValidationErrors with no errors does not panic either.
+	rr = httptest.NewRecorder()
+	writeSettingsValidationErrors(rr, nil)
+	if rr.Code != 422 {
+		t.Errorf("writeSettingsValidationErrors(nil) status = %d, want 422", rr.Code)
+	}
+}
+
+func TestPointerSegments(t *testing.T) {
+	tests := []struct {
+		in   string
+		want []string
+	}{
+		// JSON pointers split on "/" only, with RFC 6901 unescaping.
+		{"/a/b", []string{"a", "b"}},
+		{"/a~1b/c", []string{"a/b", "c"}},
+		{"/a~0b", []string{"a~b"}},
+		{"/~01", []string{"~1"}},                                       // "~1" is decoded before "~0"
+		{"/my.profile/resources", []string{"my.profile", "resources"}}, // a dotted key stays one segment
+		{"cloud/tls", []string{"cloud", "tls"}},                        // relative pointer (telemetry TLS validator)
+		{"/runtimes//x/", []string{"runtimes", "x"}},                   // empty segments dropped
+		// Dotted paths split on "." only.
+		{"cloud.tls", []string{"cloud", "tls"}},
+		{"start_claim_lease_ttl", []string{"start_claim_lease_ttl"}},
+		{"a.b.c", []string{"a", "b", "c"}},
+		// Nothing to split.
+		{"", nil},
+		{"/", nil},
+	}
+	for _, tt := range tests {
+		got := pointerSegments(tt.in)
+		if len(got) != len(tt.want) {
+			t.Errorf("pointerSegments(%q) = %q, want %q", tt.in, got, tt.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tt.want[i] {
+				t.Errorf("pointerSegments(%q) = %q, want %q", tt.in, got, tt.want)
+				break
+			}
+		}
+	}
+}
+
+// A dotted key inside a pointer maps as one key below the section.
+func TestSettingsKoanfFieldDottedKeyInPointer(t *testing.T) {
+	if got, want := settingsKoanfField("profiles", "/gpu.large/resources"), "profiles.gpu.large.resources"; got != want {
+		t.Errorf("settingsKoanfField = %q, want %q", got, want)
+	}
+	// In a mapped section the first segment is looked up whole: a dotted
+	// pointer segment is not split into a mapped key plus a rest.
+	if got, want := settingsKoanfField("access", "/admin_emails.extra"), "access.admin_emails.extra"; got != want {
+		t.Errorf("settingsKoanfField(access, /admin_emails.extra) = %q, want %q", got, want)
+	}
+}
