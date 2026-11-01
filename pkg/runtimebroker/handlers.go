@@ -168,6 +168,13 @@ func (s *Server) healthInfo(_ context.Context, conns []*HubConnection) *HealthRe
 		status = degradeHealthStatus(status)
 	}
 
+	// Profiles whose runtime is not available on this broker
+	// (ptone/scion#7010): reported by name, never degrading the status,
+	// since the broker serves its other profiles normally.
+	for name, value := range s.profileRuntimeHealthChecks() {
+		checks[name] = value
+	}
+
 	return &HealthResponse{
 		Status:  status,
 		Version: s.version,
@@ -7997,6 +8004,10 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 	// carries context/namespace), so two distinct same-type instances of such
 	// a runtime would otherwise collapse to one identity and incorrectly
 	// share the default manager.
+	// The profile's runtime resolved: clear any unavailable self-health
+	// check the discovery pass recorded for it.
+	s.setProfileRuntimeUnavailable(selProfile, false)
+
 	if !scionrt.HasPerProfileInstances(defRT) && auxiliaryRuntimeIdentity(resolved) == auxiliaryRuntimeIdentity(defRT) {
 		return fromProfile(defaultResolution(defMgr, defRT, defRec, selHow)), nil
 	}
