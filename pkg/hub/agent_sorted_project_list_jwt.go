@@ -149,7 +149,7 @@ func (s *Server) listProjectAgentsSortedAgentJWT(w http.ResponseWriter, r *http.
 	agents := make([]AgentWithCapabilities, len(plainAgents))
 	for i := range plainAgents {
 		item := plainAgents[i]
-		item.AppliedConfig, item.PendingConfig = redactAgentConfigsForResponse(item.AppliedConfig, item.PendingConfig, s.envViewAllowed(ctx, identity, &item, caps[i]))
+		item.AppliedConfig, item.PendingConfig = s.redactAgentConfigsForResponse(item.AppliedConfig, item.PendingConfig, s.envViewAllowed(ctx, identity, &item, caps[i]))
 		agents[i] = AgentWithCapabilities{Agent: item, Cap: caps[i]}
 	}
 

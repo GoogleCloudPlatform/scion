@@ -155,12 +155,54 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 		status = degradeHealthStatus(status)
 	}
 
+	if s.addHubTransportRefusalChecks(checks) {
+		status = degradeHealthStatus(status)
+	}
+
 	return &HealthResponse{
 		Status:  status,
 		Version: s.version,
 		Uptime:  time.Since(s.startTime).Round(time.Second).String(),
 		Checks:  checks,
 	}
+}
+
+// Health checks reported while a hub refuses this broker's command paths
+// under its transport policy.
+const (
+	healthCheckControlChannel = "control_channel"
+	healthCheckConduit        = "conduit"
+)
+
+// addHubTransportRefusalChecks sets control_channel and conduit to
+// unhealthy when the last dial of a hub connection's control channel or
+// conduit was refused by the hub's transport policy (the hub requires TLS
+// or a proxy it trusts), and reports whether it set either. The heartbeat
+// carries them, so the hub's health summary shows a broker that is online
+// but cannot receive commands.
+func (s *Server) addHubTransportRefusalChecks(checks map[string]string) bool {
+	s.hubMu.RLock()
+	conns := make([]*HubConnection, 0, len(s.hubConnections))
+	for _, hc := range s.hubConnections {
+		conns = append(conns, hc)
+	}
+	s.hubMu.RUnlock()
+
+	set := false
+	for _, hc := range conns {
+		hc.mu.RLock()
+		cc, cd := hc.ControlChannel, hc.conduitDialer
+		hc.mu.RUnlock()
+		if cc != nil && cc.TransportRefused() {
+			checks[healthCheckControlChannel] = api.BrokerHealthUnhealthy
+			set = true
+		}
+		if cd != nil && cd.TransportRefused() {
+			checks[healthCheckConduit] = api.BrokerHealthUnhealthy
+			set = true
+		}
+	}
+	return set
 }
 
 // heartbeatHealthReport returns the broker's health for the heartbeat,
@@ -350,6 +392,9 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			// An explicit count limit of 0 is "no limit"
 			// (ptone/scion#5605).
 			UnlimitedCountLimits: true,
+			// The resources sub-field entries of cleared_fields are
+			// applied at start (ptone/scion#5676).
+			ClearedResourceSubfields: true,
 			// Hub telemetry defaults and policy are separate tiers
 			// (ptone/scion#4218).
 			TemplateTiers: true,
@@ -844,6 +889,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
+	}
+	// The signed-URL workspace download asks the Hub the create came from.
+	if req.WorkspaceDownloadMode != "" {
+		req.workspaceHubConn = s.resolveHubNameForLaunch(r)
 	}
 
 	ctx, span := tracer.Start(ctx, "broker.agent.create")
@@ -1766,6 +1815,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				writeWorkspaceStorageUnconfigured(w)
 				return
 			}
+			if errors.Is(dlErr, errWorkspaceDownloadModeUnsupported) {
+				markAttemptFailed(http.StatusUnprocessableEntity, attemptMsg)
+				writeWorkspaceDownloadModeUnsupported(w)
+				return
+			}
 			markAttemptFailed(http.StatusInternalServerError, attemptMsg)
 			RuntimeError(w, httpMessage)
 			return
@@ -1910,6 +1964,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			span.SetStatus(codes.Error, spanErrorText(err))
+			if errors.Is(err, agent.ErrProjectPathNotInitialized) {
+				markAttemptFailed(http.StatusConflict, err.Error())
+				writeError(w, http.StatusConflict, ErrCodeProjectPathNotInitialized, err.Error(), nil)
+				return
+			}
 			if config.IsAgentStateConflict(err) {
 				markAttemptFailed(http.StatusConflict, "failed to provision agent")
 				writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to provision agent: "+err.Error(), nil)
@@ -2023,6 +2082,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			markAttemptFailed(http.StatusNotFound, "failed to create agent")
 		case isSkillErr:
 			markAttemptFailed(skillResolutionHTTPStatus(skillErr.Code), "failed to create agent")
+		case errors.Is(err, agent.ErrProjectPathNotInitialized):
+			markAttemptFailed(http.StatusConflict, err.Error())
 		case config.IsAgentStateConflict(err):
 			markAttemptFailed(http.StatusConflict, "failed to create agent")
 		case errors.Is(err, agent.ErrProjectShareNotMounted):
@@ -2119,6 +2180,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, ErrCodeNotFound, notFoundMessage(opCreateAgent, err, opts.TemplateName), nil)
 		case isSkillErr:
 			SkillResolutionFailed(w, skillErr, createSkill.ref)
+		case errors.Is(err, agent.ErrProjectPathNotInitialized):
+			writeError(w, http.StatusConflict, ErrCodeProjectPathNotInitialized, err.Error(), nil)
 		case config.IsAgentStateConflict(err):
 			writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to create agent: "+err.Error(), nil)
 		case errors.Is(err, agent.ErrProjectShareNotMounted):
@@ -2239,6 +2302,12 @@ func writeWorkspaceStorageUnconfigured(w http.ResponseWriter) {
 	writeError(w, http.StatusUnprocessableEntity, ErrCodeWorkspaceStorageUnconfigured, workspaceStorageUnconfiguredMessage, nil)
 }
 
+// writeWorkspaceDownloadModeUnsupported answers a create whose workspace
+// download mode this broker does not know.
+func writeWorkspaceDownloadModeUnsupported(w http.ResponseWriter) {
+	writeError(w, http.StatusUnprocessableEntity, ErrCodeWorkspaceDownloadModeUnsupported, workspaceDownloadModeUnsupportedMessage, nil)
+}
+
 // downloadWorkspaceFromGCS performs the non-git GCS workspace bootstrap when
 // req.WorkspaceStoragePath is set. It was factored out of createAgent's
 // inline admission step so the async-launch path (runLaunch) performs the
@@ -2269,6 +2338,15 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 		return opts, "", "", nil
 	}
 
+	// The download mode is chosen before anything is created: a mode this
+	// broker does not know is refused, never answered with the bucket
+	// download (errWorkspaceDownloadModeUnsupported, 422).
+	signed, modeErr := selectWorkspaceDownloadMode(req)
+	if modeErr != nil {
+		s.logWorkspaceBootstrapFailure(req, opSelectWorkspaceDownload, modeErr)
+		return opts, "workspace download mode not supported", workspaceDownloadModeUnsupportedMessage, modeErr
+	}
+
 	// Validate (inside resolveGCSWorkspaceDir) before anything below
 	// creates or writes under the directory.
 	workspaceDir, attemptMsg, httpMessage, err := s.resolveGCSWorkspaceDir(req)
@@ -2285,8 +2363,9 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 	// Resolve the bucket before creating anything: a broker with no bucket
 	// for the upload refuses the create with errWorkspaceStorageUnconfigured
 	// (422) instead of leaving an empty workspace directory behind.
+	// The signed-URL download needs no bucket: the Hub lists and signs.
 	bucket := s.workspaceStorageBucket(req)
-	if bucket == "" {
+	if bucket == "" && !signed {
 		return opts, "storage bucket not configured", workspaceStorageUnconfiguredMessage,
 			errWorkspaceStorageUnconfigured
 	}
@@ -2302,12 +2381,27 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 	}
 	defer unlockWorkspace()
 
+	// The signed download stages beside the workspace. A stage left by a
+	// crashed attempt on a host-local workspace is removed right after the
+	// lock is taken, before the skip check; a shared Layout leaf's stages are
+	// removed inside its provisioning locks (applySharedSignedBootstrap).
+	_, sharedRel, sharedWS, _ := s.sharedBootstrapWorkspace(req)
+	if signed && !sharedWS {
+		if recErr := recoverLocalBootstrapStages(filepath.Dir(workspaceDir), filepath.Base(workspaceDir)); recErr != nil {
+			attemptMsg, httpMessage, err = s.workspaceBootstrapFailed(req, opDownloadWorkspace, recErr)
+			return opts, attemptMsg, httpMessage, err
+		}
+	}
+
 	// A project-level workspace that already existed when the create was
 	// admitted is in use (by earlier agents of the project): it is never
 	// overwritten from a laptop's upload. The agent uses it as it is and
 	// the create answers with bootstrapSkippedWarning (ptone/scion#5815). Nothing is downloaded, recorded or
 	// re-marked.
-	if bootstrapSkipsExistingWorkspace(req) {
+	// The signed mode decides its skip under this lock instead, after
+	// recovery (signedBootstrapLocal): a project workspace that holds only
+	// its root identity entry counts as absent there.
+	if !signed && bootstrapSkipsExistingWorkspace(req) {
 		s.agentLifecycleLog.Info("Workspace bootstrap skipped: the project workspace already exists on this broker",
 			"agent_id", req.ID, "project_id", req.ProjectID)
 		opts.Workspace = workspaceDir
@@ -2320,16 +2414,22 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 	// sentinel is written after it. No broker-local record or workspace
 	// marker is written: the project's identity lives in its configuration
 	// at the project root.
-	if _, rel, shared, _ := s.sharedBootstrapWorkspace(req); shared {
-		skipped, applyErr := s.applySharedBootstrap(ctx, workspaceDir, rel, func(lockCtx context.Context) error {
-			if s.config.Debug {
-				s.agentLifecycleLog.Debug("Downloading workspace from GCS into the shared workspace", "agent_id", req.ID,
-					"bucket", bucket, "storagePath", req.WorkspaceStoragePath+"/files", "projectSlug", req.ProjectSlug)
-			}
-			return s.workspaceDownloader()(lockCtx, bucket, req.WorkspaceStoragePath+"/files", workspaceDir)
-		})
+	if sharedWS {
+		var skipped bool
+		var applyErr error
+		if signed {
+			skipped, applyErr = s.applySharedSignedBootstrap(ctx, req, sharedRel)
+		} else {
+			skipped, applyErr = s.applySharedBootstrap(ctx, workspaceDir, sharedRel, func(lockCtx context.Context) error {
+				if s.config.Debug {
+					s.agentLifecycleLog.Debug("Downloading workspace from GCS into the shared workspace", "agent_id", req.ID,
+						"bucket", bucket, "storagePath", req.WorkspaceStoragePath+"/files", "projectSlug", req.ProjectSlug)
+				}
+				return s.workspaceDownloader()(lockCtx, bucket, req.WorkspaceStoragePath+"/files", workspaceDir)
+			})
+		}
 		if applyErr != nil {
-			attemptMsg, httpMessage, err = s.workspaceBootstrapFailed(req, opDownloadWorkspace, applyErr)
+			attemptMsg, httpMessage, err = s.workspaceBootstrapFailed(req, signedBootstrapOp(applyErr), applyErr)
 			return opts, attemptMsg, httpMessage, err
 		}
 		if skipped {
@@ -2342,6 +2442,32 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 		}
 		opts.Workspace = workspaceDir
 		return opts, "", "", nil
+	}
+
+	if signed {
+		skipped, populated, signedErr := s.signedBootstrapLocal(ctx, req, workspaceDir)
+		if signedErr != nil {
+			attemptMsg, httpMessage, err = s.workspaceBootstrapFailed(req, signedBootstrapOp(signedErr), signedErr)
+			return opts, attemptMsg, httpMessage, err
+		}
+		if skipped {
+			// The project workspace came into use after admission: it is
+			// never overwritten, as for one that existed at admission.
+			s.agentLifecycleLog.Info("Workspace bootstrap skipped: the project workspace came into use meanwhile",
+				"agent_id", req.ID, "project_id", req.ProjectID)
+			if out, ok := ctx.Value(bootstrapOutcomeKey{}).(*bootstrapOutcome); ok {
+				out.skipped = true
+			}
+			opts.Workspace = workspaceDir
+			return opts, "", "", nil
+		}
+		if populated {
+			// A marker-only project directory (left by an earlier failed
+			// attempt) counts as absent in the signed mode, so this
+			// bootstrap created the broker copy: record it.
+			req.workspaceAbsentAtAdmission = true
+		}
+		return s.finishWorkspaceBootstrap(req, opts, workspaceDir), "", "", nil
 	}
 
 	if mkErr := os.MkdirAll(workspaceDir, 0755); mkErr != nil {
@@ -2362,7 +2488,13 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 		attemptMsg, httpMessage, err = s.workspaceBootstrapFailed(req, opDownloadWorkspace, syncErr)
 		return opts, attemptMsg, httpMessage, err
 	}
+	return s.finishWorkspaceBootstrap(req, opts, workspaceDir), "", "", nil
+}
 
+// finishWorkspaceBootstrap records a host-local workspace bootstrap that
+// completed: the broker workspace record for a project directory created by
+// it, and the workspace marker. It returns opts with the workspace set.
+func (s *Server) finishWorkspaceBootstrap(req CreateAgentRequest, opts api.StartOptions, workspaceDir string) api.StartOptions {
 	if req.ProjectSlug != "" {
 		if recErr := recordBrokerWorkspaceCopy(req.ProjectSlug, req.ProjectID, !req.workspaceAbsentAtAdmission); recErr != nil {
 			s.agentLifecycleLog.Warn("Failed to write broker workspace record",
@@ -2382,7 +2514,7 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 			s.agentLifecycleLog.Warn("Failed to write workspace marker", "agent_id", req.ID, "project_id", req.ProjectID, "error", writeErr)
 		}
 	}
-	return opts, "", "", nil
+	return opts
 }
 
 // bootstrapOutcome records, for the synchronous create path, that the
@@ -3893,6 +4025,17 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		s.writeStartContextError(w, sce, "start agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
 		return
 	}
+	// An NFS workspace share bound into a local container must show
+	// nosuid,nodev (a fresh mount table read; see checkNFSMountFlagsForStart).
+	if err := s.checkNFSMountFlagsForStart(ctx, id, opts.ProjectPath, resolvedRuntimeType); err != nil {
+		if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
+			return
+		}
+		span.SetStatus(codes.Error, "NFS workspace storage is not available: "+err.Error())
+		writeError(w, http.StatusServiceUnavailable, "nfs_unavailable",
+			"NFS workspace storage is not available: "+err.Error(), nil)
+		return
+	}
 
 	// Harness-config policy gate: runs on create, start and restart against
 	// the single hydrated harness-config launch will use (opts, as built by
@@ -4031,6 +4174,8 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			writeError(w, http.StatusConflict, ErrCodeConflict, scionrt.ErrRunConflict.Error(), details)
 		case errors.As(err, &skillErr):
 			skillResolutionFailedWithDetails(w, skillErr, startSkill.ref, details)
+		case errors.Is(err, agent.ErrProjectPathNotInitialized):
+			writeError(w, http.StatusConflict, ErrCodeProjectPathNotInitialized, err.Error(), details)
 		case config.IsAgentStateConflict(err):
 			writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to start agent: "+err.Error(), details)
 		case errors.Is(err, agent.ErrProjectShareNotMounted):
@@ -5116,6 +5261,14 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		s.writeStartContextError(w, sce, "restart agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
 		return
 	}
+	// As on start: checked before the stop below, so a refused restart
+	// leaves the running agent alone.
+	if err := s.checkNFSMountFlagsForStart(ctx, id, opts.ProjectPath, resolvedRuntimeType); err != nil {
+		trace.SpanFromContext(ctx).SetStatus(codes.Error, "NFS workspace storage is not available: "+err.Error())
+		writeError(w, http.StatusServiceUnavailable, "nfs_unavailable",
+			"NFS workspace storage is not available: "+err.Error(), nil)
+		return
+	}
 
 	// Harness-config policy gate: runs on create, start and restart against
 	// the single hydrated harness-config launch will use (opts, as built by
@@ -5230,6 +5383,10 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		var skillErr *agent.SkillResolutionError
 		if errors.As(err, &skillErr) {
 			skillResolutionFailedWithDetails(w, skillErr, restartSkill.ref, details)
+			return
+		}
+		if errors.Is(err, agent.ErrProjectPathNotInitialized) {
+			writeError(w, http.StatusConflict, ErrCodeProjectPathNotInitialized, err.Error(), details)
 			return
 		}
 		if config.IsAgentStateConflict(err) {
@@ -9195,9 +9352,10 @@ func isLocalhostEndpoint(endpoint string) bool {
 
 // checkNFSForDispatch is the NFS pre-flight for an agent create. It
 // applies only when NFS is configured with nfs.auto_mount on (otherwise
-// mounts are managed externally and the broker never gates on them) and the
-// project's effective settings select the nfs workspace backend (projects
-// on any other backend are never affected by NFS state).
+// mounts are managed externally and the broker does not gate on them, see
+// checkNFSMountFlagsForDispatch for the one exception) and the project's
+// effective settings select the nfs workspace backend (projects on any
+// other backend are never affected by NFS state).
 //
 // It is decided by the dispatch's resolved runtime, which is checked before
 // anything is mounted:
@@ -9214,8 +9372,11 @@ func isLocalhostEndpoint(endpoint string) bool {
 //     local disk under the mount point.
 func (s *Server) checkNFSForDispatch(ctx context.Context, name, projectPath, projectSlug, profile string) error {
 	r := s.nfsMountReconciler
-	if r == nil || !r.AutoMount() {
+	if r == nil {
 		return nil
+	}
+	if !r.AutoMount() {
+		return s.checkNFSMountFlagsForDispatch(ctx, name, projectPath, projectSlug, profile)
 	}
 	nfsCfg := s.config.NFSConfig
 	if nfsCfg == nil || len(nfsCfg.Shares) == 0 {
@@ -9280,6 +9441,95 @@ func (s *Server) checkNFSForDispatch(ctx context.Context, name, projectPath, pro
 			"agent", name, "runtime", runtimeType, "share", shareID, "error", err)
 		// auto_mount is on here (checked above): the mount failed.
 		return errors.New(scionrt.ProjectShareMountFailedText(scionrt.ProjectShareMountPathField))
+	}
+	// nosuid,nodev confirmed from a fresh mount table read, whatever the
+	// reconciler's mode (a verify-only reconciler does not require them).
+	// The detail (paths, sources) goes to the broker log only.
+	if err := r.CheckShareMountFlags(ctx, shareID); err != nil {
+		s.agentLifecycleLog.Error("NFS share nosuid,nodev not confirmed; refusing dispatch",
+			"agent", name, "runtime", runtimeType, "share", shareID, "error", err)
+		return mountFlagsRefusal(err)
+	}
+	return nil
+}
+
+// pathFreeRefusal is a refusal whose text goes into a response body: Error
+// returns only text (it names configuration fields, never a path or an NFS
+// source), while Unwrap keeps the detailed cause for errors.Is and the log.
+type pathFreeRefusal struct {
+	text  string
+	cause error
+}
+
+func (e *pathFreeRefusal) Error() string { return e.text }
+func (e *pathFreeRefusal) Unwrap() error { return e.cause }
+
+// mountFlagsRefusal is the refusal of a dispatch, start or restart whose
+// workspace share's nosuid,nodev could not be confirmed (cause is
+// CheckShareMountFlags' error, which names paths and sources).
+func mountFlagsRefusal(cause error) error {
+	return &pathFreeRefusal{text: scionrt.ProjectShareMountFlagsText(scionrt.ProjectShareMountPathField), cause: cause}
+}
+
+// checkNFSMountFlagsForStart is the NFS check of a start or restart of an
+// existing agent. Starts are otherwise not gated on NFS state, but a start
+// on a local-container runtime of a project on the nfs workspace backend
+// binds the workspace share into a new container, so the share must show
+// nosuid and nodev (CheckShareMountFlags: a fresh mount table read, any
+// reconciler mode, auto_mount on or off). Kubernetes and Cloud Run starts
+// are not checked: the platform mounts the export.
+func (s *Server) checkNFSMountFlagsForStart(ctx context.Context, name, projectPath, runtimeType string) error {
+	r := s.nfsMountReconciler
+	nfsCfg := s.config.NFSConfig
+	if r == nil || nfsCfg == nil || len(nfsCfg.Shares) == 0 || NFSWarnOnlyRuntime(runtimeType) {
+		return nil
+	}
+	if !dispatchUsesNFSWorkspace(resolveDispatchProjectDir(projectPath, "")) {
+		return nil
+	}
+	// The nfs workspace backend places workspaces on the first share only.
+	shareID := nfsCfg.Shares[0].ID
+	if err := r.CheckShareMountFlags(ctx, shareID); err != nil {
+		s.agentLifecycleLog.Error("NFS share nosuid,nodev not confirmed; refusing start",
+			"agent", name, "runtime", runtimeType, "share", shareID, "error", err)
+		return mountFlagsRefusal(err)
+	}
+	return nil
+}
+
+// checkNFSMountFlagsForDispatch is checkNFSForDispatch with auto_mount off.
+// The broker does not gate on externally managed mounts (a share that is
+// not mounted, or mounted from another source, does not refuse the
+// dispatch), with one exception: a dispatch to a local-container runtime of
+// a project on the nfs workspace backend is refused unless
+// CheckShareMountFlags confirms nosuid and nodev on the workspace share
+// from a fresh mount table read (never from a recorded status). The backend
+// and runtime are decided first, so other dispatches never touch NFS
+// state. It never mounts.
+func (s *Server) checkNFSMountFlagsForDispatch(ctx context.Context, name, projectPath, projectSlug, profile string) error {
+	r := s.nfsMountReconciler
+	nfsCfg := s.config.NFSConfig
+	if r == nil || nfsCfg == nil || len(nfsCfg.Shares) == 0 {
+		return nil
+	}
+	projectDir := resolveDispatchProjectDir(projectPath, projectSlug)
+	if !dispatchUsesNFSWorkspace(projectDir) {
+		return nil
+	}
+	runtimeType := s.resolveManagerForOpts(api.StartOptions{
+		Name:        name,
+		ProjectPath: projectDir,
+		Profile:     profile,
+	}).RuntimeType
+	if NFSWarnOnlyRuntime(runtimeType) {
+		return nil
+	}
+	// The nfs workspace backend places workspaces on the first share only.
+	shareID := nfsCfg.Shares[0].ID
+	if err := r.CheckShareMountFlags(ctx, shareID); err != nil {
+		s.agentLifecycleLog.Error("NFS share nosuid,nodev not confirmed; refusing dispatch",
+			"agent", name, "runtime", runtimeType, "share", shareID, "error", err)
+		return mountFlagsRefusal(err)
 	}
 	return nil
 }

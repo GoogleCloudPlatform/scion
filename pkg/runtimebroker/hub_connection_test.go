@@ -887,7 +887,7 @@ func TestCredentialWatcher_AddConnection(t *testing.T) {
 	}
 
 	// Start with one connection file
-	creds1 := makeTestCreds("hub-one", "broker-1", "http://hub1.example.com")
+	creds1 := makeTestCreds("hub-one", "broker-1", "https://hub1.example.com")
 	data1, _ := json.MarshalIndent(creds1, "", "  ")
 	if err := os.WriteFile(filepath.Join(credDir, "hub-one.json"), data1, 0600); err != nil {
 		t.Fatal(err)
@@ -925,7 +925,7 @@ func TestCredentialWatcher_AddConnection(t *testing.T) {
 	}
 
 	// Add a new credential file
-	creds2 := makeTestCreds("hub-two", "broker-2", "http://hub2.example.com")
+	creds2 := makeTestCreds("hub-two", "broker-2", "https://hub2.example.com")
 	data2, _ := json.MarshalIndent(creds2, "", "  ")
 	if err := os.WriteFile(filepath.Join(credDir, "hub-two.json"), data2, 0600); err != nil {
 		t.Fatal(err)
@@ -959,13 +959,13 @@ func TestCredentialWatcher_RemoveConnection(t *testing.T) {
 	}
 
 	// Start with two connections
-	creds1 := makeTestCreds("hub-one", "broker-1", "http://hub1.example.com")
+	creds1 := makeTestCreds("hub-one", "broker-1", "https://hub1.example.com")
 	data1, _ := json.MarshalIndent(creds1, "", "  ")
 	if err := os.WriteFile(filepath.Join(credDir, "hub-one.json"), data1, 0600); err != nil {
 		t.Fatal(err)
 	}
 
-	creds2 := makeTestCreds("hub-two", "broker-2", "http://hub2.example.com")
+	creds2 := makeTestCreds("hub-two", "broker-2", "https://hub2.example.com")
 	data2, _ := json.MarshalIndent(creds2, "", "  ")
 	if err := os.WriteFile(filepath.Join(credDir, "hub-two.json"), data2, 0600); err != nil {
 		t.Fatal(err)

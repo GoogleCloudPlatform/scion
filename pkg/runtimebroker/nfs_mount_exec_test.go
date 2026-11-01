@@ -86,8 +86,8 @@ func TestExecMountChecker_Mount_Success(t *testing.T) {
 		t.Errorf("expected mount command, got %s", capturedName)
 	}
 
-	// Expected args: -t nfs -o vers=3,hard 10.0.0.2:/scion-ws /mnt/nfs/ws1
-	wantArgs := []string{"-t", "nfs", "-o", "vers=3,hard", "10.0.0.2:/scion-ws", "/mnt/nfs/ws1"}
+	// Expected args: -t nfs -o vers=3,hard,nosuid,nodev 10.0.0.2:/scion-ws /mnt/nfs/ws1
+	wantArgs := []string{"-t", "nfs", "-o", "vers=3,hard,nosuid,nodev", "10.0.0.2:/scion-ws", "/mnt/nfs/ws1"}
 	if len(capturedArgs) != len(wantArgs) {
 		t.Fatalf("args len = %d, want %d: %v", len(capturedArgs), len(wantArgs), capturedArgs)
 	}

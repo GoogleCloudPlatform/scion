@@ -1956,7 +1956,7 @@ func TestBrokerRegistrationTwoPhaseFlow(t *testing.T) {
 		"capabilities": []string{"sync", "attach"},
 	}
 
-	rec1 := doRequest(t, srv, http.MethodPost, "/api/v1/brokers", createBody)
+	rec1 := doRequestLoopback(t, srv, http.MethodPost, "/api/v1/brokers", createBody)
 	if rec1.Code != http.StatusCreated {
 		t.Errorf("Phase 1: expected status 201, got %d: %s", rec1.Code, rec1.Body.String())
 	}
@@ -1985,7 +1985,7 @@ func TestBrokerRegistrationTwoPhaseFlow(t *testing.T) {
 		"capabilities": []string{"sync", "attach"},
 	}
 
-	rec2 := doRequestNoAuth(t, srv, http.MethodPost, "/api/v1/brokers/join", joinBody)
+	rec2 := doRequestNoAuthLoopback(t, srv, http.MethodPost, "/api/v1/brokers/join", joinBody)
 	if rec2.Code != http.StatusOK {
 		t.Errorf("Phase 2: expected status 200, got %d: %s", rec2.Code, rec2.Body.String())
 	}
@@ -2042,7 +2042,7 @@ func TestBrokerJoinWithInvalidToken(t *testing.T) {
 		"name": "invalid-token-host",
 	}
 
-	rec1 := doRequest(t, srv, http.MethodPost, "/api/v1/brokers", createBody)
+	rec1 := doRequestLoopback(t, srv, http.MethodPost, "/api/v1/brokers", createBody)
 	if rec1.Code != http.StatusCreated {
 		t.Fatalf("failed to create broker: %s", rec1.Body.String())
 	}
@@ -2059,7 +2059,7 @@ func TestBrokerJoinWithInvalidToken(t *testing.T) {
 		"hostname":  "test-machine",
 	}
 
-	rec2 := doRequestNoAuth(t, srv, http.MethodPost, "/api/v1/brokers/join", joinBody)
+	rec2 := doRequestNoAuthLoopback(t, srv, http.MethodPost, "/api/v1/brokers/join", joinBody)
 	if rec2.Code != http.StatusUnauthorized {
 		t.Errorf("expected status 401 for invalid token, got %d: %s", rec2.Code, rec2.Body.String())
 	}

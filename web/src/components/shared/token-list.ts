@@ -960,6 +960,20 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     isAlias: false,
   },
   {
+    value: 'user:promote',
+    label: 'user:promote',
+    description: 'Change other users between the member and viewer roles',
+    resource: 'user',
+    isAlias: false,
+  },
+  {
+    value: 'user:delete',
+    label: 'user:delete',
+    description: 'Delete users',
+    resource: 'user',
+    isAlias: false,
+  },
+  {
     value: 'user_skill_injection:update',
     label: 'user_skill_injection:update',
     description: 'Change the skills injected into your own agents',

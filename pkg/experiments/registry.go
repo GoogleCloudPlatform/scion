@@ -160,6 +160,16 @@ const ChatScheduledSend = "web.chat_scheduled_send"
 // history variant (404 while off). Stored stars are kept while it is off.
 const ChatStarredMessages = "web.chat_starred_messages"
 
+// ChatRetention gates hub-wide chat message retention: the
+// chat_retention operational-settings section and its admin API (404 while
+// off), the chat-retention sweeper, which purges nothing while it is off,
+// and the history "retention" marker. It has both layers: the hub checks it
+// in the settings handlers, the sweeper and the history handler; the web
+// layer only shows the settings panel and the history divider. Turning it
+// on deletes nothing until an admin also enables the sweep and sets a
+// window.
+const ChatRetention = "hub.chat_retention"
+
 // AuthorizationDecisionAuditV2 gates decision logging (remaining-audit P1).
 // It is the only activation control and stays default-off; turning it on
 // needs explicit owner approval.
@@ -184,16 +194,18 @@ const AgentEdit = "web.agent_edit"
 // AgentEditHeld gates held config edits (ptone/scion#3976): while it is on,
 // a config edit of an agent with a live or transitional container is kept
 // as the agent's pending config and applied at its next start, a
-// provision-rendered key is kept pending, and DELETE
+// provision-rendered key is kept pending, an edit a start does not bring
+// into effect (a clear or removal the broker does not apply at start, and
+// the whole key of a collection edit with such a part) stays pending until
+// a reincarnation applies pending edits, and DELETE
 // /api/v1/agents/{id}/pending-config discards pending edits. A
 // reincarnation does not apply pending edits yet (ptone/scion#3978), so it
 // must stay off until that lands. While it is off the hub refuses a config
-// edit of such an agent, as before, and applies no stored pending config;
-// a config edit it writes removes the pending keys that edit names, so a
-// stale pending value cannot later override it. It has its own default-off
-// switch
-// because the Edit page experiment (AgentEdit) is turned on separately; the
-// web layer only mirrors the hub's check.
+// edit of such an agent, as before, applies no stored pending config and
+// returns none, and clears it at the agent's next start or config edit, so
+// a stale pending value cannot later override a newer one. It has its own
+// default-off switch because the Edit page experiment (AgentEdit) is turned
+// on separately; the web layer only mirrors the hub's check.
 const AgentEditHeld = "hub.agent_edit_held"
 
 // AgentDelegation gates agent delegation (.design/agent-delegation.md §10):
@@ -415,7 +427,7 @@ var compiled = []Experiment{
 	{
 		Name:        PortView,
 		Title:       "Port page view",
-		Description: "Opening an agent's exposed port from the hub serves the page through a short-lived page link, so its relative scripts (including modules), styles, images, same-app requests and WebSockets work. Pages opened this way can only use relative URLs: URLs that start with / do not work. Browser storage, cookies and web workers are not available to the page. The link lasts server.hub.port_proxy.view_ttl (default 2h); opening the port from the hub again gives a new one. Conduit transport only in this release. Gates the hub's port link redirect and the /api/v1/portview/ route (LayerServer), which answers 404 while it is off. Keep it off on a hub behind an authenticating front proxy (for example IAP) until it has been verified with one (ptone/scion#5989).",
+		Description: "Opening an agent's exposed port from the hub serves the page through a short-lived page link, so its relative scripts (including modules), styles, images, same-app requests and WebSockets work. Pages opened this way can only use relative URLs: URLs that start with / do not work. Browser storage, cookies and web workers are not available to the page. The link lasts server.hub.port_proxy.view_ttl (default 2h); opening the port from the hub again gives a new one. It works over either port proxy transport; a page's WebSocket works only over Conduit. The page link grants access, so do not share it. Gates the hub's port link redirect and the /api/v1/portview/ route (LayerServer), which answers 404 while it is off. Keep it off on a hub behind an authenticating front proxy (for example IAP) until it has been verified with one (ptone/scion#5989).",
 		Default:     false,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,
@@ -479,6 +491,17 @@ var compiled = []Experiment{
 		ReviewBy:    "2027-01-31",
 	},
 	{
+		Name:        ChatRetention,
+		Title:       "Chat message retention",
+		Description: "Lets a hub admin bound how long chat history is kept, with one hub-wide age window: a background sweep hard-deletes messages older than the window, with their mentions, stars, reply metadata and attachment links, in small paced batches. Gates the Chat retention settings section and its admin API (404 while off), the sweep and the history marker (LayerServer) and the settings panel and history divider (LayerWeb). Turning it on deletes nothing until an admin also enables the sweep and sets a window; turning it off stops the sweep. Take a database backup before enabling.",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#6596",
+		Owner:       "native-chat",
+		ReviewBy:    "2027-03-31",
+	},
+	{
 		Name:        AgentEdit,
 		Title:       "Edit agent",
 		Description: "On the Edit agent page, adds a view that groups the fields by when an edit applies (next start or resume, held, needs a reincarnation, immediately, fixed) and a summary strip counting them. The page and its by-function view are always available.",
@@ -492,7 +515,7 @@ var compiled = []Experiment{
 	{
 		Name:        AgentEditHeld,
 		Title:       "Held edits for running agents",
-		Description: "Lets an agent config edit be saved while the agent is running or starting: the hub keeps it as the agent's pending config and applies it at the next start, restart or resume. System prompt, agent instructions, skills and services edits are kept pending, unless the agent's Runtime Broker re-renders them at start (changedFields), in which case they are applied like other edits; a reincarnation does not apply pending edits yet, so what a start does not apply stays pending, and the rest is applied at the next start after a reincarnation, over the values it set. Keep it off until reincarnation applies pending edits. Pending edits can be discarded. While off, a config edit of a running agent is refused as before; stored pending edits are kept but not applied, except that an edit saved while off removes the pending keys it names.",
+		Description: "Lets an agent config edit be saved while the agent is running or starting: the hub keeps it as the agent's pending config and applies it at the next start, restart or resume. System prompt, agent instructions, skills and services edits are kept pending, unless the agent's Runtime Broker re-renders them at start (changedFields), in which case they are applied like other edits. What a start does not bring into effect stays pending until reincarnation applies pending edits: clears and removals only a reincarnation applies, and the whole key of a collection edit that has such a part, including the parts a start could apply. Keep it off until reincarnation applies pending edits. Pending edits can be discarded. While off, a config edit of a running agent is refused as before; stored pending edits are not applied or shown, and are cleared at the agent's next start or config edit.",
 		Default:     false,
 		Layers:      []Layer{LayerServer, LayerWeb},
 		Stage:       StageAlpha,

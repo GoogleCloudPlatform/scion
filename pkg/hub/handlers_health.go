@@ -199,6 +199,10 @@ func (s *Server) healthChecks(ctx context.Context) map[string]string {
 	// Removed per-runtime/per-profile storage overrides (non-critical).
 	s.checkRemovedStorageOverrides(checks)
 
+	// Broker requests refused from an unlisted proxy on this host
+	// (non-critical).
+	s.checkTransportProxyHealth(checks)
+
 	return checks
 }
 

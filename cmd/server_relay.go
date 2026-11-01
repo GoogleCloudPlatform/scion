@@ -176,6 +176,17 @@ func relayServerConfig(ctx context.Context, cfg *config.GlobalConfig, db *relayd
 	if err != nil {
 		return relayserver.Config{}, err
 	}
+	// The public listener trusts a forwarded protocol only from the
+	// operator's server.trusted_proxies, resolved as the hub resolves it
+	// (config.TransportTrustedProxies): not set, a proxy on this host;
+	// an empty list, none.
+	trusted, usedDefault, err := config.TransportTrustedProxies(cfg.TrustedProxies, cfg.TrustedProxiesSet)
+	if err != nil {
+		return relayserver.Config{}, err
+	}
+	if usedDefault {
+		slog.Warn(config.TransportTrustedProxiesDefaultWarning)
+	}
 	return relayserver.Config{
 		InstanceID:     id,
 		PublicURL:      cfg.Relay.PublicURL,
@@ -188,6 +199,7 @@ func relayServerConfig(ctx context.Context, cfg *config.GlobalConfig, db *relayd
 		InternalTLS:      hopServerTLS,
 		HopTLS:           hopClientTLS,
 		PeerAuth:         auth,
+		TrustedProxies:   trusted,
 		Registry:         db.Registry,
 		Experiment:       db.Settings,
 		Events:           db.Events(),

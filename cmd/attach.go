@@ -237,6 +237,13 @@ type hubAttachTarget struct {
 // attach, the agent path. A preflight refusal is described by
 // describeAttachPreflight and is not retried.
 func attachHubSession(ctx context.Context, hubCtx *HubContext, target hubAttachTarget) error {
+	// The transport rule, before the transport source or the user token is
+	// resolved: the WebSocket dial would otherwise use ws:// for http. The
+	// hub client in hubCtx may be the injected agent-token exception, but
+	// this session sends a user credential, which is never exempt.
+	if err := checkUserHubTransport(hubCtx.Endpoint); err != nil {
+		return err
+	}
 	// Resolve transport auth for IAP/Cloud Run traversal FIRST — in IAP mode
 	// there is no application-level token by design (auth happens via
 	// Proxy-Authorization at the transport layer), so we must determine

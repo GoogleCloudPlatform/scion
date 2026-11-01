@@ -321,7 +321,12 @@ type Server struct {
 	// bootstrap (create-time and handleWorkspaceApply) when set (see
 	// SetWorkspaceDownloader).
 	workspaceDownload func(ctx context.Context, bucket, prefix, localPath string) error
-	version           string
+	// signedDownload overrides the signed-URL workspace download's object
+	// client, page source and timing (tests only; zero values mean the
+	// defaults, see signedDownloadSettings).
+	signedDownload signedDownloadSettings
+
+	version string
 
 	// Workspace transfer and project delete steps, like workspaceDownload:
 	// each replaces its real implementation when set (see the setters in
@@ -1091,6 +1096,12 @@ func (s *Server) createHubConnection(name string, creds *brokercredentials.Broke
 	if hubEndpoint == "" {
 		hubEndpoint = s.config.HubEndpoint
 	}
+	// No client is built for a hub this broker would reach unencrypted over
+	// the network: the connection carries the broker's credentials and,
+	// through the control channel and conduit, agent secrets.
+	if err := config.CheckHubTransport(hubEndpoint); err != nil {
+		return nil, fmt.Errorf("hub connection %q: %w", name, err)
+	}
 
 	// Build hub client options
 	opts := buildHubClientOpts(creds, secretKey, hubEndpoint)
@@ -1148,6 +1159,11 @@ func (s *Server) createHubConnection(name string, creds *brokercredentials.Broke
 // token reaches the hub only through DevAuthHubOptions (loopback hubs only);
 // a HubToken that is the dev token gets the same loopback rule.
 func (s *Server) createHubConnectionFromConfig() (*HubConnection, error) {
+	// The same transport rule as createHubConnection: the configured bearer
+	// token is never sent unencrypted to a network host.
+	if err := config.CheckHubTransport(s.config.HubEndpoint); err != nil {
+		return nil, fmt.Errorf("hub connection from config: %w", err)
+	}
 	var opts []hubclient.Option
 
 	switch {

@@ -460,6 +460,9 @@ func TestAgentPendingConfig_DiscardClearsAndAudits(t *testing.T) {
 func TestAgentPendingConfig_FlagOffKeepsTodayBehaviour(t *testing.T) {
 	off := func(t *testing.T, phase state.Phase) (*Server, store.Store, *inlineCaptureDispatcher, *store.Agent) {
 		srv, s, disp, agent := heldEditsFixture(t, phase)
+		// A well-formed off (loaded operational settings) clears inert
+		// pending edits (heldEditsClearable).
+		effectLoadOperationalSettings(t, srv, s)
 		setHeldEditsExperiment(t, srv, false)
 		return srv, s, disp, agent
 	}
@@ -501,7 +504,7 @@ func TestAgentPendingConfig_FlagOffKeepsTodayBehaviour(t *testing.T) {
 		assert.Nil(t, resp.PendingConfig)
 	})
 
-	t.Run("an edit written through removes the pending keys it names", func(t *testing.T) {
+	t.Run("an edit written through clears the pending keys", func(t *testing.T) {
 		srv, s, disp, stopped := off(t, state.PhaseStopped)
 		cur := pendingReloadAgent(t, s, stopped.ID)
 		cur.PendingConfig = &store.AgentPendingConfig{Config: map[string]json.RawMessage{
@@ -513,12 +516,21 @@ func TestAgentPendingConfig_FlagOffKeepsTodayBehaviour(t *testing.T) {
 			"config": map[string]interface{}{"model": "newer-model"},
 		})
 		assert.Equal(t, []string{"config.model"}, resp.Disposition.Applied)
-		require.NotNil(t, resp.PendingConfig)
-		assert.Equal(t, []string{"config.system_prompt"}, pendingConfigKeys(resp.PendingConfig), "only the key the edit named is removed")
-		discarded := pendingAudits(t, s, stopped.ID, mutationTypeAgentPendingConfigDiscarded, 1)
-		keys, trigger := pendingAuditSummary(t, discarded[0])
-		assert.Equal(t, []string{"config.model"}, keys)
-		assert.Equal(t, pendingDiscardTriggerSuperseded, trigger)
+		assert.Nil(t, resp.PendingConfig, "with the experiment off no response carries pending edits")
+		// Every pending key is cleared in the same write (ptone/scion#5864):
+		// the one the edit named as superseded, the others as
+		// experiment_off.
+		assert.Nil(t, pendingReloadAgent(t, s, stopped.ID).PendingConfig)
+		discarded := pendingAudits(t, s, stopped.ID, mutationTypeAgentPendingConfigDiscarded, 2)
+		byTrigger := map[string][]string{}
+		for _, rec := range discarded {
+			keys, trigger := pendingAuditSummary(t, rec)
+			byTrigger[trigger] = keys
+		}
+		assert.Equal(t, map[string][]string{
+			pendingDiscardTriggerSuperseded:    {"config.model"},
+			pendingDiscardTriggerExperimentOff: {"config.system_prompt"},
+		}, byTrigger)
 
 		// Turned back on, the next start runs the newer value.
 		setHeldEditsExperiment(t, srv, true)
@@ -528,7 +540,25 @@ func TestAgentPendingConfig_FlagOffKeepsTodayBehaviour(t *testing.T) {
 		assert.Equal(t, "newer-model", starts[0].model)
 	})
 
-	t.Run("stored pending config stays inert at start", func(t *testing.T) {
+	// The start fold's whole-key keep (ptone/scion#5864) runs only with
+	// held edits on: a clear written through with them off still reaches
+	// the applied config and the create inputs now.
+	t.Run("a clear written through still reaches the applied config", func(t *testing.T) {
+		srv, s, _, stopped := off(t, state.PhaseStopped)
+		effectSetCreateInputsMaxTurns(t, s, stopped.ID, 3)
+		resp := patchPending(t, srv, stopped.ID, map[string]interface{}{
+			"config": map[string]interface{}{"max_turns": nil},
+		})
+		assert.Equal(t, []string{"config.max_turns"}, resp.Disposition.HeldForReincarnate)
+		assert.Nil(t, resp.PendingConfig)
+		after := pendingReloadAgent(t, s, stopped.ID)
+		assert.Nil(t, after.AppliedConfig.InlineConfig.MaxTurns, "written through, as before")
+		require.NotNil(t, after.AppliedConfig.CreateInputs)
+		require.NotNil(t, after.AppliedConfig.CreateInputs.InlineConfig)
+		assert.Nil(t, after.AppliedConfig.CreateInputs.InlineConfig.MaxTurns, "recorded as an explicit clear, as before")
+	})
+
+	t.Run("stored pending config is not applied at start, and is cleared", func(t *testing.T) {
 		srv, s, disp, stopped := off(t, state.PhaseStopped)
 		cur := pendingReloadAgent(t, s, stopped.ID)
 		cur.PendingConfig = &store.AgentPendingConfig{Config: map[string]json.RawMessage{"model": json.RawMessage(`"pending-model"`)}}
@@ -537,7 +567,7 @@ func TestAgentPendingConfig_FlagOffKeepsTodayBehaviour(t *testing.T) {
 		starts := disp.snapshot()
 		require.Len(t, starts, 1)
 		assert.Equal(t, "old-model", starts[0].model)
-		assert.NotNil(t, pendingReloadAgent(t, s, stopped.ID).PendingConfig)
+		assert.Nil(t, pendingReloadAgent(t, s, stopped.ID).PendingConfig, "cleared lazily (ptone/scion#5864)")
 	})
 }
 
@@ -784,7 +814,7 @@ func TestAgentPendingConfig_UndecodableStoredKeyIsRemovedAtStart(t *testing.T) {
 	cur.PendingConfig = &store.AgentPendingConfig{Config: map[string]json.RawMessage{
 		"model":     json.RawMessage(`"good-model"`),
 		"max_turns": json.RawMessage(`"not a number"`),
-	}}
+	}, SavedBy: "user:" + DevUserID}
 	require.NoError(t, s.UpdateAgent(context.Background(), cur))
 
 	warnings := pendingLifecycleWarnings(t, srv, agent.ID, "start")
@@ -896,7 +926,7 @@ func TestAgentPendingConfig_AsyncStartAppliesHeldEdits(t *testing.T) {
 
 	a := f.addAgent("as-held", string(state.PhaseStopped), "")
 	cur := pendingReloadAgent(t, f.s, a.ID)
-	cur.PendingConfig = &store.AgentPendingConfig{Config: map[string]json.RawMessage{"model": json.RawMessage(`"async-held-model"`)}}
+	cur.PendingConfig = &store.AgentPendingConfig{Config: map[string]json.RawMessage{"model": json.RawMessage(`"async-held-model"`)}, SavedBy: "user:" + DevUserID}
 	require.NoError(t, f.s.UpdateAgent(context.Background(), cur))
 
 	// The agent the dispatcher received: the model it was dispatched with.
@@ -1096,7 +1126,7 @@ func heldFilterFixture(t *testing.T, caps *store.BrokerCapabilities) (*Server, s
 // with the rules a written-through edit gets (ptone/scion#3982, #4890,
 // #5676).
 func TestAgentPendingConfig_HeldSaveUsesTheStartRules(t *testing.T) {
-	t.Run("re-rendering broker: a clear or skill removal is written at the next start but needs a reincarnation", func(t *testing.T) {
+	t.Run("re-rendering broker: a clear or skill removal is kept pending whole until a reincarnation", func(t *testing.T) {
 		srv, _, _, agent := heldFilterFixture(t, &store.BrokerCapabilities{Reprovision: true, ChangedFields: true})
 		resp := patchPending(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{
 			"agent_instructions": "",
@@ -1105,7 +1135,7 @@ func TestAgentPendingConfig_HeldSaveUsesTheStartRules(t *testing.T) {
 		assert.Empty(t, resp.Disposition.Held)
 		assert.Equal(t, []string{"config.agent_instructions", "config.skills"}, resp.Disposition.HeldForReincarnate)
 		require.Len(t, resp.Warnings, 1, "%v", resp.Warnings)
-		assert.Equal(t, "config.agent_instructions, config.skills: the change is held and written at the next start; it takes effect at a reincarnation after that (a start does not apply a clear or a removed skill)", resp.Warnings[0])
+		assert.Equal(t, "config.agent_instructions, config.skills: "+heldWholeKeyNote, resp.Warnings[0])
 	})
 
 	t.Run("clearing broker: a clear and an env removal are held and reach cleared_fields at the next start", func(t *testing.T) {
@@ -1129,7 +1159,7 @@ func TestAgentPendingConfig_HeldSaveUsesTheStartRules(t *testing.T) {
 		assert.Nil(t, pendingReloadAgent(t, s, agent.ID).PendingConfig)
 	})
 
-	t.Run("a resources edit that drops a sub-field needs a reincarnation", func(t *testing.T) {
+	t.Run("a resources edit that drops a sub-field needs a reincarnation without clearedResourceSubfields", func(t *testing.T) {
 		srv, _, _, agent := heldFilterFixture(t, &store.BrokerCapabilities{Reprovision: true, ClearedFields: true})
 		resp := patchPending(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{
 			"resources": map[string]interface{}{"requests": map[string]string{"cpu": "1"}},
@@ -1208,7 +1238,7 @@ func TestAgentPendingConfig_HeldSaveUsesTheStartRules(t *testing.T) {
 	})
 
 	t.Run("a skill removal pending from an earlier save is still reported against the applied config", func(t *testing.T) {
-		srv, _, _, agent := heldFilterFixture(t, &store.BrokerCapabilities{Reprovision: true, ChangedFields: true})
+		srv, s, disp, agent := heldFilterFixture(t, &store.BrokerCapabilities{Reprovision: true, ChangedFields: true})
 		first := patchPending(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{
 			"skills": []map[string]interface{}{{"uri": "hub://skills/review"}},
 		}})
@@ -1222,6 +1252,21 @@ func TestAgentPendingConfig_HeldSaveUsesTheStartRules(t *testing.T) {
 		assert.Empty(t, second.Disposition.Held, "the start will not apply the removal")
 		assert.Equal(t, []string{"config.skills"}, second.Disposition.HeldForReincarnate)
 		require.Len(t, second.Warnings, 1, "%v", second.Warnings)
-		assert.Contains(t, second.Warnings[0], "written at the next start")
+		assert.Contains(t, second.Warnings[0], "the whole key's change is kept pending, including any part a start could apply")
+
+		// The start keeps the whole skills edit pending, the added skill
+		// included (ptone/scion#5864): the applied skills are unchanged and
+		// the start names config.skills once.
+		pendingLifecycleWarnings(t, srv, agent.ID, "stop")
+		warnings := pendingLifecycleWarnings(t, srv, agent.ID, "start")
+		assert.Contains(t, warnings, heldForReincarnateWarning([]string{"config.skills"}))
+		starts := disp.snapshot()
+		require.Len(t, starts, 1)
+		assert.NotContains(t, starts[0].inline.ChangedFields, "skills")
+		after := pendingReloadAgent(t, s, agent.ID)
+		assert.Equal(t, []api.SkillReference{{URI: "hub://skills/review"}, {URI: "hub://skills/test"}}, after.AppliedConfig.InlineConfig.Skills)
+		require.NotNil(t, after.PendingConfig)
+		assert.Equal(t, []string{"config.skills"}, pendingConfigKeys(after.PendingConfig))
+		effectAssertNoAppliedAudit(t, s, agent.ID)
 	})
 }

@@ -3,14 +3,25 @@
 Read SKILL.md in this skill first for `scion expose` itself. This file covers
 pages and apps a person opens in their browser through the link.
 
-A person opens your page in their own browser through a link on the Hub. Today
-such a page can only use what is inside the page itself: separate scripts,
-stylesheets, images and requests back to your app are not served. Build for
-that, or point the person to `scion tunnel` (below).
+A person opens your page in their own browser through a link on the Hub. What
+that page can load depends on whether the Hub has its page view on:
+
+- **Page view on**: the page's relative URLs load: separate scripts
+  (including modules), stylesheets, images and fonts, and `fetch`, XHR and
+  EventSource calls back to your app. See With the Hub's page view on.
+- **Page view off**: the page can only use what is inside the page itself.
+  Separate scripts, stylesheets, images and requests back to your app are
+  not served.
+
+You usually cannot tell from inside the agent which applies. If you do not
+know, build **one self-contained HTML file**: it works either way. For a
+full app, point the person to `scion tunnel` (below).
 
 ## Steps
 
-1. Build the page as **one self-contained HTML file** (see Build settings).
+1. Build the page as **one self-contained HTML file** (see Build settings),
+   or, if the person confirms that the Hub's page view is on, as an app that
+   uses only relative URLs (see With the Hub's page view on).
 2. Serve it on `127.0.0.1` on a free port (1024 or above; 9810 and 18380
    cannot be exposed), as `index.html` so the root URL opens it:
    `python3 -m http.server <port> --bind 127.0.0.1 --directory <folder>`
@@ -21,21 +32,49 @@ that, or point the person to `scion tunnel` (below).
 
 ## What works when a person opens the link
 
+These hold whether or not the page view is on:
+
 - Works: one HTML file with its CSS in `<style>`, its JavaScript in `<script>`
   (no `src`), and images and fonts as `data:` URLs.
-- Does not work: `<script src>`, `<link rel="stylesheet" href>`, `<img src>`
-  pointing at your server, `fetch`, XHR, EventSource or WebSocket calls back
-  to your app. This holds for relative URLs (`./app.js`) and for URLs that
-  start with `/` alike.
+- Does not work: URLs that start with `/` (for example `/app.js` or
+  `/api/data`), in `src`, `href`, CSS `url()` and requests.
 - Does not work: localStorage, sessionStorage, IndexedDB, cookies, web workers
   and service workers.
-- Does not work: dev servers with live reload (`vite dev`, `next dev`), and
-  anything that needs a live backend.
+- Does not work: dev servers with live reload (`vite dev`, `next dev`).
 - Does not work: client-side routing by path (React Router's
   `BrowserRouter`, Vue Router's `createWebHistory` and similar). Use hash
   routing instead (`HashRouter`, `createWebHashHistory`), or no router.
-- Data the page needs must be inlined at build time (for example a
-  `<script type="application/json">` block or a JS constant).
+
+With the page view off, these also do not work: `<script src>`,
+`<link rel="stylesheet" href>`, `<img src>` pointing at your server, and
+`fetch`, XHR, EventSource or WebSocket calls back to your app, relative URLs
+(`./app.js`) included. Data the page needs must then be inlined at build
+time (for example a `<script type="application/json">` block or a JS
+constant).
+
+## With the Hub's page view on
+
+When the person opens the link and the Hub can serve the agent's port for
+them, the Hub sends them on to a short-lived page link, and the page is
+served from there:
+
+- Relative URLs work for scripts (including modules), stylesheets, images,
+  fonts, and `fetch`, XHR and EventSource calls to your app. Write them as
+  `./app.js` or `app.js`, never `/app.js`.
+- Requests that send an `Authorization` header or cookies are not carried to
+  your app; the page link itself is the access.
+- A relative WebSocket (`new WebSocket(new URL('./ws', document.baseURI))`
+  with the protocol changed to `ws:` or `wss:`) works when the agent is
+  connected over the Hub's conduit transport. On the port-forward tunnel it
+  is refused.
+- Hash routing works. A path that the page changes with the history API is
+  not kept on a reload outside the page link; use hash routing.
+- Vite: set `base: './'` in `vite.config.*` so the built files refer to each
+  other relatively, then `vite build` and serve `dist`.
+- The page link grants access: do not log it, paste it into tickets or chats,
+  or send it anywhere. Hand out only the URL `scion expose` printed.
+
+## Full apps: scion tunnel
 
 For a full multi-file app, a backend API or a dev server, the human can use
 `scion tunnel` from their machine with the scion CLI, if their Hub has
@@ -82,10 +121,11 @@ https://googlecloudplatform.github.io/scion/hosted/user/port-forwarding/#multi-f
 - Search the built HTML for `src=`, `href=`, `url(`, `fetch(`, `XMLHttpRequest`,
   `EventSource`, `WebSocket`, `import(`, `localStorage`, `sessionStorage`,
   `indexedDB`, `document.cookie`, `new Worker`, `SharedWorker` and
-  `serviceWorker`. Anything that points at your server, or uses browser
-  storage, cookies or workers, will not work through the link. Ignore
-  matches inside minified library code and links to other sites; look for
-  URLs that point at your own server.
+  `serviceWorker`. Browser storage, cookies and workers will not work through
+  the link. With the page view off, nothing that points at your server
+  works either; with it on, relative URLs to your app work and URLs that
+  start with `/` do not. Ignore matches inside minified library code and
+  links to other sites; look for URLs that point at your own server.
 - Search your SOURCE (not the build) for `BrowserRouter`,
   `createBrowserRouter` and `createWebHistory`: any hit is path-based
   routing, which will not work through the link.
@@ -113,7 +153,11 @@ https://googlecloudplatform.github.io/scion/hosted/user/port-forwarding/#multi-f
 
   Check that the page renders what it should, that `errors` is empty, and
   that `blocked` is empty. Anything in `blocked` is something the page loads
-  from outside itself; inline it.
+  from outside itself; inline it. For a relative-URL app built for the page
+  view, serve it under a sub-path (for example
+  `http://127.0.0.1:<port>/app/`) and let through only requests under that
+  path: a URL that starts with `/` then shows up in `blocked`, as it would
+  fail through the link.
 - Report what you verified and how (which checks, which browser). If you
   could not run a browser, say so plainly instead of reporting the page as
   working.

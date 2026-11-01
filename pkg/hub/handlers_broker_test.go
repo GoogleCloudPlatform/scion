@@ -135,7 +135,7 @@ func TestBrokerAuthz_Registration_MemberCanRegister(t *testing.T) {
 	srv, _, alice, _, _, _, _ := setupBrokerAuthzTest(t)
 
 	// Non-admin member should be able to register a broker
-	rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/brokers",
+	rec := doRequestAsUserLoopback(t, srv, alice, http.MethodPost, "/api/v1/brokers",
 		CreateBrokerRegistrationRequest{Name: "Alice New Broker"})
 
 	assert.Equal(t, http.StatusCreated, rec.Code,
@@ -151,7 +151,7 @@ func TestBrokerAuthz_Registration_UnauthenticatedDenied(t *testing.T) {
 	t.Parallel()
 	srv, _ := testServer(t)
 
-	rec := doRequestNoAuth(t, srv, http.MethodPost, "/api/v1/brokers",
+	rec := doRequestNoAuthLoopback(t, srv, http.MethodPost, "/api/v1/brokers",
 		CreateBrokerRegistrationRequest{Name: "Unauthenticated Broker"})
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code,

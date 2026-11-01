@@ -105,6 +105,13 @@ func (s *Server) conduitUpgradeGateOn() bool {
 		s.conduitTargetStreamDeadlines() == config.ConduitTargetStreamDeadlinesEnforce
 }
 
+// conduitLegacyRouteRefusedFor reports whether conduitLegacyRouteRefused
+// refuses a legacy route for identity's stream. It logs and records
+// nothing, so a caller can ask before any route is tried.
+func (s *Server) conduitLegacyRouteRefusedFor(identity Identity) bool {
+	return s.conduitUpgradeGateOn() && conduitIsUserIdentity(identity)
+}
+
 // conduitIsUserIdentity reports whether identity opens user streams.
 func conduitIsUserIdentity(identity Identity) bool {
 	if isNilIdentity(identity) {
@@ -150,7 +157,7 @@ const (
 // and counts it with route, reasonLabel (the caller-facing value: the
 // error code, or the PTY reason) and cause.
 func (s *Server) conduitLegacyRouteRefused(ctx context.Context, identity Identity, route, reasonLabel, cause, agentID string) bool {
-	if !s.conduitUpgradeGateOn() || !conduitIsUserIdentity(identity) {
+	if !s.conduitLegacyRouteRefusedFor(identity) {
 		return false
 	}
 	slog.WarnContext(ctx, "Conduit stream open refused: no legacy route is used for user streams",

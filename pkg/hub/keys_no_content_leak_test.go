@@ -95,13 +95,17 @@ func sentinelKeysRequest() agentkeys.BrokerRequest {
 func TestExecuteKeys_NoContentLeak_HTTP(t *testing.T) {
 	t.Run("signer failure", func(t *testing.T) {
 		log := installSentinelLogCapture(t)
+		signer := &failingSigner{}
 		client := &HTTPRuntimeBrokerClient{transport: &brokerHTTPTransport{
 			client:     &http.Client{},
 			keysClient: &http.Client{},
-			signer:     failingSigner{},
+			signer:     signer,
 			debug:      true,
 		}}
-		_, err := client.ExecuteKeys(context.Background(), "broker-1", "http://example.invalid", "test-agent", sentinelKeysRequest())
+		_, err := client.ExecuteKeys(context.Background(), "broker-1", stubBrokerEndpoint, "test-agent", sentinelKeysRequest())
+		if signer.calls != 1 {
+			t.Fatalf("expected the signer to run exactly once, got %d calls", signer.calls)
+		}
 		assertNoSentinelLeak(t, err, log, agentkeys.OutcomeKeysUnavailable)
 		// A signing failure is proven pre-send: the request never reaches
 		// keysClient.Do, so the pre-send debug line must NOT appear either.

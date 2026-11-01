@@ -124,6 +124,10 @@ type ParentCeilingDecision struct {
 	// S3c through the legacy adopted-agent fallback; callers record the use
 	// (recordLegacyAdoptedFallback).
 	legacyFallback *legacyAdoptedFallback
+	// uatIntrinsic is set on an allowed user secret decision whose S3c
+	// passed at a token-recorded hop only through the intrinsic rule;
+	// callers count the use (recordUATIntrinsic).
+	uatIntrinsic bool
 }
 
 func parentCeilingDeny(cause DenyCause, reason string, proof ParentProof) ParentCeilingDecision {
@@ -307,7 +311,7 @@ func (a *AuthzService) EvaluateServiceAccountParentCeiling(ctx context.Context, 
 	}
 
 	// 5. The recorded effect ceiling.
-	if !EffectCeilingAllows(row.EffectCeiling, gcpServiceAccountAssignPermission, false) {
+	if !EffectCeilingAllows(uatHopEffectCeiling(row.SourcePrincipalKind, row.SourcePrincipalID, row.AuthorityProvenance, row.EffectCeiling), gcpServiceAccountAssignPermission, false) {
 		return parentCeilingDeny(DenyCauseCeilingEffectExceeded, "recorded ceiling does not allow assigning the service account", proof)
 	}
 
@@ -779,6 +783,9 @@ type userSecretChain struct {
 	// legacyFallback is set when S3c passed through the legacy adopted-agent
 	// fallback (legacyAdoptedSecretUseFallback). Every other clause applied.
 	legacyFallback *legacyAdoptedFallback
+	// uatIntrinsic is set when S3c passed at a hop recorded from a user
+	// access token only through the intrinsic rule (uatIntrinsicDecides).
+	uatIntrinsic bool
 }
 
 func (c userSecretChain) deny(cause DenyCause, reason string) userSecretChain {
@@ -818,7 +825,8 @@ func secretParentStep(explain *[]DecisionStep, step, detail string) {
 //     recorded principal type-checks (ceiling_orphaned); S3b a local
 //     development hop needs dev auth and the local development user
 //     (ceiling_source_not_allowed); S3c a bounded ceiling allows secret.use,
-//     with no self-operation exception (ceiling_effect_exceeded); S3d an
+//     with no self-operation exception, read through uatHopEffectCeiling
+//     (ceiling_effect_exceeded); S3d an
 //     agent delegator is live and holds secret.use through its role
 //     (ceiling_orphaned, ceiling_delegator_lacks_permission); S3e depth and
 //     cycles (ceiling_orphaned);
@@ -874,6 +882,9 @@ func (a *AuthzService) evaluateUserSecretParentCeiling(ctx context.Context, prin
 	d := userSecretSourceCheck(chain, in, resource, explain)
 	if d.Allowed && chain.legacyFallback != nil {
 		d.legacyFallback = chain.legacyFallback
+	}
+	if d.Allowed {
+		d.uatIntrinsic = chain.uatIntrinsic
 	}
 	return d, unrecordedHopNote{}
 }
@@ -988,8 +999,15 @@ func (a *AuthzService) userSecretChainVerdict(ctx context.Context, principal Age
 			}
 		}
 		// S3c, with the legacy adopted-agent fallback (see
-		// user_secret_legacy_adopted_fallback.go).
-		if edge.Kind == store.EffectCeilingBounded && !EffectCeilingAllows(edge.EffectCeiling, secretUsePermission, false) {
+		// user_secret_legacy_adopted_fallback.go). A hop recorded from a user
+		// access token applies uatHopEffectCeiling: secret.use is intrinsic
+		// to it, and every other clause, on every hop and on the terminal
+		// user, still applies.
+		if edge.Kind == store.EffectCeilingBounded && uatIntrinsicDecides(edge.DelegatorType, edge.DelegatorID, edge.AuthorityProvenance, edge.EffectCeiling, secretUsePermission) {
+			secretParentStep(explain, "uat_intrinsic", fmt.Sprintf("edge %s: recorded from a user access token; secret.use is intrinsic to the hop", edge.ID))
+			chain.uatIntrinsic = true
+		}
+		if edge.Kind == store.EffectCeilingBounded && !EffectCeilingAllows(uatHopEffectCeiling(edge.DelegatorType, edge.DelegatorID, edge.AuthorityProvenance, edge.EffectCeiling), secretUsePermission, false) {
 			fb, err := a.legacyAdoptedSecretUseFallback(ctx, agent, edge, depth)
 			if err != nil {
 				secretParentStep(explain, "error", "adoption record lookup failed")
