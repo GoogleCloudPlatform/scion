@@ -72,9 +72,11 @@ const CATALOG: Json = {
 const GIT_CHECK: Json = {
   tier: 'source',
   update_available: true,
-  current_commit: '0123abcd',
+  current_commit: '0123abcd4567890123456789abcdef0123456789',
+  compared: 'running',
   latest_commit: '89abcdef',
   current_branch: 'main',
+  tracking_ref: 'origin/main',
   commits_behind: 2,
   new_commits: [
     { hash: '89abcdef', subject: 'fix: the second thing' },
@@ -242,7 +244,8 @@ describe('Git panel', () => {
     });
     expect(
       root(el).querySelector('.git-check-summary')?.textContent?.replace(/\s+/g, ' ').trim()
-    ).toBe('2 new commits upstream on main.');
+    ).toBe('2 new commits on origin/main that the running build (0123abcd4567) does not have.');
+    expect(root(el).querySelector('.git-check-note')).toBeNull();
     const commits = Array.from(root(el).querySelectorAll('.git-check-commits li')).map((li) =>
       li.textContent?.replace(/\s+/g, ' ').trim()
     );
@@ -254,8 +257,26 @@ describe('Git panel', () => {
     button(el, 'check-upstream').click();
     await settle(el);
     expect(
-      root(el).querySelector('.git-check.up-to-date')?.textContent?.replace(/\s+/g, ' ').trim()
-    ).toBe('Up to date on main.');
+      root(el).querySelector('.git-check.up-to-date .git-check-summary')?.textContent?.replace(/\s+/g, ' ').trim()
+    ).toBe('The running build (0123abcd4567) is up to date with origin/main.');
+  });
+
+  it('says when it compared the checkout instead of the running build', async () => {
+    el = await mount(status(), {
+      ...GIT_CHECK,
+      update_available: false,
+      commits_behind: 0,
+      compared: 'checkout',
+      current_commit: '89abcdef01234567',
+    });
+    button(el, 'check-upstream').click();
+    await settle(el);
+    expect(
+      root(el).querySelector('.git-check .git-check-summary')?.textContent?.replace(/\s+/g, ' ').trim()
+    ).toBe('The repository checkout (89abcdef0123) is up to date with origin/main.');
+    expect(root(el).querySelector('.git-check-note')?.textContent?.replace(/\s+/g, ' ')).toContain(
+      "running build's commit is not in the repository checkout"
+    );
   });
 
   it('shows a failed check', async () => {

@@ -301,7 +301,7 @@ run as the `scion` user (through `runuser`):
    from swapping a Hub you stopped is `Result=timeout` being excluded, and
    the update state (step 5): a release that ran is verified as soon as its
    listener binds, and an unverified update is rolled back only within 30
-   minutes of the switch. Four residual cases are accepted:
+   minutes of the switch. Five residual cases are accepted:
 
    - If the previous release used four or more of the window's five starts
      (for example **Restart Hub** several times, then an update within five
@@ -328,6 +328,17 @@ run as the `scion` user (through `runuser`):
      is rolled back like a crash loop (a special case of the previous
      release-older-than-the-update-state-contract case). The first boot
      after a switch (a count of 1) is never rolled back.
+   - Builds from Git (**Rebuild from Git**, installed as
+     `releases/git-<sha12>`). A rebuild on top of a release is protected
+     like a release update: the Hub records the publish date of a preview or
+     stable `from`, so `previous_safe` is decided as for a release. When
+     `from` is itself a Git build (Git to Git, or a release installed on top
+     of a Git build), `previous_safe` is `false`, because the database
+     schema of an arbitrary commit cannot be checked against the downgrade
+     floor. The new build marks itself `migrated` on every start, before it
+     opens the database, so a crash loop of such a switch is not rolled
+     back: the guard leaves the Hub stopped (fail closed) and its journal
+     points to [Restoring after a failed update](#restoring-after-a-failed-update).
 4. It refuses unless `/opt/scion/current` and `/opt/scion/previous` each
    resolve to a release directory directly inside `/opt/scion/releases/`,
    and `previous` contains a `scion` binary. A link that leaves `releases/`
@@ -382,7 +393,10 @@ one JSON object:
   migration statement, and sets `previous_safe`: whether `from` is at or
   above its downgrade floor (`pkg/version.DowngradeFloor`), that is,
   whether `from` can still run on the migrated database. It may also
-  record `from_published_at`, which the guard ignores.
+  record `from_published_at`, which the guard ignores. `previous_safe` is
+  `false` when that cannot be shown: a `from` that is a Git build
+  (`git-<sha12>`), or a preview or stable `from` whose publish date the
+  Hub could not look up.
 - The Hub sets `verified` to `true` as soon as its listener is bound,
   independently of the boot reconciliation. A release that crash-loops
   before it can listen (for example, because port 8080 is taken right after

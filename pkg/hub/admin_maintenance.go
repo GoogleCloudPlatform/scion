@@ -378,6 +378,7 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 			RepoBranch:  mc.RepoBranch,
 			ServiceName: mc.ServiceName,
 			Installer:   installer,
+			Releases:    s.updateReleaseSource(),
 			Store:       s.store,
 		}), nil
 	case "rebuild-web":
@@ -841,7 +842,11 @@ func (s *Server) handleCheckForUpdates(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		result, err := CheckForUpdates(r.Context(), mc.RepoPath)
+		result, err := CheckForUpdates(r.Context(), maintenance.UpdateCheckOptions{
+			RepoPath:      mc.RepoPath,
+			Branch:        mc.RepoBranch,
+			RunningCommit: version.GetCommit(),
+		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 				"Failed to check for updates: "+err.Error(), nil)
@@ -853,6 +858,7 @@ func (s *Server) handleCheckForUpdates(w http.ResponseWriter, r *http.Request) {
 			"tier":             "source",
 			"update_available": result.UpdateAvailable,
 			"current_commit":   result.CurrentCommit,
+			"compared":         result.Compared,
 			"latest_commit":    result.LatestCommit,
 			"current_branch":   result.CurrentBranch,
 			"tracking_ref":     result.TrackingRef,

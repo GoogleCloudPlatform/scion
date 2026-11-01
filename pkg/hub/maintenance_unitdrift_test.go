@@ -186,7 +186,7 @@ func TestRebuildServerExecutor_UnitDriftReportedAtLogTail(t *testing.T) {
 		t.Fatal("restart not issued")
 	}
 	log := buf.String()
-	complete := strings.Index(log, "Server rebuild complete, restart initiated.")
+	complete := strings.Index(log, "Server rebuild installed; requesting the restart.")
 	block := strings.Index(log, unitdrift.DriftWarning)
 	if complete < 0 || block < 0 || block < complete {
 		t.Fatalf("drift block must follow the completion line:\n%s", log)
@@ -307,7 +307,7 @@ func TestRebuildServerExecutor_UnitReportInLogRecordedBeforeRestart(t *testing.T
 		t.Fatal("restart not issued")
 	}
 	for _, want := range []string{
-		"\nServer rebuild complete, restart initiated.\n",
+		"\nServer rebuild installed; requesting the restart.\n",
 		"\n==> Systemd unit check\n" + unitdrift.DriftWarning + "\n",
 		"  installed: ExecStartPre=/bin/true\n",
 	} {

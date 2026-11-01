@@ -296,7 +296,8 @@ type RebuildServerExecutor struct {
 	repoBranch  string // git branch to checkout before building (empty = stay on current)
 	serviceName string // systemd service name, for the unit drift check
 	installer   Installer
-	current     string // RunningReleaseName of the running build
+	current     string        // RunningReleaseName of the running build
+	releases    ReleaseSource // dates a preview/stable current; nil skips the lookup
 
 	// unitLocator and unitRevision back the systemd unit drift check;
 	// tests replace them (RebuildServerOptions) so they never call the
@@ -326,6 +327,11 @@ type RebuildServerOptions struct {
 	// CurrentRelease is the running build's RunningReleaseName (the
 	// pending update's "from"); default from pkg/version.
 	CurrentRelease string
+	// Releases looks up the publish date of a preview or stable
+	// CurrentRelease, for the boot-failure guard's previous_safe (as
+	// update-binary does). nil skips the lookup: such a "from" is then not
+	// safe to roll back to after migrations (fail closed).
+	Releases ReleaseSource
 	// Store, when set, keeps the last systemd unit check result for the
 	// Admin -> Maintenance page. Optional.
 	Store store.Store
@@ -346,6 +352,7 @@ func NewRebuildServerExecutor(opts RebuildServerOptions) *RebuildServerExecutor 
 		serviceName:      opts.ServiceName,
 		installer:        opts.Installer,
 		current:          opts.CurrentRelease,
+		releases:         opts.Releases,
 		unitLocator:      unitdrift.SystemctlLocator,
 		unitRevision:     unitdrift.GitRevision,
 		unitTimeout:      opts.UnitTimeout,
@@ -473,6 +480,14 @@ func (e *RebuildServerExecutor) RunWithBeforeRestart(ctx context.Context, logger
 		return fmt.Errorf("verification failed: %w", err)
 	}
 
+	// The boot-failure guard may roll back to the running release only if
+	// it is at or above the new build's downgrade floor; a preview or
+	// stable "from" needs its publish date for that (update-binary does the
+	// same). A Git "from" stays undated: not provably safe, fail closed.
+	lookupCtx, cancelLookup := context.WithTimeout(ctx, releaseAPITimeout)
+	fromPublished := releasePublishedAt(lookupCtx, e.releases, e.current)
+	cancelLookup()
+
 	// ── Install ─────────────────────────────────────────────────────────
 	_, _ = fmt.Fprintf(logger, "\n==> Installing %s (%s)\n", name, e.installer.Name())
 	installCtx, cancelInstall := context.WithTimeout(ctx, e.installTimeout)
@@ -499,12 +514,17 @@ func (e *RebuildServerExecutor) RunWithBeforeRestart(ctx context.Context, logger
 	var unitText string
 	if e.installer.Name() == StrategySudoInstall {
 		unitText = e.checkUnit(ctx, logger, repoPath, branch, currentBranch)
+	} else {
+		// Not a starter-hub unit: a drift record left from before (the
+		// Maintenance banner) can no longer be refreshed, so it is removed,
+		// as for a structural skip.
+		e.persistUnitStatus(ctx, logger, unitdrift.Report{Status: unitdrift.Skipped, Structural: true}, "", e.serviceName)
 	}
 
 	// ── Restart ─────────────────────────────────────────────────────────
 	_, _ = fmt.Fprintf(logger, "==> Restarting hub: %s -> %s at %s\n",
 		displayVersion(e.current), name, time.Now().UTC().Format(time.RFC3339))
-	_, _ = fmt.Fprintln(logger, "Server rebuild complete, restart initiated.")
+	_, _ = fmt.Fprintln(logger, "Server rebuild installed; requesting the restart.")
 	if unitText != "" {
 		_, _ = fmt.Fprintf(logger, "\n==> Systemd unit check\n%s", unitText)
 	}
@@ -515,6 +535,8 @@ func (e *RebuildServerExecutor) RunWithBeforeRestart(ctx context.Context, logger
 			Strategy: e.installer.Name(),
 			Mode:     UpdateModeGit,
 			Commit:   commit,
+			// For the boot-failure guard's previous_safe.
+			FromPublishedAt: fromPublished,
 		}
 		hookCtx, cancelHook := context.WithTimeout(ctx, e.hookTimeout)
 		err := before(hookCtx, p)
@@ -1388,16 +1410,30 @@ func streamCloudBuildLogs(ctx context.Context, client *gcstorage.Client, bucket,
 	return offset + n
 }
 
-// UpdateCheckResult contains the result of a check-for-updates operation.
+// UpdateCheckResult holds the outcome of a source-based update check.
 type UpdateCheckResult struct {
-	UpdateAvailable bool               `json:"update_available"`
-	CurrentCommit   string             `json:"current_commit"`
-	LatestCommit    string             `json:"latest_commit"`
-	CurrentBranch   string             `json:"current_branch"`
-	TrackingRef     string             `json:"tracking_ref"`
-	CommitsBehind   int                `json:"commits_behind"`
-	NewCommits      []UpdateCommitInfo `json:"new_commits,omitempty"`
+	UpdateAvailable bool `json:"update_available"`
+	// CurrentCommit is the commit compared with the tracking ref: the
+	// running build's commit when the checkout has it, else the checkout's
+	// HEAD (see Compared).
+	CurrentCommit string `json:"current_commit"`
+	// Compared is UpdateCheckRunning or UpdateCheckCheckout.
+	Compared      string             `json:"compared"`
+	LatestCommit  string             `json:"latest_commit"`
+	CurrentBranch string             `json:"current_branch"`
+	TrackingRef   string             `json:"tracking_ref"`
+	CommitsBehind int                `json:"commits_behind"`
+	NewCommits    []UpdateCommitInfo `json:"new_commits,omitempty"`
 }
+
+// What a source update check compared with the tracking ref.
+const (
+	// UpdateCheckRunning: the running build's commit.
+	UpdateCheckRunning = "running"
+	// UpdateCheckCheckout: the maintenance checkout's HEAD (the running
+	// commit is unknown or not in the checkout).
+	UpdateCheckCheckout = "checkout"
+)
 
 // UpdateCommitInfo describes a single commit available in the remote.
 type UpdateCommitInfo struct {
@@ -1405,19 +1441,33 @@ type UpdateCommitInfo struct {
 	Subject string `json:"subject"`
 }
 
-// CheckForUpdates fetches the remote and compares the local HEAD against
-// the current branch's remote tracking ref to determine whether a newer
-// version is available.
-func CheckForUpdates(ctx context.Context, repoPath string) (*UpdateCheckResult, error) {
+// UpdateCheckOptions configures CheckForUpdates.
+type UpdateCheckOptions struct {
+	// RepoPath is the maintenance checkout.
+	RepoPath string
+	// Branch is the configured branch Rebuild builds; "" means the
+	// checkout's current branch (as Rebuild does).
+	Branch string
+	// RunningCommit is the running build's commit. When the checkout has
+	// it, it is what is compared, so "up to date" means the running hub
+	// (not merely the checkout) has the branch's commits.
+	RunningCommit string
+}
+
+// CheckForUpdates fetches origin in the maintenance checkout and compares
+// the running commit (else the checkout's HEAD) with origin/<branch>.
+func CheckForUpdates(ctx context.Context, opts UpdateCheckOptions) (*UpdateCheckResult, error) {
 	log := logging.Subsystem("hub.maintenance.check-updates")
 
+	repoPath := opts.RepoPath
 	if repoPath == "" {
 		return nil, fmt.Errorf("no repository path configured")
 	}
 
-	log.Debug("Checking for updates", "repo_path", repoPath)
+	log.Debug("Checking for updates", "repo_path", repoPath, "branch", opts.Branch)
 
-	// Fetch from origin.
+	// The fetch output can name the remote (with any credentials in its
+	// URL): it goes to the server log only, never into the API error.
 	fetchCmd := exec.CommandContext(ctx, "git", "fetch", "origin")
 	fetchCmd.Dir = repoPath
 	if out, err := fetchCmd.CombinedOutput(); err != nil {
@@ -1425,62 +1475,58 @@ func CheckForUpdates(ctx context.Context, repoPath string) (*UpdateCheckResult, 
 		return nil, fmt.Errorf("git fetch failed: %w", err)
 	}
 
-	// Detect the current branch.
-	branchCmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
-	branchCmd.Dir = repoPath
-	branchOut, err := branchCmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get current branch: %w", err)
+	currentBranch := opts.Branch
+	if currentBranch == "" {
+		b, err := gitOutput(ctx, repoPath, "rev-parse", "--abbrev-ref", "HEAD")
+		if err != nil {
+			return nil, fmt.Errorf("failed to get current branch: %w", err)
+		}
+		currentBranch = b
 	}
-	currentBranch := strings.TrimSpace(string(branchOut))
-
-	// Resolve the remote tracking ref (e.g., "origin/main" or "origin/feature-branch").
 	trackingRef := "origin/" + currentBranch
 
-	// Get local HEAD commit.
-	localCmd := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
-	localCmd.Dir = repoPath
-	localOut, err := localCmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get local HEAD: %w", err)
+	base, compared := "", UpdateCheckCheckout
+	// Only a hex commit id reaches git (never an option-like value), and
+	// only when the checkout has that commit.
+	if GitReleaseName(opts.RunningCommit) != "" {
+		running := strings.ToLower(strings.TrimSpace(opts.RunningCommit))
+		if full, err := gitOutput(ctx, repoPath, "rev-parse", "--verify", "--quiet", running+"^{commit}"); err == nil {
+			base, compared = full, UpdateCheckRunning
+		}
 	}
-	localCommit := strings.TrimSpace(string(localOut))
+	if base == "" {
+		head, err := gitOutput(ctx, repoPath, "rev-parse", "HEAD")
+		if err != nil {
+			return nil, fmt.Errorf("failed to get local HEAD: %w", err)
+		}
+		base = head
+	}
 
-	// Get remote tracking commit.
-	remoteCmd := exec.CommandContext(ctx, "git", "rev-parse", trackingRef)
-	remoteCmd.Dir = repoPath
-	remoteOut, err := remoteCmd.Output()
+	remoteCommit, err := gitOutput(ctx, repoPath, "rev-parse", "--verify", trackingRef+"^{commit}")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get %s: %w", trackingRef, err)
 	}
-	remoteCommit := strings.TrimSpace(string(remoteOut))
 
 	result := &UpdateCheckResult{
-		CurrentCommit: localCommit,
+		CurrentCommit: base,
+		Compared:      compared,
 		LatestCommit:  remoteCommit,
 		CurrentBranch: currentBranch,
 		TrackingRef:   trackingRef,
 	}
-
-	if localCommit == remoteCommit {
+	if base == remoteCommit {
 		return result, nil
 	}
 
-	result.UpdateAvailable = true
-
-	// Get list of new commits (local..remote).
-	logCmd := exec.CommandContext(ctx, "git", "log", "--oneline", "--no-decorate",
-		localCommit+".."+remoteCommit)
-	logCmd.Dir = repoPath
-	logOut, err := logCmd.Output()
+	// Commits on the tracking ref that the compared commit lacks.
+	logOut, err := gitOutput(ctx, repoPath, "log", "--oneline", "--no-decorate", base+".."+remoteCommit)
 	if err != nil {
-		// Non-fatal: we know there's an update but can't list commits.
+		// Non-fatal: the commits differ, but they cannot be listed.
 		log.Warn("Failed to list new commits", "error", err)
+		result.UpdateAvailable = true
 		return result, nil
 	}
-
-	lines := strings.Split(strings.TrimSpace(string(logOut)), "\n")
-	for _, line := range lines {
+	for _, line := range strings.Split(logOut, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -1493,14 +1539,18 @@ func CheckForUpdates(ctx context.Context, repoPath string) (*UpdateCheckResult, 
 		result.NewCommits = append(result.NewCommits, info)
 	}
 	result.CommitsBehind = len(result.NewCommits)
+	// A compared commit ahead of the tracking ref (none missing) is not
+	// behind: no update.
+	result.UpdateAvailable = result.CommitsBehind > 0
 
 	log.Info("Update check complete",
-		"update_available", true,
+		"update_available", result.UpdateAvailable,
 		"commits_behind", result.CommitsBehind,
 		"branch", currentBranch,
 		"tracking_ref", trackingRef,
-		"current", localCommit[:8],
-		"latest", remoteCommit[:8])
+		"compared", compared,
+		"current", base,
+		"latest", remoteCommit)
 
 	return result, nil
 }

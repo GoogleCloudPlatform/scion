@@ -28,14 +28,24 @@ Maintenance page, and back. Do it with no new sudoers lines on starter hubs.
   `git-<sha12>` when there is none.
   - Boot reconciliation (`server.go`) and the update-state booting/verified markers (`cmd/server_update_state.go`,
     `update_downgrade.go`) now use the running release name.
-  - As a result, a git rebuild is verified on boot, and the boot-failure guard also covers git builds.
+  - As a result, a git rebuild is verified on boot.
+  - Boot-failure guard coverage (review r1, hu-em's policy):
+    - release→git is covered like release→release: the rebuild looks up the publish date of a preview/stable
+      `from` for `previous_safe`;
+    - git→git and git→release fail closed: `previous_safe` is `false` for a `git-*` `from`, because a commit's
+      schema position against the floor cannot be proven, so a crash loop leaves the hub stopped for the
+      manual restore;
+    - this is documented as a residual in `docs/deploy/single-node-vm.md`.
 - **Selection.** `PendingRestart`/`PendingUpdate` carry `mode` and `commit`.
   - A verified rebuild writes `system.release_selection` `{mode:"git", version:"git-<sha12>"}`, with no
     channel or pin. Nothing is written before the rebuild succeeds (D5).
   - `lastUpdate.mode` is `git` for a rebuild.
   - `failStaleRestartingRuns` also covers rebuild-server.
 - **check-updates** accepts `?mode=git|release` and returns 400 on any other value. Without it,
-  `deployment_tier` decides, as before.
+  `deployment_tier` decides, as before. The git check compares the running commit (the checkout's HEAD only
+  when the checkout lacks it, reported as `compared`) with `origin/<repo_branch>`.
+- On the symlink layout, a rebuild removes a stale `system.unit_drift` record, because the starter-hub unit
+  check no longer runs there.
 - **UI** (`admin-maintenance-update-card.ts`, `admin-maintenance.ts`):
   - an `sl-radio-group` "Build from Git" | "Release binary", shown only when `mode.repoConfigured`;
   - a Git panel with the configured branch (read-only), "Check for upstream commits" and Rebuild. Rebuild

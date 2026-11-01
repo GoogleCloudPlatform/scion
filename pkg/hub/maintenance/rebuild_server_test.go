@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/unitdrift"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 const testGitRelease = "git-0123456789ab"
@@ -327,4 +328,133 @@ func (missingSudoRunner) Run(context.Context, string, ...string) ([]byte, error)
 
 func (missingSudoRunner) Start(string, ...string) (<-chan error, error) {
 	return nil, exec.ErrNotFound
+}
+
+func TestRebuildServer_RestartFailureRollsBackSymlink(t *testing.T) {
+	f := newRebuildFixture(t, "")
+	inst, root, _ := symlinkInstallerForRebuild(t, "nightly-20261022")
+	inst.signal = func() error { return errors.New("cannot signal") }
+	hooked := false
+	err := f.executor(inst).RunWithBeforeRestart(context.Background(), &bytes.Buffer{}, nil,
+		func(context.Context, PendingRestart) error { hooked = true; return nil })
+	if err == nil || !strings.Contains(err.Error(), "restarting the hub failed") || !strings.Contains(err.Error(), "was rolled back") {
+		t.Fatalf("Run = %v, want a rolled-back restart failure", err)
+	}
+	if !hooked {
+		t.Fatal("the hook must run before the restart")
+	}
+	if target := readLink(t, root, currentLinkName); target != filepath.Join(releasesDirName, "nightly-20261022") {
+		t.Fatalf("current -> %q after the rollback, want the old release", target)
+	}
+}
+
+func TestRebuildServer_BuildFailureInstallsNothing(t *testing.T) {
+	f := newRebuildFixture(t, "")
+	// A failing go build: the stub is replaced by one that exits 1.
+	goStub := filepath.Join(filepath.SplitList(os.Getenv("PATH"))[0], "go")
+	if err := os.WriteFile(goStub, []byte("#!/bin/sh\necho 'compile error' >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inst, root, signals := symlinkInstallerForRebuild(t, "nightly-20261022")
+	err := f.executor(inst).Run(context.Background(), &bytes.Buffer{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "Building server binary failed: compile error") {
+		t.Fatalf("Run = %v, want the build failure", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, releasesDirName, testGitRelease)); !os.IsNotExist(err) {
+		t.Fatalf("a failed build was staged: %v", err)
+	}
+	if target := readLink(t, root, currentLinkName); target != filepath.Join(releasesDirName, "nightly-20261022") {
+		t.Fatalf("current -> %q, want unchanged", target)
+	}
+	if *signals != 0 {
+		t.Fatal("restart requested")
+	}
+}
+
+// datedReleases answers ReleaseByTag with a fixed publish date and counts
+// lookups.
+type datedReleases struct {
+	at      time.Time
+	lookups []string
+}
+
+func (d *datedReleases) ReleaseByTag(_ context.Context, tag string) (*Release, error) {
+	d.lookups = append(d.lookups, tag)
+	return &Release{Tag: tag, PublishedAt: d.at}, nil
+}
+
+// The boot-failure guard's previous_safe needs a dated preview/stable
+// "from"; a Git or nightly "from" is never looked up.
+func TestRebuildServer_FromPublishedAtForTheGuard(t *testing.T) {
+	published := time.Date(2026, 10, 22, 18, 0, 0, 0, time.UTC)
+	cases := []struct {
+		current     string
+		wantDate    time.Time
+		wantLookups int
+	}{
+		{"v0.3.0-preview.4", published, 1},
+		{"v1.0.0", published, 1},
+		{"nightly-20261022", time.Time{}, 0},
+		{"git-89abcdef0123", time.Time{}, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.current, func(t *testing.T) {
+			f := newRebuildFixture(t, "")
+			src := &datedReleases{at: published}
+			e := NewRebuildServerExecutor(RebuildServerOptions{
+				RepoPath:       f.repo,
+				Installer:      &fakeInstaller{},
+				CurrentRelease: tc.current,
+				Releases:       src,
+			})
+			var got PendingRestart
+			if err := e.RunWithBeforeRestart(context.Background(), &bytes.Buffer{}, nil,
+				func(_ context.Context, p PendingRestart) error { got = p; return nil }); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if !got.FromPublishedAt.Equal(tc.wantDate) || len(src.lookups) != tc.wantLookups {
+				t.Fatalf("FromPublishedAt = %v (lookups %v), want %v (%d lookups)", got.FromPublishedAt, src.lookups, tc.wantDate, tc.wantLookups)
+			}
+			// What the boot-failure guard gets from that "from".
+			safe := PreviousSafe(tc.current, got.FromPublishedAt, "nightly-20261009")
+			if wantSafe := tc.current != "git-89abcdef0123"; safe != wantSafe {
+				t.Fatalf("previous_safe for from %s = %v, want %v", tc.current, safe, wantSafe)
+			}
+		})
+	}
+}
+
+// unitDriftStore records hub setting deletions.
+type unitDriftStore struct {
+	store.Store
+	deleted []string
+}
+
+func (u *unitDriftStore) DeleteHubSetting(_ context.Context, section string) error {
+	u.deleted = append(u.deleted, section)
+	return nil
+}
+
+// On the symlink layout the starter-hub unit check does not run, and a
+// drift record left from before is removed, so its banner cannot go stale.
+func TestRebuildServer_SymlinkClearsUnitDriftRecord(t *testing.T) {
+	f := newRebuildFixture(t, "")
+	inst, _, _ := symlinkInstallerForRebuild(t, "nightly-20261022")
+	st := &unitDriftStore{}
+	e := NewRebuildServerExecutor(RebuildServerOptions{
+		RepoPath:       f.repo,
+		Installer:      inst,
+		CurrentRelease: "nightly-20261022",
+		Store:          st,
+	})
+	var log bytes.Buffer
+	if err := e.Run(context.Background(), &log, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(st.deleted) != 1 || st.deleted[0] != HubSettingSectionUnitDrift {
+		t.Fatalf("deleted = %v, want [%s]", st.deleted, HubSettingSectionUnitDrift)
+	}
+	if strings.Contains(log.String(), "Checking systemd unit against template") {
+		t.Fatalf("the unit check must not run on the symlink layout:\n%s", log.String())
+	}
 }

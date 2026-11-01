@@ -84,12 +84,19 @@ export interface PendingUpdate {
   commit?: string;
 }
 
-/** POST .../check-updates?mode=git: the repository checkout against origin. */
+/**
+ * POST .../check-updates?mode=git: the running build's commit (or, when the
+ * checkout does not have it, the checkout's HEAD) against origin/<branch>.
+ */
 export interface GitCheckResult {
   update_available: boolean;
+  /** The compared commit. */
   current_commit?: string;
+  /** What current_commit is: the running build, or the checkout's HEAD. */
+  compared?: 'running' | 'checkout' | (string & {});
   latest_commit?: string;
   current_branch?: string;
+  tracking_ref?: string;
   commits_behind?: number;
   new_commits?: { hash: string; subject: string }[];
 }
@@ -607,6 +614,12 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
     .git-check {
       margin-top: 0.75rem;
       font-size: 0.8125rem;
+    }
+
+    .git-check-note {
+      margin-top: 0.25rem;
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
     }
 
     .git-check-commits {
@@ -1164,14 +1177,30 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
     }
     const r = this.gitCheckResult;
     if (!r) return nothing;
-    const branch = r.current_branch ? html` on <code>${r.current_branch}</code>` : nothing;
+    const running = r.compared === 'running';
+    const subject = running ? 'The running build' : 'The repository checkout';
+    const commit = r.current_commit ? html` (<code>${r.current_commit.slice(0, 12)}</code>)` : nothing;
+    const ref = r.tracking_ref || (r.current_branch ? `origin/${r.current_branch}` : 'upstream');
+    const checkoutNote = running
+      ? nothing
+      : html`<div class="git-check-note">
+          The running build's commit is not in the repository checkout, so the checkout was
+          compared instead.
+        </div>`;
     if (!r.update_available) {
-      return html`<div class="git-check up-to-date">Up to date${branch}.</div>`;
+      return html`<div class="git-check up-to-date">
+        <div class="git-check-summary">${subject}${commit} is up to date with <code>${ref}</code>.</div>
+        ${checkoutNote}
+      </div>`;
     }
     const n = r.commits_behind ?? r.new_commits?.length ?? 0;
     return html`
       <div class="git-check">
-        <div class="git-check-summary">${n} new commit${n === 1 ? '' : 's'} upstream${branch}.</div>
+        <div class="git-check-summary">
+          ${n} new commit${n === 1 ? '' : 's'} on <code>${ref}</code> that
+          ${subject.toLowerCase()}${commit} does not have.
+        </div>
+        ${checkoutNote}
         ${r.new_commits?.length
           ? html`<ul class="git-check-commits">
               ${r.new_commits.map((c) => html`<li><code>${c.hash}</code> ${c.subject}</li>`)}

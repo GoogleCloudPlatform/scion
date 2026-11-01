@@ -806,10 +806,18 @@ func (e *BinaryUpdateExecutor) snapshot(ctx context.Context, logger io.Writer) (
 // build or a failed lookup. It is best-effort: it only dates the
 // update-state file's from.
 func (e *BinaryUpdateExecutor) runningPublished(ctx context.Context) time.Time {
-	if !update.IsReleaseTag(e.current) || update.DetectChannel(e.current) == "nightly" {
+	return releasePublishedAt(ctx, e.releases, e.current)
+}
+
+// releasePublishedAt is the publish date of a preview or stable release tag,
+// looked up in releases; zero for a nightly (it carries its date), a Git
+// build, a nil source or a failed lookup. It dates an update's "from" for
+// the boot-failure guard's previous_safe computation.
+func releasePublishedAt(ctx context.Context, releases ReleaseSource, tag string) time.Time {
+	if releases == nil || !update.IsReleaseTag(tag) || update.DetectChannel(tag) == "nightly" {
 		return time.Time{}
 	}
-	rel, err := e.releases.ReleaseByTag(ctx, e.current)
+	rel, err := releases.ReleaseByTag(ctx, tag)
 	if err != nil || rel == nil {
 		return time.Time{}
 	}

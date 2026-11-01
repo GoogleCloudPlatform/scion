@@ -111,3 +111,38 @@ func TestVerifyGitBuild(t *testing.T) {
 		})
 	}
 }
+
+// The boot-failure guard for a rebuild from Git (target git-<sha12>): the
+// target marks itself migrated and computes previous_safe like a release.
+// A release "from" at or above the floor (a preview/stable with its publish
+// date) is safe; a Git "from" is not (fail closed: a commit's schema position
+// against the floor cannot be proven), nor is an undated preview.
+func TestMarkUpdateStateBooting_GitTarget(t *testing.T) {
+	cases := []struct {
+		name, from, published string
+		wantSafe              bool
+	}{
+		{"release -> git, dated preview", "v0.3.0-preview.4", "2026-10-22T18:00:00Z", true},
+		{"release -> git, nightly", "nightly-20261023", "", true},
+		{"release -> git, undated preview", "v0.3.0-preview.4", "", false},
+		{"git -> git", "git-89abcdef0123", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := WriteUpdateState(root, UpdateState{Target: "git-0123456789ab", From: tc.from, RunID: "r1",
+				PreviousSafe: true, FromPublishedAt: tc.published}); err != nil {
+				t.Fatal(err)
+			}
+			running := RunningReleaseName("", testCommit)
+			changed, _, err := MarkUpdateStateBooting(root, running, updateStateTestFloor)
+			if err != nil || !changed {
+				t.Fatalf("changed = %v, err = %v", changed, err)
+			}
+			st, _ := ReadUpdateState(root)
+			if !st.Migrated || st.PreviousSafe != tc.wantSafe {
+				t.Fatalf("st = %+v, want migrated and previous_safe=%v", st, tc.wantSafe)
+			}
+		})
+	}
+}
