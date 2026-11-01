@@ -15,6 +15,8 @@
 package util
 
 import (
+	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -385,5 +387,23 @@ func TestRemoveWorktree_ConfigDefinedHookStillRuns(t *testing.T) {
 	}
 	if _, err := os.Stat(sentinel); err != nil {
 		t.Errorf("configuration-defined hook did not run (%v); if repository configuration is now read-only or ignored, update this test and BaseRepoGitCommand's doc", err)
+	}
+}
+
+// BaseRepoGitCommand applies HostGitCommand's first-argument rule: no
+// arguments, an empty first argument, or a first argument that is an option
+// returns errHostGitArgsOption and no command; a subcommand first builds one.
+// Mutant this catches: removing the guard (a command is returned for "-C").
+func TestBaseRepoGitCommand_RefusesLeadingOption(t *testing.T) {
+	repo := setupGitRepo(t)
+	for _, args := range [][]string{{}, {""}, {"-C", "x", "branch"}, {"--git-dir=x", "branch"}} {
+		cmd, err := BaseRepoGitCommand(context.Background(), repo, args...)
+		if !errors.Is(err, errHostGitArgsOption) || cmd != nil {
+			t.Errorf("%q: cmd %v, err %v; want no command and the leading-option refusal", args, cmd, err)
+		}
+	}
+	cmd, err := BaseRepoGitCommand(context.Background(), repo, "branch", "--list")
+	if err != nil || cmd == nil {
+		t.Errorf("branch --list: cmd %v, err %v; want a command", cmd, err)
 	}
 }

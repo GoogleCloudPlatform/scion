@@ -1790,6 +1790,15 @@ func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails
 				}
 				continue
 			}
+			// A user being deleted (ptone/scion#2143) has had its role
+			// bindings removed and keeps none until the row is gone: it is
+			// neither promoted nor demoted.
+			if u.Status == store.UserStatusDeleting {
+				if inAdminList {
+					slog.Warn("skipping admin promotion of a user being deleted listed in admin_emails", "user_id", u.ID)
+				}
+				continue
+			}
 
 			if inAdminList {
 				// Forward: ensure admin role and super-admin binding.

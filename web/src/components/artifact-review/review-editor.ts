@@ -53,7 +53,14 @@ interface CardState {
   anchor: Element;
   title: string;
   note: string;
+  /** How the comment can be edited, or why it cannot (ptone/scion#6850). */
+  hint: string;
 }
+
+/** The card's hint on the reviewer's own comment (design 4.5, ptone/scion#6850). */
+export const OWN_COMMENT_HINT = 'Click or press Enter to edit';
+/** The card's hint on an earlier comment (design 4.4, E5 S-b). */
+export const EARLIER_COMMENT_HINT = 'Earlier comment: read-only';
 
 @customElement('scion-review-editor')
 export class ScionReviewEditor extends LitElement {
@@ -165,6 +172,11 @@ export class ScionReviewEditor extends LitElement {
     return this.controller?.hasOwnMarks() ?? false;
   }
 
+  /** Whether an input method composition is still running (flush() gives null until it ends). */
+  isComposing(): boolean {
+    return this.controller?.isComposing ?? false;
+  }
+
   /** The current text; serializes only after an edit. Null if it cannot be written. */
   flush(): string | null {
     if (!this.controller) return this.content;
@@ -233,6 +245,7 @@ export class ScionReviewEditor extends LitElement {
       anchor: el,
       title: who ? `Comment ${number} · ${who}` : `Comment ${number}`,
       note: String(node.attrs.note),
+      hint: node.attrs.mine === true ? OWN_COMMENT_HINT : EARLIER_COMMENT_HINT,
     };
   };
 
@@ -259,6 +272,7 @@ export class ScionReviewEditor extends LitElement {
                 <sl-icon name="chat-text" aria-hidden="true"></sl-icon>${this.card.title}
               </div>
               <div class="card-note">${this.card.note}</div>
+              <div class="card-hint">${this.card.hint}</div>
             </div>
           </sl-popup>`
         : nothing}

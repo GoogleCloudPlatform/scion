@@ -78,3 +78,9 @@ Run proxy locally against a local backend:
 ```bash
 TARGET_URL="http://localhost:8080" PORT=9000 go run .
 ```
+
+## Forwarded headers
+
+The proxy is a trust boundary for the Scion Hub: it removes every `Forwarded` and `X-Forwarded-*` header a client sends and states only what it observed. `X-Forwarded-Proto` is the scheme the proxy served on that connection: `https` only when it terminated TLS itself, otherwise `http`. `X-Forwarded-For` is its immediate peer, and `X-Forwarded-Host` is the host it served.
+
+On Cloud Run the platform front end terminates TLS and the proxy serves plain HTTP, so it reports `http`. The proxy cannot verify the front end's TLS, so a Hub that lists this proxy in `server.trusted_proxies` refuses Runtime Broker registration and join-token minting, join, secret rotation and broker connections that come through it. Agent and web traffic are not affected. Runtime Brokers authenticate with HMAC and normally reach the Hub directly, not through the IAP front door.

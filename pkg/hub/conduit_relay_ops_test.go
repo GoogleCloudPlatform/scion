@@ -65,17 +65,27 @@ type relayOpsFixture struct {
 // startRelayOpsHub starts external relay mode on srv and registers relay-0.
 func startRelayOpsHub(t *testing.T, srv *Server, st store.Store) *relayOpsFixture {
 	t.Helper()
-	f := &relayOpsFixture{srv: srv, store: st}
-	f.regStore = entadapter.NewConduitRegistryStore(enttest.NewClient(t))
-	f.reg = registry.New(f.regStore, registry.Config{})
+	srv.config.SharedSigningSecret = testRelaySessionSecret
+	regStore := entadapter.NewConduitRegistryStore(enttest.NewClient(t))
+	return startRelayOpsHubOn(t, srv, st, regStore, registry.New(regStore, registry.Config{}), true)
+}
+
+// startRelayOpsHubOn starts external relay mode on srv over the given
+// conduit registry, which several hub replicas may share. register
+// registers relay-0 (the first replica only; the others read the same
+// registration through f.relayGen set by the caller).
+func startRelayOpsHubOn(t *testing.T, srv *Server, st store.Store, regStore registry.Store, reg *registry.Registry, register bool) *relayOpsFixture {
+	t.Helper()
+	f := &relayOpsFixture{srv: srv, store: st, regStore: regStore, reg: reg}
 	auth, err := relay.NewHMACPeerAuthFromPeerSecret(relay.HMACPeerAuthConfig{Secret: append([]byte(nil), externalPeerSecret...), SelfID: "hub-ext"})
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	srv.config.SharedSigningSecret = testRelaySessionSecret
 	require.NoError(t, srv.StartConduitExternal(ctx, ConduitExternalOptions{InstanceID: "hub-ext", PeerAuth: auth, Store: f.regStore, Registry: f.reg, Clock: clock.NewFake(time.Now()),
 		replayStore: testReplayStore(t)}))
-	f.relayGen = f.registerRelay(t, "relay-0")
+	if register {
+		f.relayGen = f.registerRelay(t, "relay-0")
+	}
 	f.internal = httptest.NewServer(srv.ConduitInternalHandler())
 	t.Cleanup(f.internal.Close)
 	f.hub = f.client(t, "relay-0")

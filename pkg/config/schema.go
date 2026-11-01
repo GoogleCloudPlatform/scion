@@ -17,9 +17,11 @@ package config
 import (
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"gopkg.in/yaml.v3"
 )
@@ -42,6 +44,11 @@ type ValidationError struct {
 	Path string
 	// Message describes the validation failure.
 	Message string
+	// StorageField marks a project storage field rule
+	// (ValidateProjectStorage). Path is then the field's settings path. A
+	// settings migration converts the file anyway and reports these as
+	// warnings, so the operator gets the file to fix.
+	StorageField bool
 }
 
 func (e ValidationError) Error() string {
@@ -175,7 +182,14 @@ func ValidateSettings(data []byte, schemaVersion string) ([]ValidationError, err
 		errs = append(errs, ValidateSharedDirSizes(vs.Runtimes, vs.Profiles)...)
 		errs = append(errs, RemovedStorageOverrideErrors(vs.Runtimes, vs.Profiles, RuntimeBrokerInstanceTargets(vs.Server.Broker.Instances))...)
 		if err := ValidateStorageBlocks(vs.Server.ProjectStorage, vs.Server.WorkspaceStorage, vs.Server.SharedDirStorage, vs.Server.HomeStorage); err != nil {
-			errs = append(errs, ValidationError{Path: ProjectStorageKey, Message: err.Error()})
+			var fields FieldErrorList
+			if errors.As(err, &fields) {
+				for _, f := range fields {
+					errs = append(errs, ValidationError{Path: f.Path, Message: strings.TrimPrefix(strings.TrimPrefix(f.Error(), f.Path), ": "), StorageField: true})
+				}
+			} else {
+				errs = append(errs, ValidationError{Path: ProjectStorageKey, Message: err.Error()})
+			}
 		}
 		errs = append(errs, ValidatePlacement(vs.Runtimes, vs.Profiles, LiteralSiblingGroups(vs.Runtimes))...)
 		errs = append(errs, RuntimeBrokerInstanceDuplicateKeys(vs.Server.Broker.Instances)...)
@@ -193,9 +207,10 @@ func SettingsWarnings(data []byte, schemaVersion string) []string {
 		return nil
 	}
 	var vs struct {
-		Runtimes map[string]V1RuntimeConfig `yaml:"runtimes"`
-		Profiles map[string]V1ProfileConfig `yaml:"profiles"`
-		Server   struct {
+		Runtimes         map[string]V1RuntimeConfig `yaml:"runtimes"`
+		Profiles         map[string]V1ProfileConfig `yaml:"profiles"`
+		DefaultResources *api.ResourceSpec          `yaml:"default_resources"`
+		Server           struct {
 			HomeStorage *V1HomeStorageConfig `yaml:"home_storage"`
 		} `yaml:"server"`
 	}
@@ -203,6 +218,13 @@ func SettingsWarnings(data []byte, schemaVersion string) []string {
 		return nil
 	}
 	warnings := SafeToEvictIgnoredWarnings(vs.Runtimes, vs.Profiles)
+	// Resource quantities the server-config API rejects or warns about
+	// (ptone/scion#6581) are warnings here: a loaded file is never refused
+	// for them.
+	qErrs, qWarnings := ValidateResourceQuantities(vs.DefaultResources, vs.Profiles)
+	for _, e := range append(qErrs, qWarnings...) {
+		warnings = append(warnings, e.Error())
+	}
 	warnings = append(warnings, PlacementIgnoredWarnings(vs.Runtimes, vs.Profiles)...)
 	warnings = append(warnings, PlacementSettingsWarnings(vs.Runtimes, vs.Profiles)...)
 	return append(warnings, HomeStorageWindowWarnings(vs.Server.HomeStorage)...)

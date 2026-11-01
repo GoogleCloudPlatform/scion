@@ -542,6 +542,9 @@ func WithHTTPClient(hc *http.Client) Option {
 // WithTimeout sets the request timeout.
 func WithTimeout(d time.Duration) Option {
 	return func(c *client) {
+		if c.transport.HTTPClient == nil {
+			c.transport.HTTPClient = &http.Client{}
+		}
 		c.transport.HTTPClient.Timeout = d
 	}
 }

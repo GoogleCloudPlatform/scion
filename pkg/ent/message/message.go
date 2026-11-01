@@ -107,8 +107,6 @@ var (
 	SenderValidator func(string) error
 	// RecipientValidator is a validator for the "recipient" field. It is called by the builders before save.
 	RecipientValidator func(string) error
-	// MsgValidator is a validator for the "msg" field. It is called by the builders before save.
-	MsgValidator func(string) error
 	// DefaultType holds the default value on creation for the "type" field.
 	DefaultType string
 	// DefaultUrgent holds the default value on creation for the "urgent" field.

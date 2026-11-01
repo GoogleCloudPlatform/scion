@@ -68,55 +68,33 @@ type Template struct {
 	Name  string
 	Path  string
 	Scope string // "global" or "project"
+
+	// root and rel, when set (templateBelow), record the trusted directory
+	// the template was found from and the template's path below it
+	// (Path == filepath.Join(root, rel)); content files are then read
+	// through a walk from root that follows no link (openDir).
+	root, rel string
 }
 
-// ResolveContent resolves a template field value to its content bytes.
-// If field is empty, returns nil, nil.
-// If a file at t.Path/field exists, reads and returns its content.
-// Otherwise, returns field as inline content bytes.
+// ResolveContent resolves a template content field value (agent_instructions
+// or system_prompt) in this template alone, with the rules of
+// ResolveContentInChain.
 func (t *Template) ResolveContent(field string) ([]byte, error) {
-	if field == "" {
-		return nil, nil
-	}
-
-	filePath := filepath.Join(t.Path, field)
-	if _, err := os.Stat(filePath); err == nil {
-		data, err := os.ReadFile(filePath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read content file %s: %w", filePath, err)
-		}
-		return data, nil
-	}
-
-	return []byte(field), nil
+	return resolveContentInTemplates([]*Template{t}, field)
 }
 
-// ResolveContentInChain resolves a template field value by searching the
-// template chain in reverse order (most specific first). This ensures that
-// when a custom template inherits a file reference like "agents.md" from a
-// parent template's config, the file is found in the parent template even
-// if it doesn't exist in the custom template's directory. Only falls back
-// to treating the field as inline content if no template in the chain
-// contains the file.
+// ResolveContentInChain resolves a template content field value
+// (agent_instructions or system_prompt) by searching the template chain in
+// reverse order (most specific first), so a custom template that inherits a
+// file reference like "agents.md" from a parent's config finds the file in
+// the parent. A value with a line break is inline content. A single-line
+// value must be a relative path inside the template directory; the file is
+// read only from inside a template directory, without following a symbolic
+// link, and a file that exists but is refused is an error
+// (ErrTemplateContentRefused). Only when no template in the chain holds the
+// file is the value treated as inline content.
 func ResolveContentInChain(chain []*Template, field string) ([]byte, error) {
-	if field == "" {
-		return nil, nil
-	}
-
-	// Walk chain in reverse (most specific first) looking for the file
-	for i := len(chain) - 1; i >= 0; i-- {
-		filePath := filepath.Join(chain[i].Path, field)
-		if _, err := os.Stat(filePath); err == nil {
-			data, err := os.ReadFile(filePath)
-			if err != nil {
-				return nil, fmt.Errorf("failed to read content file %s: %w", filePath, err)
-			}
-			return data, nil
-		}
-	}
-
-	// No template had the file; treat as inline content
-	return []byte(field), nil
+	return resolveContentInTemplates(chain, field)
 }
 
 func (t *Template) LoadConfig() (*api.ScionConfig, error) {
@@ -259,7 +237,7 @@ func FindTemplateWithContext(ctx context.Context, name string) (*Template, error
 	if err == nil {
 		path := filepath.Join(projectTemplatesDir, name)
 		if info, err := os.Stat(path); err == nil && info.IsDir() {
-			return &Template{Name: name, Path: path}, nil
+			return templateBelow(name, filepath.Dir(projectTemplatesDir), filepath.Join(filepath.Base(projectTemplatesDir), name), ""), nil
 		}
 	}
 
@@ -268,7 +246,7 @@ func FindTemplateWithContext(ctx context.Context, name string) (*Template, error
 	if err == nil {
 		path := filepath.Join(globalTemplatesDir, name)
 		if info, err := os.Stat(path); err == nil && info.IsDir() {
-			return &Template{Name: name, Path: path}, nil
+			return templateBelow(name, globalTemplatesDir, name, ""), nil
 		}
 	}
 
@@ -301,7 +279,10 @@ func FindTemplateInScope(name, scope string) *Template {
 
 	path := filepath.Join(dir, name)
 	if info, err := os.Stat(path); err == nil && info.IsDir() {
-		return &Template{Name: name, Path: path, Scope: scope}
+		if scope == "project" {
+			return templateBelow(name, filepath.Dir(dir), filepath.Join(filepath.Base(dir), name), scope)
+		}
+		return templateBelow(name, dir, name, scope)
 	}
 
 	return nil
@@ -488,7 +469,7 @@ func FindTemplateInProjectPath(name, projectPath string) (*Template, error) {
 	if root := projectTemplatesRoot(projectPath); root != "" {
 		path := filepath.Join(root, "templates", name)
 		if info, err := os.Stat(path); err == nil && info.IsDir() {
-			return &Template{Name: name, Path: path, Scope: "project"}, nil
+			return templateBelow(name, root, filepath.Join("templates", name), "project"), nil
 		}
 	}
 
@@ -497,7 +478,7 @@ func FindTemplateInProjectPath(name, projectPath string) (*Template, error) {
 	if err == nil {
 		path := filepath.Join(globalTemplatesDir, name)
 		if info, err := os.Stat(path); err == nil && info.IsDir() {
-			return &Template{Name: name, Path: path, Scope: "global"}, nil
+			return templateBelow(name, globalTemplatesDir, name, "global"), nil
 		}
 	}
 
@@ -536,6 +517,13 @@ func projectTemplatesRoot(projectPath string) string {
 // isHubWorkspaceRootWithoutScion reports whether p is a hub-managed
 // workspace root (below the hub projects directory, not a .scion path)
 // that has no .scion entry: it then has no project configuration tier.
+//
+// "Below the hub projects directory" is isUnderHubProjectsDir
+// (hub_projects_dir_other.go and hub_projects_dir_windows.go): p lies below
+// the global directory's projects/ directory, where hub-managed workspaces
+// live. It is the only containment decision for the project layer of a hub
+// workspace root: settings, project templates and harness-configs all read
+// it through this function.
 func isHubWorkspaceRootWithoutScion(p string) bool {
 	if p == "" || filepath.Base(p) == DotScion {
 		return false
@@ -545,13 +533,6 @@ func isHubWorkspaceRootWithoutScion(p string) bool {
 	}
 	return isUnderHubProjectsDir(p)
 }
-
-// isUnderHubProjectsDir (hub_projects_dir_other.go and
-// hub_projects_dir_windows.go) reports whether p lies below the global
-// directory's projects/ directory, where hub-managed workspaces live. It is
-// the only containment decision for the project layer of a hub workspace
-// root: settings, project templates and harness-configs all read it through
-// isHubWorkspaceRootWithoutScion.
 
 // LegacyProjectTemplatesWarning returns a start warning when projectPath is
 // a workspace root (see projectTemplatesRoot) with templates under its own
@@ -1060,8 +1041,11 @@ func MergeScionConfig(base, override *api.ScionConfig) *api.ScionConfig {
 		}
 		result.MCPServers = merged
 	}
-	if override.MaxTurns > 0 {
-		result.MaxTurns = override.MaxTurns
+	// Count limits are *int (ptone/scion#5605): a set override wins, 0
+	// ("no limit") included, so an explicit Unlimited overrides an
+	// inherited limit. Copy the pointee, as for ThinkingLevel.
+	if override.MaxTurns != nil {
+		result.MaxTurns = api.CloneIntPtr(override.MaxTurns)
 	}
 	if override.MaxDuration != "" {
 		result.MaxDuration = override.MaxDuration
@@ -1104,8 +1088,8 @@ func MergeScionConfig(base, override *api.ScionConfig) *api.ScionConfig {
 	if override.Branch != "" {
 		result.Branch = override.Branch
 	}
-	if override.MaxModelCalls > 0 {
-		result.MaxModelCalls = override.MaxModelCalls
+	if override.MaxModelCalls != nil {
+		result.MaxModelCalls = api.CloneIntPtr(override.MaxModelCalls)
 	}
 	if override.Info != nil {
 		if result.Info == nil {

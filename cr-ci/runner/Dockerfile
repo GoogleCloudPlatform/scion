@@ -60,6 +60,11 @@ RUN GOCACHE=/tmp/gocache GOMODCACHE=/tmp/gomodcache bash /src/golangci-lint/buil
 # --- git, built from the pinned source ------------------------------------------
 # gcc, make and the -dev libraries exist only in this stage; the runner image gets the
 # installed tree (/usr/local), never a compiler. No Perl, Python, gettext or Tk parts.
+# No Rust: git 2.55+ builds its Rust parts (libgitcore.a, via cargo) unless NO_RUST is
+# set (git's Makefile, "Optional Rust support"; mandatory only from git 3.0). Without
+# them git uses its C code; the only feature lost is the compatibility hash algorithm
+# (extensions.compatObjectFormat, SHA-1/SHA-256 interop), which nothing here uses. The
+# stage asserts that the build reports "rust: disabled".
 FROM ${UBUNTU_IMAGE} AS git
 ARG GIT_VERSION
 ARG GIT_SHA256
@@ -73,11 +78,12 @@ RUN apt-get update \
  && mkdir /tmp/git-src \
  && tar -C /tmp/git-src --strip-components=1 -xJf /tmp/git.tar.xz \
  && make -C /tmp/git-src -j"$(nproc)" prefix=/usr/local NO_TCLTK=YesPlease NO_GETTEXT=YesPlease \
-      NO_PERL=YesPlease NO_PYTHON=YesPlease NO_GITWEB=YesPlease INSTALL_SYMLINKS=YesPlease all \
+      NO_PERL=YesPlease NO_PYTHON=YesPlease NO_GITWEB=YesPlease NO_RUST=YesPlease INSTALL_SYMLINKS=YesPlease all \
  && make -C /tmp/git-src prefix=/usr/local NO_TCLTK=YesPlease NO_GETTEXT=YesPlease \
-      NO_PERL=YesPlease NO_PYTHON=YesPlease NO_GITWEB=YesPlease INSTALL_SYMLINKS=YesPlease \
+      NO_PERL=YesPlease NO_PYTHON=YesPlease NO_GITWEB=YesPlease NO_RUST=YesPlease INSTALL_SYMLINKS=YesPlease \
       DESTDIR=/out install \
- && /out/usr/local/bin/git --version | grep -qx "git version ${GIT_VERSION}"
+ && /out/usr/local/bin/git --version | grep -qx "git version ${GIT_VERSION}" \
+ && /out/usr/local/bin/git version --build-options | grep -qx 'rust: disabled'
 
 # --- The runner image ------------------------------------------------------------
 FROM ${UBUNTU_IMAGE}
@@ -144,17 +150,18 @@ COPY --from=golangci-lint --chmod=0755 /out/golangci-lint /usr/local/bin/golangc
 
 # GitHub Actions runner. installdependencies.sh ships in the verified tarball
 # and installs the .NET runtime libraries (libicu, libssl, ...) via apt.
-# _diag (the runner's logs and the job's step logs under _diag/pages; about 1 MB for
-# the P6 lint job, more for jobs with large output) stays a plain directory on the
-# root filesystem, NOT on /scratch: when a job fills /scratch, the runner must still be
-# able to write its logs and report the failure (P6 PoC run 2 lost the runner, and the
-# job's log, to ENOSPC on _diag).
-# The work folder is /home/runner/work (the mediator's JIT work_folder), which
-# entrypoint.sh links to /scratch/_work; the _work symlink here only covers a JIT
-# config that names the default _work. Nothing here may create /home/runner/work,
-# /home/runner/.cache, /home/runner/go or /home/runner/.npm: the entrypoint creates
-# them as links.
-WORKDIR /home/runner/actions-runner
+# The runner is installed at /opt/actions-runner, NOT under HOME: the job's
+# ephemeral-disk volume is mounted at HOME (/home/runner), which hides whatever the image
+# has there. _diag (the runner's logs and the job's step logs under _diag/pages; about
+# 1 MB for the P6 lint job, more for jobs with large output) therefore stays a plain
+# directory on the root filesystem, not on the volume: when a job fills the volume, the
+# runner must still be able to write its logs and report the failure (P6 PoC run 2 lost
+# the runner, and the job's log, to ENOSPC on _diag).
+# The work folder is /home/runner/work (the mediator's JIT work_folder), a real
+# directory the entrypoint creates on the volume; the _work symlink here only covers a
+# JIT config that names the default _work. Nothing here may create anything under
+# /home/runner: it is hidden by the mount.
+WORKDIR /opt/actions-runner
 RUN curl -fsSL -o /tmp/actions-runner.tgz \
       "https://github.com/actions/runner/releases/download/v${ACTIONS_RUNNER_VERSION}/actions-runner-linux-x64-${ACTIONS_RUNNER_VERSION}.tar.gz" \
  && echo "${ACTIONS_RUNNER_SHA256}  /tmp/actions-runner.tgz" | sha256sum -c - \
@@ -162,11 +169,23 @@ RUN curl -fsSL -o /tmp/actions-runner.tgz \
  && rm /tmp/actions-runner.tgz \
  && ./bin/installdependencies.sh \
  && rm -rf /var/lib/apt/lists/* \
- && ln -s /scratch/_work _work \
+ && ln -s /home/runner/work _work \
  && mkdir -p _diag \
- && chown -R runner:runner /home/runner
+ && chown -R runner:runner /opt/actions-runner /home/runner
 
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
+# The job-started hook (entrypoint.sh exports ACTIONS_RUNNER_HOOK_JOB_STARTED to it):
+# refuses, with a hard stop, any job that is not a same-repo push or pull_request of the
+# repository the runner serves. Its sha256 is pinned in the committed
+# cr-ci-job-guard.sh.sha256 (a Go test keeps the two in step) and installed read-only as
+# /etc/cr-ci/job-guard.sha256. entrypoint.sh refuses to start the runner unless the hook
+# matches it and both files and their directories are root-owned and not writable by the
+# runner; the build fails here already if they are not.
+COPY --chmod=0755 cr-ci-job-guard.sh /usr/local/bin/cr-ci-job-guard.sh
+COPY --chmod=0444 cr-ci-job-guard.sh.sha256 /etc/cr-ci/job-guard.sha256
+RUN echo "$(cat /etc/cr-ci/job-guard.sha256)  /usr/local/bin/cr-ci-job-guard.sh" | sha256sum -c - \
+ && meta=$(stat -c '%u %a' /usr/local/bin /usr/local/bin/cr-ci-job-guard.sh /etc/cr-ci /etc/cr-ci/job-guard.sha256 | tr '\n' ' ') \
+ && { [ "$meta" = "0 755 0 755 0 755 0 444 " ] || { echo "job guard files: owner/mode '$meta'" >&2; exit 1; }; }
 
 ENV HOME=/home/runner
 USER runner

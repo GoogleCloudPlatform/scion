@@ -58,6 +58,7 @@ var decodeResponseAllowlist = map[string]string{
 	"skills.go:skillService.Resolve":                          "a nil result means nothing resolved",
 	"client.go:client.Health":                                 "reachability probe; the body is optional",
 	"gcp_service_accounts.go:gcpServiceAccountService.Delete": "a 204 from a Hub that predates the impact report is a successful delete",
+	"users.go:userService.ForceDelete":                        "a 204 means nothing blocked and the user was deleted at once (nil deletion)",
 }
 
 // apiclientImportPath is the import path the guard resolves in each file, so

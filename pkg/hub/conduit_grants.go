@@ -153,18 +153,19 @@ type conduitGrantKeyStore interface {
 	CompareAndSwap(ctx context.Context, ring *grant.KeyRing, rev int) (applied bool, err error)
 }
 
-// dbConduitGrantKeyStore stores the ring as an encrypted hub-scope secret.
-// It is used only when an encryption key is configured.
+// dbConduitGrantKeyStore stores the ring as an encrypted hub-scope secret,
+// sealed by the server's shared ValueCipher (ptone/scion#1530 §5). It is
+// used only when encryption is enabled.
 type dbConduitGrantKeyStore struct {
-	store         store.SecretStore
-	encryptionKey []byte
+	store  store.SecretStore
+	cipher *secret.ValueCipher
 }
 
-func newDBConduitGrantKeyStore(st store.SecretStore, encryptionKey []byte) (*dbConduitGrantKeyStore, error) {
-	if len(encryptionKey) == 0 {
+func newDBConduitGrantKeyStore(st store.SecretStore, c *secret.ValueCipher) (*dbConduitGrantKeyStore, error) {
+	if !c.Enabled() {
 		return nil, errors.New("conduit grant key ring: persistence requires an encryption key")
 	}
-	return &dbConduitGrantKeyStore{store: st, encryptionKey: encryptionKey}, nil
+	return &dbConduitGrantKeyStore{store: st, cipher: c}, nil
 }
 
 func (d *dbConduitGrantKeyStore) Load(ctx context.Context) (*grant.KeyRing, int, error) {
@@ -175,7 +176,7 @@ func (d *dbConduitGrantKeyStore) Load(ctx context.Context) (*grant.KeyRing, int,
 	if rec == nil || rec.EncryptedValue == "" {
 		return nil, 0, store.ErrNotFound
 	}
-	plain, _, err := secret.DecryptValue(rec.EncryptedValue, d.encryptionKey)
+	plain, err := d.cipher.Decrypt(rec.EncryptedValue)
 	if err != nil {
 		return nil, 0, fmt.Errorf("%w: decrypt: %w", errConduitGrantRingUnreadable, err)
 	}
@@ -194,7 +195,7 @@ func (d *dbConduitGrantKeyStore) encode(ring *grant.KeyRing) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return secret.EncryptValue(string(raw), d.encryptionKey)
+	return d.cipher.Encrypt(string(raw))
 }
 
 func (d *dbConduitGrantKeyStore) Create(ctx context.Context, ring *grant.KeyRing) error {
@@ -724,7 +725,7 @@ func (s *Server) conduitGrantKeySet() *conduitGrantKeys {
 			return
 		}
 		var st conduitGrantKeyStore
-		if db, err := newDBConduitGrantKeyStore(s.store, s.encryptionKey); err == nil {
+		if db, err := newDBConduitGrantKeyStore(s.store, s.cipher); err == nil {
 			st = db
 		} else {
 			slog.Info("Conduit grant key ring is ephemeral: no persistence configured; it is held in memory and regenerated on restart")

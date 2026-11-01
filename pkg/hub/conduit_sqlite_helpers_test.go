@@ -210,6 +210,13 @@ type conduitFixture struct {
 func newConduitFixture(t *testing.T) *conduitFixture {
 	t.Helper()
 	srv, s := testServer(t)
+	return newConduitFixtureOn(t, srv, s)
+}
+
+// newConduitFixtureOn is newConduitFixture on a server the caller built
+// over s (for example a keyring-configured replica).
+func newConduitFixtureOn(t *testing.T, srv *Server, s store.Store) *conduitFixture {
+	t.Helper()
 	ctx := context.Background()
 	f := &conduitFixture{srv: srv, store: s, clock: &conduitTestClock{now: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)}}
 
@@ -246,7 +253,8 @@ func tcpHeader(port string) grant.StreamHeader {
 	return grant.StreamHeader{Kind: grant.StreamKindTCP, Params: map[string]string{grant.ParamHost: "127.0.0.1", grant.ParamPort: port}}
 }
 
-var testGrantEncryptionKey = secret.DeriveLocalEncryptionKey("test-shared-secret")
+// testGrantCipher is the legacy-mode cipher over a synthetic shared secret.
+var testGrantCipher = secret.NewLegacyValueCipher("test-shared-secret")
 
 func assertNoKeyMaterial(t *testing.T, s string, ring *grant.KeyRing) {
 	t.Helper()

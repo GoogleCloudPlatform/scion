@@ -237,7 +237,8 @@ type mockOAuthTransport struct {
 func (m *mockProxyAuthenticator) Authenticate(_ *http.Request) (*ProxyUserInfo, error) {
 	return m.user, m.err
 }
-func (m *mockProxyAuthenticator) Name() string { return "mock" }
+func (m *mockProxyAuthenticator) Name() string               { return "mock" }
+func (m *mockProxyAuthenticator) AssertionHeaders() []string { return nil }
 
 func (s *proxyAuthStore) GetUserByEmail(_ context.Context, email string) (*store.User, error) {
 	for _, u := range s.users {
@@ -386,6 +387,16 @@ func hubPageHeaderValues(t *testing.T) map[string]string {
 		require.NotEmpty(t, v, "securityHeadersMiddleware does not set %s", name)
 		out[name] = v
 	}
+	return out
+}
+
+// proxiedPageHeaderValues is hubPageHeaderValues for a page served from an
+// agent's port: the hub's own values, except that the untrusted-content
+// Permissions-Policy replaces the web pages' one.
+func proxiedPageHeaderValues(t *testing.T) map[string]string {
+	t.Helper()
+	out := hubPageHeaderValues(t)
+	out["Permissions-Policy"] = untrustedContentPermissionsPolicy
 	return out
 }
 

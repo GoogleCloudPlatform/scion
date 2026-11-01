@@ -44,6 +44,15 @@ var sectionSchemaDiffAllowList = map[string]string{
 	// value with a warning. An enum there would newly reject such files.
 	"gcp_iam.gcp_iam_check_mode: enum [enforce off], root []":                    "section stricter than root; the loader accepts any string",
 	"gcp_iam.gcp_iam_deny_unknown_policy: enum [fail-closed fail-open], root []": "section stricter than root; the loader accepts any string",
+
+	// Kubernetes identity and priority fields: the section keeps the JSON
+	// type, so a stored value that breaks the name rule is a save warning
+	// rather than a refusal of every save (ptone/scion#6580).
+	"profiles.*.kubernetes_block_service_account: pattern <nil>, root ^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$":   "type only in the section; the value rule is a save check (config.RuntimeSaveChecks: refused when a save sets it, a warning when stored and untouched; ptone/scion#6580)",
+	"profiles.*.kubernetes_service_account_mappings.*: pattern <nil>, root ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$": "type only in the section; the value rule is a save check (config.RuntimeSaveChecks: refused when a save sets it, a warning when stored and untouched; ptone/scion#6580)",
+	"runtimes.*.kubernetes_block_service_account: pattern <nil>, root ^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$":   "type only in the section; the value rule is a save check (config.RuntimeSaveChecks: refused when a save sets it, a warning when stored and untouched; ptone/scion#6580)",
+	"runtimes.*.kubernetes_service_account_mappings.*: pattern <nil>, root ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$": "type only in the section; the value rule is a save check (config.RuntimeSaveChecks: refused when a save sets it, a warning when stored and untouched; ptone/scion#6580)",
+	"runtimes.*.priority_class_name: pattern <nil>, root ^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$":                "type only in the section; the value rule is a save check (config.RuntimeSaveChecks: refused when a save sets it, a warning when stored and untouched; ptone/scion#6580)",
 }
 
 // TestSectionSchemas_MatchRootSchema checks every Layer-1 section schema

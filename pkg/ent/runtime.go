@@ -28,6 +28,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokertargetinventory"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatretentioncursor"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatretentionrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitprincipalepoch"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitsession"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
@@ -91,6 +93,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/userdeletion"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/userdeletionagent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userterminalworkspace"
 	"github.com/google/uuid"
 )
@@ -886,6 +890,26 @@ func init() {
 	chatlinkcodeDescID := chatlinkcodeFields[0].Descriptor()
 	// chatlinkcode.DefaultID holds the default value on creation for the id field.
 	chatlinkcode.DefaultID = chatlinkcodeDescID.Default.(func() uuid.UUID)
+	chatretentioncursorFields := schema.ChatRetentionCursor{}.Fields()
+	_ = chatretentioncursorFields
+	// chatretentioncursorDescCursorID is the schema descriptor for cursor_id field.
+	chatretentioncursorDescCursorID := chatretentioncursorFields[2].Descriptor()
+	// chatretentioncursor.DefaultCursorID holds the default value on creation for the cursor_id field.
+	chatretentioncursor.DefaultCursorID = chatretentioncursorDescCursorID.Default.(string)
+	// chatretentioncursorDescID is the schema descriptor for id field.
+	chatretentioncursorDescID := chatretentioncursorFields[0].Descriptor()
+	// chatretentioncursor.IDValidator is a validator for the "id" field. It is called by the builders before save.
+	chatretentioncursor.IDValidator = chatretentioncursorDescID.Validators[0].(func(string) error)
+	chatretentionrunFields := schema.ChatRetentionRun{}.Fields()
+	_ = chatretentionrunFields
+	// chatretentionrunDescDryRun is the schema descriptor for dry_run field.
+	chatretentionrunDescDryRun := chatretentionrunFields[2].Descriptor()
+	// chatretentionrun.DefaultDryRun holds the default value on creation for the dry_run field.
+	chatretentionrun.DefaultDryRun = chatretentionrunDescDryRun.Default.(bool)
+	// chatretentionrunDescID is the schema descriptor for id field.
+	chatretentionrunDescID := chatretentionrunFields[0].Descriptor()
+	// chatretentionrun.DefaultID holds the default value on creation for the id field.
+	chatretentionrun.DefaultID = chatretentionrunDescID.Default.(func() uuid.UUID)
 	conduitprincipalepochFields := schema.ConduitPrincipalEpoch{}.Fields()
 	_ = conduitprincipalepochFields
 	// conduitprincipalepochDescPrincipalKind is the schema descriptor for principal_kind field.
@@ -1799,10 +1823,6 @@ func init() {
 	messageDescRecipient := messageFields[4].Descriptor()
 	// message.RecipientValidator is a validator for the "recipient" field. It is called by the builders before save.
 	message.RecipientValidator = messageDescRecipient.Validators[0].(func(string) error)
-	// messageDescMsg is the schema descriptor for msg field.
-	messageDescMsg := messageFields[6].Descriptor()
-	// message.MsgValidator is a validator for the "msg" field. It is called by the builders before save.
-	message.MsgValidator = messageDescMsg.Validators[0].(func(string) error)
 	// messageDescType is the schema descriptor for type field.
 	messageDescType := messageFields[7].Descriptor()
 	// message.DefaultType holds the default value on creation for the type field.
@@ -2711,6 +2731,72 @@ func init() {
 	useraccesstokenDescID := useraccesstokenFields[0].Descriptor()
 	// useraccesstoken.DefaultID holds the default value on creation for the id field.
 	useraccesstoken.DefaultID = useraccesstokenDescID.Default.(func() uuid.UUID)
+	userdeletionFields := schema.UserDeletion{}.Fields()
+	_ = userdeletionFields
+	// userdeletionDescState is the schema descriptor for state field.
+	userdeletionDescState := userdeletionFields[2].Descriptor()
+	// userdeletion.StateValidator is a validator for the "state" field. It is called by the builders before save.
+	userdeletion.StateValidator = userdeletionDescState.Validators[0].(func(string) error)
+	// userdeletionDescRequestedByKind is the schema descriptor for requested_by_kind field.
+	userdeletionDescRequestedByKind := userdeletionFields[3].Descriptor()
+	// userdeletion.DefaultRequestedByKind holds the default value on creation for the requested_by_kind field.
+	userdeletion.DefaultRequestedByKind = userdeletionDescRequestedByKind.Default.(string)
+	// userdeletionDescRequestedByID is the schema descriptor for requested_by_id field.
+	userdeletionDescRequestedByID := userdeletionFields[4].Descriptor()
+	// userdeletion.DefaultRequestedByID holds the default value on creation for the requested_by_id field.
+	userdeletion.DefaultRequestedByID = userdeletionDescRequestedByID.Default.(string)
+	// userdeletionDescCredentialKind is the schema descriptor for credential_kind field.
+	userdeletionDescCredentialKind := userdeletionFields[5].Descriptor()
+	// userdeletion.DefaultCredentialKind holds the default value on creation for the credential_kind field.
+	userdeletion.DefaultCredentialKind = userdeletionDescCredentialKind.Default.(string)
+	// userdeletionDescBeforeSummary is the schema descriptor for before_summary field.
+	userdeletionDescBeforeSummary := userdeletionFields[9].Descriptor()
+	// userdeletion.DefaultBeforeSummary holds the default value on creation for the before_summary field.
+	userdeletion.DefaultBeforeSummary = userdeletionDescBeforeSummary.Default.(string)
+	// userdeletionDescOrphanedByRevoke is the schema descriptor for orphaned_by_revoke field.
+	userdeletionDescOrphanedByRevoke := userdeletionFields[10].Descriptor()
+	// userdeletion.DefaultOrphanedByRevoke holds the default value on creation for the orphaned_by_revoke field.
+	userdeletion.DefaultOrphanedByRevoke = userdeletionDescOrphanedByRevoke.Default.(string)
+	// userdeletionDescLastError is the schema descriptor for last_error field.
+	userdeletionDescLastError := userdeletionFields[11].Descriptor()
+	// userdeletion.DefaultLastError holds the default value on creation for the last_error field.
+	userdeletion.DefaultLastError = userdeletionDescLastError.Default.(string)
+	// userdeletionDescID is the schema descriptor for id field.
+	userdeletionDescID := userdeletionFields[0].Descriptor()
+	// userdeletion.DefaultID holds the default value on creation for the id field.
+	userdeletion.DefaultID = userdeletionDescID.Default.(func() uuid.UUID)
+	userdeletionagentFields := schema.UserDeletionAgent{}.Fields()
+	_ = userdeletionagentFields
+	// userdeletionagentDescSlug is the schema descriptor for slug field.
+	userdeletionagentDescSlug := userdeletionagentFields[3].Descriptor()
+	// userdeletionagent.DefaultSlug holds the default value on creation for the slug field.
+	userdeletionagent.DefaultSlug = userdeletionagentDescSlug.Default.(string)
+	// userdeletionagentDescProjectID is the schema descriptor for project_id field.
+	userdeletionagentDescProjectID := userdeletionagentFields[4].Descriptor()
+	// userdeletionagent.DefaultProjectID holds the default value on creation for the project_id field.
+	userdeletionagent.DefaultProjectID = userdeletionagentDescProjectID.Default.(string)
+	// userdeletionagentDescOutcome is the schema descriptor for outcome field.
+	userdeletionagentDescOutcome := userdeletionagentFields[5].Descriptor()
+	// userdeletionagent.OutcomeValidator is a validator for the "outcome" field. It is called by the builders before save.
+	userdeletionagent.OutcomeValidator = userdeletionagentDescOutcome.Validators[0].(func(string) error)
+	// userdeletionagentDescAttempts is the schema descriptor for attempts field.
+	userdeletionagentDescAttempts := userdeletionagentFields[6].Descriptor()
+	// userdeletionagent.DefaultAttempts holds the default value on creation for the attempts field.
+	userdeletionagent.DefaultAttempts = userdeletionagentDescAttempts.Default.(int)
+	// userdeletionagent.AttemptsValidator is a validator for the "attempts" field. It is called by the builders before save.
+	userdeletionagent.AttemptsValidator = userdeletionagentDescAttempts.Validators[0].(func(int) error)
+	// userdeletionagentDescLastError is the schema descriptor for last_error field.
+	userdeletionagentDescLastError := userdeletionagentFields[7].Descriptor()
+	// userdeletionagent.DefaultLastError holds the default value on creation for the last_error field.
+	userdeletionagent.DefaultLastError = userdeletionagentDescLastError.Default.(string)
+	// userdeletionagentDescUpdatedAt is the schema descriptor for updated_at field.
+	userdeletionagentDescUpdatedAt := userdeletionagentFields[8].Descriptor()
+	// userdeletionagent.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	userdeletionagent.DefaultUpdatedAt = userdeletionagentDescUpdatedAt.Default.(func() time.Time)
+	// userdeletionagentDescID is the schema descriptor for id field.
+	userdeletionagentDescID := userdeletionagentFields[0].Descriptor()
+	// userdeletionagent.DefaultID holds the default value on creation for the id field.
+	userdeletionagent.DefaultID = userdeletionagentDescID.Default.(func() uuid.UUID)
 	userterminalworkspaceFields := schema.UserTerminalWorkspace{}.Fields()
 	_ = userterminalworkspaceFields
 	// userterminalworkspaceDescSchemaVersion is the schema descriptor for schema_version field.

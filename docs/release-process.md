@@ -21,7 +21,8 @@ versions check nightly.
 
 Nightly releases expose the latest changes on `main` for early testing.
 
-- The nightly workflow runs daily at 02:00 UTC and can also be started manually.
+- The nightly workflow runs daily at 03:00 UTC (7:00 PM Pacific the previous evening) and can
+  also be started manually.
 - Tags use `nightly-YYYYMMDD`, such as `nightly-20260916`.
 - A tag is created only when `main` has commits newer than the most recent nightly tag. If the
   current day's tag already exists, the workflow does not create another one.
@@ -234,17 +235,22 @@ Release-candidate tags route to the preview branch and preview manifest entry.
 
 ### Nightly scheduling workflow
 
-[`build-nightly.yml`](../.github/workflows/build-nightly.yml) runs on a daily 02:00 UTC schedule
-or by manual dispatch. It compares `main` with the latest nightly tag and pushes a new dated tag
-only when new commits exist. That tag starts `build-release.yml`, which builds and publishes the
-nightly release. After creating a new nightly tag, the workflow deletes nightly GitHub releases
-and tags older than 14 days.
+[`build-nightly.yml`](../.github/workflows/build-nightly.yml) runs on a daily 03:00 UTC schedule
+(7:00 PM Pacific the previous evening) or by manual dispatch. It compares `main` with the latest
+nightly tag and pushes a new dated tag only when new commits exist. That tag starts
+`build-release.yml`, which builds and publishes the nightly release. After creating a new nightly
+tag, the workflow deletes nightly GitHub releases and tags older than 14 days.
+
+GitHub cron schedules are UTC-only, so the nightly and weekly preview schedules are adjusted by
+hand at each daylight saving change to keep 7:00 PM and 7:00 AM Pacific. The 03:00 and 15:00 UTC
+times are for Pacific standard time; when daylight saving starts in March, revert the crons to
+02:00 and 14:00 UTC.
 
 ### Weekly preview workflow
 
 [`build-preview-weekly.yml`](../.github/workflows/build-preview-weekly.yml) runs every Friday at
-14:00 UTC, after that day's nightly, or by manual dispatch with an optional `nightly_tag` input.
-The selection logic lives in
+15:00 UTC (7:00 AM Pacific), after that day's nightly, or by manual dispatch with an optional
+`nightly_tag` input. The selection logic lives in
 [`select-weekly-preview.sh`](../scripts/release/select-weekly-preview.sh). The workflow:
 
 1. Picks the highest `release/vX.Y` branch, comparing versions numerically. It fails if none
@@ -279,8 +285,11 @@ The main `scion` binary is published for:
 | `linux/arm64` | `scion-linux-arm64` |
 | `darwin/amd64` | `scion-darwin-amd64` |
 | `darwin/arm64` | `scion-darwin-arm64` |
+| `windows/amd64` | `scion-windows-amd64` |
+| `windows/arm64` | `scion-windows-arm64` |
 
-Release artifacts are gzip-compressed tar archives. The Telegram, Discord, Slack, and Teams
+Linux and macOS artifacts are gzip-compressed tar archives (`.tar.gz`) containing `scion`. Windows
+artifacts are zip archives (`.zip`) containing `scion.exe`. The Telegram, Discord, Slack, and Teams
 plugins are built for Linux on both amd64 and arm64; plugin builds are not published for macOS.
 
 ## Checksums

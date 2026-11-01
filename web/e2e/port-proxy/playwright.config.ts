@@ -31,6 +31,8 @@ const CI = !!process.env.CI;
 export default defineConfig({
   testDir: '.',
   testMatch: '**/*.pw.ts',
+  // The page view journeys run under playwright.view.config.ts.
+  testIgnore: '**/port-view.pw.ts',
   timeout: 90_000,
   workers: 1,
   retries: CI ? 1 : 0,

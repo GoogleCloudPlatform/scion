@@ -170,7 +170,7 @@ func TestScheduleAttention_PausedItems(t *testing.T) {
 	}
 	assert.Equal(t, []HealthAttentionItem{
 		w(sub("f1", "failing", "p1"), "Scheduled event failing failed its last run"),
-		w(sub("s1", "nightly", "p1"), "Scheduled event alpha / nightly was paused by the hub: the agent that created it was deleted"),
+		w(sub("s1", "nightly", "p1"), "Scheduled event alpha / nightly was paused by the hub: the agent or user it runs under was deleted"),
 		w(sub("s2", "zoned", "p2"), "Scheduled event zoned was paused by the hub: its cron expression names a time zone, which is not supported"),
 		w(sub("s3", "later", "p2"), "Scheduled event later was paused by the hub: a reason this hub does not recognize"),
 		w(sub("s4", "raw", "p2"), "Scheduled event raw was paused by the hub: a reason this hub does not recognize"),

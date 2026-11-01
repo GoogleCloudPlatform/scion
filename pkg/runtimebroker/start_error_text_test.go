@@ -237,10 +237,46 @@ func TestClassifyStartError_FixedText(t *testing.T) {
 		{&config.HarnessConfigNotFoundError{Name: "x", Searched: []string{"/srv/y"}}, `Failed to create agent: harness-config "x" not found`},
 	}
 	for _, c := range cases {
-		_, _, got := classifyStartError(t.Context(), c.err, "claude", "")
+		_, _, got := classifyStartError(t.Context(), c.err, "claude", "", store.LaunchKindCreate)
 		if got != c.want {
 			t.Errorf("classifyStartError(%q) message = %q, want %q", c.err, got, c.want)
 		}
+	}
+}
+
+// TestClassifyStartError_FixedTextByKind pins that the fixed texts naming
+// the operation follow the launch kind (wave 3 E-AC6): a start launch
+// (also a restart's start leg) reports "Failed to start agent", the lead
+// the synchronous start handler writes, and a create keeps "Failed to
+// create agent". Texts that do not name the operation are the same for
+// both kinds. TestAsyncStart_FailedLaunchReportsStartText pins the kind's
+// wiring from the launch record through runLaunch.
+func TestClassifyStartError_FixedTextByKind(t *testing.T) {
+	cases := []struct {
+		name       string
+		err        error
+		wantCreate string
+		wantStart  string
+	}{
+		{"runtime_error", errors.New(identityLeakingRuntimeError), "Failed to create agent", "Failed to start agent"},
+		{"template not found", config.NewTemplateNotFoundError(brokerTemplatePath, "template path "+brokerTemplatePath),
+			`Failed to create agent: template "secret" not found`, `Failed to start agent: template "secret" not found`},
+		{"harness-config not found", &config.HarnessConfigNotFoundError{Name: "x", Searched: []string{"/srv/y"}},
+			`Failed to create agent: harness-config "x" not found`, `Failed to start agent: harness-config "x" not found`},
+		{"no hub token", fmt.Errorf("start: %w", agent.ErrNoHubToken),
+			"Failed to create agent: " + agent.ErrNoHubToken.Error(), "Failed to start agent: " + agent.ErrNoHubToken.Error()},
+		{"name in use", fmt.Errorf("wrapped scion-ctr-9e1d: %w", agent.ErrContainerNameInUse),
+			agent.ErrContainerNameInUse.Error(), agent.ErrContainerNameInUse.Error()},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if _, _, got := classifyStartError(t.Context(), c.err, "claude", "", store.LaunchKindCreate); got != c.wantCreate {
+				t.Errorf("create launch message = %q, want %q", got, c.wantCreate)
+			}
+			if _, _, got := classifyStartError(t.Context(), c.err, "claude", "", store.LaunchKindStart); got != c.wantStart {
+				t.Errorf("start launch message = %q, want %q", got, c.wantStart)
+			}
+		})
 	}
 }
 

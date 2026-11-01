@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -253,20 +254,45 @@ func (s *Server) onProjectActiveProfileSaved(ctx context.Context, project *store
 // Agents on flat Runtime Brokers carry their instance's broker ID, never
 // the legacy co-located one, so the broker filter excludes them.
 func (s *Server) countProfileReferences(ctx context.Context, brokerID, globalDir string) (config.ProfileReferences, error) {
-	providers, err := s.store.GetBrokerProjects(ctx, brokerID)
+	in, _, err := s.colocatedAgentRows(ctx, brokerID)
 	if err != nil {
-		return config.ProfileReferences{}, fmt.Errorf("list the co-located broker's projects: %w", err)
+		return config.ProfileReferences{}, err
 	}
-	in := agent.ProfileRefInputs{Providers: make([]agent.ProfileRefProvider, 0, len(providers))}
-	for _, pv := range providers {
-		in.Providers = append(in.Providers, agent.ProfileRefProvider{ProjectID: pv.ProjectID, LocalPath: pv.LocalPath})
+
+	refs, ok := agent.BuildProfileReferences(globalDir, brokerID, in)
+	if !ok {
+		return config.ProfileReferences{}, fmt.Errorf("no co-located broker ID")
+	}
+	slog.Debug("Built-in profile references counted",
+		"agents", len(in.Agents), "agent_info_missing", refs.AgentInfoMissing, "agent_info_unreadable", refs.AgentInfoUnreadable)
+	return refs, nil
+}
+
+// colocatedAgentRows reads the store rows the profile reference count and
+// the placement pre-upgrade scan use for the co-located broker brokerID:
+// its provider rows (none when brokerID is empty), every project, and the
+// agents that are unplaced or placed on it. other counts the agents placed
+// on any other broker, which are left out.
+func (s *Server) colocatedAgentRows(ctx context.Context, brokerID string) (in agent.ProfileRefInputs, other int, err error) {
+	if s.store == nil {
+		return agent.ProfileRefInputs{}, 0, errors.New("no store to list the co-located broker's agents")
+	}
+	if brokerID != "" {
+		providers, err := s.store.GetBrokerProjects(ctx, brokerID)
+		if err != nil {
+			return agent.ProfileRefInputs{}, 0, fmt.Errorf("list the co-located broker's projects: %w", err)
+		}
+		in.Providers = make([]agent.ProfileRefProvider, 0, len(providers))
+		for _, pv := range providers {
+			in.Providers = append(in.Providers, agent.ProfileRefProvider{ProjectID: pv.ProjectID, LocalPath: pv.LocalPath})
+		}
 	}
 
 	cursor := ""
 	for {
 		page, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: profileReferencePageSize, Cursor: cursor, SkipTotalCount: true})
 		if err != nil {
-			return config.ProfileReferences{}, fmt.Errorf("list projects: %w", err)
+			return agent.ProfileRefInputs{}, 0, fmt.Errorf("list projects: %w", err)
 		}
 		for i := range page.Items {
 			pr := &page.Items[i]
@@ -287,12 +313,13 @@ func (s *Server) countProfileReferences(ctx context.Context, brokerID, globalDir
 	for {
 		page, err := s.store.ListAgents(ctx, store.AgentFilter{}, store.ListOptions{Limit: profileReferencePageSize, Cursor: cursor, SkipTotalCount: true})
 		if err != nil {
-			return config.ProfileReferences{}, fmt.Errorf("list agents: %w", err)
+			return agent.ProfileRefInputs{}, 0, fmt.Errorf("list agents: %w", err)
 		}
 		for i := range page.Items {
 			a := &page.Items[i]
 			if a.RuntimeBrokerID != "" && a.RuntimeBrokerID != brokerID {
-				continue // counted nowhere
+				other++
+				continue
 			}
 			row := agent.ProfileRefAgentRow{Slug: a.Slug, ProjectID: a.ProjectID, RuntimeBrokerID: a.RuntimeBrokerID}
 			if a.AppliedConfig != nil {
@@ -305,12 +332,5 @@ func (s *Server) countProfileReferences(ctx context.Context, brokerID, globalDir
 		}
 		cursor = page.NextCursor
 	}
-
-	refs, ok := agent.BuildProfileReferences(globalDir, brokerID, in)
-	if !ok {
-		return config.ProfileReferences{}, fmt.Errorf("no co-located broker ID")
-	}
-	slog.Debug("Built-in profile references counted",
-		"agents", len(in.Agents), "agent_info_missing", refs.AgentInfoMissing, "agent_info_unreadable", refs.AgentInfoUnreadable)
-	return refs, nil
+	return in, other, nil
 }

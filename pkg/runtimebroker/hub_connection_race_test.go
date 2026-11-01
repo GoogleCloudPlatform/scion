@@ -49,7 +49,7 @@ func TestHubConnection_ReinitializeConcurrentReaders(t *testing.T) {
 	t.Setenv(transportauth.EnvTransportAudience, "")
 
 	const name = "hub-one"
-	creds := makeTestCreds(name, "broker-1", "http://hub1.example.com")
+	creds := makeTestCreds(name, "broker-1", "https://hub1.example.com")
 
 	newServer := func(t *testing.T) (*Server, *HubConnection) {
 		t.Helper()

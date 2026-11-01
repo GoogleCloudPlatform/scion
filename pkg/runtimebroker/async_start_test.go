@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -554,6 +555,48 @@ func TestAsyncStart_FailureKeepsFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(agentDir, "prompt.md")); err != nil {
 		t.Fatalf("a failed start launch removed the agent's files: %v", err)
+	}
+}
+
+// TestAsyncStart_FailedLaunchReportsStartText pins the launch kind's
+// wiring through the real call path (runLaunch -> classifyStartError,
+// wave 3 E-AC6): a failed asynchronous start reports runtime_error with
+// "Failed to start agent", the synchronous start's text, never the
+// create text, and never the runtime's own error text. The create side of
+// the same path is pinned by TestStartErrorText_* (asyncCreateFailure).
+func TestAsyncStart_FailedLaunchReportsStartText(t *testing.T) {
+	const detail = "container scion-ctr-7f3a exited in namespace secret-ns"
+	mgr := newAsyncManager()
+	mgr.setStartErr(errors.New(detail))
+	srv, rtb := newAsyncTestServer(t, mgr)
+	projectDir, _ := asyncStartProject(t, "agent-st")
+
+	body := asyncStartBody("L-st")
+	body["projectPath"] = projectDir
+	w := postAsyncStart(t, srv, "agent-st", asyncStartQuery(), body)
+	if w.Code != http.StatusAccepted || !decodeStartResponse(t, w).LaunchPending {
+		t.Fatalf("expected an accepted async start, got %d: %s", w.Code, w.Body.String())
+	}
+	var failed *hubclient.AgentLaunchReport
+	if !waitUntil(t, 2*time.Second, func() bool {
+		for _, r := range rtb.getLaunchReports() {
+			if r.Report.State == hubclient.AgentLaunchReportStateFailed {
+				failed = r.Report
+				return true
+			}
+		}
+		return false
+	}) {
+		t.Fatalf("no failed terminal report; reports: %+v", rtb.getLaunchReports())
+	}
+	if failed.ErrorCode != api.LaunchCodeRuntimeError {
+		t.Errorf("error code = %q, want %q", failed.ErrorCode, api.LaunchCodeRuntimeError)
+	}
+	if failed.Message != "Failed to start agent" {
+		t.Errorf("a failed start launch reported %q, want %q", failed.Message, "Failed to start agent")
+	}
+	if strings.Contains(failed.Message, "secret-ns") {
+		t.Errorf("the report leaked the runtime error: %q", failed.Message)
 	}
 }
 

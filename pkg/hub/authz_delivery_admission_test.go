@@ -820,6 +820,21 @@ func TestHubDelivery_LivenessCausesMatchOrdinaryWalk(t *testing.T) {
 			},
 			want: DenyCauseCeilingOrphaned,
 		},
+		{
+			// The delegator agent is held (ptone/scion#3433): not live in
+			// either walk (checkAgentHoldsPermission, hubDeliveryDelegatorLiveness).
+			name: "agent_held",
+			setup: func(t *testing.T, f *goldenFixture) string {
+				a, c := tid("hd-live-agent-held-a"), tid("hd-live-agent-held-c")
+				hdAgent(t, f.store, a, f.projectAlpha.ID, []string{f.superAdminID})
+				hdAgent(t, f.store, c, f.projectAlpha.ID, []string{f.superAdminID, a})
+				hdEdge(t, f.store, store.DelegationPrincipalUser, f.superAdminID, a, f.projectAlpha.ID, nil)
+				hdEdge(t, f.store, store.DelegationPrincipalAgent, a, c, f.projectAlpha.ID, nil)
+				holdAgentFor(t, f.store, a, f.projectAlpha.ID, f.superAdminID)
+				return c
+			},
+			want: DenyCauseCeilingOrphaned,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1637,10 +1652,12 @@ func TestHubDelivery_AgentCreatedChain(t *testing.T) {
 	})
 
 	// U's UAT creates A: A's edge is bounded by the UAT's selectors, none
-	// of which covers a deliver permission. A's token then creates C, whose
-	// edge carries A's coverage and no deliver permission. Stage 2b's
-	// resolver is structural and passes; step 10 denies at C's hop.
-	t.Run("uat_parent_empty_subset", func(t *testing.T) {
+	// of which covers a deliver permission, but the deliver permissions are
+	// intrinsic to a hop recorded from a user access token
+	// (uatHopEffectCeiling). A's token then creates C, whose edge carries
+	// them (parentDeliverEligibility over A's chain), so the strict walk
+	// admits C through both hops, and the root admission runs.
+	t.Run("uat_parent_deliver_intrinsic", func(t *testing.T) {
 		f := newChainFixture(t, "hd-acc-uat")
 		withDeliveryCredentialKinds(t, CredentialKindHubDelivery)
 		authz := f.srv.authzService
@@ -1654,15 +1671,18 @@ func TestHubDelivery_AgentCreatedChain(t *testing.T) {
 		a, aEdge := f.createdAgent(t, rec, "hd-acc-uat-a")
 		require.Equal(t, store.EffectCeilingBounded, aEdge.Kind)
 		require.Contains(t, aEdge.PermissionIDs, "agent.create", "the UAT holds agent:create")
-		require.Empty(t, deliverOf(aEdge.PermissionIDs), "no UAT selector covers a deliver permission")
+		require.Empty(t, deliverOf(aEdge.PermissionIDs), "no UAT selector covers a deliver permission: the stored edge is the token's list")
 
 		c, cEdge := f.childOf(t, a, "hd-acc-uat-c")
 		require.Equal(t, []string{f.creator.ID, a.ID}, c.Ancestry)
 		require.Equal(t, store.EffectCeilingBounded, cEdge.Kind)
-		require.Empty(t, deliverOf(cEdge.PermissionIDs), "A's chain allows no deliver permission, so C's edge carries none")
+		assert.ElementsMatch(t, hubDeliveryPermissionList, deliverOf(cEdge.PermissionIDs), "A's chain allows the deliver permissions, so C's edge carries them")
 
 		d := decidePerm(authz, hdIdentity(t, authz, c.ID), userSecret(t, f, "hd-acc-uat"), ActionDeliver, "secret.deliver", true)
-		assertDeniedAtFirstHop(t, d)
+		require.True(t, d.Allowed, "reason %q", d.Reason)
+		assert.Equal(t, 2, countDecisionSteps(d.ExplainTrace, "delegation_ceiling_delivery_hop"), "one hop step per edge: %+v", d.ExplainTrace)
+		assert.True(t, hasDecisionStep(d.ExplainTrace, "delegation_ceiling_delivery_uat_intrinsic"), "A's hop passes through the intrinsic rule")
+		assert.True(t, hasDecisionStep(d.ExplainTrace, "delegation_ceiling_delivery_root"))
 	})
 
 	// Legacy-state seeding: A has the pre-provenance shape (ancestry [U]

@@ -22,6 +22,7 @@ import (
 	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
@@ -309,6 +310,20 @@ func (s *ScheduleStore) GetSchedule(ctx context.Context, id string) (*store.Sche
 	return entScheduleToStore(e), nil
 }
 
+// scheduleRecordedAuthorityIs keeps the schedules whose recorded authority
+// is the principal kind/id: the current initiator principal, with a
+// recorded attribution (version 1 or later, a credential kind neither empty
+// nor legacy_unknown). It is the store side of the hub's scheduledInitiator
+// reading, so every row it keeps is one the hub reads as that principal.
+func scheduleRecordedAuthorityIs(kind, id string) predicate.Schedule {
+	return schedule.And(
+		schedule.InitiatorPrincipalKindEQ(kind),
+		schedule.InitiatorPrincipalIDEQ(id),
+		schedule.AttributionVersionGTE(1),
+		schedule.InitiatorCredentialKindNotIn("", store.InitiatorCredentialKindLegacyUnknown),
+	)
+}
+
 // ListSchedules returns schedules matching the filter criteria.
 func (s *ScheduleStore) ListSchedules(ctx context.Context, filter store.ScheduleFilter, opts store.ListOptions) (*store.ListResult[store.Schedule], error) {
 	query := s.client.Schedule.Query()
@@ -333,12 +348,13 @@ func (s *ScheduleStore) ListSchedules(ctx context.Context, filter store.Schedule
 		query.Where(schedule.LastRunStatusEQ(filter.LastRunStatus))
 	}
 	if filter.InitiatorAgentID != "" {
-		query.Where(
-			schedule.InitiatorPrincipalKindEQ(store.DelegationPrincipalAgent),
-			schedule.InitiatorPrincipalIDEQ(filter.InitiatorAgentID),
-			schedule.AttributionVersionGTE(1),
-			schedule.InitiatorCredentialKindNotIn("", store.InitiatorCredentialKindLegacyUnknown),
-		)
+		query.Where(scheduleRecordedAuthorityIs(store.DelegationPrincipalAgent, filter.InitiatorAgentID))
+	}
+	if p := filter.AuthorityPrincipal; !p.IsZero() {
+		if p.Kind == "" || p.ID == "" {
+			return nil, fmt.Errorf("%w: schedule authority principal needs both a kind and an ID", store.ErrInvalidInput)
+		}
+		query.Where(scheduleRecordedAuthorityIs(p.Kind, p.ID))
 	}
 	if filter.SystemPausedOnly {
 		query.Where(schedule.StatusEQ(store.ScheduleStatusPaused))

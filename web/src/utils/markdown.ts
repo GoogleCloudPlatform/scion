@@ -23,6 +23,11 @@
  *
  * All rendered HTML is sanitized via DOMPurify. A DOMPurify hook
  * ensures anchors open in a new tab with rel="noopener noreferrer".
+ *
+ * `renderFragment` is the one place where rendered markdown becomes markup:
+ * the sanitizer parses it once and hands back DOM nodes. Callers change
+ * those nodes with DOM calls only and attach them as nodes, so no step after
+ * it parses markup again.
  */
 
 import { criticToSentinels, renderCriticSentinels } from './critic.js';
@@ -49,7 +54,15 @@ export interface MarkdownRenderOptions {
 
 /** Result of the lazy-loaded renderer. */
 export interface MarkdownRenderer {
+  /** Renders and sanitizes markdown to an HTML string. */
   render(markdown: string, options?: MarkdownRenderOptions): string;
+  /**
+   * Renders and sanitizes markdown to nodes owned by this document, parsing
+   * the markup exactly once. The sanitizing and image rules are the same as
+   * `render`. Change the result with DOM calls only (never by setting markup
+   * from strings) and attach it as nodes.
+   */
+  renderFragment(markdown: string, options?: MarkdownRenderOptions): DocumentFragment;
 }
 
 /**
@@ -67,17 +80,17 @@ export function isSameOriginImageSrc(src: string, origin: string): boolean {
   }
 }
 
-/** Replaces every image not served by origin with its alt text. */
-function dropOffOriginImages(html: string, origin: string): string {
-  const tpl = document.createElement('template');
-  tpl.innerHTML = html;
-  for (const img of Array.from(tpl.content.querySelectorAll('img'))) {
+/**
+ * Replaces every image in root not served by origin with its alt text.
+ * Call it before the nodes join the page's document (see toInertFragment).
+ */
+function dropOffOriginImages(root: DocumentFragment, origin: string): void {
+  for (const img of Array.from(root.querySelectorAll('img'))) {
     const src = img.getAttribute('src') ?? '';
     if (img.hasAttribute('srcset') || !isSameOriginImageSrc(src, origin)) {
-      img.replaceWith(document.createTextNode(img.getAttribute('alt') ?? ''));
+      img.replaceWith(root.ownerDocument.createTextNode(img.getAttribute('alt') ?? ''));
     }
   }
-  return tpl.innerHTML;
 }
 
 let rendererPromise: Promise<MarkdownRenderer> | null = null;
@@ -113,15 +126,44 @@ export async function getMarkdownRenderer(): Promise<MarkdownRenderer> {
         },
       });
 
+      /** Markdown to unsanitized HTML; only ever handed to the sanitizer. */
+      const toRawHtml = (markdown: string, options?: MarkdownRenderOptions): string => {
+        const source = options?.criticMarks ? criticToSentinels(markdown) : markdown;
+        const rawHtml = marked.parse(source, { async: false });
+        return options?.criticMarks
+          ? renderCriticSentinels(rawHtml, options.criticAuthor)
+          : rawHtml;
+      };
+
+      /**
+       * The single parse: the sanitizer turns the markup into nodes in its
+       * own inert document, with the default configuration (the same one
+       * `sanitize` uses for strings). The image rule then runs on those
+       * nodes while they are still outside the page's document, so the page
+       * never loads an image that is then replaced.
+       */
+      const toInertFragment = (
+        markdown: string,
+        options?: MarkdownRenderOptions
+      ): DocumentFragment => {
+        const fragment = purify.sanitize(toRawHtml(markdown, options), {
+          RETURN_DOM_FRAGMENT: true,
+        });
+        if (options?.sameOriginImagesOnly) dropOffOriginImages(fragment, window.location.origin);
+        return fragment;
+      };
+
       return {
         render(markdown: string, options?: MarkdownRenderOptions): string {
-          const source = options?.criticMarks ? criticToSentinels(markdown) : markdown;
-          let rawHtml = marked.parse(source, { async: false });
-          if (options?.criticMarks) rawHtml = renderCriticSentinels(rawHtml, options.criticAuthor);
-          const clean = purify.sanitize(rawHtml);
-          return options?.sameOriginImagesOnly
-            ? dropOffOriginImages(clean, window.location.origin)
-            : clean;
+          if (!options?.sameOriginImagesOnly) return purify.sanitize(toRawHtml(markdown, options));
+          // Serialize from an inert template, so no kept image is requested
+          // before the caller shows the result.
+          const tpl = document.createElement('template');
+          tpl.content.append(toInertFragment(markdown, options));
+          return tpl.innerHTML;
+        },
+        renderFragment(markdown: string, options?: MarkdownRenderOptions): DocumentFragment {
+          return document.adoptNode(toInertFragment(markdown, options));
         },
       };
     })();

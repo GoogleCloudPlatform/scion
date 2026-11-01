@@ -433,6 +433,12 @@ DELETE /api/v1/agents/{agentId}
 POST /api/v1/agents/{agentId}/start
 ```
 
+**Request Body (optional):**
+| Field | Type | Description |
+|-------|------|-------------|
+| `forceResume` | bool | For an agent in phase `error`: resume the interrupted harness session instead of starting a fresh one (default: false) |
+| `acceptAsyncLaunch` | bool | Opt in to an asynchronous start (default: false). Honoured only while the `hub.async_agent_start` and `hub.async_agent_launch` experiments are both on, every live hub instance advertises `async_start_v1`, and the agent and broker qualify; the hub then answers as soon as the broker accepts, with the agent in phase `starting` and an active `launch` |
+
 #### Stop Agent
 ```
 POST /api/v1/agents/{agentId}/stop
@@ -442,6 +448,9 @@ POST /api/v1/agents/{agentId}/stop
 ```
 POST /api/v1/agents/{agentId}/restart
 ```
+
+Accepts the same optional body as start, for `acceptAsyncLaunch` only: it
+applies to the restart's start leg (the stop leg stays synchronous).
 
 #### Send Message
 ```
@@ -936,11 +945,14 @@ POST /api/v1/runtime-brokers/{brokerId}/agents/{agentId}/launch
 ```
 
 Internal endpoint for a runtime broker to report progress and the terminal
-outcome of a non-blocking ("async") agent launch (design §3.2, §3.7). Only
-meaningful for an agent whose create request opted in via
-`acceptAsyncLaunch` while the `hub.async_agent_launch` experiment is on;
-with the feature off and no earlier launch left (no agent has a launch),
-every authorized, well-formed call ends in a 404 or 409 below.
+outcome of a non-blocking ("async") agent launch (design §3.2, §3.7): an
+asynchronous create, or an asynchronous start or restart of an existing
+agent. Only meaningful for an agent whose create, start or restart request
+opted in via `acceptAsyncLaunch` while the experiments allowed it
+(`hub.async_agent_launch`, on by default, and for a start
+`hub.async_agent_start`); with them off and no earlier launch left (no
+agent has a launch), every authorized, well-formed call ends in a 404 or
+409 below.
 
 Only the broker itself may call this endpoint (HMAC broker identity must
 match `{brokerId}`); a non-broker caller, or a broker identity that does not
@@ -965,6 +977,7 @@ experiment is turned off mid-launch.
   "step": "string",           // optional, free-text progress label; truncated to 512 bytes
   "message": "string",        // optional, stored and republished; truncated to 512 bytes
   "errorCode": "string",      // optional, set on a "failed" report; truncated to 512 bytes
+  "runId": "string",          // optional; set on "failed" reports: the run the launch started
   "agent": RemoteAgentInfo,   // present only on "succeeded"
   "at": "2026-01-01T00:00:00Z" // optional, broker-side timestamp
 }
@@ -976,8 +989,15 @@ The request body is bounded to 64 KiB.
 - `200 OK` with `{"result": "applied"}` (or `"duplicate"` for a stale `seq`,
   or `"completed"` for a report on an agent already past `running`). `applied`
   also covers a late `failed` report that refines a launch that already ended
-  `timed_out` or `lost` (the agent is already in `error`); `completed` also
-  covers any report on a launch that already ended `succeeded` or
+  `timed_out` or `lost` (the agent is already in `error`). `applied` also
+  covers a `failed` report on a launch that ended `running_observed` when
+  the report's `runId` equals the agent's current run, the agent is in
+  `running` or `error`, no start claim for another launch is held, no
+  delete holds the agent, no reincarnation is in flight, the error code is
+  not `broker_restarted`, and the agent has no live activity. As for any
+  applied `failed` report, the agent's hub token is revoked under the
+  launch kind's rule. `completed` also covers any report on a launch that
+  already ended `succeeded`, and every other report on a launch that ended
   `running_observed`.
 - `403 Forbidden` with the standard error body (`{"error": {"code": "forbidden", ...}}`),
   not the `{code, reason}` shape below: not the owning broker.
@@ -995,9 +1015,11 @@ The request body is bounded to 64 KiB.
   `other_owner`, `stopped`, or the agent's current launch end reason
   (`timed_out`, `lost`, `failed`, or `not_launched`) when the agent's launch
   already ended with one of those reasons — `succeeded` and
-  `running_observed` never appear here, since either one always answers
-  `200` instead (see above). This set is open — treat any unrecognized
-  `reason` as terminal.
+  `running_observed` never appear here, since either one answers `200`
+  instead (see above). A resend of a `failed` report that was applied
+  after `running_observed` gets `failed` here, because the launch has
+  then ended `failed`. This set is open — treat any unrecognized `reason`
+  as terminal.
 
 ### 5.9 The `launch` Object
 
@@ -1036,10 +1058,54 @@ POST /api/v1/agents
 The create request body accepts an optional `acceptAsyncLaunch: boolean`
 field (default `false`). It is the client's opt-in to a non-blocking launch
 and is persisted as-is regardless of whether the `hub.async_agent_launch`
-experiment is on; the experiment (checked at each create send) and the
-opt-in must both be on for a launch to actually be non-blocking.
+experiment is on; the experiment (on by default, checked at each create
+send) and the opt-in must both be on for a launch to actually be
+non-blocking. Existing agents opt in per request instead, with the same
+field in the start and restart bodies (§3.6).
 
 ---
+
+### 5.11 Runtime Broker Workspace Download
+
+```
+POST /api/v1/runtime-brokers/{brokerId}/agents/{agentId}/workspace-download
+```
+
+Internal endpoint a runtime broker pages through to bootstrap a hub-managed
+workspace upload without storage credentials of its own. The Hub asks for it
+by sending `workspaceDownloadMode: "signed_urls"` in the create request (only
+when its storage is GCS). The Hub lists the agent's uploaded files under
+`<WorkspaceStoragePath>/files/` with its own credential and answers each page
+with one GET-only signed URL per file. The response is never compressed.
+
+Checks, in order, all failing closed:
+1. HMAC broker identity matching `{brokerId}`, else `403`.
+2. The agent exists and is assigned to that broker, else `404`.
+3. The broker still provides for the agent's project, else `403`.
+4. The agent has a workspace upload at the prefix the Hub derives from the
+   agent row, and is not being deleted, else `409`.
+5. The Hub's storage is GCS, else `409 workspace_download_unsupported`.
+6. The body is at most 4 KiB and the cursor lies inside the agent's prefix,
+   else `400`.
+
+**Request Body:** `{"cursor": "string"}`; empty or absent for the first page.
+
+**Response:** `200 OK`
+```json
+{
+  "files": [{"path": "src/main.go", "url": "<signed GET URL>", "size": 123}],
+  "nextCursor": "string",   // empty on the last page; a page can be empty while nextCursor is set
+  "expires": "2026-01-01T00:15:00Z",  // on the Hub's clock
+  "expiresInSeconds": 900   // the same lifetime, relative; the broker measures it on its own clock
+}
+```
+
+A page lists at most 500 objects. Names are filtered by one shared rule table
+(`transfer.ExcludeWorkspaceObject`): the root `.scion` entry and everything
+under it (in any letter case, because a case-insensitive filesystem resolves
+`.SCION` to the same entry), directory objects and invalid relative paths are
+left out, and the broker applies the same table again, also when it writes. URLs expire after 15 minutes; the broker
+fetches a page again with the same cursor when they expire or are refused.
 
 ## 6. Template Endpoints
 
@@ -1522,6 +1588,7 @@ All error responses follow a consistent format:
 | 404 | `not_found` | Resource not found |
 | 409 | `conflict` | Resource conflict (e.g., name collision) |
 | 409 | `version_conflict` | Optimistic locking failed |
+| 409 | `encryption_policy_mismatch` | The database encryption policy refused a secret payload write from this hub's encryption keyring (stale or non-ring-aware writer); nothing was stored and there is no unencrypted fallback |
 | 422 | `unprocessable` | Valid request but cannot be processed |
 | 429 | `rate_limited` | Too many requests |
 | 500 | `internal_error` | Server error |

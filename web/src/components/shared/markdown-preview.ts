@@ -38,7 +38,8 @@ export class ScionMarkdownPreview extends LitElement {
   @property({ type: Boolean, attribute: 'same-origin-images' })
   sameOriginImages = false;
 
-  @state() private renderedHtml = '';
+  /** The rendered `.preview-container` element, built once per content. */
+  @state() private renderedContent: HTMLElement | null = null;
   @state() private loading = true;
   @state() private error: string | null = null;
 
@@ -211,11 +212,11 @@ export class ScionMarkdownPreview extends LitElement {
     }
   `;
 
-  override connectedCallback(): void {
-    super.connectedCallback();
-    void this.renderMarkdown();
-  }
+  /** Counts renders, so only the latest one's result is shown. */
+  private renderTaskId = 0;
 
+  // The first update reports content and sameOriginImages as changed, so
+  // this also renders on mount.
   override updated(changed: Map<string, unknown>): void {
     if (changed.has('content') || changed.has('sameOriginImages')) {
       void this.renderMarkdown();
@@ -223,19 +224,27 @@ export class ScionMarkdownPreview extends LitElement {
   }
 
   private async renderMarkdown(): Promise<void> {
+    const taskId = ++this.renderTaskId;
     this.loading = true;
     this.error = null;
 
     try {
       const renderer = await getMarkdownRenderer();
-      this.renderedHtml = renderer.render(this.content, {
+      if (taskId !== this.renderTaskId) return;
+      const fragment = renderer.renderFragment(this.content, {
         sameOriginImagesOnly: this.sameOriginImages,
       });
+      const container = document.createElement('div');
+      container.className = 'preview-container';
+      container.setAttribute('part', 'container');
+      container.append(fragment);
+      this.renderedContent = container;
     } catch (err) {
+      if (taskId !== this.renderTaskId) return;
       console.error('Failed to render markdown:', err);
       this.error = 'Failed to render markdown preview';
     } finally {
-      this.loading = false;
+      if (taskId === this.renderTaskId) this.loading = false;
     }
   }
 
@@ -253,11 +262,7 @@ export class ScionMarkdownPreview extends LitElement {
       `;
     }
 
-    return html`<div
-      class="preview-container"
-      part="container"
-      .innerHTML=${this.renderedHtml}
-    ></div>`;
+    return this.renderedContent ?? html`<div class="preview-container" part="container"></div>`;
   }
 }
 

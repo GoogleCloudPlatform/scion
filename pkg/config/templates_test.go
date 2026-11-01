@@ -269,20 +269,20 @@ func TestMergeScionConfig(t *testing.T) {
 	})
 
 	t.Run("max_turns override replaces base", func(t *testing.T) {
-		base := &api.ScionConfig{MaxTurns: 10}
-		override := &api.ScionConfig{MaxTurns: 50}
+		base := &api.ScionConfig{MaxTurns: api.IntPtr(10)}
+		override := &api.ScionConfig{MaxTurns: api.IntPtr(50)}
 		got := MergeScionConfig(base, override)
-		if got.MaxTurns != 50 {
-			t.Errorf("expected MaxTurns=50, got %d", got.MaxTurns)
+		if !api.IntPtrEqual(got.MaxTurns, api.IntPtr(50)) {
+			t.Errorf("expected MaxTurns=50, got %s", api.FormatCountLimit(got.MaxTurns))
 		}
 	})
 
 	t.Run("max_turns zero override keeps base", func(t *testing.T) {
-		base := &api.ScionConfig{MaxTurns: 10}
+		base := &api.ScionConfig{MaxTurns: api.IntPtr(10)}
 		override := &api.ScionConfig{}
 		got := MergeScionConfig(base, override)
-		if got.MaxTurns != 10 {
-			t.Errorf("expected MaxTurns=10, got %d", got.MaxTurns)
+		if !api.IntPtrEqual(got.MaxTurns, api.IntPtr(10)) {
+			t.Errorf("expected MaxTurns=10, got %s", api.FormatCountLimit(got.MaxTurns))
 		}
 	})
 
@@ -1384,27 +1384,27 @@ func TestMergeScionConfig_InlineConfigFields(t *testing.T) {
 	})
 
 	t.Run("max_model_calls override replaces base", func(t *testing.T) {
-		base := &api.ScionConfig{MaxModelCalls: 100}
-		override := &api.ScionConfig{MaxModelCalls: 200}
+		base := &api.ScionConfig{MaxModelCalls: api.IntPtr(100)}
+		override := &api.ScionConfig{MaxModelCalls: api.IntPtr(200)}
 		got := MergeScionConfig(base, override)
-		if got.MaxModelCalls != 200 {
-			t.Errorf("expected MaxModelCalls=200, got %d", got.MaxModelCalls)
+		if !api.IntPtrEqual(got.MaxModelCalls, api.IntPtr(200)) {
+			t.Errorf("expected MaxModelCalls=200, got %s", api.FormatCountLimit(got.MaxModelCalls))
 		}
 	})
 
 	t.Run("max_model_calls zero override keeps base", func(t *testing.T) {
-		base := &api.ScionConfig{MaxModelCalls: 150}
+		base := &api.ScionConfig{MaxModelCalls: api.IntPtr(150)}
 		override := &api.ScionConfig{}
 		got := MergeScionConfig(base, override)
-		if got.MaxModelCalls != 150 {
-			t.Errorf("expected MaxModelCalls=150, got %d", got.MaxModelCalls)
+		if !api.IntPtrEqual(got.MaxModelCalls, api.IntPtr(150)) {
+			t.Errorf("expected MaxModelCalls=150, got %s", api.FormatCountLimit(got.MaxModelCalls))
 		}
 	})
 
 	t.Run("full inline config merge over template", func(t *testing.T) {
 		template := &api.ScionConfig{
 			Model:         "claude-sonnet-4-6",
-			MaxTurns:      100,
+			MaxTurns:      api.IntPtr(100),
 			HarnessConfig: "claude-default",
 			User:          "root",
 		}
@@ -1418,8 +1418,8 @@ func TestMergeScionConfig_InlineConfigFields(t *testing.T) {
 		if got.Model != "claude-opus-4-6" {
 			t.Errorf("expected Model='claude-opus-4-6', got %q", got.Model)
 		}
-		if got.MaxTurns != 100 {
-			t.Errorf("expected MaxTurns=100 (from template), got %d", got.MaxTurns)
+		if !api.IntPtrEqual(got.MaxTurns, api.IntPtr(100)) {
+			t.Errorf("expected MaxTurns=100 (from template), got %s", api.FormatCountLimit(got.MaxTurns))
 		}
 		if got.HarnessConfig != "claude-default" {
 			t.Errorf("expected HarnessConfig='claude-default' (from template), got %q", got.HarnessConfig)

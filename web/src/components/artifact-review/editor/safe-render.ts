@@ -24,6 +24,8 @@
  *   artifactLinkTarget and image sources follow imageSource, the rules of
  *   the read-only preview.
  * - Raw HTML in the Markdown is shown as literal text.
+ * - Strikethrough is an s element with a fixed class, so it reads apart
+ *   from a suggested deletion (a del element).
  * - Images load only from the version's files (or a few inline data image
  *   types); anything else is a placeholder with the preview's wording.
  */
@@ -40,6 +42,7 @@ import {
 } from '../../../client/artifact-preview.js';
 import type { ArtifactLinkContext } from '../../../client/artifact-preview.js';
 import { artifactFileUrl } from '../../../client/artifacts.js';
+import { isMacPlatform } from '../../../utils/platform.js';
 
 /** Element names the editor may render. */
 export const ALLOWED_TAGS: ReadonlySet<string> = new Set([
@@ -61,6 +64,7 @@ export const ALLOWED_TAGS: ReadonlySet<string> = new Set([
   'em',
   'strong',
   'a',
+  's',
   'del',
   'ins',
   'mark',
@@ -103,6 +107,19 @@ const ATTRIBUTE_RULES: Record<string, (value: string, tag: string) => boolean> =
   'aria-label': () => true,
   title: (v) => FIXED_TOKEN.test(v.replace(/,/g, '')),
   name: (v, tag) => tag === 'sl-icon' && (v === 'chat-text' || v === 'image'),
+};
+
+/** The class of a strikethrough element, a fixed literal. */
+export const STRIKE_CLASS = 'gfm-strike';
+
+type AttributeRule = (value: string, tag: string) => boolean;
+
+/**
+ * Elements whose attributes follow their own rules instead of
+ * ATTRIBUTE_RULES: anything not listed for them is dropped.
+ */
+const TAG_ATTRIBUTE_RULES: Record<string, Record<string, AttributeRule>> = {
+  s: { class: (v) => v === STRIKE_CLASS },
 };
 
 /** Attribute names the editor may render, for tests. */
@@ -149,8 +166,12 @@ export function fixedSpec(spec: DOMOutputSpec, hasContent: boolean): DOMOutputSp
     for (const [name, raw] of Object.entries(first as Record<string, unknown>)) {
       if (typeof raw !== 'string' && typeof raw !== 'number' && raw !== true) continue;
       const value = String(raw);
-      const rule = ATTRIBUTE_RULES[name.toLowerCase()];
-      if (rule && rule(value, tag)) attrs[name.toLowerCase()] = value;
+      const key = name.toLowerCase();
+      const table = Object.hasOwn(TAG_ATTRIBUTE_RULES, tag)
+        ? TAG_ATTRIBUTE_RULES[tag]
+        : ATTRIBUTE_RULES;
+      const rule = Object.hasOwn(table, key) ? table[key] : undefined;
+      if (rule && rule(value, tag)) attrs[key] = value;
     }
     out.push(attrs);
     rest = rest.slice(1);
@@ -170,6 +191,15 @@ export type RenderContext = ArtifactLinkContext;
 /** Inline data images the editor shows. */
 const DATA_IMAGE = /^data:image\/(png|jpeg|gif|webp)[;,]/i;
 
+/**
+ * The hint on a followable link: the gesture that opens it on this platform
+ * (ptone/scion#6848). A fixed text that meets the title rule (FIXED_TOKEN);
+ * nothing of the link goes in it.
+ */
+export function linkOpenHint(mac: boolean): string {
+  return mac ? 'Cmd-click opens in a new tab' : 'Ctrl-click opens in a new tab';
+}
+
 /** The DOM of a link mark: a target only when artifactLinkTarget gives one. */
 export function linkSpec(mark: Mark, rc: RenderContext): DOMOutputSpec {
   const target = artifactLinkTarget(String(mark.attrs.href ?? ''), rc);
@@ -181,6 +211,7 @@ export function linkSpec(mark: Mark, rc: RenderContext): DOMOutputSpec {
         target: '_blank',
         rel: 'noopener noreferrer',
         referrerpolicy: 'no-referrer',
+        title: linkOpenHint(isMacPlatform()),
       },
       0,
     ];
@@ -250,14 +281,18 @@ export function imageView(getContext: () => RenderContext): NodeViewConstructor 
   };
 }
 
+/** The DOM of a strikethrough mark. */
+export const STRIKE_SPEC: DOMOutputSpec = ['s', { class: STRIKE_CLASS }, 0];
+
 /** Marks the toDOM functions this module has replaced, for tests. */
 export const HARDENED = Symbol('hardened');
 
 type ToDom = ((...args: never[]) => DOMOutputSpec) & { [HARDENED]?: true };
 
 /**
- * Replaces the toDOM of every node and mark of schema: html and link get
- * this module's renderers, every other one is limited by fixedSpec.
+ * Replaces the toDOM of every node and mark of schema: html, link and
+ * strikethrough get this module's renderers, every other one is limited
+ * by fixedSpec.
  */
 export function hardenSchema(schema: Schema, getContext: () => RenderContext): void {
   for (const type of Object.values(schema.nodes)) {
@@ -296,6 +331,8 @@ export function hardenSchema(schema: Schema, getContext: () => RenderContext): v
     let next: ToDom;
     if (type.name === 'link') {
       next = ((m: Mark): DOMOutputSpec => linkSpec(m, getContext())) as ToDom;
+    } else if (type.name === 'strike_through') {
+      next = ((): DOMOutputSpec => fixedSpec(STRIKE_SPEC, true)) as ToDom;
     } else {
       const prev = spec.toDOM.bind(spec) as unknown as (m: Mark, inline: boolean) => DOMOutputSpec;
       next = ((m: Mark, inline: boolean): DOMOutputSpec =>

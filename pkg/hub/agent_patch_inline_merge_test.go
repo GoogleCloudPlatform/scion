@@ -48,7 +48,7 @@ func createdInlineConfig() *api.ScionConfig {
 		CommandArgs:   []string{"--verbose"},
 		Kubernetes:    &api.KubernetesConfig{Namespace: "agents"},
 		ThinkingLevel: &tl,
-		MaxTurns:      3,
+		MaxTurns:      api.IntPtr(3),
 	}
 }
 
@@ -92,7 +92,7 @@ func TestApplyAgentUpdate_PatchMaxTurnsKeepsUnmentionedInlineConfig(t *testing.T
 
 	got := getAgentViaAPI(t, srv, agent.ID)
 	want := createdInlineConfig()
-	want.MaxTurns = 5
+	want.MaxTurns = api.IntPtr(5)
 	inline := got.AppliedConfig.InlineConfig
 	assert.Equal(t, want.Volumes, inline.Volumes)
 	assert.Equal(t, want.Skills, inline.Skills)
@@ -100,7 +100,7 @@ func TestApplyAgentUpdate_PatchMaxTurnsKeepsUnmentionedInlineConfig(t *testing.T
 	assert.Equal(t, want.Services, inline.Services)
 	assert.Equal(t, want.CommandArgs, inline.CommandArgs)
 	assert.Equal(t, want.Kubernetes, inline.Kubernetes)
-	assert.Equal(t, 5, inline.MaxTurns)
+	assert.Equal(t, api.IntPtr(5), inline.MaxTurns)
 	require.NotNil(t, inline.ThinkingLevel, "InlineConfig thinking level must survive")
 	assert.Equal(t, 40, *inline.ThinkingLevel)
 	require.NotNil(t, got.AppliedConfig.ThinkingLevel, "live thinking level must survive a PATCH that does not name it")
@@ -114,7 +114,7 @@ func TestApplyAgentUpdate_PatchMaxTurnsKeepsUnmentionedInlineConfig(t *testing.T
 	require.NotNil(t, ci.ThinkingLevel, "an absent thinking_level must not clear CreateInputs")
 	assert.Equal(t, 40, *ci.ThinkingLevel)
 	require.NotNil(t, ci.InlineConfig)
-	assert.Equal(t, 5, ci.InlineConfig.MaxTurns)
+	assert.Equal(t, api.IntPtr(5), ci.InlineConfig.MaxTurns)
 	assert.Equal(t, want.Volumes, ci.InlineConfig.Volumes)
 	require.NotNil(t, ci.InlineConfig.ThinkingLevel)
 	assert.Equal(t, 40, *ci.InlineConfig.ThinkingLevel)
@@ -171,9 +171,9 @@ func TestApplyAgentUpdate_PatchExplicitKeyChangesOnlyThatKey(t *testing.T) {
 // config's maps and slices.
 func TestMergePresentInlineFields(t *testing.T) {
 	t.Run("nil old config starts empty", func(t *testing.T) {
-		got := mergePresentInlineFields(nil, &api.ScionConfig{MaxTurns: 7, SystemPrompt: "x"}, map[string]bool{"max_turns": true})
+		got := mergePresentInlineFields(nil, &api.ScionConfig{MaxTurns: api.IntPtr(7), SystemPrompt: "x"}, map[string]bool{"max_turns": true})
 		require.NotNil(t, got)
-		assert.Equal(t, 7, got.MaxTurns)
+		assert.Equal(t, api.IntPtr(7), got.MaxTurns)
 		assert.Empty(t, got.SystemPrompt, "an absent key is not copied from the request")
 	})
 
@@ -194,8 +194,8 @@ func TestMergePresentInlineFields(t *testing.T) {
 		// applyAgentUpdate lower-cases the raw keys, as encoding/json
 		// matches field names case-insensitively.
 		present := map[string]bool{strings.ToLower("Max_Turns"): true}
-		got := mergePresentInlineFields(createdInlineConfig(), &api.ScionConfig{MaxTurns: 9}, present)
-		assert.Equal(t, 9, got.MaxTurns)
+		got := mergePresentInlineFields(createdInlineConfig(), &api.ScionConfig{MaxTurns: api.IntPtr(9)}, present)
+		assert.Equal(t, api.IntPtr(9), got.MaxTurns)
 	})
 
 	t.Run("result does not alias the old config", func(t *testing.T) {
@@ -220,7 +220,7 @@ func TestApplyAgentUpdate_PatchMixedCaseKeyIsMerged(t *testing.T) {
 	rec := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{"Max_Turns": 9})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	inline := getAgentViaAPI(t, srv, agent.ID).AppliedConfig.InlineConfig
-	assert.Equal(t, 9, inline.MaxTurns)
+	assert.Equal(t, api.IntPtr(9), inline.MaxTurns)
 	assert.Equal(t, createdInlineConfig().Volumes, inline.Volumes)
 }
 
@@ -250,12 +250,12 @@ func TestApplyAgentUpdate_HarnessSwitchIsRefused(t *testing.T) {
 	stored, err := s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "claude", stored.AppliedConfig.InlineConfig.Harness, "a refused PATCH must store nothing")
-	assert.Equal(t, 3, stored.AppliedConfig.InlineConfig.MaxTurns, "a refused PATCH must store nothing")
+	assert.Equal(t, api.IntPtr(3), stored.AppliedConfig.InlineConfig.MaxTurns, "a refused PATCH must store nothing")
 
 	// The current harness, echoed, is not a change.
 	rec = patchAgentConfig(t, srv, agent.ID, map[string]interface{}{"harness": "claude", "max_turns": 4})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	inline := getAgentViaAPI(t, srv, agent.ID).AppliedConfig.InlineConfig
 	assert.Equal(t, "claude", inline.Harness)
-	assert.Equal(t, 4, inline.MaxTurns)
+	assert.Equal(t, api.IntPtr(4), inline.MaxTurns)
 }

@@ -74,6 +74,11 @@ var sshTransportResolver = func() (transportauth.TokenSource, transportauth.Head
 
 // newSSHHubConn builds the hub access for endpoint with a user token.
 func newSSHHubConn(endpoint, token string) (*sshHubConn, error) {
+	// The transport rule, before the transport source is resolved and
+	// before either client gets the token.
+	if err := checkUserHubTransport(endpoint); err != nil {
+		return nil, tunnelclient.Errorf(tunnelclient.ExitError, "%v", err)
+	}
 	hc := &http.Client{Timeout: sshHubRequestTimeout}
 	src, mode, err := sshTransportResolver()
 	if err != nil {
@@ -82,7 +87,7 @@ func newSSHHubConn(endpoint, token string) (*sshHubConn, error) {
 	if src != nil {
 		hc.Transport = transportauth.Wrap(http.DefaultTransport, src, mode)
 	}
-	client, err := hubclient.New(endpoint,
+	client, err := newUserHubClient(endpoint,
 		hubclient.WithHTTPClient(hc),
 		hubclient.WithBearerToken(token),
 		// hc already carries any transport auth; stop New wrapping it again.
@@ -297,6 +302,10 @@ func tunnelSSHHostKeyHintIn(cmd *cobra.Command, ssh bool, endpoint, project, age
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
+		return
+	}
+	// A hint only: a hub the transport rule refuses is not asked.
+	if checkUserHubTransport(endpoint) != nil {
 		return
 	}
 	token := getHubAccessToken(endpoint)

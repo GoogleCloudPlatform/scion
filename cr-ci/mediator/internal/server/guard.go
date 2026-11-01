@@ -39,6 +39,15 @@ func (s *Server) checkRunnerJobLocked(ctx context.Context, v *view, repoFull str
 		return "ok", nil
 	}
 	rec := s.runners[runnerName]
+	if rec == nil && source == "reconcile" {
+		// Reconcile discovers in_progress jobs without the lock. If the job's completed
+		// webhook has forgotten this runner since then, the entry is stale: the job is
+		// over and the runner gone. Re-checking it would log the swap again, recreate a
+		// record for a finished runner and dispatch for nothing.
+		if _, gone := s.forgotten[runnerName]; gone {
+			return "ok", nil
+		}
+	}
 	served := nameID // after a restart, assume the runner serves its name's job
 	if rec != nil {
 		served = rec.serve
@@ -92,8 +101,10 @@ func (s *Server) checkRunnerJobLocked(ctx context.Context, v *view, repoFull str
 			switch tr := s.runners[taker]; {
 			case tr == nil:
 				s.runners[taker] = &runnerRecord{repo: serveRepo, serve: served, runID: rec.runID, at: s.launchedAt(ctx, v, taker)}
+				s.logRebind(attrs, taker, served, jobID)
 			case !tr.reassigned:
 				tr.serve, tr.runID = served, rec.runID
+				s.logRebind(attrs, taker, served, jobID)
 			}
 		}
 		return "swap", nil
@@ -107,13 +118,31 @@ func (s *Server) checkRunnerJobLocked(ctx context.Context, v *view, repoFull str
 	if rec != nil {
 		servedRunID = rec.runID
 	}
+	_, repeat := s.hijacked[runnerName]
 	res, err := s.stopRunner(serveRepo, runnerName, false)
 	if err != nil {
 		s.log().Error("runner hijacked by an untrusted job; stopping it failed", append(kill, "error", err.Error())...)
 		return "", err
 	}
-	s.log().Error("runner hijacked by an untrusted job; execution cancelled",
-		append(kill, "execution", res.ref, "registration_deleted", res.registrationDeleted)...)
+	fields := append(kill, "execution", res.ref, "registration_deleted", res.registrationDeleted)
+	if res.registrationErr != "" {
+		fields = append(fields, "registration_error", res.registrationErr)
+	}
+	switch {
+	case !repeat:
+		s.log().Error("runner hijacked by an untrusted job; execution cancelled", fields...)
+	case res.registrationDeleted:
+		s.log().Warn("hijacked runner's registration deleted", append(fields, "repeat", true)...)
+	default:
+		// GitHub still shows the untrusted job running on it, so the registration is
+		// busy and every guard pass finds it again; the execution is already gone.
+		s.log().Warn("hijacked runner's registration still busy; deletion retried", append(fields, "repeat", true)...)
+	}
+	if res.registrationDeleted {
+		delete(s.hijacked, runnerName)
+	} else if !repeat {
+		s.hijacked[runnerName] = s.o.Now()
+	}
 
 	// Serve the displaced job again, with a runner named after the
 	// hijacking job (which never gets a runner of its own). Reusing the
@@ -148,6 +177,13 @@ func (s *Server) logSwap(rec *runnerRecord, attrs []any) {
 		s.log().Warn("job inherited a runner with little task time left; it may hit the task timeout",
 			append(attrs, "event", logging.EventRunnerSwapLowBudget, "threshold", lowSwapBudget.String())...)
 	}
+}
+
+// logRebind logs that runner (launched for fromJob, which took another runner) now
+// serves the displaced job served, so that a chain of swaps reads as hand-offs.
+func (s *Server) logRebind(attrs []any, runner string, served, fromJob int64) {
+	s.log().Info("idle runner handed the displaced job",
+		append(attrs, "event", logging.EventRunnerRebind, "rebound_runner", runner, "rebound_to_job_id", served, "rebound_from_job_id", fromJob)...)
 }
 
 // launchedAt returns when runnerName's execution was created, for a runner this

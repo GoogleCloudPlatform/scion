@@ -101,7 +101,7 @@ func assertAbsent(t *testing.T, path, msg string) {
 func (f *embeddedCleanupFixture) deleteProject(t *testing.T) {
 	t.Helper()
 	rec := doRequest(t, f.srv, http.MethodDelete, "/api/v1/projects/"+f.project.ID, nil)
-	require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
+	requireProjectDeleteResponse(t, rec)
 	_, err := f.store.GetProject(context.Background(), f.project.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
@@ -145,11 +145,10 @@ func (f *embeddedCleanupFixture) backendWorkspacePath(t *testing.T) string {
 
 // TestDeleteProject_BackendConfiguredCombinedServer_RemovesLocalProjectDir
 // verifies that on a combined server with a shared workspace backend,
-// project delete removes the embedded broker's local
-// ~/.scion/projects/<slug> directory, and on nfs the project's uuid tree
-// (by the ID-keyed tree cleanup). The volume backends' uuid tree is left
-// to the lifecycle phase (ptone/scion#5833), as before for the agents'
-// tree on those backends.
+// project delete removes the project's uuid tree on every shared backend
+// (nfs and the volume backends, ptone/scion#5835) and the embedded
+// broker's local ~/.scion/projects/<slug> directory, a legacy slug-keyed
+// tree removed because its identity marker names the project.
 func TestDeleteProject_BackendConfiguredCombinedServer_RemovesLocalProjectDir(t *testing.T) {
 	tests := []struct {
 		name               string
@@ -157,8 +156,8 @@ func TestDeleteProject_BackendConfiguredCombinedServer_RemovesLocalProjectDir(t 
 		wantBackendRemoved bool
 	}{
 		{"nfs", nfsWorkspaceStorage, true},
-		{"cloudrun-volume", cloudRunVolumeWorkspaceStorage, false},
-		{"gke-shared-volume", gkeSharedVolumeWorkspaceStorage, false},
+		{"cloudrun-volume", cloudRunVolumeWorkspaceStorage, true},
+		{"gke-shared-volume", gkeSharedVolumeWorkspaceStorage, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -178,12 +177,13 @@ func TestDeleteProject_BackendConfiguredCombinedServer_RemovesLocalProjectDir(t 
 				".scion/agents/worker/home/notes.txt",
 				".scion/agents/worker/workspace/main.go",
 			)
+			require.NoError(t, os.WriteFile(filepath.Join(f.localPath, ".scion", "project-id"), []byte(f.project.ID+"\n"), 0o644))
 			// A sibling project's local directory must survive.
 			siblingPath := filepath.Join(f.home, ".scion", "projects", "sibling-project")
 			writeTree(t, siblingPath, "keep.txt")
 
 			f.deleteProject(t)
-			f.srv.nfsCleanupWG.Wait()
+			f.srv.storageCleanupWG.Wait()
 
 			if tt.wantBackendRemoved {
 				assertAbsent(t, backendPath, "backend project tree should be removed")
@@ -191,6 +191,32 @@ func TestDeleteProject_BackendConfiguredCombinedServer_RemovesLocalProjectDir(t 
 			assertAbsent(t, f.localPath, "embedded broker local project directory should be removed")
 			_, err := os.Stat(filepath.Join(siblingPath, "keep.txt"))
 			assert.NoError(t, err, "sibling project directory must be untouched")
+		})
+	}
+}
+
+// TestDeleteProject_SharedBackendCombinedServer_KeepsUnmarkedLocalDir: on a
+// shared backend the embedded broker's ~/.scion/projects/<slug> is a legacy
+// slug-keyed tree; without an identity marker naming the project (here no
+// marker, and one naming another project), it is never removed on its name
+// alone, while the uuid tree still goes.
+func TestDeleteProject_SharedBackendCombinedServer_KeepsUnmarkedLocalDir(t *testing.T) {
+	for _, marker := range []string{"", "0f8fad5b-d9cb-469f-a165-70867728950e"} {
+		t.Run("marker="+marker, func(t *testing.T) {
+			f := newEmbeddedCleanupFixture(t, "unmarked-local", nfsWorkspaceStorage, true)
+			backendPath := f.backendWorkspacePath(t)
+			writeTree(t, backendPath, "README.md")
+			writeTree(t, f.localPath, "README.md", ".scion/settings.yaml")
+			if marker != "" {
+				require.NoError(t, os.WriteFile(filepath.Join(f.localPath, ".scion", "project-id"), []byte(marker), 0o644))
+			}
+
+			f.deleteProject(t)
+			f.srv.storageCleanupWG.Wait()
+
+			assertAbsent(t, backendPath, "backend project tree should be removed")
+			_, err := os.Stat(filepath.Join(f.localPath, "README.md"))
+			assert.NoError(t, err, "a slug-keyed tree without the project's marker must be kept")
 		})
 	}
 }
@@ -225,7 +251,7 @@ func TestDeleteProject_BackendConfiguredCombinedServer_LocalProjectDirAbsent(t *
 	assertAbsent(t, f.localPath, "precondition: local project directory absent")
 
 	f.deleteProject(t)
-	f.srv.nfsCleanupWG.Wait()
+	f.srv.storageCleanupWG.Wait()
 
 	assertAbsent(t, backendPath, "backend project tree should be removed")
 	assertAbsent(t, f.localPath, "local project directory should remain absent")
@@ -242,7 +268,7 @@ func TestDeleteProject_BackendConfiguredHubOnly_KeepsLocalPathHandling(t *testin
 	writeTree(t, f.localPath, ".scion/settings.yaml")
 
 	f.deleteProject(t)
-	f.srv.nfsCleanupWG.Wait()
+	f.srv.storageCleanupWG.Wait()
 
 	assertAbsent(t, backendPath, "backend project tree should be removed")
 	_, err := os.Stat(filepath.Join(f.localPath, ".scion", "settings.yaml"))
@@ -288,7 +314,7 @@ func TestDeleteProject_BackendConfiguredCombinedServer_RemovesOnlyDirectChildOfP
 	writeTree(t, filepath.Dir(siblingFile), "keep.txt")
 
 	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID, nil)
-	require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
+	requireProjectDeleteResponse(t, rec)
 
 	_, err := os.Stat(siblingFile)
 	assert.NoError(t, err, "sibling project directory on the embedded broker's local disk must be kept")

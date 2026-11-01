@@ -17,9 +17,10 @@
  * target the journey runs against.
  *
  * Local target (default): global setup starts a throwaway member-level test
- * hub with the co-located runtime broker and the async create setting on
- * (SCION_SERVER_HUB_ASYNCAGENTLAUNCH=true, supported configuration), and
- * writes this suite's state to a private file named by E2E_AC_STATE_FILE.
+ * hub with the co-located runtime broker and the hub.async_agent_launch
+ * experiment on (startHub's experiments option sets it through the admin
+ * experiments API and reads it back), and writes this suite's state to a
+ * private file named by E2E_AC_STATE_FILE.
  *
  * Remote target: E2E_TARGET_URL names an existing non-IAP hub. Global
  * setup starts nothing. The runner issues the test identity out of band

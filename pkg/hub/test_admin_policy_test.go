@@ -217,6 +217,7 @@ var tsaDenyRoutes = []struct {
 	{http.MethodPut, "/api/v1/admin/messaging", map[string]any{}, false},
 	{http.MethodPut, "/api/v1/admin/project-defaults", map[string]any{}, false},
 	{http.MethodPut, "/api/v1/admin/profiling", map[string]any{}, false},
+	{http.MethodPut, "/api/v1/admin/chat-retention", map[string]any{}, false},
 	{http.MethodGet, "/api/v1/github-app", nil, false},
 	{http.MethodGet, "/api/v1/env?scope=hub", nil, true},
 	{http.MethodGet, "/api/v1/admin/maintenance/operations", nil, false},
@@ -1166,7 +1167,7 @@ func TestTestAdminPolicy_DispatchSecretsClamp(t *testing.T) {
 		return got
 	}
 	second := func(a *store.Agent) map[string]string {
-		return d.resolveAsNeededForKeys(ctx, a, []string{"B_AN", "H_AN", "P_AN", "U_AN"}, nil)
+		return mustResolveAsNeeded(t, d, ctx, a, []string{"B_AN", "H_AN", "P_AN", "U_AN"}, nil)
 	}
 
 	// Not a member: user scope only.

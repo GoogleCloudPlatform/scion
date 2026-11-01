@@ -19,6 +19,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -300,15 +301,18 @@ func TestNFSKeepSharedCheckout(t *testing.T) {
 	assert.NoDirExists(t, filepath.Join(resolved.HostBase, filepath.Dir(sub), "old"), "the check only reads")
 }
 
-// The export not mounted on the broker: the pod still uses the agent
-// directory, and the node creates it.
+// The export not mounted on the broker: the start is refused before any
+// pod or directory exists (ptone/scion#5823);
+// the node is never left to create project storage.
 func TestStartNFSAgentDir_ExportNotMounted(t *testing.T) {
 	mountRoot := filepath.Join(t.TempDir(), "nfs")
-	cfg, emptyAtRun, err := startNFSAgentDirAgent(t, "kubernetes", mountRoot, map[string]string{"SCION_WORKSPACE_MODE": "clone-per-agent"}, testGitClone)
-	require.NoError(t, err)
-	assert.False(t, emptyAtRun)
-	assert.Equal(t, "test-agent", cfg.NFSAgentDirName)
-	assert.False(t, cfg.NFSWorkspacePreCreated)
+	_, _, err := startNFSAgentDirAgent(t, "kubernetes", mountRoot, map[string]string{"SCION_WORKSPACE_MODE": "clone-per-agent"}, testGitClone)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrProjectShareNotMounted), "err = %v", err)
+	// The Kubernetes runtime never mounts the share on the broker: the
+	// remedy names the broker's container, not auto_mount.
+	assert.Contains(t, err.Error(), runtime.ProjectShareUnavailableText(filepath.Join(mountRoot, "share-1"), true))
+	assert.NotContains(t, err.Error(), "auto_mount")
 	assert.NoDirExists(t, mountRoot)
 }
 
@@ -352,12 +356,12 @@ func TestEnsureNFSAgentWorkspaceLeaf(t *testing.T) {
 	resolved := resolveTestNFSWorkspace(t, mountRoot)
 	ws := filepath.Join(nfsTestAgentDir(mountRoot, "agent-1"), provision.AgentWorkspaceDir)
 
-	ok, err := ensureNFSAgentWorkspaceLeaf("docker", testNFSWorkspaceProjectID, resolved, "ws-pv", nil, "agent-1")
+	ok, err := ensureNFSAgentWorkspaceLeaf("docker", testNFSWorkspaceProjectID, resolved, runtime.NFSPodShare{ClaimName: "ws-pv"}, nil, "agent-1")
 	require.NoError(t, err)
 	assert.False(t, ok)
 
 	require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share-1"), 0o755))
-	ok, err = ensureNFSAgentWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, resolved, "ws-pv", nil, "agent-1")
+	ok, err = ensureNFSAgentWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, resolved, runtime.NFSPodShare{ClaimName: "ws-pv"}, nil, "agent-1")
 	require.NoError(t, err)
 	assert.True(t, ok)
 	assert.DirExists(t, ws)
@@ -371,13 +375,13 @@ func TestEnsureNFSAgentWorkspaceLeaf(t *testing.T) {
 
 	marker := filepath.Join(ws, "work.txt")
 	require.NoError(t, os.WriteFile(marker, []byte("x"), 0o644))
-	ok, err = ensureNFSAgentWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, resolved, "ws-pv", nil, "agent-1")
+	ok, err = ensureNFSAgentWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, resolved, runtime.NFSPodShare{ClaimName: "ws-pv"}, nil, "agent-1")
 	require.NoError(t, err)
 	assert.True(t, ok)
 	assert.FileExists(t, marker)
 
 	for _, bad := range []string{"../x", "a/b", "Agent-1", "", ".."} {
-		_, err = ensureNFSAgentWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, resolved, "ws-pv", nil, bad)
+		_, err = ensureNFSAgentWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, resolved, runtime.NFSPodShare{ClaimName: "ws-pv"}, nil, bad)
 		assert.Error(t, err, "name %q", bad)
 	}
 }
@@ -393,7 +397,7 @@ func TestEnsureNFSAgentWorkspaceLeaf_ExistingAgentDirWithoutGroupWrite(t *testin
 	require.NoError(t, os.MkdirAll(agentDir, 0o755))
 	require.NoError(t, os.Chmod(agentDir, os.ModeSetgid|0o755))
 
-	ok, err := ensureNFSAgentWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, resolved, "ws-pv", nil, "agent-1")
+	ok, err := ensureNFSAgentWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, resolved, runtime.NFSPodShare{ClaimName: "ws-pv"}, nil, "agent-1")
 	require.NoError(t, err)
 	assert.False(t, ok)
 	ws := filepath.Join(agentDir, provision.AgentWorkspaceDir)

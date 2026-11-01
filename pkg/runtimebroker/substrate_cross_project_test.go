@@ -71,7 +71,7 @@ func newTestSubstrateBrokerServer(t *testing.T) (*Server, *fakeSubstrateControlC
 	mgr := agent.NewManager(rt)
 	t.Cleanup(mgr.Close)
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.ForceRuntime = ""

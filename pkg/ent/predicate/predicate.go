@@ -72,6 +72,12 @@ type BrokerTargetInventory func(*sql.Selector)
 // ChatLinkCode is the predicate function for chatlinkcode builders.
 type ChatLinkCode func(*sql.Selector)
 
+// ChatRetentionCursor is the predicate function for chatretentioncursor builders.
+type ChatRetentionCursor func(*sql.Selector)
+
+// ChatRetentionRun is the predicate function for chatretentionrun builders.
+type ChatRetentionRun func(*sql.Selector)
+
 // ConduitPrincipalEpoch is the predicate function for conduitprincipalepoch builders.
 type ConduitPrincipalEpoch func(*sql.Selector)
 
@@ -260,6 +266,12 @@ type User func(*sql.Selector)
 
 // UserAccessToken is the predicate function for useraccesstoken builders.
 type UserAccessToken func(*sql.Selector)
+
+// UserDeletion is the predicate function for userdeletion builders.
+type UserDeletion func(*sql.Selector)
+
+// UserDeletionAgent is the predicate function for userdeletionagent builders.
+type UserDeletionAgent func(*sql.Selector)
 
 // UserTerminalWorkspace is the predicate function for userterminalworkspace builders.
 type UserTerminalWorkspace func(*sql.Selector)

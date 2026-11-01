@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
@@ -56,6 +57,19 @@ const ErrCodeAgentOffline = "agent_offline"
 // errConduitNoRoute: this node has no conduit router (relay not running).
 var errConduitNoRoute = errors.New("conduit: no router on this node")
 
+// conduitPortRequest is the router request for a TCP stream to one of
+// agent's ports over its conduit session (openConduitPort,
+// portViewConduitRoute).
+func conduitPortRequest(agent *store.Agent) router.Request {
+	return router.Request{
+		Op:    router.OpStream,
+		Kind:  registry.PrincipalAgent,
+		ID:    agent.ID,
+		Want:  registry.Want{ProjectID: agent.ProjectID, Capability: grant.StreamKindTCP},
+		Agent: agentIncarnationFacts(agent),
+	}
+}
+
 // openConduitPort opens a TCP stream to 127.0.0.1:port inside the agent
 // over its conduit session, with a grant minted for identity against
 // exactly the resolved session. Errors wrap router.ErrNoSession when the
@@ -71,13 +85,7 @@ func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *
 		return nil, errConduitNoRoute
 	}
 	params := map[string]string{grant.ParamHost: conduitProxyHost, grant.ParamPort: strconv.Itoa(port)}
-	req := router.Request{
-		Op:    router.OpStream,
-		Kind:  registry.PrincipalAgent,
-		ID:    agent.ID,
-		Want:  registry.Want{ProjectID: agent.ProjectID, Capability: grant.StreamKindTCP},
-		Agent: agentIncarnationFacts(agent),
-	}
+	req := conduitPortRequest(agent)
 	var conn net.Conn
 	err := rtr.Do(ctx, req, func(ctx context.Context, res router.Resolved) error {
 		renews, canRenew := conduitTargetRenews(res), s.conduitRouteCanRenew(res)
@@ -221,9 +229,17 @@ func isResponseHeaderTimeout(err error) bool {
 // is bounded (portProxyResponseHeaderTimeout; 504 on timeout); once they
 // arrive the exchange lasts as long as the request. Credentials are
 // stripped from the request and the response is sandboxed exactly as on
-// the tunnel path.
-func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent *store.Agent, port int, proxyPath string, conn net.Conn) {
+// the tunnel path. policy is the surface's: the page view surface
+// (policy.portView) also applies portViewModifyResponse, and each surface
+// logs its own caller string. Every surface removes the front
+// proxy's identity headers (stripFrontProxyIdentityHeaders). It reports
+// whether the agent's app answered: false when the round trip failed and
+// the hub wrote the 502 or 504.
+func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent *store.Agent, port int, proxyPath string, conn net.Conn, policy portProxyPolicy) (answered bool) {
 	start := time.Now()
+	// roundTripFailed is set by the ErrorHandler: the agent's app did not
+	// answer, and the hub wrote a 502 or 504.
+	roundTripFailed := false
 	reqPath := "/" + strings.TrimPrefix(proxyPath, "/")
 	target := net.JoinHostPort(conduitProxyHost, strconv.Itoa(port))
 	status := 0
@@ -241,6 +257,9 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 					pr.Out.Header.Del(k)
 				}
 			}
+			// The front proxy's identity headers are not passed to the
+			// agent's app.
+			s.stripFrontProxyIdentityHeaders(pr.Out.Header)
 		},
 		Transport:     conduitProxyTransport(conn, headerTimeout),
 		FlushInterval: -1,
@@ -252,8 +271,7 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 					resp.Header.Del(k)
 				}
 			}
-			resp.Header.Set("Content-Security-Policy", untrustedContentSandboxCSP)
-			resp.Header.Set("X-Content-Type-Options", "nosniff")
+			applyPortProxyResponsePolicy(resp.Header, policy)
 			return nil
 		},
 		// The ErrorHandler runs only before the response is committed (the
@@ -261,7 +279,8 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 		// makes ReverseProxy panic with http.ErrAbortHandler: the client
 		// sees a truncated response, never an error body appended to it.
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			w.Header().Set("Content-Security-Policy", untrustedContentSandboxCSP)
+			roundTripFailed = true
+			setUntrustedContentHeaders(w.Header(), untrustedContentSandboxCSP)
 			w.Header().Set("X-Content-Type-Options", "nosniff")
 			if r.Context().Err() == nil && isResponseHeaderTimeout(err) {
 				// The transport closed the stream; the agent end closes
@@ -299,22 +318,25 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 		slog.Debug("Proxy request", append([]any{
 			"agent_id", agent.ID,
 			"port", port,
-			"caller", identityStringFromContext(r.Context()),
+			"caller", policy.caller,
+			"surface", policy.surface,
 			"method", r.Method,
-			"path", reqPath,
+			"path", logging.SubPath(reqPath),
 			"status", status,
 			"transport", "conduit",
 			"duration", time.Since(start),
 		}, route...)...)
 	}()
 	// ReverseProxy adds the upstream response headers to the ones already
-	// on w. Drop the web pages' policy and nosniff header set further up
-	// the handler chain, so the sandbox headers set in ModifyResponse are
-	// the only ones and pages served from an agent's port keep working as
-	// on the tunnel path.
-	w.Header().Del("Content-Security-Policy")
-	w.Header().Del("X-Content-Type-Options")
+	// on w. Drop the web pages' policy, Permissions-Policy and nosniff
+	// header set further up the handler chain, so the sandbox headers set
+	// in ModifyResponse are the only ones and pages served from an agent's
+	// port keep working as on the tunnel path.
+	for _, k := range portProxyPolicyHeaders {
+		w.Header().Del(k)
+	}
 	rp.ServeHTTP(w, r)
+	return !roundTripFailed
 }
 
 // WebSocket close codes the proxy sends to the client when the upstream

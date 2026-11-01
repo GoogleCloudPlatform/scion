@@ -399,7 +399,7 @@ func (s *Server) createHarnessConfig(w http.ResponseWriter, r *http.Request) {
 	// available. Finalize commits them.
 	if len(req.Files) > 0 && stor != nil {
 		uploadID := api.NewUUID()
-		uploadURLs, err := s.generateHarnessConfigUploadURLs(ctx, stor, hc, req.Files, uploadID, requestBaseURL(r))
+		uploadURLs, err := s.generateHarnessConfigUploadURLs(ctx, stor, hc, req.Files, uploadID, s.requestBaseURL(r))
 		if err == nil {
 			response.UploadURLs = uploadURLs
 			response.UploadID = uploadID
@@ -789,7 +789,7 @@ func (s *Server) handleHarnessConfigUpload(w http.ResponseWriter, r *http.Reques
 	// them and commits (ptone/scion#4219). Local-storage URLs point at the
 	// hub's file endpoint with ?uploadId=, which stages only.
 	uploadID := api.NewUUID()
-	uploadURLs, err := s.generateHarnessConfigUploadURLs(ctx, stor, hc, req.Files, uploadID, requestBaseURL(r))
+	uploadURLs, err := s.generateHarnessConfigUploadURLs(ctx, stor, hc, req.Files, uploadID, s.requestBaseURL(r))
 	if err != nil {
 		if writeInvalidFilePathError(w, err) {
 			return
@@ -1111,7 +1111,7 @@ func (s *Server) handleHarnessConfigDownload(w http.ResponseWriter, r *http.Requ
 	// A blob row's local URLs carry the file's hash, so the raw read serves
 	// that blob even after a later commit replaced the file.
 	if stor.Provider() == storage.ProviderLocal {
-		downloadURLs = rewriteLocalBlobDownloadURLs(downloadURLs, requestBaseURL(r), "harness-configs", hc.ID, isHarnessConfigBlobLayout(hc))
+		downloadURLs = rewriteLocalBlobDownloadURLs(downloadURLs, s.requestBaseURL(r), "harness-configs", hc.ID, isHarnessConfigBlobLayout(hc))
 	}
 
 	// ContentHash names the version the URLs were signed for, so a broker
@@ -1329,6 +1329,19 @@ type ReimportHarnessConfigRequest struct {
 	SourceURL string `json:"sourceUrl,omitempty"`
 }
 
+// reimportHarnessConfigNewStore returns the reimport's newStore: the same
+// config.yaml validation as an import, confined to the directory
+// (loadLocalHarnessConfigDir: a linked config.yaml fails it), then the store
+// that writes the source entry into the row targetID.
+func (s *Server) reimportHarnessConfigNewStore(targetID string) func(dir string) (*ResourceStore, error) {
+	return func(dir string) (*ResourceStore, error) {
+		if _, err := loadLocalHarnessConfigDir(dir); err != nil {
+			return nil, err
+		}
+		return s.targetHarnessConfigStore(targetID), nil
+	}
+}
+
 // handleHarnessConfigReimport re-imports a harness-config from its stored
 // source_url (or an override URL). POST /api/v1/harness-configs/{id}/reimport
 func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
@@ -1419,14 +1432,7 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 	// of the entry or the row is by the time it is persisted
 	// (ptone/scion#4219).
 	kind := s.harnessConfigImportKind()
-	targetID := hc.ID
-	kind.newStore = func(dir string) (*ResourceStore, error) {
-		// The same config.yaml validation as an import.
-		if _, err := config.LoadHarnessConfigDir(dir); err != nil {
-			return nil, err
-		}
-		return s.targetHarnessConfigStore(targetID), nil
-	}
+	kind.newStore = s.reimportHarnessConfigNewStore(hc.ID)
 	slug := reimportTargetSlug(hc)
 	run := func(progress importProgressFunc) ([]string, error) {
 		return s.importFromRemoteSelected(ctx, hc.ScopeID, sourceURL, hc.Scope, kind, progress,

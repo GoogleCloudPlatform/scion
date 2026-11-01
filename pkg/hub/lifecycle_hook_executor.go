@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -69,6 +70,16 @@ type HTTPExecutor struct {
 	auditLogger AuditLogger
 	log         *slog.Logger
 
+	// fireAuthorizer re-checks, before every token mint, that the hook's
+	// writer still holds the authority writing the hook required
+	// (Server.AuthorizeHookFire). Never nil: NewHTTPExecutor substitutes a
+	// denying authorizer for a nil one.
+	fireAuthorizer HookFireAuthorizer
+
+	// refusals rate limits the execution audit records of fire-time
+	// refusals per hook.
+	refusals *hookRefusalLimiter
+
 	// newHTTPClient creates the http.Client used for hook requests.
 	// Defaults to newSSRFSafeClient. Tests may override this to inject
 	// a client that allows loopback connections for httptest servers.
@@ -96,16 +107,26 @@ func (e *HTTPExecutor) httpClient() *http.Client {
 }
 
 // NewHTTPExecutor creates a new HTTPExecutor.
-func NewHTTPExecutor(s store.Store, tokenGen GCPTokenGenerator, auditLogger AuditLogger, log *slog.Logger) *HTTPExecutor {
+//
+// fireAuthorizer is a required positional parameter, so that no call site
+// gets a mint without the fire-time authority check by omission. A nil
+// fireAuthorizer refuses every token mint; webhook actions, which mint
+// nothing, are unaffected.
+func NewHTTPExecutor(s store.Store, tokenGen GCPTokenGenerator, auditLogger AuditLogger, log *slog.Logger, fireAuthorizer HookFireAuthorizer) *HTTPExecutor {
 	if log == nil {
 		log = slog.Default()
 	}
+	if fireAuthorizer == nil {
+		fireAuthorizer = denyingHookFireAuthorizer{}
+	}
 	return &HTTPExecutor{
-		store:         s,
-		tokenGen:      tokenGen,
-		auditLogger:   auditLogger,
-		log:           log,
-		newHTTPClient: newSSRFSafeClient,
+		store:          s,
+		tokenGen:       tokenGen,
+		auditLogger:    auditLogger,
+		log:            log,
+		fireAuthorizer: fireAuthorizer,
+		refusals:       newHookRefusalLimiter(hookRefusalAuditInterval, time.Now),
+		newHTTPClient:  newSSRFSafeClient,
 	}
 }
 
@@ -128,7 +149,12 @@ func (e *HTTPExecutor) Execute(ctx context.Context, hook *store.LifecycleHook, a
 	// -----------------------------------------------------------------------
 	saEmail, bearerToken, err := e.resolveIdentityAndToken(ctx, hook, action)
 	if err != nil {
-		e.recordAudit(ctx, hook, agent, trigger, saEmail, action, 0, 0, 1, err)
+		var denied *HookFireDeniedError
+		if errors.As(err, &denied) {
+			e.recordFireRefusal(ctx, hook, agent, trigger, saEmail, action, denied)
+		} else {
+			e.recordAudit(ctx, hook, agent, trigger, saEmail, action, 0, 0, 1, err)
+		}
 		return fmt.Errorf("resolve execution identity: %w", err)
 	}
 
@@ -254,6 +280,14 @@ func (e *HTTPExecutor) resolveIdentityAndToken(ctx context.Context, hook *store.
 		return saEmail, "", nil
 	}
 
+	// Before any token is minted, re-check that the hook's writer still holds
+	// the authority writing the hook required. Write-time authorization alone
+	// would let a hook keep minting after its writer is deleted, suspended,
+	// demoted or loses actAs. A refusal mints nothing.
+	if err := e.fireAuthorizer.AuthorizeHookFire(ctx, hook, sa); err != nil {
+		return saEmail, "", err
+	}
+
 	// For http actions, obtain an access token by impersonation.
 	if e.tokenGen == nil {
 		return saEmail, "", fmt.Errorf("GCP token generator not configured; cannot impersonate %s", saEmail)
@@ -265,6 +299,30 @@ func (e *HTTPExecutor) resolveIdentityAndToken(ctx context.Context, hook *store.
 	}
 
 	return saEmail, token.AccessToken, nil
+}
+
+// recordFireRefusal records a fire-time authority refusal in the execution
+// audit and the log, at most once per hookRefusalAuditInterval per hook for
+// the same cause, so a frequently firing hook cannot flood either. The next
+// record carries the number of refusals left out.
+func (e *HTTPExecutor) recordFireRefusal(ctx context.Context, hook *store.LifecycleHook, agent *store.Agent, trigger, saEmail string, action *store.LifecycleHookAction, denied *HookFireDeniedError) {
+	record, suppressed := e.refusals.admit(hook.ID, string(denied.Cause))
+	if !record {
+		return
+	}
+	var err error = denied
+	if suppressed > 0 {
+		err = fmt.Errorf("%w (%d similar refusals for this hook not recorded)", denied, suppressed)
+	}
+	e.log.WarnContext(ctx, "Lifecycle hook token mint refused: hook writer no longer authorized",
+		"hook_id", hook.ID,
+		"hook_name", hook.Name,
+		"trigger", trigger,
+		"agent_id", agent.ID,
+		"deny_cause", string(denied.Cause),
+		"suppressed", suppressed,
+	)
+	e.recordAudit(ctx, hook, agent, trigger, saEmail, action, 0, 0, 1, err)
 }
 
 // buildRenderVars constructs the variable map for action rendering with

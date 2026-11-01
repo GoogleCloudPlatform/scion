@@ -50,7 +50,7 @@ import { formatInstantWithZone } from '../../utils/time.js';
 /** One entry of the summary's ranked "Needs attention" list (server-composed). */
 export interface HealthAttentionItem {
   severity: 'critical' | 'warning';
-  /** hub_check | hub_instance | broker_offline | broker_degraded | broker_nfs | broker_host_identity | integration | dispatch | agents | schedule */
+  /** hub_check | hub_instance | broker_offline | broker_degraded | broker_nfs | broker_host_identity | broker_version_mismatch | integration | dispatch | agents | schedule */
   kind: string;
   /** What the item is about; fields that do not apply are omitted. */
   subject: { type: string; id?: string; name?: string; project_id?: string };
@@ -113,7 +113,7 @@ export interface HealthSummarySchedules {
 
 /** Fixed text per known pause reason code. */
 const PAUSED_REASON_LABELS: Readonly<Record<string, string>> = {
-  creator_deleted: 'the agent that created it was deleted',
+  creator_deleted: 'the agent or user it runs under was deleted',
   cron_zone_unsupported: 'its cron expression names a time zone, which is not supported',
 };
 

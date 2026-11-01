@@ -42,7 +42,7 @@ A scope decides which agents receive a variable or secret, not which people can 
 | **Hub** | Every agent on the Hub, started by any user. |
 | **Broker** | Every agent running on that Runtime Broker, started by any user. |
 | **Project** | Every agent in that Project, whoever starts it. |
-| **User** | Only agents owned by that user. An agent started by another agent (a child agent) is owned by its parent agent, so it receives user-scoped values only if they are marked for progeny, with `--allow-progeny` or the hub-wide default (see [Propagation to Descendant Agents](#propagation-to-descendant-agents-progeny)). |
+| **User** | Only agents owned by that user. An agent started by another agent (a child agent) is owned by its parent agent, so it receives user-scoped values only if they are marked for progeny, with `--allow-progeny` or the hub-wide default (see [Propagation to Descendant Agents](#propagation-to-descendant-agents-progeny)), and (when the agent's delegation chain has recorded provenance) every hop on the chain allows `secret.use`. |
 
 Hub, Broker and Project scopes apply to child agents in the same way as to the agents users start directly.
 
@@ -53,6 +53,20 @@ Hub-scoped and Broker-scoped variables and secrets are shared credentials. Every
 
 Store sensitive secrets at **User** scope, so that only your own agents receive them, or at **Project** scope. A Project-scoped secret is shared with every member of the Project: their agents receive it, and those agents can also read it at runtime (see [Agent Runtime Secret Retrieval](#agent-runtime-secret-retrieval)).
 :::
+
+### Start-Time Authorization
+
+When the Hub starts or restarts an agent, it authorizes each User, Project, Hub, and Runtime Broker variable and secret for that agent **before** applying scope precedence (`runtime_broker < hub < project < user`) or reading any secret value from the secret backend. The check follows the agent's recorded delegation chain: the user or agent that delegated authority to it, and so on up to a user. An item the check refuses is left out before scope precedence runs, so a refused higher-scope entry yields to a permitted lower-scope entry with the same key rather than masking it, and the start itself goes ahead. The Hub log has a `Warn` line for each item left out, with its name, scope and the reason, never its value. Only the secrets that survive both authorization and scope precedence are read from the secret backend; if a selected secret's value cannot be read from the backend after authorization, the Hub refuses the start or restart with `503` (`agent secrets could not be resolved; the agent was not started`, or `... not created` on create) rather than starting the agent without it.
+
+Agents whose delegation chain contains legacy data may not have the recorded chain this check needs. This includes agents created before the chain was recorded, and agents created later under such an agent. The Hub keeps giving those agents their Project, Hub and Runtime Broker values, and logs a rate-limited `Warn` line naming the agent, the item and the group the agent falls in. The groups and the cases that are still refused are listed under [Launch material for legacy agents](/scion/reference/delegation-provenance-adoption/#launch-material-for-legacy-agents).
+
+### Agents created from a user access token
+
+An agent created from a [user access token](/scion/hosted/user/personal-access-tokens/) receives your shared secrets and its launch material the way an agent created from a sign-in does. The token's scopes narrow the API actions the agent may take, but they do not narrow the delivery of material to it at start, resume and restart: Project, Hub and Runtime Broker values, the secrets sent for skill fetches, and your user-scoped secrets shared with progeny (`--allow-progeny`). Every other check still applies to each item, including the item's association with the agent, access constraints, and the user-scoped secret checks described under [How it Works Under the Hood](#how-it-works-under-the-hood). This is delivery to the agent, not secret management: a user access token itself cannot read or change User- or Hub-scope secrets.
+
+As for any agent, launch material reaches the agent only while the user who created it is still a member of the project. A token-created agent, or one of its sub-agents, whose creator has left the project starts without it, and the `Warn` line for each item names the cause, `root user not admitted to the project`.
+
+Reading secrets at runtime (`sciontool secret get`, the agent secret endpoints) is not covered: the agent token the Hub issues to such an agent does not carry `project:secret:read`, so runtime reads and lists are refused. The full agent role is not available from a token for the same reason.
 
 ### Reserved Names
 
@@ -105,7 +119,7 @@ To explicitly enable propagation on a specific secret or variable, use the `--al
   ```
 
 #### How it Works Under the Hood
-Enabling progeny propagation dynamically registers implicit access policies (e.g. `progeny-secret-access:<id>` or `progeny-envvar-access:<id>`) on the Scion Hub. When a child agent resolves its configuration, Scion walks the ancestor chain of the calling agent container. If the configuration creator is part of that ancestry tree and has enabled progeny permission, the descendant agent safely inherits the setting or secret.
+Enabling progeny propagation dynamically registers implicit access policies (e.g. `progeny-secret-access:<id>` or `progeny-envvar-access:<id>`) on the Scion Hub. When an agent starts, restarts, or resumes (including `as_needed` secret resolution) or reads secrets at runtime, Scion walks the calling agent's ancestry and delegation chain: if the secret's owner is at the root of that ancestry tree and has enabled progeny permission, and — when the agent's delegation chain carries recorded provenance — every recorded delegation hop on the chain allows `secret.use`, every agent delegator on the chain is live and holds `project:secret:read`, and the root user is active, admitted to the project, not restricted from `secret.use` by an access constraint, and the recorded author of the secret, then the agent inherits the secret (if a user-scoped secret is withheld at start by this check, a lower-precedence project, Runtime Broker, or Hub secret with the same key still applies; see [Security & Audit Logging](#security--audit-logging)).
 
 ---
 
@@ -113,7 +127,9 @@ Enabling progeny propagation dynamically registers implicit access policies (e.g
 
 Use the `scion hub env` command suite to manage non-sensitive configuration. Each agent environment variable carries **provenance metadata** (hub-injected, user-defined, or runtime-derived) to help you audit and debug the origin of specific values.
 
-Hub-scope variables are listed with `scope=hub` on `GET /api/v1/env`. Besides super-admins, a user who holds `hub.env_vars.read` (for example through the `hub-admin` role) can list them. That list is read-only and leaves out secrets; reading a single Hub-scope variable, writing one, and every secret endpoint still need a super-admin.
+User- and Hub-level environment variables and secrets (`scope=user`, the default when `--project` and `--broker` are omitted, and `scope=hub`) require an **interactive login** (`scion hub auth login`, a web session, or workstation dev auth). Scoped user access tokens (`scion_pat_*`) are refused on all User- and Hub-scope environment variable and secret operations—whatever their boundary or scopes—with `403 Forbidden`, `details.reason: "CREDENTIAL_MANAGEMENT"` (`details.credential: "session_required"`), and the message `"user- and hub-level environment variables and secrets require an interactive login (run 'scion hub auth login'); access tokens are not accepted"`. Project (`--project`) and Runtime Broker (`--broker`) scopes continue to accept appropriately scoped tokens.
+
+Hub-scope (`scope=hub`) environment variable and secret routes also require an unscoped local platform admin. As the one read-only exception, an interactive login holding `hub.env_vars.read` (for example through the `hub-admin` role) can list Hub-scope environment variables (`GET /api/v1/env?scope=hub`), with secret entries omitted; reading a single Hub-scope variable, writing or deleting one, and every Hub-scope secret endpoint require a super-admin on an interactive login. (Agents may still read Hub-scope items, and a federated caller may read—never write—its own User-scope variables and secrets.)
 
 ### Setting Variables
 ```bash
@@ -123,13 +139,13 @@ scion hub env set API_URL=https://api.example.com
 # Set a project-scoped variable (inferred from current directory)
 scion hub env set --project LOG_LEVEL=debug
 
-# Set a variable only for a specific broker
+# Set a variable only for a specific Runtime Broker
 scion hub env set --broker=my-gpu-node CUDA_VISIBLE_DEVICES=0
 ```
 
 ## Managing Secrets
 
-Secrets are write-only from host-level CLI commands and the Web Dashboard. Once set, their values cannot be read back by users. However, authorized agents running inside their containers can securely retrieve project-scoped secrets at runtime via the Hub API or the `sciontool` utility.
+Secrets are write-only from host-level CLI commands and the Web Dashboard. Once set, their values cannot be read back by users. However, authorized agents running inside their containers can securely retrieve project-scoped secrets at runtime via the Hub API or the `scion secret` CLI commands (and write secrets via `sciontool secret set`). As with environment variables above, User- and Hub-scope secret operations (`scion hub secret` without `--project` or `--broker`, or with `--hub-scope`) require an interactive login (`scion hub auth login`) and refuse user access tokens with `403` (`details.reason: "CREDENTIAL_MANAGEMENT"`).
 
 ### Setting Secrets
 Secrets can be set manually via the CLI or Web Dashboard, or gathered interactively during agent creation.
@@ -246,7 +262,7 @@ From inside an agent container, read secrets with `scion secret`. The calls are 
     ```bash
     export API_KEY=$(scion secret get --value MY_API_KEY)
     ```
-    Without `--value`, `scion secret get MY_API_KEY` prints the secret's metadata.
+    Without `--value` (or with `--metadata`), `scion secret get MY_API_KEY` prints the secret's metadata. `--format json` returns metadata only and cannot be combined with `--value`.
 
 `sciontool secret get` has moved to `scion secret get --value`, and `sciontool secret list` to `scion secret list`; the old commands now print a message naming the `scion` command and exit `1`.
 
@@ -269,7 +285,7 @@ From inside an agent container, read secrets with `scion secret`. The calls are 
     the web UI or `scion hub secret set --project`.*
 
 #### Using the Hub API Directly
-Under the hood, `sciontool` interacts with the Hub's agent-specific secrets API:
+Under the hood, `scion secret` and `sciontool` interact with the Hub's agent-specific secrets API:
 
 *   **`GET /api/v1/agents/{agentID}/secrets`**: Lists available secret metadata in the agent's project.
 *   **`GET /api/v1/agents/{agentID}/secrets/{key}`**: Retrieves a single secret's metadata and its base64-encoded value.
@@ -279,8 +295,35 @@ Under the hood, `sciontool` interacts with the Hub's agent-specific secrets API:
 #### Security & Audit Logging
 *   **Authentication**: API access is restricted to the running agent container. The agent must include its unique Hub-issued JWT (loaded from `SCION_HUB_TOKEN`) in the `Authorization: Bearer <token>` header of every request.
 *   **Authorization**: Agents are strictly bounded to their own project's secrets. They can also access user-scoped (personal) secrets belonging to their originating user (the user who kicked off the agent chain), which are resolved on the Hub via the agent JWT's `OriginUserID` (the user who originally started the agent chain). Agents cannot access secrets in other projects, other users' secrets, or global Hub secrets unless explicitly shared via progeny policies (descendant access).
-*   **Fail-Closed Reads**: Every runtime secret read goes through one check sequence: project permission, then an originating user who is still active and either an active member of the project (any active project role binding counts, built-in or custom, direct or through a group, except `project-visitor`) or holds system-level authority for the exact `secret.use` permission, then progeny sharing. Membership alone does not grant reads: the project permission check (`project.secret_read`) still applies. A value is fetched only for the version recorded in the secret's metadata. If a value cannot be retrieved, that key is reported as unavailable in the response rather than returned as an empty value; other keys in the same request are unaffected. When the Hub itself cannot resolve an agent's secrets, or cannot read its stored environment settings, create, start, restart, resume and waking an agent for a direct message answer `503` (`agent secrets could not be resolved; the agent was not started`, `... not created` for a create, or the environment settings equivalent) instead of starting the agent without them: a start leaves the agent as it was, a restart (which stops the agent first) leaves it stopped, and a failed create is rolled back. A provision-only create still succeeds, and the agent's later start fails closed. A reincarnation answers `202` and then fails at its start leg; it is recorded as failed with the same message and the previous config is restored. The message names no secret or value. Having no secrets or settings is not an error.
+*   **Fail-Closed Reads & Start-Time Resolution**: Both start-time secret delivery (create, start, restart, resume, and `as_needed` resolution) and every runtime secret read go through one check sequence: project permission, then an originating user who is still active and either an active member of the project (any active project role binding counts, built-in or custom, direct or through a group, except `project-visitor`) or holds system-level authority for the exact `secret.use` permission, then progeny sharing. For an agent whose delegation chain carries recorded delegation provenance, a user-scoped secret shared with progeny is also bounded by that chain at both start time and runtime: every recorded delegation on the chain must allow secret use (`secret.use`), every agent on the chain must be live and hold `project:secret:read`, and the user at the root of the chain must be the secret's owner and recorded author, active, admitted to the project and not restricted from `secret.use` by an access constraint (if a user-scoped secret is withheld at start by this check, a lower-precedence project, broker, or hub secret with the same key still applies; chains without recorded provenance continue to use the progeny relationship check). The agent secret list applies the same rule, so it lists a user-scoped key exactly when a read of that key would return it. Membership alone does not grant reads: the project permission check (`project.secret_read`) still applies. A value is fetched only for the version recorded in the secret's metadata. If a value cannot be retrieved, that key is reported as unavailable in the response rather than returned as an empty value; other keys in the same request are unaffected. When the Hub itself cannot resolve an agent's secrets, or cannot read its stored environment settings, create, start, restart, resume and waking an agent for a direct message answer `503` (`agent secrets could not be resolved; the agent was not started`, `... not created` for a create, or the environment settings equivalent) instead of starting the agent without them: a start leaves the agent as it was, a restart (which stops the agent first) leaves it stopped, and a failed create is rolled back. A provision-only create still succeeds, and the agent's later start fails closed. A reincarnation answers `202` and then fails at its start leg; it is recorded as failed with the same message and the previous config is restored. The message names no secret or value. Having no secrets or settings is not an error.
 *   **Audit Trail**: To ensure accountability, every runtime read and write operation is fully audited on the Hub. Each retrieval request logs one audit event (`agent_secret_read`) identifying the calling agent, the requested keys, and the outcome.
+
+#### User secrets captured by an agent before 2026-09-12
+
+A user-scoped secret shared with progeny reaches an agent with a recorded delegation chain only when the secret's author is its owner. Before 2026-09-12, a credential an agent captured into its user's scope (for example by harness credential capture) was recorded as written by the agent (`created_by` `agent:<id>`). A later capture of the same key kept that author. The Hub withheld such a secret from every agent of its owner whose delegation chain is recorded: the agent started without it, and a runtime read was refused.
+
+A one-shot data migration at Hub start (marker `user_secret_attribution_repair`) records the owner as the author of these secrets where that is certain. An agent could only capture into the scope of the user at the root of its own ancestry, so the migration accepts:
+
+- a capturing agent that still exists (or is soft-deleted) and whose ancestry root is the owner;
+- a capturing agent with no stored ancestry whose owner or creator is the owner;
+- a capturing agent that no longer exists, when the owner's user record does.
+
+Each repaired secret gets a mutation audit record (`user_secret_attribution_repair`, actor `system`) whose before summary keeps the original `created_by`. The secret's value, version and update time are not changed, and a value written while the migration runs (for example a credential refresh) does not stop the repair. Any other secret is left as it was, and the migration logs a warning that names it and gives the reason:
+
+| Reason | Meaning |
+|---|---|
+| `agent_not_linked_to_scope_user` | The capturing agent exists, but its ancestry root is another user, or it has no ancestry and belongs to another user. |
+| `agent_gone_scope_user_missing` | Neither the capturing agent nor the owner's user record exists. |
+| `federated_agent_ref` | The secret was captured by a federated agent (`agent:<issuer>:<id>`), which this Hub cannot check. |
+| `agent_ref_invalid` | The recorded agent ID is not a valid ID. |
+| `scope_owner_empty` | The secret has no owner. |
+| `row_changed` | The secret's author kept changing while the migration ran. The marker is not written, so the next Hub start runs the migration again. |
+
+Setting a skipped secret again does not change its author, because an update keeps `created_by`. To deliver it, clear it and set it again as its owner (`scion hub secret clear`, then `scion hub secret set`). Skips other than `row_changed` do not block the marker. A store error leaves the marker unwritten, so the next start runs the migration again.
+
+A repaired secret that is shared with progeny becomes readable at runtime (`scion secret get` inside an agent) by the owner's agents with a recorded delegation chain, in every project, as a secret written after 2026-09-12 already is. Before the repair, these secrets were never readable at runtime.
+
+Whenever authorization withholds a user-scoped secret at start or restart, or refuses a runtime read of one, the Hub logs a warning that names the agent, the secret and the cause, never the value: `start-time user secret withheld by authorization` and `runtime user secret read withheld by authorization`. The warning is logged at most once every 10 minutes for the same agent, secret and cause, and the next one reports how many were suppressed.
 
 ---
 
@@ -368,7 +411,7 @@ Other scopes use the same names, read from their own credentials only:
 
 In every scope the first match wins, and with no match the fetch is unauthenticated, which works for public repos only. A global or user-scope import never reads project credentials.
 
-Reimporting an existing template (`POST /api/v1/templates/{id}/reimport`) uses the same lookup order for the template's own scope: a project template's project credentials and App token, a global template's Hub credentials, and a user template's credentials only when you are that user. With a credential, the Hub requests the archive from `api.github.com`. When an import runs `git` instead (`git ls-remote` to resolve a branch name that contains `/`, or a sparse checkout when the archive download fails), the credential reaches `git` only through a credential helper scoped to `https://github.com`, with terminal prompts off (and `GIT_LFS_SKIP_SMUDGE=1` for the checkout); it is never put in the repository URL. The CLI's own imports work the same way.
+Reimporting an existing template (`POST /api/v1/templates/{id}/reimport`) uses the same lookup order for the template's own scope: a project template's project credentials and App token, a global template's Hub credentials, and a user template's credentials only when you are that user. With a credential, the Hub requests the archive from `api.github.com`. When an import runs `git` instead (`git ls-remote` to resolve a branch name that contains `/`, or a sparse checkout when the archive download fails), the credential reaches `git` only through a credential helper scoped to `https://github.com`, with terminal prompts off (and `GIT_LFS_SKIP_SMUDGE=1` for the checkout); it is never put in the repository URL. `git` offers no credential of the Hub host's own (its git config, `~/.netrc`, ssh or Kerberos credentials), so without a credential it runs anonymously. The CLI's own imports work the same way.
 
 Only GitHub folder URLs use a credential. Archive URLs (`.tar.gz`, `.tgz`, `.zip`, including `github.com/.../archive/...` links), rclone sources and other hosts are always fetched without one.
 
@@ -376,7 +419,7 @@ Only GitHub folder URLs use a credential. Archive URLs (`.tar.gz`, `.tgz`, `.zip
 
 Convention-keyed GitHub secrets support the standard injection modes:
 
-- **As Needed** (recommended): The credential is used at provision time to fetch skills and templates but is **not** exposed inside the agent container. This is the minimum-privilege posture.
+- **As Needed** (recommended): The credential is used at provision time to fetch skills and templates but is **not** exposed inside the agent container. This is the minimum-privilege posture. When the Hub dispatches an agent to a Runtime Broker, `provisionCredentials` includes only the `as_needed` environment-type secrets referenced by `?token=SECRET_NAME` on a `gh://` skill URI of the agent or matching a `GH_{OWNER}` / `GH_{OWNER}__{REPO}` convention name for one of the agent's `gh://` skill URIs, plus `GITHUB_TOKEN` (from the resolved environment or an `as_needed` secret) when any `gh://` skill has no explicit or convention token. Unreferenced `as_needed` secrets, `always`-injected secrets (already in the agent environment), and `file` or `variable` secrets are not sent in `provisionCredentials`.
 
   ```bash
   scion hub secret set --project GH_ACME_CORP__PRIVATE_SKILLS github_pat_...
@@ -402,10 +445,12 @@ To use secrets in production, the Hub must be configured with a production-grade
 
 ### Secrets Backend
 
-Scion uses a secrets backend to store secret values securely. The recommended backend for production is **GCP Secret Manager**, while the default `local` backend stores values directly in the Hub database using AES-256-GCM encryption at rest (derived from the hub signing secret).
+Scion uses a secrets backend to store secret values securely. The recommended backend for production is **GCP Secret Manager**, while the default `local` backend stores values directly in the Hub database using AES-256-GCM encryption at rest.
 
-:::note[Encryption at Rest]
-Secret values are never stored in plaintext. If using the default `local` backend, values are encrypted using AES-256-GCM (derived from the hub signing secret) before being written to the database. Legacy plaintext values migrate transparently on next read.
+:::note[Encryption at Rest & Startup Audit]
+Secret values stored in the `local` backend and Hub-stored infrastructure backups in the database (signing keys for agent/user tokens, skill downloads, artifact views, attachment delivery, and list cursors; the OIDC signing key and `oidc_signing_keyset`; and the Conduit grant key ring) are encrypted with the Hub's versioned value cipher (`enc:v1:` or `enc:v2:<kid>:`). Legacy `enc:v1:` values remain readable while their key is in the legacy v1 read set; in legacy mode without a keyring file, legacy plaintext rows can still be read and are rewritten as `enc:v1:` on the next write, whereas managed keyring mode (`server.keyring_file`) rejects unencrypted rows on runtime reads and admits them only during an explicit encryption migration.
+
+When a database encryption policy row is present, the Hub checks at startup that its local cipher satisfies the policy (running with `server.keyring_file`, writing `enc:v2:` under an allowed writer key ID, and holding every required reader key ID) and refuses to start on any mismatch. Before synchronizing or writing any backup keys, a startup encryption audit verifies all locally stored secret payloads and the decrypted structure of Hub-scoped infrastructure backups. Unreadable records are preserved and never overwritten: in keyring mode, an unreadable infrastructure backup keeps the Hub not ready (`/readyz` returns `503` with `reason: "backup_unreadable"`), while in legacy mode the Hub logs an `UNHEALTHY` error naming the affected record IDs and continues serving.
 :::
 
 #### Configuring GCP Secret Manager
@@ -490,6 +535,7 @@ For external messaging integrations (such as Discord, Telegram, or Google Chat) 
 - **Automatic One-Shot Migration**: When starting up or activating a plugin (e.g., via the runtime activation path in `activateInstalledIntegration`), the Hub automatically scans the integration's configuration—including per-plugin external configuration files and inline config blocks. Any discovered secret keys are automatically migrated into the configured secure **Secrets Backend** (such as GCP Secret Manager).
 - **Copy-Before-Strip Safety**: After migrating the secrets, Scion strips the raw values in-place from the integration's file-based and inline configurations (`stripSecretKeysInPlace`) using a secure copy-before-strip helper to avoid any risk of partial writes or configuration corruption, while deduplicating warning logs.
 - **Boot and Activation Consistency**: This migration-and-strip sequence runs consistently during both the Hub's boot-up routine and dynamic runtime integration activation, ensuring that secrets are never stored or exposed in plaintext configs.
+- **Redacted Wiring & Database Settings**: Integration detail responses (`GET /api/v1/admin/integrations/{name}`) omit secret keys, internal runtime keys (`bot_id`, `config_file`), and Hub wiring and database keys (`hub_url`, `broker_id`, `hmac_key`, `plugin_name`, `project_slug_map`, `database_driver`, `database_url`) from `settings`. When configuring or restarting a plugin, live Hub wiring and database values always override any cached values for those keys.
 
 ### Resolution Hierarchy
 When an agent starts, the Runtime Broker requests a "Resolved Environment" from the Hub and combines it with the template `env` block. For the same key, a later entry in this list wins over an earlier one:

@@ -64,7 +64,15 @@ func redactAppliedConfigEnvForResponse(ac *store.AgentAppliedConfig, canAttach b
 // applied config and pending config for a viewer with canAttach (see
 // redactAppliedConfigEnvForResponse): the pending config's env gets the same
 // gate as the applied config's (store.AgentPendingConfig.ResponseView).
-func redactAgentConfigsForResponse(ac *store.AgentAppliedConfig, pc *store.AgentPendingConfig, canAttach bool) (*store.AgentAppliedConfig, *store.AgentPendingConfig) {
+// With hub.agent_edit_held off, stored pending edits are inert and no
+// response carries them: the pending view is nil (ptone/scion#5864).
+//
+// Its name and three arguments are what TestAgentEnvVisibility_DecidedOnlyByTheHelpers
+// finds every response site by; keep both.
+func (s *Server) redactAgentConfigsForResponse(ac *store.AgentAppliedConfig, pc *store.AgentPendingConfig, canAttach bool) (*store.AgentAppliedConfig, *store.AgentPendingConfig) {
+	if !s.heldEditsEnabled() {
+		pc = nil
+	}
 	return redactAppliedConfigEnvForResponse(ac, canAttach), pc.ResponseView(canAttach)
 }
 
@@ -74,16 +82,26 @@ func redactAgentConfigsForResponse(ac *store.AgentAppliedConfig, pc *store.Agent
 // for it (e.g. lifecycle actions). It returns false for an unauthenticated
 // caller.
 func canViewAgentEnv(ctx context.Context, s *Server, agent *store.Agent) bool {
-	identity := GetIdentityFromContext(ctx)
+	allowed, _ := canIdentityViewAgentEnv(ctx, s, GetIdentityFromContext(ctx), agent)
+	return allowed
+}
+
+// canIdentityViewAgentEnv is canViewAgentEnv's rule for any identity: attach
+// on the agent, and never for an agent delegated credential. indeterminate
+// reports a deny the check could not decide (Decision.IsIndeterminate), so
+// a held edit's fold, which asks it for the env saver's rebuilt identity,
+// can refuse rather than fold an env edit on a fault (ptone/scion#5864).
+func canIdentityViewAgentEnv(ctx context.Context, s *Server, identity Identity, agent *store.Agent) (allowed, indeterminate bool) {
 	if identity == nil || agent == nil {
-		return false
+		return false, false
 	}
 	// An agent delegated credential never sees an unredacted environment,
 	// whatever its grant holds (.design/agent-delegation.md §11.7).
 	if isDelegatedAgentIdentity(identity) {
-		return false
+		return false, false
 	}
-	return s.authzService.CheckAccess(ctx, identity, agentResource(agent), ActionAttach).Allowed
+	d := s.authzService.CheckAccess(ctx, identity, agentResource(agent), ActionAttach)
+	return d.Allowed, d.IsIndeterminate()
 }
 
 // redactedAgentCopy returns a shallow copy of agent with AppliedConfig passed
@@ -97,7 +115,7 @@ func redactedAgentCopy(ctx context.Context, s *Server, agent *store.Agent) *stor
 		return agent
 	}
 	redacted := *agent
-	redacted.AppliedConfig, redacted.PendingConfig = redactAgentConfigsForResponse(agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
+	redacted.AppliedConfig, redacted.PendingConfig = s.redactAgentConfigsForResponse(agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
 	return &redacted
 }
 

@@ -476,9 +476,13 @@ func TestCreateAgentWithHubCredentials(t *testing.T) {
 		t.Errorf("expected SCION_HUB_URL='https://hub.example.com' (legacy compat), got %q", got)
 	}
 
-	// Check SCION_AUTH_TOKEN
-	if got := mgr.lastEnv["SCION_AUTH_TOKEN"]; got != "secret-token-xyz" {
-		t.Errorf("expected SCION_AUTH_TOKEN='secret-token-xyz', got %q", got)
+	// The hub-issued agent token reaches the manager as HubIssuedToken, never
+	// in the env.
+	if got := mgr.lastStartOpts.HubIssuedToken; got != "secret-token-xyz" {
+		t.Errorf("expected HubIssuedToken='secret-token-xyz', got %q", got)
+	}
+	if _, ok := mgr.lastEnv["SCION_AUTH_TOKEN"]; ok {
+		t.Error("SCION_AUTH_TOKEN is in the env; the hub-issued token travels in HubIssuedToken only")
 	}
 
 	// Check SCION_AGENT_ID
@@ -656,6 +660,9 @@ func TestCreateAgentWithoutHubCredentials(t *testing.T) {
 	if _, exists := mgr.lastEnv["SCION_AUTH_TOKEN"]; exists {
 		t.Error("expected SCION_AUTH_TOKEN to not be set when no agentToken provided")
 	}
+	if mgr.lastStartOpts.HubIssuedToken != "" {
+		t.Error("expected no HubIssuedToken when no agentToken provided")
+	}
 
 	if _, exists := mgr.lastEnv["SCION_AGENT_ID"]; exists {
 		t.Error("expected SCION_AGENT_ID to not be set when no id provided")
@@ -783,7 +790,7 @@ func TestCreateAgentStartFailure_CleansUpFiles(t *testing.T) {
 		t.Fatalf("failed to write scion-agent.yaml: %v", err)
 	}
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	mgr := &provisionCapturingManager{}

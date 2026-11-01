@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"testing"
@@ -86,8 +87,17 @@ func TestDispatch_StorageLayoutPrecheck(t *testing.T) {
 			var refusal *RuntimeTargetRefusal
 			require.True(t, errors.As(err, &refusal), "refused with a typed refusal: %v", err)
 			assert.Equal(t, http.StatusConflict, refusal.Status)
-			assert.Equal(t, []string{`nfs server: hub "10.0.0.2", broker "10.0.0.9"`}, refusal.Details[storageLayoutMismatchDetail])
+			details, ok := refusal.Details[storageLayoutMismatchDetail].(map[string]interface{})
+			require.True(t, ok, "structured details: %#v", refusal.Details)
+			assert.Equal(t, []string{"nfs server"}, details["fields"])
+			assert.Equal(t, []string{"nfs server: differs"}, details["issues"])
 			assert.Contains(t, refusal.Message, "server.project_storage")
+			// The refusal names the field, never the values, in the
+			// message and in the structured details.
+			for _, v := range []string{"10.0.0.2", "10.0.0.9", "/share/a", "projects"} {
+				assert.NotContains(t, refusal.Message, v)
+				assert.NotContains(t, fmt.Sprintf("%v", refusal.Details), v)
+			}
 			assert.False(t, op.called(m), "no broker call")
 		})
 		t.Run(op.name+" refuses a broker without a descriptor", func(t *testing.T) {
@@ -143,16 +153,27 @@ func TestHealthSummary_BrokerLayoutMismatch(t *testing.T) {
 		Status: store.BrokerStatusOnline, WorkspaceStorage: &api.BrokerWorkspaceStorage{Backend: "nfs", Homes: "local",
 			NFS: &api.BrokerNFSWorkspaceStorage{Server: "10.0.0.2", Export: "/scion", SubPathRoot: "projects", Healthy: true}},
 	}))
-	list, _, err := srv.healthSummaryBrokers(ctx, nil)
+	list, _, err := srv.healthSummaryBrokers(ctx, nil, "")
 	require.NoError(t, err)
 	rows := map[string]HealthSummaryBroker{}
 	for _, r := range list.Items {
 		rows[r.ID] = r
 	}
 	require.NotNil(t, rows[tid("hs-layout-bad")].WorkspaceStorage)
-	assert.Equal(t, []string{`backend: hub "nfs", broker "local"`}, rows[tid("hs-layout-bad")].WorkspaceStorage.LayoutMismatch)
+	assert.Equal(t, []string{`backend: differs`}, rows[tid("hs-layout-bad")].WorkspaceStorage.LayoutMismatch,
+		"a caller that is not a hub admin sees the differing field only")
 	assert.True(t, healthSummaryBrokerHasProblem(rows[tid("hs-layout-bad")]))
 	require.NotNil(t, rows[tid("hs-layout-ok")].WorkspaceStorage)
 	assert.Empty(t, rows[tid("hs-layout-ok")].WorkspaceStorage.LayoutMismatch)
 	assert.False(t, healthSummaryBrokerHasProblem(rows[tid("hs-layout-ok")]))
+
+	// A hub admin sees the values.
+	adminCtx := storageAdminCtx(t, s, "hs-layout-admin")
+	list, _, err = srv.healthSummaryBrokers(adminCtx, nil, "")
+	require.NoError(t, err)
+	for _, r := range list.Items {
+		if r.ID == tid("hs-layout-bad") {
+			assert.Equal(t, []string{`backend: hub "nfs", broker "local"`}, r.WorkspaceStorage.LayoutMismatch)
+		}
+	}
 }

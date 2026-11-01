@@ -196,6 +196,7 @@ func TestLegacySharedDirClaimWarnings(t *testing.T) {
 	cfg := RunConfig{
 		Name: "test-agent", Labels: map[string]string{"scion.project": "myproject"},
 		SharedDirs: []api.SharedDir{{Name: "notes"}, {Name: "cache"}},
+		Kubernetes: &api.KubernetesConfig{SharedDirStorageClass: "standard-rwx"},
 	}
 	// The local backend creates the per-dir claims, as before.
 	require.NoError(t, rt.createSharedDirPVCs(t.Context(), "default", cfg))

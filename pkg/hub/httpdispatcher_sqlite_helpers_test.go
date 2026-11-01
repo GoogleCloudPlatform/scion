@@ -155,6 +155,7 @@ type mockRuntimeBrokerClient struct {
 	lastMessage                string
 	lastInterrupt              bool
 	lastResolvedEnv            map[string]string
+	lastStartResolvedSecrets   []ResolvedSecret
 	lastRestartResolvedEnv     map[string]string
 	lastStartExtras            StartExtras
 	lastRestartExtras          StartExtras
@@ -347,6 +348,7 @@ func (m *mockRuntimeBrokerClient) StartAgent(ctx context.Context, brokerID, brok
 	m.lastProjectPath = projectPath
 	m.lastProjectSlug = projectSlug
 	m.lastResolvedEnv = resolvedEnv
+	m.lastStartResolvedSecrets = resolvedSecrets
 	m.lastInlineConfig = inlineConfig
 	m.lastStartExtras = extras
 	m.startCallCount++

@@ -13,7 +13,7 @@ names refer to [`config.example.env`](../config.example.env).
 | :--- | :--- | :--- |
 | GitHub App | Sends `workflow_job` webhooks and lets the mediator mint just-in-time (JIT) runner registrations | Installed on `TARGET_REPOS` |
 | Mediator | Go Cloud Run service `MEDIATOR_SERVICE_NAME` (scale to zero, small, `max-instances=1`: claims live in memory) | `MEDIATOR_SA_NAME` |
-| Runner job | Cloud Run Job `RUNNER_JOB_NAME`. Each execution is one ephemeral runner: `RUNNER_CPU` / `RUNNER_MEMORY`, with a `RUNNER_DISK_GI` ephemeral disk at `/scratch` | `EXEC_SA_NAME` (no roles) |
+| Runner job | Cloud Run Job `RUNNER_JOB_NAME`. Each execution is one ephemeral runner: `RUNNER_CPU` / `RUNNER_MEMORY`, with a `RUNNER_DISK_GI` ephemeral disk mounted at HOME (`/home/runner`) | `EXEC_SA_NAME` (no roles) |
 | Reconciler | Cloud Scheduler job `RECONCILER_JOB_NAME` calling `POST /reconcile` | `SCHEDULER_SA_NAME` |
 | Secrets | Secret Manager: `GITHUB_APP_PRIVATE_KEY_SECRET_NAME`, `GITHUB_WEBHOOK_SECRET_NAME` | Readable by `MEDIATOR_SA_NAME` only |
 | Image | Artifact Registry `ARTIFACT_REPO`, image `RUNNER_IMAGE_NAME` | Pushed by `BUILD_SA_NAME` |
@@ -77,11 +77,15 @@ a runner's execution by its `RUNNER_NAME` env, never by job ID.
      `labels_unservable` (WARNING) and never minted for.
    - **Fork guard:** the mediator reads the run with
      `GET /repos/{o}/{r}/actions/runs/{run_id}` (never trusting the payload)
-     and refuses, logging `SECURITY_REJECT_FORK_PR` and answering 200, when
-     the run's event is `pull_request_target` or `workflow_run` (both run with
-     the base repo's privileges, typically on behalf of fork PRs), its
-     `head_repository` differs from its `repository` (or is missing), or its
-     repository is not the webhook's repository.
+     and refuses, logging `SECURITY_REJECT_FORK_PR` and answering 200, unless
+     the run's event is on the allowlist, `push` or `pull_request` (the two the
+     workflows' routing expression routes). Every other event, named or not
+     (`pull_request_target`, `workflow_run`, `issue_comment`,
+     `repository_dispatch`, `workflow_dispatch`, `schedule`, `merge_group`, ...),
+     is refused fail-closed (`reason=event_not_allowed:<event>`). It also refuses
+     a run whose `head_repository` differs from its `repository` (or is
+     missing), or whose repository is not the webhook's repository. The same
+     check guards reconcile backfill and the hijack guard (step 4).
    - **Duplicate check:** no action if a runner named `cr-job-<job_id>` is
      registered, or a running execution has that `RUNNER_NAME`, or serves the
      job (`GH_JOB_ID`) and has not been reassigned to another job. This rests
@@ -99,19 +103,18 @@ a runner's execution by its `RUNNER_NAME` env, never by job ID.
      `work_folder` `/home/runner/work`, the same path as on GitHub-hosted
      `ubuntu-latest`. `actions/cache` stores paths relative to
      `GITHUB_WORKSPACE`, so only an identical work folder (and `HOME`) lets
-     cache entries move between the two runner types in both directions. The
-     runner image links that folder to the `/scratch` disk (cache parity
-     contract). The runner keeps the configured path as is: its work directory
-     is `Path.GetFullPath(...)`, which does not resolve symlinks (checked in
-     the actions/runner source at the pinned version), so `GITHUB_WORKSPACE`
-     is `/home/runner/work/<repo>/<repo>`. The JIT config is stored under a fresh
+     cache entries move between the two runner types in both directions. On
+     the cr-ci runner that folder is a real directory on the ephemeral disk,
+     which the job mounts at HOME (cache parity contract), so
+     `GITHUB_WORKSPACE` is `/home/runner/work/<repo>/<repo>`, physically too.
+     The JIT config is stored under a fresh
      claim token, then `jobs.run` starts one execution with the env
      overrides below. If `jobs.run` fails, the mediator deletes the
      registration, drops the claim, logs `launch_failed` and answers 503;
      `/reconcile` retries the job later.
-3. **Runner start.** The entrypoint points the workspace, temp dirs and Go
-   caches at `/scratch`, so they do not consume RAM. Cloud Run's root
-   filesystem is in memory. The entrypoint exchanges the claim token for the
+3. **Runner start.** The entrypoint checks that HOME is the ephemeral disk and
+   creates the work folder and the Go and npm caches on it as real directories,
+   so they do not consume RAM. Cloud Run's root filesystem is in memory. The entrypoint exchanges the claim token for the
    JIT config (contract below) and starts `run.sh --jitconfig` as its child
    (it forwards Cloud Run's SIGTERM and reports the runner's real exit code;
    [runner README](../runner/README.md)). GitHub assigns exactly one job; the
@@ -221,9 +224,13 @@ a runner's execution by its `RUNNER_NAME` env, never by job ID.
 - One execution per runner, with exactly these env overrides:
   `RUNNER_CLAIM_TOKEN` (32 lowercase hex characters from `crypto/rand`, single
   use), `MEDIATOR_URL` (https origin, no trailing slash), `GH_JOB_ID` (the job
-  the runner is launched to serve) and `RUNNER_NAME` (normally
+  the runner is launched to serve), `RUNNER_NAME` (normally
   `cr-job-<GH_JOB_ID>`; after a swap or a hijack it carries another job's ID,
-  and the runner only logs the mismatch). The JIT config is never in env,
+  and the runner only logs the mismatch) and `GH_REPOS` (comma-separated
+  `owner/name` list of the repositories whose jobs the runner may be handed:
+  the one repository in repo scope, every `TARGET_REPOS` entry of the owner in
+  org scope, since org-level runners take any of those jobs; the runner's job
+  guard refuses a job of any other repository). The JIT config is never in env,
   args or labels: execution env overrides are visible to anyone with
   `roles/run.viewer`.
 - The runner fetches a Google ID token for itself from the metadata server
@@ -254,10 +261,29 @@ a runner's execution by its `RUNNER_NAME` env, never by job ID.
 
 A fork-PR job that targets `RUNNER_LABEL` is refused a runner of its own, but
 it stays queued (up to 24 h), and GitHub may hand it to the next idle cr-ci
-runner launched for another job. The hijack guard (step 4) kills that runner
-as soon as GitHub reports the job, with no extra App permissions. The kill
-lands within seconds, but **after** the job may have started, so a few steps
-of untrusted code can run. That window is bounded by the other layers:
+runner launched for another job.
+
+**The window is closed on the runner side by the job-started hook.** The
+entrypoint sets `ACTIONS_RUNNER_HOOK_JOB_STARTED` to `cr-ci-job-guard.sh`.
+Runner.Worker reads it from its own environment and runs the hook after the job
+is assigned and before any of its steps, checkout included. The hook allows only
+`push`, or `pull_request` whose head repository is the repository (the same
+allowlist as the routing expression and the fork guard), and only jobs of the
+repositories the runner serves (`GH_REPOS`: its registration scope). Anything else is a
+**hard stop**: the hook kills the worker and the runner's process group, so no
+step of the job runs. A failed hook alone would not do: the runner would still
+run steps marked `if: always()` or `failure()`. For the same reason the
+entrypoint does not start the runner at all (exit 2) unless the hook is the
+root-owned, read-only file whose sha256 was pinned at image build; its path is
+fixed in production. The entrypoint exits 5 on a refusal
+([runner README](../runner/README.md), "Job guard", which cites the actions/runner
+2.338.0 source for each of these points).
+
+The hijack guard (step 4) stays as the next layer: it kills a runner whose job does
+not match as soon as GitHub reports the job, with no extra App permissions, and
+deletes the registration. Before the hook, that kill landed within seconds but
+**after** the job may have started, so a few steps of untrusted code could run.
+That case and any gap in the hook are also bounded by the other layers:
 
 - the job only exists if a maintainer approved the fork PR's workflows
   (deploy precondition 1), and the `runs-on` expression already routes
@@ -286,14 +312,14 @@ repository and still races; org runner groups restricted to selected
 workflows do not exist at repo scope and block `pull_request` runs when
 pinned to a ref.
 
-**Future hardening: per-run composite label.** Workflows would target
+**Further hardening (optional): per-run composite label.** Workflows would target
 `<RUNNER_LABEL>-run-<run_id>` (for example
 `format('{0}-run-{1}', vars.SCION_LARGE_RUNNER, github.run_id)` in the
 `runs-on` expression), and the mediator would require that label on the job
 and mint each runner with only that label. A job of another run, including a
-fork run, could then never match a cr-ci runner, closing the window
-entirely. It costs a dynamic label in workflows, logs and reconcile matching,
-so it is deferred.
+fork run, could then never match a cr-ci runner at all (the job-started hook
+already refuses it before any step). It costs a dynamic label in workflows, logs
+and reconcile matching, so it is deferred.
 
 ### Residual risk: job code can read the runner's credentials
 
@@ -304,9 +330,13 @@ runner. Job code can therefore read:
   as that runner until GitHub removes the registration after the job;
 - the claim token in `/proc/1/environ`: already spent (single use).
 
-sec-review-3 rates it LOW (record `crci-img-651578be-v3.md`), on these conditions:
-- cr-ci runs only trusted same-repo code, because both fork guards hold: the routing
-  expression's guard and the mediator's fork guard (step 2);
+sec-review-3 rates it LOW (record `crci-img-651578be-v3.md`, re-rated for the job
+guard by its fork-guard record), on these conditions:
+- the window in which untrusted code could run on a cr-ci runner is closed by the
+  runner-side job-started hook (residual risk above), on top of the routing
+  expression's guard and the mediator's fork guard (step 2). **Residual:** a
+  compromised trusted job can still read its own runner's registration
+  (ptone/scion#5978);
 - one job runs per runner;
 - the hijack guard (step 4) and the reaper bound what a leaked registration could do.
 
@@ -330,16 +360,18 @@ uid, or passing the JIT config by file and deleting it once the listener has sta
   claim also needs the runner identity's ID token (claim contract v2). Keep
   `roles/run.viewer` narrow anyway.
 - **One job per runner,** in three layers: GitHub JIT runners take at most one
-  job; the entrypoint `exec`s `run.sh` as PID 1; the job uses
+  job; the entrypoint runs `run.sh` once and exits when it does; the job uses
   `--max-retries=0` and a hard `TASK_TIMEOUT`.
 - **Fork PRs on public repositories,** in three layers:
   1. The repo or org setting requires approval for **all** external
      contributors (a deploy precondition, not a suggestion).
   2. The `runs-on` expression routes cross-repo PRs to `ubuntu-latest`.
-  3. The mediator independently refuses fork-PR, `pull_request_target` and
-     `workflow_run` runs,
-     even if a PR edits the workflow to target the label, and kills any cr-ci
-     runner such a job manages to start on (the hijack guard; see the
+  3. The mediator independently refuses every run that is not a same-repo `push`
+     or `pull_request` (an allowlist), even if a PR edits the workflow to target
+     the label, and kills any cr-ci runner such a job manages to start on (the
+     hijack guard).
+  4. On the runner, the job-started hook refuses such a job before any of its
+     steps, with a hard stop (see the
      [residual risk](#residual-risk-label-matched-job-assignment)).
 
   GitHub warns that self-hosted runners on public repos are risky. The layered
@@ -353,6 +385,28 @@ uid, or passing the JIT config by file and deleting it once the listener has sta
   `services:` containers do not work. Only host-process jobs may be routed:
   `lint`, `build-and-test`, `sqlite-nonhub-tests`, the full test suite and race
   detection. Jobs that use `postgres` services stay on GitHub-hosted runners.
+- **Runner layout (cr-ci FIXUP-5):** the ephemeral disk is mounted at HOME
+  (`/home/runner`), the runner is installed at `/opt/actions-runner` (its `_diag`
+  stays on the root filesystem), and the entrypoint creates `~/work`, `~/.cache`,
+  `~/go` and `~/.npm` as real directories on the disk, with no symlinks: physical
+  paths equal logical ones (actions/setup-node's lock-file hashing compares
+  `process.cwd()` with `GITHUB_WORKSPACE`), and whole-directory cache archives
+  restore in place. `TMPDIR` is unset, as on ubuntu-latest (`/tmp`); `GOTMPDIR` is
+  on the disk. Residuals:
+  - **HOME is the volume root, created world-writable** ("so that any user can read
+    or write to it", per Cloud Run). The entrypoint logs its owner and mode at every
+    start and sets it to 0755 only if the runner's uid owns it. Otherwise HOME stays
+    777. Only the runner's uid runs in the container, and the tools in use check
+    file modes (ssh) or the repository's owner (git), not HOME's; starting as root
+    to chmod it was rejected (a trust-model change).
+  - **Temp files are in RAM.** `/tmp` is on the in-memory root filesystem, so Go
+    tests' `t.TempDir()` and other temp files count against `RUNNER_MEMORY`. Go's
+    build and test temp work is on the disk (`GOTMPDIR`). Measure peak memory
+    before routing temp-heavy jobs such as ci.yml's `build-and-test` (not routed).
+    extras-ci.yml's `build-and-test` (a per-module `go test -count=1 ./...` matrix)
+    **is** already routed, so its `t.TempDir()` files are now in RAM too: its fixtures
+    are small, but check its peak memory in the live verification job after the
+    layout switch ([operations.md, "Runner layout switch"](operations.md#runner-layout-switch)).
 - **Shape limits:** at most 8 vCPU / 32 GiB, and memory must fit the CPU count
   (4 vCPU up to 16 GiB, 6 up to 24 GiB, 8 up to 32 GiB). The loader enforces
   this. The design's "> 16 GiB needs 4 vCPU" statement is wrong (see the
@@ -375,10 +429,11 @@ uid, or passing the JIT config by file and deleting it once the listener has sta
   `launch_failed` (`RESOURCE_EXHAUSTED`)
   ([gcp-setup.md, "Quotas"](gcp-setup.md#9-quotas)).
 - **RAM build cache (`RUNNER_BUILD_CACHE_IN_RAM=true`):** the alternative for a
-  small `/scratch`. The entrypoint makes `/scratch/.cache` a link to a directory on
-  the in-memory root filesystem, so `~/.cache` (the Go build cache and
-  golangci-lint's analysis cache) lives in RAM while `~/.cache` still points to
-  `/scratch/.cache` (cache parity holds; tar follows links in parent components).
+  small disk. The entrypoint makes `~/.cache` a link to a directory on the
+  in-memory root filesystem, so the Go build cache and golangci-lint's analysis
+  cache live in RAM (archive entries under `~/.cache/...` still restore there: tar
+  follows a link in a leading component; a whole-`~/.cache` archive would replace
+  the link).
   It counts against `RUNNER_MEMORY`: in P6 PoC run 4 the lint passed at 27.9 GB of
   32 GiB (a ~21 GB compile plus the cache grown to ~9.5 GB), leaving about 4 GB.
   It requires `RUNNER_MEMORY=32Gi` (the config loaders reject less), and the

@@ -15,6 +15,8 @@
 package util
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -110,7 +112,9 @@ func MakeWritableRecursive(path string) error {
 //
 // Symlink removal uses removeSymlinkSafe which avoids triggering macOS
 // autofs timeouts on dangling symlinks pointing to container-internal
-// paths (e.g. /home/scion/...).
+// paths (e.g. /home/scion/...). Where unlinkat(2) is unavailable (non-unix
+// platforms) symlinks are left in place and RemoveAllSafe returns an error
+// wrapping errors.ErrUnsupported.
 func RemoveAllSafe(root string) error {
 	Debugf("RemoveAllSafe: starting removal of %s", root)
 	start := time.Now()
@@ -144,7 +148,9 @@ func RemoveAllSafe(root string) error {
 						return nil // skip this entry
 					}
 					if info.Mode()&os.ModeSymlink != 0 {
-						removeSymlinkSafe(path)
+						if rmErr := removeSymlinkSafe(path); rmErr != nil && firstErr == nil {
+							firstErr = rmErr
+						}
 						symlinkCount++
 						return nil
 					}
@@ -163,7 +169,9 @@ func RemoveAllSafe(root string) error {
 		if d.Type()&os.ModeSymlink != 0 {
 			// Remove symlinks immediately during the walk to prevent
 			// any later operation from touching their targets.
-			removeSymlinkSafe(path)
+			if rmErr := removeSymlinkSafe(path); rmErr != nil && firstErr == nil {
+				firstErr = rmErr
+			}
 			symlinkCount++
 			return nil
 		}
@@ -228,7 +236,13 @@ func RemoveAllSafe(root string) error {
 // On unix this function uses unlinkat(2) with a parent directory fd to avoid
 // full path resolution. It also tries an atomic rename-over as a second
 // strategy. Debug timing is included to diagnose which approach works.
-func removeSymlinkSafe(path string) {
+//
+// Where unlinkat is not available (non-unix platforms) it fails closed: the
+// entry is left in place and an error wrapping errors.ErrUnsupported is
+// returned, with no path-based fallback. On unix it always returns nil, as
+// before; a failed removal there surfaces later when the parent directory
+// cannot be removed.
+func removeSymlinkSafe(path string) error {
 	start := time.Now()
 	dir := filepath.Dir(path)
 	name := filepath.Base(path)
@@ -236,15 +250,19 @@ func removeSymlinkSafe(path string) {
 	// Strategy 1: unlinkat with parent directory fd.
 	// This avoids full path resolution — the kernel operates directly on
 	// the directory entry via the fd, without resolving the symlink target.
-	// Only unix has it; elsewhere attempted is false and the next strategy
-	// runs.
-	if attempted, err := unlinkAt(dir, name); attempted {
+	// Only unix has it; elsewhere unlinkAt returns errUnlinkAtUnsupported
+	// and the removal fails closed.
+	attempted, err := unlinkAt(dir, name)
+	if errors.Is(err, errUnlinkAtUnsupported) {
+		return fmt.Errorf("remove symlink %s: %w", path, err)
+	}
+	if attempted {
 		if err == nil {
 			elapsed := time.Since(start)
 			if elapsed > 100*time.Millisecond {
 				Debugf("removeSymlinkSafe: unlinkat took %v for %s", elapsed, name)
 			}
-			return
+			return nil
 		}
 		Debugf("removeSymlinkSafe: unlinkat failed for %s: %v", name, err)
 	}
@@ -262,7 +280,7 @@ func removeSymlinkSafe(path string) {
 			if elapsed > 100*time.Millisecond {
 				Debugf("removeSymlinkSafe: rename-over took %v for %s", elapsed, name)
 			}
-			return
+			return nil
 		}
 		_ = os.Remove(tmp)
 	}
@@ -277,4 +295,10 @@ func removeSymlinkSafe(path string) {
 	if elapsed > 100*time.Millisecond {
 		Debugf("removeSymlinkSafe: os.Remove took %v for %s", elapsed, name)
 	}
+	return nil
 }
+
+// errUnlinkAtUnsupported is returned by unlinkAt on platforms without
+// unlinkat(2). removeSymlinkSafe refuses to fall back to path-based removal
+// when it sees it.
+var errUnlinkAtUnsupported = fmt.Errorf("unlinkat is not available on this platform: %w", errors.ErrUnsupported)

@@ -34,6 +34,11 @@ Only `scion-agent.yaml` is required for Scion to recognize the directory as a te
 
 The config file drives the role. Fields that point at content — `agent_instructions`, `system_prompt` — accept **either a filename** (resolved relative to the template directory) **or inline text**. The convention is to keep prose in separate `.md` files:
 
+- A single-line value names a file. It must be a relative path inside the template directory (no absolute path, no `..`). If no template in the chain has that file, the value is used as inline text.
+- A value with a line break is always inline text.
+- A content file must be a regular file of at most 4 MiB, reached without a symbolic link. A symbolic link at the file or at any directory on its path is refused with an error; replace it with the file or directory itself.
+- The same rules apply when Scion picks up `agents.md` or `system-prompt.md` by convention; a linked file is not picked up.
+
 ```yaml
 schema_version: "1"
 description: "Senior code reviewer — correctness, readability, security, performance"
@@ -68,6 +73,8 @@ Common fields:
 | `secrets` | Names of the secrets the job requires (values come from user, project, hub or broker secrets). |
 | `services`, `max_turns`, `max_model_calls`, `max_duration`, `thinking_level`, `command_args`, `task_flag` | Further job settings. |
 | `message_mode` | Hub only: the initial message mode for agents created from the template. |
+
+A `max_turns` or `max_model_calls` of `0` means no limit and overrides the hub and broker default limits (taking effect on Runtime Brokers that advertise the `unlimitedCountLimits` capability); leave the key out to inherit them. Older versions accepted `0` silently and treated it as "inherit", and the Runtime Broker logs each template that sets a count limit to `0` when provisioning an agent.
 
 The full field reference is [Agent Configuration (`scion-agent.yaml`)](/scion/reference/agent-config/).
 
@@ -349,7 +356,7 @@ Agents that share the project workspace see the project's `.scion` directory rea
 
 On the Hub, a template's files are stored as content-addressed blobs, and each commit swaps the template's file manifest in one compare-and-swap step. If another commit changes the same template first, the losing commit gets `409 template_conflict` and nothing is written; `scion templates sync` re-diffs against the new version and retries once (see the [API Reference](/scion/reference/api/)). Templates stored in the older layout keep working and move to blobs on their next commit. Blobs that are no longer referenced by any template are removed by a background collector after a grace period (24 hours by default), so an agent download that started from an older version still finds its files.
 
-Beyond the CLI, project templates are a **fully managed Hub-level resource** with full CRUD, SDK, and Web UI support. A connected Hub can import a whole repository of templates server-side via the **Load Templates** action in the Web UI, and imported templates can be browsed, edited, and deleted directly within the dashboard. When the Hub bootstraps or imports a template directory (or any bundled `harness-configs/<name>` subdirectory inside it), it opens the collected directory as a root, reads only the regular files recorded during collection without following symlinks or replaced directories, and verifies each file's size and SHA-256 digest on every read (`scion-agent.yaml`, `config.yaml`, and uploaded files).
+Beyond the CLI, project templates are a **fully managed Hub-level resource** with full CRUD, SDK, and Web UI support. A connected Hub can import a whole repository of templates server-side via the **Load Templates** action in the Web UI, and imported templates can be browsed, edited, and deleted directly within the dashboard (when discovering or importing workspace templates for a linked project whose recorded provider path ends in `.scion`, the Hub resolves paths from the checkout root, the parent of `.scion`). When the Hub bootstraps or imports a template directory (or any bundled `harness-configs/<name>` subdirectory inside it), it opens the collected directory as a root, reads only the regular files recorded during collection without following symlinks or replaced directories, and verifies each file's size and SHA-256 digest on every read (`scion-agent.yaml`, `config.yaml`, and uploaded files).
 
 ### Refreshing a Hub template from its source
 

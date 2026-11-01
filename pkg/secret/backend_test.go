@@ -19,6 +19,7 @@ package secret
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -689,16 +690,16 @@ func TestSecretFetch_MismatchedRecordNotReadFromSecretManager(t *testing.T) {
 // Resolve: decrypt failures are skipped
 // ============================================================================
 
-// TestResolve_DecryptErrorSkipsSecret verifies that decryptRawValue's
-// fail-closed behaviour reaches Resolve: a secret whose stored value fails
-// to decrypt is left out of the Resolve result entirely, not delivered with
-// an empty value. This covers the Resolve -> decryptRawValue path;
+// TestResolve_DecryptErrorFailsResolution verifies that a present but
+// undecryptable stored value fails the whole resolution with the typed
+// *ResolveDecryptError (ptone/scion#1530 §5: decrypt failures are never
+// treated as missing data), in own scopes and progeny alike, naming the
+// affected keys and their classification and never a value. This covers
+// the Resolve -> decryptRawValue path;
 // TestSecretFetch_DecryptErrorReportsUnavailable covers the FetchValues ->
-// decryptStoreSecret path.
-// Reverting localbackend.go's decryptRawValue to `return "", nil` on a
-// decrypt failure turns this test red: the corrupt secret would then be
-// merged into the Resolve result with Value == "" instead of being skipped.
-func TestResolve_DecryptErrorSkipsSecret(t *testing.T) {
+// decryptStoreSecret path. Before this change Resolve skipped such secrets,
+// so an agent could start without them.
+func TestResolve_DecryptErrorFailsResolution(t *testing.T) {
 	backend, s := createTestBackend(t)
 	ctx := context.Background()
 
@@ -706,6 +707,10 @@ func TestResolve_DecryptErrorSkipsSecret(t *testing.T) {
 	// produced for this key: it decodes but fails AES-GCM authentication.
 	corrupt := EncryptedPrefix + base64.StdEncoding.EncodeToString(make([]byte, 32))
 
+	if _, _, err := backend.Set(ctx, &SetSecretInput{Name: "GOOD_KEY", Value: "fake-good-value",
+		Scope: ScopeProject, ScopeID: "project-1"}); err != nil {
+		t.Fatal(err)
+	}
 	seedSecret(t, s, &store.Secret{
 		ID:             tid("resolve-decrypt-fail-own"),
 		Key:            "CORRUPT_OWN_KEY",
@@ -732,16 +737,76 @@ func TestResolve_DecryptErrorSkipsSecret(t *testing.T) {
 		AuthzCheck:    func(_ SecretMeta) bool { return true },
 	}
 	resolved, err := backend.Resolve(ctx, "", "project-1", "", opts)
-	if err != nil {
-		t.Fatalf("Resolve failed: %v", err)
+	if err == nil {
+		t.Fatalf("Resolve returned %d secrets and no error; want a typed decrypt error", len(resolved))
 	}
+	if resolved != nil {
+		t.Errorf("a failed resolution must return no secrets, got %d", len(resolved))
+	}
+	if !errors.Is(err, ErrResolveDecrypt) {
+		t.Fatalf("err = %v, want ErrResolveDecrypt", err)
+	}
+	var rde *ResolveDecryptError
+	if !errors.As(err, &rde) {
+		t.Fatalf("err is not a *ResolveDecryptError: %T", err)
+	}
+	want := []ResolveFailure{
+		{Key: "CORRUPT_OWN_KEY", Scope: ScopeProject, Kind: FailureDecrypt},
+		{Key: "CORRUPT_PROGENY_KEY", Scope: ScopeUser, Kind: FailureDecrypt},
+	}
+	if len(rde.Failures) != len(want) {
+		t.Fatalf("failures = %+v, want %+v", rde.Failures, want)
+	}
+	for i := range want {
+		if rde.Failures[i] != want[i] {
+			t.Errorf("failure[%d] = %+v, want %+v", i, rde.Failures[i], want[i])
+		}
+	}
+	msg := err.Error()
+	for _, name := range []string{"CORRUPT_OWN_KEY", "CORRUPT_PROGENY_KEY", "decrypt_failed"} {
+		if !strings.Contains(msg, name) {
+			t.Errorf("error text lacks %q: %s", name, msg)
+		}
+	}
+	for _, leak := range []string{"fake-good-value", corrupt[len(EncryptedPrefix):], "gcm", "cipher:"} {
+		if strings.Contains(msg, leak) {
+			t.Errorf("error text leaks %q", leak)
+		}
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		t.Error("a decrypt failure must never read as not found")
+	}
+}
+
+// TestResolve_LegacyPlaintextUnchanged pins that valid legacy plaintext
+// rows (written before encryption was configured) still resolve
+// unchanged in legacy mode, next to encrypted ones.
+func TestResolve_LegacyPlaintextUnchanged(t *testing.T) {
+	backend, s := createTestBackend(t)
+	ctx := context.Background()
+	seedSecret(t, s, &store.Secret{
+		ID:             tid("resolve-legacy-plain"),
+		Key:            "LEGACY_PLAIN_KEY",
+		EncryptedValue: "fake-legacy-plaintext",
+		SecretType:     store.SecretTypeEnvironment,
+		Target:         "LEGACY_PLAIN_KEY",
+		Scope:          store.ScopeProject,
+		ScopeID:        "project-1",
+	})
+	if _, _, err := backend.Set(ctx, &SetSecretInput{Name: "ENCRYPTED_KEY", Value: "fake-encrypted-value",
+		Scope: ScopeProject, ScopeID: "project-1"}); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := backend.Resolve(ctx, "", "project-1", "", nil)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	got := map[string]string{}
 	for _, sv := range resolved {
-		if sv.Name == "CORRUPT_OWN_KEY" {
-			t.Error("own-scope secret that fails to decrypt should be absent from Resolve, not present with an empty value")
-		}
-		if sv.Name == "CORRUPT_PROGENY_KEY" {
-			t.Error("progeny secret that fails to decrypt should be absent from Resolve, not present with an empty value")
-		}
+		got[sv.Name] = sv.Value
+	}
+	if got["LEGACY_PLAIN_KEY"] != "fake-legacy-plaintext" || got["ENCRYPTED_KEY"] != "fake-encrypted-value" {
+		t.Fatalf("resolved = %v", got)
 	}
 }
 
@@ -884,7 +949,7 @@ var hubInternalGetCallers = map[string]int{
 	filepath.Join("pkg", "hub", "handlers_projects_core.go"):      2, // resolveCloneToken: hub-side git clone credential, never delivered
 	filepath.Join("pkg", "hub", "resource_import.go"):             1, // resource import: hub-side git clone credential, never delivered
 	filepath.Join("pkg", "hub", "material_runtime.go"):            1, // pending FetchValues migration: agent runtime material read (fetchAuthorizedValue)
-	filepath.Join("pkg", "hub", "httpdispatcher.go"):              3, // pending FetchValues migration: provision credentials + NoAuth GITHUB_TOKEN (own and owner scope)
+	filepath.Join("pkg", "hub", "httpdispatcher.go"):              2, // pending FetchValues migration: NoAuth GITHUB_TOKEN (own and owner scope)
 	filepath.Join("pkg", "secretmigration", "secretmigration.go"): 1, // hub secret migration helper
 	filepath.Join("cmd", "server_foreground.go"):                  3, // hub startup: signing keys + telemetry credentials
 }

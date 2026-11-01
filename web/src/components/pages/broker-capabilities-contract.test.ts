@@ -46,12 +46,14 @@ const UNDECLARED_ALLOWED: readonly string[] = [
   'attachmentDelivery',
   'changedFields',
   'clearedFields',
+  'clearedResourceSubfields',
   'emptyPerAgentWorkspace',
   'nodeImageRegistry',
   'reprovision',
   'reprovisionEmptyPerAgent',
   'startsInFlight',
   'templateTiers',
+  'unlimitedCountLimits',
 ];
 
 const serverFields: readonly string[] = fixture.fields;

@@ -19,6 +19,7 @@ package entc
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -38,6 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/migrate"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/txdiag"
 )
 
 // PoolConfig holds connection pool settings applied to the underlying
@@ -58,6 +60,11 @@ type PoolConfig struct {
 	// request after an idle period stalls waiting for a dead connection to time
 	// out. A zero value leaves the database/sql default (no idle limit).
 	ConnMaxIdleTime time.Duration
+	// Diag, when set, wraps the connection pool with transaction-hold and
+	// lock-wait diagnostics (package txdiag). The opener creates one
+	// Monitor per opened DB from it; the DB's Close closes the Monitor. Nil
+	// leaves the open path exactly as without diagnostics.
+	Diag *txdiag.Config
 }
 
 // apply sets the pool parameters on db, skipping any unset (non-positive) field.
@@ -284,7 +291,17 @@ func ClearLaunchResumePhaseHook(next ent.Mutator) ent.Mutator {
 // every connection in the pool.
 // This uses the modernc.org/sqlite pure-Go driver which registers as "sqlite".
 func OpenSQLite(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client, error) {
-	db, err := sql.Open("sqlite", sqliteDSNPragmas(withUTCTimezone(dsn), "foreign_keys(1)"))
+	fullDSN := sqliteDSNPragmas(withUTCTimezone(dsn), "foreign_keys(1)")
+	var (
+		db  *sql.DB
+		mon *txdiag.Monitor
+		err error
+	)
+	if pool.Diag != nil {
+		db, mon, err = openSQLiteDiag(fullDSN, *pool.Diag)
+	} else {
+		db, err = sql.Open("sqlite", fullDSN)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("opening sqlite connection: %w", err)
 	}
@@ -300,9 +317,81 @@ func OpenSQLite(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client, e
 	}
 	pool.apply(db)
 	drv := entsql.OpenDB(dialect.SQLite, db)
-	client := ent.NewClient(append(opts, ent.Driver(drv))...)
+	client := ent.NewClient(append(opts, ent.Driver(diagDriver(drv, mon)))...)
 	client.Use(UTCTimeHook, ClearLaunchResumePhaseHook)
 	return client, nil
+}
+
+// openSQLiteDiag opens dsn through the registered modernc driver instance,
+// wrapped with diagnostics. The registered instance (not a fresh
+// sqlite.Driver) carries the driver's process-wide registrations
+// (functions, collations, connection hooks, modules), so connections open
+// exactly as sql.Open("sqlite", dsn) would open them.
+func openSQLiteDiag(dsn string, cfg txdiag.Config) (*sql.DB, *txdiag.Monitor, error) {
+	db0, err := sql.Open("sqlite", "")
+	if err != nil {
+		return nil, nil, err
+	}
+	base := db0.Driver()
+	_ = db0.Close()
+	var conn driver.Connector = txdiag.DSNConnector{DSN: dsn, Drv: base}
+	if dc, ok := base.(driver.DriverContext); ok {
+		if conn, err = dc.OpenConnector(dsn); err != nil {
+			return nil, nil, err
+		}
+	}
+	cfg.Dialect = dialect.SQLite
+	mon := txdiag.NewMonitor(cfg)
+	return sql.OpenDB(txdiag.WrapConnector(conn, mon)), mon, nil
+}
+
+// diagDriver returns drv wrapped with lock-wait probes when mon is set, and
+// drv itself otherwise.
+func diagDriver(drv *entsql.Driver, mon *txdiag.Monitor) dialect.Driver {
+	if mon == nil {
+		return drv
+	}
+	return txdiag.WrapEntDriver(drv, mon)
+}
+
+// SQLDriver returns the *entsql.Driver behind d, unwrapping a diagnostics
+// wrapper. Code that needs the *sql.DB of an ent client goes through this
+// rather than a type assertion to *entsql.Driver, which fails on a wrapped driver
+// (hack/check-entsql-driver-assert.sh enforces this).
+func SQLDriver(d dialect.Driver) (*entsql.Driver, bool) {
+	for d != nil {
+		if sd, ok := d.(*entsql.Driver); ok {
+			return sd, true
+		}
+		u, ok := d.(interface{ Unwrap() dialect.Driver })
+		if !ok {
+			return nil, false
+		}
+		d = u.Unwrap()
+	}
+	return nil, false
+}
+
+// SQLDB returns the *sql.DB behind d (see SQLDriver), or nil when d is not
+// backed by one.
+func SQLDB(d dialect.Driver) *sql.DB {
+	if sd, ok := SQLDriver(d); ok {
+		return sd.DB()
+	}
+	return nil
+}
+
+// DiagMonitor returns the diagnostics Monitor of client, if its driver was
+// opened with PoolConfig.Diag.
+func DiagMonitor(client *ent.Client) (*txdiag.Monitor, bool) {
+	if client == nil {
+		return nil, false
+	}
+	d, ok := client.Driver().(interface{ Monitor() *txdiag.Monitor })
+	if !ok {
+		return nil, false
+	}
+	return d.Monitor(), true
 }
 
 // OpenSQLiteReadOnly creates an Ent client backed by a read-only SQLite
@@ -406,16 +495,30 @@ func openPostgres(dsn string, pool PoolConfig, readOnly bool, opts ...ent.Option
 	// that sends OID 25 (text). Without this, raw queries comparing uuid columns
 	// against Go uuid.UUID parameters fail with SQLSTATE 42883 ("operator does
 	// not exist: uuid = text"). See https://github.com/ptone/scion/issues/1634.
-	db := stdlib.OpenDB(*connConfig, stdlib.OptionAfterConnect(
+	afterConnect := stdlib.OptionAfterConnect(
 		func(ctx context.Context, conn *pgx.Conn) error {
 			conn.TypeMap().RegisterDefaultPgType(uuid.UUID{}, "uuid")
 			conn.TypeMap().RegisterDefaultPgType([]uuid.UUID{}, "_uuid")
 			return nil
 		},
-	))
+	)
+	var (
+		db  *sql.DB
+		mon *txdiag.Monitor
+	)
+	if pool.Diag != nil {
+		// stdlib.OpenDB is sql.OpenDB(stdlib.GetConnector(...)); the
+		// diagnostics path wraps that same connector.
+		cfg := *pool.Diag
+		cfg.Dialect = dialect.Postgres
+		mon = txdiag.NewMonitor(cfg)
+		db = sql.OpenDB(txdiag.WrapConnector(stdlib.GetConnector(*connConfig, afterConnect), mon))
+	} else {
+		db = stdlib.OpenDB(*connConfig, afterConnect)
+	}
 	pool.apply(db)
 	drv := entsql.OpenDB(dialect.Postgres, db)
-	client := ent.NewClient(append(opts, ent.Driver(drv))...)
+	client := ent.NewClient(append(opts, ent.Driver(diagDriver(drv, mon)))...)
 	client.Use(UTCTimeHook, ClearLaunchResumePhaseHook)
 	return client, nil
 }
@@ -493,7 +596,7 @@ func AutoMigrate(ctx context.Context, client *ent.Client, opts ...AutoMigrateOpt
 	// foreign keys were not enforced; see reconcileSQLiteForeignKeys.
 	var fkResult fkReconcileResult
 	if client.Driver().Dialect() == dialect.SQLite {
-		if drv, ok := client.Driver().(*entsql.Driver); ok {
+		if drv, ok := SQLDriver(client.Driver()); ok {
 			if err := runBeforeFKReconcile(ctx, drv.DB(), cfg.beforeFKReconcile); err != nil {
 				return err
 			}
@@ -509,6 +612,13 @@ func AutoMigrate(ctx context.Context, client *ent.Client, opts ...AutoMigrateOpt
 		}
 		return err
 	}
+	// Downgrade floor rule: a change here that drops a table or column, or
+	// any other migration an older binary cannot ignore (a new NOT NULL
+	// column without a default, a narrowed enum, rewritten values), must
+	// bump pkg/version.DowngradeFloor in the same PR to the first release
+	// that contains it. The hub refuses to install a release older than
+	// the floor (below_downgrade_floor), because that binary would run on a
+	// schema it does not understand.
 	if err := dropDecisionAuditTable(ctx, client); err != nil {
 		return err
 	}

@@ -1,0 +1,12 @@
+{
+  "exit_code": 0,
+  "resolved_auth": {
+    "method": "api-key",
+    "harness": "pi",
+    "env_var": "ANTHROPIC_API_KEY"
+  },
+  "env": {
+    "PI_SKIP_VERSION_CHECK": "1",
+    "PI_TELEMETRY": "0"
+  }
+}

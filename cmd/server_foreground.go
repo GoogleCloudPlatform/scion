@@ -54,6 +54,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hostlimits"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubexport"
@@ -61,6 +62,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubtracing"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/reapermetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/ssemetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/txdiag"
 	scionplugin "github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin/grpcbroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
@@ -430,9 +432,15 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	var s store.Store
 	var entClient *ent.Client
 	if enableHub {
+		// Before the database is opened: the boot-failure guard must know
+		// that this update target may have migrated the schema.
+		markUpdateStateBooting(maintenanceInstallRoot())
 		s, entClient, err = initStore(ctx, cfg)
 		if err != nil {
-			return err
+			// A stop during the migrations is a clean exit, not a failed
+			// start (startupShutdownErr); likewise for the other
+			// context-taking startup steps below.
+			return shutdownSeq.startupErr(ctx, err)
 		}
 		if closer, ok := s.(io.Closer); ok {
 			defer func() { _ = closer.Close() }()
@@ -483,7 +491,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	operatorEndpoint, operatorEndpointSrc := resolveServerHubEndpoint(cfg, brokerSettings)
 	hubEndpoints, err := resolveHubEndpoints(ctx, s, operatorHubEndpoint{URL: operatorEndpoint, Source: operatorEndpointSrc})
 	if err != nil {
-		return err
+		return shutdownSeq.startupErr(ctx, err)
 	}
 	hubEndpoint, hubEndpointSrc := effectiveHubEndpoint(hubEndpoints, operatorEndpointSrc)
 
@@ -495,13 +503,19 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	// ResolvePluginConfig strips inline secrets.
 	var secretBackend secret.SecretBackend
 	if enableHub && s != nil {
+		// The one shared encryption object (ptone/scion#1530 §5), built
+		// before the backend and plugin boot path: the local backend and
+		// the hub hold the same pointer.
+		if err := buildServerValueCipher(); err != nil {
+			return err
+		}
 		hubID := cfg.Hub.ResolveHubID()
 		var sbErr error
 		secretBackend, sbErr = secret.NewBackend(ctx, cfg.Secrets.Backend, s, secret.GCPBackendConfig{
 			ProjectID:            cfg.Secrets.GCPProjectID,
 			CredentialsJSON:      cfg.Secrets.GCPCredentials,
 			ReplicationLocations: cfg.Secrets.GCPReplicationLocations,
-		}, hubID, resolveSessionSecret())
+		}, hubID, serverValueCipher)
 		if sbErr != nil {
 			log.Printf("Warning: failed to initialize secret backend: %v", sbErr)
 		}
@@ -531,6 +545,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		var hubInitErr error
 		hubSrv, hubInitErr = initHubServerFn(ctx, cfg, s, entClient, hubEndpoints, devAuthToken, adminEmailList, adminMode, maintenanceMessage, requestLogger, messageLogger, artifactLogger, globalDir, pluginMgr, secretBackend)
 		if hubInitErr != nil {
+			if shutdownSeq.startupErr(ctx, hubInitErr) == nil {
+				return nil
+			}
 			// Return rather than log.Fatalf so the deferred cleanups (store
 			// close, plugin shutdown, log flush including Cloud Logging) run.
 			// Startup stays fail-closed: nothing is serving yet. The exit
@@ -601,6 +618,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 				exit.addFlush(mp.Shutdown)
 
 				hubDBRec = wireHubCoreMetrics(hubSrv, mp)
+				attachTxDiagRecorder(entClient, hubDBRec)
 
 				if hubSrv.GetBrokerAuthService() != nil {
 					otelMetrics, otelAuthErr := hub.NewOTelMetricsRecorder(mp)
@@ -634,7 +652,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		// Wire command bus for cross-node dispatch (B2-4).
 		cmdBus, err := newCommandBus(ctx, cfg, hubSrv)
 		if err != nil {
-			return err
+			return shutdownSeq.startupErr(ctx, err)
 		}
 		hubSrv.SetCommandBus(cmdBus)
 
@@ -647,19 +665,22 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		hubSrv.SetShutdownHooks(frontShutdownHooks)
 
 		if err := startConduit(ctx, shutdownSeq, cfg, hubSrv, hubEndpoints.For(hub.HubEndpointForConduitCheck), &wg, errCh); err != nil {
-			return err
+			return shutdownSeq.startupErr(ctx, err)
 		}
 
 		if !enableWeb {
 			// Hub runs its own HTTP server (standalone mode).
 			eventPub, err := newEventPublisher(ctx, cfg, hubDBRec)
 			if err != nil {
-				return err
+				return shutdownSeq.startupErr(ctx, err)
 			}
 			hubSrv.SetEventPublisher(eventPub)
 			startSettingsPropagation(ctx, hubSrv, eventPub)
 
 			log.Printf("Starting Hub API server on %s:%d", cfg.Hub.Host, cfg.Hub.Port)
+			// An update target counts as healthy (update-state verified)
+			// only once its listener is bound.
+			hubSrv.SetOnListening(hubSrv.MarkUpdateStateVerified)
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -684,7 +705,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if enableWeb {
 		webSrv, err = initWebServer(ctx, cfg, hubSrv, devAuthToken, webBase, adminMode, maintenanceMessage, requestLogger, hubDBRec)
 		if err != nil {
-			return err
+			return shutdownSeq.startupErr(ctx, err)
 		}
 		shutdownSeq.addStep(shutdownPhaseMark, webSrv.BeginShutdown)
 		webSrv.SetShutdownHooks(frontShutdownHooks)
@@ -706,6 +727,11 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			}
 		}
 		log.Printf("Starting Web Frontend on %s:%d", cfg.Hub.Host, webPort)
+		if enableHub && hubSrv != nil {
+			// Combined mode: the web listener serves the hub API, so the
+			// update target is verified once it is bound.
+			webSrv.SetOnListening(hubSrv.MarkUpdateStateVerified)
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -738,7 +764,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			brokerStop.markStopped()
 		}()
 		if brokerErr != nil {
-			return brokerErr
+			return shutdownSeq.startupErr(ctx, brokerErr)
 		}
 	}
 	// Phase 2 item 5: one, centralized call site for the shared_dir_storage
@@ -792,6 +818,15 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 					webStore = ws
 					hubSrv.SetWebChatStore(webStore)
 					log.Printf("Web chat store initialized")
+
+					// Chat message retention purges the web chat tables
+					// and messages in one transaction on this same DB, so
+					// it is wired only once the webchat tables exist.
+					if crp, ok := s.(interface {
+						ChatRetention() store.ChatRetentionStore
+					}); ok {
+						hubSrv.SetChatRetentionStore(crp.ChatRetention())
+					}
 
 					// W7: Initialize local-disk attachment store.
 					globalDir, err := config.GetGlobalDir()
@@ -910,7 +945,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 									Created:         time.Now(),
 									Updated:         time.Now(),
 								}
-								if createErr := s.CreateRuntimeBroker(ctx, pluginBroker); createErr != nil {
+								if createErr := s.CreateRuntimeBrokerClearingCredentials(ctx, pluginBroker); createErr != nil {
 									log.Printf("Warning: failed to register broker entity for plugin %q: %v", bt, createErr)
 								}
 							}
@@ -1432,6 +1467,10 @@ func resolveHubProjectStorage(cfg *config.GlobalConfig) error {
 	}
 	cfg.EffectiveProjectStorage = ps
 	cfg.EffectiveProjectStorageWarnings = warnings
+	// Removed per-runtime/per-profile storage overrides in the settings
+	// file are reported (ERROR, degraded health, admin settings), never a
+	// refused start (ptone/scion#6371).
+	cfg.RemovedStorageOverridesFileError = hubRemovedStorageOverridesFileError(log.Printf)
 	return nil
 }
 
@@ -1728,6 +1767,12 @@ func validateServerPreflight(cfg *config.GlobalConfig) error {
 	if _, err := hub.ParseAgentRunScope(cfg.Auth.AgentRunScope, cfg.Auth.AgentRunScopeLegacyUntil); err != nil {
 		return err
 	}
+	// server.trusted_proxies decides whose X-Forwarded-Proto the hub-broker
+	// transport policy trusts; an invalid or catch-all entry refuses
+	// startup instead of being dropped.
+	if _, err := config.ParseTrustedProxies(cfg.TrustedProxies); err != nil {
+		return fmt.Errorf("refusing to start the hub: %w", err)
+	}
 	return nil
 }
 
@@ -1739,6 +1784,17 @@ func portProxyResponseHeaderTimeoutSetting(cfg *config.GlobalConfig) time.Durati
 	d, err := cfg.Hub.PortProxy.ResponseHeaderTimeoutDuration()
 	if err != nil {
 		return config.PortProxyDefaultResponseHeaderTimeout
+	}
+	return d
+}
+
+// portViewTTLSetting returns the configured lifetime of a page view link
+// (default 2h). validateServerPreflight has already rejected a malformed
+// or out-of-range value.
+func portViewTTLSetting(cfg *config.GlobalConfig) time.Duration {
+	d, err := cfg.Hub.PortProxy.ViewTTLDuration()
+	if err != nil {
+		return config.PortProxyDefaultViewTTL
 	}
 	return d
 }
@@ -1879,6 +1935,11 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, *ent
 		ConnMaxLifetime: connMaxLifetime,
 		ConnMaxIdleTime: connMaxIdleTime,
 	}
+	diag, err := txDiagConfig(cfg.Database.TxDiagnostics)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid database config: %w", err)
+	}
+	pool.Diag = diag
 
 	var entClient *ent.Client
 	switch cfg.Database.Driver {
@@ -1959,6 +2020,38 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, *ent
 	}
 
 	return s, entClient, nil
+}
+
+// txDiagConfig returns the transaction diagnostics config for the hub
+// store's pool, or nil when tx_diagnostics.enabled is false (the pool then
+// opens exactly as without diagnostics).
+func txDiagConfig(c config.TxDiagnosticsConfig) (*txdiag.Config, error) {
+	s, err := c.Settings()
+	if err != nil {
+		return nil, err
+	}
+	if !s.Enabled {
+		return nil, nil
+	}
+	return &txdiag.Config{
+		HoldWarnThreshold:     s.HoldWarnThreshold,
+		LockWaitWarnThreshold: s.LockWaitWarnThreshold,
+		WarnInterval:          s.WarnInterval,
+		Logger:                logging.Subsystem("hub.db"),
+	}, nil
+}
+
+// attachTxDiagRecorder hands the hub DB metrics recorder to the store's
+// transaction diagnostics, when both exist. The Monitor itself is owned by
+// the store's connection pool and closes with it.
+func attachTxDiagRecorder(client *ent.Client, rec dbmetrics.Recorder) {
+	mon, ok := entc.DiagMonitor(client)
+	if !ok {
+		return
+	}
+	if tr, ok := rec.(txdiag.Recorder); ok {
+		mon.SetRecorder(tr)
+	}
 }
 
 // migrateStore runs the schema migration and seed data. On Postgres it is
@@ -2532,8 +2625,8 @@ func resolveHubNameFromEnv() string {
 // deprecated SESSION_SECRET). The same value backs both the web session cookie
 // store and the hub JWT signing keys so that all replicas behind the load
 // balancer agree. With a keyring file it is the keyring's "legacy" signing
-// entry, which every purpose but the web session cookies still uses
-// (ptone/scion#1530 Phase 1); the legacy inputs are then refused at startup.
+// entry, which every purpose not yet on the signing ring still uses
+// (ptone/scion#1530); the legacy inputs are then refused at startup.
 func resolveSessionSecret() string {
 	if legacy, ok := keyringLegacySecret(); ok {
 		return legacy
@@ -2754,6 +2847,8 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		LaunchTimeout:                cfg.Hub.LaunchTimeout,
 		LaunchKeepaliveSeconds:       cfg.Hub.LaunchKeepaliveSeconds,
 		ConduitTCPAllowedPorts:       append([]int(nil), cfg.Hub.Conduit.TCPAllowedPorts...),
+		TransportTrustedProxies:      append([]string(nil), cfg.TrustedProxies...),
+		TransportTrustedProxiesSet:   cfg.TrustedProxiesSet,
 		ConduitGrantKeyActivation:    conduitGrantKeyActivationSetting(cfg),
 		ConduitAuthzRecheckInterval:  conduitAuthzRecheckIntervalSetting(cfg),
 		ConduitUserStreamAuthzMax:    conduitUserStreamAuthzMaxSetting(cfg),
@@ -2841,21 +2936,30 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		WebSessionKeySource: webSessionKeySource(resolveSessionSecret()),
 		// The server keyring file, or nil (legacy single-secret mode).
 		Keyring: serverKeyringFromFile(),
+		// The shared encryption object the local secret backend holds
+		// (nil: the hub builds it from Keyring or SharedSigningSecret).
+		ValueCipher: serverValueCipher,
+		// A set server.keyring_file makes hub.New refuse to start without
+		// the file keyring (never a fallback to legacy signing keys).
+		KeyringConfigured: cfg.KeyringFile != "",
 		// When SCION_REQUIRE_STABLE_SIGNING_KEY is truthy, the hub refuses to
 		// start rather than silently mint a new signing key it cannot resolve
 		// (which would invalidate every live token after, e.g., a redeploy onto a
 		// new host that changed the HubID). Operators enabling this must supply a
 		// session secret or pre-provision the signing keys.
-		RequireStableSigningKey: parseBoolEnv("SCION_REQUIRE_STABLE_SIGNING_KEY"),
-		OIDCLogin:               cfg.OIDCLogin,
-		OIDCConfig:              cfg.OIDC,
-		Federation:              cfg.Federation,
-		ProjectStorageConfig:    cfg.EffectiveProjectStorage,
-		ProjectStorageWarnings:  cfg.EffectiveProjectStorageWarnings,
+		RequireStableSigningKey:          parseBoolEnv("SCION_REQUIRE_STABLE_SIGNING_KEY"),
+		OIDCLogin:                        cfg.OIDCLogin,
+		OIDCConfig:                       cfg.OIDC,
+		Federation:                       cfg.Federation,
+		ProjectStorageConfig:             cfg.EffectiveProjectStorage,
+		ProjectStorageWarnings:           cfg.EffectiveProjectStorageWarnings,
+		RemovedStorageOverridesFileError: cfg.RemovedStorageOverridesFileError,
 		// nil (no server.native_chat section) means enabled — chat is default-on.
 		NativeChatEnabled: cfg.NativeChat.EnabledSetting(),
 		// server.hub.port_proxy.response_header_timeout (validated at startup).
 		PortProxyResponseHeaderTimeout: portProxyResponseHeaderTimeoutSetting(cfg),
+		// server.hub.port_proxy.view_ttl (validated at startup).
+		PortViewTTL: portViewTTLSetting(cfg),
 	}
 }
 
@@ -2975,11 +3079,33 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		hubSrv.SetPortProxyMetrics(portProxyRec)
 	}
 
+	if portViewRec, err := hub.NewOTelPortViewMetrics(mp); err != nil {
+		log.Printf("WARNING: hub port view metrics disabled: %v", err)
+	} else {
+		hubSrv.SetPortViewMetrics(portViewRec)
+	}
+
+	if err := hubSrv.RegisterCSPReportMetrics(mp); err != nil {
+		log.Printf("WARNING: hub browser policy report metrics disabled: %v", err)
+	}
+
 	runScopeRec, runScopeErr := hub.NewOTelAgentRunScopeMetrics(mp)
 	if runScopeErr != nil {
 		log.Printf("WARNING: hub agent run-scope metrics disabled: %v", runScopeErr)
 	} else {
 		hubSrv.SetAgentRunScopeMetrics(runScopeRec)
+	}
+
+	if legacyFallbackRec, err := hub.NewOTelLegacyAdoptedFallbackMetrics(mp); err != nil {
+		log.Printf("WARNING: hub legacy adopted-agent fallback metrics disabled: %v", err)
+	} else {
+		hubSrv.SetLegacyAdoptedFallbackMetrics(legacyFallbackRec)
+	}
+
+	if uatIntrinsicRec, err := hub.NewOTelUATIntrinsicMetrics(mp); err != nil {
+		log.Printf("WARNING: hub uat intrinsic metrics disabled: %v", err)
+	} else {
+		hubSrv.SetUATIntrinsicMetrics(uatIntrinsicRec)
 	}
 
 	// Decision logging (remaining-audit P1): the audit writer's
@@ -3023,6 +3149,7 @@ func wireCloudLoggingHealth(hubSrv *hub.Server, cs *logging.CloudWriteStats) {
 func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, endpoints hub.HubEndpoints, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger, artifactLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
 	hubCfg := buildHubServerConfig(cfg, endpoints.Operator, devAuthToken, adminEmailList, adminMode, maintenanceMessage, secretBackend)
 	hubCfg.HubEndpoints = &endpoints
+	hubCfg.MaintenanceConfig.Installer = detectUpdateInstaller(ctx, hubCfg.MaintenanceConfig)
 	warnNonConformingHubName(cfg.Hub.HubName)
 
 	// In hosted mode every replica must share the same session secret for
@@ -3935,6 +4062,34 @@ func loadAndLogSharedDirStorageStartup(logf func(format string, args ...interfac
 	}
 	logSharedDirStorageStartup(globalSettings.Server, logf)
 	logHomeStorageStartup(globalSettings, logf)
+	logK8sNFSVolumeStartup(globalSettings, logf)
+}
+
+// logK8sNFSVolumeStartup logs, when the default runtime is Kubernetes and
+// project storage is nfs with no shares[0].pv_name, that agent pods mount
+// the share inline (one NFS volume per directory, by server path, with no
+// mount options), and that NFS homes are refused at agent start in that
+// case. It checks configuration only and never fails startup.
+func logK8sNFSVolumeStartup(gs *config.VersionedSettings, logf func(format string, args ...interface{})) {
+	if gs == nil || gs.Server == nil {
+		return
+	}
+	if _, rtType, err := gs.ResolveRuntime(""); err != nil || !kubernetesRuntimeType(rtType) {
+		return
+	}
+	ps, _, err := config.ResolveProjectStorage(gs.Server)
+	if err != nil {
+		return
+	}
+	layout, err := config.ProjectStorageLayout(ps, config.DefaultVolumeMountBase)
+	if err != nil || layout.Backend != projectfs.BackendNFS || layout.Share.PVName != "" {
+		return
+	}
+	logf("k8s NFS volumes: inline, by server path; no mount options; set shares[0].pv_name to use an operator PV " +
+		"(this broker must mount the export, writable, to create each directory before the pod starts)")
+	if gs.ResolveHomeStorage().Backend == config.HomeStorageBackendNFS {
+		logf("home_storage nfs: Kubernetes agent starts are refused while nfs.shares[0].pv_name is unset (inline pod volumes do not carry NFS homes yet)")
+	}
 }
 
 // logHomeStorageStartup logs a warning for an invalid server.home_storage
@@ -4152,6 +4307,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		if cfg.RuntimeBroker.Host == "0.0.0.0" {
 			rhEndpoint = fmt.Sprintf("http://localhost:%d", cfg.RuntimeBroker.Port)
 		}
+		warnColocatedBrokerEndpointTransport(rhEndpoint)
 
 		effectiveID, regErr := registerGlobalProjectAndBrokerPresence(ctx, s, hubSrv.BrokerPresent, brokerID, brokerName, rhEndpoint, rt, serverAutoProvide, brokerSettings, loadBrokerRegistrationWorkspaceStorage(), loadBrokerProfileTypeSettings())
 		if regErr != nil {
@@ -4198,7 +4354,8 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		if authSvc := hubSrv.GetBrokerAuthService(); authSvc != nil {
 			secretKeyB64, secretErr := authSvc.GenerateAndStoreSecret(ctx, brokerID)
 			if secretErr != nil {
-				log.Printf("Warning: failed to generate/retrieve secret for co-located broker: %v", secretErr)
+				slog.Error("Co-located broker secret could not be generated or loaded; the broker API refuses every request except health checks until the server is restarted with a working secret",
+					"error", secretErr)
 			} else {
 				log.Printf("Broker secret ready for co-located control channel (idempotent)")
 				inMemoryCreds = &brokercredentials.BrokerCredentials{
@@ -4209,7 +4366,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 				}
 			}
 		} else {
-			log.Printf("Warning: BrokerAuthService not available, skipping co-located broker credentials")
+			slog.Error("Co-located broker credentials are unavailable (BrokerAuthService not available); the broker API refuses every request except health checks")
 		}
 	}
 
@@ -4252,14 +4409,18 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	var brokerNFS *config.V1NFSConfig
 	var workspaceStorageBackend string
 	brokerLayout := projectfs.Layout{Backend: projectfs.BackendLocal, Homes: projectfs.BackendLocal}
+	var brokerStorageErr error
 	if globalVS, _, gErr := config.LoadGlobalSettings(); gErr != nil {
 		log.Printf("WARNING: NFS mount checks disabled: loading global settings: %v", gErr)
 	} else {
 		workspaceStorageBackend = brokerWorkspaceStorageBackend(globalVS)
 		var layoutWarnings []string
-		brokerLayout, layoutWarnings = brokerStorageLayout(globalVS)
+		brokerLayout, layoutWarnings, brokerStorageErr = brokerStorageLayout(globalVS)
 		for _, w := range layoutWarnings {
 			log.Printf("WARNING: %s", w)
+		}
+		if brokerStorageErr != nil {
+			log.Printf("WARNING: %s", brokerStorageUnavailableWarning(brokerStorageErr))
 		}
 		var nfsWarning string
 		brokerNFS, nfsWarning = brokerNFSConfig(globalVS)
@@ -4269,6 +4430,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		if warning := brokerWorkspaceStorageWarning(globalVS); warning != "" {
 			log.Printf("WARNING: %s", warning)
 		}
+		_ = reportRemovedStorageOverridesIn(log.Printf, config.GlobalSettingsSource, globalVS)
 	}
 	if warning := brokerInotifyWarning(hostedMode, rt != nil && brokerAgentsShareHostUser(nil, rt.Name()), hostlimits.DefaultReader()); warning != "" {
 		log.Printf("WARNING: %s", warning)
@@ -4298,9 +4460,11 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		AllowContainerScriptHarnesses: cfg.RuntimeBroker.AllowContainerScriptHarnesses,
 		StateDir:                      rhStateDir,
 		NFSConfig:                     brokerNFS,
+		StorageOverridesCheck:         brokerStorageOverridesCheck,
 		StorageBucket:                 brokerStorageBucket(cfg.Storage),
 		WorkspaceStorageBackend:       workspaceStorageBackend,
 		StorageLayout:                 brokerLayout,
+		StorageError:                  brokerStorageErr,
 		DefaultProfile:                brokerDefaultProfile,
 		Debug:                         enableDebug,
 		SlowRequestThreshold:          cfg.SlowRequestThreshold,
@@ -4742,6 +4906,7 @@ func resolveMaintenanceConfig(cfg *config.GlobalConfig) hub.MaintenanceConfig {
 	}
 
 	// Pull from versioned settings if available.
+	var maint *config.V1MaintenanceConfig
 	if vs, err := loadServerVersionedSettings(); err == nil {
 		// The maintenance build registry is resolved at build time
 		// (hub.Server.maintenanceImageRegistry), not here.
@@ -4756,6 +4921,7 @@ func resolveMaintenanceConfig(cfg *config.GlobalConfig) hub.MaintenanceConfig {
 		// Read new binary auto-update fields from server.maintenance.
 		if vs.Server != nil && vs.Server.Maintenance != nil {
 			m := vs.Server.Maintenance
+			maint = m
 			if m.DeploymentTier != "" {
 				mc.DeploymentTier = m.DeploymentTier
 			}
@@ -4806,6 +4972,9 @@ func resolveMaintenanceConfig(cfg *config.GlobalConfig) hub.MaintenanceConfig {
 	if v := os.Getenv("SCION_MAINTENANCE_SERVICE_NAME"); v != "" {
 		mc.ServiceName = v
 	}
+	// SCION_MAINTENANCE_INSTALL_ROOT > server.maintenance.install_root >
+	// /opt/scion.
+	mc.InstallRoot = config.MaintenanceInstallRoot(maint)
 
 	// Apply deployment tier defaults if not explicitly configured.
 	if mc.DeploymentTier == "" {
@@ -4816,10 +4985,11 @@ func resolveMaintenanceConfig(cfg *config.GlobalConfig) hub.MaintenanceConfig {
 		}
 	}
 
-	// Apply update policy default based on deployment tier.
+	// Apply update policy default based on deployment tier. Binary-tier
+	// hubs only notify by default; an explicit "auto" is honoured.
 	if mc.UpdatePolicy == "" {
 		if mc.DeploymentTier == "binary" {
-			mc.UpdatePolicy = "auto"
+			mc.UpdatePolicy = "notify"
 		} else {
 			mc.UpdatePolicy = "disabled"
 		}
@@ -4831,6 +5001,24 @@ func resolveMaintenanceConfig(cfg *config.GlobalConfig) hub.MaintenanceConfig {
 	}
 
 	return mc
+}
+
+// detectUpdateInstaller detects, once at startup, how this hub installs
+// release binaries and restarts itself (symlink, sudo-install or
+// unsupported), and logs the result. The update-binary operation, the
+// auto-update policy and Restart Hub all use it.
+func detectUpdateInstaller(ctx context.Context, mc hub.MaintenanceConfig) maintenance.Installer {
+	dctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	inst := hub.DetectMaintenanceInstaller(dctx, mc)
+	st := inst.Status()
+	if st.Supported {
+		slog.Info("Release update installer detected", "strategy", st.Strategy, "install_root", mc.InstallRoot)
+	} else {
+		slog.Info("Release self-update is not supported on this host", "strategy", st.Strategy,
+			"install_root", mc.InstallRoot, "reason", st.Reason)
+	}
+	return inst
 }
 
 // requireImageRegistryForBroker checks that an image registry is available from
@@ -4958,5 +5146,19 @@ func (h *hubExitSequence) run() {
 			log.Printf("WARNING: hub OTel flush on exit: %v", err)
 		}
 		cancel()
+	}
+}
+
+// warnColocatedBrokerEndpointTransport logs, once at startup, that the hub
+// will not use the co-located broker's direct HTTP endpoint when it is plain
+// http on a non-loopback address (server.broker.host set to one): the
+// hub-broker transport policy refuses it at dispatch (config.CheckHubTransport
+// in the hub's broker HTTP transport), so only the control channel delivers
+// to this broker.
+func warnColocatedBrokerEndpointTransport(endpoint string) {
+	if err := config.CheckHubTransport(endpoint); err != nil {
+		slog.Warn("The co-located Runtime Broker's HTTP endpoint is not a loopback address; the hub will not send requests to it "+
+			"and delivers to this broker only over its control channel. Leave server.broker.host unset (or 0.0.0.0) to keep the HTTP fallback",
+			"endpoint", endpoint, "reason", err)
 	}
 }

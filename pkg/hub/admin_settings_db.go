@@ -33,6 +33,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
@@ -94,6 +95,10 @@ type ServerConfigDBResponse struct {
 	// reports a node env, and each profile's value (ptone/scion#3916).
 	// Read-only.
 	ImageRegistryProvenance *ImageRegistryProvenance `json:"image_registry_provenance,omitempty"`
+
+	// PlacementPreflight is the read-only Kubernetes placement pre-upgrade
+	// report (counts only). Set by the GET handler only.
+	PlacementPreflight *PlacementPreflightView `json:"placement_preflight,omitempty"`
 }
 
 // SupersededKey represents a bootstrap-material key whose value in the
@@ -127,7 +132,9 @@ type ServerConfigUpdateDBRequest struct {
 	// A section merged on its current row (mergeSectionOnCurrent) that has
 	// no entry uses the revision the merge read as an implicit CAS; the
 	// map sections (runtimes, profiles, harness_configs) use
-	// last-writer-wins.
+	// last-writer-wins. runtimes and profiles are written together in one
+	// transaction that also compares the revision of the one the body
+	// leaves out (placementPairForSave).
 	ExpectedRevisions map[string]int64 `json:"expected_revisions,omitempty"`
 }
 
@@ -147,6 +154,8 @@ func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read settings", nil)
 		return
 	}
+	resp.StorageOverrideErrors = s.removedStorageOverrideErrors()
+	resp.PlacementPreflight = s.placementPreflight(r.Context(), ops)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -1041,6 +1050,8 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// ignored, so the echo of a changed report is not refused
 	// (ptone/scion#3916).
 	rawBody = dropImageRegistryProvenance(rawBody)
+	// Likewise the read-only placement pre-upgrade report of a GET body.
+	rawBody = dropTopLevelMember(rawBody, placementPreflightKey)
 	if s.rejectGateProtectedSettingsKeys(w, rawBody) {
 		return
 	}
@@ -1064,6 +1075,9 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	rawBody = cl.body
+	if rejectRepeatedPlacementSections(w, rawBody) {
+		return
+	}
 	var req ServerConfigUpdateDBRequest
 	if err := json.Unmarshal(rawBody, &req); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
@@ -1373,6 +1387,44 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
+	// runtimes: the body's map decides which entries exist, and each sent
+	// entry is merged key by key on the stored one, so a stored key the
+	// body leaves out, including one V1RuntimeConfig does not model, is
+	// kept (ptone/scion#6580; mergeRuntimeEntries). The row revision read
+	// is the CAS base.
+	var runtimeMergeWarnings []string
+	var runtimesBefore map[string]config.V1RuntimeConfig
+	if _, ok := sectionDocs["runtimes"]; ok {
+		var rowValue []byte
+		rev := int64(0)
+		got, err := ops.store.GetHubSetting(r.Context(), "runtimes")
+		switch {
+		case err == nil:
+			rowValue, rev = got.Value, got.Revision
+		case errors.Is(err, store.ErrNotFound):
+		default:
+			slog.Error("PUT server-config: failed to read runtimes section", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
+			return
+		}
+		// The stored runtimes for the placement save checks: the row, or
+		// the effective runtimes when there is no row or it does not
+		// decode (a bootstrap-origin hub), so a stored value never counts
+		// as one this save sets.
+		if len(bytes.TrimSpace(rowValue)) == 0 || json.Unmarshal(rowValue, &runtimesBefore) != nil {
+			runtimesBefore = ops.Snapshot().Runtimes
+		}
+		merged, warnings, err := mergeRuntimesRow(rowValue, req.Runtimes, sentRuntimesObject(rawBody))
+		if err != nil {
+			slog.Error("PUT server-config: failed to build runtimes document", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+			return
+		}
+		sectionDocs["runtimes"] = merged
+		mergedBaseRevs["runtimes"] = rev
+		runtimeMergeWarnings = warnings
+	}
+
 	// The start-claim keys are checked on the merged lifecycle document,
 	// so a value carried from the row counts as well. They follow the same
 	// contract as the other lifecycle keys: omitted keeps, "" or null
@@ -1549,6 +1601,9 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// schema — Kubernetes quantity check), naming the offending key so a bad
 	// value is rejected here instead of failing every agent start later.
 	var saveWarnings []string
+	// runtimes and profiles are written below in one transaction that
+	// compares the revision of an omitted section the save checks used.
+	var placement placementPair
 	{
 		var runtimes opsettings.RuntimesSettings
 		var profiles opsettings.ProfilesSettings
@@ -1558,6 +1613,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		if doc, ok := sectionDocs["profiles"]; ok {
 			_ = json.Unmarshal(doc, &profiles)
 		}
+		sentProfiles := profiles
 		if errs := config.ValidateSharedDirSizes(runtimes, profiles); len(errs) > 0 {
 			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, errs[0].Error(), nil)
 			return
@@ -1575,7 +1631,15 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		_, hasRuntimes := sectionDocs["runtimes"]
 		_, hasProfiles := sectionDocs["profiles"]
 		if hasRuntimes || hasProfiles {
+			// The guard revision of an omitted section is read before the
+			// snapshot the checks use, so a write that lands after it fails
+			// the guarded write below (409) rather than passing a check
+			// made on an older value.
+			placement = placementPairForSave(ops, sectionDocs)
 			snap := ops.Snapshot()
+			if placementSnapshotHook != nil {
+				placementSnapshotHook()
+			}
 			if !hasRuntimes {
 				runtimes = snap.Runtimes
 			}
@@ -1583,7 +1647,43 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 				profiles = snap.Profiles
 			}
 			saveWarnings = safeToEvictSaveWarnings(runtimes, profiles)
+			// Kubernetes placement and identity fields (ptone/scion#6580):
+			// a problem this save causes is refused; one already stored
+			// that the save does not touch is a warning.
+			profilesBefore := snap.Profiles
+			if !hasRuntimes {
+				runtimesBefore = snap.Runtimes
+			}
+			pErrs, pWarnings := config.RuntimeSaveChecks(runtimesBefore, runtimes, profilesBefore, profiles)
+			// The rules across runtime entries and profiles, in the same
+			// form (PlacementPairSaveChecks).
+			xErrs, xWarnings := config.PlacementPairSaveChecks(runtimesBefore, runtimes, profilesBefore, profiles)
+			pErrs, pWarnings = append(pErrs, xErrs...), append(pWarnings, xWarnings...)
+			if len(pErrs) > 0 {
+				writeResourceQuantityError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, pErrs)
+				return
+			}
+			saveWarnings = append(saveWarnings, resourceQuantityWarnings(pWarnings)...)
+			saveWarnings = append(saveWarnings, config.PlacementIgnoredWarnings(runtimes, profiles)...)
+			saveWarnings = append(saveWarnings, config.PlacementSettingsWarnings(runtimes, profiles)...)
 		}
+		// Resource quantities (ptone/scion#6581): the profiles the body
+		// sends, and default_resources when the body sends it.
+		var defaultResources *api.ResourceSpec
+		if doc, ok := sectionDocs["agent_defaults"]; ok {
+			adSent := applySectionPatch("agent_defaults", map[string]json.RawMessage{}, nil, agentDefaultsPresence(topFP))
+			var agentDefaults opsettings.AgentDefaultsSettings
+			if adSent["default_resources"] && json.Unmarshal(doc, &agentDefaults) == nil {
+				defaultResources = agentDefaults.DefaultResources
+			}
+		}
+		qErrs, qWarnings := config.ValidateResourceQuantities(defaultResources, sentProfiles)
+		if len(qErrs) > 0 {
+			writeResourceQuantityError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, qErrs)
+			return
+		}
+		saveWarnings = append(saveWarnings, resourceQuantityWarnings(qWarnings)...)
+		saveWarnings = append(saveWarnings, runtimeMergeWarnings...)
 	}
 	// Validate hub-level default_timezone (IANA name check; rejects "Local",
 	// same rule as the file-mode handler and as the per-user display
@@ -1649,7 +1749,12 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 				})
 				return
 			}
-			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+			var details map[string]interface{}
+			var valErr *serverConfigFileValidationError
+			if errors.As(err, &valErr) {
+				details = valErr.details
+			}
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), details)
 			return
 		}
 		fileTxn, err = prepareSettingsFileTxn(s.config.ConfigPath, func(gc *config.GlobalConfig, typed *config.VersionedSettings) []config.SettingsPathEdit {
@@ -1718,7 +1823,85 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	}
 	sort.Strings(sortedSections)
 
+	// runtimes and profiles are saved first, together, in one guarded
+	// transaction: either both are written or neither is, and a conflict
+	// leaves every section of the save unwritten. The runtimes write's
+	// expected revision is the row the merge read (ptone/scion#6580).
+	if placement.active {
+		var writes []guardedSectionWrite
+		reads := placement.reads
+		for _, secName := range placementSections {
+			doc, sent := sectionDocs[secName]
+			if !sent {
+				continue
+			}
+			expectedRev := int64(-1)
+			if rev, ok := req.ExpectedRevisions[secName]; ok {
+				expectedRev = rev
+			} else if rev, ok := mergedBaseRevs[secName]; ok {
+				expectedRev = rev
+			}
+			if rev, ok := noopRevs[secName]; ok && expectedRev == rev {
+				applied[secName] = rev
+				unchanged = append(unchanged, secName)
+				reads[secName] = rev
+				continue
+			}
+			if rev, same := unchangedManagedRow(r.Context(), ops, secName, doc, expectedRev); same {
+				applied[secName] = rev
+				unchanged = append(unchanged, secName)
+				reads[secName] = rev
+				continue
+			}
+			writes = append(writes, guardedSectionWrite{section: secName, doc: doc, expectedRevision: expectedRev})
+		}
+		if len(writes) > 0 {
+			revs, notApplied, err := ops.updateGuarded(r.Context(), writes, reads, updatedBy, "managed")
+			switch {
+			case errors.Is(err, store.ErrRevisionConflict):
+				written := map[string]bool{}
+				for _, wr := range writes {
+					written[wr.section] = true
+					conflicted = append(conflicted, map[string]interface{}{
+						"section":           wr.section,
+						"expected_revision": wr.expectedRevision,
+						"current_revision":  s.getCurrentRevision(ops, wr.section),
+					})
+				}
+				// The sections checked but not written, whose revision
+				// changed, are listed too.
+				conflicted = append(conflicted, placementReadConflicts(r.Context(), ops, reads, written)...)
+			case errors.Is(err, errGuardedBatchUnsupported):
+				slog.Error("PUT server-config: the settings store cannot save runtimes and profiles together", "error", err)
+				fileTxn.abort()
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"Failed to save runtimes and profiles: the settings store cannot save them in one transaction", nil)
+				return
+			case err != nil:
+				slog.Error("Failed to update runtimes and profiles", "error", err)
+				fileTxn.abort()
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to update runtimes and profiles", nil)
+				return
+			default:
+				for sec, rev := range revs {
+					applied[sec] = rev
+					if notApplied[sec] {
+						notInEffect[sec] = true
+					}
+				}
+			}
+		}
+	}
+
 	for _, secName := range sortedSections {
+		if len(conflicted) > 0 {
+			// A conflict on the runtimes and profiles save writes nothing
+			// else.
+			break
+		}
+		if placement.active && (secName == "runtimes" || secName == "profiles") {
+			continue
+		}
 		doc := sectionDocs[secName]
 		expectedRev := int64(-1) // last-writer-wins by default
 		if rev, ok := req.ExpectedRevisions[secName]; ok {
@@ -3202,6 +3385,7 @@ var serverConfigTokenSections = map[string]settingsTokenClass{
 	"artifacts":         settingsTokenConfiguration, // artifact limits
 
 	"agent_delegation_policy": settingsTokenRefused, // which permissions may be delegated to agents
+	"chat_retention":          settingsTokenRefused, // written through PUT /api/v1/admin/chat-retention
 }
 
 // serverConfigTokenKeys classifies each key of a settingsTokenPerKey

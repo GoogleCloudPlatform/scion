@@ -750,9 +750,14 @@ workspaceStorage:
     # (the Cloud Run configuration uses the hub name).
     shareId: ""
 
-    # REQUIRED when enabled. The PersistentVolumeClaim name agent pods mount
-    # this share through, in the agent namespace. Rendered as shares[0].pv_name.
-    # The chart does not create it.
+    # Optional. The PersistentVolumeClaim name agent pods mount this share
+    # through, in the agent namespace, for example an operator-made PV/PVC
+    # with NFS mount options. Rendered as shares[0].pv_name. The chart does not
+    # create it. Left empty, agent pods mount the share inline (one NFS volume
+    # per directory, by server path, with no mount options), and the agent
+    # runtime must create each directory first through the hub pod's mount of
+    # the export, so the export must be writable by the hub's runAsUser and
+    # runAsGroup.
     pvName: ""
 
     # Relative directory on the share under which project trees live, rendered

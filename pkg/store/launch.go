@@ -124,6 +124,10 @@ type LaunchReport struct {
 	// failed report's runtime_error, or "" (ptone/scion#4666). The hub
 	// filters it before it gets here; it is stored with ErrorCode.
 	Cause string
+	// RunID is the run the launch started (the hub-minted run ID the broker
+	// echoes); empty when the broker does not send it. The store only
+	// compares it with the row's run ID; it is never stored.
+	RunID string
 
 	// AgentConfig is applied on a succeeded terminal with
 	// ApplyBrokerAgentConfig, the same rules a synchronous dispatch uses

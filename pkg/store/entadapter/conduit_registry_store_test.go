@@ -26,11 +26,11 @@ import (
 	"testing"
 	"time"
 
-	entsql "entgo.io/ent/dialect/sql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 )
 
@@ -961,7 +961,7 @@ func TestConduitRegistry_CapabilitiesSQLDefault(t *testing.T) {
 	// A writer that omits capabilities gets the SQL-level '{}' default.
 	f := newConduitFixture(t)
 	gen := f.registerRelay("relay-1")
-	drv, ok := f.store.client.Driver().(*entsql.Driver)
+	drv, ok := entc.SQLDriver(f.store.client.Driver())
 	require.True(t, ok)
 	q := fmt.Sprintf(`INSERT INTO conduit_sessions (session_id, principal_kind, principal_id, relay_instance_id,
   relay_generation, transport, endpoint_incarnation, connection_epoch, connected_at, last_seen)

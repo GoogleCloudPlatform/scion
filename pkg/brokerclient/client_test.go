@@ -21,6 +21,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 )
@@ -119,5 +120,19 @@ func TestBrokerHealth_NonJSONErrorPage(t *testing.T) {
 	msg := err.Error()
 	if strings.Contains(msg, "reverse proxy") || strings.Contains(msg, "GFE") {
 		t.Errorf("502 from load balancer should not produce a proxy-hint diagnosis, got: %v", err)
+	}
+}
+
+func TestWithTimeout_NilHTTPClient(t *testing.T) {
+	c, err := New("http://broker.example", WithHTTPClient(nil), WithTimeout(10*time.Second))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	concrete := c.(*client)
+	if concrete.transport.HTTPClient == nil {
+		t.Fatal("transport.HTTPClient is nil")
+	}
+	if concrete.transport.HTTPClient.Timeout != 10*time.Second {
+		t.Errorf("Timeout = %v, want 10s", concrete.transport.HTTPClient.Timeout)
 	}
 }

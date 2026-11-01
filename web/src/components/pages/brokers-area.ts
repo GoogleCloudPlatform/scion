@@ -21,7 +21,8 @@
  * (client/broker-routes.ts); the existing brokers page renders otherwise.
  * Columns: Name (with a marker for brokers hosted by this server), Kind,
  * Runtime target, Connection, Health (users holding hub.health.read only),
- * Agents / Cap. Filter chips: All, Flat, Legacy, Needs attention.
+ * Version (against the hub's, ptone/scion#5972), Agents / Cap. Filter chips:
+ * All, Flat, Legacy, Needs attention.
  */
 
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
@@ -51,6 +52,11 @@ import '../shared/view-toggle.js';
 import { formatRelative } from '../../utils/time.js';
 import { navigateTo, replaceSearch } from '../../client/navigation.js';
 import { visibleInterval } from '../../client/visible-interval.js';
+import {
+  brokerVersionStyles,
+  renderBrokerVersion,
+  renderHubVersionNote,
+} from '../shared/broker-version.js';
 
 /** One runtime broker row of the health summary, as far as this page reads it. */
 interface HealthSummaryBrokerRow {
@@ -91,6 +97,13 @@ export class ScionPageBrokersArea extends LitElement {
   private filter: BrokerFilter = 'all';
 
   /**
+   * The fleet hub version each broker's versionStatus was compared with
+   * (the list's hubVersion): a build token, "mixed", or "" when unknown.
+   */
+  @state()
+  private hubVersion = '';
+
+  /**
    * Self-reported health per broker ID, when the user may read the health
    * summary; null when the Health column is not shown.
    */
@@ -104,6 +117,7 @@ export class ScionPageBrokersArea extends LitElement {
     listPageStyles,
     brokerTypeBadgeStyles,
     brokerAreaStyles,
+    brokerVersionStyles,
     css`
       .filter-row {
         display: flex;
@@ -181,8 +195,11 @@ export class ScionPageBrokersArea extends LitElement {
           await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
         );
       }
-      const data = (await response.json()) as { brokers?: RuntimeBroker[] } | RuntimeBroker[];
+      const data = (await response.json()) as
+        | { brokers?: RuntimeBroker[]; hubVersion?: string }
+        | RuntimeBroker[];
       this.brokers = Array.isArray(data) ? data : data.brokers || [];
+      this.hubVersion = Array.isArray(data) ? '' : data.hubVersion || '';
       stateManager.seedBrokers(this.brokers);
     } catch (err) {
       console.error('Failed to load brokers:', err);
@@ -294,6 +311,10 @@ export class ScionPageBrokersArea extends LitElement {
     >`;
   }
 
+  private renderVersion(broker: RuntimeBroker): TemplateResult {
+    return renderBrokerVersion(broker.version, broker.versionStatus, this.hubVersion);
+  }
+
   private renderAgentCapacity(broker: RuntimeBroker): TemplateResult {
     if (broker.agentCount == null) {
       return html`<span class="meta-text">—</span>`;
@@ -378,7 +399,7 @@ export class ScionPageBrokersArea extends LitElement {
         <span class="list-stats">
           ${this.brokers.length} broker${this.brokers.length === 1 ? '' : 's'} ·
           <span class="flat-instances-stat">${flatCount}</span> flat
-          instance${flatCount === 1 ? '' : 's'}
+          instance${flatCount === 1 ? '' : 's'} · ${renderHubVersionNote(this.hubVersion)}
         </span>
       </div>
       ${rows.length === 0
@@ -404,7 +425,7 @@ export class ScionPageBrokersArea extends LitElement {
                   label=${broker.status}
                   size="small"
                 ></scion-status-badge>
-                ${this.health ? this.renderHealth(broker) : nothing}
+                ${this.health ? this.renderHealth(broker) : nothing} ${this.renderVersion(broker)}
                 ${this.renderAgentCapacity(broker)}
               </div>
             </a>
@@ -425,6 +446,7 @@ export class ScionPageBrokersArea extends LitElement {
               <th>Runtime target</th>
               <th>Connection</th>
               ${this.health ? html`<th class="health-col">Health</th>` : nothing}
+              <th class="hide-mobile">Version</th>
               <th class="hide-mobile">Agents / Cap</th>
               <th class="hide-mobile">Last Heartbeat</th>
             </tr>
@@ -448,6 +470,7 @@ export class ScionPageBrokersArea extends LitElement {
                     ></scion-status-badge>
                   </td>
                   ${this.health ? html`<td>${this.renderHealth(broker)}</td>` : nothing}
+                  <td class="hide-mobile version-col">${this.renderVersion(broker)}</td>
                   <td class="hide-mobile">${this.renderAgentCapacity(broker)}</td>
                   <td class="hide-mobile">
                     <span class="meta-text">${formatRelative(broker.lastHeartbeat)}</span>

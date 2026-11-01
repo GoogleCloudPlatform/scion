@@ -140,8 +140,9 @@ const Artifacts = "hub.artifacts"
 // with its settings section enabled (hub.artifacts need not be on). The hub
 // checks it on every upload. Attachments stored while it was on stay
 // readable after it is turned off. Its compiled default is off, but a hub
-// whose resource storage is an object store resolves it on unless an
-// override is stored (ptone/scion#5827; pkg/hub
+// whose artifact service is ready (local blob storage included) or whose
+// resource storage is an object store resolves it on unless an override is
+// stored (ptone/scion#5827, ptone/scion#5828; pkg/hub
 // deploymentExperimentDefault).
 const AttachmentArtifacts = "hub.attachment_artifacts"
 
@@ -152,16 +153,35 @@ const AttachmentArtifacts = "hub.attachment_artifacts"
 const ChatScheduledSend = "web.chat_scheduled_send"
 
 // ChatStarredMessages gates starred messages in native web chat: the
-// message Star/Unstar action, the private starred indicator and the
-// conversation header's starred-message list in the web UI, and the hub's
-// /api/v1/chat/stars routes (404 while off). Stored stars are kept while
-// it is off.
+// message Star/Unstar action, the private starred indicator, the
+// conversation header's starred-message list, the starred-only center and
+// the rail's Starred filter in the web UI, and the hub's /api/v1/chat/stars
+// and /api/v1/chat/starred-conversations routes and the starred=true
+// history variant (404 while off). Stored stars are kept while it is off.
 const ChatStarredMessages = "web.chat_starred_messages"
+
+// ChatRetention gates hub-wide chat message retention: the
+// chat_retention operational-settings section and its admin API (404 while
+// off), the chat-retention sweeper, which purges nothing while it is off,
+// and the history "retention" marker. It has both layers: the hub checks it
+// in the settings handlers, the sweeper and the history handler; the web
+// layer only shows the settings panel and the history divider. Turning it
+// on deletes nothing until an admin also enables the sweep and sets a
+// window.
+const ChatRetention = "hub.chat_retention"
 
 // AuthorizationDecisionAuditV2 gates decision logging (remaining-audit P1).
 // It is the only activation control and stays default-off; turning it on
 // needs explicit owner approval.
 const AuthorizationDecisionAuditV2 = "hub.authorization_decision_audit_v2"
+
+// PortView gates the page view mode of the agent port proxy
+// (ptone/scion#5569): a user who opens an exposed port's link from the hub
+// is sent to a short-lived page link under /api/v1/portview/, through
+// which the page's relative scripts, styles, images, requests and
+// WebSockets load. While it is off, the port link behaves as before and
+// /api/v1/portview/ answers 404.
+const PortView = "hub.port_view"
 
 // AgentEdit gates what the web Edit agent page (/agents/{id}/edit) adds
 // beyond the retired Configure page: the grouping of its fields by when an
@@ -174,16 +194,18 @@ const AgentEdit = "web.agent_edit"
 // AgentEditHeld gates held config edits (ptone/scion#3976): while it is on,
 // a config edit of an agent with a live or transitional container is kept
 // as the agent's pending config and applied at its next start, a
-// provision-rendered key is kept pending, and DELETE
+// provision-rendered key is kept pending, an edit a start does not bring
+// into effect (a clear or removal the broker does not apply at start, and
+// the whole key of a collection edit with such a part) stays pending until
+// a reincarnation applies pending edits, and DELETE
 // /api/v1/agents/{id}/pending-config discards pending edits. A
 // reincarnation does not apply pending edits yet (ptone/scion#3978), so it
 // must stay off until that lands. While it is off the hub refuses a config
-// edit of such an agent, as before, and applies no stored pending config;
-// a config edit it writes removes the pending keys that edit names, so a
-// stale pending value cannot later override it. It has its own default-off
-// switch
-// because the Edit page experiment (AgentEdit) is turned on separately; the
-// web layer only mirrors the hub's check.
+// edit of such an agent, as before, applies no stored pending config and
+// returns none, and clears it at the agent's next start or config edit, so
+// a stale pending value cannot later override a newer one. It has its own
+// default-off switch because the Edit page experiment (AgentEdit) is turned
+// on separately; the web layer only mirrors the hub's check.
 const AgentEditHeld = "hub.agent_edit_held"
 
 // AgentDelegation gates agent delegation (.design/agent-delegation.md §10):
@@ -216,9 +238,10 @@ const AgentPlugins = "hub.agent_plugins"
 
 // AsyncAgentLaunch gates asynchronous agent create (ptone/scion#4991): the
 // hub sends a create to the broker as an async launch only while it is on
-// and the request opted in (acceptAsyncLaunch). It is read at each create
-// send, so toggling needs no restart; launches already accepted finish or
-// are reaped either way.
+// and the request opted in (acceptAsyncLaunch). It is on by default
+// (ptone/scion#6640); an admin override turns it off. It is read at each
+// create send, so toggling needs no restart; launches already accepted
+// finish or are reaped either way.
 const AsyncAgentLaunch = "hub.async_agent_launch"
 
 // AsyncAgentStart gates asynchronous start, resume and restart of existing
@@ -297,6 +320,15 @@ const SkillContentHashV2 = "hub.skill_content_hash_v2"
 // whether or not it is on.
 const ArtifactReviewEditor = "web.artifact_review_editor"
 
+// UserDeleteForceCascade gates the forced user delete (ptone/scion#2143):
+// DELETE /api/v1/users/{id}?force=true, which revokes the user's authority,
+// records a deletion tombstone and stops the user's agents, the GET
+// /api/v1/users/{id}/deletion resource, and the hub's reconciler that
+// completes such deletions. The hub checks it (the force parameter with
+// experimentEnabled, the sub-route with requireExperiment); the web layer
+// only mirrors it to show the force option.
+const UserDeleteForceCascade = "hub.user_delete_force_cascade"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
@@ -315,8 +347,8 @@ var compiled = []Experiment{
 	{
 		Name:        AsyncAgentLaunch,
 		Title:       "Asynchronous agent create",
-		Description: "Lets the hub answer an agent create as soon as the Runtime Broker accepts it, while the broker finishes the launch in the background; clients that opt in (scion start and resume, the web create form, scheduled creates) follow its progress. Provision-only creates, reprovisioning and brokers without async launch support stay synchronous. Turning it off makes new creates synchronous; launches already accepted finish or time out as before.",
-		Default:     false,
+		Description: "Lets the hub answer an agent create as soon as the Runtime Broker accepts it, while the broker finishes the launch in the background; clients that opt in (scion start and resume, the web create form, scheduled creates) follow its progress. Provision-only creates, reprovisioning and brokers without async launch support stay synchronous. On by default; turning it off makes new creates synchronous, and launches already accepted finish or time out as before.",
+		Default:     true,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#4991",
@@ -393,6 +425,17 @@ var compiled = []Experiment{
 		ReviewBy: "2027-03-31",
 	},
 	{
+		Name:        PortView,
+		Title:       "Port page view",
+		Description: "Opening an agent's exposed port from the hub serves the page through a short-lived page link, so its relative scripts (including modules), styles, images, same-app requests and WebSockets work. Pages opened this way can only use relative URLs: URLs that start with / do not work. Browser storage, cookies and web workers are not available to the page. The link lasts server.hub.port_proxy.view_ttl (default 2h); opening the port from the hub again gives a new one. It works over either port proxy transport; a page's WebSocket works only over Conduit. The page link grants access, so do not share it. Gates the hub's port link redirect and the /api/v1/portview/ route (LayerServer), which answers 404 while it is off. Keep it off on a hub behind an authenticating front proxy (for example IAP) until it has been verified with one (ptone/scion#5989).",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#5569",
+		Owner:       "hub",
+		ReviewBy:    "2027-01-20",
+	},
+	{
 		Name:        Artifacts,
 		Title:       "Artifacts",
 		Description: "Lets agents and users publish files and bundles with stable, versioned references, and view them in the web UI. Gates the artifact page and other web surfaces (LayerWeb) and the hub's /api/v1/artifacts routes (LayerServer), which answer 404 while it is off.",
@@ -406,7 +449,7 @@ var compiled = []Experiment{
 	{
 		Name:        AttachmentArtifacts,
 		Title:       "Attachments as artifacts",
-		Description: "Stores files uploaded in web chat in the artifact service as attachments of the message they are sent in: the stored file is readable exactly by the readers of that message, and is removed when the message is deleted. It is delivered into each recipient agent's inbox; for a message in a project topic thread a copy is also placed in the project's scratchpad shared directory, where every agent and member with access to that directory can read it (direct and group conversations get inbox delivery only). Gates the hub's attachment upload path (LayerServer; it also needs the artifact service with its settings section enabled, but not hub.artifacts) and is reserved for the web surfaces that follow (LayerWeb). Attachments stored while it was on stay readable after it is turned off. Defaults on when the hub's resource storage is an object store (GCS); off on hubs with local storage.",
+		Description: "Stores files uploaded in web chat in the artifact service as attachments of the message they are sent in: the stored file is readable exactly by the readers of that message, and is removed when the message is deleted. It is delivered into each recipient agent's inbox; for a message in a project topic thread a copy is also placed in the project's scratchpad shared directory, where every agent and member with access to that directory can read it (direct and group conversations get inbox delivery only). Gates the hub's attachment upload path (LayerServer; it also needs the artifact service with its settings section enabled, but not hub.artifacts) and is reserved for the web surfaces that follow (LayerWeb). Attachments stored while it was on stay readable after it is turned off. Defaults on wherever the artifact service is ready, local blob storage included, and on hubs whose resource storage is an object store (GCS).",
 		Default:     false,
 		Layers:      []Layer{LayerWeb, LayerServer},
 		Stage:       StageAlpha,
@@ -440,12 +483,23 @@ var compiled = []Experiment{
 		Name:        ChatStarredMessages,
 		Title:       "Starred messages in chat",
 		Description: "Lets each user star chat messages privately and find them again from the conversation header. Gates the Star message action, the starred indicator and the header list (LayerWeb) and the hub's starred-message routes, which answer 404 while it is off (LayerServer). Stars are stored per user and are never shown to anyone else; turning it off keeps them.",
-		Default:     false,
+		Default:     true,
 		Layers:      []Layer{LayerWeb, LayerServer},
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#5797",
 		Owner:       "native-chat",
 		ReviewBy:    "2027-01-31",
+	},
+	{
+		Name:        ChatRetention,
+		Title:       "Chat message retention",
+		Description: "Lets a hub admin bound how long chat history is kept, with one hub-wide age window: a background sweep hard-deletes messages older than the window, with their mentions, stars, reply metadata and attachment links, in small paced batches. Gates the Chat retention settings section and its admin API (404 while off), the sweep and the history marker (LayerServer) and the settings panel and history divider (LayerWeb). Turning it on deletes nothing until an admin also enables the sweep and sets a window; turning it off stops the sweep. Take a database backup before enabling.",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#6596",
+		Owner:       "native-chat",
+		ReviewBy:    "2027-03-31",
 	},
 	{
 		Name:        AgentEdit,
@@ -461,7 +515,7 @@ var compiled = []Experiment{
 	{
 		Name:        AgentEditHeld,
 		Title:       "Held edits for running agents",
-		Description: "Lets an agent config edit be saved while the agent is running or starting: the hub keeps it as the agent's pending config and applies it at the next start, restart or resume. System prompt, agent instructions, skills and services edits are kept pending, unless the agent's Runtime Broker re-renders them at start (changedFields), in which case they are applied like other edits; a reincarnation does not apply pending edits yet, so what a start does not apply stays pending, and the rest is applied at the next start after a reincarnation, over the values it set. Keep it off until reincarnation applies pending edits. Pending edits can be discarded. While off, a config edit of a running agent is refused as before; stored pending edits are kept but not applied, except that an edit saved while off removes the pending keys it names.",
+		Description: "Lets an agent config edit be saved while the agent is running or starting: the hub keeps it as the agent's pending config and applies it at the next start, restart or resume. System prompt, agent instructions, skills and services edits are kept pending, unless the agent's Runtime Broker re-renders them at start (changedFields), in which case they are applied like other edits. What a start does not bring into effect stays pending until reincarnation applies pending edits: clears and removals only a reincarnation applies, and the whole key of a collection edit that has such a part, including the parts a start could apply. Keep it off until reincarnation applies pending edits. Pending edits can be discarded. While off, a config edit of a running agent is refused as before; stored pending edits are not applied or shown, and are cleared at the agent's next start or config edit.",
 		Default:     false,
 		Layers:      []Layer{LayerServer, LayerWeb},
 		Stage:       StageAlpha,
@@ -501,6 +555,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#5913",
 		Owner:       "artifacts",
 		ReviewBy:    "2027-01-21",
+	},
+	{
+		Name:        UserDeleteForceCascade,
+		Title:       "Force user delete",
+		Description: "Lets an admin delete a user who has agents: DELETE /api/v1/users/{id}?force=true revokes the user's authority at once (status deleting, role bindings, access tokens, delegations), stops the user's agents through the agent delete, and removes the user once every agent is stopped or removed by an operator. Needs agent.delete on every one of those agents. While off, force is ignored (a user with agents is refused as before) and the deletion resource answers 404; a deletion accepted while it was on runs to completion.",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#2143",
+		Owner:       "authz",
+		ReviewBy:    "2027-01-31",
 	},
 	{
 		Name:        AgentPlugins,

@@ -56,6 +56,7 @@ import {
   ARTIFACTS_FLAG,
   MAX_INLINE_TEXT_BYTES,
   artifactFileUrl,
+  artifactOriginOf,
   artifactPagePath,
   baseName,
   discardReasonText,
@@ -74,6 +75,7 @@ import {
 import type {
   Artifact,
   ArtifactFile,
+  ArtifactOrigin,
   ArtifactResponse,
   ArtifactRenderer,
   ArtifactVersion,
@@ -108,9 +110,22 @@ import { ownerDeletedBadge, ownerDeletedStyles } from '../shared/artifact-owner-
 import '../shared/code-editor.js';
 import './not-found.js';
 import { loadReviewEditor, preloadReviewEditor } from '../artifact-review/review-editor-loader.js';
+import { showConfirm } from '../shared/confirm-dialog.js';
+import { countTopLevelBlocks } from '../../utils/markdown-blocks.js';
 import type { ReviewEditorElement } from '../artifact-review/review-editor-loader.js';
 
 type Tab = 'preview' | 'files' | 'history';
+
+/** How often a return to the tab may re-read the version list (ptone/scion#6851). */
+const VERSIONS_RECHECK_MS = 30_000;
+
+/** A version kind as the page shows it (ptone/scion#6852). */
+export function versionKindLabel(kind: string): string {
+  if (kind === 'publish') return 'Publish';
+  if (kind === 'review') return 'Review';
+  if (kind === 'attachment') return 'Attachment';
+  return kind;
+}
 
 /**
  * text with CRLF and lone CR line endings as LF: the form the editor works
@@ -156,6 +171,26 @@ export const REVIEW_VIEW_KEY = 'scion:artifact-review-view';
 /** How long a refusal hint stays up without a new edit. */
 export const REVIEW_HINT_MS = 8000;
 
+/**
+ * Markdown over either of these (UTF-8 bytes, top-level blocks) opens
+ * Review in the Source view, with a notice: the graphical view takes a
+ * while to open for such documents. The reviewer can still switch to it,
+ * after a confirmation.
+ */
+export const LARGE_REVIEW_BYTES = 200_000;
+export const LARGE_REVIEW_BLOCKS = 4_000;
+
+/**
+ * Markdown over either of these is too large for the graphical view: it
+ * is not offered, since opening it could use more memory than the page
+ * has.
+ */
+export const MAX_GRAPHICAL_BYTES = 500_000;
+export const MAX_GRAPHICAL_BLOCKS = 10_000;
+
+/** How a document's size bears on the graphical review page. */
+export type ReviewSize = 'normal' | 'large' | 'too-large';
+
 /** The views of the graphical review page. */
 export type ReviewView = 'graphical' | 'source';
 
@@ -170,8 +205,12 @@ export type ReviewHint =
   | 'earlier'
   | 'moved'
   | 'source-own'
+  | 'composing'
+  | 'code-run'
   | 'generic'
-  | 'load-failed';
+  | 'load-failed'
+  | 'large'
+  | 'too-large';
 
 /** Text of each hint: a bold first sentence and a second one. */
 export const REVIEW_HINT_TEXT: Record<ReviewHint, { title: string; body: string }> = {
@@ -185,8 +224,8 @@ export const REVIEW_HINT_TEXT: Record<ReviewHint, { title: string; body: string 
     body: 'A review can only use images already in this version.',
   },
   'list-table': {
-    title: "Lists and tables can't take suggestions here yet.",
-    body: 'Edit them in the Source view.',
+    title: "List and table structure can't be changed in a suggestion.",
+    body: 'You can edit the text in them; use the Source view to add, remove or move items, rows or columns.',
   },
   break: {
     title: "Paragraph breaks can't be suggested here yet.",
@@ -209,6 +248,14 @@ export const REVIEW_HINT_TEXT: Record<ReviewHint, { title: string; body: string 
       "Suggestions you've made so far become read-only in the graphical view after you switch to Source.",
     body: 'You can still change them there.',
   },
+  composing: {
+    title: "Finish the text you're typing first.",
+    body: 'Then save or switch views again.',
+  },
+  'code-run': {
+    title: 'That edit would change code that continues on the lines next to it.',
+    body: 'Use the Source view to change backticks here.',
+  },
   generic: {
     title: "That change can't be recorded as a suggestion.",
     body: 'Use the Source view.',
@@ -217,7 +264,48 @@ export const REVIEW_HINT_TEXT: Record<ReviewHint, { title: string; body: string 
     title: 'The graphical view could not be loaded.',
     body: 'It opened in the Source view.',
   },
+  large: {
+    title: 'This document is large, so it opened in the Source view.',
+    body: '',
+  },
+  'too-large': {
+    title: 'This document is too large for the graphical view.',
+    body: '',
+  },
 };
+
+/** The confirmation before the graphical view opens a large document. */
+export const LARGE_REVIEW_CONFIRM =
+  'Opening the graphical view may take a few seconds for a document this size. Continue?';
+
+/** The view toggle's tooltip when the graphical view is not offered. */
+export const TOO_LARGE_TOOLTIP = 'Too large for the graphical view.';
+
+/** The view toggle's tooltip while the document's size is being checked. */
+export const SIZING_TOOLTIP = 'Checking the document size...';
+
+/**
+ * The size class of text for the graphical review page. Bytes are exact;
+ * blocks are counted by the app's Markdown lexer, which is close to the
+ * editor's own count but not always equal (approximate by design), and only
+ * for text within MAX_GRAPHICAL_BYTES. A count that fails counts as large:
+ * the Source view opens, and the reviewer can still switch.
+ */
+export async function reviewSize(
+  text: string,
+  countBlocks: (md: string) => Promise<number> = countTopLevelBlocks
+): Promise<ReviewSize> {
+  const bytes = new TextEncoder().encode(text).length;
+  if (bytes > MAX_GRAPHICAL_BYTES) return 'too-large';
+  let blocks: number;
+  try {
+    blocks = await countBlocks(text);
+  } catch {
+    return 'large';
+  }
+  if (blocks > MAX_GRAPHICAL_BLOCKS) return 'too-large';
+  return bytes > LARGE_REVIEW_BYTES || blocks > LARGE_REVIEW_BLOCKS ? 'large' : 'normal';
+}
 
 /** The view a reviewer last chose; graphical unless they chose source. */
 export function storedReviewView(): ReviewView {
@@ -257,6 +345,17 @@ export class ScionPageArtifactDetail extends LitElement {
   @state() private artifactId = '';
   /** Version in the URL; 0 shows the current version. */
   @state() private seq = 0;
+  /** Where the page was opened from (ptone/scion#6847); see artifactOriginOf. */
+  private origin: ArtifactOrigin = 'project';
+  /** A Refresh is reloading the page in place (ptone/scion#6851). */
+  @state() private refreshing = false;
+  /**
+   * The newest version seq the page has seen (ptone/scion#6851): the one
+   * page property every source feeds through noteSeq (an artifact load, a
+   * version list; the review heartbeat of ptone/scion#6849 later), so the
+   * page shows one answer to "is there a newer version".
+   */
+  @state() private newestSeqSeen = 0;
   @state() private loading = true;
   @state() private notFound = false;
   @state() private error: string | null = null;
@@ -356,6 +455,18 @@ export class ScionPageArtifactDetail extends LitElement {
   @state() private reviewView: ReviewView = 'graphical';
   /** The editor chunk: not requested, loading, loaded, or failed. */
   @state() private editorLoad: 'idle' | 'loading' | 'ready' | 'failed' = 'idle';
+  /** The size class of the text under review; null while it is worked out. */
+  @state() private reviewSize: ReviewSize | null = null;
+  /** The reviewer confirmed opening this large document in the graphical view. */
+  private largeConfirmed = false;
+  /** Counts reviews started, so a size worked out for an earlier one is dropped. */
+  private reviewRuns = 0;
+  /** A choice of the graphical view is being sized or confirmed (one at a time). */
+  @state() private choosingGraphical = false;
+  /** Counts choices of the graphical view, so a stale one cannot release a newer one. */
+  private choiceToken = 0;
+  /** The too-large size came from the block count (the bytes are within the ceiling). */
+  private tooLargeByBlocks = false;
   /** The hint shown under the toolbar of the graphical review page. */
   @state() private graphicalHint: ReviewHint | null = null;
   private hintTimer: ReturnType<typeof setTimeout> | null = null;
@@ -388,6 +499,9 @@ export class ScionPageArtifactDetail extends LitElement {
         display: inline-flex;
         align-items: center;
         gap: 0.25rem;
+      }
+      .version-info .v-state.current {
+        color: var(--sl-color-success-700);
       }
       .menu-note {
         display: block;
@@ -737,7 +851,9 @@ export class ScionPageArtifactDetail extends LitElement {
       this.wideReviewViewport = this.wideReviewQuery.matches;
       this.wideReviewQuery.addEventListener?.('change', this.onWideReviewChange);
     }
-    const parsed = parseArtifactPagePath(this.pageData?.path || window.location.pathname);
+    const pagePath = this.pageData?.path || window.location.pathname + window.location.search;
+    this.origin = artifactOriginOf(pagePath);
+    const parsed = parseArtifactPagePath(pagePath);
     if (parsed) {
       this.projectId = parsed.projectId;
       this.artifactId = parsed.id;
@@ -748,6 +864,8 @@ export class ScionPageArtifactDetail extends LitElement {
       this.notFound = true;
       return;
     }
+    document.addEventListener('visibilitychange', this.onVisibility);
+    this.versionsCheckedAt = Date.now();
     void this.load();
   }
 
@@ -782,6 +900,7 @@ export class ScionPageArtifactDetail extends LitElement {
       const data = (await res.json()) as ArtifactResponse;
       if (gen !== this.loadGen) return;
       this.data = data;
+      this.noteSeq(data.artifact.currentSeq);
       dispatchPageTitle(this, data.artifact.title, 'Artifacts');
       const version = data.version;
       this.entry = version?.files.find((f) => f.path === version.entryPath) ?? null;
@@ -809,6 +928,95 @@ export class ScionPageArtifactDetail extends LitElement {
       if (gen === this.loadGen) this.loading = false;
     }
   }
+
+  /** Reloads the artifact and its versions in place (ptone/scion#6851). */
+  private refresh = (): void => {
+    if (this.refreshing || this.editing || this.reviewing || this.publishOpen) return;
+    this.refreshing = true;
+    this.versionsCheckedAt = Date.now();
+    void this.refreshInPlace().finally(() => {
+      this.refreshing = false;
+    });
+  };
+
+  /**
+   * Refresh's reload (ptone/scion#6851): the page stays on screen. The
+   * artifact and, for a text entry, its text are read first and applied
+   * together, so the version shown and its text never come from different
+   * loads. The result is dropped when an edit, a review or an upload started
+   * while it ran (their buttons are disabled meanwhile), or a newer load
+   * began. A
+   * failure is reported in a toast; the page keeps what it showed.
+   */
+  private async refreshInPlace(): Promise<void> {
+    const gen = ++this.loadGen;
+    // Dropped once anything that publishes from the shown version started.
+    const stale = (): boolean =>
+      gen !== this.loadGen || this.editing || this.reviewing || this.publishOpen;
+    try {
+      const res = await apiFetch(this.versionPath);
+      if (stale()) return;
+      if (res.status === 404) {
+        this.notFound = true;
+        return;
+      }
+      if (!res.ok) throw new Error(await extractApiError(res, `HTTP ${res.status}`));
+      const data = (await res.json()) as ArtifactResponse;
+      if (stale()) return;
+      const version = data.version;
+      const entry = version?.files.find((f) => f.path === version.entryPath) ?? null;
+      const kind = entry ? rendererFor(entry.mediaType) : 'download';
+      let text: string | null = null;
+      const inline = entry !== null && entry.size <= MAX_INLINE_TEXT_BYTES;
+      if ((kind === 'markdown' || kind === 'text') && inline) {
+        const r = await apiFetch(artifactFileUrl(this.artifactId, version!.seq, entry.path, true));
+        if (!r.ok) throw new Error(await extractApiError(r, `HTTP ${r.status}`));
+        text = await r.text();
+        if (stale()) return;
+      }
+      // Apply the version, its entry and its text together.
+      this.data = data;
+      this.noteSeq(data.artifact.currentSeq);
+      dispatchPageTitle(this, data.artifact.title, 'Artifacts');
+      this.entry = entry;
+      this.text = text;
+      this.resolveNames();
+      void this.loadVersions(0, gen);
+      if (data.canManage) void this.loadCrossProjectSharing(gen);
+      if (kind === 'html' && version) {
+        void this.loadView(version.seq);
+      } else {
+        this.viewGen++;
+        if (this.viewTimer) clearTimeout(this.viewTimer);
+        this.viewTimer = null;
+        this.view = null;
+        this.viewError = null;
+        this.viewExpired = false;
+      }
+    } catch (err) {
+      if (gen !== this.loadGen) return;
+      console.error('Failed to refresh artifact:', err);
+      const message = err instanceof Error ? err.message : 'Failed to refresh';
+      showToast(`Could not refresh: ${message}`, 'danger');
+    }
+  }
+
+  /** When the version list was last read by a Refresh or a return to the tab. */
+  private versionsCheckedAt = 0;
+
+  /**
+   * A return to the tab re-reads the version list (at most every 30 s), so
+   * a version published meanwhile shows in the list and the Review pending
+   * badge (ptone/scion#6851) without reloading the page. Nothing is re-read
+   * while editing or reviewing.
+   */
+  private onVisibility = (): void => {
+    if (document.visibilityState !== 'visible' || !this.data || this.loading) return;
+    if (this.editing || this.reviewing || this.refreshing) return;
+    if (Date.now() - this.versionsCheckedAt < VERSIONS_RECHECK_MS) return;
+    this.versionsCheckedAt = Date.now();
+    void this.loadVersions(0, this.loadGen);
+  };
 
   private async loadText(file: ArtifactFile, gen: number): Promise<void> {
     const seq = this.data?.version?.seq ?? 0;
@@ -850,6 +1058,7 @@ export class ScionPageArtifactDetail extends LitElement {
   }
 
   override disconnectedCallback(): void {
+    document.removeEventListener('visibilitychange', this.onVisibility);
     super.disconnectedCallback();
     if (this.viewTimer) clearTimeout(this.viewTimer);
     this.viewTimer = null;
@@ -878,6 +1087,7 @@ export class ScionPageArtifactDetail extends LitElement {
         const page = await listVersions(this.artifactId, next);
         if (gen !== this.loadGen) return;
         this.versions = next > 0 ? [...this.versions, ...page.versions] : page.versions;
+        for (const x of page.versions) if (x.state === 'ready') this.noteSeq(x.seq);
         const discarded = page.discarded ?? [];
         this.discarded = next > 0 ? [...this.discarded, ...discarded] : discarded;
         this.versionsNext = page.nextBefore ?? 0;
@@ -951,7 +1161,8 @@ export class ScionPageArtifactDetail extends LitElement {
     navigateTo(
       artifactPagePath(
         { id: this.artifactId, scopeRef: this.homeProject },
-        seq === current ? 0 : seq
+        seq === current ? 0 : seq,
+        this.origin
       )
     );
   }
@@ -1017,9 +1228,13 @@ export class ScionPageArtifactDetail extends LitElement {
     return !!this.data?.canShare && !this.data?.canManage;
   }
 
-  /** Where the back link goes: the home project, or the artifacts list when it was deleted. */
+  /**
+   * Where the back link goes, and where a delete returns to: the Artifacts
+   * list when the page was opened from it (ptone/scion#6847) or the home
+   * project was deleted, the home project otherwise.
+   */
   private get backTarget(): { href: string; label: string } {
-    return this.data?.scopeDeleted
+    return this.data?.scopeDeleted || this.origin === 'artifacts'
       ? { href: '/artifacts', label: 'Artifacts' }
       : { href: `/projects/${encodeURIComponent(this.homeProject)}`, label: 'Project' };
   }
@@ -1055,13 +1270,27 @@ export class ScionPageArtifactDetail extends LitElement {
     );
   }
 
-  /** The artifact's current version is a review (whichever version is shown). */
+  /**
+   * The newest version the page has seen (newestSeqSeen): the artifact's
+   * current one, or a newer one a version list or another source reported
+   * (ptone/scion#6851).
+   */
+  private get latestSeq(): number {
+    return Math.max(this.newestSeqSeen, this.data?.artifact.currentSeq ?? 0);
+  }
+
+  /** Notes a version seq the page has seen to exist (see newestSeqSeen). */
+  noteSeq(seq: number): void {
+    if (seq > this.newestSeqSeen) this.newestSeqSeen = seq;
+  }
+
+  /** The artifact's newest version seen is a review (whichever version is shown). */
   private get currentIsReview(): boolean {
-    const a = this.data?.artifact;
     const v = this.data?.version;
-    if (!a || !v) return false;
-    if (v.seq === a.currentSeq) return v.kind === 'review';
-    return this.versions.find((x) => x.seq === a.currentSeq)?.kind === 'review';
+    if (!this.data || !v) return false;
+    const seq = this.latestSeq;
+    if (v.seq === seq) return v.kind === 'review';
+    return this.versions.find((x) => x.seq === seq)?.kind === 'review';
   }
 
   /** The version shown is a review. */
@@ -1071,7 +1300,7 @@ export class ScionPageArtifactDetail extends LitElement {
 
   /** The current version is a review the owner has not answered yet. */
   private get reviewPendingNow(): boolean {
-    return this.isReview && this.showsCurrent;
+    return this.isReview && this.showsCurrent && this.data!.version!.seq === this.latestSeq;
   }
 
   /**
@@ -1097,9 +1326,128 @@ export class ScionPageArtifactDetail extends LitElement {
     if (this.reviewGraphical) {
       this.clearHint();
       this.reviewView = storedReviewView();
-      if (this.reviewView === 'graphical') void this.ensureEditor();
+      this.reviewSize = null;
+      this.largeConfirmed = false;
+      this.releaseChoice();
+      void this.sizeReview(this.reviewText, ++this.reviewRuns);
     }
   };
+
+  /**
+   * Works out the size class of the text under review, then opens the
+   * remembered view: a large document opens in the Source view with a
+   * notice, and a too large one cannot use the graphical view. The view
+   * this picks is not stored, so the reviewer's own choice stays for other
+   * documents.
+   */
+  private async sizeReview(text: string, run: number): Promise<void> {
+    const size = await reviewSize(text);
+    if (run !== this.reviewRuns || !this.reviewing) return;
+    this.setReviewSize(size, text);
+    if (size === 'too-large') {
+      this.reviewView = 'source';
+      this.showHint('too-large');
+    } else if (size === 'large' && this.reviewView === 'graphical') {
+      this.reviewView = 'source';
+      this.showHint('large');
+    }
+    if (this.reviewView === 'graphical') void this.ensureEditor();
+  }
+
+  /**
+   * A view chosen with the toggle. The graphical view is sized by the text
+   * as it is now (Source view edits can make it larger): a large document
+   * opens after a confirmation (once per review), and a too large one does
+   * not open at all.
+   */
+  private chooseReviewView(next: ReviewView): void {
+    if (next !== 'graphical') {
+      this.setReviewView(next);
+      return;
+    }
+    // Not while the text is still being sized (a review starting or
+    // restarting), and one choice at a time: another click while one is
+    // sized or confirmed does nothing (no second confirmation).
+    if (this.reviewSize === null || this.choosingGraphical) return;
+    const token = ++this.choiceToken;
+    this.choosingGraphical = true;
+    void this.chooseGraphical().finally(() => {
+      if (token === this.choiceToken) this.choosingGraphical = false;
+    });
+  }
+
+  /** Ends any choice of the graphical view still pending (Cancel, a new or restarted review). */
+  private releaseChoice(): void {
+    this.choiceToken++;
+    this.choosingGraphical = false;
+  }
+
+  /** Records the size class of text, and whether a too-large one came from its blocks. */
+  private setReviewSize(size: ReviewSize, text: string): void {
+    this.reviewSize = size;
+    this.tooLargeByBlocks =
+      size === 'too-large' && new TextEncoder().encode(text).length <= MAX_GRAPHICAL_BYTES;
+  }
+
+  /** chooseReviewView('graphical'), sized by the current text. */
+  private async chooseGraphical(): Promise<void> {
+    const run = this.reviewRuns;
+    for (;;) {
+      const text = this.reviewText;
+      // Bytes first, without waiting: over the ceiling nothing else matters.
+      if (new TextEncoder().encode(text).length > MAX_GRAPHICAL_BYTES) {
+        this.setReviewSize('too-large', text);
+        this.showHint('too-large');
+        return;
+      }
+      const size = await reviewSize(text);
+      if (run !== this.reviewRuns || !this.reviewing) return;
+      // Edited while it was being sized: size the text as it is now.
+      if (this.reviewText !== text) continue;
+      this.setReviewSize(size, text);
+      if (size === 'too-large') {
+        this.showHint('too-large');
+        return;
+      }
+      if (size === 'large' && !this.largeConfirmed) {
+        const ok = await showConfirm(LARGE_REVIEW_CONFIRM, {
+          title: 'Large document',
+          confirmText: 'Open graphical view',
+          variant: 'primary',
+        });
+        if (!ok || run !== this.reviewRuns || !this.reviewing) return;
+        // Edited while the question was open: size it again.
+        if (this.reviewText !== text) continue;
+        this.largeConfirmed = true;
+      }
+      this.setReviewView('graphical');
+      return;
+    }
+  }
+
+  /**
+   * After a pause in typing in the Source view: the toggle follows the
+   * byte ceiling (disabled over it). Bytes only, so typing in a large
+   * document does not wait for a block count; blocks are counted when the
+   * graphical view is chosen. A too-large size that came from the block
+   * count is kept until the blocks are counted again, here: the toggle is
+   * disabled, so this is the only place that can find the text smaller.
+   * The view and the hints are left as they are.
+   */
+  private refreshReviewSize(text: string): void {
+    const bytes = new TextEncoder().encode(text).length;
+    if (bytes > MAX_GRAPHICAL_BYTES) {
+      this.setReviewSize('too-large', text);
+    } else if (this.reviewSize === 'too-large' && this.tooLargeByBlocks) {
+      const run = this.reviewRuns;
+      void reviewSize(text).then((size) => {
+        if (run !== this.reviewRuns || !this.reviewing || this.reviewText !== text) return;
+        this.setReviewSize(size, text);
+      });
+    } else if (this.reviewSize === 'too-large') {
+      this.setReviewSize(bytes > LARGE_REVIEW_BYTES ? 'large' : 'normal', text);
+    }
+  }
 
   /** The graphical review page is on (experiment web.artifact_review_editor). */
   private get graphicalReview(): boolean {
@@ -1150,7 +1498,8 @@ export class ScionPageArtifactDetail extends LitElement {
     if (!ed) return true;
     const t = ed.flush();
     if (t === null) {
-      this.showHint('generic');
+      // While an input method composition runs, its text is not written yet.
+      this.showHint(ed.isComposing() ? 'composing' : 'generic');
       return false;
     }
     this.reviewText = t;
@@ -1254,6 +1603,14 @@ export class ScionPageArtifactDetail extends LitElement {
     this.expandedGaps = new Set();
     this.versionsNext = 0;
     this.clearPreviewTimer();
+    // A size or confirmation still pending is for the text being
+    // discarded: drop it, and keep the graphical editor hidden until the
+    // reloaded text is sized.
+    if (this.reviewGraphical) {
+      this.reviewRuns++;
+      this.reviewSize = null;
+      this.releaseChoice();
+    }
     await this.load();
     if (!this.reviewing) return;
     // discarded is the buffer of the review just refused. After a second
@@ -1269,6 +1626,12 @@ export class ScionPageArtifactDetail extends LitElement {
     this.reviewText = lfText(this.text);
     this.reviewPreview = this.reviewText;
     this.discardedReview = discarded;
+    // The current version may be larger: size it as a new review does.
+    if (this.reviewGraphical) {
+      this.reviewSize = null;
+      this.largeConfirmed = false;
+      void this.sizeReview(this.reviewText, ++this.reviewRuns);
+    }
   }
 
   /**
@@ -1295,6 +1658,7 @@ export class ScionPageArtifactDetail extends LitElement {
   /** Leaves Review mode without saving. */
   private cancelReview = (): void => {
     this.clearPreviewTimer();
+    this.releaseChoice();
     this.reviewing = false;
     this.discardedReview = null;
   };
@@ -1316,6 +1680,7 @@ export class ScionPageArtifactDetail extends LitElement {
     this.previewTimer = setTimeout(() => {
       this.previewTimer = null;
       this.reviewPreview = this.reviewText;
+      if (this.reviewGraphical) this.refreshReviewSize(this.reviewText);
     }, REVIEW_PREVIEW_DELAY_MS);
   }
 
@@ -1381,10 +1746,14 @@ export class ScionPageArtifactDetail extends LitElement {
    * page reloads itself.
    */
   private showCurrentVersion(): void {
-    const target = artifactPagePath({ id: this.artifactId, scopeRef: this.homeProject });
+    const target = artifactPagePath(
+      { id: this.artifactId, scopeRef: this.homeProject },
+      0,
+      this.origin
+    );
     this.editing = false;
     this.reviewing = false;
-    if (stripBasePath(window.location.pathname) !== target) {
+    if (stripBasePath(window.location.pathname) + window.location.search !== target) {
       navigateTo(target);
       return;
     }
@@ -1501,12 +1870,33 @@ export class ScionPageArtifactDetail extends LitElement {
   /** After a move the artifact lives under its new home project: open it there. */
   private onMoved(moved: Artifact): void {
     this.moveOpen = false;
-    navigateTo(artifactPagePath(moved));
+    navigateTo(artifactPagePath(moved, 0, this.origin));
   }
 
   private versionLabel(v: ArtifactVersion | undefined): string {
     if (!v) return 'none';
-    return v.seq === this.data!.artifact.currentSeq ? `v${v.seq} (current)` : `v${v.seq}`;
+    return v.seq === this.latestSeq ? `v${v.seq} (current)` : `v${v.seq}`;
+  }
+
+  /** "Review by Alice", or the kind alone when the author is not known (ptone/scion#6852). */
+  private kindAndAuthor(v: ArtifactVersion): string {
+    const by = this.createdBy(v);
+    return by ? `${versionKindLabel(v.kind)} by ${by}` : versionKindLabel(v.kind);
+  }
+
+  /**
+   * The shown version's facts in the header (ptone/scion#6852): its number,
+   * whether it is the current version, its kind and author, and its date.
+   */
+  private renderVersionInfo(v: ArtifactVersion): TemplateResult {
+    const latest = this.latestSeq;
+    const state = v.seq === latest ? 'current' : `older, current is v${latest}`;
+    return html`<span class="version-info">
+      Version: <strong class="v-seq">v${v.seq}</strong> ·
+      <span class=${v.seq === latest ? 'v-state current' : 'v-state older'}>${state}</span> ·
+      <span class="v-kind">${this.kindAndAuthor(v)}</span> ·
+      <span class="v-date">${formatInstant(v.createdAt)}</span>
+    </span>`;
   }
 
   private renderVersionMenu(): TemplateResult {
@@ -1523,7 +1913,8 @@ export class ScionPageArtifactDetail extends LitElement {
             : this.versions.map(
                 (x) => html`
                   <sl-menu-item value=${String(x.seq)} ?checked=${x.seq === v?.seq} type="checkbox">
-                    ${this.versionLabel(x)} · ${formatInstant(x.createdAt)}
+                    ${this.versionLabel(x)} · ${this.kindAndAuthor(x)} ·
+                    ${formatInstant(x.createdAt)}
                     ${x.note ? html`<span class="menu-note">${x.note}</span>` : nothing}
                   </sl-menu-item>
                 `
@@ -1571,6 +1962,7 @@ export class ScionPageArtifactDetail extends LitElement {
           : nothing}
         <div slot="meta" class="meta">
           <span>Owner: ${a.ownerDeleted ? this.goneOwner(a.ownerKind, a.ownerRef) : owner}</span>
+          ${v ? this.renderVersionInfo(v) : nothing}
           ${a.key ? html`<span>Key: <code>${a.key}</code></span>` : nothing}
           <span>Updated: ${formatInstant(a.updatedAt)}</span>
           <span class="expires"
@@ -1591,15 +1983,34 @@ export class ScionPageArtifactDetail extends LitElement {
         ${hasActions
           ? html`
               <div slot="actions" class="header-actions">
+                <sl-tooltip content="Reload the artifact and its versions">
+                  <sl-button
+                    size="small"
+                    class="refresh"
+                    ?loading=${this.refreshing}
+                    @click=${this.refresh}
+                  >
+                    <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+                    Refresh
+                  </sl-button>
+                </sl-tooltip>
                 ${v ? this.renderVersionMenu() : nothing}
                 ${this.canEdit
-                  ? html`<sl-button size="small" @click=${this.startEdit}>
+                  ? html`<sl-button
+                      size="small"
+                      ?disabled=${this.refreshing}
+                      @click=${this.startEdit}
+                    >
                       <sl-icon slot="prefix" name="pencil"></sl-icon>
                       Edit
                     </sl-button>`
                   : nothing}
                 ${this.canReview
-                  ? html`<sl-button size="small" @click=${this.startReview}>
+                  ? html`<sl-button
+                      size="small"
+                      ?disabled=${this.refreshing}
+                      @click=${this.startReview}
+                    >
                       <sl-icon slot="prefix" name="chat-text"></sl-icon>
                       Review
                     </sl-button>`
@@ -1980,7 +2391,7 @@ export class ScionPageArtifactDetail extends LitElement {
       <tr>
         <td>
           <strong>v${x.seq}</strong>
-          ${x.seq === this.data!.artifact.currentSeq
+          ${x.seq === this.latestSeq
             ? html`<sl-badge pill variant="success">current</sl-badge>`
             : nothing}
         </td>
@@ -2062,6 +2473,7 @@ export class ScionPageArtifactDetail extends LitElement {
                   <sl-button
                     size="small"
                     variant="primary"
+                    ?disabled=${this.refreshing}
                     @click=${(): void => {
                       this.publishOpen = true;
                     }}
@@ -2070,7 +2482,11 @@ export class ScionPageArtifactDetail extends LitElement {
                     Upload new version
                   </sl-button>
                   ${this.canEdit
-                    ? html`<sl-button size="small" @click=${this.startEdit}>
+                    ? html`<sl-button
+                        size="small"
+                        ?disabled=${this.refreshing}
+                        @click=${this.startEdit}
+                      >
                         <sl-icon slot="prefix" name="pencil"></sl-icon>
                         Edit
                       </sl-button>`
@@ -2082,6 +2498,7 @@ export class ScionPageArtifactDetail extends LitElement {
           ? html`<div class="more">
               <sl-button
                 size="small"
+                ?disabled=${this.refreshing}
                 @click=${(): void => {
                   this.publishOpen = true;
                 }}
@@ -2178,11 +2595,16 @@ export class ScionPageArtifactDetail extends LitElement {
         ? 'image'
         : hint === 'load-failed'
           ? 'exclamation-triangle'
-          : hint === 'source-own'
+          : hint === 'source-own' || hint === 'large' || hint === 'too-large'
             ? 'info-circle'
             : 'slash-circle';
     const action =
-      hint === 'image' || hint === 'load-failed' || hint === 'earlier' || hint === 'source-own'
+      hint === 'image' ||
+      hint === 'load-failed' ||
+      hint === 'earlier' ||
+      hint === 'source-own' ||
+      hint === 'large' ||
+      hint === 'too-large'
         ? nothing
         : html`<div class="hint-actions">
             <sl-button size="small" @click=${(): void => this.setReviewView('source')}>
@@ -2279,7 +2701,13 @@ export class ScionPageArtifactDetail extends LitElement {
                 </sl-tooltip>
                 ${this.reviewHint ? html`<span class="hint">${this.reviewHint}</span>` : nothing}`}
           <span class="spacer"></span>
-          <sl-tooltip content="Undo history is kept per view and resets when you switch">
+          <sl-tooltip
+            content=${this.reviewSize === 'too-large'
+              ? TOO_LARGE_TOOLTIP
+              : this.reviewSize === null || this.choosingGraphical
+                ? SIZING_TOOLTIP
+                : 'Undo history is kept per view and resets when you switch'}
+          >
             <sl-radio-group
               size="small"
               label="View"
@@ -2287,12 +2715,17 @@ export class ScionPageArtifactDetail extends LitElement {
               value=${this.reviewView}
               @sl-change=${(e: Event): void => {
                 const group = e.target as HTMLElement & { value: string };
-                this.setReviewView(group.value as ReviewView);
+                this.chooseReviewView(group.value as ReviewView);
                 // A refused switch puts the control back.
                 if (group.value !== this.reviewView) group.value = this.reviewView;
               }}
             >
-              <sl-radio-button value="graphical">
+              <sl-radio-button
+                value="graphical"
+                ?disabled=${this.reviewSize === null ||
+                this.reviewSize === 'too-large' ||
+                this.choosingGraphical}
+              >
                 <sl-icon slot="prefix" name="file-earmark-richtext"></sl-icon>
                 <span class="lbl">Graphical</span>
               </sl-radio-button>
@@ -2336,7 +2769,7 @@ export class ScionPageArtifactDetail extends LitElement {
         ${this.renderGraphicalHint()}
         <div class="g-work">
           ${graphical
-            ? this.editorLoad === 'ready'
+            ? this.editorLoad === 'ready' && this.reviewSize !== null
               ? html`<scion-review-editor
                   .content=${this.reviewText}
                   .artifactId=${this.artifactId}

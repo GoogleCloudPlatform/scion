@@ -151,6 +151,9 @@ func TestPresentation_NeverFieldsAbsent(t *testing.T) {
 			PriorityClassName: "agents-high", SharedDirStorageClass: "standard-rwx", SharedDirSize: "40Gi",
 			SafeToEvict: &evict, SharedDirStorageBackend: "nfs", SharedDirStorageBackends: map[string]string{"data": "local"},
 			HomeStorageBackend: "nfs",
+			NodeSelector:       map[string]string{"scion.dev/pool": "agents"},
+			Tolerations:        []api.K8sToleration{{Key: "scion.dev/pool", Operator: "Equal", Value: "agents", Effect: "NoSchedule"}},
+			RuntimeClassName:   "gvisor", PlacementReported: true,
 		},
 		AgentDefaults: &api.PresentedAgentDefaults{
 			DefaultHarnessConfig: "claude", ImageRegistry: "registry.example/team", CloneDepth: "full",
