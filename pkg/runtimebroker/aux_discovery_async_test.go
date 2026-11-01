@@ -97,7 +97,8 @@ func TestStartServices_HubConnectNotDelayedByBlockingProfileCheck(t *testing.T) 
 	projectDir := filepath.Join(home, ".scion", "projects", "p1", ".scion")
 	writeProjectSettings(t, projectDir, twoK8sProfiles)
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
+	cfg.Host = "127.0.0.1"
 	cfg.StateDir = t.TempDir()
 	srv := New(cfg, &filteringMockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	endAsyncLaunchesAtCleanup(t, srv)
@@ -141,7 +142,12 @@ func TestAuxDiscovery_ProfileCheckTimeoutApplied(t *testing.T) {
 	start := time.Now()
 	srv.discoverAuxiliaryRuntimesForProjects([]string{projectDir})
 	assert.Less(t, time.Since(start), time.Second, "the pass waited past the check timeout")
-	assert.Equal(t, map[string]string{"profile_runtime.stale": api.BrokerHealthUnavailable}, srv.profileRuntimeHealthChecks())
+	// The embedded default settings add built-in profiles to every project;
+	// only the fixture's own profiles are asserted.
+	checks := srv.profileRuntimeHealthChecks()
+	assert.Equal(t, api.BrokerHealthUnavailable, checks["profile_runtime.stale"])
+	assert.NotContains(t, checks, "profile_runtime.good")
+	assert.NotContains(t, checks, "profile_runtime.local")
 	assert.Equal(t, []string{"kubernetes|context=good-cluster|namespace="}, auxKeys(srv), "the healthy profile was not registered")
 }
 
@@ -218,8 +224,17 @@ runtimes:
 `)
 		dirs = append(dirs, d)
 	}
+	// Count only the fixture's profile: the embedded default settings add
+	// built-in profiles to every project, and each of those is also checked
+	// once.
 	var calls atomic.Int32
-	srv.resolveAuxiliaryRuntime = blockingResolver(nil, nil, nil, &calls)
+	inner := blockingResolver(nil, nil, nil, nil)
+	srv.resolveAuxiliaryRuntime = func(p, a, profile string) (runtime.Runtime, config.RuntimeBuildRecord) {
+		if profile == "stale" {
+			calls.Add(1)
+		}
+		return inner(p, a, profile)
+	}
 
 	srv.discoverAuxiliaryRuntimesForProjects(dirs)
 	assert.Equal(t, int32(1), calls.Load(), "the shared stale profile was checked more than once")
