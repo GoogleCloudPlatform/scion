@@ -261,9 +261,10 @@ type RunConfig struct {
 	// resources.
 	ObserveResourceCreated func(api.ResourceHandle)
 	// KubernetesBlockIdentity marks a pod whose GCP identity mode is
-	// "block" (ptone/scion#4034). The Kubernetes runtime then sets
-	// automountServiceAccountToken false and adds the Workload Identity node
-	// selector (KubernetesWorkloadIdentityNodeLabel). The ServiceAccount
+	// "block" (ptone/scion#4034). The Kubernetes runtime then adds the
+	// Workload Identity node selector (KubernetesWorkloadIdentityNodeLabel).
+	// automountServiceAccountToken is false on every agent pod, in every
+	// GCP identity mode, not only under block. The ServiceAccount
 	// itself comes from Kubernetes.ServiceAccountName, which the agent
 	// manager has already set to the block ServiceAccount or cleared.
 	// Ignored by other runtimes.

@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -132,7 +133,9 @@ type ServerConfigUpdateDBRequest struct {
 	// A section merged on its current row (mergeSectionOnCurrent) that has
 	// no entry uses the revision the merge read as an implicit CAS; the
 	// map sections (runtimes, profiles, harness_configs) use
-	// last-writer-wins.
+	// last-writer-wins. runtimes and profiles are written together in one
+	// transaction that also compares the revision of the one the body
+	// leaves out (placementPairForSave).
 	ExpectedRevisions map[string]int64 `json:"expected_revisions,omitempty"`
 }
 
@@ -535,10 +538,12 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 
 		var superseded []SupersededKey
 		for key, bootstrapVal := range bootstrapMap {
-			if koanfPath := opsettings.KoanfPathFromSectionKey(sec.Name, key); startupOnlyLayer1Keys[koanfPath] != nil {
-				// The hub does not apply the saved value of this key, so it
-				// supersedes nothing: the startup value stays in effect
-				// (ptone/scion#6000).
+			if koanfPath := opsettings.KoanfPathFromSectionKey(sec.Name, key); opsettings.IsEnvPinnedLayer1Key(koanfPath) &&
+				koanfPath != config.PublicURLKey && ops.envOverrides[koanfPath] {
+				// A SCION_SERVER_* variable pins this key on this node, so
+				// the database value does not supersede it; the field's
+				// environment badge says so (authorized_domains,
+				// ptone/scion#6000; public_url is handled below).
 				continue
 			}
 			if sec.Name == "endpoints" && key == "public_url" && publicURLPinned {
@@ -662,8 +667,13 @@ func unseededSectionMap(unseededK *koanf.Koanf, sectionName string) map[string]i
 // endpoints hub_name and public_url: a managed endpoints row carries them
 // only after an admin sets them, and Snapshot falls back to the bootstrap
 // value (for public_url, so does the hub's endpoint resolution at startup,
-// ptone/scion#3905).
+// ptone/scion#3905). It is also the case for access authorized_domains: a
+// row without a list (a cleared list is stored that way) runs with the
+// startup list (authorizedDomainsForSnapshot, ptone/scion#6000).
 func bootstrapAppliesWhenAbsent(section, key string) bool {
+	if section == "access" && key == "authorized_domains" {
+		return true
+	}
 	return section == "endpoints" && (key == "hub_name" || key == "public_url" || key == endpointsImageRegistryKey)
 }
 
@@ -687,6 +697,14 @@ func (s *Server) applyRunningValuesForUnsetKeys(resp *ServerConfigResponse, snap
 	if snap.SoftDeleteRetainFiles == nil {
 		resp.Server.Hub.SoftDeleteRetainFiles = &retainFiles
 	}
+	// authorized_domains: with no saved list the hub runs with the startup
+	// list (authorizedDomainsForSnapshot, ptone/scion#6000), so GET shows
+	// it rather than an empty list that reads as "every domain".
+	if len(snap.AuthorizedDomains) == 0 && resp.Server.Auth != nil {
+		if running := s.AuthorizedDomains(); len(running) > 0 {
+			resp.Server.Auth.AuthorizedDomains = running
+		}
+	}
 	// image_registry: the managed value, else this replica's file tier,
 	// never a node env; profiles show managed values only. A save compares
 	// with exactly these values (ptone/scion#3916).
@@ -703,8 +721,8 @@ const (
 	softDeleteRetainFilesKey = "server.hub.soft_delete_retain_files"
 )
 
-// echoedRunningValueKeys returns the keys of soft_delete_retention and
-// soft_delete_retain_files that the request sends back
+// echoedRunningValueKeys returns the keys of soft_delete_retention,
+// soft_delete_retain_files and authorized_domains that the request sends back
 // as the running value GET showed for them while no value is stored
 // (applyRunningValuesForUnsetKeys). Such a value is an echo, not a change:
 // writing it would pin this replica's startup value (which may come from
@@ -726,6 +744,14 @@ func (s *Server) echoedRunningValueKeys(ctx context.Context, ops *OperationalSet
 	s.mu.RUnlock()
 
 	echoed := map[string]bool{}
+	// authorized_domains: GET shows the running list while none is saved
+	// (ptone/scion#6000); sending it back is an echo.
+	if req.Server != nil && req.Server.Auth != nil && len(req.Server.Auth.AuthorizedDomains) > 0 {
+		if running := s.AuthorizedDomains(); len(running) > 0 && sameDomainSet(req.Server.Auth.AuthorizedDomains, running) &&
+			storedKeyUnset(ctx, ops, authorizedDomainsKey) {
+			echoed[authorizedDomainsKey] = true
+		}
+	}
 	if req.Server != nil && req.Server.Hub != nil {
 		hub := req.Server.Hub
 		if retention > 0 && hub.SoftDeleteRetention != "" {
@@ -1073,6 +1099,9 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	rawBody = cl.body
+	if rejectRepeatedPlacementSections(w, rawBody) {
+		return
+	}
 	var req ServerConfigUpdateDBRequest
 	if err := json.Unmarshal(rawBody, &req); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
@@ -1351,6 +1380,39 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
+	// A save that sends authorized_domains or admin_emails may not leave
+	// access settings that refuse sign-in for the saving account
+	// (ptone/scion#6000). The check reads the merged access document, so a
+	// value kept from the row counts. It always checks the lists as saved:
+	// they apply on every replica that does not pin the domain list, and
+	// on this node once its pin is removed. When this node pins the list
+	// through SCION_SERVER_*, a save that sends admin_emails is also
+	// checked against the pinned list, which applies here. Either refuses.
+	if doc, ok := sectionDocs["access"]; ok {
+		fp := sectionBodyPresence("access", rawBody)
+		domainsSent := fp.has("authorized_domains") && !echoedRunning[authorizedDomainsKey]
+		adminsSent := fp.has("admin_emails")
+		pinned := slices.Contains(ops.EnvOverriddenKeys(), authorizedDomainsKey)
+		if adminsSent || domainsSent {
+			var merged opsettings.AccessSettings
+			if err := json.Unmarshal(doc, &merged); err != nil {
+				slog.Error("PUT server-config: failed to decode access document", "error", err)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+				return
+			}
+			domains, admins := s.accessListsAfterDBSave(merged, false)
+			if s.rejectAuthorizedDomainsLockout(r.Context(), w, updatedBy, domains, admins) {
+				return
+			}
+			if pinned && adminsSent {
+				domains, admins = s.accessListsAfterDBSave(merged, true)
+				if s.rejectAuthorizedDomainsLockout(r.Context(), w, updatedBy, domains, admins) {
+					return
+				}
+			}
+		}
+	}
+
 	// profiles replaces the section wholesale: a profile the body leaves
 	// out is deleted with its values, and a profile's omitted or ""
 	// image_registry stores none. GET shows managed profile registries
@@ -1596,6 +1658,9 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// schema — Kubernetes quantity check), naming the offending key so a bad
 	// value is rejected here instead of failing every agent start later.
 	var saveWarnings []string
+	// runtimes and profiles are written below in one transaction that
+	// compares the revision of an omitted section the save checks used.
+	var placement placementPair
 	{
 		var runtimes opsettings.RuntimesSettings
 		var profiles opsettings.ProfilesSettings
@@ -1623,7 +1688,15 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		_, hasRuntimes := sectionDocs["runtimes"]
 		_, hasProfiles := sectionDocs["profiles"]
 		if hasRuntimes || hasProfiles {
+			// The guard revision of an omitted section is read before the
+			// snapshot the checks use, so a write that lands after it fails
+			// the guarded write below (409) rather than passing a check
+			// made on an older value.
+			placement = placementPairForSave(ops, sectionDocs)
 			snap := ops.Snapshot()
+			if placementSnapshotHook != nil {
+				placementSnapshotHook()
+			}
 			if !hasRuntimes {
 				runtimes = snap.Runtimes
 			}
@@ -1639,6 +1712,10 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 				runtimesBefore = snap.Runtimes
 			}
 			pErrs, pWarnings := config.RuntimeSaveChecks(runtimesBefore, runtimes, profilesBefore, profiles)
+			// The rules across runtime entries and profiles, in the same
+			// form (PlacementPairSaveChecks).
+			xErrs, xWarnings := config.PlacementPairSaveChecks(runtimesBefore, runtimes, profilesBefore, profiles)
+			pErrs, pWarnings = append(pErrs, xErrs...), append(pWarnings, xWarnings...)
 			if len(pErrs) > 0 {
 				writeResourceQuantityError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, pErrs)
 				return
@@ -1803,7 +1880,85 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	}
 	sort.Strings(sortedSections)
 
+	// runtimes and profiles are saved first, together, in one guarded
+	// transaction: either both are written or neither is, and a conflict
+	// leaves every section of the save unwritten. The runtimes write's
+	// expected revision is the row the merge read (ptone/scion#6580).
+	if placement.active {
+		var writes []guardedSectionWrite
+		reads := placement.reads
+		for _, secName := range placementSections {
+			doc, sent := sectionDocs[secName]
+			if !sent {
+				continue
+			}
+			expectedRev := int64(-1)
+			if rev, ok := req.ExpectedRevisions[secName]; ok {
+				expectedRev = rev
+			} else if rev, ok := mergedBaseRevs[secName]; ok {
+				expectedRev = rev
+			}
+			if rev, ok := noopRevs[secName]; ok && expectedRev == rev {
+				applied[secName] = rev
+				unchanged = append(unchanged, secName)
+				reads[secName] = rev
+				continue
+			}
+			if rev, same := unchangedManagedRow(r.Context(), ops, secName, doc, expectedRev); same {
+				applied[secName] = rev
+				unchanged = append(unchanged, secName)
+				reads[secName] = rev
+				continue
+			}
+			writes = append(writes, guardedSectionWrite{section: secName, doc: doc, expectedRevision: expectedRev})
+		}
+		if len(writes) > 0 {
+			revs, notApplied, err := ops.updateGuarded(r.Context(), writes, reads, updatedBy, "managed")
+			switch {
+			case errors.Is(err, store.ErrRevisionConflict):
+				written := map[string]bool{}
+				for _, wr := range writes {
+					written[wr.section] = true
+					conflicted = append(conflicted, map[string]interface{}{
+						"section":           wr.section,
+						"expected_revision": wr.expectedRevision,
+						"current_revision":  s.getCurrentRevision(ops, wr.section),
+					})
+				}
+				// The sections checked but not written, whose revision
+				// changed, are listed too.
+				conflicted = append(conflicted, placementReadConflicts(r.Context(), ops, reads, written)...)
+			case errors.Is(err, errGuardedBatchUnsupported):
+				slog.Error("PUT server-config: the settings store cannot save runtimes and profiles together", "error", err)
+				fileTxn.abort()
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"Failed to save runtimes and profiles: the settings store cannot save them in one transaction", nil)
+				return
+			case err != nil:
+				slog.Error("Failed to update runtimes and profiles", "error", err)
+				fileTxn.abort()
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to update runtimes and profiles", nil)
+				return
+			default:
+				for sec, rev := range revs {
+					applied[sec] = rev
+					if notApplied[sec] {
+						notInEffect[sec] = true
+					}
+				}
+			}
+		}
+	}
+
 	for _, secName := range sortedSections {
+		if len(conflicted) > 0 {
+			// A conflict on the runtimes and profiles save writes nothing
+			// else.
+			break
+		}
+		if placement.active && (secName == "runtimes" || secName == "profiles") {
+			continue
+		}
 		doc := sectionDocs[secName]
 		expectedRev := int64(-1) // last-writer-wins by default
 		if rev, ok := req.ExpectedRevisions[secName]; ok {

@@ -24,6 +24,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
@@ -65,6 +66,8 @@ type AuditRecord struct {
 type EncryptionAudit struct {
 	// Done is false when no audit ran (no store).
 	Done bool
+	// At is when the audit finished (UTC); zero when none ran.
+	At time.Time
 	// Scanned counts every row; ReferenceOnly the empty rows with a
 	// backend reference, which hold no local payload and are not read.
 	Scanned, ReferenceOnly, Readable int
@@ -247,6 +250,7 @@ func runEncryptionAudit(ctx context.Context, st store.SecretStore, c *secret.Val
 			}
 		}
 		if len(page) < store.MaxSecretPayloadScan {
+			a.At = time.Now().UTC()
 			return a, nil
 		}
 		after = page[len(page)-1].ID

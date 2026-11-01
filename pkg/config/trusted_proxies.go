@@ -38,8 +38,9 @@ const (
 //   - an IPv4-mapped IPv6 range (::ffff:0:0/96 and its subranges), which can
 //     never match a peer; the IPv4 form is required.
 //
-// A nil or empty list returns no networks and no error: the hub then never
-// trusts a forwarded protocol.
+// A nil or empty list returns no networks and no error: no forwarded
+// protocol is trusted. TransportTrustedProxies applies the default for a
+// setting that is not set at all.
 func ParseTrustedProxies(entries []string) ([]*net.IPNet, error) {
 	var nets []*net.IPNet
 	for _, raw := range entries {
@@ -52,6 +53,40 @@ func ParseTrustedProxies(entries []string) ([]*net.IPNet, error) {
 	}
 	return nets, nil
 }
+
+// DefaultLocalTrustedProxies returns the networks trusted as a
+// TLS-terminating proxy when server.trusted_proxies is not set: this host's
+// loopback addresses, 127.0.0.1/32 and ::1/128. Each call returns new
+// values.
+func DefaultLocalTrustedProxies() []*net.IPNet {
+	return []*net.IPNet{
+		{IP: net.IPv4(127, 0, 0, 1).To4(), Mask: net.CIDRMask(32, 32)},
+		// A copy: net.IPv6loopback is a shared package variable.
+		{IP: append(net.IP(nil), net.IPv6loopback...), Mask: net.CIDRMask(128, 128)},
+	}
+}
+
+// TransportTrustedProxies resolves the networks whose forwarded protocol
+// the hub-broker transport policy trusts (config.ConfidentialArrival), for
+// both the hub and the conduit relay. set reports whether
+// server.trusted_proxies is set in any source (GlobalConfig.TrustedProxiesSet):
+//   - set, or entries not empty: ParseTrustedProxies(entries), so an
+//     explicit empty list trusts no proxy;
+//   - not set: DefaultLocalTrustedProxies, with usedDefault true, so a
+//     proxy on this host is trusted and a proxy on another host is not.
+func TransportTrustedProxies(entries []string, set bool) (nets []*net.IPNet, usedDefault bool, err error) {
+	if !set && len(entries) == 0 {
+		return DefaultLocalTrustedProxies(), true, nil
+	}
+	nets, err = ParseTrustedProxies(entries)
+	return nets, false, err
+}
+
+// TransportTrustedProxiesDefaultWarning is the startup warning of a hub or
+// relay that uses DefaultLocalTrustedProxies.
+const TransportTrustedProxiesDefaultWarning = TrustedProxiesKey + " is not set; trusting a TLS-terminating proxy on this host only " +
+	"(127.0.0.1, ::1) for broker connections. A proxy on another host must be listed in " + TrustedProxiesKey +
+	"; set it to [] to trust no proxy."
 
 func parseTrustedProxy(entry string) (*net.IPNet, error) {
 	if strings.Contains(entry, "/") {

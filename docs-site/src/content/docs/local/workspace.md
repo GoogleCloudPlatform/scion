@@ -155,7 +155,7 @@ By default, git projects use a shallow clone with `depth=1` for fast startup.
 | `SCION_GIT_DEPTH` | Clone depth (set to `0` for full clone, omission defaults to shallow depth `1`) | `1` |
 | `SCION_GIT_TOKEN_REMOTE` | The project's git remote, as the Hub recorded it. Set by the broker only | *(none)* |
 
-Authentication is handled via the `GITHUB_TOKEN` environment variable, injected from the project's secrets or your local environment through the env-gather flow. The clone uses the token only when the clone URL is HTTPS and names the project's git remote (the same host and owner/repository as `SCION_GIT_TOKEN_REMOTE`). A clone URL that names another host or repository, for example through a `scion.dev/clone-url` label, is cloned without the token, and no credential helper is configured for it. The same rule applies to the Kubernetes workspace-provisioning init container.
+Authentication is handled via the `GITHUB_TOKEN` environment variable, injected from the project's secrets, a GitHub App installation, or your personal environment through the env-gather flow. The clone uses the token only when the clone URL is HTTPS and names the project's git remote (the same host and owner/repository as `SCION_GIT_TOKEN_REMOTE`). A personal token (a user-scoped `GITHUB_TOKEN`, an agent or storage environment variable, a token collected through env-gather, or a broker/hub-scoped secret) is offered only when the project's recorded remote is on the GitHub host (`github.com`, or the host of `github_app.api_base_url` for GitHub Enterprise), whereas a project-bound credential (the project's GitHub App installation token or a project-scoped `GITHUB_TOKEN` secret) applies to the project's recorded remote on any host. A clone URL that names another host or repository, for example through a `scion.dev/clone-url` label, is cloned without the token, and no credential helper is configured for it. On every start of an existing clone-per-agent workspace, `sciontool init` reconciles `~/.gitconfig` to remove any unscoped `credential.helper` and any stale host-scoped helper when no token is offered, and agent-start clones run without host credential helpers, extra HTTP headers, or askpass. The same rule applies to the Kubernetes workspace-provisioning init container.
 
 The clone URL must use `https`, `ssh` (including the `git@host:path` form) or `git`. A local path, a `file://` or `http://` URL, a `<transport>::<address>` form, or a URL starting with `-` is refused: the agent is not started. A create request answers HTTP 422, and a start fails with the same fixed message; neither repeats the URL.
 
@@ -314,13 +314,20 @@ the agent start or workspace pull rather than being ignored.
 - **Partial clones and sparse-index checkouts are refused:** `extensions.partialClone` and
   `index.sparse` are not on the allow-list, so host-side git in such a repository is refused and an
   agent cannot start there. This is a deliberate, fail-closed limitation; it may be lifted later.
-- As defence in depth these commands also run with hooks, the file-system monitor and the pager
+- As defence in depth these commands also run with `LC_ALL=C` (dropping any inherited `LC_ALL`), with hooks, the file-system monitor and the pager
   off, signing off (`commit.gpgsign`/`tag.gpgsign`/`merge.verifySignatures` false), the `ext::`
   transport disabled and the `file://` transport allowed only for a top-level operation the user
   drives directly (`protocol.file.allow=user`; git's own indirect uses such as submodule fetches are
   blocked), submodule recursion off, and the `GIT_*` environment scrubbed (except the host operator's own
   config-file, transport and `GIT_ALLOW_PROTOCOL` settings). **Note:** a `GIT_ALLOW_PROTOCOL` set by
   the host operator overrides the `protocol.*.allow` pins.
+- **Subcommand-first arguments and discovery mode:** host git (`HostGitCommand`) refuses argument lists
+  that are empty or start with an option (`-`), so the first argument is always the git subcommand.
+  When run in a directory with no `.git` entry and no `GIT_DIR` in the environment (discovery mode,
+  including the Runtime Broker's workspace git probe), host git runs only `rev-parse` in the
+  symlink-resolved directory (with `GIT_CEILING_DIRECTORIES` set to its parent when ceiling is on) and
+  verifies after the command that the directory still resolves to the same path and gained no `.git`
+  or `HEAD` entry.
 - **git-lfs:** host-side checkouts take the LFS endpoint from the configured remote, never from a
   tracked `.lfsconfig` (which an agent could point at an arbitrary server).
   - A repository Scion manages (the shared checkout and the shared-workspace clone) and every
@@ -345,25 +352,31 @@ the agent start or workspace pull rather than being ignored.
   clone URL and never left in a workspace's `.git/config`. A git token is supplied only through a
   credential helper scoped to the clone URL's host (so it is offered to that host and no other, in
   particular not to an LFS endpoint), and only for an `http(s)` URL; for any other URL the token is
-  ignored. On project workspace clones and shared-workspace pulls, `GITHUB_TOKEN` is passed only when
-  `gitRepo` is an HTTPS URL on `github.com` (or `*.github.com`). The scoped helper also disables any
-  other configured credential helper for the command, so nothing persists the token. On a shared
-  storage layout (`server.project_storage`), the Hub provisions `shared-plain` git workspaces; if a
-  Runtime Broker reaches its backstop clone path because the Hub's provisioning sentinel is missing,
-  it passes no git token and sets no token remote, so a private repository fails with the "needs
-  credentials" error until provisioned through the Hub.
+  ignored. On project workspace clones and shared-workspace pulls, a personal token is offered only
+  when `gitRepo` is on the GitHub host (`github.com`, or the host of `github_app.api_base_url` for
+  GitHub Enterprise), while a project-bound credential (the project's GitHub App installation token or
+  project-scoped `GITHUB_TOKEN` secret) is offered for the project's recorded HTTPS remote on any host.
+  The scoped helper also disables any other configured credential helper for the command, so nothing
+  persists the token. On a shared storage layout (`server.project_storage`), the Hub provisions
+  `shared-plain` git workspaces; if a Runtime Broker reaches its backstop clone path because the Hub's
+  provisioning sentinel is missing, it offers the agent's git token only when the clone URL is HTTPS
+  and names the project's recorded remote (`SCION_GIT_TOKEN_REMOTE`), and otherwise runs with no token
+  and no host git credentials.
 - **Host credentials:** a host-side command that talks to a remote (a clone, a shared-workspace
   fetch, a template import) offers no credential of the host's own. It runs without the host user's
-  global and system git config, `~/.netrc`, Kerberos tickets, and ssh agent, keys and ssh config.
-  Without a project git token it runs anonymously; with one, the token is the only credential. Over
-  ssh it offers no identity and checks the server's host key strictly against the host user's and the
-  system's `known_hosts`, without writing them; a project token never authenticates ssh. To trust a
-  private CA, set `GIT_SSL_CAINFO` (or use the system trust store); for a proxy, set
-  `https_proxy`/`no_proxy` in the Hub or Runtime Broker environment.
+  global and system git config, `~/.netrc`, Kerberos tickets, and ssh agent, keys and ssh config, and
+  with credential helpers, extra HTTP headers and askpass cleared. Without a project git token it runs
+  anonymously; with one, the token is the only credential. Over ssh it offers no host identity and
+  checks the server's host key strictly against the host user's and the system's `known_hosts`, without
+  writing them; a project token never authenticates ssh, and Hub-host clones or pulls of an SSH
+  repository URL (`ssh://`, `git+ssh://`, `ssh+git://`, or `git@host:path`) require a project git
+  secret (`an ssh repository URL requires a project git secret`). To trust a private CA, set
+  `GIT_SSL_CAINFO` (or use the system trust store); for a proxy, set `https_proxy`/`no_proxy` in the
+  Hub or Runtime Broker environment.
 - **Updating a shared workspace** (pull) re-validates the project's stored `gitRepo` URL, verifies
   that the checkout's `origin` remote URL matches `gitRepo` (`origin remote mismatch` otherwise), and
-  fetches from `gitRepo` (passing `GITHUB_TOKEN` only for HTTPS `github.com` / `*.github.com` URLs),
-  then fast-forwards the current branch.
+  fetches from `gitRepo` (with the project's git credential for HTTPS remotes, or refusing SSH URLs
+  when no project git secret is configured), then fast-forwards the current branch.
 
 Your own git commands in your checkout are not affected. Scion also mounts the repository's git
 metadata into agents so that an agent cannot change what git does for you or for other agents, and

@@ -614,6 +614,13 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			// <main>/.git (narrowed) plus the workspace are mounted — never the
 			// whole main checkout read-write. Anything else is refused.
 			registered, regErr := util.IsRegisteredWorktree(config.RepoRoot, config.Workspace)
+			// A repository config refusal is returned as is, so the error
+			// names the refused key and its remedy instead of claiming that
+			// the workspace is not registered.
+			var refused *util.RepoConfigRefusedError
+			if errors.As(regErr, &refused) {
+				return nil, fmt.Errorf("agent %q: workspace %q against repository root %q: %w", config.Name, config.Workspace, config.RepoRoot, regErr)
+			}
 			if regErr != nil || !registered {
 				return nil, fmt.Errorf("agent %q: workspace %q against repository root %q: %w", config.Name, config.Workspace, config.RepoRoot, errOutsideRootNotRegistered)
 			}

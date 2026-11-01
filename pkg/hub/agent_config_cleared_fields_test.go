@@ -111,6 +111,52 @@ func TestNextClearedFields(t *testing.T) {
 
 	t.Run("a client cannot set the list", func(t *testing.T) {
 		assert.Nil(t, clearedFieldsFor(t, stored(), `{"cleared_fields":["harness","max_turns"]}`, true))
+		assert.Nil(t, clearedFieldsFor(t, stored(), `{"cleared_fields":["resources.limits.memory"]}`, true))
+	})
+
+	// A resources value that leaves out a stored sub-field records that
+	// sub-field's path, not the whole key, so the sub-fields it sets are
+	// kept (ptone/scion#5676).
+	withResources := func(cleared ...string) *api.ScionConfig {
+		old := stored()
+		old.Resources = &api.ResourceSpec{
+			Requests: api.ResourceList{CPU: "1", Memory: "1Gi"},
+			Limits:   api.ResourceList{CPU: "2", Memory: "4Gi"},
+			Disk:     "10Gi",
+		}
+		old.ClearedFields = cleared
+		return old
+	}
+	t.Run("a dropped resources sub-field is recorded by path", func(t *testing.T) {
+		got := clearedFieldsFor(t, withResources(), `{"resources":{"requests":{"cpu":"1","memory":"1Gi"},"limits":{"cpu":"3"},"disk":"10Gi"}}`, true)
+		assert.Equal(t, []string{"resources.limits.memory"}, got)
+		got = clearedFieldsFor(t, withResources(), `{"resources":{"limits":{"cpu":"2"}}}`, true)
+		assert.Equal(t, []string{"resources.disk", "resources.limits.memory", "resources.requests.cpu", "resources.requests.memory"}, got)
+	})
+	t.Run("setting a resources sub-field again drops its path", func(t *testing.T) {
+		old := withResources("max_turns", "resources.disk", "resources.limits.memory")
+		old.Resources.Limits.Memory = ""
+		old.Resources.Disk = ""
+		got := clearedFieldsFor(t, old, `{"resources":{"requests":{"cpu":"1","memory":"1Gi"},"limits":{"cpu":"2","memory":"8Gi"}}}`, true)
+		assert.Equal(t, []string{"max_turns", "resources.disk"}, got)
+	})
+	t.Run("resources sub-field paths are kept by an unrelated edit", func(t *testing.T) {
+		old := withResources("resources.limits.memory")
+		assert.Equal(t, []string{"resources.limits.memory"}, clearedFieldsFor(t, old, `{"model":"m"}`, true))
+	})
+	t.Run("a whole resources clear replaces the sub-field paths", func(t *testing.T) {
+		old := withResources("resources.disk", "resources.limits.memory")
+		assert.Equal(t, []string{"resources"}, clearedFieldsFor(t, old, `{"resources":null}`, true))
+		assert.Equal(t, []string{"resources"}, clearedFieldsFor(t, withResources(), `{"resources":{}}`, true))
+	})
+	t.Run("a resources value after a whole clear takes the whole key off", func(t *testing.T) {
+		old := stored()
+		old.Resources = nil
+		old.ClearedFields = []string{"resources"}
+		assert.Nil(t, clearedFieldsFor(t, old, `{"resources":{"limits":{"memory":"2Gi"}}}`, true))
+	})
+	t.Run("an unchanged resources value records nothing", func(t *testing.T) {
+		assert.Nil(t, clearedFieldsFor(t, withResources(), `{"resources":{"requests":{"cpu":"1","memory":"1Gi"},"limits":{"cpu":"2","memory":"4Gi"},"disk":"10Gi"}}`, true))
 	})
 }
 

@@ -54,12 +54,12 @@ func samplePendingConfig() *store.AgentPendingConfig {
 			"thinking_level": json.RawMessage(`null`),
 			"env":            json.RawMessage(`{"SECRET":"v"}`),
 		},
-		SavedBy:            "user:u1",
-		SavedByName:        "User One",
-		SavedAt:            time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC),
-		BaseGeneration:     2,
-		BaseStateVersion:   9,
-		EnvSaverCanViewEnv: true,
+		SavedBy:          "user:u1",
+		SavedByName:      "User One",
+		SavedAt:          time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC),
+		BaseGeneration:   2,
+		BaseStateVersion: 9,
+		KeySavers:        map[string]string{"model": "user:u1", "env": "user:u2"},
 	}
 }
 
@@ -84,7 +84,7 @@ func TestAgentStore_PendingConfig_RoundTripsThroughUpdateAgent(t *testing.T) {
 	assert.True(t, want.SavedAt.Equal(reread.PendingConfig.SavedAt))
 	assert.Equal(t, want.BaseGeneration, reread.PendingConfig.BaseGeneration)
 	assert.Equal(t, want.BaseStateVersion, reread.PendingConfig.BaseStateVersion)
-	assert.True(t, reread.PendingConfig.EnvSaverCanViewEnv, "persistence keeps the saver's env access")
+	assert.Equal(t, want.KeySavers, reread.PendingConfig.KeySavers, "persistence keeps the per-key savers")
 	require.Len(t, reread.PendingConfig.Config, 3)
 	assert.JSONEq(t, `"model-b"`, string(reread.PendingConfig.Config["model"]))
 	assert.Equal(t, "null", string(reread.PendingConfig.Config["thinking_level"]), "a stored null (clear at apply) survives")

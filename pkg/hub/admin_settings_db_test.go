@@ -1832,8 +1832,9 @@ func TestGetServerConfigDB_SupersededKeys_SeededSectionExcluded(t *testing.T) {
 // value is attributed to settings.yaml, which wins over the seed layer; a
 // key with only a seed value or only a settings.yaml value keeps its source;
 // and the public URL keeps its settings.yaml attribution (ptone/scion#4865,
-// ptone/scion#4904). authorized_domains, whose saved value the hub does not
-// apply (ptone/scion#6000), is not reported as superseded at all.
+// ptone/scion#4904). A saved authorized_domains is applied
+// (ptone/scion#6000), so with no SCION_SERVER_* pin it supersedes the
+// settings.yaml value like the other access keys.
 func TestGetServerConfigDB_SupersededKeySourceFollowsPrecedence(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1902,15 +1903,11 @@ server:
 		"server.hub.public_url":               "yaml",     // seed and settings.yaml
 		"server.auth.default_user_role":       "seed_env", // seed only
 		"server.auth.user_access_mode":        "yaml",     // settings.yaml only
+		"server.auth.authorized_domains":      "yaml",     // settings.yaml only, applied (ptone/scion#6000)
 	} {
 		if got[key] != want {
 			t.Errorf("superseded %s source = %q, want %q (all: %v)", key, got[key], want, got)
 		}
-	}
-	// The hub does not apply a saved authorized_domains (ptone/scion#6000):
-	// the saved value supersedes nothing, so the key is not listed.
-	if src, ok := got["server.auth.authorized_domains"]; ok {
-		t.Errorf("server.auth.authorized_domains reported superseded (source %q); the saved value is not applied", src)
 	}
 }
 

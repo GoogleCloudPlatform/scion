@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
+	"github.com/GoogleCloudPlatform/scion/pkg/preflight"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -373,11 +374,12 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 			"repo_path", mc.RepoPath, "branch", mc.RepoBranch,
 			"binary_dest", mc.BinaryDest, "service_name", mc.ServiceName)
 		return NewRebuildServerExecutor(RebuildServerOptions{
-			RepoPath:    mc.RepoPath,
-			RepoBranch:  mc.RepoBranch,
-			BinaryDest:  mc.BinaryDest,
-			ServiceName: mc.ServiceName,
-			Store:       s.store,
+			RepoPath:      mc.RepoPath,
+			RepoBranch:    mc.RepoBranch,
+			BinaryDest:    mc.BinaryDest,
+			ServiceName:   mc.ServiceName,
+			Store:         s.store,
+			SettingsCheck: s.requiredSettingsCheck,
 		}), nil
 	case "rebuild-web":
 		log.Debug("Resolved rebuild-web executor", "repo_path", mc.RepoPath, "branch", mc.RepoBranch)
@@ -405,15 +407,23 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 		log.Debug("Resolved update-binary executor",
 			"installer", installer.Name(), "github_repo", mc.GitHubRepo)
 		return NewBinaryUpdateExecutor(BinaryUpdateOptions{
-			GitHubRepo:  mc.GitHubRepo,
-			Installer:   installer,
-			Releases:    s.updateReleaseSource(),
-			Catalog:     s.updateReleaseCatalog(),
-			Snapshotter: s.updateSnapshotter(context.Background()),
+			GitHubRepo:    mc.GitHubRepo,
+			Installer:     installer,
+			Releases:      s.updateReleaseSource(),
+			Catalog:       s.updateReleaseCatalog(),
+			Snapshotter:   s.updateSnapshotter(context.Background()),
+			SettingsCheck: s.requiredSettingsCheck,
 		}), nil
 	default:
 		return nil, fmt.Errorf("no executor registered for operation %q", key)
 	}
+}
+
+// requiredSettingsCheck lists the required settings the server config the
+// hub was started with (ConfigPath) leaves unset, for the update
+// operations' "Settings check" log section: warnings only.
+func (s *Server) requiredSettingsCheck() []preflight.Finding {
+	return preflight.LoadRequiredSettingsFindings(s.config.ConfigPath)
 }
 
 // executeOperation starts execution of a routine operation by key.
