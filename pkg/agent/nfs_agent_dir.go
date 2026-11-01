@@ -113,9 +113,11 @@ var purgeRemovedAgentWorkspaces = func(agentDir string) {
 // Nothing outside worktrees/<agentName> and agents/<agentName> is touched.
 // It returns the paths it looked at and any failures, joined; each failure
 // leaves that path in place, and an agent created again with the same name
-// reuses it. It does nothing unless the runtime is Kubernetes, the
-// project's workspace_storage backend is nfs and the export is mounted on
-// the broker.
+// reuses it. The worktree is removed only on Kubernetes and the agent's
+// workspace on Kubernetes or Cloud Run (whose clone-per-agent agents mount
+// agents/<agentName>/workspace); either needs the project's
+// workspace_storage backend to be nfs and the export mounted on the
+// broker.
 func (m *AgentManager) RemoveNFSAgentFiles(ctx context.Context, projectPath, projectID, agentName string) (paths []string, err error) {
 	var errs []error
 	if path, err := m.RemoveNFSWorktree(ctx, projectPath, projectID, agentName); path != "" || err != nil {
