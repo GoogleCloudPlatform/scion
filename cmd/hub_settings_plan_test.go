@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/stretchr/testify/assert"
@@ -477,4 +478,21 @@ func TestMaskSensitiveSettings_CoversHubMaskedFields(t *testing.T) {
 	// The positional entries mirror the Hub's non-scalar masks.
 	assert.Contains(t, text, "NotificationChannels[i].Params", "the Hub masks channel params; settingsHubMaskedPaths lists them")
 	assert.Contains(t, text, "maskedTelemetry", "the Hub masks telemetry headers; settingsHubMaskedPaths lists them")
+}
+
+// TestSettingsKeyIndex_SuggestSkipsFarKeys pins the suggestion bounds: the
+// suggestions are those within edit distance 3 or with the same last segment,
+// and a very long input returns at once (only last-segment matches apply).
+func TestSettingsKeyIndex_SuggestSkipsFarKeys(t *testing.T) {
+	ix := newSettingsKeyIndex(testSettingsSchema())
+	assert.Equal(t, []string{"default_max_turns"}, ix.suggest("default_max_turn"))
+	assert.Contains(t, ix.suggest("hub.public_url"), "server.hub.public_url", "same last segment, far in length")
+	assert.Empty(t, ix.suggest("default_max_turns_and_more"), "length differs by more than 3")
+	assert.Equal(t, 1, levenshtein("default_max_turn", "default_max_turns"))
+
+	long := strings.Repeat("x", 1<<20)
+	start := time.Now()
+	assert.Empty(t, ix.suggest(long))
+	assert.Equal(t, []string{"server.hub.public_url"}, ix.suggest(long+".public_url"), "a long input still matches by its last segment")
+	assert.Less(t, time.Since(start), 2*time.Second, "a long input is not compared character by character against every key")
 }

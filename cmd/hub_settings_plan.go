@@ -127,6 +127,15 @@ func (ix *settingsKeyIndex) resolve(key string) (schemaKey, section string, ok b
 }
 
 // suggest returns up to three schema keys close to key.
+// suggestMaxDistance is the largest edit distance suggest accepts, and
+// suggestMaxKeyLen bounds the input it computes distances for: no schema key
+// is anywhere near that long, so a longer input can only match by its last
+// segment.
+const (
+	suggestMaxDistance = 3
+	suggestMaxKeyLen   = 256
+)
+
 func (ix *settingsKeyIndex) suggest(key string) []string {
 	key = normalizeSettingsKey(key)
 	last := key[strings.LastIndex(key, ".")+1:]
@@ -136,12 +145,20 @@ func (ix *settingsKeyIndex) suggest(key string) []string {
 	}
 	var cands []cand
 	for _, k := range ix.keys {
-		d := levenshtein(key, k)
-		kLast := k[strings.LastIndex(k, ".")+1:]
-		if kLast == last {
-			d = 0
+		// A schema key with the same last segment is a candidate whatever
+		// the rest of the path.
+		if k[strings.LastIndex(k, ".")+1:] == last {
+			cands = append(cands, cand{k, 0})
+			continue
 		}
-		if d <= 3 {
+		// The edit distance is at least the length difference, so a key
+		// whose length differs by more than the threshold cannot match;
+		// skipping it also keeps a very long input from costing
+		// len(input) x len(key) per schema key.
+		if len(key) > suggestMaxKeyLen || absInt(len(key)-len(k)) > suggestMaxDistance {
+			continue
+		}
+		if d := levenshtein(key, k); d <= suggestMaxDistance {
 			cands = append(cands, cand{k, d})
 		}
 	}
@@ -151,6 +168,13 @@ func (ix *settingsKeyIndex) suggest(key string) []string {
 		out = append(out, cands[i].k)
 	}
 	return out
+}
+
+func absInt(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
 }
 
 func levenshtein(a, b string) int {
