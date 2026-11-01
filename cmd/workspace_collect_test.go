@@ -138,9 +138,9 @@ func TestCollectWorkspaceFiles_FailsClosed(t *testing.T) {
 
 // Workspace transfer sites that must call collectWorkspaceFiles.
 var workspaceCollectRequiredSites = []string{
-	"startAgentViaHub", // non-git workspace bootstrap upload
-	"syncToViaHub",     // scion sync to (hub)
-	"syncFromViaHub",   // scion sync from (hub): local comparison set
+	"collectBootstrapWorkspace", // non-git workspace bootstrap upload (startAgentViaHub)
+	"syncToViaHub",              // scion sync to (hub)
+	"syncFromViaHub",            // scion sync from (hub): local comparison set
 }
 
 // Template and harness-config uploads collect a resource directory, not a

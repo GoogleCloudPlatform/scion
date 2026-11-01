@@ -1093,12 +1093,14 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 	// Check if this is a git-based project. When hub is enabled, all git-based
 	// projects use clone-based provisioning (HTTPS + GitHub token) rather than
 	// local worktrees. Inform the user and validate early.
+	projectIsGit := false
 	if !isJSONOutput() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		project, projectErr := hubCtx.Client.Projects().Get(ctx, projectID)
 		cancel()
 		if projectErr == nil && project != nil {
 			printHubWorkspaceSource(project)
+			projectIsGit = project.GitRemote != ""
 		}
 	}
 
@@ -1239,28 +1241,25 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 	var workspaceFiles []transfer.FileInfo
 	var workspaceRoot *os.Root // opened at the collected directory; uploads read through it
 	if hubCtx.ProjectPath != "" && !hubCtx.IsGlobal && !config.IsHubContext() {
-		projectDir := filepath.Dir(hubCtx.ProjectPath) // parent of .scion
-		if _, statErr := os.Stat(projectDir); statErr == nil && !util.IsGitRepoDir(projectDir) {
-			if debugMode {
-				util.Debugf("[workspace-scan] non-git project detected at %s, collecting files...", projectDir)
-			}
-			scanStart := time.Now()
-			files, err := collectWorkspaceFiles(projectDir, nil)
-			if debugMode {
-				util.Debugf("[workspace-scan] collected %d files in %s", len(files), time.Since(scanStart))
-			}
+		scanStart := time.Now()
+		projectDir, files, rootFound, err := collectBootstrapWorkspace(hubCtx.ProjectPath, projectPath)
+		if err != nil {
+			return fmt.Errorf("failed to collect workspace files: %w", err)
+		}
+		if !rootFound && !projectIsGit && !isLocalWorkstationEndpoint(hubCtx.Endpoint) {
+			statusln(noWorkspaceRootWarning)
+		}
+		if debugMode && projectDir != "" {
+			util.Debugf("[workspace-scan] non-git project at %s: collected %d files in %s", projectDir, len(files), time.Since(scanStart))
+		}
+		if len(files) > 0 {
+			workspaceRoot, err = os.OpenRoot(projectDir)
 			if err != nil {
-				return fmt.Errorf("failed to collect workspace files: %w", err)
+				return fmt.Errorf("failed to open workspace directory %s: %w", projectDir, err)
 			}
-			if len(files) > 0 {
-				workspaceRoot, err = os.OpenRoot(projectDir)
-				if err != nil {
-					return fmt.Errorf("failed to open workspace directory %s: %w", projectDir, err)
-				}
-				defer func() { _ = workspaceRoot.Close() }()
-				req.WorkspaceFiles = files
-				workspaceFiles = files
-			}
+			defer func() { _ = workspaceRoot.Close() }()
+			req.WorkspaceFiles = files
+			workspaceFiles = files
 		}
 	} else if debugMode && config.IsHubContext() {
 		util.Debugf("[workspace-scan] skipped: running in hub context (broker has workspace access)")
