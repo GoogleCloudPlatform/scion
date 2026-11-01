@@ -77,29 +77,38 @@ func (m *credentialStartManager) lastStart(t *testing.T) api.StartOptions {
 	return m.starts[len(m.starts)-1]
 }
 
-// startCredKeySources are the agent token keys the dispatch paths issue
-// credentials under: a random hub key, and a keyring signing ring with no
-// "legacy" entry (keyring mode once the old generation is retired), built
-// the way the hub builds it in keyring mode. Every start, resume and
-// restart must reach the agent with a credential from that key, never an
-// empty or default one.
+// startCredKeySources are the credential issuers the dispatch paths run
+// under: a token service over a random hub key (the generator injected, as
+// before), and a keyring-mode hub Server, built through New on the same
+// store over a signing ring with no "legacy" entry (keyring mode once the
+// old generation is retired), set as the dispatcher's generator exactly as
+// production does. Every start, resume and restart must reach the agent
+// with a credential from that key, never an empty or default one.
 var startCredKeySources = []struct {
-	name    string
-	kid     string // the key ID the credential must carry ("" for the random key)
-	service func(t *testing.T) *AgentTokenService
+	name string
+	kid  string // the key ID the credential must carry ("" for the random key)
+	// issuer returns the generator for the dispatcher and the service that
+	// validates what it issues.
+	issuer func(t *testing.T, s store.Store) (AgentTokenGenerator, *AgentTokenService)
 }{
-	{"random key", "", func(t *testing.T) *AgentTokenService {
+	{"random key", "", func(t *testing.T, _ store.Store) (AgentTokenGenerator, *AgentTokenService) {
 		svc, err := NewAgentTokenService(AgentTokenConfig{})
 		require.NoError(t, err)
-		return svc
+		return runTokenGenerator{svc: svc}, svc
 	}},
-	{"keyring without the legacy entry", "gen1", func(t *testing.T) *AgentTokenService {
+	{"keyring-mode hub without the legacy entry", "gen1", func(t *testing.T, s store.Store) (AgentTokenGenerator, *AgentTokenService) {
+		relaxKeyringReleaseCheck(t)
 		k := jkRing(t, "versioned", "gen1", []string{}, jkEntry{id: "gen1", secret: jkGen1Secret}, jkEntry{id: "gen2", secret: jkGen2Secret})
 		_, ok := k.Signing().LegacySecret()
 		require.False(t, ok)
-		svc, err := newRingAgentTokenService(k.Signing(), AgentTokenConfig{}, time.Now)
+		cfg := testServerConfig()
+		cfg.Keyring = k
+		cfg.KeyringConfigured = true
+		srv, err := newTestHubServer(t, cfg, s)
 		require.NoError(t, err)
-		return svc
+		require.Equal(t, SigningKeySourceKeyring, srv.signingKeySource(SecretKeyAgentSigningKey))
+		require.Empty(t, srv.config.SharedSigningSecret)
+		return srv, srv.agentTokenService
 	}},
 }
 
@@ -194,9 +203,9 @@ runtimes:
 					mgr.run(name, "cid-before", projectID, scionDir, "run-before")
 				}
 
-				svc := keys.service(t)
+				gen, svc := keys.issuer(t, s)
 				d := NewHTTPAgentDispatcherWithClient(s, NewHTTPRuntimeBrokerClient(), false, slog.Default())
-				d.SetTokenGenerator(runTokenGenerator{svc: svc})
+				d.SetTokenGenerator(gen)
 
 				require.NoError(t, tc.dispatch(ctx, d, a))
 
