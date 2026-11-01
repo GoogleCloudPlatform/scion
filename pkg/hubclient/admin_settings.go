@@ -24,8 +24,10 @@ import (
 )
 
 // AdminSettingsService covers the hub's administrative settings: the
-// server configuration (/api/v1/admin/server-config). Write refusals are
-// returned as *SettingsError.
+// server configuration (/api/v1/admin/server-config), the hub's defaults for
+// new projects (/api/v1/admin/project-defaults) and experiment overrides
+// (/api/v1/admin/experiments). Write refusals are returned as
+// *SettingsError.
 type AdminSettingsService interface {
 	// GetServerConfig returns the hub's server configuration.
 	GetServerConfig(ctx context.Context) (*ServerConfig, error)
@@ -43,6 +45,24 @@ type AdminSettingsService interface {
 	// GetServerConfigSchema returns the settings sections with their keys
 	// and JSON schema.
 	GetServerConfigSchema(ctx context.Context) (map[string]ServerConfigSectionSchema, error)
+
+	// GetProjectDefaults returns the hub's defaults for new projects.
+	GetProjectDefaults(ctx context.Context) (map[string]json.RawMessage, error)
+
+	// UpdateProjectDefaults saves the given project default keys; an
+	// explicit null clears a key.
+	UpdateProjectDefaults(ctx context.Context, body map[string]interface{}) (map[string]json.RawMessage, error)
+
+	// GetExperiments returns the experiment overrides and their state.
+	GetExperiments(ctx context.Context) (*AdminExperiments, error)
+
+	// UpdateExperiments sets (true or false) or clears (nil) experiment
+	// overrides, compare-and-set on expectedRevision.
+	UpdateExperiments(ctx context.Context, overrides map[string]*bool, expectedRevision int64) (*AdminExperiments, error)
+
+	// ResetExperiments clears every experiment override. confirmMalformed
+	// is required when the stored overrides are unreadable.
+	ResetExperiments(ctx context.Context, expectedRevision int64, confirmMalformed bool) (*AdminExperiments, error)
 }
 
 // ServerConfigSectionMetadata is a section's provenance in the server
@@ -145,11 +165,41 @@ type ServerConfigSectionSchema struct {
 	RestartRequired []string        `json:"restart_required,omitempty"`
 }
 
+// AdminExperiment is one experiment with its default and override.
+type AdminExperiment struct {
+	Name          string   `json:"name"`
+	Title         string   `json:"title"`
+	Description   string   `json:"description"`
+	Layers        []string `json:"layers"`
+	Stage         string   `json:"stage"`
+	Default       bool     `json:"default"`
+	Override      *bool    `json:"override"`
+	Enabled       bool     `json:"enabled"`
+	Issue         string   `json:"issue"`
+	Owner         string   `json:"owner"`
+	ReviewBy      string   `json:"review_by"`
+	ReviewOverdue bool     `json:"review_overdue"`
+}
+
+// AdminExperiments is the experiment settings document.
+type AdminExperiments struct {
+	Revision         int64             `json:"revision"`
+	Malformed        bool              `json:"malformed"`
+	Experiments      []AdminExperiment `json:"experiments"`
+	UnknownOverrides map[string]bool   `json:"unknown_overrides"`
+	UpdatedAt        *time.Time        `json:"updated_at"`
+	UpdatedBy        *string           `json:"updated_by"`
+}
+
 type adminSettingsService struct {
 	c *client
 }
 
-const serverConfigPath = "/api/v1/admin/server-config"
+const (
+	serverConfigPath    = "/api/v1/admin/server-config"
+	projectDefaultsPath = "/api/v1/admin/project-defaults"
+	adminExperimentPath = "/api/v1/admin/experiments"
+)
 
 func (s *adminSettingsService) GetServerConfig(ctx context.Context) (*ServerConfig, error) {
 	resp, err := s.c.get(ctx, serverConfigPath, nil)
@@ -204,4 +254,60 @@ func (s *adminSettingsService) GetServerConfigSchema(ctx context.Context) (map[s
 		return nil, err
 	}
 	return out.Sections, nil
+}
+
+func (s *adminSettingsService) GetProjectDefaults(ctx context.Context) (map[string]json.RawMessage, error) {
+	resp, err := s.c.get(ctx, projectDefaultsPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	out, err := decodeSettingsResponse[map[string]json.RawMessage](resp)
+	if err != nil {
+		return nil, err
+	}
+	return *out, nil
+}
+
+func (s *adminSettingsService) UpdateProjectDefaults(ctx context.Context, body map[string]interface{}) (map[string]json.RawMessage, error) {
+	resp, err := s.c.put(ctx, projectDefaultsPath, body, nil)
+	if err != nil {
+		return nil, err
+	}
+	out, err := decodeSettingsResponse[map[string]json.RawMessage](resp)
+	if err != nil {
+		return nil, err
+	}
+	return *out, nil
+}
+
+func (s *adminSettingsService) GetExperiments(ctx context.Context) (*AdminExperiments, error) {
+	resp, err := s.c.get(ctx, adminExperimentPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	return decodeSettingsResponse[AdminExperiments](resp)
+}
+
+func (s *adminSettingsService) UpdateExperiments(ctx context.Context, overrides map[string]*bool, expectedRevision int64) (*AdminExperiments, error) {
+	req := struct {
+		Overrides        map[string]*bool `json:"overrides"`
+		ExpectedRevision int64            `json:"expected_revision"`
+	}{Overrides: overrides, ExpectedRevision: expectedRevision}
+	resp, err := s.c.put(ctx, adminExperimentPath, req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return decodeSettingsResponse[AdminExperiments](resp)
+}
+
+func (s *adminSettingsService) ResetExperiments(ctx context.Context, expectedRevision int64, confirmMalformed bool) (*AdminExperiments, error) {
+	req := struct {
+		ExpectedRevision      int64 `json:"expected_revision"`
+		ConfirmResetMalformed bool  `json:"confirm_reset_malformed,omitempty"`
+	}{ExpectedRevision: expectedRevision, ConfirmResetMalformed: confirmMalformed}
+	resp, err := s.c.transport.DeleteJSON(ctx, adminExperimentPath, req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return decodeSettingsResponse[AdminExperiments](resp)
 }

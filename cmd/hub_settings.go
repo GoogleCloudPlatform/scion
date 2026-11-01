@@ -66,8 +66,8 @@ reported as a conflict instead of being overwritten.
 
 Needs a Hub admin login, or an access token on a hub boundary with the
 hub_config:read scope (get, schema) or hub_config:update scope (set,
-unset). Project defaults and experiment overrides are not part of the
-server configuration.`,
+unset). Project defaults and experiments have their own commands:
+'scion hub project-defaults' and 'scion hub experiments'.`,
 }
 
 var hubSettingsGetCmd = &cobra.Command{
@@ -578,7 +578,7 @@ func runHubSettingsSchema(ctx context.Context, svc hubclient.AdminSettingsServic
 		}
 		switch {
 		case n == projectDefaultsSection:
-			_, _ = fmt.Fprintf(out, "%s  (project defaults: not part of the server configuration)\n", n)
+			_, _ = fmt.Fprintf(out, "%s  (use 'scion hub project-defaults')\n", n)
 		case len(sec.KoanfPaths) == 0:
 			_, _ = fmt.Fprintf(out, "%s  (not in the server configuration; managed by its own command or page)\n", n)
 			continue

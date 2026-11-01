@@ -271,7 +271,7 @@ func buildSettingsWrite(cfg *hubclient.ServerConfig, ix *settingsKeyIndex, chang
 			unlisted = append(unlisted, ch.Key)
 		}
 		if section == projectDefaultsSection {
-			return nil, fmt.Errorf("%q is a project default, which is not part of the server configuration (PUT /api/v1/admin/project-defaults)", ch.Key)
+			return nil, fmt.Errorf("%q is a project default; use 'scion hub project-defaults'", ch.Key)
 		}
 		u, ok := units[schemaKey]
 		if !ok {
