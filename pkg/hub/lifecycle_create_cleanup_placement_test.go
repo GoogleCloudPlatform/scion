@@ -110,10 +110,10 @@ func TestLifecycleEvents_CreateCleanupPlacementRefusalKeptRow(t *testing.T) {
 				e := createFailed[0]
 				assert.Equal(t, tc.TransitionLaunchFailed, e.Transition, "the existing launch_failed, not a new event")
 				assert.Equal(t, createStageDispatch, e.ErrorCode, "error_code is the failed create stage")
-				// The event never names a run other than the failed create's own.
-				if e.LaunchID != "" {
-					assert.Equal(t, "run-mine", e.LaunchID)
-				}
+				// The event names the failed create's own run: the row keeps
+				// run-mine in both marked cases, so launch_id is not omitted.
+				assert.Equal(t, "run-mine", e.LaunchID)
+				assert.Equal(t, got.LaunchID, e.AsyncLaunchID, "async_launch_id is the row's launch")
 				return
 			}
 			// The row moved on: the guarded write changed nothing, so no
