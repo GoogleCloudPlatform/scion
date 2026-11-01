@@ -1171,9 +1171,7 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
     const n = r.commits_behind ?? r.new_commits?.length ?? 0;
     return html`
       <div class="git-check">
-        <div class="git-check-summary">
-          ${n} new commit${n === 1 ? '' : 's'} upstream${branch}.
-        </div>
+        <div class="git-check-summary">${n} new commit${n === 1 ? '' : 's'} upstream${branch}.</div>
         ${r.new_commits?.length
           ? html`<ul class="git-check-commits">
               ${r.new_commits.map((c) => html`<li><code>${c.hash}</code> ${c.subject}</li>`)}

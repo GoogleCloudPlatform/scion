@@ -1565,10 +1565,6 @@ export class ScionPageAdminMaintenance extends LitElement {
     void this.reconnectAfterUpdate();
   }
 
-  private updateBinaryRun(): MaintenanceRun | undefined {
-    return this.operationRun('update-binary');
-  }
-
   private operationRun(key: HubBinaryOperation): MaintenanceRun | undefined {
     return this.operations.find((op) => op.key === key)?.lastRun;
   }

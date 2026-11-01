@@ -203,7 +203,7 @@ describe('Mode toggle', () => {
     expect(root(el).querySelector('.release-panel')).not.toBeNull();
     // The release list loads lazily, once the panel is shown.
     expect(releaseRequests()).toEqual(['/api/v1/admin/maintenance/releases']);
-    expect(root(el).querySelector('.mode-note')?.textContent).toContain(
+    expect(root(el).querySelector('.mode-note')?.textContent?.replace(/\s+/g, ' ')).toContain(
       'once an update has been installed and verified'
     );
     // Only GETs: the toggle writes nothing to the hub.
