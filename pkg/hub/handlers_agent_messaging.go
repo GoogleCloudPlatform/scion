@@ -3007,6 +3007,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		// envelope rendered below tells the agent that a project visitor
 		// sent it.
 		structuredMsg.Metadata = stampVisitorSender(structuredMsg.Metadata, GetIdentityFromContext(ctx))
+		// A human sender's profile time zone travels with the message.
+		structuredMsg.Metadata = s.stampSenderTimezone(ctx, structuredMsg.Metadata, structuredMsg.Sender, structuredMsg.SenderID)
 
 		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 			s.messageLog.Error("Failed to persist message", "error", err)
@@ -3374,6 +3376,8 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 	// dispatched. Every `agentMsg := *msg` copy below aliases msg.Metadata's
 	// map, so stripping it once here covers all of them.
 	msg.Metadata = messaging.StripReservedMetadata(msg.Metadata)
+	// A human sender's profile time zone travels with every member's copy.
+	msg.Metadata = s.stampSenderTimezone(ctx, msg.Metadata, msg.Sender, msg.SenderID)
 
 	recipients, err := messages.ParseGroupRecipient(msg.Recipient)
 	if err != nil {
@@ -4116,6 +4120,8 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 	// map, so stripping it once here covers all of them. No offload here —
 	// broadcast rows have no ConversationID (design §10 P4 site 2).
 	msg.Metadata = messaging.StripReservedMetadata(msg.Metadata)
+	// A human sender's profile time zone travels with every copy.
+	msg.Metadata = s.stampSenderTimezone(ctx, msg.Metadata, msg.Sender, msg.SenderID)
 
 	for _, agent := range runningAgents {
 		agentMsg := *msg
@@ -4368,6 +4374,7 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 		// #2257 P2: strip on this copy too (U5(a) row), even though
 		// NewMention's own metadata never carries client input today.
 		mentionMsg.Metadata = messaging.StripReservedMetadata(mentionMsg.Metadata)
+		mentionMsg.Metadata = s.stampSenderTimezone(ctx, mentionMsg.Metadata, mentionMsg.Sender, mentionMsg.SenderID)
 
 		// Migration gate (design agent-reincarnate §3.7, R3 p2a-r1 review):
 		// a mentioned agent is a recipient in its own right, independent of
