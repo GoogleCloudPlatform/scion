@@ -862,26 +862,76 @@ func (p *MessageBrokerProxy) resolveUserMessageConversation(ctx context.Context,
 	if msg.Broadcasted {
 		return true
 	}
-	res := p.resolveUserConversation(ctx, projectID, msg)
-	switch {
-	case res.refusal != "":
-		messaging.WriteDenialMetrics.Inc(res.refusal)
-		if res.nonCanonical {
-			p.log.Error("DM recipient is not a canonical UUID under write-deny, message not persisted",
-				"notification_id", notificationIDFromContext(ctx))
-		} else {
-			p.log.Error("conversation resolution failed, message not persisted", "error", res.err)
-		}
-		return false
-	case res.err != nil:
-		p.log.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", res.err)
-	case res.kindsUndetermined:
-		p.log.Warn("skipping DM conversation resolution: principal kind undetermined",
-			"sender", msg.Sender, "sender_ok", res.senderOK, "recipient", msg.Recipient, "recipient_ok", res.recipientOK)
-	}
-	convResult := res.conv
+	var convResult *messaging.ConversationResult
+
+	// DEF-138 P-3: honour a pre-resolved ConversationID from the
+	// upstream handler instead of re-deriving. The handler resolved
+	// and stamped structuredMsg before publishing to the broker.
+	// Re-deriving here produced the inbound/outbound conversation
+	// split: the handler resolved a thread conversation, then the
+	// broker re-derived a DM because the agent's reply carries no
+	// ThreadID. Note: non-emptiness means "already resolved upstream"
+	// — it does NOT mean "the caller asserted this". Provenance is
+	// carried by ConversationAsserted (DEF-141).
 	if msg.ConversationID != "" {
 		storeMsg.ConversationID = msg.ConversationID
+		// Build a minimal ConversationResult for divergence logging.
+		// We do not re-fetch the conversation row — the handler
+		// already looked it up (explicit path) or created it
+		// (derivation path), and re-querying would add latency for
+		// information we have.
+		convResult = &messaging.ConversationResult{
+			ConversationID: msg.ConversationID,
+		}
+	} else if msg.ThreadID != "" {
+		var threadOpts []messaging.ThreadConversationOption
+		if p.webChatStore != nil {
+			threadOpts = append(threadOpts, messaging.WithTopicLookup(p.webChatStore))
+		}
+		if surface := messaging.ChannelToSurface(msg.Channel, p.log); surface != "native" {
+			threadOpts = append(threadOpts, messaging.WithThreadSurface(surface))
+		}
+		// A25.6 F1/F3: msg.ThreadID may carry a dm: prefix, in which case
+		// this resolves as kind=="direct"; register both principals so
+		// the conversation is discoverable via `conversation list`.
+		threadOpts = append(threadOpts, messaging.WithThreadParticipants(p.store))
+		var convErr error
+		convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID, threadOpts...)
+		if convErr != nil {
+			if p.writeDenyEnabled != nil && p.writeDenyEnabled() {
+				messaging.WriteDenialMetrics.Inc("mb.user.thread")
+				p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
+				return false
+			}
+			p.log.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+		}
+	} else if msg.SenderID != "" && msg.RecipientID != "" {
+		senderKind, sOK := messages.PrincipalKindFromAddress(msg.Sender)
+		recipientKind, rOK := messages.PrincipalKindFromAddress(msg.Recipient)
+		if sOK && rOK {
+			// Only here, where DM key derivation would fail anyway: the
+			// undetermined-kind branch below persists without a
+			// conversation, as before.
+			if !canPersistUserDM(msg.RecipientID, p.writeDenyEnabled != nil && p.writeDenyEnabled()) {
+				messaging.WriteDenialMetrics.Inc("mb.user.dm")
+				p.log.Error("DM recipient is not a canonical UUID under write-deny, message not persisted",
+					"notification_id", notificationIDFromContext(ctx))
+				return false
+			}
+			var convErr error
+			convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.store, p.log, senderKind, msg.SenderID, recipientKind, msg.RecipientID)
+			if convErr != nil {
+				if p.writeDenyEnabled != nil && p.writeDenyEnabled() {
+					messaging.WriteDenialMetrics.Inc("mb.user.dm")
+					p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
+					return false
+				}
+				p.log.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+			}
+		} else {
+			p.log.Warn("skipping DM conversation resolution: principal kind undetermined",
+				"sender", msg.Sender, "sender_ok", sOK, "recipient", msg.Recipient, "recipient_ok", rOK)
+		}
 	}
 	if convResult != nil && storeMsg.ConversationID == "" {
 		storeMsg.ConversationID = convResult.ConversationID
@@ -928,78 +978,6 @@ func (p *MessageBrokerProxy) resolveUserMessageConversation(ctx context.Context,
 			"message_id", storeMsg.ID, "conversation_id", storeMsg.ConversationID)
 	}
 	return true
-}
-
-// userConversationResolution is the outcome of resolveUserConversation.
-type userConversationResolution struct {
-	// conv is the resolved conversation; nil when there is none to resolve
-	// (no thread and no DM key). On a resolution error it is whatever the
-	// resolver returned; callers that need a usable ID check err too.
-	conv *messaging.ConversationResult
-	// refusal, when set, is the WriteDenialMetrics label of a resolution
-	// that write-deny turns into "do not store": "mb.user.thread" or
-	// "mb.user.dm".
-	refusal string
-	// nonCanonical marks a DM refusal for a non-canonical recipient ID.
-	nonCanonical bool
-	// err is the resolution error (with or without a refusal).
-	err error
-	// kindsUndetermined marks a DM whose principal kinds could not be
-	// determined, so no resolution was attempted.
-	kindsUndetermined     bool
-	senderOK, recipientOK bool
-}
-
-// resolveUserConversation resolves or creates the conversation of a
-// non-broadcast user message, with no logging, metrics or routing
-// classification: resolveUserMessageConversation adds those, once per
-// message. A pre-resolved msg.ConversationID is honoured (DEF-138 P-3). A
-// sending handler that only needs the conversation ID for its response
-// calls this directly and leaves classification to the persisting
-// subscriber.
-func (p *MessageBrokerProxy) resolveUserConversation(ctx context.Context, projectID string, msg *messages.StructuredMessage) userConversationResolution {
-	writeDeny := p.writeDenyEnabled != nil && p.writeDenyEnabled()
-	var res userConversationResolution
-	switch {
-	case msg.ConversationID != "":
-		// The handler already resolved it; we do not re-fetch the
-		// conversation row (see resolveUserMessageConversation).
-		res.conv = &messaging.ConversationResult{ConversationID: msg.ConversationID}
-	case msg.ThreadID != "":
-		var threadOpts []messaging.ThreadConversationOption
-		if p.webChatStore != nil {
-			threadOpts = append(threadOpts, messaging.WithTopicLookup(p.webChatStore))
-		}
-		if surface := messaging.ChannelToSurface(msg.Channel, p.log); surface != "native" {
-			threadOpts = append(threadOpts, messaging.WithThreadSurface(surface))
-		}
-		// A25.6 F1/F3: msg.ThreadID may carry a dm: prefix, in which case
-		// this resolves as kind=="direct"; register both principals so
-		// the conversation is discoverable via `conversation list`.
-		threadOpts = append(threadOpts, messaging.WithThreadParticipants(p.store))
-		res.conv, res.err = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID, threadOpts...)
-		if res.err != nil && writeDeny {
-			res.refusal = "mb.user.thread"
-		}
-	case msg.SenderID != "" && msg.RecipientID != "":
-		senderKind, sOK := messages.PrincipalKindFromAddress(msg.Sender)
-		recipientKind, rOK := messages.PrincipalKindFromAddress(msg.Recipient)
-		if !sOK || !rOK {
-			res.kindsUndetermined, res.senderOK, res.recipientOK = true, sOK, rOK
-			return res
-		}
-		// Only here, where DM key derivation would fail anyway: the
-		// undetermined-kind branch above persists without a conversation.
-		if !canPersistUserDM(msg.RecipientID, writeDeny) {
-			res.refusal, res.nonCanonical = "mb.user.dm", true
-			return res
-		}
-		res.conv, res.err = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.store, p.log, senderKind, msg.SenderID, recipientKind, msg.RecipientID)
-		if res.err != nil && writeDeny {
-			res.refusal = "mb.user.dm"
-		}
-	}
-	return res
 }
 
 // subscribeGlobalBroadcast creates a broker subscription for global broadcasts.
