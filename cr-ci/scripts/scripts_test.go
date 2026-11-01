@@ -409,7 +409,7 @@ func TestIdempotentSecondRun(t *testing.T) {
 	}{
 		{"bootstrap-gcp.sh", nil, []string{"add-iam-policy-binding"}},
 		{"build-runner-image.sh", []string{"--tag", "golden"}, nil},
-		{"deploy-job.sh", []string{"--tag", "golden"}, []string{"run jobs update cr-gh-runner-8c32g", "--clear-volumes --clear-volume-mounts --add-volume=name=scratch,type=ephemeral-disk,size=10Gi"}},
+		{"deploy-job.sh", []string{"--tag", "golden"}, []string{"run jobs update cr-gh-runner-8c32g", "--clear-volumes --clear-volume-mounts --add-volume=name=scratch,type=ephemeral-disk,size=10Gi --add-volume-mount=volume=scratch,mount-path=/home/runner"}},
 		{"deploy-mediator.sh", []string{"--tag", "golden"}, []string{"run deploy cr-runner-mediator"}},
 		{"deploy-scheduler.sh", nil, []string{"scheduler jobs update http cr-runner-reconciler"}},
 	} {
@@ -937,8 +937,8 @@ func TestDefaultTag(t *testing.T) {
 		t.Errorf("mediator default tag missing:\n%s", r.stdout)
 	}
 
-	// Upgrade order: deploy-mediator warns when the job runs another runner
-	// image than the current runner/ tree (the runner must go first).
+	// Upgrade order: deploy-mediator notes when the job runs another runner image
+	// than the current runner/ tree (the mediator goes first, the job next).
 	e.state("exists", allExisting...)
 	img := "us-central1-docker.pkg.dev/example-project/cr-runners/gh-runner:"
 	e.extra = []string{"STUB_JOB_IMAGE=" + img + "git-" + tree[:12]}

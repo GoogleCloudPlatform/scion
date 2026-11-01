@@ -1019,12 +1019,14 @@ func applyProjectDefaults(ac *store.AgentAppliedConfig, project *store.Project) 
 		ac.InlineConfig = &api.ScionConfig{}
 	}
 
-	// Apply limit defaults (only if not already set)
-	if ac.InlineConfig.MaxTurns == 0 && settings.DefaultMaxTurns > 0 {
-		ac.InlineConfig.MaxTurns = settings.DefaultMaxTurns
+	// Apply limit defaults (only if not already set). A count limit is
+	// unset only when nil: an explicit 0 ("no limit", ptone/scion#5605) is
+	// the request's own value and is kept.
+	if ac.InlineConfig.MaxTurns == nil && settings.DefaultMaxTurns > 0 {
+		ac.InlineConfig.MaxTurns = api.IntPtr(settings.DefaultMaxTurns)
 	}
-	if ac.InlineConfig.MaxModelCalls == 0 && settings.DefaultMaxModelCalls > 0 {
-		ac.InlineConfig.MaxModelCalls = settings.DefaultMaxModelCalls
+	if ac.InlineConfig.MaxModelCalls == nil && settings.DefaultMaxModelCalls > 0 {
+		ac.InlineConfig.MaxModelCalls = api.IntPtr(settings.DefaultMaxModelCalls)
 	}
 	if ac.InlineConfig.MaxDuration == "" && settings.DefaultMaxDuration != "" {
 		ac.InlineConfig.MaxDuration = settings.DefaultMaxDuration

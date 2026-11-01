@@ -537,6 +537,122 @@ func TestRootLevelStaticFile_NonexistentFallsToSPA(t *testing.T) {
 	}
 }
 
+// newRootStaticWebServer returns a web server whose assets dir holds every
+// rootStaticFiles entry plus robots.txt and index.html, two root-level
+// files that are not on the list.
+func newRootStaticWebServer(t *testing.T, devAuth bool) *WebServer {
+	t.Helper()
+	dir := t.TempDir()
+	for p := range rootStaticFiles {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, strings.TrimPrefix(p, "/")), []byte("data"), 0o644))
+	}
+	for _, name := range []string{"robots.txt", "index.html"} {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte("data"), 0o644))
+	}
+	if devAuth {
+		return newDevAuthWebServer(t, func(cfg *WebServerConfig) { cfg.AssetsDir = dir })
+	}
+	return newTestWebServer(t, WebServerConfig{AssetsDir: dir})
+}
+
+// rootPathsNeedingSession are root-level request targets (as sent on the
+// wire) that are not rootStaticFiles entries: a file on disk but not on the
+// list, dotted names with no file, and backslash forms.
+var rootPathsNeedingSession = []string{
+	"/robots.txt",
+	"/index.html",
+	"/anything.txt",
+	"/nonexistent.png",
+	"/%5Cevil.example",
+	"/%5C%5Cevil.example",
+	"/%5Cfavicon.ico",
+	"/favicon.ico%5C",
+}
+
+func TestRootLevelStaticFile_ListedFilesServedWithoutSession(t *testing.T) {
+	handler := newRootStaticWebServer(t, false).Handler()
+	for p := range rootStaticFiles {
+		for _, accept := range []string{"", "text/html"} {
+			req := httptest.NewRequest(http.MethodGet, p, nil)
+			req.Header.Set("Accept", accept)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusOK, rec.Code, "GET %s (Accept %q)", p, accept)
+			assert.Equal(t, "data", rec.Body.String(), "GET %s (Accept %q)", p, accept)
+		}
+	}
+}
+
+func TestRootLevelStaticFile_OtherRootPathsRequireSession(t *testing.T) {
+	handler := newRootStaticWebServer(t, false).Handler()
+	for _, target := range rootPathsNeedingSession {
+		t.Run(target, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, target, nil)
+			req.Header.Set("Accept", "text/html")
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusFound, rec.Code, "browser GET %s", target)
+			assert.NotEmpty(t, rec.Header().Get("Location"), "browser GET %s", target)
+			assert.NotContains(t, rec.Body.String(), "scion-app", "browser GET %s", target)
+
+			req = httptest.NewRequest(http.MethodGet, target, nil)
+			rec = httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusUnauthorized, rec.Code, "GET %s", target)
+			assert.NotEqual(t, "data", rec.Body.String(), "GET %s", target)
+		})
+	}
+}
+
+func TestRootLevelStaticFile_SignedInUnaffected(t *testing.T) {
+	ws := newRootStaticWebServer(t, true)
+	handler := devSignedIn(t, ws)
+	get := func(target string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		req.Header.Set("Accept", "text/html")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Listed files and unlisted files on disk are served as files.
+	for p := range rootStaticFiles {
+		rec := get(p)
+		assert.Equal(t, http.StatusOK, rec.Code, "GET %s", p)
+		assert.Equal(t, "data", rec.Body.String(), "GET %s", p)
+	}
+	rec := get("/robots.txt")
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "data", rec.Body.String())
+
+	// Other root-level paths get the app shell.
+	for _, target := range []string{"/anything.txt", "/nonexistent.png", "/%5Cevil.example"} {
+		rec := get(target)
+		assert.Equal(t, http.StatusOK, rec.Code, "GET %s", target)
+		assert.Contains(t, rec.Body.String(), "scion-app", "GET %s", target)
+	}
+}
+
+// TestRootLevelStaticFile_ListMatchesPublicDir checks that rootStaticFiles
+// equals the set of files in web/public/ and holds every appIconPaths entry.
+func TestRootLevelStaticFile_ListMatchesPublicDir(t *testing.T) {
+	entries, err := os.ReadDir("../../web/public")
+	require.NoError(t, err)
+	want := map[string]bool{}
+	for _, e := range entries {
+		// Dot names (such as .gitkeep) are never served (hasDotSegment).
+		if strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		require.False(t, e.IsDir(), "web/public/%s: rootStaticFiles lists root-level files only", e.Name())
+		want["/"+e.Name()] = true
+	}
+	assert.Equal(t, want, rootStaticFiles)
+	for p := range appIconPaths {
+		assert.True(t, rootStaticFiles[p], "%s in appIconPaths but not in rootStaticFiles", p)
+	}
+}
+
 func TestSPACatchAll_EmbeddedDirectoryDoesNotIntercept(t *testing.T) {
 	// Ensure that an embedded directory matching part of a client-side route
 	// does not cause tryServeStaticFile to intercept the request. The SPA
@@ -1827,8 +1943,27 @@ func TestIsPublicRoute(t *testing.T) {
 		{"/auth/debug", true},
 		{"/login", true},
 		{"/favicon.ico", true},
+		{"/favicon.svg", true},
+		{"/apple-touch-icon.png", true},
+		{"/icon-192.png", true},
+		{"/icon-512.png", true},
+		{"/icon-maskable-512.png", true},
+		{"/manifest.webmanifest", true},
 		{"/scion-notification-icon.png", true},
-		{"/robots.txt", true},
+		// Root-level paths not in rootStaticFiles take the session check,
+		// whether or not they look like a file name.
+		{"/robots.txt", false},
+		{"/anything.txt", false},
+		{"/index.html", false},
+		{"/favicon.ico/", false},
+		{"/FAVICON.ICO", false},
+		{"/favicon.ico.", false},
+		// A backslash never forms a static path.
+		{"/\\evil.example", false},
+		{"/\\\\evil.example", false},
+		{"/\\favicon.ico", false},
+		{"/favicon.ico\\", false},
+		{"/%5Cevil.example", false},
 		{"/api/v1/projects", true},
 		{"/api/v1/agents", true},
 		{"/api/v1/auth/login", true},

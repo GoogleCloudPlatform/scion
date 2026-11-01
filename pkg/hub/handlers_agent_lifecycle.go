@@ -703,7 +703,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		// success.
 		if deleteStopNoop(agent) {
 			respAgent := *agent
-			respAgent.AppliedConfig, respAgent.PendingConfig = redactAgentConfigsForResponse(agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
+			respAgent.AppliedConfig, respAgent.PendingConfig = s.redactAgentConfigsForResponse(agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
 			respAgent.Deletion = deletionViewForCaller(agent, time.Now(), callerSeesDeletionDetail(ctx))
 			writeJSON(w, http.StatusOK, &respAgent)
 			return
@@ -952,7 +952,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			}
 		}
 		respAgent := *agent
-		respAgent.AppliedConfig, respAgent.PendingConfig = redactAgentConfigsForResponse(agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
+		respAgent.AppliedConfig, respAgent.PendingConfig = s.redactAgentConfigsForResponse(agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
 		writeJSON(w, http.StatusOK, agentLifecycleResponse{Agent: &respAgent, Warnings: dispatchWarns.Warnings()})
 		return
 	case api.AgentActionRestart:
@@ -1216,6 +1216,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		if relayIdentityMappingError(w, dispatchErr) {
 			return
 		}
+		if s.relayProjectPathRefusal(ctx, w, agent, dispatchErr) {
+			return
+		}
 		if relayBrokerRefusal(w, dispatchErr) {
 			return
 		}
@@ -1290,7 +1293,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				return
 			}
 			respAgent := *current
-			respAgent.AppliedConfig, respAgent.PendingConfig = redactAgentConfigsForResponse(current.AppliedConfig, current.PendingConfig, canViewAgentEnv(ctx, s, current))
+			respAgent.AppliedConfig, respAgent.PendingConfig = s.redactAgentConfigsForResponse(current.AppliedConfig, current.PendingConfig, canViewAgentEnv(ctx, s, current))
 			respAgent.Deletion = deletionViewForCaller(current, time.Now(), callerSeesDeletionDetail(ctx))
 			writeJSON(w, http.StatusOK, agentLifecycleResponse{Agent: &respAgent, Warnings: dispatchWarns.Warnings()})
 			return
@@ -1362,7 +1365,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	s.events.PublishAgentStatus(ctx, agent)
 
 	respAgent := *agent
-	respAgent.AppliedConfig, respAgent.PendingConfig = redactAgentConfigsForResponse(agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
+	respAgent.AppliedConfig, respAgent.PendingConfig = s.redactAgentConfigsForResponse(agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
 	respAgent.Deletion = deletionViewForCaller(agent, time.Now(), callerSeesDeletionDetail(ctx))
 	writeJSON(w, http.StatusOK, agentLifecycleResponse{Agent: &respAgent, Warnings: dispatchWarns.Warnings()})
 }
@@ -1431,7 +1434,7 @@ func (s *Server) queueOfflineStop(ctx context.Context, w http.ResponseWriter, ag
 	s.wakeBrokerDrain(ctx, agent.RuntimeBrokerID)
 
 	respAgent := *agent
-	respAgent.AppliedConfig, respAgent.PendingConfig = redactAgentConfigsForResponse(agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
+	respAgent.AppliedConfig, respAgent.PendingConfig = s.redactAgentConfigsForResponse(agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
 	writeJSON(w, http.StatusAccepted, agentLifecycleResponse{Agent: &respAgent, Warnings: []string{offlineStopMessage}})
 }
 

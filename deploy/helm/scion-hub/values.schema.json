@@ -609,7 +609,7 @@
             },
             "pvName": {
               "type": "string",
-              "description": "PersistentVolumeClaim agent pods mount the share through. Required when enabled. Rendered as shares[0].pv_name."
+              "description": "Optional PersistentVolumeClaim agent pods mount the share through (rendered as shares[0].pv_name). Empty: agent pods mount the share inline, one NFS volume per directory, with no mount options."
             },
             "subpathRoot": {
               "type": "string",

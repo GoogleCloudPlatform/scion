@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // Broker-level tests for ptone/scion#2550 P2: a runtime whose handle is the
@@ -286,7 +287,7 @@ func TestCreateAgent_RunConflictIs409(t *testing.T) {
 }
 
 func TestClassifyStartError_RunConflict(t *testing.T) {
-	code, _, msg := classifyStartError(context.Background(), errIdentityRunConflict, "", "")
+	code, _, msg := classifyStartError(context.Background(), errIdentityRunConflict, "", "", store.LaunchKindCreate)
 	if code != "name_in_use" {
 		t.Fatalf("code = %q, want name_in_use", code)
 	}
@@ -479,7 +480,7 @@ func TestStartPaths_PreCleanRunMismatchIs409NoLeak(t *testing.T) {
 		})
 	}
 	t.Run("async launch", func(t *testing.T) {
-		code, _, msg := classifyStartError(context.Background(), errIdentityPreCleanMismatch, "", "")
+		code, _, msg := classifyStartError(context.Background(), errIdentityPreCleanMismatch, "", "", store.LaunchKindCreate)
 		if code != "name_in_use" {
 			t.Fatalf("code = %q, want name_in_use", code)
 		}

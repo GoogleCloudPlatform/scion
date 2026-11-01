@@ -433,6 +433,7 @@ server:
   workspace_storage:
     backend: nfs
     nfs:
+      mount_root: /mnt/nfs
       %s: %d
       shares:
         - id: ws1
@@ -720,15 +721,30 @@ kubernetes:
 	assert.Empty(t, errors, "an empty priorityClassName means unset and must pass validation")
 }
 
-func TestValidateAgentConfig_InvalidMaxTurns(t *testing.T) {
-	data := []byte(`
-schema_version: "1"
-harness_config: gemini
-max_turns: 0
-`)
-	errors, err := ValidateAgentConfig(data, "1")
-	require.NoError(t, err)
-	assert.NotEmpty(t, errors, "max_turns=0 should produce validation error (minimum is 1)")
+// TestValidateAgentConfig_CountLimits: a count limit of 0 is valid and
+// means no limit (ptone/scion#5605); a negative one is invalid.
+func TestValidateAgentConfig_CountLimits(t *testing.T) {
+	for _, tc := range []struct {
+		yaml  string
+		valid bool
+	}{
+		{yaml: "max_turns: 0", valid: true},
+		{yaml: "max_model_calls: 0", valid: true},
+		{yaml: "max_turns: 5", valid: true},
+		{yaml: "max_turns: -1", valid: false},
+		{yaml: "max_model_calls: -1", valid: false},
+	} {
+		t.Run(tc.yaml, func(t *testing.T) {
+			data := []byte("schema_version: \"1\"\nharness_config: gemini\n" + tc.yaml + "\n")
+			errors, err := ValidateAgentConfig(data, "1")
+			require.NoError(t, err)
+			if tc.valid {
+				assert.Empty(t, errors)
+			} else {
+				assert.NotEmpty(t, errors)
+			}
+		})
+	}
 }
 
 // --- Schema retrieval tests ---

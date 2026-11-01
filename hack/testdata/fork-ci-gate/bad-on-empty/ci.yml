@@ -1,0 +1,8 @@
+on:
+  # Only a comment and a blank line: no entry.
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok

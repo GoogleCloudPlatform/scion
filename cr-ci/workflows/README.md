@@ -8,7 +8,7 @@ is P6, and the routing in `.github/workflows` is P7 (see "Routing in
 
 | File | What it is |
 | :--- | :--- |
-| [`cr-runner-poc.yml`](cr-runner-poc.yml) | PoC workflow (push to a throwaway `cr-ci-poc-*` branch, or `workflow_dispatch`): runs `golangci-lint` on a cr-ci runner without the `-c=1` throttle, sampling memory and `/scratch` use |
+| [`cr-runner-poc.yml`](cr-runner-poc.yml) | PoC workflow (push to a throwaway `cr-ci-poc-*` branch, or `workflow_dispatch`): runs `golangci-lint` on a cr-ci runner without the `-c=1` throttle, sampling memory and disk use |
 | [`templates_test.go`](templates_test.go) | Static checks (stdlib only) on these templates and on `scripts/github-app-manifest.json` |
 
 ## Running the PoC: a push-triggered throwaway branch
@@ -86,29 +86,36 @@ job no longer has those since #4061 (`hack/golangci-lint-split.sh`).
 **Only host-process jobs may be routed.** Cloud Run cannot run Docker, so
 jobs with `services:` (the Postgres jobs) or Docker steps must stay on
 `ubuntu-latest` ([architecture: constraints](../docs/architecture.md#constraints)).
-v1 routes `lint` only.
+For every job whose `runs-on` reads the variable (`grep -n SCION_LARGE_RUNNER
+.github/workflows/*.yml` lists them), `hack/check-runner-routing.sh` fails on
+`services:`, `container:`, a `uses: docker://` step and a docker command in a step
+(`docker run`, `build`, `buildx`, `compose`, `pull`, `push`, `exec`, `login`,
+`create`, `start`, or `docker-compose`). It matches commands by pattern, so a step
+that reaches Docker some other way (a script it calls, a tool that uses the Docker
+API) is not caught: review routed jobs for that.
 
 ### Things P6 must look at before P7
 
 - **golangci-lint binary.** `ci.yml`'s lint job runs golangci-lint v2.15.0
   built with the go-tools#1839 patch by `cr-ci/runner/golangci-lint/build.sh`:
   it restores the binary from its own Actions cache entry (key
-  `golangci-lint-patched-<os>-<arch>-go<version>-<hash of cr-ci/runner/golangci-lint/**>`,
+  `golangci-lint-patched-<runner.environment>-<os>-<arch>-go<version>-<hash of cr-ci/runner/golangci-lint/**>`,
   path `$RUNNER_TEMP/golangci-lint-patched`), or builds it, and puts it first on
   `PATH`; `golangci-lint-action` then only restores the analysis cache
   (`install-mode: none`). A routed `lint` job does the same on the cr-ci runner
-  (`RUNNER_TEMP` is `/home/runner/work/_temp` on both runner types, so the entry
-  is shared) and uses that binary, not the image's. The image ships the same
+  (`RUNNER_TEMP` is `/home/runner/work/_temp` on both runner types, but the key
+  carries `runner.environment`, so each runner type has its own entry; see "Cache
+  scope") and uses that binary, not the image's. The image ships the same
   build (`runner/Dockerfile`, `golangci-lint` stage) for the PoC template and
   anything else that calls `golangci-lint` directly. One set of pins
   (`cr-ci/runner/golangci-lint/VERSIONS`) serves all of them.
-- **Caches under `$HOME` go to `/scratch`, in ubuntu-latest's layout.** See
-  "Cache sharing" below. The runner entrypoint sets this up; the first step of
+- **Caches under `$HOME` are on the runner's disk, in ubuntu-latest's layout.**
+  The disk is mounted at HOME. See "Cache sharing" below. The runner entrypoint sets this up; the first step of
   both templates only checks it.
 
 ### Tuning (P6b results)
 
-Measured on 2026-10-22 in us-west2 (8 vCPU / 32 GiB, 23 GiB `/scratch`, warm Go
+Measured on 2026-10-22 in us-west2 (8 vCPU / 32 GiB, 23 GiB ephemeral disk, then mounted at `/scratch`, warm Go
 and golangci-lint caches restored as in CI; `tuning-results.md` in the cr-ci
 exchange bucket, `p6/`). Five runs of the same lint:
 
@@ -122,7 +129,7 @@ exchange bucket, `p6/`). Five runs of the same lint:
   with the patched golangci-lint.)
 - **Memory:** 25.5 GB peak sampled, 6.6 GB still available; GOMEMLIMIT is what
   bounds pkg/hub's compile. No guard trip. GOGC above 100 or `off` was not tested.
-- **Disk:** `/scratch` peaked at 15.8-16.5 GB. An on-disk build cache needs at
+- **Disk:** the ephemeral disk (then at `/scratch`) peaked at 15.8-16.5 GB. An on-disk build cache needs at
   least 20 GiB of `RUNNER_DISK_GI`; the RAM build cache is not needed then.
 - **CPU and I/O:** iowait about 0 and system time 5-10 % under gVisor; 8 of 8
   cores busy while 8 compiles run. What remains is a single-threaded analysis
@@ -154,52 +161,146 @@ golangci-lint-action) has to agree with ubuntu-latest on three things:
    ubuntu-latest the workspace is `/home/runner/work/scion/scion`, so the Go
    build cache is stored as `../../../.cache/go-build`. The cr-ci runner
    must therefore use the same work folder, `/home/runner/work`, or the
-   names differ. And because the kernel resolves `..` **physically** while
-   the work folder is a link to `/scratch/_work`, `../../../.cache` lands in
-   `/scratch/.cache`. So `/scratch` must mirror `$HOME`:
-   `~/.cache -> /scratch/.cache` and `~/go -> /scratch/go`. With
-   `/scratch/cache`, entries would extract next to Go's cache, the restore
-   would report a hit, and the lint would still run cold.
+   names differ. The kernel resolves `..` **physically**, and tar replaces a
+   symlink to a directory with a real directory when it extracts a directory
+   member (a whole-directory cache such as `~/.npm` stores `../../../.npm/`).
+   So the work folder and the cache homes must be real directories at
+   ubuntu-latest's paths, not links: the cr-ci runner mounts its disk at HOME
+   for that.
 
 On the cr-ci runner this is set up before any step runs, as agreed in
 `gs://scion-xproject-exchange/cr-ci/cache-parity.md`:
 
 - the image: `HOME=/home/runner`, uid 1001, zstd;
 - the mediator: `work_folder` `/home/runner/work` in `generate-jitconfig`;
-- the entrypoint: `/home/runner/work -> /scratch/_work`,
-  `~/.cache -> /scratch/.cache` and `~/go -> /scratch/go` (the parents, so
-  tar never replaces a link), and `GOCACHE`, `GOMODCACHE` and `GOPATH` under
-  `$HOME`.
+- the runner job: its ephemeral disk mounted at HOME (`/home/runner`);
+- the entrypoint: `/home/runner/work`, `~/.cache`, `~/go` and `~/.npm` as
+  real directories on that disk (no links, so physical paths are the logical
+  ones), and `GOCACHE`, `GOMODCACHE` and `GOPATH` under `$HOME`.
 
 Parity therefore holds for any routed workflow. The templates' first step,
 "Check cr-ci cache parity", creates nothing: it fails the job if `HOME`, the
-links, the work folder, `go env GOCACHE`/`GOMODCACHE`, `GITHUB_WORKSPACE` or
+real directories (on the disk, not the root filesystem), the work folder, `go env GOCACHE`/`GOMODCACHE`, `GITHUB_WORKSPACE` or
 zstd are wrong.
 
 | | Result |
 | :--- | :--- |
-| **Parity holds** (the check passes) | **Shared.** A routed job restores the entries ubuntu-latest saved, and the entries it saves on `main` restore unchanged on a fallback ubuntu-latest run. One set of entries; quota unchanged. |
+| **Parity holds** (the check passes) | **Shared key and paths.** A routed job restores the entries ubuntu-latest saved, and the entries it saves on `main` restore unchanged on a fallback ubuntu-latest run. One set of entries; quota unchanged. The Go build cache's *contents* still differ by runner type (cgo; see "Cache scope"), so a restore is warm only for the type that saved it. |
 | Parity broken (the check fails) | **Separate.** Every restore misses or extracts beside the cache (a cold lint; ci.yml's comments cite 818-1063 s cold against 584-776 s warm, and the warm lint took 1310-1802 s on ubuntu-latest in October 2026, see "Tuning"). Routed `main` runs save a second set (about 4.2 GB of Go build cache plus module zips and the golangci-lint analysis cache) inside the repository's 10 GB Actions cache quota, which raises eviction pressure on every other workload. |
 
-**`GITHUB_WORKSPACE` stays `/home/runner/work/scion/scion`.** In actions/runner
-v2.338.0 the work directory is `Path.GetFullPath(Path.Combine(root,
-WorkFolder))`, and the workspace paths are `Path.Combine` of it.
-`GetFullPath` is lexical and does not resolve symlinks (read from the source
-by cr-ci-dev-2). If it ever canonicalised to `/scratch/_work/...`, the
-archive names would differ again. That is unverified at runtime until P6;
-the parity check fails the job in that case, and the PoC's "Runner facts"
-step prints both the reported and the physical path.
+**Cache scope (ptone/scion#5979).** Routed jobs on pushes to `main` save caches in
+`main`'s scope, and every later run on either runner type restores them. Decision:
+- **The patched golangci-lint binary is scoped by runner type.** Its key includes
+  `runner.environment` (`github-hosted` or `self-hosted`): a job executes the binary
+  it restores, so each runner type only runs binaries it built itself. Only the type
+  that runs lint on main pushes saves an entry: on a fork with `SCION_LARGE_RUNNER`
+  set that is `self-hosted`, so a hosted lint run there (a fork pull request) builds
+  the binary each time (about 50 s); upstream, with the variable unset, only
+  `github-hosted` exists. Harmless either way.
+- **The Go build and module caches and golangci-lint's analysis cache keep one key
+  for both runner types, but the build cache is warm only for the type that saved
+  it.** The cr-ci image has no
+  C compiler, so Go there defaults to `CGO_ENABLED=0`, while ubuntu-latest builds
+  with cgo on. With cgo off, `net` and `os/user` compile other files, and every
+  package that imports them, which is nearly all of scion and most dependencies,
+  gets another build-cache key. Path parity holds; content parity does not, beyond
+  the standard library and dependencies below `net`. The analysis cache splits the
+  same way; module zips do not.
+  - On a fork with the variable set, the routed main push is the only writer, so
+    a workload's cache holds cgo-off entries: warm for cr-ci, effectively cold for
+    a hosted run of the same workload (a fork pull request, a run with the variable
+    unset, or a job moved back after a problem). Accepted: same-repo pull requests,
+    which run on cr-ci, are nearly all of the fork's.
+  - The first routed main push of a workload restores the hosted (cgo-on) cache,
+    misses on almost all of it, and `save-go-cache` then deletes every entry it did
+    not use ("trim"), so from that day on the key holds a cgo-off cache.
+  - Follow-up for the owner (option (b)): set `CGO_ENABLED: "0"` for the routed Go
+    jobs on both runner types, which restores true parity. Release builds are
+    already cgo-off, but it changes what hosted runs test (the pure-Go resolver,
+    `os/user`), so it needs the owner's decision. Adding gcc to the image is not an
+    option: it widens what a job can do there.
+- **Who may write these caches.** Only pushes to `main` save them; pull requests
+  restore but never save, and fork pull requests never run on cr-ci. Module zips are
+  verified against `go.sum`; build-cache and analysis entries are not. Routing adds
+  the cr-ci execution environment (runner image, mediator, GCP project) to the
+  trusted writers of `main`'s caches, whose build-cache objects can be linked into
+  binaries a hosted run executes. That is acceptable: those are trusted main-push
+  jobs, cr-ci already gates merges through the jobs it runs, and per the cgo split
+  above little is reused across runner types in practice.
+
+**`GITHUB_WORKSPACE` stays `/home/runner/work/scion/scion`**, and with the work
+folder a real directory it is also the physical path, so `pwd -P`, an action's
+`process.cwd()` and `GITHUB_WORKSPACE` agree. (Runner images before cr-ci FIXUP-5
+linked the work folder into `/scratch`; actions/setup-node's npm cache then failed,
+because its lock-file hashing drops files whose path, from `process.cwd()`, is not
+under `GITHUB_WORKSPACE`.) The PoC's "Runner facts" step prints both the reported
+and the physical path.
 
 **P6 checkpoints for cache sharing** (runtime assumptions no step proves):
 
 - `GITHUB_WORKSPACE` is reported lexically (`/home/runner/work/...`). The
   parity step fails the job if it is not.
-- When cr-ci *saves*, actions/cache (through `@actions/glob`) archives the
-  logical `$HOME/...` paths, not their `/scratch/...` realpaths. The source
-  says so, but nothing checks it at run time. Confirm it once: let a routed
-  `main` run on cr-ci save the lint cache under a fresh key, then restore
-  that key on ubuntu-latest and check that the entries land in
-  `/home/runner/.cache/go-build`.
+- When cr-ci *saves* and ubuntu-latest restores, the entries land in
+  `/home/runner/.cache/go-build`. With real directories the logical and physical
+  paths are the same, so this follows; confirm it once after the layout switch.
+
+## Fork CI gate
+
+Forks of `GoogleCloudPlatform/scion` (such as `ptone/scion`) are for staging
+pull requests, so a fork does not run CI on `push` or `schedule`. Every job in
+a workflow triggered by a branch push or a schedule starts its job-level `if:`
+with the same gate:
+
+```yaml
+if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
+```
+
+A job that already had an `if:` keeps it, ANDed after the gate:
+`${{ (<gate>) && (<old condition>) }}`. Upstream, the gate is always true, so
+push and schedule runs are unchanged. `pull_request`, `pull_request_target`
+and `workflow_dispatch` runs are unchanged everywhere, the fork included. On
+a fork push or schedule every job is skipped, including the `always()`
+summary jobs, so nothing turns red and no check is left pending. Jobs that
+already carry the stricter upstream-only guard
+(`if: github.repository == 'GoogleCloudPlatform/scion'`, in
+`build-nightly.yml` and `build-preview-weekly.yml`) keep it as it is. No
+variable or other fork-side setting is involved.
+
+As a result, the routing expression's `push` branch routes nothing for now.
+Upstream, `SCION_LARGE_RUNNER` is unset, and on a fork the push run is
+skipped. On a fork, cr-ci serves only same-repository pull requests.
+
+To run push CI on a fork anyway, start the workflow with `workflow_dispatch`
+where it has that trigger (`docs.yml`, `full-test-suite.yml`, `web-e2e.yml`,
+`build-nightly.yml`, `build-preview-weekly.yml`, `race-detection.yml`), or
+edit the gate in that fork's copy of the workflow.
+
+`hack/check-fork-ci-gate.sh` (the `fork-ci-gate-check` job in `ci.yml`, with
+fixtures in `hack/testdata/fork-ci-gate/`) fails when such a job lacks the
+gate. It also fails when the gate is weakened, for example by an `||` outside the
+job's own condition. It skips push triggers that filter only tags. It has no
+YAML parser and reads only the 2-space block style used here. In every
+workflow except `build-release.yml` (skipped by name, layout rules included),
+it reports `unrecognised layout` (exit 1) for:
+
+- an inline `on:` value that is not a bare event or a one-line list of bare
+  events (for example a flow map, a quoted event, or a list over several lines);
+- any line under a block `on:` that is not one of: a 2-space `- event` entry,
+  a 2-space `event:` key, that key's settings indented by 4 or more spaces, a
+  comment, or a blank line. This covers entries at column 0, a list or scalar
+  on the next line, and 4-space entries;
+- an `on:` with no entry (a block `on:` holding only comments or blank lines,
+  or `on: []`);
+- no top-level `on:` or `jobs:` key it recognises (for example a quoted
+  `"jobs":` or `jobs :`);
+- an inline `jobs:` value, a job key that is not an unquoted 2-space key, or a
+  `jobs:` with no job.
+
+Keep each `if:` on one line. A block-scalar `if:` is reported, and a trailing
+comment with no quotes in it is ignored.
+
+`build-release.yml` (tag pushes) is not gated yet; its jobs carry the
+upstream-only repository guard instead.
 
 ## PoC success criteria
 
@@ -228,7 +329,7 @@ mediator log and the execution log
   files). P6 measured a compile peak near 21 GB, and 27.9 GB with the build
   cache in RAM, of 32 GiB.
 - Disk: the caches (8-9.5 GB of Go build cache during the lint, plus the
-  workspace, modules and temp dirs; about 15-20 GiB in total) fit on `/scratch`.
+  workspace, modules and temp dirs; about 15-20 GiB in total) fit on the disk.
   That needs `RUNNER_DISK_GI` of at least 20 after the per-instance quota increase
   (P6b: peak 16.5 GB on 23 GiB, the us-west2 limit;
   [gcp-setup, "Quotas"](../docs/gcp-setup.md#9-quotas)), or
@@ -237,7 +338,7 @@ mediator log and the execution log
 - The runner deregisters itself, and the execution ends (and stops billing)
   when the job ends.
 - The runner checkpoints in [runner/README.md](../runner/README.md#runtime-contract)
-  hold: the `/scratch` mount check matches, and the claim succeeds on
+  hold: the volume mount check (HOME) matches, and the claim succeeds on
   attempt 1.
 
 ## Static checks
@@ -251,10 +352,11 @@ mediator log and the execution log
 - The PoC triggers on `push` to `cr-ci-poc-*` branches and on
   `workflow_dispatch`, and runs on the label alone. Its default label (input
   and push fallback) equals `RUNNER_LABEL`'s default in `config.example.env`.
-  It contains no `-c=1` throttle, samples memory and `/scratch` during the lint,
-  and reports `df -h /scratch`.
+  It contains no `-c=1` throttle, samples memory and the disk at HOME during the
+  lint, and reports `df -h /home/runner`.
 - The PoC template starts with the self-hosted-only, verify-only cache parity
-  step (`HOME`, the work folder and cache links, `go env` paths,
+  step (`HOME`, the work folder and caches as real directories on the disk,
+  `go env` paths,
   `GITHUB_WORKSPACE`, zstd). It creates no links and writes no `GITHUB_ENV`.
 - The PoC judges warmth by the contents of `$(go env GOCACHE)`.
 - Every `uses:` is pinned to a full commit SHA. No tabs.

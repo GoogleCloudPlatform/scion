@@ -53,20 +53,23 @@ type ErrorResponse struct {
 
 // Error codes matching the Runtime Broker API specification.
 const (
-	ErrCodeInvalidRequest     = "invalid_request"
-	ErrCodeValidationError    = "validation_error"
-	ErrCodeUnauthorized       = "unauthorized"
-	ErrCodeForbidden          = "forbidden"
-	ErrCodeAgentNotFound      = "agent_not_found"
-	ErrCodeNotFound           = "not_found"
-	ErrCodeConflict           = "conflict"
-	ErrCodeMethodNotAllowed   = "method_not_allowed"
-	ErrCodeInternalError      = "internal_error"
-	ErrCodeRuntimeError       = "runtime_error"
-	ErrCodeRuntimeUnavailable = "runtime_unavailable"
-	ErrCodeHubUnreachable     = "hub_unreachable"
-	ErrCodeTemplateError      = "template_error"
-	ErrCodeSkillResolution    = api.BrokerErrCodeSkillResolution
+	ErrCodeInvalidRequest  = "invalid_request"
+	ErrCodeValidationError = "validation_error"
+	ErrCodeUnauthorized    = "unauthorized"
+	ErrCodeForbidden       = "forbidden"
+	ErrCodeAgentNotFound   = "agent_not_found"
+	ErrCodeNotFound        = "not_found"
+	ErrCodeConflict        = "conflict"
+	// ErrCodeProjectPathNotInitialized: a plain project's explicit project
+	// path holds no .scion directory or marker (agent.ErrProjectPathNotInitialized).
+	ErrCodeProjectPathNotInitialized = agent.ProjectPathNotInitializedCode
+	ErrCodeMethodNotAllowed          = "method_not_allowed"
+	ErrCodeInternalError             = "internal_error"
+	ErrCodeRuntimeError              = "runtime_error"
+	ErrCodeRuntimeUnavailable        = "runtime_unavailable"
+	ErrCodeHubUnreachable            = "hub_unreachable"
+	ErrCodeTemplateError             = "template_error"
+	ErrCodeSkillResolution           = api.BrokerErrCodeSkillResolution
 
 	// ErrCodeWorkspaceStorageUnconfigured marks a create whose workspace was
 	// uploaded to bucket storage (workspaceStoragePath set) when neither the
@@ -74,6 +77,10 @@ const (
 	// answered with 422 before anything is provisioned, and the hub relays
 	// it unchanged instead of folding it into a 502 (ptone/scion#3422).
 	ErrCodeWorkspaceStorageUnconfigured = api.BrokerErrCodeWorkspaceStorageUnconfigured
+
+	// ErrCodeWorkspaceDownloadModeUnsupported marks a create whose
+	// workspaceDownloadMode this broker does not know (422).
+	ErrCodeWorkspaceDownloadModeUnsupported = api.BrokerErrCodeWorkspaceDownloadModeUnsupported
 
 	// ErrCodeIdentityNotMapped and ErrCodeIdentityKSAMismatch mark a GCP
 	// identity "assign" dispatch on Kubernetes refused for a missing or
@@ -111,6 +118,11 @@ const (
 	// hub's claim on the delete may have lapsed, so acting could remove an
 	// agent the user started again. Nothing was done.
 	ErrCodeStaleDispatch = "stale_dispatch"
+
+	// ErrCodeProjectStorageUnavailable is the 503 code for a dispatch of a
+	// project on shared project storage whose share is not mounted on the
+	// broker (ptone/scion#5823); see api.BrokerErrCodeProjectStorageUnavailable.
+	ErrCodeProjectStorageUnavailable = api.BrokerErrCodeProjectStorageUnavailable
 
 	// ErrCodeRuntimeLogsUnsupported marks a logs request that a runtime
 	// declines to serve at all, rather than one that failed. The broker uses
@@ -402,7 +414,14 @@ func (e *OpaqueError) Unwrap() error { return e.err }
 // going through writeRuntimeOpError — err's text still always reaches the
 // log on every path (through sanitizeFailureCause on the create and start
 // paths), just not through this one function.
+//
+// A start that failed with agent.ErrNoHubToken gets that error's fixed text
+// after the lead: it names the cause (the hub issued no agent token) and no
+// credential value, so the hub relays an actionable create or start error.
 func runtimeOpError(op string, err error) *OpaqueError {
+	if errors.Is(err, agent.ErrNoHubToken) {
+		return NewOpaqueError(failedOpText(op)+": "+agent.ErrNoHubToken.Error(), err)
+	}
 	return NewOpaqueError(failedOpText(op), err)
 }
 
@@ -467,6 +486,11 @@ func notFoundResourceText(err error, templateSlug string) string {
 // (classifyStartError, run_launch.go) share it, so both report the same
 // text for the same failure (ptone/scion#3113).
 const opCreateAgent = "create agent"
+
+// opStartAgent is the runtimeOpError op for a start launch's Manager.Start
+// failure: the same "Failed to start agent" lead the synchronous start
+// handler writes.
+const opStartAgent = "start agent"
 
 // runtimeCauseCodes maps the Kubernetes reasons that get a details.cause
 // code on a create's 500 to that code: an api.BrokerRuntimeCause value, the
@@ -798,6 +822,14 @@ func (s *Server) writeStartContextError(w http.ResponseWriter, err error, op str
 		s.logStartContextFailure("buildStartContext failed", op, startContextDiagnostic(sce), extra)
 		TemplateError(w, runtimeOpError(op, err).Error())
 		return http.StatusInternalServerError
+	}
+	if sce.Status == http.StatusServiceUnavailable && sce.Code == ErrCodeProjectStorageUnavailable {
+		// Its message is one of the path-free project storage texts
+		// (runtime.ProjectShareClientTexts): it names the mount point only
+		// as "its configured mount point" and gives the remedy; the path is
+		// in the broker log.
+		writeError(w, sce.Status, sce.Code, sce.Message, sce.Details)
+		return sce.Status
 	}
 	if sce.Status >= 400 && sce.Status < 500 {
 		code := sce.Code

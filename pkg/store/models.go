@@ -1428,6 +1428,20 @@ type BrokerCapabilities struct {
 	// applies (api.ClearableConfigPath, and env key removals) as applied
 	// at the next start rather than held for a reincarnation.
 	ClearedFields bool `json:"clearedFields,omitempty"`
+	// UnlimitedCountLimits indicates the broker honours an explicit
+	// max_turns or max_model_calls of 0 as "no limit" over an inherited one
+	// (ptone/scion#5605): its merge, default fill and launch keep it. Only
+	// for such a broker does the hub accept a change of a count limit to
+	// Unlimited; an older broker would keep the inherited limit.
+	UnlimitedCountLimits bool `json:"unlimitedCountLimits,omitempty"`
+	// ClearedResourceSubfields indicates the broker applies the resources
+	// sub-field entries of cleared_fields (resources.requests.cpu and the
+	// like, api.ResourceSubPaths) at start, so a resources edit that drops
+	// one sub-field restores its inherited value while keeping the others
+	// (ptone/scion#5676). Only for such a broker does the hub report that
+	// drop as applied at the next start; an older broker ignores the
+	// entries and keeps the previous value until a reincarnation.
+	ClearedResourceSubfields bool `json:"clearedResourceSubfields,omitempty"`
 	// StartsInFlight indicates the broker reports the agent starts still
 	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
 	// then does the hub read a start's absence from that list as "no start
@@ -1907,6 +1921,13 @@ const (
 	// UserStatusPending is used only on UserKindFederated rows: the
 	// account was recorded before the user's first verified request.
 	UserStatusPending = "pending"
+	// UserStatusDeleting is the status of a user whose forced deletion is
+	// in progress (ptone/scion#2143; see UserDeletion). Only
+	// UserStore.MarkUserDeleting writes it; UpdateUser refuses to write it
+	// and refuses to change a row that has it (ErrUserDeleting), so the
+	// status leaves deleting only when the deletion completes and the row
+	// is removed. Every status check that requires active denies it.
+	UserStatusDeleting = "deleting"
 )
 
 // User kind constants.
@@ -3676,10 +3697,29 @@ type ScheduleFilter struct {
 	// the hub's agent row decision, so an agent's list pages fill with the
 	// rows it holds.
 	InitiatorAgentID string
+	// AuthorityPrincipal, when set, keeps only schedules whose recorded
+	// authority (the current initiator principal, with a recorded
+	// attribution as for InitiatorAgentID) is this principal. It matches the
+	// principal the schedule fires under, never CreatedBy. Kind and ID must
+	// both be set; one without the other is ErrInvalidInput.
+	AuthorityPrincipal ScheduleAuthorityPrincipal
 	// SystemPausedOnly, when true, keeps only paused schedules with a
 	// non-empty StatusReason: schedules the hub paused itself. A schedule a
 	// user paused (empty reason) is left out.
 	SystemPausedOnly bool
+}
+
+// ScheduleAuthorityPrincipal names the principal a schedule's recorded
+// authority resolves to: Kind is a DelegationPrincipal* value and ID the
+// principal's ID. The zero value means no principal filter.
+type ScheduleAuthorityPrincipal struct {
+	Kind string
+	ID   string
+}
+
+// IsZero reports whether p names no principal.
+func (p ScheduleAuthorityPrincipal) IsZero() bool {
+	return p.Kind == "" && p.ID == ""
 }
 
 // ToAPI converts a store.Agent to an api.AgentInfo for external consumption.
@@ -4411,6 +4451,14 @@ const (
 	// operator scope re-issue (ptone/scion#3652). The row is kept as
 	// evidence of the authority the agent held before.
 	EdgeDeactivationScopeReissueReplaced EdgeDeactivationCause = "scope_reissue_replaced"
+	// EdgeDeactivationUserDeleteCascade is recorded by a forced user
+	// delete (ptone/scion#2143), under the deletion's operation ID, on the
+	// edges where the user is the delegator and on the edges and
+	// service-account assignments of every agent it stops. A restore
+	// reactivates only agent_soft_delete rows, so it reactivates none of
+	// these. ValidEdgeDeactivationCause and
+	// ValidAssignmentDeactivationCause accept it.
+	EdgeDeactivationUserDeleteCascade EdgeDeactivationCause = "user_delete_cascade"
 )
 
 // ValidEdgeDeactivationCause reports whether c is a cause that may be
@@ -4421,7 +4469,8 @@ func ValidEdgeDeactivationCause(c EdgeDeactivationCause) bool {
 		EdgeDeactivationAgentHardDelete,
 		EdgeDeactivationDelegatorDeleted,
 		EdgeDeactivationCreateCompensation,
-		EdgeDeactivationReincarnateReplaced:
+		EdgeDeactivationReincarnateReplaced,
+		EdgeDeactivationUserDeleteCascade:
 		return true
 	}
 	return false
@@ -4464,7 +4513,8 @@ func ValidAssignmentDeactivationCause(c EdgeDeactivationCause) bool {
 		EdgeDeactivationReincarnateReplaced,
 		EdgeDeactivationReincarnateFailed,
 		EdgeDeactivationReincarnatePendingSwept,
-		EdgeDeactivationReincarnateStaleSwept:
+		EdgeDeactivationReincarnateStaleSwept,
+		EdgeDeactivationUserDeleteCascade:
 		return true
 	}
 	return false
@@ -4492,6 +4542,9 @@ const (
 	SAAssignmentOriginScheduledProjectDefault        SAAssignmentOrigin = "scheduled_project_default"
 	SAAssignmentOriginScheduledHubDefault            SAAssignmentOrigin = "scheduled_hub_default"
 	SAAssignmentOriginHostPassthroughTranslation     SAAssignmentOrigin = "host_passthrough_translation"
+	// SAAssignmentOriginLegacyBackfill marks a row written by the boot
+	// backfill for an agent created before assignment rows were recorded.
+	SAAssignmentOriginLegacyBackfill SAAssignmentOrigin = "legacy_backfill"
 )
 
 // AgentServiceAccountAssignment records who authorized an agent's

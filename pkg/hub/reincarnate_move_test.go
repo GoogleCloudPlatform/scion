@@ -201,7 +201,7 @@ func TestEvaluateMoveEligibility_Refusals(t *testing.T) {
 				in.Dst.WorkspaceStorage = &api.BrokerWorkspaceStorage{Backend: api.WorkspaceStorageBackendLocal}
 			},
 			check: moveCheckSameExport, status: http.StatusConflict, code: ErrCodeConflict,
-			msgContain: "mounts backend local",
+			msgContain: "(backend: differs;",
 		},
 		{
 			name: "different export",
@@ -209,7 +209,7 @@ func TestEvaluateMoveEligibility_Refusals(t *testing.T) {
 				in.Dst.WorkspaceStorage = moveTestStorage("10.0.0.2", "/vol2", "projects", true)
 			},
 			check: moveCheckSameExport, status: http.StatusConflict, code: ErrCodeConflict,
-			msgContain: "10.0.0.2:/vol2",
+			msgContain: "(nfs export: differs;",
 		},
 		{
 			name: "different subpath root",
@@ -217,7 +217,7 @@ func TestEvaluateMoveEligibility_Refusals(t *testing.T) {
 				in.Dst.WorkspaceStorage = moveTestStorage("10.0.0.2", "/vol1", "other", true)
 			},
 			check: moveCheckSameExport, status: http.StatusConflict, code: ErrCodeConflict,
-			msgContain: `subpath root "other"`,
+			msgContain: "(subpath_root: differs;",
 			notCalled:  []string{"reachable:dst", "dispatch", "capacity"},
 		},
 		{
@@ -226,7 +226,7 @@ func TestEvaluateMoveEligibility_Refusals(t *testing.T) {
 				in.Dst.WorkspaceStorage.NFS.ExportID = ""
 			},
 			check: moveCheckSameExport, status: http.StatusPreconditionFailed, code: ErrCodeUnsupportedCapability,
-			msgContain: "broker dst-name has not reported the export identity marker (projects/.scion-export-id",
+			msgContain: "broker dst-name has not reported the export identity marker (<subpath_root>/.scion-export-id",
 			notCalled:  []string{"reachable:dst", "dispatch", "capacity"},
 		},
 		{
@@ -243,7 +243,7 @@ func TestEvaluateMoveEligibility_Refusals(t *testing.T) {
 				in.Dst.WorkspaceStorage.NFS.ExportID = "0a0a0a0a-0000-4000-8000-000000000000"
 			},
 			check: moveCheckSameExport, status: http.StatusConflict, code: ErrCodeConflict,
-			msgContain: "see different export identity markers (" + moveTestExportID + " and 0a0a0a0a-0000-4000-8000-000000000000)",
+			msgContain: "see different export identity markers, so they do not mount the same directory",
 			notCalled:  []string{"reachable:dst", "dispatch", "capacity"},
 		},
 		{

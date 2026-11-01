@@ -42,6 +42,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
@@ -1773,7 +1774,7 @@ func doBrokerSignedRequest(t *testing.T, srv *Server, brokerID string, key []byt
 	if onBehalfOfEmail != "" {
 		req.Header.Set(HeaderOnBehalfOf, "user:"+onBehalfOfEmail)
 	}
-	require.NoError(t, srv.brokerAuthService.SignRequest(req, brokerID, key))
+	require.NoError(t, (&apiclient.HMACAuth{BrokerID: brokerID, SecretKey: key}).ApplyAuth(req))
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	return rec
@@ -1875,10 +1876,11 @@ func rotateSecretAsUser(t *testing.T, srv *Server, user *store.User, brokerID st
 	rec := httptest.NewRecorder()
 	if user == nil {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/brokers/"+brokerID+"/rotate-secret", nil)
+		req.RemoteAddr = tpLoopbackPeer // the transport policy admits a client on the hub host
 		srv.handleBrokerRotateSecret(rec, req, brokerID)
 		return rec
 	}
-	return doRequestAsUser(t, srv, user, http.MethodPost, "/api/v1/brokers/"+brokerID+"/rotate-secret", nil)
+	return doRequestAsUserLoopback(t, srv, user, http.MethodPost, "/api/v1/brokers/"+brokerID+"/rotate-secret", nil)
 }
 
 // setupMutePinTest builds a server with a web chat store, one project and one
@@ -5317,9 +5319,11 @@ func (d *reincarnateTestDispatcher) moveSnapshot() (provisions, localDeletes, st
 }
 func (d *reincarnateTestDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) error {
 	d.mu.Lock()
-	// A start the hub refused before sending (its run not begun, or the hub
-	// shutting down) records no run, as in production.
-	if d.runStore != nil && !errors.Is(d.startErr, errStartRunNotBegun) && !errors.Is(d.startErr, ErrHubShuttingDown) {
+	// A start the hub refused before sending (its run not begun, the hub
+	// shutting down, or its pending config fold refused) records no run,
+	// as in production.
+	if d.runStore != nil && !errors.Is(d.startErr, errStartRunNotBegun) && !errors.Is(d.startErr, ErrHubShuttingDown) &&
+		!errors.Is(d.startErr, errPendingConfigFold) {
 		runID := fmt.Sprintf("run-%s-%d", agent.RuntimeBrokerID, len(d.startBrokers)+1)
 		if _, err := d.runStore.SetAgentRunID(ctx, agent.ID, runID, nil); err == nil {
 			agent.RunID = runID

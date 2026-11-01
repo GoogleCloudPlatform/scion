@@ -44,6 +44,7 @@ type AgentLaunchReport struct {
 	Message    string           `json:"message,omitempty"`
 	ErrorCode  string           `json:"errorCode,omitempty"`
 	Cause      string           `json:"cause,omitempty"` // failed runtime_error only: an api.BrokerRuntimeCause code
+	RunID      string           `json:"runId,omitempty"` // failed only: the run the launch started (compared, never stored)
 	Agent      *RemoteAgentInfo `json:"agent,omitempty"` // succeeded only
 	At         time.Time        `json:"at,omitzero"`
 }
@@ -151,6 +152,7 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 		Message:    sanitizeFailureReason(req.Message),
 		ErrorCode:  sanitizeFailureReason(req.ErrorCode),
 		Cause:      launchReportCause(req),
+		RunID:      req.RunID,
 	}
 	if req.Cause != "" && sr.Cause == "" {
 		// The raw cause is untrusted broker text, so only its length is
@@ -188,15 +190,19 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 
 	// A "failed" report the store actually applied (HTTPStatus==0, not a
 	// conflict/stale-launch rejection, and Result==Applied rather than
-	// Completed) means this launch ended in a broker-confirmed failure before
-	// ever reaching running — see ApplyLaunchReportPreRunning/
-	// applyLaunchReportActive's Failed branches and the timed_out/lost+
-	// phase=error refine case in entadapter/launch_report.go. Revoke the
-	// credential the Hub minted for this create (ptone/scion#1956). This
-	// condition is deliberately narrower than "State==failed": a stray
+	// Completed) means this launch ended in a broker-confirmed failure — see
+	// applyLaunchReportPreRunning/applyLaunchReportActive's Failed branches,
+	// the timed_out/lost+phase=error refine case, and the failed report
+	// after running_observed in entadapter/launch_report.go. Revoke the
+	// credential the Hub minted for this create (ptone/scion#1956). The
+	// running_observed case applies only when the report names the agent's
+	// current run, the agent is in running or error with no live activity,
+	// no start claim for another launch, delete or reincarnation holds it,
+	// and the code is not broker_restarted (ptone/scion#5368). This
+	// condition is deliberately narrower than "State==failed": any other
 	// failed report once the agent is already Running returns
-	// Result=Completed (the agent did start; nothing to revoke), and a
-	// failed report arriving during a stop/suspend returns a Conflict
+	// Result=Completed (the agent may have started; nothing to revoke), and
+	// a failed report arriving during a stop/suspend returns a Conflict
 	// HTTPStatus — in both of those cases the agent may still be relying on
 	// its current credential. The launch kind decides the rule
 	// (launchFailureRevokeReason).

@@ -143,6 +143,19 @@ func (s *Server) Reconcile(ctx context.Context) ReconcileResult {
 			delete(s.cancelled, ref)
 		}
 	}
+	// Normally cleared when a guard pass sees the registration deleted (the hijacker's
+	// completed delivery); this bounds the map if that delivery is lost. A later kill
+	// of the same runner then logs ERROR again, which is louder and safe.
+	for name, at := range s.hijacked {
+		if now.Sub(at) > cancelledTTL {
+			delete(s.hijacked, name)
+		}
+	}
+	for name, at := range s.forgotten {
+		if now.Sub(at) > cancelledTTL {
+			delete(s.forgotten, name)
+		}
+	}
 
 	s.reapRunners(ctx, now, &res, addErr)
 

@@ -13,6 +13,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - run: echo ok
+      # Not docker commands (the docker check must not match them):
+      - run: grep -n FROM Dockerfile docker-compose.yml; echo "dockerd is not here"
+      - name: skip docker
+        run: echo docker -v; docker --version; docker -H host; echo "docker --context x"
   postgres:
     runs-on: ubuntu-latest
     services:

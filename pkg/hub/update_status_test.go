@@ -243,13 +243,13 @@ func TestReconcilePendingUpdate(t *testing.T) {
 
 func TestUpdateOutcome(t *testing.T) {
 	p := PendingUpdate{To: "v0.3.0-preview.4"}
-	if got := updateOutcome(p, "v0.3.0-preview.4"); got != LastUpdateVerified {
+	if got := updateOutcome(p, "v0.3.0-preview.4", nil); got != LastUpdateVerified {
 		t.Errorf("match = %q", got)
 	}
-	if got := updateOutcome(p, "nightly-20261023"); got != LastUpdateFailed {
+	if got := updateOutcome(p, "nightly-20261023", nil); got != LastUpdateFailed {
 		t.Errorf("mismatch = %q", got)
 	}
-	if got := updateOutcome(PendingUpdate{}, ""); got != LastUpdateFailed {
+	if got := updateOutcome(PendingUpdate{}, "", nil); got != LastUpdateFailed {
 		t.Errorf("empty target = %q", got)
 	}
 }
@@ -807,12 +807,12 @@ func TestRunReleaseUpdateCheck(t *testing.T) {
 		srv, s := newTestServerWithStore(t)
 		srv.config.MaintenanceConfig = MaintenanceConfig{DeploymentTier: "binary", UpdatePolicy: "auto",
 			ReleaseChannel: "nightly"}
-		// A configured channel that the executor does not consider current
-		// is refused before a run is created.
+		// A channel the executor does not know is refused before a run is
+		// created.
 		exec := maintenance.NewBinaryUpdateExecutor(maintenance.BinaryUpdateOptions{
-			Channel: "preview", CurrentVersion: "nightly-20261020", Installer: newTestInstaller(maintenance.StrategySymlink),
+			CurrentVersion: "nightly-20261020", Installer: newTestInstaller(maintenance.StrategySymlink),
 		})
-		srv.autoApplyUpdate(ctx, "nightly", exec)
+		srv.autoApplyUpdate(ctx, "beta", exec)
 		if runs, _ := s.ListMaintenanceRuns(ctx, "update-binary", 5); len(runs) != 0 {
 			t.Fatalf("a refused auto update created a run: %+v", runs)
 		}

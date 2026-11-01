@@ -159,7 +159,7 @@ func (h *tunnelHub) client(cred tunnelclient.Credential) (hubclient.Client, erro
 	if h.src != nil {
 		opts = append(opts, hubclient.WithTransportAuth(h.src, h.mode))
 	}
-	return hubclient.New(h.endpoint, opts...)
+	return newUserHubClient(h.endpoint, opts...)
 }
 
 // Whoami implements tunnelclient.Hub.
@@ -290,6 +290,11 @@ func runTunnel(cmd *cobra.Command, args []string) error {
 	if endpoint == "" {
 		return tunnelclient.Errorf(tunnelclient.ExitUsage, "no hub endpoint: pass --hub or select a hub with 'scion use --hub <name>'")
 	}
+	// The transport rule, before the host-key hint or the tunnel reads a
+	// credential (tunnelClientConfig checks again for its other callers).
+	if err := checkUserHubTransport(endpoint); err != nil {
+		return tunnelclient.Errorf(tunnelclient.ExitError, "%v", err)
+	}
 	target := resolveHubOnlyProject()
 	if err := target.unlinkedError(); err != nil {
 		return err
@@ -361,6 +366,11 @@ func tunnelPinSource() (sshPinSource, error) {
 // credential chain and the state store. The returned hub records agent
 // lookup misses.
 func tunnelClientConfig(endpoint string, stderr io.Writer) (tunnelclient.Config, *tunnelHub, error) {
+	// The transport rule, before the transport source or the credential is
+	// resolved: the conduit dial would otherwise use ws:// for http.
+	if err := checkUserHubTransport(endpoint); err != nil {
+		return tunnelclient.Config{}, nil, tunnelclient.Errorf(tunnelclient.ExitError, "%v", err)
+	}
 	src, mode, err := tunnelTransportSource(hubTransportSettings(endpoint))
 	if err != nil {
 		return tunnelclient.Config{}, nil, tunnelclient.Errorf(tunnelclient.ExitError, "resolving transport auth: %v", err)

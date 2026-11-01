@@ -72,8 +72,9 @@ func (s *Server) BootstrapHarnessConfigsFromDir(ctx context.Context, harnessConf
 		dirPath := filepath.Join(harnessConfigsDir, name)
 		slug := api.Slugify(name)
 
-		// Load config.yaml to get harness type
-		hcDir, err := config.LoadHarnessConfigDir(dirPath)
+		// Load config.yaml to get harness type, confined to the directory
+		// (a linked config.yaml fails the load).
+		hcDir, err := loadLocalHarnessConfigDir(dirPath)
 		if err != nil {
 			s.resourceLog.Warn("harness config bootstrap: failed to load config, skipping",
 				"config", name, "error", err)
@@ -143,11 +144,13 @@ func (s *Server) bootstrapSingleHarnessConfig(ctx context.Context, name, dirPath
 }
 
 // isHarnessConfigDir reports whether dir looks like a harness-config directory,
-// i.e. it contains a config.yaml file. Analogous to
-// templateimport.IsScionTemplate (which checks for scion-agent.yaml).
+// i.e. it contains a config.yaml that is a regular file. Analogous to
+// templateimport.IsScionTemplate (which checks for scion-agent.yaml). The
+// check uses Lstat: a linked config.yaml is not followed and does not make
+// dir a harness-config (the collection would not record it).
 func isHarnessConfigDir(dir string) bool {
-	info, err := os.Stat(filepath.Join(dir, "config.yaml"))
-	return err == nil && !info.IsDir()
+	info, err := os.Lstat(filepath.Join(dir, "config.yaml"))
+	return err == nil && info.Mode().IsRegular()
 }
 
 // syncExistingHarnessConfig re-syncs a local harness config directory through

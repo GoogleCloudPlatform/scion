@@ -51,7 +51,7 @@ import (
 // sqlDB returns the *sql.DB backing s.client, or nil if the client is not
 // backed by a database/sql driver (mirrors CompositeStore.DB).
 func (s *AgentStore) sqlDB() *sql.DB {
-	if drv, ok := s.client.Driver().(*entsql.Driver); ok {
+	if drv, ok := entc.SQLDriver(s.client.Driver()); ok {
 		return drv.DB()
 	}
 	return nil

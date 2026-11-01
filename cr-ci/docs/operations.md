@@ -93,13 +93,19 @@ commands without `--apply`; read that transcript before applying.
 | Runner image | see [Runner image updates](#runner-image-updates) |
 | `RECONCILE_SCHEDULE` or `MEDIATOR_URL` | `scripts/deploy-scheduler.sh --apply` (after `deploy-mediator.sh` for `MEDIATOR_URL`) |
 
-**Upgrade order: runner first.** When a change touches both, run
-`build-runner-image.sh` and `deploy-job.sh` **before** `deploy-mediator.sh`.
-The mediator registers runners with the work folder `/home/runner/work`, and
-only a runner image that links that folder to the `/scratch` disk (cache
-parity) keeps the work folder off the in-memory root filesystem. An older
-image with a newer mediator risks OOM on large jobs. `deploy-mediator.sh`
-warns when the job's image tag differs from the current `runner/` tree hash.
+**Upgrade order: mediator first.** When a change touches both, run
+`deploy-mediator.sh` **before** `build-runner-image.sh` and `deploy-job.sh`. A
+newer mediator only adds launch env that an older runner image ignores (for
+example `GH_REPOS`, the job guard's allowlist), while a newer runner image can
+require it: under an older mediator it fails closed at startup (exit 2,
+`required environment variable GH_REPOS is not set`), and the job it was launched
+for waits until the stale registration is reaped. That happened in redeploy #2
+(2026-10-27), which updated the job first. `deploy-mediator.sh` notes when the
+job's image tag differs from the current `runner/` tree hash; deploy the job next.
+(The earlier rule, runner first, came from the mediator's `/home/runner/work`
+work folder, which needs a runner image that puts it on the disk; every image
+since PR-img does.) The mediator-first order assumes the job runs a runner image at or
+after PR-img; with an older one, deploy the job first.
 
 Every script is idempotent, so re-running one after a partial failure is the
 recovery. A mediator deploy restarts the single instance and loses pending
@@ -198,7 +204,9 @@ All tool versions and checksums are pinned in one place, the `ARG` block of
    runs one no-op execution, so the first real job does not pay the image import.
    New executions use the new tag; running ones finish on the old image.
 
-**Rollback:** `scripts/deploy-job.sh --tag <previous tag> --apply`. Old tags
+**Rollback:** `scripts/deploy-job.sh --tag <previous tag> --apply`. Across the
+runner layout switch (below), run `deploy-job.sh` from the older commit: it sets
+the older volume mount together with the older tag. Old tags
 stay in `ARTIFACT_REPO` (list them with
 `gcloud artifacts docker tags list REGION-docker.pkg.dev/GCP_PROJECT/ARTIFACT_REPO/RUNNER_IMAGE_NAME`).
 
@@ -209,6 +217,37 @@ itself at start-up on every execution. Check
 `ACTIONS_RUNNER_VERSION` soon after each release. Keep `GO_VERSION` in step
 with `go.mod`. golangci-lint follows `runner/golangci-lint/VERSIONS`, which CI's
 lint job uses too: a change there changes both.
+
+## Runner layout switch
+
+cr-ci FIXUP-5 moved the runner's ephemeral disk from `/scratch` to HOME
+(`/home/runner`), with the work folder and caches as real directories on it and
+the runner installed at `/opt/actions-runner`
+([architecture](architecture.md#constraints), "Runner layout"). The image and the
+job's volume mount must match:
+- **A new image on a job that still mounts `/scratch`**, or an old image on a job
+  that mounts HOME, exits 2 at startup, before any claim (`/home/runner exists but
+  is not a mount point; ... run deploy-job.sh`, or the old image's `/scratch`
+  check). The job it was launched for waits until reconcile reaps the
+  registration.
+- **So switch with one `deploy-job.sh --apply --warm-up`** from the commit that
+  has the new layout: it updates the image tag and the mount in the same
+  `gcloud run jobs update`, and the warm-up execution checks the new layout
+  before the first real job. The mediator does not change.
+- **The parity check in `.github/actions/setup-go-cache` accepts both layouts**
+  for the switch: the old `/scratch` links, or real directories on a volume at
+  HOME. **Removal step:** once every cr-ci deployment runs an image with the new
+  layout (check the warm-up log and a routed job's "Check cr-ci cache parity"
+  step for `real directory` lines and no `old cr-ci runner layout` note), delete
+  the `if [ -L /home/runner/work ]` branch from that step in a cr-ci change.
+- **Live verification after the switch** (on a named companion GO): a routed
+  diagnostic job checks `pwd -P`, actions/setup-node's npm cache, a temp-directory
+  ancestor check, and single-node-vm's tests, and ii3 reads its memory and disk.
+  Also check the **peak memory of a routed extras-ci.yml `build-and-test`** run: with
+  `TMPDIR` unset its `t.TempDir()` files are in RAM.
+- After the switch, the first start logs `volume root /home/runner: owner uid N,
+  mode M`. Record it: if the runner's uid (1001) owns the root, the entrypoint
+  has set it to 0755; otherwise HOME stays world-writable (a documented residual).
 
 ## Capacity and quotas
 
@@ -258,9 +297,10 @@ logged (a unit test enforces this).
 | `launch_failed` | ERROR | `jobs.run` failed; registration deleted, job retried by reconcile |
 | `cancel` | INFO | Job finished while queued: its idle runner stopped, or left alone because it runs another job (`action=none_busy`) |
 | `claim_consumed` / `claim_rejected` | INFO / WARNING | Runner fetched its JIT config / was refused: `identity_missing` or `identity_invalid` (401, claim kept; repeated ones from outside the runner are worth a look), or an unknown, used or expired token (410) |
-| `SECURITY_REJECT_FORK_PR` | WARNING | Fork-PR or `pull_request_target` run refused a runner. **Alert on this.** |
-| `SECURITY_KILL_HIJACKED_RUNNER` | ERROR | An untrusted job started on a cr-ci runner minted for another job; the execution was cancelled and the registration deleted ([architecture](architecture.md#residual-risk-label-matched-job-assignment)). **Alert on this and review the run.** |
+| `SECURITY_REJECT_FORK_PR` | WARNING | A run outside the allowlist was refused a runner: a fork PR (`reason=head_repository_differs`), or any event but `push` and `pull_request` (`reason=event_not_allowed:<event>`). **Alert on this.** |
+| `SECURITY_KILL_HIJACKED_RUNNER` | ERROR / WARNING | An untrusted job started on a cr-ci runner minted for another job; the execution was cancelled and the registration deleted ([architecture](architecture.md#residual-risk-label-matched-job-assignment)). **Alert on the ERROR and review the run.** While GitHub still shows the untrusted job running it refuses to delete the busy registration: the ERROR then has `registration_deleted=false` and GitHub's 422 in `registration_error`, and every later guard pass retries at WARNING (`repeat=true`) until GitHub times the job out, about 10 minutes. The WARNING `hijacked runner's registration deleted` follows when GitHub's `completed` delivery for that job arrives (if it is lost, reconcile forgets the runner after an hour). The execution is gone from the first line on |
 | `runner_swap` | INFO | A runner started a different legitimate job; harmless. `inherited_budget` is the task time that job has left (`TASK_TIMEOUT` minus `execution_age`) |
+| `runner_rebind` | INFO | Follows `runner_swap`: the idle runner launched for the job that took the runner (`rebound_runner`) now serves the displaced job (`rebound_to_job_id`). In a chain of swaps the displaced job is handed on once per swap, so several runners can carry the same `served_job_id` over time; only the latest one serves it |
 | `runner_swap_low_budget` | WARNING | That job inherited less than 20 minutes; if it fails on the task timeout, re-run it. Frequent ones: lower `RUNNER_IDLE_TIMEOUT` or raise `TASK_TIMEOUT` ([architecture](architecture.md#flow)) |
 | `webhook_rejected` | WARNING | Bad signature, malformed payload or repo outside `TARGET_REPOS` |
 | `webhook_ignored` | INFO / DEBUG / WARNING | Not `workflow_job`, or job without `RUNNER_LABEL`; WARNING with `reason=labels_unservable` when a job has `RUNNER_LABEL` plus other labels a cr-ci runner cannot satisfy (fix its `runs-on`) |
@@ -281,6 +321,14 @@ logged (a unit test enforces this).
 
 ## Troubleshooting
 
+- **Testing the job guard live:** a refused job only lands on a runner launched for
+  another job (the mediator launches none for it), and any routed job, including a
+  real one queued meanwhile, can supply or take that runner. So a quiet window cannot
+  be guaranteed; plan for real jobs competing. A real job displaced this way is
+  re-served at once by the hijack recovery and loses only its first runner (D11 live
+  test, 2026-10-27: a third-party golangci-lint job supplied the runner and ran on its
+  replacement).
+
 - **Job stuck "waiting for a runner":** look for its `job_id` in the mediator
   logs. `capacity_full` means it is waiting for a slot; `SECURITY_REJECT_FORK_PR`
   or `labels_unservable` means it will never get one; no line at all means the webhook was not
@@ -300,6 +348,34 @@ logged (a unit test enforces this).
   than wait for a job it could only give part of the task timeout. The next
   `/reconcile` reaps its registration (`runner_reaped`) and re-serves its job if
   that is still queued.
+- **Runner execution exits 2 with `job guard: ... refusing to start the runner`:**
+  the image's job-started hook or its pinned sha256 (`/etc/cr-ci/job-guard.sha256`)
+  is missing, not root-owned and read-only, or does not match. The runner was not
+  started and no claim was spent. This means a broken or tampered image: rebuild it
+  from the repository (the Docker build checks the same thing) and redeploy. A line
+  `ignoring CR_...: test overrides take effect only in test mode` means a test
+  override was set on the job; remove it.
+- **Runner execution exits 5 with `ERROR job_guard_refused`:** GitHub assigned the
+  runner a job cr-ci does not run (a fork PR, a disallowed event, or a job of a
+  repository outside the runner's served list, `GH_REPOS`; typically one queued on
+  the label), and the runner's job-started hook stopped the runner before any of the
+  job's steps. The execution's log line (Cloud Logging) names the reason, event,
+  head, the job's repository and the served list (`served=`, comma-separated), and
+  only there is the reason recorded. **In GitHub the job looks like a broken runner:**
+  it stays "in progress" with no steps for about 10 minutes, then fails with the
+  annotation "The self-hosted runner lost communication with the server" and an
+  empty log, because the hook kills the runner before its log is uploaded (D11 live
+  test, 2026-10-27). The hook prints only the reason code to the job's log, when that
+  log is uploaded at all: it may be public, and under org scope the served list can
+  name private repositories. In org scope the served list is
+  every `TARGET_REPOS` entry of the owner, so a job of another served repository
+  runs; `reason=repository_not_served` then means a repository of the org that is
+  not in `TARGET_REPOS` queued a job on the label (add it to `TARGET_REPOS`, or drop
+  the label from its workflow). `served_repositories_missing` or
+  `served_repositories_malformed` means a launch without a valid `GH_REPOS`, which
+  the mediator never produces (the entrypoint exits 2 first). The mediator's hijack guard deletes the registration once
+  GitHub releases it (see `SECURITY_KILL_HIJACKED_RUNNER`), and the job shows as failed in GitHub. This is the guard working; look at who queued that job
+  on the label (`SECURITY_REJECT_FORK_PR` in the mediator log for the same run).
 - **Runner execution exits 4 with `ERROR idle_timeout_raced_job`:** the idle stop
   and a job start crossed (a job was assigned just as the idle deadline passed),
   and the stop cancelled that job. Re-run the job. Frequent ones would mean jobs

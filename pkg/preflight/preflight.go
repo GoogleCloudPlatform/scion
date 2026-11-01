@@ -118,6 +118,7 @@ func NewRegistry() *Registry { return &Registry{checks: map[string]Check{}} }
 func NewDefaultRegistry() *Registry {
 	r := NewRegistry()
 	r.Register(ProfilesCheck())
+	r.Register(TransportProxyCheck())
 	return r
 }
 

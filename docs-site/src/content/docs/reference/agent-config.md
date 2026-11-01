@@ -62,9 +62,11 @@ These platform skills are managed by Scion and do not need to be manually includ
 
 | Field | Type | Description |
 | :--- | :--- | :--- |
-| `max_turns` | int | Maximum number of LLM turns before the agent stops. Exceeding this triggers a `LIMITS_EXCEEDED` state and termination. |
-| `max_model_calls` | int | Maximum number of model calls before the agent stops. |
-| `max_duration` | string | Maximum runtime duration (e.g., `"2h"`, `"30m"`). Exceeding this triggers a `LIMITS_EXCEEDED` state and termination. |
+| `max_turns` | int | Maximum number of LLM turns before the agent stops. Exceeding this triggers a `LIMITS_EXCEEDED` state and termination. `0` means no limit and overrides any inherited or default limit; leave the key out to inherit. |
+| `max_model_calls` | int | Maximum number of model calls before the agent stops. `0` means no limit and overrides any inherited or default limit; leave the key out to inherit. |
+| `max_duration` | string | Maximum runtime duration (e.g., `"2h"`, `"30m"`). Exceeding this triggers a `LIMITS_EXCEEDED` state and termination. `"0"` means no limit; leave the key out to inherit. |
+
+Each limit has three states: left out (or `null`), which inherits the value from the template chain and then from the hub and broker default limits; an explicit "no limit" (`0` for a count, `"0"` for a duration), which overrides an inherited limit and is never filled by a default; and a limit. A negative count is invalid. Before count limits were typed, a `max_turns: 0` or `max_model_calls: 0` in a template or config file was accepted silently and meant "inherit"; it now means no limit, so remove the key to inherit. A Runtime Broker logs each template that sets a count limit to `0` when it provisions an agent. An explicit count limit of `0` takes effect only on a Runtime Broker that advertises the `unlimitedCountLimits` capability: at create or start an older broker keeps the inherited limit and the Hub warns about it, while a configuration edit (`PATCH /api/v1/agents/:id` or `PATCH /api/v1/projects/:id/agents/:agentId`) that changes `max_turns` or `max_model_calls` to `0` is refused with `422 validation_error` (`unlimited_not_supported_by_broker`, or `broker_unknown` when the agent's Runtime Broker is not registered).
 
 ### Environment variables (`env`)
 
@@ -91,7 +93,7 @@ The keys in this section are **ignored in templates**, with a warning. They take
 | Field | Type | Description | Set it instead in |
 | :--- | :--- | :--- | :--- |
 | `image` | string | Container image for this agent. | The harness-config's `config.yaml` `image`; settings `harness_configs.<name>.image`; a profile `harness_overrides.<name>.image`; `--image` |
-| `volumes` | list | Additional volume mounts. | Settings `harness_configs.<name>.volumes`; the harness-config |
+| `volumes` | list | Additional volume mounts. Subject to [Volume Source Restrictions](/scion/reference/orchestrator-settings/#volume-source-restrictions). | Settings `harness_configs.<name>.volumes`; the harness-config |
 | `resources` | object | Container resource requests/limits (see below). | Settings `default_resources`, profile `resources` and `harness_overrides`; hub `agent_defaults.resources`; project resource defaults |
 | `kubernetes` | object | Kubernetes runtime overrides (see below). | Settings runtimes and profiles |
 | `hub` | object | Hub endpoint override (see below). | Broker settings |

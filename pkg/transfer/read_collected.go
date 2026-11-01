@@ -17,6 +17,7 @@ package transfer
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -57,30 +58,17 @@ func ReadCollectedFile(root *os.Root, fi FileInfo) ([]byte, error) {
 func OpenCollectedFile(root *os.Root, fi FileInfo) (io.ReadCloser, error) {
 	rel := filepath.FromSlash(fi.Path)
 
-	// The entry itself must be a regular file. Checking before opening also
-	// avoids blocking on a FIFO; the non-blocking open covers a FIFO swapped
-	// in between this check and the open.
-	info, err := root.Lstat(rel)
-	if err != nil {
+	// The entry itself must still be a regular file (OpenRegularFile: Lstat,
+	// a non-blocking open, so a FIFO swapped in after the Lstat does not
+	// block, then fstat and SameFile on the opened file).
+	f, info, err := OpenRegularFile(root, rel)
+	switch {
+	case errors.Is(err, ErrNotRegularFile):
+		return nil, fmt.Errorf("%s is no longer a regular file", fi.Path)
+	case errors.Is(err, ErrFileReplaced):
+		return nil, fmt.Errorf("%s changed since it was collected (replaced while it was opened)", fi.Path)
+	case err != nil:
 		return nil, fmt.Errorf("failed to read %s: %w", fi.Path, err)
-	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s is no longer a regular file", fi.Path)
-	}
-
-	f, err := root.OpenFile(rel, readOnlyFlags, 0)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open %s: %w", fi.Path, err)
-	}
-
-	info, err = f.Stat()
-	if err != nil {
-		_ = f.Close()
-		return nil, fmt.Errorf("failed to stat %s: %w", fi.Path, err)
-	}
-	if !info.Mode().IsRegular() {
-		_ = f.Close()
-		return nil, fmt.Errorf("%s is no longer a regular file", fi.Path)
 	}
 	if info.Size() != fi.Size {
 		_ = f.Close()

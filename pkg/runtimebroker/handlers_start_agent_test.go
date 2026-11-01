@@ -287,8 +287,8 @@ func TestStartAgentInlineConfigModelUpdatesExistingAgentConfig(t *testing.T) {
 	if updated.Model != "gemini-2.5-pro" {
 		t.Errorf("expected model %q, got %q", "gemini-2.5-pro", updated.Model)
 	}
-	if updated.MaxTurns != 7 {
-		t.Errorf("expected max_turns 7, got %d", updated.MaxTurns)
+	if !api.IntPtrEqual(updated.MaxTurns, api.IntPtr(7)) {
+		t.Errorf("expected max_turns 7, got %s", api.FormatCountLimit(updated.MaxTurns))
 	}
 }
 

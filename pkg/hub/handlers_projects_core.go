@@ -35,13 +35,14 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
-	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/google/uuid"
 )
 
 type ListProjectsResponse struct {
@@ -94,7 +95,7 @@ type RegisterProjectResponse struct {
 	Created     bool                     `json:"created"`
 	Matches     []hubclient.ProjectMatch `json:"matches,omitempty"`     // Populated when multiple projects share the same git remote
 	BrokerToken string                   `json:"brokerToken,omitempty"` // DEPRECATED: use two-phase registration
-	SecretKey   string                   `json:"secretKey,omitempty"`   // DEPRECATED: secrets only from /brokers/join
+	SecretKey   string                   `json:"secretKey,omitempty"`   // DEPRECATED: secrets only from /brokers/join; set only when this request minted the broker's first secret
 }
 
 // AddProviderRequest is the request for adding a broker as a project provider.
@@ -347,6 +348,13 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Labels = labels
+
+	// A client-supplied project ID is a canonical UUID: it keys the store row
+	// and, on a shared backend, the project's directory tree.
+	if !validClientProjectID(req.ID) {
+		ValidationError(w, invalidClientProjectIDMessage, map[string]interface{}{"field": "id"})
+		return
+	}
 
 	// Idempotency: if we have a client-provided ID, check for existing project
 	if req.ID != "" {
@@ -618,7 +626,7 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		}
 	} else if project.GitRemote == "" {
 		// Hub-native project (no git remote): create workspace directory.
-		if err := s.initHubManagedProject(project); err != nil {
+		if err := s.initHubManagedProject(ctx, project); err != nil {
 			// Workspace storage did not respond: the workspace (and its
 			// seeded .scion/settings.yaml) cannot be created, so roll back
 			// like the clone failure above and answer 503. Other failures
@@ -633,6 +641,11 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 			s.projectsLogger().Warn("failed to initialize project workspace",
 				"project_id", project.ID, "slug", project.Slug, "error", err)
 		}
+	} else {
+		// Per-agent git project (clone-per-agent, worktree-per-agent): no
+		// workspace is prepared at create, but on a shared backend brokers
+		// still require <ProjectRoot>/.scion/{project-id,project-slug}.
+		s.ensureSharedProjectIdentityBestEffort(project)
 	}
 
 	// Auto-link brokers that have auto_provide enabled (mirrors registerProject behavior).
@@ -1106,14 +1119,30 @@ func writeWorkspaceStorageUnavailable(w http.ResponseWriter, err error) bool {
 // On the local workspace backend this is ~/.scion/projects/<slug>/.scion,
 // inside the workspace directory it also creates (unchanged). On a shared
 // backend it is <ProjectRoot(uuid)>/.scion beside workspace/, which no
-// agent mounts; the workspace itself is created by the
-// first agent or the first Files-tab write. Unlike linked projects,
+// agent mounts, and the hub first provisions the empty workspace leaf
+// (provisionHubNativeWorkspace: the leaf at mode 2775 with the default ACL,
+// chowned to the Layout uid:gid, and the provisioning sentinel), so the
+// first agent finds a provisioned workspace. Unlike linked projects,
 // hub-managed projects keep their settings directly in that directory (no
 // split storage or marker files).
 //
-// A shared workspace storage the hub cannot use returns an error wrapping
-// errWorkspaceStorageUnavailable; callers roll the create back.
-func (s *Server) initHubManagedProject(project *store.Project) error {
+// A shared workspace storage the hub cannot use, or a failed workspace
+// provisioning, returns an error wrapping errWorkspaceStorageUnavailable;
+// callers roll the create back.
+func (s *Server) initHubManagedProject(ctx context.Context, project *store.Project) (err error) {
+	createdRoot, err := s.provisionHubNativeWorkspace(ctx, project)
+	if err != nil {
+		return err
+	}
+	if createdRoot {
+		// This create made the project root: a later storage failure rolls
+		// the create back (the callers remove the row), so the tree goes too.
+		defer func() {
+			if errors.Is(err, errWorkspaceStorageUnavailable) {
+				s.removeCreatedProjectRoot(project)
+			}
+		}()
+	}
 	scionDir, err := s.ensureProjectConfigDir(project, true)
 	if err != nil {
 		return err
@@ -1135,10 +1164,79 @@ func (s *Server) seedSharedProjectIdentity(project *store.Project, scionDir stri
 	}
 	if _, err := s.ensureProjectConfigIdentity(project); err != nil {
 		s.projectsLogger().Warn("failed to write the project identity files on shared workspace storage",
-			"project_id", project.ID, "error", err)
+			"project_id", project.ID, "error", sanitizedStorageError(err))
 		return fmt.Errorf("project configuration: %w", errWorkspaceStorageUnavailable)
 	}
 	return nil
+}
+
+// ensureSharedProjectIdentityBestEffort writes the project-id and
+// project-slug files for a project whose create seeds no project
+// configuration otherwise: a git project that is not a shared workspace
+// (clone-per-agent or worktree-per-agent), and a project created by
+// handleProjectRegister. A no-op on the local backend.
+// Hub-native and shared-workspace projects are seeded by initHubManagedProject
+// and cloneSharedWorkspaceProject (seedSharedProjectIdentity) and do not call
+// this, so each project shape has exactly one seeding call site at create.
+// Best-effort: a failure is logged and the create goes on (the hub-start
+// pass ensureProjectConfigIdentities retries it); a project-id naming
+// another project is left unchanged and reported by
+// ensureProjectConfigIdentity, as for the other shapes.
+func (s *Server) ensureSharedProjectIdentityBestEffort(project *store.Project) {
+	if !s.workspaceBackendShared() {
+		return
+	}
+	if _, err := s.ensureProjectConfigIdentity(project); err != nil {
+		s.projectsLogger().Warn("failed to write the project identity files on shared workspace storage",
+			"project_id", project.ID, "error", sanitizedStorageError(err))
+	}
+}
+
+// invalidClientProjectIDMessage is the 400 text for a client-supplied
+// project ID that is not a canonical UUID.
+const invalidClientProjectIDMessage = "id must be a canonical lowercase UUID (for example 0b6f3e1a-2c4d-4e5f-8a9b-0c1d2e3f4a5b)"
+
+// validClientProjectID reports whether id, a client-supplied project ID, is
+// empty (the hub then generates one) or a canonical lowercase UUID, the form
+// the hub and the CLI generate. Other forms uuid.Parse accepts (braces, urn:,
+// upper case) are refused: the ID keys a directory tree on shared storage.
+func validClientProjectID(id string) bool {
+	if id == "" {
+		return true
+	}
+	u, err := uuid.Parse(id)
+	return err == nil && u.String() == id
+}
+
+// sanitizedStorageError renders err for an operator log line without any
+// path: the operation and the errno of the innermost path, link or syscall
+// error, behind the outermost code-authored prefix when that holds no path
+// separator. A deep OS error never carries a host path into the log.
+func sanitizedStorageError(err error) string {
+	if err == nil {
+		return ""
+	}
+	prefix := ""
+	if head, _, ok := strings.Cut(err.Error(), ":"); ok && !strings.ContainsAny(head, `/\`) {
+		prefix = head + ": "
+	}
+	var pe *fs.PathError
+	var le *os.LinkError
+	var se *os.SyscallError
+	switch {
+	case errors.As(err, &pe):
+		return prefix + pe.Op + ": " + pe.Err.Error()
+	case errors.As(err, &le):
+		return prefix + le.Op + ": " + le.Err.Error()
+	case errors.As(err, &se):
+		return prefix + se.Syscall + ": " + se.Err.Error()
+	case errors.Is(err, errWorkspaceStorageUnavailable):
+		return prefix + errWorkspaceStorageUnavailable.Error()
+	}
+	if prefix != "" {
+		return strings.TrimSuffix(prefix, ": ")
+	}
+	return "storage error (details withheld: may name a path)"
 }
 
 // ensureProjectConfigDir creates the hub-managed project's configuration
@@ -1229,7 +1327,8 @@ func (s *Server) writeHubConnectionSettings(project *store.Project, scionDir str
 }
 
 // provisionSharedWorkspace provisions a shared-workspace git project's
-// workspace on a shared backend through provision.ProvisionShared with the
+// workspace, or (with no clone and no workspace lock) a hub-native project's
+// empty workspace, on a shared backend through provision.ProvisionShared with the
 // Kubernetes init container's layout: the uuid workspace leaf
 // (Resolve(workspace)), shared-plain, the sentinel and lock in
 // <ProjectRoot>/provision (provision.ProjectStateDir), the legacy lock in
@@ -1251,10 +1350,14 @@ var provisionSharedClone = provision.ProvisionShared
 // refusal of a project's clone URL for a hub-side clone, and reports whether
 // it wrote the response.
 func writeSharedCloneSourceRefused(w http.ResponseWriter, err error) bool {
-	if !errors.Is(err, provision.ErrHostCloneURLRefused) {
+	switch {
+	case errors.Is(err, provision.ErrHostCloneURLRefused):
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeInvalidRequest, provision.ErrHostCloneURLRefused.Error(), nil)
+	case errors.Is(err, errSSHCloneURLNeedsProjectSecret):
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeInvalidRequest, errSSHCloneURLNeedsProjectSecret.Error(), nil)
+	default:
 		return false
 	}
-	writeError(w, http.StatusUnprocessableEntity, ErrCodeInvalidRequest, provision.ErrHostCloneURLRefused.Error(), nil)
 	return true
 }
 
@@ -1278,7 +1381,7 @@ func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Pr
 	}
 	storageErr := func(step string, err error) error {
 		s.projectsLogger().Warn("shared workspace provisioning: storage step failed",
-			"project_id", project.ID, "step", step, "error", err)
+			"project_id", project.ID, "step", step, "error", sanitizedStorageError(err))
 		return fmt.Errorf("shared workspace provisioning: %w", errWorkspaceStorageUnavailable)
 	}
 	pr, err := layout.ProjectRoot(project.ID)
@@ -1300,7 +1403,7 @@ func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Pr
 		}
 		if err := shareddirs.DeleteProjectRoot(base, pr.SubPathRoot, project.ID); err != nil {
 			s.projectsLogger().Warn("shared workspace provisioning: could not remove the failed project tree",
-				"project_id", project.ID, "error", err)
+				"project_id", project.ID, "error", sanitizedStorageError(err))
 		}
 	}
 	root, err := res.Open(true)
@@ -1332,6 +1435,27 @@ func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Pr
 	if cloneCfg != nil && project.GitRemote != "" {
 		cloneToken = s.resolveCloneToken(ctx, project)
 	}
+	// The legacy lock in the workspace itself excludes an older pod that may
+	// already be provisioning a git workspace. A hub-native workspace is new
+	// (or absent) and is never cloned, so it takes only the state-directory
+	// lock and gets no lock file in its root.
+	legacyLockDir := res.HostPath
+	if project.GitRemote == "" {
+		legacyLockDir = ""
+	}
+	// With no project credential the clone runs anonymously: it is run
+	// unbound, so the hardened clone resets the hub host's own git
+	// authentication for it, on any host.
+	tokenRemote := project.GitRemote
+	if cloneToken == "" {
+		tokenRemote = ""
+	}
+	if cloneCfg != nil {
+		if err := sshCloneURLRefused(cloneCfg.URL, cloneToken != ""); err != nil {
+			cleanup()
+			return err
+		}
+	}
 	err = provisionSharedClone(provision.ProvisionInput{
 		Ctx:              ctx,
 		Resolved:         provision.ResolvedWorkspace{HostPath: res.HostPath},
@@ -1339,20 +1463,147 @@ func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Pr
 		Mode:             store.SharingModeSharedPlain,
 		GitClone:         cloneCfg,
 		CloneToken:       cloneToken,
-		CloneTokenRemote: project.GitRemote,
+		CloneTokenRemote: tokenRemote,
 		HostGitHardened:  true,
 		NFSUID:           layout.UID,
 		NFSGID:           layout.GID,
 		SentinelDir:      stateDir,
-		LegacyDir:        res.HostPath,
+		LegacyDir:        legacyLockDir,
 	})
 	if err != nil {
 		s.projectsLogger().Warn("shared workspace provisioning failed",
-			"project_id", project.ID, "error", err.Error())
+			"project_id", project.ID, "error", sanitizedStorageError(err))
 		cleanup()
+		if cloneCfg == nil {
+			// No clone ran (a hub-native workspace): a storage failure, not a git one.
+			return fmt.Errorf("shared workspace provisioning: %w", errWorkspaceStorageUnavailable)
+		}
 		return sharedWorkspaceCloneError(err)
 	}
 	return nil
+}
+
+// provisionHubNativeWorkspace provisions the empty workspace of a hub-native
+// project (no git remote) on a shared backend at create, through the same
+// provisionSharedWorkspace a shared-workspace git project uses, with no
+// clone: the workspace leaf and the provisioning state directory through the
+// confined EnsureLeaf walk (mode 2775, default ACL), PrepareStateDir, then
+// provision.ProvisionShared (shared-plain, SentinelDir =
+// <ProjectRoot>/provision, the Layout uid/gid), which chowns the leaf and
+// writes the sentinel. A no-op on the local backend, for any git project,
+// for an empty-per-agent project (no project workspace) and for the global
+// project. Errors wrap errWorkspaceStorageUnavailable (no host path); a
+// project root this call created is removed again on failure.
+//
+// It provisions only when this create makes the project root, and reports
+// whether it did. A project root that already exists (a tree another hub on
+// the same share made, or one left behind) is not touched here: its
+// identity is unconfirmed until the project configuration is checked, so its
+// leaf is left to the identity-confirmed startup backfill
+// (backfillHubNativeWorkspace).
+func (s *Server) provisionHubNativeWorkspace(ctx context.Context, project *store.Project) (createdRoot bool, err error) {
+	if !s.hubNativeWorkspaceProject(ctx, project) {
+		return false, nil
+	}
+	exists, err := s.sharedProjectRootExists(project)
+	if err != nil {
+		s.projectsLogger().Warn("hub-native workspace provisioning: could not check the project root",
+			"project_id", project.ID, "error", sanitizedStorageError(err))
+		return false, fmt.Errorf("shared workspace provisioning: %w", errWorkspaceStorageUnavailable)
+	}
+	if exists {
+		s.projectsLogger().Info("hub-native workspace provisioning: the project root already exists; left to the startup backfill",
+			"project_id", project.ID)
+		return false, nil
+	}
+	if err := s.provisionSharedWorkspace(ctx, project); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// hubNativeWorkspaceProject reports whether the hub provisions project's
+// workspace itself (provisionHubNativeWorkspace, backfillHubNativeWorkspace):
+// a shared backend and a hub-native project. This is the one predicate for
+// "hub-native" here:
+//   - never a git project (a hub-created leaf must not change a git project's
+//     provisioning decision), an empty-per-agent project or the global project;
+//   - never a project linked from an existing checkout (origin label linked);
+//   - a project created on the hub (origin label hub) is hub-native;
+//   - a project with no origin label (created before the label existed) is
+//     hub-native only when no provider has a registered local path for it,
+//     since a linked project is registered with one.
+func (s *Server) hubNativeWorkspaceProject(ctx context.Context, project *store.Project) bool {
+	if !s.workspaceBackendShared() || project == nil || project.GitRemote != "" ||
+		project.IsEmptyPerAgent() || isGlobalHubProject(project.Slug) || project.IsLinkedOrigin() {
+		return false
+	}
+	if project.Labels[store.LabelProjectOrigin] == store.ProjectOriginHub {
+		return true
+	}
+	providers, err := s.store.GetProjectProviders(ctx, project.ID)
+	if err != nil {
+		return false
+	}
+	for _, p := range providers {
+		if p.LocalPath != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// sharedProjectRootExists reports whether project's root
+// (<HostBase>/<subpath_root>/<uuid>) exists on the shared backend.
+func (s *Server) sharedProjectRootExists(project *store.Project) (bool, error) {
+	layout, err := s.workspaceLayout()
+	if err != nil {
+		return false, err
+	}
+	pr, err := layout.ProjectRoot(project.ID)
+	if err != nil {
+		return false, err
+	}
+	base, err := pr.ResolvedHostBase()
+	if err != nil {
+		return false, err
+	}
+	switch _, err := os.Lstat(filepath.Join(base, pr.RelPath)); {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	default:
+		return false, err
+	}
+}
+
+// removeCreatedProjectRoot removes the project root a failed create made,
+// with everything under it, through the confined shareddirs.DeleteProjectRoot.
+// Best-effort: a failure is logged with ids only.
+func (s *Server) removeCreatedProjectRoot(project *store.Project) {
+	if err := s.deleteSharedProjectRoot(project); err != nil {
+		s.projectsLogger().Warn("project create rollback: could not remove the project tree this create made",
+			"project_id", project.ID, "error", sanitizedStorageError(err))
+	}
+}
+
+// deleteSharedProjectRoot removes project's root on the shared backend with
+// everything under it (shareddirs.DeleteProjectRoot: the confined walk).
+func (s *Server) deleteSharedProjectRoot(project *store.Project) error {
+	layout, err := s.workspaceLayout()
+	if err != nil {
+		return err
+	}
+	pr, err := layout.ProjectRoot(project.ID)
+	if err != nil {
+		return err
+	}
+	base, err := pr.ResolvedHostBase()
+	if err != nil {
+		return err
+	}
+	return shareddirs.DeleteProjectRoot(base, pr.SubPathRoot, project.ID)
 }
 
 // sharedWorkspaceCloneError maps a provisioning failure to a *util.GitError
@@ -1405,7 +1656,10 @@ func (s *Server) updateSharedProjectSlugFile(project *store.Project, newSlug str
 // On the local workspace backend it performs the host-side git clone into
 // the hub-managed workspace (~/.scion/projects/<slug>) and seeds the .scion
 // project structure on top; if the clone fails, the workspace directory is
-// cleaned up and an error is returned (unchanged).
+// cleaned up and an error is returned (unchanged). The clone URL is checked
+// first (provision.CheckHostCloneURL, refused with
+// provision.ErrHostCloneURLRefused) and cloned with the hardened transport
+// settings, as on a shared backend.
 //
 // On a shared backend the hub provisions the uuid workspace agents mount
 // (provisionSharedWorkspace: the provisioning lock, the clone and the
@@ -1428,29 +1682,46 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 		return s.seedHubProjectSettings(project, scionDir)
 	}
 
+	// The clone URL comes from the clone-url label or the project's git
+	// remote, and the clone runs on the hub host: as on a shared backend it
+	// is checked before any filesystem work, refused (never rewritten)
+	// unless it is an https, ssh or git URL, and cloned with the hardened
+	// transport settings and the token bound to the project's remote
+	// (hostGitAccess).
+	cloneURL := resolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
+	localFixture := localCloneFixtureAllowed(cloneURL)
+	if !localFixture {
+		if err := provision.CheckHostCloneURL(cloneURL); err != nil {
+			return err
+		}
+	}
+
 	workspacePath, err := localProjectPath(project.Slug)
 	if err != nil {
 		return err
 	}
-
-	// Build clone URL from the project's git remote.
-	// The clone-url label may be an explicit override (e.g. local path for testing).
-	// Only convert to HTTPS if the URL looks like a remote git URL.
-	cloneURL := resolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
 
 	defaultBranch := project.Labels[store.LabelDefaultBranch]
 	if defaultBranch == "" {
 		defaultBranch = "main"
 	}
 
-	// Resolve a token for authentication.
-	token := s.resolveCloneToken(ctx, project)
-
-	// Perform the clone
-	if err := util.CloneSharedWorkspace(workspacePath, cloneURL, defaultBranch, token); err != nil {
+	// Perform the clone. The project's token goes only to its own recorded
+	// remote (hostGitAccess).
+	var cloneErr error
+	if localFixture {
+		cloneErr = util.CloneSharedWorkspace(workspacePath, cloneURL, defaultBranch, "")
+	} else {
+		if err := s.refuseSSHWithoutProjectSecret(ctx, project, cloneURL); err != nil {
+			return err
+		}
+		token, hardening := s.hostGitAccess(ctx, project, cloneURL)
+		cloneErr = util.CloneSharedWorkspaceHardened(workspacePath, cloneURL, defaultBranch, token, hardening)
+	}
+	if cloneErr != nil {
 		// Clean up the workspace directory on failure — return to pre-creation state
 		_ = util.RemoveAllSafe(workspacePath)
-		return fmt.Errorf("shared workspace clone failed: %w", err)
+		return fmt.Errorf("shared workspace clone failed: %w", cloneErr)
 	}
 
 	// Agents provision from this clone, and provisioning requires
@@ -1528,7 +1799,8 @@ func (s *Server) autoAssociateGitHubInstallation(ctx context.Context, project *s
 // It tries GitHub App installation tokens first, then project secrets, then the
 // creating user's profile-level GitHub token as a final fallback. This last
 // fallback solves the bootstrap problem where a new project linked to a private
-// repo has no project-level credentials yet.
+// repo has no project-level credentials yet; it applies only to a project
+// whose recorded remote is on the GitHub host (personalTokenHostAllowed).
 func (s *Server) resolveCloneToken(ctx context.Context, project *store.Project) string {
 	// Try GitHub App token first
 	if project.GitHubInstallationID != nil {
@@ -1549,8 +1821,12 @@ func (s *Server) resolveCloneToken(ctx context.Context, project *store.Project) 
 			return sv.Value
 		}
 
-		// Fall back to the creating user's profile-level GITHUB_TOKEN
-		if project.CreatedBy != "" {
+		// Fall back to the creating user's profile-level GITHUB_TOKEN. It
+		// is a personal token, so it is used only when the project's
+		// recorded remote is on the GitHub host: a project's remote is
+		// chosen by its creator and inherited by a project clone, so it
+		// cannot decide alone where a user's token goes.
+		if project.CreatedBy != "" && personalTokenHostAllowed(project.GitRemote, s.personalTokenGitHubHost()) {
 			sv, err = s.secretBackend.Get(ctx, "GITHUB_TOKEN", "user", project.CreatedBy)
 			if err == nil && sv != nil && sv.Value != "" {
 				s.projectsLogger().Info("using creator's GitHub token for project clone",
@@ -1631,10 +1907,11 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// SECURITY-GATE: the embedded-broker form of register (req.Broker set)
-	// creates or re-registers a broker and returns its secret, so it is
-	// session-only (CREDENTIAL_MANAGEMENT): every credential other than an
-	// interactive session or a dev credential is refused before any lookup
-	// or write. A token registers brokers through POST /api/v1/brokers.
+	// creates or re-registers a broker and can return a newly minted secret
+	// (never a stored one), so it is session-only (CREDENTIAL_MANAGEMENT):
+	// every credential other than an interactive session or a dev
+	// credential is refused before any lookup or write. A token registers
+	// brokers through POST /api/v1/brokers.
 	if req.Broker != nil {
 		if _, ok := s.requireSessionCredentialFor(w, ctx, authzop.ReasonCredentialManagement); !ok {
 			return
@@ -1643,6 +1920,10 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 
 	if req.Name == "" {
 		ValidationError(w, "name is required", nil)
+		return
+	}
+	if !validClientProjectID(req.ID) {
+		ValidationError(w, invalidClientProjectIDMessage, map[string]interface{}{"field": "id"})
 		return
 	}
 
@@ -2069,6 +2350,12 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		// Ensure the #general chat topic exists for this project (best-effort).
 		s.ensureProjectGeneralTopic(ctx, project)
 
+		// A registered project is dispatched by slug to every provider without a
+		// registered local path (the auto-linked brokers below; brokerUsesSlugProjectDir),
+		// and on a shared backend such a broker requires the project identity
+		// files: write them now (best-effort), not at the next hub start.
+		s.ensureSharedProjectIdentityBestEffort(project)
+
 		// Auto-link brokers that have auto_provide enabled
 		s.autoLinkProviders(ctx, project)
 	} else {
@@ -2175,7 +2462,11 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			// Update existing broker. The name and slug are set at
 			// creation or through the update API, so they are kept.
 			broker = existingBroker
-			broker.Version = req.Broker.Version
+			// An empty version (hubsync sends none) keeps the stored one;
+			// see brokerVersionToken.
+			if req.Broker.Version != "" {
+				broker.Version = brokerVersionToken(req.Broker.Version)
+			}
 			broker.Status = store.BrokerStatusOnline
 			broker.ConnectionState = "connected"
 			broker.Capabilities = req.Broker.Capabilities
@@ -2195,7 +2486,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 				ID:              brokerID,
 				Name:            req.Broker.Name,
 				Slug:            api.Slugify(req.Broker.Name),
-				Version:         req.Broker.Version,
+				Version:         brokerVersionToken(req.Broker.Version),
 				Status:          store.BrokerStatusOnline,
 				ConnectionState: "connected",
 				Capabilities:    req.Broker.Capabilities,
@@ -2262,10 +2553,22 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Generate HMAC credentials for the broker if broker auth service is available
-		// (deprecated flow only - new flow gets secrets from /brokers/join)
-		if s.brokerAuthService != nil {
+		// (deprecated flow only - new flow gets secrets from /brokers/join).
+		// The response carries a secret only when BOTH hold:
+		//  - transport policy: the request arrived over TLS or from this host
+		//    (config.ConfidentialArrival), as for join and rotate. Otherwise the
+		//    project and broker are still registered, no secret is minted or
+		//    returned, and the broker gets its secret by joining;
+		//  - this request minted the broker's first secret. A broker that already
+		//    has a secret gets none back: its stored secret is never returned here,
+		//    and a new one comes only from POST /brokers/{id}/rotate-secret or
+		//    /brokers/join.
+		if !config.ConfidentialArrival(r, s.transportTrustedNets) {
+			slog.Warn("Project register: broker secret withheld; the request did not arrive over TLS or from this host",
+				"brokerID", broker.ID, "remote_addr", r.RemoteAddr)
+		} else if s.brokerAuthService != nil {
 			var err error
-			secretKey, err = s.brokerAuthService.GenerateAndStoreSecret(ctx, broker.ID)
+			secretKey, _, err = s.brokerAuthService.MintSecretIfAbsent(ctx, broker.ID)
 			if err != nil {
 				// Log but don't fail - broker is registered, can complete join later
 				util.Debugf("Warning: failed to generate broker secret: %v", err)
@@ -2292,9 +2595,14 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// The node image registry is shown redacted (ptone/scion#3916).
+	// The node image registry is shown redacted (ptone/scion#3916), and the
+	// storage values only to a hub admin or the broker itself.
 	if broker != nil {
-		shown := brokerForDisplay(*broker)
+		self := false
+		if brokerIdent := GetBrokerIdentityFromContext(ctx); brokerIdent != nil && brokerIdent.BrokerID() == broker.ID {
+			self = true
+		}
+		shown := brokerForDisplay(s.brokerStorageForViewer(ctx, *broker, self))
 		broker = &shown
 	}
 	writeJSON(w, http.StatusOK, RegisterProjectResponse{
@@ -2878,7 +3186,7 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 	agents := make([]AgentWithCapabilities, 0, len(result.Items))
 	for i := range result.Items {
 		item := result.Items[i]
-		item.AppliedConfig, item.PendingConfig = redactAgentConfigsForResponse(item.AppliedConfig, item.PendingConfig, s.envViewAllowed(ctx, identity, &item, caps[i]))
+		item.AppliedConfig, item.PendingConfig = s.redactAgentConfigsForResponse(item.AppliedConfig, item.PendingConfig, s.envViewAllowed(ctx, identity, &item, caps[i]))
 		agents = append(agents, AgentWithCapabilities{Agent: item, Cap: caps[i]})
 	}
 	capsDone()
@@ -3126,6 +3434,14 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		if err == store.ErrNotFound {
 			agent, err = s.store.GetAgent(ctx, agentID)
+			// For the message action, a caller who cannot read the target
+			// agent's project gets exactly the unknown-agent answer for a
+			// soft-deleted target; a reader keeps the answer it gets today.
+			// canReadProject fails closed: a lookup fault counts as no read.
+			if err == nil && action == api.AgentActionMessage && (agent == nil ||
+				(!agent.DeletedAt.IsZero() && !s.canReadProject(ctx, GetIdentityFromContext(ctx), agent.ProjectID))) {
+				err = store.ErrNotFound
+			}
 			if (errors.Is(err, store.ErrNotFound) || (err == nil && agent.ProjectID != projectID)) && isVisitorIdentity(GetIdentityFromContext(ctx)) {
 				// A visitor gets the one refusal for an unknown agent too
 				// (admitVisitorSubRoute already refused it before here).
@@ -3596,6 +3912,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 		Actor:     userIdentity,
 		Force:     r.URL.Query().Get("force") == "true",
 	}
+	effectInputs.forced = req.Force
 	result, decision := s.deletionService.Delete(ctx, req)
 	if decision != nil {
 		writeError(w, decision.HTTPStatus, decision.DenialCode, decision.Reason, decision.Details)
@@ -3608,6 +3925,14 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 	deletedProject := result.Project
 	s.executePostDeletionEffects(ctx, id, deletedProject, effectInputs)
 
+	// The Hub is the only remover of the project's tree on shared project
+	// storage: when it cannot see that storage the tree is kept, and the
+	// delete says so (200 with fixed, path-free items) instead of an
+	// unqualified 204.
+	if kept := s.projectDeleteStorageKept(ctx, id); len(kept) > 0 {
+		writeJSON(w, http.StatusOK, projectDeleteResult{StorageKept: kept})
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -3623,6 +3948,8 @@ type deletionEffectInputs struct {
 	harnesses []store.HarnessConfig
 	providers []store.ProjectProvider
 	project   *store.Project // may be nil if not found
+	// forced is set for a forced delete (ProjectDeleteRequest.Force).
+	forced bool
 }
 
 // preEnumerateDeletionEffects gathers read-only data needed for post-deletion
@@ -3684,29 +4011,41 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 		s.quotaService.Release(ctx, "max_projects_per_user", projectID)
 	}
 
-	// Effect 3: Notify provider brokers to clean up local project
-	// directories and the project's NFS workspace tree, if any. Each
-	// provider is filtered by brokerUsesSlugProjectDir.
+	// Effect 3: Notify provider brokers to clean up their local project
+	// directories and project-configs entries and to release the project's
+	// per-dir shared-dir claims. Each provider is filtered by
+	// brokerUsesSlugProjectDir.
 	s.cleanupBrokerProjectDirectoriesFromInputs(ctx, project, inputs.providers)
 
 	// Effect 5: Filesystem cleanup (hub-managed projects). On the local
-	// workspace backend the hub-managed workspace is ~/.scion/projects/<slug>;
-	// on a shared backend the project tree (workspace and project
-	// configuration under ProjectRoot) is removed by the ID-keyed tree
-	// cleanup below.
-	if (project.GitRemote == "" || project.IsSharedWorkspace()) && project.Slug != "" {
-		projectPath := s.removeHubManagedProjectDir(projectID, project.Slug)
-		s.removeEmbeddedBrokerProjectDir(project.Slug, projectPath)
-	} else if project.Slug != "" && s.embeddedBrokerUsesSlugProjectDir(project, inputs.providers) {
-		// A git project the embedded broker served without a linked path
-		// lives at ~/.scion/projects/<slug> on it (ptone/scion#2569).
-		s.removeEmbeddedBrokerProjectDir(project.Slug, "")
+	// workspace backend the hub-managed workspace is ~/.scion/projects/<slug>
+	// (and the embedded broker's directory is that same one), removed here
+	// as before. On a shared backend the hub's and the embedded broker's
+	// ~/.scion/projects/<slug> is a legacy slug-keyed tree, removed by the
+	// storage cleanup below only when its identity markers name this
+	// project, never on its name alone.
+	if !s.workspaceBackendShared() {
+		if (project.GitRemote == "" || project.IsSharedWorkspace()) && project.Slug != "" {
+			projectPath := s.removeHubManagedProjectDir(projectID, project.Slug)
+			s.removeEmbeddedBrokerProjectDir(project.Slug, projectPath)
+		} else if project.Slug != "" && s.embeddedBrokerUsesSlugProjectDir(project, inputs.providers) {
+			// A git project the embedded broker served without a linked path
+			// lives at ~/.scion/projects/<slug> on it (ptone/scion#2569).
+			s.removeEmbeddedBrokerProjectDir(project.Slug, "")
+		}
 	}
-	// Remove the project's ID-keyed NFS workspace tree from the hub's own
-	// mount of the export, in the background. This covers the embedded
-	// broker (skipped by Effect 3), linked-path providers and brokers
-	// without a provider row.
-	s.startHubNFSProjectTreeCleanup(projectID)
+	// Remove the project's storage the hub is the one deleter of, in the
+	// background: its tree on the shared project storage (from the hub's
+	// own mount, whatever provider rows exist), the legacy slug-keyed trees
+	// whose markers name it, and its object-storage prefix.
+	// A forced delete that found agent records may leave agents running on
+	// their brokers: their project tree is not removed now but after a
+	// grace (forcedDeleteGrace), by the maintenance pass.
+	var deferUntil time.Time
+	if inputs.forced && len(inputs.agents) > 0 {
+		deferUntil = time.Now().Add(s.forcedDeleteGrace())
+	}
+	s.startProjectStorageCleanup(project, deferUntil)
 
 	// Effect 7: Clean up external project config directory.
 	if project.Slug != "" && project.ID != "" {
@@ -3716,12 +4055,29 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 		}
 		if configPath, err := marker.ExternalProjectPath(); err == nil {
 			projectConfigDir := filepath.Dir(configPath)
-			if err := config.RemoveProjectConfig(projectConfigDir); err != nil && !os.IsNotExist(err) {
+			_, statErr := os.Lstat(projectConfigDir)
+			err := config.RemoveProjectConfig(projectConfigDir)
+			if err != nil && !os.IsNotExist(err) {
 				s.projectsLogger().Warn("failed to remove project config directory",
 					"project_id", projectID, "error_class", fsErrorClass(err))
+			} else {
+				err = nil
 			}
+			d := projectfs.Deletion{Tree: projectfs.TreeProjectConfig, Path: projectConfigDir, Outcome: projectfs.OutcomeDeleted}
+			switch {
+			case err != nil:
+				d.Outcome, d.Err = projectfs.OutcomeFailed, err
+			case os.IsNotExist(statErr):
+				d.Outcome = projectfs.OutcomeAbsent
+			}
+			s.auditStorage(ctx, s.projectsLogger(), projectID, "", []projectfs.Deletion{d})
 		}
 	}
+
+	// Effect 7b: Remove the starred messages stored under the project (its
+	// threads and the DMs with its agents). Best effort: the read checks
+	// already hide them, and upkeep purges any left behind.
+	s.deleteMessageStarsOfProject(ctx, projectID)
 
 	// Effect 8: Publish project-deleted event.
 	s.events.PublishProjectDeleted(ctx, projectID)
@@ -3731,7 +4087,7 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 // deleted project on the local workspace backend, ~/.scion/projects/<slug>,
 // only when it is a direct child of that projects root. On a shared backend
 // it removes nothing (the project tree is keyed by project ID and removed by
-// startHubNFSProjectTreeCleanup). When the slug fails the slug rule or the
+// startProjectStorageCleanup). When the slug fails the slug rule or the
 // path cannot be resolved, nothing is removed and a warning is logged.
 //
 // It returns the local path it was asked to remove, or "" when nothing was
@@ -3927,6 +4283,20 @@ func (s *Server) cleanupBrokerProjectDirectoriesFromInputs(ctx context.Context, 
 			continue
 		}
 		if err := client.CleanupProject(ctx, provider.BrokerID, broker.Endpoint, project.Slug, project.ID); err != nil {
+			if isBrokerStatus(err, http.StatusConflict) {
+				// The broker kept its project directory: it still has
+				// agents of the project (a forced delete), or another
+				// Runtime Broker instance of its host does. That is the
+				// outcome, not a failure: the delete has committed and
+				// stands.
+				s.projectsLogger().Info("project directory kept on broker",
+					"project_id", project.ID, "slug", project.Slug, "broker", provider.BrokerID)
+				s.auditStorage(ctx, s.projectsLogger(), project.ID, "", []projectfs.Deletion{{
+					Tree: projectfs.TreeProjectDir, Path: "projects/" + project.Slug, Outcome: projectfs.OutcomeKept,
+					Reason: brokerProjectDirKeptReason(provider.BrokerID),
+				}})
+				continue
+			}
 			s.projectsLogger().Warn("failed to cleanup project on broker",
 				"project_id", project.ID, "slug", project.Slug,
 				"broker", provider.BrokerID, "endpoint", broker.Endpoint, "error", err)
@@ -3934,10 +4304,16 @@ func (s *Server) cleanupBrokerProjectDirectoriesFromInputs(ctx context.Context, 
 	}
 }
 
+// brokerProjectDirKeptReason is the audit reason of a broker project
+// directory the broker kept (it answered the cleanup with 409).
+func brokerProjectDirKeptReason(brokerID string) string {
+	return "kept on Runtime Broker " + brokerID + ": it still has agents of the project, or another instance of its host does"
+}
+
 // brokerUsesSlugProjectDir reports whether provider's broker keeps project
 // in its conventional ~/.scion/projects/<slug> directory, so that the
-// broker's project cleanup (which removes that directory and the project's
-// NFS workspace tree) applies to it. That holds for hub-managed projects (no
+// broker's project cleanup (which removes that directory and releases the
+// project's shared-dir claims) applies to it. That holds for hub-managed projects (no
 // git remote, or a shared-workspace git project) on every provider, and for
 // any other git project on a provider with no registered local path: the
 // hub then dispatches by slug (projectDispatchInfo.projectSlug in
@@ -3959,74 +4335,6 @@ func (s *Server) embeddedBrokerUsesSlugProjectDir(project *store.Project, provid
 		}
 	}
 	return false
-}
-
-// hubNFSProjectCleanupRetryDelay is how long a failed NFS project tree
-// removal waits before its one retry (agent pods may still be terminating),
-// and hubNFSProjectCleanupTimeout bounds the whole background cleanup.
-// Variables so tests can shorten them.
-var (
-	hubNFSProjectCleanupRetryDelay = 30 * time.Second
-	hubNFSProjectCleanupTimeout    = 15 * time.Minute
-)
-
-// hubNFSCleanupAttemptHook, when set, is called with the attempt number (1
-// or 2) just before each attempt's still-deleted check. Tests only.
-var hubNFSCleanupAttemptHook func(attempt int)
-
-// startHubNFSProjectTreeCleanup starts, in the background, the removal of
-// the deleted project's tree <MountRoot>/<shareID>/<SubPathRoot>/<projectID>
-// on the NFS workspace export when this hub's workspace storage is nfs
-// (ptone/scion#2569). The tree is keyed by project ID, so removing it is safe
-// whatever provider rows exist; brokers remove it from their own mounts too,
-// and whichever runs second finds nothing to do. A share not mounted on the
-// hub counts as nothing to remove. The removal is guarded by
-// runtime.CleanupNFSProjectRetry, which retries a failed removal once. It
-// runs with its own context and timeout, not the request's.
-//
-// Project IDs can be reused (registering from the same checkout brings the
-// same ID back), so immediately before each attempt the project must still
-// be absent from the store (GetProject returns store.ErrNotFound; any other
-// result keeps the tree, logged at Info). A final failure is logged for an
-// operator, never returned.
-func (s *Server) startHubNFSProjectTreeCleanup(projectID string) {
-	wsCfg := s.config.ProjectStorageConfig.WorkspaceStorage()
-	if wsCfg == nil || wsCfg.Backend != "nfs" || wsCfg.NFS == nil || len(wsCfg.NFS.Shares) == 0 {
-		return
-	}
-	nfs := wsCfg.NFS
-	log := s.projectsLogger()
-	retryDelay, timeout, hook := hubNFSProjectCleanupRetryDelay, hubNFSProjectCleanupTimeout, hubNFSCleanupAttemptHook
-	stillDeleted := func(ctx context.Context, attempt int) bool {
-		if hook != nil {
-			hook(attempt)
-		}
-		_, err := s.store.GetProject(ctx, projectID)
-		if errors.Is(err, store.ErrNotFound) {
-			return true
-		}
-		if err != nil {
-			log.Info("NFS workspace tree cleanup: could not confirm the project is still deleted; keeping the tree",
-				"project_id", projectID, "attempt", attempt, "error", err)
-		}
-		return false
-	}
-	s.nfsCleanupWG.Add(1)
-	go func() {
-		defer s.nfsCleanupWG.Done()
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
-		defer cancel()
-		err := runtime.CleanupNFSProjectRetry(ctx, nfs, projectID, retryDelay, stillDeleted)
-		switch {
-		case errors.Is(err, runtime.ErrNFSCleanupSkipped):
-			log.Info("NFS workspace tree kept: the project exists again", "project_id", projectID)
-		case err != nil:
-			log.Error("project's NFS workspace tree was not removed after project delete; an operator must remove it",
-				"project_id", projectID, "error", err)
-		default:
-			log.Info("removed project's NFS workspace tree (if present)", "project_id", projectID)
-		}
-	}()
 }
 
 // NOTE: deleteProjectAgents was replaced by dispatchAgentDeletions in RS3 R1,

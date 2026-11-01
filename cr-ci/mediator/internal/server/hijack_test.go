@@ -222,6 +222,8 @@ func TestHijackKill(t *testing.T) {
 		{"fork PR, busy registration", &fakes.GitHubRun{ID: 12, Repo: testRepo, HeadRepo: "contributor/example-repo", Event: "pull_request", Status: "in_progress"}, testRepo, true, "cr-job-120"},
 		{"pull_request_target", &fakes.GitHubRun{ID: 12, Repo: testRepo, HeadRepo: testRepo, Event: "pull_request_target", Status: "in_progress"}, testRepo, false, "cr-job-120"},
 		{"workflow_run", &fakes.GitHubRun{ID: 12, Repo: testRepo, HeadRepo: testRepo, Event: "workflow_run", Status: "in_progress"}, testRepo, false, "cr-job-120"},
+		{"schedule (not allowlisted)", &fakes.GitHubRun{ID: 12, Repo: testRepo, HeadRepo: testRepo, Event: "schedule", Status: "in_progress"}, testRepo, false, "cr-job-120"},
+		{"unknown event (fail closed)", &fakes.GitHubRun{ID: 12, Repo: testRepo, HeadRepo: testRepo, Event: "some_future_event", Status: "in_progress"}, testRepo, false, "cr-job-120"},
 		{"run lookup fails (fail closed)", nil, testRepo, false, "cr-job-120"},
 		{"repo not served", nil, "other-owner/other-repo", false, "cr-job-120"},
 	}
@@ -614,5 +616,223 @@ func TestReconcileGuardViewResetAfterKill(t *testing.T) {
 	}
 	if n := h.activeExecutions(); n > 3 {
 		t.Errorf("%d active executions, want at most MAX_CONCURRENT_RUNNERS (3)", n)
+	}
+}
+
+// TestHijackBusyRegistration (D11 live test, F1): GitHub refuses to delete a hijacked
+// runner's registration while it still shows the untrusted job running (422, busy).
+// The first kill logs GitHub's refusal at ERROR. Later guard passes, which find the
+// runner again, retry the deletion at WARNING instead of logging a new ERROR each time,
+// and once GitHub lets the registration go the runner is forgotten.
+func TestHijackBusyRegistration(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	h.addSameRepoRun(10)
+	h.queued(100, 10)
+	h.gh.AddRun(fakes.GitHubRun{ID: 12, Repo: testRepo, HeadRepo: "contributor/example-repo", Event: "pull_request", Status: "in_progress",
+		Jobs: []fakes.GitHubJob{{ID: 120, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-100"}}})
+	h.gh.SetRunnerState("cr-job-100", "online", true)
+
+	kills := func(severity string) int {
+		n := 0
+		for _, l := range strings.Split(h.logs.String(), "\n") {
+			if strings.Contains(l, `"event":"`+logging.EventKillHijacked+`"`) && strings.Contains(l, `"severity":"`+severity+`"`) {
+				n++
+			}
+		}
+		return n
+	}
+	if res := h.reconcile(); res.HijacksKilled != 1 || h.activeFor("cr-job-100") != 0 {
+		t.Fatalf("result %+v; cr-job-100 active = %d, want it killed", res, h.activeFor("cr-job-100"))
+	}
+	if kills("ERROR") != 1 || !strings.Contains(h.logs.String(), `"registration_deleted":false`) ||
+		!strings.Contains(h.logs.String(), `"registration_error":`) || !strings.Contains(h.logs.String(), "still running a job") {
+		t.Fatalf("first kill: want one ERROR with registration_deleted false and GitHub's refusal:\n%s", h.logs.String())
+	}
+
+	// Still busy: the next passes find it again and retry quietly.
+	h.reconcile()
+	h.reconcile()
+	if kills("ERROR") != 1 || kills("WARNING") != 2 || !strings.Contains(h.logs.String(), `"repeat":true`) {
+		t.Errorf("repeats: %d ERROR, %d WARNING kill lines, want 1 and 2:\n%s", kills("ERROR"), kills("WARNING"), h.logs.String())
+	}
+
+	// GitHub lets the registration go: it is deleted and the runner forgotten.
+	h.gh.SetRunnerState("cr-job-100", "offline", false)
+	h.reconcile()
+	if !strings.Contains(h.logs.String(), "hijacked runner's registration deleted") {
+		t.Errorf("no deletion line after the registration was released:\n%s", h.logs.String())
+	}
+	if h.hijackedHas("cr-job-100") {
+		t.Error("hijacked runner still remembered after its registration was deleted")
+	}
+	if kills("ERROR") != 1 {
+		t.Errorf("ERROR kill lines = %d, want still 1", kills("ERROR"))
+	}
+}
+
+// TestHijackBusyRegistrationReleasedOnCompleted (D11 live test, F1): in practice GitHub
+// lets the busy registration go when it times the untrusted job out, and reconcile
+// no longer visits a completed job, so the release is seen through the hijacker's
+// completed webhook: the registration is deleted and the runner forgotten. If that
+// delivery is lost, reconcile prunes the entry after cancelledTTL.
+func TestHijackBusyRegistrationReleasedOnCompleted(t *testing.T) {
+	setup := func(t *testing.T) *harness {
+		h := newHarness(t, harnessOpts{})
+		h.addSameRepoRun(10)
+		h.queued(100, 10)
+		h.gh.AddRun(fakes.GitHubRun{ID: 12, Repo: testRepo, HeadRepo: "contributor/example-repo", Event: "pull_request", Status: "in_progress",
+			Jobs: []fakes.GitHubJob{{ID: 120, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-100"}}})
+		h.gh.SetRunnerState("cr-job-100", "online", true)
+		if code, out := h.webhook(inProgress(120, 12, testRepo, "cr-job-100")); code != http.StatusOK || !strings.Contains(out, "killed") {
+			t.Fatalf("in_progress: %d %q", code, out)
+		}
+		if !h.hijackedHas("cr-job-100") {
+			t.Fatalf("busy hijacked runner not remembered:\n%s", h.logs.String())
+		}
+		return h
+	}
+	t.Run("completed delivery", func(t *testing.T) {
+		h := setup(t)
+		// GitHub times the job out and lets the registration go.
+		h.gh.SetJob(12, fakes.GitHubJob{ID: 120, Status: "completed", Labels: []string{testLabel}, RunnerName: "cr-job-100"})
+		h.gh.SetRunnerState("cr-job-100", "offline", false)
+		h.webhook(jobEvent("completed", 120, 12, testRepo, "failure", "cr-job-100"))
+		if !strings.Contains(h.logs.String(), "hijacked runner's registration deleted") {
+			t.Errorf("no deletion line after the completed delivery:\n%s", h.logs.String())
+		}
+		if h.hijackedHas("cr-job-100") {
+			t.Error("hijacked runner still remembered after its registration was deleted")
+		}
+	})
+	t.Run("completed delivery lost", func(t *testing.T) {
+		h := setup(t)
+		h.gh.SetJob(12, fakes.GitHubJob{ID: 120, Status: "completed", Labels: []string{testLabel}, RunnerName: "cr-job-100"})
+		h.reconcile()
+		if !h.hijackedHas("cr-job-100") {
+			t.Fatal("entry pruned before cancelledTTL")
+		}
+		h.clock.Add(cancelledTTL + time.Minute)
+		h.reconcile()
+		if h.hijackedHas("cr-job-100") {
+			t.Error("entry not pruned after cancelledTTL")
+		}
+	})
+}
+
+// hijackedHas reports, under dispatchMu, whether the server remembers runner name as
+// a hijacked runner whose registration GitHub has not let go yet.
+func (h *harness) hijackedHas(name string) bool {
+	h.srv.dispatchMu.Lock()
+	defer h.srv.dispatchMu.Unlock()
+	_, ok := h.srv.hijacked[name]
+	return ok
+}
+
+// countEvent counts the log lines with the given event.
+func (h *harness) countEvent(event string) int {
+	return strings.Count(h.logs.String(), `"event":"`+event+`"`)
+}
+
+// TestSwapChainThreeRunners (followups-v13a): three jobs B, L, S, each with its own
+// runner, take each other's runners in a cycle (B on S's, L on B's, S on L's). The
+// displaced job S is handed on runner by runner: one runner_swap and one
+// runner_rebind per hand-off, no extra launch or kill, and at the end exactly one
+// not-reassigned record serves S, the runner S then runs on.
+func TestSwapChainThreeRunners(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	const b, l, s = 100, 101, 102
+	h.addSameRepoRun(10)
+	h.addSameRepoRun(11)
+	h.addSameRepoRun(12)
+	h.queued(b, 10)
+	h.queued(l, 11)
+	h.queued(s, 12)
+	if n := len(h.executions()); n != 3 {
+		t.Fatalf("executions = %d, want 3", n)
+	}
+	steps := []struct {
+		job    int64
+		run    int64
+		runner string
+		want   string
+	}{
+		{b, 10, RunnerName(s), "swap"}, // B on S's runner: S is displaced, B's own runner takes it over
+		{l, 11, RunnerName(b), "swap"}, // L on B's runner (now serving S): S moves on to L's runner
+		{s, 12, RunnerName(l), "ok"},   // S on L's runner, which serves S
+	}
+	for _, st := range steps {
+		if code, out := h.webhook(inProgress(st.job, st.run, testRepo, st.runner)); code != http.StatusOK || !strings.Contains(out, st.want) {
+			t.Fatalf("job %d on %s: %d %q, want %q", st.job, st.runner, code, out, st.want)
+		}
+	}
+	if got := h.countEvent(logging.EventRunnerSwap); got != 2 {
+		t.Errorf("runner_swap lines = %d, want 2 (one per hand-off)", got)
+	}
+	if got := h.countEvent(logging.EventRunnerRebind); got != 2 {
+		t.Errorf("runner_rebind lines = %d, want 2", got)
+	}
+	for _, want := range []string{
+		`"rebound_runner":"cr-job-100","rebound_to_job_id":102,"rebound_from_job_id":100`,
+		`"rebound_runner":"cr-job-101","rebound_to_job_id":102,"rebound_from_job_id":101`,
+	} {
+		if !strings.Contains(h.logs.String(), want) {
+			t.Errorf("logs lack %s:\n%s", want, h.logs.String())
+		}
+	}
+	if n := len(h.executions()); n != 3 || len(h.cr.CancelCalls) != 0 || len(h.gh.Deleted) != 0 {
+		t.Errorf("executions %d, cancels %v, deleted %v; want 3 and no kill", n, h.cr.CancelCalls, h.gh.Deleted)
+	}
+	h.srv.dispatchMu.Lock()
+	var serving []string
+	for name, rec := range h.srv.runners {
+		if rec.serve == s && !rec.reassigned {
+			serving = append(serving, name)
+		}
+	}
+	h.srv.dispatchMu.Unlock()
+	if len(serving) != 1 || serving[0] != RunnerName(l) {
+		t.Errorf("not-reassigned records serving job %d: %v, want exactly [%s]", s, serving, RunnerName(l))
+	}
+}
+
+// TestReconcileSkipsForgottenRunner (followups-v13a): reconcile discovers in_progress
+// jobs without the lock, so its view can predate a job's completed webhook, which
+// forgets the runner. Such a stale entry must not log the swap again, recreate a
+// record for the finished runner, or dispatch.
+func TestReconcileSkipsForgottenRunner(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	h.addSameRepoRun(10)
+	// GitHub's listing still shows job 101 running on cr-job-100 (the stale view).
+	h.addSameRepoRun(11, fakes.GitHubJob{ID: 101, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-100"})
+	h.queued(100, 10)
+	if code, out := h.webhook(inProgress(101, 11, testRepo, "cr-job-100")); code != http.StatusOK || !strings.Contains(out, "swap") {
+		t.Fatalf("in_progress: %d %q", code, out)
+	}
+	h.webhook(jobEvent("completed", 101, 11, testRepo, "success", "cr-job-100"))
+	swaps, execs := h.countEvent(logging.EventRunnerSwap), len(h.executions())
+	h.gh.SetRunnerState("cr-job-100", "online", true)
+	if res := h.reconcile(); res.HijacksKilled != 0 {
+		t.Errorf("reconcile killed %d", res.HijacksKilled)
+	}
+	if got := h.countEvent(logging.EventRunnerSwap); got != swaps {
+		t.Errorf("runner_swap lines %d -> %d after reconcile; the stale entry was re-checked", swaps, got)
+	}
+	if got := len(h.executions()); got != execs {
+		t.Errorf("executions %d -> %d after reconcile", execs, got)
+	}
+	h.srv.dispatchMu.Lock()
+	_, recreated := h.srv.runners["cr-job-100"]
+	h.srv.dispatchMu.Unlock()
+	if recreated {
+		t.Error("reconcile recreated a record for the forgotten runner cr-job-100")
+	}
+	// After cancelledTTL the forgotten entry is pruned.
+	h.clock.Add(cancelledTTL + time.Minute)
+	h.reconcile()
+	h.srv.dispatchMu.Lock()
+	_, still := h.srv.forgotten["cr-job-100"]
+	h.srv.dispatchMu.Unlock()
+	if still {
+		t.Error("forgotten entry not pruned after cancelledTTL")
 	}
 }

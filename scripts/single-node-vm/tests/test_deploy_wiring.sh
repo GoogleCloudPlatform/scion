@@ -134,9 +134,10 @@ _start_deploy_bg() {
   if [[ "${DEPLOY_BG_DEFAULT_SIGINT:-}" == "true" ]]; then
     # A shell cannot un-ignore a signal that was ignored when it started,
     # and a suite launched in the background from a non-interactive shell
-    # inherits SIGINT ignored. Reset SIGINT to its default before exec so
-    # a SIGINT test does not depend on how the suite was started.
-    launcher=("$PYTHON" -c 'import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])')
+    # inherits SIGINT ignored (and SIGHUP too, under nohup). Reset both to
+    # their defaults before exec so a SIGINT or SIGHUP test does not
+    # depend on how the suite was started.
+    launcher=("$PYTHON" -c 'import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); signal.signal(signal.SIGHUP, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])')
   fi
   set -m
   ${launcher[@]+"${launcher[@]}"} env "$@" bash "$DEPLOY_SH" --config "$config_file" --version v1.0.0-test \
@@ -946,6 +947,129 @@ test_deploy_create_tier_off_interrupt_in_phase4_removes_temp_files() {
   assert_eq "143" "$DEPLOY_RC" "deploy.sh must have ended on SIGTERM"
   _assert_deploy_tmpdir_empty "$deploy_tmpdir" "SIGTERM in Phase 4"
   rm -rf "$deploy_tmpdir"
+}
+
+# run_deploy_create_interrupted_at_hubenv CONFIG_JSON DEPLOY_TMPDIR [SIGNAL]
+# -- runs deploy.sh (create mode) with TMPDIR=DEPLOY_TMPDIR and every
+# `compute ssh`/`compute scp` succeeding. The stub holds the remote
+# `mktemp -d /tmp/scion-hubenv.XXXXXX` call (GCLOUD_STUB_HUBENV_MKTEMP_BLOCKS),
+# which deploy.sh makes right after writing its local 0600 hub.env copy
+# (the session secret). Once that call has started, the copy's state is
+# recorded and deploy.sh's process group is sent SIGNAL (TERM by default,
+# INT or HUP; for INT and HUP, deploy.sh starts with SIGINT and SIGHUP at
+# their default dispositions). Sets INTERRUPT_REACHED, HUBENV_COPIES (how many files
+# under DEPLOY_TMPDIR held SCION_SERVER_SESSION_SECRET= at that moment;
+# contents are never printed), HUBENV_COPY_MODE and HUBENV_DIR_MODE (the
+# copy's and its directory's modes), HUBENV_IN_PRIVATE_DIR (true when the
+# copy was in a scion-deploy.* directory under DEPLOY_TMPDIR), DEPLOY_RC
+# and DEPLOY_LOG. (ptone/scion#6612)
+run_deploy_create_interrupted_at_hubenv() {
+  local config_json="$1" deploy_tmpdir="$2" signal="${3:-TERM}" config_file log_file pid
+  config_file="$(mktemp)"
+  log_file="$(mktemp)"
+  printf '%s' "$config_json" > "$config_file"
+  local sentinel="${GCLOUD_STUB_STATE_DIR}/hubenv-mktemp-started"
+  rm -f "$sentinel"
+  if [[ "$signal" == "INT" || "$signal" == "HUP" ]]; then
+    DEPLOY_BG_DEFAULT_SIGINT=true _start_deploy_bg "$config_file" "$log_file" GCLOUD_STUB_SSH_SUCCEEDS=true \
+      GCLOUD_STUB_HUBENV_MKTEMP_BLOCKS=true TMPDIR="$deploy_tmpdir"
+  else
+    _start_deploy_bg "$config_file" "$log_file" GCLOUD_STUB_SSH_SUCCEEDS=true \
+      GCLOUD_STUB_HUBENV_MKTEMP_BLOCKS=true TMPDIR="$deploy_tmpdir"
+  fi
+  pid="$_DEPLOY_BG_PID"
+  local waited_ms=0
+  while [[ ! -f "$sentinel" && "$waited_ms" -lt 30000 ]]; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    waited_ms=$((waited_ms + 100))
+  done
+  INTERRUPT_REACHED=false
+  [[ -f "$sentinel" ]] && INTERRUPT_REACHED=true
+  local copies copy
+  copies="$(grep -rl 'SCION_SERVER_SESSION_SECRET=' "$deploy_tmpdir" 2>/dev/null || true)"
+  HUBENV_COPIES="$(printf '%s' "$copies" | grep -c . || true)"
+  copy="${copies%%$'\n'*}"
+  HUBENV_COPY_MODE=""
+  HUBENV_DIR_MODE=""
+  HUBENV_IN_PRIVATE_DIR=false
+  if [[ -n "$copy" ]]; then
+    HUBENV_COPY_MODE="$(stat -c %a "$copy" 2>/dev/null || true)"
+    HUBENV_DIR_MODE="$(stat -c %a "$(dirname "$copy")" 2>/dev/null || true)"
+    case "$copy" in
+      "$deploy_tmpdir"/scion-deploy.*/*) HUBENV_IN_PRIVATE_DIR=true ;;
+    esac
+  fi
+  if [[ "$INTERRUPT_REACHED" == "true" && "$signal" != "TERM" ]]; then
+    # Signal first and give deploy.sh time to exit on that signal alone;
+    # _stop_deploy_bg's own SIGTERM below then only reaps it.
+    kill "-${signal}" -- "-${pid}" 2>/dev/null || true
+    waited_ms=0
+    while kill -0 "$pid" 2>/dev/null && [[ "$waited_ms" -lt 10000 ]]; do
+      sleep 0.05
+      waited_ms=$((waited_ms + 50))
+    done
+  fi
+  _stop_deploy_bg "$pid" "$log_file"
+  DEPLOY_LOG="$(cat "$log_file")"
+  rm -f "$config_file" "$log_file"
+}
+
+# _assert_hubenv_interrupt_cleaned SIGNAL EXPECTED_RC -- one interrupted
+# run at the hub.env point: the 0600 copy existed, in deploy.sh's private
+# 0700 directory, when SIGNAL arrived; deploy.sh ended on SIGNAL; nothing
+# is left in its TMPDIR.
+_assert_hubenv_interrupt_cleaned() {
+  local signal="$1" expected_rc="$2" deploy_tmpdir
+  fresh_gcloud_state
+  deploy_tmpdir="$(mktemp -d)"
+  run_deploy_create_interrupted_at_hubenv \
+    "$(base_config_json "$HUB" "" "registry" "us-docker.pkg.dev/demo-project/scion")" "$deploy_tmpdir" "$signal"
+  assert_eq "true" "$INTERRUPT_REACHED" \
+    "deploy.sh must reach the hub.env staging step, or this test can't check cleanup there (${signal}): ${DEPLOY_LOG}"
+  assert_eq "1" "$HUBENV_COPIES" "exactly one local hub.env copy must exist when ${signal} arrives (contents not shown)"
+  assert_eq "600" "$HUBENV_COPY_MODE" "the local hub.env copy must be mode 0600 (${signal})"
+  assert_eq "true" "$HUBENV_IN_PRIVATE_DIR" "the local hub.env copy must be in deploy.sh's private scion-deploy.* directory (${signal})"
+  assert_eq "700" "$HUBENV_DIR_MODE" "deploy.sh's private temp directory must be mode 0700 (${signal})"
+  assert_eq "$expected_rc" "$DEPLOY_RC" "deploy.sh must end on ${signal} (status ${expected_rc}) after cleaning up"
+  assert_eq "" "$(find "$deploy_tmpdir" -mindepth 1 2>/dev/null)" \
+    "an interrupted run (${signal}) must leave nothing in deploy.sh's TMPDIR, the hub.env copy included"
+  rm -rf "$deploy_tmpdir"
+}
+
+test_deploy_create_sigterm_after_hubenv_copy_removes_it() {
+  _assert_hubenv_interrupt_cleaned TERM 143
+}
+
+test_deploy_create_sigint_after_hubenv_copy_removes_it() {
+  _assert_hubenv_interrupt_cleaned INT 130
+}
+
+test_deploy_create_sighup_after_hubenv_copy_removes_it() {
+  _assert_hubenv_interrupt_cleaned HUP 129
+}
+
+# Every local temp file is created inside the private directory, so the
+# per-phase *_ERR files and the hub.env copy are covered from creation:
+# the script registers the directory, not the files.
+# shellcheck disable=SC2016 # literal deploy.sh source lines
+test_deploy_cleanup_trap_covers_exit_and_signals() {
+  local script
+  script="$(cat "$DEPLOY_SH")"
+  assert_contains "$script" 'trap deploy_cleanup EXIT' "the cleanup must run on EXIT"
+  assert_contains "$script" "trap 'deploy_on_signal INT 130' INT" "the cleanup must run on INT and re-raise it"
+  assert_contains "$script" "trap 'deploy_on_signal TERM 143' TERM" "the cleanup must run on TERM and re-raise it"
+  assert_contains "$script" "trap 'deploy_on_signal HUP 129' HUP" "the cleanup must run on HUP and re-raise it"
+  assert_contains "$script" 'DEPLOY_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/scion-deploy.XXXXXX")"' \
+    "local temp files must go to a private directory"
+  assert_contains "$script" 'export TMPDIR="$DEPLOY_TMPDIR"' "every later mktemp must land in the private directory"
+  local trap_line first_local_mktemp
+  trap_line="$(line_number 'trap deploy_cleanup EXIT' "$script")"
+  # The first local mktemp executed at top level (functions run later).
+  first_local_mktemp="$(line_number 'API_LIST_ERR_FILE="$(mktemp)"' "$script")"
+  assert_true "$([[ -n "$trap_line" && -n "$first_local_mktemp" && "$trap_line" -lt "$first_local_mktemp" ]] && echo true || echo false)" \
+    "the trap and the private directory must be set up before the first local temp file"
+  # That it is the only EXIT registration: test_deploy_sh_registers_a_single_exit_trap.
 }
 
 test_deploy_create_tier_off_sigint_in_phase4_removes_temp_files() {
@@ -2639,10 +2763,10 @@ test_deploy_create_api_check_enables_iamcredentials_when_missing() {
   assert_not_contains "$enable_line" "compute.googleapis.com" "an already-enabled API must not be re-enabled"
 }
 
-# deploy.sh never removes the hub SA's project role bindings one by one:
-# --delete deletes the hub SA itself, so every binding it holds
-# (serviceAccountAdmin included) no longer applies. Asserts that path, against the
-# exact state a default create left behind.
+# --delete removes the hub SA's project role bindings (serviceAccountAdmin
+# included; see test_delete_sa_bindings.sh) and then deletes the SA.
+# Asserts the SA delete, against the exact state a default create left
+# behind.
 test_deploy_delete_after_create_deletes_hub_sa_holding_service_account_admin() {
   fresh_gcloud_state
   run_deploy_create "$(base_config_json "$HUB")"

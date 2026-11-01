@@ -166,8 +166,9 @@ On the current version of a Markdown artifact, choose **Review**. An editor open
 
 :::note[Graphical review editor (experimental)]
 When the `web.artifact_review_editor` [experiment](/scion/reference/experiments/) is on (in addition to `hub.artifacts`), **Review** opens a graphical review editor with a **Graphical** and **Source** view toggle:
-- In **Graphical** view (**Track changes** is always on), you edit the rendered document directly: typing, deleting and replacing text are recorded inline as CriticMarkup suggestions, and **Comment** (`Ctrl+Alt+M` or `Cmd+Alt+M`) adds a note on the selection (`Enter` edits a comment you added in this review; comments from earlier reviews are read-only).
-- Changes that cannot be recorded in the graphical view — formatting, headings, lists, tables, code blocks, paragraph breaks, multi-paragraph paste, or edits that would move an earlier comment — show a hint to switch to **Source** view.
+- In **Graphical** view (**Track changes** is always on), you edit the rendered document directly — including prose inside paragraphs, headings, blockquotes, list items, and table cells — and typing, deleting, and replacing text are recorded inline as CriticMarkup suggestions, while **Comment** (`Ctrl+Alt+M` or `Cmd+Alt+M`) adds a note on the selection (`Enter` edits a comment you added in this review; comments from earlier reviews are read-only). Unedited list items, table rows, bullet markers, list numbering, alignment colons, and cell padding stay byte-for-byte as written.
+- Structural changes that cannot be recorded in the graphical view — formatting, adding or removing list items or table rows/columns, code blocks, paragraph breaks, multi-paragraph paste, or edits that would alter CriticMarkup token pairing or move an earlier comment — show a hint to switch to **Source** view.
+- **Large documents**: Markdown documents over **200 KB** (`200,000` UTF-8 bytes) or **4,000** top-level blocks open directly in **Source** view with a notice ("This document is large, so it opened in the Source view."), though you can still switch to **Graphical** view after confirming a prompt. Documents over **500 KB** (`500,000` bytes) or **10,000** top-level blocks open in **Source** view with the **Graphical** toggle disabled ("Too large for the graphical view.").
 - **Source** view uses the CriticMarkup source editor and toolbar (**Comment**, **Suggest**, **Insert**, **Delete**). Suggestions you made in the graphical view become read-only in the graphical view after you switch to **Source**, though you can still edit them in **Source**. Undo history is kept per view and resets when you switch, and your last chosen view is remembered in the browser.
 - Every save goes through the same review publish and Hub checks whether or not `web.artifact_review_editor` is on.
 :::
@@ -339,7 +340,7 @@ While `hub.artifacts` is off:
 - **CLI:** every artifact request answers `404`. `scion artifact publish` adds a hint that the experiment may be off; `get` lists it among the possible causes. Messages sent with `--artifact` lose their references, with a warning.
 - **Check.** Inside an agent, `scion whoami --full` lists the experiments that are on now, on its `Experiments:` line. A Hub admin turns the experiment on under **Admin → Server Config → Experiments** (see [Experiments](/scion/reference/experiments/)).
 
-If the experiment is on but artifacts are disabled in the Hub's settings, the web controls still appear, but every artifact request behind them, and every `scion artifact` command, answers `404` (ptone/scion#4932). Messages sent with `--artifact` lose their references, with a warning. Ask a Hub admin to check the Hub's `artifacts` settings.
+If the experiment is on but artifacts are disabled in the Hub's settings, the web controls still appear, but every artifact request behind them, and every `scion artifact` command, answers `404`. Messages sent with `--artifact` lose their references, with a warning. Ask a Hub admin to check the Hub's `artifacts` settings.
 
 ### A review is refused
 

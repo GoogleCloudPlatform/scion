@@ -376,6 +376,7 @@ var testAdminRoleGatePolicy = map[string]testAdminRoleGate{
 	"admin_delegation_adoption.go:recheckDelegationAdoptionAdmin": {Policy: testAdminPolicyDeny, Reason: "agent authority migration"},
 	"admin_mode.go:adminModeMiddleware":                           {Policy: testAdminPolicyAllow, Reason: "admins pass while admin mode is on (the mode itself is hub.admin_mode.update, deny)"},
 	"admin_mode.go:adminModeWebMiddleware":                        {Policy: testAdminPolicyAllow, Reason: "admins pass while admin mode is on (web)"},
+	"agent_pending_config_authz.go:deferDuringMaintenance":        {Policy: testAdminPolicyAllow, Reason: "a held edit's fold mirrors adminModeMiddleware: an admin saver's keys are not deferred while admin mode is on"},
 	"gcp_iam_settings.go:gcpIAMHubAdmin":                          {Policy: testAdminPolicyDeny, EnforcedIn: "requireGCPIAMHubAdmin", Reason: "GCP permission check settings are runtime configuration"},
 	"handlers_env_secrets.go:authorizeHubEnvVarList":              {Policy: testAdminPolicyDeny, Reason: "hub environment variables (hub.env_vars.read)"},
 	"handlers_env_secrets.go:resolveEnvSecretAccess":              {Policy: testAdminPolicyDeny, Reason: "hub-scope environment variables and secrets"},
@@ -442,6 +443,7 @@ var testAdminSettingsSectionPolicy = map[string]testAdminPolicy{
 	"profiling":         testAdminPolicyDeny,
 
 	"agent_delegation_policy": testAdminPolicyDeny,
+	"chat_retention":          testAdminPolicyDeny,
 }
 
 // testAdminSettingsKeyPolicy classifies every operational settings key
@@ -563,16 +565,19 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	"hub.conduit":                            testAdminPolicyDeny,
 	experiments.ChatScheduledSend:            testAdminPolicyDeny,
 	experiments.ChatStarredMessages:          testAdminPolicyDeny,
+	experiments.ChatRetention:                testAdminPolicyDeny,
 	experiments.AgentEdit:                    testAdminPolicyDeny,
 	experiments.AgentEditHeld:                testAdminPolicyDeny,
 	experiments.AttachmentArtifacts:          testAdminPolicyDeny,
 	experiments.AgentPlugins:                 testAdminPolicyDeny,
+	experiments.PortView:                     testAdminPolicyDeny,
 	experiments.AgentBadges:                  testAdminPolicyDeny,
 	experiments.SSEHiddenTabClose:            testAdminPolicyDeny,
 	experiments.SecretRotation:               testAdminPolicyDeny,
 	experiments.ContentHashV2:                testAdminPolicyDeny,
 	experiments.ArtifactReviewEditor:         testAdminPolicyDeny,
 	experiments.SkillContentHashV2:           testAdminPolicyDeny,
+	experiments.UserDeleteForceCascade:       testAdminPolicyDeny,
 }
 
 // testAdminPolicyInputs are the vocabularies the classification must cover.
@@ -931,7 +936,15 @@ func (d *HTTPAgentDispatcher) restrictTestAdminRootedSecrets(ctx context.Context
 		return resolved
 	}
 	restricted, allowed, root := d.testAdminRootScopes(ctx, agent)
-	if !restricted {
+	return d.applyTestAdminSecretScopes(ctx, agent, resolved, restricted, allowed, root)
+}
+
+// applyTestAdminSecretScopes is restrictTestAdminRootedSecrets with the
+// testAdminRootScopes result supplied by the caller (launch selection
+// decides it once, before it fetches any value): when restricted, it keeps
+// only secrets of an allowed scope and reports the withheld scopes.
+func (d *HTTPAgentDispatcher) applyTestAdminSecretScopes(ctx context.Context, agent *store.Agent, resolved []secret.SecretWithValue, restricted bool, allowed map[string]bool, root string) []secret.SecretWithValue {
+	if !restricted || len(resolved) == 0 {
 		return resolved
 	}
 	out := resolved[:0:0]

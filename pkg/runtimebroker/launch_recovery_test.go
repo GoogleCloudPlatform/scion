@@ -590,3 +590,361 @@ func TestLaunchRuntimeIdentity(t *testing.T) {
 		t.Fatalf("unknown manager identity = %q, want empty", got)
 	}
 }
+
+// --- ptone/scion#5368: StartFailed and PostCompleted terminals -------------
+//
+// Journal fixtures carry the terminal flags as raw JSON, so these tests build
+// without the fields they exercise.
+
+// TestRecoverLaunch_LaunchingRecord_CompletedAnswer_NoCleanup: a launching
+// record cannot tell a Start in progress from one that succeeded, so a
+// completed answer to its broker_restarted report removes nothing.
+func TestRecoverLaunch_LaunchingRecord_CompletedAnswer_NoCleanup(t *testing.T) {
+	mgr := newRecFakeManager(api.AgentInfo{Name: "agent-LRC", ContainerID: "c-run", RunID: "run-LRC"})
+	srv, rtb := newAsyncTestServer(t, mgr)
+	rtb.launchReportFunc = func(*hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		return completedAnswer, nil
+	}
+	jr, agentDir := startFailedTerminalRecord(t, "LRC", "run-LRC")
+	jr.State = journalLaunching.String()
+	jr.Terminal = nil
+	path := writeDeadRecord(t, srv, jr)
+
+	runRecovery(t, srv)
+
+	if n := mgr.CleanupCallCount(); n != 0 {
+		t.Fatalf("a completed answer to a launching record must remove nothing, got %d handle clean-ups", n)
+	}
+	if d := mgr.Deleted(); len(d) != 0 {
+		t.Fatalf("a completed answer to a launching record must delete no run entry: %+v", d)
+	}
+	if !filesExist(agentDir) {
+		t.Fatal("a completed answer to a launching record must keep the files")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("the answered record was not removed: %v", err)
+	}
+}
+
+// TestRecoverLaunch_LaunchingRecord_AppliedAnswer_CleansUp: an applied
+// answer to a launching record's report still removes everything.
+func TestRecoverLaunch_LaunchingRecord_AppliedAnswer_CleansUp(t *testing.T) {
+	mgr := newRecFakeManager()
+	srv, rtb := newAsyncTestServer(t, mgr)
+	rtb.launchReportFunc = appliedReports
+	jr, agentDir := startFailedTerminalRecord(t, "LRA", "")
+	jr.State = journalLaunching.String()
+	jr.Terminal = nil
+	writeDeadRecord(t, srv, jr)
+
+	runRecovery(t, srv)
+
+	if n := mgr.CleanupCallCount(); n != 1 {
+		t.Fatalf("expected one handle clean-up, got %d", n)
+	}
+	if filesExist(agentDir) {
+		t.Fatal("an applied answer must remove the create's files")
+	}
+}
+
+// startFailedTerminalRecord returns a terminal_pending record of a create
+// launch id whose failed terminal is journalled, with a fresh project
+// directory holding the launch's marker and agent files with no recorded
+// owner, and the agent directory's path. runID is the record's run ("" for
+// none, so the file clean-up has no owner to check).
+func startFailedTerminalRecord(t *testing.T, id, runID string) (journalRecord, string) {
+	t.Helper()
+	projectDir := t.TempDir()
+	agentDir := filepath.Join(projectDir, "agents", "agent-"+id)
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "prompt.md"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeLaunchMarker(projectDir, false, "agent-"+id, id); err != nil {
+		t.Fatal(err)
+	}
+	jr := launchingRecord(id)
+	jr.RunID = runID
+	jr.ProjectPath = projectDir
+	jr.State = journalTerminalPending.String()
+	jr.Terminal = &journalTerminal{Step: api.LaunchStepWorkspaceSync, ErrorCode: api.LaunchCodeLaunchTimeout, Message: "launch timed out before the agent started"}
+	return jr, agentDir
+}
+
+// writeFlaggedDeadRecord is writeDeadRecord with each of flags set to true
+// in the record's terminal, written as raw JSON.
+func writeFlaggedDeadRecord(t *testing.T, srv *Server, jr journalRecord, flags ...string) string {
+	t.Helper()
+	path := writeDeadRecord(t, srv, jr)
+	m := rawRecord(t, rawFile(t, path))
+	term, ok := m["terminal"].(map[string]any)
+	if !ok {
+		t.Fatal("test setup: the record has no terminal")
+	}
+	for _, f := range flags {
+		term[f] = true
+	}
+	data, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJournalFile(path, data); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestRecoverLaunch_PostCompletedTerminal_UsesPostCompletedClassifier(t *testing.T) {
+	answer := func(r *hubclient.AgentLaunchReportResult) func(*hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		return func(*hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) { return r, nil }
+	}
+	unanswered := func(*hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		return nil, errors.New("simulated unreachable")
+	}
+	postCompleted := []string{"startFailed", "postCompleted"}
+
+	// The full and resources-only rows answered at once.
+	for _, c := range []struct {
+		name      string
+		flags     []string
+		answer    func(*hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error)
+		wantFiles bool
+	}{
+		{"applied gives full", postCompleted, appliedReports, false},
+		{"409 failed gives full", postCompleted, answer(stale409(hubclient.AgentLaunchReportReasonFailed)), false},
+		{"start failed only, completed gives resources-only", []string{"startFailed"}, answer(completedAnswer), true},
+		{"completed gives resources-only", postCompleted, answer(completedAnswer), true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			mgr := newRecFakeManager()
+			srv, rtb := newAsyncTestServer(t, mgr)
+			rtb.launchReportFunc = c.answer
+			jr, agentDir := startFailedTerminalRecord(t, "RPC", "")
+			path := writeFlaggedDeadRecord(t, srv, jr, c.flags...)
+
+			runRecovery(t, srv)
+
+			if n := len(terminalReports(rtb)); n != 1 {
+				t.Fatalf("expected the terminal resent once, got %d", n)
+			}
+			if n := mgr.CleanupCallCount(); n != 1 {
+				t.Fatalf("expected one handle clean-up, got %d", n)
+			}
+			if got := filesExist(agentDir); got != c.wantFiles {
+				t.Fatalf("files kept = %v, want %v", got, c.wantFiles)
+			}
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("the answered record was not removed: %v", err)
+			}
+		})
+	}
+
+	t.Run("409 deleted gives resources-only, files kept", func(t *testing.T) {
+		// The record names its run, and the runtime lists an entry
+		// labelled with it: a full clean-up would delete that entry
+		// (deleteRecoveredRun) and the files.
+		mgr := newRecFakeManager(api.AgentInfo{Name: "agent-RPD", ContainerID: "c-run", RunID: "run-RPD"})
+		srv, rtb := newAsyncTestServer(t, mgr)
+		rtb.launchReportFunc = answer(stale409(hubclient.AgentLaunchReportReasonDeleted))
+		jr, agentDir := startFailedTerminalRecord(t, "RPD", "run-RPD")
+		writeFlaggedDeadRecord(t, srv, jr, postCompleted...)
+
+		runRecovery(t, srv)
+
+		reports := terminalReports(rtb)
+		if len(reports) != 1 {
+			t.Fatalf("expected the terminal resent once, got %d", len(reports))
+		}
+		if got := reportJSON(t, reports[0])["runId"]; got != "run-RPD" {
+			t.Fatalf("the resent failed report runId = %v, want the journalled run run-RPD", got)
+		}
+		if n := mgr.CleanupCallCount(); n != 1 {
+			t.Fatalf("expected one handle clean-up, got %d", n)
+		}
+		if d := mgr.Deleted(); len(d) != 0 {
+			t.Fatalf("a resources-only clean-up must not run the run-scoped delete: %+v", d)
+		}
+		if !filesExist(agentDir) {
+			t.Fatal("a 409 deleted answer must keep the files (the delete flow owns them)")
+		}
+	})
+
+	t.Run("answered resources-only clean-up fails", func(t *testing.T) {
+		mgr := &failingCleanupManager{recFakeManager: newRecFakeManager(), cleanupErr: errors.New("delete pod: refused")}
+		srv, rtb := newAsyncTestServer(t, mgr)
+		rtb.launchReportFunc = answer(completedAnswer)
+		jr, agentDir := startFailedTerminalRecord(t, "RPF", "")
+		path := writeFlaggedDeadRecord(t, srv, jr, postCompleted...)
+
+		runRecovery(t, srv)
+
+		got := readJournalFileT(t, path)
+		if got.State != "cleanup_pending" || got.CleanupScope != cleanupScopeResources {
+			t.Fatalf("a failed resources-only clean-up must keep a cleanup_pending record scoped to the resources: %+v", got)
+		}
+		// The next pass retries the resources only and keeps the files.
+		mgr.cleanupErr = nil
+		runRecovery(t, srv)
+		if n := mgr.CleanupCalls(); n != 2 {
+			t.Fatalf("expected the resources retried on the next pass, got %d clean-up calls", n)
+		}
+		if !filesExist(agentDir) {
+			t.Fatal("the retry of a resources-only clean-up must keep the files")
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("the record was not removed after the retry: %v", err)
+		}
+	})
+
+	t.Run("no answer", func(t *testing.T) {
+		mgr := newRecFakeManager()
+		srv, rtb := newAsyncTestServer(t, mgr)
+		rtb.launchReportFunc = unanswered
+		useUnansweredRecoveryTimings(srv)
+		jr, agentDir := startFailedTerminalRecord(t, "RPN", "")
+		path := writeFlaggedDeadRecord(t, srv, jr, postCompleted...)
+
+		runRecovery(t, srv)
+
+		if n := mgr.CleanupCallCount(); n != 1 {
+			t.Fatalf("an unanswered post-completed report must remove the resources on this boot, got %d handle clean-ups", n)
+		}
+		if !filesExist(agentDir) {
+			t.Fatal("an unanswered report must keep the files")
+		}
+		assertKeptForResend(t, path, 1)
+	})
+
+	t.Run("no answer, then a later boot answers applied", func(t *testing.T) {
+		mgr := newRecFakeManager()
+		srv, rtb := newAsyncTestServer(t, mgr)
+		rtb.launchReportFunc = unanswered
+		useUnansweredRecoveryTimings(srv)
+		jr, agentDir := startFailedTerminalRecord(t, "RPL", "")
+		path := writeFlaggedDeadRecord(t, srv, jr, postCompleted...)
+
+		runRecovery(t, srv)
+		if n := mgr.CleanupCallCount(); n != 1 {
+			t.Fatalf("the no-answer boot must remove the resources, got %d handle clean-ups", n)
+		}
+		if !filesExist(agentDir) {
+			t.Fatal("the no-answer boot must keep the files")
+		}
+
+		rtb.launchReportFunc = appliedReports
+		runRecovery(t, srv)
+		if n := mgr.CleanupCallCount(); n != 2 {
+			t.Fatalf("the applied answer must run the full clean-up, got %d handle clean-ups in all", n)
+		}
+		if filesExist(agentDir) {
+			t.Fatal("the later applied answer must remove the create's files")
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("the record was not removed after the applied answer: %v", err)
+		}
+	})
+
+	t.Run("start failed only, no answer: no clean-up, kept for the resend", func(t *testing.T) {
+		// No completed answer reached the live broker, so recovery keeps
+		// #3763's rule: nothing is removed until the hub answers.
+		mgr := newRecFakeManager()
+		srv, rtb := newAsyncTestServer(t, mgr)
+		rtb.launchReportFunc = unanswered
+		useUnansweredRecoveryTimings(srv)
+		jr, agentDir := startFailedTerminalRecord(t, "RPS", "")
+		path := writeFlaggedDeadRecord(t, srv, jr, "startFailed")
+
+		runRecovery(t, srv)
+
+		if n := mgr.CleanupCallCount(); n != 0 {
+			t.Fatalf("an unanswered StartFailed-only report must remove nothing, got %d handle clean-ups", n)
+		}
+		if !filesExist(agentDir) {
+			t.Fatal("an unanswered report must keep the files")
+		}
+		raw := rawFile(t, path)
+		rec := rawRecord(t, raw)
+		if rec["state"] != "terminal_pending" || rec["reportAttempts"] != float64(1) {
+			t.Fatalf("the record was not kept as terminal_pending with 1 attempt: %s", raw)
+		}
+		if _, ok := rec["cleanupScope"]; ok {
+			t.Fatalf("a terminal_pending record must carry no clean-up scope: %s", raw)
+		}
+	})
+
+	t.Run("no answer and the clean-up fails", func(t *testing.T) {
+		mgr := &failingCleanupManager{recFakeManager: newRecFakeManager(), cleanupErr: errors.New("delete pod: refused")}
+		srv, rtb := newAsyncTestServer(t, mgr)
+		rtb.launchReportFunc = unanswered
+		useUnansweredRecoveryTimings(srv)
+		jr, _ := startFailedTerminalRecord(t, "RPX", "")
+		path := writeFlaggedDeadRecord(t, srv, jr, postCompleted...)
+
+		runRecovery(t, srv)
+
+		if n := mgr.CleanupCalls(); n != 1 {
+			t.Fatalf("a resources-only clean-up must be attempted on the no-answer boot, got %d calls", n)
+		}
+		assertKeptForResend(t, path, 1)
+	})
+
+	t.Run("record kept by a drain, completed at the next boot", func(t *testing.T) {
+		l := runPostCompletedDrainLaunch(t, "rpdrain")
+		assertDrainKeptRecord(t, l)
+		if n := len(l.mgr.Cleaned()); n != 0 {
+			t.Fatalf("test setup: the drain must have cleaned nothing, got %d", n)
+		}
+
+		// The broker restarts with the same state dir.
+		l.srv.launchJournal.Close()
+		cfg := l.srv.config
+		cfg.StateDir = l.srv.stateDir
+		srv2 := New(cfg, l.mgr, &runtime.MockRuntime{NameFunc: func() string { return "mock" }}, config.RuntimeBuildRecord{})
+		closeJournalAtCleanup(t, srv2)
+		rtb2 := &mockRuntimeBrokerService{launchReportFunc: answer(completedAnswer)}
+		srv2.hubMu.Lock()
+		srv2.hubConnections["hub-a"] = &HubConnection{Name: "hub-a", BrokerID: "broker-on-a", HubClient: &stubBrokerHubClient{brokers: rtb2}}
+		srv2.hubMu.Unlock()
+		srv2.launchTimingOverride = fastLaunchTimings(fastTestKeepaliveInterval)
+
+		runRecovery(t, srv2)
+
+		if n := len(l.mgr.Cleaned()); n != 1 {
+			t.Fatalf("the next boot must run the deferred resources-only clean-up, got %d", n)
+		}
+		if !filesExist(l.agentDir) {
+			t.Fatal("a completed answer must keep the files")
+		}
+		if _, err := os.Stat(l.rec.journal.path); !os.IsNotExist(err) {
+			t.Fatalf("the record was not removed after the answer: %v", err)
+		}
+	})
+}
+
+// useUnansweredRecoveryTimings shortens srv's report backoffs and
+// recovery TTL, as writeUnansweredRecord does, so an unanswered resend
+// gives up quickly.
+func useUnansweredRecoveryTimings(srv *Server) {
+	srv.launchTimingOverride = fastLaunchTimings(fastTestKeepaliveInterval)
+	srv.launchRecoveryTTL = 300 * time.Millisecond
+}
+
+// assertKeptForResend checks a post-completed record kept after an
+// unanswered resend: terminal_pending, still flagged, attempts counted, and
+// no clean-up scope.
+func assertKeptForResend(t *testing.T, path string, attempts int) {
+	t.Helper()
+	raw := rawFile(t, path)
+	rec := rawRecord(t, raw)
+	if rec["state"] != "terminal_pending" || rec["reportAttempts"] != float64(attempts) {
+		t.Fatalf("the record was not kept as terminal_pending with %d attempt(s): %s", attempts, raw)
+	}
+	if term := rawTerminal(t, raw); term == nil || term["postCompleted"] != true {
+		t.Fatalf("the kept terminal lost its postCompleted flag: %s", raw)
+	}
+	if _, ok := rec["cleanupScope"]; ok {
+		t.Fatalf("a terminal_pending record must carry no clean-up scope: %s", raw)
+	}
+}

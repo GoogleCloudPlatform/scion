@@ -161,7 +161,7 @@ func TestAgentAppliedConfigResponseViewRedactsCreateInputs(t *testing.T) {
 func TestAgentAppliedConfigResponseViewDropsClearedFields(t *testing.T) {
 	for _, canAttach := range []bool{false, true} {
 		original := &AgentAppliedConfig{InlineConfig: &api.ScionConfig{
-			MaxTurns:      3,
+			MaxTurns:      api.IntPtr(3),
 			ClearedFields: []string{"env.SECRET_NAME", "max_turns"},
 		}}
 		view := original.ResponseView(canAttach)
@@ -172,7 +172,7 @@ func TestAgentAppliedConfigResponseViewDropsClearedFields(t *testing.T) {
 		if strings.Contains(string(data), "cleared_fields") || strings.Contains(string(data), "SECRET_NAME") {
 			t.Errorf("canAttach=%v: response carries cleared_fields: %s", canAttach, data)
 		}
-		if view.InlineConfig.MaxTurns != 3 {
+		if !api.IntPtrEqual(view.InlineConfig.MaxTurns, api.IntPtr(3)) {
 			t.Errorf("canAttach=%v: other inline fields must be kept, got %+v", canAttach, view.InlineConfig)
 		}
 		if len(original.InlineConfig.ClearedFields) != 2 {

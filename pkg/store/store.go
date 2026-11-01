@@ -455,6 +455,9 @@ type Store interface {
 	// User Access Token operations
 	UserAccessTokenStore
 
+	// Forced user deletion tombstones (ptone/scion#2143)
+	UserDeletionStore
+
 	// Broker Secret operations (Runtime Broker authentication)
 	BrokerSecretStore
 
@@ -1671,6 +1674,14 @@ type RuntimeBrokerStore interface {
 	// CreateRuntimeBroker creates a new runtime broker record.
 	CreateRuntimeBroker(ctx context.Context, broker *RuntimeBroker) error
 
+	// CreateRuntimeBrokerClearingCredentials creates a new runtime broker
+	// record and, in the same transaction, deletes any broker secret and join
+	// token stored for its ID, so a row created with an ID an earlier row had
+	// starts without that row's credential. Used where the ID is fixed or
+	// supplied by the caller (plugin, co-located, flat and registered
+	// brokers).
+	CreateRuntimeBrokerClearingCredentials(ctx context.Context, broker *RuntimeBroker) error
+
 	// GetRuntimeBroker retrieves a runtime broker by ID.
 	// Returns ErrNotFound if the broker doesn't exist.
 	GetRuntimeBroker(ctx context.Context, id string) (*RuntimeBroker, error)
@@ -1713,10 +1724,11 @@ type RuntimeBrokerStore interface {
 	// RefreshRuntimeBrokerState is the heartbeat's write. It reads the
 	// broker, calls refresh on that copy and, when refresh reports a
 	// change, writes only Capabilities, WorkspaceStorage, DefaultProfile,
-	// Health and Profiles, as a compare-and-set on the row's version. A
-	// concurrent write between the read and the write makes it retry with
-	// a fresh read, so refresh may run more than once and must change only
-	// those fields; changes it makes to any other field are not stored.
+	// Health, Profiles and Version (the broker's build token), as a
+	// compare-and-set on the row's lock version. A concurrent write
+	// between the read and the write makes it retry with a fresh read, so
+	// refresh may run more than once and must change only those fields;
+	// changes it makes to any other field are not stored.
 	// Every other column keeps whatever a concurrent writer stored. On a
 	// flat row Profiles and DefaultProfile are stored empty, as
 	// UpdateRuntimeBroker does. Returns ErrNotFound if the broker doesn't
@@ -2165,7 +2177,10 @@ type UserStore interface {
 	GetUserByEmail(ctx context.Context, email string) (*User, error)
 
 	// UpdateUser updates an existing user.
-	// Returns ErrNotFound if the user doesn't exist.
+	// Returns ErrNotFound if the user doesn't exist, and ErrUserDeleting if
+	// the user's status is UserStatusDeleting or the update would set it
+	// (only MarkUserDeleting writes that status, and only the deletion's
+	// completion ends it).
 	UpdateUser(ctx context.Context, user *User) error
 
 	// UpdateUserLastLogin sets only the last_login timestamp for a user.
@@ -2177,6 +2192,11 @@ type UserStore interface {
 	// DeleteUser removes a user by ID.
 	// Returns ErrNotFound if the user doesn't exist.
 	DeleteUser(ctx context.Context, id string) error
+
+	// MarkUserDeleting sets the status of user id to UserStatusDeleting
+	// (ptone/scion#2143). It is the only write of that status. Returns
+	// ErrNotFound if the user does not exist.
+	MarkUserDeleting(ctx context.Context, id string) error
 
 	// LockUserRow locks the user row until the surrounding transaction ends
 	// (ptone/scion#2769). On PostgreSQL exclusive=true runs
@@ -2516,6 +2536,20 @@ type SecretStore interface {
 	// The replacement passes the encryption policy fence like every other
 	// payload write.
 	ReplaceSecretCiphertext(ctx context.Context, id string, expectedVersion int, expectedCiphertext, replacement string) (applied bool, err error)
+
+	// AttributeUserSecretToOwner sets created_by to scope_id on the
+	// user-scope secret row with this ID, and only while its created_by
+	// equals expectedCreatedBy. It is the repair write of the legacy user
+	// secret attribution migration, which moves rows captured by an agent
+	// before ptone/scion#1557 from "agent:<uuid>" to their owner. The
+	// decision depends only on the row's identity, scope, owner and
+	// created_by, never on its payload, so a concurrent value write (for
+	// example a credential refresh) does not defeat it. Version,
+	// timestamps, the payload and every other column are preserved, so the
+	// repair is never seen as a credential change. It returns applied=false
+	// (no error) when the row is gone, is not user-scoped, has an empty
+	// scope_id, or its created_by differs.
+	AttributeUserSecretToOwner(ctx context.Context, id string, expectedCreatedBy string) (applied bool, err error)
 }
 
 // MaxSecretPayloadScan is the largest ScanSecretPayloads page.
@@ -2747,6 +2781,10 @@ type UserAccessTokenStore interface {
 	// CountUserAccessTokens returns the number of active (non-revoked) tokens for a user.
 	CountUserAccessTokens(ctx context.Context, userID string) (int, error)
 
+	// RevokeUserAccessTokensForUser revokes every unrevoked token of userID
+	// and returns how many it revoked (ptone/scion#2143).
+	RevokeUserAccessTokensForUser(ctx context.Context, userID string) (int, error)
+
 	// DeleteUserAccessTokensByProject permanently removes all "project"-boundary
 	// tokens scoped to projectID. A hub-boundary token belonging to one of the
 	// project's members is never removed by this call, even if that member
@@ -2828,6 +2866,12 @@ type BrokerSecretStore interface {
 	// CleanExpiredJoinTokens removes all expired join tokens and returns how
 	// many were removed.
 	CleanExpiredJoinTokens(ctx context.Context) (int, error)
+
+	// DeleteOrphanBrokerCredentials removes, in one transaction, every broker
+	// secret and join token whose broker ID has no runtime broker row, and
+	// returns how many of each were removed. A later row with the same ID
+	// then starts without a credential. Idempotent.
+	DeleteOrphanBrokerCredentials(ctx context.Context) (secrets, joinTokens int, err error)
 }
 
 // =============================================================================
@@ -3571,6 +3615,38 @@ const HubSettingsRevisionSection = "_settings_revision"
 // settings after a delete instead.
 type HubSettingRevisionDeleter interface {
 	DeleteHubSettingRevision(ctx context.Context, section string) (int64, error)
+}
+
+// HubSettingWrite is one section write of a guarded batch
+// (HubSettingGuardedBatchWriter). ExpectedRevision has UpsertHubSetting's
+// meaning: -1 unconditional, 0 create-only, >0 the current revision. A
+// Delete write removes the row instead (Value unused): the row must exist,
+// at ExpectedRevision unless that is -1 (a missing row is then
+// ErrNotFound), and its returned HubSetting has only Section and
+// SettingsRevision set.
+type HubSettingWrite struct {
+	Section          string
+	Value            json.RawMessage
+	ExpectedRevision int64
+	Delete           bool
+}
+
+// HubSettingGuardedBatchWriter is an optional HubSettingStore method: write
+// several sections in one transaction, guarded by the revisions of other
+// sections the caller read to validate the write. Guarded batches are
+// serialized against each other (on Postgres by a transaction-scoped
+// advisory lock, which also covers a read section with no row), every
+// existing written and read row is locked, and all are compared inside the
+// transaction: a read section must still be at its given revision (0: it
+// must not exist), and each write's ExpectedRevision must hold. Any
+// mismatch returns ErrRevisionConflict and writes nothing. The
+// operational-settings revision is bumped once for the batch and returned
+// in every row's SettingsRevision. A section may appear once, as a write
+// or as a read; HubSettingsRevisionSection may not appear. The rows are
+// returned in the order of writes.
+type HubSettingGuardedBatchWriter interface {
+	UpsertHubSettingsGuarded(ctx context.Context, writes []HubSettingWrite, reads map[string]int64,
+		updatedBy, origin string) ([]HubSetting, error)
 }
 
 // HubSettingStore defines persistence operations for operational hub settings.

@@ -61,6 +61,10 @@ func (s *Server) authenticateBrokerUpgrade(w http.ResponseWriter, r *http.Reques
 	}
 	if _, err := s.brokerAuthService.ValidateBrokerSignature(r.Context(), r); err != nil {
 		slog.Error("HMAC validation failed for broker", "brokerID", brokerID, "error", err)
+		if errors.Is(err, errBrokerAuthBodyTooLarge) {
+			writeBrokerAuthFailure(w, err)
+			return "", false
+		}
 		writeError(w, http.StatusUnauthorized, ErrCodeBrokerAuthFailed, "Invalid broker signature", nil)
 		return "", false
 	}
@@ -87,6 +91,14 @@ func brokerExecScope(b *store.RuntimeBroker) string {
 // authoritative value for it), and its exec_scope comes from the broker
 // row.
 func (s *Server) decideConduitBroker(w http.ResponseWriter, r *http.Request, forRelay bool) (conduitAdmission, bool) {
+	// Transport policy: the broker session carries broker RPCs with agent
+	// secrets. A direct arrival is judged here. A relay admission
+	// (forRelay) is a request the hub builds itself from the relay's admit
+	// call (hubAdmit, conduit_relay_admit.go), with a synthetic peer; the broker
+	// arrived at the relay, not here, so it is not judged by this check.
+	if !forRelay && !s.requireConfidentialArrival(w, r) {
+		return conduitAdmission{}, false
+	}
 	brokerID, ok := s.authenticateBrokerUpgrade(w, r)
 	if !ok {
 		return conduitAdmission{}, false

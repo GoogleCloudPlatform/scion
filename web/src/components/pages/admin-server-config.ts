@@ -33,6 +33,7 @@ import { normalizeModelAlias } from '../../shared/model-utils.js';
 import type { RuntimeBroker, GCPServiceAccount } from '../../shared/types.js';
 import { formatInstantWithZone, isValidTimeZone } from '../../utils/time.js';
 import { isHttpUrl } from '../../utils/http-url.js';
+import { renderReleaseNotesLink } from '../../utils/release-notes-link.js';
 import '../shared/timezone-picker.js';
 import type { TimezoneChangeDetail } from '../shared/timezone-picker.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
@@ -58,6 +59,19 @@ import {
   settingsErrorStyles,
 } from '../shared/settings-error-views.js';
 import './admin-experiments.js';
+import './admin-chat-retention.js';
+import { showConfirm } from '../shared/confirm-dialog.js';
+import {
+  issuesAt,
+  validateResourceSpec,
+  type QuantityIssues,
+  type ResourceSpecInput,
+} from '../../shared/resource-quantity.js';
+import {
+  validateK8sRuntimeFields,
+  type PlacementIssue,
+  type Toleration,
+} from '../../shared/k8s-placement.js';
 import {
   type ImageRegistryProvenance,
   hasOtherProfileEnvOverrides,
@@ -360,6 +374,13 @@ interface V1RuntimeConfig {
   cloudrun?: V1CloudRunConfig;
   cloudrun_instances?: V1CloudRunInstancesConfig;
   safe_to_evict?: boolean;
+  // Kubernetes placement and identity (ptone/scion#6580).
+  node_selector?: Record<string, string>;
+  tolerations?: Toleration[];
+  runtime_class_name?: string;
+  kubernetes_service_account_mappings?: Record<string, string>;
+  kubernetes_block_service_account?: string;
+  priority_class_name?: string;
 }
 
 // Sets or clears one key in a runtime's Cloud Run block, and drops the
@@ -748,6 +769,47 @@ const REMOVED_STORAGE_OVERRIDE_KEYS = [
   'home_storage_leaf',
 ];
 
+// Container and Kubernetes runtime fields, cleared when a runtime switches
+// to Cloud Run.
+const CONTAINER_RUNTIME_KEYS = [
+  'host',
+  'context',
+  'namespace',
+  'gke',
+  'list_all_namespaces',
+  'safe_to_evict',
+  'node_selector',
+  'tolerations',
+  'runtime_class_name',
+  'kubernetes_service_account_mappings',
+  'kubernetes_block_service_account',
+  'priority_class_name',
+] as const;
+
+/**
+ * The runtime entry keys a switch to type clears: the container and
+ * Kubernetes fields and the other Cloud Run block when switching to a Cloud
+ * Run type, both Cloud Run blocks otherwise.
+ */
+export function runtimeTypeSwitchKeys(type: string): string[] {
+  if (type === 'cloudrun') return [...CONTAINER_RUNTIME_KEYS, 'cloudrun_instances'];
+  if (type === 'cloudrun-instances') return [...CONTAINER_RUNTIME_KEYS, 'cloudrun'];
+  return ['cloudrun', 'cloudrun_instances'];
+}
+
+/** The keys of rt holding a value that a switch to type would clear. */
+export function runtimeTypeSwitchClears(rt: object, type: string): string[] {
+  const entry = rt as Record<string, unknown>;
+  return runtimeTypeSwitchKeys(type).filter((k) => {
+    const v = entry[k];
+    if (v === undefined || v === null || v === '') return false;
+    // false is unset for the switches; safe_to_evict false is a value.
+    if (v === false && k !== 'safe_to_evict') return false;
+    if (typeof v === 'object' && Object.keys(v).length === 0) return false;
+    return true;
+  });
+}
+
 export function stripRemovedStorageOverrides<T extends object>(
   entries: Record<string, T>
 ): Record<string, T> {
@@ -1012,6 +1074,10 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   // Runtimes, Profiles & Harness Configs
   @state() private runtimes: Record<string, V1RuntimeConfig> = {};
+  // The runtimes as loaded. A save sends null for each key the form
+  // removed from a loaded entry, because the hub keeps a key a sent entry
+  // leaves out (ptone/scion#6580).
+  private loadedRuntimes: Record<string, V1RuntimeConfig> = {};
   @state() private profiles: Record<string, V1ProfileConfig> = {};
   @state() private harnessConfigsMap: Record<string, unknown> = {};
   @state() private harnessConfigsRaw: Record<string, string> = {};
@@ -1038,6 +1104,9 @@ export class ScionPageAdminServerConfig extends LitElement {
   private loadedHubTracingEnabled: boolean | null = null;
   @state() private sectionMetadata: Record<string, SectionMetadataInfo> | null = null;
   @state() private ignoredKeysNotice: string[] | null = null;
+  // Warnings the last save returned (accepted values worth a look, such
+  // as a memory value without a unit).
+  @state() private saveWarningsNotice: string[] | null = null;
   @state() private supersededKeys: Record<string, SupersededKeyInfo[]> | null = null;
   @state() private deprecatedEnvKeys: DeprecatedEnvKeyInfo[] | null = null;
   @state() private resetConfirmSection: string | null = null;
@@ -1742,6 +1811,35 @@ export class ScionPageAdminServerConfig extends LitElement {
       margin-bottom: 1rem;
     }
 
+    .k8s-placement {
+      margin-top: 0.75rem;
+    }
+    .k8s-placement summary {
+      cursor: pointer;
+      font-weight: 600;
+      margin-bottom: 0.5rem;
+    }
+    .k8s-row {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+      margin-bottom: 0.25rem;
+    }
+    .k8s-row sl-input,
+    .k8s-row sl-select {
+      flex: 1;
+    }
+
+    .field-warning {
+      display: block;
+      color: var(--sl-color-warning-700, #a16207);
+    }
+
+    .save-warnings-notice ul {
+      margin: 0.25rem 0 0;
+      padding-left: 1.25rem;
+    }
+
     .ignored-keys-notice code {
       font-family: var(--sl-font-mono, monospace);
       font-size: 0.75rem;
@@ -1888,6 +1986,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.loading = true;
     this.error = null;
     this.ignoredKeysNotice = null;
+    this.saveWarningsNotice = null;
     try {
       const [res] = await Promise.all([
         apiFetch('/api/v1/admin/server-config'),
@@ -2132,6 +2231,11 @@ export class ScionPageAdminServerConfig extends LitElement {
           JSON.parse(JSON.stringify(data.runtimes)) as Record<string, V1RuntimeConfig>
         )
       : {};
+    this.k8sRows.clear();
+    this.loadedRuntimes = JSON.parse(JSON.stringify(this.runtimes)) as Record<
+      string,
+      V1RuntimeConfig
+    >;
     this.profiles = data.profiles
       ? stripRemovedStorageOverrides(
           JSON.parse(JSON.stringify(data.profiles)) as Record<string, V1ProfileConfig>
@@ -2260,6 +2364,75 @@ export class ScionPageAdminServerConfig extends LitElement {
     return this.harnessConfigSelection === '__other__'
       ? this.customHarnessConfig.trim()
       : this.harnessConfigSelection;
+  }
+
+  /**
+   * The runtimes to send on save: each entry as edited, plus null for each
+   * key the form removed from a loaded entry, so the hub clears it (the hub
+   * keeps a key a sent entry leaves out). An entry the form removed is left
+   * out, which deletes it.
+   */
+  private runtimesPayload(): Record<string, Record<string, unknown>> {
+    const out: Record<string, Record<string, unknown>> = {};
+    for (const [name, rt] of Object.entries(this.runtimes)) {
+      const entry: Record<string, unknown> = { ...rt };
+      const loaded = hasOwn(this.loadedRuntimes, name) ? this.loadedRuntimes[name] : undefined;
+      if (loaded) {
+        for (const key of Object.keys(loaded)) {
+          if (!hasOwn(entry, key) || entry[key] === undefined) entry[key] = null;
+        }
+      }
+      out[name] = entry;
+    }
+    return out;
+  }
+
+  /** The default resources as the form would send them. */
+  private get defaultResourcesInput(): ResourceSpecInput {
+    return {
+      requests: { cpu: this.defaultResCpuReq, memory: this.defaultResMemReq },
+      limits: { cpu: this.defaultResCpuLim, memory: this.defaultResMemLim },
+      disk: this.defaultResDisk,
+    };
+  }
+
+  /**
+   * Resource quantity findings for default_resources and every profile's
+   * resources (the same rules as the hub's save check, ptone/scion#6581).
+   */
+  private get resourceQuantityIssues(): QuantityIssues {
+    const all: QuantityIssues = { errors: [], warnings: [] };
+    const add = (path: string, spec: ResourceSpecInput | undefined): void => {
+      const r = validateResourceSpec(path, spec);
+      all.errors.push(...r.errors);
+      all.warnings.push(...r.warnings);
+    };
+    add('default_resources', this.defaultResourcesInput);
+    for (const [name, profile] of Object.entries(this.profiles)) {
+      add(`profiles.${name}.resources`, profile.resources);
+      const overrides = profile['harness_overrides'] as
+        | Record<string, { resources?: ResourceSpecInput }>
+        | undefined;
+      for (const [harness, ho] of Object.entries(overrides ?? {})) {
+        add(`profiles.${name}.harness_overrides.${harness}.resources`, ho?.resources);
+      }
+    }
+    return all;
+  }
+
+  private get hasResourceQuantityErrors(): boolean {
+    return this.resourceQuantityIssues.errors.length > 0;
+  }
+
+  /** Inline resource quantity errors and warnings for one field path. */
+  private renderQuantityIssues(path: string): typeof nothing | TemplateResult {
+    const { errors, warnings } = issuesAt(this.resourceQuantityIssues, path);
+    if (errors.length === 0 && warnings.length === 0) return nothing;
+    return html`${errors.map(
+      (m) => html`<span class="field-error" data-quantity-error=${path}>${m}</span>`
+    )}${warnings.map(
+      (m) => html`<span class="hint field-warning" data-quantity-warning=${path}>${m}</span>`
+    )}`;
   }
 
   private get hasHarnessConfigErrors(): boolean {
@@ -2658,7 +2831,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
     // Runtimes, profiles, harness_configs — always send edited state (including
     // empty objects) so the backend can distinguish "no change" from "cleared".
-    if (ok('runtimes')) payload.runtimes = this.runtimes;
+    if (ok('runtimes')) payload.runtimes = this.runtimesPayload();
     if (ok('harness_configs')) payload.harness_configs = this.harnessConfigsMap;
     if (ok('profiles')) payload.profiles = this.profiles;
 
@@ -3117,7 +3290,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
     // Runtimes, profiles, harness_configs — always send edited state (including
     // empty objects) so the backend can distinguish "no change" from "cleared".
-    if (ok('runtimes')) payload.runtimes = this.runtimes;
+    if (ok('runtimes')) payload.runtimes = this.runtimesPayload();
     if (ok('harness_configs')) payload.harness_configs = this.harnessConfigsMap;
     if (ok('profiles')) payload.profiles = this.profiles;
 
@@ -3129,6 +3302,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.successMessage = null;
     this.reloadResult = null;
     this.ignoredKeysNotice = null;
+    this.saveWarningsNotice = null;
     this.validationErrors = null;
     this.conflictInfo = null;
     this.safetyNetKeys = null;
@@ -3160,6 +3334,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       const result = (await res.json()) as {
         reload?: ReloadResult;
         ignored_keys?: string[];
+        warnings?: string[];
       };
       this.reloadResult = result.reload ?? null;
       const ignoredKeys =
@@ -3170,6 +3345,8 @@ export class ScionPageAdminServerConfig extends LitElement {
       this.successMessage = 'Settings saved successfully';
       // Restore ignored_keys notice after loadConfig clears it
       this.ignoredKeysNotice = ignoredKeys;
+      this.saveWarningsNotice =
+        result.warnings && result.warnings.length > 0 ? result.warnings : null;
     } catch {
       this.error = 'Failed to save settings';
     } finally {
@@ -3316,7 +3493,8 @@ export class ScionPageAdminServerConfig extends LitElement {
       ${this.loading ? nothing : this.renderEnvOverrideBanner()} ${this.renderDeprecatedEnvNotice()}
       ${this.renderSupersededPanel()} ${this.renderConflictBanner()}
       ${this.renderValidationErrors()} ${this.renderSafetyNetNotice()}
-      ${this.renderIgnoredKeysNotice()} ${this.renderResetConfirmDialog()}
+      ${this.renderIgnoredKeysNotice()} ${this.renderSaveWarningsNotice()}
+      ${this.renderResetConfirmDialog()}
       ${this.error ? html`<div class="status-message error">${this.error}</div>` : nothing}
       ${this.successMessage
         ? html`<div class="status-message success">
@@ -3773,6 +3951,19 @@ export class ScionPageAdminServerConfig extends LitElement {
     `;
   }
 
+  /** Renders the warnings the last save returned; the save went through. */
+  private renderSaveWarningsNotice(): typeof nothing | ReturnType<typeof html> {
+    if (!this.saveWarningsNotice || this.saveWarningsNotice.length === 0) return nothing;
+    return html`
+      <div class="ignored-keys-notice save-warnings-notice">
+        <strong>Saved with warnings:</strong>
+        <ul>
+          ${this.saveWarningsNotice.map((w) => html`<li>${w}</li>`)}
+        </ul>
+      </div>
+    `;
+  }
+
   private renderValidationErrors(): typeof nothing | ReturnType<typeof html> {
     if (!this.validationErrors || this.validationErrors.length === 0) return nothing;
     // Group by the section the server named; entries without one (a nested
@@ -3992,11 +4183,25 @@ export class ScionPageAdminServerConfig extends LitElement {
                   errors on the Runtimes &amp; Profiles tab before saving.
                 </div>`
               : nothing}
+            ${this.hasPlacementErrors
+              ? html`<div class="error placement-blocked" style="margin-bottom:0.75rem;">
+                  Cannot save: fix the Kubernetes placement values marked as invalid
+                  (${this.placementIssues.errors.map((e) => e.path).join(', ')}).
+                </div>`
+              : nothing}
+            ${this.hasResourceQuantityErrors
+              ? html`<div class="error resource-quantity-blocked" style="margin-bottom:0.75rem;">
+                  Cannot save: fix the resource values marked as invalid
+                  (${this.resourceQuantityIssues.errors.map((e) => e.path).join(', ')}).
+                </div>`
+              : nothing}
             <div class="actions">
               <sl-button
                 variant="primary"
                 ?loading=${this.saving}
-                ?disabled=${this.hasHarnessConfigErrors}
+                ?disabled=${this.hasHarnessConfigErrors ||
+                this.hasResourceQuantityErrors ||
+                this.hasPlacementErrors}
                 @click=${() => {
                   void this.handleSave();
                 }}
@@ -4096,13 +4301,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                         ${r.release_url
                           ? html`<div class="release-field">
                               <span class="release-label">Release notes:</span>
-                              <a href="${r.release_url}" target="_blank" rel="noopener noreferrer">
-                                View Release Notes
-                                <sl-icon
-                                  name="box-arrow-up-right"
-                                  style="font-size: 0.75rem;"
-                                ></sl-icon>
-                              </a>
+                              ${renderReleaseNotesLink(r.release_url)}
                             </div>`
                           : nothing}
                       </div>
@@ -4694,6 +4893,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                           this.defaultResCpuReq = (e.target as HTMLInputElement).value;
                         }}
                       ></sl-input>
+                      ${this.renderQuantityIssues('default_resources.requests.cpu')}
                     </div>
                     <div class="form-field">
                       <label>Memory Request</label>
@@ -4704,6 +4904,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                           this.defaultResMemReq = (e.target as HTMLInputElement).value;
                         }}
                       ></sl-input>
+                      ${this.renderQuantityIssues('default_resources.requests.memory')}
                     </div>
                     <div class="form-field">
                       <label>CPU Limit</label>
@@ -4714,6 +4915,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                           this.defaultResCpuLim = (e.target as HTMLInputElement).value;
                         }}
                       ></sl-input>
+                      ${this.renderQuantityIssues('default_resources.limits.cpu')}
                     </div>
                     <div class="form-field">
                       <label>Memory Limit</label>
@@ -4724,6 +4926,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                           this.defaultResMemLim = (e.target as HTMLInputElement).value;
                         }}
                       ></sl-input>
+                      ${this.renderQuantityIssues('default_resources.limits.memory')}
                     </div>
                     <div class="form-field full-width">
                       <label>Disk</label>
@@ -4734,6 +4937,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                           this.defaultResDisk = (e.target as HTMLInputElement).value;
                         }}
                       ></sl-input>
+                      ${this.renderQuantityIssues('default_resources.disk')}
                     </div>
                   </div>`
               )}
@@ -5079,6 +5283,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
       ${this.renderHubObservabilitySection()} ${this.renderNativeChatSection()}
       ${this.renderMessageBrokerSection()} ${this.renderCrossProjectMessagingSection()}
+      <scion-admin-chat-retention></scion-admin-chat-retention>
     `;
   }
 
@@ -5306,7 +5511,7 @@ export class ScionPageAdminServerConfig extends LitElement {
               value=${rt.type || ''}
               ?disabled=${readOnly}
               @sl-change=${(e: Event) => {
-                this.updateRuntimeField(name, 'type', (e.target as HTMLSelectElement).value);
+                void this.changeRuntimeType(name, e.target as HTMLSelectElement);
               }}
             >
               <sl-option value="docker">docker</sl-option>
@@ -5437,8 +5642,367 @@ export class ScionPageAdminServerConfig extends LitElement {
                 </div>
               `}
         </div>
+        ${this.isKubernetesRuntime(name) ? this.renderK8sPlacement(name, rt, readOnly) : nothing}
       </sl-card>
     `;
+  }
+
+  // Key/value rows being edited, per runtime and map field, so a row with
+  // an empty or duplicate key can exist while it is typed. The runtime's
+  // map is rebuilt from the rows on every edit (rows with an empty key are
+  // left out). Cleared on load.
+  private k8sRows = new Map<string, Array<[string, string]>>();
+
+  private mapRows(
+    name: string,
+    field: 'node_selector' | 'kubernetes_service_account_mappings'
+  ): Array<[string, string]> {
+    const id = `${name}\u0000${field}`;
+    let rows = this.k8sRows.get(id);
+    if (!rows) {
+      rows = Object.entries(this.runtimes[name]?.[field] ?? {});
+      this.k8sRows.set(id, rows);
+    }
+    return rows;
+  }
+
+  private setMapRows(
+    name: string,
+    field: 'node_selector' | 'kubernetes_service_account_mappings',
+    rows: Array<[string, string]>
+  ): void {
+    this.k8sRows.set(`${name}\u0000${field}`, rows);
+    const map: Record<string, string> = {};
+    for (const [k, v] of rows) if (k !== '') map[k] = v;
+    this.setRuntimeValue(name, field, Object.keys(map).length > 0 ? map : undefined);
+  }
+
+  /** Sets or removes one key of a runtime entry. */
+  private setRuntimeValue(name: string, field: keyof V1RuntimeConfig, value: unknown): void {
+    const updated = { ...this.runtimes };
+    const rt = { ...updated[name] } as Record<string, unknown>;
+    if (value === undefined || value === '') {
+      delete rt[field];
+    } else {
+      rt[field] = value;
+    }
+    updated[name] = rt;
+    this.runtimes = updated;
+  }
+
+  /**
+   * Placement and identity problems of every Kubernetes runtime entry, as
+   * the hub's save check sees them: a problem in a field the form changed
+   * (or on a new entry) is an error and blocks Save; one in a field still
+   * as loaded is a warning, as the hub accepts it with a save warning.
+   */
+  private get placementIssues(): { errors: PlacementIssue[]; warnings: PlacementIssue[] } {
+    const errors: PlacementIssue[] = [];
+    const warnings: PlacementIssue[] = [];
+    for (const [name, rt] of Object.entries(this.runtimes)) {
+      if (!this.isKubernetesRuntime(name)) continue;
+      const loaded = hasOwn(this.loadedRuntimes, name) ? this.loadedRuntimes[name] : undefined;
+      for (const issue of validateK8sRuntimeFields(name, rt)) {
+        const field = issue.path.slice(`runtimes.${name}.`.length) as keyof V1RuntimeConfig;
+        const same =
+          loaded !== undefined && JSON.stringify(loaded[field]) === JSON.stringify(rt[field]);
+        (same ? warnings : errors).push(issue);
+      }
+    }
+    for (const [name, rows] of this.k8sRows) {
+      const [rtName, field] = name.split('\u0000');
+      if (!hasOwn(this.runtimes, rtName) || !this.isKubernetesRuntime(rtName)) continue;
+      const keys = rows.map(([k]) => k);
+      if (keys.some((k, i) => k === '' && rows[i][1] !== '')) {
+        errors.push({
+          path: `runtimes.${rtName}.${field}`,
+          message: 'a row has a value but no key',
+        });
+      }
+      if (new Set(keys.filter((k) => k !== '')).size !== keys.filter((k) => k !== '').length) {
+        errors.push({ path: `runtimes.${rtName}.${field}`, message: 'the same key appears twice' });
+      }
+    }
+    return { errors, warnings };
+  }
+
+  private get hasPlacementErrors(): boolean {
+    return this.placementIssues.errors.length > 0;
+  }
+
+  /** Inline placement errors and warnings for one runtime field. */
+  private renderPlacementIssues(path: string): typeof nothing | TemplateResult {
+    const { errors, warnings } = this.placementIssues;
+    const e = errors.filter((i) => i.path === path);
+    const w = warnings.filter((i) => i.path === path);
+    if (e.length === 0 && w.length === 0) return nothing;
+    return html`${e.map(
+      (i) => html`<span class="field-error" data-placement-error=${path}>${i.message}</span>`
+    )}${w.map(
+      (i) =>
+        html`<span class="hint field-warning" data-placement-warning=${path}
+          >${i.message} (stored value; the hub saves it with a warning)</span
+        >`
+    )}`;
+  }
+
+  /** The Kubernetes placement and identity fields of a kubernetes runtime entry. */
+  private renderK8sPlacement(name: string, rt: V1RuntimeConfig, readOnly: boolean): TemplateResult {
+    const p = `runtimes.${name}`;
+    const tolerations = rt.tolerations ?? [];
+    // Event handlers read the list as it is when they run, not as rendered,
+    // so two edits between renders both apply.
+    const currentTolerations = (): Toleration[] =>
+      (this.runtimes[name]?.tolerations ?? []).map((x) => ({ ...x }));
+    const setTolerations = (next: Toleration[]) =>
+      this.setRuntimeValue(name, 'tolerations', next.length > 0 ? next : undefined);
+    const mapEditor = (
+      field: 'node_selector' | 'kubernetes_service_account_mappings',
+      keyPlaceholder: string,
+      valuePlaceholder: string
+    ) => {
+      const rows = this.mapRows(name, field);
+      return html`<div class="k8s-rows" data-k8s-field=${field}>
+        ${rows.map(
+          ([k, v], i) =>
+            html`<div class="k8s-row">
+              <sl-input
+                class="k8s-key"
+                size="small"
+                value=${k}
+                placeholder=${keyPlaceholder}
+                ?disabled=${readOnly}
+                @sl-input=${(e: Event) => {
+                  const next = this.mapRows(name, field).map((r) => [...r] as [string, string]);
+                  next[i][0] = (e.target as HTMLInputElement).value;
+                  this.setMapRows(name, field, next);
+                }}
+              ></sl-input>
+              <sl-input
+                class="k8s-value"
+                size="small"
+                value=${v}
+                placeholder=${valuePlaceholder}
+                ?disabled=${readOnly}
+                @sl-input=${(e: Event) => {
+                  const next = this.mapRows(name, field).map((r) => [...r] as [string, string]);
+                  next[i][1] = (e.target as HTMLInputElement).value;
+                  this.setMapRows(name, field, next);
+                }}
+              ></sl-input>
+              ${!readOnly
+                ? html`<sl-icon-button
+                    class="k8s-remove"
+                    name="x-lg"
+                    label="Remove"
+                    @click=${() =>
+                      this.setMapRows(
+                        name,
+                        field,
+                        this.mapRows(name, field).filter((_, j) => j !== i)
+                      )}
+                  ></sl-icon-button>`
+                : nothing}
+            </div>`
+        )}
+        ${!readOnly
+          ? html`<sl-button
+              class="k8s-add"
+              size="small"
+              @click=${() => this.setMapRows(name, field, [...this.mapRows(name, field), ['', '']])}
+              >Add</sl-button
+            >`
+          : nothing}
+      </div>`;
+    };
+    const textField = (
+      field: 'runtime_class_name' | 'kubernetes_block_service_account' | 'priority_class_name',
+      label: string,
+      placeholder: string,
+      hint: string
+    ) =>
+      html`<div class="form-field">
+        <label>${label}</label>
+        <sl-input
+          class="k8s-${field}"
+          value=${rt[field] ?? ''}
+          placeholder=${placeholder}
+          ?disabled=${readOnly}
+          @sl-input=${(e: Event) =>
+            this.setRuntimeValue(name, field, (e.target as HTMLInputElement).value)}
+        ></sl-input>
+        <span class="hint">${hint}</span>
+        ${this.renderPlacementIssues(`${p}.${field}`)}
+      </div>`;
+    return html`<details class="k8s-placement" ?open=${this.k8sSectionHasValues(rt)}>
+      <summary>Kubernetes placement and identity</summary>
+      <div class="form-grid">
+        <div class="form-field full-width">
+          <label>Node selector</label>
+          <span class="hint">Node labels agent pods must match (label key to value).</span>
+          ${mapEditor('node_selector', 'e.g. scion.dev/pool', 'e.g. agents')}
+          ${this.renderPlacementIssues(`${p}.node_selector`)}
+        </div>
+        <div class="form-field full-width">
+          <label>Tolerations</label>
+          <span class="hint">Taints agent pods tolerate. Exists matches any value.</span>
+          <div class="k8s-rows" data-k8s-field="tolerations">
+            ${tolerations.map(
+              (t, i) =>
+                html`<div class="k8s-row">
+                  <sl-input
+                    class="tol-key"
+                    size="small"
+                    value=${t.key ?? ''}
+                    placeholder="key"
+                    ?disabled=${readOnly}
+                    @sl-input=${(e: Event) => {
+                      const next = currentTolerations();
+                      const v = (e.target as HTMLInputElement).value;
+                      if (v) next[i].key = v;
+                      else delete next[i].key;
+                      setTolerations(next);
+                    }}
+                  ></sl-input>
+                  <sl-select
+                    class="tol-operator"
+                    size="small"
+                    value=${t.operator || 'Equal'}
+                    ?disabled=${readOnly}
+                    @sl-change=${(e: Event) => {
+                      const next = currentTolerations();
+                      next[i].operator = (e.target as HTMLSelectElement).value;
+                      if (next[i].operator === 'Exists') delete next[i].value;
+                      setTolerations(next);
+                    }}
+                  >
+                    <sl-option value="Equal">Equal</sl-option>
+                    <sl-option value="Exists">Exists</sl-option>
+                  </sl-select>
+                  <sl-input
+                    class="tol-value"
+                    size="small"
+                    value=${t.value ?? ''}
+                    placeholder="value"
+                    ?disabled=${readOnly || t.operator === 'Exists'}
+                    @sl-input=${(e: Event) => {
+                      const next = currentTolerations();
+                      const v = (e.target as HTMLInputElement).value;
+                      if (v) next[i].value = v;
+                      else delete next[i].value;
+                      setTolerations(next);
+                    }}
+                  ></sl-input>
+                  <sl-select
+                    class="tol-effect"
+                    size="small"
+                    value=${t.effect || 'any'}
+                    ?disabled=${readOnly}
+                    @sl-change=${(e: Event) => {
+                      const next = currentTolerations();
+                      const v = (e.target as HTMLSelectElement).value;
+                      if (v && v !== 'any') next[i].effect = v;
+                      else delete next[i].effect;
+                      setTolerations(next);
+                    }}
+                  >
+                    <sl-option value="any">any effect</sl-option>
+                    <sl-option value="NoSchedule">NoSchedule</sl-option>
+                    <sl-option value="PreferNoSchedule">PreferNoSchedule</sl-option>
+                    <sl-option value="NoExecute">NoExecute</sl-option>
+                  </sl-select>
+                  ${!readOnly
+                    ? html`<sl-icon-button
+                        class="k8s-remove"
+                        name="x-lg"
+                        label="Remove"
+                        @click=${() =>
+                          setTolerations(currentTolerations().filter((_, j) => j !== i))}
+                      ></sl-icon-button>`
+                    : nothing}
+                </div>`
+            )}
+            ${!readOnly
+              ? html`<sl-button
+                  class="k8s-add"
+                  size="small"
+                  @click=${() => setTolerations([...currentTolerations(), { operator: 'Equal' }])}
+                  >Add</sl-button
+                >`
+              : nothing}
+          </div>
+          ${this.renderPlacementIssues(`${p}.tolerations`)}
+        </div>
+        ${textField(
+          'runtime_class_name',
+          'Runtime class',
+          'e.g. gvisor',
+          'RuntimeClass for agent pods. A profile that sets one wins.'
+        )}
+        ${textField(
+          'priority_class_name',
+          'Priority class',
+          'e.g. agents-default',
+          'PriorityClass for agent pods; it must exist on the cluster.'
+        )}
+        <div class="form-field full-width">
+          <label>Service account mappings</label>
+          <span class="hint"
+            >GCP service account to Kubernetes ServiceAccount (Workload Identity), for GCP identity
+            mode Assign.</span
+          >
+          ${mapEditor(
+            'kubernetes_service_account_mappings',
+            'name@project.iam.gserviceaccount.com',
+            'Kubernetes ServiceAccount'
+          )}
+          ${this.renderPlacementIssues(`${p}.kubernetes_service_account_mappings`)}
+        </div>
+        ${textField(
+          'kubernetes_block_service_account',
+          'Block service account',
+          'e.g. agent-block',
+          'Kubernetes ServiceAccount a pod runs as in GCP identity mode Block.'
+        )}
+      </div>
+    </details>`;
+  }
+
+  /** Whether any Kubernetes placement or identity field holds a value (the section starts open then). */
+  private k8sSectionHasValues(rt: V1RuntimeConfig): boolean {
+    return (
+      Object.keys(rt.node_selector ?? {}).length > 0 ||
+      (rt.tolerations ?? []).length > 0 ||
+      !!rt.runtime_class_name ||
+      !!rt.priority_class_name ||
+      Object.keys(rt.kubernetes_service_account_mappings ?? {}).length > 0 ||
+      !!rt.kubernetes_block_service_account
+    );
+  }
+
+  /**
+   * Changes a runtime's type. When the switch would clear fields that hold
+   * a value (switching to or from Cloud Run clears the other group's
+   * fields), the fields are named and the change is confirmed first;
+   * Cancel puts the select back.
+   */
+  private async changeRuntimeType(name: string, select: HTMLSelectElement): Promise<void> {
+    const value = select.value;
+    const rt = this.runtimes[name];
+    if (!rt || (rt.type || '') === value) return;
+    const cleared = runtimeTypeSwitchClears(rt, value);
+    if (cleared.length > 0) {
+      const ok = await showConfirm(
+        `Changing runtime "${name}" to ${value} clears these fields:\n${cleared.join(', ')}\n\nThey are removed when you save.`,
+        { title: 'Change runtime type?', confirmText: 'Change type' }
+      );
+      if (!ok) {
+        select.value = rt.type || '';
+        this.requestUpdate();
+        return;
+      }
+    }
+    this.updateRuntimeField(name, 'type', value);
   }
 
   private updateRuntimeField(name: string, field: keyof V1RuntimeConfig, value: string): void {
@@ -5452,25 +6016,8 @@ export class ScionPageAdminServerConfig extends LitElement {
     // When switching type, clear fields that belong to the other type group
     // so stale values don't persist in the payload.
     if (field === 'type') {
-      const isCloudRun = value === 'cloudrun' || value === 'cloudrun-instances';
-      if (isCloudRun) {
-        // Switching to Cloud Run — clear container/k8s fields
-        delete rt.host;
-        delete rt.context;
-        delete rt.namespace;
-        delete rt.gke;
-        delete rt.list_all_namespaces;
-        delete rt.safe_to_evict;
-        // Each Cloud Run type reads its own block; drop the other one.
-        if (value === 'cloudrun-instances') {
-          delete rt.cloudrun;
-        } else {
-          delete rt.cloudrun_instances;
-        }
-      } else {
-        // Switching away from Cloud Run — clear both Cloud Run blocks
-        delete rt.cloudrun;
-        delete rt.cloudrun_instances;
+      for (const key of runtimeTypeSwitchKeys(value)) {
+        delete (rt as Record<string, unknown>)[key];
       }
     }
     updated[name] = rt;
@@ -5753,6 +6300,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                 );
               }}
             ></sl-input>
+            ${this.renderQuantityIssues(`profiles.${name}.resources.requests.cpu`)}
           </div>
           <div class="form-field">
             <label>Memory Request</label>
@@ -5769,6 +6317,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                 );
               }}
             ></sl-input>
+            ${this.renderQuantityIssues(`profiles.${name}.resources.requests.memory`)}
           </div>
           <div class="form-field">
             <label>CPU Limit</label>
@@ -5785,6 +6334,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                 );
               }}
             ></sl-input>
+            ${this.renderQuantityIssues(`profiles.${name}.resources.limits.cpu`)}
           </div>
           <div class="form-field">
             <label>Memory Limit</label>
@@ -5801,6 +6351,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                 );
               }}
             ></sl-input>
+            ${this.renderQuantityIssues(`profiles.${name}.resources.limits.memory`)}
           </div>
           <div class="form-field">
             <label>Disk</label>
@@ -5812,6 +6363,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                 this.updateProfileDisk(name, (e.target as HTMLInputElement).value);
               }}
             ></sl-input>
+            ${this.renderQuantityIssues(`profiles.${name}.resources.disk`)}
           </div>
         </div>
       </sl-card>

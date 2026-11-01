@@ -185,7 +185,9 @@ test.beforeAll(async ({ browser }) => {
 
   context = await browser.newContext({ baseURL: hub.baseURL, storageState: member.storageFile });
   context.on('request', (req) => {
-    if (req.headers()['authorization'] !== undefined) bearerRequests.push(req.url());
+    // Record the path only, so a failure never prints a credential.
+    if (req.headers()['authorization'] !== undefined)
+      bearerRequests.push(new URL(req.url()).pathname);
   });
   await assertTestIdentity(context.request, { email: member.email, role: 'member' });
   for (const agent of suite.agents) await waitServed(agent.id);
@@ -229,21 +231,41 @@ for (const transport of TRANSPORTS) {
 
       for (const name of SUBRESOURCES) {
         const sent = await subs.get(name)!.request!.allHeaders();
-        expect.soft(sent['cookie'], `${name} request cookie`).toBeUndefined();
+        // Compare presence only, so a failure never prints a cookie value.
+        expect.soft(sent['cookie'] !== undefined, `${name} request sent a cookie`).toBe(false);
       }
 
       // The module script's answer, as the browser exposed it.
       const res = subs.get(CORS_SUBRESOURCE)!.response!;
       const headers = await res.allHeaders();
       expect.soft(res.status(), 'app.js status').toBe(401);
-      expect.soft(headers['content-type'], 'app.js content type').toBe('text/plain; charset=utf-8');
-      expect.soft(headers['x-scion-proxy-error'], 'app.js error header').toBe('no-credentials');
       expect
-        .soft(headers['x-scion-proxy-hint'], 'app.js hint header')
-        .toBe('sandboxed-subresource');
-      expect.soft(headers['x-content-type-options'], 'app.js nosniff').toBe('nosniff');
-      expect.soft(headers['cache-control'], 'app.js cache control').toBe('no-store');
-      expect.soft(headers['access-control-allow-origin'], 'app.js allow origin').toBe('*');
+        .soft(
+          headers['content-type'] === 'text/plain; charset=utf-8',
+          'app.js content type is text/plain; charset=utf-8'
+        )
+        .toBe(true);
+      expect
+        .soft(
+          headers['x-scion-proxy-error'] === 'no-credentials',
+          'app.js error header is no-credentials'
+        )
+        .toBe(true);
+      expect
+        .soft(
+          headers['x-scion-proxy-hint'] === 'sandboxed-subresource',
+          'app.js hint header is sandboxed-subresource'
+        )
+        .toBe(true);
+      expect
+        .soft(headers['x-content-type-options'] === 'nosniff', 'app.js nosniff is nosniff')
+        .toBe(true);
+      expect
+        .soft(headers['cache-control'] === 'no-store', 'app.js cache control is no-store')
+        .toBe(true);
+      expect
+        .soft(headers['access-control-allow-origin'] === '*', 'app.js allow origin is *')
+        .toBe(true);
 
       // The no-cors loads: the browser blocks their plain-text answers, so
       // they fail without a response. The failure text depends on the
@@ -303,7 +325,10 @@ for (const transport of TRANSPORTS) {
       const redirect = await first?.response();
       expect(redirect?.status()).toBe(308);
       const location = (await redirect?.allHeaders())?.['location'] ?? '';
-      expect(new URL(location, bare).toString()).toBe(root);
+      expect(
+        new URL(location, bare).toString() === root,
+        'the redirect goes to the trailing-slash URL'
+      ).toBe(true);
       await page.close();
     });
   });

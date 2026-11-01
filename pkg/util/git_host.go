@@ -19,14 +19,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Host-side git invocations.
@@ -51,11 +54,13 @@ import (
 //     outside a small allowlist is refused. It checks again after the
 //     command that the repository config it depended on did not change.
 //
-// Global and system config are the host user's and stay in effect: git-lfs
-// installs its filter there, so LFS content is still checked out. Command
-// line settings (-c) take precedence over every config file, including
-// files pulled in with include.path, which is why pinning works without
-// rewriting the repository config.
+// For local commands, global and system config are the host user's and stay
+// in effect: git-lfs installs its filter there, so LFS content is still
+// checked out. A command that talks to a remote reads neither, and offers no
+// host credential (HostGitRemoteEnv). Command line settings (-c) take
+// precedence over every config file, including files pulled in with
+// include.path, which is why pinning works without rewriting the repository
+// config.
 //
 // The repository config these commands read can still be written by agents
 // on runtimes where it is mounted read-write. The check after each command
@@ -78,6 +83,9 @@ import (
 //     part of the checks here, and never fetches from submodule URLs.
 //   - merge.verifySignatures=false, commit.gpgsign=false, tag.gpgsign=false:
 //     no git invocation runs gpg.program to verify or make a signature.
+//   - http.emptyAuth=false: git never starts Negotiate/NTLM authentication
+//     with empty credentials, so a Kerberos ticket or NTLM identity of the
+//     host user is not offered on an http(s) remote operation.
 //   - protocol.file.allow=user: the file:// and local-path transports are
 //     allowed for a top-level operation the user drives directly (git treats
 //     those as GIT_PROTOCOL_FROM_USER=1), which includes a hub clone URL that is
@@ -96,6 +104,7 @@ func HostGitArgs() []string {
 		"-c", "merge.verifySignatures=false",
 		"-c", "commit.gpgsign=false",
 		"-c", "tag.gpgsign=false",
+		"-c", "http.emptyAuth=false",
 	}
 }
 
@@ -138,15 +147,48 @@ var hostGitEnvKept = map[string]bool{
 	"GIT_TEST_ASSUME_DIFFERENT_OWNER": true,
 }
 
+// hostGitEnvDropped are the non-GIT_* variables HostGitEnv drops: host
+// authentication sources (the ssh agent and askpass program, a netrc path,
+// the GSS proxy switch and the Kerberos credential cache and client keytab)
+// that no host-side git call relies on, and the marker of HostGitRemoteEnv's
+// layer. Remote commands also get HostGitRemoteEnv, which points HOME and the
+// Kerberos variables at nothing: dropping KRB5CCNAME alone would fall back to
+// the default credential cache, and libcurl reads $HOME/.netrc, not NETRC.
+var hostGitEnvDropped = map[string]bool{
+	"SSH_AUTH_SOCK":       true,
+	"SSH_ASKPASS":         true,
+	"NETRC":               true,
+	"GSS_USE_PROXY":       true,
+	"KRB5CCNAME":          true,
+	"KRB5_CLIENT_KTNAME":  true,
+	hostGitRemoteLayerEnv: true,
+}
+
 // HostGitEnv returns env without GIT_* variables other than hostGitEnvKept:
 // no inherited GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR, GIT_INDEX_FILE,
 // GIT_CONFIG_COUNT/KEY/VALUE, GIT_CONFIG_PARAMETERS, GIT_EXEC_PATH, editor or
-// pager variables. Callers append the GIT_* variables they set themselves.
+// pager variables, and no TLS client certificate (GIT_SSL_CERT, GIT_SSL_KEY,
+// GIT_SSL_CERT_PASSWORD_PROTECTED) or GIT_SSL_NO_VERIFY. It also drops the
+// host authentication variables in hostGitEnvDropped. Callers append the
+// GIT_* variables they set themselves.
+//
+// It also drops any inherited LC_ALL entry and appends LC_ALL=C, so git
+// reports in the C locale whatever the user's locale: callers match git's
+// message text (for example "not a git repository" or "is not a working
+// tree"). On Windows, where environment keys are case-insensitive, an entry
+// spelled another way (such as Lc_All) can remain, but the appended LC_ALL=C
+// overrides it: os/exec keeps the last of duplicate entries, matching keys
+// case-insensitively there. Inherited LANG, LANGUAGE, LC_MESSAGES and other
+// LC_* entries are left in place: LC_ALL overrides LANG and every LC_*
+// category, and under the C locale gettext ignores LANGUAGE.
 func HostGitEnv(env []string) []string {
-	out := make([]string, 0, len(env))
+	out := make([]string, 0, len(env)+1)
 	for _, kv := range env {
 		k, _, _ := strings.Cut(kv, "=")
 		if strings.HasPrefix(k, "GIT_") && !hostGitEnvKept[k] {
+			continue
+		}
+		if k == "LC_ALL" || hostGitEnvDropped[k] {
 			continue
 		}
 		// Drop any inherited scoped-credential variable so it never reaches a host
@@ -157,10 +199,27 @@ func HostGitEnv(env []string) []string {
 		}
 		out = append(out, kv)
 	}
-	return out
+	return append(out, "LC_ALL=C")
 }
 
-// HostGitOptions configures HostGitCommand.
+// HostGitCeiling selects whether git may discover a repository above the
+// command's directory. HostGitCommand refuses any value other than CeilingOn
+// and CeilingOff before running anything.
+type HostGitCeiling int
+
+const (
+	// CeilingOn, the default, stops repository discovery at the command's
+	// directory when that directory has no .git entry: git runs with
+	// GIT_CEILING_DIRECTORIES set to its parent, so it never finds, or reads
+	// the config of, a repository above it.
+	CeilingOn HostGitCeiling = iota
+	// CeilingOff lets git discover a repository above the command's
+	// directory, which the policy check does not read. Every use needs an
+	// entry, with its reason, in TestHostGitGoesThroughOneDoor's allowlist.
+	CeilingOff
+)
+
+// HostGitOptions configures HostGitCommand and RunHostGit.
 type HostGitOptions struct {
 	// Config holds extra key=value settings passed as -c after HostGitArgs,
 	// for example "safe.directory=<path>".
@@ -169,9 +228,16 @@ type HostGitOptions struct {
 	// A caller that sets it starts from HostGitEnv itself.
 	Env []string
 	// Network marks a command that fetches from or pushes to a remote. It
-	// has no effect on the policy check (deny-by-default applies either way);
-	// it only widens the before/after snapshot to every repository key.
+	// has no effect on the policy check (deny-by-default applies either way).
+	// It widens the before/after snapshot to every repository key, adds the
+	// transport allow-list, and selects the remote authentication layer:
+	// the command runs with HostGitRemoteEnv for Remote. A network command
+	// without Remote is refused.
 	Network bool
+	// Remote is the remote a Network command talks to and the project
+	// credential offered to it (NewHostGitRemote). It is required with
+	// Network and refused without it.
+	Remote *HostGitRemote
 	// Policy selects the deny-by-default allow-list the repository config is
 	// checked against before the command runs. The zero value,
 	// RepoPolicyManaged, is the strict list for a Scion-managed repository;
@@ -190,6 +256,13 @@ type HostGitOptions struct {
 	// tracked .lfsconfig), so a host-side checkout that does resolve LFS uses
 	// a trusted endpoint. Used for linked checkouts.
 	LFSURL string
+	// Audience is who reads the command's errors. AudienceRemote (broker and
+	// Hub callers) gives a refusal that names no host path.
+	Audience Audience
+	// Ceiling bounds repository discovery when dir has no .git entry and the
+	// environment pins no GIT_DIR. The zero value, CeilingOn, keeps git from
+	// discovering a repository above dir.
+	Ceiling HostGitCeiling
 }
 
 // ErrRepoConfigChanged is returned (wrapped) when the repository config a
@@ -372,9 +445,53 @@ func (c *HostGitCmd) after(runErr error) error {
 // sensitive keys; running the returned command re-checks the policy and the
 // sensitive keys afterwards (HostGitCmd, verifyConfigStable). The policy read
 // is the primary control; the pins and HostGitArgs are defence in depth.
+//
+// Discovery mode: when dir has no .git entry and env pins no GIT_DIR, there
+// is no repository at dir for the policy to read, and git would look for one
+// in dir's ancestors. This mode runs only the subcommands in
+// hostGitDiscoverySubcommands (currently rev-parse), in the resolved
+// directory, which is checked again for a .git or HEAD entry just before the
+// command is built. With opts.Ceiling at its default (CeilingOn) git runs
+// with GIT_CEILING_DIRECTORIES set to dir's parent (symlinks resolved), so it
+// finds no repository above dir. A parent whose resolved path contains the
+// path-list separator (':' or, on Windows, ';') cannot be expressed as a
+// ceiling, so the command is refused. With CeilingOff git may discover a
+// repository above dir, whose config is not checked here. In either ceiling
+// mode, a directory that cannot be resolved is refused. A dir that git
+// would itself treat as a git directory (it holds a HEAD entry) is refused.
+// A .git or HEAD created in the resolved directory while the command runs is
+// seen only after it has run, and fails the command (ErrRepoConfigChanged),
+// as does dir resolving elsewhere after the run.
+//
+// In every mode the caller's first argument must be the subcommand: no
+// arguments, an empty first argument, or a first argument that starts with
+// an option is refused before anything runs (errHostGitArgsOption). The
+// directory, repository and config come only from dir, opts.Env and
+// opts.Config, never from a global option such as -C, --git-dir, --work-tree
+// or -c. Options after the subcommand are the caller's.
+//
+// For opts.Audience AudienceRemote, the errors of discovery mode carry no
+// host path; the argument and subcommand refusals carry none for either
+// audience.
 func HostGitCommand(ctx context.Context, dir string, opts HostGitOptions, args ...string) (*HostGitCmd, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("HostGitCommand: dir is required")
+	}
+	// args is exactly the slice appended after HostGitArgs (and the pins)
+	// below, so its first element is what git reads first after them.
+	if len(args) == 0 || args[0] == "" || strings.HasPrefix(args[0], "-") {
+		return nil, errHostGitArgsOption
+	}
+	switch opts.Ceiling {
+	case CeilingOn, CeilingOff:
+	default:
+		return nil, errHostGitCeilingInvalid
+	}
+	switch {
+	case opts.Network && opts.Remote == nil:
+		return nil, errHostGitRemoteRequired
+	case !opts.Network && opts.Remote != nil:
+		return nil, errHostGitRemoteWithoutNetwork
 	}
 	env := opts.Env
 	if env == nil {
@@ -383,15 +500,97 @@ func HostGitCommand(ctx context.Context, dir string, opts HostGitOptions, args .
 	if opts.SkipLFSSmudge {
 		env = append(env, "GIT_LFS_SKIP_SMUDGE=1")
 	}
-	allowOpts := repoConfigAllowOptions{worktreePath: opts.AllowedWorktreePath}
-	if err := checkRepoConfigPolicy(ctx, dir, env, opts.Policy, allowOpts); err != nil {
-		return nil, err
+	if opts.Network {
+		env = HostGitRemoteEnv(env, opts.Remote.url, opts.Remote.token)
 	}
-	// Snapshot the sensitive keys before the command, to detect any change to
-	// them while it runs (verifyConfigStable).
-	before, err := repoConfigSnapshot(dir, env)
+	discover, err := hostGitDiscovers(dir, env, opts.Audience)
 	if err != nil {
 		return nil, err
+	}
+	allowOpts := repoConfigAllowOptions{worktreePath: opts.AllowedWorktreePath, audience: opts.Audience}
+	// runDir is where git runs: dir, or in discovery mode the resolved
+	// directory, so a link swapped after resolution cannot move the command.
+	runDir := dir
+	var verify func() error
+	if discover {
+		if !hostGitDiscoverySubcommands[args[0]] {
+			return nil, errHostGitDiscoverySubcommand
+		}
+		resolved, err := hostGitResolveDir(dir, opts.Audience)
+		if err != nil {
+			return nil, err
+		}
+		hostGitAfterResolve(resolved)
+		// Detection, the ceiling and cmd.Dir must agree on one directory:
+		// check the resolved one again, so a directory swapped in after the
+		// first check (one holding a .git) is refused before git runs there.
+		stillNone, err := hostGitDiscovers(resolved, env, opts.Audience)
+		if err != nil {
+			return nil, err
+		}
+		if !stillNone {
+			return nil, fmt.Errorf("%w: a repository appeared in the command's directory before it ran", ErrRepoConfigChanged)
+		}
+		runDir = resolved
+		switch opts.Ceiling {
+		case CeilingOn:
+			ceiling := filepath.Dir(resolved)
+			if strings.ContainsRune(ceiling, filepath.ListSeparator) {
+				return nil, errHostGitCeilingSeparator
+			}
+			env = setEnvValue(env, "GIT_CEILING_DIRECTORIES", ceiling)
+		case CeilingOff:
+			// No bound: git may discover a repository above dir.
+		}
+		verify = func() error {
+			// dir must still resolve to where git ran.
+			again, err := hostGitResolveDir(dir, opts.Audience)
+			if err != nil {
+				return fmt.Errorf("%w: %v", ErrRepoConfigChanged, err)
+			}
+			if again != resolved {
+				return fmt.Errorf("%w: the command's directory resolved elsewhere after it ran", ErrRepoConfigChanged)
+			}
+			hostGitBeforeVerifyDiscover(resolved)
+			// Nothing was read before the command; the resolved directory,
+			// where git ran, must still hold no repository afterwards. The
+			// check uses the resolved path, as the before-run check does,
+			// because dir may be repointed after the comparison above.
+			stillNone, err := hostGitDiscovers(resolved, env, opts.Audience)
+			if err != nil {
+				return fmt.Errorf("%w: %v", ErrRepoConfigChanged, err)
+			}
+			if !stillNone {
+				return fmt.Errorf("%w: a repository appeared in the command's directory while it ran", ErrRepoConfigChanged)
+			}
+			return nil
+		}
+	} else {
+		if err := checkRepoConfigPolicy(ctx, dir, env, opts.Policy, allowOpts); err != nil {
+			return nil, err
+		}
+		// Snapshot the sensitive keys before the command, to detect any change
+		// to them while it runs (verifyConfigStable).
+		before, err := repoConfigSnapshot(dir, env)
+		if err != nil {
+			return nil, err
+		}
+		verify = func() error {
+			// After the command, re-run the deny-by-default policy (allow-list
+			// plus the git cross-check) on the current repository config, and
+			// confirm no sensitive key changed value. The command fails
+			// (ErrRepoConfigChanged) on a newly-added include or refused key, or
+			// a change to a sensitive key (remote url/fetch, branch tracking,
+			// submodule url/update, core.worktree, user.signingkey, gpg.format,
+			// filter.lfs.*). A change confined to other allowed keys is
+			// tolerated — git-lfs writes lfs.repositoryformatversion (and
+			// lfs.<url>.access after auth) during its own filter-process even
+			// with the smudge skipped. A fresh context, bounded by
+			// hostGitVerifyTimeout: the command's own may have expired.
+			vctx, cancel := context.WithTimeout(context.Background(), hostGitVerifyTimeout)
+			defer cancel()
+			return verifyConfigStable(vctx, dir, env, opts.Policy, allowOpts, before)
+		}
 	}
 	lead := HostGitArgs()
 	if opts.Network {
@@ -407,28 +606,176 @@ func HostGitCommand(ctx context.Context, dir string, opts HostGitOptions, args .
 	for _, kv := range opts.Config {
 		lead = append(lead, "-c", kv)
 	}
-	pins, err := readFilterPins(ctx, dir, lead, env)
+	pins, err := readFilterPins(ctx, runDir, lead, env)
 	if err != nil {
 		return nil, err
 	}
 	full := append(append(append([]string{}, lead...), pins...), args...)
 	cmd := exec.CommandContext(ctx, "git", full...)
-	cmd.Dir = dir
+	cmd.Dir = runDir
 	cmd.Env = env
-	verify := func() error {
-		// After the command, re-run the deny-by-default policy (allow-list plus
-		// the git cross-check) on the current repository config, and confirm no
-		// sensitive key changed value. The command fails (ErrRepoConfigChanged)
-		// on a newly-added include or refused key, or a change to a sensitive
-		// key (remote url/fetch, branch tracking, submodule url/update,
-		// core.worktree, user.signingkey, gpg.format, filter.lfs.*). A change
-		// confined to other allowed keys is tolerated — git-lfs writes
-		// lfs.repositoryformatversion (and lfs.<url>.access after auth) during
-		// its own filter-process even with the smudge skipped. A fresh context:
-		// the command's own may have expired.
-		return verifyConfigStable(context.Background(), dir, env, opts.Policy, allowOpts, before)
-	}
 	return &HostGitCmd{Cmd: cmd, verify: verify}, nil
+}
+
+// hostGitError is a discovery-mode error: the fixed class, and for the local
+// audience the cause (which may name a path) as well. A remote error wraps
+// nothing, so no *fs.PathError reaches it.
+func hostGitError(audience Audience, class string, cause error) error {
+	if audience == AudienceRemote || cause == nil {
+		return errors.New("host-side git: " + class)
+	}
+	return fmt.Errorf("host-side git: %s: %w", class, cause)
+}
+
+// hostGitDiscovers reports whether git, run in dir with env, would look for
+// the repository in dir's ancestors: env pins no GIT_DIR and dir has no .git
+// entry. A dir holding a HEAD entry (which git may take as a git directory,
+// reading its config unchecked) and any error other than a missing .git are
+// refused.
+func hostGitDiscovers(dir string, env []string, audience Audience) (bool, error) {
+	if gitEnvValue(env, "GIT_DIR") != "" {
+		return false, nil
+	}
+	_, err := os.Lstat(filepath.Join(dir, ".git"))
+	if err == nil {
+		return false, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return false, hostGitError(audience, "cannot check the command's directory for a repository", err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "HEAD")); !errors.Is(err, fs.ErrNotExist) {
+		return false, hostGitError(audience, "the command's directory has no .git entry but may itself be a git directory; refusing", nil)
+	}
+	return true, nil
+}
+
+// hostGitResolveDir returns dir made absolute with symlinks resolved: where
+// discovery-mode git runs, and the base of its GIT_CEILING_DIRECTORIES (the
+// parent of this value lets git check the directory itself and nothing above
+// it; git compares ceilings against its resolved working directory, so an
+// unresolved parent would not stop it). git splits the ceiling at the
+// path-list separator, so a parent containing one would become several
+// unrelated ceilings: the caller refuses it, with an error that names no
+// path for either audience.
+func hostGitResolveDir(dir string, audience Audience) (string, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", hostGitError(audience, "cannot resolve the command's directory", err)
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", hostGitError(audience, "cannot resolve the command's directory", err)
+	}
+	return resolved, nil
+}
+
+// hostGitDiscoverySubcommands are the git subcommands discovery mode runs:
+// read-only ones that need no repository at the command's directory. Adding
+// a subcommand, or a discovery-mode caller, needs security review of the
+// options it passes too: for example, rev-parse
+// --show-superproject-working-tree starts a child git in the parent
+// directory, which CeilingOff does not bound.
+var hostGitDiscoverySubcommands = map[string]bool{
+	"rev-parse": true,
+}
+
+// hostGitAfterResolve runs in discovery mode between resolving the command's
+// directory and checking it again. It does nothing; it is a variable so a
+// test can change the directory in that window.
+var hostGitAfterResolve = func(resolved string) {}
+
+// hostGitBeforeVerifyDiscover runs in discovery mode after the after-run
+// check has found that the command's directory still resolves to where git
+// ran, and before that directory is checked for a repository. It does
+// nothing; it is a variable so a test can repoint the directory in that
+// window.
+var hostGitBeforeVerifyDiscover = func(resolved string) {}
+
+// errHostGitArgsOption refuses caller arguments that are missing, start with
+// an empty argument or start with an option: the first argument must be the
+// git subcommand.
+var errHostGitArgsOption = errors.New("host-side git: the first argument must be the git subcommand, not an option; refusing")
+
+// errHostGitDiscoverySubcommand refuses, in discovery mode, a subcommand
+// outside hostGitDiscoverySubcommands.
+var errHostGitDiscoverySubcommand = errors.New("host-side git: without a repository at the command's directory only read-only subcommands run; refusing")
+
+// errHostGitCeilingInvalid refuses a Ceiling value other than CeilingOn and
+// CeilingOff.
+var errHostGitCeilingInvalid = errors.New("host-side git: unknown repository discovery setting; refusing")
+
+// errHostGitCeilingSeparator refuses a discovery bound whose path contains
+// the path-list separator.
+var errHostGitCeilingSeparator = errors.New("host-side git: cannot bound repository discovery: the parent directory's path contains the path-list separator; refusing")
+
+// hostGitVerifyTimeout bounds the after-run check of the repository config,
+// which runs git with a fresh context.
+const hostGitVerifyTimeout = 30 * time.Second
+
+// hostGitWaitDelay bounds how long RunHostGit waits for git's output pipes
+// to close after git exits or is killed, so a descendant holding them open
+// cannot keep the call running.
+const hostGitWaitDelay = 5 * time.Second
+
+// setEnvValue returns env without any key= entry, with key=value appended.
+func setEnvValue(env []string, key, value string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		if k, _, _ := strings.Cut(kv, "="); k == key {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, key+"="+value)
+}
+
+// HostGitResult is the outcome of RunHostGit.
+type HostGitResult struct {
+	// ExitCode is git's exit status, or -1 when git did not run or did not
+	// exit normally (refused, failed to start, killed by a signal or by ctx).
+	ExitCode int
+	// Stdout and Stderr are git's output, unmodified.
+	Stdout []byte
+	Stderr []byte
+	// Err is a refusal before the run, a start or wait failure, or a change
+	// to the repository config during the run (wrapping
+	// ErrRepoConfigChanged). A normal non-zero exit is not an error here: it is
+	// in ExitCode. When git's output pipes stay open past hostGitWaitDelay
+	// after git exits (a descendant holds them), a zero exit reports
+	// exec.ErrWaitDelay, and a non-zero exit reports its ExitCode with Err nil;
+	// either way the output may be truncated.
+	Err error
+}
+
+// RunHostGit builds the command with HostGitCommand (policy check, snapshot,
+// filter pins, HostGitArgs, HostGitEnv, the discovery ceiling), runs it once
+// under ctx and applies the after-run check. It does not retry and does not
+// interpret git's output: callers classify ExitCode, Stdout and Stderr.
+func RunHostGit(ctx context.Context, dir string, opts HostGitOptions, args ...string) HostGitResult {
+	cmd, err := HostGitCommand(ctx, dir, opts, args...)
+	if err != nil {
+		return HostGitResult{ExitCode: -1, Err: err}
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	cmd.WaitDelay = hostGitWaitDelay
+	runErr := cmd.Cmd.Run()
+	res := HostGitResult{ExitCode: -1}
+	if ps := cmd.ProcessState; ps != nil && ps.Exited() {
+		res.ExitCode = ps.ExitCode()
+		var exitErr *exec.ExitError
+		if errors.As(runErr, &exitErr) {
+			runErr = nil
+		}
+	}
+	if ctxErr := ctx.Err(); runErr != nil && ctxErr != nil && !errors.Is(runErr, ctxErr) {
+		runErr = fmt.Errorf("%w: %w", ctxErr, runErr)
+	}
+	res.Err = cmd.after(runErr)
+	res.Stdout = stdout.Bytes()
+	res.Stderr = stderr.Bytes()
+	return res
 }
 
 // hostGit returns a git command with HostGitArgs ahead of args and the
@@ -510,6 +857,38 @@ func ScopedCredentialHelperEnv(base []string, cloneURL, token string) (env []str
 		fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", start+1, key),
 		fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", start+1, scopedCredentialHelperText),
 	), true
+}
+
+// NoCredentialHelperEnv returns base, for a git command that talks to
+// cloneURL, with:
+//   - the configured credential helper list reset to empty, so no helper of
+//     the host user's (a credential store, also one scoped to a URL) is
+//     asked;
+//   - the configured extra HTTP headers reset to empty, twice: git picks
+//     http.<url>.extraHeader settings by the most specific matching URL and
+//     skips a less specific reset, so one reset is keyed on cloneURL itself,
+//     which no other setting for this request can be more specific than;
+//     and git applies no URL-scoped setting at all to a URL it cannot
+//     normalize (for example one with a "/../" segment), so the generic
+//     http.extraHeader is reset too;
+//   - askpass disabled: an empty GIT_ASKPASS stops git's askpass lookup, and
+//     with GIT_TERMINAL_PROMPT=0 git then fails instead of prompting.
+//
+// It does not change other git authentication sources, for example
+// ~/.netrc, TLS client certificates (http.sslCert), Kerberos/Negotiate or
+// ssh; HostGitRemoteEnv, which applies it, covers those.
+func NoCredentialHelperEnv(base []string, cloneURL string) []string {
+	start := existingConfigCount(base)
+	return append(base,
+		"GIT_ASKPASS=",
+		"GIT_CONFIG_COUNT="+strconv.Itoa(start+3),
+		fmt.Sprintf("GIT_CONFIG_KEY_%d=credential.helper", start),
+		fmt.Sprintf("GIT_CONFIG_VALUE_%d=", start),
+		fmt.Sprintf("GIT_CONFIG_KEY_%d=http.extraHeader", start+1),
+		fmt.Sprintf("GIT_CONFIG_VALUE_%d=", start+1),
+		fmt.Sprintf("GIT_CONFIG_KEY_%d=http.%s.extraHeader", start+2, cloneURL),
+		fmt.Sprintf("GIT_CONFIG_VALUE_%d=", start+2),
+	)
 }
 
 // scopedGitCredentialEnv is the environment variable the scoped credential helper

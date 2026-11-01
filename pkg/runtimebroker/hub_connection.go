@@ -147,6 +147,9 @@ type HubConnection struct {
 	// the control channel with its own lifecycle (conduit_dial.go).
 	conduitCancel context.CancelFunc
 	conduitWg     sync.WaitGroup
+	// conduitDialer is the running conduit dialer (nil when none), read for
+	// the broker's health checks. Guarded by mu.
+	conduitDialer *ConduitDialer
 	// conduitExitHook, when set, runs on the dialer goroutine after the
 	// dialer returned, before the goroutine ends (tests only).
 	conduitExitHook func()
@@ -554,6 +557,13 @@ func (hc *HubConnection) reinitialize(ctx context.Context, server *Server, creds
 	// Stop existing services. stop takes hc.mu itself.
 	hc.stop()
 
+	// New credentials may name another hub; the transport rule applies to
+	// it before anything is sent (createHubConnection does the same).
+	if err := config.CheckHubTransport(creds.HubEndpoint); err != nil {
+		hc.setStatus(ConnectionStatusError)
+		return fmt.Errorf("hub connection %q: %w", hc.Name, err)
+	}
+
 	// Update credentials
 	hc.mu.Lock()
 	hc.Credentials = creds
@@ -699,6 +709,11 @@ func isDevAuthToken(token string) bool {
 func HubClientForCredentials(creds *brokercredentials.BrokerCredentials) (hubclient.Client, error) {
 	if creds == nil || creds.SecretKey == "" {
 		return nil, fmt.Errorf("hub credentials have no secret")
+	}
+	// The transport rule createHubConnection applies: credentials written
+	// before it existed may name a plain http network hub.
+	if err := config.CheckHubTransport(creds.HubEndpoint); err != nil {
+		return nil, fmt.Errorf("hub credentials: %w", err)
 	}
 	secretKey, err := base64.StdEncoding.DecodeString(creds.SecretKey)
 	if err != nil {

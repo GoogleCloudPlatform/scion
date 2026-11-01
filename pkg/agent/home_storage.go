@@ -30,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 )
 
@@ -326,10 +327,35 @@ func homeStorageGlobal(gs *config.VersionedSettings) *config.V1HomeStorageConfig
 	return gs.Server.EffectiveHomeStorage()
 }
 
+// homeShareLayout returns the Layout agent homes on nfs resolve on: the
+// shared-dir Layout of the project storage Layout built from the global
+// settings (config.ResolveProjectStorage and config.ProjectStorageLayout,
+// the struct the broker and hub build their Layouts from; homes: nfs uses
+// that one share, design one-share homes, ptone/scion#5825). It must be an nfs
+// Layout.
+func homeShareLayout(gs *config.VersionedSettings, profile string) (projectfs.Layout, error) {
+	var srv *config.V1ServerConfig
+	if gs != nil {
+		srv = gs.Server
+	}
+	ps, _, err := config.ResolveProjectStorage(srv)
+	if err != nil {
+		return projectfs.Layout{}, fmt.Errorf("home storage nfs needs usable project storage settings for profile %q: %v", profile, err)
+	}
+	layout, err := config.ProjectStorageLayout(ps, config.DefaultVolumeMountBase)
+	if err != nil {
+		return projectfs.Layout{}, fmt.Errorf("home storage nfs needs usable project storage settings for profile %q: %v", profile, err)
+	}
+	hl := layout.SharedDirLayout()
+	if hl.Backend != projectfs.BackendNFS {
+		return projectfs.Layout{}, fmt.Errorf("home storage nfs needs the project storage nfs share (server.project_storage backend nfs) for profile %q", profile)
+	}
+	return hl, nil
+}
+
 // newNFSHomeStoragePlan builds the plan for an agent's first start with an
-// NFS home. The share is the first share of the global shared_dir_storage
-// nfs block (EffectiveSharedDirStorage), the same share and claim the
-// agent's shared dirs use.
+// NFS home, on the project storage share (homeShareLayout): the share and
+// claim the agent's shared dirs use.
 func newNFSHomeStoragePlan(in homeStorageInput, gs *config.VersionedSettings, leaf string) (*homeStoragePlan, error) {
 	hs := homeStorageGlobal(gs)
 	if err := hs.Validate(); err != nil {
@@ -338,38 +364,29 @@ func newNFSHomeStoragePlan(in homeStorageInput, gs *config.VersionedSettings, le
 	if err := checkNFSHomeStart(in, hs); err != nil {
 		return nil, err
 	}
-	var sd *config.V1SharedDirStorageConfig
-	if gs.Server != nil {
-		sd = gs.Server.EffectiveSharedDirStorage()
-	}
-	if sd == nil || sd.Backend != config.HomeStorageBackendNFS {
-		return nil, homeStorageUnavailable("home_storage nfs needs shared_dir_storage nfs for profile %q", in.Profile)
-	}
-	if err := sd.Validate(); err != nil {
-		return nil, homeStorageUnavailable("home_storage nfs needs a complete shared_dir_storage nfs block for profile %q: %v", in.Profile, err)
-	}
-	share, err := firstNFSShare(sd)
+	hl, err := homeShareLayout(gs, in.Profile)
 	if err != nil {
-		return nil, homeStorageUnavailable("home_storage nfs for profile %q: %v", in.Profile, err)
+		return nil, homeStorageUnavailable("%v", err)
 	}
-	if share.PVName == "" {
-		return nil, homeStorageUnavailable("home_storage nfs needs a claim (shares[0].pv_name) in shared_dir_storage for profile %q", in.Profile)
+	if hl.Share.PVName == "" {
+		return nil, homeStorageUnavailable("home storage nfs needs a claim (shares[0].pv_name) on the project storage share for profile %q: "+
+			"without it Kubernetes pods mount the share inline, which NFS homes do not support yet", in.Profile)
 	}
 	return &homeStoragePlan{
 		Backend:     config.HomeStorageBackendNFS,
 		Leaf:        leaf,
-		ShareID:     share.ID,
-		PVClaimName: share.PVName,
-		SubPathRoot: nfsSubPathRoot(sd.NFS),
-		MountRoot:   sd.NFS.MountRoot,
+		ShareID:     hl.Share.ID,
+		PVClaimName: hl.Share.PVName,
+		SubPathRoot: hl.SubPathRoot,
+		MountRoot:   filepath.Dir(hl.HostBase),
 		AgentID:     in.AgentID,
 		Settings:    hs,
 	}, nil
 }
 
 // recordedNFSHomeStorage builds the plan for a later start of an agent
-// whose record names an NFS home. The recorded share must still be
-// configured in server.shared_dir_storage with the recorded claim.
+// whose record names an NFS home. The recorded share must still be the
+// project storage share (homeShareLayout), with the recorded claim.
 func recordedNFSHomeStorage(in homeStorageInput, rec *homeStorageRecord) (*homeStoragePlan, error) {
 	gs, err := in.LoadSettings()
 	if err != nil {
@@ -382,32 +399,23 @@ func recordedNFSHomeStorage(in homeStorageInput, rec *homeStorageRecord) (*homeS
 	if err := checkNFSHomeStart(in, hs); err != nil {
 		return nil, err
 	}
-	var nfs *config.V1NFSConfig
-	if gs.Server != nil && gs.Server.EffectiveSharedDirStorage() != nil {
-		nfs = gs.Server.EffectiveSharedDirStorage().NFS
+	hl, err := homeShareLayout(gs, in.Profile)
+	if err != nil {
+		return nil, homeStorageUnavailable("recorded home share %s not configured: %v", rec.ShareID, err)
 	}
-	if nfs != nil {
-		// The host mount root and shares come from the current block, so
-		// it must be complete and valid before any of it is used.
-		if err := (&config.V1SharedDirStorageConfig{Backend: config.HomeStorageBackendNFS, NFS: nfs}).Validate(); err != nil {
-			return nil, homeStorageUnavailable("the agent has an NFS home but server.shared_dir_storage.nfs is not valid: %v", err)
-		}
-		for _, share := range nfs.Shares {
-			if share.ID == rec.ShareID && share.PVName == rec.PVClaimName {
-				return &homeStoragePlan{
-					Backend:     config.HomeStorageBackendNFS,
-					Leaf:        rec.Leaf,
-					ShareID:     rec.ShareID,
-					PVClaimName: rec.PVClaimName,
-					SubPathRoot: rec.SubPathRoot,
-					MountRoot:   nfs.MountRoot,
-					AgentID:     in.AgentID,
-					Settings:    hs,
-				}, nil
-			}
-		}
+	if hl.Share.ID != rec.ShareID || hl.Share.PVName != rec.PVClaimName {
+		return nil, homeStorageUnavailable("recorded home share %s not configured", rec.ShareID)
 	}
-	return nil, homeStorageUnavailable("recorded home share %s not configured", rec.ShareID)
+	return &homeStoragePlan{
+		Backend:     config.HomeStorageBackendNFS,
+		Leaf:        rec.Leaf,
+		ShareID:     rec.ShareID,
+		PVClaimName: rec.PVClaimName,
+		SubPathRoot: rec.SubPathRoot,
+		MountRoot:   filepath.Dir(hl.HostBase),
+		AgentID:     in.AgentID,
+		Settings:    hs,
+	}, nil
 }
 
 // errHomeStorageNotConfigured is returned by loadHomeStorageSettings when
@@ -446,23 +454,4 @@ func checkHomeStorageLoaded(gs *config.VersionedSettings) (*config.VersionedSett
 		return nil, fmt.Errorf("global settings mention home_storage but it was not loaded (missing schema_version: \"1\"?)")
 	}
 	return gs, nil
-}
-
-// nfsSubPathRoot is the subpath root of an nfs block, with the shared
-// default (config.SubPathRootOrDefault).
-func nfsSubPathRoot(nfs *config.V1NFSConfig) string {
-	if nfs == nil {
-		return config.SubPathRootOrDefault("")
-	}
-	return config.SubPathRootOrDefault(nfs.SubPathRoot)
-}
-
-// firstNFSShare returns the first share of a shared-dir storage nfs block.
-// Validate already requires one, but the block is checked again here so
-// the share is never read from a missing or empty block.
-func firstNFSShare(sd *config.V1SharedDirStorageConfig) (config.V1NFSShare, error) {
-	if sd == nil || sd.NFS == nil || len(sd.NFS.Shares) == 0 {
-		return config.V1NFSShare{}, fmt.Errorf("shared_dir_storage nfs has no shares configured")
-	}
-	return sd.NFS.Shares[0], nil
 }

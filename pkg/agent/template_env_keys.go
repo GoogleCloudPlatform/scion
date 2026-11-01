@@ -299,3 +299,32 @@ func templateDisplayName(templateName string, provenance *imageProvenance, cfg *
 	}
 	return templateName
 }
+
+// logTemplateUnlimitedCounts logs, at info level, each template of chain
+// whose config sets max_turns or max_model_calls to 0. That now means "no
+// limit", overriding any inherited or default limit (ptone/scion#5605);
+// before, such a 0 was accepted silently and meant "inherit". The line lets
+// an operator find templates written with the old meaning. ProvisionAgent
+// calls it once per provision (not the async-create preflight, and not the
+// chain merge every start of an existing agent runs). A template whose
+// config does not load is skipped; provisioning reports that itself.
+func logTemplateUnlimitedCounts(ctx context.Context, chain []*config.Template) {
+	for _, tpl := range chain {
+		cfg, err := tpl.LoadConfig()
+		if err != nil || cfg == nil {
+			continue
+		}
+		var keys []string
+		if api.IsUnlimitedCount(cfg.MaxTurns) {
+			keys = append(keys, "max_turns")
+		}
+		if api.IsUnlimitedCount(cfg.MaxModelCalls) {
+			keys = append(keys, "max_model_calls")
+		}
+		if len(keys) == 0 {
+			continue
+		}
+		slog.InfoContext(ctx, "template sets a count limit to 0, which means no limit; remove the key to inherit the default limit",
+			"template", templateRef(tpl), "path", tpl.Path, "keys", keys)
+	}
+}

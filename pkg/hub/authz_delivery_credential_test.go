@@ -723,15 +723,19 @@ func referencesIdent(node ast.Node, names ...string) bool {
 
 // TestHubDelivery_ConstructorCallSites pins, by AST scan, where a
 // hubDeliveryIdentity can be produced: newHubDeliveryIdentity is called only
-// from authz_delivery_credential.go and the hub_delivery tests, and no other
+// from authz_delivery_credential.go, material_delivery.go (its one production
+// caller, newLaunchDeliveryIdentity, which deliverySelector.mint and the
+// read-only census share) and the hub_delivery tests, and no other
 // production file builds the type as a composite literal or with new.
 func TestHubDelivery_ConstructorCallSites(t *testing.T) {
 	allowedCallers := map[string]bool{
 		"authz_delivery_credential.go":      true,
+		"material_delivery.go":              true,
 		"authz_delivery_credential_test.go": true,
 		"authz_delivery_admission_test.go":  true,
 		"authz_delivery_gate_test.go":       true,
 	}
+	productionCalls := map[string]int{}
 	calls := 0
 	for name, file := range hubPackageSyntax(t) {
 		isTest := strings.HasSuffix(name, "_test.go")
@@ -742,6 +746,9 @@ func TestHubDelivery_ConstructorCallSites(t *testing.T) {
 				if fn == "newHubDeliveryIdentity" {
 					calls++
 					assert.True(t, allowedCallers[name], "newHubDeliveryIdentity is called from %s", name)
+					if !isTest {
+						productionCalls[name]++
+					}
 				}
 				if fn == "new" && len(n.Args) == 1 && !isTest && name != "authz_delivery_credential.go" {
 					assert.False(t, referencesIdent(n.Args[0], "hubDeliveryIdentity"), "new(hubDeliveryIdentity) in %s", name)
@@ -755,6 +762,8 @@ func TestHubDelivery_ConstructorCallSites(t *testing.T) {
 		})
 	}
 	assert.Positive(t, calls, "the scan must find the test call sites, or it is not scanning this package")
+	// Exactly one production call site: newLaunchDeliveryIdentity.
+	assert.Equal(t, map[string]int{"material_delivery.go": 1}, productionCalls)
 }
 
 // TestHubDelivery_NotInRequestContext pins, by AST scan of the production

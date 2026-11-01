@@ -56,6 +56,10 @@ type Tx struct {
 	BrokerTargetInventory *BrokerTargetInventoryClient
 	// ChatLinkCode is the client for interacting with the ChatLinkCode builders.
 	ChatLinkCode *ChatLinkCodeClient
+	// ChatRetentionCursor is the client for interacting with the ChatRetentionCursor builders.
+	ChatRetentionCursor *ChatRetentionCursorClient
+	// ChatRetentionRun is the client for interacting with the ChatRetentionRun builders.
+	ChatRetentionRun *ChatRetentionRunClient
 	// ConduitPrincipalEpoch is the client for interacting with the ConduitPrincipalEpoch builders.
 	ConduitPrincipalEpoch *ConduitPrincipalEpochClient
 	// ConduitSession is the client for interacting with the ConduitSession builders.
@@ -182,6 +186,10 @@ type Tx struct {
 	User *UserClient
 	// UserAccessToken is the client for interacting with the UserAccessToken builders.
 	UserAccessToken *UserAccessTokenClient
+	// UserDeletion is the client for interacting with the UserDeletion builders.
+	UserDeletion *UserDeletionClient
+	// UserDeletionAgent is the client for interacting with the UserDeletionAgent builders.
+	UserDeletionAgent *UserDeletionAgentClient
 	// UserTerminalWorkspace is the client for interacting with the UserTerminalWorkspace builders.
 	UserTerminalWorkspace *UserTerminalWorkspaceClient
 
@@ -337,6 +345,8 @@ func (tx *Tx) init() {
 	tx.BrokerSetting = NewBrokerSettingClient(tx.config)
 	tx.BrokerTargetInventory = NewBrokerTargetInventoryClient(tx.config)
 	tx.ChatLinkCode = NewChatLinkCodeClient(tx.config)
+	tx.ChatRetentionCursor = NewChatRetentionCursorClient(tx.config)
+	tx.ChatRetentionRun = NewChatRetentionRunClient(tx.config)
 	tx.ConduitPrincipalEpoch = NewConduitPrincipalEpochClient(tx.config)
 	tx.ConduitSession = NewConduitSessionClient(tx.config)
 	tx.Conversation = NewConversationClient(tx.config)
@@ -400,6 +410,8 @@ func (tx *Tx) init() {
 	tx.UsageReservation = NewUsageReservationClient(tx.config)
 	tx.User = NewUserClient(tx.config)
 	tx.UserAccessToken = NewUserAccessTokenClient(tx.config)
+	tx.UserDeletion = NewUserDeletionClient(tx.config)
+	tx.UserDeletionAgent = NewUserDeletionAgentClient(tx.config)
 	tx.UserTerminalWorkspace = NewUserTerminalWorkspaceClient(tx.config)
 }
 

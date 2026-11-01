@@ -6,7 +6,7 @@ ephemeral GitHub Actions JIT runner. That runner takes one job and then exits.
 | File | Purpose |
 | :--- | :--- |
 | [`Dockerfile`](Dockerfile) | Image: Ubuntu 24.04, GitHub Actions runner, Go, golangci-lint, git (built from pinned source, >= 2.48), jq, curl, zstd, ca-certificates, and the tools routed CI jobs expect preinstalled (make, procps, python3 + python3-yaml, ripgrep, tmux, shellcheck 0.9.0, openssh-client); non-root `runner` user (uid 1001, `HOME=/home/runner`) |
-| [`entrypoint.sh`](entrypoint.sh) | PID 1: checks `/scratch`, redirects caches, does the claim exchange, then runs `./run.sh --jitconfig` as a child, forwards signals and exits with the runner's real exit code |
+| [`entrypoint.sh`](entrypoint.sh) | PID 1: checks the volume at HOME, creates the work and cache directories on it, does the claim exchange, then runs `./run.sh --jitconfig` as a child, forwards signals and exits with the runner's real exit code |
 | [`entrypoint_test.go`](entrypoint_test.go) | Offline harness: runs `entrypoint.sh` against a fake claim server on loopback with a stub `run.sh` |
 
 ## Build arguments
@@ -20,7 +20,7 @@ the values. Read them there.
 | `UBUNTU_IMAGE` | Base image, `ubuntu:24.04@sha256:<index digest>` | Docker Hub `library/ubuntu` tag `24.04`, top-level (multi-arch index) digest |
 | `ACTIONS_RUNNER_VERSION` / `ACTIONS_RUNNER_SHA256` | GitHub Actions runner, `actions-runner-linux-x64-<v>.tar.gz` | The release notes of <https://github.com/actions/runner/releases> list the SHA-256 of each tarball |
 | `GO_VERSION` / `GO_SHA256` | Go toolchain, `go<v>.linux-amd64.tar.gz` | <https://go.dev/dl/> (keep it in step with the repo's `go.mod`) |
-| `GIT_VERSION` / `GIT_SHA256` | git, `git-<v>.tar.xz`, built from source in the `git` stage (gcc only there) | `sha256sums.asc` in <https://mirrors.edge.kernel.org/pub/software/scm/git/>; also check the tarball against Junio C Hamano's `git-<v>.tar.sign` (key `96E07AF25771955980DAD10020D04E5A713660A7`). Must be 2.48 or newer: the build asserts it |
+| `GIT_VERSION` / `GIT_SHA256` | git, `git-<v>.tar.xz`, built from source in the `git` stage (gcc only there) | `sha256sums.asc` in <https://mirrors.edge.kernel.org/pub/software/scm/git/>; also check the tarball against Junio C Hamano's `git-<v>.tar.sign` (key `96E07AF25771955980DAD10020D04E5A713660A7`). Must be 2.48 or newer: the build asserts it. git is built with `NO_RUST=YesPlease` (2.55+ builds Rust parts by default, which needs cargo); git 3.0 makes Rust mandatory, so a bump to 3.x must revisit the git stage |
 
 golangci-lint is not a download: the `golangci-lint` stage builds it with
 [`golangci-lint/build.sh`](golangci-lint/README.md), the same script, pins
@@ -65,15 +65,20 @@ therefore shared in both directions only if all of these hold:
   `GOCACHE=$HOME/.cache/go-build`, `GOMODCACHE=$HOME/go/pkg/mod`,
   `GOPATH=$HOME/go` and `GOLANGCI_LINT_CACHE=$HOME/.cache/golangci-lint`, and
   leaves `XDG_CACHE_HOME` unset.
-- **Bytes on the disk:** the entrypoint links `~/work`, `~/.cache` and `~/go`
-  into `/scratch` (step 3). The link targets mirror `$HOME` under `/scratch`
-  (`/scratch/_work`, `/scratch/.cache`, `/scratch/go`), because the kernel
-  resolves `..` physically. From the physical workspace
-  `/scratch/_work/<repo>/<repo>`, an entry `../../../.cache/X` lands in
-  `/scratch/.cache/X`, which is exactly where `~/.cache/X` points. A
-  non-mirrored target such as `/scratch/cache` would restore entries next to
-  Go's cache, not into it. `TestEntrypointCacheTarRoundTrip` reproduces the
-  round trip in both directions.
+- **Bytes on the disk:** the Cloud Run Job mounts its ephemeral-disk volume at
+  HOME (`/home/runner`), and the entrypoint creates `~/work`, `~/.cache`, `~/go`
+  and `~/.npm` as **real directories** on it (step 3). There are no symlinks, so
+  every physical path is the logical one: an entry `../../../.cache/X` from the
+  workspace lands in `~/.cache/X`, and a whole-directory archive (the member
+  `../../../.npm/` that actions/setup-node's npm cache produces) restores onto
+  the real `~/.npm`. A symlink there would be replaced by GNU tar with a real
+  directory (it does that for a directory member unless `--keep-directory-symlink`,
+  which actions/cache does not pass), and would also make an action's
+  `process.cwd()` differ from `GITHUB_WORKSPACE` (actions/setup-node's lock-file
+  hashing then finds nothing). `TestEntrypointCacheTarRoundTrip` and
+  `TestEntrypointCacheTarWholeDirectory` reproduce the round trips.
+  (Runner images before cr-ci FIXUP-5 mounted the volume at `/scratch` and
+  linked these paths into it; see docs/operations.md, "Runner layout switch".)
 
 The workflow templates' self-hosted step only verifies this layout; it
 creates nothing. Parity holds for any routed workflow.
@@ -98,68 +103,77 @@ The mediator sets these env overrides on each execution (see
 | `MEDIATOR_URL` | https origin of the mediator, no trailing slash |
 | `GH_JOB_ID` | numeric GitHub job ID (used in logs only) |
 | `RUNNER_NAME` | normally `cr-job-<GH_JOB_ID>` (used in logs only). After a runner swap or hijack recovery the mediator may reuse another job's name, so a mismatch is only a warning |
+| `GH_REPOS` | comma-separated `owner/name` list (1-100) of the repositories whose jobs the runner may be handed: its registration scope. Repo scope: the one repository; org scope: every `TARGET_REPOS` entry of the owner (an org runner may take any of their jobs). The job guard refuses a job of any other repository |
 
 The JIT config is never passed in env, args or labels. The entrypoint does
 this, in order:
 
-1. **Checks the env.** All four variables and `HOME` must be set, and `HOME`
-   must be `/home/runner`. The token must be
+1. **Checks the env and the job guard.** All five variables and `HOME` must be set, and `HOME`
+   must be `/home/runner`; `GH_REPOS` must be 1-100 comma-separated `owner/name` entries. The job-started hook must be
+   the pinned, protected file ("Job guard", below), or it exits 2 here, in warm-up too. The token must be
    exactly 32 lowercase hex chars (the mediator uses `hex.EncodeToString`;
    uppercase is rejected). `MEDIATOR_URL` must be an https origin; plain http is
    accepted only for `127.0.0.1` and `localhost`, which the test harness uses.
-2. **Checks `/scratch`.** `/scratch` must exist, be a mount point, and be
-   writable. If any check fails, it exits 2 before the token is spent. Cloud
-   Run's root filesystem is in memory, so a missing volume would silently turn
-   the caches into RAM use. The mount check first looks for `/scratch` in
-   `/proc/self/mountinfo`. If it is not listed there, or the table cannot be
-   read, the fallback accepts `/scratch` when `stat -c %d` reports a different
-   device for it than for its parent directory. The log line
-   `/scratch is a mount (<fstype>): ...` says which check matched. If
-   `/scratch` is tmpfs (an in-memory volume), it logs a warning.
+2. **Checks the volume at HOME.** HOME (`/home/runner`) must exist, be a mount
+   point, and be writable. If any check fails, it exits 2 before the token is
+   spent. Cloud Run's root filesystem is in memory, so a missing volume would
+   silently turn the caches into RAM use. The mount check first looks for HOME
+   in `/proc/self/mountinfo`. If it is not listed there, or the table cannot be
+   read, the fallback accepts HOME when `stat -c %d` reports a different device
+   for it than for its parent directory. The log line
+   `/home/runner is a mount (<fstype>): ...` says which check matched. If the
+   volume is tmpfs (in memory), it logs a warning. A job definition that still
+   mounts the volume at `/scratch` (an image/job mismatch) fails here: exit 2,
+   with a hint to run `deploy-job.sh`, which updates the image and the mount
+   together.
 
-   **P6 PoC checkpoint:** neither check has run on Cloud Run's gVisor yet.
-   Confirm from the execution log that one of them matches the ephemeral-disk
-   at `/scratch` (ideally `listed in /proc/self/mountinfo`). If neither does,
-   every execution exits 2.
-3. **Links HOME into `/scratch`** (see "Cache parity" above). Each link is
-   handled as follows: a correct link is kept; a missing path is created as
-   the link; a real file or directory, or a link to anywhere else, exits 2
-   before the token is spent. The links are the parents of the cached paths,
-   so tar never replaces one.
+   It also logs the volume root's owner and mode
+   (`volume root /home/runner: owner uid N, mode M`). Cloud Run creates the
+   volume "so that any user can read or write to it"; the entrypoint sets it to
+   0755 only if this uid owns it, and otherwise leaves it. A world-writable HOME
+   is a documented residual ([architecture](../docs/architecture.md#constraints)).
+3. **Creates the work and cache directories on the volume** (see "Cache parity"
+   above). Each of `~/work`, `~/.cache`, `~/go` and `~/.npm` is created as a real
+   directory, or kept if it already is one; a symlink or a non-directory there
+   exits 2 before the token is spent.
 
-   | Link | Target | Holds |
-   | :--- | :--- | :--- |
-   | `~/work` | `/scratch/_work` | the runner work folder (`work_folder` = `/home/runner/work`) |
-   | `~/.cache` | `/scratch/.cache` | `GOCACHE`, `GOLANGCI_LINT_CACHE`, any XDG cache |
-   | `~/go` | `/scratch/go` | `GOPATH`, `GOMODCACHE` |
-   | `~/.npm` | `/scratch/.npm` | npm's cache (actions/setup-node's npm cache step also needs the directory to exist) |
+   | Directory | Holds |
+   | :--- | :--- |
+   | `~/work` | the runner work folder (`work_folder` = `/home/runner/work`) |
+   | `~/.cache` | `GOCACHE`, `GOLANGCI_LINT_CACHE`, any XDG cache |
+   | `~/go` | `GOPATH`, `GOMODCACHE` |
+   | `~/.npm` | npm's cache (actions/setup-node's npm cache step also needs the directory to exist) |
 
    **RAM build cache.** With `RUNNER_BUILD_CACHE_IN_RAM=true` (set on the job by
-   `deploy-job.sh` from `config.env`), `/scratch/.cache` is itself a link to a
-   directory on the in-memory root filesystem (`/tmp/cr-ci-build-cache`), made by
-   the same rules before `~/.cache` is linked to it. `~/.cache` still reads
-   `/scratch/.cache`, so the parity above holds and archive entries land in RAM.
-   The cache then counts against the memory limit
+   `deploy-job.sh` from `config.env`), `~/.cache` is instead a link to a
+   directory on the in-memory root filesystem (`/tmp/cr-ci-build-cache`). Archive
+   entries under `~/.cache/...` still land in RAM (tar follows a link in a leading
+   component), but a whole-`~/.cache` archive would replace the link. The cache
+   then counts against the memory limit
    ([architecture](../docs/architecture.md#constraints)). Any other value than
    `true` or `false` exits 2.
 
    It exports `GOCACHE`, `GOMODCACHE`, `GOPATH` and `GOLANGCI_LINT_CACHE` as
-   on ubuntu-latest, leaves `XDG_CACHE_HOME` unset, and exports
-   `RUNNER_WORKSPACE=$HOME/work` and `RUNNER_TEMP`/`TMPDIR=/scratch/_temp`.
-   For job steps, the runner sets `RUNNER_WORKSPACE` and `RUNNER_TEMP` itself,
-   under its work folder. The runner's `_diag` directory (its own logs, and
-   the job's step logs under `_diag/pages`, which grow with the job's output:
-   about 1 MB for the P6 lint job) is deliberately **not** on `/scratch`: it stays on the root
-   filesystem, so a job that fills `/scratch` cannot crash the runner and lose the
-   job log with it (P6 PoC run 2). The image also keeps a
-   `_work` symlink to `/scratch/_work` in the runner directory, for a JIT
-   config that names the default `_work`.
+   on ubuntu-latest, leaves `XDG_CACHE_HOME` and `TMPDIR` unset (temp files go
+   to `/tmp`, root-owned and sticky, as on ubuntu-latest; tools that check a
+   temp directory's ancestors accept it), exports `GOTMPDIR=~/.cr-ci/go-tmp`
+   (Go's build and test temp work stays on the volume), and exports
+   `RUNNER_WORKSPACE=$HOME/work` and `RUNNER_TEMP=$HOME/work/_temp`. For job
+   steps, the runner sets `RUNNER_WORKSPACE` and `RUNNER_TEMP` itself, under its
+   work folder. Other temp files (Go tests' `t.TempDir()`, npm) now use `/tmp`,
+   that is RAM: measure before routing temp-heavy jobs such as build-and-test.
+   The runner is installed at `/opt/actions-runner`, not under HOME (the mount
+   would hide it), so its `_diag` directory (its own logs, and the job's step
+   logs under `_diag/pages`, which grow with the job's output: about 1 MB for
+   the P6 lint job) stays on the root filesystem: a job that fills the volume
+   cannot crash the runner and lose the job log with it (P6 PoC run 2). The image
+   also keeps a `_work` symlink to `/home/runner/work` in the runner directory,
+   for a JIT config that names the default `_work`.
 
-   **P6 PoC checkpoint:** the runner builds the work directory with
-   `Path.GetFullPath(Path.Combine(root, work_folder))`, which on Unix does not
-   resolve symlinks, so `GITHUB_WORKSPACE` should read
-   `/home/runner/work/...`. Confirm it in the PoC log, and confirm
-   `go env GOCACHE` is `/home/runner/.cache/go-build`.
+   The work folder is a real directory, so `GITHUB_WORKSPACE`
+   (`/home/runner/work/<repo>/<repo>`) is also the physical path, and
+   `go env GOCACHE` is `/home/runner/.cache/go-build`; the setup-go-cache parity
+   step checks both on every routed Go job.
 4. **Claims the JIT config** (claim contract v2,
    `gs://scion-xproject-exchange/cr-ci/claim-contract-v2.md`). The claim is
    bound to the execution's workload identity, so a principal that can read
@@ -197,7 +211,7 @@ this, in order:
 
 5. **Runs the runner and reports its real exit code.** It unsets
    `RUNNER_CLAIM_TOKEN` and starts `./run.sh --jitconfig <config>` in
-   `/home/runner/actions-runner` as a **child** (not `exec`), for two reasons:
+   `/opt/actions-runner` as a **child** (not `exec`), for two reasons:
    - **Exit code.** In actions/runner (checked in v2.338.0), `run-helper.sh`
      maps every Runner.Listener exit code it does not know, an abort's 134
      included, to exit 0 after printing `Exiting with unknown error code: N`.
@@ -235,14 +249,15 @@ this, in order:
      `run.sh` exits.
 
    The output goes through FIFOs in a private temp dir under `/tmp`, small and
-   on the root filesystem, never on `/scratch`. A watcher process that does not
+   on the root filesystem, never on the volume. A watcher process that does not
    finish within 5 s of `run.sh`'s exit is abandoned, so a stray process holding
    the pipe cannot keep the execution alive.
 
-Exit codes: the runner's (above) once `run.sh` has started, 0 for an idle stop, and
-**4** when an idle stop raced a job start (above). A 4 can also be the runner's own
+Exit codes: the runner's (above) once `run.sh` has started, 0 for an idle stop,
+**4** when an idle stop raced a job start, and **5** when the job guard refused the
+assigned job (above). A 4 can also be the runner's own
 code passed through; the `ERROR idle_timeout_raced_job` log line tells them apart. Before that, **2** for a configuration error (env,
-`HOME`, `/scratch`, a HOME link, missing `run.sh`) and **3** for a failed claim. Neither path starts
+`HOME`, the volume at HOME, a work or cache directory, missing `run.sh`) and **3** for a failed claim. Neither path starts
 `run.sh`. If a claim is lost (for example, the mediator restarted and its
 in-memory claims are gone), the runner exits 3. `/reconcile` then deletes the
 orphaned `cr-job-*` registration and relaunches the job if it is still queued.
@@ -262,23 +277,99 @@ So job steps can read this runner's ephemeral registration, the JIT config on
 `run.sh`'s argv (`/proc/<pid>/cmdline`), and the spent claim token in
 `/proc/1/environ`. The claim token is worthless by then: single use, already
 exchanged. The JIT config lets a job act as its own runner registration until GitHub
-removes it after the job. sec-review-3 rates this **LOW**, but only because cr-ci
-serves trusted same-repo code:
+removes it after the job. sec-review-3 rates this **LOW**: the window in which untrusted
+code could run on a cr-ci runner is closed by the runner-side job-started hook ("Job
+guard", below). On top of it:
 - the routing expression's fork-PR guard routes only same-repo `push` and `pull_request`
   events and sends everything else to `ubuntu-latest` (fork PRs, `pull_request_target`,
   `workflow_run`, `merge_group`, schedule, workflow_dispatch);
-- the mediator's fork guard (`forkReason`) refuses runners to `pull_request_target` and
-  `workflow_run` runs, and to runs whose repository or head repository is not the target
-  repository (fork PRs);
+- the mediator's fork guard (`forkReason`) is an allowlist of the same two events and
+  also refuses runs whose repository or head repository is not the target repository
+  (fork PRs);
 - one job runs per runner;
 - the hijack guard and the reaper catch a runner registration that ends up running
   another job or is left behind.
 
-If untrusted code were ever routed to cr-ci, this would become Medium/High: **the fork
-guards are load-bearing**. The structural fix (a runner-only uid with job steps dropped
-to another uid, or passing the JIT config by file and deleting it once the listener has
-started) is tracked in ptone/scion#5978
+**Residual:** a compromised trusted job can still read its own runner's registration.
+The structural fix (a runner-only uid with job steps dropped to another uid, or passing
+the JIT config by file and deleting it once the listener has started) is tracked in
+ptone/scion#5978
 ([architecture](../docs/architecture.md#residual-risk-job-code-can-read-the-runners-credentials)).
+
+**Job guard (`cr-ci-job-guard.sh`).** The entrypoint exports, read-only,
+`ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/bin/cr-ci-job-guard.sh`,
+`CR_JOB_GUARD_MARKER` and `CR_JOB_GUARD_REPOS` (= `GH_REPOS`, the repositories the
+runner serves). The hook allows a job only if `GITHUB_REPOSITORY` is one of
+`CR_JOB_GUARD_REPOS` (whole entries, case-insensitive) and `GITHUB_EVENT_NAME` is
+`push`, or `pull_request` with the payload's `pull_request.head.repo.full_name` equal to
+`GITHUB_REPOSITORY`. It refuses anything else, and also an empty or malformed served
+list or a missing or unparsable payload (fail closed).
+
+**No fail-open: the hook must be the pinned one.** If the worker cannot run the hook
+(missing, not executable), only its pre-job step fails and the job's `always()` steps
+still run. So before any claim (and in warm-up) the entrypoint exits **2**, without
+starting `run.sh`, unless:
+- the hook and `/etc/cr-ci/job-guard.sha256` are regular files (not symlinks), owned by
+  root, with no group or other write bit and not writable by the runner's uid, and so
+  are their directories (`/usr/local/bin`, `/etc/cr-ci`); the runner must not run as
+  root;
+- the hook is executable and its sha256 equals the one in `/etc/cr-ci/job-guard.sha256`.
+  That value is the committed `runner/cr-ci-job-guard.sh.sha256`, installed read-only by
+  the Dockerfile, which also checks it (`sha256sum -c`) and the owners and modes at build
+  time. `TestJobGuardPinnedSHA` fails when the hook changes without its pin.
+
+**The path is fixed in production.** `CR_JOB_GUARD_HOOK`, `CR_JOB_GUARD_SHA_FILE`,
+`CR_JOB_GUARD_OWNER_UID` and every other `CR_*` override take effect only in test mode:
+`CR_TEST_MODE=1` and the entrypoint not PID 1. Production runs it as PID 1 (the
+image's exec-form `ENTRYPOINT`), so it cannot enable test mode; otherwise each override
+is logged (`ignoring CR_...`) and dropped. A job cannot set any of them anyway: the
+entrypoint's environment is the Cloud Run execution's (deploy-job.sh and the
+mediator's overrides), and the entrypoint has made its checks and exported the guard's
+settings before `run.sh`, and so any job, exists. A value for one of the exported
+variables in the execution environment is replaced, not used.
+
+Checked against actions/runner v2.338.0:
+- **Before any step:** Runner.Worker adds the hook to its pre-job steps ahead of
+  container setup, every action's `pre` step and all job steps, checkout included
+  (`src/Runner.Worker/JobExtension.cs` L303-312, L315, L328, L362; steps = pre-job
+  steps then job steps, L585-586). Only action downloads (no job code) happen
+  earlier (L301).
+- **Not overridable:** the worker reads the variable from its own process environment
+  (`Environment.GetEnvironmentVariable`, L304), inherited from `run.sh`. A workflow's or
+  job's `env:` only shapes step environments, and no step has run yet.
+- **A failed hook alone does not stop the job:** later steps with `if: always()`,
+  `failure()` or `!cancelled()` would still run (`src/Runner.Worker/StepsRunner.cs`
+  L200-235). So a refusal is a **hard stop**: the hook writes the marker (the reason
+  and the job's own sanitized event, head and repository; never the served list, a
+  token or the JIT config), prints the reason code into the job's log, then SIGKILLs, in this order, its parent (the worker), the parent's process group,
+  and its own group unless that group is its alone. The runner spawns its children
+  without a new session or group (`src/Runner.Sdk/ProcessInvoker.cs` L226-298), so
+  normally both are run.sh's group (listener, worker, hook) and the hook dies last.
+  Killing the parent first means the stop does not rest on the hook sharing the
+  worker's group. The worker is still waiting for the hook to exit
+  (`JobHookProvider.RunHook` awaits it), so it cannot reach a step first.
+- **Runs under `bash -e`:** the runner starts a `.sh` hook as `bash -e <file>`
+  (`src/Runner.Worker/Handlers/ScriptHandler.cs` L213-216 with
+  `ScriptHandlerHelpers.cs` L19), so the hook turns errexit off first (`set +e`): a
+  failing `kill` cannot end it before the rest of the stop sequence.
+- **Fail closed:** if the hook is still alive after the kills (a group of its own), it
+  checks once a second that the worker and its group are gone and exits 1; if they are
+  not gone after 10 s it exits 1 with `could not stop the runner`. Independently, the
+  entrypoint's enforcer, which sees the marker, SIGKILLs run.sh's group itself.
+  (Residual, rated very unlikely by sec-review-3: if every SIGKILL and the marker write
+  all fail, the enforcer has nothing to act on.)
+
+- **What the job's log shows:** only `job refused by the cr-ci runner's job guard
+  (reason=<code>)`. The refused job's log may be public (a fork pull request), and under
+  org scope the served list can name private repositories, so the hook prints no
+  repository name. The marker sits in the entrypoint's private temp dir; the job runs as
+  the same uid but no step of it ever runs to read it.
+
+After `run.sh` has died, the entrypoint logs, to its own stderr (the container log in
+Cloud Logging, never the job's log), `ERROR job_guard_refused: ... (reason=... event=...
+head=... repository=... served=<GH_REPOS>)`, adding the served list itself, and exits
+**5**. The mediator's hijack guard deletes the registration
+when GitHub reports the job.
 
 ## Testing
 
@@ -288,13 +379,16 @@ cd cr-ci && go test ./runner/
 
 The harness needs `bash`, `curl`, `jq`, `awk` and `tar`, and no network or GCP
 access. It uses throwaway random tokens and configs. Test-only overrides
-point the script at a temp scratch directory, a fake mount table, a stub
-runner directory, a zero retry backoff, and a fake metadata server on
-loopback: `CR_SCRATCH_DIR`, `CR_MOUNTINFO`, `CR_RUNNER_DIR`,
+point the script at a fake mount table (which lists the temp HOME as the
+volume), a stub runner directory, a zero retry backoff, and a fake metadata
+server on loopback: `CR_MOUNTINFO`, `CR_RUNNER_DIR`,
 `CR_CLAIM_BACKOFF_SECONDS` and `CR_METADATA_URL`. `CR_EXPECTED_HOME` (default
 `/home/runner`) lets the harness use a temp dir as `HOME`. `CR_METADATA_URL` defaults
 to `http://metadata.google.internal` and accepts only that value or a
-loopback http origin. Production leaves them all unset.
+loopback http origin. `CR_JOB_GUARD_HOOK`, `CR_JOB_GUARD_SHA_FILE` and
+`CR_JOB_GUARD_OWNER_UID` point the job guard check at a copy of the hook and its pin
+owned by the test's uid. All of them need test mode (`CR_TEST_MODE=1`, which the
+harness sets; the entrypoint is not PID 1 there) and are ignored otherwise.
 Some tests also put stub `stat` and `sleep` commands first on `PATH`. Every
 run has a `~/.curlrc` containing `verbose`, so if `curl -q` were dropped, the
 leak assertions would catch the tokens on stderr. Like the real metadata
@@ -312,7 +406,7 @@ covers:
   `format=full`. The claim carries `Bearer <ID token>` and
   `X-Runner-Claim: <claim token>`. `run.sh` gets `--jitconfig <config>`, is
   the entrypoint's child with SIGINT not ignored, runs in the runner dir, and
-  sees the `/scratch` env but no token. The claim token, the ID token and the config appear on neither
+  sees the volume env (`RUNNER_TEMP` under `~/work`, `GOTMPDIR`, no `TMPDIR`) but no token. The claim token, the ID token and the config appear on neither
   stdout nor stderr. A RUNNER_NAME/GH_JOB_ID mismatch only warns.
 - **Identity.** A claim 401 exits 3 without retrying. Two metadata 5xx
   responses and then a token leads to a normal start on attempt 3. Five
@@ -328,24 +422,25 @@ covers:
   empty or non-string `jit_config` exits 3 without retrying. The retry delays
   are 1, 2, 4, 8 s by default, and they double from a fractional base too
   (checked with a `sleep` stub).
-- **`/scratch` problems.** A missing directory, a directory that is not a
-  mount point by either check, or a read-only `/scratch` exits 2 without
+- **Volume problems.** A missing HOME, a HOME that is not a mount point by
+  either check (including a job that mounts the volume at `/scratch`), or a
+  read-only volume exits 2 without
   contacting the mediator. tmpfs only logs a warning. The device fallback
   accepts a mount that is missing from the table, or used when the table is
   unreadable (checked with a `stat` stub).
-- **Cache parity.** Success leaves `~/work`, `~/.cache` and `~/go` linked to
-  their mirrored targets, and `run.sh` sees the ubuntu-latest Go paths and no
-  `XDG_CACHE_HOME`. Correct existing links are kept. A real `~/.cache` or
-  `~/work`, a `~/go` link elsewhere, a `~/.cache` link to the old
-  non-mirrored target, a wrong `HOME` or an unset `HOME` exits 2 without
-  contacting the mediator. A tar round trip with actions/cache's scheme
-  (`-P -C` the workspace, entries `../../../.cache/...` and
-  `../../../go/pkg/mod/...`) restores an ubuntu-latest archive to where Go
-  reads, with the bytes on the scratch disk and the links intact. The same
-  round trip restores a cr-ci archive under a plain ubuntu `HOME`. A
-  whole-directory archive (`../../../.cache`, directory entries included)
-  restores into `~/.cache` without replacing the link. A `HOME` where the
-  links cannot be created exits 2 without contacting the mediator.
+- **Cache parity.** Success leaves `~/work`, `~/.cache`, `~/go` and `~/.npm`
+  as real directories on the volume (or `~/.cache` a link to RAM in RAM mode),
+  and `run.sh` sees the ubuntu-latest Go paths and no `XDG_CACHE_HOME` or
+  `TMPDIR`. Existing directories are kept with their contents. A symlink at any
+  of them (the old `/scratch` layout included), a non-directory, a wrong `HOME`
+  or an unset `HOME` exits 2 without contacting the mediator. The volume root's
+  owner and mode are logged, and a root this uid owns is set to 0755. A tar
+  round trip with actions/cache's scheme (`-P -C` the workspace, entries
+  `../../../.cache/...` and `../../../go/pkg/mod/...`) restores an ubuntu-latest
+  archive to where Go reads, with the bytes on the volume. The same round trip
+  restores a cr-ci archive under a plain ubuntu `HOME`. Whole-directory archives
+  (`../../../.npm` and `../../../.cache`, directory entries included) restore
+  onto the real directories, physically on the volume.
 - **Bad env.** Any missing variable, a malformed (short or uppercase) token,
   a non-numeric job ID, a non-https or path-bearing URL, a non-loopback
   `CR_METADATA_URL`, or a missing `run.sh` exits 2 without contacting the

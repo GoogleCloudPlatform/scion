@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -47,8 +48,8 @@ func relayRoleTestConfig() *config.GlobalConfig {
 	cfg.Hub.Conduit.PeerAuth = config.ConduitPeerAuthHMAC
 	cfg.Hub.Conduit.InstanceID = "relay-7"
 	cfg.Hub.Conduit.InternalListen = "127.0.0.1:0"
-	cfg.Hub.Conduit.InternalAdvertise = "http://relay-7.internal:9811"
-	cfg.Relay.HubInternalURL = "http://hub-internal.example:9811"
+	cfg.Hub.Conduit.InternalAdvertise = "https://relay-7.internal:9811"
+	cfg.Relay.HubInternalURL = "https://hub-internal.example:9811"
 	cfg.Relay.PublicURL = "https://relay-7.example.com"
 	cfg.Database.Driver, cfg.Database.URL = "sqlite", "relay.db"
 	return cfg
@@ -220,12 +221,12 @@ func TestRelayServerConfigReadsRelaySettings(t *testing.T) {
 	rcfg, err := relayServerConfig(context.Background(), cfg, db)
 	require.NoError(t, err)
 	assert.Equal(t, "relay-7", rcfg.InstanceID)
-	assert.Equal(t, "http://hub-internal.example:9811", rcfg.HubInternalURL)
+	assert.Equal(t, "https://hub-internal.example:9811", rcfg.HubInternalURL)
 	assert.Equal(t, "https://relay-7.example.com", rcfg.PublicURL)
 	assert.False(t, rcfg.Singleton)
 	assert.Equal(t, "127.0.0.1:18443", rcfg.PublicListen)
 	assert.Equal(t, "127.0.0.1:0", rcfg.InternalListen)
-	assert.Equal(t, "http://relay-7.internal:9811", rcfg.Advertise(nil), "server.hub.conduit.internal_advertise")
+	assert.Equal(t, "https://relay-7.internal:9811", rcfg.Advertise(nil), "server.hub.conduit.internal_advertise")
 	assert.NotNil(t, rcfg.PeerAuth)
 	assert.Same(t, db.Settings, rcfg.Experiment)
 	assert.Nil(t, rcfg.Events, "no LISTEN source on SQLite")
@@ -395,4 +396,78 @@ func TestRelayMetrics_UnsetWithAProjectExports(t *testing.T) {
 	mp, _ = relayMetrics(context.Background(), cfg, "relay-7", relayObservabilityInputs(cfg))
 	assert.Nil(t, mp, "explicitly off: no export even with a project")
 	assert.Equal(t, 1, built)
+}
+
+// TestRelayServerConfigTrustedProxies: the relay's public listener trusts
+// a forwarded protocol only from server.trusted_proxies. Not set, a proxy
+// on this host (loopback) is trusted; set to an empty list, none is; an
+// invalid or catch-all entry refuses startup.
+func TestRelayServerConfigTrustedProxies(t *testing.T) {
+	db := &relaydb.DB{Settings: &relaydb.SettingsReader{}}
+	rcfg, err := relayServerConfig(context.Background(), relayRoleTestConfig(), db)
+	require.NoError(t, err)
+	require.Len(t, rcfg.TrustedProxies, 2, "loopback is trusted when the setting is not set")
+	assert.Equal(t, "127.0.0.1/32", rcfg.TrustedProxies[0].String())
+	assert.Equal(t, "::1/128", rcfg.TrustedProxies[1].String())
+
+	explicitEmpty := relayRoleTestConfig()
+	explicitEmpty.TrustedProxiesSet = true
+	rcfg, err = relayServerConfig(context.Background(), explicitEmpty, db)
+	require.NoError(t, err)
+	assert.Empty(t, rcfg.TrustedProxies, "an explicit empty list trusts no proxy")
+
+	cfg := relayRoleTestConfig()
+	cfg.TrustedProxies = []string{"10.20.0.0/16"}
+	rcfg, err = relayServerConfig(context.Background(), cfg, db)
+	require.NoError(t, err)
+	require.Len(t, rcfg.TrustedProxies, 1)
+	assert.Equal(t, "10.20.0.0/16", rcfg.TrustedProxies[0].String())
+
+	for _, bad := range []string{"0.0.0.0/0", "not-an-ip"} {
+		cfg := relayRoleTestConfig()
+		cfg.TrustedProxies = []string{bad}
+		_, err := relayServerConfig(context.Background(), cfg, db)
+		require.Error(t, err, bad)
+		assert.Contains(t, err.Error(), config.TrustedProxiesKey)
+	}
+}
+
+// TestRelayServerConfigTrustedProxies_ParityWithHub: the relay resolves
+// server.trusted_proxies with the same helper the hub's config feeds
+// (config.TransportTrustedProxies; hub.New is checked against it in
+// pkg/hub), so both trust the same proxies for the same settings.
+func TestRelayServerConfigTrustedProxies_ParityWithHub(t *testing.T) {
+	db := &relaydb.DB{Settings: &relaydb.SettingsReader{}}
+	for name, tc := range map[string]struct {
+		list []string
+		set  bool
+	}{
+		"not set":        {},
+		"explicit empty": {set: true},
+		"listed":         {list: []string{"10.20.0.0/16", "::1"}, set: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := relayRoleTestConfig()
+			cfg.TrustedProxies, cfg.TrustedProxiesSet = tc.list, tc.set
+			rcfg, err := relayServerConfig(context.Background(), cfg, db)
+			require.NoError(t, err)
+			want, _, err := config.TransportTrustedProxies(tc.list, tc.set)
+			require.NoError(t, err)
+			assert.Equal(t, ipNetStrings(want), ipNetStrings(rcfg.TrustedProxies), "relay")
+
+			sc := buildHubServerConfig(cfg, "", "", nil, false, "", nil)
+			assert.Equal(t, tc.set, sc.TransportTrustedProxiesSet, "the hub gets whether the setting is set")
+			hubNets, _, err := config.TransportTrustedProxies(sc.TransportTrustedProxies, sc.TransportTrustedProxiesSet)
+			require.NoError(t, err)
+			assert.Equal(t, ipNetStrings(want), ipNetStrings(hubNets), "hub")
+		})
+	}
+}
+
+func ipNetStrings(nets []*net.IPNet) []string {
+	out := make([]string, 0, len(nets))
+	for _, n := range nets {
+		out = append(out, n.String())
+	}
+	return out
 }

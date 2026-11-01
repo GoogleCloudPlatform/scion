@@ -362,10 +362,19 @@ func validateConfigAgainstHarnessCapabilities(cfg *api.ScionConfig, caps api.Har
 
 	issues := map[string]interface{}{}
 
-	if cfg.MaxTurns > 0 && caps.Limits.MaxTurns.Support == api.SupportNo {
+	// A count limit is nil (inherit), 0 (no limit) or positive
+	// (ptone/scion#5605); a negative value is refused whatever the harness.
+	if err := api.ValidateCountLimit("max_turns", cfg.MaxTurns); err != nil {
+		issues["max_turns"] = err.Error()
+	}
+	if err := api.ValidateCountLimit("max_model_calls", cfg.MaxModelCalls); err != nil {
+		issues["max_model_calls"] = err.Error()
+	}
+
+	if _, limited := cfg.TurnLimit(); limited && caps.Limits.MaxTurns.Support == api.SupportNo {
 		issues["max_turns"] = supportReason(caps.Limits.MaxTurns)
 	}
-	if cfg.MaxModelCalls > 0 && caps.Limits.MaxModelCalls.Support == api.SupportNo {
+	if _, limited := cfg.ModelCallLimit(); limited && caps.Limits.MaxModelCalls.Support == api.SupportNo {
 		issues["max_model_calls"] = supportReason(caps.Limits.MaxModelCalls)
 	}
 	if strings.TrimSpace(cfg.MaxDuration) != "" && caps.Limits.MaxDuration.Support == api.SupportNo {

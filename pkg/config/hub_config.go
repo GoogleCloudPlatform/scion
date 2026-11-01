@@ -742,17 +742,20 @@ type RuntimeTargetConfig struct {
 	Namespace   string `json:"namespace,omitempty" yaml:"namespace,omitempty" koanf:"namespace"`
 	Kubeconfig  string `json:"kubeconfig,omitempty" yaml:"kubeconfig,omitempty" koanf:"kubeconfig"`
 	// See V1RuntimeTargetConfig.
-	KubernetesBlockServiceAccount    string            `json:"kubernetesBlockServiceAccount,omitempty" yaml:"kubernetesBlockServiceAccount,omitempty" koanf:"kubernetesBlockServiceAccount"`
-	KubernetesServiceAccountMappings map[string]string `json:"kubernetesServiceAccountMappings,omitempty" yaml:"kubernetesServiceAccountMappings,omitempty" koanf:"kubernetesServiceAccountMappings"`
-	SharedDirStorageClass            string            `json:"sharedDirStorageClass,omitempty" yaml:"sharedDirStorageClass,omitempty" koanf:"sharedDirStorageClass"`
-	SharedDirSize                    string            `json:"sharedDirSize,omitempty" yaml:"sharedDirSize,omitempty" koanf:"sharedDirSize"`
-	GKE                              bool              `json:"gke,omitempty" yaml:"gke,omitempty" koanf:"gke"`
-	PriorityClassName                string            `json:"priorityClassName,omitempty" yaml:"priorityClassName,omitempty" koanf:"priorityClassName"`
-	SafeToEvict                      *bool             `json:"safeToEvict,omitempty" yaml:"safeToEvict,omitempty" koanf:"safeToEvict"`
-	SharedDirStorageBackend          string            `json:"sharedDirStorageBackend,omitempty" yaml:"sharedDirStorageBackend,omitempty" koanf:"sharedDirStorageBackend"`
-	SharedDirStorageBackends         map[string]string `json:"sharedDirStorageBackends,omitempty" yaml:"sharedDirStorageBackends,omitempty" koanf:"sharedDirStorageBackends"`
-	HomeStorageBackend               string            `json:"homeStorageBackend,omitempty" yaml:"homeStorageBackend,omitempty" koanf:"homeStorageBackend"`
-	HomeStorageLeaf                  string            `json:"homeStorageLeaf,omitempty" yaml:"homeStorageLeaf,omitempty" koanf:"homeStorageLeaf"`
+	KubernetesBlockServiceAccount    string              `json:"kubernetesBlockServiceAccount,omitempty" yaml:"kubernetesBlockServiceAccount,omitempty" koanf:"kubernetesBlockServiceAccount"`
+	KubernetesServiceAccountMappings map[string]string   `json:"kubernetesServiceAccountMappings,omitempty" yaml:"kubernetesServiceAccountMappings,omitempty" koanf:"kubernetesServiceAccountMappings"`
+	SharedDirStorageClass            string              `json:"sharedDirStorageClass,omitempty" yaml:"sharedDirStorageClass,omitempty" koanf:"sharedDirStorageClass"`
+	SharedDirSize                    string              `json:"sharedDirSize,omitempty" yaml:"sharedDirSize,omitempty" koanf:"sharedDirSize"`
+	GKE                              bool                `json:"gke,omitempty" yaml:"gke,omitempty" koanf:"gke"`
+	PriorityClassName                string              `json:"priorityClassName,omitempty" yaml:"priorityClassName,omitempty" koanf:"priorityClassName"`
+	SafeToEvict                      *bool               `json:"safeToEvict,omitempty" yaml:"safeToEvict,omitempty" koanf:"safeToEvict"`
+	NodeSelector                     map[string]string   `json:"nodeSelector,omitempty" yaml:"nodeSelector,omitempty" koanf:"nodeSelector"`
+	Tolerations                      []api.K8sToleration `json:"tolerations,omitempty" yaml:"tolerations,omitempty" koanf:"tolerations"`
+	RuntimeClassName                 string              `json:"runtimeClassName,omitempty" yaml:"runtimeClassName,omitempty" koanf:"runtimeClassName"`
+	SharedDirStorageBackend          string              `json:"sharedDirStorageBackend,omitempty" yaml:"sharedDirStorageBackend,omitempty" koanf:"sharedDirStorageBackend"`
+	SharedDirStorageBackends         map[string]string   `json:"sharedDirStorageBackends,omitempty" yaml:"sharedDirStorageBackends,omitempty" koanf:"sharedDirStorageBackends"`
+	HomeStorageBackend               string              `json:"homeStorageBackend,omitempty" yaml:"homeStorageBackend,omitempty" koanf:"homeStorageBackend"`
+	HomeStorageLeaf                  string              `json:"homeStorageLeaf,omitempty" yaml:"homeStorageLeaf,omitempty" koanf:"homeStorageLeaf"`
 }
 
 // DatabaseConfig holds database connection settings.
@@ -786,6 +789,77 @@ type DatabaseConfig struct {
 	// refuses to start (and those commands refuse to migrate); with this set
 	// it logs a warning and continues.
 	AllowShadowedSchema bool `json:"allowShadowedSchema" yaml:"allowShadowedSchema" koanf:"allowShadowedSchema"`
+
+	// TxDiagnostics configures the hub's transaction-hold and lock-wait
+	// diagnostics (WARN lines and metrics). See TxDiagnosticsSettings.
+	TxDiagnostics TxDiagnosticsConfig `json:"tx_diagnostics" yaml:"tx_diagnostics" koanf:"tx_diagnostics"`
+}
+
+// TxDiagnosticsConfig configures the hub database's transaction-hold and
+// lock-wait diagnostics. Durations are Go duration strings; empty takes the
+// default and "0" turns that WARN off (metrics are still recorded).
+type TxDiagnosticsConfig struct {
+	// Enabled installs the diagnostics. Nil means true. False leaves the
+	// database open path exactly as without diagnostics.
+	Enabled *bool `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
+	// HoldWarnThreshold logs a transaction or connection held this long
+	// (default "2s").
+	HoldWarnThreshold string `json:"hold_warn_threshold,omitempty" yaml:"hold_warn_threshold,omitempty" koanf:"hold_warn_threshold"`
+	// LockWaitWarnThreshold logs a request that waited this long for a
+	// connection (default "1s").
+	LockWaitWarnThreshold string `json:"lock_wait_warn_threshold,omitempty" yaml:"lock_wait_warn_threshold,omitempty" koanf:"lock_wait_warn_threshold"`
+	// WarnInterval is the rate-limit window: at most one line per call site
+	// and kind per interval (default "1m").
+	WarnInterval string `json:"warn_interval,omitempty" yaml:"warn_interval,omitempty" koanf:"warn_interval"`
+}
+
+// Defaults of TxDiagnosticsConfig.
+const (
+	DefaultTxHoldWarnThreshold     = 2 * time.Second
+	DefaultTxLockWaitWarnThreshold = time.Second
+	DefaultTxWarnInterval          = time.Minute
+)
+
+// TxDiagnosticsSettings are the parsed TxDiagnosticsConfig values.
+type TxDiagnosticsSettings struct {
+	Enabled               bool
+	HoldWarnThreshold     time.Duration
+	LockWaitWarnThreshold time.Duration
+	WarnInterval          time.Duration
+}
+
+// Settings parses c, applying the defaults. A malformed or negative
+// duration, or a zero warn_interval, returns an error.
+func (c TxDiagnosticsConfig) Settings() (TxDiagnosticsSettings, error) {
+	s := TxDiagnosticsSettings{Enabled: c.Enabled == nil || *c.Enabled}
+	var err error
+	if s.HoldWarnThreshold, err = parseTxDiagDuration("hold_warn_threshold", c.HoldWarnThreshold, DefaultTxHoldWarnThreshold); err != nil {
+		return s, err
+	}
+	if s.LockWaitWarnThreshold, err = parseTxDiagDuration("lock_wait_warn_threshold", c.LockWaitWarnThreshold, DefaultTxLockWaitWarnThreshold); err != nil {
+		return s, err
+	}
+	if s.WarnInterval, err = parseTxDiagDuration("warn_interval", c.WarnInterval, DefaultTxWarnInterval); err != nil {
+		return s, err
+	}
+	if s.WarnInterval == 0 {
+		return s, fmt.Errorf("invalid tx_diagnostics.warn_interval %q: must be positive", c.WarnInterval)
+	}
+	return s, nil
+}
+
+func parseTxDiagDuration(key, v string, def time.Duration) (time.Duration, error) {
+	if v == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("invalid tx_diagnostics.%s %q: %w", key, v, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("invalid tx_diagnostics.%s %q: must not be negative", key, v)
+	}
+	return d, nil
 }
 
 // ConnMaxLifetimeDuration parses ConnMaxLifetime into a time.Duration.
@@ -1172,6 +1246,24 @@ type GlobalConfig struct {
 	// the settings API.
 	KeyringFileAllowWorldReadable bool `json:"keyringFileAllowWorldReadable,omitempty" yaml:"keyringFileAllowWorldReadable,omitempty" koanf:"keyringFileAllowWorldReadable"`
 
+	// TrustedProxies lists the IPs or CIDRs of the TLS-terminating proxies
+	// in front of the hub (server.trusted_proxies;
+	// SCION_SERVER_TRUSTEDPROXIES, comma-separated). The hub trusts
+	// X-Forwarded-Proto: https only from a peer in this list, and only for
+	// its hub-broker transport check. When the setting is not set at all
+	// (TrustedProxiesSet false) a proxy on this host is trusted
+	// (TransportTrustedProxies); set to an empty list, no proxy is.
+	// Validated at startup (ParseTrustedProxies). Operator-controlled only:
+	// never returned or accepted by the settings API.
+	TrustedProxies []string `json:"trustedProxies,omitempty" yaml:"trustedProxies,omitempty" koanf:"trustedProxies"`
+	// TrustedProxiesSet reports whether any source names
+	// server.trusted_proxies, even as an empty list or an empty env value
+	// (see markTrustedProxiesSet). LoadGlobalConfig sets it, through
+	// ConvertV1ServerToGlobalConfig for settings.yaml (a non-nil
+	// V1ServerConfig.TrustedProxies), and ConvertGlobalToV1ServerConfig
+	// writes a set but empty list back as trusted_proxies: [].
+	TrustedProxiesSet bool `json:"-" yaml:"-" koanf:"-"`
+
 	// Admin mode settings
 	AdminMode          bool   `json:"adminMode" yaml:"adminMode" koanf:"adminMode"`
 	MaintenanceMessage string `json:"maintenanceMessage" yaml:"maintenanceMessage" koanf:"maintenanceMessage"`
@@ -1250,6 +1342,11 @@ type GlobalConfig struct {
 	EffectiveProjectStorage *V1ProjectStorageConfig `json:"-" yaml:"-" koanf:"-"`
 	// EffectiveProjectStorageWarnings are that resolution's warnings.
 	EffectiveProjectStorageWarnings []string `json:"-" yaml:"-" koanf:"-"`
+	// RemovedStorageOverridesFileError is the public message of the removed
+	// per-runtime or per-profile storage overrides the global settings file
+	// carries, set at hub startup (config.RemovedStorageOverridesError), or
+	// "". It is reported, never a refused start (ptone/scion#6371).
+	RemovedStorageOverridesFileError string `json:"-" yaml:"-" koanf:"-"`
 
 	// NativeChat controls the built-in chat feature. Nil (absent) means
 	// enabled. Populated from server.native_chat in settings.yaml.
@@ -1330,8 +1427,8 @@ func DefaultGlobalConfig() GlobalConfig {
 			Host:                          DefaultBrokerHost,
 			ReadTimeout:                   30 * time.Second,
 			WriteTimeout:                  120 * time.Second, // Longer for agent operations
-			CORSEnabled:                   true,
-			CORSAllowedOrigins:            []string{"*"},
+			CORSEnabled:                   false,             // off by default with no origins: nothing calls the broker from a browser (opt in with server.broker.cors)
+			CORSAllowedOrigins:            []string{},
 			CORSAllowedMethods:            []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 			CORSAllowedHeaders:            []string{"Authorization", "Content-Type", "X-Scion-Broker-Token", "X-API-Key"},
 			CORSMaxAge:                    3600,
@@ -1428,6 +1525,7 @@ func applyDatabasePoolDefaults(db *DatabaseConfig) {
 func LoadGlobalConfig(configPath string) (*GlobalConfig, error) {
 	// Try loading from settings.yaml first (versioned path)
 	if gc, ok := loadGlobalConfigFromSettings(configPath); ok {
+		markTrustedProxiesSet(gc, nil)
 		return gc, nil
 	}
 
@@ -1435,7 +1533,43 @@ func LoadGlobalConfig(configPath string) (*GlobalConfig, error) {
 	// key, but a settings.yaml may still carry top-level hub sections
 	// (quotas, agent_secrets, default_timezone, ...); honour them so a
 	// file-mode reload does not reset those live values (ptone/scion#2284).
-	return loadGlobalConfigLegacy(configPath, findTopLevelSettingsRaw(configPath))
+	gc, err := loadGlobalConfigLegacy(configPath, findTopLevelSettingsRaw(configPath))
+	if err != nil {
+		return nil, err
+	}
+	markTrustedProxiesSet(gc, nil)
+	return gc, nil
+}
+
+// markTrustedProxiesSet sets gc.TrustedProxiesSet when server.trusted_proxies
+// has a value or any of its SCION_SERVER_* names is defined, even as an
+// empty string (lookupEnv, os.LookupEnv when nil). The file sources mark it
+// themselves when they hold the key, even as an empty list.
+func markTrustedProxiesSet(gc *GlobalConfig, lookupEnv func(string) (string, bool)) {
+	if len(gc.TrustedProxies) > 0 {
+		gc.TrustedProxiesSet = true
+		return
+	}
+	if lookupEnv == nil {
+		lookupEnv = os.LookupEnv
+	}
+	for _, name := range trustedProxiesEnvNames() {
+		if _, ok := lookupEnv(name); ok {
+			gc.TrustedProxiesSet = true
+			return
+		}
+	}
+}
+
+// trustedProxiesEnvNames returns the SCION_SERVER_* names that set
+// server.trusted_proxies: the canonical name and its aliases.
+func trustedProxiesEnvNames() []string {
+	for _, e := range ServerEnvEntries() {
+		if e.Path == TrustedProxiesKey {
+			return append([]string{e.Canonical}, e.Aliases...)
+		}
+	}
+	return []string{"SCION_SERVER_TRUSTEDPROXIES"}
 }
 
 // loadGlobalConfigFromSettings attempts to load server config from settings.yaml files.
@@ -1711,6 +1845,9 @@ func loadGlobalConfigLegacy(configPath string, topLevel map[string]interface{}) 
 		var probe GlobalConfig
 		_ = unmarshalWithUnusedKeyCheck(k, &probe, "server config", serverConfigSources(configPath))
 	}
+	// server.yaml names trustedProxies, even as an empty list: the
+	// operator chose a list (GlobalConfig.TrustedProxiesSet).
+	trustedProxiesInFile := k.Exists("trustedProxies")
 
 	// 3b. settings.yaml top-level telemetry.enabled. Of the top-level
 	// sections only telemetryEnabled is env-overridable (the rest are
@@ -1763,6 +1900,7 @@ func loadGlobalConfigLegacy(configPath string, topLevel map[string]interface{}) 
 	if err := applyEnvToOutsideKoanfFields(config); err != nil {
 		return nil, err
 	}
+	config.TrustedProxiesSet = trustedProxiesInFile
 
 	// Apply defaults for database path if not set
 	if config.Database.URL == "" && config.Database.Driver == "sqlite" {
@@ -2453,6 +2591,10 @@ func normalizeListSettings(gc *GlobalConfig) {
 	} {
 		*list = normalizeCORSList(*list)
 	}
+	// server.trusted_proxies: each item split on commas and trimmed, as the
+	// CORS lists are, so a comma-separated env value or file entry works.
+	// ParseTrustedProxies checks the result at startup.
+	gc.TrustedProxies = normalizeCORSList(gc.TrustedProxies)
 }
 
 // normalizeCORSList splits every item on commas, trims it and drops empty
@@ -2581,6 +2723,9 @@ func loadServerFromSettingsFile(dir string) (*GlobalConfig, bool) {
 		return nil, false
 	}
 
+	// ConvertV1ServerToGlobalConfig sets TrustedProxiesSet when the file
+	// holds trusted_proxies as a list, even an empty one. A null value is
+	// not set, as it is after the hub rewrites the file (omitempty).
 	gc := ConvertV1ServerToGlobalConfig(&v1Server)
 	applyTopLevelSettingsSections(gc, raw)
 
@@ -2764,3 +2909,8 @@ const KeyringFileKey = "server.keyring_file"
 // keyring file override (GlobalConfig.KeyringFileAllowWorldReadable). No
 // settings API reads or writes it.
 const KeyringFileAllowWorldReadableKey = "server.keyring_file_allow_world_readable"
+
+// TrustedProxiesKey is the settings key of the TLS-terminating proxy
+// allowlist (GlobalConfig.TrustedProxies). No settings API reads or writes
+// it.
+const TrustedProxiesKey = "server.trusted_proxies"
