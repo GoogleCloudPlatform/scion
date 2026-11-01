@@ -91,6 +91,7 @@ var PendingBearerDispositions = []PendingEntry{
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/delegation-adoption", Method: "GET", Area: AreaHub},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/delegation-adoption/commits", Method: "POST", Area: AreaHub},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/delegation-adoption/previews", Method: "POST", Area: AreaHub},
+	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/keys/status", Method: "GET", Area: AreaHub},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/operations/{key}/runs", Method: "GET", Area: AreaHub},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/operations/{key}/runs/{runId}", Method: "GET", Area: AreaHub},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/conduit/grant-keys", Method: "GET", Area: AreaHub},
