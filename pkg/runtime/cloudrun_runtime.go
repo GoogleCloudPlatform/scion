@@ -274,6 +274,13 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	if err := r.checkOwnerLabel(cfg); err != nil {
 		return "", err
 	}
+	// The instance's CPU and memory from the resolved resources, checked
+	// against the Cloud Run limits before anything is provisioned or any
+	// API call is made.
+	resources, err := cloudRunContainerResources(cfg.Resources)
+	if err != nil {
+		return "", err
+	}
 	// Deliver resolved secrets through the instance env: env-type secrets as
 	// plain variables, file/variable secrets as the staged blob that
 	// sciontool init writes out. Done before any provisioning so an
@@ -377,6 +384,8 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 
 	// Instance doesn't exist, proceed to create.
 	inst := r.buildCloudRunInstance(cfg, uid, gid, nfsPaths)
+	inst.Containers[0].Resources = resources
+	logCloudRunResources(instanceID, resources, cfg.Resources)
 
 	req := &runpb.CreateInstanceRequest{
 		Parent:     parent,
