@@ -17,6 +17,9 @@ package cmd
 import (
 	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -144,4 +147,38 @@ func TestTestAdminG7_KeyringModeRefusesWithoutReadingTheSharedSecret(t *testing.
 	assert.False(t, in.KeyringSigning)
 	assert.True(t, in.SharedSigningSecret)
 	assert.Equal(t, 1, calls)
+}
+
+// The keyring-mode decisions of the hosted checks read the loaded keyring
+// (serverKeyringFromFile), so runServerStart must load it first: a check
+// that ran before loadServerKeyring would see legacy mode and refuse (or
+// warn) on the absent session secret.
+func TestRunServerStart_LoadsKeyringBeforeHostedChecks(t *testing.T) {
+	f, err := parser.ParseFile(token.NewFileSet(), "server_foreground.go", nil, 0)
+	require.NoError(t, err)
+	var fn *ast.FuncDecl
+	for _, d := range f.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Recv == nil && fd.Name.Name == "runServerStart" {
+			fn = fd
+		}
+	}
+	require.NotNil(t, fn, "runServerStart not found")
+	first := map[string]token.Pos{}
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if id, ok := call.Fun.(*ast.Ident); ok {
+				if _, seen := first[id.Name]; !seen {
+					first[id.Name] = call.Pos()
+				}
+			}
+		}
+		return true
+	})
+	load, ok := first["loadServerKeyring"]
+	require.True(t, ok, "runServerStart does not call loadServerKeyring")
+	for _, check := range []string{"validateHostedBasic", "validateHostedHAPreflight", "validateServerPreflight"} {
+		pos, ok := first[check]
+		require.True(t, ok, "runServerStart does not call %s", check)
+		assert.Less(t, load, pos, "%s must run after loadServerKeyring", check)
+	}
 }
