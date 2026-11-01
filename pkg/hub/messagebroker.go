@@ -1128,6 +1128,20 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 			p.publishDeliveryFailed(ctx, projectID, agentSlug, msg, errors.New(phaseErr.Message))
 			return
 		}
+		// A held agent (ptone/scion#3433) is refused like a suspended one,
+		// for a topic message and a broadcast alike (ptone/scion#6859); a
+		// lookup fault refuses. The same predicate as Server.agentHeld.
+		held, holdErr := p.store.HasActiveAgentHold(ctx, agent.ID)
+		if holdErr != nil || held {
+			refusal := heldTargetDMError(agent)
+			if holdErr != nil {
+				refusal = heldLookupFaultDMError()
+			}
+			p.log.Warn("Rejecting broker message to held agent",
+				"agentSlug", agentSlug, "projectID", projectID, "error", holdErr)
+			p.publishDeliveryFailed(ctx, projectID, agentSlug, msg, errors.New(refusal.Message))
+			return
+		}
 	}
 
 	// Persist to message store before delivery attempt (no pending rows).

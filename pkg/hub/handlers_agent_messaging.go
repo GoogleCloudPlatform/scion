@@ -2320,6 +2320,22 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		ValidationError(w, "external_ref requires surface to be set", nil)
 		return
 	}
+
+	// A held target (ptone/scion#3433) is refused for a user send, with or
+	// without wake, with the refusal an agent send gets (ptone/scion#6859).
+	// It runs after request validation and the resume-permission check
+	// (the same order as an agent send on this route, whose hold check is
+	// in ExecuteAgentDM), and before conversation resolution, persistence
+	// and any wake, so a refused send writes and resumes nothing. Delegated
+	// sends get it in delegatedDeliveryRefusal. A migrating recipient is
+	// deferred, not refused (see the migration gate below).
+	if GetAgentIdentityFromContext(ctx) == nil && delegatedAgentIdentityFromContext(ctx) == nil && !reincarnationInFlight(agent) {
+		if dmErr := s.heldTargetRefusal(ctx, agent); dmErr != nil {
+			WriteAgentDMError(w, dmErr)
+			return
+		}
+	}
+
 	if req.Surface != "" && req.ExternalRef != "" {
 		var keyOpts []messaging.ConversationByKeyOption
 		keyOpts = append(keyOpts, messaging.WithSurface(req.Surface))
@@ -2384,17 +2400,6 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	delegatedSender := delegatedAgentIdentityFromContext(ctx) != nil
 	if delegatedSender {
 		if dmErr := s.delegatedDeliveryRefusal(ctx, agent, deferDelivery); dmErr != nil {
-			WriteAgentDMError(w, dmErr)
-			return
-		}
-	}
-
-	// A held target (ptone/scion#3433) is refused for a user send, with or
-	// without wake, before any wake side effect and with the refusal the
-	// agent send gets (ptone/scion#6859). Agent sends get the same check in
-	// ExecuteAgentDM, delegated sends above.
-	if !senderIsAgent && !delegatedSender && !deferDelivery {
-		if dmErr := s.heldTargetRefusal(ctx, agent); dmErr != nil {
 			WriteAgentDMError(w, dmErr)
 			return
 		}

@@ -24,10 +24,16 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -153,4 +159,203 @@ func TestHeldTargetSend_Agent(t *testing.T) {
 		assert.Equal(t, AgentDMAccepted, result.Outcome, "wake=%v", wake)
 		require.Len(t, disp.getMessageCalls(), 1, "wake=%v", wake)
 	}
+}
+
+// targetHoldFaultStore fails the hold lookup for one agent.
+type targetHoldFaultStore struct {
+	store.Store
+	agentID string
+}
+
+func (h *targetHoldFaultStore) HasActiveAgentHold(ctx context.Context, agentID string) (bool, error) {
+	if agentID == h.agentID {
+		return false, errors.New("injected hold lookup fault")
+	}
+	return h.Store.HasActiveAgentHold(ctx, agentID)
+}
+
+// A user send whose target's hold cannot be read is refused with the
+// lookup-fault refusal (500), and nothing is resumed, dispatched or stored.
+func TestHeldTargetSend_UserLookupFault(t *testing.T) {
+	srv, s, _, target, disp := heldSendFixture(t, string(state.PhaseRunning), false)
+	u := wakeLifecycleUser(t, s, "held-user-fault", target.ProjectID, "agent.message", "agent.read", "agent.lifecycle")
+	orig := srv.store
+	srv.store = &targetHoldFaultStore{Store: orig, agentID: target.ID}
+	t.Cleanup(func() { srv.store = orig })
+
+	for _, wake := range []bool{false, true} {
+		rec := requestAsIdentity(t, srv, authUser(u), http.MethodPost, "/api/v1/agents/"+target.ID+"/message",
+			map[string]interface{}{"message": "fault", "wake": wake})
+		require.Equal(t, http.StatusInternalServerError, rec.Code, "wake=%v: %s", wake, rec.Body.String())
+		apiErr := decodeTargetAPIError(t, rec)
+		assert.Equal(t, heldLookupFaultDMError().Code, apiErr.Code, "wake=%v", wake)
+		assert.Equal(t, heldLookupFaultDMError().Message, apiErr.Message, "wake=%v", wake)
+	}
+	assertNothingHappened(t, s, target, disp)
+}
+
+// routedHeldRequest is a chat-integration message from env's user to alpha,
+// with msg as its text.
+func routedHeldRequest(env routedTestEnv, msg string) routedInboundRequest {
+	return routedInboundRequest{
+		ProjectID:    env.project.ID,
+		DefaultAgent: "alpha",
+		Message: &messages.StructuredMessage{
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Channel:   "slack",
+			Sender:    "user:" + env.user.Email,
+			Msg:       msg,
+			Type:      messages.TypeInstruction,
+		},
+	}
+}
+
+// storedForAgent returns the number of persisted messages for agentID.
+func storedForAgent(t *testing.T, s store.Store, agentID string) int {
+	t.Helper()
+	rows, err := s.ListMessages(context.Background(), store.MessageFilter{AgentID: agentID}, store.ListOptions{Limit: 100})
+	require.NoError(t, err)
+	return len(rows.Items)
+}
+
+// A routed inbound (chat integration) message to a held, running primary is
+// refused like a stopped primary; nothing is dispatched or stored.
+func TestHeldTargetSend_RoutedPrimary(t *testing.T) {
+	env := setupRoutedTestEnv(t)
+	holdAgentFor(t, env.store, env.agent1.ID, env.project.ID, env.user.ID)
+
+	rec := env.doRoutedRequest(t, routedHeldRequest(env, "hello @beta"))
+
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, ErrCodeAgentNotRunning, errResp.Error.Code)
+	assert.Empty(t, env.dispatcher.getCalls(), "no dispatch to a held primary, and no fan-out")
+	assert.Zero(t, storedForAgent(t, env.store, env.agent1.ID))
+	assert.Zero(t, storedForAgent(t, env.store, env.agent2.ID))
+}
+
+// A routed inbound message that mentions a held, running agent is delivered
+// to the primary only; the held mention is reported not_running.
+func TestHeldTargetSend_RoutedMention(t *testing.T) {
+	env := setupRoutedTestEnv(t)
+	holdAgentFor(t, env.store, env.agent2.ID, env.project.ID, env.user.ID)
+
+	rec := env.doRoutedRequest(t, routedHeldRequest(env, "hello @beta"))
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp routedInboundResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Results, 2)
+	assert.Equal(t, "delivered", resp.Results[0].Status, "the primary is not held")
+	assert.Equal(t, "beta", resp.Results[1].AgentSlug)
+	assert.Equal(t, "not_running", resp.Results[1].Status, "the held mention is refused")
+	assert.Equal(t, heldTargetDMError(env.agent2).Message, resp.Results[1].Error)
+	calls := env.dispatcher.getCalls()
+	require.Len(t, calls, 1)
+	assert.Equal(t, env.agent1.ID, calls[0].Agent.ID)
+	assert.Zero(t, storedForAgent(t, env.store, env.agent2.ID))
+}
+
+// heldBrokerProxy is a message broker proxy over s with a recording
+// dispatcher.
+func heldBrokerProxy(t *testing.T, s store.Store) (*MessageBrokerProxy, *brokerMockDispatcher) {
+	t.Helper()
+	events := NewChannelEventPublisher()
+	t.Cleanup(events.Close)
+	b := eventbus.NewInProcessEventBus(slog.Default())
+	t.Cleanup(func() { _ = b.Close() })
+	dispatcher := &brokerMockDispatcher{}
+	return NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return dispatcher }, slog.Default()), dispatcher
+}
+
+// dispatchedTo reports whether any recorded dispatch went to slug.
+func dispatchedTo(d *brokerMockDispatcher, slug string) bool {
+	for _, m := range d.getMessages() {
+		if m.agentSlug == slug {
+			return true
+		}
+	}
+	return false
+}
+
+// A topic message through the message broker to a held, running agent is
+// refused: not dispatched, not stored, and the agent sender is told.
+func TestHeldTargetSend_BrokerTopicMessage(t *testing.T) {
+	s := newBrokerTestStore(t)
+	projectID := setupBrokerTestProject(t, s)
+	sender := setupBrokerTestAgent(t, s, projectID, "held-topic-sender", "running")
+	target := setupBrokerTestAgent(t, s, projectID, "held-topic-target", "running")
+	holdAgentFor(t, s, target.ID, projectID, "held-topic-root")
+	proxy, dispatcher := heldBrokerProxy(t, s)
+
+	msg := messages.NewInstruction("agent:"+sender.Slug, "agent:"+target.Slug, "hello")
+	msg.SenderID = sender.ID
+	msg.RecipientID = target.ID
+	proxy.deliverToAgent(context.Background(), projectID, target.Slug, msg)
+
+	assert.False(t, dispatchedTo(dispatcher, target.Slug), "no dispatch to a held agent")
+	assert.Zero(t, storedForAgent(t, s, target.ID), "nothing stored for a held agent")
+	var notice *brokerDispatchedMsg
+	for _, d := range dispatcher.getMessages() {
+		if d.agentSlug == sender.Slug {
+			d := d
+			notice = &d
+		}
+	}
+	require.NotNil(t, notice, "the agent sender is told")
+	assert.Equal(t, "DELIVERY_FAILED", notice.structured.Status)
+
+	// Control: the same message to a running agent that is not held is
+	// delivered.
+	other := setupBrokerTestAgent(t, s, projectID, "unheld-topic-target", "running")
+	msg2 := messages.NewInstruction("agent:"+sender.Slug, "agent:"+other.Slug, "hello")
+	msg2.SenderID = sender.ID
+	msg2.RecipientID = other.ID
+	proxy.deliverToAgent(context.Background(), projectID, other.Slug, msg2)
+	assert.True(t, dispatchedTo(dispatcher, other.Slug))
+	assert.Equal(t, 1, storedForAgent(t, s, other.ID))
+}
+
+// A project broadcast skips a held, running agent and still reaches its
+// running, unheld sibling.
+func TestHeldTargetSend_BrokerProjectBroadcast(t *testing.T) {
+	s := newBrokerTestStore(t)
+	projectID := setupBrokerTestProject(t, s)
+	held := setupBrokerTestAgent(t, s, projectID, "held-bcast-target", "running")
+	sibling := setupBrokerTestAgent(t, s, projectID, "unheld-bcast-sibling", "running")
+	holdAgentFor(t, s, held.ID, projectID, "held-bcast-root")
+	proxy, dispatcher := heldBrokerProxy(t, s)
+
+	msg := messages.NewInstruction("user:alice", "project:all", "broadcast hello")
+	msg.SenderID = tid("held-bcast-user")
+	msg.Broadcasted = true
+	proxy.fanOutToProject(context.Background(), projectID, msg)
+
+	assert.False(t, dispatchedTo(dispatcher, held.Slug), "no broadcast dispatch to a held agent")
+	assert.Zero(t, storedForAgent(t, s, held.ID), "nothing stored for a held agent")
+	assert.True(t, dispatchedTo(dispatcher, sibling.Slug), "the unheld sibling still gets the broadcast")
+	assert.Equal(t, 1, storedForAgent(t, s, sibling.ID))
+}
+
+// A routed inbound message whose primary's hold cannot be read is refused
+// with the lookup-fault refusal (500), not a dispatch failure; nothing is
+// dispatched or stored.
+func TestHeldTargetSend_RoutedLookupFault(t *testing.T) {
+	env := setupRoutedTestEnv(t)
+	orig := env.srv.store
+	env.srv.store = &targetHoldFaultStore{Store: orig, agentID: env.agent1.ID}
+	t.Cleanup(func() { env.srv.store = orig })
+
+	rec := env.doRoutedRequest(t, routedHeldRequest(env, "hello @beta"))
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, heldLookupFaultDMError().Code, errResp.Error.Code)
+	assert.Equal(t, heldLookupFaultDMError().Message, errResp.Error.Message)
+	assert.Empty(t, env.dispatcher.getCalls(), "no dispatch, and no fan-out")
+	assert.Zero(t, storedForAgent(t, env.store, env.agent1.ID))
+	assert.Zero(t, storedForAgent(t, env.store, env.agent2.ID))
 }
