@@ -24,6 +24,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/pathcanon"
 )
 
 func TestCheckNFSMountScope(t *testing.T) {
@@ -286,5 +287,47 @@ func TestNFSBindScope_ShareBaseThroughLink(t *testing.T) {
 		if err := s.check(allowed); err != nil {
 			t.Errorf("check(%s) = %v, want nil", allowed, err)
 		}
+	}
+}
+
+// A share base that is only a volume name becomes that volume's root, so
+// a bare drive name never resolves against the working directory on the
+// drive. Windows forms are passed in, so every case runs on every OS.
+func TestVolumeRooted(t *testing.T) {
+	for _, tc := range []struct {
+		base, vol string
+		sep       byte
+		want      string
+	}{
+		{base: "", vol: "", sep: '/', want: "/"},
+		{base: "/mnt/scion/share1", vol: "", sep: '/', want: "/mnt/scion/share1"},
+		{base: "Z:", vol: "Z:", sep: '\\', want: `Z:\`},
+		{base: `Z:\mnt\share1`, vol: "Z:", sep: '\\', want: `Z:\mnt\share1`},
+		{base: `\\server\share`, vol: `\\server\share`, sep: '\\', want: `\\server\share\`},
+		{base: `\\server\share\scion`, vol: `\\server\share`, sep: '\\', want: `\\server\share\scion`},
+	} {
+		if got := volumeRooted(tc.base, tc.vol, tc.sep); got != tc.want {
+			t.Errorf("volumeRooted(%q, %q, %q) = %q, want %q", tc.base, tc.vol, tc.sep, got, tc.want)
+		}
+	}
+}
+
+// A share mounted at the root of the file system: the host base is the
+// root, and the project root is refused.
+func TestNewNFSBindScope_ShareAtVolumeRoot(t *testing.T) {
+	root := string(filepath.Separator)
+	if v := filepath.VolumeName(t.TempDir()); v != "" {
+		root = v + root
+	}
+	ws := filepath.Join(root, filepath.FromSlash(scopeRel("workspace")))
+	s, err := newNFSBindScope(RunConfig{WorkspaceBackendName: "nfs", ProjectID: scopeProjectID, Workspace: ws})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want, _ := pathcanon.Resolve(root); s.hostBase != want {
+		t.Fatalf("hostBase = %q, want the volume root %q", s.hostBase, want)
+	}
+	if err := s.check(filepath.Join(root, filepath.FromSlash(scopeRel()))); !errors.Is(err, errNFSMountScope) {
+		t.Errorf("check(project root at the volume root) = %v, want a refusal", err)
 	}
 }
