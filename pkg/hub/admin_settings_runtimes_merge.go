@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"reflect"
 	"sort"
 
@@ -219,20 +218,6 @@ func decodeJSONNumbers(data []byte, v any) error {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
 	return dec.Decode(v)
-}
-
-// writeResourceQuantityError answers a save whose resource quantities
-// fail config.ValidateResourceQuantities: the message is the first error,
-// and details carry the field path of the first error and every error.
-func writeResourceQuantityError(w http.ResponseWriter, status int, code string, errs []config.ValidationError) {
-	all := make([]string, 0, len(errs))
-	for _, e := range errs {
-		all = append(all, e.Error())
-	}
-	writeError(w, status, code, errs[0].Error(), map[string]interface{}{
-		"field":  errs[0].Path,
-		"errors": all,
-	})
 }
 
 // resourceQuantityWarnings returns the save warnings for the warnings of

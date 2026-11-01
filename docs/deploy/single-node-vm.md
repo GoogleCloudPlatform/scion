@@ -223,6 +223,49 @@ a different release, re-run `deploy.sh --version <tag>`, or update from the
 Maintenance page. A re-run without `--version` keeps the release `current`
 points at (see [Re-running the deploy script](#re-running-the-deploy-script)).
 
+### Chat plugins and updates
+
+When the Hub updates itself (Maintenance page or auto-update), it updates
+the chat plugins in `/home/scion/.scion/plugins/broker/` with it. Plugins
+are separate binaries that the Hub talks to over a protocol that has only
+one version, so a plugin from a different release can fail on its first
+call:
+
+- Each regular `scion-plugin-<name>` file in that directory is replaced
+  with `scion-plugin-<name>-linux-<arch>.tar.gz` from the **same release**.
+  The plugin is verified against the same `SHA256SUMS` file as the Hub
+  binary. Each plugin is swapped in with one atomic rename after the new
+  release is activated and before the Hub restarts. The restart also
+  restarts the plugins.
+- If a downloaded plugin does not match its `SHA256SUMS` line, or its
+  download URL is outside the release, or its archive is malformed, the
+  whole update fails before anything is installed.
+- A plugin the release does not publish, or whose `SHA256SUMS` line is
+  missing or unusable, is left as it is, with a warning in the run log.
+  Nothing unverified is installed. A downgrade's confirmation lists these
+  plugins as risks. Symlinks and plugins configured with a path outside
+  that directory are left alone too.
+- If the directory is not writable by the Hub, or is itself a symlink,
+  the plugins are not updated, and the run log has a warning.
+- If the update fails after activation (a plugin cannot be swapped in, or
+  the restart cannot be recorded or requested), the Hub goes back to the
+  previous release and the previous plugins are put back. If a plugin
+  cannot be put back, its old binary is kept in a
+  `.scion-update-*/old/` directory inside the plugin directory, and the
+  error says so. The next update removes such directories, with a warning
+  in the run log.
+- Each release keeps a copy of the plugins installed with it in
+  `/opt/scion/releases/<tag>/plugins/`. After the boot-failure guard rolls
+  back, the restored Hub copies its own plugins back at startup, before
+  loading them. It only replaces a plugin whose file is exactly the build
+  of the release that failed. A plugin you rebuilt or reinstalled by hand
+  is never replaced.
+- A downgrade is an ordinary update, so it installs the plugins of the
+  older release.
+
+`deploy.sh` still installs the plugins you select from the release it
+installs.
+
 ### Boot-failure guard
 
 A release that crashes on startup cannot roll itself back, so `deploy.sh`
@@ -808,6 +851,8 @@ installed to `/home/scion/.scion/plugins/broker/`. Each plugin runs as a
 broker plugin within the Hub process. Like the main binary, each plugin
 tarball is verified against the release's `SHA256SUMS` asset before
 installation (see [Quick Start](#quick-start)).
+When the Hub later updates itself, it updates these plugins to the same
+release (see [Chat plugins and updates](#chat-plugins-and-updates)).
 
 ## Container Images
 

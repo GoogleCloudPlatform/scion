@@ -202,9 +202,7 @@ A managed section can be reset to tracking mode via the "Reset to bootstrap" but
 2. The section falls back to bootstrap values
 3. On next boot, the section is re-seeded from current deployment config
 
-:::note[Known Limitation]
-The "Reset to bootstrap" feature requires a backend endpoint that is not yet available. The UI is wired and ready — the endpoint will be added in a follow-up release.
-:::
+The endpoint is `DELETE /api/v1/admin/server-config/sections/{name}`; from the CLI, `scion hub settings unset --section NAME --reset`. The `experiments` section is refused there: experiment overrides have their own compare-and-set reset (`DELETE /api/v1/admin/experiments`).
 
 ## Environment Variable Namespaces
 
@@ -296,6 +294,28 @@ The `profiling` section holds operational switches for in-app profiling. It is s
 - **In the web client:** while it is on, the page shell's initial data carries `"readinessMarks": true` for a signed-in user, the same value that user reads from `GET /api/v1/profiling`. Signed-out pages, and every page while it is off, are served exactly as without the setting. The client reads the value once per page load, so a change applies on the next full load.
 - Off, the client makes no `performance.mark` calls and the server adds nothing to the shell.
 
+## Chat Retention
+
+The `chat_retention` section bounds how long the Hub keeps chat messages (`pkg/config/opsettings/chat_retention.go`). Like `profiling`, it is stored only in the Hub database: it has no `settings.yaml` key and no environment variable, and it is not seeded. An absent row resolves to the compiled defaults (`enabled: false`, `messages_retention_days: null`, default sweep tuning), and a stored document that fails to parse or validate fails closed (`enabled: false`, no window). It is gated by the [`hub.chat_retention`](/scion/reference/experiments/#server-experiments-with-notes) experiment (off by default). The background `"chat-retention"` singleton purges messages only while `hub.chat_retention` is on, `enabled` is `true`, and `messages_retention_days` is set (`enabled: false` doubles as a legal hold).
+
+:::caution[Back up the database before enabling]
+Chat retention irreversibly purges chat messages older than `messages_retention_days` (oldest first, in small paced transactions) along with their message-bound attachments and notifications, while keeping thread records and membership. Take and verify a database backup before enabling `hub.chat_retention` and `chat_retention.enabled`.
+:::
+
+| Key | Type | Default | Constraints | Effect |
+|-----|------|---------|-------------|--------|
+| `enabled` | boolean | `false` | — | Turns the retention sweep on while `hub.chat_retention` is on and `messages_retention_days` is set. While `false`, nothing is purged. |
+| `messages_retention_days` | integer or `null` | `null` (keep forever) | `7`–`36500` when set | Hub-wide age window in days (`ChatRetentionMinDays = 7`, `ChatRetentionMaxDays = 36500`). When `null` (absent in the stored document), messages are kept forever. |
+| `sweep.chunk_size` | integer | `200` | `25`–`1000` | Largest number of messages deleted in one transaction. |
+| `sweep.pause_ms` | integer | `500` | `0`–`10000` | Pause after each chunk, in milliseconds. |
+| `sweep.tick_budget_seconds` | integer | `30` | `1`–`40` | Wall time one tick may run, in seconds. |
+| `sweep.tick_interval_minutes` | integer | `10` | `1`–`1440` | Time between ticks, in minutes. |
+
+- **Permissions and credentials:** `GET /api/v1/admin/chat-retention` and `PUT /api/v1/admin/chat-retention` are both Hub-admin routes (`RouteID: "admin.chatRetention"`, `Classification: RouteHubAdmin`, permission `hub.config.update` on `hub`) restricted to interactive sessions (`SessionOnly: ReasonIrreversibleCascade`); user access tokens and test-admin identities are refused. While the `hub.chat_retention` experiment is off, both `GET` and `PUT` return `404 not_found` (`Route not found`); unsupported HTTP methods return `405` whether or not the experiment is on.
+- **Response (`GET` and `PUT`):** Returns `enabled`, `messages_retention_days` (`null` when no window is set), `sweep` (`chunk_size`, `pause_ms`, `tick_budget_seconds`, `tick_interval_minutes`), `last_applied_cutoff` (the UTC cutoff the sweep last reached, or `null` until it reaches one), and `revision` (the section revision for `expected_revision`).
+- **`PUT` semantics and error codes:** Omitted fields are unchanged; explicit `null` resets a field to its compiled default (`enabled: false`, `messages_retention_days: null`, or default sweep tuning; `"sweep": null` resets all four sweep fields). Changing `enabled` or `messages_retention_days` requires `expected_revision` (`400 invalid_request` if missing); a stale `expected_revision` or concurrent modification returns `409 revision_conflict`. Unknown JSON fields, malformed JSON, or out-of-range values return `400 invalid_request` (or `400 validation_failed` on schema validation). Without database-backed operational settings, `PUT` returns `501 not_implemented`. Every change is written with compare-and-set on the section revision and recorded in the mutation audit (`hub_setting_update` on `chat_retention`, executor `admin-chat-retention`) before the write; if the audit record cannot be written, the save is refused with `500 internal_error` and settings are not changed (`hub_setting_update_not_applied` is recorded if the settings write itself fails).
+- **Admin UI:** While the `hub.chat_retention` web flag is on, **Admin → Server Config** renders the **Chat retention** panel (`<scion-admin-chat-retention>`).
+
 ## HA Bootstrap Guidance
 
 For high-availability deployments with multiple hub replicas:
@@ -309,6 +329,21 @@ For high-availability deployments with multiple hub replicas:
 4. **Managed sections:** For sections that have been admin-edited, changing the `SCION_SEED_*` variable has no effect — the database value wins. A "superseded" notice in the admin UI shows which deployment values differ from the database.
 
 5. **Resetting:** To return a managed section to tracking mode, use "Reset to bootstrap" in the admin UI. The section reverts to the seed value and will track future seed changes.
+
+## From the CLI
+
+`scion hub settings` reads and changes the same settings as the admin page, through the same endpoints (see the [CLI reference](/scion/reference/cli/#scion-hub)):
+
+```bash
+scion hub settings get                                # sections, sources and revisions
+scion hub settings get --section agent_defaults
+scion hub settings set default_max_turns 200
+scion hub settings set runtimes.k8s.namespace agents
+scion hub settings unset server.hub.monitoring_dashboard_url
+scion hub settings schema                             # sections and keys
+```
+
+Each `set` or `unset` sends the revision of every section it changes in `expected_revisions`, as read just before the save, so a concurrent change is a `409` listing each section's expected and current revision rather than a silent overwrite. The save report is printed: keys in effect now, keys that apply after a restart, keys saved but not in use, and warnings. Project defaults and experiment overrides are not part of the server configuration.
 
 ## Admin UI
 
@@ -332,7 +367,7 @@ To streamline management of complex environments, the **General** settings tab i
    - Adds a hub-level **Default GCP Identity Mode** (`agent_defaults.default_gcp_identity_mode`) with an optional service account picker (`default_gcp_identity_service_account_id`). It is the fallback for new agents when neither the create request (not applicable to a scheduled dispatch, which has none) nor the project's default GCP identity sets a mode — including agents dispatched by a schedule, which follow the same fallback ladder as interactive/API creates. **Passthrough** applies only on the Hub's own embedded (co-located) broker, as recorded by the Hub server at startup; elsewhere, including any Kubernetes profile, the hub default is left unset and the agent gets the runtime default (**Block**, or **Passthrough** on Kubernetes). A broker label cannot opt a broker in. **Assign** accepts only a verified hub-scoped service account and requires `gcp_iam_check_mode: enforce`. Other values are rejected with `422`. The setting is stored in the Hub settings database on every driver (SQLite or Postgres). It applies to new agents without a restart and persists across restarts. On the Kubernetes runtime an explicit **Block** (from any rung, including this one) runs the agent pod as a zero-privilege ServiceAccount; see [block on Kubernetes](/scion/hosted/ha/kubernetes/#block). An agent with no mode configured anywhere gets **Passthrough** on Kubernetes. A hub default of **Passthrough** is denied for Kubernetes profiles, so those agents get the same runtime default. See [Hub-Default GCP Identity](/scion/hosted/ha/permissions/#hub-default-gcp-identity).
    - Houses the **Telemetry Toggle**, which has been moved to this card to keep telemetry configuration closely aligned with operational defaults.
 3. **Project Default Settings Card**: Configures platform-level default annotations and behaviors for newly created projects.
-4. **Quotas Card**: Houses the **Enforce broker agent quotas** switch (`quotas.enforce_broker_quotas`), on by default. When turned off, agent creates on a broker are no longer rejected once `max_agents_per_broker` is reached — usage is still counted (reservations, release, reconcile and backfill are unaffected), so the Admin → Quotas usage page keeps showing the true count (e.g. "31 / 16") while it is off, and turning the switch back on makes the next over-cap create return `429` immediately with no reconcile wait. The switch only affects `max_agents_per_broker`; other quota limits (such as `max_agents_per_project`) are always enforced. This is a normal Layer-1 section on every driver (`PUT /api/v1/admin/server-config`, no restart, propagates to replicas within 60s). The card links to Admin → Quotas, where the hub-wide `max_agents_per_broker` default itself is edited.
+4. **Quotas Card**: Houses the **Enforce broker agent quotas** switch (`quotas.enforce_broker_quotas`), on by default. When turned off, agent creates on a broker are no longer rejected once `max_agents_per_broker` is reached — usage is still counted (reservations, release, reconcile and backfill are unaffected), so the Admin → Quotas usage page keeps showing the true count (e.g. "31 / 16") while it is off, and turning the switch back on makes the next over-cap create return `429` immediately with no reconcile wait. The switch only affects `max_agents_per_broker`; other quota limits (such as `max_agents_per_project`) are always enforced. This is a normal Layer-1 section on every driver (`PUT /api/v1/admin/server-config`, no restart, propagates to replicas within 60s). The card links to Admin → Quotas, where the hub-wide `max_agents_per_broker` default itself is edited. `max_agents_per_project` counts the agents in a project that hold capacity: agents that are starting or running, and agents whose stop is queued for an offline broker. Stopped, suspended, errored and halted agents do not count, so starting, resuming, restarting, waking or reincarnating one re-checks the limit and is refused with `429 quota_exceeded` (naming the project, its count and its limit) when the project is full. The total is shared by everyone in the project, but the cap it is compared against is the one resolved for the agent's creator: an entitlement binding for that user or one of their groups, else the hub-wide default. Two creators with different caps can therefore get different answers at the same project total. This is intended, because an admin raise applies to one principal. An agent created by another agent is judged on the creating agent's cap: a user's raise does not carry over, but the agent's group bindings apply. The Admin → Quotas row for this limit shows the count summed across all projects.
 5. **Agent Secrets Card**: Houses the **Restrict agent-written secrets to profile scope** switch (`agent_secrets.user_scope_only`), off by default. When on, the hub rejects every agent-originated secret write that resolves to project scope — including an empty scope, which defaults to project — with `403 secret_scope_restricted`, whatever harness, flag, or `force` is used. This covers the web terminal's Capture Auth button (which disables the Project option and preselects Profile while the setting is on) and ad-hoc `sciontool secret set` calls alike. User-originated project writes (web UI, `scion hub secret set --project`, chat and Discord apps) and agent user-scope writes are unaffected. Existing project secrets are not removed or migrated — turning the setting on stops new agent writes only; use the project secrets UI to clean up existing ones. This is a normal Layer-1 section on every driver (`PUT /api/v1/admin/server-config`, no restart, propagates to replicas within 60s).
 
 ### Runtimes & Profiles Tab
@@ -381,15 +416,14 @@ The superseded notice names the layer each deployment value comes from: `SCION_S
 
 ### Error Handling
 
-The admin UI provides structured feedback on save:
+The admin UI provides structured feedback on save. Every error uses the common envelope `{"error": {"code", "message", "details"}}` (see [Settings save errors](/scion/reference/api/#admin-apiv1admin)):
 
 | Response | UI Treatment |
 |----------|-------------|
 | **200** | Success; shows ignored-keys notice if applicable |
-| **400** `validation_failed` | Inline per-section validation errors |
 | **409** `revision_conflict` | "Settings changed since you loaded this page" banner with Reload button, listing any keys saved before the conflict (`applied_keys`, `pending_restart`, and `skipped`) |
 | **409** `legacy_server_yaml` | Shows the message: the server config still comes from a deprecated `server.yaml`; move it under `server:` in `settings.yaml`, remove `server.yaml`, then save again. Nothing was saved |
-| **422** `validation_error` | On a database-backed Hub, a duration-valued key, including one nested in a map, does not parse as a duration (for example `"5 minutes"`); `details.field` names the full key path. `""` or `null` clears the key. Also: `default_thinking_level` outside 1-100 (`0` included; `null` clears it), or `{"federation": null}` (`details.keys`). Nothing was saved |
+| **422** `validation_error` | Inline validation errors at each field: `details.errors` lists every rejected value with its koanf path in `field` (and `section` for a schema error). For example a value that fails the section schema, a duration-valued key, including one nested in a map, that does not parse as a duration (for example `"5 minutes"`; `""` or `null` clears the key), `default_thinking_level` outside 1-100 (`0` included; `null` clears it), or `{"federation": null}` (`details.keys`). Nothing was saved |
 | **422** `layer0_rejected` | Safety-net notice on hosted Hubs (should not occur with layer-aware UI) |
 | **422** `startup_only_key_rejected` | On a database-backed Hub, `telemetry.cloud.cloud_logging` was sent with a value different from what `GET` returns (`keys: ["telemetry.cloud.cloud_logging"]`); nothing was saved |
 | **422** `unclassified_keys_rejected` / `unpersisted_keys_rejected` / `hub_owned_keys_rejected` / `unsaved_keys_rejected` | Shows the message and the offending keys; nothing was saved |

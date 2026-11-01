@@ -1453,6 +1453,15 @@ func (c *cappedReader) Read(p []byte) (int, error) {
 }
 
 func extractScionBinary(tarballPath, destDir string, logger io.Writer, maxBytes int64) (string, error) {
+	return extractRootEntry(tarballPath, destDir, "scion", logger, maxBytes)
+}
+
+// extractRootEntry extracts the single root-level regular file entry of a
+// release .tar.gz into destDir/extracted/<entry> and returns its path, with
+// the rules and caps of ExtractScionBinary. Release plugin archives
+// (build-release.yml: tar -czvf … -C dist scion-plugin-<name>) have the
+// same layout with entry scion-plugin-<name>.
+func extractRootEntry(tarballPath, destDir, entry string, logger io.Writer, maxBytes int64) (string, error) {
 	f, err := os.Open(tarballPath)
 	if err != nil {
 		return "", fmt.Errorf("open tarball: %w", err)
@@ -1470,7 +1479,7 @@ func extractScionBinary(tarballPath, destDir string, logger io.Writer, maxBytes 
 	if err := os.MkdirAll(extractDir, 0o755); err != nil {
 		return "", fmt.Errorf("create extract directory: %w", err)
 	}
-	binPath := filepath.Join(extractDir, "scion")
+	binPath := filepath.Join(extractDir, entry)
 
 	found := false
 	for {
@@ -1487,9 +1496,9 @@ func extractScionBinary(tarballPath, destDir string, logger io.Writer, maxBytes 
 
 		name := path.Clean(strings.TrimPrefix(header.Name, "./"))
 		switch {
-		case name == "scion":
+		case name == entry:
 			if found {
-				return "", fmt.Errorf("release archive has more than one %q entry", "scion")
+				return "", fmt.Errorf("release archive has more than one %q entry", entry)
 			}
 			if header.Typeflag != tar.TypeReg {
 				return "", fmt.Errorf("release archive entry %q is not a regular file", header.Name)
@@ -1510,9 +1519,9 @@ func extractScionBinary(tarballPath, destDir string, logger io.Writer, maxBytes 
 				}
 				return "", err
 			}
-			_, _ = fmt.Fprintf(logger, "Found scion binary: %s\n", header.Name)
-		case path.Base(name) == "scion":
-			return "", fmt.Errorf("release archive has a nested %q entry (%s); only a root-level scion is accepted", "scion", header.Name)
+			_, _ = fmt.Fprintf(logger, "Found %s binary: %s\n", entry, header.Name)
+		case path.Base(name) == entry:
+			return "", fmt.Errorf("release archive has a nested %q entry (%s); only a root-level %s is accepted", entry, header.Name, entry)
 		default:
 			// Not extracted. Its content is still read (and counted against
 			// the cap) by the next tr.Next.
@@ -1520,7 +1529,7 @@ func extractScionBinary(tarballPath, destDir string, logger io.Writer, maxBytes 
 	}
 
 	if !found {
-		return "", fmt.Errorf("no 'scion' binary found at the root of the tarball")
+		return "", fmt.Errorf("no '%s' binary found at the root of the tarball", entry)
 	}
 	return binPath, nil
 }

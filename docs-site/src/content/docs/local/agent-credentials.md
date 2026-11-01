@@ -546,7 +546,7 @@ Scion provides deep integration with GitHub Apps to manage Git credentials autom
 2. **Credential Helper**: Scion injects `sciontool` as a Git credential helper into the agent container (`git config --global credential.helper`).
 3. **On-Demand Tokens**: When the agent executes a `git clone`, `push`, or `pull`, Git asks the credential helper for a password. `sciontool` retrieves the fresh, short-lived token provided by the Hub, ensuring operations never fail due to token expiration—even for long-running agents.
 
-This flow is automatically enabled for any project linked to a GitHub App installation.
+This flow is automatically enabled for any project linked to a GitHub App installation. On agent create, start, and restart, the Hub mints a GitHub App installation token only for the agent's own project; an agent whose project has no installation configured receives no App token.
 
 ### Personal Access Tokens (PATs)
 

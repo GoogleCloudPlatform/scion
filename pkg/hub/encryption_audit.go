@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/keymaterial"
 	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -45,11 +46,6 @@ const readyReasonBackupUnreadable = "backup_unreadable"
 // auditKindInvalidPayload classifies a record that decrypts but whose
 // infrastructure payload does not parse.
 const auditKindInvalidPayload = "invalid_payload"
-
-// errExistingRecordUnreadable refuses a backup or synchronization write
-// over an existing record this instance cannot read: an unreadable record
-// is preserved, never replaced as a startup repair.
-var errExistingRecordUnreadable = errors.New("existing stored record is unreadable with the configured encryption keys; refusing to overwrite it")
 
 // AuditRecord identifies one unreadable stored record: identity and a
 // stable failure classification, never a payload.
@@ -342,31 +338,12 @@ func (s *Server) auditFlagged(key, scope, scopeID string) bool {
 	return false
 }
 
-// guardOverwrite refuses (errExistingRecordUnreadable) a backup or
+// guardOverwrite refuses (keymaterial.ErrExistingRecordUnreadable) a backup or
 // synchronization write over an existing record the startup audit flagged
-// or that this instance cannot decrypt now. A missing record, or an empty
-// reference-only one, may be written.
+// or that this instance cannot decrypt now. It is
+// keymaterial.GuardOverwrite, which the OIDC key manager shares.
 func guardOverwrite(ctx context.Context, st store.SecretStore, c *secret.ValueCipher, flagged func(key, scope, scopeID string) bool, key, scope, scopeID string) error {
-	if flagged != nil && flagged(key, scope, scopeID) {
-		return errExistingRecordUnreadable
-	}
-	if st == nil {
-		return nil
-	}
-	existing, err := st.GetSecret(ctx, key, scope, scopeID)
-	if errors.Is(err, store.ErrNotFound) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("reading the existing record before overwrite: %w", err)
-	}
-	if existing.EncryptedValue == "" {
-		return nil
-	}
-	if _, err := c.Decrypt(existing.EncryptedValue); err != nil {
-		return errExistingRecordUnreadable
-	}
-	return nil
+	return keymaterial.GuardOverwrite(ctx, st, c, flagged, key, scope, scopeID)
 }
 
 // guardBackupOverwrite is guardOverwrite for this server's store, cipher
