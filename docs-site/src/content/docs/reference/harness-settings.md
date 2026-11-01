@@ -400,10 +400,10 @@ A harness-config without a provisioner that declares a `ready` or `delivery` blo
 `system_prompt_mode` (or the declarative defaults for instructions and system prompts) apply when
 the agent is provisioned, and the harness reports its `harness` type as its name instead of
 `generic`. In `config.yaml`, `system_prompt_file`, `instructions_file`, `skills_dir`, and
-`config_dir` must each be empty or a relative path inside the agent home (not absolute, no `..`
+`config_dir` must each be empty or a relative path inside the Agent home (not absolute, no `..`
 component, and not `.`). When a declarative harness reads or writes `instructions_file` (default
 `agents.md`, reads bounded to 4 MiB) or `system_prompt_file` (default `.scion/system_prompt.md`),
-every access goes through a handle confined to the agent home (`pkg/agenthome`): a path that
+every access goes through a handle confined to the Agent home (`pkg/agenthome`): a path that
 leaves the home or traverses a linked directory component is refused, a linked or non-regular file
 is not read, and a symlink at the target file is replaced rather than written through. A `ready`
 block taken from the built-in bundle does not have this effect. Message
