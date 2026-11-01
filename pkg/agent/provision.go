@@ -956,6 +956,10 @@ func buildProvisionContext(ctx context.Context, opts api.StartOptions) (context.
 	return ctx, inlineCfg
 }
 
+// provisionFinish is Provision's call of finishProvision, replaceable in
+// tests to fail a create after GetAgent has made the agent directory.
+var provisionFinish = (*AgentManager).finishProvision
+
 // finishProvision performs the steps common to Provision and Reprovision once
 // the agent's on-disk config exists: persist the lightweight agent-config
 // status file, (re-)stage the project pre-start hook, and persist an explicit
@@ -1365,13 +1369,18 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 		return cfg, err
 	}
 
-	if err := m.finishProvision(opts, agentDir, agentHome, cfg); err != nil {
-		return cfg, err
-	}
 	// A create: the later start must not mistake this agent for one that
-	// predates per-agent NFS directories (see nfsKeepSharedCheckout).
+	// predates per-agent NFS directories (see nfsKeepSharedCheckout and
+	// cloudRunKeepSharedCheckout). Recorded as soon as GetAgent has made
+	// the agent directory, before anything else can fail: a create that
+	// fails later and is started afterwards (not as a create) would
+	// otherwise be pinned to the shared checkout for good.
 	if opts.FreshProvision {
 		recordNFSAgentDir(agentDir, opts.Name)
+		recordCloudRunAgentWorkspace(agentDir, opts.Name)
+	}
+	if err := provisionFinish(m, opts, agentDir, agentHome, cfg); err != nil {
+		return cfg, err
 	}
 
 	// A provision-only create carries no run (the hub mints runs only for

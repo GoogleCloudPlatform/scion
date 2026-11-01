@@ -126,6 +126,7 @@ func TestWorkspacePlacementFor(t *testing.T) {
 		{"podman nfs", workspacePlacementInput{Backend: "nfs", Runtime: "podman"}, api.WorkspacePlacementExport},
 		{"apple container nfs", workspacePlacementInput{Backend: "nfs", Runtime: "container"}, api.WorkspacePlacementExport},
 		{"cloudrun nfs", workspacePlacementInput{Backend: "nfs", Runtime: "cloudrun"}, api.WorkspacePlacementExport},
+		{"cloudrun nfs clone-per-agent (its own workspace on the export)", workspacePlacementInput{Backend: "nfs", Runtime: "cloudrun", ClonePerAgent: true}, api.WorkspacePlacementExport},
 		{"cloudrun-sandbox nfs (copies to local disk)", workspacePlacementInput{Backend: "nfs", Runtime: "cloudrun-sandbox"}, api.WorkspacePlacementLocal},
 		{"substrate nfs (never mounts)", workspacePlacementInput{Backend: "nfs", Runtime: "substrate"}, api.WorkspacePlacementLocal},
 		{"unknown runtime nfs", workspacePlacementInput{Backend: "nfs", Runtime: "future-runtime"}, api.WorkspacePlacementLocal},
