@@ -330,8 +330,10 @@ func realClockSmokeTx(ctx context.Context, e *env, d time.Duration) error {
 	if err != nil {
 		return err
 	}
+	// A no-op after a successful Commit: database/sql returns ErrTxDone
+	// without reaching the driver, so no second hold line is recorded.
+	defer func() { _ = tx.Rollback() }()
 	if _, err := newSetting(ctx, tx.Client(), "smoke"); err != nil {
-		_ = tx.Rollback()
 		return err
 	}
 	time.Sleep(d)
