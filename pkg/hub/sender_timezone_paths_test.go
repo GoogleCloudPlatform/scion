@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"testing"
 
@@ -25,6 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 )
 
 // A human with a profile time zone who writes in native chat, in a DM with
@@ -32,6 +34,7 @@ import (
 // dispatched message; a client-supplied value never reaches the agent.
 func TestSenderTimezone_NativeChatSend(t *testing.T) {
 	f := newSendFixture(t)
+	enableWriteDenySwitch(t, f.srv) // render the hub envelope, so it is checked too
 	setUserTimezone(t, f.st, f.ua, "Asia/Tokyo")
 	require.NoError(t, f.wcs.UpdateTopic(context.Background(), f.topicA, TopicUpdate{DefaultAgent: &f.target.Slug}))
 	agentDM := dmKeyFor(t, "user", f.ua.ID, "agent", f.target.ID)
@@ -74,8 +77,13 @@ func TestSenderTimezone_AgentSenderSpoofStripped(t *testing.T) {
 	assert.NotContains(t, sm.Metadata, messages.MetadataSenderTimezone)
 	assert.NotContains(t, sm.DeliveryText, "sender_timezone")
 
+	// The outbound route reaches another agent through a conversation
+	// reference (as the agent-to-agent parity tests do).
+	dm, err := messaging.ResolveOrCreateDMConversation(context.Background(), f.st, f.st, slog.Default(),
+		"agent", f.sender.ID, "agent", f.target.ID)
+	require.NoError(t, err)
 	rec = f.outbound(t, f.sender, OutboundMessageRequest{
-		Recipient: "agent:" + f.target.Slug, Msg: "outbound hello", Type: messages.TypeInstruction, Metadata: spoof,
+		ConversationRef: "conv:" + dm.ConversationID, Msg: "outbound hello", Type: messages.TypeInstruction, Metadata: spoof,
 	})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	sm = f.lastDispatch(t, f.target).StructuredMessage
