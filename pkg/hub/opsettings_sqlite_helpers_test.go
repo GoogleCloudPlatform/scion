@@ -125,14 +125,23 @@ func putServerConfig(t *testing.T, srv *Server, body string) *httptest.ResponseR
 	return rr
 }
 
+// rejectedKeys returns the code and details.keys of a settings error body
+// in the writeError envelope.
 func rejectedKeys(t *testing.T, rr *httptest.ResponseRecorder) (string, []string) {
 	t.Helper()
 	var resp struct {
-		Error string   `json:"error"`
-		Keys  []string `json:"keys"`
+		Error struct {
+			Code    string `json:"code"`
+			Details struct {
+				Keys []string `json:"keys"`
+			} `json:"details"`
+		} `json:"error"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unmarshal %s: %v", rr.Body.String(), err)
 	}
-	return resp.Error, resp.Keys
+	if resp.Error.Code == "" {
+		t.Fatalf("error body is not the writeError envelope: %s", rr.Body.String())
+	}
+	return resp.Error.Code, resp.Error.Details.Keys
 }

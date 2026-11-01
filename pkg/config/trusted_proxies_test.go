@@ -272,7 +272,18 @@ func TestTransportTrustedProxies(t *testing.T) {
 	a, b := DefaultLocalTrustedProxies(), DefaultLocalTrustedProxies()
 	a[0].IP[0] = 10
 	if b[0].String() != "127.0.0.1/32" {
-		t.Error("DefaultLocalTrustedProxies returns shared values")
+		t.Error("DefaultLocalTrustedProxies returns shared IPv4 values")
+	}
+	// Restore the global if the test finds it shared, so one failure
+	// does not cascade into other tests.
+	saved := append(net.IP(nil), net.IPv6loopback...)
+	defer copy(net.IPv6loopback, saved)
+	a[1].IP[0] = 0xfe
+	if b[1].String() != "::1/128" {
+		t.Error("DefaultLocalTrustedProxies returns shared IPv6 values")
+	}
+	if !net.IPv6loopback.Equal(net.IP{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}) {
+		t.Errorf("DefaultLocalTrustedProxies exposes net.IPv6loopback: it is now %v", net.IPv6loopback)
 	}
 }
 

@@ -59,6 +59,10 @@ These are census keys (`<name>@<file>:<function>`). Methods are keyed `(*T).Name
 14. `SharedSigningSecret@cmd/server_test_admin_gate.go:resolveTestMode` (:292)
 15. `SharedSigningSecret@pkg/hub/test_admin_gate.go:validateTestAdminGateConfig` (:194)
 
+**Key status check.** `scion server keys check` applies the checks a starting Hub applies to a loaded keyring file.
+
+16. `LegacySecret@pkg/hub/keystatus.go:CheckKeyringFile` requires a `legacy` signing entry, as `validateKeyringConfig` does. The two checks change together.
+
 ### Release gate (T10 scope, not T7)
 
 - `LegacySecret@pkg/keyring/load.go:(*Keyring).CheckSessionPilot` (:495)
@@ -158,6 +162,7 @@ There is one plaintext path, `pkg/hub/hub_secrets.go:41` (`setHubSecret` with no
 | `cmd/server_foreground.go:2907` | `hub.ServerConfig.ValueCipher = serverValueCipher` | on-ring |
 | `pkg/hub/keyring.go:serverValueCipher` (:142) | `cfg.ValueCipher` (which must wrap the file's ring), else the file. `NewLegacyValueCipher(SharedSigningSecret)` (:156) runs only without a file. | on-ring; the legacy branch is legacy-only |
 | `pkg/secret/localbackend.go:NewLocalBackend` | A scalar-secret constructor. Production uses `NewBackend` with the shared cipher. | legacy-only |
+| `cmd/server_keys.go:keysValueCipher` | `scion server keys status`: `secret.NewValueCipher(keyring file)`. `NewLegacyValueCipher` runs only without a file. | on-ring; the legacy branch is legacy-only |
 
 ## Census
 

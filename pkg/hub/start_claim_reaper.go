@@ -134,6 +134,7 @@ func (s *Server) reapStartClaim(ctx context.Context, a *store.Agent, now time.Ti
 				slog.Warn("Start claim reaper: settling the claim of an ended launch failed", "agent_id", a.ID, "claim_id", a.StartClaimID, "error", err)
 			} else {
 				s.releaseSlotIfIdle(ctx, a.ID)
+				s.releaseProjectSlotIfIdle(ctx, a.ID)
 			}
 			return
 		}
@@ -194,6 +195,7 @@ func (s *Server) reapUnconfirmedStartClaim(ctx context.Context, a *store.Agent, 
 			s.claimStops.Delete(a.ID)
 			slog.Info("Start claim reaper: released an unconfirmed start claim", "agent_id", a.ID, "kind", a.StartClaimKind, "reason", why)
 			s.releaseSlotIfIdle(ctx, a.ID)
+			s.releaseProjectSlotIfIdle(ctx, a.ID)
 		}
 	}
 	if view != nil && view.deleted {
@@ -269,6 +271,7 @@ func (s *Server) releaseClaimOfDeregisteredBroker(ctx context.Context, a *store.
 		ClaimKind:       string(a.StartClaimKind),
 	})
 	s.releaseSlotIfIdle(ctx, a.ID)
+	s.releaseProjectSlotIfIdle(ctx, a.ID)
 }
 
 // revokeUnconfirmedCreateCredential revokes the credential of a create

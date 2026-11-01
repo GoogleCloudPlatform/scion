@@ -42,7 +42,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
-import type { TemplateResult } from 'lit';
+import type { PropertyValues, TemplateResult } from 'lit';
 import { customElement, property, query, state } from 'lit/decorators.js';
 
 import type { PageData } from '../../shared/types.js';
@@ -451,6 +451,14 @@ export class ScionPageArtifactDetail extends LitElement {
   @query('.untrusted') private untrustedFrame?: HTMLElement;
   @query('scion-code-editor.review-editor') private reviewEditor?: ScionCodeEditor;
   @query('scion-review-editor') private graphicalEditor?: ReviewEditorElement;
+  @query('.g-sticky') private stickyBlock?: HTMLElement;
+  /**
+   * Height of the sticky review toolbar and hint strip, measured as they
+   * wrap and grow, so the editor scrolls the caret clear of them.
+   */
+  @state() private stickyInset = 0;
+  private stickyObserver: ResizeObserver | null = null;
+  private stickyObserved: HTMLElement | null = null;
   /** The view of the graphical review page (experiment web.artifact_review_editor). */
   @state() private reviewView: ReviewView = 'graphical';
   /** The editor chunk: not requested, loading, loaded, or failed. */
@@ -699,6 +707,20 @@ export class ScionPageArtifactDetail extends LitElement {
       .graphical-review {
         margin-bottom: 0.25rem;
       }
+      /* The review tools and the hint under them stay in view while the
+         document scrolls under them, at every width. The z-index lifts them
+         over the document only: Shoelace's dialogs, drawers, popups and
+         tooltips stack far above. */
+      /* Sticky offsets count from inside the scroll container's padding
+         (the app shell's .content: 1.5rem, 1rem at 640px and below), so
+         the block rises by that padding to meet the top edge and the text
+         does not show above it. */
+      .g-sticky {
+        position: sticky;
+        top: -1.5rem;
+        z-index: 2;
+        background: var(--scion-bg, #f8fafc);
+      }
       .g-toolbar {
         display: flex;
         flex-wrap: wrap;
@@ -807,6 +829,9 @@ export class ScionPageArtifactDetail extends LitElement {
         padding: 0 0.3rem;
       }
       @media (max-width: 640px) {
+        .g-sticky {
+          top: -1rem;
+        }
         .g-toolbar {
           gap: 0.3rem;
           padding: 0.4rem;
@@ -822,6 +847,13 @@ export class ScionPageArtifactDetail extends LitElement {
         }
         .g-toolbar .narrow {
           display: inline;
+        }
+      }
+      /* Comment is the only way to comment by touch: a tap target of at
+         least 44px on phones and touch screens. */
+      @media (max-width: 640px), (pointer: coarse) {
+        .g-toolbar sl-button.comment {
+          --sl-input-height-small: 2.75rem;
         }
       }
       .download-state,
@@ -1069,6 +1101,28 @@ export class ScionPageArtifactDetail extends LitElement {
     this.wideQuery = null;
     this.wideReviewQuery?.removeEventListener?.('change', this.onWideReviewChange);
     this.wideReviewQuery = null;
+    this.stickyObserver?.disconnect();
+    this.stickyObserver = null;
+    this.stickyObserved = null;
+  }
+
+  override updated(changed: PropertyValues<this>): void {
+    super.updated(changed);
+    this.observeSticky();
+  }
+
+  /** Measures the sticky review block whenever a new one renders. */
+  private observeSticky(): void {
+    const block = this.stickyBlock ?? null;
+    if (block === this.stickyObserved) return;
+    this.stickyObserver?.disconnect();
+    this.stickyObserved = block;
+    if (!block || typeof ResizeObserver === 'undefined') return;
+    this.stickyObserver ??= new ResizeObserver((entries) => {
+      const last = entries[entries.length - 1];
+      if (last) this.stickyInset = last.target.getBoundingClientRect().height;
+    });
+    this.stickyObserver.observe(block);
   }
 
   private async loadVersions(before = 0, gen = this.loadGen): Promise<void> {
@@ -2644,129 +2698,131 @@ export class ScionPageArtifactDetail extends LitElement {
         publishes a new version as a review; v${v.seq} stays as it is.
       </div>
       <div class="graphical-review" @keydown=${this.onReviewKeydown}>
-        <div class="g-toolbar" role="toolbar" aria-label="Review tools">
-          ${graphical
-            ? html`<sl-tooltip content="A review records every edit as a suggestion">
-                  <!-- A disabled switch takes no focus: the wrapper does, so the
+        <div class="g-sticky">
+          <div class="g-toolbar" role="toolbar" aria-label="Review tools">
+            ${graphical
+              ? html`<sl-tooltip content="A review records every edit as a suggestion">
+                    <!-- A disabled switch takes no focus: the wrapper does, so the
                        tooltip is reachable by keyboard. -->
-                  <span
-                    class="track-wrap"
-                    tabindex="0"
-                    role="switch"
-                    aria-checked="true"
-                    aria-disabled="true"
-                    aria-label="Track changes: on. A review records every edit as a suggestion."
-                  >
-                    <sl-switch size="small" checked disabled class="track" aria-hidden="true">
-                      <span class="lbl">Track changes</span
-                      ><span class="narrow" aria-hidden="true">Track</span>
-                    </sl-switch>
-                  </span>
-                </sl-tooltip>
-                <span class="sep"></span>
-                <sl-tooltip content="Comment on the selection (Ctrl+Alt+M)">
-                  <sl-button
-                    size="small"
-                    class="comment"
-                    ?disabled=${this.editorLoad !== 'ready'}
-                    @click=${(): void => void this.graphicalEditor?.comment()}
-                  >
-                    <sl-icon slot="prefix" name="chat-text"></sl-icon>
-                    <span class="lbl">Comment</span>
-                  </sl-button>
-                </sl-tooltip>`
-            : html`<sl-tooltip content="Comment on the selection (Ctrl+Alt+M)">
-                  <sl-button size="small" @click=${(): void => this.applyTool('comment')}>
-                    <sl-icon slot="prefix" name="chat-text"></sl-icon>
-                    <span class="lbl">Comment</span>
-                  </sl-button>
-                </sl-tooltip>
-                <sl-tooltip content="Suggest a replacement for the selection">
-                  <sl-button size="small" @click=${(): void => this.applyTool('suggest')}>
-                    <sl-icon slot="prefix" name="arrow-left-right"></sl-icon>
-                    <span class="lbl">Suggest</span>
-                  </sl-button>
-                </sl-tooltip>
-                <sl-tooltip content="Suggest an insertion after the selection">
-                  <sl-button size="small" @click=${(): void => this.applyTool('insert')}>
-                    <sl-icon slot="prefix" name="plus-circle"></sl-icon>
-                    <span class="lbl">Insert</span>
-                  </sl-button>
-                </sl-tooltip>
-                <sl-tooltip content="Suggest deleting the selection">
-                  <sl-button size="small" @click=${(): void => this.applyTool('delete')}>
-                    <sl-icon slot="prefix" name="dash-circle"></sl-icon>
-                    <span class="lbl">Delete</span>
-                  </sl-button>
-                </sl-tooltip>
-                ${this.reviewHint ? html`<span class="hint">${this.reviewHint}</span>` : nothing}`}
-          <span class="spacer"></span>
-          <sl-tooltip
-            content=${this.reviewSize === 'too-large'
-              ? TOO_LARGE_TOOLTIP
-              : this.reviewSize === null || this.choosingGraphical
-                ? SIZING_TOOLTIP
-                : 'Undo history is kept per view and resets when you switch'}
-          >
-            <sl-radio-group
-              size="small"
-              label="View"
-              class="view-toggle"
-              value=${this.reviewView}
-              @sl-change=${(e: Event): void => {
-                const group = e.target as HTMLElement & { value: string };
-                this.chooseReviewView(group.value as ReviewView);
-                // A refused switch puts the control back.
-                if (group.value !== this.reviewView) group.value = this.reviewView;
-              }}
+                    <span
+                      class="track-wrap"
+                      tabindex="0"
+                      role="switch"
+                      aria-checked="true"
+                      aria-disabled="true"
+                      aria-label="Track changes: on. A review records every edit as a suggestion."
+                    >
+                      <sl-switch size="small" checked disabled class="track" aria-hidden="true">
+                        <span class="lbl">Track changes</span
+                        ><span class="narrow" aria-hidden="true">Track</span>
+                      </sl-switch>
+                    </span>
+                  </sl-tooltip>
+                  <span class="sep"></span>
+                  <sl-tooltip content="Comment on the selection (Ctrl+Alt+M)">
+                    <sl-button
+                      size="small"
+                      class="comment"
+                      ?disabled=${this.editorLoad !== 'ready'}
+                      @click=${(): void => void this.graphicalEditor?.comment()}
+                    >
+                      <sl-icon slot="prefix" name="chat-text"></sl-icon>
+                      <span class="lbl">Comment</span>
+                    </sl-button>
+                  </sl-tooltip>`
+              : html`<sl-tooltip content="Comment on the selection (Ctrl+Alt+M)">
+                    <sl-button size="small" @click=${(): void => this.applyTool('comment')}>
+                      <sl-icon slot="prefix" name="chat-text"></sl-icon>
+                      <span class="lbl">Comment</span>
+                    </sl-button>
+                  </sl-tooltip>
+                  <sl-tooltip content="Suggest a replacement for the selection">
+                    <sl-button size="small" @click=${(): void => this.applyTool('suggest')}>
+                      <sl-icon slot="prefix" name="arrow-left-right"></sl-icon>
+                      <span class="lbl">Suggest</span>
+                    </sl-button>
+                  </sl-tooltip>
+                  <sl-tooltip content="Suggest an insertion after the selection">
+                    <sl-button size="small" @click=${(): void => this.applyTool('insert')}>
+                      <sl-icon slot="prefix" name="plus-circle"></sl-icon>
+                      <span class="lbl">Insert</span>
+                    </sl-button>
+                  </sl-tooltip>
+                  <sl-tooltip content="Suggest deleting the selection">
+                    <sl-button size="small" @click=${(): void => this.applyTool('delete')}>
+                      <sl-icon slot="prefix" name="dash-circle"></sl-icon>
+                      <span class="lbl">Delete</span>
+                    </sl-button>
+                  </sl-tooltip>
+                  ${this.reviewHint ? html`<span class="hint">${this.reviewHint}</span>` : nothing}`}
+            <span class="spacer"></span>
+            <sl-tooltip
+              content=${this.reviewSize === 'too-large'
+                ? TOO_LARGE_TOOLTIP
+                : this.reviewSize === null || this.choosingGraphical
+                  ? SIZING_TOOLTIP
+                  : 'Undo history is kept per view and resets when you switch'}
             >
-              <sl-radio-button
-                value="graphical"
-                ?disabled=${this.reviewSize === null ||
-                this.reviewSize === 'too-large' ||
-                this.choosingGraphical}
+              <sl-radio-group
+                size="small"
+                label="View"
+                class="view-toggle"
+                value=${this.reviewView}
+                @sl-change=${(e: Event): void => {
+                  const group = e.target as HTMLElement & { value: string };
+                  this.chooseReviewView(group.value as ReviewView);
+                  // A refused switch puts the control back.
+                  if (group.value !== this.reviewView) group.value = this.reviewView;
+                }}
               >
-                <sl-icon slot="prefix" name="file-earmark-richtext"></sl-icon>
-                <span class="lbl">Graphical</span>
-              </sl-radio-button>
-              <sl-radio-button value="source">
-                <sl-icon slot="prefix" name="code-slash"></sl-icon>
-                <span class="lbl">Source</span>
-              </sl-radio-button>
-            </sl-radio-group>
-          </sl-tooltip>
-          <sl-dropdown placement="bottom-end" distance="4">
-            <sl-icon-button
-              slot="trigger"
-              name="question-circle"
-              label="About reviews and shortcuts"
-            ></sl-icon-button>
-            <div class="help-panel">
-              <p>
-                Edit the text directly: typing, deleting and replacing are recorded as suggestions.
-                Select text and choose Comment to leave a note. A review may change nothing outside
-                its marks.
-              </p>
-              <div class="help-sub">Shortcuts</div>
-              <table>
-                <tr>
-                  <td>Comment</td>
-                  <td><kbd>Ctrl+Alt+M</kbd></td>
-                </tr>
-                <tr>
-                  <td>Edit the selected comment</td>
-                  <td><kbd>Enter</kbd></td>
-                </tr>
-              </table>
-              <div class="help-sub">Changes that need the Source view</div>
-              <p>
-                Formatting, headings, lists, tables, code blocks and paragraph breaks are edited in
-                the Source view.
-              </p>
-            </div>
-          </sl-dropdown>
+                <sl-radio-button
+                  value="graphical"
+                  ?disabled=${this.reviewSize === null ||
+                  this.reviewSize === 'too-large' ||
+                  this.choosingGraphical}
+                >
+                  <sl-icon slot="prefix" name="file-earmark-richtext"></sl-icon>
+                  <span class="lbl">Graphical</span>
+                </sl-radio-button>
+                <sl-radio-button value="source">
+                  <sl-icon slot="prefix" name="code-slash"></sl-icon>
+                  <span class="lbl">Source</span>
+                </sl-radio-button>
+              </sl-radio-group>
+            </sl-tooltip>
+            <sl-dropdown placement="bottom-end" distance="4">
+              <sl-icon-button
+                slot="trigger"
+                name="question-circle"
+                label="About reviews and shortcuts"
+              ></sl-icon-button>
+              <div class="help-panel">
+                <p>
+                  Edit the text directly: typing, deleting and replacing are recorded as
+                  suggestions. Select text and choose Comment to leave a note. A review may change
+                  nothing outside its marks.
+                </p>
+                <div class="help-sub">Shortcuts</div>
+                <table>
+                  <tr>
+                    <td>Comment</td>
+                    <td><kbd>Ctrl+Alt+M</kbd></td>
+                  </tr>
+                  <tr>
+                    <td>Edit the selected comment</td>
+                    <td><kbd>Enter</kbd></td>
+                  </tr>
+                </table>
+                <div class="help-sub">Changes that need the Source view</div>
+                <p>
+                  Formatting, headings, lists, tables, code blocks and paragraph breaks are edited
+                  in the Source view.
+                </p>
+              </div>
+            </sl-dropdown>
+          </div>
+          ${this.renderGraphicalHint()}
         </div>
-        ${this.renderGraphicalHint()}
         <div class="g-work">
           ${graphical
             ? this.editorLoad === 'ready' && this.reviewSize !== null
@@ -2777,6 +2833,7 @@ export class ScionPageArtifactDetail extends LitElement {
                   .entryPath=${f.path}
                   .files=${v.files}
                   .noteAuthor=${this.createdBy(v)}
+                  .scrollInset=${this.stickyInset}
                   @review-change=${(e: CustomEvent<{ text: string }>): void => {
                     this.reviewText = e.detail.text;
                     if (this.graphicalHint !== 'load-failed') this.clearHint();

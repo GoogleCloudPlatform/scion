@@ -1958,7 +1958,7 @@ type BrokerDispatchStore interface {
 	// "pending", or "failed" with reason == expiredReason, by the pre-fix
 	// nc-promote-busy bug (a storeMsg persisted without stamping
 	// DispatchState). The exact complement of ExpireStuckPendingMessages'
-	// and PurgeFailedMessages' agent-only scoping: only an agent recipient
+	// and PurgeFailedMessagesChunk's agent-only scoping: only an agent recipient
 	// is ever legitimately in either state. Returns the number repaired.
 	BackfillNonAgentDispatchState(ctx context.Context, expiredReason string) (int, error)
 }
@@ -3309,12 +3309,16 @@ type MessageStore interface {
 	// unread messages older than unreadCutoff. Returns count removed.
 	PurgeOldMessages(ctx context.Context, readCutoff time.Time, unreadCutoff time.Time) (int, error)
 
-	// PurgeFailedMessages removes messages with dispatch_state="failed" whose
-	// created timestamp is before cutoff. Returns the number of messages
-	// removed. Unlike PurgeOldMessages (read/unread semantics, which would
-	// also delete successfully delivered history), this filters strictly on
+	// PurgeFailedMessagesChunk removes, in one transaction, agent-recipient
+	// messages with dispatch_state="failed" whose created timestamp is
+	// before cutoff. It walks candidates in (created, id) order strictly
+	// after the given position, examines at most limit of them, and stops
+	// early once the transaction has run for maxDuration (no time bound
+	// when maxDuration <= 0). Callers loop, passing the returned Next, until
+	// Done. Unlike PurgeOldMessages (read/unread semantics, which would also
+	// delete successfully delivered history), this filters strictly on
 	// dispatch_state so delivered messages are never touched.
-	PurgeFailedMessages(ctx context.Context, cutoff time.Time) (int, error)
+	PurgeFailedMessagesChunk(ctx context.Context, cutoff time.Time, after MessagePosition, limit int, maxDuration time.Duration) (FailedMessagePurgeChunk, error)
 
 	// SetMessageConversationID updates the conversation_id on an existing
 	// message. Used by the Phase 4 backfill to link legacy messages to

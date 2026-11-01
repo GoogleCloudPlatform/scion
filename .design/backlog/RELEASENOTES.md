@@ -11,6 +11,14 @@
 - All container images built and published to Artifact Registry (core-base, scion-base, scion-claude, scion-gemini, scion-opencode, scion-codex)
 
 ### Changed
+- **A project's default count limits now have an explicit Unlimited.** On the project settings
+  `PUT`, `defaultMaxTurns` and `defaultMaxModelCalls` now take `0` as Unlimited (an explicit "no
+  limit" that new agents get above the template, hub and Runtime Broker defaults) and `null` to
+  clear; `0` used to clear. A negative value is refused with `422`. **Reload any open hub web tabs
+  after upgrading:** a project settings page loaded before the upgrade sends `0` for an empty count
+  limit on every save, which now sets Unlimited for every new agent of the project. The Hub records
+  the audit event `project_settings_limit_unlimited` (and logs a warning) for such a change, so it
+  can be found and reverted. (ptone/scion#3925)
 - **Clearing one resources sub-field now applies at the next start.** A `config` PATCH whose
   `resources` leaves out a sub-field the agent stores (requests or limits `cpu`/`memory`, or `disk`)
   now clears just that sub-field, and the resource defaults fill it again at the next start, on a

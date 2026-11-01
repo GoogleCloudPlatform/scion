@@ -434,7 +434,11 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if enableHub {
 		// Before the database is opened: the boot-failure guard must know
 		// that this update target may have migrated the schema.
-		markUpdateStateBooting(maintenanceInstallRoot())
+		installRoot := maintenanceInstallRoot()
+		markUpdateStateBooting(installRoot)
+		// Before the plugin manager loads plugins: after a boot-failure
+		// guard rollback, the plugins of the restored release.
+		reconcilePluginsAfterRollback(installRoot)
 		s, entClient, err = initStore(ctx, cfg)
 		if err != nil {
 			// A stop during the migrations is a clean exit, not a failed
@@ -3606,6 +3610,9 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 	// values a saved hub value now beats.
 	hubSrv.WarnMaintenanceImageRegistryDrift()
 	hubSrv.WarnShadowedImageRegistries(flatInstanceImageRegistries())
+	// A saved authorized_domains that differs from the deployment value
+	// (before ptone/scion#6000 a saved list was not enforced).
+	hubSrv.WarnAuthorizedDomainsDrift(snap)
 
 	if envKeys := ops.EnvOverriddenKeys(); len(envKeys) > 0 {
 		slog.Warn("Layer-1 settings overridden by SCION_SERVER_* env vars on this node — these values diverge from the shared DB",

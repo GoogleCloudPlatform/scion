@@ -34,10 +34,10 @@ and only one of them can be configured today:
 - **Hub side (the create timeout).** There is **no hub setting** for this. A
   substrate broker serves every create synchronously (it does not support
   async launch, so `hub.launch_timeout` does not apply). The hub waits on a
-  fixed 120-second request timeout, whether it dispatches over the control
+  fixed 180-second request timeout, whether it dispatches over the control
   channel or calls the broker directly over HTTP.
 
-The hub's fixed 120 seconds is shorter than the broker's worst-case start
+The hub's fixed 180 seconds is shorter than the broker's worst-case start
 budget, so the invariant only holds when the start actually finishes inside
 the hub's window. Warming the template (below) keeps the golden build out of
 the request path. Until the hub timeout becomes configurable, treat a create
