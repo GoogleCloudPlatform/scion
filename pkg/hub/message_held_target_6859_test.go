@@ -287,7 +287,7 @@ func TestHeldTargetSend_BrokerTopicMessage(t *testing.T) {
 	projectID := setupBrokerTestProject(t, s)
 	sender := setupBrokerTestAgent(t, s, projectID, "held-topic-sender", "running")
 	target := setupBrokerTestAgent(t, s, projectID, "held-topic-target", "running")
-	holdAgentFor(t, s, target.ID, projectID, "held-topic-root")
+	holdAgentFor(t, s, target.ID, projectID, tid("held-topic-root"))
 	proxy, dispatcher := heldBrokerProxy(t, s)
 
 	msg := messages.NewInstruction("agent:"+sender.Slug, "agent:"+target.Slug, "hello")
@@ -325,7 +325,7 @@ func TestHeldTargetSend_BrokerProjectBroadcast(t *testing.T) {
 	projectID := setupBrokerTestProject(t, s)
 	held := setupBrokerTestAgent(t, s, projectID, "held-bcast-target", "running")
 	sibling := setupBrokerTestAgent(t, s, projectID, "unheld-bcast-sibling", "running")
-	holdAgentFor(t, s, held.ID, projectID, "held-bcast-root")
+	holdAgentFor(t, s, held.ID, projectID, tid("held-bcast-root"))
 	proxy, dispatcher := heldBrokerProxy(t, s)
 
 	msg := messages.NewInstruction("user:alice", "project:all", "broadcast hello")
