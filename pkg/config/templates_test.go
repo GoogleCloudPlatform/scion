@@ -2384,3 +2384,136 @@ func TestTemplateFromDir(t *testing.T) {
 		t.Errorf("FindTemplate(%s) = {%q, %q}, want {planner, %s}", dir, viaFind.Name, viaFind.Path, dir)
 	}
 }
+
+func TestIsTemplateHashName(t *testing.T) {
+	lower64 := strings.Repeat("ab", 32)
+	upper64 := strings.ToUpper(lower64)
+	mixed64 := strings.Repeat("aB", 32)
+
+	tests := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"empty", "", false},
+		{"simple name", "claude", false},
+		{"hyphenated name", "my-template", false},
+		{"dotted name", "template.v1", false},
+		{"path", "/path/to/template", false},
+		{"bare lowercase hex 64", lower64, true},
+		{"bare uppercase hex 64", upper64, true},
+		{"bare mixedcase hex 64", mixed64, true},
+		{"prefixed lowercase", "sha256:" + lower64, true},
+		{"prefixed uppercase", "sha256:" + upper64, true},
+		{"prefixed uppercase prefix", "SHA256:" + lower64, true},
+		{"prefixed mixedcase prefix and hex", "ShA256:" + mixed64, true},
+		{"too short hex 63", lower64[:63], false},
+		{"too long hex 65", lower64 + "a", false},
+		{"prefixed too short", "sha256:" + lower64[:63], false},
+		{"prefixed too long", "sha256:" + lower64 + "a", false},
+		{"wrong prefix length", "sha512:" + lower64, false},
+		{"non-hex character in bare", strings.Repeat("a", 63) + "g", false},
+		{"non-hex character in prefixed", "sha256:" + strings.Repeat("a", 63) + "z", false},
+		{"contains space", lower64[:30] + " " + lower64[31:], false},
+		{"contains newline", lower64[:30] + "\n" + lower64[31:], false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isTemplateHashName(tc.in)
+			if got != tc.want {
+				t.Errorf("isTemplateHashName(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+			// Must match canonical regex definition.
+			wantRegex := templateHashPattern.MatchString(tc.in)
+			if got != wantRegex {
+				t.Errorf("isTemplateHashName(%q) = %v disagrees with templateHashPattern.MatchString(%q) = %v", tc.in, got, tc.in, wantRegex)
+			}
+		})
+	}
+}
+
+func FuzzIsTemplateHashName(f *testing.F) {
+	seeds := []string{
+		"",
+		"claude",
+		"my-template",
+		"sha256:",
+		"sha256:abc",
+		strings.Repeat("0f", 32),
+		strings.Repeat("0F", 32),
+		strings.Repeat("aB", 32),
+		"sha256:" + strings.Repeat("0f", 32),
+		"SHA256:" + strings.Repeat("0F", 32),
+		"sha256:" + strings.Repeat("0F", 32),
+		"sha256:" + strings.Repeat("g", 64),
+		strings.Repeat("a", 63),
+		strings.Repeat("a", 65),
+		"/var/cache/template",
+	}
+	for _, seed := range seeds {
+		f.Add(seed)
+	}
+
+	f.Fuzz(func(t *testing.T, s string) {
+		got := isTemplateHashName(s)
+		want := templateHashPattern.MatchString(s)
+		if got != want {
+			t.Fatalf("isTemplateHashName(%q) = %v, want (regex) %v", s, got, want)
+		}
+	})
+}
+
+func BenchmarkFriendlyTemplateName_SimpleName(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = FriendlyTemplateName("my-template")
+	}
+}
+
+func BenchmarkFriendlyTemplateName_ContentHash(b *testing.B) {
+	hash := "sha256:" + strings.Repeat("0f", 32)
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = FriendlyTemplateName(hash)
+	}
+}
+
+func BenchmarkFriendlyTemplateName_BareHash(b *testing.B) {
+	hash := strings.Repeat("0f", 32)
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = FriendlyTemplateName(hash)
+	}
+}
+
+func BenchmarkIsTemplateHashName_SimpleName(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = isTemplateHashName("my-template")
+	}
+}
+
+func BenchmarkIsTemplateHashName_BareHash(b *testing.B) {
+	hash := strings.Repeat("0f", 32)
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = isTemplateHashName(hash)
+	}
+}
+
+func BenchmarkIsTemplateHashName_UpperHash(b *testing.B) {
+	hash := "SHA256:" + strings.Repeat("0F", 32)
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = isTemplateHashName(hash)
+	}
+}
+
+func BenchmarkIsTemplateHashName_Hash(b *testing.B) {
+	hash := "sha256:" + strings.Repeat("0f", 32)
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = isTemplateHashName(hash)
+	}
+}

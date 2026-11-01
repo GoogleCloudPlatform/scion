@@ -316,16 +316,39 @@ func templateNameFromDir(dir string) string {
 // local to display-name derivation so an unprefixed or uppercase digest (a
 // legacy or externally produced hash) is never shown as a template name
 // either (ptone/scion#3113).
+//
+// Retained to document the canonical grammar and for test parity checks.
 var templateHashPattern = regexp.MustCompile(`(?i)^(sha256:)?[0-9a-f]{64}$`)
+
+// isHex64 reports whether s consists of exactly 64 ASCII hexadecimal characters
+// (0-9, a-f, A-F).
+func isHex64(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
 
 // isTemplateHashName reports whether s is a content hash rather than a
 // template name: the prefixed form cache directories use today, or any
 // other letter case or the bare 64-hex digest (templateHashPattern).
-// transfer.IsContentHash is a strict subset of templateHashPattern; it is
-// kept on purpose, only to tie this check to the cache's canonical hash
-// form, so a change to that form is reflected here too.
+// Because transfer.IsContentHash is a strict subset of templateHashPattern,
+// validating the length, case-insensitive HashPrefix, and hex digest directly
+// avoids regex evaluation for all inputs including valid content hashes.
 func isTemplateHashName(s string) bool {
-	return transfer.IsContentHash(s) || templateHashPattern.MatchString(s)
+	if len(s) != 64 && len(s) != len(transfer.HashPrefix)+64 {
+		return false
+	}
+	if len(s) == 64 {
+		return isHex64(s)
+	}
+	return strings.EqualFold(s[:len(transfer.HashPrefix)], transfer.HashPrefix) && isHex64(s[len(transfer.HashPrefix):])
 }
 
 // FriendlyTemplateName converts a raw template reference (cache path, URI, or
