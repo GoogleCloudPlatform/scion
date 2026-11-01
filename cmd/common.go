@@ -1449,6 +1449,30 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 		statusln(line)
 	}
 	if len(resp.UploadURLs) > 0 && len(workspaceFiles) > 0 {
+		agentID := ""
+		if resp.Agent != nil {
+			agentID = resp.Agent.ID
+		}
+		if agentID == "" {
+			return fmt.Errorf("failed to finalize workspace bootstrap: the hub returned no agent ID for '%s'", agentName)
+		}
+		// An agent this start created is removed when its workspace
+		// bootstrap fails, so it is not left provisioning. An agent that
+		// existed before the start (same ID) is left in place.
+		createdByStart := existing == nil || existing.ID != agentID
+		removeProvisioningAgent := func() {
+			if !createdByStart {
+				return
+			}
+			delCtx, delCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer delCancel()
+			if delErr := hubCtx.Client.ProjectAgents(projectID).Delete(delCtx, agentID, &hubclient.DeleteAgentOptions{DeleteFiles: true}); delErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to clean up provisioning agent '%s': %v\n", agentName, delErr)
+				return
+			}
+			statusf("Removed provisioning agent '%s' after the failed workspace bootstrap.\n", agentName)
+		}
+
 		statusf("Uploading workspace (%d files)...\n", len(workspaceFiles))
 		tc := transfer.NewClient(nil)
 		uploadErr := tc.UploadFiles(ctx, workspaceRoot, workspaceFiles, resp.UploadURLs, func(file transfer.FileInfo, bytesTransferred int64) error {
@@ -1458,21 +1482,18 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 			return nil
 		})
 		if uploadErr != nil {
+			removeProvisioningAgent()
 			return fmt.Errorf("failed to upload workspace files: %w", uploadErr)
 		}
 
-		// Finalize: triggers broker dispatch
+		// Finalize: triggers broker dispatch. The route takes the agent ID.
 		manifest := transfer.BuildManifest(workspaceFiles)
-		agentSlug := agentName
-		if resp.Agent != nil && resp.Agent.Slug != "" {
-			agentSlug = resp.Agent.Slug
-		}
-
-		finalizeResp, err := hubCtx.Client.Workspace().FinalizeSyncTo(ctx, agentSlug, manifest)
+		finalizeResp, err := hubCtx.Client.Workspace().FinalizeSyncTo(ctx, agentID, manifest)
 		if err != nil {
 			if apiErr, ok := asIncompleteCreate(err); ok {
 				return incompleteCreateError(agentName, apiErr)
 			}
+			removeProvisioningAgent()
 			return fmt.Errorf("failed to finalize workspace bootstrap: %w", err)
 		}
 		for _, line := range workspaceFinalizeNotice(finalizeResp.FilesApplied, finalizeResp.Warnings) {
