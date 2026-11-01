@@ -1646,6 +1646,27 @@ const (
 // (ptone/scion#3080). Without one, the delete's 404 is "not found" as before.
 const BrokerErrorCodeRunMismatch = "run_mismatch"
 
+// Error-detail keys a runtime broker sets on a runtime_unavailable 503 that
+// refuses a dispatch because the Hub's stored profiles cannot resolve its
+// runtime profile (ptone/scion#4955): a requested or saved profile the
+// stored profiles lack, an active_profile that does not resolve, or a
+// stored profile whose runtime is not defined. The Hub writes its own
+// client text for it, naming the profile; the broker's text is not relayed.
+// The wire code stays runtime_unavailable, so every Hub classification of
+// that code is unchanged.
+const (
+	// BrokerErrorDetailReason is the refusal's reason; see
+	// BrokerErrorReasonProfileUnresolved.
+	BrokerErrorDetailReason = "reason"
+	// BrokerErrorDetailProfile is the profile that does not resolve; ""
+	// when the dispatch needed the default profile and active_profile is
+	// unset.
+	BrokerErrorDetailProfile = "profile"
+	// BrokerErrorReasonProfileUnresolved is the BrokerErrorDetailReason
+	// value for a stored-profile miss.
+	BrokerErrorReasonProfileUnresolved = "profile_unresolved"
+)
+
 // ResourceHandle.Kind values.
 const (
 	ResourceKindSecret              = "secret"

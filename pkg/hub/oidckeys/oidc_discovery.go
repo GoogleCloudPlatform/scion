@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hub
+package oidckeys
 
 import (
 	"encoding/json"
@@ -37,10 +37,10 @@ type OIDCDiscoveryDoc struct {
 	JWKSURI               string `json:"jwks_uri"`
 }
 
-// discoverOIDCEndpoints fetches and parses the OIDC discovery document
+// DiscoverOIDCEndpoints fetches and parses the OIDC discovery document
 // from {issuerURL}/.well-known/openid-configuration.
 // Returns an error if any required endpoint (authorization, token, userinfo) is missing.
-func discoverOIDCEndpoints(issuerURL string, client *http.Client) (*OIDCDiscoveryDoc, error) {
+func DiscoverOIDCEndpoints(issuerURL string, client *http.Client) (*OIDCDiscoveryDoc, error) {
 	discoveryURL := strings.TrimRight(issuerURL, "/") + "/.well-known/openid-configuration"
 	resp, err := client.Get(discoveryURL)
 	if err != nil {
@@ -100,11 +100,11 @@ func validateOIDCEndpointScheme(endpoint, fieldName string) error {
 	return fmt.Errorf("oidc discovery: %s %q must use HTTPS scheme", fieldName, endpoint)
 }
 
-// discoverJWKSURL fetches the OIDC discovery document from the issuer and
+// DiscoverJWKSURL fetches the OIDC discovery document from the issuer and
 // extracts the jwks_uri field. Returns an error if the discovery document
 // cannot be fetched or does not contain a jwks_uri.
 // When requireHTTPS is true, the discovered jwks_uri must use the HTTPS scheme.
-func discoverJWKSURL(issuerURL string, client *http.Client, requireHTTPS bool) (string, error) {
+func DiscoverJWKSURL(issuerURL string, client *http.Client, requireHTTPS bool) (string, error) {
 	discoveryURL := strings.TrimRight(issuerURL, "/") + "/.well-known/openid-configuration"
 	resp, err := client.Get(discoveryURL)
 	if err != nil {

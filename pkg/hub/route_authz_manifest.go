@@ -213,6 +213,7 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/admin/chat-retention":               "admin", // Admin chat retention settings (session only)
 	"/api/v1/admin/conduit/grant-keys/rotate":    "admin", // POST: rotate the conduit grant signing key; returns kids and timestamps only; 404 when hub.conduit is off
 	"/api/v1/admin/conduit/grant-keys/revoke":    "admin", // POST {kid}: revoke a conduit grant key at once; returns the kid only; 404 when hub.conduit is off
+	"/api/v1/admin/keys/status":                  "admin", // GET: this instance's server key status report (IDs, deadlines, counts; never key material); platform admin only; 404 when server.secret_rotation is off
 	"/api/v1/admin/limits":                       "admin", // Admin limits
 	"/api/v1/admin/limits/":                      "admin", // Admin limit by ID
 	"/api/v1/admin/entitlements/":                "admin", // Admin entitlement by ID

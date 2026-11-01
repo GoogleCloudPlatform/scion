@@ -216,8 +216,11 @@ func TestServerConfigDB_HubName_InvalidChangeRejected(t *testing.T) {
 	before, _ := endpointsRow(t, fakeStore)
 
 	rr := putHubNameServerConfigDB(t, srv, ops, `{"server":{"hub":{"hub_name":"Bad.Name"}}}`)
-	assert.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
-	assert.Contains(t, rr.Body.String(), "endpoints")
+	assert.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
+	if entries := settingsErrorEntries(t, rr); assert.NotEmpty(t, entries) {
+		assert.Equal(t, "endpoints", entries[0].Section)
+		assert.Equal(t, "server.hub.hub_name", entries[0].Field)
+	}
 	after, _ := endpointsRow(t, fakeStore)
 	assert.Equal(t, before, after)
 }

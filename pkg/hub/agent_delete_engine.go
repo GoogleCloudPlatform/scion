@@ -96,6 +96,10 @@ type deletionOutcome struct {
 	code       string // failed: the deletion code
 	message    string // failed: the stored error message
 	retryAfter string // failed with runtime_unavailable: the Retry-After to send
+	// refusal is set when the delete failed because the agent's saved
+	// placement is inconsistent (rollbackPlacement): the answer carries its
+	// code, guidance and details instead of the plain conflict.
+	refusal *RuntimeTargetRefusal
 }
 
 // deletionRetryAfter remembers, per agent, the Retry-After of the latest
@@ -109,6 +113,32 @@ var deletionRetryAfter sync.Map // agent ID -> deletionRetryAfterEntry
 type deletionRetryAfterEntry struct {
 	claim int64
 	value string
+}
+
+// deletionPlacementRefusals remembers, per agent, the placement refusal of
+// the latest delete this hub process failed for an inconsistent saved
+// placement (rollbackPlacement), so a request that joins that delete
+// answers with the same specific code as the request that ran it. As for
+// deletionRetryAfter, a joiner on another hub process (or after a restart)
+// has no entry and answers the plain 409 conflict the stored deletion code
+// gives. One entry per agent, replaced on the next such failure and
+// removed when a delete of the agent completes.
+var deletionPlacementRefusals sync.Map // agent ID -> deletionPlacementRefusalEntry
+
+type deletionPlacementRefusalEntry struct {
+	claim   int64
+	refusal *RuntimeTargetRefusal
+}
+
+// deletionPlacementRefusalFor returns the remembered placement refusal for
+// the agent's failed delete at claim, or nil if this process has none.
+func deletionPlacementRefusalFor(agentID string, claim int64) *RuntimeTargetRefusal {
+	if v, ok := deletionPlacementRefusals.Load(agentID); ok {
+		if e := v.(deletionPlacementRefusalEntry); e.claim == claim {
+			return e.refusal
+		}
+	}
+	return nil
 }
 
 // deletionRetryAfterFor returns the remembered Retry-After for the agent's
@@ -351,11 +381,28 @@ func (s *Server) deletePlacementPreCheck(ctx context.Context, agentID string) er
 	if err != nil {
 		return err
 	}
+	return s.deletePlacementPreCheckRow(ctx, row)
+}
+
+// deletePlacementPreCheckRow is deletePlacementPreCheck on an already-read
+// row, with the same skip list. The delete handler runs it on the row it
+// loaded before its Runtime Broker availability check, so an offline
+// Runtime Broker does not hide the placement refusal (ptone/scion#4959).
+func (s *Server) deletePlacementPreCheckRow(ctx context.Context, row *store.Agent) error {
+	return agentDeletePlacementCheck(ctx, s.store, row)
+}
+
+// agentDeletePlacementCheck is the agent delete's placement pre-check of
+// row on st: nil for a row the check skips (see deletePlacementPreCheck),
+// otherwise checkAgentPinnedPlacement's answer. The project delete's
+// refusal uses it to flag the agents an agent delete would refuse
+// (checkProjectAgentsDeletedTx).
+func agentDeletePlacementCheck(ctx context.Context, st store.Store, row *store.Agent) error {
 	if isManagedAgentRuntime(row.Runtime) || !row.DeletedAt.IsZero() ||
 		row.DeletionState == store.DeletionStateFinalizing || row.DeletionState == store.DeletionStateDeleting {
 		return nil
 	}
-	_, err = checkAgentPinnedPlacement(ctx, s.store, row)
+	_, err := checkAgentPinnedPlacement(ctx, st, row)
 	return err
 }
 
@@ -395,8 +442,10 @@ func (s *Server) runAgentDeletion(reqCtx context.Context, plan *agentDeletionPla
 				}
 			}
 			if out.kind == deletionOutcomeDeleted {
-				// The agent is gone: drop any remembered Retry-After.
+				// The agent is gone: drop any remembered Retry-After and
+				// placement refusal.
 				deletionRetryAfter.Delete(plan.snapshot.ID)
+				deletionPlacementRefusals.Delete(plan.snapshot.ID)
 			}
 			e.stopRenewal()
 			cancel(nil)
@@ -812,7 +861,7 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 		if refusal, ok := placementRefusalOf(err); ok {
 			s.agentLifecycleLog.Warn("delete engine: agent placement is inconsistent; not dispatching, not finalizing",
 				"agent_id", agent.ID, "claim", e.plan.claim, "code", refusal.Code, "force", req.Force)
-			return e.rollback(store.DeletionCodeConflict, refusal.Message), false
+			return e.rollbackPlacement(refusal), false
 		}
 		if agent.IsPinned() {
 			s.agentLifecycleLog.Error("delete engine: could not check the pinned agent's placement; not dispatching, not finalizing",
@@ -880,7 +929,7 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 		s.agentLifecycleLog.Warn("delete engine: agent placement is inconsistent; nothing was dispatched, not finalizing",
 			"agent_id", agent.ID, "claim", e.plan.claim, "code", refusal.Code,
 			"force", req.Force, "best_effort", bestEffort)
-		return e.rollback(store.DeletionCodeConflict, refusal.Message), false
+		return e.rollbackPlacement(refusal), false
 	}
 	var refused *DeleteRunMismatchError
 	if errors.As(err, &refused) {
@@ -1040,7 +1089,9 @@ func retriedRunMismatchMessage(first, second *DeleteRunMismatchError) string {
 //   - nil: the engine finalizes. A soft finish records the reported run on
 //     the row (see finish).
 //   - a stale dispatch: abandon, as for the first dispatch.
-//   - a placement refusal: conflict, as for the first dispatch.
+//   - a placement refusal: rollbackPlacement, as for the first dispatch.
+//     The stored code stays conflict, and the answer carries the
+//     refusal's own code and details.
 //   - another run mismatch, whichever run it names: conflict. There is
 //     no second retry, so a run that keeps changing cannot loop the
 //     engine; the next delete starts over.
@@ -1077,7 +1128,7 @@ func (e *deletionEngine) retryReportedRunDelete(ctx context.Context, first *Dele
 	if refusal, ok := placementRefusalOf(err); ok {
 		s.agentLifecycleLog.Warn("delete engine: agent placement is inconsistent; the run the broker held was not deleted, not finalizing",
 			"agent_id", agent.ID, "claim", e.plan.claim, "code", refusal.Code, "force", req.Force)
-		return e.rollback(store.DeletionCodeConflict, refusal.Message), false
+		return e.rollbackPlacement(refusal), false
 	}
 	var second *DeleteRunMismatchError
 	if errors.As(err, &second) {
@@ -1253,6 +1304,25 @@ func (e *deletionEngine) rollback(code, msg string) deletionOutcome {
 	}
 	e.publishStatus(ctx)
 	return deletionOutcome{kind: deletionOutcomeFailed, code: code, message: msg}
+}
+
+// rollbackPlacement fails the delete for a placement refusal (the claimed
+// snapshot's check, the dispatcher's backstop on the first dispatch, or its
+// backstop on the delete of the run the broker reported holding,
+// retryReportedRunDelete): nothing was deleted, so it rolls back as a
+// conflict and restores the prior phase. The stored deletion code stays
+// conflict; the outcome carries the refusal, so the answer names the
+// specific placement code, as the claim's pre-check does
+// (writeDeletionFailureWithRefusal). The refusal is remembered for this
+// claim before the rollback publishes, so a joiner on this hub process
+// woken by that event already finds it (deletionPlacementRefusals).
+func (e *deletionEngine) rollbackPlacement(refusal *RuntimeTargetRefusal) deletionOutcome {
+	deletionPlacementRefusals.Store(e.agentID(), deletionPlacementRefusalEntry{claim: e.plan.claim, refusal: refusal})
+	out := e.rollback(store.DeletionCodeConflict, refusal.Message)
+	if out.kind == deletionOutcomeFailed {
+		out.refusal = refusal
+	}
+	return out
 }
 
 // startNotInFlight reports, for the delete rollback, whether no start of cur
@@ -1505,6 +1575,32 @@ func deleteSyncWaitFor(r *http.Request) time.Duration {
 // any other caller (isAdmin false) the body carries a generic message and
 // no deletionCode.
 func writeDeletionFailure(w http.ResponseWriter, agentID, code, message, retryAfter string, isAdmin bool) {
+	writeDeletionFailureWithRefusal(w, agentID, code, message, retryAfter, nil, isAdmin)
+}
+
+// writeDeletionFailureWithRefusal is writeDeletionFailure for a failure that
+// may carry a placement refusal (deletionOutcome.refusal, or the joiner's
+// remembered one). A conflict with a refusal answers as the claim's
+// pre-check does: the refusal's status (409), code, guidance message and
+// details, to every caller, as every other placement refusal is written
+// (writeRuntimeTargetRefusal); details also carry agentId, and
+// deletionCode for platform admins only. Any other failure is
+// writeDeletionFailure's answer.
+func writeDeletionFailureWithRefusal(w http.ResponseWriter, agentID, code, message, retryAfter string, refusal *RuntimeTargetRefusal, isAdmin bool) {
+	if refusal != nil && code == store.DeletionCodeConflict {
+		slog.Warn("agent delete failed", "agent_id", agentID, "deletion_code", code,
+			"placement_code", refusal.Code, "message", refusal.Message)
+		details := map[string]interface{}{}
+		for k, v := range refusal.Details {
+			details[k] = v
+		}
+		details["agentId"] = agentID
+		if isAdmin {
+			details["deletionCode"] = code
+		}
+		writeError(w, refusal.Status, refusal.Code, refusal.Message, details)
+		return
+	}
 	// The operator log keeps the full failure for every caller; writeError
 	// below logs only the message the caller receives.
 	slog.Warn("agent delete failed", "agent_id", agentID, "deletion_code", code,
@@ -1621,7 +1717,8 @@ func (s *Server) resolveJoinFromRow(w http.ResponseWriter, ctx context.Context, 
 		return false
 	}
 	if code := row.DeletionEffectiveCode(now); code != "" {
-		writeDeletionFailure(w, agentID, code, row.DeletionError, deletionRetryAfterFor(agentID, row.DeletionClaim), isAdmin)
+		writeDeletionFailureWithRefusal(w, agentID, code, row.DeletionError, deletionRetryAfterFor(agentID, row.DeletionClaim),
+			deletionPlacementRefusalFor(agentID, row.DeletionClaim), isAdmin)
 		return true
 	}
 	if row.DeletionState == store.DeletionStateNone && row.DeletionClaim >= observedClaim {

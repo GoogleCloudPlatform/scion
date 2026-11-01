@@ -351,6 +351,77 @@ func TestDeriveHealthSummaryStatus_Rules(t *testing.T) {
 				Message: "Runtime brokers cannot connect through the local proxy on instance hub-1: set server.trusted_proxies (see the hub log)",
 			}},
 		},
+		{
+			name: "online broker whose control channel is unhealthy cannot receive commands",
+			mutate: func(r *HealthSummaryResponse) {
+				r.Brokers.Items[0].Health = &HealthBrokerSelf{Status: HealthStatusDegraded, Checks: map[string]string{
+					"docker": "available", "control_channel": "unhealthy",
+				}}
+			},
+			wantStatus: HealthStatusDegraded,
+			wantItems: []HealthAttentionItem{{
+				Severity: HealthAttentionWarning, Kind: HealthAttentionBrokerCommandPath,
+				Subject: HealthAttentionSubject{Type: HealthSubjectBroker, ID: "b-ok", Name: "ok"},
+				Message: "Runtime broker ok is online but cannot receive commands: its control channel to the hub is not connected",
+			}},
+		},
+		{
+			name: "command path item names a refused conduit, other failing checks keep the degraded item",
+			mutate: func(r *HealthSummaryResponse) {
+				r.Brokers.Items[0].Health = &HealthBrokerSelf{Status: HealthStatusDegraded, Checks: map[string]string{
+					"runtime": "unavailable", "control_channel": "unhealthy", "conduit": "unhealthy",
+				}}
+			},
+			wantStatus: HealthStatusDegraded,
+			wantItems: []HealthAttentionItem{{
+				Severity: HealthAttentionWarning, Kind: HealthAttentionBrokerCommandPath,
+				Subject: HealthAttentionSubject{Type: HealthSubjectBroker, ID: "b-ok", Name: "ok"},
+				Message: "Runtime broker ok is online but cannot receive commands: its control channel to the hub is not connected (conduit unhealthy too)",
+			}, {
+				Severity: HealthAttentionWarning, Kind: HealthAttentionBrokerDegraded,
+				Subject: HealthAttentionSubject{Type: HealthSubjectBroker, ID: "b-ok", Name: "ok"},
+				Message: "Runtime broker ok reports degraded (runtime: unavailable)",
+			}},
+		},
+		{
+			name: "control channel starting or reconnecting (unknown) is neutral",
+			mutate: func(r *HealthSummaryResponse) {
+				r.Brokers.Items[0].Health = &HealthBrokerSelf{Status: HealthStatusHealthy, Checks: map[string]string{
+					"docker": "available", "control_channel": "unknown",
+				}}
+			},
+			wantStatus: HealthStatusHealthy,
+			wantItems:  []HealthAttentionItem{},
+		},
+		{
+			name: "a refused conduit alone keeps the degraded item",
+			mutate: func(r *HealthSummaryResponse) {
+				r.Brokers.Items[0].Health = &HealthBrokerSelf{Status: HealthStatusDegraded, Checks: map[string]string{
+					"control_channel": "healthy", "conduit": "unhealthy",
+				}}
+			},
+			wantStatus: HealthStatusDegraded,
+			wantItems: []HealthAttentionItem{{
+				Severity: HealthAttentionWarning, Kind: HealthAttentionBrokerDegraded,
+				Subject: HealthAttentionSubject{Type: HealthSubjectBroker, ID: "b-ok", Name: "ok"},
+				Message: "Runtime broker ok reports degraded (conduit: unhealthy)",
+			}},
+		},
+		{
+			name: "an offline broker's stale command path report adds nothing",
+			mutate: func(r *HealthSummaryResponse) {
+				r.Brokers.Items[0].Status = store.BrokerStatusOffline
+				r.Brokers.Items[0].Health = &HealthBrokerSelf{Status: HealthStatusDegraded, Checks: map[string]string{
+					"control_channel": "unhealthy",
+				}}
+			},
+			wantStatus: HealthStatusDegraded,
+			wantItems: []HealthAttentionItem{{
+				Severity: HealthAttentionWarning, Kind: HealthAttentionBrokerOffline,
+				Subject: HealthAttentionSubject{Type: HealthSubjectBroker, ID: "b-ok", Name: "ok"},
+				Message: "Runtime broker ok is offline",
+			}},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

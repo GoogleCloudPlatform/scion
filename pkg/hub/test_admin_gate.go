@@ -53,6 +53,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/keymaterial"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -272,19 +273,20 @@ func (s *Server) liveTestAdminIdentityCount(ctx context.Context) (int, error) {
 }
 
 // Signing-key source labels (signingKeySource). Labels only: no key
-// material is ever recorded or returned.
+// material is ever recorded or returned. They are declared in
+// keymaterial, which the OIDC key manager shares.
 const (
-	signingKeySourceConfig        = "config"
-	signingKeySourceSharedSecret  = "shared_secret"
-	signingKeySourceSecretBackend = "secret_backend"
-	signingKeySourceStore         = "store"
-	signingKeySourceLegacyStore   = "legacy_store"
-	signingKeySourceGenerated     = "generated"
-	signingKeySourceEphemeral     = "ephemeral"
-	signingKeySourceUnresolved    = "unresolved"
+	signingKeySourceConfig        = keymaterial.SourceConfig
+	signingKeySourceSharedSecret  = keymaterial.SourceSharedSecret
+	signingKeySourceSecretBackend = keymaterial.SourceSecretBackend
+	signingKeySourceStore         = keymaterial.SourceStore
+	signingKeySourceLegacyStore   = keymaterial.SourceLegacyStore
+	signingKeySourceGenerated     = keymaterial.SourceGenerated
+	signingKeySourceEphemeral     = keymaterial.SourceEphemeral
+	signingKeySourceUnresolved    = keymaterial.SourceUnresolved
 	// signingKeySourceSharedScope is a key persisted under a fixed scope
 	// every node and hub sharing the database reads (not hub-id scoped).
-	signingKeySourceSharedScope = "shared_scope"
+	signingKeySourceSharedScope = keymaterial.SourceSharedScope
 )
 
 // webSessionKeyName names the web session cookie key class for

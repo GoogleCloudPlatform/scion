@@ -444,7 +444,7 @@ func createSyncCtx(reqCtx context.Context, srv *Server, agentID, projectPath, ex
 }
 
 // ptone/scion#4817: the request ending after a synchronous create's start
-// has begun (the hub's 120s dispatch timeout firing on a slow cold start)
+// has begun (the hub's dispatch timeout firing on a slow cold start)
 // must not cancel the start. A cancelled start is read by the runtime as
 // abandoned, and the Kubernetes runtime then deletes the pod and its
 // Secrets while the image is still pulling; the broker also removes the

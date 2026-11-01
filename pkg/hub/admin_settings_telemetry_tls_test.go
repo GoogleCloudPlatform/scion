@@ -164,14 +164,12 @@ func TestPutServerConfigDB_TelemetryTLSInvalidPairRejected(t *testing.T) {
 			require.NotNil(t, before)
 
 			rr := putServerConfigDB(t, srv, ops, tc.body)
-			require.Equal(t, http.StatusBadRequest, rr.Code, "an invalid tls save must be refused: %s", rr.Body.String())
-			var resp struct {
-				Errors map[string][]struct{ Path, Message string } `json:"errors"`
-			}
-			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), rr.Body.String())
-			require.NotEmpty(t, resp.Errors["telemetry"], rr.Body.String())
-			assert.Equal(t, "cloud/tls", resp.Errors["telemetry"][0].Path)
-			assert.Contains(t, resp.Errors["telemetry"][0].Message, "telemetry.cloud.tls")
+			require.Equal(t, http.StatusUnprocessableEntity, rr.Code, "an invalid tls save must be refused: %s", rr.Body.String())
+			entries := settingsErrorEntries(t, rr)
+			assert.Equal(t, "telemetry", entries[0].Section)
+			assert.Equal(t, "telemetry.cloud.tls", entries[0].Field)
+			assert.Equal(t, "cloud/tls", entries[0].Path)
+			assert.Contains(t, entries[0].Message, "telemetry.cloud.tls")
 
 			after := storedRow(fake, "telemetry")
 			require.NotNil(t, after)
@@ -255,8 +253,8 @@ func TestPutServerConfig_FileMode_TelemetryTLSInvalidPairRejected(t *testing.T) 
 			require.NoError(t, os.WriteFile(settingsPath, []byte(fileModeTelemetrySettings), 0o600))
 
 			rr := putServerConfigFile(t, tc.body)
-			require.Equal(t, http.StatusBadRequest, rr.Code, "an invalid tls save must be refused: %s", rr.Body.String())
-			assert.Contains(t, rr.Body.String(), "telemetry.cloud.tls")
+			require.Equal(t, http.StatusUnprocessableEntity, rr.Code, "an invalid tls save must be refused: %s", rr.Body.String())
+			assert.Equal(t, "telemetry.cloud.tls", settingsErrorEntries(t, rr)[0].Field)
 			data, err := os.ReadFile(settingsPath)
 			require.NoError(t, err)
 			assert.Equal(t, fileModeTelemetrySettings, string(data), "a refused save must not write the file")

@@ -37,10 +37,11 @@ func (e *durationFieldError) Error() string { return e.msg }
 // lists (opsettings.Section.Durations and NestedDurations) in the given
 // section documents. A key that is absent, null or "" is skipped ("" and
 // null clear the key); a string that does not parse as a duration fails.
-// A non-string value is left to the section schema. Sections are checked
-// in registry order and map entries in key order, so the first failure
-// reported is stable.
-func validateDurationSettings(sectionDocs map[string]json.RawMessage) *durationFieldError {
+// A non-string value is left to the section schema. Every failure is
+// returned; sections are checked in registry order and map entries in key
+// order, so the order is stable.
+func validateDurationSettings(sectionDocs map[string]json.RawMessage) []*durationFieldError {
+	var out []*durationFieldError
 	for _, sec := range opsettings.Registry {
 		doc, ok := sectionDocs[sec.Name]
 		if !ok {
@@ -56,24 +57,22 @@ func validateDurationSettings(sectionDocs map[string]json.RawMessage) *durationF
 		}
 		for _, k := range keys {
 			if fe := checkDurationValue(fields[k.SectionKey], k.KoanfPath, k.SectionKey); fe != nil {
-				return fe
+				out = append(out, fe)
 			}
 		}
 		for _, pattern := range sec.NestedDurations {
 			segs := strings.Split(strings.TrimPrefix(pattern, sec.Name+"."), ".")
-			if fe := walkNestedDuration(fields, segs, sec.Name); fe != nil {
-				return fe
-			}
+			out = append(out, walkNestedDuration(fields, segs, sec.Name)...)
 		}
 	}
-	return nil
+	return out
 }
 
 // walkNestedDuration follows segs (a NestedDurations pattern below the
 // section name) through the object fields, whose koanf path is prefix. A
 // "*" segment visits every key of the map at that level. A missing key or
 // a value that is not an object ends the walk without an error.
-func walkNestedDuration(fields map[string]json.RawMessage, segs []string, prefix string) *durationFieldError {
+func walkNestedDuration(fields map[string]json.RawMessage, segs []string, prefix string) []*durationFieldError {
 	names := []string{segs[0]}
 	if segs[0] == "*" {
 		names = make([]string, 0, len(fields))
@@ -82,11 +81,12 @@ func walkNestedDuration(fields map[string]json.RawMessage, segs []string, prefix
 		}
 		sort.Strings(names)
 	}
+	var out []*durationFieldError
 	for _, name := range names {
 		path := prefix + "." + name
 		if len(segs) == 1 {
 			if fe := checkDurationValue(fields[name], path, path); fe != nil {
-				return fe
+				out = append(out, fe)
 			}
 			continue
 		}
@@ -94,11 +94,9 @@ func walkNestedDuration(fields map[string]json.RawMessage, segs []string, prefix
 		if err := json.Unmarshal(fields[name], &next); err != nil || next == nil {
 			continue
 		}
-		if fe := walkNestedDuration(next, segs[1:], path); fe != nil {
-			return fe
-		}
+		out = append(out, walkNestedDuration(next, segs[1:], path)...)
 	}
-	return nil
+	return out
 }
 
 // checkDurationValue reports raw, the value of the duration-valued key at

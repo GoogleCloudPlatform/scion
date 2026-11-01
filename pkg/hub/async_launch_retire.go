@@ -50,6 +50,6 @@ func rejectRetiredAsyncAgentLaunch(w http.ResponseWriter, rawBody []byte) bool {
 	if !retiredAsyncAgentLaunchInBody(rawBody) {
 		return false
 	}
-	writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, config.RetiredAsyncAgentLaunchWarning, nil)
+	writeSettingsFieldError(w, "server.hub.async_agent_launch", config.RetiredAsyncAgentLaunchWarning)
 	return true
 }

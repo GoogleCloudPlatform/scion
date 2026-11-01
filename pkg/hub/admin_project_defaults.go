@@ -123,10 +123,7 @@ func (s *Server) handlePutProjectDefaults(w http.ResponseWriter, r *http.Request
 
 	// Validate the document against the section schema.
 	if errs := opsettings.Validate("project_defaults", doc); len(errs) > 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"error":  "validation_failed",
-			"errors": errs,
-		})
+		writeSettingsValidation(w, "", sectionValidationEntries("project_defaults", errs), nil)
 		return
 	}
 
@@ -153,17 +150,15 @@ func (s *Server) handlePutProjectDefaults(w http.ResponseWriter, r *http.Request
 			return
 		}
 		if errs := opsettings.Validate("project_defaults", merged); len(errs) > 0 {
-			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-				"error":  "validation_failed",
-				"errors": errs,
-			})
+			writeSettingsValidation(w, "", sectionValidationEntries("project_defaults", errs), nil)
 			return
 		}
 		if _, same := unchangedManagedRow(r.Context(), ops, "project_defaults", merged, baseRev); !same {
 			if _, err := ops.Update(r.Context(), "project_defaults", merged, updatedBy, baseRev, "managed"); err != nil {
 				if errors.Is(err, store.ErrRevisionConflict) {
-					writeError(w, http.StatusConflict, ErrCodeConflict,
-						"Project defaults changed concurrently; retry", nil)
+					writeSettingsRevisionConflict(w, "Project defaults changed concurrently; reload and save again.",
+						[]map[string]interface{}{settingsConflictEntry("project_defaults", baseRev,
+							s.getCurrentRevision(ops, "project_defaults"))}, nil)
 					return
 				}
 				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,

@@ -425,7 +425,7 @@ func TestReincarnationWorker_TransferModeMismatchFailsBeforeAnySideEffect(t *tes
 			mv := &reincarnationMove{SourceBrokerID: f.src.ID, TargetBrokerID: f.dst.ID, ProjectID: f.project.ID,
 				SelfMove: true, AgentDirWorkspace: true, Force: true, TransferMode: tc.planned}
 
-			f.srv.runReincarnationWorker(ctx, a.ID, rec.ID, a.AppliedConfig, &fresh, "h", time.Now(), "", &ReincarnationPlan{}, 2, a.DeletionClaim, mv)
+			f.srv.runReincarnationWorker(ctx, a.ID, rec.ID, a.AppliedConfig, &fresh, "h", time.Now(), "", &ReincarnationPlan{}, 2, a.DeletionClaim, mv, nil)
 
 			got, err := f.s.GetAgentReincarnation(ctx, rec.ID)
 			require.NoError(t, err)

@@ -37,7 +37,7 @@ import (
 //
 // TestCreateAgent_DispatchFailure_CleansUpBroker (handlers_agent_test.go)
 // covers the plain, non-GatherEnv dispatch-failure branch. The tests below
-// cover the other three branches. TestProjectQuota_KeptAcrossBrokerReleases_ReleasedOnDelete
+// cover the other three branches. TestProjectQuota_FollowsBrokerLifecycle
 // (broker_quota_rollback_test.go) is the positive control: a successful
 // create holds both reservations.
 

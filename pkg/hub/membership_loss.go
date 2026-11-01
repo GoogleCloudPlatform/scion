@@ -735,6 +735,7 @@ func (s *Server) stopHeldAgent(ctx context.Context, agentID string, attempt int)
 	agent.ContainerStatus = "stopped"
 	agent.Activity = ""
 	s.releaseBrokerQuota(ctx, agent)
+	s.releaseProjectQuota(ctx, agent)
 	if s.events != nil {
 		s.events.PublishAgentStatus(ctx, agent)
 	}

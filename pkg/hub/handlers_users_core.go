@@ -217,8 +217,28 @@ func (s *Server) revokeUserSessions(w http.ResponseWriter, r *http.Request, id s
 	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
 }
 
+// getUser answers GET /api/v1/users/{id}. A scoped token (a user access
+// token or any other ScopedUserIdentity) reads a user only with user.read on
+// the hub-level user record (hubScopedResource), the check each row of the
+// users list passes for a token. The decision uses only the path id, so a
+// refused token gets the same 403 whether or not user id exists.
 func (s *Server) getUser(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
+	token, isToken := GetIdentityFromContext(ctx).(*ScopedUserIdentity)
+	if isToken {
+		decision := s.authzService.Decide(ctx, AuthzRequest{
+			Principal:  principalContextForIdentity(token),
+			Credential: credentialContextForIdentity(token),
+			Resource:   hubScopedResource("user", id),
+			Action:     ActionRead,
+			Permission: "user.read",
+		})
+		if !decision.Allowed {
+			writeForbiddenStructured(w, "requires user.read permission", "user", ActionRead)
+			return
+		}
+	}
+
 	user, err := s.store.GetUser(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
@@ -227,7 +247,16 @@ func (s *Server) getUser(w http.ResponseWriter, r *http.Request, id string) {
 
 	resp := UserWithCapabilities{User: *user}
 	if identity := GetIdentityFromContext(ctx); identity != nil {
-		resp.Cap = s.authzService.ComputeCapabilities(ctx, identity, userResource(user))
+		// A token's capabilities are computed on the hub-scoped user record,
+		// other callers' on the user record. The token branch builds the
+		// shape hubScopedResource builds, written as a literal so the
+		// resource-type guard resolves its type.
+		if isToken {
+			resp.Cap = s.authzService.ComputeCapabilities(ctx, identity,
+				Resource{Type: "user", ID: user.ID, ParentType: "system"})
+		} else {
+			resp.Cap = s.authzService.ComputeCapabilities(ctx, identity, userResource(user))
+		}
 	}
 	stripPreferencesForViewer(ctx, &resp.User, resp.Cap)
 

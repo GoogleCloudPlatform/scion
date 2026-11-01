@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -257,9 +258,17 @@ func gcpIAMRequestValues(rawBody []byte) map[string]json.RawMessage {
 
 // validateGCPIAMRequest rejects a sent gcp_iam key whose value is not a
 // recognised non-empty string. It writes a 422 and returns false on
-// failure.
+// failure, naming every invalid key.
 func validateGCPIAMRequest(w http.ResponseWriter, rawBody []byte) bool {
-	for key, raw := range gcpIAMRequestValues(rawBody) {
+	values := gcpIAMRequestValues(rawBody)
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var entries []settingsFieldError
+	for _, key := range keys {
+		raw := values[key]
 		var v string
 		valid := json.Unmarshal(raw, &v) == nil && v != ""
 		allowed := opsettings.GCPIAMCheckModes
@@ -274,10 +283,13 @@ func validateGCPIAMRequest(w http.ResponseWriter, rawBody []byte) bool {
 			}
 		}
 		if !valid {
-			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-				fmt.Sprintf("invalid %s %s: must be one of %s", key, string(raw), strings.Join(allowed, ", ")), nil)
-			return false
+			entries = append(entries, settingsFieldError{Section: "gcp_iam", Field: key,
+				Message: fmt.Sprintf("invalid %s %s: must be one of %s", key, string(raw), strings.Join(allowed, ", "))})
 		}
+	}
+	if len(entries) > 0 {
+		writeSettingsValidation(w, entries[0].Message, entries, nil)
+		return false
 	}
 	return true
 }

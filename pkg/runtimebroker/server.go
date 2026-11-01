@@ -282,13 +282,21 @@ type ServerConfig struct {
 	ColocatedStorage storage.Storage
 }
 
+// DefaultWriteTimeout is the broker HTTP server's default write timeout. A
+// broker handler can take as long as the hub's hub-to-broker request limit
+// (180s, ptone/scion#6829) before it answers, and the handlers do not extend
+// their own write deadline, so the default leaves 30s of margin above that
+// limit: otherwise a direct-HTTP answer after 120s would be cut off before
+// the hub gives up.
+const DefaultWriteTimeout = 210 * time.Second
+
 // DefaultServerConfig returns the default server configuration.
 func DefaultServerConfig() ServerConfig {
 	return ServerConfig{
 		Port:                 9800,
 		Host:                 "0.0.0.0",
 		ReadTimeout:          30 * time.Second,
-		WriteTimeout:         120 * time.Second,
+		WriteTimeout:         DefaultWriteTimeout,
 		CORSEnabled:          false, // off by default: nothing calls the broker from a browser (opt in with server.broker.cors)
 		CORSAllowedOrigins:   []string{},
 		CORSAllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},

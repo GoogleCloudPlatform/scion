@@ -59,6 +59,9 @@ type MessageStore struct {
 	// schema default dispatch_state (ptone/scion#4827). Nil means
 	// slog.Default(). Tests set it to capture the line.
 	pendingLogger *slog.Logger
+	// now is the clock PurgeFailedMessagesChunk measures its time bound
+	// with. Nil means time.Now. Tests set it to drive the bound.
+	now func() time.Time
 }
 
 // NewMessageStore creates a new Ent-backed MessageStore.
@@ -634,27 +637,130 @@ func (s *MessageStore) PurgeOldMessages(ctx context.Context, readCutoff time.Tim
 	return n, nil
 }
 
-// PurgeFailedMessages removes messages with dispatch_state="failed" whose
-// created timestamp is before cutoff. Returns the number of messages removed.
+// failedPurgeDeleteBatch bounds how many IDs one DELETE statement of a
+// PurgeFailedMessagesChunk transaction names. The chunk checks its time
+// bound between these statements, so a slow chunk stops after the batch in
+// flight rather than after the whole chunk. A var (not const) so tests can
+// shrink it.
+var failedPurgeDeleteBatch = 100
+
+// PurgeFailedMessagesChunk removes, in one transaction, the agent-recipient
+// messages with dispatch_state="failed" and created before cutoff among the
+// next limit candidates after the position after, in (created, id) order.
+// It stops early, after the delete batch in flight, once the transaction has
+// run for maxDuration, and always makes progress on at least one batch.
+//
 // Unlike PurgeOldMessages, this filters strictly on dispatch_state so
 // successfully delivered (dispatched) message history is never touched.
-// Scoped to agent recipients only (message.RecipientHasPrefix "agent:"):
-// only a message addressed to an agent can have genuinely and irrecoverably
-// failed dispatch. A "user:" recipient row reaching "failed" only ever came
-// from ExpireStuckPendingMessages sweeping a writer bug (nc-promote-busy);
-// deleting it would destroy real chat history the user never saw fail.
-func (s *MessageStore) PurgeFailedMessages(ctx context.Context, cutoff time.Time) (int, error) {
-	n, err := s.client.Message.Delete().
-		Where(
-			message.DispatchStateEQ(store.MessageDispatchFailed),
-			message.CreatedLT(cutoff),
-			message.RecipientHasPrefix("agent:"),
-		).
-		Exec(ctx)
-	if err != nil {
-		return 0, mapError(err)
+// Scoped to agent recipients only: only a message addressed to an agent can
+// have genuinely and irrecoverably failed dispatch. A "user:" recipient row
+// reaching "failed" only ever came from ExpireStuckPendingMessages sweeping
+// a writer bug (nc-promote-busy); deleting it would destroy real chat
+// history the user never saw fail.
+//
+// The candidate range is dispatch_state = 'failed' (a literal, see
+// messageDispatchFailedLiteral) and created < cutoff, served in order by the
+// partial (created, id) WHERE dispatch_state = 'failed' index. The recipient
+// check is applied in the DELETE rather than in the range, so the keyset
+// cursor moves past the failed user: rows the purge keeps instead of
+// rescanning them on every chunk (ptone/scion#6954).
+func (s *MessageStore) PurgeFailedMessagesChunk(ctx context.Context, cutoff time.Time, after store.MessagePosition, limit int, maxDuration time.Duration) (store.FailedMessagePurgeChunk, error) {
+	res := store.FailedMessagePurgeChunk{Next: after}
+	if limit <= 0 {
+		return res, fmt.Errorf("purge failed messages: limit must be positive, got %d", limit)
 	}
-	return n, nil
+	now := s.now
+	if now == nil {
+		now = time.Now
+	}
+	start := now()
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return res, mapError(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	candidates, err := failedPurgeCandidates(ctx, tx.Client(), cutoff, after, limit)
+	if err != nil {
+		return res, err
+	}
+	for i := 0; i < len(candidates); i += failedPurgeDeleteBatch {
+		if i > 0 && maxDuration > 0 && now().Sub(start) >= maxDuration {
+			break
+		}
+		batch := candidates[i:min(i+failedPurgeDeleteBatch, len(candidates))]
+		ids := make([]uuid.UUID, 0, len(batch))
+		for _, m := range batch {
+			ids = append(ids, m.ID)
+		}
+		// The recipient check is the same ent predicate the one-shot purge
+		// used (LIKE 'agent:%', with each dialect's case rules), applied in
+		// the DELETE so the rows deleted are exactly the rows it deleted.
+		n, err := tx.Message.Delete().
+			Where(
+				message.IDIn(ids...),
+				messageDispatchFailedLiteral(),
+				message.RecipientHasPrefix("agent:"),
+			).
+			Exec(ctx)
+		if err != nil {
+			return store.FailedMessagePurgeChunk{Next: after}, mapError(err)
+		}
+		res.Deleted += n
+		res.Examined += len(batch)
+		last := batch[len(batch)-1]
+		res.Next = store.MessagePosition{Created: last.Created.UTC(), ID: last.ID.String()}
+	}
+	if err := tx.Commit(); err != nil {
+		return store.FailedMessagePurgeChunk{Next: after}, mapError(err)
+	}
+	res.Done = len(candidates) < limit && res.Examined == len(candidates)
+	return res, nil
+}
+
+// failedPurgeCandidates reads the next limit purge candidates after the
+// position after on c: failed rows created before cutoff, in (created, id)
+// order, with the columns the purge needs.
+func failedPurgeCandidates(ctx context.Context, c *ent.Client, cutoff time.Time, after store.MessagePosition, limit int) ([]*ent.Message, error) {
+	preds := []predicate.Message{
+		messageDispatchFailedLiteral(),
+		message.CreatedLT(cutoff.UTC()),
+	}
+	if !after.IsStart() {
+		afterID, err := parseUUID(after.ID)
+		if err != nil {
+			return nil, err
+		}
+		at := after.Created.UTC()
+		// created >= at is spelled out besides the (created, id) tiebreak
+		// so the planner gets a two-sided range on the index instead of
+		// walking it from the oldest row.
+		preds = append(preds,
+			message.CreatedGTE(at),
+			message.Or(message.CreatedGT(at), message.IDGT(afterID)),
+		)
+	}
+	candidates, err := c.Message.Query().
+		Where(preds...).
+		Order(ent.Asc(message.FieldCreated), ent.Asc(message.FieldID)).
+		Limit(limit).
+		Select(message.FieldID, message.FieldCreated).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return candidates, nil
+}
+
+// messageDispatchFailedLiteral matches dispatch_state = 'failed' with the
+// value inlined as a literal rather than a bound parameter, so the predicate
+// textually implies the WHERE of the partial failed index. SQLite and a
+// Postgres generic plan can only use a partial index when the query proves
+// its WHERE without knowing parameter values.
+func messageDispatchFailedLiteral() predicate.Message {
+	return func(s *entsql.Selector) {
+		s.Where(entsql.ExprP(s.C(message.FieldDispatchState) + " = '" + store.MessageDispatchFailed + "'"))
+	}
 }
 
 // SetMessageConversationID updates the conversation_id on an existing message.

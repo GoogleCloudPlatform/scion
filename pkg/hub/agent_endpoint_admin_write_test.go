@@ -58,15 +58,18 @@ func TestHandlePutServerConfig_AgentEndpoint_InvalidRejected(t *testing.T) {
 			rr := httptest.NewRecorder()
 			srv.handleAdminServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body))
 
-			if rr.Code != http.StatusBadRequest {
-				t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+			if rr.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
+			}
+			if e := settingsErrorEntries(t, rr); e[0].Field != "server.hub.agent_endpoint" {
+				t.Errorf("field = %q, want server.hub.agent_endpoint", e[0].Field)
 			}
 			if !strings.Contains(rr.Body.String(), "server.hub.agent_endpoint") {
-				t.Errorf("expected the 400 body to carry the validator's message naming server.hub.agent_endpoint, got: %s", rr.Body.String())
+				t.Errorf("expected the 422 body to carry the validator's message naming server.hub.agent_endpoint, got: %s", rr.Body.String())
 			}
 			for _, secret := range tt.secrets {
 				if strings.Contains(rr.Body.String(), secret) {
-					t.Errorf("expected the 400 body not to contain %q, got: %s", secret, rr.Body.String())
+					t.Errorf("expected the 422 body not to contain %q, got: %s", secret, rr.Body.String())
 				}
 			}
 

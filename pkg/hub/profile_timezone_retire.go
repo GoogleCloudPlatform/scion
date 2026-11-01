@@ -90,7 +90,7 @@ func rejectRemovedProfileTimezone(w http.ResponseWriter, rawBody []byte) bool {
 	if !ok {
 		return false
 	}
-	writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, removedProfileTimezoneMessage(name), nil)
+	writeSettingsFieldError(w, "profiles."+name+".timezone", removedProfileTimezoneMessage(name))
 	return true
 }
 

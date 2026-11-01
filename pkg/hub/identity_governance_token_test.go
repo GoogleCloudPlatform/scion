@@ -151,6 +151,59 @@ func TestUserListToken_RequiresUserListAndHubBoundary(t *testing.T) {
 	assert.Contains(t, ids, listed, "a session lists users")
 }
 
+// TestUserReadToken_RequiresHubUserRead pins GET /api/v1/users/{id} for
+// tokens: user:read on a hub boundary reads another user, for a super-admin
+// and for a hub-member holder alike, and the returned capabilities allow
+// read; a token without user:read is refused with one identical 403 body
+// (forbidden, resource_type user, denied_action read) for another user, for
+// its holder's own id and for an id that does not exist; a project-boundary
+// credential carrying user:read is refused. A session reads users as it does
+// without these rules.
+func TestUserReadToken_RequiresHubUserRead(t *testing.T) {
+	srv, s := testServer(t)
+	admin := hubConfigTokenUser(t, s, "ig-read-super", store.SystemRoleSuperAdmin)
+	target := hubConfigTokenUser(t, s, "ig-read-target", store.SystemRoleHubMember)
+	path := func(id string) string { return "/api/v1/users/" + id }
+
+	member := hubConfigTokenUser(t, s, "ig-read-member", store.SystemRoleHubMember)
+	for label, holder := range map[string]string{"super-admin": admin, "hub member": member} {
+		readKey := mintHubConfigToken(t, srv, holder, hubBoundary(), "user:read")
+		rec := doRequestWithToken(t, srv, readKey, http.MethodGet, path(target), nil)
+		require.Equal(t, http.StatusOK, rec.Code, "%s with user:read: %s", label, rec.Body.String())
+		var got UserWithCapabilities
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+		assert.Equal(t, target, got.ID, label)
+		assert.True(t, capabilityAllows(got.Cap, ActionRead), "%s: capabilities allow read: %+v", label, got.Cap)
+	}
+
+	listOnly := mintHubConfigToken(t, srv, admin, hubBoundary(), "user:list")
+	var refusals []ErrorResponse
+	for _, id := range []string{target, admin, tid("ig-read-unknown")} {
+		rec := doRequestWithToken(t, srv, listOnly, http.MethodGet, path(id), nil)
+		require.Equal(t, http.StatusForbidden, rec.Code, "without user:read, id %s: %s", id, rec.Body.String())
+		var resp ErrorResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		resp.Error.RequestID = ""
+		refusals = append(refusals, resp)
+	}
+	assert.Equal(t, ErrCodeForbidden, refusals[0].Error.Code)
+	assert.Equal(t, "user", refusals[0].Error.Details["resource_type"])
+	assert.Equal(t, "read", refusals[0].Error.Details["denied_action"])
+	assert.Equal(t, refusals[0], refusals[1], "own id refused as another user")
+	assert.Equal(t, refusals[0], refusals[2], "unknown id refused as another user")
+
+	project := igProject(t, s, "ig-read-project")
+	igProjectBinding(t, s, admin, project, store.ProjectRoleOwner)
+	adminUser := NewAuthenticatedUser(admin, admin+"@test.com", admin, "admin", "api")
+	projectCredential := NewScopedUserIdentityWithBoundaryAndDecoration(adminUser, projectBoundary(project),
+		[]string{"user:read"}, tid("ig-read-project-cred"), bearerCeiling(t, "user:read"), nil)
+	rec := doRequestAsIdentity(t, srv, projectCredential, http.MethodGet, path(target), nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "project boundary: %s", rec.Body.String())
+
+	rec = doRequest(t, srv, http.MethodGet, path(target), nil)
+	assert.Equal(t, http.StatusOK, rec.Code, "a session reads users: %s", rec.Body.String())
+}
+
 // TestRoleReadToken_DoesNotAdmitRoleWrites pins that role:read and
 // role_binding:read admit the role definition, permission registry and role
 // binding reads on a hub boundary, each read needs its own selector, the

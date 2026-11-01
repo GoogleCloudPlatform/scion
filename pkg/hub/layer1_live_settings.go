@@ -16,6 +16,7 @@ package hub
 
 import (
 	"reflect"
+	"slices"
 	"sync"
 	"time"
 
@@ -41,6 +42,9 @@ type startupLayer1Values struct {
 	// GitHubApp holds the non-secret GitHub App fields only. The private
 	// key and webhook secret are never part of a snapshot.
 	GitHubApp githubAppPublicConfig
+	// AuthorizedDomains is the sign-in domain list from settings.yaml and
+	// SCION_SERVER_* (ptone/scion#6000).
+	AuthorizedDomains []string
 }
 
 // githubAppPublicConfig is the part of GitHubAppServerConfig that the
@@ -87,6 +91,7 @@ func (s *Server) recordStartupLayer1Values() {
 		AutoExposePortsDefault: copyBoolPtr(s.config.AutoExposePortsDefault),
 		TelemetryConfig:        s.config.TelemetryConfig,
 		GitHubApp:              githubAppPublicFrom(s.config.GitHubAppConfig),
+		AuthorizedDomains:      slices.Clone(s.config.AuthorizedDomains),
 	}
 }
 
@@ -206,6 +211,10 @@ type layer1ApplySkips struct {
 	// FederationReason is set when the federation configuration was not
 	// installed.
 	FederationReason string
+	// AuthorizedDomainsPinned is set when a SCION_SERVER_* variable pins
+	// authorized_domains on this node, so a saved list is not applied
+	// (ptone/scion#6000).
+	AuthorizedDomainsPinned bool
 }
 
 // layer1ApplySkips returns the items the last ApplySnapshot skipped.
@@ -221,5 +230,8 @@ func (s *Server) layer1ApplySkips() layer1ApplySkips {
 	s.federationApply.mu.Lock()
 	out.FederationReason = s.federationApply.skipReason
 	s.federationApply.mu.Unlock()
+	if ops := s.GetOperationalSettings(); ops != nil {
+		out.AuthorizedDomainsPinned = slices.Contains(ops.EnvOverriddenKeys(), authorizedDomainsKey)
+	}
 	return out
 }

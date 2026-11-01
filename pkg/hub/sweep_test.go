@@ -99,6 +99,187 @@ func TestFailedMessageRetentionHandler_HonorsConfiguredWindow(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound, "configured 1-day window purges the 2-day-old message")
 }
 
+// TestFailedMessageRetentionHandler_DrainsBacklogAcrossTicks pins the
+// chunked purge's tick behavior (ptone/scion#6954): with the tick budget
+// spent after one chunk, a backlog larger than a chunk drains over several
+// ticks, each tick resumes from the saved cursor, the cursor resets when the
+// pass completes, and kept rows (failed user: rows, failed rows newer than
+// the cutoff) survive.
+func TestFailedMessageRetentionHandler_DrainsBacklogAcrossTicks(t *testing.T) {
+	prevChunk, prevPause, prevBudget := failedPurgeChunkSize, failedPurgeChunkPause, failedPurgeTickBudget
+	failedPurgeChunkSize, failedPurgeChunkPause, failedPurgeTickBudget = 2, 0, 0
+	t.Cleanup(func() {
+		failedPurgeChunkSize, failedPurgeChunkPause, failedPurgeTickBudget = prevChunk, prevPause, prevBudget
+	})
+
+	srv, cs := newSweepTestServer(t)
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	old := time.Now().Add(-8 * 24 * time.Hour)
+	create := func(recipient string, created time.Time) string {
+		m := &store.Message{
+			ID: uuid.NewString(), ProjectID: projectID,
+			Sender: "user:x", Recipient: recipient, Msg: "m",
+			DispatchState: store.MessageDispatchFailed,
+			CreatedAt:     created,
+		}
+		require.NoError(t, cs.CreateMessage(ctx, m))
+		return m.ID
+	}
+	var purge []string
+	for i := 0; i < 5; i++ {
+		purge = append(purge, create("agent:a", old.Add(time.Duration(i)*time.Minute)))
+	}
+	keepUser := create("user:alice", old.Add(90*time.Second))
+	keepRecent := create("agent:a", time.Now())
+
+	remaining := func() int {
+		n := 0
+		for _, id := range purge {
+			if _, err := cs.GetMessage(ctx, id); err == nil {
+				n++
+			}
+		}
+		return n
+	}
+
+	// Six candidates (five agent rows, one user row) in chunks of two: three
+	// full chunks, then an empty one that completes the pass.
+	var late string
+	wantRemaining := []int{3, 2, 0}
+	for tick, want := range wantRemaining {
+		srv.failedMessageRetentionHandler()(ctx)
+		assert.Equal(t, want, remaining(), "after tick %d", tick+1)
+		assert.False(t, srv.failedPurge.cursor.IsStart(), "an unfinished pass keeps its cursor after tick %d", tick+1)
+		if tick == 0 {
+			// A row that turns failed mid-pass with a created older than
+			// the saved cursor, as a stuck-pending expiry leaves it.
+			require.True(t, old.Add(-time.Minute).Before(srv.failedPurge.cursor.Created))
+			late = create("agent:a", old.Add(-time.Minute))
+		}
+	}
+	_, err := cs.GetMessage(ctx, late)
+	require.NoError(t, err, "a row behind the cursor is not reached in the current pass")
+
+	srv.failedMessageRetentionHandler()(ctx)
+	assert.True(t, srv.failedPurge.cursor.IsStart(), "a completed pass resets the cursor")
+	_, err = cs.GetMessage(ctx, late)
+	require.NoError(t, err, "the tick that completes the pass walks only past the cursor")
+
+	// The next pass starts from the beginning and reaches it.
+	srv.failedMessageRetentionHandler()(ctx)
+	_, err = cs.GetMessage(ctx, late)
+	assert.ErrorIs(t, err, store.ErrNotFound, "the next pass purges the row left behind the cursor")
+
+	_, err = cs.GetMessage(ctx, keepUser)
+	require.NoError(t, err, "failed user: rows are never purged")
+	_, err = cs.GetMessage(ctx, keepRecent)
+	require.NoError(t, err, "failed rows inside the retention window survive")
+}
+
+// setFailedPurgeKnobs sets the chunked purge's tuning vars for one test.
+func setFailedPurgeKnobs(t *testing.T, chunk int, pause, budget time.Duration) {
+	t.Helper()
+	prevChunk, prevPause, prevBudget := failedPurgeChunkSize, failedPurgeChunkPause, failedPurgeTickBudget
+	failedPurgeChunkSize, failedPurgeChunkPause, failedPurgeTickBudget = chunk, pause, budget
+	t.Cleanup(func() {
+		failedPurgeChunkSize, failedPurgeChunkPause, failedPurgeTickBudget = prevChunk, prevPause, prevBudget
+	})
+}
+
+// createOldFailedAgentMessages creates n failed agent: messages past the
+// default retention window, one minute apart, and returns their IDs.
+func createOldFailedAgentMessages(t *testing.T, cs store.Store, n int) []string {
+	t.Helper()
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	old := time.Now().Add(-8 * 24 * time.Hour)
+	ids := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		m := &store.Message{
+			ID: uuid.NewString(), ProjectID: projectID,
+			Sender: "user:x", Recipient: "agent:a", Msg: "m",
+			DispatchState: store.MessageDispatchFailed,
+			CreatedAt:     old.Add(time.Duration(i) * time.Minute),
+		}
+		require.NoError(t, cs.CreateMessage(ctx, m))
+		ids = append(ids, m.ID)
+	}
+	return ids
+}
+
+// TestPurgeFailedMessages_RunsSeveralChunksInOneTick pins that within the
+// tick budget one tick runs chunk after chunk, pausing between them, until
+// the pass completes.
+func TestPurgeFailedMessages_RunsSeveralChunksInOneTick(t *testing.T) {
+	setFailedPurgeKnobs(t, 2, time.Millisecond, 10*time.Second)
+	srv, cs := newSweepTestServer(t)
+	ctx := context.Background()
+	ids := createOldFailedAgentMessages(t, cs, 5)
+
+	cutoff := time.Now().UTC().AddDate(0, 0, -defaultFailedMessageRetentionDays)
+	purged, chunks, done, err := srv.purgeFailedMessages(ctx, cutoff)
+	require.NoError(t, err)
+	assert.Equal(t, 5, purged)
+	assert.Equal(t, 3, chunks, "five rows in chunks of two: two full chunks and a short last one")
+	assert.True(t, done)
+	assert.True(t, srv.failedPurge.cursor.IsStart(), "a completed pass resets the cursor")
+	for _, id := range ids {
+		_, err := cs.GetMessage(ctx, id)
+		assert.ErrorIs(t, err, store.ErrNotFound)
+	}
+}
+
+// cancelAfterChunkStore, once its switch is armed, cancels a context after
+// each successful purge chunk, so the purge loop sees the cancellation in
+// the pause that follows.
+type cancelAfterChunkStore struct {
+	store.Store
+	fault  *storeFaultSwitch
+	cancel context.CancelFunc
+}
+
+func (s *cancelAfterChunkStore) PurgeFailedMessagesChunk(ctx context.Context, cutoff time.Time, after store.MessagePosition, limit int, maxDuration time.Duration) (store.FailedMessagePurgeChunk, error) {
+	res, err := s.Store.PurgeFailedMessagesChunk(ctx, cutoff, after, limit, maxDuration)
+	if err == nil && s.fault.Active() {
+		s.cancel()
+	}
+	return res, err
+}
+
+// TestPurgeFailedMessages_CancelDuringPauseKeepsCommittedCursor pins that a
+// context cancelled during the pause between chunks ends the tick with the
+// context's error and leaves the cursor at the last committed chunk.
+func TestPurgeFailedMessages_CancelDuringPauseKeepsCommittedCursor(t *testing.T) {
+	// A long pause, so the select can only end on the cancelled context: a
+	// short one could race its timer against the cancellation.
+	setFailedPurgeKnobs(t, 2, time.Minute, 10*time.Minute)
+	srv, cs := newSweepTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *cancelAfterChunkStore {
+		return &cancelAfterChunkStore{Store: inner, fault: f, cancel: cancel}
+	})
+	ids := createOldFailedAgentMessages(t, cs, 5)
+	fault.Arm()
+
+	cutoff := time.Now().UTC().AddDate(0, 0, -defaultFailedMessageRetentionDays)
+	purged, chunks, done, err := srv.purgeFailedMessages(ctx, cutoff)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, 2, purged, "the first chunk committed before the cancellation")
+	assert.Equal(t, 1, chunks)
+	assert.False(t, done)
+	assert.Equal(t, ids[1], srv.failedPurge.cursor.ID, "the cursor is the last row of the committed chunk")
+
+	// The next tick resumes from that cursor. It runs on a fresh context,
+	// which the armed wrapper's cancel does not reach.
+	failedPurgeChunkPause = 0
+	purged, _, done, err = srv.purgeFailedMessages(context.Background(), cutoff)
+	require.NoError(t, err)
+	assert.Equal(t, 3, purged)
+	assert.True(t, done)
+}
+
 func TestBrokerMessageSweepHandler_FailsPendingMessagesWithMissingRecipient(t *testing.T) {
 	srv, cs := newSweepTestServer(t)
 	ctx := context.Background()

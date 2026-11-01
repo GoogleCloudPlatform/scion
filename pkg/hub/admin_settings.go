@@ -313,8 +313,7 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 	// While the test admin tier is on, federation settings are refused on
 	// every write path, resets included (G8).
 	if sectionName == "federation" && s.testAdminTierOn() {
-		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-			errTestAdminFederationRefused.Error(), map[string]interface{}{"keys": []string{"federation"}})
+		writeFederationRefused(w, errTestAdminFederationRefused.Error())
 		return
 	}
 
@@ -322,6 +321,13 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 	if sec == nil {
 		writeError(w, http.StatusNotFound, ErrCodeNotFound,
 			"Unknown section: "+sectionName, nil)
+		return
+	}
+
+	// Resetting access returns it to the bootstrap values; like a save, it
+	// may not leave access settings that refuse sign-in for the account
+	// making it (ptone/scion#6000).
+	if sectionName == "access" && s.rejectAccessResetLockout(r.Context(), w, ops) {
 		return
 	}
 
@@ -550,7 +556,7 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// validated before anything is written.
 	instancesPresent, instances, err := brokerInstancesInBody(rawBody)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+		writeServerConfigFileError(w, err)
 		return
 	}
 	// Any other key the typed decode drops (unknown, misspelt, or a flat
@@ -576,7 +582,7 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	if req.Server != nil && req.Server.Hub != nil && req.Server.Hub.AgentEndpoint != "" {
 		normalized, err := config.ValidateAgentEndpoint(req.Server.Hub.AgentEndpoint)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+			writeSettingsFieldError(w, "server.hub.agent_endpoint", err.Error())
 			return
 		}
 		req.Server.Hub.AgentEndpoint = normalized
@@ -596,8 +602,8 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		doc, err := json.Marshal(opsettings.AccessSettings{DefaultUserRole: req.Server.Auth.DefaultUserRole})
 		if err == nil {
 			if errs := opsettings.Validate("access", doc); len(errs) > 0 {
-				writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
-					fmt.Sprintf("invalid server.auth.default_user_role %q: must be \"member\" or \"viewer\"", req.Server.Auth.DefaultUserRole), nil)
+				writeSettingsFieldError(w, "server.auth.default_user_role",
+					fmt.Sprintf("invalid server.auth.default_user_role %q: must be \"member\" or \"viewer\"", req.Server.Auth.DefaultUserRole))
 				return
 			}
 		}
@@ -607,7 +613,7 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// quantity; reject a bad value here, naming its key, rather than writing
 	// it to settings.yaml where it would fail every agent start.
 	if errs := config.ValidateSharedDirSizes(req.Runtimes, req.Profiles); len(errs) > 0 {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, errs[0].Error(), nil)
+		writeSettingsValidationErrors(w, errs)
 		return
 	}
 
@@ -616,7 +622,7 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// overrides), and the storage blocks in the request must resolve to
 	// one server.project_storage.
 	if errs := config.RemovedStorageOverrideErrors(req.Runtimes, req.Profiles, nil); len(errs) > 0 {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, errs[0].Error(), nil)
+		writeSettingsValidationErrors(w, errs)
 		return
 	}
 
@@ -626,14 +632,23 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// count or low memory is accepted with a warning.
 	qErrs, qWarnings := config.ValidateResourceQuantities(req.DefaultResources, req.Profiles)
 	if len(qErrs) > 0 {
-		writeResourceQuantityError(w, http.StatusBadRequest, ErrCodeInvalidRequest, qErrs)
+		writeSettingsValidationErrors(w, qErrs)
 		return
 	}
 	if req.Server != nil {
 		if _, _, err := config.SynthesizeProjectStorage(req.Server.ProjectStorage, req.Server.WorkspaceStorage, req.Server.SharedDirStorage, req.Server.HomeStorage); err != nil {
-			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), projectStorageFieldErrorDetails(err))
+			writeSettingsValidation(w, err.Error(), projectStorageEntries(err), nil)
 			return
 		}
+	}
+
+	// A save that sends authorized_domains or admin_emails may not leave
+	// access settings that refuse sign-in for the saving account
+	// (ptone/scion#6000). In file mode (one node) a domain list
+	// SCION_SERVER_* sets stays in effect after the reload, so sending it
+	// alone is not checked.
+	if s.rejectFileAccessLockout(w, r, rawBody, &req) {
+		return
 	}
 
 	globalDir, err := config.GetGlobalDir()
@@ -728,7 +743,11 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// only in part is validated again as merged with the stored fields.
 	if req.Server != nil {
 		if err := validateMergedServerSections(raw, rawServer); err != nil {
-			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), projectStorageFieldErrorDetails(err))
+			if errors.Is(err, errServerSectionUnreadable) {
+				writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+				return
+			}
+			writeSettingsValidation(w, err.Error(), projectStorageEntries(err), nil)
 			return
 		}
 	}
@@ -742,7 +761,7 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 			tls = req.Telemetry.Cloud.TLS
 		}
 		if err := config.ValidateV1TelemetryTLS(tls); err != nil {
-			writeError(w, http.StatusBadRequest, ErrCodeValidationError, err.Error(), nil)
+			writeSettingsFieldError(w, "telemetry.cloud.tls", err.Error())
 			return
 		}
 	}
@@ -768,8 +787,8 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	if req.DefaultTimezone != nil {
 		tz := *req.DefaultTimezone
 		if err := validateDefaultTimezone(tz); err != nil {
-			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-				fmt.Sprintf("invalid default_timezone %q: %v", tz, err), nil)
+			writeSettingsFieldError(w, "default_timezone",
+				fmt.Sprintf("invalid default_timezone %q: %v", tz, err))
 			return
 		}
 	}
@@ -801,7 +820,7 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 			// already stored that the save does not touch is a warning.
 			pErrs, pWarnings := config.RuntimeSaveChecks(stored.Runtimes, merged.Runtimes, stored.Profiles, merged.Profiles)
 			if len(pErrs) > 0 {
-				writeResourceQuantityError(w, http.StatusBadRequest, ErrCodeInvalidRequest, pErrs)
+				writeSettingsValidationErrors(w, pErrs)
 				return
 			}
 			saveWarnings = append(saveWarnings, resourceQuantityWarnings(pWarnings)...)
@@ -1124,9 +1143,8 @@ func rejectInvalidDefaultThinkingLevel(w http.ResponseWriter, field string, leve
 	if level == nil || validDefaultThinkingLevel(*level) {
 		return false
 	}
-	writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-		fmt.Sprintf("invalid %s %d: must be between 1 and 100; send null to clear it", field, *level),
-		map[string]interface{}{"field": field})
+	writeSettingsFieldError(w, field,
+		fmt.Sprintf("invalid %s %d: must be between 1 and 100; send null to clear it", field, *level))
 	return true
 }
 
@@ -1145,11 +1163,10 @@ func rejectNullFederation(w http.ResponseWriter, rawBody []byte) bool {
 	if v, sent := top.sentFold("federation"); !sent || !isJSONNull(v) {
 		return false
 	}
-	writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+	writeFederationRefused(w,
 		"federation cannot be null: to restore the bootstrap federation settings use "+
 			"DELETE /api/v1/admin/server-config/sections/federation (database-backed hubs); "+
-			"to clear individual fields send them explicitly (false, [] or \"\")",
-		map[string]interface{}{"keys": []string{"federation"}})
+			"to clear individual fields send them explicitly (false, [] or \"\")")
 	return true
 }
 

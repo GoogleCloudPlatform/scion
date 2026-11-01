@@ -57,8 +57,9 @@ export interface ProjectCreateDefaults {
   defaultHarnessAuth?: string;
   defaultModel?: string;
   defaultThinkingLevel?: number | null;
-  defaultMaxTurns?: number;
-  defaultMaxModelCalls?: number;
+  /** null or absent: no project value; 0: Unlimited; n: a limit. */
+  defaultMaxTurns?: number | null;
+  defaultMaxModelCalls?: number | null;
   defaultMaxDuration?: string;
   defaultResources?: AgentResourceSpec | null;
   telemetryEnabled?: boolean | null;
@@ -137,6 +138,11 @@ const RESOURCE_KEYS: ReadonlyArray<{
  *   ignores; the broker resolves the image from settings and the harness
  *   config.
  */
+/** A count limit as hint text: 0 is "Unlimited". */
+function countLimitText(n: number): string {
+  return n === 0 ? 'Unlimited' : String(n);
+}
+
 export function resolveInheritedPlaceholders(
   sources: InheritedSources
 ): Record<string, AgentConfigPlaceholder> {
@@ -164,12 +170,13 @@ export function resolveInheritedPlaceholders(
   if (ps.defaultHarnessAuth) {
     out['config.auth_selectedType'] = { value: ps.defaultHarnessAuth, source: FROM_PROJECT };
   }
-  if (ps.defaultMaxTurns) {
-    out['config.max_turns'] = { value: String(ps.defaultMaxTurns), source: FROM_PROJECT };
+  // A project count limit of 0 is Unlimited, not unset (ptone/scion#3925).
+  if (typeof ps.defaultMaxTurns === 'number') {
+    out['config.max_turns'] = { value: countLimitText(ps.defaultMaxTurns), source: FROM_PROJECT };
   }
-  if (ps.defaultMaxModelCalls) {
+  if (typeof ps.defaultMaxModelCalls === 'number') {
     out['config.max_model_calls'] = {
-      value: String(ps.defaultMaxModelCalls),
+      value: countLimitText(ps.defaultMaxModelCalls),
       source: FROM_PROJECT,
     };
   }

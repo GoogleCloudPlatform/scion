@@ -34,8 +34,8 @@ Edits to a template's `env` take effect on an agent's next start. Its job keys a
 | :--- | :--- | :--- |
 | `schema_version` | string | Should be `"1"`. |
 | `default_harness_config` | string | The name of the default harness config to use (e.g., `gemini`, `antigravity`). |
-| `agent_instructions` | string | Role-specific instructions for the agent (harness-agnostic). |
-| `system_prompt` | string | The system prompt to use for the agent (harness-agnostic). |
+| `agent_instructions` | string | Role-specific instructions for the agent (harness-agnostic). A value with a line break is inline text. A single-line value must be a relative path inside the template directory (an absolute path, `..` component, or `.` is refused); if a template in the chain has that path, it is read as a plain regular file of at most 4 MiB without following symlinks or hard links (an invalid or unreadable file is refused), and if no template in the chain has the file, the value is used as inline text (see [`scion-agent.yaml`](/scion/local/templates/#scion-agentyaml)). |
+| `system_prompt` | string | The system prompt to use for the agent (harness-agnostic). Follows the same relative template file or inline text rules as `agent_instructions`. |
 | `harness_config` | string | The harness config to use. When a template sets both this and `default_harness_config`, `default_harness_config` wins. |
 | `env` | map | Environment variables. In a template, a lowest-precedence fallback; see [Environment variables](#environment-variables-env). |
 | `detached` | bool | Run in background (default `true`). |
