@@ -105,7 +105,11 @@ func TestCallerMayReadProviders_GoodStandingAgent(t *testing.T) {
 	// Held: the same project and token shape as good; only the hold differs,
 	// and the gate refuses on standing.
 	require.Equal(t, standingReasonAgentHeld, standingReason(srv.agentStanding(ctx, held)))
-	require.NotEqual(t, unrecognized, readDecision(asAgent(held, project.ID)).Reason, "held: a real agent principal")
+	heldDecision := readDecision(asAgent(held, project.ID))
+	require.NotEqual(t, unrecognized, heldDecision.Reason, "held: a real agent principal")
+	// The kernel allows this principal, so the gate's own standing check is
+	// what refuses it.
+	require.True(t, heldDecision.Allowed, "held: the kernel allows the project read, so the gate's standing check refuses it: %q", heldDecision.Reason)
 	mayRead(asAgent(held, project.ID), false, "a held agent of the same project")
 
 	// Another project: the good agent itself, asserting another project, is
@@ -115,6 +119,8 @@ func TestCallerMayReadProviders_GoodStandingAgent(t *testing.T) {
 
 	// Unknown: no agent record, so the gate refuses on standing.
 	require.Equal(t, standingReasonAgentMissing, standingReason(srv.agentStanding(ctx, missing)))
-	require.NotEqual(t, unrecognized, readDecision(asAgent(missing, project.ID)).Reason, "unknown agent: a real agent principal")
+	missingDecision := readDecision(asAgent(missing, project.ID))
+	require.NotEqual(t, unrecognized, missingDecision.Reason, "unknown agent: a real agent principal")
+	require.True(t, missingDecision.Allowed, "unknown agent: the kernel allows the project read, so the gate's standing check refuses it: %q", missingDecision.Reason)
 	mayRead(asAgent(missing, project.ID), false, "an unknown agent")
 }
