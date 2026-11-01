@@ -358,15 +358,14 @@ The superseded notice names the layer each deployment value comes from: `SCION_S
 
 ### Error Handling
 
-The admin UI provides structured feedback on save:
+The admin UI provides structured feedback on save. Every error uses the common envelope `{"error": {"code", "message", "details"}}` (see [Settings save errors](/scion/reference/api/#admin-apiv1admin)):
 
 | Response | UI Treatment |
 |----------|-------------|
 | **200** | Success; shows ignored-keys notice if applicable |
-| **400** `validation_failed` | Inline per-section validation errors |
 | **409** `revision_conflict` | "Settings changed since you loaded this page" banner with Reload button, listing any keys saved before the conflict (`applied_keys`, `pending_restart`, and `skipped`) |
 | **409** `legacy_server_yaml` | Shows the message: the server config still comes from a deprecated `server.yaml`; move it under `server:` in `settings.yaml`, remove `server.yaml`, then save again. Nothing was saved |
-| **422** `validation_error` | On a database-backed Hub, a duration-valued key, including one nested in a map, does not parse as a duration (for example `"5 minutes"`); `details.field` names the full key path. `""` or `null` clears the key. Also: `default_thinking_level` outside 1-100 (`0` included; `null` clears it), or `{"federation": null}` (`details.keys`). Nothing was saved |
+| **422** `validation_error` | Inline validation errors at each field: `details.errors` lists every rejected value with its koanf path in `field` (and `section` for a schema error). For example a value that fails the section schema, a duration-valued key, including one nested in a map, that does not parse as a duration (for example `"5 minutes"`; `""` or `null` clears the key), `default_thinking_level` outside 1-100 (`0` included; `null` clears it), or `{"federation": null}` (`details.keys`). Nothing was saved |
 | **422** `layer0_rejected` | Safety-net notice on hosted Hubs (should not occur with layer-aware UI) |
 | **422** `startup_only_key_rejected` | On a database-backed Hub, `telemetry.cloud.cloud_logging` was sent with a value different from what `GET` returns (`keys: ["telemetry.cloud.cloud_logging"]`); nothing was saved |
 | **422** `unclassified_keys_rejected` / `unpersisted_keys_rejected` / `hub_owned_keys_rejected` / `unsaved_keys_rejected` | Shows the message and the offending keys; nothing was saved |

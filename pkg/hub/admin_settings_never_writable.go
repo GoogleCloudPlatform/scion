@@ -272,7 +272,6 @@ func (s *Server) rejectGateProtectedSettingsKeys(w http.ResponseWriter, rawBody 
 			break
 		}
 	}
-	writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, msg,
-		map[string]interface{}{"keys": keys})
+	writeSettingsKeysError(w, msg, keys)
 	return true
 }

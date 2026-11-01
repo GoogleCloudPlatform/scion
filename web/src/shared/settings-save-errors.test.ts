@@ -160,6 +160,7 @@ describe('classifySettingsError — validation', () => {
     const err = classifySettingsError(
       422,
       {
+        // The body as earlier hubs sent it: a fixed message and string entries.
         error: {
           code: 'validation_error',
           message: 'federation config validation failed',
@@ -172,6 +173,112 @@ describe('classifySettingsError — validation', () => {
       ['federation', null, 'federation config validation failed'],
       ['federation', null, 'trusted_issuers[0]: issuer_url is required'],
     ]);
+  });
+});
+
+describe('classifySettingsError — one envelope (ptone/scion#4450)', () => {
+  it('reads every details.errors entry of a nested 422, with section and koanf field', () => {
+    const err = classifySettingsError(
+      422,
+      {
+        error: {
+          code: 'validation_error',
+          message: 'server.auth.default_user_role: bad role',
+          details: {
+            field: 'server.auth.default_user_role',
+            errors: [
+              {
+                section: 'access',
+                field: 'server.auth.default_user_role',
+                path: '/default_user_role',
+                message: 'bad role',
+              },
+              {
+                section: 'telemetry',
+                field: 'telemetry.cloud.endpoint',
+                path: '/cloud/endpoint',
+                message: 'is required',
+              },
+            ],
+          },
+        },
+      },
+      CTX
+    );
+    expect(err.kind).toBe('validation');
+    expect(err.fieldErrors).toEqual([
+      {
+        section: 'access',
+        key: 'server.auth.default_user_role',
+        path: '/default_user_role',
+        message: 'bad role',
+      },
+      {
+        section: 'telemetry',
+        key: 'telemetry.cloud.endpoint',
+        path: '/cloud/endpoint',
+        message: 'is required',
+      },
+    ]);
+  });
+
+  it('uses a koanf field in dotted form when no section mapping is known', () => {
+    const err = classifySettingsError(422, {
+      error: {
+        code: 'validation_error',
+        message: 'server.federation.algorithms: bad alg',
+        details: {
+          field: 'server.federation.algorithms',
+          errors: [
+            { section: 'federation', field: 'server.federation.algorithms', message: 'bad alg' },
+            { field: 'server.federation.trusted_issuers[1].issuer_type', message: 'bad type' },
+          ],
+        },
+      },
+    });
+    expect(err.fieldErrors.map((e) => [e.section, e.key, e.message])).toEqual([
+      ['federation', 'server.federation.algorithms', 'bad alg'],
+      [null, 'server.federation.trusted_issuers.1.issuer_type', 'bad type'],
+    ]);
+  });
+
+  it('reads a nested 409 revision_conflict from details', () => {
+    const err = classifySettingsError(409, {
+      error: {
+        code: 'revision_conflict',
+        message: 'One or more sections have been modified since the expected revision.',
+        details: {
+          conflicted: [{ section: 'lifecycle', expected_revision: 1, current_revision: 2 }],
+          applied: { access: 2 },
+          applied_keys: ['server.hub.admin_emails'],
+          pending_restart: ['server.hub.public_url'],
+          skipped: [{ key: 'server.x', reason: 'r' }],
+        },
+      },
+    });
+    expect(err.kind).toBe('conflict');
+    expect(err.conflicted).toEqual([
+      { section: 'lifecycle', expected_revision: 1, current_revision: 2 },
+    ]);
+    expect(err.appliedKeys).toEqual(['server.hub.admin_emails']);
+    expect(err.pendingRestart).toEqual(['server.hub.public_url']);
+    expect(err.skipped).toEqual([{ key: 'server.x', reason: 'r' }]);
+  });
+
+  it('reads a nested 422 layer0_rejected with details.keys', () => {
+    const err = classifySettingsError(422, {
+      error: {
+        code: 'layer0_rejected',
+        message: 'Bootstrap settings are managed via settings.yaml.',
+        details: {
+          keys: ['server.database.driver'],
+          field: 'server.database.driver',
+          errors: [{ field: 'server.database.driver', message: 'x' }],
+        },
+      },
+    });
+    expect(err.kind).toBe('layer0');
+    expect(err.keys).toEqual(['server.database.driver']);
   });
 });
 

@@ -61,21 +61,27 @@ func seedPlacement(t *testing.T, f *fakeHubSettingStore, ops *OperationalSetting
 
 // A body that sends runtimes or profiles spelt in another case, or twice,
 // is refused before the typed decode reads it, and nothing is written: a
-// case variant by the placement check (validation_failed), a repeated
-// member by the earlier repeated-member check (invalid_request).
+// case variant by the placement check (422 validation_error), a repeated
+// member by the earlier repeated-member check (400 invalid_request).
 func TestPutSettingsRepeatedPlacementSectionRefused(t *testing.T) {
 	tempSettingsHome(t)
-	for _, tc := range []struct{ body, code string }{
-		{`{"Runtimes":{"d":{"type":"docker"}}}`, "validation_failed"},
-		{`{"PROFILES":{"p":{"runtime":"docker"}}}`, "validation_failed"},
-		{`{"runtimes":{"k":{"type":"kubernetes"}},"runtimes":{"d":{"type":"docker"}}}`, ErrCodeInvalidRequest},
-		{`{"runtimes":{"k":{"type":"kubernetes"}},"Runtimes":{"d":{"type":"docker"}}}`, ErrCodeInvalidRequest},
+	for _, tc := range []struct {
+		body, code string
+		status     int
+	}{
+		{`{"Runtimes":{"d":{"type":"docker"}}}`, ErrCodeValidationError, http.StatusUnprocessableEntity},
+		{`{"PROFILES":{"p":{"runtime":"docker"}}}`, ErrCodeValidationError, http.StatusUnprocessableEntity},
+		{`{"runtimes":{"k":{"type":"kubernetes"}},"runtimes":{"d":{"type":"docker"}}}`, ErrCodeInvalidRequest, http.StatusBadRequest},
+		{`{"runtimes":{"k":{"type":"kubernetes"}},"Runtimes":{"d":{"type":"docker"}}}`, ErrCodeInvalidRequest, http.StatusBadRequest},
 	} {
 		t.Run(tc.body, func(t *testing.T) {
 			srv, fake, ops := newTestDBServer(t)
 			rr := putServerConfigDB(t, srv, ops, tc.body)
-			require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
-			assert.Contains(t, rr.Body.String(), tc.code)
+			require.Equal(t, tc.status, rr.Code, rr.Body.String())
+			assert.Equal(t, tc.code, settingsErrorFields(t, rr.Body.Bytes())["error"])
+			if tc.status == http.StatusUnprocessableEntity {
+				settingsErrorEntries(t, rr)
+			}
 			requireNoPlacementRow(t, fake, "runtimes")
 			requireNoPlacementRow(t, fake, "profiles")
 		})
@@ -209,7 +215,7 @@ func TestPutSettingsPlacementDependencyRevisionConflict(t *testing.T) {
 	var resp struct {
 		Conflicted []map[string]interface{} `json:"conflicted"`
 	}
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.NoError(t, json.Unmarshal(settingsErrorDetailsJSON(t, rr.Body.Bytes()), &resp))
 	require.Len(t, resp.Conflicted, 2, rr.Body.String())
 	assert.Equal(t, "runtimes", resp.Conflicted[0]["section"])
 	assert.Equal(t, map[string]interface{}{
@@ -316,8 +322,8 @@ func TestResetPlacementSectionChecksPair(t *testing.T) {
 		Error struct {
 			Code    string `json:"code"`
 			Details struct {
-				Field  string   `json:"field"`
-				Errors []string `json:"errors"`
+				Field  string               `json:"field"`
+				Errors []settingsFieldError `json:"errors"`
 			} `json:"details"`
 		} `json:"error"`
 	}
@@ -325,7 +331,7 @@ func TestResetPlacementSectionChecksPair(t *testing.T) {
 	assert.Equal(t, ErrCodeValidationError, resp.Error.Code)
 	assert.Equal(t, "profiles.fast.runtime", resp.Error.Details.Field)
 	require.Len(t, resp.Error.Details.Errors, 1, rr.Body.String())
-	assert.Contains(t, resp.Error.Details.Errors[0], "profiles.fast.runtime")
+	assert.Equal(t, "profiles.fast.runtime", resp.Error.Details.Errors[0].Field)
 	requirePlacementRow(t, fake, "runtimes", 1, `{"pool-rt":{"type":"kubernetes","namespace":"agents"}}`)
 
 	// Without the profile's placement the same reset is valid.
@@ -358,7 +364,7 @@ func TestResetPlacementSectionRevisionConflict(t *testing.T) {
 	var resp struct {
 		Conflicted []map[string]interface{} `json:"conflicted"`
 	}
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.NoError(t, json.Unmarshal(settingsErrorDetailsJSON(t, rr.Body.Bytes()), &resp))
 	require.Len(t, resp.Conflicted, 2, rr.Body.String())
 	assert.Equal(t, "runtimes", resp.Conflicted[0]["section"])
 	assert.Equal(t, true, resp.Conflicted[1]["read"])
@@ -414,7 +420,7 @@ func TestPutSettingsPlacementGuardReadBeforeSnapshot(t *testing.T) {
 	var resp struct {
 		Conflicted []map[string]interface{} `json:"conflicted"`
 	}
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.NoError(t, json.Unmarshal(settingsErrorDetailsJSON(t, rr.Body.Bytes()), &resp))
 	require.Len(t, resp.Conflicted, 2, rr.Body.String())
 	assert.Equal(t, map[string]interface{}{
 		"section": "profiles", "expected_revision": float64(1), "current_revision": float64(2), "read": true,
@@ -440,7 +446,7 @@ func TestResetPlacementSectionGuardReadBeforeSnapshot(t *testing.T) {
 	var resp struct {
 		Conflicted []map[string]interface{} `json:"conflicted"`
 	}
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.NoError(t, json.Unmarshal(settingsErrorDetailsJSON(t, rr.Body.Bytes()), &resp))
 	require.Len(t, resp.Conflicted, 2, rr.Body.String())
 	assert.Equal(t, true, resp.Conflicted[1]["read"])
 	requirePlacementRow(t, fake, "runtimes", 1, `{"pool-rt":{"type":"kubernetes","namespace":"agents"}}`)

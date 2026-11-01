@@ -45,7 +45,7 @@ var placementSections = []string{"profiles", "runtimes"}
 // its checks use.
 var placementSnapshotHook func()
 
-// rejectRepeatedPlacementSections writes a 400 validation_failed when the
+// rejectRepeatedPlacementSections writes a 422 validation_error when the
 // JSON object body sends runtimes or profiles under a name that matches
 // only without regard to case: the typed decode would still read it, so
 // the section would be saved under a name the save checks do not see. A
@@ -78,16 +78,14 @@ func rejectRepeatedPlacementSections(w http.ResponseWriter, rawBody []byte) (don
 	if len(bad) == 0 {
 		return false
 	}
-	errs := map[string][]config.ValidationError{}
+	var entries []settingsFieldError
 	for _, section := range placementSections {
 		if bad[section] {
-			errs[section] = []config.ValidationError{{Path: section, Message: section + ": spell the section name in lower case"}}
+			entries = append(entries, settingsFieldError{Section: section, Field: section,
+				Message: section + ": spell the section name in lower case"})
 		}
 	}
-	writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-		"error":  "validation_failed",
-		"errors": errs,
-	})
+	writeSettingsValidation(w, entries[0].Message, entries, nil)
 	return true
 }
 
@@ -190,23 +188,15 @@ func (s *Server) resetPlacementSection(ctx context.Context, w http.ResponseWrite
 	errs, _ := config.RuntimeSaveChecks(snap.Runtimes, runtimes, snap.Profiles, profiles)
 	pairErrs, _ := config.PlacementPairSaveChecks(snap.Runtimes, runtimes, snap.Profiles, profiles)
 	if errs = append(errs, pairErrs...); len(errs) > 0 {
-		writeResourceQuantityError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, errs)
+		writeSettingsValidationErrors(w, errs)
 		return false
 	}
 	err = ops.deleteGuarded(ctx, section, row.Revision, reads)
 	switch {
 	case errors.Is(err, store.ErrRevisionConflict):
-		conflicted := []map[string]interface{}{{
-			"section":           section,
-			"expected_revision": row.Revision,
-			"current_revision":  s.getCurrentRevision(ops, section),
-		}}
+		conflicted := []map[string]interface{}{settingsConflictEntry(section, row.Revision, s.getCurrentRevision(ops, section))}
 		conflicted = append(conflicted, placementReadConflicts(ctx, ops, reads, map[string]bool{section: true})...)
-		writeJSON(w, http.StatusConflict, map[string]interface{}{
-			"error":      "revision_conflict",
-			"message":    "The section, or the section checked with it, changed during the reset.",
-			"conflicted": conflicted,
-		})
+		writeSettingsRevisionConflict(w, "The section, or the section checked with it, changed during the reset.", conflicted, nil)
 		return false
 	case err != nil:
 		slog.Error("Failed to reset section", "section", section, "error", err)
