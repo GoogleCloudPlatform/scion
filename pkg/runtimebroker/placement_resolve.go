@@ -633,7 +633,8 @@ func (s *Server) checkStartLegacyPlacement(agentName, projectPath string, inline
 // (placementForStart). An agent with no stored config yet has nothing to
 // check before the stop: Manager.Start checks the config it provisions with
 // the same operator rules (config.ApplyPlacement), as checkStartOperatorPlacement
-// leaves it on start. A stored config that exists but cannot be read or
+// leaves it on start. A restart request carries no kubernetes block, so
+// that later check cannot refuse anything the restart itself brings. A stored config that exists but cannot be read or
 // parsed still fails closed, and so does a restart with no project path.
 func (s *Server) checkRestartLegacyPlacement(agentName, projectPath string, sharedWorkspace bool, rp *api.ResolvedPlacement) error {
 	if rp != nil && rp.OperatorOwned {
