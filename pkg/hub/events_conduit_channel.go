@@ -25,8 +25,8 @@ import (
 // delivered on commit or neither is), every subject a relay acts on: the
 // revocation subjects that trigger a re-check, the settings change subject,
 // and the grant key change subject (the relay hints its targets to fetch
-// keys; the notice carries the subject only). A conduit notice carries the subject and identifiers only: no
-// entity body, credential or token.
+// keys; the notice carries the subject only). A conduit notice carries the
+// subject and identifiers only: no entity body, credential or token.
 
 // pgConduitChannel is the dedicated conduit channel.
 const pgConduitChannel = "scion_ev_conduit"
