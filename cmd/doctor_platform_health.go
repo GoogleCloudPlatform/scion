@@ -585,7 +585,7 @@ func brokerProfileRuntimeWarnings(b hubclient.HealthSummaryBroker) []string {
 		if !ok || profile == "" || value != "unavailable" {
 			continue
 		}
-		out = append(out, fmt.Sprintf("broker %s: the runtime of profile %s is unreachable; fix the profile's runtime configuration or remove the profile", name, profile))
+		out = append(out, fmt.Sprintf("broker %s: the runtime of profile %s is not available on this broker; check the profile's runtime configuration if agents use it", name, profile))
 	}
 	sort.Strings(out)
 	return out
