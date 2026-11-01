@@ -962,6 +962,10 @@ func buildProvisionContext(ctx context.Context, opts api.StartOptions) (context.
 // HarnessAuth override onto scion-agent.json. Extracted (the same
 // argument the design makes for deriveAgentConfig) so a future change to any
 // of these three steps cannot silently apply to only one of the two callers.
+// provisionFinish is Provision's call of finishProvision, replaceable in
+// tests to fail a create after GetAgent has made the agent directory.
+var provisionFinish = (*AgentManager).finishProvision
+
 func (m *AgentManager) finishProvision(opts api.StartOptions, agentDir, agentHome string, cfg *api.ScionConfig) error {
 	_ = UpdateAgentConfig(opts.Name, opts.ProjectPath, "created", m.Runtime.Name(), opts.Profile)
 
@@ -1365,15 +1369,18 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 		return cfg, err
 	}
 
-	if err := m.finishProvision(opts, agentDir, agentHome, cfg); err != nil {
-		return cfg, err
-	}
 	// A create: the later start must not mistake this agent for one that
 	// predates per-agent NFS directories (see nfsKeepSharedCheckout and
-	// cloudRunKeepSharedCheckout).
+	// cloudRunKeepSharedCheckout). Recorded as soon as GetAgent has made
+	// the agent directory, before anything else can fail: a create that
+	// fails later and is started afterwards (not as a create) would
+	// otherwise be pinned to the shared checkout for good.
 	if opts.FreshProvision {
 		recordNFSAgentDir(agentDir, opts.Name)
 		recordCloudRunAgentWorkspace(agentDir, opts.Name)
+	}
+	if err := provisionFinish(m, opts, agentDir, agentHome, cfg); err != nil {
+		return cfg, err
 	}
 
 	// A provision-only create carries no run (the hub mints runs only for

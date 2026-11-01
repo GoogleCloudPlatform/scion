@@ -16,6 +16,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -187,4 +188,47 @@ func TestProvisionThenStart_CloudRunClonePerAgentKeepsOwnWorkspace(t *testing.T)
 	require.NoError(t, err)
 	assert.Contains(t, cfg.Env, "SCION_WORKSPACE_MODE=clone-per-agent")
 	assert.NotContains(t, cfg.Env, "SCION_WORKSPACE_MODE=shared-plain")
+}
+
+// A provision-only create that fails after the agent directory exists
+// (finishProvision, injected) has already recorded the
+// agent's own workspace, so a later start (not a create) keeps
+// clone-per-agent instead of pinning the agent to the shared checkout.
+func TestProvisionFailedThenStart_CloudRunClonePerAgentKeepsOwnWorkspace(t *testing.T) {
+	mountRoot := filepath.Join(t.TempDir(), "nfs")
+	require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share-1"), 0o755))
+	f := newSharedDirStorageRunFixture(t)
+	f.writeGlobalSettings(t, fmt.Sprintf(nfsWorkspaceStartYAML, mountRoot))
+	var cfg runtime.RunConfig
+	mgr := NewManager(&runtime.MockRuntime{
+		NameFunc: func() string { return "cloudrun" },
+		RunFunc: func(ctx context.Context, rc runtime.RunConfig) (string, error) {
+			cfg = rc
+			return "mock-id", nil
+		},
+	})
+	env := func() map[string]string {
+		return map[string]string{"SCION_PROJECT_ID": testNFSWorkspaceProjectID, "SCION_WORKSPACE_MODE": "clone-per-agent"}
+	}
+	agentDir := filepath.Join(f.projectScionDir, "agents", "test-agent")
+	orig := provisionFinish
+	provisionFinish = func(*AgentManager, api.StartOptions, string, string, *api.ScionConfig) error {
+		return errors.New("injected finishProvision failure")
+	}
+
+	opts := api.StartOptions{Name: "test-agent", ProjectPath: f.projectScionDir, NoAuth: true, GitClone: testGitClone}
+	provisionOpts := opts
+	provisionOpts.Env = env()
+	provisionOpts.FreshProvision = true
+	_, err := mgr.Provision(context.Background(), provisionOpts)
+	provisionFinish = orig
+	require.Error(t, err, "the create fails after the agent directory exists")
+	assert.Contains(t, err.Error(), "injected finishProvision failure")
+	assert.FileExists(t, filepath.Join(agentDir, cloudRunAgentWorkspaceRecordFile), "recorded before the failure")
+	assert.FileExists(t, filepath.Join(agentDir, nfsAgentDirRecordFile), "recorded before the failure")
+
+	opts.Env = env()
+	_, err = mgr.Start(context.Background(), opts)
+	require.NoError(t, err)
+	assert.Contains(t, cfg.Env, "SCION_WORKSPACE_MODE=clone-per-agent", "the failed create is not mistaken for a legacy agent")
 }
