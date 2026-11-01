@@ -395,7 +395,7 @@ server:
 
 `gvisor` is an example: Scion does not create RuntimeClasses or check that one exists.
 
-At agent launch, this release checks and enforces these rules for flat instances only (runtime entries and profiles of a regular Runtime Broker keep their current launch behaviour and follow in a later release). Saving or resetting `runtimes` or `profiles` in [admin settings](/scion/reference/admin-settings/#validation) already checks the Kubernetes placement rules across both sections together; see [Legacy host placement check](#legacy-host-placement-check).
+At agent launch, this release checks and enforces these rules for flat instances only (runtime entries and profiles of a regular Runtime Broker keep their current launch behaviour and follow in a later release). Saving or resetting `runtimes` or `profiles` in [admin settings](/scion/reference/admin-settings/) already checks the Kubernetes placement rules across both sections together; see [Legacy host placement check](#legacy-host-placement-check).
 
 ##### Before upgrading
 
