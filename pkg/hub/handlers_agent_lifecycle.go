@@ -194,6 +194,7 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 		// skipped here too.
 		if !reportOfOtherRun(presentedAgentTokenRunID(ctx), agent.RunID) {
 			s.reconcileBrokerQuotaOnPhaseChange(ctx, agent, oldPhase, status.Phase)
+			s.reconcileProjectQuotaOnPhaseChange(ctx, agent, oldPhase, status.Phase)
 		}
 	}
 
@@ -596,8 +597,10 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	agent.Activity = ""
 	// A suspended agent has no running container: release its
 	// max_agents_per_broker reservation so it stops consuming broker
-	// capacity until it is resumed (ptone/scion#1963).
+	// capacity until it is resumed (ptone/scion#1963), and its
+	// max_agents_per_project one (ptone/scion#6033).
 	s.releaseBrokerQuota(ctx, agent)
+	s.releaseProjectQuota(ctx, agent)
 	s.events.PublishAgentStatus(ctx, agent)
 	return nil
 }
@@ -700,7 +703,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		// success.
 		if deleteStopNoop(agent) {
 			respAgent := *agent
-			respAgent.AppliedConfig, respAgent.PendingConfig = redactAgentConfigsForResponse(agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
+			respAgent.AppliedConfig, respAgent.PendingConfig = s.redactAgentConfigsForResponse(agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
 			respAgent.Deletion = deletionViewForCaller(agent, time.Now(), callerSeesDeletionDetail(ctx))
 			writeJSON(w, http.StatusOK, &respAgent)
 			return
@@ -949,7 +952,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			}
 		}
 		respAgent := *agent
-		respAgent.AppliedConfig, respAgent.PendingConfig = redactAgentConfigsForResponse(agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
+		respAgent.AppliedConfig, respAgent.PendingConfig = s.redactAgentConfigsForResponse(agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
 		writeJSON(w, http.StatusOK, agentLifecycleResponse{Agent: &respAgent, Warnings: dispatchWarns.Warnings()})
 		return
 	case api.AgentActionRestart:
@@ -1157,6 +1160,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					// step with it. A run from another caller still misses.
 					if restartStoppedRecordable(agent.RunID) && s.recordRestartStopped(ctx, agent.ID, agent.RunID) {
 						s.releaseBrokerQuota(ctx, agent)
+						s.releaseProjectQuota(ctx, agent)
 					}
 				}
 			}
@@ -1210,6 +1214,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			return
 		}
 		if relayIdentityMappingError(w, dispatchErr) {
+			return
+		}
+		if s.relayProjectPathRefusal(ctx, w, agent, dispatchErr) {
 			return
 		}
 		if relayBrokerRefusal(w, dispatchErr) {
@@ -1286,14 +1293,16 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				return
 			}
 			respAgent := *current
-			respAgent.AppliedConfig, respAgent.PendingConfig = redactAgentConfigsForResponse(current.AppliedConfig, current.PendingConfig, canViewAgentEnv(ctx, s, current))
+			respAgent.AppliedConfig, respAgent.PendingConfig = s.redactAgentConfigsForResponse(current.AppliedConfig, current.PendingConfig, canViewAgentEnv(ctx, s, current))
 			respAgent.Deletion = deletionViewForCaller(current, time.Now(), callerSeesDeletionDetail(ctx))
 			writeJSON(w, http.StatusOK, agentLifecycleResponse{Agent: &respAgent, Warnings: dispatchWarns.Warnings()})
 			return
 		}
 		// A stopped agent has no running container: release its
-		// max_agents_per_broker reservation (ptone/scion#1963).
+		// max_agents_per_broker reservation (ptone/scion#1963) and its
+		// max_agents_per_project one (ptone/scion#6033).
 		s.releaseBrokerQuota(ctx, agent)
+		s.releaseProjectQuota(ctx, agent)
 	} else if !startStatusWritten {
 		// A start or restart run by startAgentCore wrote its status while
 		// its claim was held.
@@ -1351,11 +1360,12 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	if action == api.AgentActionRestart && sd != nil && reloaded &&
 		isBrokerQuotaCountedPhase(agent.Phase) && agent.DeletedAt.IsZero() && !deletionActive(agent) {
 		s.reassertBrokerReservation(ctx, agent)
+		s.reassertProjectReservation(ctx, agent, backstopSiteRestart)
 	}
 	s.events.PublishAgentStatus(ctx, agent)
 
 	respAgent := *agent
-	respAgent.AppliedConfig, respAgent.PendingConfig = redactAgentConfigsForResponse(agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
+	respAgent.AppliedConfig, respAgent.PendingConfig = s.redactAgentConfigsForResponse(agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
 	respAgent.Deletion = deletionViewForCaller(agent, time.Now(), callerSeesDeletionDetail(ctx))
 	writeJSON(w, http.StatusOK, agentLifecycleResponse{Agent: &respAgent, Warnings: dispatchWarns.Warnings()})
 }
@@ -1424,7 +1434,7 @@ func (s *Server) queueOfflineStop(ctx context.Context, w http.ResponseWriter, ag
 	s.wakeBrokerDrain(ctx, agent.RuntimeBrokerID)
 
 	respAgent := *agent
-	respAgent.AppliedConfig, respAgent.PendingConfig = redactAgentConfigsForResponse(agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
+	respAgent.AppliedConfig, respAgent.PendingConfig = s.redactAgentConfigsForResponse(agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
 	writeJSON(w, http.StatusAccepted, agentLifecycleResponse{Agent: &respAgent, Warnings: []string{offlineStopMessage}})
 }
 
@@ -1849,9 +1859,11 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 					// and publish the row as stored.
 					// A failed re-read is logged inside; the stop's result stands.
 					_ = s.settleLifecycleWrite(ctx, agent, string(state.PhaseStopped))
-					// Release the per-broker reservation, same as a single
-					// explicit stop (ptone/scion#1963).
+					// Release the per-broker and per-project reservations,
+					// same as a single explicit stop (ptone/scion#1963,
+					// ptone/scion#6033).
 					s.releaseBrokerQuota(ctx, agent)
+					s.releaseProjectQuota(ctx, agent)
 					// settleLifecycleWrite reloaded DeletedAt: a delete that
 					// soft-finished meanwhile gets no stale stopped status.
 					if agent.DeletedAt.IsZero() {

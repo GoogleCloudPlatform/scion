@@ -18,6 +18,7 @@ package relayserver
 
 import (
 	"crypto/tls"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -146,6 +147,45 @@ func TestPublicListenerTrustsListedProxyOnly(t *testing.T) {
 		}
 		if !tc.refused && !reachedAdmission(rec) {
 			t.Errorf("%s: an admitted dial did not reach admission (HTTP %d %q)", tc.name, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// TestPublicListenerRefusalNamesReason: the refusal names its reason and
+// the trusted proxy setting in details, as the hub's does, so a broker can
+// print the setting to change.
+func TestPublicListenerRefusalNamesReason(t *testing.T) {
+	w := relaytest.NewWorld(t)
+	s := startServer(t, testConfig(t, w, newFakeExperiment(expAnswer{on: true})))
+	for _, tc := range []struct {
+		name   string
+		remote string
+		extra  http.Header
+		reason string
+	}{
+		{name: "proxy on this host", remote: "127.0.0.1:40000",
+			extra: http.Header{"X-Forwarded-Proto": {"https"}}, reason: config.ArrivalRefusalUntrustedLocalProxy},
+		{name: "plaintext from a network peer", remote: "192.0.2.10:40000", reason: config.ArrivalRefusalNotTLS},
+	} {
+		hdr := publicDialPrincipals["broker"].Clone()
+		for k, v := range tc.extra {
+			hdr[k] = v
+		}
+		rec := publicDial(t, s, tc.remote, false, hdr)
+		var body struct {
+			Error struct {
+				Code    string            `json:"code"`
+				Details map[string]string `json:"details"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("%s: body %q: %v", tc.name, rec.Body.String(), err)
+		}
+		if rec.Code != http.StatusForbidden || body.Error.Code != ErrCodeTransportNotConfidential {
+			t.Errorf("%s: HTTP %d code %q, want 403 %s", tc.name, rec.Code, body.Error.Code, ErrCodeTransportNotConfidential)
+		}
+		if body.Error.Details["reason"] != tc.reason || body.Error.Details["setting"] != config.TrustedProxiesKey {
+			t.Errorf("%s: details = %v, want reason %s and setting %s", tc.name, body.Error.Details, tc.reason, config.TrustedProxiesKey)
 		}
 	}
 }

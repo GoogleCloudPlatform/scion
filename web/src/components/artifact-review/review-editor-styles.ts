@@ -347,4 +347,9 @@ export const reviewEditorStyles = css`
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
+  .card-hint {
+    margin-top: 0.35rem;
+    font-size: 0.75rem;
+    color: var(--scion-text-muted, #64748b);
+  }
 `;

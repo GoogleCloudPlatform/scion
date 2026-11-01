@@ -160,10 +160,10 @@ as soon as the Hub answers, as before, possibly while the agent is still
 provisioning. A synchronous launch runs on the Hub independently of the CLI
 request: if the CLI gives up or you press Ctrl-C mid-dispatch, the Hub keeps
 going instead of rolling the agent back (`scion start` and `scion create` send
-the initial agent create request and any env-gather submission with a 3-minute
+the initial agent create request and any env-gather submission with a 4-minute
 client timeout instead of the standard 30-second client timeout so synchronous
 creates can complete). Each dispatch attempt is bounded at
-120 seconds, so a slow cold start (for example on Kubernetes) can still fail on
+180 seconds, so a slow cold start (for example on Kubernetes) can still fail on
 a synchronous launch; [asynchronous agent create](/scion/reference/server-config/#asynchronous-agent-create), on by default, avoids that limit. While waiting, each launch step is printed to stderr with a readable label, for example
 `my-agent: provisioning (waiting to be scheduled)` (nothing extra under `--format json`). If the
 launch fails, the error gives the failure code (with its label, unless the message already says
@@ -1347,6 +1347,13 @@ scion hub test-identity delete "$FIXTURE_ID" --purge
     - `set`: Set hub-wide messaging settings.
         - Flags: `--cross-project-enabled <bool>` (enable or disable cross-project messaging), `--revision <int>` (required, optimistic concurrency revision).
     - `get`: Show the current hub-wide messaging settings and revision.
+- `scion hub settings`: View and change the Hub's server configuration (operational settings, agent defaults, runtimes, profiles, harness configs, telemetry, federation) over `/api/v1/admin/server-config`. Keys are the dotted paths `scion hub settings schema` lists (for example `server.hub.public_url`, `default_max_turns`, `runtimes`); a key below a listed key (`runtimes.k8s.namespace`) changes that part of the current value and saves the whole value, so other entries are kept. Every change is compare-and-set: it sends the revision of each section it changes as read just before (`expected_revisions`), so a change made in between is reported as a conflict instead of being overwritten. Field errors are printed one per line with the key, and a conflict lists each section's expected and current revision and what was already saved. Needs a Hub admin login, or an access token on a hub boundary with `hub_config:read` (`get`, `schema`) or `hub_config:update` (`set`, `unset`).
+    - `get [KEY]`: With no argument, list the sections with their source (`db`, `file` or `default`), revision and last change. With `KEY`, print its value; `--section NAME` prints every key of a section. Secret values are shown masked.
+    - `set KEY VALUE [KEY VALUE ...]`: Change keys in one save. `VALUE` is read as YAML (`true`, `42`, `"text"`, `[a, b]`, `{k: v}`); `--string` sends values as text. `--file <path|->` reads a YAML or JSON document of keys instead; a null in it unsets the key.
+    - `unset KEY [KEY ...]`: Clear keys, so the Hub uses its default. A key below a listed key (`runtimes.old`) is removed from the current value. The GCP permission-check keys and the agent role defaults cannot be cleared this way. `--section NAME --reset` deletes the section's saved values instead, so the Hub uses its startup configuration for the section (asks for confirmation; `--yes` answers it).
+    - `schema [SECTION]`: List the sections and their keys (keys that apply only after a Hub restart are marked); with `SECTION`, print its JSON schema.
+    - Flags on `set` and `unset`: `--revision SECTION=N` (repeatable; pin a section's expected revision), `--dry-run` (print the request body without sending it; values of secret keys are masked), `--no-validate` (send keys the schema does not list and let the Hub decide).
+- `scion hub settings` is not available in agent mode.
 
 ### `scion service-accounts`
 

@@ -234,7 +234,7 @@ func TestFoldPendingConfig_RemovesUnappliableKeepsProvisionKeys(t *testing.T) {
 			"no_such_key":   json.RawMessage(`1`),
 		}},
 	}
-	folded, unappliable := (&Server{}).foldPendingConfig(context.Background(), agent, isContainerConfigField)
+	folded, unappliable := (&Server{}).foldPendingConfig(context.Background(), agent, pendingFoldPlan{keep: isContainerConfigField})
 	assert.Empty(t, folded)
 	assert.Equal(t, []string{"config.max_turns", "config.no_such_key"}, unappliable)
 	require.NotNil(t, agent.PendingConfig)

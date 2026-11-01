@@ -64,6 +64,7 @@ var launchCodeLabels = map[string]string{
 	api.LaunchCodeHarnessConfigUnusable:       "the harness config cannot be used",
 	api.LaunchCodeAgentStateUnavailable:       "the agent's state on the broker is unavailable",
 	api.LaunchCodeAgentStateConflict:          "the agent's state on the broker cannot be used",
+	api.LaunchCodeProjectPathNotInitialized:   "the project path on the runtime broker is not initialized as a project",
 	api.BrokerErrCodeSkillResolution:          "a required skill could not be resolved",
 	api.BrokerErrCodeStorageMigrationRequired: "the agent's storage settings must be migrated first",
 	api.LaunchCodeImagePullFailed:             "the agent image could not be pulled",

@@ -171,7 +171,9 @@ func applyHarnessOverride(result HarnessConfigEntry, override V1HarnessOverride)
 // *ActiveProfileError naming the configured value and the stored profiles.
 // A named profile missing
 // from an overlaid map gives a *StoredProfileNotFoundError naming it and
-// the stored profiles.
+// the stored profiles. When the overlay supplied the profiles and the
+// resolved profile names a runtime the runtimes do not define, the error
+// is a *StoredProfileRuntimeNotFoundError (ptone/scion#4889).
 // The runtime type is V1RuntimeConfig.Type if set, otherwise the map key name.
 func (vs *VersionedSettings) ResolveRuntime(profileName string) (V1RuntimeConfig, string, error) {
 	if profileName == "" {
@@ -189,6 +191,9 @@ func (vs *VersionedSettings) ResolveRuntime(profileName string) (V1RuntimeConfig
 	}
 	rtConfig, ok := vs.Runtimes[profile.Runtime]
 	if !ok {
+		if vs.storedProfileNames != nil {
+			return V1RuntimeConfig{}, "", &StoredProfileRuntimeNotFoundError{Profile: profileName, Runtime: profile.Runtime, Available: sortedNames(vs.Runtimes)}
+		}
 		return V1RuntimeConfig{}, "", fmt.Errorf("runtime %q not found for profile %q", profile.Runtime, profileName)
 	}
 
@@ -1399,7 +1404,11 @@ type V1ServerConfig struct {
 	// TrustedProxies lists the TLS-terminating proxies whose
 	// X-Forwarded-Proto the hub trusts for its hub-broker transport check
 	// (server.trusted_proxies, TrustedProxiesKey). See GlobalConfig.TrustedProxies.
-	TrustedProxies []string `json:"trusted_proxies,omitempty" yaml:"trusted_proxies,omitempty" koanf:"trusted_proxies"`
+	// A pointer, so that "not set" (nil: a proxy on this host is trusted)
+	// and an explicit empty list (trust no proxy) both survive a struct
+	// round trip: omitempty drops only nil, and a non-nil empty list is
+	// written as trusted_proxies: []. A null value decodes as nil (not set).
+	TrustedProxies *[]string `json:"trusted_proxies,omitempty" yaml:"trusted_proxies,omitempty" koanf:"trusted_proxies"`
 
 	// Maintenance holds binary auto-update and deployment tier settings.
 	Maintenance *V1MaintenanceConfig `json:"maintenance,omitempty" yaml:"maintenance,omitempty" koanf:"maintenance"`
@@ -4167,8 +4176,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 	if v1.KeyringFileAllowWorldReadable {
 		gc.KeyringFileAllowWorldReadable = true
 	}
-	if len(v1.TrustedProxies) > 0 {
-		gc.TrustedProxies = append([]string(nil), v1.TrustedProxies...)
+	if v1.TrustedProxies != nil {
+		gc.TrustedProxies = append([]string(nil), (*v1.TrustedProxies)...)
+		gc.TrustedProxiesSet = true
 	}
 
 	// Hub server config
@@ -4657,7 +4667,11 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		KeyringFile: gc.KeyringFile,
 
 		KeyringFileAllowWorldReadable: gc.KeyringFileAllowWorldReadable,
-		TrustedProxies:                append([]string(nil), gc.TrustedProxies...),
+	}
+	if gc.TrustedProxiesSet || len(gc.TrustedProxies) > 0 {
+		// Non-nil even when empty, so an explicit [] is written back.
+		list := append([]string{}, gc.TrustedProxies...)
+		v1.TrustedProxies = &list
 	}
 
 	// Hub server config
@@ -6911,6 +6925,9 @@ func loadServerConfigOnly(path string) (*GlobalConfig, error) {
 	if err := k.Unmarshal("", &gc); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal server config: %w", err)
 	}
+	// trustedProxies: [] is an explicit choice (trust no proxy), so the
+	// migrated settings.yaml keeps it (ConvertGlobalToV1ServerConfig).
+	gc.TrustedProxiesSet = k.Exists("trustedProxies")
 	return &gc, nil
 }
 

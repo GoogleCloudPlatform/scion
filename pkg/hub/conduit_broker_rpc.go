@@ -64,14 +64,15 @@ import (
 type conduitBrokerTunnel struct {
 	sessions func(brokerID string) conduit.Session
 	// timeout bounds each request, as ControlChannelConfig.RequestTimeout
-	// does on the control channel (default 120s).
+	// does on the control channel (default brokerRequestTimeout, 180s).
 	timeout time.Duration
 }
 
 var _ controlChannelTunnel = (*conduitBrokerTunnel)(nil)
 
 // newConduitBrokerTunnel returns a tunnel over the sessions sessions
-// returns (nil when the broker has none). A zero timeout is 120s.
+// returns (nil when the broker has none). A zero timeout is the control
+// channel default (brokerRequestTimeout).
 func newConduitBrokerTunnel(sessions func(brokerID string) conduit.Session, timeout time.Duration) *conduitBrokerTunnel {
 	if timeout <= 0 {
 		timeout = DefaultControlChannelConfig().RequestTimeout

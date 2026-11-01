@@ -278,10 +278,7 @@ func TestPutServerConfigDB_Layer0Keys_Rejected422(t *testing.T) {
 		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	var resp map[string]interface{}
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("json.Unmarshal: %v", err)
-	}
+	resp := settingsErrorFields(t, rr.Body.Bytes())
 
 	if resp["error"] != "layer0_rejected" {
 		t.Errorf("expected error=layer0_rejected, got %v", resp["error"])
@@ -346,10 +343,7 @@ func TestPutServerConfigDB_UnclassifiedOnly_422Rejected(t *testing.T) {
 		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	var resp map[string]interface{}
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("json.Unmarshal: %v", err)
-	}
+	resp := settingsErrorFields(t, rr.Body.Bytes())
 
 	if resp["error"] != "unclassified_keys_rejected" {
 		t.Errorf("expected error=unclassified_keys_rejected, got %v", resp["error"])
@@ -399,10 +393,7 @@ func TestPutServerConfigDB_MixedLayer1AndUnclassified_422Rejected(t *testing.T) 
 		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	var resp map[string]interface{}
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("json.Unmarshal: %v", err)
-	}
+	resp := settingsErrorFields(t, rr.Body.Bytes())
 
 	if resp["error"] != "unclassified_keys_rejected" {
 		t.Errorf("expected error=unclassified_keys_rejected, got %v", resp["error"])
@@ -527,10 +518,7 @@ func TestPutServerConfigDB_ExplicitLayer0_Still422(t *testing.T) {
 		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	var resp map[string]interface{}
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("json.Unmarshal: %v", err)
-	}
+	resp := settingsErrorFields(t, rr.Body.Bytes())
 
 	if resp["error"] != "layer0_rejected" {
 		t.Errorf("expected error=layer0_rejected, got %v", resp["error"])
@@ -618,10 +606,7 @@ func TestPutServerConfigDB_CAS_StaleRevision_409(t *testing.T) {
 		t.Fatalf("expected 409, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	var resp map[string]interface{}
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("json.Unmarshal: %v", err)
-	}
+	resp := settingsErrorFields(t, rr.Body.Bytes())
 
 	if resp["error"] != "revision_conflict" {
 		t.Errorf("expected error=revision_conflict, got %v", resp["error"])
@@ -1832,8 +1817,9 @@ func TestGetServerConfigDB_SupersededKeys_SeededSectionExcluded(t *testing.T) {
 // value is attributed to settings.yaml, which wins over the seed layer; a
 // key with only a seed value or only a settings.yaml value keeps its source;
 // and the public URL keeps its settings.yaml attribution (ptone/scion#4865,
-// ptone/scion#4904). authorized_domains, whose saved value the hub does not
-// apply (ptone/scion#6000), is not reported as superseded at all.
+// ptone/scion#4904). A saved authorized_domains is applied
+// (ptone/scion#6000), so with no SCION_SERVER_* pin it supersedes the
+// settings.yaml value like the other access keys.
 func TestGetServerConfigDB_SupersededKeySourceFollowsPrecedence(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1902,15 +1888,11 @@ server:
 		"server.hub.public_url":               "yaml",     // seed and settings.yaml
 		"server.auth.default_user_role":       "seed_env", // seed only
 		"server.auth.user_access_mode":        "yaml",     // settings.yaml only
+		"server.auth.authorized_domains":      "yaml",     // settings.yaml only, applied (ptone/scion#6000)
 	} {
 		if got[key] != want {
 			t.Errorf("superseded %s source = %q, want %q (all: %v)", key, got[key], want, got)
 		}
-	}
-	// The hub does not apply a saved authorized_domains (ptone/scion#6000):
-	// the saved value supersedes nothing, so the key is not listed.
-	if src, ok := got["server.auth.authorized_domains"]; ok {
-		t.Errorf("server.auth.authorized_domains reported superseded (source %q); the saved value is not applied", src)
 	}
 }
 
@@ -2323,10 +2305,7 @@ func TestPutServerConfigDB_AsyncLaunchSettings_422(t *testing.T) {
 			if rr.Code != http.StatusUnprocessableEntity {
 				t.Fatalf("expected 422 for %s, got %d: %s", tt.name, rr.Code, rr.Body.String())
 			}
-			var resp map[string]interface{}
-			if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-				t.Fatalf("failed to unmarshal response: %v", err)
-			}
+			resp := settingsErrorFields(t, rr.Body.Bytes())
 			if resp["error"] != "layer0_rejected" {
 				t.Errorf("expected error=layer0_rejected, got %v", resp["error"])
 			}
@@ -2345,10 +2324,7 @@ func TestPutServerConfigDB_ProjectStorage_422(t *testing.T) {
 	if rr.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
 	}
-	var resp map[string]interface{}
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("failed to unmarshal response: %v", err)
-	}
+	resp := settingsErrorFields(t, rr.Body.Bytes())
 	if resp["error"] != "layer0_rejected" {
 		t.Errorf("expected error=layer0_rejected, got %v", resp["error"])
 	}
@@ -2833,10 +2809,7 @@ func TestPutServerConfigDB_CAS_MultiSection_PartialApply(t *testing.T) {
 		t.Fatalf("expected 409 Conflict, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	var resp map[string]interface{}
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("json.Unmarshal: %v", err)
-	}
+	resp := settingsErrorFields(t, rr.Body.Bytes())
 
 	if resp["error"] != "revision_conflict" {
 		t.Errorf("expected error=revision_conflict, got %v", resp["error"])
@@ -3761,14 +3734,17 @@ func TestPutServerConfigDB_DefaultUserRoleOnly_PersistedAndSnapshot(t *testing.T
 }
 
 // Invalid values are rejected by the access-section schema in DB mode.
-func TestPutServerConfigDB_DefaultUserRoleInvalid_400NothingWritten(t *testing.T) {
+func TestPutServerConfigDB_DefaultUserRoleInvalid_422NothingWritten(t *testing.T) {
 	srv, fakeStore, ops := newTestDBServer(t)
 	fakeStore.seed("access", json.RawMessage(`{"default_user_role":"viewer"}`))
 	_, _ = ops.Refresh(context.Background())
 
 	rr := putServerConfigDB(t, srv, ops, `{"server":{"auth":{"default_user_role":"superuser"}}}`)
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if entries := settingsErrorEntries(t, rr); entries[0].Field != "server.auth.default_user_role" {
+		t.Errorf("field = %q, want server.auth.default_user_role", entries[0].Field)
 	}
 	access, _ := readAccessRow(t, fakeStore)
 	if access.DefaultUserRole != "viewer" {

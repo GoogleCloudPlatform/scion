@@ -34,6 +34,11 @@ Only `scion-agent.yaml` is required for Scion to recognize the directory as a te
 
 The config file drives the role. Fields that point at content — `agent_instructions`, `system_prompt` — accept **either a filename** (resolved relative to the template directory) **or inline text**. The convention is to keep prose in separate `.md` files:
 
+- A single-line value names a file. It must be a relative path inside the template directory (not an absolute path, no `..` component, and not `.`; a single-line value that is not a local relative path is refused with an error). If a template in the chain has that path and it cannot be read as a valid content file, loading fails with an error (`template content file refused`) instead of using the value as inline text; only when no template in the chain has that file (`ErrNotExist`) is the value used as inline text.
+- A value with a line break is always inline text and is never looked up as a file.
+- A content file must be a plain regular file of at most 4 MiB inside the template directory, reached without following a symbolic link. A symbolic link at the file or at any directory on its path, a non-directory path component, a hard link, directory or device, a file larger than 4 MiB, or an unreadable file (permission denied) is refused with an error; replace a link with the file or directory itself, or use multi-line inline text.
+- The same rules apply when Scion checks for `agents.md` or `system-prompt.md` by convention (`TemplateHasContentFile`); a file that would be refused is not picked up.
+
 ```yaml
 schema_version: "1"
 description: "Senior code reviewer — correctness, readability, security, performance"
@@ -69,7 +74,7 @@ Common fields:
 | `services`, `max_turns`, `max_model_calls`, `max_duration`, `thinking_level`, `command_args`, `task_flag` | Further job settings. |
 | `message_mode` | Hub only: the initial message mode for agents created from the template. |
 
-A `max_turns` or `max_model_calls` of `0` means no limit and overrides the hub and broker default limits; leave the key out to inherit them. Older versions accepted `0` silently and treated it as "inherit".
+A `max_turns` or `max_model_calls` of `0` means no limit and overrides the hub and broker default limits (taking effect on Runtime Brokers that advertise the `unlimitedCountLimits` capability); leave the key out to inherit them. Older versions accepted `0` silently and treated it as "inherit", and the Runtime Broker logs each template that sets a count limit to `0` when provisioning an agent.
 
 The full field reference is [Agent Configuration (`scion-agent.yaml`)](/scion/reference/agent-config/).
 

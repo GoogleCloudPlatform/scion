@@ -233,8 +233,13 @@ func (e *GovernanceError) Error() string {
 //	d. Compare that constraint-state fingerprint to the preview's
 //	e. If it changed: reject with preview_state_mismatch
 //	f. Re-authorize the actor: verify they still hold access_constraint.admin
-//	g. For relaxations: verify the actor holds sufficient authority over the
-//	   permissions being restored (server classification chooses the path)
+//	g. For relaxations and time-window changes: verify the actor holds
+//	   authority over the permissions the change requires (server
+//	   classification and the stored window choose the path). Order: a
+//	   relaxation sent with a user access token is refused as session only;
+//	   then the stored constraint of an update or delete is loaded once;
+//	   then a token update whose window does not cover the stored one is
+//	   refused as session only; then the authority check runs
 //	h. Enforce lockout: at least one active direct user retains
 //	   access_constraint.admin at the relevant scope
 //	i. Apply the mutation (create/update/delete)
@@ -281,24 +286,39 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 		return nil, fmt.Errorf("classification failed: %w", err)
 	}
 
-	// Step g: For relaxations, verify the actor has sufficient authority.
-	// A relaxation sent with a user access token is refused: it needs a
-	// session.
-	if classification == ClassificationRelax || classification == ClassificationMixed {
-		if commitSentWithToken(ctx, req) {
-			return nil, errTokenRelaxationSessionOnly
-		}
-		if err := gs.checkRelaxationAuthority(ctx, req, scopeType, scopeID); err != nil {
-			return nil, err
+	// Step g: For relaxations and time-window changes, verify the actor has
+	// sufficient authority. A relaxation sent with a user access token is
+	// refused first: it needs a session.
+	relaxes := classification == ClassificationRelax || classification == ClassificationMixed
+	if relaxes && commitSentWithToken(ctx, req) {
+		return nil, errTokenRelaxationSessionOnly
+	}
+
+	// The stored constraint of an update or delete, loaded once for the
+	// time-window and authority checks below.
+	var stored *store.AccessConstraint
+	if req.ConstraintID != "" && (req.Operation == "update" || req.Operation == "delete") {
+		stored, err = gs.store.GetAccessConstraint(ctx, req.ConstraintID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load stored constraint: %w", err)
 		}
 	}
+	windowUpdate := req.Operation == "update" && req.Draft != nil && stored != nil
 
 	// A user access token may not narrow or add a constraint's time window:
 	// the constraint is inactive outside its window, so an update whose
-	// window does not cover the existing one relaxes the boundary and needs
-	// a session.
-	if req.Operation == "update" && commitSentWithToken(ctx, req) {
-		if err := gs.checkTokenWindowCovers(ctx, req); err != nil {
+	// window does not cover the stored one relaxes the boundary and needs a
+	// session.
+	if windowUpdate && commitSentWithToken(ctx, req) && !constraintWindowCovers(req.Draft, stored) {
+		return nil, errTokenRelaxationSessionOnly
+	}
+
+	// Any change to the time window (a bound added, removed or moved, in
+	// either direction) needs the relaxation authority whatever the
+	// classification, for session and token commits alike.
+	windowChanged := windowUpdate && constraintWindowChanged(req.Draft, stored)
+	if relaxes || windowChanged {
+		if err := gs.checkRelaxationAuthority(ctx, req, stored, scopeType, scopeID); err != nil {
 			return nil, err
 		}
 	}
@@ -556,31 +576,32 @@ func (gs *GovernanceService) classifyOperation(ctx context.Context, req CommitRe
 	return ClassificationTighten, nil // No permission changes = default to tighten.
 }
 
-// checkTokenWindowCovers refuses, with errTokenRelaxationSessionOnly, an
-// update whose proposed time window does not cover the existing window:
-// the proposed NotBefore is later than the existing one or newly set, or
-// the proposed ExpiresAt is earlier than the existing one or newly set.
-func (gs *GovernanceService) checkTokenWindowCovers(ctx context.Context, req CommitRequest) error {
-	if req.ConstraintID == "" || req.Draft == nil {
-		return nil
+// constraintWindowChanged reports whether proposed and existing differ in
+// NotBefore or ExpiresAt: a bound set on one side only, or set to different
+// instants. Instants are compared exactly (time.Equal, any time zone), so a
+// bound moved by less than a second is a change; no rounding is applied.
+func constraintWindowChanged(proposed, existing *store.AccessConstraint) bool {
+	return !timeBoundEqual(proposed.NotBefore, existing.NotBefore) ||
+		!timeBoundEqual(proposed.ExpiresAt, existing.ExpiresAt)
+}
+
+// timeBoundEqual reports whether two optional time bounds are both unset or
+// both set to the same instant.
+func timeBoundEqual(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
 	}
-	existing, err := gs.store.GetAccessConstraint(ctx, req.ConstraintID)
-	if err != nil {
-		return fmt.Errorf("failed to load existing constraint: %w", err)
-	}
-	if !constraintWindowCovers(req.Draft, existing) {
-		return errTokenRelaxationSessionOnly
-	}
-	return nil
+	return a.Equal(*b)
 }
 
 // ---------------------------------------------------------------------------
 // Relaxation authority
 // ---------------------------------------------------------------------------
 
-// checkRelaxationAuthority verifies the actor has sufficient authority over
-// the permissions being restored by a relaxation.
-func (gs *GovernanceService) checkRelaxationAuthority(ctx context.Context, req CommitRequest, scopeType, scopeID string) error {
+// checkRelaxationAuthority verifies the actor holds every permission a
+// relaxation or a time-window change requires. stored is the constraint
+// being updated or deleted (nil for create).
+func (gs *GovernanceService) checkRelaxationAuthority(ctx context.Context, req CommitRequest, stored *store.AccessConstraint, scopeType, scopeID string) error {
 	// Get the actor's effective permissions at the relevant scope, within
 	// the request credential's limits.
 	actorPerms, err := gs.commitActorPermissions(ctx, req, scopeType, scopeID)
@@ -596,11 +617,11 @@ func (gs *GovernanceService) checkRelaxationAuthority(ctx context.Context, req C
 		actorPermSet[p] = struct{}{}
 	}
 
-	// Determine which permissions are being restored (relaxed).
-	var restoredPerms []string
+	// Determine which permissions the change requires authority over.
+	var requiredPerms []string
 	if req.Operation == "delete" {
 		// Delete restores all permissions the boundary was removing. Ideally
-		// restoredPerms would contain every permission NOT in the boundary's
+		// requiredPerms would contain every permission NOT in the boundary's
 		// max set (the permissions the boundary was restricting), but we lack
 		// a full permission registry to enumerate "everything else."
 		//
@@ -610,31 +631,33 @@ func (gs *GovernanceService) checkRelaxationAuthority(ctx context.Context, req C
 		// to them (and more). If the actor does not even hold authority over
 		// the permissions the boundary explicitly allows, they should not be
 		// able to remove the boundary.
-		if req.ConstraintID != "" {
-			existing, err := gs.store.GetAccessConstraint(ctx, req.ConstraintID)
-			if err == nil {
-				restoredPerms = append(restoredPerms, existing.MaximumPermissions...)
+		if stored != nil {
+			requiredPerms = append(requiredPerms, stored.MaximumPermissions...)
+		}
+	} else if req.Operation == "update" && req.Draft != nil && stored != nil {
+		// Permissions being added to the max set are being "relaxed" (restored).
+		storedSet := make(map[string]struct{}, len(stored.MaximumPermissions))
+		for _, p := range stored.MaximumPermissions {
+			storedSet[p] = struct{}{}
+		}
+		for _, p := range req.Draft.MaximumPermissions {
+			if _, ok := storedSet[p]; !ok {
+				requiredPerms = append(requiredPerms, p)
 			}
 		}
-	} else if req.Operation == "update" && req.Draft != nil {
-		// Permissions being added to the max set are being "relaxed" (restored).
-		existing, err := gs.store.GetAccessConstraint(ctx, req.ConstraintID)
-		if err == nil {
-			existingSet := make(map[string]struct{}, len(existing.MaximumPermissions))
-			for _, p := range existing.MaximumPermissions {
-				existingSet[p] = struct{}{}
-			}
-			for _, p := range req.Draft.MaximumPermissions {
-				if _, ok := existingSet[p]; !ok {
-					restoredPerms = append(restoredPerms, p)
-				}
-			}
+		// Any change to the time window, in either direction, needs the
+		// same authority as delete: every permission in the stored
+		// constraint's max set. One rule covers every change to when a
+		// boundary applies; a narrowed or added window lifts the boundary
+		// outside it, and a widened or removed window re-times it.
+		if constraintWindowChanged(req.Draft, stored) {
+			requiredPerms = append(requiredPerms, stored.MaximumPermissions...)
 		}
 	}
 
-	// The actor must hold each permission being restored.
+	// The actor must hold each permission the change requires.
 	var missingPerms []string
-	for _, p := range restoredPerms {
+	for _, p := range requiredPerms {
 		if _, ok := actorPermSet[p]; !ok {
 			missingPerms = append(missingPerms, p)
 		}
@@ -643,7 +666,7 @@ func (gs *GovernanceService) checkRelaxationAuthority(ctx context.Context, req C
 	if len(missingPerms) > 0 {
 		return &GovernanceError{
 			Code:    ErrCodeInsufficientRelaxationAuthority,
-			Message: fmt.Sprintf("actor lacks authority over %d permission(s) being restored", len(missingPerms)),
+			Message: fmt.Sprintf("actor lacks authority over %d permission(s) this change requires", len(missingPerms)),
 			Details: map[string]interface{}{
 				"missingPermissionIds": missingPerms,
 			},

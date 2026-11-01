@@ -37,6 +37,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/google/uuid"
@@ -178,6 +179,10 @@ type HTTPAgentDispatcher struct {
 	// storageLayout is the hub's projectfs Layout source for
 	// storageLayoutPrecheck (SetStorageLayout); nil disables the check.
 	storageLayout func() (projectfs.Layout, error)
+	// workspaceStorage returns the hub's current storage backend
+	// (SetWorkspaceStorage); buildCreateRequestFor asks for the signed-URL
+	// workspace download only when it is GCS. Nil means no storage.
+	workspaceStorage func() storage.Storage
 
 	// attachmentIssuer issues the attachment delivery capabilities of a
 	// message on every dispatch attempt (ptone/scion#4596). Nil issues none.
@@ -790,6 +795,14 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 	if agent.AppliedConfig != nil && agent.AppliedConfig.WorkspaceStoragePath != "" {
 		req.WorkspaceStoragePath = agent.AppliedConfig.WorkspaceStoragePath
 		req.WorkspaceStorageBucket = agent.AppliedConfig.WorkspaceStorageBucket
+		// A GCS hub serves the broker-self workspace download, so the
+		// broker fetches per-file signed URLs from it and needs no storage
+		// credential of its own. The URLs are never in this request: the
+		// broker asks for them when it downloads. The bucket is still sent
+		// for brokers that predate the field.
+		if d.workspaceStorageIsGCS() {
+			req.WorkspaceDownloadMode = api.WorkspaceDownloadModeSignedURLs
+		}
 	}
 
 	if d.debug {
@@ -1145,23 +1158,9 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 	if d.githubAppMinter != nil && agent.ProjectID != "" {
 		project, projectErr := d.store.GetProject(ctx, agent.ProjectID)
 		if projectErr == nil {
-			// Determine which project to use for GitHub App token minting.
-			// Prefer the agent's own project; fall back to a source project
-			// referenced by label (e.g. for template-sync agents loading
-			// from an external repo whose git project has the app installed).
+			// The token is minted only for the agent's own project: no label
+			// or other agent-supplied value selects a different project.
 			mintProject := project
-			if project.GitHubInstallationID == nil {
-				if sourceProjectID := agent.Labels["scion.dev/github-token-source-project"]; sourceProjectID != "" {
-					if sg, sgErr := d.store.GetProject(ctx, sourceProjectID); sgErr == nil && sg.GitHubInstallationID != nil {
-						mintProject = sg
-						if d.debug {
-							d.log.Debug("buildCreateRequest: using source project for GitHub App token",
-								"sourceProjectID", sourceProjectID,
-								"installationID", *sg.GitHubInstallationID)
-						}
-					}
-				}
-			}
 			if mintProject.GitHubInstallationID != nil {
 				if req.ResolvedEnv != nil && req.ResolvedEnv["GITHUB_TOKEN"] != "" {
 					// User already has a GITHUB_TOKEN from secrets/env.
@@ -1193,9 +1192,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 						// A test pins this ordering dependency.
 						req.ResolvedEnv["GITHUB_TOKEN"] = token
 						classifyEnv(&req.EnvClassifications, "GITHUB_TOKEN", api.EnvKindSecretInjected)
-						if mintProject.ID == project.ID {
-							req.githubAppToken = token
-						}
+						req.githubAppToken = token
 						req.ResolvedEnv["SCION_GITHUB_APP_ENABLED"] = "true"
 						classifyEnv(&req.EnvClassifications, "SCION_GITHUB_APP_ENABLED", api.EnvKindPlain)
 						req.ResolvedEnv["SCION_GITHUB_TOKEN_EXPIRY"] = expiry
@@ -3080,14 +3077,9 @@ func (d *HTTPAgentDispatcher) injectLifecycleGitHubToken(
 	if err != nil {
 		return ""
 	}
+	// The token is minted only for the agent's own project: no label or
+	// other agent-supplied value selects a different project.
 	mintProject := project
-	if project.GitHubInstallationID == nil {
-		if sourceProjectID := agent.Labels["scion.dev/github-token-source-project"]; sourceProjectID != "" {
-			if sourceProject, sourceErr := d.store.GetProject(ctx, sourceProjectID); sourceErr == nil && sourceProject.GitHubInstallationID != nil {
-				mintProject = sourceProject
-			}
-		}
-	}
 	if mintProject.GitHubInstallationID == nil {
 		return ""
 	}
@@ -3121,10 +3113,7 @@ func (d *HTTPAgentDispatcher) injectLifecycleGitHubToken(
 	classifyEnv(envClassifications, "SCION_GITHUB_TOKEN_EXPIRY", api.EnvKindPlain)
 	resolvedEnv["SCION_GITHUB_TOKEN_PATH"] = "/tmp/.github-token"
 	classifyEnv(envClassifications, "SCION_GITHUB_TOKEN_PATH", api.EnvKindPlain)
-	if mintProject.ID == project.ID {
-		return token
-	}
-	return ""
+	return token
 }
 
 // startEnvResult bundles everything buildStartEnv assembles. DispatchAgentStart

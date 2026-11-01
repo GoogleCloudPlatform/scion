@@ -337,7 +337,7 @@
         "port": { "type": "integer", "default": 9800, "x-env-var": "SCION_SERVER_BROKER_PORT" },
         "host": { "type": "string", "default": "0.0.0.0", "x-env-var": "SCION_SERVER_BROKER_HOST" },
         "read_timeout": { "type": "string", "default": "30s", "x-env-var": "SCION_SERVER_BROKER_READTIMEOUT" },
-        "write_timeout": { "type": "string", "default": "120s", "x-env-var": "SCION_SERVER_BROKER_WRITETIMEOUT" },
+        "write_timeout": { "type": "string", "default": "210s", "x-env-var": "SCION_SERVER_BROKER_WRITETIMEOUT" },
         "hub_endpoint": {
           "type": "string",
           "format": "uri",

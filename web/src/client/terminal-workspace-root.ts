@@ -21,6 +21,7 @@ import {
   TERMINAL_SESSION_COUNT_EVENT,
   TERMINAL_DRAG_MIME,
   TERMINAL_PALETTE_NEW_AGENT_EVENT,
+  TERMINAL_PANE_DIALOG_OPEN_EVENT,
   type TerminalSessionCountDetail,
   type TerminalPaletteNewAgentDetail,
 } from './terminal-workspace-events.js';
@@ -440,6 +441,7 @@ export class TerminalWorkspaceRoot {
     // buildRailFooter) or the keyboard shortcut (handleGlobalKeydown).
     document.addEventListener('keydown', this.handleGlobalKeydown);
     document.addEventListener('focusin', this.handleGlobalFocusIn);
+    this.element.addEventListener(TERMINAL_PANE_DIALOG_OPEN_EVENT, this.handlePaneDialogOpen);
 
     this.shell.append(this.rail, this.createPaneArea());
     this.testHubBannerHost.className = 'terminal-test-hub-banner';
@@ -784,6 +786,7 @@ export class TerminalWorkspaceRoot {
     window.removeEventListener(TEST_INFRA_STATUS_EVENT, this.handleTestInfraStatus);
     document.removeEventListener('keydown', this.handleGlobalKeydown);
     document.removeEventListener('focusin', this.handleGlobalFocusIn);
+    this.element.removeEventListener(TERMINAL_PANE_DIALOG_OPEN_EVENT, this.handlePaneDialogOpen);
     this.releasePaletteAgents();
     this.touchQuery?.removeEventListener?.('change', this.handleTouchQueryChange);
     this.paletteHost.dispose();
@@ -1022,6 +1025,20 @@ export class TerminalWorkspaceRoot {
     if (this.paletteHost.hasUnrelatedModalOpen()) return;
     e.preventDefault();
     this.openPalette();
+  };
+
+  /**
+   * A pane dialog that opens while the palette is open or pending (such as
+   * the secret-conflict dialog, when a capture request returns) closes the
+   * palette, so two modals are never open together. The close does not
+   * refocus the palette's invoker: the pane dialog takes focus. A dialog in
+   * an off-screen pane is not visible, so it leaves the palette open, as
+   * {@link QuickPaletteHost.hasUnrelatedModalOpen} ignores it.
+   */
+  private readonly handlePaneDialogOpen = (e: Event): void => {
+    if (!this.paletteHost.isOpen) return;
+    if (e.target instanceof Element && e.target.closest('[hidden]')) return;
+    this.paletteHost.hide();
   };
 
   /**

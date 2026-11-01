@@ -180,7 +180,10 @@ func TestResolveRuntimeNameForOpts_ForceRuntimeMatchesDispatch(t *testing.T) {
 	})
 
 	_, dispatchName := managerAndType(srv.resolveManagerForOpts(api.StartOptions{Name: "agent-a"}))
-	preflightName := srv.resolveRuntimeNameForOpts(api.StartOptions{Name: "agent-a"})
+	preflightName, err := srv.resolveRuntimeNameForOpts(api.StartOptions{Name: "agent-a"})
+	if err != nil {
+		t.Fatalf("resolveRuntimeNameForOpts: %v", err)
+	}
 
 	if preflightName != "kubernetes" {
 		t.Fatalf("expected preflight name %q, got %q", "kubernetes", preflightName)

@@ -444,7 +444,7 @@ func TestReincarnationWorker_MoveRecheckFailsBeforeAnySideEffect(t *testing.T) {
 	fresh := *a.AppliedConfig
 	mv := &reincarnationMove{SourceBrokerID: f.src.ID, TargetBrokerID: f.dst.ID, ProjectID: f.project.ID, SelfMove: true, AgentDirWorkspace: true}
 
-	f.srv.runReincarnationWorker(ctx, a.ID, rec.ID, a.AppliedConfig, &fresh, "h", time.Now(), "", &ReincarnationPlan{}, 2, a.DeletionClaim, mv)
+	f.srv.runReincarnationWorker(ctx, a.ID, rec.ID, a.AppliedConfig, &fresh, "h", time.Now(), "", &ReincarnationPlan{}, 2, a.DeletionClaim, mv, nil)
 
 	got, err := f.s.GetAgentReincarnation(ctx, rec.ID)
 	require.NoError(t, err)
@@ -677,7 +677,7 @@ func TestReincarnationWorker_MoveRefusesReassignedAgent(t *testing.T) {
 	fresh := *a.AppliedConfig
 	mv := &reincarnationMove{SourceBrokerID: f.src.ID, TargetBrokerID: f.dst.ID, ProjectID: f.project.ID, SelfMove: true, AgentDirWorkspace: true}
 
-	f.srv.runReincarnationWorker(ctx, a.ID, rec.ID, a.AppliedConfig, &fresh, "h", time.Now(), "", &ReincarnationPlan{}, 2, a.DeletionClaim, mv)
+	f.srv.runReincarnationWorker(ctx, a.ID, rec.ID, a.AppliedConfig, &fresh, "h", time.Now(), "", &ReincarnationPlan{}, 2, a.DeletionClaim, mv, nil)
 
 	got, err := f.s.GetAgentReincarnation(ctx, rec.ID)
 	require.NoError(t, err)
@@ -795,7 +795,7 @@ func runMoveWorkerDirect(t *testing.T, f *moveFixture, mv *reincarnationMove) *s
 	}
 	require.NoError(t, f.s.CreateAgentReincarnation(ctx, rec))
 	fresh := *a.AppliedConfig
-	f.srv.runReincarnationWorker(ctx, a.ID, rec.ID, a.AppliedConfig, &fresh, "h", time.Now(), "", &ReincarnationPlan{}, 2, a.DeletionClaim, mv)
+	f.srv.runReincarnationWorker(ctx, a.ID, rec.ID, a.AppliedConfig, &fresh, "h", time.Now(), "", &ReincarnationPlan{}, 2, a.DeletionClaim, mv, nil)
 	got, err := f.s.GetAgentReincarnation(ctx, rec.ID)
 	require.NoError(t, err)
 	return got

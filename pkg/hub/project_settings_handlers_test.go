@@ -110,8 +110,8 @@ func TestProjectSettings_DefaultLimits(t *testing.T) {
 	project := createTestProjectForSettings(t, s)
 
 	putBody := hubclient.ProjectSettings{
-		DefaultMaxTurns:      100,
-		DefaultMaxModelCalls: 500,
+		DefaultMaxTurns:      api.IntPtr(100),
+		DefaultMaxModelCalls: api.IntPtr(500),
 		DefaultMaxDuration:   "2h",
 		DefaultResources: &hubclient.ProjectResourceSpec{
 			Requests: &hubclient.ProjectResourceList{CPU: "500m", Memory: "1Gi"},
@@ -125,8 +125,8 @@ func TestProjectSettings_DefaultLimits(t *testing.T) {
 
 	var putResp hubclient.ProjectSettings
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&putResp))
-	assert.Equal(t, 100, putResp.DefaultMaxTurns)
-	assert.Equal(t, 500, putResp.DefaultMaxModelCalls)
+	assert.Equal(t, api.IntPtr(100), putResp.DefaultMaxTurns)
+	assert.Equal(t, api.IntPtr(500), putResp.DefaultMaxModelCalls)
 	assert.Equal(t, "2h", putResp.DefaultMaxDuration)
 	require.NotNil(t, putResp.DefaultResources)
 	require.NotNil(t, putResp.DefaultResources.Requests)
@@ -143,8 +143,8 @@ func TestProjectSettings_DefaultLimits(t *testing.T) {
 
 	var getResp hubclient.ProjectSettings
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&getResp))
-	assert.Equal(t, 100, getResp.DefaultMaxTurns)
-	assert.Equal(t, 500, getResp.DefaultMaxModelCalls)
+	assert.Equal(t, api.IntPtr(100), getResp.DefaultMaxTurns)
+	assert.Equal(t, api.IntPtr(500), getResp.DefaultMaxModelCalls)
 	assert.Equal(t, "2h", getResp.DefaultMaxDuration)
 	require.NotNil(t, getResp.DefaultResources)
 	assert.Equal(t, "10Gi", getResp.DefaultResources.Disk)
@@ -156,22 +156,23 @@ func TestProjectSettings_ClearDefaultLimits(t *testing.T) {
 
 	// Set values first
 	putBody := hubclient.ProjectSettings{
-		DefaultMaxTurns:      100,
-		DefaultMaxModelCalls: 500,
+		DefaultMaxTurns:      api.IntPtr(100),
+		DefaultMaxModelCalls: api.IntPtr(500),
 		DefaultMaxDuration:   "2h",
 	}
 	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings", putBody)
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	// Clear by sending explicit zero/empty values
-	clearBody := json.RawMessage(`{"defaultMaxTurns":0,"defaultMaxModelCalls":0,"defaultMaxDuration":"","defaultResources":{}}`)
+	// Clear by sending null for the count limits (0 is Unlimited,
+	// ptone/scion#3925) and empty values for the rest.
+	clearBody := json.RawMessage(`{"defaultMaxTurns":null,"defaultMaxModelCalls":null,"defaultMaxDuration":"","defaultResources":{}}`)
 	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings", clearBody)
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	var resp hubclient.ProjectSettings
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-	assert.Equal(t, 0, resp.DefaultMaxTurns)
-	assert.Equal(t, 0, resp.DefaultMaxModelCalls)
+	assert.Nil(t, resp.DefaultMaxTurns)
+	assert.Nil(t, resp.DefaultMaxModelCalls)
 	assert.Empty(t, resp.DefaultMaxDuration)
 	assert.Nil(t, resp.DefaultResources)
 }

@@ -364,12 +364,15 @@ func (s *Server) handleCreateGitHubAppInstallation(w http.ResponseWriter, r *htt
 		return
 	}
 
+	var missing []settingsFieldError
 	if installation.InstallationID == 0 {
-		writeError(w, http.StatusBadRequest, ErrCodeValidationError, "installation_id is required", nil)
-		return
+		missing = append(missing, settingsFieldError{Field: "installation_id", Message: "installation_id is required"})
 	}
 	if installation.AccountLogin == "" {
-		writeError(w, http.StatusBadRequest, ErrCodeValidationError, "account_login is required", nil)
+		missing = append(missing, settingsFieldError{Field: "account_login", Message: "account_login is required"})
+	}
+	if len(missing) > 0 {
+		writeSettingsValidation(w, missing[0].Message, missing, nil)
 		return
 	}
 
@@ -532,7 +535,7 @@ func (s *Server) handleProjectGitHubInstallation(w http.ResponseWriter, r *http.
 			return
 		}
 		if req.InstallationID == 0 {
-			writeError(w, http.StatusBadRequest, ErrCodeValidationError, "installation_id is required", nil)
+			writeSettingsFieldError(w, "installation_id", "installation_id is required")
 			return
 		}
 
@@ -703,11 +706,19 @@ func (s *Server) handleProjectGitIdentity(w http.ResponseWriter, r *http.Request
 		switch identity.Mode {
 		case "bot", "custom", "co-authored":
 		default:
-			writeError(w, http.StatusBadRequest, ErrCodeValidationError, "mode must be 'bot', 'custom', or 'co-authored'", nil)
+			writeSettingsFieldError(w, "mode", "mode must be 'bot', 'custom', or 'co-authored'")
 			return
 		}
 		if identity.Mode == "custom" && (identity.Name == "" || identity.Email == "") {
-			writeError(w, http.StatusBadRequest, ErrCodeValidationError, "name and email are required when mode is 'custom'", nil)
+			const msg = "name and email are required when mode is 'custom'"
+			var missing []settingsFieldError
+			if identity.Name == "" {
+				missing = append(missing, settingsFieldError{Field: "name", Message: msg})
+			}
+			if identity.Email == "" {
+				missing = append(missing, settingsFieldError{Field: "email", Message: msg})
+			}
+			writeSettingsValidation(w, msg, missing, nil)
 			return
 		}
 		project.GitIdentity = &identity

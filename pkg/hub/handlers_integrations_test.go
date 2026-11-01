@@ -1098,8 +1098,12 @@ func TestUpdateConfig_UnknownSecretKey(t *testing.T) {
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
+	}
+	entries := settingsErrorEntries(t, rr)
+	if entries[0].Field != "secrets.unknown_key" {
+		t.Errorf("field = %q, want secrets.unknown_key", entries[0].Field)
 	}
 }
 

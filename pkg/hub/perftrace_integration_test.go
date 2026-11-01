@@ -486,8 +486,7 @@ func TestPerfTrace_AdminSettingsRejectsPerfTrace(t *testing.T) {
 	rr := httptest.NewRecorder()
 	srv.handlePutServerConfigDB(rr, req, ops)
 	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
-	var resp map[string]any
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	resp := settingsErrorFields(t, rr.Body.Bytes())
 	assert.Equal(t, "layer0_rejected", resp["error"])
 	assert.Contains(t, resp["keys"], "server.hub.perf_trace")
 }

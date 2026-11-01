@@ -158,8 +158,9 @@ func TestWorkstation_PutServerConfig_StartupBlockInvalidRejected(t *testing.T) {
 	}
 }
 
-// The refusal is exactly {"error":{"code","message","details":{"field"}}}:
-// the shape of the other settings validation errors, with no extra field.
+// The refusal is exactly {"error":{"code","message","details":{"field",
+// "errors"}}}: the settings error envelope (ptone/scion#4450), with one
+// entry naming the field and no extra member.
 func TestWorkstation_PutServerConfig_StartupBlockErrorShape(t *testing.T) {
 	startupBlockHome(t, startupBlockSettingsYAML)
 	srv, _, _ := newSQLiteHubInMode(t, true, nil)
@@ -171,11 +172,18 @@ func TestWorkstation_PutServerConfig_StartupBlockErrorShape(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
 		t.Fatalf("unmarshal %s: %v", rr.Body.String(), err)
 	}
+	msg := config.HubPortProxyConfig{ResponseHeaderTimeout: "1h"}.Validate().Error()
 	want := map[string]interface{}{
 		"error": map[string]interface{}{
 			"code":    ErrCodeValidationError,
-			"message": config.HubPortProxyConfig{ResponseHeaderTimeout: "1h"}.Validate().Error(),
-			"details": map[string]interface{}{"field": "server.hub.port_proxy.response_header_timeout"},
+			"message": msg,
+			"details": map[string]interface{}{
+				"field": "server.hub.port_proxy.response_header_timeout",
+				"errors": []interface{}{map[string]interface{}{
+					"field":   "server.hub.port_proxy.response_header_timeout",
+					"message": msg,
+				}},
+			},
 		},
 	}
 	if !reflect.DeepEqual(got, want) {

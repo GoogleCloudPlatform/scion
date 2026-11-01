@@ -532,6 +532,33 @@ func TestHandleAdminMessaging_PutOffloadThresholdRunes_NegativeRejected(t *testi
 	if putRR.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for a negative offload_threshold_runes, got %d: %s", putRR.Code, putRR.Body.String())
 	}
+	// The schema errors are config.ValidationError values, which encode with
+	// lowercase keys (ptone/scion#4450): {"path", "message"}, not
+	// {"Path", "Message"}.
+	var body struct {
+		Error  string                       `json:"error"`
+		Errors []map[string]json.RawMessage `json:"errors"`
+	}
+	if err := json.Unmarshal(putRR.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v: %s", err, putRR.Body.String())
+	}
+	if body.Error != "validation_failed" || len(body.Errors) == 0 {
+		t.Fatalf("want validation_failed with errors, got %s", putRR.Body.String())
+	}
+	for _, e := range body.Errors {
+		if _, ok := e["message"]; !ok {
+			t.Errorf("entry without a lowercase message key: %s", putRR.Body.String())
+		}
+		if _, ok := e["path"]; !ok {
+			t.Errorf("entry without a lowercase path key: %s", putRR.Body.String())
+		}
+		if _, ok := e["Message"]; ok {
+			t.Errorf("entry still carries the capitalized Message key: %s", putRR.Body.String())
+		}
+		if _, ok := e["Path"]; ok {
+			t.Errorf("entry still carries the capitalized Path key: %s", putRR.Body.String())
+		}
+	}
 }
 
 // --- ptone/scion#4596: attachment delivery settings ---

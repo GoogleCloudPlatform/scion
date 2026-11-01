@@ -300,6 +300,21 @@ func (s *Server) handleRuntimeBrokerRoutes(w http.ResponseWriter, r *http.Reques
 			s.handleAgentLaunchReport(w, r, brokerID, agentID)
 			return
 		}
+		// The broker-self signed workspace download, POST
+		// .../agents/{agentId}/workspace-download, with the same segment
+		// rules as the launch report.
+		if agentID, ok := strings.CutSuffix(agentPath, "/workspace-download"); ok {
+			if agentID == "" || strings.Contains(agentID, "/") {
+				NotFound(w, "Agent")
+				return
+			}
+			if r.Method != http.MethodPost {
+				MethodNotAllowed(w, http.MethodPost)
+				return
+			}
+			s.handleWorkspaceDownload(w, r, brokerID, agentID)
+			return
+		}
 	}
 
 	// Delegate to the original handler for other operations
@@ -1910,6 +1925,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			// reservation alone too.
 			if !reportOfOtherRun(agentHB.RunID, agent.RunID) {
 				s.reconcileBrokerQuotaOnPhaseChange(ctx, agent, agent.Phase, statusUpdate.Phase)
+				s.reconcileProjectQuotaOnPhaseChange(ctx, agent, agent.Phase, statusUpdate.Phase)
 			}
 
 			// Update the agent's status

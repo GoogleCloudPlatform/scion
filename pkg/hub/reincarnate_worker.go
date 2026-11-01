@@ -591,7 +591,7 @@ func (s *Server) advanceListedRecord(ctx context.Context, rec *store.AgentReinca
 // carries a Phase or Activity while a migration is in flight, so the
 // worker is the sole writer of §3.9's "migrating to generation N+1" for
 // both self and non-self migrations.
-func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnationID string, previous, fresh *store.AgentAppliedConfig, handoff string, migrationStart time.Time, requestedBy string, plan *ReincarnationPlan, toGeneration int, admittedDeletionClaim int64, move *reincarnationMove) {
+func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnationID string, previous, fresh *store.AgentAppliedConfig, handoff string, migrationStart time.Time, requestedBy string, plan *ReincarnationPlan, toGeneration int, admittedDeletionClaim int64, move *reincarnationMove, capHold *reincarnationCapacity) {
 	defer func() {
 		if p := recover(); p != nil {
 			s.agentLifecycleLog.Error("reincarnation worker panicked",
@@ -697,6 +697,21 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateStopping, "failed to record stopping state: "+err.Error(), recovery(store.AgentReincarnationStateStopping))
 		return
 	}
+	// Capacity backstop (ptone/scion#6033): the agent reads stopping, a
+	// counted phase, from here on. Until this write it read its prior phase,
+	// so a concurrent reincarnate request that lost the claim could
+	// conditionally roll back the reservations this reincarnation relies on
+	// (a reincarnation is not a start-kind claim). Re-assert them without the
+	// cap check, as the restart backstop does; a row written here is owned
+	// by this reincarnation. A move's broker slot moves later
+	// (moveBrokerQuota), so only its project slot is re-asserted.
+	owned := capHold.owned()
+	if id := s.reassertProjectReservation(ctx, agent, backstopSiteReincarnate); id != "" {
+		owned.projectReservationID = id
+	}
+	if move == nil && s.reassertBrokerReservationAt(ctx, agent, backstopSiteReincarnate) {
+		owned.brokerReservationID = s.activeReservationID(ctx, store.LimitMaxAgentsPerBroker, agent.ID, store.QuotaScopeBroker, agent.RuntimeBrokerID)
+	}
 
 	// A stop failure is fatal, checked BEFORE any config write. The broker
 	// itself already treats "already stopped" and "not found" as success
@@ -711,6 +726,24 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateStopping, "stop failed: "+err.Error(), recovery(store.AgentReincarnationStateStopping))
 		return
 	}
+	// The old container is gone. From here until a start is sent with an
+	// unknown outcome or succeeds, a failure leaves no container, so once
+	// the failure is recorded (the deferred call runs after the fail
+	// helpers, which write phase error) the capacity this reincarnation
+	// holds is released conditionally (releaseFailedReincarnationCapacity).
+	// On success the agent runs, holds capacity, and the conditional
+	// releases would keep everything anyway.
+	releaseCapacityOnExit := true
+	// releaseIdleOnExit widens the release to the agent's idle slots: set
+	// for a refused move, where the agent holds a source broker slot this
+	// reincarnation did not create (the transfer leaves a held one in
+	// place, and the failed move's reconcile restores one unchecked).
+	releaseIdleOnExit := false
+	defer func() {
+		if releaseCapacityOnExit {
+			s.releaseFailedReincarnationCapacity(ctx, agentID, releaseIdleOnExit, owned)
+		}
+	}()
 	if move != nil {
 		// The source's exposed ports die with its container.
 		s.clearExposedPortsForAgent(ctx, agentID)
@@ -731,6 +764,16 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		// reservation is left untouched and the agent stays stopped on
 		// the source.
 		if err := s.moveBrokerQuota(ctx, agent, move); err != nil {
+			// The refused transfer left the agent's source broker
+			// slot, if it held one, in place, and failReincarnation's
+			// failed-move reconcile (reconcileFailedMove, through
+			// ensureBrokerReservationOn) restores a source slot without
+			// the cap check, also for an agent that held none. This
+			// reincarnation created neither, so the owned release would
+			// keep it. No container can exist (the stop succeeded and
+			// nothing started), so once the failure is recorded the
+			// agent's idle slots are released (ptone/scion#6033).
+			releaseIdleOnExit = true
 			s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateProvisioning, "target broker quota: "+err.Error(), recovery(store.AgentReincarnationStateProvisioning))
 			return
 		}
@@ -914,12 +957,17 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 			// at gen N+1, so row, disk and any container agree.
 			s.agentLifecycleLog.Info("reincarnation failed: start outcome ambiguous, a container may exist; not re-rendering the previous config",
 				"agent_id", agentID, "reincarnation_id", reincarnationID, "from_state", store.AgentReincarnationStateStarting, "cause", errMsg)
+			// A container may run: keep the capacity; the sweep releases
+			// it once the agent is seen idle.
+			releaseCapacityOnExit = false
 			s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateStarting, errMsg, nil)
 			return
 		}
 		failAfterProvision(store.AgentReincarnationStateStarting, errMsg)
 		return
 	}
+	// The start was accepted: the agent holds capacity.
+	releaseCapacityOnExit = false
 	// Take the start echo, image included: this is the runtime-resolved
 	// image. The record's NewAppliedConfig and the completion write below
 	// both persist fresh. The agent-level echo (template, runtime, runtime
@@ -1026,12 +1074,11 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 // reincarnationRerenderTimeout bounds the best-effort re-render of the
 // previous config after a failed reincarnation (rerenderPreviousConfig). A
 // reprovision dispatch can make two broker round trips (the env-gather first
-// pass, then the replay with the gathered env), each bounded by the broker
-// transport's own timeout (the control-channel RequestTimeout, 120s by
-// default), so this allows both plus margin. It is well inside
-// reincarnationStaleAfter, so the sweep cannot resolve the record while the
-// re-render is still running.
-const reincarnationRerenderTimeout = 5 * time.Minute
+// pass, then the replay with the gathered env), each bounded by the
+// hub-to-broker request limit (brokerRequestTimeout), so this allows both
+// plus a minute of margin. It is well inside reincarnationStaleAfter, so the
+// sweep cannot resolve the record while the re-render is still running.
+const reincarnationRerenderTimeout = 2*brokerRequestTimeout + time.Minute
 
 // reincarnationStartLeftNoContainer reports whether a DispatchAgentStart
 // error is a definitive outcome that leaves no gen N+1 container: the broker
@@ -1058,9 +1105,13 @@ const reincarnationRerenderTimeout = 5 * time.Minute
 // delete owns the agent row then, so no rollback or re-render may write it.
 // During a hub shutdown the rollback's own dispatches (the target delete,
 // the re-render) are best effort and normally refused by the same gate;
-// the agent row is still rolled back or failed consistently.
+// the agent row is still rolled back or failed consistently. A pending
+// config fold refused before the dispatch (errPendingConfigFold,
+// pendingFoldRefusedOutsideDelete) is definitive for the same reason; the
+// reincarnation start does not fold pending config until ptone/scion#3978,
+// so that branch is defensive for now.
 func reincarnationStartLeftNoContainer(err error) bool {
-	if startRunNotBegunOutsideDelete(err) || errors.Is(err, ErrHubShuttingDown) {
+	if startRunNotBegunOutsideDelete(err) || pendingFoldRefusedOutsideDelete(err) || errors.Is(err, ErrHubShuttingDown) {
 		return true
 	}
 	return isConfirmedStartNotActedOnError(err) && !brokerStartAttempted(err)

@@ -36,6 +36,7 @@
 import { LitElement, css, html, nothing } from 'lit';
 import type { PropertyValues, TemplateResult } from 'lit';
 import { customElement, property, query, state } from 'lit/decorators.js';
+import { styleMap } from 'lit/directives/style-map.js';
 
 import type { ArtifactFile } from '../../client/artifacts.js';
 import { ReviewController } from './editor/controller.js';
@@ -53,7 +54,18 @@ interface CardState {
   anchor: Element;
   title: string;
   note: string;
+  /** How the comment can be edited, or why it cannot (ptone/scion#6850). */
+  hint: string;
 }
+
+/** Space kept between the pinned toolbar and a caret scrolled into view. */
+const SCROLL_GAP_PX = 8;
+/** ProseMirror's default scroll margin, kept on every other side. */
+const PM_SCROLL_MARGIN_PX = 5;
+/** The card's hint on the reviewer's own comment (design 4.5, ptone/scion#6850). */
+export const OWN_COMMENT_HINT = 'Click or press Enter to edit';
+/** The card's hint on an earlier comment (design 4.4, E5 S-b). */
+export const EARLIER_COMMENT_HINT = 'Earlier comment: read-only';
 
 @customElement('scion-review-editor')
 export class ScionReviewEditor extends LitElement {
@@ -66,6 +78,12 @@ export class ScionReviewEditor extends LitElement {
   @property({ attribute: false }) files: ArtifactFile[] = [];
   /** Shown as the author of comments already in the text. */
   @property({ type: String }) noteAuthor = '';
+  /**
+   * Height in px of what is pinned over the top of the scrolled page (the
+   * sticky review toolbar). The editor keeps the caret and selection
+   * below it when it scrolls them into view.
+   */
+  @property({ attribute: false }) scrollInset = 0;
 
   @state() private card: CardState | null = null;
 
@@ -83,6 +101,11 @@ export class ScionReviewEditor extends LitElement {
     css`
       :host {
         display: block;
+      }
+      /* Focus scrolled into view stays below the pinned review toolbar. */
+      .editor-root [tabindex],
+      .editor-root a[href] {
+        scroll-margin-top: var(--review-scroll-inset, 0px);
       }
     `,
   ];
@@ -103,6 +126,39 @@ export class ScionReviewEditor extends LitElement {
     if (changed.has('content') && this.controller && this.content !== this.known) {
       this.open(this.content);
     }
+    if (changed.has('scrollInset')) this.applyScrollInset();
+  }
+
+  /**
+   * The top scroll margin in whole px for the pinned inset: 0 when nothing
+   * is pinned (a negative, NaN or infinite inset counts as nothing), so 0
+   * keeps ProseMirror's and the browser's defaults.
+   */
+  private get insetTop(): number {
+    const inset = Number.isFinite(this.scrollInset) ? Math.ceil(this.scrollInset) : 0;
+    return inset > 0 ? inset + SCROLL_GAP_PX : 0;
+  }
+
+  /**
+   * ProseMirror scrolls the selection into view itself and ignores CSS
+   * scroll-padding, so the pinned toolbar's height goes into its scroll
+   * margin and threshold: a caret under the toolbar counts as out of view.
+   * The browser scrolls focus (Tab to a comment badge or a link) by CSS
+   * scroll-margin instead, which reads the same number from
+   * --review-scroll-inset, set on .editor-root in render().
+   */
+  private applyScrollInset(): void {
+    if (!this.controller) return;
+    const top = this.insetTop;
+    this.controller.view.setProps({
+      scrollMargin: {
+        top: top || PM_SCROLL_MARGIN_PX,
+        right: PM_SCROLL_MARGIN_PX,
+        bottom: PM_SCROLL_MARGIN_PX,
+        left: PM_SCROLL_MARGIN_PX,
+      },
+      scrollThreshold: { top, right: 0, bottom: 0, left: 0 },
+    });
   }
 
   private async start(): Promise<void> {
@@ -141,6 +197,7 @@ export class ScionReviewEditor extends LitElement {
     view.dom.addEventListener('focusin', this.onPointer);
     view.dom.addEventListener('mouseleave', this.hideCard);
     view.dom.addEventListener('focusout', this.hideCard);
+    this.applyScrollInset();
     this.open(this.content);
   }
 
@@ -238,6 +295,7 @@ export class ScionReviewEditor extends LitElement {
       anchor: el,
       title: who ? `Comment ${number} · ${who}` : `Comment ${number}`,
       note: String(node.attrs.note),
+      hint: node.attrs.mine === true ? OWN_COMMENT_HINT : EARLIER_COMMENT_HINT,
     };
   };
 
@@ -250,7 +308,10 @@ export class ScionReviewEditor extends LitElement {
       <span id="mode-note" class="visually-hidden"
         >Suggest mode: your edits are recorded as suggestions.</span
       >
-      <div class="editor-root"></div>
+      <div
+        class="editor-root"
+        style=${styleMap({ '--review-scroll-inset': `${this.insetTop}px` })}
+      ></div>
       ${this.card
         ? html`<sl-popup
             active
@@ -264,6 +325,7 @@ export class ScionReviewEditor extends LitElement {
                 <sl-icon name="chat-text" aria-hidden="true"></sl-icon>${this.card.title}
               </div>
               <div class="card-note">${this.card.note}</div>
+              <div class="card-hint">${this.card.hint}</div>
             </div>
           </sl-popup>`
         : nothing}

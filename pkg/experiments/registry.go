@@ -194,16 +194,18 @@ const AgentEdit = "web.agent_edit"
 // AgentEditHeld gates held config edits (ptone/scion#3976): while it is on,
 // a config edit of an agent with a live or transitional container is kept
 // as the agent's pending config and applied at its next start, a
-// provision-rendered key is kept pending, and DELETE
+// provision-rendered key is kept pending, an edit a start does not bring
+// into effect (a clear or removal the broker does not apply at start, and
+// the whole key of a collection edit with such a part) stays pending until
+// a reincarnation applies pending edits, and DELETE
 // /api/v1/agents/{id}/pending-config discards pending edits. A
 // reincarnation does not apply pending edits yet (ptone/scion#3978), so it
 // must stay off until that lands. While it is off the hub refuses a config
-// edit of such an agent, as before, and applies no stored pending config;
-// a config edit it writes removes the pending keys that edit names, so a
-// stale pending value cannot later override it. It has its own default-off
-// switch
-// because the Edit page experiment (AgentEdit) is turned on separately; the
-// web layer only mirrors the hub's check.
+// edit of such an agent, as before, applies no stored pending config and
+// returns none, and clears it at the agent's next start or config edit, so
+// a stale pending value cannot later override a newer one. It has its own
+// default-off switch because the Edit page experiment (AgentEdit) is turned
+// on separately; the web layer only mirrors the hub's check.
 const AgentEditHeld = "hub.agent_edit_held"
 
 // AgentDelegation gates agent delegation (.design/agent-delegation.md §10):
@@ -264,9 +266,12 @@ const SSEHiddenTabClose = "web.sse_hidden_tab_close"
 
 // SecretRotation gates opt-in Hub server keyring configuration
 // (server.keyring_file, ptone/scion#1530): a hub configured with a keyring
-// file refuses to start while it is off. It is checked once at startup
-// (the keyring is loaded once, before any listener opens); turning it off
-// later changes nothing until the next restart. Readers of persisted
+// file refuses to start while it is off. For the keyring it is checked once
+// at startup (the keyring is loaded once, before any listener opens);
+// turning it off later changes nothing there until the next restart. The
+// admin key status endpoint (GET /api/v1/admin/keys/status) checks it on
+// every request (requireExperiment), so the endpoint answers 404 as soon as
+// it is off. Readers of persisted
 // keyring-format data must never depend on it. The design names it
 // "server.secret-rotation"; NamePattern allows no hyphen.
 const SecretRotation = "server.secret_rotation"
@@ -425,7 +430,7 @@ var compiled = []Experiment{
 	{
 		Name:        PortView,
 		Title:       "Port page view",
-		Description: "Opening an agent's exposed port from the hub serves the page through a short-lived page link, so its relative scripts (including modules), styles, images, same-app requests and WebSockets work. Pages opened this way can only use relative URLs: URLs that start with / do not work. Browser storage, cookies and web workers are not available to the page. The link lasts server.hub.port_proxy.view_ttl (default 2h); opening the port from the hub again gives a new one. Conduit transport only in this release. Gates the hub's port link redirect and the /api/v1/portview/ route (LayerServer), which answers 404 while it is off. Keep it off on a hub behind an authenticating front proxy (for example IAP) until it has been verified with one (ptone/scion#5989).",
+		Description: "Opening an agent's exposed port from the hub serves the page through a short-lived page link, so its relative scripts (including modules), styles, images, same-app requests and WebSockets work. Pages opened this way can only use relative URLs: URLs that start with / do not work. Browser storage, cookies and web workers are not available to the page. The link lasts server.hub.port_proxy.view_ttl (default 2h); opening the port from the hub again gives a new one. It works over either port proxy transport; a page's WebSocket works only over Conduit. The page link grants access, so do not share it. Gates the hub's port link redirect and the /api/v1/portview/ route (LayerServer), which answers 404 while it is off. Keep it off on a hub behind an authenticating front proxy (for example IAP) until it has been verified with one (ptone/scion#5989).",
 		Default:     false,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,
@@ -513,7 +518,7 @@ var compiled = []Experiment{
 	{
 		Name:        AgentEditHeld,
 		Title:       "Held edits for running agents",
-		Description: "Lets an agent config edit be saved while the agent is running or starting: the hub keeps it as the agent's pending config and applies it at the next start, restart or resume. System prompt, agent instructions, skills and services edits are kept pending, unless the agent's Runtime Broker re-renders them at start (changedFields), in which case they are applied like other edits; a reincarnation does not apply pending edits yet, so what a start does not apply stays pending, and the rest is applied at the next start after a reincarnation, over the values it set. Keep it off until reincarnation applies pending edits. Pending edits can be discarded. While off, a config edit of a running agent is refused as before; stored pending edits are kept but not applied, except that an edit saved while off removes the pending keys it names.",
+		Description: "Lets an agent config edit be saved while the agent is running or starting: the hub keeps it as the agent's pending config and applies it at the next start, restart or resume. System prompt, agent instructions, skills and services edits are kept pending, unless the agent's Runtime Broker re-renders them at start (changedFields), in which case they are applied like other edits. What a start does not bring into effect stays pending until reincarnation applies pending edits: clears and removals only a reincarnation applies, and the whole key of a collection edit that has such a part, including the parts a start could apply. Keep it off until reincarnation applies pending edits. Pending edits can be discarded. While off, a config edit of a running agent is refused as before; stored pending edits are not applied or shown, and are cleared at the agent's next start or config edit.",
 		Default:     false,
 		Layers:      []Layer{LayerServer, LayerWeb},
 		Stage:       StageAlpha,
@@ -579,7 +584,7 @@ var compiled = []Experiment{
 	{
 		Name:        SecretRotation,
 		Title:       "Server keyring (session cookie pilot)",
-		Description: "Lets a hub start with a versioned keyring file (server.keyring_file). In this release only web session cookies use it: several signing generations can be read at once, with deadlines, while every other purpose keeps the legacy server secret. Checked at startup; a hub with a keyring file refuses to start while it is off. Full server-secret rotation is not available yet.",
+		Description: "Lets a hub start with a versioned keyring file (server.keyring_file). In this release only web session cookies use it: several signing generations can be read at once, with deadlines, while every other purpose keeps the legacy server secret. The keyring file is checked at startup: a hub with a keyring file refuses to start while it is off. It also gates the admin key status endpoint (GET /api/v1/admin/keys/status), checked on every request, so turning it off hides that endpoint at once. Full server-secret rotation is not available yet.",
 		Default:     false,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,

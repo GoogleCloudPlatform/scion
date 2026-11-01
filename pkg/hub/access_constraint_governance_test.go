@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -1401,6 +1402,232 @@ func TestGovernance_UpdateDraftMustNameTarget(t *testing.T) {
 	got, err := s.GetAccessConstraint(ctx, a.ID)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"agent.read"}, got.MaximumPermissions)
+}
+
+// ---------------------------------------------------------------------------
+// 14b3. A time-window change needs relaxation authority
+// ---------------------------------------------------------------------------
+
+// TestGovernance_WindowChangeNeedsRelaxationAuthority pins that a session
+// update which adds, changes or removes a constraint's time window, with
+// the maximum permissions unchanged, needs relaxation authority over every
+// permission in the stored constraint's maximum set: an actor lacking one of
+// them is refused with insufficient_relaxation_authority and the constraint
+// is kept as stored; an actor holding them all commits the same change.
+func TestGovernance_WindowChangeNeedsRelaxationAuthority(t *testing.T) {
+	gs, ps, _, s := govTestSetup(t)
+	ctx := context.Background()
+
+	// partialID administers constraints but lacks agent.delete.
+	partialID := pvSeedUser(t, s, "gov-window-partial")
+	partialRD := createTestRoleDefinition(t, s, "partial-admin-role-window", store.RoleScopeSystem,
+		[]string{PermissionConstraintAdmin, "agent.read", "agent.create"})
+	pvSeedRoleBinding(t, s, partialRD.ID, "user", partialID, store.RoleScopeSystem, "")
+	fullID := govSeedAdminUser(t, s, "gov-window-full")
+	userID := govSeedNonAdminUser(t, s, "gov-window-target")
+
+	base := gs.nowFunc().UTC().Truncate(time.Second)
+	at := func(d time.Duration) *time.Time {
+		v := base.Add(d)
+		return &v
+	}
+	type window struct{ notBefore, expiresAt *time.Time }
+	for _, tc := range []struct {
+		name             string
+		stored, proposed window
+	}{
+		{"added", window{}, window{expiresAt: at(72 * time.Hour)}},
+		{"narrowed", window{expiresAt: at(72 * time.Hour)}, window{expiresAt: at(time.Hour)}},
+		{"notBefore added", window{expiresAt: at(72 * time.Hour)}, window{notBefore: at(24 * time.Hour), expiresAt: at(72 * time.Hour)}},
+		{"widened", window{notBefore: at(time.Hour), expiresAt: at(48 * time.Hour)}, window{notBefore: at(time.Hour), expiresAt: at(96 * time.Hour)}},
+		{"removed", window{notBefore: at(time.Hour), expiresAt: at(48 * time.Hour)}, window{}},
+		{"shifted", window{notBefore: at(time.Hour), expiresAt: at(48 * time.Hour)}, window{notBefore: at(24 * time.Hour), expiresAt: at(96 * time.Hour)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			name := "gov-window-" + strings.ReplaceAll(tc.name, " ", "-")
+			draft := func(w window) *store.AccessConstraint {
+				return &store.AccessConstraint{
+					Name:                 name,
+					SubjectKind:          store.ConstraintSubjectPrincipal,
+					SubjectPrincipalType: pvStrPtr("user"),
+					SubjectPrincipalID:   pvStrPtr(userID),
+					ScopeType:            store.RoleScopeSystem,
+					MaximumPermissions:   []string{"agent.read", "agent.delete"},
+					NotBefore:            w.notBefore,
+					ExpiresAt:            w.expiresAt,
+					Purpose:              "window authority",
+					CreatedBy:            fullID,
+				}
+			}
+			created := govCreateAndCommit(t, gs, ps, draft(tc.stored), pvTestActor(fullID))
+
+			commit := func(actorID string) error {
+				proposed := draft(tc.proposed)
+				proposed.ID = created.ID
+				preview, err := ps.GeneratePreview(ctx, PreviewRequest{
+					Operation:    "update",
+					Draft:        proposed,
+					ConstraintID: created.ID,
+					BaseRevision: created.Revision,
+					Actor:        pvTestActor(actorID),
+				})
+				require.NoError(t, err)
+				_, err = gs.CommitBoundaryChange(ctx, CommitRequest{
+					Operation:    "update",
+					Draft:        proposed,
+					ConstraintID: created.ID,
+					BaseRevision: created.Revision,
+					PreviewToken: preview.PreviewToken,
+					Actor:        pvTestActor(actorID),
+				})
+				return err
+			}
+
+			err := commit(partialID)
+			var ge *GovernanceError
+			require.ErrorAs(t, err, &ge, "window %s without authority over agent.delete", tc.name)
+			assert.Equal(t, ErrCodeInsufficientRelaxationAuthority, ge.Code)
+			assert.Equal(t, []string{"agent.delete"}, ge.Details["missingPermissionIds"])
+			got, err := s.GetAccessConstraint(ctx, created.ID)
+			require.NoError(t, err)
+			assert.Equal(t, created.Revision, got.Revision, "the refused update changes nothing")
+
+			require.NoError(t, commit(fullID), "window %s with authority", tc.name)
+			got, err = s.GetAccessConstraint(ctx, created.ID)
+			require.NoError(t, err)
+			assert.True(t, timeBoundEqual(got.NotBefore, tc.proposed.notBefore), "notBefore")
+			assert.True(t, timeBoundEqual(got.ExpiresAt, tc.proposed.expiresAt), "expiresAt")
+		})
+	}
+}
+
+// TestGovernance_WindowSubSecondChange pins how time-window bounds are
+// compared: exactly, with no rounding, as instants. A session update that
+// echoes the stored window as read back from the store (sub-second instants
+// included), or the same instant in another time zone, does not change the
+// window and needs no relaxation authority; moving ExpiresAt by one
+// millisecond is a window change and does.
+func TestGovernance_WindowSubSecondChange(t *testing.T) {
+	gs, ps, _, s := govTestSetup(t)
+	ctx := context.Background()
+
+	partialID := pvSeedUser(t, s, "gov-window-subsec-partial")
+	partialRD := createTestRoleDefinition(t, s, "partial-admin-role-window-subsec", store.RoleScopeSystem,
+		[]string{PermissionConstraintAdmin, "agent.read", "agent.create"})
+	pvSeedRoleBinding(t, s, partialRD.ID, "user", partialID, store.RoleScopeSystem, "")
+	fullID := govSeedAdminUser(t, s, "gov-window-subsec-full")
+	userID := govSeedNonAdminUser(t, s, "gov-window-subsec-target")
+
+	expiresAt := gs.nowFunc().UTC().Truncate(time.Second).Add(72*time.Hour + 250*time.Millisecond)
+	draft := func(purpose string, expires *time.Time) *store.AccessConstraint {
+		return &store.AccessConstraint{
+			Name:                 "gov-window-subsec",
+			SubjectKind:          store.ConstraintSubjectPrincipal,
+			SubjectPrincipalType: pvStrPtr("user"),
+			SubjectPrincipalID:   pvStrPtr(userID),
+			ScopeType:            store.RoleScopeSystem,
+			MaximumPermissions:   []string{"agent.read", "agent.delete"},
+			ExpiresAt:            expires,
+			Purpose:              purpose,
+			CreatedBy:            fullID,
+		}
+	}
+	created := govCreateAndCommit(t, gs, ps, draft("window sub-second", &expiresAt), pvTestActor(fullID))
+	require.NotNil(t, created.ExpiresAt)
+	require.True(t, created.ExpiresAt.Equal(expiresAt), "the store keeps the sub-second bound: got %v", *created.ExpiresAt)
+
+	commit := func(actorID string, c *store.AccessConstraint, proposed *store.AccessConstraint) (*store.AccessConstraint, error) {
+		t.Helper()
+		proposed.ID = c.ID
+		preview, err := ps.GeneratePreview(ctx, PreviewRequest{
+			Operation: "update", Draft: proposed, ConstraintID: c.ID, BaseRevision: c.Revision, Actor: pvTestActor(actorID),
+		})
+		require.NoError(t, err)
+		_, err = gs.CommitBoundaryChange(ctx, CommitRequest{
+			Operation: "update", Draft: proposed, ConstraintID: c.ID, BaseRevision: c.Revision,
+			PreviewToken: preview.PreviewToken, Actor: pvTestActor(actorID),
+		})
+		if err != nil {
+			return nil, err
+		}
+		got, getErr := s.GetAccessConstraint(ctx, c.ID)
+		require.NoError(t, getErr)
+		return got, nil
+	}
+
+	// Echo the stored window: not a window change, so the partial admin commits.
+	got, err := commit(partialID, created, draft("purpose edited", created.ExpiresAt))
+	require.NoError(t, err, "echoing the stored sub-second window is not a window change")
+	require.True(t, got.ExpiresAt.Equal(expiresAt))
+
+	// Echo the same instant in another time zone: not a window change.
+	shifted := got.ExpiresAt.In(time.FixedZone("UTC+05:30", 5*3600+1800))
+	got, err = commit(partialID, got, draft("purpose edited again", &shifted))
+	require.NoError(t, err, "the same instant in another zone is not a window change")
+	require.True(t, got.ExpiresAt.Equal(expiresAt))
+
+	// Move ExpiresAt by one millisecond: a window change.
+	moved := got.ExpiresAt.Add(time.Millisecond)
+	_, err = commit(partialID, got, draft("purpose edited", &moved))
+	var ge *GovernanceError
+	require.ErrorAs(t, err, &ge, "a one-millisecond move is a window change")
+	assert.Equal(t, ErrCodeInsufficientRelaxationAuthority, ge.Code)
+
+	got, err = commit(fullID, got, draft("purpose edited", &moved))
+	require.NoError(t, err, "the full admin moves the bound")
+	assert.True(t, got.ExpiresAt.Equal(moved), "got %v, want %v", *got.ExpiresAt, moved)
+}
+
+// hiddenConstraintStore reports store.ErrNotFound for one constraint ID,
+// as if the row were deleted after the preview token was validated.
+type hiddenConstraintStore struct {
+	store.Store
+	hiddenID string
+}
+
+func (s hiddenConstraintStore) GetAccessConstraint(ctx context.Context, id string) (*store.AccessConstraint, error) {
+	if id == s.hiddenID {
+		return nil, store.ErrNotFound
+	}
+	return s.Store.GetAccessConstraint(ctx, id)
+}
+
+// TestGovernance_CommitStoredConstraintNotFound pins that a delete commit
+// whose stored constraint cannot be loaded after the preview token is
+// validated fails with an error that wraps store.ErrNotFound, and deletes
+// nothing.
+func TestGovernance_CommitStoredConstraintNotFound(t *testing.T) {
+	gs, ps, authz, s := govTestSetup(t)
+	ctx := context.Background()
+
+	adminID := govSeedAdminUser(t, s, "gov-admin-stored-missing")
+	userID := govSeedNonAdminUser(t, s, "gov-user-stored-missing")
+	actor := pvTestActor(adminID)
+	created := govCreateAndCommit(t, gs, ps, &store.AccessConstraint{
+		Name:                 "gov-stored-missing",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
+		SubjectPrincipalType: pvStrPtr("user"),
+		SubjectPrincipalID:   pvStrPtr(userID),
+		ScopeType:            store.RoleScopeSystem,
+		MaximumPermissions:   []string{"agent.read"},
+		Purpose:              "stored constraint not found",
+		CreatedBy:            adminID,
+	}, actor)
+
+	preview, err := ps.GeneratePreview(ctx, PreviewRequest{
+		Operation: "delete", ConstraintID: created.ID, BaseRevision: created.Revision, Actor: actor,
+	})
+	require.NoError(t, err)
+
+	hidden := NewGovernanceService(hiddenConstraintStore{Store: s, hiddenID: created.ID}, ps, authz, slog.Default())
+	hidden.nowFunc = gs.nowFunc
+	_, err = hidden.CommitBoundaryChange(ctx, CommitRequest{
+		Operation: "delete", ConstraintID: created.ID, BaseRevision: created.Revision,
+		PreviewToken: preview.PreviewToken, Actor: actor,
+	})
+	require.ErrorIs(t, err, store.ErrNotFound)
+	_, err = s.GetAccessConstraint(ctx, created.ID)
+	require.NoError(t, err, "nothing is deleted")
 }
 
 // ---------------------------------------------------------------------------

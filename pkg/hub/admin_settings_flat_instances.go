@@ -54,14 +54,17 @@ func brokerInstancesInBody(rawBody []byte) (present bool, instances []config.V1R
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&instances); err != nil {
-		return true, nil, fmt.Errorf("invalid server.broker.instances: %w", err)
+		msg := fmt.Sprintf("invalid server.broker.instances: %v", err)
+		return true, nil, &serverConfigFileValidationError{msg: msg,
+			entries: []settingsFieldError{{Field: "server.broker.instances", Message: msg}}}
 	}
 	if errs := config.ValidateRuntimeBrokerInstances(instances); len(errs) > 0 {
 		all := make([]error, 0, len(errs))
 		for _, e := range errs {
 			all = append(all, e)
 		}
-		return true, nil, errors.Join(all...)
+		return true, nil, &serverConfigFileValidationError{msg: errors.Join(all...).Error(),
+			entries: configValidationEntries(errs, "server.broker.instances")}
 	}
 	return true, instances, nil
 }

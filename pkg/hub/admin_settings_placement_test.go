@@ -103,15 +103,21 @@ func TestPutServerConfig_PlacementSaveChecks(t *testing.T) {
 			if rr.Code != want || !strings.Contains(rr.Body.String(), tt.want) {
 				t.Fatalf("got %d, want %d containing %q: %s", rr.Code, want, tt.want, rr.Body.String())
 			}
+			if tt.wantErr {
+				settingsErrorEntries(t, rr)
+			}
 		})
 		t.Run("file/"+tt.name, func(t *testing.T) {
 			rr := placementFilePut(t, tt.stored, tt.body)
 			want := http.StatusOK
 			if tt.wantErr {
-				want = http.StatusBadRequest
+				want = http.StatusUnprocessableEntity
 			}
 			if rr.Code != want || !strings.Contains(rr.Body.String(), tt.want) {
 				t.Fatalf("got %d, want %d containing %q: %s", rr.Code, want, tt.want, rr.Body.String())
+			}
+			if tt.wantErr {
+				settingsErrorEntries(t, rr)
 			}
 		})
 	}
@@ -212,15 +218,21 @@ func TestPutServerConfig_IdentityFieldsSaveRule(t *testing.T) {
 			if rr.Code != want || !strings.Contains(rr.Body.String(), tt.want) {
 				t.Fatalf("got %d, want %d containing %q: %s", rr.Code, want, tt.want, rr.Body.String())
 			}
+			if tt.wantErr {
+				settingsErrorEntries(t, rr)
+			}
 		})
 		t.Run("file/"+tt.name, func(t *testing.T) {
 			rr := placementFilePut(t, tt.stored, tt.body)
 			want := http.StatusOK
 			if tt.wantErr {
-				want = http.StatusBadRequest
+				want = http.StatusUnprocessableEntity
 			}
 			if rr.Code != want || !strings.Contains(rr.Body.String(), tt.want) {
 				t.Fatalf("got %d, want %d containing %q: %s", rr.Code, want, tt.want, rr.Body.String())
+			}
+			if tt.wantErr {
+				settingsErrorEntries(t, rr)
 			}
 		})
 	}

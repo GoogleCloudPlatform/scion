@@ -379,7 +379,7 @@ func (s *Server) execDispatchStop(ctx context.Context, d store.BrokerDispatch) (
 	}
 	if intentAt != nil {
 		// The queued stop has now been applied: release the per-broker
-		// reservation as a direct stop does, and replace the stop_queued
+		// and per-project reservations as a direct stop does, and replace the stop_queued
 		// container status and the queued-stop notice the offline stop set.
 		// Both only while the row still holds the run the stop was queued
 		// for (agent.RunID, the intent's run): a newer run keeps its state
@@ -395,11 +395,13 @@ func (s *Server) execDispatchStop(ctx context.Context, d store.BrokerDispatch) (
 			}
 			if recorded {
 				s.releaseBrokerQuota(ctx, agent)
+				s.releaseProjectQuota(ctx, agent)
 			}
 		} else if s.stopRunStillCurrent(ctx, agent.ID, agent.RunID, "queued stop") {
 			// A check, not a lock: a run minted between this read and the
 			// release loses its reservation until the backfill restores it.
 			s.releaseBrokerQuota(ctx, agent)
+			s.releaseProjectQuota(ctx, agent)
 		}
 		// The start claim held when the stop was recorded is superseded
 		// (compare-and-set on the stop's intent time, whatever the run). It
