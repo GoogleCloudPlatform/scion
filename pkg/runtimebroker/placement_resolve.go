@@ -48,7 +48,7 @@ const (
 	placementLegacyGlobalCause     = "the agent runtime's global settings use the legacy format and mention Kubernetes placement keys; set schema_version: \"1\" so Kubernetes placement can be determined"
 	placementBuiltFromCause        = "the runtime entry this agent's runtime was built from no longer matches its cluster and namespace; restart the agent runtime, fix the entry, or align the settings file's entry with the stored one"
 	placementAgentConfigCause      = "the agent's config could not be read to check it against the agent runtime's Kubernetes placement"
-	placementOverlayInvalidCause   = "the Kubernetes placement in the runtimes and profiles stored in the Hub is not valid; fix them in the Hub settings (the server config view names the paths)"
+	placementOverlayInvalidCause   = "the Kubernetes placement in the runtimes and profiles stored in the Hub is not valid; fix them in the Hub settings (scion doctor and the settings placement report name the sections; the Hub log names the paths)"
 )
 
 // placementDefaultsOnlyCause is the fixed cause for a profile with placement
