@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -537,10 +538,12 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 
 		var superseded []SupersededKey
 		for key, bootstrapVal := range bootstrapMap {
-			if koanfPath := opsettings.KoanfPathFromSectionKey(sec.Name, key); startupOnlyLayer1Keys[koanfPath] != nil {
-				// The hub does not apply the saved value of this key, so it
-				// supersedes nothing: the startup value stays in effect
-				// (ptone/scion#6000).
+			if koanfPath := opsettings.KoanfPathFromSectionKey(sec.Name, key); opsettings.IsEnvPinnedLayer1Key(koanfPath) &&
+				koanfPath != config.PublicURLKey && ops.envOverrides[koanfPath] {
+				// A SCION_SERVER_* variable pins this key on this node, so
+				// the database value does not supersede it; the field's
+				// environment badge says so (authorized_domains,
+				// ptone/scion#6000; public_url is handled below).
 				continue
 			}
 			if sec.Name == "endpoints" && key == "public_url" && publicURLPinned {
@@ -664,8 +667,13 @@ func unseededSectionMap(unseededK *koanf.Koanf, sectionName string) map[string]i
 // endpoints hub_name and public_url: a managed endpoints row carries them
 // only after an admin sets them, and Snapshot falls back to the bootstrap
 // value (for public_url, so does the hub's endpoint resolution at startup,
-// ptone/scion#3905).
+// ptone/scion#3905). It is also the case for access authorized_domains: a
+// row without a list (a cleared list is stored that way) runs with the
+// startup list (authorizedDomainsForSnapshot, ptone/scion#6000).
 func bootstrapAppliesWhenAbsent(section, key string) bool {
+	if section == "access" && key == "authorized_domains" {
+		return true
+	}
 	return section == "endpoints" && (key == "hub_name" || key == "public_url" || key == endpointsImageRegistryKey)
 }
 
@@ -689,6 +697,14 @@ func (s *Server) applyRunningValuesForUnsetKeys(resp *ServerConfigResponse, snap
 	if snap.SoftDeleteRetainFiles == nil {
 		resp.Server.Hub.SoftDeleteRetainFiles = &retainFiles
 	}
+	// authorized_domains: with no saved list the hub runs with the startup
+	// list (authorizedDomainsForSnapshot, ptone/scion#6000), so GET shows
+	// it rather than an empty list that reads as "every domain".
+	if len(snap.AuthorizedDomains) == 0 && resp.Server.Auth != nil {
+		if running := s.AuthorizedDomains(); len(running) > 0 {
+			resp.Server.Auth.AuthorizedDomains = running
+		}
+	}
 	// image_registry: the managed value, else this replica's file tier,
 	// never a node env; profiles show managed values only. A save compares
 	// with exactly these values (ptone/scion#3916).
@@ -705,8 +721,8 @@ const (
 	softDeleteRetainFilesKey = "server.hub.soft_delete_retain_files"
 )
 
-// echoedRunningValueKeys returns the keys of soft_delete_retention and
-// soft_delete_retain_files that the request sends back
+// echoedRunningValueKeys returns the keys of soft_delete_retention,
+// soft_delete_retain_files and authorized_domains that the request sends back
 // as the running value GET showed for them while no value is stored
 // (applyRunningValuesForUnsetKeys). Such a value is an echo, not a change:
 // writing it would pin this replica's startup value (which may come from
@@ -728,6 +744,14 @@ func (s *Server) echoedRunningValueKeys(ctx context.Context, ops *OperationalSet
 	s.mu.RUnlock()
 
 	echoed := map[string]bool{}
+	// authorized_domains: GET shows the running list while none is saved
+	// (ptone/scion#6000); sending it back is an echo.
+	if req.Server != nil && req.Server.Auth != nil && len(req.Server.Auth.AuthorizedDomains) > 0 {
+		if running := s.AuthorizedDomains(); len(running) > 0 && sameDomainSet(req.Server.Auth.AuthorizedDomains, running) &&
+			storedKeyUnset(ctx, ops, authorizedDomainsKey) {
+			echoed[authorizedDomainsKey] = true
+		}
+	}
 	if req.Server != nil && req.Server.Hub != nil {
 		hub := req.Server.Hub
 		if retention > 0 && hub.SoftDeleteRetention != "" {
@@ -1353,6 +1377,39 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		// it may be filtered into a no-op (ptone/scion#3916).
 		if sec == "endpoints" && sameAsFilteredBase(merged, filteredBase) && !fp.has("public_url") && !fp.has("hub_name") {
 			noopRevs[sec] = rev
+		}
+	}
+
+	// A save that sends authorized_domains or admin_emails may not leave
+	// access settings that refuse sign-in for the saving account
+	// (ptone/scion#6000). The check reads the merged access document, so a
+	// value kept from the row counts. It always checks the lists as saved:
+	// they apply on every replica that does not pin the domain list, and
+	// on this node once its pin is removed. When this node pins the list
+	// through SCION_SERVER_*, a save that sends admin_emails is also
+	// checked against the pinned list, which applies here. Either refuses.
+	if doc, ok := sectionDocs["access"]; ok {
+		fp := sectionBodyPresence("access", rawBody)
+		domainsSent := fp.has("authorized_domains") && !echoedRunning[authorizedDomainsKey]
+		adminsSent := fp.has("admin_emails")
+		pinned := slices.Contains(ops.EnvOverriddenKeys(), authorizedDomainsKey)
+		if adminsSent || domainsSent {
+			var merged opsettings.AccessSettings
+			if err := json.Unmarshal(doc, &merged); err != nil {
+				slog.Error("PUT server-config: failed to decode access document", "error", err)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+				return
+			}
+			domains, admins := s.accessListsAfterDBSave(merged, false)
+			if s.rejectAuthorizedDomainsLockout(r.Context(), w, updatedBy, domains, admins) {
+				return
+			}
+			if pinned && adminsSent {
+				domains, admins = s.accessListsAfterDBSave(merged, true)
+				if s.rejectAuthorizedDomainsLockout(r.Context(), w, updatedBy, domains, admins) {
+					return
+				}
+			}
 		}
 	}
 

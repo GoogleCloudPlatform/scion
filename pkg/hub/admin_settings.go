@@ -325,6 +325,13 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 		return
 	}
 
+	// Resetting access returns it to the bootstrap values; like a save, it
+	// may not leave access settings that refuse sign-in for the account
+	// making it (ptone/scion#6000).
+	if sectionName == "access" && s.rejectAccessResetLockout(r.Context(), w, ops) {
+		return
+	}
+
 	// Resetting the GCP permission-check section returns both keys to their
 	// deploy-time values: the same transition rule and audit record as a
 	// PUT apply.
@@ -634,6 +641,15 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), projectStorageFieldErrorDetails(err))
 			return
 		}
+	}
+
+	// A save that sends authorized_domains or admin_emails may not leave
+	// access settings that refuse sign-in for the saving account
+	// (ptone/scion#6000). In file mode (one node) a domain list
+	// SCION_SERVER_* sets stays in effect after the reload, so sending it
+	// alone is not checked.
+	if s.rejectFileAccessLockout(w, r, rawBody, &req) {
+		return
 	}
 
 	globalDir, err := config.GetGlobalDir()
