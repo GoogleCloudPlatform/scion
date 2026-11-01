@@ -148,9 +148,15 @@ func CheckAllowedParams(params map[string]string, allowed []string) error {
 // PendingRestart describes an installed update whose hub restart is about to
 // be requested. It is passed to the before-restart hook.
 type PendingRestart struct {
-	From     string // running version ("" for a git build)
-	To       string // installed release tag
+	From     string // running version ("" for a git build); rebuild-server: RunningReleaseName
+	To       string // installed release tag, or git-<sha12> for a rebuild from Git
 	Strategy string // Installer.Name()
+	// Mode is UpdateModeRelease (update-binary) or UpdateModeGit
+	// (rebuild-server). Boot reconciliation records it in the selection.
+	Mode string
+	// Commit is the full commit id of a rebuild from Git ("" for a
+	// release).
+	Commit   string
 	Snapshot string // database snapshot path; "" when none could be taken (PostgreSQL)
 	Channel  string // the installed release's channel
 	Pin      string // PinLatest or the installed tag (the pin parameter)
@@ -160,6 +166,13 @@ type PendingRestart struct {
 	// previous_safe computation.
 	FromPublishedAt time.Time
 }
+
+// Update modes: how the hub binary is obtained. The release selection and
+// update-status report them.
+const (
+	UpdateModeRelease = "release"
+	UpdateModeGit     = "git"
+)
 
 // BeforeRestartFunc runs after the new binary is activated and before the
 // hub is restarted. The runner implements it to persist the run (status
@@ -618,6 +631,7 @@ func (e *BinaryUpdateExecutor) RunWithBeforeRestart(ctx context.Context, logger 
 			From:            e.current,
 			To:              target,
 			Strategy:        e.installer.Name(),
+			Mode:            UpdateModeRelease,
 			Snapshot:        snapshot,
 			Channel:         update.DetectChannel(target),
 			Pin:             pinParam(params),
@@ -649,18 +663,24 @@ func (e *BinaryUpdateExecutor) RunWithBeforeRestart(ctx context.Context, logger 
 // the new binary installed, and the error says it will run after the next
 // restart.
 func (e *BinaryUpdateExecutor) undoActivation(ctx context.Context, logger io.Writer, target string, cause error) error {
-	d, ok := e.installer.(Deactivator)
+	return undoInstall(ctx, e.installer, e.installTimeout, logger, target, cause)
+}
+
+// undoInstall rolls back the last Activate of inst when it implements
+// Deactivator (bounded by timeout), and returns cause annotated with the
+// outcome. It is shared by update-binary and rebuild-server.
+func undoInstall(ctx context.Context, inst Installer, timeout time.Duration, logger io.Writer, target string, cause error) error {
+	d, ok := inst.(Deactivator)
 	if !ok {
 		return fmt.Errorf("%w; %s cannot be rolled back by the %s installer (no backup of the previous binary is kept): %s stays installed and will run after the hub's next restart",
-			cause, target, e.installer.Name(), target)
+			cause, target, inst.Name(), target)
 	}
 	// ctx is the run's context, not the hook's or Restart's (their own
 	// deadlines never reach here). It may still have ended: the run's
-	// overall deadline (the 20-minute update-binary backstop) or a
-	// cancellation. The rollback must run regardless, so it is detached from
-	// that cancellation, keeps ctx's values (logging, trace) and is bounded
-	// on its own.
-	undoCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.installTimeout)
+	// overall deadline or a cancellation. The rollback must run
+	// regardless, so it is detached from that cancellation, keeps ctx's
+	// values (logging, trace) and is bounded on its own.
+	undoCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 	defer cancel()
 	if err := d.Deactivate(undoCtx); err != nil {
 		return fmt.Errorf("%w; rolling back %s also failed (%v): %s stays installed and will run after the hub's next restart",

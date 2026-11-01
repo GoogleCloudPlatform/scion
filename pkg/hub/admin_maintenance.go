@@ -369,14 +369,15 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 			Harnesses:  mc.Harnesses,
 		}), nil
 	case "rebuild-server":
+		installer := s.updateInstaller()
 		log.Debug("Resolved rebuild-server executor",
 			"repo_path", mc.RepoPath, "branch", mc.RepoBranch,
-			"binary_dest", mc.BinaryDest, "service_name", mc.ServiceName)
+			"installer", installer.Name(), "service_name", mc.ServiceName)
 		return NewRebuildServerExecutor(RebuildServerOptions{
 			RepoPath:    mc.RepoPath,
 			RepoBranch:  mc.RepoBranch,
-			BinaryDest:  mc.BinaryDest,
 			ServiceName: mc.ServiceName,
+			Installer:   installer,
 			Store:       s.store,
 		}), nil
 	case "rebuild-web":
@@ -771,10 +772,14 @@ func toMaintenanceRunResponse(run store.MaintenanceOperationRun) maintenanceRunR
 }
 
 // handleCheckForUpdates handles POST /api/v1/admin/maintenance/check-updates.
-// It dispatches to the appropriate update checker based on the deployment tier:
-//   - "binary": checks the effective channel's latest release in the release
-//     catalog (refreshed, within the catalog's throttle)
-//   - "source" (default): checks for git updates via origin fetch
+// The optional query parameter mode=release|git picks the checker (the
+// update card's mode toggle asks for the panel it shows); without it the
+// deployment tier does:
+//   - release ("binary" tier): checks the effective channel's latest
+//     release in the release catalog (refreshed, within the catalog's
+//     throttle)
+//   - git (otherwise): checks the maintenance repo for upstream commits
+//     via origin fetch
 //
 // Authorization: enforced by routeGuard via hub.maintenance.execute permission.
 func (s *Server) handleCheckForUpdates(w http.ResponseWriter, r *http.Request) {
@@ -785,8 +790,21 @@ func (s *Server) handleCheckForUpdates(w http.ResponseWriter, r *http.Request) {
 
 	mc := s.config.MaintenanceConfig
 
-	switch mc.DeploymentTier {
-	case "binary":
+	checkRelease := mc.DeploymentTier == "binary"
+	switch mode := r.URL.Query().Get("mode"); mode {
+	case "":
+	case UpdateModeRelease:
+		checkRelease = true
+	case UpdateModeGit:
+		checkRelease = false
+	default:
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+			fmt.Sprintf("invalid mode %q: expected %q or %q", mode, UpdateModeRelease, UpdateModeGit), nil)
+		return
+	}
+
+	switch {
+	case checkRelease:
 		sel, err := s.readReleaseSelection(r.Context())
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read the release selection", nil)

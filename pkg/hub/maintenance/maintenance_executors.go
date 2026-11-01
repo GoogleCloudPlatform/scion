@@ -29,7 +29,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"time"
 
 	cloudbuild "cloud.google.com/go/cloudbuild/apiv1/v2"
@@ -42,6 +41,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
 
@@ -273,12 +273,30 @@ func (e *PullImagesExecutor) Run(ctx context.Context, logger io.Writer, params m
 	return nil
 }
 
-// RebuildServerExecutor rebuilds the server binary from git and restarts via systemd.
+// RebuildServerExecutor rebuilds the hub binary from the maintenance repo's
+// Git checkout and installs it through the host's Installer, like a
+// release:
+//
+//  1. Installer.Preflight, before anything is fetched or built;
+//  2. git fetch, checkout/reset to origin/<branch> (or the current branch);
+//  3. make web, then go build with the commit and build time stamped in
+//     (GitBuildLDFlags) into a temporary directory, and VerifyGitBuild;
+//  4. Installer.Stage under the release name git-<sha12> (on the symlink
+//     layout releases/git-<sha12>/, swapped and retained like a release;
+//     with sudo-install <RepoPath>/scion.rebuild, installed with the
+//     starter hub's sudoers rules), Installer.Activate;
+//  5. on a starter hub (sudo-install), the systemd unit drift check;
+//  6. the before-restart hook, then Installer.Restart. If either fails an
+//     installer that implements Deactivator is rolled back.
+//
+// Boot reconciliation verifies the run by the restarted hub's release name
+// (RunningReleaseName) and then records the Git selection.
 type RebuildServerExecutor struct {
 	repoPath    string // path to scion source checkout
 	repoBranch  string // git branch to checkout before building (empty = stay on current)
-	binaryDest  string // install path (e.g., /usr/local/bin/scion)
-	serviceName string // systemd service name (e.g., "scion-hub")
+	serviceName string // systemd service name, for the unit drift check
+	installer   Installer
+	current     string // RunningReleaseName of the running build
 
 	// unitLocator and unitRevision back the systemd unit drift check;
 	// tests replace them (RebuildServerOptions) so they never call the
@@ -290,15 +308,24 @@ type RebuildServerExecutor struct {
 	// store, when set, keeps the last unit check result for the
 	// Admin -> Maintenance banner (hub setting system.unit_drift).
 	store store.Store
+
+	preflightTimeout time.Duration
+	installTimeout   time.Duration
+	hookTimeout      time.Duration
+	restartTimeout   time.Duration
 }
 
-// RebuildServerOptions configures a RebuildServerExecutor. Zero values are
-// kept as-is; Run applies its own defaults.
+// RebuildServerOptions configures a RebuildServerExecutor.
 type RebuildServerOptions struct {
 	RepoPath    string // path to scion source checkout
 	RepoBranch  string // git branch to checkout before building (empty = stay on current)
-	BinaryDest  string // install path (e.g., /usr/local/bin/scion)
-	ServiceName string // systemd service name (e.g., "scion-hub")
+	ServiceName string // systemd service name for the unit drift check; default DefaultServiceName
+	// Installer installs and restarts (the one detected at startup). nil
+	// means unsupported: the run fails at preflight.
+	Installer Installer
+	// CurrentRelease is the running build's RunningReleaseName (the
+	// pending update's "from"); default from pkg/version.
+	CurrentRelease string
 	// Store, when set, keeps the last systemd unit check result for the
 	// Admin -> Maintenance page. Optional.
 	Store store.Store
@@ -314,14 +341,28 @@ type RebuildServerOptions struct {
 // NewRebuildServerExecutor returns a RebuildServerExecutor configured from opts.
 func NewRebuildServerExecutor(opts RebuildServerOptions) *RebuildServerExecutor {
 	e := &RebuildServerExecutor{
-		repoPath:     opts.RepoPath,
-		repoBranch:   opts.RepoBranch,
-		binaryDest:   opts.BinaryDest,
-		serviceName:  opts.ServiceName,
-		unitLocator:  unitdrift.SystemctlLocator,
-		unitRevision: unitdrift.GitRevision,
-		unitTimeout:  opts.UnitTimeout,
-		store:        opts.Store,
+		repoPath:         opts.RepoPath,
+		repoBranch:       opts.RepoBranch,
+		serviceName:      opts.ServiceName,
+		installer:        opts.Installer,
+		current:          opts.CurrentRelease,
+		unitLocator:      unitdrift.SystemctlLocator,
+		unitRevision:     unitdrift.GitRevision,
+		unitTimeout:      opts.UnitTimeout,
+		store:            opts.Store,
+		preflightTimeout: preflightTimeout,
+		installTimeout:   installTimeout,
+		hookTimeout:      hookTimeout,
+		restartTimeout:   restartTimeout,
+	}
+	if e.serviceName == "" {
+		e.serviceName = DefaultServiceName
+	}
+	if e.installer == nil {
+		e.installer = NewUnsupportedInstaller("no installer configured", "")
+	}
+	if e.current == "" {
+		e.current = RunningReleaseName(version.Version, version.GetCommit())
 	}
 	if opts.UnitLocator != nil {
 		e.unitLocator = opts.UnitLocator
@@ -332,7 +373,22 @@ func NewRebuildServerExecutor(opts RebuildServerOptions) *RebuildServerExecutor 
 	return e
 }
 
+// Run implements MaintenanceExecutor; runners that record runs use
+// RunWithBeforeRestart.
 func (e *RebuildServerExecutor) Run(ctx context.Context, logger io.Writer, params map[string]string) error {
+	return e.RunWithBeforeRestart(ctx, logger, params, nil)
+}
+
+// rebuildStep is one command of a rebuild.
+type rebuildStep struct {
+	name string
+	cmd  string
+	args []string
+	dir  string
+}
+
+// RunWithBeforeRestart implements RestartingExecutor.
+func (e *RebuildServerExecutor) RunWithBeforeRestart(ctx context.Context, logger io.Writer, params map[string]string, before BeforeRestartFunc) error {
 	log := logging.Subsystem("hub.maintenance.rebuild-server")
 
 	if runtime.GOOS != "linux" {
@@ -343,14 +399,6 @@ func (e *RebuildServerExecutor) Run(ctx context.Context, logger io.Writer, param
 	if repoPath == "" {
 		return fmt.Errorf("no repository path configured for rebuild-server")
 	}
-	binaryDest := e.binaryDest
-	if binaryDest == "" {
-		binaryDest = "/usr/local/bin/scion"
-	}
-	serviceName := e.serviceName
-	if serviceName == "" {
-		serviceName = "scion-hub"
-	}
 
 	// A "branch" param on the API request overrides the configured default.
 	branch := e.repoBranch
@@ -360,48 +408,168 @@ func (e *RebuildServerExecutor) Run(ctx context.Context, logger io.Writer, param
 
 	log.Debug("Starting rebuild-server",
 		"repo_path", repoPath, "branch", branch,
-		"binary_dest", binaryDest, "service_name", serviceName)
+		"installer", e.installer.Name(), "service_name", e.serviceName)
 
-	// Build to a staging path inside the repo directory (where the service user
-	// has write access), then use "sudo install" to place it into the final
-	// destination (e.g., /usr/local/bin/scion). This avoids two problems:
-	//   1. ETXTBSY — writing directly to a running binary fails on Linux.
-	//   2. Permission denied — the service user typically cannot write to
-	//      /usr/local/bin/.
-	// Both the install and restart steps use sudo, backed by narrowly-scoped
-	// sudoers rules installed by the deploy script (gce-start-hub.sh).
-	stagingBinary := filepath.Join(repoPath, "scion.rebuild")
-
-	type step struct {
-		name string
-		cmd  string
-		args []string
-		dir  string
+	// ── Preflight: before anything is fetched or built ──────────────────
+	_, _ = fmt.Fprintf(logger, "==> Preflight (installer: %s)\n", e.installer.Name())
+	preCtx, cancelPre := context.WithTimeout(ctx, e.preflightTimeout)
+	err := e.installer.Preflight(preCtx)
+	cancelPre()
+	if err != nil {
+		return fmt.Errorf("installer preflight failed (%s): %w", e.installer.Name(), err)
 	}
+	_, _ = fmt.Fprintf(logger, "Preflight passed.\n\n")
 
-	var steps []step
+	// ── Update the checkout ─────────────────────────────────────────────
+	var steps []rebuildStep
 	var currentBranch string
-	steps = append(steps, step{"Fetching latest code", "git", []string{"fetch", "origin"}, repoPath})
+	steps = append(steps, rebuildStep{"Fetching latest code", "git", []string{"fetch", "origin"}, repoPath})
 	if branch != "" {
-		steps = append(steps, step{"Checking out branch " + branch, "git", []string{"checkout", branch}, repoPath})
-		steps = append(steps, step{"Resetting to origin/" + branch, "git", []string{"reset", "--hard", "origin/" + branch}, repoPath})
+		steps = append(steps, rebuildStep{"Checking out branch " + branch, "git", []string{"checkout", branch}, repoPath})
+		steps = append(steps, rebuildStep{"Resetting to origin/" + branch, "git", []string{"reset", "--hard", "origin/" + branch}, repoPath})
 	} else {
 		// Determine the current branch to reset against its remote tracking ref.
-		branchCmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
-		branchCmd.Dir = repoPath
-		branchOut, err := branchCmd.CombinedOutput()
+		out, err := gitOutput(ctx, repoPath, "rev-parse", "--abbrev-ref", "HEAD")
 		if err != nil {
-			return fmt.Errorf("failed to determine current branch: %s", strings.TrimSpace(string(branchOut)))
+			return fmt.Errorf("failed to determine current branch: %w", err)
 		}
-		currentBranch = strings.TrimSpace(string(branchOut))
-		steps = append(steps, step{"Resetting to origin/" + currentBranch, "git", []string{"reset", "--hard", "origin/" + currentBranch}, repoPath})
+		currentBranch = out
+		steps = append(steps, rebuildStep{"Resetting to origin/" + currentBranch, "git", []string{"reset", "--hard", "origin/" + currentBranch}, repoPath})
 	}
-	steps = append(steps,
-		step{"Building web assets", "make", []string{"web"}, repoPath},
-		step{"Building server binary", "go", []string{"build", "-o", stagingBinary, "./cmd/scion"}, repoPath},
-		step{"Installing server binary", "sudo", []string{"install", "-m", "755", stagingBinary, binaryDest}, ""},
-	)
+	if err := runRebuildSteps(ctx, logger, steps); err != nil {
+		return err
+	}
 
+	commit, err := gitOutput(ctx, repoPath, "rev-parse", "HEAD")
+	if err != nil {
+		return fmt.Errorf("failed to read the checked-out commit: %w", err)
+	}
+	name := GitReleaseName(commit)
+	if name == "" {
+		return fmt.Errorf("git rev-parse HEAD returned %q, not a commit id", commit)
+	}
+	_, _ = fmt.Fprintf(logger, "Building commit %s as %s\n\n", commit, name)
+	for _, r := range e.installer.Retained() {
+		if r.Current && r.Tag == name {
+			return fmt.Errorf("%s is already the active build (commit %s); there is nothing new to build", name, commit)
+		}
+	}
+
+	// ── Build into a temporary directory and verify ─────────────────────
+	tmpDir, err := os.MkdirTemp("", "scion-rebuild-*")
+	if err != nil {
+		return fmt.Errorf("create temp directory: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+	bin := filepath.Join(tmpDir, "scion")
+	if err := runRebuildSteps(ctx, logger, []rebuildStep{
+		{"Building web assets", "make", []string{"web"}, repoPath},
+		{"Building server binary", "go", []string{"build", "-ldflags", GitBuildLDFlags(commit, time.Now()), "-o", bin, "./cmd/scion"}, repoPath},
+	}); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(logger, "==> Verifying the build\n")
+	if err := VerifyGitBuild(ctx, bin, commit, logger); err != nil {
+		return fmt.Errorf("verification failed: %w", err)
+	}
+
+	// ── Install ─────────────────────────────────────────────────────────
+	_, _ = fmt.Fprintf(logger, "\n==> Installing %s (%s)\n", name, e.installer.Name())
+	installCtx, cancelInstall := context.WithTimeout(ctx, e.installTimeout)
+	staged, err := e.installer.Stage(installCtx, name, bin)
+	if err != nil {
+		cancelInstall()
+		return fmt.Errorf("stage %s: %w", name, err)
+	}
+	err = e.installer.Activate(installCtx, staged)
+	cancelInstall()
+	if err != nil {
+		return fmt.Errorf("activate %s: %w", name, err)
+	}
+	_, _ = fmt.Fprintf(logger, "Installed %s.\n\n", name)
+
+	// ── Systemd unit check (starter hubs) ───────────────────────────────
+	// The template it compares against is the starter hub's
+	// (unitdrift.TemplatePath); a deploy.sh hub (symlink layout) renders
+	// its own unit, so the check applies to sudo-install only. Rebuild
+	// from git never rewrites the unit, so a template change needs a
+	// re-provision; tell the admin. The check is read-only, bounded and
+	// never fails, so the restart below always runs. Its report is the
+	// last part of the log written before the restart is recorded.
+	var unitText string
+	if e.installer.Name() == StrategySudoInstall {
+		unitText = e.checkUnit(ctx, logger, repoPath, branch, currentBranch)
+	}
+
+	// ── Restart ─────────────────────────────────────────────────────────
+	_, _ = fmt.Fprintf(logger, "==> Restarting hub: %s -> %s at %s\n",
+		displayVersion(e.current), name, time.Now().UTC().Format(time.RFC3339))
+	_, _ = fmt.Fprintln(logger, "Server rebuild complete, restart initiated.")
+	if unitText != "" {
+		_, _ = fmt.Fprintf(logger, "\n==> Systemd unit check\n%s", unitText)
+	}
+	if before != nil {
+		p := PendingRestart{
+			From:     e.current,
+			To:       name,
+			Strategy: e.installer.Name(),
+			Mode:     UpdateModeGit,
+			Commit:   commit,
+		}
+		hookCtx, cancelHook := context.WithTimeout(ctx, e.hookTimeout)
+		err := before(hookCtx, p)
+		cancelHook()
+		if err != nil {
+			log.Error("Before-restart hook failed; not restarting", "error", err)
+			return undoInstall(ctx, e.installer, e.installTimeout, logger, name,
+				fmt.Errorf("recording the restart failed, so the hub was not restarted: %w", err))
+		}
+	}
+	restartCtx, cancelRestart := context.WithTimeout(ctx, e.restartTimeout)
+	err = e.installer.Restart(restartCtx)
+	cancelRestart()
+	if err != nil {
+		log.Error("Failed to restart the hub", "error", err)
+		return undoInstall(ctx, e.installer, e.installTimeout, logger, name,
+			fmt.Errorf("restarting the hub failed: %w", err))
+	}
+	log.Info("Server rebuild installed, restart requested", "from", e.current, "to", name)
+	return nil
+}
+
+// checkUnit compares the installed systemd unit with the template in the
+// tree just checked out, records the result for the Maintenance banner
+// and returns the report text.
+func (e *RebuildServerExecutor) checkUnit(ctx context.Context, logger io.Writer, repoPath, branch, currentBranch string) string {
+	_, _ = fmt.Fprintf(logger, "==> Checking systemd unit against template (result at end of log)\n\n")
+	unitBranch := branch
+	if unitBranch == "" {
+		unitBranch = currentBranch
+	}
+	if unitBranch == "HEAD" { // detached checkout: no branch to name
+		unitBranch = ""
+	}
+	rep := unitdrift.Check(ctx, unitdrift.CheckOptions{
+		RepoPath: repoPath,
+		Branch:   unitBranch,
+		Service:  e.serviceName,
+		Locate:   e.unitLocator,
+		Revision: e.unitRevision,
+		Timeout:  e.unitTimeout,
+	})
+	if rep.Status == unitdrift.Drift {
+		logging.Subsystem("hub.maintenance.rebuild-server").Warn(
+			"Installed systemd unit differs from template; re-provision needed", "service_name", e.serviceName)
+	}
+	// Persisted now, before the restart, so the restart cannot lose it.
+	e.persistUnitStatus(ctx, logger, rep, unitBranch, e.serviceName)
+	return rep.Text
+}
+
+// runRebuildSteps runs steps in order, logging each, and stops at the
+// first failure.
+func runRebuildSteps(ctx context.Context, logger io.Writer, steps []rebuildStep) error {
+	log := logging.Subsystem("hub.maintenance.rebuild-server")
 	for i, step := range steps {
 		_, _ = fmt.Fprintf(logger, "==> %s\n", step.name)
 		log.Debug("Executing step",
@@ -428,78 +596,23 @@ func (e *RebuildServerExecutor) Run(ctx context.Context, logger io.Writer, param
 		log.Debug("Step completed", "step", i+1, "name", step.name)
 		_, _ = fmt.Fprintln(logger)
 	}
-
-	// Compare the installed systemd unit with the template in the tree just
-	// checked out. Rebuild from git never rewrites the unit, so a template
-	// change needs a re-provision; tell the admin. The check is read-only,
-	// bounded and never fails, so the restart below always runs. Its report
-	// is written last, after the completion line (also when the restart
-	// fails to start), so it is not buried in the build output.
-	_, _ = fmt.Fprintf(logger, "==> Checking systemd unit against template (result at end of log)\n\n")
-	unitBranch := branch
-	if unitBranch == "" {
-		unitBranch = currentBranch
-	}
-	if unitBranch == "HEAD" { // detached checkout: no branch to name
-		unitBranch = ""
-	}
-	unitReport := unitdrift.Check(ctx, unitdrift.CheckOptions{
-		RepoPath: repoPath,
-		Branch:   unitBranch,
-		Service:  serviceName,
-		Locate:   e.unitLocator,
-		Revision: e.unitRevision,
-		Timeout:  e.unitTimeout,
-	})
-	if unitReport.Status == unitdrift.Drift {
-		log.Warn("Installed systemd unit differs from template; re-provision needed", "service_name", serviceName)
-	}
-	// Persist the result for the Maintenance banner now, before the
-	// restart, so the restart cannot lose it.
-	e.persistUnitStatus(ctx, logger, unitReport, unitBranch, serviceName)
-	// The restart child's output and everything written after Start go
-	// through a Write-only, mutex-guarded writer. Handing the child a
-	// *bytes.Buffer directly would let exec copy with Buffer.ReadFrom, which
-	// trims the buffer back to its length at Start when the child exits,
-	// dropping the lines below; it would also race with them.
-	tail := &restartLogWriter{w: logger}
-	defer func() {
-		_, _ = fmt.Fprintf(tail, "\n==> Systemd unit check\n%s", unitReport.Text)
-	}()
-
-	// Fire-and-forget: start the restart but don't wait for it to finish.
-	// "systemctl restart" sends SIGTERM to this very process, so cmd.Run()
-	// would never return — it reports "signal: terminated". Using cmd.Start()
-	// lets us return success so the calling goroutine can persist the
-	// completed run status to the DB before the process is killed.
-	_, _ = fmt.Fprintf(logger, "==> Restarting service\n")
-	log.Debug("Initiating service restart (fire-and-forget)",
-		"cmd", "sudo", "args", fmt.Sprintf("[systemctl restart %s]", serviceName))
-	restartCmd := exec.Command("sudo", "systemctl", "restart", serviceName)
-	restartCmd.Stdout = tail
-	restartCmd.Stderr = tail
-	if err := restartCmd.Start(); err != nil {
-		log.Error("Failed to initiate service restart", "error", err)
-		return fmt.Errorf("restarting service failed: %w", err)
-	}
-
-	log.Info("Server rebuild complete, restart initiated")
-	_, _ = fmt.Fprintln(tail, "\nServer rebuild complete, restart initiated.")
 	return nil
 }
 
-// restartLogWriter serialises writes to w. It implements only Write (not
-// io.ReaderFrom), so os/exec copies a child's output with its own buffer
-// and calls Write as data arrives.
-type restartLogWriter struct {
-	mu sync.Mutex
-	w  io.Writer
-}
-
-func (l *restartLogWriter) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.w.Write(p)
+// gitOutput runs git in dir and returns its trimmed stdout.
+func gitOutput(ctx context.Context, dir string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if detail := strings.TrimSpace(stderr.String()); detail != "" {
+			return "", fmt.Errorf("git %s: %s", strings.Join(args, " "), detail)
+		}
+		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+	}
+	return strings.TrimSpace(stdout.String()), nil
 }
 
 // UnitDriftStatus is the stored result of the last systemd unit check,

@@ -29,7 +29,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
-	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
 
 // updateSnapshotDirName is the snapshot directory next to the SQLite
@@ -273,7 +272,7 @@ func (s *Server) writeUpdateStateBeforeRestart(runID string, p maintenance.Pendi
 // not depend on boot reconciliation or the database. Best-effort: a
 // failure is logged.
 func (s *Server) MarkUpdateStateVerified() {
-	s.markUpdateStateVerified(version.Version)
+	s.markUpdateStateVerified(runningReleaseName())
 }
 
 // markUpdateStateVerified sets verified=true in the update-state file when

@@ -72,7 +72,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/asyncwrite"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
-	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/GoogleCloudPlatform/scion/resources"
 	"github.com/google/uuid"
 )
@@ -3352,8 +3351,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 
 	// Reconcile an update whose hub restart was pending (the restart that
 	// started this process, usually) before the abort sweep below: the run
-	// is completed or failed from the version this binary reports.
-	if err := srv.reconcilePendingUpdate(ctx, version.Version); err != nil {
+	// is completed or failed from the release name this binary reports
+	// (its version, or git-<sha12> for a build from Git).
+	if err := srv.reconcilePendingUpdate(ctx, runningReleaseName()); err != nil {
 		slog.Warn("Failed to reconcile the pending update", "error", err)
 	}
 
