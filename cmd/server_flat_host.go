@@ -779,7 +779,10 @@ func installColocatedSettingsOverlay(cfg *config.GlobalConfig, hubSrv *hub.Serve
 		// The stored runtimes and profiles, with their Kubernetes placement
 		// findings, so invalid stored placement refuses Kubernetes starts
 		// from the first dispatch (the startup ApplySnapshot ran before
-		// this install).
+		// this install). A concurrent apply of a newer snapshot can be
+		// overwritten by this one until the next settings change, as for the
+		// maps before; maps and findings stay one snapshot, so it never
+		// fails open.
 		hub.UpdateSettingsOverlay(overlay, snap)
 		// Removed storage overrides in the stored runtimes and profiles are
 		// reported, not refused: they are fixed through the admin settings
