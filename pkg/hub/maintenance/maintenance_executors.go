@@ -437,6 +437,11 @@ func (e *RebuildServerExecutor) RunWithBeforeRestart(ctx context.Context, logger
 		"repo_path", repoPath, "branch", branch,
 		"installer", e.installer.Name(), "service_name", e.serviceName)
 
+	// Refuse a branch git would not accept before anything runs (#6987).
+	if err := validateBranchName(ctx, repoPath, branch); err != nil {
+		return err
+	}
+
 	// ── Preflight: before anything is fetched or built ──────────────────
 	_, _ = fmt.Fprintf(logger, "==> Preflight (installer: %s)\n", e.installer.Name())
 	preCtx, cancelPre := context.WithTimeout(ctx, e.preflightTimeout)
@@ -455,7 +460,9 @@ func (e *RebuildServerExecutor) RunWithBeforeRestart(ctx context.Context, logger
 
 	// ── Update the checkout ─────────────────────────────────────────────
 	plan := rebuildPlan{repoPath: repoPath, branch: branch}
-	if branch == "" {
+	if branch != "" {
+		plan.endOfOptions = gitSupportsEndOfOptions(ctx, repoPath)
+	} else {
 		// Determine the current branch to reset against its remote tracking ref.
 		out, err := gitOutput(ctx, repoPath, "rev-parse", "--abbrev-ref", "HEAD")
 		if err != nil {
@@ -634,6 +641,7 @@ type rebuildPlan struct {
 	repoPath      string
 	branch        string // configured or requested branch; "" = currentBranch
 	currentBranch string // the checkout's branch, when branch is ""
+	endOfOptions  bool   // pass --end-of-options before branch (git >= 2.24)
 	bin           string // build output (rebuildBuild)
 	ldflags       string // -ldflags value (rebuildBuild)
 }
@@ -649,8 +657,8 @@ func runRebuildSteps(ctx context.Context, logger io.Writer, phase rebuildPhase, 
 	case rebuildCheckout:
 		steps = append(steps, rebuildStep{"Fetching latest code", "git", []string{"fetch", "origin"}, p.repoPath})
 		if p.branch != "" {
-			steps = append(steps, rebuildStep{"Checking out branch " + p.branch, "git", []string{"checkout", p.branch}, p.repoPath})
-			steps = append(steps, rebuildStep{"Resetting to origin/" + p.branch, "git", []string{"reset", "--hard", "origin/" + p.branch}, p.repoPath})
+			steps = append(steps, rebuildStep{"Checking out branch " + p.branch, "git", branchArgs(p.endOfOptions, p.branch, "checkout"), p.repoPath})
+			steps = append(steps, rebuildStep{"Resetting to origin/" + p.branch, "git", branchArgs(p.endOfOptions, "origin/"+p.branch, "reset", "--hard"), p.repoPath})
 		} else {
 			steps = append(steps, rebuildStep{"Resetting to origin/" + p.currentBranch, "git", []string{"reset", "--hard", "origin/" + p.currentBranch}, p.repoPath})
 		}
@@ -815,6 +823,11 @@ func (e *RebuildWebExecutor) Run(ctx context.Context, logger io.Writer, params m
 
 	log.Debug("Starting rebuild-web", "repo_path", repoPath, "branch", branch)
 
+	// Refuse a branch git would not accept before anything runs (#6987).
+	if err := validateBranchName(ctx, repoPath, branch); err != nil {
+		return err
+	}
+
 	type step struct {
 		name string
 		cmd  string
@@ -824,8 +837,9 @@ func (e *RebuildWebExecutor) Run(ctx context.Context, logger io.Writer, params m
 	var steps []step
 	steps = append(steps, step{"Fetching latest code", "git", []string{"fetch", "origin"}})
 	if branch != "" {
-		steps = append(steps, step{"Checking out branch " + branch, "git", []string{"checkout", branch}})
-		steps = append(steps, step{"Resetting to origin/" + branch, "git", []string{"reset", "--hard", "origin/" + branch}})
+		endOfOptions := gitSupportsEndOfOptions(ctx, repoPath)
+		steps = append(steps, step{"Checking out branch " + branch, "git", branchArgs(endOfOptions, branch, "checkout")})
+		steps = append(steps, step{"Resetting to origin/" + branch, "git", branchArgs(endOfOptions, "origin/"+branch, "reset", "--hard")})
 	} else {
 		branchCmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
 		branchCmd.Dir = repoPath

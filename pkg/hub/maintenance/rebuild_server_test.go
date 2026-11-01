@@ -60,6 +60,8 @@ func newRebuildFixture(t *testing.T, reportCommit string) *rebuildFixture {
 case "$1 $2" in
   "rev-parse HEAD") echo %s ;;
   "rev-parse --abbrev-ref") echo main ;;
+  "check-ref-format --branch") echo "$3" ;;
+  "version ") echo "git version 2.43.0" ;;
 esac
 `, f.calls, testCommit))
 	write("make", fmt.Sprintf("echo \"make $*\" >> '%s'\n", f.calls))
