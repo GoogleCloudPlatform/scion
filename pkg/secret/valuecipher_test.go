@@ -429,7 +429,9 @@ func TestValueCipher_DecryptAuthenticatedReportsOpeningKey(t *testing.T) {
 // but sealed under another one (a key-ID label lie) fails: no other key
 // is tried.
 func TestValueCipher_DecryptAuthenticatedFailsLikeDecrypt(t *testing.T) {
-	c := ciphertest.Cipher(t, ciphertest.Ring{Active: "k1", IDs: []string{"k1", "k2", "old", keyring.LegacyID}, V1Readers: []string{"old"}})
+	// The ring holds at most three keys; v1 is readable only by "old",
+	// which did not seal goldenV1.
+	c := ciphertest.Cipher(t, ciphertest.Ring{Active: "k1", IDs: []string{"k1", "k2", "old"}, V1Readers: []string{"old"}})
 	raw, _ := base64.StdEncoding.DecodeString(strings.TrimPrefix(goldenV2, "enc:v2:k2:"))
 	tampered := append([]byte{}, raw...)
 	tampered[len(tampered)-1] ^= 0x01
