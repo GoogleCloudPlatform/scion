@@ -43,11 +43,21 @@ const SigningKeySourceKeyring = "keyring"
 
 // keyringReleaseCheck refuses what this release does not support in
 // managed ring mode (releaseKeyringCheck): every requirement that exists
-// only because some purposes are not on the signing ring yet. It is the
-// one place those requirements live, so lifting them is a change to this
-// line. A variable so tests can build servers on versioned rings and on
-// rings without the "legacy" entry; production never changes it.
+// only because some purposes are not on the signing ring yet. Every
+// release-limit check goes through it: the server's load of the keyring
+// file (CheckKeyringRelease), startup (validateKeyringConfig) and
+// `scion server keys check` (CheckKeyringFile). Lifting the limits is a
+// change to this one line. A variable so tests can build servers on
+// versioned rings and on rings without the "legacy" entry; production never
+// changes it.
 var keyringReleaseCheck = releaseKeyringCheck
+
+// CheckKeyringRelease applies this release's limits to a keyring file the
+// server has just loaded, before the hub exists (keyringReleaseCheck,
+// without a session secret). Errors name no key material.
+func CheckKeyringRelease(k *keyring.Keyring) error {
+	return keyringReleaseCheck(k, nil)
+}
 
 // releaseKeyringCheck applies this release's limits to a keyring file:
 // keyring.Keyring.CheckSessionPilot (no emit "versioned" or write_format
@@ -109,7 +119,7 @@ func managedSigning(cfg ServerConfig) bool {
 // validateKeyringConfig checks a managed-mode ServerConfig
 // (ptone/scion#1530) before New reads any signing key: a configured
 // keyring file must have produced a keyring, which must pass
-// checkKeyringFile (the checks `scion server keys check` applies too, plus
+// validateKeyringFile (the checks `scion server keys check` applies too, plus
 // SharedSigningSecret through the release check); and explicit agent/user
 // JWT signing keys are refused, so no purpose is partly rotated. In legacy
 // mode (no keyring file) explicit signing keys take precedence. Errors
@@ -122,7 +132,7 @@ func validateKeyringConfig(cfg ServerConfig) error {
 	if k == nil {
 		return errors.New("keyring mode: server.keyring_file is configured but no keyring file was loaded; refusing to fall back to legacy signing keys")
 	}
-	if err := checkKeyringFile(k, &cfg); err != nil {
+	if err := validateKeyringFile(k, &cfg); err != nil {
 		return err
 	}
 	if len(cfg.AgentTokenConfig.SigningKey) > 0 {
@@ -134,7 +144,7 @@ func validateKeyringConfig(cfg ServerConfig) error {
 	return nil
 }
 
-// checkKeyringFile is the keyring check shared by startup
+// validateKeyringFile is the keyring check shared by startup
 // (validateKeyringConfig, with its cfg) and `scion server keys check`
 // (CheckKeyringFile, cfg nil), in this order: the signing ring has an
 // active generation; the keyring came from the file (a missing or
@@ -142,7 +152,7 @@ func validateKeyringConfig(cfg ServerConfig) error {
 // mode); it passes this release's check (keyringReleaseCheck); and with
 // emit "legacy" its active signing generation is a legacy reader
 // (checkLegacyEmitActiveReader). k must be non-nil.
-func checkKeyringFile(k *keyring.Keyring, cfg *ServerConfig) error {
+func validateKeyringFile(k *keyring.Keyring, cfg *ServerConfig) error {
 	// The zero time never reaches a sign_until, so only a ring without a
 	// usable active generation errors here.
 	if _, err := k.Signing().Active(agentJWTPurpose, time.Time{}); err != nil {

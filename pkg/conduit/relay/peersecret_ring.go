@@ -38,9 +38,10 @@ var (
 // CheckPeerSecretNotInRing refuses a relay-peer secret equal to the raw
 // secret of any generation of the hub's signing ring: the active one, a
 // previous or staged one and the "legacy" entry, whatever their deadlines.
-// Both the configured value and its normalized form
-// (config.NormalizePeerSecret) are compared, in constant time, against
-// every generation; the loop never stops early.
+// Callers pass the normalized value (config.NormalizePeerSecret), which is
+// what keys the relay-peer HMAC; a value with the trailing newline still
+// attached is compared in both forms. Every comparison is constant time,
+// against every generation, and the loop never stops early.
 //
 // It fails closed: a ring with no usable generation, or a generation that
 // is present with an empty secret, is refused, so there is no case in

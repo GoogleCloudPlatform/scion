@@ -703,7 +703,7 @@ func TestCheckKeyringFile(t *testing.T) {
 
 // `scion server keys check` (CheckKeyringFile) and startup
 // (validateKeyringConfig) accept and refuse the same keyring files. They
-// share checkKeyringFile; this table guards against the two diverging
+// share validateKeyringFile; this table guards against the two diverging
 // again, with the production release check and with it relaxed.
 func TestCheckKeyringFile_ParityWithValidateKeyringConfig(t *testing.T) {
 	for name, k := range map[string]*keyring.Keyring{
