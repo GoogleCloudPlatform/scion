@@ -362,7 +362,7 @@ func TestManagerStartCallSitesResolvePlacement(t *testing.T) {
 				if !ok || sel.Sel.Name != "Start" || len(call.Args) != 2 {
 					return true
 				}
-				if !isStartOptionsArg(call.Args[1]) {
+				if nonManagerStartReceivers[receiverName(sel.X)] {
 					return true
 				}
 				if !managerStartSites[fn.Name.Name] {
@@ -380,14 +380,20 @@ func TestManagerStartCallSitesResolvePlacement(t *testing.T) {
 	}
 }
 
-// isStartOptionsArg reports whether e is the start options argument the
-// Runtime Broker passes to Manager.Start: opts or lc.opts.
-func isStartOptionsArg(e ast.Expr) bool {
+// nonManagerStartReceivers are the receivers of the two-argument Start
+// calls in the Runtime Broker's code that are not an agent manager: the
+// tracer (spans) and a hub connection. Every other two-argument Start call
+// counts as a Manager.Start site, whatever its arguments are named.
+var nonManagerStartReceivers = map[string]bool{"tracer": true, "conn": true}
+
+// receiverName is the last name of a call's receiver expression: mgr for
+// mgr, Manager for sc.Manager.
+func receiverName(e ast.Expr) string {
 	switch v := e.(type) {
 	case *ast.Ident:
-		return v.Name == "opts"
+		return v.Name
 	case *ast.SelectorExpr:
-		return v.Sel.Name == "opts"
+		return v.Sel.Name
 	}
-	return false
+	return ""
 }
