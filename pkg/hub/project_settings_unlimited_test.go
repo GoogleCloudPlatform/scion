@@ -276,3 +276,19 @@ func TestTemplateTiers_ProjectUnlimitedDispatched(t *testing.T) {
 	require.NotNil(t, req.Config.HubAgentDefaults)
 	assert.Equal(t, 9, req.Config.HubAgentDefaults.MaxTurns)
 }
+
+// TestBrokersWithoutUnlimitedCountLimits: the brokers lacking
+// unlimitedCountLimits are named (ID when unnamed), sorted; capable brokers
+// and nil entries are skipped, so a nil entry never panics.
+func TestBrokersWithoutUnlimitedCountLimits(t *testing.T) {
+	got := brokersWithoutUnlimitedCountLimits([]*store.RuntimeBroker{
+		nil,
+		{ID: "id-b", Name: "zeta"},
+		{ID: "id-c", Capabilities: &store.BrokerCapabilities{ClearedFields: true}},
+		{ID: "id-d", Name: "capable", Capabilities: &store.BrokerCapabilities{UnlimitedCountLimits: true}},
+		nil,
+	})
+	assert.Equal(t, []string{"id-c", "zeta"}, got)
+	assert.Nil(t, brokersWithoutUnlimitedCountLimits(nil))
+	assert.Nil(t, brokersWithoutUnlimitedCountLimits([]*store.RuntimeBroker{nil}))
+}

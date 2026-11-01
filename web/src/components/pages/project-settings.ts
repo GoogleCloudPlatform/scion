@@ -2235,7 +2235,9 @@ export class ScionPageProjectSettings extends LitElement {
       this.loadedDefaultMaxModelCalls = this.configDefaultMaxModelCalls;
       const allWarnings: unknown[] = Array.isArray(warnings) ? warnings : [];
       this.countLimitWarnings = allWarnings.filter(isCountLimitWarningValue);
-      const otherWarnings = allWarnings.filter((w) => !isCountLimitWarningValue(w));
+      const otherWarnings = allWarnings.filter(
+        (w): w is string => typeof w === 'string' && !isCountLimitWarning(w)
+      );
       this.profileDefaultWarnings = splitProfileWarnings(otherWarnings);
       const warningCount =
         Object.values(this.profileDefaultWarnings.byProfile).flat().length +

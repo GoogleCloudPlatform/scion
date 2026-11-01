@@ -95,21 +95,34 @@ func (s *Server) projectUnlimitedBrokerWarnings(ctx context.Context, projectID s
 		return nil
 	}
 	brokers, _ := s.projectProviderBrokers(ctx, projectID)
-	var old []string
+	old := brokersWithoutUnlimitedCountLimits(brokers)
+	if len(old) == 0 {
+		return nil
+	}
+	return []string{fmt.Sprintf(
+		"%s: Unlimited (0) applies only on Runtime Brokers that support it; agents on %s keep the inherited limit",
+		strings.Join(fields, ", "), strings.Join(old, ", "))}
+}
+
+// brokersWithoutUnlimitedCountLimits returns the names (the ID when a
+// broker has no name), sorted, of the brokers that do not advertise
+// unlimitedCountLimits. A nil entry is skipped: projectProviderBrokers
+// never returns one today, but the guard keeps a future caller from
+// panicking on it.
+func brokersWithoutUnlimitedCountLimits(brokers []*store.RuntimeBroker) []string {
+	var out []string
 	for _, b := range brokers {
+		if b == nil {
+			continue
+		}
 		if b.Capabilities == nil || !b.Capabilities.UnlimitedCountLimits {
 			name := b.Name
 			if name == "" {
 				name = b.ID
 			}
-			old = append(old, name)
+			out = append(out, name)
 		}
 	}
-	if len(old) == 0 {
-		return nil
-	}
-	slices.Sort(old)
-	return []string{fmt.Sprintf(
-		"%s: Unlimited (0) applies only on Runtime Brokers that support it; agents on %s keep the inherited limit",
-		strings.Join(fields, ", "), strings.Join(old, ", "))}
+	slices.Sort(out)
+	return out
 }
