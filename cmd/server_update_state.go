@@ -16,9 +16,11 @@ package cmd
 
 import (
 	"log/slog"
+	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
+	scionplugin "github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
 
@@ -49,5 +51,24 @@ func markUpdateStateBooting(installRoot string) {
 	case changed:
 		slog.Info("Update state: booting the update target", "target", st.Target, "from", st.From,
 			"run_id", st.RunID, "previous_safe", st.PreviousSafe)
+	}
+}
+
+// reconcilePluginsAfterRollback puts the broker plugins back in lockstep
+// with the release the boot-failure guard restored
+// (maintenance.ReconcilePluginsAfterRollback). It runs before the plugin
+// manager loads plugins. Best-effort: a failure is logged and startup goes
+// on.
+func reconcilePluginsAfterRollback(installRoot string) {
+	pluginsDir, err := scionplugin.DefaultPluginsDir()
+	if err != nil {
+		return
+	}
+	replaced, err := maintenance.ReconcilePluginsAfterRollback(installRoot, filepath.Join(pluginsDir, scionplugin.PluginTypeBroker))
+	for _, p := range replaced {
+		slog.Info("Restored the broker plugin of the rolled-back-to release", "path", p, "install_root", installRoot)
+	}
+	if err != nil {
+		slog.Warn("Failed to restore the broker plugins after a rollback", "install_root", installRoot, "error", err)
 	}
 }

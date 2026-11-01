@@ -37,6 +37,7 @@ import (
 	gcstorage "cloud.google.com/go/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/unitdrift"
+	"github.com/GoogleCloudPlatform/scion/pkg/preflight"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -290,6 +291,10 @@ type RebuildServerExecutor struct {
 	// store, when set, keeps the last unit check result for the
 	// Admin -> Maintenance banner (hub setting system.unit_drift).
 	store store.Store
+
+	// settings lists the required settings that are unset; nil skips the
+	// settings check section.
+	settings func() []preflight.Finding
 }
 
 // RebuildServerOptions configures a RebuildServerExecutor. Zero values are
@@ -309,6 +314,10 @@ type RebuildServerOptions struct {
 	UnitRevision unitdrift.Revision
 	// UnitTimeout bounds the unit check; zero means unitdrift.DefaultTimeout.
 	UnitTimeout time.Duration
+	// SettingsCheck, when set, lists the required settings that are unset
+	// (preflight.LoadRequiredSettingsFindings); Run writes them to the log
+	// as warnings and goes on. nil skips the section.
+	SettingsCheck func() []preflight.Finding
 }
 
 // NewRebuildServerExecutor returns a RebuildServerExecutor configured from opts.
@@ -322,6 +331,7 @@ func NewRebuildServerExecutor(opts RebuildServerOptions) *RebuildServerExecutor 
 		unitRevision: unitdrift.GitRevision,
 		unitTimeout:  opts.UnitTimeout,
 		store:        opts.Store,
+		settings:     opts.SettingsCheck,
 	}
 	if opts.UnitLocator != nil {
 		e.unitLocator = opts.UnitLocator
@@ -361,6 +371,11 @@ func (e *RebuildServerExecutor) Run(ctx context.Context, logger io.Writer, param
 	log.Debug("Starting rebuild-server",
 		"repo_path", repoPath, "branch", branch,
 		"binary_dest", binaryDest, "service_name", serviceName)
+
+	// Warnings only: an unset required setting never stops the rebuild.
+	if e.settings != nil {
+		preflight.WriteSettingsCheck(logger, e.settings())
+	}
 
 	// Build to a staging path inside the repo directory (where the service user
 	// has write access), then use "sudo install" to place it into the final
@@ -1438,6 +1453,15 @@ func (c *cappedReader) Read(p []byte) (int, error) {
 }
 
 func extractScionBinary(tarballPath, destDir string, logger io.Writer, maxBytes int64) (string, error) {
+	return extractRootEntry(tarballPath, destDir, "scion", logger, maxBytes)
+}
+
+// extractRootEntry extracts the single root-level regular file entry of a
+// release .tar.gz into destDir/extracted/<entry> and returns its path, with
+// the rules and caps of ExtractScionBinary. Release plugin archives
+// (build-release.yml: tar -czvf … -C dist scion-plugin-<name>) have the
+// same layout with entry scion-plugin-<name>.
+func extractRootEntry(tarballPath, destDir, entry string, logger io.Writer, maxBytes int64) (string, error) {
 	f, err := os.Open(tarballPath)
 	if err != nil {
 		return "", fmt.Errorf("open tarball: %w", err)
@@ -1455,7 +1479,7 @@ func extractScionBinary(tarballPath, destDir string, logger io.Writer, maxBytes 
 	if err := os.MkdirAll(extractDir, 0o755); err != nil {
 		return "", fmt.Errorf("create extract directory: %w", err)
 	}
-	binPath := filepath.Join(extractDir, "scion")
+	binPath := filepath.Join(extractDir, entry)
 
 	found := false
 	for {
@@ -1472,9 +1496,9 @@ func extractScionBinary(tarballPath, destDir string, logger io.Writer, maxBytes 
 
 		name := path.Clean(strings.TrimPrefix(header.Name, "./"))
 		switch {
-		case name == "scion":
+		case name == entry:
 			if found {
-				return "", fmt.Errorf("release archive has more than one %q entry", "scion")
+				return "", fmt.Errorf("release archive has more than one %q entry", entry)
 			}
 			if header.Typeflag != tar.TypeReg {
 				return "", fmt.Errorf("release archive entry %q is not a regular file", header.Name)
@@ -1495,9 +1519,9 @@ func extractScionBinary(tarballPath, destDir string, logger io.Writer, maxBytes 
 				}
 				return "", err
 			}
-			_, _ = fmt.Fprintf(logger, "Found scion binary: %s\n", header.Name)
-		case path.Base(name) == "scion":
-			return "", fmt.Errorf("release archive has a nested %q entry (%s); only a root-level scion is accepted", "scion", header.Name)
+			_, _ = fmt.Fprintf(logger, "Found %s binary: %s\n", entry, header.Name)
+		case path.Base(name) == entry:
+			return "", fmt.Errorf("release archive has a nested %q entry (%s); only a root-level %s is accepted", entry, header.Name, entry)
 		default:
 			// Not extracted. Its content is still read (and counted against
 			// the cap) by the next tr.Next.
@@ -1505,7 +1529,7 @@ func extractScionBinary(tarballPath, destDir string, logger io.Writer, maxBytes 
 	}
 
 	if !found {
-		return "", fmt.Errorf("no 'scion' binary found at the root of the tarball")
+		return "", fmt.Errorf("no '%s' binary found at the root of the tarball", entry)
 	}
 	return binPath, nil
 }

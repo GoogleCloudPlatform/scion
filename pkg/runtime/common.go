@@ -462,6 +462,13 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		return nil, err
 	}
 	config.Workspace = resolvedWorkspace
+	// On NFS project storage, no bind may reach the project root, its
+	// configuration directory or another tree of the share
+	// (checkNFSMountScope); every bind is checked when it is emitted below.
+	nfsScope, err := newNFSBindScope(config)
+	if err != nil {
+		return nil, err
+	}
 
 	// Resolve RepoRoot through any symlinks too, the same way Workspace just
 	// was: the branches below compare the two with filepath.Rel to decide
@@ -614,6 +621,13 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			// <main>/.git (narrowed) plus the workspace are mounted — never the
 			// whole main checkout read-write. Anything else is refused.
 			registered, regErr := util.IsRegisteredWorktree(config.RepoRoot, config.Workspace)
+			// A repository config refusal is returned as is, so the error
+			// names the refused key and its remedy instead of claiming that
+			// the workspace is not registered.
+			var refused *util.RepoConfigRefusedError
+			if errors.As(regErr, &refused) {
+				return nil, fmt.Errorf("agent %q: workspace %q against repository root %q: %w", config.Name, config.Workspace, config.RepoRoot, regErr)
+			}
 			if regErr != nil || !registered {
 				return nil, fmt.Errorf("agent %q: workspace %q against repository root %q: %w", config.Name, config.Workspace, config.RepoRoot, errOutsideRootNotRegistered)
 			}
@@ -873,6 +887,9 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		src, err := checkBindSource(spec.src)
 		if err != nil {
 			return nil, err
+		}
+		if err := nfsScope.check(src); err != nil {
+			return nil, fmt.Errorf("bind mount at %s: %w", tgt, err)
 		}
 		val := fmt.Sprintf("%s:%s", src, tgt)
 		if spec.ro {

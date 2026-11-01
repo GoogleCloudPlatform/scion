@@ -239,12 +239,18 @@ type ServerConfig struct {
 	// the TLS-terminating proxies whose X-Forwarded-Proto the hub-broker
 	// transport policy trusts (config.ConfidentialArrival). It is read by that
 	// policy only, never by TrustedProxies' users (proxy header login,
-	// client IP rate limits). Empty means a forwarded protocol is never
-	// trusted. The server command validates it at startup
-	// (config.ParseTrustedProxies); New drops an invalid list (logged),
-	// which only narrows what is accepted. Startup config only; never
-	// API-writable.
+	// client IP rate limits). New resolves it with
+	// TransportTrustedProxiesSet (config.TransportTrustedProxies): when the
+	// setting is not set, a proxy on this host (loopback) is trusted; set to
+	// an empty list, a forwarded protocol is never trusted. The server
+	// command validates it at startup (config.ParseTrustedProxies); New
+	// drops an invalid list (logged), which only narrows what is accepted.
+	// Startup config only; never API-writable.
 	TransportTrustedProxies []string
+	// TransportTrustedProxiesSet reports whether server.trusted_proxies is
+	// set in any source, even as an empty list
+	// (config.GlobalConfig.TrustedProxiesSet).
+	TransportTrustedProxiesSet bool
 	// Debug enables verbose debug logging.
 	Debug bool
 	// OAuthConfig holds OAuth provider credentials for CLI authentication.
@@ -1534,6 +1540,12 @@ type RemoteCreateAgentRequest struct {
 	// WorkspaceStorageBucket is the GCS bucket holding WorkspaceStoragePath.
 	// Brokers that predate it ignore it and use their own bucket setting.
 	WorkspaceStorageBucket string `json:"workspaceStorageBucket,omitempty"`
+	// WorkspaceDownloadMode mirrors
+	// runtimebroker.CreateAgentRequest.WorkspaceDownloadMode: "signed_urls"
+	// (api.WorkspaceDownloadModeSignedURLs) when the broker must bootstrap the
+	// workspace through the Hub's signed-URL workspace download; empty for
+	// the bucket download. Set by buildCreateRequestFor only.
+	WorkspaceDownloadMode string `json:"workspaceDownloadMode,omitempty"`
 
 	// GatherEnv indicates the broker should evaluate env completeness before starting.
 	// If required keys are missing, the broker returns HTTP 202 with env requirements.
@@ -2110,6 +2122,10 @@ type Server struct {
 	// chatRetention is the chat message retention wiring (chat_retention.go).
 	chatRetention chatRetentionState
 
+	// failedPurge is the failed-message retention purge's resume cursor
+	// (sweep.go).
+	failedPurge failedPurgeState
+
 	// Artifact store for the artifact_* tables (pkg/artifacts) — nil = artifacts unavailable.
 	artifactStore artifacts.Store
 	// artifactBlobSweeper keeps the blob sweep's position between passes
@@ -2246,6 +2262,9 @@ type Server struct {
 	oidcIssuerURL        string
 	oidcTokenRateLimiter *GCPTokenRateLimiter // per-agent rate limiter for OIDC identity token requests
 	oidcTokenLifetime    time.Duration        // validity duration for OIDC identity tokens
+	// oidcHandlers serves the OIDC endpoints over a live view of this
+	// server (deps_oidckeys.go); set in New before registerRoutes.
+	oidcHandlers *OIDCHandlers
 
 	// GCP token generator for agent identity (nil = GCP identity disabled)
 	gcpTokenGenerator GCPTokenGenerator
@@ -2565,9 +2584,14 @@ type Server struct {
 	cspReports       *cspreport.Handler
 	cspReportLimiter *cspReportLimiter
 
-	// transportTrustedNets is ServerConfig.TransportTrustedProxies, parsed
-	// once in New (config.ConfidentialArrival).
+	// transportTrustedNets is ServerConfig.TransportTrustedProxies,
+	// resolved once in New (config.TransportTrustedProxies) for
+	// config.ConfidentialArrival.
 	transportTrustedNets []*net.IPNet
+	// transportProxyRefusals records refused broker requests from a proxy
+	// on this host (transport_policy.go): the rate-limited ERROR log and
+	// the broker_transport_proxy health check read it.
+	transportProxyRefusals transportProxyRefusals
 
 	// experiments is the compiled feature-flag registry (pkg/experiments).
 	// Nil in production and in most tests; always read through the
@@ -3105,7 +3129,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		PongWait:       60 * time.Second,
 		WriteWait:      10 * time.Second,
 		MaxMessageSize: 1024 * 1024, // 1MB — see issue #165
-		RequestTimeout: 120 * time.Second,
+		RequestTimeout: brokerRequestTimeout,
 		Debug:          cfg.Debug,
 	}, logging.Subsystem("hub.control-channel"))
 	// Set disconnect callback to mark broker offline when WebSocket drops.
@@ -3586,10 +3610,13 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 
 	srv.cspReportLimiter = newCSPReportLimiter(cfg.TrustedProxies)
 
-	if nets, err := config.ParseTrustedProxies(cfg.TransportTrustedProxies); err != nil {
+	if nets, usedDefault, err := config.TransportTrustedProxies(cfg.TransportTrustedProxies, cfg.TransportTrustedProxiesSet); err != nil {
 		slog.Error("Ignoring an invalid trusted proxy list; X-Forwarded-Proto is not trusted from any peer", "error", err)
 	} else {
 		srv.transportTrustedNets = nets
+		if usedDefault {
+			slog.Warn(config.TransportTrustedProxiesDefaultWarning)
+		}
 	}
 	srv.cspReports = newCSPReportHandler(srv.cspReportLimiter, cfg.CSPReportRawSamples)
 	if cfg.CSPReportRawSamples {
@@ -3613,6 +3640,8 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	}
 
 	srv.experiments = cfg.Experiments
+
+	srv.oidcHandlers = NewOIDCHandlers(oidcDeps{srv})
 
 	srv.registerRoutes()
 
@@ -4080,8 +4109,9 @@ func logSigningKeyFailure(keyType string, err error) {
 // EncryptedValue is updated — the SecretRef is preserved so the UI and other consumers
 // can see that the secret is backed by Secret Manager.
 //
-// It refuses (errExistingRecordUnreadable) to overwrite an existing record
-// that is unreadable with the configured keys (ptone/scion#1530 §5).
+// It refuses (keymaterial.ErrExistingRecordUnreadable) to overwrite an
+// existing record that is unreadable with the configured keys
+// (ptone/scion#1530 §5).
 func (s *Server) backupSigningKeyToStore(ctx context.Context, keyName, encodedValue, hubID string) error {
 	if err := s.guardBackupOverwrite(ctx, keyName, store.ScopeHub, hubID); err != nil {
 		return err
@@ -5208,6 +5238,7 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 
 	dispatcher := NewHTTPAgentDispatcherWithClient(s.store, client, s.config.Debug, logging.Subsystem("hub.dispatcher"))
 	dispatcher.SetStorageLayout(s.projectStorageLayout)
+	dispatcher.SetWorkspaceStorage(s.GetStorage)
 
 	// Configure token generator if available
 	if s.agentTokenService != nil {
@@ -5589,9 +5620,11 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 	agent.ContainerStatus = "stopped"
 	agent.Activity = ""
 	// A suspended agent has no running container: release its
-	// max_agents_per_broker reservation (ptone/scion#1963), mirroring
+	// max_agents_per_broker reservation (ptone/scion#1963) and its
+	// max_agents_per_project one (ptone/scion#6033), mirroring
 	// suspendAgent's HTTP-path behavior.
 	s.releaseBrokerQuota(ctx, agent)
+	s.releaseProjectQuota(ctx, agent)
 	releaseClaim()
 	s.events.PublishAgentStatus(ctx, agent)
 	return true
@@ -6778,11 +6811,13 @@ func (s *Server) registerSchedulerHandlers() {
 	s.scheduler.RegisterRecurringSingleton("notification-orphan-gc", 60, store.LockNotificationOrphanGC, s.notificationOrphanGCHandler())
 	// Hourly: delete hub-instance registry rows 24 h after their last write.
 	s.registerHubInstancePrune(s.scheduler)
-	// Reconcile stale max_agents_per_broker reservations (ptone/scion#1963):
-	// runs immediately at tick 0 (startup) and then hourly, fixing rows left
-	// with released_at IS NULL by the pre-fix stop/suspend paths (or any
-	// future drift) without a separate one-shot migration.
-	s.scheduler.RegisterRecurringSingleton("broker-quota-reconcile", 60, store.LockBrokerQuotaReconcile, s.ReconcileStaleBrokerQuotaReservations)
+	// Reconcile stale max_agents_per_broker reservations (ptone/scion#1963),
+	// then max_agents_per_project ones (ptone/scion#6033): runs immediately
+	// at tick 0 (startup) and then hourly, fixing rows left with
+	// released_at IS NULL by the pre-fix stop/suspend paths (or any future
+	// drift) and backfilling agents that hold capacity, without a separate
+	// one-shot migration.
+	s.scheduler.RegisterRecurringSingleton("broker-quota-reconcile", 60, store.LockBrokerQuotaReconcile, s.reconcileQuotaReservations)
 	s.scheduler.RegisterRecurringSingleton("reincarnation-sweep", 5, store.LockReincarnationSweep, s.reincarnationSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("start-claim-reaper", 1, store.LockStartClaimReaper, s.startClaimReaperHandler())
 	// Forced user deletions (ptone/scion#2143): every minute, on every
@@ -7609,6 +7644,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/chat-retention", s.guarded("/api/v1/admin/chat-retention", s.handleAdminChatRetention))
 	s.mux.HandleFunc("/api/v1/admin/conduit/grant-keys/rotate", s.guarded("/api/v1/admin/conduit/grant-keys/rotate", s.handleAdminConduitGrantKeyRotate))
 	s.mux.HandleFunc("/api/v1/admin/conduit/grant-keys/revoke", s.guarded("/api/v1/admin/conduit/grant-keys/revoke", s.handleAdminConduitGrantKeyRevoke))
+	s.mux.HandleFunc("/api/v1/admin/keys/status", s.guarded("/api/v1/admin/keys/status", s.adminKeyStatusHandler()))
 	s.mux.HandleFunc("/api/v1/admin/agents/reset-auth-all", s.guarded("/api/v1/admin/agents/reset-auth-all", s.handleAdminResetAuthAll))
 	s.mux.HandleFunc("/api/v1/admin/delegation-adoption", s.guarded("/api/v1/admin/delegation-adoption", s.handleDelegationAdoption))
 	s.mux.HandleFunc("/api/v1/admin/delegation-adoption/previews", s.guarded("/api/v1/admin/delegation-adoption/previews", s.handleDelegationAdoptionPreviews))
@@ -7805,9 +7841,10 @@ func (s *Server) registerRoutes() {
 
 	// OIDC Identity Provider endpoints (unauthenticated — public metadata)
 	if s.oidcKeyManager != nil {
-		s.mux.HandleFunc("GET /.well-known/openid-configuration", s.guarded("GET /.well-known/openid-configuration", s.handleOIDCDiscovery))
-		s.mux.HandleFunc("GET /.well-known/jwks.json", s.guarded("GET /.well-known/jwks.json", s.handleJWKS))
-		s.mux.HandleFunc("POST /api/v1/agent/identity-token", s.guarded("POST /api/v1/agent/identity-token", s.handleAgentIdentityToken))
+		oidc := s.oidcArea()
+		s.mux.HandleFunc("GET /.well-known/openid-configuration", s.guarded("GET /.well-known/openid-configuration", oidc.HandleOIDCDiscovery))
+		s.mux.HandleFunc("GET /.well-known/jwks.json", s.guarded("GET /.well-known/jwks.json", oidc.HandleJWKS))
+		s.mux.HandleFunc("POST /api/v1/agent/identity-token", s.guarded("POST /api/v1/agent/identity-token", oidc.HandleAgentIdentityToken))
 	}
 
 	// Workstation-only filesystem endpoints: declarative guard enforces workstation token.

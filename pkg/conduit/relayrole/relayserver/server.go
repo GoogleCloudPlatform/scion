@@ -485,18 +485,20 @@ const ErrCodeTransportNotConfidential = "transport_not_confidential"
 // session.
 func requireConfidentialArrival(next http.Handler, trusted []*net.IPNet, log *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if config.ConfidentialArrival(r, trusted) {
+		reason := config.ArrivalRefusal(r, trusted)
+		if reason == "" {
 			next.ServeHTTP(w, r)
 			return
 		}
 		log.Warn("Conduit relay: refused a dial that did not arrive over TLS or from this host",
-			"remote_addr", r.RemoteAddr, "trusted_proxies_configured", len(trusted) > 0)
+			"reason", reason, "remote_addr", r.RemoteAddr, "trusted_proxies_configured", len(trusted) > 0)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
 		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{
 			"code": ErrCodeTransportNotConfidential,
 			"message": "Conduit dials must reach the relay over TLS or from this host. Use the relay's https:// URL. " +
 				"If TLS ends at a proxy in front of the relay, list the proxy's addresses in " + config.TrustedProxiesKey + ".",
+			"details": map[string]any{"reason": reason, "setting": config.TrustedProxiesKey},
 		}})
 	})
 }

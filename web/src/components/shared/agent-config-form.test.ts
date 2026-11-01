@@ -270,6 +270,22 @@ describe('scion-agent-config-form mutability display', () => {
     ).toContain('Unlimited takes effect at the next reincarnation');
   });
 
+  it('says a held clear or Unlimited turns stays pending as a whole until a reincarnation', async () => {
+    const el = await mount({ values: { max_turns: 20 } });
+    await clear(el, 'config.max_turns');
+    // The agent starts running: the drafted clear is now a held edit.
+    el.editability = editability('running', {
+      'config.max_turns': { ...NOW, disposition: 'held' },
+    });
+    await el.updateComplete;
+    const note = () =>
+      field(el, 'config.max_turns').querySelector('[data-testid="clear-note"]')!.textContent;
+    expect(note()).toContain('Clearing is held as a whole until a reincarnation');
+    expect(note()).not.toContain('next start');
+    await setUnlimited(el, 'config.max_turns', true);
+    expect(note()).toContain('Unlimited is held as a whole until a reincarnation');
+  });
+
   it('does not warn for Unlimited duration, which applies at the next start', async () => {
     const el = await mount({ values: { max_duration: '1h' } });
     await setUnlimited(el, 'config.max_duration', true);

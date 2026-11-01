@@ -1655,3 +1655,123 @@ func TestCloneSharedWorkspace_HTTPS_NoCredentialOnArgvOrConfig(t *testing.T) {
 		t.Errorf(".git/config must be credential-free, got:\n%s", cfg)
 	}
 }
+
+// addRefusedRepoConfigKey appends, as data, an include directive (refused by
+// every repository config policy) to the main repository's config.
+func addRefusedRepoConfigKey(t *testing.T, repo string) {
+	t.Helper()
+	cfg := filepath.Join(repo, ".git", "config")
+	f, err := os.OpenFile(cfg, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("[include]\n\tpath = /dev/null\n"); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A repository whose config the linked-checkout policy refuses reports no
+// branch.
+// Mutant this catches: BranchExistsIn still calling hostGit("-C", ...) with
+// no policy check (it would stay true).
+func TestBranchExistsIn_RefusedRepoConfig(t *testing.T) {
+	hostGitTestEnv(t)
+	repo := setupGitRepo(t)
+	if out, err := exec.Command("git", "-C", repo, "branch", "b").CombinedOutput(); err != nil {
+		t.Fatalf("git branch: %v: %s", err, out)
+	}
+	if !BranchExistsIn(repo, "b") {
+		t.Fatal("control: BranchExistsIn = false before the refused key, want true")
+	}
+	addRefusedRepoConfigKey(t, repo)
+	if BranchExistsIn(repo, "b") {
+		t.Error("BranchExistsIn = true for a repository whose config the policy refuses, want false")
+	}
+}
+
+// A repository whose config the linked-checkout policy refuses makes the
+// worktree lookup fail, and the error names no host path.
+// Mutants this catches: FindWorktreeByBranchIn still calling hostGit("-C",
+// ...) with no policy check (it would return the worktree path);
+// hostGitLookupOptions using AudienceLocal (the error would name the
+// repository directory).
+func TestFindWorktreeByBranchIn_RefusedRepoConfig(t *testing.T) {
+	hostGitTestEnv(t)
+	repo := setupGitRepo(t)
+	wt := filepath.Join(filepath.Dir(repo), "wt-refused-config")
+	addWorktreeDirect(t, repo, wt, "w")
+	want, err := filepath.EvalSymlinks(wt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := FindWorktreeByBranchIn(repo, "w")
+	if err != nil {
+		t.Fatalf("control: FindWorktreeByBranchIn: %v", err)
+	}
+	if resolved, _ := filepath.EvalSymlinks(got); resolved != want {
+		t.Fatalf("control: FindWorktreeByBranchIn = %q, want %q", got, want)
+	}
+
+	addRefusedRepoConfigKey(t, repo)
+	got, err = FindWorktreeByBranchIn(repo, "w")
+	if err == nil || got != "" {
+		t.Fatalf("FindWorktreeByBranchIn = (%q, %v) for a repository whose config the policy refuses, want (\"\", error)", got, err)
+	}
+	t.Run("refusal names no path", func(t *testing.T) {
+		resolvedRepo, _ := filepath.EvalSymlinks(repo)
+		for _, p := range []string{repo, resolvedRepo, filepath.Dir(repo), filepath.Dir(resolvedRepo)} {
+			if p != "" && strings.Contains(err.Error(), p) {
+				t.Errorf("error %q names the host path %q", err, p)
+			}
+		}
+	})
+}
+
+// A repository whose config the linked-checkout policy refuses makes the
+// membership check fail closed with an error.
+// Mutant this catches: IsRegisteredWorktree still calling hostGit("-C", ...)
+// with no policy check (it would report (true, nil)).
+func TestIsRegisteredWorktree_RefusedRepoConfig(t *testing.T) {
+	hostGitTestEnv(t)
+	repo := setupGitRepo(t)
+	sibling := filepath.Join(filepath.Dir(repo), "sibling-refused-config")
+	addWorktreeDirect(t, repo, sibling, "feature")
+	ok, err := IsRegisteredWorktree(repo, sibling)
+	if err != nil || !ok {
+		t.Fatalf("control: IsRegisteredWorktree = (%v, %v), want (true, nil)", ok, err)
+	}
+	addRefusedRepoConfigKey(t, repo)
+	ok, err = IsRegisteredWorktree(repo, sibling)
+	if err == nil || ok {
+		t.Errorf("IsRegisteredWorktree = (%v, %v) for a repository whose config the policy refuses, want (false, error)", ok, err)
+	}
+}
+
+// Creating a worktree from inside a bare repository resolves the repository
+// root to the bare repository's parent, which holds no .git entry, so the
+// host-git door is in discovery mode and refuses the worktree add before
+// anything runs.
+// Mutant this catches: the worktree add running outside the door, or the
+// door running subcommands other than rev-parse in discovery mode (the error
+// would not wrap errHostGitDiscoverySubcommand: git would run at the bare
+// repository's parent, which holds no repository, and fail on its own).
+func TestCreateWorktree_BareRepoRefused(t *testing.T) {
+	hostGitTestEnv(t)
+	base := t.TempDir()
+	bare := filepath.Join(base, "repo.git")
+	if out, err := exec.Command("git", "init", "-q", "--bare", bare).CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare: %v: %s", err, out)
+	}
+	path := filepath.Join(bare, "wt")
+	err := CreateWorktree(path, "feature")
+	if !errors.Is(err, errHostGitDiscoverySubcommand) {
+		t.Fatalf("CreateWorktree in a bare repository: err = %v, want errHostGitDiscoverySubcommand", err)
+	}
+	if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
+		t.Errorf("worktree directory %q exists after the refusal (Lstat err %v)", path, statErr)
+	}
+}

@@ -228,11 +228,8 @@ func rejectedSettingsKeys(candidates []rawPath, view func() (map[string]any, err
 // handlers return for keys they would otherwise drop.
 func writeUnpersistedKeysRejected(w http.ResponseWriter, rejected []string) {
 	slog.Warn("PUT server-config: rejecting keys that cannot be persisted", "keys", rejected)
-	writeJSON(w, http.StatusUnprocessableEntity, map[string]interface{}{
-		"error":   "unpersisted_keys_rejected",
-		"message": "These settings are not recognised or cannot be saved through the server config API. Nothing was saved.",
-		"keys":    rejected,
-	})
+	writeSettingsCodedKeysError(w, "unpersisted_keys_rejected",
+		"These settings are not recognised or cannot be saved through the server config API. Nothing was saved.", rejected)
 }
 
 // serverConfigFileView returns the file-mode GET /api/v1/admin/server-config

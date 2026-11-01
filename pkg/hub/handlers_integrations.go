@@ -20,10 +20,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -532,12 +534,19 @@ func (s *Server) handleUpdateIntegrationConfig(w http.ResponseWriter, r *http.Re
 			allowedSecrets[m.ConfigKey] = m.SecretKey
 		}
 
-		for configKey, value := range req.Secrets {
-			secretKey, ok := allowedSecrets[configKey]
-			if !ok {
-				BadRequest(w, "unknown secret key: "+configKey)
-				return
+		// Every unknown key is refused before any secret is stored.
+		var unknown []settingsFieldError
+		for _, configKey := range slices.Sorted(maps.Keys(req.Secrets)) {
+			if _, ok := allowedSecrets[configKey]; !ok {
+				unknown = append(unknown, settingsFieldError{Field: "secrets." + configKey, Message: "unknown secret key: " + configKey})
 			}
+		}
+		if len(unknown) > 0 {
+			writeSettingsValidation(w, unknown[0].Message, unknown, nil)
+			return
+		}
+		for configKey, value := range req.Secrets {
+			secretKey := allowedSecrets[configKey]
 			if err := s.SetChatIntegrationSecret(ctx, secretKey, value, ChatSecretDescription(secretKey), userID); err != nil {
 				slog.Error("Failed to store integration secret", "plugin", name, "key", configKey, "error", err)
 				InternalError(w)
