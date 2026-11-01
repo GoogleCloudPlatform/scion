@@ -48,7 +48,7 @@ const (
 	placementLegacyGlobalCause     = "the agent runtime's global settings use the legacy format and mention Kubernetes placement keys; set schema_version: \"1\" so Kubernetes placement can be determined"
 	placementBuiltFromCause        = "the runtime entry this agent's runtime was built from no longer matches its cluster and namespace; restart the agent runtime, fix the entry, or align the settings file's entry with the stored one"
 	placementAgentConfigCause      = "the agent's config could not be read to check it against the agent runtime's Kubernetes placement"
-	placementOverlayInvalidCause   = "the Kubernetes placement in the runtimes and profiles stored in the Hub is not valid; fix them in the Hub settings (scion doctor and the settings placement report name the sections; the Hub log names the paths)"
+	placementOverlayInvalidCause   = "the Kubernetes placement in the runtimes and profiles stored in the Hub is not valid; fix them in the Hub settings (the server config's placement report names the sections; the Hub log names the paths)"
 )
 
 // placementDefaultsOnlyCause is the fixed cause for a profile with placement
@@ -631,11 +631,13 @@ func (s *Server) checkStartLegacyPlacement(agentName, projectPath string, inline
 //
 // On a legacy Runtime Broker every Kubernetes start is operator-owned
 // (placementForStart). An agent with no stored config yet has nothing to
-// check before the stop: Manager.Start checks the config it provisions with
-// the same operator rules (config.ApplyPlacement), as checkStartOperatorPlacement
-// leaves it on start. A restart request carries no kubernetes block, so
-// that later check cannot refuse anything the restart itself brings. A stored config that exists but cannot be read or
-// parsed still fails closed, and so does a restart with no project path.
+// check before the stop: Manager.Start checks the config it provisions
+// with the same operator rules (config.ApplyPlacement), as
+// checkStartOperatorPlacement leaves it on start. A restart request
+// carries no kubernetes block, so that later check cannot refuse anything
+// the restart itself brings. A stored config that exists but cannot be
+// read or parsed still fails closed, and so does a restart with no project
+// path.
 func (s *Server) checkRestartLegacyPlacement(agentName, projectPath string, sharedWorkspace bool, rp *api.ResolvedPlacement) error {
 	if rp != nil && rp.OperatorOwned {
 		if projectPath == "" {
