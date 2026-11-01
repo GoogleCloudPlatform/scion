@@ -129,16 +129,28 @@ func newNFSBindScope(cfg RunConfig) (*nfsBindScope, error) {
 	if !ok || !filepath.IsAbs(cfg.Workspace) {
 		return nil, refuse(fmt.Sprintf("is not project %s's workspace on NFS project storage (<share>%s)", cfg.ProjectID, suffix))
 	}
-	if base == "" {
-		base = "/"
-	}
+	native := filepath.FromSlash(base)
+	native = volumeRooted(native, filepath.VolumeName(native), filepath.Separator)
 	// The share base is resolved once here; every bind source is compared
 	// with this canonical form.
-	hostBase, err := pathcanon.Resolve(filepath.FromSlash(base))
+	hostBase, err := pathcanon.Resolve(native)
 	if err != nil {
 		return nil, refuse(fmt.Sprintf("is on a share that cannot be resolved (%v)", err))
 	}
 	return &nfsBindScope{hostBase: hostBase, subPathRoot: root, projectID: cfg.ProjectID}, nil
+}
+
+// volumeRooted returns base, or the root of its volume when base is only a
+// volume name vol: "" on Unix (a share mounted at "/"), a drive such as
+// "Z:" or a UNC share such as \\server\share on Windows. A bare drive
+// name is drive-relative (it resolves to the working directory on that
+// drive), so the separator is appended to name the volume's root. vol and
+// sep are parameters so every case can be tested on every platform.
+func volumeRooted(base, vol string, sep byte) string {
+	if base == vol {
+		return base + string(sep)
+	}
+	return base
 }
 
 // check refuses a bind source on the share that checkNFSMountScope
