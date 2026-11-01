@@ -144,7 +144,7 @@ func TestHeldTargetSend_Agent(t *testing.T) {
 	// Control: the same sends to a running target that is not held go
 	// through.
 	for _, wake := range []bool{false, true} {
-		srv, s, sender, target, disp := heldSendFixture(t, string(state.PhaseRunning), false)
+		srv, _, sender, target, disp := heldSendFixture(t, string(state.PhaseRunning), false)
 		result, dmErr := srv.ExecuteAgentDM(context.Background(), &AgentDMInput{
 			SenderAgent:    sender,
 			SenderIdentity: wakeDMSenderIdentity(sender, ScopeProjectRead, ScopeAgentLifecycle),
