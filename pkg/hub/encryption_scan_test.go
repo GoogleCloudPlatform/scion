@@ -349,9 +349,9 @@ func TestEncryptionAudit_CountsAuthenticatedKeysOnly(t *testing.T) {
 	}
 }
 
-// Obligation 4a negative case: verify fails every row that is not a
-// readable enc:v2 value under an allowed (policy) kid, the planted
-// kid-label lie included, and lists only identities.
+// Verify fails every row that is not a readable enc:v2 value under an
+// allowed (policy) kid, the planted kid-label lie included, and lists
+// only identities.
 func TestVerifyEncryption_PolicyAllowedSet(t *testing.T) {
 	for backend, open := range scanBackends {
 		t.Run(backend, func(t *testing.T) {
