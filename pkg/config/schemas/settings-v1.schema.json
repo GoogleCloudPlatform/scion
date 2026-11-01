@@ -1674,6 +1674,18 @@
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_PEERSECRET",
               "x-since": "1"
             },
+            "peer_key_file": {
+              "type": "string",
+              "description": "This node's relay-peer private key file: a PEM PKCS #8 Ed25519 key readable only by the server. When set, the node signs relay-peer calls with it, and its instance_id must be set and listed in peers with the matching public key; startup is refused otherwise. Read at startup.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_PEERKEYFILE",
+              "x-since": "1"
+            },
+            "peers": {
+              "type": "array",
+              "description": "Relay peers enrolled with their own keys: each peer's instance id, role (relay or hub) and Ed25519 public keys. A peer's key verifies only calls made under that peer's id. Read at startup.",
+              "items": { "$ref": "#/$defs/serverHubConduitPeer" },
+              "x-since": "1"
+            },
             "proxy_session_max_age": {
               "type": "string",
               "description": "How long a user conduit session admitted through trusted-proxy authentication (no bearer credential) may open new tunnels, counted from admission. After it, a new tunnel request on that session is refused with 401; open tunnels are unaffected (e.g. '30m'; default '1h', between '5m' and '1h').",
@@ -2699,6 +2711,29 @@
         "install_root": { "type": "string", "description": "Versioned install root (releases/, current, previous) for release self-update. Default /opt/scion; SCION_MAINTENANCE_INSTALL_ROOT overrides it." }
       },
       "additionalProperties": false
+    },
+    "serverHubConduitPeer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "role", "keys"],
+      "properties": {
+        "id": { "type": "string", "description": "The peer's instance id (its server.hub.conduit.instance_id)." },
+        "role": { "type": "string", "enum": ["relay", "hub"], "description": "The peer's role." },
+        "keys": {
+          "type": "array",
+          "minItems": 1,
+          "description": "The peer's public keys; more than one during a rotation.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key_id", "public_key"],
+            "properties": {
+              "key_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,32}$", "description": "Key id, unique per peer." },
+              "public_key": { "type": "string", "description": "Ed25519 public key, standard base64." }
+            }
+          }
+        }
+      }
     },
     "serverNotificationChannel": {
       "type": "object",

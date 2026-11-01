@@ -679,6 +679,11 @@ func startConduitExternal(ctx context.Context, cfg *config.GlobalConfig, hubSrv 
 	if opts.PeerSecret == "" {
 		return errors.New("server.hub.conduit.peer_secret is required when server.hub.conduit.relay_mode is external")
 	}
+	// Enrolled relay peers and this hub's own key (opt-in): with a key
+	// file the hub signs with it; enrolled peers' key signatures verify.
+	if opts.Peers, opts.PeerKey, err = relay.PeerKeyOptions(cfg.Hub.Conduit); err != nil {
+		return err
+	}
 	auth, mode, err := hub.NewConduitPeerAuth(opts)
 	if err != nil {
 		return err

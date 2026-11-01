@@ -141,6 +141,27 @@ func relayDatabaseOptions(cfg *config.GlobalConfig) relaydb.Options {
 	}
 }
 
+// relayPeerAuthOptions builds the relay's relay-peer auth options. They
+// come from the conduit settings only: the peer secret, the enrolled peers
+// and this node's key. A relay never takes the session secret or the
+// signing ring, which are hub-only.
+func relayPeerAuthOptions(cfg *config.GlobalConfig, id string, onGCP bool) (relay.ConduitPeerAuthOptions, error) {
+	peers, key, err := relay.PeerKeyOptions(cfg.Hub.Conduit)
+	if err != nil {
+		return relay.ConduitPeerAuthOptions{}, err
+	}
+	return relay.ConduitPeerAuthOptions{
+		Mode:            cfg.Hub.Conduit.PeerAuthMode(),
+		OnGCP:           onGCP,
+		SelfID:          id,
+		PeerSecret:      cfg.Hub.Conduit.PeerSecretValue(),
+		Audience:        cfg.Hub.Conduit.PeerAudience,
+		ServiceAccounts: cfg.Hub.Conduit.PeerServiceAccounts,
+		Peers:           peers,
+		PeerKey:         key,
+	}, nil
+}
+
 // openRelayDB opens the relay's database access (a var for tests).
 var openRelayDB = relaydb.Open
 
@@ -153,13 +174,9 @@ func relayServerConfig(ctx context.Context, cfg *config.GlobalConfig, db *relayd
 	}
 	id := relay.InstanceID(cfg.Hub.Conduit.InstanceID)
 	onGCP := metadata.OnGCE()
-	opts := relay.ConduitPeerAuthOptions{
-		Mode:            cfg.Hub.Conduit.PeerAuthMode(),
-		OnGCP:           onGCP,
-		SelfID:          id,
-		PeerSecret:      cfg.Hub.Conduit.PeerSecretValue(),
-		Audience:        cfg.Hub.Conduit.PeerAudience,
-		ServiceAccounts: cfg.Hub.Conduit.PeerServiceAccounts,
+	opts, err := relayPeerAuthOptions(cfg, id, onGCP)
+	if err != nil {
+		return relayserver.Config{}, err
 	}
 	if onGCP {
 		if email, err := metadata.EmailWithContext(ctx, "default"); err == nil {
