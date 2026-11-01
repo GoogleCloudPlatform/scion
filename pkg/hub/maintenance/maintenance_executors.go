@@ -447,7 +447,6 @@ func (e *RebuildServerExecutor) RunWithBeforeRestart(ctx context.Context, logger
 		}
 		plan.currentBranch = out
 	}
-	currentBranch := plan.currentBranch
 	if err := runRebuildSteps(ctx, logger, rebuildCheckout, plan); err != nil {
 		return err
 	}
@@ -475,12 +474,11 @@ func (e *RebuildServerExecutor) RunWithBeforeRestart(ctx context.Context, logger
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 	plan.bin = filepath.Join(tmpDir, "scion")
 	plan.ldflags = GitBuildLDFlags(commit, time.Now())
-	bin := plan.bin
 	if err := runRebuildSteps(ctx, logger, rebuildBuild, plan); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(logger, "==> Verifying the build\n")
-	if err := VerifyGitBuild(ctx, bin, commit, logger); err != nil {
+	if err := VerifyGitBuild(ctx, plan.bin, commit, logger); err != nil {
 		return fmt.Errorf("verification failed: %w", err)
 	}
 
@@ -506,7 +504,7 @@ func (e *RebuildServerExecutor) RunWithBeforeRestart(ctx context.Context, logger
 	// ── Install ─────────────────────────────────────────────────────────
 	_, _ = fmt.Fprintf(logger, "\n==> Installing %s (%s)\n", name, e.installer.Name())
 	installCtx, cancelInstall := context.WithTimeout(ctx, e.installTimeout)
-	staged, err := e.installer.Stage(installCtx, name, bin)
+	staged, err := e.installer.Stage(installCtx, name, plan.bin)
 	if err != nil {
 		cancelInstall()
 		return fmt.Errorf("stage %s: %w", name, err)
@@ -528,7 +526,7 @@ func (e *RebuildServerExecutor) RunWithBeforeRestart(ctx context.Context, logger
 	// last part of the log written before the restart is recorded.
 	var unitText string
 	if e.installer.Name() == StrategySudoInstall {
-		unitText = e.checkUnit(ctx, logger, repoPath, branch, currentBranch)
+		unitText = e.checkUnit(ctx, logger, repoPath, branch, plan.currentBranch)
 	} else {
 		// Not a starter-hub unit: a drift record left from before (the
 		// Maintenance banner) can no longer be refreshed, so it is removed,
