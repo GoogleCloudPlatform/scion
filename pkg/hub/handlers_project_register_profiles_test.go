@@ -149,3 +149,56 @@ func TestProjectRegisterEmbeddedBroker_FirstRegisterStoresProfiles(t *testing.T)
 	assert.Equal(t, []string{"docker-default"}, profileNames(created.Profiles),
 		"a first register stores the profiles it sends")
 }
+
+// Capabilities on the same path: a re-register that sends none keeps the
+// stored capabilities, and capabilities it sends replace them.
+
+func TestProjectRegisterEmbeddedBroker_ReregisterWithoutCapabilitiesKeepsStored(t *testing.T) {
+	srv, s := testServer(t)
+	owner := newHubMemberUser(t, s, "register-caps-owner-e")
+	broker := registerBrokerTestExistingBroker(t, s, "register-caps-name-e", owner.ID)
+	broker.Capabilities = &store.BrokerCapabilities{WebPTY: true, Sync: true, Attach: true}
+	require.NoError(t, s.UpdateRuntimeBroker(context.Background(), broker))
+
+	rec := doRequestAsUserLoopback(t, srv, owner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+		Name: "register-caps-project-e",
+		Broker: &RegisterProjectBrokerInfo{
+			ID:      broker.ID,
+			Name:    broker.Name,
+			Version: "2.0.0-nocaps",
+		},
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "re-register should succeed; got: %s", rec.Body.String())
+
+	updated, err := s.GetRuntimeBroker(context.Background(), broker.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "2.0.0-nocaps", updated.Version, "the re-register is applied")
+	require.NotNil(t, updated.Capabilities, "a re-register without capabilities keeps the stored capabilities")
+	assert.True(t, updated.Capabilities.WebPTY)
+	assert.True(t, updated.Capabilities.Sync)
+	assert.True(t, updated.Capabilities.Attach)
+}
+
+func TestProjectRegisterEmbeddedBroker_ReregisterWithCapabilitiesReplaces(t *testing.T) {
+	srv, s := testServer(t)
+	owner := newHubMemberUser(t, s, "register-caps-owner-f")
+	broker := registerBrokerTestExistingBroker(t, s, "register-caps-name-f", owner.ID)
+
+	rec := doRequestAsUserLoopback(t, srv, owner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+		Name: "register-caps-project-f",
+		Broker: &RegisterProjectBrokerInfo{
+			ID:           broker.ID,
+			Name:         broker.Name,
+			Version:      "2.0.0-caps",
+			Capabilities: &store.BrokerCapabilities{WebPTY: true, Attach: true},
+		},
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "re-register should succeed; got: %s", rec.Body.String())
+
+	updated, err := s.GetRuntimeBroker(context.Background(), broker.ID)
+	require.NoError(t, err)
+	require.NotNil(t, updated.Capabilities)
+	assert.True(t, updated.Capabilities.WebPTY, "capabilities sent on a re-register replace the stored ones")
+	assert.True(t, updated.Capabilities.Attach)
+	assert.False(t, updated.Capabilities.Sync)
+}

@@ -2469,7 +2469,11 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			}
 			broker.Status = store.BrokerStatusOnline
 			broker.ConnectionState = "connected"
-			broker.Capabilities = req.Broker.Capabilities
+			// A re-register that sends no capabilities keeps the stored
+			// ones; capabilities it sends replace them.
+			if req.Broker.Capabilities != nil {
+				broker.Capabilities = req.Broker.Capabilities
+			}
 			// A re-register that sends no profiles (absent, null or an
 			// empty list) keeps the stored ones; heartbeats refresh them.
 			// A non-empty list replaces them.
