@@ -330,7 +330,10 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 		}
 		printMoveForceHint(os.Stderr, err, reincarnateForce)
 		if apiclient.IsConflictError(err) && moveVerdictFromError(err) == nil {
-			return wrapHubError(fmt.Errorf("a reincarnation is already pending for '%s': %w", agentName, err))
+			// The hub refuses with 409 for several reasons (a pending
+			// reincarnation, a start in progress, a concurrent write); its
+			// message names which, so the prefix must not claim one.
+			return wrapHubError(fmt.Errorf("cannot reincarnate '%s' now: %w", agentName, err))
 		}
 		if perr := patchNeedsUpdateError(err, wantPatched, hubCtx.CredentialKind); perr != nil {
 			return wrapHubError(perr)

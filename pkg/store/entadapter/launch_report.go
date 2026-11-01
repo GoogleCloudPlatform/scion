@@ -181,11 +181,21 @@ func (s *AgentStore) applyLaunchReportEnded(ctx context.Context, ltx *launchTx, 
 
 	case store.LaunchEndReasonRunningObserved:
 		if r.State == store.LaunchReportStateSucceeded {
+			now, err := storeNow(ctx, ltx.tx, ltx.client.Driver().Dialect() == dialect.Postgres)
+			if err != nil {
+				return store.LaunchReportAnswer{}, nil, false, err
+			}
 			upd := ltx.client.Agent.UpdateOneID(current.ID).
 				SetLaunchEndReason(store.LaunchEndReasonSucceeded).
 				SetStateVersion(current.StateVersion + 1)
 			applySucceededAgentInfo(upd, current, r)
-			updated, err := upd.Save(ctx)
+			// A status-written running_observed end keeps the linked start
+			// claim, so a broker failure report can still end the launch
+			// failed. The broker's succeeded report settles the outcome:
+			// release the claim now, as the failed report does, instead of
+			// leaving it to the start-claim reaper's next pass (up to a
+			// minute of 409s for a reincarnate right after a create).
+			updated, err := withLaunchEndSettlement(upd, current, store.LaunchEndReasonSucceeded, now).Save(ctx)
 			if err != nil {
 				return store.LaunchReportAnswer{}, nil, false, mapError(err)
 			}
