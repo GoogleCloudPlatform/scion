@@ -81,18 +81,45 @@ func (a *AuthzService) ResolveListScopes(ctx context.Context, identity Identity,
 // scopePermissionID.
 func (a *AuthzService) resolveListScopesWithCeiling(ctx context.Context, identity Identity, scopePermissionID, ceilingPermissionID string) (ListScopeResult, error) {
 	none := ListScopeResult{Scopes: ScopeSetNone()}
-	permissionID := scopePermissionID
-
 	if identity == nil {
 		return none, nil
 	}
 	// An agent delegated credential never gets a list scope from this
-	// function: the agent's own principals contribute nothing, and no list
-	// operation admits a delegated credential yet (.design/agent-delegation.md
-	// §11.8). An error, never a scope, so the caller fails closed.
+	// function: the agent's own principals contribute nothing. A delegated
+	// list takes its scope only from the delegated list arm (delegatedListScope),
+	// which resolves the authorizing user's scope through
+	// resolveListScopesForPrincipal (.design/agent-delegation.md §11.8). An
+	// error, never a scope, so any other caller fails closed.
 	if isDelegatedAgentIdentity(identity) {
 		return none, errDelegatedListScope
 	}
+	return a.resolveListScopesForIdentity(ctx, identity, scopePermissionID, ceilingPermissionID)
+}
+
+// resolveListScopesForPrincipal resolves the list scope of principal, an
+// authorizing user held as an argument, for permissionID. It is
+// ResolveListScopes for a principal that is not the request's identity:
+// the delegated list arm passes the issuer it built from the stored issuer
+// row, which is never placed in the identity slot. Only a user principal
+// with an identity is accepted; anything else gets no scope and an error.
+// The issuer is a session principal, so no credential caveat reduces its
+// scope; its access constraints apply as for any user.
+func (a *AuthzService) resolveListScopesForPrincipal(ctx context.Context, principal PrincipalContext, permissionID string) (ListScopeResult, error) {
+	none := ListScopeResult{Scopes: ScopeSetNone()}
+	if isNilIdentity(principal.Identity) || principal.Kind != PrincipalKindUser {
+		return none, errors.New("resolveListScopesForPrincipal: not a user principal")
+	}
+	if isDelegatedAgentIdentity(principal.Identity) {
+		return none, errDelegatedListScope
+	}
+	return a.resolveListScopesForIdentity(ctx, principal.Identity, permissionID, permissionID)
+}
+
+// resolveListScopesForIdentity is the body of resolveListScopesWithCeiling
+// for a non-nil identity that is not an agent delegated credential.
+func (a *AuthzService) resolveListScopesForIdentity(ctx context.Context, identity Identity, scopePermissionID, ceilingPermissionID string) (ListScopeResult, error) {
+	none := ListScopeResult{Scopes: ScopeSetNone()}
+	permissionID := scopePermissionID
 
 	// Note: Suspension is enforced at the auth middleware layer, which rejects
 	// suspended principals before the handler runs. ResolveListScopes does not

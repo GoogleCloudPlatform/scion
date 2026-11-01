@@ -273,62 +273,13 @@ func bearerStageAgentDelegationCode(stage string) string {
 // DeniedByAgentDelegation. Any lookup error denies.
 func (a *AuthzService) decideAgentDelegation(ctx context.Context, request AuthzRequest, _ *ProjectAdmissionCache) Decision {
 	identity, _ := request.Principal.Identity.(*DelegatedAgentIdentity)
-	principal := principalContextForIdentity(request.Principal.Identity)
-	credential := credentialContextForIdentity(request.Principal.Identity)
-	attribution := func(code string) *AgentDelegationAttribution {
-		at := &AgentDelegationAttribution{ActorKind: actorKindAgentDelegated, AgentDelegationCode: code}
-		if identity != nil {
-			at.ActorAgentID = identity.agentID
-			at.AuthorizingUserID = identity.authorizingUserID
-			at.SourceGrantID = identity.grantID
-			at.ExchangeAgentCredentialID = identity.exchangeAgentCredID
-		}
-		return at
-	}
 	deny := func(code string) Decision {
-		d := Decision{
-			Allowed:         false,
-			Reason:          "agent delegation: " + code,
-			DeniedBy:        DeniedByAgentDelegation,
-			AlwaysAudit:     true,
-			AgentDelegation: attribution(code),
-		}
-		return decorateDecision(d, request, principal, credential, auditPermissionID(request))
+		return a.agentDelegationDeny(request, identity, code)
 	}
 
-	if identity == nil {
-		return deny(agentDelegationCodeCredentialNotAdmitted)
-	}
-	st := delegatedStateFromContext(ctx)
-	if st == nil || st.identity != identity {
-		// The identity must be the one the middleware built for this
-		// request, with its loaded rows.
-		return deny(agentDelegationCodeStateMissing)
-	}
-
-	// 0. The operation routeGuard matched in the admission table, and the
-	// experiment.
-	entry, ok := delegatedAdmissionFromContext(ctx)
-	if !ok {
-		return deny(agentDelegationCodeCredentialNotAdmitted)
-	}
-	if listed, ok := agentDelegationAdmissionFor(entry.Method, entry.RouteID); !ok || listed.Operation != entry.Operation {
-		return deny(agentDelegationCodeCredentialNotAdmitted)
-	}
-	if !a.agentDelegation.complete() || !a.agentDelegation.enabled() {
-		return deny(agentDelegationCodeExperimentDisabled)
-	}
-
-	// 1-5c. The revocation chain and actor state.
-	if code := a.delegatedChainCode(ctx, st); code != "" {
+	st, spec, entry, code := a.agentDelegationRouteChecks(ctx, identity)
+	if code != "" {
 		return deny(code)
-	}
-
-	// 6. The catalog admits the delegated pair for the operation (defence
-	// in depth: the admission table drift test pins the same fact).
-	spec, ok := catalogOperationByID(entry.Operation)
-	if !ok || !catalogAdmitsDelegated(spec) {
-		return deny(agentDelegationCodeCredentialNotAdmitted)
 	}
 
 	// 7. Exactly one canonical permission: the explicit Permission, or the
@@ -341,42 +292,57 @@ func (a *AuthzService) decideAgentDelegation(ctx context.Context, request AuthzR
 		}
 		permissionID = resolved
 	}
-	// 7a. The operation's primary permission, or a listed secondary check.
-	if permissionID != spec.BasePermission && !slices.Contains(entry.Secondary, permissionID) {
-		return deny(agentDelegationCodeCredentialNotAdmitted)
+	// 7a-9. The permission is admitted on the route and held by the
+	// credential, the grant and the policy. Decide never accepts the
+	// route's item-filter permission.
+	if code := a.agentDelegationPermissionChecks(identity, st, spec, entry, permissionID, false); code != "" {
+		return deny(code)
 	}
 
-	// 8. The credential ceiling holds it, and the credential ceiling is a
-	// subset of the grant's.
-	ceiling := identity.Ceiling()
-	grantCeiling := permissions.FrozenPermissionCeiling{Version: permissions.CeilingVersionV1, PermissionIDs: st.grant.CeilingPermissionIDs}
-	if !ceiling.Allows(permissionID) || !grantCeiling.Allows(permissionID) {
-		return deny(agentDelegationCodeOutsideCeiling)
+	// 10-11. The issuer's live authority on the resolved target.
+	eval, code := a.agentDelegationTargetCheck(ctx, identity, st, permissionID, request.Resource, request.TargetEvidence)
+	if code != "" {
+		return deny(code)
 	}
+	return a.agentDelegationAllow(request, identity, st, eval)
+}
 
-	// 9. The hub agent-delegation policy holds it for the grant's boundary
-	// kind, and the hub setting has not removed it. A setting the hub
-	// cannot read denies.
-	boundary := identity.Boundary()
-	narrowing, err := a.agentDelegation.policy()
-	if err != nil {
-		return deny(agentDelegationCodeLookupError)
+// agentDelegationAttribution is the attribution block of a decision for
+// identity, with code on a deny.
+func agentDelegationAttribution(identity *DelegatedAgentIdentity, code string) *AgentDelegationAttribution {
+	at := &AgentDelegationAttribution{ActorKind: actorKindAgentDelegated, AgentDelegationCode: code}
+	if identity != nil {
+		at.ActorAgentID = identity.agentID
+		at.AuthorizingUserID = identity.authorizingUserID
+		at.SourceGrantID = identity.grantID
+		at.ExchangeAgentCredentialID = identity.exchangeAgentCredID
 	}
-	if !agentDelegableUnder(narrowing, permissionID, permissions.BoundaryKind(boundary.Kind)) {
-		return deny(agentDelegationCodePermissionNotDelegable)
-	}
+	return at
+}
 
-	// 10-11. The issuer's live authority on the resolved target, evaluated
-	// as a bearer of the grant's boundary with the credential's ceiling.
-	eval := a.EvaluateBearerCeiling(ctx, st.issuerPC, boundary, ceiling, permissionID, request.Resource,
-		BearerOptions{Evidence: request.TargetEvidence, Memo: st.memo})
-	if !eval.Decision.Allowed {
-		return deny(bearerStageAgentDelegationCode(eval.Stage))
+// agentDelegationDeny is the decorated deny decision for request with the
+// agent delegation code code.
+func (a *AuthzService) agentDelegationDeny(request AuthzRequest, identity *DelegatedAgentIdentity, code string) Decision {
+	d := Decision{
+		Allowed:         false,
+		Reason:          "agent delegation: " + code,
+		DeniedBy:        DeniedByAgentDelegation,
+		AlwaysAudit:     true,
+		AgentDelegation: agentDelegationAttribution(identity, code),
 	}
+	return decorateDecision(d, request, principalContextForIdentity(request.Principal.Identity),
+		credentialContextForIdentity(request.Principal.Identity), auditPermissionID(request))
+}
 
-	at := attribution("")
-	at.TargetScope = eval.TargetScope
-	at.AccessSource = eval.AccessSource
+// agentDelegationAllow is the decorated allow decision for request, with
+// the issuer-authority evaluation eval (nil when the decision has no
+// single target, as for a list scope).
+func (a *AuthzService) agentDelegationAllow(request AuthzRequest, identity *DelegatedAgentIdentity, st *delegatedRequestState, eval *BearerEvaluation) Decision {
+	at := agentDelegationAttribution(identity, "")
+	if eval != nil {
+		at.TargetScope = eval.TargetScope
+		at.AccessSource = eval.AccessSource
+	}
 	d := Decision{
 		Allowed:         true,
 		Reason:          "agent delegation",
@@ -384,5 +350,107 @@ func (a *AuthzService) decideAgentDelegation(ctx context.Context, request AuthzR
 		AlwaysAudit:     true,
 		AgentDelegation: at,
 	}
-	return decorateDecision(d, request, principal, credential, auditPermissionID(request))
+	return decorateDecision(d, request, principalContextForIdentity(request.Principal.Identity),
+		credentialContextForIdentity(request.Principal.Identity), auditPermissionID(request))
+}
+
+// agentDelegationRouteChecks runs §11.2 steps 0-6 for identity: the
+// request state the middleware loaded, the admission table entry routeGuard
+// matched, the experiment, the revocation chain and actor state, and the
+// catalog admission of the operation. It returns the request state, the
+// operation and the entry, and "" when every check passes; otherwise the
+// agent delegation code of the first failure.
+func (a *AuthzService) agentDelegationRouteChecks(ctx context.Context, identity *DelegatedAgentIdentity) (*delegatedRequestState, authzop.OperationSpec, agentDelegationAdmission, string) {
+	var (
+		spec  authzop.OperationSpec
+		entry agentDelegationAdmission
+	)
+	if identity == nil {
+		return nil, spec, entry, agentDelegationCodeCredentialNotAdmitted
+	}
+	st := delegatedStateFromContext(ctx)
+	if st == nil || st.identity != identity {
+		// The identity must be the one the middleware built for this
+		// request, with its loaded rows.
+		return nil, spec, entry, agentDelegationCodeStateMissing
+	}
+
+	// 0. The operation routeGuard matched in the admission table, and the
+	// experiment.
+	entry, ok := delegatedAdmissionFromContext(ctx)
+	if !ok {
+		return nil, spec, entry, agentDelegationCodeCredentialNotAdmitted
+	}
+	if listed, ok := agentDelegationAdmissionFor(entry.Method, entry.RouteID); !ok || listed.Operation != entry.Operation {
+		return nil, spec, entry, agentDelegationCodeCredentialNotAdmitted
+	}
+	if !a.agentDelegation.complete() || !a.agentDelegation.enabled() {
+		return nil, spec, entry, agentDelegationCodeExperimentDisabled
+	}
+
+	// 1-5c. The revocation chain and actor state.
+	if code := a.delegatedChainCode(ctx, st); code != "" {
+		return nil, spec, entry, code
+	}
+
+	// 6. The catalog admits the delegated pair for the operation (defence
+	// in depth: the admission table drift test pins the same fact).
+	spec, ok = catalogOperationByID(entry.Operation)
+	if !ok || !catalogAdmitsDelegated(spec) {
+		return nil, spec, entry, agentDelegationCodeCredentialNotAdmitted
+	}
+	return st, spec, entry, ""
+}
+
+// agentDelegationPermissionChecks runs §11.2 steps 7a-9 for permissionID:
+// it is the operation's primary permission, a listed secondary check or,
+// only when itemFilter is set, the route's item-filter permission; the
+// credential ceiling and the grant's ceiling hold it; and the hub
+// agent-delegation policy holds it for the grant's boundary kind. It
+// returns "" or the agent delegation code of the first failure.
+func (a *AuthzService) agentDelegationPermissionChecks(identity *DelegatedAgentIdentity, st *delegatedRequestState, spec authzop.OperationSpec, entry agentDelegationAdmission, permissionID string, itemFilter bool) string {
+	// 7a. The operation's primary permission, a listed secondary check, or
+	// the item filter on the item-filter path only.
+	switch {
+	case itemFilter:
+		if entry.ItemFilter == "" || permissionID != entry.ItemFilter {
+			return agentDelegationCodeCredentialNotAdmitted
+		}
+	case permissionID != spec.BasePermission && !slices.Contains(entry.Secondary, permissionID):
+		return agentDelegationCodeCredentialNotAdmitted
+	}
+
+	// 8. The credential ceiling holds it, and the credential ceiling is a
+	// subset of the grant's.
+	ceiling := identity.Ceiling()
+	grantCeiling := permissions.FrozenPermissionCeiling{Version: permissions.CeilingVersionV1, PermissionIDs: st.grant.CeilingPermissionIDs}
+	if !ceiling.Allows(permissionID) || !grantCeiling.Allows(permissionID) {
+		return agentDelegationCodeOutsideCeiling
+	}
+
+	// 9. The hub agent-delegation policy holds it for the grant's boundary
+	// kind, and the hub setting has not removed it. A setting the hub
+	// cannot read denies.
+	narrowing, err := a.agentDelegation.policy()
+	if err != nil {
+		return agentDelegationCodeLookupError
+	}
+	if !agentDelegableUnder(narrowing, permissionID, permissions.BoundaryKind(identity.Boundary().Kind)) {
+		return agentDelegationCodePermissionNotDelegable
+	}
+	return ""
+}
+
+// agentDelegationTargetCheck runs §11.2 steps 10-11: the issuer's live
+// authority on target for permissionID, evaluated as a bearer of the
+// grant's boundary with the credential's ceiling. It returns the
+// evaluation and "" on allow, or the agent delegation code of the deny
+// stage.
+func (a *AuthzService) agentDelegationTargetCheck(ctx context.Context, identity *DelegatedAgentIdentity, st *delegatedRequestState, permissionID string, target Resource, evidence TargetScopeEvidence) (*BearerEvaluation, string) {
+	eval := a.EvaluateBearerCeiling(ctx, st.issuerPC, identity.Boundary(), identity.Ceiling(), permissionID, target,
+		BearerOptions{Evidence: evidence, Memo: st.memo})
+	if !eval.Decision.Allowed {
+		return &eval, bearerStageAgentDelegationCode(eval.Stage)
+	}
+	return &eval, ""
 }

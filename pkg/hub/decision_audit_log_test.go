@@ -330,7 +330,7 @@ func TestDecisionAuditCounts_RecorderAndClosedLabelSet(t *testing.T) {
 		require.False(t, seen[name], "duplicate disposition %s", name)
 		seen[name] = true
 	}
-	require.Len(t, seen, 10)
+	require.Len(t, seen, 11)
 }
 
 // The sampling policy is unchanged by decision logging: with an allow rate

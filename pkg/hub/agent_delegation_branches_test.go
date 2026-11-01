@@ -35,8 +35,8 @@ import (
 )
 
 // TestAgentDelegationHandlerBranches_MatchCatalog pins the handlers'
-// explicit delegated branches (admitDelegatedHandler and
-// admitDelegatedAgentHandler calls) against the
+// explicit delegated branches (admitDelegatedHandler,
+// admitDelegatedAgentHandler and admitDelegatedListHandler calls) against the
 // catalog and the admission table: the set of operations named in those
 // calls equals the set of catalog operations that admit the delegated
 // principal and credential, which equals the set of admission table
@@ -80,7 +80,7 @@ func TestAgentDelegationHandlerBranches_MatchCatalog(t *testing.T) {
 					}
 				}
 			case *ast.CallExpr:
-				if fn, ok := node.Fun.(*ast.Ident); ok && (fn.Name == "admitDelegatedHandler" || fn.Name == "admitDelegatedAgentHandler") {
+				if fn, ok := node.Fun.(*ast.Ident); ok && (fn.Name == "admitDelegatedHandler" || fn.Name == "admitDelegatedAgentHandler" || fn.Name == "admitDelegatedListHandler") {
 					require.Len(t, node.Args, 4, "%s: %s takes four arguments", fset.Position(node.Pos()), fn.Name)
 					branches = append(branches, branch{where: fset.Position(node.Pos()).String(), arg: node.Args[2]})
 				}
@@ -273,6 +273,74 @@ func TestAdmitDelegatedHandler_DeniesUnlessAdmittedForThisOperationAndTarget(t *
 			req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/a-1", nil).WithContext(ctx)
 			rec := httptest.NewRecorder()
 			got := admitDelegatedHandler(rec, req, tc.op, tc.resource)
+			assert.Equal(t, tc.allowed, got)
+			if tc.allowed {
+				assert.Equal(t, http.StatusOK, rec.Code, "nothing written on the allow path")
+				assert.Empty(t, rec.Body.String())
+				return
+			}
+			require.Equal(t, http.StatusForbidden, rec.Code)
+			var body struct {
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body), rec.Body.String())
+			assert.Equal(t, agentDelegationCodeCredentialNotAdmitted, body.Error.Code)
+		})
+	}
+}
+
+// TestAdmitDelegatedListHandler_DeniesUnlessAdmittedForThisListAndCollection:
+// the list handler branch lets a delegated caller through only when
+// routeGuard admitted exactly the handler's operation on a list route (an
+// entry with an item filter) whose target is exactly the collection; every
+// other shape answers 403 credential_not_admitted. A non-delegated caller is
+// never affected.
+func TestAdmitDelegatedListHandler_DeniesUnlessAdmittedForThisListAndCollection(t *testing.T) {
+	listEntry, ok := agentDelegationAdmissionFor(http.MethodGet, agentsCollectionRouteID)
+	require.True(t, ok)
+	readEntry, ok := agentDelegationAdmissionFor(http.MethodGet, delegatedRouteID(AgentRouteRoot))
+	require.True(t, ok)
+	noFilter := listEntry
+	noFilter.ItemFilter = ""
+	delegated := adtTestIdentity("agent-x", "project-x")
+
+	type ctxFn func(context.Context) context.Context
+	withEntry := func(e agentDelegationAdmission) ctxFn {
+		return func(ctx context.Context) context.Context { return contextWithDelegatedAdmission(ctx, e) }
+	}
+	withTarget := func(tg delegatedRouteTarget) ctxFn {
+		return func(ctx context.Context) context.Context { return contextWithDelegatedTarget(ctx, tg) }
+	}
+	otherID := hubAgentCollectionTarget
+	otherID.ID = "elsewhere"
+	withProject := hubAgentCollectionTarget
+	withProject.ProjectID = "p-1"
+	cases := []struct {
+		name     string
+		identity Identity
+		setup    []ctxFn
+		allowed  bool
+	}{
+		{"admitted for the list operation and the collection", delegated, []ctxFn{withEntry(listEntry), withTarget(hubAgentCollectionTarget)}, true},
+		{"no admission entry", delegated, []ctxFn{withTarget(hubAgentCollectionTarget)}, false},
+		{"admitted for the agent read route", delegated, []ctxFn{withEntry(readEntry), withTarget(hubAgentCollectionTarget)}, false},
+		{"list entry without an item filter", delegated, []ctxFn{withEntry(noFilter), withTarget(hubAgentCollectionTarget)}, false},
+		{"no route target", delegated, []ctxFn{withEntry(listEntry)}, false},
+		{"collection type with another ID", delegated, []ctxFn{withEntry(listEntry), withTarget(otherID)}, false},
+		{"collection with a project", delegated, []ctxFn{withEntry(listEntry), withTarget(withProject)}, false},
+		{"non-delegated caller without any admission", NewAuthenticatedUser("u-1", "u@example.com", "U", "member", "web"), nil, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := contextWithIdentity(context.Background(), tc.identity)
+			for _, fn := range tc.setup {
+				ctx = fn(ctx)
+			}
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil).WithContext(ctx)
+			rec := httptest.NewRecorder()
+			got := admitDelegatedListHandler(rec, req, opAgentList, hubAgentCollectionTarget)
 			assert.Equal(t, tc.allowed, got)
 			if tc.allowed {
 				assert.Equal(t, http.StatusOK, rec.Code, "nothing written on the allow path")
