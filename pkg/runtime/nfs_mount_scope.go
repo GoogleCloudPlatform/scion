@@ -95,7 +95,8 @@ func checkNFSMountScope(rel, subPathRoot, projectID string) error {
 // nfsBindScope is the mount-scope check of the local-container runtimes'
 // binds for an agent whose workspace is on NFS project storage.
 type nfsBindScope struct {
-	// hostBase is where the share is mounted on this host (resolved).
+	// hostBase is where the share is mounted on this host, in its
+	// canonical form (pathcanon.Resolve).
 	hostBase    string
 	subPathRoot string
 	projectID   string
@@ -131,21 +132,30 @@ func newNFSBindScope(cfg RunConfig) (*nfsBindScope, error) {
 	if base == "" {
 		base = "/"
 	}
-	return &nfsBindScope{hostBase: filepath.FromSlash(base), subPathRoot: root, projectID: cfg.ProjectID}, nil
+	// The share base is resolved once here; every bind source is compared
+	// with this canonical form.
+	hostBase, err := pathcanon.Resolve(filepath.FromSlash(base))
+	if err != nil {
+		return nil, refuse(fmt.Sprintf("is on a share that cannot be resolved (%v)", err))
+	}
+	return &nfsBindScope{hostBase: hostBase, subPathRoot: root, projectID: cfg.ProjectID}, nil
 }
 
 // check refuses a bind source on the share that checkNFSMountScope
-// refuses. Sources off the share are not its concern. Whether a source is
-// on the share is decided by pathcanon.Within on the canonical forms of
-// both paths; a path that cannot be resolved is refused.
+// refuses. Sources off the share are not its concern. A named volume lives
+// in the container runtime's own storage, not on the share, and is
+// allowed; any other source must be an absolute path, so that the result
+// never depends on the broker's working directory. Whether a source is on
+// the share is decided by pathcanon.Within on its canonical form; a source
+// that cannot be resolved is refused.
 func (s *nfsBindScope) check(src string) error {
-	if s == nil {
+	if s == nil || isNamedVolume(src) {
 		return nil
 	}
-	base, err := pathcanon.Resolve(s.hostBase)
-	if err != nil {
-		return fmt.Errorf("%w: share %q cannot be resolved: %v", errNFSMountScope, s.hostBase, err)
+	if !filepath.IsAbs(src) {
+		return fmt.Errorf("%w: bind source %q is not an absolute path", errNFSMountScope, src)
 	}
+	base := s.hostBase
 	source, err := pathcanon.Resolve(src)
 	if err != nil {
 		return fmt.Errorf("%w: bind source %q cannot be resolved: %v", errNFSMountScope, src, err)

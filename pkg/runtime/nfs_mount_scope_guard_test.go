@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -199,5 +200,91 @@ func TestSharedDirClaimSubPath_MountScope(t *testing.T) {
 	split.SubPathRoot = ""
 	if _, _, err := sharedDirClaimSubPath(&split, "other"); err != nil {
 		t.Errorf("transitional split: sharedDirClaimSubPath(other) = %v, want the shape check only", err)
+	}
+}
+
+// nfsBindScopeFixture creates <tmp>/<dir>/share1/projects/<pid>/workspace
+// and returns the share base and the workspace.
+func nfsBindScopeFixture(t *testing.T, dir string) (base, ws string) {
+	t.Helper()
+	base = filepath.Join(t.TempDir(), dir, "share1")
+	ws = filepath.Join(base, filepath.FromSlash(scopeRel("workspace")))
+	mkdirs(t, ws)
+	return base, ws
+}
+
+// A named volume is the container runtime's own storage, never the share,
+// whatever the broker's working directory; a relative path that is not a
+// named volume is refused rather than resolved against it.
+func TestNFSBindScope_NamedVolumeAndRelativeSource(t *testing.T) {
+	base, ws := nfsBindScopeFixture(t, "d")
+	s, err := newNFSBindScope(RunConfig{WorkspaceBackendName: "nfs", ProjectID: scopeProjectID, Workspace: ws})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, cwd := range []string{base, ws} {
+		t.Chdir(cwd)
+		for _, named := range []string{scopeRoot, "cache", "workspace"} {
+			if err := s.check(named); err != nil {
+				t.Errorf("cwd %s: check(named volume %q) = %v, want nil", cwd, named, err)
+			}
+		}
+		for _, rel := range []string{"./" + scopeRoot, scopeRel(".scion"), "../share1", "."} {
+			if err := s.check(rel); !errors.Is(err, errNFSMountScope) || !strings.Contains(err.Error(), "not an absolute path") {
+				t.Errorf("cwd %s: check(%q) = %v, want a refusal of a relative source", cwd, rel, err)
+			}
+		}
+	}
+}
+
+// A source on the share that cannot be resolved (a dangling link) is
+// refused, not treated as off the share.
+func TestNFSBindScope_UnresolvableSourceRefused(t *testing.T) {
+	_, ws := nfsBindScopeFixture(t, "d")
+	s, err := newNFSBindScope(RunConfig{WorkspaceBackendName: "nfs", ProjectID: scopeProjectID, Workspace: ws})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dangling := filepath.Join(ws, "dangling")
+	if err := os.Symlink(filepath.Join(ws, "missing"), dangling); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	if err := s.check(dangling); !errors.Is(err, errNFSMountScope) || !strings.Contains(err.Error(), "cannot be resolved") {
+		t.Errorf("check(dangling link) = %v, want a refusal", err)
+	}
+}
+
+// A share base reached through a link is resolved once; sources are
+// compared with its canonical form whichever spelling they use.
+func TestNFSBindScope_ShareBaseThroughLink(t *testing.T) {
+	realBase, _ := nfsBindScopeFixture(t, "real")
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(realBase, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	ws := filepath.Join(link, filepath.FromSlash(scopeRel("workspace")))
+	s, err := newNFSBindScope(RunConfig{WorkspaceBackendName: "nfs", ProjectID: scopeProjectID, Workspace: ws})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := layoutRealPath(t, realBase); s.hostBase != want {
+		t.Fatalf("hostBase = %q, want the canonical %q", s.hostBase, want)
+	}
+	for _, refused := range []string{
+		filepath.Join(realBase, filepath.FromSlash(scopeRel())),
+		filepath.Join(link, filepath.FromSlash(scopeRel())),
+		filepath.Join(link, filepath.FromSlash(scopeRel(".scion"))),
+	} {
+		if err := s.check(refused); !errors.Is(err, errNFSMountScope) {
+			t.Errorf("check(%s) = %v, want a refusal", refused, err)
+		}
+	}
+	for _, allowed := range []string{
+		filepath.Join(realBase, filepath.FromSlash(scopeRel("workspace"))),
+		filepath.Join(link, filepath.FromSlash(scopeRel("workspace"))),
+	} {
+		if err := s.check(allowed); err != nil {
+			t.Errorf("check(%s) = %v, want nil", allowed, err)
+		}
 	}
 }
