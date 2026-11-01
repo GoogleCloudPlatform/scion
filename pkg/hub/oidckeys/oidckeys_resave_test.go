@@ -40,7 +40,7 @@ type oidcResaveRow struct {
 	ref     string
 }
 
-// oidcRow returns the OIDC signing-key backup row.
+// oidcResaveRowOf returns the OIDC signing-key backup row.
 func oidcResaveRowOf(t *testing.T, st store.Store) oidcResaveRow {
 	t.Helper()
 	r, err := st.GetSecret(context.Background(), SecretKeyOIDCSigningKey, store.ScopeHub, oidcCASTestHubID)
