@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -358,8 +359,12 @@ func hubFleetAttention(resp *HealthSummaryResponse) []HealthAttentionItem {
 	for _, c := range resp.Hub.UnhealthyChecks {
 		explained[c.InstanceID] = true
 		msg := "Hub check " + c.Name + " is not healthy on instance " + c.InstanceLabel
-		if c.Name == saAssignCheckName {
+		switch c.Name {
+		case saAssignCheckName:
 			msg = "Service account assignment check cannot run on instance " + c.InstanceLabel
+		case transportProxyHealthCheck:
+			msg = "Runtime brokers cannot connect through the local proxy on instance " + c.InstanceLabel +
+				": set " + config.TrustedProxiesKey + " (see the hub log)"
 		}
 		out = append(out, HealthAttentionItem{
 			Severity: sev, Kind: HealthAttentionHubCheck,

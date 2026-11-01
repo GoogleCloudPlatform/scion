@@ -508,10 +508,11 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 	supersedesQueuedStop := agent.ContainerStatus == containerStatusStopQueued
 	sd := opts.Dispatch
 	callerDeadline, hasCallerDeadline := ctx.Deadline()
-	// stillHeld are the pending config keys a container-creating start left
-	// pending (the provision-rendered keys the agent's broker does not
-	// re-render at start), reported once the start succeeded.
-	var stillHeld []string
+	// stillPending is what a container-creating start's fold left: the
+	// keys held for reincarnation, the keys dropped by the saver re-check
+	// and the keys maintenance mode deferred, reported once the start
+	// succeeded.
+	var stillPending startPendingOutcome
 	// accepted: a broker accepted the start as an asynchronous launch.
 	accepted := false
 	err := s.withStartClaim(ctx, agent, opts.Kind, opts.Existing, func(ctx context.Context, fence func() error) (bool, error) {
@@ -534,12 +535,12 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 		// agent (other than a restart's start leg) keeps the running
 		// container, so its held edits stay held.
 		if createsContainer {
-			held, err := s.foldPendingConfigAtStart(ctx, agent, startFoldTrigger(opts))
+			outcome, err := s.foldPendingConfigAtStart(ctx, agent, startFoldTrigger(opts))
 			if err != nil {
 				sd.rollback(ctx)
 				return false, err
 			}
-			stillHeld = held
+			stillPending = outcome
 		}
 		dctx := ctx
 		if opts.KeepCallerDeadline && hasCallerDeadline {
@@ -619,7 +620,7 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 	}
 	if err == nil || errors.Is(err, errStartedStatusWrite) {
 		s.addEphemeralWorkspaceStartWarning(ctx, agent, hadEphemeral)
-		s.noteHeldForReincarnate(ctx, agent, stillHeld)
+		s.noteStartPendingOutcome(ctx, agent, stillPending)
 	}
 	if supersedesQueuedStop && (err == nil || errors.Is(err, errStartedStatusWrite)) {
 		// A start handed off to an asynchronous launch is still launching:
@@ -737,7 +738,9 @@ func (s *Server) publishAgentStatusByID(ctx context.Context, agentID string) {
 // environment, a credential that could not be issued, a run that could not
 // be begun before the request was sent (errStartRunNotBegun; not when a
 // delete refused the run-ID write, since the delete then owns the row), a
-// broker without the required capability, a create left incomplete, a phase
+// pending config fold that refused the start (errPendingConfigFold; not
+// under a delete either), a broker without the required capability, a
+// create left incomplete, a phase
 // that no longer allows a launch, or a broker that confirmed it did not
 // act. Anything else, including a start that succeeded but whose status
 // write failed, an ambiguous dispatch error, a claim refusal (the earlier
@@ -758,8 +761,21 @@ func startDidNotHappen(err error) bool {
 	var incomplete *AgentCreateIncompleteError
 	return errors.As(err, &quotaErr) || errors.As(err, &stillMissing) || errors.As(err, &tokenErr) ||
 		errors.Is(err, errBrokerLacksEmptyPerAgent) || errors.As(err, &incomplete) ||
-		startRunNotBegunOutsideDelete(err) ||
+		startRunNotBegunOutsideDelete(err) || pendingFoldRefusedOutsideDelete(err) ||
 		errors.Is(err, ErrLaunchInvalidPhase) || isConfirmedStartNotActedOnError(err)
+}
+
+// pendingFoldRefusedOutsideDelete reports whether err is a start refused by
+// its pending config fold (errPendingConfigFold), for a reason other than a
+// delete holding the agent row (store.ErrDeleteInProgress), which then owns
+// the row. The outcome is definitive: the fold returns before any request
+// leaves the hub, and a compare-and-set conflict or a saver that could not
+// be re-checked has already been retried pendingFoldAttempts times inside
+// the fold, so no container was created. Whether to start again is the
+// caller's policy. Both startDidNotHappen and
+// reincarnationStartLeftNoContainer use it.
+func pendingFoldRefusedOutsideDelete(err error) bool {
+	return errors.Is(err, errPendingConfigFold) && !errors.Is(err, store.ErrDeleteInProgress)
 }
 
 // startRunNotBegunOutsideDelete reports whether err is a start whose run
@@ -1126,6 +1142,11 @@ func (s *Server) writeStartClaimError(ctx context.Context, w http.ResponseWriter
 		return true
 	case errors.Is(err, store.ErrClaimPredicate):
 		Conflict(w, "the agent cannot be started now: it is being deleted or reincarnated")
+		return true
+	case errors.Is(err, errPendingReauthIndeterminate):
+		// The fold could not re-check a held edit's saver (a lookup or
+		// authorization fault): nothing was dropped, written or sent.
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "start not sent: "+pendingReauthUnavailableMessage, nil)
 		return true
 	case errors.Is(err, errStartClaimLost):
 		// A delete that won while the start was dispatching (a hard delete

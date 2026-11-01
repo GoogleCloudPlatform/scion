@@ -452,13 +452,13 @@ Windows and exclusions don't stop Compute Engine maintenance, and most control p
 
 ### GCP Identity Modes on Kubernetes
 
-An agent's GCP identity mode decides which Google identity, if any, GCP client libraries in the agent pod use. The mode is resolved by the Hub (the create request, then the project's per-profile default service account, then the project default, then the hub default; see [Hub-Default GCP Identity](/scion/hosted/ha/permissions/#hub-default-gcp-identity)) and applied by the Runtime Broker for the runtime the agent is dispatched to. On the Kubernetes runtime the three modes behave as follows:
+An agent's GCP identity mode decides which Google identity, if any, GCP client libraries in the agent pod use. The mode is resolved by the Hub (the create request, then the project's per-profile default service account, then the project default, then the hub default; see [Hub-Default GCP Identity](/scion/hosted/ha/permissions/#hub-default-gcp-identity)) and applied by the Runtime Broker for the runtime the agent is dispatched to. On the Kubernetes runtime, every agent pod is created with `automountServiceAccountToken: false`, in all three modes (see [Agent pod identity](#agent-pod-identity)). The three modes behave as follows:
 
 | Mode | On the Kubernetes runtime |
 | :--- | :--- |
 | `block` | The pod runs as a zero-privilege identity: the operator's block KSA, or the namespace's `default` KSA when none is configured, with no Kubernetes API token mounted and only on Workload Identity nodes. See **block** below. |
-| `passthrough` | The pod uses whatever identity the cluster gives it, configured outside Scion. The default when no identity is configured (see **No identity configured** below). |
-| `assign` | Uses GKE Workload Identity: the pod runs as a Kubernetes ServiceAccount (KSA) that the operator has bound to the assigned Google service account (GSA). Requires a GSA-to-KSA mapping in the broker's settings. |
+| `passthrough` | The pod uses whatever identity the cluster gives it, configured outside Scion. No Kubernetes API token is mounted. The default when no identity is configured (see **No identity configured** below). |
+| `assign` | Uses GKE Workload Identity: the pod runs as a Kubernetes ServiceAccount (KSA) that the operator has bound to the assigned Google service account (GSA). No Kubernetes API token is mounted. Requires a GSA-to-KSA mapping in the broker's settings. |
 
 #### Setup checklist: give agents a GCP identity
 
@@ -487,7 +487,7 @@ For agents whose identity resolves to `block`, none of the steps above apply. In
 GKE cannot give a single pod no Google identity: on a node pool with Workload Identity, every Kubernetes ServiceAccount (KSA) receives a federated token, with or without a Google service account annotation. On Kubernetes, `block` therefore means a zero-privilege identity. When the mode resolved for a Kubernetes dispatch is `block`, from the request, a project default, a hub default, or an agent's own stored identity, the broker starts the pod with:
 
 - `spec.serviceAccountName` set to the **block KSA** named by `kubernetes_block_service_account`, or, when none is configured, left unset so the pod runs as the namespace's `default` KSA. Either way this replaces any `serviceAccountName` from the agent's saved config.
-- `automountServiceAccountToken: false`, so no Kubernetes API token is mounted. This does not remove the federated Google token.
+- `automountServiceAccountToken: false`, so no Kubernetes API token is mounted. This does not remove the federated Google token. Agent pods in the other modes get the same setting.
 - The node selector `iam.gke.io/gke-metadata-server-enabled: "true"`, merged into any existing node selector, so the pod only schedules on Workload Identity nodes. On a node pool without Workload Identity a pod can use the node's own service account. If no node carries the label, the pod stays `Pending`.
 
 `block` is never replaced by `passthrough`. The agent environment is the same as `block` on other runtimes (`SCION_METADATA_MODE=block`), and no service account email or project ID is set.
@@ -669,7 +669,7 @@ The error details carry the same values as separate fields: `serviceAccount`, `p
 
 There is no fallback: a failed mapping or discovery never runs the pod with the emulator or with the pod's default identity.
 
-**Per-profile default service account.** A project that runs agents on both Kubernetes and other profiles can set a default service account for each Kubernetes profile (`defaultGCPIdentityServiceAccountIDByProfile` in the project settings API). Pick a GSA that has a mapping on that profile. Agents created on that profile with no explicit identity then default to it, instead of a broader project default that has no Workload Identity binding. See [Per-Profile Default Service Accounts](/scion/hosted/ha/permissions/#per-profile-default-service-accounts).
+**Per-profile default service account.** A project that runs agents on both Kubernetes and other profiles can set a default service account for each Kubernetes profile (**Project Settings > Configuration > Auth & Security > Per-profile default service accounts**, or `defaultGCPIdentityServiceAccountIDByProfile` in the project settings API). Pick a GSA that has a mapping on that profile. Agents created on that profile with no explicit identity then default to it, instead of a broader project default that has no Workload Identity binding. See [Per-Profile Default Service Accounts](/scion/hosted/ha/permissions/#per-profile-default-service-accounts).
 
 **Early warning for unmapped service accounts.** The Hub warns, before any dispatch, about a GSA a project's agents can be assigned that no Kubernetes broker profile of the project maps. That covers the project's own service accounts and the hub-scoped ones. The warning appears on:
 
@@ -691,6 +691,8 @@ The warning says a profile maps the GSA, not that the Workload Identity binding 
 #### passthrough
 
 `passthrough` is unchanged on Kubernetes. Scion sets no metadata override, and the pod uses whatever identity the cluster provides: the node's service account, or a KSA bound through Workload Identity that you set up yourself (for example with `serviceAccountName`, as in [GKE Workload Identity](#gke-workload-identity)). Identity is assigned out of band, so Scion does not check which GSA the pod ends up with. An explicit per-agent `passthrough` request goes through the Hub's [passthrough authorization checks](/scion/hosted/ha/permissions/#hub-default-gcp-identity). Use `assign` when you want the Hub to control which GSA an agent gets.
+
+The pod is created with `automountServiceAccountToken: false`, so no Kubernetes API token is mounted. GCP identity through Workload Identity does not depend on that token. See [Agent pod identity](#agent-pod-identity).
 
 #### Example: assign on GKE
 
@@ -769,6 +771,24 @@ Scion communicates directly with the Kubernetes API using the native Go client, 
 To ensure secure execution, Scion enforces the following pod security policies automatically:
 - **Non-Root Execution**: Agent pods run as the unprivileged `scion` user (UID `1000`). `project_storage.nfs.uid` is ignored on Kubernetes; when it is set to a value other than `1000`, the broker logs a warning.
 - **Environment Injection**: Standard environmental variables like `HOME` (`/home/scion`), `USER` (`scion`), and `LOGNAME` (`scion`) are explicitly injected to prevent sandbox escapes and ensure consistent toolchain behavior.
+- **No Kubernetes API Token**: Agent pods are created with `automountServiceAccountToken: false` in every GCP identity mode. See [Agent pod identity](#agent-pod-identity).
+
+### Agent pod identity
+
+Agent pods are created with `automountServiceAccountToken: false` in every GCP identity mode, so no Kubernetes API token is mounted in the pod. Nothing in Scion uses that token from inside the pod. The pod keeps its ServiceAccount, and GCP identity through Workload Identity does not depend on the token.
+
+The agent's Google service account should hold no `container.*` IAM roles. Agent pods in GCP identity mode `passthrough` should run on Workload Identity node pools.
+
+Pods are immutable, so the setting applies from each agent's next start. An agent that was already running when the Runtime Broker was upgraded keeps its current pod until it is restarted. Restart running agents to apply the setting to them.
+
+To list agent pods that do not have `automountServiceAccountToken: false` across all namespaces, run this with your own cluster credentials:
+
+```bash
+kubectl get pods -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{"\t"}{.spec.automountServiceAccountToken}{"\t"}{.spec.containers[*].name}{"\n"}{end}' \
+  | awk -F'\t' '$3 ~ /(^| )agent( |$)/ && $2 != "false"'
+```
+
+It selects pods by their container name, `agent`, not by label. An empty second column means the field is unset. It can also list pods outside Scion that have a container named `agent`, so check each one by name.
 
 ## Reliability & Auto-Recovery
 
@@ -812,7 +832,7 @@ The provisioning init container runs the agent's own image, so an older `scionto
 
 No data is lost in these cases, but to keep the workspace free of provisioning files, make sure every agent of the project runs an image from a release that includes the provisioning state directory.
 
-`mount_root/<share id>` must be the mounted export itself, not a parent of the mount point or an ordinary directory. The Runtime Broker treats it as the export once it exists: if the export is not actually mounted there, the directories are created on the Runtime Broker host's local disk, and the Pod still depends on the kubelet creating them on the export. On a verify-only Runtime Broker (whose default runtime is Kubernetes or Cloud Run, so the platform mounts the export into agent pods), an exact `/proc/mounts` `server:export` string match is advisory (logged as a warning and reported in health when the container's mount source differs in form, such as hostname vs IP or a trailing slash): shared-storage dispatches are admitted when `<mount_root>/<share id>/<subpath_root>` is a visible directory (`503 project_storage_unavailable` when absent) and `<subpath_root>/<project-id>/.scion/project-id` matches the dispatched project (`409` on mismatch).
+`mount_root/<share id>` must be the mounted export itself, not a parent of the mount point or an ordinary directory. The Runtime Broker treats it as the export once it exists: if the export is not actually mounted there, the directories are created on the Runtime Broker host's local disk, and the Pod still depends on the kubelet creating them on the export. On a verify-only Runtime Broker (whose default runtime is Kubernetes or Cloud Run, so the platform mounts the export into agent pods), an exact `/proc/mounts` `server:export` string match is advisory (logged as a warning and reported in health when the container's mount source differs in form, such as hostname vs IP or a trailing slash), and Kubernetes and Cloud Run agent dispatches are not gated on host `nosuid,nodev` flags (unlike local-container runtimes such as Docker, Podman and Apple `container`, which require `nosuid,nodev` on the host NFS mount and any submounts before create, start and restart and return `503 nfs_unavailable` when either flag is missing; see [NFS mounts on the Runtime Broker](/scion/reference/server-config/#nfs-mounts-on-the-runtime-broker)). On a verify-only Runtime Broker, shared-storage dispatches are admitted when `<mount_root>/<share id>/<subpath_root>` is a visible directory (`503 project_storage_unavailable` when absent) and `<subpath_root>/<project-id>/.scion/project-id` matches the dispatched project (`409` on mismatch).
 
 #### Inline NFS volumes (no pv_name)
 
@@ -917,7 +937,7 @@ With [`server.project_storage.homes: nfs`](/scion/reference/server-config/#proje
 - **Export requirements**: the export's group must be the pod group, gid 1000. The home directory is mode 2771 and owned by that group, and the agent writes through the group. A start whose home is not writable by uid 1000 fails with `home_storage_unavailable` and names the requirement.
 - **Creating the home directory** (`homes_options.leaf`):
   - `pod` (default): a `home-leaf` init container in the agent's pod creates it. The container runs as root with only the `CHOWN`, `FOWNER` and `DAC_OVERRIDE` capabilities and mounts only the agent's directory. This needs an export without root squashing; on a squashed export the start fails with `home_leaf_failed`. The Runtime Broker does nothing on its host.
-  - `broker`: the Runtime Broker creates it through its own mount of the export at `nfs.mount_root` (for example an fstab entry with `nofail`). This works on root-squashed and all-squashed exports. The mount is checked only when an agent using it starts; a missing mount fails that start with `home_storage_unavailable` and never affects Runtime Broker startup or agents on other runtimes.
+  - `broker`: the Runtime Broker creates it through its own mount of the export at `nfs.mount_root` (for example an fstab entry with `nosuid,nodev,nofail`). This works on root-squashed and all-squashed exports. The mount is checked only when an agent using it starts; a missing mount fails that start with `home_storage_unavailable` and never affects Runtime Broker startup or agents on other runtimes.
 - **Each start**: a `home-prepare` init container (uid 1000) checks the home and its sentinel file `.scion-home-seed.json`. A new home is seeded once: the image's own home directory is copied if it is smaller than `skeleton_max_bytes`, then the Runtime Broker's copy of the agent home is transferred. Later starts transfer the Runtime Broker's copy over the existing home and clear `.scion/hooks` first. A home with content but no sentinel, or one belonging to another agent, fails the start without changes.
 - **Secrets**: staged secret and auth files stay in memory or read-only volumes under `/run/scion`. In the home they appear as symbolic links, so their content is never written to the export. A file, link or directory the user put at a link target that scion never linked, or a symbolic link in its parent path, is kept and the link is skipped with a warning. If `.scion` or `.scion/hooks` in the home is a symbolic link, the start fails rather than transferring through it. `SCION_SECRETS_FILE` points at the staged `secrets.json`. The harness's own staged secrets are copied into memory only (`SCION_HARNESS_SECRETS_DIR`), never into the home, and its generated outputs are written to memory too.
 - **Images**: the image's sciontool must support NFS homes (`sciontool version --features` lists `home-v1`); older images fail with a message saying so.

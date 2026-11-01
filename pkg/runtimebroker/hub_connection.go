@@ -147,6 +147,9 @@ type HubConnection struct {
 	// the control channel with its own lifecycle (conduit_dial.go).
 	conduitCancel context.CancelFunc
 	conduitWg     sync.WaitGroup
+	// conduitDialer is the running conduit dialer (nil when none), read for
+	// the broker's health checks. Guarded by mu.
+	conduitDialer *ConduitDialer
 	// conduitExitHook, when set, runs on the dialer goroutine after the
 	// dialer returned, before the goroutine ends (tests only).
 	conduitExitHook func()

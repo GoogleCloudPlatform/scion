@@ -10,6 +10,10 @@ Scion now mounts repository git metadata into agents read-only with a private, c
 
 [Read the full release notes for this week ->](/scion/release-notes/2026-10-19/)
 
+## Kubernetes agent pods no longer mount a Kubernetes API token
+
+Kubernetes agent pods no longer mount a Kubernetes API token. Restart running agents to apply this to them. To list agent pods that still have a token across all namespaces, see [Agent pod identity](/scion/hosted/ha/kubernetes/#agent-pod-identity).
+
 ## Agents created from a user access token receive shared secrets and launch material again
 
 An agent created from a user access token now receives your user-scoped secrets shared with progeny (`--allow-progeny`) at create, start, resume, restart and `as_needed` resolution, as an agent created from a sign-in does. Since the start-time user-secret check, such agents started without them, for example without harness credentials or personal tokens ([miller79/scion#202](https://github.com/miller79/scion/issues/202)). The agent-only permissions `secret.deliver`, `env_var.deliver`, `skill_injection.deliver` and `secret.use` are now intrinsic to the agent's token-recorded edge: the token's scopes do not narrow them, and no token scope is added for them ([ptone/scion#6467](https://github.com/ptone/scion/issues/6467); the decision that `secret.use` gets no selector is recorded on [ptone/scion#2340](https://github.com/ptone/scion/issues/2340)). This applies to existing agents at their next start, with no migration. Every other check on each item still applies, and runtime secret reads and the full agent role still need `project:secret:read`, which no token grants.

@@ -367,7 +367,16 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 		}
 	}
 
-	err := ops.DeleteSection(r.Context(), sectionName)
+	var err error
+	if sectionName == "runtimes" || sectionName == "profiles" {
+		// The pair the reset leaves is validated and the delete guarded
+		// (resetPlacementSection); it writes its own error responses.
+		if !s.resetPlacementSection(r.Context(), w, ops, sectionName) {
+			return
+		}
+	} else {
+		err = ops.DeleteSection(r.Context(), sectionName)
+	}
 	if publicURLBefore != "" && err != nil {
 		s.auditPublicURLNotApplied(r.Context(), gcpIAMSurfaceReset, publicURLBefore, "", err)
 	}

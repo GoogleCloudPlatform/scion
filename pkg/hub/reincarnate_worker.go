@@ -1058,9 +1058,13 @@ const reincarnationRerenderTimeout = 5 * time.Minute
 // delete owns the agent row then, so no rollback or re-render may write it.
 // During a hub shutdown the rollback's own dispatches (the target delete,
 // the re-render) are best effort and normally refused by the same gate;
-// the agent row is still rolled back or failed consistently.
+// the agent row is still rolled back or failed consistently. A pending
+// config fold refused before the dispatch (errPendingConfigFold,
+// pendingFoldRefusedOutsideDelete) is definitive for the same reason; the
+// reincarnation start does not fold pending config until ptone/scion#3978,
+// so that branch is defensive for now.
 func reincarnationStartLeftNoContainer(err error) bool {
-	if startRunNotBegunOutsideDelete(err) || errors.Is(err, ErrHubShuttingDown) {
+	if startRunNotBegunOutsideDelete(err) || pendingFoldRefusedOutsideDelete(err) || errors.Is(err, ErrHubShuttingDown) {
 		return true
 	}
 	return isConfirmedStartNotActedOnError(err) && !brokerStartAttempted(err)
