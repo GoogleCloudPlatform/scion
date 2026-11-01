@@ -399,7 +399,11 @@ A harness-config without a provisioner that declares a `ready` or `delivery` blo
 `config_dir`: its `ready` block is used, its `instructions_file`, `system_prompt_file` and
 `system_prompt_mode` (or the declarative defaults for instructions and system prompts) apply when
 the agent is provisioned, and the harness reports its `harness` type as its name instead of
-`generic`. A `ready` block taken from the built-in bundle does not have this effect. Message
+`generic`. `instructions_file` and `system_prompt_file` must be relative paths inside the Agent
+home (no absolute paths or `..`): every read and write goes through a directory handle confined to
+the Agent home (`pkg/agenthome`), refusing any path that leaves the Agent home or traverses a
+symlinked directory component and replacing any symlink at the target file rather than writing
+through it. A `ready` block taken from the built-in bundle does not have this effect. Message
 delivery and interrupts still use the built-in bundle for the `harness` type (the defaults for a
 type with no bundle), so a custom `delivery` block, `interrupt_key` and `interrupt_sequence` do
 not yet change how messages are submitted or interrupted.

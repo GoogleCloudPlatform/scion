@@ -273,6 +273,24 @@ The `profiling` section holds operational switches for in-app profiling. It is s
 - **In the web client:** while it is on, the page shell's initial data carries `"readinessMarks": true` for a signed-in user, the same value that user reads from `GET /api/v1/profiling`. Signed-out pages, and every page while it is off, are served exactly as without the setting. The client reads the value once per page load, so a change applies on the next full load.
 - Off, the client makes no `performance.mark` calls and the server adds nothing to the shell.
 
+## Chat Retention
+
+The `chat_retention` section configures automatic age-based deletion of chat messages. Like `profiling`, it is stored only in the Hub database (no `settings.yaml` key, no environment variable, and no seed), and is gated by the [`hub.chat_retention`](/scion/reference/experiments/#server-experiments-with-notes) experiment (off by default). Both the `hub.chat_retention` experiment and `chat_retention.enabled` must be on before any messages are deleted.
+
+:::caution[Back up the database before enabling]
+Chat retention permanently deletes chat messages older than `messages_retention_days` along with their message-bound attachments and notifications. Take and verify a database backup before enabling `hub.chat_retention` and `chat_retention.enabled`.
+:::
+
+| Key | Type | Default | Constraints | Effect |
+|-----|------|---------|-------------|--------|
+| `enabled` | boolean | `false` | — | Enables the background retention sweep while the `hub.chat_retention` experiment is on. |
+| `messages_retention_days` | integer | `90` | `7`–`36500` | Age threshold in days. Messages with `created_at` older than this window are deleted in batches; thread records and thread membership are kept. Values below `7` or above `36500` are rejected (`400`). |
+| `sweep.interval_seconds` | integer | `3600` | `60`–`86400` | Optional interval between background sweep runs. |
+| `sweep.batch_size` | integer | `1000` | `10`–`10000` | Optional maximum messages deleted per batch. |
+| `sweep.max_batches_per_run` | integer | `50` | `1`–`500` | Optional maximum batches processed in a single sweep run. |
+
+- **Reading and changing it:** `GET /api/v1/admin/chat-retention` and `PUT /api/v1/admin/chat-retention` (or the **Chat Retention** card in Admin → Server Config when `hub.chat_retention` is enabled). Reading requires `hub.config.read` and updating requires `hub.config.write` on an interactive session or dev credential (user access tokens are refused). When `hub.chat_retention` is off, `PUT /api/v1/admin/chat-retention` returns `404 experiment_disabled`.
+
 ## HA Bootstrap Guidance
 
 For high-availability deployments with multiple hub replicas:

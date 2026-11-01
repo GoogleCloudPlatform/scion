@@ -34,10 +34,10 @@ Only `scion-agent.yaml` is required for Scion to recognize the directory as a te
 
 The config file drives the role. Fields that point at content — `agent_instructions`, `system_prompt` — accept **either a filename** (resolved relative to the template directory) **or inline text**. The convention is to keep prose in separate `.md` files:
 
-- A single-line value names a file. It must be a relative path inside the template directory (no absolute path, no `..`). If no template in the chain has that file, the value is used as inline text.
+- A single-line value names a file. It must be a relative path inside the template directory (no absolute path, no `..`, and no leading `-` or path component starting with `.` such as `.scion`). Only when no template in the chain has that path is the value used as inline text; if the path exists in a template in the chain and cannot be read as a valid content file, loading the template fails with an error instead of treating the path as inline text.
 - A value with a line break is always inline text.
-- A content file must be a regular file of at most 4 MiB, reached without a symbolic link. A symbolic link at the file or at any directory on its path is refused with an error; replace it with the file or directory itself.
-- The same rules apply when Scion picks up `agents.md` or `system-prompt.md` by convention; a linked file is not picked up.
+- A content file must be a plain regular file of at most 4 MiB inside the template directory, with a link count of 1 (not a hard link) and reached without following a symbolic link. A symbolic link at the file or at any directory on its path, a hard-linked file, a directory or special file, a file over 4 MiB, or an unreadable file is refused with an error; copy the content into a regular file inside the template directory or inline it in `scion-agent.yaml`.
+- The same rules apply when Scion picks up `agents.md` or `system-prompt.md` by convention; a symlinked, hard-linked, oversized, or non-regular file at either conventional name is refused.
 
 ```yaml
 schema_version: "1"
