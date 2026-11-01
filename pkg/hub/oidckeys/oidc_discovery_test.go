@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hub
+package oidckeys
 
 import (
 	"net/http"
@@ -36,7 +36,7 @@ func TestDiscoverJWKSURL_ValidDiscovery(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	jwksURL, err := discoverJWKSURL(srv.URL, client, false)
+	jwksURL, err := DiscoverJWKSURL(srv.URL, client, false)
 	if err != nil {
 		t.Fatalf("expected success, got error: %v", err)
 	}
@@ -54,7 +54,7 @@ func TestDiscoverJWKSURL_MissingJWKSURI(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	_, err := discoverJWKSURL(srv.URL, client, false)
+	_, err := DiscoverJWKSURL(srv.URL, client, false)
 	if err == nil {
 		t.Fatal("expected error for missing jwks_uri, got nil")
 	}
@@ -71,7 +71,7 @@ func TestDiscoverJWKSURL_Non200Status(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	_, err := discoverJWKSURL(srv.URL, client, false)
+	_, err := DiscoverJWKSURL(srv.URL, client, false)
 	if err == nil {
 		t.Fatal("expected error for non-200 status, got nil")
 	}
@@ -89,7 +89,7 @@ func TestDiscoverJWKSURL_InvalidJSON(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	_, err := discoverJWKSURL(srv.URL, client, false)
+	_, err := DiscoverJWKSURL(srv.URL, client, false)
 	if err == nil {
 		t.Fatal("expected error for invalid JSON, got nil")
 	}
@@ -101,7 +101,7 @@ func TestDiscoverJWKSURL_InvalidJSON(t *testing.T) {
 // Test 5: Network error — use an unreachable URL, function returns error
 func TestDiscoverJWKSURL_NetworkError(t *testing.T) {
 	client := &http.Client{Timeout: 1 * time.Second}
-	_, err := discoverJWKSURL("http://127.0.0.1:1", client, false)
+	_, err := DiscoverJWKSURL("http://127.0.0.1:1", client, false)
 	if err == nil {
 		t.Fatal("expected error for network error, got nil")
 	}
@@ -127,7 +127,7 @@ func TestDiscoverJWKSURL_TrailingSlashNormalization(t *testing.T) {
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	// Issuer URL with trailing slash
-	jwksURL, err := discoverJWKSURL(srv.URL+"/", client, false)
+	jwksURL, err := DiscoverJWKSURL(srv.URL+"/", client, false)
 	if err != nil {
 		t.Fatalf("expected success with trailing slash, got error: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestDiscoverJWKSURL_RequireHTTPS_RejectsHTTP(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	_, err := discoverJWKSURL(srv.URL, client, true)
+	_, err := DiscoverJWKSURL(srv.URL, client, true)
 	if err == nil {
 		t.Fatal("expected error for HTTP jwks_uri with requireHTTPS=true, got nil")
 	}
@@ -164,7 +164,7 @@ func TestDiscoverJWKSURL_RequireHTTPS_AcceptsHTTPS(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	jwksURL, err := discoverJWKSURL(srv.URL, client, true)
+	jwksURL, err := DiscoverJWKSURL(srv.URL, client, true)
 	if err != nil {
 		t.Fatalf("expected success for HTTPS jwks_uri with requireHTTPS=true, got error: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestDiscoverJWKSURL_RequireHTTPS_AcceptsHTTPS(t *testing.T) {
 	}
 }
 
-// --- Tests for discoverOIDCEndpoints ---
+// --- Tests for DiscoverOIDCEndpoints ---
 
 func TestDiscoverOIDCEndpoints_ValidDiscovery(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -193,7 +193,7 @@ func TestDiscoverOIDCEndpoints_ValidDiscovery(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	doc, err := discoverOIDCEndpoints(srv.URL, client)
+	doc, err := DiscoverOIDCEndpoints(srv.URL, client)
 	if err != nil {
 		t.Fatalf("expected success, got error: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestDiscoverOIDCEndpoints_MissingAuthorizationEndpoint(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	_, err := discoverOIDCEndpoints(srv.URL, client)
+	_, err := DiscoverOIDCEndpoints(srv.URL, client)
 	if err == nil {
 		t.Fatal("expected error for missing authorization_endpoint, got nil")
 	}
@@ -247,7 +247,7 @@ func TestDiscoverOIDCEndpoints_MissingTokenEndpoint(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	_, err := discoverOIDCEndpoints(srv.URL, client)
+	_, err := DiscoverOIDCEndpoints(srv.URL, client)
 	if err == nil {
 		t.Fatal("expected error for missing token_endpoint, got nil")
 	}
@@ -268,7 +268,7 @@ func TestDiscoverOIDCEndpoints_MissingUserinfoEndpoint(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	_, err := discoverOIDCEndpoints(srv.URL, client)
+	_, err := DiscoverOIDCEndpoints(srv.URL, client)
 	if err == nil {
 		t.Fatal("expected error for missing userinfo_endpoint, got nil")
 	}
@@ -284,7 +284,7 @@ func TestDiscoverOIDCEndpoints_Non200Status(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	_, err := discoverOIDCEndpoints(srv.URL, client)
+	_, err := DiscoverOIDCEndpoints(srv.URL, client)
 	if err == nil {
 		t.Fatal("expected error for non-200 status, got nil")
 	}
@@ -301,7 +301,7 @@ func TestDiscoverOIDCEndpoints_InvalidJSON(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	_, err := discoverOIDCEndpoints(srv.URL, client)
+	_, err := DiscoverOIDCEndpoints(srv.URL, client)
 	if err == nil {
 		t.Fatal("expected error for invalid JSON, got nil")
 	}
@@ -328,7 +328,7 @@ func TestDiscoverOIDCEndpoints_TrailingSlashNormalization(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	doc, err := discoverOIDCEndpoints(srv.URL+"/", client)
+	doc, err := DiscoverOIDCEndpoints(srv.URL+"/", client)
 	if err != nil {
 		t.Fatalf("expected success with trailing slash, got error: %v", err)
 	}
@@ -339,7 +339,7 @@ func TestDiscoverOIDCEndpoints_TrailingSlashNormalization(t *testing.T) {
 
 func TestDiscoverOIDCEndpoints_NetworkError(t *testing.T) {
 	client := &http.Client{Timeout: 1 * time.Second}
-	_, err := discoverOIDCEndpoints("http://127.0.0.1:1", client)
+	_, err := DiscoverOIDCEndpoints("http://127.0.0.1:1", client)
 	if err == nil {
 		t.Fatal("expected error for network error, got nil")
 	}
@@ -363,7 +363,7 @@ func TestDiscoverOIDCEndpoints_RejectsHTTPEndpoints(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	_, err := discoverOIDCEndpoints(srv.URL, client)
+	_, err := DiscoverOIDCEndpoints(srv.URL, client)
 	if err == nil {
 		t.Fatal("expected error for HTTP authorization_endpoint, got nil")
 	}
@@ -385,7 +385,7 @@ func TestDiscoverOIDCEndpoints_AllowsHTTPLocalhostEndpoints(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	doc, err := discoverOIDCEndpoints(srv.URL, client)
+	doc, err := DiscoverOIDCEndpoints(srv.URL, client)
 	if err != nil {
 		t.Fatalf("expected success for localhost HTTP endpoints, got error: %v", err)
 	}

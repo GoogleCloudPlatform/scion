@@ -91,8 +91,9 @@ var LeakGuardSignatures = []string{
 	"hub.(*PreviewService).cleanupNonces",
 	"hub.(*NonceCache).cleanup",
 	// OIDC key cleanup/refresh loops, which run on the server-lifetime
-	// context and stop on Shutdown (ptone/scion#3641).
-	"hub.(*OIDCKeyManager).Start",
+	// context and stop on Shutdown (ptone/scion#3641). The key manager
+	// lives in pkg/hub/oidckeys.
+	"oidckeys.(*OIDCKeyManager).Start",
 }
 
 // LeakGuardStoreSignature and LeakGuardStoreDiagSignature are the

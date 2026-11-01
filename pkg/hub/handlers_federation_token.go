@@ -31,14 +31,6 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 )
 
-// Token kinds carried in the scion_token_kind claim of tokens signed with
-// the hub's OIDC key, so a receiving hub tells a user access credential for
-// a peer hub from an agent identity token by an explicit claim.
-const (
-	tokenKindUser  = "user"
-	tokenKindAgent = "agent"
-)
-
 // permissionFederationTokenMint is the self permission a user access token
 // needs to obtain a user access credential for a peer hub.
 const permissionFederationTokenMint = "federation_token.mint"

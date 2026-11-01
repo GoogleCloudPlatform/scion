@@ -2262,6 +2262,9 @@ type Server struct {
 	oidcIssuerURL        string
 	oidcTokenRateLimiter *GCPTokenRateLimiter // per-agent rate limiter for OIDC identity token requests
 	oidcTokenLifetime    time.Duration        // validity duration for OIDC identity tokens
+	// oidcHandlers serves the OIDC endpoints over a live view of this
+	// server (deps_oidckeys.go); set in New before registerRoutes.
+	oidcHandlers *OIDCHandlers
 
 	// GCP token generator for agent identity (nil = GCP identity disabled)
 	gcpTokenGenerator GCPTokenGenerator
@@ -3638,6 +3641,8 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 
 	srv.experiments = cfg.Experiments
 
+	srv.oidcHandlers = NewOIDCHandlers(oidcDeps{srv})
+
 	srv.registerRoutes()
 
 	return srv, nil
@@ -4104,8 +4109,9 @@ func logSigningKeyFailure(keyType string, err error) {
 // EncryptedValue is updated — the SecretRef is preserved so the UI and other consumers
 // can see that the secret is backed by Secret Manager.
 //
-// It refuses (errExistingRecordUnreadable) to overwrite an existing record
-// that is unreadable with the configured keys (ptone/scion#1530 §5).
+// It refuses (keymaterial.ErrExistingRecordUnreadable) to overwrite an
+// existing record that is unreadable with the configured keys
+// (ptone/scion#1530 §5).
 func (s *Server) backupSigningKeyToStore(ctx context.Context, keyName, encodedValue, hubID string) error {
 	if err := s.guardBackupOverwrite(ctx, keyName, store.ScopeHub, hubID); err != nil {
 		return err
@@ -7835,9 +7841,10 @@ func (s *Server) registerRoutes() {
 
 	// OIDC Identity Provider endpoints (unauthenticated — public metadata)
 	if s.oidcKeyManager != nil {
-		s.mux.HandleFunc("GET /.well-known/openid-configuration", s.guarded("GET /.well-known/openid-configuration", s.handleOIDCDiscovery))
-		s.mux.HandleFunc("GET /.well-known/jwks.json", s.guarded("GET /.well-known/jwks.json", s.handleJWKS))
-		s.mux.HandleFunc("POST /api/v1/agent/identity-token", s.guarded("POST /api/v1/agent/identity-token", s.handleAgentIdentityToken))
+		oidc := s.oidcArea()
+		s.mux.HandleFunc("GET /.well-known/openid-configuration", s.guarded("GET /.well-known/openid-configuration", oidc.HandleOIDCDiscovery))
+		s.mux.HandleFunc("GET /.well-known/jwks.json", s.guarded("GET /.well-known/jwks.json", oidc.HandleJWKS))
+		s.mux.HandleFunc("POST /api/v1/agent/identity-token", s.guarded("POST /api/v1/agent/identity-token", oidc.HandleAgentIdentityToken))
 	}
 
 	// Workstation-only filesystem endpoints: declarative guard enforces workstation token.

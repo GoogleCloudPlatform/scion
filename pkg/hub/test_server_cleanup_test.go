@@ -162,7 +162,7 @@ func TestTestServerCleanupStopsBackgroundGoroutines(t *testing.T) {
 		// context.Background() and outlive Shutdown (ptone/scion#3641).
 		"newTestHubServer/oidc": {
 			newServer: func(t *testing.T) (*Server, store.Store) { return testOIDCServerWithRoutes(t), nil },
-			extra:     map[string]int{"hub.(*OIDCKeyManager).Start": 2},
+			extra:     map[string]int{"oidckeys.(*OIDCKeyManager).Start": 2},
 		},
 	} {
 		newServer := tc.newServer
