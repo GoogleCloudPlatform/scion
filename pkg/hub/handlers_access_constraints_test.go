@@ -25,7 +25,6 @@ import (
 	"go/token"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -671,12 +670,14 @@ func TestB7_GovernanceErrorStatus(t *testing.T) {
 }
 
 // TestB7_PreviewTokenCodes_SameStatusOnCommitPath pins that every preview
-// token error code (each ErrCodePreview* constant declared in the package's
-// non-test sources) answers the same status on the governance commit path as
-// on the token error path, and never 500, so a new code cannot be left out
-// of governanceErrorStatus.
+// token error code (each ErrCodePreview* constant declared in the non-test
+// sources of pkg/hub and its guard-scanned areas) answers the same status on
+// the governance commit path as on the token error path, and never 500, so a
+// new code cannot be left out of governanceErrorStatus.
 func TestB7_PreviewTokenCodes_SameStatusOnCommitPath(t *testing.T) {
-	files, err := filepath.Glob("*.go")
+	// pkgmove:scan-covers guardScanSubdirs
+	// scanned through guardScanSubdirs: finds the ErrCodePreview* constants wherever they are declared.
+	files, err := globGuardScanDirs(".", "*.go")
 	require.NoError(t, err)
 	fset := token.NewFileSet()
 	codes := map[string]string{}
