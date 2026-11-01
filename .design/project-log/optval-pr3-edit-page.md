@@ -1,7 +1,7 @@
 # Optional count limits: the agent Edit page
 
 **Date:** 2026-10-31
-**Branch:** scion/dev-optval
+**Branch:** scion/agent-edit-3
 **Design:** optional typed values for count and resource limits, section 6 (Edit page)
 
 ## Problem
