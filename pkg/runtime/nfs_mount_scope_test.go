@@ -89,7 +89,7 @@ func scopeRel(elems ...string) string {
 func mountScopeViolation(rel string) string {
 	rel = path.Clean("/" + rel)[1:] // "" for the export root
 	projectRoot := scopeRel()
-	config := scopeRel(projectfs.ProjectConfigDirName)
+	projectConfigDir := scopeRel(projectfs.ProjectConfigDirName)
 	switch {
 	case rel == "":
 		return "the export root"
@@ -97,7 +97,7 @@ func mountScopeViolation(rel string) string {
 		return "the project root"
 	case strings.HasPrefix(projectRoot, rel+"/"):
 		return "a parent of the project root"
-	case rel == config || strings.HasPrefix(rel, config+"/"):
+	case rel == projectConfigDir || strings.HasPrefix(rel, projectConfigDir+"/"):
 		return "the project configuration directory or a path under it"
 	case rel == scopeRel("agents"):
 		return "the parent of every agent directory"
@@ -593,7 +593,7 @@ func TestCloudRunInstance_NFSMountScope(t *testing.T) {
 		}
 	}
 	// Every mode gets the same set today. For clone-per-agent that is the
-	// project workspace; #6926 moves it to a per-agent workspace, which
+	// project workspace; ptone/scion#6926 moves it to a per-agent workspace, which
 	// will change its expected set on purpose.
 	for _, mode := range []string{"shared-plain", "clone-per-agent", "worktree-per-agent"} {
 		t.Run(mode, func(t *testing.T) {

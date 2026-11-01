@@ -809,6 +809,15 @@ func cloudRunNFSExportPaths(nfsExport, subPathRoot, projectID, slug, agentID str
 		if err := validateUnixPathBelowRoot(p, exportRoot); err != nil {
 			return nil, fmt.Errorf("cloudrun: invalid NFS %s path: %w", name, err)
 		}
+		// The instance mounts these directories of the share; none may be
+		// the project root or its configuration directory
+		// (checkNFSMountScope). Defense in depth: the inputs validated
+		// above (project and agent IDs, the slug through the layout) cannot
+		// produce such a path today.
+		rel := strings.TrimPrefix(strings.TrimPrefix(p, exportRoot), "/")
+		if err := checkNFSMountScope(rel, root, projectID); err != nil {
+			return nil, fmt.Errorf("cloudrun: NFS %s volume: %w", name, err)
+		}
 	}
 	return paths, nil
 }

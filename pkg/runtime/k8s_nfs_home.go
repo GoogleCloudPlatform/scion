@@ -438,6 +438,14 @@ func (r *KubernetesRuntime) nfsHomePodSpec(config RunConfig, containerHome strin
 	if err != nil {
 		return parts, err
 	}
+	// Defense in depth: NFSHomeSubPaths validates every component and takes
+	// the paths from the layout, so no accepted input reaches a refusal
+	// here today.
+	for _, sub := range []string{agentDir, home} {
+		if err := checkNFSMountScope(sub, hs.SubPathRoot, hs.ProjectID); err != nil {
+			return parts, fmt.Errorf("NFS home: %w", err)
+		}
+	}
 	if hs.GID <= 0 {
 		return parts, fmt.Errorf("home storage %q needs the export group", HomeStorageNFS)
 	}

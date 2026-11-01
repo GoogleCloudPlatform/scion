@@ -194,6 +194,7 @@ func TestBuildPod_NFSHomeBrokerLeafAndSharedClaim(t *testing.T) {
 	cfg.WorkspaceBackendName = "nfs"
 	cfg.NFSPVClaimName = "home-pvc"
 	cfg.NFSSubPath = "projects/" + testHomeProjectID + "/workspace"
+	cfg.ProjectID = testHomeProjectID
 	cfg.HomeStorage.StopGraceSeconds = 45
 	pod, err := rt.buildPod("default", cfg)
 	if err != nil {
@@ -1113,6 +1114,7 @@ func TestBuildPod_NFSHomeClonePerAgentSharedClaim(t *testing.T) {
 	cfg.WorkspaceBackendName = "nfs"
 	cfg.NFSPVClaimName = "home-pvc"
 	cfg.NFSSubPath = "projects/" + testHomeProjectID + "/workspace"
+	cfg.ProjectID = testHomeProjectID
 	cfg.NFSAgentDirName = "a"
 	pod, err := rt.buildPod("default", cfg)
 	if err != nil {
