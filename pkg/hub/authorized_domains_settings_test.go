@@ -682,3 +682,19 @@ func TestResetAccessSection_AuthorizedDomainsLockout(t *testing.T) {
 		}
 	})
 }
+
+// A nil OperationalSettings refuses the access reset (fail closed) rather
+// than skipping the check. The reset handler already refuses such a hub
+// before the check (handleAdminServerConfigSectionReset), so this pins the
+// helper on its own.
+func TestRejectAccessResetLockout_NilOpsRefuses(t *testing.T) {
+	srv := &Server{}
+	ctx := contextWithIdentity(context.Background(), NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli"))
+	rr := httptest.NewRecorder()
+	if !srv.rejectAccessResetLockout(ctx, rr, nil) {
+		t.Fatal("rejectAccessResetLockout(nil ops) = false, want a refusal")
+	}
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400: %s", rr.Code, rr.Body.String())
+	}
+}

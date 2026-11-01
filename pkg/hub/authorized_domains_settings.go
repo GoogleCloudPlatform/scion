@@ -243,9 +243,17 @@ func (s *Server) rejectFileAccessLockout(w http.ResponseWriter, r *http.Request,
 // the bootstrap list, else the startup list (and, on a node that pins the
 // list, the pinned list as well); admin_emails from the bootstrap list,
 // else the running one. The test identity clamp applies. A bootstrap
-// section that cannot be read refuses the reset. Nothing is deleted when it
-// refuses.
+// section that cannot be read, or a nil ops, refuses the reset. Nothing is
+// deleted when it refuses.
 func (s *Server) rejectAccessResetLockout(ctx context.Context, w http.ResponseWriter, ops *OperationalSettings) bool {
+	if ops == nil {
+		// The reset handler refuses a hub without OperationalSettings
+		// before it gets here; a nil ops still refuses the reset (fail
+		// closed), it never skips the check.
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+			"Section reset requires DB-backed operational settings", nil)
+		return true
+	}
 	var boot opsettings.AccessSettings
 	if ops.bootstrapKoanf != nil {
 		doc, err := opsettings.ExtractSectionFromKoanf(ops.bootstrapKoanf, "access")
