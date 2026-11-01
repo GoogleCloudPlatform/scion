@@ -782,7 +782,9 @@ func installColocatedSettingsOverlay(cfg *config.GlobalConfig, hubSrv *hub.Serve
 		// this install). A concurrent apply of a newer snapshot can be
 		// overwritten by this one until the next settings change, as for the
 		// maps before; maps and findings stay one snapshot, so it never
-		// fails open.
+		// fails open. The seed does not take the Hub's settings apply lock,
+		// which is unexported Hub state that only a new Hub API could
+		// expose.
 		hub.UpdateSettingsOverlay(overlay, snap)
 		// Removed storage overrides in the stored runtimes and profiles are
 		// reported, not refused: they are fixed through the admin settings

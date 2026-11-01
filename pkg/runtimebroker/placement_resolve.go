@@ -122,9 +122,10 @@ func (s *Server) placementForStart(ctx context.Context, res runtimeResolution, p
 	return operatorOwnedPlacement(rp), nil
 }
 
-// placementGlobalLoadedHook, when set (tests only), runs in resolvePlacement
-// right after the global settings (with the Hub overlay) are loaded.
-var placementGlobalLoadedHook func()
+// testHookPlacementAfterGlobalLoad, when set (tests only), runs in
+// resolvePlacement right after the global settings (with the Hub overlay)
+// are loaded.
+var testHookPlacementAfterGlobalLoad func()
 
 // operatorOwnedPlacement returns legacy placement rp (nil: none) as
 // operator-owned placement, a fresh value that leaves rp unchanged.
@@ -164,8 +165,8 @@ func (s *Server) resolvePlacement(ctx context.Context, res runtimeResolution, pr
 
 	// Step 2: the global settings, failing closed.
 	gvs, _, err := config.LoadGlobalSettingsWithOverlayFor(ctx)
-	if placementGlobalLoadedHook != nil {
-		placementGlobalLoadedHook()
+	if testHookPlacementAfterGlobalLoad != nil {
+		testHookPlacementAfterGlobalLoad()
 	}
 	if err != nil {
 		s.agentLifecycleLog.Warn("Kubernetes placement: global settings could not be read", "agent", res.Agent, "error", err)

@@ -314,8 +314,8 @@ func TestPlacementFindingsComeFromTheLoadedSettings(t *testing.T) {
 			o := config.NewSettingsOverlay()
 			o.UpdateWithPlacementFindings(entries, nil, nil, tc.before, nil)
 			config.SetGlobalSettingsOverlay(o)
-			placementGlobalLoadedHook = func() { o.UpdateWithPlacementFindings(entries, nil, nil, tc.after, nil) }
-			t.Cleanup(func() { placementGlobalLoadedHook = nil })
+			testHookPlacementAfterGlobalLoad = func() { o.UpdateWithPlacementFindings(entries, nil, nil, tc.after, nil) }
+			t.Cleanup(func() { testHookPlacementAfterGlobalLoad = nil })
 
 			_, err := f.srv.resolvePlacement(context.Background(), f.res(resolutionForced, "", ""), nil)
 			if tc.refused {
