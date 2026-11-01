@@ -625,18 +625,18 @@ func serverConfigForMaskTest() config.V1ServerConfig {
 }
 
 // Design D6: file-mode PUT rejects default_user_role values outside the
-// schema enum with 400 and writes nothing.
+// schema enum with 422 and writes nothing.
 func TestHandlePutServerConfig_DefaultUserRole_InvalidRejected(t *testing.T) {
 	for _, v := range []string{"superuser", "admin", "Viewer"} {
 		t.Run(v, func(t *testing.T) {
 			srv := &Server{}
 			rr, settingsPath := fileModePutServerConfig(t, srv,
 				`{"server":{"auth":{"default_user_role":"`+v+`"}}}`)
-			if rr.Code != http.StatusBadRequest {
-				t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+			if rr.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
 			}
 			if !strings.Contains(rr.Body.String(), "default_user_role") {
-				t.Errorf("400 body should name default_user_role, got: %s", rr.Body.String())
+				t.Errorf("422 body should name default_user_role, got: %s", rr.Body.String())
 			}
 			if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
 				data, _ := os.ReadFile(settingsPath)
@@ -1014,11 +1014,11 @@ func TestHandlePutServerConfig_SharedDirSize_InvalidRejected(t *testing.T) {
 		t.Run(key, func(t *testing.T) {
 			srv := &Server{}
 			rr, settingsPath := fileModePutServerConfig(t, srv, body)
-			if rr.Code != http.StatusBadRequest {
-				t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+			if rr.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
 			}
 			if !strings.Contains(rr.Body.String(), key) {
-				t.Errorf("400 body should name %s, got: %s", key, rr.Body.String())
+				t.Errorf("422 body should name %s, got: %s", key, rr.Body.String())
 			}
 			if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
 				data, _ := os.ReadFile(settingsPath)
@@ -1057,11 +1057,11 @@ func TestHandlePutServerConfig_RemovedStorageOverridesRejected(t *testing.T) {
 		t.Run(key, func(t *testing.T) {
 			srv := &Server{}
 			rr, settingsPath := fileModePutServerConfig(t, srv, body)
-			if rr.Code != http.StatusBadRequest {
-				t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+			if rr.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
 			}
 			if !strings.Contains(rr.Body.String(), key) || !strings.Contains(rr.Body.String(), "volumes:") {
-				t.Errorf("400 body should name %s and volumes:, got: %s", key, rr.Body.String())
+				t.Errorf("422 body should name %s and volumes:, got: %s", key, rr.Body.String())
 			}
 			if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
 				data, _ := os.ReadFile(settingsPath)
@@ -1082,11 +1082,11 @@ func TestHandlePutServerConfig_SharedDirStorageBackend_InvalidRejected(t *testin
 		t.Run(key, func(t *testing.T) {
 			srv := &Server{}
 			rr, settingsPath := fileModePutServerConfig(t, srv, body)
-			if rr.Code != http.StatusBadRequest {
-				t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+			if rr.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
 			}
 			if !strings.Contains(rr.Body.String(), key) {
-				t.Errorf("400 body should name %s, got: %s", key, rr.Body.String())
+				t.Errorf("422 body should name %s, got: %s", key, rr.Body.String())
 			}
 			if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
 				data, _ := os.ReadFile(settingsPath)

@@ -41,14 +41,14 @@ var agentSchemaFiles = map[string]string{
 // ValidationError represents a single schema validation error.
 type ValidationError struct {
 	// Path is the JSON pointer to the field that failed validation (e.g., "hub/endpoint").
-	Path string
+	Path string `json:"path"`
 	// Message describes the validation failure.
-	Message string
+	Message string `json:"message"`
 	// StorageField marks a project storage field rule
 	// (ValidateProjectStorage). Path is then the field's settings path. A
 	// settings migration converts the file anyway and reports these as
 	// warnings, so the operator gets the file to fix.
-	StorageField bool
+	StorageField bool `json:"storage_field,omitempty"`
 }
 
 func (e ValidationError) Error() string {

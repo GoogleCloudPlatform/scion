@@ -64,19 +64,18 @@ func assertRejectedKeys(t *testing.T, rr *httptest.ResponseRecorder, want []stri
 	if rr.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d, want 422: %s", rr.Code, rr.Body.String())
 	}
-	var resp struct {
-		Error string   `json:"error"`
-		Keys  []string `json:"keys"`
+	fields := settingsErrorFields(t, rr.Body.Bytes())
+	code, _ := fields["error"].(string)
+	var keys []string
+	for _, k := range fields["keys"].([]interface{}) {
+		keys = append(keys, k.(string))
 	}
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode 422 body: %v", err)
+	sort.Strings(keys)
+	if !reflect.DeepEqual(keys, want) {
+		t.Errorf("rejected keys = %v, want %v", keys, want)
 	}
-	sort.Strings(resp.Keys)
-	if !reflect.DeepEqual(resp.Keys, want) {
-		t.Errorf("rejected keys = %v, want %v", resp.Keys, want)
-	}
-	if resp.Error != "unpersisted_keys_rejected" {
-		t.Errorf("error = %q, want unpersisted_keys_rejected", resp.Error)
+	if code != "unpersisted_keys_rejected" {
+		t.Errorf("error = %q, want unpersisted_keys_rejected", code)
 	}
 }
 

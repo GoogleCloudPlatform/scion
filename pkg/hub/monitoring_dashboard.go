@@ -41,9 +41,7 @@ func validateMonitoringDashboardURLRequest(w http.ResponseWriter, req *ServerCon
 		return true
 	}
 	if err := config.ValidateMonitoringDashboardURL(req.Server.Hub.MonitoringDashboardURL); err != nil {
-		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, err.Error(), map[string]interface{}{
-			"field": config.MonitoringDashboardURLKey,
-		})
+		writeSettingsFieldError(w, config.MonitoringDashboardURLKey, err.Error())
 		return false
 	}
 	return true
