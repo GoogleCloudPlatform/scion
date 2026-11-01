@@ -787,19 +787,21 @@ func (e *BinaryUpdateExecutor) CheckTarget(ctx context.Context, params map[strin
 // and says so in the run log. A failed snapshot fails the update before
 // anything is installed.
 func (e *BinaryUpdateExecutor) snapshot(ctx context.Context, logger io.Writer) (string, error) {
-	return takeUpdateSnapshot(ctx, e.snapshots, e.current, logger, "hub.maintenance.update-binary")
+	return takeUpdateSnapshot(ctx, e.snapshots, e.current, logger, "hub.maintenance.update-binary",
+		"Upgrades go ahead without one; downgrades are refused.")
 }
 
 // takeUpdateSnapshot takes the pre-update database snapshot (design D4)
 // shared by update-binary and rebuild-server, logging under subsystem. An
-// unsupported snapshotter (PostgreSQL) logs why and returns "" with no
-// error; a failed snapshot is an error, and the caller installs nothing.
-func takeUpdateSnapshot(ctx context.Context, snaps DBSnapshotter, from string, logger io.Writer, subsystem string) (string, error) {
+// unsupported snapshotter (PostgreSQL) logs why, then the caller's
+// unsupportedNote (what happens without one), and returns "" with no error;
+// a failed snapshot is an error, and the caller installs nothing.
+func takeUpdateSnapshot(ctx context.Context, snaps DBSnapshotter, from string, logger io.Writer, subsystem, unsupportedNote string) (string, error) {
 	_, _ = fmt.Fprintf(logger, "\n==> Database snapshot\n")
 	st := snaps.SnapshotStatus()
 	if !st.Supported {
 		logging.Subsystem(subsystem).Warn("Updating without a database snapshot", "reason", st.Reason)
-		_, _ = fmt.Fprintf(logger, "No database snapshot taken: %s. Upgrades go ahead without one; downgrades are refused.\n", st.Reason)
+		_, _ = fmt.Fprintf(logger, "No database snapshot taken: %s. %s\n", st.Reason, unsupportedNote)
 		return "", nil
 	}
 	path, err := snaps.Snapshot(ctx, from, logger)

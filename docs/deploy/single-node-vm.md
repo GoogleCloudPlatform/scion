@@ -530,6 +530,28 @@ together with the release:
 A release that is no longer in `releases/` (the Hub keeps the last five) can
 be installed again with `deploy.sh --version <tag>` before step 4.
 
+`deploy.sh --version` installs releases only. If the snapshot was taken from
+a Git build (`hub-git-<sha12>-<timestamp>.db`) and `releases/git-<sha12>` has
+been pruned, either:
+
+- rebuild that commit into `releases/` by hand before step 4, as the `scion`
+  user in the maintenance repository (the stamped commit is what names the
+  build):
+
+  ```bash
+  cd <maintenance repo>
+  sudo -u scion git checkout <full commit>
+  sudo -u scion make web
+  sudo -u scion mkdir -p /opt/scion/releases/git-<sha12>
+  sudo -u scion go build -o /opt/scion/releases/git-<sha12>/scion \
+    -ldflags "-X github.com/GoogleCloudPlatform/scion/pkg/version.Commit=<full commit> -X github.com/GoogleCloudPlatform/scion/pkg/version.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    ./cmd/scion
+  ```
+
+- or skip that snapshot: install a release with `deploy.sh --version <tag>`
+  and restore an older snapshot taken from a release (`hub-<tag>-<timestamp>.db`),
+  if one is retained. Changes made after that snapshot are lost.
+
 ### Converting an existing VM (`migrate-layout`)
 
 VMs deployed before this layout have a plain binary at `/usr/local/bin/scion`

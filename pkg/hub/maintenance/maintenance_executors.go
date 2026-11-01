@@ -495,7 +495,8 @@ func (e *RebuildServerExecutor) RunWithBeforeRestart(ctx context.Context, logger
 	// failed update" restores, including after a Git build the
 	// boot-failure guard leaves stopped. On the run ctx: VACUUM INTO of a
 	// large database can take a while.
-	snapshot, err := takeUpdateSnapshot(ctx, e.snapshots, e.current, logger, "hub.maintenance.rebuild-server")
+	snapshot, err := takeUpdateSnapshot(ctx, e.snapshots, e.current, logger, "hub.maintenance.rebuild-server",
+		"The rebuild goes ahead without one.")
 	if err != nil {
 		return err
 	}

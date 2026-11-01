@@ -540,7 +540,8 @@ func TestRebuildServer_UnsupportedSnapshotStillRebuilds(t *testing.T) {
 	if got.Snapshot != "" || strings.Contains(strings.Join(inst.calls, ","), "snapshot") {
 		t.Fatalf("snapshot %q, calls %v: want none taken", got.Snapshot, inst.calls)
 	}
-	if !strings.Contains(log.String(), "No database snapshot taken: PostgreSQL databases are not snapshotted") {
-		t.Fatalf("missing the no-snapshot line:\n%s", log.String())
+	if !strings.Contains(log.String(), "No database snapshot taken: PostgreSQL databases are not snapshotted. The rebuild goes ahead without one.\n") ||
+		strings.Contains(log.String(), "downgrades") {
+		t.Fatalf("missing the rebuild's no-snapshot line:\n%s", log.String())
 	}
 }
