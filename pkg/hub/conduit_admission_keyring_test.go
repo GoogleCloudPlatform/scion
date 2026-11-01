@@ -106,7 +106,7 @@ func admKeyring(t *testing.T, active string, emit keyring.Emit, readers []string
 func admAllowVersioned(t *testing.T) {
 	t.Helper()
 	orig := keyringReleaseCheck
-	keyringReleaseCheck = func(*keyring.Keyring, *ServerConfig) error { return nil }
+	keyringReleaseCheck = func(*keyring.Keyring) error { return nil }
 	t.Cleanup(func() { keyringReleaseCheck = orig })
 }
 
@@ -130,7 +130,9 @@ func admReplica(t *testing.T, st store.Store, k *keyring.Keyring) *Server {
 	t.Helper()
 	cfg := testServerConfig()
 	cfg.Keyring = k
-	cfg.SharedSigningSecret = krLegacySecret
+	if k == nil {
+		cfg.SharedSigningSecret = krLegacySecret
+	}
 	cfg.KeyringNow = func() time.Time { return conduitRelayNow() }
 	srv, err := newTestHubServer(t, cfg, st)
 	require.NoError(t, err)

@@ -438,11 +438,11 @@ func TestWebKeyring_CookieSizeLimitKept(t *testing.T) {
 
 // TestNew_KeyringModeRefusesExplicitSigningKeys: explicit agent or user
 // JWT signing keys keep precedence in legacy mode but are refused with a
-// keyring file, as is a SharedSigningSecret that is not the keyring's
-// legacy entry.
+// keyring file, as is any non-empty SharedSigningSecret (the legacy secret
+// itself included): with a keyring file no purpose reads it.
 func TestNew_KeyringModeRefusesExplicitSigningKeys(t *testing.T) {
 	ka, _ := krRollout(t)
-	base := ServerConfig{Keyring: ka, SharedSigningSecret: krLegacySecret}
+	base := ServerConfig{Keyring: ka}
 	require.NoError(t, validateKeyringConfig(base))
 
 	agent := base
@@ -457,22 +457,17 @@ func TestNew_KeyringModeRefusesExplicitSigningKeys(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "UserTokenConfig.SigningKey")
 
-	mismatch := base
-	mismatch.SharedSigningSecret = "some-other-secret"
-	err = validateKeyringConfig(mismatch)
-	require.Error(t, err)
-	assert.NotContains(t, err.Error(), krLegacySecret)
-	assert.NotContains(t, err.Error(), "some-other-secret")
-	// The same mismatch with a secret of equal length, so the comparison
-	// runs over every byte instead of stopping at the length check.
-	sameLength := base
-	sameLength.SharedSigningSecret = "test-only-wrong0-session-secret"
-	require.Len(t, sameLength.SharedSigningSecret, len(krLegacySecret))
-	err = validateKeyringConfig(sameLength)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "SharedSigningSecret")
-	assert.NotContains(t, err.Error(), krLegacySecret)
-	assert.NotContains(t, err.Error(), sameLength.SharedSigningSecret)
+	for _, shared := range []string{krLegacySecret, "some-other-secret", " "} {
+		withShared := base
+		withShared.SharedSigningSecret = shared
+		err = validateKeyringConfig(withShared)
+		require.Error(t, err, "SharedSigningSecret %q", shared)
+		assert.Contains(t, err.Error(), "SharedSigningSecret must be empty")
+		assert.NotContains(t, err.Error(), krLegacySecret)
+		if strings.TrimSpace(shared) != "" {
+			assert.NotContains(t, err.Error(), shared)
+		}
+	}
 
 	// Legacy mode: explicit keys are allowed (precedence unchanged).
 	legacy := ServerConfig{Keyring: keyring.Legacy("s"), AgentTokenConfig: AgentTokenConfig{SigningKey: []byte("k")}}

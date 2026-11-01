@@ -112,9 +112,10 @@ func TestLoadServerKeyring_RingMode(t *testing.T) {
 	k := serverKeyringFromFile()
 	require.NotNil(t, k)
 	assert.Equal(t, "gen1", serverSigningRingFromFile().ActiveID())
-	// Every other purpose keeps the legacy entry.
-	assert.Equal(t, cmdKRLegacySecret, resolveSessionSecret())
-	assert.Equal(t, cmdKRLegacySecret, sessionSecretValue())
+	// With a keyring file no cmd consumer resolves a session secret: every
+	// purpose takes its keys from the ring, so the legacy entry is not read.
+	assert.Empty(t, resolveSessionSecret())
+	assert.Empty(t, sessionSecretValue())
 	assert.Equal(t, hub.SigningKeySourceKeyring, webSessionKeySource(resolveSessionSecret()))
 	assert.Contains(t, logs.String(), "those capabilities, admission tokens and relay-peer signatures only")
 	assertNoCmdKRSecret(t, logs.String())
