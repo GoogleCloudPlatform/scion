@@ -975,6 +975,44 @@ check_contains "cloud-build channel (buildStepOutputs): waits on the second buil
 check_contains "cloud-build channel (buildStepOutputs): tags the step-output digest" "gcloud artifacts docker tags add ${AR}/scion-claude@$(bd scion-claude) ${AR}/scion-claude:stable" "$(ctr)"
 check_eq "cloud-build channel (buildStepOutputs): four channel tags" "4" "$(ctr | grep -c 'tags add' || true)"
 
+# Step outputs written by buildx-record-digest.sh (what the cloudbuild*.yaml
+# push steps run) are read by the driver: one step per image, each with its
+# own BUILDER_OUTPUT, from a stub docker's buildx metadata file.
+reset_cache
+cb_fixture
+: > "${TMP}/cbimages"
+mkdir -p "${TMP}/recbin"
+cat > "${TMP}/recbin/docker" <<'STUB'
+#!/usr/bin/env bash
+prev=""
+for a in "$@"; do
+  if [ "${prev}" = "--metadata-file" ]; then cat "${REC_META:?}" > "${a}"; fi
+  prev="${a}"
+done
+STUB
+chmod +x "${TMP}/recbin/docker"
+rec_b64s=()
+rec_ok=0
+for n in "${IMGS4[@]}"; do
+  rm -rf "${TMP}/recout"; mkdir -p "${TMP}/recout"
+  printf '{\n  "containerimage.digest": "%s",\n  "image.name": "%s,%s"\n}\n' \
+    "$(bd "${n}")" "${AR}/${n}:${S1}" "${AR}/${n}:v1.0.0" > "${TMP}/recmeta"
+  if PATH="${TMP}/recbin:${PATH}" REC_META="${TMP}/recmeta" BUILDER_OUTPUT="${TMP}/recout" \
+    bash "${SCRIPT_DIR}/buildx-record-digest.sh" "${AR}/${n}:v1.0.0" buildx build \
+    -t "${AR}/${n}:${S1}" -t "${AR}/${n}:v1.0.0" --push . >/dev/null 2>&1; then
+    rec_ok=$((rec_ok + 1))
+  fi
+  rec_b64s+=("$(b64 "$(cat "${TMP}/recout/output" 2>/dev/null || true)"$'\n')")
+done
+check_eq "cloud-build channel (recorded step outputs): the recorder ran for each image" "4" "${rec_ok}"
+# Setup steps (no output) come first, as in the yamls.
+(IFS=';'; printf ';;%s\n' "${rec_b64s[*]}") > "${TMP}/cbstepout.${CB_ID}"
+run_driver v1.0.0 --repo "${REPO_URL}" --channel-tag stable "${CB_X[@]}"
+: > "${TMP}/cbstepout.${CB_ID}"
+check_rc "cloud-build channel (recorded step outputs): exit 0" 0 "${RC}"
+check_contains "cloud-build channel (recorded step outputs): tags the recorded digest" "gcloud artifacts docker tags add ${AR}/core-base@$(bd core-base) ${AR}/core-base:stable" "$(ctr)"
+check_eq "cloud-build channel (recorded step outputs): four channel tags" "4" "$(ctr | grep -c 'tags add' || true)"
+
 # cb_stop <name> <message> [driver args after the version...]: the run stops
 # with rc 1 and the message, and nothing is tagged.
 cb_stop() {
