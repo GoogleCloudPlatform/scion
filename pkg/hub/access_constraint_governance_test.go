@@ -1202,6 +1202,209 @@ func TestGovernance_DeleteRelaxationAuthority_InsufficientAuthority(t *testing.T
 }
 
 // ---------------------------------------------------------------------------
+// 14b2. A delete preview token commits only for its own constraint
+// ---------------------------------------------------------------------------
+
+// TestGovernance_DeleteTokenBoundToItsConstraint pins that a delete commit
+// is refused when the preview token was issued for another constraint, the
+// other constraint is left in place, and the token still commits for the
+// constraint it was issued for.
+func TestGovernance_DeleteTokenBoundToItsConstraint(t *testing.T) {
+	gs, ps, _, s := govTestSetup(t)
+	ctx := context.Background()
+
+	adminID := govSeedAdminUser(t, s, "gov-admin-cid-bind")
+	userID := govSeedNonAdminUser(t, s, "gov-user-cid-bind")
+	actor := pvTestActor(adminID)
+
+	create := func(name string) *store.AccessConstraint {
+		return govCreateAndCommit(t, gs, ps, &store.AccessConstraint{
+			Name:                 name,
+			SubjectKind:          store.ConstraintSubjectPrincipal,
+			SubjectPrincipalType: pvStrPtr("user"),
+			SubjectPrincipalID:   pvStrPtr(userID),
+			ScopeType:            store.RoleScopeSystem,
+			MaximumPermissions:   []string{"agent.read"},
+			Purpose:              "token binding",
+			CreatedBy:            adminID,
+		}, actor)
+	}
+	a := create("gov-cid-bind-a")
+	b := create("gov-cid-bind-b")
+	require.Equal(t, a.Revision, b.Revision, "only the constraint ID may differ")
+
+	preview, err := ps.GeneratePreview(ctx, PreviewRequest{
+		Operation:    "delete",
+		ConstraintID: a.ID,
+		BaseRevision: a.Revision,
+		Actor:        actor,
+	})
+	require.NoError(t, err)
+
+	_, err = gs.CommitBoundaryChange(ctx, CommitRequest{
+		Operation:    "delete",
+		ConstraintID: b.ID,
+		BaseRevision: b.Revision,
+		PreviewToken: preview.PreviewToken,
+		Actor:        actor,
+	})
+	var ge *GovernanceError
+	require.ErrorAs(t, err, &ge, "a token for A must not delete B")
+	assert.Equal(t, ErrCodePreviewConstraintMismatch, ge.Code)
+	_, err = s.GetAccessConstraint(ctx, b.ID)
+	require.NoError(t, err, "B must remain")
+
+	_, err = gs.CommitBoundaryChange(ctx, CommitRequest{
+		Operation:    "delete",
+		ConstraintID: a.ID,
+		BaseRevision: a.Revision,
+		PreviewToken: preview.PreviewToken,
+		Actor:        actor,
+	})
+	require.NoError(t, err, "the token must still commit for A")
+	_, err = s.GetAccessConstraint(ctx, a.ID)
+	require.ErrorIs(t, err, store.ErrNotFound)
+}
+
+// TestGovernance_UpdateTokenBoundToItsConstraint pins that an update commit
+// is refused when the preview token was issued for another constraint, the
+// other constraint is left as stored, and the token still commits the update
+// of the constraint it was issued for.
+func TestGovernance_UpdateTokenBoundToItsConstraint(t *testing.T) {
+	gs, ps, _, s := govTestSetup(t)
+	ctx := context.Background()
+
+	adminID := govSeedAdminUser(t, s, "gov-admin-cid-bind-upd")
+	userID := govSeedNonAdminUser(t, s, "gov-user-cid-bind-upd")
+	actor := pvTestActor(adminID)
+
+	draft := func(name string, perms ...string) *store.AccessConstraint {
+		return &store.AccessConstraint{
+			Name:                 name,
+			SubjectKind:          store.ConstraintSubjectPrincipal,
+			SubjectPrincipalType: pvStrPtr("user"),
+			SubjectPrincipalID:   pvStrPtr(userID),
+			ScopeType:            store.RoleScopeSystem,
+			MaximumPermissions:   perms,
+			Purpose:              "token binding",
+			CreatedBy:            adminID,
+		}
+	}
+	a := govCreateAndCommit(t, gs, ps, draft("gov-cid-bind-upd-a", "agent.read", "agent.create"), actor)
+	b := govCreateAndCommit(t, gs, ps, draft("gov-cid-bind-upd-b", "agent.read", "agent.create"), actor)
+	require.Equal(t, a.Revision, b.Revision, "only the constraint ID may differ")
+
+	// The same proposed content, addressed to a given constraint (the update
+	// applies to the draft's ID, as the handler sets it from the path).
+	update := func(id string) *store.AccessConstraint {
+		d := draft("gov-cid-bind-upd-tight", "agent.read")
+		d.ID = id
+		return d
+	}
+	preview, err := ps.GeneratePreview(ctx, PreviewRequest{
+		Operation:    "update",
+		Draft:        update(a.ID),
+		ConstraintID: a.ID,
+		BaseRevision: a.Revision,
+		Actor:        actor,
+	})
+	require.NoError(t, err)
+
+	_, err = gs.CommitBoundaryChange(ctx, CommitRequest{
+		Operation:    "update",
+		Draft:        update(b.ID),
+		ConstraintID: b.ID,
+		BaseRevision: b.Revision,
+		PreviewToken: preview.PreviewToken,
+		Actor:        actor,
+	})
+	var ge *GovernanceError
+	require.ErrorAs(t, err, &ge, "a token for A must not update B")
+	assert.Equal(t, ErrCodePreviewConstraintMismatch, ge.Code)
+	got, err := s.GetAccessConstraint(ctx, b.ID)
+	require.NoError(t, err)
+	assert.Equal(t, b.Revision, got.Revision, "B must be left as stored")
+	assert.ElementsMatch(t, []string{"agent.read", "agent.create"}, got.MaximumPermissions)
+
+	_, err = gs.CommitBoundaryChange(ctx, CommitRequest{
+		Operation:    "update",
+		Draft:        update(a.ID),
+		ConstraintID: a.ID,
+		BaseRevision: a.Revision,
+		PreviewToken: preview.PreviewToken,
+		Actor:        actor,
+	})
+	require.NoError(t, err, "the token must still commit the update of A")
+	got, err = s.GetAccessConstraint(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"agent.read"}, got.MaximumPermissions)
+}
+
+// TestGovernance_UpdateDraftMustNameTarget pins that an update commit whose
+// draft names a constraint other than req.ConstraintID (or none) is refused
+// with invalid_request before any check or write, both constraints are left
+// as stored, and the preview token is not consumed: the well-formed request
+// then commits with the same token.
+func TestGovernance_UpdateDraftMustNameTarget(t *testing.T) {
+	gs, ps, _, s := govTestSetup(t)
+	ctx := context.Background()
+
+	adminID := govSeedAdminUser(t, s, "gov-admin-draft-target")
+	userID := govSeedNonAdminUser(t, s, "gov-user-draft-target")
+	actor := pvTestActor(adminID)
+
+	draft := func(name string, perms ...string) *store.AccessConstraint {
+		return &store.AccessConstraint{
+			Name:                 name,
+			SubjectKind:          store.ConstraintSubjectPrincipal,
+			SubjectPrincipalType: pvStrPtr("user"),
+			SubjectPrincipalID:   pvStrPtr(userID),
+			ScopeType:            store.RoleScopeSystem,
+			MaximumPermissions:   perms,
+			Purpose:              "draft names target",
+			CreatedBy:            adminID,
+		}
+	}
+	a := govCreateAndCommit(t, gs, ps, draft("gov-draft-target-a", "agent.read", "agent.create"), actor)
+	b := govCreateAndCommit(t, gs, ps, draft("gov-draft-target-b", "agent.read", "agent.create"), actor)
+
+	update := func(id string) *store.AccessConstraint {
+		d := draft("gov-draft-target-tight", "agent.read")
+		d.ID = id
+		return d
+	}
+	preview, err := ps.GeneratePreview(ctx, PreviewRequest{
+		Operation: "update", Draft: update(a.ID), ConstraintID: a.ID, BaseRevision: a.Revision, Actor: actor,
+	})
+	require.NoError(t, err)
+
+	for label, d := range map[string]*store.AccessConstraint{"draft names B": update(b.ID), "draft names none": update("")} {
+		_, err = gs.CommitBoundaryChange(ctx, CommitRequest{
+			Operation: "update", Draft: d, ConstraintID: a.ID, BaseRevision: a.Revision,
+			PreviewToken: preview.PreviewToken, Actor: actor,
+		})
+		var ge *GovernanceError
+		require.ErrorAs(t, err, &ge, label)
+		assert.Equal(t, ErrCodeInvalidRequest, ge.Code, label)
+	}
+	for _, c := range []*store.AccessConstraint{a, b} {
+		got, err := s.GetAccessConstraint(ctx, c.ID)
+		require.NoError(t, err)
+		assert.Equal(t, c.Revision, got.Revision, "%s must be left as stored", c.Name)
+		assert.ElementsMatch(t, []string{"agent.read", "agent.create"}, got.MaximumPermissions)
+	}
+
+	_, err = gs.CommitBoundaryChange(ctx, CommitRequest{
+		Operation: "update", Draft: update(a.ID), ConstraintID: a.ID, BaseRevision: a.Revision,
+		PreviewToken: preview.PreviewToken, Actor: actor,
+	})
+	require.NoError(t, err, "the token is not consumed by the refusal")
+	got, err := s.GetAccessConstraint(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"agent.read"}, got.MaximumPermissions)
+}
+
+// ---------------------------------------------------------------------------
 // 14b3. A time-window change needs relaxation authority
 // ---------------------------------------------------------------------------
 
