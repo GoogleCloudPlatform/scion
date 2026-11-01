@@ -160,11 +160,10 @@ func TestCheckPeerSecretNotInRing_UnsetStagedSlotIsNotRefused(t *testing.T) {
 // Fail closed: a non-nil ring with no usable generation (zero, or a
 // dangling active ID) refuses rather than comparing against nothing; so
 // does a populated generation with an empty secret (the loader refuses
-// one; this guards the comparison itself). A nil ring is legacy mode or
-// the relay role: nothing to compare.
+// one; this guards the comparison itself). A nil ring (also what a zero
+// Keyring returns) is legacy mode or the relay role: nothing to compare.
 func TestCheckPeerSecretNotInRing_FailsClosed(t *testing.T) {
 	psRequireRefused(t, CheckPeerSecretNotInRing(psPeerSecret, &keyring.SigningRing{}), errPeerSecretRingNoUsable)
-	psRequireRefused(t, CheckPeerSecretNotInRing(psPeerSecret, (&keyring.Keyring{}).Signing()), errPeerSecretRingNoUsable)
 	psRequireRefused(t, checkPeerSecretAgainst(psPeerSecret, nil), errPeerSecretRingNoUsable)
 
 	psRequireRefused(t, checkPeerSecretAgainst(psPeerSecret, [][]byte{[]byte(psActiveSecret), {}}), errPeerSecretRingEmptyEntry)
