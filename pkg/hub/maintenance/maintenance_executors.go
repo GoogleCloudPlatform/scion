@@ -438,22 +438,17 @@ func (e *RebuildServerExecutor) RunWithBeforeRestart(ctx context.Context, logger
 	_, _ = fmt.Fprintf(logger, "Preflight passed.\n\n")
 
 	// ── Update the checkout ─────────────────────────────────────────────
-	var steps []rebuildStep
-	var currentBranch string
-	steps = append(steps, rebuildStep{"Fetching latest code", "git", []string{"fetch", "origin"}, repoPath})
-	if branch != "" {
-		steps = append(steps, rebuildStep{"Checking out branch " + branch, "git", []string{"checkout", branch}, repoPath})
-		steps = append(steps, rebuildStep{"Resetting to origin/" + branch, "git", []string{"reset", "--hard", "origin/" + branch}, repoPath})
-	} else {
+	plan := rebuildPlan{repoPath: repoPath, branch: branch}
+	if branch == "" {
 		// Determine the current branch to reset against its remote tracking ref.
 		out, err := gitOutput(ctx, repoPath, "rev-parse", "--abbrev-ref", "HEAD")
 		if err != nil {
 			return fmt.Errorf("failed to determine current branch: %w", err)
 		}
-		currentBranch = out
-		steps = append(steps, rebuildStep{"Resetting to origin/" + currentBranch, "git", []string{"reset", "--hard", "origin/" + currentBranch}, repoPath})
+		plan.currentBranch = out
 	}
-	if err := runRebuildSteps(ctx, logger, steps); err != nil {
+	currentBranch := plan.currentBranch
+	if err := runRebuildSteps(ctx, logger, rebuildCheckout, plan); err != nil {
 		return err
 	}
 
@@ -478,11 +473,10 @@ func (e *RebuildServerExecutor) RunWithBeforeRestart(ctx context.Context, logger
 		return fmt.Errorf("create temp directory: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
-	bin := filepath.Join(tmpDir, "scion")
-	if err := runRebuildSteps(ctx, logger, []rebuildStep{
-		{"Building web assets", "make", []string{"web"}, repoPath},
-		{"Building server binary", "go", []string{"build", "-ldflags", GitBuildLDFlags(commit, time.Now()), "-o", bin, "./cmd/scion"}, repoPath},
-	}); err != nil {
+	plan.bin = filepath.Join(tmpDir, "scion")
+	plan.ldflags = GitBuildLDFlags(commit, time.Now())
+	bin := plan.bin
+	if err := runRebuildSteps(ctx, logger, rebuildBuild, plan); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(logger, "==> Verifying the build\n")
@@ -610,9 +604,50 @@ func (e *RebuildServerExecutor) checkUnit(ctx context.Context, logger io.Writer,
 	return rep.Text
 }
 
-// runRebuildSteps runs steps in order, logging each, and stops at the
-// first failure.
-func runRebuildSteps(ctx context.Context, logger io.Writer, steps []rebuildStep) error {
+// rebuildPhase selects the step table runRebuildSteps runs.
+type rebuildPhase int
+
+const (
+	// rebuildCheckout updates the checkout: git fetch, then checkout and
+	// reset to origin/<branch> (or reset the current branch).
+	rebuildCheckout rebuildPhase = iota
+	// rebuildBuild builds the web assets and the binary.
+	rebuildBuild
+)
+
+// rebuildPlan carries what the step tables need.
+type rebuildPlan struct {
+	repoPath      string
+	branch        string // configured or requested branch; "" = currentBranch
+	currentBranch string // the checkout's branch, when branch is ""
+	bin           string // build output (rebuildBuild)
+	ldflags       string // -ldflags value (rebuildBuild)
+}
+
+// runRebuildSteps builds the step table of phase and runs it in order,
+// logging each step, and stops at the first failure. The table (its git
+// commands included) and the process start are kept in this one function so
+// the host-git door guard (pkg/util TestHostGitGoesThroughOneDoor) counts
+// them together.
+func runRebuildSteps(ctx context.Context, logger io.Writer, phase rebuildPhase, p rebuildPlan) error {
+	var steps []rebuildStep
+	switch phase {
+	case rebuildCheckout:
+		steps = append(steps, rebuildStep{"Fetching latest code", "git", []string{"fetch", "origin"}, p.repoPath})
+		if p.branch != "" {
+			steps = append(steps, rebuildStep{"Checking out branch " + p.branch, "git", []string{"checkout", p.branch}, p.repoPath})
+			steps = append(steps, rebuildStep{"Resetting to origin/" + p.branch, "git", []string{"reset", "--hard", "origin/" + p.branch}, p.repoPath})
+		} else {
+			steps = append(steps, rebuildStep{"Resetting to origin/" + p.currentBranch, "git", []string{"reset", "--hard", "origin/" + p.currentBranch}, p.repoPath})
+		}
+	case rebuildBuild:
+		steps = append(steps,
+			rebuildStep{"Building web assets", "make", []string{"web"}, p.repoPath},
+			rebuildStep{"Building server binary", "go", []string{"build", "-ldflags", p.ldflags, "-o", p.bin, "./cmd/scion"}, p.repoPath},
+		)
+	default:
+		return fmt.Errorf("unknown rebuild phase %d", phase)
+	}
 	log := logging.Subsystem("hub.maintenance.rebuild-server")
 	for i, step := range steps {
 		_, _ = fmt.Fprintf(logger, "==> %s\n", step.name)
