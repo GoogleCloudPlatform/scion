@@ -84,7 +84,7 @@ func TestCloudRunContainerResources(t *testing.T) {
 		{
 			name:    "cpu needing more than the default memory",
 			spec:    &api.ResourceSpec{Limits: limits("4", "")},
-			wantErr: []string{"4 vCPU (from resources.limits.cpu)", "2048Mi to 16384Mi", "512Mi (platform default)", "set resources.limits.cpu or resources.limits.memory"},
+			wantErr: []string{"4 vCPU (from resolved resources.limits.cpu)", "2048Mi to 16384Mi", "512Mi (platform default)", "set resources.limits.cpu or resources.limits.memory"},
 		},
 		{
 			name:    "band error from requests names the request",
@@ -92,14 +92,19 @@ func TestCloudRunContainerResources(t *testing.T) {
 			wantErr: []string{"2 vCPU (from resources.requests.cpu)", "16384Mi (from resources.requests.memory)", "set resources.limits.cpu or resources.limits.memory"},
 		},
 		{
-			name:    "built-in default cpu named as a possible source",
+			name:    "built-in default cpu named as resolved",
 			spec:    &api.ResourceSpec{Limits: limits("2", "16Gi")},
-			wantErr: []string{"2 vCPU (from resources.limits.cpu or the built-in default 2)"},
+			wantErr: []string{"2 vCPU (from resolved resources.limits.cpu)"},
 		},
 		{
-			name:    "explicit non-default cpu names only the field",
+			name:    "cpu limit raised to the request named as resolved",
+			spec:    &api.ResourceSpec{Requests: limits("4", ""), Limits: limits("4", "")},
+			wantErr: []string{"4 vCPU (from resolved resources.limits.cpu)", "512Mi (platform default)"},
+		},
+		{
+			name:    "any cpu limit named as resolved",
 			spec:    &api.ResourceSpec{Limits: limits("1", "6Gi")},
-			wantErr: []string{"1 vCPU (from resources.limits.cpu)"},
+			wantErr: []string{"1 vCPU (from resolved resources.limits.cpu)"},
 		},
 		{
 			name:    "memory above the cpu band",
