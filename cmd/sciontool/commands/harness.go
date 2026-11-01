@@ -323,7 +323,11 @@ func validateManifestPaths(m *containerProvisionManifest, bundleRoot, home strin
 		}
 		clean := filepath.Clean(path)
 		for _, root := range allowed {
-			if strings.HasPrefix(clean, root) {
+			if root == "" {
+				continue
+			}
+			rel, err := filepath.Rel(root, clean)
+			if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 				return nil
 			}
 		}

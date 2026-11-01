@@ -121,6 +121,77 @@ func TestRunHarnessProvision_RejectsManifestWithEscapingPaths(t *testing.T) {
 	}
 }
 
+func TestValidateManifestPaths_RejectsSiblingPrefixEscape(t *testing.T) {
+	home := "/home/agent"
+	bundleRoot := "/home/agent/.scion/harness"
+	extraRoot := "/run/scion/mem/outputs"
+
+	tests := []struct {
+		name    string
+		mutate  func(m *containerProvisionManifest)
+		wantErr bool
+	}{
+		{
+			name: "sibling home directory prefix escape",
+			mutate: func(m *containerProvisionManifest) {
+				m.Inputs["auth_candidates"] = "/home/agent_victim/confidential.json"
+			},
+			wantErr: true,
+		},
+		{
+			name: "sibling bundle directory prefix escape",
+			mutate: func(m *containerProvisionManifest) {
+				m.HarnessBundleDir = "/home/agent_victim/.scion/harness"
+			},
+			wantErr: true,
+		},
+		{
+			name: "sibling extraRoot prefix escape",
+			mutate: func(m *containerProvisionManifest) {
+				m.Outputs.Env = "/run/scion/mem/outputs_other/env.json"
+			},
+			wantErr: true,
+		},
+		{
+			name: "valid nested paths",
+			mutate: func(m *containerProvisionManifest) {
+				m.Inputs["auth_candidates"] = "/home/agent/auth.json"
+				m.Outputs.Env = "/run/scion/mem/outputs/env.json"
+				m.Outputs.ResolvedAuth = "/home/agent/.scion/harness/outputs/auth.json"
+			},
+			wantErr: false,
+		},
+		{
+			name: "exact root path",
+			mutate: func(m *containerProvisionManifest) {
+				m.HarnessBundleDir = "/home/agent/.scion/harness"
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := &containerProvisionManifest{
+				HarnessBundleDir: bundleRoot,
+				Inputs:           map[string]string{},
+				Outputs: containerOutputs{
+					Env:          filepath.Join(bundleRoot, "outputs", "env.json"),
+					ResolvedAuth: filepath.Join(bundleRoot, "outputs", "resolved-auth.json"),
+				},
+			}
+			tt.mutate(m)
+			err := validateManifestPaths(m, bundleRoot, home, extraRoot)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validateManifestPaths() error = %v, wantErr = %v", err, tt.wantErr)
+			}
+			if tt.wantErr && !strings.Contains(err.Error(), "escapes allowed roots") {
+				t.Errorf("expected 'escapes allowed roots' in error, got: %v", err)
+			}
+		})
+	}
+}
+
 func TestRunHarnessProvision_TimesOut(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
