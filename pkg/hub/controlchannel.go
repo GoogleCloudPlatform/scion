@@ -49,6 +49,15 @@ type ControlChannelConfig struct {
 	Debug bool
 }
 
+// requestTimeout is the bound on one tunneled request: RequestTimeout, or
+// the hub-to-broker request limit (brokerRequestTimeout) when it is unset.
+func (c ControlChannelConfig) requestTimeout() time.Duration {
+	if c.RequestTimeout == 0 {
+		return brokerRequestTimeout
+	}
+	return c.RequestTimeout
+}
+
 // DefaultControlChannelConfig returns the default control channel configuration.
 func DefaultControlChannelConfig() ControlChannelConfig {
 	return ControlChannelConfig{
@@ -56,7 +65,7 @@ func DefaultControlChannelConfig() ControlChannelConfig {
 		PongWait:       60 * time.Second,
 		WriteWait:      10 * time.Second,
 		MaxMessageSize: 1024 * 1024, // 1MB — must be large enough to carry RemoteCreateAgentRequest payloads (see issue #165)
-		RequestTimeout: 120 * time.Second,
+		RequestTimeout: brokerRequestTimeout,
 		Debug:          false,
 	}
 }
@@ -799,10 +808,7 @@ func (hc *BrokerConnection) TunnelRequest(ctx context.Context, req *wsprotocol.R
 	}
 
 	// Wait for response with timeout
-	timeout := hc.config.RequestTimeout
-	if timeout == 0 {
-		timeout = 120 * time.Second
-	}
+	timeout := hc.config.requestTimeout()
 
 	select {
 	case resp := <-respCh:

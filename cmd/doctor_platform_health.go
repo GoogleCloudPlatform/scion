@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -351,13 +352,19 @@ func healthSummaryBrokersLine(s *hubclient.HealthSummary, verbose bool) string {
 	if b.NotReported {
 		return "Runtime broker data not available"
 	}
-	online := 0
+	online, noCommands := 0, 0
 	for _, it := range b.Items {
 		if it.Status == "online" {
 			online++
+			if brokerCommandPath(it) == commandPathNo {
+				noCommands++
+			}
 		}
 	}
 	line := fmt.Sprintf("%d of %d listed online, %d registered", online, len(b.Items), b.Total)
+	if noCommands > 0 {
+		line += fmt.Sprintf(", %d online but cannot receive commands", noCommands)
+	}
 	if b.Truncated {
 		line += " (list truncated)"
 	}
@@ -402,6 +409,11 @@ func healthSummaryBrokerRow(b hubclient.HealthSummaryBroker) string {
 		parts = append(parts, self)
 	} else {
 		parts = append(parts, "self-health not reported")
+	}
+	if b.Status == "online" {
+		if cp := brokerCommandPath(b); cp != "" {
+			parts = append(parts, "commands "+cp)
+		}
 	}
 	parts = append(parts, fmt.Sprintf("agents running %d, attention %d", b.Agents.Running, b.Agents.Attention))
 	if b.LastHeartbeat != nil {
@@ -529,6 +541,22 @@ func healthSummaryInstancesLine(s *hubclient.HealthSummary) string {
 		line += "\n    " + strings.Join(parts, "; ")
 	}
 	return line
+}
+
+// brokerCommandPath is whether the hub can send commands to broker b, from
+// its self-reported control_channel check (brokerReportedCommandPath):
+// yes or no, or "" when there is nothing to report (an older broker, no
+// control channel, or starting within its grace). Only fixed words are
+// returned.
+func brokerCommandPath(b hubclient.HealthSummaryBroker) string {
+	if b.Health == nil {
+		return ""
+	}
+	word := brokerReportedCommandPath(&api.BrokerHealthReport{Checks: b.Health.Checks})
+	if word == commandPathNotReported {
+		return ""
+	}
+	return word
 }
 
 // nonHealthyCheckList lists "name: value" for every check that did not

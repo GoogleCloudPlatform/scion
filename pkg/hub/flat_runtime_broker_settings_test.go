@@ -197,8 +197,13 @@ func TestServerConfigPut_FileModePreservesRuntimeBrokerInstances(t *testing.T) {
 			`{"server":{"broker":{"instances":[{"key":"a","name":"x","profile":"p","runtime_target":{"type":"docker"}}]}}}`,
 		} {
 			rr := putFlatFileModeServerConfig(t, body)
-			if rr.Code != http.StatusBadRequest {
-				t.Fatalf("want 400 for %s, got %d %s", body, rr.Code, rr.Body.String())
+			if rr.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("want 422 for %s, got %d %s", body, rr.Code, rr.Body.String())
+			}
+			for _, e := range settingsErrorEntries(t, rr) {
+				if !strings.HasPrefix(e.Field, "server.broker.instances") {
+					t.Errorf("field %q is not under server.broker.instances", e.Field)
+				}
 			}
 		}
 		after, _ := os.ReadFile(path)
@@ -250,8 +255,8 @@ func TestServerConfigPut_WorkstationDBExplicitInstancesValidatedAndApplied(t *te
 	srv, _, _ := newSQLiteHubInMode(t, true, nil)
 	before, _ := os.ReadFile(path)
 	rr := putServerConfig(t, srv, `{"server":{"broker":{"instances":[{"key":"a","name":"x","runtime_target":{"type":"podman"}}]}}}`)
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("invalid list: want 400, got %d %s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("invalid list: want 422, got %d %s", rr.Code, rr.Body.String())
 	}
 	if after, _ := os.ReadFile(path); string(after) != string(before) {
 		t.Fatal("an invalid list must be rejected before any write")

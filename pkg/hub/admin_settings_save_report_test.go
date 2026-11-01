@@ -78,15 +78,20 @@ func TestPutServerConfigDB_ConflictReportsWrittenKeysOnly(t *testing.T) {
 	}`)
 	require.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
 
-	var resp struct {
-		Error              string           `json:"error"`
-		Applied            map[string]int64 `json:"applied"`
-		UnchangedRevisions map[string]int64 `json:"unchanged_revisions"`
-		AppliedKeys        []string         `json:"applied_keys"`
-		PendingRestart     []string         `json:"pending_restart"`
+	var body struct {
+		Error struct {
+			Code    string `json:"code"`
+			Details struct {
+				Applied            map[string]int64 `json:"applied"`
+				UnchangedRevisions map[string]int64 `json:"unchanged_revisions"`
+				AppliedKeys        []string         `json:"applied_keys"`
+				PendingRestart     []string         `json:"pending_restart"`
+			} `json:"details"`
+		} `json:"error"`
 	}
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
-	assert.Equal(t, "revision_conflict", resp.Error)
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &body))
+	assert.Equal(t, "revision_conflict", body.Error.Code)
+	resp := body.Error.Details
 	assert.Contains(t, resp.Applied, "endpoints")
 	assert.NotContains(t, resp.Applied, "access", "an unchanged section is not listed as applied")
 	assert.NotContains(t, resp.Applied, "lifecycle")

@@ -225,7 +225,7 @@ func TestPurgeOldMessages(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestPurgeFailedMessages(t *testing.T) {
+func TestPurgeFailedMessagesChunk(t *testing.T) {
 	s := newTestMessageStore(t)
 	ctx := context.Background()
 	projectID := uuid.NewString()
@@ -240,7 +240,7 @@ func TestPurgeFailedMessages(t *testing.T) {
 	require.NoError(t, s.CreateMessage(ctx, recentFailed))
 
 	// A dispatched (successfully delivered) message old enough to be purged
-	// by PurgeOldMessages semantics, but must survive PurgeFailedMessages
+	// by PurgeOldMessages semantics, but must survive the failed purge
 	// since it filters strictly on dispatch_state=failed.
 	oldDelivered := newTestMessage(projectID, "agent-1")
 	oldDelivered.DispatchState = store.MessageDispatchDispatched
@@ -248,11 +248,10 @@ func TestPurgeFailedMessages(t *testing.T) {
 	require.NoError(t, s.CreateMessage(ctx, oldDelivered))
 
 	cutoff := time.Now().Add(-7 * 24 * time.Hour)
-	n, err := s.PurgeFailedMessages(ctx, cutoff)
-	require.NoError(t, err)
+	n := purgeAllFailedMessages(t, s, cutoff, 500)
 	assert.Equal(t, 1, n, "only the old failed message is purged")
 
-	_, err = s.GetMessage(ctx, oldFailed.ID)
+	_, err := s.GetMessage(ctx, oldFailed.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 	_, err = s.GetMessage(ctx, recentFailed.ID)
 	require.NoError(t, err, "recent failed message is within the retention window")
@@ -260,14 +259,14 @@ func TestPurgeFailedMessages(t *testing.T) {
 	require.NoError(t, err, "delivered message history is never purged by this sweep")
 }
 
-// TestPurgeFailedMessages_SkipsUserRecipients is a regression test for
+// TestPurgeFailedMessagesChunk_SkipsUserRecipients is a regression test for
 // nc-promote-busy round 2 (R1): only a message addressed to an agent can
 // have genuinely and irrecoverably failed dispatch. A "user:" recipient row
 // reaching dispatch_state "failed" only ever got there because
 // ExpireStuckPendingMessages swept a writer bug that left it "pending"
 // (nc-promote-busy); hard-deleting it here would destroy real chat history
 // the user never saw fail.
-func TestPurgeFailedMessages_SkipsUserRecipients(t *testing.T) {
+func TestPurgeFailedMessagesChunk_SkipsUserRecipients(t *testing.T) {
 	s := newTestMessageStore(t)
 	ctx := context.Background()
 	projectID := uuid.NewString()
@@ -284,11 +283,10 @@ func TestPurgeFailedMessages_SkipsUserRecipients(t *testing.T) {
 	require.NoError(t, s.CreateMessage(ctx, oldFailedAgent))
 
 	cutoff := time.Now().Add(-7 * 24 * time.Hour)
-	n, err := s.PurgeFailedMessages(ctx, cutoff)
-	require.NoError(t, err)
+	n := purgeAllFailedMessages(t, s, cutoff, 500)
 	assert.Equal(t, 1, n, "only the agent-recipient failed message is purged")
 
-	_, err = s.GetMessage(ctx, oldFailedUser.ID)
+	_, err := s.GetMessage(ctx, oldFailedUser.ID)
 	require.NoError(t, err, "user-recipient failed row must survive — it is never a real dispatch failure")
 	_, err = s.GetMessage(ctx, oldFailedAgent.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)

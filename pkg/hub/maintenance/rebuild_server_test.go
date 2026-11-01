@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/unitdrift"
+	"github.com/GoogleCloudPlatform/scion/pkg/preflight"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -543,5 +544,53 @@ func TestRebuildServer_UnsupportedSnapshotStillRebuilds(t *testing.T) {
 	if !strings.Contains(log.String(), "No database snapshot taken: PostgreSQL databases are not snapshotted. The rebuild goes ahead without one.\n") ||
 		strings.Contains(log.String(), "downgrades") {
 		t.Fatalf("missing the rebuild's no-snapshot line:\n%s", log.String())
+	}
+}
+
+// The required-settings check (upstream #4420) warns only: it is written
+// after the installer preflight and before the first checkout step, and
+// the rebuild goes on to install.
+func TestRebuildServer_SettingsCheckWarnsOnly(t *testing.T) {
+	f := newRebuildFixture(t, "")
+	inst := &fakeInstaller{}
+	calls := 0
+	e := NewRebuildServerExecutor(RebuildServerOptions{
+		RepoPath:   f.repo,
+		RepoBranch: "main",
+		Installer:  inst,
+		SettingsCheck: func() []preflight.Finding {
+			calls++
+			return unsetTrustedProxiesFinding()
+		},
+	})
+	var log bytes.Buffer
+	if err := e.Run(context.Background(), &log, nil); err != nil {
+		t.Fatalf("Run: %v\n%s", err, log.String())
+	}
+	out := log.String()
+	if calls != 1 {
+		t.Errorf("settings check ran %d times, want 1", calls)
+	}
+	section := strings.Index(out, "==> Settings check")
+	first := strings.Index(out, "==> Fetching latest code")
+	pre := strings.Index(out, "Preflight passed.")
+	if section < 0 || first < 0 || pre < 0 || section > first || pre > section {
+		t.Fatalf("the settings check is not between the preflight and the first step:\n%s", out)
+	}
+	if !strings.Contains(out, "WARNING ["+preflight.TransportProxyCheckName+".trusted_proxies_not_set]") {
+		t.Errorf("log lacks the warning:\n%s", out)
+	}
+	if !strings.Contains(out, "==> Installing "+testGitRelease) || !strings.Contains(strings.Join(inst.calls, ","), "restart") {
+		t.Errorf("the rebuild did not go on to install and restart (calls %v):\n%s", inst.calls, out)
+	}
+
+	// Without a settings check there is no section.
+	var plain bytes.Buffer
+	e2 := NewRebuildServerExecutor(RebuildServerOptions{RepoPath: f.repo, RepoBranch: "main", Installer: &fakeInstaller{}})
+	if err := e2.Run(context.Background(), &plain, nil); err != nil {
+		t.Fatalf("Run: %v\n%s", err, plain.String())
+	}
+	if strings.Contains(plain.String(), "Settings check") {
+		t.Errorf("a section without a settings check:\n%s", plain.String())
 	}
 }

@@ -1503,6 +1503,78 @@ describe('scion-page-admin-server-config', () => {
       expect(errText).toContain('admin_emails');
     });
 
+    it('422 validation_error entries render inline errors (ptone/scion#4450)', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 422,
+            body: {
+              error: {
+                code: 'validation_error',
+                message: 'server.hub.admin_emails: invalid email format',
+                details: {
+                  field: 'server.hub.admin_emails',
+                  errors: [
+                    {
+                      section: 'access',
+                      field: 'server.hub.admin_emails',
+                      path: '/admin_emails',
+                      message: 'invalid email format',
+                    },
+                  ],
+                },
+              },
+            },
+          }),
+        })
+      );
+
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await (element as any).updateComplete;
+
+      const errorsEl = query(element, '.validation-errors');
+      expect(errorsEl).not.toBeNull();
+      const errText = errorsEl!.textContent ?? '';
+      expect(errText).toContain('invalid email format');
+      expect(errText).toContain('admin_emails');
+    });
+
+    it('a nested 409 revision_conflict renders the conflict banner', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 409,
+            body: {
+              error: {
+                code: 'revision_conflict',
+                message: 'One or more sections have been modified since the expected revision.',
+                details: {
+                  conflicted: [{ section: 'access', expected_revision: 3, current_revision: 5 }],
+                },
+              },
+            },
+          }),
+        })
+      );
+
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await (element as any).updateComplete;
+
+      const bannerEl = query(element, '.conflict-banner');
+      expect(bannerEl).not.toBeNull();
+      expect(bannerEl!.textContent ?? '').toContain('access');
+    });
+
     it('409 revision_conflict renders conflict banner with Reload button', async () => {
       const config = makeBaseConfig({ settings_tier: 'db' });
 

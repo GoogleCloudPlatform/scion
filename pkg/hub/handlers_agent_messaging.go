@@ -1514,6 +1514,11 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			// lifecycle events.
 			persisting := bp.subscribeProjectUserMessages(agent.ProjectID)
 			recordLogged = persisting
+			// The persisting subscriber stores the row under the id and
+			// creation time already used for the receipt (message_id) and
+			// the published Timestamp.
+			structuredMsg.PersistMessageID = storeMsg.ID
+			structuredMsg.PersistCreatedAt = storeMsg.CreatedAt
 			err := bp.PublishUserMessage(ctx, agent.ProjectID, result.RecipientID, structuredMsg)
 			if errors.Is(err, eventbus.ErrReservedChannel) {
 				// Nothing was published or stored: the request named a
