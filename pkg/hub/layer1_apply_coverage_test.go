@@ -61,11 +61,6 @@ var layer1NotWritableKeys = map[string]string{
 	"default_agent_role":     "accepted only as an unchanged echo of GET (dbUnwrittenLayer1Paths)",
 }
 
-// layer1ExemptKeys are Layer-1 koanf paths left out of this check.
-var layer1ExemptKeys = map[string]string{
-	"server.auth.authorized_domains": "handled in a separate change",
-}
-
 func observeLocked[T any](f func(s *Server) T) func(s *Server, _ *OperationalSettings) any {
 	return func(s *Server, _ *OperationalSettings) any {
 		s.mu.RLock()
@@ -208,6 +203,9 @@ func layer1LiveProbes(t *testing.T) map[string]layer1LiveProbe {
 			observe: observeLocked(func(s *Server) any { return s.config.UserAccessMode })},
 		"server.auth.default_user_role": {section: "access", doc: `{"default_user_role":"viewer"}`,
 			observe: observeLocked(func(s *Server) any { return s.config.DefaultUserRole })},
+		// ptone/scion#6000: a saved list was stored but not applied.
+		"server.auth.authorized_domains": {section: "access", doc: `{"authorized_domains":["probe.example.com"]}`,
+			observe: func(s *Server, _ *OperationalSettings) any { return s.AuthorizedDomains() }},
 
 		// lifecycle
 		"server.hub.auto_suspend_stalled": {section: "lifecycle", doc: `{"auto_suspend_stalled":true}`,
@@ -346,12 +344,6 @@ func TestLayer1Keys_AppliedLiveOrRestartRequired(t *testing.T) {
 		_, live := probes[key]
 		restart := opsettings.IsRestartRequired(key)
 		_, exempt := layer1NotWritableKeys[key]
-		if _, skip := layer1ExemptKeys[key]; skip {
-			if live || restart || exempt {
-				t.Errorf("%s is exempt from this check but also has a probe, the restart_required flag or a not-writable entry", key)
-			}
-			continue
-		}
 		switch {
 		case live && restart:
 			t.Errorf("%s has a live-apply probe and is flagged restart_required; it must be one or the other", key)
