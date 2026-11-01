@@ -163,9 +163,10 @@ func TestValidateManifestPaths_SeparatorBoundary(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "exact root path",
+			name: "exact home and extra roots",
 			mutate: func(m *containerProvisionManifest) {
-				m.HarnessBundleDir = "/home/agent/.scion/harness"
+				m.Inputs["auth_candidates"] = home
+				m.Outputs.Env = extraRoot
 			},
 			wantErr: false,
 		},
