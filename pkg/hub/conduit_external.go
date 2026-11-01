@@ -143,6 +143,9 @@ type conduitExternalRuntime struct {
 	// legs counts the hub's open proxied legs; the drain step holds them
 	// and closes the ones left at its deadline.
 	legs conduitIngressLegs
+	// ingressPending holds this hub's placements the relays' session
+	// counts may not include yet (see conduitIngressPending).
+	ingressPending conduitIngressPending
 }
 
 // StartConduitExternal starts the hub's side of external relay mode: the
