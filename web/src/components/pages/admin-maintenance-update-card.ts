@@ -1186,8 +1186,8 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
     const checkoutNote = running
       ? nothing
       : html`<div class="git-check-note">
-          The running build's commit could not be found in the repository checkout, so the
-          checkout was compared instead.
+          The running build's commit could not be found in the repository checkout, so the checkout
+          was compared instead.
         </div>`;
     if (!r.update_available) {
       return html`<div class="git-check up-to-date">
