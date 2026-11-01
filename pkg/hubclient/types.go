@@ -381,6 +381,11 @@ type RuntimeBroker struct {
 	// VersionStatus compares Version with the fleet hub version: match,
 	// mismatch or unknown. Empty for a plugin record, or from an older Hub.
 	VersionStatus string `json:"versionStatus,omitempty"`
+	// Health is the broker's last self-reported health as the Hub stored
+	// it (fixed words only, api.NormalizeBrokerHealthReport); nil when the
+	// broker never reported it. Its control_channel check says whether the
+	// Hub can send the broker commands.
+	Health *api.BrokerHealthReport `json:"health,omitempty"`
 }
 
 // BrokerCapabilities describes runtime broker capabilities.

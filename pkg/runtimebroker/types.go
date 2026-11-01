@@ -175,6 +175,15 @@ type HubConnectionInfo struct {
 	IsColocated       bool   `json:"isColocated,omitempty"`
 	HasHeartbeat      bool   `json:"hasHeartbeat"`
 	HasControlChannel bool   `json:"hasControlChannel"`
+	// CommandPath is whether the hub can send commands over this
+	// connection's control channel: healthy, unknown (starting or
+	// reconnecting) or unhealthy (ControlChannelClient.CommandPathState).
+	// Empty when the connection runs no control channel.
+	CommandPath string `json:"commandPath,omitempty"`
+	// TransportRefused reports that the hub's transport policy refused the
+	// last dial of this connection's control channel or conduit (the hub
+	// requires TLS or a proxy it trusts: server.trusted_proxies).
+	TransportRefused bool `json:"transportRefused,omitempty"`
 }
 
 // ============================================================================

@@ -93,7 +93,16 @@ func matchesAgentProject(a api.AgentInfo, projectID string) bool {
 // GetHealthInfo returns the current health status of the Runtime Broker server.
 // This can be called directly by co-located components (e.g., the WebServer)
 // to build composite health responses without making an HTTP round-trip.
+// Its command path checks cover every hub connection (the worst value of
+// each); a heartbeat reports only its own connection's
+// (heartbeatHealthReportFor).
 func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
+	return s.healthInfo(ctx, s.hubConnectionList())
+}
+
+// healthInfo is GetHealthInfo with the command path checks taken from
+// conns only.
+func (s *Server) healthInfo(_ context.Context, conns []*HubConnection) *HealthResponse {
 	checks := make(map[string]string)
 
 	// Check runtime availability. A degraded default runtime (the
@@ -155,7 +164,7 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 		status = degradeHealthStatus(status)
 	}
 
-	if s.addHubTransportRefusalChecks(checks) {
+	if addCommandPathChecks(checks, conns) {
 		status = degradeHealthStatus(status)
 	}
 
@@ -167,42 +176,71 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 	}
 }
 
-// Health checks reported while a hub refuses this broker's command paths
-// under its transport policy.
+// Health checks reporting whether the hub can send commands to this
+// broker (its command path): the control channel, and the conduit.
 const (
 	healthCheckControlChannel = "control_channel"
 	healthCheckConduit        = "conduit"
 )
 
-// addHubTransportRefusalChecks sets control_channel and conduit to
-// unhealthy when the last dial of a hub connection's control channel or
-// conduit was refused by the hub's transport policy (the hub requires TLS
-// or a proxy it trusts), and reports whether it set either. The heartbeat
-// carries them, so the hub's health summary shows a broker that is online
-// but cannot receive commands.
-func (s *Server) addHubTransportRefusalChecks(checks map[string]string) bool {
-	s.hubMu.RLock()
-	conns := make([]*HubConnection, 0, len(s.hubConnections))
-	for _, hc := range s.hubConnections {
-		conns = append(conns, hc)
+// addCommandPathChecks sets control_channel and conduit from the command
+// paths of conns, and reports whether either is unhealthy (the broker is
+// degraded then). control_channel is set for every connection that runs a
+// control channel (ControlChannelClient.CommandPathState: healthy, or
+// unhealthy when refused by the hub's transport policy or not connected past
+// the grace; while starting or reconnecting within the grace, nothing); a
+// connection without one (the control channel disabled, or no credentials)
+// reports nothing.
+// conduit is set only when there is something to report
+// (ConduitDialer.CommandPathState). With several connections the worst
+// value of each check is reported: the broker's own /healthz passes all of
+// them, while each heartbeat passes only its own connection, so a hub is
+// never told about another hub's control channel. The hub's health summary
+// then shows a broker that is online but cannot receive commands.
+func addCommandPathChecks(checks map[string]string, conns []*HubConnection) bool {
+	set := func(name, value string) {
+		if value != "" && commandPathRank(value) > commandPathRank(checks[name]) {
+			checks[name] = value
+		}
 	}
-	s.hubMu.RUnlock()
-
-	set := false
 	for _, hc := range conns {
 		hc.mu.RLock()
 		cc, cd := hc.ControlChannel, hc.conduitDialer
 		hc.mu.RUnlock()
-		if cc != nil && cc.TransportRefused() {
-			checks[healthCheckControlChannel] = api.BrokerHealthUnhealthy
-			set = true
+		// unknown (starting or reconnecting, within the grace) is not
+		// reported: it is not a failure, and surfaces that list every
+		// non-passing check would show it on a healthy broker.
+		if v := commandPathOf(cc); v != api.BrokerHealthUnknown {
+			set(healthCheckControlChannel, v)
 		}
-		if cd != nil && cd.TransportRefused() {
-			checks[healthCheckConduit] = api.BrokerHealthUnhealthy
-			set = true
+		if cd != nil {
+			set(healthCheckConduit, cd.CommandPathState())
 		}
 	}
-	return set
+	return checks[healthCheckControlChannel] == api.BrokerHealthUnhealthy ||
+		checks[healthCheckConduit] == api.BrokerHealthUnhealthy
+}
+
+// commandPathOf is cc's CommandPathState, or "" for no control channel.
+func commandPathOf(cc *ControlChannelClient) string {
+	if cc == nil {
+		return ""
+	}
+	return cc.CommandPathState()
+}
+
+// commandPathRank orders command path values from best to worst, so that
+// with several hub connections the worst is reported: nothing, healthy,
+// unhealthy.
+func commandPathRank(v string) int {
+	switch v {
+	case api.BrokerHealthHealthy:
+		return 1
+	case api.BrokerHealthUnhealthy:
+		return 2
+	default:
+		return 0
+	}
 }
 
 // heartbeatHealthReport returns the broker's health for the heartbeat,
@@ -212,13 +250,29 @@ func (s *Server) addHubTransportRefusalChecks(checks map[string]string) bool {
 // normalised to fixed values (api.NormalizeBrokerHealthReport): the
 // per-share detail /healthz shows (share IDs, mount errors) is not sent,
 // so nfs_mounts is "healthy" or "unhealthy". The hub stores it for display
-// only; it never changes the broker's online/offline status.
+// only; it never changes the broker's online/offline status. It carries no
+// command path checks: a hub connection's heartbeat uses
+// heartbeatHealthReportFor, which adds that connection's own.
 func (s *Server) heartbeatHealthReport(ctx context.Context) *api.BrokerHealthReport {
-	info := s.GetHealthInfo(ctx)
-	if info == nil {
-		return nil
+	return s.heartbeatHealthReportFor(nil)(ctx)
+}
+
+// heartbeatHealthReportFor returns the heartbeat health of hub connection
+// hc: heartbeatHealthReport plus the command path checks of hc alone
+// (control_channel and conduit), never another connection's. A nil hc
+// reports no command path checks.
+func (s *Server) heartbeatHealthReportFor(hc *HubConnection) func(ctx context.Context) *api.BrokerHealthReport {
+	var conns []*HubConnection
+	if hc != nil {
+		conns = []*HubConnection{hc}
 	}
-	return api.NormalizeBrokerHealthReport(&api.BrokerHealthReport{Status: info.Status, Checks: info.Checks})
+	return func(ctx context.Context) *api.BrokerHealthReport {
+		info := s.healthInfo(ctx, conns)
+		if info == nil {
+			return nil
+		}
+		return api.NormalizeBrokerHealthReport(&api.BrokerHealthReport{Status: info.Status, Checks: info.Checks})
+	}
 }
 
 // degradeHealthStatus lowers a healthy status to degraded. Any other
@@ -619,6 +673,13 @@ func (s *Server) handleHubConnections(w http.ResponseWriter, r *http.Request) {
 			IsColocated:       conn.IsColocated,
 			HasHeartbeat:      snap.Heartbeat != nil,
 			HasControlChannel: snap.HasControlChannel,
+		}
+		if cc := snap.ControlChannel; cc != nil {
+			info.CommandPath = cc.CommandPathState()
+			info.TransportRefused = cc.TransportRefused()
+		}
+		if cd := snap.ConduitDialer; cd != nil && cd.TransportRefused() {
+			info.TransportRefused = true
 		}
 		connections = append(connections, info)
 	}
