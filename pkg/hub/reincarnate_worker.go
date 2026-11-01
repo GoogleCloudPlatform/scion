@@ -1026,12 +1026,11 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 // reincarnationRerenderTimeout bounds the best-effort re-render of the
 // previous config after a failed reincarnation (rerenderPreviousConfig). A
 // reprovision dispatch can make two broker round trips (the env-gather first
-// pass, then the replay with the gathered env), each bounded by the broker
-// transport's own timeout (the control-channel RequestTimeout, 120s by
-// default), so this allows both plus margin. It is well inside
-// reincarnationStaleAfter, so the sweep cannot resolve the record while the
-// re-render is still running.
-const reincarnationRerenderTimeout = 5 * time.Minute
+// pass, then the replay with the gathered env), each bounded by the
+// hub-to-broker request limit (brokerRequestTimeout), so this allows both
+// plus a minute of margin. It is well inside reincarnationStaleAfter, so the
+// sweep cannot resolve the record while the re-render is still running.
+const reincarnationRerenderTimeout = 2*brokerRequestTimeout + time.Minute
 
 // reincarnationStartLeftNoContainer reports whether a DispatchAgentStart
 // error is a definitive outcome that leaves no gen N+1 container: the broker

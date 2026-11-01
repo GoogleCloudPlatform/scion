@@ -231,13 +231,16 @@ func TestHeartbeatHealth_TransportRefusalReportsCommandPath(t *testing.T) {
 		srv.hubMu.Unlock()
 	})
 
-	heartbeat := sendHealthHeartbeat(t, srv)
+	heartbeat := sendConnectionHealthHeartbeat(t, srv, hc)
 	require.NotNil(t, heartbeat.Health)
 	assert.Equal(t, api.BrokerHealthDegraded, heartbeat.Health.Status)
 	assert.Equal(t, api.BrokerHealthUnhealthy, heartbeat.Health.Checks[healthCheckControlChannel])
 	assert.Equal(t, api.BrokerHealthUnhealthy, heartbeat.Health.Checks[healthCheckConduit])
 	assert.Equal(t, "online", heartbeat.Status, "health never changes liveness")
 
+	// Refusal cleared: the channel, created just now and not connected,
+	// is within its grace, and a conduit with no session; neither is
+	// reported, and neither degrades the broker.
 	cc.setTransportRefusal(nil)
 	cd.transportRefused.Store(false)
 	info := srv.GetHealthInfo(context.Background())

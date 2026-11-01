@@ -79,6 +79,81 @@ describe('scion-review-editor review-change', () => {
   });
 });
 
+describe('scion-review-editor scrollInset', () => {
+  type Sides = { top: number; right: number; bottom: number; left: number };
+  const props = (el: ScionReviewEditor): { margin: Sides; threshold: Sides } => {
+    const view = controllerOf(el).view;
+    return {
+      margin: view.someProp('scrollMargin') as Sides,
+      threshold: view.someProp('scrollThreshold') as Sides,
+    };
+  };
+
+  it('keeps a caret scrolled into view clear of the pinned toolbar', async () => {
+    const { el } = await mount('a dog\n');
+    el.scrollInset = 100;
+    await el.updateComplete;
+    // A caret under the toolbar counts as out of view, and lands below it.
+    expect(props(el).margin.top).toBe(108);
+    expect(props(el).threshold.top).toBe(108);
+    el.scrollInset = 40.4;
+    await el.updateComplete;
+    expect(props(el).margin.top).toBe(49);
+    expect(props(el).margin.bottom).toBe(5);
+  });
+
+  it('keeps focused comment badges and links clear of the pinned toolbar', async () => {
+    const { el } = await mount('a {==dog==}{>>Why?<<} and [a link](https://example.com)\n');
+    el.scrollInset = 100;
+    await el.updateComplete;
+    // Focus scrolling reads scroll-margin, which reads this height.
+    const root = el.shadowRoot!.querySelector<HTMLElement>('.editor-root')!;
+    expect(root.style.getPropertyValue('--review-scroll-inset')).toBe('108px');
+    const badge = root.querySelector<HTMLElement>('.critic-comment')!;
+    expect(badge.getAttribute('tabindex')).toBe('0');
+    const css = Array.from(el.shadowRoot!.adoptedStyleSheets ?? [])
+      .flatMap((sheet) => Array.from(sheet.cssRules))
+      .map((r) => r.cssText)
+      .join('\n');
+    expect(css).toMatch(
+      /\.editor-root \[tabindex\],\s*\.editor-root a\[href\]\s*\{\s*scroll-margin-top: var\(--review-scroll-inset, 0px\);/
+    );
+    // 0, nothing pinned: today's behaviour, ProseMirror's defaults and a 0
+    // scroll-margin (the CSS default).
+    el.scrollInset = 0;
+    await el.updateComplete;
+    // Always set here, so an inherited value cannot act as a second input.
+    expect(root.style.getPropertyValue('--review-scroll-inset')).toBe('0px');
+    expect(props(el).margin).toEqual({ top: 5, right: 5, bottom: 5, left: 5 });
+    expect(props(el).threshold).toEqual({ top: 0, right: 0, bottom: 0, left: 0 });
+  });
+
+  it('treats a negative, NaN or infinite inset as nothing pinned', async () => {
+    const { el } = await mount('a dog\n');
+    const root = el.shadowRoot!.querySelector<HTMLElement>('.editor-root')!;
+    for (const bad of [-40, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      el.scrollInset = 100;
+      await el.updateComplete;
+      el.scrollInset = bad;
+      await el.updateComplete;
+      expect(root.style.getPropertyValue('--review-scroll-inset'), String(bad)).toBe('0px');
+      expect(props(el).margin.top, String(bad)).toBe(5);
+      expect(props(el).threshold.top, String(bad)).toBe(0);
+    }
+  });
+
+  it('applies an inset set before the editor started', async () => {
+    const el = document.createElement('scion-review-editor') as ScionReviewEditor;
+    el.content = 'a dog\n';
+    el.entryPath = 'doc.md';
+    el.scrollInset = 60;
+    document.body.append(el);
+    await el.updateComplete;
+    await el.ready;
+    expect(props(el).margin.top).toBe(68);
+  });
+});
+
 /**
  * The comment card (ptone/scion#6850): a read-only tooltip whose last line
  * says how the reviewer's own comment is edited, or that an earlier one is

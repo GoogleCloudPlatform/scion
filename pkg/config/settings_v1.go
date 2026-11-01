@@ -171,7 +171,9 @@ func applyHarnessOverride(result HarnessConfigEntry, override V1HarnessOverride)
 // *ActiveProfileError naming the configured value and the stored profiles.
 // A named profile missing
 // from an overlaid map gives a *StoredProfileNotFoundError naming it and
-// the stored profiles.
+// the stored profiles. When the overlay supplied the profiles and the
+// resolved profile names a runtime the runtimes do not define, the error
+// is a *StoredProfileRuntimeNotFoundError (ptone/scion#4889).
 // The runtime type is V1RuntimeConfig.Type if set, otherwise the map key name.
 func (vs *VersionedSettings) ResolveRuntime(profileName string) (V1RuntimeConfig, string, error) {
 	if profileName == "" {
@@ -189,6 +191,9 @@ func (vs *VersionedSettings) ResolveRuntime(profileName string) (V1RuntimeConfig
 	}
 	rtConfig, ok := vs.Runtimes[profile.Runtime]
 	if !ok {
+		if vs.storedProfileNames != nil {
+			return V1RuntimeConfig{}, "", &StoredProfileRuntimeNotFoundError{Profile: profileName, Runtime: profile.Runtime, Available: sortedNames(vs.Runtimes)}
+		}
 		return V1RuntimeConfig{}, "", fmt.Errorf("runtime %q not found for profile %q", profile.Runtime, profileName)
 	}
 

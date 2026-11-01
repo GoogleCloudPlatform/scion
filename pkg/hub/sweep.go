@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -41,6 +42,34 @@ var stuckMessageCountCap = 1000
 // for dispatch_state="failed" messages when
 // Server.Config.FailedMessageRetentionDays is unset or non-positive.
 const defaultFailedMessageRetentionDays = 7
+
+// The failed-message retention purge deletes in chunks so it never holds
+// the database (on SQLite, the single connection) for long
+// (ptone/scion#6954). Vars (not consts) so tests can shrink them.
+var (
+	// failedPurgeChunkSize bounds the rows one purge transaction examines.
+	failedPurgeChunkSize = 500
+	// failedPurgeTxBudget bounds how long one purge transaction runs; the
+	// store stops the chunk early after the delete batch in flight.
+	failedPurgeTxBudget = 250 * time.Millisecond
+	// failedPurgeChunkPause is the wait between chunk transactions, so
+	// requests queued on the released connection run before the next chunk.
+	failedPurgeChunkPause = 50 * time.Millisecond
+	// failedPurgeTickBudget bounds the wall time of one purge tick, well
+	// inside the handler's 30 s context. A tick always runs at least one
+	// chunk; an unfinished pass resumes from the cursor at the next tick.
+	failedPurgeTickBudget = 20 * time.Second
+)
+
+// failedPurgeState is the in-memory resume cursor of the failed-message
+// retention purge. The cursor resets to the start when a pass finishes, so
+// rows that become failed after the walk passed their (created, id) — the
+// stuck-pending expiry keeps a row's original created — are reached on the
+// next pass. Losing it on restart only costs a rescan from the start.
+type failedPurgeState struct {
+	mu     sync.Mutex
+	cursor store.MessagePosition
+}
 
 // missingRecipientFailureReason is recorded on messages that are failed early
 // by brokerMessageSweepHandler because their recipient agent no longer exists.
@@ -142,14 +171,15 @@ func (s *Server) failedMessageRetentionHandler() func(ctx context.Context) {
 		}
 		cutoff := time.Now().UTC().AddDate(0, 0, -retentionDays)
 
-		purged, err := s.store.PurgeFailedMessages(ctx, cutoff)
+		purged, chunks, done, err := s.purgeFailedMessages(ctx, cutoff)
+		if purged > 0 {
+			s.agentLifecycleLog.Info("failed-message-retention: purged failed messages",
+				"count", purged, "chunks", chunks, "passComplete", done,
+				"retentionDays", retentionDays, "cutoff", cutoff)
+		}
 		if err != nil {
 			s.agentLifecycleLog.Error("failed-message-retention: purge failed", "error", err)
 			return
-		}
-		if purged > 0 {
-			s.agentLifecycleLog.Info("failed-message-retention: purged failed messages",
-				"count", purged, "retentionDays", retentionDays, "cutoff", cutoff)
 		}
 
 		// Drop webchat mention rows whose message is gone. The webchat
@@ -168,6 +198,44 @@ func (s *Server) failedMessageRetentionHandler() func(ctx context.Context) {
 			if orphans > 0 {
 				s.agentLifecycleLog.Info("failed-message-retention: purged orphan mention rows",
 					"count", orphans)
+			}
+		}
+	}
+}
+
+// purgeFailedMessages runs one tick of the chunked failed-message purge:
+// chunk transactions of at most failedPurgeChunkSize rows and
+// failedPurgeTxBudget each, separated by failedPurgeChunkPause, from the
+// saved cursor until the pass completes or failedPurgeTickBudget is spent.
+// It returns the rows deleted, the chunks run and whether the pass
+// completed. On error the cursor keeps the last committed chunk's position.
+func (s *Server) purgeFailedMessages(ctx context.Context, cutoff time.Time) (purged, chunks int, done bool, err error) {
+	s.failedPurge.mu.Lock()
+	defer s.failedPurge.mu.Unlock()
+
+	start := time.Now()
+	for {
+		res, chunkErr := s.store.PurgeFailedMessagesChunk(ctx, cutoff, s.failedPurge.cursor, failedPurgeChunkSize, failedPurgeTxBudget)
+		if chunkErr != nil {
+			return purged, chunks, false, chunkErr
+		}
+		chunks++
+		purged += res.Deleted
+		if res.Done {
+			s.failedPurge.cursor = store.MessagePosition{}
+			return purged, chunks, true, nil
+		}
+		s.failedPurge.cursor = res.Next
+		if time.Since(start)+failedPurgeChunkPause >= failedPurgeTickBudget {
+			return purged, chunks, false, nil
+		}
+		if failedPurgeChunkPause > 0 {
+			t := time.NewTimer(failedPurgeChunkPause)
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return purged, chunks, false, ctx.Err()
+			case <-t.C:
 			}
 		}
 	}

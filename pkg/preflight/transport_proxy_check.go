@@ -16,6 +16,7 @@ package preflight
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/url"
 	"strings"
@@ -48,19 +49,26 @@ func TransportProxyCheck() Check {
 // runTransportProxyCheck never returns an error, so the registry never
 // turns it into a blocking could_not_run finding: a server config that does
 // not load is a warning here (the hub's own startup reports the cause).
-// The error text is logged only, since it may quote settings values.
+// Only the error's type is logged, never its text, which may quote
+// settings values.
 func runTransportProxyCheck(_ context.Context, env Env) ([]Finding, error) {
 	cfg, err := loadTransportProxyConfig(env.ServerConfigPath)
 	if err != nil {
-		slog.Warn("preflight: the server config does not load", "error", err)
-		return []Finding{{
-			Code:        TransportProxyCheckName + ".config_not_loaded",
-			Severity:    SeverityWarn,
-			Message:     "the server config does not load, so " + config.TrustedProxiesKey + " could not be checked",
-			Remediation: "fix the server config; the hub reports the cause when it starts",
-		}}, nil
+		slog.Warn("preflight: the server config does not load", "error_type", fmt.Sprintf("%T", err))
+		return []Finding{transportProxyConfigNotLoaded()}, nil
 	}
 	return transportProxyFindings(cfg), nil
+}
+
+// transportProxyConfigNotLoaded is the warning for a server config that
+// does not load.
+func transportProxyConfigNotLoaded() Finding {
+	return Finding{
+		Code:        TransportProxyCheckName + ".config_not_loaded",
+		Severity:    SeverityWarn,
+		Message:     "the server config does not load, so " + config.TrustedProxiesKey + " could not be checked",
+		Remediation: "fix the server config; the hub reports the cause when it starts",
+	}
 }
 
 // transportProxyFindings returns the warning for a hub whose public URL is

@@ -61,7 +61,8 @@ func ParseTrustedProxies(entries []string) ([]*net.IPNet, error) {
 func DefaultLocalTrustedProxies() []*net.IPNet {
 	return []*net.IPNet{
 		{IP: net.IPv4(127, 0, 0, 1).To4(), Mask: net.CIDRMask(32, 32)},
-		{IP: net.IPv6loopback, Mask: net.CIDRMask(128, 128)},
+		// A copy: net.IPv6loopback is a shared package variable.
+		{IP: append(net.IP(nil), net.IPv6loopback...), Mask: net.CIDRMask(128, 128)},
 	}
 }
 

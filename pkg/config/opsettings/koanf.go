@@ -580,8 +580,20 @@ func DetectDeprecatedServerEnv(serverEnvKoanf *koanf.Koanf) []DeprecatedEnvVar {
 // variable is the supported way to pin the value on a node, not a
 // deprecated seed input. server.hub.public_url resolves env first, then the
 // database, then settings.yaml (ptone/scion#3905).
+// server.auth.authorized_domains resolves the same way (ptone/scion#6000):
+// a node that restricts sign-in through SCION_SERVER_* keeps that list
+// whatever is saved. This differs on purpose from the other access keys,
+// where a saved value wins over SCION_SERVER_*.
 var envPinnedLayer1Keys = map[string]bool{
-	"server.hub.public_url": true,
+	"server.hub.public_url":          true,
+	"server.auth.authorized_domains": true,
+}
+
+// IsEnvPinnedLayer1Key reports whether a SCION_SERVER_* variable pins the
+// Layer-1 key on a node (envPinnedLayer1Keys), so the saved value does not
+// apply where the variable is set.
+func IsEnvPinnedLayer1Key(key string) bool {
+	return envPinnedLayer1Keys[key]
 }
 
 // koanfKeyToEnvSuffix converts a koanf key back to the env var suffix form:

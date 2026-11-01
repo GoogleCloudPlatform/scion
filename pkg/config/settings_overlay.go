@@ -16,6 +16,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -235,6 +236,43 @@ type StoredProfileNotFoundError struct {
 func (e *StoredProfileNotFoundError) Error() string {
 	return fmt.Sprintf("profile %q not found in the hub's stored profiles (available profiles: %s)",
 		e.Requested, joinAvailableProfiles(e.Available, e.Retained))
+}
+
+// StoredProfileRuntimeNotFoundError reports that a profile resolved from
+// the hub's stored profiles (named, saved, or the default profile) names a
+// runtime that the runtimes, after the overlay, do not define
+// (ptone/scion#4889). Stored settings are authoritative on a broker that
+// applies the overlay, so a dispatch with this profile must fail instead of
+// falling back to the broker's default runtime. Its text keeps the
+// "runtime %q not found for profile %q" form and adds the available
+// runtimes.
+type StoredProfileRuntimeNotFoundError struct {
+	// Profile is the resolved profile name.
+	Profile string
+	// Runtime is the runtimes key the profile names.
+	Runtime string
+	// Available is the sorted list of runtime names that are defined.
+	Available []string
+}
+
+func (e *StoredProfileRuntimeNotFoundError) Error() string {
+	available := "none"
+	if len(e.Available) > 0 {
+		available = strings.Join(e.Available, ", ")
+	}
+	return fmt.Sprintf("runtime %q not found for profile %q in the hub's stored settings (available runtimes: %s)",
+		e.Runtime, e.Profile, available)
+}
+
+// IsStoredProfileError reports whether err is one of the typed errors
+// ResolveRuntime returns when the hub's stored profiles do not resolve:
+// *ActiveProfileError, *StoredProfileNotFoundError or
+// *StoredProfileRuntimeNotFoundError.
+func IsStoredProfileError(err error) bool {
+	var ape *ActiveProfileError
+	var spe *StoredProfileNotFoundError
+	var sre *StoredProfileRuntimeNotFoundError
+	return errors.As(err, &ape) || errors.As(err, &spe) || errors.As(err, &sre)
 }
 
 // joinAvailableProfiles lists the stored profile names, then the retained

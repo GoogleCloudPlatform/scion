@@ -28,7 +28,7 @@ Settings are classified into two layers:
 | Layer | Examples | Behavior |
 |-------|----------|----------|
 | **Layer-0** (bootstrap) | `server.mode`, `server.database.*`, `server.storage.*`, `server.secrets.*`, `server.hub.port`, `server.auth.dev_mode` | Always resolved from bootstrap configuration (`settings.yaml` and environment). Editable through the admin UI only on workstation Hubs; see [Layer-0 edits by deployment mode](#layer-0-edits-by-deployment-mode). |
-| **Layer-1** (operational) | `server.hub.admin_emails`, `server.auth.user_access_mode`, `server.auth.default_user_role`, `server.hub.public_url`, `server.hub.hub_name`, `image_registry`, `telemetry.*`, the agent defaults (top-level `default_*` keys such as `default_template` and `default_timezone`), `server.github_app.*`, `server.notification_channels`, `server.federation.*`, `runtimes`, `profiles`, `harness_configs`, `auto_expose_ports.enabled`, `quotas.enforce_broker_quotas`, `agent_secrets.user_scope_only`, `project_defaults.default_scratchpad`, `server.hub.observability.metrics_enabled`, `server.hub.observability.tracing_enabled` | Stored in the Hub database on every driver and editable via the admin UI. Bootstrap values serve as initial defaults. |
+| **Layer-1** (operational) | `server.hub.admin_emails`, `server.auth.user_access_mode`, `server.auth.default_user_role`, `server.auth.authorized_domains`, `server.hub.public_url`, `server.hub.hub_name`, `image_registry`, `telemetry.*`, the agent defaults (top-level `default_*` keys such as `default_template` and `default_timezone`), `server.github_app.*`, `server.notification_channels`, `server.federation.*`, `runtimes`, `profiles`, `harness_configs`, `auto_expose_ports.enabled`, `quotas.enforce_broker_quotas`, `agent_secrets.user_scope_only`, `project_defaults.default_scratchpad`, `server.hub.observability.metrics_enabled`, `server.hub.observability.tracing_enabled` | Stored in the Hub database on every driver and editable via the admin UI. Bootstrap values serve as initial defaults. |
 
 For the full key lists by section, see [Layer 0](/scion/reference/server-config/#layer-0--bootstrap-file--env-only) and [Layer 1](/scion/reference/server-config/#layer-1--operational-hub_settings-table) in the server configuration reference.
 
@@ -47,7 +47,7 @@ This applies to `SCION_SERVER_*` too. On a Layer-1 key it is only the top of the
 
 ### `server.hub.public_url`: environment first
 
-`server.hub.public_url` is the one Layer-1 key where an operator setting on the node ranks above the database. The Hub resolves it once at startup, in this order:
+`server.hub.public_url` is one of two Layer-1 keys where an operator setting on the node ranks above the database (the other is [`server.auth.authorized_domains`](#serverauthauthorized_domains-environment-first)). The Hub resolves it once at startup, in this order:
 
 1. **Operator pin.** If the `--base-url` flag, `SCION_SERVER_HUB_ENDPOINT` or `SCION_SERVER_BASE_URL` is set, the Hub uses its operator-configured endpoint: the first of them that is set, in that order, as described in [Hub Endpoint Resolution](/scion/reference/server-config/#hub-endpoint-resolution). A value saved in the database is not used.
 2. **Database.** Otherwise a value an admin saved through the admin API or UI is used, even when `settings.yaml` also sets one. A stale bootstrap file therefore does not override a value managed in the UI. Rows the Hub seeds from bootstrap material at startup do not count as saved values, and a save that leaves the Public URL unchanged (or sends back the value shown) does not store it. A public URL stored by a save in an earlier release stays in effect until an admin clears it.
@@ -63,13 +63,36 @@ The endpoint resolved this way is the Hub endpoint everywhere it is used: the UR
 
 The environment variable for this key is `SCION_SERVER_HUB_ENDPOINT`, and its seed variable is `SCION_SEED_SERVER_HUB_ENDPOINT`. Startup does not use the seed variable to resolve the endpoint, so the admin UI does not show its value as the field value. The spellings `SCION_SERVER_HUB_PUBLICURL` and `SCION_SEED_SERVER_HUB_PUBLICURL` are no longer read; the Hub warns about them at startup and names the replacement. Because the environment pins this key, `SCION_SERVER_HUB_ENDPOINT` is not part of the `SCION_SERVER_*` deprecation for Layer-1 keys.
 
+### `server.auth.authorized_domains`: environment first
+
+The sign-in domain list is applied without a restart, like the other access keys. It resolves in a different order, on purpose: a node whose deployment restricts sign-in keeps that restriction whatever is saved.
+
+1. **Environment pin.** If `SCION_SERVER_AUTH_AUTHORIZEDDOMAINS` is set on the node, the Hub uses its list. A value saved in the database is stored but not applied on that node. The save report lists the key under `skipped`, and the field's environment badge shows the environment value as in effect.
+2. **Database.** Otherwise a list an admin saved is used.
+3. **File and seed.** Otherwise the Hub uses the `settings.yaml` list, then the `SCION_SEED_SERVER_AUTH_AUTHORIZEDDOMAINS` seed.
+
+Clearing the saved list (or saving the access section without one) returns the Hub to the list it started with, from `settings.yaml` and the environment. It does not allow every domain. Each node falls back to its own startup list, so on a Hub with several replicas the list in effect after a clear can differ between nodes whose `settings.yaml` or environment differ. To lift a restriction set in `settings.yaml` or the environment, change the deployment configuration and restart. `GET` shows that startup list while no list is saved, and a save that sends it back stores nothing.
+
+A save that sends `authorized_domains` or `admin_emails` is refused with `422 validation_error`, naming `server.auth.authorized_domains`, if the access settings it would leave in effect refuse sign-in for the account making the save. That is the case when the account's email is not in `admin_emails` (as saved, or the running list when the save leaves it empty) and the domain list in effect after the save is not empty and does not match the email's domain. The domain list in effect is the saved list, or the startup list when none is saved. On a database-backed Hub the saved list is checked even on a node that pins the list, because it applies on every node without the pin, and on this node once the pin is removed. On such a node, a save that sends `admin_emails` is also checked against the pinned list. Nothing is written when the save is refused. In `settings.yaml` mode (a single node), a save that sends only `authorized_domains` while `SCION_SERVER_AUTH_AUTHORIZEDDOMAINS` is set is not checked, because the environment list stays in effect. The check covers the saving account only; it does not stop a save that excludes other administrators.
+
+`SCION_SERVER_AUTH_AUTHORIZEDDOMAINS` is not part of the `SCION_SERVER_*` deprecation for Layer-1 keys. The other access keys (`admin_emails`, `user_access_mode`, `default_user_role`) keep the database-first rule: a saved value wins over their `SCION_SERVER_*` variables.
+
+:::caution[Upgrading]
+Earlier releases stored and showed a saved `server.auth.authorized_domains` on database-backed Hubs but did not enforce it. The Hub ran with the `settings.yaml` and environment list. After upgrading, a saved list is enforced on every node that does not pin the list through `SCION_SERVER_AUTH_AUTHORIZEDDOMAINS`. Before you upgrade, compare the saved list (Server Config page, or `GET /api/v1/admin/server-config`) with your deployment list. At startup the Hub logs `authorized_domains: the saved value differs from the deployment value`, with the list in effect (`in_effect=saved` or `deployment_pin`) and the list sizes (no domain names). On `settings.yaml`-mode Hubs, a saved list now applies without a restart.
+
+If an administrator is locked out after the upgrade:
+
+- **Database-backed Hub:** set `SCION_SERVER_AUTH_AUTHORIZEDDOMAINS` on one node to a list that includes the administrator's email domain, and restart that node. The pin wins over the saved list on that node. Sign in through that node (behind a load balancer, reach it directly, for example with a port-forward to that node), correct the saved list, then remove the variable and restart the node. Adding the email to `admin_emails` in `settings.yaml` or the environment works only when no `admin_emails` is saved, because a saved `admin_emails` list wins over the deployment value.
+- **`settings.yaml`-mode Hub:** add the email to `admin_emails` in `settings.yaml` or the environment and restart. Admin emails are always allowed to sign in. Then correct the list.
+:::
+
 ### Hot reload vs restart
 
 - **Layer-1:** a save applies without a restart. The serving node applies it immediately, and other replicas pick it up through the settings event (within about 2 seconds), with a 60-second poll as a backstop. Live applies are ordered by a store-wide revision so an older snapshot never overwrites a newer one. A few Layer-1 keys take effect only after a restart. The schema endpoint (`GET /api/v1/admin/server-config/schema`) lists them per section in `restart_required`: today `server.hub.public_url` and `server.github_app.app_id`.
 - **Layer-0:** changes take effect only when the Hub restarts. On a workstation Hub, a save that changes a Layer-0 key in `settings.yaml` lists it in the response's `reload.requires_restart`. `log_level` is the exception and applies immediately.
 - **Restoring `hub_settings`:** the Hub orders settings by a revision counter stored in `hub_settings` (the reserved `_settings_revision` row). If the table is restored from a backup, or the database is replaced, while a Hub is running, the stored counter can be lower than the one the Hub has seen. Each replica detects this on its next settings read (the settings event or the 60-second poll), logs a warning (`the stored settings revision went backward`) and resynchronises its settings to the database. This assumes that every replica reads from the one primary database it writes to; the Hub does not route reads to read replicas. The database URL must therefore target the read-write primary: with several hosts in the URL, set `target_session_attrs=read-write`, and do not put the Hub behind a proxy that sends some connections to a standby. Restarting the Hub after a restore is still the most predictable option, in particular for the keys that take effect only after a restart.
 
-Clearing one of these Layer-1 keys returns the running Hub to the value it started with (from `settings.yaml`, the seed or the environment): `soft_delete_retention`, `soft_delete_retain_files`, `auto_expose_ports.enabled` and `telemetry.enabled`. Clearing `image_registry` returns it to the settings-file value (see below). Two sections revert as a whole:
+Clearing one of these Layer-1 keys returns the running Hub to the value it started with (from `settings.yaml`, the seed or the environment): `soft_delete_retention`, `soft_delete_retain_files`, `auto_expose_ports.enabled`, `telemetry.enabled` and `server.auth.authorized_domains` (its startup list comes from `settings.yaml` and the environment only). Clearing `image_registry` returns it to the settings-file value (see below). Two sections revert as a whole:
 
 - **GitHub App:** clearing `app_id` returns all the non-secret GitHub App fields to their startup values. While `app_id` is set, clearing another field applies the empty value, except `private_key_path`, which keeps the startup path.
 - **Telemetry:** a telemetry section with no keys returns to the startup telemetry config. Clearing one telemetry key while others remain applies the config without that key, not its startup value.
@@ -273,6 +296,28 @@ The `profiling` section holds operational switches for in-app profiling. It is s
 - **In the web client:** while it is on, the page shell's initial data carries `"readinessMarks": true` for a signed-in user, the same value that user reads from `GET /api/v1/profiling`. Signed-out pages, and every page while it is off, are served exactly as without the setting. The client reads the value once per page load, so a change applies on the next full load.
 - Off, the client makes no `performance.mark` calls and the server adds nothing to the shell.
 
+## Chat Retention
+
+The `chat_retention` section bounds how long the Hub keeps chat messages (`pkg/config/opsettings/chat_retention.go`). Like `profiling`, it is stored only in the Hub database: it has no `settings.yaml` key and no environment variable, and it is not seeded. An absent row resolves to the compiled defaults (`enabled: false`, `messages_retention_days: null`, default sweep tuning), and a stored document that fails to parse or validate fails closed (`enabled: false`, no window). It is gated by the [`hub.chat_retention`](/scion/reference/experiments/#server-experiments-with-notes) experiment (off by default). The background `"chat-retention"` singleton purges messages only while `hub.chat_retention` is on, `enabled` is `true`, and `messages_retention_days` is set (`enabled: false` doubles as a legal hold).
+
+:::caution[Back up the database before enabling]
+Chat retention irreversibly purges chat messages older than `messages_retention_days` (oldest first, in small paced transactions) along with their message-bound attachments and notifications, while keeping thread records and membership. Take and verify a database backup before enabling `hub.chat_retention` and `chat_retention.enabled`.
+:::
+
+| Key | Type | Default | Constraints | Effect |
+|-----|------|---------|-------------|--------|
+| `enabled` | boolean | `false` | — | Turns the retention sweep on while `hub.chat_retention` is on and `messages_retention_days` is set. While `false`, nothing is purged. |
+| `messages_retention_days` | integer or `null` | `null` (keep forever) | `7`–`36500` when set | Hub-wide age window in days (`ChatRetentionMinDays = 7`, `ChatRetentionMaxDays = 36500`). When `null` (absent in the stored document), messages are kept forever. |
+| `sweep.chunk_size` | integer | `200` | `25`–`1000` | Largest number of messages deleted in one transaction. |
+| `sweep.pause_ms` | integer | `500` | `0`–`10000` | Pause after each chunk, in milliseconds. |
+| `sweep.tick_budget_seconds` | integer | `30` | `1`–`40` | Wall time one tick may run, in seconds. |
+| `sweep.tick_interval_minutes` | integer | `10` | `1`–`1440` | Time between ticks, in minutes. |
+
+- **Permissions and credentials:** `GET /api/v1/admin/chat-retention` and `PUT /api/v1/admin/chat-retention` are both Hub-admin routes (`RouteID: "admin.chatRetention"`, `Classification: RouteHubAdmin`, permission `hub.config.update` on `hub`) restricted to interactive sessions (`SessionOnly: ReasonIrreversibleCascade`); user access tokens and test-admin identities are refused. While the `hub.chat_retention` experiment is off, both `GET` and `PUT` return `404 not_found` (`Route not found`); unsupported HTTP methods return `405` whether or not the experiment is on.
+- **Response (`GET` and `PUT`):** Returns `enabled`, `messages_retention_days` (`null` when no window is set), `sweep` (`chunk_size`, `pause_ms`, `tick_budget_seconds`, `tick_interval_minutes`), `last_applied_cutoff` (the UTC cutoff the sweep last reached, or `null` until it reaches one), and `revision` (the section revision for `expected_revision`).
+- **`PUT` semantics and error codes:** Omitted fields are unchanged; explicit `null` resets a field to its compiled default (`enabled: false`, `messages_retention_days: null`, or default sweep tuning; `"sweep": null` resets all four sweep fields). Changing `enabled` or `messages_retention_days` requires `expected_revision` (`400 invalid_request` if missing); a stale `expected_revision` or concurrent modification returns `409 revision_conflict`. Unknown JSON fields, malformed JSON, or out-of-range values return `400 invalid_request` (or `400 validation_failed` on schema validation). Without database-backed operational settings, `PUT` returns `501 not_implemented`. Every change is written with compare-and-set on the section revision and recorded in the mutation audit (`hub_setting_update` on `chat_retention`, executor `admin-chat-retention`) before the write; if the audit record cannot be written, the save is refused with `500 internal_error` and settings are not changed (`hub_setting_update_not_applied` is recorded if the settings write itself fails).
+- **Admin UI:** While the `hub.chat_retention` web flag is on, **Admin → Server Config** renders the **Chat retention** panel (`<scion-admin-chat-retention>`).
+
 ## HA Bootstrap Guidance
 
 For high-availability deployments with multiple hub replicas:
@@ -352,7 +397,7 @@ Furthermore, these database-backed settings are wired directly into the runtime 
 
 The environment values come from `env_values` in `GET /api/v1/admin/server-config` (see [Environment Override Warnings](/scion/reference/server-config/#environment-override-warnings)). Secret values are masked there as in the rest of the response, and the page never shows them.
 
-`server.auth.authorized_domains` is a special case on database-backed Hubs: the Hub does not apply a saved value (it runs with the startup value from `settings.yaml` and the environment until [ptone/scion#6000](https://github.com/ptone/scion/issues/6000) is fixed). So the environment value is shown as in effect, and the key is not reported as superseded.
+`server.auth.authorized_domains` is a special case on database-backed Hubs: `SCION_SERVER_AUTH_AUTHORIZEDDOMAINS` pins the list on the node (see [`server.auth.authorized_domains`: environment first](#serverauthauthorized_domains-environment-first)). So when it is set, the environment value is shown as in effect, and the key is not reported as superseded.
 
 The superseded notice names the layer each deployment value comes from: `SCION_SERVER_*`, `settings.yaml` (or the `--config` location), `SCION_SEED_*`, or *built-in default* for a value that no setting or variable sets. A layer is named when it sets the key, even to the default value, so a `SCION_SEED_*` value equal to the default is shown as `SCION_SEED_*`. The admin API reports these as `source` in `superseded_keys`: `server_env`, `yaml`, `seed_env`, or `default`.
 

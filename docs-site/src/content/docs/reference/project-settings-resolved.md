@@ -94,7 +94,7 @@ without being wired up here.
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `projectSet` | bool | Whether the project has an annotation for this setting. A stored `scion.io/default-thinking-level` outside 1-100 (for example a `0` saved by an older Hub) counts as unset, as in `GET /settings`: new agents get the hub default, and the next save of the project settings removes it. |
-| `projectValue` | string \| null | The annotation's raw value, or `null` when `projectSet` is false. Always a string — annotations are strings. |
+| `projectValue` | string \| null | The annotation's raw value, or `null` when `projectSet` is false. Always a string — annotations are strings. For `scion.io/default-max-turns` and `scion.io/default-max-model-calls`, `"0"` is Unlimited (an explicit "no limit"), not a clear: a cleared count limit has no annotation. |
 | `hubDefault` | string | Whether a hub-level default exists. See below. |
 
 ### `hubDefault` is tri-state

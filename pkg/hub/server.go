@@ -2122,6 +2122,10 @@ type Server struct {
 	// chatRetention is the chat message retention wiring (chat_retention.go).
 	chatRetention chatRetentionState
 
+	// failedPurge is the failed-message retention purge's resume cursor
+	// (sweep.go).
+	failedPurge failedPurgeState
+
 	// Artifact store for the artifact_* tables (pkg/artifacts) — nil = artifacts unavailable.
 	artifactStore artifacts.Store
 	// artifactBlobSweeper keeps the blob sweep's position between passes
@@ -3122,7 +3126,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		PongWait:       60 * time.Second,
 		WriteWait:      10 * time.Second,
 		MaxMessageSize: 1024 * 1024, // 1MB — see issue #165
-		RequestTimeout: 120 * time.Second,
+		RequestTimeout: brokerRequestTimeout,
 		Debug:          cfg.Debug,
 	}, logging.Subsystem("hub.control-channel"))
 	// Set disconnect callback to mark broker offline when WebSocket drops.
@@ -7630,6 +7634,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/chat-retention", s.guarded("/api/v1/admin/chat-retention", s.handleAdminChatRetention))
 	s.mux.HandleFunc("/api/v1/admin/conduit/grant-keys/rotate", s.guarded("/api/v1/admin/conduit/grant-keys/rotate", s.handleAdminConduitGrantKeyRotate))
 	s.mux.HandleFunc("/api/v1/admin/conduit/grant-keys/revoke", s.guarded("/api/v1/admin/conduit/grant-keys/revoke", s.handleAdminConduitGrantKeyRevoke))
+	s.mux.HandleFunc("/api/v1/admin/keys/status", s.guarded("/api/v1/admin/keys/status", s.adminKeyStatusHandler()))
 	s.mux.HandleFunc("/api/v1/admin/agents/reset-auth-all", s.guarded("/api/v1/admin/agents/reset-auth-all", s.handleAdminResetAuthAll))
 	s.mux.HandleFunc("/api/v1/admin/delegation-adoption", s.guarded("/api/v1/admin/delegation-adoption", s.handleDelegationAdoption))
 	s.mux.HandleFunc("/api/v1/admin/delegation-adoption/previews", s.guarded("/api/v1/admin/delegation-adoption/previews", s.handleDelegationAdoptionPreviews))

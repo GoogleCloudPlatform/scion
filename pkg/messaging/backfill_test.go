@@ -183,8 +183,8 @@ func (m *mockMessageStore) PurgeOldMessages(_ context.Context, _, _ time.Time) (
 	return 0, nil
 }
 
-func (m *mockMessageStore) PurgeFailedMessages(_ context.Context, _ time.Time) (int, error) {
-	return 0, nil
+func (m *mockMessageStore) PurgeFailedMessagesChunk(_ context.Context, _ time.Time, _ store.MessagePosition, _ int, _ time.Duration) (store.FailedMessagePurgeChunk, error) {
+	return store.FailedMessagePurgeChunk{Done: true}, nil
 }
 
 func (m *mockMessageStore) SetMessageConversationID(_ context.Context, messageID, conversationID string) error {

@@ -166,6 +166,18 @@ func (Message) Indexes() []ent.Index {
 		// planner to pick the index (store.MessageDispatchPending).
 		index.Fields("created", "id").
 			Annotations(entsql.IndexWhere("dispatch_state = 'pending'")),
+		// The failed-message retention purge walks dispatch_state = 'failed'
+		// AND created < cutoff in (created, id) keyset chunks. A separate
+		// partial index rather than widening the pending one: SQLite only
+		// uses a partial index whose WHERE terms appear in the query, so an
+		// IN ('pending', 'failed') index would not serve the pending sweep,
+		// and failed rows (kept for the retention window) would bloat the
+		// pending sweep's range. The WHERE must match the purge's literal
+		// (store.MessageDispatchFailed). The explicit name avoids colliding
+		// with the pending index's default name (ptone/scion#6954).
+		index.Fields("created", "id").
+			StorageKey("message_failed_created_id").
+			Annotations(entsql.IndexWhere("dispatch_state = 'failed'")),
 	}
 }
 
