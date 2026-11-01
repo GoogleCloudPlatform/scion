@@ -322,7 +322,8 @@ describe('scion-page-admin-server-config', () => {
   it('renders without errors', async () => {
     element = await createComponent(createFetchHandler(makeBaseConfig()));
     expect(element.shadowRoot).toBeTruthy();
-    expect(shadowText(element)).toContain('0.1.0-test');
+    // The version line shows update-status's version (default mock).
+    expect(shadowText(element)).toContain('nightly-20261101');
   });
 
   it('calls the config API on connect', async () => {
