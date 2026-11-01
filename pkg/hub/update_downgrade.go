@@ -94,16 +94,10 @@ type updateStatusDowngrade struct {
 	SnapshotsSupported bool `json:"snapshotsSupported"`
 }
 
-// Rollback marker of the boot-failure guard: see
-// maintenance.ReadRollbackMarker. The hub reports each marker (by "at")
-// once.
-const (
-	rollbackMarkerName    = maintenance.RollbackMarkerName
-	maxRollbackMarkerSize = maintenance.MaxRollbackMarkerSize
-	// HubSettingSectionRollbackMarker records the last rollback marker the
-	// hub has seen, so each is reported once.
-	HubSettingSectionRollbackMarker = "system.rollback_marker"
-)
+// HubSettingSectionRollbackMarker records the last rollback marker of the
+// boot-failure guard (maintenance.ReadRollbackMarker) the hub has seen, so
+// each marker (by "at") is reported once.
+const HubSettingSectionRollbackMarker = "system.rollback_marker"
 
 // RollbackMarker is the content of the rollback marker file.
 type RollbackMarker = maintenance.RollbackMarker
