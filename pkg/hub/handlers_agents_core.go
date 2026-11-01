@@ -357,6 +357,14 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	identity := GetIdentityFromContext(ctx)
 
+	// An agent delegated credential lists through the delegated list arm
+	// only, and never reaches ResolveListScopes below, which has no scope
+	// for it (.design/agent-delegation.md §11.8).
+	if d, ok := identity.(*DelegatedAgentIdentity); ok && d != nil {
+		s.listAgentsDelegated(w, r, d)
+		return
+	}
+
 	// Sorted mode validates sort and dir before either short-circuit below,
 	// so an invalid value is a 400 for every caller and the short-circuit
 	// echo only ever carries validated values. Without sort, nothing here
@@ -421,56 +429,9 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// RS2: Slug-to-ID resolution for projectId filter.
-	// If projectId looks like a slug (not a UUID), resolve it to a project ID.
-	// The resolution must not become a cross-scope existence oracle: nonexistent
-	// and unauthorized slugs are externally indistinguishable — both silently
-	// produce an unmatched filter that returns zero results.
-	projectID := query.Get("projectId")
-	if projectID != "" && gouuid.Validate(projectID) != nil {
-		// Looks like a slug. Resolve within the authorized scope to prevent
-		// the slug lookup from disclosing projects outside the caller's authority.
-		project, lookupErr := s.store.GetProjectBySlug(ctx, projectID)
-		if lookupErr != nil || project == nil {
-			// Slug not found — indistinguishable from unauthorized.
-			projectID = ""
-		} else if !scopeResult.Scopes.Contains(project.ID) {
-			// Project exists but is outside the caller's authorized scope.
-			// Treat identically to "not found" to prevent an existence oracle.
-			projectID = ""
-		} else {
-			projectID = project.ID
-		}
-		// When slug resolution fails (not found or unauthorized), leave
-		// projectID empty. The store filter will return all authorized agents
-		// (no project restriction), which is correct: it prevents the caller
-		// from distinguishing "slug doesn't exist" from "slug exists but I
-		// can't see it".
-		if projectID == "" {
-			// Force empty result: filter to an impossible project ID so the
-			// caller cannot infer slug existence from result count changes.
-			projectID = "00000000-0000-0000-0000-000000000000"
-		}
-	}
-
-	filter := store.AgentFilter{
-		ProjectID:       projectID,
-		RuntimeBrokerID: query.Get("runtimeBrokerId"),
-		Phase:           query.Get("phase"),
-		IncludeDeleted:  query.Get("includeDeleted") == "true",
-	}
-	if err := applyAgentAttributeAndRelationshipFilters(&filter, query); err != nil {
-		BadRequest(w, err.Error())
+	filter, ok := s.agentListQueryFilter(ctx, w, query, scopeResult.Scopes.Contains)
+	if !ok {
 		return
-	}
-
-	if labelParams := query["label"]; len(labelParams) > 0 {
-		parsed, err := parseLabelFilters(labelParams)
-		if err != nil {
-			BadRequest(w, err.Error())
-			return
-		}
-		filter.Labels = parsed
 	}
 
 	// RS2: Push the authorized project predicate into the store filter.
@@ -564,6 +525,68 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		ServerTime:            time.Now().UTC(),
 		Capabilities:          scopeCap,
 	})
+}
+
+// agentListQueryFilter builds the caller filters of a hub agent list
+// request from query: the projectId filter (a slug resolves only to a
+// project inside the caller's list scope, reported by projectInScope),
+// broker, phase, deleted, attribute, relationship and label filters. It
+// adds no authorization predicate. On a malformed filter it writes the 400
+// and reports false.
+func (s *Server) agentListQueryFilter(ctx context.Context, w http.ResponseWriter, query url.Values, projectInScope func(projectID string) bool) (store.AgentFilter, bool) {
+	// RS2: Slug-to-ID resolution for projectId filter.
+	// If projectId looks like a slug (not a UUID), resolve it to a project ID.
+	// The resolution must not reveal whether a project outside the caller's
+	// scope exists: nonexistent and unauthorized slugs are externally
+	// indistinguishable — both silently produce an unmatched filter that
+	// returns zero results.
+	projectID := query.Get("projectId")
+	if projectID != "" && gouuid.Validate(projectID) != nil {
+		// Looks like a slug. Resolve within the authorized scope to prevent
+		// the slug lookup from disclosing projects outside the caller's authority.
+		project, lookupErr := s.store.GetProjectBySlug(ctx, projectID)
+		if lookupErr != nil || project == nil {
+			// Slug not found — indistinguishable from unauthorized.
+			projectID = ""
+		} else if !projectInScope(project.ID) {
+			// Project exists but is outside the caller's authorized scope.
+			// Treat identically to "not found", so existence is not revealed.
+			projectID = ""
+		} else {
+			projectID = project.ID
+		}
+		// When slug resolution fails (not found or unauthorized), leave
+		// projectID empty. The store filter will return all authorized agents
+		// (no project restriction), which is correct: it prevents the caller
+		// from distinguishing "slug doesn't exist" from "slug exists but I
+		// can't see it".
+		if projectID == "" {
+			// Force empty result: filter to an impossible project ID so the
+			// caller cannot infer slug existence from result count changes.
+			projectID = "00000000-0000-0000-0000-000000000000"
+		}
+	}
+
+	filter := store.AgentFilter{
+		ProjectID:       projectID,
+		RuntimeBrokerID: query.Get("runtimeBrokerId"),
+		Phase:           query.Get("phase"),
+		IncludeDeleted:  query.Get("includeDeleted") == "true",
+	}
+	if err := applyAgentAttributeAndRelationshipFilters(&filter, query); err != nil {
+		BadRequest(w, err.Error())
+		return store.AgentFilter{}, false
+	}
+
+	if labelParams := query["label"]; len(labelParams) > 0 {
+		parsed, err := parseLabelFilters(labelParams)
+		if err != nil {
+			BadRequest(w, err.Error())
+			return store.AgentFilter{}, false
+		}
+		filter.Labels = parsed
+	}
+	return filter, true
 }
 
 // addAgentCreateIfAnyProjectAllows adds "create" to the agents list's

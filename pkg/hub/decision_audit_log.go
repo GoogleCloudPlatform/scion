@@ -78,6 +78,12 @@ const (
 	// decisionAuditExcludedCorrelation: no operation context and no
 	// request ID. No ID is minted here.
 	decisionAuditExcludedCorrelation
+	// decisionAuditExcludedRecordKind: the record summarizes several
+	// decisions (store.DecisionAuditRecord.RecordKind is set, for example
+	// the agent delegation list-filter record). The authorization/decide
+	// envelope describes one decision, so such a record is never mapped to
+	// it; it stays in-process until the typed audit schema carries it.
+	decisionAuditExcludedRecordKind
 	// decisionAuditInvalid: the envelope failed auditevent validation (for
 	// example a reason over 256 bytes), the record was nil or had an
 	// unknown result, or mapping panicked. Never truncated; the error text
@@ -97,6 +103,7 @@ var decisionAuditDispositionNames = [decisionAuditDispositionCount]string{
 	decisionAuditExcludedPermission:  "excluded_permission",
 	decisionAuditExcludedCredential:  "excluded_credential",
 	decisionAuditExcludedCorrelation: "excluded_correlation",
+	decisionAuditExcludedRecordKind:  "excluded_record_kind",
 	decisionAuditInvalid:             "invalid",
 }
 
@@ -123,7 +130,7 @@ type DecisionAuditMetricsRecorder interface {
 }
 
 // decisionAuditCounts holds the always-present in-process counts by
-// (disposition, result), at most 10 × 2 series, plus an optional recorder.
+// (disposition, result), at most 11 × 2 series, plus an optional recorder.
 type decisionAuditCounts struct {
 	counts   [decisionAuditDispositionCount][2]atomic.Uint64
 	recorder atomic.Pointer[decisionAuditRecorderBox]
@@ -247,6 +254,9 @@ func mapDecisionEnvelope(ctx context.Context, rec *store.DecisionAuditRecord) (a
 		return zero, decisionAuditInvalid
 	}
 
+	if rec.RecordKind != "" {
+		return zero, decisionAuditExcludedRecordKind
+	}
 	if rec.ResourceType != "project" && rec.ResourceType != "agent" {
 		return zero, decisionAuditExcludedResource
 	}
