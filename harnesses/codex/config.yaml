@@ -56,7 +56,7 @@ system_prompt_mode: prepend_to_instructions
 model: medium
 model_aliases:
   small: gpt-6-luna
-  medium: gpt-6.1-sol
+  medium: gpt-6.1-terra
   large: gpt-6.1-sol
   extra-large: gpt-6-astra
 
