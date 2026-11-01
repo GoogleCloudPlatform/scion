@@ -29,6 +29,7 @@ package runtime
 // directory or anything under it.
 
 import (
+	"errors"
 	"fmt"
 	"path"
 	"path/filepath"
@@ -266,10 +267,11 @@ func TestBuildCommonRunArgs_NFSMountScope(t *testing.T) {
 				{rel: scopeRel("workspace", ".scion"), target: "/workspace/.scion", readOnly: true},
 			}
 		}},
-		// Worktree-per-agent on these runtimes: the per-agent worktree on
-		// the share is Kubernetes-only (pkg/agent nfsWorktreeSelection), so
-		// the agent gets the project workspace, with the repository root
-		// recomposed to it (composeSharedRepoRoot).
+		// Worktree-per-agent on these runtimes is exactly the shared-plain
+		// shape of a git project: the per-agent worktree on the share is
+		// Kubernetes-only (pkg/agent nfsWorktreeSelection), so the agent
+		// gets the project workspace, with the repository root recomposed
+		// to it (composeSharedRepoRoot).
 		{name: "worktree-per-agent", setup: func(t *testing.T, f *dockerScopeFixture, cfg RunConfig) (RunConfig, []shareMount) {
 			ws := f.workspace(t, projectfs.ModeWorktreePerAgent, "")
 			layoutGit(t, ws, "init", "-q")
@@ -424,8 +426,11 @@ func podShareMounts(t *testing.T, pod *corev1.Pod, c corev1.Container) []shareMo
 		case v.HostPath != nil:
 			t.Errorf("container %s mounts host path %s", c.Name, v.HostPath.Path)
 			continue
+		case v.Secret != nil, v.ConfigMap != nil, v.EmptyDir != nil, v.Projected != nil, v.DownwardAPI != nil:
+			continue // not on the share
 		default:
-			continue // secret, configMap, emptyDir, projected: not on the share
+			t.Errorf("container %s mounts volume %q of a kind this test does not classify; add it as on or off the share", c.Name, vm.Name)
+			continue
 		}
 		out = append(out, shareMount{rel: path.Join(volRel, vm.SubPath), target: vm.MountPath, readOnly: vm.ReadOnly})
 	}
@@ -562,7 +567,8 @@ func cloudRunShareMounts(t *testing.T, inst *runpb.Instance) []shareMount {
 }
 
 // Cloud Run mounts the project workspace, the agent home and, read-only,
-// the agent secrets; it has no shared dirs on the share and refuses
+// the agent secrets, whatever the workspace mode: buildCloudRunInstance does
+// not read it. It has no shared dirs on the share, and Run refuses
 // empty-per-agent before any path is built.
 func TestCloudRunInstance_NFSMountScope(t *testing.T) {
 	paths, err := cloudRunNFSExportPaths(scopeExport, scopeRoot, scopeProjectID, scopeAgent, scopeAgentID)
@@ -571,21 +577,42 @@ func TestCloudRunInstance_NFSMountScope(t *testing.T) {
 	}
 	paths.server = scopeServer
 	r := &CloudRunRuntime{}
-	cfg := RunConfig{
-		Name: scopeAgent, Image: "test-image", WorkspaceBackendName: "nfs", ProjectID: scopeProjectID,
-		NFSSubPathRoot: scopeRoot, Env: []string{"SCION_WORKSPACE_MODE=shared-plain"},
-		Labels: map[string]string{"agent_id": scopeAgentID},
-	}
-	inst := r.buildCloudRunInstance(cfg, 1000, 1000, paths)
 	home := "/home/" + r.ExecUser()
-	assertMountScope(t, cloudRunShareMounts(t, inst), []shareMount{
+	sharedPlain := []shareMount{
 		{rel: scopeRel("workspace"), target: "/workspace"},
 		{rel: scopeRel("agents", scopeAgent, "home-"+scopeAgentID), target: home},
 		{rel: scopeRel("agents", scopeAgent, "secrets-"+scopeAgentID), target: home + "/.scion/secrets", readOnly: true},
-	})
-
-	cfg.Env = []string{"SCION_WORKSPACE_MODE=empty-per-agent"}
-	if err := rejectEmptyPerAgentOnCloudRun(cfg); err == nil {
-		t.Error("Cloud Run accepted an empty-per-agent agent, which would get the project workspace")
 	}
+	cfgFor := func(mode string) RunConfig {
+		return RunConfig{
+			Name: scopeAgent, Image: "test-image", WorkspaceBackendName: "nfs", ProjectID: scopeProjectID,
+			NFSSubPathRoot: scopeRoot, Env: []string{"SCION_WORKSPACE_MODE=" + mode},
+			Labels: map[string]string{"agent_id": scopeAgentID},
+		}
+	}
+	for _, mode := range []string{"shared-plain", "clone-per-agent", "worktree-per-agent"} {
+		t.Run(mode, func(t *testing.T) {
+			got := cloudRunShareMounts(t, r.buildCloudRunInstance(cfgFor(mode), 1000, 1000, paths))
+			if mode == "shared-plain" {
+				assertMountScope(t, got, sharedPlain)
+				return
+			}
+			// Clone-per-agent and worktree-per-agent get the project
+			// workspace today; clone-per-agent is moving to a per-agent
+			// workspace (#6926), so only the refused paths are asserted
+			// for them until then.
+			for _, m := range got {
+				if why := mountScopeViolation(m.rel); why != "" {
+					t.Errorf("agent mount %s is %s", m, why)
+				}
+			}
+		})
+	}
+
+	t.Run("empty-per-agent refused by Run", func(t *testing.T) {
+		_, err := r.Run(t.Context(), cfgFor("empty-per-agent"))
+		if !errors.Is(err, errEmptyPerAgentCloudRun) {
+			t.Errorf("Run(empty-per-agent) = %v, want %v: the agent would get the project workspace", err, errEmptyPerAgentCloudRun)
+		}
+	})
 }
