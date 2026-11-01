@@ -74,6 +74,14 @@ var (
 // Broker is not connected, so no delete was attempted.
 const userDeletionBrokerUnavailable = "runtime broker unavailable"
 
+// userDeletionPlacementConflict is an agent's last error when its delete
+// was refused because its saved placement is inconsistent: the refusal's
+// code and guidance, so the record names the specific placement code as
+// the agent delete's answer does.
+func userDeletionPlacementConflict(refusal *RuntimeTargetRefusal) string {
+	return "placement conflict: " + refusal.Error()
+}
+
 // userDeletionLock returns the in-process mutex of deletion id.
 func (s *Server) userDeletionLock(id string) *sync.Mutex {
 	m, _ := s.userDeletionLocks.LoadOrStore(id, &sync.Mutex{})
@@ -289,6 +297,15 @@ func (s *Server) refreshUserDeletionAgent(ctx context.Context, d *store.UserDele
 	case a.DeletionState == store.DeletionStateFailed:
 		rec.Outcome = store.UserDeletionOutcomeFailed
 		rec.LastError = a.DeletionError
+		// The engine refused the delete for an inconsistent saved
+		// placement (rollbackPlacement): the stored error is the
+		// refusal's message only, so the remembered refusal for this
+		// claim supplies its code, as it does for a request that joins
+		// the delete (resolveJoinFromRow). On another hub process (or
+		// after a restart) there is no entry and the message stays.
+		if refusal := deletionPlacementRefusalFor(a.ID, a.DeletionClaim); refusal != nil {
+			rec.LastError = userDeletionPlacementConflict(refusal)
+		}
 	default:
 		// No delete in flight. A failure this cascade recorded without
 		// claiming (the broker was not connected) stays failed.
@@ -324,10 +341,15 @@ func (s *Server) userDeletionAgentRecord(ctx context.Context, id, agentID string
 }
 
 // claimUserDeletionAgent starts a plain delete of agent a for the
-// deletion and records the attempt. A delete is not attempted while the
-// agent's Runtime Broker is not connected (the agent is recorded failed),
-// matching the agent delete route; managed runtimes, a created agent with
-// no launch in flight and a finalizing row need no broker.
+// deletion and records the attempt. As on the agent delete route, the
+// placement pre-check runs first: an agent whose saved placement is
+// inconsistent is recorded failed with the placement refusal whether or
+// not its Runtime Broker is connected. The broker-unavailable remedy (the
+// operator deletes the agent with force) does not apply to it, since a
+// force delete is refused for the same placement. Then a delete is not
+// attempted while the agent's Runtime Broker is not connected (the agent
+// is recorded failed); managed runtimes, a created agent with no launch in
+// flight and a finalizing row need no broker.
 func (s *Server) claimUserDeletionAgent(ctx context.Context, d *store.UserDeletion, rec *store.UserDeletionAgent, a *store.Agent, ts time.Time) error {
 	rec.Attempts++
 	rec.UpdatedAt = ts
@@ -336,6 +358,17 @@ func (s *Server) claimUserDeletionAgent(ctx context.Context, d *store.UserDeleti
 			return fmt.Errorf("record agent %s: %w", rec.AgentID, err)
 		}
 		return nil
+	}
+
+	// The claim repeats this check on the row it re-reads.
+	if err := s.deletePlacementPreCheckRow(ctx, a); err != nil {
+		rec.Outcome = store.UserDeletionOutcomeFailed
+		if refusal, refused := placementRefusalOf(err); refused {
+			rec.LastError = userDeletionPlacementConflict(refusal)
+		} else {
+			rec.LastError = err.Error()
+		}
+		return save()
 	}
 
 	createdNoLaunch := a.Phase == string(state.PhaseCreated) && a.LaunchState != store.LaunchStateActive
@@ -352,7 +385,7 @@ func (s *Server) claimUserDeletionAgent(ctx context.Context, d *store.UserDeleti
 	})
 	if refusal, refused := placementRefusalOf(err); refused {
 		rec.Outcome = store.UserDeletionOutcomeFailed
-		rec.LastError = "placement conflict: " + refusal.Error()
+		rec.LastError = userDeletionPlacementConflict(refusal)
 		return save()
 	}
 	if err != nil {
