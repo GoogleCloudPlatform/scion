@@ -72,7 +72,7 @@ func isClonePerAgentStart(opts api.StartOptions) bool {
 // in-memory /workspace that it clones itself, and mounts nothing from the
 // broker-local <agentDir>/workspace.
 func cloudRunLocalClonePerAgentStart(runtimeName string, opts api.StartOptions, explicitWorkspace bool) bool {
-	return runtimeName == "cloudrun" && !explicitWorkspace && isClonePerAgentStart(opts)
+	return isCloudRunRuntime(runtimeName) && !explicitWorkspace && isClonePerAgentStart(opts)
 }
 
 // contextWithClonePerAgentWorkspace marks ctx when opts asks for a

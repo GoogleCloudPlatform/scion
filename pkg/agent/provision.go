@@ -1369,9 +1369,11 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 		return cfg, err
 	}
 	// A create: the later start must not mistake this agent for one that
-	// predates per-agent NFS directories (see nfsKeepSharedCheckout).
+	// predates per-agent NFS directories (see nfsKeepSharedCheckout and
+	// cloudRunKeepSharedCheckout).
 	if opts.FreshProvision {
 		recordNFSAgentDir(agentDir, opts.Name)
+		recordCloudRunAgentWorkspace(agentDir, opts.Name)
 	}
 
 	// A provision-only create carries no run (the hub mints runs only for

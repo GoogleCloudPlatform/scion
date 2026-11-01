@@ -346,6 +346,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	}
 	if opts.FreshProvision {
 		recordNFSAgentDir(agentDir, opts.Name)
+		recordCloudRunAgentWorkspace(agentDir, opts.Name)
 	}
 	// Empty-per-agent (design #2703): the request's mode, or the mode
 	// persisted at provision, so a start that lost it (e.g. a dropped or
@@ -2210,6 +2211,20 @@ authDone:
 					agentDirName, agentBranch = "", ""
 					opts.Env["SCION_WORKSPACE_MODE"] = string(store.SharingModeSharedPlain)
 					agentEnv = withEnvValue(agentEnv, "SCION_WORKSPACE_MODE", string(store.SharingModeSharedPlain))
+				}
+			}
+			// A Cloud Run clone-per-agent agent mounts its own workspace
+			// on the share (the runtime creates it), except an existing
+			// agent that worked in the shared checkout before
+			// (cloudRunKeepSharedCheckout), which keeps that checkout and
+			// mode so its work stays where it is.
+			if isCloudRunRuntime(m.Runtime.Name()) && isClonePerAgentStart(opts) {
+				if keep, reason := cloudRunKeepSharedCheckout(opts.FreshProvision, agentDir, resolvedWorkspace, api.Slugify(opts.Name)); keep {
+					slog.Info("workspace_storage nfs: "+reason, "agent", opts.Name)
+					opts.Env["SCION_WORKSPACE_MODE"] = string(store.SharingModeSharedPlain)
+					agentEnv = withEnvValue(agentEnv, "SCION_WORKSPACE_MODE", string(store.SharingModeSharedPlain))
+				} else {
+					recordCloudRunAgentWorkspace(agentDir, opts.Name)
 				}
 			}
 			// ownDirCreated reports whether this start created the agent's

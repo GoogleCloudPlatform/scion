@@ -45,6 +45,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/cloudrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/startuplistener"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -259,8 +260,9 @@ func cloudRunOwnerIDs(cfg RunConfig) (uid, gid int) {
 }
 
 func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error) {
-	// Checked before anything is resolved or provisioned: this runtime
-	// always mounts the project's shared NFS workspace (see
+	// Checked before anything is resolved or provisioned: other than a
+	// clone-per-agent agent, which mounts its own workspace on the share,
+	// this runtime mounts the project's shared NFS workspace (see
 	// provisionCloudRunNFS), which would break empty-per-agent isolation.
 	if err := rejectEmptyPerAgentOnCloudRun(cfg); err != nil {
 		return "", err
@@ -659,6 +661,10 @@ type cloudRunNFSProvisionPaths struct {
 	secretsHostPath     string
 }
 
+// cloudRunRequireNFSFilesystem is requireNFSFilesystem, replaceable in
+// tests, which have no NFS mount to provision on.
+var cloudRunRequireNFSFilesystem = requireNFSFilesystem
+
 // provisionCloudRunNFS prepares the agent's NFS directories. uid and gid
 // must already be defaulted by the caller (cloudRunOwnerIDs); they are
 // used as given.
@@ -690,7 +696,26 @@ func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfi
 	paths.homeHostPath = hostPaths.homeHostPath
 	paths.secretsHostPath = hostPaths.secretsHostPath
 
-	if err := requireNFSFilesystem(hostPaths.hostBase); err != nil {
+	// A clone-per-agent agent mounts its own workspace on the share,
+	// <subpath_root>/<project>/agents/<slug>/workspace (the Kubernetes
+	// agent directory layout, which the broker's delete path removes), and
+	// clones into it in-container on its first start (sciontool init); a
+	// later start finds it populated and keeps the work.
+	clonePerAgent := isClonePerAgentRun(cfg)
+	if clonePerAgent {
+		rel, err := cloudRunAgentWorkspaceRel(hostPaths.serverRelativePath, slug)
+		if err != nil {
+			return nil, err
+		}
+		exportRoot := path.Clean(export)
+		paths.workspaceExportPath = path.Join(exportRoot, rel)
+		if err := validateUnixPathBelowRoot(paths.workspaceExportPath, exportRoot); err != nil {
+			return nil, fmt.Errorf("cloudrun: invalid NFS agent workspace path: %w", err)
+		}
+		paths.workspaceHostPath = filepath.Join(hostPaths.hostBase, filepath.FromSlash(rel))
+	}
+
+	if err := cloudRunRequireNFSFilesystem(hostPaths.hostBase); err != nil {
 		return nil, err
 	}
 	if err := refuseUnmigratedCloudRunHome(hostPaths, cfg.NFSSubPathRoot, cfg.ProjectID, agentID); err != nil {
@@ -704,7 +729,15 @@ func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfi
 		Backend:            "nfs",
 		SharedDirs:         map[string]ResolvedSharedDir{},
 	}
-	if err := ProvisionShared(ProvisionInput{
+	// The project's shared workspace is neither cloned nor mounted for a
+	// clone-per-agent agent: only its own (empty until its first start)
+	// workspace directory is created.
+	if clonePerAgent {
+		if err := mkdirNFSAgentDir(paths.workspaceHostPath, uid, gid); err != nil {
+			return nil, fmt.Errorf("cloudrun: provision NFS agent workspace %s via Hub-mounted path %s: %w",
+				paths.workspaceExportPath, paths.workspaceHostPath, err)
+		}
+	} else if err := ProvisionShared(ProvisionInput{
 		Ctx:       ctx,
 		Resolved:  resolved,
 		ProjectID: cfg.ProjectID,
@@ -894,6 +927,20 @@ func refuseUnmigratedCloudRunHome(hp *cloudRunNFSHostProvisionPaths, subPathRoot
 		return fmt.Errorf("cloudrun: agent %s has its home at the location used before this version; run the project-storage-migrate maintenance operation (with the agent stopped) before starting it", agentID)
 	}
 	return nil
+}
+
+// cloudRunAgentWorkspaceRel returns the export-relative path of a
+// clone-per-agent agent's own workspace, <subpath_root>/<project>/agents/
+// <slug>/workspace, derived from the project's workspace path the same way
+// the broker's delete path derives it (NFSAgentDirSubPath and
+// provision.AgentWorkspaceDir), so the directory created here is the one
+// removed when the agent is deleted.
+func cloudRunAgentWorkspaceRel(projectWorkspaceRel, slug string) (string, error) {
+	agentDir, err := NFSAgentDirSubPath(filepath.FromSlash(projectWorkspaceRel), slug)
+	if err != nil {
+		return "", fmt.Errorf("cloudrun: %w", err)
+	}
+	return filepath.ToSlash(filepath.Join(agentDir, provision.AgentWorkspaceDir)), nil
 }
 
 // cloudRunAgentLeaves returns an agent's home and secrets paths relative to
@@ -1398,7 +1445,7 @@ func sanitizeGCPLabelValue(value string) string {
 // errEmptyPerAgentCloudRun is returned by CloudRunRuntime.Run for an
 // empty-per-agent agent (design #2703).
 var errEmptyPerAgentCloudRun = errors.New("cloudrun: \"Empty directory per agent\" (empty-per-agent) workspaces are not supported on the Cloud Run runtime, " +
-	"which always mounts the project's shared workspace; use a Docker, Podman, Apple or Kubernetes broker for this project")
+	"which mounts the project's shared workspace; use a Docker, Podman, Apple or Kubernetes broker for this project")
 
 // errCloudRunNeedsNFSWorkspace is returned, wrapped with the backend name,
 // by CloudRunRuntime.Run for a workspace backend other than "nfs"
@@ -1430,6 +1477,24 @@ func isEmptyPerAgentRun(cfg RunConfig) bool {
 	for _, kv := range cfg.Env {
 		k, v, ok := strings.Cut(kv, "=")
 		if ok && k == "SCION_WORKSPACE_MODE" && store.ResolveWorkspaceSharingMode(v) == store.SharingModeEmptyPerAgent {
+			return true
+		}
+	}
+	return false
+}
+
+// isClonePerAgentRun reports whether cfg starts a clone-per-agent agent:
+// SCION_WORKSPACE_MODE clone-per-agent in its env and a git clone to make,
+// the same test the agent start uses (isClonePerAgentStart). A start that
+// keeps an existing agent on the shared checkout sends shared-plain
+// instead (pkg/agent cloudRunKeepSharedCheckout).
+func isClonePerAgentRun(cfg RunConfig) bool {
+	if cfg.GitClone == nil {
+		return false
+	}
+	for _, kv := range cfg.Env {
+		k, v, ok := strings.Cut(kv, "=")
+		if ok && k == "SCION_WORKSPACE_MODE" && store.ResolveWorkspaceSharingMode(v) == store.SharingModeClonePerAgent {
 			return true
 		}
 	}
