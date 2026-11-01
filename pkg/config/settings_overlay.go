@@ -110,7 +110,15 @@ func (o *SettingsOverlay) Update(
 ) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	o.updateLocked(runtimes, profiles, harnessConfigs)
+}
 
+// updateLocked is Update with o.mu held.
+func (o *SettingsOverlay) updateLocked(
+	runtimes map[string]V1RuntimeConfig,
+	profiles map[string]V1ProfileConfig,
+	harnessConfigs map[string]HarnessConfigEntry,
+) {
 	if runtimes != nil {
 		o.runtimes = nonEmptyOrNil(cloneRuntimes(runtimes))
 	}
@@ -130,6 +138,29 @@ func (o *SettingsOverlay) Update(
 func (o *SettingsOverlay) SetPlacementFindings(errs, warnings []string) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	return o.setPlacementFindingsLocked(errs, warnings)
+}
+
+// UpdateWithPlacementFindings is Update (skipped when every map is nil)
+// and SetPlacementFindings under one lock, so a reader never sees newly
+// applied runtimes and profiles with the findings of the previous ones.
+// It reports whether the findings changed.
+func (o *SettingsOverlay) UpdateWithPlacementFindings(
+	runtimes map[string]V1RuntimeConfig,
+	profiles map[string]V1ProfileConfig,
+	harnessConfigs map[string]HarnessConfigEntry,
+	errs, warnings []string,
+) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if runtimes != nil || profiles != nil || harnessConfigs != nil {
+		o.updateLocked(runtimes, profiles, harnessConfigs)
+	}
+	return o.setPlacementFindingsLocked(errs, warnings)
+}
+
+// setPlacementFindingsLocked is SetPlacementFindings with o.mu held.
+func (o *SettingsOverlay) setPlacementFindingsLocked(errs, warnings []string) bool {
 	changed := !slices.Equal(o.placementErrors, errs) || !slices.Equal(o.placementWarnings, warnings)
 	o.placementErrors = slices.Clone(errs)
 	o.placementWarnings = slices.Clone(warnings)

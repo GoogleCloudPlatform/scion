@@ -2006,18 +2006,24 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	if snap.FromOperationalSettings {
 		feedImageRegistryOverlay(s.GetOperationalSettings())
 	}
-	if snap.Runtimes != nil || snap.Profiles != nil || snap.HarnessConfigs != nil {
-		if overlay := config.GetGlobalSettingsOverlay(); overlay != nil {
-			overlay.Update(snap.Runtimes, snap.Profiles, snap.HarnessConfigs)
-			if overlay.SetPlacementFindings(snap.PlacementErrors, snap.PlacementWarnings) {
-				for _, w := range snap.PlacementWarnings {
-					slog.Warn("Stored runtimes and profiles: " + w)
-				}
-				if len(snap.PlacementErrors) > 0 {
-					slog.Error("Stored runtimes and profiles have invalid Kubernetes placement; the co-located Runtime Broker refuses Kubernetes starts until they are fixed",
-						"paths", snap.PlacementErrors)
-				}
+	// The placement findings are recorded with the maps under one lock,
+	// and for every DB-backed snapshot even when no map changed: a stored
+	// runtimes document that does not decode leaves the runtimes map nil
+	// but is still a finding.
+	mapsChanged := snap.Runtimes != nil || snap.Profiles != nil || snap.HarnessConfigs != nil
+	if overlay := config.GetGlobalSettingsOverlay(); overlay != nil && (mapsChanged || snap.FromOperationalSettings) {
+		if overlay.UpdateWithPlacementFindings(snap.Runtimes, snap.Profiles, snap.HarnessConfigs, snap.PlacementErrors, snap.PlacementWarnings) {
+			for _, w := range snap.PlacementWarnings {
+				slog.Warn("Stored runtimes and profiles: " + w)
 			}
+			if len(snap.PlacementErrors) > 0 {
+				slog.Error("Stored runtimes and profiles have invalid Kubernetes placement; the co-located Runtime Broker refuses Kubernetes starts until they are fixed",
+					"paths", snap.PlacementErrors)
+			}
+		}
+	}
+	if mapsChanged {
+		if overlay := config.GetGlobalSettingsOverlay(); overlay != nil {
 			// Recount the built-in profile references the overlay retains
 			// (ptone/scion#5113); never blocks.
 			s.triggerProfileReferences()
