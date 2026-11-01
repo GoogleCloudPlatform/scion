@@ -181,6 +181,8 @@ export class ScionApp extends LitElement {
     /* Content wrapper */
     .content {
       flex: 1;
+      /* The artifact page's sticky review toolbar (.g-sticky) offsets its top
+         by this top padding, and by the 1rem at 640px below: change both. */
       padding: 1.5rem;
       /* The last of the scrolled content clears the home indicator (the
          page uses viewport-fit=cover); the inset is 0 elsewhere. */
