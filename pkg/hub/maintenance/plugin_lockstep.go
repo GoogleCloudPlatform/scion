@@ -15,6 +15,7 @@
 package maintenance
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -170,10 +171,34 @@ func (e *BinaryUpdateExecutor) hasInstalledPlugins() bool {
 	return err == nil && len(plugins) > 0
 }
 
+// pluginDirSkipReason returns why lockstep cannot replace plugins in dir,
+// or "" when it can: a plugin directory that is itself a symlink (the
+// rollback reconcile refuses one too, so lockstep would not survive a
+// rollback there) or one the hub cannot write.
+func pluginDirSkipReason(dir string) string {
+	if fi, err := os.Lstat(dir); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Sprintf("the plugin directory %s is a symlink", dir)
+	}
+	if !isWritableDir(dir) {
+		return fmt.Sprintf("the plugin directory %s is not writable by the hub", dir)
+	}
+	return ""
+}
+
+// checksumSkip reports whether err from ExpectedChecksum is a missing or
+// bad SHA256SUMS line, which skips the plugin (design D2) instead of
+// failing the update.
+func checksumSkip(err error) bool {
+	return errors.Is(err, ErrChecksumMissing) || errors.Is(err, ErrChecksumBad)
+}
+
 // pluginRisks returns, for the downgrade risk list, what lockstep cannot
-// do for target: plugins the release publishes no asset for, and a plugin
-// directory that cannot be written.
-func (e *BinaryUpdateExecutor) pluginRisks(rel *Release, target string) []string {
+// do for target: plugins the release publishes no asset or no usable
+// SHA256SUMS line for, and a plugin directory lockstep skips. The
+// SHA256SUMS file is fetched (pinned and capped) only when an installed
+// plugin has an asset; if it cannot be fetched, the per-line risks are
+// left out (the run checks again and warns).
+func (e *BinaryUpdateExecutor) pluginRisks(ctx context.Context, rel *Release, target string) []string {
 	if e.pluginDir == "" {
 		return nil
 	}
@@ -181,27 +206,60 @@ func (e *BinaryUpdateExecutor) pluginRisks(rel *Release, target string) []string
 	if err != nil || len(plugins) == 0 {
 		return nil
 	}
-	if !isWritableDir(e.pluginDir) {
-		return []string{fmt.Sprintf("The plugin directory %s is not writable by the hub, so its broker plugins stay at their current builds and may fail with %s.",
-			e.pluginDir, target)}
+	if reason := pluginDirSkipReason(e.pluginDir); reason != "" {
+		return []string{fmt.Sprintf("Broker plugins are not updated (%s), so they stay at their current builds and may fail with %s.",
+			reason, target)}
 	}
 	var risks []string
+	var sums []byte
+	sumsFetched := false
 	for _, p := range plugins {
-		if _, ok := rel.Asset(PluginAssetName(p.name)); !ok {
+		assetName := PluginAssetName(p.name)
+		if _, ok := rel.Asset(assetName); !ok {
 			risks = append(risks, fmt.Sprintf("%s publishes no %s asset: the installed %s stays at its current build and may fail with %s.",
-				target, PluginAssetName(p.name), p.file, target))
+				target, assetName, p.file, target))
+			continue
+		}
+		if !sumsFetched {
+			sums, sumsFetched = e.fetchReleaseSums(ctx, rel, target), true
+		}
+		if sums == nil {
+			continue
+		}
+		if _, err := ExpectedChecksum(sums, assetName); checksumSkip(err) {
+			risks = append(risks, fmt.Sprintf("%s has no usable %s line for %s (%v): the installed %s stays at its current build and may fail with %s.",
+				target, ChecksumsAssetName, assetName, err, p.file, target))
 		}
 	}
 	return risks
 }
 
+// fetchReleaseSums downloads rel's SHA256SUMS through the pinned, capped
+// download path; nil when it cannot.
+func (e *BinaryUpdateExecutor) fetchReleaseSums(ctx context.Context, rel *Release, target string) []byte {
+	asset, ok := rel.Asset(ChecksumsAssetName)
+	if !ok || CheckAssetURL(e.repo, target, asset.URL) != nil {
+		return nil
+	}
+	var buf bytes.Buffer
+	if _, err := fetchCapped(ctx, downloadClient(e.httpClient), asset.URL, maxChecksumsSize, &buf); err != nil {
+		return nil
+	}
+	return buf.Bytes()
+}
+
 // preparePlugins is the plugin part of the download phase: it lists the
-// managed plugins, and for each one the release has an asset for, checks
-// the asset URL pin, downloads it (capped like the hub tarball), verifies
-// it against sums and extracts the plugin binary into tmpDir. A missing
-// asset keeps the plugin, and an unreadable or unwritable plugin directory
-// skips lockstep, each with a warning. Any URL, checksum or extraction
-// problem is an error: the update fails before anything is replaced.
+// managed plugins, and for each one the release has an asset and a
+// SHA256SUMS line for, checks the asset URL pin, downloads it (capped like
+// the hub tarball), verifies it against that line and extracts the plugin
+// binary into tmpDir.
+//
+// Kept, with a warning (nothing unverified is installed): a plugin without
+// an asset, or whose SHA256SUMS line is missing or bad (design D2). Skipped,
+// with a warning: an unreadable, unwritable or symlinked plugin directory.
+// An error, so the update fails before anything is replaced: a URL outside
+// the release, a failed download, a downloaded hash that differs from its
+// line, or a bad archive.
 func (e *BinaryUpdateExecutor) preparePlugins(ctx context.Context, logger io.Writer, client *http.Client,
 	rel *Release, target string, sums []byte, tmpDir string) (*pluginPlan, error) {
 	if e.pluginDir == "" {
@@ -222,9 +280,8 @@ func (e *BinaryUpdateExecutor) preparePlugins(ctx context.Context, logger io.Wri
 	if len(plugins) == 0 {
 		return nil, nil
 	}
-	if !isWritableDir(e.pluginDir) {
-		pluginWarn(logger, fmt.Sprintf("the plugin directory %s is not writable by the hub; broker plugins are not updated and may not work with %s",
-			e.pluginDir, target))
+	if reason := pluginDirSkipReason(e.pluginDir); reason != "" {
+		pluginWarn(logger, fmt.Sprintf("%s; broker plugins are not updated and may not work with %s", reason, target))
 		return nil, nil
 	}
 
@@ -243,6 +300,12 @@ func (e *BinaryUpdateExecutor) preparePlugins(ctx context.Context, logger io.Wri
 			return nil, fmt.Errorf("release %s: %w", target, err)
 		}
 		expected, err := ExpectedChecksum(sums, assetName)
+		if checksumSkip(err) {
+			pluginWarn(logger, fmt.Sprintf("release %s: %v; %s is left at its current build and may not work with %s",
+				target, err, p.file, target))
+			plan.plugins = append(plan.plugins, u)
+			continue
+		}
 		if err != nil {
 			return nil, fmt.Errorf("checksum verification failed for %s: %w", assetName, err)
 		}
@@ -307,18 +370,23 @@ type pluginSwap struct {
 	dir     string
 	staging string
 	updates []pluginUpdate
-	swapped []pluginUpdate // replaced so far, in order
+	// swapped are the plugins replaced and not yet put back, in order.
+	swapped []pluginUpdate
+	// keep is set once a restore failed: the staging directory holds the
+	// only copies of old binaries and is not removed.
+	keep bool
 }
 
-// stagePluginSwap removes staging directories left by an interrupted run,
-// then stages the replacements of plan. Nothing in the plugin directory
+// stagePluginSwap removes staging directories left by an interrupted run
+// (logged: one may hold old binaries a failed restore left behind), then
+// stages the replacements of plan. Nothing in the plugin directory
 // changes. It returns nil when there is nothing to replace.
-func stagePluginSwap(plan *pluginPlan) (*pluginSwap, error) {
+func stagePluginSwap(logger io.Writer, plan *pluginPlan) (*pluginSwap, error) {
 	updates := plan.replacements()
 	if len(updates) == 0 {
 		return nil, nil
 	}
-	removeStalePluginStaging(plan.dir)
+	removeStalePluginStaging(logger, plan.dir)
 	staging, err := os.MkdirTemp(plan.dir, pluginStagingPrefix)
 	if err != nil {
 		return nil, fmt.Errorf("create a staging directory in %s: %w", plan.dir, err)
@@ -347,7 +415,8 @@ func (sw *pluginSwap) newPath(u pluginUpdate) string { return filepath.Join(sw.s
 func (sw *pluginSwap) oldPath(u pluginUpdate) string { return filepath.Join(sw.staging, "old", u.file) }
 
 // apply renames each new binary over the installed one. On failure the
-// plugins already replaced are put back before the error is returned.
+// plugins already replaced are put back before the error is returned; any
+// that cannot be stay in swapped, so a later restore retries them.
 func (sw *pluginSwap) apply(logger io.Writer) error {
 	for _, u := range sw.updates {
 		if err := os.Rename(sw.newPath(u), u.path); err != nil {
@@ -363,37 +432,51 @@ func (sw *pluginSwap) apply(logger io.Writer) error {
 	return nil
 }
 
-// restore puts back the old binaries of the plugins apply replaced, each
-// with one rename, then removes the staging directory.
+// restore puts back the old binaries of the plugins still swapped, each
+// with one rename, then removes the staging directory. Plugins it cannot
+// put back stay swapped, and the staging directory (their old binaries) is
+// kept.
 func (sw *pluginSwap) restore() error {
 	var errs []error
+	var failed []pluginUpdate
 	for i := len(sw.swapped) - 1; i >= 0; i-- {
 		u := sw.swapped[i]
 		if err := os.Rename(sw.oldPath(u), u.path); err != nil {
 			errs = append(errs, fmt.Errorf("restore %s: %w", u.path, err))
+			failed = append([]pluginUpdate{u}, failed...)
 		}
 	}
-	sw.swapped = nil
+	sw.swapped = failed
 	if len(errs) > 0 {
-		// Keep the staging directory: it holds the old binaries.
-		return errors.Join(errs...)
+		sw.keep = true
+		return fmt.Errorf("%w (the old binaries are kept in %s)", errors.Join(errs...), filepath.Join(sw.staging, "old"))
 	}
+	sw.keep = false
 	sw.cleanup()
 	return nil
 }
 
-// cleanup removes the staging directory.
-func (sw *pluginSwap) cleanup() { _ = os.RemoveAll(sw.staging) }
+// cleanup removes the staging directory, unless a failed restore left old
+// binaries in it.
+func (sw *pluginSwap) cleanup() {
+	if sw.keep {
+		return
+	}
+	_ = os.RemoveAll(sw.staging)
+}
 
-// removeStalePluginStaging removes staging directories of earlier runs.
-func removeStalePluginStaging(dir string) {
+// removeStalePluginStaging removes staging directories of earlier runs,
+// each with a warning naming it.
+func removeStalePluginStaging(logger io.Writer, dir string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
 	for _, e := range entries {
 		if e.IsDir() && strings.HasPrefix(e.Name(), pluginStagingPrefix) {
-			_ = os.RemoveAll(filepath.Join(dir, e.Name()))
+			p := filepath.Join(dir, e.Name())
+			pluginWarn(logger, fmt.Sprintf("removing %s, left by an interrupted or failed plugin update (it may hold old plugin binaries under old/)", p))
+			_ = os.RemoveAll(p)
 		}
 	}
 }

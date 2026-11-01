@@ -237,17 +237,23 @@ call:
   binary. Each plugin is swapped in with one atomic rename after the new
   release is activated and before the Hub restarts. The restart also
   restarts the plugins.
-- If a plugin's checksum is wrong or missing, the whole update fails
-  before anything is installed.
-- A plugin the release does not publish is left as it is, with a warning
-  in the run log. A downgrade's confirmation lists these plugins as
-  risks. Symlinks and plugins configured with a path outside that
-  directory are left alone too.
-- If the directory is not writable by the Hub, the plugins are not
-  updated, and the run log has a warning.
-- If the update fails after activation (the restart cannot be recorded or
-  requested), the Hub goes back to the previous release and the previous
-  plugins are put back.
+- If a downloaded plugin does not match its `SHA256SUMS` line, or its
+  download URL is outside the release, or its archive is malformed, the
+  whole update fails before anything is installed.
+- A plugin the release does not publish, or whose `SHA256SUMS` line is
+  missing or unusable, is left as it is, with a warning in the run log.
+  Nothing unverified is installed. A downgrade's confirmation lists these
+  plugins as risks. Symlinks and plugins configured with a path outside
+  that directory are left alone too.
+- If the directory is not writable by the Hub, or is itself a symlink,
+  the plugins are not updated, and the run log has a warning.
+- If the update fails after activation (a plugin cannot be swapped in, or
+  the restart cannot be recorded or requested), the Hub goes back to the
+  previous release and the previous plugins are put back. If a plugin
+  cannot be put back, its old binary is kept in a
+  `.scion-update-*/old/` directory inside the plugin directory, and the
+  error says so. The next update removes such directories, with a warning
+  in the run log.
 - Each release keeps a copy of the plugins installed with it in
   `/opt/scion/releases/<tag>/plugins/`. After the boot-failure guard rolls
   back, the restored Hub copies its own plugins back at startup, before

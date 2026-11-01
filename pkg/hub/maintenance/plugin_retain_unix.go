@@ -37,9 +37,11 @@ func (s *symlinkInstaller) ActiveRelease() string {
 }
 
 // RetainPlugins implements PluginRetainer: it writes copies of bins to
-// releases/<release>/plugins.partial/ and renames that directory over
-// releases/<release>/plugins/. The release must be a directory directly
-// under releases/.
+// releases/<release>/plugins.partial/, removes releases/<release>/plugins/
+// and renames the partial directory into its place. The pair is not
+// atomic: a crash in between leaves no plugins/ directory, which the
+// rollback reconcile treats as nothing to restore. The release must be a
+// directory directly under releases/.
 func (s *symlinkInstaller) RetainPlugins(release string, bins map[string]string) error {
 	if !releaseDirRE.MatchString(release) || strings.HasSuffix(release, partialSuffix) {
 		return fmt.Errorf("invalid release name %q", release)
