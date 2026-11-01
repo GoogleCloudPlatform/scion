@@ -188,7 +188,7 @@ Metrics are exported every 60 seconds and every trace is sampled. Neither can be
 
 #### Asynchronous agent create
 
-A synchronous Hub agent create holds the create request open while the Runtime Broker provisions the workspace and starts the agent. That request is bounded by the CLI's HTTP client timeout (30s) and by the Hub's `write_timeout` (`60s` by default), so the synchronous path is not suited to agents that take several minutes to start.
+A synchronous Hub agent create holds the create request open while the Runtime Broker provisions the workspace and starts the agent. Each dispatch to the broker is bounded by the Hub's fixed 180-second request timeout. The Hub extends that request's write deadline to cover it, and `scion start` and `scion create` wait up to 4 minutes for the answer, so the synchronous path is still not suited to agents that take longer than that to start.
 
 Asynchronous create is the `hub.async_agent_launch` [experiment](/scion/reference/experiments/), on by default. An admin can turn it off, or back on, in **Admin → Server Config → Experiments**; no restart is needed, and the Hub checks it each time it sends a create to a broker. With it on, the Hub answers as soon as the broker accepts the create. The agent is returned in a pre-running phase with an active launch, and the broker finishes the start in the background:
 
@@ -307,6 +307,7 @@ Controls the Runtime Broker service.
 | :--- | :--- | :--- | :--- |
 | `enabled` | bool | `false` | Whether to start the broker service. |
 | `port` | int | `9800` | HTTP port to listen on. |
+| `write_timeout` | duration | `"210s"` | HTTP write timeout of the broker's server. Keep it above the Hub's fixed 180-second request timeout to the broker (the default leaves 30 seconds of margin); a lower value can cut off an answer the Hub is still waiting for. Env: `SCION_SERVER_RUNTIMEBROKER_WRITETIMEOUT`. |
 | `broker_id` | string | | Unique UUID for this Runtime Broker. It names the Runtime Broker's state directory (`<state_dir>/<broker-id>`), so it must be a single path element: an empty ID, `.`, or an ID containing `..`, `/`, `\` or NUL is refused on join and on credential save. A value written by hand (for example with `scion config set`) is caught when the server starts, which refuses to start with it. |
 | `broker_name` | string | | Name the broker registers under on the Hub. Default: the hostname (`Hosted Broker` for a broker run with a co-located Hub). |
 | `broker_nickname` | string | | Same as `broker_name`, and takes precedence over it. Set by `scion runtime-broker register --broker-name`. |

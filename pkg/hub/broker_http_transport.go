@@ -118,17 +118,26 @@ func checkBrokerRedirect(req *http.Request, via []*http.Request) error {
 	return nil
 }
 
+// brokerRequestTimeout is the hub-to-broker request limit (ptone/scion#6829):
+// the broker HTTP clients' timeout here, the control channel's
+// RequestTimeout (DefaultControlChannelConfig and the configuration New
+// builds), the conduit tunnels' default (which read the control channel
+// default), and syncDispatchTimeout, the bound on one synchronous launch
+// dispatch. They are one limit and change together. It is not
+// configurable.
+const brokerRequestTimeout = 180 * time.Second
+
 func newBrokerHTTPTransport(debug bool, signer brokerRequestSigner) *brokerHTTPTransport {
 	transport := otelhttp.NewTransport(http.DefaultTransport)
 	return &brokerHTTPTransport{
 		client: &http.Client{
 			Transport:     transport,
-			Timeout:       120 * time.Second,
+			Timeout:       brokerRequestTimeout,
 			CheckRedirect: checkBrokerRedirect,
 		},
 		keysClient: &http.Client{
 			Transport: transport,
-			Timeout:   120 * time.Second,
+			Timeout:   brokerRequestTimeout,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				return http.ErrUseLastResponse
 			},

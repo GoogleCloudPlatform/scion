@@ -535,7 +535,7 @@ func (c *ControlChannelBrokerClient) ImageStatus(ctx context.Context, brokerID, 
 }
 
 // PullImage asks a broker to pull an image via control channel.
-// Note: inherits the tunnel's RequestTimeout (default 120s). Large image pulls
+// Note: inherits the tunnel's RequestTimeout (brokerRequestTimeout, 180s). Large image pulls
 // may exceed this timeout and report an error even though the pull continues
 // broker-side. A future async-pull mechanism would address this limitation.
 func (c *ControlChannelBrokerClient) PullImage(ctx context.Context, brokerID, image string) error {
