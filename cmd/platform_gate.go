@@ -109,6 +109,13 @@ var windowsAllowed = map[string]bool{
 	"hub.secret.list":           true,
 	"hub.secret.clear":          true,
 	"hub.secret.update":         true,
+	// Hub administrative settings: Hub API calls only; the one local file
+	// access is reading a settings document (hub settings set --file).
+	"hub.settings":        true,
+	"hub.settings.get":    true,
+	"hub.settings.set":    true,
+	"hub.settings.unset":  true,
+	"hub.settings.schema": true,
 	// hub.secret.migrate and hub.secret.migrate-names are deliberately
 	// absent: they are hub-server-host admin tools that open the local hub
 	// database read-write (schema migration, WAL) and can write a foreign-key
