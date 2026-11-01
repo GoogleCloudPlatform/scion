@@ -882,8 +882,8 @@ func TestForceDeleteUser_PlacementRefusalRecordsCode(t *testing.T) {
 	}, 15*time.Second, 20*time.Millisecond, "the agent reads failed")
 	require.Len(t, v.Agents, 1)
 	assert.Equal(t, store.UserDeletionOutcomeFailed, v.Agents[0].Outcome)
-	assert.Contains(t, v.Agents[0].LastError, ErrCodeRuntimeTargetPinStale, "the record names the placement code")
-	assert.Contains(t, v.Agents[0].LastError, "placement conflict: ")
+	want := "placement conflict: " + ErrCodeRuntimeTargetPinStale + ": " + placementRefusalFor(a).Message
+	assert.Equal(t, want, v.Agents[0].LastError, "the record names the placement code, then the guidance")
 
 	got := mustGetAgent(t, f.s, a.ID)
 	assert.True(t, got.DeletedAt.IsZero(), "the agent is kept")
@@ -894,7 +894,7 @@ func TestForceDeleteUser_PlacementRefusalRecordsCode(t *testing.T) {
 	f.srv.reconcileUserDeletion(ctx, v.DeletionID, false)
 	v = f.getDeletion(t)
 	assert.Equal(t, store.UserDeletionStateStopping, v.State)
-	assert.Contains(t, v.Agents[0].LastError, ErrCodeRuntimeTargetPinStale)
+	assert.Equal(t, want, v.Agents[0].LastError)
 	assert.Contains(t, v.LastError, a.ID)
 	assert.Contains(t, v.LastError, ErrCodeRuntimeTargetPinStale)
 }
