@@ -163,9 +163,8 @@ func (b *nfsPodVolumes) claimVolume() (corev1.Volume, error) {
 // it adds the volume inlineName for it (the same name must always name the
 // same directory).
 func (b *nfsPodVolumes) mount(inlineName, subPath, mountPath string, readOnly bool) (corev1.VolumeMount, error) {
-	if b.layout.Share.PVName != "" && subPath == "" {
-		// An empty workspace subPath mounts the claim's root, as before.
-		return corev1.VolumeMount{Name: "workspace", MountPath: mountPath, ReadOnly: readOnly}, nil
+	if err := b.checkScope(subPath, mountPath); err != nil {
+		return corev1.VolumeMount{}, err
 	}
 	realized, err := realizeNFSLeaf(b.layout, b.projectID, subPath, mountPath, readOnly)
 	if err != nil {
@@ -193,6 +192,9 @@ func (b *nfsPodVolumes) mount(inlineName, subPath, mountPath string, readOnly bo
 // through the layout first, so it must sit strictly under the project's
 // tree. With a claim, it is mount's subPath mount of the claim.
 func (b *nfsPodVolumes) mountWithin(parentName, subPath, mountPath string, readOnly bool) (corev1.VolumeMount, error) {
+	if err := b.checkScope(subPath, mountPath); err != nil {
+		return corev1.VolumeMount{}, err
+	}
 	if b.layout.Share.PVName != "" {
 		return b.mount(parentName, subPath, mountPath, readOnly)
 	}
@@ -215,6 +217,20 @@ func (b *nfsPodVolumes) mountWithin(parentName, subPath, mountPath string, readO
 		return corev1.VolumeMount{Name: parentName, MountPath: mountPath, SubPath: rel, ReadOnly: readOnly}, nil
 	}
 	return corev1.VolumeMount{}, fmt.Errorf("inline NFS mount of %q needs the volume %q of its parent directory", mountPath, parentName)
+}
+
+// checkScope refuses a directory of the workspace share that no container
+// may mount (checkNFSMountScope), with a claim or inline: an empty subPath
+// (the claim's root, the export root), the project root, the project
+// configuration directory. The subpath root is the configured one
+// (RunConfig.NFSSubPathRoot). Shared dirs on another share or the
+// transitional split are checked by sharedDirClaimSubPath, which only
+// admits <project>/shared-dirs/<name>.
+func (b *nfsPodVolumes) checkScope(subPath, mountPath string) error {
+	if err := checkNFSMountScope(subPath, b.layout.SubPathRoot, b.projectID); err != nil {
+		return fmt.Errorf("NFS mount at %s: %w", mountPath, err)
+	}
+	return nil
 }
 
 // addInline adds v unless a volume of that name is already there, which

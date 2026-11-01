@@ -19,11 +19,23 @@ import (
 	"embed"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
+
+// withNFSWorkspace makes cfg an nfs-backend start with its workspace on an
+// NFS project tree (<share>/projects/<project ID>/workspace), as pkg/agent
+// places it: the bind check of buildCommonRunArgs finds the share from it.
+func withNFSWorkspace(t *testing.T, cfg RunConfig) RunConfig {
+	t.Helper()
+	ws := filepath.Join(t.TempDir(), "share1", "projects", "proj-123", "workspace")
+	mkdirs(t, ws)
+	cfg.WorkspaceBackendName, cfg.ProjectID, cfg.Workspace = "nfs", "proj-123", ws
+	return cfg
+}
 
 // TestBuildCommonRunArgs_LocalBackend_HostUID verifies that backend=local
 // (or empty) advertises the broker's own UID/GID — today's behavior, unchanged.
@@ -47,7 +59,7 @@ func TestBuildCommonRunArgs_LocalBackend_HostUID(t *testing.T) {
 // advertises the configured NFS UID/GID instead of the host UID.
 func TestBuildCommonRunArgs_NFSBackend_StableUID(t *testing.T) {
 	cfg := minimalRunConfig()
-	cfg.WorkspaceBackendName = "nfs"
+	cfg = withNFSWorkspace(t, cfg)
 	cfg.NFSUID = 1000
 	cfg.NFSGID = 1000
 
@@ -64,7 +76,7 @@ func TestBuildCommonRunArgs_NFSBackend_StableUID(t *testing.T) {
 // can be set to non-default values via config.
 func TestBuildCommonRunArgs_NFSBackend_CustomUID(t *testing.T) {
 	cfg := minimalRunConfig()
-	cfg.WorkspaceBackendName = "nfs"
+	cfg = withNFSWorkspace(t, cfg)
 	cfg.NFSUID = 2000
 	cfg.NFSGID = 2000
 
@@ -81,7 +93,7 @@ func TestBuildCommonRunArgs_NFSBackend_CustomUID(t *testing.T) {
 // defaults to 1000:1000 (design §9.1 convergence with K8s pod UID/GID).
 func TestBuildCommonRunArgs_NFSBackend_DefaultUID(t *testing.T) {
 	cfg := minimalRunConfig()
-	cfg.WorkspaceBackendName = "nfs"
+	cfg = withNFSWorkspace(t, cfg)
 	cfg.NFSUID = 0 // should default to 1000
 	cfg.NFSGID = 0 // should default to 1000
 
@@ -109,7 +121,7 @@ func TestBuildCommonRunArgs_NFSBackend_DistinctIDs(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := minimalRunConfig()
-			cfg.WorkspaceBackendName = "nfs"
+			cfg = withNFSWorkspace(t, cfg)
 			cfg.NFSUID = tc.uid
 			cfg.NFSGID = tc.gid
 
@@ -128,7 +140,7 @@ func TestBuildCommonRunArgs_NFSBackend_DistinctIDs(t *testing.T) {
 // init can skip the per-start recursive chown.
 func TestBuildCommonRunArgs_NFSBackend_ExposesBackendEnv(t *testing.T) {
 	cfg := minimalRunConfig()
-	cfg.WorkspaceBackendName = "nfs"
+	cfg = withNFSWorkspace(t, cfg)
 	cfg.NFSUID = 1000
 	cfg.NFSGID = 1000
 

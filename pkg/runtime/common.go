@@ -462,6 +462,13 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		return nil, err
 	}
 	config.Workspace = resolvedWorkspace
+	// On NFS project storage, no bind may reach the project root, its
+	// configuration directory or another tree of the share
+	// (checkNFSMountScope); every bind is checked when it is emitted below.
+	nfsScope, err := newNFSBindScope(config)
+	if err != nil {
+		return nil, err
+	}
 
 	// Resolve RepoRoot through any symlinks too, the same way Workspace just
 	// was: the branches below compare the two with filepath.Rel to decide
@@ -880,6 +887,9 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		src, err := checkBindSource(spec.src)
 		if err != nil {
 			return nil, err
+		}
+		if err := nfsScope.check(src); err != nil {
+			return nil, fmt.Errorf("bind mount at %s: %w", tgt, err)
 		}
 		val := fmt.Sprintf("%s:%s", src, tgt)
 		if spec.ro {
