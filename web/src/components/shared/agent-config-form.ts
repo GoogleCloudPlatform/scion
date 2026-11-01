@@ -1287,6 +1287,15 @@ export class ScionAgentConfigForm extends LitElement {
     `;
   }
 
+  /**
+   * Whether a start keeps the previous value for this draft: a clear, or a
+   * count limit of 0 (the broker applies limits only when greater than 0).
+   * Unlimited on a duration ("0") is applied at the next start.
+   */
+  private keptByStart(f: AgentConfigFieldDef, d: FieldDraft): boolean {
+    return d.cleared || (d.unlimited && f.control === 'limit-count');
+  }
+
   private renderStatus(f: AgentConfigFieldDef, st: AgentFieldEditState, d: FieldDraft | undefined) {
     switch (st.disposition) {
       case 'locked':
@@ -1298,6 +1307,12 @@ export class ScionAgentConfigForm extends LitElement {
           <sl-badge variant="warning" pill
             ><sl-icon name="hourglass-split"></sl-icon> Held — applies at next start</sl-badge
           >
+          ${st.clearNeedsReincarnate && d && this.keptByStart(f, d)
+            ? html`<span class="clear-note" data-testid="clear-note">
+                ${d.cleared ? 'Clearing' : 'Unlimited'} is held as a whole until a reincarnation; a
+                start does not apply it and keeps the previous value.</span
+              >`
+            : nothing}
           ${this.notSaveableNote(st)}
         </div>`;
       case 'reincarnate':
@@ -1310,12 +1325,8 @@ export class ScionAgentConfigForm extends LitElement {
         </div>`;
       default: {
         const session = st.note === 'session' ? ' (the conversation continues)' : '';
-        // A start keeps the previous value for a clear, and for a count
-        // limit of 0 (the broker applies limits only when greater than 0).
-        // Unlimited on a duration ("0") is applied at the next start.
-        const keptByStart = !!d && (d.cleared || (d.unlimited && f.control === 'limit-count'));
         const clearNote =
-          st.clearNeedsReincarnate && d && keptByStart
+          st.clearNeedsReincarnate && d && this.keptByStart(f, d)
             ? html`<span class="clear-note" data-testid="clear-note">
                 ${d.cleared ? 'Clearing' : 'Unlimited'} takes effect at the next reincarnation; a
                 plain start keeps the previous value.</span
@@ -1415,7 +1426,7 @@ export class ScionAgentConfigForm extends LitElement {
         control = this.renderTimezone(f, off, d, id);
         break;
       case 'resources':
-        control = this.renderResources(off);
+        control = this.renderResources(off, st.disposition === 'held');
         break;
       case 'auto-expose':
         control = this.renderAutoExpose(f, off, id);
@@ -1707,7 +1718,7 @@ export class ScionAgentConfigForm extends LitElement {
       ${set ? nothing : html`<div class="inherited" data-testid="inherited">${inherited}</div>`}`;
   }
 
-  private renderResources(off: boolean) {
+  private renderResources(off: boolean, held: boolean) {
     return html`<div class="grid">
         ${RESOURCE_FIELDS.map((r) => {
           const key = `config.resources.${r.sub}`;
@@ -1747,8 +1758,9 @@ export class ScionAgentConfigForm extends LitElement {
       ${this.resourcesRemoveStored()
         ? html`<div class="status">
             <span class="clear-note" data-testid="clear-note"
-              >Removing a value takes effect at the next reincarnation; a plain start keeps the
-              previous value.</span
+              >${held
+                ? 'Removing a value holds the whole resources edit until a reincarnation, including the values a start could apply; a start keeps the previous values.'
+                : 'Removing a value takes effect at the next reincarnation; a plain start keeps the previous value.'}</span
             >
           </div>`
         : nothing}`;

@@ -381,6 +381,12 @@ func isKubernetesRuntime(name string) bool {
 	return name == "kubernetes"
 }
 
+// isCloudRunRuntime reports whether name is the Cloud Run Instances
+// runtime ("cloudrun", not "cloudrun-sandbox").
+func isCloudRunRuntime(name string) bool {
+	return name == "cloudrun"
+}
+
 // writeAgentRecordFile writes v as JSON to the file name in agentDir. It is
 // the single writer for the per-agent storage records (home storage). The file is written to a temporary name and renamed
 // into place, so a reader never sees a partial record. The file and the

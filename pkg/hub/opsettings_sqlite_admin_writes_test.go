@@ -154,10 +154,7 @@ func TestSQLite_PutServerConfig_Layer0Rejected(t *testing.T) {
 	if rr.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
 	}
-	var resp map[string]interface{}
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
+	resp := settingsErrorFields(t, rr.Body.Bytes())
 	if resp["error"] != "layer0_rejected" {
 		t.Errorf("expected error=layer0_rejected, got %v", resp["error"])
 	}

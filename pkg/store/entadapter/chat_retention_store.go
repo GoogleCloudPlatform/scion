@@ -62,6 +62,28 @@ func NewChatRetentionStore(client *ent.Client) *ChatRetentionStore {
 
 var _ store.ChatRetentionStore = (*ChatRetentionStore)(nil)
 
+// failedScanQuery is the statement of one failed-message scan. The
+// dispatch_state filter is a literal, not a bound parameter, so the query
+// textually implies the WHERE of the partial failed index: SQLite, and a
+// Postgres generic plan, use a partial index only when the query proves its
+// predicate without parameter values. The recipient check is the former
+// DELETE's (LIKE 'agent:%', with each dialect's case rules), computed per
+// row so the rows read are reported whether or not they qualify.
+func (s *ChatRetentionStore) failedScanQuery(cutoff time.Time, after store.ChatRetentionPosition, scanLimit int) (string, []any) {
+	query := `SELECT id, created, project_id, conversation_id,
+  CASE WHEN recipient LIKE 'agent:%' THEN 1 ELSE 0 END
+  FROM messages WHERE dispatch_state = '` + store.MessageDispatchFailed + `' AND created < ?`
+	args := []any{cutoff.UTC()}
+	if !after.IsStart() {
+		c := after.Created.UTC()
+		query += ` AND created >= ? AND (created > ? OR id > ?)`
+		args = append(args, c, c, after.ID)
+	}
+	query += ` ORDER BY created, id LIMIT ?`
+	args = append(args, scanLimit)
+	return s.rebind(query), args
+}
+
 // placeholders returns n bind placeholders starting at bind position
 // start (1-based): "?, ?, ..." on SQLite and "$start, $start+1, ..." on
 // Postgres.
@@ -205,12 +227,11 @@ func countMain(c *store.ChatRetentionCounts) *int64   { return &c.Main }
 func countFailed(c *store.ChatRetentionCounts) *int64 { return &c.Failed }
 
 // SelectFailedMessages implements store.ChatRetentionStore. The statement
-// walks the (created, id) index from the cursor and stops after scanLimit
-// rows, so its work is bounded even when failed rows are sparse (messages
-// has no dispatch_state index). Eligibility is computed in SQL with the
-// filters of the former unbounded failed-message DELETE, so LIKE behaves as
-// it did there on each dialect; the rows are filtered here so the scan
-// reports how far it got.
+// (failedScanQuery) ranges over the partial (created, id) WHERE
+// dispatch_state = 'failed' index (message_failed_created_id), so it reads
+// failed rows only, in index order, and stops after scanLimit of them.
+// Failed "user:" rows are read but not returned, and the position moves
+// past them, so they are not rescanned on every step.
 func (s *ChatRetentionStore) SelectFailedMessages(ctx context.Context, cutoff time.Time, after store.ChatRetentionPosition, scanLimit, limit int) (store.FailedMessageScan, error) {
 	out := store.FailedMessageScan{Next: after}
 	if err := s.requireDB(); err != nil {
@@ -219,19 +240,8 @@ func (s *ChatRetentionStore) SelectFailedMessages(ctx context.Context, cutoff ti
 	if scanLimit <= 0 || limit <= 0 {
 		return out, nil
 	}
-	query := `SELECT id, created, project_id, conversation_id,
-  CASE WHEN dispatch_state = ? AND recipient LIKE 'agent:%' THEN 1 ELSE 0 END
-  FROM messages WHERE created < ?`
-	args := []any{store.MessageDispatchFailed, cutoff.UTC()}
-	if !after.IsStart() {
-		c := after.Created.UTC()
-		query += ` AND created >= ? AND (created > ? OR id > ?)`
-		args = append(args, c, c, after.ID)
-	}
-	query += ` ORDER BY created, id LIMIT ?`
-	args = append(args, scanLimit)
-
-	rows, err := s.db.QueryContext(ctx, s.rebind(query), args...)
+	query, args := s.failedScanQuery(cutoff, after, scanLimit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return out, fmt.Errorf("chat retention: select failed messages: %w", err)
 	}

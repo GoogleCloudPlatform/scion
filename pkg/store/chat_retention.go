@@ -177,14 +177,14 @@ type ChatRetentionStore interface {
 	// already gone counts nothing.
 	PurgeChatMessages(ctx context.Context, ids []string, projectOf map[string]string, cursor ChatRetentionCursor) (ChatRetentionPurgeResult, error)
 
-	// SelectFailedMessages scans at most scanLimit messages created before
-	// cutoff and after the position after, oldest first in (created, id)
-	// order over the created index, and returns those of them in
-	// dispatch_state "failed" with an agent recipient ("agent:" prefix), up
-	// to limit. The scan cap bounds the work of one statement however
-	// sparse failed rows are. A "user:" recipient row is never returned: it
-	// reaches "failed" only by the stuck-pending expiry, and is real chat
-	// history.
+	// SelectFailedMessages scans at most scanLimit messages in
+	// dispatch_state "failed" created before cutoff and after the position
+	// after, oldest first in (created, id) order over the partial failed
+	// index, and returns those of them with an agent recipient ("agent:"
+	// prefix), up to limit. The scan cap bounds the work of one statement
+	// however many failed "user:" rows sit in the range. A "user:"
+	// recipient row is never returned: it reaches "failed" only by the
+	// stuck-pending expiry, and is real chat history.
 	SelectFailedMessages(ctx context.Context, cutoff time.Time, after ChatRetentionPosition, scanLimit, limit int) (FailedMessageScan, error)
 
 	// PurgeFailedMessages deletes the given messages with the same

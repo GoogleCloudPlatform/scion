@@ -297,10 +297,11 @@ func TestChatRetentionStore_SelectFailedMessages(t *testing.T) {
 	require.Empty(t, got.Candidates)
 }
 
-// TestChatRetentionStore_SelectFailedMessagesScanCap: with failed rows
-// sparse among delivered ones, each scan reads at most scanLimit rows and
-// moves the position to the last row it read, so a walk of capped scans
-// finds every failed row and no other.
+// TestChatRetentionStore_SelectFailedMessagesScanCap: with failed agent
+// rows sparse among failed "user:" rows (both in the failed index) and
+// delivered rows (not in it), each scan reads at most scanLimit failed
+// rows and moves the position to the last row it read, so a walk of capped
+// scans finds every failed agent row and no other.
 func TestChatRetentionStore_SelectFailedMessagesScanCap(t *testing.T) {
 	f := newChatRetentionFixture(t)
 	project := uuid.New()
@@ -308,18 +309,20 @@ func TestChatRetentionStore_SelectFailedMessagesScanCap(t *testing.T) {
 	base := cutoff.Add(-48 * time.Hour)
 	var failed []string
 	for i := 0; i < 45; i++ {
-		state := "dispatched"
+		at := base.Add(time.Duration(i) * time.Minute)
+		recipient := "user:alice"
 		if i%20 == 13 {
-			state = "failed"
+			recipient = "agent:bot"
 		}
-		id := f.message(chatRetentionMsg{project: project, created: base.Add(time.Duration(i) * time.Minute), state: state})
-		if state == "failed" {
+		id := f.message(chatRetentionMsg{project: project, created: at, state: "failed", recipient: recipient})
+		if recipient == "agent:bot" {
 			failed = append(failed, id)
 		}
+		_ = f.message(chatRetentionMsg{project: project, created: at.Add(30 * time.Second), state: "dispatched"})
 	}
 
-	// The first scan of 10 rows holds no failed row: no candidate, but the
-	// position moves past the 10 rows read.
+	// The first scan reads 10 failed "user:" rows: no candidate, but the
+	// position moves past them (the delivered rows between are not read).
 	first, err := f.st.SelectFailedMessages(f.ctx, cutoff, store.ChatRetentionPosition{}, 10, 100)
 	require.NoError(t, err)
 	assert.Empty(t, first.Candidates)

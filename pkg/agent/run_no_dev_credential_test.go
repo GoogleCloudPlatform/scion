@@ -53,11 +53,13 @@ const (
 // hub-issued token. Each started case asserts the hub and token keys of the
 // container env exactly; every case asserts the agent token file.
 func TestStartHubCredentialIsHubIssuedOnly(t *testing.T) {
+	// The endpoints use https: on the mock runtime Start refuses a
+	// plaintext hub endpoint that is not loopback (checkAgentHubTransport).
 	const (
-		bridgeEndpoint = "http://host.docker.internal:8080"
+		bridgeEndpoint = "https://host.docker.internal:8080"
 		remoteEndpoint = "https://hub.example.com"
-		agentEndpoint  = "http://agent-config.example:9810"
-		configEndpoint = "http://config-env.example:9810"
+		agentEndpoint  = "https://agent-config.example:9810"
+		configEndpoint = "https://config-env.example:9810"
 	)
 	tests := []struct {
 		name string

@@ -17,11 +17,15 @@ gated by `hub.chat_retention` and keeps its 7-day default.
   messaging page. It replaces
   `Config.FailedMessageRetentionDays`, which nothing ever set. The handler
   reads it on every run, so a change takes effect without a restart.
-- **Store** `ChatRetentionStore.SelectFailedMessages` is a capped scan.
-  It reads at most `scanLimit` rows below the cutoff, from a `(created, id)`
-  keyset, over the created index. It marks in SQL the rows matching the old
-  filters (`dispatch_state = 'failed'`, `recipient LIKE 'agent:%'`), so
-  `LIKE` behaves on each dialect as it did in the old `DELETE`. It returns
+- **Store** `ChatRetentionStore.SelectFailedMessages` is a capped scan
+  over the partial `message_failed_created_id` index (`(created, id) WHERE
+  dispatch_state = 'failed'`). That index came from the upstream change
+  (#4427) that P3's merge supersedes, and is kept exactly as upstream wrote
+  it. The scan reads at most `scanLimit` failed rows below the cutoff from
+  a `(created, id)` keyset. `dispatch_state = 'failed'` is a literal, so
+  SQLite and a Postgres generic plan can use the partial index. The
+  recipient check (`recipient LIKE 'agent:%'`) is computed in SQL per row,
+  so `LIKE` behaves on each dialect as it did in the old `DELETE`. It returns
   up to `limit` of them, the position to resume from (the last candidate
   when the limit cut the scan, else the last row read) and whether the
   range below the cutoff is exhausted. `PurgeFailedMessages` runs the same cascade
@@ -64,9 +68,16 @@ gated by `hub.chat_retention` and keeps its 7-day default.
 
 ## Decisions
 
-- No new index. messages has no `dispatch_state` index; the capped scan
-  bounds each statement instead (review round 1), and the cursor spreads a
-  large range below the cutoff over several runs. A row whose `created` is
+- Merge with upstream #4427, which had chunked the old ent `DELETE` with
+  an in-memory cursor and added the failed index. P3 keeps the index and
+  replaces the rest with the cascade path. `PurgeFailedMessagesChunk`,
+  `FailedMessagePurgeChunk`, `store.MessagePosition` and the server's
+  `failedPurge` state are removed. Upstream's tests were ported to the new
+  path, or dropped where superseded; the dispositions are in the review
+  report.
+- The scan cap stays (1000 failed rows per statement) and the cursor stays.
+  With the index, a scan reads only failed rows, so the cap matters only
+  when many failed "user:" rows sit in the range. A row whose `created` is
   older than the cursor and that turns failed more than 24 h after creation
   (only possible when the hub was down past the pending expiry) waits until
   a longer window moves the clamp back.
@@ -87,18 +98,21 @@ gated by `hub.chat_retention` and keeps its 7-day default.
   sparse failed rows over capped scans. They also check the cascade, counts under `Failed`, that no
   cursor is written, and idempotence. These replace the old `MessageStore`
   purge tests.
-- `pkg/hub` shard 5: unit tests of the paced walk (capped scans over
+- `TestFailedMessageScan_UsesFailedIndex` checks the SQLite plan of the
+  exact statement `SelectFailedMessages` issues. From the start and from a
+  cursor, the plan names `message_failed_created_id` and has no temp
+  B-tree sort. `TestMessagesFailedCreatedIDIndex_AutoMigrate` (upstream,
+  unchanged) pins the index on both dialects.
+- `pkg/hub`: unit tests of the paced walk (capped scans over
   sparse rows, resume from the cursor, the 24 h clamp), SQLite handler
   tests on the real web chat tables (same rows, no orphans, window change
   without restart, counts added to an open sweep run, counts deferred
   while a tick holds the run, no store), admin messaging
   validation, schema and fallback, and member/admin authz.
-- `pkg/hub` `-tags integration` shard 3:
+- `pkg/hub` `-tags integration`:
   `TestFailedMessageRetention_Postgres_SameRowsNoOrphans` (60 rows in
   chunks of 25).
 
 ## Known gaps and follow-ups
 
-- A partial `(created, id) WHERE dispatch_state = 'failed'` index, like the
-  pending one, would make each run proportional to the failed rows instead
-  of the rows scanned. It needs an ent schema change.
+- None beyond the decisions above.

@@ -54,6 +54,7 @@ func TestPollBrokerHubConnections_WaitsForFirstHeartbeat(t *testing.T) {
 		nil, // broker not answering yet
 		{Connections: []BrokerHubConnectionInfo{}}, // connections not loaded
 		{Connections: []BrokerHubConnectionInfo{{Name: "hub-a", Status: "disconnected"}}},
+		{Connections: []BrokerHubConnectionInfo{{Name: "hub-a", Status: "connecting"}}}, // control channel handshake pending
 		{Connections: []BrokerHubConnectionInfo{{Name: "hub-a", Status: "connected"}}},
 		{Connections: []BrokerHubConnectionInfo{{Name: "hub-a", Status: "error"}}},
 	}
@@ -68,7 +69,7 @@ func TestPollBrokerHubConnections_WaitsForFirstHeartbeat(t *testing.T) {
 	live := pollBrokerHubConnections(newStatusWaitBudget(), query, []string{"hub-a"}, time.Millisecond)
 	require.NotNil(t, live)
 	assert.Equal(t, "connected", live.Connections[0].Status)
-	assert.Equal(t, 4, calls)
+	assert.Equal(t, 5, calls)
 }
 
 func TestPollBrokerHubConnections_Bounded(t *testing.T) {

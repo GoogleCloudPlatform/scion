@@ -190,41 +190,30 @@ runs:
           fi
         }
         check HOME "$HOME" /home/runner
-        if [ -L /home/runner/work ]; then
-          # SWITCH ONLY: the layout of cr-ci runner images before the volume moved to HOME
-          # (cr-ci FIXUP-5): HOME entries linked into /scratch, mirrored. Remove this branch
-          # once every cr-ci deployment runs the new image (cr-ci/docs/operations.md,
-          # "Runner layout switch").
-          echo "note: old cr-ci runner layout (/home/runner/work links into /scratch)"
-          check "work folder /home/runner/work" "$(readlink -f /home/runner/work)" "$(readlink -f /scratch/_work)"
-          check "HOME/.cache" "$(readlink -f "$HOME/.cache")" "$(readlink -f /scratch/.cache)"
-          check "HOME/go" "$(readlink -f "$HOME/go")" "$(readlink -f /scratch/go)"
+        # Real directories: each resolves to itself. ~/.cache may instead be a link to
+        # the entrypoint's RAM directory when the job sets RUNNER_BUILD_CACHE_IN_RAM=true
+        # (the same branch as cr-ci/workflows/cr-runner-poc.yml; templates_test.go keeps
+        # the two in step).
+        for d in /home/runner/work "$HOME/go" "$HOME/.npm"; do
+          check "real directory $d" "$(readlink -f "$d")" "$d"
+        done
+        if [ "${RUNNER_BUILD_CACHE_IN_RAM:-false}" = true ] && [ -L "$HOME/.cache" ]; then
+          check "HOME/.cache (RAM build cache)" "$(readlink -f "$HOME/.cache")" /tmp/cr-ci-build-cache
         else
-          # Real directories: each resolves to itself. ~/.cache may instead be a link to
-          # the entrypoint's RAM directory when the job sets RUNNER_BUILD_CACHE_IN_RAM=true
-          # (the same branch as cr-ci/workflows/cr-runner-poc.yml; templates_test.go keeps
-          # the two in step).
-          for d in /home/runner/work "$HOME/go" "$HOME/.npm"; do
-            check "real directory $d" "$(readlink -f "$d")" "$d"
-          done
-          if [ "${RUNNER_BUILD_CACHE_IN_RAM:-false}" = true ] && [ -L "$HOME/.cache" ]; then
-            check "HOME/.cache (RAM build cache)" "$(readlink -f "$HOME/.cache")" /tmp/cr-ci-build-cache
-          else
-            check "real directory ~/.cache" "$(readlink -f "$HOME/.cache")" /home/runner/.cache
-          fi
-          # On the volume, not on the root filesystem (in memory on Cloud Run).
-          home_dev=$(stat -c %d "$HOME" 2>/dev/null)
-          root_dev=$(stat -c %d / 2>/dev/null)
-          if [ -z "$home_dev" ] || [ "$home_dev" = "$root_dev" ]; then
-            echo "::error title=cr-ci cache parity::HOME is on the root filesystem (device '$home_dev'); the runner job must mount its volume at /home/runner"
-            fail=1
-          else
-            echo "ok   HOME is a volume (device $home_dev)"
-          fi
-          for d in /home/runner/work "$HOME/go" "$HOME/.npm"; do
-            check "device of $d" "$(stat -c %d "$d" 2>/dev/null)" "$home_dev"
-          done
+          check "real directory ~/.cache" "$(readlink -f "$HOME/.cache")" /home/runner/.cache
         fi
+        # On the volume, not on the root filesystem (in memory on Cloud Run).
+        home_dev=$(stat -c %d "$HOME" 2>/dev/null)
+        root_dev=$(stat -c %d / 2>/dev/null)
+        if [ -z "$home_dev" ] || [ "$home_dev" = "$root_dev" ]; then
+          echo "::error title=cr-ci cache parity::HOME is on the root filesystem (device '$home_dev'); the runner job must mount its volume at /home/runner"
+          fail=1
+        else
+          echo "ok   HOME is a volume (device $home_dev)"
+        fi
+        for d in /home/runner/work "$HOME/go" "$HOME/.npm"; do
+          check "device of $d" "$(stat -c %d "$d" 2>/dev/null)" "$home_dev"
+        done
         check "go env GOCACHE" "$(go env GOCACHE)" /home/runner/.cache/go-build
         check "go env GOMODCACHE" "$(go env GOMODCACHE)" /home/runner/go/pkg/mod
         check "GITHUB_WORKSPACE parent" "${GITHUB_WORKSPACE%/*/*}" /home/runner/work

@@ -14,7 +14,7 @@
 
 //go:build !no_sqlite
 
-package hub
+package oidckeys
 
 import (
 	"context"
@@ -125,7 +125,7 @@ func TestGenerateRSAKeyPair(t *testing.T) {
 	var firstKey *rsa.PrivateKey
 	for i, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			key, err := generateRSAKeyPair()
+			key, err := GenerateRSAKeyPair()
 			require.NoError(t, err)
 			require.NotNil(t, key)
 
@@ -159,13 +159,13 @@ func TestPEMEncodingRoundTrip(t *testing.T) {
 		{name: "round-trip preserves public key"},
 	}
 
-	key, err := generateRSAKeyPair()
+	key, err := GenerateRSAKeyPair()
 	require.NoError(t, err)
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			// Encode to PEM
-			pemData, err := encodePEMPrivateKey(key)
+			pemData, err := EncodePEMPrivateKey(key)
 			require.NoError(t, err)
 			require.NotEmpty(t, pemData)
 
@@ -175,7 +175,7 @@ func TestPEMEncodingRoundTrip(t *testing.T) {
 			assert.Equal(t, "PRIVATE KEY", block.Type, "PEM block type should be PRIVATE KEY")
 
 			// Decode from PEM
-			decoded, err := decodePEMPrivateKey(pemData)
+			decoded, err := DecodePEMPrivateKey(pemData)
 			require.NoError(t, err)
 			require.NotNil(t, decoded)
 
@@ -227,7 +227,7 @@ func TestDecodePEMPrivateKey_Errors(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := decodePEMPrivateKey(tc.input)
+			_, err := DecodePEMPrivateKey(tc.input)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantErr)
 		})
@@ -235,9 +235,9 @@ func TestDecodePEMPrivateKey_Errors(t *testing.T) {
 }
 
 func TestComputeKeyID(t *testing.T) {
-	key1, err := generateRSAKeyPair()
+	key1, err := GenerateRSAKeyPair()
 	require.NoError(t, err)
-	key2, err := generateRSAKeyPair()
+	key2, err := GenerateRSAKeyPair()
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -285,7 +285,7 @@ func TestComputeKeyID(t *testing.T) {
 }
 
 func TestJoseSignerProducesValidRS256(t *testing.T) {
-	key, err := generateRSAKeyPair()
+	key, err := GenerateRSAKeyPair()
 	require.NoError(t, err)
 
 	kid := computeKeyID(&key.PublicKey)
@@ -338,7 +338,7 @@ func TestJoseSignerProducesValidRS256(t *testing.T) {
 			assert.Equal(t, tc.claims["iss"], result["iss"])
 
 			// Verify that verifying with a different key fails
-			wrongKey, err := generateRSAKeyPair()
+			wrongKey, err := GenerateRSAKeyPair()
 			require.NoError(t, err)
 			var wrongResult map[string]interface{}
 			err = parsed.Claims(&wrongKey.PublicKey, &wrongResult)
@@ -675,10 +675,10 @@ func TestOIDCSigningKeySecretID(t *testing.T) {
 }
 
 func TestEncodePEMPrivateKey_PKCS8Format(t *testing.T) {
-	key, err := generateRSAKeyPair()
+	key, err := GenerateRSAKeyPair()
 	require.NoError(t, err)
 
-	pemData, err := encodePEMPrivateKey(key)
+	pemData, err := EncodePEMPrivateKey(key)
 	require.NoError(t, err)
 
 	// Should be valid PKCS#8
@@ -955,7 +955,7 @@ func TestOIDCKeyManager_RotateKey_WithBackend(t *testing.T) {
 	assert.NotEmpty(t, sv.Value, "Rotated key should be persisted to backend")
 
 	// The persisted key should be the new active key.
-	privKey, err := decodePEMPrivateKey([]byte(sv.Value))
+	privKey, err := DecodePEMPrivateKey([]byte(sv.Value))
 	require.NoError(t, err)
 	newKID := computeKeyID(&privKey.PublicKey)
 	assert.Equal(t, mgr.JWKS().Keys[0].KeyID, newKID,
@@ -1275,14 +1275,14 @@ func TestOIDCKeyManager_CASCreateKeyInStore_Direct(t *testing.T) {
 	}
 
 	// Generate two different keys.
-	key1, err := generateRSAKeyPair()
+	key1, err := GenerateRSAKeyPair()
 	require.NoError(t, err)
-	pem1, err := encodePEMPrivateKey(key1)
+	pem1, err := EncodePEMPrivateKey(key1)
 	require.NoError(t, err)
 
-	key2, err := generateRSAKeyPair()
+	key2, err := GenerateRSAKeyPair()
 	require.NoError(t, err)
-	pem2, err := encodePEMPrivateKey(key2)
+	pem2, err := EncodePEMPrivateKey(key2)
 	require.NoError(t, err)
 
 	t.Run("first writer wins", func(t *testing.T) {

@@ -943,7 +943,7 @@ var getCallerPattern = regexp.MustCompile(`\b(?:secretBackend|sb|Backend)\.Get\(
 // surfaced rather than silently inherited.
 var hubInternalGetCallers = map[string]int{
 	filepath.Join("pkg", "hub", "server.go"):                      2, // hub signing keys (current + legacy)
-	filepath.Join("pkg", "hub", "oidckeys.go"):                    1, // OIDC signing key material
+	filepath.Join("pkg", "hub", "oidckeys", "oidckeys.go"):        1, // OIDC signing key material
 	filepath.Join("pkg", "hub", "handlers_chat_secrets.go"):       1, // hub-scoped chat integration secret
 	filepath.Join("pkg", "hub", "handlers_github_app.go"):         1, // hub-scoped GitHub App credential
 	filepath.Join("pkg", "hub", "handlers_projects_core.go"):      2, // resolveCloneToken: hub-side git clone credential, never delivered

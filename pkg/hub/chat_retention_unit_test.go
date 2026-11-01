@@ -137,9 +137,13 @@ func (f *fakeChatRetentionStore) SelectFailedMessages(ctx context.Context, cutof
 		if !after.IsStart() && (m.created.Before(after.Created) || (m.created.Equal(after.Created) && m.id <= after.ID)) {
 			continue
 		}
+		// The scan ranges over the failed index: only failed rows are read.
+		if m.state != store.MessageDispatchFailed {
+			continue
+		}
 		scanned++
 		out.Next = store.ChatRetentionPosition{Created: m.created, ID: m.id}
-		if m.state != store.MessageDispatchFailed || (m.recipient != "" && !strings.HasPrefix(m.recipient, "agent:")) {
+		if m.recipient != "" && !strings.HasPrefix(m.recipient, "agent:") {
 			continue
 		}
 		out.Candidates = append(out.Candidates, store.ChatRetentionCandidate{ID: m.id, Created: m.created, ProjectID: m.project})

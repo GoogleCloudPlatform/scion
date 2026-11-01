@@ -452,13 +452,13 @@ Windows and exclusions don't stop Compute Engine maintenance, and most control p
 
 ### GCP Identity Modes on Kubernetes
 
-An agent's GCP identity mode decides which Google identity, if any, GCP client libraries in the agent pod use. The mode is resolved by the Hub (the create request, then the project's per-profile default service account, then the project default, then the hub default; see [Hub-Default GCP Identity](/scion/hosted/ha/permissions/#hub-default-gcp-identity)) and applied by the Runtime Broker for the runtime the agent is dispatched to. On the Kubernetes runtime the three modes behave as follows:
+An agent's GCP identity mode decides which Google identity, if any, GCP client libraries in the agent pod use. The mode is resolved by the Hub (the create request, then the project's per-profile default service account, then the project default, then the hub default; see [Hub-Default GCP Identity](/scion/hosted/ha/permissions/#hub-default-gcp-identity)) and applied by the Runtime Broker for the runtime the agent is dispatched to. On the Kubernetes runtime, every agent pod is created with `automountServiceAccountToken: false`, in all three modes (see [Agent pod identity](#agent-pod-identity)). The three modes behave as follows:
 
 | Mode | On the Kubernetes runtime |
 | :--- | :--- |
 | `block` | The pod runs as a zero-privilege identity: the operator's block KSA, or the namespace's `default` KSA when none is configured, with no Kubernetes API token mounted and only on Workload Identity nodes. See **block** below. |
-| `passthrough` | The pod uses whatever identity the cluster gives it, configured outside Scion. The default when no identity is configured (see **No identity configured** below). |
-| `assign` | Uses GKE Workload Identity: the pod runs as a Kubernetes ServiceAccount (KSA) that the operator has bound to the assigned Google service account (GSA). Requires a GSA-to-KSA mapping in the broker's settings. |
+| `passthrough` | The pod uses whatever identity the cluster gives it, configured outside Scion. No Kubernetes API token is mounted. The default when no identity is configured (see **No identity configured** below). |
+| `assign` | Uses GKE Workload Identity: the pod runs as a Kubernetes ServiceAccount (KSA) that the operator has bound to the assigned Google service account (GSA). No Kubernetes API token is mounted. Requires a GSA-to-KSA mapping in the broker's settings. |
 
 #### Setup checklist: give agents a GCP identity
 
@@ -487,7 +487,7 @@ For agents whose identity resolves to `block`, none of the steps above apply. In
 GKE cannot give a single pod no Google identity: on a node pool with Workload Identity, every Kubernetes ServiceAccount (KSA) receives a federated token, with or without a Google service account annotation. On Kubernetes, `block` therefore means a zero-privilege identity. When the mode resolved for a Kubernetes dispatch is `block`, from the request, a project default, a hub default, or an agent's own stored identity, the broker starts the pod with:
 
 - `spec.serviceAccountName` set to the **block KSA** named by `kubernetes_block_service_account`, or, when none is configured, left unset so the pod runs as the namespace's `default` KSA. Either way this replaces any `serviceAccountName` from the agent's saved config.
-- `automountServiceAccountToken: false`, so no Kubernetes API token is mounted. This does not remove the federated Google token.
+- `automountServiceAccountToken: false`, so no Kubernetes API token is mounted. This does not remove the federated Google token. Agent pods in the other modes get the same setting.
 - The node selector `iam.gke.io/gke-metadata-server-enabled: "true"`, merged into any existing node selector, so the pod only schedules on Workload Identity nodes. On a node pool without Workload Identity a pod can use the node's own service account. If no node carries the label, the pod stays `Pending`.
 
 `block` is never replaced by `passthrough`. The agent environment is the same as `block` on other runtimes (`SCION_METADATA_MODE=block`), and no service account email or project ID is set.
@@ -692,6 +692,8 @@ The warning says a profile maps the GSA, not that the Workload Identity binding 
 
 `passthrough` is unchanged on Kubernetes. Scion sets no metadata override, and the pod uses whatever identity the cluster provides: the node's service account, or a KSA bound through Workload Identity that you set up yourself (for example with `serviceAccountName`, as in [GKE Workload Identity](#gke-workload-identity)). Identity is assigned out of band, so Scion does not check which GSA the pod ends up with. An explicit per-agent `passthrough` request goes through the Hub's [passthrough authorization checks](/scion/hosted/ha/permissions/#hub-default-gcp-identity). Use `assign` when you want the Hub to control which GSA an agent gets.
 
+The pod is created with `automountServiceAccountToken: false`, so no Kubernetes API token is mounted. GCP identity through Workload Identity does not depend on that token. See [Agent pod identity](#agent-pod-identity).
+
 #### Example: assign on GKE
 
 Broker global settings (`~/.scion/settings.yaml` on the broker host, or, for a broker in the same process as a database-backed Hub, the equivalent `runtimes` and `profiles` in the Hub database):
@@ -769,6 +771,24 @@ Scion communicates directly with the Kubernetes API using the native Go client, 
 To ensure secure execution, Scion enforces the following pod security policies automatically:
 - **Non-Root Execution**: Agent pods run as the unprivileged `scion` user (UID `1000`). `project_storage.nfs.uid` is ignored on Kubernetes; when it is set to a value other than `1000`, the broker logs a warning.
 - **Environment Injection**: Standard environmental variables like `HOME` (`/home/scion`), `USER` (`scion`), and `LOGNAME` (`scion`) are explicitly injected to prevent sandbox escapes and ensure consistent toolchain behavior.
+- **No Kubernetes API Token**: Agent pods are created with `automountServiceAccountToken: false` in every GCP identity mode. See [Agent pod identity](#agent-pod-identity).
+
+### Agent pod identity
+
+Agent pods are created with `automountServiceAccountToken: false` in every GCP identity mode, so no Kubernetes API token is mounted in the pod. Nothing in Scion uses that token from inside the pod. The pod keeps its ServiceAccount, and GCP identity through Workload Identity does not depend on the token.
+
+The agent's Google service account should hold no `container.*` IAM roles. Agent pods in GCP identity mode `passthrough` should run on Workload Identity node pools.
+
+Pods are immutable, so the setting applies from each agent's next start. An agent that was already running when the Runtime Broker was upgraded keeps its current pod until it is restarted. Restart running agents to apply the setting to them.
+
+To list agent pods that do not have `automountServiceAccountToken: false` across all namespaces, run this with your own cluster credentials:
+
+```bash
+kubectl get pods -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{"\t"}{.spec.automountServiceAccountToken}{"\t"}{.spec.containers[*].name}{"\n"}{end}' \
+  | awk -F'\t' '$3 ~ /(^| )agent( |$)/ && $2 != "false"'
+```
+
+It selects pods by their container name, `agent`, not by label. An empty second column means the field is unset. It can also list pods outside Scion that have a container named `agent`, so check each one by name.
 
 ## Reliability & Auto-Recovery
 

@@ -417,8 +417,9 @@ func TestRetryPreviousRunIDs(t *testing.T) {
 	assert.Equal(t, []string{"p1", "cur"}, in, "the snapshot's list is not modified")
 }
 
-// A placement refusal of the retried delete is a conflict with the
-// refusal's message, not a classified runtime error.
+// A placement refusal of the retried delete keeps the agent with the
+// stored deletion code conflict and answers 409 with the refusal's own
+// code and message, not a classified runtime error.
 func TestForceDelete_RunMismatch_RetryPlacementRefusal(t *testing.T) {
 	f := newRunMismatchFixture(t, "rmf-placement", state.PhaseRunning)
 	refusal := &RuntimeTargetRefusal{Code: ErrCodeRuntimeTargetMismatch, Status: http.StatusConflict, Message: "placement refusal for the test"}

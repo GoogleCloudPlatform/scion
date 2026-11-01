@@ -139,21 +139,25 @@ func TestFailedPurge_ContextDone(t *testing.T) {
 	assert.Equal(t, h.st.msgs[0].created, h.st.failedCursor.Position.Created.Add(time.Minute), "it rests at the last purged row")
 }
 
-// TestFailedPurge_SparseRowsCappedScans: failed rows scattered among many
-// other rows are all found by scans that each read at most the scan cap;
-// no other row is deleted.
+// TestFailedPurge_SparseRowsCappedScans: failed agent rows scattered among
+// many failed "user:" rows (which the failed index also holds) and
+// delivered rows are all found by scans that each read at most the scan
+// cap; no other row is deleted, and delivered rows are not read.
 func TestFailedPurge_SparseRowsCappedScans(t *testing.T) {
 	h := newChatRetentionUnitHarness()
 	h.sw.scanCap = 10
 	base := h.clock.t.Add(-30 * 24 * time.Hour)
 	var failed []string
 	for i := 0; i < 210; i++ {
-		id, state := fmt.Sprintf("m-%04d", i), store.MessageDispatchDispatched
+		id := fmt.Sprintf("m-%04d", i)
+		at := base.Add(time.Duration(i) * time.Minute)
+		recipient := "user:alice"
 		if i%30 == 7 {
-			state = store.MessageDispatchFailed
+			recipient = ""
 			failed = append(failed, id)
 		}
-		h.st.add(id, base.Add(time.Duration(i)*time.Minute), "p1", state)
+		h.st.msgs = append(h.st.msgs, fakeChatRetentionMsg{id: id, created: at, project: "p1", state: store.MessageDispatchFailed, recipient: recipient})
+		h.st.add(fmt.Sprintf("d-%04d", i), at.Add(30*time.Second), "p1", store.MessageDispatchDispatched)
 	}
 	cfg := chatRetentionTestConfig(func(c *opsettings.ChatRetentionConfig) { c.PauseMS = 0 })
 
@@ -166,9 +170,9 @@ func TestFailedPurge_SparseRowsCappedScans(t *testing.T) {
 	for i, n := range h.st.failedScanned {
 		assert.LessOrEqual(t, n, 10, "scan %d", i)
 	}
-	assert.Len(t, h.st.msgs, 210-len(failed))
+	assert.Len(t, h.st.msgs, 420-len(failed))
 	for _, m := range h.st.msgs {
-		assert.NotEqual(t, store.MessageDispatchFailed, m.state)
+		assert.False(t, m.state == store.MessageDispatchFailed && m.recipient == "", "failed agent row %s left", m.id)
 	}
 }
 
@@ -180,7 +184,8 @@ func TestFailedPurge_ResumesFromCursor(t *testing.T) {
 	h.sw.scanCap = 10
 	base := h.clock.t.Add(-30 * 24 * time.Hour)
 	for i := 0; i < 100; i++ {
-		h.st.add(fmt.Sprintf("m-%04d", i), base.Add(time.Duration(i)*time.Minute), "p1", store.MessageDispatchDispatched)
+		// Failed "user:" rows: read by every scan, never purged.
+		h.st.msgs = append(h.st.msgs, fakeChatRetentionMsg{id: fmt.Sprintf("m-%04d", i), created: base.Add(time.Duration(i) * time.Minute), project: "p1", state: store.MessageDispatchFailed, recipient: "user:alice"})
 	}
 	cutoff := h.clock.t.Add(-7 * 24 * time.Hour)
 	// A 1 s budget with a 500 ms pause: two scans.
@@ -210,7 +215,8 @@ func TestFailedPurge_CursorStaysBehindCutoff(t *testing.T) {
 	h := newChatRetentionUnitHarness()
 	cutoff := h.clock.t.Add(-7 * 24 * time.Hour)
 	h.st.add("late", cutoff.Add(-12*time.Hour), "p1", store.MessageDispatchPending)
-	h.st.add("recent-ok", cutoff.Add(-time.Hour), "p1", store.MessageDispatchDispatched)
+	h.st.add("recent-ok", cutoff.Add(-time.Hour), "p1", store.MessageDispatchFailed)
+	h.st.msgs[1].recipient = "user:alice" // read by the scan, kept
 	cfg := chatRetentionTestConfig(nil)
 
 	res, err := h.sw.PurgeFailed(context.Background(), cutoff, cfg)

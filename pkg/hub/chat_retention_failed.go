@@ -34,11 +34,11 @@ import (
 // transaction time), pause and tick budget, with the budget also bounded by
 // the handler's deadline.
 //
-// messages has no dispatch_state index, and with chat retention off the
-// range below the cutoff can be most of the table. So each scan reads at
-// most chatRetentionFailedScanCap rows under the chunk timeout, and the
-// walk resumes from a persisted cursor (phase "failed") instead of the
-// oldest row. The cursor is saved at least failedCursorLag behind the
+// Each scan ranges over the partial (created, id) WHERE dispatch_state =
+// 'failed' index, so it reads failed rows only, and at most
+// chatRetentionFailedScanCap of them, under the chunk timeout. The walk
+// resumes from a persisted cursor (phase "failed") instead of the oldest
+// row. The cursor is saved at least failedCursorLag behind the
 // cutoff: a pending message expires to failed only stuckMessageExpireTTL
 // after it was created, so rows the walk passed while they were pending
 // are scanned again once they can have failed. Lengthening the window
