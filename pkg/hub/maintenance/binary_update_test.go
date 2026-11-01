@@ -316,7 +316,7 @@ func TestBinaryUpdate_Success(t *testing.T) {
 		t.Fatalf("calls = %v, want %v", inst.calls, want)
 	}
 	if hooked == nil || *hooked != (PendingRestart{From: "nightly-20261022", To: "nightly-20261023", Strategy: "fake",
-		Channel: "nightly", Pin: PinLatest}) {
+		Mode: UpdateModeRelease, Channel: "nightly", Pin: PinLatest}) {
 		t.Fatalf("hook got %+v", hooked)
 	}
 	if !strings.Contains(string(inst.stagedBin), `"version":"nightly-20261023"`) {
