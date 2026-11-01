@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log/slog"
@@ -27,7 +28,9 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -89,15 +92,7 @@ func TestSendReceipt_DeferredCarriesConversationID(t *testing.T) {
 // persisting subscriber stores the message in.
 func TestSendReceipt_BrokerUserDMNamesStoredConversation(t *testing.T) {
 	srv, s, project, agent, user := def138Setup(t)
-	events := NewChannelEventPublisher()
-	t.Cleanup(events.Close)
-	inner := eventbus.NewInProcessEventBus(slog.Default())
-	t.Cleanup(func() { _ = inner.Close() })
-	proxy := NewMessageBrokerProxy(inner, s, events, func() AgentDispatcher { return &brokerMockDispatcher{} }, slog.Default())
-	srv.SetMessageBrokerProxy(proxy)
-	proxy.Start()
-	t.Cleanup(proxy.Stop)
-	require.NoError(t, proxy.EnsureProjectSubscriptions(context.Background(), project.ID))
+	startReceiptBrokerProxy(t, srv, s, project.ID, eventbus.NewInProcessEventBus(slog.Default()))
 
 	rr := postOutboundNoConv(t, srv, project.ID, agent.ID, user.Email, "plain dm to a user")
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
@@ -118,4 +113,104 @@ func TestSendReceipt_BrokerUserDMNamesStoredConversation(t *testing.T) {
 	require.Len(t, rows, 1)
 	require.NotEmpty(t, rows[0].ConversationID, "the subscriber stores the DM in a conversation")
 	assert.Equal(t, rows[0].ConversationID, receipt.ConversationID)
+}
+
+// startReceiptBrokerProxy wires a started message broker proxy over bus
+// into srv, so outbound user messages take the broker path.
+func startReceiptBrokerProxy(t *testing.T, srv *Server, s store.Store, projectID string, bus eventbus.EventBus) *MessageBrokerProxy {
+	t.Helper()
+	events := NewChannelEventPublisher()
+	t.Cleanup(events.Close)
+	t.Cleanup(func() { _ = bus.Close() })
+	proxy := NewMessageBrokerProxy(bus, s, events, func() AgentDispatcher { return &brokerMockDispatcher{} }, slog.Default())
+	srv.SetMessageBrokerProxy(proxy)
+	proxy.Start()
+	t.Cleanup(proxy.Stop)
+	require.NoError(t, proxy.EnsureProjectSubscriptions(context.Background(), projectID))
+	return proxy
+}
+
+// routingClassifications is the number of routing classifications the
+// divergence board has recorded (compared, explicit and derived).
+func routingClassifications() int64 {
+	m := messaging.DivergenceMetrics
+	return m.Total() + m.ExplicitRoutes() + m.DerivedRoutes()
+}
+
+// A broker-relayed plain DM is classified, and checked for consistency,
+// exactly once, although the handler resolves its conversation for the
+// receipt.
+func TestSendReceipt_BrokerUserDMClassifiedOnce(t *testing.T) {
+	srv, s, project, agent, user := def138Setup(t)
+	startReceiptBrokerProxy(t, srv, s, project.ID, eventbus.NewInProcessEventBus(slog.Default()))
+
+	classified, derived := routingClassifications(), messaging.DivergenceMetrics.DerivedRoutes()
+	checks := messaging.DivergenceMetrics.ConsistencyChecks()
+	rr := postOutboundNoConv(t, srv, project.ID, agent.ID, user.Email, "classified once")
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.Eventually(t, func() bool {
+		res, err := s.ListMessages(context.Background(), store.MessageFilter{RecipientID: user.ID}, store.ListOptions{})
+		return err == nil && len(res.Items) == 1
+	}, 5*time.Second, 10*time.Millisecond)
+
+	assert.Equal(t, classified+1, routingClassifications(), "one routing classification for the message")
+	assert.Equal(t, derived+1, messaging.DivergenceMetrics.DerivedRoutes(), "classified as handler-derived")
+	assert.Equal(t, checks+1, messaging.DivergenceMetrics.ConsistencyChecks(), "one DEF-3 consistency check")
+}
+
+// The resolve step the handler uses counts nothing; the persisting
+// subscriber's wrapper counts a write-deny refusal once.
+func TestResolveUserConversation_RefusalCountedOnce(t *testing.T) {
+	_, s, project, agent, _ := def138Setup(t)
+	events := NewChannelEventPublisher()
+	t.Cleanup(events.Close)
+	bus := eventbus.NewInProcessEventBus(slog.Default())
+	t.Cleanup(func() { _ = bus.Close() })
+	proxy := NewMessageBrokerProxy(bus, s, events, func() AgentDispatcher { return &brokerMockDispatcher{} }, slog.Default())
+	proxy.writeDenyEnabled = func() bool { return true }
+	ctx := context.Background()
+	msg := &messages.StructuredMessage{
+		Sender: "agent:" + agent.Slug, SenderID: agent.ID,
+		Recipient: "user:someone@example.com", RecipientID: "not-a-canonical-uuid",
+		Msg: "refused", Type: messages.TypeInstruction,
+	}
+
+	before := messaging.WriteDenialMetrics.Get("mb.user.dm")
+	res := proxy.resolveUserConversation(ctx, project.ID, msg)
+	assert.Equal(t, "mb.user.dm", res.refusal)
+	assert.True(t, res.nonCanonical)
+	assert.Equal(t, before, messaging.WriteDenialMetrics.Get("mb.user.dm"), "the resolve step counts nothing")
+
+	ok := proxy.resolveUserMessageConversation(ctx, project.ID, &store.Message{ID: tid("refused-row")}, msg)
+	assert.False(t, ok, "the subscriber refuses to store")
+	assert.Equal(t, before+1, messaging.WriteDenialMetrics.Get("mb.user.dm"), "one refusal, counted once")
+}
+
+// A send naming the reserved channel is refused before its conversation is
+// resolved, so the 400 leaves no DM conversation behind.
+func TestSendReceipt_ReservedChannelCreatesNoConversation(t *testing.T) {
+	srv, s, project, agent, user := def138Setup(t)
+	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
+		{Name: eventbus.InProcessBusName, Bus: eventbus.NewInProcessEventBus(slog.Default())},
+		{Name: "chatplugin", ChannelID: eventbus.InProcessBusName, Bus: nullSpokeEventBus{}},
+	}, slog.Default())
+	startReceiptBrokerProxy(t, srv, s, project.ID, fanout)
+
+	body, err := json.Marshal(OutboundMessageRequest{
+		Recipient: "user:" + user.Email, Msg: "reserved", Channel: eventbus.InProcessBusName,
+	})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/outbound-message", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+		Claims: jwt.Claims{Subject: agent.ID}, ProjectID: project.ID,
+	}}))
+	rr := httptest.NewRecorder()
+	srv.handleAgentOutboundMessage(rr, req, agent.ID)
+	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+
+	dmKey, err := messages.DMConversationKey("agent", agent.ID, "user", user.ID)
+	require.NoError(t, err)
+	_, err = s.GetConversationByExternalRef(context.Background(), "native", dmKey)
+	assert.Error(t, err, "no DM conversation was created")
 }
