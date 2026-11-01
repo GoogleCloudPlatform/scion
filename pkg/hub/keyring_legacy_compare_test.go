@@ -106,3 +106,46 @@ func TestValidateKeyringConfig_SharedSigningSecretOnlyCheckedEmpty(t *testing.T)
 	assert.Equal(t, 1, empty, "validateKeyringConfig must check that SharedSigningSecret is empty")
 	assert.Zero(t, other, "validateKeyringConfig must never compare SharedSigningSecret with a value or pass it to a function")
 }
+
+// TestValidateTestAdminGateConfig_KeyringRefusalPrecedesSharedSecret pins
+// that the test admin tier's construction re-check decides keyring mode
+// (managedSigning) before it reads SharedSigningSecret, so keyring mode
+// never reads the shared secret on that path: in validateTestAdminGateConfig
+// the first managedSigning call comes before the first SharedSigningSecret
+// reference, and the function returns in that case.
+func TestValidateTestAdminGateConfig_KeyringRefusalPrecedesSharedSecret(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "test_admin_gate.go", nil, 0)
+	require.NoError(t, err)
+	var fn *ast.FuncDecl
+	for _, d := range f.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Recv == nil && fd.Name.Name == "validateTestAdminGateConfig" {
+			fn = fd
+		}
+	}
+	require.NotNil(t, fn, "validateTestAdminGateConfig not found")
+	var managed, shared token.Pos
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.CaseClause:
+			for _, e := range x.List {
+				if c, ok := e.(*ast.CallExpr); ok {
+					if id, ok := c.Fun.(*ast.Ident); ok && id.Name == "managedSigning" && managed == token.NoPos {
+						managed = c.Pos()
+						require.NotEmpty(t, x.Body, "the managedSigning case must refuse")
+						_, isReturn := x.Body[0].(*ast.ReturnStmt)
+						assert.True(t, isReturn, "the managedSigning case must return")
+					}
+				}
+			}
+		case *ast.SelectorExpr:
+			if x.Sel.Name == "SharedSigningSecret" && shared == token.NoPos {
+				shared = x.Pos()
+			}
+		}
+		return true
+	})
+	require.NotEqual(t, token.NoPos, managed, "validateTestAdminGateConfig must refuse keyring mode (managedSigning)")
+	require.NotEqual(t, token.NoPos, shared, "validateTestAdminGateConfig must still check SharedSigningSecret in legacy mode")
+	assert.Less(t, managed, shared, "keyring mode must be refused before SharedSigningSecret is read")
+}

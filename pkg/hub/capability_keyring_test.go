@@ -138,13 +138,16 @@ func capRollout(t *testing.T, emit string) (a, b *keyring.Keyring) {
 	if emit == "legacy" {
 		reads = []string{"legacy", "gen1", "gen2"}
 	}
-	legacy := krEntry{id: "legacy", secret: krLegacySecret}
-	a = capKeyring(t, "gen1", emit, reads, legacy,
+	legacy := []krEntry{{id: "legacy", secret: krLegacySecret}}
+	if rolloutWithoutLegacy {
+		reads, legacy = withoutLegacyID(reads), nil
+	}
+	a = capKeyring(t, "gen1", emit, reads, append(legacy,
 		krEntry{id: "gen1", secret: krGen1Secret},
-		krEntry{id: "gen2", secret: krGen2Secret})
-	b = capKeyring(t, "gen2", emit, reads, legacy,
+		krEntry{id: "gen2", secret: krGen2Secret})...)
+	b = capKeyring(t, "gen2", emit, reads, append(legacy,
 		krEntry{id: "gen1", secret: krGen1Secret, signUntil: krTime(time.Hour), verifyUntl: krTime(48 * time.Hour)},
-		krEntry{id: "gen2", secret: krGen2Secret})
+		krEntry{id: "gen2", secret: krGen2Secret})...)
 	return a, b
 }
 

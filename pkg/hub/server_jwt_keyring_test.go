@@ -688,7 +688,7 @@ func verifiesOnlyUnder(t *testing.T, tok, name string) []string {
 	parsed, err := jwt.ParseSigned(tok, []jose.SignatureAlgorithm{jose.HS256})
 	require.NoError(t, err)
 	var out []string
-	for id, s := range map[string]string{"legacy": jkLegacySecret, "gen2": jkGen2Secret} {
+	for id, s := range map[string]string{"legacy": jkLegacySecret, "gen1": jkGen1Secret, "gen2": jkGen2Secret} {
 		var c jwt.Claims
 		if parsed.Claims(deriveSharedSigningKey(s, name), &c) == nil {
 			out = append(out, id)

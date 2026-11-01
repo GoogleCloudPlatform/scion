@@ -217,13 +217,16 @@ func decodesUnderAny(ws *WebServer, c *http.Cookie) bool {
 // (issuance closed at T0+1h, verification until T0+48h). Both carry the
 // imported legacy entry, which every other purpose still uses.
 func krRollout(t *testing.T) (a, b *keyring.Keyring) {
-	legacy := krEntry{id: "legacy", secret: krLegacySecret}
-	a = krKeyring(t, "gen1", legacy,
+	legacy := []krEntry{{id: "legacy", secret: krLegacySecret}}
+	if rolloutWithoutLegacy {
+		legacy = nil
+	}
+	a = krKeyring(t, "gen1", append(legacy,
 		krEntry{id: "gen1", secret: krGen1Secret},
-		krEntry{id: "gen2", secret: krGen2Secret})
-	b = krKeyring(t, "gen2", legacy,
+		krEntry{id: "gen2", secret: krGen2Secret})...)
+	b = krKeyring(t, "gen2", append(legacy,
 		krEntry{id: "gen1", secret: krGen1Secret, signUntil: krTime(time.Hour), verifyUntl: krTime(48 * time.Hour)},
-		krEntry{id: "gen2", secret: krGen2Secret})
+		krEntry{id: "gen2", secret: krGen2Secret})...)
 	return a, b
 }
 

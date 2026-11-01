@@ -117,9 +117,12 @@ func admAllowVersioned(t *testing.T) {
 func admRollout(t *testing.T, emit keyring.Emit) (a, b *keyring.Keyring) {
 	t.Helper()
 	readers := []string{"legacy", "gen1", "gen2"}
-	legacy := admEntry{id: "legacy", secret: krLegacySecret}
-	a = admKeyring(t, "gen1", emit, readers, legacy, admEntry{id: "gen1", secret: krGen1Secret}, admEntry{id: "gen2", secret: krGen2Secret})
-	b = admKeyring(t, "gen2", emit, readers, legacy, admEntry{id: "gen1", secret: krGen1Secret, bounded: true}, admEntry{id: "gen2", secret: krGen2Secret})
+	legacy := []admEntry{{id: "legacy", secret: krLegacySecret}}
+	if rolloutWithoutLegacy {
+		readers, legacy = withoutLegacyID(readers), nil
+	}
+	a = admKeyring(t, "gen1", emit, readers, append(legacy, admEntry{id: "gen1", secret: krGen1Secret}, admEntry{id: "gen2", secret: krGen2Secret})...)
+	b = admKeyring(t, "gen2", emit, readers, append(legacy, admEntry{id: "gen1", secret: krGen1Secret, bounded: true}, admEntry{id: "gen2", secret: krGen2Secret})...)
 	return a, b
 }
 

@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -76,8 +77,34 @@ func (m *credentialStartManager) lastStart(t *testing.T) api.StartOptions {
 	return m.starts[len(m.starts)-1]
 }
 
+// startCredKeySources are the agent token keys the dispatch paths issue
+// credentials under: a random hub key, and a keyring signing ring with no
+// "legacy" entry (keyring mode once the old generation is retired), built
+// the way the hub builds it in keyring mode. Every start, resume and
+// restart must reach the agent with a credential from that key, never an
+// empty or default one.
+var startCredKeySources = []struct {
+	name    string
+	kid     string // the key ID the credential must carry ("" for the random key)
+	service func(t *testing.T) *AgentTokenService
+}{
+	{"random key", "", func(t *testing.T) *AgentTokenService {
+		svc, err := NewAgentTokenService(AgentTokenConfig{})
+		require.NoError(t, err)
+		return svc
+	}},
+	{"keyring without the legacy entry", "gen1", func(t *testing.T) *AgentTokenService {
+		k := jkRing(t, "versioned", "gen1", []string{}, jkEntry{id: "gen1", secret: jkGen1Secret}, jkEntry{id: "gen2", secret: jkGen2Secret})
+		_, ok := k.Signing().LegacySecret()
+		require.False(t, ok)
+		svc, err := newRingAgentTokenService(k.Signing(), AgentTokenConfig{}, time.Now)
+		require.NoError(t, err)
+		return svc
+	}},
+}
+
 func TestStartCredential_E2E_HubDispatchReachesAgentStart(t *testing.T) {
-	for _, tc := range []struct {
+	cases := []struct {
 		name     string
 		running  bool // the agent's container is up (restart stops it first)
 		resume   bool
@@ -103,21 +130,23 @@ func TestStartCredential_E2E_HubDispatchReachesAgentStart(t *testing.T) {
 				return d.DispatchAgentRestart(ctx, a)
 			},
 		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := context.Background()
-			home := t.TempDir()
-			t.Setenv("HOME", home)
-			workDir := t.TempDir()
-			t.Chdir(workDir)
+	}
+	for _, keys := range startCredKeySources {
+		for _, tc := range cases {
+			t.Run(tc.name+"/"+keys.name, func(t *testing.T) {
+				ctx := context.Background()
+				home := t.TempDir()
+				t.Setenv("HOME", home)
+				workDir := t.TempDir()
+				t.Chdir(workDir)
 
-			// A linked project on the broker whose settings select the
-			// mock runtime, so the broker resolves the stand-in manager.
-			const slug, name = "e2e-cred", "dev"
-			projectID := tid("project-e2e-cred")
-			scionDir := filepath.Join(workDir, ".scion")
-			require.NoError(t, os.MkdirAll(scionDir, 0o755))
-			require.NoError(t, os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(`schema_version: "1"
+				// A linked project on the broker whose settings select the
+				// mock runtime, so the broker resolves the stand-in manager.
+				const slug, name = "e2e-cred", "dev"
+				projectID := tid("project-e2e-cred")
+				scionDir := filepath.Join(workDir, ".scion")
+				require.NoError(t, os.MkdirAll(scionDir, 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(`schema_version: "1"
 active_profile: local
 profiles:
     local:
@@ -126,65 +155,68 @@ runtimes:
     mock:
         type: mock
 `), 0o644))
-			require.NoError(t, config.WriteProjectID(scionDir, projectID))
+				require.NoError(t, config.WriteProjectID(scionDir, projectID))
 
-			mgr := &credentialStartManager{}
-			cfg := runtimebroker.DefaultServerConfig()
-			cfg.BrokerAuthEnabled = false // no hub keys here: serve the broker API without auth
-			cfg.BrokerID = "e2e-cred-broker"
-			cfg.BrokerName = "e2e-cred-broker"
-			cfg.ForceRuntime = "mock"
-			brokerSrv := runtimebroker.New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "mock" }}, config.RuntimeBuildRecord{})
-			httpSrv := httptest.NewServer(brokerSrv.Handler())
-			defer httpSrv.Close()
+				mgr := &credentialStartManager{}
+				cfg := runtimebroker.DefaultServerConfig()
+				cfg.BrokerAuthEnabled = false // no hub keys here: serve the broker API without auth
+				cfg.BrokerID = "e2e-cred-broker"
+				cfg.BrokerName = "e2e-cred-broker"
+				cfg.ForceRuntime = "mock"
+				brokerSrv := runtimebroker.New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "mock" }}, config.RuntimeBuildRecord{})
+				httpSrv := httptest.NewServer(brokerSrv.Handler())
+				defer httpSrv.Close()
 
-			s := createTestStore(t)
-			require.NoError(t, s.CreateProject(ctx, &store.Project{ID: projectID, Name: slug, Slug: slug}))
-			brokerID := tid("broker-e2e-cred")
-			require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
-				ID: brokerID, Name: "e2e-cred-broker", Slug: "e2e-cred-broker", Endpoint: httpSrv.URL, Status: store.BrokerStatusOnline,
-			}))
-			require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-				ProjectID: projectID, BrokerID: brokerID, BrokerName: "e2e-cred-broker",
-				LocalPath: scionDir, Status: store.BrokerStatusOnline,
-			}))
-			a := &store.Agent{
-				ID: tid("agent-e2e-cred"), Name: name, Slug: name, ProjectID: projectID, RuntimeBrokerID: brokerID,
-				Phase:         "stopped",
-				AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "claude"},
-			}
-			if tc.running {
-				a.Phase = "running"
-			}
-			require.NoError(t, s.CreateAgent(ctx, a))
-			_, err := s.SetAgentRunID(ctx, a.ID, "run-before", nil)
-			require.NoError(t, err)
-			a, err = s.GetAgent(ctx, a.ID)
-			require.NoError(t, err)
-			if tc.running {
-				mgr.run(name, "cid-before", projectID, scionDir, "run-before")
-			}
+				s := createTestStore(t)
+				require.NoError(t, s.CreateProject(ctx, &store.Project{ID: projectID, Name: slug, Slug: slug}))
+				brokerID := tid("broker-e2e-cred")
+				require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+					ID: brokerID, Name: "e2e-cred-broker", Slug: "e2e-cred-broker", Endpoint: httpSrv.URL, Status: store.BrokerStatusOnline,
+				}))
+				require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+					ProjectID: projectID, BrokerID: brokerID, BrokerName: "e2e-cred-broker",
+					LocalPath: scionDir, Status: store.BrokerStatusOnline,
+				}))
+				a := &store.Agent{
+					ID: tid("agent-e2e-cred"), Name: name, Slug: name, ProjectID: projectID, RuntimeBrokerID: brokerID,
+					Phase:         "stopped",
+					AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "claude"},
+				}
+				if tc.running {
+					a.Phase = "running"
+				}
+				require.NoError(t, s.CreateAgent(ctx, a))
+				_, err := s.SetAgentRunID(ctx, a.ID, "run-before", nil)
+				require.NoError(t, err)
+				a, err = s.GetAgent(ctx, a.ID)
+				require.NoError(t, err)
+				if tc.running {
+					mgr.run(name, "cid-before", projectID, scionDir, "run-before")
+				}
 
-			svc, err := NewAgentTokenService(AgentTokenConfig{})
-			require.NoError(t, err)
-			d := NewHTTPAgentDispatcherWithClient(s, NewHTTPRuntimeBrokerClient(), false, slog.Default())
-			d.SetTokenGenerator(runTokenGenerator{svc: svc})
+				svc := keys.service(t)
+				d := NewHTTPAgentDispatcherWithClient(s, NewHTTPRuntimeBrokerClient(), false, slog.Default())
+				d.SetTokenGenerator(runTokenGenerator{svc: svc})
 
-			require.NoError(t, tc.dispatch(ctx, d, a))
+				require.NoError(t, tc.dispatch(ctx, d, a))
 
-			opts := mgr.lastStart(t)
-			require.NotEmpty(t, opts.HubIssuedToken, "the agent received no hub-issued credential")
-			claims, err := svc.ValidateAgentToken(opts.HubIssuedToken)
-			require.NoError(t, err, "the agent's credential is not one this hub issued")
-			assert.Equal(t, a.ID, claims.Subject, "credential agent")
-			assert.NotEqual(t, "run-before", opts.RunID)
-			assert.Equal(t, opts.RunID, claims.RunID, "the credential is the one issued for this run")
-			got, err := s.GetAgent(ctx, a.ID)
-			require.NoError(t, err)
-			assert.Equal(t, opts.RunID, got.RunID, "the hub recorded the run the agent started with")
-			assert.Equal(t, tc.resume, opts.Resume, "resume flag")
-			_, inEnv := opts.Env[startCredentialEnvKey]
-			assert.False(t, inEnv, "the credential must reach the agent only as the hub-issued credential, not as a plain env value")
-		})
+				opts := mgr.lastStart(t)
+				require.NotEmpty(t, opts.HubIssuedToken, "the agent received no hub-issued credential")
+				claims, err := svc.ValidateAgentToken(opts.HubIssuedToken)
+				require.NoError(t, err, "the agent's credential is not one this hub issued")
+				if keys.kid != "" {
+					assert.Equal(t, keys.kid, jwtHeader(t, opts.HubIssuedToken)["kid"], "the credential comes from the ring's active generation")
+				}
+				assert.Equal(t, a.ID, claims.Subject, "credential agent")
+				assert.NotEqual(t, "run-before", opts.RunID)
+				assert.Equal(t, opts.RunID, claims.RunID, "the credential is the one issued for this run")
+				got, err := s.GetAgent(ctx, a.ID)
+				require.NoError(t, err)
+				assert.Equal(t, opts.RunID, got.RunID, "the hub recorded the run the agent started with")
+				assert.Equal(t, tc.resume, opts.Resume, "resume flag")
+				_, inEnv := opts.Env[startCredentialEnvKey]
+				assert.False(t, inEnv, "the credential must reach the agent only as the hub-issued credential, not as a plain env value")
+			})
+		}
 	}
 }
