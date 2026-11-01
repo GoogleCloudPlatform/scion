@@ -49,7 +49,11 @@ import (
 // and the clear takes effect at the agent's next reincarnation.
 //
 // Env keys (env.KEY) are always removed: a template's env is applied at
-// start as a final fill, whichever way the template resolves.
+// start as a final fill, whichever way the template resolves. Resources
+// sub-fields (api.ResourceSubPaths) are always emptied too: templates never
+// supply resources (config.StripTemplateEnvironmentKeys), so the chain has
+// nothing to restore, and the per-start resource tiers fill the emptied
+// sub-field (ptone/scion#5676).
 func (s *Server) applyClearedFields(ctx context.Context, merged *api.ScionConfig, projectPath, projectDir, agentDir, agentName string, paths []string) {
 	if len(paths) == 0 {
 		return
@@ -58,12 +62,13 @@ func (s *Server) applyClearedFields(ctx context.Context, merged *api.ScionConfig
 	if err != nil {
 		var kept, applied []string
 		for _, p := range paths {
-			if api.ClearableConfigPath(p) && !strings.HasPrefix(p, api.ClearedEnvPathPrefix) {
+			if api.ClearableConfigPath(p) && !strings.HasPrefix(p, api.ClearedEnvPathPrefix) && !api.IsResourceSubPath(p) {
 				kept = append(kept, p)
 				continue
 			}
-			// Env keys are applied; paths ApplyClearedFields rejects still
-			// reach it, so they are reported as ignored.
+			// Env keys and resources sub-fields never take a value from
+			// the chain, so they are applied; paths ApplyClearedFields
+			// rejects still reach it, so they are reported as ignored.
 			applied = append(applied, p)
 		}
 		if len(kept) > 0 {

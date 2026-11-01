@@ -118,7 +118,7 @@ func TestEnsureSigningKey_CopiesLegacyKeyForwardAndRepairsRef(t *testing.T) {
 // names oidc_signing_key explicitly, but it has its own load path — separate
 // from ensureSigningKey — that originally had no copy-forward at all).
 func TestOIDCKeyManager_CopiesLegacyKeyForwardAndRepairsRef(t *testing.T) {
-	st := createOIDCTestStore(t)
+	st := newOIDCHubTestStore(t)
 	ctx := context.Background()
 
 	hubID := "test-hub-oidc-copy-forward"

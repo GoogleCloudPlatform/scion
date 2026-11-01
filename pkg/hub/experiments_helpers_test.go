@@ -44,7 +44,7 @@ func testExperiment(name string, def bool, layers ...experiments.Layer) experime
 func routeRegistrationExperiments(t *testing.T) []experiments.Experiment {
 	t.Helper()
 	var out []experiments.Experiment
-	for _, name := range []string{experiments.FederationProjectVisitors} {
+	for _, name := range []string{experiments.FederationProjectVisitors, experiments.SecretRotation} {
 		exp, ok := experiments.Default().Lookup(name)
 		if !ok {
 			t.Fatalf("experiment %q is not in the production registry", name)
@@ -59,7 +59,8 @@ func routeRegistrationExperiments(t *testing.T) []experiments.Experiment {
 // (server-only, default on, so a test asserting web-layer filtering has a
 // name that must NOT appear in a web-facing result), per ptone/scion#2217,
 // plus routeRegistrationExperiments (the production definitions, default
-// off; federation.project_visitors has both layers) so a server built by
+// off; federation.project_visitors has both layers, server.secret_rotation
+// the server layer only) so a server built by
 // New() with this registry can register its routes.
 func testRegistry(t *testing.T) *experiments.Registry {
 	t.Helper()

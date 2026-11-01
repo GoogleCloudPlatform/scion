@@ -2851,6 +2851,7 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		LaunchKeepaliveSeconds:       cfg.Hub.LaunchKeepaliveSeconds,
 		ConduitTCPAllowedPorts:       append([]int(nil), cfg.Hub.Conduit.TCPAllowedPorts...),
 		TransportTrustedProxies:      append([]string(nil), cfg.TrustedProxies...),
+		TransportTrustedProxiesSet:   cfg.TrustedProxiesSet,
 		ConduitGrantKeyActivation:    conduitGrantKeyActivationSetting(cfg),
 		ConduitAuthzRecheckInterval:  conduitAuthzRecheckIntervalSetting(cfg),
 		ConduitUserStreamAuthzMax:    conduitUserStreamAuthzMaxSetting(cfg),
@@ -3079,6 +3080,16 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		log.Printf("WARNING: hub port proxy metrics disabled: %v", err)
 	} else {
 		hubSrv.SetPortProxyMetrics(portProxyRec)
+	}
+
+	if portViewRec, err := hub.NewOTelPortViewMetrics(mp); err != nil {
+		log.Printf("WARNING: hub port view metrics disabled: %v", err)
+	} else {
+		hubSrv.SetPortViewMetrics(portViewRec)
+	}
+
+	if err := hubSrv.RegisterCSPReportMetrics(mp); err != nil {
+		log.Printf("WARNING: hub browser policy report metrics disabled: %v", err)
 	}
 
 	runScopeRec, runScopeErr := hub.NewOTelAgentRunScopeMetrics(mp)
@@ -3599,6 +3610,9 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 	// values a saved hub value now beats.
 	hubSrv.WarnMaintenanceImageRegistryDrift()
 	hubSrv.WarnShadowedImageRegistries(flatInstanceImageRegistries())
+	// A saved authorized_domains that differs from the deployment value
+	// (before ptone/scion#6000 a saved list was not enforced).
+	hubSrv.WarnAuthorizedDomainsDrift(snap)
 
 	if envKeys := ops.EnvOverriddenKeys(); len(envKeys) > 0 {
 		slog.Warn("Layer-1 settings overridden by SCION_SERVER_* env vars on this node — these values diverge from the shared DB",

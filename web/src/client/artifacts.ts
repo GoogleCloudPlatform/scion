@@ -836,9 +836,37 @@ export function artifactListUrl(filters: ArtifactListFilters, cursor?: string): 
  * Path of an artifact's page in the web UI; seq above 0 names one of its
  * versions, 0 the current one.
  */
-export function artifactPagePath(a: Pick<Artifact, 'id' | 'scopeRef'>, seq = 0): string {
+export function artifactPagePath(
+  a: Pick<Artifact, 'id' | 'scopeRef'>,
+  seq = 0,
+  origin: ArtifactOrigin = 'project'
+): string {
   const base = `/projects/${encodeURIComponent(a.scopeRef)}/artifacts/${encodeURIComponent(a.id)}`;
-  return seq > 0 ? `${base}/v/${seq}` : base;
+  const path = seq > 0 ? `${base}/v/${seq}` : base;
+  return origin === 'artifacts' ? `${path}?${ARTIFACT_ORIGIN_PARAM}=artifacts` : path;
+}
+
+/**
+ * Where an artifact's page was opened from (ptone/scion#6847): the
+ * hub-wide Artifacts list, or (by default) the artifact's project. Its
+ * page goes back there, after a delete too.
+ */
+export type ArtifactOrigin = 'artifacts' | 'project';
+
+/**
+ * The query parameter that records an Artifacts-list origin on the page's
+ * URL, so a reload or a link opened in a new tab keeps it.
+ */
+export const ARTIFACT_ORIGIN_PARAM = 'from';
+
+/** The origin an artifact page path records; a path without one is the project's. */
+export function artifactOriginOf(path: string): ArtifactOrigin {
+  const q = path.indexOf('?');
+  if (q < 0) return 'project';
+  const query = path.slice(q + 1).split('#')[0];
+  return new URLSearchParams(query).get(ARTIFACT_ORIGIN_PARAM) === 'artifacts'
+    ? 'artifacts'
+    : 'project';
 }
 
 // ---------------------------------------------------------------------------

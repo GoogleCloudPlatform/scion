@@ -20,8 +20,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
-	"crypto/rand"
-	"crypto/rsa"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
@@ -52,7 +50,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/google/uuid"
 	"github.com/knadh/koanf/v2"
@@ -3432,35 +3429,18 @@ const testOIDCIssuerURL = "https://scion.example.com"
 
 // installTestOIDCKeyManager sets an OIDCKeyManager with a fresh RS256 key and
 // the testOIDCIssuerURL issuer on srv. Routes that New() registers only when
-// the OIDC provider is enabled stay unregistered.
+// the OIDC provider is enabled stay unregistered. The manager is built by
+// NewOIDCKeyManager with no store and no secret backend, so it generates
+// an RSA-2048 key in memory and persists nothing.
 func installTestOIDCKeyManager(t *testing.T, srv *Server) {
 	t.Helper()
 
-	// Generate a test RSA key pair.
-	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	mgr, err := NewOIDCKeyManager(context.Background(), OIDCKeyManagerConfig{
+		IssuerURL:   testOIDCIssuerURL,
+		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ValueCipher: secret.NewLegacyValueCipher(""),
+	})
 	require.NoError(t, err)
-
-	kid := computeKeyID(&privKey.PublicKey)
-	signingKey := &OIDCSigningKey{
-		KeyID:      kid,
-		PrivateKey: privKey,
-		PublicKey:  &privKey.PublicKey,
-		Active:     true,
-	}
-
-	// Create the RS256 signer (needed by identity token endpoint).
-	signer, err := jose.NewSigner(
-		jose.SigningKey{Algorithm: jose.RS256, Key: privKey},
-		(&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", kid),
-	)
-	require.NoError(t, err)
-
-	mgr := &OIDCKeyManager{
-		activeKey: signingKey,
-		allKeys:   []*OIDCSigningKey{signingKey},
-		signer:    signer,
-		issuerURL: testOIDCIssuerURL,
-	}
 
 	srv.oidcKeyManager = mgr
 	srv.oidcIssuerURL = testOIDCIssuerURL
@@ -5319,9 +5299,11 @@ func (d *reincarnateTestDispatcher) moveSnapshot() (provisions, localDeletes, st
 }
 func (d *reincarnateTestDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) error {
 	d.mu.Lock()
-	// A start the hub refused before sending (its run not begun, or the hub
-	// shutting down) records no run, as in production.
-	if d.runStore != nil && !errors.Is(d.startErr, errStartRunNotBegun) && !errors.Is(d.startErr, ErrHubShuttingDown) {
+	// A start the hub refused before sending (its run not begun, the hub
+	// shutting down, or its pending config fold refused) records no run,
+	// as in production.
+	if d.runStore != nil && !errors.Is(d.startErr, errStartRunNotBegun) && !errors.Is(d.startErr, ErrHubShuttingDown) &&
+		!errors.Is(d.startErr, errPendingConfigFold) {
 		runID := fmt.Sprintf("run-%s-%d", agent.RuntimeBrokerID, len(d.startBrokers)+1)
 		if _, err := d.runStore.SetAgentRunID(ctx, agent.ID, runID, nil); err == nil {
 			agent.RunID = runID
