@@ -208,6 +208,11 @@ func TestSendReceipt_ReservedChannelCreatesNoConversation(t *testing.T) {
 	rr := httptest.NewRecorder()
 	srv.handleAgentOutboundMessage(rr, req, agent.ID)
 	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+	// The reserved-channel rejection itself, not the earlier
+	// unregistered-channel validation, which also answers 400.
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Contains(t, resp.Error.Message, "reserved for internal use")
 
 	dmKey, err := messages.DMConversationKey("agent", agent.ID, "user", user.ID)
 	require.NoError(t, err)
