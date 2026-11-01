@@ -44,7 +44,7 @@ type beginLaunchInvalidPhaseStore struct {
 	store.Store
 }
 
-func (beginLaunchInvalidPhaseStore) BeginLaunch(context.Context, string, string, time.Duration) (string, error) {
+func (beginLaunchInvalidPhaseStore) BeginLaunchWithOptions(context.Context, string, string, time.Duration, store.BeginLaunchOptions) (string, error) {
 	return "", store.ErrInvalidPhase
 }
 

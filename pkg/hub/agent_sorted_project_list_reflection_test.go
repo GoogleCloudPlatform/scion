@@ -231,6 +231,12 @@ var reflectFillStoreAgentSkipFields = map[string]bool{
 	// DeletedAt, which GetAgentsByIDs filters out. It is json:"-" and not
 	// an authz input.
 	"SoftDeleteOpID": true,
+	// effective_config is written only through SetAgentEffectiveConfig and
+	// launch_run_id only by beginLaunch (WP1 slice 3); CreateAgent and
+	// UpdateAgent never write them (a guard pins it), so they cannot
+	// round-trip here. Both are json:"-" and not authz inputs.
+	"EffectiveConfig": true,
+	"LaunchRunID":     true,
 }
 
 func reflectFillStoreAgent(t *testing.T, projectID string) *store.Agent {

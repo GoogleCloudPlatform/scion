@@ -53,6 +53,7 @@ func (s *AgentStore) ApplyLaunchReport(ctx context.Context, agentID, brokerID st
 		return store.LaunchReportAnswer{}, store.Agent{}, err
 	}
 
+	obs := s.lifecycle.load()
 	ltx, err := s.beginLaunchTx(ctx)
 	if err != nil {
 		return store.LaunchReportAnswer{}, store.Agent{}, err
@@ -138,10 +139,15 @@ func (s *AgentStore) ApplyLaunchReport(ctx context.Context, agentID, brokerID st
 			committed = true
 			return answer, *entAgentToStore(updated), nil
 		}
+		var hooks commitHooks
+		if err := observeLaunchReport(ctx, obs, ltx, &hooks, current, updated, r); err != nil {
+			return store.LaunchReportAnswer{}, store.Agent{}, err
+		}
 		if err := ltx.tx.Commit(); err != nil {
 			return store.LaunchReportAnswer{}, store.Agent{}, fmt.Errorf("launch store: commit ApplyLaunchReport: %w", err)
 		}
 		committed = true
+		hooks.run()
 		return answer, *entAgentToStore(updated), nil
 	}
 
@@ -162,11 +168,36 @@ func (s *AgentStore) ApplyLaunchReport(ctx context.Context, agentID, brokerID st
 	if err != nil {
 		return store.LaunchReportAnswer{}, store.Agent{}, err
 	}
+	var hooks commitHooks
+	if err := observeLaunchReport(ctx, obs, ltx, &hooks, current, updated, r); err != nil {
+		return store.LaunchReportAnswer{}, store.Agent{}, err
+	}
 	if err := ltx.tx.Commit(); err != nil {
 		return store.LaunchReportAnswer{}, store.Agent{}, fmt.Errorf("launch store: commit ApplyLaunchReport: %w", err)
 	}
 	committed = true
+	hooks.run()
 	return answer, *entAgentToStore(updated), nil
+}
+
+// observeLaunchReport observes an applied launch report (design 2.2-2.4):
+// a succeeded or failed report for the row's launch is run-correlated
+// evidence (E(iii)) and a config-resolution write; a failed report that
+// ends the active launch is a launch end (launch_failed(failed)).
+func observeLaunchReport(ctx context.Context, obs store.AgentWriteObserver, ltx *launchTx, hooks *commitHooks, current, updated *ent.Agent, r store.LaunchReport) error {
+	if obs == nil || current == nil || updated == nil {
+		return nil
+	}
+	hints := store.AgentWriteHints{
+		LaunchReport: r.State == store.LaunchReportStateSucceeded || r.State == store.LaunchReportStateFailed,
+	}
+	if r.State == store.LaunchReportStateFailed && current.LaunchState == store.LaunchStateActive &&
+		updated.LaunchState == store.LaunchStateEnded && updated.LaunchEndReason == store.LaunchEndReasonFailed {
+		hints.LaunchEnd = &store.LaunchEndHint{Reason: store.LaunchEndReasonFailed, Code: r.ErrorCode, Cause: r.Cause}
+	}
+	return observeAgentWriteDeferred(ctx, obs, ltx.client, hooks, store.AgentWrite{
+		Op: store.AgentWriteLaunch, Before: entAgentToStore(current), After: entAgentToStore(updated), Now: time.Now(), Hints: hints,
+	})
 }
 
 // applyLaunchReportEnded handles design §3.7 step 5 (launch_state=ended). Its

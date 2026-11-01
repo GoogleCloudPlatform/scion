@@ -42,6 +42,7 @@ var agentRunIDWriteMethods = map[string]bool{
 	"CompareAndSwapAgentRunID": true,
 	"RevertAgentRunID":         true,
 	"AdoptAgentRunID":          true,
+	"SettleLaunchedRun":        true,
 }
 
 // wantAgentRunIDWriters is the complete set of functions outside the store
@@ -169,6 +170,27 @@ func TestAgentRunIDStoreWritersAreAClosedSet(t *testing.T) {
 		"AgentUpsert": true, "AgentUpsertOne": true, "AgentUpsertBulk": true,
 	}, filepath.Join("pkg", "ent")), "agent upsert type outside the generated ent code")
 	assert.Empty(t, agentUpsertCalls(t), "agent upsert outside the generated ent code")
+}
+
+// TestAgentSingleWriterColumnsAreAClosedSet: module-wide, outside the
+// generated ent code, agents.effective_config is written only by
+// SetAgentEffectiveConfig and agents.launch_run_id only by beginLaunch
+// (WP1 slice 3 addendum v12 section 1). The store package's
+// TestAgentColumnSetterGuard checks the same by type inside pkg/store;
+// this scan covers every other package by name. The writer guard's proof
+// package (entadapter testdata) calls both families on purpose.
+func TestAgentSingleWriterColumnsAreAClosedSet(t *testing.T) {
+	skip := []string{filepath.Join("pkg", "ent"), filepath.Join("pkg", "store", "entadapter", "testdata", "writerguardproof")}
+	assert.Equal(t, []string{"pkg/store/entadapter/effective_config_store.go AgentStore.SetAgentEffectiveConfig"},
+		moduleReferences(t, map[string]bool{
+			"SetEffectiveConfig": true, "SetNillableEffectiveConfig": true,
+			"ClearEffectiveConfig": true, "UpdateEffectiveConfig": true,
+		}, skip...))
+	assert.Equal(t, []string{"pkg/store/entadapter/launch_store.go AgentStore.beginLaunch"},
+		moduleReferences(t, map[string]bool{
+			"SetLaunchRunID": true, "SetNillableLaunchRunID": true,
+			"ClearLaunchRunID": true, "UpdateLaunchRunID": true,
+		}, skip...))
 }
 
 // softFinishRunFields are the store.DeletionFields that write an agent's
@@ -420,4 +442,89 @@ func TestChainFromAgentCreate(t *testing.T) {
 			assert.Equal(t, tc.want, chainFromAgentCreate(e))
 		})
 	}
+}
+
+// TestSetAgentRunIDHasOneFreshMintCaller (WP1 attribution design v2.8,
+// section 6.1; review r6 L4): a run mint is trusted as fresh because its
+// only production caller generates the run ID for its own dispatch. The
+// callers of SetAgentRunID are exactly HTTPAgentDispatcher.beginRun, and
+// beginRun passes the result of uuid.NewString(), assigned exactly once.
+// The scan covers the whole module except pkg/ent (generated code). The
+// allowed exceptions are the shared store conformance fixtures listed in
+// storetestExceptions (not production), which supply run IDs of their own
+// (implementation review r1 OP-3). They are listed file by file, so a new
+// caller anywhere else, a new storetest file included, fails here.
+func TestSetAgentRunIDHasOneFreshMintCaller(t *testing.T) {
+	storetestExceptions := map[string]bool{
+		"pkg/store/storetest/domains_usage_reservation_release.go":  true,
+		"pkg/store/storetest/domains_usage_reservation_transfer.go": true, // ptone/scion#4181
+	}
+	var callers, exempt []string
+	for _, ref := range moduleReferences(t, map[string]bool{"SetAgentRunID": true}, filepath.Join("pkg", "ent")) {
+		file, _, _ := strings.Cut(ref, " ")
+		if storetestExceptions[file] {
+			exempt = append(exempt, ref)
+			continue
+		}
+		callers = append(callers, ref)
+	}
+	// The production caller set is exactly beginRun: the exemption above
+	// cannot hide a production caller, because only the listed storetest
+	// files are skipped.
+	assert.Equal(t, []string{"pkg/hub/httpdispatcher.go HTTPAgentDispatcher.beginRun"}, callers)
+	// Each exemption is still in use, by its one fixture.
+	assert.ElementsMatch(t, []string{
+		"pkg/store/storetest/domains_usage_reservation_release.go newReleaseFixture",
+		"pkg/store/storetest/domains_usage_reservation_transfer.go createTransferAgent",
+	}, exempt)
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "httpdispatcher.go", nil, parser.SkipObjectResolution)
+	require.NoError(t, err)
+	var begin *ast.FuncDecl
+	for _, d := range file.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == "beginRun" {
+			begin = fd
+		}
+	}
+	require.NotNil(t, begin, "beginRun not found")
+	fresh := map[string]bool{}  // identifiers assigned uuid.NewString()
+	assigns := map[string]int{} // assignments per identifier, any value
+	var mintArgs []ast.Expr
+	ast.Inspect(begin.Body, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.AssignStmt:
+			for _, lhs := range x.Lhs {
+				if id, ok := lhs.(*ast.Ident); ok {
+					assigns[id.Name]++
+				}
+			}
+			for i, rhs := range x.Rhs {
+				if call, ok := rhs.(*ast.CallExpr); ok && isSelector(call.Fun, "uuid", "NewString") && i < len(x.Lhs) {
+					if id, ok := x.Lhs[i].(*ast.Ident); ok {
+						fresh[id.Name] = true
+					}
+				}
+			}
+		case *ast.CallExpr:
+			if sel, ok := x.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "SetAgentRunID" && len(x.Args) >= 3 {
+				mintArgs = append(mintArgs, x.Args[2])
+			}
+		}
+		return true
+	})
+	require.Len(t, mintArgs, 1, "beginRun mints once")
+	id, ok := mintArgs[0].(*ast.Ident)
+	require.True(t, ok, "the minted run ID is an identifier")
+	assert.True(t, fresh[id.Name], "beginRun's minted run ID %s must come from uuid.NewString()", id.Name)
+	assert.Equal(t, 1, assigns[id.Name], "beginRun's minted run ID %s must be assigned exactly once (no reassignment before the mint)", id.Name)
+}
+
+func isSelector(e ast.Expr, pkg, name string) bool {
+	sel, ok := e.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != name {
+		return false
+	}
+	x, ok := sel.X.(*ast.Ident)
+	return ok && x.Name == pkg
 }

@@ -230,6 +230,13 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 						a.Detached = *opts.Detached
 					}
 					a.Phase = "running"
+					// This start resolved no configuration, so it reports
+					// none: the effective fields stay unset and
+					// ConfigResolved stays false (WP1 slice 3 addendum v14
+					// section 5), so the broker sends no brokerBuild and
+					// the hub records nothing, as for an older broker.
+					a.Harness, a.Model, a.TemplateHash = "", "", ""
+					a.ConfigResolved = false
 					return &a, nil
 				}
 			}
@@ -1068,6 +1075,16 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	} else {
 		h = harness.New(harnessName)
 		harnessConfigSource = string(config.HarnessConfigSourceUnresolved)
+	}
+	// launchedHarness is the name of the harness implementation this start
+	// resolved and launches with (harness.Resolve's, the error fallback's,
+	// or harness.New's Generic), captured once here. It is the effective
+	// harness the hub records (WP1 slice 3 addendum v14 section 5), not the
+	// stored harnessName, which a harness-config switch or a legacy config
+	// can leave stale or empty.
+	launchedHarness := ""
+	if h != nil {
+		launchedHarness = h.Name()
 	}
 
 	// Clear the staged provisioning state (wrapper and whole bundle) before
@@ -2874,6 +2891,13 @@ authDone:
 				a.HarnessConfig = harnessConfigName
 				a.HarnessConfigRevision = harnessConfigRevision
 				a.HarnessConfigSource = harnessConfigSource
+				// The effective configuration the hub records (WP1 slice 3).
+				a.Harness = launchedHarness
+				a.Model = effectiveModel
+				a.ConfigResolved = true
+				if th := startedTemplateHash(provenance, finalScionCfg); th != "" {
+					a.TemplateHash = th
+				}
 				a.HarnessAuth = opts.HarnessAuth
 				a.Profile = profileName
 				a.WorkspacePlacement = workspacePlacement
@@ -2896,6 +2920,10 @@ authDone:
 		HarnessConfig:         harnessConfigName,
 		HarnessConfigRevision: harnessConfigRevision,
 		HarnessConfigSource:   harnessConfigSource,
+		Harness:               launchedHarness,
+		Model:                 effectiveModel,
+		TemplateHash:          startedTemplateHash(provenance, finalScionCfg),
+		ConfigResolved:        true,
 		HarnessAuth:           opts.HarnessAuth,
 		Profile:               profileName,
 		WorkspacePlacement:    workspacePlacement,
@@ -4320,6 +4348,20 @@ func isEmptyPerAgentStart(opts api.StartOptions) bool {
 // loaded from a content-addressed cache (see api.AgentInfo.TemplateHash).
 func infoTemplateHydrated(cfg *api.ScionConfig) bool {
 	return cfg != nil && cfg.Info != nil && cfg.Info.TemplateHash != ""
+}
+
+// startedTemplateHash is the content hash of the template a start ran
+// with: from the image provenance record for an agent with one, otherwise
+// from agent info. "" when the template was resolved by name (no hash is
+// known), so the hub records the effective template hash as unknown.
+func startedTemplateHash(provenance *imageProvenance, cfg *api.ScionConfig) string {
+	if provenance != nil {
+		return provenance.TemplateHash
+	}
+	if cfg != nil && cfg.Info != nil {
+		return cfg.Info.TemplateHash
+	}
+	return ""
 }
 
 // templateHydrated reports whether the agent's template was loaded from a

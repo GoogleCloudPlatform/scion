@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -55,6 +56,53 @@ type launchSettleStore struct {
 	store.Store
 	fault       *storeFaultSwitch
 	afterReport func(ctx context.Context, agentID string)
+	// beforeSettle (when armed) runs right before SettleLaunchedRun
+	// delegates, as a hub write landing between the handler's check and the
+	// swap would (WP1 slice 3b). settleErr (when armed) fails
+	// SettleLaunchedRun without delegating.
+	beforeSettle func(ctx context.Context, agentID string)
+	settleErr    error
+
+	// adopts records every AdoptAgentRunID call (the applied settle and
+	// the heartbeat adoption), which always delegates.
+	adoptMu sync.Mutex
+	adopts  []adoptCall
+}
+
+// adoptCall is one recorded AdoptAgentRunID call and its result.
+type adoptCall struct {
+	from, to string
+	swapped  bool
+}
+
+// AdoptAgentRunID delegates and records the call.
+func (w *launchSettleStore) AdoptAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string, unchangedSince time.Time) (bool, error) {
+	ok, err := w.Store.AdoptAgentRunID(ctx, agentID, expectedRunID, newRunID, unchangedSince)
+	w.adoptMu.Lock()
+	w.adopts = append(w.adopts, adoptCall{from: expectedRunID, to: newRunID, swapped: ok && err == nil})
+	w.adoptMu.Unlock()
+	return ok, err
+}
+
+// adoptCalls returns the recorded AdoptAgentRunID calls.
+func (w *launchSettleStore) adoptCalls() []adoptCall {
+	w.adoptMu.Lock()
+	defer w.adoptMu.Unlock()
+	return append([]adoptCall(nil), w.adopts...)
+}
+
+// SettleLaunchedRun runs beforeSettle, or fails with settleErr, while the
+// switch is armed, then delegates.
+func (w *launchSettleStore) SettleLaunchedRun(ctx context.Context, agentID string, f store.LaunchSettleFence) (bool, error) {
+	if w.fault.Active() {
+		if w.settleErr != nil {
+			return false, w.settleErr
+		}
+		if w.beforeSettle != nil {
+			w.beforeSettle(ctx, agentID)
+		}
+	}
+	return w.Store.SettleLaunchedRun(ctx, agentID, f)
 }
 
 func (w *launchSettleStore) ApplyLaunchReport(ctx context.Context, agentID, brokerID string, r store.LaunchReport) (store.LaunchReportAnswer, store.Agent, error) {
@@ -258,8 +306,10 @@ func TestLaunchReportSettle_Failed_Keeps(t *testing.T) {
 // A repeated succeeded report is not applied again and settles nothing: a
 // list recorded after the first report is kept. The store answers a repeat
 // of a terminal report for an ended launch "completed" (ApplyLaunchReport's
-// ended branch), never "duplicate", so this also pins that a completed
-// answer is deliberately not settled.
+// ended branch), never "duplicate". This fixture's launch binds no run
+// (BeginLaunch without a RunID, as an older binary's), so this also pins
+// that a completed answer for an unbound launch is not settled (WP1 slice
+// 3b settles a completed answer only for a bound launch).
 func TestLaunchReportSettle_DuplicateSucceeded_Keeps(t *testing.T) {
 	f := newLaunchSettleFixture(t, "lrsettle-dup")
 	require.Equal(t, store.LaunchReportResultApplied, f.reportResult(t, store.LaunchReportStateSucceeded, "run-1"))

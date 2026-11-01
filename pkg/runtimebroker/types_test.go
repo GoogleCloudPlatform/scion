@@ -22,6 +22,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
 
 func TestBrokerInfoResponse_JSON(t *testing.T) {
@@ -426,6 +427,68 @@ func TestAgentInfoToResponse(t *testing.T) {
 				t.Errorf("Ready = %v, want %v", resp.Ready, tt.expectedReady)
 			}
 		})
+	}
+}
+
+// TestAgentInfoToResponse_EffectiveConfig (WP1 slice 3 addendum v12
+// section 5): the response carries the template hash, harness and model
+// Start resolved, and the broker's own build.
+func TestAgentInfoToResponse_EffectiveConfig(t *testing.T) {
+	resp := AgentInfoToResponse(api.AgentInfo{
+		Name: "agent-eff", Phase: "running", TemplateHash: "sha256:tmpl", Harness: "claude-code", Model: "model-x-1",
+		ConfigResolved: true,
+	})
+	if resp.TemplateHash != "sha256:tmpl" || resp.Harness != "claude-code" || resp.Model != "model-x-1" {
+		t.Errorf("effective fields = %q %q %q", resp.TemplateHash, resp.Harness, resp.Model)
+	}
+	if resp.BrokerBuild == "" || resp.BrokerBuild != version.Short() {
+		t.Errorf("BrokerBuild = %q, want version.Short() %q", resp.BrokerBuild, version.Short())
+	}
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{`"templateHash":"sha256:tmpl"`, `"harness":"claude-code"`, `"model":"model-x-1"`, `"brokerBuild":`} {
+		if !strings.Contains(string(data), key) {
+			t.Errorf("wire form lacks %s: %s", key, data)
+		}
+	}
+}
+
+// TestAgentInfoToResponse_NoBrokerBuildWithoutResolution (review
+// wp1s3-r1 R1, O1): an entry no start resolved (no Harness: an
+// already-running start, a list or get entry) carries no brokerBuild, so
+// the hub sees no effective-only field and records nothing.
+func TestAgentInfoToResponse_NoBrokerBuildWithoutResolution(t *testing.T) {
+	// Even a Harness on the entry does not count: only the explicit marker
+	// says a start resolved the configuration (review wp1s3-r2 O-1).
+	resp := AgentInfoToResponse(api.AgentInfo{Name: "agent-listed", Phase: "running", RunID: "run-b", Template: "tmpl", Harness: "listed"})
+	if resp.BrokerBuild != "" {
+		t.Errorf("BrokerBuild = %q, want empty", resp.BrokerBuild)
+	}
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "brokerBuild") {
+		t.Errorf("wire form carries brokerBuild: %s", data)
+	}
+}
+
+// TestAgentInfoToResponse_BrokerBuildFollowsTheMarker (review wp1s3-r2
+// O-1): a start that resolved its configuration gets brokerBuild even with
+// an empty Harness (an agent whose stored config names no harness).
+func TestAgentInfoToResponse_BrokerBuildFollowsTheMarker(t *testing.T) {
+	resp := AgentInfoToResponse(api.AgentInfo{Name: "agent-noharness", Phase: "running", Model: "model-x-1", ConfigResolved: true})
+	if resp.BrokerBuild != version.Short() {
+		t.Errorf("BrokerBuild = %q, want %q", resp.BrokerBuild, version.Short())
+	}
+	data, err := json.Marshal(api.AgentInfo{Name: "a", ConfigResolved: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.ToLower(string(data)), "resolved") {
+		t.Errorf("ConfigResolved must never be on the wire: %s", data)
 	}
 }
 

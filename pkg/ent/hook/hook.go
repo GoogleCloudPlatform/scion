@@ -117,6 +117,30 @@ func (f AgentIdentityKeyFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.V
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.AgentIdentityKeyMutation", m)
 }
 
+// The AgentLifecycleCursorFunc type is an adapter to allow the use of ordinary
+// function as AgentLifecycleCursor mutator.
+type AgentLifecycleCursorFunc func(context.Context, *ent.AgentLifecycleCursorMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f AgentLifecycleCursorFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.AgentLifecycleCursorMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.AgentLifecycleCursorMutation", m)
+}
+
+// The AgentLifecycleOutboxFunc type is an adapter to allow the use of ordinary
+// function as AgentLifecycleOutbox mutator.
+type AgentLifecycleOutboxFunc func(context.Context, *ent.AgentLifecycleOutboxMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f AgentLifecycleOutboxFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.AgentLifecycleOutboxMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.AgentLifecycleOutboxMutation", m)
+}
+
 // The AgentRecoveryFunc type is an adapter to allow the use of ordinary
 // function as AgentRecovery mutator.
 type AgentRecoveryFunc func(context.Context, *ent.AgentRecoveryMutation) (ent.Value, error)

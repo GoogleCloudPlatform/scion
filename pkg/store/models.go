@@ -111,6 +111,10 @@ type Agent struct {
 
 	// Applied configuration (stored as JSON)
 	AppliedConfig *AgentAppliedConfig `json:"appliedConfig,omitempty"`
+	// EffectiveConfig is the broker's verified effective configuration for
+	// one run (AgentEffectiveConfig), or nil. Written only by
+	// SetAgentEffectiveConfig; never by UpdateAgent.
+	EffectiveConfig *AgentEffectiveConfig `json:"-"`
 
 	// PendingConfig holds config edits the hub stored instead of applying
 	// (see AgentPendingConfig); nil when there are none. UpdateAgent writes
@@ -168,6 +172,7 @@ type Agent struct {
 	// (§3.3).
 	LaunchAsyncOptIn   bool      `json:"-"`
 	LaunchID           string    `json:"-"`
+	LaunchRunID        string    `json:"-"` // the run the launch dispatched (agents.launch_run_id); "" when unknown
 	LaunchState        string    `json:"-"` // "" | "active" | "ended"
 	LaunchEndReason    string    `json:"-"`
 	LaunchKind         string    `json:"-"` // "create" | "start" | "restart"

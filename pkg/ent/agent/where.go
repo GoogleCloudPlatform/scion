@@ -216,6 +216,11 @@ func AppliedConfig(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldAppliedConfig, v))
 }
 
+// EffectiveConfig applies equality check predicate on the "effective_config" field. It's identical to EffectiveConfigEQ.
+func EffectiveConfig(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldEffectiveConfig, v))
+}
+
 // PendingConfig applies equality check predicate on the "pending_config" field. It's identical to PendingConfigEQ.
 func PendingConfig(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldPendingConfig, v))
@@ -284,6 +289,11 @@ func LaunchAsyncOptIn(v bool) predicate.Agent {
 // LaunchID applies equality check predicate on the "launch_id" field. It's identical to LaunchIDEQ.
 func LaunchID(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldLaunchID, v))
+}
+
+// LaunchRunID applies equality check predicate on the "launch_run_id" field. It's identical to LaunchRunIDEQ.
+func LaunchRunID(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchRunID, v))
 }
 
 // RunID applies equality check predicate on the "run_id" field. It's identical to RunIDEQ.
@@ -2491,6 +2501,81 @@ func AppliedConfigContainsFold(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldContainsFold(FieldAppliedConfig, v))
 }
 
+// EffectiveConfigEQ applies the EQ predicate on the "effective_config" field.
+func EffectiveConfigEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldEffectiveConfig, v))
+}
+
+// EffectiveConfigNEQ applies the NEQ predicate on the "effective_config" field.
+func EffectiveConfigNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldEffectiveConfig, v))
+}
+
+// EffectiveConfigIn applies the In predicate on the "effective_config" field.
+func EffectiveConfigIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldEffectiveConfig, vs...))
+}
+
+// EffectiveConfigNotIn applies the NotIn predicate on the "effective_config" field.
+func EffectiveConfigNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldEffectiveConfig, vs...))
+}
+
+// EffectiveConfigGT applies the GT predicate on the "effective_config" field.
+func EffectiveConfigGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldEffectiveConfig, v))
+}
+
+// EffectiveConfigGTE applies the GTE predicate on the "effective_config" field.
+func EffectiveConfigGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldEffectiveConfig, v))
+}
+
+// EffectiveConfigLT applies the LT predicate on the "effective_config" field.
+func EffectiveConfigLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldEffectiveConfig, v))
+}
+
+// EffectiveConfigLTE applies the LTE predicate on the "effective_config" field.
+func EffectiveConfigLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldEffectiveConfig, v))
+}
+
+// EffectiveConfigContains applies the Contains predicate on the "effective_config" field.
+func EffectiveConfigContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldEffectiveConfig, v))
+}
+
+// EffectiveConfigHasPrefix applies the HasPrefix predicate on the "effective_config" field.
+func EffectiveConfigHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldEffectiveConfig, v))
+}
+
+// EffectiveConfigHasSuffix applies the HasSuffix predicate on the "effective_config" field.
+func EffectiveConfigHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldEffectiveConfig, v))
+}
+
+// EffectiveConfigIsNil applies the IsNil predicate on the "effective_config" field.
+func EffectiveConfigIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldEffectiveConfig))
+}
+
+// EffectiveConfigNotNil applies the NotNil predicate on the "effective_config" field.
+func EffectiveConfigNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldEffectiveConfig))
+}
+
+// EffectiveConfigEqualFold applies the EqualFold predicate on the "effective_config" field.
+func EffectiveConfigEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldEffectiveConfig, v))
+}
+
+// EffectiveConfigContainsFold applies the ContainsFold predicate on the "effective_config" field.
+func EffectiveConfigContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldEffectiveConfig, v))
+}
+
 // PendingConfigEQ applies the EQ predicate on the "pending_config" field.
 func PendingConfigEQ(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldPendingConfig, v))
@@ -3219,6 +3304,81 @@ func LaunchIDEqualFold(v string) predicate.Agent {
 // LaunchIDContainsFold applies the ContainsFold predicate on the "launch_id" field.
 func LaunchIDContainsFold(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldContainsFold(FieldLaunchID, v))
+}
+
+// LaunchRunIDEQ applies the EQ predicate on the "launch_run_id" field.
+func LaunchRunIDEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchRunID, v))
+}
+
+// LaunchRunIDNEQ applies the NEQ predicate on the "launch_run_id" field.
+func LaunchRunIDNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldLaunchRunID, v))
+}
+
+// LaunchRunIDIn applies the In predicate on the "launch_run_id" field.
+func LaunchRunIDIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldLaunchRunID, vs...))
+}
+
+// LaunchRunIDNotIn applies the NotIn predicate on the "launch_run_id" field.
+func LaunchRunIDNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldLaunchRunID, vs...))
+}
+
+// LaunchRunIDGT applies the GT predicate on the "launch_run_id" field.
+func LaunchRunIDGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldLaunchRunID, v))
+}
+
+// LaunchRunIDGTE applies the GTE predicate on the "launch_run_id" field.
+func LaunchRunIDGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldLaunchRunID, v))
+}
+
+// LaunchRunIDLT applies the LT predicate on the "launch_run_id" field.
+func LaunchRunIDLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldLaunchRunID, v))
+}
+
+// LaunchRunIDLTE applies the LTE predicate on the "launch_run_id" field.
+func LaunchRunIDLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldLaunchRunID, v))
+}
+
+// LaunchRunIDContains applies the Contains predicate on the "launch_run_id" field.
+func LaunchRunIDContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldLaunchRunID, v))
+}
+
+// LaunchRunIDHasPrefix applies the HasPrefix predicate on the "launch_run_id" field.
+func LaunchRunIDHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldLaunchRunID, v))
+}
+
+// LaunchRunIDHasSuffix applies the HasSuffix predicate on the "launch_run_id" field.
+func LaunchRunIDHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldLaunchRunID, v))
+}
+
+// LaunchRunIDIsNil applies the IsNil predicate on the "launch_run_id" field.
+func LaunchRunIDIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldLaunchRunID))
+}
+
+// LaunchRunIDNotNil applies the NotNil predicate on the "launch_run_id" field.
+func LaunchRunIDNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldLaunchRunID))
+}
+
+// LaunchRunIDEqualFold applies the EqualFold predicate on the "launch_run_id" field.
+func LaunchRunIDEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldLaunchRunID, v))
+}
+
+// LaunchRunIDContainsFold applies the ContainsFold predicate on the "launch_run_id" field.
+func LaunchRunIDContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldLaunchRunID, v))
 }
 
 // RunIDEQ applies the EQ predicate on the "run_id" field.

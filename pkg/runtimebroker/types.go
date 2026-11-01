@@ -23,6 +23,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
 
 // ============================================================================
@@ -229,6 +230,15 @@ type AgentResponse struct {
 	// the agent's workspace (api.WorkspacePlacementExport or
 	// WorkspacePlacementLocal). Empty when no start resolved it.
 	WorkspacePlacement string `json:"workspacePlacement,omitempty"`
+
+	// The broker's effective configuration of the start (WP1 slice 3
+	// addendum v12 section 5): the template content hash, the harness and
+	// the effective model Start resolved, and the broker build. Older
+	// brokers omit them, and the hub then records nothing.
+	TemplateHash string `json:"templateHash,omitempty"`
+	Harness      string `json:"harness,omitempty"`
+	Model        string `json:"model,omitempty"`
+	BrokerBuild  string `json:"brokerBuild,omitempty"`
 }
 
 // AgentConfig contains agent configuration details.
@@ -693,6 +703,20 @@ type StatsResponse struct {
 // Conversion Functions
 // ============================================================================
 
+// effectiveBrokerBuild is the broker build echoed with info: this
+// broker's version.Short() when the start that produced info resolved the
+// agent's configuration (info.ConfigResolved, set only by agent Start's
+// resolving return paths), else "". A start that found the agent already
+// running, and every list or get entry, carry no brokerBuild and so no
+// effective-only field: the hub records nothing for them (WP1 slice 3
+// addendum v14 section 5).
+func effectiveBrokerBuild(info api.AgentInfo) string {
+	if !info.ConfigResolved {
+		return ""
+	}
+	return version.Short()
+}
+
 // AgentInfoToResponse converts an api.AgentInfo to an AgentResponse.
 func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 	phase := info.Phase
@@ -745,6 +769,10 @@ func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 		HarnessConfigRevision: info.HarnessConfigRevision,
 		HarnessConfigSource:   info.HarnessConfigSource,
 		HarnessAuth:           info.HarnessAuth,
+		TemplateHash:          info.TemplateHash,
+		Harness:               info.Harness,
+		Model:                 info.Model,
+		BrokerBuild:           effectiveBrokerBuild(info),
 		Image:                 info.Image,
 		RuntimeType:           info.Runtime,
 		Profile:               info.Profile,

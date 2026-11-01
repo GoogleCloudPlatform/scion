@@ -33,6 +33,12 @@ type AgentHold func(*sql.Selector)
 // AgentIdentityKey is the predicate function for agentidentitykey builders.
 type AgentIdentityKey func(*sql.Selector)
 
+// AgentLifecycleCursor is the predicate function for agentlifecyclecursor builders.
+type AgentLifecycleCursor func(*sql.Selector)
+
+// AgentLifecycleOutbox is the predicate function for agentlifecycleoutbox builders.
+type AgentLifecycleOutbox func(*sql.Selector)
+
 // AgentRecovery is the predicate function for agentrecovery builders.
 type AgentRecovery func(*sql.Selector)
 

@@ -232,6 +232,21 @@ func DefaultHubID() string {
 // across restarts in workstation mode.
 const hubIDFileName = "hub-id"
 
+// ReadPersistedHubID returns the hub ID persisted in the global directory's
+// hub-id file (what PersistentHubID reads and writes), or "" when there is
+// none or it cannot be read. It never writes.
+func ReadPersistedHubID() string {
+	globalDir, err := GetGlobalDir()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(globalDir, hubIDFileName))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
 // PersistentHubID returns the hub instance ID, persisting the derived value to
 // disk on first call so that subsequent startups use the same ID even if the
 // machine hostname changes (e.g. DHCP, OS update, migration). The file is
