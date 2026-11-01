@@ -257,7 +257,10 @@ describe('Git panel', () => {
     button(el, 'check-upstream').click();
     await settle(el);
     expect(
-      root(el).querySelector('.git-check.up-to-date .git-check-summary')?.textContent?.replace(/\s+/g, ' ').trim()
+      root(el)
+        .querySelector('.git-check.up-to-date .git-check-summary')
+        ?.textContent?.replace(/\s+/g, ' ')
+        .trim()
     ).toBe('The running build (0123abcd4567) is up to date with origin/main.');
   });
 
@@ -272,7 +275,10 @@ describe('Git panel', () => {
     button(el, 'check-upstream').click();
     await settle(el);
     expect(
-      root(el).querySelector('.git-check .git-check-summary')?.textContent?.replace(/\s+/g, ' ').trim()
+      root(el)
+        .querySelector('.git-check .git-check-summary')
+        ?.textContent?.replace(/\s+/g, ' ')
+        .trim()
     ).toBe('The repository checkout (89abcdef0123) is up to date with origin/main.');
     expect(root(el).querySelector('.git-check-note')?.textContent?.replace(/\s+/g, ' ')).toContain(
       "running build's commit is not in the repository checkout"

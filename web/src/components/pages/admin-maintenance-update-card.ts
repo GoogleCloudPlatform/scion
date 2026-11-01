@@ -1179,17 +1179,21 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
     if (!r) return nothing;
     const running = r.compared === 'running';
     const subject = running ? 'The running build' : 'The repository checkout';
-    const commit = r.current_commit ? html` (<code>${r.current_commit.slice(0, 12)}</code>)` : nothing;
+    const commit = r.current_commit
+      ? html` (<code>${r.current_commit.slice(0, 12)}</code>)`
+      : nothing;
     const ref = r.tracking_ref || (r.current_branch ? `origin/${r.current_branch}` : 'upstream');
     const checkoutNote = running
       ? nothing
       : html`<div class="git-check-note">
-          The running build's commit is not in the repository checkout, so the checkout was
-          compared instead.
+          The running build's commit is not in the repository checkout, so the checkout was compared
+          instead.
         </div>`;
     if (!r.update_available) {
       return html`<div class="git-check up-to-date">
-        <div class="git-check-summary">${subject}${commit} is up to date with <code>${ref}</code>.</div>
+        <div class="git-check-summary">
+          ${subject}${commit} is up to date with <code>${ref}</code>.
+        </div>
         ${checkoutNote}
       </div>`;
     }
