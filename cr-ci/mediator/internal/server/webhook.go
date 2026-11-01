@@ -23,6 +23,7 @@ type webhookPayload struct {
 		Labels     []string `json:"labels"`
 		Conclusion string   `json:"conclusion"`
 		RunnerName string   `json:"runner_name"`
+		RunnerID   int64    `json:"runner_id"`
 	} `json:"workflow_job"`
 	Repository struct {
 		FullName string `json:"full_name"`
@@ -78,6 +79,9 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	if job.RunnerName != "" {
 		attrs = append(attrs, "runner", job.RunnerName)
 	}
+	if job.RunnerID != 0 {
+		attrs = append(attrs, "runner_id", job.RunnerID)
+	}
 	notConfigured := func() bool {
 		if s.o.MediatorURL != "" {
 			return false
@@ -93,10 +97,10 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		if notConfigured() {
 			return
 		}
-		result, err := s.checkRunnerJob(ctx, p.Repository.FullName, job.ID, job.RunID, job.RunnerName, nil, "webhook")
+		result, err := s.checkRunnerJob(ctx, p.Repository.FullName, job.ID, job.RunID, job.RunnerName, job.RunnerID, nil, "webhook")
 		if p.Action == "completed" {
 			// The ephemeral runner is gone with the job.
-			s.forgetRunner(job.RunnerName)
+			s.forgetRunner(job.RunnerName, job.RunnerID, attrs)
 		}
 		if err != nil {
 			plain(w, http.StatusServiceUnavailable, "runner check failed")
