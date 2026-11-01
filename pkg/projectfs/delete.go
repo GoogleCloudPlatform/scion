@@ -266,6 +266,13 @@ var ErrRefused = errors.New("projectfs: deletion refused")
 // latter as expected).
 var ErrNoProjectTree = errors.New("projectfs: no project tree below the host base")
 
+// ErrShareEmpty marks, together with ErrNoProjectTree, a shared Layout whose
+// host base has no entries at all: the share is not mounted (only the empty
+// mount point is), or a mounted share was emptied. errors.Is(err,
+// ErrNoProjectTree) holds for it too, so callers of ErrNoProjectTree see no
+// change.
+var ErrShareEmpty = errors.New("projectfs: the host base is empty")
+
 // Retryable reports whether d failed in a way a later attempt may clear: a
 // removal that failed part-way (for example while a terminating process was
 // still writing), not a refusal.
