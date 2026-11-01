@@ -1896,7 +1896,7 @@ jobs:
     # the harness runs anyway.
     if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.single_node_vm == 'true')) }}
     # Routed to the cr-ci runner when SCION_LARGE_RUNNER is set
-    # (hack/check-runner-routing.sh). Held until the runner-layout switch: the
+    # (hack/check-runner-routing.sh). Was held until the runner-layout switch: the
     # scion-layout tests refuse temp trees under a world-writable ancestor, and
     # the old layout put them under /scratch, mode 777 (cr-ci followups v12).
     # Hosted runs take 417-457 s, so 15 min leaves headroom on either runner.
