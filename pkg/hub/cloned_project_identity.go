@@ -381,10 +381,16 @@ func (s *Server) recordedProjectRelation(ctx context.Context, project *store.Pro
 	return recordedNotFormer, nil
 }
 
+// errNoProjectFromLookup reports a project lookup that returned neither a
+// project nor an error.
+var errNoProjectFromLookup = errors.New("project lookup returned no project and no error")
+
 // ownIDRelation classifies the project's own ID recorded under
 // recordedSlug: recordedOtherProjectDir when the live project holding
 // recordedSlug is another project whose project config directory is the
 // one <recordedSlug>__<id8 of project.ID> names, else recordedSameProject.
+// A slug lookup that returns no project and no error is a failure
+// (errNoProjectFromLookup), so nothing is changed.
 func (s *Server) ownIDRelation(ctx context.Context, project *store.Project, recordedSlug string) (recordedRelation, error) {
 	if recordedSlug == project.Slug {
 		return recordedSameProject, nil
@@ -395,6 +401,8 @@ func (s *Server) ownIDRelation(ctx context.Context, project *store.Project, reco
 		return recordedSameProject, nil
 	case err != nil:
 		return recordedNotFormer, err
+	case holder == nil:
+		return recordedNotFormer, errNoProjectFromLookup
 	}
 	if holder.ID == project.ID {
 		return recordedSameProject, nil
