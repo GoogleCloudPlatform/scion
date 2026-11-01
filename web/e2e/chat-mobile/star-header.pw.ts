@@ -283,21 +283,25 @@ test.describe('starred messages: header list on a phone', () => {
     const sheet = listSurface(page);
     await expect(sheet).toBeVisible();
     await expect(sheet.locator('h2')).toHaveText('Starred messages');
+    await expect(entries(page)).toHaveCount(20);
+    // Measure only after the sheet's slide-in has finished: read during the
+    // transition, the boxes come out a fraction short, and the drag below
+    // would start under the list.
+    await sheet.evaluate((el) =>
+      Promise.all(el.getAnimations({ subtree: true }).map((a) => a.finished)).then(() => undefined)
+    );
+    // 44px targets, with room for float rounding in the measured box (43.99997).
+    const minTarget = 44 - 0.01;
     const close = sheet.locator('button.close');
     const cbox = (await close.boundingBox())!;
-    expect(cbox.width).toBeGreaterThanOrEqual(44);
-    expect(cbox.height).toBeGreaterThanOrEqual(44);
-    await expect(entries(page)).toHaveCount(20);
+    expect(cbox.width).toBeGreaterThanOrEqual(minTarget);
+    expect(cbox.height).toBeGreaterThanOrEqual(minTarget);
     const ebox = (await entries(page).first().boundingBox())!;
-    expect(ebox.height).toBeGreaterThanOrEqual(44);
+    expect(ebox.height).toBeGreaterThanOrEqual(minTarget);
 
     const scroller = sheet.locator('.scroll');
     const room = await scroller.evaluate((el) => el.scrollHeight - el.clientHeight);
     expect(room, 'starred sheet list must overflow before the touch drag').toBeGreaterThan(100);
-    // Measure the list only after the sheet's slide-in has finished, or the drag starts below it.
-    await sheet.evaluate((el) =>
-      Promise.all(el.getAnimations({ subtree: true }).map((a) => a.finished)).then(() => undefined)
-    );
     const sbox = (await scroller.boundingBox())!;
     const frameBefore = await page.evaluate(() => document.scrollingElement?.scrollTop ?? 0);
     await touchScroll(page, sbox.x + sbox.width / 2, sbox.y + sbox.height - 30, 0, -200);

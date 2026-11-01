@@ -31,6 +31,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/preflight"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/GoogleCloudPlatform/scion/pkg/version/update"
@@ -178,6 +179,10 @@ type RestartingExecutor interface {
 // BinaryUpdateOptions configures a BinaryUpdateExecutor. Zero values take
 // the documented defaults.
 type BinaryUpdateOptions struct {
+	// SettingsCheck, when set, lists the required settings that are unset
+	// (preflight.LoadRequiredSettingsFindings); Run writes them to the log
+	// as warnings and goes on. nil skips the section.
+	SettingsCheck func() []preflight.Finding
 	// GitHubRepo is the release repository (owner/name); default
 	// DefaultGitHubRepo.
 	GitHubRepo string
@@ -258,6 +263,7 @@ type BinaryUpdateExecutor struct {
 	timeout    time.Duration
 	snapshots  DBSnapshotter
 	floor      string
+	settings   func() []preflight.Finding
 	pluginDir  string
 
 	// Per-step deadlines after the download phase.
@@ -289,6 +295,7 @@ func NewBinaryUpdateExecutor(opts BinaryUpdateOptions) *BinaryUpdateExecutor {
 		timeout:    opts.DownloadTimeout,
 		snapshots:  opts.Snapshotter,
 		floor:      opts.DowngradeFloor,
+		settings:   opts.SettingsCheck,
 		pluginDir:  opts.PluginDir,
 	}
 	if e.repo == "" {
@@ -517,6 +524,11 @@ func (e *BinaryUpdateExecutor) RunWithBeforeRestart(ctx context.Context, logger 
 		return fmt.Errorf("installer preflight failed (%s): %w", e.installer.Name(), err)
 	}
 	_, _ = fmt.Fprintln(logger, "Preflight passed.")
+	// Warnings only: an unset required setting never stops the update.
+	if e.settings != nil {
+		_, _ = fmt.Fprintln(logger)
+		preflight.WriteSettingsCheck(logger, e.settings())
+	}
 
 	dlCtx, cancel := context.WithTimeout(ctx, e.timeout)
 	defer cancel()

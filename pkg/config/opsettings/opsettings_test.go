@@ -1126,6 +1126,34 @@ func TestDetectDeprecatedServerEnv_PublicURLIsPin(t *testing.T) {
 	}
 }
 
+// TestDetectDeprecatedServerEnv_AuthorizedDomainsIsPin checks that
+// SCION_SERVER_AUTH_AUTHORIZEDDOMAINS, which pins
+// server.auth.authorized_domains on a node (ptone/scion#6000), is not
+// reported as a deprecated seed input, while the other access keys still
+// are.
+func TestDetectDeprecatedServerEnv_AuthorizedDomainsIsPin(t *testing.T) {
+	envK := koanf.New(".")
+	_ = envK.Load(confmap.Provider(map[string]interface{}{
+		"server.auth.authorized_domains": []string{"example.com"},
+		"server.auth.user_access_mode":   "domain_restricted",
+	}, "."), nil)
+
+	deprecated := DetectDeprecatedServerEnv(envK)
+	if len(deprecated) != 1 || deprecated[0].KoanfKey != "server.auth.user_access_mode" {
+		t.Fatalf("DetectDeprecatedServerEnv = %+v, want only server.auth.user_access_mode", deprecated)
+	}
+	for key, want := range map[string]bool{
+		"server.auth.authorized_domains": true,
+		"server.hub.public_url":          true,
+		"server.hub.admin_emails":        false,
+		"server.auth.user_access_mode":   false,
+	} {
+		if got := IsEnvPinnedLayer1Key(key); got != want {
+			t.Errorf("IsEnvPinnedLayer1Key(%q) = %v, want %v", key, got, want)
+		}
+	}
+}
+
 func TestDetectDeprecatedServerEnv_Layer1Keys(t *testing.T) {
 	envK := koanf.New(".")
 	_ = envK.Load(confmap.Provider(map[string]interface{}{

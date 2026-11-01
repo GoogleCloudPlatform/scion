@@ -3610,6 +3610,9 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 	// values a saved hub value now beats.
 	hubSrv.WarnMaintenanceImageRegistryDrift()
 	hubSrv.WarnShadowedImageRegistries(flatInstanceImageRegistries())
+	// A saved authorized_domains that differs from the deployment value
+	// (before ptone/scion#6000 a saved list was not enforced).
+	hubSrv.WarnAuthorizedDomainsDrift(snap)
 
 	if envKeys := ops.EnvOverriddenKeys(); len(envKeys) > 0 {
 		slog.Warn("Layer-1 settings overridden by SCION_SERVER_* env vars on this node — these values diverge from the shared DB",

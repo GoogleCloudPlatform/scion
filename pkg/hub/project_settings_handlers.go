@@ -239,7 +239,8 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 			BadRequest(w, msg)
 			return
 		}
-		merged, present, err := mergeProjectSettingsPut(projectSettingsFromAnnotations(project), body)
+		stored := projectSettingsFromAnnotations(project)
+		merged, present, err := mergeProjectSettingsPut(stored, body)
 		if err != nil {
 			BadRequest(w, "Invalid request body: "+err.Error())
 			return
@@ -254,6 +255,23 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 		if present[projectSettingsFieldThinkingLevel] &&
 			rejectInvalidDefaultThinkingLevel(w, projectSettingsFieldThinkingLevel, merged.DefaultThinkingLevel) {
 			return
+		}
+
+		// A count limit is 0 (Unlimited) or more; null clears it
+		// (ptone/scion#3925).
+		for _, f := range []struct {
+			name  string
+			value *int
+		}{
+			{projectSettingsFieldMaxTurns, merged.DefaultMaxTurns},
+			{projectSettingsFieldMaxModelCalls, merged.DefaultMaxModelCalls},
+		} {
+			if present[f.name] && f.value != nil && *f.value < 0 {
+				writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+					fmt.Sprintf("invalid %s %d: must be 0 (Unlimited) or more; send null to clear it", f.name, *f.value),
+					map[string]interface{}{"field": f.name})
+				return
+			}
 		}
 
 		if present[projectSettingsFieldMaxAgentRole] && merged.MaxAgentRole != "" && !ValidAgentRole(AgentRole(merged.MaxAgentRole)) {
@@ -285,9 +303,12 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 		if present[projectSettingsFieldActiveProfile] {
 			s.onProjectActiveProfileSaved(ctx, project)
 		}
+		unlimitedSet := s.recordProjectUnlimitedLimits(ctx, project, stored, merged)
+		warnings := s.profileDefaultSAWarnings(ctx, project.ID, changedProfileDefaults)
+		warnings = append(warnings, s.projectUnlimitedBrokerWarnings(ctx, project.ID, unlimitedSet)...)
 		writeJSON(w, http.StatusOK, projectSettingsWithWarnings{
 			ProjectSettings: projectSettingsFromAnnotations(project),
-			Warnings:        s.profileDefaultSAWarnings(ctx, project.ID, changedProfileDefaults),
+			Warnings:        warnings,
 		})
 
 	default:
@@ -587,6 +608,8 @@ func isKubernetesRuntimeType(t string) bool {
 // struct tags.
 const (
 	projectSettingsFieldThinkingLevel            = "defaultThinkingLevel"
+	projectSettingsFieldMaxTurns                 = "defaultMaxTurns"
+	projectSettingsFieldMaxModelCalls            = "defaultMaxModelCalls"
 	projectSettingsFieldTelemetryEnabled         = "telemetryEnabled"
 	projectSettingsFieldAutoExposePortsEnabled   = "autoExposePortsEnabled"
 	projectSettingsFieldMaxAgentRole             = "maxAgentRole"
@@ -606,6 +629,10 @@ var projectSettingsNullClearsFields = map[string]bool{
 	projectSettingsFieldThinkingLevel:          true,
 	projectSettingsFieldTelemetryEnabled:       true,
 	projectSettingsFieldAutoExposePortsEnabled: true,
+	// The count limits are tri-state too: 0 is Unlimited, so only null can
+	// express "inherit" (ptone/scion#3925).
+	projectSettingsFieldMaxTurns:      true,
+	projectSettingsFieldMaxModelCalls: true,
 }
 
 // projectSettingsNotStoredFields are the request keys the project settings
@@ -664,9 +691,10 @@ func quoteFieldNames(ss []string) []string {
 //   - A field absent from the body keeps its stored value.
 //   - A field set to JSON null also keeps its stored value, except the
 //     tri-state fields in projectSettingsNullClearsFields, where null clears.
-//   - A field set to its empty value clears it: "" for strings, 0 for
-//     defaultMaxTurns and defaultMaxModelCalls, {} for
+//   - A field set to its empty value clears it: "" for strings, {} for
 //     defaultGCPIdentityServiceAccountIDByProfile and defaultResources.
+//     defaultMaxTurns and defaultMaxModelCalls are tri-state: null clears
+//     them and 0 is Unlimited (ptone/scion#3925).
 //   - Any other value replaces the stored value. Object-valued fields
 //     (defaultResources, the per-profile map) are replaced as a whole, not
 //     merged key by key.
@@ -800,16 +828,8 @@ func projectSettingsFromAnnotations(project *store.Project) *hubclient.ProjectSe
 	}
 
 	// Default agent limits
-	if val, ok := project.Annotations[projectSettingDefaultMaxTurns]; ok {
-		if n, err := strconv.Atoi(val); err == nil {
-			settings.DefaultMaxTurns = n
-		}
-	}
-	if val, ok := project.Annotations[projectSettingDefaultMaxModelCalls]; ok {
-		if n, err := strconv.Atoi(val); err == nil {
-			settings.DefaultMaxModelCalls = n
-		}
-	}
+	settings.DefaultMaxTurns = countLimitAnnotation(project.Annotations, projectSettingDefaultMaxTurns)
+	settings.DefaultMaxModelCalls = countLimitAnnotation(project.Annotations, projectSettingDefaultMaxModelCalls)
 	settings.DefaultMaxDuration = project.Annotations[projectSettingDefaultMaxDuration]
 
 	// Default GCP identity
@@ -901,8 +921,8 @@ func applyProjectSettingsToAnnotations(project *store.Project, settings *hubclie
 	}
 
 	// Default agent limits
-	setOrDeleteInt(project.Annotations, projectSettingDefaultMaxTurns, settings.DefaultMaxTurns)
-	setOrDeleteInt(project.Annotations, projectSettingDefaultMaxModelCalls, settings.DefaultMaxModelCalls)
+	setOrDeleteCountLimit(project.Annotations, projectSettingDefaultMaxTurns, settings.DefaultMaxTurns)
+	setOrDeleteCountLimit(project.Annotations, projectSettingDefaultMaxModelCalls, settings.DefaultMaxModelCalls)
 	setOrDelete(project.Annotations, projectSettingDefaultMaxDuration, settings.DefaultMaxDuration)
 
 	// Agent authorization
@@ -936,13 +956,30 @@ func applyProjectSettingsToAnnotations(project *store.Project, settings *hubclie
 	}
 }
 
-// setOrDeleteInt sets an annotation to the string representation of n, or deletes it if n is 0.
-func setOrDeleteInt(m map[string]string, key string, n int) {
-	if n > 0 {
-		m[key] = strconv.Itoa(n)
-	} else {
-		delete(m, key)
+// countLimitAnnotation reads a project count-limit annotation: absent gives
+// nil (inherit), "0" gives 0 (Unlimited) and "n" a limit n. A malformed or
+// negative value reads as unset, as an absent one does (ptone/scion#3925).
+func countLimitAnnotation(m map[string]string, key string) *int {
+	val, ok := m[key]
+	if !ok {
+		return nil
 	}
+	n, err := strconv.Atoi(val)
+	if err != nil || n < 0 {
+		return nil
+	}
+	return &n
+}
+
+// setOrDeleteCountLimit stores a project count limit: nil deletes the
+// annotation (inherit), and any other value is stored as written, so 0
+// (Unlimited) is kept rather than read back as a clear (ptone/scion#3925).
+func setOrDeleteCountLimit(m map[string]string, key string, n *int) {
+	if n == nil {
+		delete(m, key)
+		return
+	}
+	m[key] = strconv.Itoa(*n)
 }
 
 // setOrDelete sets an annotation key to value, or deletes it if value is empty.
@@ -1008,7 +1045,7 @@ func applyProjectDefaults(ac *store.AgentAppliedConfig, project *store.Project) 
 	}
 
 	// Check if there are any project limit/resource defaults to apply
-	hasLimits := settings.DefaultMaxTurns > 0 || settings.DefaultMaxModelCalls > 0 || settings.DefaultMaxDuration != ""
+	hasLimits := settings.DefaultMaxTurns != nil || settings.DefaultMaxModelCalls != nil || settings.DefaultMaxDuration != ""
 	hasResources := settings.DefaultResources != nil
 	if !hasLimits && !hasResources {
 		return
@@ -1021,12 +1058,14 @@ func applyProjectDefaults(ac *store.AgentAppliedConfig, project *store.Project) 
 
 	// Apply limit defaults (only if not already set). A count limit is
 	// unset only when nil: an explicit 0 ("no limit", ptone/scion#5605) is
-	// the request's own value and is kept.
-	if ac.InlineConfig.MaxTurns == nil && settings.DefaultMaxTurns > 0 {
-		ac.InlineConfig.MaxTurns = api.IntPtr(settings.DefaultMaxTurns)
+	// the request's own value and is kept. A project 0 (Unlimited,
+	// ptone/scion#3925) is stamped as an inline 0, with the same precedence
+	// as a project limit.
+	if ac.InlineConfig.MaxTurns == nil && settings.DefaultMaxTurns != nil {
+		ac.InlineConfig.MaxTurns = api.CloneIntPtr(settings.DefaultMaxTurns)
 	}
-	if ac.InlineConfig.MaxModelCalls == nil && settings.DefaultMaxModelCalls > 0 {
-		ac.InlineConfig.MaxModelCalls = api.IntPtr(settings.DefaultMaxModelCalls)
+	if ac.InlineConfig.MaxModelCalls == nil && settings.DefaultMaxModelCalls != nil {
+		ac.InlineConfig.MaxModelCalls = api.CloneIntPtr(settings.DefaultMaxModelCalls)
 	}
 	if ac.InlineConfig.MaxDuration == "" && settings.DefaultMaxDuration != "" {
 		ac.InlineConfig.MaxDuration = settings.DefaultMaxDuration

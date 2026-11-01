@@ -135,8 +135,8 @@ type routedBrokerTunnel struct {
 	enabled func() bool
 	// execScope returns the broker's authoritative exec_scope.
 	execScope func(ctx context.Context, brokerID string) (string, error)
-	// timeout bounds each attempt (default 120s, as on the control
-	// channel).
+	// timeout bounds each attempt (default brokerRequestTimeout, 180s, as
+	// on the control channel).
 	timeout time.Duration
 	// onFallback, when set, sees a fallback forced by a hub-side fault
 	// (reason: brokerRPCFallback*).

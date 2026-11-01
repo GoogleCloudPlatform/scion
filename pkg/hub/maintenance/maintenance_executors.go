@@ -37,6 +37,7 @@ import (
 	gcstorage "cloud.google.com/go/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/unitdrift"
+	"github.com/GoogleCloudPlatform/scion/pkg/preflight"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -290,6 +291,10 @@ type RebuildServerExecutor struct {
 	// store, when set, keeps the last unit check result for the
 	// Admin -> Maintenance banner (hub setting system.unit_drift).
 	store store.Store
+
+	// settings lists the required settings that are unset; nil skips the
+	// settings check section.
+	settings func() []preflight.Finding
 }
 
 // RebuildServerOptions configures a RebuildServerExecutor. Zero values are
@@ -309,6 +314,10 @@ type RebuildServerOptions struct {
 	UnitRevision unitdrift.Revision
 	// UnitTimeout bounds the unit check; zero means unitdrift.DefaultTimeout.
 	UnitTimeout time.Duration
+	// SettingsCheck, when set, lists the required settings that are unset
+	// (preflight.LoadRequiredSettingsFindings); Run writes them to the log
+	// as warnings and goes on. nil skips the section.
+	SettingsCheck func() []preflight.Finding
 }
 
 // NewRebuildServerExecutor returns a RebuildServerExecutor configured from opts.
@@ -322,6 +331,7 @@ func NewRebuildServerExecutor(opts RebuildServerOptions) *RebuildServerExecutor 
 		unitRevision: unitdrift.GitRevision,
 		unitTimeout:  opts.UnitTimeout,
 		store:        opts.Store,
+		settings:     opts.SettingsCheck,
 	}
 	if opts.UnitLocator != nil {
 		e.unitLocator = opts.UnitLocator
@@ -361,6 +371,11 @@ func (e *RebuildServerExecutor) Run(ctx context.Context, logger io.Writer, param
 	log.Debug("Starting rebuild-server",
 		"repo_path", repoPath, "branch", branch,
 		"binary_dest", binaryDest, "service_name", serviceName)
+
+	// Warnings only: an unset required setting never stops the rebuild.
+	if e.settings != nil {
+		preflight.WriteSettingsCheck(logger, e.settings())
+	}
 
 	// Build to a staging path inside the repo directory (where the service user
 	// has write access), then use "sudo install" to place it into the final

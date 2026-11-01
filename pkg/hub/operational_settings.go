@@ -23,6 +23,7 @@ import (
 	"maps"
 	"math/rand"
 	"reflect"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1778,6 +1779,15 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	if iamChanged {
 		applied = append(applied, gcpIAMSection)
 	}
+
+	// Authorized domains (ptone/scion#6000): a SCION_SERVER_* pin on this
+	// node, then the saved list, then the startup value
+	// (authorizedDomainsForSnapshot).
+	domains := authorizedDomainsForSnapshot(snap, s.startupLayer1.AuthorizedDomains)
+	if !slices.Equal(s.config.AuthorizedDomains, domains) {
+		applied = append(applied, "authorized_domains")
+	}
+	s.config.AuthorizedDomains = domains
 
 	// User access mode
 	if snap.UserAccessMode != "" {

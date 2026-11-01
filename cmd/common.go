@@ -1758,8 +1758,10 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 // the hub answers only once the runtime has created the agent, which can
 // take well over hubClientTimeout (a Cloud Run instance create, for
 // example), so these requests get a longer timeout. Other hub requests keep
-// theirs.
-var hubCreateRequestTimeout = 3 * time.Minute
+// theirs. It must outlast the hub's synchronous create: one dispatch of up
+// to the hub-to-broker request limit (180s, ptone/scion#6829) plus the
+// hub's 30s response write slack, about 210s.
+var hubCreateRequestTimeout = 4 * time.Minute
 
 func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, projectID string, req *hubclient.CreateAgentRequest) (*hubclient.CreateAgentResponse, error) {
 	createCtx := apiclient.WithRequestTimeout(ctx, hubCreateRequestTimeout)

@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
@@ -175,6 +176,13 @@ type ControlChannelClient struct {
 	connected   bool
 	sessionID   string
 	connectedAt time.Time
+	// disconnectedSince is when the channel last stopped being connected:
+	// the client's creation, or the last drop. It is zero while connected.
+	// Guarded by mu.
+	disconnectedSince time.Time
+	// now is the clock of disconnectedSince and CommandPathState. It is nil
+	// in production (time.Now); tests set it.
+	now func() time.Time
 	// transportRefusal is the hub's transport refusal of the last dial, or
 	// nil when the last dial was not refused that way (cleared on a
 	// successful handshake). Guarded by mu.
@@ -315,6 +323,8 @@ func NewControlChannelClient(config ControlChannelConfig, handlers http.Handler,
 		streams:        make(map[string]*StreamHandler),
 		dispatchSem:    make(chan struct{}, defaultMaxConcurrentDispatches),
 		cancels:        make(map[string]*requestCancel),
+		// Not connected yet: the command path grace starts now.
+		disconnectedSince: time.Now(),
 	}
 }
 
@@ -473,6 +483,7 @@ func (c *ControlChannelClient) doConnect() error {
 	c.mu.Lock()
 	c.connected = true
 	c.connectedAt = time.Now()
+	c.disconnectedSince = time.Time{}
 	c.transportRefusal = nil
 	cb := c.config.OnConnectionStateChange
 	c.mu.Unlock()
@@ -493,6 +504,45 @@ func (c *ControlChannelClient) setTransportRefusal(refusal *hubRefusalError) {
 	c.mu.Lock()
 	c.transportRefusal = refusal
 	c.mu.Unlock()
+}
+
+// commandPathGrace is how long a control channel may be not connected
+// before CommandPathState reports it unhealthy: the first dial plus the
+// longest reconnect backoff (ReconnectMax, 60s), so a broker that is
+// starting or reconnecting normally is not reported as failing.
+const commandPathGrace = 90 * time.Second
+
+// clock returns the current time from c.now, or time.Now.
+func (c *ControlChannelClient) clock() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
+}
+
+// CommandPathState reports whether the hub can send commands to this broker
+// over the control channel, as a fixed broker health value:
+//
+//   - api.BrokerHealthHealthy: connected (the handshake completed);
+//   - api.BrokerHealthUnhealthy: the last dial was refused by the hub's
+//     transport policy, or the channel has not been connected for longer
+//     than commandPathGrace;
+//   - api.BrokerHealthUnknown: not connected, within the grace (starting
+//     or reconnecting).
+func (c *ControlChannelClient) CommandPathState() string {
+	c.mu.RLock()
+	connected, refused, since := c.connected, c.transportRefusal != nil, c.disconnectedSince
+	c.mu.RUnlock()
+	switch {
+	case connected:
+		return api.BrokerHealthHealthy
+	case refused:
+		return api.BrokerHealthUnhealthy
+	case !since.IsZero() && c.clock().Sub(since) > commandPathGrace:
+		return api.BrokerHealthUnhealthy
+	default:
+		return api.BrokerHealthUnknown
+	}
 }
 
 // TransportRefused reports whether the last dial was refused by the hub's
@@ -1314,6 +1364,9 @@ func (c *ControlChannelClient) CloseStream(streamID, reason string, code int) er
 // markDisconnected updates the connection state.
 func (c *ControlChannelClient) markDisconnected() {
 	c.mu.Lock()
+	if c.connected {
+		c.disconnectedSince = c.clock()
+	}
 	c.connected = false
 	cb := c.config.OnConnectionStateChange
 	c.mu.Unlock()
