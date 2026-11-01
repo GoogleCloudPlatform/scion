@@ -21,8 +21,9 @@ package runtime
 // hub writes. Agent containers must get only their own directories from
 // it: the agent workspace (the project workspace for shared-plain), the
 // agent home, the declared shared dirs and, read-only, the agent secrets.
-// For each runtime and workspace mode these tests build the agent's mounts
-// on an NFS Layout (subpath root "projects") and assert that the share
+// For each runtime and each workspace mode it places on the share, these
+// tests build the agent's mounts on an NFS Layout (subpath root
+// "projects") in the shape pkg/agent produces and assert that the share
 // mounts are exactly that set, and that none is the export root, a parent
 // of the project root, the project root, or the project configuration
 // directory or anything under it.
@@ -39,8 +40,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 const (
@@ -263,44 +266,35 @@ func TestBuildCommonRunArgs_NFSMountScope(t *testing.T) {
 				{rel: scopeRel("workspace", ".scion"), target: "/workspace/.scion", readOnly: true},
 			}
 		}},
-		{name: "clone-per-agent", setup: func(t *testing.T, f *dockerScopeFixture, cfg RunConfig) (RunConfig, []shareMount) {
-			cfg.Workspace = f.workspace(t, projectfs.ModeClonePerAgent, scopeAgent)
-			cfg.AgentOwnWorkspace = true
-			cfg.GitClone = &api.GitCloneConfig{URL: "https://example.com/repo.git", Branch: "main"}
-			return cfg, []shareMount{{rel: scopeRel("agents", scopeAgent, "workspace"), target: "/workspace"}}
-		}},
-		{name: "empty-per-agent", setup: func(t *testing.T, f *dockerScopeFixture, cfg RunConfig) (RunConfig, []shareMount) {
-			cfg.Workspace = f.workspace(t, projectfs.ModeEmptyPerAgent, scopeAgent)
-			cfg.AgentOwnWorkspace = true
-			return cfg, []shareMount{{rel: scopeRel("agents", scopeAgent, "workspace"), target: "/workspace"}}
-		}},
+		// Worktree-per-agent on these runtimes: the per-agent worktree on
+		// the share is Kubernetes-only (pkg/agent nfsWorktreeSelection), so
+		// the agent gets the project workspace, with the repository root
+		// recomposed to it (composeSharedRepoRoot).
 		{name: "worktree-per-agent", setup: func(t *testing.T, f *dockerScopeFixture, cfg RunConfig) (RunConfig, []shareMount) {
-			base := f.workspace(t, projectfs.ModeWorktreePerAgent, "")
-			layoutGit(t, base, "init", "-q")
-			layoutGit(t, base, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init")
-			ws, err := f.layout.Resolve(f.project, scopeAgent, projectfs.WorkspaceMount(projectfs.ModeWorktreePerAgent, ""))
-			if err != nil {
-				t.Fatal(err)
-			}
-			layoutGit(t, base, "worktree", "add", "-q", "-b", scopeAgent, ws.HostPath)
-			cfg.RepoRoot, cfg.Workspace = base, ws.HostPath
-			cfg.AgentOwnWorkspace = true
+			ws := f.workspace(t, projectfs.ModeWorktreePerAgent, "")
+			layoutGit(t, ws, "init", "-q")
+			mkdirs(t, filepath.Join(ws, ".scion"))
+			cfg.RepoRoot, cfg.Workspace = ws, ws
+			// pkg/agent seeds the per-agent private .git/config copy
+			// bound over the repository's (off the share).
 			cfg.PrivateGitConfigSource = seedTestPrivateGitConfig(t)
+			// The workspace's .git admin paths are narrowed read-only,
+			// all inside the project workspace.
 			git := func(elems ...string) string { return scopeRel(append([]string{"workspace", ".git"}, elems...)...) }
 			return cfg, []shareMount{
-				{rel: scopeRel("workspace", "worktrees", scopeAgent), target: "/repo-root/worktrees/" + scopeAgent},
-				{rel: git(), target: "/repo-root/.git", readOnly: true},
-				{rel: git("objects"), target: "/repo-root/.git/objects"},
-				{rel: git("objects", "info"), target: "/repo-root/.git/objects/info", readOnly: true},
-				{rel: git("refs"), target: "/repo-root/.git/refs"},
-				{rel: git("logs"), target: "/repo-root/.git/logs"},
-				{rel: git("lfs"), target: "/repo-root/.git/lfs"},
-				{rel: git("worktrees", scopeAgent), target: "/repo-root/.git/worktrees/" + scopeAgent},
-				{rel: git("worktrees", scopeAgent, "commondir"), target: "/repo-root/.git/worktrees/" + scopeAgent + "/commondir", readOnly: true},
-				{rel: git("worktrees", scopeAgent, "config.worktree"), target: "/repo-root/.git/worktrees/" + scopeAgent + "/config.worktree", readOnly: true},
-				{rel: git("worktrees", scopeAgent, "gitdir"), target: "/repo-root/.git/worktrees/" + scopeAgent + "/gitdir", readOnly: true},
+				{rel: scopeRel("workspace"), target: "/workspace"},
+				{rel: scopeRel("workspace", ".scion"), target: "/workspace/.scion", readOnly: true},
+				{rel: git("config.worktree"), target: "/workspace/.git/config.worktree", readOnly: true},
+				{rel: git("hooks"), target: "/workspace/.git/hooks", readOnly: true},
+				{rel: git("info"), target: "/workspace/.git/info", readOnly: true},
+				{rel: git("objects", "info"), target: "/workspace/.git/objects/info", readOnly: true},
+				{rel: git("scion-sharers"), target: "/workspace/.git/scion-sharers", readOnly: true},
 			}
 		}},
+		// Clone-per-agent is not on the share for these runtimes
+		// (TestSelectWorkspaceBackend_NFSClonePerAgentIsLocal), and
+		// empty-per-agent on NFS is refused for them in pkg/agent
+		// (errEmptyPerAgentNFSRuntime).
 	}
 	for _, rt := range []string{"docker", "podman"} {
 		for _, mc := range modes {
@@ -317,8 +311,8 @@ func TestBuildCommonRunArgs_NFSMountScope(t *testing.T) {
 				}
 				share, other := f.shareMounts(t, args)
 				assertMountScope(t, share, append(want, scopeSharedDirMounts()...))
-				// Off the share: only the local home and, for a worktree,
-				// the per-agent private git config.
+				// Off the share: only the local home and the private git
+				// config copy.
 				allowedOther := []string{layoutRealPath(t, f.home)}
 				if cfg.PrivateGitConfigSource != "" {
 					allowedOther = append(allowedOther, layoutRealPath(t, cfg.PrivateGitConfigSource))
@@ -330,6 +324,16 @@ func TestBuildCommonRunArgs_NFSMountScope(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// On an nfs workspace_storage, clone-per-agent keeps its workspace on the
+// node (the local backend): the share mounts of the local-container
+// runtimes are then only the shared dirs.
+func TestSelectWorkspaceBackend_NFSClonePerAgentIsLocal(t *testing.T) {
+	cfg := &config.V1WorkspaceStorageConfig{Backend: "nfs", NFS: &config.V1NFSConfig{}}
+	if got := SelectWorkspaceBackend(cfg, store.SharingModeClonePerAgent).Name(); got != "local" {
+		t.Errorf("clone-per-agent on nfs selects backend %q, want local", got)
 	}
 }
 
