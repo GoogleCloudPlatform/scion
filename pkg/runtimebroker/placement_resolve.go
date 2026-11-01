@@ -412,11 +412,10 @@ func (s *Server) resolveFlatPlacement(rt scionrt.Runtime, agentName string) (*ap
 }
 
 // checkFlatCreatePlacement checks, for a create on a flat instance, the
-// request's own kubernetes blocks (its inline config, which provisioning
-// writes into the agent's config, and its create config) against the
-// instance's operator-owned placement (config.CheckAgentPlacement), before
-// the create has any side effect. Nil on a legacy Runtime Broker, whose
-// create relies on Manager.Start's check.
+// request's own kubernetes blocks against the instance's operator-owned
+// placement (checkCreatePlacement), before the dispatch attempt. Nil on a
+// legacy Runtime Broker, whose create is checked once its runtime's
+// placement is resolved.
 func (s *Server) checkFlatCreatePlacement(req CreateAgentRequest) error {
 	if !s.isFlat() {
 		return nil
@@ -424,6 +423,18 @@ func (s *Server) checkFlatCreatePlacement(req CreateAgentRequest) error {
 	rp, err := s.resolveFlatPlacement(nil, req.Name)
 	if err != nil || rp == nil {
 		return err
+	}
+	return s.checkCreatePlacement(req, rp)
+}
+
+// checkCreatePlacement checks a create request's own kubernetes blocks
+// (its inline config, which provisioning writes into the agent's config,
+// and its create config) against operator-owned placement rp
+// (config.CheckAgentPlacement), before the agent is provisioned or
+// started. Nil when rp is nil or not operator-owned.
+func (s *Server) checkCreatePlacement(req CreateAgentRequest, rp *api.ResolvedPlacement) error {
+	if rp == nil || !rp.OperatorOwned {
+		return nil
 	}
 	var blocks []*api.KubernetesConfig
 	if req.InlineConfig != nil {
@@ -434,7 +445,7 @@ func (s *Server) checkFlatCreatePlacement(req CreateAgentRequest) error {
 	}
 	for _, block := range blocks {
 		if err := config.CheckAgentPlacement(block, rp, config.AgentPlacementLayerRequest); err != nil {
-			s.agentLifecycleLog.Warn("Kubernetes placement: the request's kubernetes block conflicts with the instance's placement", "agent", req.Name, "error", err)
+			s.agentLifecycleLog.Warn("Kubernetes placement: the request's kubernetes block conflicts with the operator's placement", "agent", req.Name, "error", err)
 			return placementRefusal(err.Error())
 		}
 	}

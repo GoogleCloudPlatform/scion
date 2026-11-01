@@ -16,10 +16,12 @@ package runtimebroker
 
 import (
 	"context"
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -153,6 +155,87 @@ func TestLegacyOrphanedAgentRestartRefusedBeforeStop(t *testing.T) {
 			expectNoPodEffects(t, f)
 		})
 	}
+}
+
+// legacyCreateConflicts are create request kubernetes blocks that conflict
+// with an empty operator policy, with the cause each is refused with.
+var legacyCreateConflicts = []struct {
+	name  string
+	extra map[string]any
+	want  string
+}{
+	{"config tolerations", map[string]any{"config": map[string]any{"template": "claude", "kubernetes": map[string]any{
+		"tolerations": []map[string]string{{"key": "dedicated", "operator": "Exists"}}}}},
+		"kubernetes.tolerations[0] in the request"},
+	{"inline runtime class", map[string]any{"inlineConfig": map[string]any{"kubernetes": map[string]any{"runtimeClassName": "kata"}}},
+		"kubernetes.runtimeClassName in the request"},
+}
+
+// expectNoAgentDir fails when a refused create left the agent's directory.
+func expectNoAgentDir(t *testing.T, name string) {
+	t.Helper()
+	projectDir, err := config.GetResolvedProjectDir("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(config.GetAgentDir(projectDir, name, false)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("agent directory of %s exists (stat err %v)", name, err)
+	}
+}
+
+// A legacy create whose own kubernetes block conflicts with the operator
+// placement (here an empty policy) is refused with a validation error
+// before the agent is provisioned or started, on the synchronous and the
+// asynchronous path alike: no Manager.Start call, no launch and no agent
+// directory. An extra node selector key is still accepted.
+func TestLegacyCreatePlacementRejectedBeforeCreateSideEffects(t *testing.T) {
+	for _, tc := range legacyCreateConflicts {
+		t.Run(tc.name+" sync", func(t *testing.T) {
+			f := newPlacementFixture(t, plBareGlobal, k8s.ConnKubeconfig, plGoodRecord())
+			f.srv.config.ForceRuntime = "kubernetes"
+			body := map[string]any{"name": "sync-agent", "config": map[string]any{"template": "claude"}}
+			for k, v := range tc.extra {
+				body[k] = v
+			}
+			w := postCreate(t, f.srv, body)
+			if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), tc.want) {
+				t.Fatalf("got %d %s", w.Code, w.Body.String())
+			}
+			if f.mgr.startCalls != 0 {
+				t.Errorf("Manager.Start ran %d times", f.mgr.startCalls)
+			}
+			expectNoAgentDir(t, "sync-agent")
+		})
+		t.Run(tc.name+" async", func(t *testing.T) {
+			f, mgr, rtb := newAsyncPlacementFixture(t, plBareGlobal, plGoodRecord())
+			body := asyncCreateBody("async-agent", "L-LEGACY-REFUSED")
+			for k, v := range tc.extra {
+				body[k] = v
+			}
+			w := postCreate(t, f.srv, body)
+			if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), tc.want) {
+				t.Fatalf("got %d %s", w.Code, w.Body.String())
+			}
+			// The refusal is written before beginAsyncLaunch, the only place
+			// a launch starts, so nothing can start after this response.
+			if n := len(mgr.recorded()); n != 0 {
+				t.Errorf("Manager.Start ran %d times", n)
+			}
+			if n := len(rtb.getLaunchReports()); n != 0 {
+				t.Errorf("a refused create sent %d launch reports", n)
+			}
+			expectNoAgentDir(t, "async-agent")
+		})
+	}
+
+	f := newPlacementFixture(t, plBareGlobal, k8s.ConnKubeconfig, plGoodRecord())
+	f.srv.config.ForceRuntime = "kubernetes"
+	w := postCreate(t, f.srv, map[string]any{"name": "selector-agent", "config": map[string]any{"template": "claude",
+		"kubernetes": map[string]any{"nodeSelector": map[string]string{"disk": "ssd"}}}})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("an extra selector key: got %d %s", w.Code, w.Body.String())
+	}
+	requireOperatorOwnedStart(t, "create with an extra selector key", f.mgr.lastStartOpts)
 }
 
 // Malformed or invalid placement in the Hub's stored runtimes and profiles
