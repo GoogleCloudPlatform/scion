@@ -15,9 +15,11 @@
 package runtimebroker
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,18 +37,11 @@ import (
 
 // Tests for the background auxiliary runtime discovery (ptone/scion#7010).
 
-// shortAuxCheckTimeout sets auxProfileCheckTimeout to d for the test.
-func shortAuxCheckTimeout(t *testing.T, d time.Duration) {
-	t.Helper()
-	prev := auxProfileCheckTimeout
-	auxProfileCheckTimeout = d
-	t.Cleanup(func() { auxProfileCheckTimeout = prev })
-}
-
 // blockingResolver returns a resolver that blocks every discovery check
 // (agent name "") of the profiles in block until release is closed, then
-// fails them, and resolves every other call through byProfile. Commands
-// pass the agent's name, so they are never blocked.
+// fails them, and resolves every other call through byProfile; any other
+// profile fails at once. Commands pass the agent's name, so they are never
+// blocked.
 func blockingResolver(block map[string]bool, release <-chan struct{}, byProfile map[string]runtime.Runtime, calls *atomic.Int32) func(string, string, string) (runtime.Runtime, config.RuntimeBuildRecord) {
 	return func(_, agentName, profile string) (runtime.Runtime, config.RuntimeBuildRecord) {
 		if profile == "local" {
@@ -64,6 +59,31 @@ func blockingResolver(block map[string]bool, release <-chan struct{}, byProfile 
 			return rt, config.RuntimeBuildRecord{}
 		}
 		return &runtime.ErrorRuntime{Err: fmt.Errorf("token=SECRET-VALUE exec plugin failed for %q", profile)}, config.RuntimeBuildRecord{}
+	}
+}
+
+// releaseAtCleanup returns a channel that is closed when the test ends, so
+// blocked stub checks finish.
+func releaseAtCleanup(t *testing.T) chan struct{} {
+	t.Helper()
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	return release
+}
+
+// runPassWithin runs a discovery pass over dirs and fails the test if it
+// does not return within limit.
+func runPassWithin(t *testing.T, srv *Server, dirs []string, limit time.Duration) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.discoverAuxiliaryRuntimesForProjects(dirs)
+	}()
+	select {
+	case <-done:
+	case <-time.After(limit):
+		t.Fatalf("the discovery pass did not return within %s", limit)
 	}
 }
 
@@ -102,6 +122,7 @@ func TestStartServices_HubConnectNotDelayedByBlockingProfileCheck(t *testing.T) 
 	cfg.StateDir = t.TempDir()
 	srv := New(cfg, &filteringMockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	endAsyncLaunchesAtCleanup(t, srv)
+	srv.auxCheckTimeout = time.Hour
 
 	release := make(chan struct{})
 	var once sync.Once
@@ -129,25 +150,18 @@ func TestStartServices_HubConnectNotDelayedByBlockingProfileCheck(t *testing.T) 
 }
 
 // TestAuxDiscovery_ProfileCheckTimeoutApplied: a hung check is abandoned
-// after auxProfileCheckTimeout, and the profile is reported unavailable.
+// after the check timeout, and the profile is reported unavailable.
 func TestAuxDiscovery_ProfileCheckTimeoutApplied(t *testing.T) {
-	shortAuxCheckTimeout(t, 50*time.Millisecond)
 	srv := newDiscoveryTestServer(t, "docker")
+	srv.auxCheckTimeout = 50 * time.Millisecond
 	projectDir := t.TempDir()
 	writeProjectSettings(t, projectDir, twoK8sProfiles)
-	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
-	srv.resolveAuxiliaryRuntime = blockingResolver(map[string]bool{"stale": true}, release, map[string]runtime.Runtime{"good": fakeKubernetesRuntime("good-cluster", "")}, nil)
+	srv.resolveAuxiliaryRuntime = blockingResolver(map[string]bool{"stale": true}, releaseAtCleanup(t), map[string]runtime.Runtime{"good": fakeKubernetesRuntime("good-cluster", "")}, nil)
 
-	start := time.Now()
-	srv.discoverAuxiliaryRuntimesForProjects([]string{projectDir})
-	assert.Less(t, time.Since(start), time.Second, "the pass waited past the check timeout")
-	// The embedded default settings add built-in profiles to every project;
-	// only the fixture's own profiles are asserted.
+	runPassWithin(t, srv, []string{projectDir}, 2*time.Second)
 	checks := srv.profileRuntimeHealthChecks()
 	assert.Equal(t, api.BrokerHealthUnavailable, checks["profile_runtime.stale"])
 	assert.NotContains(t, checks, "profile_runtime.good")
-	assert.NotContains(t, checks, "profile_runtime.local")
 	assert.Equal(t, []string{"kubernetes|context=good-cluster|namespace="}, auxKeys(srv), "the healthy profile was not registered")
 }
 
@@ -155,8 +169,8 @@ func TestAuxDiscovery_ProfileCheckTimeoutApplied(t *testing.T) {
 // than worker slots do not stop a later healthy profile from registering,
 // because a timed-out check releases its slot at once.
 func TestAuxDiscovery_HungChecksDoNotStarveHealthyProfile(t *testing.T) {
-	shortAuxCheckTimeout(t, 50*time.Millisecond)
 	srv := newDiscoveryTestServer(t, "docker")
+	srv.auxCheckTimeout = 50 * time.Millisecond
 	projectDir := t.TempDir()
 	var b strings.Builder
 	b.WriteString("schema_version: \"1\"\nprofiles:\n")
@@ -172,27 +186,24 @@ func TestAuxDiscovery_HungChecksDoNotStarveHealthyProfile(t *testing.T) {
 	}
 	b.WriteString("  k8s-ok:\n    type: kubernetes\n    context: ok\n")
 	writeProjectSettings(t, projectDir, b.String())
-	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
-	srv.resolveAuxiliaryRuntime = blockingResolver(block, release, map[string]runtime.Runtime{"zz-healthy": fakeKubernetesRuntime("ok", "")}, nil)
+	srv.resolveAuxiliaryRuntime = blockingResolver(block, releaseAtCleanup(t), map[string]runtime.Runtime{"zz-healthy": fakeKubernetesRuntime("ok", "")}, nil)
 
-	start := time.Now()
-	srv.discoverAuxiliaryRuntimesForProjects([]string{projectDir})
-	assert.Less(t, time.Since(start), time.Second, "hung checks held their worker slots")
+	runPassWithin(t, srv, []string{projectDir}, 2*time.Second)
 	assert.Equal(t, []string{"kubernetes|context=ok|namespace="}, auxKeys(srv), "the healthy profile after the hung ones was not registered")
 	assert.Len(t, srv.profileRuntimeHealthChecks(), auxProfileHealthMax, "the profile checks are not capped")
 }
 
 // TestAuxDiscovery_UnreachableProfileWarningNamesProfile: the self-health
-// report names the profile with a fixed value and carries nothing from the
-// resolution error, and it does not degrade the broker's status.
+// report names a timed-out profile with a fixed value and carries nothing
+// from the resolution error, and it does not degrade the broker's status.
 func TestAuxDiscovery_UnreachableProfileWarningNamesProfile(t *testing.T) {
 	srv := newDiscoveryTestServer(t, "docker")
+	srv.auxCheckTimeout = 50 * time.Millisecond
 	projectDir := t.TempDir()
 	writeProjectSettings(t, projectDir, twoK8sProfiles)
-	srv.resolveAuxiliaryRuntime = blockingResolver(nil, nil, map[string]runtime.Runtime{"good": fakeKubernetesRuntime("good-cluster", "")}, nil)
+	srv.resolveAuxiliaryRuntime = blockingResolver(map[string]bool{"stale": true}, releaseAtCleanup(t), map[string]runtime.Runtime{"good": fakeKubernetesRuntime("good-cluster", "")}, nil)
 
-	srv.discoverAuxiliaryRuntimesForProjects([]string{projectDir})
+	runPassWithin(t, srv, []string{projectDir}, 2*time.Second)
 
 	health := srv.GetHealthInfo(context.Background())
 	assert.Equal(t, api.BrokerHealthUnavailable, health.Checks["profile_runtime.stale"])
@@ -204,6 +215,103 @@ func TestAuxDiscovery_UnreachableProfileWarningNamesProfile(t *testing.T) {
 		assert.NotContains(t, name+value, "exec plugin")
 	}
 	assert.Equal(t, "profile_runtime.a_b_c", profileRuntimeCheckName("a b/c"))
+}
+
+// TestAuxDiscovery_FastNonActiveFailureNotReported: a non-active profile
+// whose runtime fails fast (for example the built-in remote profile on a
+// broker without cluster access, ptone/scion#3605) gets no self-health
+// check, so doctor shows nothing for it; a fast failure of the project's
+// active profile is reported.
+func TestAuxDiscovery_FastNonActiveFailureNotReported(t *testing.T) {
+	srv := newDiscoveryTestServer(t, "docker")
+	projectDir := t.TempDir()
+	// Only the embedded defaults' profiles, which include a built-in
+	// Kubernetes profile ("remote") that fails fast here.
+	writeProjectSettings(t, projectDir, "schema_version: \"1\"\n")
+	srv.resolveAuxiliaryRuntime = blockingResolver(nil, nil, nil, nil)
+	srv.discoverAuxiliaryRuntimesForProjects([]string{projectDir})
+	assert.Empty(t, srv.profileRuntimeHealthChecks(), "a fast failure of a non-active profile was reported")
+	assert.Empty(t, srv.GetHealthInfo(context.Background()).Checks["profile_runtime.remote"])
+
+	activeDir := t.TempDir()
+	writeProjectSettings(t, activeDir, `schema_version: "1"
+active_profile: stale
+profiles:
+  stale:
+    runtime: k8s-stale
+runtimes:
+  k8s-stale:
+    type: kubernetes
+    context: deleted-cluster
+`)
+	srv.discoverAuxiliaryRuntimesForProjects([]string{activeDir})
+	assert.Equal(t, api.BrokerHealthUnavailable, srv.profileRuntimeHealthChecks()["profile_runtime.stale"], "a failure of the active profile was not reported")
+	assert.NotContains(t, srv.profileRuntimeHealthChecks(), "profile_runtime.remote")
+}
+
+// lockedWriter serialises writes to w.
+type lockedWriter struct {
+	w  *bytes.Buffer
+	mu *sync.Mutex
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
+}
+
+// TestAuxDiscovery_LogLevels pins the log levels (ruling (5) as amended): a
+// timed-out check logs at Warn naming the profile, a failure of the active
+// profile stays Warn, and a fast failure of a non-active profile stays Info.
+func TestAuxDiscovery_LogLevels(t *testing.T) {
+	var buf bytes.Buffer
+	var mu sync.Mutex
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&lockedWriter{w: &buf, mu: &mu}, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	srv := newDiscoveryTestServer(t, "docker")
+	srv.auxCheckTimeout = 50 * time.Millisecond
+	projectDir := t.TempDir()
+	writeProjectSettings(t, projectDir, `schema_version: "1"
+active_profile: act
+profiles:
+  act:
+    runtime: k8s-act
+  hung:
+    runtime: k8s-hung
+  fast:
+    runtime: k8s-fast
+runtimes:
+  k8s-act:
+    type: kubernetes
+    context: act
+  k8s-hung:
+    type: kubernetes
+    context: hung
+  k8s-fast:
+    type: kubernetes
+    context: fast
+`)
+	srv.resolveAuxiliaryRuntime = blockingResolver(map[string]bool{"hung": true}, releaseAtCleanup(t), nil, nil)
+	runPassWithin(t, srv, []string{projectDir}, 2*time.Second)
+
+	mu.Lock()
+	out := buf.String()
+	mu.Unlock()
+	line := func(profile string) string {
+		for _, l := range strings.Split(out, "\n") {
+			if strings.Contains(l, "profile="+profile+" ") || strings.HasSuffix(l, "profile="+profile) {
+				return l
+			}
+		}
+		return ""
+	}
+	assert.Contains(t, line("hung"), "level=WARN", "a timed-out check is not a warning")
+	assert.Contains(t, line("hung"), "did not finish in time")
+	assert.Contains(t, line("act"), "level=WARN", "an active-profile failure is not a warning")
+	assert.Contains(t, line("fast"), "level=INFO", "a fast non-active failure is not Info")
 }
 
 // TestAuxDiscovery_FailedProfileCheckedOncePerPass: one stale profile
@@ -240,12 +348,63 @@ runtimes:
 	assert.Equal(t, int32(1), calls.Load(), "the shared stale profile was checked more than once")
 }
 
+// TestAuxDiscovery_SameNameOtherSettingsKeptApart: two projects define a
+// profile of the same name with different settings. The one that timed out
+// stays reported although the other resolves, also after a command
+// resolves the other; and two that both time out get distinct check names.
+func TestAuxDiscovery_SameNameOtherSettingsKeptApart(t *testing.T) {
+	srv := newDiscoveryTestServer(t, "docker")
+	srv.auxCheckTimeout = 50 * time.Millisecond
+	mk := func(context string) string {
+		d := t.TempDir()
+		writeProjectSettings(t, d, fmt.Sprintf(`schema_version: "1"
+profiles:
+  k8s:
+    runtime: k
+runtimes:
+  k:
+    type: kubernetes
+    context: %s
+`, context))
+		return d
+	}
+	deadDir, okDir := mk("dead"), mk("ok")
+	release := releaseAtCleanup(t)
+	okRT := fakeKubernetesRuntime("ok", "")
+	srv.resolveAuxiliaryRuntime = func(p, agentName, profile string) (runtime.Runtime, config.RuntimeBuildRecord) {
+		if profile != "k8s" {
+			return &runtime.ErrorRuntime{Err: errors.New("no")}, config.RuntimeBuildRecord{}
+		}
+		if p == okDir {
+			return okRT, config.RuntimeBuildRecord{}
+		}
+		<-release
+		return &runtime.ErrorRuntime{Err: errors.New("cluster unreachable")}, config.RuntimeBuildRecord{}
+	}
+
+	runPassWithin(t, srv, []string{deadDir, okDir}, 2*time.Second)
+	assert.Equal(t, api.BrokerHealthUnavailable, srv.profileRuntimeHealthChecks()["profile_runtime.k8s"], "the other project's resolved profile hid the failure")
+
+	res := srv.resolveManagerForOpts(api.StartOptions{Name: "a1", ProjectPath: okDir, Profile: "k8s"})
+	require.Same(t, runtime.Runtime(okRT), res.Runtime)
+	assert.Equal(t, api.BrokerHealthUnavailable, srv.profileRuntimeHealthChecks()["profile_runtime.k8s"], "a command resolving the other settings cleared the failure")
+
+	// Both time out: two checks, the second with a suffix.
+	srv2 := newDiscoveryTestServer(t, "docker")
+	srv2.auxCheckTimeout = 50 * time.Millisecond
+	srv2.resolveAuxiliaryRuntime = blockingResolver(map[string]bool{"k8s": true}, release, nil, nil)
+	runPassWithin(t, srv2, []string{deadDir, mk("dead-2")}, 2*time.Second)
+	checks := srv2.profileRuntimeHealthChecks()
+	assert.Equal(t, api.BrokerHealthUnavailable, checks["profile_runtime.k8s"])
+	assert.Equal(t, api.BrokerHealthUnavailable, checks["profile_runtime.k8s-2"])
+}
+
 // TestAuxDiscovery_LateSuccessRegistersRuntimeAndClearsCheck: a check that
 // finishes after its timeout and succeeds registers its runtime (under the
 // registry lock) and clears the profile's unavailable check.
 func TestAuxDiscovery_LateSuccessRegistersRuntimeAndClearsCheck(t *testing.T) {
-	shortAuxCheckTimeout(t, 50*time.Millisecond)
 	srv := newDiscoveryTestServer(t, "docker")
+	srv.auxCheckTimeout = 50 * time.Millisecond
 	projectDir := t.TempDir()
 	writeProjectSettings(t, projectDir, twoK8sProfiles)
 	release := make(chan struct{})
@@ -258,7 +417,7 @@ func TestAuxDiscovery_LateSuccessRegistersRuntimeAndClearsCheck(t *testing.T) {
 		return &runtime.ErrorRuntime{Err: errors.New("no")}, config.RuntimeBuildRecord{}
 	}
 
-	srv.discoverAuxiliaryRuntimesForProjects([]string{projectDir})
+	runPassWithin(t, srv, []string{projectDir}, 2*time.Second)
 	require.Contains(t, srv.profileRuntimeHealthChecks(), "profile_runtime.stale")
 	close(release)
 	require.Eventually(t, func() bool {
@@ -268,20 +427,21 @@ func TestAuxDiscovery_LateSuccessRegistersRuntimeAndClearsCheck(t *testing.T) {
 	assert.Equal(t, []string{"kubernetes|context=deleted-cluster|namespace="}, auxKeys(srv))
 }
 
-// TestAuxDiscovery_LaterPassClearsCheck: a later pass that finds the
-// runtime available clears the profile's unavailable check, and so does a
-// command that resolves the profile.
+// TestAuxDiscovery_LaterPassClearsCheck: a later pass (the next start) that
+// finds the runtime available clears the profile's unavailable check, and
+// so does a command that resolves the profile.
 func TestAuxDiscovery_LaterPassClearsCheck(t *testing.T) {
 	srv := newDiscoveryTestServer(t, "docker")
+	srv.auxCheckTimeout = 50 * time.Millisecond
 	projectDir := t.TempDir()
 	writeProjectSettings(t, projectDir, twoK8sProfiles)
-	srv.resolveAuxiliaryRuntime = blockingResolver(nil, nil, nil, nil)
-	srv.discoverAuxiliaryRuntimesForProjects([]string{projectDir})
+	srv.resolveAuxiliaryRuntime = blockingResolver(map[string]bool{"stale": true, "good": true}, releaseAtCleanup(t), nil, nil)
+	runPassWithin(t, srv, []string{projectDir}, 2*time.Second)
 	require.Contains(t, srv.profileRuntimeHealthChecks(), "profile_runtime.stale")
 	require.Contains(t, srv.profileRuntimeHealthChecks(), "profile_runtime.good")
 
 	srv.resolveAuxiliaryRuntime = blockingResolver(nil, nil, map[string]runtime.Runtime{"stale": fakeKubernetesRuntime("deleted-cluster", "")}, nil)
-	srv.discoverAuxiliaryRuntimesForProjects([]string{projectDir})
+	runPassWithin(t, srv, []string{projectDir}, 2*time.Second)
 	assert.NotContains(t, srv.profileRuntimeHealthChecks(), "profile_runtime.stale", "a later pass did not clear the check")
 
 	srv.resolveAuxiliaryRuntime = blockingResolver(nil, nil, map[string]runtime.Runtime{"good": fakeKubernetesRuntime("good-cluster", "")}, nil)
@@ -294,20 +454,51 @@ func TestAuxDiscovery_LaterPassClearsCheck(t *testing.T) {
 // background pass has ended, also when no profile resolves.
 func TestAuxDiscovery_RecoverLaunchesAfterPass(t *testing.T) {
 	srv := newDiscoveryTestServer(t, "docker")
+	srv.auxCheckTimeout = time.Hour
 	writeProjectSettings(t, filepath.Join(os.Getenv("HOME"), ".scion", "projects", "p1", ".scion"), twoK8sProfiles)
 	release := make(chan struct{})
 	srv.resolveAuxiliaryRuntime = blockingResolver(map[string]bool{"stale": true, "good": true}, release, nil, nil)
 	var recovered atomic.Bool
-	prev := afterAuxiliaryRuntimeDiscovery
-	afterAuxiliaryRuntimeDiscovery = func(*Server) { recovered.Store(true) }
-	t.Cleanup(func() { afterAuxiliaryRuntimeDiscovery = prev })
+	srv.afterAuxDiscovery = func() { recovered.Store(true) }
 
 	srv.startAuxiliaryRuntimeDiscovery(context.Background())
-	time.Sleep(50 * time.Millisecond)
+	assert.False(t, srv.waitAuxiliaryRuntimeDiscovery(50*time.Millisecond))
 	assert.False(t, recovered.Load(), "launch recovery ran before the pass ended")
 	close(release)
 	require.True(t, srv.waitAuxiliaryRuntimeDiscovery(5*time.Second))
 	assert.True(t, recovered.Load(), "launch recovery did not run after the pass")
+}
+
+// TestAuxDiscovery_ShutdownStopsPass: Shutdown's stop during a blocked
+// pass ends it; after the checks are released nothing is registered and
+// launch recovery does not run.
+func TestAuxDiscovery_ShutdownStopsPass(t *testing.T) {
+	srv := newDiscoveryTestServer(t, "docker")
+	srv.auxCheckTimeout = time.Hour
+	writeProjectSettings(t, filepath.Join(os.Getenv("HOME"), ".scion", "projects", "p1", ".scion"), twoK8sProfiles)
+	release := make(chan struct{})
+	good := fakeKubernetesRuntime("good-cluster", "")
+	srv.resolveAuxiliaryRuntime = func(_, agentName, profile string) (runtime.Runtime, config.RuntimeBuildRecord) {
+		if profile == "good" || profile == "stale" {
+			<-release
+			return good, config.RuntimeBuildRecord{}
+		}
+		return &runtime.ErrorRuntime{Err: errors.New("no")}, config.RuntimeBuildRecord{}
+	}
+	var recovered atomic.Bool
+	srv.afterAuxDiscovery = func() { recovered.Store(true) }
+
+	srv.startAuxiliaryRuntimeDiscovery(context.Background())
+	require.False(t, srv.waitAuxiliaryRuntimeDiscovery(50*time.Millisecond))
+	start := time.Now()
+	srv.stopAuxiliaryRuntimeDiscovery()
+	assert.Less(t, time.Since(start), auxDiscoveryStopWait, "stopping waited for the blocked checks")
+	assert.True(t, srv.waitAuxiliaryRuntimeDiscovery(0), "the pass did not end on stop")
+
+	close(release)
+	time.Sleep(100 * time.Millisecond)
+	assert.Empty(t, auxKeys(srv), "a runtime was registered after stop")
+	assert.False(t, recovered.Load(), "launch recovery ran after stop")
 }
 
 // TestAuxDiscovery_CommandDuringBlockedPassResolvesOwnRuntime: a start
@@ -316,12 +507,11 @@ func TestAuxDiscovery_RecoverLaunchesAfterPass(t *testing.T) {
 // runtime, never the default runtime.
 func TestAuxDiscovery_CommandDuringBlockedPassResolvesOwnRuntime(t *testing.T) {
 	srv := newDiscoveryTestServer(t, "docker")
+	srv.auxCheckTimeout = time.Hour
 	projectDir := t.TempDir()
 	writeProjectSettings(t, projectDir, twoK8sProfiles)
-	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
 	good := fakeKubernetesRuntime("good-cluster", "")
-	srv.resolveAuxiliaryRuntime = blockingResolver(map[string]bool{"stale": true, "good": true}, release, map[string]runtime.Runtime{"good": good}, nil)
+	srv.resolveAuxiliaryRuntime = blockingResolver(map[string]bool{"stale": true, "good": true}, releaseAtCleanup(t), map[string]runtime.Runtime{"good": good}, nil)
 
 	passDone := make(chan struct{})
 	go func() {
@@ -351,7 +541,7 @@ func TestAuxDiscovery_ActiveProfileFailureUnchanged(t *testing.T) {
 	setupTestScionEnv(t)
 	cfg := DefaultServerConfig()
 	srv := New(cfg, &filteringMockManager{}, &runtime.ErrorRuntime{Err: errors.New("default runtime failed")}, config.RuntimeBuildRecord{})
-	srv.setProfileRuntimeUnavailable("stale", true)
+	srv.setProfileRuntimeUnavailable("stale-key", "stale", true)
 
 	health := srv.GetHealthInfo(context.Background())
 	assert.Equal(t, "unavailable", health.Checks["runtime"])

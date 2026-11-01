@@ -7998,16 +7998,17 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 		return fromProfile(runtimeResolution{Manager: agent.NewManager(resolved), Runtime: resolved, RuntimeType: resolved.Name(), How: resolutionErrorRuntime}), nil
 	}
 
+	// The profile's runtime resolved: clear the unavailable self-health
+	// state the discovery pass recorded for these profile settings (the same
+	// key, so a same-named profile with other settings stays reported).
+	s.setProfileRuntimeUnavailable(auxProfileKey(selProfile, runtimeType, rtConfig, projectDir), selProfile, false)
+
 	// A PerProfileInstancesRuntime default never short-circuits here either,
 	// for the same reason the pre-check above skips it: auxiliaryRuntimeIdentity
 	// has no generic per-profile-config field to compare (only Kubernetes
 	// carries context/namespace), so two distinct same-type instances of such
 	// a runtime would otherwise collapse to one identity and incorrectly
 	// share the default manager.
-	// The profile's runtime resolved: clear any unavailable self-health
-	// check the discovery pass recorded for it.
-	s.setProfileRuntimeUnavailable(selProfile, false)
-
 	if !scionrt.HasPerProfileInstances(defRT) && auxiliaryRuntimeIdentity(resolved) == auxiliaryRuntimeIdentity(defRT) {
 		return fromProfile(defaultResolution(defMgr, defRT, defRec, selHow)), nil
 	}

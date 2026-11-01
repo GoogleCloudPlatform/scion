@@ -488,18 +488,25 @@ type Server struct {
 	// auxDiscoveryDone is closed when the background auxiliary runtime
 	// discovery pass (startAuxiliaryRuntimeDiscovery) has finished, nil
 	// when none was started. Guarded by auxDiscoveryMu.
-	auxDiscoveryMu   sync.Mutex
-	auxDiscoveryDone chan struct{}
+	auxDiscoveryMu     sync.Mutex
+	auxDiscoveryDone   chan struct{}
+	auxDiscoveryCancel context.CancelFunc
+
+	// auxCheckTimeout, when positive, overrides auxProfileCheckTimeout for
+	// this server; afterAuxDiscovery, when set, replaces recoverLaunches at
+	// the end of the pass. Both for tests.
+	auxCheckTimeout   time.Duration
+	afterAuxDiscovery func()
 
 	// onHubConnectionsStarted, when set (tests only), is called right after
 	// startServices has started every hub connection.
 	onHubConnectionsStarted func()
 
-	// profileRuntimeUnavailable holds the profiles whose runtime was found
-	// not available, reported as profile_runtime.<name> self-health checks
+	// profileRuntimeUnavailable holds the profile settings whose runtime was
+	// found not available, reported as profile_runtime.<name> self-health checks
 	// (profileRuntimeHealthChecks). Guarded by profileRuntimeHealthMu.
 	profileRuntimeHealthMu    sync.Mutex
-	profileRuntimeUnavailable map[string]bool
+	profileRuntimeUnavailable map[string]string // auxProfileKey -> profile name
 
 	// resolveAuxiliaryRuntime resolves the runtime.Runtime for a project path
 	// and profile name when discovering or creating auxiliary runtimes, and
@@ -1771,6 +1778,10 @@ const ghResolutionCacheCloseTimeout = 10 * time.Second
 
 // Shutdown gracefully shuts down the server.
 func (s *Server) Shutdown(ctx context.Context) error {
+	// Stop the background auxiliary runtime discovery pass, bounded: it
+	// registers nothing more and skips launch recovery (ptone/scion#7010).
+	s.stopAuxiliaryRuntimeDiscovery()
+
 	// Stop the heartbeat service account report's background discovery.
 	s.saDiscovery().stop()
 
@@ -1953,7 +1964,7 @@ func (s *Server) sortedAuxiliaryRuntimes() []namedAuxiliaryRuntime {
 // sweep (controlPathSweeper) reaches their agents only from then on. Scanning
 // the project dirs this broker has local agent state for is a follow-up (see
 // the Limitations in the Volume Source Restrictions reference).
-func (s *Server) discoverAuxiliaryRuntimes() {
+func (s *Server) discoverAuxiliaryRuntimesCtx(ctx context.Context) {
 	// Collect project paths to scan
 	var projectPaths []string
 
@@ -1984,7 +1995,7 @@ func (s *Server) discoverAuxiliaryRuntimes() {
 		projectPaths = append(projectPaths, pd)
 	}
 
-	s.discoverAuxiliaryRuntimesForProjects(projectPaths)
+	s.discoverAuxiliaryRuntimesForProjectsCtx(ctx, projectPaths)
 }
 
 // logUnresolvedAuxiliaryProfile reports a settings profile whose runtime
@@ -2025,6 +2036,13 @@ func logUnresolvedAuxiliaryProfile(profileName, activeProfile string, resolved s
 // de-duplication and registration directly, without depending on the
 // broker's on-disk project discovery.
 func (s *Server) discoverAuxiliaryRuntimesForProjects(projectPaths []string) {
+	s.discoverAuxiliaryRuntimesForProjectsCtx(context.Background(), projectPaths)
+}
+
+// discoverAuxiliaryRuntimesForProjectsCtx is discoverAuxiliaryRuntimesForProjects
+// on ctx: once ctx is done (the server is stopping) it stops waiting for
+// checks and registers nothing more.
+func (s *Server) discoverAuxiliaryRuntimesForProjectsCtx(ctx context.Context, projectPaths []string) {
 	defRT := s.currentRuntime()
 	// Compared against every resolved profile below so that a profile
 	// pointing at the broker's own runtime instance — not merely the same
@@ -2035,25 +2053,34 @@ func (s *Server) discoverAuxiliaryRuntimesForProjects(projectPaths []string) {
 	defaultIdentity := auxiliaryRuntimeIdentity(defRT)
 
 	cands := collectAuxProfileCandidates(projectPaths)
-	results := s.checkAuxProfileCandidates(cands, defaultIdentity)
+	results := s.checkAuxProfileCandidates(ctx, cands, defaultIdentity)
+	if ctx.Err() != nil {
+		return
+	}
 
 	// Results are applied in candidate order (projects in the given order,
 	// profile names sorted), as when the checks ran one by one, so the
-	// sorted-first profile still wins a collapsed identity.
+	// sorted-first profile still wins a collapsed identity among the checks
+	// that finished in time; a timed-out check is skipped here and a later
+	// candidate of the same identity registers instead.
 	discoveredIdentities := make(map[string]bool)
 	for i, c := range cands {
 		r := results[i]
-		if r.timedOut {
+		if r.timedOut || r.rt == nil {
 			// Reported when the check timed out (checkAuxProfileCandidates),
-			// before any late result could clear it.
+			// before any late result could clear it; nil: stopped.
 			continue
 		}
 		if r.rt.Name() == "error" {
-			s.setProfileRuntimeUnavailable(c.profile, true)
+			// Only the project's active profile is reported on a fast
+			// failure; a non-active one (for example a built-in profile on a
+			// broker without cluster access) keeps the Info line only
+			// (ptone/scion#3605).
+			s.setProfileRuntimeUnavailable(c.key, c.profile, c.profile == c.activeProfile)
 			logUnresolvedAuxiliaryProfile(c.profile, c.activeProfile, r.rt)
 			continue
 		}
-		s.setProfileRuntimeUnavailable(c.profile, false)
+		s.setProfileRuntimeUnavailable(c.key, c.profile, false)
 
 		identity := auxiliaryRuntimeIdentity(r.rt)
 		if identity == defaultIdentity || discoveredIdentities[identity] {
@@ -2076,14 +2103,18 @@ type auxProfileCandidate struct {
 	projectPath   string
 	profile       string
 	activeProfile string
+	key           string // auxProfileKey
 }
 
 // collectAuxProfileCandidates lists the profiles of the given project
 // settings directories whose runtime entry exists, projects in the given
 // order and profile names sorted. A profile whose resolved settings
-// (name, runtime type and runtime config) equal an earlier candidate's is
-// checked once: one stale profile shared by several projects costs one
-// check per pass, not one per project. It counts as the active profile when
+// (name, runtime type and runtime config: auxProfileKey) equal an earlier
+// candidate's is checked once, with the FIRST project's path: one stale
+// profile shared by several projects costs one check per pass, not one per
+// project. This assumes equal runtime settings resolve to the same runtime
+// in every project, which holds while no runtime config value is resolved
+// relative to the project. The candidate counts as the active profile when
 // it is active in any of those projects.
 func collectAuxProfileCandidates(projectPaths []string) []auxProfileCandidate {
 	var cands []auxProfileCandidate
@@ -2111,12 +2142,7 @@ func collectAuxProfileCandidates(projectPaths []string) []auxProfileCandidate {
 			if err != nil {
 				continue
 			}
-			key := profileName + "\x00" + runtimeType
-			if b, err := json.Marshal(rtConfig); err == nil {
-				key += "\x00" + string(b)
-			} else {
-				key += "\x00" + gp
-			}
+			key := auxProfileKey(profileName, runtimeType, rtConfig, gp)
 			if i, ok := seen[key]; ok {
 				if profileName == vs.ActiveProfile {
 					cands[i].activeProfile = profileName
@@ -2124,7 +2150,7 @@ func collectAuxProfileCandidates(projectPaths []string) []auxProfileCandidate {
 				continue
 			}
 			seen[key] = len(cands)
-			cands = append(cands, auxProfileCandidate{projectPath: gp, profile: profileName, activeProfile: vs.ActiveProfile})
+			cands = append(cands, auxProfileCandidate{projectPath: gp, profile: profileName, activeProfile: vs.ActiveProfile, key: key})
 		}
 	}
 	return cands
@@ -2138,22 +2164,29 @@ type auxCheckResult struct {
 }
 
 // checkAuxProfileCandidates resolves every candidate's runtime,
-// auxDiscoveryConcurrency at a time, each bounded by
-// auxProfileCheckTimeout, and returns the results in candidate order. A
-// check that times out releases its worker slot at once and is reported
-// timedOut; its resolution keeps running and, if it later succeeds, is
-// registered by applyLateAuxResult.
-func (s *Server) checkAuxProfileCandidates(cands []auxProfileCandidate, defaultIdentity string) []auxCheckResult {
+// auxDiscoveryConcurrency at a time, each bounded by the check timeout, and
+// returns the results in candidate order. A check that times out releases
+// its worker slot at once, is reported unavailable (and logged at Warn),
+// and is returned timedOut; its resolution keeps running and, if it later
+// succeeds, is registered by applyLateAuxResult. Once ctx is done no more
+// checks start, and the ones in flight are abandoned unreported (nil rt).
+func (s *Server) checkAuxProfileCandidates(ctx context.Context, cands []auxProfileCandidate, defaultIdentity string) []auxCheckResult {
 	resolver := s.resolveAuxiliaryRuntime
 	if resolver == nil {
 		resolver = agent.ResolveRuntimeWithRecord
 	}
-	timeout := auxProfileCheckTimeout
+	timeout := s.auxProfileTimeout()
 	results := make([]auxCheckResult, len(cands))
 	sem := make(chan struct{}, auxDiscoveryConcurrency)
 	var wg sync.WaitGroup
 	for i, c := range cands {
-		sem <- struct{}{}
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+		}
+		if ctx.Err() != nil {
+			break
+		}
 		wg.Add(1)
 		go func(i int, c auxProfileCandidate) {
 			defer wg.Done()
@@ -2172,9 +2205,11 @@ func (s *Server) checkAuxProfileCandidates(cands []auxProfileCandidate, defaultI
 				results[i] = auxCheckResult{timedOut: true}
 				// Report first, then hand the result over: a late success
 				// clears the report, and must not be overwritten by it.
-				s.setProfileRuntimeUnavailable(c.profile, true)
-				logUnresolvedAuxiliaryProfile(c.profile, c.activeProfile, auxCheckTimeoutRuntime(timeout))
-				go func() { s.applyLateAuxResult(c, <-done, defaultIdentity) }()
+				s.setProfileRuntimeUnavailable(c.key, c.profile, true)
+				logAuxProfileCheckTimedOut(c.profile, timeout)
+				go func() { s.applyLateAuxResult(ctx, c, <-done, defaultIdentity) }()
+			case <-ctx.Done():
+				go func() { <-done }()
 			}
 		}(i, c)
 	}
@@ -2183,16 +2218,16 @@ func (s *Server) checkAuxProfileCandidates(cands []auxProfileCandidate, defaultI
 }
 
 // applyLateAuxResult handles a profile runtime check that finished after
-// the pass stopped waiting for it. A runtime that resolved is registered
-// under auxiliaryRuntimesMu, the same lock and map every other
-// registration uses, unless its identity is the default's or is already
-// registered, and the profile's unavailable check is cleared. A failed one
-// leaves the profile reported unavailable.
-func (s *Server) applyLateAuxResult(c auxProfileCandidate, r auxCheckResult, defaultIdentity string) {
-	if r.rt == nil || r.rt.Name() == "error" {
+// the pass stopped waiting for it. Unless ctx is done (the server is
+// stopping), a runtime that resolved is registered under
+// auxiliaryRuntimesMu, the same lock and map every other registration uses,
+// unless its identity is the default's or is already registered, and the
+// profile's unavailable state is cleared. A failed one stays reported.
+func (s *Server) applyLateAuxResult(ctx context.Context, c auxProfileCandidate, r auxCheckResult, defaultIdentity string) {
+	if ctx.Err() != nil || r.rt == nil || r.rt.Name() == "error" {
 		return
 	}
-	s.setProfileRuntimeUnavailable(c.profile, false)
+	s.setProfileRuntimeUnavailable(c.key, c.profile, false)
 	identity := auxiliaryRuntimeIdentity(r.rt)
 	if identity == defaultIdentity {
 		return
@@ -2207,12 +2242,6 @@ func (s *Server) applyLateAuxResult(c auxProfileCandidate, r auxCheckResult, def
 		slog.Info("Discovered auxiliary runtime from project settings after its check timed out",
 			"runtime", r.rt.Name(), "identity", identity, "profile", c.profile)
 	}
-}
-
-// auxCheckTimeoutRuntime is the error runtime logged for a profile whose
-// runtime check did not finish within timeout.
-func auxCheckTimeoutRuntime(timeout time.Duration) scionrt.Runtime {
-	return &scionrt.ErrorRuntime{Err: fmt.Errorf("the runtime check did not finish within %s", timeout)}
 }
 
 // auxiliaryRuntimeIdentity returns a key that identifies a specific resolved
