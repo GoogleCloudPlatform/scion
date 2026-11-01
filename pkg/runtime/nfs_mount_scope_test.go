@@ -29,6 +29,7 @@ package runtime
 // directory or anything under it.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path"
@@ -36,6 +37,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	runpb "cloud.google.com/go/run/apiv2/runpb"
 	corev1 "k8s.io/api/core/v1"
@@ -578,7 +580,7 @@ func TestCloudRunInstance_NFSMountScope(t *testing.T) {
 	paths.server = scopeServer
 	r := &CloudRunRuntime{}
 	home := "/home/" + r.ExecUser()
-	sharedPlain := []shareMount{
+	want := []shareMount{
 		{rel: scopeRel("workspace"), target: "/workspace"},
 		{rel: scopeRel("agents", scopeAgent, "home-"+scopeAgentID), target: home},
 		{rel: scopeRel("agents", scopeAgent, "secrets-"+scopeAgentID), target: home + "/.scion/secrets", readOnly: true},
@@ -590,27 +592,25 @@ func TestCloudRunInstance_NFSMountScope(t *testing.T) {
 			Labels: map[string]string{"agent_id": scopeAgentID},
 		}
 	}
+	// Every mode gets the same set today. For clone-per-agent that is the
+	// project workspace; #6926 moves it to a per-agent workspace, which
+	// will change its expected set on purpose.
 	for _, mode := range []string{"shared-plain", "clone-per-agent", "worktree-per-agent"} {
 		t.Run(mode, func(t *testing.T) {
-			got := cloudRunShareMounts(t, r.buildCloudRunInstance(cfgFor(mode), 1000, 1000, paths))
-			if mode == "shared-plain" {
-				assertMountScope(t, got, sharedPlain)
-				return
-			}
-			// Clone-per-agent and worktree-per-agent get the project
-			// workspace today; clone-per-agent is moving to a per-agent
-			// workspace (#6926), so only the refused paths are asserted
-			// for them until then.
-			for _, m := range got {
-				if why := mountScopeViolation(m.rel); why != "" {
-					t.Errorf("agent mount %s is %s", m, why)
-				}
-			}
+			assertMountScope(t, cloudRunShareMounts(t, r.buildCloudRunInstance(cfgFor(mode), 1000, 1000, paths)), want)
 		})
 	}
 
 	t.Run("empty-per-agent refused by Run", func(t *testing.T) {
-		_, err := r.Run(t.Context(), cfgFor("empty-per-agent"))
+		// Run's empty-per-agent refusal is its first check. The config also
+		// fails the next pre-network check (no nfs backend), so if the
+		// refusal regressed, Run returns that error rather than reaching
+		// the Cloud Run API; the timeout bounds it either way.
+		cfg := cfgFor("empty-per-agent")
+		cfg.WorkspaceBackendName = ""
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+		_, err := r.Run(ctx, cfg)
 		if !errors.Is(err, errEmptyPerAgentCloudRun) {
 			t.Errorf("Run(empty-per-agent) = %v, want %v: the agent would get the project workspace", err, errEmptyPerAgentCloudRun)
 		}
