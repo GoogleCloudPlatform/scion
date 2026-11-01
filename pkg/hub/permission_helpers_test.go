@@ -169,7 +169,9 @@ var nonRouteCallSites = map[string][]permissionCallSite{
 		{"port_forward_handlers.go", "Server.authorizePortRegistration"},
 		{"conduit_agent_check.go", "conduitAgentScopeCheck"},
 	},
-	"agent.identity_token": {{"handlers_oidc.go", "Server.handleAgentIdentityToken"}},
+	// The OIDC handler denies on OIDCCallerAgent.CanRequestIdentityToken,
+	// which the hub adapter evaluates from the agent's identity-token scope.
+	"agent.identity_token": {{"deps_oidckeys.go", "oidcDeps.CallerAgent"}},
 	// Both GCP token mint endpoints decide it through authorizeAgentGCPMint;
 	// the GCS link proxy decides it for the stored sending agent.
 	"gcp_service_account.use": {

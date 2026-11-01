@@ -62,7 +62,7 @@ func newPeerTokFixture(t *testing.T, mutate func(*config.TrustedIssuerConfig)) *
 	t.Helper()
 	peer, _, agentClaims := testOIDCIdentityServer(t)
 	federationTokenConfigure(t, peer)
-	jwks := httptest.NewServer(http.HandlerFunc(peer.handleJWKS))
+	jwks := httptest.NewServer(http.HandlerFunc(peer.oidcArea().HandleJWKS))
 	t.Cleanup(jwks.Close)
 
 	userKey, userJWKS, userKid := setupFederationTestServer(t)

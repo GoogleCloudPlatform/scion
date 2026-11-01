@@ -27,10 +27,8 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -56,6 +54,17 @@ var encSigningKeys = []string{
 	SecretKeyAgentSigningKey, SecretKeyUserSigningKey, SecretKeyDownloadSigningKey,
 	SecretKeyArtifactViewKey, SecretKeyAttachmentDeliveryKey, SecretKeyListCursorKey,
 	SecretKeyPortViewKey,
+}
+
+// newOIDCHubTestStore creates an in-memory SQLite store for the OIDC key
+// manager tests that stay in package hub.
+func newOIDCHubTestStore(t *testing.T) store.Store {
+	t.Helper()
+	s, err := newTestStore(t, ":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	return s
 }
 
 // v2Cipher is a managed cipher writing enc:v2: under active, holding ids.
@@ -546,44 +555,10 @@ func TestServerValueCipher_SharedObject(t *testing.T) {
 	assert.True(t, legacy.Enabled() && !legacy.Managed())
 }
 
-// OIDC acceptance: the RSA key and the keyset round-trip under an
-// independent v2 key across a restart, with identical KIDs and JWKS.
-func TestOIDCKeyManager_IndependentV2RestartKeepsKIDAndJWKS(t *testing.T) {
-	st := createOIDCTestStore(t)
-	ctx := context.Background()
-	c := v2Cipher(t, "k2", "k2")
-	newMgr := func() *OIDCKeyManager {
-		m, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{Store: st, HubID: encTestHubID,
-			IssuerURL: "https://example.com", ValueCipher: c})
-		require.NoError(t, err)
-		return m
-	}
-	m1 := newMgr()
-	require.NoError(t, m1.RotateKey(ctx))
-	kids := func(m *OIDCKeyManager) []string {
-		var out []string
-		for _, k := range m.JWKS().Keys {
-			out = append(out, k.KeyID)
-		}
-		sort.Strings(out)
-		return out
-	}
-	wantKIDs, wantActive := kids(m1), m1.activeKey.KeyID
-	require.Len(t, wantKIDs, 2)
-	for _, key := range []string{SecretKeyOIDCSigningKey, SecretKeyOIDCKeyset} {
-		v, err := st.GetSecretValue(ctx, key, store.ScopeHub, encTestHubID)
-		require.NoError(t, err)
-		assert.True(t, strings.HasPrefix(v, "enc:v2:k2:"), "%s is not enc:v2:k2", key)
-	}
-	m2 := newMgr()
-	assert.Equal(t, wantKIDs, kids(m2))
-	assert.Equal(t, wantActive, m2.activeKey.KeyID)
-}
-
 // D1: an unreadable stored keyset is not replaced at startup (it used to
 // be saved over after a failed restore).
 func TestOIDCRestoreFailureDoesNotSaveKeyset(t *testing.T) {
-	st := createOIDCTestStore(t)
+	st := newOIDCHubTestStore(t)
 	ctx := context.Background()
 	c := v2Cipher(t, "k2", "k2")
 	_, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{Store: st, HubID: encTestHubID,
@@ -604,36 +579,6 @@ func TestOIDCRestoreFailureDoesNotSaveKeyset(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, before.EncryptedValue, after.EncryptedValue, "the unreadable keyset was overwritten")
 	assert.Equal(t, before.Version, after.Version)
-}
-
-// D2: a CAS loser that cannot decrypt the winner's key fails instead of
-// continuing with (and later persisting) its own key.
-func TestOIDCCASLoserUndecryptableFails(t *testing.T) {
-	st := createOIDCTestStore(t)
-	ctx := context.Background()
-	winner, err := generateRSAKeyPair()
-	require.NoError(t, err)
-	winnerPEM, err := encodePEMPrivateKey(winner)
-	require.NoError(t, err)
-	require.NoError(t, st.CreateSecret(ctx, &store.Secret{ID: oidcSigningKeySecretID(encTestHubID), Key: SecretKeyOIDCSigningKey,
-		EncryptedValue: sealForeign(t, "k2", string(winnerPEM)), Scope: store.ScopeHub, ScopeID: encTestHubID,
-		SecretType: store.SecretTypeInternal}))
-	before, err := st.GetSecret(ctx, SecretKeyOIDCSigningKey, store.ScopeHub, encTestHubID)
-	require.NoError(t, err)
-
-	mine, err := generateRSAKeyPair()
-	require.NoError(t, err)
-	minePEM, err := encodePEMPrivateKey(mine)
-	require.NoError(t, err)
-	m := &OIDCKeyManager{store: st, hubID: encTestHubID, log: slog.Default(), cipher: v2Cipher(t, "k2", "k2")}
-	key, err := m.casCreateKeyInStore(ctx, SecretKeyOIDCSigningKey, string(minePEM), encTestHubID)
-	require.Error(t, err)
-	assert.Nil(t, key)
-	assert.ErrorIs(t, err, secret.ErrDecrypt)
-	assert.NotContains(t, err.Error(), "PRIVATE KEY")
-	after, err := st.GetSecret(ctx, SecretKeyOIDCSigningKey, store.ScopeHub, encTestHubID)
-	require.NoError(t, err)
-	assert.Equal(t, before.EncryptedValue, after.EncryptedValue)
 }
 
 // Grant ring: v2 roundtrip and CAS through the shared cipher; a node
@@ -688,7 +633,7 @@ func TestConduitGrantRing_IndependentV2RoundTripAndCAS(t *testing.T) {
 // check passes) but does not parse. The failed restore must leave it in
 // place instead of saving the in-memory keyset over it.
 func TestOIDCRestoreFailureDoesNotSaveUnparseableKeyset(t *testing.T) {
-	st := createOIDCTestStore(t)
+	st := newOIDCHubTestStore(t)
 	ctx := context.Background()
 	c := v2Cipher(t, "k2", "k2")
 	_, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{Store: st, HubID: encTestHubID,

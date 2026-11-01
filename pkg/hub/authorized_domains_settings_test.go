@@ -206,8 +206,8 @@ func TestApplySnapshot_AuthorizedDomainsFileSnapshot(t *testing.T) {
 	}
 }
 
-// captureWarnLogs routes slog to a buffer for the test.
-func captureWarnLogs(t *testing.T) *bytes.Buffer {
+// captureAuthorizedDomainsWarnLogs routes slog to a buffer for the test.
+func captureAuthorizedDomainsWarnLogs(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
 	prev := slog.Default()
@@ -221,7 +221,7 @@ func TestWarnAuthorizedDomainsDrift(t *testing.T) {
 	t.Run("saved differs", func(t *testing.T) {
 		srv, _, ops := newDomainsDBServer(t, []string{"startup.example"}, nil, nil)
 		saveAccess(t, ops, `{"authorized_domains":["saved.example","second.example"]}`)
-		logs := captureWarnLogs(t)
+		logs := captureAuthorizedDomainsWarnLogs(t)
 		srv.WarnAuthorizedDomainsDrift(ops.Snapshot())
 		out := logs.String()
 		if !strings.Contains(out, msg) || !strings.Contains(out, "in_effect=saved") ||
@@ -238,7 +238,7 @@ func TestWarnAuthorizedDomainsDrift(t *testing.T) {
 		bootK, envK := pinnedDomainsKoanfs(t, "env.example")
 		srv, _, ops := newDomainsDBServer(t, []string{"env.example"}, bootK, envK)
 		saveAccess(t, ops, `{"authorized_domains":["saved.example"]}`)
-		logs := captureWarnLogs(t)
+		logs := captureAuthorizedDomainsWarnLogs(t)
 		srv.WarnAuthorizedDomainsDrift(ops.Snapshot())
 		if out := logs.String(); !strings.Contains(out, msg) || !strings.Contains(out, "in_effect=deployment_pin") {
 			t.Errorf("warning = %q", out)
@@ -253,7 +253,7 @@ func TestWarnAuthorizedDomainsDrift(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, _, ops := newDomainsDBServer(t, []string{"a.example", "b.example"}, nil, nil)
 			saveAccess(t, ops, tc.doc)
-			logs := captureWarnLogs(t)
+			logs := captureAuthorizedDomainsWarnLogs(t)
 			srv.WarnAuthorizedDomainsDrift(ops.Snapshot())
 			if out := logs.String(); out != "" {
 				t.Errorf("unexpected warning: %q", out)
@@ -264,7 +264,7 @@ func TestWarnAuthorizedDomainsDrift(t *testing.T) {
 		srv := &Server{}
 		srv.config.AuthorizedDomains = []string{"a.example"}
 		srv.recordStartupLayer1Values()
-		logs := captureWarnLogs(t)
+		logs := captureAuthorizedDomainsWarnLogs(t)
 		srv.WarnAuthorizedDomainsDrift(Layer1Snapshot{AuthorizedDomains: []string{"b.example"}})
 		if out := logs.String(); out != "" {
 			t.Errorf("unexpected warning: %q", out)
@@ -560,7 +560,7 @@ func newDomainsFileServer(t *testing.T, startup []string) (*Server, string) {
 	return srv, path
 }
 
-func putServerConfigFile(srv *Server, body string) *httptest.ResponseRecorder {
+func putAuthorizedDomainsServerConfigFile(srv *Server, body string) *httptest.ResponseRecorder {
 	rr := httptest.NewRecorder()
 	srv.handlePutServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body))
 	return rr
@@ -570,7 +570,7 @@ func TestPutServerConfigFile_AuthorizedDomains(t *testing.T) {
 	t.Run("refused, settings.yaml untouched", func(t *testing.T) {
 		srv, path := newDomainsFileServer(t, nil)
 		before, _ := os.ReadFile(path)
-		rr := putServerConfigFile(srv, `{"server":{"auth":{"authorized_domains":["other.example"]}}}`)
+		rr := putAuthorizedDomainsServerConfigFile(srv, `{"server":{"auth":{"authorized_domains":["other.example"]}}}`)
 		assertLockoutRefusal(t, rr, "other.example")
 		if after, _ := os.ReadFile(path); string(after) != string(before) {
 			t.Errorf("settings.yaml changed on refusal:\n%s", after)
@@ -578,7 +578,7 @@ func TestPutServerConfigFile_AuthorizedDomains(t *testing.T) {
 	})
 	t.Run("allowed list applies without a restart", func(t *testing.T) {
 		srv, _ := newDomainsFileServer(t, nil)
-		rr := putServerConfigFile(srv, `{"server":{"auth":{"authorized_domains":["example.com"]}}}`)
+		rr := putAuthorizedDomainsServerConfigFile(srv, `{"server":{"auth":{"authorized_domains":["example.com"]}}}`)
 		if rr.Code != http.StatusOK {
 			t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
 		}
@@ -588,7 +588,7 @@ func TestPutServerConfigFile_AuthorizedDomains(t *testing.T) {
 	})
 	t.Run("admin_emails in the same body allows", func(t *testing.T) {
 		srv, _ := newDomainsFileServer(t, nil)
-		rr := putServerConfigFile(srv, `{"server":{"hub":{"admin_emails":["admin@example.com"]},"auth":{"authorized_domains":["other.example"]}}}`)
+		rr := putAuthorizedDomainsServerConfigFile(srv, `{"server":{"hub":{"admin_emails":["admin@example.com"]},"auth":{"authorized_domains":["other.example"]}}}`)
 		if rr.Code != http.StatusOK {
 			t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
 		}
@@ -596,7 +596,7 @@ func TestPutServerConfigFile_AuthorizedDomains(t *testing.T) {
 	t.Run("env pin wins and is not checked", func(t *testing.T) {
 		srv, _ := newDomainsFileServer(t, []string{"env.example"})
 		t.Setenv("SCION_SERVER_AUTH_AUTHORIZEDDOMAINS", "env.example")
-		rr := putServerConfigFile(srv, `{"server":{"auth":{"authorized_domains":["other.example"]}}}`)
+		rr := putAuthorizedDomainsServerConfigFile(srv, `{"server":{"auth":{"authorized_domains":["other.example"]}}}`)
 		if rr.Code != http.StatusOK {
 			t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
 		}
