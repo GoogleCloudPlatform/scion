@@ -15,6 +15,8 @@ Maintenance page, and back. Do it with no new sudoers lines on starter hubs.
   3. `make web`;
   4. `go build -ldflags "-X pkg/version.Commit=<sha> -X pkg/version.BuildTime=<rfc3339>"` into a temp dir;
   5. `VerifyGitBuild`: the binary must report the commit and no release version;
+  5a. the pre-update database snapshot (design D4; review r2): the same `DBSnapshotter` as update-binary, the
+      path recorded in the pending update, and a failed snapshot installs nothing;
   6. `Stage`/`Activate` under the name `git-<sha12>`;
   7. the starter-hub unit drift check, for sudo-install only;
   8. the before-restart hook, then `Restart`.

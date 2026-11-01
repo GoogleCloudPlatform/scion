@@ -379,6 +379,7 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 			ServiceName: mc.ServiceName,
 			Installer:   installer,
 			Releases:    s.updateReleaseSource(),
+			Snapshotter: s.updateSnapshotter(context.Background()),
 			Store:       s.store,
 		}), nil
 	case "rebuild-web":

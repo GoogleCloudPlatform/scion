@@ -988,9 +988,9 @@ _rb_decision_table() {
   _rb_case stay "valid, unverified, stale current" stale "too old to roll back automatically" '_rb_update_state "$(_rb_happy_state)"'
   _rb_case stay "valid, unverified, migrated and safe, stale current" stale "too old to roll back automatically" '_rb_update_state "$(_rb_happy_state migrated=true)"'
   _rb_case stay "verified" fresh "was verified" '_rb_update_state "$(_rb_happy_state verified=true)"'
-  _rb_case stay "migrated, previous not safe" fresh "below its downgrade floor" '_rb_update_state "$(_rb_happy_state migrated=true previous_safe=false)"'
+  _rb_case stay "migrated, previous not safe" fresh "cannot be shown to be safe for it (below the downgrade floor, or a Git build)" '_rb_update_state "$(_rb_happy_state migrated=true previous_safe=false)"'
   _rb_case stay "migrated, previous_safe missing" fresh "Restoring after a failed update" '_rb_update_state "$(_rb_happy_state migrated=true previous_safe=)"'
-  _rb_case stay "migrated, previous_safe not a boolean" fresh "below its downgrade floor" '_rb_update_state "$(_rb_happy_state migrated=true previous_safe="\"true\"")"'
+  _rb_case stay "migrated, previous_safe not a boolean" fresh "cannot be shown to be safe for it (below the downgrade floor, or a Git build)" '_rb_update_state "$(_rb_happy_state migrated=true previous_safe="\"true\"")"'
   _rb_case swap "migrated, previous safe" fresh "safe to undo" '_rb_update_state "$(_rb_happy_state migrated=true)"'
   _rb_case swap "not migrated, previous not safe" fresh "safe to undo" '_rb_update_state "$(_rb_happy_state previous_safe=false)"'
   # Readable but about other links: fail closed, never the timer.
@@ -1230,7 +1230,7 @@ test_rollback_update_state_git_builds() {
   local g1=git-0123456789ab g2=git-89abcdef0123
   _rb_git_case swap "release->git, migrated, previous safe" "$g1" v0.3.0-preview.4 true true "safe to undo"
   _rb_git_case swap "nightly->git, migrated, previous safe" "$g1" nightly-20261020 true true "safe to undo"
-  _rb_git_case stay "git->git, migrated, previous not safe" "$g2" "$g1" true false "below its downgrade floor"
-  _rb_git_case stay "git->release, migrated, previous not safe" nightly-20261101 "$g1" true false "below its downgrade floor"
+  _rb_git_case stay "git->git, migrated, previous not safe" "$g2" "$g1" true false "cannot be shown to be safe for it (below the downgrade floor, or a Git build)"
+  _rb_git_case stay "git->release, migrated, previous not safe" nightly-20261101 "$g1" true false "cannot be shown to be safe for it (below the downgrade floor, or a Git build)"
   _rb_git_case swap "git->git, not migrated" "$g2" "$g1" false false "safe to undo"
 }

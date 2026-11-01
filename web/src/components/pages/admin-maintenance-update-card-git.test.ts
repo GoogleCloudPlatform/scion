@@ -281,7 +281,7 @@ describe('Git panel', () => {
         .trim()
     ).toBe('The repository checkout (89abcdef0123) is up to date with origin/main.');
     expect(root(el).querySelector('.git-check-note')?.textContent?.replace(/\s+/g, ' ')).toContain(
-      "running build's commit is not in the repository checkout"
+      "running build's commit could not be found in the repository checkout"
     );
   });
 

@@ -339,6 +339,10 @@ run as the `scion` user (through `runuser`):
      opens the database, so a crash loop of such a switch is not rolled
      back: the guard leaves the Hub stopped (fail closed) and its journal
      points to [Restoring after a failed update](#restoring-after-a-failed-update).
+     A rebuild takes the same pre-update database snapshot as a release
+     update (in `/opt/scion/snapshots/`, named after the build it replaces,
+     for example `hub-git-<sha12>-<timestamp>.db`), so that procedure
+     applies unchanged.
 4. It refuses unless `/opt/scion/current` and `/opt/scion/previous` each
    resolve to a release directory directly inside `/opt/scion/releases/`,
    and `previous` contains a `scion` binary. A link that leaves `releases/`

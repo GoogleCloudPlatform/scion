@@ -298,6 +298,7 @@ type RebuildServerExecutor struct {
 	installer   Installer
 	current     string        // RunningReleaseName of the running build
 	releases    ReleaseSource // dates a preview/stable current; nil skips the lookup
+	snapshots   DBSnapshotter // the pre-update database snapshot (design D4)
 
 	// unitLocator and unitRevision back the systemd unit drift check;
 	// tests replace them (RebuildServerOptions) so they never call the
@@ -332,6 +333,11 @@ type RebuildServerOptions struct {
 	// update-binary does). nil skips the lookup: such a "from" is then not
 	// safe to roll back to after migrations (fail closed).
 	Releases ReleaseSource
+	// Snapshotter takes the pre-update database snapshot, as for
+	// update-binary (design D4: before every update). nil means snapshots
+	// are unsupported: the rebuild goes ahead without one, as an upgrade
+	// does.
+	Snapshotter DBSnapshotter
 	// Store, when set, keeps the last systemd unit check result for the
 	// Admin -> Maintenance page. Optional.
 	Store store.Store
@@ -353,6 +359,7 @@ func NewRebuildServerExecutor(opts RebuildServerOptions) *RebuildServerExecutor 
 		installer:        opts.Installer,
 		current:          opts.CurrentRelease,
 		releases:         opts.Releases,
+		snapshots:        opts.Snapshotter,
 		unitLocator:      unitdrift.SystemctlLocator,
 		unitRevision:     unitdrift.GitRevision,
 		unitTimeout:      opts.UnitTimeout,
@@ -370,6 +377,9 @@ func NewRebuildServerExecutor(opts RebuildServerOptions) *RebuildServerExecutor 
 	}
 	if e.current == "" {
 		e.current = RunningReleaseName(version.Version, version.GetCommit())
+	}
+	if e.snapshots == nil {
+		e.snapshots = NewUnsupportedDBSnapshotter("no database snapshotter is configured")
 	}
 	if opts.UnitLocator != nil {
 		e.unitLocator = opts.UnitLocator
@@ -480,6 +490,16 @@ func (e *RebuildServerExecutor) RunWithBeforeRestart(ctx context.Context, logger
 		return fmt.Errorf("verification failed: %w", err)
 	}
 
+	// ── Database snapshot, before anything changes ──────────────────────
+	// As for update-binary (design D4). It is what "Restoring after a
+	// failed update" restores, including after a Git build the
+	// boot-failure guard leaves stopped. On the run ctx: VACUUM INTO of a
+	// large database can take a while.
+	snapshot, err := takeUpdateSnapshot(ctx, e.snapshots, e.current, logger, "hub.maintenance.rebuild-server")
+	if err != nil {
+		return err
+	}
+
 	// The boot-failure guard may roll back to the running release only if
 	// it is at or above the new build's downgrade floor; a preview or
 	// stable "from" needs its publish date for that (update-binary does the
@@ -533,6 +553,7 @@ func (e *RebuildServerExecutor) RunWithBeforeRestart(ctx context.Context, logger
 			From:     e.current,
 			To:       name,
 			Strategy: e.installer.Name(),
+			Snapshot: snapshot,
 			Mode:     UpdateModeGit,
 			Commit:   commit,
 			// For the boot-failure guard's previous_safe.

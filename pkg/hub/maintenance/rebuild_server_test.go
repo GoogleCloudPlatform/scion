@@ -458,3 +458,89 @@ func TestRebuildServer_SymlinkClearsUnitDriftRecord(t *testing.T) {
 		t.Fatalf("the unit check must not run on the symlink layout:\n%s", log.String())
 	}
 }
+
+// Design D4: a rebuild takes the same pre-update database snapshot as
+// update-binary, after the build is verified and before anything is
+// installed, and records its path for the pending update.
+func TestRebuildServer_SnapshotBeforeActivation(t *testing.T) {
+	f := newRebuildFixture(t, "")
+	inst := &fakeInstaller{}
+	snaps := &fakeDBSnapshotter{calls: &inst.calls}
+	e := NewRebuildServerExecutor(RebuildServerOptions{
+		RepoPath:       f.repo,
+		Installer:      inst,
+		CurrentRelease: "git-89abcdef0123",
+		Snapshotter:    snaps,
+	})
+	var got PendingRestart
+	var log bytes.Buffer
+	err := e.RunWithBeforeRestart(context.Background(), &log, nil, func(_ context.Context, p PendingRestart) error {
+		inst.calls = append(inst.calls, "hook")
+		got = p
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Run: %v\n%s", err, log.String())
+	}
+	want := []string{"preflight", "snapshot", "stage:" + testGitRelease, "activate:staged-" + testGitRelease, "hook", "restart"}
+	if strings.Join(inst.calls, ",") != strings.Join(want, ",") {
+		t.Fatalf("calls = %v, want %v", inst.calls, want)
+	}
+	wantPath := fakeSnapshotDir + "/hub-git-89abcdef0123-20261029T070000Z.db"
+	if got.Snapshot != wantPath {
+		t.Fatalf("pending snapshot = %q, want %q", got.Snapshot, wantPath)
+	}
+	if len(snaps.froms) != 1 || snaps.froms[0] != "git-89abcdef0123" {
+		t.Fatalf("snapshot from = %v", snaps.froms)
+	}
+	if !strings.Contains(log.String(), "\n==> Database snapshot\n") {
+		t.Fatalf("missing the snapshot step in the log:\n%s", log.String())
+	}
+	// The snapshot comes after the build was verified.
+	if strings.Index(log.String(), "Build verified") > strings.Index(log.String(), "==> Database snapshot") {
+		t.Fatalf("snapshot before the build was verified:\n%s", log.String())
+	}
+}
+
+func TestRebuildServer_SnapshotFailureInstallsNothing(t *testing.T) {
+	f := newRebuildFixture(t, "")
+	inst := &fakeInstaller{}
+	e := NewRebuildServerExecutor(RebuildServerOptions{
+		RepoPath:    f.repo,
+		Installer:   inst,
+		Snapshotter: &fakeDBSnapshotter{calls: &inst.calls, err: errors.New("disk full")},
+	})
+	hooked := false
+	err := e.RunWithBeforeRestart(context.Background(), &bytes.Buffer{}, nil,
+		func(context.Context, PendingRestart) error { hooked = true; return nil })
+	if err == nil || !strings.Contains(err.Error(), "database snapshot failed, nothing was installed: disk full") {
+		t.Fatalf("Run = %v, want the snapshot failure", err)
+	}
+	if strings.Join(inst.calls, ",") != "preflight,snapshot" || hooked {
+		t.Fatalf("calls = %v (hooked %v), want nothing installed after the snapshot", inst.calls, hooked)
+	}
+}
+
+// Without snapshot support (PostgreSQL) a rebuild goes ahead without one,
+// as an upgrade through update-binary does.
+func TestRebuildServer_UnsupportedSnapshotStillRebuilds(t *testing.T) {
+	f := newRebuildFixture(t, "")
+	inst := &fakeInstaller{}
+	e := NewRebuildServerExecutor(RebuildServerOptions{
+		RepoPath:    f.repo,
+		Installer:   inst,
+		Snapshotter: &fakeDBSnapshotter{calls: &inst.calls, unsupported: "PostgreSQL databases are not snapshotted"},
+	})
+	var got PendingRestart
+	var log bytes.Buffer
+	if err := e.RunWithBeforeRestart(context.Background(), &log, nil,
+		func(_ context.Context, p PendingRestart) error { got = p; return nil }); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got.Snapshot != "" || strings.Contains(strings.Join(inst.calls, ","), "snapshot") {
+		t.Fatalf("snapshot %q, calls %v: want none taken", got.Snapshot, inst.calls)
+	}
+	if !strings.Contains(log.String(), "No database snapshot taken: PostgreSQL databases are not snapshotted") {
+		t.Fatalf("missing the no-snapshot line:\n%s", log.String())
+	}
+}
