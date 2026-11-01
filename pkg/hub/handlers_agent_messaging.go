@@ -2389,6 +2389,17 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		}
 	}
 
+	// A held target (ptone/scion#3433) is refused for a user send, with or
+	// without wake, before any wake side effect and with the refusal the
+	// agent send gets (ptone/scion#6859). Agent sends get the same check in
+	// ExecuteAgentDM, delegated sends above.
+	if !senderIsAgent && !delegatedSender && !deferDelivery {
+		if dmErr := s.heldTargetRefusal(ctx, agent); dmErr != nil {
+			WriteAgentDMError(w, dmErr)
+			return
+		}
+	}
+
 	if req.Wake && !senderIsAgent && !delegatedSender && !deferDelivery {
 		// The response waits on the resume and the readiness wait: extend
 		// this request's write deadline to cover them (ptone/scion#4178).
