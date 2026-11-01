@@ -48,7 +48,7 @@ func StartupNotice(k *Keyring) string {
 	return fmt.Sprintf("server secret: keyring file revision %q (experimental signing pilot): "+
 		"web session cookies, agent and user JWTs, skill file download URLs, artifact view links, authorized-list cursors, "+
 		"attachment delivery URLs, conduit admission tokens and relay-peer signatures (shared-secret fallback) all use signing generations %v (active %q); "+
-		"no purpose reads the %q entry outside the ring, which this release still requires, and encryption keeps the "+
+		"this release still requires a %q entry in the ring, but no purpose reads it outside the ring, and encryption keeps the "+
 		"imported key %q. Full server-secret rotation is not available in this release.",
 		k.Revision(), k.Signing().IDs(), k.Signing().ActiveID(), LegacyID, k.Encryption().ActiveID())
 }

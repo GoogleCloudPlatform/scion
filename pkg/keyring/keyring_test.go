@@ -577,7 +577,7 @@ func TestKeysNeverFormatMaterial(t *testing.T) {
 	if !strings.Contains(StartupNotice(Legacy(fixtureLegacySecret)), "agent JWTs") {
 		t.Fatal("legacy notice must name the coupled uses")
 	}
-	if !strings.Contains(StartupNotice(k), "which this release still requires") {
+	if !strings.Contains(StartupNotice(k), "this release still requires a \"legacy\" entry in the ring, but no purpose reads it outside the ring") {
 		t.Fatal("ring notice must state the pilot limitation")
 	}
 	if !strings.Contains(StartupNotice(k), "conduit admission tokens and relay-peer signatures (shared-secret fallback) all use signing generations") {
