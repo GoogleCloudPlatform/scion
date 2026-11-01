@@ -593,7 +593,7 @@ func TestCloudRunInstance_NFSMountScope(t *testing.T) {
 		}
 	}
 	// Every mode gets the same set today. For clone-per-agent that is the
-	// project workspace; #6926 moves it to a per-agent workspace, which
+	// project workspace; ptone/scion#6926 moves it to a per-agent workspace, which
 	// will change its expected set on purpose.
 	for _, mode := range []string{"shared-plain", "clone-per-agent", "worktree-per-agent"} {
 		t.Run(mode, func(t *testing.T) {
