@@ -215,13 +215,13 @@ func TestProvisionFailedThenStart_CloudRunClonePerAgentKeepsOwnWorkspace(t *test
 	provisionFinish = func(*AgentManager, api.StartOptions, string, string, *api.ScionConfig) error {
 		return errors.New("injected finishProvision failure")
 	}
+	t.Cleanup(func() { provisionFinish = orig })
 
 	opts := api.StartOptions{Name: "test-agent", ProjectPath: f.projectScionDir, NoAuth: true, GitClone: testGitClone}
 	provisionOpts := opts
 	provisionOpts.Env = env()
 	provisionOpts.FreshProvision = true
 	_, err := mgr.Provision(context.Background(), provisionOpts)
-	provisionFinish = orig
 	require.Error(t, err, "the create fails after the agent directory exists")
 	assert.Contains(t, err.Error(), "injected finishProvision failure")
 	assert.FileExists(t, filepath.Join(agentDir, cloudRunAgentWorkspaceRecordFile), "recorded before the failure")
