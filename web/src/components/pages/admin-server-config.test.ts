@@ -2882,6 +2882,25 @@ describe('scion-page-admin-server-config', () => {
       expect(query(element, 'a.manage-updates-link')).not.toBeNull();
     });
 
+    // A 200 with a partial body is not trusted (fallback, no channel); an
+    // empty effective channel renders the version without "()".
+    it.each([
+      [
+        'no channel object',
+        { ...makeUpdateStatus('v0.3.0-preview.4', 'preview'), channel: undefined },
+        'Scion version: 0.1.0-test',
+      ],
+      ['an empty effective channel', makeUpdateStatus('v0.3.0', ''), 'Scion version: v0.3.0'],
+    ])('renders the line for a 200 with %s', async (_name, body, expected) => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig(), { updateStatusResponse: body })
+      );
+
+      const line = query(element, '.version-line');
+      expect(line?.textContent?.replace(/\s+/g, ' ').trim()).toBe(expected);
+      expect(line?.textContent).not.toContain('(');
+    });
+
     it('has no update controls and never checks for updates or runs an operation', async () => {
       let ran = false;
       element = await createComponent(

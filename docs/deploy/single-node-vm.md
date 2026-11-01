@@ -407,9 +407,10 @@ last row:
 that include the guard write `update-state.json` when they update. When a
 release that predates the guard performs an update (for example, updating
 back up after a downgrade to a pre-guard release), the file is not
-rewritten, so it still describes the earlier update. A crash loop of the
-newly installed release in that window is therefore **not** rolled back
-automatically: `target` and `from` no longer match the links, so the guard
+rewritten, so it still describes the earlier update (if no update-state
+file exists yet, the missing-file row above applies instead). A crash loop
+of the newly installed release in that window is therefore **not** rolled
+back automatically: `target` and `from` no longer match the links, so the guard
 refuses on the mismatch and leaves the Hub stopped. It never swaps to a
 wrong release. The next update performed by a release that includes the
 guard (or the next `deploy.sh` switch) rewrites the file. To recover in
