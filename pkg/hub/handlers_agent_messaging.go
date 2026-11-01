@@ -1506,8 +1506,21 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 				if !stored {
 					return
 				}
+				// The receipt names the conversation the stored row is in.
+				result.ConversationID = storeMsg.ConversationID
 				recordLogged = logged
 				break
+			}
+			// Resolve the conversation here, as the persisting subscriber
+			// would (a plain DM to a user names none), so the receipt can
+			// name the conversation the row is stored in: the subscriber
+			// honours a pre-resolved ConversationID. When resolution
+			// refuses (write-deny), the subscriber refuses the same way.
+			if structuredMsg.ConversationID == "" &&
+				bp.resolveUserMessageConversation(ctx, agent.ProjectID, storeMsg, structuredMsg) &&
+				storeMsg.ConversationID != "" {
+				structuredMsg.ConversationID = storeMsg.ConversationID
+				result.ConversationID = storeMsg.ConversationID
 			}
 			// Ensure the persisting user-message subscription first, as the
 			// notification path does: it is otherwise only created on agent

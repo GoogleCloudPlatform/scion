@@ -19,11 +19,15 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -78,4 +82,40 @@ func TestSendReceipt_DeferredCarriesConversationID(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, stored.ConversationID)
 	assert.Equal(t, stored.ConversationID, resp.ConversationID)
+}
+
+// A plain agent-to-user DM relayed through the message broker (no
+// conversation named) gets a receipt naming the conversation the
+// persisting subscriber stores the message in.
+func TestSendReceipt_BrokerUserDMNamesStoredConversation(t *testing.T) {
+	srv, s, project, agent, user := def138Setup(t)
+	events := NewChannelEventPublisher()
+	t.Cleanup(events.Close)
+	inner := eventbus.NewInProcessEventBus(slog.Default())
+	t.Cleanup(func() { _ = inner.Close() })
+	proxy := NewMessageBrokerProxy(inner, s, events, func() AgentDispatcher { return &brokerMockDispatcher{} }, slog.Default())
+	srv.SetMessageBrokerProxy(proxy)
+	proxy.Start()
+	t.Cleanup(proxy.Stop)
+	require.NoError(t, proxy.EnsureProjectSubscriptions(context.Background(), project.ID))
+
+	rr := postOutboundNoConv(t, srv, project.ID, agent.ID, user.Email, "plain dm to a user")
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var receipt struct {
+		ConversationID string `json:"conversation_id"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &receipt))
+
+	var rows []store.Message
+	require.Eventually(t, func() bool {
+		res, err := s.ListMessages(context.Background(), store.MessageFilter{RecipientID: user.ID}, store.ListOptions{})
+		if err != nil {
+			return false
+		}
+		rows = res.Items
+		return len(rows) > 0
+	}, 5*time.Second, 10*time.Millisecond)
+	require.Len(t, rows, 1)
+	require.NotEmpty(t, rows[0].ConversationID, "the subscriber stores the DM in a conversation")
+	assert.Equal(t, rows[0].ConversationID, receipt.ConversationID)
 }
