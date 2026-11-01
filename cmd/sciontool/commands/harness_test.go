@@ -121,7 +121,7 @@ func TestRunHarnessProvision_RejectsManifestWithEscapingPaths(t *testing.T) {
 	}
 }
 
-func TestValidateManifestPaths_RejectsSiblingPrefixEscape(t *testing.T) {
+func TestValidateManifestPaths_SeparatorBoundary(t *testing.T) {
 	home := "/home/agent"
 	bundleRoot := "/home/agent/.scion/harness"
 	extraRoot := "/run/scion/mem/outputs"
@@ -129,6 +129,7 @@ func TestValidateManifestPaths_RejectsSiblingPrefixEscape(t *testing.T) {
 	tests := []struct {
 		name    string
 		mutate  func(m *containerProvisionManifest)
+		extra   []string // extra roots; nil means {extraRoot}
 		wantErr bool
 	}{
 		{
@@ -168,6 +169,21 @@ func TestValidateManifestPaths_RejectsSiblingPrefixEscape(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "dot-dot-prefixed name directly under root is inside",
+			mutate: func(m *containerProvisionManifest) {
+				m.Inputs["auth_candidates"] = "/home/agent/..foo/auth.json"
+			},
+			wantErr: false,
+		},
+		{
+			name: "empty extra root does not accept outside paths",
+			mutate: func(m *containerProvisionManifest) {
+				m.Outputs.Env = "/etc/outside/env.json"
+			},
+			extra:   []string{""},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -181,7 +197,11 @@ func TestValidateManifestPaths_RejectsSiblingPrefixEscape(t *testing.T) {
 				},
 			}
 			tt.mutate(m)
-			err := validateManifestPaths(m, bundleRoot, home, extraRoot)
+			extra := tt.extra
+			if extra == nil {
+				extra = []string{extraRoot}
+			}
+			err := validateManifestPaths(m, bundleRoot, home, extra...)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("validateManifestPaths() error = %v, wantErr = %v", err, tt.wantErr)
 			}
