@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -52,23 +52,69 @@ func createProjectAgentForGate(t *testing.T, srv *Server, s store.Store, project
 	return id
 }
 
+// productionAgentIdentity is the identity a verified agent token carries
+// (agentIdentityWrapper over AgentTokenClaims), so authorization treats it
+// as a real agent principal.
+func productionAgentIdentity(id, projectID string, scopes []AgentTokenScope) Identity {
+	return &agentIdentityWrapper{&AgentTokenClaims{
+		Claims: jwt.Claims{Subject: id}, ProjectID: projectID, Scopes: scopes,
+	}}
+}
+
 // TestCallerMayReadProviders_GoodStandingAgent is the positive control for
 // the provider-reader gate's agent branch (ptone/scion#6844): a
 // good-standing agent of the project passes, while a held agent of the same
-// project, an agent of another project and an unknown agent do not.
+// project, an agent of another project and an unknown agent do not. Every
+// case runs as a real agent principal (productionAgentIdentity), and each
+// refusal is checked for its own cause: an identity the authorization
+// kernel does not recognize as an agent would be refused whatever the case,
+// so the negative cases could not fail with one.
 func TestCallerMayReadProviders_GoodStandingAgent(t *testing.T) {
 	srv, s, alice, _, project := setupTemplateAuthzTest(t)
 	ctx := context.Background()
 	scopes := ScopesForRole(AgentRoleFull)
 	asAgent := func(id, projectID string) context.Context {
-		return contextWithIdentity(ctx, newTestAgentIdentity(id, projectID, scopes))
+		return contextWithIdentity(ctx, productionAgentIdentity(id, projectID, scopes))
 	}
+	// readDecision is the kernel's project read decision for the caller.
+	readDecision := func(callerCtx context.Context) Decision {
+		return srv.authzService.CheckAccess(callerCtx, GetIdentityFromContext(callerCtx), projectResource(project), ActionRead)
+	}
+	// mayRead checks the gate and, on a mismatch, reports the project read
+	// decision's reason, so a failure names its cause.
+	mayRead := func(callerCtx context.Context, want bool, what string) {
+		t.Helper()
+		if got := srv.callerMayReadProviders(callerCtx, project.ID); got != want {
+			t.Errorf("%s: callerMayReadProviders = %v, want %v (project read decision: %q)", what, got, want, readDecision(callerCtx).Reason)
+		}
+	}
+	const unrecognized = "unrecognized principal kind"
 
 	good := createProjectAgentForGate(t, srv, s, project.ID, alice.ID, "gate-good-agent", false)
 	held := createProjectAgentForGate(t, srv, s, project.ID, alice.ID, "gate-held-agent", true)
+	missing := tid("gate-missing-agent")
+	otherProject := tid("gate-other-project")
 
-	assert.True(t, srv.callerMayReadProviders(asAgent(good, project.ID), project.ID), "a good-standing agent of the project")
-	assert.False(t, srv.callerMayReadProviders(asAgent(held, project.ID), project.ID), "a held agent of the same project")
-	assert.False(t, srv.callerMayReadProviders(asAgent(good, tid("gate-other-project")), project.ID), "an agent identity of another project")
-	assert.False(t, srv.callerMayReadProviders(asAgent(tid("gate-missing-agent"), project.ID), project.ID), "an unknown agent")
+	// The positive: the kernel grants the read through the agent's token
+	// scopes, and the gate passes.
+	d := readDecision(asAgent(good, project.ID))
+	require.True(t, d.Allowed, "a good-standing agent's project read: %q", d.Reason)
+	require.Equal(t, "role binding grant", d.Reason)
+	mayRead(asAgent(good, project.ID), true, "a good-standing agent of the project")
+
+	// Held: the same project and token shape as good; only the hold differs,
+	// and the gate refuses on standing.
+	require.Equal(t, standingReasonAgentHeld, standingReason(srv.agentStanding(ctx, held)))
+	require.NotEqual(t, unrecognized, readDecision(asAgent(held, project.ID)).Reason, "held: a real agent principal")
+	mayRead(asAgent(held, project.ID), false, "a held agent of the same project")
+
+	// Another project: the good agent itself, asserting another project, is
+	// refused on the project check (the same agent passes above).
+	require.NotEqual(t, unrecognized, readDecision(asAgent(good, otherProject)).Reason, "other project: a real agent principal")
+	mayRead(asAgent(good, otherProject), false, "an agent identity of another project")
+
+	// Unknown: no agent record, so the gate refuses on standing.
+	require.Equal(t, standingReasonAgentMissing, standingReason(srv.agentStanding(ctx, missing)))
+	require.NotEqual(t, unrecognized, readDecision(asAgent(missing, project.ID)).Reason, "unknown agent: a real agent principal")
+	mayRead(asAgent(missing, project.ID), false, "an unknown agent")
 }

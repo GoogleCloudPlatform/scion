@@ -98,7 +98,7 @@ func TestListRuntimeBrokers_LocalPathOnlyForProviderReaders(t *testing.T) {
 	} {
 		t.Run(tc.name+" does not list the broker or see the LocalPath", func(t *testing.T) {
 			agentID := createProjectAgentForGate(t, srv, s, project.ID, alice.ID, tc.agent, tc.held)
-			rec := doRequestAsIdentity(t, srv, newTestAgentIdentity(agentID, project.ID, ScopesForRole(AgentRoleFull)), http.MethodGet, path, nil)
+			rec := doRequestAsIdentity(t, srv, productionAgentIdentity(agentID, project.ID, ScopesForRole(AgentRoleFull)), http.MethodGet, path, nil)
 			assert.NotContains(t, rec.Body.String(), brokerListLocalPath)
 			got := decodeBrokerListLocalPaths(t, rec) // requires 200
 			assert.NotContains(t, got, broker.ID, "a hub-level broker is not listed to a project-bounded agent")
