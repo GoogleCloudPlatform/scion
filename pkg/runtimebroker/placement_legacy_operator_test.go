@@ -157,6 +157,19 @@ func TestLegacyOrphanedAgentRestartRefusedBeforeStop(t *testing.T) {
 	}
 }
 
+// cwdDotScion returns the project the test fixture created in the working
+// directory (its .scion directory). A restart on a legacy Kubernetes
+// runtime names it, so the agent's stored config (none yet) is checked
+// before the stop instead of the restart being refused for no project.
+func cwdDotScion(t *testing.T) string {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(wd, ".scion")
+}
+
 // legacyCreateConflicts are create request kubernetes blocks that conflict
 // with an empty operator policy, with the cause each is refused with.
 var legacyCreateConflicts = []struct {

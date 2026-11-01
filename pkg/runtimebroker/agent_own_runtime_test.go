@@ -1140,8 +1140,8 @@ func TestHandleAgentAttach_PassesProjectPathHint(t *testing.T) {
 
 // Two same-named pods of the agent in two other namespaces, and none in the
 // agent's own runtime: they are two candidates (not one by pod name), so
-// restart (with no project path left, refused before the stop) stops and
-// starts nothing, and delete fails as ambiguous without removing either.
+// restart fails as ambiguous without stopping or starting anything, and
+// delete fails without removing either.
 func TestOtherRuntimes_SameNamedPodsInTwoNamespaces_Ambiguous(t *testing.T) {
 	setup := func(t *testing.T) (*ownRTFixture, *atomic.Int32) {
 		f := newOwnRTFixture(t, "agents", false)
@@ -1171,12 +1171,17 @@ func TestOtherRuntimes_SameNamedPodsInTwoNamespaces_Ambiguous(t *testing.T) {
 
 	t.Run("restart", func(t *testing.T) {
 		f, runs := setup(t)
-		w := f.do(t, http.MethodPost, "/api/v1/agents/"+ownRTAgent+"/restart?projectId="+ownRTProjectID+"&runtime=kubernetes")
-		// No single container matches, so the restart (which names no
-		// project) has no project path: on this legacy Kubernetes runtime
-		// it is refused before the stop.
-		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), placementLegacyRestartNoProjectCause) {
-			t.Fatalf("restart status = %d, body %s; want 400 refused before the stop", w.Code, w.Body.String())
+		// The restart names the agent's project: no single container
+		// matches, so it could not recover the project from one.
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+ownRTAgent+"/restart?projectId="+ownRTProjectID+"&runtime=kubernetes",
+			strings.NewReader(projectBody(f.projectDir, "")))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		f.srv.Handler().ServeHTTP(w, req)
+		// The HTTP body is the generic runtime-op message; the logged error
+		// carries the reason.
+		if w.Code < 400 || !strings.Contains(f.logs.String(), "ambiguous") {
+			t.Fatalf("restart status = %d, body %s; want an ambiguity failure; logs:\n%s", w.Code, w.Body.String(), f.logs.String())
 		}
 		if n := runs.Load(); n != 0 {
 			t.Fatalf("starts = %d, want 0", n)
