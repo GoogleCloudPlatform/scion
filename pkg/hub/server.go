@@ -2122,6 +2122,10 @@ type Server struct {
 	// chatRetention is the chat message retention wiring (chat_retention.go).
 	chatRetention chatRetentionState
 
+	// failedPurge is the failed-message retention purge's resume cursor
+	// (sweep.go).
+	failedPurge failedPurgeState
+
 	// Artifact store for the artifact_* tables (pkg/artifacts) — nil = artifacts unavailable.
 	artifactStore artifacts.Store
 	// artifactBlobSweeper keeps the blob sweep's position between passes
