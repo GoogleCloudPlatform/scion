@@ -202,9 +202,7 @@ A managed section can be reset to tracking mode via the "Reset to bootstrap" but
 2. The section falls back to bootstrap values
 3. On next boot, the section is re-seeded from current deployment config
 
-:::note[Known Limitation]
-The "Reset to bootstrap" feature requires a backend endpoint that is not yet available. The UI is wired and ready — the endpoint will be added in a follow-up release.
-:::
+The endpoint is `DELETE /api/v1/admin/server-config/sections/{name}`; from the CLI, `scion hub settings unset --section NAME --reset`. The `experiments` section is refused there: experiment overrides have their own compare-and-set reset (`DELETE /api/v1/admin/experiments`).
 
 ## Environment Variable Namespaces
 
@@ -331,6 +329,21 @@ For high-availability deployments with multiple hub replicas:
 4. **Managed sections:** For sections that have been admin-edited, changing the `SCION_SEED_*` variable has no effect — the database value wins. A "superseded" notice in the admin UI shows which deployment values differ from the database.
 
 5. **Resetting:** To return a managed section to tracking mode, use "Reset to bootstrap" in the admin UI. The section reverts to the seed value and will track future seed changes.
+
+## From the CLI
+
+`scion hub settings` reads and changes the same settings as the admin page, through the same endpoints (see the [CLI reference](/scion/reference/cli/#scion-hub)):
+
+```bash
+scion hub settings get                                # sections, sources and revisions
+scion hub settings get --section agent_defaults
+scion hub settings set default_max_turns 200
+scion hub settings set runtimes.k8s.namespace agents
+scion hub settings unset server.hub.monitoring_dashboard_url
+scion hub settings schema                             # sections and keys
+```
+
+Each `set` or `unset` sends the revision of every section it changes in `expected_revisions`, as read just before the save, so a concurrent change is a `409` listing each section's expected and current revision rather than a silent overwrite. The save report is printed: keys in effect now, keys that apply after a restart, keys saved but not in use, and warnings. Project defaults and experiment overrides are not part of the server configuration.
 
 ## Admin UI
 
