@@ -227,6 +227,10 @@ type AgentDMResult struct {
 	// RecipientID is the target agent's UUID.
 	RecipientID string
 
+	// ConversationID is the conversation the message was persisted in.
+	// Empty when conversation resolution was skipped or failed.
+	ConversationID string
+
 	// DispatchErr is non-nil when Outcome is AgentDMAmbiguous. It
 	// captures the dispatch failure reason for logging/diagnostics.
 	// Callers should NOT expose this to end users.
@@ -612,6 +616,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			MessageID:          msgID,
 			Recipient:          storeMsg.Recipient,
 			RecipientID:        storeMsg.RecipientID,
+			ConversationID:     storeMsg.ConversationID,
 			AttachmentWarnings: attachmentWarnings,
 			ArtifactWarning:    artifactWarning,
 			BoundAttachments:   boundAttachments,
@@ -703,6 +708,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 				MessageID:          msgID,
 				Recipient:          storeMsg.Recipient,
 				RecipientID:        storeMsg.RecipientID,
+				ConversationID:     storeMsg.ConversationID,
 				DispatchErr:        dispatchErr,
 				AttachmentWarnings: attachmentWarnings,
 				ArtifactWarning:    artifactWarning,
@@ -745,6 +751,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			MessageID:          msgID,
 			Recipient:          storeMsg.Recipient,
 			RecipientID:        storeMsg.RecipientID,
+			ConversationID:     storeMsg.ConversationID,
 			DispatchErr:        fmt.Errorf("dispatch succeeded but state transition failed: %w", casErr),
 			AttachmentWarnings: attachmentWarnings,
 			ArtifactWarning:    artifactWarning,
@@ -806,6 +813,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		MessageID:          msgID,
 		Recipient:          storeMsg.Recipient,
 		RecipientID:        storeMsg.RecipientID,
+		ConversationID:     storeMsg.ConversationID,
 		AttachmentWarnings: attachmentWarnings,
 		ArtifactWarning:    artifactWarning,
 		BoundAttachments:   boundAttachments,
@@ -875,6 +883,9 @@ func WriteAgentDMResult(w http.ResponseWriter, result *AgentDMResult, mentionRes
 		"status":       status,
 		"recipient":    result.Recipient,
 		"recipient_id": result.RecipientID,
+	}
+	if result.ConversationID != "" {
+		body["conversation_id"] = result.ConversationID
 	}
 	if deferredNote != "" {
 		body["deferred"] = deferredNote
