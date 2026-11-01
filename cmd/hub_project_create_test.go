@@ -320,6 +320,7 @@ func TestStartAgentViaHub_WorkspaceFilesWarningWiring(t *testing.T) {
 			require.NoError(t, os.MkdirAll(scionDir, 0755))
 			require.NoError(t, os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte("hub:\n  enabled: true\n"), 0644))
 			require.NoError(t, os.WriteFile(filepath.Join(projectDir, "notes.txt"), []byte("local file"), 0644))
+			t.Chdir(projectDir) // the bootstrap collects from the workspace the start runs in
 
 			projectID := "project-epa"
 			agentPath := "/api/v1/projects/" + projectID + "/agents/agent-1"

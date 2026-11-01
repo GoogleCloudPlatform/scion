@@ -16,10 +16,14 @@ package cmd
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/pathcanon"
 )
 
 // collectWorkspaceFiles collects the files of a local workspace for a hub
@@ -51,4 +55,109 @@ func collectWorkspaceFiles(root string, extra []string) ([]transfer.FileInfo, er
 		}
 	}
 	return files, nil
+}
+
+// bootstrapWorkspaceDir returns the workspace root whose files the non-git
+// workspace bootstrap uploads for the project resolved to resolvedPath, or ""
+// when there is none. explicitPath is the project path given on the command
+// line, if any.
+//
+// A candidate root is the directory holding the nearest .scion entry at or
+// above a start directory: the explicit project path, then the working
+// directory, then the workspace path recorded in the project's settings. It
+// is accepted only when that .scion entry belongs to the resolved project: a
+// marker file that resolves to resolvedPath, or the .scion directory
+// resolvedPath names.
+func bootstrapWorkspaceDir(resolvedPath, explicitPath string) string {
+	var starts []string
+	if explicitPath != "" && explicitPath != "global" && explicitPath != "home" {
+		starts = append(starts, explicitPath)
+	}
+	if wd, err := os.Getwd(); err == nil {
+		starts = append(starts, wd)
+	}
+	if s, err := config.LoadSettings(resolvedPath); err == nil && s != nil && s.WorkspacePath != "" {
+		starts = append(starts, s.WorkspacePath)
+	}
+	for _, start := range starts {
+		if root := workspaceRootFrom(start, resolvedPath); root != "" {
+			return root
+		}
+	}
+	return ""
+}
+
+// workspaceRootFrom returns the directory holding the nearest .scion entry at
+// or above start when that entry belongs to the project resolved to
+// resolvedPath, or "".
+func workspaceRootFrom(start, resolvedPath string) string {
+	entry, isDir := nearestDotScion(start)
+	switch {
+	case entry == "":
+		return ""
+	case isDir:
+		if sameLocalPath(entry, resolvedPath) {
+			return filepath.Dir(entry)
+		}
+	default:
+		if resolved, err := config.ResolveProjectMarker(entry); err == nil && sameLocalPath(resolved, resolvedPath) {
+			return filepath.Dir(entry)
+		}
+	}
+	return ""
+}
+
+// nearestDotScion walks up from start to the first .scion entry and reports
+// its path and whether it is a directory. It returns "" when there is none.
+func nearestDotScion(start string) (path string, isDir bool) {
+	dir, err := filepath.Abs(start)
+	if err != nil {
+		return "", false
+	}
+	for {
+		p := filepath.Join(dir, config.DotScion)
+		if info, err := os.Stat(p); err == nil {
+			return p, info.IsDir()
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false
+		}
+		dir = parent
+	}
+}
+
+// noWorkspaceRootWarning is printed when a non-git start to a remote broker
+// has no workspace root to collect from.
+const noWorkspaceRootWarning = "no workspace root found for this project; run from the project directory or pass --project"
+
+// collectBootstrapWorkspace collects the files of the workspace root of the
+// project resolved to resolvedPath for the non-git workspace bootstrap (see
+// bootstrapWorkspaceDir). It returns the root and its files; dir is "" when
+// there is no non-git workspace root to collect from. found reports whether a
+// workspace root belonging to the project was found at all.
+func collectBootstrapWorkspace(resolvedPath, explicitPath string) (dir string, files []transfer.FileInfo, found bool, err error) {
+	dir = bootstrapWorkspaceDir(resolvedPath, explicitPath)
+	if dir == "" {
+		return "", nil, false, nil
+	}
+	if _, statErr := os.Stat(dir); statErr != nil || util.IsGitRepoDir(dir) {
+		return "", nil, true, nil
+	}
+	files, err = collectWorkspaceFiles(dir, nil)
+	if err != nil {
+		return "", nil, true, err
+	}
+	return dir, files, true, nil
+}
+
+// sameLocalPath reports whether a and b name the same location, compared in
+// pathcanon's canonical form (links resolved; case-insensitive on Windows).
+func sameLocalPath(a, b string) bool {
+	ab, err := pathcanon.Within(a, b)
+	if err != nil || !ab {
+		return false
+	}
+	ba, err := pathcanon.Within(b, a)
+	return err == nil && ba
 }
