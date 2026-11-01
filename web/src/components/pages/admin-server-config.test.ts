@@ -2897,7 +2897,11 @@ describe('scion-page-admin-server-config', () => {
       expect(text).not.toContain('Update Now');
       expect(text).not.toContain('Update & Restart');
       expect(query(element, '.update-banner')).toBeNull();
-      const urls = vi.mocked(fetch).mock.calls.map((c) => String(c[0]));
+      const urls = vi
+        .mocked(fetch)
+        .mock.calls.map(([input]) =>
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+        );
       expect(urls.some((u) => u.includes('/maintenance/check-updates'))).toBe(false);
       expect(urls.some((u) => u.includes('/maintenance/operations/'))).toBe(false);
       expect(ran).toBe(false);
