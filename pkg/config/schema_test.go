@@ -16,6 +16,8 @@ package config
 
 import (
 	"fmt"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -1625,7 +1627,7 @@ func TestDetectSettingsFormat_V1OnlyRuntimeKeyIndicators(t *testing.T) {
 		})
 	}
 	t.Run("legacy keys only", func(t *testing.T) {
-		data := []byte("runtimes:\n  k8s:\n    host: unix:///var/run/docker.sock\n    context: my-cluster\n    namespace: agents\n    env: {A: b}\n    sync: true\n")
+		data := []byte("runtimes:\n  k8s:\n    host: unix:///var/run/docker.sock\n    context: my-cluster\n    namespace: agents\n    env: {A: b}\n    sync: \"true\"\n")
 		version, isLegacy := DetectSettingsFormat(data)
 		assert.Equal(t, "", version, "legacy runtime keys alone are not a v1 indicator")
 		assert.False(t, isLegacy)
@@ -1643,4 +1645,35 @@ func TestDetectSettingsFormat_V1OnlyRuntimeKeysKeepExplicitVersion(t *testing.T)
 			assert.False(t, isLegacy)
 		})
 	}
+}
+
+// yamlKeys returns the yaml keys of a struct type's fields.
+func yamlKeys(t reflect.Type) map[string]bool {
+	keys := map[string]bool{}
+	for i := 0; i < t.NumField(); i++ {
+		name, _, _ := strings.Cut(t.Field(i).Tag.Get("yaml"), ",")
+		if name != "" && name != "-" {
+			keys[name] = true
+		}
+	}
+	return keys
+}
+
+// v1RuntimeIndicatorKeys must list exactly the runtime-entry keys that exist
+// only on V1RuntimeConfig: a key missing from it is dropped when a file
+// without schema_version uses it, and a key the legacy RuntimeConfig also has
+// would detect legacy files as v1.
+func TestV1RuntimeIndicatorKeys_MatchV1OnlyRuntimeFields(t *testing.T) {
+	legacy := yamlKeys(reflect.TypeOf(RuntimeConfig{}))
+	require.NotEmpty(t, legacy)
+	var want []string
+	for k := range yamlKeys(reflect.TypeOf(V1RuntimeConfig{})) {
+		if !legacy[k] {
+			want = append(want, k)
+		}
+	}
+	got := append([]string(nil), v1RuntimeIndicatorKeys...)
+	sort.Strings(want)
+	sort.Strings(got)
+	assert.Equal(t, want, got, "v1RuntimeIndicatorKeys must equal the V1RuntimeConfig yaml keys minus the RuntimeConfig ones")
 }
