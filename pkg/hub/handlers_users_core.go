@@ -247,11 +247,16 @@ func (s *Server) getUser(w http.ResponseWriter, r *http.Request, id string) {
 
 	resp := UserWithCapabilities{User: *user}
 	if identity := GetIdentityFromContext(ctx); identity != nil {
-		resource := userResource(user)
+		// A token's capabilities are computed on the hub-scoped user record,
+		// other callers' on the user record. The token branch builds the
+		// shape hubScopedResource builds, written as a literal so the
+		// resource-type guard resolves its type.
 		if isToken {
-			resource = hubScopedResource("user", user.ID)
+			resp.Cap = s.authzService.ComputeCapabilities(ctx, identity,
+				Resource{Type: "user", ID: user.ID, ParentType: "system"})
+		} else {
+			resp.Cap = s.authzService.ComputeCapabilities(ctx, identity, userResource(user))
 		}
-		resp.Cap = s.authzService.ComputeCapabilities(ctx, identity, resource)
 	}
 	stripPreferencesForViewer(ctx, &resp.User, resp.Cap)
 
