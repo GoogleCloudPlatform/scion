@@ -1184,6 +1184,9 @@ func CleanRemoteTemplateCache() error {
 // - Hub bucket/prefix configuration
 // - Fallback chain: local project -> hub project -> hub global -> error
 
+// rcloneURIPattern matches rclone remote URI syntax (e.g., :backend:path).
+var rcloneURIPattern = regexp.MustCompile(`^:\w+:.+`)
+
 // ValidateRemoteURI performs basic validation on a remote template URI.
 func ValidateRemoteURI(uri string) error {
 	if !IsRemoteURI(uri) {
@@ -1205,7 +1208,7 @@ func ValidateRemoteURI(uri string) error {
 
 	case RemoteTypeRclone:
 		// Basic validation - should match :backend:path format
-		if !regexp.MustCompile(`^:\w+:.+`).MatchString(uri) {
+		if !rcloneURIPattern.MatchString(uri) {
 			return fmt.Errorf("invalid rclone URI format: %s (expected :backend:path)", uri)
 		}
 		return nil
