@@ -131,19 +131,12 @@ func (o *SettingsOverlay) updateLocked(
 	o.active = true
 }
 
-// SetPlacementFindings records the Kubernetes placement findings of the
-// runtimes and profiles last given to Update: the settings paths whose
-// placement is malformed or invalid, and ignored unknown keys. It reports
-// whether they differ from the findings recorded before.
-func (o *SettingsOverlay) SetPlacementFindings(errs, warnings []string) bool {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	return o.setPlacementFindingsLocked(errs, warnings)
-}
-
-// UpdateWithPlacementFindings is Update and SetPlacementFindings under one
-// lock, so a reader never sees newly applied runtimes and profiles with the
-// findings of the previous ones. It reports whether the findings changed.
+// UpdateWithPlacementFindings is Update plus the Kubernetes placement
+// findings of the given runtimes and profiles (errs: the settings paths
+// whose placement is malformed or invalid; warnings: ignored unknown keys),
+// under one lock, so a reader never sees newly applied runtimes and
+// profiles with the findings of the previous ones. It reports whether the
+// findings changed.
 func (o *SettingsOverlay) UpdateWithPlacementFindings(
 	runtimes map[string]V1RuntimeConfig,
 	profiles map[string]V1ProfileConfig,
@@ -156,7 +149,10 @@ func (o *SettingsOverlay) UpdateWithPlacementFindings(
 	return o.setPlacementFindingsLocked(errs, warnings)
 }
 
-// setPlacementFindingsLocked is SetPlacementFindings with o.mu held.
+// setPlacementFindingsLocked records the Kubernetes placement findings of
+// the runtimes and profiles being applied (the settings paths whose
+// placement is malformed or invalid, and ignored unknown keys) with o.mu
+// held, and reports whether they differ from the findings recorded before.
 func (o *SettingsOverlay) setPlacementFindingsLocked(errs, warnings []string) bool {
 	changed := !slices.Equal(o.placementErrors, errs) || !slices.Equal(o.placementWarnings, warnings)
 	o.placementErrors = slices.Clone(errs)
@@ -221,6 +217,10 @@ func (o *SettingsOverlay) Apply(vs *VersionedSettings) {
 		return
 	}
 
+	// The placement findings of the runtimes and profiles applied below,
+	// copied under the same lock so a reader of vs never sees one without
+	// the other.
+	vs.placementErrors = slices.Clone(o.placementErrors)
 	if len(o.runtimes) > 0 {
 		vs.Runtimes = cloneRuntimes(o.runtimes)
 	}

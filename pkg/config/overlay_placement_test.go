@@ -89,7 +89,7 @@ func TestSettingsOverlayPlacementFindings(t *testing.T) {
 		t.Fatal("a nil overlay has placement errors")
 	}
 	o := NewSettingsOverlay()
-	if !o.SetPlacementFindings([]string{"runtimes.k"}, nil) || o.SetPlacementFindings([]string{"runtimes.k"}, nil) {
+	if !o.UpdateWithPlacementFindings(nil, nil, nil, []string{"runtimes.k"}, nil) || o.UpdateWithPlacementFindings(nil, nil, nil, []string{"runtimes.k"}, nil) {
 		t.Fatal("change reporting is wrong")
 	}
 	errs := o.PlacementErrors()
@@ -97,7 +97,39 @@ func TestSettingsOverlayPlacementFindings(t *testing.T) {
 	if o.PlacementErrors()[0] != "runtimes.k" {
 		t.Fatal("PlacementErrors shares the overlay's slice")
 	}
-	if !o.SetPlacementFindings(nil, nil) || o.PlacementErrors() != nil {
+	if !o.UpdateWithPlacementFindings(nil, nil, nil, nil, nil) || o.PlacementErrors() != nil {
 		t.Fatal("findings not cleared")
+	}
+}
+
+// Apply carries the overlay's placement findings into the settings it
+// fills, together with the maps from the same update: settings loaded
+// before a later update keep both the earlier maps and the earlier
+// findings, and settings loaded after it get both new ones.
+func TestSettingsOverlayApplyCarriesPlacementFindings(t *testing.T) {
+	if (*VersionedSettings)(nil).PlacementErrors() != nil {
+		t.Fatal("nil settings have placement errors")
+	}
+	o := NewSettingsOverlay()
+	invalid := map[string]V1RuntimeConfig{"k": {Type: "kubernetes", RuntimeClassName: "Not_Valid"}}
+	o.UpdateWithPlacementFindings(invalid, nil, nil, []string{"runtimes.k.runtime_class_name"}, nil)
+	before := &VersionedSettings{}
+	o.Apply(before)
+
+	valid := map[string]V1RuntimeConfig{"k": {Type: "kubernetes", RuntimeClassName: "gvisor"}}
+	o.UpdateWithPlacementFindings(valid, nil, nil, nil, nil)
+	after := &VersionedSettings{}
+	o.Apply(after)
+
+	if got := before.PlacementErrors(); !reflect.DeepEqual(got, []string{"runtimes.k.runtime_class_name"}) || before.Runtimes["k"].RuntimeClassName != "Not_Valid" {
+		t.Fatalf("settings applied before the fix: findings %v, runtime class %q", got, before.Runtimes["k"].RuntimeClassName)
+	}
+	if got := after.PlacementErrors(); got != nil || after.Runtimes["k"].RuntimeClassName != "gvisor" {
+		t.Fatalf("settings applied after the fix: findings %v, runtime class %q", got, after.Runtimes["k"].RuntimeClassName)
+	}
+	errs := before.PlacementErrors()
+	errs[0] = "changed"
+	if before.PlacementErrors()[0] != "runtimes.k.runtime_class_name" {
+		t.Fatal("PlacementErrors shares the settings' slice")
 	}
 }

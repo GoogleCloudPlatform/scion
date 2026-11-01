@@ -122,6 +122,10 @@ func (s *Server) placementForStart(ctx context.Context, res runtimeResolution, p
 	return operatorOwnedPlacement(rp), nil
 }
 
+// placementGlobalLoadedHook, when set (tests only), runs in resolvePlacement
+// right after the global settings (with the Hub overlay) are loaded.
+var placementGlobalLoadedHook func()
+
 // operatorOwnedPlacement returns legacy placement rp (nil: none) as
 // operator-owned placement, a fresh value that leaves rp unchanged.
 func operatorOwnedPlacement(rp *api.ResolvedPlacement) *api.ResolvedPlacement {
@@ -160,6 +164,9 @@ func (s *Server) resolvePlacement(ctx context.Context, res runtimeResolution, pr
 
 	// Step 2: the global settings, failing closed.
 	gvs, _, err := config.LoadGlobalSettingsWithOverlayFor(ctx)
+	if placementGlobalLoadedHook != nil {
+		placementGlobalLoadedHook()
+	}
 	if err != nil {
 		s.agentLifecycleLog.Warn("Kubernetes placement: global settings could not be read", "agent", res.Agent, "error", err)
 		return nil, placementRefusal(placementGlobalUnreadableCause)
@@ -176,8 +183,10 @@ func (s *Server) resolvePlacement(ctx context.Context, res runtimeResolution, pr
 	}
 	// Malformed or invalid placement in the Hub's stored runtimes and
 	// profiles fails every Kubernetes start closed: it is never read as no
-	// placement.
-	if paths := config.GetGlobalSettingsOverlay().PlacementErrors(); len(paths) > 0 {
+	// placement. The findings come with the runtimes and profiles gvs was
+	// built from (one overlay snapshot), so a concurrent settings save can
+	// never pair new findings with old entries or old findings with new.
+	if paths := gvs.PlacementErrors(); len(paths) > 0 {
 		s.agentLifecycleLog.Warn("Kubernetes placement: the stored runtimes and profiles have invalid placement", "agent", res.Agent, "paths", paths)
 		return nil, placementRefusal(placementOverlayInvalidCause)
 	}

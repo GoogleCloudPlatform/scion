@@ -281,15 +281,49 @@ func TestPlacementOverlayMalformedFailsClosed(t *testing.T) {
 	old := config.GetGlobalSettingsOverlay()
 	t.Cleanup(func() { config.SetGlobalSettingsOverlay(old) })
 	o := config.NewSettingsOverlay()
-	o.Update(map[string]config.V1RuntimeConfig{"gke": {Type: "kubernetes", Context: "ctx-a", Namespace: "agents"}}, nil, nil)
-	o.SetPlacementFindings([]string{"runtimes.gke"}, nil)
+	entries := map[string]config.V1RuntimeConfig{"gke": {Type: "kubernetes", Context: "ctx-a", Namespace: "agents"}}
+	o.UpdateWithPlacementFindings(entries, nil, nil, []string{"runtimes.gke"}, nil)
 	config.SetGlobalSettingsOverlay(o)
 	_, err := f.srv.resolvePlacement(context.Background(), f.res(resolutionForced, "", ""), nil)
 	wantRefusal(t, err, placementOverlayInvalidCause)
 
-	o.SetPlacementFindings(nil, nil)
+	o.UpdateWithPlacementFindings(entries, nil, nil, nil, nil)
 	if _, err := f.srv.resolvePlacement(context.Background(), f.res(resolutionForced, "", ""), nil); err != nil {
 		t.Fatalf("valid overlay: %v", err)
+	}
+}
+
+// A start reads the placement findings from the settings it loaded, never
+// from the overlay at a later moment: a settings save that lands right
+// after the start's load (here through a hook) neither clears the findings
+// of the entries the start resolves (a fix) nor adds findings to them (a
+// breakage). The findings always belong to the same overlay snapshot as
+// the runtimes and profiles.
+func TestPlacementFindingsComeFromTheLoadedSettings(t *testing.T) {
+	entries := map[string]config.V1RuntimeConfig{"gke": {Type: "kubernetes", Context: "ctx-a", Namespace: "agents"}}
+	for _, tc := range []struct {
+		name          string
+		before, after []string
+		refused       bool
+	}{
+		{"a fix lands after the load", []string{"runtimes.gke"}, nil, true},
+		{"a breakage lands after the load", nil, []string{"runtimes.gke"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newPlacementFixture(t, plBareGlobal, k8s.ConnKubeconfig, plGoodRecord())
+			o := config.NewSettingsOverlay()
+			o.UpdateWithPlacementFindings(entries, nil, nil, tc.before, nil)
+			config.SetGlobalSettingsOverlay(o)
+			placementGlobalLoadedHook = func() { o.UpdateWithPlacementFindings(entries, nil, nil, tc.after, nil) }
+			t.Cleanup(func() { placementGlobalLoadedHook = nil })
+
+			_, err := f.srv.resolvePlacement(context.Background(), f.res(resolutionForced, "", ""), nil)
+			if tc.refused {
+				wantRefusal(t, err, placementOverlayInvalidCause)
+			} else if err != nil {
+				t.Fatalf("resolve with the settings loaded before the breakage: %v", err)
+			}
+		})
 	}
 }
 
