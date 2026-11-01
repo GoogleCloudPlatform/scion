@@ -760,3 +760,48 @@ func TestPluginSwap_RestoreFailureKeepsBackups(t *testing.T) {
 	wantFile(t, filepath.Join(dir, "scion-plugin-a"), "a old")
 	noStaging(t, dir)
 }
+
+// stageThen is a fakeInstaller that runs then after a successful Stage.
+type stageThen struct {
+	fakeInstaller
+	then func()
+}
+
+func (s *stageThen) Stage(ctx context.Context, tag, bin string) (string, error) {
+	staged, err := s.fakeInstaller.Stage(ctx, tag, bin)
+	if err == nil {
+		s.then()
+	}
+	return staged, err
+}
+
+// TestPluginLockstep_StageFailureNeverActivates pins the order "stage the
+// plugin replacements, then Activate": a plugin directory that becomes
+// unwritable after the download phase makes staging fail, and the hub
+// release is never activated, restarted or rolled back.
+func TestPluginLockstep_StageFailureNeverActivates(t *testing.T) {
+	requireLinux(t)
+	if os.Geteuid() == 0 {
+		t.Skip("root can write a 0555 directory")
+	}
+	gh := newFakeGitHub(t)
+	gh.addLockstepRelease("nightly-20261023", "2026-10-23T04:00:00Z", lockstepPlugin{name: "telegram", body: "telegram 23"})
+	dir := pluginDirWith(t, map[string]string{"telegram": "telegram 22"})
+	inst := &stageThen{then: func() {
+		if err := os.Chmod(dir, 0o555); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	e := newTestExecutor(gh, inst, "nightly-20261022")
+	e.pluginDir = dir
+
+	err := e.Run(context.Background(), &bytes.Buffer{}, map[string]string{"target_version": "nightly-20261023"})
+	if err == nil || !strings.Contains(err.Error(), "stage the broker plugins, nothing was activated") {
+		t.Fatalf("err = %v", err)
+	}
+	if !slices.Equal(inst.calls, []string{"preflight", "stage:nightly-20261023"}) {
+		t.Fatalf("calls = %v, want no activate or restart", inst.calls)
+	}
+	wantFile(t, filepath.Join(dir, "scion-plugin-telegram"), "telegram 22")
+}
