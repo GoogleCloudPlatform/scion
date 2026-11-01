@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/pathcanon"
 )
 
 // errNFSMountScope marks an agent mount refused by checkNFSMountScope.
@@ -133,18 +134,37 @@ func newNFSBindScope(cfg RunConfig) (*nfsBindScope, error) {
 	return &nfsBindScope{hostBase: filepath.FromSlash(base), subPathRoot: root, projectID: cfg.ProjectID}, nil
 }
 
-// check refuses a bind source (resolved) on the share that
-// checkNFSMountScope refuses. Sources off the share are not its concern.
+// check refuses a bind source on the share that checkNFSMountScope
+// refuses. Sources off the share are not its concern. Whether a source is
+// on the share is decided by pathcanon.Within on the canonical forms of
+// both paths; a path that cannot be resolved is refused.
 func (s *nfsBindScope) check(src string) error {
 	if s == nil {
 		return nil
 	}
-	rel, err := filepath.Rel(s.hostBase, src)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+	base, err := pathcanon.Resolve(s.hostBase)
+	if err != nil {
+		return fmt.Errorf("%w: share %q cannot be resolved: %v", errNFSMountScope, s.hostBase, err)
+	}
+	source, err := pathcanon.Resolve(src)
+	if err != nil {
+		return fmt.Errorf("%w: bind source %q cannot be resolved: %v", errNFSMountScope, src, err)
+	}
+	onShare, err := pathcanon.Within(base, source)
+	if err != nil {
+		return fmt.Errorf("%w: bind source %q cannot be checked against the share: %v", errNFSMountScope, src, err)
+	}
+	if !onShare {
 		return nil
+	}
+	// source is base or below it (Within), so rel names its path on the
+	// share.
+	rel, err := filepath.Rel(base, source)
+	if err != nil {
+		return fmt.Errorf("%w: bind source %q: %v", errNFSMountScope, src, err)
 	}
 	if rel == "." {
 		rel = ""
 	}
-	return checkNFSMountScope(rel, s.subPathRoot, s.projectID)
+	return checkNFSMountScope(filepath.ToSlash(rel), s.subPathRoot, s.projectID)
 }
