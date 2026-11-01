@@ -124,6 +124,9 @@ type LastUpdate struct {
 	// Restored is the release the boot-failure guard restored (the
 	// marker's "to"); set only for LastUpdateRolledBack.
 	Restored string `json:"restored,omitempty"`
+	// Mode is UpdateModeGit for a rebuild from Git (its run is a
+	// rebuild-server run), else empty (an update-binary run).
+	Mode string `json:"mode,omitempty"`
 }
 
 // effectiveUpdateMode is how this hub is updated: the release selection's
@@ -341,6 +344,9 @@ func (s *Server) reconcilePendingUpdate(ctx context.Context, running string) err
 			To:     p.To,
 			Status: status,
 			At:     time.Now().UTC().Format(time.RFC3339),
+		}
+		if p.Mode == UpdateModeGit {
+			last.Mode = UpdateModeGit
 		}
 		if status == LastUpdateRolledBack {
 			last.At, last.Restored = marker.At, marker.To

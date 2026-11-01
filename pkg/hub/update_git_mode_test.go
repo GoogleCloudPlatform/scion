@@ -106,7 +106,7 @@ func TestReconcilePendingUpdate_GitRebuild(t *testing.T) {
 		if got.Status != store.MaintenanceStatusCompleted {
 			t.Fatalf("run = %+v, want completed", got)
 		}
-		if last := getLastUpdate(t, s); last == nil || last.Status != LastUpdateVerified || last.To != gitModeTestRelease {
+		if last := getLastUpdate(t, s); last == nil || last.Status != LastUpdateVerified || last.To != gitModeTestRelease || last.Mode != UpdateModeGit {
 			t.Fatalf("last_update = %+v", last)
 		}
 		sel := getReleaseSelection(t, s)
