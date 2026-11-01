@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
+	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/GoogleCloudPlatform/scion/pkg/version/update"
@@ -209,6 +210,17 @@ func (s *Server) updateInstaller() maintenance.Installer {
 		return inst
 	}
 	return maintenance.NewUnsupportedInstaller("no update installer was detected at startup", "")
+}
+
+// updatePluginDir is the broker plugin directory whose plugins an update
+// installs in lockstep (~/.scion/plugins/broker; design D6), "" when the
+// home directory cannot be resolved (lockstep is then off).
+func updatePluginDir() string {
+	dir, err := plugin.DefaultPluginsDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, plugin.PluginTypeBroker)
 }
 
 // DetectMaintenanceInstaller detects the update Installer for this host from

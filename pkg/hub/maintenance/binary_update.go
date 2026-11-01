@@ -210,6 +210,10 @@ type BinaryUpdateOptions struct {
 	// DowngradeFloor is the oldest installable release; default
 	// version.DowngradeFloor.
 	DowngradeFloor string
+	// PluginDir is the broker plugin directory whose plugins are updated
+	// with the hub (~/.scion/plugins/broker; design D6). "" disables
+	// plugin lockstep.
+	PluginDir string
 }
 
 // BinaryUpdateExecutor installs one verified release tag of GitHubRepo
@@ -225,12 +229,18 @@ type BinaryUpdateOptions struct {
 //     (redirects only to *.githubusercontent.com, size and time capped) and
 //     verify the tarball's own checksum line;
 //  5. extract only `scion` and check `scion version --format json`;
-//  6. snapshot the database (DBSnapshotter; skipped, with a log line, when
+//  6. download, verify and extract the target's builds of the broker
+//     plugins installed in PluginDir (preparePlugins; plugin lockstep,
+//     design D6), with the same pin, SHA256SUMS and caps;
+//  7. snapshot the database (DBSnapshotter; skipped, with a log line, when
 //     unsupported) and pass its path to the before-restart hook;
-//  7. Installer.Stage, Installer.Activate, the before-restart hook,
-//     Installer.Restart. If the hook or Restart fails, an installer that
-//     implements Deactivator (symlink) is rolled back so nothing changed;
-//     sudo-install cannot be, and its error says the new binary stays.
+//  8. Installer.Stage, plugin retention under releases/<tag>/plugins/
+//     (PluginRetainer installers), Installer.Activate, the plugin swap,
+//     the before-restart hook, Installer.Restart. If the plugin swap, the
+//     hook or Restart fails, an installer that implements Deactivator
+//     (symlink) is rolled back, and then the plugins too, so nothing
+//     changed; sudo-install cannot be, and its error says the new binary
+//     (and plugins) stay.
 //
 // Preflight, install, the hook and Restart each run under a short deadline
 // derived from the run ctx, the download phase under DownloadTimeout.
@@ -248,6 +258,7 @@ type BinaryUpdateExecutor struct {
 	timeout    time.Duration
 	snapshots  DBSnapshotter
 	floor      string
+	pluginDir  string
 
 	// Per-step deadlines after the download phase.
 	preflightTimeout time.Duration
@@ -278,6 +289,7 @@ func NewBinaryUpdateExecutor(opts BinaryUpdateOptions) *BinaryUpdateExecutor {
 		timeout:    opts.DownloadTimeout,
 		snapshots:  opts.Snapshotter,
 		floor:      opts.DowngradeFloor,
+		pluginDir:  opts.PluginDir,
 	}
 	if e.repo == "" {
 		e.repo = DefaultGitHubRepo
@@ -460,7 +472,9 @@ func DowngradeDetails(current, target string, class update.Class, floor string, 
 		fmt.Sprintf("Harness bundles created by newer releases may be rejected by %s.", target),
 		fmt.Sprintf("Settings keys that %s does not know may be dropped when it rewrites settings.yaml "+
 			"(a copy is saved with the snapshot).", target),
-		fmt.Sprintf("Broker plugins are not changed by this update; a plugin built for a newer release may fail with %s.", target),
+		fmt.Sprintf("Broker plugins installed in ~/.scion/plugins/broker are switched to %s's builds with the hub; "+
+			"a plugin %s does not publish, or a plugin directory the hub cannot write, stays at its current build and may fail with %s.",
+			target, target, target),
 		fmt.Sprintf("A database snapshot is written to %s before the update. Restoring it is a manual step: "+
 			"stop the hub, copy the snapshot over the database, switch the release back, start the hub.", st.Dir),
 	}
@@ -583,6 +597,10 @@ func (e *BinaryUpdateExecutor) RunWithBeforeRestart(ctx context.Context, logger 
 	if err := VerifyScionBinary(dlCtx, bin, target, logger); err != nil {
 		return fmt.Errorf("verification failed: %w", err)
 	}
+	plugins, err := e.preparePlugins(dlCtx, logger, client, rel, target, sums.Bytes(), tmpDir)
+	if err != nil {
+		return fmt.Errorf("broker plugin lockstep failed, nothing was installed: %w", err)
+	}
 	cancel()
 
 	// ── Database snapshot, before anything changes ──────────────────────
@@ -603,12 +621,32 @@ func (e *BinaryUpdateExecutor) RunWithBeforeRestart(ctx context.Context, logger 
 		cancelInstall()
 		return fmt.Errorf("stage %s: %w", target, err)
 	}
+	if r, ok := e.installer.(PluginRetainer); ok {
+		retainPlugins(logger, e.installer, plugins, r.ActiveRelease(), filepath.Base(staged))
+	}
 	err = e.installer.Activate(installCtx, staged)
 	cancelInstall()
 	if err != nil {
 		return fmt.Errorf("activate %s: %w", target, err)
 	}
 	_, _ = fmt.Fprintf(logger, "Installed %s.\n", target)
+
+	// ── Broker plugins, before the restart ──────────────────────────────
+	var swap *pluginSwap
+	if plugins != nil {
+		_, _ = fmt.Fprintf(logger, "\n==> Installing broker plugins (%s)\n", plugins.dir)
+		swap, err = stagePluginSwap(plugins)
+		if err == nil && swap != nil {
+			err = swap.apply(logger)
+		}
+		if err != nil {
+			return e.undoActivation(ctx, logger, target, nil,
+				fmt.Errorf("installing the broker plugins failed, so the hub was not restarted: %w", err))
+		}
+		if swap == nil {
+			_, _ = fmt.Fprintln(logger, "No broker plugin to replace.")
+		}
+	}
 
 	// ── Restart ─────────────────────────────────────────────────────────
 	_, _ = fmt.Fprintf(logger, "\n==> Restarting hub: %s -> %s at %s\n",
@@ -628,7 +666,7 @@ func (e *BinaryUpdateExecutor) RunWithBeforeRestart(ctx context.Context, logger 
 		cancelHook()
 		if err != nil {
 			log.Error("Before-restart hook failed; not restarting", "error", err)
-			return e.undoActivation(ctx, logger, target,
+			return e.undoActivation(ctx, logger, target, swap,
 				fmt.Errorf("recording the restart failed, so the hub was not restarted: %w", err))
 		}
 	}
@@ -636,7 +674,10 @@ func (e *BinaryUpdateExecutor) RunWithBeforeRestart(ctx context.Context, logger 
 	err = e.installer.Restart(restartCtx)
 	cancelRestart()
 	if err != nil {
-		return e.undoActivation(ctx, logger, target, fmt.Errorf("restarting the hub failed: %w", err))
+		return e.undoActivation(ctx, logger, target, swap, fmt.Errorf("restarting the hub failed: %w", err))
+	}
+	if swap != nil {
+		swap.cleanup()
 	}
 	log.Info("Binary update installed, restart requested", "from", e.current, "to", target)
 	_, _ = fmt.Fprintln(logger, "Restart requested.")
@@ -644,13 +685,17 @@ func (e *BinaryUpdateExecutor) RunWithBeforeRestart(ctx context.Context, logger 
 }
 
 // undoActivation is called when an activated update cannot be followed by a
-// restart. Installers that implement Deactivator are rolled back, so the
+// restart. Installers that implement Deactivator are rolled back, and
+// then the broker plugins swap replaced (when swap is not nil), so the
 // failed run changed nothing. Others (sudo-install keeps no backup) leave
 // the new binary installed, and the error says it will run after the next
-// restart.
-func (e *BinaryUpdateExecutor) undoActivation(ctx context.Context, logger io.Writer, target string, cause error) error {
+// restart; its plugins stay replaced too, so they match the hub that runs.
+func (e *BinaryUpdateExecutor) undoActivation(ctx context.Context, logger io.Writer, target string, swap *pluginSwap, cause error) error {
 	d, ok := e.installer.(Deactivator)
 	if !ok {
+		if swap != nil {
+			swap.cleanup()
+		}
 		return fmt.Errorf("%w; %s cannot be rolled back by the %s installer (no backup of the previous binary is kept): %s stays installed and will run after the hub's next restart",
 			cause, target, e.installer.Name(), target)
 	}
@@ -663,8 +708,18 @@ func (e *BinaryUpdateExecutor) undoActivation(ctx context.Context, logger io.Wri
 	undoCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.installTimeout)
 	defer cancel()
 	if err := d.Deactivate(undoCtx); err != nil {
+		if swap != nil {
+			swap.cleanup()
+		}
 		return fmt.Errorf("%w; rolling back %s also failed (%v): %s stays installed and will run after the hub's next restart",
 			cause, target, err, target)
+	}
+	if swap != nil {
+		if err := swap.restore(); err != nil {
+			return fmt.Errorf("%w; %s was rolled back, but restoring the previous broker plugins failed (%v): they stay at %s's builds",
+				cause, target, err, target)
+		}
+		_, _ = fmt.Fprintf(logger, "Restored the previous broker plugins.\n")
 	}
 	_, _ = fmt.Fprintf(logger, "Rolled back: the previous release is active again.\n")
 	return fmt.Errorf("%w; %s was rolled back, nothing changed", cause, target)
@@ -724,11 +779,24 @@ func (e *BinaryUpdateExecutor) checkTarget(ctx context.Context, target string, r
 	case class == update.ClassSame:
 		return requestErrorf(CodeAlreadyRunning, "the hub is already running %s", target)
 	case class == update.ClassUnknown:
-		return e.admitDowngrade(target, update.ClassSwitchOlder, params)
+		return e.withPluginRisks(e.admitDowngrade(target, update.ClassSwitchOlder, params), rel, target)
 	case class.IsDowngrade():
-		return e.admitDowngrade(target, class, params)
+		return e.withPluginRisks(e.admitDowngrade(target, class, params), rel, target)
 	}
 	return nil
+}
+
+// withPluginRisks adds to the risk list of a downgrade confirmation what
+// plugin lockstep cannot do for target (pluginRisks).
+func (e *BinaryUpdateExecutor) withPluginRisks(err error, rel *Release, target string) error {
+	re, ok := IsRequestError(err)
+	if !ok || re.Code != CodeDowngradeRequiresConfirmation || re.Details == nil {
+		return err
+	}
+	if risks, ok := re.Details["risks"].([]string); ok {
+		re.Details["risks"] = append(risks, e.pluginRisks(rel, target)...)
+	}
+	return err
 }
 
 // CheckTarget runs every check Run makes before its download, without
@@ -741,6 +809,15 @@ func (e *BinaryUpdateExecutor) checkTarget(ctx context.Context, target string, r
 // repeats every check.
 func (e *BinaryUpdateExecutor) CheckTarget(ctx context.Context, params map[string]string) error {
 	if err := e.ValidateParams(params); err != nil {
+		// A same-channel downgrade is refused without a release lookup;
+		// its risk list still names the plugins the target lacks. A failed
+		// lookup leaves the generic plugin risk only.
+		if re, ok := IsRequestError(err); ok && re.Code == CodeDowngradeRequiresConfirmation && e.hasInstalledPlugins() {
+			target := params[ParamTargetVersion]
+			if rel, lerr := e.releases.ReleaseByTag(ctx, target); lerr == nil && rel != nil && rel.Tag == target {
+				return e.withPluginRisks(err, rel, target)
+			}
+		}
 		return err
 	}
 	target := params[ParamTargetVersion]

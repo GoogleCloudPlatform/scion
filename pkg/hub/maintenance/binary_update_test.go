@@ -795,7 +795,7 @@ func TestBinaryUpdate_RollbackRunsWhenRunCtxIsCancelled(t *testing.T) {
 		e := newTestExecutor(newFakeGitHub(t), inst, "nightly-20261022")
 		parent, cancel := context.WithCancel(context.WithValue(context.Background(), testCtxKey{}, "trace-1"))
 		cancel()
-		err := e.undoActivation(parent, &bytes.Buffer{}, "nightly-20261023", errors.New("hook failed"))
+		err := e.undoActivation(parent, &bytes.Buffer{}, "nightly-20261023", nil, errors.New("hook failed"))
 		if err == nil || !strings.Contains(err.Error(), "rolled back, nothing changed") {
 			t.Fatalf("err = %v, want a completed rollback", err)
 		}

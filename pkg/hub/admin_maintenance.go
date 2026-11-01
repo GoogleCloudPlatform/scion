@@ -410,6 +410,7 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 			Releases:    s.updateReleaseSource(),
 			Catalog:     s.updateReleaseCatalog(),
 			Snapshotter: s.updateSnapshotter(context.Background()),
+			PluginDir:   updatePluginDir(),
 		}), nil
 	default:
 		return nil, fmt.Errorf("no executor registered for operation %q", key)
