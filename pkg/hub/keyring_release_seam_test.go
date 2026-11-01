@@ -153,6 +153,9 @@ func TestRelaxKeyringReleaseForTest_RefusesOutsideTests(t *testing.T) {
 	assert.Equal(t, reflect.ValueOf(releaseKeyringCheck).Pointer(), reflect.ValueOf(keyringReleaseCheck).Pointer(), "a refused call leaves the production check in place")
 
 	restore := RelaxKeyringReleaseForTest()
+	// Restore even if an assertion below stops the test, so the relaxed
+	// check never leaks into later tests (restoring twice is harmless).
+	t.Cleanup(restore)
 	require.NoError(t, keyringReleaseCheck(seamNoLegacyKeyring(t), nil), "inside a test binary the hook relaxes the check")
 	restore()
 	assert.Equal(t, reflect.ValueOf(releaseKeyringCheck).Pointer(), reflect.ValueOf(keyringReleaseCheck).Pointer(), "restore reinstates the production check")
