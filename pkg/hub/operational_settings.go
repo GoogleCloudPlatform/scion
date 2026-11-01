@@ -1631,6 +1631,25 @@ func (a *settingsApplyState) recordLocked(snap Layer1Snapshot) {
 	}
 }
 
+// UpdateSettingsOverlay applies snap's runtimes, profiles and harness
+// configs (nil: no change) and their Kubernetes placement findings to
+// overlay under one lock (config.SettingsOverlay.UpdateWithPlacementFindings),
+// and logs the findings when they change. ApplySnapshot and the co-located
+// Runtime Broker's overlay install both use it, so a snapshot's findings are
+// recorded the same way from the first dispatch on.
+func UpdateSettingsOverlay(overlay *config.SettingsOverlay, snap Layer1Snapshot) {
+	if !overlay.UpdateWithPlacementFindings(snap.Runtimes, snap.Profiles, snap.HarnessConfigs, snap.PlacementErrors, snap.PlacementWarnings) {
+		return
+	}
+	for _, w := range snap.PlacementWarnings {
+		slog.Warn("Stored runtimes and profiles: " + w)
+	}
+	if len(snap.PlacementErrors) > 0 {
+		slog.Error("Stored runtimes and profiles have invalid Kubernetes placement; the co-located Runtime Broker refuses Kubernetes starts until they are fixed",
+			"paths", snap.PlacementErrors)
+	}
+}
+
 // ApplySnapshot writes the Layer1Snapshot values into the Server's config
 // and MaintenanceState. This is the refactored body of the old reloadSettings()
 // logic — no consumer sites change; request-path code keeps reading s.config.*
@@ -2012,15 +2031,7 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	// but is still a finding.
 	mapsChanged := snap.Runtimes != nil || snap.Profiles != nil || snap.HarnessConfigs != nil
 	if overlay := config.GetGlobalSettingsOverlay(); overlay != nil && (mapsChanged || snap.FromOperationalSettings) {
-		if overlay.UpdateWithPlacementFindings(snap.Runtimes, snap.Profiles, snap.HarnessConfigs, snap.PlacementErrors, snap.PlacementWarnings) {
-			for _, w := range snap.PlacementWarnings {
-				slog.Warn("Stored runtimes and profiles: " + w)
-			}
-			if len(snap.PlacementErrors) > 0 {
-				slog.Error("Stored runtimes and profiles have invalid Kubernetes placement; the co-located Runtime Broker refuses Kubernetes starts until they are fixed",
-					"paths", snap.PlacementErrors)
-			}
-		}
+		UpdateSettingsOverlay(overlay, snap)
 	}
 	if mapsChanged {
 		if overlay := config.GetGlobalSettingsOverlay(); overlay != nil {

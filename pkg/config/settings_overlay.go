@@ -141,10 +141,9 @@ func (o *SettingsOverlay) SetPlacementFindings(errs, warnings []string) bool {
 	return o.setPlacementFindingsLocked(errs, warnings)
 }
 
-// UpdateWithPlacementFindings is Update (skipped when every map is nil)
-// and SetPlacementFindings under one lock, so a reader never sees newly
-// applied runtimes and profiles with the findings of the previous ones.
-// It reports whether the findings changed.
+// UpdateWithPlacementFindings is Update and SetPlacementFindings under one
+// lock, so a reader never sees newly applied runtimes and profiles with the
+// findings of the previous ones. It reports whether the findings changed.
 func (o *SettingsOverlay) UpdateWithPlacementFindings(
 	runtimes map[string]V1RuntimeConfig,
 	profiles map[string]V1ProfileConfig,
@@ -153,9 +152,7 @@ func (o *SettingsOverlay) UpdateWithPlacementFindings(
 ) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if runtimes != nil || profiles != nil || harnessConfigs != nil {
-		o.updateLocked(runtimes, profiles, harnessConfigs)
-	}
+	o.updateLocked(runtimes, profiles, harnessConfigs)
 	return o.setPlacementFindingsLocked(errs, warnings)
 }
 

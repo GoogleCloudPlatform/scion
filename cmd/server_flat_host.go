@@ -776,7 +776,11 @@ func installColocatedSettingsOverlay(cfg *config.GlobalConfig, hubSrv *hub.Serve
 	config.SetGlobalSettingsOverlay(overlay)
 	if ops := hubSrv.GetOperationalSettings(); ops != nil {
 		snap := ops.Snapshot()
-		overlay.Update(snap.Runtimes, snap.Profiles, snap.HarnessConfigs)
+		// The stored runtimes and profiles, with their Kubernetes placement
+		// findings, so invalid stored placement refuses Kubernetes starts
+		// from the first dispatch (the startup ApplySnapshot ran before
+		// this install).
+		hub.UpdateSettingsOverlay(overlay, snap)
 		// Removed storage overrides in the stored runtimes and profiles are
 		// reported, not refused: they are fixed through the admin settings
 		// API, which needs a running hub (ptone/scion#6371).
