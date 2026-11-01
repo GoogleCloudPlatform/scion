@@ -46,15 +46,27 @@ func TestPlacementLoadUnknownNonPlacementWarns(t *testing.T) {
 	}
 }
 
-// On load, malformed or misspelt placement keys, and invalid placement,
-// are placement errors naming the entry: the Runtime Broker then refuses
-// Kubernetes starts rather than reading them as no placement.
+// On load, malformed or misspelt placement keys, invalid placement, sibling
+// runtime entries that disagree, and the rules across runtime entries and
+// profiles are placement errors naming the entry: the Runtime Broker then
+// refuses Kubernetes starts rather than reading them as no placement.
 func TestPlacementLoadUnknownPlacementRejects(t *testing.T) {
 	cases := map[string]map[string]json.RawMessage{
 		"runtimes.k":                    {"runtimes": json.RawMessage(`{"k":{"type":"kubernetes","nodeSelector":{"pool":"a"}}}`)},
 		"profiles.p":                    {"profiles": json.RawMessage(`{"p":{"runtime":"kubernetes","tolerations":[{"key":"a","tolerationSeconds":5}]}}`)},
 		"runtimes.d":                    {"runtimes": json.RawMessage(`{"d":{"type":"docker","runtime_class_name":"gvisor"}}`)},
 		"runtimes.c.runtime_class_name": {"runtimes": json.RawMessage(`{"c":{"type":"kubernetes","runtime_class_name":"Not_Valid"}}`)},
+		// Sibling runtime entries (same context and namespace) that
+		// disagree: the pair is named once, at its first entry.
+		"runtimes.a": {"runtimes": json.RawMessage(`{"a":{"type":"kubernetes","context":"c1","namespace":"agents","node_selector":{"pool":"x"}},` +
+			`"b":{"type":"kubernetes","context":"c1","namespace":"agents","node_selector":{"pool":"y"}}}`)},
+		// A profile's pool selector that differs from its runtime entry's.
+		"profiles.p.node_selector": {
+			"runtimes": json.RawMessage(`{"k":{"type":"kubernetes","node_selector":{"scion.dev/pool":"a"}}}`),
+			"profiles": json.RawMessage(`{"p":{"runtime":"k","node_selector":{"scion.dev/pool":"b"}}}`),
+		},
+		// A profile with placement whose runtime entry does not exist.
+		"profiles.p.runtime": {"profiles": json.RawMessage(`{"p":{"runtime":"nosuch","runtime_class_name":"gvisor"}}`)},
 	}
 	for want, docs := range cases {
 		got, _ := OverlayMapSections(docs, nil)
