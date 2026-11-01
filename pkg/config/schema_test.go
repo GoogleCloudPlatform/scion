@@ -1598,3 +1598,49 @@ profiles:
 	require.NoError(t, err)
 	assert.Empty(t, errs)
 }
+
+// v1OnlyRuntimeKeyValues holds a YAML value for each runtime-entry key added
+// to v1RuntimeIndicatorKeys for placement, Cloud Run, substrate and
+// Kubernetes service account settings. Each key exists only on
+// V1RuntimeConfig, not on the legacy RuntimeConfig.
+var v1OnlyRuntimeKeyValues = map[string]string{
+	"priority_class_name":                 "scion-agents",
+	"runtime_class_name":                  "gvisor",
+	"node_selector":                       "{pool: agents}",
+	"tolerations":                         "[{key: dedicated, operator: Equal, value: agents, effect: NoSchedule}]",
+	"cloudrun_instances":                  "{project_id: my-project}",
+	"cloudrun_sandbox":                    "{project_id: my-project}",
+	"substrate":                           "{endpoint: substrate-example}",
+	"kubernetes_service_account_mappings": `{"sa@my-project.iam.gserviceaccount.com": agent-ksa}`,
+	"kubernetes_block_service_account":    "blocked-ksa",
+}
+
+func TestDetectSettingsFormat_V1OnlyRuntimeKeyIndicators(t *testing.T) {
+	for key, value := range v1OnlyRuntimeKeyValues {
+		t.Run(key, func(t *testing.T) {
+			data := []byte("runtimes:\n  k8s:\n    " + key + ": " + value + "\n")
+			version, isLegacy := DetectSettingsFormat(data)
+			assert.Equal(t, "1", version, "a runtime entry using only %s and no schema_version is v1", key)
+			assert.False(t, isLegacy)
+		})
+	}
+	t.Run("legacy keys only", func(t *testing.T) {
+		data := []byte("runtimes:\n  k8s:\n    host: unix:///var/run/docker.sock\n    context: my-cluster\n    namespace: agents\n    env: {A: b}\n    sync: true\n")
+		version, isLegacy := DetectSettingsFormat(data)
+		assert.Equal(t, "", version, "legacy runtime keys alone are not a v1 indicator")
+		assert.False(t, isLegacy)
+	})
+}
+
+// An explicit schema_version other than "1" is returned as is: the runtime
+// key indicators apply only to files with no schema_version.
+func TestDetectSettingsFormat_V1OnlyRuntimeKeysKeepExplicitVersion(t *testing.T) {
+	for key, value := range v1OnlyRuntimeKeyValues {
+		t.Run(key, func(t *testing.T) {
+			data := []byte("schema_version: \"2\"\nruntimes:\n  k8s:\n    " + key + ": " + value + "\n")
+			version, isLegacy := DetectSettingsFormat(data)
+			assert.Equal(t, "2", version, "an explicit non-v1 schema_version is not replaced by the %s indicator", key)
+			assert.False(t, isLegacy)
+		})
+	}
+}
