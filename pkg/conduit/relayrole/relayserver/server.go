@@ -52,6 +52,11 @@ import (
 // changes. A hub test keeps this list equal to the hub's own.
 var RevocationSubjects = []string{"conduit.authz.changed", "agent.*.deleted", "agent.*.ports", "project.*.deleted", "conduit.broker.changed"}
 
+// GrantKeysChangedSubject is the hub event published after a grant key
+// rotation or revocation is stored. The relay sends GrantKeysChanged to its
+// stream_renewal.v2 target sessions on it, so they fetch keys at once.
+const GrantKeysChangedSubject = "conduit.grant_keys.changed"
+
 // SettingsUpdatedSubject is the hub event published after a settings
 // change. The relay re-reads hub.conduit on it, besides its periodic read.
 const SettingsUpdatedSubject = "admin.settings.updated"
@@ -374,6 +379,10 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	unsubscribe := func() {}
 	if cfg.Events != nil {
 		changed, unsubscribe = cfg.Events.Subscribe(SettingsUpdatedSubject)
+		keys, unsubscribeKeys := cfg.Events.Subscribe(GrantKeysChangedSubject)
+		reconnected := make(chan struct{}, 1)
+		removeHook := cfg.Events.AddOnListen(listenReconnectHook(reconnected))
+		go followGrantKeys(ctx, keys, reconnected, r.NotifyGrantKeysChanged, func() { unsubscribeKeys(); removeHook() })
 	}
 	if cfg.StartEvents != nil {
 		cfg.StartEvents()
@@ -501,4 +510,41 @@ func requireConfidentialArrival(next http.Handler, trusted []*net.IPNet, log *sl
 			"details": map[string]any{"reason": reason, "setting": config.TrustedProxiesKey},
 		}})
 	})
+}
+
+// listenReconnectHook returns an AddOnListen hook that signals reconnected
+// on every LISTEN (re)connect except the first: a notice missed while the
+// connection was down is covered by hinting again. It never blocks the
+// listener (one pending signal is enough).
+func listenReconnectHook(reconnected chan<- struct{}) func() {
+	var listened atomic.Bool
+	return func() {
+		if !listened.Swap(true) {
+			return
+		}
+		select {
+		case reconnected <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// followGrantKeys calls notify (the relay's NotifyGrantKeysChanged) on every
+// grant key change event and on every LISTEN reconnect, until ctx ends or
+// the event channel closes. Targets rate-limit the key fetches a hint
+// triggers.
+func followGrantKeys(ctx context.Context, keys <-chan string, reconnected <-chan struct{}, notify func() int, stop func()) {
+	defer stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case _, ok := <-keys:
+			if !ok {
+				return
+			}
+		case <-reconnected:
+		}
+		notify()
+	}
 }
