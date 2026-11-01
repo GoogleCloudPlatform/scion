@@ -102,9 +102,11 @@ type nfsBindScope struct {
 
 // newNFSBindScope returns the bind check for cfg, or nil when its
 // workspace is not on NFS project storage. The share's host base is not
-// in the run config: it is the part of the (resolved) workspace before
-// <subpath root>/<project ID>, and a workspace that does not sit strictly
-// inside that tree is refused.
+// in the run config: pkg/agent places an nfs-backend workspace at exactly
+// <host base>/<subpath root>/<project ID>/workspace on these runtimes (the
+// project workspace; per-agent workspaces on the share are
+// Kubernetes-only), so the host base is the workspace with that suffix
+// removed, and any other workspace is refused.
 func newNFSBindScope(cfg RunConfig) (*nfsBindScope, error) {
 	if cfg.WorkspaceBackendName != "nfs" {
 		return nil, nil
@@ -116,22 +118,19 @@ func newNFSBindScope(cfg RunConfig) (*nfsBindScope, error) {
 	if err != nil {
 		return nil, refuse(fmt.Sprintf("cannot be checked (%v)", err))
 	}
-	if cfg.ProjectID == "" || cfg.Workspace == "" {
+	if cfg.ProjectID == "" || strings.ContainsAny(cfg.ProjectID, `/\`) || cfg.Workspace == "" {
 		return nil, refuse(fmt.Sprintf("cannot be checked against project ID %q", cfg.ProjectID))
 	}
-	want := append(strings.Split(filepath.ToSlash(root), "/"), cfg.ProjectID)
-	comps := strings.Split(filepath.ToSlash(filepath.Clean(cfg.Workspace)), "/")
-	// The rightmost <subpath root>/<project ID> with something below it.
-	for i := len(comps) - len(want) - 1; i >= 1; i-- {
-		if slices.Equal(comps[i:i+len(want)], want) {
-			base := strings.Join(comps[:i], "/")
-			if base == "" {
-				base = "/"
-			}
-			return &nfsBindScope{hostBase: filepath.FromSlash(base), subPathRoot: root, projectID: cfg.ProjectID}, nil
-		}
+	suffix := "/" + path.Join(filepath.ToSlash(root), cfg.ProjectID, projectfs.ProjectWorkspaceDirName)
+	ws := filepath.ToSlash(filepath.Clean(cfg.Workspace))
+	base, ok := strings.CutSuffix(ws, suffix)
+	if !ok || !filepath.IsAbs(cfg.Workspace) {
+		return nil, refuse(fmt.Sprintf("is not project %s's workspace on NFS project storage (<share>%s)", cfg.ProjectID, suffix))
 	}
-	return nil, refuse(fmt.Sprintf("is not inside project %s's tree on NFS project storage", cfg.ProjectID))
+	if base == "" {
+		base = "/"
+	}
+	return &nfsBindScope{hostBase: filepath.FromSlash(base), subPathRoot: root, projectID: cfg.ProjectID}, nil
 }
 
 // check refuses a bind source (resolved) on the share that

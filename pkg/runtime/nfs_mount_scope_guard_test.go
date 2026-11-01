@@ -87,6 +87,13 @@ func TestNewNFSBindScope(t *testing.T) {
 	if err := s.check("/mnt/scion/share1"); !errors.Is(err, errNFSMountScope) {
 		t.Errorf("check(share root) = %v, want refusal", err)
 	}
+	// A host base that itself contains <subpath root>/<project ID>: only
+	// the workspace suffix is removed.
+	nested := "/srv/" + scopeRel("mnt", "share1", scopeRel("workspace"))
+	if s, err := newNFSBindScope(RunConfig{WorkspaceBackendName: "nfs", ProjectID: scopeProjectID, Workspace: nested}); err != nil ||
+		s.hostBase != filepath.FromSlash("/srv/"+scopeRel("mnt", "share1")) {
+		t.Errorf("nested host base: newNFSBindScope(%s) = %+v, %v", nested, s, err)
+	}
 	if s, err := newNFSBindScope(RunConfig{WorkspaceBackendName: "local", Workspace: "/x"}); s != nil || err != nil {
 		t.Errorf("local backend: newNFSBindScope = %+v, %v; want no check", s, err)
 	}
@@ -95,6 +102,12 @@ func TestNewNFSBindScope(t *testing.T) {
 		{WorkspaceBackendName: "nfs", ProjectID: scopeProjectID, Workspace: "/srv/agent/workspace"},
 		{WorkspaceBackendName: "nfs", ProjectID: scopeProjectID, Workspace: "/mnt/scion/share1/" + scopeRel()},
 		{WorkspaceBackendName: "nfs", ProjectID: scopeProjectID, NFSSubPathRoot: "other", Workspace: ws},
+		// Another project whose ID has this one as a prefix.
+		{WorkspaceBackendName: "nfs", ProjectID: scopeProjectID, Workspace: "/mnt/scion/share1/projects/" + scopeProjectID + "x/workspace"},
+		// Not the project workspace itself.
+		{WorkspaceBackendName: "nfs", ProjectID: scopeProjectID, Workspace: ws + "/sub"},
+		{WorkspaceBackendName: "nfs", ProjectID: scopeProjectID, Workspace: "/mnt/scion/share1/" + scopeRel("agents", scopeAgent, "workspace")},
+		{WorkspaceBackendName: "nfs", ProjectID: scopeProjectID, Workspace: scopeRel("workspace")},
 	} {
 		if _, err := newNFSBindScope(cfg); !errors.Is(err, errNFSMountScope) {
 			t.Errorf("newNFSBindScope(%+v) = %v, want refusal", cfg, err)
@@ -162,4 +175,28 @@ func TestBuildCommonRunArgs_NFSMountScopeRefused(t *testing.T) {
 			t.Fatalf("buildCommonRunArgs = %v, want a mount-scope refusal", err)
 		}
 	})
+}
+
+// With the subpath root known, a shared-dir subPath must be in the
+// project's tree below it, not only <project>/shared-dirs/<name> in shape.
+// On the transitional split (no subpath root) the shape check alone applies.
+func TestSharedDirClaimSubPath_MountScope(t *testing.T) {
+	r := &SharedDirRealization{
+		Backend: "nfs", PVClaimName: scopeClaim, ProjectID: scopeProjectID, SubPathRoot: scopeRoot,
+		SubPaths: map[string]string{
+			"scratch": scopeRel("shared-dirs", "scratch"),
+			"other":   "elsewhere/" + scopeProjectID + "/shared-dirs/other",
+		},
+	}
+	if _, _, err := sharedDirClaimSubPath(r, "scratch"); err != nil {
+		t.Errorf("sharedDirClaimSubPath(scratch) = %v, want nil", err)
+	}
+	if _, _, err := sharedDirClaimSubPath(r, "other"); !errors.Is(err, errNFSMountScope) {
+		t.Errorf("sharedDirClaimSubPath(other) = %v, want a mount-scope refusal", err)
+	}
+	split := *r
+	split.SubPathRoot = ""
+	if _, _, err := sharedDirClaimSubPath(&split, "other"); err != nil {
+		t.Errorf("transitional split: sharedDirClaimSubPath(other) = %v, want the shape check only", err)
+	}
 }
