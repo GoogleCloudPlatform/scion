@@ -215,7 +215,7 @@ func decodesUnderAny(ws *WebServer, c *http.Cookie) bool {
 // krRollout returns the keyrings of two replicas mid-rollout: A still has
 // gen1 active; B has activated gen2 and keeps gen1 as the outgoing entry
 // (issuance closed at T0+1h, verification until T0+48h). Both carry the
-// imported legacy entry, which every other purpose still uses.
+// imported legacy entry, unless rolloutWithoutLegacy is set.
 func krRollout(t *testing.T) (a, b *keyring.Keyring) {
 	legacy := []krEntry{{id: "legacy", secret: krLegacySecret}}
 	if rolloutWithoutLegacy {
