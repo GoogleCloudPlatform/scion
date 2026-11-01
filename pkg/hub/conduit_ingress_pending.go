@@ -129,10 +129,3 @@ func (p *conduitIngressPending) addLocked(now time.Time, ri registry.RelayInstan
 		})
 	}
 }
-
-// pendingFor returns the pending placements on ri (tests).
-func (p *conduitIngressPending) pendingFor(ri registry.RelayInstance) int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.countLocked(conduitIngressPendingKey{ri.InstanceID, ri.Generation})
-}

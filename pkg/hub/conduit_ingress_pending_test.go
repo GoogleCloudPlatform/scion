@@ -154,3 +154,10 @@ func abs(n int) int {
 	}
 	return n
 }
+
+// pendingFor returns the pending placements on ri (a test helper: production code reads the count under its own lock).
+func (p *conduitIngressPending) pendingFor(ri registry.RelayInstance) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.countLocked(conduitIngressPendingKey{ri.InstanceID, ri.Generation})
+}
