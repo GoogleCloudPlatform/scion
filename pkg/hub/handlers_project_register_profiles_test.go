@@ -183,6 +183,10 @@ func TestProjectRegisterEmbeddedBroker_ReregisterWithCapabilitiesReplaces(t *tes
 	srv, s := testServer(t)
 	owner := newHubMemberUser(t, s, "register-caps-owner-f")
 	broker := registerBrokerTestExistingBroker(t, s, "register-caps-name-f", owner.ID)
+	// Stored Sync is true and the request leaves it out (false), so a
+	// merge instead of a replace would keep it true.
+	broker.Capabilities = &store.BrokerCapabilities{WebPTY: false, Sync: true, Attach: false}
+	require.NoError(t, s.UpdateRuntimeBroker(context.Background(), broker))
 
 	rec := doRequestAsUserLoopback(t, srv, owner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
 		Name: "register-caps-project-f",
@@ -200,5 +204,5 @@ func TestProjectRegisterEmbeddedBroker_ReregisterWithCapabilitiesReplaces(t *tes
 	require.NotNil(t, updated.Capabilities)
 	assert.True(t, updated.Capabilities.WebPTY, "capabilities sent on a re-register replace the stored ones")
 	assert.True(t, updated.Capabilities.Attach)
-	assert.False(t, updated.Capabilities.Sync)
+	assert.False(t, updated.Capabilities.Sync, "the stored capabilities are replaced, not merged")
 }
