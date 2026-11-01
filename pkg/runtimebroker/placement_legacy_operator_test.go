@@ -184,14 +184,21 @@ var legacyCreateConflicts = []struct {
 		"kubernetes.runtimeClassName in the request"},
 }
 
-// expectNoAgentDir fails when a refused create left the agent's directory.
-func expectNoAgentDir(t *testing.T, name string) {
+// legacyCreateAgentDir is the directory a create of agent name in the
+// fixture's project provisions.
+func legacyCreateAgentDir(t *testing.T, name string) string {
 	t.Helper()
 	projectDir, err := config.GetResolvedProjectDir("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(config.GetAgentDir(projectDir, name, false)); !errors.Is(err, os.ErrNotExist) {
+	return config.GetAgentDir(projectDir, name, false)
+}
+
+// expectNoAgentDir fails when a refused create left the agent's directory.
+func expectNoAgentDir(t *testing.T, name string) {
+	t.Helper()
+	if _, err := os.Stat(legacyCreateAgentDir(t, name)); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("agent directory of %s exists (stat err %v)", name, err)
 	}
 }
@@ -241,14 +248,29 @@ func TestLegacyCreatePlacementRejectedBeforeCreateSideEffects(t *testing.T) {
 		})
 	}
 
+	// The accepted create: the mock manager provisions the agent's
+	// directory where the start options say, as Manager.Start does, and
+	// that is the path the refused creates above were checked at.
 	f := newPlacementFixture(t, plBareGlobal, k8s.ConnKubeconfig, plGoodRecord())
 	f.srv.config.ForceRuntime = "kubernetes"
+	f.mgr.beforeStart = func(opts api.StartOptions) {
+		projectDir, err := config.GetResolvedProjectDir(opts.ProjectPath)
+		if err == nil {
+			err = os.MkdirAll(config.GetAgentDir(projectDir, opts.Name, opts.SharedWorkspace), 0o755)
+		}
+		if err != nil {
+			t.Errorf("provision the agent directory: %v", err)
+		}
+	}
 	w := postCreate(t, f.srv, map[string]any{"name": "selector-agent", "config": map[string]any{"template": "claude",
 		"kubernetes": map[string]any{"nodeSelector": map[string]string{"disk": "ssd"}}}})
 	if w.Code != http.StatusCreated {
 		t.Fatalf("an extra selector key: got %d %s", w.Code, w.Body.String())
 	}
 	requireOperatorOwnedStart(t, "create with an extra selector key", f.mgr.lastStartOpts)
+	if _, err := os.Stat(legacyCreateAgentDir(t, "selector-agent")); err != nil {
+		t.Errorf("the accepted create's agent directory is not where the refused creates were checked: %v", err)
+	}
 }
 
 // Malformed or invalid placement in the Hub's stored runtimes and profiles
