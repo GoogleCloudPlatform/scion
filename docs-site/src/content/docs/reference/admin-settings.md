@@ -296,6 +296,28 @@ The `profiling` section holds operational switches for in-app profiling. It is s
 - **In the web client:** while it is on, the page shell's initial data carries `"readinessMarks": true` for a signed-in user, the same value that user reads from `GET /api/v1/profiling`. Signed-out pages, and every page while it is off, are served exactly as without the setting. The client reads the value once per page load, so a change applies on the next full load.
 - Off, the client makes no `performance.mark` calls and the server adds nothing to the shell.
 
+## Chat Retention
+
+The `chat_retention` section bounds how long the Hub keeps chat messages (`pkg/config/opsettings/chat_retention.go`). Like `profiling`, it is stored only in the Hub database: it has no `settings.yaml` key and no environment variable, and it is not seeded. An absent row resolves to the compiled defaults (`enabled: false`, `messages_retention_days: null`, default sweep tuning), and a stored document that fails to parse or validate fails closed (`enabled: false`, no window). It is gated by the [`hub.chat_retention`](/scion/reference/experiments/#server-experiments-with-notes) experiment (off by default). The background `"chat-retention"` singleton purges messages only while `hub.chat_retention` is on, `enabled` is `true`, and `messages_retention_days` is set (`enabled: false` doubles as a legal hold).
+
+:::caution[Back up the database before enabling]
+Chat retention irreversibly purges chat messages older than `messages_retention_days` (oldest first, in small paced transactions) along with their message-bound attachments and notifications, while keeping thread records and membership. Take and verify a database backup before enabling `hub.chat_retention` and `chat_retention.enabled`.
+:::
+
+| Key | Type | Default | Constraints | Effect |
+|-----|------|---------|-------------|--------|
+| `enabled` | boolean | `false` | — | Turns the retention sweep on while `hub.chat_retention` is on and `messages_retention_days` is set. While `false`, nothing is purged. |
+| `messages_retention_days` | integer or `null` | `null` (keep forever) | `7`–`36500` when set | Hub-wide age window in days (`ChatRetentionMinDays = 7`, `ChatRetentionMaxDays = 36500`). When `null` (absent in the stored document), messages are kept forever. |
+| `sweep.chunk_size` | integer | `200` | `25`–`1000` | Largest number of messages deleted in one transaction. |
+| `sweep.pause_ms` | integer | `500` | `0`–`10000` | Pause after each chunk, in milliseconds. |
+| `sweep.tick_budget_seconds` | integer | `30` | `1`–`40` | Wall time one tick may run, in seconds. |
+| `sweep.tick_interval_minutes` | integer | `10` | `1`–`1440` | Time between ticks, in minutes. |
+
+- **Permissions and credentials:** `GET /api/v1/admin/chat-retention` and `PUT /api/v1/admin/chat-retention` are both Hub-admin routes (`RouteID: "admin.chatRetention"`, `Classification: RouteHubAdmin`, permission `hub.config.update` on `hub`) restricted to interactive sessions (`SessionOnly: ReasonIrreversibleCascade`); user access tokens and test-admin identities are refused. While the `hub.chat_retention` experiment is off, both `GET` and `PUT` return `404 not_found` (`Route not found`); unsupported HTTP methods return `405` whether or not the experiment is on.
+- **Response (`GET` and `PUT`):** Returns `enabled`, `messages_retention_days` (`null` when no window is set), `sweep` (`chunk_size`, `pause_ms`, `tick_budget_seconds`, `tick_interval_minutes`), `last_applied_cutoff` (the UTC cutoff the sweep last reached, or `null` until it reaches one), and `revision` (the section revision for `expected_revision`).
+- **`PUT` semantics and error codes:** Omitted fields are unchanged; explicit `null` resets a field to its compiled default (`enabled: false`, `messages_retention_days: null`, or default sweep tuning; `"sweep": null` resets all four sweep fields). Changing `enabled` or `messages_retention_days` requires `expected_revision` (`400 invalid_request` if missing); a stale `expected_revision` or concurrent modification returns `409 revision_conflict`. Unknown JSON fields, malformed JSON, or out-of-range values return `400 invalid_request` (or `400 validation_failed` on schema validation). Without database-backed operational settings, `PUT` returns `501 not_implemented`. Every change is written with compare-and-set on the section revision and recorded in the mutation audit (`hub_setting_update` on `chat_retention`, executor `admin-chat-retention`) before the write; if the audit record cannot be written, the save is refused with `500 internal_error` and settings are not changed (`hub_setting_update_not_applied` is recorded if the settings write itself fails).
+- **Admin UI:** While the `hub.chat_retention` web flag is on, **Admin → Server Config** renders the **Chat retention** panel (`<scion-admin-chat-retention>`).
+
 ## HA Bootstrap Guidance
 
 For high-availability deployments with multiple hub replicas:

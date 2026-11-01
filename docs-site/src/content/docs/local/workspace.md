@@ -98,6 +98,7 @@ If you request a branch that is already checked out in another worktree (e.g., b
 
 In non-git projects (where no `.git` directory is found):
 - Scion defaults to mounting the **project root** (the directory containing `.scion`).
+- An explicit project path on a Runtime Broker (for example from `scion hub link` or `POST /api/v1/projects/:id/providers`) must contain its own `.scion` directory or `.scion` marker file (and `.scion` cannot be a symlink pointing outside the project path); otherwise agent create, start, and restart refuse the path with `409 project_path_not_initialized` instead of mounting its parent directory. Initialize the directory with `scion init` first, or create `mkdir <path>/.scion`.
 - For global agents, it defaults to the **current working directory**.
 - All agents share the same files. There is no isolation or branching.
 
@@ -284,12 +285,12 @@ the Hub and cannot be changed later.
 #### Git that Scion runs on the host
 
 The Runtime Broker and the Hub run git on the host during provisioning clones and in repositories that
-agent containers can also write: your linked checkout (when it creates or removes an agent's
-worktree), the shared clone of a `worktree-per-agent` project, and the clone of a shared-workspace
-project (including shared-workspace pulls). Before each of these commands in an existing repository,
+agent containers can also write: your linked checkout (when it creates, lists, or removes an agent's
+worktree or checks whether a branch exists), the shared clone of a `worktree-per-agent` project, and the clone of a shared-workspace
+project (including the shared-workspace clone's local branch-creation fallback when the requested branch is not on the remote, and every step of a shared-workspace pull: reading the current branch, remote URL, and `HEAD`/`FETCH_HEAD` commits, fetching, fast-forwarding, and reading the pulled commit list). Before each of these commands in an existing repository,
 Scion reads the repository's config (`.git/config`, and a worktree's `config.worktree`) as data and
 **refuses the command, naming the key**, if the config contains an `include`/`includeIf` directive
-or any key outside an allow-list. This is deny-by-default: a key that is not known to be safe stops
+or any key outside an allow-list, and verifies after the command that the repository config did not change during the run. This is deny-by-default: a key that is not known to be safe stops
 the agent start or workspace pull rather than being ignored.
 
 - **A repository Scion manages** (the shared checkout of a `worktree-per-agent` project, the clone
@@ -364,7 +365,7 @@ the agent start or workspace pull rather than being ignored.
   and no host git credentials.
 - **Host credentials:** a host-side command that talks to a remote (a clone, a shared-workspace
   fetch, a template import) offers no credential of the host's own. It runs without the host user's
-  global and system git config, `~/.netrc`, Kerberos tickets, and ssh agent, keys and ssh config, and
+  global and system git config, `~/.netrc`, TLS client certificates (`http.sslCert`/`http.sslKey`), Kerberos tickets, and ssh agent, keys and ssh config, and
   with credential helpers, extra HTTP headers and askpass cleared. Without a project git token it runs
   anonymously; with one, the token is the only credential. Over ssh it offers no host identity and
   checks the server's host key strictly against the host user's and the system's `known_hosts`, without
