@@ -79,6 +79,7 @@ func TestBypassCensus(t *testing.T) {
 
 		// ─── AdminModeMiddleware bypass (infrastructure, KEEP) ───────────
 		{file: "admin_mode.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "AdminModeMiddleware admin bypass (infrastructure, KEEP)"},
+		{file: "agent_pending_config_authz.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "held-edit fold mirrors AdminModeMiddleware: an admin saver's keys are not deferred during maintenance (infrastructure, KEEP)"},
 
 		// ─── Messaging authorization engine (permanent, D6/D7) ─────────────
 		{file: "authorize_message.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "authorizeAgentMessage super-admin bypass (D6, KEEP)"},

@@ -53,20 +53,23 @@ type ErrorResponse struct {
 
 // Error codes matching the Runtime Broker API specification.
 const (
-	ErrCodeInvalidRequest     = "invalid_request"
-	ErrCodeValidationError    = "validation_error"
-	ErrCodeUnauthorized       = "unauthorized"
-	ErrCodeForbidden          = "forbidden"
-	ErrCodeAgentNotFound      = "agent_not_found"
-	ErrCodeNotFound           = "not_found"
-	ErrCodeConflict           = "conflict"
-	ErrCodeMethodNotAllowed   = "method_not_allowed"
-	ErrCodeInternalError      = "internal_error"
-	ErrCodeRuntimeError       = "runtime_error"
-	ErrCodeRuntimeUnavailable = "runtime_unavailable"
-	ErrCodeHubUnreachable     = "hub_unreachable"
-	ErrCodeTemplateError      = "template_error"
-	ErrCodeSkillResolution    = api.BrokerErrCodeSkillResolution
+	ErrCodeInvalidRequest  = "invalid_request"
+	ErrCodeValidationError = "validation_error"
+	ErrCodeUnauthorized    = "unauthorized"
+	ErrCodeForbidden       = "forbidden"
+	ErrCodeAgentNotFound   = "agent_not_found"
+	ErrCodeNotFound        = "not_found"
+	ErrCodeConflict        = "conflict"
+	// ErrCodeProjectPathNotInitialized: a plain project's explicit project
+	// path holds no .scion directory or marker (agent.ErrProjectPathNotInitialized).
+	ErrCodeProjectPathNotInitialized = agent.ProjectPathNotInitializedCode
+	ErrCodeMethodNotAllowed          = "method_not_allowed"
+	ErrCodeInternalError             = "internal_error"
+	ErrCodeRuntimeError              = "runtime_error"
+	ErrCodeRuntimeUnavailable        = "runtime_unavailable"
+	ErrCodeHubUnreachable            = "hub_unreachable"
+	ErrCodeTemplateError             = "template_error"
+	ErrCodeSkillResolution           = api.BrokerErrCodeSkillResolution
 
 	// ErrCodeWorkspaceStorageUnconfigured marks a create whose workspace was
 	// uploaded to bucket storage (workspaceStoragePath set) when neither the
@@ -74,6 +77,10 @@ const (
 	// answered with 422 before anything is provisioned, and the hub relays
 	// it unchanged instead of folding it into a 502 (ptone/scion#3422).
 	ErrCodeWorkspaceStorageUnconfigured = api.BrokerErrCodeWorkspaceStorageUnconfigured
+
+	// ErrCodeWorkspaceDownloadModeUnsupported marks a create whose
+	// workspaceDownloadMode this broker does not know (422).
+	ErrCodeWorkspaceDownloadModeUnsupported = api.BrokerErrCodeWorkspaceDownloadModeUnsupported
 
 	// ErrCodeIdentityNotMapped and ErrCodeIdentityKSAMismatch mark a GCP
 	// identity "assign" dispatch on Kubernetes refused for a missing or

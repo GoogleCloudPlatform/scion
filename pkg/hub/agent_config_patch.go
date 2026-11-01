@@ -281,18 +281,18 @@ func (s *Server) applyAgentConfigPatch(ctx context.Context, agent *store.Agent, 
 	// they take effect at the next start, not at the next
 	// reincarnation (ptone/scion#3982).
 	merged.ChangedFields = nextChangedFields(old.InlineConfig, provision)
-	// A resources edit that drops a stored sub-field keeps that
-	// sub-field at start (the merge applies only non-empty values) and
-	// records no clear, so it waits for the next reincarnation
-	// (ptone/scion#5676). Added after the clears are recorded:
-	// recording it would revert the whole resources value.
+	// A resources edit that drops a stored sub-field is recorded above
+	// as a resources.<sub-field> clear (ptone/scion#5676); it counts as a
+	// clear of config.resources, which a broker with
+	// clearedResourceSubfields applies at the next start.
+	resDropped := droppedResourceSubPaths(old.InlineConfig, cfg, p.present)
 	cleared = withDroppedResourcesSubField(cleared, old.InlineConfig, cfg, p.present)
 	// A broker with clearedFields applies the clears recorded above at
 	// the next start (ptone/scion#4890), so only the rest are held.
 	// What is reported applied follows what was recorded above.
 	sup := s.agentBrokerStartSupport(ctx, agent)
 	provision = sup.heldProvisionEdits(provision, old.InlineConfig, cfg, merged.ClearedFields)
-	cleared = sup.heldClearEdits(cleared, merged.ClearedFields, droppedEnvKeys(old.InlineConfig, cfg, p.present))
+	cleared = sup.heldClearEdits(cleared, merged.ClearedFields, droppedEnvKeys(old.InlineConfig, cfg, p.present), resDropped)
 	removed = sup.heldRemovals(removed, merged.ClearedFields)
 	res.warnings = append(res.warnings, sup.reincarnateOnlyEditWarnings(provision, cleared)...)
 	res.warnings = append(res.warnings, removedEntriesWarnings(removed)...)

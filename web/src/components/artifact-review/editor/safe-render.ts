@@ -42,6 +42,7 @@ import {
 } from '../../../client/artifact-preview.js';
 import type { ArtifactLinkContext } from '../../../client/artifact-preview.js';
 import { artifactFileUrl } from '../../../client/artifacts.js';
+import { isMacPlatform } from '../../../utils/platform.js';
 
 /** Element names the editor may render. */
 export const ALLOWED_TAGS: ReadonlySet<string> = new Set([
@@ -190,6 +191,15 @@ export type RenderContext = ArtifactLinkContext;
 /** Inline data images the editor shows. */
 const DATA_IMAGE = /^data:image\/(png|jpeg|gif|webp)[;,]/i;
 
+/**
+ * The hint on a followable link: the gesture that opens it on this platform
+ * (ptone/scion#6848). A fixed text that meets the title rule (FIXED_TOKEN);
+ * nothing of the link goes in it.
+ */
+export function linkOpenHint(mac: boolean): string {
+  return mac ? 'Cmd-click opens in a new tab' : 'Ctrl-click opens in a new tab';
+}
+
 /** The DOM of a link mark: a target only when artifactLinkTarget gives one. */
 export function linkSpec(mark: Mark, rc: RenderContext): DOMOutputSpec {
   const target = artifactLinkTarget(String(mark.attrs.href ?? ''), rc);
@@ -201,6 +211,7 @@ export function linkSpec(mark: Mark, rc: RenderContext): DOMOutputSpec {
         target: '_blank',
         rel: 'noopener noreferrer',
         referrerpolicy: 'no-referrer',
+        title: linkOpenHint(isMacPlatform()),
       },
       0,
     ];

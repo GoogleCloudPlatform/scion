@@ -49,11 +49,14 @@ type AgentPendingConfig struct {
 	BaseGeneration   int   `json:"baseGeneration"`
 	BaseStateVersion int64 `json:"baseStateVersion"`
 
-	// EnvSaverCanViewEnv records whether the caller who last saved
-	// config.env could read the agent's env. Applying the edit passes it to
-	// the env-removal rules the live PATCH gates on the caller's env access.
-	// Persisted, never returned (MarshalJSON drops it).
-	EnvSaverCanViewEnv bool `json:"envSaverCanViewEnv,omitempty"`
+	// KeySavers maps each Config key (the same key) to the principal that
+	// saved its current value, by its precise kind ("user:<id>",
+	// "dev:<id>", "agent:<id>", "agent_delegated:<id>", ...). A fold
+	// re-authorizes each key against its saver's current grants
+	// (ptone/scion#5864). A key with no entry (a row written before the
+	// field existed) falls back to SavedBy. Persisted, never returned
+	// (MarshalJSON drops it).
+	KeySavers map[string]string `json:"keySavers,omitempty"`
 
 	// LimitsFormat is the storage format of the count limits (max_turns,
 	// max_model_calls) in Config (ptone/scion#5605). Rows written before
@@ -92,6 +95,12 @@ func (p *AgentPendingConfig) Clone() *AgentPendingConfig {
 			out.Config[k] = append(json.RawMessage(nil), v...)
 		}
 	}
+	if p.KeySavers != nil {
+		out.KeySavers = make(map[string]string, len(p.KeySavers))
+		for k, v := range p.KeySavers {
+			out.KeySavers[k] = v
+		}
+	}
 	return &out
 }
 
@@ -109,13 +118,13 @@ func (p *AgentPendingConfig) ResponseView(canAttach bool) *AgentPendingConfig {
 	return view
 }
 
-// MarshalJSON is the response encoding: it drops EnvSaverCanViewEnv, and
+// MarshalJSON is the response encoding: it drops KeySavers, and
 // redacts config.env and config.telemetry.cloud.headers unless ResponseView
 // allowed them (GITHUB_TOKEN is always dropped from env).
 func (p AgentPendingConfig) MarshalJSON() ([]byte, error) {
 	type alias AgentPendingConfig
 	out := alias(p)
-	out.EnvSaverCanViewEnv = false
+	out.KeySavers = nil
 	out.LimitsFormat = 0
 	out.Config = redactPendingConfigForResponse(p.Config, p.envResponseVisible)
 	return json.Marshal(out)

@@ -855,6 +855,25 @@ func credentialVarEntry(entries []string) string {
 	return ""
 }
 
+// effectiveCredentialHelpers returns the credential helpers in effect after
+// the credential.*helper entries of a "key=value" list, in order: an empty
+// value clears the helpers collected so far, as git does.
+func effectiveCredentialHelpers(entries []string) []string {
+	var out []string
+	for _, e := range entries {
+		k, v, _ := strings.Cut(e, "=")
+		if !strings.HasPrefix(k, "credential.") || !strings.HasSuffix(k, ".helper") {
+			continue
+		}
+		if v == "" {
+			out = nil
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
 // credentialEntries returns the credential.* entries of a "key=value" list.
 func credentialEntries(entries []string) []string {
 	var out []string
@@ -869,7 +888,7 @@ func credentialEntries(entries []string) []string {
 func TestSparseGitCheckout_TokenFromScopedCredentialHelper(t *testing.T) {
 	// execSparseGitCheckout uses the plain remote URL and authenticates
 	// through the credential helper scoped to https://github.com
-	// (util.ScopedCredentialHelperEnv). A fake git on PATH records argv,
+	// (util.HostGitRemoteEnv), or not at all without a token. A fake git on PATH records argv,
 	// GIT_CONFIG_* entries and the helper's credential variable, so this runs
 	// offline.
 	parts := &GitHubURLParts{Owner: "test", Repo: "nonexistent-repo-12345", Branch: "main", Path: "templates"}
@@ -912,22 +931,24 @@ func TestSparseGitCheckout_TokenFromScopedCredentialHelper(t *testing.T) {
 			env := configEnv()
 			require.Len(t, env, len(want), "every git call must be logged")
 			for _, sub := range []string{"init", "remote", "config", "fetch"} {
-				creds := credentialEntries(env[sub])
+				creds := effectiveCredentialHelpers(env[sub])
 				if tt.token == "" {
 					assert.Empty(t, creds, "%s: no credential helper without a token", sub)
 					assert.Equal(t, "CRED=<unset>", credentialVarEntry(env[sub]), "%s: no credential variable without a token", sub)
 					continue
 				}
-				// The empty credential.helper reset (so no configured helper
-				// runs or stores the token), then the one helper scoped to
-				// the remote's host. The helper value is the constant that
-				// reads the credential variable at run time; the token is in
-				// the git command's environment only.
-				require.Len(t, creds, 2, "%s: %v", sub, creds)
-				assert.Equal(t, "credential.helper=", creds[0], sub)
-				assert.True(t, strings.HasPrefix(creds[1], "credential.https://github.com.helper="), "%s: %s", sub, creds[1])
-				assert.Contains(t, creds[1], "${"+scopedCredentialVar+"}", sub)
-				assert.NotContains(t, creds[1], tt.token, "%s: git config values contain no secret values", sub)
+				// After the credential.helper resets (so no configured helper
+				// runs or stores the token), the one helper scoped to the
+				// remote's host is in effect. The helper value is the constant
+				// that reads the credential variable at run time; the token is
+				// in the git command's environment only.
+				all := credentialEntries(env[sub])
+				require.NotEmpty(t, all, "%s: the credential.helper resets must be present", sub)
+				assert.Equal(t, "credential.helper=", all[0], sub)
+				require.Len(t, creds, 1, "%s: %v", sub, creds)
+				assert.True(t, strings.HasPrefix(creds[0], "credential.https://github.com.helper="), "%s: %s", sub, creds[0])
+				assert.Contains(t, creds[0], "${"+scopedCredentialVar+"}", sub)
+				assert.NotContains(t, creds[0], tt.token, "%s: git config values contain no secret values", sub)
 				assert.Equal(t, "CRED="+tt.token, credentialVarEntry(env[sub]), sub)
 			}
 

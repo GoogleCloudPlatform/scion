@@ -747,6 +747,19 @@ describe('Resources: removing a stored value', () => {
     expect(note(el)!.textContent).toContain('next reincarnation');
   });
 
+  it('a held removal says the whole resources edit waits for a reincarnation', async () => {
+    const el = await mount('stopped', { values: stored });
+    await setSub(el, 'limits.cpu', '');
+    // The agent starts running: the drafted edit is now a held edit.
+    el.editability = hubEditability('running', {
+      'config.resources': { tier: 'T1', disposition: 'held' },
+    });
+    await el.updateComplete;
+    expect(field(el, 'config.resources').dataset.disposition).toBe('held');
+    expect(note(el)!.textContent).toContain('holds the whole resources edit until a reincarnation');
+    expect(note(el)!.textContent).not.toContain('next start');
+  });
+
   it('changing or adding a value shows no note', async () => {
     const el = await mount('stopped', { values: stored });
     await setSub(el, 'limits.cpu', '8');

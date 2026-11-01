@@ -3186,7 +3186,7 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 	agents := make([]AgentWithCapabilities, 0, len(result.Items))
 	for i := range result.Items {
 		item := result.Items[i]
-		item.AppliedConfig, item.PendingConfig = redactAgentConfigsForResponse(item.AppliedConfig, item.PendingConfig, s.envViewAllowed(ctx, identity, &item, caps[i]))
+		item.AppliedConfig, item.PendingConfig = s.redactAgentConfigsForResponse(item.AppliedConfig, item.PendingConfig, s.envViewAllowed(ctx, identity, &item, caps[i]))
 		agents = append(agents, AgentWithCapabilities{Agent: item, Cap: caps[i]})
 	}
 	capsDone()

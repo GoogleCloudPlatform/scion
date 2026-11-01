@@ -847,7 +847,22 @@ func (o *OperationalSettings) update(
 		return 0, false, err
 	}
 
-	// Update local cache.
+	reread := o.cacheWrite(section, result)
+	inEffect := true
+	if reread {
+		inEffect = o.refreshThrough(ctx, result.SettingsRevision, section)
+	}
+	o.publishAndSelfApply(section, result.Revision)
+
+	return result.Revision, inEffect, nil
+}
+
+// cacheWrite caches one written row, as every write path does: the write
+// is cached directly when its revision is at or above the revision the
+// cache knows this section at (knownAtLocked). It reports whether the
+// cache already held newer state of the section, so the store must be
+// read again (refreshThrough) before the self-apply.
+func (o *OperationalSettings) cacheWrite(section string, result *store.HubSetting) (reread bool) {
 	malformed := !json.Valid(result.Value)
 	if malformed {
 		slog.Error("operational settings: malformed JSON after write (should not happen)",
@@ -876,7 +891,7 @@ func (o *OperationalSettings) update(
 	// not written, and the store is read again below, before the
 	// self-apply (ptone/scion#4457, ptone/scion#5762). A store without
 	// revisions (0) is cached directly, as before.
-	reread := result.SettingsRevision > 0 && result.SettingsRevision < o.knownAtLocked(section)
+	reread = result.SettingsRevision > 0 && result.SettingsRevision < o.knownAtLocked(section)
 	if !reread {
 		o.cache[section] = sectionState{
 			Value:                result.Value,
@@ -895,33 +910,39 @@ func (o *OperationalSettings) update(
 		o.cacheSeq++
 	}
 	o.mu.Unlock()
-	inEffect := true
-	if reread {
-		inEffect = o.refreshThrough(ctx, result.SettingsRevision, section)
-	}
+	return reread
+}
 
-	// Publish admin.settings.updated event to propagate the change to other
-	// replicas via PostgresEventPublisher (design §3.6). On SQLite the
-	// publisher is an in-process ChannelEventPublisher (single replica); it
-	// is nil only before StartPropagation is wired, e.g. in tests.
+// publishAndSelfApply publishes the settings event of a written section and
+// self-applies the current snapshot.
+func (o *OperationalSettings) publishAndSelfApply(section string, revision int64) {
+	o.publish(section, revision)
+	o.selfApply()
+}
+
+// publish sends the admin.settings.updated event for a written section, so
+// other replicas refresh (design §3.6). On SQLite the publisher is an
+// in-process ChannelEventPublisher (single replica); it is nil only before
+// StartPropagation is wired, e.g. in tests.
+func (o *OperationalSettings) publish(section string, revision int64) {
 	if o.events != nil {
 		o.events.PublishRaw(settingsUpdatedSubject, SettingsUpdatedEvent{
 			Section:  section,
-			Revision: result.Revision,
+			Revision: revision,
 		})
 	}
+}
 
-	// Self-apply: the writing node applies its own change synchronously
-	// rather than waiting for its own event (design §3.6). Double-apply
-	// (sync here + own event received via subscription) is harmless because
-	// ApplySnapshot and ApplyMaintenanceFromSnapshot are idempotent.
+// selfApply applies the current snapshot on the writing node synchronously
+// rather than waiting for its own event (design §3.6). Double-apply (sync
+// here + own event received via subscription) is harmless because
+// ApplySnapshot and ApplyMaintenanceFromSnapshot are idempotent.
+func (o *OperationalSettings) selfApply() {
 	if o.server != nil {
 		snap := o.Snapshot()
 		ApplySnapshot(o.server, snap)
 		ApplyMaintenanceFromSnapshot(o.server, snap)
 	}
-
-	return result.Revision, inEffect, nil
 }
 
 // DeleteSection removes a section row from the store, evicts it from the local
@@ -944,7 +965,35 @@ func (o *OperationalSettings) DeleteSection(ctx context.Context, section string)
 	} else if err := o.store.DeleteHubSetting(ctx, section); err != nil {
 		return err
 	}
+	o.applyDelete(ctx, section, deleteRevision)
+	return nil
+}
 
+// deleteGuarded is DeleteSection in a guarded store transaction
+// (store.HubSettingGuardedBatchWriter): the row must still be at
+// expectedRevision and each section in reads at its revision, or
+// store.ErrRevisionConflict is returned and nothing is deleted.
+func (o *OperationalSettings) deleteGuarded(ctx context.Context, section string, expectedRevision int64, reads map[string]int64) error {
+	bw, ok := o.store.(store.HubSettingGuardedBatchWriter)
+	if !ok {
+		return errGuardedBatchUnsupported
+	}
+	if err := o.checkWriteGuard(ctx, section); err != nil {
+		return err
+	}
+	rows, err := bw.UpsertHubSettingsGuarded(ctx,
+		[]store.HubSettingWrite{{Section: section, ExpectedRevision: expectedRevision, Delete: true}}, reads, "", "")
+	if err != nil {
+		return err
+	}
+	o.applyDelete(ctx, section, rows[0].SettingsRevision)
+	return nil
+}
+
+// applyDelete evicts a deleted section from the cache, publishes the event
+// so peers refresh and self-applies. deleteRevision is the
+// operational-settings revision of the delete (0 when unknown).
+func (o *OperationalSettings) applyDelete(ctx context.Context, section string, deleteRevision int64) {
 	o.mu.Lock()
 	// As in Update: a delete at or above the revision the cache knows the
 	// section at is applied to the cache directly, with a tombstone so a
@@ -983,8 +1032,6 @@ func (o *OperationalSettings) DeleteSection(ctx context.Context, section string)
 		ApplySnapshot(o.server, snap)
 		ApplyMaintenanceFromSnapshot(o.server, snap)
 	}
-
-	return nil
 }
 
 // refreshThroughAttempts bounds refreshThrough's reads.
