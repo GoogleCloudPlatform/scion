@@ -126,7 +126,6 @@ func (ix *settingsKeyIndex) resolve(key string) (schemaKey, section string, ok b
 	return best, ix.section[best], true
 }
 
-// suggest returns up to three schema keys close to key.
 // suggestMaxDistance is the largest edit distance suggest accepts, and
 // suggestMaxKeyLen bounds the input it computes distances for: no schema key
 // is anywhere near that long, so a longer input can only match by its last
@@ -136,6 +135,7 @@ const (
 	suggestMaxKeyLen   = 256
 )
 
+// suggest returns up to three schema keys close to key.
 func (ix *settingsKeyIndex) suggest(key string) []string {
 	key = normalizeSettingsKey(key)
 	last := key[strings.LastIndex(key, ".")+1:]
@@ -155,7 +155,7 @@ func (ix *settingsKeyIndex) suggest(key string) []string {
 		// whose length differs by more than the threshold cannot match;
 		// skipping it also keeps a very long input from costing
 		// len(input) x len(key) per schema key.
-		if len(key) > suggestMaxKeyLen || absInt(len(key)-len(k)) > suggestMaxDistance {
+		if !suggestInRange(key, k) {
 			continue
 		}
 		if d := levenshtein(key, k); d <= suggestMaxDistance {
@@ -168,6 +168,15 @@ func (ix *settingsKeyIndex) suggest(key string) []string {
 		out = append(out, cands[i].k)
 	}
 	return out
+}
+
+// suggestInRange reports whether suggest computes an edit distance from key
+// to the schema key k. The distance is at least the length difference, so a
+// key whose length differs by more than suggestMaxDistance cannot match, and
+// an input longer than suggestMaxKeyLen is never compared (it matches only by
+// its last segment).
+func suggestInRange(key, k string) bool {
+	return len(key) <= suggestMaxKeyLen && absInt(len(key)-len(k)) <= suggestMaxDistance
 }
 
 func absInt(n int) int {
