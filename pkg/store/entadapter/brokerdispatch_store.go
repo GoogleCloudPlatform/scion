@@ -559,7 +559,7 @@ var backfillPageSize = 500
 // the pre-fix nc-promote-busy bug (any writer that built a storeMsg without
 // stamping DispatchState). The exact complement of the R1 agent-only
 // allow-list: only an agent-addressed row is ever legitimately pending or
-// genuinely failed (see ExpireStuckPendingMessages/PurgeFailedMessages), so
+// genuinely failed (see ExpireStuckPendingMessages/PurgeFailedMessagesChunk), so
 // any other row in either state is this writer bug. Sets dispatch_state
 // "dispatched", clears the failure reason, and backdates dispatched_at to
 // the row's own created time when unset. Returns the number of rows
