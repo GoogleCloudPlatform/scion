@@ -160,6 +160,23 @@ check_eq "build fails: exit 1" 1 "${RC}"
 check_contains "build fails: message" "docker buildx build failed" "${OUT}"
 check_eq "build fails: no step output" "<absent>" "$(output)"
 
+# --- the metadata dir is removed on exit, after a success and after a failure --
+# Each run gets a private, empty TMPDIR; the stub's log proves the metadata
+# file was under it, and the TMPDIR must be empty again afterwards.
+mkdir "${TMP}/tmpdir.ok" "${TMP}/tmpdir.fail"
+STUB_META="${TMP}/m.good"
+TMPDIR="${TMP}/tmpdir.ok" run_rec scion-claude --push .
+check_eq "cleanup on success: exit 0" 0 "${RC}"
+check_contains "cleanup on success: metadata under the private TMPDIR" "--metadata-file ${TMP}/tmpdir.ok/" "$(cat "${TMP}/log")"
+check_eq "cleanup on success: TMPDIR empty afterwards" "" "$(ls -A "${TMP}/tmpdir.ok")"
+STUB_META="${TMP}/m.nodigest"
+TMPDIR="${TMP}/tmpdir.fail" run_rec scion-claude --push .
+check_eq "cleanup on failure: exit 1" 1 "${RC}"
+check_contains "cleanup on failure: message" "no containerimage.digest" "${OUT}"
+check_contains "cleanup on failure: metadata under the private TMPDIR" "--metadata-file ${TMP}/tmpdir.fail/" "$(cat "${TMP}/log")"
+check_eq "cleanup on failure: TMPDIR empty afterwards" "" "$(ls -A "${TMP}/tmpdir.fail")"
+STUB_META="${TMP}/m.good"
+
 # --- refusals before the build: docker is not run, no output -----------------
 # refused <name> <message> [recorder args...]: runs the recorder with exactly
 # the given args.

@@ -68,6 +68,7 @@ done
 if [ -z "${BUILDER_OUTPUT:-}" ] || [ ! -d "${BUILDER_OUTPUT}" ]; then die "BUILDER_OUTPUT is not set to a directory"; fi
 
 meta_dir="$(mktemp -d)"
+trap 'rm -rf -- "${meta_dir:?}"' EXIT
 meta="${meta_dir}/metadata.json"
 docker buildx build --metadata-file "${meta}" "${@:3}" || die "docker buildx build failed"
 
