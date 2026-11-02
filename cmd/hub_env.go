@@ -265,8 +265,9 @@ func resolveEnvScope(cmd *cobra.Command, settings *config.Settings) (scope, scop
 
 // resolveScopeID resolves a scope ID that may be a human-friendly name or slug
 // into a UUID by querying the hub API. If the scopeID is already a valid UUID
-// or is empty, it is returned unchanged.
-func resolveScopeID(ctx context.Context, client hubclient.Client, scope, scopeID string) (string, error) {
+// or is empty, it is returned unchanged. uat is as for
+// resolveProjectByNameOrID.
+func resolveScopeID(ctx context.Context, client hubclient.Client, scope, scopeID string, uat bool) (string, error) {
 	if scopeID == "" {
 		return scopeID, nil
 	}
@@ -276,7 +277,7 @@ func resolveScopeID(ctx context.Context, client hubclient.Client, scope, scopeID
 	}
 	switch scope {
 	case "project":
-		project, err := resolveProjectByNameOrID(ctx, client, scopeID)
+		project, err := resolveProjectByNameOrID(ctx, client, scopeID, uat)
 		if err != nil {
 			return "", err
 		}

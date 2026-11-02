@@ -649,7 +649,8 @@ func requireArtifactProfileClient() (*config.Settings, hubclient.Client, string,
 	if projectPath != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		project, err := resolveProjectNameOrID(ctx, client, projectPath)
+		// A hub profile mints its own tokens, never a user access token.
+		project, err := resolveProjectNameOrID(ctx, client, projectPath, false)
 		if err != nil {
 			return nil, nil, "", err
 		}
