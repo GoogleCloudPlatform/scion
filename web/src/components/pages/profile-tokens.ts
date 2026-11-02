@@ -125,8 +125,13 @@ export class ScionPageProfileTokens extends LitElement {
         <div class="page-header-info">
           <h1>Access Tokens</h1>
           <p>
-            Create and manage personal access tokens for CI/CD pipelines and automation. Tokens are
-            scoped to a specific project with limited permissions.
+            Create and manage user access tokens for CI/CD and automation. A token works in one
+            project, or across every project you can currently access (hub).
+          </p>
+          <p>
+            Scopes set the most a token can do. Each request is allowed only if the token has the
+            scope and your account currently has that access. If your access changes, the token's
+            reach changes with it.
           </p>
         </div>
       </div>
