@@ -17,6 +17,8 @@ SCION_HOST_GID=HOST_ID
 /host/three:/other
 -e
 SCION_METADATA_INTERCEPTION=off
+--label
+scion.bind_sources=W3sic291cmNlIjoiL2hvc3QvdHdvIiwiZGVzdGluYXRpb24iOiIvc2FtZSJ9LHsic291cmNlIjoiL2hvc3QvdGhyZWUiLCJkZXN0aW5hdGlvbiI6Ii9vdGhlciJ9XQ==
 scion-agent:latest
 sh
 -c

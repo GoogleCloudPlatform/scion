@@ -37,40 +37,50 @@ const userVolumeGoldenHome = "/golden-home"
 // run argv is pinned byte for byte (ptone/scion#5837): realizing the entries
 // as Owner=user Mounts through projectfs.Layout.Realize must not change them.
 // The testdata was captured before that change.
+//
+// A refused case pins the refusal instead: Run must fail, and its error text
+// is the golden.
 func userVolumeCases() []struct {
 	name    string
+	refused bool
 	volumes []api.VolumeMount
 } {
 	return []struct {
 		name    string
+		refused bool
 		volumes []api.VolumeMount
 	}{
-		{"local", []api.VolumeMount{
+		{"local", false, []api.VolumeMount{
 			{Source: "/host/data", Target: "/data"},
 			{Source: "/host/ref", Target: "/ref", ReadOnly: true},
 			{Type: "local", Source: "/host/typed", Target: "/typed"},
 		}},
-		{"expanded", []api.VolumeMount{
+		{"expanded", false, []api.VolumeMount{
 			{Source: "~/cache", Target: "~/.cache/tool"},
-			{Source: "~", Target: "/host-home", ReadOnly: true},
+			{Source: "~/ro", Target: "/host-home", ReadOnly: true},
 			{Source: "${GOLDEN_VOLUME_SRC}/sub", Target: "/env"},
 		}},
-		{"dedup", []api.VolumeMount{
+		{"dedup", false, []api.VolumeMount{
 			{Source: "/host/one", Target: "/same", ReadOnly: true},
 			{Source: "/host/two", Target: "/same"},
 			{Source: "/host/three", Target: "/other"},
 		}},
-		{"workdir", []api.VolumeMount{
+		{"workdir", false, []api.VolumeMount{
 			{Source: "/host/src", Target: "/workspace"},
 		}},
-		{"gcs-and-local", []api.VolumeMount{
+		{"gcs-and-local", false, []api.VolumeMount{
 			{Type: "gcs", Bucket: "bucket-a", Target: "/gcs-a"},
 			{Type: "gcs", Bucket: "bucket-b", Prefix: "pre/fix", Mode: "ro", Target: "~/gcs-b", ReadOnly: true},
 			{Source: "/host/data", Target: "/data"},
 		}},
-		{"other-types", []api.VolumeMount{
+		{"other-types", false, []api.VolumeMount{
 			{Type: "nfs", Server: "10.0.0.2", Source: "/export/x", Target: "/nfs"},
 			{Type: "cloudrun-volume", VolumeName: "vol", Source: "/cr", Target: "/cr"},
+		}},
+		// The host home holds the Scion global directory: the source is
+		// refused before any run.
+		{"refused", true, []api.VolumeMount{
+			{Source: "~", Target: "/host-home", ReadOnly: true},
 		}},
 	}
 }
@@ -119,10 +129,17 @@ func TestUserVolumes_RunArgsGolden(t *testing.T) {
 					Volumes:      tc.volumes,
 				}
 				out, err := rc.rt.Run(context.Background(), cfg)
-				if err != nil {
+				var got []byte
+				switch {
+				case tc.refused && err == nil:
+					t.Fatalf("Run succeeded, want a refusal:\n%s", out)
+				case tc.refused:
+					got = []byte("refused: " + err.Error() + "\n")
+				case err != nil:
 					t.Fatalf("Run: %v", err)
+				default:
+					got = append(hostIDEnv.ReplaceAll([]byte(out), []byte("${1}=HOST_ID")), '\n')
 				}
-				got := append(hostIDEnv.ReplaceAll([]byte(out), []byte("${1}=HOST_ID")), '\n')
 				file := filepath.Join("testdata", "user_volumes_golden", rc.name+"-"+tc.name+".txt")
 				if *updateVolumeArgsGolden {
 					if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {

@@ -20,6 +20,8 @@ SYS_ADMIN
 /dev/fuse
 --label
 scion.gcs_volumes=W3sic291cmNlIjoiIiwidGFyZ2V0IjoiL2djcy1hIiwiYnVja2V0IjoiYnVja2V0LWEiLCJwcmVmaXgiOiIifSx7InNvdXJjZSI6IiIsInRhcmdldCI6Ii9ob21lL3NjaW9uL2djcy1iIiwiYnVja2V0IjoiYnVja2V0LWIiLCJwcmVmaXgiOiJwcmUvZml4In1d
+--label
+scion.bind_sources=W3sic291cmNlIjoiL2hvc3QvZGF0YSIsImRlc3RpbmF0aW9uIjoiL2RhdGEifV0=
 -e
 SCION_START_CMD=tmux new-session -d -s scion -n agent sh -c ''\''hello'\''; echo $? > /tmp/scion-harness-exit-code' \; set-option -g window-size latest \; new-window -t scion -n shell \; select-window -t scion:agent \; attach-session -t scion
 scion-agent:latest

@@ -1,9 +1,7 @@
-# Project storage phase 5c: `volumes:` entries realized through Layout.Realize
+# `volumes:` entries realized through Layout.Realize
 
-**Date**: 2026-10-27
-**Issues**: ptone/scion#5837 (part of the lifecycle phase ptone/scion#5833), tracking ptone/scion#5805
-**Stacks on**: phase 5a (ptone/scion#6287, `eb51fb5a4`)
-**Design**: design-v9 §P5 and OQ-R2 (a `volumes:` entry is always `Scope=agent`, `Owner=user`)
+**Date**: 2026-10-31
+**Design**: storage design §P5 and OQ-R2 (a `volumes:` entry is always `Scope=agent`, `Owner=user`)
 
 ## Summary
 
@@ -14,7 +12,10 @@ path or, for gcs, the bucket). It goes through `Layout.Resolve` and
 `realizeUserVolume` (`pkg/runtime/user_volumes.go`).
 
 - Docker, Podman and Apple: the `-v src:tgt[:ro]` of a non-gcs entry comes
-  from `Realize(RuntimeBind)`.
+  from `Realize(RuntimeBind)`. The step sits after the configured-volume
+  source checks (`checkConfiguredVolumeSource`, `checkVolumeSource`) and
+  before `registerMount`; every bind is still checked when it is emitted
+  (`checkBindSource`).
 - Kubernetes: a gcs entry's `MountPath` and `ReadOnly` come from
   `Realize(RuntimePod)`, which returns no claim. The CSI volume stays the
   runtime's.
@@ -27,15 +28,15 @@ This merges code paths only. Behaviour does not change.
   runtimes passed an entry through as written: an empty source or target, or
   any type other than `gcs` treated as a bind. A refusal in projectfs would
   therefore be new behaviour. Entry checks stay in `api.VolumeMount.Validate`
-  (template load) and in `checkVolumeSource` (runtime). The guard projectfs
+  (template load) and in the runtime's source checks. The guard projectfs
   does add is that a `KindVolume` Mount must be user-owned and agent-scoped.
 - **gcsfuse on bind runtimes is left as it was.** It is an in-container
   mount command, not a bind mount, and replacing GCS-FUSE is a design
   non-goal. On k8s, local and nfs entries are still skipped with a warning.
-- **The golden testdata was captured at BASE** (a detached worktree at
-  `eb51fb5a`, with the new test files copied in and the `-update-*` flags
-  run there). It then passed unchanged at the new head. That is the proof of
-  no behaviour change.
+- **The golden testdata is captured at the base commit** (a detached
+  worktree at the base, with only the new test files copied in and the
+  `-update-*` flags run there). It then passes unchanged at the new head.
+  That is the proof of no behaviour change.
 
 ## Gotchas
 
@@ -46,6 +47,11 @@ This merges code paths only. Behaviour does not change.
   `SCION_DEV_BINARIES` and the force-host-network env, and replaces the
   host uid and gid values with a placeholder, so the testdata is the same on
   every machine. `-update-volume-args-golden` rewrites it.
+- The argv includes the `scion.bind_sources` label (a base64 record of the
+  emitted binds), so the goldens change whenever a bind source does.
+- A source of `~` is the host home, which holds the Scion global
+  directory; the bind-source checks refuse it. The `refused` case pins that
+  refusal's text before and after.
 
 ## Follow-ups (not done)
 

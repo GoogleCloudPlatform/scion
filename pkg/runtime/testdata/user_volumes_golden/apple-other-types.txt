@@ -17,6 +17,8 @@ SCION_HOST_GID=HOST_ID
 /cr:/cr
 -e
 SCION_METADATA_INTERCEPTION=off
+--label
+scion.bind_sources=W3sic291cmNlIjoiL2V4cG9ydC94IiwiZGVzdGluYXRpb24iOiIvbmZzIn0seyJzb3VyY2UiOiIvY3IiLCJkZXN0aW5hdGlvbiI6Ii9jciJ9XQ==
 scion-agent:latest
 sh
 -c

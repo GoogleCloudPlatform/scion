@@ -19,6 +19,8 @@ SCION_HOST_GID=HOST_ID
 /host/typed:/typed
 -e
 SCION_METADATA_INTERCEPTION=off
+--label
+scion.bind_sources=W3sic291cmNlIjoiL2hvc3QvZGF0YSIsImRlc3RpbmF0aW9uIjoiL2RhdGEifSx7InNvdXJjZSI6Ii9ob3N0L3JlZiIsImRlc3RpbmF0aW9uIjoiL3JlZiJ9LHsic291cmNlIjoiL2hvc3QvdHlwZWQiLCJkZXN0aW5hdGlvbiI6Ii90eXBlZCJ9XQ==
 scion-agent:latest
 sh
 -c

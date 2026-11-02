@@ -17,6 +17,8 @@ SCION_HOST_GID=HOST_ID
 /host/src:/workspace
 -e
 SCION_METADATA_INTERCEPTION=off
+--label
+scion.bind_sources=W3sic291cmNlIjoiL2hvc3Qvc3JjIiwiZGVzdGluYXRpb24iOiIvd29ya3NwYWNlIn1d
 scion-agent:latest
 sh
 -c
