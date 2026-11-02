@@ -275,7 +275,6 @@ var EntryPointExemptions = []EntryPointExemption{
 	{Pattern: "/api/v1/users/me/visitor-grants", Kind: ExemptionAuthenticationOnly, Reason: "List a project visitor's own visitor grants, self-service; any other caller gets 404", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/users/me/visitor-dms", Kind: ExemptionAuthenticationOnly, Reason: "List a project visitor's own DMs with agents it may message, self-service; any other caller gets 404", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/principals/", Kind: ExemptionAuthenticationOnly, Reason: "Resolve principal display name, self-service", Owner: "route_metadata.go"},
-	{Pattern: "/api/v1/conduit/grant-keys", Kind: ExemptionAuthenticationOnly, Reason: "Conduit grant public keys, authenticated read-only, experiment-gated", Owner: "route_metadata.go"},
 	// Artifact share links (hub.artifacts experiment): reads authenticated
 	// by a link token in the path only, like the view route below; the
 	// artifact service resolves the token on every request and never uses
@@ -302,8 +301,6 @@ var EntryPointExemptions = []EntryPointExemption{
 	{Pattern: "/api/v1/admin/delegation-adoption/previews", Kind: ExemptionHubAdmin, Reason: "Delegation-provenance adoption preview; read-only planning, hub system admin on a session or local development credential only.", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/admin/delegation-adoption/commits", Kind: ExemptionHubAdmin, Reason: "Delegation-provenance adoption commit (adopt or revert); hub system admin on a session or local development credential only, rechecked in the commit transaction; per-hop mutation audit. Operation contract deferred, as for the other hub-admin exemptions.", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/admin/keys/status", Kind: ExemptionHubAdmin, Reason: "Server key status report (IDs, deadlines, policy state, aggregate counts; never key material or record identifiers), behind server.secret_rotation; unscoped platform admin on a session or local development credential only (route guard falls back to requireAdmin). No registered permission, so it cannot be delegated.", Owner: "route_metadata.go"},
-	{Pattern: "/api/v1/experiments", Kind: ExemptionAuthenticationOnly, Reason: "Resolved experiments map for signed-in callers, no resource-level authorization", Owner: "route_metadata.go"},
-	{Pattern: "/api/v1/profiling", Kind: ExemptionAuthenticationOnly, Reason: "Profiling switches for signed-in callers (one boolean), no resource-level authorization", Owner: "route_metadata.go"},
 
 	// Workstation endpoints — workstation token authentication
 	{Pattern: "/api/v1/system/identity", Kind: ExemptionInternalOnly, Reason: "Workstation system endpoint, workstation-token auth", Owner: "route_metadata.go"},

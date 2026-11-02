@@ -107,6 +107,18 @@ func (c bearerCoverage) hasPrefix(prefix string) bool {
 	return false
 }
 
+// exemptCovers reports whether a non-user exemption covers the normalized
+// path n: an exemption on exactly n, or one on a prefix ending in "/" that
+// n is below.
+func (c bearerCoverage) exemptCovers(n string) bool {
+	for p := range c.exemptPaths {
+		if p == n || (strings.HasSuffix(p, "/") && strings.HasPrefix(n, p)) {
+			return true
+		}
+	}
+	return false
+}
+
 // TestBearerDisposition_EveryRoutePatternCovered requires every live route
 // to have a bearer record: a catalog entry point, an entry-point exemption
 // of a non-user kind (nonUserExemptionKinds) or a pending entry.
@@ -298,7 +310,9 @@ func hubDeclarationMatches(t *testing.T, re *regexp.Regexp) bool {
 
 // pendingEntryProblems returns every reason a pending entry is not
 // acceptable: an invalid kind, method or area, a duplicate, an entry point
-// that is already catalogued, or one that does not name a live entry point.
+// that is already catalogued, one that a public or internal-only exemption
+// covers (that exemption is its bearer record), or one that does not name
+// a live entry point.
 func pendingEntryProblems(t *testing.T, entries []authzop.PendingEntry) []string {
 	t.Helper()
 	c := newBearerCoverage()
@@ -323,6 +337,9 @@ func pendingEntryProblems(t *testing.T, entries []authzop.PendingEntry) []string
 		seen[key] = true
 		if op, ok := c.catalog[key]; ok {
 			problems = append(problems, label+": already catalogued by "+string(op))
+		}
+		if bearerHTTPLikeKinds[pe.Kind] && c.exemptCovers(key.Pattern) {
+			problems = append(problems, label+": a public or internal-only exemption covers it; the exemption is its bearer record")
 		}
 
 		if bearerHTTPLikeKinds[pe.Kind] {
@@ -354,8 +371,8 @@ func pendingEntryProblems(t *testing.T, entries []authzop.PendingEntry) []string
 
 // TestBearerDisposition_PendingEntriesAreLiveAndUncatalogued requires every
 // PendingBearerDispositions entry to name a live entry point that is not
-// catalogued. A stale entry fails, and so does one that is also
-// catalogued.
+// catalogued and that no public or internal-only exemption covers. A stale
+// entry fails, and so does one that is also catalogued or exempted.
 func TestBearerDisposition_PendingEntriesAreLiveAndUncatalogued(t *testing.T) {
 	if len(authzop.PendingBearerDispositions) == 0 {
 		t.Log("PendingBearerDispositions is empty")
@@ -384,6 +401,28 @@ func TestBearerDisposition_PendingEntriesAreLiveAndUncatalogued(t *testing.T) {
 			}
 		})
 	}
+	// An entry that a non-user exemption covers is rejected by that rule.
+	covered := []struct {
+		name  string
+		entry authzop.PendingEntry
+	}{
+		{"covered by a public exemption", authzop.PendingEntry{Kind: authzop.EntryPointHTTPRoute, Method: "GET", Pattern: "/metrics", Area: authzop.AreaHub}},
+		{"covered by a prefix exemption", authzop.PendingEntry{Kind: authzop.EntryPointHTTPRoute, Method: "GET", Pattern: "/api/v1/artifacts/shared/{token}", Area: authzop.AreaProjects}},
+	}
+	for _, tc := range covered {
+		t.Run(tc.name, func(t *testing.T) {
+			p := pendingEntryProblems(t, []authzop.PendingEntry{tc.entry})
+			if len(p) != 1 || !strings.Contains(p[0], "exemption covers it") {
+				t.Errorf("entry %+v must be rejected by the exemption rule alone, got %v", tc.entry, p)
+			}
+		})
+	}
+	t.Run("uncovered entry passes", func(t *testing.T) {
+		e := authzop.PendingEntry{Kind: authzop.EntryPointHTTPRoute, Method: "GET", Pattern: "/api/v1/agents/{id}/groups", Area: authzop.AreaAgents}
+		if p := pendingEntryProblems(t, []authzop.PendingEntry{e}); len(p) != 0 {
+			t.Errorf("entry %+v must pass: %v", e, p)
+		}
+	})
 	t.Run("duplicate", func(t *testing.T) {
 		e := authzop.PendingEntry{Kind: authzop.EntryPointHTTPRoute, Method: "GET", Pattern: "/api/v1/agents/{id}/logs", Area: authzop.AreaAgents}
 		if p := pendingEntryProblems(t, []authzop.PendingEntry{e, e}); len(p) == 0 {
