@@ -48,13 +48,19 @@ Hub (--boundary hub), for hub-level scopes such as hub_health:read and for
 one token that works across every project you can reach.
 
 Most CLI commands that work in a project first look the project up, which
-needs the project:read scope. Include it in tokens used with the CLI.
+needs the project:read scope, and project:list when the CLI finds the
+project by its git remote, slug or name. Include both in tokens used with
+the CLI. project:manage does not include them.
 Scopes common CLI flows need:
 
-  Any command run in a project   project:read
+  Any command run in a project   project:read, project:list
   scion list                     project:read, agent:list
   scion look, scion logs         project:read, agent:read
-  scion start / create           project:read, agent:create, agent:read
+  scion start / create           project:read, agent:create, agent:read,
+                                 and for any agent role above none:
+                                 skill:read, skill:list, template:read,
+                                 template:list, harness_config:read,
+                                 harness_config:list (or pass --role none)
   scion message                  project:read, agent:message
   scion attach                   project:read, agent:attach
   scion stop, suspend, resume    project:read, agent:lifecycle
@@ -74,7 +80,7 @@ Examples:
   scion hub token create \
     --project my-project \
     --name "github-actions" \
-    --scopes project:read,agent:create,agent:read,agent:list \
+    --scopes project:read,project:list,agent:create,agent:read,agent:list,skill:read,skill:list,template:read,template:list,harness_config:read,harness_config:list \
     --expires 90d
 
   # Create a hub-boundary token for "scion doctor" Platform Health
@@ -133,12 +139,12 @@ Expiry (--expires) accepts %s.
 Default: 90 days. Maximum: 1 year.
 
 CLI use: most CLI commands look the project up first, which needs
-project:read. See "scion hub token --help" for the scopes common CLI flows
-need.
+project:read and project:list. See "scion hub token --help" for the
+scopes common CLI flows need.
 
 Examples:
-  scion hub token create --project my-project --name ci-token --scopes project:read,agent:create,agent:read
-  scion hub token create --project my-project --name deploy --scopes project:read,agent:manage --expires 30d
+  scion hub token create --project my-project --name ci-token --scopes project:read,project:list,agent:create,agent:read,skill:read,skill:list,template:read,template:list,harness_config:read,harness_config:list
+  scion hub token create --project my-project --name deploy --scopes project:read,project:list,agent:manage --expires 30d
   scion hub token create --boundary hub --name health-check --scopes hub_health:read,broker:read,agent:list`, permissions.UATScopeHelp(), expiryAcceptedForms, expiryUnitNote),
 	Args: cobra.NoArgs,
 	RunE: runTokenCreate,
