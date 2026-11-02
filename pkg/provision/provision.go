@@ -1489,40 +1489,83 @@ func acquireFileLockWithin(ctx context.Context, dir string, wait time.Duration) 
 // not revisited. Accepted: it does not accumulate further once contention
 // stops, and it is already git-excluded.
 func garbageCollectLockLitter(dir string) {
-	now, err := serverNow(dir)
-	if err != nil {
-		return
-	}
+	_, _ = SweepLockLitter(dir, LockLitterMinAge())
+}
+
+// LockLitterMinAge is the age past which provisioning-lock litter may be
+// removed: the garbage-collection cutoff 2S of acquireFileLock's
+// correctness argument.
+func LockLitterMinAge() time.Duration {
+	return 2 * provisionLockStaleAfter
+}
+
+// SweepLockLitter removes dir's provisioning-lock litter older than minAge
+// and reports how long the youngest remaining entry still needs before it
+// may be removed (0 when none is left). ".evict-*" entries are aged from
+// their evicted-at marker (see garbageCollectLockLitter); an entry without
+// the marker is never guessed at and counts as pending for the full
+// minAge. Other litter (staging directories, clock probes a crashed
+// caller left) is aged from its own mtime; a concurrent caller's probe is
+// young and kept. The live lock itself and anything not under the lock's
+// name prefix are never touched. Ages are measured against the file
+// server's clock (serverNow). The first removal error is returned; the
+// sweep continues past it.
+func SweepLockLitter(dir string, minAge time.Duration) (pending time.Duration, err error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return
-	}
-	cutoff := 2 * provisionLockStaleAfter
-	prefix := provisionFileLockName + "."
-	for _, e := range entries {
-		name := e.Name()
-		if name == provisionFileLockName || !strings.HasPrefix(name, prefix) {
-			continue // the live lock name itself, or not one of ours
+		if errors.Is(err, fs.ErrNotExist) {
+			return 0, nil
 		}
+		return 0, err
+	}
+	prefix := provisionFileLockName + "."
+	var litter []os.DirEntry
+	for _, e := range entries {
+		if name := e.Name(); name != provisionFileLockName && strings.HasPrefix(name, prefix) {
+			litter = append(litter, e)
+		}
+	}
+	if len(litter) == 0 {
+		return 0, nil
+	}
+	now, err := serverNow(dir)
+	if err != nil {
+		return minAge, err
+	}
+	var firstErr error
+	keep := func(age time.Duration) {
+		if left := minAge - age; left > pending {
+			pending = left
+		}
+	}
+	for _, e := range litter {
+		name := e.Name()
 		path := filepath.Join(dir, name)
+		var age time.Duration
 		if strings.Contains(name, ".evict-") {
 			info, err := os.Stat(filepath.Join(path, provisionLockEvictedAtFile))
 			if err != nil {
-				continue // no confirmed eviction time yet; never guess (see doc)
+				keep(0) // no confirmed eviction time yet; never guess
+				continue
 			}
-			if now.Sub(info.ModTime()) > cutoff {
-				_ = os.RemoveAll(path)
+			age = now.Sub(info.ModTime())
+		} else {
+			info, err := e.Info()
+			if err != nil {
+				keep(0)
+				continue
 			}
+			age = now.Sub(info.ModTime())
+		}
+		if age <= minAge {
+			keep(age)
 			continue
 		}
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		if now.Sub(info.ModTime()) > cutoff {
-			_ = os.RemoveAll(path)
+		if err := os.RemoveAll(path); err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
+	return pending, firstErr
 }
 
 // tryCreateFileLock atomically publishes a fully-formed, already-owned lock
