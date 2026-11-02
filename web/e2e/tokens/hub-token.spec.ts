@@ -37,7 +37,8 @@ test.describe('Access tokens: hub boundary', () => {
   test.use({ storageState: env.adminStorageState, baseURL: env.baseURL });
 
   test('create, list and revoke a hub token with no project selected', async ({ page }) => {
-    const name = `e2e-hub-${Date.now()}`;
+    // Unique per project: the desktop and mobile projects share one hub.
+    const name = `e2e-hub-${test.info().project.name}-${Date.now()}`;
 
     // 1. Open the page.
     await page.goto('/profile/tokens', { waitUntil: 'domcontentloaded' });

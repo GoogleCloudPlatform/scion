@@ -137,19 +137,19 @@ export function buildTokenLabels(rows: LabelRow[]): {
   labels: Record<string, string> | undefined;
   error?: string;
 } {
-  const labels: Record<string, string> = {};
-  let count = 0;
+  // A Map, so that any key (including "__proto__") is kept as a key.
+  const labels = new Map<string, string>();
   for (const row of rows) {
     const key = row.key.trim();
     if (!key && !row.value) continue;
     if (!key) return { labels: undefined, error: 'Each label needs a key' };
-    if (Object.prototype.hasOwnProperty.call(labels, key)) {
+    if (labels.has(key)) {
       return { labels: undefined, error: `Duplicate label key "${key}"` };
     }
-    labels[key] = row.value;
-    count++;
+    labels.set(key, row.value);
   }
-  return { labels: count > 0 ? labels : undefined };
+  // Object.fromEntries defines own properties, so "__proto__" stays a key.
+  return { labels: labels.size > 0 ? Object.fromEntries(labels) : undefined };
 }
 
 /** Human-readable text for a MintDenialReason code from the eligibility API. */
@@ -1528,8 +1528,10 @@ export class ScionTokenList extends LitElement {
         // back to the plain catalog (server enforcement still applies
         // regardless of what this picker shows) and surface the failure --
         // only when a boundary was requested; the parameterless catalog
-        // call has nothing to blame.
-        this.availableScopes = catalog;
+        // call has nothing to blame. For a hub target, leave out the
+        // scopes a hub token may not select, as on the path above.
+        this.availableScopes =
+          target.kind === 'hub' ? filterScopesForBoundary(catalog, 'hub') : catalog;
         this.scopesUnsupportedKey = null;
         if (cacheKey) this.scopesErrorKey = cacheKey;
         return;
@@ -1596,7 +1598,9 @@ export class ScionTokenList extends LitElement {
       this.scopesUnsupportedKey = null;
     } catch {
       if (seq !== this.scopesRequestSeq) return; // superseded before the catch
-      this.availableScopes = this.scopesCache.get('') ?? [...FALLBACK_SCOPES];
+      const catalog = this.scopesCache.get('') ?? [...FALLBACK_SCOPES];
+      this.availableScopes =
+        target.kind === 'hub' ? filterScopesForBoundary(catalog, 'hub') : catalog;
       this.scopesUnsupportedKey = null;
       if (cacheKey) this.scopesErrorKey = cacheKey;
       console.warn('Failed to fetch scopes from /api/v1/auth/scopes');
@@ -2139,8 +2143,8 @@ export class ScionTokenList extends LitElement {
             ${this.scopesErrorKey && this.scopesErrorKey === scopesKey
               ? html`<div class="dialog-error">
                   Could not check which scopes you can select for this
-                  ${isHub ? 'hub token' : 'project'}. Showing the full catalog with no eligibility
-                  -- the server still enforces access when you submit.
+                  ${isHub ? 'hub token' : 'project'}. Showing the catalog with no eligibility -- the
+                  server still enforces access when you submit.
                 </div>`
               : nothing}
             ${this.scopesUnsupportedKey && this.scopesUnsupportedKey === scopesKey
@@ -2235,8 +2239,8 @@ export class ScionTokenList extends LitElement {
               Add label
             </sl-button>
             <div class="scope-selected-count">
-              Up to ${MAX_TOKEN_LABELS} key=value labels. Descriptive only. Cannot be changed after
-              creation.
+              Up to ${MAX_TOKEN_LABELS} key=value labels. Labels describe the token; they do not
+              identify an agent. Cannot be changed after creation.
             </div>
           </div>
 

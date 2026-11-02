@@ -699,6 +699,19 @@ describe('scion-token-list — hub boundary, purpose and labels (ptone/scion#212
     expect(buildTokenLabels([]).labels).toBeUndefined();
   });
 
+  it('keeps a __proto__ label key as a key and refuses it twice', () => {
+    const { labels, error } = buildTokenLabels([{ key: '__proto__', value: 'x' }]);
+    expect(error).toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(labels, '__proto__')).toBe(true);
+    expect(JSON.stringify(labels)).toBe('{"__proto__":"x"}');
+    expect(
+      buildTokenLabels([
+        { key: '__proto__', value: 'a' },
+        { key: '__proto__', value: 'b' },
+      ]).error
+    ).toBe('Duplicate label key "__proto__"');
+  });
+
   it('the labels editor stops adding rows at the limit', async () => {
     const el = await createComponent(baseFetch());
     (el as any).openCreateDialog();
@@ -829,20 +842,22 @@ describe('scion-token-list — hub boundary, purpose and labels (ptone/scion#212
   });
 
   it('unsupported_boundary falls back to allowedBoundaries filtering with a notice', async () => {
+    let hubFetches = 0;
     const el = await createComponent(
       baseFetch({
-        scopes: (url) =>
-          url.includes('boundary=hub')
-            ? jsonResponse(
-                {
-                  error: {
-                    code: 'unsupported_boundary',
-                    message: 'hub boundary eligibility is not available yet',
-                  },
-                },
-                400
-              )
-            : jsonResponse(CATALOG_WITH_BOUNDARIES),
+        scopes: (url) => {
+          if (!url.includes('boundary=hub')) return jsonResponse(CATALOG_WITH_BOUNDARIES);
+          hubFetches++;
+          return jsonResponse(
+            {
+              error: {
+                code: 'unsupported_boundary',
+                message: 'hub boundary eligibility is not available yet',
+              },
+            },
+            400
+          );
+        },
       })
     );
 
@@ -861,12 +876,67 @@ describe('scion-token-list — hub boundary, purpose and labels (ptone/scion#212
     expect(shadowText(el)).toContain(
       'Eligibility is not available on this hub; the server checks scopes when you create the token.'
     );
+    // Not cached: a hub that gains hub eligibility is asked again.
+    expect((el as any).scopesCache.has('hub')).toBe(false);
+    expect(hubFetches).toBe(1);
 
     // Back on the project boundary the notice is gone.
     (el as any).handleBoundaryChange('project');
     await new Promise((r) => setTimeout(r, 10));
     await el.updateComplete;
     expect(shadowText(el)).not.toContain('Eligibility is not available on this hub');
+
+    // Switching to Hub again sends a second ?boundary=hub request.
+    (el as any).handleBoundaryChange('hub');
+    await new Promise((r) => setTimeout(r, 10));
+    expect(hubFetches).toBe(2);
+    expect((el as any).scopesUnsupportedKey).toBe('hub');
+  });
+
+  it('a failed hub eligibility request still leaves out scopes a hub token may not select', async () => {
+    const el = await createComponent(
+      baseFetch({
+        scopes: (url) =>
+          url.includes('boundary=hub')
+            ? jsonResponse({ error: { code: 'forbidden', message: 'forbidden' } }, 403)
+            : jsonResponse(CATALOG_WITH_BOUNDARIES),
+      })
+    );
+
+    (el as any).openCreateDialog();
+    (el as any).handleBoundaryChange('hub');
+    await new Promise((r) => setTimeout(r, 10));
+    await el.updateComplete;
+
+    const values = (el as any).availableScopes.map((s: any) => s.value);
+    expect(values).toContain('agent:read');
+    expect(values).toContain('broker:create');
+    expect(values).not.toContain('agent:delete'); // project-only
+    expect(values).not.toContain('agent:manage'); // alias with a project-only member
+    expect((el as any).scopesErrorKey).toBe('hub');
+    expect((el as any).scopesUnsupportedKey).toBeNull();
+    expect(shadowText(el)).toContain(
+      'Could not check which scopes you can select for this hub token'
+    );
+
+    // A network error on the hub request filters the same way.
+    document.body.innerHTML = '';
+    const el2 = await createComponent(
+      baseFetch({
+        scopes: (url) =>
+          url.includes('boundary=hub')
+            ? Promise.reject(new TypeError('network down'))
+            : jsonResponse(CATALOG_WITH_BOUNDARIES),
+      })
+    );
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    (el2 as any).openCreateDialog();
+    (el2 as any).handleBoundaryChange('hub');
+    await new Promise((r) => setTimeout(r, 10));
+    const values2 = (el2 as any).availableScopes.map((s: any) => s.value);
+    expect(values2).not.toContain('agent:delete');
+    expect(values2).toContain('broker:create');
+    expect((el2 as any).scopesErrorKey).toBe('hub');
   });
 
   it('an older hub response without boundary is treated as project when projectId is set', () => {
