@@ -419,18 +419,18 @@ Sends a message to a running agent or user.
     - `--at <time>`: *(Deprecated — use `scion schedule create --at` instead.)* Schedule message delivery at an absolute time.
 
 - **Output:**
-  A successful send ends with a confirmation that names the message the Hub created, as a `(message <id>)` suffix, for example `Message accepted for agent 'reviewer' (message 0f3c…).` or `Message sent to user:alice@example.com via Hub (conversation 7b1e…, message 0f3c…).` A group send prints the ID on each recipient's line (`  Accepted: agent:a (message 0f3c…)`), because every recipient gets its own message. The ID is the one agents see as `message_id` in the delivered message. For a message recorded in a conversation, it is also the `<message-id>` that `scion conversation get-message conv:<conversation-id> <message-id>` takes; a message with no conversation (for example a broadcast) cannot be fetched that way. A Hub that does not report an ID gets the confirmation without the suffix. `scion broadcast` prints no ID. With `--format json`, a single send's result has the ID in `message_id`, and a group send's `results` entries carry `message_id` for each accepted (`delivered`), deferred or `unknown` (ambiguous) recipient; a failed recipient has none.
+  A successful send ends with a confirmation that names the conversation the message landed in and the message the Hub created, as a `(conversation <id>, message <id>)` suffix, for example `Message accepted for agent 'reviewer' (conversation 7b1e…, message 0f3c…).` or `Message sent to user:alice@example.com via Hub (conversation 7b1e…, message 0f3c…).` The conversation ID is the one to reply into. A group send prints both IDs on each recipient's line (`  Accepted: agent:a (conversation 7b1e…, message 0f3c…)`), because every recipient gets its own message. The ID is the one agents see as `message_id` in the delivered message. For a message recorded in a conversation, it is also the `<message-id>` that `scion conversation get-message conv:<conversation-id> <message-id>` takes; a message with no conversation (for example a broadcast) cannot be fetched that way. Each part of the suffix is left out when the Hub does not report it: a message the Hub did not record in a conversation has no conversation ID, and a Hub that predates this field reports none. `scion broadcast` prints no ID. With `--format json`, a single send's result has the IDs in `message_id` and `conversation_id`, and a group send's `results` entries carry `message_id` and `conversation_id` for each accepted (`delivered`), deferred or `unknown` (ambiguous) recipient; a failed recipient has neither.
 
 - **What the confirmation means:**
   The Hub reports a status for each agent send, and the CLI words its confirmation by what that status actually confirms. "Accepted" means the Hub handed the message to the agent's runtime, which buffered it as input. It does not confirm that the agent has read or acted on it. No send status currently confirms that.
 
   | Hub status | Meaning | CLI confirmation |
   |---|---|---|
-  | `dispatched`, `delivered` | The runtime accepted and buffered the message. | `Message accepted for agent 'x' (message <id>).` |
+  | `dispatched`, `delivered` | The runtime accepted and buffered the message. | `Message accepted for agent 'x' (conversation <id>, message <id>).` |
   | `delivered_not_persisted` | Accepted as above, but the Hub could not save it to history, so there is no message ID. | `Message accepted for agent 'x'.` |
-  | `ambiguous` (HTTP `202`) | The Hub could not tell whether the runtime took the message. Check before you resend. | `Message accepted for agent 'x' (delivery unconfirmed) (message <id>).` |
-  | `deduplicated` | An agent sent an `@mention` notification that repeats one the Hub sent moments earlier for the same message, so it was not sent again. The ID is the earlier message's. | `Message accepted for agent 'x' (duplicate of an earlier send) (message <id>).` |
-  | `deferred` (HTTP `202`) | The agent is reincarnating. The message was saved to history and not sent yet. The new generation sees it on catch-up. | `agent x is reincarnating; message saved to history and will be seen on catch-up (message <id>).` |
+  | `ambiguous` (HTTP `202`) | The Hub could not tell whether the runtime took the message. Check before you resend. | `Message accepted for agent 'x' (delivery unconfirmed) (conversation <id>, message <id>).` |
+  | `deduplicated` | An agent sent an `@mention` notification that repeats one the Hub sent moments earlier for the same message, so it was not sent again. The ID is the earlier message's. | `Message accepted for agent 'x' (duplicate of an earlier send) (conversation <id>, message <id>).` |
+  | `deferred` (HTTP `202`) | The agent is reincarnating. The message was saved to history and not sent yet. The new generation sees it on catch-up. | `agent x is reincarnating; message saved to history and will be seen on catch-up (conversation <id>, message <id>).` |
   | failed (an error response) | The message was not sent. | An error, and no confirmation. |
 
   `scion broadcast` prints a `Broadcast accepted (…)` line, followed by a note when some targeted agents are still starting (the message is held until they are ready), or `No running agents …` when it reached none. With `--all` it prints `Broadcasting message to <n> agents...`, then `Message accepted for agent 'x' via Hub.` for each agent it reached, whatever the status, and a warning for each send that failed. With `--format json`, a single `scion message` send prints the Hub's response, with its raw `status` value, except a human's `@<agent-name>` send, which prints nothing on success; group sends report the statuses described below.
@@ -442,7 +442,7 @@ Sends a message to a running agent or user.
     "group_id": "…",
     "total": 3, "delivered": 1, "deferred": 0, "failed": 1, "unknown": 1,
     "results": [
-      {"recipient": "agent:a", "status": "delivered", "message_id": "…"},
+      {"recipient": "agent:a", "status": "delivered", "message_id": "…", "conversation_id": "…"},
       {"recipient": "agent:b", "status": "failed", "error": "…"},
       {"recipient": "agent:c", "status": "unknown", "error": "…"}
     ],
