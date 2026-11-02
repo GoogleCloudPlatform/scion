@@ -26,8 +26,8 @@
  * editor stays out of every other page's download.
  *
  * Events:
- * - review-change {text}: the text after an edit (150 ms after typing
- *   pauses, and on blur);
+ * - review-change {text, blur}: the text after an edit (150 ms after typing
+ *   pauses, and on blur); blur is true when focus leaving the editor sent it;
  * - review-hint {kind}: an edit was refused (policy.ts HintKind);
  * - review-ready: the document is shown;
  * - review-load-failed: the document cannot be shown here.
@@ -43,6 +43,7 @@ import { ReviewController } from './editor/controller.js';
 import type { NoteRequest } from './editor/controller.js';
 import type { HintKind } from './editor/policy.js';
 import { commentNumber } from './editor/review.js';
+import type { ReviewChangeDetail } from './review-editor-loader.js';
 import { reviewEditorStyles } from './review-editor-styles.js';
 import './review-note-dialog.js';
 import type { ScionReviewNoteDialog } from './review-note-dialog.js';
@@ -192,7 +193,7 @@ export class ScionReviewEditor extends LitElement {
     view.dom.setAttribute('aria-multiline', 'true');
     view.dom.setAttribute('aria-label', `Review editor: ${this.entryPath.split('/').pop() ?? ''}`);
     view.dom.setAttribute('aria-describedby', 'mode-note');
-    view.dom.addEventListener('blur', () => this.flushChange());
+    view.dom.addEventListener('blur', () => this.flushChange(true));
     view.dom.addEventListener('mouseover', this.onPointer);
     view.dom.addEventListener('focusin', this.onPointer);
     view.dom.addEventListener('mouseleave', this.hideCard);
@@ -260,10 +261,13 @@ export class ScionReviewEditor extends LitElement {
     this.changeTimer = setTimeout(() => this.flushChange(), REVIEW_CHANGE_DELAY_MS);
   }
 
-  private flushChange(): void {
+  /** Sends review-change; blur says focus leaving the editor sent it. */
+  private flushChange(blur = false): void {
     if (!this.controller?.dirty) return;
     const text = this.flush();
-    if (text !== null) this.emit('review-change', { text });
+    if (text === null) return;
+    const detail: ReviewChangeDetail = { text, blur };
+    this.emit('review-change', detail);
   }
 
   private askNote(req: NoteRequest): Promise<string | null> {

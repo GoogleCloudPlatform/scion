@@ -20,6 +20,7 @@ import './review-editor.js';
 import { EARLIER_COMMENT_HINT, OWN_COMMENT_HINT, REVIEW_CHANGE_DELAY_MS } from './review-editor.js';
 import type { ScionReviewEditor } from './review-editor.js';
 import type { ReviewController } from './editor/controller.js';
+import type { ReviewChangeDetail } from './review-editor-loader.js';
 
 afterEach(() => {
   document.body.replaceChildren();
@@ -76,6 +77,33 @@ describe('scion-review-editor review-change', () => {
     view.dispatch(view.state.tr.insertText('big ', 3));
     await pause();
     expect(changes).toEqual(['a {++big ++}dog\n']);
+  });
+
+  it('says whether focus leaving the editor sent it (ptone/scion#6952)', async () => {
+    const sentBy = (el: ScionReviewEditor): ReviewChangeDetail[] => {
+      const sent: ReviewChangeDetail[] = [];
+      el.addEventListener('review-change', (e) =>
+        sent.push((e as CustomEvent<ReviewChangeDetail>).detail)
+      );
+      return sent;
+    };
+    // After typing pauses: blur false.
+    const paused = await mount('a dog\n');
+    const afterPause = sentBy(paused.el);
+    let view = controllerOf(paused.el).view;
+    view.dispatch(view.state.tr.insertText('big ', 3));
+    await pause();
+    expect(afterPause).toEqual([{ text: 'a {++big ++}dog\n', blur: false }]);
+    paused.el.remove();
+    // An edit, then focus leaves within the pause: sent once, by the blur
+    // (the page keeps its hint for it).
+    const left = await mount('a dog\n');
+    const onBlur = sentBy(left.el);
+    view = controllerOf(left.el).view;
+    view.dispatch(view.state.tr.insertText('big ', 3));
+    view.dom.dispatchEvent(new FocusEvent('blur'));
+    await pause();
+    expect(onBlur).toEqual([{ text: 'a {++big ++}dog\n', blur: true }]);
   });
 });
 
