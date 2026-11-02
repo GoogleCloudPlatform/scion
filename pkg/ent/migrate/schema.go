@@ -2022,6 +2022,14 @@ var (
 					Where: "dispatch_state = 'pending'",
 				},
 			},
+			{
+				Name:    "message_failed_created_id",
+				Unique:  false,
+				Columns: []*schema.Column{MessagesColumns[23], MessagesColumns[0]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "dispatch_state = 'failed'",
+				},
+			},
 		},
 	}
 	// MessageAddresseesColumns holds the columns for the "message_addressees" table.
@@ -2646,6 +2654,7 @@ var (
 		{Name: "project_id", Type: field.TypeUUID},
 		{Name: "name", Type: field.TypeString},
 		{Name: "cron_expr", Type: field.TypeString},
+		{Name: "time_zone", Type: field.TypeString, Default: ""},
 		{Name: "event_type", Type: field.TypeString},
 		{Name: "payload", Type: field.TypeString, Default: "{}"},
 		{Name: "status", Type: field.TypeString, Default: "active"},
@@ -2684,7 +2693,7 @@ var (
 			{
 				Name:    "schedule_next_run_at",
 				Unique:  false,
-				Columns: []*schema.Column{SchedulesColumns[23]},
+				Columns: []*schema.Column{SchedulesColumns[24]},
 			},
 		},
 	}

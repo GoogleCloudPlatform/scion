@@ -16,7 +16,7 @@
 - [agent.hold.lift](#agentholdlift) — Lift the holds of a suspended agent whose owners are admitted to its project again (hub admin)
 - [agent.lifecycle.reincarnate](#agentlifecyclereincarnate) — Reincarnate an agent
 - [agent.read](#agentread) — Read a single agent's metadata by ID
-- [agent.list](#agentlist) — List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project
+- [agent.list](#agentlist) — List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project. An agent delegated credential is admitted on the hub form only: its scope is the authorizing user's list scope within the grant boundary, and each item is also decided for agent.read
 - [agent.update](#agentupdate) — Update agent configuration or metadata
 - [agent.update.pendingconfig.delete](#agentupdatependingconfigdelete) — Discard an agent's pending config edits (behind hub.agent_edit_held; 404 while it is off)
 - [agent.status.update](#agentstatusupdate) — Report an agent's status: the agent itself, or a user who may update the agent
@@ -741,7 +741,7 @@
 
 **Domain:** agent
 
-**Description:** List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project
+**Description:** List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project. An agent delegated credential is admitted on the hub form only: its scope is the authorizing user's list scope within the grant boundary, and each item is also decided for agent.read
 
 ### Entry Points
 
@@ -750,9 +750,9 @@
 | http_route | GET | `/api/v1/agents` |
 | http_route | GET | `/api/v1/projects/{id}/agents` |
 
-**Principals:** `user`, `agent`
+**Principals:** `user`, `agent`, `agent_delegated`
 
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `delegated_agent`
 
 **Bearer:** `admit` (target `list_scope`; boundaries `project`, `hub`)
 
@@ -771,7 +771,7 @@
 | no-broad-query-on-none | security | ScopeSetNone produces empty list without issuing any resource query | Yes |
 | slug-not-oracle | security | Project slug lookup for agent list filter must not distinguish unauthorized from nonexistent | Yes |
 
-**Denial Codes:** `forbidden`, `credential_insufficient`, `user_suspended`
+**Denial Codes:** `forbidden`, `credential_insufficient`, `user_suspended`, `credential_not_admitted`, `delegated_list_sort_unsupported`
 
 ### Tests
 
@@ -793,6 +793,8 @@
 - `pkg/hub:TestListCaveats_ProjectBoundaryRequiresListPermissionInCeiling`
 - `pkg/hub:TestProjectAgentListToken_RequiresAgentListOnTheProject`
 - `pkg/hub:TestListFilters_CannotEnlargeTokenResults`
+- `pkg/hub:TestAgentDelegatedAgentList_ExplicitScopeAcrossProjects`
+- `pkg/hub:TestAgentDelegatedAgentList_MixedItemsAndCounts`
 
 ---
 

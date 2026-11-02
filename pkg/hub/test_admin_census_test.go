@@ -304,6 +304,12 @@ var testAdminAdminEmailsCensus = map[string]string{
 	"server.go:AdminEmails":                               "config: accessor; ReconcileSuperAdminBindings skips test identities",
 	"server.go:New":                                       "config: passed to ReconcileSuperAdminBindings, which skips test identities",
 	"web.go:adminEmails":                                  "sign-in: web sign-in; test identities never sign in",
+
+	// The authorized_domains save check (ptone/scion#6000) reads admin_emails
+	// only to predict the sign-in admin bypass for the saving account.
+	"authorized_domains_settings.go:accessListsAfterDBSave":   "save check: refuse-only lockout guard (ptone/scion#6000); admin-kind test identities get no admin_emails bypass (rejectAuthorizedDomainsLockout clamp) and write no access keys (rejectTestAdminSettingsWrite)",
+	"authorized_domains_settings.go:accessListsAfterFileSave": "save check: refuse-only lockout guard (ptone/scion#6000); admin-kind test identities get no admin_emails bypass (rejectAuthorizedDomainsLockout clamp) and write no access keys (rejectTestAdminSettingsWrite)",
+	"authorized_domains_settings.go:rejectFileAccessLockout":  "save check: refuse-only lockout guard (ptone/scion#6000); admin-kind test identities get no admin_emails bypass (rejectAuthorizedDomainsLockout clamp) and write no access keys (rejectTestAdminSettingsWrite)",
 }
 
 // The legacy admin fast path itself (IsUnscopedLocalPlatformAdmin) lives in

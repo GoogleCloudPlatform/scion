@@ -32,8 +32,9 @@ import (
 
 // TestSeparateRelayEventContract: a separate relay, which does not import
 // this package, re-checks on exactly the hub's revocation subjects, re-reads
-// hub.conduit on the hub's settings event, and LISTENs on the conduit
-// channel, where the hub publishes exactly the subjects the relay acts on.
+// hub.conduit on the hub's settings event, hints its targets on the hub's
+// grant key change event, and LISTENs on the conduit channel, where the hub
+// publishes exactly the subjects the relay acts on.
 func TestSeparateRelayEventContract(t *testing.T) {
 	want := append(append([]string(nil), conduitAuthzEventPatterns...), conduitBrokerChangedSubject)
 	got := append([]string(nil), relayserver.RevocationSubjects...)
@@ -41,8 +42,9 @@ func TestSeparateRelayEventContract(t *testing.T) {
 	sort.Strings(got)
 	assert.Equal(t, want, got)
 	assert.Equal(t, settingsUpdatedSubject, relayserver.SettingsUpdatedSubject)
+	assert.Equal(t, conduitGrantKeysChangedSubject, relayserver.GrantKeysChangedSubject)
 
-	relayActsOn := append(append([]string(nil), relayserver.RevocationSubjects...), relayserver.SettingsUpdatedSubject)
+	relayActsOn := append(append([]string(nil), relayserver.RevocationSubjects...), relayserver.SettingsUpdatedSubject, relayserver.GrantKeysChangedSubject)
 	published := conduitChannelSubjects()
 	sort.Strings(relayActsOn)
 	sort.Strings(published)
@@ -65,7 +67,7 @@ func TestSeparateRelayListenerReceivesHubEvents(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(pub.Close)
 
-	subjects := append(append([]string(nil), relayserver.RevocationSubjects...), relayserver.SettingsUpdatedSubject)
+	subjects := append(append([]string(nil), relayserver.RevocationSubjects...), relayserver.SettingsUpdatedSubject, relayserver.GrantKeysChangedSubject)
 	l, err := relaydb.NewListener(dsn, subjects, slog.Default())
 	require.NoError(t, err)
 	t.Cleanup(l.Close)
@@ -101,7 +103,7 @@ func TestSeparateRelayListenerReceivesHubEvents(t *testing.T) {
 	}
 
 	pub.PublishRaw("agent.a1.status", map[string]string{"x": "y"}) // not delivered
-	for _, subject := range []string{"agent.a1.deleted", "project.p1.deleted", conduitAuthzChangedSubject, conduitBrokerChangedSubject, settingsUpdatedSubject} {
+	for _, subject := range []string{"agent.a1.deleted", "project.p1.deleted", conduitAuthzChangedSubject, conduitBrokerChangedSubject, settingsUpdatedSubject, conduitGrantKeysChangedSubject} {
 		pub.PublishRaw(subject, map[string]string{"x": "y"})
 		select {
 		case got := <-events:

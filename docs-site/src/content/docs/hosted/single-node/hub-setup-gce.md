@@ -259,7 +259,7 @@ Then start Caddy manually (`sudo caddy start --config /etc/caddy/Caddyfile`) ins
 
 **Option B — TLS terminated upstream**
 
-If TLS is terminated by an upstream load balancer, reverse proxy, or appliance (e.g., an F5, nginx, or GCP HTTPS Load Balancer), no local TLS configuration is needed. The upstream proxy forwards plain HTTP to the Hub on port 8080. Ensure `SCION_SERVER_BASE_URL` is still set to the `https://` URL that clients use.
+If TLS is terminated by an upstream load balancer, reverse proxy, or appliance (e.g., an F5, nginx, or GCP HTTPS Load Balancer), no local TLS configuration is needed. The upstream proxy forwards plain HTTP to the Hub on port 8080. Ensure `SCION_SERVER_BASE_URL` is still set to the `https://` URL that clients use, and list the proxy's source IP addresses or CIDR ranges in [`server.trusted_proxies`](/scion/reference/server-config/#runtime-broker-transport-and-trusted-proxies) (`SCION_SERVER_TRUSTEDPROXIES`) when the proxy runs on another host so Runtime Brokers can register, join, rotate secrets, and connect through it.
 
 **Option C — Identity-Aware Proxy (GCP)**
 

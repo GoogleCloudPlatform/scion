@@ -50,6 +50,8 @@ const (
 	FieldName = "name"
 	// FieldCronExpr holds the string denoting the cron_expr field in the database.
 	FieldCronExpr = "cron_expr"
+	// FieldTimeZone holds the string denoting the time_zone field in the database.
+	FieldTimeZone = "time_zone"
 	// FieldEventType holds the string denoting the event_type field in the database.
 	FieldEventType = "event_type"
 	// FieldPayload holds the string denoting the payload field in the database.
@@ -101,6 +103,7 @@ var Columns = []string{
 	FieldProjectID,
 	FieldName,
 	FieldCronExpr,
+	FieldTimeZone,
 	FieldEventType,
 	FieldPayload,
 	FieldStatus,
@@ -139,6 +142,8 @@ var (
 	NameValidator func(string) error
 	// CronExprValidator is a validator for the "cron_expr" field. It is called by the builders before save.
 	CronExprValidator func(string) error
+	// DefaultTimeZone holds the default value on creation for the "time_zone" field.
+	DefaultTimeZone string
 	// EventTypeValidator is a validator for the "event_type" field. It is called by the builders before save.
 	EventTypeValidator func(string) error
 	// DefaultPayload holds the default value on creation for the "payload" field.
@@ -255,6 +260,11 @@ func ByName(opts ...sql.OrderTermOption) OrderOption {
 // ByCronExpr orders the results by the cron_expr field.
 func ByCronExpr(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldCronExpr, opts...).ToFunc()
+}
+
+// ByTimeZone orders the results by the time_zone field.
+func ByTimeZone(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldTimeZone, opts...).ToFunc()
 }
 
 // ByEventType orders the results by the event_type field.

@@ -120,7 +120,7 @@ While the deletion is in progress:
 - A plain delete, and any change to the user, is refused with `409 user_deletion_in_progress` (with `details.deletionId`). Another forced delete joins the deletion and retries its agents at once (**Retry** in the panel).
 - Creating or restoring an agent for the user (an agent owned by the user, or started by one of the user's agents) is refused with `409 conflict`.
 
-An agent whose Runtime Broker cannot be reached stays `failed`, and the deletion stays in progress, with no timeout: the Hub never reports an agent as stopped unless its teardown was confirmed. To finish, delete that agent from its page with force (`DELETE /api/v1/agents/{id}?force=true`); it is then reported as `removed`, and the completion records how many agents were stopped and how many were removed. Turning the experiment off stops new forced deletes only: a deletion already accepted runs to completion, because the user's authority is already revoked and what remains is stopping the agents the requester was allowed to delete. While the experiment is off, the **Deletion status** panel and `GET /api/v1/users/{id}/deletion` are not available.
+An agent whose Runtime Broker cannot be reached stays `failed`, and the deletion stays in progress, with no timeout: the Hub never reports an agent as stopped unless its teardown was confirmed. To finish, delete that agent from its page with force (`DELETE /api/v1/agents/{id}?force=true`); it is then reported as `removed`, and the completion records how many agents were stopped and how many were removed. An agent whose delete is refused because its saved placement is inconsistent also stays `failed`, and deleting it with force does not remove it: a force delete is refused for the same reason. Its latest error usually starts with `placement conflict:`, followed by the refusal code; if the refusal was recorded on another Hub process, or before the Hub restarted, it is the refusal's message alone, which links to the same section. See [Inconsistent agent placement](/scion/hosted/ha/multi-broker/#inconsistent-agent-placement). Turning the experiment off stops new forced deletes only: a deletion already accepted runs to completion, because the user's authority is already revoked and what remains is stopping the agents the requester was allowed to delete. While the experiment is off, the **Deletion status** panel and `GET /api/v1/users/{id}/deletion` are not available.
 
 ## OAuth Authentication
 
@@ -137,7 +137,7 @@ export SCION_SERVER_OAUTH_WEB_GITHUB_CLIENTID="your-client-id"
 export SCION_SERVER_OAUTH_WEB_GITHUB_CLIENTSECRET="your-client-secret"
 ```
 
-On the web server, only `/assets/*`, `/shoelace/*`, and the exact root-level files shipped in `web/public/` (`/apple-touch-icon.png`, `/favicon.ico`, `/favicon.svg`, `/icon-192.png`, `/icon-512.png`, `/icon-maskable-512.png`, `/manifest.webmanifest`, and `/scion-notification-icon.png`) skip the web session check so the sign-in page can render. Every other root-level path (with or without a file extension, including `/robots.txt` and any path containing a backslash) requires a session, sending browsers to sign-in and returning `401` to other clients.
+On the web server, only `/assets/*`, `/shoelace/*`, and the exact root-level files shipped in `web/public/` (`/apple-touch-icon.png`, `/favicon.ico`, `/favicon.svg`, `/icon-192.png`, `/icon-512.png`, `/icon-maskable-512.png`, `/manifest.webmanifest`, and `/scion-notification-icon.png`) skip the web session check so the sign-in page can render. Every other root-level path (with or without a file extension, including `/robots.txt` and any path containing a backslash) requires a session, redirecting browsers to the sign-in page and returning `401` to other clients.
 
 ### CLI OAuth Setup
 
@@ -547,7 +547,7 @@ Scion supports native GitHub App integration for secure, automated agent authent
 - **Admin Management**: Global monitoring of installations, rate limits, and status via the "GitHub App" tab in the Admin Server Config UI.
 
 ### Project Association
-Projects can be linked to specific GitHub App installations. The system automatically associates GitHub App installations at project creation time, streamlining the authentication flow for private repositories. Project settings provide visual indicators and permission badges for real-time feedback on integration health.
+Projects can be linked to specific GitHub App installations. The system automatically associates GitHub App installations at project creation time, streamlining the authentication flow for private repositories. On agent create, start, and restart, the Hub mints GitHub App installation tokens only for the agent's own project; an agent whose project has no installation configured receives no App token. Project settings provide visual indicators and permission badges for real-time feedback on integration health.
 
 ### Webhook Secret
 GitHub App webhook deliveries must be signed. Set the webhook secret in the "GitHub App" tab of the Admin Server Config UI; the Hub stores it as a hub-scoped secret. Use the same value as the webhook secret in your GitHub App's settings. If no webhook secret is configured, the Hub rejects every webhook event with `503 Service Unavailable` instead of processing it unsigned.

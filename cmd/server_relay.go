@@ -137,7 +137,7 @@ func relayDatabaseOptions(cfg *config.GlobalConfig) relaydb.Options {
 		DSN:           cfg.Database.URL,
 		MaxOpenConns:  cfg.Database.MaxOpenConns,
 		MaxIdleConns:  cfg.Database.MaxIdleConns,
-		EventSubjects: append(append([]string(nil), relayserver.RevocationSubjects...), relayserver.SettingsUpdatedSubject),
+		EventSubjects: append(append([]string(nil), relayserver.RevocationSubjects...), relayserver.SettingsUpdatedSubject, relayserver.GrantKeysChangedSubject),
 	}
 }
 

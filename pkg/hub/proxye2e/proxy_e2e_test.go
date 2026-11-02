@@ -196,7 +196,20 @@ func TestHubBehindLocalTLSProxy(t *testing.T) {
 		require.Zero(t, logs.count(isHubRefusal))
 		require.Zero(t, logs.count(isBrokerRefusal))
 		require.NotContains(t, srv.GetHealthInfo(context.Background()).Checks, transportProxyHealthCheck)
-		require.NotContains(t, f.broker.GetHealthInfo(context.Background()).Checks, "control_channel")
+		// No refusal: the broker's command path is never unhealthy. Its
+		// control channel is healthy, or not yet reported while the broker
+		// finishes the handshake the hub has already seen (the grace), and
+		// its heartbeat tells the hub healthy (replacing the refused phase's
+		// value).
+		checks := f.broker.GetHealthInfo(context.Background()).Checks
+		if v, ok := checks["control_channel"]; ok {
+			require.Equal(t, api.BrokerHealthHealthy, v, "control_channel is healthy when reported")
+		}
+		require.NotEqual(t, api.BrokerHealthUnhealthy, checks["conduit"], "no conduit refusal")
+		require.Eventually(t, func() bool {
+			b, err := f.store.GetRuntimeBroker(context.Background(), f.brokerID)
+			return err == nil && b.Health != nil && b.Health.Checks["control_channel"] == api.BrokerHealthHealthy
+		}, heartbeatTimeout, 100*time.Millisecond, "the broker's heartbeat reports control_channel healthy")
 		f.requireNetworkPeerRefused(t, srv)
 	})
 }

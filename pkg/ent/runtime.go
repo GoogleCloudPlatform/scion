@@ -2278,32 +2278,36 @@ func init() {
 	scheduleDescCronExpr := scheduleFields[3].Descriptor()
 	// schedule.CronExprValidator is a validator for the "cron_expr" field. It is called by the builders before save.
 	schedule.CronExprValidator = scheduleDescCronExpr.Validators[0].(func(string) error)
+	// scheduleDescTimeZone is the schema descriptor for time_zone field.
+	scheduleDescTimeZone := scheduleFields[4].Descriptor()
+	// schedule.DefaultTimeZone holds the default value on creation for the time_zone field.
+	schedule.DefaultTimeZone = scheduleDescTimeZone.Default.(string)
 	// scheduleDescEventType is the schema descriptor for event_type field.
-	scheduleDescEventType := scheduleFields[4].Descriptor()
+	scheduleDescEventType := scheduleFields[5].Descriptor()
 	// schedule.EventTypeValidator is a validator for the "event_type" field. It is called by the builders before save.
 	schedule.EventTypeValidator = scheduleDescEventType.Validators[0].(func(string) error)
 	// scheduleDescPayload is the schema descriptor for payload field.
-	scheduleDescPayload := scheduleFields[5].Descriptor()
+	scheduleDescPayload := scheduleFields[6].Descriptor()
 	// schedule.DefaultPayload holds the default value on creation for the payload field.
 	schedule.DefaultPayload = scheduleDescPayload.Default.(string)
 	// scheduleDescStatus is the schema descriptor for status field.
-	scheduleDescStatus := scheduleFields[6].Descriptor()
+	scheduleDescStatus := scheduleFields[7].Descriptor()
 	// schedule.DefaultStatus holds the default value on creation for the status field.
 	schedule.DefaultStatus = scheduleDescStatus.Default.(string)
 	// scheduleDescRunCount is the schema descriptor for run_count field.
-	scheduleDescRunCount := scheduleFields[12].Descriptor()
+	scheduleDescRunCount := scheduleFields[13].Descriptor()
 	// schedule.DefaultRunCount holds the default value on creation for the run_count field.
 	schedule.DefaultRunCount = scheduleDescRunCount.Default.(int)
 	// scheduleDescErrorCount is the schema descriptor for error_count field.
-	scheduleDescErrorCount := scheduleFields[13].Descriptor()
+	scheduleDescErrorCount := scheduleFields[14].Descriptor()
 	// schedule.DefaultErrorCount holds the default value on creation for the error_count field.
 	schedule.DefaultErrorCount = scheduleDescErrorCount.Default.(int)
 	// scheduleDescCreated is the schema descriptor for created field.
-	scheduleDescCreated := scheduleFields[15].Descriptor()
+	scheduleDescCreated := scheduleFields[16].Descriptor()
 	// schedule.DefaultCreated holds the default value on creation for the created field.
 	schedule.DefaultCreated = scheduleDescCreated.Default.(func() time.Time)
 	// scheduleDescUpdated is the schema descriptor for updated field.
-	scheduleDescUpdated := scheduleFields[16].Descriptor()
+	scheduleDescUpdated := scheduleFields[17].Descriptor()
 	// schedule.DefaultUpdated holds the default value on creation for the updated field.
 	schedule.DefaultUpdated = scheduleDescUpdated.Default.(func() time.Time)
 	// schedule.UpdateDefaultUpdated holds the default value on update for the updated field.

@@ -23,6 +23,7 @@ import (
 	"maps"
 	"math/rand"
 	"reflect"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1779,6 +1780,15 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		applied = append(applied, gcpIAMSection)
 	}
 
+	// Authorized domains (ptone/scion#6000): a SCION_SERVER_* pin on this
+	// node, then the saved list, then the startup value
+	// (authorizedDomainsForSnapshot).
+	domains := authorizedDomainsForSnapshot(snap, s.startupLayer1.AuthorizedDomains)
+	if !slices.Equal(s.config.AuthorizedDomains, domains) {
+		applied = append(applied, "authorized_domains")
+	}
+	s.config.AuthorizedDomains = domains
+
 	// User access mode
 	if snap.UserAccessMode != "" {
 		s.config.UserAccessMode = snap.UserAccessMode
@@ -2509,6 +2519,10 @@ const DefaultAttachmentDeliveryMaxBytes int64 = 32 << 20
 // messaging.attachment_inbox_retention_days (ptone/scion#4596).
 const DefaultAttachmentInboxRetentionDays = 7
 
+// DefaultFailedMessageRetentionDays is the compiled default of
+// messaging.failed_message_retention_days.
+const DefaultFailedMessageRetentionDays = 7
+
 // messagingSection returns the cached messaging section, and false when it
 // is absent or unreadable.
 func (o *OperationalSettings) messagingSection() (opsettings.MessagingSettings, bool) {
@@ -2551,6 +2565,20 @@ func (o *OperationalSettings) AttachmentInboxRetentionDays() int {
 		return DefaultAttachmentInboxRetentionDays
 	}
 	return *ms.AttachmentInboxRetentionDays
+}
+
+// FailedMessageRetentionDays returns how many days a failed message to an
+// agent is kept before the failed-message purge deletes it. The compiled
+// default applies when the section or field is absent or unreadable, or
+// the value is below 1.
+//
+// Hot-reloadable: reads from the DB-backed cache.
+func (o *OperationalSettings) FailedMessageRetentionDays() int {
+	ms, ok := o.messagingSection()
+	if !ok || ms.FailedMessageRetentionDays == nil || *ms.FailedMessageRetentionDays < 1 {
+		return DefaultFailedMessageRetentionDays
+	}
+	return *ms.FailedMessageRetentionDays
 }
 
 // ChatRetention returns the resolved chat retention settings (the

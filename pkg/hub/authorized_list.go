@@ -600,8 +600,9 @@ func listCursorAEAD(key []byte) (cipher.AEAD, error) {
 	return aead, nil
 }
 
-// newListCursorSealer builds a sealer from one fixed 32-byte AES-256 key,
-// sealing and opening the c1 form only (legacy mode).
+// newListCursorSealer builds a sealer from one fixed 32-byte AES-256 key
+// (legacy mode): it seals the c1 form and opens c1 and the c2 form whose
+// key ID is "legacy" (see fixedCapabilityKeys).
 func newListCursorSealer(key []byte) (*listCursorSealer, error) {
 	if _, err := listCursorAEAD(key); err != nil {
 		return nil, err

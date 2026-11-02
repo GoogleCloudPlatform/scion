@@ -266,9 +266,12 @@ const SSEHiddenTabClose = "web.sse_hidden_tab_close"
 
 // SecretRotation gates opt-in Hub server keyring configuration
 // (server.keyring_file, ptone/scion#1530): a hub configured with a keyring
-// file refuses to start while it is off. It is checked once at startup
-// (the keyring is loaded once, before any listener opens); turning it off
-// later changes nothing until the next restart. Readers of persisted
+// file refuses to start while it is off. For the keyring it is checked once
+// at startup (the keyring is loaded once, before any listener opens);
+// turning it off later changes nothing there until the next restart. The
+// admin key status endpoint (GET /api/v1/admin/keys/status) checks it on
+// every request (requireExperiment), so the endpoint answers 404 as soon as
+// it is off. Readers of persisted
 // keyring-format data must never depend on it. The design names it
 // "server.secret-rotation"; NamePattern allows no hyphen.
 const SecretRotation = "server.secret_rotation"
@@ -581,7 +584,7 @@ var compiled = []Experiment{
 	{
 		Name:        SecretRotation,
 		Title:       "Server keyring (session cookie pilot)",
-		Description: "Lets a hub start with a versioned keyring file (server.keyring_file). In this release only web session cookies use it: several signing generations can be read at once, with deadlines, while every other purpose keeps the legacy server secret. Checked at startup; a hub with a keyring file refuses to start while it is off. Full server-secret rotation is not available yet.",
+		Description: "Lets a hub start with a versioned keyring file (server.keyring_file). In this release only web session cookies use it: several signing generations can be read at once, with deadlines, while every other purpose keeps the legacy server secret. The keyring file is checked at startup: a hub with a keyring file refuses to start while it is off. It also gates the admin key status endpoint (GET /api/v1/admin/keys/status), checked on every request, so turning it off hides that endpoint at once. Full server-secret rotation is not available yet.",
 		Default:     false,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,

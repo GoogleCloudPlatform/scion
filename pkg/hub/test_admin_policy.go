@@ -349,6 +349,8 @@ var testAdminLegacyRoutePolicy = map[string]testAdminPolicy{
 	"admin.delegationAdoption":          testAdminPolicyDeny,
 	"admin.delegationAdoption.previews": testAdminPolicyDeny,
 	"admin.delegationAdoption.commits":  testAdminPolicyDeny,
+	// Server key status: deployment-wide key configuration.
+	"admin.keys.status": testAdminPolicyDeny,
 	// Lifting a governance hold on one agent.
 	"agents.hold.lift": testAdminPolicyAllow,
 	// Revoking one user's web sessions.

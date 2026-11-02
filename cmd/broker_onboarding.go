@@ -118,7 +118,8 @@ func (b *statusWaitBudget) poll(probe func(timeout time.Duration) bool, interval
 
 // brokerHubConnectionsSettled reports whether live has a settled status for
 // every named connection. A missing connection, an empty status, or a
-// disconnected or reconnecting one is still settling right after a start.
+// disconnected, connecting (control channel handshake pending) or
+// reconnecting one is still settling right after a start.
 func brokerHubConnectionsSettled(live *BrokerHubConnectionsResponse, names []string) bool {
 	if live == nil {
 		return false
@@ -129,7 +130,7 @@ func brokerHubConnectionsSettled(live *BrokerHubConnectionsResponse, names []str
 	}
 	for _, n := range names {
 		switch byName[n] {
-		case "", "disconnected", "reconnecting":
+		case "", "disconnected", "connecting", "reconnecting":
 			return false
 		}
 	}

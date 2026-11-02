@@ -29,6 +29,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport"
@@ -130,11 +131,31 @@ type ConduitDialer struct {
 	// transportRefused is set while the last upgrade was refused by the
 	// hub's transport policy, and cleared when a session is established.
 	transportRefused atomic.Bool
+	// sessionUp is set while a session is established, and cleared when
+	// it ends.
+	sessionUp atomic.Bool
 }
 
 // TransportRefused reports whether the last upgrade was refused by the
 // hub's transport policy and no session has been established since.
 func (d *ConduitDialer) TransportRefused() bool { return d.transportRefused.Load() }
+
+// CommandPathState reports the conduit as a fixed broker health value, or
+// "" when there is nothing to report: api.BrokerHealthUnhealthy while the
+// hub's transport policy refuses it, api.BrokerHealthHealthy while a
+// session is established. Any other state reports nothing: the conduit is
+// optional (a hub may not serve it, and the control channel carries the
+// commands then), so its absence is not a failure.
+func (d *ConduitDialer) CommandPathState() string {
+	switch {
+	case d.transportRefused.Load():
+		return api.BrokerHealthUnhealthy
+	case d.sessionUp.Load():
+		return api.BrokerHealthHealthy
+	default:
+		return ""
+	}
+}
 
 // errConduitForbidden stops the dialer after a 4403 close (terminal per
 // the close-code table). The control channel is unaffected.
@@ -194,6 +215,7 @@ func conduitEndpointURL(hubEndpoint string) (string, error) {
 // Run keeps the session until ctx ends (ctx.Err()) or the hub refuses the
 // broker with 4403 (errConduitForbidden).
 func (d *ConduitDialer) Run(ctx context.Context) error {
+	defer d.sessionUp.Store(false)
 	cfg := d.cfg.Session
 	cfg.Clock = d.cfg.Clock
 	if d.cfg.RPCHandler != nil {
@@ -205,11 +227,13 @@ func (d *ConduitDialer) Run(ctx context.Context) error {
 		Hello:  d.hello,
 		OnSession: func(_ context.Context, _ conduit.Session, w *conduitv1.Welcome) {
 			d.transportRefused.Store(false)
+			d.sessionUp.Store(true)
 			d.log.Info("Conduit session established alongside the control channel",
 				"session_id", w.GetSessionId(), "relay", w.GetRelayInstanceId(), "incarnation", w.GetEndpointIncarnation())
 		},
 		Backoff: d.session,
 		Decide: func(_ context.Context, end conduit.End, delay time.Duration) (time.Duration, error) {
+			d.sessionUp.Store(false)
 			delay, err := d.decide(end, delay)
 			if d.cfg.OnEnd != nil {
 				d.cfg.OnEnd(end, delay, err)

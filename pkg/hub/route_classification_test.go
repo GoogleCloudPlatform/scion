@@ -145,6 +145,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/admin/delegation-adoption":              "hub-admin:delegation-adoption",
 	"/api/v1/admin/delegation-adoption/previews":     "hub-admin:delegation-adoption",
 	"/api/v1/admin/delegation-adoption/commits":      "hub-admin:delegation-adoption",
+	"/api/v1/admin/keys/status":                      "hub-admin:key-status",
 	"/api/v1/admin/lifecycle-hooks":                  "hub-admin:lifecycle-hook",
 	"/api/v1/admin/lifecycle-hooks/":                 "hub-admin:lifecycle-hook",
 	"/api/v1/admin/validate-resources":               "hub-admin:resource-validation",

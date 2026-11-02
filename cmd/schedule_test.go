@@ -167,3 +167,52 @@ func TestPrintScheduleDetail_StatusReason(t *testing.T) {
 	out = captureStdout(t, func() { printScheduleDetail(&sched) })
 	assert.NotContains(t, out, "Reason:")
 }
+
+// TestBuildCreateRecurringRequest_TimeZone: --time-zone is passed through to
+// the request unchanged (the hub validates it), and is omitted when unset.
+func TestBuildCreateRecurringRequest_TimeZone(t *testing.T) {
+	origName, origCron, origZone := scheduleName, scheduleCron, scheduleTimeZone
+	origType, origAgent, origMessage := scheduleType, scheduleAgent, scheduleMessage
+	defer func() {
+		scheduleName, scheduleCron, scheduleTimeZone = origName, origCron, origZone
+		scheduleType, scheduleAgent, scheduleMessage = origType, origAgent, origMessage
+	}()
+	scheduleName, scheduleCron = "digest", "0 7 * * *"
+	scheduleType, scheduleAgent, scheduleMessage = "message", "lead", "digest"
+
+	scheduleTimeZone = "America/Los_Angeles"
+	req := buildCreateRecurringRequest()
+	assert.Equal(t, "America/Los_Angeles", req.TimeZone)
+	assert.Equal(t, "0 7 * * *", req.CronExpr)
+	body, err := json.Marshal(req)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), `"timeZone":"America/Los_Angeles"`)
+
+	scheduleTimeZone = ""
+	body, err = json.Marshal(buildCreateRecurringRequest())
+	require.NoError(t, err)
+	assert.NotContains(t, string(body), "timeZone", "an unset zone is omitted (UTC)")
+
+	flag := scheduleCreateRecurringCmd.Flags().Lookup("time-zone")
+	require.NotNil(t, flag, "create-recurring has --time-zone")
+	assert.Equal(t, "", flag.DefValue)
+}
+
+// TestScheduleZoneLabels: the detail view always names the zone, and the
+// list's cron column names it only when it is not UTC.
+func TestScheduleZoneLabels(t *testing.T) {
+	assert.Equal(t, "UTC", scheduleZoneLabel(""))
+	assert.Equal(t, "Europe/London", scheduleZoneLabel("Europe/London"))
+	assert.Equal(t, "0 9 * * *", scheduleCronLabel("0 9 * * *", ""))
+	assert.Equal(t, "0 9 * * * (Europe/London)", scheduleCronLabel("0 9 * * *", "Europe/London"))
+
+	var sched hubclient.Schedule
+	require.NoError(t, json.Unmarshal([]byte(
+		`{"id":"s1","name":"nightly","cronExpr":"0 3 * * *","timeZone":"Asia/Tokyo","eventType":"message","status":"active"}`,
+	), &sched))
+	out := captureStdout(t, func() { printScheduleDetail(&sched) })
+	assert.Contains(t, out, "  Zone:       Asia/Tokyo\n")
+	sched.TimeZone = ""
+	out = captureStdout(t, func() { printScheduleDetail(&sched) })
+	assert.Contains(t, out, "  Zone:       UTC\n")
+}

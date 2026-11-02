@@ -287,7 +287,7 @@ func TestBuildUpdateStatus_Downgrade(t *testing.T) {
 
 func writeRollbackMarker(t *testing.T, root, content string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(root, rollbackMarkerName), []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, maintenance.RollbackMarkerName), []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -311,7 +311,7 @@ func TestReadRollbackMarker(t *testing.T) {
 		if err != nil || m == nil || *m != (RollbackMarker{At: "2026-10-24T03:10:00Z", From: "nightly-20261024", To: "nightly-20261023"}) {
 			t.Fatalf("m = %+v, err = %v", m, err)
 		}
-		if _, err := os.Stat(filepath.Join(root, rollbackMarkerName)); err != nil {
+		if _, err := os.Stat(filepath.Join(root, maintenance.RollbackMarkerName)); err != nil {
 			t.Fatal("the marker was removed")
 		}
 	})
@@ -322,7 +322,7 @@ func TestReadRollbackMarker(t *testing.T) {
 		"bad at":      `{"at":"yesterday","from":"a","to":"b"}`,
 		"no from":     `{"at":"2026-10-24T03:10:00Z","to":"b"}`,
 		"no to":       `{"at":"2026-10-24T03:10:00Z","from":"a"}`,
-		"oversized":   `{"at":"2026-10-24T03:10:00Z","from":"a","to":"b","pad":"` + strings.Repeat("x", maxRollbackMarkerSize) + `"}`,
+		"oversized":   `{"at":"2026-10-24T03:10:00Z","from":"a","to":"b","pad":"` + strings.Repeat("x", maintenance.MaxRollbackMarkerSize) + `"}`,
 		"two objects": valid + valid,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -336,7 +336,7 @@ func TestReadRollbackMarker(t *testing.T) {
 
 	t.Run("a directory is refused", func(t *testing.T) {
 		root := t.TempDir()
-		if err := os.Mkdir(filepath.Join(root, rollbackMarkerName), 0o755); err != nil {
+		if err := os.Mkdir(filepath.Join(root, maintenance.RollbackMarkerName), 0o755); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := readRollbackMarker(root); err == nil {
@@ -353,7 +353,7 @@ func TestReadRollbackMarker(t *testing.T) {
 		if err := os.WriteFile(target, []byte(valid), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Symlink(target, filepath.Join(root, rollbackMarkerName)); err != nil {
+		if err := os.Symlink(target, filepath.Join(root, maintenance.RollbackMarkerName)); err != nil {
 			t.Fatal(err)
 		}
 		if m, err := readRollbackMarker(root); err == nil || m != nil {
@@ -415,7 +415,7 @@ func TestReconcilePendingUpdate_RollbackMarker(t *testing.T) {
 		if seen := getSeenRollbackMarker(t, s); seen == nil || seen.At != "2026-10-24T03:10:00Z" || seen.RunID != run.ID {
 			t.Fatalf("seen marker = %+v", seen)
 		}
-		if _, err := os.Stat(filepath.Join(root, rollbackMarkerName)); err != nil {
+		if _, err := os.Stat(filepath.Join(root, maintenance.RollbackMarkerName)); err != nil {
 			t.Fatal("the marker was removed")
 		}
 
