@@ -217,6 +217,8 @@ func errorClass(err error) string {
 		return "timed out"
 	case errors.Is(err, context.Canceled):
 		return "canceled"
+	case errors.Is(err, ErrStillPresent):
+		return "still present after removal"
 	case errors.Is(err, ErrNoProjectTree):
 		return "refused: no project tree below the host base (share not mounted)"
 	case errors.Is(err, ErrRefused):
@@ -259,6 +261,15 @@ type DeferredDeletion struct {
 // removed (an unusable host base, a symlinked or non-directory component,
 // a share outside the mount root). Retrying cannot help with it.
 var ErrRefused = errors.New("projectfs: deletion refused")
+
+// AgentWorkspacePendingReason is the reason of a kept agent directory: it
+// still holds entries the hub does not own, normally the agent's own
+// workspace, which only the broker removes.
+const AgentWorkspacePendingReason = "the agent directory is not empty: workspace pending broker removal"
+
+// ErrStillPresent marks a tree that was reported removed (or absent) but
+// is still there when checked right after.
+var ErrStillPresent = errors.New("projectfs: still present after removal")
 
 // ErrNoProjectTree marks the refusal of a shared Layout whose host base
 // exists but has no subpath root: the share is not mounted, or the hub has
