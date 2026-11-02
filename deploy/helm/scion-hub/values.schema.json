@@ -220,6 +220,11 @@
         },
         "affinity": {
           "type": "object"
+        },
+        "terminationGracePeriodSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Seconds the kubelet waits after SIGTERM before it kills the hub pod. Default 45: the Hub's conduit drain (up to about 12s) and then the Runtime Broker's launch drain (up to 10s, within the broker's own 30s shutdown deadline) run before the launch reports are sent, and the Kubernetes default of 30s leaves that little margin. Shorter than about 25s can cut a slow drain off."
         }
       }
     },

@@ -38,6 +38,13 @@ read as `<pod name>-<UUID>` (see the [Hub monitoring dashboard](/scion/hosted/si
 and it is the default conduit relay instance ID. If `hub.extraEnv` already sets
 `POD_NAME`, the chart keeps your entry instead; that value must be unique per pod.
 
+The hub pod runs the Hub and the Runtime Broker in one process. The chart sets the
+pod's `terminationGracePeriodSeconds` to 45 (`hub.terminationGracePeriodSeconds`)
+instead of the Kubernetes default of 30. On shutdown the broker spends up to 10
+seconds ending the agent launches in progress, out of a 30-second shutdown budget, and
+the extra time lets the rest of the shutdown finish before the pod is killed. See
+[Broker restarts during a launch](/scion/reference/server-config/#asynchronous-agent-create).
+
 The chart does **not** create an Ingress, Gateway, load balancer, IAP
 configuration, Cloud SQL instance, GCS bucket, Secret Manager permissions, or
 any IAM binding. Provision those separately, for example with
