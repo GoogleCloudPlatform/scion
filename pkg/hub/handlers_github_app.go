@@ -221,7 +221,11 @@ func (s *Server) loadGitHubAppSecret(ctx context.Context, name string) (string, 
 	}
 
 	// Fallback: read directly from the database
-	return s.store.GetSecretValue(ctx, name, store.ScopeHub, s.hubID)
+	stored, err := s.store.GetSecretValue(ctx, name, store.ScopeHub, s.hubID)
+	if err != nil {
+		return "", err
+	}
+	return s.openHubSecret(ctx, stored)
 }
 
 // persistGitHubAppConfigToDB writes the non-sensitive GitHub App configuration

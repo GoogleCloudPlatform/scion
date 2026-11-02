@@ -202,7 +202,7 @@ A managed section can be reset to tracking mode via the "Reset to bootstrap" but
 2. The section falls back to bootstrap values
 3. On next boot, the section is re-seeded from current deployment config
 
-The endpoint is `DELETE /api/v1/admin/server-config/sections/{name}`; from the CLI, `scion hub settings unset --section NAME --reset`. The `experiments` section is refused there: experiment overrides have their own compare-and-set reset (`DELETE /api/v1/admin/experiments`).
+The endpoint is `DELETE /api/v1/admin/server-config/sections/{name}`; from the CLI, `scion hub settings unset --section NAME --reset`. The `experiments` section is refused there: use `scion hub experiments reset --all`, which is compare-and-set.
 
 ## Environment Variable Namespaces
 
@@ -343,7 +343,7 @@ scion hub settings unset server.hub.monitoring_dashboard_url
 scion hub settings schema                             # sections and keys
 ```
 
-Each `set` or `unset` sends the revision of every section it changes in `expected_revisions`, as read just before the save, so a concurrent change is a `409` listing each section's expected and current revision rather than a silent overwrite. The save report is printed: keys in effect now, keys that apply after a restart, keys saved but not in use, and warnings. Project defaults and experiment overrides are not part of the server configuration.
+Each `set` or `unset` sends the revision of every section it changes in `expected_revisions`, as read just before the save, so a concurrent change is a `409` listing each section's expected and current revision rather than a silent overwrite. The save report is printed: keys in effect now, keys that apply after a restart, keys saved but not in use, and warnings. Project defaults and experiment overrides have their own commands, `scion hub project-defaults` and `scion hub experiments`.
 
 ## Admin UI
 

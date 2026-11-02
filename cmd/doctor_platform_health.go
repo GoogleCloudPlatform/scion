@@ -368,6 +368,16 @@ func healthSummaryBrokersLine(s *hubclient.HealthSummary, verbose bool) string {
 	if b.Truncated {
 		line += " (list truncated)"
 	}
+	profileWarnings := false
+	for _, it := range b.Items {
+		for _, w := range brokerProfileRuntimeWarnings(it) {
+			line += "\n    " + w
+			profileWarnings = true
+		}
+	}
+	if profileWarnings {
+		line += "\n    " + brokerProfileRuntimeNameNote
+	}
 	if !verbose {
 		return line
 	}
@@ -557,6 +567,38 @@ func brokerCommandPath(b hubclient.HealthSummaryBroker) string {
 		return ""
 	}
 	return word
+}
+
+// brokerProfileRuntimeCheckPrefix starts a broker self-health check that
+// reports a profile whose runtime is not available on that broker
+// (ptone/scion#7010).
+const brokerProfileRuntimeCheckPrefix = "profile_runtime."
+
+// brokerProfileRuntimeNameNote explains the profile names in the
+// profile_runtime lines: they are check names, not always the exact
+// profile name.
+const brokerProfileRuntimeNameNote = "(profile names are shown reduced to letters, digits, '_', '.' and '-'; a -2, -3 suffix marks a same-named profile with other runtime settings in another project)"
+
+// brokerProfileRuntimeWarnings returns one line per profile the broker
+// reports as having an unavailable runtime, sorted by profile name.
+func brokerProfileRuntimeWarnings(b hubclient.HealthSummaryBroker) []string {
+	if b.Health == nil {
+		return nil
+	}
+	name := b.Name
+	if name == "" {
+		name = b.ID
+	}
+	var out []string
+	for check, value := range b.Health.Checks {
+		profile, ok := strings.CutPrefix(check, brokerProfileRuntimeCheckPrefix)
+		if !ok || profile == "" || value != "unavailable" {
+			continue
+		}
+		out = append(out, fmt.Sprintf("broker %s: the runtime of profile %s is not available on this broker; check the profile's runtime configuration if agents use it", name, profile))
+	}
+	sort.Strings(out)
+	return out
 }
 
 // nonHealthyCheckList lists "name: value" for every check that did not

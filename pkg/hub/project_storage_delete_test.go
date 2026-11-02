@@ -626,39 +626,28 @@ func TestProjectStorageCleanup_FailedRemovalRetriedByPass(t *testing.T) {
 	assertAbsent(t, tree, "the pass removes it")
 }
 
-// R1: the hub's health reports a shared backend whose mount point has no
-// project tree (the share is not mounted) before any delete needs it, as a
-// non-critical (degraded) check; a mounted tree is healthy; the local
-// backend has no such check; a hung probe times out.
+// R1: on nfs the project tree is part of the critical workspace_storage
+// check (handlers_health_storage_test.go). checkProjectStorageTree reports
+// no project_storage_tree for nfs whatever the tree's state (present,
+// missing on a fresh hub, missing with projects), and nothing on the local
+// backend.
 func TestHealth_ProjectStorageTree(t *testing.T) {
 	e := newStorageCleanupEnv(t)
-	checks := map[string]string{}
-	e.srv.checkProjectStorageTree(checks)
-	assert.Equal(t, "healthy", checks[projectStorageTreeCheck])
-
-	require.NoError(t, os.RemoveAll(e.subRoot))
-	checks = map[string]string{}
-	e.srv.checkProjectStorageTree(checks)
-	assert.Equal(t, "healthy", checks[projectStorageTreeCheck], "no project yet: a mount point without the tree is expected")
-
-	require.NoError(t, e.s.CreateProject(context.Background(), &store.Project{ID: tid("health-p"), Slug: "health-p", Name: "health-p"}))
-	checks = map[string]string{}
-	e.srv.checkProjectStorageTree(checks)
-	assert.Contains(t, checks[projectStorageTreeCheck], "the share may not be mounted")
-	assert.False(t, criticalHealthChecks[projectStorageTreeCheck], "degraded, never unhealthy")
-	assert.Equal(t, HealthStatusDegraded, deriveHealthStatus(map[string]string{"database": "healthy", projectStorageTreeCheck: checks[projectStorageTreeCheck]}))
-
-	prevProbe, prevTimeout := projectStorageTreeProbe, workspaceHealthTimeout
-	block := make(chan struct{})
-	projectStorageTreeProbe = func(projectfs.Layout) error { <-block; return nil }
-	workspaceHealthTimeout = 10 * time.Millisecond
-	t.Cleanup(func() { close(block); projectStorageTreeProbe, workspaceHealthTimeout = prevProbe, prevTimeout })
-	checks = map[string]string{}
-	e.srv.checkProjectStorageTree(checks)
-	assert.Contains(t, checks[projectStorageTreeCheck], "timed out")
+	steps := []func(){
+		func() {},
+		func() { require.NoError(t, os.RemoveAll(e.subRoot)) },
+		func() { e.addProject(t, "health-p") },
+	}
+	for i, step := range steps {
+		step()
+		checks := map[string]string{}
+		e.srv.checkProjectStorageTree(checks)
+		_, has := checks[projectStorageTreeCheck]
+		assert.False(t, has, "step %d: no project_storage_tree on nfs: %v", i, checks)
+	}
 
 	e.srv.config.ProjectStorageConfig = nil
-	checks = map[string]string{}
+	checks := map[string]string{}
 	e.srv.checkProjectStorageTree(checks)
 	_, has := checks[projectStorageTreeCheck]
 	assert.False(t, has, "no check on the local backend")

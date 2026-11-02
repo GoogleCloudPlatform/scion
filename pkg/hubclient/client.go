@@ -116,7 +116,7 @@ type Client interface {
 	Messaging() MessagingService
 
 	// AdminSettings returns the hub administrative settings operations
-	// interface (server configuration).
+	// interface (server configuration, project defaults, experiments).
 	AdminSettings() AdminSettingsService
 
 	// ProjectInjectedSkills returns an InjectedSkillsService scoped to a project.
