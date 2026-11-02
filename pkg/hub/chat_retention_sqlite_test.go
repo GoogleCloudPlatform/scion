@@ -90,11 +90,12 @@ func newChatRetentionHubFixture(t *testing.T) *chatRetentionHubFixture {
 }
 
 type chatRetentionSeed struct {
-	created time.Time
-	state   string
-	channel string
-	conv    string
-	thread  string
+	created   time.Time
+	state     string
+	channel   string
+	conv      string
+	thread    string
+	recipient string // default "agent:bot"
 }
 
 // message stores a message and one row in every dependent table.
@@ -103,9 +104,12 @@ func (f *chatRetentionHubFixture) message(sd chatRetentionSeed) string {
 	if sd.state == "" {
 		sd.state = store.MessageDispatchDispatched
 	}
+	if sd.recipient == "" {
+		sd.recipient = "agent:bot"
+	}
 	m := &store.Message{
 		ID: api.NewUUID(), ProjectID: f.project.ID, Sender: "user:alice@test.com", SenderID: f.alice.ID,
-		Recipient: "agent:bot", Msg: "hello", Type: "chat", Channel: sd.channel, ThreadID: sd.thread,
+		Recipient: sd.recipient, Msg: "hello", Type: "chat", Channel: sd.channel, ThreadID: sd.thread,
 		ConversationID: sd.conv, DispatchState: sd.state, CreatedAt: sd.created,
 	}
 	require.NoError(f.t, f.s.CreateMessage(f.ctx, m))

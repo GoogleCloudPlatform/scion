@@ -349,3 +349,19 @@ func TestFormatForDelivery_ForwardsVisitorSenderKeys(t *testing.T) {
 		t.Errorf("a key outside the allowlist was forwarded:\n%s", result)
 	}
 }
+
+// The legacy renderer forwards the hub-set sender time zone.
+func TestFormatForDelivery_ForwardsSenderTimezone(t *testing.T) {
+	msg := &StructuredMessage{
+		Version:   Version,
+		Timestamp: "2026-10-31T10:00:00Z",
+		Sender:    "user:alice@example.com",
+		Recipient: "agent:dev",
+		Msg:       "hi",
+		Type:      TypeInstruction,
+		Metadata:  map[string]string{MetadataSenderTimezone: "Europe/Berlin"},
+	}
+	if result := FormatForDelivery(msg); !strings.Contains(result, `"sender_timezone": "Europe/Berlin"`) {
+		t.Errorf("delivery lacks sender_timezone:\n%s", result)
+	}
+}

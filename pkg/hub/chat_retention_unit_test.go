@@ -38,12 +38,13 @@ func (c *fakeChatRetentionClock) now() time.Time { return c.t }
 
 // fakeChatRetentionMsg is one message of fakeChatRetentionStore.
 type fakeChatRetentionMsg struct {
-	id      string
-	created time.Time
-	project string
-	state   string
-	conv    string
-	thread  string
+	id        string
+	created   time.Time
+	project   string
+	state     string
+	conv      string
+	thread    string
+	recipient string // "" = an agent
 }
 
 // fakeChatRetentionTopic is one web chat topic of fakeChatRetentionStore.
@@ -61,18 +62,29 @@ type fakeChatRetentionStore struct {
 	msgs      []fakeChatRetentionMsg
 	cursor    store.ChatRetentionCursor
 	hasCursor bool
-	runs      []*store.ChatRetentionRun
+	// failedCursor is the cursor of phase "failed"; failedSaves counts
+	// its writes.
+	failedCursor    store.ChatRetentionCursor
+	hasFailedCursor bool
+	failedSaves     int
+	// failedScanned holds the rows each failed-message scan read.
+	failedScanned []int
+	runs          []*store.ChatRetentionRun
 
 	purgeCost func(call int) time.Duration
 	purgeErr  error
 	// afterPurge, when set, runs after each successful purge (a test
 	// cancels the tick's context from it).
-	afterPurge  func(call int)
-	purgeCalls  int
-	selectCalls int
-	scanned     int
-	lastSelect  store.ChatRetentionPosition
-	deadlines   []bool
+	afterPurge func(call int)
+	purgeCalls int
+	// failedPurgeCalls counts PurgeFailedMessages calls; they share
+	// purgeCost, purgeErr and afterPurge (by call number) with the main
+	// purge.
+	failedPurgeCalls int
+	selectCalls      int
+	scanned          int
+	lastSelect       store.ChatRetentionPosition
+	deadlines        []bool
 
 	// convDeleted holds the soft-deleted conversations and their deletion
 	// times; topics the web chat topics.
@@ -217,10 +229,71 @@ func (f *fakeChatRetentionStore) SelectChatRetentionCandidates(ctx context.Conte
 
 func (f *fakeChatRetentionStore) PurgeChatMessages(ctx context.Context, ids []string, projectOf map[string]string, cursor store.ChatRetentionCursor) (store.ChatRetentionPurgeResult, error) {
 	f.purgeCalls++
+	res, err := f.purge(ctx, ids, f.purgeCalls, func(c *store.ChatRetentionCounts) { c.Main++ })
+	if err != nil {
+		return res, err
+	}
+	// The deleted-conversation phase purges with no cursor (Phase "").
+	if cursor.Phase != "" {
+		f.cursor, f.hasCursor = cursor, true
+	}
+	if f.afterPurge != nil {
+		f.afterPurge(f.purgeCalls)
+	}
+	return res, nil
+}
+
+func (f *fakeChatRetentionStore) SelectFailedMessages(ctx context.Context, cutoff time.Time, after store.ChatRetentionPosition, scanLimit, limit int) (store.FailedMessageScan, error) {
+	f.selectCalls++
+	f.lastSelect = after
+	out := store.FailedMessageScan{Next: after}
+	scanned, truncated := 0, false
+	for _, m := range f.msgs {
+		if !m.created.Before(cutoff) || scanned == scanLimit {
+			break
+		}
+		if !after.IsStart() && (m.created.Before(after.Created) || (m.created.Equal(after.Created) && m.id <= after.ID)) {
+			continue
+		}
+		// The scan ranges over the failed index: only failed rows are read.
+		if m.state != store.MessageDispatchFailed {
+			continue
+		}
+		scanned++
+		out.Next = store.ChatRetentionPosition{Created: m.created, ID: m.id}
+		if m.recipient != "" && !strings.HasPrefix(m.recipient, "agent:") {
+			continue
+		}
+		out.Candidates = append(out.Candidates, store.ChatRetentionCandidate{ID: m.id, Created: m.created, ProjectID: m.project})
+		if len(out.Candidates) == limit {
+			truncated = true
+			break
+		}
+	}
+	f.scanned += scanned
+	f.failedScanned = append(f.failedScanned, scanned)
+	out.Exhausted = !truncated && scanned < scanLimit
+	return out, nil
+}
+
+func (f *fakeChatRetentionStore) PurgeFailedMessages(ctx context.Context, ids []string, projectOf map[string]string) (store.ChatRetentionPurgeResult, error) {
+	f.failedPurgeCalls++
+	res, err := f.purge(ctx, ids, f.failedPurgeCalls, func(c *store.ChatRetentionCounts) { c.Failed++ })
+	if err != nil {
+		return res, err
+	}
+	if f.afterPurge != nil {
+		f.afterPurge(f.failedPurgeCalls)
+	}
+	return res, nil
+}
+
+// purge drops ids, counting each under countMessage and one mention.
+func (f *fakeChatRetentionStore) purge(ctx context.Context, ids []string, call int, countMessage func(*store.ChatRetentionCounts)) (store.ChatRetentionPurgeResult, error) {
 	_, hasDeadline := ctx.Deadline()
 	f.deadlines = append(f.deadlines, hasDeadline)
 	if f.purgeCost != nil {
-		f.clock.t = f.clock.t.Add(f.purgeCost(f.purgeCalls))
+		f.clock.t = f.clock.t.Add(f.purgeCost(call))
 	}
 	res := store.ChatRetentionPurgeResult{ByProject: map[string]store.ChatRetentionCounts{}}
 	if f.purgeErr != nil {
@@ -234,7 +307,7 @@ func (f *fakeChatRetentionStore) PurgeChatMessages(ctx context.Context, ids []st
 	for _, m := range f.msgs {
 		if drop[m.id] {
 			c := res.ByProject[m.project]
-			c.Main++
+			countMessage(&c)
 			c.Mentions++
 			res.ByProject[m.project] = c
 			continue
@@ -260,16 +333,16 @@ func (f *fakeChatRetentionStore) PurgeChatMessages(ctx context.Context, ids []st
 			res.UnlinkedAttachments = append(res.UnlinkedAttachments, a)
 		}
 	}
-	if cursor.Phase != "" {
-		f.cursor, f.hasCursor = cursor, true
-	}
-	if f.afterPurge != nil {
-		f.afterPurge(f.purgeCalls)
-	}
 	return res, nil
 }
 
 func (f *fakeChatRetentionStore) GetChatRetentionCursor(ctx context.Context, phase string) (store.ChatRetentionCursor, error) {
+	if phase == store.ChatRetentionPhaseFailed {
+		if !f.hasFailedCursor {
+			return store.ChatRetentionCursor{Phase: phase}, nil
+		}
+		return f.failedCursor, nil
+	}
 	if !f.hasCursor {
 		return store.ChatRetentionCursor{Phase: phase}, nil
 	}
@@ -279,6 +352,11 @@ func (f *fakeChatRetentionStore) GetChatRetentionCursor(ctx context.Context, pha
 func (f *fakeChatRetentionStore) SaveChatRetentionCursor(ctx context.Context, c store.ChatRetentionCursor) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if c.Phase == store.ChatRetentionPhaseFailed {
+		f.failedCursor, f.hasFailedCursor = c, true
+		f.failedSaves++
+		return nil
 	}
 	f.cursor, f.hasCursor = c, true
 	return nil

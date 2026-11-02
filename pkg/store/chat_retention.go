@@ -23,6 +23,11 @@ import (
 // the oldest-first walk of messages over the created index.
 const ChatRetentionPhaseMain = "main"
 
+// ChatRetentionPhaseFailed is the cursor phase of the failed-message purge
+// (messaging.failed_message_retention_days): its walk over the created
+// index. It never carries a last applied cutoff.
+const ChatRetentionPhaseFailed = "failed"
+
 // Chat retention run triggers and statuses (chat_retention_runs).
 const (
 	ChatRetentionTriggerSweep = "sweep"
@@ -91,6 +96,9 @@ type ChatRetentionCounts struct {
 	// DeletedConv counts messages deleted because their conversation or
 	// topic was deleted more than the grace period ago.
 	DeletedConv int64 `json:"deleted_conv,omitempty"`
+	// Failed counts failed agent messages deleted by the failed-message
+	// purge (messaging.failed_message_retention_days).
+	Failed int64 `json:"failed,omitempty"`
 	// Addressees, Mentions, Stars, Ext and Attachments count the
 	// dependent rows deleted with those messages: message_addressees,
 	// webchat_mention, webchat_message_star, webchat_message_ext and
@@ -116,6 +124,7 @@ type ChatRetentionCounts struct {
 func (c *ChatRetentionCounts) Add(o ChatRetentionCounts) {
 	c.Main += o.Main
 	c.DeletedConv += o.DeletedConv
+	c.Failed += o.Failed
 	c.Addressees += o.Addressees
 	c.Mentions += o.Mentions
 	c.Stars += o.Stars
@@ -144,6 +153,18 @@ func (r ChatRetentionPurgeResult) Total() ChatRetentionCounts {
 		t.Add(c)
 	}
 	return t
+}
+
+// FailedMessageScan is the outcome of one capped failed-message scan.
+type FailedMessageScan struct {
+	// Candidates are the failed agent messages found, oldest first.
+	Candidates []ChatRetentionCandidate
+	// Next is where the next scan resumes: the last candidate when the
+	// limit cut the scan short, else the last row scanned. It equals the
+	// position scanned from when the scan found no row.
+	Next ChatRetentionPosition
+	// Exhausted is true when no row below the cutoff remains after Next.
+	Exhausted bool
 }
 
 // ChatRetentionPolicy is the policy a run applied, recorded on its row.
@@ -219,6 +240,20 @@ type ChatRetentionStore interface {
 	// id unless a message links it again, and reports whether it deleted
 	// it.
 	DeleteUnlinkedChatAttachment(ctx context.Context, id string) (bool, error)
+	// SelectFailedMessages scans at most scanLimit messages in
+	// dispatch_state "failed" created before cutoff and after the position
+	// after, oldest first in (created, id) order over the partial failed
+	// index, and returns those of them with an agent recipient ("agent:"
+	// prefix), up to limit. The scan cap bounds the work of one statement
+	// however many failed "user:" rows sit in the range. A "user:"
+	// recipient row is never returned: it reaches "failed" only by the
+	// stuck-pending expiry, and is real chat history.
+	SelectFailedMessages(ctx context.Context, cutoff time.Time, after ChatRetentionPosition, scanLimit, limit int) (FailedMessageScan, error)
+
+	// PurgeFailedMessages deletes the given messages with the same
+	// dependent rows as PurgeChatMessages, in one transaction, and counts
+	// the messages under Failed instead of Main. It writes no cursor.
+	PurgeFailedMessages(ctx context.Context, ids []string, projectOf map[string]string) (ChatRetentionPurgeResult, error)
 
 	// GetChatRetentionCursor returns the cursor of phase, or a zero cursor
 	// for phase (Position at the start) when none is stored.
