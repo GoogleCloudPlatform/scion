@@ -61,8 +61,12 @@ func CheckKeyringRelease(k *keyring.Keyring) error {
 // releaseKeyringCheck applies this release's limits to a keyring file:
 // keyring.Keyring.CheckSessionPilot (no emit "versioned" or write_format
 // "v2", a "legacy" signing entry, and the imported legacy encryption key
-// as the active one). Errors name no key material.
+// as the active one). A nil keyring is refused (fail closed). Errors name
+// no key material.
 func releaseKeyringCheck(k *keyring.Keyring) error {
+	if k == nil {
+		return errors.New("keyring file: not loaded")
+	}
 	return k.CheckSessionPilot()
 }
 
