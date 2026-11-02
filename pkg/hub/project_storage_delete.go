@@ -404,14 +404,7 @@ func (s *Server) startAgentStorageCleanup(agent *store.Agent, teardownConfirmed 
 			audit([]projectfs.Deletion{{Tree: projectfs.TreeAgentRoot, Outcome: projectfs.OutcomeFailed,
 				Err: layoutErr, Reason: "the hub's project storage layout is unavailable"}})
 		case shared:
-			ds := removeAgentSharedStorage(ctx, layout, a)
-			for i := range ds {
-				if ds[i].Tree == projectfs.TreeAgentRoot && ds[i].Outcome == projectfs.OutcomeKept &&
-					ds[i].Reason == projectfs.AgentWorkspacePendingReason && teardownConfirmed {
-					ds[i].Reason = agentRootOtherFilesReason
-				}
-			}
-			audit(ds)
+			removeAgentSharedStorage(ctx, layout, a, teardownConfirmed, audit)
 		}
 
 		if stor != nil && ctx.Err() == nil {

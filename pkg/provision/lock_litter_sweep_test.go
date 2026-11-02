@@ -59,40 +59,57 @@ func TestSweepLockLitter_EvictAgedByMarker(t *testing.T) {
 	dir := t.TempDir()
 	evict := releasedLockEvict(t, dir)
 
-	pending, err := SweepLockLitter(dir, LockLitterMinAge())
+	left, err := SweepLockLitter(dir)
 	require.NoError(t, err)
 	assert.DirExists(t, evict, "a young .evict entry is kept")
-	assert.Greater(t, pending, time.Duration(0))
-	assert.LessOrEqual(t, pending, LockLitterMinAge())
+	assert.Greater(t, left.Pending, time.Duration(0))
+	assert.LessOrEqual(t, left.Pending, LockLitterMinAge())
+	assert.Equal(t, 0, left.Unaged)
 
 	// The directory's own mtime does not count: only the marker's.
 	backdate(t, evict, 24*time.Hour)
-	_, err = SweepLockLitter(dir, LockLitterMinAge())
+	_, err = SweepLockLitter(dir)
 	require.NoError(t, err)
 	assert.DirExists(t, evict, "the entry's own mtime never ages it")
 
 	backdate(t, filepath.Join(evict, provisionLockEvictedAtFile), LockLitterMinAge()+time.Minute)
-	pending, err = SweepLockLitter(dir, LockLitterMinAge())
+	left, err = SweepLockLitter(dir)
 	require.NoError(t, err)
 	assert.NoDirExists(t, evict)
-	assert.Equal(t, time.Duration(0), pending)
+	assert.Equal(t, LockLitter{}, left)
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 	assert.Empty(t, entries, "nothing else is left, not even a clock probe")
 }
 
-// An ".evict-*" entry without its marker is never guessed at: kept,
-// pending for the full cutoff.
-func TestSweepLockLitter_EvictWithoutMarkerKept(t *testing.T) {
+// An ".evict-*" entry without its marker is never guessed at: kept and
+// counted as unaged, with no pending wait (waiting would not age it).
+func TestSweepLockLitter_EvictWithoutMarkerUnaged(t *testing.T) {
 	dir := t.TempDir()
 	evict := filepath.Join(dir, provisionFileLockName+".evict-abc")
 	require.NoError(t, os.Mkdir(evict, 0o755))
 	backdate(t, evict, 24*time.Hour)
 
-	pending, err := SweepLockLitter(dir, LockLitterMinAge())
+	left, err := SweepLockLitter(dir)
 	require.NoError(t, err)
 	assert.DirExists(t, evict)
-	assert.Equal(t, LockLitterMinAge(), pending)
+	assert.Equal(t, LockLitter{Unaged: 1}, left)
+}
+
+// The exported sweep's cutoff is LockLitterMinAge: litter just past a
+// shorter age is kept by it, and removed by the test seam with that age.
+func TestSweepLockLitter_CutoffIsFixed(t *testing.T) {
+	dir := t.TempDir()
+	stage := filepath.Join(dir, provisionFileLockName+".stage-x")
+	require.NoError(t, os.Mkdir(stage, 0o755))
+	backdate(t, stage, time.Minute)
+
+	_, err := SweepLockLitter(dir)
+	require.NoError(t, err)
+	assert.DirExists(t, stage, "younger than LockLitterMinAge")
+	_, err = sweepLockLitter(dir, 30*time.Second)
+	require.NoError(t, err)
+	assert.NoDirExists(t, stage)
 }
 
 // Staging directories and leaked clock probes are aged from their own
@@ -113,27 +130,27 @@ func TestSweepLockLitter_OtherLitterAndUntouched(t *testing.T) {
 		backdate(t, p, 24*time.Hour)
 	}
 
-	pending, err := SweepLockLitter(dir, LockLitterMinAge())
+	left, err := SweepLockLitter(dir)
 	require.NoError(t, err)
 	assert.NoDirExists(t, oldStage)
 	assert.NoFileExists(t, oldProbe)
 	assert.DirExists(t, youngStage)
 	assert.DirExists(t, live, "the live lock is never swept")
 	assert.DirExists(t, other, "entries outside the lock's prefix are never swept")
-	assert.Greater(t, pending, time.Duration(0))
+	assert.Greater(t, left.Pending, time.Duration(0))
 }
 
 // A missing directory, or one without litter, is nothing to do.
 func TestSweepLockLitter_Nothing(t *testing.T) {
-	pending, err := SweepLockLitter(filepath.Join(t.TempDir(), "missing"), LockLitterMinAge())
+	left, err := SweepLockLitter(filepath.Join(t.TempDir(), "missing"))
 	require.NoError(t, err)
-	assert.Equal(t, time.Duration(0), pending)
+	assert.Equal(t, LockLitter{}, left)
 
 	dir := t.TempDir()
 	require.NoError(t, os.Mkdir(filepath.Join(dir, "workspace"), 0o755))
-	pending, err = SweepLockLitter(dir, LockLitterMinAge())
+	left, err = SweepLockLitter(dir)
 	require.NoError(t, err)
-	assert.Equal(t, time.Duration(0), pending)
+	assert.Equal(t, LockLitter{}, left)
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 	assert.Len(t, entries, 1, "no clock probe is written when there is no litter")

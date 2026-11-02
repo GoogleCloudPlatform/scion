@@ -759,12 +759,11 @@ func TestAgentStorageCleanup_LockLitterAgedAgentRootGone(t *testing.T) {
 
 // Litter still younger than the cutoff is kept, and with it agents/<slug>,
 // audited with the litter reason. A wait longer than the cleanup's budget
-// is not attempted. Home and secrets go; the live lock name and the
-// project tree are untouched.
+// is not attempted. Home and secrets go; the project tree is untouched.
 func TestAgentStorageCleanup_YoungLockLitterKept(t *testing.T) {
-	origMin := agentLockLitterMinAge
-	agentLockLitterMinAge = func() time.Duration { return 24 * time.Hour }
-	t.Cleanup(func() { agentLockLitterMinAge = origMin })
+	origTimeout := agentStorageCleanupTimeout
+	agentStorageCleanupTimeout = time.Minute // shorter than the cutoff's wait
+	t.Cleanup(func() { agentStorageCleanupTimeout = origTimeout })
 
 	e := newStorageCleanupEnv(t)
 	projectID := tid("asc-young")
@@ -782,20 +781,40 @@ func TestAgentStorageCleanup_YoungLockLitterKept(t *testing.T) {
 	assert.DirExists(t, evict, "young litter is kept")
 	assertAbsent(t, filepath.Join(agentDir, "home-"+a.ID), "own home removed")
 	assertAbsent(t, filepath.Join(agentDir, "secrets-"+a.ID), "own secrets removed")
+	assert.DirExists(t, filepath.Join(tree, "workspace", ".git"))
 	l := e.auditLine(t, "agent-root")
 	assert.Contains(t, l, "outcome=kept")
 	assert.Contains(t, l, agentLockLitterPendingReason)
 	assert.NotContains(t, l, agentRootOtherFilesReason)
 }
 
+// retryingLitterSweep stands in for provision.SweepLockLitter: the first
+// call reports the litter as pending for wait, later calls remove it.
+func retryingLitterSweep(t *testing.T, wait time.Duration) *int {
+	t.Helper()
+	calls := 0
+	orig, origMargin := agentLockLitterSweep, agentLockLitterRetryMargin
+	agentLockLitterSweep = func(dir string) (provision.LockLitter, error) {
+		calls++
+		if calls == 1 {
+			return provision.LockLitter{Pending: wait}, nil
+		}
+		matches, err := filepath.Glob(filepath.Join(dir, ".scion-provision.lock.*"))
+		require.NoError(t, err)
+		for _, m := range matches {
+			require.NoError(t, os.RemoveAll(m))
+		}
+		return provision.LockLitter{}, nil
+	}
+	agentLockLitterRetryMargin = 50 * time.Millisecond
+	t.Cleanup(func() { agentLockLitterSweep, agentLockLitterRetryMargin = orig, origMargin })
+	return &calls
+}
+
 // When the litter becomes old enough within the cleanup's budget, the
 // cleanup waits and retries once, and the agent directory goes.
 func TestAgentStorageCleanup_LockLitterRetried(t *testing.T) {
-	origMin, origMargin := agentLockLitterMinAge, agentLockLitterRetryMargin
-	agentLockLitterMinAge = func() time.Duration { return 2 * time.Second }
-	agentLockLitterRetryMargin = 200 * time.Millisecond
-	t.Cleanup(func() { agentLockLitterMinAge, agentLockLitterRetryMargin = origMin, origMargin })
-
+	calls := retryingLitterSweep(t, 200*time.Millisecond)
 	e := newStorageCleanupEnv(t)
 	projectID := tid("asc-retry")
 	tree := e.seedTree(t, e.subRoot, projectID)
@@ -807,6 +826,57 @@ func TestAgentStorageCleanup_LockLitterRetried(t *testing.T) {
 	e.srv.startAgentStorageCleanup(a, true)
 	e.srv.storageCleanupWG.Wait()
 
+	assert.Equal(t, 2, *calls, "one sweep, one retry")
 	assertAbsent(t, agentDir, "the retry removes the agent directory")
 	assert.Contains(t, e.auditLine(t, "agent-root"), "outcome=deleted")
+}
+
+// Home and secrets are audited before the retry wait: a hub that stops
+// while waiting has still recorded the deletions it made. Only the agent
+// directory's line comes after the wait.
+func TestAgentStorageCleanup_AuditsBeforeRetryWait(t *testing.T) {
+	retryingLitterSweep(t, 2*time.Second)
+	e := newStorageCleanupEnv(t)
+	projectID := tid("asc-early")
+	tree := e.seedTree(t, e.subRoot, projectID)
+	a := &store.Agent{ID: tid("asc-early-agent"), Slug: "dev", ProjectID: projectID}
+	agentDir := filepath.Join(tree, "agents", "dev")
+	for _, leaf := range []string{"home-", "secrets-"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(agentDir, leaf+a.ID), 0o755))
+	}
+	brokerRemovedAgentWorkspace(t, agentDir)
+
+	e.srv.startAgentStorageCleanup(a, true)
+	require.Eventually(t, func() bool {
+		return strings.Contains(e.logs.String(), "tree=agent-home") && strings.Contains(e.logs.String(), "tree=agent-secrets")
+	}, time.Second, 10*time.Millisecond, "home and secrets are audited before the wait")
+	assert.NotContains(t, e.logs.String(), "tree=agent-root", "the agent directory waits for the retry")
+	e.srv.storageCleanupWG.Wait()
+	assert.Contains(t, e.auditLine(t, "agent-root"), "outcome=deleted")
+	assert.Equal(t, 1, strings.Count(e.logs.String(), "tree=agent-home"), "home is audited once")
+}
+
+// An evicted lock without its eviction marker is never aged: there is no
+// wait for it, and the kept agent directory says why.
+func TestAgentStorageCleanup_UnagedLockLitterKept(t *testing.T) {
+	e := newStorageCleanupEnv(t)
+	projectID := tid("asc-unaged")
+	tree := e.seedTree(t, e.subRoot, projectID)
+	a := &store.Agent{ID: tid("asc-unaged-agent"), Slug: "dev", ProjectID: projectID}
+	agentDir := filepath.Join(tree, "agents", "dev")
+	require.NoError(t, os.RemoveAll(filepath.Join(agentDir, "workspace")))
+	unaged := filepath.Join(agentDir, ".scion-provision.lock.evict-unaged")
+	require.NoError(t, os.MkdirAll(unaged, 0o755))
+	old := time.Now().Add(-24 * time.Hour)
+	require.NoError(t, os.Chtimes(unaged, old, old))
+
+	start := time.Now()
+	e.srv.startAgentStorageCleanup(a, true)
+	e.srv.storageCleanupWG.Wait()
+
+	assert.Less(t, time.Since(start), 10*time.Second, "no wait for litter that never ages")
+	assert.DirExists(t, unaged)
+	l := e.auditLine(t, "agent-root")
+	assert.Contains(t, l, "outcome=kept")
+	assert.Contains(t, l, agentLockLitterUnagedReason)
 }

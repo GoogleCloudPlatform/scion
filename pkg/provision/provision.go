@@ -1489,7 +1489,7 @@ func acquireFileLockWithin(ctx context.Context, dir string, wait time.Duration) 
 // not revisited. Accepted: it does not accumulate further once contention
 // stops, and it is already git-excluded.
 func garbageCollectLockLitter(dir string) {
-	_, _ = SweepLockLitter(dir, LockLitterMinAge())
+	_, _ = SweepLockLitter(dir)
 }
 
 // LockLitterMinAge is the age past which provisioning-lock litter may be
@@ -1499,24 +1499,44 @@ func LockLitterMinAge() time.Duration {
 	return 2 * provisionLockStaleAfter
 }
 
-// SweepLockLitter removes dir's provisioning-lock litter older than minAge
-// and reports how long the youngest remaining entry still needs before it
-// may be removed (0 when none is left). ".evict-*" entries are aged from
-// their evicted-at marker (see garbageCollectLockLitter); an entry without
-// the marker is never guessed at and counts as pending for the full
-// minAge. Other litter (staging directories, clock probes a crashed
-// caller left) is aged from its own mtime; a concurrent caller's probe is
-// young and kept. The live lock itself and anything not under the lock's
-// name prefix are never touched. Ages are measured against the file
-// server's clock (serverNow). The first removal error is returned; the
-// sweep continues past it.
-func SweepLockLitter(dir string, minAge time.Duration) (pending time.Duration, err error) {
+// LockLitter is what SweepLockLitter left in place.
+type LockLitter struct {
+	// Pending is how long the youngest remaining aged entry still needs
+	// before it may be removed (0 when none is left).
+	Pending time.Duration
+	// Unaged counts ".evict-*" entries without their evicted-at marker.
+	// They have no eviction time and are never removed automatically, so
+	// waiting does not help (see garbageCollectLockLitter).
+	Unaged int
+}
+
+// SweepLockLitter removes dir's provisioning-lock litter older than
+// LockLitterMinAge and reports what it left. ".evict-*" entries are aged
+// from their evicted-at marker (see garbageCollectLockLitter); one without
+// the marker is never guessed at (counted in Unaged). Other litter
+// (staging directories, clock probes a crashed caller left) is aged from
+// its own mtime; a concurrent caller's probe is young and kept. The live
+// lock itself and anything not under the lock's name prefix are never
+// touched. Ages are measured against the file server's clock (serverNow).
+// The first removal error is returned; the sweep continues past it.
+//
+// The cutoff is fixed: a caller MUST NOT remove litter younger than
+// LockLitterMinAge by any other means, since a younger ".evict-*" entry
+// can still be the destination a stale observer's rename relies on (the
+// invariant in acquireFileLock's correctness argument).
+func SweepLockLitter(dir string) (LockLitter, error) {
+	return sweepLockLitter(dir, LockLitterMinAge())
+}
+
+// sweepLockLitter is SweepLockLitter with the cutoff as a parameter, for
+// tests only.
+func sweepLockLitter(dir string, minAge time.Duration) (left LockLitter, err error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return 0, nil
+			return left, nil
 		}
-		return 0, err
+		return left, err
 	}
 	prefix := provisionFileLockName + "."
 	var litter []os.DirEntry
@@ -1526,17 +1546,16 @@ func SweepLockLitter(dir string, minAge time.Duration) (pending time.Duration, e
 		}
 	}
 	if len(litter) == 0 {
-		return 0, nil
+		return left, nil
 	}
 	now, err := serverNow(dir)
 	if err != nil {
-		return minAge, err
+		left.Pending = minAge
+		return left, err
 	}
 	var firstErr error
 	keep := func(age time.Duration) {
-		if left := minAge - age; left > pending {
-			pending = left
-		}
+		left.Pending = max(left.Pending, minAge-age)
 	}
 	for _, e := range litter {
 		name := e.Name()
@@ -1545,7 +1564,7 @@ func SweepLockLitter(dir string, minAge time.Duration) (pending time.Duration, e
 		if strings.Contains(name, ".evict-") {
 			info, err := os.Stat(filepath.Join(path, provisionLockEvictedAtFile))
 			if err != nil {
-				keep(0) // no confirmed eviction time yet; never guess
+				left.Unaged++ // no confirmed eviction time; never guess
 				continue
 			}
 			age = now.Sub(info.ModTime())
@@ -1565,7 +1584,7 @@ func SweepLockLitter(dir string, minAge time.Duration) (pending time.Duration, e
 			firstErr = err
 		}
 	}
-	return pending, firstErr
+	return left, firstErr
 }
 
 // tryCreateFileLock atomically publishes a fully-formed, already-owned lock
