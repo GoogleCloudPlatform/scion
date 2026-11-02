@@ -1002,15 +1002,19 @@ else
 fi
 grace_null="$WORK/grace-null.yaml"
 # An explicit null deletes the key, so the schema's minimum never runs; the
-# template must fall back to 45 rather than render int(nil) = 0, which is an
-# immediate SIGKILL with no launch drain.
-if "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+# template must fall back to the values.yaml default rather than render
+# int(nil) = 0, which is an immediate SIGKILL with no launch drain. The null
+# render is compared with the DEFAULT render's line, not a literal, so the
+# template's fallback drifting from the values.yaml default is caught too.
+grace_default_line=$(grep -E '^      terminationGracePeriodSeconds: [0-9]+$' "$grace_default" || true)
+if [[ -n $grace_default_line ]] \
+    && "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
     "${BASE[@]}" --set hub.terminationGracePeriodSeconds=null >"$grace_null" 2>>"$_tcerr" \
-    && [[ $(grep -cE '^      terminationGracePeriodSeconds: 45$' "$grace_null") -eq 1 ]] \
+    && [[ $(grep -cxF -- "$grace_default_line" "$grace_null") -eq 1 ]] \
     && [[ $(grep -cF 'terminationGracePeriodSeconds:' "$grace_null") -eq 1 ]]; then
-  pass "hub.terminationGracePeriodSeconds=null falls back to 45, not 0"
+  pass "hub.terminationGracePeriodSeconds=null renders the default render's value (${grace_default_line##* }), not 0"
 else
-  fail "hub.terminationGracePeriodSeconds=null did not render 45 exactly once - a null that renders 0 kills the pod without a drain"
+  fail "hub.terminationGracePeriodSeconds=null did not render the default render's line (${grace_default_line:-<none>}) exactly once - a null that renders 0 kills the pod without a drain, and a different value means the template fallback drifted from values.yaml"
 fi
 expect_render_failure "hub.terminationGracePeriodSeconds=0" \
   "hub.terminationGracePeriodSeconds: Must be greater than or equal to 1" \
@@ -3552,7 +3556,7 @@ _ps_bad="$(_pipe_unguarded "$_self" | wc -l || true)"
 #
 # So: bump this number in the diff that adds the assignment. That is the same
 # contract every other pinned count in this suite carries.
-PIPE_SITES_EXPECTED=43   # 44, less the gate-parity step's sites (removed with acknowledgeHAUnlanded), plus the four in its replacement, plus the two in the config.existingSecret + K_SERVICE NOTES rows.
+PIPE_SITES_EXPECTED=44   # 44, less the gate-parity step's sites (removed with acknowledgeHAUnlanded), plus the four in its replacement, plus the two in the config.existingSecret + K_SERVICE NOTES rows (= 43), plus grace_default_line in the grace-period null arm (|| true fallback) = 44.
 if [[ "$_ps_total" -ne "$PIPE_SITES_EXPECTED" ]]; then
   meta_failure "the pipeline-assignment sweep found $_ps_total sites in $_self, pinned at $PIPE_SITES_EXPECTED. If you added an assignment-from-a-pipeline, give it a || fallback and bump PIPE_SITES_EXPECTED in the same diff. If you did not, the pattern has stopped matching and the zero below would mean nothing."
 else
