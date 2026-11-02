@@ -212,12 +212,12 @@ func routedHeldRequest(env routedTestEnv, msg string) routedInboundRequest {
 	}
 }
 
-// storedForAgent returns the number of persisted messages for agentID.
-func storedForAgent(t *testing.T, s store.Store, agentID string) int {
+// storedRowsFor returns the persisted messages for agentID.
+func storedRowsFor(t *testing.T, s store.Store, agentID string) []store.Message {
 	t.Helper()
 	rows, err := s.ListMessages(context.Background(), store.MessageFilter{AgentID: agentID}, store.ListOptions{Limit: 100})
 	require.NoError(t, err)
-	return len(rows.Items)
+	return rows.Items
 }
 
 // A routed inbound (chat integration) message to a held, running primary is
@@ -233,8 +233,8 @@ func TestHeldTargetSend_RoutedPrimary(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
 	assert.Equal(t, ErrCodeAgentNotRunning, errResp.Error.Code)
 	assert.Empty(t, env.dispatcher.getCalls(), "no dispatch to a held primary, and no fan-out")
-	assert.Zero(t, storedForAgent(t, env.store, env.agent1.ID))
-	assert.Zero(t, storedForAgent(t, env.store, env.agent2.ID))
+	assert.Zero(t, len(storedRowsFor(t, env.store, env.agent1.ID)))
+	assert.Zero(t, len(storedRowsFor(t, env.store, env.agent2.ID)))
 }
 
 // A routed inbound message that mentions a held, running agent is delivered
@@ -256,7 +256,7 @@ func TestHeldTargetSend_RoutedMention(t *testing.T) {
 	calls := env.dispatcher.getCalls()
 	require.Len(t, calls, 1)
 	assert.Equal(t, env.agent1.ID, calls[0].Agent.ID)
-	assert.Zero(t, storedForAgent(t, env.store, env.agent2.ID))
+	assert.Zero(t, len(storedRowsFor(t, env.store, env.agent2.ID)))
 }
 
 // heldBrokerProxy is a message broker proxy over s with a recording
@@ -297,7 +297,7 @@ func TestHeldTargetSend_BrokerTopicMessage(t *testing.T) {
 	proxy.deliverToAgent(context.Background(), projectID, target.Slug, msg)
 
 	assert.False(t, dispatchedTo(dispatcher, target.Slug), "no dispatch to a held agent")
-	assert.Zero(t, storedForAgent(t, s, target.ID), "nothing stored for a held agent")
+	assert.Zero(t, len(storedRowsFor(t, s, target.ID)), "nothing stored for a held agent")
 	var notice *brokerDispatchedMsg
 	for _, d := range dispatcher.getMessages() {
 		if d.agentSlug == sender.Slug {
@@ -316,7 +316,7 @@ func TestHeldTargetSend_BrokerTopicMessage(t *testing.T) {
 	msg2.RecipientID = other.ID
 	proxy.deliverToAgent(context.Background(), projectID, other.Slug, msg2)
 	assert.True(t, dispatchedTo(dispatcher, other.Slug))
-	assert.Equal(t, 1, storedForAgent(t, s, other.ID))
+	assert.Equal(t, 1, len(storedRowsFor(t, s, other.ID)))
 }
 
 // A project broadcast skips a held, running agent and still reaches its
@@ -335,9 +335,9 @@ func TestHeldTargetSend_BrokerProjectBroadcast(t *testing.T) {
 	proxy.fanOutToProject(context.Background(), projectID, msg)
 
 	assert.False(t, dispatchedTo(dispatcher, held.Slug), "no broadcast dispatch to a held agent")
-	assert.Zero(t, storedForAgent(t, s, held.ID), "nothing stored for a held agent")
+	assert.Zero(t, len(storedRowsFor(t, s, held.ID)), "nothing stored for a held agent")
 	assert.True(t, dispatchedTo(dispatcher, sibling.Slug), "the unheld sibling still gets the broadcast")
-	assert.Equal(t, 1, storedForAgent(t, s, sibling.ID))
+	assert.Equal(t, 1, len(storedRowsFor(t, s, sibling.ID)))
 }
 
 // A routed inbound message whose primary's hold cannot be read is refused
@@ -357,8 +357,8 @@ func TestHeldTargetSend_RoutedLookupFault(t *testing.T) {
 	assert.Equal(t, heldLookupFaultDMError().Code, errResp.Error.Code)
 	assert.Equal(t, heldLookupFaultDMError().Message, errResp.Error.Message)
 	assert.Empty(t, env.dispatcher.getCalls(), "no dispatch, and no fan-out")
-	assert.Zero(t, storedForAgent(t, env.store, env.agent1.ID))
-	assert.Zero(t, storedForAgent(t, env.store, env.agent2.ID))
+	assert.Zero(t, len(storedRowsFor(t, env.store, env.agent1.ID)))
+	assert.Zero(t, len(storedRowsFor(t, env.store, env.agent2.ID)))
 }
 
 // fanoutHoldFixture is setupGroupTest's project, runtime broker, project
@@ -420,10 +420,10 @@ func TestHeldTargetSend_GroupMembers(t *testing.T) {
 	assert.Equal(t, "failed", res["agent:"+held.Slug].Status)
 	assert.Equal(t, heldTargetDMError(held).Message, res["agent:"+held.Slug].Error)
 	assert.False(t, dispatchedTo(dispatcher, held.Slug), "no dispatch to a held member")
-	assert.Zero(t, storedForAgent(t, s, held.ID), "nothing stored for a held member")
+	assert.Zero(t, len(storedRowsFor(t, s, held.ID)), "nothing stored for a held member")
 	assert.Equal(t, "delivered", res["agent:"+peer.Slug].Status, "the unheld member is delivered")
 	assert.True(t, dispatchedTo(dispatcher, peer.Slug))
-	assert.Equal(t, 1, storedForAgent(t, s, peer.ID))
+	assert.Equal(t, 1, len(storedRowsFor(t, s, peer.ID)))
 }
 
 // A group[] member whose hold cannot be read is refused; the other member
@@ -440,7 +440,7 @@ func TestHeldTargetSend_GroupMemberLookupFault(t *testing.T) {
 	assert.Equal(t, "failed", res["agent:"+target.Slug].Status)
 	assert.Equal(t, heldLookupFaultDMError().Message, res["agent:"+target.Slug].Error)
 	assert.False(t, dispatchedTo(dispatcher, target.Slug))
-	assert.Zero(t, storedForAgent(t, s, target.ID))
+	assert.Zero(t, len(storedRowsFor(t, s, target.ID)))
 	assert.Equal(t, "delivered", res["agent:"+peer.Slug].Status)
 	assert.True(t, dispatchedTo(dispatcher, peer.Slug))
 }
@@ -467,10 +467,10 @@ func TestHeldTargetSend_BroadcastFallback(t *testing.T) {
 
 	for _, refused := range []*store.Agent{held, fault} {
 		assert.False(t, dispatchedTo(dispatcher, refused.Slug), "no broadcast dispatch to %s", refused.Slug)
-		assert.Zero(t, storedForAgent(t, s, refused.ID), "nothing stored for %s", refused.Slug)
+		assert.Zero(t, len(storedRowsFor(t, s, refused.ID)), "nothing stored for %s", refused.Slug)
 	}
 	assert.True(t, dispatchedTo(dispatcher, sibling.Slug), "the unheld sibling still gets the broadcast")
-	assert.Equal(t, 1, storedForAgent(t, s, sibling.ID))
+	assert.Equal(t, 1, len(storedRowsFor(t, s, sibling.ID)))
 	notices := 0
 	for _, d := range dispatcher.getMessages() {
 		if d.agentSlug == sender.Slug && d.structured != nil && d.structured.Status == "DELIVERY_FAILED" {
@@ -510,10 +510,10 @@ func TestHeldTargetSend_UserMentions(t *testing.T) {
 	assert.Equal(t, "error", byslug[held.Slug].Status)
 	assert.Equal(t, heldTargetDMError(held).Message, byslug[held.Slug].Error)
 	assert.False(t, dispatchedTo(dispatcher, held.Slug), "no dispatch to a held mentioned agent")
-	assert.Zero(t, storedForAgent(t, s, held.ID), "nothing stored for a held mentioned agent")
+	assert.Zero(t, len(storedRowsFor(t, s, held.ID)), "nothing stored for a held mentioned agent")
 	assert.Equal(t, "delivered", byslug[peer.Slug].Status)
 	assert.True(t, dispatchedTo(dispatcher, peer.Slug))
-	assert.Equal(t, 1, storedForAgent(t, s, peer.ID))
+	assert.Equal(t, 1, len(storedRowsFor(t, s, peer.ID)))
 }
 
 // A mentioned agent whose hold cannot be read is refused; the other mention
@@ -538,17 +538,9 @@ func TestHeldTargetSend_MentionLookupFault(t *testing.T) {
 	assert.Equal(t, "error", byslug[target.Slug].Status)
 	assert.Equal(t, heldLookupFaultDMError().Message, byslug[target.Slug].Error)
 	assert.False(t, dispatchedTo(dispatcher, target.Slug))
-	assert.Zero(t, storedForAgent(t, s, target.ID))
+	assert.Zero(t, len(storedRowsFor(t, s, target.ID)))
 	assert.Equal(t, "delivered", byslug[peer.Slug].Status)
 	assert.True(t, dispatchedTo(dispatcher, peer.Slug))
-}
-
-// deferredRowsFor returns the stored messages for agentID.
-func deferredRowsFor(t *testing.T, s store.Store, agentID string) []store.Message {
-	t.Helper()
-	rows, err := s.ListMessages(context.Background(), store.MessageFilter{AgentID: agentID}, store.ListOptions{Limit: 100})
-	require.NoError(t, err)
-	return rows.Items
 }
 
 // A held group[] member that is reincarnating is saved for catch-up
@@ -564,7 +556,7 @@ func TestHeldTargetSend_GroupMemberReincarnating(t *testing.T) {
 
 	assert.Equal(t, "deferred", res["agent:"+target.Slug].Status)
 	assert.False(t, dispatchedTo(dispatcher, target.Slug), "no dispatch to a reincarnating member")
-	rows := deferredRowsFor(t, s, target.ID)
+	rows := storedRowsFor(t, s, target.ID)
 	require.Len(t, rows, 1, "the deferred member's message is saved for catch-up")
 	assert.Equal(t, store.MessageDispatchDeferred, rows[0].DispatchState)
 	assert.Equal(t, "delivered", res["agent:"+peer.Slug].Status)
@@ -595,7 +587,7 @@ func TestHeldTargetSend_MentionReincarnating(t *testing.T) {
 	require.Len(t, resp.MentionResults, 1)
 	assert.Equal(t, "deferred", resp.MentionResults[0].Status, resp.MentionResults[0].Error)
 	assert.False(t, dispatchedTo(dispatcher, target.Slug), "no dispatch to a reincarnating mentioned agent")
-	rows := deferredRowsFor(t, s, target.ID)
+	rows := storedRowsFor(t, s, target.ID)
 	require.Len(t, rows, 1, "the deferred mention is saved for catch-up")
 	assert.Equal(t, store.MessageDispatchDeferred, rows[0].DispatchState)
 	assert.NotEmpty(t, rows[0].ConversationID, "the deferred mention has its catch-up conversation")
