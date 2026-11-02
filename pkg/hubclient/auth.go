@@ -208,6 +208,9 @@ func (s *authService) GetAuthProviders(ctx context.Context, clientType string) (
 	if err != nil {
 		return nil, err
 	}
+	if err := s.c.checkLoginResponse(resp); err != nil {
+		return nil, err
+	}
 	defer func() {
 		_ = resp.Body.Close()
 	}()
@@ -237,6 +240,9 @@ func (s *authService) GetAuthURL(ctx context.Context, callbackURL, state, provid
 	}
 	resp, err := s.c.post(ctx, "/api/v1/auth/cli/authorize", body, nil)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.c.checkLoginResponse(resp); err != nil {
 		return nil, err
 	}
 	return apiclient.DecodeRequired[AuthURLResponse](resp)
@@ -289,6 +295,9 @@ func (s *authService) RequestDeviceCode(ctx context.Context, provider string) (*
 	}
 	resp, err := s.c.post(ctx, "/api/v1/auth/cli/device", body, nil)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.c.checkLoginResponse(resp); err != nil {
 		return nil, err
 	}
 	return apiclient.DecodeRequired[DeviceCodeResponse](resp)
