@@ -228,11 +228,12 @@ const msgSignedBootstrapDone = "Workspace bootstrapped through signed URLs"
 
 // logSignedBootstrapDone logs a completed signed-URL workspace bootstrap at
 // Info: the agent, the number of files and bytes written, and the time since
-// start. It never names a URL or a path.
+// start, which is taken under the workspace lock, so it covers staging,
+// download and commit but not the lock wait. It never names a URL or a path.
 func (s *Server) logSignedBootstrapDone(req CreateAgentRequest, res signedDownloadResult, start time.Time) {
 	s.agentLifecycleLog.Info(msgSignedBootstrapDone,
-		"agent_name", req.Name, "agent_id", req.ID, "project_id", req.ProjectID,
-		"files", len(res.written), "bytes", res.bytes, "duration", time.Since(start))
+		"agent_id", req.ID, "name", req.Name, "project_id", req.ProjectID,
+		"files", len(res.written), "bytes", res.bytes, "elapsed", time.Since(start).String())
 }
 
 // fetchSignedWorkspacePage requests one page from the Hub connection the

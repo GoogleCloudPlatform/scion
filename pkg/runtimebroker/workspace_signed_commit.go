@@ -547,7 +547,6 @@ func leafHasEntries(ws string) bool {
 // ACL, downloads into it, re-checks that the leaf is still empty, renames
 // the stage over the empty leaf and writes the sentinel last.
 func (s *Server) applySharedSignedBootstrap(ctx context.Context, req CreateAgentRequest, rel string) (skipped bool, err error) {
-	start := time.Now()
 	base, err := filepath.EvalSymlinks(s.config.StorageLayout.HostBase)
 	if err != nil {
 		return false, fmt.Errorf("resolve host base: %w", err)
@@ -560,6 +559,7 @@ func (s *Server) applySharedSignedBootstrap(ctx context.Context, req CreateAgent
 	wsPath := filepath.Join(base, rel)
 	parent, leaf := filepath.Dir(wsPath), filepath.Base(wsPath)
 	err = provision.WithWorkspaceProvisionLocks(ctx, wsPath, func(lockCtx context.Context) error {
+		start := time.Now()
 		// Every writer of a stage for this leaf holds these locks while the
 		// stage exists, so any stage seen here is stale.
 		if _, err := removeStaleBootstrapStages(parent, leaf); err != nil {

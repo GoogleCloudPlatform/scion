@@ -16,8 +16,10 @@ package runtimebroker
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -40,9 +42,14 @@ func signedBootstrapDoneRecords(logs string) []map[string]any {
 	return out
 }
 
+// signedBootstrapMaxElapsed is a loose upper bound on a test bootstrap's
+// logged elapsed time, well under the test timeout: a duration measured
+// from the wrong start is far above it.
+const signedBootstrapMaxElapsed = time.Minute
+
 // requireOneSignedBootstrapDone asserts that logs hold exactly one success
-// line, at Info, for agent name, with the file count, byte total and a
-// duration.
+// line, at Info, for agent name, with the file count, byte total and an
+// elapsed time between 0 and signedBootstrapMaxElapsed.
 func requireOneSignedBootstrapDone(t *testing.T, logs, name string, files, bytes int) {
 	t.Helper()
 	recs := signedBootstrapDoneRecords(logs)
@@ -53,8 +60,8 @@ func requireOneSignedBootstrapDone(t *testing.T, logs, name string, files, bytes
 	if r["level"] != "INFO" {
 		t.Errorf("level = %v, want INFO", r["level"])
 	}
-	if r["agent_name"] != name {
-		t.Errorf("agent_name = %v, want %q", r["agent_name"], name)
+	if r["name"] != name {
+		t.Errorf("name = %v, want %q", r["name"], name)
 	}
 	if r["files"] != float64(files) {
 		t.Errorf("files = %v, want %d", r["files"], files)
@@ -62,8 +69,18 @@ func requireOneSignedBootstrapDone(t *testing.T, logs, name string, files, bytes
 	if r["bytes"] != float64(bytes) {
 		t.Errorf("bytes = %v, want %d", r["bytes"], bytes)
 	}
-	if d, ok := r["duration"].(float64); !ok || d < 0 {
-		t.Errorf("duration = %v (%T), want a non-negative number", r["duration"], r["duration"])
+	elapsed, _ := r["elapsed"].(string)
+	d, err := time.ParseDuration(elapsed)
+	if err != nil || d < 0 || d >= signedBootstrapMaxElapsed {
+		t.Errorf("elapsed = %v (parse err %v), want a duration in [0, %v)", r["elapsed"], err, signedBootstrapMaxElapsed)
+	}
+}
+
+// requireNoSignedBootstrapDone asserts that logs hold no success line.
+func requireNoSignedBootstrapDone(t *testing.T, logs string) {
+	t.Helper()
+	if n := len(signedBootstrapDoneRecords(logs)); n != 0 {
+		t.Fatalf("success lines = %d, want 0:\n%s", n, logs)
 	}
 }
 
@@ -148,7 +165,7 @@ func TestSignedBootstrap_LogCarriesNoURLOrPath(t *testing.T) {
 				t.Errorf("%s: planted %q not detected", name, planted)
 			}
 		}
-		if leaks := bootstrapLogLeaks(`{"msg":"`+msgSignedBootstrapDone+`","files":2,"bytes":8,"duration":1}`, h, []string{dir}); len(leaks) != 0 {
+		if leaks := bootstrapLogLeaks(`{"msg":"`+msgSignedBootstrapDone+`","files":2,"bytes":8,"elapsed":"1ms"}`, h, []string{dir}); len(leaks) != 0 {
 			t.Errorf("clean line detected: %v", leaks)
 		}
 	})
@@ -185,9 +202,7 @@ func TestSignedBootstrap_LogCarriesNoURLOrPath(t *testing.T) {
 			}
 			text := logs.String()
 			if fail {
-				if n := len(signedBootstrapDoneRecords(text)); n != 0 {
-					t.Fatalf("a failed bootstrap logged %d success lines:\n%s", n, text)
-				}
+				requireNoSignedBootstrapDone(t, text)
 				if findLogRecord(text, "GCS workspace bootstrap failed", nil) == nil {
 					t.Fatalf("the failure must still be logged:\n%s", text)
 				}
@@ -199,4 +214,52 @@ func TestSignedBootstrap_LogCarriesNoURLOrPath(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSignedBootstrap_NoSuccessLineWithoutCompletion: a signed bootstrap
+// that is skipped, or that fails after its download, logs no success line.
+func TestSignedBootstrap_NoSuccessLineWithoutCompletion(t *testing.T) {
+	t.Run("case A skip", func(t *testing.T) {
+		f := newCaseAFixture(t, map[string]string{"a.txt": "A"})
+		f.writeMarker(t, "m")
+		if err := os.WriteFile(filepath.Join(f.w, "theirs.txt"), []byte("t"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		logs := captureLifecycleJSONLog(f.srv)
+		if skipped, err := f.run(); err != nil || !skipped {
+			t.Fatalf("run = (skipped %v, err %v), want a skip", skipped, err)
+		}
+		requireNoSignedBootstrapDone(t, logs.String())
+	})
+	t.Run("case A failure after the final rename", func(t *testing.T) {
+		f := newCaseAFixture(t, map[string]string{"a.txt": "A"})
+		f.writeMarker(t, "m")
+		logs := captureLifecycleJSONLog(f.srv)
+		crashAt(t, "after_rename")
+		if _, err := f.run(); !errors.Is(err, errSignedBootstrapCrash) {
+			t.Fatalf("err = %v, want the injected failure", err)
+		}
+		if f.h.pageCalls == 0 {
+			t.Fatal("the download must have run")
+		}
+		requireNoSignedBootstrapDone(t, logs.String())
+	})
+	t.Run("case C failure while applying", func(t *testing.T) {
+		srv, rtb := newAsyncTestServer(t, newAsyncManager())
+		srv.config.WorktreeBase = t.TempDir()
+		srv.signedDownload.sleep = noSleep
+		forbidGCSDownload(t, srv)
+		h := newFakeSignedHub(t, map[string]string{"a.txt": "A"})
+		wireSignedHub(rtb, h)
+		logs := captureLifecycleJSONLog(srv)
+		crashAt(t, "apply_file")
+		w := postCreate(t, srv, signedCreate("agent-apply-fails", api.WorkspaceDownloadModeSignedURLs, false))
+		if w.Code < 300 {
+			t.Fatalf("create = %d, want a failure: %s", w.Code, w.Body.String())
+		}
+		if h.pageCalls == 0 {
+			t.Fatal("the download must have run")
+		}
+		requireNoSignedBootstrapDone(t, logs.String())
+	})
 }
