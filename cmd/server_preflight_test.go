@@ -732,7 +732,7 @@ func TestServerPreflight_ReportAndExitCodes(t *testing.T) {
 		assert.True(t, isReportedInJSON(err), "the report was printed: Execute prints no banner")
 		rep := decodeReport(t, stdout)
 		assert.Equal(t, preflight.ReportVersion, rep.Version)
-		assert.Equal(t, []string{"settings.profiles"}, rep.Checks)
+		assert.Equal(t, []string{"settings.profiles", "settings.transport_proxy"}, rep.Checks)
 		blocks, warns := 0, 0
 		for _, f := range rep.Findings {
 			switch f.Severity {

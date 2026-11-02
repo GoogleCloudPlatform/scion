@@ -336,9 +336,11 @@ describe('Server Version & Updates', () => {
   });
 
   it('shows git-mode operations only when mode is git', async () => {
+    // Without a reported repo the card has no Git panel, so Rebuild stays
+    // in Routine Operations (with one, the card offers it).
     el = await mount({
       status: updateStatus({
-        mode: { effective: 'git', repoConfigured: true, repoBranch: 'main' },
+        mode: { effective: 'git', repoConfigured: false, repoBranch: 'main' },
       }),
     });
     expect(cardTitles(el)).toEqual(['Rebuild from Git', 'Operation A']);
@@ -2205,5 +2207,111 @@ describe('lastUpdateMessage', () => {
     expect(lastUpdateMessage(last({ status: 'failed' }))).toBe(
       'Update to nightly-20261023 failed.'
     );
+  });
+});
+
+describe('Rebuild from Git (update card Git panel)', () => {
+  const GIT_STATUS = updateStatus({
+    current: {
+      version: '0123abcd',
+      channel: '',
+      commit: '0123abcd4567890123456789abcdef0123456789',
+      isGitBuild: true,
+    },
+    mode: { effective: 'git', repoConfigured: true, repoBranch: 'main' },
+    installer: { strategy: 'sudo-install', supported: true, reason: '', migrateHint: '' },
+  });
+  const GIT_PENDING = {
+    runId: 'run-r1',
+    from: 'nightly-20261031',
+    to: 'git-0123abcd4567',
+    strategy: 'sudo-install',
+    at: '2026-11-01T00:00:00Z',
+    mode: 'git',
+    commit: '0123abcd4567890123456789abcdef0123456789',
+  };
+  const rebuildOps = (status?: string, id = 'run-r1'): Json[] => [
+    op(
+      'rebuild-server',
+      'Rebuild from Git',
+      status ? { id, status, startedAt: '2026-11-01T00:00:00Z' } : undefined
+    ),
+    op('op-a', 'Operation A'),
+  ];
+
+  it('takes Rebuild out of Routine Operations when a repo is configured', async () => {
+    el = await mount({ status: GIT_STATUS });
+    expect(cardTitles(el)).toEqual(['Operation A']);
+    expect(cardRoot(el).querySelector('sl-button.rebuild')).not.toBeNull();
+  });
+
+  it('runs rebuild-server from the card through the run dialog', async () => {
+    el = await mount({ status: GIT_STATUS, operations: () => rebuildOps() });
+    cardRoot(el).querySelector<HTMLElement>('sl-button.rebuild')!.click();
+    await settle(el);
+    const dialog = root(el).querySelector('sl-dialog[label="Run Operation"]');
+    expect(dialog?.textContent).toContain('Rebuild from Git');
+    expect(dialog?.textContent).toContain('This operation will restart the server.');
+    findButton(dialog!, 'Run')!.click();
+    await settle(el);
+    expect(
+      fetchMock.mock.calls.some(
+        (c) =>
+          pathOf(c[0] as string) === '/api/v1/admin/maintenance/operations/rebuild-server/run' &&
+          (c[1] as RequestInit | undefined)?.method === 'POST'
+      )
+    ).toBe(true);
+    expect(runBodies).toEqual([{ params: {} }]);
+  });
+
+  it('marks the card busy while a rebuild runs', async () => {
+    el = await mount({ status: GIT_STATUS, operations: () => rebuildOps('running') });
+    expect(cardRoot(el).querySelector('sl-button.rebuild')?.hasAttribute('disabled')).toBe(true);
+  });
+
+  it('follows a restarting rebuild by uptime, not by version', async () => {
+    vi.mocked(waitForHubRestart).mockReturnValue(new Promise(() => {}));
+    el = await mount({
+      status: { ...GIT_STATUS, pendingUpdate: GIT_PENDING },
+      operations: () => rebuildOps('restarting'),
+    });
+    expect(waitForHubRestart).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(waitForHubRestart).mock.calls[0]?.[0]?.expectVersion).toBeUndefined();
+  });
+
+  it('opens the rebuild run from the last update', async () => {
+    el = await mount({
+      status: {
+        ...GIT_STATUS,
+        lastUpdate: {
+          runId: 'run-r1',
+          from: 'nightly-20261031',
+          to: 'git-0123abcd4567',
+          status: 'verified',
+          at: '2026-11-01T00:01:00Z',
+          mode: 'git',
+        },
+      },
+      operations: () => rebuildOps('completed'),
+    });
+    cardRoot(el).querySelector<HTMLElement>('a.last-update-run')!.click();
+    await settle(el);
+    expect(
+      fetchMock.mock.calls.some(
+        (c) =>
+          pathOf(c[0] as string) ===
+          '/api/v1/admin/maintenance/operations/rebuild-server/runs/run-r1'
+      )
+    ).toBe(true);
+  });
+});
+
+describe('expectedRestartVersion', () => {
+  it('expects the release tag, and no version for a rebuild from Git', async () => {
+    const { expectedRestartVersion } = await import('./admin-maintenance.js');
+    const base = { runId: 'r', from: 'a', at: '' };
+    expect(expectedRestartVersion({ ...base, to: 'nightly-20261101' })).toBe('nightly-20261101');
+    expect(expectedRestartVersion({ ...base, to: 'git-0123abcd4567', mode: 'git' })).toBeNull();
+    expect(expectedRestartVersion({ ...base, to: '' })).toBeNull();
   });
 });

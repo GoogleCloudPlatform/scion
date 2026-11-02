@@ -3072,6 +3072,13 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		}
 	}
 
+	// Agent pods are created with automountServiceAccountToken false, in
+	// every GCP identity mode and whether or not config.Kubernetes is set.
+	// Nothing in Scion uses a Kubernetes API token from inside the pod,
+	// and GCP identity (Workload Identity) does not depend on it.
+	automount := false
+	pod.Spec.AutomountServiceAccountToken = &automount
+
 	if config.KubernetesBlockIdentity {
 		applyKubernetesBlockIdentity(pod)
 	}
@@ -4699,6 +4706,16 @@ func sharedDirClaimSubPath(r *SharedDirRealization, sharedDirName string) (claim
 	project := filepath.Base(filepath.Dir(filepath.Dir(subPath)))
 	if r.ProjectID == "" || !shareddirs.ValidProjectID(project) || project != r.ProjectID {
 		return "", "", fmt.Errorf("shared dir %q: resolved subPath %q is not under this project's tree", sharedDirName, subPath)
+	}
+	// With the subpath root known (the shared dirs are on the Layout's own
+	// nfs share), the subPath must also be in this project's tree below it
+	// (checkNFSMountScope). Shared dirs not on the Layout's own nfs share
+	// (the transitional split, gke-shared-volume, cloudrun-volume) carry no
+	// subpath root, and the shape check above is the check.
+	if r.SubPathRoot != "" {
+		if err := checkNFSMountScope(filepath.ToSlash(subPath), r.SubPathRoot, r.ProjectID); err != nil {
+			return "", "", fmt.Errorf("shared dir %q: %w", sharedDirName, err)
+		}
 	}
 	return r.PVClaimName, subPath, nil
 }

@@ -76,6 +76,8 @@ import './not-found.js';
 interface AgentPatchResponse {
   disposition?: AgentUpdateDisposition;
   warnings?: string[];
+  /** The agent's pending config edits after the save (held edits on). */
+  pendingConfig?: { config?: Record<string, unknown> } | null;
 }
 
 /** The agent PATCH body the page sends. */
@@ -193,16 +195,33 @@ export function agentEditTopValues(agent: Agent, hubAutoExpose = false): AgentCo
   };
 }
 
-/** One line summarizing a save's disposition, by when each edit takes effect. */
-export function dispositionSummary(d: AgentUpdateDisposition | undefined): string {
-  const names = (keys: string[] | undefined) =>
-    (keys ?? []).map((k) => k.replace(/^config\./, '')).join(', ');
+/**
+ * One line summarizing a save's disposition, by when each edit takes
+ * effect. pending is the agent's pending config keys after the save (the
+ * keys of the response's pendingConfig.config): a heldForReincarnate key
+ * that is pending stays pending as a whole through every start, until a
+ * reincarnation applies it.
+ */
+export function dispositionSummary(
+  d: AgentUpdateDisposition | undefined,
+  pending: readonly string[] = []
+): string {
+  const short = (k: string) => k.replace(/^config\./, '');
+  const names = (keys: string[] | undefined) => (keys ?? []).map(short).join(', ');
+  const isPending = new Set(pending);
   const parts: string[] = [];
   const applied = names(d?.applied);
   if (applied) parts.push(`Saved ${applied}.`);
   const held = names(d?.held);
   if (held) parts.push(`Saved ${held} for the next start.`);
-  const reincarnate = names(d?.heldForReincarnate);
+  const reincarnateKeys = d?.heldForReincarnate ?? [];
+  const pendingWhole = names(reincarnateKeys.filter((k) => isPending.has(short(k))));
+  const reincarnate = names(reincarnateKeys.filter((k) => !isPending.has(short(k))));
+  if (pendingWhole) {
+    parts.push(
+      `Saved ${pendingWhole}; held as a whole until a reincarnation, including parts a start could apply.`
+    );
+  }
   if (reincarnate) parts.push(`Saved ${reincarnate}; takes effect at the next reincarnation.`);
   return parts.length > 0 ? parts.join(' ') : 'Saved; nothing changed.';
 }
@@ -368,7 +387,10 @@ export class ScionPageAgentEdit extends LitElement {
       // An unreadable body still means the save succeeded.
     }
     this.warnings = body.warnings ?? [];
-    showToast(dispositionSummary(body.disposition), 'success');
+    showToast(
+      dispositionSummary(body.disposition, Object.keys(body.pendingConfig?.config ?? {})),
+      'success'
+    );
     form.reset();
     // The saved identity is now the stored one.
     this.gcp.gcpIdentityUserSet = false;

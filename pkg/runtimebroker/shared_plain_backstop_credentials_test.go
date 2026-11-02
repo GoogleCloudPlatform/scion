@@ -141,10 +141,11 @@ func testBackstopOffersNoCredential(t *testing.T, recordedRemote bool, agentToke
 	askpass := filepath.Join(dir, "askpass")
 	writeBackstopFile(t, askpass, "#!/bin/sh\nprintf '%s\\n' \"$1\" >> '"+askpassLog+"'\necho "+backstopAskpassSecret+"\n", 0o700)
 	gitconfig := filepath.Join(dir, "gitconfig")
-	writeBackstopFile(t, gitconfig, "[http]\n\tsslCAInfo = "+ca+"\n\textraHeader = X-Ambient: generic-"+backstopHeaderSecret+"\n"+
+	writeBackstopFile(t, gitconfig, "[http]\n\textraHeader = X-Ambient: generic-"+backstopHeaderSecret+"\n"+
 		"[http \""+cs.srv.URL+"/\"]\n\textraHeader = X-Ambient: host-"+backstopHeaderSecret+"\n"+
 		"[http \""+cloneURL+"\"]\n\textraHeader = X-Ambient: full-"+backstopHeaderSecret+"\n"+
 		"[credential]\n\thelper = store --file="+store+"\n\thelper = "+helper+"\n", 0o600)
+	t.Setenv("GIT_SSL_CAINFO", ca)
 	t.Setenv("GIT_CONFIG_GLOBAL", gitconfig)
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	t.Setenv("GIT_ASKPASS", askpass)

@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -72,6 +73,9 @@ type runtimeSelection struct {
 	// entryName is the runtimes key the resolved profile names, or "" when
 	// settings did not resolve the profile.
 	entryName string
+	// err, when set, is why no runtime may be built: build returns an
+	// ErrorRuntime carrying it instead of falling back.
+	err error
 }
 
 // record returns the build record of rt, built from s (see
@@ -137,6 +141,16 @@ func selectRuntime(projectPath string, profileName string) runtimeSelection {
 				resolvedProfile = vs.ActiveProfile
 			}
 			entryName = vs.Profiles[resolvedProfile].Runtime
+		}
+		var sre *config.StoredProfileRuntimeNotFoundError
+		if err != nil && profileName != "" && errors.As(err, &sre) {
+			// A named profile from the hub's stored profiles whose runtime
+			// is not defined: the stored settings are authoritative, so
+			// neither the legacy runtime-type nor the auto-detect fallback
+			// applies (ptone/scion#4889). An empty profileName (the
+			// default profile, as at broker startup) keeps the fallback.
+			util.Debugf("GetRuntime: stored profile's runtime is not defined: %v", err)
+			return runtimeSelection{vs: vs, projectDir: projectDir, profileName: profileName, err: err}
 		}
 		if err != nil {
 			util.Debugf("GetRuntime: ResolveRuntime failed: %v", err)
@@ -233,6 +247,9 @@ func selectRuntime(projectPath string, profileName string) runtimeSelection {
 // build constructs the runtime s selected. It is GetRuntime's construction
 // step, unchanged.
 func (s runtimeSelection) build() Runtime {
+	if s.err != nil {
+		return &ErrorRuntime{Err: s.err}
+	}
 	vs, profileName, rtConfig, runtimeType := s.vs, s.profileName, s.rtConfig, s.runtimeType
 
 	switch runtimeType {

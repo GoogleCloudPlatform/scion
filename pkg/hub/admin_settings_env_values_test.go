@@ -39,9 +39,10 @@ func envSecretSentinel(key string) string {
 // field class of the server-config GET: each maskedServerFields entry, the
 // telemetry cloud headers, notification channel params, the never-shown
 // server keys (relay-peer secret, test identities, proxy driver settings,
-// hub class, the server keyring file and its world-readable override), the
-// map sections whose values are withheld, and a key that matches no
-// settings field. The values are strings unless noted.
+// hub class, the server keyring file and its world-readable override, the
+// transport policy's trusted proxy list), the map sections whose values are
+// withheld, and a key that matches no settings field. The values are strings
+// unless noted.
 func secretEnvKeys() map[string]any {
 	keys := map[string]any{}
 	for _, f := range maskedServerFields {
@@ -64,6 +65,7 @@ func secretEnvKeys() map[string]any {
 	}
 	keys["server.keyring_file_allow_world_readable"] = true
 	keys["server.auth.proxy.driver_principals"] = []any{envSecretSentinel("server.auth.proxy.driver_principals")}
+	keys["server.trusted_proxies"] = []any{envSecretSentinel("server.trusted_proxies")}
 	keys["server.notification_channels"] = []any{map[string]any{
 		"type":   "webhook",
 		"params": map[string]any{"url": envSecretSentinel("server.notification_channels")},
@@ -141,11 +143,11 @@ func TestEnvValueMayBeShown(t *testing.T) {
 	}
 }
 
-// TestGetServerConfigDB_EnvValues covers the DB tier: the authorized domains
-// the hub runs with come from the environment (the saved value is never
-// applied, ptone/scion#6000), so the env value is in effect and the key is
-// not reported as superseded; a key whose managed row wins is not in effect;
-// a key with no row is in effect.
+// TestGetServerConfigDB_EnvValues covers the DB tier: a SCION_SERVER_*
+// variable pins the authorized domains on the node (ptone/scion#6000), so
+// the env value is in effect over the saved one and the key is not reported
+// as superseded; a key whose managed row wins is not in effect; a key with
+// no row is in effect.
 func TestGetServerConfigDB_EnvValues(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // no settings.yaml
 	envDomains := []any{"env-a.example", "env-b.example"}
@@ -213,7 +215,8 @@ func TestGetServerConfigDB_EnvValues(t *testing.T) {
 		}
 	}
 
-	// The saved authorized domains supersede nothing; admin_emails does.
+	// The saved authorized domains supersede nothing (the env pin wins);
+	// admin_emails does.
 	var supersededAccess []string
 	for _, sk := range resp.SupersededKeys["access"] {
 		supersededAccess = append(supersededAccess, sk.Key)

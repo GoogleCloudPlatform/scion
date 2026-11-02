@@ -36,10 +36,9 @@ import (
 // creator's personal token only for a remote on the GitHub host
 // (resolveCloneToken). Whenever no project credential is offered (any other
 // URL, or the recorded remote itself with none resolved), git runs
-// anonymously: the hub host user's credential helpers and extra HTTP headers
-// are reset and askpass is disabled, on every host
-// (util.HostGitHardening.NoCredentialHelpers; see util.NoCredentialHelperEnv
-// for what it does not cover).
+// anonymously (util.HostGitHardening.NoCredentialHelpers). On every clone and
+// fetch, with or without a token, git offers no credential of the hub host's
+// own (util.HostGitRemoteEnv).
 func (s *Server) hostGitAccess(ctx context.Context, project *store.Project, cloneURL string) (string, util.HostGitHardening) {
 	h := util.HostGitHardening{
 		Config: append(provision.HostCloneGitConfig(), "protocol.http.allow=never"),
@@ -51,9 +50,7 @@ func (s *Server) hostGitAccess(ctx context.Context, project *store.Project, clon
 	}
 	token := s.resolveCloneToken(ctx, project)
 	if token == "" {
-		// No project credential: the fetch runs anonymously. The hub host's
-		// own git authentication (credential helpers of any scope, extra
-		// headers, askpass) is never offered, on any host.
+		// No project credential: the fetch runs anonymously.
 		h.NoCredentialHelpers = true
 	}
 	return token, h

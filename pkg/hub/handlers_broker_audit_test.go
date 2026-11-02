@@ -62,7 +62,7 @@ func TestBrokerAudit_HubTokenRegistrationRecordsCredential(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestWithTokenLoopback(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name: "audit-hubtoken-broker",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
@@ -93,7 +93,7 @@ func TestBrokerAudit_SessionReregistrationRecordsCredential(t *testing.T) {
 	owner := newHubMemberUser(t, s, "audit-session-owner")
 	broker := createReregistrationTestBroker(t, s, "audit-session-broker", owner.ID)
 
-	rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestAsUserLoopback(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name: broker.Name,
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
@@ -118,7 +118,7 @@ func TestBrokerAudit_DeniedRegistrationRecordsNoEvent(t *testing.T) {
 	other := newHubMemberUser(t, s, "audit-denied-other")
 	broker := createReregistrationTestBroker(t, s, "audit-denied-broker", owner.ID)
 
-	rec := doRequestAsUser(t, srv, other, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestAsUserLoopback(t, srv, other, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name: broker.Name,
 	})
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
@@ -153,7 +153,7 @@ func TestBrokerAudit_SelfRotationRecordsBrokerCredential(t *testing.T) {
 	audit := installBrokerAuditCapture(srv)
 	broker, key := newOnboardingSigningBroker(t, s, "audit-self-rotate")
 
-	rec := doBrokerSignedRequest(t, srv, broker.ID, key, "", http.MethodPost, "/api/v1/brokers/"+broker.ID+"/rotate-secret", nil)
+	rec := doBrokerSignedRequestLoopback(t, srv, broker.ID, key, "", http.MethodPost, "/api/v1/brokers/"+broker.ID+"/rotate-secret", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 	events := brokerAuditEventsOfType(audit, BrokerAuthEventRotate)
@@ -260,7 +260,7 @@ func TestBrokerAudit_ProjectRegisterLinkRecordsCredential(t *testing.T) {
 	f := brokerAssocSetup(t, "audit-link-on-register")
 	audit := installBrokerAuditCapture(f.srv)
 
-	rec := doRequestAsUser(t, f.srv, f.brokerOwner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+	rec := doRequestAsUserLoopback(t, f.srv, f.brokerOwner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
 		Name:     "Audit Register Link",
 		BrokerID: f.otherBroker.ID,
 	})
@@ -279,7 +279,7 @@ func TestBrokerAudit_ProjectRegisterDeniedLinkRecordsNoEvent(t *testing.T) {
 	f := brokerAssocSetup(t, "audit-link-on-register-denied")
 	audit := installBrokerAuditCapture(f.srv)
 
-	rec := doRequestAsUser(t, f.srv, f.projectOwner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+	rec := doRequestAsUserLoopback(t, f.srv, f.projectOwner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
 		Name:     "Audit Register Link Denied",
 		BrokerID: f.otherBroker.ID,
 	})
@@ -307,7 +307,7 @@ func TestBrokerAudit_EmbeddedRegisterRecordsCredential(t *testing.T) {
 				info = &RegisterProjectBrokerInfo{ID: broker.ID, Name: broker.Name, Version: "2.0.0"}
 			}
 
-			rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+			rec := doRequestAsUserLoopback(t, srv, owner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
 				Name:   "Audit Embedded Project",
 				Broker: info,
 			})

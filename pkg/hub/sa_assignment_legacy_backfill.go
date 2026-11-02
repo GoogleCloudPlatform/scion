@@ -189,7 +189,7 @@ func legacySAAssignmentFromEdge(ctx context.Context, s store.Store, agent *store
 		(edge.Kind != store.EffectCeilingBounded && edge.Kind != store.EffectCeilingPrincipal) {
 		return nil, saBackfillSkipUnrecordedEdge, nil
 	}
-	if !EffectCeilingAllows(edge.EffectCeiling, gcpServiceAccountAssignPermission, false) {
+	if !EffectCeilingAllows(uatHopEffectCeiling(edge.DelegatorType, edge.DelegatorID, edge.AuthorityProvenance, edge.EffectCeiling), gcpServiceAccountAssignPermission, false) {
 		return nil, saBackfillSkipCeilingLacksAssign, nil
 	}
 

@@ -31,6 +31,12 @@
 // set. With Handler.Dedupe, repeats of the same violation are collapsed
 // into one record per interval, and a summary record (RepeatsLogMessage)
 // later counts them and shows the latest (see Dedupe and repeatAttrs).
+//
+// Every report request that can be read is answered 204, including one
+// whose reports a budget refuses: a browser treats any other answer as a
+// failed delivery, and a refusal is not something it can act on. Refused
+// requests and reports are counted (Handler.Counts) and summarized in at
+// most one record per interval (RefusedLogMessage) instead of one each.
 package cspreport
 
 import (
@@ -41,8 +47,10 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
-	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -58,6 +66,12 @@ const (
 
 	// maxFieldBytes bounds the other string fields of a record.
 	maxFieldBytes = 512
+
+	// maxReportsPerRequest bounds the reports of one request that are
+	// looked at (collapsed, written or refused); the rest are counted as
+	// dropped. A browser batches a few reports at a time, and Safari sends
+	// one per request.
+	maxReportsPerRequest = 100
 
 	// maxRecordsPerRequest bounds the records one request can write. A
 	// browser batches a few reports at a time. Repeats collapsed by Dedupe
@@ -76,6 +90,15 @@ const (
 	// for a violation whose repeats were collapsed (see repeatAttrs).
 	RepeatsLogMessage = "csp_violation_repeats"
 
+	// RefusedLogMessage is the message of the refusal summary record (see
+	// refusalLog): how many requests and reports either budget refused
+	// since the previous one.
+	RefusedLogMessage = "csp_violation_refused"
+
+	// DefaultRefusedInterval is the shortest time between two refusal
+	// summary records when Handler.RefusedInterval is not set.
+	DefaultRefusedInterval = time.Minute
+
 	contentTypeReports   = "application/reports+json"
 	contentTypeCSPReport = "application/csp-report"
 	reportTypeCSP        = "csp-violation"
@@ -85,25 +108,43 @@ const (
 	directiveTrustedTypes = "require-trusted-types-for"
 )
 
-// Limiter decides whether a request may be handled now. retryAfterSeconds
-// is used only when allowed is false.
-type Limiter func(r *http.Request) (allowed bool, retryAfterSeconds int)
+// Limiter decides whether a request may be handled now. A refused request
+// is answered 204 like any other, so there is no retry time to give.
+type Limiter func(r *http.Request) bool
 
 // RecordLimiter decides whether one more record may be written now. It is
 // asked once per record, the dropped-count record included.
-// retryAfterSeconds is used only when allowed is false.
-type RecordLimiter func() (allowed bool, retryAfterSeconds int)
+type RecordLimiter func() bool
 
-// Handler is the report endpoint. Allow is asked once per request, before
-// the content type is checked and the body is read, so refused and
-// malformed requests count against it too. AllowRecord is asked once per
-// report record and dropped-count record written; a report collapsed by
-// Dedupe, and a Dedupe summary record, do not ask it. With a Dedupe,
-// AllowRecord is called under the Dedupe's lock, so it must not block or
-// call back into the handler. Log
-// receives the records; a nil Log uses slog.Default(). A nil Allow or
-// AllowRecord lets everything through, and a nil Dedupe logs every report.
+// Handler is the report endpoint.
+//
+// AllowRead is the per-client read ceiling. It is asked once per request,
+// before the content type is checked and the body is read; a request it
+// refuses is answered 204 and counted as refused, and nothing of it is
+// read. It is meant to be generous: it bounds the work one client can
+// cause, not the records it can write.
+//
+// Allow is the per-client budget. It is asked at most once per request:
+// when the request holds a report to write (a report Dedupe does not
+// collapse as a repeat), when it needs a dropped-count record (reports
+// past maxReportsPerRequest or past maxRecordsPerRequest), or when it
+// cannot be read (another content type, a body over MaxBodyBytes, a
+// malformed body). A request of at most maxReportsPerRequest reports that
+// are all repeats is not charged. AllowRecord is asked once per report
+// record and dropped-count record written; a report collapsed by Dedupe,
+// a Dedupe summary record and a refusal summary record do not ask it.
+// For a report record, Allow and AllowRecord are called under the
+// Dedupe's lock (when there is a Dedupe), so they must not block or call
+// back into the handler; for the dropped-count record they are called
+// without it.
+//
+// Log receives the records; a nil Log uses slog.Default(). A nil
+// AllowRead, Allow or AllowRecord lets everything through, and a nil
+// Dedupe logs every report.
+//
+// A Handler must not be copied after first use.
 type Handler struct {
+	AllowRead   Limiter
 	Allow       Limiter
 	AllowRecord RecordLimiter
 	Dedupe      *Dedupe
@@ -114,6 +155,49 @@ type Handler struct {
 	// sink), so it is logged only when an operator turns this on to
 	// diagnose a report.
 	RawSamples bool
+	// RefusedInterval is the shortest time between two refusal summary
+	// records (RefusedLogMessage). Zero means DefaultRefusedInterval.
+	RefusedInterval time.Duration
+
+	// now is the clock of the refusal summaries; nil means time.Now.
+	now func() time.Time
+	// afterFunc arms the refusal flush timer and returns its stop
+	// function; nil means time.AfterFunc.
+	afterFunc func(time.Duration, func()) (stop func() bool)
+
+	// timerMu guards stopTimer and closed.
+	timerMu   sync.Mutex
+	stopTimer func() bool
+	closed    bool
+
+	refusals  refusalLog
+	collapsed atomic.Int64
+}
+
+// Counts are the running totals of a Handler since it was created.
+type Counts struct {
+	// RefusedRequests counts requests refused before their reports were
+	// read: by the read ceiling, or, for a request that could not be read
+	// (another content type, a body over MaxBodyBytes, a malformed body),
+	// by the per-client budget.
+	RefusedRequests int64
+	// RefusedReports counts reports of read requests that the per-client
+	// or the hub-wide budget refused. They are neither logged nor tracked
+	// by Dedupe.
+	RefusedReports int64
+	// Collapsed counts reports Dedupe collapsed as repeats.
+	Collapsed int64
+}
+
+// Counts returns the handler's running totals.
+func (h *Handler) Counts() Counts {
+	h.refusals.mu.Lock()
+	defer h.refusals.mu.Unlock()
+	return Counts{
+		RefusedRequests: h.refusals.totalRequests,
+		RefusedReports:  h.refusals.totalReports,
+		Collapsed:       h.collapsed.Load(),
+	}
 }
 
 // Violation is one parsed report. Sample is logged only with
@@ -129,71 +213,103 @@ type Violation struct {
 	Sample       string
 }
 
-// ServeHTTP answers 204 when every report was written, collapsed as a
-// repeat by Dedupe, or counted as dropped; 429 when the request limiter
-// refuses or the record limiter refuses a report before any record of the
-// request was written; 413 when the body is over MaxBodyBytes, 415 for
-// another content type and 400 for a malformed body. Reports refused by
-// either limiter are neither logged nor counted. The dropped-count record
-// covers only the reports to log past maxRecordsPerRequest (repeats are
-// collapsed first), and is written only while the record limiter allows
-// it. Dedupe summary records are written whatever the answer.
+// ServeHTTP answers 204 to every report request it reads, whatever became
+// of its reports: written, collapsed as a repeat by Dedupe, counted as
+// dropped, or refused by either budget; and 204 to a request the read
+// ceiling refuses, without reading it. A request it cannot read gets 413
+// when the body is over MaxBodyBytes, 415 for another content type and 400
+// for a malformed body, unless the per-client budget refuses it, in which
+// case it gets 204 too. Another method gets 405.
+//
+// Refused requests and reports write no record of their own. They are
+// counted (see Counts), and at most one refusal summary record
+// (RefusedLogMessage) per RefusedInterval reports how many there were.
+// The dropped-count record covers the reports past maxReportsPerRequest
+// and the reports to log past maxRecordsPerRequest (repeats are collapsed
+// first). It is charged like a report record, to the per-client budget
+// (once per request) and to the record limiter; when either refuses, the
+// dropped reports are counted as refused instead. Dedupe summary records
+// are written whatever happened to the request.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if h.Allow != nil {
-		if ok, retry := h.Allow(r); !ok {
-			tooMany(w, retry)
-			return
-		}
+	log := h.Log
+	if log == nil {
+		log = slog.Default()
+	}
+	now := h.clock()
+	// A summary of refusals counted earlier is due whatever this request
+	// holds.
+	h.noteRefusals(log)(h.refusals.flush(now, h.refusedInterval()))
+	// The read ceiling is asked before anything of the request is read.
+	if h.AllowRead != nil && !h.AllowRead(r) {
+		h.refuseRequest(w, log, now)
+		return
 	}
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || (mediaType != contentTypeReports && mediaType != contentTypeCSPReport) {
-		http.Error(w, "unsupported content type", http.StatusUnsupportedMediaType)
+		h.unreadable(w, r, log, now, http.StatusUnsupportedMediaType, "unsupported content type")
 		return
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, MaxBodyBytes))
 	if err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			http.Error(w, "report too large", http.StatusRequestEntityTooLarge)
+			h.unreadable(w, r, log, now, http.StatusRequestEntityTooLarge, "report too large")
 			return
 		}
-		http.Error(w, "unreadable report", http.StatusBadRequest)
+		h.unreadable(w, r, log, now, http.StatusBadRequest, "unreadable report")
 		return
 	}
-	violations, err := parseBody(body)
+	// Only the first maxReportsPerRequest reports are looked at; the rest
+	// are counted as dropped.
+	violations, dropped, err := parseBody(body, maxReportsPerRequest)
 	if err != nil {
-		http.Error(w, "malformed report", http.StatusBadRequest)
+		h.unreadable(w, r, log, now, http.StatusBadRequest, "malformed report")
 		return
 	}
-	log := h.Log
-	if log == nil {
-		log = slog.Default()
+
+	// The per-client budget is charged once, for the first report that is
+	// not a repeat; once either budget refuses, every later report of the
+	// request that is not a repeat is refused too.
+	clientAsked, refusing := false, false
+	allow := func() bool {
+		if refusing {
+			return false
+		}
+		if !clientAsked && h.Allow != nil {
+			clientAsked = true
+			if !h.Allow(r) {
+				refusing = true
+				return false
+			}
+		}
+		if !h.allowRecord() {
+			refusing = true
+			return false
+		}
+		return true
 	}
-	written, dropped := 0, 0
-reports:
+	written, refused := 0, 0
 	for _, v := range violations {
-		verdict, summaries, retry := h.Dedupe.admit(v, written < maxRecordsPerRequest, h.allowRecord)
+		verdict, summaries := h.Dedupe.admit(v, written < maxRecordsPerRequest, allow)
 		for i := range summaries {
 			// A summary belongs to earlier requests, not this one.
 			log.LogAttrs(context.Background(), slog.LevelInfo, RepeatsLogMessage, repeatAttrs(&summaries[i])...)
 		}
 		switch verdict {
 		case verdictRepeat:
+			h.collapsed.Add(1)
 			continue
 		case verdictDropped:
 			dropped++
 			continue
 		case verdictRefused:
-			if written == 0 {
-				tooMany(w, retry)
-				return
-			}
-			break reports
+			refused++
+			continue
 		}
 		written++
 		attrs := []slog.Attr{
@@ -211,11 +327,36 @@ reports:
 		}
 		log.LogAttrs(r.Context(), slog.LevelInfo, LogMessage, attrs...)
 	}
+	// The dropped-count record is charged like a report record: to the
+	// per-client budget (once per request) and to the record budget. When
+	// either refuses, the dropped reports are counted as refused.
 	if dropped > 0 {
-		if ok, _ := h.allowRecord(); ok {
+		if allow() {
 			log.LogAttrs(r.Context(), slog.LevelInfo, DroppedLogMessage, slog.Int("dropped", dropped))
+		} else {
+			refused += dropped
 		}
 	}
+	if refused > 0 {
+		h.noteRefusals(log)(h.refusals.add(now, h.refusedInterval(), 0, refused))
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// unreadable answers a request whose reports cannot be read: with code,
+// when the per-client budget allows it, and as a refused request
+// otherwise.
+func (h *Handler) unreadable(w http.ResponseWriter, r *http.Request, log *slog.Logger, now time.Time, code int, msg string) {
+	if h.Allow != nil && !h.Allow(r) {
+		h.refuseRequest(w, log, now)
+		return
+	}
+	http.Error(w, msg, code)
+}
+
+// refuseRequest answers a request refused whole with 204 and counts it.
+func (h *Handler) refuseRequest(w http.ResponseWriter, log *slog.Logger, now time.Time) {
+	h.noteRefusals(log)(h.refusals.add(now, h.refusedInterval(), 1, 0))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -245,20 +386,97 @@ func repeatAttrs(r *repeatSummary) []slog.Attr {
 }
 
 // allowRecord asks AllowRecord, allowing everything when it is nil.
-func (h *Handler) allowRecord() (bool, int) {
+func (h *Handler) allowRecord() bool {
 	if h.AllowRecord == nil {
-		return true, 0
+		return true
 	}
 	return h.AllowRecord()
 }
 
-// tooMany answers 429 with a Retry-After of at least one second.
-func tooMany(w http.ResponseWriter, retry int) {
-	if retry < 1 {
-		retry = 1
+// noteRefusals returns the function that acts on a refusalLog result:
+// it writes the summary when one is due, and arms the flush timer when
+// asked to.
+func (h *Handler) noteRefusals(log *slog.Logger) func(refusalSummary, bool, time.Duration) {
+	return func(sum refusalSummary, ok bool, armIn time.Duration) {
+		if ok {
+			logRefusals(log, sum)
+		}
+		if armIn > 0 {
+			h.after(armIn, func() {
+				// After Close, Close writes what is pending.
+				if h.isClosed() {
+					return
+				}
+				h.noteRefusals(log)(h.refusals.fire(h.clock(), h.refusedInterval()))
+			})
+		}
 	}
-	w.Header().Set("Retry-After", strconv.Itoa(retry))
-	http.Error(w, "too many reports", http.StatusTooManyRequests)
+}
+
+// after calls f once d has passed, through afterFunc when it is set. After
+// Close it arms nothing.
+func (h *Handler) after(d time.Duration, f func()) {
+	h.timerMu.Lock()
+	defer h.timerMu.Unlock()
+	if h.closed {
+		return
+	}
+	if h.afterFunc != nil {
+		h.stopTimer = h.afterFunc(d, f)
+		return
+	}
+	h.stopTimer = time.AfterFunc(d, f).Stop
+}
+
+// Close stops the refusal flush timer and writes the refusals still
+// pending as a last summary, whatever the interval. Requests served after
+// Close are still answered and counted, but arm no timer; a later Close
+// writes their refusals. It is safe to call more than once.
+//
+// Close does not wait for a timer callback that is already running, so
+// one summary from such a callback can be written just after Close. The
+// refusals are counted once either way: the callback and Close take the
+// pending counts under the same lock, and only one of them finds them.
+func (h *Handler) Close() {
+	h.timerMu.Lock()
+	h.closed = true
+	stop := h.stopTimer
+	h.stopTimer = nil
+	h.timerMu.Unlock()
+	if stop != nil {
+		stop()
+	}
+	log := h.Log
+	if log == nil {
+		log = slog.Default()
+	}
+	if sum, ok := h.refusals.drain(h.clock()); ok {
+		logRefusals(log, sum)
+	}
+}
+
+// isClosed reports whether Close has been called.
+func (h *Handler) isClosed() bool {
+	h.timerMu.Lock()
+	defer h.timerMu.Unlock()
+	return h.closed
+}
+
+// clock returns the current time of the refusal summaries.
+func (h *Handler) clock() time.Time {
+	if h.now != nil {
+		return h.now()
+	}
+	return time.Now()
+}
+
+// refusedInterval returns RefusedInterval, or DefaultRefusedInterval when
+// it is not set.
+func (h *Handler) refusedInterval() time.Duration {
+	if h.RefusedInterval > 0 {
+		return h.RefusedInterval
+	}
+	return DefaultRefusedInterval
 }
 
 // reportingAPIReport is one Reporting API report: an entry of an array
@@ -300,42 +518,51 @@ var errMalformed = errors.New("malformed report")
 // parseBody reads a report body by its shape: a JSON array is a list of
 // Reporting API reports, and an object is either the older form or a
 // single Reporting API report. Entries of other report types are skipped;
-// a body with no policy report in it is malformed. Every policy report is
-// returned (MaxBodyBytes bounds how many); the handler applies
-// maxRecordsPerRequest after collapsing repeats.
-func parseBody(body []byte) ([]Violation, error) {
+// a body with no policy report in it is malformed. At most limit policy
+// reports are returned, in body order, with the number of policy reports
+// past them, which are not turned into a Violation. The handler then
+// collapses repeats and applies maxRecordsPerRequest.
+func parseBody(body []byte, limit int) ([]Violation, int, error) {
 	if firstByte(body) == '[' {
 		var reports []reportingAPIReport
 		if err := json.Unmarshal(body, &reports); err != nil {
-			return nil, errMalformed
+			return nil, 0, errMalformed
 		}
 		var out []Violation
+		extra := 0
 		for _, rep := range reports {
+			if !rep.isPolicyReport() {
+				continue
+			}
+			if len(out) == limit {
+				extra++
+				continue
+			}
 			if v, ok := rep.violation(); ok {
 				out = append(out, v)
 			}
 		}
 		if len(out) == 0 {
-			return nil, errMalformed
+			return nil, 0, errMalformed
 		}
-		return out, nil
+		return out, extra, nil
 	}
 	var rep singleReport
 	if err := json.Unmarshal(body, &rep); err != nil {
-		return nil, errMalformed
+		return nil, 0, errMalformed
 	}
 	if b := rep.Legacy; b != nil {
 		directive := b.EffectiveDirective
 		if directive == "" {
 			directive = b.ViolatedDirective
 		}
-		return []Violation{newViolation(directive, b.BlockedURI, b.SourceFile, b.LineNumber, b.DocumentURI, b.ScriptSample)}, nil
+		return []Violation{newViolation(directive, b.BlockedURI, b.SourceFile, b.LineNumber, b.DocumentURI, b.ScriptSample)}, 0, nil
 	}
 	v, ok := rep.violation()
 	if !ok {
-		return nil, errMalformed
+		return nil, 0, errMalformed
 	}
-	return []Violation{v}, nil
+	return []Violation{v}, 0, nil
 }
 
 // firstByte returns the first byte of body that is not JSON white space,
@@ -351,11 +578,16 @@ func firstByte(body []byte) byte {
 	return 0
 }
 
+// isPolicyReport reports whether rep is a policy report with a body.
+func (rep reportingAPIReport) isPolicyReport() bool {
+	return rep.Type == reportTypeCSP && rep.Body != nil
+}
+
 // violation returns the report as a Violation, or false when it is not a
 // policy report with a body. The page is the body's documentURL, or the
 // report's url when the body has none.
 func (rep reportingAPIReport) violation() (Violation, bool) {
-	if rep.Type != reportTypeCSP || rep.Body == nil {
+	if !rep.isPolicyReport() {
 		return Violation{}, false
 	}
 	b := rep.Body

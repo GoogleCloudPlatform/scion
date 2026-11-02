@@ -416,6 +416,61 @@ func DirExistsInTree(hostBase, relDir string) (bool, error) {
 	return true, nil
 }
 
+// TreeDirState reports whether <hostBase>/<relDir> exists as a plain
+// directory, reached without following a symlink at any component (as
+// DirExistsInTree), and, when it does not, whether the host base itself has
+// no entries at all. Both answers come from the one host-base descriptor:
+// the walk below it never follows a symlink, and the emptiness read takes at
+// most one name from that descriptor (no second path-based open). A read
+// error is returned as an error, never as "empty".
+func TreeDirState(hostBase, relDir string) (exists, baseEmpty bool, err error) {
+	if _, err := splitRelPath(relDir); err != nil {
+		return false, false, fmt.Errorf("%w: %w", ErrTreeRefused, err)
+	}
+	baseFd, err := unix.Open(hostBase, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return false, false, fmt.Errorf("%w: open host base %q: %w", ErrTreeRefused, hostBase, err)
+	}
+	defer func() { _ = unix.Close(baseFd) }()
+	fd, ok, err := openExistingDirPathNoFollow(baseFd, relDir)
+	if err != nil {
+		return false, false, fmt.Errorf("%w: %q: %w", ErrTreeRefused, relDir, err)
+	}
+	if ok {
+		_ = unix.Close(fd)
+		return true, false, nil
+	}
+	name, err := firstDirName(baseFd)
+	if err != nil {
+		return false, false, fmt.Errorf("read host base %q: %w", hostBase, err)
+	}
+	return false, name == "", nil
+}
+
+// firstDirName returns the first entry name of the already-open directory
+// fd dirFd other than "." and "..", or "" when it has none, via raw getdents
+// (unix.ReadDirent) on the fd alone. Unlike readDirNames, ENOENT (the
+// directory removed under the fd) is an error here: the caller must not read
+// a vanished directory as an empty one.
+func firstDirName(dirFd int) (string, error) {
+	buf := make([]byte, 4096)
+	for {
+		n, err := unix.ReadDirent(dirFd, buf)
+		if err != nil {
+			if errors.Is(err, unix.EINTR) {
+				continue
+			}
+			return "", err
+		}
+		if n <= 0 {
+			return "", nil
+		}
+		if _, _, names := unix.ParseDirent(buf[:n], 1, nil); len(names) > 0 {
+			return names[0], nil
+		}
+	}
+}
+
 // errTreeAbsent is openTreeDir's "a component does not exist".
 var errTreeAbsent = errors.New("tree component absent")
 

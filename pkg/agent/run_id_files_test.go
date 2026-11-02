@@ -349,7 +349,7 @@ func TestProvision_CreateRecordsProvisionOwner(t *testing.T) {
 }
 
 // A start whose project has no trusted root for the host state file (here
-// a symlinked .scion) records no run and carries on, as a failed
+// an agents directory reached through a symlink) records no run and carries on, as a failed
 // agent-info.json record did: the container is still created, and nothing
 // is written through the refused root or into agent-info.json.
 func TestStart_RefusedRootStillStarts(t *testing.T) {
@@ -362,8 +362,22 @@ func TestStart_RefusedRootStillStarts(t *testing.T) {
 	if err := os.MkdirAll(linked, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(projectScionDir, filepath.Join(linked, config.DotScion)); err != nil {
+	// linked's .scion is a real directory (a .scion symlinked elsewhere is
+	// refused before the start, ptone/scion#6647); its entries, agents
+	// included, are symlinks into the fixture's .scion, so the agent
+	// directory sits below a symlink.
+	linkedScion := filepath.Join(linked, config.DotScion)
+	if err := os.Mkdir(linkedScion, 0o755); err != nil {
 		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(projectScionDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if err := os.Symlink(filepath.Join(projectScionDir, e.Name()), filepath.Join(linkedScion, e.Name())); err != nil {
+			t.Fatal(err)
+		}
 	}
 	ran := false
 	rt := &runtime.MockRuntime{

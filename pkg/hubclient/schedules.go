@@ -64,6 +64,7 @@ func (s *scheduleService) basePath() string {
 type CreateScheduleRequest struct {
 	Name      string `json:"name"`
 	CronExpr  string `json:"cronExpr"`
+	TimeZone  string `json:"timeZone,omitempty"` // IANA zone for CronExpr; empty means UTC
 	EventType string `json:"eventType"`
 	Payload   string `json:"payload,omitempty"`
 	AgentName string `json:"agentName,omitempty"`
@@ -76,11 +77,13 @@ type CreateScheduleRequest struct {
 
 // UpdateScheduleRequest is the client-side request for updating a schedule.
 type UpdateScheduleRequest struct {
-	Name      string `json:"name,omitempty"`
-	CronExpr  string `json:"cronExpr,omitempty"`
-	EventType string `json:"eventType,omitempty"`
-	Payload   string `json:"payload,omitempty"`
-	Status    string `json:"status,omitempty"`
+	Name     string `json:"name,omitempty"`
+	CronExpr string `json:"cronExpr,omitempty"`
+	// TimeZone: nil leaves the zone unchanged; "" sets it back to UTC.
+	TimeZone  *string `json:"timeZone,omitempty"`
+	EventType string  `json:"eventType,omitempty"`
+	Payload   string  `json:"payload,omitempty"`
+	Status    string  `json:"status,omitempty"`
 }
 
 // Schedule represents a recurring schedule returned by the Hub API.
@@ -89,6 +92,7 @@ type Schedule struct {
 	ProjectID     string     `json:"projectId"`
 	Name          string     `json:"name"`
 	CronExpr      string     `json:"cronExpr"`
+	TimeZone      string     `json:"timeZone,omitempty"` // IANA zone for CronExpr; empty means UTC
 	EventType     string     `json:"eventType"`
 	Payload       string     `json:"payload"`
 	Status        string     `json:"status"`

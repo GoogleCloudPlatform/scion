@@ -28,7 +28,6 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -200,23 +199,6 @@ func TestProvisionShared_CloneWithToken_PublicRepoUnchanged(t *testing.T) {
 	}
 }
 
-func TestRunGitClone_UsesScopedHelperNotUnscoped(t *testing.T) {
-	// runGitClone must authenticate through a host-scoped credential helper,
-	// never an unscoped credential.helper. Build the scoped env the way
-	// runGitClone does and assert it keys on the clone URL's host.
-	env := append(util.HostGitEnv([]string{"PATH=/bin", "GITHUB_TOKEN=tok"}), "GIT_TERMINAL_PROMPT=0", "GIT_LFS_SKIP_SMUDGE=1")
-	scoped, ok := util.ScopedCredentialHelperEnv(env, "https://github.com/org/repo.git", "tok")
-	require.True(t, ok)
-	joined := strings.Join(scoped, "\n")
-	assert.Contains(t, joined, "credential.https://github.com.helper")
-	// The only unscoped credential.helper entry is the empty reset (so no
-	// other helper runs or persists); it must have an empty value.
-	assert.Contains(t, joined, "GIT_CONFIG_KEY_0=credential.helper\nGIT_CONFIG_VALUE_0=\n")
-	// A non-http(s) URL yields no helper (token ignored).
-	_, ok = util.ScopedCredentialHelperEnv(env, "git@github.com:org/repo.git", "tok")
-	assert.False(t, ok)
-}
-
 func TestCloneError_WithToken(t *testing.T) {
 	auth := cloneError("https://github.com/org/private.git",
 		"fatal: Authentication failed for 'https://github.com/org/private.git/'\n", nil, true, "")
@@ -227,10 +209,11 @@ func TestCloneError_WithToken(t *testing.T) {
 	assert.Contains(t, notFound.Error(), "has no access to it")
 }
 
-// runGitClone passes the clone environment's token to cloneError, so a
-// token that git prints is redacted. A fake git on PATH prints the value of
-// GITHUB_TOKEN when asked to clone and fails; other git commands run the
-// real git.
+// runGitClone passes the clone's token to cloneError, so a token that git
+// prints is redacted. git sees the token only in the scoped credential
+// helper's variable (SCION_SCOPED_GIT_CREDENTIAL; GITHUB_TOKEN is removed
+// from its environment). A fake git on PATH prints that variable when asked
+// to clone and fails; other git commands run the real git.
 func TestProvisionShared_CloneWithToken_GitOutputRedacted(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	isolateGitConfig(t)
@@ -238,7 +221,7 @@ func TestProvisionShared_CloneWithToken_GitOutputRedacted(t *testing.T) {
 	require.NoError(t, err)
 	binDir := t.TempDir()
 	script := "#!/bin/sh\n" +
-		"for a in \"$@\"; do if [ \"$a\" = clone ]; then echo \"fatal: unexpected server response for $GITHUB_TOKEN\" >&2; exit 128; fi; done\n" +
+		"for a in \"$@\"; do if [ \"$a\" = clone ]; then echo \"fatal: unexpected server response for $SCION_SCOPED_GIT_CREDENTIAL$GITHUB_TOKEN\" >&2; exit 128; fi; done\n" +
 		"exec '" + realGit + "' \"$@\"\n"
 	require.NoError(t, os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755))
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -257,7 +240,8 @@ func TestProvisionShared_CloneWithToken_GitOutputRedacted(t *testing.T) {
 // with a tracked .lfsconfig naming a recording server must not contact it (the
 // clone skips the LFS smudge), so the server receives no request and no
 // Authorization header. Live part gated on git-lfs; the scoped-helper wiring is
-// asserted unconditionally in TestRunGitClone_UsesScopedHelperNotUnscoped.
+// asserted unconditionally in TestRunGitClone_UsesScopedHelperNotUnscoped
+// (remote_layer_test.go).
 func TestRunGitClone_SkipsLFSSmudge_NoEndpointContact(t *testing.T) {
 	if _, err := exec.LookPath("git-lfs"); err != nil {
 		t.Skip("git-lfs not installed; argv/env wiring covered by TestRunGitClone_UsesScopedHelperNotUnscoped")

@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 368
+**Operations:** 370
 
 ## Table of Contents
 
@@ -16,7 +16,7 @@
 - [agent.hold.lift](#agentholdlift) — Lift the holds of a suspended agent whose owners are admitted to its project again (hub admin)
 - [agent.lifecycle.reincarnate](#agentlifecyclereincarnate) — Reincarnate an agent
 - [agent.read](#agentread) — Read a single agent's metadata by ID
-- [agent.list](#agentlist) — List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project
+- [agent.list](#agentlist) — List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project. An agent delegated credential is admitted on the hub form only: its scope is the authorizing user's list scope within the grant boundary, and each item is also decided for agent.read
 - [agent.update](#agentupdate) — Update agent configuration or metadata
 - [agent.update.pendingconfig.delete](#agentupdatependingconfigdelete) — Discard an agent's pending config edits (behind hub.agent_edit_held; 404 while it is off)
 - [agent.status.update](#agentstatusupdate) — Report an agent's status: the agent itself, or a user who may update the agent
@@ -255,6 +255,7 @@
 - [hub.config.update](#hubconfigupdate) — Update server configuration sections. The route guard checks hub.config.read, so a token needs hub_config:read and hub_config:update, and writes configuration keys only
 - [hub.messaging.update](#hubmessagingupdate) — Read and update messaging configuration switches
 - [hub.profiling.update](#hubprofilingupdate) — Read and update the profiling switches (session only)
+- [hub.chatretention.update](#hubchatretentionupdate) — Read and update the chat message retention settings (session only)
 - [hub.experiments.update](#hubexperimentsupdate) — Read and update hub-wide experiment overrides
 - [hub.conduitgrantkeys.rotate](#hubconduitgrantkeysrotate) — Rotate the conduit grant signing key (kids and timestamps only in the response)
 - [hub.conduitgrantkeys.revoke](#hubconduitgrantkeysrevoke) — Revoke a conduit grant key at once (the kid only in the response)
@@ -333,6 +334,7 @@
 - [broker.delete](#brokerdelete) — Deregister a runtime broker: unlink it from every project, clear project defaults that name it, and remove its credentials. A user needs an interactive session and broker.delete on the broker
 - [broker.heartbeat](#brokerheartbeat) — Record a broker heartbeat: broker liveness and the state of the agents it runs. The broker sends its own; a user needs an interactive session and broker.update on the broker from a role binding (the owner relationship does not apply)
 - [broker.agent.launchreport](#brokeragentlaunchreport) — Record a broker's launch report for an agent it runs
+- [broker.agent.workspacedownload](#brokeragentworkspacedownload) — Issue signed download URLs for the uploaded workspace files of an agent the broker runs
 - [broker.messagefailures.report](#brokermessagefailuresreport) — Record buffered message delivery failures reported by a broker
 - [broker.attachment.redeem](#brokerattachmentredeem) — Redeem an attachment delivery capability (ptone/scion#4596): the broker the hub issued it to downloads one attachment, once, before it expires, to write it into the recipient agent's home
 - [broker.controlchannel.call](#brokercontrolchannelcall) — Carry a call between the hub and a connected broker over the control channel; each call runs under the operation that initiated it
@@ -739,7 +741,7 @@
 
 **Domain:** agent
 
-**Description:** List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project
+**Description:** List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project. An agent delegated credential is admitted on the hub form only: its scope is the authorizing user's list scope within the grant boundary, and each item is also decided for agent.read
 
 ### Entry Points
 
@@ -748,9 +750,9 @@
 | http_route | GET | `/api/v1/agents` |
 | http_route | GET | `/api/v1/projects/{id}/agents` |
 
-**Principals:** `user`, `agent`
+**Principals:** `user`, `agent`, `agent_delegated`
 
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `delegated_agent`
 
 **Bearer:** `admit` (target `list_scope`; boundaries `project`, `hub`)
 
@@ -769,7 +771,7 @@
 | no-broad-query-on-none | security | ScopeSetNone produces empty list without issuing any resource query | Yes |
 | slug-not-oracle | security | Project slug lookup for agent list filter must not distinguish unauthorized from nonexistent | Yes |
 
-**Denial Codes:** `forbidden`, `credential_insufficient`, `user_suspended`
+**Denial Codes:** `forbidden`, `credential_insufficient`, `user_suspended`, `credential_not_admitted`, `delegated_list_sort_unsupported`
 
 ### Tests
 
@@ -791,6 +793,8 @@
 - `pkg/hub:TestListCaveats_ProjectBoundaryRequiresListPermissionInCeiling`
 - `pkg/hub:TestProjectAgentListToken_RequiresAgentListOnTheProject`
 - `pkg/hub:TestListFilters_CannotEnlargeTokenResults`
+- `pkg/hub:TestAgentDelegatedAgentList_ExplicitScopeAcrossProjects`
+- `pkg/hub:TestAgentDelegatedAgentList_MixedItemsAndCounts`
 
 ---
 
@@ -9687,6 +9691,39 @@
 
 ---
 
+## hub.chatretention.update
+
+**Domain:** hub
+
+**Description:** Read and update the chat message retention settings (session only)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/admin/chat-retention` |
+| http_route | PUT | `/api/v1/admin/chat-retention` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `IRREVERSIBLE_CASCADE`)
+
+**Base Permission:** `hub.config.update`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestAdminChatRetention_TokenRefused`
+
+---
+
 ## hub.experiments.update
 
 **Domain:** hub
@@ -12364,6 +12401,40 @@
 
 ---
 
+## broker.agent.workspacedownload
+
+**Domain:** broker
+
+**Description:** Issue signed download URLs for the uploaded workspace files of an agent the broker runs
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/runtime-brokers/{id}/agents/{agentId}/workspace-download` |
+
+**Principals:** `broker`
+
+**Credentials:** `broker_token`
+
+**Bearer:** `non_user`
+
+**Resource Resolver:** broker-self
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDisposition_EveryRoutePatternCovered`
+
+### Exemptions
+
+- **internal_only:** The broker authenticates with its own HMAC credential for an agent assigned to it in a project it still provides for; no user permission applies (scope: broker self access) — waives: `base_permission`
+
+---
+
 ## broker.messagefailures.report
 
 **Domain:** broker
@@ -12445,9 +12516,9 @@
 |------|--------|---------|
 | broker_call | — | `TunnelRequest:controlchannel` |
 | broker_call | — | `OpenStream:controlchannel` |
-| broker_call | — | `SendStreamData:controlchannel` |
-| broker_call | — | `ResizeStream:controlchannel` |
-| broker_call | — | `CloseStream:controlchannel` |
+| broker_call | — | `SendStreamData:brokerconnection` |
+| broker_call | — | `ResizeStream:brokerconnection` |
+| broker_call | — | `CloseStream:brokerconnection` |
 | broker_call | — | `handleResponse:controlchannel` |
 | broker_call | — | `handleStreamData:controlchannel` |
 | broker_call | — | `handleStreamClose:controlchannel` |

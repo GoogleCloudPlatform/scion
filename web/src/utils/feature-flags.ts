@@ -224,3 +224,12 @@ export const ARTIFACT_REVIEW_EDITOR_FLAG = 'web.artifact_review_editor';
  * request and on the deletion resource. Default OFF.
  */
 export const USER_DELETE_FORCE_CASCADE_FLAG = 'hub.user_delete_force_cascade';
+
+/**
+ * Chat message retention (hub.chat_retention): the Chat retention panel in
+ * Admin > Server Config and the history divider at the top of a thread
+ * whose older messages the retention policy removed. Presentation only: the
+ * hub checks the experiment in the settings API, the sweep and the history
+ * marker. Default OFF.
+ */
+export const CHAT_RETENTION_FLAG = 'hub.chat_retention';

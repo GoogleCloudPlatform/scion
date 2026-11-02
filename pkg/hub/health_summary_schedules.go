@@ -336,7 +336,7 @@ func healthScheduleReasonText(code string) string {
 	case store.ScheduleStatusReasonCreatorDeleted:
 		return "the agent or user it runs under was deleted"
 	case store.ScheduleStatusReasonCronZoneUnsupported:
-		return "its cron expression names a time zone, which is not supported"
+		return "its cron expression has a zone prefix, which is not supported: set its time zone field instead"
 	default:
 		return "a reason this hub does not recognize"
 	}

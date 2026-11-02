@@ -389,7 +389,7 @@ cmd_swap() {
       log "update-state.json: the update to $cur (run $run_id) was verified, so this crash loop is not a failed update: not rolling back. $stay"
       exit "$LEAVE_STOPPED" ;;
     unsafe)
-      log "update-state.json: $cur (run $run_id) migrated the database, and $prev is below its downgrade floor: not rolling back. Nothing changed; the hub stays stopped. Restore the database snapshot with the release it was taken from (docs/deploy/single-node-vm.md, Restoring after a failed update)."
+      log "update-state.json: $cur (run $run_id) migrated the database, and $prev cannot be shown to be safe for it (below the downgrade floor, or a Git build): not rolling back. Nothing changed; the hub stays stopped. Restore the database snapshot with the release it was taken from (docs/deploy/single-node-vm.md, Restoring after a failed update)."
       exit "$LEAVE_STOPPED" ;;
     *)
       age="$(switched_seconds_ago)" || die "cannot read when $INSTALL_ROOT/current was switched; nothing changed"

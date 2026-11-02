@@ -28,7 +28,9 @@ five modes:
 
 The default mode is **`project`**, which preserves pre-mode behavior: any
 project member with the `agent.message` permission can message any agent.
-No tightening occurs until someone explicitly sets a non-default mode.
+No tightening occurs until someone explicitly sets a non-default mode. A
+soft-deleted agent (`deletedAt` set) cannot receive messages in any mode and
+returns the same `404` as an unknown target.
 
 ### Key principles
 

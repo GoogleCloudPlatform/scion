@@ -158,6 +158,26 @@ func (Message) Indexes() []ent.Index {
 		// The inter-agent view's legacy lookup filters on project_id and
 		// the sender text ("agent:<slug>") and orders by created, id.
 		index.Fields("project_id", "sender", "created", "id"),
+		// The stuck-pending sweep filters on dispatch_state = 'pending' AND
+		// created < cutoff and orders by created, id. Pending rows are a
+		// tiny fraction of the table, so a partial index keeps the sweep
+		// proportional to the pending rows instead of every row older than
+		// the cutoff. The WHERE must match the query's literal for the
+		// planner to pick the index (store.MessageDispatchPending).
+		index.Fields("created", "id").
+			Annotations(entsql.IndexWhere("dispatch_state = 'pending'")),
+		// The failed-message retention purge walks dispatch_state = 'failed'
+		// AND created < cutoff in (created, id) keyset chunks. A separate
+		// partial index rather than widening the pending one: SQLite only
+		// uses a partial index whose WHERE terms appear in the query, so an
+		// IN ('pending', 'failed') index would not serve the pending sweep,
+		// and failed rows (kept for the retention window) would bloat the
+		// pending sweep's range. The WHERE must match the purge's literal
+		// (store.MessageDispatchFailed). The explicit name avoids colliding
+		// with the pending index's default name (ptone/scion#6954).
+		index.Fields("created", "id").
+			StorageKey("message_failed_created_id").
+			Annotations(entsql.IndexWhere("dispatch_state = 'failed'")),
 	}
 }
 
