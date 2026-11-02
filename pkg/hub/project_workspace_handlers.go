@@ -311,6 +311,9 @@ func (walkDirSearcher) Search(root *os.Root, query string, limit int) (FileSearc
 			// the whole listing — skip it and keep walking.
 			return nil
 		}
+		if skip, err := skipDotGitEntry(d); skip {
+			return err
+		}
 		if path == "." || d.IsDir() {
 			return nil
 		}
@@ -751,38 +754,13 @@ func (s *Server) handleProjectWorkspaceUpload(w http.ResponseWriter, r *http.Req
 				return
 			}
 
-			// Create parent directories, confined to the root: a component
-			// that is, or leads through, a symlink out of the workspace is
-			// refused by root.MkdirAll rather than followed.
-			if dir := filepath.Dir(relPath); dir != "." {
-				if err := root.MkdirAll(dir, 0755); err != nil {
-					_ = src.Close()
-					notAccessible(w, "upload-mkdir", relPath, err)
-					return
-				}
-			}
-
-			// Write file to disk
-			dst, err := root.Create(relPath)
-			if err != nil {
-				_ = src.Close()
-				notAccessible(w, "upload", relPath, err)
-				return
-			}
-
-			written, err := io.Copy(dst, src)
+			// Write through the opened parent directory: a .git directory
+			// on the way, a symlink as the target, or a path out of the
+			// workspace is refused rather than followed.
+			written, info, err := writeWorkspaceFile(root, relPath, src)
 			_ = src.Close()
-			_ = dst.Close()
-
 			if err != nil {
-				InternalError(w)
-				return
-			}
-
-			// Get file info for response
-			info, err := root.Stat(relPath)
-			if err != nil {
-				InternalError(w)
+				writeWorkspaceFileError(w, "upload", relPath, err)
 				return
 			}
 
@@ -808,8 +786,9 @@ func (s *Server) handleProjectWorkspaceUpload(w http.ResponseWriter, r *http.Req
 func (s *Server) handleProjectWorkspaceDownload(w http.ResponseWriter, r *http.Request, root *os.Root, filePath string) {
 	// Validate the file path. This lexical check is kept as defence in depth:
 	// it rejects the obvious shapes early, but it cannot see symlinks, so the
-	// confinement that actually matters is the Root below.
-	if err := validateWorkspaceFilePath(filePath); err != nil {
+	// confinement that actually matters is the Root below. A path with a .git
+	// component is refused, as for writes.
+	if err := validateWorkspaceWritePath(filePath); err != nil {
 		BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", filePath, err.Error()))
 		return
 	}
@@ -920,6 +899,10 @@ func writeDirectoryToZip(zw *zip.Writer, root *os.Root) error {
 		if err != nil {
 			// One unreadable entry should not truncate the whole archive.
 			return nil
+		}
+
+		if skip, err := skipDotGitEntry(d); skip {
+			return err
 		}
 
 		if path == "." || d.IsDir() {
@@ -1137,24 +1120,11 @@ func (s *Server) handleProjectWorkspaceWrite(w http.ResponseWriter, r *http.Requ
 		// If file doesn't exist (new file creation), skip the check
 	}
 
-	// Create parent directories if needed, confined to the root.
-	if dir := filepath.Dir(filePath); dir != "." {
-		if err := root.MkdirAll(dir, 0755); err != nil {
-			notAccessible(w, "write-mkdir", filePath, err)
-			return
-		}
-	}
-
-	// Write the file
-	if err := root.WriteFile(filePath, []byte(req.Content), 0644); err != nil {
-		notAccessible(w, "write", filePath, err)
-		return
-	}
-
-	// Read back file info for the response
-	info, err := root.Stat(filePath)
+	// Write through the opened parent directory, creating missing parents
+	// (see writeWorkspaceFile).
+	_, info, err := writeWorkspaceFile(root, filePath, strings.NewReader(req.Content))
 	if err != nil {
-		InternalError(w)
+		writeWorkspaceFileError(w, "write", filePath, err)
 		return
 	}
 
@@ -1661,8 +1631,9 @@ func validateWorkspaceFilePath(path string) error {
 }
 
 // validateWorkspaceWritePath is validateWorkspaceFilePath for the handlers
-// that create, change or remove workspace files (write, upload, delete). It
-// also refuses a path with a .git component under util.IsDotGitComponent.
+// that create, change, remove or download workspace files (write, upload,
+// delete, download). It also refuses a path with a .git component under
+// util.IsDotGitComponent.
 func validateWorkspaceWritePath(path string) error {
 	if err := validateWorkspaceFilePath(path); err != nil {
 		return err
@@ -1673,6 +1644,34 @@ func validateWorkspaceWritePath(path string) error {
 		}
 	}
 	return nil
+}
+
+// skipDotGitEntry reports whether a listing or archive walk leaves out d, an
+// entry named .git under util.IsDotGitComponent (a directory or a gitfile),
+// and the error that tells fs.WalkDir to skip it.
+func skipDotGitEntry(d fs.DirEntry) (bool, error) {
+	if !util.IsDotGitComponent(d.Name()) {
+		return false, nil
+	}
+	if d.IsDir() {
+		return true, fs.SkipDir
+	}
+	return true, nil
+}
+
+// writeWorkspaceFileError answers a failed writeWorkspaceFile: 400 naming the
+// path for a refusal, notAccessible for a path os.Root would not resolve, and
+// 500 otherwise.
+func writeWorkspaceFileError(w http.ResponseWriter, kind, relPath string, err error) {
+	var pathErr *fs.PathError
+	switch {
+	case errors.Is(err, errWorkspaceWriteRefused):
+		BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", relPath, err.Error()))
+	case errors.As(err, &pathErr):
+		notAccessible(w, kind, relPath, err)
+	default:
+		InternalError(w)
+	}
 }
 
 // workspaceBodyLimit returns the request body cap for workspace file writes

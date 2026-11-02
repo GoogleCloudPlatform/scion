@@ -1,0 +1,203 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !no_sqlite
+
+package hub
+
+import (
+	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+const gitConfigContent = "[core]\n\tbare = false\n"
+
+// plantGitWorkspace gives workspacePath a .git directory with a config and a
+// hooks directory, and returns the config path.
+func plantGitWorkspace(t *testing.T, workspacePath string) string {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Join(workspacePath, ".git", "hooks"), 0o755))
+	cfg := filepath.Join(workspacePath, ".git", "config")
+	require.NoError(t, os.WriteFile(cfg, []byte(gitConfigContent), 0o644))
+	return cfg
+}
+
+func assertGitConfigUnchanged(t *testing.T, cfg string) {
+	t.Helper()
+	got, err := os.ReadFile(cfg)
+	require.NoError(t, err)
+	assert.Equal(t, gitConfigContent, string(got), ".git/config was changed")
+}
+
+// TestProjectWorkspaceWrite_SymlinkIntoDotGitRefused covers a write or an
+// upload that reaches .git through a symlink stored in the workspace.
+func TestProjectWorkspaceWrite_SymlinkIntoDotGitRefused(t *testing.T) {
+	cases := []struct {
+		name  string
+		links map[string]string // link path (relative) -> target
+		path  string            // request path
+		gone  string            // workspace-relative path that must not exist afterwards
+	}{
+		{
+			name:  "dir_link_to_dotgit",
+			links: map[string]string{"gitlink": ".git"},
+			path:  "gitlink/config",
+		},
+		{
+			name:  "dir_link_to_dotgit_new_file",
+			links: map[string]string{"gitlink": ".git"},
+			path:  "gitlink/hooks/pre-commit",
+			gone:  ".git/hooks/pre-commit",
+		},
+		{
+			name:  "nested_dir_link_to_hooks",
+			links: map[string]string{"sub/hooks": "../.git/hooks"},
+			path:  "sub/hooks/pre-commit",
+			gone:  ".git/hooks/pre-commit",
+		},
+		{
+			name:  "top_dir_link_to_hooks",
+			links: map[string]string{"hookslink": ".git/hooks"},
+			path:  "hookslink/post-checkout",
+			gone:  ".git/hooks/post-checkout",
+		},
+		{
+			name:  "final_file_link_to_config",
+			links: map[string]string{"cfg": ".git/config"},
+			path:  "cfg",
+		},
+		{
+			name:  "final_dangling_link_into_dotgit",
+			links: map[string]string{"newhook": ".git/hooks/pre-push"},
+			path:  "newhook",
+			gone:  ".git/hooks/pre-push",
+		},
+	}
+	for _, tc := range cases {
+		for _, method := range []string{http.MethodPut, http.MethodPost} {
+			t.Run(tc.name+"_"+method, func(t *testing.T) {
+				srv, _ := testServer(t)
+				project, workspacePath := createTestHubManagedProject(t, srv, "WS Symlink DotGit")
+				cfg := plantGitWorkspace(t, workspacePath)
+				for link, target := range tc.links {
+					abs := filepath.Join(workspacePath, filepath.FromSlash(link))
+					require.NoError(t, os.MkdirAll(filepath.Dir(abs), 0o755))
+					require.NoError(t, os.Symlink(target, abs))
+				}
+
+				filesURL := fmt.Sprintf("/api/v1/projects/%s/workspace/files", project.ID)
+				var code int
+				var body string
+				if method == http.MethodPut {
+					rec := doRequest(t, srv, http.MethodPut, filesURL+"/"+tc.path,
+						ProjectWorkspaceWriteRequest{Content: "planted"})
+					code, body = rec.Code, rec.Body.String()
+				} else {
+					rec := doMultipartRequest(t, srv, http.MethodPost, filesURL,
+						map[string][]byte{tc.path: []byte("planted")})
+					code, body = rec.Code, rec.Body.String()
+				}
+				assert.Equal(t, http.StatusBadRequest, code, "body: %s", body)
+				assertGitConfigUnchanged(t, cfg)
+				if tc.gone != "" {
+					assertNoEntry(t, workspacePath, tc.gone)
+				}
+				for link := range tc.links {
+					fi, err := os.Lstat(filepath.Join(workspacePath, filepath.FromSlash(link)))
+					require.NoError(t, err)
+					assert.NotZero(t, fi.Mode()&os.ModeSymlink, "%s is no longer a symlink", link)
+				}
+			})
+		}
+	}
+}
+
+// TestProjectWorkspaceWrite_DotGitAliasRefused covers a directory that is the
+// workspace's .git without a .git name on the way: .git is a symlink to an
+// in-tree directory, and the request names that directory. Only the
+// comparison of the opened handle with .git catches it.
+func TestProjectWorkspaceWrite_DotGitAliasRefused(t *testing.T) {
+	srv, _ := testServer(t)
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS DotGit Alias")
+	gitReal := filepath.Join(workspacePath, "gitdir-real")
+	require.NoError(t, os.MkdirAll(filepath.Join(gitReal, "hooks"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(gitReal, "config"), []byte(gitConfigContent), 0o644))
+	require.NoError(t, os.Symlink("gitdir-real", filepath.Join(workspacePath, ".git")))
+
+	filesURL := fmt.Sprintf("/api/v1/projects/%s/workspace/files", project.ID)
+	rec := doRequest(t, srv, http.MethodPut, filesURL+"/gitdir-real/config",
+		ProjectWorkspaceWriteRequest{Content: "planted"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "write through the .git alias, body: %s", rec.Body.String())
+	assertGitConfigUnchanged(t, filepath.Join(gitReal, "config"))
+
+	rec = doMultipartRequest(t, srv, http.MethodPost, filesURL,
+		map[string][]byte{"gitdir-real/hooks/pre-commit": []byte("planted")})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "upload through the .git alias, body: %s", rec.Body.String())
+	assertNoEntry(t, workspacePath, "gitdir-real/hooks/pre-commit")
+}
+
+// TestProjectWorkspaceWrite_SymlinkToNormalDirAllowed is the control: a write
+// or an upload beneath a symlink to an ordinary in-tree directory still lands
+// in that directory.
+func TestProjectWorkspaceWrite_SymlinkToNormalDirAllowed(t *testing.T) {
+	srv, _ := testServer(t)
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS Symlink Control")
+	plantGitWorkspace(t, workspacePath)
+	require.NoError(t, os.MkdirAll(filepath.Join(workspacePath, "docs", "real"), 0o755))
+	require.NoError(t, os.Symlink("docs/real", filepath.Join(workspacePath, "linked")))
+	require.NoError(t, os.MkdirAll(filepath.Join(workspacePath, "sub"), 0o755))
+	require.NoError(t, os.Symlink("../docs/real", filepath.Join(workspacePath, "sub", "up")))
+
+	filesURL := fmt.Sprintf("/api/v1/projects/%s/workspace/files", project.ID)
+	rec := doRequest(t, srv, http.MethodPut, filesURL+"/linked/new/put.txt",
+		ProjectWorkspaceWriteRequest{Content: "put"})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	rec = doMultipartRequest(t, srv, http.MethodPost, filesURL,
+		map[string][]byte{"sub/up/post.txt": []byte("post")})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	got, err := os.ReadFile(filepath.Join(workspacePath, "docs", "real", "new", "put.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "put", string(got))
+	got, err = os.ReadFile(filepath.Join(workspacePath, "docs", "real", "post.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "post", string(got))
+}
+
+// TestProjectWorkspaceDelete_SymlinkToDotGitRemovesLinkOnly confirms DELETE
+// of a symlink into .git removes the link and leaves .git alone.
+func TestProjectWorkspaceDelete_SymlinkToDotGitRemovesLinkOnly(t *testing.T) {
+	srv, _ := testServer(t)
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS Delete Symlink DotGit")
+	cfg := plantGitWorkspace(t, workspacePath)
+	require.NoError(t, os.Symlink(".git", filepath.Join(workspacePath, "gitlink")))
+	require.NoError(t, os.Symlink(".git/config", filepath.Join(workspacePath, "cfg")))
+
+	filesURL := fmt.Sprintf("/api/v1/projects/%s/workspace/files", project.ID)
+	for _, link := range []string{"gitlink", "cfg"} {
+		rec := doRequest(t, srv, http.MethodDelete, filesURL+"/"+link, nil)
+		assert.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
+		assertNoEntry(t, workspacePath, link)
+	}
+	assertGitConfigUnchanged(t, cfg)
+	fi, err := os.Lstat(filepath.Join(workspacePath, ".git", "hooks"))
+	require.NoError(t, err)
+	assert.True(t, fi.IsDir(), ".git/hooks was removed")
+}
