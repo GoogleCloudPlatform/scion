@@ -233,11 +233,11 @@ export SCION_SERVER_AUTH_AUTHORIZEDDOMAINS="example.com,mycompany.org"
 
 `server.auth.authorized_domains` resolves in environment-first order so a deployment pin cannot be widened from the UI:
 
-1. **Environment pin (`SCION_SERVER_AUTH_AUTHORIZEDDOMAINS`)**: When set on the node, its list is always enforced on that node; a database save is stored for unpinned nodes and reported under `reload.skipped` on the pinned node.
-2. **Database (`hub_settings`)**: Otherwise, a list saved through the Web UI (**Admin -> Server Config -> Access Control**), `PUT /api/v1/admin/server-config`, or `scion hub settings set` is loaded at startup and applied live across replicas without a restart. Clearing the saved list reverts to the startup list from `settings.yaml` and the environment rather than allowing all domains.
+1. **Environment pin (`SCION_SERVER_AUTH_AUTHORIZEDDOMAINS`)**: When set on the node, its list is always enforced on that node; a database save is stored for unpinned nodes, and on the pinned node the save report (`reload`) lists `server.auth.authorized_domains` in `skipped` (not `applied_keys`) with reason `"Saved; a deployment setting on this Hub pins this value."`
+2. **Database (`hub_settings`)**: Otherwise, a list saved through the Web UI (**Admin -> Server Config -> Access Control**), `PUT /api/v1/admin/server-config`, or `scion hub settings set` is loaded at startup and applied live across replicas without a restart. Clearing the saved list (an empty `authorized_domains` in the stored `access` row) uses the startup value (`settings.yaml` and `SCION_SERVER_AUTH_AUTHORIZEDDOMAINS`), so a save never allows more domains than the deployment does.
 3. **File and seed**: Otherwise, the list in `settings.yaml` (`server.auth.authorized_domains`) or `SCION_SEED_SERVER_AUTH_AUTHORIZEDDOMAINS` is used.
 
-A save of `authorized_domains` or `admin_emails` (or a reset of the `access` section) that would leave the saving administrator's own email rejected is refused with `422 validation_error`.
+A save of `authorized_domains` or `admin_emails` (or a reset of the `access` section via `DELETE /api/v1/admin/server-config/sections/access`) that would leave the saving administrator's own email rejected is refused with `422 validation_error` (`"This authorized_domains list would refuse sign-in for your account. Include your email domain, or add your email to admin_emails."`).
 
 ### Behavior
 
