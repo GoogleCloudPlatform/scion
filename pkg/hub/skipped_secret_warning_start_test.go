@@ -288,15 +288,8 @@ func requireFetched(t *testing.T, fb *swFaultBackend, names ...string) {
 	}
 }
 
-// lifecycleWarnings decodes the response's top-level warnings.
-func lifecycleWarnings(t *testing.T, body []byte) []string {
-	t.Helper()
-	var resp struct {
-		Warnings []string `json:"warnings"`
-	}
-	require.NoError(t, json.Unmarshal(body, &resp), "body %s", body)
-	return resp.Warnings
-}
+// lifecycleWarnings (ephemeral_sqlite_helpers_test.go) decodes a lifecycle
+// response's top-level warnings.
 
 // sentSecretNames returns the names of the secrets the broker received.
 func sentSecretNames(secrets []ResolvedSecret) []string {
@@ -751,14 +744,18 @@ func TestSkippedSecretWarning_Audience(t *testing.T) {
 	}
 	type requester struct {
 		name string
-		do   func(f *swFixture) *httptest.ResponseRecorder
+		do   func(t *testing.T, f *swFixture) *httptest.ResponseRecorder
 		want string
 	}
 	requesters := []requester{
-		{"owner", func(f *swFixture) *httptest.ResponseRecorder { return f.lifecycle(t, f.owner, "start", nil) }, ownerWant},
-		{"non_owner_project_admin", func(f *swFixture) *httptest.ResponseRecorder { return f.lifecycle(t, f.admin, "start", nil) }, otherWant},
+		{"owner", func(t *testing.T, f *swFixture) *httptest.ResponseRecorder {
+			return f.lifecycle(t, f.owner, "start", nil)
+		}, ownerWant},
+		{"non_owner_project_admin", func(t *testing.T, f *swFixture) *httptest.ResponseRecorder {
+			return f.lifecycle(t, f.admin, "start", nil)
+		}, otherWant},
 		// Dev auth is a single local user; here it does not own the agent.
-		{"dev_auth_non_owner", func(f *swFixture) *httptest.ResponseRecorder {
+		{"dev_auth_non_owner", func(t *testing.T, f *swFixture) *httptest.ResponseRecorder {
 			return doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agent.ID+"/start", nil)
 		}, otherWant},
 	}
@@ -776,7 +773,7 @@ func TestSkippedSecretWarning_Audience(t *testing.T) {
 					c = newSWCrossNode(t, f)
 					emitting = c.ownerLog
 				}
-				rec := r.do(f)
+				rec := r.do(t, f)
 				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 				fb := f.fb
 				if crossNode {
