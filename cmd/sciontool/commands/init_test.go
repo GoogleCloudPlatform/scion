@@ -3478,8 +3478,9 @@ func TestConfigureSharedWorkspaceGit_EnforcedRefusesWithoutUsableUID(t *testing.
 //
 // On the supervisor side, "drop" is only inferred from that expected failure
 // (EPERM or EINVAL at start as non-root, or a nonzero exit as root); any
-// other outcome fails the test. On the git side, init only logs git
-// failures, so "drop" is inferred from a missing .gitconfig. That cannot tell a dropped write from a skipped
+// other outcome fails the test. On the git side, "drop" is inferred from a
+// missing .gitconfig, with or without the fail-closed error of the first
+// (unscoped-helper removal) git call. That cannot tell a dropped write from a skipped
 // one; TestConfigureSharedWorkspaceGit_UsablePairWritesConfig and
 // TestConfigureGitCommand_RootInitSetsWorkloadCredential cover that half.
 func TestConfigureSharedWorkspaceGit_FollowsSupervisorDropDecision(t *testing.T) {
@@ -3546,6 +3547,12 @@ func TestConfigureSharedWorkspaceGit_FollowsSupervisorDropDecision(t *testing.T)
 			switch {
 			case errors.Is(gitErr, errSharedWorkspaceGitPrivilegeDropRequired):
 				gitGot = refuse
+			case gitErr != nil && strings.Contains(gitErr.Error(), "failed to remove an unscoped git credential helper") &&
+				!fileExists(filepath.Join(agentHome, ".gitconfig")):
+				// The dropped git cannot start (non-root) or cannot write
+				// (root), so the unscoped-helper removal fails and init
+				// fails closed before writing anything.
+				gitGot = drop
 			case gitErr != nil:
 				t.Fatalf("configureSharedWorkspaceGit: unexpected error %v", gitErr)
 			case !fileExists(filepath.Join(agentHome, ".gitconfig")):

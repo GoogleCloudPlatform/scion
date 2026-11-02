@@ -670,12 +670,12 @@ var identityOperations = []OperationSpec{
 	{
 		ID:          "user.admin.promote",
 		Domain:      "user.admin",
-		Description: "Promote or demote a user's administrative level (dispatched from PATCH /api/v1/users/{id} when role field is present)",
+		Description: "Promote or demote a user's administrative level (dispatched from PATCH /api/v1/users/{id} when role field is present). A token needs user:promote on a hub boundary, checked on the hub-level user record. CanDelegate applies to every change that involves a super-admin binding, so a token never creates or removes one; the last super-admin, self-demotion, invited-user and binding-drift guards apply to every credential, and a token's own role is session-only",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointInternalDispatch, Pattern: "updateUser:role-field"},
 		},
 		Principals:            []PrincipalKind{PrincipalUser},
-		Credentials:           []CredentialKind{CredentialSessionJWT},
+		Credentials:           []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver:      "user-from-url",
 		BasePermission:        "user.promote",
 		Effects:               []SecurityEffect{EffectChangeAuthority},
@@ -689,20 +689,28 @@ var identityOperations = []OperationSpec{
 			AfterFields:   []string{"new_level"},
 			Atomic:        true,
 		},
-		DenialCodes: []DenialCode{DenialForbidden},
-		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
-		Bearer:      SessionOnly(ReasonGovernancePending),
+		// conflict: the last super-admin, self-demotion, an invited user, a
+		// test identity, or bindings changed after the authorization check
+		// (details.reason binding_state_drift).
+		DenialCodes: []DenialCode{DenialForbidden, DenialConflict},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestUserRoleToken_PromotionToAdminDenied"},
+			{Package: "pkg/hub", Function: "TestUserRoleToken_LastSuperAdminProtected"},
+			{Package: "pkg/hub", Function: "TestUserPatchToken_MixedRoleAndStatusAllOrNothing"},
+		},
+		Bearer: BearerDisposition{Kind: BearerAdmit, Target: BearerTargetHubInstance, Boundaries: []BearerBoundary{BearerBoundaryHub}, Pin: "TestUserRoleToken_PromotionToAdminDenied"},
 	},
 
 	{
 		ID:          "user.admin.delete",
 		Domain:      "user.admin",
-		Description: "Delete a user account",
+		Description: "Delete a user account. A token needs user:delete on a hub boundary, checked on the hub-level user record, and is refused while the user holds a direct system-scope role binding of any lifecycle state (403 forbidden, details.reason system_role_binding_held; judged again in the transaction on the bindings the delete removes, 409 conflict with details.reason binding_state_drift), with or without force. The completion of a forced deletion a token requested applies the same rule",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/{id}", Method: "DELETE"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "user-from-url",
 		BasePermission:   "user.delete",
 		Effects:          []SecurityEffect{EffectDeleteResource},
@@ -726,24 +734,36 @@ var identityOperations = []OperationSpec{
 		// change before the transaction (user_delete_blockers_changed).
 		// user_deletion_in_progress: a forced deletion of the user is in
 		// progress (a plain delete is refused; a forced one joins it).
+		// forbidden also covers a token's refusal for a user with a direct
+		// system-scope role binding (details.reason
+		// system_role_binding_held), and conflict such a binding found in
+		// the transaction (details.reason binding_state_drift); a user gone
+		// by the transaction answers not_found.
 		DenialCodes: []DenialCode{DenialForbidden, DenialLastOwner, DenialUserDeleteBlocked, DenialConflict,
-			DenialUserDeleteForceForbidden, DenialUserDeleteBlockersChanged, DenialUserDeletionInProgress},
+			DenialUserDeleteForceForbidden, DenialUserDeleteBlockersChanged, DenialUserDeletionInProgress,
+			DenialResourceNotFound},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestDeleteUser_GuardOrder"},
 			{Package: "pkg/hub", Function: "TestForceDeleteUser_ForbiddenWritesNothing"},
+			{Package: "pkg/hub", Function: "TestUserDeleteToken_LastProjectOwnerProtected"},
+			{Package: "pkg/hub", Function: "TestUserDeleteToken_SystemBindingHolderRefused"},
+			{Package: "pkg/hub", Function: "TestUserDeleteToken_ForceUsesTokenAgentDelete"},
+			{Package: "pkg/hub", Function: "TestUserDeleteToken_BindingAddedAfterPreCheckRefused"},
+			{Package: "pkg/hub", Function: "TestUserDeleteToken_ForcedCompletionKeepsSystemBinding"},
+			{Package: "pkg/hub", Function: "TestUserDeleteToken_ConcurrentlyDeletedUserNotFound"},
 		},
-		Bearer: SessionOnly(ReasonGovernancePending),
+		Bearer: AdmitOn(BearerTargetHubInstance, BearerBoundaryHub),
 	},
 	{
 		ID:          "user.admin.deleteblockers",
 		Domain:      "user.admin",
-		Description: "List what blocks deleting a user (agents and active delegations), without deleting",
+		Description: "List what blocks deleting a user (agents and active delegations), without deleting. A token needs user:delete on a hub boundary, checked on the hub-level user record",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/{id}/delete-blockers", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "user-from-url",
 		BasePermission:   "user.delete",
 		Effects:          []SecurityEffect{EffectReadOne},
@@ -753,19 +773,19 @@ var identityOperations = []OperationSpec{
 		TestRefs: []TestRef{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestUserDeleteBlockers_RequiresUserDelete"},
-			{Package: "pkg/hub", Function: "TestSessionOnlyGate_ReasonIsReported"},
+			{Package: "pkg/hub", Function: "TestUserDeleteReadsToken_RequireDeleteSelectorAndHubBoundary"},
 		},
-		Bearer: SessionOnly(ReasonGovernancePending),
+		Bearer: AdmitOn(BearerTargetHubInstance, BearerBoundaryHub),
 	},
 	{
 		ID:          "user.admin.deletion",
 		Domain:      "user.admin",
-		Description: "Read the forced deletion of a user: its state and the outcome of each of the user's agents",
+		Description: "Read the forced deletion of a user: its state and the outcome of each of the user's agents. A token needs user:delete on a hub boundary, checked on the hub-level user record",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/{id}/deletion", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "user-from-url",
 		BasePermission:   "user.delete",
 		Effects:          []SecurityEffect{EffectReadOne},
@@ -777,8 +797,9 @@ var identityOperations = []OperationSpec{
 		TestRefs: []TestRef{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestUserDeletion_RequiresUserDelete"},
+			{Package: "pkg/hub", Function: "TestUserDeleteReadsToken_RequireDeleteSelectorAndHubBoundary"},
 		},
-		Bearer: SessionOnly(ReasonGovernancePending),
+		Bearer: AdmitOn(BearerTargetHubInstance, BearerBoundaryHub),
 	},
 
 	// =====================================================================

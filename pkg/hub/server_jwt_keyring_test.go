@@ -60,16 +60,20 @@ var p3AliasNames = []string{SecretKeyAgentSigningKey, SecretKeyUserSigningKey}
 func p3StaleKey(name string) []byte { return deriveSharedSigningKey(p3StaleAliasSecret, name) }
 
 // aliasCounter counts every key-targeted access to the two JWT signing-key
-// aliases, by key name.
+// aliases, by key name. The startup encryption audit's authenticated read
+// of the stored payloads (ScanSecretPayloads) is a separate, attributed
+// class (audits): it is not an alias read, so it never counts as a
+// fallback read in reads, and totals reports reads and writes only.
 type aliasCounter struct {
 	mu     sync.Mutex
 	reads  map[string]int
 	writes map[string]int
+	audits map[string]int
 	ops    []string
 }
 
 func newAliasCounter() *aliasCounter {
-	return &aliasCounter{reads: map[string]int{}, writes: map[string]int{}}
+	return &aliasCounter{reads: map[string]int{}, writes: map[string]int{}, audits: map[string]int{}}
 }
 
 func isAliasName(name string) bool {
@@ -84,6 +88,16 @@ func (c *aliasCounter) read(op, name string) {
 	defer c.mu.Unlock()
 	c.reads[name]++
 	c.ops = append(c.ops, "read:"+op+":"+name)
+}
+
+func (c *aliasCounter) audit(op, name string) {
+	if !isAliasName(name) {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.audits[name]++
+	c.ops = append(c.ops, "audit:"+op+":"+name)
 }
 
 func (c *aliasCounter) write(op, name string) {
@@ -112,6 +126,13 @@ func (c *aliasCounter) readsOf(name string) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.reads[name]
+}
+
+// auditsOf counts the alias rows the startup encryption audit read.
+func (c *aliasCounter) auditsOf(name string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.audits[name]
 }
 
 func (c *aliasCounter) writesOf(name string) int {
@@ -164,6 +185,16 @@ func (s *jwtAliasCountingStore) ListProgenySecrets(ctx context.Context, ancestor
 	rows, err := s.Store.ListProgenySecrets(ctx, ancestorIDs)
 	for _, row := range rows {
 		s.c.read("store.ListProgenySecrets", row.Key)
+	}
+	return rows, err
+}
+
+// ScanSecretPayloads is the startup encryption audit's read: counted as an
+// audit read, never as an alias read.
+func (s *jwtAliasCountingStore) ScanSecretPayloads(ctx context.Context, afterID string, limit int) ([]store.SecretPayload, error) {
+	rows, err := s.Store.ScanSecretPayloads(ctx, afterID, limit)
+	for _, row := range rows {
+		s.c.audit("store.ScanSecretPayloads", row.Key)
 	}
 	return rows, err
 }
@@ -406,6 +437,9 @@ func TestP3_AliasHarnessSeesLegacyFallback(t *testing.T) {
 	require.NoError(t, err)
 	for _, name := range p3AliasNames {
 		assert.Positive(t, f.c.readsOf(name), name)
+		// The startup audit read the same rows, counted apart from the
+		// fallback reads above.
+		assert.Equal(t, 1, f.c.auditsOf(name), name)
 	}
 	assert.Equal(t, p3StaleKey(SecretKeyAgentSigningKey), srv.agentTokenService.config.SigningKey)
 	assert.Equal(t, p3StaleKey(SecretKeyUserSigningKey), srv.userTokenService.config.SigningKey)
@@ -474,6 +508,11 @@ func TestP3_ManagedStartupRefusesWithoutAliasReads(t *testing.T) {
 				assert.Contains(t, err.Error(), `no "legacy" entry`)
 			}
 			requireNoAliasAccess(t, f)
+			// Every case refuses in validateKeyringConfig, before the startup
+			// encryption audit runs: no audit read either.
+			for _, name := range p3AliasNames {
+				assert.Zero(t, f.c.auditsOf(name), "%s audit reads before the refusal", name)
+			}
 			assert.Equal(t, before, f.snapshot(t))
 			assertNoJWTKeyMaterial(t, err.Error())
 			assertNoJWTKeyMaterial(t, logs.String())
@@ -505,6 +544,14 @@ func TestP3_ManagedStartupDoesNotTouchAliases(t *testing.T) {
 		require.NoError(t, err)
 		_, err = srv.userTokenService.ValidateUserToken(tok)
 		require.NoError(t, err)
+		// The startup audit authenticated both aliases on every start (one
+		// audit read each), and found them readable.
+		for _, name := range p3AliasNames {
+			assert.Equal(t, i+1, f.c.auditsOf(name), "start %d: %s audit reads", i, name)
+		}
+		audit := srv.EncryptionAudit()
+		assert.True(t, audit.Done, "start %d", i)
+		assert.Empty(t, audit.BackupUnreadable, "start %d", i)
 		require.NoError(t, srv.Shutdown(context.Background()))
 		requireNoAliasAccess(t, f)
 		assert.Equal(t, before, f.snapshot(t), "start %d", i)

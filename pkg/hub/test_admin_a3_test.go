@@ -332,7 +332,7 @@ func TestTestAdminA3_CustomRolesInvitesJoinTokens(t *testing.T) {
 	// co-located broker registers (A0/A2), so a test admin mints none
 	// through the API; the store shapes any join token write anyway
 	// (TestGrantShaping_InvitesAndJoinTokens).
-	rec = doRequestWithToken(t, srv, k.AccessToken, http.MethodPost, "/api/v1/brokers", map[string]any{"name": "a3-broker-" + generateID()[:8]})
+	rec = doRequestWithTokenLoopback(t, srv, k.AccessToken, http.MethodPost, "/api/v1/brokers", map[string]any{"name": "a3-broker-" + generateID()[:8]})
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	grants, _, err := s.ListIssuanceStampedGrants(ctx, *row.IssuanceID, 0)
 	require.NoError(t, err)

@@ -18,6 +18,7 @@ import (
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -3097,7 +3098,14 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 	// written during provisioning — they don't indicate a real clone.
 	if !isWorkspaceEmpty(workspacePath) {
 		log.Info("Workspace already populated, skipping git clone")
-		return nil
+		// The agent's .gitconfig outlives the clone: bring its credential
+		// helper to the current binding on every start, so a helper an
+		// earlier version wrote (unscoped, or scoped to a remote the hub no
+		// longer offers the token to) does not survive a restart.
+		uid, gid = cloneUserIDs(uid, gid)
+		offerToken := provision.CloneTokenAllowed(os.Getenv(api.EnvGitTokenRemote), normalizeCloneURL(cloneURL))
+		setupGitCmd := func(cmd *exec.Cmd) { configureGitCommand(cmd, uid, gid) }
+		return reconcileCloneCredentialHelper(filepath.Join(agentHome, ".gitconfig"), setupGitCmd, offerToken)
 	}
 
 	// Snapshot the workspace's pre-existing top-level entries (e.g.
@@ -3111,13 +3119,7 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 	// When uid is 0 (broker running as root or no host UID configured), fall
 	// back to the scion user so that cloned files are owned by the container
 	// user rather than root.
-	if uid == 0 {
-		if scionUser, err := scionUserLookup("scion"); err == nil {
-			uid, _ = strconv.Atoi(scionUser.Uid)
-			gid, _ = strconv.Atoi(scionUser.Gid)
-			log.Info("Falling back to scion user UID=%d GID=%d for git clone", uid, gid)
-		}
-	}
+	uid, gid = cloneUserIDs(uid, gid)
 
 	currentEUID := os.Geteuid()
 	ensureWorkspaceOwnership(workspacePath, uid, gid, currentEUID, os.Chown)
@@ -3324,41 +3326,11 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 	// root (HOME=/root) but the harness runs as the scion user.
 	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
 
-	// The helper is scoped to the host of the project's recorded git remote
-	// (credential.https://<host>.helper, provision.TokenRemoteCredentialScope),
-	// the same binding as the shared workspace's helper, and written only when
-	// offerToken: a clone URL that does not name the recorded remote, or no
-	// recorded remote, gets no helper, so later fetches and pushes to that
-	// origin are never offered the token. An unscoped credential.helper (an
-	// earlier version wrote one) is removed first in every case.
-	// Both git config calls run a trusted git binary from rootexec's fixed
-	// search path (never $PATH), as configureSharedWorkspaceGit does; without
-	// one the clone fails closed.
-	gitPath, err := rootexec.Resolve("git")
-	if err != nil {
-		return fmt.Errorf("failed to resolve a trusted git binary for the credential helper: %w", err)
-	}
-	unsetCmd := exec.Command(gitPath, "config", "--file", gitconfigPath, "--unset-all", "credential.helper")
-	setupGitCmd(unsetCmd)
-	if err := procreap.RunManaged(unsetCmd); err != nil {
-		var exitErr *exec.ExitError
-		// Exit status 5: the key is not set (or the file does not exist).
-		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 5 {
-			return fmt.Errorf("failed to remove an unscoped git credential helper: %w", err)
-		}
-	}
-	if scope, scoped := provision.TokenRemoteCredentialScope(os.Getenv(api.EnvGitTokenRemote)); offerToken && scoped {
-		var credentialHelper string
-		if hub.IsGitHubAppEnabled() {
-			credentialHelper = "!sciontool credential-helper"
-		} else {
-			credentialHelper = provision.GitTokenCredentialHelper
-		}
-		credCmd := exec.Command(gitPath, "config", "--file", gitconfigPath, "--replace-all", "credential."+scope+".helper", credentialHelper)
-		setupGitCmd(credCmd)
-		if err := procreap.RunManaged(credCmd); err != nil {
-			return fmt.Errorf("failed to configure git credential helper: %w", err)
-		}
+	// The helper is scoped to the recorded remote's host and written only
+	// when offerToken; see reconcileCloneCredentialHelper, which also runs on
+	// every later start of this workspace.
+	if err := reconcileCloneCredentialHelper(gitconfigPath, setupGitCmd, offerToken); err != nil {
+		return err
 	}
 
 	// Resolve the agent feature branch name.
@@ -3649,10 +3621,10 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivileg
 		configureCmd = func(cmd *exec.Cmd) {}
 	}
 
-	// gitConfig runs `git config --file gitconfigPath args...`. With absentOK, a
-	// run that exits 5 (`--unset-all` of a key that is not set) is not a
-	// failure.
-	gitConfig := func(absentOK bool, args ...string) {
+	// gitConfig runs `git config --file gitconfigPath args...` and returns its
+	// failure, after logging it. With absentOK, a run that exits 5
+	// (`--unset-all` of a key that is not set) is not a failure.
+	gitConfig := func(absentOK bool, args ...string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		gitPath, rerr := rootexec.Resolve("git")
@@ -3661,22 +3633,24 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivileg
 			if gitConfigFailureHook != nil {
 				gitConfigFailureHook(args, rerr)
 			}
-			return
+			return rerr
 		}
 		cmd := exec.CommandContext(ctx, gitPath, append([]string{"config", "--file", gitconfigPath}, args...)...)
 		configureCmd(cmd)
 		if out, cerr := procreap.CombinedOutputManaged(cmd); cerr != nil {
 			var exitErr *exec.ExitError
 			if absentOK && errors.As(cerr, &exitErr) && exitErr.ExitCode() == 5 {
-				return
+				return nil
 			}
 			log.Error("Failed to run git config %v: %s %v", args, string(out), cerr)
 			if gitConfigFailureHook != nil {
 				gitConfigFailureHook(args, cerr)
 			}
+			return cerr
 		}
+		return nil
 	}
-	runGitConfig := func(args ...string) { gitConfig(false, args...) }
+	runGitConfig := func(args ...string) { _ = gitConfig(false, args...) }
 
 	// Configure credential helper using sciontool's credential-helper command,
 	// which handles both GITHUB_TOKEN env var and GitHub App token refresh.
@@ -3695,8 +3669,12 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivileg
 	// write. An unscoped credential.helper (written by an earlier version) is
 	// removed first; without a recorded remote no helper is configured.
 	// Replacing all values keeps this idempotent when provisioning already
-	// wrote the same key.
-	gitConfig(true, "--unset-all", "credential.helper")
+	// wrote the same key. A failed removal fails closed, as gitCloneWorkspace
+	// does: no helper is written and the error is returned, because the
+	// unscoped helper would still offer the token to every host.
+	if err := gitConfig(true, "--unset-all", "credential.helper"); err != nil {
+		return fmt.Errorf("failed to remove an unscoped git credential helper: %w", err)
+	}
 	if scope, ok := provision.TokenRemoteCredentialScope(os.Getenv(api.EnvGitTokenRemote)); ok {
 		runGitConfig("--replace-all", "credential."+scope+".helper", credentialHelper)
 	} else {
@@ -4053,6 +4031,106 @@ func writeEnvFile(agentHome string, uid, gid int) {
 	}
 
 	log.Debug("Wrote %d env vars to %s", len(lines)-1, envPath)
+}
+
+// cloneUserIDs returns the identity gitCloneWorkspace runs git as: uid/gid,
+// or the scion user when uid is 0 (broker running as root or no host UID
+// configured), so that cloned files are owned by the container user rather
+// than root.
+func cloneUserIDs(uid, gid int) (int, int) {
+	if uid != 0 {
+		return uid, gid
+	}
+	if scionUser, err := scionUserLookup("scion"); err == nil {
+		uid, _ = strconv.Atoi(scionUser.Uid)
+		gid, _ = strconv.Atoi(scionUser.Gid)
+		log.Info("Falling back to scion user UID=%d GID=%d for git clone", uid, gid)
+	}
+	return uid, gid
+}
+
+// reconcileCloneCredentialHelper brings the git credential helper in a
+// clone-per-agent agent's .gitconfig (gitconfigPath) to the current token
+// binding. It runs on the first clone and on every later start of a
+// populated workspace, because the .gitconfig outlives the clone:
+//
+//   - an unscoped credential.helper (an earlier version wrote one) is removed;
+//   - a scoped credential.<url>.helper whose value is one of the helpers this
+//     file writes is removed, so a helper written for a remote the hub no
+//     longer offers the token to does not survive a restart;
+//   - when offerToken, the helper is written again, scoped to the host of the
+//     project's recorded git remote (credential.https://<host>.helper,
+//     provision.TokenRemoteCredentialScope).
+//
+// A clone URL that does not name the recorded remote, or no recorded remote,
+// ends with no helper, so fetches and pushes to that origin are never offered
+// the token. Every git call runs a trusted git binary from rootexec's fixed
+// search path (never $PATH), as configureSharedWorkspaceGit does, through
+// setupGitCmd. Any failure is returned, so the caller fails closed.
+func reconcileCloneCredentialHelper(gitconfigPath string, setupGitCmd func(*exec.Cmd), offerToken bool) error {
+	gitPath, err := rootexec.Resolve("git")
+	if err != nil {
+		return fmt.Errorf("failed to resolve a trusted git binary for the credential helper: %w", err)
+	}
+	// unset runs `git config --unset-all key [value-pattern]`; exit status 5
+	// means the key is not set (or the file does not exist). It resolves git
+	// itself so the exec site is provably routed through rootexec.Resolve
+	// (the exec-site guard checks the smallest enclosing function).
+	unset := func(args ...string) error {
+		unsetGit, err := rootexec.Resolve("git")
+		if err != nil {
+			return err
+		}
+		cmd := exec.Command(unsetGit, append([]string{"config", "--file", gitconfigPath, "--unset-all"}, args...)...)
+		setupGitCmd(cmd)
+		if err := procreap.RunManaged(cmd); err != nil {
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 5 {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := unset("credential.helper"); err != nil {
+		return fmt.Errorf("failed to remove an unscoped git credential helper: %w", err)
+	}
+
+	ours := []string{"!sciontool credential-helper", provision.GitTokenCredentialHelper}
+	listCmd := exec.Command(gitPath, "config", "--file", gitconfigPath, "--null", "--get-regexp", `^credential\..+\.helper$`)
+	setupGitCmd(listCmd)
+	out, err := procreap.OutputManaged(listCmd)
+	if err != nil {
+		var exitErr *exec.ExitError
+		// Exit status 1: no key matches (or the file does not exist).
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			return fmt.Errorf("failed to list git credential helpers: %w", err)
+		}
+		out = nil
+	}
+	for _, entry := range strings.Split(string(out), "\x00") {
+		key, value, ok := strings.Cut(entry, "\n")
+		if !ok || !slices.Contains(ours, value) {
+			continue
+		}
+		if err := unset("--fixed-value", key, value); err != nil {
+			return fmt.Errorf("failed to remove a scoped git credential helper: %w", err)
+		}
+	}
+
+	scope, scoped := provision.TokenRemoteCredentialScope(os.Getenv(api.EnvGitTokenRemote))
+	if !offerToken || !scoped {
+		return nil
+	}
+	credentialHelper := provision.GitTokenCredentialHelper
+	if hub.IsGitHubAppEnabled() {
+		credentialHelper = "!sciontool credential-helper"
+	}
+	credCmd := exec.Command(gitPath, "config", "--file", gitconfigPath, "--replace-all", "credential."+scope+".helper", credentialHelper)
+	setupGitCmd(credCmd)
+	if err := procreap.RunManaged(credCmd); err != nil {
+		return fmt.Errorf("failed to configure git credential helper: %w", err)
+	}
+	return nil
 }
 
 // isWorkspaceEmpty returns true if the directory doesn't exist or contains

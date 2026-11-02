@@ -22,13 +22,22 @@ package hub
 // reading any secret or env value,
 // and writes nothing: it only lists agents and reads the records the admission
 // reads (agents, delegation edges, holds, users, role bindings). Callers should
-// still open the store read-only (hack/fland-delivery-census does).
+// still open the store read-only (hack/delivery-census does).
+//
+// For agents whose own edge was recorded from a user access token
+// (uatRecordedHop) it also reports the intrinsic set's effect: the stored
+// role against the role the chain lets its tokens carry, and how many of the
+// owner's progeny-shared user secrets the user secret parent ceiling admits,
+// and how many of those only through the intrinsic rule. It counts rows by
+// ID and never decrypts or prints a value or a row name.
 
 import (
 	"context"
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/go-jose/go-jose/v4/jwt"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -66,14 +75,43 @@ type LaunchDeliveryEdgeFacts struct {
 	CeilingKind          string `json:"ceilingKind,omitempty"`
 	Sentinel             bool   `json:"sentinel"`
 	DelegatorAgentGone   bool   `json:"delegatorAgentGone"`
+	// UATRecorded: the edge was recorded from a user access token
+	// (uatRecordedHop), so the intrinsic set applies to it.
+	UATRecorded bool `json:"uatRecorded"`
+	// InitiatorCredentialKind is the edge's initiator credential kind. A
+	// scheduler-recorded edge with initiator "uat" carries a token's list
+	// but is not a uatRecordedHop: scheduler-recorded hops are not token
+	// hops. Counted, and unchanged.
+	InitiatorCredentialKind string `json:"initiatorCredentialKind,omitempty"`
+}
+
+// LaunchDeliveryUATFacts are the intrinsic-set facts of an agent whose own
+// edge is UATRecorded.
+type LaunchDeliveryUATFacts struct {
+	// StoredRole is the agent's stored role; FilteredRole is the highest of
+	// full, baseline and readonly, no higher than StoredRole, whose scopes
+	// the agent's chain ceiling allows ("none" when none fits, "" when the
+	// chain could not be evaluated).
+	StoredRole   string `json:"storedRole"`
+	FilteredRole string `json:"filteredRole"`
+	// OwnerSharedRows counts the owner's user secrets shared with progeny;
+	// OwnerSharedAdmitted those the user secret parent ceiling admits (the
+	// start-time check); OwnerSharedIntrinsic those of the admitted whose
+	// S3c passed only through the intrinsic rule.
+	OwnerSharedRows      int `json:"ownerSharedRows"`
+	OwnerSharedAdmitted  int `json:"ownerSharedAdmitted"`
+	OwnerSharedIntrinsic int `json:"ownerSharedIntrinsic"`
+	// OwnerSharedError is set when the owner's rows could not be listed.
+	OwnerSharedError string `json:"ownerSharedError,omitempty"`
 }
 
 // LaunchDeliveryCensusRow is one live agent's census result. Cohort is what
 // a start delivers: "delivers" when the strict admission admits every
-// deliver permission; a legacy_* cohort or uat_created_no_deliver_mapping
-// when every permission is admitted and at least one only through the
-// fallback (the first such cohort); otherwise the withheld cohort of the first refused permission.
-// StrictCohort is the same classification without the fallback.
+// deliver permission; a legacy_* cohort or uat_descendant_legacy when every
+// permission is admitted and at least one only through the fallback (the
+// first such cohort); otherwise the withheld cohort of the first refused
+// permission. StrictCohort is the same classification without the fallback.
+// UAT is set when the agent's own edge is UATRecorded.
 type LaunchDeliveryCensusRow struct {
 	AgentID      string                           `json:"agentId"`
 	ProjectID    string                           `json:"projectId"`
@@ -84,24 +122,44 @@ type LaunchDeliveryCensusRow struct {
 	MintError    string                           `json:"mintError,omitempty"`
 	Edge         LaunchDeliveryEdgeFacts          `json:"edge"`
 	Verdicts     map[string]LaunchDeliveryVerdict `json:"verdicts"`
+	UAT          *LaunchDeliveryUATFacts          `json:"uat,omitempty"`
 }
 
 // LaunchDeliveryCensusReport is the whole census. Withheld counts agents a
 // start refuses at least one deliver permission; Fallback counts agents
-// served only through a legacy cohort of the fallback; ProductGap counts
-// agents served only through the uat_created_no_deliver_mapping exception;
-// StrictWithheld counts agents the strict admission refuses (Withheld +
-// Fallback + ProductGap).
+// served only through a cohort of the fallback (legacy_* and
+// uat_descendant_legacy); StrictWithheld counts agents the strict admission
+// refuses (Withheld + Fallback). UATDescendantLegacy counts the
+// uat_descendant_legacy agents, which the fallback retires once it reads
+// zero.
+//
+// The UAT* counts cover agents whose own edge is UATRecorded: UATCreated
+// such agents; UATRoleFiltered those whose FilteredRole is below their
+// StoredRole; UATOwnerSharedRows, UATOwnerSharedAdmitted and
+// UATOwnerSharedIntrinsic the sums of their owner-row facts;
+// UATRootNotAdmitted those withheld launch material because their root user
+// is not admitted to the project (cohort uat_root_not_admitted).
+// SchedulerUATInitiated counts scheduler-recorded own edges whose initiator
+// credential was a user access token (scheduler-recorded hops are not token
+// hops, so the intrinsic set does not change them).
 type LaunchDeliveryCensusReport struct {
-	Agents         int                       `json:"agents"`
-	Withheld       int                       `json:"withheld"`
-	Fallback       int                       `json:"fallback"`
-	ProductGap     int                       `json:"productGap"`
-	StrictWithheld int                       `json:"strictWithheld"`
-	ByCohort       map[string]int            `json:"byCohort"`
-	ByCause        map[string]int            `json:"byCause"`
-	ByStrictCause  map[string]int            `json:"byStrictCause"`
-	Rows           []LaunchDeliveryCensusRow `json:"rows"`
+	Agents                  int `json:"agents"`
+	Withheld                int `json:"withheld"`
+	Fallback                int `json:"fallback"`
+	StrictWithheld          int `json:"strictWithheld"`
+	UATDescendantLegacy     int `json:"uatDescendantLegacy"`
+	UATCreated              int `json:"uatCreated"`
+	UATRoleFiltered         int `json:"uatRoleFiltered"`
+	UATOwnerSharedRows      int `json:"uatOwnerSharedRows"`
+	UATOwnerSharedAdmitted  int `json:"uatOwnerSharedAdmitted"`
+	UATOwnerSharedIntrinsic int `json:"uatOwnerSharedIntrinsic"`
+	UATRootNotAdmitted      int `json:"uatRootNotAdmitted"`
+	SchedulerUATInitiated   int `json:"schedulerUatInitiated"`
+
+	ByCohort      map[string]int            `json:"byCohort"`
+	ByCause       map[string]int            `json:"byCause"`
+	ByStrictCause map[string]int            `json:"byStrictCause"`
+	Rows          []LaunchDeliveryCensusRow `json:"rows"`
 }
 
 // LaunchDeliveryCensus runs the launch delivery admission for every live agent
@@ -127,16 +185,14 @@ func (a *AuthzService) LaunchDeliveryCensus(ctx context.Context, devLocal bool) 
 			rep.ByCohort[row.Cohort]++
 			switch {
 			case row.Cohort == "delivers":
-			case strings.HasPrefix(row.Cohort, "legacy_"):
+			case strings.HasPrefix(row.Cohort, "legacy_"), row.Cohort == legacyDeliveryCohortUATDescendant:
 				rep.Fallback++
-				rep.StrictWithheld++
-			case row.Cohort == deliveryCohortUATNoDeliverMapping:
-				rep.ProductGap++
 				rep.StrictWithheld++
 			default:
 				rep.Withheld++
 				rep.StrictWithheld++
 			}
+			rep.addUATFacts(row)
 			for _, p := range LaunchDeliveryCensusPermissions {
 				v, ok := row.Verdicts[p]
 				if !ok {
@@ -159,10 +215,42 @@ func (a *AuthzService) LaunchDeliveryCensus(ctx context.Context, devLocal bool) 
 	return rep, nil
 }
 
+// addUATFacts adds one row's intrinsic-set facts to the report counts.
+func (rep *LaunchDeliveryCensusReport) addUATFacts(row LaunchDeliveryCensusRow) {
+	if row.Cohort == legacyDeliveryCohortUATDescendant {
+		rep.UATDescendantLegacy++
+	}
+	if row.Cohort == launchDeliveryCohortUATRootNotAdmitted {
+		rep.UATRootNotAdmitted++
+	}
+	if row.Edge.SourceCredentialKind == string(store.SourceCredentialScheduler) && row.Edge.InitiatorCredentialKind == store.InitiatorCredentialKindUAT {
+		rep.SchedulerUATInitiated++
+	}
+	if row.UAT == nil {
+		return
+	}
+	rep.UATCreated++
+	if row.UAT.FilteredRole != "" && CompareRoles(AgentRole(row.UAT.FilteredRole), AgentRole(row.UAT.StoredRole)) < 0 {
+		rep.UATRoleFiltered++
+	}
+	rep.UATOwnerSharedRows += row.UAT.OwnerSharedRows
+	rep.UATOwnerSharedAdmitted += row.UAT.OwnerSharedAdmitted
+	rep.UATOwnerSharedIntrinsic += row.UAT.OwnerSharedIntrinsic
+}
+
+// launchDeliveryCohortUATRootNotAdmitted names an agent whose own edge was
+// recorded from a user access token, or a uat_descendant_legacy agent, whose
+// launch material is withheld because its root user is not admitted to the
+// agent's project, as for a session-created agent.
+const launchDeliveryCohortUATRootNotAdmitted = "uat_root_not_admitted"
+
 func (a *AuthzService) launchDeliveryCensusRow(ctx context.Context, ag *store.Agent) LaunchDeliveryCensusRow {
 	row := LaunchDeliveryCensusRow{AgentID: ag.ID, ProjectID: ag.ProjectID, OwnerID: ag.OwnerID, Phase: ag.Phase,
 		Verdicts: map[string]LaunchDeliveryVerdict{}}
 	row.Edge = a.launchDeliveryEdgeFacts(ctx, ag)
+	if row.Edge.UATRecorded {
+		row.UAT = a.launchDeliveryUATFacts(ctx, ag)
+	}
 	h, err := a.newLaunchDeliveryIdentity(ctx, ag.ID, true)
 	if err != nil {
 		// A start of this agent fails hard (the credential cannot be minted).
@@ -212,8 +300,61 @@ func launchDeliveryOutcomeCohort(f LaunchDeliveryEdgeFacts, o hubDeliveryAdmissi
 	// hubDeliveryChainAdmission prefixes a provenance-root refusal (the walk
 	// passed) with this text.
 	walkPassed := strings.HasPrefix(o.reason, "delivery provenance root denied")
+	tokenChain := f.UATRecorded || o.deniedCohort == legacyDeliveryCohortUATDescendant
+	if walkPassed && tokenChain && strings.HasPrefix(o.reason, deliveryRootNotAdmittedReason) {
+		return launchDeliveryCohortUATRootNotAdmitted
+	}
 	targetHeld := o.reason == "agent "+agentID+" is held"
 	return launchDeliveryCohort(f, o.cause, walkPassed, targetHeld)
+}
+
+// launchDeliveryUATFacts computes the intrinsic-set facts of agent ag, whose
+// own edge is UATRecorded. It reads what start reads and writes nothing.
+func (a *AuthzService) launchDeliveryUATFacts(ctx context.Context, ag *store.Agent) *LaunchDeliveryUATFacts {
+	stored, additional := agentRoleAndScopes(ag)
+	facts := &LaunchDeliveryUATFacts{StoredRole: string(stored)}
+	if chain, err := a.chainEffectCeiling(ctx, ag); err == nil {
+		facts.FilteredRole = string(AgentRoleNone)
+		for _, candidate := range []AgentRole{AgentRoleFull, AgentRoleBaseline, AgentRoleReadOnly} {
+			if roleFitsCeiling(chain.Ceiling, candidate) {
+				facts.FilteredRole = string(minRole(stored, candidate))
+				break
+			}
+		}
+	}
+	// The owner path of start (startSecretResolveOpts) is installed only for
+	// an agent with an owner and a stored ancestry, and decides only rows
+	// shared with progeny.
+	if ag.OwnerID == "" || len(ag.Ancestry) == 0 {
+		return facts
+	}
+	rows, err := a.store.ListProgenySecrets(ctx, ag.Ancestry)
+	if err != nil {
+		facts.OwnerSharedError = "owner secret lookup failed"
+		return facts
+	}
+	ident := &agentIdentityWrapper{AgentTokenClaims: &AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: ag.ID},
+		ProjectID: ag.ProjectID,
+		Ancestry:  ag.Ancestry,
+		Scopes:    append(ScopesForRole(stored), additional...),
+	}}
+	for i := range rows {
+		r := &rows[i]
+		if r.Scope != store.ScopeUser || r.ScopeID != ag.OwnerID || !r.AllowProgeny {
+			continue
+		}
+		facts.OwnerSharedRows++
+		d := a.EvaluateUserSecretParentCeiling(ctx, ident, userSecretResource(r.ID, r.ScopeID))
+		if !d.Allowed {
+			continue
+		}
+		facts.OwnerSharedAdmitted++
+		if d.uatIntrinsic {
+			facts.OwnerSharedIntrinsic++
+		}
+	}
+	return facts
 }
 
 // launchDeliveryEdgeFacts reads the agent's own active edges in its project.
@@ -233,6 +374,8 @@ func (a *AuthzService) launchDeliveryEdgeFacts(ctx context.Context, ag *store.Ag
 	f.SourceCredentialKind = string(e.SourceCredentialKind)
 	f.CeilingKind = string(e.Kind)
 	f.Sentinel = isMigrationSentinel(e)
+	f.UATRecorded = uatRecordedHop(e.DelegatorType, e.DelegatorID, e.AuthorityProvenance, e.EffectCeiling)
+	f.InitiatorCredentialKind = e.InitiatorCredentialKind
 	if e.DelegatorType == store.DelegationPrincipalAgent {
 		parent, perr := a.store.GetAgent(ctx, e.DelegatorID)
 		if perr != nil || parent == nil || !parent.DeletedAt.IsZero() {
@@ -273,8 +416,6 @@ func launchDeliveryCohort(f LaunchDeliveryEdgeFacts, cause DenyCause, walkPassed
 			role = "none"
 		}
 		return "adopted_" + role
-	case cause == DenyCauseCeilingEffectExceeded && f.SourceCredentialKind == string(store.SourceCredentialUAT):
-		return "uat_created"
 	case f.DelegatorAgentGone:
 		return "deleted_or_held_parent"
 	default:

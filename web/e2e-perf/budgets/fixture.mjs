@@ -172,6 +172,7 @@ export function buildFixture() {
           'hub.agent_edit_held': false,
           'hub.artifacts': false,
           'hub.attachment_artifacts': false,
+          'hub.chat_retention': false,
           'hub.flat_runtime_brokers': false,
           'hub.user_delete_force_cascade': false,
           'web.agent_badges': false,

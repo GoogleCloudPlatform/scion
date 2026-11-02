@@ -162,7 +162,7 @@ func runExpose(cmd *cobra.Command, args []string) error {
 			if listErr == nil {
 				for _, p := range ports {
 					if p.Port == port {
-						_, _ = fmt.Fprintf(out, "Port %d is already exposed.\nURL: %s\nBase path: %s\n", p.Port, p.URL, p.BasePath)
+						_, _ = fmt.Fprintf(out, "Port %d is already exposed.\nURL: %s\nBase path: %s\n%s\n", p.Port, p.URL, p.BasePath, exposeBrowserHint)
 						return nil
 					}
 				}
@@ -172,9 +172,15 @@ func runExpose(cmd *cobra.Command, args []string) error {
 		}
 		return err
 	}
-	_, _ = fmt.Fprintf(out, "Port %d exposed.\nURL: %s\nBase path: %s\n", resp.Port, resp.URL, resp.BasePath)
+	_, _ = fmt.Fprintf(out, "Port %d exposed.\nURL: %s\nBase path: %s\n%s\n", resp.Port, resp.URL, resp.BasePath, exposeBrowserHint)
 	return nil
 }
+
+// exposeBrowserHint follows the URL that scion expose prints: what a page
+// opened through the link can load, in product terms, and where the
+// details are.
+const exposeBrowserHint = "Opened in a browser, the page runs in a sandbox. If the Hub's page view is on, " +
+	"its relative URLs load; otherwise serve one self-contained HTML file. See the scion-web-serving skill."
 
 func runUnexpose(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()

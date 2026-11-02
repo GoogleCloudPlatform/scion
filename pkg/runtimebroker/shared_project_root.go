@@ -496,11 +496,10 @@ func (s *Server) provisionSharedPlainWorkspace(ctx context.Context, in startCont
 	}
 	// The token is bound to the recorded remote, never to the clone URL:
 	// without a match the token itself is withheld. The recorded remote is
-	// passed on only together with an offered token: runGitClone keeps the
-	// host's own git authentication for a clone of its CloneTokenRemote, so
-	// a clone with no token offered (no match, or no agent token) gets no
-	// CloneTokenRemote and runs with no host credential of any form
-	// (util.NoCredentialHelperEnv).
+	// passed on only together with an offered token. runGitClone offers no
+	// host credential of any form on any clone (util.HostGitRemoteEnv), so a
+	// clone with no token offered (no match, or no agent token) runs
+	// anonymously.
 	var cloneToken, cloneTokenRemote string
 	if provision.CloneTokenAllowed(gc.TokenRemote, gc.URL) && env[provision.GitTokenEnv] != "" {
 		cloneToken, cloneTokenRemote = env[provision.GitTokenEnv], gc.TokenRemote

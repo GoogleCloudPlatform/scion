@@ -454,9 +454,9 @@ branch with an open same-repo pull request:
      --format='table(timestamp, jsonPayload.event, jsonPayload.job_id, jsonPayload.runner, jsonPayload.reason)'
    ```
 
-3. **Runner execution log:** the entrypoint logs the `/scratch` mount check
-   and `claim succeeded on attempt 1` (the [runner README](../runner/README.md#runtime-contract)
-   lists both as P6 checkpoints):
+3. **Runner execution log:** the entrypoint logs the volume mount check
+   (`/home/runner is a mount (...)`), the volume root's owner and mode, and
+   `claim succeeded on attempt 1` ([runner README](../runner/README.md#runtime-contract)):
 
    ```bash
    gcloud logging read --project "$GCP_PROJECT" --freshness=1h --limit=50 \

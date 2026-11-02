@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs/migrate"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
@@ -272,4 +273,11 @@ func (s *Server) planStorageMigration(ctx context.Context) (map[string]string, e
 		pending[id] = noticeReasonIdentity
 	}
 	return pending, nil
+}
+
+// deleteLegacyProjectTrees removes the legacy slug-keyed trees whose
+// identity markers name projectID (migrate.DeleteLegacyProjectTrees), for
+// the project storage cleanup of a project delete.
+func deleteLegacyProjectTrees(layout projectfs.Layout, globalDir, slug, projectID string) ([]projectfs.Deletion, error) {
+	return migrate.DeleteLegacyProjectTrees(layout, globalDir, slug, projectID)
 }

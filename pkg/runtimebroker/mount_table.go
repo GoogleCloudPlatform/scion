@@ -31,16 +31,31 @@ const procMountsPath = "/proc/mounts"
 // can exceed bufio.Scanner's 64 KiB default).
 const maxMountTableLine = 1 << 20
 
+// MountEntry is one mount table entry: the source mounted at a path
+// (server:export for NFS) and the mount options the kernel reports for it
+// ("rw,nosuid,nodev,relatime,vers=3,...").
+type MountEntry struct {
+	Source  string
+	Options string
+}
+
 // MountTable is a parsed mount table: cleaned, unescaped mountpoint to the
-// source mounted there (server:export for NFS). When a path is mounted more
-// than once, the last (topmost, visible) entry wins.
-type MountTable map[string]string
+// entry mounted there. When a path is mounted more than once, the last
+// (topmost, visible) entry wins.
+type MountTable map[string]MountEntry
 
 // Lookup returns the source mounted at path and whether path is a
 // mountpoint. path is compared after filepath.Clean.
 func (t MountTable) Lookup(path string) (source string, mounted bool) {
-	source, mounted = t[filepath.Clean(path)]
-	return source, mounted
+	e, mounted := t.LookupEntry(path)
+	return e.Source, mounted
+}
+
+// LookupEntry returns the entry mounted at path and whether path is a
+// mountpoint. path is compared after filepath.Clean.
+func (t MountTable) LookupEntry(path string) (MountEntry, bool) {
+	e, mounted := t[filepath.Clean(path)]
+	return e, mounted
 }
 
 // ReadProcMountTable reads and parses /proc/mounts. It reads the mount
@@ -67,7 +82,11 @@ func ParseMountTable(r io.Reader) (MountTable, error) {
 		if len(fields) < 2 {
 			continue
 		}
-		t[filepath.Clean(unescapeMountField(fields[1]))] = unescapeMountField(fields[0])
+		e := MountEntry{Source: unescapeMountField(fields[0])}
+		if len(fields) >= 4 {
+			e.Options = unescapeMountField(fields[3])
+		}
+		t[filepath.Clean(unescapeMountField(fields[1]))] = e
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("reading mount table: %w", err)
@@ -75,15 +94,15 @@ func ParseMountTable(r io.Reader) (MountTable, error) {
 	return t, nil
 }
 
-// ProcMountSource looks path up in /proc/mounts and returns the source
+// ProcMountEntry looks path up in /proc/mounts and returns the entry
 // mounted there and whether path is a mountpoint.
-func ProcMountSource(path string) (source string, mounted bool, err error) {
+func ProcMountEntry(path string) (entry MountEntry, mounted bool, err error) {
 	t, err := ReadProcMountTable()
 	if err != nil {
-		return "", false, err
+		return MountEntry{}, false, err
 	}
-	source, mounted = t.Lookup(path)
-	return source, mounted, nil
+	entry, mounted = t.LookupEntry(path)
+	return entry, mounted, nil
 }
 
 // unescapeMountField decodes the octal escapes (\040 for space, etc.) the

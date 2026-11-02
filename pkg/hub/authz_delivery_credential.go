@@ -106,6 +106,13 @@ type hubDeliveryAdmissionOutcome struct {
 	// legacyCohort is set when the outcome is an allow by the legacy
 	// fallback: the cohort (legacyDeliveryCohort*) of the first legacy hop.
 	legacyCohort string
+	// deniedCohort is set on a deny the fallback returned for a chain of
+	// that cohort (uat_descendant_legacy whose root user is not admitted).
+	deniedCohort string
+	// uatIntrinsic is set on an allow whose walk passed a hop recorded from
+	// a user access token only through the intrinsic rule
+	// (uatIntrinsicDecides).
+	uatIntrinsic bool
 }
 
 func newHubDeliveryAdmissionMemo() *hubDeliveryAdmissionMemo {
@@ -342,6 +349,9 @@ func (a *AuthzService) hubDeliveryAdmission(
 		if memo != nil {
 			memo.save(permissionID, o)
 		}
+		if o.ok && o.uatIntrinsic {
+			a.recordUATIntrinsic(ctx, permissionID, uatIntrinsicPathLaunchDelivery)
+		}
 	}
 	if !o.ok {
 		if cause != nil {
@@ -386,7 +396,8 @@ func (a *AuthzService) hubDeliveryChainAdmission(
 		}
 	}
 
-	if ok, reason, c := a.hubDeliveryChainWalk(ctx, agentID, h.projectID, permissionID, explain); !ok {
+	var obs hubDeliveryWalkObservation
+	if ok, reason, c := a.hubDeliveryWalkObserved(ctx, agentID, h.projectID, permissionID, explain, nil, &obs); !ok {
 		return hubDeliveryAdmissionOutcome{reason: reason, cause: c}
 	}
 
@@ -394,6 +405,11 @@ func (a *AuthzService) hubDeliveryChainAdmission(
 	if err != nil {
 		c := DenyCauseForProvenanceError(err)
 		reason := "delivery provenance root denied: " + err.Error()
+		if errors.Is(err, ErrProvenanceNotAdmitted) {
+			// Named for the launch withheld Warn and the census: the chain
+			// passed, and the root user is not admitted to the agent's project.
+			reason = deliveryRootNotAdmittedReason + ": " + err.Error()
+		}
 		if c == DenyCauseCeilingError {
 			reason = "delivery ceiling check failed (fail-closed): " + err.Error()
 		}
@@ -406,8 +422,14 @@ func (a *AuthzService) hubDeliveryChainAdmission(
 	// shows what was evaluated even if the two ever differed.
 	addStep("delegation_ceiling_delivery_root",
 		fmt.Sprintf("root user %s admitted to project %s for %s", root.RootUser.ID, root.Edge.ScopeID, permissionID))
-	return hubDeliveryAdmissionOutcome{ok: true, reason: "delivery ceiling passed"}
+	return hubDeliveryAdmissionOutcome{ok: true, reason: "delivery ceiling passed", uatIntrinsic: obs.uatIntrinsic}
 }
+
+// deliveryRootNotAdmittedReason begins the reason of a delivery admission
+// whose chain passed and whose root user is not admitted to the agent's
+// project. It keeps the "delivery provenance root denied" prefix the census
+// reads (launchDeliveryOutcomeCohort).
+const deliveryRootNotAdmittedReason = "delivery provenance root denied: root user not admitted to the project"
 
 // hdDelegatorLiveness is one hop's delegator state, as seen by
 // hubDeliveryDelegatorLiveness.
@@ -486,8 +508,10 @@ func (a *AuthzService) hubDeliveryDelegatorLiveness(ctx context.Context, delegat
 //     delegator user:DevUserID (ceiling_source_not_allowed);
 //  4. known provenance version (ceiling_unrecorded);
 //  5. effect ceiling: principal passes, bounded must allow permissionID
-//     with no self-operation exception (ceiling_effect_exceeded), any other
-//     kind denies (ceiling_unrecorded);
+//     with no self-operation exception (ceiling_effect_exceeded), read
+//     through uatHopEffectCeiling, so the deliver permissions are intrinsic
+//     to a hop recorded from a user access token; any other kind denies
+//     (ceiling_unrecorded);
 //  6. live delegator (hubDeliveryDelegatorLiveness); a held agent
 //     delegator is not live;
 //  7. a user delegator ends the chain; an agent delegator is the next hop;
@@ -511,6 +535,19 @@ func (a *AuthzService) hubDeliveryChainWalk(ctx context.Context, startAgentID, s
 // there it records the hop's cohort in legacy and goes on instead of
 // denying; every other check is unchanged.
 func (a *AuthzService) hubDeliveryWalk(ctx context.Context, startAgentID, scopeProjectID, permissionID string, explain *[]DecisionStep, legacy *hubDeliveryLegacyNote) (bool, string, DenyCause) {
+	return a.hubDeliveryWalkObserved(ctx, startAgentID, scopeProjectID, permissionID, explain, legacy, nil)
+}
+
+// hubDeliveryWalkObservation is what a walk reports besides its verdict.
+type hubDeliveryWalkObservation struct {
+	// uatIntrinsic: a hop recorded from a user access token passed only
+	// through the intrinsic rule (uatIntrinsicDecides).
+	uatIntrinsic bool
+}
+
+// hubDeliveryWalkObserved is hubDeliveryWalk that also fills obs when it is
+// not nil. obs never changes the verdict.
+func (a *AuthzService) hubDeliveryWalkObserved(ctx context.Context, startAgentID, scopeProjectID, permissionID string, explain *[]DecisionStep, legacy *hubDeliveryLegacyNote, obs *hubDeliveryWalkObservation) (bool, string, DenyCause) {
 	// The tolerant walk applies only to the delivery permissions
 	// (legacyFallbackPermission); for any other permission it is the strict
 	// walk, whatever the caller passed.
@@ -544,10 +581,13 @@ func (a *AuthzService) hubDeliveryWalk(ctx context.Context, startAgentID, scopeP
 	delegateID := startAgentID
 	// pendingUAT (tolerant walk only) is set by an agent-recorded hop whose
 	// ceiling lacks the permission because an ancestor was created from a
-	// user access token (legacyInheritsUATGap). The next hops must reach
-	// that UAT-created hop through hops of the same kind, or the walk
-	// denies with pendingReason, the first such hop's own deny.
+	// user access token (legacyInheritsUATGap): the uat_descendant_legacy
+	// cohort. The next hops must reach a hop recorded from a user access
+	// token whose uatHopEffectCeiling allows the permission, through hops
+	// of the same kind, or the walk denies with pendingReason, the first
+	// such hop's own deny.
 	pendingUAT, pendingReason := false, ""
+	intrinsic := false
 	for depth := 0; ; depth++ {
 		if depth > maxDelegationDepth {
 			return deny("delegation chain exceeded maximum depth", "")
@@ -616,8 +656,9 @@ func (a *AuthzService) hubDeliveryWalk(ctx context.Context, startAgentID, scopeP
 		// hopCohort is the legacy cohort the tolerant walk lets this hop
 		// through under; inherits marks an agent-recorded hop that only
 		// inherits a UAT-created ancestor's gap. Both stay unset on the
-		// strict walk.
-		hopCohort, inherits := "", false
+		// strict walk. uatHop marks a hop recorded from a user access token
+		// whose uatHopEffectCeiling allows the permission.
+		hopCohort, inherits, uatHop := "", false, false
 		switch {
 		case !knownProvenanceVersion(edge.ProvenanceVersion) || (edge.Kind != store.EffectCeilingPrincipal && edge.Kind != store.EffectCeilingBounded):
 			if legacy == nil {
@@ -626,7 +667,7 @@ func (a *AuthzService) hubDeliveryWalk(ctx context.Context, startAgentID, scopeP
 			// An unrecorded edge has no ceiling to apply; its delegator is
 			// still checked below and the walk goes on.
 			hopCohort = legacyDeliveryCohortUnadoptedEdge
-		case edge.Kind == store.EffectCeilingBounded && !EffectCeilingAllows(edge.EffectCeiling, permissionID, false):
+		case edge.Kind == store.EffectCeilingBounded && !EffectCeilingAllows(uatHopEffectCeiling(edge.DelegatorType, edge.DelegatorID, edge.AuthorityProvenance, edge.EffectCeiling), permissionID, false):
 			exceeded := fmt.Sprintf("delegation ceiling: %s is outside the frozen effect ceiling", permissionID)
 			if legacy != nil {
 				hopCohort = legacyBoundedEdgeCohort(edge, permissionID)
@@ -637,11 +678,19 @@ func (a *AuthzService) hubDeliveryWalk(ctx context.Context, startAgentID, scopeP
 			}
 			if inherits && !pendingUAT {
 				pendingReason = exceeded
+				hopCohort = legacyDeliveryCohortUATDescendant
+			}
+		case uatRecordedHop(edge.DelegatorType, edge.DelegatorID, edge.AuthorityProvenance, edge.EffectCeiling):
+			uatHop = true
+			if uatIntrinsicDecides(edge.DelegatorType, edge.DelegatorID, edge.AuthorityProvenance, edge.EffectCeiling, permissionID) {
+				addStep("delegation_ceiling_delivery_uat_intrinsic",
+					fmt.Sprintf("edge %s: recorded from a user access token; %s is intrinsic to the hop", edge.ID, permissionID))
+				intrinsic = true
 			}
 		}
 		if pendingUAT {
 			switch {
-			case hopCohort == deliveryCohortUATNoDeliverMapping:
+			case uatHop:
 				pendingUAT = false
 			case inherits:
 			default:
@@ -679,6 +728,9 @@ func (a *AuthzService) hubDeliveryWalk(ctx context.Context, startAgentID, scopeP
 			if pendingUAT {
 				// Unreachable: an inheriting hop has an agent delegator.
 				return deny(pendingReason, DenyCauseCeilingEffectExceeded)
+			}
+			if obs != nil {
+				obs.uatIntrinsic = intrinsic
 			}
 			return true, "delivery ceiling chain passed", ""
 		}

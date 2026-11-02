@@ -251,10 +251,11 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"handlers_roles.go:deleteRoleBinding:GetRoleBinding":                                             "mutation: the binding being deleted",
 	"handlers_roles.go:authorizeRoleBindingDelete:GetRoleBinding":                                    "routing: the binding's scope selects the project check; the authorization service decides",
 	"handlers_users_core.go:deleteSuperAdminBindingTx:ListRoleBindingsForPrincipal":                  "mutation: bindings being deleted",
-	"handlers_users_core.go:guardAndCascadeUserRoleBindingsTx:GetRoleBinding":                        "mutation: user-delete binding cascade",
-	"handlers_users_core.go:guardAndCascadeUserRoleBindingsTx:ListRoleBindingsForPrincipal":          "mutation: user-delete binding cascade",
+	"handlers_users_core.go:guardAndCascadeUserRoleBindingsCheckTx:GetRoleBinding":                   "mutation: user-delete binding cascade",
+	"handlers_users_core.go:guardAndCascadeUserRoleBindingsCheckTx:ListRoleBindingsForPrincipal":     "mutation: user-delete binding cascade",
 	"user_delete_data.go:cleanupOrphanedProvisionedUser:ListRoleBindingsForPrincipal":                "guard: keeps a provisioned user row that gained any binding (any binding only keeps the row; never admits)",
 	"handlers_users_core.go:superAdminBindingStateForUser:ListRoleBindingsForPrincipal":              "mutation: role-change target's own binding state; test identity targets are refused first",
+	"handlers_users_core.go:userHoldsSystemRoleBinding:ListRoleBindingsForPrincipal":                 "guard: a token delete is refused when the target holds a direct system-scope binding (a binding found only refuses; never admits)",
 	"project_membership_service.go:RemoveMember:GetRoleBinding":                                      "mutation: the binding being removed",
 	"project_membership_service.go:UpdateMemberRole:GetRoleBinding":                                  "mutation: the binding being changed",
 	"project_membership_service.go:findExistingDirectBindingsFromStore:ListRoleBindingsForPrincipal": "mutation: the target's existing bindings to replace",
@@ -303,6 +304,12 @@ var testAdminAdminEmailsCensus = map[string]string{
 	"server.go:AdminEmails":                               "config: accessor; ReconcileSuperAdminBindings skips test identities",
 	"server.go:New":                                       "config: passed to ReconcileSuperAdminBindings, which skips test identities",
 	"web.go:adminEmails":                                  "sign-in: web sign-in; test identities never sign in",
+
+	// The authorized_domains save check (ptone/scion#6000) reads admin_emails
+	// only to predict the sign-in admin bypass for the saving account.
+	"authorized_domains_settings.go:accessListsAfterDBSave":   "save check: refuse-only lockout guard (ptone/scion#6000); admin-kind test identities get no admin_emails bypass (rejectAuthorizedDomainsLockout clamp) and write no access keys (rejectTestAdminSettingsWrite)",
+	"authorized_domains_settings.go:accessListsAfterFileSave": "save check: refuse-only lockout guard (ptone/scion#6000); admin-kind test identities get no admin_emails bypass (rejectAuthorizedDomainsLockout clamp) and write no access keys (rejectTestAdminSettingsWrite)",
+	"authorized_domains_settings.go:rejectFileAccessLockout":  "save check: refuse-only lockout guard (ptone/scion#6000); admin-kind test identities get no admin_emails bypass (rejectAuthorizedDomainsLockout clamp) and write no access keys (rejectTestAdminSettingsWrite)",
 }
 
 // The legacy admin fast path itself (IsUnscopedLocalPlatformAdmin) lives in

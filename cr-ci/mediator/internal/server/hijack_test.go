@@ -727,3 +727,112 @@ func (h *harness) hijackedHas(name string) bool {
 	_, ok := h.srv.hijacked[name]
 	return ok
 }
+
+// countEvent counts the log lines with the given event.
+func (h *harness) countEvent(event string) int {
+	return strings.Count(h.logs.String(), `"event":"`+event+`"`)
+}
+
+// TestSwapChainThreeRunners (followups-v13a): three jobs B, L, S, each with its own
+// runner, take each other's runners in a cycle (B on S's, L on B's, S on L's). The
+// displaced job S is handed on runner by runner: one runner_swap and one
+// runner_rebind per hand-off, no extra launch or kill, and at the end exactly one
+// not-reassigned record serves S, the runner S then runs on.
+func TestSwapChainThreeRunners(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	const b, l, s = 100, 101, 102
+	h.addSameRepoRun(10)
+	h.addSameRepoRun(11)
+	h.addSameRepoRun(12)
+	h.queued(b, 10)
+	h.queued(l, 11)
+	h.queued(s, 12)
+	if n := len(h.executions()); n != 3 {
+		t.Fatalf("executions = %d, want 3", n)
+	}
+	steps := []struct {
+		job    int64
+		run    int64
+		runner string
+		want   string
+	}{
+		{b, 10, RunnerName(s), "swap"}, // B on S's runner: S is displaced, B's own runner takes it over
+		{l, 11, RunnerName(b), "swap"}, // L on B's runner (now serving S): S moves on to L's runner
+		{s, 12, RunnerName(l), "ok"},   // S on L's runner, which serves S
+	}
+	for _, st := range steps {
+		if code, out := h.webhook(inProgress(st.job, st.run, testRepo, st.runner)); code != http.StatusOK || !strings.Contains(out, st.want) {
+			t.Fatalf("job %d on %s: %d %q, want %q", st.job, st.runner, code, out, st.want)
+		}
+	}
+	if got := h.countEvent(logging.EventRunnerSwap); got != 2 {
+		t.Errorf("runner_swap lines = %d, want 2 (one per hand-off)", got)
+	}
+	if got := h.countEvent(logging.EventRunnerRebind); got != 2 {
+		t.Errorf("runner_rebind lines = %d, want 2", got)
+	}
+	for _, want := range []string{
+		`"rebound_runner":"cr-job-100","rebound_to_job_id":102,"rebound_from_job_id":100`,
+		`"rebound_runner":"cr-job-101","rebound_to_job_id":102,"rebound_from_job_id":101`,
+	} {
+		if !strings.Contains(h.logs.String(), want) {
+			t.Errorf("logs lack %s:\n%s", want, h.logs.String())
+		}
+	}
+	if n := len(h.executions()); n != 3 || len(h.cr.CancelCalls) != 0 || len(h.gh.Deleted) != 0 {
+		t.Errorf("executions %d, cancels %v, deleted %v; want 3 and no kill", n, h.cr.CancelCalls, h.gh.Deleted)
+	}
+	h.srv.dispatchMu.Lock()
+	var serving []string
+	for name, rec := range h.srv.runners {
+		if rec.serve == s && !rec.reassigned {
+			serving = append(serving, name)
+		}
+	}
+	h.srv.dispatchMu.Unlock()
+	if len(serving) != 1 || serving[0] != RunnerName(l) {
+		t.Errorf("not-reassigned records serving job %d: %v, want exactly [%s]", s, serving, RunnerName(l))
+	}
+}
+
+// TestReconcileSkipsForgottenRunner (followups-v13a): reconcile discovers in_progress
+// jobs without the lock, so its view can predate a job's completed webhook, which
+// forgets the runner. Such a stale entry must not log the swap again, recreate a
+// record for the finished runner, or dispatch.
+func TestReconcileSkipsForgottenRunner(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	h.addSameRepoRun(10)
+	// GitHub's listing still shows job 101 running on cr-job-100 (the stale view).
+	h.addSameRepoRun(11, fakes.GitHubJob{ID: 101, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-100"})
+	h.queued(100, 10)
+	if code, out := h.webhook(inProgress(101, 11, testRepo, "cr-job-100")); code != http.StatusOK || !strings.Contains(out, "swap") {
+		t.Fatalf("in_progress: %d %q", code, out)
+	}
+	h.webhook(jobEvent("completed", 101, 11, testRepo, "success", "cr-job-100"))
+	swaps, execs := h.countEvent(logging.EventRunnerSwap), len(h.executions())
+	h.gh.SetRunnerState("cr-job-100", "online", true)
+	if res := h.reconcile(); res.HijacksKilled != 0 {
+		t.Errorf("reconcile killed %d", res.HijacksKilled)
+	}
+	if got := h.countEvent(logging.EventRunnerSwap); got != swaps {
+		t.Errorf("runner_swap lines %d -> %d after reconcile; the stale entry was re-checked", swaps, got)
+	}
+	if got := len(h.executions()); got != execs {
+		t.Errorf("executions %d -> %d after reconcile", execs, got)
+	}
+	h.srv.dispatchMu.Lock()
+	_, recreated := h.srv.runners["cr-job-100"]
+	h.srv.dispatchMu.Unlock()
+	if recreated {
+		t.Error("reconcile recreated a record for the forgotten runner cr-job-100")
+	}
+	// After cancelledTTL the forgotten entry is pruned.
+	h.clock.Add(cancelledTTL + time.Minute)
+	h.reconcile()
+	h.srv.dispatchMu.Lock()
+	_, still := h.srv.forgotten["cr-job-100"]
+	h.srv.dispatchMu.Unlock()
+	if still {
+		t.Error("forgotten entry not pruned after cancelledTTL")
+	}
+}

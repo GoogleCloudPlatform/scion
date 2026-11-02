@@ -25,6 +25,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1289,4 +1290,182 @@ func TestKubernetesRuntime_CopiesAgentHome(t *testing.T) {
 			t.Errorf("CopiesAgentHome(%s) = true, want false", name)
 		}
 	}
+}
+
+// assertAutomountOff fails unless the pod spec sets
+// automountServiceAccountToken to false explicitly. Unset means the
+// ServiceAccount's own setting applies, which mounts the token by default.
+func assertAutomountOff(t *testing.T, pod *corev1.Pod) {
+	t.Helper()
+	if a := pod.Spec.AutomountServiceAccountToken; a == nil || *a {
+		t.Errorf("automountServiceAccountToken = %v, want false", a)
+	}
+}
+
+// A passthrough pod with no Kubernetes block at all (config.Kubernetes nil)
+// is created with automountServiceAccountToken false.
+func TestBuildPod_AutomountOffWhenKubernetesConfigNil(t *testing.T) {
+	rt, _, _ := newTestK8sRuntime()
+	pod, err := rt.buildPod("default", RunConfig{
+		Name:         "automount-nil",
+		Image:        "example.com/image:v1",
+		UnixUsername: "scion",
+		Harness:      &EnvHarness{},
+	})
+	if err != nil {
+		t.Fatalf("buildPod: %v", err)
+	}
+	assertAutomountOff(t, pod)
+	if pod.Spec.ServiceAccountName != "" {
+		t.Errorf("ServiceAccountName = %q, want unset", pod.Spec.ServiceAccountName)
+	}
+}
+
+// A pod with a Kubernetes block that names a ServiceAccount, as GCP identity
+// mode assign does, keeps that ServiceAccount and is created with
+// automountServiceAccountToken false.
+func TestBuildPod_AutomountOffWithKubernetesBlockAndServiceAccount(t *testing.T) {
+	rt, _, _ := newTestK8sRuntime()
+	pod, err := rt.buildPod("default", RunConfig{
+		Name:         "automount-sa",
+		Image:        "example.com/image:v1",
+		UnixUsername: "scion",
+		Harness:      &EnvHarness{},
+		Kubernetes:   &api.KubernetesConfig{ServiceAccountName: "agent-wi-ksa"},
+	})
+	if err != nil {
+		t.Fatalf("buildPod: %v", err)
+	}
+	assertAutomountOff(t, pod)
+	if pod.Spec.ServiceAccountName != "agent-wi-ksa" {
+		t.Errorf("ServiceAccountName = %q, want agent-wi-ksa", pod.Spec.ServiceAccountName)
+	}
+}
+
+// The pod Run submits to the API server carries
+// automountServiceAccountToken false.
+func TestRun_CreatedPodHasAutomountOff(t *testing.T) {
+	rt, clientset, _ := newTestK8sRuntime()
+	var (
+		mu      sync.Mutex
+		created []*corev1.Pod
+	)
+	clientset.PrependReactor("create", "pods", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		if pod, ok := action.(k8stesting.CreateAction).GetObject().(*corev1.Pod); ok {
+			mu.Lock()
+			created = append(created, pod.DeepCopy())
+			mu.Unlock()
+		}
+		return false, nil, nil
+	})
+
+	// runWithHooks ends Run at the pod create; its error is the cancelled
+	// context and is not what this test checks.
+	_ = runWithHooks(t, rt, clientset, hookTestConfig("automount-run"))
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(created) != 1 {
+		t.Fatalf("pod creates = %d, want 1", len(created))
+	}
+	assertAutomountOff(t, created[0])
+}
+
+// GCP identity mode block keeps its pod settings: the block ServiceAccount,
+// automountServiceAccountToken false and the Workload Identity node selector.
+func TestBuildPod_BlockIdentityStillAutomountOffAndWINodeSelector(t *testing.T) {
+	rt, _, _ := newTestK8sRuntime()
+	pod, err := rt.buildPod("default", RunConfig{
+		Name:                    "block-automount",
+		Image:                   "example.com/image:v1",
+		UnixUsername:            "scion",
+		Harness:                 &EnvHarness{},
+		Kubernetes:              &api.KubernetesConfig{ServiceAccountName: "block-ksa"},
+		KubernetesBlockIdentity: true,
+	})
+	if err != nil {
+		t.Fatalf("buildPod: %v", err)
+	}
+	assertAutomountOff(t, pod)
+	if pod.Spec.ServiceAccountName != "block-ksa" {
+		t.Errorf("ServiceAccountName = %q, want block-ksa", pod.Spec.ServiceAccountName)
+	}
+	if pod.Spec.NodeSelector[KubernetesWorkloadIdentityNodeLabel] != "true" {
+		t.Errorf("NodeSelector = %v, want %s=true", pod.Spec.NodeSelector, KubernetesWorkloadIdentityNodeLabel)
+	}
+}
+
+// A block pod and a non-block pod built from the same config have the same
+// env, volumes and mounts, so block identity changes none of them. Neither
+// pod declares a volume or mount for the ServiceAccount token path.
+func TestBuildPod_AutomountChangeLeavesEnvAndVolumesUnchanged(t *testing.T) {
+	rt, _, _ := newTestK8sRuntime()
+	config := RunConfig{
+		Name:         "automount-env",
+		Image:        "example.com/image:v1",
+		UnixUsername: "scion",
+		Harness:      &EnvHarness{},
+		Env:          []string{"FOO=bar"},
+		Kubernetes:   &api.KubernetesConfig{ServiceAccountName: "agent-wi-ksa"},
+		ResolvedSecrets: []api.ResolvedSecret{
+			{Name: "API_KEY", Type: "environment", Target: "API_KEY", Value: "v", Source: "user"},
+		},
+	}
+	plain, err := rt.buildPod("default", config)
+	if err != nil {
+		t.Fatalf("buildPod: %v", err)
+	}
+	blockConfig := config
+	blockConfig.KubernetesBlockIdentity = true
+	block, err := rt.buildPod("default", blockConfig)
+	if err != nil {
+		t.Fatalf("buildPod (block): %v", err)
+	}
+
+	if !reflect.DeepEqual(plain.Spec.Volumes, block.Spec.Volumes) {
+		t.Errorf("volumes differ:\n plain %v\n block %v", plain.Spec.Volumes, block.Spec.Volumes)
+	}
+	if len(plain.Spec.Containers) != len(block.Spec.Containers) || len(plain.Spec.InitContainers) != len(block.Spec.InitContainers) {
+		t.Fatalf("container counts differ")
+	}
+	pairs := [][2][]corev1.Container{{plain.Spec.Containers, block.Spec.Containers}, {plain.Spec.InitContainers, block.Spec.InitContainers}}
+	for _, p := range pairs {
+		for i := range p[0] {
+			// Harness env comes from a map, so compare env in name order.
+			if !reflect.DeepEqual(sortedEnv(p[0][i].Env), sortedEnv(p[1][i].Env)) {
+				t.Errorf("container %q env differs:\n plain %v\n block %v", p[0][i].Name, p[0][i].Env, p[1][i].Env)
+			}
+			if !reflect.DeepEqual(p[0][i].VolumeMounts, p[1][i].VolumeMounts) {
+				t.Errorf("container %q mounts differ:\n plain %v\n block %v", p[0][i].Name, p[0][i].VolumeMounts, p[1][i].VolumeMounts)
+			}
+		}
+	}
+
+	const saDir = "/var/run/secrets/kubernetes.io/serviceaccount"
+	for _, pod := range []*corev1.Pod{plain, block} {
+		for _, v := range pod.Spec.Volumes {
+			if strings.HasPrefix(v.Name, "kube-api-access-") {
+				t.Errorf("unexpected volume %q", v.Name)
+			}
+		}
+		for _, c := range append(append([]corev1.Container(nil), pod.Spec.InitContainers...), pod.Spec.Containers...) {
+			for _, m := range c.VolumeMounts {
+				if strings.HasPrefix(m.MountPath, saDir) {
+					t.Errorf("container %q mounts %q", c.Name, m.MountPath)
+				}
+			}
+		}
+	}
+}
+
+// sortedEnv returns a copy of env ordered by name, then value.
+func sortedEnv(env []corev1.EnvVar) []corev1.EnvVar {
+	out := slices.Clone(env)
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].Value < out[j].Value
+	})
+	return out
 }

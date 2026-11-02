@@ -75,8 +75,10 @@ func reportSavedKeys(before, after map[string]json.RawMessage) savedKeysReport {
 
 // withSkipped moves the applied keys that the last ApplySnapshot skipped
 // into Skipped: server.notification_channels when a channel failed
-// validation, and the federation keys when the federation configuration
-// was not installed (ptone/scion#4466). PendingRestart is unchanged.
+// validation, the federation keys when the federation configuration
+// was not installed (ptone/scion#4466), and server.auth.authorized_domains
+// when a SCION_SERVER_* variable pins it on this node (ptone/scion#6000).
+// PendingRestart is unchanged.
 func (r savedKeysReport) withSkipped(skips layer1ApplySkips) savedKeysReport {
 	applied := make([]string, 0, len(r.Applied))
 	skipped := append([]skippedKey{}, r.Skipped...)
@@ -86,6 +88,8 @@ func (r savedKeysReport) withSkipped(skips layer1ApplySkips) savedKeysReport {
 			skipped = append(skipped, skippedKey{Key: key, Reason: skippedChannelsReason(skips)})
 		case strings.HasPrefix(key, "server.federation.") && skips.FederationReason != "":
 			skipped = append(skipped, skippedKey{Key: key, Reason: skips.FederationReason})
+		case key == authorizedDomainsKey && skips.AuthorizedDomainsPinned:
+			skipped = append(skipped, skippedKey{Key: key, Reason: authorizedDomainsPinnedReason})
 		default:
 			applied = append(applied, key)
 		}
