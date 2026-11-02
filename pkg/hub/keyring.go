@@ -169,8 +169,10 @@ func validateKeyringFile(k *keyring.Keyring, cfg *ServerConfig) error {
 
 // serverValueCipher returns the shared ValueCipher for cfg
 // (ptone/scion#1530 §5): cfg.ValueCipher when set (it must wrap the
-// keyring file's encryption ring, if there is one), else one built from
-// the keyring file, else the legacy cipher over SharedSigningSecret.
+// keyring file's encryption ring, if there is one), else the cipher the
+// local secret backend holds, else one built from the keyring file, else
+// the legacy cipher over SharedSigningSecret. With a local secret backend
+// it never builds a second cipher: every stored ciphertext uses one.
 func serverValueCipher(cfg ServerConfig) (*secret.ValueCipher, error) {
 	file := cfg.Keyring != nil && cfg.Keyring.Source() == keyring.SourceFile
 	if cfg.ValueCipher != nil {
@@ -181,6 +183,23 @@ func serverValueCipher(cfg ServerConfig) (*secret.ValueCipher, error) {
 			return nil, errors.New("the local secret backend must share the server's ValueCipher")
 		}
 		return cfg.ValueCipher, nil
+	}
+	if lb, ok := cfg.SecretBackend.(*secret.LocalBackend); ok {
+		c := lb.Cipher()
+		if c == nil {
+			return nil, errors.New("the local secret backend has no ValueCipher")
+		}
+		if file && !c.UsesRing(cfg.Keyring.Encryption()) {
+			return nil, errors.New("keyring mode: the local secret backend's ValueCipher must wrap the keyring file's encryption ring")
+		}
+		// Without a keyring file only the mode is checked: proving that a
+		// legacy backend cipher derives from SharedSigningSecret would
+		// need a second derivation of the key, which this function never
+		// makes. A managed cipher always needs the file it wraps.
+		if !file && c.Managed() {
+			return nil, errors.New("the local secret backend's ValueCipher comes from a keyring file, but no keyring file is configured")
+		}
+		return c, nil
 	}
 	if file {
 		return secret.NewValueCipher(cfg.Keyring)
