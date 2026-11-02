@@ -42,34 +42,51 @@ func TestUATDefaultedRoleWithNoFittingRoleDenied(t *testing.T) {
 	assertCreateWroteNothing(t, f.store, f.proj.ID, "uat-none-deny", f.creator.ID)
 }
 
-// ptone/scion#7069: the selectors of the reported token (project read and
-// update plus the agent selectors) fit no role above none. The refusal names
-// exactly the read selectors the readonly role still needs, and the same
-// token with those selectors added creates an agent with a usable role.
+// ptone/scion#7069: a token whose selectors fit no role above none is
+// refused, and the refusal names exactly the selectors the readonly role
+// still needs. Adding the named selectors gives an agent a usable role.
+//   - the recorded token (project:manage plus the agent selectors, no
+//     project:read) needs seven, project:read among them;
+//   - project read and update plus the agent selectors needs six.
 func TestUATNoUsableRoleNamesMissingSelectors(t *testing.T) {
-	reported := []string{
-		"project:read", "project:update",
-		"agent:create", "agent:read", "agent:list", "agent:lifecycle", "agent:delete", "agent:message", "agent:attach",
-	}
-	missing := []string{"harness_config:list", "harness_config:read", "skill:list", "skill:read", "template:list", "template:read"}
+	for _, tc := range []struct {
+		name    string
+		held    []string
+		missing []string
+	}{
+		{
+			name: "recorded token",
+			held: []string{"agent:create", "agent:delete", "agent:lifecycle", "agent:list", "agent:message", "agent:read", "project:manage"},
+			missing: []string{"harness_config:list", "harness_config:read", "project:read",
+				"skill:list", "skill:read", "template:list", "template:read"},
+		},
+		{
+			name: "project read and update",
+			held: []string{"project:read", "project:update",
+				"agent:create", "agent:read", "agent:list", "agent:lifecycle", "agent:delete", "agent:message", "agent:attach"},
+			missing: []string{"harness_config:list", "harness_config:read", "skill:list", "skill:read", "template:list", "template:read"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newUATCreateFixture(t, "uat-7069")
+			rec := f.create(t, f.uat(t, tc.held...), CreateAgentRequest{Name: "uat-7069"})
+			msg := assertCeilingDenial(t, rec)
+			assert.Equal(t, "the token's scopes fit no usable agent role; the readonly role also needs the selectors "+
+				strings.Join(tc.missing, ", ")+"; add them, request role=none explicitly, or create from a session", msg)
+			for _, held := range tc.held {
+				assert.NotContains(t, msg, held, "a selector the token holds is not named")
+			}
+			assertCreateWroteNothing(t, f.store, f.proj.ID, "uat-7069", f.creator.ID)
 
-	f := newUATCreateFixture(t, "uat-7069")
-	rec := f.create(t, f.uat(t, reported...), CreateAgentRequest{Name: "uat-7069"})
-	msg := assertCeilingDenial(t, rec)
-	assert.Equal(t, "the token's scopes fit no usable agent role; the readonly role also needs the selectors "+
-		strings.Join(missing, ", ")+"; add them, request role=none explicitly, or create from a session", msg)
-	for _, held := range reported {
-		assert.NotContains(t, msg, held, "a selector the token holds is not named")
+			// The named selectors are enough: adding them yields a usable
+			// role within the ceiling.
+			rec = f.create(t, f.uat(t, append(append([]string{}, tc.held...), tc.missing...)...), CreateAgentRequest{Name: "uat-7069-ok"})
+			agent, edge := f.createdAgent(t, rec, "uat-7069-ok")
+			assert.NotEqual(t, string(AgentRoleNone), agent.AppliedConfig.AgentRole)
+			assert.True(t, roleFitsCeiling(edge.EffectCeiling, AgentRole(agent.AppliedConfig.AgentRole)))
+			assert.False(t, agent.AppliedConfig.NoAuth)
+		})
 	}
-	assertCreateWroteNothing(t, f.store, f.proj.ID, "uat-7069", f.creator.ID)
-
-	// The named selectors are enough: adding them yields a usable role
-	// within the ceiling, and nothing more than the token covers.
-	rec = f.create(t, f.uat(t, append(append([]string{}, reported...), missing...)...), CreateAgentRequest{Name: "uat-7069-ok"})
-	agent, edge := f.createdAgent(t, rec, "uat-7069-ok")
-	assert.NotEqual(t, string(AgentRoleNone), agent.AppliedConfig.AgentRole)
-	assert.True(t, roleFitsCeiling(edge.EffectCeiling, AgentRole(agent.AppliedConfig.AgentRole)))
-	assert.False(t, agent.AppliedConfig.NoAuth)
 }
 
 // noUsableRoleMessage names selectors only for a bounded ceiling that lacks

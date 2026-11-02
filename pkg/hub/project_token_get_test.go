@@ -28,11 +28,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// reportedProjectTokenSelectors are the selectors of the token in
-// ptone/scion#7068: project read and update plus the agent selectors.
-var reportedProjectTokenSelectors = []string{
+// readUpdateProjectSelectors are project read and update plus the agent
+// selectors: the "project read/write" token the issue text describes.
+var readUpdateProjectSelectors = []string{
 	"project:read", "project:update",
 	"agent:create", "agent:read", "agent:list", "agent:lifecycle", "agent:delete", "agent:message", "agent:attach",
+}
+
+// recordedTokenSelectors7068 are the selectors of the tokens actually
+// inspected for ptone/scion#7068 (user_access_tokens on the reporting hub):
+// project:manage and the agent selectors, with no project:read and no
+// project:list.
+var recordedTokenSelectors7068 = []string{
+	"agent:create", "agent:delete", "agent:lifecycle", "agent:list", "agent:message", "agent:read", "project:manage",
 }
 
 // getProjectByID fetches /api/v1/projects/<id> with a token and returns the
@@ -64,10 +72,28 @@ func TestProjectTokenGet_OwnProjectOnly(t *testing.T) {
 		assert.Equal(t, http.StatusOK, code)
 		assert.Equal(t, f.projA, id)
 	})
-	t.Run("reported selectors read the project", func(t *testing.T) {
-		code, id := getProjectByID(t, f, f.mint(t, f.admin, projectBoundary(f.projA), reportedProjectTokenSelectors...), f.projA)
+	t.Run("read/update selectors read the project", func(t *testing.T) {
+		code, id := getProjectByID(t, f, f.mint(t, f.admin, projectBoundary(f.projA), readUpdateProjectSelectors...), f.projA)
 		assert.Equal(t, http.StatusOK, code)
 		assert.Equal(t, f.projA, id)
+	})
+	t.Run("recorded #7068 token neither reads nor lists the project", func(t *testing.T) {
+		// project:manage is not a read/write alias: without project:read
+		// the token gets 404 on its own project, and without project:list
+		// the list is empty (the list rule is also pinned by
+		// TestProjectListToken_RequiresProjectListSelector).
+		key := f.mint(t, f.admin, projectBoundary(f.projA), recordedTokenSelectors7068...)
+		code, _ := getProjectByID(t, f, key, f.projA)
+		assert.Equal(t, http.StatusNotFound, code)
+		rec := f.call(t, key, http.MethodGet, "/api/v1/projects", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var list struct {
+			Projects   []json.RawMessage `json:"projects"`
+			TotalCount int               `json:"totalCount"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &list), rec.Body.String())
+		assert.Empty(t, list.Projects)
+		assert.Equal(t, 0, list.TotalCount)
 	})
 	t.Run("super-admin without membership reads its project", func(t *testing.T) {
 		admin := uuid.NewString()
@@ -81,6 +107,8 @@ func TestProjectTokenGet_OwnProjectOnly(t *testing.T) {
 		// f.admin owns both projects: only the boundary keeps B out.
 		code, _ := getProjectByID(t, f, f.mint(t, f.admin, projectBoundary(f.projA), "project:read"), f.projB)
 		assert.Equal(t, http.StatusNotFound, code)
+		// The member cannot read B at all; the admin case above is the
+		// boundary pin, this one checks the plain no-access case.
 		code, _ = getProjectByID(t, f, f.mint(t, f.member, projectBoundary(f.projA), "project:read"), f.projB)
 		assert.Equal(t, http.StatusNotFound, code)
 	})
