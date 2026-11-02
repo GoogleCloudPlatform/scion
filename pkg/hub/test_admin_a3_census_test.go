@@ -51,6 +51,7 @@ var agentScopeCensusExempt = map[string]string{
 	"agenttoken.go:SignAgentToken":                     "copies grant.Scopes; every AgentTokenGrant with scopes is built by AuthorizeAgentToken (pinned below); the empty-grant fallback agent:status:update is allowed (TestTestAdminA3_ScopeCensus)",
 	"conduit_relay_admit.go:writeRelayAdmission":       "relay admission claims of a USER principal: copies a scoped user credential's own scopes (only a user access token reaches relay admission: relayUserAuthTypes admits no workload delegation), never an agent token's (the agent branch copies only the credential ID); every later relay operation rebuilds the user and is decided with the test-admin policy applied to that user, so the agent clamp is not the control here (pinned by TestTestAdminA3_RelayUserIdentityIgnoresClaimScopes)",
 	"agent_scope_reissue.go:planAgentDelegatorReissue": "scopes from AuthorizeAgentToken (parentGrant)",
+	"delivery_census.go:launchDeliveryUATFacts":        "read-only census identity for the user secret parent ceiling, built exactly as startSecretResolveOpts builds its owner-path identity (stored role scopes); never signed, and the ceiling evaluation it feeds reads no scope",
 	"httpdispatcher.go:startSecretResolveOpts":         "dispatch-time secret resolution identity (resolveSecrets and resolveAsNeededForKeys), never signed; unchanged by A3 by decision (ti-adm-em 11:41Z): dispatch-time project-scope injection stays under A2's membership rule (provenance-root membership, SystemAuthorityProof)",
 }
 

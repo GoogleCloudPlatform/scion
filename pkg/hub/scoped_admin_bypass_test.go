@@ -69,6 +69,7 @@ func TestBrokerSecretRotationRejectsScopedAdmin(t *testing.T) {
 	broker := &store.RuntimeBroker{ID: tid("broker-1"), Name: "Broker", Slug: "broker-1", CreatedBy: tid("different-owner")}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/brokers/"+broker.ID+"/rotate-secret", nil)
+	req.RemoteAddr = tpLoopbackPeer // the transport policy admits a client on the hub host
 	req = req.WithContext(contextWithIdentity(req.Context(), scopedAdminIdentity()))
 	rec := httptest.NewRecorder()
 
@@ -131,6 +132,7 @@ func TestFederatedAdminCannotUseDirectAdminShortcuts(t *testing.T) {
 		broker := &store.RuntimeBroker{ID: tid("fed-broker-1"), Name: "Broker", Slug: "fed-broker-1", CreatedBy: tid("different-owner")}
 		require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/brokers/"+broker.ID+"/rotate-secret", nil)
+		req.RemoteAddr = tpLoopbackPeer // the transport policy admits a client on the hub host
 		req = req.WithContext(contextWithIdentity(req.Context(), federatedAdminIdentity()))
 		rec := httptest.NewRecorder()
 

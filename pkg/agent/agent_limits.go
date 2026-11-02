@@ -31,8 +31,10 @@ import (
 // own. The hub agent_defaults and this broker's settings.yaml defaults only
 // fill a limit the agent does not set. Those defaults are applied on every
 // start (applyDefaultLimits) and never persisted, so scion-agent.json holds
-// only the agent's own limits: a persisted non-zero limit is the agent's own,
-// and a zero one means "use the current default". A later change to either
+// only the agent's own limits: a persisted limit is the agent's own, and an
+// absent one means "use the current default". A persisted count limit of 0 is
+// the agent's own "no limit" (ptone/scion#5605): no default fills it, and the
+// launch sets no SCION_MAX_TURNS / SCION_MAX_MODEL_CALLS for it. A later change to either
 // default then reaches the agent on its next start or restart instead of
 // being frozen at provision.
 //
@@ -40,10 +42,11 @@ import (
 // its scion-agent.json; they cannot be told apart from its own values and
 // keep applying.
 
-// agentLimits holds the limit fields of an agent config.
+// agentLimits holds the limit fields of an agent config. A nil count limit
+// is unset; 0 is an explicit "no limit" (ptone/scion#5605).
 type agentLimits struct {
-	MaxTurns      int
-	MaxModelCalls int
+	MaxTurns      *int
+	MaxModelCalls *int
 	MaxDuration   string
 }
 
@@ -52,16 +55,21 @@ func limitsOf(cfg *api.ScionConfig) agentLimits {
 	if cfg == nil {
 		return agentLimits{}
 	}
-	return agentLimits{MaxTurns: cfg.MaxTurns, MaxModelCalls: cfg.MaxModelCalls, MaxDuration: cfg.MaxDuration}
+	return agentLimits{
+		MaxTurns:      api.CloneIntPtr(cfg.MaxTurns),
+		MaxModelCalls: api.CloneIntPtr(cfg.MaxModelCalls),
+		MaxDuration:   cfg.MaxDuration,
+	}
 }
 
-// overlay returns l with every limit set in over replacing l's.
+// overlay returns l with every limit set in over replacing l's. A count
+// limit of 0 ("no limit") is set, so it replaces.
 func (l agentLimits) overlay(over agentLimits) agentLimits {
-	if over.MaxTurns != 0 {
-		l.MaxTurns = over.MaxTurns
+	if over.MaxTurns != nil {
+		l.MaxTurns = api.CloneIntPtr(over.MaxTurns)
 	}
-	if over.MaxModelCalls != 0 {
-		l.MaxModelCalls = over.MaxModelCalls
+	if over.MaxModelCalls != nil {
+		l.MaxModelCalls = api.CloneIntPtr(over.MaxModelCalls)
 	}
 	if over.MaxDuration != "" {
 		l.MaxDuration = over.MaxDuration
@@ -76,8 +84,8 @@ func withLimits(cfg *api.ScionConfig, l agentLimits) *api.ScionConfig {
 		return nil
 	}
 	out := *cfg
-	out.MaxTurns = l.MaxTurns
-	out.MaxModelCalls = l.MaxModelCalls
+	out.MaxTurns = api.CloneIntPtr(l.MaxTurns)
+	out.MaxModelCalls = api.CloneIntPtr(l.MaxModelCalls)
 	out.MaxDuration = l.MaxDuration
 	return &out
 }
@@ -115,26 +123,10 @@ func applyDefaultLimits(ctx context.Context, cfg *api.ScionConfig, settings *con
 	if cfg == nil {
 		return
 	}
-	if hd := api.HubAgentDefaultsFromContext(ctx); hd != nil {
-		if cfg.MaxTurns == 0 && hd.MaxTurns > 0 {
-			cfg.MaxTurns = hd.MaxTurns
-		}
-		if cfg.MaxModelCalls == 0 && hd.MaxModelCalls > 0 {
-			cfg.MaxModelCalls = hd.MaxModelCalls
-		}
-		if cfg.MaxDuration == "" && hd.MaxDuration != "" {
-			cfg.MaxDuration = hd.MaxDuration
-		}
-	}
+	var turns, calls int
+	var duration string
 	if settings != nil {
-		if cfg.MaxTurns == 0 && settings.DefaultMaxTurns > 0 {
-			cfg.MaxTurns = settings.DefaultMaxTurns
-		}
-		if cfg.MaxModelCalls == 0 && settings.DefaultMaxModelCalls > 0 {
-			cfg.MaxModelCalls = settings.DefaultMaxModelCalls
-		}
-		if cfg.MaxDuration == "" && settings.DefaultMaxDuration != "" {
-			cfg.MaxDuration = settings.DefaultMaxDuration
-		}
+		turns, calls, duration = settings.DefaultMaxTurns, settings.DefaultMaxModelCalls, settings.DefaultMaxDuration
 	}
+	config.FillDefaultLimits(cfg, api.HubAgentDefaultsFromContext(ctx), turns, calls, duration)
 }

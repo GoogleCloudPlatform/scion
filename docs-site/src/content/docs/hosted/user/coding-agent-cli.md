@@ -75,8 +75,10 @@ a dedicated OS user, an isolated `HOME`, or log out first (`scion hub auth logou
 :::
 
 User- and hub-scope `scion hub env` and `scion hub secret` commands (without `--project` or
-`--broker`) need an interactive login (`scion hub auth login`); the Hub refuses access tokens on
-them.
+`--broker`, or with `--hub-scope`) need an interactive login (`scion hub auth login`); the Hub
+refuses access tokens on them with `403 Forbidden` (`details.reason: "CREDENTIAL_MANAGEMENT"`).
+Project (`--project`) and Runtime Broker (`--broker`) scopes continue to accept appropriately scoped
+tokens.
 
 Run `scion hub status` in the agent's environment to check which credential the CLI is
 using.

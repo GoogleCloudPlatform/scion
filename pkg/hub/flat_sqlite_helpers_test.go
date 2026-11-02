@@ -359,12 +359,12 @@ type flatRegFixture struct {
 
 func (f *flatRegFixture) register(t *testing.T, as *store.User, req CreateBrokerRegistrationRequest) *httptest.ResponseRecorder {
 	t.Helper()
-	return doRequestAsUser(t, f.srv, as, http.MethodPost, "/api/v1/brokers", req)
+	return doRequestAsUserLoopback(t, f.srv, as, http.MethodPost, "/api/v1/brokers", req)
 }
 
 func (f *flatRegFixture) join(t *testing.T, req BrokerJoinRequest) *httptest.ResponseRecorder {
 	t.Helper()
-	return doRequestNoAuth(t, f.srv, http.MethodPost, "/api/v1/brokers/join", req)
+	return doRequestNoAuthLoopback(t, f.srv, http.MethodPost, "/api/v1/brokers/join", req)
 }
 
 // registerFlat performs a full flat registration and join, returning the

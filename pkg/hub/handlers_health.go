@@ -16,12 +16,14 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
@@ -191,8 +193,15 @@ func (s *Server) healthChecks(ctx context.Context) map[string]string {
 	// Legacy storage blocks still in use (non-critical).
 	s.checkProjectStorageConfig(checks)
 
+	// The project tree on a shared backend's mount (non-critical).
+	s.checkProjectStorageTree(checks)
+
 	// Removed per-runtime/per-profile storage overrides (non-critical).
 	s.checkRemovedStorageOverrides(checks)
+
+	// Broker requests refused from an unlisted proxy on this host
+	// (non-critical).
+	s.checkTransportProxyHealth(checks)
 
 	return checks
 }
@@ -212,6 +221,172 @@ func (s *Server) checkProjectStorageConfig(checks map[string]string) {
 		return
 	}
 	checks[projectStorageConfigCheck] = "degraded: legacy storage blocks in use; write server.project_storage (the hub startup log prints the block)"
+}
+
+// projectStorageTreeCheck is the health check key of a shared backend other
+// than nfs (cloudrun-volume, gke-shared-volume) whose mount point has no
+// project tree: the share is not mounted (only the mount point is), so the
+// hub, the one deleter of project trees on the share, cannot remove them.
+// Not critical: degraded, never unhealthy. On nfs the same fact is part of
+// the critical workspace_storage check instead (nfsProjectTreeStatus).
+const projectStorageTreeCheck = "project_storage_tree"
+
+// projectStorageTreeProbe runs the tree check of the delete path's
+// storageKept probe (project_delete_storage_kept.go); a variable so tests
+// can make it hang.
+var projectStorageTreeProbe = func(l projectfs.Layout) error { return l.CheckTreesMounted() }
+
+// projectTreeHealthProbe runs the health checks' tree check for one shared
+// Layout; a variable so tests can make it hang or count its calls.
+var projectTreeHealthProbe = func(l projectfs.Layout) error { return l.CheckTreeMounted() }
+
+// projectTreeProbesInFlight maps a Layout key to its in-flight tree probe
+// (*inFlightCall[error]), as workspaceHealthProbesInFlight does for the
+// mount stat: at most one stuck probe per mount, and later callers wait on
+// it with their own deadline.
+var projectTreeProbesInFlight sync.Map
+
+// startProjectTreeProbe returns the in-flight tree probe for l, starting one
+// if none is running.
+func startProjectTreeProbe(l projectfs.Layout) *inFlightCall[error] {
+	return joinOrStartInFlight(&projectTreeProbesInFlight, l.Key(), func() (func() error, func()) {
+		probe := projectTreeHealthProbe
+		return func() error { return probe(l) }, nil
+	})
+}
+
+// The fixed, path-free workspace_storage values of the nfs project tree check
+// (/healthz is unauthenticated: they name no host path and no configured value).
+const (
+	workspaceStorageShareEmpty   = "unhealthy: shared project storage is empty or not mounted"
+	workspaceStorageNoTree       = "unhealthy: shared project storage has no project tree"
+	workspaceStorageTreeTimedOut = "unhealthy: shared project storage check timed out"
+	workspaceStorageTreeError    = "unhealthy: shared project storage could not be checked"
+)
+
+// projectTreeOutcome is one tree check's result for the health checks.
+type projectTreeOutcome int
+
+const (
+	projectTreeOK projectTreeOutcome = iota
+	projectTreeShareEmpty
+	projectTreeMissing
+	projectTreeTimedOut
+	projectTreeError
+)
+
+// probeProjectTree runs (or joins) the tree probe of l and waits for it until
+// deadline. ErrNoProjectTree on a hub with no projects is OK: the tree
+// appears with the first project. The store read gets the time that remains;
+// a store error or timeout counts as having projects (hubHasProjects: fail
+// closed).
+func (s *Server) probeProjectTree(l projectfs.Layout, deadline time.Time) projectTreeOutcome {
+	call := startProjectTreeProbe(l)
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+	select {
+	case <-call.done:
+	case <-timer.C:
+		return projectTreeTimedOut
+	}
+	err := call.res
+	if err == nil {
+		return projectTreeOK
+	}
+	if !errors.Is(err, projectfs.ErrNoProjectTree) {
+		return projectTreeError
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	if !s.hubHasProjects(ctx) {
+		return projectTreeOK
+	}
+	if errors.Is(err, projectfs.ErrShareEmpty) {
+		return projectTreeShareEmpty
+	}
+	return projectTreeMissing
+}
+
+// nfsLayouts returns the distinct nfs Layouts of the hub's project storage
+// (the layout and its transitional shared-dir split), or none.
+func (s *Server) nfsLayouts() []projectfs.Layout {
+	layout, err := s.projectStorageLayout()
+	if err != nil {
+		return nil
+	}
+	var out []projectfs.Layout
+	seen := map[string]bool{}
+	for _, l := range []projectfs.Layout{layout, layout.SharedDirLayout()} {
+		l.SharedDirs = nil
+		if l.Backend != projectfs.BackendNFS || seen[l.Key()] {
+			continue
+		}
+		seen[l.Key()] = true
+		out = append(out, l)
+	}
+	return out
+}
+
+// nfsProjectTreeStatus returns "" when every nfs Layout of the hub has its
+// project tree (or the hub has no projects yet), else the fixed unhealthy
+// workspace_storage value. It is part of the critical workspace_storage
+// check, so /readyz answers 503 and /healthz reports unhealthy.
+func (s *Server) nfsProjectTreeStatus(deadline time.Time) string {
+	for _, l := range s.nfsLayouts() {
+		switch s.probeProjectTree(l, deadline) {
+		case projectTreeOK:
+			continue
+		case projectTreeShareEmpty:
+			return workspaceStorageShareEmpty
+		case projectTreeMissing:
+			return workspaceStorageNoTree
+		case projectTreeTimedOut:
+			return workspaceStorageTreeTimedOut
+		default:
+			return workspaceStorageTreeError
+		}
+	}
+	return ""
+}
+
+// checkProjectStorageTree reports, on a shared backend other than nfs, a
+// mount point without the project tree below it, before any delete needs
+// it (non-critical: degraded). nfs Layouts are skipped: their tree is part
+// of workspace_storage (nfsProjectTreeStatus). The probe is deduplicated
+// per Layout and bounded by workspaceHealthTimeout, so a hung mount cannot
+// block the health endpoint.
+func (s *Server) checkProjectStorageTree(checks map[string]string) {
+	layout, err := s.projectStorageLayout()
+	if err != nil {
+		return
+	}
+	var others []projectfs.Layout
+	seen := map[string]bool{}
+	for _, l := range []projectfs.Layout{layout, layout.SharedDirLayout()} {
+		l.SharedDirs = nil
+		if !l.Backend.Shared() || l.Backend == projectfs.BackendNFS || seen[l.Key()] {
+			continue
+		}
+		seen[l.Key()] = true
+		others = append(others, l)
+	}
+	if len(others) == 0 {
+		return
+	}
+	deadline := time.Now().Add(workspaceHealthTimeout)
+	for _, l := range others {
+		switch s.probeProjectTree(l, deadline) {
+		case projectTreeOK:
+			continue
+		case projectTreeTimedOut:
+			checks[projectStorageTreeCheck] = "degraded: the project tree check timed out"
+			return
+		default:
+			checks[projectStorageTreeCheck] = "degraded: the shared project storage has no project tree; the share may not be mounted"
+			return
+		}
+	}
+	checks[projectStorageTreeCheck] = HealthStatusHealthy
 }
 
 // healthStats counts running agents, projects and online runtime brokers
@@ -293,6 +468,9 @@ func (s *Server) checkWorkspaceStorageHealth(checks map[string]string) {
 	// block the health endpoint (and with it the readiness probes). Probes of
 	// the same mount share one in-flight stat; see workspaceHealthProbesInFlight.
 	call := startWorkspaceHealthProbe(mountPath, requireMount)
+	// One deadline for the whole check: the mount stat, and on nfs the
+	// project tree probe and its store read, share workspaceHealthTimeout.
+	deadline := time.Now().Add(workspaceHealthTimeout)
 	timer := time.NewTimer(workspaceHealthTimeout)
 	defer timer.Stop()
 
@@ -325,6 +503,14 @@ func (s *Server) checkWorkspaceStorageHealth(checks map[string]string) {
 			// "down" to scion server start/status and gce-start-hub.sh
 			// (ptone/scion#1094).
 			checks["workspace_storage_mount_verification"] = "unavailable: could not compare filesystem device IDs"
+		}
+		// On nfs the Hub must also see the share itself, not only the mount
+		// point: a state-only Hub on a shared layout is unsupported.
+		if wsCfg.Backend == string(projectfs.BackendNFS) {
+			if msg := s.nfsProjectTreeStatus(deadline); msg != "" {
+				checks["workspace_storage"] = msg
+				return
+			}
 		}
 		checks["workspace_storage"] = "healthy"
 	case <-timer.C:

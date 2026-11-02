@@ -2902,25 +2902,18 @@ func runGitClone(ctx context.Context, in ProvisionInput) error {
 			withToken, token = true, in.CloneToken
 		}
 	}
+	offered := ""
 	if withToken {
-		// Host-scoped credential helper: the token is offered only to the clone
-		// URL's host, carried in the environment and never in argv/URL/config; the
-		// helper first clears any inherited unscoped credential.helper. For a
-		// non-http(s) URL the token is ignored (git uses its own transport auth).
-		if scoped, ok := util.ScopedCredentialHelperEnv(env, gc.URL, token); ok {
-			env = scoped
-		}
-	} else if in.HostGitHardened && strings.HasPrefix(gc.URL, "https://") {
-		// A hardened host-side clone with no token offered, of an https URL
-		// that is not the project's recorded remote (CloneTokenRemote): git
-		// runs with no credential helper, no extra HTTP header and no
-		// askpass (util.NoCredentialHelperEnv), as the hub's local-backend
-		// clone and workspace pull do. The recorded remote itself keeps the
-		// host's own git authentication.
-		if _, bound := cloneTokenHost(in.CloneTokenRemote, gc.URL); !bound {
-			env = util.NoCredentialHelperEnv(env, gc.URL)
-		}
+		offered = token
 	}
+	// Remote authentication: no host credential of any kind (credential
+	// helpers, askpass, extra headers, netrc, client certificates, Kerberos,
+	// ssh identity, host global/system config), on every clone, the
+	// project's recorded remote included. With no token offered the clone is
+	// anonymous; with one, the token is the only credential, offered only to
+	// the clone URL's host through a scoped helper, carried in the environment
+	// and never in argv/URL/config. A non-http(s) URL ignores the token.
+	env = util.HostGitRemoteEnv(env, gc.URL, offered)
 	cmd.Env = env
 	output, err := cmd.CombinedOutput()
 	if err == nil {

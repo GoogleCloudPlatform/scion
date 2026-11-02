@@ -53,7 +53,7 @@ func TestUpdateAgentRequest_SendsConfigAndNewFields(t *testing.T) {
 	tz := "Europe/Paris"
 	got, err := updateBody(t, &UpdateAgentRequest{
 		StateVersion:     7,
-		Config:           &api.ScionConfig{Model: "claude-opus-4-6", MaxTurns: 50},
+		Config:           &api.ScionConfig{Model: "claude-opus-4-6", MaxTurns: api.IntPtr(50)},
 		GCPIdentity:      &GCPIdentityConfig{MetadataMode: "block"},
 		AgentRole:        &role,
 		ExplicitTimezone: &tz,
@@ -109,7 +109,7 @@ func TestUpdateAgentRequest_TaskAndConfigTaskIsAnError(t *testing.T) {
 }
 
 func TestUpdateAgentRequest_ConfigLeavesOutUnsetPointerKeys(t *testing.T) {
-	got, err := updateBody(t, &UpdateAgentRequest{Config: &api.ScionConfig{MaxTurns: 5}})
+	got, err := updateBody(t, &UpdateAgentRequest{Config: &api.ScionConfig{MaxTurns: api.IntPtr(5)}})
 	require.NoError(t, err)
 	// api.ScionConfig.Detached has no omitempty; the hub must not read a
 	// null detached as an edit of it.

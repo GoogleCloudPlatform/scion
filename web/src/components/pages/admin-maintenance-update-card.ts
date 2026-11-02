@@ -16,13 +16,17 @@
 
 /**
  * "Server Version & Updates" card of the maintenance page: the running
- * version from update-status, the last update result, and (in release
- * mode) the channel and release picker over GET .../releases.
+ * version from update-status, the last update result, and a panel per
+ * update mode: the channel and release picker over GET .../releases
+ * (release), or the configured branch, the upstream commit check and
+ * Rebuild (git). When a maintenance repo is configured a "Build from Git" |
+ * "Release binary" toggle picks the panel; it persists nothing (the hub
+ * records the mode once a rebuild or update has been verified).
  *
- * The card holds no update state of its own. Update asks the page with an
- * `update-request` event; the page owns the confirm dialog, the run
- * request and the restart/reconnect state machine, and passes the
- * reconnect state back in as properties.
+ * The card holds no update state of its own. Update and Rebuild ask the
+ * page with `update-request` and `rebuild-request` events; the page owns
+ * the confirm dialogs, the run request and the restart/reconnect state
+ * machine, and passes the reconnect state back in as properties.
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -41,6 +45,29 @@ export interface LastUpdate {
   to: string;
   status: 'verified' | 'failed' | 'rolled_back' | (string & {});
   at: string;
+  /**
+   * The release the boot-failure guard restored; only on rolled_back, and
+   * absent from hubs that do not report it (then from is shown).
+   */
+  restored?: string;
+  /** 'git' for a rebuild from Git (a rebuild-server run). */
+  mode?: string;
+}
+
+/** Detail of the card's `view-run` event. */
+export interface ViewRunDetail {
+  runId: string;
+  operationKey: 'update-binary' | 'rebuild-server';
+}
+
+/** The operation whose run recorded a last update. */
+export function lastUpdateOperation(last: LastUpdate): ViewRunDetail['operationKey'] {
+  return last.mode === 'git' ? 'rebuild-server' : 'update-binary';
+}
+
+/** The release a rolled-back update returned to: restored, else from. */
+export function rollbackTarget(last: LastUpdate): string {
+  return last.restored || last.from || 'the previous release';
 }
 
 /** An update whose hub restart is pending, from system.pending_update. */
@@ -51,7 +78,31 @@ export interface PendingUpdate {
   snapshot?: string;
   strategy?: string;
   at: string;
+  /** 'git' for a rebuild from Git, whose `to` is git-<sha12>. */
+  mode?: string;
+  /** The full commit of a rebuild from Git. */
+  commit?: string;
 }
+
+/**
+ * POST .../check-updates?mode=git: the running build's commit (or, when the
+ * checkout does not have it, the checkout's HEAD) against origin/<branch>.
+ */
+export interface GitCheckResult {
+  update_available: boolean;
+  /** The compared commit. */
+  current_commit?: string;
+  /** What current_commit is: the running build, or the checkout's HEAD. */
+  compared?: 'running' | 'checkout' | (string & {});
+  latest_commit?: string;
+  current_branch?: string;
+  tracking_ref?: string;
+  commits_behind?: number;
+  new_commits?: { hash: string; subject: string }[];
+}
+
+/** The update modes, as update-status reports them. */
+export type UpdateMode = 'git' | 'release';
 
 /**
  * GET /api/v1/admin/maintenance/update-status. Later phases add fields;
@@ -137,11 +188,24 @@ export const LAST_UPDATE_LABELS: Record<string, string> = {
   rolled_back: 'rolled back',
 };
 
-/**
- * Classes the hub installs in this phase. Older releases (downgrade,
- * switch-older) stay disabled until downgrade safety lands.
- */
-const SELECTABLE_CLASSES = new Set(['same', 'upgrade', 'switch-newer']);
+/** Older than the running version: the hub asks for a typed confirmation. */
+const OLDER_CLASSES = new Set(['downgrade', 'switch-older']);
+
+/** Classes the hub installs; older ones only after a typed confirmation. */
+const SELECTABLE_CLASSES = new Set(['same', 'upgrade', 'switch-newer', ...OLDER_CLASSES]);
+
+/** Whether a release class is older than the running version. */
+export function isOlderClass(cls: string | undefined): boolean {
+  return !!cls && OLDER_CLASSES.has(cls);
+}
+
+/** Why an older release cannot be picked on a hub without database snapshots. */
+export const NO_SNAPSHOTS_REASON =
+  "Older than the running version: this hub's database cannot be snapshotted, so it cannot roll back";
+
+/** The tooltip of an older entry that can be picked. */
+const OLDER_TOOLTIP =
+  'Older than the running version: installing it asks you to confirm the risks by typing its tag';
 
 const CHANNEL_SOURCE_DESCRIPTIONS: Record<string, string> = {
   selection: "chosen by an administrator's update",
@@ -178,11 +242,16 @@ export function isReleasesResponse(data: unknown): data is ReleasesResponse {
 }
 
 /**
- * Why a release cannot be picked, or null when it can. Not-installable,
- * below-floor and older releases are disabled; so is a class the page
- * does not know.
+ * Why a release cannot be picked, or null when it can. Not-installable and
+ * below-floor releases are disabled; so is a class the page does not know,
+ * and an older release when the hub reports that it cannot take database
+ * snapshots (snapshotsSupported false, a Postgres hub).
  */
-export function releaseDisabledReason(r: CatalogRelease, floor?: string): string | null {
+export function releaseDisabledReason(
+  r: CatalogRelease,
+  floor?: string,
+  snapshotsSupported = true
+): string | null {
   if (!r.installable) {
     return `Not installable: ${r.reason || 'the release has no verifiable binary'}`;
   }
@@ -193,7 +262,7 @@ export function releaseDisabledReason(r: CatalogRelease, floor?: string): string
         : "Below this hub's downgrade floor";
     case 'downgrade':
     case 'switch-older':
-      return 'Older than the running version: rolling back is not supported yet';
+      if (!snapshotsSupported) return NO_SNAPSHOTS_REASON;
   }
   if (!r.class || !SELECTABLE_CLASSES.has(r.class)) {
     return 'The hub did not say how this release compares to the running version';
@@ -209,12 +278,20 @@ export interface ReleaseBadge {
 }
 
 /** The badges of a release entry: Current, Local, Older, Not installable, Below floor. */
-export function releaseBadges(r: CatalogRelease, floor?: string): ReleaseBadge[] {
+export function releaseBadges(
+  r: CatalogRelease,
+  floor?: string,
+  snapshotsSupported = true
+): ReleaseBadge[] {
   const badges: ReleaseBadge[] = [];
   if (r.class === 'same') badges.push({ label: 'Current', variant: 'primary' });
   if (r.local) badges.push({ label: 'Local', variant: 'neutral' });
-  if (r.class === 'downgrade' || r.class === 'switch-older') {
-    badges.push({ label: 'Older', variant: 'warning', tooltip: releaseDisabledReason(r) ?? '' });
+  if (isOlderClass(r.class)) {
+    badges.push({
+      label: 'Older',
+      variant: 'warning',
+      tooltip: releaseDisabledReason(r, floor, snapshotsSupported) ?? OLDER_TOOLTIP,
+    });
   }
   if (!r.installable) {
     badges.push({
@@ -250,6 +327,7 @@ export function renderInstallerUnsupported(st: UpdateStatus): TemplateResult {
 }
 
 const RELEASES_PATH = '/api/v1/admin/maintenance/releases';
+const GIT_CHECK_PATH = '/api/v1/admin/maintenance/check-updates?mode=git';
 
 @customElement('scion-admin-maintenance-update-card')
 export class ScionAdminMaintenanceUpdateCard extends LitElement {
@@ -299,6 +377,33 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
 
   /** The running version the loaded release classes were computed against. */
   private releasesForVersion: string | null = null;
+
+  /** The panel picked with the mode toggle; null means the hub's mode. */
+  @state()
+  private pickedMode: UpdateMode | null = null;
+
+  @state()
+  private gitCheckLoading = false;
+
+  @state()
+  private gitCheckError: string | null = null;
+
+  @state()
+  private gitCheckResult: GitCheckResult | null = null;
+
+  /** The running commit the git check result was computed against. */
+  private gitCheckForCommit: string | null = null;
+
+  /**
+   * The panel shown: the toggle's pick when a maintenance repo is
+   * configured (the toggle is shown only then), otherwise the hub's mode.
+   */
+  get shownMode(): UpdateMode | null {
+    const st = this.status;
+    if (!st) return null;
+    if (st.mode.repoConfigured && this.pickedMode) return this.pickedMode;
+    return st.mode.effective;
+  }
 
   static override styles = css`
     :host {
@@ -470,6 +575,10 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
       color: var(--scion-text-muted, #64748b);
     }
 
+    .older-note {
+      color: var(--sl-color-warning-700, #a16207);
+    }
+
     sl-option sl-badge {
       margin-left: 0.25rem;
     }
@@ -482,11 +591,90 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
     .retry-releases {
       margin-top: 0.5rem;
     }
+
+    .mode-toggle,
+    .git-panel {
+      margin-top: 1rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .mode-note {
+      margin-top: 0.375rem;
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .git-panel .release-field {
+      display: flex;
+      gap: 0.5rem;
+      font-size: 0.8125rem;
+    }
+
+    .git-check {
+      margin-top: 0.75rem;
+      font-size: 0.8125rem;
+    }
+
+    .git-check-note {
+      margin-top: 0.25rem;
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .git-check-commits {
+      margin: 0.375rem 0 0;
+      padding-left: 1.25rem;
+    }
   `;
 
   protected override willUpdate(changed: PropertyValues<this>): void {
     super.willUpdate(changed);
-    if (changed.has('status')) this.maybeLoadReleases();
+    if (changed.has('status')) {
+      this.maybeLoadReleases();
+      // An upstream check is relative to the running commit.
+      const commit = this.status?.current.commit ?? null;
+      if (this.gitCheckResult && this.gitCheckForCommit !== commit) {
+        this.gitCheckResult = null;
+        this.gitCheckError = null;
+      }
+    }
+  }
+
+  private onModeChange(e: Event): void {
+    const value = (e.target as HTMLElement & { value: string }).value;
+    if (value !== 'git' && value !== 'release') return;
+    this.pickedMode = value;
+    this.maybeLoadReleases();
+  }
+
+  /**
+   * POST check-updates?mode=git: fetches origin in the maintenance repo and
+   * lists the upstream commits. Does nothing while a check is in flight.
+   */
+  async checkUpstream(): Promise<void> {
+    if (this.gitCheckLoading) return;
+    const commit = this.status?.current.commit ?? null;
+    this.gitCheckLoading = true;
+    this.gitCheckError = null;
+    try {
+      const res = await apiFetch(GIT_CHECK_PATH, { method: 'POST' });
+      if (!res.ok) {
+        throw new Error(await extractApiError(res, `HTTP ${res.status}`));
+      }
+      this.gitCheckResult = (await res.json()) as GitCheckResult;
+      this.gitCheckForCommit = commit;
+    } catch (err) {
+      this.gitCheckResult = null;
+      this.gitCheckError =
+        err instanceof Error ? err.message : 'Failed to check for upstream commits';
+    } finally {
+      this.gitCheckLoading = false;
+    }
+  }
+
+  private onRebuildClick(): void {
+    this.dispatchEvent(new CustomEvent('rebuild-request', { bubbles: true, composed: true }));
   }
 
   /**
@@ -496,7 +684,7 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
    */
   private maybeLoadReleases(): void {
     const st = this.status;
-    if (!st || st.mode.effective !== 'release' || this.releasesLoading) return;
+    if (!st || this.shownMode !== 'release' || this.releasesLoading) return;
     if (this.releases && this.releasesForVersion === st.current.version) return;
     if (this.releasesForVersion !== null && this.releasesForVersion !== st.current.version) {
       this.pickedChannel = null;
@@ -556,6 +744,15 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
     return this.status?.downgrade?.floor || undefined;
   }
 
+  /** False only when the hub says it cannot snapshot its database. */
+  private get snapshotsSupported(): boolean {
+    return this.status?.downgrade?.snapshotsSupported !== false;
+  }
+
+  private disabledReason(r: CatalogRelease): string | null {
+    return releaseDisabledReason(r, this.floor, this.snapshotsSupported);
+  }
+
   /** The release a picker value stands for in the selected channel. */
   private releaseFor(value: string): CatalogRelease | undefined {
     const ch = this.channelOf(this.selectedChannel);
@@ -568,14 +765,19 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
   private latestDisabledReason(): string | null {
     const latest = this.releaseFor(LATEST_VALUE);
     if (!latest) return 'The latest release is not in the list';
-    return releaseDisabledReason(latest, this.floor);
+    return this.disabledReason(latest);
   }
 
-  /** The picked release, else Latest when it can be picked, else nothing. */
+  /**
+   * The picked release, else Latest when it can be picked and is not
+   * older than the running version (a downgrade is never preselected),
+   * else nothing.
+   */
   private get selectedValue(): string {
     if (this.pickedRelease) return this.pickedRelease;
     const ch = this.channelOf(this.selectedChannel);
-    return ch?.latest && !this.latestDisabledReason() ? LATEST_VALUE : '';
+    if (!ch?.latest || this.latestDisabledReason()) return '';
+    return isOlderClass(this.releaseFor(LATEST_VALUE)?.class) ? '' : LATEST_VALUE;
   }
 
   /** Why Update is disabled for the current pick, or null when it is enabled. */
@@ -588,7 +790,7 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
     const r = value ? this.releaseFor(value) : undefined;
     if (!r) return 'Pick a release';
     if (r.class === 'same') return `The hub is already running ${r.tag}`;
-    return releaseDisabledReason(r, this.floor);
+    return this.disabledReason(r);
   }
 
   private onChannelChange(e: Event): void {
@@ -738,7 +940,9 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
           ${st.lastUpdate ? this.renderLastUpdate(st.lastUpdate) : nothing}
         </div>
         ${inst.supported ? nothing : renderInstallerUnsupported(st)}
-        ${st.mode.effective === 'release' ? this.renderReleasePanel() : nothing}
+        ${st.mode.repoConfigured ? this.renderModeToggle() : nothing}
+        ${this.shownMode === 'release' ? this.renderReleasePanel() : nothing}
+        ${this.shownMode === 'git' && st.mode.repoConfigured ? this.renderGitPanel(st) : nothing}
       </div>
     `;
   }
@@ -746,12 +950,20 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
   private renderLastUpdate(last: LastUpdate): TemplateResult {
     const label = LAST_UPDATE_LABELS[last.status] ?? last.status;
     const badge =
-      last.status === 'verified' ? 'completed' : last.status === 'failed' ? 'failed' : 'pending';
+      last.status === 'verified'
+        ? 'completed'
+        : last.status === 'failed' || last.status === 'rolled_back'
+          ? 'failed'
+          : 'pending';
     return html`
       <div class="release-field last-update">
         <span class="release-label">Last update:</span>
         <span>
-          ${last.from ? html`${last.from} &rarr; ` : nothing}${last.to}
+          ${last.status === 'rolled_back'
+            ? html`<span class="last-update-rollback"
+                >Rolled back to ${rollbackTarget(last)} after ${last.to} failed to start</span
+              >`
+            : html`${last.from ? html`${last.from} &rarr; ` : nothing}${last.to}`}
           <span class="status-badge ${badge}">${label}</span>
           ${last.at ? html`${this.formatRelativeTime(last.at)}` : nothing}
           ${last.runId
@@ -761,8 +973,8 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
                 @click=${(e: Event) => {
                   e.preventDefault();
                   this.dispatchEvent(
-                    new CustomEvent<{ runId: string }>('view-run', {
-                      detail: { runId: last.runId },
+                    new CustomEvent<ViewRunDetail>('view-run', {
+                      detail: { runId: last.runId, operationKey: lastUpdateOperation(last) },
                       bubbles: true,
                       composed: true,
                     })
@@ -876,8 +1088,128 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
             Update
           </sl-button>
           ${blocked ? html`<span class="update-blocked">${blocked}</span>` : nothing}
+          ${!blocked && isOlderClass(selected?.class)
+            ? html`<span class="older-note"
+                >${selected?.tag} is older than the running version: the hub lists the risks and
+                asks you to type the tag before it installs it.</span
+              >`
+            : nothing}
           ${selected?.notesUrl ? renderReleaseNotesLink(selected.notesUrl) : nothing}
         </div>
+      </div>
+    `;
+  }
+
+  private renderModeToggle(): TemplateResult {
+    return html`
+      <div class="mode-toggle">
+        <sl-radio-group
+          class="mode-select"
+          label="Update from"
+          size="small"
+          .value=${this.shownMode ?? ''}
+          @sl-change=${(e: Event) => this.onModeChange(e)}
+        >
+          <sl-radio-button value="git">Build from Git</sl-radio-button>
+          <sl-radio-button value="release">Release binary</sl-radio-button>
+        </sl-radio-group>
+        ${this.status && this.shownMode !== this.status.mode.effective
+          ? html`<div class="mode-note">
+              The hub switches to this mode once
+              ${this.shownMode === 'git' ? 'a rebuild' : 'an update'} has been installed and
+              verified.
+            </div>`
+          : nothing}
+      </div>
+    `;
+  }
+
+  private renderGitPanel(st: UpdateStatus): TemplateResult {
+    const blocked = !st.installer.supported
+      ? 'The installer cannot update this hub.'
+      : this.busy
+        ? 'An update or rebuild is in progress.'
+        : null;
+    return html`
+      <div class="git-panel">
+        <div class="release-field">
+          <span class="release-label">Branch:</span>
+          ${st.mode.repoBranch
+            ? html`<code class="git-branch">${st.mode.repoBranch}</code>`
+            : html`<span class="git-branch">the checkout's current branch</span>`}
+        </div>
+        <div class="release-actions">
+          <sl-button
+            size="small"
+            class="check-upstream"
+            ?loading=${this.gitCheckLoading}
+            ?disabled=${this.gitCheckLoading}
+            @click=${() => this.checkUpstream()}
+          >
+            <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+            Check for upstream commits
+          </sl-button>
+          <sl-button
+            variant="warning"
+            size="small"
+            class="rebuild"
+            ?disabled=${!!blocked}
+            @click=${() => this.onRebuildClick()}
+          >
+            <sl-icon slot="prefix" name="git"></sl-icon>
+            Rebuild
+          </sl-button>
+          ${blocked ? html`<span class="update-blocked">${blocked}</span>` : nothing}
+        </div>
+        ${this.renderGitCheck()}
+      </div>
+    `;
+  }
+
+  private renderGitCheck(): TemplateResult | typeof nothing {
+    if (this.gitCheckError) {
+      return html`
+        <sl-alert variant="danger" open class="git-check-error">
+          <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+          Could not check for upstream commits: ${this.gitCheckError}
+        </sl-alert>
+      `;
+    }
+    const r = this.gitCheckResult;
+    if (!r) return nothing;
+    const running = r.compared === 'running';
+    const subject = running ? 'The running build' : 'The repository checkout';
+    const commit = r.current_commit
+      ? html` (<code>${r.current_commit.slice(0, 12)}</code>)`
+      : nothing;
+    const ref = r.tracking_ref || (r.current_branch ? `origin/${r.current_branch}` : 'upstream');
+    const checkoutNote = running
+      ? nothing
+      : html`<div class="git-check-note">
+          The running build's commit could not be found in the repository checkout, so the checkout
+          was compared instead.
+        </div>`;
+    if (!r.update_available) {
+      return html`<div class="git-check up-to-date">
+        <div class="git-check-summary">
+          ${subject}${commit} is up to date with <code>${ref}</code>.
+        </div>
+        ${checkoutNote}
+      </div>`;
+    }
+    const n = r.commits_behind ?? r.new_commits?.length ?? 0;
+    return html`
+      <div class="git-check">
+        <div class="git-check-summary">
+          ${n} new commit${n === 1 ? '' : 's'} on <code>${ref}</code> that
+          ${subject.toLowerCase()}${commit} does not have.
+        </div>
+        ${checkoutNote}
+        ${r.new_commits?.length
+          ? html`<ul class="git-check-commits">
+              ${r.new_commits.map((c) => html`<li><code>${c.hash}</code> ${c.subject}</li>`)}
+            </ul>`
+          : nothing}
       </div>
     `;
   }
@@ -908,7 +1240,7 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
       `);
     }
     for (const r of ch.releases) {
-      const reason = releaseDisabledReason(r, this.floor);
+      const reason = this.disabledReason(r);
       const date = this.formatDate(r.publishedAt);
       options.push(html`
         <sl-option
@@ -918,7 +1250,7 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
           ?disabled=${!!reason}
           title=${reason ?? ''}
           >${r.tag}${date ? html`<span slot="suffix" class="release-date">${date}</span>` : nothing}
-          ${releaseBadges(r, this.floor).map((b) =>
+          ${releaseBadges(r, this.floor, this.snapshotsSupported).map((b) =>
             b.tooltip
               ? html`<sl-tooltip slot="suffix" content=${b.tooltip}
                   ><sl-badge variant=${b.variant} pill class="release-badge">${b.label}</sl-badge>

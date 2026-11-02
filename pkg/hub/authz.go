@@ -560,6 +560,12 @@ type AuthzService struct {
 	legacyFallbackWarn     *hookRefusalLimiter
 	legacyFallbackWarnOnce sync.Once
 
+	// uatIntrinsicUses counts uses of the intrinsic set of token-recorded
+	// hops (authz_uat_intrinsic_metrics.go); uatIntrinsicMetrics, when set,
+	// exports them.
+	uatIntrinsicUses    atomic.Int64
+	uatIntrinsicMetrics uatIntrinsicMetrics
+
 	// relationshipResolver handles progeny relationship grants. Lazily
 	// initialized on first use.
 	relationshipResolver *RelationshipGrantResolver

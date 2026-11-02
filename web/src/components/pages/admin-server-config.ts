@@ -59,6 +59,7 @@ import {
   settingsErrorStyles,
 } from '../shared/settings-error-views.js';
 import './admin-experiments.js';
+import './admin-chat-retention.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import {
   issuesAt,
@@ -66,6 +67,11 @@ import {
   type QuantityIssues,
   type ResourceSpecInput,
 } from '../../shared/resource-quantity.js';
+import {
+  validateK8sRuntimeFields,
+  type PlacementIssue,
+  type Toleration,
+} from '../../shared/k8s-placement.js';
 import {
   type ImageRegistryProvenance,
   hasOtherProfileEnvOverrides,
@@ -368,6 +374,13 @@ interface V1RuntimeConfig {
   cloudrun?: V1CloudRunConfig;
   cloudrun_instances?: V1CloudRunInstancesConfig;
   safe_to_evict?: boolean;
+  // Kubernetes placement and identity (ptone/scion#6580).
+  node_selector?: Record<string, string>;
+  tolerations?: Toleration[];
+  runtime_class_name?: string;
+  kubernetes_service_account_mappings?: Record<string, string>;
+  kubernetes_block_service_account?: string;
+  priority_class_name?: string;
 }
 
 // Sets or clears one key in a runtime's Cloud Run block, and drops the
@@ -765,6 +778,12 @@ const CONTAINER_RUNTIME_KEYS = [
   'gke',
   'list_all_namespaces',
   'safe_to_evict',
+  'node_selector',
+  'tolerations',
+  'runtime_class_name',
+  'kubernetes_service_account_mappings',
+  'kubernetes_block_service_account',
+  'priority_class_name',
 ] as const;
 
 /**
@@ -1792,6 +1811,25 @@ export class ScionPageAdminServerConfig extends LitElement {
       margin-bottom: 1rem;
     }
 
+    .k8s-placement {
+      margin-top: 0.75rem;
+    }
+    .k8s-placement summary {
+      cursor: pointer;
+      font-weight: 600;
+      margin-bottom: 0.5rem;
+    }
+    .k8s-row {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+      margin-bottom: 0.25rem;
+    }
+    .k8s-row sl-input,
+    .k8s-row sl-select {
+      flex: 1;
+    }
+
     .field-warning {
       display: block;
       color: var(--sl-color-warning-700, #a16207);
@@ -2193,6 +2231,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           JSON.parse(JSON.stringify(data.runtimes)) as Record<string, V1RuntimeConfig>
         )
       : {};
+    this.k8sRows.clear();
     this.loadedRuntimes = JSON.parse(JSON.stringify(this.runtimes)) as Record<
       string,
       V1RuntimeConfig
@@ -4144,6 +4183,12 @@ export class ScionPageAdminServerConfig extends LitElement {
                   errors on the Runtimes &amp; Profiles tab before saving.
                 </div>`
               : nothing}
+            ${this.hasPlacementErrors
+              ? html`<div class="error placement-blocked" style="margin-bottom:0.75rem;">
+                  Cannot save: fix the Kubernetes placement values marked as invalid
+                  (${this.placementIssues.errors.map((e) => e.path).join(', ')}).
+                </div>`
+              : nothing}
             ${this.hasResourceQuantityErrors
               ? html`<div class="error resource-quantity-blocked" style="margin-bottom:0.75rem;">
                   Cannot save: fix the resource values marked as invalid
@@ -4154,7 +4199,9 @@ export class ScionPageAdminServerConfig extends LitElement {
               <sl-button
                 variant="primary"
                 ?loading=${this.saving}
-                ?disabled=${this.hasHarnessConfigErrors || this.hasResourceQuantityErrors}
+                ?disabled=${this.hasHarnessConfigErrors ||
+                this.hasResourceQuantityErrors ||
+                this.hasPlacementErrors}
                 @click=${() => {
                   void this.handleSave();
                 }}
@@ -5236,6 +5283,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
       ${this.renderHubObservabilitySection()} ${this.renderNativeChatSection()}
       ${this.renderMessageBrokerSection()} ${this.renderCrossProjectMessagingSection()}
+      <scion-admin-chat-retention></scion-admin-chat-retention>
     `;
   }
 
@@ -5594,8 +5642,342 @@ export class ScionPageAdminServerConfig extends LitElement {
                 </div>
               `}
         </div>
+        ${this.isKubernetesRuntime(name) ? this.renderK8sPlacement(name, rt, readOnly) : nothing}
       </sl-card>
     `;
+  }
+
+  // Key/value rows being edited, per runtime and map field, so a row with
+  // an empty or duplicate key can exist while it is typed. The runtime's
+  // map is rebuilt from the rows on every edit (rows with an empty key are
+  // left out). Cleared on load.
+  private k8sRows = new Map<string, Array<[string, string]>>();
+
+  private mapRows(
+    name: string,
+    field: 'node_selector' | 'kubernetes_service_account_mappings'
+  ): Array<[string, string]> {
+    const id = `${name}\u0000${field}`;
+    let rows = this.k8sRows.get(id);
+    if (!rows) {
+      rows = Object.entries(this.runtimes[name]?.[field] ?? {});
+      this.k8sRows.set(id, rows);
+    }
+    return rows;
+  }
+
+  private setMapRows(
+    name: string,
+    field: 'node_selector' | 'kubernetes_service_account_mappings',
+    rows: Array<[string, string]>
+  ): void {
+    this.k8sRows.set(`${name}\u0000${field}`, rows);
+    const map: Record<string, string> = {};
+    for (const [k, v] of rows) if (k !== '') map[k] = v;
+    this.setRuntimeValue(name, field, Object.keys(map).length > 0 ? map : undefined);
+  }
+
+  /** Sets or removes one key of a runtime entry. */
+  private setRuntimeValue(name: string, field: keyof V1RuntimeConfig, value: unknown): void {
+    const updated = { ...this.runtimes };
+    const rt = { ...updated[name] } as Record<string, unknown>;
+    if (value === undefined || value === '') {
+      delete rt[field];
+    } else {
+      rt[field] = value;
+    }
+    updated[name] = rt;
+    this.runtimes = updated;
+  }
+
+  /**
+   * Placement and identity problems of every Kubernetes runtime entry, as
+   * the hub's save check sees them: a problem in a field the form changed
+   * (or on a new entry) is an error and blocks Save; one in a field still
+   * as loaded is a warning, as the hub accepts it with a save warning.
+   */
+  private get placementIssues(): { errors: PlacementIssue[]; warnings: PlacementIssue[] } {
+    const errors: PlacementIssue[] = [];
+    const warnings: PlacementIssue[] = [];
+    for (const [name, rt] of Object.entries(this.runtimes)) {
+      if (!this.isKubernetesRuntime(name)) continue;
+      const loaded = hasOwn(this.loadedRuntimes, name) ? this.loadedRuntimes[name] : undefined;
+      for (const issue of validateK8sRuntimeFields(name, rt)) {
+        const field = issue.path.slice(`runtimes.${name}.`.length) as keyof V1RuntimeConfig;
+        const same =
+          loaded !== undefined && JSON.stringify(loaded[field]) === JSON.stringify(rt[field]);
+        (same ? warnings : errors).push(issue);
+      }
+    }
+    for (const [name, rows] of this.k8sRows) {
+      const [rtName, field] = name.split('\u0000');
+      if (!hasOwn(this.runtimes, rtName) || !this.isKubernetesRuntime(rtName)) continue;
+      const keys = rows.map(([k]) => k);
+      if (keys.some((k, i) => k === '' && rows[i][1] !== '')) {
+        errors.push({
+          path: `runtimes.${rtName}.${field}`,
+          message: 'a row has a value but no key',
+        });
+      }
+      if (new Set(keys.filter((k) => k !== '')).size !== keys.filter((k) => k !== '').length) {
+        errors.push({ path: `runtimes.${rtName}.${field}`, message: 'the same key appears twice' });
+      }
+    }
+    return { errors, warnings };
+  }
+
+  private get hasPlacementErrors(): boolean {
+    return this.placementIssues.errors.length > 0;
+  }
+
+  /** Inline placement errors and warnings for one runtime field. */
+  private renderPlacementIssues(path: string): typeof nothing | TemplateResult {
+    const { errors, warnings } = this.placementIssues;
+    const e = errors.filter((i) => i.path === path);
+    const w = warnings.filter((i) => i.path === path);
+    if (e.length === 0 && w.length === 0) return nothing;
+    return html`${e.map(
+      (i) => html`<span class="field-error" data-placement-error=${path}>${i.message}</span>`
+    )}${w.map(
+      (i) =>
+        html`<span class="hint field-warning" data-placement-warning=${path}
+          >${i.message} (stored value; the hub saves it with a warning)</span
+        >`
+    )}`;
+  }
+
+  /** The Kubernetes placement and identity fields of a kubernetes runtime entry. */
+  private renderK8sPlacement(name: string, rt: V1RuntimeConfig, readOnly: boolean): TemplateResult {
+    const p = `runtimes.${name}`;
+    const tolerations = rt.tolerations ?? [];
+    // Event handlers read the list as it is when they run, not as rendered,
+    // so two edits between renders both apply.
+    const currentTolerations = (): Toleration[] =>
+      (this.runtimes[name]?.tolerations ?? []).map((x) => ({ ...x }));
+    const setTolerations = (next: Toleration[]) =>
+      this.setRuntimeValue(name, 'tolerations', next.length > 0 ? next : undefined);
+    const mapEditor = (
+      field: 'node_selector' | 'kubernetes_service_account_mappings',
+      keyPlaceholder: string,
+      valuePlaceholder: string
+    ) => {
+      const rows = this.mapRows(name, field);
+      return html`<div class="k8s-rows" data-k8s-field=${field}>
+        ${rows.map(
+          ([k, v], i) =>
+            html`<div class="k8s-row">
+              <sl-input
+                class="k8s-key"
+                size="small"
+                value=${k}
+                placeholder=${keyPlaceholder}
+                ?disabled=${readOnly}
+                @sl-input=${(e: Event) => {
+                  const next = this.mapRows(name, field).map((r) => [...r] as [string, string]);
+                  next[i][0] = (e.target as HTMLInputElement).value;
+                  this.setMapRows(name, field, next);
+                }}
+              ></sl-input>
+              <sl-input
+                class="k8s-value"
+                size="small"
+                value=${v}
+                placeholder=${valuePlaceholder}
+                ?disabled=${readOnly}
+                @sl-input=${(e: Event) => {
+                  const next = this.mapRows(name, field).map((r) => [...r] as [string, string]);
+                  next[i][1] = (e.target as HTMLInputElement).value;
+                  this.setMapRows(name, field, next);
+                }}
+              ></sl-input>
+              ${!readOnly
+                ? html`<sl-icon-button
+                    class="k8s-remove"
+                    name="x-lg"
+                    label="Remove"
+                    @click=${() =>
+                      this.setMapRows(
+                        name,
+                        field,
+                        this.mapRows(name, field).filter((_, j) => j !== i)
+                      )}
+                  ></sl-icon-button>`
+                : nothing}
+            </div>`
+        )}
+        ${!readOnly
+          ? html`<sl-button
+              class="k8s-add"
+              size="small"
+              @click=${() => this.setMapRows(name, field, [...this.mapRows(name, field), ['', '']])}
+              >Add</sl-button
+            >`
+          : nothing}
+      </div>`;
+    };
+    const textField = (
+      field: 'runtime_class_name' | 'kubernetes_block_service_account' | 'priority_class_name',
+      label: string,
+      placeholder: string,
+      hint: string
+    ) =>
+      html`<div class="form-field">
+        <label>${label}</label>
+        <sl-input
+          class="k8s-${field}"
+          value=${rt[field] ?? ''}
+          placeholder=${placeholder}
+          ?disabled=${readOnly}
+          @sl-input=${(e: Event) =>
+            this.setRuntimeValue(name, field, (e.target as HTMLInputElement).value)}
+        ></sl-input>
+        <span class="hint">${hint}</span>
+        ${this.renderPlacementIssues(`${p}.${field}`)}
+      </div>`;
+    return html`<details class="k8s-placement" ?open=${this.k8sSectionHasValues(rt)}>
+      <summary>Kubernetes placement and identity</summary>
+      <div class="form-grid">
+        <div class="form-field full-width">
+          <label>Node selector</label>
+          <span class="hint">Node labels agent pods must match (label key to value).</span>
+          ${mapEditor('node_selector', 'e.g. scion.dev/pool', 'e.g. agents')}
+          ${this.renderPlacementIssues(`${p}.node_selector`)}
+        </div>
+        <div class="form-field full-width">
+          <label>Tolerations</label>
+          <span class="hint">Taints agent pods tolerate. Exists matches any value.</span>
+          <div class="k8s-rows" data-k8s-field="tolerations">
+            ${tolerations.map(
+              (t, i) =>
+                html`<div class="k8s-row">
+                  <sl-input
+                    class="tol-key"
+                    size="small"
+                    value=${t.key ?? ''}
+                    placeholder="key"
+                    ?disabled=${readOnly}
+                    @sl-input=${(e: Event) => {
+                      const next = currentTolerations();
+                      const v = (e.target as HTMLInputElement).value;
+                      if (v) next[i].key = v;
+                      else delete next[i].key;
+                      setTolerations(next);
+                    }}
+                  ></sl-input>
+                  <sl-select
+                    class="tol-operator"
+                    size="small"
+                    value=${t.operator || 'Equal'}
+                    ?disabled=${readOnly}
+                    @sl-change=${(e: Event) => {
+                      const next = currentTolerations();
+                      next[i].operator = (e.target as HTMLSelectElement).value;
+                      if (next[i].operator === 'Exists') delete next[i].value;
+                      setTolerations(next);
+                    }}
+                  >
+                    <sl-option value="Equal">Equal</sl-option>
+                    <sl-option value="Exists">Exists</sl-option>
+                  </sl-select>
+                  <sl-input
+                    class="tol-value"
+                    size="small"
+                    value=${t.value ?? ''}
+                    placeholder="value"
+                    ?disabled=${readOnly || t.operator === 'Exists'}
+                    @sl-input=${(e: Event) => {
+                      const next = currentTolerations();
+                      const v = (e.target as HTMLInputElement).value;
+                      if (v) next[i].value = v;
+                      else delete next[i].value;
+                      setTolerations(next);
+                    }}
+                  ></sl-input>
+                  <sl-select
+                    class="tol-effect"
+                    size="small"
+                    value=${t.effect || 'any'}
+                    ?disabled=${readOnly}
+                    @sl-change=${(e: Event) => {
+                      const next = currentTolerations();
+                      const v = (e.target as HTMLSelectElement).value;
+                      if (v && v !== 'any') next[i].effect = v;
+                      else delete next[i].effect;
+                      setTolerations(next);
+                    }}
+                  >
+                    <sl-option value="any">any effect</sl-option>
+                    <sl-option value="NoSchedule">NoSchedule</sl-option>
+                    <sl-option value="PreferNoSchedule">PreferNoSchedule</sl-option>
+                    <sl-option value="NoExecute">NoExecute</sl-option>
+                  </sl-select>
+                  ${!readOnly
+                    ? html`<sl-icon-button
+                        class="k8s-remove"
+                        name="x-lg"
+                        label="Remove"
+                        @click=${() =>
+                          setTolerations(currentTolerations().filter((_, j) => j !== i))}
+                      ></sl-icon-button>`
+                    : nothing}
+                </div>`
+            )}
+            ${!readOnly
+              ? html`<sl-button
+                  class="k8s-add"
+                  size="small"
+                  @click=${() => setTolerations([...currentTolerations(), { operator: 'Equal' }])}
+                  >Add</sl-button
+                >`
+              : nothing}
+          </div>
+          ${this.renderPlacementIssues(`${p}.tolerations`)}
+        </div>
+        ${textField(
+          'runtime_class_name',
+          'Runtime class',
+          'e.g. gvisor',
+          'RuntimeClass for agent pods. A profile that sets one wins.'
+        )}
+        ${textField(
+          'priority_class_name',
+          'Priority class',
+          'e.g. agents-default',
+          'PriorityClass for agent pods; it must exist on the cluster.'
+        )}
+        <div class="form-field full-width">
+          <label>Service account mappings</label>
+          <span class="hint"
+            >GCP service account to Kubernetes ServiceAccount (Workload Identity), for GCP identity
+            mode Assign.</span
+          >
+          ${mapEditor(
+            'kubernetes_service_account_mappings',
+            'name@project.iam.gserviceaccount.com',
+            'Kubernetes ServiceAccount'
+          )}
+          ${this.renderPlacementIssues(`${p}.kubernetes_service_account_mappings`)}
+        </div>
+        ${textField(
+          'kubernetes_block_service_account',
+          'Block service account',
+          'e.g. agent-block',
+          'Kubernetes ServiceAccount a pod runs as in GCP identity mode Block.'
+        )}
+      </div>
+    </details>`;
+  }
+
+  /** Whether any Kubernetes placement or identity field holds a value (the section starts open then). */
+  private k8sSectionHasValues(rt: V1RuntimeConfig): boolean {
+    return (
+      Object.keys(rt.node_selector ?? {}).length > 0 ||
+      (rt.tolerations ?? []).length > 0 ||
+      !!rt.runtime_class_name ||
+      !!rt.priority_class_name ||
+      Object.keys(rt.kubernetes_service_account_mappings ?? {}).length > 0 ||
+      !!rt.kubernetes_block_service_account
+    );
   }
 
   /**

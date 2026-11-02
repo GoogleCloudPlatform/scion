@@ -1065,6 +1065,48 @@ field in the start and restart bodies (§3.6).
 
 ---
 
+### 5.11 Runtime Broker Workspace Download
+
+```
+POST /api/v1/runtime-brokers/{brokerId}/agents/{agentId}/workspace-download
+```
+
+Internal endpoint a runtime broker pages through to bootstrap a hub-managed
+workspace upload without storage credentials of its own. The Hub asks for it
+by sending `workspaceDownloadMode: "signed_urls"` in the create request (only
+when its storage is GCS). The Hub lists the agent's uploaded files under
+`<WorkspaceStoragePath>/files/` with its own credential and answers each page
+with one GET-only signed URL per file. The response is never compressed.
+
+Checks, in order, all failing closed:
+1. HMAC broker identity matching `{brokerId}`, else `403`.
+2. The agent exists and is assigned to that broker, else `404`.
+3. The broker still provides for the agent's project, else `403`.
+4. The agent has a workspace upload at the prefix the Hub derives from the
+   agent row, and is not being deleted, else `409`.
+5. The Hub's storage is GCS, else `409 workspace_download_unsupported`.
+6. The body is at most 4 KiB and the cursor lies inside the agent's prefix,
+   else `400`.
+
+**Request Body:** `{"cursor": "string"}`; empty or absent for the first page.
+
+**Response:** `200 OK`
+```json
+{
+  "files": [{"path": "src/main.go", "url": "<signed GET URL>", "size": 123}],
+  "nextCursor": "string",   // empty on the last page; a page can be empty while nextCursor is set
+  "expires": "2026-01-01T00:15:00Z",  // on the Hub's clock
+  "expiresInSeconds": 900   // the same lifetime, relative; the broker measures it on its own clock
+}
+```
+
+A page lists at most 500 objects. Names are filtered by one shared rule table
+(`transfer.ExcludeWorkspaceObject`): the root `.scion` entry and everything
+under it (in any letter case, because a case-insensitive filesystem resolves
+`.SCION` to the same entry), directory objects and invalid relative paths are
+left out, and the broker applies the same table again, also when it writes. URLs expire after 15 minutes; the broker
+fetches a page again with the same cursor when they expire or are refused.
+
 ## 6. Template Endpoints
 
 ### 6.1 List Templates

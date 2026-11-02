@@ -16,6 +16,7 @@ package api
 
 import (
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -46,14 +47,73 @@ var clearableConfigKeys = map[string]bool{
 	"system_prompt":   true,
 }
 
+// resourceSubPaths are the ScionConfig.ClearedFields entries that name one
+// sub-field of resources (ptone/scion#5676): clearing one removes the
+// agent's own value for that sub-field only, so the per-start resource
+// tiers (profile, hub agent_defaults, settings default_resources, the
+// built-in CPU default) fill it, while the sub-fields the agent still sets
+// are kept. A Runtime Broker that applies them advertises the
+// clearedResourceSubfields capability; an older one ignores them.
+var resourceSubPaths = map[string]func(*ResourceSpec) *string{
+	"resources.requests.cpu":    func(r *ResourceSpec) *string { return &r.Requests.CPU },
+	"resources.requests.memory": func(r *ResourceSpec) *string { return &r.Requests.Memory },
+	"resources.limits.cpu":      func(r *ResourceSpec) *string { return &r.Limits.CPU },
+	"resources.limits.memory":   func(r *ResourceSpec) *string { return &r.Limits.Memory },
+	"resources.disk":            func(r *ResourceSpec) *string { return &r.Disk },
+}
+
+// resourceSubPathList is resourceSubPaths' keys, sorted, built once.
+// TestResourceSubPaths pins that the two hold the same paths.
+var resourceSubPathList = []string{
+	"resources.disk",
+	"resources.limits.cpu",
+	"resources.limits.memory",
+	"resources.requests.cpu",
+	"resources.requests.memory",
+}
+
+// ResourceSubPaths returns the resources sub-field ClearedFields entries,
+// sorted. The result is a copy the caller may change.
+func ResourceSubPaths() []string {
+	return slices.Clone(resourceSubPathList)
+}
+
+// IsResourceSubPath reports whether path names one resources sub-field
+// (see ResourceSubPaths).
+func IsResourceSubPath(path string) bool {
+	_, ok := resourceSubPaths[path]
+	return ok
+}
+
+// ResourceSubField returns a pointer to the sub-field of r that the
+// resources sub-path path names, or nil when path is not one or r is nil.
+func ResourceSubField(r *ResourceSpec, path string) *string {
+	f, ok := resourceSubPaths[path]
+	if !ok || r == nil {
+		return nil
+	}
+	return f(r)
+}
+
+// ResourceSubFieldValue returns the value of the sub-field of r that the
+// resources sub-path path names, or "" when path is not one or r is nil
+// (ResourceSubField returns nil), so callers never dereference nil.
+func ResourceSubFieldValue(r *ResourceSpec, path string) string {
+	if f := ResourceSubField(r, path); f != nil {
+		return *f
+	}
+	return ""
+}
+
 // ClearableConfigPath reports whether path is a ScionConfig.ClearedFields
-// entry a Runtime Broker applies: a key in clearableConfigKeys, or
-// ClearedEnvPathPrefix followed by a non-empty env key.
+// entry a Runtime Broker applies: a key in clearableConfigKeys, a resources
+// sub-field (ResourceSubPaths), or ClearedEnvPathPrefix followed by a
+// non-empty env key.
 func ClearableConfigPath(path string) bool {
 	if k, ok := strings.CutPrefix(path, ClearedEnvPathPrefix); ok {
 		return k != ""
 	}
-	return clearableConfigKeys[path]
+	return clearableConfigKeys[path] || IsResourceSubPath(path)
 }
 
 // scionConfigFieldIndex indexes ScionConfig's fields by json key.
@@ -71,11 +131,13 @@ var scionConfigFieldIndex = func() map[string]int {
 
 // ApplyClearedFields applies the cleared paths to cfg, in place. An env path
 // removes that key from cfg.Env (a template's env is applied at start as a
-// final fill, so it is never copied here). Any other path takes its value
-// from inherit when inherit is non-nil, and is zeroed otherwise, so the
-// value the start derives under cfg applies. A path ClearableConfigPath
-// does not accept is left alone and returned in ignored. Applying the same
-// paths again gives the same result.
+// final fill, so it is never copied here). A resources sub-path empties
+// that sub-field of cfg.Resources and never reads inherit: templates never
+// supply resources, so the per-start resource tiers fill it. Any other path
+// takes its value from inherit when inherit is non-nil, and is zeroed
+// otherwise, so the value the start derives under cfg applies. A path
+// ClearableConfigPath does not accept is left alone and returned in
+// ignored. Applying the same paths again gives the same result.
 func ApplyClearedFields(cfg *ScionConfig, paths []string, inherit *ScionConfig) (ignored []string) {
 	if cfg == nil {
 		return nil
@@ -88,6 +150,12 @@ func ApplyClearedFields(cfg *ScionConfig, paths []string, inherit *ScionConfig) 
 		}
 		if k, ok := strings.CutPrefix(p, ClearedEnvPathPrefix); ok {
 			delete(cfg.Env, k)
+			continue
+		}
+		if IsResourceSubPath(p) {
+			if f := ResourceSubField(cfg.Resources, p); f != nil {
+				*f = ""
+			}
 			continue
 		}
 		i, ok := scionConfigFieldIndex[p]

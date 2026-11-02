@@ -45,7 +45,11 @@ func (s *Server) LoadChatIntegrationSecret(ctx context.Context, name string) (st
 	if s.store == nil {
 		return "", nil
 	}
-	return s.store.GetSecretValue(ctx, name, store.ScopeHub, s.hubID)
+	stored, err := s.store.GetSecretValue(ctx, name, store.ScopeHub, s.hubID)
+	if err != nil {
+		return "", err
+	}
+	return s.openHubSecret(ctx, stored)
 }
 
 // HasChatIntegrationSecret checks whether a chat integration secret exists

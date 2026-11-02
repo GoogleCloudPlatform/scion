@@ -625,7 +625,7 @@ func derivedCredentialKind(t *testing.T, identity Identity) CredentialKind {
 // exact deliver permission, or when the source authority is not live, even
 // though the delegator holds secret.deliver through a role.
 func TestDeliveryGate_Part2DeliverEffectCeilingRequired(t *testing.T) {
-	setup := func(t *testing.T, name string, ceiling store.EffectCeiling) (*goldenFixture, *hubDeliveryIdentity) {
+	setup := func(t *testing.T, name string, ceiling store.EffectCeiling, source ...store.SourceCredentialKind) (*goldenFixture, *hubDeliveryIdentity) {
 		t.Helper()
 		f := newGoldenFixture(t)
 		ctx := context.Background()
@@ -637,6 +637,13 @@ func TestDeliveryGate_Part2DeliverEffectCeilingRequired(t *testing.T) {
 		})
 		require.NoError(t, err)
 
+		// The edge is recorded from a session unless the case names a
+		// source: the deliver permissions are intrinsic to a hop recorded
+		// from a user access token (uatHopEffectCeiling).
+		cred := store.SourceCredentialSession
+		if len(source) > 0 {
+			cred = source[0]
+		}
 		agentC := tid("dg-ceiling-" + name)
 		require.NoError(t, f.store.CreateAgent(ctx, &store.Agent{
 			ID: agentC, Slug: "slug-" + agentC[:8], Name: "name-" + agentC[:8],
@@ -649,7 +656,7 @@ func TestDeliveryGate_Part2DeliverEffectCeilingRequired(t *testing.T) {
 			ScopeType: store.RoleScopeProject, ScopeID: f.projectAlpha.ID, Role: string(AgentRoleFull), Active: true,
 			AuthorityProvenance: store.AuthorityProvenance{
 				ProvenanceVersion: 1, SourcePrincipalKind: store.DelegationPrincipalUser,
-				SourcePrincipalID: f.projectOwnerID, SourceCredentialKind: store.SourceCredentialUAT,
+				SourcePrincipalID: f.projectOwnerID, SourceCredentialKind: cred,
 			},
 			EffectCeiling: ceiling,
 		}))
@@ -667,6 +674,16 @@ func TestDeliveryGate_Part2DeliverEffectCeilingRequired(t *testing.T) {
 		assert.Equal(t, DenyCauseCeilingEffectExceeded, d.DenyCause)
 		assert.Equal(t, DeniedByDelegationCeiling, d.DeniedBy)
 		assert.True(t, relationshipResult(t, d, RelationshipRuleProgeny).Accepted, "the item grant held; the ceiling denied")
+	})
+
+	// The same ceiling recorded from a user access token: secret.deliver is
+	// intrinsic to the hop, so the strict walk admits it.
+	t.Run("uat_hop_deliver_intrinsic", func(t *testing.T) {
+		f, h := setup(t, "uat", store.EffectCeiling{
+			Kind: store.EffectCeilingBounded, Version: permissions.CeilingVersionV1, PermissionIDs: []string{"agent.read", "secret.use"},
+		}, store.SourceCredentialUAT)
+		d := decidePerm(f.authz, h, Resource{Type: "secret", ID: f.secretID}, ActionDeliver, "secret.deliver", true)
+		assert.True(t, d.Allowed, "reason %q", d.Reason)
 	})
 
 	t.Run("effect_ceiling_holds_deliver", func(t *testing.T) {

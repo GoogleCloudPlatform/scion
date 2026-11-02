@@ -56,6 +56,10 @@ type Tx struct {
 	BrokerTargetInventory *BrokerTargetInventoryClient
 	// ChatLinkCode is the client for interacting with the ChatLinkCode builders.
 	ChatLinkCode *ChatLinkCodeClient
+	// ChatRetentionCursor is the client for interacting with the ChatRetentionCursor builders.
+	ChatRetentionCursor *ChatRetentionCursorClient
+	// ChatRetentionRun is the client for interacting with the ChatRetentionRun builders.
+	ChatRetentionRun *ChatRetentionRunClient
 	// ConduitPrincipalEpoch is the client for interacting with the ConduitPrincipalEpoch builders.
 	ConduitPrincipalEpoch *ConduitPrincipalEpochClient
 	// ConduitSession is the client for interacting with the ConduitSession builders.
@@ -341,6 +345,8 @@ func (tx *Tx) init() {
 	tx.BrokerSetting = NewBrokerSettingClient(tx.config)
 	tx.BrokerTargetInventory = NewBrokerTargetInventoryClient(tx.config)
 	tx.ChatLinkCode = NewChatLinkCodeClient(tx.config)
+	tx.ChatRetentionCursor = NewChatRetentionCursorClient(tx.config)
+	tx.ChatRetentionRun = NewChatRetentionRunClient(tx.config)
 	tx.ConduitPrincipalEpoch = NewConduitPrincipalEpochClient(tx.config)
 	tx.ConduitSession = NewConduitSessionClient(tx.config)
 	tx.Conversation = NewConversationClient(tx.config)

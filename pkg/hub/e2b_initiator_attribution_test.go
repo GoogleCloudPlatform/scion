@@ -329,6 +329,11 @@ func TestExecuteSchedule_RecurrenceCopiesInitiatorAttribution(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, s, projectID := setupScheduleTest(t)
 			ctx := context.Background()
+			if tc.attrs.InitiatorPrincipalKind == store.DelegationPrincipalUser {
+				// The evaluator pauses a schedule whose authority user
+				// has no row instead of firing it (ptone/scion#2143).
+				newActiveMember(t, s, "e2b-recur-uat-user", "e2b-recur-uat-user@test.com")
+			}
 
 			sched := &store.Schedule{
 				ID:                   tid("e2b-recur-sched-" + tc.name),

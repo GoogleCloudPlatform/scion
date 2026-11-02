@@ -357,6 +357,14 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	identity := GetIdentityFromContext(ctx)
 
+	// An agent delegated credential lists through the delegated list arm
+	// only, and never reaches ResolveListScopes below, which has no scope
+	// for it (.design/agent-delegation.md §11.8).
+	if d, ok := identity.(*DelegatedAgentIdentity); ok && d != nil {
+		s.listAgentsDelegated(w, r, d)
+		return
+	}
+
 	// Sorted mode validates sort and dir before either short-circuit below,
 	// so an invalid value is a 400 for every caller and the short-circuit
 	// echo only ever carries validated values. Without sort, nothing here
@@ -421,56 +429,9 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// RS2: Slug-to-ID resolution for projectId filter.
-	// If projectId looks like a slug (not a UUID), resolve it to a project ID.
-	// The resolution must not become a cross-scope existence oracle: nonexistent
-	// and unauthorized slugs are externally indistinguishable — both silently
-	// produce an unmatched filter that returns zero results.
-	projectID := query.Get("projectId")
-	if projectID != "" && gouuid.Validate(projectID) != nil {
-		// Looks like a slug. Resolve within the authorized scope to prevent
-		// the slug lookup from disclosing projects outside the caller's authority.
-		project, lookupErr := s.store.GetProjectBySlug(ctx, projectID)
-		if lookupErr != nil || project == nil {
-			// Slug not found — indistinguishable from unauthorized.
-			projectID = ""
-		} else if !scopeResult.Scopes.Contains(project.ID) {
-			// Project exists but is outside the caller's authorized scope.
-			// Treat identically to "not found" to prevent an existence oracle.
-			projectID = ""
-		} else {
-			projectID = project.ID
-		}
-		// When slug resolution fails (not found or unauthorized), leave
-		// projectID empty. The store filter will return all authorized agents
-		// (no project restriction), which is correct: it prevents the caller
-		// from distinguishing "slug doesn't exist" from "slug exists but I
-		// can't see it".
-		if projectID == "" {
-			// Force empty result: filter to an impossible project ID so the
-			// caller cannot infer slug existence from result count changes.
-			projectID = "00000000-0000-0000-0000-000000000000"
-		}
-	}
-
-	filter := store.AgentFilter{
-		ProjectID:       projectID,
-		RuntimeBrokerID: query.Get("runtimeBrokerId"),
-		Phase:           query.Get("phase"),
-		IncludeDeleted:  query.Get("includeDeleted") == "true",
-	}
-	if err := applyAgentAttributeAndRelationshipFilters(&filter, query); err != nil {
-		BadRequest(w, err.Error())
+	filter, ok := s.agentListQueryFilter(ctx, w, query, scopeResult.Scopes.Contains)
+	if !ok {
 		return
-	}
-
-	if labelParams := query["label"]; len(labelParams) > 0 {
-		parsed, err := parseLabelFilters(labelParams)
-		if err != nil {
-			BadRequest(w, err.Error())
-			return
-		}
-		filter.Labels = parsed
 	}
 
 	// RS2: Push the authorized project predicate into the store filter.
@@ -564,6 +525,68 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		ServerTime:            time.Now().UTC(),
 		Capabilities:          scopeCap,
 	})
+}
+
+// agentListQueryFilter builds the caller filters of a hub agent list
+// request from query: the projectId filter (a slug resolves only to a
+// project inside the caller's list scope, reported by projectInScope),
+// broker, phase, deleted, attribute, relationship and label filters. It
+// adds no authorization predicate. On a malformed filter it writes the 400
+// and reports false.
+func (s *Server) agentListQueryFilter(ctx context.Context, w http.ResponseWriter, query url.Values, projectInScope func(projectID string) bool) (store.AgentFilter, bool) {
+	// RS2: Slug-to-ID resolution for projectId filter.
+	// If projectId looks like a slug (not a UUID), resolve it to a project ID.
+	// The resolution must not reveal whether a project outside the caller's
+	// scope exists: nonexistent and unauthorized slugs are externally
+	// indistinguishable — both silently produce an unmatched filter that
+	// returns zero results.
+	projectID := query.Get("projectId")
+	if projectID != "" && gouuid.Validate(projectID) != nil {
+		// Looks like a slug. Resolve within the authorized scope to prevent
+		// the slug lookup from disclosing projects outside the caller's authority.
+		project, lookupErr := s.store.GetProjectBySlug(ctx, projectID)
+		if lookupErr != nil || project == nil {
+			// Slug not found — indistinguishable from unauthorized.
+			projectID = ""
+		} else if !projectInScope(project.ID) {
+			// Project exists but is outside the caller's authorized scope.
+			// Treat identically to "not found", so existence is not revealed.
+			projectID = ""
+		} else {
+			projectID = project.ID
+		}
+		// When slug resolution fails (not found or unauthorized), leave
+		// projectID empty. The store filter will return all authorized agents
+		// (no project restriction), which is correct: it prevents the caller
+		// from distinguishing "slug doesn't exist" from "slug exists but I
+		// can't see it".
+		if projectID == "" {
+			// Force empty result: filter to an impossible project ID so the
+			// caller cannot infer slug existence from result count changes.
+			projectID = "00000000-0000-0000-0000-000000000000"
+		}
+	}
+
+	filter := store.AgentFilter{
+		ProjectID:       projectID,
+		RuntimeBrokerID: query.Get("runtimeBrokerId"),
+		Phase:           query.Get("phase"),
+		IncludeDeleted:  query.Get("includeDeleted") == "true",
+	}
+	if err := applyAgentAttributeAndRelationshipFilters(&filter, query); err != nil {
+		BadRequest(w, err.Error())
+		return store.AgentFilter{}, false
+	}
+
+	if labelParams := query["label"]; len(labelParams) > 0 {
+		parsed, err := parseLabelFilters(labelParams)
+		if err != nil {
+			BadRequest(w, err.Error())
+			return store.AgentFilter{}, false
+		}
+		filter.Labels = parsed
+	}
+	return filter, true
 }
 
 // addAgentCreateIfAnyProjectAllows adds "create" to the agents list's
@@ -900,6 +923,27 @@ func quotaExceededMessage(limitName string) string {
 	return "quota exceeded: " + limitName
 }
 
+// quotaRefusal returns the message and details of a request refused at a
+// quota. The limit is the one the error names (a *QuotaExceededError), else
+// limitName. A project agent limit names the project, its count and limit,
+// and how to free a slot (ptone/scion#6033); every other limit keeps
+// quotaExceededMessage and quotaExceededDetails.
+func quotaRefusal(limitName string, err error) (string, map[string]interface{}) {
+	var exceeded *QuotaExceededError
+	if !errors.As(err, &exceeded) {
+		return quotaExceededMessage(limitName), quotaExceededDetails(err)
+	}
+	if exceeded.Limit == store.LimitMaxAgentsPerProject && exceeded.ScopeType == store.QuotaScopeProject {
+		return fmt.Sprintf("%s (project %s: %d of %d agents in use); stop or delete an agent in this project to free a slot",
+				quotaExceededMessage(exceeded.Limit), exceeded.ScopeID, exceeded.Count, exceeded.Max),
+			map[string]interface{}{"projectId": exceeded.ScopeID, "count": exceeded.Count, "limit": exceeded.Max}
+	}
+	if exceeded.Limit != "" {
+		limitName = exceeded.Limit
+	}
+	return quotaExceededMessage(limitName), quotaExceededDetails(err)
+}
+
 // reserveQuotaHTTP is checkAndReserveQuota that also reports whether this
 // call created a new reservation (see QuotaService.Reserve). created is
 // only meaningful when ok is true.
@@ -927,8 +971,8 @@ func writeQuotaReserveError(w http.ResponseWriter, limitName string, err error) 
 			fmt.Sprintf("agent %s already holds capacity on Runtime Broker %s; it cannot be admitted on %s",
 				conflict.ResourceID, conflict.HeldScopeID, conflict.RequestedScopeID), nil)
 	case errors.Is(err, store.ErrQuotaExceeded):
-		writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
-			quotaExceededMessage(limitName), quotaExceededDetails(err))
+		message, details := quotaRefusal(limitName, err)
+		writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded, message, details)
 	case errors.Is(err, ErrQuotaLockContention):
 		writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
 			"quota check temporarily unavailable, please retry", nil)
@@ -963,7 +1007,7 @@ func (s *Server) releaseAgentQuotas(ctx context.Context, resourceID, runtimeBrok
 	if runtimeBrokerID != "" {
 		s.quotaService.Release(ctx, store.LimitMaxAgentsPerBroker, resourceID)
 	}
-	s.quotaService.Release(ctx, "max_agents_per_project", resourceID)
+	s.quotaService.Release(ctx, store.LimitMaxAgentsPerProject, resourceID)
 }
 
 // Budgets for best-effort cleanup that must outlive the request that
@@ -1059,11 +1103,13 @@ type createRollback struct {
 // the client sees a timeout rather than the create error — a deliberate
 // trade for not leaking the agent's row, runtime resources and reservations.
 //
-// Failures of steps 1, 2 and 4 are logged and otherwise ignored, with one
-// exception: when the broker refuses step 2 because it holds a different
+// Failures of steps 1, 2 and 4 are logged and otherwise ignored, with two
+// exceptions: when the broker refuses step 2 because it holds a different
 // run of the agent (ptone/scion#3080) and refuseDeleteRunMismatch refuses,
-// steps 3 and 4 are skipped, and the row is left in phase error with its
-// quotas held (markCreateCleanupRefused). When the
+// or when the dispatcher refuses it because the agent's saved placement is
+// inconsistent (placementRefusalOf), steps 3 and 4 are skipped, and the
+// row is left in phase error with its quotas held
+// (markCreateCleanupRefused). When the
 // compensation transaction fails, the failure is logged at ERROR with a
 // correlation ID and the compensation's op ID, and a fallback runs: a
 // delete of the agent row without the audit record, in one transaction
@@ -1099,14 +1145,29 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 			}
 		}()
 		var refused *DeleteRunMismatchError
+		var deleteErr error
 		func() {
 			rctx, cancel := detachedCleanupContext(ctx, createCleanupRuntimeTimeout)
 			defer cancel()
 			if err := rb.DeleteRuntime(rctx); err != nil {
 				s.agentLifecycleLog.Warn("Create-failure cleanup: runtime delete failed", "agent_id", agent.ID, "error", err)
 				errors.As(err, &refused)
+				deleteErr = err
 			}
 		}()
+		// The agent's saved placement is inconsistent, so the dispatcher
+		// refused the delete before sending anything: as for a run
+		// mismatch, removing the row could leave a workload running with
+		// no row and release its capacity with no evidence of teardown.
+		// The row is kept in phase error with the placement guidance and
+		// its quotas stay held, as the delete engine keeps it
+		// (rollbackPlacement).
+		if refusal, ok := placementRefusalOf(deleteErr); ok {
+			s.agentLifecycleLog.Warn("Create-failure cleanup: agent placement is inconsistent; nothing was dispatched, keeping the agent row",
+				"agent_id", agent.ID, "code", refusal.Code, "stage", rb.Stage)
+			s.markCreateCleanupRefused(ctx, agent.ID, createCleanupTargetRun(deleteErr), createCleanupRefusedPrefix+refusal.Message)
+			return ""
+		}
 		// The broker holds a different run of the agent than the row
 		// records and deleted nothing (ptone/scion#3080): removing the row
 		// would leave that run with no row. The row is kept in phase error
@@ -1117,7 +1178,7 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 		if refused != nil && refuseDeleteRunMismatch(false, true) {
 			s.agentLifecycleLog.Warn("Create-failure cleanup: broker holds a different run than the hub recorded; keeping the agent row",
 				"agent_id", agent.ID, "hub_run_id", refused.RequestedRunID, "broker_run_id", refused.CurrentRunID, "stage", rb.Stage)
-			s.markCreateCleanupRefused(ctx, agent.ID, refused)
+			s.markCreateCleanupRefused(ctx, agent.ID, refused.RequestedRunID, createCleanupRefusedMessage(refused))
 			return ""
 		}
 	}
@@ -1205,21 +1266,22 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 }
 
 // markCreateCleanupRefused leaves a failed create's row, whose runtime
-// delete the broker refused because it holds another run
-// (ptone/scion#3080), in phase error with the refusal's message.
+// delete was refused, in phase error with message: the broker holds
+// another run (ptone/scion#3080, createCleanupRefusedMessage), or the
+// agent's saved placement is inconsistent (createCleanupRefusedPrefix and
+// the placement guidance).
 //
 // The write is guarded on the run the refused delete named
-// (IfRunID: refused.RequestedRunID, ptone/scion#2550): when the row has
-// moved on since (to the broker's run, or any newer one), it records a live
-// run, which must not be marked failed, so nothing is written. Failures
-// are logged.
-func (s *Server) markCreateCleanupRefused(ctx context.Context, agentID string, refused *DeleteRunMismatchError) {
+// (IfRunID: runID, ptone/scion#2550): when the row has moved on since (to
+// the broker's run, or any newer one), it records a live run, which must
+// not be marked failed, so nothing is written. Failures are logged.
+func (s *Server) markCreateCleanupRefused(ctx context.Context, agentID, runID, message string) {
 	mctx, cancel := detachedCleanupContext(ctx, createCleanupStoreTimeout)
 	defer cancel()
 	err := s.store.UpdateAgentStatus(mctx, agentID, store.AgentStatusUpdate{
 		Phase:   string(state.PhaseError),
-		Message: createCleanupRefusedMessage(refused),
-		IfRunID: refused.RequestedRunID,
+		Message: message,
+		IfRunID: runID,
 	})
 	switch {
 	case errors.Is(err, store.ErrRunChanged):
@@ -1228,7 +1290,7 @@ func (s *Server) markCreateCleanupRefused(ctx context.Context, agentID string, r
 			current = a.RunID
 		}
 		s.agentLifecycleLog.Warn("Create-failure cleanup: the agent moved to another run after the refused delete; not marking it failed",
-			"agent_id", agentID, "hub_run_id", refused.RequestedRunID, "broker_run_id", refused.CurrentRunID, "current_run_id", current)
+			"agent_id", agentID, "hub_run_id", runID, "current_run_id", current)
 	case err != nil:
 		s.agentLifecycleLog.Warn("Create-failure cleanup: marking the kept row failed also failed", "agent_id", agentID, "error", err)
 	}
@@ -1350,8 +1412,36 @@ func writeCreateFailure(w http.ResponseWriter, correlationID string, writeOrigin
 // name a run that never reached the broker (ptone/scion#2550).
 func dispatchDeleteFailedCreate(st store.Store, dispatcher AgentDispatcher, agent *store.Agent) func(context.Context) error {
 	return func(ctx context.Context) error {
-		return dispatcher.DispatchAgentDelete(ctx, failedCreateDeleteTarget(ctx, st, agent), true, true, false, time.Time{})
+		target := failedCreateDeleteTarget(ctx, st, agent)
+		err := dispatcher.DispatchAgentDelete(ctx, target, true, true, false, time.Time{})
+		if _, ok := placementRefusalOf(err); ok {
+			return &createCleanupDeleteError{runID: target.RunID, err: err}
+		}
+		return err
 	}
+}
+
+// createCleanupDeleteError is a failed create's refused runtime delete,
+// with the run it named, so the cleanup can guard its write of the kept
+// row on that run (markCreateCleanupRefused). It wraps the refusal.
+type createCleanupDeleteError struct {
+	runID string
+	err   error
+}
+
+func (e *createCleanupDeleteError) Error() string { return e.err.Error() }
+
+func (e *createCleanupDeleteError) Unwrap() error { return e.err }
+
+// createCleanupTargetRun is the run a failed create's refused runtime
+// delete named (createCleanupDeleteError), or "" (no run guard) when err
+// does not carry it.
+func createCleanupTargetRun(err error) string {
+	var ce *createCleanupDeleteError
+	if errors.As(err, &ce) {
+		return ce.runID
+	}
+	return ""
 }
 
 // failedCreateDeleteTarget returns the agent a failed create's cleanup
@@ -1419,7 +1509,9 @@ func (s *Server) applyCreateEffectCeiling(
 		return store.EffectCeiling{}, store.AuthorityProvenance{}, "", false
 	}
 
-	capped, cause, allowed := childRoleWithinCeiling(ceiling, role, roleExplicit)
+	// The role cap reads the hop's ceiling as every walk does
+	// (uatHopEffectCeiling); the stored ceiling stays the token's verbatim.
+	capped, cause, allowed := childRoleWithinCeiling(uatHopEffectCeiling(prov.SourcePrincipalKind, prov.SourcePrincipalID, prov, ceiling), role, roleExplicit)
 	if !allowed {
 		msg := reasonNoUsableRole
 		if roleExplicit {
@@ -2007,6 +2099,20 @@ func (s *Server) createAgentInProject(
 			return
 		}
 	}
+	// A count limit is unset, 0 (no limit) or positive (ptone/scion#5605).
+	if req.Config != nil {
+		issues := map[string]interface{}{}
+		if err := api.ValidateCountLimit("max_turns", req.Config.MaxTurns); err != nil {
+			issues["max_turns"] = err.Error()
+		}
+		if err := api.ValidateCountLimit("max_model_calls", req.Config.MaxModelCalls); err != nil {
+			issues["max_model_calls"] = err.Error()
+		}
+		if len(issues) > 0 {
+			ValidationError(w, "Config contains invalid count limits", map[string]interface{}{"fields": issues})
+			return
+		}
+	}
 
 	// Harness-config resolution (request > project annotation > template
 	// default) happens later, in deriveAgentConfig, along with the rest of
@@ -2341,7 +2447,7 @@ func (s *Server) createAgentInProject(
 			return
 		}
 	}
-	if !s.checkAndReserveQuota(ctx, w, "max_agents_per_project", createdBy, "project", projectID, agent.ID) {
+	if !s.checkAndReserveQuota(ctx, w, store.LimitMaxAgentsPerProject, createdBy, store.QuotaScopeProject, projectID, agent.ID) {
 		s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
 		return
 	}
@@ -2743,7 +2849,11 @@ func (s *Server) createAgentInProject(
 					// trigger spurious sync-registration attempts. No revoke here:
 					// DispatchAgentCreateWithGather already revoked any credential
 					// it minted on this error return.
-					failCreate(createRollback{Stage: createStageDispatchEnvGather, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
+					failCreate(createRollback{Stage: createStageDispatchEnvGather, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() {
+						if !s.relayProjectPathRefusal(ctx, w, agent, err) {
+							dispatchCreateErrorResponse(w, err, agent.ID)
+						}
+					})
 					return
 				} else if created.AcceptedLaunch() != nil {
 					// Accepted for asynchronous launch: the row is already
@@ -2834,7 +2944,11 @@ func (s *Server) createAgentInProject(
 					// trigger spurious sync-registration attempts. No revoke here:
 					// DispatchAgentCreateWithGather already revoked any credential
 					// it minted on this error return.
-					failCreate(createRollback{Stage: createStageDispatch, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
+					failCreate(createRollback{Stage: createStageDispatch, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() {
+						if !s.relayProjectPathRefusal(ctx, w, agent, err) {
+							dispatchCreateErrorResponse(w, err, agent.ID)
+						}
+					})
 					return
 				} else if created.AcceptedLaunch() != nil {
 					// Accepted for asynchronous launch: the row is already
@@ -3189,56 +3303,20 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 		Needs:     brokerReqs.Needs,
 	}
 
-	// Build hubHas with scope info
-	// Try to determine the scope for each key the Hub provided
+	// The env var storage scopes that apply to this agent, in the order the
+	// dispatch resolver applies them (lowest precedence first), from the
+	// single envScopePrecedence list. Both the hubHas labels and the needs
+	// cross-check below walk it, so neither can drift from resolution.
+	envFilters := envScopeFilters(agent, s.HubID())
+
+	// Label each key the Hub provided with the source whose value won.
 	for _, key := range brokerReqs.HubHas {
 		if key == agentTZEnvKey {
 			// TZ is labelled with the rung of the agent TZ chain.
 			resp.HubHas = append(resp.HubHas, EnvSource{Key: key, Scope: s.agentTZ(ctx, agent).Source})
 			continue
 		}
-		source := EnvSource{Key: key, Scope: "hub"}
-
-		// Check if we can determine a more specific scope
-		if agent.OwnerID != "" {
-			vars, err := s.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: "user", ScopeID: agent.OwnerID, Key: key})
-			if err == nil && len(vars) > 0 {
-				source.Scope = "user"
-			}
-		}
-		if source.Scope == "hub" && agent.ProjectID != "" {
-			vars, err := s.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: "project", ScopeID: agent.ProjectID, Key: key})
-			if err == nil && len(vars) > 0 {
-				source.Scope = "project"
-			}
-		}
-		if source.Scope == "hub" {
-			// Check if it came from config
-			if agent.AppliedConfig != nil {
-				if _, ok := agent.AppliedConfig.Env[key]; ok {
-					source.Scope = "config"
-				}
-			}
-		}
-		if source.Scope == "hub" && s.secretBackend != nil {
-			if agent.OwnerID != "" {
-				metas, err := s.secretBackend.List(ctx, secret.Filter{
-					Scope: "user", ScopeID: agent.OwnerID, Name: key,
-				})
-				if err == nil && len(metas) > 0 {
-					source.Scope = "secret"
-				}
-			}
-			if source.Scope == "hub" && agent.ProjectID != "" {
-				metas, err := s.secretBackend.List(ctx, secret.Filter{
-					Scope: "project", ScopeID: agent.ProjectID, Name: key,
-				})
-				if err == nil && len(metas) > 0 {
-					source.Scope = "secret"
-				}
-			}
-		}
-		resp.HubHas = append(resp.HubHas, source)
+		resp.HubHas = append(resp.HubHas, EnvSource{Key: key, Scope: s.envGatherSourceLabel(ctx, agent, envFilters, key)})
 	}
 
 	// Relay SecretInfo from broker
@@ -3258,31 +3336,12 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 	// found, this indicates a resolution mismatch — the dispatch should have
 	// included it but didn't.
 	for _, key := range brokerReqs.Needs {
-		// Check env_vars table
-		if agent.OwnerID != "" {
-			vars, err := s.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: "user", ScopeID: agent.OwnerID, Key: key})
-			if err == nil && len(vars) > 0 {
-				resp.HubWarnings = append(resp.HubWarnings,
-					fmt.Sprintf("%s is stored in Hub env storage (user scope) but was not included in the dispatch — this may indicate a resolution issue", key))
-				continue
-			}
-		}
-		if agent.ProjectID != "" {
-			vars, err := s.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: "project", ScopeID: agent.ProjectID, Key: key})
-			if err == nil && len(vars) > 0 {
-				resp.HubWarnings = append(resp.HubWarnings,
-					fmt.Sprintf("%s is stored in Hub env storage (project scope) but was not included in the dispatch — this may indicate a resolution issue", key))
-				continue
-			}
-		}
-		// Check hub-scope env_vars
-		if hubID := s.HubID(); hubID != "" {
-			vars, err := s.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: "hub", ScopeID: hubID, Key: key})
-			if err == nil && len(vars) > 0 {
-				resp.HubWarnings = append(resp.HubWarnings,
-					fmt.Sprintf("%s is stored in Hub env storage (hub scope) but was not included in the dispatch — injection_mode may be as_needed", key))
-				continue
-			}
+		// Check env_vars table, highest-precedence scope first.
+		// as_needed rows count here: they are the usual reason a stored key
+		// was left out of the first dispatch pass.
+		if label, ok := s.envGatherStoredScope(ctx, envFilters, key, false); ok {
+			resp.HubWarnings = append(resp.HubWarnings, envGatherNotDispatchedWarning(key, label))
+			continue
 		}
 		// Check secret backend
 		if s.secretBackend != nil {
@@ -3315,6 +3374,100 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 	}
 
 	return resp
+}
+
+// envGatherSourceLabel names where the value the Hub supplied for key came
+// from, for the env-gather hubHas list. It follows the dispatch merge in
+// buildCreateRequest, so the label names the value that actually won:
+//
+//  1. A non-empty explicit agent config value ("config"): it outranks every
+//     storage scope. An empty config value is a passthrough marker that
+//     yields to storage, so it is not reported here.
+//  2. The highest-precedence env var storage scope holding the key, from
+//     envFilters (envScopePrecedence, walked from the top), labelled with
+//     envScopeSourceLabel ("user", "project", "hub" or "broker"). as_needed
+//     rows are skipped: hubHas reports the first dispatch pass, which
+//     resolveEnvFromStorage builds without them.
+//  3. A user- or project-scope secret of that name ("secret"): environment
+//     secrets only fill keys config and storage left unset.
+//  4. "hub" when none of the above matched (an empty config value with no
+//     stored value, for instance). This fallback is not a lookup result.
+//
+// It deliberately does not apply the admin-kind test identity scope filter
+// (envScopesForDispatch): it labels keys the broker already reported as
+// supplied by the Hub, and decides nothing about what is dispatched.
+//
+// A nil agent gets the "hub" fallback. buildEnvGatherResponse, the only
+// caller, reads agent.ID first, so this is defensive only.
+func (s *Server) envGatherSourceLabel(ctx context.Context, agent *store.Agent, envFilters []store.EnvVarFilter, key string) string {
+	if agent == nil {
+		return "hub"
+	}
+	if agent.AppliedConfig != nil && agent.AppliedConfig.Env[key] != "" {
+		return "config"
+	}
+	if label, ok := s.envGatherStoredScope(ctx, envFilters, key, true); ok {
+		return label
+	}
+	if s.secretBackend != nil {
+		if agent.OwnerID != "" {
+			metas, err := s.secretBackend.List(ctx, secret.Filter{Scope: "user", ScopeID: agent.OwnerID, Name: key})
+			if err == nil && len(metas) > 0 {
+				return "secret"
+			}
+		}
+		if agent.ProjectID != "" {
+			metas, err := s.secretBackend.List(ctx, secret.Filter{Scope: "project", ScopeID: agent.ProjectID, Name: key})
+			if err == nil && len(metas) > 0 {
+				return "secret"
+			}
+		}
+	}
+	return "hub"
+}
+
+// envGatherStoredScope returns the label of the highest-precedence env var
+// storage scope in envFilters (lowest precedence first) that holds key, and
+// whether any does. With skipAsNeeded, a scope holding the key only as an
+// as_needed row does not count. A scope whose read fails is logged and
+// skipped: provenance is advisory, so a failed read only costs the label
+// (or the warning) for that scope, never the response.
+func (s *Server) envGatherStoredScope(ctx context.Context, envFilters []store.EnvVarFilter, key string, skipAsNeeded bool) (string, bool) {
+	for i := len(envFilters) - 1; i >= 0; i-- {
+		filter := envFilters[i]
+		filter.Key = key
+		vars, err := s.store.ListEnvVars(ctx, filter)
+		if err != nil {
+			slog.WarnContext(ctx, "env-gather provenance: reading stored env vars failed; skipping this scope",
+				"scope", filter.Scope, "error", err)
+			continue
+		}
+		for _, v := range vars {
+			if skipAsNeeded && v.InjectionMode == store.InjectionModeAsNeeded {
+				continue
+			}
+			return envScopeSourceLabel(filter.Scope), true
+		}
+	}
+	return "", false
+}
+
+// envGatherNotDispatchedWarning is the hub warning for a key the broker
+// needs that is stored at the given env var scope label but was not in the
+// dispatch. A user- or project-scope value should always be dispatched, so it
+// points at a resolution issue; a hub- or broker-scope value is commonly
+// as_needed.
+func envGatherNotDispatchedWarning(key, label string) string {
+	scope := label
+	if label == "broker" {
+		scope = store.ScopeRuntimeBroker
+	}
+	switch label {
+	case "hub", "broker":
+		return fmt.Sprintf("%s is stored in Hub env storage (%s scope) but was not included in the dispatch — injection_mode may be as_needed", key, scope)
+	default:
+		return fmt.Sprintf("%s is stored in Hub env storage (%s scope) but was not included in the dispatch — this may indicate a resolution issue", key, scope)
+	}
 }
 
 // submitAgentEnv handles POST /api/v1/projects/{projectId}/agents/{agentId}/env
@@ -3456,6 +3609,9 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 			return
 		}
 		if relayIdentityMappingError(w, err) {
+			return
+		}
+		if s.relayProjectPathRefusal(ctx, w, agent, err) {
 			return
 		}
 		if relayBrokerRefusal(w, err) {
@@ -4022,10 +4178,11 @@ func (s *Server) writeAgentGetResponse(w http.ResponseWriter, r *http.Request, a
 		resp.TimezoneSource = &tz.Source
 	}
 
-	resp.AppliedConfig, resp.PendingConfig = redactAgentConfigsForResponse(resp.AppliedConfig, resp.PendingConfig, s.envViewAllowed(ctx, GetIdentityFromContext(ctx), agent, resp.Cap))
-	if r.URL.Query().Get("view") == agentViewEdit {
+	resp.AppliedConfig, resp.PendingConfig = s.redactAgentConfigsForResponse(resp.AppliedConfig, resp.PendingConfig, s.envViewAllowed(ctx, GetIdentityFromContext(ctx), agent, resp.Cap))
+	if r.URL.Query().Get("view") == agentViewEdit && s.heldEditsEnabled() {
 		// The applied config with every pending key applied, as the
 		// edit form shows it; the same env gate as the applied config.
+		// With held edits off, pending edits are inert and not shown.
 		next := s.effectiveNextRun(ctx, agent)
 		if next == agent.AppliedConfig {
 			next = cloneAppliedConfig(next)
@@ -4097,11 +4254,11 @@ func (s *Server) agentEditAccessFor(ctx context.Context, identity Identity, agen
 	// credential scopes must cover the role. A lookup error counts as not
 	// allowed. The role actually requested is checked again, with the
 	// rest of the authority rules, when the reincarnation is asked for.
-	ceiling, _, err := s.authzService.sourceEffectCeiling(ctx, identity)
+	ceiling, prov, err := s.authzService.sourceEffectCeiling(ctx, identity)
 	if err != nil {
 		return access
 	}
-	_, _, access.CanChangeRole = childRoleWithinCeiling(ceiling, role, true)
+	_, _, access.CanChangeRole = childRoleWithinCeiling(uatHopEffectCeiling(prov.SourcePrincipalKind, prov.SourcePrincipalID, prov, ceiling), role, true)
 	return access
 }
 
@@ -4289,6 +4446,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 	// applyAgentConfigUpdateHeld keeps such edits as the agent's pending
 	// config instead (agent_pending_config.go).
 	var configHeld, pendingSaved, pendingFolded, pendingSuperseded, pendingUnappliable []string
+	var pendingDrops map[string][]string
 	if updates.Config != nil {
 		if !agent.DeletedAt.IsZero() {
 			Conflict(w, "Config cannot be updated for deleted agents")
@@ -4302,6 +4460,8 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			warnings = append(warnings, out.warnings...)
 			configApplied, configHeld, configHeldForReincarnate = out.applied, out.held, out.heldForReincarnate
 			pendingSaved, pendingFolded, pendingUnappliable = out.saved, out.folded, out.unappliable
+			pendingSuperseded = out.superseded
+			pendingDrops = out.drops
 		} else {
 			if !configPatchPhase(agent.Phase) {
 				Conflict(w, configPatchPhaseMessage)
@@ -4317,6 +4477,18 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			// applied later over the value written now.
 			pendingSuperseded = dropPendingKeysNamed(agent, presentConfigKeys)
 		}
+	}
+	// With held edits off, stored pending edits are inert: every PATCH
+	// that persists the row clears them in the same whole-row
+	// compare-and-set (ptone/scion#5864), so a later turn of the
+	// experiment never applies edits saved under an earlier one. The keys
+	// the request named are audited as superseded above; the rest as
+	// experiment_off. Only a well-formed off clears (heldEditsClearable):
+	// a malformed experiments document leaves them inert.
+	var pendingExperimentOff []string
+	if !heldEdits && !agent.PendingConfig.IsEmpty() && s.heldEditsClearable() {
+		pendingExperimentOff = pendingConfigKeys(agent.PendingConfig)
+		agent.PendingConfig = nil
 	}
 
 	// Apply GCP identity update (only allowed for agents in 'created' phase)
@@ -4534,8 +4706,12 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		s.auditPendingConfig(ctx, agent.ID, mutationTypeAgentPendingConfigSaved, pendingSaved, "")
 	}
 	s.auditUnappliablePendingKeys(ctx, agent.ID, pendingUnappliable)
+	s.auditDroppedPendingKeys(ctx, agent.ID, pendingDrops)
 	if len(pendingSuperseded) > 0 {
 		s.auditPendingConfig(ctx, agent.ID, mutationTypeAgentPendingConfigDiscarded, pendingSuperseded, pendingDiscardTriggerSuperseded)
+	}
+	if len(pendingExperimentOff) > 0 {
+		s.auditPendingConfig(ctx, agent.ID, mutationTypeAgentPendingConfigDiscarded, pendingExperimentOff, pendingDiscardTriggerExperimentOff)
 	}
 
 	tz := s.agentTZ(ctx, agent)
@@ -4826,7 +5002,8 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id string) 
 
 // performAgentDelete deletes an agent through the backend-driven engine
 // (design ptone/scion#2483 §2.4): load, authorize, DeletedAt → 204, an
-// active delete → join, broker availability → 503, claim, then start the
+// active delete → join, placement pre-check → 409, broker availability →
+// 503, claim, then start the
 // engine and wait up to deleteSyncWait for its outcome. A fast delete answers
 // 204 (or 502/409 on failure) exactly as before; a slow one answers 202
 // {agentId, deletion} and its outcome arrives as events. A second DELETE
@@ -4885,6 +5062,17 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 			return
 		}
 
+		// The placement pre-check first (the claim repeats it on the row it
+		// re-reads): an agent whose saved placement is inconsistent is
+		// refused with its specific 409 whether or not its Runtime Broker
+		// is reachable, force or not (ptone/scion#4959).
+		if err := s.deletePlacementPreCheckRow(ctx, agent); err != nil {
+			if !writeRuntimeTargetRefusal(w, err) {
+				writeErrorFromErr(w, err, "")
+			}
+			return
+		}
+
 		// Verify the broker is reachable before claiming, to avoid orphaned
 		// containers. Force bypasses this so stuck agents can always be
 		// cleaned up; managed agents have no broker; a created row with no
@@ -4899,7 +5087,11 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 
 		plan, err := s.claimAgentDeletion(ctx, agent.ID, params)
 		if err != nil {
-			writeErrorFromErr(w, err, "")
+			// A placement refusal carries its details, as the engine's
+			// answer for the same refusal does.
+			if !writeRuntimeTargetRefusal(w, err) {
+				writeErrorFromErr(w, err, "")
+			}
 			return
 		}
 		if plan != nil {
@@ -4945,7 +5137,7 @@ func (s *Server) awaitAgentDeletion(w http.ResponseWriter, r *http.Request, plan
 		case deletionOutcomeDeleted:
 			w.WriteHeader(http.StatusNoContent)
 		case deletionOutcomeFailed:
-			writeDeletionFailure(w, plan.snapshot.ID, out.code, out.message, out.retryAfter, isAdmin)
+			writeDeletionFailureWithRefusal(w, plan.snapshot.ID, out.code, out.message, out.retryAfter, out.refusal, isAdmin)
 		default: // lost: someone else holds the row now
 			s.joinAgentDeletion(w, r, plan.snapshot.ID, plan.claim, deadline, isAdmin)
 		}
@@ -5678,6 +5870,11 @@ func dispatchCreateErrorResponse(w http.ResponseWriter, err error, agentID strin
 	if writeSecretResolutionError(w, err) {
 		return
 	}
+	// The project's clone URL is one provisioning refuses: 422 with the
+	// refusal's fixed text, as at project create.
+	if writeSharedCloneSourceRefused(w, err) {
+		return
+	}
 
 	switch {
 	case relayDispatchRefusal(w, err):
@@ -5798,6 +5995,12 @@ func relayBrokerRefusal(w http.ResponseWriter, err error) bool {
 		// built before those texts put the host mount path in the message,
 		// so anything else is replaced by a fixed text.
 		writeError(w, se.StatusCode, code, projectStorageRefusalMessage(se.brokerErrorMessage()), nil)
+		return true
+	case se.StatusCode == http.StatusConflict && code == projectPathNotInitializedErrorCode:
+		// The broker's text names a host path: answer with the hub's own
+		// path-free text. Callers that hold the agent use
+		// relayProjectPathRefusal first, which may add the provider path.
+		writeError(w, se.StatusCode, code, projectPathRefusalGeneric, nil)
 		return true
 	case se.StatusCode == http.StatusConflict && code == ErrCodeConflict:
 	case se.StatusCode == http.StatusForbidden && code == ErrCodeForbidden:

@@ -110,7 +110,7 @@ func (e *nfsDeleteTestEnv) deleteProject(t *testing.T) {
 	rec := doRequest(t, e.srv, http.MethodDelete, "/api/v1/projects/"+e.project.ID, nil)
 	require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
 	// Wait for the background NFS tree removal the delete started.
-	e.srv.nfsCleanupWG.Wait()
+	e.srv.storageCleanupWG.Wait()
 	_, err := e.s.GetProject(context.Background(), e.project.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
@@ -199,11 +199,17 @@ func TestDeleteProject_NoEmbeddedBroker_NFS_HubRemovesExportTree(t *testing.T) {
 	assert.True(t, os.IsNotExist(err), "deleted project's NFS tree must be removed (err=%v)", err)
 }
 
-// A share that is not mounted on the hub is nothing to remove.
+// A share that is not mounted on the hub: the delete commits and removes
+// nothing on the share, and it answers 200 with the fixed storageKept item
+// instead of an unqualified 204.
 func TestDeleteProject_NFS_ShareNotMountedOnHubIsSuccess(t *testing.T) {
 	e := newNFSDeleteTestEnv(t, "unmounted-nfs")
 	e.srv.config.ProjectStorageConfig.NFS.MountRoot = filepath.Join(e.home, "absent")
-	e.deleteProject(t)
+	rec := doRequest(t, e.srv, http.MethodDelete, "/api/v1/projects/"+e.project.ID, nil)
+	requireSharedStorageKeptBody(t, rec)
+	e.srv.storageCleanupWG.Wait()
+	_, err := e.s.GetProject(context.Background(), e.project.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
 // The hub's workspace storage config is not validated like a broker's, so
@@ -228,6 +234,9 @@ func TestDeleteProject_EmbeddedBroker_GitSlugProvider_RemovesLocalDir(t *testing
 	e.srv.SetEmbeddedBrokerID(e.addBroker(t, "embedded", "").ID)
 	local := filepath.Join(e.home, ".scion", "projects", e.project.Slug)
 	require.NoError(t, os.MkdirAll(filepath.Join(local, ".scion", "agents", "dev"), 0o755))
+	// On a shared backend the directory is a legacy slug-keyed tree: it is
+	// removed because its identity marker names the project.
+	require.NoError(t, os.WriteFile(filepath.Join(local, ".scion", "project-id"), []byte(e.project.ID), 0o644))
 	other := filepath.Join(e.home, ".scion", "projects", "other-project")
 	require.NoError(t, os.MkdirAll(other, 0o755))
 
@@ -251,20 +260,20 @@ func TestDeleteProject_EmbeddedBroker_GitLinkedProvider_KeepsLocalDir(t *testing
 	assert.NoError(t, err, "a linked project's slug directory is not the hub's to remove")
 }
 
-// setHubAttemptHook installs hubNFSCleanupAttemptHook (with a short retry
+// setHubAttemptHook installs projectStorageCleanupAttemptHook (with a short retry
 // delay) for one test and returns the attempts seen.
 func setHubAttemptHook(t *testing.T, fn func(attempt int)) *[]int {
 	t.Helper()
 	var seen []int
-	origDelay := hubNFSProjectCleanupRetryDelay
-	hubNFSProjectCleanupRetryDelay = time.Millisecond
-	hubNFSCleanupAttemptHook = func(attempt int) {
+	origDelay := projectStorageCleanupRetryDelay
+	projectStorageCleanupRetryDelay = time.Millisecond
+	projectStorageCleanupAttemptHook = func(attempt int) {
 		seen = append(seen, attempt)
 		if fn != nil {
 			fn(attempt)
 		}
 	}
-	t.Cleanup(func() { hubNFSCleanupAttemptHook, hubNFSProjectCleanupRetryDelay = nil, origDelay })
+	t.Cleanup(func() { projectStorageCleanupAttemptHook, projectStorageCleanupRetryDelay = nil, origDelay })
 	return &seen
 }
 
@@ -317,7 +326,7 @@ func TestDeleteProject_NFS_ProjectRecreatedBeforeRetryKeepsTree(t *testing.T) {
 	// Not e.deleteProject: the project exists again by design.
 	rec := doRequest(t, e.srv, http.MethodDelete, "/api/v1/projects/"+e.project.ID, nil)
 	require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
-	e.srv.nfsCleanupWG.Wait()
+	e.srv.storageCleanupWG.Wait()
 
 	assert.Equal(t, []int{1, 2}, *seen)
 	_, err := os.Stat(filepath.Join(tree, "workspace", "README.md"))
@@ -337,7 +346,7 @@ func TestDeleteProject_NFS_ProjectRecreatedBeforeFirstAttemptKeepsTree(t *testin
 
 	rec := doRequest(t, e.srv, http.MethodDelete, "/api/v1/projects/"+e.project.ID, nil)
 	require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
-	e.srv.nfsCleanupWG.Wait()
+	e.srv.storageCleanupWG.Wait()
 
 	assert.Equal(t, []int{1}, *seen)
 	_, err := os.Stat(filepath.Join(tree, "workspace", "README.md"))

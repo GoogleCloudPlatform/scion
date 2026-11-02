@@ -49,8 +49,8 @@ func readAgentConfig(t *testing.T, cfgPath string) (api.ScionConfig, string) {
 // configure form edits.
 func setInline() *api.ScionConfig {
 	return &api.ScionConfig{
-		MaxTurns:      9,
-		MaxModelCalls: 40,
+		MaxTurns:      api.IntPtr(9),
+		MaxModelCalls: api.IntPtr(40),
 		ThinkingLevel: intPtr(3),
 		Resources:     &api.ResourceSpec{Requests: api.ResourceList{CPU: "2"}},
 		SystemPrompt:  "be terse",
@@ -63,7 +63,7 @@ func setInline() *api.ScionConfig {
 // inline config no longer holds them, and lists them as cleared.
 func clearedInline(cleared bool) *api.ScionConfig {
 	c := &api.ScionConfig{
-		MaxModelCalls: 40,
+		MaxModelCalls: api.IntPtr(40),
 		Env:           map[string]string{"BAR": "kept"},
 	}
 	if cleared {
@@ -88,15 +88,15 @@ func TestApplyInlineConfigUpdate_ClearedFieldsRevertToInherited(t *testing.T) {
 
 	srv.applyInlineConfigUpdate(context.Background(), agentName, projectDir, setInline(), false)
 	got, _ := readAgentConfig(t, cfgPath)
-	if got.MaxTurns != 9 || got.ThinkingLevel == nil || got.Resources == nil || got.SystemPrompt == "" || got.Env["FOO"] != "set" {
+	if !api.IntPtrEqual(got.MaxTurns, api.IntPtr(9)) || got.ThinkingLevel == nil || got.Resources == nil || got.SystemPrompt == "" || got.Env["FOO"] != "set" {
 		t.Fatalf("fixture: set fields not applied: %+v", got)
 	}
 
 	for i := 0; i < 2; i++ { // the start after the clear, then a second start
 		srv.applyInlineConfigUpdate(context.Background(), agentName, projectDir, clearedInline(true), false)
 		got, raw := readAgentConfig(t, cfgPath)
-		if got.MaxTurns != 4 {
-			t.Errorf("start #%d: max_turns = %d, want the inherited 4", i+1, got.MaxTurns)
+		if !api.IntPtrEqual(got.MaxTurns, api.IntPtr(4)) {
+			t.Errorf("start #%d: max_turns = %s, want the inherited 4", i+1, api.FormatCountLimit(got.MaxTurns))
 		}
 		if got.ThinkingLevel != nil {
 			t.Errorf("start #%d: thinking_level = %d, want cleared", i+1, *got.ThinkingLevel)
@@ -110,7 +110,7 @@ func TestApplyInlineConfigUpdate_ClearedFieldsRevertToInherited(t *testing.T) {
 		if _, ok := got.Env["FOO"]; ok {
 			t.Errorf("start #%d: env FOO still set: %v", i+1, got.Env)
 		}
-		if got.Env["BAR"] != "kept" || got.MaxModelCalls != 40 || got.Harness != "claude" {
+		if got.Env["BAR"] != "kept" || !api.IntPtrEqual(got.MaxModelCalls, api.IntPtr(40)) || got.Harness != "claude" {
 			t.Errorf("start #%d: a field that was not cleared changed: %+v", i+1, got)
 		}
 		if strings.Contains(raw, "cleared_fields") {
@@ -151,7 +151,7 @@ func TestApplyInlineConfigUpdate_IgnoresUnclearablePaths(t *testing.T) {
 		Volumes:   []api.VolumeMount{{Source: "/src", Target: "/workspace"}},
 		Env:       map[string]string{"FOO": "x"},
 		Telemetry: &api.TelemetryConfig{},
-		MaxTurns:  4,
+		MaxTurns:  api.IntPtr(4),
 	}
 	cfgPath := writeAgentConfig(t, projectDir, agentName, persisted)
 	want, _ := readAgentConfig(t, cfgPath)
@@ -237,7 +237,7 @@ func TestStartAgent_ClearedFieldsAppliedBeforeStart(t *testing.T) {
 	agentName := "cleared-start-agent"
 	cfgPath := writeAgentConfig(t, projectDir, agentName, api.ScionConfig{
 		Harness:       "gemini",
-		MaxTurns:      3,
+		MaxTurns:      api.IntPtr(3),
 		ThinkingLevel: intPtr(2),
 		Env:           map[string]string{"FOO": "old", "BAR": "kept"},
 	})
@@ -252,7 +252,7 @@ func TestStartAgent_ClearedFieldsAppliedBeforeStart(t *testing.T) {
 	}`, projectDir))
 
 	o := lastObservation(t, obs, 1)
-	if o.file.MaxTurns != 0 || o.file.ThinkingLevel != nil {
+	if o.file.MaxTurns != nil || o.file.ThinkingLevel != nil {
 		t.Errorf("cleared limits kept: max_turns=%d thinking_level=%v", o.file.MaxTurns, o.file.ThinkingLevel)
 	}
 	if _, ok := o.file.Env["FOO"]; ok || o.file.Env["BAR"] != "kept" {
@@ -369,26 +369,26 @@ func TestStartAgent_ClearedLimitInheritsTemplateByName(t *testing.T) {
 	}
 	// As provisioned: the template's values are written into the agent's
 	// config.
-	cfgPath := writeAgentConfig(t, projectDir, agentName, api.ScionConfig{Harness: "claude", MaxTurns: 5})
+	cfgPath := writeAgentConfig(t, projectDir, agentName, api.ScionConfig{Harness: "claude", MaxTurns: api.IntPtr(5)})
 	writeAgentInfo(t, projectDir, agentName, api.AgentInfo{Template: "limited"})
 	obs := observeStarts(mgr, projectDir, agentName, cfgPath)
 
 	postClearedAgentAction(t, srv, agentName, "start", fmt.Sprintf(`{"projectPath": %q, "inlineConfig": {"max_turns": 9}}`, projectDir))
-	if o := lastObservation(t, obs, 1); o.file.MaxTurns != 9 || o.effective.MaxTurns != 9 {
+	if o := lastObservation(t, obs, 1); !api.IntPtrEqual(o.file.MaxTurns, api.IntPtr(9)) || !api.IntPtrEqual(o.effective.MaxTurns, api.IntPtr(9)) {
 		t.Fatalf("set: file max_turns=%d effective=%d, want 9", o.file.MaxTurns, o.effective.MaxTurns)
 	}
 
 	postClearedAgentAction(t, srv, agentName, "start", fmt.Sprintf(`{"projectPath": %q, "inlineConfig": {"cleared_fields": ["max_turns"]}}`, projectDir))
 	o := lastObservation(t, obs, 2)
-	if o.file.MaxTurns != 5 || strings.Contains(o.raw, "cleared_fields") {
+	if !api.IntPtrEqual(o.file.MaxTurns, api.IntPtr(5)) || strings.Contains(o.raw, "cleared_fields") {
 		t.Fatalf("clear: the start read %s, want the template's max_turns 5 and no cleared_fields", o.raw)
 	}
-	if o.effective.MaxTurns != 5 {
+	if !api.IntPtrEqual(o.effective.MaxTurns, api.IntPtr(5)) {
 		t.Fatalf("clear: effective max_turns = %d, want the template's 5", o.effective.MaxTurns)
 	}
 
 	postClearedAgentAction(t, srv, agentName, "restart", fmt.Sprintf(`{"projectPath": %q}`, projectDir))
-	if o := lastObservation(t, obs, 3); o.effective.MaxTurns != 5 {
+	if o := lastObservation(t, obs, 3); !api.IntPtrEqual(o.effective.MaxTurns, api.IntPtr(5)) {
 		t.Fatalf("restart: effective max_turns = %d, want the template's 5", o.effective.MaxTurns)
 	}
 }
@@ -424,7 +424,7 @@ func TestStartAgent_ClearedLimitHydratedTemplate(t *testing.T) {
 			projectDir := filepath.Join(t.TempDir(), ".scion")
 			agentName := "hydrated-agent"
 			cfgPath := writeAgentConfig(t, projectDir, agentName, api.ScionConfig{
-				Harness: "claude", MaxTurns: 5, Env: map[string]string{"FOO": "1"},
+				Harness: "claude", MaxTurns: api.IntPtr(5), Env: map[string]string{"FOO": "1"},
 			})
 			writeAgentInfo(t, projectDir, agentName, api.AgentInfo{Template: "limited", TemplateHash: hash})
 			obs := observeStarts(mgr, projectDir, agentName, cfgPath)
@@ -433,8 +433,8 @@ func TestStartAgent_ClearedLimitHydratedTemplate(t *testing.T) {
 			lastObservation(t, obs, 1)
 			postClearedAgentAction(t, srv, agentName, "start", fmt.Sprintf(`{"projectPath": %q, "inlineConfig": {"cleared_fields": ["max_turns", "env.FOO"]}}`, projectDir))
 			o := lastObservation(t, obs, 2)
-			if o.file.MaxTurns != tc.wantMaxTurns || o.effective.MaxTurns != tc.wantMaxTurns {
-				t.Errorf("max_turns: file %d, effective %d; want %d", o.file.MaxTurns, o.effective.MaxTurns, tc.wantMaxTurns)
+			if !api.IntPtrEqual(o.file.MaxTurns, api.IntPtr(tc.wantMaxTurns)) || !api.IntPtrEqual(o.effective.MaxTurns, api.IntPtr(tc.wantMaxTurns)) {
+				t.Errorf("max_turns: file %s, effective %s; want %d", api.FormatCountLimit(o.file.MaxTurns), api.FormatCountLimit(o.effective.MaxTurns), tc.wantMaxTurns)
 			}
 			if _, ok := o.file.Env["FOO"]; ok {
 				t.Errorf("env FOO kept: %v", o.file.Env)
@@ -512,7 +512,7 @@ func TestStartAgent_ClearedLimitHydratedTemplateDefaultLayer(t *testing.T) {
 	writeTemplateFile(t, filepath.Join(projectDir, "templates", "default"), "max_turns: 7\n")
 
 	o := clearedChainCase(t, srv, mgr, projectDir, api.AgentInfo{Template: "hub-tpl", TemplateHash: hash})
-	if o.file.MaxTurns != 7 || o.effective.MaxTurns != 7 {
+	if !api.IntPtrEqual(o.file.MaxTurns, api.IntPtr(7)) || !api.IntPtrEqual(o.effective.MaxTurns, api.IntPtr(7)) {
 		t.Errorf("max_turns: file %d, effective %d; want the default layer's 7", o.file.MaxTurns, o.effective.MaxTurns)
 	}
 	if o.file.Resources != nil {
@@ -530,7 +530,7 @@ func TestStartAgent_ClearedLimitUnresolvableTemplateKept(t *testing.T) {
 	projectDir := filepath.Join(t.TempDir(), ".scion")
 
 	o := clearedChainCase(t, srv, mgr, projectDir, api.AgentInfo{Template: "gone"})
-	if o.file.MaxTurns != 9 || o.effective.MaxTurns != 9 {
+	if !api.IntPtrEqual(o.file.MaxTurns, api.IntPtr(9)) || !api.IntPtrEqual(o.effective.MaxTurns, api.IntPtr(9)) {
 		t.Errorf("max_turns: file %d, effective %d; want the current 9 kept", o.file.MaxTurns, o.effective.MaxTurns)
 	}
 	if o.file.Resources == nil || o.file.Resources.Requests.CPU != "2" {
@@ -550,7 +550,7 @@ func TestStartAgent_ClearedLimitSurvivesTemplateRemoval(t *testing.T) {
 	tplDir := filepath.Join(projectDir, "templates", "limited")
 	writeTemplateFile(t, tplDir, "max_turns: 5\n")
 	agentName := "removed-template-agent"
-	cfgPath := writeAgentConfig(t, projectDir, agentName, api.ScionConfig{Harness: "claude", MaxTurns: 5})
+	cfgPath := writeAgentConfig(t, projectDir, agentName, api.ScionConfig{Harness: "claude", MaxTurns: api.IntPtr(5)})
 	writeAgentInfo(t, projectDir, agentName, api.AgentInfo{Template: "limited"})
 	obs := observeStarts(mgr, projectDir, agentName, cfgPath)
 
@@ -558,7 +558,7 @@ func TestStartAgent_ClearedLimitSurvivesTemplateRemoval(t *testing.T) {
 	lastObservation(t, obs, 1)
 	clear := fmt.Sprintf(`{"projectPath": %q, "inlineConfig": {"cleared_fields": ["max_turns"]}}`, projectDir)
 	postClearedAgentAction(t, srv, agentName, "start", clear)
-	if o := lastObservation(t, obs, 2); o.file.MaxTurns != 5 || o.effective.MaxTurns != 5 {
+	if o := lastObservation(t, obs, 2); !api.IntPtrEqual(o.file.MaxTurns, api.IntPtr(5)) || !api.IntPtrEqual(o.effective.MaxTurns, api.IntPtr(5)) {
 		t.Fatalf("clear: file %d, effective %d; want the template's 5", o.file.MaxTurns, o.effective.MaxTurns)
 	}
 
@@ -566,7 +566,7 @@ func TestStartAgent_ClearedLimitSurvivesTemplateRemoval(t *testing.T) {
 		t.Fatal(err)
 	}
 	postClearedAgentAction(t, srv, agentName, "start", clear)
-	if o := lastObservation(t, obs, 3); o.file.MaxTurns != 5 || o.effective.MaxTurns != 5 {
+	if o := lastObservation(t, obs, 3); !api.IntPtrEqual(o.file.MaxTurns, api.IntPtr(5)) || !api.IntPtrEqual(o.effective.MaxTurns, api.IntPtr(5)) {
 		t.Fatalf("after the template is removed: file %d, effective %d; want 5 kept", o.file.MaxTurns, o.effective.MaxTurns)
 	}
 }
@@ -600,7 +600,7 @@ func TestStartAgent_ClearedLimitInheritsFromRecordedTemplate(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			cfgPath := writeAgentConfig(t, projectDir, agentName, api.ScionConfig{Harness: "claude", MaxTurns: 5})
+			cfgPath := writeAgentConfig(t, projectDir, agentName, api.ScionConfig{Harness: "claude", MaxTurns: api.IntPtr(5)})
 			writeAgentInfo(t, projectDir, agentName, api.AgentInfo{Template: "limited"})
 			writeHomeAgentInfo(t, projectDir, agentName, api.AgentInfo{Template: "planted"})
 			if tc.legacy {
@@ -621,7 +621,7 @@ func TestStartAgent_ClearedLimitInheritsFromRecordedTemplate(t *testing.T) {
 				clearBody = `{"projectPath": %q, "profile": "", "inlineConfig": {"cleared_fields": ["max_turns"]}}`
 			}
 			postClearedAgentAction(t, srv, agentName, "start", fmt.Sprintf(clearBody, projectDir))
-			if o := lastObservation(t, obs, 2); o.file.MaxTurns != tc.wantMaxTurns {
+			if o := lastObservation(t, obs, 2); !api.IntPtrEqual(o.file.MaxTurns, api.IntPtr(tc.wantMaxTurns)) {
 				t.Fatalf("clear: the start read %s, want max_turns %d", o.raw, tc.wantMaxTurns)
 			}
 		})

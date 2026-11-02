@@ -611,6 +611,6 @@ func TestAttachHubSession_CleanDetachReturnsNil(t *testing.T) {
 	stubPlainTransport(t)
 	stubAttachSession(t, func() error { return nil })
 
-	err := attachHubSession(context.Background(), &HubContext{Endpoint: "http://hub.invalid"}, hubAttachTarget{Name: "a1", ID: "id-1"})
+	err := attachHubSession(context.Background(), &HubContext{Endpoint: "https://hub.invalid"}, hubAttachTarget{Name: "a1", ID: "id-1"})
 	assert.NoError(t, err)
 }

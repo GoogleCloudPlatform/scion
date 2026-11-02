@@ -28,165 +28,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// TestDeleteProjectTree_RemovesSharedDirsAndEmptyPidDir is the happy path
-// (ptone/scion#1802): a project with shared dirs containing real content —
-// files and a nested subdirectory — is fully removed, and the now-empty pid
-// dir is removed too, while sibling projects and subpath_root itself are
-// untouched.
-func TestDeleteProjectTree_RemovesSharedDirsAndEmptyPidDir(t *testing.T) {
-	hostBase := t.TempDir()
-	sharedDirs := filepath.Join(hostBase, "projects", "pid-1", "shared-dirs")
-	require.NoError(t, os.MkdirAll(filepath.Join(sharedDirs, "scratchpad", "nested"), 0o2775))
-	require.NoError(t, os.WriteFile(filepath.Join(sharedDirs, "scratchpad", "file.txt"), []byte("hi"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(sharedDirs, "scratchpad", "nested", "inner.txt"), []byte("hi"), 0o644))
-
-	// A sibling project must survive untouched.
-	siblingLeaf := filepath.Join(hostBase, "projects", "pid-2", "shared-dirs", "scratchpad")
-	require.NoError(t, os.MkdirAll(siblingLeaf, 0o2775))
-	require.NoError(t, os.WriteFile(filepath.Join(siblingLeaf, "keep.txt"), []byte("keep"), 0o644))
-
-	require.NoError(t, DeleteProjectTree(hostBase, "projects", "pid-1"))
-
-	_, err := os.Stat(filepath.Join(hostBase, "projects", "pid-1"))
-	assert.True(t, os.IsNotExist(err), "pid-1's directory should be gone entirely")
-
-	_, err = os.Stat(filepath.Join(hostBase, "projects"))
-	assert.NoError(t, err, "subpath_root itself must survive")
-
-	info, err := os.Stat(filepath.Join(siblingLeaf, "keep.txt"))
-	require.NoError(t, err, "sibling project's content must survive untouched")
-	assert.False(t, info.IsDir())
-}
-
-// TestDeleteProjectTree_PidDirNotEmpty_Survives covers "the pid dir if it's
-// then empty": if something other than shared-dirs lives under the pid dir,
-// deletion must not force it away.
-func TestDeleteProjectTree_PidDirNotEmpty_Survives(t *testing.T) {
-	hostBase := t.TempDir()
-	pidDir := filepath.Join(hostBase, "projects", "pid-1")
-	require.NoError(t, os.MkdirAll(filepath.Join(pidDir, "shared-dirs", "scratchpad"), 0o2775))
-	require.NoError(t, os.MkdirAll(filepath.Join(pidDir, "something-else"), 0o755))
-
-	require.NoError(t, DeleteProjectTree(hostBase, "projects", "pid-1"))
-
-	_, err := os.Stat(filepath.Join(pidDir, "shared-dirs"))
-	assert.True(t, os.IsNotExist(err), "shared-dirs must be fully removed")
-
-	info, err := os.Stat(filepath.Join(pidDir, "something-else"))
-	require.NoError(t, err, "the pid dir must survive since it isn't empty, and its other content is untouched")
-	assert.True(t, info.IsDir())
-}
-
-// TestDeleteProjectTree_SymlinkInsideLeaf_UnlinkedNotTraversed is the
-// required "symlinks inside the tree pointing at a victim or outside ⇒
-// victim intact" test.
-func TestDeleteProjectTree_SymlinkInsideLeaf_UnlinkedNotTraversed(t *testing.T) {
-	hostBase := t.TempDir()
-	leaf := filepath.Join(hostBase, "projects", "pid-1", "shared-dirs", "scratchpad")
-	require.NoError(t, os.MkdirAll(leaf, 0o2775))
-
-	victim := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(victim, "secret.txt"), []byte("victim data"), 0o644))
-	require.NoError(t, os.Symlink(victim, filepath.Join(leaf, "escape")))
-
-	// A symlink to a sibling project's leaf, staying inside the export.
-	siblingLeaf := filepath.Join(hostBase, "projects", "pid-2", "shared-dirs", "scratchpad")
-	require.NoError(t, os.MkdirAll(siblingLeaf, 0o2775))
-	require.NoError(t, os.WriteFile(filepath.Join(siblingLeaf, "sibling.txt"), []byte("sibling data"), 0o644))
-	require.NoError(t, os.Symlink(siblingLeaf, filepath.Join(leaf, "escape-in-base")))
-
-	require.NoError(t, DeleteProjectTree(hostBase, "projects", "pid-1"))
-
-	_, err := os.Stat(filepath.Join(hostBase, "projects", "pid-1"))
-	assert.True(t, os.IsNotExist(err), "pid-1 must be fully removed (its symlinks are unlinked, not traversed)")
-
-	// The symlink targets themselves must be completely untouched.
-	info, err := os.Stat(filepath.Join(victim, "secret.txt"))
-	require.NoError(t, err, "the outside victim must be untouched")
-	assert.False(t, info.IsDir())
-
-	info, err = os.Stat(filepath.Join(siblingLeaf, "sibling.txt"))
-	require.NoError(t, err, "the in-base sibling victim must be untouched")
-	assert.False(t, info.IsDir())
-}
-
-// TestDeleteProjectTree_SymlinkedPidComponent_Refused is the required "a
-// symlinked pid/shared-dirs component ⇒ refused or unlinked, never
-// traversed" test, for the pid component.
-func TestDeleteProjectTree_SymlinkedPidComponent_Refused(t *testing.T) {
-	hostBase := t.TempDir()
-	subRoot := filepath.Join(hostBase, "projects")
-	require.NoError(t, os.MkdirAll(subRoot, 0o755))
-
-	victim := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(victim, "secret.txt"), []byte("victim data"), 0o644))
-	require.NoError(t, os.Symlink(victim, filepath.Join(subRoot, "pid-1")))
-
-	err := DeleteProjectTree(hostBase, "projects", "pid-1")
-	require.Error(t, err, "a symlinked pid component must be refused, not traversed")
-
-	info, statErr := os.Stat(filepath.Join(victim, "secret.txt"))
-	require.NoError(t, statErr, "the victim must be untouched")
-	assert.False(t, info.IsDir())
-
-	// The symlink itself must still be exactly what it was.
-	target, readErr := os.Readlink(filepath.Join(subRoot, "pid-1"))
-	require.NoError(t, readErr, "the symlink component itself must not have been removed either")
-	assert.Equal(t, victim, target)
-}
-
-// TestDeleteProjectTree_SymlinkedSharedDirsComponent_Refused is the
-// shared-dirs half of the same requirement.
-func TestDeleteProjectTree_SymlinkedSharedDirsComponent_Refused(t *testing.T) {
-	hostBase := t.TempDir()
-	pidDir := filepath.Join(hostBase, "projects", "pid-1")
-	require.NoError(t, os.MkdirAll(pidDir, 0o755))
-
-	victim := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(victim, "secret.txt"), []byte("victim data"), 0o644))
-	require.NoError(t, os.Symlink(victim, filepath.Join(pidDir, "shared-dirs")))
-
-	err := DeleteProjectTree(hostBase, "projects", "pid-1")
-	require.Error(t, err, "a symlinked shared-dirs component must be refused, not traversed")
-
-	info, statErr := os.Stat(filepath.Join(victim, "secret.txt"))
-	require.NoError(t, statErr, "the victim must be untouched")
-	assert.False(t, info.IsDir())
-}
-
-// TestDeleteProjectTree_NothingToDelete_IsANoOp covers the "no error when
-// there's nothing under subpath_root/projectID at all" case, including
-// project IDs that never had any shared dirs.
-func TestDeleteProjectTree_NothingToDelete_IsANoOp(t *testing.T) {
-	hostBase := t.TempDir()
-
-	t.Run("subpath_root itself absent", func(t *testing.T) {
-		assert.NoError(t, DeleteProjectTree(hostBase, "projects", "pid-1"))
-	})
-
-	t.Run("subpath_root present, project absent", func(t *testing.T) {
-		require.NoError(t, os.MkdirAll(filepath.Join(hostBase, "projects"), 0o755))
-		assert.NoError(t, DeleteProjectTree(hostBase, "projects", "pid-never-existed"))
-	})
-}
-
-// TestDeleteProjectTree_InvalidProjectID_Refused mirrors the same
-// project-ID validation used at creation time: deletion must not accept a
-// traversal-shaped project ID either.
-func TestDeleteProjectTree_InvalidProjectID_Refused(t *testing.T) {
-	hostBase := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(hostBase, "projects"), 0o755))
-
-	err := DeleteProjectTree(hostBase, "projects", "../victim")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid project ID")
-}
-
-// TestDeleteProjectTree_ConcurrentDeletion_Tolerated is the required
-// "concurrent-deletion tolerance test": calling DeleteProjectTree
-// concurrently (or twice in a row) for the same project must not error just
-// because another call already removed part of the tree.
-func TestDeleteProjectTree_ConcurrentDeletion_Tolerated(t *testing.T) {
+// Concurrent deletions of one tree converge: no call fails because
+// another removed entries first, and the tree is gone afterwards.
+func TestDeleteTree_ConcurrentDeletion_Tolerated(t *testing.T) {
 	hostBase := t.TempDir()
 	leaf := filepath.Join(hostBase, "projects", "pid-1", "shared-dirs", "scratchpad")
 	require.NoError(t, os.MkdirAll(leaf, 0o2775))
@@ -201,7 +45,7 @@ func TestDeleteProjectTree_ConcurrentDeletion_Tolerated(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			errs[i] = DeleteProjectTree(hostBase, "projects", "pid-1")
+			_, errs[i] = DeleteTree(hostBase, "projects/pid-1")
 		}(i)
 	}
 	wg.Wait()
@@ -212,60 +56,6 @@ func TestDeleteProjectTree_ConcurrentDeletion_Tolerated(t *testing.T) {
 
 	_, statErr := os.Stat(filepath.Join(hostBase, "projects", "pid-1"))
 	assert.True(t, os.IsNotExist(statErr), "pid-1 must be fully removed after the concurrent calls settle")
-}
-
-// TestDeleteProjectTree_HostBaseMissing_Refused covers "refuse and log when
-// the base is missing".
-func TestDeleteProjectTree_HostBaseMissing_Refused(t *testing.T) {
-	hostBase := filepath.Join(t.TempDir(), "does-not-exist")
-	err := DeleteProjectTree(hostBase, "projects", "pid-1")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "does not exist")
-}
-
-// TestDeleteProjectTree_MultiComponentSubPathRoot_Works is the legitimate
-// half of the multi-component subpath_root behavior:
-// config.ValidateSubPathRoot allows a multi-segment relative subpath_root
-// (e.g. "a/b"), and deletion must walk it correctly, not just refuse it.
-func TestDeleteProjectTree_MultiComponentSubPathRoot_Works(t *testing.T) {
-	hostBase := t.TempDir()
-	leaf := filepath.Join(hostBase, "a", "b", "pid-1", "shared-dirs", "scratchpad")
-	require.NoError(t, os.MkdirAll(leaf, 0o2775))
-	require.NoError(t, os.WriteFile(filepath.Join(leaf, "file.txt"), []byte("hi"), 0o644))
-
-	require.NoError(t, DeleteProjectTree(hostBase, filepath.Join("a", "b"), "pid-1"))
-
-	_, err := os.Stat(filepath.Join(hostBase, "a", "b", "pid-1"))
-	assert.True(t, os.IsNotExist(err), "pid-1 must be fully removed")
-	_, err = os.Stat(filepath.Join(hostBase, "a", "b"))
-	assert.NoError(t, err, "subpath_root itself must survive")
-}
-
-// TestDeleteProjectTree_SymlinkedSubPathRootIntermediateComponent_Refused:
-// openat(2)'s O_NOFOLLOW only refuses a
-// symlink at the FINAL component of a path string, so a naive
-// single-openat-call walk of a multi-component subpath_root like "a/b"
-// would silently follow a symlinked "a" and operate inside whatever it
-// points at. Component-by-component walking (openExistingDirPathNoFollow)
-// must refuse this instead.
-func TestDeleteProjectTree_SymlinkedSubPathRootIntermediateComponent_Refused(t *testing.T) {
-	hostBase := t.TempDir()
-
-	victim := t.TempDir()
-	victimLeaf := filepath.Join(victim, "b", "pid-1", "shared-dirs", "scratchpad")
-	require.NoError(t, os.MkdirAll(victimLeaf, 0o2775))
-	require.NoError(t, os.WriteFile(filepath.Join(victimLeaf, "secret.txt"), []byte("victim data"), 0o644))
-
-	// hostBase/a is a symlink to victim, so hostBase/a/b would resolve to
-	// victim/b if the intermediate "a" component were ever followed.
-	require.NoError(t, os.Symlink(victim, filepath.Join(hostBase, "a")))
-
-	err := DeleteProjectTree(hostBase, filepath.Join("a", "b"), "pid-1")
-	require.Error(t, err, "a symlinked intermediate subpath_root component must be refused, not traversed")
-
-	info, statErr := os.Stat(filepath.Join(victimLeaf, "secret.txt"))
-	require.NoError(t, statErr, "the victim must be completely untouched")
-	assert.False(t, info.IsDir())
 }
 
 // TestRemoveTreeContents_DepthCapEnforced: a child
@@ -375,14 +165,10 @@ func TestRemoveTreeContents_DepthCapLoweredRealChain(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr), "a sibling file must still be removed")
 }
 
-// TestDeleteProjectTree_DepthCapEntryPoint_StartsAtZero pins the depth
-// DeleteProjectTree itself passes to removeTreeContents for shared-dirs/'s
-// own contents: it must be 0, exactly like a fresh top-level call, not some
-// other value that would make the cap fire one level early or late. A chain
-// exactly `cap` levels deep under shared-dirs/ must be fully removable
-// end to end through DeleteProjectTree; a chain one level deeper must be
-// reported and left in place.
-func TestDeleteProjectTree_DepthCapEntryPoint_StartsAtZero(t *testing.T) {
+// The depth cap counts from the tree DeleteTree removes: a chain exactly
+// at the cap is removed completely; one level past it is reported and left
+// in place, with its root.
+func TestDeleteTree_DepthCapEntryPoint_StartsAtZero(t *testing.T) {
 	old := maxDeleteTreeDepth
 	maxDeleteTreeDepth = 4
 	t.Cleanup(func() { maxDeleteTreeDepth = old })
@@ -399,9 +185,10 @@ func TestDeleteProjectTree_DepthCapEntryPoint_StartsAtZero(t *testing.T) {
 	require.NoError(t, os.MkdirAll(deepAtCap, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(deepAtCap, "leaf.txt"), []byte("x"), 0o644))
 
-	require.NoError(t, DeleteProjectTree(hostBase, "projects", "pid-at-cap"))
-	_, statErr := os.Stat(filepath.Join(hostBase, "projects", "pid-at-cap"))
-	assert.True(t, os.IsNotExist(statErr), "a chain exactly at the cap, entered through DeleteProjectTree, must be fully removed")
+	_, err := DeleteTree(hostBase, "projects/pid-at-cap/shared-dirs")
+	require.NoError(t, err)
+	_, statErr := os.Stat(atCap)
+	assert.True(t, os.IsNotExist(statErr), "a chain exactly at the cap, entered through DeleteTree, must be fully removed")
 
 	// One level past the cap: the deepest directory must be reported and
 	// left in place, so the project dir itself survives (not empty).
@@ -413,13 +200,13 @@ func TestDeleteProjectTree_DepthCapEntryPoint_StartsAtZero(t *testing.T) {
 	require.NoError(t, os.MkdirAll(deepOverCap, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(deepOverCap, "leaf.txt"), []byte("x"), 0o644))
 
-	err := DeleteProjectTree(hostBase, "projects", "pid-over-cap")
-	require.Error(t, err, "a chain one level past the cap, entered through DeleteProjectTree, must be reported")
+	_, err = DeleteTree(hostBase, "projects/pid-over-cap/shared-dirs")
+	require.Error(t, err, "a chain one level past the cap, entered through DeleteTree, must be reported")
 
 	_, statErr = os.Stat(deepOverCap)
 	assert.NoError(t, statErr, "the over-cap directory must be left in place, untouched")
-	_, statErr = os.Stat(filepath.Join(hostBase, "projects", "pid-over-cap"))
-	assert.NoError(t, statErr, "the project dir must survive: shared-dirs/ under it is not empty")
+	_, statErr = os.Stat(overCap)
+	assert.NoError(t, statErr, "the tree's root must survive: it is not empty")
 }
 
 // TestReadDirNames_RemovedDirectory_TreatedAsEmpty: a directory removed out
@@ -507,7 +294,7 @@ func TestDeleteSharedDir_RemovesOnlyTheNamedLeaf(t *testing.T) {
 }
 
 // TestDeleteSharedDir_NothingToDelete_IsANoOp mirrors
-// TestDeleteProjectTree_NothingToDelete_IsANoOp for the single-leaf variant.
+// the DeleteTree tests for the single-leaf variant.
 func TestDeleteSharedDir_NothingToDelete_IsANoOp(t *testing.T) {
 	hostBase := t.TempDir()
 
@@ -522,7 +309,7 @@ func TestDeleteSharedDir_NothingToDelete_IsANoOp(t *testing.T) {
 }
 
 // TestDeleteSharedDir_InvalidInputs_Refused mirrors the project-ID/name
-// validation DeleteProjectTree already requires.
+// validation DeleteTree already requires.
 func TestDeleteSharedDir_InvalidInputs_Refused(t *testing.T) {
 	hostBase := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(hostBase, "projects"), 0o755))
@@ -572,8 +359,8 @@ func TestDeleteSharedDir_SymlinkedSharedDirsComponent_Refused(t *testing.T) {
 // subPathRoot itself, so a symlinked <pid> (projectID) component must be
 // refused exactly like a symlinked shared-dirs component already is
 // (TestDeleteSharedDir_SymlinkedSharedDirsComponent_Refused above) --
-// mirroring DeleteProjectTree's own
-// TestDeleteProjectTree_SymlinkedPidComponent_Refused. Without a dedicated
+// mirroring DeleteTree's own
+// the DeleteTree tests. Without a dedicated
 // test, a regression that special-cased just the <pid> hop to follow
 // symlinks (while leaving every other hop NOFOLLOW) would pass every other
 // committed DeleteSharedDir test.
@@ -603,8 +390,8 @@ func TestDeleteSharedDir_SymlinkedPidComponent_Refused(t *testing.T) {
 // TestDeleteSharedDir_SymlinkedSubPathRootIntermediateComponent_Refused: a
 // multi-component subPathRoot with a symlinked INTERMEDIATE component (not
 // the final one) must be refused the
-// same way DeleteProjectTree's own
-// TestDeleteProjectTree_SymlinkedSubPathRootIntermediateComponent_Refused
+// same way DeleteTree's own
+// the DeleteTree tests
 // already requires, since DeleteSharedDir walks the whole
 // subPathRoot/projectID/shared-dirs chain through the same
 // openExistingDirPathNoFollow helper.
@@ -653,7 +440,7 @@ func TestDeleteSharedDir_SymlinkedLeaf_Refused(t *testing.T) {
 }
 
 // TestDeleteSharedDir_SymlinkInsideLeaf_UnlinkedNotTraversed confirms
-// content-level symlink safety carries over from DeleteProjectTree's own
+// content-level symlink safety carries over from DeleteTree's own
 // walk: a symlink planted as leaf CONTENT is unlinked directly, never
 // followed.
 func TestDeleteSharedDir_SymlinkInsideLeaf_UnlinkedNotTraversed(t *testing.T) {
@@ -732,4 +519,158 @@ func TestDeleteProjectRoot_SymlinkedComponentsRefused(t *testing.T) {
 	assert.DirExists(t, filepath.Join(victim, "pid-3"))
 
 	require.Error(t, DeleteProjectRoot(hostBase, "projects", "../pid-1"), "an invalid project ID is refused")
+}
+
+// TestDeleteTree_RemovesOnlyTheLeaf: a multi-component path is removed with
+// everything under it; its parents and siblings stay; a symlink inside is
+// unlinked, never followed; a repeated call is nothing to do.
+func TestDeleteTree_RemovesOnlyTheLeaf(t *testing.T) {
+	hostBase := t.TempDir()
+	leaf := filepath.Join(hostBase, "projects", "pid-1", "agents", "dev")
+	require.NoError(t, os.MkdirAll(filepath.Join(leaf, "workspace", "sub"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(leaf, "workspace", "sub", "f"), []byte("x"), 0o644))
+	victim := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(victim, "keep.txt"), []byte("victim"), 0o644))
+	require.NoError(t, os.Symlink(victim, filepath.Join(leaf, "out")))
+	sibling := filepath.Join(hostBase, "projects", "pid-1", "agents", "other")
+	require.NoError(t, os.MkdirAll(sibling, 0o755))
+
+	existed, err := DeleteTree(hostBase, "projects/pid-1/agents/dev")
+	require.NoError(t, err)
+	assert.True(t, existed)
+	assert.NoDirExists(t, leaf)
+	assert.DirExists(t, sibling)
+	assert.FileExists(t, filepath.Join(victim, "keep.txt"))
+
+	existed, err = DeleteTree(hostBase, "projects/pid-1/agents/dev")
+	require.NoError(t, err)
+	assert.False(t, existed, "a missing leaf is nothing to do")
+	existed, err = DeleteTree(hostBase, "absent/pid-1")
+	require.NoError(t, err)
+	assert.False(t, existed, "a missing parent is nothing to do")
+}
+
+// TestDeleteTree_SymlinkAtAnyComponentRefused: a symlink at the leaf or at
+// any parent component is refused and its target left untouched.
+func TestDeleteTree_SymlinkAtAnyComponentRefused(t *testing.T) {
+	for _, linkAt := range []string{"projects", "projects/pid-1", "projects/pid-1/agents", "projects/pid-1/agents/dev"} {
+		t.Run(linkAt, func(t *testing.T) {
+			hostBase := t.TempDir()
+			victim := t.TempDir()
+			require.NoError(t, os.MkdirAll(filepath.Join(victim, "pid-1", "agents", "dev", "agents", "dev"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(victim, "keep.txt"), []byte("v"), 0o644))
+			link := filepath.Join(hostBase, linkAt)
+			require.NoError(t, os.MkdirAll(filepath.Dir(link), 0o755))
+			require.NoError(t, os.Symlink(victim, link))
+
+			_, err := DeleteTree(hostBase, "projects/pid-1/agents/dev")
+			require.Error(t, err)
+			assert.FileExists(t, filepath.Join(victim, "keep.txt"))
+			assert.DirExists(t, filepath.Join(victim, "pid-1", "agents", "dev"))
+		})
+	}
+}
+
+// TestDeleteTree_InvalidInputs: an unclean or absolute path and a missing
+// host base are errors, and nothing is removed.
+func TestDeleteTree_InvalidInputs(t *testing.T) {
+	hostBase := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(hostBase, "keep"), 0o755))
+	for _, rel := range []string{"", ".", "..", "../keep", "a/../keep", "/keep", "a//b", "a/./b"} {
+		_, err := DeleteTree(hostBase, rel)
+		assert.Error(t, err, "path %q", rel)
+	}
+	assert.DirExists(t, filepath.Join(hostBase, "keep"))
+	_, err := DeleteTree(filepath.Join(hostBase, "absent"), "keep")
+	assert.Error(t, err, "a missing host base is an error")
+}
+
+// TestRemoveDirIfEmpty: an empty directory is removed; a non-empty one is
+// kept with everything in it; an absent one is nothing to do; a symlinked
+// leaf or parent is refused.
+func TestRemoveDirIfEmpty(t *testing.T) {
+	hostBase := t.TempDir()
+	empty := filepath.Join(hostBase, "p", "agents", "a")
+	full := filepath.Join(hostBase, "p", "agents", "b")
+	require.NoError(t, os.MkdirAll(empty, 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(full, "workspace"), 0o755))
+
+	existed, notEmpty, err := RemoveDirIfEmpty(hostBase, "p/agents/a")
+	require.NoError(t, err)
+	assert.True(t, existed)
+	assert.False(t, notEmpty)
+	assert.NoDirExists(t, empty)
+
+	existed, notEmpty, err = RemoveDirIfEmpty(hostBase, "p/agents/b")
+	require.NoError(t, err)
+	assert.True(t, existed)
+	assert.True(t, notEmpty)
+	assert.DirExists(t, filepath.Join(full, "workspace"))
+
+	existed, _, err = RemoveDirIfEmpty(hostBase, "p/agents/a")
+	require.NoError(t, err)
+	assert.False(t, existed)
+
+	victim := t.TempDir()
+	require.NoError(t, os.Symlink(victim, filepath.Join(hostBase, "p", "agents", "c")))
+	_, _, err = RemoveDirIfEmpty(hostBase, "p/agents/c")
+	assert.ErrorIs(t, err, ErrTreeRefused)
+	assert.DirExists(t, victim)
+	_, _, err = RemoveDirIfEmpty(hostBase, "../x")
+	assert.ErrorIs(t, err, ErrTreeRefused)
+}
+
+// The tree file helpers write, read, list and remove a file below a host
+// base without following a symlink at any component, and refuse a
+// non-regular file or a symlinked component.
+func TestTreeFileHelpers(t *testing.T) {
+	hostBase := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(hostBase, "projects", "pid-1"), 0o755))
+
+	require.NoError(t, WriteFileInTree(hostBase, "projects/pid-1/provision", "marker", []byte("v1\n"), true))
+	require.NoError(t, WriteFileInTree(hostBase, "projects/pid-1/provision", "marker", []byte("v2\n"), true))
+	data, ok, err := ReadFileInTree(hostBase, "projects/pid-1/provision", "marker", 64)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "v2\n", string(data))
+	names, ok, err := ListDirInTree(hostBase, "projects")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, []string{"pid-1"}, names)
+
+	_, ok, err = ReadFileInTree(hostBase, "projects/absent/provision", "marker", 64)
+	require.NoError(t, err)
+	assert.False(t, ok, "an absent component reads as absent")
+	_, ok, err = ListDirInTree(hostBase, "absent")
+	require.NoError(t, err)
+	assert.False(t, ok)
+	assert.Error(t, WriteFileInTree(hostBase, "projects/absent/provision", "marker", nil, true), "only the last component is created")
+	_, _, err = ReadFileInTree(hostBase, "projects/pid-1/provision", "marker", 1)
+	assert.ErrorIs(t, err, ErrTreeRefused, "an oversized file is refused")
+
+	victim := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(victim, "marker"), []byte("victim"), 0o644))
+	require.NoError(t, os.Symlink(victim, filepath.Join(hostBase, "projects", "pid-2")))
+	assert.ErrorIs(t, WriteFileInTree(hostBase, "projects/pid-2", "marker", []byte("x"), false), ErrTreeRefused)
+	_, _, err = ReadFileInTree(hostBase, "projects/pid-2", "marker", 64)
+	assert.ErrorIs(t, err, ErrTreeRefused)
+	assert.ErrorIs(t, RemoveFileInTree(hostBase, "projects/pid-2", "marker"), ErrTreeRefused)
+	got, err := os.ReadFile(filepath.Join(victim, "marker"))
+	require.NoError(t, err)
+	assert.Equal(t, "victim", string(got), "a symlinked component is never followed")
+
+	require.NoError(t, os.Symlink(filepath.Join(victim, "marker"), filepath.Join(hostBase, "projects", "pid-1", "provision", "link")))
+	_, _, err = ReadFileInTree(hostBase, "projects/pid-1/provision", "link", 64)
+	assert.ErrorIs(t, err, ErrTreeRefused, "a symlinked file is refused")
+	assert.ErrorIs(t, WriteFileInTree(hostBase, "projects/pid-1/provision", "link", []byte("x"), false), ErrTreeRefused)
+	require.NoError(t, RemoveFileInTree(hostBase, "projects/pid-1/provision", "link"), "a symlink is unlinked")
+	got, err = os.ReadFile(filepath.Join(victim, "marker"))
+	require.NoError(t, err)
+	assert.Equal(t, "victim", string(got))
+
+	require.NoError(t, RemoveFileInTree(hostBase, "projects/pid-1/provision", "marker"))
+	require.NoError(t, RemoveFileInTree(hostBase, "projects/pid-1/provision", "marker"), "removing again is nothing to do")
+	for _, bad := range []string{"", ".", "..", "a/b"} {
+		assert.ErrorIs(t, WriteFileInTree(hostBase, "projects/pid-1/provision", bad, nil, false), ErrTreeRefused, "name %q", bad)
+	}
 }

@@ -612,6 +612,13 @@ func AutoMigrate(ctx context.Context, client *ent.Client, opts ...AutoMigrateOpt
 		}
 		return err
 	}
+	// Downgrade floor rule: a change here that drops a table or column, or
+	// any other migration an older binary cannot ignore (a new NOT NULL
+	// column without a default, a narrowed enum, rewritten values), must
+	// bump pkg/version.DowngradeFloor in the same PR to the first release
+	// that contains it. The hub refuses to install a release older than
+	// the floor (below_downgrade_floor), because that binary would run on a
+	// schema it does not understand.
 	if err := dropDecisionAuditTable(ctx, client); err != nil {
 		return err
 	}

@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -127,10 +128,15 @@ func (e *ExecMountChecker) ReadMountTable() (MountTable, error) {
 
 // Mount executes the NFS mount command.
 // Requires mount privilege (root or CAP_SYS_ADMIN).
+//
+// options are passed through HardenNFSMountOptions here as well as by the
+// reconciler, so every mount this process makes carries nosuid and nodev as
+// its last options, whichever caller built them.
 func (e *ExecMountChecker) Mount(ctx context.Context, server, export, target, options string) error {
 	if err := e.MountPrivilegeError(); err != nil {
 		return err
 	}
+	options = HardenNFSMountOptions(options)
 	source := fmt.Sprintf("%s:%s", server, export)
 	args := []string{"-t", "nfs", "-o", options, source, target}
 	e.log.Info("Mounting NFS share", "source", source, "target", target, "options", options)
@@ -138,6 +144,21 @@ func (e *ExecMountChecker) Mount(ctx context.Context, server, export, target, op
 	out, err := e.runCommand(ctx, "mount", args...)
 	if err != nil {
 		return fmt.Errorf("mount %s on %s failed: %w (output: %s)", source, target, err, string(out))
+	}
+	return nil
+}
+
+// RemountRequiredFlags applies nosuid and nodev to the mount at target in
+// place (mount -o remount,nosuid,nodev), without unmounting it.
+func (e *ExecMountChecker) RemountRequiredFlags(ctx context.Context, target string) error {
+	if err := e.MountPrivilegeError(); err != nil {
+		return err
+	}
+	options := "remount," + strings.Join(requiredNFSMountFlags, ",")
+	e.log.Info("Remounting NFS share", "target", target, "options", options)
+	out, err := e.runCommand(ctx, "mount", "-o", options, target)
+	if err != nil {
+		return fmt.Errorf("remount of %s failed: %w (output: %s)", target, err, string(out))
 	}
 	return nil
 }

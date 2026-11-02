@@ -22,7 +22,7 @@
  * the two components never drift apart.
  */
 
-import { html, css } from 'lit';
+import { html, css, nothing } from 'lit';
 import type { TemplateResult } from 'lit';
 import { formatInstant, zoneLabel } from '../../../utils/time.js';
 
@@ -52,6 +52,31 @@ export function renderDateDivider(dateStr: string): TemplateResult {
   `;
 }
 
+/**
+ * The text of the retention divider at the top of a thread whose older
+ * messages the hub's retention policy removed, with the cutoff in the same
+ * date format as the date dividers, or '' for an invalid instant.
+ */
+export function retentionDividerText(purgedBeforeIso: string): string {
+  const date = formatChatDate(purgedBeforeIso);
+  if (!date) return '';
+  return `Messages before ${date} are removed by this hub's retention policy.`;
+}
+
+/**
+ * Render the retention divider (styled like a date divider, but in normal
+ * case so the sentence reads as one), or nothing for an invalid instant.
+ */
+export function renderRetentionDivider(purgedBeforeIso: string): TemplateResult | typeof nothing {
+  const text = retentionDividerText(purgedBeforeIso);
+  if (!text) return nothing;
+  return html`
+    <div class="date-divider retention-divider" role="note">
+      <span class="date-label retention-label">${text}</span>
+    </div>
+  `;
+}
+
 /** Styles for `renderDateDivider` — include in any component that uses it. */
 export const chatDateDividerStyles = css`
   .date-divider {
@@ -76,5 +101,13 @@ export const chatDateDividerStyles = css`
     text-transform: uppercase;
     letter-spacing: 0.05em;
     white-space: nowrap;
+  }
+
+  .retention-label {
+    text-transform: none;
+    letter-spacing: normal;
+    font-weight: 500;
+    white-space: normal;
+    text-align: center;
   }
 `;

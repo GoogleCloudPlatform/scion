@@ -1428,6 +1428,20 @@ type BrokerCapabilities struct {
 	// applies (api.ClearableConfigPath, and env key removals) as applied
 	// at the next start rather than held for a reincarnation.
 	ClearedFields bool `json:"clearedFields,omitempty"`
+	// UnlimitedCountLimits indicates the broker honours an explicit
+	// max_turns or max_model_calls of 0 as "no limit" over an inherited one
+	// (ptone/scion#5605): its merge, default fill and launch keep it. Only
+	// for such a broker does the hub accept a change of a count limit to
+	// Unlimited; an older broker would keep the inherited limit.
+	UnlimitedCountLimits bool `json:"unlimitedCountLimits,omitempty"`
+	// ClearedResourceSubfields indicates the broker applies the resources
+	// sub-field entries of cleared_fields (resources.requests.cpu and the
+	// like, api.ResourceSubPaths) at start, so a resources edit that drops
+	// one sub-field restores its inherited value while keeping the others
+	// (ptone/scion#5676). Only for such a broker does the hub report that
+	// drop as applied at the next start; an older broker ignores the
+	// entries and keeps the previous value until a reincarnation.
+	ClearedResourceSubfields bool `json:"clearedResourceSubfields,omitempty"`
 	// StartsInFlight indicates the broker reports the agent starts still
 	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
 	// then does the hub read a start's absence from that list as "no start
@@ -3532,6 +3546,7 @@ const (
 type ScheduleFieldMask struct {
 	Name      bool
 	CronExpr  bool
+	TimeZone  bool
 	EventType bool
 	Payload   bool
 	Status    bool
@@ -3604,7 +3619,8 @@ type Schedule struct {
 	ID            string     `json:"id"`
 	ProjectID     string     `json:"projectId"`
 	Name          string     `json:"name"`
-	CronExpr      string     `json:"cronExpr"`               // Standard 5-field cron expression (UTC)
+	CronExpr      string     `json:"cronExpr"`               // Standard 5-field cron expression, evaluated in TimeZone
+	TimeZone      string     `json:"timeZone,omitempty"`     // IANA time zone for CronExpr; empty means UTC
 	EventType     string     `json:"eventType"`              // "message" (future: "dispatch_agent")
 	Payload       string     `json:"payload"`                // JSON: handler-specific configuration
 	Status        string     `json:"status"`                 // active, paused, deleted
@@ -3683,10 +3699,29 @@ type ScheduleFilter struct {
 	// the hub's agent row decision, so an agent's list pages fill with the
 	// rows it holds.
 	InitiatorAgentID string
+	// AuthorityPrincipal, when set, keeps only schedules whose recorded
+	// authority (the current initiator principal, with a recorded
+	// attribution as for InitiatorAgentID) is this principal. It matches the
+	// principal the schedule fires under, never CreatedBy. Kind and ID must
+	// both be set; one without the other is ErrInvalidInput.
+	AuthorityPrincipal ScheduleAuthorityPrincipal
 	// SystemPausedOnly, when true, keeps only paused schedules with a
 	// non-empty StatusReason: schedules the hub paused itself. A schedule a
 	// user paused (empty reason) is left out.
 	SystemPausedOnly bool
+}
+
+// ScheduleAuthorityPrincipal names the principal a schedule's recorded
+// authority resolves to: Kind is a DelegationPrincipal* value and ID the
+// principal's ID. The zero value means no principal filter.
+type ScheduleAuthorityPrincipal struct {
+	Kind string
+	ID   string
+}
+
+// IsZero reports whether p names no principal.
+func (p ScheduleAuthorityPrincipal) IsZero() bool {
+	return p.Kind == "" && p.ID == ""
 }
 
 // ToAPI converts a store.Agent to an api.AgentInfo for external consumption.
@@ -4957,6 +4992,45 @@ type DecisionAuditRecord struct {
 	ResourceAncestryLen    int
 	ResourceScopeKind      string
 	ResourceScopeUserIDSet bool
+
+	// RecordKind is empty for an ordinary decision record. A non-empty
+	// value names a record that summarizes more than one decision, for
+	// example DecisionAuditRecordKindListFilter. In-memory only, like the
+	// rest of the record: the decision-log adapter excludes every record
+	// with a RecordKind until the typed audit schema carries it.
+	RecordKind string
+	// ListFilter is the summary of a list request's item filter. Set only
+	// when RecordKind is DecisionAuditRecordKindListFilter.
+	ListFilter *DecisionAuditListFilter
+}
+
+// DecisionAuditRecordKindListFilter is the RecordKind of the one aggregated
+// item-filter record an agent delegated credential's list request writes.
+const DecisionAuditRecordKindListFilter = "agent_delegation_list_filter"
+
+// DecisionAuditListFilterMaxDeniedIDs bounds DecisionAuditListFilter.DeniedIDs.
+const DecisionAuditListFilterMaxDeniedIDs = 50
+
+// DecisionAuditListFilter summarizes the per-item decisions of one list
+// request. Each distinct item is counted once, however many passes of the
+// list examined it.
+type DecisionAuditListFilter struct {
+	// ItemPermission is the permission each item was decided for.
+	ItemPermission string
+	// Allowed, Denied and DroppedByAdmission count distinct items. An item
+	// is dropped by admission when its project is outside the list's
+	// project set, has no project, or does not admit the authorizing user.
+	Allowed            int
+	Denied             int
+	DroppedByAdmission int
+	// DeniedIDs holds up to DecisionAuditListFilterMaxDeniedIDs IDs of
+	// denied or dropped items; Truncated reports that there were more.
+	DeniedIDs []string
+	Truncated bool
+	// Incomplete reports that the request did not finish its list, for any
+	// reason, after the list arm started: a panic, a cancelled request, an
+	// invalid cursor or filter, or a server error.
+	Incomplete bool
 }
 
 // =============================================================================

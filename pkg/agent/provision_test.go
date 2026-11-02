@@ -1669,8 +1669,8 @@ func TestProvisionAgent_SharedWorkspaceCredentialHelper(t *testing.T) {
 	sharedWorkspace := filepath.Join(tmpDir, "shared-ws")
 	_ = os.MkdirAll(sharedWorkspace, 0755)
 
-	// Set SharedWorkspace context
-	ctx := api.ContextWithSharedWorkspace(context.Background())
+	// Set SharedWorkspace context, with the project's recorded git remote.
+	ctx := api.ContextWithGitTokenRemote(api.ContextWithSharedWorkspace(context.Background()), "github.com/org/shared")
 
 	home, _, _, err := ProvisionAgent(ctx, "shared-agent", "claude", "", "", projectScionDir, "", "", "", sharedWorkspace)
 	if err != nil {
@@ -1685,8 +1685,11 @@ func TestProvisionAgent_SharedWorkspaceCredentialHelper(t *testing.T) {
 	}
 
 	content := string(data)
-	if !strings.Contains(content, "[credential]") {
-		t.Errorf("expected [credential] section in .gitconfig, got:\n%s", content)
+	if !strings.Contains(content, `[credential "https://github.com"]`) {
+		t.Errorf("expected a credential section scoped to the recorded remote's host in .gitconfig, got:\n%s", content)
+	}
+	if strings.Contains(content, "[credential]") {
+		t.Errorf("the credential helper must not be unscoped, got:\n%s", content)
 	}
 	if !strings.Contains(content, "GITHUB_TOKEN") {
 		t.Errorf("expected GITHUB_TOKEN reference in credential helper, got:\n%s", content)

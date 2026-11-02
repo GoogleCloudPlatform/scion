@@ -423,13 +423,67 @@ readonly EMPTY_SHA256="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7
 # nothing in it is expanded either locally or on the VM. ARGS must be
 # shell-safe words (deploy.sh only passes validated values).
 install_layout_command() {
+  layout_script_write
+  layout_script_run "$@"
+  layout_script_remove
+}
+
+# layout_script_write / layout_script_run ARGS... / layout_script_remove --
+# the three parts of install_layout_command, for a VM command that runs
+# scion-layout.sh more than once: write it once, run it as often as needed,
+# remove it. A command must carry the script only once: an ssh --command
+# is a single argv word, which Linux caps at 128 KiB (MAX_ARG_STRLEN), and
+# scion-layout.sh alone is over a quarter of that.
+layout_script_write() {
   printf '%s\n' \
     "    SCION_LAYOUT_SH=\"\$(mktemp)\"" \
     "    cat > \"\$SCION_LAYOUT_SH\" << 'SCIONLAYOUTEOF'" \
     "$(cat "${SCRIPT_DIR}/scion-layout.sh")" \
-    "SCIONLAYOUTEOF" \
-    "    sudo bash \"\$SCION_LAYOUT_SH\" $* || { rm -f \"\$SCION_LAYOUT_SH\"; exit 1; }" \
+    "SCIONLAYOUTEOF"
+}
+layout_script_run() {
+  printf '%s\n' \
+    "    sudo bash \"\$SCION_LAYOUT_SH\" $* || { rm -f \"\$SCION_LAYOUT_SH\"; exit 1; }"
+}
+layout_script_remove() {
+  printf '%s\n' \
     "    rm -f \"\$SCION_LAYOUT_SH\""
+}
+
+# install_guard_command -- prints remote shell text (to follow
+# layout_script_write in the same command) that installs the start-attempts
+# counter (scion-hub-start-attempt.sh, run by the hub unit's ExecStartPre=-,
+# next to the guard) and the
+# boot-failure guard: scion-hub-rollback.sh (this directory) root-owned
+# 0755 at /usr/local/libexec/scion/scion-hub-rollback.sh (design D1 as
+# amended: outside the hub-owned ${INSTALL_ROOT}, so the hub user can
+# neither edit nor replace a script root runs), through scion-layout.sh
+# install-guard, which creates /usr/local/libexec/scion root-owned 0755 and
+# checks its directory chain; and the root oneshot scion-hub-rollback.service that
+# scion-hub.service's OnFailure= starts. Idempotent. Shared by the deploy
+# and migrate-layout paths so both install the same guard; the caller
+# writes scion-hub.service afterwards and runs daemon-reload. The guard
+# and layout temp files are removed on any exit (an EXIT trap, cleared
+# once the guard file is gone), including when install-guard fails.
+install_guard_command() {
+  printf '%s\n' \
+    "    SCION_ROLLBACK_SH=\"\$(mktemp)\"" \
+    "    SCION_START_ATTEMPT_SH=\"\$(mktemp)\"" \
+    "    trap 'rm -f \"\$SCION_ROLLBACK_SH\" \"\$SCION_START_ATTEMPT_SH\" \"\${SCION_LAYOUT_SH:-}\"' EXIT" \
+    "    cat > \"\$SCION_ROLLBACK_SH\" << 'SCIONROLLBACKEOF'" \
+    "$(cat "${SCRIPT_DIR}/scion-hub-rollback.sh")" \
+    "SCIONROLLBACKEOF" \
+    "    cat > \"\$SCION_START_ATTEMPT_SH\" << 'SCIONSTARTATTEMPTEOF'" \
+    "$(cat "${SCRIPT_DIR}/scion-hub-start-attempt.sh")" \
+    "SCIONSTARTATTEMPTEOF"
+  # shellcheck disable=SC2016 # expanded on the VM, not here
+  layout_script_run install-guard '"$SCION_ROLLBACK_SH"' '"$SCION_START_ATTEMPT_SH"'
+  printf '%s\n' \
+    "    rm -f \"\$SCION_ROLLBACK_SH\" \"\$SCION_START_ATTEMPT_SH\"" \
+    "    trap - EXIT" \
+    "    sudo tee /etc/systemd/system/scion-hub-rollback.service > /dev/null << 'SERVICEEOF'" \
+    "$(cat "${SCRIPT_DIR}/config-templates/scion-hub-rollback.service")" \
+    "SERVICEEOF"
 }
 
 # read_current_release ZONE -- prints the release tag ${INSTALL_ROOT}/current
@@ -635,19 +689,50 @@ source "${SCRIPT_DIR}/hybrid-tier.sh"
 # shellcheck source=scripts/single-node-vm/release-order.sh
 source "${SCRIPT_DIR}/release-order.sh"
 
-# One EXIT trap, registered once, removes these three temp files on every
-# exit path, including SIGINT and SIGTERM: SSH_STDERR_FILE,
-# HYBRID_KUBECONFIG and ALLUSERS_STDERR_FILE. Other temp files are not
-# covered by this trap. The three start empty, and
-# `rm -f ""` is a harmless no-op, so setting the trap here before any
-# file exists is safe. `trap`
-# replaces rather than stacks, so a second, later `trap ... EXIT` call
-# would silently drop this one -- there must only ever be this single
-# registration.
+# Local temp files (ptone/scion#6612). Every temp file this script and
+# hybrid-tier.sh create on the operator's machine -- the 0600 hub.env copy
+# holding the session secret (HUB_ENV_TMPFILE), the per-phase *_ERR
+# files, the kubeconfig -- is a plain `mktemp`, so all of them land in
+# TMPDIR. TMPDIR is pointed at DEPLOY_TMPDIR, a private (0700) directory
+# made once here, and deploy_cleanup removes that whole directory. So
+# each file is covered from the moment it exists, with no per-file
+# registration and no window between a mktemp and its trap entry (the
+# only window left is this one mktemp -d, which can at worst leave an
+# empty directory). Child processes (gcloud, kubectl, python3) inherit
+# TMPDIR, so their temp files go the same way.
+#
+# deploy_cleanup runs on EXIT and on INT, TERM and HUP. A signal handler
+# cleans up, then re-raises the signal with the default action, so an
+# interrupted run still ends with the signal's status (130 for INT, 143
+# for TERM). `trap` replaces rather than stacks: these must stay the only
+# EXIT/INT/TERM/HUP registrations in this script. SSH_STDERR_FILE,
+# HYBRID_KUBECONFIG and ALLUSERS_STDERR_FILE are also removed by name;
+# they start empty, and `rm -f ""` is a no-op.
 SSH_STDERR_FILE=""
 HYBRID_KUBECONFIG=""
 ALLUSERS_STDERR_FILE=""
-trap 'rm -f "$SSH_STDERR_FILE" "$HYBRID_KUBECONFIG" "$ALLUSERS_STDERR_FILE"' EXIT
+DEPLOY_TMPDIR=""
+deploy_cleanup() {
+  rm -f "$SSH_STDERR_FILE" "$HYBRID_KUBECONFIG" "$ALLUSERS_STDERR_FILE"
+  case "$DEPLOY_TMPDIR" in
+    */scion-deploy.*) rm -rf "$DEPLOY_TMPDIR" ;;
+  esac
+}
+# deploy_on_signal SIGNAL STATUS -- clean up, then die of SIGNAL; should the
+# re-raised signal somehow not end the script, exit with STATUS
+# (128 + signal number) instead of carrying on.
+deploy_on_signal() {
+  deploy_cleanup
+  trap - EXIT INT TERM HUP
+  kill -s "$1" "$$"
+  exit "$2"
+}
+trap deploy_cleanup EXIT
+trap 'deploy_on_signal INT 130' INT
+trap 'deploy_on_signal TERM 143' TERM
+trap 'deploy_on_signal HUP 129' HUP
+DEPLOY_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/scion-deploy.XXXXXX")"
+export TMPDIR="$DEPLOY_TMPDIR"
 
 # ---------------------------------------------------------------------------
 # Teardown flow (--delete)
@@ -1299,8 +1384,11 @@ if [[ "$MIGRATE_LAYOUT_MODE" == "true" ]]; then
     --zone="${ZONE}" --project="${PROJECT_ID}" \
     --command="
     set -euo pipefail
-$(install_layout_command adopt)
-$(install_layout_command set-maintenance /home/scion/.scion/settings.yaml "${MIGRATE_UPDATE_POLICY}")
+$(layout_script_write)
+$(layout_script_run adopt)
+$(layout_script_run set-maintenance /home/scion/.scion/settings.yaml "${MIGRATE_UPDATE_POLICY}")
+$(install_guard_command)
+$(layout_script_remove)
     sudo tee /etc/systemd/system/scion-hub.service > /dev/null << 'SERVICEEOF'
 $(cat "${SCRIPT_DIR}/config-templates/scion-hub.service")
 SERVICEEOF
@@ -3039,6 +3127,10 @@ info "Installing systemd service..."
 gcloud compute ssh "${INSTANCE_NAME}" \
   --zone="${ZONE}" --project="${PROJECT_ID}" \
   --command="
+    set -euo pipefail
+$(layout_script_write)
+$(install_guard_command)
+$(layout_script_remove)
     sudo tee /etc/systemd/system/scion-hub.service > /dev/null << 'SERVICEEOF'
 $(cat "${SCRIPT_DIR}/config-templates/scion-hub.service")
 SERVICEEOF

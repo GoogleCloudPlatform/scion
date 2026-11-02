@@ -456,7 +456,7 @@ func TestApplyInlineConfigUpdate_NoSkillsLeavesSkillsUnchanged(t *testing.T) {
 	}
 	cfgPath := writeAgentConfig(t, projectDir, agentName, api.ScionConfig{Skills: skills})
 
-	srv.applyInlineConfigUpdate(context.Background(), agentName, projectDir, &api.ScionConfig{MaxTurns: 5}, false)
+	srv.applyInlineConfigUpdate(context.Background(), agentName, projectDir, &api.ScionConfig{MaxTurns: api.IntPtr(5)}, false)
 
 	if got := readAgentSkills(t, cfgPath); !reflect.DeepEqual(got, skills) {
 		t.Fatalf("skills changed\n got: %+v\nwant: %+v", got, skills)

@@ -215,6 +215,7 @@ func TestBuildPod_SharedDirStorageNFS_PrecedesWorkspaceStorageNFS(t *testing.T) 
 		WorkspaceBackendName: "nfs",
 		NFSPVClaimName:       "scion-workspaces",
 		NFSSubPath:           "projects/proj-123/workspace",
+		ProjectID:            "proj-123",
 		Labels:               map[string]string{"scion.project": "myproject"},
 		SharedDirs:           []api.SharedDir{{Name: "scratchpad"}},
 		SharedDirStorage: &SharedDirRealization{
