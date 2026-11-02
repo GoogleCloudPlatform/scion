@@ -43,8 +43,12 @@ func TestProjectWorkspaceWrite_DotGitPathRefused(t *testing.T) {
 	srv, _ := testServer(t)
 	project, workspacePath := createTestHubManagedProject(t, srv, "WS Write DotGit")
 
-	for _, p := range []string{".git/config", ".GIT/config", "a/.git/b"} {
-		t.Run(p, func(t *testing.T) {
+	for name, p := range map[string]string{
+		"top":       ".git/config",
+		"uppercase": ".GIT/config",
+		"nested":    "a/.git/b",
+	} {
+		t.Run(name, func(t *testing.T) {
 			body := ProjectWorkspaceWriteRequest{Content: "[core]\n"}
 			rec := doRequest(t, srv, http.MethodPut, fmt.Sprintf("/api/v1/projects/%s/workspace/files/%s", project.ID, p), body)
 			assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
