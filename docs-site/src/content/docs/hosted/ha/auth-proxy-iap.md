@@ -523,6 +523,8 @@ This unblocks seamless interactive attachments to agents executing under IAP-sec
 
 A browser follows IAP's Google sign-in page; the `scion` CLI cannot. Against a Hub behind IAP, `scion hub auth login` stops with an error that says the Hub appears to be behind IAP, instead of trying to decode the sign-in page. If the CLI already sent a transport token and IAP rejected it, the error says so instead.
 
+The CLI recognises IAP by its `X-Goog-IAP-Generated-Response` header, by its plain-text `Invalid IAP credentials` 401 or 403, or by a redirect to `accounts.google.com`. With IAP [external identities](https://cloud.google.com/iap/docs/enable-external-identities), the sign-in page is on another host, so the CLI reports only that the Hub returned an HTML page instead of a JSON response. The same transport setup applies.
+
 A person's CLI uses the same dual-layer model as agents:
 
 | Layer | Credential | How the CLI gets it |
@@ -551,10 +553,13 @@ This is not the `auth.proxy.iap.audience` value, which is the audience of the as
 
 ```bash
 mkdir -p ~/.scion
-(umask 077; gcloud auth print-identity-token \
+# Write to a private temp file, then rename it into place, so the CLI never
+# reads a partly written token.
+tmp="$(mktemp ~/.scion/iap-transport-token.XXXXXX)"
+gcloud auth print-identity-token \
   --impersonate-service-account=SA_EMAIL \
   --audiences="$CLIENT_ID" \
-  --include-email > ~/.scion/iap-transport-token)
+  --include-email > "$tmp" && mv "$tmp" ~/.scion/iap-transport-token
 
 export SCION_TRANSPORT_MODE=iap
 export SCION_TRANSPORT_TOKEN_FILE=~/.scion/iap-transport-token

@@ -1024,10 +1024,13 @@ in the runbook.
 
 ```bash
 mkdir -p ~/.scion
-(umask 077; gcloud auth print-identity-token \
+# Write to a private temp file, then rename it into place, so the CLI never
+# reads a partly written token.
+tmp="$(mktemp ~/.scion/iap-transport-token.XXXXXX)"
+gcloud auth print-identity-token \
   --impersonate-service-account="$SA_EMAIL" \
   --audiences="$CLIENT_ID" \
-  --include-email > ~/.scion/iap-transport-token)
+  --include-email > "$tmp" && mv "$tmp" ~/.scion/iap-transport-token
 
 export SCION_TRANSPORT_MODE=iap
 export SCION_TRANSPORT_TOKEN_FILE=~/.scion/iap-transport-token
@@ -1048,6 +1051,9 @@ scion list --project my-project
 - If IAP rejects the token, the CLI reports that IAP did not accept the
   transport token. Check the expiry, the audience, the email claim, and the
   service account's IAP role.
+- With IAP external identities, the sign-in page is not on
+  `accounts.google.com`. The CLI then reports only that the hub returned an
+  HTML page instead of a JSON response; the same setup applies.
 
 The alternative needs no service account: SSH to the VM (see below) and run
 the CLI there against `http://localhost:8080` with `SCION_HUB_TOKEN` set to a
