@@ -96,7 +96,9 @@ func krKeyring(t *testing.T, active string, entries ...krEntry) *keyring.Keyring
 	require.NoError(t, err)
 	k, err := keyring.Parse(data)
 	require.NoError(t, err)
-	require.NoError(t, k.CheckSessionPilot())
+	// Through the release-check seam: a test that relaxes it (a ring without
+	// the "legacy" entry) gets that ring.
+	require.NoError(t, keyringReleaseCheck(k))
 	return k
 }
 
