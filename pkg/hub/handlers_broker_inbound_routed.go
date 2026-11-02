@@ -471,6 +471,8 @@ func (s *Server) dispatchRoutedRecipient(
 	// offload metadata keys — the switch above doesn't exclude them, so a
 	// plugin could otherwise spoof body_offloaded/body_chars/body_sha256.
 	msg.Metadata = messaging.StripReservedMetadata(msg.Metadata)
+	// A human sender's profile time zone travels with the message.
+	msg.Metadata = s.stampSenderTimezone(ctx, msg.Metadata, msg.Sender, msg.SenderID)
 
 	// --- Validate through envelope choke point ---
 	if err := messaging.ValidateLegacyMessage(msg); err != nil {
