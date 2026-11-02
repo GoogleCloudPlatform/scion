@@ -22,6 +22,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -50,13 +51,19 @@ func assertNoEcho(t *testing.T, err error) {
 
 // googleSignInRoundTripper serves requests to the Google sign-in host with
 // signInPage and sends every other request through base.
+// When sawCredential is set, it records whether a request to the sign-in
+// host carried Proxy-Authorization or Authorization.
 type googleSignInRoundTripper struct {
-	base http.RoundTripper
+	base          http.RoundTripper
+	sawCredential *atomic.Bool
 }
 
 func (rt googleSignInRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req.URL.Hostname() != googleSignInHost {
 		return rt.base.RoundTrip(req)
+	}
+	if rt.sawCredential != nil && (req.Header.Get("Proxy-Authorization") != "" || req.Header.Get("Authorization") != "") {
+		rt.sawCredential.Store(true)
 	}
 	rec := httptest.NewRecorder()
 	rec.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -259,5 +266,100 @@ func TestHubOrigin_DropsPathQueryAndUserInfo(t *testing.T) {
 	u := &url.URL{Scheme: "https", User: url.UserPassword("u", "MARKER-PASS"), Host: "hub.example.com", Path: "/p", RawQuery: "MARKER-Q=1"}
 	if got := hubOrigin(u.String()); got != "https://hub.example.com" {
 		t.Errorf("hubOrigin = %q", got)
+	}
+}
+
+func TestGetAuthProviders_XHTMLMediaType(t *testing.T) {
+	c, _ := newLoginTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xhtml+xml; charset=utf-8")
+		_, _ = w.Write([]byte("  MARKER-NOT-A-TAG-FIRST"))
+	})
+	_, err := c.Auth().GetAuthProviders(context.Background(), string(OAuthClientTypeCLI))
+	if !errors.Is(err, ErrHubHTMLResponse) {
+		t.Fatalf("err = %v, want ErrHubHTMLResponse", err)
+	}
+	assertNoEcho(t, err)
+}
+
+func TestGetAuthProviders_NoCredentialTextNamesClientIDAudience(t *testing.T) {
+	c, _ := newLoginTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Goog-IAP-Generated-Response", "true")
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+	_, err := c.Auth().GetAuthProviders(context.Background(), string(OAuthClientTypeCLI))
+	if !errors.Is(err, ErrHubBehindIAP) {
+		t.Fatalf("err = %v, want ErrHubBehindIAP", err)
+	}
+	for _, want := range []string{"IAP OAuth client ID (the audience)", "email claim"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error message lacks %q: %s", want, err)
+		}
+	}
+}
+
+func TestGetAuthProviders_RedirectToGoogleSignInWithTransportCredential(t *testing.T) {
+	src := transportauth.NewInjectedSource()
+	src.SetToken(makeTestJWT(time.Now().Add(time.Hour)), time.Now().Add(time.Hour))
+	var sawCredential atomic.Bool
+	var hubSawProxyAuth atomic.Bool
+	c, _ := newLoginTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Proxy-Authorization") != "" {
+			hubSawProxyAuth.Store(true)
+		}
+		http.Redirect(w, r, "https://"+googleSignInHost+"/o/oauth2/v2/auth?"+signInQuery, http.StatusFound)
+	},
+		WithHTTPClient(&http.Client{Transport: googleSignInRoundTripper{base: http.DefaultTransport, sawCredential: &sawCredential}}),
+		WithTransportAuth(src, transportauth.HeaderProxyAuthorization),
+	)
+
+	_, err := c.Auth().GetAuthProviders(context.Background(), string(OAuthClientTypeCLI))
+	var iapErr *IAPResponseError
+	if !errors.As(err, &iapErr) || !iapErr.TransportCredentialSent {
+		t.Fatalf("err = %v, want IAPResponseError with TransportCredentialSent", err)
+	}
+	if !hubSawProxyAuth.Load() {
+		t.Error("the hub request carried no Proxy-Authorization; the test does not exercise the transport credential")
+	}
+	if sawCredential.Load() {
+		t.Error("the request to the sign-in host carried a credential header")
+	}
+	assertNoEcho(t, err)
+}
+
+func TestGetAuthProviders_IAPPlainTextUnauthorizedWithoutHeader(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		c, _ := newLoginTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte("Invalid IAP credentials: MARKER-IAP-REASON"))
+		})
+		_, err := c.Auth().GetAuthProviders(context.Background(), string(OAuthClientTypeCLI))
+		if !errors.Is(err, ErrHubBehindIAP) {
+			t.Fatalf("status %d: err = %v, want ErrHubBehindIAP", status, err)
+		}
+		assertNoEcho(t, err)
+	}
+}
+
+func TestGetAuthProviders_OtherPlainTextUnauthorizedUnchanged(t *testing.T) {
+	c, _ := newLoginTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("token expired"))
+	})
+	_, err := c.Auth().GetAuthProviders(context.Background(), string(OAuthClientTypeCLI))
+	if err == nil || errors.Is(err, ErrHubBehindIAP) || errors.Is(err, ErrHubHTMLResponse) {
+		t.Fatalf("err = %v, want the unchanged error path", err)
+	}
+	if !strings.Contains(err.Error(), "token expired") {
+		t.Errorf("err = %v, want the hub's text", err)
+	}
+}
+
+func TestHubOrigin_FallbackWithoutHost(t *testing.T) {
+	for _, in := range []string{"", "hub.example.com", "%zz"} {
+		if got := hubOrigin(in); got != "the configured URL" {
+			t.Errorf("hubOrigin(%q) = %q, want the fallback", in, got)
+		}
 	}
 }

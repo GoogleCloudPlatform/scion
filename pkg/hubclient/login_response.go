@@ -39,6 +39,10 @@ const googleSignInHost = "accounts.google.com"
 // before it is decoded.
 const loginResponsePeekBytes = 512
 
+// iapInvalidCredentialsPrefix starts the plain-text body IAP sends with a
+// 401 or 403 when a request carries no valid IAP credential.
+const iapInvalidCredentialsPrefix = "Invalid IAP credentials"
+
 // ErrHubBehindIAP reports that Identity-Aware Proxy (IAP), not the hub,
 // answered a login request.
 var ErrHubBehindIAP = errors.New("hub appears to be behind Identity-Aware Proxy (IAP)")
@@ -67,7 +71,8 @@ func (e *IAPResponseError) Error() string {
 	}
 	return fmt.Sprintf("the hub at %s appears to be behind Identity-Aware Proxy (IAP): IAP answered instead of the hub. "+
 		"Use the IAP transport: set SCION_TRANSPORT_MODE=iap, SCION_TRANSPORT_TOKEN or SCION_TRANSPORT_TOKEN_FILE "+
-		"to an OIDC token minted for the IAP audience, and SCION_HUB_TOKEN to a user access token; see the IAP auth guide: %s",
+		"to an OIDC token minted for the IAP OAuth client ID (the audience) with the email claim included, "+
+		"and SCION_HUB_TOKEN to a user access token; see the IAP auth guide: %s",
 		e.HubOrigin, iapGuideURL)
 }
 
@@ -109,7 +114,7 @@ func (c *client) checkLoginResponse(resp *http.Response) error {
 	}
 
 	origin := hubOrigin(c.transport.BaseURL)
-	if isIAPResponse(resp) {
+	if isIAPResponse(resp, peeked) {
 		closeBody(resp)
 		return &IAPResponseError{HubOrigin: origin, TransportCredentialSent: c.hasTransportCredential()}
 	}
@@ -131,10 +136,15 @@ func (c *client) hasTransportCredential() bool {
 	return ok
 }
 
-// isIAPResponse reports whether IAP generated resp, or resp is the Google
-// sign-in page that IAP redirected to.
-func isIAPResponse(resp *http.Response) bool {
+// isIAPResponse reports whether IAP generated resp (by its marker header,
+// or by its plain-text 401/403 body), or resp is the Google sign-in page
+// that IAP redirected to.
+func isIAPResponse(resp *http.Response, peeked []byte) bool {
 	if strings.EqualFold(resp.Header.Get("X-Goog-IAP-Generated-Response"), "true") {
+		return true
+	}
+	if (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) &&
+		bytes.HasPrefix(bytes.TrimLeft(peeked, " \t\r\n"), []byte(iapInvalidCredentialsPrefix)) {
 		return true
 	}
 	if resp.Request != nil && resp.Request.URL != nil &&
