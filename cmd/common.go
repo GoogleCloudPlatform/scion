@@ -1458,9 +1458,22 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 		}
 		// An agent this start created is removed when its workspace
 		// bootstrap fails, so it is not left provisioning. An agent that
-		// existed before the start (same ID) is left in place.
-		createdByStart := existing == nil || existing.ID != agentID
+		// existed before the start (same ID) is left in place, and so is
+		// one whose existence before the start could not be checked.
+		createdByStart, existenceUnknown := false, false
+		switch {
+		case existing != nil:
+			createdByStart = existing.ID != agentID
+		case apiclient.IsNotFoundError(getErr):
+			createdByStart = true
+		default:
+			existenceUnknown = true
+		}
 		removeProvisioningAgent := func() {
+			if existenceUnknown {
+				fmt.Fprintf(os.Stderr, "Warning: provisioning agent '%s' was not removed after the failed workspace bootstrap: could not check whether it existed before this start; if it is not wanted, remove it with 'scion delete %s'\n", agentName, agentName)
+				return
+			}
 			if !createdByStart {
 				return
 			}

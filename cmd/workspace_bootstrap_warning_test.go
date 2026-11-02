@@ -32,9 +32,11 @@ func TestStartAgentViaHub_NoWorkspaceRootWarning(t *testing.T) {
 		fromWorkspace bool   // run from the workspace root (files are collected)
 		gitRemote     string // the hub project's git remote
 		devToken      string // a dev token makes the loopback stub the local workstation hub
+		jsonOutput    bool
 		wantWarning   bool
 	}{
 		{name: "no workspace root found", wantWarning: true},
+		{name: "json output", gitRemote: "https://example.com/org/repo.git", jsonOutput: true},
 		{name: "files collected", fromWorkspace: true},
 		{name: "git project", gitRemote: "https://example.com/org/repo.git"},
 		{name: "local workstation hub", devToken: "dev-token"},
@@ -48,6 +50,9 @@ func TestStartAgentViaHub_NoWorkspaceRootWarning(t *testing.T) {
 				t.Setenv(k, "")
 			}
 			t.Setenv("SCION_DEV_TOKEN", tc.devToken)
+			if tc.jsonOutput {
+				outputFormat = "json"
+			}
 
 			const projectID, agentName = "proj-root-warn", "root-warn-agent"
 			workspace, resolved := setupMarkerLayoutProject(t)

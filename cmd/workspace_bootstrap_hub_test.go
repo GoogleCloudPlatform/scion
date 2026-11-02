@@ -42,6 +42,8 @@ type bootstrapHubStub struct {
 	agentID   string
 
 	existingPhase  string // "" → the existing-agent GET returns 404
+	existingStatus int    // non-zero → the existing-agent GET fails with this status
+	existingDrop   bool   // the existing-agent GET fails at transport level (connection closed)
 	existingID     string // ID of the existing agent ("" → agentID)
 	createNoID     bool   // the create answer carries no agent ID
 	uploadStatus   int    // non-zero → uploads fail with this status
@@ -82,6 +84,20 @@ func (s *bootstrapHubStub) serve(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == projectPath:
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"id": s.projectID, "name": "p"})
 	case r.Method == http.MethodGet && r.URL.Path == projectPath+"/agents/"+s.agentName:
+		if s.existingDrop {
+			if hj, ok := w.(http.Hijacker); ok {
+				if conn, _, err := hj.Hijack(); err == nil {
+					_ = conn.Close()
+					return
+				}
+			}
+			http.Error(w, "hijack unsupported", http.StatusInternalServerError)
+			return
+		}
+		if s.existingStatus != 0 {
+			writeStubError(w, s.existingStatus, "internal_error", "lookup failed")
+			return
+		}
 		if s.existingPhase == "" {
 			writeStubError(w, http.StatusNotFound, "not_found", "agent not found")
 			return
@@ -253,6 +269,36 @@ func TestStartAgentViaHub_FailedBootstrapLeavesNoProvisioningAgent(t *testing.T)
 		require.Error(t, err)
 		assert.Equal(t, []string{deletePath}, stub.deleted, "the agent the create returned is removed")
 	})
+
+	const unknownWarning = "Warning: provisioning agent 'ws-agent' was not removed after the failed workspace bootstrap: could not check whether it existed before this start; if it is not wanted, remove it with 'scion delete ws-agent'"
+	for _, tc := range []struct {
+		name    string
+		mut     func(*bootstrapHubStub)
+		wantErr string
+	}{
+		{"existence check failed", func(s *bootstrapHubStub) {
+			s.existingStatus = http.StatusInternalServerError
+			s.finalizeStatus = http.StatusInternalServerError
+		}, "failed to finalize workspace bootstrap"},
+		{"existence check failed at transport level", func(s *bootstrapHubStub) {
+			s.existingDrop = true
+			s.finalizeStatus = http.StatusInternalServerError
+		}, "failed to finalize workspace bootstrap"},
+		{"existence check failed and upload fails", func(s *bootstrapHubStub) {
+			s.existingStatus = http.StatusInternalServerError
+			s.uploadStatus = http.StatusForbidden
+		}, "failed to upload workspace files"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := newBootstrapHubStub(t, projectID, agentName, agentID)
+			tc.mut(stub)
+			stderr, err := startMarkerLayoutAgent(t, stub, false)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+			assert.Empty(t, stub.deleted, "no agent deleted when its existence before the start is unknown")
+			assert.Contains(t, stderr, unknownWarning)
+		})
+	}
 
 	t.Run("cleanup failure is reported", func(t *testing.T) {
 		stub := newBootstrapHubStub(t, projectID, agentName, agentID)
