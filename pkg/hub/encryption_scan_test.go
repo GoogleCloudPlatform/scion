@@ -229,14 +229,14 @@ func TestEncryptionScan_ReferenceOnlyRowsNeverDecrypted(t *testing.T) {
 	assert.Zero(t, dec.calls, "no reference-only row reaches a decrypt")
 }
 
-// pageCountingStore counts ScanSecretPayloads calls and checks each limit.
-type pageCountingStore struct {
+// scanPageCountingStore counts ScanSecretPayloads calls and checks each limit.
+type scanPageCountingStore struct {
 	store.SecretStore
 	pages  int
 	limits []int
 }
 
-func (s *pageCountingStore) ScanSecretPayloads(ctx context.Context, after string, limit int) ([]store.SecretPayload, error) {
+func (s *scanPageCountingStore) ScanSecretPayloads(ctx context.Context, after string, limit int) ([]store.SecretPayload, error) {
 	s.pages++
 	s.limits = append(s.limits, limit)
 	return s.SecretStore.ScanSecretPayloads(ctx, after, limit)
@@ -258,7 +258,7 @@ func TestEncryptionScan_PagesCoverEveryRow(t *testing.T) {
 						EncryptedValue: sealed, Scope: store.ScopeHub, ScopeID: scanTestScopeID, SecretType: store.SecretTypeEnvironment})
 					require.NoError(t, err)
 				}
-				ps := &pageCountingStore{SecretStore: st}
+				ps := &scanPageCountingStore{SecretStore: st}
 				dec := &countingDecrypter{d: c}
 				seen := map[string]bool{}
 				n, err := scanSecretPayloads(context.Background(), ps, dec, func(r ScanRow) error {
