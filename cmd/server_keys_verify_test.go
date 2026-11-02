@@ -334,9 +334,10 @@ func (t *writeCountingTx) Commit() error {
 	return t.Tx.Commit()
 }
 
-// Verify opens the database strictly read only and never writes: no
-// statement that could write is issued, the database file is byte for
-// byte unchanged, and a write through the client it opens fails.
+// Verify opens the database strictly read only and never writes: through
+// the client verify itself opens, no statement that could write is issued
+// and nothing is committed; the database file is byte for byte unchanged;
+// and a write through a second client opened the same read-only way fails.
 func TestServerKeysVerify_NeverWrites(t *testing.T) {
 	home := keysTestEnv(t)
 	path := verifyKeyring(t)

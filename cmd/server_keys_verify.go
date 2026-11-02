@@ -48,9 +48,10 @@ key ID that only opens under another key, or under none, fails.
 
 Allowed writer key IDs: the database encryption policy's allowed_write_kids
 when a policy exists. Without a policy, the keyring file's active encryption
-key when its write_format is v2. In legacy mode (no keyring file), or with
-write_format v1 and no policy, the allowed set is empty, so every row that
-holds a local payload fails.
+key when its write_format is v2; this release refuses a keyring file with
+write_format v2, so that case is not reachable yet. In legacy mode (no
+keyring file), or with write_format v1 and no policy, the allowed set is
+empty, so every row that holds a local payload fails.
 
 Row handling:
   - a reference-only row (empty value, backend reference) holds no local

@@ -143,7 +143,8 @@ const (
 	// allowed_write_kids.
 	VerifyAllowedFromPolicy = "policy"
 	// VerifyAllowedFromKeyring: no policy; the keyring file's writer key,
-	// which writes enc:v2:.
+	// which writes enc:v2:. Not reachable in this release, whose keyring
+	// check refuses write_format v2; kept for when that refusal is lifted.
 	VerifyAllowedFromKeyring = "keyring"
 	// VerifyAllowedNone: no policy, and no keyring file writing enc:v2:
 	// (legacy mode, or write_format v1): no row can pass.
