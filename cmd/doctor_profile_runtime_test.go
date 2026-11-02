@@ -39,6 +39,8 @@ func TestDoctorPlatformHealth_ProfileRuntimeCheckLine(t *testing.T) {
 	line := healthSummaryBrokersLine(s, false)
 	assert.Contains(t, line, "broker broker-a: the runtime of profile old-gke is not available on this broker; check the profile's runtime configuration if agents use it")
 	assert.Equal(t, 1, strings.Count(line, "is not available on this broker"), "a line for a broker without the check")
+	assert.Contains(t, line, brokerProfileRuntimeNameNote, "the name note is missing")
+	assert.NotContains(t, healthSummaryBrokersLine(&hubclient.HealthSummary{}, false), brokerProfileRuntimeNameNote, "the name note without any profile line")
 
 	assert.Empty(t, brokerProfileRuntimeWarnings(hubclient.HealthSummaryBroker{Name: "x"}), "no health, no line")
 }
