@@ -1698,7 +1698,7 @@ Settings that can be changed at runtime and are shared across all replicas. Stor
 | `quotas` | `enforce_broker_quotas` |
 | `agent_secrets` | `user_scope_only` |
 | `agent_delegation_policy` | `remove` map per boundary kind (`project`, `hub`) listing permissions removed from what may be delegated to agents; it can only narrow (`hub.agent_delegation` experiment; runtime/DB-only; refused to user access tokens) |
-| `messaging` | `conversation_envelope_switch`, `cross_project_messaging_enabled`, `offload_threshold_runes`, `attachment_delivery_max_bytes`, `attachment_inbox_retention_days` (managed via `/api/v1/admin/messaging`) |
+| `messaging` | `conversation_envelope_switch`, `cross_project_messaging_enabled`, `offload_threshold_runes`, `attachment_delivery_max_bytes`, `attachment_inbox_retention_days`, `failed_message_retention_days` (managed via `/api/v1/admin/messaging`) |
 | `runtimes` | The whole `runtimes` map |
 | `profiles` | The whole `profiles` map |
 | `harness_configs` | The whole `harness_configs` map |

@@ -198,7 +198,7 @@ func (s *tokenService) List(ctx context.Context) (*ListTokensResponse, error) {
 
 // Get returns details for a specific token.
 func (s *tokenService) Get(ctx context.Context, id string) (*TokenInfo, error) {
-	resp, err := s.c.get(ctx, "/api/v1/auth/tokens/"+id, nil)
+	resp, err := s.c.get(ctx, "/api/v1/auth/tokens/"+url.PathEscape(id), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -207,7 +207,7 @@ func (s *tokenService) Get(ctx context.Context, id string) (*TokenInfo, error) {
 
 // Revoke soft-revokes a token.
 func (s *tokenService) Revoke(ctx context.Context, id string) error {
-	resp, err := s.c.post(ctx, "/api/v1/auth/tokens/"+id+"/revoke", nil, nil)
+	resp, err := s.c.post(ctx, "/api/v1/auth/tokens/"+url.PathEscape(id)+"/revoke", nil, nil)
 	if err != nil {
 		return err
 	}
@@ -216,7 +216,7 @@ func (s *tokenService) Revoke(ctx context.Context, id string) error {
 
 // Delete permanently removes a token.
 func (s *tokenService) Delete(ctx context.Context, id string) error {
-	resp, err := s.c.delete(ctx, "/api/v1/auth/tokens/"+id, nil)
+	resp, err := s.c.delete(ctx, "/api/v1/auth/tokens/"+url.PathEscape(id), nil)
 	if err != nil {
 		return err
 	}
