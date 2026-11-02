@@ -16,6 +16,7 @@ package hubclient
 
 import (
 	"context"
+	"net/url"
 	"os"
 	"time"
 
@@ -127,7 +128,7 @@ func (s *workspaceService) SyncFrom(ctx context.Context, agentID string, opts *S
 		}
 	}
 
-	resp, err := s.c.post(ctx, "/api/v1/agents/"+agentID+"/workspace/sync-from", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/agents/"+url.PathEscape(agentID)+"/workspace/sync-from", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -142,7 +143,7 @@ func (s *workspaceService) SyncTo(ctx context.Context, agentID string, files []t
 		Files: files,
 	}
 
-	resp, err := s.c.post(ctx, "/api/v1/agents/"+agentID+"/workspace/sync-to", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/agents/"+url.PathEscape(agentID)+"/workspace/sync-to", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -157,7 +158,7 @@ func (s *workspaceService) FinalizeSyncTo(ctx context.Context, agentID string, m
 		Manifest: manifest,
 	}
 
-	resp, err := s.c.post(ctx, "/api/v1/agents/"+agentID+"/workspace/sync-to/finalize", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/agents/"+url.PathEscape(agentID)+"/workspace/sync-to/finalize", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -167,7 +168,7 @@ func (s *workspaceService) FinalizeSyncTo(ctx context.Context, agentID string, m
 
 // GetStatus returns the current workspace sync status for an agent.
 func (s *workspaceService) GetStatus(ctx context.Context, agentID string) (*WorkspaceStatusResponse, error) {
-	resp, err := s.c.get(ctx, "/api/v1/agents/"+agentID+"/workspace", nil)
+	resp, err := s.c.get(ctx, "/api/v1/agents/"+url.PathEscape(agentID)+"/workspace", nil)
 	if err != nil {
 		return nil, err
 	}
