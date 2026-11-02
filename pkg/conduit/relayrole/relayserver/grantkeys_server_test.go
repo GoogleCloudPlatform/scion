@@ -18,6 +18,7 @@ package relayserver
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -153,4 +154,64 @@ func TestServerHintsTargetsOnListenReconnect(t *testing.T) {
 	}
 	ev.listen() // a reconnect after a drop
 	waitHints(t, &hints, 1, "after a LISTEN reconnect")
+}
+
+// cleanupEvents is an Events that records each subscription's unsubscribe
+// and each listen hook's removal.
+type cleanupEvents struct {
+	mu           sync.Mutex
+	unsubscribed map[string]int
+	hooksRemoved int
+}
+
+func (e *cleanupEvents) Subscribe(subjects ...string) (<-chan string, func()) {
+	key := strings.Join(subjects, ",")
+	return make(chan string), func() {
+		e.mu.Lock()
+		e.unsubscribed[key]++
+		e.mu.Unlock()
+	}
+}
+
+func (e *cleanupEvents) AddOnListen(func()) func() {
+	return func() {
+		e.mu.Lock()
+		e.hooksRemoved++
+		e.mu.Unlock()
+	}
+}
+
+// TestStartFailureReleasesEventRegistrations: when the public listener
+// cannot bind, Start fails and releases what it registered on the events:
+// the settings and grant key subscriptions and the listen hook (the hint
+// loop ends with the failed start, not only when Start's context ends).
+func TestStartFailureReleasesEventRegistrations(t *testing.T) {
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = held.Close() })
+
+	w := relaytest.NewWorld(t)
+	cfg := testConfig(t, w, newFakeExperiment(expAnswer{on: true}))
+	ev := &cleanupEvents{unsubscribed: map[string]int{}}
+	cfg.Events = ev
+	cfg.PublicListen = held.Addr().String() // in use: the bind fails
+	if r := awaitStart(t, startAsync(t, cfg)); r.err == nil {
+		t.Fatal("Start succeeded with its public listen address in use")
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		ev.mu.Lock()
+		settings, keys, hooks := ev.unsubscribed[SettingsUpdatedSubject], ev.unsubscribed[GrantKeysChangedSubject], ev.hooksRemoved
+		ev.mu.Unlock()
+		if settings == 1 && keys == 1 && hooks >= 1 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after the failed start: settings unsubscribed %d, grant keys unsubscribed %d, listen hooks removed %d; want 1, 1, at least 1", settings, keys, hooks)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
