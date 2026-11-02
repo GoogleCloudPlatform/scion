@@ -883,7 +883,7 @@ runtimes:
 // which cover run.go's application of the field once it reaches Start.
 
 func TestStartAgentEndpoint_KubernetesAssignResolvedKSAReachesOpts(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 	mgr, ok := srv.manager.(*envCapturingManager)
@@ -908,7 +908,7 @@ func TestStartAgentEndpoint_KubernetesAssignResolvedKSAReachesOpts(t *testing.T)
 }
 
 func TestRestartAgentEndpoint_KubernetesAssignResolvedKSAReachesOpts(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 	mgr, ok := srv.manager.(*envCapturingManager)
@@ -942,7 +942,7 @@ func TestRestartAgentEndpoint_KubernetesAssignResolvedKSAReachesOpts(t *testing.
 // path (a JSON inlineConfig field in the request body), not only when
 // buildStartContext is called directly — mgr.Start must never be reached.
 func TestStartAgentEndpoint_KubernetesAssignConflictingInlineServiceAccountNameRejected(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 	mgr, ok := srv.manager.(*envCapturingManager)
@@ -981,7 +981,7 @@ func TestStartAgentEndpoint_KubernetesAssignConflictingInlineServiceAccountNameR
 // requestId needs the real status to distinguish a client-correctable
 // rejection from a broker-side failure.
 func TestCreateAgentEndpoint_BuildStartContext400RecordedAsAttemptStatus(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 
@@ -1024,7 +1024,7 @@ func TestCreateAgentEndpoint_BuildStartContext400RecordedAsAttemptStatus(t *test
 // in.ProjectPath is non-empty, isolating exactly the behavior this test
 // guards.
 func TestStartAgentEndpoint_NoStrayProjectMarkerFromResolvedProjectPath(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "docker")
 

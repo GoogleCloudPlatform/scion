@@ -192,6 +192,112 @@ func TestArtifactOpenFileRedirectDropsCredentials(t *testing.T) {
 	}
 }
 
+// TestArtifactOpenFile_RedirectHTTPSOnly checks that an object-store redirect
+// is followed only over https, unless the hub itself is reached over plain http
+// (a local development hub), matching fetchRedirect's contract.
+func TestArtifactOpenFile_RedirectHTTPSOnly(t *testing.T) {
+	objects := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("object bytes"))
+	}))
+	defer objects.Close()
+
+	// HTTPS hub redirecting to plain http object store:
+	httpsHub := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, objects.URL+"/blob", http.StatusFound)
+	}))
+	defer httpsHub.Close()
+
+	c, err := New(httpsHub.URL, WithHTTPClient(httpsHub.Client()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Artifacts().OpenFile(context.Background(), "id-1", 0, "a.png"); !errors.Is(err, errArtifactRedirect) {
+		t.Fatalf("https hub following plain http redirect: got err %v, want errArtifactRedirect", err)
+	}
+
+	// Plain http hub redirecting to plain http object store (dev):
+	httpHub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, objects.URL+"/blob", http.StatusFound)
+	}))
+	defer httpHub.Close()
+
+	c2, err := New(httpHub.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, err := c2.Artifacts().OpenFile(context.Background(), "id-1", 0, "a.png")
+	if err != nil {
+		t.Fatalf("plain http hub failed to follow plain http redirect: %v", err)
+	}
+	_ = rc.Close()
+
+	// Other schemes (e.g. ftp) are refused:
+	ftpHub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "ftp://objects.example.com/blob", http.StatusFound)
+	}))
+	defer ftpHub.Close()
+
+	c3, _ := New(ftpHub.URL)
+	if _, err := c3.Artifacts().OpenFile(context.Background(), "id-1", 0, "a.png"); !errors.Is(err, errArtifactRedirect) {
+		t.Fatalf("ftp redirect: got err %v, want errArtifactRedirect", err)
+	}
+}
+
+// TestArtifactOpenFile_NoSubsequentRedirect checks that the object-store client
+// does not follow further redirects from the object store.
+func TestArtifactOpenFile_NoSubsequentRedirect(t *testing.T) {
+	third := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("third party server should not be requested")
+		_, _ = w.Write([]byte("third bytes"))
+	}))
+	defer third.Close()
+
+	object := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, third.URL+"/blob", http.StatusFound)
+	}))
+	defer object.Close()
+
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, object.URL+"/blob", http.StatusFound)
+	}))
+	defer hub.Close()
+
+	c, _ := New(hub.URL)
+	if _, err := c.Artifacts().OpenFile(context.Background(), "id-1", 0, "a.png"); err == nil || !strings.Contains(err.Error(), "unexpected status") {
+		t.Fatalf("object store redirect followed: got %v, want unexpected status error", err)
+	}
+}
+
+// TestArtifactOpenFile_CustomClient_NoSubsequentRedirect checks that when a custom
+// objectClient is configured on artifactService, it also enforces the redirect policy
+// and does not follow subsequent redirects.
+func TestArtifactOpenFile_CustomClient_NoSubsequentRedirect(t *testing.T) {
+	third := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("third party server should not be requested")
+		_, _ = w.Write([]byte("third bytes"))
+	}))
+	defer third.Close()
+
+	object := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, third.URL+"/blob", http.StatusFound)
+	}))
+	defer object.Close()
+
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, object.URL+"/blob", http.StatusFound)
+	}))
+	defer hub.Close()
+
+	c, _ := New(hub.URL)
+	svc := &artifactService{
+		c:            c.(*client),
+		objectClient: &http.Client{},
+	}
+	if _, err := svc.OpenFile(context.Background(), "id-1", 0, "a.png"); err == nil || !strings.Contains(err.Error(), "unexpected status") {
+		t.Fatalf("object store redirect followed with custom client: got %v, want unexpected status error", err)
+	}
+}
+
 func TestArtifactList(t *testing.T) {
 	var queries []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

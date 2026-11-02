@@ -109,6 +109,15 @@ var relationshipOwnerExcluded = map[relationshipAllowKey][]string{
 	{"progeny", "agent", "secret"}:          {},
 	{"progeny", "agent", "env_var"}:         {},
 	{"progeny", "agent", "skill_injection"}: {"skill_injection.deliver"},
+	// Association delivery (ptone/scion#2129). Only the deliver permissions
+	// are admitted: runtime retrieval (secret.use) is never an association
+	// grant (F design section 4.6).
+	{"project_association", "agent", "secret"}:  {"secret.use"},
+	{"project_association", "agent", "env_var"}: {},
+	{"hub_association", "agent", "secret"}:      {"secret.use"},
+	{"hub_association", "agent", "env_var"}:     {},
+	{"broker_association", "agent", "secret"}:   {"secret.use"},
+	{"broker_association", "agent", "env_var"}:  {},
 }
 
 func policyCellPermissions() map[relationshipAllowKey]map[string]bool {

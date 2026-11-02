@@ -194,6 +194,7 @@ func TestBuildPod_NFSHomeBrokerLeafAndSharedClaim(t *testing.T) {
 	cfg.WorkspaceBackendName = "nfs"
 	cfg.NFSPVClaimName = "home-pvc"
 	cfg.NFSSubPath = "projects/" + testHomeProjectID + "/workspace"
+	cfg.ProjectID = testHomeProjectID
 	cfg.HomeStorage.StopGraceSeconds = 45
 	pod, err := rt.buildPod("default", cfg)
 	if err != nil {
@@ -1113,6 +1114,7 @@ func TestBuildPod_NFSHomeClonePerAgentSharedClaim(t *testing.T) {
 	cfg.WorkspaceBackendName = "nfs"
 	cfg.NFSPVClaimName = "home-pvc"
 	cfg.NFSSubPath = "projects/" + testHomeProjectID + "/workspace"
+	cfg.ProjectID = testHomeProjectID
 	cfg.NFSAgentDirName = "a"
 	pod, err := rt.buildPod("default", cfg)
 	if err != nil {
@@ -1161,6 +1163,7 @@ func TestRun_NFSHomeSecretDeleteBetweenConfirmAndCreate(t *testing.T) {
 	cs.PrependReactor("create", "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
 		return true, nil, errors.New("stop here")
 	})
+	seedConfigClaims(t, cs, "default", cfg)
 	if _, err := rt.Run(context.Background(), cfg); err == nil || !strings.Contains(err.Error(), "stop here") {
 		t.Fatalf("Run: %v", err)
 	}

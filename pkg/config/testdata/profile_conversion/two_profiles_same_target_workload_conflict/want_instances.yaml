@@ -1,12 +1,33 @@
 server:
   broker:
     instances:
-      - key: k8s-agents
-        name: k8s-agents
+      - key: k8s-agents-fast
+        name: k8s-agents-fast
         runtime_target:
           type: kubernetes
           namespace: agents
         agent_defaults:
           image_registry: reg.example/team
+          resources:
+            requests:
+              cpu: "1"
           harness_overrides:
-            claude: {}
+            claude:
+              image: claude:fast
+              env:
+                TOKEN: SENSITIVE-A
+      - key: k8s-agents-slow
+        name: k8s-agents-slow
+        runtime_target:
+          type: kubernetes
+          namespace: agents
+        agent_defaults:
+          image_registry: reg.example/team
+          resources:
+            requests:
+              cpu: "4"
+          harness_overrides:
+            claude:
+              image: claude:slow
+              env:
+                TOKEN: SENSITIVE-B

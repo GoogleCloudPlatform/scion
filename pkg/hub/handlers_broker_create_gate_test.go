@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -58,7 +59,7 @@ func TestBrokerCreateGate_ProjectUATLimitedToAgentReadDenied(t *testing.T) {
 	uat := mintScopedUAT(t, srv, ownerID, projectID, []string{"agent:read"})
 
 	const brokerName = "gate-uat-agentread-new-broker"
-	rec := doRequestWithToken(t, srv, uat, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestWithTokenLoopback(t, srv, uat, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name: brokerName,
 	})
 
@@ -86,7 +87,7 @@ func TestBrokerCreateGate_OwnerUATCannotRemint(t *testing.T) {
 
 	uat := mintScopedUAT(t, srv, ownerID, projectID, []string{"agent:read"})
 
-	rec := doRequestWithToken(t, srv, uat, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestWithTokenLoopback(t, srv, uat, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name:        broker.Name,
 		AutoProvide: true,
 	})
@@ -113,7 +114,7 @@ func TestBrokerCreateGate_SuperAdminUATCannotRemint(t *testing.T) {
 	rs4AddProjectRole(t, s, admin.ID, projectID, store.ProjectRoleOwner)
 	adminUAT := mintScopedUAT(t, srv, admin.ID, projectID, []string{"agent:read"})
 
-	rec := doRequestWithToken(t, srv, adminUAT, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestWithTokenLoopback(t, srv, adminUAT, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name:        broker.Name,
 		AutoProvide: true,
 	})
@@ -143,7 +144,7 @@ func TestBrokerCreateGate_OwnerUATCannotRotate(t *testing.T) {
 
 	uat := mintScopedUAT(t, srv, ownerID, projectID, []string{"agent:read"})
 
-	rec := doRequestWithToken(t, srv, uat, http.MethodPost, "/api/v1/brokers/"+broker.ID+"/rotate-secret", map[string]interface{}{})
+	rec := doRequestWithTokenLoopback(t, srv, uat, http.MethodPost, "/api/v1/brokers/"+broker.ID+"/rotate-secret", map[string]interface{}{})
 
 	assert.Equal(t, http.StatusForbidden, rec.Code,
 		"the broker owner's own UAT must not rotate its secret via the owner shortcut; got: %s", rec.Body.String())
@@ -173,7 +174,7 @@ func TestBrokerCreateGate_SuperAdminUATCannotRotate(t *testing.T) {
 	rs4AddProjectRole(t, s, admin.ID, projectID, store.ProjectRoleOwner)
 	adminUAT := mintScopedUAT(t, srv, admin.ID, projectID, []string{"agent:read"})
 
-	rec := doRequestWithToken(t, srv, adminUAT, http.MethodPost, "/api/v1/brokers/"+broker.ID+"/rotate-secret", map[string]interface{}{})
+	rec := doRequestWithTokenLoopback(t, srv, adminUAT, http.MethodPost, "/api/v1/brokers/"+broker.ID+"/rotate-secret", map[string]interface{}{})
 
 	assert.Equal(t, http.StatusForbidden, rec.Code,
 		"a super-admin's scoped UAT must not rotate another user's broker secret via the admin shortcut; got: %s", rec.Body.String())
@@ -188,9 +189,10 @@ func TestBrokerCreateGate_SuperAdminUATCannotRotate(t *testing.T) {
 // authenticated broker's own HMAC identity only satisfies the self shortcut
 // for ITS OWN id: broker A's credential must not rotate broker B's secret.
 // Driven through real middleware — the request is HMAC-signed with broker
-// A's actual stored secret via BrokerAuthService.SignRequest, and dispatched
-// through srv.Handler().ServeHTTP, the same as a real broker's outbound
-// call, rather than constructing the broker identity by hand.
+// A's actual stored secret via apiclient.HMACAuth.ApplyAuth (the signer
+// real brokers use), and dispatched through srv.Handler().ServeHTTP, the
+// same as a real broker's outbound call, rather than constructing the
+// broker identity by hand.
 func TestBrokerRotateSecret_UnrelatedBrokerSelfDenied(t *testing.T) {
 	t.Parallel()
 	srv, s := testServer(t)
@@ -205,7 +207,8 @@ func TestBrokerRotateSecret_UnrelatedBrokerSelfDenied(t *testing.T) {
 	callerKey := seedBrokerSecret(t, s, caller.ID)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/brokers/"+target.ID+"/rotate-secret", nil)
-	require.NoError(t, srv.brokerAuthService.SignRequest(req, caller.ID, callerKey))
+	req.RemoteAddr = tpLoopbackPeer // the transport policy admits a client on the hub host
+	require.NoError(t, (&apiclient.HMACAuth{BrokerID: caller.ID, SecretKey: callerKey}).ApplyAuth(req))
 	rec := httptest.NewRecorder()
 
 	srv.Handler().ServeHTTP(rec, req)
@@ -348,7 +351,7 @@ func TestBrokerCreateGate_HubUATAdmittedForBrokerCreation(t *testing.T) {
 	require.Equal(t, string(BoundaryKindHub), token.BoundaryKind)
 
 	const uatBroker = "gate-hubuat-brokercreate-uat"
-	rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: uatBroker})
+	rec := doRequestWithTokenLoopback(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: uatBroker})
 	require.Equal(t, http.StatusCreated, rec.Code, "a hub UAT carrying broker:create must be admitted for broker creation; got: %s", rec.Body.String())
 	created, err := s.GetRuntimeBrokerByName(ctx, uatBroker)
 	require.NoError(t, err)

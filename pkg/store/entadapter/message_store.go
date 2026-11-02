@@ -15,10 +15,12 @@
 package entadapter
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -403,11 +405,15 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 	if filter.SenderID != "" {
 		query.Where(message.SenderIDEQ(filter.SenderID))
 	}
+	// ParticipantID is recipient_id = X OR sender_id = X. The COUNT uses the
+	// OR directly (it needs no sort), but the page reads each branch as its
+	// own query; see participantPage.
+	var participantBranches []predicate.Message
 	if filter.ParticipantID != "" {
-		query.Where(message.Or(
+		participantBranches = []predicate.Message{
 			message.RecipientIDEQ(filter.ParticipantID),
 			message.SenderIDEQ(filter.ParticipantID),
-		))
+		}
 	}
 	if filter.Sender != "" {
 		query.Where(message.SenderEQ(filter.Sender))
@@ -447,7 +453,11 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 	var totalCount int
 	if !opts.SkipTotalCount {
 		var err error
-		totalCount, err = query.Clone().Count(ctx)
+		countQuery := query.Clone()
+		if participantBranches != nil {
+			countQuery.Where(message.Or(participantBranches...))
+		}
+		totalCount, err = countQuery.Count(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -499,11 +509,20 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 		createdOrder = entsql.OrderAsc()
 		idOrder = entsql.OrderAsc()
 	}
-	entities, err := query.
-		Order(message.ByCreated(createdOrder)).
-		Order(message.ByID(idOrder)).
-		Limit(limit + 1).
-		All(ctx)
+	page := func(q *ent.MessageQuery) ([]*ent.Message, error) {
+		return q.
+			Order(message.ByCreated(createdOrder)).
+			Order(message.ByID(idOrder)).
+			Limit(limit + 1).
+			All(ctx)
+	}
+	var entities []*ent.Message
+	var err error
+	if participantBranches == nil {
+		entities, err = page(query)
+	} else {
+		entities, err = participantPage(query, participantBranches, page, ascending, limit+1)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -522,6 +541,54 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 		result.Items = msgs
 	}
 	return result, nil
+}
+
+// participantPage returns the first n rows, in (created, id) order, of base
+// filtered by any of branches. Each branch is read as its own query, served
+// by its (column, created, id) index in index order, so each one stops after
+// n rows. With the OR in a single query, SQLite plans a multi-index OR plus
+// a temp B-tree sort, which fetches and sorts every row the participant has
+// and is slow for busy agents (ptone/scion#6572). The branches are merged
+// here and rows that match more than one branch are kept once.
+//
+// The merge compares created as time and id as UUID bytes. That is the
+// order the database uses, except for the legacy SQLite rows described in
+// ListMessages, whose stored created text sorts differently.
+func participantPage(
+	base *ent.MessageQuery,
+	branches []predicate.Message,
+	page func(*ent.MessageQuery) ([]*ent.Message, error),
+	ascending bool,
+	n int,
+) ([]*ent.Message, error) {
+	seen := make(map[uuid.UUID]bool)
+	var merged []*ent.Message
+	for _, branch := range branches {
+		rows, err := page(base.Clone().Where(branch))
+		if err != nil {
+			return nil, err
+		}
+		for _, e := range rows {
+			if !seen[e.ID] {
+				seen[e.ID] = true
+				merged = append(merged, e)
+			}
+		}
+	}
+	slices.SortFunc(merged, func(a, b *ent.Message) int {
+		c := a.Created.Compare(b.Created)
+		if c == 0 {
+			c = bytes.Compare(a.ID[:], b.ID[:])
+		}
+		if !ascending {
+			c = -c
+		}
+		return c
+	})
+	if len(merged) > n {
+		merged = merged[:n]
+	}
+	return merged, nil
 }
 
 // MarkMessageRead marks a message as read.
@@ -550,44 +617,6 @@ func (s *MessageStore) MarkAllMessagesRead(ctx context.Context, recipientID stri
 		SetRead(true).
 		Save(ctx)
 	return err
-}
-
-// PurgeOldMessages removes read messages older than readCutoff and unread
-// messages older than unreadCutoff. Returns the number of messages removed.
-func (s *MessageStore) PurgeOldMessages(ctx context.Context, readCutoff time.Time, unreadCutoff time.Time) (int, error) {
-	n, err := s.client.Message.Delete().
-		Where(message.Or(
-			message.And(message.ReadEQ(true), message.CreatedLT(readCutoff)),
-			message.And(message.ReadEQ(false), message.CreatedLT(unreadCutoff)),
-		)).
-		Exec(ctx)
-	if err != nil {
-		return 0, err
-	}
-	return n, nil
-}
-
-// PurgeFailedMessages removes messages with dispatch_state="failed" whose
-// created timestamp is before cutoff. Returns the number of messages removed.
-// Unlike PurgeOldMessages, this filters strictly on dispatch_state so
-// successfully delivered (dispatched) message history is never touched.
-// Scoped to agent recipients only (message.RecipientHasPrefix "agent:"):
-// only a message addressed to an agent can have genuinely and irrecoverably
-// failed dispatch. A "user:" recipient row reaching "failed" only ever came
-// from ExpireStuckPendingMessages sweeping a writer bug (nc-promote-busy);
-// deleting it would destroy real chat history the user never saw fail.
-func (s *MessageStore) PurgeFailedMessages(ctx context.Context, cutoff time.Time) (int, error) {
-	n, err := s.client.Message.Delete().
-		Where(
-			message.DispatchStateEQ(store.MessageDispatchFailed),
-			message.CreatedLT(cutoff),
-			message.RecipientHasPrefix("agent:"),
-		).
-		Exec(ctx)
-	if err != nil {
-		return 0, mapError(err)
-	}
-	return n, nil
 }
 
 // SetMessageConversationID updates the conversation_id on an existing message.

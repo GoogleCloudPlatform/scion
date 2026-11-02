@@ -203,14 +203,21 @@ func TestFlatProfileResolution_StartUsesInstanceSharedDirDefaults(t *testing.T) 
 	})
 	start := func(ctx context.Context, name string, inline *api.ScionConfig) runtime.RunConfig {
 		t.Helper()
-		_, err := r.mgr.Start(ctx, api.StartOptions{
+		opts := api.StartOptions{
 			Name:         name,
 			ProjectPath:  r.fixture.projectScionDir,
 			NoAuth:       true,
 			Env:          map[string]string{"SCION_AGENT_ID": "agent-" + name, "SCION_PROJECT_ID": "pid-flat"},
 			SharedDirs:   []api.SharedDir{{Name: "scratchpad"}},
 			InlineConfig: inline,
-		})
+		}
+		if config.FlatInstancePolicyFrom(ctx) != nil {
+			// A flat Kubernetes start carries the instance's resolved
+			// (here empty) operator-owned placement, as the agent runtime
+			// server resolves it before every start.
+			opts.ResolvedPlacement, opts.PlacementResolved = &api.ResolvedPlacement{OperatorOwned: true}, true
+		}
+		_, err := r.mgr.Start(ctx, opts)
 		require.NoError(t, err)
 		return r.runs[len(r.runs)-1]
 	}

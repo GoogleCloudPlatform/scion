@@ -39,6 +39,11 @@ export interface ChatScrollAnchor {
   messageId: string;
   /** That message's top edge minus the scroller's top edge, in pixels. */
   offset: number;
+  /**
+   * The center message filter the position was taken under; absent for the
+   * whole history. A position is only restored under the same filter.
+   */
+  messageFilter?: 'starred';
 }
 
 /** A message row as seen by the anchor search. */
@@ -113,4 +118,30 @@ export function takeChatScrollAnchor(): ChatScrollAnchor | null {
 /** Forget any stored anchor (account teardown). */
 export function clearChatScrollAnchor(): void {
   remembered = null;
+  filteredAnchors.clear();
+}
+
+/**
+ * The last position of each conversation's starred-only center, kept when
+ * the view leaves it for the full conversation (a jump, Show all), so that
+ * Back to the filtered view restores it. In memory only, bounded.
+ */
+const filteredAnchors = new Map<string, ChatScrollAnchor>();
+const MAX_FILTERED_ANCHORS = 50;
+
+/** Store the starred-only position of `anchor.conversationKey`. */
+export function rememberFilteredScrollAnchor(anchor: ChatScrollAnchor): void {
+  filteredAnchors.delete(anchor.conversationKey);
+  filteredAnchors.set(anchor.conversationKey, { ...anchor, messageFilter: 'starred' });
+  for (const key of filteredAnchors.keys()) {
+    if (filteredAnchors.size <= MAX_FILTERED_ANCHORS) break;
+    filteredAnchors.delete(key);
+  }
+}
+
+/** Take (and clear) the starred-only position of a conversation. */
+export function takeFilteredScrollAnchor(conversationKey: string): ChatScrollAnchor | null {
+  const anchor = filteredAnchors.get(conversationKey) ?? null;
+  filteredAnchors.delete(conversationKey);
+  return anchor;
 }

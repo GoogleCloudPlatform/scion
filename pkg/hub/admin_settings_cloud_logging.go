@@ -118,10 +118,8 @@ func (s *Server) checkCloudLoggingDBWrite(ctx context.Context, ops *OperationalS
 // writeCloudLoggingDBWriteRefused answers a refused
 // telemetry.cloud.cloud_logging write with a structured 422.
 func writeCloudLoggingDBWriteRefused(w http.ResponseWriter) {
-	writeJSON(w, http.StatusUnprocessableEntity, map[string]interface{}{
-		"error": startupOnlyKeyRejectedCode,
-		"message": "telemetry.cloud.cloud_logging is read at startup from SCION_CLOUD_LOGGING or settings.yaml; " +
+	writeSettingsCodedKeysError(w, startupOnlyKeyRejectedCode,
+		"telemetry.cloud.cloud_logging is read at startup from SCION_CLOUD_LOGGING or settings.yaml; "+
 			"a database-backed hub does not use a saved value. Set it in settings.yaml or the environment and restart.",
-		"keys": []string{telemetryCloudLoggingKey},
-	})
+		[]string{telemetryCloudLoggingKey})
 }

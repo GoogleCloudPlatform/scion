@@ -472,7 +472,10 @@ func serveHABridgeProcess(t *testing.T, address, replica string) {
 			CredentialType: "id_token", CacheTTL: 10 * time.Second,
 		}},
 		Projects: []bridge.ProjectConfig{{Slug: "proj1", ExposedAgents: []string{"agent1"}}},
-		Timeouts: bridge.TimeoutConfig{SendMessage: 2 * time.Second, SSEKeepalive: 50 * time.Millisecond},
+		// The blocking send must outlast a peer replica restart under -race
+		// (TestCrossReplicaStreamCursor) and stay below the 10s agent
+		// inactivity timeout set below.
+		Timeouts: bridge.TimeoutConfig{SendMessage: 6 * time.Second, SSEKeepalive: 50 * time.Millisecond},
 	}
 	b := bridge.New(stateStore, adminClient, nil, cfg, nil, logger.With("replica", replica))
 	defer b.Shutdown()

@@ -45,6 +45,15 @@ type BrokerWorkspaceStorage struct {
 	// homes: "local" or "nfs" (on the share described by NFS). Empty when
 	// the broker predates the field (unknown).
 	Homes string `json:"homes,omitempty"`
+	// Invalid reports that the broker's project storage settings are
+	// unusable: the broker places no agent files and refuses agent starts
+	// until they are fixed. Only Backend is set alongside it.
+	Invalid bool `json:"invalid,omitempty"`
+	// Redacted reports that the hub removed the storage values (the NFS
+	// server, export, subpath root and export identity marker, and the
+	// volume claim and subpath root) because the reader is not a hub
+	// admin. The value fields are then omitted, not empty.
+	Redacted bool `json:"redacted,omitempty"`
 }
 
 // BrokerNFSWorkspaceStorage identifies the NFS export a broker places agent
@@ -54,12 +63,12 @@ type BrokerNFSWorkspaceStorage struct {
 	// Server is the NFS server host of Shares[0]. It is compared exactly
 	// (case-sensitive, no DNS resolution): brokers sharing an export must
 	// configure the identical server string.
-	Server string `json:"server"`
+	Server string `json:"server,omitempty"`
 	// Export is the exported path of Shares[0].
-	Export string `json:"export"`
+	Export string `json:"export,omitempty"`
 	// SubPathRoot is the directory under the export that holds per-project
 	// workspace trees (<export>/<subPathRoot>/<projectID>/...).
-	SubPathRoot string `json:"subPathRoot"`
+	SubPathRoot string `json:"subPathRoot,omitempty"`
 	// Healthy reports whether the broker's last health check of the share
 	// succeeded. It is false until the broker has checked the mount.
 	Healthy bool `json:"healthy"`
@@ -79,7 +88,7 @@ type BrokerVolumeWorkspaceStorage struct {
 	ClaimName string `json:"claimName,omitempty"`
 	// SubPathRoot is the directory under the volume holding the
 	// per-project trees.
-	SubPathRoot string `json:"subPathRoot"`
+	SubPathRoot string `json:"subPathRoot,omitempty"`
 }
 
 // ExportIDMarkerName is the export identity marker's file name, directly

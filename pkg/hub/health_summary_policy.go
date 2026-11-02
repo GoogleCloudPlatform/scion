@@ -20,6 +20,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -63,6 +65,12 @@ const (
 // or is missing on, the host.
 const HealthAttentionBrokerHostIdentity = "broker_host_identity"
 
+// HealthAttentionBrokerCommandPath is the attention item kind for an online
+// runtime broker that reports it cannot receive commands: its
+// control_channel check is unhealthy (ptone/scion#6880). Online comes from
+// heartbeats, which do not use the command path.
+const HealthAttentionBrokerCommandPath = "broker_command_path"
+
 // HealthAttentionBrokerVersionMismatch is the attention item kind for an
 // online runtime broker whose version differs from the hub's
 // (ptone/scion#5972). Mirrored as hubclient.HealthAttentionBrokerVersionMismatch.
@@ -86,8 +94,8 @@ type HealthAttentionItem struct {
 	// Severity is critical or warning.
 	Severity string `json:"severity"`
 	// Kind is hub_check, hub_instance, broker_offline, broker_degraded,
-	// broker_nfs, broker_host_identity, broker_version_mismatch,
-	// integration, dispatch, agents or schedule.
+	// broker_command_path, broker_nfs, broker_host_identity,
+	// broker_version_mismatch, integration, dispatch, agents or schedule.
 	Kind    string                 `json:"kind"`
 	Subject HealthAttentionSubject `json:"subject"`
 	// Message is a fixed, server-composed sentence.
@@ -183,10 +191,20 @@ func deriveHealthSummaryStatus(resp *HealthSummaryResponse) (string, []HealthAtt
 		online := !healthSummaryBrokerStatusIsProblem(b.Status)
 		if healthSummaryBrokerSelfIsProblem(b.Health) {
 			degrade()
-			if online {
+			// A broker that cannot receive commands gets its own item; the
+			// generic one remains for any other failing check.
+			cannotReceive := online && brokerCannotReceiveCommands(b.Health)
+			if cannotReceive {
+				items = append(items, HealthAttentionItem{
+					Severity: HealthAttentionWarning, Kind: HealthAttentionBrokerCommandPath, Subject: subject,
+					Message: "Runtime broker " + label + " is online but cannot receive commands: its control channel to the hub is not connected" +
+						brokerCommandPathDetail(b.Health),
+				})
+			}
+			if failing := brokerFailingChecksExcept(b.Health, cannotReceive); online && (!cannotReceive || failing != "") {
 				items = append(items, HealthAttentionItem{
 					Severity: HealthAttentionWarning, Kind: HealthAttentionBrokerDegraded, Subject: subject,
-					Message: "Runtime broker " + label + " reports " + b.Health.Status + brokerFailingChecks(b.Health),
+					Message: "Runtime broker " + label + " reports " + b.Health.Status + failing,
 				})
 			}
 		}
@@ -358,8 +376,12 @@ func hubFleetAttention(resp *HealthSummaryResponse) []HealthAttentionItem {
 	for _, c := range resp.Hub.UnhealthyChecks {
 		explained[c.InstanceID] = true
 		msg := "Hub check " + c.Name + " is not healthy on instance " + c.InstanceLabel
-		if c.Name == saAssignCheckName {
+		switch c.Name {
+		case saAssignCheckName:
 			msg = "Service account assignment check cannot run on instance " + c.InstanceLabel
+		case transportProxyHealthCheck:
+			msg = "Runtime brokers cannot connect through the local proxy on instance " + c.InstanceLabel +
+				": set " + config.TrustedProxiesKey + " (see the hub log)"
 		}
 		out = append(out, HealthAttentionItem{
 			Severity: sev, Kind: HealthAttentionHubCheck,
@@ -408,8 +430,18 @@ func hubInstanceStoppedReportingAttention(list *HealthSummaryHubInstances) []Hea
 // " (name: value, ...)", sorted, or "" when none. Values come from the
 // fixed vocabulary of api.NormalizeBrokerHealthReport.
 func brokerFailingChecks(h *HealthBrokerSelf) string {
+	return brokerFailingChecksExcept(h, false)
+}
+
+// brokerFailingChecksExcept is brokerFailingChecks, leaving out the command
+// path checks (control_channel and conduit) when skipCommandPath is set:
+// the broker_command_path item reports them.
+func brokerFailingChecksExcept(h *HealthBrokerSelf, skipCommandPath bool) string {
 	var parts []string
 	for k, v := range h.Checks {
+		if skipCommandPath && (k == brokerCheckControlChannel || k == brokerCheckConduit) {
+			continue
+		}
 		if v != HealthStatusHealthy && v != "available" {
 			parts = append(parts, k+": "+v)
 		}
@@ -419,6 +451,31 @@ func brokerFailingChecks(h *HealthBrokerSelf) string {
 	}
 	sort.Strings(parts)
 	return " (" + strings.Join(parts, ", ") + ")"
+}
+
+// Broker self-health checks that report the command path (the broker's
+// control channel and conduit to the hub).
+const (
+	brokerCheckControlChannel = "control_channel"
+	brokerCheckConduit        = "conduit"
+)
+
+// brokerCannotReceiveCommands reports whether a broker's self-report says
+// the hub cannot send it commands: control_channel is unhealthy. A missing
+// check (an older broker, or none reported) or unknown (starting or
+// reconnecting) is not.
+func brokerCannotReceiveCommands(h *HealthBrokerSelf) bool {
+	return h != nil && h.Checks[brokerCheckControlChannel] == api.BrokerHealthUnhealthy
+}
+
+// brokerCommandPathDetail adds that the conduit is refused too, when the
+// broker reports it unhealthy: both are refused together by the hub's
+// transport policy, whose own health check names the cause.
+func brokerCommandPathDetail(h *HealthBrokerSelf) string {
+	if h.Checks[brokerCheckConduit] == api.BrokerHealthUnhealthy {
+		return " (conduit unhealthy too)"
+	}
+	return ""
 }
 
 // healthBrokerLabel is the name a message uses for a broker.

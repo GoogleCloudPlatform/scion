@@ -22,12 +22,24 @@
  * call tries again.
  */
 
+/**
+ * The detail of a review-change event from <scion-review-editor>: the text,
+ * and whether focus leaving the editor sent it (blur) rather than a pause
+ * in typing.
+ */
+export interface ReviewChangeDetail {
+  text: string;
+  blur: boolean;
+}
+
 /** What the artifact page calls on a <scion-review-editor>. */
 export interface ReviewEditorElement extends HTMLElement {
   flush(): string | null;
   comment(): Promise<void>;
   /** Whether the reviewer has made a suggestion or comment in this view since it opened. */
   hasOwnMarks(): boolean;
+  /** Whether an input method composition is still running (its text cannot be written yet). */
+  isComposing(): boolean;
 }
 
 /*

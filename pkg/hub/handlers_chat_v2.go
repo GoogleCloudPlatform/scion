@@ -962,6 +962,7 @@ func (s *Server) handleTopicDelete(w http.ResponseWriter, r *http.Request, topic
 
 	s.events.PublishChatTopicEvent(r.Context(), topic.ProjectID, "deleted", *topic)
 	s.deleteScheduledMessagesOfConversation(r.Context(), topicID)
+	s.deleteMessageStarsOfConversation(r.Context(), topicID)
 	s.removeDeletedTopicFromThreadGroups(r.Context(), topic)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
@@ -1754,6 +1755,8 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	var artifactWarning string
 	msg.Metadata, artifactRefs, artifactWarning = s.admitMessageArtifacts(ctx, msg.Metadata, directAgentRecipient(primaryAgent, ""))
 	msg.ArtifactRefsAdmitted = len(artifactRefs) > 0
+	// The sender's profile time zone travels with the message.
+	msg.Metadata = s.stampSenderTimezone(ctx, msg.Metadata, msg.Sender, msg.SenderID)
 
 	// Phase gate (nc-delivery-unreachable): a primary that is soft-deleted or
 	// in a lifecycle phase where the container cannot accept a buffered
@@ -2184,6 +2187,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 			// already stripped above, so this is a defence-in-depth no-op
 			// today, not a load-bearing second strip.
 			mentionMsg.Metadata = messaging.StripReservedMetadata(mentionMsg.Metadata)
+			mentionMsg.Metadata = s.stampSenderTimezone(ctx, mentionMsg.Metadata, mentionMsg.Sender, mentionMsg.SenderID)
 
 			// Migration gate (design agent-reincarnate §3.7, F2 p2a-r2
 			// review): a mentioned (secondary) agent is a recipient in its
@@ -2720,6 +2724,10 @@ func (s *Server) handleMessageEdit(w http.ResponseWriter, r *http.Request, key, 
 		NotFound(w, "Message")
 		return
 	}
+	// From here on use the stored, canonical ID: the path may spell the same
+	// UUID another way (upper case, braces), and the edit marker, content
+	// write and event are keyed by the canonical form.
+	messageID = msg.ID
 
 	// Verify the caller is the message sender.
 	if msg.SenderID != user.ID() {
@@ -2833,6 +2841,10 @@ func (s *Server) handleMessageDelete(w http.ResponseWriter, r *http.Request, key
 		NotFound(w, "Message")
 		return
 	}
+	// From here on use the stored, canonical ID: the path may spell the same
+	// UUID another way (upper case, braces), and the deletion, its mention
+	// and star cleanup and the event are all keyed by the canonical form.
+	messageID = msg.ID
 
 	// Verify the caller is the message sender.
 	if msg.SenderID != user.ID() {
@@ -2866,7 +2878,10 @@ func (s *Server) handleMessageDelete(w http.ResponseWriter, r *http.Request, key
 	// Soft-delete: set deleted_at in extension table and redact content
 	// in the main messages table so no other component can read it.
 	now := time.Now().UTC()
-	if err := wcs.SetMessageDeleted(ctx, messageID, now); err != nil {
+	// The stars of the message go in the same transaction; their owners
+	// are told to refetch after the commit (markChatMessageDeleted).
+	starOwners, err := markChatMessageDeleted(ctx, wcs, messageID, now)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete message", nil)
 		return
 	}
@@ -2882,6 +2897,7 @@ func (s *Server) handleMessageDelete(w http.ResponseWriter, r *http.Request, key
 		MessageID:       messageID,
 		DeletedAt:       now.Format(time.RFC3339Nano),
 	})
+	s.publishStarsChangedTo(ctx, starOwners)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"messageId": messageID,
@@ -2907,7 +2923,8 @@ func hasAgentReplyAfter(ctx context.Context, s store.Store, threadID string, aft
 	const pageSize = 50
 	cursor := ""
 	for {
-		opts := store.ListOptions{Limit: pageSize}
+		// The scan reads only Items and NextCursor, so it skips the count.
+		opts := store.ListOptions{Limit: pageSize, SkipTotalCount: true}
 		if cursor != "" {
 			opts.Cursor = cursor
 		}
@@ -2938,7 +2955,13 @@ func hasAgentReplyAfter(ctx context.Context, s store.Store, threadID string, aft
 //   - limit: page size (default 50, max 200)
 //   - cursor: keyset pagination cursor from the previous page's nextCursor (optional)
 //   - around: message ID to center the page around (optional)
+//   - starred: "true" lists only the caller's starred messages
+//     (handleStarredHistory); any other value is a 400
 func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Request, key string) {
+	if rawQueryHasKey(r.URL.RawQuery, "starred") {
+		s.handleStarredHistory(w, r, key)
+		return
+	}
 	user := GetUserIdentityFromContext(r.Context())
 	if user == nil {
 		Forbidden(w)
@@ -3021,8 +3044,13 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 	// historyConvID is the conversation the page is listed by, when the
 	// envelope switch resolved one; reply previews are matched against it.
 	historyConvID := target.ConversationID
+	// No history caller reads totalCount, and counting costs a scan of
+	// the whole conversation on every page, so the page skips it
+	// (ptone/scion#6571). The around jump derives both of its queries from
+	// opts, so they skip it too.
 	opts := store.ListOptions{
-		Limit: limit,
+		Limit:          limit,
+		SkipTotalCount: true,
 		// Keyset pagination cursor. The client sends the opaque `nextCursor`
 		// from the previous page back as `cursor` (see chat-thread.ts
 		// fetchHistoryV2); reading any other parameter name silently drops it
@@ -3058,7 +3086,10 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		if olderLimit > 0 {
 			olderFilter := filter
 			olderFilter.Before = anchor.CreatedAt
-			older, err = s.store.ListMessages(ctx, olderFilter, store.ListOptions{Limit: olderLimit})
+			olderOpts := opts
+			olderOpts.Cursor = ""
+			olderOpts.Limit = olderLimit
+			older, err = s.store.ListMessages(ctx, olderFilter, olderOpts)
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch messages", nil)
 				return
@@ -3069,10 +3100,11 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		if newerLimit > 0 {
 			newerFilter := filter
 			newerFilter.After = anchor.CreatedAt
-			newer, err = s.store.ListMessages(ctx, newerFilter, store.ListOptions{
-				Limit:   newerLimit,
-				SortDir: "asc",
-			})
+			newerOpts := opts
+			newerOpts.Cursor = ""
+			newerOpts.Limit = newerLimit
+			newerOpts.SortDir = "asc"
+			newer, err = s.store.ListMessages(ctx, newerFilter, newerOpts)
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch messages", nil)
 				return
@@ -3088,7 +3120,6 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		result = &store.ListResult[store.Message]{
 			Items:      items,
 			NextCursor: older.NextCursor,
-			TotalCount: older.TotalCount + 1 + newer.TotalCount,
 		}
 	} else {
 		var err error
@@ -3105,6 +3136,18 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	page := s.chatHistoryPage(ctx, wcs, key, historyConvID, result, canPost)
+	page.Retention = s.chatHistoryRetentionMarker(ctx, result, historyConvID, topic)
+	writeJSON(w, http.StatusOK, page)
+}
+
+// chatHistoryPage enriches one page of conversation history for the
+// response: attachment metadata, the extension data (reply-to, edited,
+// deleted; a deleted message's text is stripped), reply previews of this
+// conversation's messages and the viewer's artifact references. Ordinary
+// history and the starred-only variant (handleStarredHistory) share it,
+// so the filtered page carries everything a normal page does.
+func (s *Server) chatHistoryPage(ctx context.Context, wcs WebChatStore, key, historyConvID string, result *store.ListResult[store.Message], canPost *bool) chatHistoryResponse {
 	if result.Items == nil {
 		result.Items = []store.Message{}
 	}
@@ -3179,8 +3222,21 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 				}
 
 				refMsgs, err := s.store.GetMessagesByIDs(ctx, replyToIDs)
-				if err == nil && len(refMsgs) > 0 {
-					replyPreviews = make(map[string]chatReplyPreview, len(refMsgs))
+				if err == nil {
+					replyPreviews = make(map[string]chatReplyPreview, len(replyToIDs))
+					// A reply target that no longer exists (removed by
+					// chat retention or any other hard delete) gets a
+					// preview marked unavailable, so the client can show
+					// a muted quote instead of dropping it.
+					for _, id := range replyToIDs {
+						if _, ok := refMsgs[id]; !ok {
+							replyPreviews[id] = chatReplyPreview{
+								MessageID:   id,
+								Content:     chatReplyUnavailablePreview,
+								Unavailable: true,
+							}
+						}
+					}
 					for id, refMsg := range refMsgs {
 						// A preview shows only a message of this
 						// conversation, also for reply rows stored
@@ -3238,7 +3294,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	writeJSON(w, http.StatusOK, chatHistoryResponse{
+	return chatHistoryResponse{
 		Messages:                    result.Items,
 		NextCursor:                  result.NextCursor,
 		TotalCount:                  result.TotalCount,
@@ -3248,7 +3304,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		MessageArtifactsUnavailable: messageArtifactsUnavailable,
 		MessageExtensions:           messageExtensions,
 		ReplyPreviews:               replyPreviews,
-	})
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -3335,8 +3391,10 @@ func (s *Server) handleConversationInteragent(w http.ResponseWriter, r *http.Req
 		}
 	}
 
+	// The response carries no total, so neither query counts.
 	opts := store.ListOptions{
-		Limit: limit,
+		Limit:          limit,
+		SkipTotalCount: true,
 	}
 
 	// Query 1: messages where the DM agent's UUID appears in sender_id
@@ -4138,6 +4196,9 @@ func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Reques
 	// 14. Publish SSE events (outside transaction — best-effort)
 	s.events.PublishChatTopicEvent(ctx, projectID, "created", *result)
 	s.events.PublishDMPromotedEvent(ctx, key, *result)
+	// Stars of the moved messages now belong to the new thread: the DM's
+	// users refetch their collections (content-free, own subjects only).
+	s.publishStarsChangedTo(ctx, dmUserParticipants(key))
 
 	// 15. Return created topic
 	writeJSON(w, http.StatusCreated, promoteResponse{
@@ -5803,7 +5864,9 @@ type chatMessageResponse struct {
 type chatHistoryResponse struct {
 	Messages   []store.Message `json:"messages"`
 	NextCursor string          `json:"nextCursor,omitempty"`
-	TotalCount int             `json:"totalCount"`
+	// TotalCount is 0 on an ordinary history page, which skips the count.
+	// The starred-only variant (handleStarredHistory) reports its matches.
+	TotalCount int `json:"totalCount"`
 	// CanPost reports, for a topic, whether the caller's account may post
 	// in it (project.chat_post). Omitted for a DM.
 	CanPost            *bool                      `json:"canPost,omitempty"`
@@ -5818,6 +5881,16 @@ type chatHistoryResponse struct {
 	MessageArtifactsUnavailable []string                      `json:"messageArtifactsUnavailable,omitempty"`
 	MessageExtensions           map[string]*WebChatMessageExt `json:"messageExtensions,omitempty"` // Phase-3: keyed by message ID
 	ReplyPreviews               map[string]chatReplyPreview   `json:"replyPreviews,omitempty"`     // Phase-3: keyed by reply-to message ID
+	// Retention marks where the conversation's history now starts because
+	// of the hub's chat retention policy (hub.chat_retention). Set only on
+	// the oldest page (no nextCursor); see chatHistoryRetentionMarker.
+	Retention *chatHistoryRetention `json:"retention,omitempty"`
+}
+
+// chatHistoryRetention is the history page's retention marker: messages
+// before PurgedBefore are removed by the hub's retention policy.
+type chatHistoryRetention struct {
+	PurgedBefore time.Time `json:"purgedBefore"`
 }
 
 // chatReplyPreview provides a truncated preview of the message being replied to.
@@ -5825,7 +5898,15 @@ type chatReplyPreview struct {
 	MessageID  string `json:"messageId"`
 	SenderName string `json:"senderName"`
 	Content    string `json:"content"` // truncated to 100 chars
+	// Unavailable is true when the replied-to message no longer exists
+	// (for example removed by chat retention). SenderName is then empty
+	// and Content is chatReplyUnavailablePreview.
+	Unavailable bool `json:"unavailable,omitempty"`
 }
+
+// chatReplyUnavailablePreview is the content of a reply preview whose
+// target message no longer exists.
+const chatReplyUnavailablePreview = "[no longer available]"
 
 type chatDMListResponse struct {
 	DMs []chatDMEntry `json:"dms"`
@@ -6307,7 +6388,7 @@ func (s *Server) handleAttachmentDownload(w http.ResponseWriter, r *http.Request
 	// Defence in depth: markup is refused at upload and only raster images
 	// are served inline, but if either check ever lets active content
 	// through, the sandbox keeps it off the hub's origin.
-	w.Header().Set("Content-Security-Policy", untrustedContentSandboxCSP)
+	setUntrustedContentHeaders(w.Header(), untrustedContentSandboxCSP)
 
 	// Content-Disposition: inline for images, attachment for everything else.
 	disposition := "attachment"

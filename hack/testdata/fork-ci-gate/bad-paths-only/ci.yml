@@ -1,0 +1,9 @@
+on:
+  push:
+    paths:
+      - 'docs-site/**'
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok

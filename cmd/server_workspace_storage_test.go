@@ -253,10 +253,11 @@ func TestBrokerWorkspaceStorageWarning(t *testing.T) {
 		}
 	}
 
-	// An invalid subpath_root does not disable NFS mount checks: they do not
-	// use it.
-	if cfg, warn := brokerNFSConfig(settings(nfs("projects/"))); cfg == nil || warn != "" {
-		t.Errorf("brokerNFSConfig with an unclean subpath_root = %v, %q; want config and no warning", cfg, warn)
+	// An invalid subpath_root fails the project storage resolution, so NFS
+	// mount checks are disabled with a warning; the broker now refuses
+	// agent starts for an invalid block (brokerStorageLayout).
+	if cfg, warn := brokerNFSConfig(settings(nfs("projects/"))); cfg != nil || !strings.HasPrefix(warn, "NFS mount checks disabled:") {
+		t.Errorf("brokerNFSConfig with an unclean subpath_root = %v, %q; want nil and a \"NFS mount checks disabled:\" warning", cfg, warn)
 	}
 }
 

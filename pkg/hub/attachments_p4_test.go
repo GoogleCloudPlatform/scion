@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"go/ast"
@@ -32,6 +33,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
@@ -60,7 +62,8 @@ func TestAttachmentArtifacts_DefaultOnWithObjectStorage(t *testing.T) {
 	local, err := storage.NewLocal(storage.Config{Provider: storage.ProviderLocal, Bucket: "hub", LocalPath: t.TempDir()})
 	require.NoError(t, err)
 	srv.SetStorage(local)
-	assert.False(t, srv.experimentEnabled(name), "local resource storage (T1): off")
+	assert.Equal(t, srv.attachmentArtifactsReady(), srv.experimentEnabled(name),
+		"local resource storage: on exactly when the artifact service is ready")
 
 	srv.SetStorage(&mockStorage{provider: storage.ProviderGCS})
 	assert.True(t, srv.experimentEnabled(name), "object storage: on by default")
@@ -78,6 +81,62 @@ func TestAttachmentArtifacts_DefaultOnWithObjectStorage(t *testing.T) {
 		}
 		assert.Equal(t, e.Default, srv.experimentDefault(e), e.Name)
 	}
+}
+
+// TestAttachmentArtifacts_DefaultOnWhereverReady (ptone/scion#5828): with
+// local blob storage, an artifact store and a hub id (a workstation or
+// single-node hub, no object storage) hub.attachment_artifacts resolves on,
+// and uploads go to the artifact service. Turning the artifacts settings
+// section off makes the service not ready and the default off; a stored
+// override still wins.
+func TestAttachmentArtifacts_DefaultOnWhereverReady(t *testing.T) {
+	f := newRefFixture(t)
+	name := experiments.AttachmentArtifacts
+	exp, ok := f.srv.experimentRegistry().Lookup(name)
+	require.True(t, ok)
+	f.srv.SetHubID("ready-hub")
+	installLocalArtifactService(t, f.srv)
+	require.True(t, f.srv.attachmentArtifactsReady())
+	require.False(t, f.srv.objectStorageConfigured(), "no object storage")
+
+	assert.True(t, f.srv.experimentEnabled(name), "ready on local blob storage: on by default")
+	assert.True(t, f.srv.experimentDefault(exp), "the admin view reports the deployment default")
+	assert.True(t, f.srv.attachmentUploadsToArtifacts(f.sessionContext(f.ua)), "uploads go to the artifact service")
+
+	storeAttachmentArtifactsOverride(t, f.srv, false)
+	assert.False(t, f.srv.experimentEnabled(name), "a stored override still wins")
+	storeAttachmentArtifactsOverride(t, f.srv, true)
+	assert.True(t, f.srv.experimentEnabled(name))
+}
+
+// TestAttachmentArtifacts_DefaultOffWhenSectionDisabled: with the artifacts
+// settings section off the service is not ready, so on local storage the
+// default stays off.
+func TestAttachmentArtifacts_DefaultOffWhenSectionDisabled(t *testing.T) {
+	srv, _ := testServer(t)
+	srv.SetHubID("ready-hub")
+	installLocalArtifactService(t, srv)
+	srv.SetOperationalSettings(artifactsOps(t, `{"enabled":false}`))
+	require.False(t, srv.attachmentArtifactsReady())
+	exp, _ := srv.experimentRegistry().Lookup(experiments.AttachmentArtifacts)
+	assert.False(t, srv.experimentEnabled(experiments.AttachmentArtifacts))
+	assert.False(t, srv.experimentDefault(exp))
+}
+
+// installLocalArtifactService installs an artifact store and local blob
+// storage on srv, as a workstation hub runs them, without touching the
+// experiment.
+func installLocalArtifactService(t *testing.T, srv *Server) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "artifacts.db")+"?_pragma=busy_timeout(5000)")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	st := artifacts.NewStore(db, "sqlite")
+	require.NoError(t, st.Init(context.Background()))
+	srv.SetArtifactStore(st)
+	blobs, err := storage.NewLocal(storage.Config{Provider: storage.ProviderLocal, Bucket: "hub", LocalPath: t.TempDir()})
+	require.NoError(t, err)
+	srv.SetStorage(blobs)
 }
 
 // ---------------------------------------------------------------------------

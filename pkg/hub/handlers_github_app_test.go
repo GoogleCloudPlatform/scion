@@ -165,16 +165,20 @@ func TestHandleGitHubAppInstallations_ValidationErrors(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/github-app/installations", map[string]interface{}{
 		"account_login": "acme",
 	})
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 for missing installation_id, got %d", rec.Code)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Errorf("expected 422 for missing installation_id, got %d", rec.Code)
+	} else if e := settingsErrorEntries(t, rec); e[0].Field != "installation_id" {
+		t.Errorf("field = %q, want installation_id", e[0].Field)
 	}
 
 	// Missing account_login
 	rec = doRequest(t, srv, http.MethodPost, "/api/v1/github-app/installations", map[string]interface{}{
 		"installation_id": 123,
 	})
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 for missing account_login, got %d", rec.Code)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Errorf("expected 422 for missing account_login, got %d", rec.Code)
+	} else if e := settingsErrorEntries(t, rec); e[0].Field != "account_login" {
+		t.Errorf("field = %q, want account_login", e[0].Field)
 	}
 }
 

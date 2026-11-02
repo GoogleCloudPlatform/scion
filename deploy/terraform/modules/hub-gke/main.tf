@@ -161,7 +161,10 @@ locals {
     # The runtime broker in the hub pod creates the workspace and shared-dir
     # subPath directories through this mount, as the hub's uid, before the
     # agent pod starts. The kubelet creates them only if the broker can't
-    # (ensureNFSWorkspaceLeaf, pkg/agent/nfs_workspace_leaf.go).
+    # (ensureNFSWorkspaceLeaf, pkg/agent/nfs_workspace_leaf.go). With
+    # pv_name empty, agent pods mount the share inline (one NFS volume per
+    # directory, no mount options) and the kubelet never creates them: the
+    # broker's mount of the export must then be writable by the hub's uid.
     workspaceStorage = {
       nfs = {
         enabled     = true

@@ -61,6 +61,15 @@ const (
 	// agents.run_intent for rows that predate the column. See
 	// cmd/boot_run_intent_backfill.go.
 	MigrationRunIntentBackfill MigrationName = "run_intent_backfill"
+	// MigrationSAAssignmentLegacyBackfill is the one-shot migration that
+	// records the missing service-account assignment row for legacy
+	// assign-mode agents. See cmd/boot_sa_assignment_legacy_backfill.go.
+	MigrationSAAssignmentLegacyBackfill MigrationName = "sa_assignment_legacy_backfill"
+	// MigrationUserSecretAttributionRepair is the one-shot migration that
+	// moves created_by on legacy agent-captured user secrets from
+	// "agent:<uuid>" to the scope owner. See
+	// cmd/boot_user_secret_attribution_repair.go.
+	MigrationUserSecretAttributionRepair MigrationName = "user_secret_attribution_repair"
 )
 
 // migrationMarker records the completion state of a single migration.
@@ -213,7 +222,8 @@ func isKnownMigration(name MigrationName) bool {
 	case MigrationDMKey, MigrationBackfill, MigrationGroupRefRepair, MigrationWorkspaceModeLabel,
 		MigrationBrokerOwnershipBackfill, MigrationNonAgentDispatchStateBackfill,
 		MigrationBrokerQuotaBindingsToSettings, MigrationEmptyPerAgentLegacyReport,
-		MigrationUTCTimestampRepair, MigrationRunIntentBackfill:
+		MigrationUTCTimestampRepair, MigrationRunIntentBackfill,
+		MigrationSAAssignmentLegacyBackfill, MigrationUserSecretAttributionRepair:
 		return true
 	default:
 		return false

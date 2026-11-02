@@ -247,6 +247,12 @@ switch to a two-phase apply (NEG Service first, then everything else).
   `hub.securityContext.runAsUser`/`runAsGroup`, which the chart also renders as
   the share's uid/gid. They come from one place because the hub writes
   workspaces that agents later read. The hub-gke image assumes 1000:1000.
+- The module also accepts an empty `nfs.pv_name`. Agent pods then mount the
+  share inline (one NFS volume per directory, by server path, with no NFS
+  mount options), and the agent runtime in the hub pod must create every
+  directory first through its mount of the export: the export must be
+  writable by `nfs_uid`/`nfs_gid` (writes not mapped to an anonymous user
+  that cannot write). This configuration still passes the claim `<hub>-nfs`.
 - If agent create times out and a `scion-shared-*` claim in `<hub>` shows
   `ProvisioningFailed`, the hub isn't getting `project_storage`: check
   `chart_values.workspaceStorage.nfs` and the rendered settings.yaml.

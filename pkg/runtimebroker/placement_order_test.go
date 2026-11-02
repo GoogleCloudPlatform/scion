@@ -292,7 +292,7 @@ func TestCheckStartLegacyPlacement(t *testing.T) {
 	f, agentDir := newOrderFixture(t, plGlobal(""), plGoodRecord(), `{"kubernetes": {"tolerations": [{"operator": "Exists"}]}}`)
 	rp := &api.ResolvedPlacement{NodeSelector: map[string]string{"pool": "agents"}}
 	matchAll := &api.ScionConfig{Kubernetes: &api.KubernetesConfig{Tolerations: []api.K8sToleration{{Operator: "Exists"}}}}
-	benign := &api.ScionConfig{MaxTurns: 4}
+	benign := &api.ScionConfig{MaxTurns: api.IntPtr(4)}
 
 	if err := f.srv.checkStartLegacyPlacement(plOrderAgent, f.dotScion, benign, false, rp); err == nil {
 		t.Error("persisted match-all toleration with a benign inline update: want a refusal")

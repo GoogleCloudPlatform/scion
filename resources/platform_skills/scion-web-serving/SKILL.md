@@ -60,8 +60,10 @@ exposed (see Full apps: scion tunnel).
 - Your service must start answering within 60 seconds (the Hub's default),
   or the caller gets a timeout error. Without the conduit transport, the
   whole response must arrive within that time.
-- Pages opened in a browser through the link can only use what is inside the
-  page itself. See references/web-apps.md before serving a web page or app.
+- What a page opened in a browser through the link can load depends on the
+  Hub: with its page view on, the page's relative URLs load; with it off, the
+  page can only use what is inside it. See references/web-apps.md before
+  serving a web page or app.
 
 ## Full apps: scion tunnel
 
@@ -80,5 +82,6 @@ https://googlecloudplatform.github.io/scion/hosted/user/port-forwarding/
 ## Web pages and apps
 
 For anything a person opens in a browser through the link, read
-references/web-apps.md: build settings for one self-contained HTML file,
-what does not work in a page, routing, and how to verify it honestly.
+references/web-apps.md: what loads with and without the Hub's page view,
+build settings, what does not work in a page, routing, and how to verify it
+honestly.

@@ -31,7 +31,15 @@ import { ReviewController } from './controller.js';
 import { docMarkKinds } from './guard.js';
 import { LOAD_META } from './track.js';
 import type { HintKind } from './policy.js';
-import { ALLOWED_ATTRIBUTES, ALLOWED_TAGS, HARDENED } from './safe-render.js';
+import { reviewEditorStyles } from '../review-editor-styles.js';
+import {
+  ALLOWED_ATTRIBUTES,
+  ALLOWED_TAGS,
+  HARDENED,
+  STRIKE_CLASS,
+  STRIKE_SPEC,
+  fixedSpec,
+} from './safe-render.js';
 import { renderContext } from './__fixtures__/core.js';
 
 const made: ReviewController[] = [];
@@ -152,6 +160,88 @@ describe('fixed attributes (S2)', () => {
     expect(dom.querySelector('mark.critic-hl')?.textContent).toBe('mark');
     expect(dom.querySelector('ol')?.getAttribute('start')).toBe('3');
     expect(dom.querySelectorAll('td').length).toBe(2);
+  });
+});
+
+describe('task lists and strikethrough (S1, S2)', () => {
+  it('render no input, only fixed task attributes, and s with only its fixed class', async () => {
+    const md = [
+      '- [x] done <input type="checkbox" onclick="window.__pwned=1">',
+      '- [ ] open ~~struck~~ and {--~~gone~~--}',
+      '',
+    ].join('\n');
+    const c = await open(md);
+    const dom = c.view.dom;
+    assertFixedDom(dom);
+    expect(dom.querySelectorAll('input').length).toBe(0);
+    expect(Array.from(dom.querySelectorAll('code.raw-html')).map((e) => e.textContent)).toEqual([
+      '<input type="checkbox" onclick="window.__pwned=1">',
+    ]);
+    for (const li of Array.from(dom.querySelectorAll('li'))) {
+      for (const a of Array.from(li.attributes)) {
+        expect(['data-item-type', 'data-checked'], a.name).toContain(a.name);
+      }
+    }
+    // Positive controls.
+    expect(dom.querySelector('li[data-item-type="task"][data-checked="true"]')).not.toBeNull();
+    const strikes = Array.from(dom.querySelectorAll('s'));
+    expect(strikes.map((x) => x.outerHTML)).toEqual([
+      '<s class="gfm-strike">struck</s>',
+      '<s class="gfm-strike">gone</s>',
+    ]);
+    expect(dom.querySelector('del.critic-del > s.gfm-strike')?.textContent).toBe('gone');
+    expect(c.flush()).toBe(md);
+  });
+
+  it('keep the strikethrough class a fixed literal', () => {
+    expect(STRIKE_CLASS).toBe('gfm-strike');
+    expect(STRIKE_SPEC).toEqual(['s', { class: 'gfm-strike' }, 0]);
+  });
+
+  it('drop input elements, event handlers and anything not listed', () => {
+    expect(fixedSpec(['input', { type: 'checkbox', checked: true }], false)).toEqual(['span']);
+    expect(fixedSpec(['input', { type: 'checkbox' }, 0], true)).toEqual(['span', 0]);
+    expect(
+      fixedSpec(['li', { 'data-item-type': 'task', onclick: 'x', onmouseover: 'y' }, 0], true)
+    ).toEqual(['li', { 'data-item-type': 'task' }, 0]);
+    // Task attributes take their fixed values only.
+    const wrong = { 'data-item-type': 'note', 'data-checked': 'yes' };
+    expect(fixedSpec(['li', wrong, 0], true)).toEqual(['li', {}, 0]);
+    expect(fixedSpec(['li', { 'data-checked': 'false' }, 0], true)).toEqual([
+      'li',
+      { 'data-checked': 'false' },
+      0,
+    ]);
+    // s takes its fixed class and nothing else.
+    expect(
+      fixedSpec(
+        ['s', { class: 'gfm-strike', title: 'x', style: 'text-align: left', id: 'a' }, 0],
+        true
+      )
+    ).toEqual(['s', { class: 'gfm-strike' }, 0]);
+    expect(fixedSpec(['s', { class: 'other' }, 0], true)).toEqual(['s', {}, 0]);
+    expect(fixedSpec(['s', { onclick: 'x' }, 0], true)).toEqual(['s', {}, 0]);
+    // Names that only exist on Object.prototype are not rules. "constructor"
+    // survives the lowercasing of names; __proto__ is an own key only when
+    // parsed from JSON.
+    expect(fixedSpec(['p', { constructor: 'x' }, 0], true)).toEqual(['p', {}, 0]);
+    const proto = JSON.parse('{"__proto__":"x"}') as Record<string, string>;
+    expect(Object.keys(proto)).toEqual(['__proto__']);
+    expect(fixedSpec(['p', proto, 0], true)).toEqual(['p', {}, 0]);
+    expect(fixedSpec(['strike', { class: 'gfm-strike' }, 0], true)).toEqual(['span', 0]);
+  });
+
+  it('draw the checkbox from attribute selectors and fixed text only', () => {
+    const css = reviewEditorStyles.cssText;
+    expect(css).not.toMatch(/attr\s*\(/);
+    const contents = css.match(/content:[^;]*;/g) ?? [];
+    const task = contents.filter((x) => /[☐☑]/.test(x));
+    expect(task).toEqual([
+      "content: '☐';",
+      "content: '☐' / 'Not done: ';",
+      "content: '☑';",
+      "content: '☑' / 'Done: ';",
+    ]);
   });
 });
 

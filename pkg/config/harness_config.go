@@ -229,6 +229,10 @@ func parseValidatedHarnessConfig(data []byte) (HarnessConfigEntry, error) {
 		return HarnessConfigEntry{}, fmt.Errorf("failed to parse config.yaml: %w", err)
 	}
 
+	if err := ValidateHarnessHomePaths(entry); err != nil {
+		return HarnessConfigEntry{}, fmt.Errorf("invalid config.yaml: %w", err)
+	}
+
 	// The schema cannot express ordering or duration ranges; enforce them
 	// here so a bad block fails at load like any other schema error.
 	if err := entry.Thinking.Validate(); err != nil {
@@ -241,6 +245,26 @@ func parseValidatedHarnessConfig(data []byte) (HarnessConfigEntry, error) {
 		return HarnessConfigEntry{}, fmt.Errorf("invalid config.yaml: %w", err)
 	}
 	return entry, nil
+}
+
+// ValidateHarnessHomePaths checks the harness-config fields that name a
+// path in the agent home: system_prompt_file, instructions_file, skills_dir
+// and config_dir. Each must be empty or a local relative path
+// (filepath.IsLocal: not absolute, no ".." component, not empty after
+// cleaning), so it cannot name a path outside the home. The error names the
+// field, not its value.
+func ValidateHarnessHomePaths(entry HarnessConfigEntry) error {
+	for _, f := range []struct{ key, val string }{
+		{"system_prompt_file", entry.SystemPromptFile},
+		{"instructions_file", entry.InstructionsFile},
+		{"skills_dir", entry.SkillsDir},
+		{"config_dir", entry.ConfigDir},
+	} {
+		if f.val != "" && (!filepath.IsLocal(f.val) || filepath.Clean(f.val) == ".") {
+			return fmt.Errorf("%s must be a relative path inside the agent home", f.key)
+		}
+	}
+	return nil
 }
 
 // harnessConfigDirName is the harness-config's name: config.yaml's name when
@@ -319,6 +343,14 @@ func FindHarnessConfigDir(name string, projectPath string, templatePaths ...stri
 	// The "generic" harness has no embedded files and therefore no on-disk
 	// directory.  Return a synthetic entry so callers (e.g. template-sync
 	// agents) can proceed without a physical harness-config dir.
+	//
+	// Its image is the shared base, scion-base:latest (moved under the
+	// configured image_registry like any short-form image), not a
+	// harness-specific image. A deployment that moves only the harness
+	// :latest tags after a rebuild leaves generic agents on the old base, so
+	// scion-base:latest must be moved together with them; image-build/README.md
+	// ("Tagging") says so. A generic harness-config dir with its own image
+	// takes precedence over this entry.
 	if name == "generic" {
 		return &HarnessConfigDir{
 			Name:   "generic",
@@ -626,6 +658,9 @@ func SeedHarnessConfigFromDir(targetDir string, sourceFS fs.FS, sourcePath strin
 	var entry HarnessConfigEntry
 	if err := yaml.Unmarshal(configData, &entry); err != nil {
 		return fmt.Errorf("failed to parse config.yaml: %w", err)
+	}
+	if err := ValidateHarnessHomePaths(entry); err != nil {
+		return fmt.Errorf("invalid config.yaml: %w", err)
 	}
 
 	configDir := entry.ConfigDir

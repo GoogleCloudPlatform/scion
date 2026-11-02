@@ -3497,7 +3497,7 @@ module's settings template writes them.
       "uid" (int $nfsWs.uid)
       "gid" (int $nfsWs.gid)
       "subpath_root" $nfsWs.subpathRoot
-      "shares" (list (dict "id" $nfsWs.shareId "server" $nfsWs.server "export" $nfsWs.export "pv_name" $nfsWs.pvName)))) }}
+      "shares" (list (ternary (dict "id" $nfsWs.shareId "server" $nfsWs.server "export" $nfsWs.export "pv_name" $nfsWs.pvName) (dict "id" $nfsWs.shareId "server" $nfsWs.server "export" $nfsWs.export) (ne (toString $nfsWs.pvName) ""))))) }}
 {{- end }}
 {{- $doc := dict "schema_version" "1" "active_profile" "default" "server" $server }}
 {{- if .Values.agents.imageRegistry }}
@@ -4314,7 +4314,11 @@ THE GUARDS, and why each one is here rather than left to the hub:
     cannot mount, and the pod sits in ContainerCreating with nothing in the
     chart's output saying why. A missing shareId makes the mount path the mount
     root itself, which still passes readiness while the hub and agents disagree
-    about the tree. A missing pvName leaves agent pods with no claim to mount.
+    about the tree. pvName is optional: without it, agent pods mount the share
+    inline, one NFS volume per directory by server path, with no NFS mount
+    options, and the agent runtime (here the hub pod, which mounts the export at
+    <mountRoot>/<shareId>) creates each directory first, so the export must be
+    writable by hub.securityContext.runAsUser and runAsGroup.
   - config.extra.server.project_storage (and the deprecated workspace_storage,
     shared_dir_storage and home_storage) is refused while this is enabled.
     It would replace or change the settings half without touching the mount -
@@ -4351,7 +4355,6 @@ it, so the guards run even when the settings Secret is not rendered.
 {{- if not $server }}{{- $missing = append $missing "workspaceStorage.nfs.server" }}{{- end }}
 {{- if not $export }}{{- $missing = append $missing "workspaceStorage.nfs.export" }}{{- end }}
 {{- if not $shareId }}{{- $missing = append $missing "workspaceStorage.nfs.shareId" }}{{- end }}
-{{- if not $pvName }}{{- $missing = append $missing "workspaceStorage.nfs.pvName" }}{{- end }}
 {{- if $missing }}
 {{- fail (printf "workspaceStorage.nfs.enabled is true, which requires %s. The chart renders the hub's NFS volume and server.project_storage from these, and the hub's /readyz fails unless the share is mounted at <mountRoot>/<shareId>." (join ", " $missing)) }}
 {{- end }}
@@ -4372,7 +4375,7 @@ it, so the guards run even when the settings Secret is not rendered.
 {{- if not (hasPrefix "/" $export) }}
 {{- fail (printf "workspaceStorage.nfs.export is %s; it must be an absolute export path on the server, such as /scion_workspaces." (include "scion-hub.diagValue" $nfs.export)) }}
 {{- end }}
-{{- if not (regexMatch "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$" $pvName) }}
+{{- if and $pvName (not (regexMatch "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$" $pvName)) }}
 {{- fail (printf "workspaceStorage.nfs.pvName is %s; it must be a Kubernetes object name (lower-case letters, digits, '-' and '.'). It names the PersistentVolumeClaim agent pods mount." (include "scion-hub.diagValue" $nfs.pvName)) }}
 {{- end }}
 {{- $extra := .Values.config.extra | default (dict) }}

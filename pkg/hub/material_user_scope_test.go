@@ -261,8 +261,10 @@ func TestAgentSecretRead_SharingSourceLookupErrorDenies(t *testing.T) {
 }
 
 // TestAgentSecretRead_UserScopeMakesNoProjectSecretDecision pins that a
-// user-scope read never calls Decide(project.secret_read) — the
-// delegation ceiling and its edge lookup are never consulted.
+// user-scope read never calls Decide(project.secret_read). The fixture
+// agent has no delegation edge, so the read's only edge lookup is the
+// chain classification of check 8 (one hop, no edge); a project decision
+// would add the step-10 walk's own lookup.
 func TestAgentSecretRead_UserScopeMakesNoProjectSecretDecision(t *testing.T) {
 	f := newMaterialFixture(t, "user-scope-no-project-decision")
 	ctx := context.Background()
@@ -280,8 +282,8 @@ func TestAgentSecretRead_UserScopeMakesNoProjectSecretDecision(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if counting.getDelegationEdgesForDelegateCalls != 0 {
-		t.Fatalf("expected no project decision for a user-scope read, got %d edge lookups", counting.getDelegationEdgesForDelegateCalls)
+	if counting.getDelegationEdgesForDelegateCalls != 1 {
+		t.Fatalf("expected only the chain classification's edge lookup for a user-scope read, got %d edge lookups", counting.getDelegationEdgesForDelegateCalls)
 	}
 }
 
@@ -323,17 +325,6 @@ func TestAgentGetSecret_UserMetaErrorIsUnavailable(t *testing.T) {
 		t.Fatalf("backend error text leaked into response: %s", rec.Body.String())
 	}
 	assertBackendErrorAudited(t, auditor)
-}
-
-// TestAgentSecretRead_UserScopeCeilingApplied documents the known gap
-// (partial coverage): user-scoped reads have no delegation-ceiling step at
-// all yet. Check 8 still calls the relationship resolver directly rather
-// than routing through a permission decision, so closing this gap needs two
-// further changes neither of which has landed: a shared, exact-permission
-// progeny decision path that accepts a non-read-only action, and a
-// user-material delegation ceiling to evaluate once that path exists.
-func TestAgentSecretRead_UserScopeCeilingApplied(t *testing.T) {
-	t.Skip("pending the shared exact-permission progeny decision path and the user-material delegation ceiling")
 }
 
 // TestAgentSecretRead_ProgenyEligibleSecretIDsNilRecDenies pins that

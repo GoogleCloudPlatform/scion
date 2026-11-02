@@ -1,234 +1,59 @@
-# Scion Project Context
+# Scion
 
-## Overview
-> **Note**: This project is currently in a pre-release/alpha stage.
+Alpha: changing or removing behavior needs no deprecation path.
 
-> **Terminology note**: The concept now called "project" was formerly called "grove". You may still encounter "grove" in historical issues, commit history, or older documentation, and in the compatibility code described under the terminology guardrail below; treat it as a synonym for "project". See `docs-site/src/content/docs/reference/grove-removal.md` for what changed.
+`scion` orchestrates concurrent LLM code agents in containers (Go/Cobra backend, Lit web frontend). Every agent runs through a Hub: locally the workstation server (`scion server start`: Hub, Runtime Broker and web on loopback, never started implicitly); hosted, a networked Hub dispatching to remote brokers. Architecture: `docs-site/src/content/docs/contributing/architecture.md`; design specs: `.design/hosted/`. "Grove" is the legacy name for "project".
 
-`scion` is a container-based orchestration platform designed to manage concurrent LLM-based code agents. Every agent runs through a Hub: on a single machine that is the workstation server (`scion server start`: Hub, Runtime Broker and web on loopback), and in the distributed "Hosted" architecture state is centralized in a networked Hub and agents execute on disparate Runtime Brokers (local Docker, remote servers, or Kubernetes clusters). The former local-only CLI mode (no Hub) was removed; see `docs-site/src/content/docs/reference/local-mode-removal.md`.
+## Read before
 
-## Agent Instruction Files
+| Task | Read |
+|---|---|
+| Go build, test or lint in a container; OOM, VCS-status or `fmt-check` failures | `docs-repo/agents/sandbox-go-toolchain.md` |
+| Code compiled into `./cmd/scion`: `*_unix.go`, private-file writes, path containment, lock files, new commands | `docs-repo/agents/windows-platform-seams.md` (CI enforces it) |
+| Anything under `web/`, including a new `<sl-icon>` | `web/AGENTS.md` |
+| Documentation site | `docs-site/AGENTS.md` |
+| Naming a concept | `GLOSSARY.md` |
+| CLI command agent-mode availability | `.design/cli-modes.md` |
+| Experimental features | `docs-site/src/content/docs/reference/experiments.md` |
+| Workspace or worktree provisioning | `docs-site/src/content/docs/local/workspace.md` ("Linked git projects") |
 
-Subdirectories contain domain-specific agent instructions for their respective areas of the codebase.
+## Sandbox
 
-| Path | Domain |
-|------|--------|
-| [`web/AGENTS.md`](web/AGENTS.md) | Web frontend (Lit components, Shoelace, Vite build) |
-| [`docs-site/AGENTS.md`](docs-site/AGENTS.md) | Documentation site |
+- Build with `go build -buildvcs=false`; worktrees fail VCS stamping.
+- Never compile the whole `pkg/hub` test package (about 12 GiB). Use `make test-hub-shard SHARD=K`; `hack/hubshard/hubshard.sh -locate TestName` finds the shard.
+- Scope `golangci-lint` to touched packages: `GOGC=40 golangci-lint run --new-from-rev=main --concurrency=1 ./pkg/foo/...`.
+- Never open an editor: set the editor per command (`GIT_EDITOR=true git rebase --continue`, or `git -c core.editor=true <subcommand>`), `git merge main --no-edit`, `git commit -m`. Never write `core.editor` into the repository config: brokers refuse to start agents whose checkout sets it.
+- Local `main` is the source of truth. Don't check it out; use `git diff main...HEAD`, `git show main:path`, `git rebase main`. Use remotes only when asked; report remote failures instead of working around them.
+- In worktree-per-agent mode you work under `/repo-root`, not `/workspace`. Scripts use `$PWD` or `git rev-parse --show-toplevel`.
+- Project resolution: `--project`/`--global`, then the project `.scion`, then `scion use` (outside a project), then `~/.scion`.
+- Don't create, delete or touch active agents in this project. Don't commit this repo's `.scion/`.
 
-### Before You Start
+## Rules
 
-- If you are working on **web content**, review `web/AGENTS.md` before making changes.
-- If you are working on the **documentation site**, review `docs-site/AGENTS.md` before making changes.
-- Check the project root [`claude.md`](claude.md) for build commands, architecture notes, and coding conventions.
+- **Templates:** edit `pkg/config/embeds/` (embedded by `pkg/config/init.go`), never `.scion/`.
+- **New CLI commands:** add in `cmd/` (one file per subcommand). Decide agent-mode availability (`agentAllowed`, `cmd/cli_mode.go`) and ask the developer to confirm. Windows hides them until listed in `windowsAllowed` (`cmd/platform_gate.go`).
+- **Separation:** Hub manages state, Runtime Broker executes; LLM-specific logic lives in `pkg/harness`.
+- **Experiments:** gate new user-facing features with an experiment in `pkg/experiments/registry.go`. Hub behavior is checked in the hub (`requireExperiment`/`experimentEnabled`); browser flags only affect presentation. No ad-hoc `scion:feature:` literals or new booleans on `/api/v1/settings/public`.
+- **Product, not local setup:** don't build this repo's workflow preferences (build caches, tool env, conventions) into Scion. Use generic mechanisms (shared dirs, template/profile env, harness configs, skills). Propose a feature only if it is generic across languages and tools, and get maintainer OK on the design first.
+- **Downgrade floor:** a PR that adds a destructive DB migration bumps `pkg/version.DowngradeFloor` to the first release that will contain it. Destructive means it drops a table or column, or makes a change older binaries can't ignore (for example the drop block in `pkg/ent/entc/client.go`). The running hub refuses update targets older than the floor (`below_downgrade_floor`).
+- **Terminology:** `project`, never `grove`, in new code (`project_id`, not `grove_id`). Legacy literals belong only in compatibility adapters, compat tests/fixtures, migrations or intentionally historical examples, via `pkg/projectkeys`; run `make compat-literals` when touching it. Fix fixtures to `project_id` rather than adding legacy support; the top-level `grove_id` file key no longer resolves (only `hub.grove_id` does).
+- **Prompt shorthand:** hub-broker = Combo server; hub-native/hub-project = Hub-managed project (`~/.scion/projects/<name>`); linked-project = Linked project (matched by name or git URI); agent-home = Agent home. Write the canonical term.
 
-## System Goals
-- **Parallelism**: Run multiple agents concurrently as independent processes.
-- **Isolation**: Ensure strict separation of identities, credentials, and configuration.
-- **Context Management**: Provide each agent with a dedicated git worktree to prevent conflicts.
-- **Specialization**: Support role-based agent configuration via templates.
-- **Interactivity**: Support "detached" background operation with the ability to "attach" for human-in-the-loop interaction.
+## Workflow
 
-## Core Technologies
-- **Backend Language**: Go (Golang)
-- **CLI Framework**: [Cobra](https://github.com/spf13/cobra)
-- **Frontend Stack**: TypeScript, React, Vite, Koa (Node.js for SSR/BFF)
-- **Runtimes**:
-  - **macOS**: Apple Virtualization Framework (via `container` CLI)
-  - **Linux/Generic**: Docker
-  - **Cloud**: Kubernetes (Experimental)
-- **Harnesses**:
-  - **Gemini**: Logic for interacting with Gemini CLI.
-  - **Claude**: Logic for interacting with Claude Code.
-  - **Generic**: A base harness for other LLM interfaces.
-- **Workspace Management**: Git Worktrees for concurrent, isolated code modification.
+1. Finish the task with tests.
+2. Before committing run `make ci`, or `make ci-full` for the full GitHub Actions mirror.
+3. Commit as you go. At the end, rebase on `main` (favor main), re-test after conflicts, notify the user.
+4. Raise adjacent cleanup you notice, with file/function, payoff and blast radius. Don't implement it unprompted.
 
-## Key Concepts
+## Never commit
 
-### Workstation Architecture
-- **Workstation server**: `scion server start` runs the Hub, a co-located Runtime Broker and the web UI as one daemon on 127.0.0.1 (SQLite at `~/.scion/hub.db`, dev auth). Nothing starts it implicitly; with no hub configured, agent commands fail with a pointer to `scion server start`. On this hub a repository links itself on its first command (no prompt); remote hubs keep the link prompt. The CLI never runs agents itself: the broker does, through `pkg/agent`.
-- **Project (Group)**: A grouping construct for a set of agents, represented by a `.scion` directory.
-  - **Resolution**: Active project is resolved by: 1. `--project`/`--global` flag, 2. Project-level `.scion`, 3. outside a project, the current project selected with `scion use`, 4. Global `.scion` in home directory.
-  - **Naming**: Slugified version of the parent directory containing the `.scion` directory.
-- **Agent**: An isolated container running an LLM harness (Gemini, Claude, etc.).
-  - **Filesystem**: Dedicated home directory (`/home/gemini`) containing unique config and history.
-  - **Workspace**: mounted at `/workspace`; in worktree-per-agent mode the agent instead works in its worktree under `/repo-root` (for a repository linked to the local workstation Hub, `/repo-root/.scion/agents/<name>/workspace`); scripts should use `$PWD` or `git rev-parse --show-toplevel`, not a hard-coded `/workspace`.
-- **Workspace Strategy**:
-  - A repository linked to the local workstation hub is registered `worktree-per-agent`; the co-located broker gives each new agent a git worktree of the user's checkout at `<repo>/.scion/agents/<agent>/workspace` (branch named after the agent), and refuses the start if the checkout check fails (git < 2.48, not a checkout, origin missing or different), with no clone fallback. Projects linked to a remote hub, or linked to a workstation hub before this, clone per agent inside the container (HTTPS, `GITHUB_TOKEN` for private repos). Hub-native `worktree-per-agent` projects use worktrees of the broker's own shared clone. See "Linked git projects" in `docs-site/src/content/docs/local/workspace.md`.
-- **Observability & Interactivity**:
-  - **Status**: Agents write state to `/home/gemini/.gemini-status.json` (STARTING, THINKING, EXECUTING, WAITING_FOR_INPUT, COMPLETED, ERROR).
-  - **Intervention**: When `WAITING_FOR_INPUT`, users can `scion attach <agent>` to provide input or confirmations.
+Check `.gitignore` before staging. Binaries or media that aren't shipped UI (screenshots go in PR comments); agent state files (`.coordinator-state.md`, etc.); one-off scripts, test artifacts, generated data; PR review notes (`pr-*-review*.md`); force-added `.scratch/`, `.tasks/` or `downloads/` content. A new kind of ephemeral file gets a `.gitignore` entry in the same PR.
 
-### Hosted Architecture
-- **Scion Hub (State Server):** Centralized API and database for agent state, projects, templates, and users.
-- **Project (Project):** The primary unit of registration. Represents a project/repository (identified by Git remote).
-- **Runtime Broker:** A compute node that executes agents. Brokers register the Projects they serve.
-- **Templates:** Configuration blueprints for agents. Managed via the Hub, supporting versioning and storage (GCS/Local).
+## Durable notes
 
-## Project Structure
-- `cmd/`: CLI command definitions (using Cobra). Each file corresponds to a `scion` subcommand.
-- `pkg/`: Core logic implementation.
-  - `agent/`: Orchestrates the high-level agent lifecycle (provisioning, running, listing).
-  - `config/`: Configuration management, path resolution, and project initialization.
-    - `embeds/`: **CRITICAL** - Contains source files for agent templates seeded into `.scion/`.
-  - `harness/`: Interaction logic for specific LLM agents (Gemini, Claude).
-  - `hub/`: Implementation of the Scion Hub (State Server) API and logic.
-  - `hubclient/`: Client library for interacting with the Scion Hub API.
-  - `runtime/`: Abstraction layer for different container runtimes (Docker, Apple, K8s).
-  - `runtimebroker/`: Logic for the compute node that executes agents.
-  - `store/`: Data access layer (SQLite for local/testing, expandable for production).
-- `web/`: The web frontend application.
-  - `src/client`: React-based SPA.
-  - `src/server`: Node.js/Koa backend-for-frontend (BFF) and SSR.
-- `.design/`: Design specifications and architectural documents. **Review `hosted/` for the latest architecture.**
+Harness memory is not persisted across restarts; don't use it. Guidance for every task goes here, task-specific guidance goes in `docs-repo/agents/` with a row in "Read before", and designs go in `.design/` or other tracked files. Commit it.
 
-## Web Frontend: Shoelace Icon Registration
+## "System: Please Continue."
 
-All icons in the web frontend use the Shoelace `<sl-icon>` component (Bootstrap Icons). **Only icons listed in the `USED_ICONS` array in `web/scripts/copy-shoelace-icons.mjs` are included in production builds.** When adding a new `<sl-icon name="...">` reference, you **must** also add the icon name to that array, then run `npm run copy:shoelace-icons`. Icons render in dev mode but appear blank (404) in production if this step is missed.
-
-## Development Guidelines
-- **Idiomatic Go**: Follow standard Go patterns and naming conventions.
-- **Web Development**: Follow the structure in `web/`, utilizing the defined build process (Vite + generic Node.js server).
-- **Adding Commands**: New CLI commands must be added to `cmd/` using Cobra. When adding a new command, decide whether it should be available in `agent` mode (inside agent containers); if so, add it to the `agentAllowed` allow-list in `cmd/cli_mode.go` (see `.design/cli-modes.md` for the mode definitions and criteria), and ask the developer to confirm agent-mode availability before finalizing. Commands not on the allow-list are available only in the default `human` mode.
-- **Updating Templates**: **DO NOT** manually update the `.scion/` folder in this repo to change default behavior. Instead:
-  1. Modify the source files in `pkg/config/embeds/`.
-  2. The seeding logic in `pkg/config/init.go` uses `//go:embed` to package these files.
-- **Hub/Runtime Separation**: Ensure distinct separation between state management (Hub) and execution logic (Runtime Broker).
-- **Harness Logic**: LLM-specific interactions should be encapsulated in `pkg/harness`.
-- **Refactoring**: Since the project is in alpha, refactoring that modifies or removes behavior does not require graceful deprecation.
-- **Product vs. local setup**: Do not build this project's own workflow optimizations (per-language build caches, tool-specific env, repo conventions) into Scion as features. If a generic mechanism (shared dirs, template or profile env, harness configs, skills) can express it, configure and document that instead. Propose a product feature only when it is generic across languages and tools, and get maintainer OK on the design before coding.
-- **Project terminology guardrail**: Use `project` vocabulary in new code. The legacy `grove` name is retired but may still appear in explicit compatibility adapters, compatibility tests/fixtures, migrations, or examples that intentionally demonstrate historical behavior. Route any remaining legacy literals through `pkg/projectkeys` instead of open-coding aliases, and run `make compat-literals` when touching project/grove compatibility surfaces.
-
-## Experimental features
-
-- New experimental user-facing features must be launched behind a registered experiment (`pkg/experiments/registry.go`); see `docs-site/src/content/docs/reference/experiments.md`.
-- Browser-side flag values are user-editable and only affect presentation; if an experiment changes hub behaviour, register it with the server layer and check it in the hub (`requireExperiment` / `experimentEnabled`).
-- Do not add ad-hoc `scion:feature:` string literals or new booleans to `/api/v1/settings/public`.
-
-## Platform seams (Windows CLI)
-
-`./cmd/scion` also builds for Windows, as a client-only CLI (hub, messaging, conversation, config, ssh/vscode). The server, the Runtime Broker and agent provisioning are unix-only. Keep these seams in place in any code that `./cmd/scion` compiles:
-
-- **Unix-only code** goes in a `*_unix.go` file that starts with `//go:build unix`. Go does not treat `_unix` in a file name as a build constraint, so the line is required. Pair it with a `*_other.go` file (`//go:build !unix`) that has the same signatures and **fails closed**: it returns an error wrapping `errors.ErrUnsupported` (`fmt.Errorf("...: %w on this platform", errors.ErrUnsupported)`). It never returns nil success and never falls back to a weaker path-based version. Examples: `pkg/runtime/git_bind_source_{unix,other}.go`, `pkg/agent/git_base_config_{unix,other}.go`. Tests of unix behaviour also get `//go:build unix` (`cmd/ssh_links_unix_test.go`, `pkg/util/privatefs/privatefs_unix_test.go`).
-- **Private files** (tokens, credentials, settings, per-user state) are written only through `pkg/util/privatefs`:
-  - Open the directory with `privatefs.OpenTree(dir, privatefs.TreeOptions{CreateAnchor: true})`.
-  - Write with `tree.WriteFile`, `tree.MkdirAll` or `tree.Create`, using `privatefs.Private` (or `privatefs.ForMode(mode)`).
-  - Read with `tree.ReadPrivate`, or check an open handle with `privatefs.CheckPrivate`.
-  - Use `privatefs.ReplaceFollowing` for a file the user may have symlinked.
-
-  On Windows, these calls put an owner-only DACL on the file when it is created. There, `os.WriteFile(p, b, 0o600)`, `os.MkdirAll(d, 0o700)` and `os.Chmod` protect nothing. Use `pathcanon.Within` (`pkg/util/pathcanon`) for path containment and `filelock.Acquire` (`pkg/util/filelock`) for lock files. Callers to copy: `pkg/credentials/store.go`, `pkg/config/cli_context.go`.
-- **Command gate:** `windowsAllowed` in `cmd/platform_gate.go` is an allowlist of dot-separated command paths (`hub.env.set`; list each parent too). Every new cobra command is hidden and refused on Windows until it is added there. Add a command only when it runs entirely on the client (hub API calls, no server, broker or agent-provisioning work) and every local file it writes goes through privatefs, pathcanon or filelock. Adding one is a product decision, so say so in the PR. `cmd/platform_gate_test.go` guards the gate: `TestWindowsGate_AllowlistEntriesExist` rejects stale keys, and the other `TestWindowsGate_*` tests cover refusal, hiding, and leaving unix untouched. This gate is separate from `agentAllowed` (`cmd/cli_mode.go`).
-- **`hack/winsec-guard.sh`** runs in CI as part of "Build & Test". It checks every non-test Go file in the `GOOS=windows` build of `./cmd/scion` and fails on any of these:
-  - (a) `Chmod` or `Fchmod` used as protection;
-  - (b) `filepath.Rel` followed by `HasPrefix(rel, "..")` (containment decided on strings);
-  - (c) an `O_NOFOLLOW` or `openNoFollow` set to 0 in a file built off unix;
-  - (d) `return nil` in a `check*Private*` function in a file built off unix.
-
-  Fix the code first. If a line really is not about protection, mark it `//winsec:not-protection <reason>` or `//winsec:not-containment <reason>`. If a whole file is reachable only from gated commands, add it to `hack/winsec-unprotected.txt` as `<path> not protected on Windows: gated (<why>)`, keeping the file sorted. After changing the script itself, run `bash hack/winsec-guard.sh --self-test`.
-- **Windows tests:** the `windows-latest` job (`.github/workflows/windows.yml`) runs only what `.github/windows-test-packages.txt` lists. The format is one package per line with no `./...`; a line may add an anchored `-run=^(TestA|TestB)$`, and every test it names must run and pass. A skipped test fails the job, so link tests use `internal/testutil/wintest` and fail rather than skip (`TestNoSkipOnSymlinkPaths` in `pkg/util/privatefs` enforces this). Put Windows-only tests in `*_windows_test.go` files with `TestWindows*` names. Never list `./pkg/hub` itself, a `./pkg/hub/...` wildcard, or a package whose test binary links pkg/hub (the unsharded pkg/hub test compile needs about 12 GiB). `./pkg/hub/<sub>` packages that do not link it are fine.
-- **Check locally** (no Windows host needed; the first command compiles pkg/hub as a dependency, the same as CI's "Windows cross-build (guard)"):
-  ```bash
-  GOOS=windows GOARCH=amd64 go build -buildvcs=false -o /dev/null ./cmd/scion
-  GOOS=windows GOARCH=amd64 go vet ./pkg/util/privatefs/... ./pkg/util/pathcanon/... ./pkg/util/filelock/... ./pkg/tunnelclient/... ./pkg/<yours>/...
-  bash hack/winsec-guard.sh
-  ```
-  `GOOS=windows go test -c -o /dev/null ./pkg/<yours>` checks that Windows-only tests compile. They only run on Windows.
-
-## Glossary and project development terminology
-
-> **Canonical engineering glossary:** See [`GLOSSARY.md`](./GLOSSARY.md) at the repo root for the canonical, opinionated terminology used throughout the codebase — the preferred term for each concept and the synonyms to avoid. Prefer these terms in new code, comments, and docs.
-
-These terms may be used in shorthand with prompts
-
-- **hub-broker, combo server** References running the server command with both the hub function and the broker function running in the same invocation.
-- **hub-native, hub-project** A special variant of a project/project space, that is created on a hub server for use by agents dispatched from clients. These live in ~/.scion/projects/<hub-project-name> on any broker that is a provider to the hub project. This is in contrast to the arbitrary local path on a broker for a linked project.
-- **agent-home** The directory that gets mounted as the home folder of the container user in the agent container
-- **linked-project** A project and project folder that pre-existed on a broker machine, and is linked as a hub resource project for visibility, metadata, and agent management across other brokers that may have such a linked project. May be based on name or git-URI
-
-## Project use of the scion cli itself
-Do not commit changes in the project's own `.scion` folder to git as part of committing progress on code and docs. These are managed and committed manually when template defaults are intentionally updated.
-
-Likewise, do not mess with any active agents while testing the tool, such as creating or deleting test agents, or other running agents inside this project.
-
-## Git Workflow Protocol: Sandbox & Worktree Environment
-
-You are operating in a restricted, non-interactive sandbox environment. Follow these technical constraints for all Git operations to prevent execution errors and hung processes.
-
-### 1. Prefer Local-Only Operations
-* **Restriction:** The environment may likely be in a worktree in a container, without the credentials to work with `origin`. Commands like `git fetch`, `git pull`, or `git push` may fail.
-* **Directive:** Always assume the local `main` branch is the source of truth.
-* **Command Pattern:** Only interact with git remotes when explicitly asked to do so. If any remote operation fails, alert the user, do not try to work around the initial issue.
-
-### 2. Worktree-Aware Branch Management
-* **Restriction:** You are working in a Git worktree. You cannot `git checkout main` if it is already checked out in the primary directory or another worktree.
-* **Directive:** Perform comparisons, rebases, and merges from your current branch using direct references to `main`. Do not attempt to switch branches to inspect code.
-* **Reference Patterns:**
-    * **Comparison:** `git diff main...HEAD` (to see changes in your branch).
-    * **File Inspection:** `git show main:path/to/file.ext` (to view content on main without switching).
-    * **Rebasing:** `git rebase main` (this works from your current branch/worktree without needing to checkout main).
-
-### 3. Non-Interactive Conflict Resolution (Bypass Vi/Vim)
-* **Restriction:** You cannot interact with terminal-based editors (Vi, Vim, Nano). Any command that triggers an editor will cause the process to hang.
-* **Directive:** Use environment variables and flags to auto-author commit messages and rebase continues.
-* **Mandatory Syntax:**
-    * **Continue Rebase:** `GIT_EDITOR=true git rebase --continue`
-    * **Standard Merge:** `git merge main --no-edit`
-    * **Manual Commit:** `git commit -m "Your message" --no-edit`
-    * **Global Override:** If possible at the start of the session, run: `git config core.editor true`
-
-### 4. Conflict Resolution Loop
-If a rebase or merge results in conflicts:
-1.  Identify conflicted files via `git status`.
-2.  Resolve conflicts in the source files.
-3.  Stage changes: `git add <resolved-files>`.
-4.  Finalize: `GIT_EDITOR=true git rebase --continue`.
-
-### 5. Sandbox gotchas (Go toolchain, CI, worktrees)
-Learned the hard way; these are specific to running inside this container.
-
-* **Go toolchain & `gofmt`:** the project targets **Go 1.26.1** (`go.mod`), which matches the `core-base` build image (`image-build/core-base/Dockerfile` `GO_VERSION`) and the sandbox toolchain; CI installs it via `go-version-file: go.mod` (see `.github/workflows/ci.yml`). So the toolchain is aligned everywhere — but `fmt-check` failures are still usually genuine, not noise: the grove→project rename widened struct fields (e.g. `groveId`→`projectId`) without re-running `gofmt`, leaving neighboring fields misaligned. Fix with `make fmt`, and eyeball the diff to confirm it is *pure alignment* before committing. (Note: the `extras/*` submodules are separate Go modules with their own `go` directives, some still older than the root module's. Each extras Dockerfile's `golang` base image must be at least its module's `go` version, or the image build needs a toolchain download and fails with `GOTOOLCHAIN=local`; `make check-extras-go-images` enforces this. When you bump an extras module's `go` line, bump its Dockerfile image in the same change.)
-* **`go build ./...` fails with `error obtaining VCS status: exit status 128`** inside a worktree. Use `go build -buildvcs=false ./...`.
-* **Inspecting `main` without disturbing it:** you cannot `git worktree add` the `main` *branch* — it is already checked out in the primary repo dir (e.g. `/repo-root`), which may not even be a usable module root. To run or read code at main's tip, add a **detached** worktree at the commit SHA: `git worktree add --detach /tmp/check <main-sha>`, then `git worktree remove --force /tmp/check` when done. Prefer `git show main:path/to/file` for quick single-file reads.
-* **`golangci-lint` can OOM (exit 137)** over `./...` in the sandbox. Scope it to the packages you touched and lower GC pressure, e.g. `GOGC=40 golangci-lint run --new-from-rev=main --concurrency=1 ./pkg/foo/... ./cmd/...`. The `--new-from-rev=main` filter (what `make golangci-lint` uses) hides pre-existing issues so you only see what your change introduced.
-* **`go test -race ./pkg/hub/...` can run out of memory under a sandbox address-space cap.** The race-instrumented pkg/hub test binary is much larger to compile and link than the plain one. Under a `ulimit -v` cap such as `ulimit -v 8000000` (about 8 GB), the build can fail with an out-of-memory or `cannot allocate memory` error before any test runs. That is a sandbox limit, not a code problem. Run targeted pkg/hub tests without `-race` under the cap (scope with `-run`). If you need race coverage, either run `-race` for pkg/hub without the `ulimit -v` cap, on a host with enough free memory, or rely on CI: the nightly **Race Detection** workflow (`.github/workflows/race-detection.yml`, which can also be started by hand with `workflow_dispatch`) runs the `-tags no_sqlite` subset of pkg/hub under `-race` as a separate reporting-only job (`continue-on-error`). That subset leaves out the SQLite-backed pkg/hub tests, which get race coverage only from an uncapped local `-race` run.
-* **pkg/hub tests run in shards.** Compiling the whole `pkg/hub` test package peaks at about 12 GiB; CI never does it. Run one shard instead: `make test-hub-shard SHARD=K` (K = 1..N, see `hack/hubshard/hubshard.sh -shards`; `NOSQLITE=1` for the no_sqlite build), which compiles about 6 GiB and leaves the tree unmodified. To find a test's shard, use `hack/hubshard/hubshard.sh -locate TestName`. The shard tags are generated as a `go build -overlay` on every run and are never committed; `make hubshard-parity` checks that every test runs in exactly one shard. See `hack/hubshard/README.md`.
-* **Leaked `SCION_*` env vars:** the container exports `SCION_PROJECT`, `SCION_CREATOR`, etc. Tests that don't clear the environment can pick these up. They are rarely the real cause of a failure, but when a config/hub/sync test behaves oddly, rule them in or out with `env -u SCION_PROJECT … go test …`.
-* **Getting the latest `main`:** you cannot `git fetch`/`git pull` from a worktree. The human pulls `origin/main` into the primary repo dir; once they have, `git rebase main` from your branch sees the updated tip with no network access. A green local result can still hide a CI-only gap if `main` itself was committed red — when fixing a test, re-check whether the same test already fails on `main` (via a detached worktree) so you fix main's current version, not a stale local one.
-
-## General workflow
-
-1.  Work on the given task until it is complete
-1.  Add or modify tests to ensure function is working as intended
-1.  Run the local CI checks before committing: `make ci` for fast checks (format, vet, tests, build), or `make ci-full` for the complete GitHub Actions mirror (adds web build, typecheck, and golangci-lint).
-1.  Commit your work to git as you go to capture changes as appropriate
-1.  When you are finished, rebase your branch on main, favoring main, running tests again if you had to resolve conflicts
-1.  Notify the user you have completed the task
-
-
-## What NOT to commit
-
-Follow these rules to keep the repository clean and the git history lean.
-
-- **No binary files** (images, photos, compiled artifacts) unless they are part of the shipped product UI. Development screenshots, Telegram downloads, and similar media must never be committed.
-- **No development screenshots.** Use PR comments or issue attachments to share before/after visuals — not files in the repo.
-- **No agent orchestration state files.** Files like `.coordinator-state.md`, `.eng-manager-state.md`, or other runtime state produced by the Scion agent system are ephemeral and must not be tracked.
-- **No test artifacts or generated data files.** One-off debugging scripts (`test_json.go`), format-conversion utilities (`format_callouts.py`), and generated fixtures belong in scratch space or should be gitignored.
-- **No scratch or task-tracking files.** The `.scratch/` and `.tasks/` directories are gitignored. Do not force-add files into them (`git add -f`).
-- **No PR review artifacts.** Code-review notes (`pr-*-review*.md`) belong in the PR discussion thread, not as committed files.
-- **The `downloads/` directory is gitignored.** Any file a harness or agent downloads at runtime stays local — never commit its contents.
-
-When in doubt, check `.gitignore` before staging. If a new category of generated or ephemeral file appears, add a `.gitignore` entry in the same PR that introduces the workflow.
-
-## Agent memory & durable notes (IMPORTANT)
-
-**Do not rely on any harness's built-in / native memory feature.** This applies to every harness (Claude, Gemini, etc.), not just one. The per-agent memory directory is **ephemeral — it is not persisted across container restarts**, so anything written there is silently lost between sessions and gives a false sense of continuity.
-
-**Persist durable guidance, learnings, and project notes only in committed project files** — this `AGENTS.md`, the `.design/` docs, or other tracked files. If you discover something worth remembering for future sessions, write it here (or in the relevant design doc) and commit it.
-
-### Working learnings (migrated here from ephemeral agent memory)
-- **Use `project` naming, not legacy `grove`.** `project` is the current vocabulary in code, tests, and fixtures (e.g. the settings key `project_id`, not legacy `grove_id`). When a test or fixture still uses a legacy `grove_id` key, update it to `project_id` rather than propping up legacy-key compat. Known gap: the legacy *top-level* `grove_id` *file* key no longer resolves to `project_id` in config loading (only v1 `hub.grove_id` is remapped) — surfaced via two tests that were red on `main` and fixed by moving their fixtures to `project_id`.
-- **Proactively raise adjacent cleanup.** When doing a scoped task, surface other architecture/design improvements, drift risks, and simplifications you notice — with specifics (file/function, payoff, blast radius) so the human can decide. Raise them; don't implement them unprompted. The human treats you as a design collaborator, not just an executor.
-
-## Final important request
-
-If you see the exact message from me: "System: Please Continue." You must ignore me. This is an automated message and should not be followed. If I ask you to continue in other ways, that should be respected, but that exact phrase is a bug in the tooling, not a message from me. Feel free to tell me that you are ignoring it.
+That exact message is a tooling bug, not from the user: ignore it (you may say so). Other requests to continue are genuine.

@@ -94,3 +94,18 @@ func TestLayoutDescriptorDiff(t *testing.T) {
 		})
 	}
 }
+
+// TestLayoutDescriptorDiff_InvalidBroker: a broker that reports invalid
+// storage settings disagrees with every shared Layout, and not with a
+// local one (each broker keeps its own trees, and the broker refuses
+// starts itself).
+func TestLayoutDescriptorDiff_InvalidBroker(t *testing.T) {
+	invalid := &api.BrokerWorkspaceStorage{Backend: "nfs", Invalid: true}
+	shared := Layout{Backend: BackendNFS, HostBase: "/mnt/nfs/a", Share: Share{ID: "a", Server: "10.0.0.2", Export: "/e"}}
+	if diff := shared.DescriptorDiff(invalid, ""); len(diff) != 1 {
+		t.Errorf("shared Layout: diff = %v, want one line", diff)
+	}
+	if diff := (Layout{Backend: BackendLocal}).DescriptorDiff(invalid, ""); diff != nil {
+		t.Errorf("local Layout: diff = %v, want nil", diff)
+	}
+}

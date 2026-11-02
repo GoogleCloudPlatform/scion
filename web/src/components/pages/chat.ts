@@ -47,7 +47,13 @@ import { apiFetch, parseApiError } from '../../client/api.js';
 import { navigateTo, pushRoute, replaceRoute, stateManager } from '../../client/main.js';
 import { browserPath, stripBasePath } from '../../client/navigation.js';
 import { agentIndexOf, agentStore } from '../../client/agent-store.js';
-import { dmPeerFromKey } from '../../client/chat-routes.js';
+import {
+  dmPeerFromKey,
+  isChatConversationPath,
+  messageFilterFromSearch,
+  searchWithMessageFilter,
+  type ChatMessageFilter,
+} from '../../client/chat-routes.js';
 import type { AgentListSnapshot } from '../../client/agent-store.js';
 import type { SeedEpochToken } from '../../client/state.js';
 import { dispatchPageTitle, PAGE_TITLE_EVENT } from '../../client/page-title.js';
@@ -56,7 +62,7 @@ import { chatNotifications } from '../../client/chat-notifications.js';
 import { chatUnread, type UnreadCountAnswer } from '../../client/chat-unread.js';
 import { badgeCountFromLists, type ChatDMListEntry } from '../../client/chat-unread-dms.js';
 // Type-only: the rail module itself is loaded lazily (loadSpaceRail).
-import type { DMSelectDetail } from '../shared/chat/chat-space-rail.js';
+import type { DMSelectDetail, RailFilterChangeDetail } from '../shared/chat/chat-space-rail.js';
 import {
   CHAT_STARTUP_REUSE_MS,
   chatDMsLoad,
@@ -118,7 +124,11 @@ import {
   starredMessagesEnabled,
 } from '../../client/chat-stars.js';
 import { showToast } from '../../utils/toast.js';
-import type { PeerAgentResolvedDetail } from '../shared/chat/chat-thread.js';
+import type {
+  MessageFilterChangeDetail,
+  PeerAgentResolvedDetail,
+  StarOpenDetail,
+} from '../shared/chat/chat-thread.js';
 import { ChatPanelHistory, type ChatPanel } from './chat-panel-history.js';
 import '../shared/chat/chat-action-sheet.js';
 import type { ActionSheetItem, ActionSheetSelectDetail } from '../shared/chat/chat-action-sheet.js';
@@ -1079,6 +1089,13 @@ export class ScionPageChat extends LitElement {
   @state() private mobilePanel: ChatPanel = 'left';
   /** Browser history entries for mobile panel changes (see chat-panel-history). */
   private _panelHistory = new ChatPanelHistory();
+
+  /**
+   * The open conversation's center message filter, from the URL
+   * (`?messages=starred` on a conversation route, while the experiment is
+   * on): 'starred' shows only the caller's starred messages.
+   */
+  @state() private centerMessageFilter: ChatMessageFilter = '';
   /**
    * The panel the history entry this page was created on records (a reload,
    * or Back/Forward to it), until the conversation its URL names opens. Read
@@ -2063,6 +2080,10 @@ export class ScionPageChat extends LitElement {
         ?.conversationKey !== this.v2Conversation?.conversationKey
     ) {
       this.dismissPromotedThreadLinkToast();
+      // Another conversation opened in place (the rail, a DM, a search
+      // result): its URL decides the filter, so none is carried over.
+      const filter = this.urlMessageFilter();
+      if (this.centerMessageFilter !== filter) this.centerMessageFilter = filter;
     }
     const pending = this._pendingScrollRestore;
     if (
@@ -2384,6 +2405,7 @@ export class ScionPageChat extends LitElement {
     // browser URL without updating pageData, so pageData.path can be
     // stale when this is called from handleRailLoaded after a reload.
     const path = window.location.pathname;
+    this.syncMessageFilterFromUrl();
 
     // Match legacy /chat/space/{projectId}/thread/{topicId} (backward compat)
     const legacyThreadMatch = path.match(/\/chat\/space\/([^/]+)\/thread\/([^/]+)/);
@@ -3269,9 +3291,33 @@ export class ScionPageChat extends LitElement {
         projectSlug?: string;
         threadName: string;
         defaultAgent?: string;
+        messageFilter?: 'starred';
       }
     );
   }
+
+  /** The center filter a rail selection asks for (only while the experiment is on). */
+  private railSelectionFilter(requested: 'starred' | undefined): ChatMessageFilter {
+    return requested === 'starred' && starredMessagesEnabled() ? 'starred' : '';
+  }
+
+  /**
+   * The user picked a rail filter. With a conversation open, Starred shows
+   * it as the starred-only center at once (its empty state when it has no
+   * stars), and All or Unread return a starred-only center to full
+   * context; each is a new history entry, as other filter changes are.
+   */
+  private handleRailFilterChange = (e: CustomEvent<RailFilterChangeDetail>): void => {
+    const conv = this.v2Conversation;
+    if (!conv) return;
+    const path = stripBasePath(window.location.pathname);
+    if (!isChatConversationPath(path)) return;
+    const filter = this.railSelectionFilter(e.detail?.filter === 'starred' ? 'starred' : undefined);
+    if (filter === this.centerMessageFilter) return;
+    ++this._userNavSeq;
+    this.pushChatPath(`${path}${searchWithMessageFilter(window.location.search, filter)}`);
+    this.centerMessageFilter = filter;
+  };
 
   /**
    * In-page thread navigation shared by the space rail's `thread-select`
@@ -3290,6 +3336,7 @@ export class ScionPageChat extends LitElement {
     projectSlug?: string;
     threadName: string;
     defaultAgent?: string;
+    messageFilter?: 'starred';
   }): void {
     ++this._userNavSeq;
     // Determine the slug for the readable URL
@@ -3325,7 +3372,11 @@ export class ScionPageChat extends LitElement {
     } else {
       threadPath = `/chat/space/${encodeURIComponent(detail.projectId)}/thread/${encodeURIComponent(detail.conversationKey)}`;
     }
-    this.pushChatPath(threadPath);
+    // A Starred rail row opens the starred-only center (the filter is part of
+    // the URL); any other selection opens full context.
+    const filter = this.railSelectionFilter(detail.messageFilter);
+    this.pushChatPath(threadPath + searchWithMessageFilter('', filter));
+    this.centerMessageFilter = filter;
 
     dispatchPageTitle(this, `#${detail.threadName}`, 'Chat');
     void this.loadV2Members(detail.projectId);
@@ -4297,7 +4348,37 @@ export class ScionPageChat extends LitElement {
   private handleRailDMSelect(e: CustomEvent<DMSelectDetail>): void {
     const detail = e.detail;
     if (!detail?.peerId) return;
+    const filter = this.railSelectionFilter(detail.messageFilter);
+    if (filter && detail.conversationKey) {
+      this.openStarredDM(detail, filter);
+      return;
+    }
     this.openDM(detail.peerId, detail.peerKind, detail.displayName);
+  }
+
+  /**
+   * Open a DM chosen in the Starred rail as its starred-only center. The
+   * row carries the DM's key, so nothing needs resolving.
+   */
+  private openStarredDM(detail: DMSelectDetail, filter: ChatMessageFilter): void {
+    ++this._userNavSeq;
+    this.v2Conversation = {
+      conversationKey: detail.conversationKey,
+      projectId: this.inheritedProjectId(),
+      projectSlug: '',
+      threadName: '',
+      defaultAgent: '',
+      isDM: true,
+      peerName: detail.displayName,
+      peerId: detail.peerId,
+      peerKind: detail.peerKind,
+    };
+    this.mobilePanel = 'center';
+    this.pushChatPath(
+      `/chat/dm/${encodeURIComponent(detail.conversationKey)}${searchWithMessageFilter('', filter)}`
+    );
+    this.centerMessageFilter = filter;
+    dispatchPageTitle(this, detail.displayName, 'Chat');
   }
 
   /** Handle member click from the members sidebar to open a DM. */
@@ -4638,7 +4719,9 @@ export class ScionPageChat extends LitElement {
     // the open DM's peer clicked) adds no entry: Back would only land on the
     // same conversation. In the mobile layout the panel change it makes is
     // an ordinary panel move.
-    if (path === stripBasePath(window.location.pathname)) {
+    // The query is part of what the URL names: the starred-only center and
+    // the full conversation are separate entries, so Back returns between them.
+    if (path === stripBasePath(window.location.pathname) + window.location.search) {
       const entry = this.ownsPanelHistory() ? this._panelHistory.current() : null;
       if (entry && entry.panel !== this.mobilePanel) {
         this._panelHistory.move(entry.panel, this.mobilePanel);
@@ -6479,9 +6562,11 @@ export class ScionPageChat extends LitElement {
             : ''}
           currentUserId=${this.pageData?.user?.id || ''}
           .dms=${this.v2DMList}
+          .centerFilter=${this.v2Conversation ? this.centerMessageFilter : ''}
           @thread-select=${this.handleThreadSelect}
           @dm-select=${this.handleRailDMSelect}
           @reset-view=${this.handleResetView}
+          @rail-filter-change=${this.handleRailFilterChange}
         ></scion-chat-space-rail>
       `;
     }
@@ -6770,6 +6855,9 @@ export class ScionPageChat extends LitElement {
               .agentMembers=${this.v2AgentMembers}
               .agents=${this.getAgentsFromMembers()}
               .restoreScrollAnchor=${this.scrollRestoreFor(conv.conversationKey)}
+              .messageFilter=${this.centerMessageFilter}
+              @chat-message-filter-change=${this.handleMessageFilterChange}
+              @chat-star-open=${this.handleStarOpen}
               @scroll-restore-consumed=${this.handleScrollRestoreConsumed}
               @default-agent-changed=${this.handleDefaultAgentChanged}
               @peer-agent-resolved=${this.handlePeerAgentResolved}
@@ -6791,7 +6879,7 @@ export class ScionPageChat extends LitElement {
 
   /**
    * Whether the header shows the starred-messages button: the experiment is
-   * on and the conversation supports stars (phase 1: project threads). It
+   * on and the conversation supports stars (threads and both DM kinds). It
    * sits in the always-visible action area, not the secondary span.
    */
   private headerShowsStars(conv: V2ConversationState): boolean {
@@ -6834,6 +6922,7 @@ export class ScionPageChat extends LitElement {
       item = await fetchStarDetail(messageId);
     } catch {
       if (superseded()) return;
+      this.refocusStarredTrigger();
       showToast('Could not open the starred message', 'danger', {
         action: {
           label: 'Retry',
@@ -6847,17 +6936,93 @@ export class ScionPageChat extends LitElement {
     }
     if (superseded()) return;
     if (!item) {
+      this.refocusStarredTrigger();
       showToast('This starred message is no longer available', 'warning');
       return;
     }
     this.v2SearchActive = false;
     if (item.conversationKey === this.v2Conversation?.conversationKey) {
       await this.updateComplete;
-      void this.threadElement()?.scrollToMessageById(item.messageId);
+      // A header entry always opens the message in the full conversation,
+      // also from the starred-only center.
+      const thread = this.threadElement();
+      if (this.centerMessageFilter) thread?.openInFullContext(item.messageId);
+      else void thread?.scrollToMessageById(item.messageId, true, true);
       return;
     }
     navigateTo(item.permalink);
   }
+
+  /**
+   * A header entry could not be opened: the list closed before the jump,
+   * so give focus back to its star button, unless focus already moved on.
+   */
+  private refocusStarredTrigger(): void {
+    const focused = deepActiveElement();
+    if (focused && focused !== document.body) return;
+    this.shadowRoot?.querySelector('scion-chat-starred-list')?.focusTrigger();
+  }
+
+  /**
+   * The center message filter the current URL asks for, if it may apply:
+   * only on a conversation route and only while the experiment is on.
+   */
+  private urlMessageFilter(): ChatMessageFilter {
+    const requested = messageFilterFromSearch(window.location.search);
+    if (!requested) return '';
+    const path = stripBasePath(window.location.pathname);
+    return isChatConversationPath(path) && starredMessagesEnabled() ? requested : '';
+  }
+
+  /**
+   * Take the center message filter from the URL. A filter on a route that
+   * is not one conversation, or while the experiment is off, is dropped
+   * from the URL in place, so it is never carried on to another route;
+   * while the experiment is off a notice says the full history is shown.
+   */
+  private syncMessageFilterFromUrl(): void {
+    const filter = this.urlMessageFilter();
+    if (this.centerMessageFilter !== filter) this.centerMessageFilter = filter;
+    if (filter || !messageFilterFromSearch(window.location.search)) return;
+    const path = stripBasePath(window.location.pathname);
+    // On a conversation route the filter was dropped because the
+    // experiment is off: say so, so the full history is not taken for the
+    // starred messages, before the URL changes.
+    if (isChatConversationPath(path)) {
+      showToast('Starred messages are not available. Showing all messages.', 'warning');
+    }
+    const search = searchWithMessageFilter(window.location.search, '');
+    window.history.replaceState(
+      window.history.state,
+      '',
+      browserPath(path) + search + window.location.hash
+    );
+    void replaceRoute(path);
+  }
+
+  /**
+   * The thread asks to show the conversation under another filter (a jump
+   * to a message, Show all, Reply or Edit from the starred-only center).
+   * The change is a new history entry, so Back returns to the filtered
+   * view; a jump also names the message in the fragment, like a permalink.
+   */
+  private handleMessageFilterChange = (e: Event): void => {
+    const detail = (e as CustomEvent<MessageFilterChangeDetail>).detail;
+    const path = stripBasePath(window.location.pathname);
+    if (!detail || !isChatConversationPath(path)) return;
+    const filter = detail.filter === 'starred' && starredMessagesEnabled() ? 'starred' : '';
+    const search = searchWithMessageFilter(window.location.search, filter);
+    const hash = detail.messageId ? `#msg-${encodeURIComponent(detail.messageId)}` : '';
+    ++this._userNavSeq;
+    this.pushChatPath(`${path}${search}${hash}`);
+    this.centerMessageFilter = filter;
+  };
+
+  /** A starred message from the filtered center now lives elsewhere: open it there. */
+  private handleStarOpen = (e: Event): void => {
+    const item = (e as CustomEvent<StarOpenDetail>).detail?.item;
+    if (item?.permalink) navigateTo(item.permalink);
+  };
 
   /** The open conversation's thread element, if rendered. */
   private threadElement(): import('../shared/chat/chat-thread.js').ScionChatThread | null {

@@ -46,6 +46,8 @@
 # Usage: verify-base-contract.sh
 #   GO_MIN_VERSION   minimum acceptable Go (default 1.26.1; see go.mod)
 #   NODE_MIN_VERSION minimum acceptable Node major (default 24)
+#   HELM_VERSION     exact helm version the build pinned (unset: presence and
+#                    a working binary are checked, the version is not)
 #   TARGETARCH       BuildKit automatic arg — the arch being built (e.g. arm64)
 #   BUILDARCH        BuildKit automatic arg — the arch doing the building
 #
@@ -508,6 +510,35 @@ else
 fi
 
 need_cmd npm "global harness installs (chrome-devtools-mcp, @playwright/cli)"
+
+# helm — an exact pin, not a floor (install-core-toolchain.sh step_helm): chart
+# work on deploy/helm/scion-hub regenerates golden output, and two helm
+# versions can render different manifests. The Dockerfiles forward the pin as
+# HELM_VERSION; a running container re-checked without it gets presence and a
+# working binary only, with a note.
+if command -v helm >/dev/null 2>&1; then
+  helm_path="$(command -v helm)"
+  helm_ver="$(helm version --template '{{.Version}}' 2>/dev/null | sed 's/^v//')"
+  helm_want="${HELM_VERSION:-}"
+  helm_want="${helm_want#v}"
+  if [ -z "$helm_ver" ]; then
+    fail "helm at $helm_path does not run ('helm version' failed) — chart
+      rendering (deploy/helm/scion-hub) needs a working helm"
+  elif [ -z "$helm_want" ]; then
+    ok "helm $helm_ver present ($helm_path)"
+    note "HELM_VERSION unset, so the pinned helm version is not checked"
+  elif [ "$helm_ver" = "$helm_want" ]; then
+    ok "helm $helm_ver = pinned $helm_want ($helm_path)"
+  else
+    fail "helm at $helm_path is $helm_ver, expected the pinned $helm_want —
+      another copy is earlier on PATH, or the pin and the install disagree;
+      two helm versions can render different manifests for
+      deploy/helm/scion-hub"
+  fi
+else
+  fail "helm missing — chart work on deploy/helm/scion-hub (pinned to match
+      .github/workflows/chart-ci.yml)"
+fi
 
 echo "--- end base contract ---"
 

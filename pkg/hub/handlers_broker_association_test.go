@@ -270,7 +270,7 @@ func TestBrokerAssociation_RegistrationCreatesNoAssociation(t *testing.T) {
 	ctx := context.Background()
 	member := newHubMemberUser(t, s, "assoc-reg-none-member")
 
-	rec := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestAsUserLoopback(t, srv, member, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name: "assoc-reg-none-broker",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())

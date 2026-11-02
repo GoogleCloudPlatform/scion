@@ -35,9 +35,9 @@ import (
 // fall back to the local layout: no agent mounts it for a shared-backend dir.
 var ErrSharedDirStorageUnavailable = errors.New("nfs shared-dir storage is unavailable")
 
-// ensureSharedDirLeaf is shareddirs.EnsureLeaf, replaceable in tests to
-// replace a path component after the walk and reach the backstop check.
-var ensureSharedDirLeaf = shareddirs.EnsureLeaf
+// ensureSharedDirLeaf is shareddirs.EnsureLeafOwned, replaceable in tests
+// to replace a path component after the walk and reach the backstop check.
+var ensureSharedDirLeaf = shareddirs.EnsureLeafOwned
 
 // SharedDirHostPath is the host-side directory backing one shared dir, as
 // resolved by ResolveSharedDirHostPath.
@@ -144,7 +144,7 @@ func ResolveSharedDirHostPath(gs *config.VersionedSettings, home, slug, projectI
 	if err != nil {
 		return SharedDirHostPath{}, fmt.Errorf("%w: resolve host base symlinks: %v", ErrSharedDirStorageUnavailable, err)
 	}
-	leafFd, _, err := ensureSharedDirLeaf(resolvedHostBase, res.RelPath)
+	leafFd, _, err := ensureSharedDirLeaf(resolvedHostBase, res.RelPath, res.Owner())
 	if err != nil {
 		return SharedDirHostPath{}, fmt.Errorf("%w: shared dir %q: %v", ErrSharedDirStorageUnavailable, name, err)
 	}

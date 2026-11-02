@@ -186,15 +186,56 @@ export function textMarkRuns(
   to = Infinity,
   skip: ReadonlySet<number> = new Set()
 ): MarkRun[] {
-  const out: MarkRun[] = [];
-  for (const s of parseCritic(text)) {
-    if (s.kind === 'text' || s.start < from || s.start >= to || skip.has(s.start)) continue;
-    if (s.kind === 'comment') out.push({ kind: 'comment', text: s.text });
-    else if (s.kind === 'substitution') {
-      out.push({ kind: 'substitution', text: plain(s.text), next: plain(s.next ?? '') });
-    } else out.push({ kind: s.kind, text: plain(s.text) });
+  return new TextMarks(text).runs(plain, from, to, skip);
+}
+
+/**
+ * The segments parseCritic reads in one text, read once, for the marks of
+ * many ranges of it (textMarkRuns for each range, without reading the
+ * whole text again each time).
+ */
+export class TextMarks {
+  private readonly segs: ReturnType<typeof parseCritic>;
+  /** Whether the segments' starts strictly increase (a range is then found by search). */
+  private readonly ordered: boolean;
+
+  constructor(text: string) {
+    this.segs = parseCritic(text);
+    this.ordered = this.segs.every((s, i) => i === 0 || this.segs[i - 1].start < s.start);
   }
-  return out;
+
+  /** textMarkRuns(text, plain, from, to, skip). */
+  runs(
+    plain: (md: string) => string,
+    from = 0,
+    to = Infinity,
+    skip: ReadonlySet<number> = new Set()
+  ): MarkRun[] {
+    const out: MarkRun[] = [];
+    const segs = this.segs;
+    for (let k = this.ordered ? this.firstAt(from) : 0; k < segs.length; k++) {
+      const s = segs[k];
+      if (this.ordered && s.start >= to) break;
+      if (s.kind === 'text' || s.start < from || s.start >= to || skip.has(s.start)) continue;
+      if (s.kind === 'comment') out.push({ kind: 'comment', text: s.text });
+      else if (s.kind === 'substitution') {
+        out.push({ kind: 'substitution', text: plain(s.text), next: plain(s.next ?? '') });
+      } else out.push({ kind: s.kind, text: plain(s.text) });
+    }
+    return out;
+  }
+
+  /** The index of the first segment starting at or after from. */
+  private firstAt(from: number): number {
+    let lo = 0;
+    let hi = this.segs.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (this.segs[mid].start < from) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  }
 }
 
 // Whitespace is not compared: line breaks inside a mark read differently

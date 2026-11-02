@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -216,12 +217,19 @@ func TestResolveMaintenanceConfig_ExplicitAutoHonoured(t *testing.T) {
 }
 
 func TestResolveMaintenanceConfig_InstallRoot(t *testing.T) {
-	writeMaintenanceSettings(t, &config.V1MaintenanceConfig{InstallRoot: "/srv/scion"})
-	if got := resolveMaintenanceConfig(&config.GlobalConfig{}).InstallRoot; got != "/srv/scion" {
-		t.Errorf("InstallRoot = %q, want the setting /srv/scion", got)
+	// "/srv/..." is not absolute on Windows (filepath.IsAbs), where the
+	// install root would be ignored; use a drive-rooted path there and keep
+	// the unix literals unchanged (ptone/scion#6332).
+	setting, env := "/srv/scion", "/srv/env"
+	if runtime.GOOS == "windows" {
+		setting, env = `C:\srv\scion`, `C:\srv\env`
 	}
-	t.Setenv(config.EnvMaintenanceInstallRoot, "/srv/env")
-	if got := resolveMaintenanceConfig(&config.GlobalConfig{}).InstallRoot; got != "/srv/env" {
-		t.Errorf("InstallRoot = %q, want the env override /srv/env", got)
+	writeMaintenanceSettings(t, &config.V1MaintenanceConfig{InstallRoot: setting})
+	if got := resolveMaintenanceConfig(&config.GlobalConfig{}).InstallRoot; got != setting {
+		t.Errorf("InstallRoot = %q, want the setting %s", got, setting)
+	}
+	t.Setenv(config.EnvMaintenanceInstallRoot, env)
+	if got := resolveMaintenanceConfig(&config.GlobalConfig{}).InstallRoot; got != env {
+		t.Errorf("InstallRoot = %q, want the env override %s", got, env)
 	}
 }

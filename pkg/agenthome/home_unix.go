@@ -51,6 +51,39 @@ func Open(path string) (*Home, error) {
 	return &Home{path: path, fd: fd}, nil
 }
 
+// OpenBelow opens the directory rel below root and returns it as a Home.
+// root is opened with a plain directory open, as Open opens an agent home;
+// each component of rel is then opened without following a symbolic link
+// (a linked component is refused with ErrLinkComponent, a component that is
+// not a directory with ErrNotDirectory). rel is relative to root, slash or
+// OS separated; an absolute rel or one with a ".." component is refused, and
+// an empty rel or "." is root itself. It is for a directory reached from a
+// trusted root through entries that someone else may be able to change, such
+// as a template directory below a project's template directory.
+func OpenBelow(root, rel string) (*Home, error) {
+	var parts []string
+	if rel != "" {
+		p, err := splitRel(rel)
+		if err != nil {
+			return nil, err
+		}
+		parts = p
+	}
+	if len(parts) == 0 {
+		return Open(root)
+	}
+	r, err := Open(root)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = r.Close() }()
+	fd, err := r.walk(parts, false, 0)
+	if err != nil {
+		return nil, err
+	}
+	return &Home{path: filepath.Join(append([]string{root}, parts...)...), fd: fd}, nil
+}
+
 // Path returns the broker-side path the home was opened with.
 func (h *Home) Path() string { return h.path }
 

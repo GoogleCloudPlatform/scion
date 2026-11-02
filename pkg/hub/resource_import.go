@@ -172,7 +172,7 @@ func (s *Server) harnessConfigImportKind() resourceImportKind {
 		marker:        "config.yaml",
 		isResourceDir: isHarnessConfigDir,
 		newStore: func(dir string) (*ResourceStore, error) {
-			hcDir, err := config.LoadHarnessConfigDir(dir)
+			hcDir, err := loadLocalHarnessConfigDir(dir)
 			if err != nil {
 				return nil, err
 			}
@@ -438,7 +438,7 @@ func discoverResourceDirs(root, sourceURL string, kind resourceImportKind) ([]re
 		}
 		nameFromConfig := false
 		if kind.marker == "config.yaml" {
-			if hcDir, err := config.LoadHarnessConfigDir(root); err == nil && hcDir.Config.Name != "" {
+			if hcDir, err := loadLocalHarnessConfigDir(root); err == nil && hcDir.Config.Name != "" {
 				name = hcDir.Config.Name
 				nameFromConfig = true
 			}
@@ -467,7 +467,7 @@ func discoverResourceDirs(root, sourceURL string, kind resourceImportKind) ([]re
 			childName := entry.Name()
 			nameFromConfig := false
 			if kind.marker == "config.yaml" {
-				if hcDir, err := config.LoadHarnessConfigDir(dir); err == nil && hcDir.Config.Name != "" {
+				if hcDir, err := loadLocalHarnessConfigDir(dir); err == nil && hcDir.Config.Name != "" {
 					childName = hcDir.Config.Name
 					nameFromConfig = true
 				}

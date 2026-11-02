@@ -3,7 +3,11 @@
 # runner execution starts from (permissions-matrix C8), then grant
 # MEDIATOR_SA_NAME roles/run.developer on that job only (C10).
 # Shape: RUNNER_CPU / RUNNER_MEMORY, one task, no retries, TASK_TIMEOUT, an
-# ephemeral-disk volume of RUNNER_DISK_GI at /scratch, identity EXEC_SA_NAME, and
+# ephemeral-disk volume of RUNNER_DISK_GI mounted at the runner's HOME, /home/runner (the
+# entrypoint creates the work folder and the caches on it; an image from before this
+# layout refuses to start on such a job, and the current image refuses a job that still
+# mounts it at /scratch: update the image and the job together, which this script does),
+# identity EXEC_SA_NAME, and
 # the env RUNNER_BUILD_CACHE_IN_RAM and RUNNER_IDLE_TIMEOUT_SECONDS (from RUNNER_IDLE_TIMEOUT)
 # for the entrypoint (the job's only env vars:
 # --set-env-vars replaces the template's env on update).
@@ -72,7 +76,7 @@ SHAPE=(
 )
 VOLUME=(
   --add-volume="name=scratch,type=ephemeral-disk,size=${CFG[RUNNER_DISK_GI]}Gi"
-  "--add-volume-mount=volume=scratch,mount-path=/scratch"
+  "--add-volume-mount=volume=scratch,mount-path=/home/runner"
 )
 
 # The per-job ephemeral-disk limit the server enforces depends on the region and
@@ -98,11 +102,12 @@ crci_note "check: EXEC_SA_NAME holds no project roles"
 crci_check_exec_sa_has_no_roles
 
 if ((WARMUP)); then
-  # A no-op execution: the entrypoint checks the image, /scratch and the HOME links
+  # A no-op execution: the entrypoint checks the image, the volume at HOME and the work
+  # and cache directories
   # and exits 0 before any claim. The mediator ignores it (it has no RUNNER_NAME);
   # it counts toward MAX_CONCURRENT_RUNNERS for the few seconds it runs.
   crci_note "F-F: warm-up execution (imports the image before the first real job)"
   crci_run gcloud run jobs execute "$JOB" --region="$R" --project="$P" \
     --update-env-vars=RUNNER_WARMUP=1 --wait --format=none
 fi
-crci_note "done; next: deploy-mediator.sh"
+crci_note "done (upgrade order: deploy-mediator.sh goes before this when both changed)"

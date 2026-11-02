@@ -1,18 +1,20 @@
 {
-  "profile_map": {},
+  "profile_map": {
+    "a": "k8s-agents-a",
+    "b": "k8s-agents-b"
+  },
   "findings": [
     {
       "code": "profile_conflict",
-      "severity": "blocking",
-      "path": "profiles.*.kubernetes_service_account_mappings.agent@proj.iam.gserviceaccount.com",
+      "severity": "notice",
+      "path": "profiles.*",
       "profiles": [
         "a",
         "b"
       ],
       "message_contains": [
-        "a: ksa-a from profiles.a.kubernetes_service_account_mappings.agent@proj.iam.gserviceaccount.com",
-        "b: ksa-b from",
-        "declare a second instance"
+        "differ in kubernetes_service_account_mappings.agent@proj.iam.gserviceaccount.com;",
+        "k8s-agents-a (a), k8s-agents-b (b)"
       ]
     }
   ]

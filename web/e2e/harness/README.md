@@ -137,11 +137,12 @@ reference use.
 
 ### Hub settings and a co-located broker
 
-Three more `startHub()` options, all off by default:
+Four more `startHub()` options, all off by default:
 
 - `env`: extra environment of the hub process, for supported
-  configuration such as `SCION_SERVER_HUB_ASYNCAGENTLAUNCH: 'true'` or
-  `SCION_IMAGE_REGISTRY`. It is applied over the member-level hub's
+  configuration such as `SCION_IMAGE_REGISTRY` or
+  `SCION_SERVER_HUB_LAUNCHTIMEOUT`. Experiments are not environment
+  settings; use `experiments` or `startupExperiments`. It is applied over the member-level hub's
   `SCION_*`-free environment. Keys the harness sets itself
   (`HARNESS_OWNED_ENV`: `HOME`, `SCION_CLI_MODE`, the hub id and hub class,
   the broker host) and the test mode and test identity settings
@@ -159,6 +160,14 @@ Three more `startHub()` options, all off by default:
   and restarts the hub on the same database, port, HOME and hub id. If
   anything fails before the restarted hub is healthy, the hub process is
   killed and `startHub()` throws.
+- `experiments`: names of experiments the suite needs on. Once the hub is
+  healthy (after any `startupExperiments` restart), `startHub()` turns
+  each one on through the admin experiments API, with no restart, and
+  reads the listing back. If one is not enabled, or a request fails, the
+  hub process is killed and `startHub()` throws, so a suite never runs
+  with an experiment silently off. The override is stored in the hub's
+  database, so it survives `restartHubWithoutDevAuth`. The async create
+  journeys use it for `hub.async_agent_launch`.
 
 `restartHubWithoutDevAuth(stateFile)` restarts a hub that `startHub()`
 started in the same process on the same database, port, HOME and hub id,
@@ -186,7 +195,8 @@ const state = await startHub({
   testLogin: false,
   testIdentities: true,
   runtimeBroker: true,
-  env: { SCION_SERVER_HUB_ASYNCAGENTLAUNCH: 'true', SCION_IMAGE_REGISTRY: registry },
+  env: { SCION_IMAGE_REGISTRY: registry },
+  experiments: ['hub.async_agent_launch'],
   stateFile,
 });
 ```

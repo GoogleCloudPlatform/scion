@@ -119,7 +119,7 @@ func TestHandleOIDCDiscovery(t *testing.T) {
 			req := httptest.NewRequest(tc.method, "/.well-known/openid-configuration", nil)
 			w := httptest.NewRecorder()
 
-			srv.handleOIDCDiscovery(w, req)
+			srv.oidcArea().HandleOIDCDiscovery(w, req)
 
 			assert.Equal(t, tc.wantStatus, w.Code)
 
@@ -189,7 +189,7 @@ func TestHandleJWKS(t *testing.T) {
 			req := httptest.NewRequest(tc.method, "/.well-known/jwks.json", nil)
 			w := httptest.NewRecorder()
 
-			srv.handleJWKS(w, req)
+			srv.oidcArea().HandleJWKS(w, req)
 
 			assert.Equal(t, tc.wantStatus, w.Code)
 
@@ -230,12 +230,16 @@ func TestOIDCEndpoints_Unauthenticated(t *testing.T) {
 	srv := testOIDCServerWithRoutes(t)
 
 	// These requests do NOT include any auth headers.
+	// wantKey must be in the routed JSON body and notKey must not, which pins
+	// each route to its own handler (discovery document vs key set).
 	tests := []struct {
-		name string
-		path string
+		name    string
+		path    string
+		wantKey string
+		notKey  string
 	}{
-		{name: "discovery endpoint", path: "/.well-known/openid-configuration"},
-		{name: "JWKS endpoint", path: "/.well-known/jwks.json"},
+		{name: "discovery endpoint", path: "/.well-known/openid-configuration", wantKey: "jwks_uri", notKey: "keys"},
+		{name: "JWKS endpoint", path: "/.well-known/jwks.json", wantKey: "keys", notKey: "jwks_uri"},
 	}
 
 	for _, tc := range tests {
@@ -253,6 +257,11 @@ func TestOIDCEndpoints_Unauthenticated(t *testing.T) {
 
 			assert.Equal(t, http.StatusOK, w.Code,
 				"%s should return 200 without auth", tc.path)
+
+			var body map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body), "%s body: %s", tc.path, w.Body.String())
+			assert.Contains(t, body, tc.wantKey, "%s should serve its own document", tc.path)
+			assert.NotContains(t, body, tc.notKey, "%s should not serve the other OIDC document", tc.path)
 		})
 	}
 }
@@ -359,7 +368,7 @@ func doIdentityTokenRequest(t *testing.T, srv *Server, claims *AgentTokenClaims,
 	}
 
 	w := httptest.NewRecorder()
-	srv.handleAgentIdentityToken(w, req)
+	srv.oidcArea().HandleAgentIdentityToken(w, req)
 	return w
 }
 
@@ -576,6 +585,21 @@ func TestHandleAgentIdentityToken_RateLimiting(t *testing.T) {
 	// 3rd request should be rate limited.
 	w := doIdentityTokenRequest(t, srv, claims, body)
 	assert.Equal(t, http.StatusTooManyRequests, w.Code, "request exceeding burst should be rate limited")
+}
+
+// TestHandleAgentIdentityToken_NoRateLimiter checks that a server with no
+// identity-token rate limiter still issues tokens: the OIDC adapter must
+// return a nil limiter interface, never a typed nil.
+func TestHandleAgentIdentityToken_NoRateLimiter(t *testing.T) {
+	srv, _, claims := testOIDCIdentityServer(t)
+	srv.oidcTokenRateLimiter = nil
+
+	w := doIdentityTokenRequest(t, srv, claims, identityTokenRequest{Audience: "https://api.example.com"})
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp identityTokenResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.NotEmpty(t, resp.Token)
 }
 
 func TestHandleAgentIdentityToken_ForbiddenMessage(t *testing.T) {

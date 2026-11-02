@@ -103,7 +103,9 @@ type conduitRPCGuard struct {
 }
 
 // conduitSeenRequests remembers served requests for the whole broker
-// process, across sessions and hub connections.
+// process, across sessions and hub connections. A guard with an injected
+// clock must use its own set (newSeenOnce): add moves the set's sweep time
+// to the latest now it sees.
 var conduitSeenRequests = newSeenOnce()
 
 // NewConduitBrokerRPCHandler returns the RPC handler for the broker
@@ -219,7 +221,13 @@ func (g *conduitRPCGuard) check(ctx context.Context, req *wsprotocol.RequestEnve
 	if !apiclient.VerifyHMAC(key, apiclient.BuildCanonicalString(r, timestamp, nonce), sigBytes) {
 		return unauth("invalid signature")
 	}
-	if !g.seen.add(nonce+"\n"+signature, requestTime.Add(g.maxSkew), now) {
+	// Recorded only after the signature verifies, so only a key holder can
+	// add entries. The key is the verified signature bytes: they depend only
+	// on the canonical signed input, so every header encoding of one signed
+	// request (signature text spellings, which the base64 decoder accepts
+	// with other unused bits or CR/LF; a nonce that takes in a signed header
+	// line) has the same key.
+	if !g.seen.add(string(sigBytes), requestTime.Add(g.maxSkew), now) {
 		return unauth("request already served")
 	}
 	return nil
@@ -236,12 +244,21 @@ func signedHeaderListed(list, name string) bool {
 	return false
 }
 
-// seenOnce remembers keys until their expiry: a key is refused while now
-// is not after its expiry. Expired keys are dropped on each add, so it
-// holds at most the keys of one acceptance window.
+// seenOnce remembers keys until their expiry: a key is refused while it is
+// held. Expired keys are dropped on each add, so it holds at most the keys
+// of one acceptance window.
+//
+// Callers pass the now they checked the request against, which can be
+// older than another caller's now (a request body read after the check,
+// or scheduling). So add also refuses any key whose expiry is before the
+// latest now it has swept with: such a key may already have been dropped,
+// and accepting it could serve the same request twice. Only a request at
+// the very edge of its window is refused this way, which is the safe side.
 type seenOnce struct {
 	mu   sync.Mutex
 	keys map[string]time.Time
+	// sweptTo is the latest now any add has swept with.
+	sweptTo time.Time
 }
 
 func newSeenOnce() *seenOnce { return &seenOnce{keys: map[string]time.Time{}} }
@@ -250,10 +267,16 @@ func newSeenOnce() *seenOnce { return &seenOnce{keys: map[string]time.Time{}} }
 func (s *seenOnce) add(key string, expiry, now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if now.After(s.sweptTo) {
+		s.sweptTo = now
+	}
 	for k, exp := range s.keys {
-		if now.After(exp) {
+		if s.sweptTo.After(exp) {
 			delete(s.keys, k)
 		}
+	}
+	if s.sweptTo.After(expiry) {
+		return false
 	}
 	if _, ok := s.keys[key]; ok {
 		return false

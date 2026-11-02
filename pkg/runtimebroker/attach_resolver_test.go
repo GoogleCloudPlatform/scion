@@ -269,7 +269,7 @@ profiles:
 func TestHandleInfo_OptedOutDefaultRuntime_ReportsBrokerWideAttachFalse(t *testing.T) {
 	writeHomeSettings(t, `schema_version: "1"
 `)
-	srv := New(DefaultServerConfig(), &mockManager{}, newOptOutTestRuntime("optout"), config.RuntimeBuildRecord{})
+	srv := New(testServerConfig(), &mockManager{}, newOptOutTestRuntime("optout"), config.RuntimeBuildRecord{})
 
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/info", nil))

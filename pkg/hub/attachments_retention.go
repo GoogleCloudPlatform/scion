@@ -136,6 +136,12 @@ func (s *Server) sweepLegacyAttachmentBlobs(ctx context.Context, cutoff time.Tim
 // (logged on the send path) leaves the blob unlinked; history lists
 // attachments through the same links, so such a blob is already not shown
 // with its message.
+//
+// The object-storage condition is deliberately not widened to hubs whose
+// attachment artifacts use local blob storage: there, blobs that sent
+// messages reference are what history downloads of attachments sent
+// before artifacts were on still read, so they are kept until they can be
+// moved or their messages are deleted.
 func (s *Server) legacyBlobSweepable(ctx context.Context, wcs WebChatStore, projectID, id string, objectStorage bool) bool {
 	meta, err := wcs.GetAttachment(ctx, id)
 	if err != nil || meta == nil || meta.ID != id || meta.ProjectID != projectID {

@@ -105,7 +105,8 @@ type chatReadTarget struct {
 	// Topic is the thread's topic (nil for a DM).
 	Topic *WebChatTopic
 	// Project is the thread's project as loaded by the read check (nil
-	// for a DM, and when the caller did not set it).
+	// when the caller did not set it). History leaves it nil for a DM; the
+	// star routes set an agent DM's peer project (starConversation).
 	Project *store.Project
 	// Filter selects the conversation's history messages: Channel plus
 	// ConversationID (read switch on) or ThreadID (off).

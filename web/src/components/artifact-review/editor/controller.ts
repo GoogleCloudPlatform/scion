@@ -29,8 +29,10 @@ import type { EditorState, Transaction } from '@milkdown/prose/state';
 import type { EditorView } from '@milkdown/prose/view';
 
 import { artifactLinkTarget } from '../../../client/artifact-preview.js';
+import { isMacPlatform } from '../../../utils/platform.js';
 import { createCore } from './create.js';
 import type { Core } from './create.js';
+import { reviewKeymap } from './keymap.js';
 import { guardTransfers, pastePlugin } from './paste.js';
 import { containerClass, policyPlugin, touchesEarlier } from './policy.js';
 import type { HintKind } from './policy.js';
@@ -74,6 +76,60 @@ export function headingSlug(text: string): string {
     .replace(/\s/g, '-');
 }
 
+/** The link element of the editor an event's target is in (a text node's parent counts). */
+function linkElementAt(view: EditorView, target: EventTarget | null): Element | null {
+  const el =
+    target instanceof Element ? target : target instanceof Text ? target.parentElement : null;
+  const a = el?.closest('a') ?? null;
+  return a && view.dom.contains(a) ? a : null;
+}
+
+/** The parts of a mouse event the link gestures read. */
+type Gesture = Pick<MouseEvent, 'type' | 'button' | 'metaKey' | 'ctrlKey'>;
+
+/**
+ * Whether a click follows a link (ptone/scion#6848): a click of the main
+ * button with Mod (Meta on macOS, Ctrl elsewhere), or a middle click.
+ */
+export function followsLink(e: Gesture, mac: boolean): boolean {
+  const mod = mac ? e.metaKey : e.ctrlKey;
+  return (e.type === 'click' && e.button === 0 && mod) || (e.type === 'auxclick' && e.button === 1);
+}
+
+/** Whether a press is a Mod press of the main button. */
+export function isModPress(e: Gesture, mac: boolean): boolean {
+  return e.button === 0 && (mac ? e.metaKey : e.ctrlKey);
+}
+
+/**
+ * Whether a press on a link is held back: a Mod press of the main button
+ * (no caret move, no added selection range) or a middle press (no paste of
+ * the PRIMARY selection where the middle button pastes, as on Linux).
+ */
+export function holdsLinkPress(e: Gesture, mac: boolean): boolean {
+  return e.button === 1 || isModPress(e, mac);
+}
+
+/**
+ * Where the link mark at a link's DOM element points (ptone/scion#6848),
+ * read from the document rather than the DOM: the text node at the start
+ * of the element carries the mark. Null when there is no link mark there.
+ */
+export function linkMarkTarget(
+  view: EditorView,
+  a: Element,
+  rc: RenderContext
+): ReturnType<typeof artifactLinkTarget> | null {
+  let pos: number;
+  try {
+    pos = view.posAtDOM(a, 0);
+  } catch {
+    return null;
+  }
+  const link = view.state.doc.nodeAt(pos)?.marks.find((m) => m.type.name === 'link');
+  return link ? artifactLinkTarget(String(link.attrs.href ?? ''), rc) : null;
+}
+
 /** Moves the cursor to the heading whose fragment id is id; false if none. */
 export function scrollToHeading(view: EditorView, id: string): boolean {
   let want: string;
@@ -107,6 +163,8 @@ export class ReviewController {
   private dirtyAt = new WeakMap<CompositionSnapshot, boolean>();
   private endedTimer: ReturnType<typeof setTimeout> | null = null;
   private unguard: () => void = () => {};
+  /** A note dialog of editNote is open. */
+  private noteOpen = false;
 
   private constructor(private readonly opts: ControllerOptions) {}
 
@@ -125,6 +183,7 @@ export class ReviewController {
     const onRefuse = (hint: HintKind): void => opts.onHint(hint);
     const unitCheck = (doc: Node, first: number, last: number): HintKind | null =>
       this.session.unitCheck(doc, first, last);
+    const keys = reviewKeymap(onRefuse);
     let parse: (md: string) => Node = () => {
       throw new Error('editor not ready');
     };
@@ -137,6 +196,7 @@ export class ReviewController {
         trackPlugin(),
         this.uiPlugin(),
         keymap({
+          ...keys,
           'Mod-Alt-m': () => {
             void this.comment();
             return true;
@@ -145,9 +205,9 @@ export class ReviewController {
             void this.comment();
             return true;
           },
-          Enter: (state) => {
+          Enter: (state, dispatch, view) => {
             const c = selectedComment(state);
-            if (!c) return false;
+            if (!c) return keys.Enter(state, dispatch, view);
             void this.editNote(c.pos);
             return true;
           },
@@ -157,6 +217,29 @@ export class ReviewController {
     parse = this.core.parse;
     this.session = new ReviewSession(this.core);
     this.unguard = guardTransfers(opts.root, () => this.core.view, this.core.parse, onRefuse);
+  }
+
+  /**
+   * A click on a link in the editor (ptone/scion#6848). No click follows a
+   * link natively: its default is always prevented, which leaves caret
+   * placement (done on mousedown and mouseup) to ProseMirror. A Mod-click
+   * (Meta on macOS, Ctrl elsewhere, ProseMirror's Mod) or a middle click
+   * follows it, by the link mark at the clicked link: artifactLinkTarget
+   * decides, as in the preview (design S3). A followable target opens in a
+   * new tab, a fragment scrolls to its heading, anything else does nothing.
+   */
+  private onLinkClick(view: EditorView, event: MouseEvent): boolean {
+    const a = linkElementAt(view, event.target);
+    if (!a) return false;
+    event.preventDefault();
+    if (!followsLink(event, isMacPlatform())) return false;
+    const target = linkMarkTarget(view, a, this.opts.render());
+    if (target?.kind === 'external' || target?.kind === 'file') {
+      window.open(target.href, '_blank', 'noopener,noreferrer');
+      return true;
+    }
+    if (target?.kind === 'fragment') return scrollToHeading(view, target.id);
+    return true;
   }
 
   private uiPlugin(): Plugin {
@@ -203,27 +286,31 @@ export class ReviewController {
           void this.editNote(pos);
           return true;
         },
-        handleClick: (view, pos, event): boolean => {
-          if (!(event.metaKey || event.ctrlKey)) return false;
-          const target = event.target as Element | null;
-          const a = target?.closest?.('a');
-          if (!a) return false;
-          const href = a.getAttribute('href');
-          if (href) {
-            window.open(href, '_blank', 'noopener,noreferrer');
-            return true;
-          }
-          if (a.classList.contains('fragment-link')) {
-            const link = view.state.doc
-              .resolve(pos)
-              .marks()
-              .find((m) => m.type.name === 'link');
-            const t = link ? artifactLinkTarget(String(link.attrs.href), this.opts.render()) : null;
-            if (t?.kind === 'fragment') return scrollToHeading(view, t.id);
-          }
-          return false;
+        // A single click on a comment badge edits it (ptone/scion#6850,
+        // design 4.5): the reviewer's own comment opens the note dialog, an
+        // earlier one stays read-only and says why (editNote). A click in
+        // highlighted text places the caret as on any text.
+        handleClickOn: (_view, _pos, node, nodePos, event, direct): boolean => {
+          if (!direct || node.type.name !== COMMENT) return false;
+          const modified = event.metaKey || event.ctrlKey || event.shiftKey || event.altKey;
+          if (event.button !== 0 || modified) return false;
+          void this.editNote(nodePos);
+          return true;
         },
         handleDOMEvents: {
+          // Links are followed by click events only (ptone/scion#6848): a
+          // Mod-click (Cmd on macOS, Ctrl elsewhere) or a middle click.
+          click: (view, event): boolean => this.onLinkClick(view, event),
+          auxclick: (view, event): boolean => this.onLinkClick(view, event),
+          // A Mod press on a link neither moves the caret nor (Firefox, Ctrl)
+          // adds a selection range, and a middle press pastes nothing: the
+          // click or auxclick that follows opens the link.
+          mousedown: (view, event): boolean => {
+            if (!holdsLinkPress(event, isMacPlatform())) return false;
+            if (!linkElementAt(view, event.target)) return false;
+            event.preventDefault();
+            return true;
+          },
           compositionstart: (): boolean => {
             this.beginComposition();
             return false;
@@ -353,9 +440,9 @@ export class ReviewController {
     const docBefore = view.state.doc;
     const id: unknown = this.uiKey.getState(view.state);
     const refused = reconcileComposition(view, snap, id, (doc, pos, at, before) => {
-      const container = containerClass(view.state.doc.resolve(pos + 1));
-      if (container === 'code') return 'code';
-      if (container) return 'list-table';
+      // Composed text in a list item or a table cell is an insertion like
+      // any other; code takes no suggestions.
+      if (containerClass(view.state.doc.resolve(pos + 1)) === 'code') return 'code';
       // The same hint as for typing at that place.
       if (touchesEarlier(before, at, at))
         return this.session.earlierHint(before.resolve(at).index(0));
@@ -363,11 +450,12 @@ export class ReviewController {
       return this.session.unitCheck(doc, i, i);
     });
     if (refused) this.opts.onHint(refused as HintKind);
-    if (view.state.doc === docBefore && docBefore.eq(snap.doc)) {
-      // The composition changed nothing: the document is as before it, and
-      // no change was reported while it ran.
+    if (view.state.doc.eq(snap.doc)) {
+      // The document has the content it had before the composition (it
+      // changed nothing, or it was restored): it is as edited as it was
+      // then. Compared by content, since a restore builds a new document.
       this.session.setDirty(this.dirtyAt.get(snap) ?? true);
-      this.opts.onChange();
+      if (view.state.doc === docBefore) this.opts.onChange();
     }
   }
 
@@ -400,9 +488,14 @@ export class ReviewController {
   /**
    * The current text, serializing only after an edit; null when it cannot
    * be written faithfully (every unit written must read back as the
-   * document and keep every earlier mark, design 4.6 item 3 and E5).
+   * document and keep every earlier mark, design 4.6 item 3 and E5). A
+   * composition that has ended but whose settle step is still pending is
+   * settled first, so Save or a switch to Source right after it keeps the
+   * composed text as a suggestion; while a composition runs, the text
+   * cannot be written (null).
    */
   flush(): string | null {
+    if (this.ended && !this.core.view.composing) this.settleComposition();
     return this.session.save();
   }
 
@@ -418,6 +511,16 @@ export class ReviewController {
 
   get dirty(): boolean {
     return this.session.isDirty;
+  }
+
+  /** Whether the opened text gets the whole-text check on every edit (design E7). */
+  get isHazardous(): boolean {
+    return this.session.isHazardous;
+  }
+
+  /** Whether an input method composition is running in the view. */
+  get isComposing(): boolean {
+    return this.core.view.composing || this.composing !== null;
   }
 
   /**
@@ -473,8 +576,10 @@ export class ReviewController {
   }
 
   /**
-   * Edit the note of this session's comment at pos (Enter, double-click).
-   * Comments already in the text are not edited here.
+   * Edit the note of this session's comment at pos (a click on its badge,
+   * Enter, double-click; ptone/scion#6850). Comments already in the text
+   * are not edited here. An empty note removes the comment and this
+   * session's highlight with it (editComment), as for a new comment.
    */
   async editNote(pos: number): Promise<void> {
     const view = this.core.view;
@@ -485,14 +590,23 @@ export class ReviewController {
       this.opts.onHint(this.session.earlierHint(view.state.doc.resolve(pos).index(0)));
       return;
     }
+    // One note dialog at a time: the second click of a double-click, or
+    // Enter while the dialog is open, opens no other (ptone/scion#6850).
+    if (this.noteOpen) return;
     const docBefore = view.state.doc;
     const number = commentNumber(view.state, pos);
-    const note = await this.opts.askNote({
-      note: String(node.attrs.note),
-      number,
-      quote: '',
-      context: this.commentContext(pos),
-    });
+    let note: string | null;
+    this.noteOpen = true;
+    try {
+      note = await this.opts.askNote({
+        note: String(node.attrs.note),
+        number,
+        quote: '',
+        context: this.commentContext(pos),
+      });
+    } finally {
+      this.noteOpen = false;
+    }
     view.focus();
     if (note === null) return;
     // The document may have changed while the dialog was open: the comment

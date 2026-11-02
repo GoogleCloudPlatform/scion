@@ -36,6 +36,11 @@ func EnsureLeaf(hostBase, rel string) (leafFd int, alreadyExisted bool, err erro
 	return -1, false, unsupported("EnsureLeaf", rel)
 }
 
+// EnsureLeafOwned is unsupported on this platform.
+func EnsureLeafOwned(hostBase, rel string, owner Owner) (leafFd int, alreadyExisted bool, err error) {
+	return -1, false, unsupported("EnsureLeafOwned", rel)
+}
+
 // CloseFd is a no-op: no descriptor is ever returned on this platform.
 func CloseFd(fd int) error { return nil }
 

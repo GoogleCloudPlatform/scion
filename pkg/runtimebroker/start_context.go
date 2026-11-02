@@ -623,28 +623,46 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
-	// 3. Hub auth token. Precedence (highest first):
-	//   1. in.AgentToken — the explicit hub-provided dedicated field (create path).
-	//   2. an existing env["SCION_AUTH_TOKEN"] already populated from in.ResolvedEnv
-	//      above — on the start/resume path the hub mints the agent JWT into
-	//      resolvedEnv, so it is already present here and must be kept.
-	// There is no third source: this process's own SCION_AUTH_TOKEN is never
-	// given to an agent, co-located hub or not. An agent the hub issued no
-	// token for starts with no hub credential; the agent manager logs that
-	// and reports it in the start response (pkg/agent/run.go).
-	if in.AgentToken != "" {
-		env["SCION_AUTH_TOKEN"] = in.AgentToken
-		// Bootstrap: NOT in argv. Diverted to ~/.scion/scion-token by
-		// pkg/agent/run.go:761-777; read by pkg/hubsync/sync.go:1329.
-		classifyBrokerEnv("SCION_AUTH_TOKEN", api.EnvKindSecretBootstrap)
-		if s.config.Debug {
-			s.agentLifecycleLog.Debug("SCION_AUTH_TOKEN set from agent token", "agent_id", in.AgentID, "length", len(in.AgentToken))
-		}
-	} else if env["SCION_AUTH_TOKEN"] != "" {
-		// Token already resolved from the hub via resolvedEnv (start/resume path); keep it.
-		if s.config.Debug {
-			s.agentLifecycleLog.Debug("SCION_AUTH_TOKEN kept from resolved env", "agent_id", in.AgentID, "length", len(env["SCION_AUTH_TOKEN"]))
-		}
+	// The git token remote is set only from the hub's GitClone (below), never
+	// from the request's env, so an env entry cannot bind the git token to
+	// another remote. Likewise the in-container clone URL is set only from
+	// GitClone, after the clone URL check (refusedCloneURL), so an env entry
+	// cannot start a clone that check never saw.
+	// Their classifications go too: a value set below is classified again
+	// there, and one that is not set leaves no stale entry.
+	for _, key := range []string{api.EnvGitTokenRemote, "SCION_GIT_CLONE_URL"} {
+		delete(env, key)
+		delete(envCls, key)
+	}
+
+	// 3. Hub auth token. The agent's hub credential is only the token the
+	// hub issued for this start (opts.HubIssuedToken below):
+	//   - in.AgentToken, the dedicated field of a create request; or
+	//   - on start and restart, the resolved env SCION_AUTH_TOKEN, but only
+	//     when the hub classified it secret-bootstrap, which the hub does
+	//     only for the token it issued (setStartEnvToken). The resolved env
+	//     also carries the agent's config env (AppliedConfig.Env), so an
+	//     unclassified value there is not hub-issued.
+	// A SCION_AUTH_TOKEN from any other source (Config.Env, a config env
+	// value in the resolved env) is dropped from env and never reaches the
+	// agent. This process's own SCION_AUTH_TOKEN is never given to an agent,
+	// co-located hub or not. A hub-dispatched start without a hub-issued
+	// token fails in the agent manager with agent.ErrNoHubToken
+	// (pkg/agent/run.go), relayed to the hub as the start's error message.
+	hubIssuedToken := in.AgentToken
+	if hubIssuedToken == "" && in.EnvClassifications["SCION_AUTH_TOKEN"] == api.EnvKindSecretBootstrap {
+		hubIssuedToken = in.ResolvedEnv["SCION_AUTH_TOKEN"]
+	}
+	if v, ok := env["SCION_AUTH_TOKEN"]; ok && v != hubIssuedToken {
+		// Names no value.
+		s.agentLifecycleLog.Info("SCION_AUTH_TOKEN in the start env is not the hub-issued token; dropped", "agent_id", in.AgentID)
+	}
+	delete(env, "SCION_AUTH_TOKEN")
+	if envCls != nil {
+		delete(envCls, "SCION_AUTH_TOKEN")
+	}
+	if hubIssuedToken != "" && s.config.Debug {
+		s.agentLifecycleLog.Debug("hub-issued agent token present", "agent_id", in.AgentID, "length", len(hubIssuedToken))
 	}
 
 	// 4. Hub endpoint
@@ -886,6 +904,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		ProjectPath:        in.ProjectPath,
 		NoAuth:             in.NoAuth,
 		TrustedHubEndpoint: trustedHubEndpoint,
+		HubIssuedToken:     hubIssuedToken,
 		// FreshProvision is true only for a create dispatch: GetAgent wipes
 		// and re-clones an existing populated workspace only in that case,
 		// never on start or restart (GoogleCloudPlatform/scion#1931).
@@ -1060,8 +1079,37 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		// cloned per agent. Ignored when GitClone is set: that request asks
 		// for a per-agent clone instead.
 		if gc := in.Config.SharedWorkspaceClone; gc != nil && gc.URL != "" && in.Config.GitClone == nil {
+			// A clone URL that provisioning refuses fails the dispatch, as on
+			// every other path that clones the project's URL.
+			if sce := refusedCloneURL(in.AgentID, "shared-workspace", gc.URL); sce != nil {
+				span.SetStatus(codes.Error, sce.Message)
+				return nil, sce
+			}
 			gcCopy := *gc
 			opts.SharedWorkspaceClone = &gcCopy
+			// The project's recorded remote, as the hub sent it: the agent's
+			// git credential helper is scoped to its host (sciontool init,
+			// configureSharedWorkspaceGit), never to the clone URL's.
+			if gc.TokenRemote != "" {
+				env[api.EnvGitTokenRemote] = gc.TokenRemote
+				classifyBrokerEnv(api.EnvGitTokenRemote, api.EnvKindPlain)
+			}
+		}
+	}
+
+	// --- Project clone URL check ---
+	// A clone URL that provisioning refuses fails the dispatch before any
+	// route that uses it: the linked-checkout decision, the broker's
+	// host-side worktree-per-agent clone and the in-container clone all
+	// come after this. There is no fallback to another workspace mode.
+	if in.Config != nil && in.Config.GitClone != nil {
+		mode := "clone-per-agent"
+		if in.WorkspaceMode == store.WorkspaceModeWorktreePerAgent {
+			mode = "worktree-per-agent"
+		}
+		if sce := refusedCloneURL(in.AgentID, mode, in.Config.GitClone.URL); sce != nil {
+			span.SetStatus(codes.Error, sce.Message)
+			return nil, sce
 		}
 	}
 
@@ -1163,6 +1211,8 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// --- Git clone mode ---
 	if !worktreeProvisioned && !linkedCheckout && !sharedPlainProvisioned && in.Config != nil && in.Config.GitClone != nil {
 		gc := in.Config.GitClone
+		// The clone URL passed the project clone URL check above, before the
+		// worktree and linked-checkout routes.
 		env["SCION_GIT_CLONE_URL"] = gc.URL
 		// Clone URL may embed credentials — the original #127 bug.
 		classifyBrokerEnv("SCION_GIT_CLONE_URL", api.EnvKindSecretInjected)
@@ -1173,6 +1223,13 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		if gc.Depth != nil {
 			env["SCION_GIT_DEPTH"] = strconv.Itoa(*gc.Depth)
 			classifyBrokerEnv("SCION_GIT_DEPTH", api.EnvKindPlain)
+		}
+		// The project's recorded remote, as the hub sent it: sciontool init
+		// offers the git token to the clone only when the clone URL names it.
+		// Relayed unchanged; without it the clone gets no token.
+		if gc.TokenRemote != "" {
+			env[api.EnvGitTokenRemote] = gc.TokenRemote
+			classifyBrokerEnv(api.EnvGitTokenRemote, api.EnvKindPlain)
 		}
 		if in.Config.Branch != "" {
 			env["SCION_AGENT_BRANCH"] = in.Config.Branch
@@ -1230,14 +1287,26 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	if emptyPerAgent {
 		// Never git, whatever a stale resolvedEnv claims.
 		isGitWorkspace = false
-		delete(env, "SCION_WORKSPACE_GIT")
-		delete(envCls, "SCION_WORKSPACE_GIT")
 	}
-	if isGitWorkspace {
+	// The broker owns this key: a value from the hub's resolved env (project
+	// env included), the request's env or anywhere else is replaced by the
+	// value computed here. The Kubernetes runtime's shared-repository guard
+	// trusts it, and pkg/agent keeps it as computed here (Manager.Start).
+	delete(env, "SCION_WORKSPACE_GIT")
+	delete(envCls, "SCION_WORKSPACE_GIT")
+	switch {
+	case isGitWorkspace:
 		env["SCION_WORKSPACE_GIT"] = "true"
 		classifyBrokerEnv("SCION_WORKSPACE_GIT", api.EnvKindPlain)
+	case !emptyPerAgent && s.sharedWorkspaceKnownNotGit(ctx, in, &opts, worktreeProvisioned, linkedCheckout):
+		// Explicit only when the broker positively knows the shared
+		// workspace is not a git repository (sharedWorkspaceKnownNotGit).
+		env["SCION_WORKSPACE_GIT"] = "false"
+		classifyBrokerEnv("SCION_WORKSPACE_GIT", api.EnvKindPlain)
 	}
-	// Absent when false — avoids encoding a "false" string agents must parse.
+	// Otherwise absent: git-ness is not known, and readers treat absent as
+	// "not git" except the Kubernetes guard, which then refuses (fail
+	// closed). An empty-per-agent workspace is never git and stays absent.
 
 	// --- Env + telemetry + secrets ---
 	opts.Env = env
@@ -2156,6 +2225,22 @@ func resolveWorktreeProvision(in worktreeProvisionInput) worktreeProvisionResult
 		},
 		WorktreePath: worktreePath,
 		ProjectRoot:  resolved.HostPath,
+	}
+}
+
+// refusedCloneURL returns the dispatch failure for a project clone URL that
+// provisioning refuses (provision.CheckDispatchCloneURL), or nil for an
+// accepted or empty URL: HTTP 422 with the refusal's fixed text after mode, naming no
+// URL, the same shape as the worktree-per-agent refusal. The dispatch does
+// not fall back to another workspace mode.
+func refusedCloneURL(agentID, mode, cloneURL string) *startContextError {
+	if provision.CheckDispatchCloneURL(cloneURL) == nil {
+		return nil
+	}
+	slog.Warn(mode+": the project's clone URL is not accepted; failing the dispatch", "agent_id", agentID)
+	return &startContextError{
+		Status:  http.StatusUnprocessableEntity,
+		Message: fmt.Errorf("%s: %w", mode, provision.ErrHostCloneURLRefused).Error(),
 	}
 }
 

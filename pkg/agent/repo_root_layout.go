@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 )
@@ -102,8 +103,9 @@ var legacyAgentWorkspaces sync.Map
 // workspace there (clone-per-agent, for example) may hold unpushed work, so
 // it keeps being admitted until the agent is recreated; a shared or
 // project-scoped workspace is never admitted from the legacy tree, nor is
-// another agent's directory. Temporary: retired with the legacy fallback
-// (ptone/scion#5835).
+// another agent's directory. It ends for each agent when that agent is
+// deleted, which removes the legacy directory (ptone/scion#5835); the code
+// path is removed in a later release (ptone/scion#5839).
 func legacyAgentWorkspaceRoot(projectDir, agentName, agentDir string, sharedOrExplicit bool) string {
 	if sharedOrExplicit || agentDir == "" {
 		return ""
@@ -117,6 +119,53 @@ func legacyAgentWorkspaceRoot(projectDir, agentName, agentDir string, sharedOrEx
 			"agent", agentName, "agent_dir", legacy)
 	}
 	return legacy
+}
+
+// ErrLegacyAgentStateRetired refuses the create of a new agent whose name
+// resolves, through the legacy look-up fallback, to a legacy in-project
+// agent directory: that directory belongs to an earlier agent of the same
+// name, provisioned before its project's configuration moved to the shared
+// project root, whose record is gone. Nothing may start from it, and the new
+// agent must not reuse its state. Deleting the new agent removes the
+// directory (ptone/scion#5835); creating it again then provisions it in the
+// external root. It is an agent-state conflict (config.IsAgentStateConflict),
+// so brokers answer it with 409 and its message.
+var ErrLegacyAgentStateRetired error = legacyAgentStateRetiredError{}
+
+type legacyAgentStateRetiredError struct{}
+
+func (legacyAgentStateRetiredError) Error() string {
+	return "an earlier agent of this name, provisioned before its project's configuration moved to the shared project root, left its state on this broker and no agent owns it any more; delete this agent to remove that state, then create it again"
+}
+
+func (legacyAgentStateRetiredError) Unwrap() error { return config.ErrAgentStateConflict }
+
+// refuseRetiredLegacyAgent returns ErrLegacyAgentStateRetired for a create
+// (opts.FreshProvision) of an agent of a shared project configuration that
+// has no state in the external agents root while a legacy in-project
+// directory of its name exists (config.LegacySharedProjectAgentDir): a
+// legacy directory with no live agent record. Starts and restarts of an
+// existing legacy agent are not refused; they keep the read-only fallback
+// and the narrow workspace admission until the agent is deleted.
+func refuseRetiredLegacyAgent(projectDir string, opts api.StartOptions) error {
+	if !opts.FreshProvision || !config.IsSharedProjectConfigDir(projectDir) {
+		return nil
+	}
+	legacy := config.LegacySharedProjectAgentDir(projectDir, opts.Name)
+	if legacy == "" {
+		return nil
+	}
+	// The same predicate as the look-up (config.HasExternalAgentState), so
+	// a create is admitted exactly when every look-up resolves the agent to
+	// the external root, never to the legacy directory. An agents root that
+	// cannot be resolved refuses (fail closed).
+	if root, err := config.AgentsRootForProject(projectDir, false, opts.HubProjectID); err == nil &&
+		config.HasExternalAgentState(filepath.Join(root, opts.Name)) {
+		return nil
+	}
+	slog.Warn("create refused: the agent name resolves to a legacy agent directory no agent owns",
+		"agent", opts.Name, "agent_dir", legacy)
+	return ErrLegacyAgentStateRetired
 }
 
 // composeSharedRepoRoot is composeRepoRoot for a workspace the backend placed

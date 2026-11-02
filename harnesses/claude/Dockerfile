@@ -16,9 +16,6 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
-ARG TZ
-ENV TZ="$TZ"
-
 ARG USERNAME=scion
 
 # Persist bash history.

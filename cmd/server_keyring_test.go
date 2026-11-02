@@ -116,7 +116,7 @@ func TestLoadServerKeyring_RingMode(t *testing.T) {
 	assert.Equal(t, cmdKRLegacySecret, resolveSessionSecret())
 	assert.Equal(t, cmdKRLegacySecret, sessionSecretValue())
 	assert.Equal(t, hub.SigningKeySourceKeyring, webSessionKeySource(resolveSessionSecret()))
-	assert.Contains(t, logs.String(), "session cookies and those capabilities only")
+	assert.Contains(t, logs.String(), "those capabilities, admission tokens and relay-peer signatures only")
 	assertNoCmdKRSecret(t, logs.String())
 }
 
@@ -315,6 +315,40 @@ func TestLoadServerKeyring_WorldReadablePolicy(t *testing.T) {
 	}
 }
 
+// TestLoadServerKeyring_UnreadableRingNeverSelectsLegacy (ptone/scion#1530
+// Phase 3): a configured keyring file that is missing, unreadable or not a
+// regular file refuses startup; no keyring is kept and the legacy-mode
+// notice is never printed (missing managed material never selects legacy
+// mode). hub.New refuses the same configuration on its own through
+// KeyringConfigured.
+func TestLoadServerKeyring_UnreadableRingNeverSelectsLegacy(t *testing.T) {
+	unreadable := writeCmdKeyring(t, nil)
+	require.NoError(t, os.Chmod(unreadable, 0))
+	if f, err := os.Open(unreadable); err == nil {
+		_ = f.Close()
+		t.Skip("running with privileges that read mode-000 files")
+	}
+	for name, path := range map[string]string{
+		"missing":    filepath.Join(t.TempDir(), "absent.json"),
+		"unreadable": unreadable,
+		"directory":  t.TempDir(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			isolateKeyring(t)
+			logs := captureSecretEnvSlog(t)
+			cfg := &config.GlobalConfig{KeyringFile: path}
+			err := loadServerKeyring(cfg)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), config.KeyringFileKey)
+			assert.Nil(t, serverKeyringFromFile())
+			assert.NotContains(t, logs.String(), "legacy single-secret mode")
+			hubCfg := buildHubServerConfig(cfg, "https://hub.example.com", "", nil, false, "", nil)
+			assert.True(t, hubCfg.KeyringConfigured)
+			assert.Nil(t, hubCfg.Keyring)
+		})
+	}
+}
+
 // TestApplyKeyringFlagOverrides: flags win over the loaded settings (which
 // already put env over settings.yaml); an unset flag leaves them alone.
 func TestApplyKeyringFlagOverrides(t *testing.T) {
@@ -404,4 +438,17 @@ func TestBuildServerValueCipher(t *testing.T) {
 		assert.Nil(t, serverValueCipher)
 		assertNoCmdKRSecret(t, err.Error())
 	})
+}
+
+// TestBuildHubServerConfig_KeyringConfigured: the hub is told a keyring
+// file is configured exactly when server.keyring_file is set.
+func TestBuildHubServerConfig_KeyringConfigured(t *testing.T) {
+	isolateKeyring(t)
+	assert.False(t, buildHubServerConfig(&config.GlobalConfig{}, "https://hub.example.com", "", nil, false, "", nil).KeyringConfigured)
+	cfg := &config.GlobalConfig{KeyringFile: writeCmdKeyring(t, nil)}
+	require.NoError(t, loadServerKeyring(cfg))
+	hubCfg := buildHubServerConfig(cfg, "https://hub.example.com", "", nil, false, "", nil)
+	assert.True(t, hubCfg.KeyringConfigured)
+	require.NotNil(t, hubCfg.Keyring)
+	assert.Equal(t, "gen1", hubCfg.Keyring.Signing().ActiveID())
 }

@@ -49,6 +49,7 @@ func TestBuildPod_SharedDirLayout_OneSubPathBranch(t *testing.T) {
 				WorkspaceBackendName: "nfs",
 				NFSPVClaimName:       "scion-workspaces",
 				NFSSubPath:           "projects/pid-1/workspace",
+				ProjectID:            "pid-1",
 				SharedDirStorage:     sharedDirsOnClaim("nfs", "scion-workspaces", "projects/pid-1", "notes", "cache"),
 			},
 			claim: "scion-workspaces",
@@ -168,6 +169,8 @@ func TestBuildPod_LegacyWorkspaceNFS_SubPathsAndClaimUnchanged(t *testing.T) {
 		WorkspaceBackendName: "nfs",
 		NFSPVClaimName:       "scion-workspaces",
 		NFSSubPath:           "team/projects/" + pid + "/workspace",
+		NFSSubPathRoot:       "team/projects",
+		ProjectID:            pid,
 		SharedDirs:           dirs,
 		SharedDirStorage:     r,
 	}
@@ -196,6 +199,7 @@ func TestLegacySharedDirClaimWarnings(t *testing.T) {
 	cfg := RunConfig{
 		Name: "test-agent", Labels: map[string]string{"scion.project": "myproject"},
 		SharedDirs: []api.SharedDir{{Name: "notes"}, {Name: "cache"}},
+		Kubernetes: &api.KubernetesConfig{SharedDirStorageClass: "standard-rwx"},
 	}
 	// The local backend creates the per-dir claims, as before.
 	require.NoError(t, rt.createSharedDirPVCs(t.Context(), "default", cfg))

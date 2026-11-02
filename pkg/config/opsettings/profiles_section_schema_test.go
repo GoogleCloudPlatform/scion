@@ -64,11 +64,17 @@ func TestProfilesSectionSchema_KubernetesBlockServiceAccount(t *testing.T) {
 			t.Errorf("kubernetes_block_service_account %q failed validation: %v", v, errs)
 		}
 	}
+	// The section schema carries the type only; the name rule is a save
+	// check (config.RuntimeSaveChecks, ptone/scion#6580), so type-correct
+	// invalid names pass here and a non-string fails.
 	for _, v := range []string{"Bad_Name", "-lead", strings.Repeat("a", 254)} {
 		doc := json.RawMessage(`{"k8s": {"runtime": "kubernetes", "kubernetes_block_service_account": "` + v + `"}}`)
-		if errs := Validate("profiles", doc); len(errs) == 0 {
-			t.Errorf("kubernetes_block_service_account %q passed validation; want a schema error", v)
+		if errs := Validate("profiles", doc); len(errs) > 0 {
+			t.Errorf("kubernetes_block_service_account %q failed the section schema: %v", v, errs)
 		}
+	}
+	if errs := Validate("profiles", json.RawMessage(`{"k8s": {"runtime": "kubernetes", "kubernetes_block_service_account": 5}}`)); len(errs) == 0 {
+		t.Error("a non-string kubernetes_block_service_account passed validation")
 	}
 }
 

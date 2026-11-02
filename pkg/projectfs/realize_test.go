@@ -136,3 +136,96 @@ func TestRealize_SplitUsesItsOwnClaim(t *testing.T) {
 		t.Errorf("claim = %q, want the split share's sd-pv", got.ClaimName)
 	}
 }
+
+// TestRealize_InlineNFS: on an nfs share with no claim, a pod mount is an
+// inline NFS volume of the directory's own server path, with no subPath; a
+// claim keeps the claim; every other case without a claim fails closed.
+func TestRealize_InlineNFS(t *testing.T) {
+	inline := Layout{Backend: BackendNFS, HostBase: "/mnt/nfs/a", SubPathRoot: "projects", Share: Share{ID: "a", Server: "192.0.2.1", Export: "/e"}}
+	claim := inline
+	claim.Share.PVName = "a-pv"
+	sdNoClaim := Layout{Backend: BackendNFS, HostBase: "/mnt/sd/s", SubPathRoot: "projects", Share: Share{ID: "s", Server: "192.0.2.2", Export: "/sd"}}
+	split := Layout{Backend: BackendLocal, HostBase: "/home/u/.scion", SharedDirs: &sdNoClaim}
+	noServer := inline
+	noServer.Share.Server = ""
+	noExport := inline
+	noExport.Share.Export = ""
+	gke := Layout{Backend: BackendGKESharedVolume, HostBase: "/mnt/v", SubPathRoot: "projects", Share: Share{ID: "v", Server: "192.0.2.3", Export: "/v"}}
+
+	ws := WorkspaceMount(ModeSharedPlain, "")
+	sd := SharedDirMount(api.SharedDir{Name: "notes", ReadOnly: true}, "")
+	resolve := func(l Layout, m Mount) Resolved {
+		t.Helper()
+		r, err := l.Resolve(Project{ID: testPID}, "", m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+
+	got, err := inline.Realize(resolve(inline, ws), RuntimePod)
+	want := Realized{NFS: &NFSSource{Server: "192.0.2.1", Path: "/e/projects/" + testPID + "/workspace"}, Target: "/workspace"}
+	if err != nil || got.ClaimName != "" || got.SubPath != "" || got.NFS == nil || *got.NFS != *want.NFS || got.Target != want.Target || got.ReadOnly {
+		t.Errorf("inline workspace = %+v (%+v), %v", got, got.NFS, err)
+	}
+	got, err = inline.Realize(resolve(inline, sd), RuntimePod)
+	if err != nil || got.NFS == nil || got.NFS.Path != "/e/projects/"+testPID+"/shared-dirs/notes" || !got.ReadOnly || got.SubPath != "" {
+		t.Errorf("inline read-only shared dir = %+v, %v", got, err)
+	}
+	got, err = claim.Realize(resolve(claim, ws), RuntimePod)
+	if err != nil || got.ClaimName != "a-pv" || got.NFS != nil || got.SubPath != "projects/"+testPID+"/workspace" {
+		t.Errorf("claim workspace = %+v, %v", got, err)
+	}
+
+	refused := []struct {
+		name string
+		l    Layout
+		r    Resolved
+	}{
+		{"split without claim", split, resolve(split, sd)},
+		{"split resolved, realized on its own share", sdNoClaim, func() Resolved { r := resolve(split, sd); r.HostBase = "/elsewhere"; return r }()},
+		{"missing server", noServer, resolve(noServer, ws)},
+		{"missing server path", noExport, resolve(noExport, ws)},
+		{"gke-shared-volume without claim", gke, resolve(gke, ws)},
+	}
+	for _, tc := range refused {
+		if got, err := tc.l.Realize(tc.r, RuntimePod); err == nil {
+			t.Errorf("%s: realized %+v, want a fail-closed error", tc.name, got)
+		}
+	}
+}
+
+// TestProjectLeaf: a leaf strictly under <root>/<pid>/ resolves with the
+// same server path Resolve gives; the project root, another project's
+// tree, the export root and unclean paths are refused.
+func TestProjectLeaf(t *testing.T) {
+	l := Layout{Backend: BackendNFS, HostBase: "/mnt/nfs/a", SubPathRoot: "projects", Share: Share{ID: "a", Server: "192.0.2.1", Export: "/e"}}
+	base := "projects/" + testPID
+	r, err := l.ProjectLeaf(testPID, base+"/workspace/.git", "/repo-root/.git", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.ServerPath != "/e/"+base+"/workspace/.git" || r.SubPath != base+"/workspace/.git" || r.Target != "/repo-root/.git" || !r.ReadOnly ||
+		r.HostPath != "/mnt/nfs/a/"+base+"/workspace/.git" || r.Backend != BackendNFS {
+		t.Errorf("leaf = %+v", r)
+	}
+	ws, _ := l.Resolve(Project{ID: testPID}, "", WorkspaceMount(ModeSharedPlain, ""))
+	if leaf, _ := l.ProjectLeaf(testPID, ws.SubPath, ws.Target, false); leaf.ServerPath != ws.ServerPath || leaf.SubPath != ws.SubPath {
+		t.Errorf("leaf of the workspace subPath = %+v, want Resolve's %+v", leaf, ws)
+	}
+	const otherPID = "11111111-2222-3333-4444-555555555555"
+	for _, sub := range []string{
+		"", base, base + "/", "/" + base + "/workspace", "projects", "projects/" + otherPID + "/workspace",
+		base + "/../" + otherPID + "/workspace", base + "/./workspace", base + "//workspace", base + "x/workspace", "other/" + testPID + "/workspace",
+	} {
+		if got, err := l.ProjectLeaf(testPID, sub, "/t", false); err == nil {
+			t.Errorf("ProjectLeaf(%q) = %+v, want refusal", sub, got)
+		}
+	}
+	if _, err := l.ProjectLeaf("../x", base+"/workspace", "/t", false); err == nil {
+		t.Error("invalid project ID must be refused")
+	}
+	if _, err := (Layout{Backend: BackendLocal}).ProjectLeaf(testPID, base+"/workspace", "/t", false); err == nil {
+		t.Error("the local backend has no project tree on a share")
+	}
+}

@@ -10,8 +10,8 @@
   "chunks": {
     "$comment": "CodeMirror editor core (ptone/scion#5351). Each language is its own lazily loaded lang-<name> chunk (vite.config.ts), so this chunk holds only the core: @codemirror/view, state, language, autocomplete, commands, search and @lezer/common, highlight (409,273 B raw at the split, from 783,936 B with every language). The design's 350,000 B estimate assumed about 430 KB of languages; they measured about 350 KB, so the limit was revised to 420,000 B with webperf-lead approval.",
     "assets/codemirror-": { "raw": 420000, "gzip": 140000 },
-    "$comment-review-editor": "The graphical review editor (ptone/scion#5913): Milkdown, ProseMirror and the remark stack (about 149 kB gzip measured in the design spike) plus the editor modules, loaded only when a review opens in the graphical view. combined: the limit is for all review-editor-* chunks together (the packages chunk and the editor modules' chunk). Interim limit 165,000 B gzip / 535,000 B raw, measured from 159,982 B gzip / 515,143 B raw with the editor's load and save checks; the follow-up trims unused editor parts and then sets the final limit (ptone/scion#5914).",
-    "assets/review-editor-": { "raw": 535000, "gzip": 165000, "combined": true }
+    "$comment-review-editor": "The graphical review editor (ptone/scion#5913): Milkdown, ProseMirror and the remark stack plus the editor modules, loaded only when a review opens in the graphical view. combined: the limit is for all review-editor-* chunks together (the packages chunk and the editor modules' chunk). Measured at 142,409 B gzip / 454,689 B raw after leaving out the Markdown presets' commands, keymaps and input rules (ptone/scion#5914; from 159,881 B gzip / 514,668 B raw); the limit is that plus 20 kB gzip and 70 kB raw for the later editor work. Raise it only with measured numbers.",
+    "assets/review-editor-": { "raw": 525000, "gzip": 162500, "combined": true }
   },
   "entryClosure": {
     "entry": "src/client/main.ts",
@@ -30,6 +30,17 @@
       "assets/shoelace-",
       "assets/untrusted-view-frame-",
       "assets/markdown-"
+    ]
+  },
+  "$comment-requiredStrings": "Marker strings of the review editor's safety and input modules (ptone/scion#5914), each a literal that occurs in exactly one source file, its module (artifact-review/bundle-markers.test.ts checks this): safe-render.ts's schema renderers (the Symbol that tags every renderer it replaces, raw HTML's included), its image placeholder and its link renderer; the paste plugin; the suggest-mode policy; the tracking plugin. The build drops plugin code nothing uses, so this proves these modules are in the production chunks, which the unit tests (run on the source) cannot.",
+  "requiredStrings": {
+    "assets/review-editor-": [
+      "hardened",
+      "image-placeholder failed",
+      "inert-link",
+      "criticPaste",
+      "criticPolicy",
+      "criticTrack"
     ]
   },
   "requiredChunks": [

@@ -1507,7 +1507,7 @@ and `pkg/runtimebroker` do not import each other today (verified: no non-test im
 direction) and must not start to; both already import `pkg/api` freely, so a second small leaf
 package imports exactly as cleanly and keeps the keys contract from being buried inside either
 side's package. The name `agentkeys` (not `keys`) is deliberate: `keys` is heavily overloaded
-already in this codebase (`pkg/projectkeys`, `pkg/hub/oidckeys.go`, DM/conversation "keys" in
+already in this codebase (`pkg/projectkeys`, `pkg/hub/oidckeys`, DM/conversation "keys" in
 `pkg/messages/dm_key.go`) and a bare `pkg/keys` would be actively confusing next to those.
 
 **What changed in existing packages (compile-only, no dispatch reachable):**

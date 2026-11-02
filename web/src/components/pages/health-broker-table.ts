@@ -32,6 +32,7 @@ import { customElement, property } from 'lit/decorators.js';
 import { ifDefined } from 'lit/directives/if-defined.js';
 
 import { formatRelative } from '../../utils/time.js';
+import { mismatchLines } from '../../shared/broker-storage.js';
 import {
   brokerVersionStyles,
   renderBrokerVersion,
@@ -56,7 +57,17 @@ export interface HealthSummaryBroker {
   /** Null when the broker reported no runtime profile. */
   runtime: { type: string; profile?: string } | null;
   /** Null when the broker never reported its workspace storage. */
-  workspace_storage: { backend: string; nfs_healthy?: boolean } | null;
+  workspace_storage: {
+    backend: string;
+    nfs_healthy?: boolean;
+    /**
+     * How the broker's reported storage layout differs from the hub's.
+     * Absent when the hub lists no difference; that is not a confirmed
+     * match (it is also absent when the hub's layout is not shared or could
+     * not be read).
+     */
+    layout_mismatch?: string[];
+  } | null;
   /**
    * The broker's self-reported health; null when it never reported one
    * (an older broker). As fresh as last_heartbeat.
@@ -426,6 +437,19 @@ export class ScionHealthBrokerTable extends LitElement {
     `;
   }
 
+  /**
+   * A "layout mismatch" pill when the hub reports that the broker's storage
+   * layout differs from its own; the differences are its title and are read
+   * out by screen readers.
+   */
+  private renderLayoutMismatch(b: HealthSummaryBroker): TemplateResult | typeof nothing {
+    const lines = mismatchLines(b.workspace_storage?.layout_mismatch);
+    if (lines.length === 0) return nothing;
+    return html`<span class="pill tone-warn layout-mismatch" title=${lines.join('\n')}
+        >layout mismatch</span
+      ><span class="visually-hidden">: ${lines.join('; ')}</span>`;
+  }
+
   private renderRow(b: HealthSummaryBroker): TemplateResult {
     const storage = storageCell(b);
     const health = healthCell(b);
@@ -453,6 +477,7 @@ export class ScionHealthBrokerTable extends LitElement {
           ${storage.tone === 'plain'
             ? storage.text
             : html`<span class="pill tone-${storage.tone}">${storage.text}</span>`}
+          ${this.renderLayoutMismatch(b)}
         </td>
         <td class="agents num" title=${ifDefined(agents?.title)}>
           ${agents

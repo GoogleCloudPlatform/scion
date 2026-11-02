@@ -228,7 +228,7 @@ func TestCreateAgentProjectHubEndpointWhenDisabled(t *testing.T) {
 // hub-managed project (ProjectSlug set, no ProjectPath) correctly resolves the project
 // path and uses project settings hub.endpoint from the .scion subdirectory.
 func TestCreateAgentHubManagedProjectSettingsEndpoint(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.HubEndpoint = "http://localhost:9810" // broker's default (combo mode)
@@ -387,7 +387,7 @@ func TestResolveProjectSettingsDir(t *testing.T) {
 // overrides the dispatcher-provided endpoint for container injection.
 func TestCreateAgentContainerHubEndpointOverride(t *testing.T) {
 	t.Run("container endpoint overrides request endpoint", func(t *testing.T) {
-		cfg := DefaultServerConfig()
+		cfg := testServerConfig()
 		cfg.BrokerID = "test-broker-id"
 		cfg.BrokerName = "test-host"
 		cfg.Debug = true
@@ -426,7 +426,7 @@ func TestCreateAgentContainerHubEndpointOverride(t *testing.T) {
 	})
 
 	t.Run("container endpoint overrides localhost even with project settings", func(t *testing.T) {
-		cfg := DefaultServerConfig()
+		cfg := testServerConfig()
 		cfg.BrokerID = "test-broker-id"
 		cfg.BrokerName = "test-host"
 		cfg.Debug = true
@@ -497,7 +497,7 @@ hub:
 	})
 
 	t.Run("non-localhost endpoint is not overridden by container endpoint", func(t *testing.T) {
-		cfg := DefaultServerConfig()
+		cfg := testServerConfig()
 		cfg.BrokerID = "test-broker-id"
 		cfg.BrokerName = "test-host"
 		cfg.ContainerHubEndpoint = "http://host.containers.internal:8080"
@@ -528,7 +528,7 @@ hub:
 	})
 
 	t.Run("kubernetes runtime skips container endpoint override", func(t *testing.T) {
-		cfg := DefaultServerConfig()
+		cfg := testServerConfig()
 		cfg.BrokerID = "test-broker-id"
 		cfg.BrokerName = "test-host"
 		cfg.ContainerHubEndpoint = "http://host.containers.internal:8080"
@@ -611,7 +611,7 @@ runtimes:
 		if err := os.WriteFile(filepath.Join(dotScion, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
 			t.Fatal(err)
 		}
-		cfg := DefaultServerConfig()
+		cfg := testServerConfig()
 		cfg.BrokerID = "test-broker-id"
 		cfg.BrokerName = "test-host"
 		cfg.ForceRuntime = "kubernetes"
@@ -675,7 +675,7 @@ runtimes:
 // different hub in multi-hub setups).
 func TestCreateAgentConnectionHubEndpoint(t *testing.T) {
 	t.Run("connection endpoint used when request endpoint empty", func(t *testing.T) {
-		cfg := DefaultServerConfig()
+		cfg := testServerConfig()
 		cfg.BrokerID = "test-broker-id"
 		cfg.BrokerName = "test-host"
 		cfg.HubEndpoint = "http://localhost:8080" // broker's own local hub
@@ -716,7 +716,7 @@ func TestCreateAgentConnectionHubEndpoint(t *testing.T) {
 	})
 
 	t.Run("request endpoint takes priority over connection endpoint", func(t *testing.T) {
-		cfg := DefaultServerConfig()
+		cfg := testServerConfig()
 		cfg.BrokerID = "test-broker-id"
 		cfg.BrokerName = "test-host"
 		cfg.ForceRuntime = "mock"

@@ -174,6 +174,13 @@ func (a *AuthzService) checkDelegationCeiling(
 		return a.checkHubDeliveryCeiling(ctx, req, h, permissionID, agentID, explain, cause)
 	}
 
+	// An agent's use of a user-scope secret takes the user-scope secret
+	// parent ceiling instead of the generic walk below. Whether it applies
+	// is decided only by userSecretParentProofApplies.
+	if userSecretParentProofApplies(req, permissionID) {
+		return a.checkUserSecretParentCeiling(ctx, req, agentID, explain, cause, note...)
+	}
+
 	// scopeType is fixed to RoleScopeProject: delegation edges are
 	// project-scoped.
 	scopeType := store.RoleScopeProject
@@ -209,6 +216,49 @@ func (a *AuthzService) checkDelegationCeiling(
 	return a.walkDelegationChainCore(ctx, req.Resource, req.Action, permissionID, agentID, attested, descendantRead, scopeType, scopeID, explain, cause, note...)
 }
 
+// checkUserSecretParentCeiling is checkDelegationCeiling's arm for an
+// agent's use of a user-scope secret (userSecretParentProofApplies): it
+// evaluates EvaluateUserSecretParentCeiling for the request's principal and
+// resource. The principal must be a non-nil AgentIdentity whose ID is
+// agentID. A ceiling_error decision is returned as an error, so Decide
+// denies with ceiling_error; any other deny sets cause and, for
+// ceiling_unrecorded, note.
+func (a *AuthzService) checkUserSecretParentCeiling(
+	ctx context.Context,
+	req AuthzRequest,
+	agentID string,
+	explain *[]DecisionStep,
+	cause *DenyCause,
+	note ...*unrecordedHopNote,
+) (bool, string, error) {
+	setCause := func(c DenyCause) {
+		if cause != nil {
+			*cause = c
+		}
+	}
+	principal, ok := req.Principal.Identity.(AgentIdentity)
+	if !ok || isNilIdentity(principal) || principal.ID() == "" || principal.ID() != agentID {
+		secretParentStep(explain, "error", "the principal is not the agent under evaluation")
+		setCause(DenyCauseCeilingError)
+		return false, "user secret parent ceiling: invalid principal", errUserSecretParentCeiling
+	}
+	d, hop := a.evaluateUserSecretParentCeiling(ctx, principal, req.Resource, explain)
+	if d.Allowed {
+		if d.uatIntrinsic {
+			a.recordUATIntrinsic(ctx, secretUsePermission, uatIntrinsicPathStep10)
+		}
+		return true, "user secret parent ceiling passed", nil
+	}
+	setCause(d.DenyCause)
+	if d.DenyCause == DenyCauseCeilingError {
+		return false, "user secret parent ceiling: " + d.Reason, fmt.Errorf("%w: %s", errUserSecretParentCeiling, d.Reason)
+	}
+	if len(note) > 0 && note[0] != nil && d.DenyCause == DenyCauseCeilingUnrecorded {
+		*note[0] = hop
+	}
+	return false, "user secret parent ceiling: " + d.Reason, nil
+}
+
 // descendantReadReasonMarker is appended to the reason of a delegation
 // ceiling that passed only because a bounded hop admitted the status read
 // of a descendant, and from there to the allowed decision's Reason
@@ -225,7 +275,7 @@ func descendantReadPassesHop(edge *store.DelegationEdge, permissionID string, de
 	if !descendantRead || permissionID != permissionAgentRead || edge == nil || edge.Kind != store.EffectCeilingBounded {
 		return false
 	}
-	frozen, ok := edge.Frozen()
+	frozen, ok := uatHopEffectCeiling(edge.DelegatorType, edge.DelegatorID, edge.AuthorityProvenance, edge.EffectCeiling).Frozen()
 	if !ok {
 		return false
 	}
@@ -602,8 +652,9 @@ func adoptionCeilingCovers(permissionID string) bool {
 //     missing or inactive delegator);
 //   - a hop whose provenance version is not understood denies every
 //     permission in recordedProvenanceRequired;
-//   - a bounded hop denies a permission its ceiling does not allow, with the
-//     self-operation exception only when the resource is the acting agent;
+//   - a bounded hop denies a permission its ceiling (uatHopEffectCeiling)
+//     does not allow, with the self-operation exception only when the
+//     resource is the acting agent;
 //   - an unrecorded hop denies every permission in
 //     recordedProvenanceRequired or legacyChainExcludedPermissions and
 //     passes the rest;
@@ -644,7 +695,7 @@ func hopEffectCeilingDenyFor(edge *store.DelegationEdge, permissionID string, re
 			return "", ""
 		}
 		selfTarget := resource.Type == "agent" && resource.ID != "" && resource.ID == actingAgentID
-		if !EffectCeilingAllows(edge.EffectCeiling, permissionID, selfTarget) {
+		if !EffectCeilingAllows(uatHopEffectCeiling(edge.DelegatorType, edge.DelegatorID, edge.AuthorityProvenance, edge.EffectCeiling), permissionID, selfTarget) {
 			return DenyCauseCeilingEffectExceeded, fmt.Sprintf("delegation ceiling: %s is outside the frozen effect ceiling", permissionID)
 		}
 		return "", ""

@@ -72,7 +72,7 @@ func newSharedRootFixture(t *testing.T, seed bool) *sharedRootFixture {
 
 func newSharedLayoutServer(t *testing.T, layout projectfs.Layout) (*Server, *provisionCapturingManager) {
 	t.Helper()
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.ForceRuntime = "mock"
@@ -193,7 +193,14 @@ func TestCreateAgent_SharedLayoutRefusals(t *testing.T) {
 		wantStatus int
 		wantText   string
 	}{
-		{"no configuration", func(t *testing.T, f *sharedRootFixture) {}, sharedRootProjectID, http.StatusConflict, sharedProjectConfigText},
+		{"no configuration", func(t *testing.T, f *sharedRootFixture) {
+			// The subpath root is there (the share is mounted), the project's tree is not.
+			if err := os.MkdirAll(filepath.Join(f.layout.HostBase, "projects"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}, sharedRootProjectID, http.StatusConflict, sharedProjectConfigText},
+		{"mount point without the subpath root", func(t *testing.T, f *sharedRootFixture) {}, sharedRootProjectID, http.StatusServiceUnavailable,
+			runtime.ProjectShareUnavailableText(runtime.ProjectShareMountPathField, false)},
 		{"project-id of another project", func(t *testing.T, f *sharedRootFixture) {
 			writeSharedSeed(t, f.scionDir, "11111111-2222-3333-4444-555555555555", "web")
 		}, sharedRootProjectID, http.StatusConflict, sharedProjectConfigText},
@@ -214,7 +221,8 @@ func TestCreateAgent_SharedLayoutRefusals(t *testing.T) {
 			if err := os.RemoveAll(f.layout.HostBase); err != nil {
 				t.Fatal(err)
 			}
-		}, sharedRootProjectID, http.StatusServiceUnavailable, "project storage share is not mounted on this broker"},
+		}, sharedRootProjectID, http.StatusServiceUnavailable,
+			runtime.ProjectShareUnavailableText(runtime.ProjectShareMountPathField, false)},
 		{"no project ID", func(t *testing.T, f *sharedRootFixture) {
 			writeSharedSeed(t, f.scionDir, sharedRootProjectID, "web")
 		}, "", http.StatusConflict, sharedProjectNoIDText},
@@ -229,6 +237,11 @@ func TestCreateAgent_SharedLayoutRefusals(t *testing.T) {
 			}
 			if f.mgr.provisionCalled {
 				t.Error("Provision must not run after a refusal")
+			}
+			// A refusal body names configuration fields, never the share's
+			// mount point or the project root.
+			if body := w.Body.String(); strings.Contains(body, f.layout.HostBase) {
+				t.Errorf("refusal body names the share path %s: %s", f.layout.HostBase, body)
 			}
 			if tc.name == "no configuration" {
 				if _, err := os.Lstat(f.scionDir); !os.IsNotExist(err) {
@@ -433,8 +446,15 @@ func TestCheckNFSForDispatch_WarnOnlyRefusedOnSharedLayout(t *testing.T) {
 			projectPath := writeSettings(t, t.TempDir(), "schema_version: \"1\"\n")
 			err := srv.checkNFSForDispatch(context.Background(), "agent-1", filepath.Join(projectPath, ".scion"), "", "")
 			if shared {
-				if err == nil || !strings.Contains(err.Error(), "project storage share is not mounted on this broker (/mnt/nfs/ws1;") {
-					t.Fatalf("checkNFSForDispatch = %v, want the not-mounted refusal", err)
+				// A Kubernetes dispatch: the broker never mounts the share,
+				// so the advice is to make it available in the broker's
+				// container. The text goes into the response body: no path.
+				want := runtime.ProjectShareUnavailableText(runtime.ProjectShareMountPathField, true)
+				if err == nil || err.Error() != want {
+					t.Fatalf("checkNFSForDispatch = %v, want %q", err, want)
+				}
+				if strings.Contains(err.Error(), "/mnt/nfs") {
+					t.Fatalf("checkNFSForDispatch refusal names the share path: %v", err)
 				}
 				return
 			}
@@ -619,8 +639,9 @@ func TestCreateAgent_SharedPlainBackstopInput(t *testing.T) {
 	if in.Mode != store.SharingModeSharedPlain || in.ProjectID != sharedRootProjectID || in.GitClone == nil || in.GitClone.URL != "https://github.example/org/repo.git" {
 		t.Errorf("input: %+v", in)
 	}
-	if in.CloneToken != "tok-123" || in.CloneTokenRemote != in.GitClone.URL || !in.HostGitHardened || in.RequireChownSuccess {
-		t.Errorf("token/hardening: token %q remote %q hardened %v requireChown %v", in.CloneToken, in.CloneTokenRemote, in.HostGitHardened, in.RequireChownSuccess)
+	// createSharedGitAgent sends no token remote, so the clone gets no token.
+	if in.CloneToken != "" || in.CloneTokenRemote != "" || in.CloneWithToken || !in.HostGitHardened || in.RequireChownSuccess {
+		t.Errorf("token/hardening: token set %v remote %q withToken %v hardened %v requireChown %v", in.CloneToken != "", in.CloneTokenRemote, in.CloneWithToken, in.HostGitHardened, in.RequireChownSuccess)
 	}
 	if v, ok := f.mgr.lastOpts.Env["SCION_GIT_CLONE_URL"]; ok {
 		t.Errorf("the in-container clone must not be requested (SCION_GIT_CLONE_URL=%q)", v)
@@ -878,5 +899,142 @@ func TestFindAgentInSharedProject_NoProbe(t *testing.T) {
 	}
 	if _, _, err := f.srv.findAgentInSharedProject(context.Background(), "a1", sharedRootProjectID, false); !errors.Is(err, errDeleteTargetUnknown) {
 		t.Fatalf("missing share: %v, want a refusal", err)
+	}
+}
+
+// createSharedPlainAgentForURL creates an agent of the shared-layout
+// fixture's git project in shared-plain mode on a local container runtime,
+// with a git token in its resolved env and cloneURL as its clone URL.
+func createSharedPlainAgentForURL(t *testing.T, f *sharedRootFixture, cloneURL string) *httptest.ResponseRecorder {
+	t.Helper()
+	return createSharedPlainAgentWith(t, f, cloneURL, "")
+}
+
+// createSharedPlainAgentWith is createSharedPlainAgentForURL with the token
+// remote the hub sends ("" sends none).
+func createSharedPlainAgentWith(t *testing.T, f *sharedRootFixture, cloneURL, tokenRemote string) *httptest.ResponseRecorder {
+	t.Helper()
+	return createSharedPlainAgentWithToken(t, f, cloneURL, tokenRemote, "tok-123")
+}
+
+// createSharedPlainAgentWithToken is createSharedPlainAgentWith with the
+// agent's resolved GITHUB_TOKEN ("" resolves none).
+func createSharedPlainAgentWithToken(t *testing.T, f *sharedRootFixture, cloneURL, tokenRemote, agentToken string) *httptest.ResponseRecorder {
+	t.Helper()
+	resolvedEnv := map[string]string{}
+	if agentToken != "" {
+		resolvedEnv["GITHUB_TOKEN"] = agentToken
+	}
+	envJSON, err := json.Marshal(resolvedEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitClone := map[string]string{"url": cloneURL, "branch": "main"}
+	if tokenRemote != "" {
+		gitClone["tokenRemote"] = tokenRemote
+	}
+	cfg, err := json.Marshal(map[string]any{
+		"template": "claude", "sharedWorkspace": true,
+		"gitClone": gitClone,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf(`{
+		"name": "a1", "id": "agent-uuid-a1", "slug": "a1",
+		"projectId": %q, "projectSlug": "web",
+		"resolvedEnv": %s,
+		"config": %s
+	}`, sharedRootProjectID, envJSON, cfg)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(w, req)
+	return w
+}
+
+// The shared-plain backstop clone gets no git token, whatever host or
+// transport the clone URL names: the agent's token is not passed to the
+// provisioner, no token remote is set, and the token is not otherwise
+// requested.
+func TestCreateAgent_SharedPlainBackstopClonesWithoutGitToken(t *testing.T) {
+	for _, cloneURL := range []string{
+		"https://github.example/org/repo.git",
+		"https://other.example/org/repo.git",
+		"https://github.example/org/other.git",
+		"ssh://git@github.example/org/repo.git",
+	} {
+		t.Run(cloneURL, func(t *testing.T) {
+			f := newSharedRootFixture(t, true)
+			var got []provision.ProvisionInput
+			old := provisionSharedFn
+			provisionSharedFn = func(in provision.ProvisionInput) error { got = append(got, in); return nil }
+			t.Cleanup(func() { provisionSharedFn = old })
+
+			if w := createSharedPlainAgentForURL(t, f, cloneURL); w.Code >= 300 {
+				t.Fatalf("create = %d: %s", w.Code, w.Body.String())
+			}
+			if len(got) != 1 {
+				t.Fatalf("ProvisionShared calls = %d, want 1", len(got))
+			}
+			in := got[0]
+			if in.GitClone == nil || in.GitClone.URL != cloneURL {
+				t.Fatalf("fixture check: the provisioner did not get the clone URL %q: %+v", cloneURL, in.GitClone)
+			}
+			if in.CloneToken != "" {
+				t.Error("the backstop clone was given a git token")
+			}
+			if in.CloneTokenRemote != "" {
+				t.Errorf("CloneTokenRemote = %q, want none", in.CloneTokenRemote)
+			}
+			if in.CloneWithToken {
+				t.Error("the backstop clone asked for the environment's git token")
+			}
+		})
+	}
+}
+
+// With the project's recorded remote sent by the hub (gc.TokenRemote), the
+// shared-plain backstop clone gets the agent's git token only when the clone
+// URL names that remote; any other host or repository, or no recorded
+// remote, gets none. The binding passed on is the recorded remote, and only
+// with an offered token: with no token offered no CloneTokenRemote is set,
+// so the provisioner's clone runs with no host credential (runGitClone keeps
+// the host's own git authentication for a clone of its CloneTokenRemote).
+func TestCreateAgent_SharedPlainBackstopTokenBoundToRecordedRemote(t *testing.T) {
+	const cloneURL = "https://github.example/org/repo.git"
+	for _, tc := range []struct {
+		name, tokenRemote, agentToken, wantToken, wantRemote string
+	}{
+		{"recorded remote names the clone URL", "github.example/org/repo", "tok-123", "tok-123", "github.example/org/repo"},
+		{"recorded remote names the clone URL, no agent token", "github.example/org/repo", "", "", ""},
+		{"recorded remote on another host", "recorded.example/org/repo", "tok-123", "", ""},
+		{"recorded remote names another repository", "github.example/org/other", "tok-123", "", ""},
+		{"no recorded remote", "", "tok-123", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSharedRootFixture(t, true)
+			var got []provision.ProvisionInput
+			old := provisionSharedFn
+			provisionSharedFn = func(in provision.ProvisionInput) error { got = append(got, in); return nil }
+			t.Cleanup(func() { provisionSharedFn = old })
+
+			if w := createSharedPlainAgentWithToken(t, f, cloneURL, tc.tokenRemote, tc.agentToken); w.Code >= 300 {
+				t.Fatalf("create = %d: %s", w.Code, w.Body.String())
+			}
+			if len(got) != 1 {
+				t.Fatalf("ProvisionShared calls = %d, want 1", len(got))
+			}
+			in := got[0]
+			if in.CloneToken != tc.wantToken {
+				t.Errorf("CloneToken set %v, want %v", in.CloneToken != "", tc.wantToken != "")
+			}
+			if in.CloneTokenRemote != tc.wantRemote {
+				t.Errorf("CloneTokenRemote = %q, want %q (the recorded remote, only with an offered token; never the clone URL)", in.CloneTokenRemote, tc.wantRemote)
+			}
+			if in.CloneWithToken {
+				t.Error("the backstop clone asked for the environment's git token")
+			}
+		})
 	}
 }

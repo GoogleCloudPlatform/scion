@@ -423,13 +423,67 @@ readonly EMPTY_SHA256="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7
 # nothing in it is expanded either locally or on the VM. ARGS must be
 # shell-safe words (deploy.sh only passes validated values).
 install_layout_command() {
+  layout_script_write
+  layout_script_run "$@"
+  layout_script_remove
+}
+
+# layout_script_write / layout_script_run ARGS... / layout_script_remove --
+# the three parts of install_layout_command, for a VM command that runs
+# scion-layout.sh more than once: write it once, run it as often as needed,
+# remove it. A command must carry the script only once: an ssh --command
+# is a single argv word, which Linux caps at 128 KiB (MAX_ARG_STRLEN), and
+# scion-layout.sh alone is over a quarter of that.
+layout_script_write() {
   printf '%s\n' \
     "    SCION_LAYOUT_SH=\"\$(mktemp)\"" \
     "    cat > \"\$SCION_LAYOUT_SH\" << 'SCIONLAYOUTEOF'" \
     "$(cat "${SCRIPT_DIR}/scion-layout.sh")" \
-    "SCIONLAYOUTEOF" \
-    "    sudo bash \"\$SCION_LAYOUT_SH\" $* || { rm -f \"\$SCION_LAYOUT_SH\"; exit 1; }" \
+    "SCIONLAYOUTEOF"
+}
+layout_script_run() {
+  printf '%s\n' \
+    "    sudo bash \"\$SCION_LAYOUT_SH\" $* || { rm -f \"\$SCION_LAYOUT_SH\"; exit 1; }"
+}
+layout_script_remove() {
+  printf '%s\n' \
     "    rm -f \"\$SCION_LAYOUT_SH\""
+}
+
+# install_guard_command -- prints remote shell text (to follow
+# layout_script_write in the same command) that installs the start-attempts
+# counter (scion-hub-start-attempt.sh, run by the hub unit's ExecStartPre=-,
+# next to the guard) and the
+# boot-failure guard: scion-hub-rollback.sh (this directory) root-owned
+# 0755 at /usr/local/libexec/scion/scion-hub-rollback.sh (design D1 as
+# amended: outside the hub-owned ${INSTALL_ROOT}, so the hub user can
+# neither edit nor replace a script root runs), through scion-layout.sh
+# install-guard, which creates /usr/local/libexec/scion root-owned 0755 and
+# checks its directory chain; and the root oneshot scion-hub-rollback.service that
+# scion-hub.service's OnFailure= starts. Idempotent. Shared by the deploy
+# and migrate-layout paths so both install the same guard; the caller
+# writes scion-hub.service afterwards and runs daemon-reload. The guard
+# and layout temp files are removed on any exit (an EXIT trap, cleared
+# once the guard file is gone), including when install-guard fails.
+install_guard_command() {
+  printf '%s\n' \
+    "    SCION_ROLLBACK_SH=\"\$(mktemp)\"" \
+    "    SCION_START_ATTEMPT_SH=\"\$(mktemp)\"" \
+    "    trap 'rm -f \"\$SCION_ROLLBACK_SH\" \"\$SCION_START_ATTEMPT_SH\" \"\${SCION_LAYOUT_SH:-}\"' EXIT" \
+    "    cat > \"\$SCION_ROLLBACK_SH\" << 'SCIONROLLBACKEOF'" \
+    "$(cat "${SCRIPT_DIR}/scion-hub-rollback.sh")" \
+    "SCIONROLLBACKEOF" \
+    "    cat > \"\$SCION_START_ATTEMPT_SH\" << 'SCIONSTARTATTEMPTEOF'" \
+    "$(cat "${SCRIPT_DIR}/scion-hub-start-attempt.sh")" \
+    "SCIONSTARTATTEMPTEOF"
+  # shellcheck disable=SC2016 # expanded on the VM, not here
+  layout_script_run install-guard '"$SCION_ROLLBACK_SH"' '"$SCION_START_ATTEMPT_SH"'
+  printf '%s\n' \
+    "    rm -f \"\$SCION_ROLLBACK_SH\" \"\$SCION_START_ATTEMPT_SH\"" \
+    "    trap - EXIT" \
+    "    sudo tee /etc/systemd/system/scion-hub-rollback.service > /dev/null << 'SERVICEEOF'" \
+    "$(cat "${SCRIPT_DIR}/config-templates/scion-hub-rollback.service")" \
+    "SERVICEEOF"
 }
 
 # read_current_release ZONE -- prints the release tag ${INSTALL_ROOT}/current
@@ -495,6 +549,116 @@ proxy_sa_name() {
   printf '%s' "$name"
 }
 
+# Project roles granted to the hub VM's service account (Phase 2). The
+# create path grants HUB_SA_BASE_ROLES, plus HUB_SA_MINTING_ROLE when
+# hub_sa_minting is true. Teardown removes all of them, whatever
+# hub_sa_minting says now, since an earlier deploy may have granted the
+# minting role. Both paths read these lists, so they cannot drift apart.
+# The proxy SA and the deployer get no project roles here that teardown
+# owns (see Phase 2 and the IAP tunnel note in the teardown flow).
+HUB_SA_BASE_ROLES=(roles/logging.logWriter roles/monitoring.metricWriter roles/cloudtrace.agent roles/artifactregistry.writer roles/aiplatform.user)
+HUB_SA_MINTING_ROLE="roles/iam.serviceAccountAdmin"
+
+# _project_binding_absent TEXT -- true when TEXT (gcloud's stderr from
+# projects remove-iam-policy-binding) says the member/role binding is not
+# in the policy. Real gcloud exits 1 in that case rather than no-op, with
+# one of the IamPolicyBindingNotFound messages: "Policy binding with the
+# specified principal, role, and condition not found!" (what
+# --condition=None gets), "... principal and role not found!", or the
+# plural "Policy bindings with the specified principal and role not
+# found!". Older SDKs say "member" where newer ones say "principal".
+_project_binding_absent() {
+  if printf '%s\n' "$1" | grep -qiE 'permission|forbidden'; then
+    return 1
+  fi
+  printf '%s\n' "$1" | grep -qiE 'Policy bindings? with the specified (principal|member).* not found'
+}
+
+# remove_hub_sa_project_bindings PROJECT_ID SA_EMAIL ROLE...
+#
+# Removes the project IAM bindings of SA_EMAIL for exactly the given
+# roles, one remove-iam-policy-binding call per role and member, always
+# with --condition=None, never set-iam-policy. Members removed are the
+# live "serviceAccount:SA_EMAIL" and any "deleted:serviceAccount:SA_EMAIL
+# ?uid=..." tombstones GCP left from an earlier SA delete. No other
+# member and no other role is touched. Conditional bindings are skipped:
+# deploy.sh never creates one, and --condition=None cannot remove one.
+# Each role and member gets at most one call.
+#
+# The policy is read once to find what is bound. If that read fails, it
+# falls back to one blind removal of the live member per role, where an
+# absent binding is not an error; tombstones then stay and are reported.
+#
+# Sets HUB_SA_BINDINGS_REMOVED (count) and HUB_SA_BINDINGS_FAILED (count).
+# Never exits: a binding that could not be removed is warned about, and
+# a later --delete removes its tombstone.
+remove_hub_sa_project_bindings() {
+  local project="$1" sa_email="$2"
+  shift 2
+  local live_member="serviceAccount:${sa_email}"
+  local tombstone_prefix="deleted:serviceAccount:${sa_email}?uid="
+  local -a targets=()
+  local role member cond_title cond_expr policy_rows policy_err_file err_text wanted r t
+  HUB_SA_BINDINGS_REMOVED=0
+  HUB_SA_BINDINGS_FAILED=0
+
+  policy_err_file="$(mktemp)"
+  if policy_rows="$(gcloud projects get-iam-policy "${project}" \
+      --flatten="bindings[].members" \
+      --format="value(bindings.role,bindings.members,bindings.condition.title,bindings.condition.expression)" 2>"${policy_err_file}")"; then
+    # Tab is IFS whitespace, so empty condition fields collapse: an
+    # unconditional row leaves cond_title and cond_expr both empty, and any
+    # condition at all leaves at least one of them set. --flatten makes
+    # each row a single member, so member is compared whole.
+    while IFS=$'\t' read -r role member cond_title cond_expr; do
+      [[ -z "$role" || -z "$member" ]] && continue
+      [[ -n "$cond_title" || -n "$cond_expr" ]] && continue
+      wanted=false
+      for r in "$@"; do
+        [[ "$r" == "$role" ]] && wanted=true
+      done
+      [[ "$wanted" == "true" ]] || continue
+      if [[ "$member" == "$live_member" || "$member" == "$tombstone_prefix"* ]]; then
+        wanted=true
+        for t in ${targets[@]+"${targets[@]}"}; do
+          [[ "$t" == "${role}"$'\t'"${member}" ]] && wanted=false
+        done
+        [[ "$wanted" == "true" ]] && targets+=("${role}"$'\t'"${member}")
+      fi
+    done <<< "$policy_rows"
+    if [[ ${#targets[@]} -eq 0 ]]; then
+      echo "  No project role bindings left for ${sa_email}."
+    fi
+  else
+    warn "Could not read the IAM policy of project ${project}; removing ${sa_email}'s role bindings without it. Tombstones (deleted:serviceAccount:...) of an earlier SA delete are not checked:"
+    print_gcloud_error "$(cat "${policy_err_file}")"
+    for role in "$@"; do
+      targets+=("${role}"$'\t'"${live_member}")
+    done
+  fi
+  rm -f "${policy_err_file}"
+
+  local target
+  for target in ${targets[@]+"${targets[@]}"}; do
+    role="${target%%$'\t'*}"
+    member="${target#*$'\t'}"
+    if err_text="$(gcloud projects remove-iam-policy-binding "${project}" \
+        --member="${member}" \
+        --role="${role}" \
+        --condition=None \
+        --quiet 2>&1 >/dev/null)"; then
+      echo "  Removed: ${role} from ${member}"
+      HUB_SA_BINDINGS_REMOVED=$((HUB_SA_BINDINGS_REMOVED + 1))
+    elif _project_binding_absent "$err_text"; then
+      echo "  Not bound: ${role} for ${member}"
+    else
+      warn "Could not remove ${role} from ${member}:"
+      print_gcloud_error "$err_text"
+      HUB_SA_BINDINGS_FAILED=$((HUB_SA_BINDINGS_FAILED + 1))
+    fi
+  done
+}
+
 # Validate config file exists if specified
 if [[ -n "$CONFIG_FILE" ]]; then
   if [[ ! -f "$CONFIG_FILE" ]]; then
@@ -525,19 +689,50 @@ source "${SCRIPT_DIR}/hybrid-tier.sh"
 # shellcheck source=scripts/single-node-vm/release-order.sh
 source "${SCRIPT_DIR}/release-order.sh"
 
-# One EXIT trap, registered once, removes these three temp files on every
-# exit path, including SIGINT and SIGTERM: SSH_STDERR_FILE,
-# HYBRID_KUBECONFIG and ALLUSERS_STDERR_FILE. Other temp files are not
-# covered by this trap. The three start empty, and
-# `rm -f ""` is a harmless no-op, so setting the trap here before any
-# file exists is safe. `trap`
-# replaces rather than stacks, so a second, later `trap ... EXIT` call
-# would silently drop this one -- there must only ever be this single
-# registration.
+# Local temp files (ptone/scion#6612). Every temp file this script and
+# hybrid-tier.sh create on the operator's machine -- the 0600 hub.env copy
+# holding the session secret (HUB_ENV_TMPFILE), the per-phase *_ERR
+# files, the kubeconfig -- is a plain `mktemp`, so all of them land in
+# TMPDIR. TMPDIR is pointed at DEPLOY_TMPDIR, a private (0700) directory
+# made once here, and deploy_cleanup removes that whole directory. So
+# each file is covered from the moment it exists, with no per-file
+# registration and no window between a mktemp and its trap entry (the
+# only window left is this one mktemp -d, which can at worst leave an
+# empty directory). Child processes (gcloud, kubectl, python3) inherit
+# TMPDIR, so their temp files go the same way.
+#
+# deploy_cleanup runs on EXIT and on INT, TERM and HUP. A signal handler
+# cleans up, then re-raises the signal with the default action, so an
+# interrupted run still ends with the signal's status (130 for INT, 143
+# for TERM). `trap` replaces rather than stacks: these must stay the only
+# EXIT/INT/TERM/HUP registrations in this script. SSH_STDERR_FILE,
+# HYBRID_KUBECONFIG and ALLUSERS_STDERR_FILE are also removed by name;
+# they start empty, and `rm -f ""` is a no-op.
 SSH_STDERR_FILE=""
 HYBRID_KUBECONFIG=""
 ALLUSERS_STDERR_FILE=""
-trap 'rm -f "$SSH_STDERR_FILE" "$HYBRID_KUBECONFIG" "$ALLUSERS_STDERR_FILE"' EXIT
+DEPLOY_TMPDIR=""
+deploy_cleanup() {
+  rm -f "$SSH_STDERR_FILE" "$HYBRID_KUBECONFIG" "$ALLUSERS_STDERR_FILE"
+  case "$DEPLOY_TMPDIR" in
+    */scion-deploy.*) rm -rf "$DEPLOY_TMPDIR" ;;
+  esac
+}
+# deploy_on_signal SIGNAL STATUS -- clean up, then die of SIGNAL; should the
+# re-raised signal somehow not end the script, exit with STATUS
+# (128 + signal number) instead of carrying on.
+deploy_on_signal() {
+  deploy_cleanup
+  trap - EXIT INT TERM HUP
+  kill -s "$1" "$$"
+  exit "$2"
+}
+trap deploy_cleanup EXIT
+trap 'deploy_on_signal INT 130' INT
+trap 'deploy_on_signal TERM 143' TERM
+trap 'deploy_on_signal HUP 129' HUP
+DEPLOY_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/scion-deploy.XXXXXX")"
+export TMPDIR="$DEPLOY_TMPDIR"
 
 # ---------------------------------------------------------------------------
 # Teardown flow (--delete)
@@ -605,6 +800,9 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   # this can never drift from what create actually named the SA.
   PROXY_SA_NAME="$(proxy_sa_name "$HUB_NAME")"
   PROXY_SA_EMAIL="${PROXY_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+  # Every role the create path may have granted SA_EMAIL, minting role
+  # included whatever hub_sa_minting says now.
+  HUB_SA_TEARDOWN_ROLES=("${HUB_SA_BASE_ROLES[@]}" "${HUB_SA_MINTING_ROLE}")
 
   echo ""
   echo "Checking hybrid-tier firewall rule ownership:"
@@ -700,6 +898,7 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   echo "  Cloud NAT:         ${NAT_NAME} (router: ${ROUTER_NAME})"
   echo "  Cloud Router:      ${ROUTER_NAME} (region: ${REGION})"
   echo "  Service account:   ${SA_EMAIL}"
+  echo "  Project roles:     ${HUB_SA_TEARDOWN_ROLES[*]} (bindings for ${SA_EMAIL}, and its deleted:serviceAccount tombstones, only)"
   echo "  Proxy SA:          ${PROXY_SA_EMAIL}"
   echo "  Service account:   $(hybrid_transport_sa_name "${HUB_NAME}")@${PROJECT_ID}.iam.gserviceaccount.com (hybrid tier agent transport; if present and marked)"
   echo "  Firewall rule:     ${FW_RULE_NAME}"
@@ -733,6 +932,9 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   ROUTER_NOT_FOUND=false
   SA_DELETED=false
   SA_NOT_FOUND=false
+  HUB_SA_BINDINGS_ATTEMPTED=false
+  HUB_SA_BINDINGS_REMOVED=0
+  HUB_SA_BINDINGS_FAILED=0
   PROXY_SA_DELETED=false
   PROXY_SA_NOT_FOUND=false
   FW_RULE_DELETED=false
@@ -868,6 +1070,13 @@ if [[ "$DELETE_MODE" == "true" ]]; then
       warn "Cloud Router ${ROUTER_NAME} could not be deleted: $(cat "${ROUTER_DELETE_ERR}")"
     fi
     rm -f "${ROUTER_DELETE_ERR}"
+
+    # Before the SA delete: once the SA is gone, GCP keeps its bindings as
+    # deleted:serviceAccount:...?uid= tombstones. Those of an earlier
+    # delete are removed here too.
+    info "Removing the service account's project role bindings..."
+    HUB_SA_BINDINGS_ATTEMPTED=true
+    remove_hub_sa_project_bindings "${PROJECT_ID}" "${SA_EMAIL}" "${HUB_SA_TEARDOWN_ROLES[@]}"
 
     info "Deleting service account..."
     SA_DELETE_ERR="$(mktemp)"
@@ -1029,6 +1238,12 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   else
     echo "  Kept service account:       ${SA_EMAIL}"
   fi
+  if [[ "$HUB_SA_BINDINGS_ATTEMPTED" == "true" ]]; then
+    echo "  Removed project bindings:   ${HUB_SA_BINDINGS_REMOVED} for ${SA_EMAIL}"
+    if [[ "$HUB_SA_BINDINGS_FAILED" -gt 0 ]]; then
+      echo "  Kept project bindings:      ${HUB_SA_BINDINGS_FAILED} for ${SA_EMAIL} (removal failed; re-run teardown)"
+    fi
+  fi
   if [[ "$PROXY_SA_DELETED" == "true" ]]; then
     echo "  Deleted proxy SA:           ${PROXY_SA_EMAIL}"
   elif [[ "${PROXY_SA_NOT_FOUND:-false}" == "true" ]]; then
@@ -1169,8 +1384,11 @@ if [[ "$MIGRATE_LAYOUT_MODE" == "true" ]]; then
     --zone="${ZONE}" --project="${PROJECT_ID}" \
     --command="
     set -euo pipefail
-$(install_layout_command adopt)
-$(install_layout_command set-maintenance /home/scion/.scion/settings.yaml "${MIGRATE_UPDATE_POLICY}")
+$(layout_script_write)
+$(layout_script_run adopt)
+$(layout_script_run set-maintenance /home/scion/.scion/settings.yaml "${MIGRATE_UPDATE_POLICY}")
+$(install_guard_command)
+$(layout_script_remove)
     sudo tee /etc/systemd/system/scion-hub.service > /dev/null << 'SERVICEEOF'
 $(cat "${SCRIPT_DIR}/config-templates/scion-hub.service")
 SERVICEEOF
@@ -2087,9 +2305,9 @@ fi
 # read and set IAM policy on it, and delete it if a follow-up grant fails.
 # serviceAccountCreator alone is not enough for that flow. Skipped when
 # hub_sa_minting is false.
-HUB_SA_ROLES=(roles/logging.logWriter roles/monitoring.metricWriter roles/cloudtrace.agent roles/artifactregistry.writer roles/aiplatform.user)
+HUB_SA_ROLES=("${HUB_SA_BASE_ROLES[@]}")
 if [[ "$HUB_SA_MINTING" == "true" ]]; then
-  HUB_SA_ROLES+=(roles/iam.serviceAccountAdmin)
+  HUB_SA_ROLES+=("${HUB_SA_MINTING_ROLE}")
 fi
 info "Binding IAM roles..."
 for ROLE in "${HUB_SA_ROLES[@]}"; do
@@ -2909,6 +3127,10 @@ info "Installing systemd service..."
 gcloud compute ssh "${INSTANCE_NAME}" \
   --zone="${ZONE}" --project="${PROJECT_ID}" \
   --command="
+    set -euo pipefail
+$(layout_script_write)
+$(install_guard_command)
+$(layout_script_remove)
     sudo tee /etc/systemd/system/scion-hub.service > /dev/null << 'SERVICEEOF'
 $(cat "${SCRIPT_DIR}/config-templates/scion-hub.service")
 SERVICEEOF
