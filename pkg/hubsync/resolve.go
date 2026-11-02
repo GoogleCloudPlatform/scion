@@ -16,6 +16,7 @@ package hubsync
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -108,6 +109,10 @@ func resolveHubProjectRef(ref string, opts EnsureHubReadyOptions) (*HubContext, 
 	// Resolve the project on the hub
 	project, err := resolveProjectOnHub(ctx, client, ref)
 	if err != nil {
+		var notFound *ProjectNotFoundError
+		if errors.As(err, &notFound) && UsesUserAccessToken(credentialKind) {
+			return nil, ScopedTokenProjectLookupEmptyError(ref)
+		}
 		return nil, err
 	}
 
