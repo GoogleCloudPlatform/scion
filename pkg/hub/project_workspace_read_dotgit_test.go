@@ -146,8 +146,9 @@ func TestProjectWorkspaceArchive_OmitsDotGit(t *testing.T) {
 }
 
 // TestProjectWorkspaceRead_SymlinkIntoDotGitRefused: a download through a
-// planted symlink into .git, as the target or as a directory on the way, is
-// refused with the .git refusal, and a regular file is still served.
+// planted symlink into .git is refused: as the target with the neutral
+// refusal (any symlink target is), as a directory on the way with the .git
+// refusal. A regular file is still served.
 func TestProjectWorkspaceRead_SymlinkIntoDotGitRefused(t *testing.T) {
 	srv, _ := testServer(t)
 	project, workspacePath := createTestHubManagedProject(t, srv, "WS Read Symlink DotGit")
@@ -156,21 +157,39 @@ func TestProjectWorkspaceRead_SymlinkIntoDotGitRefused(t *testing.T) {
 	require.NoError(t, os.Symlink(".git", filepath.Join(workspacePath, "g")))
 	filesURL := fmt.Sprintf("/api/v1/projects/%s/workspace/files", project.ID)
 
-	for name, p := range map[string]string{
-		"final_link":      "cfg",
-		"final_link_json": "cfg?format=json",
-		"dir_link":        "g/config",
-		"dir_link_json":   "g/config?format=json",
+	const neutral = "path is not accessible"
+	const dotGit = ".git component"
+	for name, tc := range map[string]struct{ path, want string }{
+		"final_link":      {"cfg", neutral},
+		"final_link_json": {"cfg?format=json", neutral},
+		"dir_link":        {"g/config", dotGit},
+		"dir_link_json":   {"g/config?format=json", dotGit},
 	} {
 		t.Run(name, func(t *testing.T) {
-			rec := doRequest(t, srv, http.MethodGet, filesURL+"/"+p, nil)
+			rec := doRequest(t, srv, http.MethodGet, filesURL+"/"+tc.path, nil)
 			assert.Equal(t, http.StatusBadRequest, rec.Code, "download through a link into .git, body: %s", rec.Body.String())
 			assert.NotContains(t, rec.Body.String(), dotGitReadSecret, "the .git/config secret was served")
-			assert.Contains(t, rec.Body.String(), ".git component", "not the .git refusal")
+			assert.Contains(t, rec.Body.String(), tc.want, "not the expected refusal")
 		})
 	}
 
 	rec := doRequest(t, srv, http.MethodGet, filesURL+"/docs/notes.txt", nil)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 	assert.Equal(t, "notes", rec.Body.String())
+}
+
+// TestProjectWorkspaceRead_InTreeLinkNeutralRefusal: a download of an ordinary
+// in-tree symlinked file is refused with the neutral text, which neither
+// claims a .git component nor echoes the path.
+func TestProjectWorkspaceRead_InTreeLinkNeutralRefusal(t *testing.T) {
+	srv, _ := testServer(t)
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS Read InTree Link")
+	plantDotGitReadTree(t, workspacePath)
+	require.NoError(t, os.Symlink("docs/notes.txt", filepath.Join(workspacePath, "notes-link")))
+
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/workspace/files/notes-link", project.ID), nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "in-tree link, body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "path is not accessible")
+	assert.NotContains(t, rec.Body.String(), ".git")
+	assert.NotContains(t, rec.Body.String(), "notes-link", "the refusal echoes the path")
 }

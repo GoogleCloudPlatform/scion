@@ -50,10 +50,11 @@ func assertGitConfigUnchanged(t *testing.T, cfg string) {
 // upload that reaches .git through a symlink stored in the workspace.
 func TestProjectWorkspaceWrite_SymlinkIntoDotGitRefused(t *testing.T) {
 	cases := []struct {
-		name  string
-		links map[string]string // link path (relative) -> target
-		path  string            // request path
-		gone  string            // workspace-relative path that must not exist afterwards
+		name   string
+		links  map[string]string // link path (relative) -> target
+		path   string            // request path
+		gone   string            // workspace-relative path that must not exist afterwards
+		reason string            // expected refusal reason in the body, "" = not checked
 	}{
 		{
 			name:  "dir_link_to_dotgit",
@@ -79,15 +80,17 @@ func TestProjectWorkspaceWrite_SymlinkIntoDotGitRefused(t *testing.T) {
 			gone:  ".git/hooks/post-checkout",
 		},
 		{
-			name:  "final_file_link_to_config",
-			links: map[string]string{"cfg": ".git/config"},
-			path:  "cfg",
+			name:   "final_file_link_to_config",
+			links:  map[string]string{"cfg": ".git/config"},
+			path:   "cfg",
+			reason: "target is not a regular file",
 		},
 		{
-			name:  "final_dangling_link_into_dotgit",
-			links: map[string]string{"newhook": ".git/hooks/pre-push"},
-			path:  "newhook",
-			gone:  ".git/hooks/pre-push",
+			name:   "final_dangling_link_into_dotgit",
+			links:  map[string]string{"newhook": ".git/hooks/pre-push"},
+			path:   "newhook",
+			gone:   ".git/hooks/pre-push",
+			reason: "target is not a regular file",
 		},
 	}
 	for _, tc := range cases {
@@ -116,6 +119,9 @@ func TestProjectWorkspaceWrite_SymlinkIntoDotGitRefused(t *testing.T) {
 				}
 				assert.Equal(t, http.StatusBadRequest, code, "body: %s", body)
 				assertGitConfigUnchanged(t, cfg)
+				if tc.reason != "" {
+					assert.Contains(t, body, tc.reason, "refused for another reason than the symlink target")
+				}
 				if tc.gone != "" {
 					assertNoEntry(t, workspacePath, tc.gone)
 				}
@@ -276,19 +282,70 @@ func TestProjectWorkspaceDelete_TrailingSlash(t *testing.T) {
 		name string
 		path string
 		want int
+		text string // expected in the body; never a .git claim
 		keep string
 	}{
-		{name: "empty_dir", path: "d/", want: http.StatusBadRequest, keep: "d"},
-		{name: "file", path: "f/", want: http.StatusBadRequest, keep: "f"},
+		{name: "empty_dir", path: "d/", want: http.StatusBadRequest, text: "File not accessible", keep: "d"},
+		{name: "file", path: "f/", want: http.StatusBadRequest, text: "path is not accessible", keep: "f"},
 		{name: "missing", path: "x/", want: http.StatusNotFound},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := doRequest(t, srv, http.MethodDelete, filesURL+"/"+tc.path, nil)
 			assert.Equal(t, tc.want, rec.Code, "body: %s", rec.Body.String())
+			if tc.text != "" {
+				assert.Contains(t, rec.Body.String(), tc.text)
+			}
+			assert.NotContains(t, rec.Body.String(), ".git")
 			if tc.keep != "" {
 				_, err := os.Lstat(filepath.Join(workspacePath, tc.keep))
 				assert.NoError(t, err, "%s was removed", tc.keep)
 			}
+		})
+	}
+}
+
+// TestProjectWorkspaceWrite_LinkIntoNestedDotGitRefused covers a nested
+// repository's .git directory reached through a symlink: only the name check
+// of the walk catches it (it is not the workspace root's .git).
+func TestProjectWorkspaceWrite_LinkIntoNestedDotGitRefused(t *testing.T) {
+	srv, _ := testServer(t)
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS Write Nested DotGit")
+	plantGitWorkspace(t, workspacePath)
+	require.NoError(t, os.MkdirAll(filepath.Join(workspacePath, "sub", ".git", "hooks"), 0o755))
+	require.NoError(t, os.Symlink("sub/.git", filepath.Join(workspacePath, "l")))
+	filesURL := fmt.Sprintf("/api/v1/projects/%s/workspace/files", project.ID)
+
+	rec := doRequest(t, srv, http.MethodPut, filesURL+"/l/hooks/pre-commit",
+		ProjectWorkspaceWriteRequest{Content: "planted"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "write through a link into a nested .git, body: %s", rec.Body.String())
+	rec = doMultipartRequest(t, srv, http.MethodPost, filesURL,
+		map[string][]byte{"l/hooks/post-checkout": []byte("planted")})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "upload through a link into a nested .git, body: %s", rec.Body.String())
+	assertNoEntry(t, workspacePath, "sub/.git/hooks/pre-commit")
+	assertNoEntry(t, workspacePath, "sub/.git/hooks/post-checkout")
+}
+
+// TestOpenWorkspaceTarget_DanglingLinkCreatesNothing drives the open with a
+// dangling link already in place, as if it had been swapped in after the
+// Lstat: whether Lstat had found the name absent (O_EXCL) or present (no
+// O_CREATE), the open fails and nothing is created at the link's target.
+func TestOpenWorkspaceTarget_DanglingLinkCreatesNothing(t *testing.T) {
+	for name, exists := range map[string]bool{"lstat_absent": false, "lstat_present": true} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			require.NoError(t, os.MkdirAll(filepath.Join(dir, ".git"), 0o755))
+			require.NoError(t, os.Symlink(".git/index.lock", filepath.Join(dir, "swapped")))
+			root, err := os.OpenRoot(dir)
+			require.NoError(t, err)
+			defer func() { _ = root.Close() }()
+
+			f, err := openWorkspaceTarget(root, "swapped", exists)
+			if f != nil {
+				_ = f.Close()
+			}
+			assert.Error(t, err, "the open through a swapped-in dangling link succeeded")
+			_, statErr := os.Lstat(filepath.Join(dir, ".git", "index.lock"))
+			assert.True(t, os.IsNotExist(statErr), "the open created the link target (err %v)", statErr)
 		})
 	}
 }

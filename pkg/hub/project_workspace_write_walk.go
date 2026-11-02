@@ -35,6 +35,11 @@ const maxWorkspaceSymlinkHops = 40
 // way, a symlink as the target) rather than an I/O failure.
 var errWorkspaceWriteRefused = errors.New("refused")
 
+// errWorkspaceThroughDotGit is the refusal of a path that reaches a .git
+// directory (by name or as the workspace root's .git entry). It wraps
+// errWorkspaceWriteRefused; it is the only refusal answered with the .git text.
+var errWorkspaceThroughDotGit = fmt.Errorf("%w: path resolves through a .git directory", errWorkspaceWriteRefused)
+
 // workspaceWriteParent is the open parent directory of a workspace write
 // target, reached one component at a time from the workspace root.
 type workspaceWriteParent struct {
@@ -144,7 +149,7 @@ func (p *workspaceWriteParent) step(name string, create bool) error {
 	if create && util.IsDotGitComponent(name) {
 		// Request components are refused lexically before the walk; this
 		// keeps the walk from ever creating a .git directory.
-		return fmt.Errorf("%w: path resolves through a .git directory", errWorkspaceWriteRefused)
+		return errWorkspaceThroughDotGit
 	}
 	cur := p.Dir()
 	info, err := cur.Lstat(name)
@@ -179,7 +184,9 @@ func (p *workspaceWriteParent) step(name string, create bool) error {
 	if !info.IsDir() {
 		return fmt.Errorf("%w: %s is not a directory", errWorkspaceWriteRefused, name)
 	}
-	next, err := cur.OpenRoot(name)
+	// The trailing slash makes the open fail on a non-directory (a FIFO swapped
+	// in after the Lstat) instead of blocking on it.
+	next, err := cur.OpenRoot(name + "/")
 	if err != nil {
 		return err
 	}
@@ -196,7 +203,7 @@ func (p *workspaceWriteParent) step(name string, create bool) error {
 	}
 	if p.isDotGit(name, opened) {
 		_ = next.Close()
-		return fmt.Errorf("%w: path resolves through a .git directory", errWorkspaceWriteRefused)
+		return errWorkspaceThroughDotGit
 	}
 	p.stack = append(p.stack, next)
 	return nil
@@ -224,7 +231,9 @@ func writeWorkspaceFile(root *os.Root, relPath string, src io.Reader) (int64, fs
 	defer parent.Close()
 	dir := parent.Dir()
 
-	if info, err := dir.Lstat(base); err == nil && notRegular(info) {
+	before, err := dir.Lstat(base)
+	exists := err == nil
+	if exists && notRegular(before) {
 		return 0, nil, fmt.Errorf("%w: target is not a regular file", errWorkspaceWriteRefused)
 	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return 0, nil, err
@@ -233,7 +242,7 @@ func writeWorkspaceFile(root *os.Root, relPath string, src io.Reader) (int64, fs
 	// Open without truncating, then confirm the opened file is still the
 	// regular entry named base before changing it, so an entry swapped for a
 	// symlink after the Lstat above is left untouched.
-	f, err := dir.OpenFile(base, os.O_WRONLY|os.O_CREATE, 0644)
+	f, err := openWorkspaceTarget(dir, base, exists)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -264,6 +273,23 @@ func writeWorkspaceFile(root *os.Root, relPath string, src io.Reader) (int64, fs
 		return written, nil, err
 	}
 	return written, info, nil
+}
+
+// openWorkspaceTarget opens base in dir for writing, without truncating. An
+// entry Lstat found absent is created with O_EXCL, which never follows a
+// symlink, so an entry that appeared in between (a symlink included) is
+// refused rather than followed or created through; an entry found present is
+// opened without O_CREATE, so a dangling link swapped in creates nothing.
+func openWorkspaceTarget(dir *os.Root, base string, exists bool) (*os.File, error) {
+	flag := os.O_WRONLY
+	if !exists {
+		flag |= os.O_CREATE | os.O_EXCL
+	}
+	f, err := dir.OpenFile(base, flag, 0644)
+	if errors.Is(err, fs.ErrExist) {
+		return nil, fmt.Errorf("%w: target appeared while opening it", errWorkspaceWriteRefused)
+	}
+	return f, err
 }
 
 // notRegular reports whether info is anything but a regular file: the files

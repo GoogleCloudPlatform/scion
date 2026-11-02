@@ -793,7 +793,7 @@ func (s *Server) handleProjectWorkspaceDownload(w http.ResponseWriter, r *http.R
 	}
 
 	// Open the parent one directory at a time (as for writes, creating
-	// nothing) and refuse a symlink as the target, with the .git refusal.
+	// nothing) and refuse a symlink as the target (see writeWorkspaceWalkError).
 	parent, base, linfo, err := openWorkspaceReadTarget(root, filePath)
 	if err != nil {
 		writeWorkspaceWalkError(w, "download", filePath, err)
@@ -1668,12 +1668,16 @@ func validateWorkspaceWritePath(path string) error {
 }
 
 // writeWorkspaceWalkError answers a failed download or delete walk: the .git
-// refusal (400) for a policy refusal, 404 for a missing entry, and
-// notAccessible otherwise.
+// refusal (400) when the path reaches a .git directory, a neutral 400 that
+// does not echo the path for every other refusal (a symlink target, a
+// non-directory on the way, an entry that changed), 404 for a missing entry,
+// and notAccessible otherwise.
 func writeWorkspaceWalkError(w http.ResponseWriter, kind, relPath string, err error) {
 	switch {
-	case errors.Is(err, errWorkspaceWriteRefused):
+	case errors.Is(err, errWorkspaceThroughDotGit):
 		BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", relPath, errDotGitComponent.Error()))
+	case errors.Is(err, errWorkspaceWriteRefused):
+		BadRequest(w, "Invalid file path: path is not accessible")
 	case errors.Is(err, fs.ErrNotExist):
 		NotFound(w, "File")
 	default:
@@ -1681,8 +1685,8 @@ func writeWorkspaceWalkError(w http.ResponseWriter, kind, relPath string, err er
 	}
 }
 
-// errDotGitComponent is the refusal of a path with a .git component; a
-// download through a symlink gets the same answer.
+// errDotGitComponent is the refusal of a path with a .git component, also
+// given to a download or delete whose walk reaches a .git directory.
 var errDotGitComponent = errors.New("paths with a .git component are not allowed")
 
 // validateWorkspaceReadPath is validateWorkspaceWritePath for downloads.
