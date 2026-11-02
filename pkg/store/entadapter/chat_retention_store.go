@@ -330,6 +330,32 @@ func (s *ChatRetentionStore) webchatTimeArg(t time.Time) any {
 	return t.UTC().Format(time.RFC3339Nano)
 }
 
+// deletedOrderCol is the id term of the deleted-candidate queries. Their
+// filter is served by a partial deleted_at index; on SQLite, which keeps
+// no planner statistics by default, "ORDER BY id LIMIT" could instead make
+// the planner walk the primary key and filter every row (a whole-table
+// scan). The unary + (a no-op on the value) keeps the id terms from using
+// an index, so only the partial index can serve the query and the few
+// deleted rows are sorted. TestChatRetentionStore_DeletedCandidatePlans
+// pins the plan.
+func (s *ChatRetentionStore) deletedOrderCol() string {
+	if s.pg {
+		return "id"
+	}
+	return "+id"
+}
+
+// deletedCandidatesQuery is the deleted-candidate page query of table:
+// cols of the rows soft-deleted before the first bind value, after the ID
+// of the second when withAfter, in ID order, limited by the last bind.
+func (s *ChatRetentionStore) deletedCandidatesQuery(cols, table string, withAfter bool) string {
+	query := `SELECT ` + cols + ` FROM ` + table + ` WHERE deleted_at IS NOT NULL AND deleted_at < ?`
+	if withAfter {
+		query += ` AND ` + s.deletedOrderCol() + ` > ?`
+	}
+	return s.rebind(query + ` ORDER BY ` + s.deletedOrderCol() + ` LIMIT ?`)
+}
+
 // ListChatRetentionDeletedConversations implements store.ChatRetentionStore.
 func (s *ChatRetentionStore) ListChatRetentionDeletedConversations(ctx context.Context, cutoff time.Time, after string, limit int) ([]string, error) {
 	if err := s.requireDB(); err != nil {
@@ -338,15 +364,12 @@ func (s *ChatRetentionStore) ListChatRetentionDeletedConversations(ctx context.C
 	if limit <= 0 {
 		return nil, nil
 	}
-	query := `SELECT id FROM conversations WHERE deleted_at IS NOT NULL AND deleted_at < ?`
 	args := []any{cutoff.UTC()}
 	if after != "" {
-		query += ` AND id > ?`
 		args = append(args, after)
 	}
-	query += ` ORDER BY id LIMIT ?`
 	args = append(args, limit)
-	rows, err := s.db.QueryContext(ctx, s.rebind(query), args...)
+	rows, err := s.db.QueryContext(ctx, s.deletedCandidatesQuery("id", "conversations", after != ""), args...)
 	if err != nil {
 		return nil, fmt.Errorf("chat retention: list deleted conversations: %w", err)
 	}
@@ -373,15 +396,12 @@ func (s *ChatRetentionStore) ListChatRetentionDeletedTopics(ctx context.Context,
 	if limit <= 0 {
 		return nil, nil
 	}
-	query := `SELECT id, conversation_id FROM webchat_topic WHERE deleted_at IS NOT NULL AND deleted_at < ?`
 	args := []any{s.webchatTimeArg(cutoff)}
 	if after != "" {
-		query += ` AND id > ?`
 		args = append(args, after)
 	}
-	query += ` ORDER BY id LIMIT ?`
 	args = append(args, limit)
-	rows, err := s.db.QueryContext(ctx, s.rebind(query), args...)
+	rows, err := s.db.QueryContext(ctx, s.deletedCandidatesQuery("id, conversation_id", "webchat_topic", after != ""), args...)
 	if err != nil {
 		return nil, fmt.Errorf("chat retention: list deleted topics: %w", err)
 	}

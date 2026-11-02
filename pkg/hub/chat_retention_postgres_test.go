@@ -138,9 +138,9 @@ func TestChatRetention_Postgres_CascadeAndReplicaRace(t *testing.T) {
 // TestChatRetention_Postgres_DeletedConversationsAndAttachments runs the
 // deleted-conversation phase and the attachment byte delete on Postgres
 // against the real tables (TIMESTAMPTZ topic times, uuid conversation
-// IDs): with no window, the messages of a conversation and of a legacy
-// topic deleted more than the grace ago are purged with their dependent
-// rows; an attachment left unlinked loses its bytes and then its row, and
+// IDs): with no window, the messages of a conversation, of a legacy topic
+// and of a linked topic (by conversation and by thread_id) deleted more
+// than the grace ago are purged with their dependent rows; an attachment left unlinked loses its bytes and then its row, and
 // one whose byte delete fails keeps its row. It also checks that an unread
 // mention after a purged read watermark still counts (design §8.5).
 func TestChatRetention_Postgres_DeletedConversationsAndAttachments(t *testing.T) {
@@ -192,6 +192,12 @@ func TestChatRetention_Postgres_DeletedConversationsAndAttachments(t *testing.T)
 	legacyTopic := api.NewUUID()
 	exec(`INSERT INTO webchat_topic (id, project_id, name, is_general, created_by, created_at, deleted_at) VALUES ($1, $2, 'legacy', FALSE, 'u1', $3, $4)`,
 		legacyTopic, project, now.Add(-400*day), now.Add(-31*day))
+	// A linked topic: its conversation_id (TEXT) is bound against the uuid
+	// messages.conversation_id, and its pre-stamp rows match by thread_id.
+	linkedConv := api.NewUUID()
+	linkedTopic := api.NewUUID()
+	exec(`INSERT INTO webchat_topic (id, project_id, name, is_general, conversation_id, created_by, created_at, deleted_at) VALUES ($1, $2, 'linked', FALSE, $3, 'u1', $4, $5)`,
+		linkedTopic, project, linkedConv, now.Add(-400*day), now.Add(-45*day))
 	recentDeleted := now.Add(-5 * day)
 	graceConv := &store.Conversation{ID: api.NewUUID(), ProjectID: &pid, Kind: "group", Surface: "native",
 		DriftState: "active", LastActivityAt: recentDeleted, CreatedAt: recentDeleted.Add(-time.Hour), DeletedAt: &recentDeleted}
@@ -201,11 +207,14 @@ func TestChatRetention_Postgres_DeletedConversationsAndAttachments(t *testing.T)
 	g1 := seed(recent, store.MessageDispatchDispatched, goneConv.ID, "")
 	g2 := seed(recent, store.MessageDispatchFailed, goneConv.ID, "")
 	l1 := seed(recent, store.MessageDispatchDispatched, "", legacyTopic)
-	purge := []string{g1, g2, l1}
+	k1 := seed(recent, store.MessageDispatchDispatched, linkedConv, linkedTopic)
+	k2 := seed(recent, store.MessageDispatchDispatched, "", linkedTopic) // pre-stamp row
+	purge := []string{g1, g2, l1, k1, k2}
 	keep := []string{
 		seed(recent, store.MessageDispatchPending, goneConv.ID, ""),
 		seed(recent, store.MessageDispatchDispatched, graceConv.ID, ""),
-		seed(now.Add(-400*day), store.MessageDispatchDispatched, "", ""), // no window: kept
+		seed(now.Add(-400*day), store.MessageDispatchDispatched, "", ""),          // no window: kept
+		seed(recent, store.MessageDispatchDispatched, api.NewUUID(), linkedTopic), // re-keyed elsewhere: kept
 	}
 	attOK := attach(g1)
 	attFail := attach(l1)

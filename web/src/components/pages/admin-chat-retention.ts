@@ -208,15 +208,25 @@ export function retentionSaveErrors(body: unknown, fallback: string): string[] {
 
 /**
  * The warning shown while the sweep is enabled: what it deletes, with the
- * window (null when none is set) and the deleted-conversation grace (null
- * while the field is not a whole number).
+ * window (null when none is set, 'invalid' while the field holds a value
+ * that is not a valid window, which then goes unmentioned: the save shows
+ * the validation error) and the deleted-conversation grace (null while the
+ * field is not a valid grace).
  */
-export function retentionWarning(days: number | null, graceDays: number | null): string {
-  const parts = [
-    days !== null
-      ? `While enabled, messages older than ${days} days are permanently deleted from this hub.`
-      : 'No retention window is set: only the messages of deleted conversations and topics are purged.',
-  ];
+export function retentionWarning(
+  days: number | null | 'invalid',
+  graceDays: number | null
+): string {
+  const parts: string[] = [];
+  if (days === null) {
+    parts.push(
+      'No retention window is set: only the messages of deleted conversations and topics are purged.'
+    );
+  } else if (days !== 'invalid') {
+    parts.push(
+      `While enabled, messages older than ${days} days are permanently deleted from this hub.`
+    );
+  }
   if (graceDays !== null) {
     const unit = graceDays === 1 ? 'day' : 'days';
     parts.push(
@@ -493,8 +503,16 @@ export class ScionAdminChatRetention extends LitElement {
     }
     const form = this.form;
     const days = parseWholeNumber(form.days);
-    const deleting = form.enabled && form.days.trim() !== '' && days !== null;
-    const graceDays = parseWholeNumber(form.graceDays);
+    const windowSet = form.days.trim() !== '';
+    const windowValid = days !== null && days >= RETENTION_MIN_DAYS && days <= RETENTION_MAX_DAYS;
+    const grace = parseWholeNumber(form.graceDays);
+    const graceDays =
+      grace !== null && grace >= RETENTION_MIN_GRACE_DAYS && grace <= RETENTION_MAX_DAYS
+        ? grace
+        : null;
+    const warning = form.enabled
+      ? retentionWarning(!windowSet ? null : windowValid ? days : 'invalid', graceDays)
+      : '';
     const cutoff = this.settings.last_applied_cutoff;
     return html`
       <div class="form-grid">
@@ -582,10 +600,8 @@ export class ScionAdminChatRetention extends LitElement {
           )}
         </div>
       </details>
-      ${form.enabled
-        ? html`<div class="status-message warning delete-warning">
-            ${retentionWarning(deleting ? days : null, graceDays)}
-          </div>`
+      ${warning
+        ? html`<div class="status-message warning delete-warning">${warning}</div>`
         : nothing}
       ${this.saveErrors.length > 0
         ? html`<div class="status-message error save-errors" role="alert">

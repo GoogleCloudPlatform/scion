@@ -182,6 +182,18 @@ describe('retentionWarning', () => {
   });
 });
 
+describe('retentionWarning with an invalid window', () => {
+  it('leaves the window out and keeps the grace', () => {
+    expect(retentionWarning('invalid', 30)).toBe(
+      'Messages of conversations and topics deleted more than 30 days ago are permanently deleted.'
+    );
+  });
+
+  it('says nothing when neither field is valid', () => {
+    expect(retentionWarning('invalid', null)).toBe('');
+  });
+});
+
 describe('retentionSaveErrors', () => {
   it('lists the per-field errors of a validation_failed body', () => {
     expect(
@@ -299,6 +311,20 @@ describe('scion-admin-chat-retention', () => {
         'No retention window is set: only the messages of deleted conversations and topics are purged.'
       );
       expect(q(el, '.delete-warning')?.textContent).toContain('deleted more than 14 days ago');
+    });
+
+    it('does not describe a window the field does not hold', async () => {
+      current = settings({ enabled: true, messages_retention_days: 30 });
+      const el = await mount();
+      for (const typed of ['abc', '3']) {
+        await type(el, '.retention-days', typed);
+        const text = q(el, '.delete-warning')?.textContent ?? '';
+        expect(text).not.toContain('No retention window is set');
+        expect(text).not.toContain('messages older than');
+        expect(text).toContain('deleted more than 30 days ago');
+      }
+      await type(el, '.retention-grace-days', 'x');
+      expect(q(el, '.delete-warning')).toBeNull();
     });
 
     it('saves a changed grace', async () => {

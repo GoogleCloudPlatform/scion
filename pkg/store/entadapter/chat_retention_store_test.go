@@ -19,7 +19,9 @@ package entadapter
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -425,6 +427,78 @@ func TestChatRetentionStore_DeletedConversationsAndTopics(t *testing.T) {
 	topics, err = f.st.ListChatRetentionDeletedTopics(f.ctx, cutoff, "t-a-linked", 100)
 	require.NoError(t, err)
 	require.Equal(t, []store.ChatRetentionDeletedTopic{{ID: "t-b-legacy"}}, topics)
+}
+
+// TestChatRetentionStore_DeletedCandidatePlans: the deleted-candidate
+// page queries, first page and resumed, are served by the partial
+// deleted_at indexes and never scan the table (design §6.4: no
+// whole-table work). SQLite's plan is asserted. Postgres plans by cost, so
+// a test-sized table says little about a real one: its plan is logged.
+func TestChatRetentionStore_DeletedCandidatePlans(t *testing.T) {
+	f := newChatRetentionFixture(t)
+	cutoff := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 20; i++ {
+		_ = f.conversation(time.Time{})
+		f.topic(fmt.Sprintf("live-%02d", i), "", time.Time{})
+	}
+	_ = f.conversation(cutoff.Add(-48 * time.Hour))
+	f.topic("gone", "", cutoff.Add(-48*time.Hour))
+
+	for _, tc := range []struct {
+		name, cols, table, index string
+		cutoffArg                any
+	}{
+		{"conversations", "id", "conversations", "conversation_deleted_at", cutoff.UTC()},
+		{"topics", "id, conversation_id", "webchat_topic", "idx_webchat_topic_deleted", f.webchatTime(cutoff)},
+	} {
+		for _, withAfter := range []bool{false, true} {
+			args := []any{tc.cutoffArg}
+			if withAfter {
+				args = append(args, "00000000-0000-0000-0000-000000000000")
+			}
+			args = append(args, 100)
+			query := f.st.deletedCandidatesQuery(tc.cols, tc.table, withAfter)
+			name := fmt.Sprintf("%s after=%t", tc.name, withAfter)
+			if f.pg() {
+				rows, err := f.db.QueryContext(f.ctx, "EXPLAIN "+query, args...)
+				require.NoError(t, err, name)
+				var plan []string
+				for rows.Next() {
+					var line string
+					require.NoError(t, rows.Scan(&line))
+					plan = append(plan, line)
+				}
+				require.NoError(t, rows.Close())
+				t.Logf("%s plan (Postgres):\n%s", name, strings.Join(plan, "\n"))
+				continue
+			}
+			rows, err := f.db.QueryContext(f.ctx, "EXPLAIN QUERY PLAN "+query, args...)
+			require.NoError(t, err, name)
+			var details []string
+			for rows.Next() {
+				var id, parent, notused int
+				var detail string
+				require.NoError(t, rows.Scan(&id, &parent, &notused, &detail))
+				details = append(details, detail)
+			}
+			require.NoError(t, rows.Close())
+			plan := strings.Join(details, " | ")
+			assert.Contains(t, plan, "INDEX "+tc.index, "%s: plan %q", name, plan)
+			for _, d := range details {
+				if strings.HasPrefix(d, "SCAN "+tc.table) {
+					assert.Contains(t, d, tc.index, "%s: a table scan %q", name, d)
+				}
+			}
+		}
+	}
+
+	// The queries still return the deleted rows in ID order.
+	ids, err := f.st.ListChatRetentionDeletedConversations(f.ctx, cutoff, "", 100)
+	require.NoError(t, err)
+	assert.Len(t, ids, 1)
+	topics, err := f.st.ListChatRetentionDeletedTopics(f.ctx, cutoff, "", 100)
+	require.NoError(t, err)
+	assert.Equal(t, []store.ChatRetentionDeletedTopic{{ID: "gone"}}, topics)
 }
 
 // TestChatRetentionStore_SelectConversationMessages: a deleted

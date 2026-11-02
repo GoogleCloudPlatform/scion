@@ -325,6 +325,9 @@ type chatRetentionTickResult struct {
 	// AttachmentDeleteFailures counts unlinked attachments whose bytes
 	// could not be deleted; their rows stay for the attachment GC.
 	AttachmentDeleteFailures int
+	// AttachmentRelinked counts attachments linked again between the link
+	// re-check and the byte delete: their bytes are gone, their rows kept.
+	AttachmentRelinked int
 	// LastAppliedCutoff is the cursor's last applied cutoff after the
 	// tick (it only moves forward); nil when none is set yet.
 	LastAppliedCutoff *time.Time
@@ -401,21 +404,24 @@ func (sw *chatRetentionSweeper) RunTick(ctx context.Context, p chatRetentionPoli
 	pacer := &chatRetentionPacer{sw: sw, pause: cfg.Pause()}
 	tickErr := sw.walkDeleted(ctx, p, run, &res, pacer, deletedEnd)
 
+	// A deleted-conversation failure does not hold back the main walk: it
+	// is recorded on the run, and the main walk still runs unless the
+	// tick's context is done.
 	var cursor store.ChatRetentionCursor
 	cursorDirty, mainRan := false, false
-	if tickErr == nil && hasWindow {
+	if ctx.Err() == nil && hasWindow {
 		// The pause owed by the last purge of the deleted-conversation
 		// phase comes before the main walk's first chunk.
 		ok, err := pacer.wait(ctx, budgetEnd)
 		switch {
 		case err != nil:
-			tickErr = err
+			tickErr = firstChatRetentionErr(tickErr, err)
 		case !ok:
 			res.BudgetExhausted = true
 		default:
 			cursor, err = sw.store.GetChatRetentionCursor(ctx, store.ChatRetentionPhaseMain)
 			if err != nil {
-				tickErr = err
+				tickErr = firstChatRetentionErr(tickErr, err)
 				break
 			}
 			mainRan = true
@@ -425,7 +431,7 @@ func (sw *chatRetentionSweeper) RunTick(ctx context.Context, p chatRetentionPoli
 				cursor.Position = store.ChatRetentionPosition{}
 				cursorDirty = true
 			}
-			tickErr = sw.walk(ctx, p, &cursor, run, &res, budgetEnd, &cursorDirty)
+			tickErr = firstChatRetentionErr(tickErr, sw.walk(ctx, p, &cursor, run, &res, budgetEnd, &cursorDirty))
 		}
 	} else if tickErr == nil && !res.DeletedDone {
 		res.BudgetExhausted = true
@@ -491,6 +497,14 @@ func (sw *chatRetentionSweeper) RunTick(ctx context.Context, p chatRetentionPoli
 		tickErr = err
 	}
 	return res, tickErr
+}
+
+// firstChatRetentionErr returns first unless it is nil, then next.
+func firstChatRetentionErr(first, next error) error {
+	if first != nil {
+		return first
+	}
+	return next
 }
 
 // chatRetentionTimeLeft returns the wall-clock time left before ctx's
@@ -634,14 +648,32 @@ func (pc *chatRetentionPacer) wait(ctx context.Context, end time.Time) (bool, er
 }
 
 // walkDeleted runs the deleted-conversation phase until every candidate is
-// done (res.DeletedDone), end passes, the context ends or a chunk fails.
+// visited, end passes, the context ends or a candidate list fails.
 // Candidates are the conversations deleted before the grace cutoff, then
 // the topics deleted before it, each read in ID pages. A topic whose
 // conversation was already a candidate is visited only for its legacy
-// thread_id messages.
+// thread_id messages. A candidate whose purge fails is logged and skipped,
+// so it cannot hold back the others; the first such error is returned and
+// res.DeletedDone stays false.
 func (sw *chatRetentionSweeper) walkDeleted(ctx context.Context, p chatRetentionPolicy, run *store.ChatRetentionRun, res *chatRetentionTickResult, pacer *chatRetentionPacer, end time.Time) error {
 	chunk := p.Config.ChunkSize
 	seen := map[string]bool{}
+	var candidateErr error
+	// visit drains one candidate. stop is true when the phase must end:
+	// out of time, or the context is done (err is then set).
+	visit := func(conversationID, threadID string) (stop bool, err error) {
+		done, err := sw.drainDeleted(ctx, conversationID, threadID, run, res, pacer, end, &chunk, p.Config.ChunkSize)
+		if err != nil {
+			if ctx.Err() != nil {
+				return true, err
+			}
+			slog.Warn("chat retention: deleted conversation purge failed; skipped this tick",
+				"conversation", conversationID, "topic", threadID, "error", err)
+			candidateErr = firstChatRetentionErr(candidateErr, err)
+			return false, nil
+		}
+		return !done, nil
+	}
 
 	after := ""
 	for {
@@ -655,9 +687,8 @@ func (sw *chatRetentionSweeper) walkDeleted(ctx context.Context, p chatRetention
 		}
 		for _, id := range ids {
 			seen[id] = true
-			done, err := sw.drainDeleted(ctx, id, "", run, res, pacer, end, &chunk, p.Config.ChunkSize)
-			if err != nil || !done {
-				return err
+			if stop, err := visit(id, ""); stop {
+				return firstChatRetentionErr(candidateErr, err)
 			}
 		}
 		if len(ids) < chatRetentionCandidatePage {
@@ -681,9 +712,8 @@ func (sw *chatRetentionSweeper) walkDeleted(ctx context.Context, p chatRetention
 			if seen[conv] {
 				conv = ""
 			}
-			done, err := sw.drainDeleted(ctx, conv, t.ID, run, res, pacer, end, &chunk, p.Config.ChunkSize)
-			if err != nil || !done {
-				return err
+			if stop, err := visit(conv, t.ID); stop {
+				return firstChatRetentionErr(candidateErr, err)
 			}
 		}
 		if len(topics) < chatRetentionCandidatePage {
@@ -691,8 +721,8 @@ func (sw *chatRetentionSweeper) walkDeleted(ctx context.Context, p chatRetention
 		}
 		after = topics[len(topics)-1].ID
 	}
-	res.DeletedDone = true
-	return nil
+	res.DeletedDone = candidateErr == nil
+	return candidateErr
 }
 
 // chatRetentionWithTimeout runs f under the chunk timeout.
@@ -766,9 +796,12 @@ func (sw *chatRetentionSweeper) drainDeleted(ctx context.Context, conversationID
 // with no message link, its bytes and then its metadata row (design
 // §6.3). The order matters: the attachment GC needs the row to judge the
 // bytes sweepable, so when the byte delete fails the row stays and the GC
-// retries. An attachment linked again since the purge is skipped. Without
-// a blob store every row is left for the attachment GC. Failures are
-// logged and never fail the tick.
+// retries. An attachment linked again before the link re-check is
+// skipped. One linked again between the re-check and the byte delete loses
+// its bytes while its row is kept (the row delete is conditional on no
+// link); that window is milliseconds, the legacy GC shares it, and it is
+// logged. Without a blob store every row is left for the attachment GC.
+// Failures are logged and never fail the tick.
 func (sw *chatRetentionSweeper) deleteAttachments(ctx context.Context, atts []store.ChatRetentionAttachment, run *store.ChatRetentionRun, res *chatRetentionTickResult) {
 	if sw.attachments == nil {
 		return
@@ -803,11 +836,15 @@ func (sw *chatRetentionSweeper) deleteAttachments(ctx context.Context, atts []st
 				slog.Warn("chat retention: attachment row not deleted after its bytes", "attachment", a.ID, "error", err)
 				return nil
 			}
-			if deleted {
-				addChatRetentionCounts(run, res, map[string]store.ChatRetentionCounts{
-					a.ProjectID: {AttachmentRows: 1, AttachmentBytes: a.Size},
-				})
+			if !deleted {
+				res.AttachmentRelinked++
+				slog.Warn("chat retention: attachment bytes deleted but the attachment was linked again; row kept",
+					"attachment", a.ID)
+				return nil
 			}
+			addChatRetentionCounts(run, res, map[string]store.ChatRetentionCounts{
+				a.ProjectID: {AttachmentRows: 1, AttachmentBytes: a.Size},
+			})
 			return nil
 		})
 	}

@@ -67,6 +67,22 @@ after the deletion, and attachment bytes are deleted directly.
   a string. Sub-second ordering can be wrong, which a grace measured in
   days does not notice.
 
+## Review round 1 fixes
+
+- A deleted-conversation failure no longer holds back the main walk. A
+  failing candidate is logged and skipped, so the others still go. The
+  main walk runs after any Phase B error unless the tick's context is
+  done, and the run keeps the first error.
+- The relink race after the byte delete is logged, with the attachment
+  ID, and counted in the tick result.
+- On SQLite the deleted-candidate queries use `+id` for their id terms, so
+  the planner cannot walk the primary key for `ORDER BY id LIMIT`. Only
+  the partial `deleted_at` index serves them. An `EXPLAIN QUERY PLAN` test
+  pins this; on Postgres the plan is logged.
+- The panel warning leaves out the window sentence while the window field
+  holds an invalid value, and shows no warning when the grace is invalid
+  too.
+
 ## Known gaps
 
 - Race, also present in the legacy GC: a message that links an attachment

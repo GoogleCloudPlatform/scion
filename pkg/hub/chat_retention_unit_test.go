@@ -83,8 +83,10 @@ type fakeChatRetentionStore struct {
 	attachments map[string]store.ChatRetentionAttachment
 	links       map[string]map[string]bool
 	// conversationSelects counts SelectChatRetentionConversationMessages
-	// calls.
-	conversationSelects int
+	// calls; conversationSelectFail makes it fail for those conversation
+	// or topic IDs.
+	conversationSelects    int
+	conversationSelectFail map[string]bool
 }
 
 // addConv adds a message of a conversation and/or thread.
@@ -151,6 +153,9 @@ func (f *fakeChatRetentionStore) ListChatRetentionDeletedTopics(ctx context.Cont
 
 func (f *fakeChatRetentionStore) SelectChatRetentionConversationMessages(ctx context.Context, conversationID, threadID string, limit int) ([]store.ChatRetentionCandidate, error) {
 	f.conversationSelects++
+	if f.conversationSelectFail[conversationID] || f.conversationSelectFail[threadID] {
+		return nil, errors.New("select timed out")
+	}
 	var out []store.ChatRetentionCandidate
 	for _, m := range f.msgs {
 		if len(out) == limit {
@@ -996,6 +1001,8 @@ func TestChatRetentionSweeper_DeletedPhaseSharesBudget(t *testing.T) {
 type fakeChatRetentionBlobs struct {
 	deleted []string
 	fail    map[string]bool
+	// onDelete, when set, runs after a successful delete.
+	onDelete func(id string)
 }
 
 func (b *fakeChatRetentionBlobs) Delete(ctx context.Context, projectID, id string) error {
@@ -1003,6 +1010,9 @@ func (b *fakeChatRetentionBlobs) Delete(ctx context.Context, projectID, id strin
 		return errors.New("object storage unavailable")
 	}
 	b.deleted = append(b.deleted, projectID+"/"+id)
+	if b.onDelete != nil {
+		b.onDelete(id)
+	}
 	return nil
 }
 
@@ -1074,4 +1084,73 @@ func TestChatRetentionSweeper_AttachmentRelinkedSkipped(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, blobs.deleted)
 	assert.Contains(t, h.st.attachments, att)
+}
+
+// TestChatRetentionSweeper_DeletedPhaseErrorDoesNotStopMainWalk: when the
+// deleted-conversation phase fails on every tick, the main walk still
+// purges; the run records the failure and the tick returns it.
+func TestChatRetentionSweeper_DeletedPhaseErrorDoesNotStopMainWalk(t *testing.T) {
+	h := newChatRetentionUnitHarness()
+	h.seedOld(50, "p1")
+	h.st.convDeleted = map[string]time.Time{"broken": h.clock.t.Add(-40 * 24 * time.Hour)}
+	h.st.addConv("broken-1", h.clock.t.Add(-time.Hour), "p2", "delivered", "broken", "")
+	h.st.conversationSelectFail = map[string]bool{"broken": true}
+
+	res, err := h.sw.RunTick(context.Background(), h.policy(chatRetentionTestConfig(nil)))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "select timed out")
+	assert.False(t, res.DeletedDone)
+	assert.True(t, res.ReachedCutoff, "the main walk ran to its cutoff")
+	assert.Equal(t, int64(50), res.Purged.Main)
+	assert.True(t, h.st.has("broken-1"), "the failing candidate's message is kept")
+	require.Len(t, h.st.runs, 1)
+	run := h.st.runs[0]
+	assert.Equal(t, store.ChatRetentionStatusFailed, run.Status)
+	assert.Contains(t, run.Error, "select timed out")
+	assert.Equal(t, int64(50), run.Counts["p1"].Main)
+	require.NotNil(t, res.LastAppliedCutoff, "the main cursor still records its cutoff")
+}
+
+// TestChatRetentionSweeper_DeletedPhaseSkipsFailingCandidate: a candidate
+// whose purge fails is skipped, and the candidates after it are still
+// purged in the same tick.
+func TestChatRetentionSweeper_DeletedPhaseSkipsFailingCandidate(t *testing.T) {
+	h := newChatRetentionUnitHarness()
+	old := h.clock.t.Add(-40 * 24 * time.Hour)
+	h.st.convDeleted = map[string]time.Time{"a-broken": old, "b-ok": old}
+	h.st.topics = []fakeChatRetentionTopic{{id: "topic-ok", deleted: old}}
+	h.st.addConv("broken-1", h.clock.t.Add(-time.Hour), "p1", "delivered", "a-broken", "")
+	h.st.addConv("ok-1", h.clock.t.Add(-time.Hour), "p1", "delivered", "b-ok", "")
+	h.st.addConv("topic-1", h.clock.t.Add(-time.Hour), "p1", "delivered", "", "topic-ok")
+	h.st.conversationSelectFail = map[string]bool{"a-broken": true}
+	cfg := chatRetentionTestConfig(func(c *opsettings.ChatRetentionConfig) { c.MessagesRetentionDays = 0 })
+
+	res, err := h.sw.RunTick(context.Background(), h.policy(cfg))
+	require.Error(t, err)
+	assert.False(t, res.DeletedDone)
+	assert.True(t, h.st.has("broken-1"))
+	assert.False(t, h.st.has("ok-1"), "a later conversation is purged")
+	assert.False(t, h.st.has("topic-1"), "a later topic is purged")
+	assert.Equal(t, int64(2), res.Purged.DeletedConv)
+	require.Len(t, h.st.runs, 1)
+	assert.Equal(t, store.ChatRetentionStatusFailed, h.st.runs[0].Status)
+}
+
+// TestChatRetentionSweeper_AttachmentRelinkedAfterByteDelete: an
+// attachment linked again between the link re-check and the byte delete
+// keeps its row; the tick counts it and does not count a deleted row.
+func TestChatRetentionSweeper_AttachmentRelinkedAfterByteDelete(t *testing.T) {
+	const att = "77777777-7777-4777-8777-777777777777"
+	h := newChatRetentionUnitHarness()
+	h.st.add("old-1", h.clock.t.Add(-100*24*time.Hour), "p1", "delivered")
+	h.st.attach(att, "", 5, "old-1")
+	blobs := &fakeChatRetentionBlobs{onDelete: func(id string) { h.st.links[id]["sent-now"] = true }}
+	h.sw.attachments = blobs
+
+	res, err := h.sw.RunTick(context.Background(), h.policy(chatRetentionTestConfig(nil)))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"/" + att}, blobs.deleted)
+	assert.Contains(t, h.st.attachments, att, "the row is kept for the new link")
+	assert.Equal(t, 1, res.AttachmentRelinked)
+	assert.Zero(t, res.Purged.AttachmentRows)
 }
