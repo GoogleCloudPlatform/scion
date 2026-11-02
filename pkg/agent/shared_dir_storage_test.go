@@ -1584,6 +1584,11 @@ func TestResolveSharedDirs_LocalBranch_InvalidNamesSkipped(t *testing.T) {
 	out := logs.String()
 	assert.Equal(t, len(invalid), strings.Count(out, skipInvalidSharedDirMsg), "one log line per skipped name")
 	assert.NotContains(t, out, root, "the log names the entry, never a host path")
+	// The index is the entry's position in the project's list ("-x" is the
+	// 9th entry, after 7 skipped ones), and the reason carries no
+	// kept-list index of its own.
+	assert.Contains(t, out, `index=8 name=-x reason="invalid name \"-x\"`)
+	assert.NotContains(t, out, "shared_dirs[")
 }
 
 // A repeated name is skipped after its first occurrence (logged), so it is
@@ -1599,6 +1604,7 @@ func TestResolveSharedDirs_LocalBranch_DuplicateNameKeptOnce(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, want, volumes)
 	assert.Equal(t, 1, strings.Count(logs.String(), skipInvalidSharedDirMsg))
+	assert.Contains(t, logs.String(), `index=1 name=data reason="duplicate name \"data\""`)
 }
 
 // When every name is invalid, nothing is created and no volume is returned.

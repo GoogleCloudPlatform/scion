@@ -111,12 +111,10 @@ func resolveSharedDirs(
 		// propagated — this preserves exact pre-existing behaviour (design
 		// AC1).
 		//
-		// Names that fail api.ValidateSharedDirs (a project's settings can
-		// come from a cloned repo's settings.yaml) are skipped with a log
-		// line and get no directory; the valid ones are still created and
-		// mounted. Without this, one bad name made EnsureSharedDirs refuse
-		// (or, before it validated, create a directory outside shared-dirs/)
-		// and SharedDirsToVolumeMounts drop every shared dir of the agent.
+		// Names that fail api.ValidateSharedDirs are skipped with a log line
+		// and get no directory; the valid ones are created and mounted. This
+		// filter is defensive, for direct callers: Start already passes a
+		// filtered list (run.go).
 		dirs = validLocalSharedDirs(dirs)
 		if len(dirs) == 0 {
 			return nil, nil, nil
@@ -460,19 +458,33 @@ func usesLocalSharedDirLayout(sdLayout projectfs.Layout, split bool, runtimeName
 
 // validLocalSharedDirs returns the entries of dirs that pass
 // api.ValidateSharedDirs, in order: a name that is not a slug, or that
-// repeats a kept name, is skipped with one warning naming the entry and
-// the reason (never a host path), so no directory is created for it.
+// repeats a kept name, is skipped with one warning naming the entry, its
+// position in dirs and the reason (never a host path), so no directory is
+// created for it.
 func validLocalSharedDirs(dirs []api.SharedDir) []api.SharedDir {
 	kept := make([]api.SharedDir, 0, len(dirs))
-	for _, d := range dirs {
+	for i, d := range dirs {
 		if err := api.ValidateSharedDirs(append(kept, d)); err != nil {
 			slog.Warn("shared dirs: skipping an invalid shared-dir name; no directory is created for it",
-				"name", d.Name, "reason", err.Error())
+				"index", i, "name", d.Name, "reason", sharedDirReason(err))
 			continue
 		}
 		kept = append(kept, d)
 	}
 	return kept
+}
+
+// sharedDirReason returns err's text without the "shared_dirs[N]: " prefix
+// api.ValidateSharedDirs adds, whose N is a position in the list it was
+// given, not in the project's list.
+func sharedDirReason(err error) string {
+	msg := err.Error()
+	if rest, ok := strings.CutPrefix(msg, "shared_dirs["); ok {
+		if _, reason, ok := strings.Cut(rest, "]: "); ok {
+			return reason
+		}
+	}
+	return msg
 }
 
 // agentSharedDirs returns the agent's shared dirs: the project
