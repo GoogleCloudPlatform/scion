@@ -380,7 +380,7 @@ func TestEventsStartAfterRegistration(t *testing.T) {
 		t.Fatal("no listen hook registered")
 	}
 	joined := strings.Join(ev.subscribed, " ")
-	for _, want := range append(append([]string(nil), RevocationSubjects...), SettingsUpdatedSubject) {
+	for _, want := range append(append([]string(nil), RevocationSubjects...), SettingsUpdatedSubject, GrantKeysChangedSubject) {
 		if !strings.Contains(joined, want) {
 			t.Errorf("no subscription to %s", want)
 		}

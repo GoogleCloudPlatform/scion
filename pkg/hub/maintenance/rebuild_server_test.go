@@ -596,3 +596,100 @@ func TestRebuildServer_SettingsCheckWarnsOnly(t *testing.T) {
 		t.Errorf("a section without a settings check:\n%s", plain.String())
 	}
 }
+
+// detachedGitStub replaces the fixture's git stub with one that reports a
+// detached HEAD for rev-parse --abbrev-ref (and the fixture commit for
+// rev-parse HEAD), answers the #6987 branch checks as the fixture's stub
+// does, and records every call.
+func detachedGitStub(t *testing.T, f *rebuildFixture) {
+	t.Helper()
+	stubs := filepath.SplitList(os.Getenv("PATH"))[0]
+	script := fmt.Sprintf(`#!/bin/sh
+echo "git $*" >> '%s'
+case "$1 $2" in
+  "rev-parse HEAD") echo %s ;;
+  "rev-parse --abbrev-ref") echo HEAD ;;
+  "check-ref-format --branch") echo "$3" ;;
+  "version ") echo "git version 2.43.0" ;;
+esac
+`, f.calls, testCommit)
+	if err := os.WriteFile(filepath.Join(stubs, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A detached HEAD with no branch configured or requested is refused before
+// anything is fetched or reset ("origin/HEAD" would be reset to); a given
+// branch still rebuilds.
+func TestRebuildServer_DetachedHeadWithoutBranchRefused(t *testing.T) {
+	f := newRebuildFixture(t, "")
+	detachedGitStub(t, f)
+	inst := &fakeInstaller{}
+	e := NewRebuildServerExecutor(RebuildServerOptions{RepoPath: f.repo, Installer: inst})
+	err := e.Run(context.Background(), &bytes.Buffer{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "the checkout is on a detached HEAD; set server.maintenance.repo_branch or pass the branch parameter") {
+		t.Fatalf("Run = %v, want the detached-HEAD refusal", err)
+	}
+	if calls := f.callLog(t); strings.TrimSpace(calls) != "git rev-parse --abbrev-ref HEAD" {
+		t.Fatalf("commands run = %q, want only the branch lookup", calls)
+	}
+	if strings.Join(inst.calls, ",") != "preflight" {
+		t.Fatalf("installer calls = %v, want only the preflight", inst.calls)
+	}
+
+	// A requested branch (or a configured one) does not need the lookup.
+	inst2 := &fakeInstaller{}
+	e2 := NewRebuildServerExecutor(RebuildServerOptions{RepoPath: f.repo, Installer: inst2})
+	if err := e2.Run(context.Background(), &bytes.Buffer{}, map[string]string{"branch": "main"}); err != nil {
+		t.Fatalf("Run with branch=main: %v", err)
+	}
+	// The stub reports git 2.43, so --end-of-options precedes the ref (#6987).
+	if !strings.Contains(f.callLog(t), "git reset --hard --end-of-options origin/main") {
+		t.Fatalf("branch=main did not reset to origin/main:\n%s", f.callLog(t))
+	}
+}
+
+func TestRebuildWeb_DetachedHeadWithoutBranchRefused(t *testing.T) {
+	f := newRebuildFixture(t, "")
+	detachedGitStub(t, f)
+	err := NewRebuildWebExecutor(RebuildWebOptions{RepoPath: f.repo}).Run(context.Background(), &bytes.Buffer{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "rebuild-web: the checkout is on a detached HEAD; set server.maintenance.repo_branch or pass the branch parameter") {
+		t.Fatalf("Run = %v, want the detached-HEAD refusal", err)
+	}
+	if calls := f.callLog(t); strings.TrimSpace(calls) != "git rev-parse --abbrev-ref HEAD" {
+		t.Fatalf("commands run = %q, want only the branch lookup", calls)
+	}
+}
+
+// binPathInstaller records the binary Stage was given.
+type binPathInstaller struct {
+	fakeInstaller
+	bin string
+}
+
+func (b *binPathInstaller) Stage(ctx context.Context, tag, bin string) (string, error) {
+	b.bin = bin
+	return b.fakeInstaller.Stage(ctx, tag, bin)
+}
+
+// The build's temporary directory is removed once the build is installed,
+// before the restart is requested (the restart can end the process before
+// a deferred cleanup runs).
+func TestRebuildServer_TempBuildRemovedBeforeRestart(t *testing.T) {
+	f := newRebuildFixture(t, "")
+	inst := &binPathInstaller{}
+	e := NewRebuildServerExecutor(RebuildServerOptions{RepoPath: f.repo, RepoBranch: "main", Installer: inst})
+	hooked := false
+	err := e.RunWithBeforeRestart(context.Background(), &bytes.Buffer{}, nil, func(context.Context, PendingRestart) error {
+		hooked = true
+		if inst.bin == "" {
+			t.Error("Stage got no binary")
+		} else if _, err := os.Stat(filepath.Dir(inst.bin)); !os.IsNotExist(err) {
+			t.Errorf("build directory %s still exists at the restart hook (%v)", filepath.Dir(inst.bin), err)
+		}
+		return nil
+	})
+	if err != nil || !hooked {
+		t.Fatalf("Run = %v (hooked %v)", err, hooked)
+	}
+}

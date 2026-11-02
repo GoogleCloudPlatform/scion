@@ -19,190 +19,22 @@ package entadapter
 import (
 	"context"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
-	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 )
 
 // messageFailedCreatedIDIndex is the partial index that serves the
-// failed-message retention purge (dispatch_state = 'failed', created <
+// failed-message purge's scans (dispatch_state = 'failed', created <
 // cutoff, ORDER BY created, id).
 const messageFailedCreatedIDIndex = "message_failed_created_id"
-
-// purgeAllFailedMessages calls PurgeFailedMessagesChunk with chunks of limit
-// rows until the pass is done and returns the total deleted. It fails the
-// test if a chunk examines more than limit rows.
-func purgeAllFailedMessages(t *testing.T, s *MessageStore, cutoff time.Time, limit int) int {
-	t.Helper()
-	total, _ := purgeFailedMessagesCountingChunks(t, s, cutoff, limit)
-	return total
-}
-
-// purgeFailedMessagesCountingChunks is purgeAllFailedMessages that also
-// returns the number of chunk calls.
-func purgeFailedMessagesCountingChunks(t *testing.T, s *MessageStore, cutoff time.Time, limit int) (deleted, calls int) {
-	t.Helper()
-	ctx := context.Background()
-	var after store.MessagePosition
-	for {
-		calls++
-		require.Less(t, calls, 1000, "the purge must finish")
-		res, err := s.PurgeFailedMessagesChunk(ctx, cutoff, after, limit, 0)
-		require.NoError(t, err)
-		require.LessOrEqual(t, res.Examined, limit, "a chunk transaction must not exceed the chunk size")
-		require.LessOrEqual(t, res.Deleted, res.Examined)
-		deleted += res.Deleted
-		if res.Done {
-			return deleted, calls
-		}
-		require.NotEqual(t, after, res.Next, "an unfinished chunk must advance the cursor")
-		after = res.Next
-	}
-}
-
-func createFailedPurgeMessage(t *testing.T, s *MessageStore, projectID, recipient, state string, created time.Time) string {
-	t.Helper()
-	m := newTestMessage(projectID, uuid.NewString())
-	m.Recipient = recipient
-	m.DispatchState = state
-	m.CreatedAt = created
-	require.NoError(t, s.CreateMessage(context.Background(), m))
-	return m.ID
-}
-
-// TestPurgeFailedMessagesChunk_DrainsBacklogOverSeveralChunks pins that a
-// backlog larger than one chunk drains over several calls, no call examines
-// more than the chunk size, and rows the purge must keep survive: failed
-// rows newer than the cutoff, failed user: rows interleaved with the
-// backlog, and old rows in other states (ptone/scion#6954). Some rows share
-// a created timestamp so the (created, id) tiebreak of the cursor is
-// exercised.
-func TestPurgeFailedMessagesChunk_DrainsBacklogOverSeveralChunks(t *testing.T) {
-	s := newTestMessageStore(t)
-	ctx := context.Background()
-	projectID := uuid.NewString()
-	base := time.Now().UTC().Add(-10 * 24 * time.Hour).Truncate(time.Second)
-	cutoff := time.Now().UTC().Add(-7 * 24 * time.Hour)
-
-	var purge, keep []string
-	for i := 0; i < 11; i++ {
-		// Pairs of rows share a created timestamp.
-		at := base.Add(time.Duration(i/2) * time.Minute)
-		purge = append(purge, createFailedPurgeMessage(t, s, projectID, "agent:coder", store.MessageDispatchFailed, at))
-		if i%4 == 0 {
-			keep = append(keep, createFailedPurgeMessage(t, s, projectID, "user:alice", store.MessageDispatchFailed, at))
-		}
-	}
-	keep = append(keep,
-		createFailedPurgeMessage(t, s, projectID, "agent:coder", store.MessageDispatchDispatched, base),
-		createFailedPurgeMessage(t, s, projectID, "agent:coder", store.MessageDispatchFailed, cutoff.Add(time.Hour)),
-		createFailedPurgeMessage(t, s, projectID, "agent:coder", store.MessageDispatchFailed, time.Now().UTC()),
-	)
-
-	deleted, calls := purgeFailedMessagesCountingChunks(t, s, cutoff, 3)
-	assert.Equal(t, len(purge), deleted)
-	// 11 agent rows plus 3 user rows are candidates: at least 5 chunks of 3.
-	assert.GreaterOrEqual(t, calls, 5, "the backlog must drain over several chunks")
-
-	for _, id := range purge {
-		_, err := s.GetMessage(ctx, id)
-		assert.ErrorIs(t, err, store.ErrNotFound, "old failed agent row %s is purged", id)
-	}
-	for _, id := range keep {
-		_, err := s.GetMessage(ctx, id)
-		assert.NoError(t, err, "row %s must survive the purge", id)
-	}
-
-	// A second pass finds nothing to delete and finishes in one chunk.
-	deleted, calls = purgeFailedMessagesCountingChunks(t, s, cutoff, 3)
-	assert.Equal(t, 0, deleted)
-	assert.Equal(t, 2, calls, "the kept user: rows still take one full chunk to walk past")
-}
-
-// TestPurgeFailedMessagesChunk_TimeBoundStopsChunkEarly pins that a chunk
-// transaction stops after the delete batch in flight once it has run for
-// maxDuration, returns a cursor at the last examined row, and that the next
-// call resumes from it.
-func TestPurgeFailedMessagesChunk_TimeBoundStopsChunkEarly(t *testing.T) {
-	prevBatch := failedPurgeDeleteBatch
-	failedPurgeDeleteBatch = 2
-	t.Cleanup(func() { failedPurgeDeleteBatch = prevBatch })
-
-	s := newTestMessageStore(t)
-	// The clock stands still until the chunk runs a DELETE, which advances
-	// it by 100ms: the elapsed time the bound sees depends only on the
-	// batches the chunk ran, not on how often it reads the clock.
-	var mu sync.Mutex
-	clock := time.Unix(1_700_000_000, 0)
-	s.now = func() time.Time {
-		mu.Lock()
-		defer mu.Unlock()
-		return clock
-	}
-	s.client.Message.Use(func(next ent.Mutator) ent.Mutator {
-		return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
-			if m.Op().Is(ent.OpDelete) {
-				mu.Lock()
-				clock = clock.Add(100 * time.Millisecond)
-				mu.Unlock()
-			}
-			return next.Mutate(ctx, m)
-		})
-	})
-
-	ctx := context.Background()
-	projectID := uuid.NewString()
-	base := time.Now().UTC().Add(-10 * 24 * time.Hour).Truncate(time.Second)
-	var ids []string
-	for i := 0; i < 6; i++ {
-		ids = append(ids, createFailedPurgeMessage(t, s, projectID, "agent:coder", store.MessageDispatchFailed, base.Add(time.Duration(i)*time.Second)))
-	}
-	cutoff := time.Now().UTC().Add(-7 * 24 * time.Hour)
-
-	// The chunk has run 100ms (one DELETE) before the second batch, under
-	// the 150ms bound, and 200ms before the third, over it.
-	res, err := s.PurgeFailedMessagesChunk(ctx, cutoff, store.MessagePosition{}, 6, 150*time.Millisecond)
-	require.NoError(t, err)
-	assert.Equal(t, 4, res.Examined, "the chunk stops after the batch in flight when the bound is reached")
-	assert.Equal(t, 4, res.Deleted)
-	assert.False(t, res.Done)
-	assert.Equal(t, ids[3], res.Next.ID, "the cursor is the last examined row")
-	_, err = s.GetMessage(ctx, ids[4])
-	require.NoError(t, err, "rows past the early stop are left for the next chunk")
-
-	res, err = s.PurgeFailedMessagesChunk(ctx, cutoff, res.Next, 6, 150*time.Millisecond)
-	require.NoError(t, err)
-	assert.Equal(t, 2, res.Deleted)
-	assert.True(t, res.Done)
-	for _, id := range ids {
-		_, err := s.GetMessage(ctx, id)
-		assert.ErrorIs(t, err, store.ErrNotFound)
-	}
-
-	// A bound already spent before the first batch still makes progress.
-	more := createFailedPurgeMessage(t, s, projectID, "agent:coder", store.MessageDispatchFailed, base)
-	res, err = s.PurgeFailedMessagesChunk(ctx, cutoff, store.MessagePosition{}, 6, time.Nanosecond)
-	require.NoError(t, err)
-	assert.Equal(t, 1, res.Deleted, "a chunk always runs its first batch")
-	_, err = s.GetMessage(ctx, more)
-	assert.ErrorIs(t, err, store.ErrNotFound)
-}
-
-func TestPurgeFailedMessagesChunk_RejectsNonPositiveLimit(t *testing.T) {
-	s := newTestMessageStore(t)
-	_, err := s.PurgeFailedMessagesChunk(context.Background(), time.Now(), store.MessagePosition{}, 0, 0)
-	require.Error(t, err)
-}
 
 // TestMessagesFailedCreatedIDIndex_AutoMigrate pins that AutoMigrate creates
 // the partial (created, id) WHERE dispatch_state = 'failed' index on the
@@ -231,56 +63,40 @@ func TestMessagesFailedCreatedIDIndex_AutoMigrate(t *testing.T) {
 	check(t)
 }
 
-// TestFailedMessagePurge_UsesFailedIndex pins that the purge's candidate
-// query, from the start and from a cursor, is served by the partial failed
-// index in index order: the SQLite plan for the exact SQL the store issues
-// must name the index and must not sort. Without it the planner walks the
-// created index and checks dispatch_state row by row over every message
-// older than the cutoff (ptone/scion#6954).
-func TestFailedMessagePurge_UsesFailedIndex(t *testing.T) {
+// TestFailedMessageScan_UsesFailedIndex pins that the failed-message scan,
+// from the start and from a cursor, is served by the partial failed index
+// in index order: the SQLite plan for the exact SQL SelectFailedMessages
+// issues (failedScanQuery) must name the index and must not sort. Without
+// it the planner walks the created index and checks dispatch_state row by
+// row over every message older than the cutoff.
+func TestFailedMessageScan_UsesFailedIndex(t *testing.T) {
 	enttest.SkipOnPostgres(t, "inspects SQLite EXPLAIN QUERY PLAN output")
-	ctx := context.Background()
-	base := enttest.NewClient(t)
-	rec := &planRecordingDriver{Driver: base.Driver()}
-	client := ent.NewClient(ent.Driver(rec))
-	ms := NewMessageStore(client)
-
-	projectID := uuid.NewString()
+	f := newChatRetentionFixture(t)
+	project := uuid.New()
 	at := time.Now().UTC().Add(-10 * 24 * time.Hour)
 	for i := 0; i < 5; i++ {
 		state := store.MessageDispatchFailed
 		if i%2 == 0 {
 			state = store.MessageDispatchDispatched
 		}
-		createFailedPurgeMessage(t, ms, projectID, "agent:coder", state, at.Add(time.Duration(i)*time.Second))
+		_ = f.message(chatRetentionMsg{project: project, created: at.Add(time.Duration(i) * time.Second), state: state})
 	}
 	cutoff := time.Now().UTC().Add(-7 * 24 * time.Hour)
 
 	cases := []struct {
 		name  string
-		after store.MessagePosition
+		after store.ChatRetentionPosition
 	}{
-		{"from_start", store.MessagePosition{}},
-		{"from_cursor", store.MessagePosition{Created: at.Add(time.Second), ID: uuid.NewString()}},
+		{"from_start", store.ChatRetentionPosition{}},
+		{"from_cursor", store.ChatRetentionPosition{Created: at.Add(time.Second), ID: uuid.NewString()}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			rec.mu.Lock()
-			rec.queries = nil
-			rec.mu.Unlock()
-			// The chunk runs this select inside a transaction, which the
-			// recording driver does not see; run it on the plain client.
-			_, err := failedPurgeCandidates(ctx, client, cutoff, tc.after, 500)
+			query, args := f.st.failedScanQuery(cutoff, tc.after, 1000)
+			assert.Contains(t, query, "dispatch_state = 'failed'", "dispatch_state must be a literal so the partial index applies")
+
+			rows, err := f.db.QueryContext(f.ctx, "EXPLAIN QUERY PLAN "+query, args...)
 			require.NoError(t, err)
-
-			rec.mu.Lock()
-			require.Len(t, rec.queries, 1)
-			q := rec.queries[0]
-			rec.mu.Unlock()
-			assert.Contains(t, q.sql, "= 'failed'", "dispatch_state must be a literal so the partial index applies")
-
-			rows := &entsql.Rows{}
-			require.NoError(t, base.Driver().Query(ctx, "EXPLAIN QUERY PLAN "+q.sql, q.args, rows))
 			var plan strings.Builder
 			for rows.Next() {
 				var id, parent, unused int
@@ -290,9 +106,94 @@ func TestFailedMessagePurge_UsesFailedIndex(t *testing.T) {
 			}
 			require.NoError(t, rows.Err())
 			require.NoError(t, rows.Close())
-			t.Logf("query: %s\nplan:\n%s", q.sql, plan.String())
-			assert.Contains(t, plan.String(), messageFailedCreatedIDIndex, "query: %s", q.sql)
-			assert.NotContains(t, plan.String(), "TEMP B-TREE", "query: %s", q.sql)
+			t.Logf("query: %s\nplan:\n%s", query, plan.String())
+			assert.Contains(t, plan.String(), messageFailedCreatedIDIndex, "query: %s", query)
+			assert.NotContains(t, plan.String(), "TEMP B-TREE", "query: %s", query)
+
+			// The statement the store runs is the one inspected.
+			_, err = f.st.SelectFailedMessages(f.ctx, cutoff, tc.after, 1000, 100)
+			require.NoError(t, err)
 		})
+	}
+}
+
+// TestChatRetentionStore_FailedDrainsBacklogOverSeveralChunks pins that a
+// failed backlog larger than one chunk drains over several scan and purge
+// calls, no purge exceeds the chunk size, and rows the purge must keep
+// survive: failed rows newer than the cutoff, failed "user:" rows
+// interleaved with the backlog, and old rows in other states. Pairs of
+// rows share a created timestamp, so the (created, id) tiebreak of the
+// cursor is exercised.
+func TestChatRetentionStore_FailedDrainsBacklogOverSeveralChunks(t *testing.T) {
+	f := newChatRetentionFixture(t)
+	project := uuid.New()
+	base := time.Now().UTC().Add(-10 * 24 * time.Hour).Truncate(time.Second)
+	cutoff := time.Now().UTC().Add(-7 * 24 * time.Hour)
+
+	var purge, keep []string
+	for i := 0; i < 11; i++ {
+		at := base.Add(time.Duration(i/2) * time.Minute)
+		id := f.message(chatRetentionMsg{project: project, created: at, state: store.MessageDispatchFailed, recipient: "agent:coder"})
+		f.dependents(id, project)
+		purge = append(purge, id)
+		if i%4 == 0 {
+			keep = append(keep, f.message(chatRetentionMsg{project: project, created: at, state: store.MessageDispatchFailed, recipient: "user:alice"}))
+		}
+	}
+	keep = append(keep,
+		f.message(chatRetentionMsg{project: project, created: base, state: store.MessageDispatchDispatched, recipient: "agent:coder"}),
+		f.message(chatRetentionMsg{project: project, created: cutoff.Add(time.Hour), state: store.MessageDispatchFailed, recipient: "agent:coder"}),
+		f.message(chatRetentionMsg{project: project, created: time.Now().UTC(), state: store.MessageDispatchFailed, recipient: "agent:coder"}),
+	)
+
+	drain := func() (deleted int64, calls int) {
+		var pos store.ChatRetentionPosition
+		for {
+			calls++
+			require.Less(t, calls, 100, "the walk must finish")
+			scan, err := f.st.SelectFailedMessages(f.ctx, cutoff, pos, 1000, 3)
+			require.NoError(t, err)
+			require.LessOrEqual(t, len(scan.Candidates), 3, "a chunk must not exceed the chunk size")
+			ids := candidateIDs(scan.Candidates)
+			res, err := f.st.PurgeFailedMessages(f.ctx, ids, nil)
+			require.NoError(t, err)
+			deleted += res.Total().Failed
+			if scan.Exhausted {
+				return deleted, calls
+			}
+			require.NotEqual(t, pos, scan.Next, "an unfinished scan must advance the position")
+			pos = scan.Next
+		}
+	}
+	deleted, calls := drain()
+	assert.Equal(t, int64(len(purge)), deleted)
+	assert.GreaterOrEqual(t, calls, 4, "11 rows in chunks of 3 take at least 4 calls")
+	for _, id := range purge {
+		assert.Equal(t, 0, f.count(`SELECT COUNT(*) FROM messages WHERE id = ?`, id), "old failed agent row %s is purged", id)
+	}
+	for _, id := range keep {
+		assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM messages WHERE id = ?`, id), "row %s must survive", id)
+	}
+	assert.Equal(t, noOrphans(), f.orphans())
+
+	// A second pass finds nothing to delete: the kept "user:" rows are read
+	// and passed in one scan.
+	deleted, calls = drain()
+	assert.Equal(t, int64(0), deleted)
+	assert.Equal(t, 1, calls)
+}
+
+// TestChatRetentionStore_SelectFailedMessagesNonPositiveBounds: a scan with
+// a non-positive limit or scan cap reads nothing and stays where it is.
+func TestChatRetentionStore_SelectFailedMessagesNonPositiveBounds(t *testing.T) {
+	f := newChatRetentionFixture(t)
+	_ = f.message(chatRetentionMsg{project: uuid.New(), created: time.Now().UTC().Add(-30 * 24 * time.Hour), state: store.MessageDispatchFailed})
+	pos := store.ChatRetentionPosition{Created: time.Now().UTC().Add(-40 * 24 * time.Hour), ID: uuid.NewString()}
+	for _, b := range [][2]int{{0, 10}, {10, 0}, {-1, 10}} {
+		got, err := f.st.SelectFailedMessages(f.ctx, time.Now().UTC(), pos, b[0], b[1])
+		require.NoError(t, err)
+		assert.Empty(t, got.Candidates, "%v", b)
+		assert.Equal(t, pos, got.Next, "%v", b)
+		assert.False(t, got.Exhausted, "%v", b)
 	}
 }

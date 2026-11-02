@@ -459,7 +459,7 @@ const (
 )
 
 func gcpSANestedPath(projectID string) string {
-	return fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts", projectID)
+	return fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts", url.PathEscape(projectID))
 }
 
 // byIDPath resolves a ref to the address that serves it.
@@ -468,9 +468,9 @@ func gcpSANestedPath(projectID string) string {
 // is made; see GCPServiceAccountRef.
 func (r GCPServiceAccountRef) byIDPath() string {
 	if r.projectID != "" {
-		return fmt.Sprintf("%s/%s", gcpSANestedPath(r.projectID), r.id)
+		return fmt.Sprintf("%s/%s", gcpSANestedPath(r.projectID), url.PathEscape(r.id))
 	}
-	return fmt.Sprintf("%s/%s", gcpSAFlatPath, r.id)
+	return fmt.Sprintf("%s/%s", gcpSAFlatPath, url.PathEscape(r.id))
 }
 
 // scopeQuery renders scope selection as the Hub's query parameters.

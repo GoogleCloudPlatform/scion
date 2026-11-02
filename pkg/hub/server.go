@@ -48,6 +48,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/cronzone"
 	"github.com/GoogleCloudPlatform/scion/pkg/cspreport"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
@@ -582,13 +583,6 @@ type ServerConfig struct {
 	// AuditRetentionDays is the number of days to retain authorization audit records.
 	// Default: 90. Used by CleanupAuditRecords for periodic retention cleanup.
 	AuditRetentionDays int
-
-	// FailedMessageRetentionDays is the number of days to retain messages in
-	// dispatch_state="failed" before the failed-message-retention sweep
-	// purges them. Default: 7 (see defaultFailedMessageRetentionDays). Mirrors
-	// the AuditRetentionDays pattern. Zero or negative falls back to the
-	// default rather than disabling the sweep.
-	FailedMessageRetentionDays int
 
 	// Experiments is the compiled experiments registry used to resolve
 	// hub-wide feature flags (pkg/experiments). Production leaves this nil;
@@ -2120,10 +2114,6 @@ type Server struct {
 
 	// chatRetention is the chat message retention wiring (chat_retention.go).
 	chatRetention chatRetentionState
-
-	// failedPurge is the failed-message retention purge's resume cursor
-	// (sweep.go).
-	failedPurge failedPurgeState
 
 	// Artifact store for the artifact_* tables (pkg/artifacts) — nil = artifacts unavailable.
 	artifactStore artifacts.Store
@@ -6657,7 +6647,7 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 				"cron_expr", sched.CronExpr, "error", err)
 			return
 		}
-		log.Warn("schedule paused: cron zone prefixes are not supported; edit the expression to UTC and resume",
+		log.Warn("schedule paused: cron zone prefixes are not supported; remove the prefix, set the schedule's time zone, and resume",
 			"cron_expr", sched.CronExpr)
 		return
 	}
@@ -6671,15 +6661,17 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 	}
 
 	// Compute next run time
-	cronSchedule, err := parseScheduleCron(sched.CronExpr)
+	nextRunAt, err := scheduleNextRun(sched.CronExpr, sched.TimeZone, now)
 	if err != nil {
-		log.Error("schedule-evaluator: invalid cron expression",
-			"cron_expr", sched.CronExpr, "error", err)
-		_ = s.store.UpdateScheduleAfterRun(ctx, sched.ID, now, time.Time{},
-			fmt.Sprintf("invalid cron expression: %v", err))
+		msg := fmt.Sprintf("invalid cron expression: %v", err)
+		if errors.Is(err, cronzone.ErrInvalidZone) {
+			msg = fmt.Sprintf("invalid schedule time zone: %v", err)
+		}
+		log.Error("schedule-evaluator: invalid schedule timing",
+			"cron_expr", sched.CronExpr, "time_zone", sched.TimeZone, "error", err)
+		_ = s.store.UpdateScheduleAfterRun(ctx, sched.ID, now, time.Time{}, msg)
 		return
 	}
-	nextRunAt := cronSchedule.Next(now)
 
 	// Create a one-shot event from the schedule
 	evt := store.ScheduledEvent{

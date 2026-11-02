@@ -168,6 +168,13 @@ func (s *Server) healthInfo(_ context.Context, conns []*HubConnection) *HealthRe
 		status = degradeHealthStatus(status)
 	}
 
+	// Profiles whose runtime is not available on this broker
+	// (ptone/scion#7010): reported by name, never degrading the status,
+	// since the broker serves its other profiles normally.
+	for name, value := range s.profileRuntimeHealthChecks() {
+		checks[name] = value
+	}
+
 	return &HealthResponse{
 		Status:  status,
 		Version: s.version,
@@ -7990,6 +7997,11 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 		// manager is stored in no holder, so its record is the zero value.
 		return fromProfile(runtimeResolution{Manager: agent.NewManager(resolved), Runtime: resolved, RuntimeType: resolved.Name(), How: resolutionErrorRuntime}), nil
 	}
+
+	// The profile's runtime resolved: clear the unavailable self-health
+	// state the discovery pass recorded for these profile settings (the same
+	// key, so a same-named profile with other settings stays reported).
+	s.setProfileRuntimeUnavailable(auxProfileKey(selProfile, runtimeType, rtConfig, projectDir), selProfile, false)
 
 	// A PerProfileInstancesRuntime default never short-circuits here either,
 	// for the same reason the pre-check above skips it: auxiliaryRuntimeIdentity

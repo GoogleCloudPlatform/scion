@@ -2654,6 +2654,7 @@ var (
 		{Name: "project_id", Type: field.TypeUUID},
 		{Name: "name", Type: field.TypeString},
 		{Name: "cron_expr", Type: field.TypeString},
+		{Name: "time_zone", Type: field.TypeString, Default: ""},
 		{Name: "event_type", Type: field.TypeString},
 		{Name: "payload", Type: field.TypeString, Default: "{}"},
 		{Name: "status", Type: field.TypeString, Default: "active"},
@@ -2692,7 +2693,7 @@ var (
 			{
 				Name:    "schedule_next_run_at",
 				Unique:  false,
-				Columns: []*schema.Column{SchedulesColumns[23]},
+				Columns: []*schema.Column{SchedulesColumns[24]},
 			},
 		},
 	}

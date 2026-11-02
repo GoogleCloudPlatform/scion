@@ -28,7 +28,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { paginateAll, PaginationError } from '../../client/paginate-all.js';
 import { resourceStyles } from './resource-styles.js';
-import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
+import { browserTimeZone, formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 interface Schedule {
@@ -36,6 +36,8 @@ interface Schedule {
   projectId: string;
   name: string;
   cronExpr: string;
+  /** IANA zone the cron is evaluated in; absent or empty means UTC. */
+  timeZone?: string;
   eventType: string;
   payload: string;
   status: string;
@@ -53,10 +55,10 @@ interface Schedule {
 
 /**
  * Label shown on a schedule whose cron expression carries a zone prefix.
- * Schedules are evaluated in UTC only; the hub rejects such expressions and
- * pauses existing rows that use one.
+ * The hub rejects such expressions and pauses existing rows that use one;
+ * the zone belongs in the schedule's time zone field.
  */
-export const ZONE_PREFIX_BADGE_LABEL = 'Zone prefix not supported — edit to UTC';
+export const ZONE_PREFIX_BADGE_LABEL = 'Zone prefix not supported — use the time zone field';
 
 /**
  * Text shown for each system pause reason the hub stores in
@@ -64,7 +66,8 @@ export const ZONE_PREFIX_BADGE_LABEL = 'Zone prefix not supported — edit to UT
  */
 const STATUS_REASON_LABELS: Record<string, string> = {
   creator_deleted: 'Creator deleted: resume to run it under your authority',
-  cron_zone_unsupported: 'Zone prefix not supported: edit to UTC, then resume',
+  cron_zone_unsupported:
+    'Zone prefix not supported: remove it, set the time zone field, then resume',
 };
 
 /** Returns the text shown for a schedule's status reason, or '' when it has none. */
@@ -81,10 +84,26 @@ export function hasCronZonePrefix(expr: string): boolean {
   return expr.startsWith('CRON_TZ=') || expr.startsWith('TZ=');
 }
 
+/** The zone shown for a schedule's cron expression: its IANA name, or UTC. */
+export function scheduleZoneLabel(timeZone: string | undefined): string {
+  return timeZone ? timeZone : 'UTC';
+}
+
+/**
+ * Normalizes a time zone typed into a form: trimmed, with "UTC" stored as
+ * empty, the way the hub stores it. The hub validates the name.
+ */
+export function normalizeTimeZoneInput(value: string): string {
+  const zone = value.trim();
+  return zone === 'UTC' ? '' : zone;
+}
+
 /** The edit dialog's fields. */
 export interface ScheduleEditFields {
   name: string;
   cronExpr: string;
+  /** The time zone field; omitted leaves the zone alone. */
+  timeZone?: string;
   /** Resume a paused schedule in the same request. */
   resume: boolean;
 }
@@ -95,7 +114,7 @@ export interface ScheduleEditFields {
  * the hub would reject (empty fields, a zone-prefixed expression).
  */
 export function buildScheduleEdit(
-  sched: Pick<Schedule, 'name' | 'cronExpr' | 'status'>,
+  sched: Pick<Schedule, 'name' | 'cronExpr' | 'status' | 'timeZone'>,
   fields: ScheduleEditFields
 ): { patch: Record<string, unknown> } | { error: string } {
   const name = fields.name.trim();
@@ -105,12 +124,16 @@ export function buildScheduleEdit(
   if (hasCronZonePrefix(cronExpr)) {
     return {
       error:
-        'Zone prefixes (CRON_TZ=, TZ=) are not supported. Remove the prefix and give the time in UTC.',
+        'Zone prefixes (CRON_TZ=, TZ=) are not supported. Remove the prefix and set the time zone field instead.',
     };
   }
   const patch: Record<string, unknown> = {};
   if (name !== sched.name) patch.name = name;
   if (cronExpr !== sched.cronExpr) patch.cronExpr = cronExpr;
+  if (fields.timeZone !== undefined) {
+    const timeZone = normalizeTimeZoneInput(fields.timeZone);
+    if (timeZone !== (sched.timeZone ?? '')) patch.timeZone = timeZone;
+  }
   if (fields.resume && sched.status === 'paused') patch.status = 'active';
   return { patch };
 }
@@ -141,6 +164,7 @@ export class ScionScheduleList extends LitElement {
   @state() private dialogOpen = false;
   @state() private dialogName = '';
   @state() private dialogCron = '';
+  @state() private dialogTimeZone = '';
   @state() private dialogEventType = 'message';
   @state() private dialogAgent = '';
   @state() private dialogMessage = '';
@@ -155,6 +179,7 @@ export class ScionScheduleList extends LitElement {
   @state() private editSchedule: Schedule | null = null;
   @state() private editName = '';
   @state() private editCron = '';
+  @state() private editTimeZone = '';
   @state() private editResume = false;
   @state() private editLoading = false;
   @state() private editError: string | null = null;
@@ -245,6 +270,7 @@ export class ScionScheduleList extends LitElement {
   private openCreateDialog(): void {
     this.dialogName = '';
     this.dialogCron = '';
+    this.dialogTimeZone = '';
     this.dialogEventType = 'message';
     this.dialogAgent = '';
     this.dialogMessage = '';
@@ -273,6 +299,8 @@ export class ScionScheduleList extends LitElement {
         eventType: this.dialogEventType,
         agentName: this.dialogAgent,
       };
+      const timeZone = normalizeTimeZoneInput(this.dialogTimeZone);
+      if (timeZone) body.timeZone = timeZone;
 
       if (this.dialogEventType === 'message') {
         body.message = this.dialogMessage;
@@ -311,6 +339,7 @@ export class ScionScheduleList extends LitElement {
     this.editSchedule = sched;
     this.editName = sched.name;
     this.editCron = sched.cronExpr;
+    this.editTimeZone = sched.timeZone ?? '';
     this.editResume = false;
     this.editError = null;
   }
@@ -330,6 +359,7 @@ export class ScionScheduleList extends LitElement {
     const body = buildScheduleEdit(sched, {
       name: this.editName,
       cronExpr: this.editCron,
+      timeZone: this.editTimeZone,
       resume: this.editResume,
     });
     if ('error' in body) {
@@ -487,9 +517,33 @@ export class ScionScheduleList extends LitElement {
 
   private renderZonePrefixBadge(sched: Schedule) {
     if (!hasCronZonePrefix(sched.cronExpr)) return nothing;
-    return html`<span class="badge zone-prefix" title="Cron expressions are evaluated in UTC"
+    return html`<span class="badge zone-prefix" title="Set the zone in the time zone field"
       >${ZONE_PREFIX_BADGE_LABEL}</span
     >`;
+  }
+
+  /**
+   * The time zone field of the create and edit dialogs. Empty means UTC;
+   * the help text offers the browser's zone. The hub validates the name.
+   */
+  private renderTimeZoneInput(
+    cls: string,
+    value: string,
+    onInput: (value: string) => void
+  ): TemplateResult {
+    const local = browserTimeZone();
+    const hint =
+      'IANA time zone, e.g. America/Los_Angeles. Empty means UTC.' +
+      (local && local !== 'UTC' ? ` Your browser's zone is ${local}.` : '') +
+      ' Daylight saving changes keep the local time.';
+    return html`<sl-input
+      label="Time zone"
+      class=${cls}
+      placeholder="UTC"
+      help-text=${hint}
+      .value=${value}
+      @sl-input=${(e: Event): void => onInput((e.target as HTMLInputElement).value)}
+    ></sl-input>`;
   }
 
   override render() {
@@ -593,7 +647,7 @@ export class ScionScheduleList extends LitElement {
             <tr>
               <th>Name</th>
               <th>Type</th>
-              <th>Cron (UTC)</th>
+              <th>Cron</th>
               <th>Next Run</th>
               <th>Status</th>
               <th class="hide-mobile">Runs</th>
@@ -613,8 +667,9 @@ export class ScionScheduleList extends LitElement {
     const isPaused = sched.status === 'paused';
     const isActing = this.actionId === sched.id;
     const nextRun = isActive ? this.formatFutureTime(sched.nextRunAt) : '-';
-    // Cron expressions are UTC; the next run is shown in the display zone,
-    // labelled, so the two are never confused.
+    // The cron expression is evaluated in the schedule's zone (shown under
+    // it); the next run is shown in the display zone, labelled, so the two
+    // are never confused.
     const nextRunAbsolute =
       isActive && sched.nextRunAt ? formatInstantWithZone(sched.nextRunAt) : '';
 
@@ -629,6 +684,7 @@ export class ScionScheduleList extends LitElement {
             >${sched.cronExpr}</span
           >
           ${this.renderZonePrefixBadge(sched)}
+          <div class="meta-text schedule-zone">${scheduleZoneLabel(sched.timeZone)}</div>
         </td>
         <td>
           <span class="meta-text">${nextRun}</span>
@@ -704,11 +760,15 @@ export class ScionScheduleList extends LitElement {
           <sl-input
             label="Cron Expression"
             placeholder="0 9 * * 1-5"
-            help-text="Standard 5-field cron: minute hour day month weekday (UTC)"
+            help-text="Standard 5-field cron: minute hour day month weekday, in the time zone below"
             .value=${this.dialogCron}
             @sl-input=${(e: Event) => (this.dialogCron = (e.target as HTMLInputElement).value)}
             required
           ></sl-input>
+
+          ${this.renderTimeZoneInput('create-time-zone', this.dialogTimeZone, (v) => {
+            this.dialogTimeZone = v;
+          })}
 
           <sl-select
             label="Event Type"
@@ -831,8 +891,8 @@ export class ScionScheduleList extends LitElement {
             label="Cron Expression"
             class="edit-cron"
             help-text=${prefixed
-              ? 'Zone prefixes (CRON_TZ=, TZ=) are not supported: remove the prefix and give the time in UTC.'
-              : 'Standard 5-field cron: minute hour day month weekday (UTC)'}
+              ? 'Zone prefixes (CRON_TZ=, TZ=) are not supported: remove the prefix and set the time zone field.'
+              : 'Standard 5-field cron: minute hour day month weekday, in the time zone below'}
             .value=${this.editCron}
             @sl-input=${(e: Event): void => {
               this.editCron = (e.target as HTMLInputElement).value;
@@ -840,6 +900,9 @@ export class ScionScheduleList extends LitElement {
             required
           ></sl-input>
 
+          ${this.renderTimeZoneInput('edit-time-zone', this.editTimeZone, (v) => {
+            this.editTimeZone = v;
+          })}
           ${sched.status === 'paused'
             ? html`
                 <label class="checkbox-label">
@@ -913,7 +976,11 @@ export class ScionScheduleList extends LitElement {
             ${this.renderStatusReason(sched, true)}
           </div>
           <div class="detail-row">
-            <strong>Cron (UTC):</strong> ${sched.cronExpr} ${this.renderZonePrefixBadge(sched)}
+            <strong>Cron:</strong> ${sched.cronExpr} ${this.renderZonePrefixBadge(sched)}
+          </div>
+          <div class="detail-row">
+            <strong>Time zone:</strong>
+            <span class="schedule-zone">${scheduleZoneLabel(sched.timeZone)}</span>
           </div>
           <div class="detail-row"><strong>Event Type:</strong> ${sched.eventType}</div>
           <div class="detail-row"><strong>Target Agent:</strong> ${agent}</div>

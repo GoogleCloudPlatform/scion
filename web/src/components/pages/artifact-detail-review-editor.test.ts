@@ -877,7 +877,7 @@ describe('artifact page: graphical review editor experiment', () => {
     editor.next = 'We {++really ++}ship in Q3.\n';
     editor.dispatchEvent(
       new CustomEvent('review-change', {
-        detail: { text: editor.next },
+        detail: { text: editor.next, blur: false },
         bubbles: true,
         composed: true,
       })
@@ -938,7 +938,7 @@ describe('artifact page: graphical review editor experiment', () => {
     expect(save().hasAttribute('disabled')).toBe(true);
     editor.dispatchEvent(
       new CustomEvent('review-change', {
-        detail: { text: 'We {++really ++}ship in Q3.\n' },
+        detail: { text: 'We {++really ++}ship in Q3.\n', blur: false },
         bubbles: true,
         composed: true,
       })
@@ -961,6 +961,37 @@ describe('artifact page: graphical review editor experiment', () => {
     byText(el, '.hint-strip sl-button', 'Open Source view')!.click();
     await settle(el);
     expect($(el, '.g-work scion-code-editor.review-editor')).not.toBeNull();
+  });
+
+  it('keeps the hint on a review-change sent by focus leaving the editor, and takes its text (ptone/scion#6952)', async () => {
+    mockFetch();
+    const el = await mount(true);
+    await startReview(el);
+    const editor = $<FakeReviewEditor>(el, 'scion-review-editor')!;
+    editor.dispatchEvent(
+      new CustomEvent('review-hint', { detail: { kind: 'code' }, bubbles: true, composed: true })
+    );
+    await settle(el);
+    expect($(el, '.hint-strip')!.textContent).toContain("Code blocks can't take suggestions.");
+    const save = (): HTMLElement => byText(el, '.edit-footer sl-button', 'Save review')!;
+    expect(save().hasAttribute('disabled')).toBe(true);
+    // The press of a toolbar button blurs the editor, which sends the text:
+    // the strip, and with it the button under the pointer, stays in place.
+    editor.dispatchEvent(
+      new CustomEvent('review-change', {
+        detail: { text: 'We {++really ++}ship in Q3.\n', blur: true },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await settle(el);
+    expect($(el, '.hint-strip')).not.toBeNull();
+    expect($(el, '.hint-strip')!.textContent).toContain("Code blocks can't take suggestions.");
+    expect(save().hasAttribute('disabled')).toBe(false);
+    // The switch the press was for still closes it.
+    await chooseView(el, 'source');
+    expect($(el, '.g-work scion-code-editor.review-editor')).not.toBeNull();
+    expect($(el, '.hint-strip')).toBeNull();
   });
 
   it('keeps one live region mounted, and the earlier-review hint has no Source pointer', async () => {
@@ -1127,7 +1158,7 @@ describe('artifact page: graphical review editor experiment', () => {
     const editor = $<FakeReviewEditor>(el, 'scion-review-editor')!;
     editor.dispatchEvent(
       new CustomEvent('review-change', {
-        detail: { text: 'We {++really ++}ship in Q3.\n' },
+        detail: { text: 'We {++really ++}ship in Q3.\n', blur: false },
         bubbles: true,
         composed: true,
       })
