@@ -139,7 +139,7 @@ EXPECTED_FILES=8        # SCRIPTS + NOT_RUN_HERE + NOT_EXECUTABLE + this file.
 SCRIPTS=(
   reserved-flags.sh     # 59 - the reserved-flag lists and the test-mode / hub-class values
   update-strategy.sh    #  4 - the updateStrategy derivation
-  render-guards.sh      # 130 - every other render-time refusal, incl. the HA-unlanded gate
+  render-guards.sh      # 286 - every other render-time refusal, incl. the HA-unlanded gate
   chart-integrity.sh    # 49 - .helmignore breadth, the packaged file set, base-url, signing key, session annotation, checksum redaction, NOTES rotation, scheduling guards
   rbac-collision.sh     # 46 - the cluster-scoped RBAC name, and two pinned residuals
 )
