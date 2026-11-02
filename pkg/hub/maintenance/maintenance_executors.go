@@ -461,6 +461,9 @@ func (e *RebuildServerExecutor) RunWithBeforeRestart(ctx context.Context, logger
 		if err != nil {
 			return fmt.Errorf("failed to determine current branch: %w", err)
 		}
+		if out == "HEAD" {
+			return errDetachedHead("rebuild-server")
+		}
 		plan.currentBranch = out
 	}
 	if err := runRebuildSteps(ctx, logger, rebuildCheckout, plan); err != nil {
@@ -531,6 +534,11 @@ func (e *RebuildServerExecutor) RunWithBeforeRestart(ctx context.Context, logger
 		return fmt.Errorf("activate %s: %w", name, err)
 	}
 	_, _ = fmt.Fprintf(logger, "Installed %s.\n\n", name)
+	// The build was copied into place by Stage, so its temporary directory
+	// is no longer needed. Removed now: the restart below can end this
+	// process before the deferred cleanup runs (the defer still covers the
+	// failure paths).
+	_ = os.RemoveAll(tmpDir)
 
 	// ── Systemd unit check (starter hubs) ───────────────────────────────
 	// The template it compares against is the starter hub's
@@ -692,6 +700,13 @@ func runRebuildSteps(ctx context.Context, logger io.Writer, phase rebuildPhase, 
 	return nil
 }
 
+// errDetachedHead refuses a rebuild with no branch to reset to: the checkout
+// is on a detached HEAD (git rev-parse --abbrev-ref HEAD says "HEAD") and no
+// branch is configured or requested, so "origin/HEAD" would be reset to.
+func errDetachedHead(op string) error {
+	return fmt.Errorf("%s: the checkout is on a detached HEAD; set server.maintenance.repo_branch or pass branch=...", op)
+}
+
 // gitOutput runs git in dir and returns its trimmed stdout.
 func gitOutput(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
@@ -834,6 +849,9 @@ func (e *RebuildWebExecutor) Run(ctx context.Context, logger io.Writer, params m
 			return fmt.Errorf("failed to determine current branch: %s", strings.TrimSpace(string(branchOut)))
 		}
 		currentBranch := strings.TrimSpace(string(branchOut))
+		if currentBranch == "HEAD" {
+			return errDetachedHead("rebuild-web")
+		}
 		steps = append(steps, step{"Resetting to origin/" + currentBranch, "git", []string{"reset", "--hard", "origin/" + currentBranch}})
 	}
 	steps = append(steps, step{"Building web assets", "make", []string{"web"}})
