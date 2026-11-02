@@ -15,7 +15,7 @@ A relay is **policy-free**:
 
 - **Admission.** The relay forwards the dialer's credential headers to a hub, and the hub decides whether to admit the dialer and as whom. Only an allowlist of credential headers is forwarded, and proxy identity headers never are.
 - **RPCs and refreshes.** The hub answers every RPC a user sends on a relay-held session and checks every in-band credential refresh.
-- **Re-checks.** The relay schedules re-checks of its sessions and user streams: periodically, on the hub's revocation events, and whenever its event connection reconnects. The hub evaluates each one, and the relay acts on the answer: close, renew or keep.
+- **Re-checks.** The relay schedules re-checks of its sessions and user streams: periodically, on the hub's revocation events (including `conduit.revoke.grant_keys` when a Conduit grant signing key is rotated or revoked with `POST /api/v1/admin/conduit/grant-keys/rotate` or `DELETE /api/v1/admin/conduit/grant-keys/{kid}`, which also prompts every other Hub replica to reload the grant key ring from the store), and whenever its event connection reconnects. The hub evaluates each one, and the relay acts on the answer: close, renew or keep.
 
 The relay keeps each session's hub admission token and presents it unchanged. It never opens, parses or logs it.
 

@@ -205,30 +205,44 @@ Users whose only email address is unverified at their provider can no longer sig
 
 ## Domain Authorization
 
-You can restrict authentication to specific email domains using the `server.auth.authorized_domains` setting. This provides an additional layer of access control beyond OAuth authentication. See also [Who can sign in](#who-can-sign-in-user-access-mode).
+You can restrict authentication to specific email domains using the `server.auth.authorized_domains` setting. This provides an additional layer of access control beyond OAuth authentication. See also [Who can sign in](#who-can-sign-in-user-access-mode) and [`server.auth.authorized_domains`: environment first](/scion/reference/admin-settings/#serverauthauthorized_domains-environment-first).
 
 ### Configuration
 
-Set the environment variable with a comma-separated list of allowed domains:
-
-```bash
-# Allow only users from these domains
-export SCION_SEED_SERVER_AUTH_AUTHORIZEDDOMAINS="example.com,mycompany.org"
-```
-
-Or configure in `server.yaml`:
+Configure in `settings.yaml`:
 
 ```yaml
-auth:
-  authorizedDomains:
-    - example.com
-    - mycompany.org
+server:
+  auth:
+    authorized_domains:
+      - example.com
+      - mycompany.org
 ```
+
+Or set the seed or environment pin with a comma-separated list of allowed domains:
+
+```bash
+# Seed the initial list when no list is saved in the database
+export SCION_SEED_SERVER_AUTH_AUTHORIZEDDOMAINS="example.com,mycompany.org"
+
+# Or pin the list on this node (overrides any list saved in the database)
+export SCION_SERVER_AUTH_AUTHORIZEDDOMAINS="example.com,mycompany.org"
+```
+
+### Precedence and Live Updates
+
+`server.auth.authorized_domains` resolves in environment-first order so a deployment pin cannot be widened from the UI:
+
+1. **Environment pin (`SCION_SERVER_AUTH_AUTHORIZEDDOMAINS`)**: When set on the node, its list is always enforced on that node; a database save is stored for unpinned nodes and reported under `reload.skipped` on the pinned node.
+2. **Database (`hub_settings`)**: Otherwise, a list saved through the Web UI (**Admin -> Server Config -> Access Control**), `PUT /api/v1/admin/server-config`, or `scion hub settings set` is loaded at startup and applied live across replicas without a restart. Clearing the saved list reverts to the startup list from `settings.yaml` and the environment rather than allowing all domains.
+3. **File and seed**: Otherwise, the list in `settings.yaml` (`server.auth.authorized_domains`) or `SCION_SEED_SERVER_AUTH_AUTHORIZEDDOMAINS` is used.
+
+A save of `authorized_domains` or `admin_emails` (or a reset of the `access` section) that would leave the saving administrator's own email rejected is refused with `422 validation_error`.
 
 ### Behavior
 
 - **Empty list (default)**: All email domains are allowed.
-- **Non-empty list**: Only emails from listed domains can authenticate.
+- **Non-empty list**: Only emails from listed domains (or addresses in `server.auth.admin_emails`) can authenticate.
 - **Case insensitive**: `Example.COM` matches `example.com`.
 - **Exact match**: Subdomains must be listed explicitly.
 
