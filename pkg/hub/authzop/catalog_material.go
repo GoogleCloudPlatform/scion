@@ -138,6 +138,7 @@ var materialOperations = []OperationSpec{
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
 		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		Bearer:      NonUser(),
 	},
 
 	// =====================================================================

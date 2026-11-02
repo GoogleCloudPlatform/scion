@@ -67,9 +67,8 @@ const conduitIngressMinDrainDeadline = time.Millisecond
 // relay's default, so no relay promises a client more time than the hub
 // keeps the legs open.
 func conduitIngressDrainDeadline(now, signalAt, holdDeadline time.Time, grace time.Duration, graceSet bool) time.Duration {
-	// Explicit comparisons, not the min and max builtins: a pkg/hub test
-	// helper declares its own min(int, int), which shadows the builtin in
-	// the package's test build.
+	// Explicit comparisons rather than the min and max builtins (written
+	// when a pkg/hub test helper shadowed min in the test build).
 	fromSignal := conduit.DefaultDrainDeadline
 	if graceSet {
 		if c := relay.ShutdownDrainCap(grace); c < fromSignal {

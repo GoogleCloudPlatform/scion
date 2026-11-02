@@ -36,6 +36,7 @@ import (
 type CreateScheduleRequest struct {
 	Name      string `json:"name"`
 	CronExpr  string `json:"cronExpr"`
+	TimeZone  string `json:"timeZone,omitempty"` // IANA zone for CronExpr; empty or "UTC" means UTC
 	EventType string `json:"eventType"`
 	Payload   string `json:"payload,omitempty"` // Raw JSON payload (advanced)
 
@@ -52,11 +53,14 @@ type CreateScheduleRequest struct {
 
 // UpdateScheduleRequest is the API request for updating a recurring schedule.
 type UpdateScheduleRequest struct {
-	Name      string `json:"name,omitempty"`
-	CronExpr  string `json:"cronExpr,omitempty"`
-	EventType string `json:"eventType,omitempty"`
-	Payload   string `json:"payload,omitempty"`
-	Status    string `json:"status,omitempty"`
+	Name     string `json:"name,omitempty"`
+	CronExpr string `json:"cronExpr,omitempty"`
+	// TimeZone is the IANA zone for the cron expression. Absent leaves the
+	// stored zone unchanged; "" (or "UTC") sets it back to UTC.
+	TimeZone  *string `json:"timeZone,omitempty"`
+	EventType string  `json:"eventType,omitempty"`
+	Payload   string  `json:"payload,omitempty"`
+	Status    string  `json:"status,omitempty"`
 }
 
 // ListSchedulesResponse is the API response for listing schedules.
@@ -245,10 +249,15 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 		}
 	}
 
-	// Validate cron expression (standard 5-field, UTC-only).
-	cronSchedule, err := parseScheduleCron(req.CronExpr)
-	if err != nil {
+	// Validate the cron expression (standard 5-field, no zone prefix) and
+	// the time zone it is evaluated in (empty means UTC).
+	if _, err := parseScheduleCron(req.CronExpr); err != nil {
 		writeCronParseError(w, err)
+		return
+	}
+	timeZone, err := normalizeScheduleTimeZone(req.TimeZone)
+	if err != nil {
+		writeScheduleTimingError(w, err)
 		return
 	}
 
@@ -301,7 +310,11 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 	}
 
 	// Compute next run time
-	nextRunAt := cronSchedule.Next(time.Now().UTC())
+	nextRunAt, err := scheduleNextRun(req.CronExpr, timeZone, time.Now().UTC())
+	if err != nil {
+		writeScheduleTimingError(w, err)
+		return
+	}
 
 	// Determine creator identity
 	createdBy := ""
@@ -314,6 +327,7 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 		ProjectID: projectID,
 		Name:      req.Name,
 		CronExpr:  req.CronExpr,
+		TimeZone:  timeZone,
 		EventType: req.EventType,
 		Payload:   payload,
 		Status:    store.ScheduleStatusActive,
@@ -417,6 +431,7 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 	}
 	originalStatus := schedule.Status
 	originalCronExpr := schedule.CronExpr
+	originalTimeZone := schedule.TimeZone
 	originalEventType := schedule.EventType
 	originalPayload := schedule.Payload
 
@@ -505,17 +520,40 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 	// metadata-only, the same as omitting the field. Only an actual change
 	// writes the column, which keeps the field mask consistent with
 	// changesFutureDispatch below.
-	if req.CronExpr != "" && req.CronExpr != originalCronExpr {
-		// Validate new cron expression
-		cronSchedule, err := parseScheduleCron(req.CronExpr)
+	// The time zone works the same way: absent or equal to the stored
+	// value (after normalizing "UTC" to "") is no change. A change to
+	// either the expression or the zone recomputes NextRunAt from both.
+	cronChanged := req.CronExpr != "" && req.CronExpr != originalCronExpr
+	zoneChanged := false
+	newTimeZone := originalTimeZone
+	if req.TimeZone != nil {
+		tz, err := normalizeScheduleTimeZone(*req.TimeZone)
 		if err != nil {
-			writeCronParseError(w, err)
+			writeScheduleTimingError(w, err)
 			return
 		}
-		schedule.CronExpr = req.CronExpr
-		nextRunAt := cronSchedule.Next(time.Now().UTC())
+		newTimeZone = tz
+		zoneChanged = tz != originalTimeZone
+	}
+	if cronChanged || zoneChanged {
+		newCronExpr := originalCronExpr
+		if cronChanged {
+			newCronExpr = req.CronExpr
+		}
+		nextRunAt, err := scheduleNextRun(newCronExpr, newTimeZone, time.Now().UTC())
+		if err != nil {
+			writeScheduleTimingError(w, err)
+			return
+		}
+		if cronChanged {
+			schedule.CronExpr = newCronExpr
+			fields.CronExpr = true
+		}
+		if zoneChanged {
+			schedule.TimeZone = newTimeZone
+			fields.TimeZone = true
+		}
 		schedule.NextRunAt = &nextRunAt
-		fields.CronExpr = true
 		fields.NextRunAt = true
 	}
 	if req.EventType != "" && req.EventType != originalEventType {
@@ -536,36 +574,37 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 
 	// An enable transition (any prior status, e.g. paused, back to active)
 	// re-arms future dispatch the same way resumeSchedule does. If this
-	// request didn't already recompute NextRunAt via a real CronExpr change,
-	// it must be recomputed here from the stored cron: otherwise a schedule
-	// that went stale while paused (or was paused with a next_run_at already
-	// in the past) would reactivate carrying that stale time, and the
-	// scheduler would treat it as immediately due.
+	// request didn't already recompute NextRunAt via a real CronExpr or
+	// TimeZone change, it must be recomputed here from the stored cron
+	// expression and time zone: otherwise a schedule that went stale while
+	// paused (or was paused with a next_run_at already in the past) would
+	// reactivate carrying that stale time, and the scheduler would treat it
+	// as immediately due.
 	enabling := req.Status == store.ScheduleStatusActive && originalStatus != store.ScheduleStatusActive
-	if enabling && !fields.CronExpr {
+	if enabling && !fields.NextRunAt {
 		// A stored expression that no longer parses (for example one with a
 		// zone prefix, which is no longer supported) cannot be enabled; the
 		// user must edit it first.
-		cronSchedule, err := parseScheduleCron(schedule.CronExpr)
+		nextRunAt, err := scheduleNextRun(schedule.CronExpr, schedule.TimeZone, time.Now().UTC())
 		if err != nil {
-			writeCronParseError(w, err)
+			writeScheduleTimingError(w, err)
 			return
 		}
-		nextRunAt := cronSchedule.Next(time.Now().UTC())
 		schedule.NextRunAt = &nextRunAt
 		fields.NextRunAt = true
 	}
 
 	// Ruling Q2: a fully reauthorized mutation that changes future dispatch
-	// (payload/target/type/timing, or an enable transition) replaces the
-	// attribution and bumps authorization_revision atomically in the same
-	// write. A metadata-only edit (name, an unchanged cron/type/payload
-	// resent as-is, or a status change other than an enable, e.g. pause)
-	// does not re-attribute, and attribution is passed to the store only
-	// when it changed. Deriving this from the field mask itself (rather
-	// than from req's presence checks) is what keeps the two in sync: a
-	// dispatch field only re-attributes when the field mask also writes it.
-	changesFutureDispatch := fields.CronExpr || fields.EventType || fields.Payload || enabling
+	// (payload/target/type/timing including the time zone, or an enable
+	// transition) replaces the attribution and bumps authorization_revision
+	// atomically in the same write. A metadata-only edit (name, an
+	// unchanged cron/type/payload resent as-is, or a status change other
+	// than an enable, e.g. pause) does not re-attribute, and attribution is
+	// passed to the store only when it changed. Deriving this from the field
+	// mask itself (rather than from req's presence checks) is what keeps the
+	// two in sync: a dispatch field only re-attributes when the field mask
+	// also writes it.
+	changesFutureDispatch := fields.CronExpr || fields.TimeZone || fields.EventType || fields.Payload || enabling
 
 	// The write is conditioned on the revision this handler just read,
 	// regardless of whether this particular call replaces attribution: a
@@ -717,12 +756,11 @@ func (s *Server) resumeSchedule(w http.ResponseWriter, r *http.Request, projectI
 	// A stored expression that no longer parses (for example one with a
 	// zone prefix, which is no longer supported) cannot be resumed; the user
 	// must edit it first.
-	cronSchedule, err := parseScheduleCron(schedule.CronExpr)
+	nextRunAt, err := scheduleNextRun(schedule.CronExpr, schedule.TimeZone, time.Now().UTC())
 	if err != nil {
-		writeCronParseError(w, err)
+		writeScheduleTimingError(w, err)
 		return
 	}
-	nextRunAt := cronSchedule.Next(time.Now().UTC())
 
 	ceiling, ok := s.revisionAuthorityCeiling(w, r, projectID, ActionUpdate)
 	if !ok {

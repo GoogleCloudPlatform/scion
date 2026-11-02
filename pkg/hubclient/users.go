@@ -134,7 +134,7 @@ func (s *userService) List(ctx context.Context, opts *ListUsersOptions) (*ListUs
 
 // Get returns a user by ID.
 func (s *userService) Get(ctx context.Context, userID string) (*User, error) {
-	resp, err := s.c.get(ctx, "/api/v1/users/"+userID, nil)
+	resp, err := s.c.get(ctx, "/api/v1/users/"+url.PathEscape(userID), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -143,7 +143,7 @@ func (s *userService) Get(ctx context.Context, userID string) (*User, error) {
 
 // Update updates a user.
 func (s *userService) Update(ctx context.Context, userID string, req *UpdateUserRequest) (*User, error) {
-	resp, err := s.c.patch(ctx, "/api/v1/users/"+userID, req, nil)
+	resp, err := s.c.patch(ctx, "/api/v1/users/"+url.PathEscape(userID), req, nil)
 	if err != nil {
 		return nil, err
 	}

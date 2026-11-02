@@ -159,8 +159,8 @@ func runSignedDownload(t *testing.T, h *fakeSignedHub, tweak func(*signedDownloa
 	if tweak != nil {
 		tweak(&srv.signedDownload)
 	}
-	written, err := srv.signedWorkspaceDownload(context.Background(), CreateAgentRequest{ID: "agent-1"}, dir)
-	return dir, written, err
+	res, err := srv.signedWorkspaceDownload(context.Background(), CreateAgentRequest{ID: "agent-1"}, dir)
+	return dir, res.written, err
 }
 
 func requireSignedClass(t *testing.T, err error, class string) {

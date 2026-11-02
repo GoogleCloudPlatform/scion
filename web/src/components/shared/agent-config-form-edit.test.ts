@@ -728,19 +728,30 @@ describe('Resources: removing a stored value', () => {
   const note = (el: ScionAgentConfigForm) =>
     field(el, 'config.resources').querySelector('[data-testid="clear-note"]');
   const stored = { resources: { requests: { cpu: '1', memory: '2Gi' }, limits: { cpu: '4' } } };
+  // The agent's broker cannot apply a removed sub-field at a start.
+  const base = hubEditability('stopped');
+  const unsupported: AgentEditability = {
+    ...base,
+    fields: {
+      ...base.fields,
+      'config.resources': { ...base.fields['config.resources'], subfieldClearUnsupported: true },
+    },
+  };
 
   it('emptying one stored value says the removal waits for a reincarnation', async () => {
-    const el = await mount('stopped', { values: stored });
+    const el = await mount('stopped', { values: stored }, unsupported);
     expect(note(el)).toBeNull();
     await setSub(el, 'limits.cpu', '');
-    expect(note(el)!.textContent).toContain('next reincarnation');
+    expect(note(el)!.textContent).toContain(
+      'Clearing a resource limit takes effect at the next reincarnation'
+    );
     expect(el.collectConfigPatch()).toEqual({
       resources: { requests: { cpu: '1', memory: '2Gi' } },
     });
   });
 
   it('emptying every stored value sends null and says the same', async () => {
-    const el = await mount('stopped', { values: stored });
+    const el = await mount('stopped', { values: stored }, unsupported);
     for (const name of ['requests.cpu', 'requests.memory', 'limits.cpu'])
       await setSub(el, name, '');
     expect(el.collectConfigPatch()).toEqual({ resources: null });
@@ -752,7 +763,7 @@ describe('Resources: removing a stored value', () => {
     await setSub(el, 'limits.cpu', '');
     // The agent starts running: the drafted edit is now a held edit.
     el.editability = hubEditability('running', {
-      'config.resources': { tier: 'T1', disposition: 'held' },
+      'config.resources': { tier: 'T1', disposition: 'held', subfieldClearUnsupported: true },
     });
     await el.updateComplete;
     expect(field(el, 'config.resources').dataset.disposition).toBe('held');
@@ -760,11 +771,31 @@ describe('Resources: removing a stored value', () => {
     expect(note(el)!.textContent).not.toContain('next start');
   });
 
-  it('changing or adding a value shows no note', async () => {
+  it('a held removal shows no note when the broker applies it at the next start', async () => {
     const el = await mount('stopped', { values: stored });
+    await setSub(el, 'limits.cpu', '');
+    el.editability = hubEditability('running', {
+      'config.resources': { tier: 'T1', disposition: 'held' },
+    });
+    await el.updateComplete;
+    expect(field(el, 'config.resources').dataset.disposition).toBe('held');
+    expect(note(el)).toBeNull();
+  });
+
+  it('changing or adding a value shows no note', async () => {
+    const el = await mount('stopped', { values: stored }, unsupported);
     await setSub(el, 'limits.cpu', '8');
     await setSub(el, 'disk', '20Gi');
     expect(note(el)).toBeNull();
+  });
+
+  it('shows no note when the broker applies the removal at the next start', async () => {
+    const el = await mount('stopped', { values: stored });
+    await setSub(el, 'limits.cpu', '');
+    expect(note(el)).toBeNull();
+    expect(el.collectConfigPatch()).toEqual({
+      resources: { requests: { cpu: '1', memory: '2Gi' } },
+    });
   });
 });
 

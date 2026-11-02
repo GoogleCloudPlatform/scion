@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
@@ -213,6 +214,7 @@ func workspaceHoldsOnlyIdentity(w string) (bool, error) {
 // complete stage holding the identity entry, which recovery renames into
 // place (recoverLocalBootstrapStages).
 func (s *Server) signedBootstrapAbsent(ctx context.Context, req CreateAgentRequest, w string) (skipped bool, err error) {
+	start := time.Now()
 	parent, base := filepath.Dir(w), filepath.Base(w)
 	exists := false
 	if fi, err := os.Lstat(w); err == nil {
@@ -242,7 +244,8 @@ func (s *Server) signedBootstrapAbsent(ctx context.Context, req CreateAgentReque
 	if err := os.Mkdir(stagePath, 0o755); err != nil {
 		return false, &signedCommitError{Class: signedCommitStage}
 	}
-	if _, err := s.signedWorkspaceDownload(ctx, req, stagePath); err != nil {
+	res, err := s.signedWorkspaceDownload(ctx, req, stagePath)
+	if err != nil {
 		_ = os.RemoveAll(stagePath)
 		return false, err
 	}
@@ -275,6 +278,7 @@ func (s *Server) signedBootstrapAbsent(ctx context.Context, req CreateAgentReque
 	if err := signedBootstrapHook("after_rename"); err != nil {
 		return false, err
 	}
+	s.logSignedBootstrapDone(req, res, start)
 	return false, nil
 }
 
@@ -385,6 +389,7 @@ func recoverLocalBootstrapStages(parent, base string) error {
 // everything into a stage beside W first, so a failed download leaves W as
 // it was, then applies the stage into W in place.
 func (s *Server) signedBootstrapInPlace(ctx context.Context, req CreateAgentRequest, w string) error {
+	start := time.Now()
 	parent, base := filepath.Dir(w), filepath.Base(w)
 	if err := os.MkdirAll(w, 0o755); err != nil {
 		return &signedCommitError{Class: signedCommitStage}
@@ -397,12 +402,12 @@ func (s *Server) signedBootstrapInPlace(ctx context.Context, req CreateAgentRequ
 	if err := os.Mkdir(stagePath, 0o755); err != nil {
 		return &signedCommitError{Class: signedCommitStage}
 	}
-	written, err := s.signedWorkspaceDownload(ctx, req, stagePath)
+	res, err := s.signedWorkspaceDownload(ctx, req, stagePath)
 	if err != nil {
 		_ = os.RemoveAll(stagePath)
 		return err
 	}
-	if err := applyStageInPlace(parent, stage, base, written); err != nil {
+	if err := applyStageInPlace(parent, stage, base, res.written); err != nil {
 		if errors.Is(err, errSignedBootstrapCrash) {
 			return err
 		}
@@ -412,6 +417,7 @@ func (s *Server) signedBootstrapInPlace(ctx context.Context, req CreateAgentRequ
 	if err := os.RemoveAll(stagePath); err != nil {
 		return &signedCommitError{Class: signedCommitApply}
 	}
+	s.logSignedBootstrapDone(req, res, start)
 	return nil
 }
 
@@ -553,6 +559,7 @@ func (s *Server) applySharedSignedBootstrap(ctx context.Context, req CreateAgent
 	wsPath := filepath.Join(base, rel)
 	parent, leaf := filepath.Dir(wsPath), filepath.Base(wsPath)
 	err = provision.WithWorkspaceProvisionLocks(ctx, wsPath, func(lockCtx context.Context) error {
+		start := time.Now()
 		// Every writer of a stage for this leaf holds these locks while the
 		// stage exists, so any stage seen here is stale.
 		if _, err := removeStaleBootstrapStages(parent, leaf); err != nil {
@@ -578,7 +585,8 @@ func (s *Server) applySharedSignedBootstrap(ctx context.Context, req CreateAgent
 			return &signedCommitError{Class: signedCommitStage}
 		}
 		stagePath := filepath.Join(parent, stage)
-		if _, err := s.signedWorkspaceDownload(lockCtx, req, stagePath); err != nil {
+		res, err := s.signedWorkspaceDownload(lockCtx, req, stagePath)
+		if err != nil {
 			_ = os.RemoveAll(stagePath)
 			return err
 		}
@@ -611,7 +619,11 @@ func (s *Server) applySharedSignedBootstrap(ctx context.Context, req CreateAgent
 		if err := lockCtx.Err(); err != nil {
 			return fmt.Errorf("provisioning lock lost: %w", err)
 		}
-		return provision.MarkProvisioned(provision.ProjectStateDir(wsPath))
+		if err := provision.MarkProvisioned(provision.ProjectStateDir(wsPath)); err != nil {
+			return err
+		}
+		s.logSignedBootstrapDone(req, res, start)
+		return nil
 	})
 	return skipped, err
 }

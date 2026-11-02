@@ -120,7 +120,7 @@ While the deletion is in progress:
 - A plain delete, and any change to the user, is refused with `409 user_deletion_in_progress` (with `details.deletionId`). Another forced delete joins the deletion and retries its agents at once (**Retry** in the panel).
 - Creating or restoring an agent for the user (an agent owned by the user, or started by one of the user's agents) is refused with `409 conflict`.
 
-An agent whose Runtime Broker cannot be reached stays `failed`, and the deletion stays in progress, with no timeout: the Hub never reports an agent as stopped unless its teardown was confirmed. To finish, delete that agent from its page with force (`DELETE /api/v1/agents/{id}?force=true`); it is then reported as `removed`, and the completion records how many agents were stopped and how many were removed. Turning the experiment off stops new forced deletes only: a deletion already accepted runs to completion, because the user's authority is already revoked and what remains is stopping the agents the requester was allowed to delete. While the experiment is off, the **Deletion status** panel and `GET /api/v1/users/{id}/deletion` are not available.
+An agent whose Runtime Broker cannot be reached stays `failed`, and the deletion stays in progress, with no timeout: the Hub never reports an agent as stopped unless its teardown was confirmed. To finish, delete that agent from its page with force (`DELETE /api/v1/agents/{id}?force=true`); it is then reported as `removed`, and the completion records how many agents were stopped and how many were removed. An agent whose delete is refused because its saved placement is inconsistent also stays `failed`, and deleting it with force does not remove it: a force delete is refused for the same reason. Its latest error usually starts with `placement conflict:`, followed by the refusal code; if the refusal was recorded on another Hub process, or before the Hub restarted, it is the refusal's message alone, which links to the same section. See [Inconsistent agent placement](/scion/hosted/ha/multi-broker/#inconsistent-agent-placement). Turning the experiment off stops new forced deletes only: a deletion already accepted runs to completion, because the user's authority is already revoked and what remains is stopping the agents the requester was allowed to delete. While the experiment is off, the **Deletion status** panel and `GET /api/v1/users/{id}/deletion` are not available.
 
 ## OAuth Authentication
 
@@ -205,30 +205,44 @@ Users whose only email address is unverified at their provider can no longer sig
 
 ## Domain Authorization
 
-You can restrict authentication to specific email domains using the `server.auth.authorized_domains` setting. This provides an additional layer of access control beyond OAuth authentication. See also [Who can sign in](#who-can-sign-in-user-access-mode).
+You can restrict authentication to specific email domains using the `server.auth.authorized_domains` setting. This provides an additional layer of access control beyond OAuth authentication. See also [Who can sign in](#who-can-sign-in-user-access-mode) and [`server.auth.authorized_domains`: environment first](/scion/reference/admin-settings/#serverauthauthorized_domains-environment-first).
 
 ### Configuration
 
-Set the environment variable with a comma-separated list of allowed domains:
-
-```bash
-# Allow only users from these domains
-export SCION_SEED_SERVER_AUTH_AUTHORIZEDDOMAINS="example.com,mycompany.org"
-```
-
-Or configure in `server.yaml`:
+Configure in `settings.yaml`:
 
 ```yaml
-auth:
-  authorizedDomains:
-    - example.com
-    - mycompany.org
+server:
+  auth:
+    authorized_domains:
+      - example.com
+      - mycompany.org
 ```
+
+Or set the seed or environment pin with a comma-separated list of allowed domains:
+
+```bash
+# Seed the initial list when no list is saved in the database
+export SCION_SEED_SERVER_AUTH_AUTHORIZEDDOMAINS="example.com,mycompany.org"
+
+# Or pin the list on this node (overrides any list saved in the database)
+export SCION_SERVER_AUTH_AUTHORIZEDDOMAINS="example.com,mycompany.org"
+```
+
+### Precedence and Live Updates
+
+`server.auth.authorized_domains` resolves in environment-first order so a deployment pin cannot be widened from the UI:
+
+1. **Environment pin (`SCION_SERVER_AUTH_AUTHORIZEDDOMAINS`)**: When set on the node, its list is always enforced on that node; a database save is stored for unpinned nodes, and on the pinned node the save report (`reload`) lists `server.auth.authorized_domains` in `skipped` (not `applied_keys`) with reason `"Saved; a deployment setting on this Hub pins this value."`
+2. **Database (`hub_settings`)**: Otherwise, a list saved through the Web UI (**Admin -> Server Config -> Access Control**), `PUT /api/v1/admin/server-config`, or `scion hub settings set` is loaded at startup and applied live across replicas without a restart. Clearing the saved list (an empty `authorized_domains` in the stored `access` row) uses the startup value (`settings.yaml` and `SCION_SERVER_AUTH_AUTHORIZEDDOMAINS`), so a save never allows more domains than the deployment does.
+3. **File and seed**: Otherwise, the list in `settings.yaml` (`server.auth.authorized_domains`) or `SCION_SEED_SERVER_AUTH_AUTHORIZEDDOMAINS` is used.
+
+A save of `authorized_domains` or `admin_emails` (or a reset of the `access` section via `DELETE /api/v1/admin/server-config/sections/access`) that would leave the saving administrator's own email rejected is refused with `422 validation_error` (`"This authorized_domains list would refuse sign-in for your account. Include your email domain, or add your email to admin_emails."`).
 
 ### Behavior
 
 - **Empty list (default)**: All email domains are allowed.
-- **Non-empty list**: Only emails from listed domains can authenticate.
+- **Non-empty list**: Only emails from listed domains (or addresses in `server.auth.admin_emails`) can authenticate.
 - **Case insensitive**: `Example.COM` matches `example.com`.
 - **Exact match**: Subdomains must be listed explicitly.
 

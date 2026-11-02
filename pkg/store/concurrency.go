@@ -174,7 +174,7 @@ const (
 
 	// LockFailedMessageRetention guards the periodic purge of messages in
 	// dispatch_state="failed" that have exceeded the configured retention
-	// window (Server.Config.FailedMessageRetentionDays).
+	// window (messaging.failed_message_retention_days).
 	LockFailedMessageRetention AdvisoryLockKey = 0x5C100019
 
 	// LockAgentLaunchDeadline guards RunLaunchReaperTick, the T1 async-create

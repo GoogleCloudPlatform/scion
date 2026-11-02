@@ -150,6 +150,47 @@ func TestGetServerConfigSchema(t *testing.T) {
 	assert.JSONEq(t, `{"type":"object"}`, string(schema["endpoints"].Schema))
 }
 
+func TestProjectDefaults_GetAndUpdate(t *testing.T) {
+	svc, got := settingsTestServer(t, http.StatusOK, `{"default_scratchpad":true}`)
+	cur, err := svc.GetProjectDefaults(context.Background())
+	require.NoError(t, err)
+	assert.JSONEq(t, `true`, string(cur["default_scratchpad"]))
+
+	_, err = svc.UpdateProjectDefaults(context.Background(), map[string]interface{}{"default_scratchpad": nil})
+	require.NoError(t, err)
+	req := (*got)[1]
+	assert.Equal(t, http.MethodPut, req.Method)
+	assert.Equal(t, "/api/v1/admin/project-defaults", req.Path)
+	assert.JSONEq(t, `null`, string(req.Body["default_scratchpad"]))
+}
+
+func TestExperiments_UpdateAndReset(t *testing.T) {
+	body := `{"revision":3,"malformed":false,"experiments":[{"name":"x","default":false,"override":true,"enabled":true}],"unknown_overrides":{}}`
+	svc, got := settingsTestServer(t, http.StatusOK, body)
+
+	on := true
+	res, err := svc.UpdateExperiments(context.Background(), map[string]*bool{"x": &on, "y": nil}, 3)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), res.Revision)
+	req := (*got)[0]
+	assert.Equal(t, http.MethodPut, req.Method)
+	assert.Equal(t, "/api/v1/admin/experiments", req.Path)
+	assert.JSONEq(t, `{"x":true,"y":null}`, string(req.Body["overrides"]))
+	assert.JSONEq(t, `3`, string(req.Body["expected_revision"]))
+
+	_, err = svc.ResetExperiments(context.Background(), 3, false)
+	require.NoError(t, err)
+	req = (*got)[1]
+	assert.Equal(t, http.MethodDelete, req.Method)
+	assert.JSONEq(t, `3`, string(req.Body["expected_revision"]))
+	_, present := req.Body["confirm_reset_malformed"]
+	assert.False(t, present)
+
+	_, err = svc.ResetExperiments(context.Background(), 0, true)
+	require.NoError(t, err)
+	assert.JSONEq(t, `true`, string((*got)[2].Body["confirm_reset_malformed"]))
+}
+
 // --- error envelope -------------------------------------------------------
 
 func settingsErrorFrom(t *testing.T, status int, body string) *SettingsError {

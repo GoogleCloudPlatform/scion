@@ -36,7 +36,7 @@ func TestParseChatRetentionDoc(t *testing.T) {
 		{name: "window below minimum", doc: `{"messages_retention_days":6}`, wantErr: true},
 		{name: "zero window", doc: `{"messages_retention_days":0}`, wantErr: true},
 		{name: "sweep tuning", doc: `{"sweep":{"chunk_size":25,"pause_ms":0,"tick_budget_seconds":5,"tick_interval_minutes":1}}`,
-			want: ChatRetentionConfig{ChunkSize: 25, PauseMS: 0, TickBudgetSeconds: 5, TickIntervalMinutes: 1}},
+			want: ChatRetentionConfig{DeletedConversationGraceDays: 30, ChunkSize: 25, PauseMS: 0, TickBudgetSeconds: 5, TickIntervalMinutes: 1}},
 		{name: "partial sweep", doc: `{"sweep":{"chunk_size":1000}}`,
 			want: func() ChatRetentionConfig { c := def; c.ChunkSize = 1000; return c }()},
 		{name: "chunk below floor", doc: `{"sweep":{"chunk_size":24}}`, wantErr: true},
@@ -48,7 +48,13 @@ func TestParseChatRetentionDoc(t *testing.T) {
 		{name: "budget over the scheduler limit", doc: `{"sweep":{"tick_budget_seconds":41}}`, wantErr: true},
 		{name: "pause over the limit", doc: `{"sweep":{"pause_ms":10001}}`, wantErr: true},
 		{name: "zero interval", doc: `{"sweep":{"tick_interval_minutes":0}}`, wantErr: true},
-		{name: "unknown field", doc: `{"deleted_conversation_grace_days":30}`, wantErr: true},
+		{name: "grace", doc: `{"enabled":true,"deleted_conversation_grace_days":1}`,
+			want: func() ChatRetentionConfig { c := def; c.Enabled = true; c.DeletedConversationGraceDays = 1; return c }()},
+		{name: "largest grace", doc: `{"deleted_conversation_grace_days":36500}`,
+			want: func() ChatRetentionConfig { c := def; c.DeletedConversationGraceDays = 36500; return c }()},
+		{name: "zero grace", doc: `{"deleted_conversation_grace_days":0}`, wantErr: true},
+		{name: "grace above the cap", doc: `{"deleted_conversation_grace_days":36501}`, wantErr: true},
+		{name: "unknown field", doc: `{"failed_message_retention_days":7}`, wantErr: true},
 		{name: "unknown sweep field", doc: `{"sweep":{"foo":1}}`, wantErr: true},
 		{name: "malformed", doc: `{`, wantErr: true},
 	}
@@ -86,7 +92,7 @@ func TestParseChatRetentionDoc(t *testing.T) {
 func TestChatRetentionConfigSettingsRoundTrip(t *testing.T) {
 	for _, c := range []ChatRetentionConfig{
 		DefaultChatRetentionConfig(),
-		{Enabled: true, MessagesRetentionDays: 30, ChunkSize: 100, PauseMS: 10, TickBudgetSeconds: 5, TickIntervalMinutes: 2},
+		{Enabled: true, MessagesRetentionDays: 30, DeletedConversationGraceDays: 3, ChunkSize: 100, PauseMS: 10, TickBudgetSeconds: 5, TickIntervalMinutes: 2},
 	} {
 		doc, err := json.Marshal(c.Settings())
 		if err != nil {

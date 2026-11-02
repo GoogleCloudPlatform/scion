@@ -16,6 +16,7 @@ package hubclient
 
 import (
 	"context"
+	"net/url"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -92,7 +93,7 @@ func (s *skillRegistryService) List(ctx context.Context) (*ListSkillRegistriesRe
 }
 
 func (s *skillRegistryService) Get(ctx context.Context, id string) (*SkillRegistry, error) {
-	resp, err := s.c.get(ctx, "/api/v1/skill-registries/"+id, nil)
+	resp, err := s.c.get(ctx, "/api/v1/skill-registries/"+url.PathEscape(id), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +109,7 @@ func (s *skillRegistryService) Create(ctx context.Context, req *CreateSkillRegis
 }
 
 func (s *skillRegistryService) Update(ctx context.Context, id string, req *UpdateSkillRegistryRequest) (*SkillRegistry, error) {
-	resp, err := s.c.put(ctx, "/api/v1/skill-registries/"+id, req, nil)
+	resp, err := s.c.put(ctx, "/api/v1/skill-registries/"+url.PathEscape(id), req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +117,7 @@ func (s *skillRegistryService) Update(ctx context.Context, id string, req *Updat
 }
 
 func (s *skillRegistryService) Delete(ctx context.Context, id string) error {
-	resp, err := s.c.delete(ctx, "/api/v1/skill-registries/"+id, nil)
+	resp, err := s.c.delete(ctx, "/api/v1/skill-registries/"+url.PathEscape(id), nil)
 	if err != nil {
 		return err
 	}
@@ -124,7 +125,7 @@ func (s *skillRegistryService) Delete(ctx context.Context, id string) error {
 }
 
 func (s *skillRegistryService) Pin(ctx context.Context, id string, req *PinSkillHashRequest) error {
-	resp, err := s.c.post(ctx, "/api/v1/skill-registries/"+id+"/pin", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/skill-registries/"+url.PathEscape(id)+"/pin", req, nil)
 	if err != nil {
 		return err
 	}

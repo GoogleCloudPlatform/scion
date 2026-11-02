@@ -170,7 +170,7 @@ func (o *orderingStore) UpsertHubSetting(ctx context.Context, section string, va
 	if section == HubSettingSectionUnitDrift {
 		o.upserts++
 		calls, _ := os.ReadFile(o.calls)
-		if strings.Contains(o.log.String(), "==> Restarting service") || strings.Contains(string(calls), "systemctl restart") {
+		if strings.Contains(o.log.String(), "==> Restarting hub") || strings.Contains(string(calls), "-n systemctl restart") {
 			o.restartBegunAtUpsert = true
 		}
 	}

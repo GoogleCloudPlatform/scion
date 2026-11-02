@@ -345,7 +345,7 @@ describe('scion-health-attention hub-paused schedules', () => {
       { ...pausedRow, reason: 'cron_zone_unsupported', target: '', updated_at: null },
     ]);
     expect(root.querySelector('.paused-detail')!.textContent!.trim()).toBe(
-      'Paused by the hub: its cron expression names a time zone, which is not supported'
+      'Paused by the hub: its cron expression has a zone prefix, which is not supported: set its time zone field instead'
     );
   });
 
@@ -384,7 +384,7 @@ describe('pausedReasonLabel', () => {
       'the agent or user it runs under was deleted'
     );
     expect(pausedReasonLabel('cron_zone_unsupported')).toBe(
-      'its cron expression names a time zone, which is not supported'
+      'its cron expression has a zone prefix, which is not supported: set its time zone field instead'
     );
     expect(pausedReasonLabel('other')).toBe(PAUSED_REASON_GENERIC);
     expect(pausedReasonLabel('constructor')).toBe(PAUSED_REASON_GENERIC);

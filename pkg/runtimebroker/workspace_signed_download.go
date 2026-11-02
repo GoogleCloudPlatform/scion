@@ -193,25 +193,47 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 	}
 }
 
+// signedDownloadResult is what a completed signed download wrote.
+type signedDownloadResult struct {
+	// written are the relative paths written, in page order.
+	written []string
+	// bytes is the total size of the files written.
+	bytes int64
+}
+
 // signedWorkspaceDownload downloads the agent's uploaded workspace files
 // into the staging directory dir through the Hub's signed URLs and returns
-// the relative paths it wrote. It never reads the bucket with this broker's
-// credentials.
-func (s *Server) signedWorkspaceDownload(ctx context.Context, req CreateAgentRequest, dir string) ([]string, error) {
+// the relative paths it wrote and their total size. It never reads the
+// bucket with this broker's credentials.
+func (s *Server) signedWorkspaceDownload(ctx context.Context, req CreateAgentRequest, dir string) (signedDownloadResult, error) {
 	st := s.signedDownload.resolved()
 	if st.fetchPage == nil {
 		st.fetchPage = s.fetchSignedWorkspacePage
 	}
 	root, err := os.OpenRoot(dir)
 	if err != nil {
-		return nil, &signedDownloadError{Stage: "file", Page: 0, File: -1, Class: signedClassWrite}
+		return signedDownloadResult{}, &signedDownloadError{Stage: "file", Page: 0, File: -1, Class: signedClassWrite}
 	}
 	defer func() { _ = root.Close() }()
 	d := &signedDownloader{st: st, req: req, root: root}
 	if err := d.run(ctx); err != nil {
-		return nil, err
+		return signedDownloadResult{}, err
 	}
-	return d.written, nil
+	return signedDownloadResult{written: d.written, bytes: d.bytes}, nil
+}
+
+// msgSignedBootstrapDone is the message of the one Info line a completed
+// signed-URL workspace bootstrap logs.
+const msgSignedBootstrapDone = "Workspace bootstrapped through signed URLs"
+
+// logSignedBootstrapDone logs a completed signed-URL workspace bootstrap at
+// Info: the agent, the number of files and bytes written, and the time since
+// start, which is taken under the workspace lock, so it covers staging,
+// download and commit but not the lock wait. It never names a URL or a path.
+func (s *Server) logSignedBootstrapDone(req CreateAgentRequest, res signedDownloadResult, start time.Time) {
+	s.agentLifecycleLog.Info(msgSignedBootstrapDone,
+		"agent_id", req.ID, "name", req.Name, "project_id", req.ProjectID,
+		"files", len(res.written), "bytes", res.bytes, "elapsed", time.Since(start).String())
 }
 
 // fetchSignedWorkspacePage requests one page from the Hub connection the
@@ -237,6 +259,9 @@ type signedDownloader struct {
 	root *os.Root
 	// written are the relative paths written, in page order.
 	written []string
+	// bytes is the total listed size of written; a file is only completed
+	// when its length matches its listed size.
+	bytes int64
 }
 
 func (d *signedDownloader) run(ctx context.Context) error {
@@ -335,6 +360,7 @@ func (d *signedDownloader) downloadPage(ctx context.Context, page int, cursor st
 	for _, f := range resp.Files {
 		seen[f.Path] = true
 		d.written = append(d.written, f.Path)
+		d.bytes += f.Size
 	}
 
 	done := make(map[string]bool, len(resp.Files))
