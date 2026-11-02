@@ -414,6 +414,10 @@ The environment values come from `env_values` in `GET /api/v1/admin/server-confi
 
 The superseded notice names the layer each deployment value comes from: `SCION_SERVER_*`, `settings.yaml` (or the `--config` location), `SCION_SEED_*`, or *built-in default* for a value that no setting or variable sets. A layer is named when it sets the key, even to the default value, so a `SCION_SEED_*` value equal to the default is shown as `SCION_SEED_*`. The admin API reports these as `source` in `superseded_keys`: `server_env`, `yaml`, `seed_env`, or `default`.
 
+### Saving changed sections
+
+On a database-backed or workstation Hub, **Save & Reload** on the Server Configuration page sends only the settings sections you changed, each in full, together with the revision each section had when the page loaded. Sections you did not touch are not sent, so a change another admin saved to them is kept. If another admin saved one of the sections you changed after the page loaded, the Hub refuses the save with `409 revision_conflict` and nothing in that section is overwritten; the page shows the "Settings changed since you loaded this page" banner, and **Reload** fetches the current values and revisions. A save with no changes sends nothing and reports *No changes to save*. The Federation page sends its section's revision the same way. On a settings-file Hub the page sends the full configuration, as before, without revisions.
+
 ### Error Handling
 
 The admin UI provides structured feedback on save. Every error uses the common envelope `{"error": {"code", "message", "details"}}` (see [Settings save errors](/scion/reference/api/#admin-apiv1admin)):
