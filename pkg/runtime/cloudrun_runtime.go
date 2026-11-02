@@ -82,6 +82,10 @@ type CloudRunRuntime struct {
 	// Nil in production (provisionCloudRunNFS); tests inject a stub so Run
 	// can reach the Instances API without a mounted NFS export.
 	provisionNFS func(ctx context.Context, cfg RunConfig, agentID string, uid, gid int) (*cloudRunNFSProvisionPaths, error)
+	// testActAs overrides how the doctor check asks IAM whether the caller
+	// may act as the instance service account. Nil in production
+	// (testActAsIAM); tests inject a stub.
+	testActAs actAsTester
 
 	// resolveMu protects the resolution of GCP metadata. When ProjectID
 	// and Location are both empty (auto-detected Cloud Run environment),
