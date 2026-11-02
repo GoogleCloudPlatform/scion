@@ -198,6 +198,10 @@ runtimes:
 				require.NoError(t, err)
 				a, err = s.GetAgent(ctx, a.ID)
 				require.NoError(t, err)
+				// The agent's own project edge from a project member: a hub
+				// Server issues an agent credential only to an agent with
+				// recorded provenance in good standing.
+				seedAgentEdge(t, s, tid("user-e2e-cred"), a)
 				if tc.running {
 					mgr.run(name, "cid-before", projectID, scionDir, "run-before")
 				}
