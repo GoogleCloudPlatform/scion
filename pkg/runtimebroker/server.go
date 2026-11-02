@@ -487,16 +487,21 @@ type Server struct {
 
 	// auxDiscoveryDone is closed when the background auxiliary runtime
 	// discovery pass (startAuxiliaryRuntimeDiscovery) has finished, nil
-	// when none was started. Guarded by auxDiscoveryMu.
-	auxDiscoveryMu     sync.Mutex
-	auxDiscoveryDone   chan struct{}
-	auxDiscoveryCancel context.CancelFunc
+	// when none was started; auxDiscoveryCancel stops the running pass
+	// (Shutdown); auxDiscoveryStopped, set by Shutdown, keeps a later start
+	// from starting a pass. All three are guarded by auxDiscoveryMu.
+	auxDiscoveryMu      sync.Mutex
+	auxDiscoveryDone    chan struct{}
+	auxDiscoveryCancel  context.CancelFunc
+	auxDiscoveryStopped bool
 
 	// auxCheckTimeout, when positive, overrides auxProfileCheckTimeout for
 	// this server; afterAuxDiscovery, when set, replaces recoverLaunches at
-	// the end of the pass. Both for tests.
-	auxCheckTimeout   time.Duration
-	afterAuxDiscovery func()
+	// the end of the pass; afterLateAuxResult, when set, is called when
+	// applyLateAuxResult returns. All for tests.
+	auxCheckTimeout    time.Duration
+	afterAuxDiscovery  func()
+	afterLateAuxResult func()
 
 	// onHubConnectionsStarted, when set (tests only), is called right after
 	// startServices has started every hub connection.
@@ -2224,6 +2229,9 @@ func (s *Server) checkAuxProfileCandidates(ctx context.Context, cands []auxProfi
 // unless its identity is the default's or is already registered, and the
 // profile's unavailable state is cleared. A failed one stays reported.
 func (s *Server) applyLateAuxResult(ctx context.Context, c auxProfileCandidate, r auxCheckResult, defaultIdentity string) {
+	if s.afterLateAuxResult != nil {
+		defer s.afterLateAuxResult()
+	}
 	if ctx.Err() != nil || r.rt == nil || r.rt.Name() == "error" {
 		return
 	}

@@ -99,6 +99,13 @@ func (s *Server) startAuxiliaryRuntimeDiscovery(ctx context.Context) {
 	pctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	s.auxDiscoveryMu.Lock()
+	if s.auxDiscoveryStopped {
+		// Shutdown already ran: start no pass that it could not stop.
+		s.auxDiscoveryMu.Unlock()
+		cancel()
+		slog.Info("Server stopping: auxiliary runtime discovery and launch recovery not started")
+		return
+	}
 	s.auxDiscoveryDone, s.auxDiscoveryCancel = done, cancel
 	s.auxDiscoveryMu.Unlock()
 	go func() {
@@ -119,9 +126,11 @@ func (s *Server) startAuxiliaryRuntimeDiscovery(ctx context.Context) {
 }
 
 // stopAuxiliaryRuntimeDiscovery cancels a running pass and waits for it,
-// up to auxDiscoveryStopWait. Called by Shutdown.
+// up to auxDiscoveryStopWait, and keeps a later start from starting one.
+// Called by Shutdown.
 func (s *Server) stopAuxiliaryRuntimeDiscovery() {
 	s.auxDiscoveryMu.Lock()
+	s.auxDiscoveryStopped = true
 	cancel := s.auxDiscoveryCancel
 	s.auxDiscoveryMu.Unlock()
 	if cancel == nil {
@@ -252,5 +261,5 @@ func profileRuntimeCheckName(profileName string) string {
 func logAuxProfileCheckTimedOut(profileName string, timeout time.Duration) {
 	slog.Warn("Runtime of a profile is not available on this broker: its runtime check did not finish in time; agents that use it are not found until it resolves",
 		"profile", profileName, "timeout", timeout.String(),
-		"hint", "fix the profile's runtime configuration if agents use it, or remove the profile from your settings if it is no longer used")
+		"hint", "fix the profile's runtime configuration if agents use it")
 }
