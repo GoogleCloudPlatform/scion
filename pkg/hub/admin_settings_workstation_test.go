@@ -276,10 +276,21 @@ func TestWorkstation_PutServerConfig_ClearsFromPresence(t *testing.T) {
 			fileKeys: []string{"server.hub.cors.enabled"},
 		},
 		{
-			name:     "broker CORS off without a cors block",
-			body:     `{"server":{"broker":{"cors":{"enabled":false}}}}`,
-			want:     map[string]interface{}{"server.broker.cors.enabled": false, "server.broker.broker_id": "b-123"},
+			// Broker CORS is off by default, so an absent block means CORS
+			// off for the broker and the explicit true must create the block.
+			name:     "broker CORS on without a cors block",
+			body:     `{"server":{"broker":{"cors":{"enabled":true}}}}`,
+			want:     map[string]interface{}{"server.broker.cors.enabled": true, "server.broker.broker_id": "b-123"},
 			fileKeys: []string{"server.broker.cors.enabled"},
+		},
+		{
+			// The mirror case: an explicit false equals the default (off),
+			// so nothing is written and no block is created.
+			name:     "broker CORS off without a cors block is a no-op",
+			body:     `{"server":{"broker":{"cors":{"enabled":false}}}}`,
+			absent:   [][]string{{"server", "broker", "cors"}},
+			want:     map[string]interface{}{"server.broker.broker_id": "b-123"},
+			fileKeys: nil,
 		},
 		{
 			name: "null on the broker block keeps the hub-owned identity",
@@ -449,7 +460,7 @@ func TestWorkstation_PutServerConfig_NoPartialWrites(t *testing.T) {
 		status int
 	}{
 		{"invalid Layer-1 value", `{"default_timezone":"Not/AZone","server":{"hub":{"port":9999}}}`, http.StatusUnprocessableEntity},
-		{"invalid file-routed value", `{"quotas":{"enforce_broker_quotas":false},"server":{"hub":{"agent_endpoint":"not a url"}}}`, http.StatusBadRequest},
+		{"invalid file-routed value", `{"quotas":{"enforce_broker_quotas":false},"server":{"hub":{"agent_endpoint":"not a url"}}}`, http.StatusUnprocessableEntity},
 		{"unknown key", `{"quotas":{"enforce_broker_quotas":false},"server":{"hub":{"port":9999,"bogus":1}}}`, http.StatusUnprocessableEntity},
 		{"revision conflict", `{"expected_revisions":{"quotas":999},"quotas":{"enforce_broker_quotas":false},"server":{"hub":{"port":9999}}}`, http.StatusConflict},
 	}
@@ -720,8 +731,10 @@ func TestWorkstation_PutServerConfig_InvalidModeRejected(t *testing.T) {
 	before := readFileString(t, settingsPath)
 	for _, mode := range []string{"Hosted", "prod"} {
 		rr := putServerConfig(t, srv, `{"server":{"mode":"`+mode+`"}}`)
-		if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "invalid server.mode") {
-			t.Errorf("mode %q: expected 400 invalid server.mode, got %d: %s", mode, rr.Code, rr.Body.String())
+		if rr.Code != http.StatusUnprocessableEntity || !strings.Contains(rr.Body.String(), "invalid server.mode") {
+			t.Errorf("mode %q: expected 422 invalid server.mode, got %d: %s", mode, rr.Code, rr.Body.String())
+		} else if e := settingsErrorEntries(t, rr); e[0].Field != "server.mode" {
+			t.Errorf("mode %q: field = %q, want server.mode", mode, e[0].Field)
 		}
 	}
 	if after := readFileString(t, settingsPath); after != before {
@@ -1112,7 +1125,7 @@ func TestWorkstation_PutServerConfig_ServerYAMLWithServerKeyAllowed(t *testing.T
 }
 
 // A workstation PUT checks server.home_storage like the file-mode handler:
-// unknown values are rejected with 400 and nothing is written; a valid
+// unknown values are rejected with 422 and nothing is written; a valid
 // block is written.
 func TestWorkstation_PutServerConfig_HomeStorageValidated(t *testing.T) {
 	for _, body := range []string{
@@ -1125,9 +1138,10 @@ func TestWorkstation_PutServerConfig_HomeStorageValidated(t *testing.T) {
 			srv, _, _ := newSQLiteHubInMode(t, true, nil)
 			before := readFileString(t, settingsPath)
 			rr := putServerConfig(t, srv, body)
-			if rr.Code != http.StatusBadRequest {
-				t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+			if rr.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
 			}
+			settingsErrorEntries(t, rr)
 			if after := readFileString(t, settingsPath); after != before {
 				t.Errorf("settings.yaml changed:\n%s", after)
 			}

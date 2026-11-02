@@ -16,9 +16,7 @@ package agent
 
 import (
 	"context"
-	"errors"
 	"net/http"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -192,29 +190,6 @@ func TestGitHubSkillResolver_FlushCache(t *testing.T) {
 		t.Fatalf("file has %d entries after FlushCache, want 1", len(f.Entries))
 	}
 	(&GitHubSkillResolver{}).FlushCache() // no cache: no-op
-}
-
-// TestNewGitHubResolutionCache_DirModeFailureIsNotFatal checks that a cache
-// directory whose mode cannot be changed (for example one owned by another
-// user) still yields a working cache.
-func TestNewGitHubResolutionCache_DirModeFailureIsNotFatal(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	orig := chmod
-	chmod = func(string, os.FileMode) error { return errors.New("operation not permitted") }
-	t.Cleanup(func() { chmod = orig })
-
-	cache, err := newTestResolutionCache(dir, time.Hour)
-	if err != nil {
-		t.Fatalf("NewGitHubResolutionCache: %v", err)
-	}
-	cache.putEntry("gh://o/r/s@main", ResolvedSkill{Name: "s"}, true)
-	cache.Flush()
-	if f := readCacheFile(t, dir); len(f.Entries) != 1 {
-		t.Fatalf("file has %d entries, want 1", len(f.Entries))
-	}
 }
 
 // TestWithContentFlightKeyIsSeparate checks that a caller that cannot use

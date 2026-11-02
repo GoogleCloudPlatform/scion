@@ -22,7 +22,6 @@ import (
 	"sort"
 	"strings"
 
-	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
@@ -75,7 +74,7 @@ func Generate(ctx context.Context, path string) (*Report, error) {
 		return nil, fmt.Errorf("migrating fixture db: %w", err)
 	}
 
-	drv, ok := client.Driver().(*entsql.Driver)
+	drv, ok := entc.SQLDriver(client.Driver())
 	if !ok {
 		return nil, fmt.Errorf("ent client driver does not expose a *sql.DB")
 	}

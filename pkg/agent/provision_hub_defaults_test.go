@@ -177,11 +177,11 @@ harness_configs:
 			if cfg == nil {
 				t.Fatal("ProvisionAgent returned nil config")
 			}
-			if cfg.MaxTurns != tc.wantTurns {
-				t.Errorf("MaxTurns: want %d, got %d (%s)", tc.wantTurns, cfg.MaxTurns, tc.wantExplanation)
+			if !api.IntPtrEqual(cfg.MaxTurns, wantCount(tc.wantTurns)) {
+				t.Errorf("MaxTurns: want %d, got %s (%s)", tc.wantTurns, api.FormatCountLimit(cfg.MaxTurns), tc.wantExplanation)
 			}
-			if cfg.MaxModelCalls != tc.wantCalls {
-				t.Errorf("MaxModelCalls: want %d, got %d (%s)", tc.wantCalls, cfg.MaxModelCalls, tc.wantExplanation)
+			if !api.IntPtrEqual(cfg.MaxModelCalls, wantCount(tc.wantCalls)) {
+				t.Errorf("MaxModelCalls: want %d, got %s (%s)", tc.wantCalls, api.FormatCountLimit(cfg.MaxModelCalls), tc.wantExplanation)
 			}
 			if cfg.MaxDuration != tc.wantDuration {
 				t.Errorf("MaxDuration: want %q, got %q (%s)", tc.wantDuration, cfg.MaxDuration, tc.wantExplanation)
@@ -297,8 +297,8 @@ harness_configs:
 	if err != nil {
 		t.Fatalf("ProvisionAgent: %v", err)
 	}
-	if cfg.MaxTurns != 10 {
-		t.Errorf("MaxTurns: want 10 from settings.yaml, got %d", cfg.MaxTurns)
+	if !api.IntPtrEqual(cfg.MaxTurns, api.IntPtr(10)) {
+		t.Errorf("MaxTurns: want 10 from settings.yaml, got %s", api.FormatCountLimit(cfg.MaxTurns))
 	}
 	if cfg.Resources == nil || cfg.Resources.Limits.CPU != "1" {
 		t.Errorf("Resources: want cpu=1 from settings.yaml, got %+v", cfg.Resources)

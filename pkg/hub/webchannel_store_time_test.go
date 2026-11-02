@@ -20,13 +20,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"net/http"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
 	_ "time/tzdata"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/hubtestutil"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/storedtime"
 	"github.com/stretchr/testify/assert"
@@ -42,7 +41,7 @@ import (
 // database without the ent schema.
 func newModerncWebChatStore(t *testing.T) (*sqliteWebChatStore, *sql.DB) {
 	t.Helper()
-	db := openTestMemorySQLite(t, "sqlite")
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
 	wcs := NewWebChatStore(db, "sqlite").(*sqliteWebChatStore)
 	require.NoError(t, wcs.Init())
 	return wcs, db
@@ -72,7 +71,7 @@ func TestWebChatTime_TouchThreadRoundTrip(t *testing.T) {
 	at := tokyoTime(t)
 	require.NoError(t, wcs.TouchThread(ctx, "u1", "p1", "agent-tokyo", "m2", at))
 
-	requireCanonicalWebchatText(t, rawText(t, db,
+	requireCanonicalWebchatText(t, hubtestutil.RawText(t, db,
 		`SELECT last_activity_at FROM webchat_thread WHERE agent_id = 'agent-tokyo'`), at)
 
 	threads, err := wcs.GetThreads(ctx, "u1", "p1", 10)
@@ -83,8 +82,8 @@ func TestWebChatTime_TouchThreadRoundTrip(t *testing.T) {
 		require.False(t, th.LastActivityAt.IsZero(), "thread %s has a zero LastActivityAt", th.AgentID)
 		got[th.AgentID] = th.LastActivityAt
 	}
-	requireUTCInstant(t, got["agent-now"], now)
-	requireUTCInstant(t, got["agent-tokyo"], at)
+	hubtestutil.RequireUTCInstant(t, got["agent-now"], now)
+	hubtestutil.RequireUTCInstant(t, got["agent-tokyo"], at)
 }
 
 func TestWebChatTime_RecordChannelStoresUTC(t *testing.T) {
@@ -93,7 +92,7 @@ func TestWebChatTime_RecordChannelStoresUTC(t *testing.T) {
 
 	at := tokyoTime(t)
 	require.NoError(t, wcs.RecordChannel(ctx, "u1", "p1", "a1", "web", at))
-	requireCanonicalWebchatText(t, rawText(t, db,
+	requireCanonicalWebchatText(t, hubtestutil.RawText(t, db,
 		`SELECT last_message_at FROM webchat_conversation_context WHERE agent_id = 'a1'`), at)
 
 	ch, err := wcs.GetLastChannel(ctx, "u1", "p1", "a1")
@@ -110,12 +109,12 @@ func TestWebChatTime_AttachmentRoundTrip(t *testing.T) {
 		ID: "att-1", ProjectID: "p1", Filename: "a.txt", MimeType: "text/plain",
 		Size: 1, UploadedBy: "u1", CreatedAt: at,
 	}))
-	requireCanonicalWebchatText(t, rawText(t, db,
+	requireCanonicalWebchatText(t, hubtestutil.RawText(t, db,
 		`SELECT created_at FROM webchat_attachment WHERE id = 'att-1'`), at)
 
 	meta, err := wcs.GetAttachment(ctx, "att-1")
 	require.NoError(t, err)
-	requireUTCInstant(t, meta.CreatedAt, at)
+	hubtestutil.RequireUTCInstant(t, meta.CreatedAt, at)
 }
 
 func TestWebChatTime_EditDeleteRoundTrip(t *testing.T) {
@@ -127,23 +126,23 @@ func TestWebChatTime_EditDeleteRoundTrip(t *testing.T) {
 	require.NoError(t, wcs.SetMessageEdited(ctx, "msg-1", editedAt))
 	require.NoError(t, wcs.SetMessageDeleted(ctx, "msg-1", deletedAt))
 
-	requireCanonicalWebchatText(t, rawText(t, db,
+	requireCanonicalWebchatText(t, hubtestutil.RawText(t, db,
 		`SELECT edited_at FROM webchat_message_ext WHERE message_id = 'msg-1'`), editedAt)
-	requireCanonicalWebchatText(t, rawText(t, db,
+	requireCanonicalWebchatText(t, hubtestutil.RawText(t, db,
 		`SELECT deleted_at FROM webchat_message_ext WHERE message_id = 'msg-1'`), deletedAt)
 
 	ext, err := wcs.GetMessageExt(ctx, "msg-1")
 	require.NoError(t, err)
 	require.NotNil(t, ext.EditedAt)
 	require.NotNil(t, ext.DeletedAt)
-	requireUTCInstant(t, *ext.EditedAt, editedAt)
-	requireUTCInstant(t, *ext.DeletedAt, deletedAt)
+	hubtestutil.RequireUTCInstant(t, *ext.EditedAt, editedAt)
+	hubtestutil.RequireUTCInstant(t, *ext.DeletedAt, deletedAt)
 
 	exts, err := wcs.GetMessageExts(ctx, []string{"msg-1"})
 	require.NoError(t, err)
 	require.Contains(t, exts, "msg-1")
-	requireUTCInstant(t, *exts["msg-1"].EditedAt, editedAt)
-	requireUTCInstant(t, *exts["msg-1"].DeletedAt, deletedAt)
+	hubtestutil.RequireUTCInstant(t, *exts["msg-1"].EditedAt, editedAt)
+	hubtestutil.RequireUTCInstant(t, *exts["msg-1"].DeletedAt, deletedAt)
 }
 
 // legacyWebchatTimes are text forms older binaries left in webchat_* columns,
@@ -182,9 +181,9 @@ VALUES ('u1', 'p1', ?, 'm', ?, ?)`, fmt.Sprintf("agent-%d", i), lt.text, lt.text
 		require.NoError(t, err)
 		name := legacyWebchatTimes[i].name
 		t.Run(name, func(t *testing.T) {
-			requireUTCInstant(t, th.LastActivityAt, legacyWebchatInstant)
+			hubtestutil.RequireUTCInstant(t, th.LastActivityAt, legacyWebchatInstant)
 			require.NotNil(t, th.LastReadAt)
-			requireUTCInstant(t, *th.LastReadAt, legacyWebchatInstant)
+			hubtestutil.RequireUTCInstant(t, *th.LastReadAt, legacyWebchatInstant)
 		})
 	}
 }
@@ -204,12 +203,12 @@ VALUES (?, 'p1', 'f', 'text/plain', 1, 'u1', ?)`, id, lt.text)
 
 			meta, err := wcs.GetAttachment(ctx, id)
 			require.NoError(t, err)
-			requireUTCInstant(t, meta.CreatedAt, legacyWebchatInstant)
+			hubtestutil.RequireUTCInstant(t, meta.CreatedAt, legacyWebchatInstant)
 
 			ext, err := wcs.GetMessageExt(ctx, id)
 			require.NoError(t, err)
-			requireUTCInstant(t, *ext.EditedAt, legacyWebchatInstant)
-			requireUTCInstant(t, *ext.DeletedAt, legacyWebchatInstant)
+			hubtestutil.RequireUTCInstant(t, *ext.EditedAt, legacyWebchatInstant)
+			hubtestutil.RequireUTCInstant(t, *ext.DeletedAt, legacyWebchatInstant)
 		})
 	}
 }
@@ -222,7 +221,7 @@ func TestSearchChatMessages_PagesToExhaustionOnEntSchema(t *testing.T) {
 	wcs, s, _ := newEntWebChatStore(t)
 	ctx := context.Background()
 
-	proj := &store.Project{ID: tid("search-paging"), Name: "search-paging", Slug: "search-paging",
+	proj := &store.Project{ID: hubtestutil.TID("search-paging"), Name: "search-paging", Slug: "search-paging",
 		Created: time.Now(), Updated: time.Now()}
 	require.NoError(t, s.CreateProject(ctx, proj))
 
@@ -243,20 +242,20 @@ func TestSearchChatMessages_PagesToExhaustionOnEntSchema(t *testing.T) {
 	}
 	for _, m := range msgs {
 		require.NoError(t, s.CreateMessage(ctx, &store.Message{
-			ID: tid("search-paging-" + m.name), ProjectID: proj.ID,
+			ID: hubtestutil.TID("search-paging-" + m.name), ProjectID: proj.ID,
 			Sender: "user:alice", Recipient: "agent:bot", Msg: "needle " + m.name,
 			Channel: "web", ThreadID: "topic-1", CreatedAt: m.created,
 		}))
 	}
 	// Expected order: created DESC, id DESC within a tie.
-	want := []string{tid("search-paging-m5")}
-	tieA, tieB := tid("search-paging-tie-a"), tid("search-paging-tie-b")
+	want := []string{hubtestutil.TID("search-paging-m5")}
+	tieA, tieB := hubtestutil.TID("search-paging-tie-a"), hubtestutil.TID("search-paging-tie-b")
 	if tieA > tieB {
 		want = append(want, tieA, tieB)
 	} else {
 		want = append(want, tieB, tieA)
 	}
-	want = append(want, tid("search-paging-m2"), tid("search-paging-m1"), tid("search-paging-m0"))
+	want = append(want, hubtestutil.TID("search-paging-m2"), hubtestutil.TID("search-paging-m1"), hubtestutil.TID("search-paging-m0"))
 
 	var got []string
 	cursor := ""
@@ -291,32 +290,6 @@ func TestSearchChatMessages_InvalidCursorTimestamp(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidSearchCursor)
 }
 
-// TestChatSearch_InvalidCursorIsBadRequest checks that a malformed cursor is
-// reported as a client error, not a server error.
-func TestChatSearch_InvalidCursorIsBadRequest(t *testing.T) {
-	srv, s := testServer(t)
-	dbp, ok := s.(interface{ DB() *sql.DB })
-	require.True(t, ok, "test store must expose DB()")
-	wcs := NewWebChatStore(dbp.DB(), "sqlite")
-	require.NoError(t, wcs.Init())
-	srv.SetWebChatStore(wcs)
-
-	ctx := context.Background()
-	proj := &store.Project{ID: tid("search-bad-cursor"), Name: "search-bad-cursor", Slug: "search-bad-cursor",
-		Created: time.Now(), Updated: time.Now()}
-	require.NoError(t, s.CreateProject(ctx, proj))
-	srv.createProjectMembersGroup(ctx, proj)
-	base := "/api/v1/chat/search?q=needle&projectId=" + proj.ID + "&cursor="
-
-	rec := doRequest(t, srv, http.MethodGet, base+url.QueryEscape("not-a-time|some-id"), nil)
-	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), ErrCodeInvalidCursor)
-
-	// A well-formed cursor still searches normally.
-	rec = doRequest(t, srv, http.MethodGet, base+url.QueryEscape("2026-10-01T04:00:00Z|some-id"), nil)
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-}
-
 // requireCanonicalEntText asserts the stored text is what the SQLite driver
 // writes for a UTC time.Time bound into an ent column.
 func requireCanonicalEntText(t *testing.T, text string, want time.Time) {
@@ -331,35 +304,35 @@ func TestWebChatTime_ConversationInsertsBindTime(t *testing.T) {
 	wcs, s, db := newEntWebChatStore(t)
 	ctx := context.Background()
 
-	proj := &store.Project{ID: tid("conv-insert"), Name: "conv-insert", Slug: "conv-insert",
+	proj := &store.Project{ID: hubtestutil.TID("conv-insert"), Name: "conv-insert", Slug: "conv-insert",
 		Created: time.Now(), Updated: time.Now()}
 	require.NoError(t, s.CreateProject(ctx, proj))
 
 	convTimes := func(id string) (string, string) {
 		t.Helper()
-		return rawText(t, db, `SELECT CAST(last_activity_at AS TEXT) FROM conversations WHERE id = ?`, id),
-			rawText(t, db, `SELECT CAST(created_at AS TEXT) FROM conversations WHERE id = ?`, id)
+		return hubtestutil.RawText(t, db, `SELECT CAST(last_activity_at AS TEXT) FROM conversations WHERE id = ?`, id),
+			hubtestutil.RawText(t, db, `SELECT CAST(created_at AS TEXT) FROM conversations WHERE id = ?`, id)
 	}
 	topicConv := func(topicID string) string {
 		t.Helper()
-		return rawText(t, db, `SELECT conversation_id FROM webchat_topic WHERE id = ?`, topicID)
+		return hubtestutil.RawText(t, db, `SELECT conversation_id FROM webchat_topic WHERE id = ?`, topicID)
 	}
 
 	t.Run("CreateTopic", func(t *testing.T) {
 		at := tokyoTime(t)
-		topicID := tid("conv-insert-topic")
+		topicID := hubtestutil.TID("conv-insert-topic")
 		require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
 			ID: topicID, ProjectID: proj.ID, Name: "topic", CreatedBy: "u1", CreatedAt: at,
 		}))
 		last, created := convTimes(topicConv(topicID))
 		requireCanonicalEntText(t, last, at)
 		requireCanonicalEntText(t, created, at)
-		requireCanonicalWebchatText(t, rawText(t, db, `SELECT created_at FROM webchat_topic WHERE id = ?`, topicID), at)
+		requireCanonicalWebchatText(t, hubtestutil.RawText(t, db, `SELECT created_at FROM webchat_topic WHERE id = ?`, topicID), at)
 	})
 
 	t.Run("PromoteDM", func(t *testing.T) {
 		at := tokyoTime(t).Add(time.Minute)
-		topicID := tid("conv-insert-promoted")
+		topicID := hubtestutil.TID("conv-insert-promoted")
 		_, err := wcs.PromoteDM(ctx, WebChatTopic{
 			ID: topicID, ProjectID: proj.ID, Name: "promoted", CreatedBy: "u1",
 			CreatedAt: at, LastActivityAt: at,
@@ -382,11 +355,11 @@ func TestWebChatTime_ConversationInsertsBindTime(t *testing.T) {
 		require.NoError(t, err)
 		assert.False(t, stored.Before(before.Truncate(time.Second)), "stored %v before %v", stored, before)
 		// The webchat_topic row carries the same instant in its own canonical form.
-		requireCanonicalWebchatText(t, rawText(t, db, `SELECT created_at FROM webchat_topic WHERE id = ?`, topicID), stored)
+		requireCanonicalWebchatText(t, hubtestutil.RawText(t, db, `SELECT created_at FROM webchat_topic WHERE id = ?`, topicID), stored)
 	})
 
 	t.Run("backfillTopicConversations", func(t *testing.T) {
-		topicID := tid("conv-insert-backfill")
+		topicID := hubtestutil.TID("conv-insert-backfill")
 		_, err := db.Exec(`INSERT INTO webchat_topic (id, project_id, name, is_general, created_by, created_at)
 VALUES (?, ?, 'backfill', 0, 'u1', ?)`, topicID, proj.ID, time.Now().UTC().Format(time.RFC3339Nano))
 		require.NoError(t, err)
@@ -407,12 +380,12 @@ func TestWebChatTime_ConversationListOrdersMixedRows(t *testing.T) {
 	wcs, s, _ := newEntWebChatStore(t)
 	ctx := context.Background()
 
-	proj := &store.Project{ID: tid("conv-order"), Name: "conv-order", Slug: "conv-order",
+	proj := &store.Project{ID: hubtestutil.TID("conv-order"), Name: "conv-order", Slug: "conv-order",
 		Created: time.Now(), Updated: time.Now()}
 	require.NoError(t, s.CreateProject(ctx, proj))
 
 	base := time.Date(2026, 10, 1, 4, 0, 0, 0, time.UTC)
-	entConvID := tid("conv-order-ent")
+	entConvID := hubtestutil.TID("conv-order-ent")
 	pid := proj.ID
 	require.NoError(t, s.CreateConversation(ctx, &store.Conversation{
 		ID: entConvID, ProjectID: &pid, Kind: "group", Surface: "native",
@@ -422,7 +395,7 @@ func TestWebChatTime_ConversationListOrdersMixedRows(t *testing.T) {
 
 	createTopic := func(name string, at time.Time) string {
 		t.Helper()
-		topicID := tid("conv-order-" + name)
+		topicID := hubtestutil.TID("conv-order-" + name)
 		require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
 			ID: topicID, ProjectID: proj.ID, Name: name, CreatedBy: "u1", CreatedAt: at,
 		}))

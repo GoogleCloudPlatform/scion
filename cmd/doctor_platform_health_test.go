@@ -552,6 +552,12 @@ func TestHealthSummaryClientTypeMatchesHub(t *testing.T) {
 	assert.NotEmpty(t, hubPaths)
 }
 
+// TestHealthAttentionKindMirror pins hubclient's mirror of the attention
+// kinds it names to the hub's constants (ptone/scion#5972).
+func TestHealthAttentionKindMirror(t *testing.T) {
+	assert.Equal(t, hub.HealthAttentionBrokerVersionMismatch, hubclient.HealthAttentionBrokerVersionMismatch)
+}
+
 // jsonFieldPaths records the JSON path of every field reachable from t.
 func jsonFieldPaths(t reflect.Type, prefix string, out map[string]bool) {
 	for t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice {
@@ -872,4 +878,32 @@ func TestSingleLineHealthSummary_KeepsRawBodyUnchanged(t *testing.T) {
 	assert.Equal(t, "x\ny", s.Brokers.Items[0].Name, "the input is not modified")
 	assert.Equal(t, want, got.Raw)
 	assert.Equal(t, want, s.Raw)
+}
+
+// The brokers line counts online brokers that cannot receive commands, and
+// the verbose row shows the command path in fixed words, from the
+// broker's self-reported control_channel check only.
+func TestRenderDoctorHealthSummary_CommandPath(t *testing.T) {
+	s := degradedSummary()
+	s.Brokers.Items[1].Health = &hubclient.HealthBrokerSelf{Status: "degraded", Checks: map[string]string{"control_channel": "unhealthy"}}
+
+	brief := findCheck(t, renderDoctorHealthSummary(&s, false), "runtime-brokers").Message
+	assert.Equal(t, "1 of 2 listed online, 2 registered, 1 online but cannot receive commands", brief)
+	verbose := findCheck(t, renderDoctorHealthSummary(&s, true), "runtime-brokers").Message
+	assert.Contains(t, verbose, "self-health degraded (control_channel: unhealthy); commands no; agents running 3")
+
+	for value, want := range map[string]string{
+		"healthy": "yes", "unhealthy": "no", "unknown": "",
+		"": "", "available": "", "unhealthy: dial tcp 10.0.0.1:443": "",
+	} {
+		b := hubclient.HealthSummaryBroker{Status: "online", Health: &hubclient.HealthBrokerSelf{Checks: map[string]string{"control_channel": value}}}
+		assert.Equal(t, want, brokerCommandPath(b), "control_channel %q", value)
+	}
+	assert.Equal(t, "", brokerCommandPath(hubclient.HealthSummaryBroker{Status: "online"}), "not reported")
+
+	// An offline broker's last report adds neither the count nor the field.
+	s.Brokers.Items[1].Status = "offline"
+	brief = findCheck(t, renderDoctorHealthSummary(&s, false), "runtime-brokers").Message
+	assert.NotContains(t, brief, "cannot receive commands")
+	assert.NotContains(t, findCheck(t, renderDoctorHealthSummary(&s, true), "runtime-brokers").Message, "commands no")
 }

@@ -260,7 +260,7 @@ func displayProjectDir(dir string) string {
 		if shown == home {
 			return "~"
 		}
-		if rel, err := filepath.Rel(home, shown); err == nil && !strings.HasPrefix(rel, "..") {
+		if rel, err := filepath.Rel(home, shown); err == nil && !strings.HasPrefix(rel, "..") { //winsec:not-containment display only: shortens a path under home to ~
 			return filepath.Join("~", rel)
 		}
 	}

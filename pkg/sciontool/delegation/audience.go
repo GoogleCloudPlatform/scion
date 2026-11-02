@@ -17,7 +17,6 @@ package delegation
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -72,8 +71,10 @@ func (h *Helper) resolveAudience(ctx context.Context) (string, error) {
 			HubID string `json:"hub_id"`
 		} `json:"hub"`
 	}
-	if json.Unmarshal(body, &health) != nil {
-		return "", errors.New("resolve hub audience: /healthz did not answer JSON")
+	if err := json.Unmarshal(body, &health); err != nil {
+		// /healthz is public and carries no credential, so its parse error
+		// may be wrapped.
+		return "", fmt.Errorf("resolve hub audience: /healthz did not answer JSON: %w", err)
 	}
 	id := strings.TrimSpace(health.HubID)
 	if id == "" && health.Hub != nil {

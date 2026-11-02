@@ -19,7 +19,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -47,13 +46,13 @@ type mockWebStore struct {
 }
 
 func TestSPAShellHandler(t *testing.T) {
-	// Use dev-auth so the SPA handler is accessible
+	// Signed in with dev auth so the SPA handler is accessible
 	ws := newDevAuthWebServer(t)
 
 	req := httptest.NewRequest("GET", "/", nil)
 	rec := httptest.NewRecorder()
 
-	ws.Handler().ServeHTTP(rec, req)
+	devSignedIn(t, ws).ServeHTTP(rec, req)
 
 	resp := rec.Result()
 	body, err := io.ReadAll(resp.Body)
@@ -95,8 +94,9 @@ func TestSPAShellHandler(t *testing.T) {
 }
 
 func TestSPACatchAll(t *testing.T) {
-	// Use dev-auth so all routes are accessible
+	// Signed in with dev auth so all routes are accessible
 	ws := newDevAuthWebServer(t)
+	handler := devSignedIn(t, ws)
 
 	// Various SPA routes should all return the SPA shell.
 	// Chat routes are included to verify that multi-segment client-side
@@ -115,7 +115,7 @@ func TestSPACatchAll(t *testing.T) {
 			req := httptest.NewRequest("GET", path, nil)
 			rec := httptest.NewRecorder()
 
-			ws.Handler().ServeHTTP(rec, req)
+			handler.ServeHTTP(rec, req)
 
 			resp := rec.Result()
 			if resp.StatusCode != http.StatusOK {
@@ -392,7 +392,7 @@ func TestSPAHandler_NoAssets_ServesErrorPage(t *testing.T) {
 	ws.assetsDisk = ""
 	ws.hasAssets = false
 
-	handler := ws.Handler()
+	handler := devSignedIn(t, ws)
 
 	paths := []string{"/", "/projects", "/agents", "/settings"}
 	for _, path := range paths {
@@ -470,7 +470,7 @@ func TestSPAHandler_WithAssets_ServesNormalShell(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/", nil)
 	rec := httptest.NewRecorder()
-	ws.Handler().ServeHTTP(rec, req)
+	devSignedIn(t, ws).ServeHTTP(rec, req)
 
 	resp := rec.Result()
 	body, _ := io.ReadAll(resp.Body)
@@ -526,15 +526,130 @@ func TestRootLevelStaticFile_NonexistentFallsToSPA(t *testing.T) {
 	})
 
 	req := httptest.NewRequest("GET", "/nonexistent.png", nil)
-	req.Header.Set("Authorization", "Bearer test-dev-token-12345")
 	rec := httptest.NewRecorder()
 
-	ws.Handler().ServeHTTP(rec, req)
+	devSignedIn(t, ws).ServeHTTP(rec, req)
 
 	resp := rec.Result()
 	ct := resp.Header.Get("Content-Type")
 	if !strings.Contains(ct, "text/html") {
 		t.Errorf("non-existent root file should fall through to SPA shell (text/html), got Content-Type %q", ct)
+	}
+}
+
+// newRootStaticWebServer returns a web server whose assets dir holds every
+// rootStaticFiles entry plus robots.txt and index.html, two root-level
+// files that are not on the list.
+func newRootStaticWebServer(t *testing.T, devAuth bool) *WebServer {
+	t.Helper()
+	dir := t.TempDir()
+	for p := range rootStaticFiles {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, strings.TrimPrefix(p, "/")), []byte("data"), 0o644))
+	}
+	for _, name := range []string{"robots.txt", "index.html"} {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte("data"), 0o644))
+	}
+	if devAuth {
+		return newDevAuthWebServer(t, func(cfg *WebServerConfig) { cfg.AssetsDir = dir })
+	}
+	return newTestWebServer(t, WebServerConfig{AssetsDir: dir})
+}
+
+// rootPathsNeedingSession are root-level request targets (as sent on the
+// wire) that are not rootStaticFiles entries: a file on disk but not on the
+// list, dotted names with no file, and backslash forms.
+var rootPathsNeedingSession = []string{
+	"/robots.txt",
+	"/index.html",
+	"/anything.txt",
+	"/nonexistent.png",
+	"/%5Cevil.example",
+	"/%5C%5Cevil.example",
+	"/%5Cfavicon.ico",
+	"/favicon.ico%5C",
+}
+
+func TestRootLevelStaticFile_ListedFilesServedWithoutSession(t *testing.T) {
+	handler := newRootStaticWebServer(t, false).Handler()
+	for p := range rootStaticFiles {
+		for _, accept := range []string{"", "text/html"} {
+			req := httptest.NewRequest(http.MethodGet, p, nil)
+			req.Header.Set("Accept", accept)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusOK, rec.Code, "GET %s (Accept %q)", p, accept)
+			assert.Equal(t, "data", rec.Body.String(), "GET %s (Accept %q)", p, accept)
+		}
+	}
+}
+
+func TestRootLevelStaticFile_OtherRootPathsRequireSession(t *testing.T) {
+	handler := newRootStaticWebServer(t, false).Handler()
+	for _, target := range rootPathsNeedingSession {
+		t.Run(target, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, target, nil)
+			req.Header.Set("Accept", "text/html")
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusFound, rec.Code, "browser GET %s", target)
+			assert.NotEmpty(t, rec.Header().Get("Location"), "browser GET %s", target)
+			assert.NotContains(t, rec.Body.String(), "scion-app", "browser GET %s", target)
+
+			req = httptest.NewRequest(http.MethodGet, target, nil)
+			rec = httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusUnauthorized, rec.Code, "GET %s", target)
+			assert.NotEqual(t, "data", rec.Body.String(), "GET %s", target)
+		})
+	}
+}
+
+func TestRootLevelStaticFile_SignedInUnaffected(t *testing.T) {
+	ws := newRootStaticWebServer(t, true)
+	handler := devSignedIn(t, ws)
+	get := func(target string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		req.Header.Set("Accept", "text/html")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Listed files and unlisted files on disk are served as files.
+	for p := range rootStaticFiles {
+		rec := get(p)
+		assert.Equal(t, http.StatusOK, rec.Code, "GET %s", p)
+		assert.Equal(t, "data", rec.Body.String(), "GET %s", p)
+	}
+	rec := get("/robots.txt")
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "data", rec.Body.String())
+
+	// Other root-level paths get the app shell.
+	for _, target := range []string{"/anything.txt", "/nonexistent.png", "/%5Cevil.example"} {
+		rec := get(target)
+		assert.Equal(t, http.StatusOK, rec.Code, "GET %s", target)
+		assert.Contains(t, rec.Body.String(), "scion-app", "GET %s", target)
+	}
+}
+
+// TestRootLevelStaticFile_ListMatchesPublicDir checks that rootStaticFiles
+// equals the set of files in web/public/ and holds every appIconPaths entry.
+func TestRootLevelStaticFile_ListMatchesPublicDir(t *testing.T) {
+	entries, err := os.ReadDir("../../web/public")
+	require.NoError(t, err)
+	want := map[string]bool{}
+	for _, e := range entries {
+		// Dot names (such as .gitkeep) are never served (hasDotSegment).
+		if strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		require.False(t, e.IsDir(), "web/public/%s: rootStaticFiles lists root-level files only", e.Name())
+		want["/"+e.Name()] = true
+	}
+	assert.Equal(t, want, rootStaticFiles)
+	for p := range appIconPaths {
+		assert.True(t, rootStaticFiles[p], "%s in appIconPaths but not in rootStaticFiles", p)
 	}
 }
 
@@ -556,7 +671,7 @@ func TestSPACatchAll_EmbeddedDirectoryDoesNotIntercept(t *testing.T) {
 	// NOT a static file or 404 from the file server.
 	req := httptest.NewRequest("GET", "/chat/my-project/thread-id", nil)
 	rec := httptest.NewRecorder()
-	ws.Handler().ServeHTTP(rec, req)
+	devSignedIn(t, ws).ServeHTTP(rec, req)
 
 	resp := rec.Result()
 	if resp.StatusCode != http.StatusOK {
@@ -976,7 +1091,7 @@ func TestMountHubAPI_RoutesToHub(t *testing.T) {
 	})
 	ws.MountHubAPI(mockHandler, func(ctx context.Context) error { return nil })
 
-	handler := ws.Handler()
+	handler := devSignedIn(t, ws)
 
 	// /api/v1/projects should reach the Hub handler
 	req := httptest.NewRequest("GET", "/api/v1/projects", nil)
@@ -1017,9 +1132,9 @@ func TestSessionToBearerMiddleware(t *testing.T) {
 	})
 	ws.MountHubAPI(mockHandler, func(ctx context.Context) error { return nil })
 
-	handler := ws.Handler()
+	// Signed in through a dev sign-in link (a session with a JWT).
+	handler := devSignedIn(t, ws)
 
-	// First request: auto-login via dev-auth (establishes session with JWT)
 	req1 := httptest.NewRequest("GET", "/api/v1/projects", nil)
 	rec1 := httptest.NewRecorder()
 	handler.ServeHTTP(rec1, req1)
@@ -1111,8 +1226,8 @@ func TestSessionToBearerMiddleware_TokenRegeneration(t *testing.T) {
 	assert.Equal(t, "overflow-user@enterprise.example.com", claims.Email)
 }
 
-func TestDevAuthMiddleware_GeneratesHubTokens(t *testing.T) {
-	// When userTokenSvc is available, dev-auth should generate Hub JWTs in the session.
+func TestDevSignIn_GeneratesHubTokens(t *testing.T) {
+	// When userTokenSvc is available, a dev sign-in should put Hub JWTs in the session.
 	tokenSvc, err := NewUserTokenService(UserTokenConfig{})
 	require.NoError(t, err)
 
@@ -1120,12 +1235,7 @@ func TestDevAuthMiddleware_GeneratesHubTokens(t *testing.T) {
 	ws.SetUserTokenService(tokenSvc)
 
 	handler := ws.Handler()
-
-	// Trigger dev auto-login
-	req := httptest.NewRequest("GET", "/auth/me", nil)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusOK, rec.Result().StatusCode)
+	cookies := devSignIn(t, ws)
 
 	// Verify the session cookie contains Hub tokens by making a second request
 	// to an /api/v1/ route and checking the Authorization header is injected.
@@ -1137,14 +1247,14 @@ func TestDevAuthMiddleware_GeneratesHubTokens(t *testing.T) {
 	ws.MountHubAPI(mockHub, func(ctx context.Context) error { return nil })
 
 	req2 := httptest.NewRequest("GET", "/api/v1/test", nil)
-	for _, c := range rec.Result().Cookies() {
+	for _, c := range cookies {
 		req2.AddCookie(c)
 	}
 	rec2 := httptest.NewRecorder()
 	handler.ServeHTTP(rec2, req2)
 
 	assert.True(t, strings.HasPrefix(capturedAuth, "Bearer "),
-		"dev-auth should generate Hub JWT, got Authorization: %q", capturedAuth)
+		"a dev sign-in should generate Hub JWT, got Authorization: %q", capturedAuth)
 }
 
 func TestSessionToBearerMiddleware_SigningKeyRotation(t *testing.T) {
@@ -1169,14 +1279,16 @@ func TestSessionToBearerMiddleware_SigningKeyRotation(t *testing.T) {
 	handler := ws.Handler()
 
 	// Step 1: Establish a session with tokens signed by the old key.
+	sessionCookies := devSignIn(t, ws)
 	req1 := httptest.NewRequest("GET", "/api/v1/projects", nil)
+	for _, c := range sessionCookies {
+		req1.AddCookie(c)
+	}
 	rec1 := httptest.NewRecorder()
 	handler.ServeHTTP(rec1, req1)
 	require.Equal(t, http.StatusOK, rec1.Result().StatusCode)
 	require.True(t, strings.HasPrefix(capturedAuthHeader, "Bearer "),
 		"initial request should have a valid Bearer token")
-
-	sessionCookies := rec1.Result().Cookies()
 
 	// Step 2: Rotate the signing key.
 	newSvc, err := NewUserTokenService(UserTokenConfig{
@@ -1466,120 +1578,16 @@ func TestIsProxyRoute(t *testing.T) {
 	}
 }
 
-func TestDevAuth_AutoLogin(t *testing.T) {
-	ws := newDevAuthWebServer(t)
-
-	// Request to a protected route should succeed with dev-auth
-	req := httptest.NewRequest("GET", "/", nil)
-	rec := httptest.NewRecorder()
-
-	ws.Handler().ServeHTTP(rec, req)
-
-	resp := rec.Result()
-	assert.Equal(t, http.StatusOK, resp.StatusCode,
-		"dev-auth should auto-login and serve the page")
-
-	// A session cookie should be set
-	cookies := resp.Cookies()
-	var sessionCookie *http.Cookie
-	for _, c := range cookies {
-		if c.Name == webSessionName {
-			sessionCookie = c
-			break
-		}
-	}
-	assert.NotNil(t, sessionCookie, "session cookie should be set")
-}
-
-func TestDevAuth_RecordsLastLogin(t *testing.T) {
-	for _, tt := range []struct {
-		name        string
-		previous    time.Time
-		wantUpdates int
-	}{
-		{name: "first login", wantUpdates: 1},
-		{name: "older login", previous: time.Now().Add(-6 * time.Minute), wantUpdates: 1},
-		{name: "recent login", previous: time.Now().Add(-time.Minute)},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			ws := newDevAuthWebServer(t)
-			s := newFakeUserStore()
-			require.NoError(t, s.CreateUser(context.Background(), &store.User{
-				ID: DevUserID, Email: "dev@localhost", LastLogin: tt.previous,
-			}))
-			ws.store = s
-			handler := ws.devAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(http.StatusOK)
-			}))
-
-			before := time.Now()
-			rec := httptest.NewRecorder()
-			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
-			require.Equal(t, http.StatusOK, rec.Code)
-			user, err := s.GetUser(context.Background(), DevUserID)
-			require.NoError(t, err)
-			if tt.wantUpdates > 0 {
-				require.False(t, user.LastLogin.Before(before))
-				require.False(t, user.LastLogin.After(time.Now()))
-			} else {
-				assert.Equal(t, tt.previous, user.LastLogin)
-			}
-			assert.Equal(t, tt.wantUpdates, s.lastLoginUpdateCalls)
-			assert.Zero(t, s.updateCalls, "login must not write the full user record")
-			loginTime := user.LastLogin
-
-			// Reusing a session must not turn last login into last activity.
-			req := httptest.NewRequest(http.MethodGet, "/", nil)
-			for _, cookie := range rec.Result().Cookies() {
-				req.AddCookie(cookie)
-			}
-			rec = httptest.NewRecorder()
-			handler.ServeHTTP(rec, req)
-			require.Equal(t, http.StatusOK, rec.Code)
-			user, err = s.GetUser(context.Background(), DevUserID)
-			require.NoError(t, err)
-			assert.Equal(t, loginTime, user.LastLogin)
-			assert.Equal(t, tt.wantUpdates, s.lastLoginUpdateCalls)
-			assert.Zero(t, s.updateCalls)
-
-			// Clients that discard cookies must not write on every request.
-			rec = httptest.NewRecorder()
-			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
-			require.Equal(t, http.StatusOK, rec.Code)
-			user, err = s.GetUser(context.Background(), DevUserID)
-			require.NoError(t, err)
-			assert.Equal(t, loginTime, user.LastLogin)
-			assert.Equal(t, tt.wantUpdates, s.lastLoginUpdateCalls)
-			assert.Zero(t, s.updateCalls)
-		})
-	}
-}
-
-func TestDevAuth_LastLoginWriteFailure(t *testing.T) {
-	ws := newDevAuthWebServer(t)
-	s := newFakeUserStore()
-	require.NoError(t, s.CreateUser(context.Background(), &store.User{ID: DevUserID}))
-	s.lastLoginUpdateErr = errors.New("last login write failed")
-	ws.store = s
-	handler := ws.devAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
-	assert.Equal(t, http.StatusOK, rec.Code)
-	user, err := s.GetUser(context.Background(), DevUserID)
-	require.NoError(t, err)
-	assert.True(t, user.LastLogin.IsZero())
-	assert.Equal(t, 1, s.lastLoginUpdateCalls)
-	assert.Zero(t, s.updateCalls)
-}
-
 func TestDevAuth_SessionPersists(t *testing.T) {
 	ws := newDevAuthWebServer(t)
 	handler := ws.Handler()
+	cookies := devSignIn(t, ws)
 
-	// First request: get the session cookie
+	// First request with the session cookie from the sign-in link
 	req1 := httptest.NewRequest("GET", "/auth/me", nil)
+	for _, c := range cookies {
+		req1.AddCookie(c)
+	}
 	rec1 := httptest.NewRecorder()
 	handler.ServeHTTP(rec1, req1)
 
@@ -1594,9 +1602,9 @@ func TestDevAuth_SessionPersists(t *testing.T) {
 	assert.Equal(t, "dev@localhost", user1.Email)
 	assert.Equal(t, "Development User", user1.Name)
 
-	// Second request with the session cookie should also work
+	// Second request with the same session cookie should also work
 	req2 := httptest.NewRequest("GET", "/auth/me", nil)
-	for _, c := range resp1.Cookies() {
+	for _, c := range cookies {
 		req2.AddCookie(c)
 	}
 	rec2 := httptest.NewRecorder()
@@ -1612,7 +1620,7 @@ func TestDevAuth_SessionPersists(t *testing.T) {
 }
 
 func TestDevAuth_Disabled(t *testing.T) {
-	// Without dev token, no auto-login should occur
+	// Without dev token, protected routes redirect to login
 	ws := newTestWebServer(t, WebServerConfig{})
 
 	req := httptest.NewRequest("GET", "/", nil)
@@ -1645,9 +1653,8 @@ func TestAuthMe_Unauthenticated(t *testing.T) {
 
 func TestAuthMe_Authenticated(t *testing.T) {
 	ws := newDevAuthWebServer(t)
-	handler := ws.Handler()
+	handler := devSignedIn(t, ws)
 
-	// First request auto-logs in
 	req := httptest.NewRequest("GET", "/auth/me", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -1667,16 +1674,12 @@ func TestLogout_ClearsSession(t *testing.T) {
 	ws := newDevAuthWebServer(t)
 	handler := ws.Handler()
 
-	// First: auto-login to get a session
-	req1 := httptest.NewRequest("GET", "/auth/me", nil)
-	rec1 := httptest.NewRecorder()
-	handler.ServeHTTP(rec1, req1)
-	resp1 := rec1.Result()
-	assert.Equal(t, http.StatusOK, resp1.StatusCode)
+	// First: sign in to get a session
+	cookies := devSignIn(t, ws)
 
 	// POST /auth/logout with session cookies
 	req2 := httptest.NewRequest("POST", "/auth/logout", nil)
-	for _, c := range resp1.Cookies() {
+	for _, c := range cookies {
 		req2.AddCookie(c)
 	}
 	rec2 := httptest.NewRecorder()
@@ -1940,8 +1943,27 @@ func TestIsPublicRoute(t *testing.T) {
 		{"/auth/debug", true},
 		{"/login", true},
 		{"/favicon.ico", true},
+		{"/favicon.svg", true},
+		{"/apple-touch-icon.png", true},
+		{"/icon-192.png", true},
+		{"/icon-512.png", true},
+		{"/icon-maskable-512.png", true},
+		{"/manifest.webmanifest", true},
 		{"/scion-notification-icon.png", true},
-		{"/robots.txt", true},
+		// Root-level paths not in rootStaticFiles take the session check,
+		// whether or not they look like a file name.
+		{"/robots.txt", false},
+		{"/anything.txt", false},
+		{"/index.html", false},
+		{"/favicon.ico/", false},
+		{"/FAVICON.ICO", false},
+		{"/favicon.ico.", false},
+		// A backslash never forms a static path.
+		{"/\\evil.example", false},
+		{"/\\\\evil.example", false},
+		{"/\\favicon.ico", false},
+		{"/favicon.ico\\", false},
+		{"/%5Cevil.example", false},
 		{"/api/v1/projects", true},
 		{"/api/v1/agents", true},
 		{"/api/v1/auth/login", true},
@@ -2365,7 +2387,7 @@ func TestSSEHandler_RequiresSubParam(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/events", nil)
 	rec := httptest.NewRecorder()
-	ws.Handler().ServeHTTP(rec, req)
+	devSignedIn(t, ws).ServeHTTP(rec, req)
 
 	resp := rec.Result()
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
@@ -2382,7 +2404,7 @@ func TestSSEHandler_InvalidSubject(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/events?sub=foo..bar", nil)
 	rec := httptest.NewRecorder()
-	ws.Handler().ServeHTTP(rec, req)
+	devSignedIn(t, ws).ServeHTTP(rec, req)
 
 	resp := rec.Result()
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
@@ -2397,7 +2419,7 @@ func TestSSEHandler_NoPublisher(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/events?sub=project.test.>", nil)
 	rec := httptest.NewRecorder()
-	ws.Handler().ServeHTTP(rec, req)
+	devSignedIn(t, ws).ServeHTTP(rec, req)
 
 	resp := rec.Result()
 	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
@@ -2415,7 +2437,7 @@ func TestSSEHandler_Headers(t *testing.T) {
 	t.Cleanup(pub.Close)
 
 	// Use a test server so we get a real connection that supports streaming
-	ts := httptest.NewServer(ws.Handler())
+	ts := httptest.NewServer(devSignedIn(t, ws))
 	defer ts.Close()
 
 	// Make a request that will establish the SSE connection
@@ -2437,7 +2459,7 @@ func TestSSEHandler_EventDelivery(t *testing.T) {
 	ws.SetAuthzService(NewAuthzService(mockSuperAdminStore(DevUserID), nil))
 	t.Cleanup(pub.Close)
 
-	ts := httptest.NewServer(ws.Handler())
+	ts := httptest.NewServer(devSignedIn(t, ws))
 	defer ts.Close()
 
 	// Start SSE connection in background
@@ -2559,7 +2581,7 @@ func TestSSEHandler_ReconnectOnMaxAge(t *testing.T) {
 	ws.SetAuthzService(NewAuthzService(mockSuperAdminStore(DevUserID), nil))
 	t.Cleanup(pub.Close)
 
-	ts := httptest.NewServer(ws.Handler())
+	ts := httptest.NewServer(devSignedIn(t, ws))
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/events?sub=project.test.>")
@@ -2613,7 +2635,7 @@ func TestSSEHandler_HeartbeatIsNamedEvent(t *testing.T) {
 	ws.SetAuthzService(NewAuthzService(mockSuperAdminStore(DevUserID), nil))
 	t.Cleanup(pub.Close)
 
-	ts := httptest.NewServer(ws.Handler())
+	ts := httptest.NewServer(devSignedIn(t, ws))
 	defer ts.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -2674,7 +2696,7 @@ func TestNonLoginPageRendersAppComponent(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/", nil)
 	rec := httptest.NewRecorder()
-	ws.Handler().ServeHTTP(rec, req)
+	devSignedIn(t, ws).ServeHTTP(rec, req)
 
 	resp := rec.Result()
 	body, err := io.ReadAll(resp.Body)
@@ -2894,7 +2916,7 @@ func TestResolveAPIPath(t *testing.T) {
 func TestSPAShellHandler_ContainsInitialData(t *testing.T) {
 	ws := newDevAuthWebServer(t)
 
-	// Set up user token service so dev-auth generates Hub JWTs
+	// Set up user token service so a dev sign-in puts Hub JWTs in the session
 	tokenSvc, err := NewUserTokenService(UserTokenConfig{})
 	require.NoError(t, err)
 	ws.SetUserTokenService(tokenSvc)
@@ -2914,7 +2936,7 @@ func TestSPAShellHandler_ContainsInitialData(t *testing.T) {
 	})
 	ws.MountHubAPI(mockHub, func(ctx context.Context) error { return nil })
 
-	handler := ws.Handler()
+	handler := devSignedIn(t, ws)
 
 	// Request an agent detail page (its page consumes the prefetch)
 	req := httptest.NewRequest("GET", "/agents/"+tid("agent-1"), nil)
@@ -2970,7 +2992,7 @@ func TestSPAShellHandler_ListPagesHaveNoPrefetch(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"agents": []interface{}{}, "projects": []interface{}{}})
 	})
 	ws.MountHubAPI(mockHub, func(ctx context.Context) error { return nil })
-	handler := ws.Handler()
+	handler := devSignedIn(t, ws)
 
 	for _, path := range []string{"/agents", "/agents/", "/projects", "/projects/"} {
 		t.Run(path, func(t *testing.T) {
@@ -3003,7 +3025,7 @@ func TestSPAShellHandler_ListPagesHaveNoPrefetch(t *testing.T) {
 
 func TestSPAShellHandler_UserInInitialData(t *testing.T) {
 	ws := newDevAuthWebServer(t)
-	handler := ws.Handler()
+	handler := devSignedIn(t, ws)
 
 	// Request the home page (no API prefetch for /)
 	req := httptest.NewRequest("GET", "/", nil)
@@ -3041,7 +3063,7 @@ func TestSPAShellHandler_UserInInitialData(t *testing.T) {
 func TestSPAShellHandler_NoHubMounted(t *testing.T) {
 	ws := newDevAuthWebServer(t)
 	// Do NOT mount a Hub handler
-	handler := ws.Handler()
+	handler := devSignedIn(t, ws)
 
 	// Request an agent detail page (a prefetched route) — should still render with user info
 	req := httptest.NewRequest("GET", "/agents/"+tid("agent-1"), nil)
@@ -3074,7 +3096,7 @@ func TestSPAShellHandler_NoHubMounted(t *testing.T) {
 func TestSPAShellHandler_HubAPIError(t *testing.T) {
 	ws := newDevAuthWebServer(t)
 
-	// Set up user token service so dev-auth generates Hub JWTs
+	// Set up user token service so a dev sign-in puts Hub JWTs in the session
 	tokenSvc, err := NewUserTokenService(UserTokenConfig{})
 	require.NoError(t, err)
 	ws.SetUserTokenService(tokenSvc)
@@ -3086,7 +3108,7 @@ func TestSPAShellHandler_HubAPIError(t *testing.T) {
 	})
 	ws.MountHubAPI(mockHub, func(ctx context.Context) error { return nil })
 
-	handler := ws.Handler()
+	handler := devSignedIn(t, ws)
 
 	// Request an agent detail page (a prefetched route)
 	req := httptest.NewRequest("GET", "/agents/"+tid("agent-1"), nil)
@@ -4593,7 +4615,7 @@ func TestSPAShellCacheControl(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"id": agentID, "name": "cache-agent"})
 	}), func(ctx context.Context) error { return nil })
-	handler := ws.Handler()
+	handler := devSignedIn(t, ws)
 
 	get := func(path string) (*http.Response, string) {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -4634,7 +4656,7 @@ func TestSPAShellCacheControl(t *testing.T) {
 	bare.hasAssets = false
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
-	bare.Handler().ServeHTTP(rec, req)
+	devSignedIn(t, bare).ServeHTTP(rec, req)
 	bareResp := rec.Result()
 	defer func() { _ = bareResp.Body.Close() }()
 	assert.Equal(t, "no-cache", bareResp.Header.Get("Cache-Control"))

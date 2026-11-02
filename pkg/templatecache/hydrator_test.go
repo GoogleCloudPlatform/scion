@@ -118,6 +118,7 @@ func (m *mockHubClient) Schedules(projectID string) hubclient.ScheduleService   
 func (m *mockHubClient) GCPServiceAccounts() hubclient.GCPServiceAccountService           { return nil }
 func (m *mockHubClient) Messages() hubclient.MessageService                               { return nil }
 func (m *mockHubClient) Messaging() hubclient.MessagingService                            { return nil }
+func (m *mockHubClient) AdminSettings() hubclient.AdminSettingsService                    { return nil }
 func (m *mockHubClient) Conversations() hubclient.ConversationService                     { return nil }
 func (m *mockHubClient) ThreadGroups() hubclient.ThreadGroupService                       { return nil }
 func (m *mockHubClient) AllowList() hubclient.AllowListService                            { return nil }
@@ -140,6 +141,7 @@ func (m *mockHubClient) TestIdentities() hubclient.TestIdentityService      { re
 func (m *mockHubClient) TestIdentityDelegations() hubclient.TestIdentityDelegationService {
 	return nil
 }
+func (m *mockHubClient) AgentDelegations() hubclient.AgentDelegationService { return nil }
 func (m *mockHubClient) DiscoverSkillsDirectory(ctx context.Context, req hubclient.DiscoverSkillsDirectoryRequest) (*hubclient.DiscoverSkillsDirectoryResponse, error) {
 	return nil, nil
 }

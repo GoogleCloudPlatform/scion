@@ -242,8 +242,11 @@ type ProjectSettings struct {
 	AutoExposePortsEnabled *bool   `json:"autoExposePortsEnabled,omitempty"`
 
 	// Default agent limits
-	DefaultMaxTurns      int                  `json:"defaultMaxTurns,omitempty"`
-	DefaultMaxModelCalls int                  `json:"defaultMaxModelCalls,omitempty"`
+	// DefaultMaxTurns and DefaultMaxModelCalls: nil inherits (no project
+	// value), 0 is an explicit "no limit" (Unlimited) and n >= 1 a limit.
+	// On the settings PUT, null clears them (ptone/scion#3925).
+	DefaultMaxTurns      *int                 `json:"defaultMaxTurns,omitempty"`
+	DefaultMaxModelCalls *int                 `json:"defaultMaxModelCalls,omitempty"`
 	DefaultMaxDuration   string               `json:"defaultMaxDuration,omitempty"`
 	DefaultResources     *ProjectResourceSpec `json:"defaultResources,omitempty"`
 
@@ -378,6 +381,14 @@ type RuntimeBroker struct {
 	// last saw it ("as reported at").
 	RuntimeTargetPresentation           *api.RuntimeTargetPresentation `json:"runtimeTargetPresentation,omitempty"`
 	RuntimeTargetPresentationObservedAt *time.Time                     `json:"runtimeTargetPresentationObservedAt,omitempty"`
+	// VersionStatus compares Version with the fleet hub version: match,
+	// mismatch or unknown. Empty for a plugin record, or from an older Hub.
+	VersionStatus string `json:"versionStatus,omitempty"`
+	// Health is the broker's last self-reported health as the Hub stored
+	// it (fixed words only, api.NormalizeBrokerHealthReport); nil when the
+	// broker never reported it. Its control_channel check says whether the
+	// Hub can send the broker commands.
+	Health *api.BrokerHealthReport `json:"health,omitempty"`
 }
 
 // BrokerCapabilities describes runtime broker capabilities.
@@ -425,6 +436,16 @@ type BrokerCapabilities struct {
 	// cleared_fields at start (ptone/scion#3906, ptone/scion#4890;
 	// store.BrokerCapabilities.ClearedFields is its counterpart).
 	ClearedFields bool `json:"clearedFields,omitempty"`
+	// UnlimitedCountLimits indicates the broker honours an explicit
+	// max_turns or max_model_calls of 0 as "no limit" over an inherited one
+	// (ptone/scion#5605; store.BrokerCapabilities.UnlimitedCountLimits is
+	// its counterpart).
+	UnlimitedCountLimits bool `json:"unlimitedCountLimits,omitempty"`
+	// ClearedResourceSubfields indicates the broker applies the resources
+	// sub-field entries of cleared_fields at start (ptone/scion#5676;
+	// store.BrokerCapabilities.ClearedResourceSubfields is its
+	// counterpart).
+	ClearedResourceSubfields bool `json:"clearedResourceSubfields,omitempty"`
 	// StartsInFlight indicates the broker reports the agent starts still
 	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
 	// then does the hub read a start's absence from that list as "no start

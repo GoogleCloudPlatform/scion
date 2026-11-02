@@ -138,6 +138,12 @@ const (
 	// deleteBlocksStart).
 	ErrCodeDeleteInProgress = "delete_in_progress"
 
+	// ErrCodeEncryptionPolicyMismatch is returned (409) when the database
+	// encryption policy refuses a secret payload write from this hub's
+	// encryption keyring (ptone/scion#1530 §6). Nothing was written; there
+	// is no unencrypted fallback.
+	ErrCodeEncryptionPolicyMismatch = "encryption_policy_mismatch"
+
 	// ErrCodeStartOutcomeUnknown is returned (504) by a create or env
 	// submit whose synchronous dispatch to the runtime broker ended without
 	// an answer (the dispatch deadline, or no response to a sent request).
@@ -271,6 +277,30 @@ const (
 	// remove the last direct-user project-owner binding.
 	// D7: normalized from SCREAMING_SNAKE to lower_snake_case (approved breaking change).
 	ErrCodeLastOwner = "last_owner"
+
+	// ErrCodeUserDeleteBlocked is returned with 409 when a user cannot be
+	// deleted because agents or active delegations depend on the user.
+	// details.agents and details.edges list them (each capped) and
+	// details.truncated reports more. GET /api/v1/users/{id}/delete-blockers
+	// returns the same lists without attempting the delete.
+	ErrCodeUserDeleteBlocked = "user_delete_blocked"
+
+	// ErrCodeUserDeleteForceForbidden is returned with 403 when a forced
+	// user delete (DELETE /api/v1/users/{id}?force=true) names agents the
+	// caller may not delete; details.agents lists them ({id, projectId}).
+	// Nothing is written.
+	ErrCodeUserDeleteForceForbidden = "user_delete_force_forbidden"
+
+	// ErrCodeUserDeleteBlockersChanged is returned with 409 when the agents
+	// blocking a forced user delete changed between the authorization
+	// check and the delete transaction. Nothing is written; retry.
+	ErrCodeUserDeleteBlockersChanged = "user_delete_blockers_changed"
+
+	// ErrCodeUserDeletionInProgress is returned with 409 for a plain user
+	// delete, or an update of the user, while a forced deletion of that
+	// user is in progress; details.deletionId and details.state identify
+	// it (GET /api/v1/users/{id}/deletion).
+	ErrCodeUserDeletionInProgress = "user_deletion_in_progress"
 
 	// ErrCodeInvalidCursor is returned for every authorizedList pagination
 	// cursor failure: malformed input, truncation, a tampered byte, a
@@ -418,6 +448,10 @@ func WriteErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		statusCode = http.StatusConflict
 		code = ErrCodeDeleteInProgress
 		message = DeleteInProgressMessage
+	case errors.Is(err, store.ErrEncryptionPolicyMismatch):
+		statusCode = http.StatusConflict
+		code = ErrCodeEncryptionPolicyMismatch
+		message = "The database encryption policy refused this write: this hub's encryption keyring does not match it. Nothing was stored."
 	case errors.Is(err, store.ErrVersionConflict):
 		statusCode = http.StatusConflict
 		code = ErrCodeVersionConflict

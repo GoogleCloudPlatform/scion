@@ -148,8 +148,8 @@ func TestVisitorAgents_ListAndReadProjected(t *testing.T) {
 }
 
 // A member's list and read responses are unchanged: the full agent record,
-// not the visitor view. An owner's send response carries no conversation
-// fields.
+// not the visitor view. An owner's send response names the conversation the
+// message landed in, as every sender's does, but carries no visitor DM key.
 func TestVisitorAgents_MemberResponsesUnchanged(t *testing.T) {
 	f := newVisitorMessagingFixture(t)
 	populated := f.populatedAgent(t)
@@ -168,7 +168,13 @@ func TestVisitorAgents_MemberResponsesUnchanged(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var sent map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &sent))
-	assert.NotContains(t, sent, "conversation_id")
+	var ownerSent MessageDeliveryResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &ownerSent))
+	require.NotEmpty(t, ownerSent.MessageID)
+	stored, err := f.st.GetMessage(context.Background(), ownerSent.MessageID)
+	require.NoError(t, err)
+	require.NotEmpty(t, stored.ConversationID)
+	assert.Equal(t, stored.ConversationID, ownerSent.ConversationID)
 	assert.NotContains(t, sent, "conversation_key")
 
 	// The visitor-only routes answer 404 for a member.
@@ -496,13 +502,11 @@ func TestVisitorSubRoutes_AgentListAndReadShapes(t *testing.T) {
 	}
 }
 
-// Only a visitor sender gets the conversation fields in the send response.
-func TestVisitorDeliveryConversation_VisitorOnly(t *testing.T) {
+// Only a visitor sender gets the DM key in the send response.
+func TestVisitorDMKey_VisitorOnly(t *testing.T) {
 	agent := &store.Agent{ID: tid("delivery-agent")}
 	visitor := NewVisitorIdentity(tid("delivery-visitor"), visitorTestUserIssuer, "sub", "v@corp.com", "V")
-	id, key := visitorDeliveryConversation(visitor, agent, "conv-1")
-	assert.Equal(t, "conv-1", id)
-	assert.Equal(t, "dm:agent:"+agent.ID+":user:"+visitor.ID(), key)
+	assert.Equal(t, "dm:agent:"+agent.ID+":user:"+visitor.ID(), visitorDMKey(visitor, agent))
 
 	for name, identity := range map[string]Identity{
 		"local user":        NewDevUser(DevUserConfig{}),
@@ -510,9 +514,7 @@ func TestVisitorDeliveryConversation_VisitorOnly(t *testing.T) {
 		"no identity":       nil,
 		"typed nil visitor": (*VisitorIdentity)(nil),
 	} {
-		id, key := visitorDeliveryConversation(identity, agent, "conv-1")
-		assert.Empty(t, id, name)
-		assert.Empty(t, key, name)
+		assert.Empty(t, visitorDMKey(identity, agent), name)
 	}
 }
 

@@ -134,9 +134,10 @@ _start_deploy_bg() {
   if [[ "${DEPLOY_BG_DEFAULT_SIGINT:-}" == "true" ]]; then
     # A shell cannot un-ignore a signal that was ignored when it started,
     # and a suite launched in the background from a non-interactive shell
-    # inherits SIGINT ignored. Reset SIGINT to its default before exec so
-    # a SIGINT test does not depend on how the suite was started.
-    launcher=("$PYTHON" -c 'import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])')
+    # inherits SIGINT ignored (and SIGHUP too, under nohup). Reset both to
+    # their defaults before exec so a SIGINT or SIGHUP test does not
+    # depend on how the suite was started.
+    launcher=("$PYTHON" -c 'import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); signal.signal(signal.SIGHUP, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])')
   fi
   set -m
   ${launcher[@]+"${launcher[@]}"} env "$@" bash "$DEPLOY_SH" --config "$config_file" --version v1.0.0-test \
@@ -948,6 +949,129 @@ test_deploy_create_tier_off_interrupt_in_phase4_removes_temp_files() {
   rm -rf "$deploy_tmpdir"
 }
 
+# run_deploy_create_interrupted_at_hubenv CONFIG_JSON DEPLOY_TMPDIR [SIGNAL]
+# -- runs deploy.sh (create mode) with TMPDIR=DEPLOY_TMPDIR and every
+# `compute ssh`/`compute scp` succeeding. The stub holds the remote
+# `mktemp -d /tmp/scion-hubenv.XXXXXX` call (GCLOUD_STUB_HUBENV_MKTEMP_BLOCKS),
+# which deploy.sh makes right after writing its local 0600 hub.env copy
+# (the session secret). Once that call has started, the copy's state is
+# recorded and deploy.sh's process group is sent SIGNAL (TERM by default,
+# INT or HUP; for INT and HUP, deploy.sh starts with SIGINT and SIGHUP at
+# their default dispositions). Sets INTERRUPT_REACHED, HUBENV_COPIES (how many files
+# under DEPLOY_TMPDIR held SCION_SERVER_SESSION_SECRET= at that moment;
+# contents are never printed), HUBENV_COPY_MODE and HUBENV_DIR_MODE (the
+# copy's and its directory's modes), HUBENV_IN_PRIVATE_DIR (true when the
+# copy was in a scion-deploy.* directory under DEPLOY_TMPDIR), DEPLOY_RC
+# and DEPLOY_LOG. (ptone/scion#6612)
+run_deploy_create_interrupted_at_hubenv() {
+  local config_json="$1" deploy_tmpdir="$2" signal="${3:-TERM}" config_file log_file pid
+  config_file="$(mktemp)"
+  log_file="$(mktemp)"
+  printf '%s' "$config_json" > "$config_file"
+  local sentinel="${GCLOUD_STUB_STATE_DIR}/hubenv-mktemp-started"
+  rm -f "$sentinel"
+  if [[ "$signal" == "INT" || "$signal" == "HUP" ]]; then
+    DEPLOY_BG_DEFAULT_SIGINT=true _start_deploy_bg "$config_file" "$log_file" GCLOUD_STUB_SSH_SUCCEEDS=true \
+      GCLOUD_STUB_HUBENV_MKTEMP_BLOCKS=true TMPDIR="$deploy_tmpdir"
+  else
+    _start_deploy_bg "$config_file" "$log_file" GCLOUD_STUB_SSH_SUCCEEDS=true \
+      GCLOUD_STUB_HUBENV_MKTEMP_BLOCKS=true TMPDIR="$deploy_tmpdir"
+  fi
+  pid="$_DEPLOY_BG_PID"
+  local waited_ms=0
+  while [[ ! -f "$sentinel" && "$waited_ms" -lt 30000 ]]; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    waited_ms=$((waited_ms + 100))
+  done
+  INTERRUPT_REACHED=false
+  [[ -f "$sentinel" ]] && INTERRUPT_REACHED=true
+  local copies copy
+  copies="$(grep -rl 'SCION_SERVER_SESSION_SECRET=' "$deploy_tmpdir" 2>/dev/null || true)"
+  HUBENV_COPIES="$(printf '%s' "$copies" | grep -c . || true)"
+  copy="${copies%%$'\n'*}"
+  HUBENV_COPY_MODE=""
+  HUBENV_DIR_MODE=""
+  HUBENV_IN_PRIVATE_DIR=false
+  if [[ -n "$copy" ]]; then
+    HUBENV_COPY_MODE="$(stat -c %a "$copy" 2>/dev/null || true)"
+    HUBENV_DIR_MODE="$(stat -c %a "$(dirname "$copy")" 2>/dev/null || true)"
+    case "$copy" in
+      "$deploy_tmpdir"/scion-deploy.*/*) HUBENV_IN_PRIVATE_DIR=true ;;
+    esac
+  fi
+  if [[ "$INTERRUPT_REACHED" == "true" && "$signal" != "TERM" ]]; then
+    # Signal first and give deploy.sh time to exit on that signal alone;
+    # _stop_deploy_bg's own SIGTERM below then only reaps it.
+    kill "-${signal}" -- "-${pid}" 2>/dev/null || true
+    waited_ms=0
+    while kill -0 "$pid" 2>/dev/null && [[ "$waited_ms" -lt 10000 ]]; do
+      sleep 0.05
+      waited_ms=$((waited_ms + 50))
+    done
+  fi
+  _stop_deploy_bg "$pid" "$log_file"
+  DEPLOY_LOG="$(cat "$log_file")"
+  rm -f "$config_file" "$log_file"
+}
+
+# _assert_hubenv_interrupt_cleaned SIGNAL EXPECTED_RC -- one interrupted
+# run at the hub.env point: the 0600 copy existed, in deploy.sh's private
+# 0700 directory, when SIGNAL arrived; deploy.sh ended on SIGNAL; nothing
+# is left in its TMPDIR.
+_assert_hubenv_interrupt_cleaned() {
+  local signal="$1" expected_rc="$2" deploy_tmpdir
+  fresh_gcloud_state
+  deploy_tmpdir="$(mktemp -d)"
+  run_deploy_create_interrupted_at_hubenv \
+    "$(base_config_json "$HUB" "" "registry" "us-docker.pkg.dev/demo-project/scion")" "$deploy_tmpdir" "$signal"
+  assert_eq "true" "$INTERRUPT_REACHED" \
+    "deploy.sh must reach the hub.env staging step, or this test can't check cleanup there (${signal}): ${DEPLOY_LOG}"
+  assert_eq "1" "$HUBENV_COPIES" "exactly one local hub.env copy must exist when ${signal} arrives (contents not shown)"
+  assert_eq "600" "$HUBENV_COPY_MODE" "the local hub.env copy must be mode 0600 (${signal})"
+  assert_eq "true" "$HUBENV_IN_PRIVATE_DIR" "the local hub.env copy must be in deploy.sh's private scion-deploy.* directory (${signal})"
+  assert_eq "700" "$HUBENV_DIR_MODE" "deploy.sh's private temp directory must be mode 0700 (${signal})"
+  assert_eq "$expected_rc" "$DEPLOY_RC" "deploy.sh must end on ${signal} (status ${expected_rc}) after cleaning up"
+  assert_eq "" "$(find "$deploy_tmpdir" -mindepth 1 2>/dev/null)" \
+    "an interrupted run (${signal}) must leave nothing in deploy.sh's TMPDIR, the hub.env copy included"
+  rm -rf "$deploy_tmpdir"
+}
+
+test_deploy_create_sigterm_after_hubenv_copy_removes_it() {
+  _assert_hubenv_interrupt_cleaned TERM 143
+}
+
+test_deploy_create_sigint_after_hubenv_copy_removes_it() {
+  _assert_hubenv_interrupt_cleaned INT 130
+}
+
+test_deploy_create_sighup_after_hubenv_copy_removes_it() {
+  _assert_hubenv_interrupt_cleaned HUP 129
+}
+
+# Every local temp file is created inside the private directory, so the
+# per-phase *_ERR files and the hub.env copy are covered from creation:
+# the script registers the directory, not the files.
+# shellcheck disable=SC2016 # literal deploy.sh source lines
+test_deploy_cleanup_trap_covers_exit_and_signals() {
+  local script
+  script="$(cat "$DEPLOY_SH")"
+  assert_contains "$script" 'trap deploy_cleanup EXIT' "the cleanup must run on EXIT"
+  assert_contains "$script" "trap 'deploy_on_signal INT 130' INT" "the cleanup must run on INT and re-raise it"
+  assert_contains "$script" "trap 'deploy_on_signal TERM 143' TERM" "the cleanup must run on TERM and re-raise it"
+  assert_contains "$script" "trap 'deploy_on_signal HUP 129' HUP" "the cleanup must run on HUP and re-raise it"
+  assert_contains "$script" 'DEPLOY_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/scion-deploy.XXXXXX")"' \
+    "local temp files must go to a private directory"
+  assert_contains "$script" 'export TMPDIR="$DEPLOY_TMPDIR"' "every later mktemp must land in the private directory"
+  local trap_line first_local_mktemp
+  trap_line="$(line_number 'trap deploy_cleanup EXIT' "$script")"
+  # The first local mktemp executed at top level (functions run later).
+  first_local_mktemp="$(line_number 'API_LIST_ERR_FILE="$(mktemp)"' "$script")"
+  assert_true "$([[ -n "$trap_line" && -n "$first_local_mktemp" && "$trap_line" -lt "$first_local_mktemp" ]] && echo true || echo false)" \
+    "the trap and the private directory must be set up before the first local temp file"
+  # That it is the only EXIT registration: test_deploy_sh_registers_a_single_exit_trap.
+}
+
 test_deploy_create_tier_off_sigint_in_phase4_removes_temp_files() {
   fresh_gcloud_state
   local deploy_tmpdir
@@ -993,9 +1117,21 @@ test_deploy_create_tier_off_full_run_removes_temp_files() {
 # deploy.sh registers exactly one EXIT trap: a second registration would
 # replace, not extend, the first.
 test_deploy_sh_registers_a_single_exit_trap() {
-  local count
-  count="$(grep -cE '^[[:space:]]*trap .* EXIT[[:space:]]*$' "$DEPLOY_SH" || true)"
+  local count remote
+  # The binary and plugin install commands each set an EXIT trap inside
+  # their remote --command string (it runs in the VM's shell, not in
+  # deploy.sh) to remove their private download dir; those are written
+  # with escaped quotes (\"\$SCION_EXTRACT_DIR\"), which only appear
+  # inside such double-quoted strings. The hub.env install does the same
+  # for its private staging dir (${HUB_ENV_REMOTE_DIR}, expanded locally
+  # into the remote command). Every other trap line is deploy.sh's own,
+  # and there must be exactly one.
+  # shellcheck disable=SC2016 # a regex for literal text in deploy.sh
+  remote='trap .rm -rf (\\"\\\$(SCION|PLUGIN)_EXTRACT_DIR\\"|\$\{HUB_ENV_REMOTE_DIR\}). EXIT'
+  count="$(grep -E '^[[:space:]]*trap .* EXIT[[:space:]]*$' "$DEPLOY_SH" | grep -cvE "$remote" || true)"
   assert_eq "1" "$count" "deploy.sh must register exactly one EXIT trap"
+  assert_eq "3" "$(grep -cE "$remote" "$DEPLOY_SH" || true)" \
+    "the remote install commands (binary, plugin, hub.env) must each clean up their private dir with an EXIT trap"
 }
 
 # =====================================================================
@@ -1856,7 +1992,7 @@ test_deploy_create_tier_off_settings_yaml_byte_identical() {
   assert_not_contains "$template" "HYBRID_" \
     "the dev-mode heredoc template must carry no hybrid-tier reference outside the splices"
   expected="$(IMAGE_REGISTRY="localhost/scion" HUB_NAME="demohub" ADMIN_EMAIL="admin@example.com" \
-    RELEASE_CHANNEL="nightly" UPDATE_POLICY="auto" render_settings_yaml_template "$template"; echo x)"
+    RELEASE_CHANNEL="nightly" UPDATE_POLICY="auto" INSTALL_ROOT="/opt/scion" render_settings_yaml_template "$template"; echo x)"
   expected="${expected%x}"
   assert_contains "$expected" "  # Listen port: set by --web-port in scion-hub.service, not here." "the rendered template must reach the listen-port comment line"
   assert_eq "$expected" "$actual" \
@@ -1890,7 +2026,7 @@ test_deploy_create_tier_off_proxy_settings_yaml_byte_identical() {
   assert_not_contains "$template" "HYBRID_" \
     "the proxy-mode heredoc template must carry no hybrid-tier reference outside the splices"
   expected="$(IMAGE_REGISTRY="us-docker.pkg.dev/demo-project/scion" HUB_NAME="demohub" ADMIN_EMAIL="admin@example.com" \
-    RELEASE_CHANNEL="nightly" UPDATE_POLICY="auto" \
+    RELEASE_CHANNEL="nightly" UPDATE_POLICY="auto" INSTALL_ROOT="/opt/scion" \
     IAP_AUDIENCE="/projects/123456789012/locations/us-central1/services/scion-hub-demohub-iap-proxy" \
     render_settings_yaml_template "$template"; echo x)"
   expected="${expected%x}"
@@ -2190,6 +2326,7 @@ server.auth.mode
 server.hub.admin_emails[0]
 server.hub.hub_name
 server.maintenance.deployment_tier
+server.maintenance.install_root
 server.maintenance.release_channel
 server.maintenance.update_policy
 server.secrets.backend
@@ -2203,7 +2340,8 @@ server.storage.local_path"
       expected_leaves="$(printf '%s\n%s\n%s' "$common_leaves" \
         "server.auth.proxy.iap.audience" "server.auth.proxy.provider" | LC_ALL=C sort)"
     else
-      expected_leaves="$(printf '%s' "$common_leaves" | LC_ALL=C sort)"
+      # The bootstrap write alone binds to loopback (ptone/scion#6150).
+      expected_leaves="$(printf '%s\n%s' "$common_leaves" "server.hub.host" | LC_ALL=C sort)"
     fi
     assert_eq "$expected_leaves" "$(_json_leaf_paths "$json")" \
       "tier-off ${mode}-mode write: exactly the expected set of keys"
@@ -2234,6 +2372,8 @@ server.storage.local_path"
       "tier-off ${mode}-mode write: server.maintenance.release_channel"
     assert_eq "auto" "$(_json_get "$json" server.maintenance.update_policy)" \
       "tier-off ${mode}-mode write: server.maintenance.update_policy"
+    assert_eq "/opt/scion" "$(_json_get "$json" server.maintenance.install_root)" \
+      "tier-off ${mode}-mode write: server.maintenance.install_root"
     assert_eq "/home/scion/.scion/workspace-storage" "$(_json_get "$json" server.storage.local_path)" \
       "tier-off ${mode}-mode write: server.storage.local_path"
     assert_eq "local" "$(_json_get "$json" server.secrets.backend)" \
@@ -2623,10 +2763,10 @@ test_deploy_create_api_check_enables_iamcredentials_when_missing() {
   assert_not_contains "$enable_line" "compute.googleapis.com" "an already-enabled API must not be re-enabled"
 }
 
-# deploy.sh never removes the hub SA's project role bindings one by one:
-# --delete deletes the hub SA itself, so every binding it holds
-# (serviceAccountAdmin included) no longer applies. Asserts that path, against the
-# exact state a default create left behind.
+# --delete removes the hub SA's project role bindings (serviceAccountAdmin
+# included; see test_delete_sa_bindings.sh) and then deletes the SA.
+# Asserts the SA delete, against the exact state a default create left
+# behind.
 test_deploy_delete_after_create_deletes_hub_sa_holding_service_account_admin() {
   fresh_gcloud_state
   run_deploy_create "$(base_config_json "$HUB")"
@@ -2739,4 +2879,123 @@ test_deploy_create_service_iap_binding_failure_warns_with_gcloud_error_and_falls
     "gcloud's error text must follow the warning and precede the fallback's result"
   assert_eq "1" "$(gcloud_log | grep '^projects add-iam-policy-binding ' | grep -c -- '--role=roles/iap.httpsResourceAccessor' || true)" \
     "the project-level fallback must run once"
+}
+
+# =====================================================================
+# Bootstrap listen host (ptone/scion#6150)
+# =====================================================================
+#
+# The server refuses to start a web server that listens on a non-loopback
+# address with a base URL that is not https (checkWebBaseURLListener in
+# cmd/server_web_base_url.go). On a fresh VM nothing sets a base URL
+# before Phase 5 writes the IAP audience the https URL is derived from,
+# so the Phase 3 first start must bind to loopback. Phase 5 drops the
+# bind, and the hub then starts on 0.0.0.0 with the IAP-derived URL.
+
+BOOTSTRAP_HOST_LINE='    host: "127.0.0.1"'
+BOOTSTRAP_IAP_AUDIENCE="/projects/123456789012/locations/us-central1/services/scion-hub-${HUB}-iap-proxy"
+
+# _last_line_number PATTERN TEXT -- like line_number, but the last match.
+_last_line_number() {
+  printf '%s\n' "$2" | grep -n -F -- "$1" | tail -1 | cut -d: -f1
+}
+
+# _lt A B -- "true" if A and B are both non-empty and A < B.
+_lt() {
+  [[ -n "$1" && -n "$2" && "$1" -lt "$2" ]] && echo true || echo false
+}
+
+# A full fresh create, in log order: the bootstrap settings.yaml with the
+# loopback bind is written before the first `systemctl start` and the
+# first health check poll. Phase 5 then rewrites settings.yaml without
+# the bind (and with the IAP audience), before the restart and its
+# health check.
+test_deploy_create_fresh_bootstrap_binds_loopback_before_first_start() {
+  fresh_gcloud_state
+  local deploy_tmpdir
+  deploy_tmpdir="$(mktemp -d)"
+  run_deploy_create_until_exit \
+    "$(base_config_json "$HUB" "" "registry" "us-docker.pkg.dev/demo-project/scion")" "$deploy_tmpdir"
+  rm -rf "$deploy_tmpdir"
+  assert_eq "true" "$EXITED_ON_OWN" "deploy.sh must exit on its own: ${DEPLOY_LOG}"
+  assert_eq "0" "$DEPLOY_RC" "a full fresh create against the stub must exit 0: ${DEPLOY_LOG}"
+  local log
+  log="$(gcloud_log)"
+  assert_eq "2" "$(printf '%s\n' "$log" | grep -c "<< 'SETTINGSEOF'" || true)" \
+    "a full create writes settings.yaml twice (Phase 3 bootstrap, Phase 5 proxy)"
+  assert_eq "1" "$(printf '%s\n' "$log" | grep -cxF -- "$BOOTSTRAP_HOST_LINE" || true)" \
+    "exactly one settings.yaml write (the bootstrap one) sets the loopback bind"
+
+  local dev_at host_at start_at first_health_at proxy_at restart_at last_health_at
+  dev_at="$(line_number "<< 'SETTINGSEOF'" "$log")"
+  host_at="$(line_number "$BOOTSTRAP_HOST_LINE" "$log")"
+  start_at="$(line_number 'sudo systemctl start scion-hub.service' "$log")"
+  first_health_at="$(line_number 'curl -s http://localhost:8080/healthz' "$log")"
+  proxy_at="$(_last_line_number "<< 'SETTINGSEOF'" "$log")"
+  restart_at="$(line_number 'sudo systemctl restart scion-hub.service' "$log")"
+  last_health_at="$(_last_line_number 'curl -s http://localhost:8080/healthz' "$log")"
+  assert_true "$(_lt "$dev_at" "$host_at")" \
+    "the loopback bind must be inside the bootstrap settings.yaml write (dev ${dev_at}, host ${host_at})"
+  assert_true "$(_lt "$host_at" "$start_at")" \
+    "the loopback bind must be written before the first systemctl start (host ${host_at}, start ${start_at})"
+  assert_true "$(_lt "$start_at" "$first_health_at")" \
+    "the first health check must follow the first start (start ${start_at}, health ${first_health_at})"
+  assert_true "$(_lt "$first_health_at" "$proxy_at")" \
+    "the Phase 5 settings.yaml write must follow the first health check (health ${first_health_at}, proxy ${proxy_at})"
+  assert_true "$(_lt "$proxy_at" "$restart_at")" \
+    "the Phase 5 settings.yaml write must precede the restart (proxy ${proxy_at}, restart ${restart_at})"
+  assert_true "$(_lt "$restart_at" "$last_health_at")" \
+    "a health check must follow the Phase 5 restart (restart ${restart_at}, health ${last_health_at})"
+  assert_true "$(_lt "$host_at" "$proxy_at")" \
+    "the only loopback bind must come before the Phase 5 write"
+
+  # What the hub parses from each write (the hub's own koanf parser).
+  local dev_json proxy_json
+  dev_json="$(_settings_yaml_json "$(_settings_heredoc_nth "$log" 1)")"
+  assert_eq "0" "$?" "the bootstrap settings.yaml write must parse as YAML"
+  assert_eq "127.0.0.1" "$(_json_get "$dev_json" server.hub.host)" \
+    "the bootstrap write binds the hub and web listener to loopback, which the base-URL guard accepts with any base URL"
+  proxy_json="$(_settings_yaml_json "$(_settings_heredoc_nth "$log" 2)")"
+  assert_eq "0" "$?" "the Phase 5 settings.yaml write must parse as YAML"
+  assert_eq "<missing>" "$(_json_get "$proxy_json" server.hub.host)" \
+    "the Phase 5 write drops the bind, so the hub listens on the default 0.0.0.0 for the Cloud Run proxy"
+  assert_eq "$BOOTSTRAP_IAP_AUDIENCE" "$(_json_get "$proxy_json" server.auth.proxy.iap.audience)" \
+    "the Phase 5 write carries the IAP audience, from which the hub derives its https base URL"
+  assert_eq "<missing>" "$(_json_get "$proxy_json" server.hub.public_url)" \
+    "deploy.sh writes no explicit base URL"
+}
+
+# A re-run on a VM that already has hub.env (where an operator's
+# SCION_SERVER_BASE_URL lives): deploy.sh keeps hub.env and writes no
+# base URL of its own, so the base URL the hub uses after Phase 5 is
+# unchanged. The bootstrap loopback bind still applies, since the hub is
+# stopped and started again in Phase 3.
+test_deploy_rerun_existing_hub_env_keeps_base_url_sources() {
+  fresh_gcloud_state
+  local deploy_tmpdir
+  deploy_tmpdir="$(mktemp -d)"
+  run_deploy_create_until_exit \
+    "$(base_config_json "$HUB" "" "registry" "us-docker.pkg.dev/demo-project/scion")" "$deploy_tmpdir" \
+    GCLOUD_STUB_HUB_ENV_EXISTS=true
+  rm -rf "$deploy_tmpdir"
+  assert_eq "true" "$EXITED_ON_OWN" "deploy.sh must exit on its own: ${DEPLOY_LOG}"
+  assert_eq "0" "$DEPLOY_RC" "a full re-run against the stub must exit 0: ${DEPLOY_LOG}"
+  assert_contains "$DEPLOY_LOG" "hub.env already exists, preserving existing SCION_SERVER_SESSION_SECRET." \
+    "the re-run must take the existing-hub.env branch"
+  local log
+  log="$(gcloud_log)"
+  assert_not_contains "$log" "/tmp/hub.env" "a re-run must not copy or move a new hub.env onto the VM"
+  # Regression guards, not discriminators: deploy.sh has never written
+  # either base URL source. They fail if a later change starts to, which
+  # could change the base URL of an existing VM on a re-run (#6150 brief:
+  # a re-run must not change it).
+  assert_not_contains "$log" "SCION_SERVER_BASE_URL" "deploy.sh must not set SCION_SERVER_BASE_URL"
+  assert_not_contains "$log" "public_url" "deploy.sh must not set server.hub.public_url"
+  assert_true "$(_lt "$(line_number "$BOOTSTRAP_HOST_LINE" "$log")" "$(line_number 'sudo systemctl start scion-hub.service' "$log")")" \
+    "on a re-run, too, the loopback bind is written before the Phase 3 start"
+  local proxy_json
+  proxy_json="$(_settings_yaml_json "$(_settings_heredoc_nth "$log" 2)")"
+  assert_eq "0" "$?" "the Phase 5 settings.yaml write must parse as YAML"
+  assert_eq "<missing>" "$(_json_get "$proxy_json" server.hub.host)" \
+    "the Phase 5 write on a re-run drops the bind as well"
 }

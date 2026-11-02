@@ -373,14 +373,16 @@ ti_on="$("$HELM" template t "$CHART" "${BASE[@]}" --set-string hub.hubClass=test
 ! printf '%s' "$ti_default" | grep -qiE 'test-identit|test_identit|testidentit|test-mode|class: test'
 ti_check "test identities unset: no trace in the render" $(( ti_rc != 0 || $? != 0 ))
 # 2. Explicit false: byte-identical to unset.
-[ "$ti_off_rc" -eq 0 ] && [ "$ti_off" = "$ti_default" ]
-ti_check "test identities false: render identical to unset" $?
+ti_same_ok=0
+[ "$ti_off_rc" -eq 0 ] && [ "$ti_off" = "$ti_default" ] || ti_same_ok=1
+ti_check "test identities false: render identical to unset" "$ti_same_ok"
 # 3. True (with hub.hubClass: test): the ONLY difference from hub.hubClass: test
 #    alone is one added "- --test-mode=member:h" line (h is BASE's hub.hubId):
 #    no env var, configmap key, settings field or annotation.
 ti_diff="$(diff <(printf '%s\n' "$ti_class") <(printf '%s\n' "$ti_on") | grep -E '^[<>]')"
-[ "$ti_on_rc" -eq 0 ] && [ "$ti_class_rc" -eq 0 ] && [ "$(printf '%s\n' "$ti_diff" | sed 's/^> *//')" = "- --test-mode=member:h" ]
-ti_check "test identities true: exactly one added arg, --test-mode=member:<hubId>" $? "diff: $(printf '%s' "$ti_diff" | tr '\n' ' ' | cut -c1-200)"
+ti_one_ok=0
+[ "$ti_on_rc" -eq 0 ] && [ "$ti_class_rc" -eq 0 ] && [ "$(printf '%s\n' "$ti_diff" | sed 's/^> *//')" = "- --test-mode=member:h" ] || ti_one_ok=1
+ti_check "test identities true: exactly one added arg, --test-mode=member:<hubId>" "$ti_one_ok" "diff: $(printf '%s' "$ti_diff" | tr '\n' ' ' | cut -c1-200)"
 # 4. True plus --test-mode in hub.args: still refused (the chart renders it).
 ! "$HELM" template t "$CHART" "${BASE[@]}" --set-string hub.hubClass=test --set hub.testIdentities.enabled=true --set-json 'hub.args=["--test-mode=off"]' >/dev/null 2>&1
 ti_check "test identities true: hub.args --test-mode still refused" $?

@@ -21,10 +21,11 @@ import (
 
 // RetiredAsyncAgentLaunchWarning is logged at hub startup when the retired
 // server.hub.async_agent_launch setting is still set. Async agent create is
-// now the hub.async_agent_launch experiment (ptone/scion#4991); the setting
-// is ignored, so without this warning a hub that set it would silently go
-// synchronous after an upgrade.
-const RetiredAsyncAgentLaunchWarning = "server.hub.async_agent_launch is retired; enable the hub.async_agent_launch experiment instead"
+// now the hub.async_agent_launch experiment (ptone/scion#4991, on by
+// default since ptone/scion#6640); the setting is ignored, so without this
+// warning a hub that set it (for example to false) would silently follow
+// the experiment instead.
+const RetiredAsyncAgentLaunchWarning = "server.hub.async_agent_launch is retired and ignored; use the hub.async_agent_launch experiment (on by default)"
 
 // retiredAsyncAgentLaunchEnvVar is the environment variable the retired
 // setting was read from.

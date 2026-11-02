@@ -216,6 +216,10 @@ type replayListStore struct {
 	// lands between a write and the writer's cache update.
 	afterUpsert func()
 	afterDelete func()
+	// duringList, when set, runs once inside ListHubSettings, after the
+	// read and before it returns, standing in for work that lands while a
+	// read is in flight.
+	duringList func()
 }
 
 // DeleteHubSettingRevision passes the optional revision-returning delete
@@ -237,11 +241,17 @@ func (r *replayListStore) DeleteHubSettingRevision(ctx context.Context, section 
 func (r *replayListStore) ListHubSettings(ctx context.Context) ([]store.HubSetting, error) {
 	r.mu.Lock()
 	replay := r.replay
+	during := r.duringList
+	r.duringList = nil
 	r.mu.Unlock()
-	if replay != nil {
-		return replay, nil
+	rows, err := replay, error(nil)
+	if replay == nil {
+		rows, err = r.HubSettingStore.ListHubSettings(ctx)
 	}
-	return r.HubSettingStore.ListHubSettings(ctx)
+	if during != nil {
+		during()
+	}
+	return rows, err
 }
 
 func (r *replayListStore) UpsertHubSetting(ctx context.Context, section string, value json.RawMessage,
@@ -258,6 +268,12 @@ func (r *replayListStore) UpsertHubSetting(ctx context.Context, section string, 
 // A Refresh whose read is older than the cached values is discarded: the
 // cache keeps the newer values and revision, and nothing is reported
 // changed (ptone/scion#4457).
+//
+// The newer write lands while the read is in flight (duringList), which is
+// how a stale read arises. A stale read with no change of the cache while
+// it was in flight is instead the signature of a store reset and is
+// resynchronised to (ptone/scion#5667,
+// TestOperationalSettings_RefreshResyncsAfterStoreReset).
 func TestOperationalSettings_RefreshDiscardsStaleRead(t *testing.T) {
 	st, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
@@ -270,15 +286,19 @@ func TestOperationalSettings_RefreshDiscardsStaleRead(t *testing.T) {
 	stale, err := st.ListHubSettings(ctx)
 	require.NoError(t, err)
 
-	_, err = ops.Update(ctx, "lifecycle", json.RawMessage(`{"auto_suspend_stalled":false}`), "admin@example.com", -1, "managed")
-	require.NoError(t, err)
-	newRev := ops.SettingsRevision()
-
 	rs.mu.Lock()
 	rs.replay = stale
+	rs.duringList = func() {
+		_, err := ops.Update(ctx, "lifecycle", json.RawMessage(`{"auto_suspend_stalled":false}`), "admin@example.com", -1, "managed")
+		require.NoError(t, err)
+	}
 	rs.mu.Unlock()
 	changed, err := ops.Refresh(ctx)
 	require.NoError(t, err)
+	newRev := ops.SettingsRevision()
+	row, err := st.GetHubSetting(ctx, store.HubSettingsRevisionSection)
+	require.NoError(t, err)
+	require.Equal(t, row.Revision, newRev, "the write during the read raised the cached revision")
 	assert.Empty(t, changed)
 	assert.Equal(t, newRev, ops.SettingsRevision())
 	assert.False(t, ops.Snapshot().AutoSuspendStalled, "the stale read did not replace the newer value")

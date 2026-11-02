@@ -34,8 +34,9 @@ import (
 
 // TestProvision_UnlimitedDurationBeatsDefaults: a "0" from the template is a
 // set value, so neither the hub's agent defaults nor the broker's
-// settings.yaml default replaces it. Max turns of 0, by contrast, is unset
-// and gets the default.
+// settings.yaml default replaces it. Max turns of 0 is likewise an explicit
+// "no limit" (ptone/scion#5605; before, a template's 0 meant unset and got
+// the default).
 func TestProvision_UnlimitedDurationBeatsDefaults(t *testing.T) {
 	const settingsYAML = `schema_version: "1"
 default_harness_config: test-harness
@@ -69,7 +70,47 @@ harness_configs:
 			require.NoError(t, err)
 			require.NotNil(t, cfg)
 			assert.Equal(t, "0", cfg.MaxDuration, "a duration of \"0\" (no limit) must not be replaced by a default")
-			assert.NotZero(t, cfg.MaxTurns, "max turns of 0 is unset, so a default fills it")
+			// A template's max_turns of 0 is an explicit "no limit"
+			// (ptone/scion#5605): no default fills it.
+			assert.Equal(t, api.IntPtr(0), cfg.MaxTurns, "max turns of 0 is no limit, so no default fills it")
+		})
+	}
+}
+
+// TestProvision_InlineUnlimitedCountBeatsTemplate: an inline max_turns of 0
+// (the requester's Unlimited, as replayed from an agent's create inputs at
+// reincarnation) overrides the template's limit, and neither default fills
+// it (ptone/scion#5605). An inline value still beats the template, and an
+// unset inline count leaves the template's value.
+func TestProvision_InlineUnlimitedCountBeatsTemplate(t *testing.T) {
+	const settingsYAML = `schema_version: "1"
+default_harness_config: test-harness
+default_max_turns: 10
+default_max_model_calls: 11
+harness_configs:
+  test-harness:
+    harness: test-harness
+`
+	const templateJSON = `{"default_harness_config": "test-harness", "max_turns": 5, "max_model_calls": 6}`
+	ctx := api.ContextWithHubAgentDefaults(context.Background(), &api.HubAgentDefaults{MaxTurns: 50, MaxModelCalls: 51})
+	for _, tc := range []struct {
+		name      string
+		inline    *api.ScionConfig
+		wantTurns *int
+		wantCalls *int
+	}{
+		{name: "inline unlimited", inline: &api.ScionConfig{MaxTurns: api.IntPtr(0), MaxModelCalls: api.IntPtr(0)}, wantTurns: api.IntPtr(0), wantCalls: api.IntPtr(0)},
+		{name: "inline value", inline: &api.ScionConfig{MaxTurns: api.IntPtr(3)}, wantTurns: api.IntPtr(3), wantCalls: api.IntPtr(6)},
+		{name: "inline unset", inline: &api.ScionConfig{}, wantTurns: api.IntPtr(5), wantCalls: api.IntPtr(6)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			projectScionDir := hubDefaultsFixture(t, settingsYAML, templateJSON)
+			_, _, cfg, err := ProvisionAgent(ctx, "unlimited-count-agent", "limits-tpl", "", "test-harness",
+				projectScionDir, "", "", "", "", tc.inline)
+			require.NoError(t, err)
+			require.NotNil(t, cfg)
+			assert.Equal(t, tc.wantTurns, cfg.MaxTurns)
+			assert.Equal(t, tc.wantCalls, cfg.MaxModelCalls)
 		})
 	}
 }

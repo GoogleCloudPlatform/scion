@@ -206,8 +206,12 @@ export function tolerationLabel(t: PresentedToleration): string {
 
 /**
  * The Placement rows of a Kubernetes flat target: node selector,
- * tolerations and runtime class, each only when reported. Empty for any
- * other runtime type, so docker and future types show no Placement group.
+ * tolerations and runtime class, each only when reported. With none of
+ * them, one row says whether the instance reported no placement
+ * (placementReported true) or did not report placement at all. Empty for
+ * any other runtime type, so docker and future types show no Placement
+ * group, and when there is no presentation. The rows are read-only: the
+ * placement is configured on the broker.
  */
 export function placementRows(
   target: RuntimeTargetDescriptor,
@@ -227,5 +231,11 @@ export function placementRows(
   const objects = tolerations.filter((x) => !!x && typeof x === 'object' && !Array.isArray(x));
   push(rows, 'Tolerations', objects.map(tolerationLabel).join('; '));
   push(rows, 'Runtime class', t.runtimeClassName);
+  if (rows.length === 0) {
+    rows.push({
+      label: 'Placement',
+      value: t.placementReported === true ? 'None configured on the broker' : 'Not reported',
+    });
+  }
   return rows;
 }

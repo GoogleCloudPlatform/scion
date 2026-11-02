@@ -52,6 +52,7 @@ func (m *mockUserStore) ListUsers(context.Context, store.UserFilter, store.ListO
 }
 func (m *mockUserStore) DeleteUser(context.Context, string) error                     { return nil }
 func (m *mockUserStore) LockUserRow(context.Context, string, bool) error              { return nil }
+func (m *mockUserStore) MarkUserDeleting(context.Context, string) error               { return nil }
 func (m *mockUserStore) UpdateUserLastSeen(context.Context, string, time.Time) error  { return nil }
 func (m *mockUserStore) UpdateUserLastLogin(context.Context, string, time.Time) error { return nil }
 func (m *mockUserStore) IsUserInvitedOrActive(context.Context, string) (bool, error) {

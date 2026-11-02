@@ -30,10 +30,31 @@
  *   - entryClosure:       gzip limit on the entry chunk plus every chunk and
  *                         stylesheet it imports statically (what every route
  *                         downloads before the first render);
+ *   - isolatedChunks:     chunk file name prefixes that no chunk outside the
+ *                         prefix may import statically (a lazily loaded
+ *                         chunk stays lazy wherever it is reached from,
+ *                         including other lazy chunks);
+ *   - chunkImports:       per chunk file name prefix, the only chunk file
+ *                         name prefixes its chunks may import statically
+ *                         (so a lazy chunk never pulls in an unrelated
+ *                         large one through a shared helper);
  *   - requiredChunks:     chunk file name prefixes that must exist (proves a
  *                         lazy split still happens);
+ *   - requiredStrings:    per chunk file name prefix, strings that must
+ *                         occur exactly once in the built JS, in a chunk of
+ *                         that prefix: marker strings of modules that must
+ *                         survive tree shaking, such as the review editor's
+ *                         rendering and input rules (a second copy anywhere
+ *                         could stand in for a module the build left out);
  *   - forbiddenModules:   source modules that must not be in the static
- *                         closure of the given routes. Module lists come from
+ *                         closure of the given routes, by base name
+ *                         (pattern) or by full path (pathPattern, for
+ *                         example node_modules/<package>/), or as packages
+ *                         of a named chunk in manualChunks (chunkPackages);
+ *   - manualChunks:       the package pattern of each named chunk, which
+ *                         vite.config.ts uses to place those packages;
+ *   - a chunks entry with combined: true limits all chunks of the prefix
+ *                         together (otherwise each one). Module lists come from
  *                         each chunk's source map, looked up next to the chunk
  *                         or under dist/sourcemaps/ (where hidden maps may be
  *                         moved), so the check works with either policy.
@@ -102,13 +123,54 @@ export function findSourceMap(distDir, file) {
 }
 
 /**
- * Modules in `modules` whose base name matches `pattern` and that are not in
- * the exact-path allowlist `allow` (no globs: each entry is one path).
+ * Modules in `modules` whose base name matches `pattern` or whose path
+ * (relative to web/) matches `pathPattern`, and that are not in the
+ * exact-path allowlist `allow` (no globs: each entry is one path). Either
+ * pattern may be absent.
  */
-export function forbiddenIn(modules, pattern, allow) {
-  const re = new RegExp(pattern);
+export function forbiddenIn(modules, pattern, allow, pathPattern) {
+  const re = pattern ? new RegExp(pattern) : null;
+  const pathRe = pathPattern ? new RegExp(pathPattern) : null;
   const allowed = new Set(allow.map((a) => a.path));
-  return modules.filter((m) => re.test(posix.basename(m)) && !allowed.has(m));
+  return modules.filter(
+    (m) =>
+      ((re !== null && re.test(posix.basename(m))) || (pathRe !== null && pathRe.test(m))) &&
+      !allowed.has(m)
+  );
+}
+
+/**
+ * Static imports of chunks named `prefix`* by chunks not named so: the
+ * manifest entries outside the prefix whose `imports` (not
+ * `dynamicImports`) name an entry whose file starts with `prefix`.
+ */
+export function staticImportersOf(manifest, prefix) {
+  const out = [];
+  for (const chunk of Object.values(manifest)) {
+    if (chunk.file.startsWith(prefix)) continue;
+    for (const dep of chunk.imports ?? []) {
+      const target = manifest[dep];
+      if (target && target.file.startsWith(prefix)) out.push({ from: chunk.file, to: target.file });
+    }
+  }
+  return out;
+}
+
+/**
+ * Static imports from chunks named `prefix`* of chunks whose file starts
+ * with none of `allowed`.
+ */
+export function importsOutside(manifest, prefix, allowed) {
+  const out = [];
+  for (const chunk of Object.values(manifest)) {
+    if (!chunk.file.startsWith(prefix)) continue;
+    for (const dep of chunk.imports ?? []) {
+      const target = manifest[dep];
+      const file = target ? target.file : dep;
+      if (!allowed.some((a) => file.startsWith(a))) out.push({ from: chunk.file, to: file });
+    }
+  }
+  return out;
 }
 
 function gzipSize(buf) {
@@ -154,6 +216,27 @@ export function checkBudget({ manifest, budget, readFile, listFiles, readMapModu
       failures.push(`no chunk matching ${prefix}*.js`);
       continue;
     }
+    if (limit.combined) {
+      // One limit for all chunks of the prefix: raw bytes and gzip sizes add up.
+      let raw = 0;
+      let gz = 0;
+      for (const file of found) {
+        const buf = readFile(file);
+        if (!buf) {
+          failures.push(`${file}: missing from the build`);
+          continue;
+        }
+        raw += buf.length;
+        gz += gzipSize(buf);
+      }
+      const label = `${prefix}* combined (${found.join(', ')})`;
+      report.push(`${label}: raw ${raw} / ${limit.raw}, gzip ${gz} / ${limit.gzip}`);
+      if (limit.raw !== undefined && raw > limit.raw)
+        failures.push(`${label}: raw ${raw} B exceeds ${limit.raw} B`);
+      if (limit.gzip !== undefined && gz > limit.gzip)
+        failures.push(`${label}: gzip ${gz} B exceeds ${limit.gzip} B`);
+      continue;
+    }
     for (const file of found) {
       const buf = readFile(file);
       if (!buf) {
@@ -181,14 +264,69 @@ export function checkBudget({ manifest, budget, readFile, listFiles, readMapModu
       failures.push(`entry closure of ${entry}: gzip ${total} B exceeds ${limit} B`);
   }
 
+  for (const prefix of budget.isolatedChunks ?? []) {
+    const bad = staticImportersOf(manifest, prefix);
+    report.push(`isolated chunk ${prefix}*: ${bad.length} static importer(s) outside it`);
+    for (const b of bad)
+      failures.push(`${b.from} imports ${b.to} statically (isolated ${prefix}*)`);
+  }
+
+  for (const [prefix, allowed] of Object.entries(budget.chunkImports ?? {})) {
+    if (prefix.startsWith('$')) continue;
+    const bad = importsOutside(manifest, prefix, allowed);
+    report.push(`static imports of ${prefix}*: ${bad.length} outside the allowed list`);
+    for (const b of bad)
+      failures.push(`${b.from} imports ${b.to} statically (not allowed for ${prefix}*)`);
+  }
+
   for (const prefix of budget.requiredChunks ?? []) {
     const found = built.filter((f) => f.startsWith(prefix) && f.endsWith('.js'));
     report.push(`required chunk ${prefix}*.js: ${found.length ? found.join(', ') : 'none'}`);
     if (!found.length) failures.push(`no chunk matching ${prefix}*.js`);
   }
 
+  for (const [prefix, strings] of Object.entries(budget.requiredStrings ?? {})) {
+    if (prefix.startsWith('$')) continue;
+    const found = built.filter((f) => f.startsWith(prefix) && f.endsWith('.js'));
+    const count = (text, x) => text.split(x).length - 1;
+    const texts = built
+      .filter((f) => f.endsWith('.js'))
+      .map((f) => ({ f, text: readFile(f)?.toString('utf-8') ?? '' }));
+    let ok = 0;
+    for (const x of strings) {
+      const where = texts.filter((t) => count(t.text, x) > 0);
+      const total = where.reduce((n, t) => n + count(t.text, x), 0);
+      if (total === 0) failures.push(`${prefix}*.js: missing required string ${JSON.stringify(x)}`);
+      else if (total > 1 || !where[0].f.startsWith(prefix)) {
+        failures.push(
+          `${prefix}*.js: required string ${JSON.stringify(x)} occurs ${total} time(s), in ${where.map((t) => t.f).join(', ')}; EXPECT once, in ${prefix}*.js`
+        );
+      } else ok++;
+    }
+    report.push(
+      `required strings in ${prefix}*.js: ${ok} of ${strings.length} present, each exactly once in the build`
+    );
+    if (!found.length) failures.push(`no chunk matching ${prefix}*.js`);
+  }
+
   for (const rule of budget.forbiddenModules ?? []) {
     const allow = rule.allow ?? [];
+    const chunkPkgs = rule.chunkPackages ? budget.manualChunks?.[rule.chunkPackages] : undefined;
+    if (rule.chunkPackages && !chunkPkgs) {
+      failures.push(
+        `forbiddenModules rule for ${rule.roots}: no manualChunks entry ${rule.chunkPackages}`
+      );
+      continue;
+    }
+    const pathPattern = [rule.pathPattern, chunkPkgs]
+      .filter(Boolean)
+      .map((p) => `(${p})`)
+      .join('|');
+    if (!rule.pattern && !pathPattern) {
+      failures.push(`forbiddenModules rule for ${rule.roots}: needs a pattern or a pathPattern`);
+      continue;
+    }
+    const label = [rule.pattern, pathPattern].filter(Boolean).join(' or path ');
     for (const a of allow) {
       if (typeof a.path !== 'string' || /[*?[\]{}]/.test(a.path) || !a.reason) {
         failures.push(
@@ -206,10 +344,12 @@ export function checkBudget({ manifest, budget, readFile, listFiles, readMapModu
           failures.push(`${file}: no source map, cannot check modules in the closure of ${root}`);
           continue;
         }
-        for (const m of forbiddenIn(modules, rule.pattern, allow)) bad.add(`${m} (in ${file})`);
+        for (const m of forbiddenIn(modules, rule.pattern, allow, pathPattern || undefined)) {
+          bad.add(`${m} (in ${file})`);
+        }
       }
       report.push(
-        `static closure of ${root} (${keys.length} chunks): ${bad.size} module(s) matching ${rule.pattern}`
+        `static closure of ${root} (${keys.length} chunks): ${bad.size} module(s) matching ${label}`
       );
       for (const b of bad) failures.push(`${root}: static closure contains ${b}`);
     }

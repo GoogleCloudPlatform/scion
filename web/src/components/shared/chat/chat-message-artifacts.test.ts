@@ -23,15 +23,23 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { MessageArtifactRef } from '../../../client/artifacts.js';
 
-vi.mock('../../../utils/markdown.js', () => ({
-  getMarkdownRenderer: () =>
-    Promise.resolve({
-      render: (markdown: string) =>
-        `<p>${markdown
-          .replace(/```([\s\S]*?)```/g, '</p><pre><code>$1</code></pre><p>')
-          .replace(/`([^`]+)`/g, '<code>$1</code>')}</p>`,
-    }),
-}));
+vi.mock('../../../utils/markdown.js', () => {
+  const render = (markdown: string): string =>
+    `<p>${markdown
+      .replace(/```([\s\S]*?)```/g, '</p><pre><code>$1</code></pre><p>')
+      .replace(/`([^`]+)`/g, '<code>$1</code>')}</p>`;
+  return {
+    getMarkdownRenderer: () =>
+      Promise.resolve({
+        render,
+        renderFragment: (markdown: string) => {
+          const tpl = document.createElement('template');
+          tpl.innerHTML = render(markdown);
+          return tpl.content;
+        },
+      }),
+  };
+});
 
 vi.mock('../code-editor.js', () => ({
   getLanguageFromPath: () => 'plaintext',

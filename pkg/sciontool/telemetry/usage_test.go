@@ -921,7 +921,9 @@ func assertUsageSeries(t *testing.T, series []*monitoringpb.TimeSeries) {
 	}
 	byStatus := map[string]int64{}
 	for _, ts := range calls {
-		assertLabelKeys(t, ts.Metric.Labels, "agent_id", "project_id", "harness", "model", "status",
+		// No unprefixed agent_id/project_id: the same identity labels as
+		// scion.usage.tokens (ptone/scion#3668).
+		assertLabelKeys(t, ts.Metric.Labels, "harness", "model", "status",
 			"scion_metric_resource_id", "scion_metric_scope_id", "scion_metric_point_id",
 			"scion_agent_id", "scion_project_id", "scion_agent_slug",
 			"service_name", "service_instance_id")

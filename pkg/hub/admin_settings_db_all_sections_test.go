@@ -823,7 +823,10 @@ func TestPutServerConfigDB_TelemetryMaskedHeaderNoOpMembers(t *testing.T) {
 		{"empty nested object over a stored one", `{"telemetry":{"cloud":{"tls":{},"headers":{"x-api-key":"********"}}}}`, http.StatusOK},
 		{"null nested object over a stored one", `{"telemetry":{"cloud":{"tls":null,"headers":{"x-api-key":"********"}}}}`, http.StatusBadRequest},
 		{"empty string over a shown endpoint", `{"telemetry":{"cloud":{"endpoint":"","headers":{"x-api-key":"********"}}}}`, http.StatusBadRequest},
-		{"false for a member GET omitted", `{"telemetry":{"cloud":{"cloud_logging":false,"headers":{"x-api-key":"********"}}}}`, http.StatusBadRequest},
+		// cloud_logging false where GET shows none is an echo: it is
+		// dropped before the masked-header check (ptone/scion#5664).
+		{"cloud_logging false for a member GET omitted", `{"telemetry":{"cloud":{"cloud_logging":false,"headers":{"x-api-key":"********"}}}}`, http.StatusOK},
+		{"cloud_logging true for a member GET omitted", `{"telemetry":{"cloud":{"cloud_logging":true,"headers":{"x-api-key":"********"}}}}`, http.StatusUnprocessableEntity},
 		{"case-variant nested clear", `{"telemetry":{"cloud":{"tls":{"CA_FILE":""},"headers":{"x-api-key":"********"}}}}`, http.StatusBadRequest},
 		{"case-variant nested null", `{"telemetry":{"cloud":{"tls":{"Enabled":null},"headers":{"x-api-key":"********"}}}}`, http.StatusBadRequest},
 		{"case-variant nested no-op", `{"telemetry":{"cloud":{"TLS":{"Ca_File":"/etc/ca.pem"},"headers":{"x-api-key":"********"}}}}`, http.StatusOK},

@@ -23,7 +23,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"regexp"
+	"strings"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
 )
 
 // The hub admission token (design §3.9 "Hub admission token"). Admit
@@ -35,29 +39,72 @@ import (
 // status and the principal's current permissions on every operation. It
 // proves who was admitted, never what they may do now.
 //
-// The token is the base64url encoding of a random 12-byte nonce and the
-// AES-256-GCM sealing of the JSON claims under a hub-only key derived by
-// HKDF from the session secret with its own label (independent of the
-// relay-peer secret, which relays hold). The claims are confidential to
-// the hub, and opening a token authenticates it: a token that does not
-// open, or was sealed under another key, is refused. A session-secret
-// rotation invalidates every outstanding token: there is no overlap key.
-// The token is never logged or put in an error.
+// The token is sealed with AES-256-GCM under a hub-only key derived by
+// HKDF from a signing generation's secret with its own label (independent
+// of the relay-peer secret, which relays hold). The claims are
+// confidential to the hub, and opening a token authenticates it: a token
+// that does not open, or was sealed under another key, is refused. The
+// token is never logged or put in an error.
+//
+// Keys and formats (ptone/scion#1530 Phase 5). The key is a purpose of the
+// signing ring (conduitAdmissionPurpose, the unchanged derivation): in
+// managed ring mode (a keyring file) the active generation seals and
+// every eligible generation opens; in legacy mode the ring is the legacy
+// adapter over the shared session secret, so the key is exactly the one
+// that secret always gave. Two wire formats:
+//
+//   - legacy (emit "legacy"): base64url(nonce || ciphertext), AAD
+//     conduitAdmissionAAD; it opens with the ring's legacy readers.
+//   - versioned (emit "versioned"): "ca3." + kid + "." +
+//     base64url(nonce || ciphertext), AAD conduitAdmissionAADv3Prefix +
+//     kid; it opens with that generation only (an unknown kid opens
+//     nothing, never another key).
+//
+// No token is sealed at or after the active generation's sign_until, and
+// none opens at or after its generation's verify_until, whatever the
+// claims' own expiry and whether the operation accepts expired claims.
 
 // conduitAdmissionKeyInfo is the HKDF label of the admission token key. It
 // differs from every other derivation of the session secret and from the
 // relay-peer secret's.
 const conduitAdmissionKeyInfo = "scion conduit relay admission token aead v2"
 
-// conduitAdmissionAAD binds a sealed token to its use.
+// conduitAdmissionAAD binds a sealed legacy-format token to its use.
 const conduitAdmissionAAD = "scion conduit relay admission token"
 
-// conduitAdmissionTokenVersion is the claims format version.
+// conduitAdmissionV3Prefix starts a versioned token; the key ID and a dot
+// follow. A legacy token never contains a dot (unpadded base64url).
+const conduitAdmissionV3Prefix = "ca3."
+
+// conduitAdmissionAADv3Prefix, followed by the key ID, binds a sealed
+// versioned token to its use and to its generation.
+const conduitAdmissionAADv3Prefix = "scion conduit relay admission token:ca3:"
+
+// conduitAdmissionTokenVersion is the claims format version (unchanged by
+// the versioned wire format).
 const conduitAdmissionTokenVersion = 2
+
+// conduitAdmissionPurpose is the admission token key's signing-ring
+// purpose: HKDF-SHA256 of the generation's secret with
+// conduitAdmissionKeyInfo, 32 bytes, as the shared session secret always
+// gave.
+var conduitAdmissionPurpose = keyring.NewPurpose("conduit_admission_token", func(secret []byte) []byte {
+	key, err := hkdf.Key(sha256.New, secret, nil, conduitAdmissionKeyInfo, 32)
+	if err != nil {
+		return nil
+	}
+	return key
+})
 
 // errConduitAdmissionNoKey refuses admission tokens without a shared
 // session secret: tokens from one hub replica must open on every other.
 var errConduitAdmissionNoKey = errors.New("conduit admission tokens need the shared session secret (--session-secret or SCION_SERVER_SESSION_SECRET)")
+
+// errConduitAdmissionIssuanceClosed refuses to seal a token when no key
+// may issue now: the signing ring's active generation reached its
+// sign_until, or the ring has no usable active generation. It names no key
+// or ID.
+var errConduitAdmissionIssuanceClosed = errors.New("conduit admission tokens: no signing key may issue now (the active signing generation reached its sign_until, or the signing ring has none)")
 
 // conduitAdmissionMaxAge caps a token's lifetime after admission (or
 // re-issue): exp <= min(credential_expiry, issued + 1h).
@@ -110,28 +157,50 @@ var (
 	errAdmissionTokenRelay = errors.New("admission token is for another relay")
 )
 
-// conduitAdmissionAEAD returns the admission token cipher, derived on
-// first use from the shared session secret.
-func (s *Server) conduitAdmissionAEAD() (cipher.AEAD, error) {
-	s.conduitAdmissionKeyOnce.Do(func() {
-		secret := s.config.SharedSigningSecret
-		if secret == "" {
-			s.conduitAdmissionKeyErr = errConduitAdmissionNoKey
-			return
-		}
-		key, err := hkdf.Key(sha256.New, []byte(secret), nil, conduitAdmissionKeyInfo, 32)
-		if err != nil {
-			s.conduitAdmissionKeyErr = err
-			return
-		}
-		block, err := aes.NewCipher(key)
-		if err != nil {
-			s.conduitAdmissionKeyErr = err
-			return
-		}
-		s.conduitAdmissionAEADv, s.conduitAdmissionKeyErr = cipher.NewGCM(block)
-	})
-	return s.conduitAdmissionAEADv, s.conduitAdmissionKeyErr
+// conduitAdmissionRing returns the signing ring admission token keys come
+// from: the keyring's signing ring in managed ring mode (any keyring but
+// the legacy adapter; a ring without a usable active generation then
+// fails every seal and open, never falling back to the shared secret), or
+// the legacy adapter over the shared session secret.
+func (s *Server) conduitAdmissionRing() (*keyring.SigningRing, error) {
+	if k := s.config.Keyring; k != nil && k.Source() != keyring.SourceLegacy {
+		return k.Signing(), nil
+	}
+	secret := s.config.SharedSigningSecret
+	if secret == "" {
+		return nil, errConduitAdmissionNoKey
+	}
+	return keyring.Legacy(secret).Signing(), nil
+}
+
+// errConduitAdmissionNoActive refuses admission tokens in managed ring
+// mode when the signing ring has no usable active generation.
+var errConduitAdmissionNoActive = errors.New("conduit admission tokens: keyring mode: the signing ring has no usable active generation")
+
+// checkConduitAdmissionKeys is the startup check of the admission token
+// keys: a shared session secret in legacy mode, a signing ring with an
+// active generation in managed ring mode. An active generation past its
+// sign_until is not a startup refusal; minting then fails and /readyz
+// reports it.
+func (s *Server) checkConduitAdmissionKeys() error {
+	ring, err := s.conduitAdmissionRing()
+	if err != nil {
+		return err
+	}
+	if len(ring.IDs()) == 0 {
+		return errConduitAdmissionNoActive
+	}
+	return nil
+}
+
+// newConduitAdmissionAEAD returns the admission token cipher of one
+// derived key.
+func newConduitAdmissionAEAD(key []byte) (cipher.AEAD, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(block)
 }
 
 // setAdmissionLifetime sets IssuedAt and Expiry from now:
@@ -145,11 +214,21 @@ func setAdmissionLifetime(c *conduitAdmissionClaims, now time.Time) {
 	c.Expiry = exp
 }
 
-// mintAdmissionToken seals c.
+// mintAdmissionToken seals c under the signing ring's active generation,
+// in the format the ring's emit selects. Nothing is sealed at or after the
+// active generation's sign_until.
 func (s *Server) mintAdmissionToken(c conduitAdmissionClaims) (string, error) {
-	aead, err := s.conduitAdmissionAEAD()
+	ring, err := s.conduitAdmissionRing()
 	if err != nil {
 		return "", err
+	}
+	key, err := ring.Active(conduitAdmissionPurpose, s.keyringNow())
+	if err != nil {
+		return "", errConduitAdmissionIssuanceClosed
+	}
+	aead, err := newConduitAdmissionAEAD(key.Bytes())
+	if err != nil {
+		return "", errConduitAdmissionIssuanceClosed
 	}
 	c.V = conduitAdmissionTokenVersion
 	c.Nonce = newAdmissionNonce()
@@ -161,26 +240,50 @@ func (s *Server) mintAdmissionToken(c conduitAdmissionClaims) (string, error) {
 	if _, err := rand.Read(nonce); err != nil {
 		return "", err
 	}
+	if ring.Emit() == keyring.EmitVersioned {
+		sealed := aead.Seal(nonce, nonce, payload, []byte(conduitAdmissionAADv3Prefix+key.ID))
+		return conduitAdmissionV3Prefix + key.ID + "." + base64.RawURLEncoding.EncodeToString(sealed), nil
+	}
 	sealed := aead.Seal(nonce, nonce, payload, []byte(conduitAdmissionAAD))
 	return base64.RawURLEncoding.EncodeToString(sealed), nil
 }
 
+// conduitAdmissionKeyIDPattern is the keyring's key ID syntax. A versioned
+// token whose key ID does not match it is refused before any ring lookup.
+var conduitAdmissionKeyIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,32}$`)
+
 // openAdmissionToken authenticates and decrypts token (nil, false on any
-// failure).
+// failure). A versioned token opens with its key ID's generation only, a
+// legacy token with the ring's legacy readers, each strictly before its
+// verify_until.
 func (s *Server) openAdmissionToken(token string) ([]byte, bool) {
-	aead, err := s.conduitAdmissionAEAD()
+	ring, err := s.conduitAdmissionRing()
 	if err != nil {
 		return nil, false
 	}
-	sealed, err := base64.RawURLEncoding.DecodeString(token)
-	if err != nil || len(sealed) < aead.NonceSize()+aead.Overhead() {
-		return nil, false
+	kid, body, aad := "", token, conduitAdmissionAAD
+	if rest, ok := strings.CutPrefix(token, conduitAdmissionV3Prefix); ok {
+		var found bool
+		kid, body, found = strings.Cut(rest, ".")
+		if !found || !conduitAdmissionKeyIDPattern.MatchString(kid) || strings.Contains(body, ".") {
+			return nil, false
+		}
+		aad = conduitAdmissionAADv3Prefix + kid
 	}
-	payload, err := aead.Open(nil, sealed[:aead.NonceSize()], sealed[aead.NonceSize():], []byte(conduitAdmissionAAD))
+	sealed, err := base64.RawURLEncoding.DecodeString(body)
 	if err != nil {
 		return nil, false
 	}
-	return payload, true
+	for _, key := range ring.Candidates(conduitAdmissionPurpose, kid, s.keyringNow()) {
+		aead, err := newConduitAdmissionAEAD(key.Bytes())
+		if err != nil || len(sealed) < aead.NonceSize()+aead.Overhead() {
+			continue
+		}
+		if payload, err := aead.Open(nil, sealed[:aead.NonceSize()], sealed[aead.NonceSize():], []byte(aad)); err == nil {
+			return payload, true
+		}
+	}
+	return nil, false
 }
 
 // newAdmissionNonce returns a random claims nonce.

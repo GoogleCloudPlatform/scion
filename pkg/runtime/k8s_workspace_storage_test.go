@@ -131,6 +131,12 @@ func TestBuildPod_NFSProvisionStateMount(t *testing.T) {
 			agentWant: []corev1.VolumeMount{
 				{Name: "workspace", MountPath: "/repo-root/.git", SubPath: "projects/proj-123/workspace/.git"},
 				{Name: "workspace", MountPath: "/repo-root/worktrees/agent-1", SubPath: "projects/proj-123/workspace/worktrees/agent-1"},
+				// read-only admin narrowing.
+				{Name: "workspace", MountPath: "/repo-root/.git/hooks", SubPath: "projects/proj-123/workspace/.git/hooks", ReadOnly: true},
+				{Name: "workspace", MountPath: "/repo-root/.git/info", SubPath: "projects/proj-123/workspace/.git/info", ReadOnly: true},
+				{Name: "workspace", MountPath: "/repo-root/.git/objects/info", SubPath: "projects/proj-123/workspace/.git/objects/info", ReadOnly: true},
+				{Name: "workspace", MountPath: "/repo-root/.git/worktrees", SubPath: "projects/proj-123/workspace/.git/worktrees", ReadOnly: true},
+				{Name: "workspace", MountPath: "/repo-root/.git/worktrees/agent-1", SubPath: "projects/proj-123/workspace/.git/worktrees/agent-1"},
 			},
 		},
 	} {
@@ -180,15 +186,22 @@ func TestBuildPod_NFSProvisionStateMount_NotForAgentDirModes(t *testing.T) {
 // A workspace subPath outside the expected project layout fails the build
 // instead of mounting a guessed directory.
 func TestBuildPod_NFSProvisionStateMount_FailsClosed(t *testing.T) {
-	for _, mutate := range []func(*RunConfig){
-		func(c *RunConfig) { c.ProjectID = "proj-other" },
-		func(c *RunConfig) { c.NFSSubPath = "projects/proj-123/../proj-999/workspace" },
-		func(c *RunConfig) { c.NFSSubPath = "projects/proj-123/data" },
+	// A workspace subPath outside the project's tree is refused when the
+	// workspace is mounted (checkNFSMountScope), before the provisioning
+	// state mount is reached; one inside it that is not <project>/workspace
+	// is refused by the provisioning state mount.
+	for _, tc := range []struct {
+		mutate func(*RunConfig)
+		want   string
+	}{
+		{func(c *RunConfig) { c.ProjectID = "proj-other" }, "outside project proj-other's tree"},
+		{func(c *RunConfig) { c.NFSSubPath = "projects/proj-123/../proj-999/workspace" }, "not a clean path"},
+		{func(c *RunConfig) { c.NFSSubPath = "projects/proj-123/data" }, "provisioning state"},
 	} {
 		cfg := nfsBaseConfig("bad")
-		mutate(&cfg)
+		tc.mutate(&cfg)
 		_, err := newNFSTestK8sRuntime().buildPod("default", cfg)
-		assert.ErrorContains(t, err, "provisioning state", "subPath %q project %q", cfg.NFSSubPath, cfg.ProjectID)
+		assert.ErrorContains(t, err, tc.want, "subPath %q project %q", cfg.NFSSubPath, cfg.ProjectID)
 	}
 }
 

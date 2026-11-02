@@ -98,8 +98,9 @@ func TestBuildPod_KubernetesBlockIdentity(t *testing.T) {
 }
 
 // TestBuildPod_NoBlockIdentityUnchanged pins that a pod without the block
-// identity (passthrough, assign) keeps today's spec: the ServiceAccount as
-// configured, no automount setting and no added node selector.
+// identity (passthrough, assign) keeps the ServiceAccount as configured,
+// has automountServiceAccountToken false, as every agent pod, and gets no
+// added node selector.
 func TestBuildPod_NoBlockIdentityUnchanged(t *testing.T) {
 	rt, _, _ := newTestK8sRuntime()
 	pod, err := rt.buildPod("default", RunConfig{
@@ -115,8 +116,8 @@ func TestBuildPod_NoBlockIdentityUnchanged(t *testing.T) {
 	if pod.Spec.ServiceAccountName != "agent-worker-ksa" {
 		t.Errorf("ServiceAccountName = %q, want agent-worker-ksa", pod.Spec.ServiceAccountName)
 	}
-	if pod.Spec.AutomountServiceAccountToken != nil {
-		t.Errorf("expected automountServiceAccountToken unset, got %v", *pod.Spec.AutomountServiceAccountToken)
+	if a := pod.Spec.AutomountServiceAccountToken; a == nil || *a {
+		t.Errorf("automountServiceAccountToken = %v, want false", a)
 	}
 	if _, ok := pod.Spec.NodeSelector[KubernetesWorkloadIdentityNodeLabel]; ok {
 		t.Errorf("expected no Workload Identity node selector, got %v", pod.Spec.NodeSelector)

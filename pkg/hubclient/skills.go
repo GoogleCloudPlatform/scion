@@ -102,6 +102,7 @@ type SkillVersion struct {
 	Version            string         `json:"version"`
 	Status             string         `json:"status"`
 	ContentHash        string         `json:"contentHash,omitempty"`
+	ContentHashV2      string         `json:"contentHashV2,omitempty"` // skill content hash v2 (ptone/scion#5935), set only while hub.skill_content_hash_v2 is on
 	Files              []TemplateFile `json:"files,omitempty"`
 	PublisherID        string         `json:"publisherId,omitempty"`
 	DeprecationMessage string         `json:"deprecationMessage,omitempty"`
@@ -208,6 +209,7 @@ type ResolvedSkill struct {
 	Name               string            `json:"name"`
 	ResolvedVersion    string            `json:"resolvedVersion"`
 	ContentHash        string            `json:"contentHash"`
+	ContentHashV2      string            `json:"contentHashV2,omitempty"` // skill content hash v2 (ptone/scion#5935), set only while hub.skill_content_hash_v2 is on
 	Files              []DownloadURLInfo `json:"files"`
 	Deprecated         bool              `json:"deprecated,omitempty"`
 	DeprecationMessage string            `json:"deprecationMessage,omitempty"`
@@ -282,7 +284,7 @@ func (s *skillService) List(ctx context.Context, opts *ListSkillsOptions) (*List
 
 // Get returns a single skill by ID.
 func (s *skillService) Get(ctx context.Context, skillID string) (*Skill, error) {
-	resp, err := s.c.get(ctx, "/api/v1/skills/"+skillID, nil)
+	resp, err := s.c.get(ctx, "/api/v1/skills/"+url.PathEscape(skillID), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -300,7 +302,7 @@ func (s *skillService) Create(ctx context.Context, req *CreateSkillRequest) (*Cr
 
 // Update updates specific skill fields.
 func (s *skillService) Update(ctx context.Context, skillID string, req *UpdateSkillRequest) (*Skill, error) {
-	resp, err := s.c.patch(ctx, "/api/v1/skills/"+skillID, req, nil)
+	resp, err := s.c.patch(ctx, "/api/v1/skills/"+url.PathEscape(skillID), req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -309,7 +311,7 @@ func (s *skillService) Update(ctx context.Context, skillID string, req *UpdateSk
 
 // Delete removes a skill (soft delete).
 func (s *skillService) Delete(ctx context.Context, skillID string) error {
-	resp, err := s.c.delete(ctx, "/api/v1/skills/"+skillID, nil)
+	resp, err := s.c.delete(ctx, "/api/v1/skills/"+url.PathEscape(skillID), nil)
 	if err != nil {
 		return err
 	}
@@ -318,7 +320,7 @@ func (s *skillService) Delete(ctx context.Context, skillID string) error {
 
 // PublishVersion creates a draft version and returns upload URLs.
 func (s *skillService) PublishVersion(ctx context.Context, skillID string, req *PublishVersionRequest) (*PublishVersionResponse, error) {
-	resp, err := s.c.post(ctx, "/api/v1/skills/"+skillID+"/versions", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/skills/"+url.PathEscape(skillID)+"/versions", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -327,7 +329,7 @@ func (s *skillService) PublishVersion(ctx context.Context, skillID string, req *
 
 // ListVersions returns versions for a skill.
 func (s *skillService) ListVersions(ctx context.Context, skillID string) (*ListSkillVersionsResponse, error) {
-	resp, err := s.c.get(ctx, "/api/v1/skills/"+skillID+"/versions", nil)
+	resp, err := s.c.get(ctx, "/api/v1/skills/"+url.PathEscape(skillID)+"/versions", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -336,7 +338,7 @@ func (s *skillService) ListVersions(ctx context.Context, skillID string) (*ListS
 
 // FinalizeVersion verifies files and transitions a version from draft to published.
 func (s *skillService) FinalizeVersion(ctx context.Context, skillID string, req *FinalizeSkillVersionRequest) (*SkillVersion, error) {
-	resp, err := s.c.post(ctx, "/api/v1/skills/"+skillID+"/finalize", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/skills/"+url.PathEscape(skillID)+"/finalize", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -352,7 +354,7 @@ func (s *skillService) RequestUploadURLs(ctx context.Context, skillID string, ve
 		Version: version,
 		Files:   files,
 	}
-	resp, err := s.c.post(ctx, "/api/v1/skills/"+skillID+"/upload", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/skills/"+url.PathEscape(skillID)+"/upload", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -373,7 +375,7 @@ func (s *skillService) DownloadFile(ctx context.Context, signedURL string) ([]by
 
 // DeprecateVersion marks a published version as deprecated.
 func (s *skillService) DeprecateVersion(ctx context.Context, skillID, versionID string, req *DeprecateVersionRequest) (*SkillVersion, error) {
-	resp, err := s.c.post(ctx, "/api/v1/skills/"+skillID+"/versions/"+versionID+"/deprecate", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/skills/"+url.PathEscape(skillID)+"/versions/"+url.PathEscape(versionID)+"/deprecate", req, nil)
 	if err != nil {
 		return nil, err
 	}

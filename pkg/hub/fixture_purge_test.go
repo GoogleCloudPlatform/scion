@@ -953,13 +953,13 @@ func TestFixturePurge_ProjectPathUnreachableFromRequests(t *testing.T) {
 // carry no stamp, so a purge could not remove one). A human member can.
 func TestTestIdentity_BrokerCreateRefused(t *testing.T) {
 	e := newFPEnv(t, "fpp-broker")
-	rec := doRequestWithToken(t, e.srv, e.fx.AccessToken, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: "fpp-fixture-broker"})
+	rec := doRequestWithTokenLoopback(t, e.srv, e.fx.AccessToken, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: "fpp-fixture-broker"})
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), testIdentityReasonFixtureBroker)
 	_, err := e.store.GetRuntimeBrokerByName(context.Background(), "fpp-fixture-broker")
 	assert.ErrorIs(t, err, store.ErrNotFound)
 
-	rec = doRequestWithToken(t, e.srv, e.humanTok, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: "fpp-human-broker"})
+	rec = doRequestWithTokenLoopback(t, e.srv, e.humanTok, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: "fpp-human-broker"})
 	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 }
 

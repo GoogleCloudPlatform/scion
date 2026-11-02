@@ -1024,8 +1024,8 @@ every runtime — not a substrate-specific mechanism:
 
 - **A create that outlives the hub's dispatch timeout leaks a running,
   unbootstrapped actor** (holding a worker indefinitely). The hub's
-  control-channel `RequestTimeout` is hard-coded at 120s
-  (`pkg/hub/server.go`); a cold template build (§3) can exceed it. The
+  control-channel `RequestTimeout` is hard-coded at 180s (120s before
+  ptone/scion#6829; `brokerRequestTimeout` in `pkg/hub`); a cold template build (§3) can exceed it. The
   broker's own dispatch context is never cancelled by a hub-side timeout
   (generic, not substrate-specific — `pkg/runtimebroker/controlchannel.go`).
   **Operator mitigation:** warm the template before first use — see

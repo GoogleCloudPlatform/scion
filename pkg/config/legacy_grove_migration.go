@@ -48,6 +48,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 	"gopkg.in/yaml.v3"
 )
 
@@ -230,6 +231,16 @@ func currentProjectMigrationReporter() Reporter {
 // fixture to another uid (which requires root).
 var geteuid = os.Geteuid
 
+// ownerSkipReason is the Skipped reason for a migration source that
+// currentUserOwns did not confirm as the current user's: err is nil when
+// another user owns it, else why its owner could not be read.
+func ownerSkipReason(err error) string {
+	if err != nil {
+		return "cannot verify its owner: " + unwrapErrno(err)
+	}
+	return "owned by another user"
+}
+
 // backupWriteFile mimics (*os.File).Write for writeConflictBackup's own
 // write to the backup file. Tests override it to force a failure after the
 // backup file has been created, so the partial-file cleanup can be
@@ -298,17 +309,6 @@ func projectMigrationStateFor(dir string) *projectMigrationDirState {
 	key := projectMigrationDirKey(dir)
 	v, _ := projectMigrationDirs.LoadOrStore(key, &projectMigrationDirState{})
 	return v.(*projectMigrationDirState)
-}
-
-// fileOwnerUID returns the uid that owns the file described by info. ok is
-// false only if the platform does not expose *syscall.Stat_t; scion is
-// built for linux and darwin, both of which do.
-func fileOwnerUID(info os.FileInfo) (int, bool) {
-	st, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return 0, false
-	}
-	return int(st.Uid), true
 }
 
 // manualRenameCommand returns the copy-pasteable command a Skipped report
@@ -483,7 +483,7 @@ func migrateLegacyGlobalRoot(scionHome string, root legacyGlobalRoot, report Rep
 		return
 	}
 
-	if err := os.MkdirAll(canonicalRoot, info.Mode().Perm()); err != nil {
+	if err := mkdirLikeLegacyRoot(scionHome, root.legacyName, root.canonicalName, info); err != nil {
 		report.Skipped(legacyRoot, unwrapErrno(err), manualRenameCommand(legacyRoot, canonicalRoot))
 		return
 	}
@@ -550,8 +550,8 @@ func migrateLegacyGlobalEntry(legacyRoot, canonicalRoot, canonicalRootName strin
 		report.Skipped(src, "not a directory", manualDirMoveAndLinkCommand(src, dst, relLink))
 		return
 	}
-	if uid, ok := fileOwnerUID(srcInfo); ok && uid != geteuid() {
-		report.Skipped(src, "owned by another user", manualDirMoveAndLinkCommand(src, dst, relLink))
+	if owned, err := currentUserOwns(src, srcInfo); err != nil || !owned {
+		report.Skipped(src, ownerSkipReason(err), manualDirMoveAndLinkCommand(src, dst, relLink))
 		return
 	}
 
@@ -941,8 +941,8 @@ func migrateLegacyYAMLKeysLocked(file, path string, renames []legacyYAMLKeyRenam
 		return overrides
 	}
 
-	if uid, ok := fileOwnerUID(info); ok && uid != geteuid() {
-		reportActionsSkipped(report, st, actions, path, "owned by another user")
+	if owned, err := currentUserOwns(path, info); err != nil || !owned {
+		reportActionsSkipped(report, st, actions, path, ownerSkipReason(err))
 		return overrides
 	}
 
@@ -1210,13 +1210,21 @@ func surgicalRenameKey(lines [][]byte, node *yaml.Node, canonical string) bool {
 // write or close failure removes the partial candidate before returning the
 // error.
 func writeConflictBackup(path string, orig []byte) (string, error) {
-	base := path + ".grove-migration.bak"
+	// The backup is created private (mode 0600; on Windows an owner-only
+	// ACL set at creation) in a Tree anchored at path's directory.
+	tree, err := privatefs.OpenTree(filepath.Dir(path), privatefs.TreeOptions{})
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = tree.Close() }()
+	base := filepath.Base(path) + ".grove-migration.bak"
 	for n := 0; ; n++ {
-		candidate := base
+		name := base
 		if n > 0 {
-			candidate = fmt.Sprintf("%s.%d", base, n)
+			name = fmt.Sprintf("%s.%d", base, n)
 		}
-		f, err := os.OpenFile(candidate, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		candidate := path + name[len(filepath.Base(path)):]
+		f, err := tree.Create(name, true, privatefs.Private)
 		if err != nil {
 			if errors.Is(err, fs.ErrExist) {
 				continue
@@ -1224,13 +1232,22 @@ func writeConflictBackup(path string, orig []byte) (string, error) {
 			return "", err
 		}
 		_, writeErr := backupWriteFile(f, orig)
-		closeErr := backupCloseFile(f)
+		if writeErr == nil {
+			// Sync while the handle is open, so a flush failure is
+			// still handled by deleting through it.
+			writeErr = f.Sync()
+		}
 		if writeErr != nil {
-			_ = os.Remove(candidate)
+			// Delete the partial file through its own handle.
+			_ = tree.RemoveOpen(f)
+			_ = backupCloseFile(f)
 			return "", writeErr
 		}
-		if closeErr != nil {
-			_ = os.Remove(candidate)
+		if closeErr := backupCloseFile(f); closeErr != nil {
+			// Only a close failing after a successful sync gets here, and
+			// no handle is left to delete through: remove the name,
+			// walked without following a reparse point.
+			_ = tree.Remove(name)
 			return "", closeErr
 		}
 		return candidate, nil

@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path"
@@ -30,6 +31,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -231,6 +233,9 @@ func toResourceFiles(files []transfer.FileInfo) []store.TemplateFile {
 // with a subset of files and a content hash computed over that subset, which
 // later corrupts agent provisioning while masquerading as healthy. label
 // prefixes error messages ("template bootstrap" / "harness config bootstrap").
+// Each file is read through root (opened at the collected directory) with
+// transfer.OpenCollectedFile, so a file that is no longer a regular file of
+// the collected size and hash fails the upload.
 //
 // This is shared bootstrap mechanics for the resource-storage refactor (§7.3):
 // templates and harness-configs both route their import/sync upload loop through
@@ -241,7 +246,7 @@ func toResourceFiles(files []transfer.FileInfo) []store.TemplateFile {
 // cancels the in-flight uploads as soon as one fails, preserving the fail-fast
 // contract above. Each worker writes its result into its own slot, so the
 // returned manifest preserves input order without locking.
-func uploadResourceFiles(ctx context.Context, stor storage.Storage, storagePath string, files []transfer.FileInfo, label string) ([]store.TemplateFile, map[string]struct{}, error) {
+func uploadResourceFiles(ctx context.Context, stor storage.Storage, root *os.Root, storagePath string, files []transfer.FileInfo, label string) ([]store.TemplateFile, map[string]struct{}, error) {
 	type uploadResult struct {
 		file       store.TemplateFile
 		objectPath string
@@ -264,9 +269,9 @@ func uploadResourceFiles(ctx context.Context, stor storage.Storage, storagePath 
 
 			objectPath := storagePath + "/" + fi.Path
 
-			f, err := os.Open(fi.FullPath)
+			f, err := transfer.OpenCollectedFile(root, fi)
 			if err != nil {
-				return fmt.Errorf("%s: failed to open file %s: %w", label, fi.Path, err)
+				return fmt.Errorf("%s: %w", label, err)
 			}
 
 			uploadOpts := storage.UploadOptions{}
@@ -402,23 +407,39 @@ func generateDownloadURLs(ctx context.Context, stor storage.Storage, basePath, l
 //	<hubEndpoint>/api/v1/<resourceType>/<resourceID>/files/<filePath>
 //
 // with method PUT. The client's authenticated HTTP transport handles auth.
-// requestBaseURL derives the external base URL from the incoming HTTP request.
-// It trusts X-Forwarded-Proto and X-Forwarded-Host when present, which assumes
-// the hub is behind a trusted reverse proxy that overwrites those headers.
-// Otherwise it falls back to the request's TLS state and Host header.
-func requestBaseURL(r *http.Request) string {
-	host := r.Header.Get("X-Forwarded-Host")
-	if host == "" {
-		host = r.Host
-	}
+// requestBaseURL derives the external base URL from the incoming HTTP
+// request (requestBaseURLWith with the hub's server.trusted_proxies).
+func (s *Server) requestBaseURL(r *http.Request) string {
+	return requestBaseURLWith(r, s.transportTrustedNets)
+}
 
-	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
-		return proto + "://" + host
-	}
+// requestBaseURLWith derives the external base URL from r. X-Forwarded-Host
+// and X-Forwarded-Proto are honoured only when the immediate peer is in
+// trusted (server.trusted_proxies), and then only as a single value (a
+// host without a comma; a protocol of exactly http or https). With trusted
+// empty, or from any other peer, they are ignored: the URL comes from the
+// request's TLS state and Host header, so a client cannot steer the URL with
+// a forged header.
+func requestBaseURLWith(r *http.Request, trusted []*net.IPNet) string {
+	host := r.Host
+	scheme := "http"
 	if r.TLS != nil {
-		return "https://" + host
+		scheme = "https"
 	}
-	return "http://" + host
+	if peer := config.RemotePeerIP(r); peer != nil && len(trusted) > 0 && config.IPInNets(peer, trusted) {
+		if vals := r.Header.Values("X-Forwarded-Host"); len(vals) == 1 {
+			if h := strings.TrimSpace(vals[0]); h != "" && !strings.Contains(h, ",") {
+				host = h
+			}
+		}
+		if vals := r.Header.Values("X-Forwarded-Proto"); len(vals) == 1 {
+			switch p := strings.ToLower(strings.TrimSpace(vals[0])); p {
+			case "http", "https":
+				scheme = p
+			}
+		}
+	}
+	return scheme + "://" + host
 }
 
 func rewriteLocalUploadURLs(urls []UploadURLInfo, hubEndpoint, resourceType, resourceID string) []UploadURLInfo {

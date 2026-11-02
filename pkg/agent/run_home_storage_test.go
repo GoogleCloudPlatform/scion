@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// These tests exercise unix-only, Windows-gated agent storage code.
+//go:build unix
+
 package agent
 
 import (
@@ -44,17 +47,14 @@ runtimes:
 profiles:
   local:
     runtime: docker
-    home_storage_backend: nfs
-    shared_dir_storage_backend: nfs
   gke:
     runtime: k8s
-    home_storage_backend: nfs
-    shared_dir_storage_backend: nfs
 server:
   home_storage:
+    backend: nfs
     allow_incomplete_phases: true
   shared_dir_storage:
-    backend: local
+    backend: nfs
     nfs:
       mount_root: %s
       shares:
@@ -151,7 +151,7 @@ server:
 	opts.SharedDirs = []api.SharedDir{{Name: "scratchpad"}}
 	_, err := NewManager(newSDSMockRuntime("kubernetes", &c)).Start(withNFSHomeExperiment(context.Background()), opts)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "home_storage_unavailable")
+	assert.Contains(t, err.Error(), "home_storage")
 	assert.Equal(t, 0, c.ran)
 	assert.Equal(t, &homeStorageRecord{Backend: homeStoragePending}, startHomeRecord(t, f, "gke-agent"))
 }

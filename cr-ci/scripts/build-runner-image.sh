@@ -42,4 +42,4 @@ crci_start
 
 crci_note "C7: runner image ${CFG[RUNNER_IMAGE_NAME]}:$TAG"
 crci_build_image "${CFG[RUNNER_IMAGE_NAME]}" Dockerfile runner "$TAG" "$LOCAL"
-crci_note "done; next: deploy-job.sh --tag $TAG"
+crci_note "done; next: deploy-mediator.sh if the mediator changed too, then deploy-job.sh --tag $TAG"

@@ -167,3 +167,54 @@ func (f *fakeHubSettingStore) seedWithOrigin(section string, doc json.RawMessage
 		Origin:   origin,
 	}
 }
+
+// UpsertHubSettingsGuarded implements store.HubSettingGuardedBatchWriter
+// for the fake: the read guards and expected revisions are checked first,
+// then every write is applied, all under one lock.
+func (f *fakeHubSettingStore) UpsertHubSettingsGuarded(_ context.Context, writes []store.HubSettingWrite, reads map[string]int64, updatedBy, origin string) ([]store.HubSetting, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(writes) == 0 {
+		return nil, store.ErrInvalidInput
+	}
+	current := func(section string) int64 {
+		if s, ok := f.settings[section]; ok {
+			return s.Revision
+		}
+		return 0
+	}
+	for section, rev := range reads {
+		if current(section) != rev {
+			return nil, store.ErrRevisionConflict
+		}
+	}
+	for _, w := range writes {
+		_, exists := f.settings[w.Section]
+		switch {
+		case w.Delete && !exists && w.ExpectedRevision == -1:
+			return nil, store.ErrNotFound
+		case w.Delete && !exists:
+			return nil, store.ErrRevisionConflict
+		case w.ExpectedRevision == -1:
+		case w.ExpectedRevision == 0:
+			if exists {
+				return nil, store.ErrRevisionConflict
+			}
+		case !exists || current(w.Section) != w.ExpectedRevision:
+			return nil, store.ErrRevisionConflict
+		}
+	}
+	out := make([]store.HubSetting, 0, len(writes))
+	for _, w := range writes {
+		if w.Delete {
+			delete(f.settings, w.Section)
+			out = append(out, store.HubSetting{Section: w.Section})
+			continue
+		}
+		s := &store.HubSetting{ID: w.Section, Section: w.Section, Value: w.Value, Revision: current(w.Section) + 1,
+			UpdatedBy: updatedBy, Origin: origin}
+		f.settings[w.Section] = s
+		out = append(out, *s)
+	}
+	return out, nil
+}

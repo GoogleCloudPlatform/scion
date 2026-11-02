@@ -1,3 +1,5 @@
+//go:build unix
+
 // Copyright 2026 The Scion Authors.
 
 package runtime
@@ -728,6 +730,9 @@ func TestAdvertisedHostOwnerIDs_MatchesRunArgs(t *testing.T) {
 		}
 		cfg := minimalRunConfig()
 		cfg.WorkspaceBackendName, cfg.NFSUID, cfg.NFSGID = tc.backend, tc.nfsUID, tc.nfsGID
+		if tc.backend == "nfs" {
+			cfg = withNFSWorkspace(t, cfg)
+		}
 		args, err := buildCommonRunArgs(cfg)
 		if err != nil {
 			t.Fatalf("buildCommonRunArgs(%q): %v", tc.backend, err)

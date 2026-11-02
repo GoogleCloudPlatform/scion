@@ -15,7 +15,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { HTTP_URL_MAX_LENGTH, isHttpUrl } from './http-url.js';
+import { HTTP_URL_MAX_LENGTH, isHttpUrl, safeHttpsUrl } from './http-url.js';
 
 describe('isHttpUrl', () => {
   it.each([
@@ -101,5 +101,37 @@ describe('isHttpUrl', () => {
       expect(isHttpUrl(atLimit)).toBe(true);
       expect(isHttpUrl(atLimit + '\u{1f600}')).toBe(false);
     });
+  });
+});
+
+describe('safeHttpsUrl', () => {
+  it.each([
+    'https://github.com/GoogleCloudPlatform/scion/releases/tag/nightly-20261023',
+    'HTTPS://github.com/x',
+  ])('returns an https URL unchanged: %s', (v) => {
+    expect(safeHttpsUrl(v)).toBe(v);
+  });
+
+  it.each([
+    ['javascript:', 'javascript:alert(document.cookie)'],
+    ['javascript: (mixed case)', 'JaVaScRiPt:alert(1)'],
+    ['javascript: (leading space)', ' javascript:alert(1)'],
+    ['data:', 'data:text/html,<script>alert(1)</script>'],
+    ['http:', 'http://github.com/GoogleCloudPlatform/scion/releases'],
+    ['relative path', '/releases/tag/nightly-20261023'],
+    ['protocol-relative', '//evil.example/x'],
+    ['malformed', 'https://'],
+    ['malformed (no slashes)', 'https:github.com'],
+    ['not a URL', 'not a url'],
+    ['empty', ''],
+  ])('returns null for %s', (_name, v) => {
+    expect(safeHttpsUrl(v)).toBeNull();
+  });
+
+  it('returns null for non-strings', () => {
+    expect(safeHttpsUrl(undefined)).toBeNull();
+    expect(safeHttpsUrl(null)).toBeNull();
+    expect(safeHttpsUrl(42)).toBeNull();
+    expect(safeHttpsUrl({ href: 'https://github.com' })).toBeNull();
   });
 });

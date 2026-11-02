@@ -674,7 +674,8 @@ const FALLBACK_SCOPES: ScopeOption[] = [
   {
     value: 'project:manage',
     label: 'project:manage',
-    description: 'Manage project administration (RS1 membership operations)',
+    description:
+      'Manage project administration (RS1 membership operations). Not a read/write alias: it does not include project:read or project:list',
     resource: 'project',
     isAlias: false,
   },
@@ -956,6 +957,20 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     value: 'user:suspend',
     label: 'user:suspend',
     description: 'Suspend or reactivate users',
+    resource: 'user',
+    isAlias: false,
+  },
+  {
+    value: 'user:promote',
+    label: 'user:promote',
+    description: 'Change other users between the member and viewer roles',
+    resource: 'user',
+    isAlias: false,
+  },
+  {
+    value: 'user:delete',
+    label: 'user:delete',
+    description: 'Delete users',
     resource: 'user',
     isAlias: false,
   },

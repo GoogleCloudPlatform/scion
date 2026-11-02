@@ -611,7 +611,7 @@ func TestSSHConfig_IncludeLineIdempotent(t *testing.T) {
 func TestSSHConfig_WarnsAboutUnreachableOtherHub(t *testing.T) {
 	home := t.TempDir()
 	p := sshPaths{home: home}
-	require.NoError(t, ensureSSHDir(home, p.includeDir()))
+	require.NoError(t, ensureSSHDir(home, sshIncludeDirRel))
 	other := p.includeFile("oldhub")
 	otherContent := renderSSHIncludeFile("https://oldhub.example.test", "oldhub", map[string]string{})
 	require.NoError(t, os.WriteFile(other, []byte(otherContent), 0o600))
@@ -650,7 +650,7 @@ func TestSSHConfig_ReusesRecordedLabel(t *testing.T) {
 	home := t.TempDir()
 	hub := twoProjectHub(t, "tok")
 	p := sshPaths{home: home}
-	require.NoError(t, ensureSSHDir(home, p.includeDir()))
+	require.NoError(t, ensureSSHDir(home, sshIncludeDirRel))
 	require.NoError(t, os.WriteFile(p.includeFile("myhub"),
 		[]byte(renderSSHIncludeFile(hub.endpoint(t), "myhub", map[string]string{})), 0o600))
 

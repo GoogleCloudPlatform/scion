@@ -27,5 +27,12 @@
 // by hack/hubshard/extract export (family
 // hack/hubshard/extract/families/hubtestutil-wave1.txt); only the names that
 // pkg/hub uses were exported. A separate comment-only commit then updated
-// their doc comments to the exported names.
+// their doc comments to the exported names. The web chat store tests'
+// database helpers (chatdb.go) followed the same way (family
+// hack/hubshard/extract/families/hubtestutil-wave2-webchat.txt; pkg/hub
+// keeps their names through pkg/hub/zz_alias_hubtestutil_chatdb_test.go).
+//
+// Hand-written: OpenMigratedTestStore (teststore.go), a migrated test store
+// for area packages, and RunTestMain (runtestmain.go and
+// runtestmain_integration.go), the TestMain harness pkg/hub delegates to.
 package hubtestutil

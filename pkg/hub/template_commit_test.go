@@ -366,7 +366,7 @@ func TestTemplateCommit_UnparsableAgentConfig(t *testing.T) {
 
 	// The directory variant derives the same.
 	dir := writeTemplateDir(t, t.TempDir(), "x", map[string]string{"scion-agent.yaml": ": invalid: yaml: ["})
-	idx := deriveTemplateIndexFromDir(dir, "gemini-broken")
+	idx := deriveTemplateIndexForTest(t, dir, "gemini-broken")
 	if idx.AgentConfig != nil || idx.DefaultHarnessConfig != "" || idx.Harness != "gemini-cli" {
 		t.Errorf("dir variant: %+v", idx)
 	}

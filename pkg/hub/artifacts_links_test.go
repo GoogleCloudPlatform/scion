@@ -48,7 +48,7 @@ import (
 func TestArtifactsShareLinkOnRoutes(t *testing.T) {
 	srv, s := testServer(t)
 	enableArtifactsForTest(t, srv)
-	require.NotEmpty(t, srv.artifactViewKey)
+	require.NotEmpty(t, fixedKeyBytes(srv.artifactViewKeys))
 	ctx := context.Background()
 	p1 := artifactProject(t, s, "share-p1")
 	createTestUserWithProjectRole(t, s, tid("share-owner"), "share-owner@test.com", p1.ID, store.ProjectRoleMember)

@@ -57,7 +57,7 @@ func newRealManagerScopeServer(t *testing.T, entries *[]api.AgentInfo) *Server {
 			return *entries, nil
 		},
 	}
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	return New(cfg, agent.NewManager(rt), rt, config.RuntimeBuildRecord{})

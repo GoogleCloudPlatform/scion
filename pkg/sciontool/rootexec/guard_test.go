@@ -144,11 +144,6 @@ var execSiteAllowlist = map[execSite]string{
 	{
 		File: "cmd/sciontool/commands/init.go",
 		Func: "gitCloneWorkspace",
-		Call: `exec.Command("git", "config", "--file", gitconfigPath, "credential.helper", credentialHelper)`,
-	}: reasonCloneCredential,
-	{
-		File: "cmd/sciontool/commands/init.go",
-		Func: "gitCloneWorkspace",
 		Call: `exec.Command("git", "-C", workspacePath, "checkout", branchName)`,
 	}: reasonCloneCredential,
 	{
@@ -240,7 +235,7 @@ var execSiteAllowlist = map[execSite]string{
 	// check cannot itself follow that value across the intervening
 	// execUserCredential call to confirm it never changes.
 	{
-		File: "pkg/sciontool/substrate/exec.go",
+		File: "pkg/sciontool/substrate/exec_run_unix.go",
 		Func: "runExec",
 		Call: `execCommandContext(runCtx, shPath, "-c", cmdString)`,
 	}: "shPath comes from execResolve (rootexec.Resolve) a few lines above",

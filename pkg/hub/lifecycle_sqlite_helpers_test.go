@@ -47,11 +47,27 @@ func newCapturingAuditLogger() *capturingAuditLogger {
 	}
 }
 
+// allowAllHookFireAuthorizer allows every fire-time mint. Tests of the
+// executor's HTTP behaviour use it; the fire-time authority check itself is
+// tested with the server's authorizer (lifecycle_hook_fire_authority_test.go).
+type allowAllHookFireAuthorizer struct{}
+
+func (allowAllHookFireAuthorizer) AuthorizeHookFire(context.Context, *store.LifecycleHook, *store.GCPServiceAccount) error {
+	return nil
+}
+
 // newTestExecutor creates an HTTPExecutor with a test-friendly HTTP client
 // that allows loopback connections (httptest servers bind to 127.0.0.1).
 // The client still blocks ALL redirects, matching production behavior.
+// It allows every fire-time mint (allowAllHookFireAuthorizer).
 func newTestExecutor(s store.Store, tokenGen GCPTokenGenerator, auditLog AuditLogger, log *slog.Logger) *HTTPExecutor {
-	executor := NewHTTPExecutor(s, tokenGen, auditLog, log)
+	return newTestExecutorWithAuthorizer(s, tokenGen, auditLog, log, allowAllHookFireAuthorizer{})
+}
+
+// newTestExecutorWithAuthorizer is newTestExecutor with the given fire-time
+// authorizer.
+func newTestExecutorWithAuthorizer(s store.Store, tokenGen GCPTokenGenerator, auditLog AuditLogger, log *slog.Logger, auth HookFireAuthorizer) *HTTPExecutor {
+	executor := NewHTTPExecutor(s, tokenGen, auditLog, log, auth)
 	executor.newHTTPClient = func() *http.Client {
 		return &http.Client{
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {

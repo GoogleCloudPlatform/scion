@@ -30,7 +30,7 @@ var messagingOperations = []OperationSpec{
 			{Kind: EntryPointBrokerCall, Pattern: "broker.inbound"},
 		},
 		Principals:  []PrincipalKind{PrincipalUser, PrincipalAgent, PrincipalBroker},
-		Credentials: []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT, CredentialBrokerToken},
+		Credentials: []CredentialKind{CredentialSessionJWT, CredentialAgentJWT, CredentialBrokerToken},
 		// References in the message body are contained to the addressed
 		// project: a thread_id resolves only to a topic of that project, a
 		// conversation_id only to a conversation the sender may read
@@ -58,6 +58,7 @@ var messagingOperations = []OperationSpec{
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
 		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		Bearer:      NonUser(),
 	},
 	// =====================================================================
 	// Domain: inbox — the caller's own messages, conversations and

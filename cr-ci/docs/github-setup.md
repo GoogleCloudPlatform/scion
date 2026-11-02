@@ -387,8 +387,8 @@ list, with every open runtime checkpoint and the PoC criteria, is
 
 ## 8. Route jobs: the Actions variable `SCION_LARGE_RUNNER` (G10)
 
-`ci.yml` chooses the runner with this expression (applied to the `lint` job
-by P7; see [workflows/README.md](../workflows/README.md)):
+Each routed job chooses its runner with this expression (in the workflows since
+the primary-runner PRs; see [workflows/README.md](../workflows/README.md#routing-in-githubworkflows)):
 
 ```yaml
 runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
@@ -454,9 +454,9 @@ branch with an open same-repo pull request:
      --format='table(timestamp, jsonPayload.event, jsonPayload.job_id, jsonPayload.runner, jsonPayload.reason)'
    ```
 
-3. **Runner execution log:** the entrypoint logs the `/scratch` mount check
-   and `claim succeeded on attempt 1` (the [runner README](../runner/README.md#runtime-contract)
-   lists both as P6 checkpoints):
+3. **Runner execution log:** the entrypoint logs the volume mount check
+   (`/home/runner is a mount (...)`), the volume root's owner and mode, and
+   `claim succeeded on attempt 1` ([runner README](../runner/README.md#runtime-contract)):
 
    ```bash
    gcloud logging read --project "$GCP_PROJECT" --freshness=1h --limit=50 \

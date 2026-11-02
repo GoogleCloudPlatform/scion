@@ -126,7 +126,7 @@ func TestResolve_ConfigWithoutReadyGetsBundleReady(t *testing.T) {
 // which carries the bundle's ready block, the readiness the name had when it
 // was keyed on the harness name.
 func TestResolve_BuiltInNameWithoutDirKeepsBundleReady(t *testing.T) {
-	legacyHook := map[string]bool{"claude": true, "gemini-cli": true, "copilot": true, "grok-build": true}
+	legacyHook := map[string]bool{"claude": true, "gemini-cli": true, "grok-build": true}
 	t.Setenv("HOME", t.TempDir())
 	for _, name := range append(AllHarnessNames(), "no-such-harness") {
 		resolved, err := Resolve(context.Background(), ResolveOptions{Name: name})
@@ -157,7 +157,7 @@ func TestResolve_BuiltInNameWithoutDirKeepsBundleReady(t *testing.T) {
 // harness-config dir, every built-in harness type gets its bundle's ready
 // block, which reproduces the legacy name-keyed table.
 func TestEffectiveConfig_ReadyFromBundleMatchesLegacyTable(t *testing.T) {
-	legacyHook := map[string]bool{"claude": true, "gemini-cli": true, "copilot": true, "grok-build": true}
+	legacyHook := map[string]bool{"claude": true, "gemini-cli": true, "grok-build": true}
 	for _, name := range AllHarnessNames() {
 		entry := EffectiveConfig(name, nil, nil, "")
 		if entry.Ready == nil {

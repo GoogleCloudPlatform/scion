@@ -33,6 +33,11 @@ files in the PR that adds the feature.
   `settings.yaml` parse checks (`tests/lib/settings-yaml-to-json.go`, run
   with `go run`).
 
+- **python3-yaml** (optional) — `test_install_layout.sh` runs
+  `scion-layout.sh`'s default settings parser (python3 + PyYAML, what the
+  VM uses) only when `python3 -I -c 'import yaml'` works, and prints a
+  `SKIP` line otherwise. CI installs it.
+
 ## Running the suite
 
 ```

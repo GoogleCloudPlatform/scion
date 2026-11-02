@@ -1,0 +1,10 @@
+--- FAIL: TestNestedParallel (0.00s)
+    toy_test.go:80: parent before
+    --- FAIL: TestNestedParallel/seq (0.00s)
+        toy_test.go:86: seq boom
+    toy_test.go:91: parent after
+    --- FAIL: TestNestedParallel/p2 (0.00s)
+        toy_test.go:89: p2 boom
+    --- FAIL: TestNestedParallel/p1 (0.02s)
+        toy_test.go:84: p1 boom
+FAIL

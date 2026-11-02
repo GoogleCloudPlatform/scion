@@ -35,6 +35,12 @@ import (
 // Unlike the unix version, the checks for links and for an existing file
 // are made before the write rather than as part of it, so a link or a file
 // created in between by another process is not detected.
+//
+// Containment rests on os.Root, which refuses any path that escapes the
+// directory (a junction's target is always absolute, so os.Root refuses
+// it too), not on the link pre-check in WriteFile: Root.Lstat does not
+// report a Windows junction as ModeSymlink on Go 1.23 and later, so the
+// pre-check passes a junction.
 type outDir struct {
 	root *os.Root
 }

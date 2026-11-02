@@ -59,7 +59,7 @@ func TestBrokerOnboarding_BrokerOnBehalfOfNotAdmittedForReregistration(t *testin
 	target := createReregistrationTestBroker(t, s, "onboarding-ck1-target", owner.ID)
 	signer, key := newOnboardingSigningBroker(t, s, "ck1")
 
-	rec := doBrokerSignedRequest(t, srv, signer.ID, key, admin.Email, http.MethodPost, "/api/v1/brokers",
+	rec := doBrokerSignedRequestLoopback(t, srv, signer.ID, key, admin.Email, http.MethodPost, "/api/v1/brokers",
 		CreateBrokerRegistrationRequest{
 			Name:        target.Name,
 			AutoProvide: true,
@@ -84,7 +84,7 @@ func TestBrokerOnboarding_BrokerOnBehalfOfNotAdmittedForRotation(t *testing.T) {
 	targetKey := seedBrokerSecret(t, s, target.ID)
 	signer, key := newOnboardingSigningBroker(t, s, "ck2")
 
-	rec := doBrokerSignedRequest(t, srv, signer.ID, key, admin.Email, http.MethodPost,
+	rec := doBrokerSignedRequestLoopback(t, srv, signer.ID, key, admin.Email, http.MethodPost,
 		"/api/v1/brokers/"+target.ID+"/rotate-secret", nil)
 
 	assert.Equal(t, http.StatusForbidden, rec.Code,
@@ -102,7 +102,7 @@ func TestBrokerOnboarding_BrokerOnBehalfOfNotAdmittedForRegistration(t *testing.
 	signer, key := newOnboardingSigningBroker(t, s, "ck3")
 
 	const brokerName = "onboarding-ck3-new-broker"
-	rec := doBrokerSignedRequest(t, srv, signer.ID, key, member.Email, http.MethodPost, "/api/v1/brokers",
+	rec := doBrokerSignedRequestLoopback(t, srv, signer.ID, key, member.Email, http.MethodPost, "/api/v1/brokers",
 		CreateBrokerRegistrationRequest{Name: brokerName})
 
 	assert.Equal(t, http.StatusForbidden, rec.Code,
@@ -148,7 +148,7 @@ func TestBrokerOnboarding_BrokerSelfRotateAllowed(t *testing.T) {
 	srv, s := testServer(t)
 	self, key := newOnboardingSigningBroker(t, s, "ck5")
 
-	rec := doBrokerSignedRequest(t, srv, self.ID, key, "", http.MethodPost,
+	rec := doBrokerSignedRequestLoopback(t, srv, self.ID, key, "", http.MethodPost,
 		"/api/v1/brokers/"+self.ID+"/rotate-secret", nil)
 
 	require.Equal(t, http.StatusOK, rec.Code,
@@ -175,7 +175,7 @@ func TestBrokerOnboarding_BrokerSelfRotateWithOnBehalfOfHeader(t *testing.T) {
 	targetKey := seedBrokerSecret(t, s, target.ID)
 	self, key := newOnboardingSigningBroker(t, s, "ck6")
 
-	rec := doBrokerSignedRequest(t, srv, self.ID, key, other.Email, http.MethodPost,
+	rec := doBrokerSignedRequestLoopback(t, srv, self.ID, key, other.Email, http.MethodPost,
 		"/api/v1/brokers/"+self.ID+"/rotate-secret", nil)
 	require.Equal(t, http.StatusOK, rec.Code,
 		"a broker must be able to rotate its own secret with an on-behalf-of header; got: %s", rec.Body.String())
@@ -185,7 +185,7 @@ func TestBrokerOnboarding_BrokerSelfRotateWithOnBehalfOfHeader(t *testing.T) {
 	newKey, err := base64.StdEncoding.DecodeString(resp.SecretKey)
 	require.NoError(t, err)
 
-	rec = doBrokerSignedRequest(t, srv, self.ID, newKey, other.Email, http.MethodPost,
+	rec = doBrokerSignedRequestLoopback(t, srv, self.ID, newKey, other.Email, http.MethodPost,
 		"/api/v1/brokers/"+target.ID+"/rotate-secret", nil)
 	assert.Equal(t, http.StatusForbidden, rec.Code,
 		"a broker must not rotate another broker's secret, whatever user it names; got: %s", rec.Body.String())

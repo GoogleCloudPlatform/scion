@@ -91,7 +91,7 @@ func createRollbackSites() []createRollbackSite {
 				if err := os.MkdirAll(filepath.Join(mountRoot, "share1"), 0o755); err != nil {
 					t.Fatal(err)
 				}
-				srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
+				srv.config.ProjectStorageConfig = projectStorageFromWorkspace(nfsConfig(mountRoot))
 			},
 			remoteBroker: true,
 			wantStage:    createStageWorkspaceStorage,

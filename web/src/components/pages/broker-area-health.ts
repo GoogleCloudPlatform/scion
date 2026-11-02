@@ -22,13 +22,14 @@
  * when the row is missing.
  */
 
-import { LitElement, html } from 'lit';
+import { LitElement, html, nothing } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 
 import type { HealthSummaryBroker } from './health-broker-table.js';
 import { failingChecks } from '../../shared/broker-area-filters.js';
 import { brokerAreaStyles } from '../shared/broker-area-styles.js';
 import { formatRelative } from '../../utils/time.js';
+import { mismatchLines } from '../../shared/broker-storage.js';
 
 @customElement('scion-broker-area-health')
 export class ScionBrokerAreaHealth extends LitElement {
@@ -54,6 +55,7 @@ export class ScionBrokerAreaHealth extends LitElement {
     }
     const checks = Object.entries(row.health?.checks ?? {}).sort(([a], [b]) => a.localeCompare(b));
     const failing = failingChecks(row.health);
+    const mismatch = mismatchLines(row.workspace_storage?.layout_mismatch);
     return html`
       <div class="stats-row">
         <div class="stat">
@@ -77,6 +79,19 @@ export class ScionBrokerAreaHealth extends LitElement {
           >
         </div>
       </div>
+      ${mismatch.length > 0
+        ? html`<div class="section storage-layout-mismatch">
+            <div class="section-header">
+              <h2>Storage layout differs from the hub</h2>
+            </div>
+            <p class="tab-note">
+              Shared-mode agent starts on this broker are refused until they match.
+            </p>
+            <ul class="storage-mismatch">
+              ${mismatch.map((l) => html`<li>${l}</li>`)}
+            </ul>
+          </div>`
+        : nothing}
       <div class="section">
         <div class="section-header">
           <h2>Checks</h2>

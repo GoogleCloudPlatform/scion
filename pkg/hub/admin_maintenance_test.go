@@ -663,6 +663,12 @@ func TestCheckForUpdates_NoRepoPath(t *testing.T) {
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
 	}
+	// The error names the real knobs; there is no maintenance.repo_path key.
+	body := rr.Body.String()
+	if !strings.Contains(body, "SCION_MAINTENANCE_REPO_PATH") || !strings.Contains(body, "workspace_path") ||
+		strings.Contains(body, "maintenance.repo_path") {
+		t.Errorf("error text = %s", body)
+	}
 }
 
 func TestCheckForUpdates_WrongMethod(t *testing.T) {

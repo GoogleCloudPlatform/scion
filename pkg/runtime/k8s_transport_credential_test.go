@@ -86,6 +86,10 @@ func runUntilPodCreated(t *testing.T, rt *KubernetesRuntime, clientset *k8sfake.
 		return false, nil, nil
 	})
 
+	// The claims the pod mounts exist and are Bound, so the claim check
+	// before the pod passes.
+	seedConfigClaims(t, clientset, rt.runNamespace(config.Labels), config)
+
 	_, _ = rt.Run(ctx, config)
 
 	mu.Lock()

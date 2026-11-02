@@ -215,11 +215,11 @@ func dispatchInheritedCase(t *testing.T, tier string, src inheritedSources) map[
 		dispatched["autoExpose"] = strconv.FormatBool(*d.AutoExposePorts)
 	}
 	if ic := req.InlineConfig; ic != nil {
-		if ic.MaxTurns > 0 {
-			dispatched["config.max_turns"] = strconv.Itoa(ic.MaxTurns)
+		if n, ok := api.CountLimit(ic.MaxTurns); ok {
+			dispatched["config.max_turns"] = strconv.Itoa(n)
 		}
-		if ic.MaxModelCalls > 0 {
-			dispatched["config.max_model_calls"] = strconv.Itoa(ic.MaxModelCalls)
+		if n, ok := api.CountLimit(ic.MaxModelCalls); ok {
+			dispatched["config.max_model_calls"] = strconv.Itoa(n)
 		}
 		set("config.max_duration", ic.MaxDuration)
 		if r := ic.Resources; r != nil {

@@ -13,7 +13,8 @@ import (
 )
 
 // routingExpr is the one runs-on expression that routes CI jobs to cr-ci. It
-// must appear byte for byte in the snippet and in every doc that shows it.
+// must appear byte for byte in every doc that shows it. In the live workflows
+// (.github/workflows), hack/check-runner-routing.sh (added by PR-wf1) checks it.
 const routingExpr = "${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}"
 
 const (
@@ -67,11 +68,10 @@ func TestRoutingExpressionShape(t *testing.T) {
 	}
 }
 
-// TestRoutingExpressionEverywhere keeps the snippet and the docs in step: every
+// TestRoutingExpressionEverywhere keeps the docs in step: every
 // line that shows a routing runs-on carries exactly routingExpr.
 func TestRoutingExpressionEverywhere(t *testing.T) {
 	files := []string{
-		"ci-lint-routing.snippet.yml",
 		"README.md",
 		"../docs/architecture.md",
 		"../docs/github-setup.md",
@@ -89,27 +89,6 @@ func TestRoutingExpressionEverywhere(t *testing.T) {
 		}
 		if found == 0 {
 			t.Errorf("%s: no routing runs-on line found", f)
-		}
-	}
-}
-
-func TestSnippetLintEnv(t *testing.T) {
-	s := readFile(t, "ci-lint-routing.snippet.yml")
-	for i, l := range lines(s) {
-		if strings.Contains(l, "-c=1") && !strings.HasPrefix(strings.TrimSpace(l), "#") &&
-			!strings.Contains(l, "runner.environment != 'self-hosted' && ") {
-			t.Errorf("snippet:%d: the -c=1 throttle must apply only off the self-hosted runner: %s", i+1, l)
-		}
-	}
-	for _, want := range []string{
-		"GOFLAGS: ${{ runner.environment != 'self-hosted' && '-gcflags=github.com/GoogleCloudPlatform/scion/pkg/hub=-c=1' || '' }}",
-		`--concurrency="$LINT_CONCURRENCY"`,
-		"LINT_CONCURRENCY: ${{ runner.environment == 'self-hosted' && '8' || '2' }}",
-		"GOMEMLIMIT: ${{ runner.environment == 'self-hosted' && '24GiB' || '8GiB' }}",
-		"GOGC: ${{ runner.environment == 'self-hosted' && '100' || '25' }}",
-	} {
-		if !strings.Contains(s, want) {
-			t.Errorf("snippet lacks %q", want)
 		}
 	}
 }
@@ -159,9 +138,9 @@ func TestPoCWorkflow(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"/sys/fs/cgroup/memory.peak", "df -h /scratch", "golangci-lint run ",
-		// memory.peak is NA under gVisor: the lint step samples memory and /scratch.
-		"/proc/meminfo", "df -k --output=used /scratch", "sample peaks:",
+		"/sys/fs/cgroup/memory.peak", "df -h /home/runner", "golangci-lint run ",
+		// memory.peak is NA under gVisor: the lint step samples memory and the volume (HOME).
+		"/proc/meminfo", "df -k --output=used /home/runner", "sample peaks:",
 		"LINT_CONCURRENCY: ${{ inputs.lint-concurrency || '8' }}",
 		"GOGC: '100'", "GOMEMLIMIT: '24GiB'",
 		// P6b sampler: CPU from /proc/stat, the memory guard on the lint's process group, -v timings.
@@ -181,11 +160,13 @@ func TestPoCWorkflow(t *testing.T) {
 	}
 }
 
-// TestCacheParityCheck: both templates start with a verify-only step, on the
-// self-hosted runner only, that checks the cache-parity contract (the
-// entrypoint sets it up; see README.md, "Cache sharing").
+// TestCacheParityCheck: the PoC template starts with a verify-only step, on
+// the self-hosted runner only, that checks the cache-parity contract (the
+// entrypoint sets it up; see README.md, "Cache sharing"). Routed jobs in the
+// live workflows get the same check from .github/actions/setup-go-cache (added
+// by PR-wf1).
 func TestCacheParityCheck(t *testing.T) {
-	for _, f := range []string{"cr-runner-poc.yml", "ci-lint-routing.snippet.yml"} {
+	for _, f := range []string{"cr-runner-poc.yml"} {
 		s := readFile(t, f)
 		first := regexp.MustCompile(`(?m)^ *steps:\n *- name: (.*)\n *if: (.*)$`).FindStringSubmatch(s)
 		if first == nil || first[1] != "Check cr-ci cache parity (cr-ci runner only)" ||
@@ -194,10 +175,11 @@ func TestCacheParityCheck(t *testing.T) {
 		}
 		for _, want := range []string{
 			`check HOME "$HOME" /home/runner`,
-			`check "work folder link /home/runner/work" "$(readlink /home/runner/work)" /scratch/_work`,
-			// /scratch mirrors $HOME: tar resolves ".." physically from the workspace
-			`check "~/.cache link" "$(readlink "$HOME/.cache")" /scratch/.cache`,
-			`check "~/go link" "$(readlink "$HOME/go")" /scratch/go`,
+			// The volume is mounted at HOME: real directories, so ".." from the workspace
+			// resolves to them physically, and whole-directory archives restore in place.
+			`check "real directory /home/runner/work" "$(readlink -f /home/runner/work)" /home/runner/work`,
+			`check "real directory ~/go" "$(readlink -f "$HOME/go")" /home/runner/go`,
+			`check "HOME not on the root filesystem"`,
 			`check "go env GOCACHE" "$(go env GOCACHE)" /home/runner/.cache/go-build`,
 			`check "go env GOMODCACHE" "$(go env GOMODCACHE)" /home/runner/go/pkg/mod`,
 			`check "GITHUB_WORKSPACE parent" "${GITHUB_WORKSPACE%/*/*}" /home/runner/work`,
@@ -208,8 +190,9 @@ func TestCacheParityCheck(t *testing.T) {
 				t.Errorf("%s: parity check lacks %q", f, want)
 			}
 		}
+		requireRAMBranch(t, f, s)
 		// Verify only: the templates create nothing.
-		for _, banned := range []string{"ln -s", "GITHUB_ENV", "/scratch/cache", "/scratch/gopath", "rm -rf"} {
+		for _, banned := range []string{"ln -s", "GITHUB_ENV", "/scratch", "rm -rf"} {
 			if strings.Contains(s, banned) {
 				t.Errorf("%s contains %q; the parity step must only verify", f, banned)
 			}
@@ -304,5 +287,76 @@ func TestManifestMatchesMatrix(t *testing.T) {
 		"Repository *Metadata*: read (mandatory). No organization permissions. Subscribed event: `workflow_job`."
 	if !strings.Contains(matrix, want) {
 		t.Errorf("permissions-matrix.md no longer states the repo-scope set the manifest encodes:\n%s", want)
+	}
+}
+
+// ramBranch is the ~/.cache check both cache parity checks must share: a real
+// directory, or, with RUNNER_BUILD_CACHE_IN_RAM=true, a link that resolves exactly to
+// the entrypoint's RAM directory (cr-ci/runner/entrypoint.sh, CR_RAM_CACHE_DIR's
+// default).
+var ramBranch = []string{
+	`if [ "${RUNNER_BUILD_CACHE_IN_RAM:-false}" = true ] && [ -L "$HOME/.cache" ]; then`,
+	`check "HOME/.cache (RAM build cache)" "$(readlink -f "$HOME/.cache")" /tmp/cr-ci-build-cache`,
+	`check "real directory ~/.cache" "$(readlink -f "$HOME/.cache")" /home/runner/.cache`,
+}
+
+func requireRAMBranch(t *testing.T, name, content string) {
+	t.Helper()
+	for _, want := range ramBranch {
+		if !strings.Contains(content, want) {
+			t.Errorf("%s: cache parity check lacks the RAM-mode line %q", name, want)
+		}
+	}
+}
+
+// TestCacheParityRAMBranchInSync: the live parity check (.github/actions/setup-go-cache,
+// outside this module) has the same RAM-mode branch as the PoC template, so the two
+// cannot drift apart. The action is read from the repository checkout; an archive of
+// cr-ci/ alone (the gate windows) does not contain it: the test then SKIPs, and only
+// the PoC side is checked, by TestCacheParityCheck. The RAM directory both checks expect must be the
+// entrypoint's default.
+func TestCacheParityRAMBranchInSync(t *testing.T) {
+	if want := "/tmp/cr-ci-build-cache"; !strings.Contains(readFile(t, "../runner/entrypoint.sh"), "ram_cache_dir=${CR_RAM_CACHE_DIR:-"+want+"}") {
+		t.Errorf("runner/entrypoint.sh no longer defaults the RAM cache directory to %s; update both parity checks", want)
+	}
+	const action = "../../.github/actions/setup-go-cache/action.yml"
+	b, err := os.ReadFile(action)
+	if os.IsNotExist(err) {
+		t.Skipf("%s is not in this tree (a cr-ci-only archive); the PoC side is checked by TestCacheParityCheck", action)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireRAMBranch(t, action, string(b))
+}
+
+// TestCacheParityActionNewLayoutOnly: the live parity check accepts only the new
+// runner layout (the volume at HOME, real directories). Its old-layout branch, for
+// /scratch links, was removed after the switch (cr-ci/docs/operations.md, "Runner
+// layout switch"), so a runner on the old layout fails the "real directory" checks.
+// SKIPs in a cr-ci-only archive, as TestCacheParityRAMBranchInSync does.
+func TestCacheParityActionNewLayoutOnly(t *testing.T) {
+	const action = "../../.github/actions/setup-go-cache/action.yml"
+	b, err := os.ReadFile(action)
+	if os.IsNotExist(err) {
+		t.Skipf("%s is not in this tree (a cr-ci-only archive)", action)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	for _, banned := range []string{"/scratch", "[ -L /home/runner/work ]", "old cr-ci runner layout"} {
+		if strings.Contains(s, banned) {
+			t.Errorf("%s contains %q; the old-layout branch was removed after the runner layout switch", action, banned)
+		}
+	}
+	for _, want := range []string{
+		`check "real directory $d" "$(readlink -f "$d")" "$d"`,
+		`echo "ok   HOME is a volume (device $home_dev)"`,
+		`check "device of $d" "$(stat -c %d "$d" 2>/dev/null)" "$home_dev"`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("%s: parity check lacks %q", action, want)
+		}
 	}
 }

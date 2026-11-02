@@ -185,6 +185,47 @@ func newDevAuthWebServer(t *testing.T, overrides ...func(*WebServerConfig)) *Web
 	return ws
 }
 
+// devSignIn signs a browser in to a dev-auth web server the way a user does:
+// it mints a code at the launch endpoint with the dev token, opens the
+// sign-in link, and returns the session cookies the link set.
+func devSignIn(t *testing.T, ws *WebServer) []*http.Cookie {
+	t.Helper()
+	h := ws.Handler()
+	mint := httptest.NewRequest(http.MethodPost, devLaunchPath, nil)
+	mint.Header.Set("Authorization", "Bearer "+ws.config.DevAuthToken)
+	mintRec := httptest.NewRecorder()
+	h.ServeHTTP(mintRec, mint)
+	require.Equal(t, http.StatusOK, mintRec.Code, mintRec.Body.String())
+	var launch devLaunchResponse
+	require.NoError(t, json.Unmarshal(mintRec.Body.Bytes(), &launch))
+
+	signIn := httptest.NewRequest(http.MethodGet, launch.SignInPath, nil)
+	signInRec := httptest.NewRecorder()
+	h.ServeHTTP(signInRec, signIn)
+	require.Equal(t, http.StatusSeeOther, signInRec.Code, signInRec.Body.String())
+	cookies := signInRec.Result().Cookies()
+	require.NotEmpty(t, cookies, "the sign-in link must set the session cookie")
+	return cookies
+}
+
+// devSignedIn returns a handler for ws that sends every request with the
+// cookies of one dev sign-in (devSignIn), unless the request already
+// carries a session cookie. For tests of signed-in behaviour on a dev-auth
+// server.
+func devSignedIn(t *testing.T, ws *WebServer) http.Handler {
+	t.Helper()
+	cookies := devSignIn(t, ws)
+	h := ws.Handler()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := r.Cookie(webSessionName); err != nil {
+			for _, c := range cookies {
+				r.AddCookie(c)
+			}
+		}
+		h.ServeHTTP(w, r)
+	})
+}
+
 // mockOAuthTransport intercepts HTTP requests to Google OAuth endpoints and
 // returns canned responses. This lets us drive handleOAuthCallback through
 // the full handler path without hitting real Google servers.
@@ -196,7 +237,8 @@ type mockOAuthTransport struct {
 func (m *mockProxyAuthenticator) Authenticate(_ *http.Request) (*ProxyUserInfo, error) {
 	return m.user, m.err
 }
-func (m *mockProxyAuthenticator) Name() string { return "mock" }
+func (m *mockProxyAuthenticator) Name() string               { return "mock" }
+func (m *mockProxyAuthenticator) AssertionHeaders() []string { return nil }
 
 func (s *proxyAuthStore) GetUserByEmail(_ context.Context, email string) (*store.User, error) {
 	for _, u := range s.users {
@@ -345,6 +387,16 @@ func hubPageHeaderValues(t *testing.T) map[string]string {
 		require.NotEmpty(t, v, "securityHeadersMiddleware does not set %s", name)
 		out[name] = v
 	}
+	return out
+}
+
+// proxiedPageHeaderValues is hubPageHeaderValues for a page served from an
+// agent's port: the hub's own values, except that the untrusted-content
+// Permissions-Policy replaces the web pages' one.
+func proxiedPageHeaderValues(t *testing.T) map[string]string {
+	t.Helper()
+	out := hubPageHeaderValues(t)
+	out["Permissions-Policy"] = untrustedContentPermissionsPolicy
 	return out
 }
 

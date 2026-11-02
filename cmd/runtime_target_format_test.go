@@ -126,3 +126,35 @@ func TestHubBrokersInfo_JSON_Golden(t *testing.T) {
 	require.NoError(t, enc.Encode(brokerInfoJSON(flatInfoFixture())))
 	compareGolden(t, "hub-brokers-info-flat.json", buf.String())
 }
+
+// The reported defaults show the instance's placement for new agents: each
+// set field when it reports placement, "none" when it reports none, and
+// "not reported" for an instance that does not report it.
+func TestRuntimeTargetSectionsShowPlacement(t *testing.T) {
+	b := flatInfoFixture()
+	pt := b.RuntimeTargetPresentation.Target
+	pt.PlacementReported = true
+	pt.NodeSelector = map[string]string{"scion.dev/pool": "agents", "disk": "ssd"}
+	pt.Tolerations = []api.K8sToleration{
+		{Key: "scion.dev/pool", Operator: "Equal", Value: "agents", Effect: "NoSchedule"},
+		{Key: "dedicated", Operator: "Exists"},
+	}
+	pt.RuntimeClassName = "gvisor"
+	var buf bytes.Buffer
+	writeRuntimeTargetSections(&buf, b.RuntimeTarget, b.RuntimeTargetPresentation, nil)
+	out := buf.String()
+	assert.Contains(t, out, "Node selector:              disk=ssd, scion.dev/pool=agents\n")
+	assert.Contains(t, out, "Tolerations:                scion.dev/pool=agents:NoSchedule; dedicated Exists\n")
+	assert.Contains(t, out, "Runtime class:              gvisor\n")
+	assert.NotContains(t, out, "Placement:")
+
+	pt.NodeSelector, pt.Tolerations, pt.RuntimeClassName = nil, nil, ""
+	buf.Reset()
+	writeRuntimeTargetSections(&buf, b.RuntimeTarget, b.RuntimeTargetPresentation, nil)
+	assert.Contains(t, buf.String(), "Placement:                  none\n")
+
+	pt.PlacementReported = false
+	buf.Reset()
+	writeRuntimeTargetSections(&buf, b.RuntimeTarget, b.RuntimeTargetPresentation, nil)
+	assert.Contains(t, buf.String(), "Placement:                  not reported\n")
+}

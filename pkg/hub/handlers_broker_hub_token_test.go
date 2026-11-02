@@ -63,7 +63,7 @@ func TestBrokerHubToken_NewRegistrationAdmitted(t *testing.T) {
 	member := newHubMemberUser(t, s, "hubtoken-new-member")
 	key := mintHubBrokerUAT(t, srv, member.ID, "broker:create")
 
-	rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestWithTokenLoopback(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name: "hubtoken-new-broker",
 	})
 
@@ -88,7 +88,7 @@ func TestBrokerHubToken_WithoutBrokerCreateScopeDenied(t *testing.T) {
 	key := mintHubBrokerUAT(t, srv, member.ID, "broker:read")
 
 	const name = "hubtoken-noscope-broker"
-	rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: name})
+	rec := doRequestWithTokenLoopback(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: name})
 
 	assert.Equal(t, http.StatusForbidden, rec.Code, "the token ceiling must contain broker:create; got: %s", rec.Body.String())
 	assert.NotContains(t, rec.Body.String(), "joinToken")
@@ -103,7 +103,7 @@ func TestBrokerHubToken_UserRemovedFromHubMembersDenied(t *testing.T) {
 	removeFromHubMembers(t, s, member.ID)
 
 	const name = "hubtoken-removed-broker"
-	rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: name})
+	rec := doRequestWithTokenLoopback(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: name})
 
 	assert.Equal(t, http.StatusForbidden, rec.Code,
 		"the token's user must currently hold broker.create; got: %s", rec.Body.String())
@@ -121,7 +121,7 @@ func TestBrokerHubToken_RevokedTokenRejected(t *testing.T) {
 	require.NoError(t, srv.uatService.RevokeToken(rs4MintContext(member.ID), member.ID, token.ID))
 
 	const name = "hubtoken-revoked-broker"
-	rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: name})
+	rec := doRequestWithTokenLoopback(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: name})
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
 	assertNoBrokerNamed(t, s, name)
@@ -143,7 +143,7 @@ func TestBrokerHubToken_ExpiredTokenRejected(t *testing.T) {
 	require.NoError(t, err)
 
 	const name = "hubtoken-expired-broker"
-	rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: name})
+	rec := doRequestWithTokenLoopback(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: name})
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
 	assertNoBrokerNamed(t, s, name)
@@ -159,7 +159,7 @@ func TestBrokerHubToken_SuspendedUserRejected(t *testing.T) {
 	require.NoError(t, s.UpdateUser(ctx, member))
 
 	const name = "hubtoken-suspended-broker"
-	rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: name})
+	rec := doRequestWithTokenLoopback(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: name})
 
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	var errResp ErrorResponse
@@ -204,7 +204,7 @@ func TestBrokerHubToken_ExpiredHubMemberBindingSessionDenied(t *testing.T) {
 	require.NoError(t, err)
 
 	const name = "hubtoken-expired-binding-broker"
-	rec := doRequestAsUser(t, srv, user, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: name})
+	rec := doRequestAsUserLoopback(t, srv, user, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: name})
 
 	assert.Equal(t, http.StatusForbidden, rec.Code,
 		"a hub-member binding outside its window grants no broker.create; got: %s", rec.Body.String())
@@ -223,7 +223,7 @@ func TestBrokerHubToken_OwnerReregistersByName(t *testing.T) {
 	broker := createReregistrationTestBroker(t, s, "hubtoken-rereg-owner-name-broker", owner.ID)
 	key := mintHubBrokerUAT(t, srv, owner.ID, "broker:create")
 
-	rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestWithTokenLoopback(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name: broker.Name,
 	})
 
@@ -244,7 +244,7 @@ func TestBrokerHubToken_OwnerReregistersByIDWithNewName(t *testing.T) {
 	broker := createReregistrationTestBroker(t, s, "hubtoken-rereg-owner-id-broker", owner.ID)
 	key := mintHubBrokerUAT(t, srv, owner.ID, "broker:create")
 
-	rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestWithTokenLoopback(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name:     "hubtoken-rereg-owner-id-renamed",
 		BrokerID: broker.ID,
 	})
@@ -276,7 +276,7 @@ func TestBrokerHubToken_SuperAdminTokenCannotReregisterOtherUsersBroker(t *testi
 			broker := createReregistrationTestBroker(t, s, "hubtoken-rereg-admin-broker", owner.ID)
 			key := mintHubBrokerUAT(t, srv, admin.ID, "broker:create")
 
-			rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/brokers", tc.req(broker))
+			rec := doRequestWithTokenLoopback(t, srv, key, http.MethodPost, "/api/v1/brokers", tc.req(broker))
 
 			assert.Equal(t, http.StatusForbidden, rec.Code,
 				"a user access token re-registers only a broker its user created; got: %s", rec.Body.String())
@@ -296,7 +296,7 @@ func TestBrokerHubToken_SuperAdminTokenReregistersOwnBroker(t *testing.T) {
 	broker := createReregistrationTestBroker(t, s, "hubtoken-rereg-admin-own-broker", admin.ID)
 	key := mintHubBrokerUAT(t, srv, admin.ID, "broker:create")
 
-	rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestWithTokenLoopback(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name: broker.Name,
 	})
 
@@ -314,7 +314,7 @@ func TestBrokerHubToken_SuperAdminTokenCannotReregisterOwnerlessBroker(t *testin
 	broker := createReregistrationTestBroker(t, s, "hubtoken-rereg-admin-ownerless-broker", "")
 	key := mintHubBrokerUAT(t, srv, admin.ID, "broker:create")
 
-	rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestWithTokenLoopback(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name:   broker.Name,
 		Labels: map[string]string{"env": "other"},
 	})
@@ -331,7 +331,7 @@ func TestBrokerHubToken_SuperAdminDevCredentialReregistersOtherUsersBroker(t *te
 	owner := newHubMemberUser(t, s, "hubtoken-rereg-dev-owner")
 	broker := createReregistrationTestBroker(t, s, "hubtoken-rereg-dev-broker", owner.ID)
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestLoopback(t, srv, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name: broker.Name,
 	})
 
@@ -391,7 +391,7 @@ func TestBrokerHubToken_SuperAdminTokenWithoutBrokerCreateDenied(t *testing.T) {
 	broker := createReregistrationTestBroker(t, s, "hubtoken-rereg-narrow-broker", owner.ID)
 	key := mintHubBrokerUAT(t, srv, admin.ID, "agent:read")
 
-	rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestWithTokenLoopback(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name: broker.Name,
 	})
 
@@ -420,7 +420,7 @@ func TestBrokerHubToken_NonOwnerReregistrationDenied(t *testing.T) {
 			broker := createReregistrationTestBroker(t, s, "hubtoken-nonowner-broker", owner.ID)
 			key := mintHubBrokerUAT(t, srv, other.ID, "broker:create")
 
-			rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/brokers", tc.req(broker))
+			rec := doRequestWithTokenLoopback(t, srv, key, http.MethodPost, "/api/v1/brokers", tc.req(broker))
 
 			assert.Equal(t, http.StatusForbidden, rec.Code,
 				"a hub member who does not own the broker must not re-register it; got: %s", rec.Body.String())
@@ -441,7 +441,7 @@ func TestBrokerHubToken_OwnNameWithOtherBrokerIDReregistersOwnBroker(t *testing.
 	target := createReregistrationTestBroker(t, s, "hubtoken-namewins-target", other.ID)
 	key := mintHubBrokerUAT(t, srv, owner.ID, "broker:create")
 
-	rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestWithTokenLoopback(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name:     own.Name,
 		BrokerID: target.ID,
 		Labels:   map[string]string{"zone": "added"},
@@ -465,7 +465,7 @@ func TestBrokerHubToken_OwnerTokenCannotRotate(t *testing.T) {
 	originalKey := seedBrokerSecret(t, s, broker.ID)
 	key := mintHubBrokerUAT(t, srv, owner.ID, "broker:create")
 
-	rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/brokers/"+broker.ID+"/rotate-secret", map[string]interface{}{})
+	rec := doRequestWithTokenLoopback(t, srv, key, http.MethodPost, "/api/v1/brokers/"+broker.ID+"/rotate-secret", map[string]interface{}{})
 
 	assert.Equal(t, http.StatusForbidden, rec.Code,
 		"no user access token selector authorizes rotation; got: %s", rec.Body.String())
@@ -552,7 +552,7 @@ func TestBrokerHubToken_SameNameBrokerAppearsDuringNewRegistration(t *testing.T)
 		return s.GetRuntimeBrokerByName(ctx, n)
 	})
 
-	rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: name})
+	rec := doRequestWithTokenLoopback(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: name})
 
 	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 	assert.NotContains(t, rec.Body.String(), "joinToken")
@@ -577,7 +577,7 @@ func TestBrokerHubToken_NameMatchChangesDuringOwnerReregistration(t *testing.T) 
 		return s.GetRuntimeBroker(ctx, target.ID)
 	})
 
-	rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestWithTokenLoopback(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name:   own.Name,
 		Labels: map[string]string{"env": "updated"},
 	})
@@ -611,7 +611,7 @@ func TestBrokerHubToken_AutoProvideTurnedOffDuringOwnerReregistration(t *testing
 		return s.GetRuntimeBrokerByName(ctx, n)
 	})
 
-	rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestAsUserLoopback(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name:        broker.Name,
 		AutoProvide: true,
 		Labels:      map[string]string{"env": "updated"},

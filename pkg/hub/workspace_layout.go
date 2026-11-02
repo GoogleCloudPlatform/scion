@@ -37,66 +37,31 @@ var errWorkspaceStorageUnavailable = errors.New("workspace storage is not availa
 // git mode); the caller resolves it through its providers instead.
 var errNotHubWorkspace = errors.New("project workspace is not hub-managed")
 
-// workspaceLayout builds the hub's workspace Layout from the in-memory
-// ServerConfig.WorkspaceStorageConfig (never from the file-only global
-// settings loader):
+// workspaceLayout is the hub's workspace Layout: projectStorageLayout, the
+// Layout built from the in-memory server.project_storage
+// (ServerConfig.ProjectStorageConfig, never the file-only global settings
+// loader), with the local backend rooted at ~/.scion (slug-keyed):
 //
-//   - nfs: config.NFSLayout (HostBase <mount_root>/<share id>);
+//   - nfs: <mount_root>/<share id>;
 //   - cloudrun-volume / gke-shared-volume: the same UUID-keyed tree under
-//     the volume's mount point (<volumeMountBase>/<volume name>), with the
-//     block's subpath_root;
+//     the volume's mount point (<volumeMountBase>/<volume name>);
 //   - unset or local: the local backend, HostBase ~/.scion, slug-keyed.
 //
 // A shared backend that cannot be built returns an error wrapping
 // errWorkspaceStorageUnavailable, never a local Layout.
 func (s *Server) workspaceLayout() (projectfs.Layout, error) {
-	return workspaceLayoutFor(s.config.WorkspaceStorageConfig)
-}
-
-// workspaceLayoutFor is workspaceLayout for an explicit config.
-func workspaceLayoutFor(wsCfg *config.V1WorkspaceStorageConfig) (projectfs.Layout, error) {
-	backend := ""
-	if wsCfg != nil {
-		backend = wsCfg.Backend
+	layout, err := s.projectStorageLayout()
+	if err != nil {
+		return projectfs.Layout{}, fmt.Errorf("%w: %v", errWorkspaceStorageUnavailable, err)
 	}
-	switch backend {
-	case "", config.WorkspaceStorageBackendLocal:
+	if layout.Backend == projectfs.BackendLocal {
 		globalDir, err := config.GetGlobalDir()
 		if err != nil {
 			return projectfs.Layout{}, fmt.Errorf("failed to get global dir: %w", err)
 		}
-		return projectfs.Layout{Backend: projectfs.BackendLocal, HostBase: globalDir}, nil
-	case config.WorkspaceStorageBackendNFS:
-		layout, err := config.NFSLayout(wsCfg.NFS)
-		if err != nil {
-			return projectfs.Layout{}, fmt.Errorf("%w: %v", errWorkspaceStorageUnavailable, err)
-		}
-		return layout, nil
-	case "cloudrun-volume", "gke-shared-volume":
-		var subPathRoot string
-		pfsBackend := projectfs.BackendCloudRunVolume
-		if backend == "cloudrun-volume" {
-			if wsCfg.CloudRunVolume != nil {
-				subPathRoot = wsCfg.CloudRunVolume.SubPathRoot
-			}
-		} else {
-			pfsBackend = projectfs.BackendGKESharedVolume
-			if wsCfg.GKESharedVolume != nil {
-				subPathRoot = wsCfg.GKESharedVolume.SubPathRoot
-			}
-		}
-		mountRoot := workspaceMountRoot(wsCfg)
-		if mountRoot == "" {
-			return projectfs.Layout{}, fmt.Errorf("%w: %s has no volume_name", errWorkspaceStorageUnavailable, backend)
-		}
-		root, err := config.ResolveSubPathRoot(subPathRoot)
-		if err != nil {
-			return projectfs.Layout{}, fmt.Errorf("%w: %v", errWorkspaceStorageUnavailable, err)
-		}
-		return projectfs.Layout{Backend: pfsBackend, HostBase: mountRoot, SubPathRoot: root}, nil
-	default:
-		return projectfs.Layout{}, fmt.Errorf("%w: unknown backend %q", errWorkspaceStorageUnavailable, backend)
+		return projectfs.Layout{Backend: projectfs.BackendLocal, HostBase: globalDir, Homes: layout.Homes}, nil
 	}
+	return layout, nil
 }
 
 // workspaceBackendShared reports whether the hub's workspace storage is a
@@ -104,8 +69,7 @@ func workspaceLayoutFor(wsCfg *config.V1WorkspaceStorageConfig) (projectfs.Layou
 // A misconfigured shared backend still counts as shared: it must never be
 // treated as the local layout.
 func (s *Server) workspaceBackendShared() bool {
-	wsCfg := s.config.WorkspaceStorageConfig
-	return wsCfg != nil && wsCfg.Backend != "" && wsCfg.Backend != config.WorkspaceStorageBackendLocal
+	return s.config.ProjectStorageConfig.EffectiveBackend() != config.WorkspaceStorageBackendLocal
 }
 
 // projectWorkspaceResolved resolves the workspace Mount of a hub-managed

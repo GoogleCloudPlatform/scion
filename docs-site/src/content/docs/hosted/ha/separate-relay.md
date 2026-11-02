@@ -15,7 +15,7 @@ A relay is **policy-free**:
 
 - **Admission.** The relay forwards the dialer's credential headers to a hub, and the hub decides whether to admit the dialer and as whom. Only an allowlist of credential headers is forwarded, and proxy identity headers never are.
 - **RPCs and refreshes.** The hub answers every RPC a user sends on a relay-held session and checks every in-band credential refresh.
-- **Re-checks.** The relay schedules re-checks of its sessions and user streams: periodically, on the hub's revocation events, and whenever its event connection reconnects. The hub evaluates each one, and the relay acts on the answer: close, renew or keep.
+- **Re-checks.** The relay schedules re-checks of its sessions and user streams: periodically, on the hub's revocation events (`conduit.authz.changed`, `agent.*.deleted`, `agent.*.ports`, `project.*.deleted`, `conduit.broker.changed`), and whenever its event connection reconnects. The hub evaluates each one, and the relay acts on the answer: close, renew or keep. When a Conduit grant signing key is rotated (`POST /api/v1/admin/conduit/grant-keys/rotate`) or revoked (`POST /api/v1/admin/conduit/grant-keys/revoke` with `{"kid": "..."}`), the hub publishes `conduit.grant_keys.changed` (`{"kid": "<kid>"}`): each hub node that receives it (or reconnects its `LISTEN` connection) invalidates its cached grant key ring so the next use reloads the ring from the store, and each relay (`followGrantKeys` / `NotifyGrantKeysChanged`) sends `GrantKeysChanged` on every `conduit.grant_keys.changed` event and every `LISTEN` reconnect to its live `stream_renewal.v2` target sessions so targets fetch the updated public keys from `GET /api/v1/conduit/grant-keys` at once.
 
 The relay keeps each session's hub admission token and presents it unchanged. It never opens, parses or logs it.
 
@@ -29,7 +29,7 @@ The relay keeps each session's hub admission token and presents it unchanged. It
 
 ## Hub ingress
 
-Clients and Runtime Brokers keep dialing the hub's own `GET /api/v1/conduit`. With `server.hub.conduit.ingress: proxy` (the default), the hub passes each dial on to a relay:
+Clients, Runtime Brokers and agents dial the hub's own `GET /api/v1/conduit`. The hub tells agents to dial it only while the ingress serves and at least one relay is eligible; an agent started at any other time keeps the port-forward tunnel until its next start. An agent told to dial keeps redialing with backoff while no relay is eligible (the hub answers `503` with reason `conduit_not_serving`) and runs no port-forward tunnel meanwhile; it is admitted once a relay is eligible again. With `server.hub.conduit.ingress: proxy` (the default), the hub passes each dial on to a relay:
 
 - **Selection.** The hub samples two eligible relays (recently seen and not draining) and picks the one holding fewer sessions. If the session count cannot be read, it picks one of the two at random.
 - **The proxied dial.** The hub forwards only the WebSocket upgrade, to the relay's internal listener, authenticated as `relay-peer`. The client's credential headers, path, query and `Host` pass unchanged, so a Runtime Broker's signature verifies as sent. The hub removes any relay-peer or ingress header the client sent, and names itself in an ingress header that the relay trusts only on that authenticated leg.
@@ -46,10 +46,11 @@ Proxy ingress needs HMAC relay-peer authentication (`server.hub.conduit.peer_aut
 
 A relay reads its own configuration file, never the hub's. It needs:
 
-- `server.relay.hub_internal_url`: the hub internal API, reachable only inside the cluster or VPC.
-- `server.relay.public_url`: the URL dialers reach this relay at.
+- `server.relay.hub_internal_url`: the hub internal API, reachable only inside the cluster or VPC. It must be `https://` unless its host is loopback (a loopback IP literal: 127.0.0.0/8 or `::1`, not `localhost`).
+- `server.relay.public_url`: the URL dialers reach this relay at. The relay admits a conduit dial on its public listener only over TLS, from its own host, or from a trusted TLS-terminating proxy; any other dial gets `403` `transport_not_confidential` before admission. While `server.trusted_proxies` is not set, only a proxy on the relay's own host (`127.0.0.1`, `::1`) is trusted; a relay behind a TLS terminator on another host works only when the terminator's addresses are listed there, and `[]` trusts no proxy.
 - `server.hub.conduit.peer_secret`: the same secret the hubs use.
 - `server.hub.conduit.internal_listen`, and `internal_advertise` where the bound address is not reachable: the relay internal API that the hubs and other relays call.
+- `server.hub.conduit.internal_tls_cert_file` and `internal_tls_key_file`, unless `internal_listen` is a loopback address (a loopback IP literal: 127.0.0.0/8 or `::1`, not `localhost`), and `internal_tls_ca_file` for a private or internal CA (on the hubs too). The relay and the hubs refuse a plaintext internal hop to a host that is not loopback; see [TLS on the internal hop](/scion/reference/server-config/#conduit-serverhubconduit).
 - `database.url`: a relay-scoped database role.
 
 The relay serves conduit sessions on `server.hub.host` and `server.hub.port`. It serves no hub API, web UI or Runtime Broker there.
@@ -61,6 +62,10 @@ scion server start --role relay --config /etc/scion-relay
 The relay refuses to start while `hub.conduit` is off. If the setting cannot be read, it retries for up to a minute and then fails. While it runs, it re-reads the experiment every 15 seconds and on every settings change. Turning the experiment off stops admission and drains the open sessions, but the process keeps running. Turning it back on resumes admission.
 
 At startup the relay logs the configuration files it loaded and its database driver, never the connection string.
+
+### Upgrading
+
+BREAKING: the conduit internal hop must use https:// unless it is a loopback address. Use loopback IP literals (`127.0.0.1` or `::1`), not `localhost`: no host name counts as loopback, because it would be resolved when the hop is dialed or bound. This covers `server.hub.conduit.internal_listen` and `server.hub.conduit.internal_advertise` (on hubs, and on separate relays, which use the same keys for their internal listener) and the relay's `server.relay.hub_internal_url`. Hubs and relays refuse to start with a non-loopback http:// internal endpoint, or with a non-loopback `internal_listen` without TLS, and never send a request to a peer whose endpoint is http:// on a non-loopback host. Upgrade all hubs and relays together: configure `server.hub.conduit.internal_tls_cert_file` and `internal_tls_key_file` (plus `internal_tls_ca_file` for a private CA, and `internal_tls_server_name` if the certificate does not name the dialed host) on every node, then roll them. Set these in the settings file or the `SCION_SERVER_HUB_CONDUIT_INTERNALTLS*` environment variables BEFORE upgrading, not as `--internal-tls-*` flags: older binaries ignore unknown settings with a warning but refuse unknown flags. During the rollout, an upgraded node refuses to reach a node not yet upgraded, so separate-relay streams, and in an HA hub the cross-node routing between hub nodes, are unavailable until every node runs TLS; plan a short window. Alternative: bind `internal_listen` to a loopback address behind a local TLS terminator and advertise the terminator's https:// address. TLS does not replace relay-peer authentication (HMAC with `server.hub.conduit.peer_secret`, or the configured `peer_auth` mode), which stays required.
 
 ### Cloud Run singleton relay (not HA)
 

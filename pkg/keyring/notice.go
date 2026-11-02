@@ -29,6 +29,7 @@ var CoupledUses = []string{
 	"local skill-file download URLs",
 	"artifact view links",
 	"authorized-list cursors",
+	"attachment delivery URLs",
 	"conduit admission tokens",
 	"relay-peer request signatures (shared-secret fallback)",
 	"local secret backend values",
@@ -44,9 +45,10 @@ func StartupNotice(k *Keyring) string {
 			"safe server-secret rotation is not available in this release.",
 			LegacyID, LegacyID, strings.Join(CoupledUses, "; "))
 	}
-	return fmt.Sprintf("server secret: keyring file revision %q (experimental session-cookie pilot): "+
-		"web session cookies use signing generations %v (active %q); every other purpose still uses the "+
-		"unchanged %q entry, whose deadlines apply to session cookies only, and encryption keeps the "+
+	return fmt.Sprintf("server secret: keyring file revision %q (experimental signing pilot): "+
+		"web session cookies, agent and user JWTs, skill file download URLs, artifact view links, authorized-list cursors and "+
+		"attachment delivery URLs, and conduit admission tokens and relay-peer signatures (shared-secret fallback) use signing generations %v (active %q); every other purpose still uses the "+
+		"unchanged %q entry, whose deadlines apply to session cookies, JWTs and those capabilities, admission tokens and relay-peer signatures only, and encryption keeps the "+
 		"imported key %q. Full server-secret rotation is not available in this release.",
 		k.Revision(), k.Signing().IDs(), k.Signing().ActiveID(), LegacyID, k.Encryption().ActiveID())
 }

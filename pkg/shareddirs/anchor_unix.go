@@ -102,8 +102,8 @@ func OpenAnchoredRoot(hostBase, rel string) (*os.Root, error) {
 	}
 	if uint64(rootStat.Dev) != uint64(walkStat.Dev) || uint64(rootStat.Ino) != uint64(walkStat.Ino) {
 		_ = root.Close()
-		return nil, fmt.Errorf(
-			"shared dir %q changed between resolution and open (possible symlink swap); refusing", path)
+		return nil, &confinementError{fmt.Sprintf(
+			"shared dir %q changed between resolution and open (possible symlink swap); refusing", path)}
 	}
 
 	return root, nil

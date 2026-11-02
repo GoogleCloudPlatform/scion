@@ -45,7 +45,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/urlredact"
-	"golang.org/x/sys/unix"
 )
 
 // ProvisionSentinelFile is the name of the sentinel file written atomically
@@ -1490,40 +1489,102 @@ func acquireFileLockWithin(ctx context.Context, dir string, wait time.Duration) 
 // not revisited. Accepted: it does not accumulate further once contention
 // stops, and it is already git-excluded.
 func garbageCollectLockLitter(dir string) {
-	now, err := serverNow(dir)
-	if err != nil {
-		return
-	}
+	_, _ = SweepLockLitter(dir)
+}
+
+// LockLitterMinAge is the age past which provisioning-lock litter may be
+// removed: the garbage-collection cutoff 2S of acquireFileLock's
+// correctness argument.
+func LockLitterMinAge() time.Duration {
+	return 2 * provisionLockStaleAfter
+}
+
+// LockLitter is what SweepLockLitter left in place.
+type LockLitter struct {
+	// Pending is how long the youngest remaining aged entry still needs
+	// before it may be removed (0 when none is left).
+	Pending time.Duration
+	// Unaged counts ".evict-*" entries without their evicted-at marker.
+	// They have no eviction time and are never removed automatically, so
+	// waiting does not help (see garbageCollectLockLitter).
+	Unaged int
+}
+
+// SweepLockLitter removes dir's provisioning-lock litter older than
+// LockLitterMinAge and reports what it left. ".evict-*" entries are aged
+// from their evicted-at marker (see garbageCollectLockLitter); one without
+// the marker is never guessed at (counted in Unaged). Other litter
+// (staging directories, clock probes a crashed caller left) is aged from
+// its own mtime; a concurrent caller's probe is young and kept. The live
+// lock itself and anything not under the lock's name prefix are never
+// touched. Ages are measured against the file server's clock (serverNow).
+// The first removal error is returned; the sweep continues past it.
+//
+// The cutoff is fixed: a caller MUST NOT remove litter younger than
+// LockLitterMinAge by any other means, since a younger ".evict-*" entry
+// can still be the destination a stale observer's rename relies on (the
+// invariant in acquireFileLock's correctness argument).
+func SweepLockLitter(dir string) (LockLitter, error) {
+	return sweepLockLitter(dir, LockLitterMinAge())
+}
+
+// sweepLockLitter is SweepLockLitter with the cutoff as a parameter, for
+// tests only.
+func sweepLockLitter(dir string, minAge time.Duration) (left LockLitter, err error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return
-	}
-	cutoff := 2 * provisionLockStaleAfter
-	prefix := provisionFileLockName + "."
-	for _, e := range entries {
-		name := e.Name()
-		if name == provisionFileLockName || !strings.HasPrefix(name, prefix) {
-			continue // the live lock name itself, or not one of ours
+		if errors.Is(err, fs.ErrNotExist) {
+			return left, nil
 		}
+		return left, err
+	}
+	prefix := provisionFileLockName + "."
+	var litter []os.DirEntry
+	for _, e := range entries {
+		if name := e.Name(); name != provisionFileLockName && strings.HasPrefix(name, prefix) {
+			litter = append(litter, e)
+		}
+	}
+	if len(litter) == 0 {
+		return left, nil
+	}
+	now, err := serverNow(dir)
+	if err != nil {
+		left.Pending = minAge
+		return left, err
+	}
+	var firstErr error
+	keep := func(age time.Duration) {
+		left.Pending = max(left.Pending, minAge-age)
+	}
+	for _, e := range litter {
+		name := e.Name()
 		path := filepath.Join(dir, name)
+		var age time.Duration
 		if strings.Contains(name, ".evict-") {
 			info, err := os.Stat(filepath.Join(path, provisionLockEvictedAtFile))
 			if err != nil {
-				continue // no confirmed eviction time yet; never guess (see doc)
+				left.Unaged++ // no confirmed eviction time; never guess
+				continue
 			}
-			if now.Sub(info.ModTime()) > cutoff {
-				_ = os.RemoveAll(path)
+			age = now.Sub(info.ModTime())
+		} else {
+			info, err := e.Info()
+			if err != nil {
+				keep(0)
+				continue
 			}
+			age = now.Sub(info.ModTime())
+		}
+		if age <= minAge {
+			keep(age)
 			continue
 		}
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		if now.Sub(info.ModTime()) > cutoff {
-			_ = os.RemoveAll(path)
+		if err := os.RemoveAll(path); err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
+	return left, firstErr
 }
 
 // tryCreateFileLock atomically publishes a fully-formed, already-owned lock
@@ -2845,6 +2906,17 @@ func runGitClone(ctx context.Context, in ProvisionInput) error {
 	var args []string
 	if in.HostGitHardened {
 		args = append(args, HostCloneGitArgs()...)
+	} else {
+		// Non-hardened clones still carry the base host-side git pins unconditionally
+		// (no hooks, no fsmonitor, no pager, restricted ext/file transports, no
+		// submodule recursion, no signature checks): a cloned repository's config
+		// cannot change what this host git invocation does. HostCloneGitArgs (the
+		// hardened path) already includes exactly these base pins (hostGitArgs ==
+		// util.HostGitArgs) plus the clone transport/redirect extras, so the base
+		// pins are present on every clone path. The hardened path intentionally
+		// repeats protocol.file.allow, overriding the base =user with =never (the
+		// last -c wins), so file:// transport is fully denied on that path.
+		args = append(args, util.HostGitArgs()...)
 	}
 	args = append(args, "clone")
 
@@ -2869,8 +2941,10 @@ func runGitClone(ctx context.Context, in ProvisionInput) error {
 	// skipped so git-lfs never contacts an endpoint named in the cloned tracked
 	// .lfsconfig with the host's credentials (agents fetch LFS objects
 	// in-container). This path also runs in the Kubernetes init container (via
-	// `sciontool provision`). http.followRedirects=false and the protocol allow
-	// list are applied as fixed args by HostCloneGitArgs when HostGitHardened.
+	// `sciontool provision`). The host-side git hardening pins (no hooks, no
+	// pager, restricted transports, no submodule recursion) plus
+	// http.followRedirects=false and the protocol allow list are applied as fixed
+	// args by HostCloneGitArgs when HostGitHardened (the hub project-create clone).
 	env := append(util.HostGitEnv(os.Environ()), "GIT_TERMINAL_PROMPT=0", "GIT_LFS_SKIP_SMUDGE=1")
 	if in.HostGitHardened {
 		env = append(env, "GIT_ALLOW_PROTOCOL="+HostCloneProtocols)
@@ -2890,15 +2964,18 @@ func runGitClone(ctx context.Context, in ProvisionInput) error {
 			withToken, token = true, in.CloneToken
 		}
 	}
+	offered := ""
 	if withToken {
-		// Host-scoped credential helper: the token is offered only to the clone
-		// URL's host, carried in the environment and never in argv/URL/config; the
-		// helper first clears any inherited unscoped credential.helper. For a
-		// non-http(s) URL the token is ignored (git uses its own transport auth).
-		if scoped, ok := util.ScopedCredentialHelperEnv(env, gc.URL, token); ok {
-			env = scoped
-		}
+		offered = token
 	}
+	// Remote authentication: no host credential of any kind (credential
+	// helpers, askpass, extra headers, netrc, client certificates, Kerberos,
+	// ssh identity, host global/system config), on every clone, the
+	// project's recorded remote included. With no token offered the clone is
+	// anonymous; with one, the token is the only credential, offered only to
+	// the clone URL's host through a scoped helper, carried in the environment
+	// and never in argv/URL/config. A non-http(s) URL ignores the token.
+	env = util.HostGitRemoteEnv(env, gc.URL, offered)
 	cmd.Env = env
 	output, err := cmd.CombinedOutput()
 	if err == nil {
@@ -3980,7 +4057,7 @@ func clearOwnStaleWorktreeEntry(ctx context.Context, in ProvisionInput, base, wo
 	if err != nil || !registered {
 		return nil
 	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
+	uid, gid, ok := fileOwner(fi)
 	if !ok {
 		return staleEntryError(in, worktreePath, staleEntryDirKept, fmt.Errorf("cannot read the owner of %s", worktreePath))
 	}
@@ -3989,12 +4066,12 @@ func clearOwnStaleWorktreeEntry(ctx context.Context, in ProvisionInput, base, wo
 	}
 	mode := fi.Mode() & (fs.ModePerm | fs.ModeSetgid | fs.ModeSticky)
 	if err := util.RemoveWorktreeEntry(ctx, worktreePath, gitCmd); err != nil {
-		if mkErr := recreateEmptyDir(worktreePath, mode, int(st.Uid), int(st.Gid)); mkErr != nil {
+		if mkErr := recreateEmptyDir(worktreePath, mode, int(uid), int(gid)); mkErr != nil {
 			err = errors.Join(err, mkErr)
 		}
 		return staleEntryError(in, worktreePath, staleEntryDirKept, err)
 	}
-	if err := recreateEmptyDir(worktreePath, mode, int(st.Uid), int(st.Gid)); err != nil {
+	if err := recreateEmptyDir(worktreePath, mode, int(uid), int(gid)); err != nil {
 		return staleEntryError(in, worktreePath, staleEntryDirNotRecreated, err)
 	}
 	slog.Info("ProvisionShared: removed a stale git entry for the agent's empty worktree directory",
@@ -4172,57 +4249,6 @@ func appendGitExclude(hostPath, pattern string) error {
 	}
 	_, err = f.WriteString(pattern + "\n")
 	return err
-}
-
-// openGitExclude opens hostPath/.git/info/exclude for reading and appending
-// without following a symlink at .git, info or exclude: each component is
-// opened with openat relative to its parent's descriptor and O_NOFOLLOW, so
-// none of them can be redirected by a symlink, or swapped for one between
-// a check and the open. info is created if missing; exclude is created if
-// missing and must be a regular file (O_NONBLOCK keeps a FIFO planted there
-// from blocking the open; it is then refused).
-func openGitExclude(hostPath string) (*os.File, error) {
-	const dirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
-	rootFd, err := unix.Open(hostPath, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", hostPath, err)
-	}
-	defer func() { _ = unix.Close(rootFd) }()
-	gitDir := filepath.Join(hostPath, ".git")
-	gitFd, err := unix.Openat(rootFd, ".git", dirFlags, 0)
-	if err != nil {
-		return nil, fmt.Errorf("open %s without following symlinks: %w", gitDir, err)
-	}
-	defer func() { _ = unix.Close(gitFd) }()
-
-	infoDir := filepath.Join(gitDir, "info")
-	infoFd, err := unix.Openat(gitFd, "info", dirFlags, 0)
-	if errors.Is(err, unix.ENOENT) {
-		if mkErr := unix.Mkdirat(gitFd, "info", 0o755); mkErr != nil && !errors.Is(mkErr, unix.EEXIST) {
-			return nil, fmt.Errorf("mkdir %s: %w", infoDir, mkErr)
-		}
-		infoFd, err = unix.Openat(gitFd, "info", dirFlags, 0)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("open %s without following symlinks: %w", infoDir, err)
-	}
-	defer func() { _ = unix.Close(infoFd) }()
-
-	excludePath := filepath.Join(infoDir, "exclude")
-	fd, err := unix.Openat(infoFd, "exclude", unix.O_RDWR|unix.O_APPEND|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0o644)
-	if err != nil {
-		return nil, fmt.Errorf("open %s without following symlinks: %w", excludePath, err)
-	}
-	var st unix.Stat_t
-	if err := unix.Fstat(fd, &st); err != nil {
-		_ = unix.Close(fd)
-		return nil, fmt.Errorf("stat %s: %w", excludePath, err)
-	}
-	if st.Mode&unix.S_IFMT != unix.S_IFREG {
-		_ = unix.Close(fd)
-		return nil, fmt.Errorf("%s is not a regular file", excludePath)
-	}
-	return os.NewFile(uintptr(fd), excludePath), nil
 }
 
 // sanitizeBranchName produces a git-safe branch name from an agent name.
@@ -4406,18 +4432,18 @@ func checkChownEPERM(path string, uid, gid int, lerr error) error {
 	if serr != nil {
 		return fmt.Errorf("lchown %d:%d %s: %w (stat for owner check failed: %v)", uid, gid, path, lerr, serr)
 	}
-	st, ok := info.Sys().(*syscall.Stat_t)
+	ownerUID, ownerGID, ok := fileOwner(info)
 	if !ok {
 		return fmt.Errorf("lchown %d:%d %s: %w (owner unknown)", uid, gid, path, lerr)
 	}
 	// -1 means "leave unchanged" to lchown, so it matches any on-disk ID.
-	if (uid == -1 || int(st.Uid) == uid) && (gid == -1 || int(st.Gid) == gid) {
+	if (uid == -1 || int(ownerUID) == uid) && (gid == -1 || int(ownerGID) == gid) {
 		slog.Debug("chown not permitted but ownership already matches, continuing",
 			"path", path, "uid", uid, "gid", gid)
 		return nil
 	}
 	return fmt.Errorf("lchown %d:%d %s: %w (owner is %d:%d, want %d:%d)",
-		uid, gid, path, lerr, st.Uid, st.Gid, uid, gid)
+		uid, gid, path, lerr, ownerUID, ownerGID, uid, gid)
 }
 
 // isLockArtifactPath reports whether path's base name is the file lock's own
@@ -4428,6 +4454,13 @@ func checkChownEPERM(path string, uid, gid int, lerr error) error {
 // provisionFileLockName, and provisionClockProbeFile is defined as
 // provisionFileLockName plus a suffix specifically so this one prefix check
 // catches all of them.
+// IsProvisioningArtifact reports whether name is provisioning bookkeeping
+// rather than workspace content: the provisioning file lock or one of its
+// satellites (isLockArtifactPath), or the provisioning sentinel.
+func IsProvisioningArtifact(name string) bool {
+	return isLockArtifactPath(name) || filepath.Base(name) == ProvisionSentinelFile
+}
+
 func isLockArtifactPath(path string) bool {
 	base := filepath.Base(path)
 	return base == provisionFileLockName || strings.HasPrefix(base, provisionFileLockName+".")
@@ -4450,6 +4483,19 @@ func resolveUID(in ProvisionInput) int {
 // resolveGID returns the NFS GID to use for chown, defaulting to 1000.
 func resolveGID(in ProvisionInput) int {
 	return DefaultOwnerID(in.NFSGID)
+}
+
+// MarkProvisioned writes the provisioning sentinel in sentinelDir (the
+// project state directory, ProjectStateDir, for a shared workspace), so
+// every later provisioner takes the reuse path. The caller holds the
+// provisioning locks (WithWorkspaceProvisionLocks) and has placed the
+// workspace's content first: a broker applying a workspace bootstrap upload
+// into a shared workspace that no provisioner has populated yet.
+func MarkProvisioned(sentinelDir string) error {
+	if sentinelDir == "" || !filepath.IsAbs(sentinelDir) {
+		return errors.New("provision: an absolute sentinel directory is required")
+	}
+	return writeSentinel(filepath.Join(sentinelDir, ProvisionSentinelFile))
 }
 
 // writeSentinel writes the provisioning sentinel file atomically using

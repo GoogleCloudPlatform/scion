@@ -20,14 +20,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
-	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
-	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -377,111 +373,13 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 		}
 	}
 
-	// Best-effort NFS shared-dir cleanup (ptone/scion#1802, Phase 2 item 3).
-	// This runs AFTER the transaction has committed: the DB row is the
-	// source of truth for "the project is deleted", and a filesystem
-	// cleanup failure must never roll that back or fail the request — it is
-	// logged and left for operator follow-up, exactly like the pre-existing
-	// (out of scope here) local-backend and workspace-dir leftover trees
-	// this same issue documents. NFS backend only: local-backend and
-	// workspace-dir cleanup remain out of scope, tracked on #1802 itself.
-	svc.cleanupNFSSharedDirTree(ctx, project.ID)
-
+	// The project's storage (its tree on the shared project storage, the
+	// legacy slug-keyed trees naming it, and its object-storage prefix) is
+	// removed by the caller after this commit, best-effort and audited
+	// (Server.startProjectStorageCleanup, ptone/scion#5835): the DB row is
+	// the source of truth for "the project is deleted", and a storage
+	// failure never rolls it back.
 	return result, nil
-}
-
-// cleanupNFSSharedDirTree removes projectID's shared-dir tree from the NFS
-// export whenever the hub's own global settings have a complete
-// server.shared_dir_storage.nfs block (ptone/scion#1802), whatever the
-// current backend, runtime or profile settings select: an agent keeps the
-// backend recorded when it was created, so a project can still have a tree
-// on the export after every setting has moved to local. Removing a missing
-// tree is a no-op. Without a complete nfs block it skips cleanup silently,
-// or logs an ERROR when a setting still selects nfs. When the global settings are unreadable or in the legacy format
-// but plausibly mention shared_dir_storage, it logs an ERROR and skips
-// (deletion is best-effort and never blocks or rolls back the DB deletion).
-// Settings are read via the same env-free, global-only loader used by the
-// broker (config.LoadGlobalSettingsWithOverlay: the global file plus the
-// DB settings overlay, if installed) so this can never be influenced by a
-// project's own settings.yaml.
-func (svc *ProjectDeletionService) cleanupNFSSharedDirTree(ctx context.Context, projectID string) {
-	// Mirrors the shared-dir browser's fail-closed rule. Deletion is
-	// best-effort by design (it never blocks or rolls back the DB deletion),
-	// so "fail closed" here means logging an ERROR instead of silently
-	// skipping cleanup, rather than refusing the request outright.
-	globalSettings, _, err := config.LoadGlobalSettingsWithOverlay()
-	if err != nil {
-		if config.GlobalSettingsMentions("shared_dir_storage") {
-			svc.logger.ErrorContext(ctx, "global settings unreadable and mention shared_dir_storage; skipping NFS shared-dir cleanup on project delete",
-				"project_id", projectID, "error", err)
-		}
-		return
-	}
-	if globalSettings == nil {
-		return
-	}
-	// A legacy-format file is converted with its server block kept
-	// (ptone/scion#3919); this fires only when such a file mentions the key
-	// but no block loaded (for example a misplaced or commented-out block).
-	if (globalSettings.Server == nil || globalSettings.Server.SharedDirStorage == nil) &&
-		config.GlobalSettingsIsLegacyFormat() && config.GlobalSettingsMentions("shared_dir_storage") {
-		svc.logger.ErrorContext(ctx, "global settings mention shared_dir_storage but it was not loaded (legacy format); skipping NFS shared-dir cleanup on project delete",
-			"project_id", projectID)
-		return
-	}
-	// The tree is project-scoped. Agents record their backend on the
-	// broker, which the hub cannot read, so any agent may still be on nfs
-	// while a complete nfs block exists. Clean whenever the block is
-	// complete, whatever the backend settings currently select.
-	var globalSD *config.V1SharedDirStorageConfig
-	if globalSettings.Server != nil {
-		globalSD = globalSettings.Server.SharedDirStorage
-	}
-	globalNFS := globalSD != nil && globalSD.Backend == "nfs"
-	sdCfg := &config.V1SharedDirStorageConfig{Backend: "nfs"}
-	if globalSD != nil {
-		sdCfg.NFS = globalSD.NFS
-	}
-	if err := sdCfg.Validate(); err != nil {
-		if selected, _ := globalSettings.SharedDirStorageNFSAnywhere(); selected != nil {
-			svc.logger.ErrorContext(ctx, "shared_dir_storage nfs config is invalid; skipping shared-dir cleanup on project delete",
-				"project_id", projectID, "error", err)
-		}
-		return
-	}
-	if !shareddirs.ValidProjectID(projectID) {
-		// Should be unreachable (hub project IDs are UUIDs it generates
-		// itself), but validate exactly as Phase 1 does before touching
-		// the filesystem at all.
-		svc.logger.ErrorContext(ctx, "refusing NFS shared-dir cleanup: project ID fails validation",
-			"project_id", projectID)
-		return
-	}
-
-	subPathRoot := config.SubPathRootOrDefault(sdCfg.NFS.SubPathRoot)
-	res, err := runtime.NewNFSBackend(sdCfg.NFS).Resolve(runtime.ResolveInput{ProjectID: projectID})
-	if err != nil {
-		svc.logger.ErrorContext(ctx, "failed to resolve NFS shared-dir host base for cleanup on project delete",
-			"project_id", projectID, "error", err)
-		return
-	}
-
-	// When the global backend is not nfs, this host may legitimately not
-	// have the export mounted (for example, a hub whose own agents all use
-	// the local backend). A missing or unreadable host base then warns and
-	// skips; it never fails the delete.
-	if !globalNFS {
-		if _, statErr := os.Stat(res.HostBase); statErr != nil {
-			svc.logger.WarnContext(ctx, "NFS shared-dir export not reachable on this host; skipping shared-dir cleanup on project delete",
-				"project_id", projectID, "host_base", res.HostBase, "error", statErr)
-			return
-		}
-	}
-
-	if err := shareddirs.DeleteProjectTree(res.HostBase, subPathRoot, projectID); err != nil {
-		svc.logger.ErrorContext(ctx, "failed to remove project's NFS shared-dir tree on delete",
-			"project_id", projectID, "host_base", res.HostBase, "error", err)
-	}
 }
 
 // ---------------------------------------------------------------------------

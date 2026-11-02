@@ -18,8 +18,8 @@ package authzop
 // (.design/agent-delegation.md §18.3): grant issuance by an interactive
 // user and the bound agent's exchange of a grant for a delegated
 // credential, both behind the hub.agent_delegation experiment; and grant
-// list, read and revoke and delegated credential revoke (§7), which answer
-// while the experiment is off.
+// list, read, revoke and revoke-all and delegated credential revoke (§7),
+// which answer while the experiment is off.
 var agentDelegationOperations = []OperationSpec{
 	{
 		ID:          "agent.delegation.create",
@@ -98,6 +98,9 @@ var agentDelegationOperations = []OperationSpec{
 // agentDelegationManagementControl describes who may act on a grant
 // through the management operations (.design/agent-delegation.md §7).
 const agentDelegationManagementControl = "Per grant: the issuer; the bound agent with its own agent token (its credential row live and unexpired, the path agent its subject); the agent's current owner; holders of the operation's permission on the hub (hub admins), for any grant; holders of it on project P (project owners and admins), for project(P)-bounded grants only. A dev session counts only as hub authority. Delegated credentials and user access tokens are refused"
+
+// agentDelegationRevokeAllControl is the per-grant authority of revoke-all.
+const agentDelegationRevokeAllControl = "Session only. On /users/me/delegations/revoke-all, the caller's own issued grants. On /agents/{id}/delegations/revoke-all, per grant: the issuer; the agent's current owner; holders of agent.delegation.revoke_all on the hub (hub admins), for any grant; holders of it on project P, for project(P)-bounded grants only. A dev session counts only as hub authority. Grants outside the caller's authority are skipped and reported, never revoked. Delegated credentials, agent tokens and user access tokens are refused"
 
 // agentDelegationManagementDenials are the denial codes of the management
 // operations (.design/agent-delegation.md §7, §8.4).
@@ -224,6 +227,39 @@ var agentDelegationManagementOperations = []OperationSpec{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestAgentDelegationManagement_ControlAuthority"},
 			{Package: "pkg/hub", Function: "TestAgentDelegationManagement_NoSecretFieldsInResponses"},
+		},
+		Bearer: SessionOnly(ReasonCredentialManagement),
+	},
+	{
+		ID:          "agent.delegation.revokeall",
+		Domain:      "agent.delegation",
+		Description: "Revoke every unrevoked agent delegation grant the caller issued, or every one bound to an agent, with the credentials exchanged from them; grants outside the caller's authority are skipped and reported",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/delegations/revoke-all", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/delegations/revoke-all", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "agent-from-url",
+		BasePermission:   "agent.delegation.revoke_all",
+		Effects:          []SecurityEffect{EffectRevokeAuthority},
+		DelegationKind:   DelegationNone,
+		Governance: &GovernancePolicy{
+			Kind:        GovernanceIssuerCredential,
+			Description: agentDelegationRevokeAllControl,
+		},
+		AuthorityEval: AuthorityEvalNone,
+		AuditObligation: &AuditObligation{
+			EventType:     "agent_delegation_grant_revoke",
+			ContextFields: []string{"actor_id", "grant_id"},
+			BeforeFields:  []string{"grant_id", "revoke_reason", "revoked_credential_ids"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden, "credential_not_admitted", "audit_failed"},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestAgentDelegationRevokeAll_CallerGrants"},
+			{Package: "pkg/hub", Function: "TestAgentDelegationRevokeAll_AgentGrantsSkipsOutsideAuthority"},
 		},
 		Bearer: SessionOnly(ReasonCredentialManagement),
 	},

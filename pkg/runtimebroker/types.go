@@ -125,6 +125,14 @@ type BrokerCapabilities struct {
 	// ClearedFields indicates this broker applies the inline config's
 	// cleared_fields at start (ptone/scion#3906, ptone/scion#4890).
 	ClearedFields bool `json:"clearedFields,omitempty"`
+	// UnlimitedCountLimits indicates this broker honours an explicit
+	// max_turns or max_model_calls of 0 as "no limit" over an inherited one
+	// (ptone/scion#5605).
+	UnlimitedCountLimits bool `json:"unlimitedCountLimits,omitempty"`
+	// ClearedResourceSubfields indicates this broker applies the resources
+	// sub-field entries of cleared_fields (api.ResourceSubPaths) at start
+	// (ptone/scion#5676).
+	ClearedResourceSubfields bool `json:"clearedResourceSubfields,omitempty"`
 	// StartsInFlight indicates the broker reports the agent starts still
 	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
 	// then does the hub read a start's absence from that list as "no start
@@ -167,6 +175,15 @@ type HubConnectionInfo struct {
 	IsColocated       bool   `json:"isColocated,omitempty"`
 	HasHeartbeat      bool   `json:"hasHeartbeat"`
 	HasControlChannel bool   `json:"hasControlChannel"`
+	// CommandPath is whether the hub can send commands over this
+	// connection's control channel: healthy, unknown (starting or
+	// reconnecting) or unhealthy (ControlChannelClient.CommandPathState).
+	// Empty when the connection runs no control channel.
+	CommandPath string `json:"commandPath,omitempty"`
+	// TransportRefused reports that the hub's transport policy refused the
+	// last dial of this connection's control channel or conduit (the hub
+	// requires TLS or a proxy it trusts: server.trusted_proxies).
+	TransportRefused bool `json:"transportRefused,omitempty"`
 }
 
 // ============================================================================
@@ -263,6 +280,10 @@ type CreateAgentRequest struct {
 	// sets workspaceAbsentAtAdmission). Without the check, a workspace
 	// bootstrap is never treated as finding an existing workspace.
 	workspaceAdmissionChecked bool
+	// workspaceHubConn names the Hub connection the create arrived on
+	// (resolveHubNameForLaunch), which the signed-URL workspace download
+	// asks for its URLs. It is never read from the wire.
+	workspaceHubConn string
 
 	RequestID   string             `json:"requestId,omitempty"`
 	ID          string             `json:"id,omitempty"`   // Hub UUID for status reporting
@@ -317,16 +338,6 @@ type CreateAgentRequest struct {
 	// while preserving the agent's home directory and clone-per-agent
 	// workspace. Ignored when ProvisionOnly is false.
 	Reprovision bool `json:"reprovision,omitempty"`
-	// SharedDirBackendChanges asks a Reprovision to change the recorded
-	// shared-dir storage backend of the named shared dirs (dir name to
-	// "nfs" or "local"; `scion reincarnate --shared-dir-backend`). Only the agent's
-	// record changes; no data is copied, moved or deleted. Refused on a
-	// request that is not a Reprovision.
-	SharedDirBackendChanges map[string]string `json:"sharedDirBackendChanges,omitempty"`
-	// AllowEmptySharedDir, with SharedDirBackendChanges, skips the start
-	// check that refuses an empty directory on the new backend while the
-	// dir's directory on its previous backend is not empty.
-	AllowEmptySharedDir bool `json:"allowEmptySharedDir,omitempty"`
 	// ExpectExistingNFSWorkspace is the moved-agent workspace expectation of
 	// a ProvisionOnly request for an agent moved here from another broker
 	// (the JSON key predates the third value). For a move on the same NFS
@@ -354,6 +365,13 @@ type CreateAgentRequest struct {
 	// sent by the hub that uploaded it. When empty the broker falls back to
 	// its own StorageBucket setting (older hubs do not send it).
 	WorkspaceStorageBucket string `json:"workspaceStorageBucket,omitempty"`
+	// WorkspaceDownloadMode selects how a WorkspaceStoragePath upload is
+	// downloaded: empty for the bucket download with this broker's
+	// credentials, api.WorkspaceDownloadModeSignedURLs for the Hub's
+	// signed-URL workspace download (no storage credential, no bucket
+	// listing). Any other value is refused: the broker never falls back to
+	// the bucket download for a mode it does not know.
+	WorkspaceDownloadMode string `json:"workspaceDownloadMode,omitempty"`
 
 	// ProjectSlug is the project slug for hub-managed projects.
 	// When set, the broker creates the workspace at ~/.scion.projects/<slug>/
@@ -545,11 +563,6 @@ type CreateAgentResponse struct {
 	// treats an absent echo on a reprovision dispatch as a failure, which is
 	// what keeps that failure mode closed instead of a silent no-op.
 	Reprovisioned bool `json:"reprovisioned,omitempty"`
-
-	// SharedDirBackendsChanged is set true when a Reprovision recorded the
-	// request's SharedDirBackendChanges. A broker that predates the field
-	// ignores the change, so the hub treats a missing echo as a failure.
-	SharedDirBackendsChanged bool `json:"sharedDirBackendsChanged,omitempty"`
 
 	// LaunchPending is set true instead of running Manager.Start inline when
 	// the broker accepted an async launch (design §3.2, §7 P1b-1): the Hub

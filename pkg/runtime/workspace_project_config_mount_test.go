@@ -141,18 +141,15 @@ func TestBuildCommonRunArgs_ProjectConfigReadOnly(t *testing.T) {
 		return cfg
 	}
 	worktree := func(t *testing.T, cfg RunConfig) RunConfig {
-		root := filepath.Join(t.TempDir(), "repo")
-		ws := filepath.Join(root, ".scion", "agents", "me", "workspace")
-		mkdirs(t, filepath.Join(root, ".git"), filepath.Join(ws, ".scion", "templates"))
+		// #5865: the worktree branch resolves the broker-recorded worktree admin
+		// and binds a per-agent private .git/config. Use a real registered
+		// worktree (setupHubManagedBaseRepo) so the start is not refused; the
+		// agent's own .scion stays writable (no read-only bind).
+		root, ws := setupHubManagedBaseRepo(t, "me")
+		mkdirs(t, filepath.Join(ws, ".scion", "templates"))
 		cfg.RepoRoot, cfg.Workspace = root, ws
 		cfg.AgentOwnWorkspace = true
-		return cfg
-	}
-	// A subdirectory project where an agent created a .git file: still the
-	// project's workspace, since the broker decides AgentOwnWorkspace.
-	subdirWithGitFile := func(t *testing.T, cfg RunConfig) RunConfig {
-		cfg = subdirProjectLayout(t, cfg, true)
-		writeFile(t, filepath.Join(cfg.Workspace, ".git"), "gitdir: ../.git/worktrees/x\n")
+		cfg.PrivateGitConfigSource = seedTestPrivateGitConfig(t)
 		return cfg
 	}
 	// The agent's own private workspace with a checked-out .scion (plain
@@ -162,21 +159,6 @@ func TestBuildCommonRunArgs_ProjectConfigReadOnly(t *testing.T) {
 		mkdirs(t, filepath.Join(ws, ".scion", "templates"))
 		cfg.Workspace = ws
 		cfg.AgentOwnWorkspace = true
-		return cfg
-	}
-	// A project kept in a subdirectory of the repository: the workspace is
-	// that subdirectory of the main checkout, holding the project's .scion.
-	subdirProject := func(withAgents bool) projectConfigLayout {
-		return func(t *testing.T, cfg RunConfig) RunConfig {
-			return subdirProjectLayout(t, cfg, withAgents)
-		}
-	}
-	subdirMarker := func(t *testing.T, cfg RunConfig) RunConfig {
-		root := filepath.Join(t.TempDir(), "repo")
-		ws := filepath.Join(root, "sub")
-		mkdirs(t, filepath.Join(root, ".git"))
-		writeFile(t, filepath.Join(ws, ".scion"), "project-id: x\n")
-		cfg.RepoRoot, cfg.Workspace = root, ws
 		return cfg
 	}
 	gitClone := func(t *testing.T, cfg RunConfig) RunConfig {
@@ -243,10 +225,10 @@ func TestBuildCommonRunArgs_ProjectConfigReadOnly(t *testing.T) {
 			{"plain, agent home under .scion/agents", plainHomeInside, ".scion", "/workspace/.scion", "/workspace/.scion/agents", "", false, false},
 			{"plain, .scion symlink", plainSymlink, "", "", "", "", false, true},
 			{"plain, .scion marker file", plainMarker, "", "", "", "", true, false},
-			{"project in a repo subdirectory, agents dir exists", subdirProject(true), ".scion", "/repo-root/sub/.scion", "/repo-root/sub/.scion/agents", "", false, false},
-			{"project in a repo subdirectory, no agents dir", subdirProject(false), ".scion", "/repo-root/sub/.scion", "", "/repo-root/sub/.scion/agents", false, false},
-			{"project in a repo subdirectory, .scion marker", subdirMarker, "", "", "", "", true, false},
-			{"project in a repo subdirectory with an agent-created .git file", subdirWithGitFile, ".scion", "/repo-root/sub/.scion", "/repo-root/sub/.scion/agents", "", false, false},
+			// A project kept in a plain subdirectory of a repository
+			// (RepoRoot set, workspace a subdir that is not a registered
+			// worktree) drives the worktree branch and is refused; see
+			// TestBuildCommonRunArgs_SubdirProjectWorktreeBranchRefused.
 			{"plain, agent's own workspace", plainOwn, "", "", "", "", false, false},
 			{"worktree", worktree, "", "", "", "", false, false},
 			{"git clone", gitClone, "", "", "", "", false, false},
@@ -280,9 +262,12 @@ func TestBuildCommonRunArgs_ProjectConfigReadOnly(t *testing.T) {
 
 				var ro []string
 				for _, v := range vols {
-					// The git admin narrowing mounts of the worktree
-					// layout are read-only on their own account.
-					if strings.HasSuffix(v, ":ro") && !strings.Contains(v, ":/repo-root/.git/") {
+					// The git admin narrowing mounts of the worktree layout
+					// (the read-only base .git root and its read-only children,
+					// e.g. .git/config) are read-only on their own account, not
+					// project-config protection; exclude the whole /repo-root/.git
+					// subtree from this comparison.
+					if strings.HasSuffix(v, ":ro") && !strings.Contains(v, ":/repo-root/.git") {
 						ro = append(ro, v)
 					}
 				}
@@ -368,56 +353,99 @@ func TestBuildCommonRunArgs_ProjectConfigReadOnly(t *testing.T) {
 	}
 }
 
-// In the full-repo-root fallback (workspace outside the repo root) the
-// repo's .scion is shadowed with a tmpfs on every runtime: --mount on
-// Docker and Podman, --tmpfs on Apple, which drops --mount arguments. On
-// Apple the mask is added only when the directory exists.
-func TestBuildCommonRunArgs_FallbackScionMask(t *testing.T) {
-	for _, tt := range []struct {
-		runtime   string
-		withScion bool
-		flag      string
-		value     string
-	}{
-		{"docker", true, "--mount", "type=tmpfs,destination=/repo-root/.scion"},
-		{"podman", true, "--mount", "type=tmpfs,destination=/repo-root/.scion"},
-		{appleContainerRuntimeName, true, "--tmpfs", "/repo-root/.scion"},
-		{appleContainerRuntimeName, false, "", ""},
-	} {
-		name := tt.runtime
-		if !tt.withScion {
-			name += "/no .scion"
+// A project kept in a plain subdirectory of a repository (RepoRoot set,
+// workspace a subdirectory that is NOT a registered worktree) drives the
+// worktree branch, where the broker-recorded worktree admin cannot be
+// resolved: the start is refused fail-closed on every runtime. Production
+// never routes a subdir project this way — detectRepoRoot returns "" for a
+// subdir project with no own .git, taking the config-Workspace-only branch,
+// where real subdir-project protection is covered (config-only tests). This
+// pins that the RepoRoot-set shape is refused rather than silently mounting
+// the enclosing repository or leaving the project .scion writable.
+func TestBuildCommonRunArgs_SubdirProjectWorktreeBranchRefused(t *testing.T) {
+	marker := func(t *testing.T, cfg RunConfig) RunConfig {
+		root := filepath.Join(t.TempDir(), "repo")
+		ws := filepath.Join(root, "sub")
+		mkdirs(t, filepath.Join(root, ".git"))
+		writeFile(t, filepath.Join(ws, ".scion"), "project-id: x\n")
+		cfg.RepoRoot, cfg.Workspace = root, ws
+		return cfg
+	}
+	// A subdirectory project where an agent created a .git gitfile: this fixture
+	// has no .git/worktrees admin dir, so the start is refused for want of a
+	// broker-recorded admin back-link. (That the resolver ignores the agent-writable
+	// gitfile specifically is proven in TestWorktreeAdmin_IgnoresAgentWritableGitfile.)
+	gitFile := func(t *testing.T, cfg RunConfig) RunConfig {
+		cfg = subdirProjectLayout(t, cfg, true)
+		writeFile(t, filepath.Join(cfg.Workspace, ".git"), "gitdir: ../.git/worktrees/x\n")
+		return cfg
+	}
+	for _, rt := range []string{"docker", "podman", appleContainerRuntimeName} {
+		for _, tt := range []struct {
+			name   string
+			layout projectConfigLayout
+		}{
+			{"agents dir exists", func(t *testing.T, cfg RunConfig) RunConfig { return subdirProjectLayout(t, cfg, true) }},
+			{"no agents dir", func(t *testing.T, cfg RunConfig) RunConfig { return subdirProjectLayout(t, cfg, false) }},
+			{".scion marker", marker},
+			{"agent-created .git file", gitFile},
+		} {
+			t.Run(rt+"/"+tt.name, func(t *testing.T) {
+				t.Setenv("HOME", t.TempDir())
+				cfg := minimalRunConfig()
+				cfg.BrokerMode = true
+				cfg.RuntimeName = rt
+				cfg.HomeDir = filepath.Join(t.TempDir(), "home")
+				mkdirs(t, cfg.HomeDir)
+				cfg = tt.layout(t, cfg)
+				args, err := buildCommonRunArgs(cfg)
+				if !errors.Is(err, errWorktreeAdminUnresolved) {
+					t.Fatalf("buildCommonRunArgs error = %v, want errWorktreeAdminUnresolved", err)
+				}
+				if !strings.Contains(err.Error(), "cannot resolve the broker-recorded worktree admin directory") {
+					t.Errorf("error message lacks the worktree-admin reason: %v", err)
+				}
+				if args != nil {
+					t.Errorf("fail-closed: expected nil args, got %q", args)
+				}
+			})
 		}
-		t.Run(name, func(t *testing.T) {
+	}
+}
+
+// An UNREGISTERED workspace outside the repo root is refused fail-closed on
+// every runtime (errOutsideRootNotRegistered): there is no full-repo-root mount
+// and no .scion mask. A REGISTERED outside-root worktree is covered by
+// TestBuildCommonRunArgs_RegisteredOutsideWorktreeProjectConfig.
+func TestBuildCommonRunArgs_FallbackScionMask(t *testing.T) {
+	// #5865 removed the full-repo-root fallback: an UNREGISTERED workspace outside
+	// the repo root is refused fail-closed (errOutsideRootNotRegistered), so there
+	// is no /repo-root mount and no .scion mask. A REGISTERED outside-root worktree
+	// is covered by TestBuildCommonRunArgs_RegisteredOutsideWorktreeProjectConfig.
+	for _, rt := range []string{"docker", "podman", appleContainerRuntimeName} {
+		t.Run(rt, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
 			root := filepath.Join(t.TempDir(), "repo")
 			mkdirs(t, filepath.Join(root, ".git"))
-			if tt.withScion {
-				mkdirs(t, filepath.Join(root, ".scion", "agents", "other", "home"))
-			}
+			mkdirs(t, filepath.Join(root, ".scion", "agents", "other", "home"))
 			ws := filepath.Join(t.TempDir(), "outside")
 			mkdirs(t, ws)
 			cfg := minimalRunConfig()
 			cfg.BrokerMode = true
-			cfg.RuntimeName = tt.runtime
+			cfg.RuntimeName = rt
 			cfg.RepoRoot, cfg.Workspace = root, ws
+			before := fsSnapshot(t, root, ws)
 			args, err := buildCommonRunArgs(cfg)
-			if err != nil {
-				t.Fatalf("buildCommonRunArgs: %v", err)
+			if !errors.Is(err, errOutsideRootNotRegistered) {
+				t.Fatalf("buildCommonRunArgs error = %v, want errOutsideRootNotRegistered", err)
 			}
-			for i := 0; i < len(args)-1; i++ {
-				if (args[i] == "--tmpfs" || args[i] == "--mount") && strings.Contains(args[i+1], "/repo-root/.scion") && tt.flag == "" {
-					t.Errorf("unexpected mask %s %s", args[i], args[i+1])
-				}
+			if !strings.Contains(err.Error(), "is not a registered worktree") {
+				t.Errorf("error message lacks the registered-worktree reason: %v", err)
 			}
-			if tt.flag != "" && !hasArgPair(args, tt.flag, tt.value) {
-				t.Errorf("args lack %s %s: %q", tt.flag, tt.value, args)
+			if args != nil {
+				t.Errorf("fail-closed: expected nil args, got %q", args)
 			}
-			if tt.runtime == appleContainerRuntimeName {
-				if got := stripUnsupportedAppleFlags(args); tt.flag != "" && !hasArgPair(got, tt.flag, tt.value) {
-					t.Errorf("the Apple mask does not survive stripUnsupportedAppleFlags: %q", got)
-				}
-			}
+			assertNothingCreated(t, before, root, ws)
 		})
 	}
 }
@@ -470,8 +498,10 @@ func TestWorkspaceProjectConfigMount(t *testing.T) {
 	}
 }
 
-// In the full-repo-root fallback on Apple, a .scion marker file can be
-// neither masked nor bound read-only, so the start is refused.
+// On Apple, an unregistered workspace outside the repo root is refused as not a
+// registered worktree, before any .scion-marker handling. (The Apple marker
+// refusal for a registered worktree's own .scion is covered by
+// TestBuildCommonRunArgs_FallbackOwnScionMarkerAndSymlink.)
 func TestBuildCommonRunArgs_FallbackAppleMarkerRefused(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	root := filepath.Join(t.TempDir(), "repo")
@@ -483,9 +513,22 @@ func TestBuildCommonRunArgs_FallbackAppleMarkerRefused(t *testing.T) {
 	cfg.BrokerMode = true
 	cfg.RuntimeName = appleContainerRuntimeName
 	cfg.RepoRoot, cfg.Workspace = root, ws
-	if _, err := buildCommonRunArgs(cfg); !errors.Is(err, errProjectConfigMarkerNoBind) {
-		t.Fatalf("buildCommonRunArgs error = %v, want errProjectConfigMarkerNoBind", err)
+	// #5865 removed the full-repo-root fallback, so an unregistered outside
+	// workspace is refused before any .scion marker handling. The Apple marker
+	// refusal for a REGISTERED outside worktree's own .scion is exercised by
+	// TestBuildCommonRunArgs_FallbackOwnScionMarkerAndSymlink.
+	before := fsSnapshot(t, root, ws)
+	args, err := buildCommonRunArgs(cfg)
+	if !errors.Is(err, errOutsideRootNotRegistered) {
+		t.Fatalf("buildCommonRunArgs error = %v, want errOutsideRootNotRegistered", err)
 	}
+	if !strings.Contains(err.Error(), "is not a registered worktree") {
+		t.Errorf("error message lacks the registered-worktree reason: %v", err)
+	}
+	if args != nil {
+		t.Errorf("fail-closed: expected nil args, got %q", args)
+	}
+	assertNothingCreated(t, before, root, ws)
 }
 
 // A .scion entry that cannot be checked (other than not existing) refuses
@@ -532,103 +575,41 @@ func TestErrProjectConfigMarkerNoBindText(t *testing.T) {
 	}
 }
 
-// In the full-repo-root fallback, a project kept in a subdirectory of the
-// repository has its own .scion below the repo root: it is masked (a
-// directory, with its agents root and homes) or bound read-only (a marker
-// file; refused on Apple). A project .scion at the repo root itself gets
-// only the existing /repo-root/.scion mask.
+// An unregistered workspace outside the repo root is refused regardless of where
+// the project's .scion sits. The nested-.scion read-only mask for the registered
+// layouts is covered by the shared-plain, config-only, non-own worktree and
+// registered outside-root fallback nested tests.
 func TestBuildCommonRunArgs_FallbackNestedProjectConfig(t *testing.T) {
-	type layout func(t *testing.T, repo string) string // returns ProjectConfigPath
-	nestedDir := func(t *testing.T, repo string) string {
-		mkdirs(t, filepath.Join(repo, "sub", ".scion", "agents", "a", "home"))
-		return filepath.Join(repo, "sub", ".scion")
-	}
-	nestedRoot := func(t *testing.T, repo string) string {
-		mkdirs(t, filepath.Join(repo, "sub", ".scion"))
-		return filepath.Join(repo, "sub") // a project root, not its .scion
-	}
-	nestedMarker := func(t *testing.T, repo string) string {
-		writeFile(t, filepath.Join(repo, "sub", ".scion"), "project-id: x\n")
-		return filepath.Join(repo, "sub")
-	}
-	nestedSymlink := func(t *testing.T, repo string) string {
-		mkdirs(t, filepath.Join(repo, "sub", "cfg"))
-		if err := os.Symlink("cfg", filepath.Join(repo, "sub", ".scion")); err != nil {
-			t.Fatal(err)
-		}
-		return filepath.Join(repo, "sub", ".scion")
-	}
-	atRoot := func(t *testing.T, repo string) string {
-		return filepath.Join(repo, ".scion")
-	}
+	// #5865 removed the full-repo-root fallback, so an unregistered workspace
+	// outside the repo root is refused regardless of where the project's .scion
+	// sits; the nested-.scion read-only mask is now exercised in the shared-plain
+	// and config-only layouts (TestBuildCommonRunArgs_SharedPlainNestedProjectConfigReadOnly,
+	// TestBuildCommonRunArgs_ConfigOnlyNestedProjectConfigReadOnly).
 	for _, rt := range []string{"docker", appleContainerRuntimeName} {
-		for _, tt := range []struct {
-			name    string
-			layout  layout
-			want    func(repo string) (flag, value string)
-			wantErr error
-		}{
-			{"nested .scion directory", nestedDir, func(repo string) (string, string) {
-				if rt == appleContainerRuntimeName {
-					return "--tmpfs", "/repo-root/sub/.scion"
-				}
-				return "--mount", "type=tmpfs,destination=/repo-root/sub/.scion"
-			}, nil},
-			{"nested project root", nestedRoot, func(repo string) (string, string) {
-				if rt == appleContainerRuntimeName {
-					return "--tmpfs", "/repo-root/sub/.scion"
-				}
-				return "--mount", "type=tmpfs,destination=/repo-root/sub/.scion"
-			}, nil},
-			{"nested marker", nestedMarker, func(repo string) (string, string) {
-				return "-v", filepath.Join(repo, "sub", ".scion") + ":/repo-root/sub/.scion:ro"
-			}, nil},
-			{"nested symlink", nestedSymlink, nil, errProjectConfigSymlink},
-			{"project .scion at the repo root", atRoot, nil, nil},
-		} {
-			t.Run(rt+"/"+tt.name, func(t *testing.T) {
-				t.Setenv("HOME", t.TempDir())
-				repo := filepath.Join(t.TempDir(), "repo")
-				mkdirs(t, filepath.Join(repo, ".git"), filepath.Join(repo, ".scion"))
-				ws := filepath.Join(t.TempDir(), "outside")
-				mkdirs(t, ws)
-				cfg := minimalRunConfig()
-				cfg.BrokerMode = true
-				cfg.RuntimeName = rt
-				cfg.RepoRoot, cfg.Workspace = repo, ws
-				cfg.ProjectConfigPath = tt.layout(t, repo)
-				resolvedRepo, err := filepath.EvalSymlinks(repo)
-				if err != nil {
-					t.Fatal(err)
-				}
-				args, err := buildCommonRunArgs(cfg)
-				wantErr := tt.wantErr
-				if rt == appleContainerRuntimeName && tt.name == "nested marker" {
-					wantErr = errProjectConfigMarkerNoBind
-				}
-				if wantErr != nil {
-					if !errors.Is(err, wantErr) {
-						t.Fatalf("error = %v, want %v", err, wantErr)
-					}
-					return
-				}
-				if err != nil {
-					t.Fatalf("buildCommonRunArgs: %v", err)
-				}
-				if tt.want == nil {
-					for i := 0; i < len(args)-1; i++ {
-						if strings.Contains(args[i+1], "/repo-root/sub") {
-							t.Errorf("unexpected nested mount %s %s", args[i], args[i+1])
-						}
-					}
-					return
-				}
-				flag, value := tt.want(resolvedRepo)
-				if !hasArgPair(args, flag, value) {
-					t.Errorf("args lack %s %s: %q", flag, value, args)
-				}
-			})
-		}
+		t.Run(rt, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			repo := filepath.Join(t.TempDir(), "repo")
+			mkdirs(t, filepath.Join(repo, ".git"), filepath.Join(repo, "sub", ".scion"))
+			ws := filepath.Join(t.TempDir(), "outside")
+			mkdirs(t, ws)
+			cfg := minimalRunConfig()
+			cfg.BrokerMode = true
+			cfg.RuntimeName = rt
+			cfg.RepoRoot, cfg.Workspace = repo, ws
+			cfg.ProjectConfigPath = filepath.Join(repo, "sub", ".scion")
+			before := fsSnapshot(t, repo, ws)
+			args, err := buildCommonRunArgs(cfg)
+			if !errors.Is(err, errOutsideRootNotRegistered) {
+				t.Fatalf("buildCommonRunArgs error = %v, want errOutsideRootNotRegistered", err)
+			}
+			if !strings.Contains(err.Error(), "is not a registered worktree") {
+				t.Errorf("error message lacks the registered-worktree reason: %v", err)
+			}
+			if args != nil {
+				t.Errorf("fail-closed: expected nil args, got %q", args)
+			}
+			assertNothingCreated(t, before, repo, ws)
+		})
 	}
 }
 
@@ -736,9 +717,16 @@ func TestBuildCommonRunArgs_AgentsMaskPointFailsClosed(t *testing.T) {
 	}
 	subdir := func(t *testing.T, cfg RunConfig) RunConfig {
 		root := filepath.Join(t.TempDir(), "repo")
-		mkdirs(t, filepath.Join(root, ".git"))
-		withAgentsFile(filepath.Join(root, "sub", ".scion"))
-		cfg.RepoRoot, cfg.Workspace = root, filepath.Join(root, "sub")
+		mkdirs(t, filepath.Join(root, ".git", "hooks"), filepath.Join(root, ".git", "info"))
+		writeFile(t, filepath.Join(root, ".git", "config"), "[core]\n")
+		ws := filepath.Join(root, "sub")
+		withAgentsFile(filepath.Join(ws, ".scion"))
+		cfg.RepoRoot, cfg.Workspace = root, ws
+		// A repo-subdirectory workspace reaches the worktree layout, which refuses
+		// unless it is a broker-recorded worktree with a private git config; set
+		// those up so the start reaches the agents-mask fail-closed check.
+		setupWorktreeAdmin(t, root, "sub", ws)
+		cfg.PrivateGitConfigSource = seedTestPrivateGitConfig(t)
 		return cfg
 	}
 	plain := func(t *testing.T, cfg RunConfig) RunConfig {
@@ -782,6 +770,43 @@ func TestBuildCommonRunArgs_AgentsMaskPointFailsClosed(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestBuildCommonRunArgs_UnregisteredRepoSubdirectoryRefused pins the behaviour
+// that a project in a repository subdirectory that is NOT a registered worktree
+// is refused before the agents-mask check: the worktree layout mounts per-agent
+// git metadata and cannot resolve a broker-recorded worktree admin for a plain
+// subdirectory, so the start fails closed with nothing mounted. The
+// registered-worktree variant of the same layout is covered by
+// TestBuildCommonRunArgs_AgentsMaskPointFailsClosed's "project in a repo
+// subdirectory" row.
+func TestBuildCommonRunArgs_UnregisteredRepoSubdirectoryRefused(t *testing.T) {
+	for _, rt := range []string{"docker", "podman", appleContainerRuntimeName} {
+		t.Run(rt, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			root := filepath.Join(t.TempDir(), "repo")
+			ws := filepath.Join(root, "sub")
+			// A real agents/ dir, so a refusal here is the unregistered-worktree
+			// one, not the agents-mask one.
+			mkdirs(t, filepath.Join(root, ".git"), filepath.Join(ws, ".scion", "agents"))
+			cfg := minimalRunConfig()
+			cfg.BrokerMode = true
+			cfg.RuntimeName = rt
+			cfg.HomeDir = filepath.Join(t.TempDir(), "home")
+			mkdirs(t, cfg.HomeDir)
+			cfg.RepoRoot, cfg.Workspace = root, ws
+			args, err := buildCommonRunArgs(cfg)
+			if !errors.Is(err, errWorktreeAdminUnresolved) {
+				t.Fatalf("error = %v, want errWorktreeAdminUnresolved", err)
+			}
+			if !strings.Contains(err.Error(), "cannot resolve the broker-recorded worktree admin directory") {
+				t.Errorf("error lacks the worktree-admin reason: %v", err)
+			}
+			if args != nil {
+				t.Errorf("fail-closed: expected nil args, got %q", args)
+			}
+		})
 	}
 }
 

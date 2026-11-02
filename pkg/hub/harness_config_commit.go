@@ -21,8 +21,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
-	"path/filepath"
 	"reflect"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -120,41 +118,17 @@ func harnessConfigDataFromEntry(entry config.HarnessConfigEntry) *store.HarnessC
 	return cfg
 }
 
-// deriveHarnessConfigIndexFromDir is the directory variant of
-// deriveHarnessConfigIndex (bootstrap, import).
-func deriveHarnessConfigIndexFromDir(dir, name string) harnessConfigIndex {
-	data, present, err := readHarnessConfigYAMLFromDir(dir)
+// deriveHarnessConfigIndexFromCollected is the collected-directory variant
+// of deriveHarnessConfigIndex (bootstrap, import): config.yaml is read
+// through the collected directory's root.
+func deriveHarnessConfigIndexFromCollected(cd *collectedDir, name string) harnessConfigIndex {
+	data, present, err := cd.harnessConfigYAML()
 	if err != nil {
 		slog.Warn("harness-config commit: cannot read config.yaml; deriving it as empty",
-			"harness_config", name, "dir", dir, "error", err)
+			"harness_config", name, "dir", cd.dir, "error", err)
 		return deriveHarnessConfigIndex(nil, false, name)
 	}
 	return deriveHarnessConfigIndex(data, present, name)
-}
-
-// readHarnessConfigYAMLFromDir reads dir/config.yaml. present is false when
-// the file does not exist. A file too large to parse is returned as present
-// with no content (derived as unparsable).
-func readHarnessConfigYAMLFromDir(dir string) ([]byte, bool, error) {
-	fp := filepath.Join(dir, harnessConfigYAMLPath)
-	fi, err := os.Stat(fp)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, false, nil
-	}
-	if err != nil {
-		return nil, false, err
-	}
-	if !fi.Mode().IsRegular() {
-		return nil, false, nil
-	}
-	if fi.Size() > maxHarnessConfigFileSize {
-		return nil, true, nil
-	}
-	data, err := os.ReadFile(fp)
-	if err != nil {
-		return nil, false, err
-	}
-	return data, true, nil
 }
 
 // harnessConfigIndexMatches reports whether hc's stored derived fields equal
@@ -182,11 +156,11 @@ func (e *unusableHarnessConfigError) Unwrap() error { return e.perr }
 // harnessConfigCommitOpts selects where a commit reads file content and how
 // it persists.
 type harnessConfigCommitOpts struct {
-	// dir, when set, is a local directory holding the same files as the new
-	// manifest (bootstrap, import, reimport). config.yaml is read from it
-	// instead of storage, and a blob the commit is missing is written from
-	// it.
-	dir string
+	// collected, when set, is the collected directory holding the same files
+	// as the new manifest (bootstrap, import, reimport). config.yaml is read
+	// from it, through its root, instead of storage, and a blob the commit is
+	// missing is written from it.
+	collected *collectedDir
 	// content holds file contents the caller already has (the file write
 	// and upload handlers), keyed by manifest path; config.yaml is read
 	// from it when present.
@@ -211,7 +185,7 @@ type harnessConfigCommitOpts struct {
 
 // blobOpts is the part of o the shared blob resolver reads.
 func (o harnessConfigCommitOpts) blobOpts() commitOpts {
-	return commitOpts{dir: o.dir, fromStaging: o.fromStaging, uploadID: o.uploadID, written: o.written}
+	return commitOpts{collected: o.collected, fromStaging: o.fromStaging, uploadID: o.uploadID, written: o.written}
 }
 
 // harnessConfigCommitPrecondition is the stored state a commit of hc
@@ -268,6 +242,13 @@ func (s *Server) commitHarnessConfigFiles(ctx context.Context, hc *store.Harness
 	if err := validateManifestFilePaths(next); err != nil {
 		return err
 	}
+	if opts.collected != nil {
+		// A bootstrap or import commit needs the collected config.yaml; it
+		// is refused before any blob is written.
+		if _, ok := opts.collected.entry(harnessConfigYAMLPath); !ok {
+			return fmt.Errorf("harness-config commit: no config.yaml was collected for %q (missing, a link or not a regular file)", hc.Name)
+		}
+	}
 
 	// 1. Make the introduced blobs exist under the content base. A legacy
 	// row is its own copy source (its migration), read from its legacy
@@ -318,6 +299,17 @@ func (s *Server) commitHarnessConfigFiles(ctx context.Context, hc *store.Harness
 	hc.Files = next
 	hc.ContentHash = contentHash
 	hc.Config = idx.Config
+	if idx.Harness == "" && opts.collected != nil && (!present || configYAML != nil) {
+		// A bootstrap or import commit stores the harness its collected
+		// config.yaml gives. Every caller validated that config.yaml before
+		// collection (the schema requires a non-empty harness), so an empty
+		// one means the collected file differs from what was validated: fail
+		// rather than keep the harness the row was created with. A
+		// config.yaml too large to parse (present, no content) keeps the
+		// stored harness with the warning below, as before.
+		*hc = prevState
+		return fmt.Errorf("harness-config commit: the collected config.yaml of %q sets no harness and none can be inferred from the name", hc.Name)
+	}
 	if idx.Harness != "" {
 		hc.Harness = idx.Harness
 	} else {
@@ -352,7 +344,7 @@ func (s *Server) commitHarnessConfigFiles(ctx context.Context, hc *store.Harness
 }
 
 // readHarnessConfigYAML returns the bytes of the config.yaml the manifest
-// next lists, from opts.content, opts.dir or its blob under base, in that
+// next lists, from opts.content, opts.collected or its blob under base, in that
 // order. present is false when next has no config.yaml. A file too large to
 // parse is returned as present with no content.
 func (s *Server) readHarnessConfigYAML(ctx context.Context, stor storage.Storage, base string, next []store.TemplateFile, opts harnessConfigCommitOpts) ([]byte, bool, error) {
@@ -362,15 +354,17 @@ func (s *Server) readHarnessConfigYAML(ctx context.Context, stor storage.Storage
 	if data, ok := opts.content[harnessConfigYAMLPath]; ok {
 		return data, true, nil
 	}
-	if opts.dir != "" {
-		data, present, err := readHarnessConfigYAMLFromDir(opts.dir)
+	if opts.collected != nil {
+		data, present, err := opts.collected.harnessConfigYAML()
 		if err != nil {
 			return nil, false, err
 		}
 		if present {
 			return data, true, nil
 		}
-		// The directory lacks a file the manifest lists: read storage.
+		// Not reached for a commit through commitHarnessConfigFiles, which
+		// has already required the collected config.yaml; a caller without
+		// one reads storage.
 	}
 	data, err := readHarnessConfigBlob(ctx, stor, base, next, harnessConfigYAMLPath, maxHarnessConfigFileSize)
 	switch {

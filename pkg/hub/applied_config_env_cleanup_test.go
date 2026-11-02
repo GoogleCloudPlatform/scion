@@ -622,6 +622,7 @@ func TestStartStillResolvesEnvAfterAppliedConfigStrip(t *testing.T) {
 	if err := memStore.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)
 	}
+	grantLaunchDelivery(t, memStore, dispatcher, agent)
 
 	if err := dispatcher.DispatchAgentStart(ctx, agent, "task", false); err != nil {
 		t.Fatalf("DispatchAgentStart failed: %v", err)

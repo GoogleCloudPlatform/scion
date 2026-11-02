@@ -1340,6 +1340,12 @@ func copySandboxAuthFiles(agentHome string, files []api.FileMapping) {
 		if f.SourcePath == "" {
 			continue
 		}
+		// No auth file may come from a Runtime Broker control path or the
+		// Scion global directory; this copy is best effort, so a refused
+		// file is skipped (checkHostFileSource logs it).
+		if _, err := checkHostFileSource(f.SourcePath); err != nil {
+			continue
+		}
 		containerPath := expandTildeTarget(f.ContainerPath, sandboxAgentHome)
 		var relPath string
 		if strings.HasPrefix(containerPath, sandboxAgentHome+"/") {
@@ -1424,7 +1430,7 @@ func mountsFor(paths scionPaths, sharedDirs []api.SharedDir) []string {
 		fmt.Sprintf("type=bind,source=%s,destination=%s", paths.workspace, sandboxWorkspace),
 	}
 	for _, sd := range sharedDirs {
-		sdPath := filepath.Join(filepath.Dir(paths.agentHome), "..", "..", "shared", sd.Name)
+		sdPath := sandboxSharedDirPath(paths, sd.Name)
 		mountDst := fmt.Sprintf("/scion-volumes/%s", sd.Name)
 		if sd.InWorkspace {
 			mountDst = fmt.Sprintf("%s/.scion-volumes/%s", sandboxWorkspace, sd.Name)
@@ -1436,6 +1442,26 @@ func mountsFor(paths scionPaths, sharedDirs []api.SharedDir) []string {
 		mounts = append(mounts, spec)
 	}
 	return mounts
+}
+
+// sandboxSharedDirPath is the host directory backing shared dir name.
+func sandboxSharedDirPath(paths scionPaths, name string) string {
+	return filepath.Join(filepath.Dir(paths.agentHome), "..", "..", "shared", name)
+}
+
+// checkSandboxMountSources applies checkBindSource to every source mountsFor
+// binds.
+func checkSandboxMountSources(paths scionPaths, sharedDirs []api.SharedDir) error {
+	srcs := []string{paths.agentHome, paths.workspace}
+	for _, sd := range sharedDirs {
+		srcs = append(srcs, sandboxSharedDirPath(paths, sd.Name))
+	}
+	for _, src := range srcs {
+		if _, err := checkBindSource(src); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // envFor builds the environment variable map for a sandbox agent.
@@ -2333,6 +2359,11 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 		"--rootfs", "/",
 		"--write",
 		"--allow-egress",
+	}
+
+	// No sandbox bind may reach a Runtime Broker control path on this host.
+	if err := checkSandboxMountSources(paths, cfg.SharedDirs); err != nil {
+		return "", err
 	}
 
 	// Per-agent mounts -- each sandbox gets only its own paths (not /scion root).

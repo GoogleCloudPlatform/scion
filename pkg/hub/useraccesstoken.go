@@ -87,16 +87,14 @@ var (
 
 // UATScopeViolationError names the selector and machine-readable reason when
 // CanMintSelector (pkg/hub/authz_boundary.go) denies a requested selector at
-// mint time. Unwrap returns ErrUATScopeViolation so existing
-// errors.Is(err, ErrUATScopeViolation) callers (handlers_auth.go's error
-// mapping, TestRS4_DenialCodeStability) keep working unchanged.
-// handlers_auth.go's scope_violation response already writes err.Error() as
-// its message, so the 403 body now includes the selector and reason text
-// (e.g. `requested scopes exceed issuer authority: selector "agent:delete"
-// denied (flat_role_insufficient)`), where it previously carried only the
-// sentinel text. This is reached only once project admission has already
-// succeeded, never on the uniform ErrUATProjectForbidden path (see
-// CreateToken below), so it does not weaken oracle resistance.
+// mint time. Unwrap returns ErrUATScopeViolation, so
+// errors.Is(err, ErrUATScopeViolation) matches it (handlers_auth.go's error
+// mapping, TestRS4_DenialCodeStability). handlers_auth.go's scope_violation
+// response writes err.Error() as its message, so the 403 body carries the
+// selector and reason text (e.g. `requested scopes exceed issuer authority:
+// selector "agent:delete" denied (flat_role_insufficient)`). This error is
+// returned only after project admission has succeeded, never on the uniform
+// ErrUATProjectForbidden path (see CreateToken below).
 type UATScopeViolationError struct {
 	Selector string
 	Reason   MintDenialReason
@@ -785,4 +783,19 @@ func (s *Server) bearerStillValid(ctx context.Context) bool {
 		return false
 	}
 	return true
+}
+
+// revokeUserAccessTokensForUserTx revokes every unrevoked access token of
+// userID inside the caller's transaction and returns how many it revoked.
+// The forced user delete (forceDeleteUserTx, ptone/scion#2143) calls it in
+// the transaction that marks the user deleting, so the user's tokens end
+// with the rest of the user's authority; ValidateToken already refuses a
+// token whose user is not active. Like every UAT mutation it lives in this
+// file.
+func revokeUserAccessTokensForUserTx(ctx context.Context, tx store.Store, userID string) (int, error) {
+	n, err := tx.RevokeUserAccessTokensForUser(ctx, userID)
+	if err != nil {
+		return 0, fmt.Errorf("revoke access tokens of user: %w", err)
+	}
+	return n, nil
 }

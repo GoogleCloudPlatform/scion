@@ -279,6 +279,30 @@ func testControlChannelBrokerClient_DeleteAgentOtherErrorsPropagate(t *testing.T
 	}
 }
 
+// CleanupProject over the control channel keeps the broker's error status,
+// as over HTTP (a 409 is a kept project directory), and a 404 is success.
+func TestControlChannelBrokerClient_CleanupProjectStatus(t *testing.T) {
+	runOverHubTunnels(t, testControlChannelBrokerClient_CleanupProjectStatus)
+}
+
+func testControlChannelBrokerClient_CleanupProjectStatus(t *testing.T, tr hubTunnelTransport) {
+	for _, status := range []int{http.StatusNoContent, http.StatusNotFound} {
+		tunnel := &mockControlChannelTunnel{connected: true, status: status}
+		client := &ControlChannelBrokerClient{manager: tr.wrap(t, tunnel)}
+		if err := client.CleanupProject(context.Background(), "broker-1", "unused", "proj-a", "p1"); err != nil {
+			t.Errorf("status %d: expected success, got %v", status, err)
+		}
+	}
+	for _, status := range []int{http.StatusConflict, http.StatusInternalServerError} {
+		tunnel := &mockControlChannelTunnel{connected: true, status: status}
+		client := &ControlChannelBrokerClient{manager: tr.wrap(t, tunnel)}
+		err := client.CleanupProject(context.Background(), "broker-1", "unused", "proj-a", "p1")
+		if !isBrokerStatus(err, status) {
+			t.Errorf("status %d: expected brokerStatusError carrying the status, got %v", status, err)
+		}
+	}
+}
+
 // A linked project's broker-local path is forwarded so the broker can find a
 // file-only agent there.
 func TestControlChannelBrokerClient_DeleteAgentForwardsProjectPath(t *testing.T) {

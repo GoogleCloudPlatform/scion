@@ -33,7 +33,7 @@ import (
 // config or dispatch endpoint is available.
 func TestStartAgentProjectSettingsFallbackHubEndpoint(t *testing.T) {
 	t.Run("linked project with settings at projectPath", func(t *testing.T) {
-		cfg := DefaultServerConfig()
+		cfg := testServerConfig()
 		cfg.BrokerID = "test-broker-id"
 		cfg.BrokerName = "test-host"
 		cfg.HubEndpoint = "http://localhost:9810"
@@ -79,7 +79,7 @@ func TestStartAgentProjectSettingsFallbackHubEndpoint(t *testing.T) {
 	})
 
 	t.Run("hub-managed project with settings in .scion subdirectory", func(t *testing.T) {
-		cfg := DefaultServerConfig()
+		cfg := testServerConfig()
 		cfg.BrokerID = "test-broker-id"
 		cfg.BrokerName = "test-host"
 		cfg.HubEndpoint = "http://localhost:9810"
@@ -130,7 +130,7 @@ func TestStartAgentProjectSettingsFallbackHubEndpoint(t *testing.T) {
 // TestStartAgentBrokerConfigUsedWhenNoProjectSettings verifies that the broker's
 // config HubEndpoint is used as fallback when project settings don't specify one.
 func TestStartAgentBrokerConfigUsedWhenNoProjectSettings(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.HubEndpoint = "http://localhost:9810"
@@ -173,7 +173,7 @@ func TestStartAgentBrokerConfigUsedWhenNoProjectSettings(t *testing.T) {
 // has no HubEndpoint configured, the hub endpoint from resolvedEnv (sent by
 // the hub dispatcher) is used as a fallback.
 func TestStartAgentResolvedEnvHubEndpointFallback(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.HubEndpoint = "" // Standalone broker without hub endpoint config
@@ -209,7 +209,7 @@ func TestStartAgentResolvedEnvHubEndpointFallback(t *testing.T) {
 // has no HubEndpoint configured, SCION_HUB_URL from resolvedEnv is accepted as
 // the fallback endpoint in the start path.
 func TestStartAgentResolvedEnvHubURLFallback(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.HubEndpoint = ""
@@ -247,7 +247,7 @@ func TestStartAgentResolvedEnvHubURLFallback(t *testing.T) {
 // the hub endpoint from resolvedEnv is localhost, the ContainerHubEndpoint
 // override is applied.
 func TestStartAgentResolvedEnvHubEndpointWithContainerOverride(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.HubEndpoint = ""                                              // No broker-level hub endpoint
@@ -337,7 +337,7 @@ runtimes:
 			t.Fatal(err)
 		}
 
-		cfg := DefaultServerConfig()
+		cfg := testServerConfig()
 		cfg.BrokerID = "test-broker-id"
 		cfg.BrokerName = "test-host"
 		cfg.HubEndpoint = "http://localhost:8080" // combo broker's own (loopback) view
@@ -375,7 +375,7 @@ runtimes:
 
 	t.Run("restart", func(t *testing.T) {
 		srv, mgr := newSrv(t)
-		body := fmt.Sprintf(`{"hubEndpoint": %q, "resolvedEnv": {"SCION_HUB_ENDPOINT": %q}}`, dispatched, dispatched)
+		body := fmt.Sprintf(`{"projectPath": %q, "hubEndpoint": %q, "resolvedEnv": {"SCION_HUB_ENDPOINT": %q}}`, cwdDotScion(t), dispatched, dispatched)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/restart", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
@@ -407,7 +407,7 @@ runtimes:
 	t.Run("restart: request field wins over a differing resolvedEnv value", func(t *testing.T) {
 		srv, mgr := newSrv(t)
 		const stale = "https://stale-in-resolved-env.example.com"
-		body := fmt.Sprintf(`{"hubEndpoint": %q, "resolvedEnv": {"SCION_HUB_ENDPOINT": %q}}`, dispatched, stale)
+		body := fmt.Sprintf(`{"projectPath": %q, "hubEndpoint": %q, "resolvedEnv": {"SCION_HUB_ENDPOINT": %q}}`, cwdDotScion(t), dispatched, stale)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/restart", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
@@ -431,7 +431,7 @@ runtimes:
 // SCION_HUB_ENDPOINT for the broker's ContainerHubEndpoint configuration.
 func TestHTTPStartAndRestart_DockerComboBridgeOverrideMatchesCreate(t *testing.T) {
 	newSrv := func() (*Server, *envCapturingManager) {
-		cfg := DefaultServerConfig()
+		cfg := testServerConfig()
 		cfg.BrokerID = "test-broker-id"
 		cfg.BrokerName = "test-host"
 		cfg.HubEndpoint = "http://localhost:8080" // combo broker's own (loopback) view
@@ -618,7 +618,7 @@ runtimes:
 
 	t.Run("http-restart", func(t *testing.T) {
 		srv, mgr := newSrv(t)
-		body := fmt.Sprintf(`{"hubEndpoint": %q, "resolvedEnv": {"SCION_HUB_ENDPOINT": %q}}`, dispatchLocal, dispatchLocal)
+		body := fmt.Sprintf(`{"projectPath": %q, "hubEndpoint": %q, "resolvedEnv": {"SCION_HUB_ENDPOINT": %q}}`, cwdDotScion(t), dispatchLocal, dispatchLocal)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/restart", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-Scion-Hub-Connection", connectionName)
@@ -644,7 +644,7 @@ func TestRestartAgent_ContainerScanSuppliesSettingsFallback(t *testing.T) {
 		t.Fatalf("failed to write settings: %v", err)
 	}
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.ForceRuntime = "mock"
@@ -674,7 +674,7 @@ func TestRestartAgent_ContainerScanSuppliesSettingsFallback(t *testing.T) {
 // sends a localhost endpoint on port 8080 but the broker's ContainerHubEndpoint
 // was pre-computed with port 9810, the actual endpoint port (8080) is preserved.
 func TestCreateAgentPortPreservedAcrossBridge(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.Debug = true

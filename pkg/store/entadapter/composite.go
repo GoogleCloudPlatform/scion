@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"entgo.io/ent/dialect"
-	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -127,6 +126,7 @@ type CompositeStore struct {
 	*UserTerminalWorkspaceStore
 	*HubInstanceStore
 	*TestIdentityDelegationStore
+	*UserDeletionStore
 
 	client *ent.Client
 	inTx   bool // true when this CompositeStore wraps a transaction
@@ -317,6 +317,7 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		UserTerminalWorkspaceStore:  NewUserTerminalWorkspaceStore(client),
 		HubInstanceStore:            NewHubInstanceStore(client),
 		TestIdentityDelegationStore: NewTestIdentityDelegationStore(client),
+		UserDeletionStore:           NewUserDeletionStore(client),
 		client:                      client,
 	}
 }
@@ -793,7 +794,7 @@ func (c *CompositeStore) Close() error {
 
 // Ping verifies connectivity to the underlying database.
 func (c *CompositeStore) Ping(ctx context.Context) error {
-	drv, ok := c.client.Driver().(*entsql.Driver)
+	drv, ok := entc.SQLDriver(c.client.Driver())
 	if !ok {
 		return fmt.Errorf("ent client driver does not expose a *sql.DB for ping")
 	}
@@ -1729,6 +1730,13 @@ func (c *CompositeStore) MigrateGitHubTokenInjectionMode(ctx context.Context) er
 // need raw SQL access; production code should use the typed store methods.
 func (c *CompositeStore) DB() *sql.DB {
 	return clientDB(c.client)
+}
+
+// ChatRetention returns the chat retention store over this store's
+// database (raw SQL on the same *sql.DB as the ent client and the web chat
+// tables, see ChatRetentionStore).
+func (c *CompositeStore) ChatRetention() store.ChatRetentionStore {
+	return NewChatRetentionStore(c.client)
 }
 
 // Dialect returns the ent dialect of the underlying driver (for example

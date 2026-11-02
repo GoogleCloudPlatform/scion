@@ -67,12 +67,27 @@ func TestInjectLifecycleGitHubToken(t *testing.T) {
 	minter := &recordingGitHubAppMinter{}
 	dispatcher := NewHTTPAgentDispatcherWithClient(st, &mockRuntimeBrokerClient{}, false, slog.Default())
 	dispatcher.SetGitHubAppMinter(minter)
-	agent := &store.Agent{
+
+	// A label naming another project's installation selects nothing: the
+	// agent's own project has none, so no token is minted.
+	labelled := &store.Agent{
 		ProjectID: targetProject.ID,
 		Labels: map[string]string{
 			"scion.dev/github-token-source-project": sourceProject.ID,
 		},
 	}
+	labelledEnv := make(map[string]string)
+	var labelledClassifications map[string]api.EnvKind
+	own := dispatcher.injectLifecycleGitHubToken(ctx, labelled, labelledEnv, &labelledClassifications, "DispatchAgentStart")
+	assert.False(t, minter.called, "no token may be minted for a project named by a label")
+	assert.Empty(t, own, "no own App token is returned")
+	for _, key := range []string{"GITHUB_TOKEN", "SCION_GITHUB_APP_ENABLED", "SCION_GITHUB_TOKEN_EXPIRY", "SCION_GITHUB_TOKEN_PATH"} {
+		_, has := labelledEnv[key]
+		assert.False(t, has, "%s must not be set", key)
+	}
+
+	// The agent's own project with an installation mints.
+	agent := &store.Agent{ProjectID: sourceProject.ID}
 	resolvedEnv := make(map[string]string)
 	var classifications map[string]api.EnvKind
 

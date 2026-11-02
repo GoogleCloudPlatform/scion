@@ -15,6 +15,8 @@
 package util
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,7 +91,7 @@ func MakeWritableRecursive(path string) error {
 		totalFiles++
 		if info.Mode().Perm()&0200 == 0 {
 			chmodCount++
-			return os.Chmod(path, info.Mode().Perm()|0200)
+			return os.Chmod(path, info.Mode().Perm()|0200) //winsec:not-protection makes the entry writable or removable before deletion
 		}
 		return nil
 	})
@@ -110,7 +112,9 @@ func MakeWritableRecursive(path string) error {
 //
 // Symlink removal uses removeSymlinkSafe which avoids triggering macOS
 // autofs timeouts on dangling symlinks pointing to container-internal
-// paths (e.g. /home/scion/...).
+// paths (e.g. /home/scion/...). Where unlinkat(2) is unavailable (non-unix
+// platforms) symlinks are left in place and RemoveAllSafe returns an error
+// wrapping errors.ErrUnsupported.
 func RemoveAllSafe(root string) error {
 	Debugf("RemoveAllSafe: starting removal of %s", root)
 	start := time.Now()
@@ -137,19 +141,21 @@ func RemoveAllSafe(root string) error {
 			if os.IsPermission(err) {
 				// Make the parent directory writable and retry.
 				parent := filepath.Dir(path)
-				if chErr := os.Chmod(parent, 0700); chErr == nil {
+				if chErr := os.Chmod(parent, 0700); chErr == nil { //winsec:not-protection makes the entry writable or removable before deletion
 					// Re-stat to determine the entry type.
 					info, stErr := os.Lstat(path)
 					if stErr != nil {
 						return nil // skip this entry
 					}
 					if info.Mode()&os.ModeSymlink != 0 {
-						removeSymlinkSafe(path)
+						if rmErr := removeSymlinkSafe(path); rmErr != nil && firstErr == nil {
+							firstErr = rmErr
+						}
 						symlinkCount++
 						return nil
 					}
 					if info.IsDir() {
-						_ = os.Chmod(path, 0700)
+						_ = os.Chmod(path, 0700) //winsec:not-protection makes the entry writable or removable before deletion
 						dirs = append(dirs, path)
 						return nil
 					}
@@ -163,7 +169,9 @@ func RemoveAllSafe(root string) error {
 		if d.Type()&os.ModeSymlink != 0 {
 			// Remove symlinks immediately during the walk to prevent
 			// any later operation from touching their targets.
-			removeSymlinkSafe(path)
+			if rmErr := removeSymlinkSafe(path); rmErr != nil && firstErr == nil {
+				firstErr = rmErr
+			}
 			symlinkCount++
 			return nil
 		}
@@ -172,7 +180,7 @@ func RemoveAllSafe(root string) error {
 			// Ensure the directory is writable so we can list/delete contents.
 			info, infoErr := d.Info()
 			if infoErr == nil && info.Mode().Perm()&0700 != 0700 {
-				_ = os.Chmod(path, 0700)
+				_ = os.Chmod(path, 0700) //winsec:not-protection makes the entry writable or removable before deletion
 			}
 			dirs = append(dirs, path)
 			return nil
@@ -190,7 +198,7 @@ func RemoveAllSafe(root string) error {
 	for _, f := range files {
 		if err := os.Remove(f); err != nil && !os.IsNotExist(err) {
 			if os.IsPermission(err) {
-				_ = os.Chmod(filepath.Dir(f), 0700)
+				_ = os.Chmod(filepath.Dir(f), 0700) //winsec:not-protection makes the entry writable or removable before deletion
 				err = os.Remove(f)
 			}
 			if err != nil && !os.IsNotExist(err) && firstErr == nil {
@@ -205,7 +213,7 @@ func RemoveAllSafe(root string) error {
 	for i := len(dirs) - 1; i >= 0; i-- {
 		if err := os.Remove(dirs[i]); err != nil && !os.IsNotExist(err) {
 			if os.IsPermission(err) {
-				_ = os.Chmod(dirs[i], 0700)
+				_ = os.Chmod(dirs[i], 0700) //winsec:not-protection makes the entry writable or removable before deletion
 				err = os.Remove(dirs[i])
 			}
 			if err != nil && !os.IsNotExist(err) && firstErr == nil {
@@ -228,7 +236,13 @@ func RemoveAllSafe(root string) error {
 // On unix this function uses unlinkat(2) with a parent directory fd to avoid
 // full path resolution. It also tries an atomic rename-over as a second
 // strategy. Debug timing is included to diagnose which approach works.
-func removeSymlinkSafe(path string) {
+//
+// Where unlinkat is not available (non-unix platforms) it fails closed: the
+// entry is left in place and an error wrapping errors.ErrUnsupported is
+// returned, with no path-based fallback. On unix it always returns nil, as
+// before; a failed removal there surfaces later when the parent directory
+// cannot be removed.
+func removeSymlinkSafe(path string) error {
 	start := time.Now()
 	dir := filepath.Dir(path)
 	name := filepath.Base(path)
@@ -236,15 +250,19 @@ func removeSymlinkSafe(path string) {
 	// Strategy 1: unlinkat with parent directory fd.
 	// This avoids full path resolution — the kernel operates directly on
 	// the directory entry via the fd, without resolving the symlink target.
-	// Only unix has it; elsewhere attempted is false and the next strategy
-	// runs.
-	if attempted, err := unlinkAt(dir, name); attempted {
+	// Only unix has it; elsewhere unlinkAt returns errUnlinkAtUnsupported
+	// and the removal fails closed.
+	attempted, err := unlinkAt(dir, name)
+	if errors.Is(err, errUnlinkAtUnsupported) {
+		return fmt.Errorf("remove symlink %s: %w", path, err)
+	}
+	if attempted {
 		if err == nil {
 			elapsed := time.Since(start)
 			if elapsed > 100*time.Millisecond {
 				Debugf("removeSymlinkSafe: unlinkat took %v for %s", elapsed, name)
 			}
-			return
+			return nil
 		}
 		Debugf("removeSymlinkSafe: unlinkat failed for %s: %v", name, err)
 	}
@@ -262,7 +280,7 @@ func removeSymlinkSafe(path string) {
 			if elapsed > 100*time.Millisecond {
 				Debugf("removeSymlinkSafe: rename-over took %v for %s", elapsed, name)
 			}
-			return
+			return nil
 		}
 		_ = os.Remove(tmp)
 	}
@@ -270,11 +288,17 @@ func removeSymlinkSafe(path string) {
 	// Strategy 3: direct os.Remove (may trigger autofs on macOS).
 	Debugf("removeSymlinkSafe: falling back to os.Remove for %s", name)
 	if rmErr := os.Remove(path); rmErr != nil && os.IsPermission(rmErr) {
-		_ = os.Chmod(dir, 0700)
+		_ = os.Chmod(dir, 0700) //winsec:not-protection makes the entry writable or removable before deletion
 		_ = os.Remove(path)
 	}
 	elapsed := time.Since(start)
 	if elapsed > 100*time.Millisecond {
 		Debugf("removeSymlinkSafe: os.Remove took %v for %s", elapsed, name)
 	}
+	return nil
 }
+
+// errUnlinkAtUnsupported is returned by unlinkAt on platforms without
+// unlinkat(2). removeSymlinkSafe refuses to fall back to path-based removal
+// when it sees it.
+var errUnlinkAtUnsupported = fmt.Errorf("unlinkat is not available on this platform: %w", errors.ErrUnsupported)

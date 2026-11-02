@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -348,7 +349,9 @@ func requireWorktreeGit(t *testing.T) {
 }
 
 // initBareRepoWithCommit creates a bare git repo (default branch main) seeded
-// with one commit, and returns its path for use as a GitClone URL.
+// with one commit, and returns its path for use as a GitClone URL. The path
+// is registered as a local clone fixture (provision.AllowLocalCloneFixture),
+// so the broker's host-side provisioning clones it.
 func initBareRepoWithCommit(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -371,6 +374,7 @@ func initBareRepoWithCommit(t *testing.T) string {
 	run("-C", wc, "add", "-A")
 	run("-C", wc, "commit", "-m", "init")
 	run("-C", wc, "push", "origin", "main")
+	provision.AllowLocalCloneFixture(t, bare)
 	return bare
 }
 

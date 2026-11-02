@@ -16,8 +16,10 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -60,6 +62,12 @@ type SettingsOverlay struct {
 	refs             ProfileReferences
 	retained         retainState
 	builtinsOverride *builtinCatalog // tests only; nil uses the embedded defaults
+
+	// placementErrors and placementWarnings are the Kubernetes placement
+	// findings of the stored runtimes and profiles
+	// (OverlaySections.PlacementErrors and Warnings), guarded by mu.
+	placementErrors   []string
+	placementWarnings []string
 }
 
 // maxFallbackLogKeys caps the set of logged single-stored-profile fallback
@@ -102,7 +110,15 @@ func (o *SettingsOverlay) Update(
 ) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	o.updateLocked(runtimes, profiles, harnessConfigs)
+}
 
+// updateLocked is Update with o.mu held.
+func (o *SettingsOverlay) updateLocked(
+	runtimes map[string]V1RuntimeConfig,
+	profiles map[string]V1ProfileConfig,
+	harnessConfigs map[string]HarnessConfigEntry,
+) {
 	if runtimes != nil {
 		o.runtimes = nonEmptyOrNil(cloneRuntimes(runtimes))
 	}
@@ -113,6 +129,47 @@ func (o *SettingsOverlay) Update(
 		o.harnessConfigs = nonEmptyOrNil(cloneHarnessConfigs(harnessConfigs))
 	}
 	o.active = true
+}
+
+// UpdateWithPlacementFindings is Update plus the Kubernetes placement
+// findings of the given runtimes and profiles (errs: the settings paths
+// whose placement is malformed or invalid; warnings: ignored unknown keys),
+// under one lock, so a reader never sees newly applied runtimes and
+// profiles with the findings of the previous ones. It reports whether the
+// findings changed.
+func (o *SettingsOverlay) UpdateWithPlacementFindings(
+	runtimes map[string]V1RuntimeConfig,
+	profiles map[string]V1ProfileConfig,
+	harnessConfigs map[string]HarnessConfigEntry,
+	errs, warnings []string,
+) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.updateLocked(runtimes, profiles, harnessConfigs)
+	return o.setPlacementFindingsLocked(errs, warnings)
+}
+
+// setPlacementFindingsLocked records the Kubernetes placement findings of
+// the runtimes and profiles being applied (the settings paths whose
+// placement is malformed or invalid, and ignored unknown keys) with o.mu
+// held, and reports whether they differ from the findings recorded before.
+func (o *SettingsOverlay) setPlacementFindingsLocked(errs, warnings []string) bool {
+	changed := !slices.Equal(o.placementErrors, errs) || !slices.Equal(o.placementWarnings, warnings)
+	o.placementErrors = slices.Clone(errs)
+	o.placementWarnings = slices.Clone(warnings)
+	return changed
+}
+
+// PlacementErrors returns a copy of the settings paths whose Kubernetes
+// placement is malformed or invalid in the runtimes and profiles the
+// overlay serves; nil for a nil overlay or when there are none.
+func (o *SettingsOverlay) PlacementErrors() []string {
+	if o == nil {
+		return nil
+	}
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return slices.Clone(o.placementErrors)
 }
 
 // UpdateImageRegistryInputs sets the hub's image_registry layers, which
@@ -160,6 +217,10 @@ func (o *SettingsOverlay) Apply(vs *VersionedSettings) {
 		return
 	}
 
+	// The placement findings of the runtimes and profiles applied below,
+	// copied under the same lock so a reader of vs never sees one without
+	// the other.
+	vs.placementErrors = slices.Clone(o.placementErrors)
 	if len(o.runtimes) > 0 {
 		vs.Runtimes = cloneRuntimes(o.runtimes)
 	}
@@ -235,6 +296,43 @@ type StoredProfileNotFoundError struct {
 func (e *StoredProfileNotFoundError) Error() string {
 	return fmt.Sprintf("profile %q not found in the hub's stored profiles (available profiles: %s)",
 		e.Requested, joinAvailableProfiles(e.Available, e.Retained))
+}
+
+// StoredProfileRuntimeNotFoundError reports that a profile resolved from
+// the hub's stored profiles (named, saved, or the default profile) names a
+// runtime that the runtimes, after the overlay, do not define
+// (ptone/scion#4889). Stored settings are authoritative on a broker that
+// applies the overlay, so a dispatch with this profile must fail instead of
+// falling back to the broker's default runtime. Its text keeps the
+// "runtime %q not found for profile %q" form and adds the available
+// runtimes.
+type StoredProfileRuntimeNotFoundError struct {
+	// Profile is the resolved profile name.
+	Profile string
+	// Runtime is the runtimes key the profile names.
+	Runtime string
+	// Available is the sorted list of runtime names that are defined.
+	Available []string
+}
+
+func (e *StoredProfileRuntimeNotFoundError) Error() string {
+	available := "none"
+	if len(e.Available) > 0 {
+		available = strings.Join(e.Available, ", ")
+	}
+	return fmt.Sprintf("runtime %q not found for profile %q in the hub's stored settings (available runtimes: %s)",
+		e.Runtime, e.Profile, available)
+}
+
+// IsStoredProfileError reports whether err is one of the typed errors
+// ResolveRuntime returns when the hub's stored profiles do not resolve:
+// *ActiveProfileError, *StoredProfileNotFoundError or
+// *StoredProfileRuntimeNotFoundError.
+func IsStoredProfileError(err error) bool {
+	var ape *ActiveProfileError
+	var spe *StoredProfileNotFoundError
+	var sre *StoredProfileRuntimeNotFoundError
+	return errors.As(err, &ape) || errors.As(err, &spe) || errors.As(err, &sre)
 }
 
 // joinAvailableProfiles lists the stored profile names, then the retained

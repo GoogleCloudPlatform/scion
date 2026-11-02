@@ -19,20 +19,16 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"time"
 
 	cloudbuild "cloud.google.com/go/cloudbuild/apiv1/v2"
@@ -40,13 +36,13 @@ import (
 	gcstorage "cloud.google.com/go/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/unitdrift"
+	"github.com/GoogleCloudPlatform/scion/pkg/preflight"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
-	"github.com/GoogleCloudPlatform/scion/pkg/version/update"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
 
@@ -278,12 +274,32 @@ func (e *PullImagesExecutor) Run(ctx context.Context, logger io.Writer, params m
 	return nil
 }
 
-// RebuildServerExecutor rebuilds the server binary from git and restarts via systemd.
+// RebuildServerExecutor rebuilds the hub binary from the maintenance repo's
+// Git checkout and installs it through the host's Installer, like a
+// release:
+//
+//  1. Installer.Preflight, before anything is fetched or built;
+//  2. git fetch, checkout/reset to origin/<branch> (or the current branch);
+//  3. make web, then go build with the commit and build time stamped in
+//     (GitBuildLDFlags) into a temporary directory, and VerifyGitBuild;
+//  4. Installer.Stage under the release name git-<sha12> (on the symlink
+//     layout releases/git-<sha12>/, swapped and retained like a release;
+//     with sudo-install <RepoPath>/scion.rebuild, installed with the
+//     starter hub's sudoers rules), Installer.Activate;
+//  5. on a starter hub (sudo-install), the systemd unit drift check;
+//  6. the before-restart hook, then Installer.Restart. If either fails an
+//     installer that implements Deactivator is rolled back.
+//
+// Boot reconciliation verifies the run by the restarted hub's release name
+// (RunningReleaseName) and then records the Git selection.
 type RebuildServerExecutor struct {
 	repoPath    string // path to scion source checkout
 	repoBranch  string // git branch to checkout before building (empty = stay on current)
-	binaryDest  string // install path (e.g., /usr/local/bin/scion)
-	serviceName string // systemd service name (e.g., "scion-hub")
+	serviceName string // systemd service name, for the unit drift check
+	installer   Installer
+	current     string        // RunningReleaseName of the running build
+	releases    ReleaseSource // dates a preview/stable current; nil skips the lookup
+	snapshots   DBSnapshotter // the pre-update database snapshot (design D4)
 
 	// unitLocator and unitRevision back the systemd unit drift check;
 	// tests replace them (RebuildServerOptions) so they never call the
@@ -295,15 +311,38 @@ type RebuildServerExecutor struct {
 	// store, when set, keeps the last unit check result for the
 	// Admin -> Maintenance banner (hub setting system.unit_drift).
 	store store.Store
+
+	// settings lists the required settings that are unset; nil skips the
+	// settings check section.
+	settings func() []preflight.Finding
+
+	preflightTimeout time.Duration
+	installTimeout   time.Duration
+	hookTimeout      time.Duration
+	restartTimeout   time.Duration
 }
 
-// RebuildServerOptions configures a RebuildServerExecutor. Zero values are
-// kept as-is; Run applies its own defaults.
+// RebuildServerOptions configures a RebuildServerExecutor.
 type RebuildServerOptions struct {
 	RepoPath    string // path to scion source checkout
 	RepoBranch  string // git branch to checkout before building (empty = stay on current)
-	BinaryDest  string // install path (e.g., /usr/local/bin/scion)
-	ServiceName string // systemd service name (e.g., "scion-hub")
+	ServiceName string // systemd service name for the unit drift check; default DefaultServiceName
+	// Installer installs and restarts (the one detected at startup). nil
+	// means unsupported: the run fails at preflight.
+	Installer Installer
+	// CurrentRelease is the running build's RunningReleaseName (the
+	// pending update's "from"); default from pkg/version.
+	CurrentRelease string
+	// Releases looks up the publish date of a preview or stable
+	// CurrentRelease, for the boot-failure guard's previous_safe (as
+	// update-binary does). nil skips the lookup: such a "from" is then not
+	// safe to roll back to after migrations (fail closed).
+	Releases ReleaseSource
+	// Snapshotter takes the pre-update database snapshot, as for
+	// update-binary (design D4: before every update). nil means snapshots
+	// are unsupported: the rebuild goes ahead without one, as an upgrade
+	// does.
+	Snapshotter DBSnapshotter
 	// Store, when set, keeps the last systemd unit check result for the
 	// Admin -> Maintenance page. Optional.
 	Store store.Store
@@ -314,19 +353,43 @@ type RebuildServerOptions struct {
 	UnitRevision unitdrift.Revision
 	// UnitTimeout bounds the unit check; zero means unitdrift.DefaultTimeout.
 	UnitTimeout time.Duration
+	// SettingsCheck, when set, lists the required settings that are unset
+	// (preflight.LoadRequiredSettingsFindings); Run writes them to the log
+	// as warnings and goes on. nil skips the section.
+	SettingsCheck func() []preflight.Finding
 }
 
 // NewRebuildServerExecutor returns a RebuildServerExecutor configured from opts.
 func NewRebuildServerExecutor(opts RebuildServerOptions) *RebuildServerExecutor {
 	e := &RebuildServerExecutor{
-		repoPath:     opts.RepoPath,
-		repoBranch:   opts.RepoBranch,
-		binaryDest:   opts.BinaryDest,
-		serviceName:  opts.ServiceName,
-		unitLocator:  unitdrift.SystemctlLocator,
-		unitRevision: unitdrift.GitRevision,
-		unitTimeout:  opts.UnitTimeout,
-		store:        opts.Store,
+		repoPath:         opts.RepoPath,
+		repoBranch:       opts.RepoBranch,
+		serviceName:      opts.ServiceName,
+		installer:        opts.Installer,
+		current:          opts.CurrentRelease,
+		releases:         opts.Releases,
+		snapshots:        opts.Snapshotter,
+		unitLocator:      unitdrift.SystemctlLocator,
+		unitRevision:     unitdrift.GitRevision,
+		unitTimeout:      opts.UnitTimeout,
+		store:            opts.Store,
+		settings:         opts.SettingsCheck,
+		preflightTimeout: preflightTimeout,
+		installTimeout:   installTimeout,
+		hookTimeout:      hookTimeout,
+		restartTimeout:   restartTimeout,
+	}
+	if e.serviceName == "" {
+		e.serviceName = DefaultServiceName
+	}
+	if e.installer == nil {
+		e.installer = NewUnsupportedInstaller("no installer configured", "")
+	}
+	if e.current == "" {
+		e.current = RunningReleaseName(version.Version, version.GetCommit())
+	}
+	if e.snapshots == nil {
+		e.snapshots = NewUnsupportedDBSnapshotter("no database snapshotter is configured")
 	}
 	if opts.UnitLocator != nil {
 		e.unitLocator = opts.UnitLocator
@@ -337,7 +400,22 @@ func NewRebuildServerExecutor(opts RebuildServerOptions) *RebuildServerExecutor 
 	return e
 }
 
+// Run implements MaintenanceExecutor; runners that record runs use
+// RunWithBeforeRestart.
 func (e *RebuildServerExecutor) Run(ctx context.Context, logger io.Writer, params map[string]string) error {
+	return e.RunWithBeforeRestart(ctx, logger, params, nil)
+}
+
+// rebuildStep is one command of a rebuild.
+type rebuildStep struct {
+	name string
+	cmd  string
+	args []string
+	dir  string
+}
+
+// RunWithBeforeRestart implements RestartingExecutor.
+func (e *RebuildServerExecutor) RunWithBeforeRestart(ctx context.Context, logger io.Writer, params map[string]string, before BeforeRestartFunc) error {
 	log := logging.Subsystem("hub.maintenance.rebuild-server")
 
 	if runtime.GOOS != "linux" {
@@ -348,14 +426,6 @@ func (e *RebuildServerExecutor) Run(ctx context.Context, logger io.Writer, param
 	if repoPath == "" {
 		return fmt.Errorf("no repository path configured for rebuild-server")
 	}
-	binaryDest := e.binaryDest
-	if binaryDest == "" {
-		binaryDest = "/usr/local/bin/scion"
-	}
-	serviceName := e.serviceName
-	if serviceName == "" {
-		serviceName = "scion-hub"
-	}
 
 	// A "branch" param on the API request overrides the configured default.
 	branch := e.repoBranch
@@ -365,48 +435,242 @@ func (e *RebuildServerExecutor) Run(ctx context.Context, logger io.Writer, param
 
 	log.Debug("Starting rebuild-server",
 		"repo_path", repoPath, "branch", branch,
-		"binary_dest", binaryDest, "service_name", serviceName)
+		"installer", e.installer.Name(), "service_name", e.serviceName)
 
-	// Build to a staging path inside the repo directory (where the service user
-	// has write access), then use "sudo install" to place it into the final
-	// destination (e.g., /usr/local/bin/scion). This avoids two problems:
-	//   1. ETXTBSY — writing directly to a running binary fails on Linux.
-	//   2. Permission denied — the service user typically cannot write to
-	//      /usr/local/bin/.
-	// Both the install and restart steps use sudo, backed by narrowly-scoped
-	// sudoers rules installed by the deploy script (gce-start-hub.sh).
-	stagingBinary := filepath.Join(repoPath, "scion.rebuild")
+	// ── Preflight: before anything is fetched or built ──────────────────
+	_, _ = fmt.Fprintf(logger, "==> Preflight (installer: %s)\n", e.installer.Name())
+	preCtx, cancelPre := context.WithTimeout(ctx, e.preflightTimeout)
+	err := e.installer.Preflight(preCtx)
+	cancelPre()
+	if err != nil {
+		return fmt.Errorf("installer preflight failed (%s): %w", e.installer.Name(), err)
+	}
+	_, _ = fmt.Fprintf(logger, "Preflight passed.\n\n")
 
-	type step struct {
-		name string
-		cmd  string
-		args []string
-		dir  string
+	// Warnings only: an unset required setting never stops the rebuild.
+	// After the installer preflight, as for update-binary.
+	if e.settings != nil {
+		preflight.WriteSettingsCheck(logger, e.settings())
 	}
 
-	var steps []step
-	var currentBranch string
-	steps = append(steps, step{"Fetching latest code", "git", []string{"fetch", "origin"}, repoPath})
-	if branch != "" {
-		steps = append(steps, step{"Checking out branch " + branch, "git", []string{"checkout", branch}, repoPath})
-		steps = append(steps, step{"Resetting to origin/" + branch, "git", []string{"reset", "--hard", "origin/" + branch}, repoPath})
-	} else {
+	// ── Update the checkout ─────────────────────────────────────────────
+	plan := rebuildPlan{repoPath: repoPath, branch: branch}
+	if branch == "" {
 		// Determine the current branch to reset against its remote tracking ref.
-		branchCmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
-		branchCmd.Dir = repoPath
-		branchOut, err := branchCmd.CombinedOutput()
+		out, err := gitOutput(ctx, repoPath, "rev-parse", "--abbrev-ref", "HEAD")
 		if err != nil {
-			return fmt.Errorf("failed to determine current branch: %s", strings.TrimSpace(string(branchOut)))
+			return fmt.Errorf("failed to determine current branch: %w", err)
 		}
-		currentBranch = strings.TrimSpace(string(branchOut))
-		steps = append(steps, step{"Resetting to origin/" + currentBranch, "git", []string{"reset", "--hard", "origin/" + currentBranch}, repoPath})
+		if out == "HEAD" {
+			return errDetachedHead("rebuild-server")
+		}
+		plan.currentBranch = out
 	}
-	steps = append(steps,
-		step{"Building web assets", "make", []string{"web"}, repoPath},
-		step{"Building server binary", "go", []string{"build", "-o", stagingBinary, "./cmd/scion"}, repoPath},
-		step{"Installing server binary", "sudo", []string{"install", "-m", "755", stagingBinary, binaryDest}, ""},
-	)
+	if err := runRebuildSteps(ctx, logger, rebuildCheckout, plan); err != nil {
+		return err
+	}
 
+	commit, err := gitOutput(ctx, repoPath, "rev-parse", "HEAD")
+	if err != nil {
+		return fmt.Errorf("failed to read the checked-out commit: %w", err)
+	}
+	name := GitReleaseName(commit)
+	if name == "" {
+		return fmt.Errorf("git rev-parse HEAD returned %q, not a commit id", commit)
+	}
+	_, _ = fmt.Fprintf(logger, "Building commit %s as %s\n\n", commit, name)
+	for _, r := range e.installer.Retained() {
+		if r.Current && r.Tag == name {
+			return fmt.Errorf("%s is already the active build (commit %s); there is nothing new to build", name, commit)
+		}
+	}
+
+	// ── Build into a temporary directory and verify ─────────────────────
+	tmpDir, err := os.MkdirTemp("", "scion-rebuild-*")
+	if err != nil {
+		return fmt.Errorf("create temp directory: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+	plan.bin = filepath.Join(tmpDir, "scion")
+	plan.ldflags = GitBuildLDFlags(commit, time.Now())
+	if err := runRebuildSteps(ctx, logger, rebuildBuild, plan); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(logger, "==> Verifying the build\n")
+	if err := VerifyGitBuild(ctx, plan.bin, commit, logger); err != nil {
+		return fmt.Errorf("verification failed: %w", err)
+	}
+
+	// ── Database snapshot, before anything changes ──────────────────────
+	// As for update-binary (design D4). It is what "Restoring after a
+	// failed update" restores, including after a Git build the
+	// boot-failure guard leaves stopped. On the run ctx: VACUUM INTO of a
+	// large database can take a while.
+	snapshot, err := takeUpdateSnapshot(ctx, e.snapshots, e.current, logger, "hub.maintenance.rebuild-server",
+		"The rebuild goes ahead without one.")
+	if err != nil {
+		return err
+	}
+
+	// The boot-failure guard may roll back to the running release only if
+	// it is at or above the new build's downgrade floor; a preview or
+	// stable "from" needs its publish date for that (update-binary does the
+	// same). A Git "from" stays undated: not provably safe, fail closed.
+	lookupCtx, cancelLookup := context.WithTimeout(ctx, releaseAPITimeout)
+	fromPublished := releasePublishedAt(lookupCtx, e.releases, e.current)
+	cancelLookup()
+
+	// ── Install ─────────────────────────────────────────────────────────
+	_, _ = fmt.Fprintf(logger, "\n==> Installing %s (%s)\n", name, e.installer.Name())
+	installCtx, cancelInstall := context.WithTimeout(ctx, e.installTimeout)
+	staged, err := e.installer.Stage(installCtx, name, plan.bin)
+	if err != nil {
+		cancelInstall()
+		return fmt.Errorf("stage %s: %w", name, err)
+	}
+	err = e.installer.Activate(installCtx, staged)
+	cancelInstall()
+	if err != nil {
+		return fmt.Errorf("activate %s: %w", name, err)
+	}
+	_, _ = fmt.Fprintf(logger, "Installed %s.\n\n", name)
+	// The build was copied into place by Stage, so its temporary directory
+	// is no longer needed. Removed now: the restart below can end this
+	// process before the deferred cleanup runs (the defer still covers the
+	// failure paths).
+	_ = os.RemoveAll(tmpDir)
+
+	// ── Systemd unit check (starter hubs) ───────────────────────────────
+	// The template it compares against is the starter hub's
+	// (unitdrift.TemplatePath); a deploy.sh hub (symlink layout) renders
+	// its own unit, so the check applies to sudo-install only. Rebuild
+	// from git never rewrites the unit, so a template change needs a
+	// re-provision; tell the admin. The check is read-only, bounded and
+	// never fails, so the restart below always runs. Its report is the
+	// last part of the log written before the restart is recorded.
+	var unitText string
+	if e.installer.Name() == StrategySudoInstall {
+		unitText = e.checkUnit(ctx, logger, repoPath, branch, plan.currentBranch)
+	} else {
+		// Not a starter-hub unit: a drift record left from before (the
+		// Maintenance banner) can no longer be refreshed, so it is removed,
+		// as for a structural skip.
+		e.persistUnitStatus(ctx, logger, unitdrift.Report{Status: unitdrift.Skipped, Structural: true}, "", e.serviceName)
+	}
+
+	// ── Restart ─────────────────────────────────────────────────────────
+	_, _ = fmt.Fprintf(logger, "==> Restarting hub: %s -> %s at %s\n",
+		displayVersion(e.current), name, time.Now().UTC().Format(time.RFC3339))
+	_, _ = fmt.Fprintln(logger, "Server rebuild installed; requesting the restart.")
+	if unitText != "" {
+		_, _ = fmt.Fprintf(logger, "\n==> Systemd unit check\n%s", unitText)
+	}
+	if before != nil {
+		p := PendingRestart{
+			From:     e.current,
+			To:       name,
+			Strategy: e.installer.Name(),
+			Snapshot: snapshot,
+			Mode:     UpdateModeGit,
+			Commit:   commit,
+			// For the boot-failure guard's previous_safe.
+			FromPublishedAt: fromPublished,
+		}
+		hookCtx, cancelHook := context.WithTimeout(ctx, e.hookTimeout)
+		err := before(hookCtx, p)
+		cancelHook()
+		if err != nil {
+			log.Error("Before-restart hook failed; not restarting", "error", err)
+			return undoInstall(ctx, e.installer, e.installTimeout, logger, name, nil,
+				fmt.Errorf("recording the restart failed, so the hub was not restarted: %w", err))
+		}
+	}
+	restartCtx, cancelRestart := context.WithTimeout(ctx, e.restartTimeout)
+	err = e.installer.Restart(restartCtx)
+	cancelRestart()
+	if err != nil {
+		log.Error("Failed to restart the hub", "error", err)
+		return undoInstall(ctx, e.installer, e.installTimeout, logger, name, nil,
+			fmt.Errorf("restarting the hub failed: %w", err))
+	}
+	log.Info("Server rebuild installed, restart requested", "from", e.current, "to", name)
+	return nil
+}
+
+// checkUnit compares the installed systemd unit with the template in the
+// tree just checked out, records the result for the Maintenance banner
+// and returns the report text.
+func (e *RebuildServerExecutor) checkUnit(ctx context.Context, logger io.Writer, repoPath, branch, currentBranch string) string {
+	_, _ = fmt.Fprintf(logger, "==> Checking systemd unit against template (result at end of log)\n\n")
+	unitBranch := branch
+	if unitBranch == "" {
+		unitBranch = currentBranch
+	}
+	if unitBranch == "HEAD" { // detached checkout: no branch to name
+		unitBranch = ""
+	}
+	rep := unitdrift.Check(ctx, unitdrift.CheckOptions{
+		RepoPath: repoPath,
+		Branch:   unitBranch,
+		Service:  e.serviceName,
+		Locate:   e.unitLocator,
+		Revision: e.unitRevision,
+		Timeout:  e.unitTimeout,
+	})
+	if rep.Status == unitdrift.Drift {
+		logging.Subsystem("hub.maintenance.rebuild-server").Warn(
+			"Installed systemd unit differs from template; re-provision needed", "service_name", e.serviceName)
+	}
+	// Persisted now, before the restart, so the restart cannot lose it.
+	e.persistUnitStatus(ctx, logger, rep, unitBranch, e.serviceName)
+	return rep.Text
+}
+
+// rebuildPhase selects the step table runRebuildSteps runs.
+type rebuildPhase int
+
+const (
+	// rebuildCheckout updates the checkout: git fetch, then checkout and
+	// reset to origin/<branch> (or reset the current branch).
+	rebuildCheckout rebuildPhase = iota
+	// rebuildBuild builds the web assets and the binary.
+	rebuildBuild
+)
+
+// rebuildPlan carries what the step tables need.
+type rebuildPlan struct {
+	repoPath      string
+	branch        string // configured or requested branch; "" = currentBranch
+	currentBranch string // the checkout's branch, when branch is ""
+	bin           string // build output (rebuildBuild)
+	ldflags       string // -ldflags value (rebuildBuild)
+}
+
+// runRebuildSteps builds the step table of phase and runs it in order,
+// logging each step, and stops at the first failure. The table (its git
+// commands included) and the process start are kept in this one function so
+// the host-git door guard (pkg/util TestHostGitGoesThroughOneDoor) counts
+// them together.
+func runRebuildSteps(ctx context.Context, logger io.Writer, phase rebuildPhase, p rebuildPlan) error {
+	var steps []rebuildStep
+	switch phase {
+	case rebuildCheckout:
+		steps = append(steps, rebuildStep{"Fetching latest code", "git", []string{"fetch", "origin"}, p.repoPath})
+		if p.branch != "" {
+			steps = append(steps, rebuildStep{"Checking out branch " + p.branch, "git", []string{"checkout", p.branch}, p.repoPath})
+			steps = append(steps, rebuildStep{"Resetting to origin/" + p.branch, "git", []string{"reset", "--hard", "origin/" + p.branch}, p.repoPath})
+		} else {
+			steps = append(steps, rebuildStep{"Resetting to origin/" + p.currentBranch, "git", []string{"reset", "--hard", "origin/" + p.currentBranch}, p.repoPath})
+		}
+	case rebuildBuild:
+		steps = append(steps,
+			rebuildStep{"Building web assets", "make", []string{"web"}, p.repoPath},
+			rebuildStep{"Building server binary", "go", []string{"build", "-ldflags", p.ldflags, "-o", p.bin, "./cmd/scion"}, p.repoPath},
+		)
+	default:
+		return fmt.Errorf("unknown rebuild phase %d", phase)
+	}
+	log := logging.Subsystem("hub.maintenance.rebuild-server")
 	for i, step := range steps {
 		_, _ = fmt.Fprintf(logger, "==> %s\n", step.name)
 		log.Debug("Executing step",
@@ -433,78 +697,30 @@ func (e *RebuildServerExecutor) Run(ctx context.Context, logger io.Writer, param
 		log.Debug("Step completed", "step", i+1, "name", step.name)
 		_, _ = fmt.Fprintln(logger)
 	}
-
-	// Compare the installed systemd unit with the template in the tree just
-	// checked out. Rebuild from git never rewrites the unit, so a template
-	// change needs a re-provision; tell the admin. The check is read-only,
-	// bounded and never fails, so the restart below always runs. Its report
-	// is written last, after the completion line (also when the restart
-	// fails to start), so it is not buried in the build output.
-	_, _ = fmt.Fprintf(logger, "==> Checking systemd unit against template (result at end of log)\n\n")
-	unitBranch := branch
-	if unitBranch == "" {
-		unitBranch = currentBranch
-	}
-	if unitBranch == "HEAD" { // detached checkout: no branch to name
-		unitBranch = ""
-	}
-	unitReport := unitdrift.Check(ctx, unitdrift.CheckOptions{
-		RepoPath: repoPath,
-		Branch:   unitBranch,
-		Service:  serviceName,
-		Locate:   e.unitLocator,
-		Revision: e.unitRevision,
-		Timeout:  e.unitTimeout,
-	})
-	if unitReport.Status == unitdrift.Drift {
-		log.Warn("Installed systemd unit differs from template; re-provision needed", "service_name", serviceName)
-	}
-	// Persist the result for the Maintenance banner now, before the
-	// restart, so the restart cannot lose it.
-	e.persistUnitStatus(ctx, logger, unitReport, unitBranch, serviceName)
-	// The restart child's output and everything written after Start go
-	// through a Write-only, mutex-guarded writer. Handing the child a
-	// *bytes.Buffer directly would let exec copy with Buffer.ReadFrom, which
-	// trims the buffer back to its length at Start when the child exits,
-	// dropping the lines below; it would also race with them.
-	tail := &restartLogWriter{w: logger}
-	defer func() {
-		_, _ = fmt.Fprintf(tail, "\n==> Systemd unit check\n%s", unitReport.Text)
-	}()
-
-	// Fire-and-forget: start the restart but don't wait for it to finish.
-	// "systemctl restart" sends SIGTERM to this very process, so cmd.Run()
-	// would never return — it reports "signal: terminated". Using cmd.Start()
-	// lets us return success so the calling goroutine can persist the
-	// completed run status to the DB before the process is killed.
-	_, _ = fmt.Fprintf(logger, "==> Restarting service\n")
-	log.Debug("Initiating service restart (fire-and-forget)",
-		"cmd", "sudo", "args", fmt.Sprintf("[systemctl restart %s]", serviceName))
-	restartCmd := exec.Command("sudo", "systemctl", "restart", serviceName)
-	restartCmd.Stdout = tail
-	restartCmd.Stderr = tail
-	if err := restartCmd.Start(); err != nil {
-		log.Error("Failed to initiate service restart", "error", err)
-		return fmt.Errorf("restarting service failed: %w", err)
-	}
-
-	log.Info("Server rebuild complete, restart initiated")
-	_, _ = fmt.Fprintln(tail, "\nServer rebuild complete, restart initiated.")
 	return nil
 }
 
-// restartLogWriter serialises writes to w. It implements only Write (not
-// io.ReaderFrom), so os/exec copies a child's output with its own buffer
-// and calls Write as data arrives.
-type restartLogWriter struct {
-	mu sync.Mutex
-	w  io.Writer
+// errDetachedHead refuses a rebuild with no branch to reset to: the checkout
+// is on a detached HEAD (git rev-parse --abbrev-ref HEAD says "HEAD") and no
+// branch is configured or requested, so "origin/HEAD" would be reset to.
+func errDetachedHead(op string) error {
+	return fmt.Errorf("%s: the checkout is on a detached HEAD; set server.maintenance.repo_branch or pass the branch parameter", op)
 }
 
-func (l *restartLogWriter) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.w.Write(p)
+// gitOutput runs git in dir and returns its trimmed stdout.
+func gitOutput(ctx context.Context, dir string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if detail := strings.TrimSpace(stderr.String()); detail != "" {
+			return "", fmt.Errorf("git %s: %s", strings.Join(args, " "), detail)
+		}
+		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+	}
+	return strings.TrimSpace(stdout.String()), nil
 }
 
 // UnitDriftStatus is the stored result of the last systemd unit check,
@@ -633,6 +849,9 @@ func (e *RebuildWebExecutor) Run(ctx context.Context, logger io.Writer, params m
 			return fmt.Errorf("failed to determine current branch: %s", strings.TrimSpace(string(branchOut)))
 		}
 		currentBranch := strings.TrimSpace(string(branchOut))
+		if currentBranch == "HEAD" {
+			return errDetachedHead("rebuild-web")
+		}
 		steps = append(steps, step{"Resetting to origin/" + currentBranch, "git", []string{"reset", "--hard", "origin/" + currentBranch}})
 	}
 	steps = append(steps, step{"Building web assets", "make", []string{"web"}})
@@ -1280,16 +1499,30 @@ func streamCloudBuildLogs(ctx context.Context, client *gcstorage.Client, bucket,
 	return offset + n
 }
 
-// UpdateCheckResult contains the result of a check-for-updates operation.
+// UpdateCheckResult holds the outcome of a source-based update check.
 type UpdateCheckResult struct {
-	UpdateAvailable bool               `json:"update_available"`
-	CurrentCommit   string             `json:"current_commit"`
-	LatestCommit    string             `json:"latest_commit"`
-	CurrentBranch   string             `json:"current_branch"`
-	TrackingRef     string             `json:"tracking_ref"`
-	CommitsBehind   int                `json:"commits_behind"`
-	NewCommits      []UpdateCommitInfo `json:"new_commits,omitempty"`
+	UpdateAvailable bool `json:"update_available"`
+	// CurrentCommit is the commit compared with the tracking ref: the
+	// running build's commit when the checkout has it, else the checkout's
+	// HEAD (see Compared).
+	CurrentCommit string `json:"current_commit"`
+	// Compared is UpdateCheckRunning or UpdateCheckCheckout.
+	Compared      string             `json:"compared"`
+	LatestCommit  string             `json:"latest_commit"`
+	CurrentBranch string             `json:"current_branch"`
+	TrackingRef   string             `json:"tracking_ref"`
+	CommitsBehind int                `json:"commits_behind"`
+	NewCommits    []UpdateCommitInfo `json:"new_commits,omitempty"`
 }
+
+// What a source update check compared with the tracking ref.
+const (
+	// UpdateCheckRunning: the running build's commit.
+	UpdateCheckRunning = "running"
+	// UpdateCheckCheckout: the maintenance checkout's HEAD (the running
+	// commit is unknown or not in the checkout).
+	UpdateCheckCheckout = "checkout"
+)
 
 // UpdateCommitInfo describes a single commit available in the remote.
 type UpdateCommitInfo struct {
@@ -1297,19 +1530,33 @@ type UpdateCommitInfo struct {
 	Subject string `json:"subject"`
 }
 
-// CheckForUpdates fetches the remote and compares the local HEAD against
-// the current branch's remote tracking ref to determine whether a newer
-// version is available.
-func CheckForUpdates(ctx context.Context, repoPath string) (*UpdateCheckResult, error) {
+// UpdateCheckOptions configures CheckForUpdates.
+type UpdateCheckOptions struct {
+	// RepoPath is the maintenance checkout.
+	RepoPath string
+	// Branch is the configured branch Rebuild builds; "" means the
+	// checkout's current branch (as Rebuild does).
+	Branch string
+	// RunningCommit is the running build's commit. When the checkout has
+	// it, it is what is compared, so "up to date" means the running hub
+	// (not merely the checkout) has the branch's commits.
+	RunningCommit string
+}
+
+// CheckForUpdates fetches origin in the maintenance checkout and compares
+// the running commit (else the checkout's HEAD) with origin/<branch>.
+func CheckForUpdates(ctx context.Context, opts UpdateCheckOptions) (*UpdateCheckResult, error) {
 	log := logging.Subsystem("hub.maintenance.check-updates")
 
+	repoPath := opts.RepoPath
 	if repoPath == "" {
 		return nil, fmt.Errorf("no repository path configured")
 	}
 
-	log.Debug("Checking for updates", "repo_path", repoPath)
+	log.Debug("Checking for updates", "repo_path", repoPath, "branch", opts.Branch)
 
-	// Fetch from origin.
+	// The fetch output can name the remote (with any credentials in its
+	// URL): it goes to the server log only, never into the API error.
 	fetchCmd := exec.CommandContext(ctx, "git", "fetch", "origin")
 	fetchCmd.Dir = repoPath
 	if out, err := fetchCmd.CombinedOutput(); err != nil {
@@ -1317,62 +1564,58 @@ func CheckForUpdates(ctx context.Context, repoPath string) (*UpdateCheckResult, 
 		return nil, fmt.Errorf("git fetch failed: %w", err)
 	}
 
-	// Detect the current branch.
-	branchCmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
-	branchCmd.Dir = repoPath
-	branchOut, err := branchCmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get current branch: %w", err)
+	currentBranch := opts.Branch
+	if currentBranch == "" {
+		b, err := gitOutput(ctx, repoPath, "rev-parse", "--abbrev-ref", "HEAD")
+		if err != nil {
+			return nil, fmt.Errorf("failed to get current branch: %w", err)
+		}
+		currentBranch = b
 	}
-	currentBranch := strings.TrimSpace(string(branchOut))
-
-	// Resolve the remote tracking ref (e.g., "origin/main" or "origin/feature-branch").
 	trackingRef := "origin/" + currentBranch
 
-	// Get local HEAD commit.
-	localCmd := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
-	localCmd.Dir = repoPath
-	localOut, err := localCmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get local HEAD: %w", err)
+	base, compared := "", UpdateCheckCheckout
+	// Only a hex commit id reaches git (never an option-like value), and
+	// only when the checkout has that commit.
+	if GitReleaseName(opts.RunningCommit) != "" {
+		running := strings.ToLower(strings.TrimSpace(opts.RunningCommit))
+		if full, err := gitOutput(ctx, repoPath, "rev-parse", "--verify", "--quiet", running+"^{commit}"); err == nil {
+			base, compared = full, UpdateCheckRunning
+		}
 	}
-	localCommit := strings.TrimSpace(string(localOut))
+	if base == "" {
+		head, err := gitOutput(ctx, repoPath, "rev-parse", "HEAD")
+		if err != nil {
+			return nil, fmt.Errorf("failed to get local HEAD: %w", err)
+		}
+		base = head
+	}
 
-	// Get remote tracking commit.
-	remoteCmd := exec.CommandContext(ctx, "git", "rev-parse", trackingRef)
-	remoteCmd.Dir = repoPath
-	remoteOut, err := remoteCmd.Output()
+	remoteCommit, err := gitOutput(ctx, repoPath, "rev-parse", "--verify", trackingRef+"^{commit}")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get %s: %w", trackingRef, err)
 	}
-	remoteCommit := strings.TrimSpace(string(remoteOut))
 
 	result := &UpdateCheckResult{
-		CurrentCommit: localCommit,
+		CurrentCommit: base,
+		Compared:      compared,
 		LatestCommit:  remoteCommit,
 		CurrentBranch: currentBranch,
 		TrackingRef:   trackingRef,
 	}
-
-	if localCommit == remoteCommit {
+	if base == remoteCommit {
 		return result, nil
 	}
 
-	result.UpdateAvailable = true
-
-	// Get list of new commits (local..remote).
-	logCmd := exec.CommandContext(ctx, "git", "log", "--oneline", "--no-decorate",
-		localCommit+".."+remoteCommit)
-	logCmd.Dir = repoPath
-	logOut, err := logCmd.Output()
+	// Commits on the tracking ref that the compared commit lacks.
+	logOut, err := gitOutput(ctx, repoPath, "log", "--oneline", "--no-decorate", base+".."+remoteCommit)
 	if err != nil {
-		// Non-fatal: we know there's an update but can't list commits.
+		// Non-fatal: the commits differ, but they cannot be listed.
 		log.Warn("Failed to list new commits", "error", err)
+		result.UpdateAvailable = true
 		return result, nil
 	}
-
-	lines := strings.Split(strings.TrimSpace(string(logOut)), "\n")
-	for _, line := range lines {
+	for _, line := range strings.Split(logOut, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -1385,533 +1628,77 @@ func CheckForUpdates(ctx context.Context, repoPath string) (*UpdateCheckResult, 
 		result.NewCommits = append(result.NewCommits, info)
 	}
 	result.CommitsBehind = len(result.NewCommits)
+	// A compared commit ahead of the tracking ref (none missing) is not
+	// behind: no update.
+	result.UpdateAvailable = result.CommitsBehind > 0
 
 	log.Info("Update check complete",
-		"update_available", true,
+		"update_available", result.UpdateAvailable,
 		"commits_behind", result.CommitsBehind,
 		"branch", currentBranch,
 		"tracking_ref", trackingRef,
-		"current", localCommit[:8],
-		"latest", remoteCommit[:8])
+		"compared", compared,
+		"current", base,
+		"latest", remoteCommit)
 
 	return result, nil
 }
 
-// ReleaseUpdateCheckResult contains the result of a release-based update check
-// for binary-tier deployments.
-type ReleaseUpdateCheckResult struct {
-	Tier            string `json:"tier"`
-	UpdateAvailable bool   `json:"update_available"`
-	CurrentVersion  string `json:"current_version"`
-	LatestVersion   string `json:"latest_version"`
-	Channel         string `json:"channel"`
-	DownloadURL     string `json:"download_url,omitempty"`
-	ChecksumsURL    string `json:"checksums_url,omitempty"`
-	ReleaseURL      string `json:"release_url,omitempty"`
-}
-
-// CheckForReleaseUpdates checks for available binary updates by fetching the
-// release manifest via pkg/version/update. It returns version comparison results
-// and download URLs for binary-tier deployments.
-func CheckForReleaseUpdates(ctx context.Context, currentVersion, channel, repo string) (*ReleaseUpdateCheckResult, error) {
-	log := logging.Subsystem("hub.maintenance.check-release-updates")
-
-	// Determine channel: explicit config takes precedence, then detect from version.
-	if channel == "" {
-		channel = update.DetectChannel(currentVersion)
-	}
-
-	result := &ReleaseUpdateCheckResult{
-		Tier:           "binary",
-		CurrentVersion: currentVersion,
-		Channel:        channel,
-	}
-
-	// If no channel can be determined (dev builds), return early.
-	if channel == "" {
-		log.Debug("No release channel detected, skipping update check", "version", currentVersion)
-		return result, nil
-	}
-
-	// Build the manifest URL for the configured repo.
-	manifestURL := fmt.Sprintf("https://raw.githubusercontent.com/%s/main/LATEST.json", repo)
-
-	manifest, err := update.FetchManifest(ctx, update.WithManifestURL(manifestURL))
-	if err != nil {
-		return nil, fmt.Errorf("fetch release manifest: %w", err)
-	}
-
-	latest, ok := manifest.Channels[channel]
-	if !ok || latest.Version == "" {
-		log.Debug("No version found for channel", "channel", channel)
-		return result, nil
-	}
-
-	result.LatestVersion = latest.Version
-	result.ReleaseURL = latest.URL
-
-	// Compare versions using the same logic as pkg/version/update.
-	info, err := update.CheckForUpdate(ctx, currentVersion,
-		update.WithManifestURL(manifestURL))
-	if err != nil {
-		return nil, fmt.Errorf("check for update: %w", err)
-	}
-	result.UpdateAvailable = info.UpdateAvailable
-
-	// If an update is available, resolve the download and checksums URLs
-	// from GitHub Releases.
-	if result.UpdateAvailable {
-		downloadURL, checksumsURL, err := resolveReleaseAssets(ctx, repo, result.LatestVersion)
-		if err != nil {
-			log.Warn("Failed to resolve download URL", "version", result.LatestVersion, "error", err)
-			// Non-fatal: we still know an update is available.
-		} else {
-			result.DownloadURL = downloadURL
-			result.ChecksumsURL = checksumsURL
-			if checksumsURL == "" {
-				// Not fatal here either: BinaryUpdateExecutor.Run fails
-				// closed on its own when it can't verify a checksum, but
-				// that decision belongs there, not in the check step.
-				log.Warn("Release has no SHA256SUMS asset; the binary update will fail closed",
-					"version", result.LatestVersion)
-			}
-		}
-	}
-
-	log.Info("Release update check complete",
-		"current", currentVersion,
-		"latest", result.LatestVersion,
-		"channel", channel,
-		"update_available", result.UpdateAvailable)
-
-	return result, nil
-}
-
-// resolveReleaseAssets queries the GitHub Releases API to find the download
-// URL for the platform-appropriate binary tarball in a given release tag,
-// along with the URL for that release's SHA256SUMS checksums asset (see
-// .github/workflows/build-release.yml). checksumsURL is returned empty,
-// not as an error, when the release predates checksum publishing --
-// callers that require a checksum decide how to handle that themselves
-// (BinaryUpdateExecutor.Run fails closed on it).
-func resolveReleaseAssets(ctx context.Context, repo, version string) (downloadURL, checksumsURL string, err error) {
-	// Query the GitHub Releases API for the tag.
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/releases/tags/%s", repo, version)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
-	if err != nil {
-		return "", "", fmt.Errorf("create GitHub release request: %w", err)
-	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", "", fmt.Errorf("fetch GitHub release: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("GitHub release API returned %s", resp.Status)
-	}
-
-	var release struct {
-		Assets []struct {
-			Name               string `json:"name"`
-			BrowserDownloadURL string `json:"browser_download_url"`
-		} `json:"assets"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return "", "", fmt.Errorf("decode GitHub release: %w", err)
-	}
-
-	// Look for the platform-appropriate tarball and the release's
-	// checksums asset.
-	wantName := fmt.Sprintf("scion-linux-%s.tar.gz", runtime.GOARCH)
-	for _, asset := range release.Assets {
-		switch asset.Name {
-		case wantName:
-			downloadURL = asset.BrowserDownloadURL
-		case "SHA256SUMS":
-			checksumsURL = asset.BrowserDownloadURL
-		}
-	}
-
-	if downloadURL == "" {
-		return "", "", fmt.Errorf("no asset matching %q found in release %s", wantName, version)
-	}
-
-	return downloadURL, checksumsURL, nil
-}
-
-// DeriveChecksumsURL derives a release's SHA256SUMS asset URL from one of
-// its own asset download URLs, by replacing the last path element. Used
-// when a caller supplies download_url directly (bypassing
-// CheckForReleaseUpdates, which already resolves both URLs together via
-// resolveReleaseAssets), so the checksum verification in
-// BinaryUpdateExecutor.Run still has somewhere to look.
-func DeriveChecksumsURL(downloadURL string) string {
-	idx := strings.LastIndex(downloadURL, "/")
-	if idx < 0 {
-		return ""
-	}
-	return downloadURL[:idx+1] + "SHA256SUMS"
-}
-
-// FetchExpectedChecksum downloads the release's SHA256SUMS asset and
-// returns the expected hash for assetName -- the tarball's filename *on
-// the release*, not any local path. Deliberately callable before the
-// (potentially large) release tarball itself is downloaded: this backs an
-// unattended updater that re-checks on a recurring schedule, and a release
-// with no checksums asset, or no entry for this asset, should fail
-// immediately rather than after downloading the whole tarball every cycle.
-// An empty checksumsURL, a download failure, and a missing entry are all
-// treated as equally fatal -- there is no "proceed anyway" path here (see
-// VerifyFileChecksum's doc comment for why this differs from deploy.sh's
-// own, operator-driven install-time tooling).
-func FetchExpectedChecksum(ctx context.Context, checksumsURL, assetName string, logger io.Writer) (string, error) {
-	if checksumsURL == "" {
-		return "", fmt.Errorf("no checksums URL available for %s", assetName)
-	}
-
-	tmpDir, err := os.MkdirTemp("", "scion-update-sums-*")
-	if err != nil {
-		return "", fmt.Errorf("create temp directory for checksums: %w", err)
-	}
-	defer func() { _ = os.RemoveAll(tmpDir) }()
-
-	sumsPath := filepath.Join(tmpDir, "SHA256SUMS")
-	if err := DownloadFile(ctx, checksumsURL, sumsPath, logger); err != nil {
-		return "", fmt.Errorf("download checksums: %w", err)
-	}
-
-	sumsData, err := os.ReadFile(sumsPath)
-	if err != nil {
-		return "", fmt.Errorf("read checksums file: %w", err)
-	}
-
-	for _, line := range strings.Split(string(sumsData), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) != 2 {
-			continue
-		}
-		// sha256sum's own output uses a "*name" prefix in binary mode,
-		// "name" in text mode (what build-release.yml's `sha256sum --`
-		// produces); accept either.
-		if strings.TrimPrefix(fields[1], "*") == assetName {
-			return fields[0], nil
-		}
-	}
-
-	return "", fmt.Errorf("no checksum entry for %q in SHA256SUMS", assetName)
-}
-
-// VerifyFileChecksum hashes the file at path and compares it against
-// expectedHash (as returned by FetchExpectedChecksum), failing closed on a
-// mismatch. This is an unattended background updater, not an interactive
-// install, so unlike deploy.sh's own preflight/verification there is no
-// override here: a mismatch always fails the update, with nothing swapped
-// in.
-func VerifyFileChecksum(path, assetName, expectedHash string, logger io.Writer) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return fmt.Errorf("open tarball for checksum: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return fmt.Errorf("hash tarball: %w", err)
-	}
-	actualHash := hex.EncodeToString(h.Sum(nil))
-
-	if !strings.EqualFold(actualHash, expectedHash) {
-		return fmt.Errorf("checksum mismatch for %q: expected %s, got %s", assetName, expectedHash, actualHash)
-	}
-
-	_, _ = fmt.Fprintf(logger, "Checksum verified for %s: %s\n", assetName, actualHash)
-	return nil
-}
-
-// BinaryUpdateExecutor downloads, verifies, and installs a new scion binary
-// from a GitHub Release, then restarts the systemd service.
-type BinaryUpdateExecutor struct {
-	serviceName string      // systemd service name (e.g., "scion-hub")
-	githubRepo  string      // GitHub repo for release lookups (e.g., "GoogleCloudPlatform/scion")
-	channel     string      // release channel override (empty = detect from current version)
-	store       store.Store // optional — used to clear system.update_available on success
-}
-
-// BinaryUpdateOptions configures a BinaryUpdateExecutor. Zero values are kept
-// as-is; Run applies its own defaults.
-type BinaryUpdateOptions struct {
-	ServiceName string      // systemd service name (e.g., "scion-hub")
-	GitHubRepo  string      // GitHub repo for release lookups (e.g., "GoogleCloudPlatform/scion")
-	Channel     string      // release channel override (empty = detect from current version)
-	Store       store.Store // optional — used to clear system.update_available on success
-}
-
-// NewBinaryUpdateExecutor returns a BinaryUpdateExecutor configured from opts.
-func NewBinaryUpdateExecutor(opts BinaryUpdateOptions) *BinaryUpdateExecutor {
-	return &BinaryUpdateExecutor{
-		serviceName: opts.ServiceName,
-		githubRepo:  opts.GitHubRepo,
-		channel:     opts.Channel,
-		store:       opts.Store,
-	}
-}
-
-func (e *BinaryUpdateExecutor) Run(ctx context.Context, logger io.Writer, params map[string]string) error {
-	log := logging.Subsystem("hub.maintenance.update-binary")
-
-	if runtime.GOOS != "linux" {
-		return fmt.Errorf("update-binary is only supported on Linux (requires systemd); current OS is %s", runtime.GOOS)
-	}
-
-	// ── Step 1: PRE-FLIGHT ──────────────────────────────────────────────
-
-	serviceName := e.serviceName
-	if serviceName == "" {
-		serviceName = "scion-hub"
-	}
-
-	binaryPath, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("failed to determine current binary path: %w", err)
-	}
-	binaryPath, err = filepath.EvalSymlinks(binaryPath)
-	if err != nil {
-		return fmt.Errorf("failed to resolve binary symlinks: %w", err)
-	}
-
-	_, _ = fmt.Fprintf(logger, "Current binary: %s\n", binaryPath)
-	_, _ = fmt.Fprintf(logger, "Service name: %s\n", serviceName)
-
-	// Get target version, download URL, and checksums URL — from params or
-	// by running a release check.
-	targetVersion := params["target_version"]
-	downloadURL := params["download_url"]
-	checksumsURL := params["checksums_url"]
-
-	if targetVersion == "" || downloadURL == "" {
-		_, _ = fmt.Fprintln(logger, "Checking for release updates...")
-		currentVersion := params["current_version"]
-		if currentVersion == "" {
-			currentVersion = version.Version
-		}
-		repo := e.githubRepo
-		if repo == "" {
-			repo = "GoogleCloudPlatform/scion"
-		}
-
-		result, err := CheckForReleaseUpdates(ctx, currentVersion, e.channel, repo)
-		if err != nil {
-			return fmt.Errorf("release update check failed: %w", err)
-		}
-		if !result.UpdateAvailable {
-			_, _ = fmt.Fprintf(logger, "No update available (current: %s, latest: %s, channel: %s)\n",
-				result.CurrentVersion, result.LatestVersion, result.Channel)
-			return nil
-		}
-		if targetVersion == "" {
-			targetVersion = result.LatestVersion
-		}
-		if downloadURL == "" {
-			downloadURL = result.DownloadURL
-		}
-		if checksumsURL == "" {
-			checksumsURL = result.ChecksumsURL
-		}
-	}
-
-	if downloadURL == "" {
-		return fmt.Errorf("no download URL available for version %s", targetVersion)
-	}
-	if checksumsURL == "" {
-		// A caller passed download_url directly without a matching
-		// checksums_url (e.g. a manually-triggered run) — derive it from
-		// the same release's own asset URL rather than treating "no
-		// checksums_url param" as "skip verification".
-		checksumsURL = DeriveChecksumsURL(downloadURL)
-	}
-
-	_, _ = fmt.Fprintf(logger, "Target version: %s\n", targetVersion)
-	_, _ = fmt.Fprintf(logger, "Download URL: %s\n", downloadURL)
-	log.Info("Starting binary update",
-		"target_version", targetVersion,
-		"download_url", downloadURL,
-		"binary_path", binaryPath)
-
-	// ── Step 1b: FETCH EXPECTED CHECKSUM ─────────────────────────────────
-	// Fetch and parse SHA256SUMS *before* downloading the (potentially
-	// large) release tarball below: this update check runs on a recurring
-	// schedule, and a release with no checksums asset, or no entry for
-	// this asset, should fail immediately rather than after a full
-	// download every cycle. Fails closed the same way the combined check
-	// used to — see FetchExpectedChecksum's doc comment for what's fatal
-	// and why there is no override here.
-
-	_, _ = fmt.Fprintf(logger, "\n==> Fetching expected checksum...\n")
-
-	assetName := path.Base(downloadURL)
-	expectedHash, err := FetchExpectedChecksum(ctx, checksumsURL, assetName, logger)
-	if err != nil {
-		return fmt.Errorf("checksum verification failed: %w", err)
-	}
-
-	// ── Step 2: DOWNLOAD ────────────────────────────────────────────────
-
-	// Create temp directory in the system default temp location (e.g., /tmp).
-	// The hub process runs as a non-root user and cannot write to the binary's
-	// directory (typically /usr/local/bin). The sudo install command handles
-	// the cross-filesystem copy, so same-filesystem is not required.
-	tmpDir, err := os.MkdirTemp("", "scion-update-*")
-	if err != nil {
-		return fmt.Errorf("failed to create temp directory: %w", err)
-	}
-	defer func() { _ = os.RemoveAll(tmpDir) }()
-
-	tarballPath := filepath.Join(tmpDir, "release.tar.gz")
-	_, _ = fmt.Fprintf(logger, "\n==> Downloading release asset...\n")
-
-	if err := DownloadFile(ctx, downloadURL, tarballPath, logger); err != nil {
-		return fmt.Errorf("download failed: %w", err)
-	}
-
-	// ── Step 2b: VERIFY CHECKSUM ─────────────────────────────────────────
-
-	_, _ = fmt.Fprintf(logger, "\n==> Verifying checksum...\n")
-
-	if err := VerifyFileChecksum(tarballPath, assetName, expectedHash, logger); err != nil {
-		return fmt.Errorf("checksum verification failed: %w", err)
-	}
-
-	// ── Step 3: VERIFY ──────────────────────────────────────────────────
-
-	_, _ = fmt.Fprintf(logger, "\n==> Extracting and verifying binary...\n")
-
-	extractedBinary, err := ExtractScionBinary(tarballPath, tmpDir, logger)
-	if err != nil {
-		return fmt.Errorf("extraction failed: %w", err)
-	}
-
-	if err := VerifyScionBinary(ctx, extractedBinary, targetVersion, logger); err != nil {
-		return fmt.Errorf("verification failed: %w", err)
-	}
-
-	// ── Step 4: SWAP ────────────────────────────────────────────────────
-
-	_, _ = fmt.Fprintf(logger, "\n==> Installing new binary...\n")
-
-	// Place backup in the temp directory — the hub user cannot write to the
-	// binary's directory (typically /usr/local/bin). Use sudo to read the
-	// binary into the backup location.
-	backupPath := filepath.Join(tmpDir, "scion.bak")
-	if err := BackupBinary(ctx, binaryPath, backupPath, logger); err != nil {
-		return fmt.Errorf("backup failed: %w", err)
-	}
-
-	installCmd := exec.CommandContext(ctx, "sudo", "install", "-m", "755", extractedBinary, binaryPath)
-	var installStderr bytes.Buffer
-	installCmd.Stdout = logger
-	installCmd.Stderr = io.MultiWriter(logger, &installStderr)
-	if err := installCmd.Run(); err != nil {
-		_, _ = fmt.Fprintf(logger, "Install failed, restoring backup...\n")
-		if restoreErr := RestoreBackup(backupPath, binaryPath, logger); restoreErr != nil {
-			log.Error("Failed to restore backup after install failure",
-				"install_error", err, "restore_error", restoreErr)
-			return fmt.Errorf("install failed (%w) AND backup restore failed (%v)", err, restoreErr)
-		}
-		_, _ = fmt.Fprintf(logger, "Backup restored successfully.\n")
-		errDetail := strings.TrimSpace(installStderr.String())
-		if errDetail != "" {
-			return fmt.Errorf("installing binary failed: %s", errDetail)
-		}
-		return fmt.Errorf("installing binary failed: %w", err)
-	}
-	_, _ = fmt.Fprintf(logger, "Binary installed to %s\n", binaryPath)
-
-	// ── Step 4b: CLEAR STALE NOTIFICATION ───────────────────────────────
-
-	// Clear system.update_available to prevent showing a stale notification
-	// after the update is applied. Best-effort: a failure here should not
-	// block the update itself.
-	if e.store != nil {
-		if delErr := e.store.DeleteHubSetting(ctx, HubSettingSectionUpdateAvailable); delErr != nil && delErr != store.ErrNotFound {
-			_, _ = fmt.Fprintf(logger, "Warning: failed to clear update_available setting: %v\n", delErr)
-			log.Warn("Failed to clear update_available setting", "error", delErr)
-		} else {
-			_, _ = fmt.Fprintf(logger, "Cleared update_available notification.\n")
-		}
-	}
-
-	// ── Step 5: RESTART ─────────────────────────────────────────────────
-
-	_, _ = fmt.Fprintf(logger, "\n==> Restarting service...\n")
-	_, _ = fmt.Fprintf(logger, "Update: %s -> %s\n", version.Version, targetVersion)
-	_, _ = fmt.Fprintf(logger, "Timestamp: %s\n", time.Now().UTC().Format(time.RFC3339))
-
-	log.Info("Binary update complete, initiating restart",
-		"old_version", version.Version,
-		"new_version", targetVersion,
-		"binary_path", binaryPath,
-		"service_name", serviceName)
-
-	// Fire-and-forget: start the restart but don't wait for it to finish.
-	// "systemctl restart" sends SIGTERM to this very process, so cmd.Run()
-	// would never return. Using cmd.Start() lets us return success so the
-	// calling goroutine can persist the completed run status to the DB
-	// before the process is killed. Same pattern as RebuildServerExecutor.
-	restartCmd := exec.Command("sudo", "systemctl", "restart", serviceName)
-	restartCmd.Stdout = logger
-	restartCmd.Stderr = logger
-	if err := restartCmd.Start(); err != nil {
-		log.Error("Failed to initiate service restart", "error", err)
-		return fmt.Errorf("restarting service failed: %w", err)
-	}
-
-	_, _ = fmt.Fprintln(logger, "\nBinary update complete, restart initiated.")
-	return nil
-}
-
-// DownloadFile fetches a URL and streams it to a local file, logging progress.
-func DownloadFile(ctx context.Context, url, destPath string, logger io.Writer) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return fmt.Errorf("create download request: %w", err)
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("download request failed: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download returned HTTP %s", resp.Status)
-	}
-
-	out, err := os.Create(destPath)
-	if err != nil {
-		return fmt.Errorf("create temp file: %w", err)
-	}
-	defer func() { _ = out.Close() }()
-
-	written, err := io.Copy(out, resp.Body)
-	if err != nil {
-		return fmt.Errorf("write download: %w", err)
-	}
-
-	_, _ = fmt.Fprintf(logger, "Downloaded %d bytes to %s\n", written, destPath)
-	return nil
-}
-
-// ExtractScionBinary extracts a .tar.gz archive and returns the path to the
-// scion binary found within it. It looks for a file named "scion" at any
-// depth in the archive.
+// DefaultMaxExtractBytes caps the decompressed size of a release tarball
+// read by ExtractScionBinary. It matches DefaultMaxDownloadBytes (512 MiB):
+// a release archive holds one scion binary of a few hundred MB at most, so
+// anything larger is refused instead of being inflated (gzip bomb).
+const DefaultMaxExtractBytes int64 = 512 << 20
+
+// ExtractScionBinary extracts the scion binary from a release .tar.gz into
+// destDir/extracted and returns its path. Release archives
+// (build-release.yml: tar -czf … -C dist scion) hold exactly one regular
+// file named "scion" at the archive root; that is the only accepted layout:
+//   - a second root-level scion entry, a scion entry in a subdirectory, or a
+//     root-level scion that is not a regular file is an error;
+//   - other entries are skipped, never written to disk;
+//   - a sparse scion entry is an error (its holes are not read from input);
+//   - reading stops with an error once more than DefaultMaxExtractBytes have
+//     been decompressed, a scion entry declaring more than that is refused
+//     before writing, and the written binary is bounded to it as well.
 func ExtractScionBinary(tarballPath, destDir string, logger io.Writer) (string, error) {
+	return extractScionBinary(tarballPath, destDir, logger, DefaultMaxExtractBytes)
+}
+
+// errExtractTooLarge reports a tarball that decompresses past the cap.
+var errExtractTooLarge = errors.New("release archive exceeds the extraction size limit")
+
+// cappedReader returns errExtractTooLarge once more than n bytes were read.
+type cappedReader struct {
+	r io.Reader
+	n int64 // bytes still allowed
+}
+
+func (c *cappedReader) Read(p []byte) (int, error) {
+	if c.n < 0 {
+		return 0, errExtractTooLarge
+	}
+	if int64(len(p)) > c.n+1 {
+		p = p[:c.n+1]
+	}
+	n, err := c.r.Read(p)
+	c.n -= int64(n)
+	if c.n < 0 {
+		return n, errExtractTooLarge
+	}
+	return n, err
+}
+
+func extractScionBinary(tarballPath, destDir string, logger io.Writer, maxBytes int64) (string, error) {
+	return extractRootEntry(tarballPath, destDir, "scion", logger, maxBytes)
+}
+
+// extractRootEntry extracts the single root-level regular file entry of a
+// release .tar.gz into destDir/extracted/<entry> and returns its path, with
+// the rules and caps of ExtractScionBinary. Release plugin archives
+// (build-release.yml: tar -czvf … -C dist scion-plugin-<name>) have the
+// same layout with entry scion-plugin-<name>.
+func extractRootEntry(tarballPath, destDir, entry string, logger io.Writer, maxBytes int64) (string, error) {
 	f, err := os.Open(tarballPath)
 	if err != nil {
 		return "", fmt.Errorf("open tarball: %w", err)
@@ -1924,74 +1711,103 @@ func ExtractScionBinary(tarballPath, destDir string, logger io.Writer) (string, 
 	}
 	defer func() { _ = gz.Close() }()
 
-	tr := tar.NewReader(gz)
+	tr := tar.NewReader(&cappedReader{r: gz, n: maxBytes})
 	extractDir := filepath.Join(destDir, "extracted")
 	if err := os.MkdirAll(extractDir, 0o755); err != nil {
 		return "", fmt.Errorf("create extract directory: %w", err)
 	}
+	binPath := filepath.Join(extractDir, entry)
 
-	var scionBinaryPath string
-
+	found := false
 	for {
 		header, err := tr.Next()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
+			if errors.Is(err, errExtractTooLarge) {
+				return "", fmt.Errorf("%w (%d bytes)", errExtractTooLarge, maxBytes)
+			}
 			return "", fmt.Errorf("read tarball entry: %w", err)
 		}
 
-		// Sanitize: skip entries that try to escape the extract directory.
-		cleanName := filepath.Clean(header.Name)
-		if strings.HasPrefix(cleanName, "..") || strings.HasPrefix(cleanName, "/") {
-			continue
-		}
-
-		targetPath := filepath.Join(extractDir, cleanName)
-		if !strings.HasPrefix(targetPath, extractDir+string(os.PathSeparator)) && targetPath != extractDir {
-			continue
-		}
-
-		switch header.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(targetPath, 0o755); err != nil {
-				return "", fmt.Errorf("create directory %q: %w", cleanName, err)
+		name := path.Clean(strings.TrimPrefix(header.Name, "./"))
+		switch {
+		case name == entry:
+			if found {
+				return "", fmt.Errorf("release archive has more than one %q entry", entry)
 			}
-
-		case tar.TypeReg:
-			// Ensure parent directory exists.
-			if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
-				return "", fmt.Errorf("create parent for %q: %w", cleanName, err)
+			if header.Typeflag != tar.TypeReg {
+				return "", fmt.Errorf("release archive entry %q is not a regular file", header.Name)
 			}
-
-			outFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(header.Mode))
-			if err != nil {
-				return "", fmt.Errorf("create file %q: %w", cleanName, err)
+			// A sparse entry's holes are synthesized as zeros without
+			// reading input, so the stream cap does not bound it. Release
+			// binaries are never sparse.
+			if isSparseEntry(header) {
+				return "", fmt.Errorf("release archive entry %q is a sparse file; refusing it", header.Name)
 			}
-			if _, err := io.Copy(outFile, tr); err != nil {
-				_ = outFile.Close()
-				return "", fmt.Errorf("write file %q: %w", cleanName, err)
+			if header.Size > maxBytes {
+				return "", fmt.Errorf("%w: entry %q declares %d bytes (limit %d)", errExtractTooLarge, header.Name, header.Size, maxBytes)
 			}
-			_ = outFile.Close()
-
-			// Track the scion binary — look for a file named "scion" (base name).
-			if filepath.Base(cleanName) == "scion" {
-				scionBinaryPath = targetPath
-				_, _ = fmt.Fprintf(logger, "Found scion binary: %s\n", cleanName)
+			found = true
+			if err := writeExtracted(binPath, tr, maxBytes); err != nil {
+				if errors.Is(err, errExtractTooLarge) {
+					return "", fmt.Errorf("%w (%d bytes)", errExtractTooLarge, maxBytes)
+				}
+				return "", err
 			}
+			_, _ = fmt.Fprintf(logger, "Found %s binary: %s\n", entry, header.Name)
+		case path.Base(name) == entry:
+			return "", fmt.Errorf("release archive has a nested %q entry (%s); only a root-level %s is accepted", entry, header.Name, entry)
+		default:
+			// Not extracted. Its content is still read (and counted against
+			// the cap) by the next tr.Next.
 		}
 	}
 
-	if scionBinaryPath == "" {
-		return "", fmt.Errorf("no 'scion' binary found in tarball")
+	if !found {
+		return "", fmt.Errorf("no '%s' binary found at the root of the tarball", entry)
 	}
+	return binPath, nil
+}
 
-	// Ensure the extracted binary is executable.
-	if err := os.Chmod(scionBinaryPath, 0o755); err != nil {
-		return "", fmt.Errorf("chmod extracted binary: %w", err)
+// isSparseEntry reports whether hdr describes a GNU sparse file, in either
+// the old GNU format or the PAX GNU.sparse.* encoding (which archive/tar
+// presents as a regular file).
+func isSparseEntry(hdr *tar.Header) bool {
+	if hdr.Typeflag == tar.TypeGNUSparse {
+		return true
 	}
+	for k := range hdr.PAXRecords {
+		if strings.HasPrefix(k, "GNU.sparse.") {
+			return true
+		}
+	}
+	return false
+}
 
-	return scionBinaryPath, nil
+// writeExtracted writes r to dst with mode 0755, at most maxBytes: the
+// output is bounded on its own, independently of the input-side cap.
+func writeExtracted(dst string, r io.Reader, maxBytes int64) error {
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", dst, err)
+	}
+	n, err := io.CopyN(out, r, maxBytes+1)
+	if err != nil && err != io.EOF {
+		_ = out.Close()
+		_ = os.Remove(dst)
+		return fmt.Errorf("write %s: %w", dst, err)
+	}
+	if n > maxBytes {
+		_ = out.Close()
+		_ = os.Remove(dst)
+		return fmt.Errorf("%w: %s exceeds %d bytes", errExtractTooLarge, dst, maxBytes)
+	}
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", dst, err)
+	}
+	return os.Chmod(dst, 0o755)
 }
 
 // VerifyScionBinary runs the extracted binary to confirm it reports the
@@ -2021,30 +1837,6 @@ func VerifyScionBinary(ctx context.Context, binaryPath, expectedVersion string, 
 
 	_, _ = fmt.Fprintf(logger, "Version verified: %s\n", versionOutput.Version)
 	return nil
-}
-
-// BackupBinary copies the current binary to a backup path using sudo cp.
-// The source binary is typically owned by root (e.g., /usr/local/bin/scion),
-// so sudo is required to read it reliably.
-func BackupBinary(ctx context.Context, srcPath, backupPath string, logger io.Writer) error {
-	cmd := exec.CommandContext(ctx, "sudo", "cp", srcPath, backupPath)
-	cmd.Stdout = logger
-	cmd.Stderr = logger
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("backup copy failed: %w", err)
-	}
-
-	_, _ = fmt.Fprintf(logger, "Backed up current binary to %s\n", backupPath)
-	return nil
-}
-
-// RestoreBackup copies the backup binary back to the original path using
-// sudo install. This is the rollback mechanism when install fails.
-func RestoreBackup(backupPath, destPath string, logger io.Writer) error {
-	cmd := exec.Command("sudo", "install", "-m", "755", backupPath, destPath)
-	cmd.Stdout = logger
-	cmd.Stderr = logger
-	return cmd.Run()
 }
 
 // ParseMigrationParams extracts and validates migration-specific parameters from the request body.

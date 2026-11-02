@@ -96,6 +96,7 @@ type harnessOpts struct {
 	max       int
 	claimTTL  time.Duration
 	orgScope  bool
+	targets   []githubapp.Repo // default: example-owner/example-repo
 	mediator  string
 	reuseFrom *harness // share the fakes (simulates a mediator restart)
 }
@@ -146,8 +147,11 @@ func newHarness(t *testing.T, o harnessOpts) *harness {
 		},
 	})
 	h.claims = claim.NewStore(o.claimTTL, h.clock.Now)
+	if o.targets == nil {
+		o.targets = []githubapp.Repo{{Owner: "example-owner", Name: "example-repo"}}
+	}
 	h.srv = New(Options{
-		TargetRepos:   []githubapp.Repo{{Owner: "example-owner", Name: "example-repo"}},
+		TargetRepos:   o.targets,
 		OrgScope:      o.orgScope,
 		RunnerLabel:   testLabel,
 		StackLabel:    testStackLabel,
@@ -437,6 +441,14 @@ func TestForkGuard(t *testing.T) {
 		{"pull_request_target", testRepo, "pull_request_target"},
 		{"workflow_run", testRepo, "workflow_run"},
 		{"head repository missing", "", "pull_request"},
+		// Allowlist: every event but push and pull_request is refused.
+		{"issue_comment", testRepo, "issue_comment"},
+		{"repository_dispatch", testRepo, "repository_dispatch"},
+		{"workflow_dispatch", testRepo, "workflow_dispatch"},
+		{"schedule", testRepo, "schedule"},
+		{"merge_group", testRepo, "merge_group"},
+		{"unknown event", testRepo, "some_future_event"},
+		{"empty event", testRepo, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -953,6 +965,67 @@ func TestOrgScopeListsRunnersOncePerOwner(t *testing.T) {
 	}
 }
 
+// TestLaunchCarriesServedRepos: the launch env's GH_REPOS (the runner's job guard
+// allowlist) is the runner's registration scope: the repo alone in repo scope, every
+// target repo of the owner in org scope (an org runner may take any of their jobs).
+func TestLaunchCarriesServedRepos(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		org     bool
+		targets []githubapp.Repo
+		want    string
+	}{
+		{"repo scope", false, []githubapp.Repo{{Owner: "example-owner", Name: "example-repo"}, {Owner: "example-owner", Name: "second-repo"}}, "example-owner/example-repo"},
+		{"org scope", true, []githubapp.Repo{{Owner: "example-owner", Name: "example-repo"}, {Owner: "example-owner", Name: "second-repo"}}, "example-owner/example-repo,example-owner/second-repo"},
+		{"org scope, one repo", true, nil, "example-owner/example-repo"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, harnessOpts{orgScope: tc.org, targets: tc.targets})
+			h.addSameRepoRun(10)
+			h.queued(100, 10)
+			ex := h.executions()
+			if len(ex) != 1 {
+				t.Fatalf("executions = %d, want 1", len(ex))
+			}
+			if got := ex[0].Env[launcher.EnvRepos]; got != tc.want {
+				t.Errorf("GH_REPOS = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestOrgScopeServedReposForOtherTarget: in org scope, a job of a target repo that is
+// not the first gets a runner whose GH_REPOS includes that repo, and a job of a
+// same-owner repo that is not a target gets no runner at all. So servedRepos is only
+// ever called with a target repo, and the job guard's allowlist never has to add the
+// triggering repo itself (gemini on #4204, declined: it would only widen the guard).
+func TestOrgScopeServedReposForOtherTarget(t *testing.T) {
+	targets := []githubapp.Repo{{Owner: "example-owner", Name: "example-repo"}, {Owner: "example-owner", Name: "second-repo"}}
+	h := newHarness(t, harnessOpts{orgScope: true, targets: targets})
+
+	const second = "example-owner/second-repo"
+	h.gh.AddRun(fakes.GitHubRun{ID: 20, Repo: second, HeadRepo: second, Event: "push", Status: "queued"})
+	h.gh.EnsureJob(20, fakes.GitHubJob{ID: 200, Status: "queued", Labels: []string{testLabel}, CreatedAt: h.clock.Now()})
+	h.webhook(jobPayload("queued", 200, 20, second, []string{testLabel}, ""))
+	ex := h.executions()
+	if len(ex) != 1 {
+		t.Fatalf("executions = %d, want 1", len(ex))
+	}
+	if got, want := ex[0].Env[launcher.EnvRepos], "example-owner/example-repo,example-owner/second-repo"; got != want {
+		t.Errorf("GH_REPOS = %q, want %q", got, want)
+	}
+
+	const other = "example-owner/not-a-target"
+	h.gh.AddRun(fakes.GitHubRun{ID: 30, Repo: other, HeadRepo: other, Event: "push", Status: "queued"})
+	h.gh.EnsureJob(30, fakes.GitHubJob{ID: 300, Status: "queued", Labels: []string{testLabel}, CreatedAt: h.clock.Now()})
+	if code, out := h.webhook(jobPayload("queued", 300, 30, other, []string{testLabel}, "")); code != http.StatusOK || !strings.Contains(out, "ignored") {
+		t.Errorf("non-target repo's job: %d %q, want 200 ignored", code, out)
+	}
+	if n := len(h.executions()); n != 1 {
+		t.Errorf("executions = %d after a non-target repo's job, want still 1", n)
+	}
+}
+
 // ---- no secrets in logs ------------------------------------------------------
 
 // TestNoSecretsInLogs drives every path (accepted and rejected webhooks,
@@ -1027,4 +1100,60 @@ func TestNoSecretsInLogs(t *testing.T) {
 			t.Errorf("%s appears in the logs", name)
 		}
 	}
+}
+
+// TestForkReasonAllowlist: only push and same-repo pull_request runs may get a
+// runner; any other event, named or unknown, is refused fail-closed.
+func TestForkReasonAllowlist(t *testing.T) {
+	repo := githubapp.Repo{Owner: "example-owner", Name: "example-repo"}
+	same := &githubapp.RepoRef{FullName: "example-owner/example-repo"}
+	fork := &githubapp.RepoRef{FullName: "contributor/example-repo"}
+	run := func(event string, head *githubapp.RepoRef) *githubapp.Run {
+		return &githubapp.Run{Event: event, Repository: same, HeadRepository: head}
+	}
+	for _, tc := range []struct {
+		name string
+		run  *githubapp.Run
+		want string
+	}{
+		{"push", run("push", same), ""},
+		{"same-repo pull_request", run("pull_request", same), ""},
+		{"fork pull_request", run("pull_request", fork), "head_repository_differs"},
+		{"pull_request without head", run("pull_request", nil), "head_repository_missing"},
+		{"other repository", &githubapp.Run{Event: "push", Repository: fork, HeadRepository: fork}, "repository_mismatch"},
+		{"pull_request_target", run("pull_request_target", same), "event_not_allowed:pull_request_target"},
+		{"workflow_run", run("workflow_run", same), "event_not_allowed:workflow_run"},
+		{"issue_comment", run("issue_comment", same), "event_not_allowed:issue_comment"},
+		{"repository_dispatch", run("repository_dispatch", same), "event_not_allowed:repository_dispatch"},
+		{"workflow_dispatch", run("workflow_dispatch", same), "event_not_allowed:workflow_dispatch"},
+		{"schedule", run("schedule", same), "event_not_allowed:schedule"},
+		{"merge_group", run("merge_group", same), "event_not_allowed:merge_group"},
+		{"unknown", run("some_future_event", same), "event_not_allowed:some_future_event"},
+		{"empty", run("", same), "event_not_allowed:"},
+		{"case matters", run("Push", same), "event_not_allowed:Push"},
+	} {
+		if got := forkReason(tc.run, repo); got != tc.want {
+			t.Errorf("%s: forkReason = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestReconcileRefusesDisallowedEvents: reconcile backfill applies the same
+// allowlist: queued jobs of schedule/workflow_dispatch/issue_comment runs get
+// no runner.
+func TestReconcileRefusesDisallowedEvents(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	for i, ev := range []string{"schedule", "workflow_dispatch", "issue_comment"} {
+		id := int64(20 + i)
+		h.gh.AddRun(fakes.GitHubRun{ID: id, Repo: testRepo, HeadRepo: testRepo, Event: ev, Status: "queued",
+			Jobs: []fakes.GitHubJob{{ID: id * 10, Status: "queued", Labels: []string{testLabel}}}})
+	}
+	res := h.reconcile()
+	if res.Backfilled != 0 || h.jitCount() != 0 {
+		t.Errorf("reconcile %+v launched %d runners, want 0 for disallowed events", res, h.jitCount())
+	}
+	if res.ForkRunsRejected != 3 {
+		t.Errorf("ForkRunsRejected = %d, want 3", res.ForkRunsRejected)
+	}
+	h.wantLog(logging.EventRejectFork)
 }

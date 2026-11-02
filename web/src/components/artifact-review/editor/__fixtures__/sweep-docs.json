@@ -1,0 +1,57 @@
+{
+  "comment": "Documents for the edit sweep (sweep.test.ts) beside the shared CriticMarkup corpus: lists with star, plus and odd-numbered markers, tables with alignment colons, backslashed pipes and uneven padding, nested and quoted lists, syntax the serializer writes differently from the source, a mark across list items, a CRLF document, literal openers of every mark kind, a literal replacement opener with a later closer, blocks sharing a line run, reference links, task lists with strikethrough and a footnote, and a sample review.",
+  "cases": [
+    {
+      "name": "review sample",
+      "in": "# Design note: artifact review {++(draft)++}\n\nThis note shows {==every kind of mark==}{>>Is this list complete? Check against critic.ts.<<} that the review editor has to render.\nThe hub stores Markdown with {~~CriticMark~>CriticMarkup~~} inline, and a reviewer can {--simply --}suggest edits.\n\n## Marks\n\n- An insertion: we {++really ++}need this.\n- A deletion: this is {--not --}optional.\n- A substitution: the {~~quick~>slow~~} path.\n- A lone comment after a word{>>Who owns this?<<}.\n* A highlight on its own: {==important==}.\n\n1. Ordered item with `inline code` and a {++suggested `flag`++}.\n2. Marks inside code are literal: `{++not a mark++}`.\n3. A mark may hold a code span: {--the `old` flag--}.\n\n## Table\n\n| Mark | Syntax | Render |\n|:-----|:------:|-------:|\n| insertion | `{++text++}` | {++green++} |\n| deletion | `{--text--}` | {--red--} |\n| comment | `{>>note<<}` | margin note{>>like this<<} |\n\n## Code\n\n```go\n// Tokens in fenced code stay literal: {--keep me--}\nfunc main() { fmt.Println(\"{~~a~>b~~}\") }\n```\n\nA mark may span lines: {++this insertion\ncontinues on the next line++} and ends here.\n\n> A quote with _emphasis_, **strong** and a {--stale--} word.\n\nAn unclosed token at the end is literal text: {++ dangling.\n"
+    },
+    {
+      "name": "star and plus bullets",
+      "in": "Intro with {++an insertion++} and a note{>>check<<}.\n\n* first item with *emphasis*\n* second item with `code` and a [link](https://example.com)\n* third item\n  continued on a second line\n\n+ plus one\n+ plus two\n\n- loose one\n\n- loose two\n"
+    },
+    {
+      "name": "ordered lists with odd numbering",
+      "in": "3. three\n7. seven with {--deleted--} text\n10. ten\n    1. nested one\n    1. nested two\n\n1) paren one\n5) paren five\n"
+    },
+    {
+      "name": "tables with alignment and backslashed pipes",
+      "in": "| Left | Center | Right |\n|:-----|:------:|------:|\n| a \\| b | c | 1 |\n|d|e|2|\n| long cell text here | {++new++} | 3 |\n\nName | Value\n--- | ---\nplain | table without outer pipes\n"
+    },
+    {
+      "name": "nested and quoted lists",
+      "in": "- outer\n  - inner a\n  - inner b with {==highlight==}{>>why<<}\n- outer two\n\n> - quoted item\n> - another quoted\n\n- [ ] todo item\n- [x] done item\n"
+    },
+    {
+      "name": "backslashes and normalized syntax",
+      "in": "## Title ##\n\nSetext heading\n==============\n\na \\* b and snake\\_case and 1\\. not a list and &amp; and &copy; and `code`\n\nline with a hard break  \nnext line\\\nlast line\n\n***\n\n~~~\ntilde fence {++literal++}\n~~~\n\nText with <span>inline html</span> and an autolink <https://example.com>.\n\n- item with &lt;tag&gt; and \\[brackets\\]\n"
+    },
+    {
+      "name": "a mark across list items",
+      "in": "- a {++x\n- y++} b\n- c\n"
+    },
+    {
+      "name": "star and plus bullets (CRLF)",
+      "in": "Intro with {++an insertion++} and a note{>>check<<}.\r\n\r\n* first item with *emphasis*\r\n* second item with `code` and a [link](https://example.com)\r\n* third item\r\n  continued on a second line\r\n\r\n+ plus one\r\n+ plus two\r\n\r\n- loose one\r\n\r\n- loose two\r\n"
+    },
+    {
+      "name": "literal openers of every kind",
+      "in": "A plain opening paragraph with some words.\n\n- first item with {++a real insertion++}\n- second item with {--a real deletion--}\n\nNotes: {++ an opener, {-- another, {~~ a third, {== a fourth and {>> a fifth stay literal.\n\n- third item\n- fourth item\n\n| col | val |\n|-----|-----|\n| text | more |\n\nA closing paragraph with words.\n"
+    },
+    {
+      "name": "reference links",
+      "in": "See [the guide][g] and [another][h] for {++more++} detail.\n\n* item with [a ref][g]\n* plain item\n\n| link | note |\n|------|------|\n| [cell ref][h] | text |\n\n[g]: https://example.com/guide\n[h]: https://example.com/other \"Other\"\n"
+    },
+    {
+      "name": "blocks sharing a line run",
+      "in": "# Title with a ` tick\nA paragraph right under it.\n\nPress the ` key:\n- one item\n- two item\n\nA separate paragraph with `code` in it.\n"
+    },
+    {
+      "name": "a literal replacement opener with a later closer",
+      "in": "Use {~~ to start.\n\nSome text here.\n\nAnd ~~} to end.\n\nA closing paragraph.\n"
+    },
+    {
+      "name": "task lists, strikethrough and footnotes",
+      "in": "# Tasks, strikethrough and footnotes\n\n- [ ] Write the plan\n- [x] Review the **draft** with `code`\n- [ ] Parent task\n  - [x] Nested done\n  - [ ] Nested open\n\nSingle ~tilde~ and double ~~struck words~~ strike.\n\nA {--~~struck deletion~~--} and ~~struck {--inner--} text~~ here.\n\nA claim with a note.[^1]\n\n[^1]: The footnote text.\n"
+    }
+  ]
+}

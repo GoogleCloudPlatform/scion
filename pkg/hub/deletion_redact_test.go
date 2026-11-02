@@ -758,7 +758,7 @@ func TestSSEHandler_AgentStatusDeletionGenericForAdminSession(t *testing.T) {
 	ws.SetAuthzService(NewAuthzService(mockSuperAdminStore(DevUserID), nil))
 	t.Cleanup(pub.Close)
 
-	ts := httptest.NewServer(ws.Handler())
+	ts := httptest.NewServer(devSignedIn(t, ws))
 	defer ts.Close()
 	// One deadline for the connect and the whole stream read below, so a
 	// stalled stream fails the test instead of hanging it.

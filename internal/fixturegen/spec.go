@@ -123,6 +123,11 @@ func Spec() []TableFixture {
 				"kind": "federated", "home_issuer": visitorIssuer,
 				"federated_email": "visitor@" + visitorDomain, "created_at": baseTime,
 			},
+			{ // user of the stopping forced deletion below: status deleting
+				"id": "22222222-2222-2222-2222-2222222222d1", "email": "deleting@example.com",
+				"display_name": "Deleting", "role": "member", "status": "deleting",
+				"created_at": baseTime,
+			},
 		}},
 		{Table: "runtime_brokers", Rows: []row{
 			{
@@ -924,6 +929,25 @@ func Spec() []TableFixture {
 			},
 		}},
 
+		// ---- Chat message retention (hub.chat_retention; policy and
+		// per-project counts only, never message IDs or content) ----
+		{Table: "chat_retention_runs", Rows: []row{
+			{
+				"id": "5b0c1e2d-3f4a-4b5c-8d6e-7f8091a2b3c4", "trigger": "sweep", "dry_run": false,
+				"started_at": baseTime, "finished_at": baseTime, "status": "ok",
+				"actor":  nil,
+				"policy": `{"messages_retention_days":30,"main_cutoff":"2025-12-02T12:00:00Z"}`,
+				"counts": `{"` + projectID + `":{"main":12,"addressees":12,"mentions":3,"stars":1,"ext":12}}`,
+				"error":  nil,
+			},
+		}},
+		{Table: "chat_retention_cursors", Rows: []row{
+			{
+				"phase": "main", "cursor_created": baseTime, "cursor_id": "6c1d2e3f-4a5b-4c6d-9e7f-8091a2b3c4d5",
+				"reset_at": baseTime, "last_applied_cutoff": baseTime, "updated_at": baseTime,
+			},
+		}},
+
 		// ---- Secret encryption policy and migrations (ptone/scion#1530
 		// §6; key IDs and progress only, never key material) ----
 		{Table: "hub_encryption_policy", Rows: []row{
@@ -994,6 +1018,39 @@ func Spec() []TableFixture {
 				"workload_sub": "100000000000000000001", "scope": "test_identity:issue",
 				"member_cap": 2, "label": "", "created_at": baseTime,
 				"expires_at": baseTime.Add(time.Hour), "revoked_at": baseTime.Add(time.Minute), "revoked_by": userID,
+			},
+		}},
+
+		// ---- Forced user deletions (ptone/scion#2143): a tombstone in state
+		// stopping (NULL completed_at) and a completed one whose user row is
+		// gone; their agents, one per outcome kind that leaves a record ----
+		{Table: "user_deletions", Rows: []row{
+			{
+				"id": "de100000-0000-0000-0000-000000000001", "user_id": "22222222-2222-2222-2222-2222222222d1",
+				"state": "stopping", "requested_by_kind": "user", "requested_by_id": userID,
+				"credential_kind": "session", "requested_at": baseTime, "completed_at": nil,
+				"last_reconciled_at": baseTime.Add(time.Minute),
+				"before_summary":     `{"role":"member","status":"active","kind":"human"}`,
+				"orphaned_by_revoke": `[{"agentId":"` + agentID + `","edgeId":"ed100000-0000-0000-0000-000000000001"}]`,
+				"last_error":         "agent 33333333: runtime broker unavailable",
+			},
+			{
+				"id": "de100000-0000-0000-0000-000000000002", "user_id": "22222222-2222-2222-2222-2222222222d2",
+				"state": "completed", "requested_by_kind": "user", "requested_by_id": userID,
+				"credential_kind": "session", "requested_at": baseTime, "completed_at": baseTime.Add(10 * time.Minute),
+				"last_reconciled_at": nil, "before_summary": "", "orphaned_by_revoke": "[]", "last_error": "",
+			},
+		}},
+		{Table: "user_deletion_agents", Rows: []row{
+			{
+				"id": "de200000-0000-0000-0000-000000000001", "deletion_id": "de100000-0000-0000-0000-000000000001",
+				"agent_id": agentID, "slug": "fixture-agent", "project_id": projectID, "outcome": "failed",
+				"attempts": 3, "last_error": "runtime broker unavailable", "updated_at": baseTime.Add(time.Minute),
+			},
+			{
+				"id": "de200000-0000-0000-0000-000000000002", "deletion_id": "de100000-0000-0000-0000-000000000002",
+				"agent_id": "33333333-3333-3333-3333-3333333333d2", "slug": "", "project_id": "", "outcome": "removed",
+				"attempts": 1, "last_error": "", "updated_at": baseTime.Add(9 * time.Minute),
 			},
 		}},
 	}

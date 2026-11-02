@@ -35,7 +35,7 @@ import (
 // resolved (here SCION_HUB_ENDPOINT), so the instance credentials keep the
 // endpoint the operator reached the Hub through (ptone/scion#3272).
 func TestBrokerRegisterInstance_PassesTheEndpointItRegistersThrough(t *testing.T) {
-	const endpoint = "http://hub.example:8080"
+	const endpoint = "https://hub.example:8080"
 	setupRegisterInstanceTest(t, endpoint)
 	brokerRegisterInstance = "remote-docker"
 	orig := registerFlatInstance
@@ -57,7 +57,7 @@ func TestBrokerRegisterInstance_PassesTheEndpointItRegistersThrough(t *testing.T
 // broker-role key and the value "remote", as legacy remote registration
 // does, so Hub filters on that label treat it the same way.
 func TestBrokerRegisterInstance_LabelsTheRowAsARemoteBroker(t *testing.T) {
-	setupRegisterInstanceTest(t, "http://hub.example:8080")
+	setupRegisterInstanceTest(t, "https://hub.example:8080")
 	brokerRegisterInstance = "remote-docker"
 	orig := registerFlatInstance
 	t.Cleanup(func() { registerFlatInstance = orig })

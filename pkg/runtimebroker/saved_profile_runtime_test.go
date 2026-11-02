@@ -222,7 +222,7 @@ func TestStartAgent_UnresolvableSavedProfileOnKubernetesDefaultBroker(t *testing
 	const name = "k8s-default-saved-profile"
 	writeSavedAgentProfile(t, projectPath, name, "vanished")
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.StateDir = t.TempDir()
@@ -286,8 +286,10 @@ func TestStartAgent_ResolvableSavedProfileUsesItsRuntime(t *testing.T) {
 	writeSavedAgentProfile(t, f.projectPath, name, lifecycleK8sProfile)
 
 	w := lifecyclePost(t, f.srv, "/api/v1/agents/"+name+"/start", map[string]any{
-		"projectPath": f.projectPath,
-		"hubEndpoint": lifecycleHubEndpoint,
+		"projectPath":        f.projectPath,
+		"hubEndpoint":        lifecycleHubEndpoint,
+		"resolvedEnv":        lifecycleHubTokenEnv(),
+		"envClassifications": lifecycleHubTokenClass(),
 	})
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusAccepted, w.Body.String())
@@ -407,7 +409,7 @@ func TestStartAgent_RecordedRuntimeNoFallbackForInstanceRuntimes(t *testing.T) {
 				const name = "instance-runtime-agent"
 				writeSavedAgentInfo(t, projectPath, name, "vanished", c.recorded)
 
-				cfg := DefaultServerConfig()
+				cfg := testServerConfig()
 				cfg.BrokerID = "test-broker-id"
 				cfg.BrokerName = "test-host"
 				cfg.StateDir = t.TempDir()

@@ -173,3 +173,15 @@ func TestRenderDeliveryText_KeepsVisitorSenderKeys(t *testing.T) {
 		}
 	}
 }
+
+// The sender time zone key is hub-reserved: StripReservedMetadata removes a
+// client-supplied value, so only the hub sets it, after the strip.
+func TestStripReservedMetadata_StripsSenderTimezone(t *testing.T) {
+	out := StripReservedMetadata(map[string]string{"foo": "bar", messages.MetadataSenderTimezone: "Europe/Berlin"})
+	if _, ok := out[messages.MetadataSenderTimezone]; ok {
+		t.Errorf("%s survived the strip: %v", messages.MetadataSenderTimezone, out)
+	}
+	if out["foo"] != "bar" {
+		t.Errorf("unrelated key lost: %v", out)
+	}
+}

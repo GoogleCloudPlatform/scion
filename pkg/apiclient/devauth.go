@@ -22,6 +22,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 )
 
 const (
@@ -79,8 +81,15 @@ func InitDevAuth(cfg DevAuthConfig, scionDir string) (string, error) {
 		return "", fmt.Errorf("failed to create token directory: %w", err)
 	}
 
-	// Persist token with secure permissions
-	if err := os.WriteFile(tokenFile, []byte(token+"\n"), 0600); err != nil {
+	// Persist the token as a private file: mode 0600 on unix (in place, as
+	// before); on Windows an owner-only ACL set at creation, by atomic
+	// replace. The directory keeps its default protection (above).
+	tree, err := privatefs.OpenTree(filepath.Dir(tokenFile), privatefs.TreeOptions{})
+	if err != nil {
+		return "", fmt.Errorf("failed to write dev token file: %w", err)
+	}
+	defer func() { _ = tree.Close() }()
+	if err := tree.WriteFile(filepath.Base(tokenFile), []byte(token+"\n"), privatefs.Private); err != nil {
 		return "", fmt.Errorf("failed to write dev token file: %w", err)
 	}
 

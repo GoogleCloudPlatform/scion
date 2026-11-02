@@ -1985,11 +1985,18 @@ func ReadAgentTokenFile() string {
 // for this change — tracked as https://github.com/ptone/scion/issues/2213.
 func createHubClient(settings *config.Settings, endpoint string) (hubclient.Client, CredentialKind, error) {
 	authOpt, kind := selectHubCredential(endpoint)
+	// The broker-injected agent token to the broker-injected endpoint is
+	// the only exception to the transport rule (NewInjectedAgentHubClient).
+	if kind == CredentialKindAgentToken {
+		if client, ok := NewInjectedAgentHubClient(endpoint, 30*time.Second); ok {
+			return client, kind, nil
+		}
+	}
 	opts := []hubclient.Option{hubclient.WithTimeout(30 * time.Second)}
 	if authOpt != nil {
 		opts = append(opts, authOpt)
 	}
-	client, err := hubclient.New(endpoint, opts...)
+	client, err := NewUserHubClient(endpoint, opts...)
 	return client, kind, err
 }
 
@@ -2092,6 +2099,21 @@ func ScopedTokenProjectNotFoundError(projectID string) error {
 		ErrScopedTokenProjectNotFound, projectID)
 }
 
+// ScopedTokenProjectLookupEmptyError explains a project reference (slug,
+// name or git URL) that matched nothing under a user access token. The hub
+// lists projects to a token only with project:list (and reads them with
+// project:read), so an empty result is most likely a missing scope. The
+// message is the same whether or not the project exists. ref is the
+// reference the CLI looked up.
+func ScopedTokenProjectLookupEmptyError(ref string) error {
+	return fmt.Errorf("%w: the Hub found no project matching '%s' while using the user access token in SCION_HUB_TOKEN\n\n"+
+		"The token most likely lacks the project:read and project:list scopes, which the CLI needs to look up the project.\n"+
+		"project:manage does not include them. Create a token that includes them, for example:\n"+
+		"  scion hub token create --project <project> --name <name> --scopes project:read,project:list,agent:list,agent:read\n\n"+
+		"If the token already has both, check that the reference names the project the token is scoped to",
+		ErrScopedTokenProjectNotFound, ref)
+}
+
 // IsLocalhostEndpoint reports whether endpoint is a loopback hub: its host is
 // localhost, 127.0.0.1 or ::1. It is the one rule for where a dev credential
 // may go: the CLI reports one only for such a hub and sends one only to it.
@@ -2137,8 +2159,9 @@ func wrapHubError(endpoint string, err error) error {
 		return fmt.Errorf("authentication failed, login to hub with 'scion hub auth login'")
 	}
 	// No hint without an endpoint: the error already says how to configure
-	// one, and there is no hub to check.
-	if config.IsHubManagedAgent() || endpoint == "" {
+	// one, and there is no hub to check. A transport refusal sent nothing,
+	// and its text already names the fix.
+	if config.IsHubManagedAgent() || endpoint == "" || errors.Is(err, config.ErrPlaintextNonLoopback) {
 		return err
 	}
 	return fmt.Errorf("%w\n\n%s", err, HubCheckHint(endpoint))

@@ -241,10 +241,10 @@ func TestProfileFindingSeverity(t *testing.T) {
 }
 
 // TestNewDefaultRegistry pins the built-in check list: exactly the
-// settings.profiles check runs.
+// settings.profiles and settings.transport_proxy checks run.
 func TestNewDefaultRegistry(t *testing.T) {
 	rep := NewDefaultRegistry().RunAll(context.Background(), Env{})
-	if len(rep.Checks) != 1 || rep.Checks[0] != ProfilesCheckName {
-		t.Fatalf("checks = %v, want exactly [%s]", rep.Checks, ProfilesCheckName)
+	if len(rep.Checks) != 2 || rep.Checks[0] != ProfilesCheckName || rep.Checks[1] != TransportProxyCheckName {
+		t.Fatalf("checks = %v, want exactly [%s %s]", rep.Checks, ProfilesCheckName, TransportProxyCheckName)
 	}
 }

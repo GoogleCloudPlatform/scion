@@ -117,7 +117,7 @@ func resolveLinkedCheckout(in linkedCheckoutInput) linkedCheckoutDecision {
 	if in.HubGlobalProject {
 		return linkedCheckoutDecision{Reason: "global project"}
 	}
-	if isHubManagedProjectPath(in.ProjectPath) {
+	if isHubManagedProjectPath(in.ProjectPath) || isSharedHubProjectRoot(in.ProjectPath) {
 		return linkedCheckoutDecision{Reason: "hub-managed project directory, not a linked checkout"}
 	}
 	if !in.WorkstationMode {

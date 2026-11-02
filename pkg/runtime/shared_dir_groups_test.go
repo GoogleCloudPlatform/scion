@@ -44,6 +44,7 @@ func sharedDirGroupsRunConfig(groups ...int64) RunConfig {
 		Labels:       map[string]string{"scion.project": "myproject"},
 		SharedDirs:   []api.SharedDir{{Name: "scratchpad"}},
 		SharedDirStorage: &SharedDirRealization{
+			ProjectID:          "pid-1",
 			Backend:            "nfs",
 			PVClaimName:        "scion-shared",
 			SubPaths:           map[string]string{"scratchpad": "projects/pid-1/shared-dirs/scratchpad"},

@@ -97,8 +97,9 @@ func layoutRealPath(t *testing.T, p string) string {
 // worktree (pkg/agent detectRepoRoot). The project checkout's own .git
 // pointer file, which pkg/agent reads to derive the project's common git
 // dir, must never sit under a read-write bind in the agent container,
-// whether the checkout is next to the main repository (fallback layout,
-// which mounts the main repository whole) or inside it (worktree layout).
+// whether the checkout is next to the main repository (the outside-root
+// fallback, which mounts only <main>/.git and the workspace) or inside it
+// (the worktree layout).
 func TestBuildCommonRunArgs_LinkedWorktreeProjectPointerNotWritable(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -137,6 +138,11 @@ func TestBuildCommonRunArgs_LinkedWorktreeProjectPointerNotWritable(t *testing.T
 				RuntimeName:  "docker",
 				RepoRoot:     main,
 				Workspace:    ws,
+				// Both layouts (the in-repo worktree and the registered
+				// outside-root worktree) now bind a per-agent private
+				// .git/config on docker; seed its source so a missing config
+				// source does not refuse the start and mask the layout under test.
+				PrivateGitConfigSource: seedTestPrivateGitConfig(t),
 			})
 			if err != nil {
 				t.Fatalf("buildCommonRunArgs: %v", err)

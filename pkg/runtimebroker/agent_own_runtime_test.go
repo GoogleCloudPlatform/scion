@@ -243,7 +243,7 @@ func newOwnRTFixtureWith(t *testing.T, opts ownRTOptions) *ownRTFixture {
 	defaultRT := runtime.NewKubernetesRuntime(client)
 	defaultRT.DefaultNamespace = "default"
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	f.srv = New(cfg, agent.NewManager(defaultRT), defaultRT, config.RuntimeBuildRecord{})
@@ -578,11 +578,11 @@ func TestKnownAgentProjectDir_HintOutsideKnownDirsIgnored(t *testing.T) {
 	}
 
 	for _, hint := range []string{"", other, filepath.Dir(other), "/nonexistent/path"} {
-		if got := f.srv.knownAgentProjectDir(ownRTAgent, ownRTProjectID, hint); got != f.projectDir {
+		if got := f.srv.knownAgentProjectDir(context.Background(), ownRTAgent, ownRTProjectID, hint); got != f.projectDir {
 			t.Errorf("hint %q: knownAgentProjectDir = %q, want %q", hint, got, f.projectDir)
 		}
 	}
-	if got := f.srv.knownAgentProjectDir(ownRTAgent, ownRTProjectID, f.projectDir); got != f.projectDir {
+	if got := f.srv.knownAgentProjectDir(context.Background(), ownRTAgent, ownRTProjectID, f.projectDir); got != f.projectDir {
 		t.Errorf("hint naming the known dir: got %q, want %q", got, f.projectDir)
 	}
 
@@ -591,7 +591,7 @@ func TestKnownAgentProjectDir_HintOutsideKnownDirsIgnored(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(other, "agents", "hint-only"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if got := f.srv.knownAgentProjectDir("hint-only", ownRTProjectID, other); got != "" {
+	if got := f.srv.knownAgentProjectDir(context.Background(), "hint-only", ownRTProjectID, other); got != "" {
 		t.Errorf("hint of another project: knownAgentProjectDir = %q, want empty", got)
 	}
 
@@ -604,7 +604,7 @@ func TestKnownAgentProjectDir_HintOutsideKnownDirsIgnored(t *testing.T) {
 	if err := config.WriteProjectID(linked, ownRTProjectID); err != nil {
 		t.Fatal(err)
 	}
-	if got := f.srv.knownAgentProjectDir("linked-only", ownRTProjectID, filepath.Dir(linked)); got != linked {
+	if got := f.srv.knownAgentProjectDir(context.Background(), "linked-only", ownRTProjectID, filepath.Dir(linked)); got != linked {
 		t.Errorf("linked hint: knownAgentProjectDir = %q, want %q", got, linked)
 	}
 }
@@ -648,7 +648,7 @@ func TestDeleteAgent_DockerOwnRuntime_ContainerIDUnchanged(t *testing.T) {
 		Labels: map[string]string{projectkeys.LabelProjectID: ownRTProjectID},
 	}}}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 	srv.resolveAuxiliaryRuntime = withoutRecord(func(string, string, string) runtime.Runtime {
@@ -896,31 +896,29 @@ func TestEnsureAgentOwnRuntime_ProfileEditedResolvesAgain(t *testing.T) {
 
 // Restart of an agent whose pod is already gone, in the issue's setup: the
 // best-effort search of the other runtimes meets the Forbidden default
-// namespace, which is logged and skipped (no 503 lookup failure); the
-// restart goes on to start the agent.
-func TestRestartAgent_ProfileNamespace_PodGone_ProceedsToStart(t *testing.T) {
+// namespace, which is logged and skipped (no 503 lookup failure). On a
+// legacy Kubernetes runtime the pathless restart is then refused before
+// the stop (operator-owned placement).
+func TestRestartAgent_ProfileNamespace_PodGonePathless_RefusedBeforeStop(t *testing.T) {
 	f := newOwnRTFixture(t, "agents", false)
-	// The start below reads the global settings only. Clear the embedded
-	// default harness config, so it fails on the missing project path and
-	// not on resolving that harness config (whose "not found" error the
-	// handler reports as a missing agent, ptone/scion#5433).
 	globalDir := filepath.Dir(filepath.Dir(filepath.Dir(f.projectDir)))
 	if err := os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte("schema_version: \"1\"\ndefault_harness_config: \"\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	w := f.do(t, http.MethodPost, "/api/v1/agents/"+ownRTAgent+"/restart?projectId="+ownRTProjectID+"&runtime=kubernetes")
-	// The start that follows fails: with the pod gone, restart has no
-	// project path for the agent (unchanged behaviour), so it answers 500,
-	// not the 503 a failed lookup would give.
-	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "Failed to restart agent") {
-		t.Fatalf("restart status = %d, body %s; want 500 from the start", w.Code, w.Body.String())
+	// With the pod gone, restart has no project path for the agent, so the
+	// stored config cannot be checked against the operator-owned placement
+	// of the legacy Kubernetes runtime: the restart is refused before the
+	// stop, and never proceeds to the start.
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), placementLegacyRestartNoProjectCause) {
+		t.Fatalf("restart status = %d, body %s; want 400 refused before the stop", w.Code, w.Body.String())
 	}
 	if recs := f.logRecords(t, "runtime list failed while searching the other runtimes"); len(recs) == 0 {
 		t.Fatalf("no skipped-runtime warning; logs:\n%s", f.logs.String())
 	}
-	if recs := f.logRecords(t, "agent not found in project, proceeding with start"); len(recs) != 1 {
-		t.Fatalf("restart did not proceed to start; logs:\n%s", f.logs.String())
+	if recs := f.logRecords(t, "agent not found in project, proceeding with start"); len(recs) != 0 {
+		t.Fatalf("restart proceeded to start; logs:\n%s", f.logs.String())
 	}
 }
 
@@ -1173,7 +1171,13 @@ func TestOtherRuntimes_SameNamedPodsInTwoNamespaces_Ambiguous(t *testing.T) {
 
 	t.Run("restart", func(t *testing.T) {
 		f, runs := setup(t)
-		w := f.do(t, http.MethodPost, "/api/v1/agents/"+ownRTAgent+"/restart?projectId="+ownRTProjectID+"&runtime=kubernetes")
+		// The restart names the agent's project: no single container
+		// matches, so it could not recover the project from one.
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+ownRTAgent+"/restart?projectId="+ownRTProjectID+"&runtime=kubernetes",
+			strings.NewReader(projectBody(f.projectDir, "")))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		f.srv.Handler().ServeHTTP(w, req)
 		// The HTTP body is the generic runtime-op message; the logged error
 		// carries the reason.
 		if w.Code < 400 || !strings.Contains(f.logs.String(), "ambiguous") {

@@ -180,7 +180,7 @@ func TestDeleteAgent_PassesRequestProjectIDAsHubProjectID(t *testing.T) {
 	entries := []api.AgentInfo{}
 	rt := labelFilterRuntime(&entries, &deleted)
 	mgr := &hubIDRecordingManager{Manager: agent.NewManager(rt)}
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})

@@ -133,11 +133,9 @@ var serverEnvTopLevelKeys = []string{
 
 // serverEnvExtraKeys lists the server settings the settings schema has no
 // node for, with their schema type.
-var serverEnvExtraKeys = map[string]string{
-	// Read by the hub from GlobalConfig (hub.gcpProjectId); VersionedSettings
-	// has no field for it.
-	"server.hub.gcp_project_id": "string",
-}
+// None today: server.hub.gcp_project_id, the last one, has a schema node
+// since ptone/scion#3830.
+var serverEnvExtraKeys = map[string]string{}
 
 // ServerEnvExcludedKeys documents settings that no SCION_SERVER_* name sets,
 // with the reason. None of them is in the table.

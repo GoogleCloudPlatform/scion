@@ -5,9 +5,10 @@
 The hybrid tier extends the [Single-Node VM deployment](single-node-vm.md) with a
 second place to run agents: a GKE cluster (`gke` runtime profile), alongside the
 VM's existing co-located Docker broker. Both runtimes share project scratchpads
-through `server.shared_dir_storage: nfs` — a new, decoupled-from-workspaces
-setting that points both the Docker bind mount and the Kubernetes PVC `subPath`
-at the same NFS-served directory tree on the VM.
+through one NFS-served directory tree on the VM: both the Docker bind mount and
+the Kubernetes PVC `subPath` point at it. Hybrid hubs deployed so far configure
+this with `server.shared_dir_storage: nfs`, which is now deprecated in favour of
+`server.project_storage`; see [Upgrading to `server.project_storage`](#upgrading-to-serverproject_storage).
 
 This tier keeps the single-node hub's SQLite store and its Docker broker
 unchanged. It adds:
@@ -27,7 +28,7 @@ must have direct local filesystem access to the NFS export (i.e. it can
 (mode + ACL, below) only runs when the broker can see and manage that
 directory tree directly. A broker that has no local copy of the export —
 for example a hypothetical future in-cluster GKE broker — is **not
-supported** by `shared_dir_storage: nfs`: `resolveSharedDirs` refuses,
+supported** by NFS shared directories: `resolveSharedDirs` refuses,
 naming the missing path, rather than letting Kubernetes create the `subPath`
 itself. (Kubelet would create a missing `subPath` as the export's squashed
 anonymous identity on an `all_squash` export — exactly the identity the
@@ -42,6 +43,9 @@ This page summarizes what an operator running or maintaining this tier needs
 to know.
 
 ## Settings
+
+The settings a hybrid hub ships today (deprecated form; see
+[Upgrading to `server.project_storage`](#upgrading-to-serverproject_storage)):
 
 ```yaml
 # ~/.scion/settings.yaml (global) on the broker
@@ -76,16 +80,16 @@ broker logs a one-time warning at startup if any of them are set, and logs the
 resolved layout (`backend`, `host_base`, `subpath_root`, `pv_name`) exactly
 once per start.
 
-To keep a broker's Docker profile on the local layout while only the `gke`
-profile uses the export, leave `server.shared_dir_storage.backend` as `local`
-(keeping the `nfs` block) and set `shared_dir_storage_backend: nfs` on the
-`gke` runtime entry or profile. The override is read at every agent start (no
-restart), and an `nfs`-resolved start still needs the export mounted on that
-broker; a missing mount fails only those starts. See
-[Per-profile backend](../../docs-site/src/content/docs/reference/server-config.md#per-profile-backend).
+Per-runtime and per-profile storage overrides (`shared_dir_storage_backend`,
+`shared_dir_storage_backends`, `home_storage_backend`, `home_storage_leaf`) are
+removed: settings validation and the hub admin settings API reject them with an
+error naming `server.project_storage` and `volumes:`. Every runtime of the
+broker uses the same placement. A directory that must stay node-local (for
+example a build cache for Docker agents) is an ordinary `volumes:` entry. See
+[Removed storage overrides](../../docs-site/src/content/docs/reference/server-config.md#removed-storage-overrides).
 
 The NFS server is reachable only at its internal IP inside the hub's own VPC,
-so any broker configured with `shared_dir_storage: nfs` must run on that same
+so any broker whose storage is on this NFS export must run on that same
 VPC network (or one routed to it) to mount the share.
 
 Agents that `deploy.sh`'s hybrid tier runs on GKE reach the hub itself through
@@ -102,6 +106,66 @@ same setting and the same confined resolver, so `scratchpad` listings work
 whether the project is browsed via a co-located Docker broker or lives only on
 GKE. When the setting is unset or `local`, both the broker and the hub file
 browser behave exactly as they do today — this is an additive, opt-in feature.
+
+## Upgrading to `server.project_storage`
+
+`server.project_storage` replaces `server.workspace_storage`,
+`server.shared_dir_storage` and `server.home_storage` with one block whose
+`backend` places workspaces **and** shared directories (see
+[Project Storage](../../docs-site/src/content/docs/reference/server-config.md#project-storage-serverproject_storage)).
+A hybrid hub's settings have only `shared_dir_storage: nfs`; workspaces are on
+the local backend (hub-local, under `~/.scion/projects/<slug>` for hub-native
+projects). The upgrade runs in this order:
+
+1. **Upgrade the binaries; nothing else changes.** Without
+   `server.project_storage`, the hub and broker synthesize it from the old
+   blocks and keep today's placement: shared directories stay on the
+   `shared_dir_storage` export and workspaces stay where they are. This
+   transitional split exists only for synthesized settings and cannot be
+   written as a `project_storage` block. At startup the hub and broker log a
+   warning that names `server.shared_dir_storage` and prints the exact
+   `server.project_storage` block to write, and the hub's
+   `project_storage_config` health check reports `degraded` until it is
+   written.
+2. **Write `server.project_storage` and remove `shared_dir_storage`.** Use
+   `backend: nfs` with the shared-dir export's `nfs` block, as the warning
+   prints it. For the settings above:
+
+   ```yaml
+   server:
+     project_storage:
+       backend: nfs
+       nfs:
+         mount_root: /srv
+         shares:
+           - id: scion-shared
+             server: <nfs-server-ip>
+             export: /srv/scion-shared
+             pv_name: scion-shared
+         subpath_root: projects
+   ```
+
+   Setting both blocks refuses startup. This is a behaviour change: one
+   backend places both data classes, so **new workspaces are created on the
+   NFS export too**, on Docker and on GKE. The export's capacity (for a
+   `deploy.sh` hub, the size-capped `/var/lib/scion-nfs/export.img`) must
+   hold them. The `nfs` fields that `shared_dir_storage` ignored (`uid`, `gid`,
+   `mount_options`, `storage_class`, `auto_mount`) now take effect, with the
+   meaning they have for workspace storage. Restart
+   the hub and broker (the block is Layer-0).
+3. **Move existing data.** Writing the block in step 2 does not move existing
+   data by itself. The hub's `project-storage-migrate` maintenance migration
+   (Admin → Maintenance, or
+   `POST /api/v1/admin/maintenance/migrations/project-storage-migrate/run`;
+   run it with `dryRun` first) moves the hub's own trees, such as hub-local
+   `~/.scion/projects/<slug>` workspaces. Each Runtime Broker moves its own
+   node-local shared dirs into `<ProjectRoot>/shared-dirs/<name>` on the
+   share on its first start after upgrade with its shared-dir layout on the
+   share (copy-only, never overwriting; the source is kept as
+   `<name>.migrated-<ts>`). No `scion` CLI command runs the hub migration.
+
+Going back after step 2 means restoring `shared_dir_storage` and moving any
+workspaces created on the export back by hand.
 
 ## Security posture
 
@@ -401,7 +465,7 @@ if __name__ == "__main__":
 
 ### Shared-dir removal
 
-With `shared_dir_storage: nfs`, both project deletion and single-shared-dir
+With shared directories on the NFS export, both project deletion and single-shared-dir
 removal act on the export, not just the database:
 
 - **Deleting a project** removes that project's entire
@@ -605,9 +669,13 @@ fresh one.
 
 ## Migration (enabling this on an existing deployment)
 
+This section describes enabling the deprecated `shared_dir_storage` block on
+an existing deployment. On a current release, configure `server.project_storage`
+instead (see [Upgrading to `server.project_storage`](#upgrading-to-serverproject_storage)):
+its migration operation moves existing data.
+
 `shared_dir_storage` is opt-in and additive. When it's unset or `local`,
-behavior is byte-identical to today — no existing single-node, HA, or
-`workspace_storage: nfs` deployment is affected by this feature existing.
+behavior is unchanged.
 
 When you enable it on a deployment that already has projects with scratchpad
 data:

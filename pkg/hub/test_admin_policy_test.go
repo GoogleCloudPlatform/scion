@@ -201,8 +201,8 @@ func TestTestSuperAdmin_IssuerTokens(t *testing.T) {
 // tsaDenyRoutes are the deny-set and default-deny routes the matrix
 // exercises: every server configuration and settings surface, the GitHub
 // app, hub environment variables, maintenance, auth reset, key rotation,
-// integrations, access constraint administration, issuance and delegation
-// adoption (a legacy role-claim admin route).
+// integrations, access constraint administration, issuance, delegation
+// adoption and server key status (legacy role-claim admin routes).
 var tsaDenyRoutes = []struct {
 	method, path string
 	body         any
@@ -217,6 +217,7 @@ var tsaDenyRoutes = []struct {
 	{http.MethodPut, "/api/v1/admin/messaging", map[string]any{}, false},
 	{http.MethodPut, "/api/v1/admin/project-defaults", map[string]any{}, false},
 	{http.MethodPut, "/api/v1/admin/profiling", map[string]any{}, false},
+	{http.MethodPut, "/api/v1/admin/chat-retention", map[string]any{}, false},
 	{http.MethodGet, "/api/v1/github-app", nil, false},
 	{http.MethodGet, "/api/v1/env?scope=hub", nil, true},
 	{http.MethodGet, "/api/v1/admin/maintenance/operations", nil, false},
@@ -226,6 +227,9 @@ var tsaDenyRoutes = []struct {
 	{http.MethodPost, "/api/v1/admin/access-constraint-previews", map[string]any{}, false},
 	{http.MethodPost, "/api/v1/test-identities", map[string]any{"role": "member"}, false},
 	{http.MethodGet, "/api/v1/admin/delegation-adoption", nil, false},
+	// Server key status: a legacy admin route (requireAdmin), denied
+	// before its experiment gate.
+	{http.MethodGet, "/api/v1/admin/keys/status", nil, false},
 }
 
 // Every deny-set route answers 403 to both admin kinds, including the
@@ -268,7 +272,7 @@ func TestTestAdminPolicy_DenySetRoutes(t *testing.T) {
 		}
 	}
 	for _, want := range []string{"permission:hub.config.read", "permission:hub.experiments.update", "role_gate:handlers_env_secrets.go:authorizeHubEnvVarList",
-		"permission:hub.github_app.read", "legacy_route:admin.delegationAdoption"} {
+		"permission:hub.github_app.read", "legacy_route:admin.delegationAdoption", "legacy_route:admin.keys.status"} {
 		assert.True(t, subjects[want], "sink policy denial %s; got %v", want, subjects)
 	}
 }
@@ -1166,7 +1170,7 @@ func TestTestAdminPolicy_DispatchSecretsClamp(t *testing.T) {
 		return got
 	}
 	second := func(a *store.Agent) map[string]string {
-		return d.resolveAsNeededForKeys(ctx, a, []string{"B_AN", "H_AN", "P_AN", "U_AN"}, nil)
+		return mustResolveAsNeeded(t, d, ctx, a, []string{"B_AN", "H_AN", "P_AN", "U_AN"}, nil)
 	}
 
 	// Not a member: user scope only.
@@ -1242,7 +1246,7 @@ func TestTestAdminPolicy_DelegationGrantManagementDenied(t *testing.T) {
 	superKind := tsaIdentity(t, s, tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin).Identity.ID)
 	hubKind := tsaIdentity(t, s, tsaIssue(t, srv, issuer2, testAdminRoleHubAdmin).Identity.ID)
 	human := tsaIdentity(t, s, taUser(t, s, "tsa-dg-human", store.SystemRoleSuperAdmin).ID)
-	ids := []string{agentDelegationRevokePermission, agentDelegationCredentialRevokePermission, agentDelegationListPermission, agentDelegationReadPermission}
+	ids := []string{agentDelegationRevokePermission, agentDelegationCredentialRevokePermission, agentDelegationListPermission, agentDelegationReadPermission, agentDelegationRevokeAllPermission}
 	for _, id := range ids {
 		assert.True(t, testAdminPermissionDenied(id), id)
 		for _, res := range []Resource{{Type: "hub", ID: "hub"}, {Type: "project", ID: "tsa-dg-project"}} {

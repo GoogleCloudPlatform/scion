@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 )
 
 // The /readyz reasons of a keyring file whose signing ring cannot issue.
@@ -40,24 +41,99 @@ const (
 // hub-local (signingKeySourceIsHubLocal): the test admin tier refuses it.
 const SigningKeySourceKeyring = "keyring"
 
-// validateKeyringConfig checks a keyring-mode ServerConfig
-// (ptone/scion#1530 Phase 1): the keyring must satisfy this release's
-// session pilot limits, SharedSigningSecret must be its "legacy" signing
-// entry (every purpose but the web session cookies still uses it), and
-// explicit agent/user JWT signing keys are refused, so no purpose is
-// partly rotated. Legacy mode (no keyring file) is unchanged: explicit
-// signing keys keep their precedence.
-func validateKeyringConfig(cfg ServerConfig) error {
-	k := cfg.Keyring
-	if k == nil || k.Source() != keyring.SourceFile {
-		return nil
-	}
+// keyringReleaseCheck refuses what this release does not support in
+// managed ring mode (releaseKeyringCheck): every requirement that exists
+// only because some purposes are not on the signing ring yet. Every
+// release-limit check goes through it: the server's load of the keyring
+// file (CheckKeyringRelease), startup (validateKeyringConfig) and
+// `scion server keys check` (CheckKeyringFile). Lifting the limits is a
+// change to this one line. A variable so tests can build servers on
+// versioned rings and on rings without the "legacy" entry; production never
+// changes it.
+var keyringReleaseCheck = releaseKeyringCheck
+
+// CheckKeyringRelease applies this release's limits to a keyring file the
+// server has just loaded, before the hub exists (keyringReleaseCheck,
+// without a session secret). Errors name no key material.
+func CheckKeyringRelease(k *keyring.Keyring) error {
+	return keyringReleaseCheck(k, nil)
+}
+
+// releaseKeyringCheck applies this release's limits to a keyring file:
+// keyring.Keyring.CheckSessionPilot (no emit "versioned" or write_format
+// "v2", a "legacy" signing entry, and the imported legacy encryption key
+// as the active one) and, at startup (cfg non-nil), SharedSigningSecret
+// equal to the "legacy" entry, compared in constant time, for the purposes
+// that still read it. `scion server keys check` passes a nil cfg: it has
+// no session secret. Errors name no key material.
+func releaseKeyringCheck(k *keyring.Keyring, cfg *ServerConfig) error {
 	if err := k.CheckSessionPilot(); err != nil {
 		return err
 	}
+	if cfg == nil {
+		return nil
+	}
+	// CheckSessionPilot has required the entry; a missing one compares
+	// unequal anyway.
 	legacy, _ := k.Signing().LegacySecret()
-	if subtle.ConstantTimeCompare([]byte(cfg.SharedSigningSecret), []byte(legacy)) != 1 {
+	if legacy == "" || subtle.ConstantTimeCompare([]byte(cfg.SharedSigningSecret), []byte(legacy)) != 1 {
 		return errors.New("keyring mode: SharedSigningSecret must be the keyring's \"legacy\" signing entry")
+	}
+	return nil
+}
+
+// legacyReaderCheckPurpose derives nothing; checkLegacyEmitActiveReader
+// uses it only to list the legacy readers' IDs.
+var legacyReaderCheckPurpose = keyring.NewPurpose("legacy_reader_check", func([]byte) []byte { return nil })
+
+// checkLegacyEmitActiveReader refuses a signing ring that would issue
+// ID-less values its own readers cannot accept (ptone/scion#1530 Phase 4,
+// design addendum §3): with emit "legacy" the active generation signs the
+// ID-less skill URLs, artifact views, list cursors and attachment delivery
+// capabilities, and ID-less values verify only against legacy_read_ids, so
+// the active generation must be one of them. It is a membership check, independent of deadlines (the
+// zero time is before every deadline). Session cookies are unaffected:
+// they try every generation. The error names no key or ID.
+func checkLegacyEmitActiveReader(r *keyring.SigningRing) error {
+	if r.Emit() != keyring.EmitLegacy {
+		return nil
+	}
+	for _, k := range r.Candidates(legacyReaderCheckPurpose, "", time.Time{}) {
+		if k.ID == r.ActiveID() {
+			return nil
+		}
+	}
+	return errors.New(`keyring file: with signing.emit "legacy" the active signing key must be listed in signing.legacy_read_ids, or the ID-less values it issues could not be verified`)
+}
+
+// managedSigning reports whether cfg is in managed ring mode: a keyring
+// file is configured, or any keyring other than the legacy adapter is set
+// (the same rule /readyz applies). In managed mode the signing ring is
+// authoritative for the agent and user JWT keys: missing or incomplete
+// ring material refuses startup and never selects the legacy signing-key
+// resolution (design §4).
+func managedSigning(cfg ServerConfig) bool {
+	return cfg.KeyringConfigured || (cfg.Keyring != nil && cfg.Keyring.Source() != keyring.SourceLegacy)
+}
+
+// validateKeyringConfig checks a managed-mode ServerConfig
+// (ptone/scion#1530) before New reads any signing key: a configured
+// keyring file must have produced a keyring, which must pass
+// validateKeyringFile (the checks `scion server keys check` applies too, plus
+// SharedSigningSecret through the release check); and explicit agent/user
+// JWT signing keys are refused, so no purpose is partly rotated. In legacy
+// mode (no keyring file) explicit signing keys take precedence. Errors
+// name no key material, key ID or value.
+func validateKeyringConfig(cfg ServerConfig) error {
+	if !managedSigning(cfg) {
+		return nil
+	}
+	k := cfg.Keyring
+	if k == nil {
+		return errors.New("keyring mode: server.keyring_file is configured but no keyring file was loaded; refusing to fall back to legacy signing keys")
+	}
+	if err := validateKeyringFile(k, &cfg); err != nil {
+		return err
 	}
 	if len(cfg.AgentTokenConfig.SigningKey) > 0 {
 		return errors.New("keyring mode cannot be combined with an explicit agent token signing key (AgentTokenConfig.SigningKey)")
@@ -66,6 +142,50 @@ func validateKeyringConfig(cfg ServerConfig) error {
 		return errors.New("keyring mode cannot be combined with an explicit user token signing key (UserTokenConfig.SigningKey)")
 	}
 	return nil
+}
+
+// validateKeyringFile is the keyring check shared by startup
+// (validateKeyringConfig, with its cfg) and `scion server keys check`
+// (CheckKeyringFile, cfg nil), in this order: the signing ring has an
+// active generation; the keyring came from the file (a missing or
+// unreadable file, or a legacy adapter in its place, never selects legacy
+// mode); it passes this release's check (keyringReleaseCheck); and with
+// emit "legacy" its active signing generation is a legacy reader
+// (checkLegacyEmitActiveReader). k must be non-nil.
+func validateKeyringFile(k *keyring.Keyring, cfg *ServerConfig) error {
+	// The zero time never reaches a sign_until, so only a ring without a
+	// usable active generation errors here.
+	if _, err := k.Signing().Active(agentJWTPurpose, time.Time{}); err != nil {
+		return errors.New("keyring mode: the signing ring has no active generation")
+	}
+	if k.Source() != keyring.SourceFile {
+		return errors.New("keyring mode: server.keyring_file is configured but the keyring did not come from it; refusing to fall back to legacy signing keys")
+	}
+	if err := keyringReleaseCheck(k, cfg); err != nil {
+		return err
+	}
+	return checkLegacyEmitActiveReader(k.Signing())
+}
+
+// serverValueCipher returns the shared ValueCipher for cfg
+// (ptone/scion#1530 §5): cfg.ValueCipher when set (it must wrap the
+// keyring file's encryption ring, if there is one), else one built from
+// the keyring file, else the legacy cipher over SharedSigningSecret.
+func serverValueCipher(cfg ServerConfig) (*secret.ValueCipher, error) {
+	file := cfg.Keyring != nil && cfg.Keyring.Source() == keyring.SourceFile
+	if cfg.ValueCipher != nil {
+		if file && !cfg.ValueCipher.UsesRing(cfg.Keyring.Encryption()) {
+			return nil, errors.New("keyring mode: ValueCipher must wrap the keyring file's encryption ring")
+		}
+		if lb, ok := cfg.SecretBackend.(*secret.LocalBackend); ok && lb.Cipher() != cfg.ValueCipher {
+			return nil, errors.New("the local secret backend must share the server's ValueCipher")
+		}
+		return cfg.ValueCipher, nil
+	}
+	if file {
+		return secret.NewValueCipher(cfg.Keyring)
+	}
+	return secret.NewLegacyValueCipher(cfg.SharedSigningSecret), nil
 }
 
 // keyringNow is the keyring deadline clock.
@@ -90,13 +210,9 @@ func (s *Server) signingNotReadyReason() string {
 		// other keyring, including a zero one, must be able to issue.
 		return ""
 	}
-	_, err := k.Signing().Active(webSessionHashPurpose, s.keyringNow())
-	if err == nil {
+	reason := signingIssuanceReason(k.Signing(), s.keyringNow())
+	if reason == "" {
 		return ""
-	}
-	reason := readyReasonSigningNoActiveGeneration
-	if errors.Is(err, keyring.ErrIssuanceClosed) {
-		reason = readyReasonSigningIssuanceClosed
 	}
 	if s.signingNotReadyLogged.CompareAndSwap(false, true) {
 		slog.Warn("Not ready: the keyring's signing ring cannot issue",

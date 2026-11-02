@@ -28,6 +28,8 @@ import {
   closureFiles,
   findSourceMap,
   forbiddenIn,
+  staticImportersOf,
+  importsOutside,
   mapSources,
   staticClosure,
 } from './check-bundle-budget.mjs';
@@ -143,6 +145,163 @@ test('forbiddenIn matches the base name and honours exact allowlist paths only',
     'src/other/terminal-workspace-events.ts',
   ]);
 });
+
+test('forbiddenIn matches a full-path pattern, alone or with a base-name pattern', () => {
+  const modules = [
+    'src/client/main.ts',
+    'node_modules/@milkdown/core/lib/index.js',
+    'node_modules/prosemirror-view/dist/index.js',
+    'node_modules/lit/index.js',
+    'src/components/artifact-review/review-editor.ts',
+    'src/components/artifact-review/review-editor-loader.ts',
+    'src/client/terminal-coordinator.ts',
+  ];
+  const pathPattern = '(node_modules/(@milkdown/|prosemirror-))|src/components/artifact-review/';
+  const loader = [
+    { path: 'src/components/artifact-review/review-editor-loader.ts', reason: 'loader' },
+  ];
+  assert.deepEqual(forbiddenIn(modules, undefined, loader, pathPattern), [
+    'node_modules/@milkdown/core/lib/index.js',
+    'node_modules/prosemirror-view/dist/index.js',
+    'src/components/artifact-review/review-editor.ts',
+  ]);
+  assert.deepEqual(forbiddenIn(modules, '^terminal-', loader, pathPattern), [
+    'node_modules/@milkdown/core/lib/index.js',
+    'node_modules/prosemirror-view/dist/index.js',
+    'src/components/artifact-review/review-editor.ts',
+    'src/client/terminal-coordinator.ts',
+  ]);
+  // The base-name pattern alone does not see package paths.
+  assert.deepEqual(forbiddenIn(modules, '^index', [], undefined), [
+    'node_modules/@milkdown/core/lib/index.js',
+    'node_modules/prosemirror-view/dist/index.js',
+    'node_modules/lit/index.js',
+  ]);
+});
+
+test('a pathPattern rule fails a static closure that holds a matching module', () => {
+  const b = budget({
+    forbiddenModules: [
+      {
+        roots: ['src/components/pages/login.ts'],
+        pathPattern: 'node_modules/@milkdown/',
+      },
+    ],
+  });
+  const { failures } = run({
+    b,
+    modules: { 'assets/lit-1.js': ['node_modules/@milkdown/core/lib/index.js'] },
+  });
+  assert.equal(failures.length, 1);
+  assert.match(failures[0], /static closure contains node_modules\/@milkdown\/core/);
+});
+
+test('a forbiddenModules rule without any pattern fails', () => {
+  const b = budget({ forbiddenModules: [{ roots: ['src/components/pages/login.ts'] }] });
+  const { failures } = run({ b });
+  assert.deepEqual(failures, [
+    'forbiddenModules rule for src/components/pages/login.ts: needs a pattern or a pathPattern',
+  ]);
+});
+
+test('staticImportersOf finds static imports of a prefix from outside it, not dynamic ones', () => {
+  const m = {
+    'src/client/main.ts': {
+      file: 'assets/main.js',
+      imports: ['_lit.js'],
+      dynamicImports: ['src/x.ts'],
+    },
+    'src/x.ts': { file: 'assets/x-1.js', dynamicImports: ['src/r.ts'] },
+    'src/r.ts': { file: 'assets/review-editor-1.js', imports: ['_review-editor-2.js'] },
+    '_review-editor-2.js': { file: 'assets/review-editor-2.js' },
+    '_lit.js': { file: 'assets/lit-1.js' },
+    '_codemirror.js': { file: 'assets/codemirror-1.js', imports: ['_review-editor-2.js'] },
+  };
+  assert.deepEqual(staticImportersOf(m, 'assets/review-editor-'), [
+    { from: 'assets/codemirror-1.js', to: 'assets/review-editor-2.js' },
+  ]);
+  delete m['_codemirror.js'];
+  assert.deepEqual(staticImportersOf(m, 'assets/review-editor-'), []);
+});
+
+test('an isolated chunk imported statically from outside fails', () => {
+  const b = budget({ isolatedChunks: ['assets/lit-'] });
+  const { failures } = run({ b });
+  assert.ok(failures.length > 0);
+  assert.match(failures[0], /imports assets\/lit-1\.js statically \(isolated assets\/lit-\*\)/);
+});
+
+test('importsOutside lists static imports of a prefix outside its allowed list, not dynamic ones', () => {
+  const m = {
+    'src/r.ts': {
+      file: 'assets/review-editor-1.js',
+      imports: ['_review-editor-2.js', '_lit.js'],
+      dynamicImports: ['_xterm.js'],
+    },
+    '_review-editor-2.js': { file: 'assets/review-editor-2.js', imports: ['_xterm.js'] },
+    '_lit.js': { file: 'assets/lit-1.js', imports: ['_xterm.js'] },
+    '_xterm.js': { file: 'assets/xterm-1.js' },
+  };
+  const allowed = ['assets/review-editor-', 'assets/lit-'];
+  assert.deepEqual(importsOutside(m, 'assets/review-editor-', allowed), [
+    { from: 'assets/review-editor-2.js', to: 'assets/xterm-1.js' },
+  ]);
+  m['_review-editor-2.js'].imports = [];
+  assert.deepEqual(importsOutside(m, 'assets/review-editor-', allowed), []);
+});
+
+test('a chunk importing a chunk outside its chunkImports list fails', () => {
+  const ok = run({
+    b: budget({ chunkImports: { 'assets/main': ['assets/lit-', 'assets/shoelace-'] } }),
+  });
+  assert.deepEqual(ok.failures, []);
+  const { failures } = run({
+    b: budget({ chunkImports: { 'assets/main': ['assets/shoelace-'] } }),
+  });
+  assert.equal(failures.length, 1);
+  assert.match(
+    failures[0],
+    /assets\/main\.js imports assets\/lit-1\.js statically \(not allowed for assets\/main\*\)/
+  );
+});
+
+test('a combined chunk limit adds up every chunk of the prefix', () => {
+  const sizes = { 'assets/codemirror-1.js': 300, 'assets/codemirror-2.js': 300 };
+  const files = ['assets/main.js', 'assets/codemirror-1.js', 'assets/codemirror-2.js'];
+  const each = runChunks2(sizes, files, { raw: 500, gzip: 100000 });
+  assert.deepEqual(each.failures, []);
+  const together = runChunks2(sizes, files, { raw: 500, gzip: 100000, combined: true });
+  assert.equal(together.failures.length, 1);
+  assert.match(together.failures[0], /combined .*raw 600 B exceeds 500 B/);
+});
+
+test('a forbiddenModules rule can name the packages of a manual chunk', () => {
+  const b = budget({
+    manualChunks: { editor: 'node_modules/@milkdown/' },
+    forbiddenModules: [{ roots: ['src/components/pages/login.ts'], chunkPackages: 'editor' }],
+  });
+  const { failures } = run({
+    b,
+    modules: { 'assets/lit-1.js': ['node_modules/@milkdown/core/lib/index.js'] },
+  });
+  assert.equal(failures.length, 1);
+  assert.match(failures[0], /static closure contains node_modules\/@milkdown\/core/);
+  const missing = budget({
+    forbiddenModules: [{ roots: ['src/components/pages/login.ts'], chunkPackages: 'nope' }],
+  });
+  assert.match(run({ b: missing }).failures[0], /no manualChunks entry nope/);
+});
+
+/** Runs the chunk limits alone over files of the given sizes (others 10 bytes). */
+function runChunks2(sizes, files, limit) {
+  return checkBudget({
+    manifest: { 'src/client/main.ts': { file: 'assets/main.js', imports: [] } },
+    budget: { chunks: { 'assets/codemirror-': limit } },
+    readFile: (f) => (files.includes(f) ? Buffer.alloc(sizes[f] ?? 10, 'a') : null),
+    listFiles: () => files,
+    readMapModules: () => [],
+  });
+}
 
 test('passes within budget', () => {
   const { failures } = run();
@@ -337,4 +496,51 @@ test('findSourceMap prefers the map next to the chunk, then dist/sourcemaps, els
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('requiredStrings: each marker occurs exactly once in the build, in a chunk of the prefix', () => {
+  const texts = {
+    'assets/review-editor-a1.js': 'x("raw-html");x("twice");x("twice")',
+    'assets/review-editor-b2.js': 'new P("criticPolicy")',
+    'assets/main.js': 'image-placeholder;criticPolicy-copy-elsewhere',
+  };
+  const check = (requiredStrings, files = Object.keys(texts)) =>
+    checkBudget({
+      manifest,
+      budget: budget({
+        files: {},
+        entryClosure: undefined,
+        requiredChunks: [],
+        forbiddenModules: [],
+        requiredStrings,
+      }),
+      readFile: (f) => (f in texts ? Buffer.from(texts[f]) : null),
+      listFiles: () => files,
+      readMapModules: () => [],
+    });
+  // Strings from either chunk of the prefix count; comment keys are skipped.
+  const ok = check({ $comment: 'why', 'assets/review-editor-': ['raw-html'] });
+  assert.deepEqual(ok.failures, []);
+  assert.ok(
+    ok.report.includes(
+      'required strings in assets/review-editor-*.js: 1 of 1 present, each exactly once in the build'
+    )
+  );
+  // Missing; only in another chunk; twice; once in the prefix and once elsewhere.
+  assert.deepEqual(
+    check({
+      'assets/review-editor-': ['nowhere', 'image-placeholder', 'twice', 'criticPolicy'],
+    }).failures,
+    [
+      'assets/review-editor-*.js: missing required string "nowhere"',
+      'assets/review-editor-*.js: required string "image-placeholder" occurs 1 time(s), in assets/main.js; EXPECT once, in assets/review-editor-*.js',
+      'assets/review-editor-*.js: required string "twice" occurs 2 time(s), in assets/review-editor-a1.js; EXPECT once, in assets/review-editor-*.js',
+      'assets/review-editor-*.js: required string "criticPolicy" occurs 2 time(s), in assets/review-editor-b2.js, assets/main.js; EXPECT once, in assets/review-editor-*.js',
+    ]
+  );
+  // No chunk of the prefix at all.
+  assert.deepEqual(check({ 'assets/review-editor-': ['raw-html'] }, ['assets/main.js']).failures, [
+    'assets/review-editor-*.js: missing required string "raw-html"',
+    'no chunk matching assets/review-editor-*.js',
+  ]);
 });

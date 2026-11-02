@@ -8,9 +8,12 @@ on:
 permissions:
   contents: read
 
+# Fork CI gate (hack/check-fork-ci-gate.sh, cr-ci/workflows/README.md): on push
+# and schedule every job runs only in GoogleCloudPlatform/scion; forks stage PRs.
 jobs:
   race-detection:
     name: Race Detection — all packages (reporting only)
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     runs-on: ubuntu-latest
     continue-on-error: true
     timeout-minutes: 120
@@ -52,7 +55,7 @@ jobs:
           echo "_It does not detect file-level TOCTOU, database races, or cross-process concurrency issues._" >> $GITHUB_STEP_SUMMARY
       - name: Upload race detection results
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: race-detection-results
           path: race-detection-output.txt
@@ -60,6 +63,7 @@ jobs:
 
   race-detection-hub:
     name: Race Detection — pkg/hub tagged (reporting only)
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     runs-on: ubuntu-latest
     continue-on-error: true
     # The pkg/hub package runs shard by shard (make test-hub-shards; the
@@ -113,7 +117,7 @@ jobs:
           echo "_The Go race detector instruments shared-memory access in exercised code paths only._" >> $GITHUB_STEP_SUMMARY
       - name: Upload race detection results
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: race-detection-hub-results
           path: race-detection-hub-output.txt

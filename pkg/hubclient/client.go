@@ -115,6 +115,10 @@ type Client interface {
 	// Messaging returns the cross-project messaging operations interface.
 	Messaging() MessagingService
 
+	// AdminSettings returns the hub administrative settings operations
+	// interface (server configuration, project defaults, experiments).
+	AdminSettings() AdminSettingsService
+
 	// ProjectInjectedSkills returns an InjectedSkillsService scoped to a project.
 	ProjectInjectedSkills(projectID string) InjectedSkillsService
 
@@ -143,6 +147,10 @@ type Client interface {
 	// TestIdentityDelegations returns the workload issuer delegation
 	// operations interface.
 	TestIdentityDelegations() TestIdentityDelegationService
+
+	// AgentDelegations returns the agent delegation grant operations
+	// interface (.design/agent-delegation.md §18.6).
+	AgentDelegations() AgentDelegationService
 
 	// Health checks API availability.
 	Health(ctx context.Context) (*HealthResponse, error)
@@ -180,9 +188,11 @@ type client struct {
 	allowList             *allowListService
 	invites               *inviteService
 	messaging             *messagingService
+	adminSettings         *adminSettingsService
 	artifacts             *artifactService
 	testIdentities        *testIdentityService
 	testIdentityDelegs    *testIdentityDelegationService
+	agentDelegations      *agentDelegationService
 }
 
 // New creates a new Hub API client.
@@ -238,9 +248,11 @@ func New(baseURL string, opts ...Option) (Client, error) {
 	c.allowList = &allowListService{c: c}
 	c.invites = &inviteService{c: c}
 	c.messaging = &messagingService{c: c}
+	c.adminSettings = &adminSettingsService{c: c}
 	c.artifacts = &artifactService{c: c}
 	c.testIdentities = &testIdentityService{c: c}
 	c.testIdentityDelegs = &testIdentityDelegationService{c: c}
+	c.agentDelegations = &agentDelegationService{c: c}
 
 	return c, nil
 }
@@ -375,6 +387,11 @@ func (c *client) Invites() InviteService {
 	return c.invites
 }
 
+// AdminSettings returns the hub administrative settings operations interface.
+func (c *client) AdminSettings() AdminSettingsService {
+	return c.adminSettings
+}
+
 // Messaging returns the cross-project messaging operations interface.
 func (c *client) Messaging() MessagingService {
 	return c.messaging
@@ -392,6 +409,11 @@ func (c *client) TestIdentities() TestIdentityService {
 
 func (c *client) TestIdentityDelegations() TestIdentityDelegationService {
 	return c.testIdentityDelegs
+}
+
+// AgentDelegations returns the agent delegation grant operations interface.
+func (c *client) AgentDelegations() AgentDelegationService {
+	return c.agentDelegations
 }
 
 // get performs an HTTP GET request.
@@ -531,6 +553,9 @@ func WithHTTPClient(hc *http.Client) Option {
 // WithTimeout sets the request timeout.
 func WithTimeout(d time.Duration) Option {
 	return func(c *client) {
+		if c.transport.HTTPClient == nil {
+			c.transport.HTTPClient = &http.Client{}
+		}
 		c.transport.HTTPClient.Timeout = d
 	}
 }

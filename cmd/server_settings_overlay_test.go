@@ -18,6 +18,8 @@ package cmd
 
 import (
 	"context"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/knadh/koanf/providers/confmap"
@@ -197,4 +199,33 @@ func TestEnableColocatedProfileReferences(t *testing.T) {
 		enableColocatedProfileReferences(context.Background(), srv)
 		require.Nil(t, config.GetGlobalSettingsOverlay())
 	})
+}
+
+// The overlay installed for the co-located broker records the Kubernetes
+// placement findings of the stored runtimes and profiles from the start,
+// before any later settings change reaches ApplySnapshot: an invalid
+// placement field and a runtimes document that does not decode both
+// refuse Kubernetes starts, and valid runtimes record none.
+func TestInstallColocatedSettingsOverlay_RecordsPlacementFindings(t *testing.T) {
+	for _, tc := range []struct {
+		name, runtimes string
+		check          func(t *testing.T, got []string)
+	}{
+		{"invalid placement field", `{"gke":{"type":"kubernetes","namespace":"agents","runtime_class_name":"Not_Valid"}}`,
+			func(t *testing.T, got []string) {
+				require.True(t, slices.ContainsFunc(got, func(p string) bool { return strings.HasPrefix(p, "runtimes.gke.") }), "findings %v", got)
+			}},
+		{"undecodable runtimes document", `{"gke":"not an entry"}`,
+			func(t *testing.T, got []string) { require.Equal(t, []string{"runtimes"}, got) }},
+		{"valid runtimes", `{"gke":{"type":"kubernetes","namespace":"agents","runtime_class_name":"gvisor"}}`,
+			func(t *testing.T, got []string) { require.Empty(t, got) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetGlobalSettingsOverlay(t)
+			cfg := &config.GlobalConfig{}
+			cfg.Database.Driver = "sqlite"
+			require.True(t, installColocatedSettingsOverlay(cfg, newStoredCatalogTestHub(t, `{}`, tc.runtimes, "managed")))
+			tc.check(t, config.GetGlobalSettingsOverlay().PlacementErrors())
+		})
+	}
 }

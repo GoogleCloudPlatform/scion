@@ -762,7 +762,7 @@ func TestCountWorkspaceFiles(t *testing.T) {
 }
 
 func TestWorkspaceRoutesRegistered(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	mgr := &mockAgentManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
@@ -1231,7 +1231,7 @@ func TestCountWorkspaceFiles_NestedDirectories(t *testing.T) {
 // and /api/v1/workspace/project-upload, which fed the hub's linked-project
 // workspace cache (removed, ptone/scion#5816).
 func TestProjectWorkspaceUpload_RoutesRemoved(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	mgr := &mockAgentManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}

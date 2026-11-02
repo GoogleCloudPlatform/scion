@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/hubtestutil"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -38,10 +39,10 @@ import (
 // The caller controls when backfills run and in what order.
 func newDEF156TestStore(t *testing.T) (*sqliteWebChatStore, *sql.DB) {
 	t.Helper()
-	db := openTestMemorySQLite(t, "sqlite")
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
 
 	// Create conversations table (Ent-managed in production).
-	_, err := db.Exec(conversationsTableDDL)
+	_, err := db.Exec(hubtestutil.ConversationsTableDDL)
 	require.NoError(t, err)
 
 	// Create messages table.
@@ -239,7 +240,7 @@ func TestDEF156_FreshCutover_MessageBackfillFirst(t *testing.T) {
 		"exactly one conversation should exist for topic")
 
 	// AC-156-1: all messages are on the topic's conversation.
-	topicConvID := getTopicConvID(t, db, topicID)
+	topicConvID := hubtestutil.GetTopicConvID(t, db, topicID)
 	assert.NotEmpty(t, topicConvID, "topic must have a conversation_id")
 
 	for _, msgID := range []string{"msg-1", "msg-2", "msg-3"} {
@@ -292,7 +293,7 @@ func TestDEF156_FreshCutover_TopicBackfillFirst(t *testing.T) {
 		"exactly one conversation should exist for topic")
 
 	// AC-156-1: all messages are on the topic's conversation.
-	topicConvID := getTopicConvID(t, db, topicID)
+	topicConvID := hubtestutil.GetTopicConvID(t, db, topicID)
 	assert.NotEmpty(t, topicConvID, "topic must have a conversation_id")
 
 	for _, msgID := range []string{"msg-1", "msg-2", "msg-3"} {
@@ -331,7 +332,7 @@ func TestDEF156_Idempotent_SecondBoot(t *testing.T) {
 	require.NoError(t, err)
 
 	convCountAfterFirst := countConversationsByExtRef(t, db, expectedKey)
-	topicConvIDFirst := getTopicConvID(t, db, topicID)
+	topicConvIDFirst := hubtestutil.GetTopicConvID(t, db, topicID)
 	msgConvIDFirst := getMessageConvID(t, db, "msg-1")
 
 	// Second boot: simulate re-running both backfills.
@@ -344,7 +345,7 @@ func TestDEF156_Idempotent_SecondBoot(t *testing.T) {
 	// AC-156-4: no new conversations, no re-stamping.
 	assert.Equal(t, convCountAfterFirst, countConversationsByExtRef(t, db, expectedKey),
 		"no new conversations after second boot")
-	assert.Equal(t, topicConvIDFirst, getTopicConvID(t, db, topicID),
+	assert.Equal(t, topicConvIDFirst, hubtestutil.GetTopicConvID(t, db, topicID),
 		"topic conversation_id unchanged after second boot")
 	assert.Equal(t, msgConvIDFirst, getMessageConvID(t, db, "msg-1"),
 		"message conversation_id unchanged after second boot")
@@ -416,7 +417,7 @@ func TestDEF156_MixedPopulation_LegacyTopicStillResolves(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify the legacy topic still resolves.
-	topicConvID := getTopicConvID(t, db, topicID)
+	topicConvID := hubtestutil.GetTopicConvID(t, db, topicID)
 	assert.Equal(t, legacyConvID, topicConvID,
 		"pre-existing legacy topic must still have its conversation_id")
 
@@ -462,7 +463,7 @@ func TestDEF156_MultipleTopics_ExactlyOneConvEach(t *testing.T) {
 		assert.Equal(t, 1, countConversationsByExtRef(t, db, expectedKey),
 			"topic %s must have exactly one conversation", topicID)
 
-		topicConvID := getTopicConvID(t, db, topicID)
+		topicConvID := hubtestutil.GetTopicConvID(t, db, topicID)
 		for j := 1; j <= 2; j++ {
 			msgID := fmt.Sprintf("msg-t%d-%d", i, j)
 			assert.Equal(t, topicConvID, getMessageConvID(t, db, msgID),
@@ -509,7 +510,7 @@ func TestDEF156_CreateTopic_FindsExistingConversation(t *testing.T) {
 	require.NoError(t, err)
 
 	// Topic should be linked to the pre-existing conversation.
-	topicConvID := getTopicConvID(t, db, topicID)
+	topicConvID := hubtestutil.GetTopicConvID(t, db, topicID)
 	assert.Equal(t, preExistingConvID, topicConvID,
 		"CreateTopic should link to existing conversation, not mint a new one")
 
@@ -543,7 +544,7 @@ func TestDEF156_CreateTopic_MintsWhenNoExisting(t *testing.T) {
 	require.NoError(t, err)
 
 	// Topic should have a conversation_id.
-	topicConvID := getTopicConvID(t, db, topicID)
+	topicConvID := hubtestutil.GetTopicConvID(t, db, topicID)
 	assert.NotEmpty(t, topicConvID, "topic should have a conversation_id")
 
 	// The conversation should use the derived external_ref.
@@ -575,7 +576,7 @@ func TestDEF156_EnsureGeneralTopic_WritesDerivedKey(t *testing.T) {
 	require.NotEmpty(t, topicID)
 
 	// Verify the conversation was created with the derived external_ref.
-	convID := getTopicConvID(t, db, topicID)
+	convID := hubtestutil.GetTopicConvID(t, db, topicID)
 	require.NotEmpty(t, convID, "general topic must have a conversation_id")
 
 	expectedExtRef, err := messaging.ThreadConversationExternalRef("proj-general", topicID)
@@ -612,7 +613,7 @@ func TestDEF156_EnsureGeneralTopic_FindsExistingConversation(t *testing.T) {
 	require.True(t, created)
 
 	// Get the created conversation's external_ref.
-	convID := getTopicConvID(t, db, topicID)
+	convID := hubtestutil.GetTopicConvID(t, db, topicID)
 	require.NotEmpty(t, convID)
 
 	expectedExtRef, err := messaging.ThreadConversationExternalRef(projectID, topicID)
@@ -655,7 +656,7 @@ func TestDEF156_EnsureGeneralTopic_ConvergesWithRoute3(t *testing.T) {
 	assert.Equal(t, 1, countConversationsByExtRef(t, db, expectedExtRef),
 		"EnsureGeneralTopic + Route 3 must converge on one conversation")
 
-	topicConvID := getTopicConvID(t, db, topicID)
+	topicConvID := hubtestutil.GetTopicConvID(t, db, topicID)
 	for _, msgID := range []string{"msg-g1", "msg-g2"} {
 		assert.Equal(t, topicConvID, getMessageConvID(t, db, msgID),
 			"message %s must be on the general topic's conversation", msgID)

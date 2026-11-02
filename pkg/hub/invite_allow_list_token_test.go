@@ -43,6 +43,12 @@ type inviteTokenFixture struct {
 func newInviteTokenFixture(t *testing.T, prefix string) *inviteTokenFixture {
 	t.Helper()
 	srv, s := testServer(t)
+	return newInviteTokenFixtureOn(t, prefix, srv, s)
+}
+
+// newInviteTokenFixtureOn builds the fixture on srv and its store s.
+func newInviteTokenFixtureOn(t *testing.T, prefix string, srv *Server, s store.Store) *inviteTokenFixture {
+	t.Helper()
 	ctx := context.Background()
 	f := &inviteTokenFixture{srv: srv, s: s, project: tid(prefix + "-project")}
 	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: f.project, Name: prefix, Slug: prefix + "-project"}))
@@ -84,24 +90,31 @@ func (f *inviteTokenFixture) mintFails(userID string, boundary TokenBoundary, sc
 // the authority the token was minted with.
 func (f *inviteTokenFixture) formerAdminToken(t *testing.T, name string, scopes ...string) (string, func()) {
 	t.Helper()
-	ctx := context.Background()
 	id := hubConfigTokenUser(t, f.s, name, store.SystemRoleHubAdmin)
 	key := mintHubConfigToken(t, f.srv, id, hubBoundary(), scopes...)
 	return key, func() {
 		t.Helper()
-		rd, err := f.s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
-		require.NoError(t, err)
-		bindings, err := f.s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, id)
-		require.NoError(t, err)
-		removed := 0
-		for _, b := range bindings {
-			if b.RoleDefinitionID == rd.ID {
-				require.NoError(t, f.s.DeleteRoleBinding(ctx, b.ID))
-				removed++
-			}
-		}
-		require.Equal(t, 1, removed, "the holder's hub admin role binding is removed")
+		f.removeHubAdminBinding(t, id)
 	}
+}
+
+// removeHubAdminBinding removes user id's hub admin role binding through
+// the store, and requires exactly one to be removed.
+func (f *inviteTokenFixture) removeHubAdminBinding(t *testing.T, id string) {
+	t.Helper()
+	ctx := context.Background()
+	rd, err := f.s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	bindings, err := f.s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, id)
+	require.NoError(t, err)
+	removed := 0
+	for _, b := range bindings {
+		if b.RoleDefinitionID == rd.ID {
+			require.NoError(t, f.s.DeleteRoleBinding(ctx, b.ID))
+			removed++
+		}
+	}
+	require.Equal(t, 1, removed, "the holder's hub admin role binding is removed")
 }
 
 // itfInviteCodeExpiry is the expiry of the invitation codes the tests store.
@@ -413,14 +426,19 @@ func TestAllowListDeleteToken_LastProjectOwnerProtected(t *testing.T) {
 
 // TestInvitationToken_CreatesNoRoleBindingOrGroupMembership pins that a
 // record a token creates through an invitation route carries no authority:
-// single and bulk invite, allow-list add and import each create a user with
+// single invite and allow-list add and import each create a user with
 // status invited and the placeholder role member, with no role binding and
 // no group membership beyond those of an invited user created directly in
 // the store, even when the request body names a role, a project or a
-// group. An invitation code a token creates is attributed to the token's
-// holder and names no role.
+// group. Bulk invite refuses a body that names a role with 422 and creates
+// nothing. User provisioning (POST /api/v1/users) refuses such a body too,
+// so its case sends only the fields it accepts and gets the same record.
+// An invitation code a token creates is attributed to the token's holder
+// and names no role. The hub runs without dev authentication, because a
+// hub with dev authentication refuses user provisioning.
 func TestInvitationToken_CreatesNoRoleBindingOrGroupMembership(t *testing.T) {
-	f := newInviteTokenFixture(t, "inauth")
+	srv, st := testServerNoDevAuth(t)
+	f := newInviteTokenFixtureOn(t, "inauth", srv, st)
 	ctx := context.Background()
 	key := f.mint(t, hubBoundary(), "user:invite", "hub_allow_list:read", "hub_allow_list:update")
 
@@ -455,6 +473,9 @@ func TestInvitationToken_CreatesNoRoleBindingOrGroupMembership(t *testing.T) {
 		{"allow-list import", "/api/v1/admin/allow-list/import", func(e string) interface{} {
 			return extra(map[string]interface{}{"emails": []interface{}{extra(map[string]interface{}{"email": e})}})
 		}, http.StatusOK},
+		{"provision", provisionPath, func(e string) interface{} {
+			return map[string]interface{}{"email": e, "displayName": "Provisioned", "note": "by token"}
+		}, http.StatusCreated},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

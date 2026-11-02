@@ -76,7 +76,48 @@ All image-related scripts live under `scripts/`. GitHub Actions workflows remain
 | `scripts/pull-containers.sh` | Pull pre-built images (auto-detects runtime). |
 | `scripts/setup-cloud-build.sh` | One-time GCP setup (APIs, Artifact Registry, permissions). |
 | `scripts/check-harness-coverage.sh` | Fails if a `harnesses/<name>/Dockerfile` is missing from an aggregate `cloudbuild-*.yaml`. |
+| `scripts/check-image-size.sh` | Reports the size growth of a candidate image over a baseline; fails above a MiB budget. See [Image size budget](#image-size-budget). |
 | `.github/workflows/build-images.yml` | GitHub Actions workflow for building and pushing images. |
+
+### Image size budget
+
+`scripts/check-image-size.sh <baseline> <candidate>` compares the
+uncompressed sizes of two images in the local store, prints both and the delta,
+and exits 1 when the candidate grew by more than the budget. With docker it
+sums the layer sizes from `docker history`; it does not use `image inspect`'s
+`.Size`, which with docker's containerd image store depends on how the image
+entered the store (larger than the layer sum for a local build, about the
+compressed size for a pull). With podman (used
+when docker is absent, or with `IMAGE_TOOL=podman`) it reads
+`podman image inspect`'s `.Size`, because `podman history` prints sizes only
+in human-readable form. If `docker` is podman's docker shim (podman-docker),
+set `IMAGE_TOOL=podman`.
+
+```bash
+# Build core-base before and after a change, then:
+image-build/scripts/check-image-size.sh core-base:before core-base:after
+image-build/scripts/check-image-size.sh --budget-mib 300 \
+  core-base:before core-base:after
+```
+
+The default budget (`DEFAULT_BUDGET_MIB` in the script, overridable with
+`IMAGE_SIZE_BUDGET_MIB` or `--budget-mib`, at most 6 digits) is 550 MiB: the
+measured 471.8 MiB that core-base's Playwright WebKit and Firefox system
+libraries add (docker layer sum, core-base on Debian 13, amd64, built
+2026-10-31, playwright-core 1.62.1's list), plus about 15%. The script is not
+wired into Cloud Build: doing so would mean pulling a baseline image inside the
+pipeline.
+
+### Playwright browser libraries
+
+core-base installs the system libraries Playwright's WebKit and Firefox builds
+need (`install-core-toolchain.sh playwright-deps`), because agents run as
+non-root and cannot `apt-get install` them. The browsers themselves are not
+baked in; `npx playwright install webkit firefox` fetches the revision that
+matches each project's Playwright version. The package list is Playwright's
+own for the base's distro release; the script names the Playwright version it
+came from and how to regenerate it. Only Debian 13 (core-base) has a list, so
+thick-prep's Ubuntu 24.04 base does not get these libraries.
 
 ### Builders
 
@@ -109,6 +150,8 @@ The orchestrator owns target sequencing, tag computation, and BASE_IMAGE threadi
 Every image is tagged with both `:<tag>` (controlled by `--tag`, defaults to `latest`) and `:<short-sha>` (computed once from `git rev-parse --short HEAD`). When no SHA is available (e.g. running outside a git working tree), only the mutable tag is emitted.
 
 When two steps in the same run depend on each other, the orchestrator threads `BASE_IMAGE=...:<short-sha>` so chained builds are immune to concurrent overwrites of `:latest`. Standalone targets (e.g. `--target harnesses` on its own) reference the parent image as `:<tag>`.
+
+**Move `scion-base:latest` together with the harness tags.** Agents that use the `generic` harness run `scion-base:latest` itself (under your `image_registry`, if set): the built-in generic harness-config (`pkg/config/harness_config.go`) names no harness-specific image. If a deployment repoints only the harness `:latest` tags (`scion-claude:latest`, ...) after a rebuild, generic agents stay on the old base, and with it the old `sciontool`. Repoint `scion-base:latest` in the same step, or give a `generic` harness-config its own `image`.
 
 ### Build provenance and stale sciontool
 

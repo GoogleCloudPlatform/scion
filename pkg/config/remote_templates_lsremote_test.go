@@ -103,7 +103,8 @@ func TestSetGitLsRemoteForTest_Restores(t *testing.T) {
 
 // TestExecGitLsRemote_Invocation pins the production runner's argv (the
 // host-side pins, then ls-remote) and the prompt-suppressing env vars, using a
-// fake git on PATH (no network). Without a token no credential helper is set.
+// fake git on PATH (no network). Without a token askpass is empty and the
+// three credential resets of the remote layer are the only config entries.
 func TestExecGitLsRemote_Invocation(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake git script requires a POSIX shell")
@@ -116,7 +117,7 @@ func TestExecGitLsRemote_Invocation(t *testing.T) {
 	out, err := execGitLsRemote(context.Background(), "https://github.com/org/repo.git", "")
 	require.NoError(t, err)
 	pins := strings.Join(util.HostGitArgs(), "|")
-	assert.Equal(t, pins+"|ls-remote|--heads|https://github.com/org/repo.git|TP=0|AP=echo|CC=", strings.TrimSpace(string(out)))
+	assert.Equal(t, pins+"|ls-remote|--heads|https://github.com/org/repo.git|TP=0|AP=|CC=3", strings.TrimSpace(string(out)))
 }
 
 // lsRemoteFakeGit puts a fake `git` on PATH that logs each argument on its
@@ -188,16 +189,18 @@ func TestResolveGitHubRef_TokenFromScopedCredentialHelper(t *testing.T) {
 
 	entries := config()
 	creds := credentialEntries(entries)
-	require.Len(t, creds, 2, "%v", creds)
+	require.NotEmpty(t, creds)
 	assert.Equal(t, "credential.helper=", creds[0], "configured credential helpers are reset")
-	assert.True(t, strings.HasPrefix(creds[1], "credential.https://github.com.helper="), creds[1])
-	assert.Contains(t, creds[1], "${"+scopedCredentialVar+"}", "the helper reads the credential variable at run time")
-	assert.NotContains(t, creds[1], token, "git config values contain no secret values")
+	helpers := effectiveCredentialHelpers(entries)
+	require.Len(t, helpers, 1, "%v", creds)
+	assert.True(t, strings.HasPrefix(helpers[0], "credential.https://github.com.helper="), helpers[0])
+	assert.Contains(t, helpers[0], "${"+scopedCredentialVar+"}", "the helper reads the credential variable at run time")
+	assert.NotContains(t, helpers[0], token, "git config values contain no secret values")
 	assert.Equal(t, "CRED="+token, credentialVarEntry(entries), "the token is in the git command's environment")
 }
 
 // TestResolveGitHubRef_NoTokenNoCredentialHelper: without a token, ls-remote
-// runs anonymously with no credential helper configured.
+// runs anonymously with no credential helper in effect.
 func TestResolveGitHubRef_NoTokenNoCredentialHelper(t *testing.T) {
 	argv, config := lsRemoteFakeGit(t)
 
@@ -207,7 +210,7 @@ func TestResolveGitHubRef_NoTokenNoCredentialHelper(t *testing.T) {
 	want := append(append([]string{}, util.HostGitArgs()...), "ls-remote", "--heads", "https://github.com/org/repo.git")
 	assert.Equal(t, want, argv())
 	entries := config()
-	assert.Empty(t, credentialEntries(entries), "no credential helper without a token")
+	assert.Empty(t, effectiveCredentialHelpers(entries), "no credential helper without a token")
 	assert.Equal(t, "CRED=<unset>", credentialVarEntry(entries), "no credential variable without a token")
 }
 

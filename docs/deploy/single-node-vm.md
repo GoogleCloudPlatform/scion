@@ -59,7 +59,9 @@ The script runs interactively, prompting for:
 5. **Chat plugins** — Telegram, Discord, Slack, Teams, or none
 6. **Container images** — provide a registry path or build locally on the VM
 7. **Admin email** — email address to grant super-admin access (defaults to deployer identity)
-8. **Update policy** — Auto (install updates automatically), Notify (check and notify only), or Disabled
+8. **Update policy** — Notify (check and notify only; the default), Auto
+   (install updates automatically), or Disabled. `--update-policy` (or
+   `update_policy` in the config file) skips the prompt.
 
 To install a specific release version:
 
@@ -170,16 +172,538 @@ On the VM itself:
 
 | Path | Purpose |
 |------|---------|
-| `/usr/local/bin/scion` | The Scion Hub binary |
+| `/opt/scion/releases/<tag>/scion` | Installed Scion releases, one directory per release tag (owned by `scion`) |
+| `/opt/scion/current` | Symlink to the active release (`releases/<tag>`); the unit runs `/opt/scion/current/scion` |
+| `/opt/scion/previous` | Symlink to the release that was active before the last switch |
+| `/opt/scion/snapshots/` | Database snapshots taken by the Hub |
+| `/opt/scion/update-state.json` | The last switch of `current` and how far the new release got; read by the [boot-failure guard](#update-state) |
+| `/opt/scion/start-attempts` | How many times the release `current` points at has started since it was switched to; read by the [boot-failure guard](#boot-failure-guard) |
+| `/opt/scion/rollback.marker` | Written by the [boot-failure guard](#boot-failure-guard) when it restores the previous release |
+| `/usr/local/bin/scion` | Root-owned symlink to `/opt/scion/current/scion`, for running `scion` on the VM |
+| `/usr/local/libexec/scion/scion-hub-rollback.sh` | Root-owned boot-failure guard script |
+| `/usr/local/libexec/scion/scion-hub-start-attempt.sh` | Root-owned start-attempts counter, run before each start of the Hub |
 | `/home/scion/.scion/settings.yaml` | Hub configuration (auth mode, storage, etc.) |
 | `/home/scion/.scion/hub.env` | Environment variables (session secret, project ID) |
 | `/home/scion/.scion/workspace-storage/` | Local workspace storage directory |
 | `/home/scion/.scion/plugins/broker/` | Chat plugin binaries (if selected) |
 | `/etc/systemd/system/scion-hub.service` | systemd unit file |
+| `/etc/systemd/system/scion-hub-rollback.service` | Root oneshot unit that runs the boot-failure guard |
 
 The unit runs as `User=scion` with `WorkingDirectory=/home/scion`, matching
 the paths above — the Hub's daemon working directory is that user's home
 directory, not `/`.
+
+## Binary layout and updates
+
+The Hub binary lives in a versioned install root owned by the `scion` user,
+so the Hub can update itself without sudo:
+
+```
+/opt/scion/                         scion:scion 0755
+  releases/nightly-20261023/scion   one directory per installed release tag
+  releases/v0.3.0-preview.4/scion
+  current  -> releases/nightly-20261023
+  previous -> releases/v0.3.0-preview.4
+  snapshots/
+/usr/local/bin/scion -> /opt/scion/current/scion   (root-owned symlink)
+```
+
+The systemd unit runs `ExecStart=/opt/scion/current/scion server start ...`.
+To install a release, the binary is verified against the release's
+`SHA256SUMS`, placed in `releases/<tag>/`, and `current` is switched to it
+with an atomic rename. The release `current` pointed at before becomes
+`previous`. `settings.yaml` records the root as
+`server.maintenance.install_root: "/opt/scion"`.
+
+`/usr/local/bin/scion` is now a **symlink**, not a binary. Running `scion` on
+the VM always runs the active release. Do not copy a binary over
+`/usr/local/bin/scion` by hand: that replaces the symlink, and the Hub
+(which runs `/opt/scion/current/scion`) does not see the change. To install
+a different release, re-run `deploy.sh --version <tag>`, or update from the
+Maintenance page. A re-run without `--version` keeps the release `current`
+points at (see [Re-running the deploy script](#re-running-the-deploy-script)).
+
+### Chat plugins and updates
+
+When the Hub updates itself (Maintenance page or auto-update), it updates
+the chat plugins in `/home/scion/.scion/plugins/broker/` with it. Plugins
+are separate binaries that the Hub talks to over a protocol that has only
+one version, so a plugin from a different release can fail on its first
+call:
+
+- Each regular `scion-plugin-<name>` file in that directory is replaced
+  with `scion-plugin-<name>-linux-<arch>.tar.gz` from the **same release**.
+  The plugin is verified against the same `SHA256SUMS` file as the Hub
+  binary. Each plugin is swapped in with one atomic rename after the new
+  release is activated and before the Hub restarts. The restart also
+  restarts the plugins.
+- If a downloaded plugin does not match its `SHA256SUMS` line, or its
+  download URL is outside the release, or its archive is malformed, the
+  whole update fails before anything is installed.
+- A plugin the release does not publish, or whose `SHA256SUMS` line is
+  missing or unusable, is left as it is, with a warning in the run log.
+  Nothing unverified is installed. A downgrade's confirmation lists these
+  plugins as risks. Symlinks and plugins configured with a path outside
+  that directory are left alone too.
+- If the directory is not writable by the Hub, or is itself a symlink,
+  the plugins are not updated, and the run log has a warning.
+- If the update fails after activation (a plugin cannot be swapped in, or
+  the restart cannot be recorded or requested), the Hub goes back to the
+  previous release and the previous plugins are put back. If a plugin
+  cannot be put back, its old binary is kept in a
+  `.scion-update-*/old/` directory inside the plugin directory, and the
+  error says so. The next update removes such directories, with a warning
+  in the run log.
+- Each release keeps a copy of the plugins installed with it in
+  `/opt/scion/releases/<tag>/plugins/`. After the boot-failure guard rolls
+  back, the restored Hub copies its own plugins back at startup, before
+  loading them. It only replaces a plugin whose file is exactly the build
+  of the release that failed. A plugin you rebuilt or reinstalled by hand
+  is never replaced.
+- A downgrade is an ordinary update, so it installs the plugins of the
+  older release.
+
+`deploy.sh` still installs the plugins you select from the release it
+installs.
+
+### Boot-failure guard
+
+A release that crashes on startup cannot roll itself back, so `deploy.sh`
+installs a guard that restores the previous release after a failed update:
+
+- `scion-hub.service` sets `StartLimitIntervalSec=300`, `StartLimitBurst=5`
+  and `OnFailure=scion-hub-rollback.service` in its `[Unit]` section. With
+  `Restart=always` and `RestartSec=5`, a Hub that keeps failing is started
+  five times within five minutes. systemd then stops restarting it, leaves
+  it in the failed state, and starts `scion-hub-rollback.service`.
+- `scion-hub-rollback.service` is a root oneshot unit that runs
+  `/usr/local/libexec/scion/scion-hub-rollback.sh`. The script and its
+  directory are owned by root with mode 0755. They live outside
+  `/opt/scion` on purpose: the `scion` user owns `/opt/scion` and could
+  replace any file in it, including a root-owned one, and root runs this
+  script. (The design originally placed it at `/opt/scion/rollback.sh`.)
+  The unit has `TimeoutStartSec=120`, so a hung run cannot block later
+  runs.
+- `scion-hub.service` also runs
+  `ExecStartPre=-/usr/local/libexec/scion/scion-hub-start-attempt.sh`
+  before every start, as the `scion` user (root-owned, mode 0755, next to
+  the guard; the `-` means it can never block a start). It keeps
+  `/opt/scion/start-attempts`, one line of JSON
+  `{"target":"<release>","count":N}`: the number of starts of the release
+  `current` points at since `current` was switched to it. A switch, or a
+  missing, unreadable or symlinked file, restarts the count at 1. It is
+  separate from `update-state.json`, which the Hub rewrites.
+
+The script runs as root but, as root, does nothing except query and
+restart the unit through `systemctl`. It never reads, follows or writes
+anything under `/opt/scion` as root. All checks, the swap and the marker
+run as the `scion` user (through `runuser`):
+
+1. It acts only when the Hub has **failed for good**: `systemctl show`
+   reports `ActiveState=failed` and `SubState=failed` (systemd will not
+   restart it) in three reads about a second apart. Otherwise it exits
+   successfully without doing anything. The unit's `Result` is not used
+   for this decision: after a crash loop it is the crash's own result
+   (`exit-code`, `signal`, `core-dump`), not `start-limit-hit` (see
+   **systemd versions** below). The failed state alone does not mean the
+   start limit was hit. An operator `systemctl stop` that fails ends there
+   too: the Hub, or a process it left in its cgroup, outlived
+   `TimeoutStopSec` and was killed (`Result=timeout`), or the Hub exited
+   non-zero on `SIGTERM`. systemd's `NRestarts` cannot tell these apart,
+   because every update and **Restart Hub** is an automatic restart and the
+   count only resets on a manual start; the guard does not use it.
+   `Result=timeout` is never acted on.
+2. If the Hub's last exit was clean (exit status 0, or `SIGTERM`, `SIGINT`,
+   `SIGHUP` or `SIGPIPE`), the limit was reached by restarts, not by a crash
+   loop. Every update and **Restart Hub** exits cleanly and is restarted by
+   systemd, and those starts count towards the limit too. In that case the
+   script restarts the Hub without changing releases, but only if systemd
+   recorded `Result=start-limit-hit`, which is what clean restarts that hit
+   the limit produce. So five intentional
+   restarts within 300 seconds (updates, **Restart Hub**,
+   `systemctl restart`) do not roll back a healthy release. A failed stop
+   with a clean main exit (a leftover child killed at `TimeoutStopSec`) has
+   `Result=timeout` and is left alone. A crash (a
+   non-zero exit status, a failure to start the binary, or death by any
+   other signal, such as `SIGSEGV`, `SIGABRT` or `SIGKILL`) counts as a
+   failure and goes on to the checks below.
+3. A crash is rolled back only if `/opt/scion/start-attempts` (read as the
+   `scion` user: a regular file, not a symlink, in exactly the format the
+   counter writes) names the release `current` points at with a count of at
+   least 2: that release failed at least one restart since it was switched
+   to. The threshold is not `StartLimitBurst`: systemd's start limit counts
+   every start in its five-minute window, the previous release's included,
+   while the counter starts over at each switch, so after a **Restart Hub**
+   or another update shortly before, a real crash loop can end well below
+   five. A missing, unreadable or mismatched file leaves the Hub stopped.
+   This also applies when `update-state.json` is missing and the guard falls
+   back to the switch time.
+
+   The count does not tell a crash loop from a failed operator stop: a
+   release restarted once from the UI has a count of 2. What keeps the guard
+   from swapping a Hub you stopped is `Result=timeout` being excluded, and
+   the update state (step 5): a release that ran is verified as soon as its
+   listener binds, and an unverified update is rolled back only within 30
+   minutes of the switch. Five residual cases are accepted:
+
+   - If the previous release used four or more of the window's five starts
+     (for example **Restart Hub** several times, then an update within five
+     minutes), a crash-looping new release can stop at a count of 1. The
+     guard then leaves the Hub stopped; restore it by hand (see
+     [Restoring after a failed update](#restoring-after-a-failed-update)).
+   - A release older than the update-state contract never marks its update
+     verified. Within 30 minutes of switching to it, after two or more
+     starts, a failed `systemctl stop` that exits non-zero is rolled back
+     like a crash loop.
+   - On the switch-time fallback (`update-state.json` missing or
+     unreadable, including when `python3` is missing), `verified` is not
+     consulted. Within 30 minutes of a switch, after two or more starts, a
+     failed `systemctl stop` that exits non-zero can then roll back a
+     release that ran fine.
+   - A `systemctl stop` that lands while the target (the release `current`
+     points at, the one being started) is still starting up, before its
+     listener binds, for example during database migrations. Hub releases
+     that include this guard exit 0 when a requested shutdown interrupts
+     their startup, so the stop leaves the Hub stopped, not failed, and the
+     guard never runs. A target that predates the guard exits non-zero
+     instead and never marks its update verified or migrated, so within 30
+     minutes of switching to it, after two or more starts, the failed stop
+     is rolled back like a crash loop (a special case of the previous
+     release-older-than-the-update-state-contract case). The first boot
+     after a switch (a count of 1) is never rolled back.
+   - Builds from Git (**Rebuild from Git**, installed as
+     `releases/git-<sha12>`). A rebuild on top of a release is protected
+     like a release update: the Hub records the publish date of a preview or
+     stable `from`, so `previous_safe` is decided as for a release. When
+     `from` is itself a Git build (Git to Git, or a release installed on top
+     of a Git build), `previous_safe` is `false`, because the database
+     schema of an arbitrary commit cannot be checked against the downgrade
+     floor. The new build marks itself `migrated` on every start, before it
+     opens the database, so a crash loop of such a switch is not rolled
+     back: the guard leaves the Hub stopped (fail closed) and its journal
+     points to [Restoring after a failed update](#restoring-after-a-failed-update).
+     A rebuild takes the same pre-update database snapshot as a release
+     update (in `/opt/scion/snapshots/`, named after the build it replaces,
+     for example `hub-git-<sha12>-<timestamp>.db`), so that procedure
+     applies unchanged.
+4. It refuses unless `/opt/scion/current` and `/opt/scion/previous` each
+   resolve to a release directory directly inside `/opt/scion/releases/`,
+   and `previous` contains a `scion` binary. A link that leaves `releases/`
+   (through `..`, an absolute target or a chain of symlinks) is refused, and
+   so is a `previous` equal to `current`. After a refusal nothing changes
+   and the Hub stays stopped.
+5. It rolls back only a **failed update that is safe to undo**, decided from
+   `/opt/scion/update-state.json` (see [Update state](#update-state)). A
+   release that ran fine and then crash-loops for another reason (a typo in
+   `settings.yaml`, a full disk, port 8080 already in use) is not rolled
+   back. Neither is an update whose database migrations the previous
+   release cannot run with. In both cases nothing changes, the Hub stays
+   stopped, and the guard's journal says why.
+6. It writes `/opt/scion/rollback.marker` (see below), before changing any
+   link: if the marker cannot be written (for example, the disk is full),
+   nothing is swapped.
+7. It swaps `previous` and then `current`, each with an atomic symlink
+   rename. The pair is not atomic: if the guard dies between the two
+   renames, both links point at the failed release, and the next run
+   refuses ("current and previous are both ..."), leaving the Hub stopped.
+8. It runs `systemctl reset-failed scion-hub` and `systemctl start scion-hub`.
+
+The guard swaps **binaries only**. It does not restore the database
+snapshot. Rolling back is safe without it when the failed release did not
+migrate the database, or migrated it only in ways the previous release
+can ignore; otherwise the guard refuses (step 5). To return the database
+to its state before the update, follow
+[Restoring after a failed update](#restoring-after-a-failed-update).
+
+It never swaps back. If the restored release crash-loops too, the start
+limit stops the Hub again and the guard runs again. It then finds that the
+marker already records this exact rollback (`from` is the current
+`previous` and `to` is the current `current`), does nothing, and leaves
+the Hub stopped for you to fix (see
+[Restoring after a failed update](#restoring-after-a-failed-update)).
+Running the script twice is therefore safe.
+
+#### Update state
+
+`/opt/scion/update-state.json` describes the last switch of `current`, as
+one JSON object:
+
+```json
+{"target":"nightly-20261023","from":"nightly-20261020","runId":"...","verified":false,"migrated":false,"previous_safe":true}
+```
+
+- The Hub writes it before it restarts into an update (`target` is the new
+  release, `from` the one it replaces). `deploy.sh` writes it when it
+  switches `current` (`runId` is `deploy.sh`), so a release installed by
+  `deploy.sh` is protected the same way.
+- The new release sets `migrated` to `true` before its first database
+  migration statement, and sets `previous_safe`: whether `from` is at or
+  above its downgrade floor (`pkg/version.DowngradeFloor`), that is,
+  whether `from` can still run on the migrated database. It may also
+  record `from_published_at`, which the guard ignores. `previous_safe` is
+  `false` when that cannot be shown: a `from` that is a Git build
+  (`git-<sha12>`), or a preview or stable `from` whose publish date the
+  Hub could not look up.
+- The Hub sets `verified` to `true` as soon as its listener is bound,
+  independently of the boot reconciliation. A release that crash-loops
+  before it can listen (for example, because port 8080 is taken right after
+  the update) is therefore still unverified and can be rolled back.
+
+The guard compares no versions. It reads the file as the `scion` user,
+without following a symlink and up to 4 KiB, and decides as below. Every
+"Rolls back" row also needs the start-attempts check of step 3 (the
+current release started at least twice since its switch), including the
+last row:
+
+| File | Guard |
+|---|---|
+| `target` is the release `current` points at and `from` the one `previous` points at, `verified` is `false`, not (`migrated` is `true` and `previous_safe` is not `true`), and `current` was switched within the last 1800 seconds | Rolls back |
+| As above, but `current` was switched longer ago | Leaves the Hub stopped: the update is not verified but too old to roll back automatically. A release older than this file never marks its update verified (for example after a downgrade to it), so an old unverified state is not taken as a failed update |
+| As above, but `verified` is `true` | Leaves the Hub stopped: the update succeeded, so the crash loop has another cause |
+| As above, but `migrated` is `true` and `previous_safe` is `false`, missing or not a boolean | Leaves the Hub stopped: restore the snapshot |
+| `target` or `from` does not match the links | Leaves the Hub stopped: the links were changed by something other than that update |
+| Missing or unreadable (not a regular file, a symlink, over 4 KiB, not a JSON object with string `target` and `from` and boolean `verified` and `migrated`) | Rolls back only if `current` was switched within the last 1800 seconds (the age of the symlink itself; every switch creates a new link), otherwise leaves the Hub stopped |
+
+To start a Hub that the guard left stopped, fix the cause shown in
+`journalctl -u scion-hub`, then run
+`sudo systemctl reset-failed scion-hub && sudo systemctl start scion-hub`.
+
+**systemd versions.** The VM image is Ubuntu 22.04 LTS, which ships systemd
+249; Ubuntu 24.04 LTS ships 255.
+
+- **systemd 249.** `OnFailure=` fires only when the unit finally fails,
+  when the start limit stops the automatic restarts. The journal says
+  "Start request repeated too quickly", but the unit's `Result` stays the
+  crash's own result (`exit-code`, `signal` or `core-dump`).
+  `Result=start-limit-hit` is set only when the run before was successful,
+  that is when clean restarts hit the limit. This is why the guard decides
+  on the failed state and on the last exit, not on `Result`.
+- **systemd 254 and later.** Unless the unit sets `RestartMode=direct`,
+  `OnFailure=` also fires on every failed start while systemd still
+  intends to restart the unit. On systemd 255.4 (Ubuntu 24.04) those runs
+  see the unit `activating`/`auto-restart`. The systemd source also has a
+  transient failed state before that (`SubState=failed-before-auto-restart`),
+  which was not observed on 255.4. The guard requires `SubState=failed` in
+  all three of its reads, so those runs do nothing either way; only the
+  final failure after the start limit is acted on.
+
+`StartLimitIntervalSec=` and `StartLimitBurst=` belong in `[Unit]` from
+systemd 230 on.
+
+**The rollback marker.** `/opt/scion/rollback.marker` is one line of JSON:
+
+```json
+{"at":"2026-10-29T07:30:00Z","from":"nightly-20261023","to":"nightly-20261020"}
+```
+
+`at` is the time of the rollback (RFC 3339, UTC), `from` the release that
+failed and `to` the release that was restored, both as release directory
+names under `releases/`. The file is owned by `scion`, mode 0644, and
+replaced with an atomic rename on each rollback, so `at` changes each time.
+The Hub reads it when it starts and reports the update that failed as
+**rolled back** on the Maintenance page. The Hub never deletes the marker.
+
+To see what the guard did:
+
+```bash
+sudo journalctl -u scion-hub-rollback.service
+sudo journalctl -u scion-hub.service
+cat /opt/scion/rollback.marker
+```
+
+### Restoring after a failed update
+
+The Hub takes a database snapshot before every update: SQLite only, with
+`VACUUM INTO`, as
+`/opt/scion/snapshots/hub-<from-version>-<timestamp>.db`. It also copies
+`settings.yaml` to `/opt/scion/snapshots/settings-<timestamp>.yaml`.
+The snapshot path is shown in the update run's result. The Hub keeps the
+last five snapshots. Database migrations are never reversed, so going back
+to an older release with the newer database can lose data or break the
+Hub. To go back to the state before an update, restore the snapshot
+together with the release:
+
+1. Stop the Hub:
+
+   ```bash
+   sudo systemctl stop scion-hub
+   ```
+
+2. Keep a copy of the current database, then restore the snapshot into
+   it. Use `sqlite3` for both, not `cp`: the database runs in WAL mode, and
+   after a crash recent changes can still be in `hub.db-wal`. `.backup`
+   includes them, and `.restore` replaces the whole database, WAL included.
+   Never delete `hub.db-wal` or `hub.db-shm` by hand.
+
+   ```bash
+   sudo -u scion sqlite3 /home/scion/.scion/hub.db ".backup '/home/scion/.scion/hub.db.before-restore'"
+   sudo -u scion sqlite3 /home/scion/.scion/hub.db ".restore '/opt/scion/snapshots/hub-<from-version>-<timestamp>.db'"
+   ```
+
+3. If needed, copy the settings back. An older release can drop settings
+   keys it does not know when it rewrites the file.
+
+   ```bash
+   sudo -u scion cp /opt/scion/snapshots/settings-<timestamp>.yaml /home/scion/.scion/settings.yaml
+   ```
+
+4. Point `current` at the release the snapshot was taken from, and
+   `previous` at the release you are leaving. Each `ln`/`mv` pair is an
+   atomic rename:
+
+   ```bash
+   cd /opt/scion
+   sudo -u scion ln -sfn releases/<from-version> current.new && sudo -u scion mv -T current.new current
+   sudo -u scion ln -sfn releases/<failed-version> previous.new && sudo -u scion mv -T previous.new previous
+   ```
+
+   If the boot-failure guard already restored the release, `current` points
+   at it already. Skip this step. Changing the links by hand makes
+   `update-state.json` no longer match them, so the guard will not roll
+   this state back on its own; that is intended.
+
+5. Start the Hub and check it:
+
+   ```bash
+   sudo systemctl reset-failed scion-hub
+   sudo systemctl start scion-hub
+   curl -s http://localhost:8080/healthz
+   ```
+
+A release that is no longer in `releases/` (the Hub keeps the last five) can
+be installed again with `deploy.sh --version <tag>` before step 4.
+
+`deploy.sh --version` installs releases only. If the snapshot was taken from
+a Git build (`hub-git-<sha12>-<timestamp>.db`) and `releases/git-<sha12>` has
+been pruned, either:
+
+- rebuild that commit into `releases/` by hand before step 4, as the `scion`
+  user in the maintenance repository (the stamped commit is what names the
+  build):
+
+  ```bash
+  cd <maintenance repo>
+  sudo -u scion git checkout <full commit>
+  sudo -u scion make web
+  sudo -u scion mkdir -p /opt/scion/releases/git-<sha12>
+  sudo -u scion go build -o /opt/scion/releases/git-<sha12>/scion \
+    -ldflags "-X github.com/GoogleCloudPlatform/scion/pkg/version.Commit=<full commit> -X github.com/GoogleCloudPlatform/scion/pkg/version.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    ./cmd/scion
+  ```
+
+- or skip that snapshot: install a release with `deploy.sh --version <tag>`
+  and restore an older snapshot taken from a release (`hub-<tag>-<timestamp>.db`),
+  if one is retained. Changes made after that snapshot are lost.
+
+### Converting an existing VM (`migrate-layout`)
+
+VMs deployed before this layout have a plain binary at `/usr/local/bin/scion`
+and a unit that runs it directly. Convert one with:
+
+```bash
+./scripts/single-node-vm/deploy.sh migrate-layout --config my-deploy-config.json
+```
+
+`hub_name` and `project_id` are read from the config file (without one, the
+script prompts for the hub name and uses the active gcloud project). The
+command:
+
+1. creates `/opt/scion/{releases,snapshots}`, owned by `scion`;
+2. moves the **currently installed** binary to `/opt/scion/releases/<its
+   version>/scion`, read from `scion version --format json`. A build with no
+   release version is stored as `releases/git-<sha12>`. Nothing is
+   downloaded, and the version does not change;
+3. points `/opt/scion/current` at it;
+4. replaces `/usr/local/bin/scion` with a symlink to
+   `/opt/scion/current/scion`;
+5. edits `settings.yaml` in place, as the file's owner (`scion`): adds
+   `server.maintenance.install_root: "/opt/scion"` and applies the update
+   policy rule below. Comments (including a trailing comment on the two
+   edited lines) and all other keys are left as they are. The edited file is parsed (with the VM's PyYAML) and compared with the
+   original before it replaces it;
+6. installs the [boot-failure guard](#boot-failure-guard)
+   (`/usr/local/libexec/scion/scion-hub-rollback.sh`, the start-attempts
+   counter `/usr/local/libexec/scion/scion-hub-start-attempt.sh` and
+   `scion-hub-rollback.service`), exactly as a fresh deploy does;
+7. re-renders the systemd unit with
+   `ExecStart=/opt/scion/current/scion ...`, the counter's `ExecStartPre=-`
+   and the guard's start limit and `OnFailure=`;
+8. runs `systemctl daemon-reload`, restarts the Hub, and waits for
+   `/healthz`.
+
+It is safe to re-run. On a converted VM the layout step does nothing, the
+settings edit changes only what is out of date, the guard is installed
+only if it changed, and the unit is re-rendered and the Hub restarted.
+Re-run `migrate-layout` on a VM converted before the guard existed to add
+it.
+
+If something goes wrong, the command stops at that step:
+
+- **The installed binary's version cannot be read, or the binary cannot be
+  copied completely** (for example, the disk is full). The command stops
+  before `current`, `/usr/local/bin/scion` or the unit change, so nothing
+  is converted. For an unreadable version, run a full
+  `deploy.sh --version <tag>` instead. For a failed copy, free disk space
+  and re-run.
+- **`/opt/scion`, `/opt/scion/releases` or `/opt/scion/snapshots` is not a
+  directory owned by `scion` with mode 0755** (for example, it was changed
+  by hand or is a symlink). The script refuses rather than repairing it,
+  and nothing changes. Fix the ownership or mode by hand
+  (`sudo chown scion:scion …`, `sudo chmod 0755 …`; replace a symlink with
+  a real directory) and re-run. `deploy.sh --version` refuses in the same
+  way. The exception is an `/opt/scion` that is still owned by root because
+  an earlier first run stopped partway. The next run finishes setting it up
+  and hands it to `scion`. Its parent, `/opt`, must be owned by root and not
+  writable by group or others (the image default, `root 0755`). Otherwise
+  `/opt/scion` is neither created nor resumed. The same rule applies to
+  `/usr/local/bin` and every directory above it, because root writes the
+  `scion` symlink there. The script refuses before changing anything.
+- **`/usr/local/libexec/scion` (or a directory above it) is a symlink,
+  is not owned by root, or is writable by group or others.** Root installs
+  the guard script there, so the script refuses before writing it, and the
+  unit change and restart are skipped. Fix the directory
+  (`sudo chown root:root …`, `sudo chmod 0755 …`) and re-run.
+- **`/usr/local/bin/scion` is a symlink to a binary only root can read**
+  (for example a hand-made `/usr/local/bin/scion -> /usr/local/lib/scion`
+  at mode 0700). A binary reached through a symlink is copied by the
+  `scion` user, not by root, so `migrate-layout` (and a `deploy.sh` re-run
+  over the old layout) stops with "input unreadable by scion". Make the
+  binary readable (`sudo chmod 0755 …`), or replace the symlink with the
+  plain binary, and re-run.
+- **The settings edit is refused.** This happens if the file has a shape the
+  script cannot edit safely (for example a flow-style `maintenance: {...}`),
+  or if PyYAML is missing (`sudo apt-get install python3-yaml`). By this
+  point steps 1-4 are done: `/opt/scion` exists and `/usr/local/bin/scion`
+  is already the symlink. `settings.yaml` is unchanged, and the guard, the
+  unit change and the restart (steps 6-8) are skipped. The Hub keeps running the same
+  binary through the symlink. To finish, set
+  `install_root: "/opt/scion"` and `update_policy` by hand as block-style
+  keys under `server:` → `maintenance:` in `settings.yaml`, then re-run
+  `migrate-layout`. The re-run finds
+  the settings already up to date (no parser needed), then renders the unit
+  and restarts the Hub.
+
+A normal re-run of `deploy.sh` also
+converts the VM: it keeps the old binary as the `previous` release and
+installs the requested version as `current`.
+
+**Update policy on conversion.** `migrate-layout` rewrites an existing
+`update_policy: "auto"` to `"notify"`, unless you ask for auto explicitly
+with `--update-policy auto` (or `update_policy: "auto"` in the config file).
+`notify` and `disabled` are kept. Before this change, `auto` was selected
+for you by default, and it did nothing on most VMs because the Hub could
+not replace its own binary. After conversion it works, so it should be a
+choice you make, not a default.
+
+**Behaviour change for unconverted VMs.** Some VMs updated themselves
+before this layout only because the `scion` user happened to have full
+passwordless sudo, for example through the GCE `google-sudoers` group, and
+had no maintenance repository configured. Those Hubs now report the
+installer as `unsupported` on the Maintenance page and do not download or
+install updates until you run `deploy.sh migrate-layout`. Hubs set up with
+the starter-hub sudoers rules (`/etc/sudoers.d/scion-rebuild-server`) and a
+maintenance repository path keep updating through the `sudo-install`
+strategy, with no change on the host.
 
 ## Configuration
 
@@ -187,20 +711,25 @@ directory, not `/`.
 
 The Hub configuration file. The deploy script writes it in two stages:
 
-1. **During VM setup (Phase 3)** — a bootstrap file with `server.auth.mode: dev` and
-   no proxy settings, so the Hub can start before IAP exists. Phase 3 checks
-   only the unauthenticated `/healthz` endpoint over SSH.
+1. **During VM setup (Phase 3)** — a bootstrap file with `server.auth.mode: dev`,
+   no proxy settings and `server.hub.host: 127.0.0.1`, so the Hub can start
+   before IAP exists. The loopback bind is needed because the server refuses
+   to listen on a non-loopback address without an https base URL, and the
+   https URL is derived from the IAP audience that only Phase 5 writes.
+   Phase 3 checks only the unauthenticated `/healthz` endpoint over SSH.
 2. **After IAP is ready (Phase 5)** — `auth.mode: proxy` with the IAP audience
-   string, enabling IAP-based authentication.
+   string, enabling IAP-based authentication. This file has no
+   `server.hub.host`, so after the restart the Hub listens on `0.0.0.0`
+   where the IAP proxy can reach it.
 
 The Phase 3 file does **not** turn on dev auth. `server.auth.mode: dev` on its own
 does not enable it, so until Phase 5 the Hub answers `/healthz` normally and
 every authenticated API call with `401`. Dev auth is turned on only by the
 `--dev-auth` flag or `server.auth.dev_mode: true` (environment variable
 `SCION_SERVER_AUTH_DEVMODE=true`). The server refuses to start with dev auth
-when the web server binds a non-loopback address. The Hub unit binds
-`0.0.0.0` so that the IAP proxy can reach it, so do not enable dev auth on
-the VM. If you need authenticated access before Phase 5, configure OAuth
+when the web server binds a non-loopback address. From Phase 5 on, the Hub
+binds `0.0.0.0` so that the IAP proxy can reach it, so do not enable dev auth
+on the VM. If you need authenticated access before Phase 5, configure OAuth
 (see [Authentication](../../docs-site/src/content/docs/hosted/single-node/auth.md)).
 For a short-lived test only, you can bind the Hub to loopback
 (`--host 127.0.0.1`) with dev auth and reach it through an SSH tunnel
@@ -219,8 +748,9 @@ server:
       - "you@example.com"
   maintenance:
     deployment_tier: "binary"
-    release_channel: "stable"
-    update_policy: "auto"
+    release_channel: "nightly"
+    update_policy: "notify"
+    install_root: "/opt/scion"
   storage:
     local_path: /home/scion/.scion/workspace-storage
   secrets:
@@ -254,12 +784,17 @@ Key settings:
 - `maintenance.deployment_tier` — `"binary"` for release-based deployments
   (set automatically by the deploy script). Source deployments use `"source"`.
 - `maintenance.release_channel` — which release channel to track for updates:
-  `"stable"` or `"preview"`. Default: `"stable"`.
+  `"stable"`, `"preview"` or `"nightly"`. The deploy script's default is
+  `"nightly"`.
+- `maintenance.install_root` — the versioned install root (see
+  [Binary layout and updates](#binary-layout-and-updates)). The deploy
+  script sets it to `"/opt/scion"`.
 - `maintenance.update_policy` — controls automatic update behavior:
-  - `"auto"` — check for updates on a schedule and install automatically
-    (recommended for binary deployments).
   - `"notify"` — check for updates and show a banner in the admin UI; admin
-    must manually trigger the update.
+    must manually trigger the update. This is the deploy script's default.
+  - `"auto"` — check for updates on a schedule and install automatically.
+    Only used when you choose it (`--update-policy auto` or
+    `update_policy: "auto"` in the config file).
   - `"disabled"` — no automatic update checking (manual checks via the admin
     UI still work).
 
@@ -356,6 +891,8 @@ installed to `/home/scion/.scion/plugins/broker/`. Each plugin runs as a
 broker plugin within the Hub process. Like the main binary, each plugin
 tarball is verified against the release's `SHA256SUMS` asset before
 installation (see [Quick Start](#quick-start)).
+When the Hub later updates itself, it updates these plugins to the same
+release (see [Chat plugins and updates](#chat-plugins-and-updates)).
 
 ## Container Images
 
@@ -422,8 +959,105 @@ authentication is needed — the agents are co-located with the Hub.
 
 ### CLI access (via IAP)
 
-To use the `scion` CLI from your local machine against the deployed Hub,
-configure it to authenticate through IAP using the Cloud Run proxy URL.
+IAP intercepts every request to the Cloud Run proxy URL. A browser follows
+IAP's Google sign-in, but the `scion` CLI cannot, so `scion hub auth login`
+against the proxy URL stops with an error saying the hub appears to be behind
+IAP. To use the CLI from your workstation, give it two credentials:
+
+- **Transport (outer):** a Google OIDC ID token that IAP accepts, sent as
+  `Proxy-Authorization`. IAP accepts an ID token for a service account whose
+  audience is the project's IAP OAuth client ID. A user account's own ID
+  token does not have that audience, so you mint the token by impersonating a
+  service account.
+- **Hub identity (inner):** a [user access token](https://googlecloudplatform.github.io/scion/hosted/user/personal-access-tokens/)
+  (UAT) in `SCION_HUB_TOKEN`. The Hub identifies you by the UAT, not by the
+  service account IAP sees. Create it in the web UI, which you reach through
+  IAP in the browser.
+
+**One-time setup (an admin runs these):**
+
+```bash
+PROJECT_ID=my-project
+REGION=us-central1
+HUB_NAME=my-hub
+SA_EMAIL="scion-cli-${HUB_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+
+# 1. A service account for workstation IAP access (or reuse an existing one).
+gcloud iam service-accounts create "scion-cli-${HUB_NAME}" --project="$PROJECT_ID"
+
+# 2. Let the service account through IAP on the proxy service.
+gcloud iap web add-iam-policy-binding \
+  --resource-type=cloud-run \
+  --service="scion-hub-${HUB_NAME}-iap-proxy" \
+  --region="$REGION" \
+  --project="$PROJECT_ID" \
+  --member="serviceAccount:${SA_EMAIL}" \
+  --role=roles/iap.httpsResourceAccessor
+
+# 3. Let each CLI user mint ID tokens for the service account.
+#    (roles/iam.serviceAccountTokenCreator also works, but grants more.)
+gcloud iam service-accounts add-iam-policy-binding "$SA_EMAIL" \
+  --project="$PROJECT_ID" \
+  --member=user:you@example.com \
+  --role=roles/iam.serviceAccountOpenIdTokenCreator
+```
+
+`roles/iap.httpsResourceAccessor` is the IAM ID of the **IAP-secured Web App
+User** role. Your own user account needs it too, for the browser.
+
+**Find the audience.** The token's audience is the project's IAP OAuth client
+ID, not the proxy URL and not the `auth.proxy.iap.audience` value in
+`settings.yaml` (that one is the audience of the assertion IAP sends to the
+Hub). `scripts/single-node-vm/hybrid-tier.sh` (`hybrid_discover_iap_client_id`)
+looks it up the same way for agent transport tokens:
+
+```bash
+CLIENT_ID="$(gcloud iap settings get --project="$PROJECT_ID" \
+  --resource-type=iap_web --format='value(accessSettings.oauthSettings.clientId)')"
+```
+
+If this prints nothing, the project's IAP settings have no OAuth client
+configured. See [Cross-org IAP: custom OAuth client required](agent-runbook-single-node-vm.md#cross-org-iap-custom-oauth-client-required)
+in the runbook.
+
+**Each session (on your workstation):**
+
+```bash
+mkdir -p ~/.scion
+# Write to a private temp file, then rename it into place, so the CLI never
+# reads a partly written token.
+tmp="$(mktemp ~/.scion/iap-transport-token.XXXXXX)"
+gcloud auth print-identity-token \
+  --impersonate-service-account="$SA_EMAIL" \
+  --audiences="$CLIENT_ID" \
+  --include-email > "$tmp" && mv "$tmp" ~/.scion/iap-transport-token || rm -f "$tmp"
+
+export SCION_TRANSPORT_MODE=iap
+export SCION_TRANSPORT_TOKEN_FILE=~/.scion/iap-transport-token
+export SCION_HUB_TOKEN=scion_pat_...   # your user access token
+export SCION_HUB_ENDPOINT=https://scion-hub-my-hub-iap-proxy-HASH-REGION.a.run.app
+
+scion list --project my-project
+```
+
+- `--include-email` is required: IAP checks the email claim of a service
+  account's ID token.
+- The ID token expires after about an hour. Re-run the `gcloud` command to
+  refresh the file; the CLI re-reads it when it changes. Setting
+  `SCION_TRANSPORT_TOKEN` to the token value instead of using a file also
+  works, until it expires.
+- A stored interactive login takes precedence over `SCION_HUB_TOKEN`; see
+  the user access token page.
+- If IAP rejects the token, the CLI reports that IAP did not accept the
+  transport token. Check the expiry, the audience, the email claim, and the
+  service account's IAP role.
+- With IAP external identities, the sign-in page is not on
+  `accounts.google.com`. The CLI then reports only that the hub returned an
+  HTML page instead of a JSON response; the same setup applies.
+
+The alternative needs no service account: SSH to the VM (see below) and run
+the CLI there against `http://localhost:8080` with `SCION_HUB_TOKEN` set to a
+user access token.
 
 ### SSH access (via gcloud)
 
@@ -457,10 +1091,11 @@ The teardown flow prompts for the hub name and region, then deletes:
 1. The Cloud Run IAP proxy service
 2. The GCE VM instance
 3. The Cloud NAT and Cloud Router (unless they were reused from a pre-existing gateway on the network/region)
-4. The hub VM's service account
-5. The Cloud Run proxy's service account
-6. The IAP SSH firewall rule
-7. The proxy-to-VM firewall rule (tcp:8080)
+4. The hub VM's service account's project role bindings (also any `deleted:serviceAccount:` tombstones of it on those roles)
+5. The hub VM's service account
+6. The Cloud Run proxy's service account
+7. The IAP SSH firewall rule
+8. The proxy-to-VM firewall rule (tcp:8080)
 
 **Note:** IAP access bindings are scoped to the region, not to the service.
 Teardown does not remove them. To clean up IAP bindings manually:
@@ -500,6 +1135,12 @@ Common causes:
   longer.
 - **VPC connectivity** — the Cloud Run proxy must be on the same VPC as the VM.
   The script deploys with `--network=default --subnet=default --vpc-egress=all-traffic`.
+- **5xx, or agents cannot reach the Hub, after a deploy that did not reach
+  "Deployment Complete"** — the Hub is still on the Phase 3 bootstrap bind
+  (`server.hub.host: 127.0.0.1`; see [settings.yaml](#settingsyaml)), so
+  `/healthz` answers on the VM's localhost but nothing else can connect.
+  Only the Phase 5 `settings.yaml` rewrite and restart remove the bind.
+  Fix: re-run `deploy.sh` to completion.
 
 ### Cloud-init takes too long
 
@@ -615,5 +1256,26 @@ The script is idempotent. Re-running it will:
 - Skip creating the VM and service account if they already exist
 - Preserve the existing `hub.env` (and its `SCION_SERVER_SESSION_SECRET`)
 - Seed the hub-scoped `GOOGLE_CLOUD_*` env vars only if they are absent (admin edits are preserved)
-- Overwrite `settings.yaml` with the current configuration
+- Overwrite `settings.yaml` with the current configuration. The update
+  policy comes from `--update-policy`, then the config file's
+  `update_policy`, and otherwise the prompt, which defaults to `notify`. An
+  earlier `auto` is not carried over unless you ask for it again.
+- Install the requested release into `/opt/scion/releases/<tag>/` and switch
+  `/opt/scion/current` to it. On a VM with the old layout, the old binary is
+  kept as the `previous` release (see
+  [Binary layout and updates](#binary-layout-and-updates)).
+- **Without `--version`, keep the release the VM already runs** when
+  `/opt/scion/current` exists. The Hub may have updated itself past the
+  release that auto-detect would pick (auto-detect reads GitHub's latest
+  release, not the Hub's channel), so the script neither downloads nor
+  switches the binary, and says so. Chat plugins are still installed from
+  that release. Pass `--version <tag>` to change releases. If the VM runs a
+  git build (`releases/git-<sha>`), the script stops and asks for
+  `--version`.
+- **With `--version` older than the running release**, print a `DOWNGRADE`
+  warning and proceed, because the version was chosen explicitly. A
+  downgrade can fail to start if the newer release already migrated the Hub
+  database. The newer release stays installed as `/opt/scion/previous`.
+- Install or refresh the [boot-failure guard](#boot-failure-guard) and
+  re-render `scion-hub.service`
 - Re-deploy the Cloud Run proxy (converges to the same state)

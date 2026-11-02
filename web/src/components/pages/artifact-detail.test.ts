@@ -28,8 +28,13 @@ import type {
   DiscardedVersion,
 } from '../../client/artifacts.js';
 import type { ScionPageArtifactDetail } from './artifact-detail.js';
-import { resetPrincipalNames } from '../../client/principal-names.js';
+import { resetPrincipalNames, shortId } from '../../client/principal-names.js';
+import { formatInstant } from '../../utils/time.js';
 import { requestBodyText, requestUrl } from '../../client/__fixtures__/request-url.js';
+import { showToast } from '../../utils/toast.js';
+
+// Toasts need Shoelace's toast stack, which the test DOM does not register.
+vi.mock('../../utils/toast.js', () => ({ showToast: vi.fn() }));
 
 const ID = '5f1c2d3e-0000-4000-8000-000000000001';
 
@@ -89,6 +94,10 @@ interface MockOptions {
   write?: (method: string, url: string) => Response;
   /** File body at the time of the read (overrides body). */
   bodyFn?: () => string;
+  /** Holds a metadata GET until the promise it returns resolves (none: answer at once). */
+  metaGate?: () => Promise<void> | undefined;
+  /** Status of a metadata GET at the time of the request (default 200). */
+  metaStatus?: () => number;
 }
 
 const VIEW_URL = `/api/v1/artifacts/view/${ID}.1.9999999999.c2lnbmF0dXJl/`;
@@ -160,11 +169,16 @@ function mockFetch(
           new Response('{"error":{"code":"not_found","message":"not found"}}', { status: 404 })
         );
       }
-      return Promise.resolve(
-        new Response(JSON.stringify(meta), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        })
+      const status = opts.metaStatus?.() ?? 200;
+      const gate = opts.metaGate?.() ?? Promise.resolve();
+      // The body is built when the gate opens, so a test can change meta meanwhile.
+      return gate.then(() =>
+        status !== 200
+          ? new Response('{"error":{"code":"internal","message":"boom"}}', { status })
+          : new Response(JSON.stringify(meta), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            })
       );
     })
   );
@@ -2061,5 +2075,437 @@ describe('artifact page', () => {
       .textContent!.replace(/\s+/g, ' ');
     expect(banner).toContain('left 1 highlight on v1');
     expect(banner).not.toContain('0 comments');
+  });
+});
+
+/**
+ * ptone/scion#6851 (Refresh, and the Review pending badge following a newer
+ * version), ptone/scion#6847 (back and after a delete, return to where the
+ * page was opened from) and ptone/scion#6852 (version kind, author, date
+ * and state in the version menu and the header).
+ */
+describe('artifact page: refresh, origin and version labels', () => {
+  const AGENT = '9d0e1f2a-3b4c-4d5e-8f6a-7b8c9d0e1f2a';
+
+  beforeAll(async () => {
+    const hd = (
+      window as unknown as { happyDOM?: { settings: { disableIframePageLoading: boolean } } }
+    ).happyDOM;
+    if (hd) hd.settings.disableIframePageLoading = true;
+    await import('./artifact-detail.js');
+  }, 30_000);
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    delete window.__SCION_FEATURES__;
+    resetPrincipalNames();
+  });
+
+  async function settle(el: ScionPageArtifactDetail): Promise<void> {
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 0));
+      await el.updateComplete;
+    }
+  }
+
+  /** Mounts the page as user u-1, so a version by u-1 shows as "You". */
+  async function mountAs(path = `/projects/p-1/artifacts/${ID}`): Promise<ScionPageArtifactDetail> {
+    window.__SCION_FEATURES__ = { 'hub.artifacts': true };
+    const el = document.createElement('scion-page-artifact-detail') as ScionPageArtifactDetail;
+    el.pageData = { path, user: { id: 'u-1' } } as ScionPageArtifactDetail['pageData'];
+    document.body.appendChild(el);
+    await settle(el);
+    return el;
+  }
+
+  function version(seq: number, kind: string, by: [string, string]): ArtifactVersion {
+    return {
+      seq,
+      ref: `scion://artifact/${ID}@${seq}`,
+      kind,
+      entryPath: 'design.md',
+      totalBytes: 5,
+      fileCount: 1,
+      createdByKind: by[0],
+      createdByRef: by[1],
+      createdAt: `2026-10-0${seq}T12:00:00Z`,
+      state: 'ready',
+      files: [{ path: 'design.md', size: 5, sha256: 'ab', mediaType: 'text/markdown' }],
+    };
+  }
+
+  /** Two versions: v1 published by u-1 (You), v2 a review by an agent, current. */
+  function twoVersions(): { meta: ArtifactResponse; versions: ArtifactVersion[] } {
+    const meta = artifact('design.md', 'text/markdown');
+    const v1 = version(1, 'publish', ['user', 'u-1']);
+    const v2 = version(2, 'review', ['agent', AGENT]);
+    meta.artifact.currentSeq = 2;
+    meta.version = v2;
+    return {
+      meta,
+      versions: [
+        { ...v2, files: [] },
+        { ...v1, files: [] },
+      ],
+    };
+  }
+
+  const text = (e: Element | null | undefined): string =>
+    (e?.textContent ?? '').replace(/\s+/g, ' ').trim();
+
+  function menuItems(el: ScionPageArtifactDetail): string[] {
+    return Array.from(el.shadowRoot!.querySelectorAll('.header-actions sl-menu-item')).map(text);
+  }
+
+  function reviewBadge(el: ScionPageArtifactDetail): Element | undefined {
+    return Array.from(el.shadowRoot!.querySelectorAll('scion-detail-header > sl-badge')).find(
+      (b) => text(b) === 'Review pending'
+    );
+  }
+
+  function headerButton(el: ScionPageArtifactDetail, label: string): HTMLElement {
+    const b = Array.from(el.shadowRoot!.querySelectorAll('.header-actions sl-button')).find(
+      (x) => text(x) === label
+    );
+    if (!b) throw new Error(`no button ${label}`);
+    return b as HTMLElement;
+  }
+
+  function onNav(): { paths: string[]; stop: () => void } {
+    const paths: string[] = [];
+    const h = (e: Event): void => {
+      paths.push((e as CustomEvent<{ path: string }>).detail.path);
+    };
+    document.addEventListener('nav-click', h);
+    return { paths, stop: () => document.removeEventListener('nav-click', h) };
+  }
+
+  it('#6852: each version menu entry shows its kind and author, compactly', async () => {
+    const { meta, versions } = twoVersions();
+    mockFetch(meta, '# Doc', { versions });
+    const el = await mountAs();
+    const agent = `${shortId(AGENT)} (agent)`;
+    expect(menuItems(el)).toEqual([
+      `v2 (current) · Review by ${agent} · ${formatInstant(versions[0].createdAt)}`,
+      `v1 · Publish by You · ${formatInstant(versions[1].createdAt)}`,
+    ]);
+  });
+
+  it('#6852: the header shows the version, its state, kind, author and date', async () => {
+    const { meta, versions } = twoVersions();
+    mockFetch(meta, '# Doc', { versions });
+    const el = await mountAs();
+    const info = el.shadowRoot!.querySelector('.meta .version-info');
+    expect(text(info)).toBe(
+      `Version: v2 · current · Review by ${shortId(AGENT)} (agent) · ${formatInstant(versions[0].createdAt)}`
+    );
+    expect(info!.querySelector('.v-state.current')).not.toBeNull();
+    document.body.innerHTML = '';
+
+    // An older version says so and names the current one.
+    const old = twoVersions();
+    old.meta.version = version(1, 'publish', ['user', 'u-1']);
+    mockFetch(old.meta, '# Old', { versions: old.versions });
+    const el2 = await mountAs(`/projects/p-1/artifacts/${ID}/v/1`);
+    const info2 = el2.shadowRoot!.querySelector('.meta .version-info');
+    expect(text(info2)).toBe(
+      `Version: v1 · older, current is v2 · Publish by You · ${formatInstant(old.versions[1].createdAt)}`
+    );
+    expect(info2!.querySelector('.v-state.older')).not.toBeNull();
+  });
+
+  it('#6851: Refresh reloads the artifact and its versions in place, and the badge shows a new review', async () => {
+    const meta = artifact('design.md', 'text/markdown');
+    const urls = mockFetch(meta, '# Doc');
+    const el = await mountAs();
+    expect(reviewBadge(el)).toBeUndefined();
+
+    // Meanwhile a reviewer publishes v2, a review.
+    meta.artifact.currentSeq = 2;
+    meta.version = version(2, 'review', ['agent', AGENT]);
+    const before = urls.length;
+    headerButton(el, 'Refresh').click();
+    await el.updateComplete;
+    // The page stays on screen while it reloads (no full-page spinner).
+    expect(el.shadowRoot!.querySelector('.loading-state')).toBeNull();
+    await settle(el);
+    const after = urls.slice(before);
+    expect(after).toContain(`/api/v1/artifacts/${ID}`);
+    expect(after.some((u) => /\/versions(\?|$)/.test(u))).toBe(true);
+    expect(reviewBadge(el)).toBeDefined();
+    expect(menuItems(el)[0]).toContain('v2 (current) · Review');
+  });
+
+  it('#6851: back on the tab, a newer review in the version list shows the badge (at most every 30 s)', async () => {
+    const meta = artifact('design.md', 'text/markdown');
+    const versions: ArtifactVersion[] = [{ ...meta.version!, files: [] }];
+    const urls = mockFetch(meta, '# Doc', { versions });
+    const el = await mountAs();
+    expect(reviewBadge(el)).toBeUndefined();
+
+    versions.unshift({ ...version(2, 'review', ['agent', AGENT]), files: [] });
+    const visible = (): void => {
+      Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
+      document.dispatchEvent(new Event('visibilitychange'));
+    };
+    // Control: within 30 s of the load nothing is re-read.
+    const listed = (): number => urls.filter((u) => /\/versions(\?|$)/.test(u)).length;
+    const n = listed();
+    visible();
+    await settle(el);
+    expect(listed()).toBe(n);
+    expect(reviewBadge(el)).toBeUndefined();
+
+    const now = Date.now();
+    vi.spyOn(Date, 'now').mockReturnValue(now + 31_000);
+    visible();
+    await settle(el);
+    expect(listed()).toBe(n + 1);
+    expect(reviewBadge(el)).toBeDefined();
+    expect(menuItems(el)[0]).toContain('v2 (current)');
+  });
+
+  it('#6847: opened from the Artifacts list, the back link and a delete go back there, and version links keep it', async () => {
+    mockFetch({ ...artifact('design.md', 'text/markdown'), canRetire: true }, '# Doc', {
+      write: () => new Response(null, { status: 204 }),
+    });
+    const el = await mountAs(`/projects/p-1/artifacts/${ID}?from=artifacts`);
+    const back = el.shadowRoot!.querySelector(
+      'scion-detail-header > scion-back-link[slot="back"]'
+    )!;
+    expect(text(back)).toBe('Artifacts');
+    expect(back.getAttribute('href')).toBe('/artifacts');
+
+    const nav = onNav();
+    try {
+      // A version link keeps the origin.
+      el.shadowRoot!.querySelector('.header-actions sl-menu')!.dispatchEvent(
+        new CustomEvent('sl-select', { detail: { item: { value: '2' } } })
+      );
+      expect(nav.paths).toEqual([`/projects/p-1/artifacts/${ID}/v/2?from=artifacts`]);
+      nav.paths.length = 0;
+
+      headerButton(el, 'Delete…').click();
+      await settle(el);
+      const dialog = el.shadowRoot!.querySelector('scion-artifact-delete-dialog')!;
+      const confirm = Array.from(dialog.shadowRoot!.querySelectorAll('sl-button')).find(
+        (b) => text(b) === 'Delete'
+      ) as HTMLElement;
+      confirm.click();
+      await settle(el);
+      expect(nav.paths).toEqual(['/artifacts']);
+    } finally {
+      nav.stop();
+    }
+  });
+
+  it('#6847: opened from its project, the back link and a delete go back to the project', async () => {
+    mockFetch({ ...artifact('design.md', 'text/markdown'), canRetire: true }, '# Doc', {
+      write: () => new Response(null, { status: 204 }),
+    });
+    const el = await mountAs();
+    const back = el.shadowRoot!.querySelector(
+      'scion-detail-header > scion-back-link[slot="back"]'
+    )!;
+    expect(text(back)).toBe('Project');
+    expect(back.getAttribute('href')).toBe('/projects/p-1');
+    const nav = onNav();
+    try {
+      headerButton(el, 'Delete…').click();
+      await settle(el);
+      const dialog = el.shadowRoot!.querySelector('scion-artifact-delete-dialog')!;
+      const confirm = Array.from(dialog.shadowRoot!.querySelectorAll('sl-button')).find(
+        (b) => text(b) === 'Delete'
+      ) as HTMLElement;
+      confirm.click();
+      await settle(el);
+      expect(nav.paths).toEqual(['/projects/p-1']);
+    } finally {
+      nav.stop();
+    }
+  });
+  /** Private state the race tests read and the actions they start. */
+  type Internals = {
+    data: ArtifactResponse;
+    text: string | null;
+    reviewText: string;
+    editText: string;
+    publishOpen: boolean;
+    editing: boolean;
+    reviewing: boolean;
+    startReview: () => void;
+    startEdit: () => void;
+  };
+  const internals = (el: ScionPageArtifactDetail): Internals => el as unknown as Internals;
+
+  /** A Refresh whose artifact read is held until release() (round 1, R-1). */
+  function heldRefresh(): {
+    meta: ArtifactResponse;
+    body: { text: string };
+    hold: () => void;
+    release: () => void;
+    opts: { metaGate: () => Promise<void> | undefined; bodyFn: () => string };
+  } {
+    const meta = artifact('design.md', 'text/markdown');
+    const body = { text: '# One' };
+    let held = false;
+    let open: (() => void) | null = null;
+    return {
+      meta,
+      body,
+      hold: (): void => {
+        held = true;
+      },
+      release: (): void => {
+        held = false;
+        open?.();
+      },
+      opts: {
+        metaGate: (): Promise<void> | undefined =>
+          held ? new Promise<void>((r) => (open = (): void => r())) : undefined,
+        bodyFn: () => body.text,
+      },
+    };
+  }
+
+  /** Meanwhile v2 is published, with new text. */
+  function publishV2(h: ReturnType<typeof heldRefresh>): void {
+    h.meta.artifact.currentSeq = 2;
+    h.meta.version = version(2, 'publish', ['user', 'u-1']);
+    h.body.text = '# Two';
+  }
+
+  it('R-1: a review started while a Refresh is in flight keeps the version it was started on', async () => {
+    const h = heldRefresh();
+    mockFetch(h.meta, '# One', h.opts);
+    const el = await mountAs();
+    const review = (): HTMLElement => headerButton(el, 'Review');
+    expect(review().hasAttribute('disabled')).toBe(false);
+
+    h.hold();
+    headerButton(el, 'Refresh').click();
+    await el.updateComplete;
+    // Review (and Edit) cannot be clicked while the Refresh runs.
+    expect(review().hasAttribute('disabled')).toBe(true);
+    expect(headerButton(el, 'Edit').hasAttribute('disabled')).toBe(true);
+
+    // A review starts anyway (another path), then the Refresh's read lands with v2.
+    internals(el).startReview();
+    publishV2(h);
+    h.release();
+    await settle(el);
+    // The Refresh result was dropped: the review's text and its base are both v1.
+    expect(internals(el).data.version!.seq).toBe(1);
+    expect(internals(el).text).toBe('# One');
+    expect(internals(el).reviewText).toBe('# One');
+  });
+
+  for (const action of ['edit', 'upload'] as const) {
+    it(`R-1: an ${action} started while a Refresh is in flight keeps the version it was started on`, async () => {
+      const h = heldRefresh();
+      mockFetch(h.meta, '# One', h.opts);
+      const el = await mountAs();
+      const uploads = (): HTMLElement[] =>
+        Array.from(el.shadowRoot!.querySelectorAll<HTMLElement>('sl-button')).filter((b) =>
+          text(b).includes('Upload new version')
+        );
+      expect(uploads().length).toBeGreaterThan(0);
+
+      h.hold();
+      headerButton(el, 'Refresh').click();
+      await el.updateComplete;
+      // Edit and every Upload button cannot be clicked while the Refresh runs.
+      expect(headerButton(el, 'Edit').hasAttribute('disabled')).toBe(true);
+      for (const u of uploads()) expect(u.hasAttribute('disabled')).toBe(true);
+
+      // The action starts anyway (another path), then the Refresh's read lands with v2.
+      if (action === 'edit') internals(el).startEdit();
+      else internals(el).publishOpen = true;
+      publishV2(h);
+      h.release();
+      await settle(el);
+      // The Refresh result was dropped: the page still shows v1.
+      expect(internals(el).data.version!.seq).toBe(1);
+      expect(internals(el).text).toBe('# One');
+      if (action === 'edit') expect(internals(el).editText).toBe('# One');
+    });
+  }
+
+  it('R-1 control: a Refresh with no review overlapping shows the new version, and a review then starts from it', async () => {
+    const h = heldRefresh();
+    mockFetch(h.meta, '# One', h.opts);
+    const el = await mountAs();
+    h.hold();
+    headerButton(el, 'Refresh').click();
+    await el.updateComplete;
+    publishV2(h);
+    h.release();
+    await settle(el);
+    expect(internals(el).data.version!.seq).toBe(2);
+    expect(internals(el).text).toBe('# Two');
+    expect(headerButton(el, 'Review').hasAttribute('disabled')).toBe(false);
+    internals(el).startReview();
+    expect(internals(el).reviewText).toBe('# Two');
+  });
+
+  for (const mode of ['editing', 'reviewing'] as const) {
+    it(`R-2: back on the tab while ${mode}, the version list is not re-read`, async () => {
+      const meta = artifact('design.md', 'text/markdown');
+      const urls = mockFetch(meta, '# Doc');
+      const el = await mountAs();
+      if (mode === 'editing') internals(el).startEdit();
+      else internals(el).startReview();
+      await el.updateComplete;
+      expect(internals(el)[mode]).toBe(true);
+      const listed = (): number => urls.filter((u) => /\/versions(\?|$)/.test(u)).length;
+      const n = listed();
+      const now = Date.now();
+      vi.spyOn(Date, 'now').mockReturnValue(now + 31_000);
+      const visible = (): void => {
+        Object.defineProperty(document, 'visibilityState', {
+          value: 'visible',
+          configurable: true,
+        });
+        document.dispatchEvent(new Event('visibilitychange'));
+      };
+      visible();
+      await settle(el);
+      expect(listed()).toBe(n);
+      // Positive control: once the edit or review is closed, the same return re-reads it.
+      internals(el)[mode] = false;
+      visible();
+      await settle(el);
+      expect(listed()).toBe(n + 1);
+    });
+  }
+
+  it('R-2: a failed Refresh keeps the page and says so in a toast', async () => {
+    const meta = artifact('design.md', 'text/markdown');
+    let status = 200;
+    mockFetch(meta, '# Doc', { metaStatus: () => status });
+    const el = await mountAs();
+    expect(el.shadowRoot!.querySelector('scion-artifact-markdown-frame')).not.toBeNull();
+    status = 500;
+    vi.mocked(showToast).mockClear();
+    headerButton(el, 'Refresh').click();
+    await settle(el);
+    expect(el.shadowRoot!.querySelector('.loading-state')).toBeNull();
+    expect(el.shadowRoot!.querySelector('.error-state')).toBeNull();
+    expect(el.shadowRoot!.querySelector('scion-artifact-markdown-frame')).not.toBeNull();
+    expect(showToast).toHaveBeenCalledWith(expect.stringMatching(/^Could not refresh: /), 'danger');
+  });
+
+  it('R-2: a version with no author shows the bare kind in the menu and the header', async () => {
+    const meta = artifact('design.md', 'text/markdown');
+    mockFetch(meta, '# Doc');
+    const el = await mountAs();
+    const v = meta.version!;
+    expect(v.createdByKind).toBeUndefined();
+    expect(menuItems(el)).toEqual([`v1 (current) · Publish · ${formatInstant(v.createdAt)}`]);
+    expect(text(el.shadowRoot!.querySelector('.meta .version-info'))).toBe(
+      `Version: v1 · current · Publish · ${formatInstant(v.createdAt)}`
+    );
   });
 });

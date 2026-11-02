@@ -711,3 +711,28 @@ func TestConfigUnset_HumanOnly(t *testing.T) {
 	}
 	assert.True(t, found, "config unset is registered (human mode)")
 }
+
+// TestServerOpenCmd_HumanModeOnly: 'scion server open' mints a web sign-in
+// link with the server's dev token, so it exists only in human mode. It is
+// on no allow-list, and agent mode removes it from the real command tree.
+func TestServerOpenCmd_HumanModeOnly(t *testing.T) {
+	assert.False(t, agentAllowed["server.open"], "server open must not be allowed in agent mode")
+	assert.False(t, agentAllowed["server"], "the server command must not be allowed in agent mode")
+
+	real := resolveCommandPath(rootCmd, "server.open")
+	require.NotNil(t, real, "server open must exist in the real command tree")
+
+	root := &cobra.Command{Use: "scion"}
+	serverReal := resolveCommandPath(rootCmd, "server")
+	require.NotNil(t, serverReal)
+	root.AddCommand(cloneCommandShape(serverReal))
+	t.Setenv("SCION_CLI_MODE", "agent")
+	applyModeRestrictions(root, resolveMode())
+	assert.Nil(t, resolveCommandPath(root, "server.open"), "server open must be removed in agent mode")
+
+	human := &cobra.Command{Use: "scion"}
+	human.AddCommand(cloneCommandShape(serverReal))
+	t.Setenv("SCION_CLI_MODE", "human")
+	applyModeRestrictions(human, resolveMode())
+	assert.NotNil(t, resolveCommandPath(human, "server.open"), "human mode keeps server open")
+}

@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/hubtestutil"
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -32,7 +33,7 @@ import (
 // for testing. The caller should close the returned *sql.DB when done.
 func newTestWebChatStore(t *testing.T) (WebChatStore, *sql.DB) {
 	t.Helper()
-	db := openTestMemorySQLite(t, "sqlite")
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
 
 	store := NewWebChatStore(db, "sqlite")
 	require.NoError(t, store.Init())

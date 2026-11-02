@@ -2381,3 +2381,521 @@ describe('on a touch-primary device, the open request holds the on-screen keyboa
     expect(document.activeElement).toBe(button);
   });
 });
+
+describe('a finger tap on a quick-switcher button holds the on-screen keyboard on any device', () => {
+  afterEach(() => {
+    for (const page of document.querySelectorAll('scion-page-chat')) page.remove();
+    vi.unstubAllGlobals();
+    for (const proxy of document.querySelectorAll('input[data-palette-keyboard-proxy]')) {
+      proxy.remove();
+    }
+  });
+
+  /**
+   * A phone that does not match TOUCH_PRIMARY_QUERY: several Android phones
+   * report hover support or a fine pointer.
+   */
+  function stubNotTouchPrimary(): void {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }))
+    );
+  }
+
+  /** The page's own quick-switcher button at the bottom of the spaces rail. */
+  async function footerButton(page: any): Promise<HTMLButtonElement> {
+    await page.updateComplete;
+    const button = page.shadowRoot.querySelector(
+      '.v2-rail > .palette-footer > .palette-footer-btn'
+    ) as HTMLButtonElement | null;
+    expect(button).not.toBeNull();
+    return button!;
+  }
+
+  /** The deepest focused element as the click finished dispatching, in the same task. */
+  function focusAtClickEnd(button: HTMLButtonElement): () => Element | null {
+    let focused: Element | null = null;
+    button.addEventListener('click', () => {
+      let el: Element | null = document.activeElement;
+      while (el?.shadowRoot?.activeElement) el = el.shadowRoot.activeElement;
+      focused = el;
+    });
+    return () => focused;
+  }
+
+  function isTextInput(el: Element | null): boolean {
+    return el instanceof HTMLInputElement && el.type === 'text';
+  }
+
+  it('a touch click gives a text field focus within the tap, before any await', async () => {
+    stubNotTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    const button = await footerButton(page);
+    const focusedInTap = focusAtClickEnd(button);
+
+    button.dispatchEvent(
+      new PointerEvent('click', { pointerType: 'touch', bubbles: true, composed: true })
+    );
+
+    // Read synchronously, in the click's own task: no awaited tick.
+    expect(isTextInput(focusedInTap())).toBe(true);
+    expect(focusedInTap()).toBe(document.querySelector('input[data-palette-keyboard-proxy]'));
+    expect(page._paletteInvoker).toBe(button);
+    expect(page._paletteOpenByTouch).toBe(false);
+    await vi.waitFor(() => expect(page.v2PaletteOpen).toBe(true));
+  });
+
+  it('a touch pointerdown before a click that carries no pointerType counts as a tap', async () => {
+    stubNotTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    const button = await footerButton(page);
+    const focusedInTap = focusAtClickEnd(button);
+
+    button.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'touch', bubbles: true }));
+    button.dispatchEvent(new MouseEvent('click', { detail: 1, bubbles: true, composed: true }));
+
+    expect(isTextInput(focusedInTap())).toBe(true);
+    await vi.waitFor(() => expect(page.v2PaletteOpen).toBe(true));
+  });
+
+  it('a touch pointerdown counts for one click only', async () => {
+    stubNotTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    const button = await footerButton(page);
+    const focusedInTap = focusAtClickEnd(button);
+
+    // The first click's open request is refused (an unrelated modal is up),
+    // so the palette stays closed for the second.
+    vi.mocked(page._isUnrelatedModalActive).mockReturnValue(true);
+    button.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'touch', bubbles: true }));
+    button.dispatchEvent(new MouseEvent('click', { detail: 1, bubbles: true, composed: true }));
+    expect(page.v2PaletteOpen).toBe(false);
+    vi.mocked(page._isUnrelatedModalActive).mockReturnValue(false);
+
+    button.dispatchEvent(new MouseEvent('click', { detail: 1, bubbles: true, composed: true }));
+
+    expect(focusedInTap()).toBe(button);
+    expect(document.querySelector('input[data-palette-keyboard-proxy]')).toBeNull();
+    await vi.waitFor(() => expect(page.v2PaletteOpen).toBe(true));
+  });
+
+  it('a pen click counts as a tap', async () => {
+    stubNotTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    const button = await footerButton(page);
+    const focusedInTap = focusAtClickEnd(button);
+
+    button.dispatchEvent(
+      new PointerEvent('click', { pointerType: 'pen', bubbles: true, composed: true })
+    );
+
+    expect(isTextInput(focusedInTap())).toBe(true);
+    await vi.waitFor(() => expect(page.v2PaletteOpen).toBe(true));
+  });
+
+  it('a pen pointerdown before a click that carries no pointerType counts as a tap', async () => {
+    stubNotTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    const button = await footerButton(page);
+    const focusedInTap = focusAtClickEnd(button);
+
+    button.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'pen', bubbles: true }));
+    button.dispatchEvent(new MouseEvent('click', { detail: 1, bubbles: true, composed: true }));
+
+    expect(isTextInput(focusedInTap())).toBe(true);
+    await vi.waitFor(() => expect(page.v2PaletteOpen).toBe(true));
+  });
+
+  it('a mouse click on a desktop leaves focus on the button, as before', async () => {
+    stubNotTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    const button = await footerButton(page);
+    const focusedInTap = focusAtClickEnd(button);
+
+    button.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'mouse', bubbles: true }));
+    button.dispatchEvent(
+      new PointerEvent('click', { pointerType: 'mouse', bubbles: true, composed: true })
+    );
+
+    expect(focusedInTap()).toBe(button);
+    expect(document.querySelector('input[data-palette-keyboard-proxy]')).toBeNull();
+    await vi.waitFor(() => expect(page.v2PaletteOpen).toBe(true));
+  });
+
+  it('a stray touch pointerdown does not make a later mouse click a tap', async () => {
+    stubNotTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    const button = await footerButton(page);
+    const focusedInTap = focusAtClickEnd(button);
+
+    // The finger slid off: no click followed this pointerdown.
+    button.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'touch', bubbles: true }));
+    button.dispatchEvent(
+      new PointerEvent('click', { pointerType: 'mouse', bubbles: true, composed: true })
+    );
+
+    expect(focusedInTap()).toBe(button);
+    expect(document.querySelector('input[data-palette-keyboard-proxy]')).toBeNull();
+    await vi.waitFor(() => expect(page.v2PaletteOpen).toBe(true));
+  });
+
+  it('a keyboard click after a stray touch pointerdown is not a tap', async () => {
+    stubNotTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    const button = await footerButton(page);
+    const focusedInTap = focusAtClickEnd(button);
+
+    // Enter or Space: a click with detail 0 and, in an engine whose clicks
+    // are not PointerEvents, no pointerType.
+    button.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'touch', bubbles: true }));
+    button.dispatchEvent(new MouseEvent('click', { detail: 0, bubbles: true, composed: true }));
+
+    expect(focusedInTap()).toBe(button);
+    expect(document.querySelector('input[data-palette-keyboard-proxy]')).toBeNull();
+    await vi.waitFor(() => expect(page.v2PaletteOpen).toBe(true));
+  });
+
+  it('a click after a cancelled touch press is not a tap', async () => {
+    stubNotTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    const button = await footerButton(page);
+    const focusedInTap = focusAtClickEnd(button);
+
+    // The browser cancelled the press (the page scrolled): no click for it.
+    button.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'touch', bubbles: true }));
+    button.dispatchEvent(
+      new PointerEvent('pointercancel', { pointerType: 'touch', bubbles: true })
+    );
+    button.dispatchEvent(new MouseEvent('click', { detail: 1, bubbles: true, composed: true }));
+
+    expect(focusedInTap()).toBe(button);
+    expect(document.querySelector('input[data-palette-keyboard-proxy]')).toBeNull();
+    await vi.waitFor(() => expect(page.v2PaletteOpen).toBe(true));
+  });
+
+  it('Cmd/Ctrl+K after a touch-opened palette closes does not hold the keyboard', async () => {
+    stubNotTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    const button = await footerButton(page);
+    button.dispatchEvent(
+      new PointerEvent('click', { pointerType: 'touch', bubbles: true, composed: true })
+    );
+    await vi.waitFor(() => expect(page.v2PaletteOpen).toBe(true));
+    page._closePaletteAndCancelLoad();
+    expect(document.querySelector('input[data-palette-keyboard-proxy]')).toBeNull();
+
+    // Queued behind the close animation or opened, either way the
+    // type-ahead starts again: the tap must not still count.
+    page._handleGlobalKeydown(makeKeydownEvent({ metaKey: true }));
+
+    // The press really asked for a reopen, so the type-ahead did start again.
+    expect(page._palettePendingReopen || page.v2PaletteOpen).toBe(true);
+    expect(page._paletteTypeahead.isCapturing).toBe(true);
+    expect(document.querySelector('input[data-palette-keyboard-proxy]')).toBeNull();
+  });
+
+  it('Cmd/Ctrl+K after a stray touch pointerdown does not hold the keyboard on a desktop', async () => {
+    stubNotTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    const button = await footerButton(page);
+    // A pointerdown whose click never came (the finger slid off) must not
+    // leak into the next open.
+    button.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'touch', bubbles: true }));
+
+    page._handleGlobalKeydown(makeKeydownEvent({ metaKey: true }));
+
+    expect(document.querySelector('input[data-palette-keyboard-proxy]')).toBeNull();
+    await vi.waitFor(() => expect(page.v2PaletteOpen).toBe(true));
+  });
+});
+
+describe('with the quick switcher mounted, a tap focuses its query input inside the tap', () => {
+  afterEach(() => {
+    for (const page of document.querySelectorAll('scion-page-chat')) page.remove();
+    vi.unstubAllGlobals();
+    for (const proxy of document.querySelectorAll('input[data-palette-keyboard-proxy]')) {
+      proxy.remove();
+    }
+  });
+
+  /** No preload here (a device that does not match TOUCH_PRIMARY_QUERY): the test mounts it. */
+  function stubNotTouchPrimary(): void {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }))
+    );
+  }
+
+  /** An eligible page with the palette imported and mounted closed, as the preload leaves it. */
+  async function pageWithMountedPalette(): Promise<{
+    page: any;
+    palette: any;
+    button: HTMLButtonElement;
+    input: HTMLInputElement;
+  }> {
+    stubNotTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    await import('../shared/palette/quick-palette.js');
+    page.v2SwitcherLoaded = true;
+    await page.updateComplete;
+    const palette = page.shadowRoot.querySelector('scion-quick-palette');
+    expect(palette).not.toBeNull();
+    await palette.updateComplete;
+    expect(palette.open).toBe(false);
+    const button = page.shadowRoot.querySelector(
+      '.v2-rail > .palette-footer > .palette-footer-btn'
+    ) as HTMLButtonElement;
+    const input = palette.shadowRoot.querySelector('#palette-query-input') as HTMLInputElement;
+    expect(input).not.toBeNull();
+    return { page, palette, button, input };
+  }
+
+  function deepActive(): Element | null {
+    let el: Element | null = document.activeElement;
+    while (el?.shadowRoot?.activeElement) el = el.shadowRoot.activeElement;
+    return el;
+  }
+
+  /** What had focus, and how often the input's focus() ran, as the click finished dispatching. */
+  function recordAtClickEnd(
+    button: HTMLButtonElement,
+    focusSpy: { mock: { calls: unknown[] } }
+  ): () => { focused: Element | null; focusCalls: number } {
+    let at = { focused: null as Element | null, focusCalls: -1 };
+    button.addEventListener('click', () => {
+      at = { focused: deepActive(), focusCalls: focusSpy.mock.calls.length };
+    });
+    return () => at;
+  }
+
+  it('a touch click with the palette mounted focuses the query input before the click returns', async () => {
+    const { page, palette, button, input } = await pageWithMountedPalette();
+    const focusSpy = vi.spyOn(input, 'focus');
+    const atClickEnd = recordAtClickEnd(button, focusSpy);
+
+    button.dispatchEvent(
+      new PointerEvent('click', { pointerType: 'touch', bubbles: true, composed: true })
+    );
+
+    // Read in the click's own task: no awaited tick.
+    expect(atClickEnd().focusCalls).toBeGreaterThan(0);
+    expect(atClickEnd().focused).toBe(input);
+    expect(palette.open).toBe(true);
+    expect(page.v2PaletteOpen).toBe(true);
+    expect(document.querySelector('input[data-palette-keyboard-proxy]')).toBeNull();
+  });
+
+  it('a mouse click with the palette mounted leaves focus on the button until the dialog shows', async () => {
+    const { page, button, input } = await pageWithMountedPalette();
+    const focusSpy = vi.spyOn(input, 'focus');
+    const atClickEnd = recordAtClickEnd(button, focusSpy);
+
+    button.dispatchEvent(
+      new PointerEvent('click', { pointerType: 'mouse', bubbles: true, composed: true })
+    );
+
+    expect(atClickEnd().focusCalls).toBe(0);
+    expect(atClickEnd().focused).toBe(button);
+    await vi.waitFor(() => expect(page.v2PaletteOpen).toBe(true));
+  });
+
+  it('Cmd/Ctrl+K with the palette mounted does not focus the query input inside the keydown', async () => {
+    const { page, input } = await pageWithMountedPalette();
+    const focusSpy = vi.spyOn(input, 'focus');
+
+    page._handleGlobalKeydown(makeKeydownEvent({ metaKey: true }));
+
+    expect(focusSpy).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(page.v2PaletteOpen).toBe(true));
+  });
+});
+
+describe('quick switcher preload', () => {
+  afterEach(() => {
+    for (const page of document.querySelectorAll('scion-page-chat')) page.remove();
+    vi.unstubAllGlobals();
+  });
+
+  function stubTouchPrimary(isTouch: boolean): void {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((query: string) => ({
+        matches: query === TOUCH_PRIMARY_QUERY && isTouch,
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }))
+    );
+  }
+
+  /** Captures the idle callback instead of running it. */
+  function stubIdleCallback(): { run: () => void; request: any; cancel: any } {
+    let callback: (() => void) | null = null;
+    const request = vi.fn((cb: () => void) => {
+      callback = cb;
+      return 7;
+    });
+    const cancel = vi.fn();
+    vi.stubGlobal('requestIdleCallback', request);
+    vi.stubGlobal('cancelIdleCallback', cancel);
+    return { run: () => callback?.(), request, cancel };
+  }
+
+  it('a touch-primary device preloads the palette when idle, mounted closed', async () => {
+    stubTouchPrimary(true);
+    const idle = stubIdleCallback();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+
+    expect(idle.request).toHaveBeenCalledTimes(1);
+    expect(page.v2SwitcherLoaded).toBe(false);
+    idle.run();
+
+    await vi.waitFor(() => expect(page.v2SwitcherLoaded).toBe(true));
+    await page.updateComplete;
+    const palette = page.shadowRoot.querySelector('scion-quick-palette');
+    expect(palette).not.toBeNull();
+    expect(palette.open).toBe(false);
+  });
+
+  it('a desktop does not preload the palette', async () => {
+    stubTouchPrimary(false);
+    const idle = stubIdleCallback();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    await page.updateComplete;
+
+    expect(idle.request).not.toHaveBeenCalled();
+    expect(page.v2SwitcherLoaded).toBe(false);
+    expect(page.shadowRoot.querySelector('scion-quick-palette')).toBeNull();
+  });
+
+  it('leaving the page cancels a scheduled palette preload', () => {
+    stubTouchPrimary(true);
+    const idle = stubIdleCallback();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+
+    page.remove();
+
+    expect(idle.cancel).toHaveBeenCalledWith(7);
+  });
+});
+
+describe('quick switcher preload without requestIdleCallback, and after a failed import', () => {
+  afterEach(() => {
+    for (const page of document.querySelectorAll('scion-page-chat')) page.remove();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    for (const proxy of document.querySelectorAll('input[data-palette-keyboard-proxy]')) {
+      proxy.remove();
+    }
+  });
+
+  function stubTouchPrimary(): void {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((query: string) => ({
+        matches: query === TOUCH_PRIMARY_QUERY,
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }))
+    );
+  }
+
+  /** The preload's own timer: the setTimeout call made with its 2.5 s fallback delay. */
+  function preloadTimer(spy: { mock: { calls: unknown[][]; results: { value: unknown }[] } }): {
+    callback: () => void;
+    id: unknown;
+  } {
+    const i = spy.mock.calls.findIndex((call) => call[1] === 2500);
+    expect(i, 'a 2500 ms timer was scheduled').toBeGreaterThanOrEqual(0);
+    return { callback: spy.mock.calls[i][0] as () => void, id: spy.mock.results[i].value };
+  }
+
+  it('without requestIdleCallback (Safari) the preload runs from a fallback timer', async () => {
+    stubTouchPrimary();
+    vi.stubGlobal('requestIdleCallback', undefined);
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+
+    const timer = preloadTimer(setTimeoutSpy);
+    expect(page.v2SwitcherLoaded).toBe(false);
+    timer.callback();
+
+    await vi.waitFor(() => expect(page.v2SwitcherLoaded).toBe(true));
+  });
+
+  it('leaving the page clears the preload timer', () => {
+    stubTouchPrimary();
+    vi.stubGlobal('requestIdleCallback', undefined);
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    const timer = preloadTimer(setTimeoutSpy);
+
+    page.remove();
+
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(timer.id);
+  });
+
+  it('a failed preload import is retried by the first open', async () => {
+    stubTouchPrimary();
+    let idleCallback: (() => void) | null = null;
+    vi.stubGlobal(
+      'requestIdleCallback',
+      vi.fn((cb: () => void) => {
+        idleCallback = cb;
+        return 1;
+      })
+    );
+    vi.stubGlobal('cancelIdleCallback', vi.fn());
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {});
+    const page = createEligiblePage();
+    const realLoad = page._loadQuickPalette;
+    const load = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockImplementation(() => realLoad());
+    page._loadQuickPalette = load;
+    document.body.appendChild(page);
+
+    expect(idleCallback).not.toBeNull();
+    idleCallback!();
+    await vi.waitFor(() =>
+      expect(debug).toHaveBeenCalledWith('[chat] quick switcher preload failed', expect.any(Error))
+    );
+    expect(page.v2SwitcherLoaded).toBe(false);
+
+    await page.togglePalette({ mode: 'open' });
+
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(page.v2SwitcherLoaded).toBe(true);
+    expect(page.v2PaletteOpen).toBe(true);
+  });
+});

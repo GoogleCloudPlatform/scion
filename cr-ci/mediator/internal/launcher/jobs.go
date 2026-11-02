@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -23,6 +24,14 @@ const (
 	maxBody      = 10 << 20
 	errBodySize  = 1024
 )
+
+// servedRepoRE is one GH_REPOS entry exactly as cr-ci/runner/entrypoint.sh accepts it
+// (its pattern without the list repetition), and maxServedRepos is the entrypoint's cap
+// on the list. A launch the entrypoint would refuse (exit 2 at startup) fails here
+// instead. TestServedReposMatchEntrypoint keeps both in step with the entrypoint.
+var servedRepoRE = regexp.MustCompile(`^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$`)
+
+const maxServedRepos = 100
 
 // TokenSource returns an OAuth2 access token for Google APIs.
 type TokenSource interface {
@@ -64,10 +73,18 @@ type envVar struct {
 }
 
 // Launch calls jobs.run with env overrides RUNNER_CLAIM_TOKEN, MEDIATOR_URL,
-// GH_JOB_ID and RUNNER_NAME, and returns the execution resource name.
+// GH_JOB_ID, RUNNER_NAME and GH_REPOS, and returns the execution resource name.
 func (l *JobsLauncher) Launch(ctx context.Context, spec LaunchSpec) (string, error) {
-	if spec.ClaimToken == "" || spec.RunnerName == "" || spec.JobID == 0 || l.MediatorURL == "" {
+	if spec.ClaimToken == "" || spec.RunnerName == "" || spec.JobID == 0 || len(spec.ServedRepos) == 0 || l.MediatorURL == "" {
 		return "", errors.New("launch: incomplete launch spec")
+	}
+	if len(spec.ServedRepos) > maxServedRepos {
+		return "", fmt.Errorf("launch: %d served repositories, at most %d (the runner's GH_REPOS cap)", len(spec.ServedRepos), maxServedRepos)
+	}
+	for _, r := range spec.ServedRepos {
+		if !servedRepoRE.MatchString(r) {
+			return "", fmt.Errorf("launch: served repository %q is not owner/name", r)
+		}
 	}
 	body := map[string]any{
 		"overrides": map[string]any{
@@ -78,6 +95,7 @@ func (l *JobsLauncher) Launch(ctx context.Context, spec LaunchSpec) (string, err
 					{EnvMediatorURL, l.MediatorURL},
 					{EnvJobID, strconv.FormatInt(spec.JobID, 10)},
 					{EnvRunnerName, spec.RunnerName},
+					{EnvRepos, strings.Join(spec.ServedRepos, ",")},
 				},
 			}},
 		},

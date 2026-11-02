@@ -29,7 +29,7 @@ import (
 )
 
 // Agent delegation grant management (.design/agent-delegation.md §7): grant
-// revoke, delegated credential revoke, list and read. These routes are not
+// revoke, delegated credential revoke, revoke-all, list and read. These routes are not
 // behind hub.agent_delegation, so an operator can review and end grants
 // while the experiment is off (§10).
 
@@ -39,6 +39,7 @@ const (
 	agentDelegationCredentialRevokePermission = "agent.delegation.credential.revoke"
 	agentDelegationListPermission             = "agent.delegation.list"
 	agentDelegationReadPermission             = "agent.delegation.read"
+	agentDelegationRevokeAllPermission        = "agent.delegation.revoke_all"
 
 	// mutationAgentDelegationCredentialRevoke is the mutation audit type of
 	// a delegated credential revocation, by a caller or by supersede.
@@ -189,6 +190,8 @@ func agentDelegationActionFor(permission string) string {
 		return permissions.ActionDelegationCredentialRevoke
 	case agentDelegationListPermission:
 		return permissions.ActionDelegationList
+	case agentDelegationRevokeAllPermission:
+		return permissions.ActionDelegationRevokeAll
 	default:
 		return permissions.ActionDelegationRead
 	}
@@ -519,6 +522,142 @@ func (s *Server) handleRevokeAgentDelegatedCredential(w http.ResponseWriter, r *
 		s.publishConduitAuthzChanged(conduitAuthzMatch{AgentID: grant.AgentID})
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// revokeAllSkipForbidden is the reason of a grant revoke-all skipped: the
+// caller may read the grant but holds no revoke-all authority over it.
+const revokeAllSkipForbidden = "forbidden"
+
+// AgentDelegationRevokeAllSkip is a grant revoke-all left unrevoked.
+type AgentDelegationRevokeAllSkip struct {
+	GrantID string `json:"grantId"`
+	AgentID string `json:"agentId"`
+	Reason  string `json:"reason"`
+}
+
+// RevokeAllAgentDelegationsResponse is the body of the revoke-all routes:
+// the grants this call revoked, and the grants it skipped. A grant revoked
+// concurrently by another caller is in neither list.
+type RevokeAllAgentDelegationsResponse struct {
+	Revoked []string                       `json:"revoked"`
+	Skipped []AgentDelegationRevokeAllSkip `json:"skipped"`
+}
+
+// handleUserMeDelegationsRevokeAll serves POST
+// /api/v1/users/me/delegations/revoke-all: revoke every unrevoked grant
+// the session caller issued, expired ones included. Session only.
+func (s *Server) handleUserMeDelegationsRevokeAll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	c, ok := s.admitAgentDelegationCaller(w, r, "", false)
+	if !ok {
+		return
+	}
+	if c.hubOnly {
+		// A dev session issues no grants.
+		writeJSON(w, http.StatusOK, RevokeAllAgentDelegationsResponse{Revoked: []string{}, Skipped: []AgentDelegationRevokeAllSkip{}})
+		return
+	}
+	s.revokeAllAgentDelegations(w, r, c, store.AgentDelegationGrantFilter{IssuerUserID: c.user.ID()}, nil)
+}
+
+// handleAgentDelegationsRevokeAll serves POST
+// /api/v1/agents/{agentId}/delegations/revoke-all: revoke every unrevoked
+// grant bound to the agent, expired ones included, that the session caller
+// holds revoke-all authority over. Session only: the bound agent
+// relinquishes its grants one by one.
+func (s *Server) handleAgentDelegationsRevokeAll(w http.ResponseWriter, r *http.Request, agentID string) {
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	c, ok := s.admitAgentDelegationCaller(w, r, agentID, false)
+	if !ok {
+		return
+	}
+	agent, err := optionalRow(s.store.GetAgent(r.Context(), agentID))
+	if err != nil {
+		InternalError(w)
+		return
+	}
+	s.revokeAllAgentDelegations(w, r, c, store.AgentDelegationGrantFilter{AgentID: agentID}, agent)
+}
+
+// revokeAllAgentDelegations revokes the unrevoked grants matching filter
+// that the caller holds agent.delegation.revoke_all control authority over
+// (agentDelegationControlAllowed: the issuer and the agent's current owner
+// from the stored rows, the permission on the hub for any grant, the
+// permission on project P for project(P)-bounded grants). A grant the
+// caller may read but not revoke this way is skipped and reported; a grant
+// outside the caller's read authority is left out, as in the list routes.
+// Every revocation, each with its own agent_delegation_grant_revoke
+// mutation audit, runs in one transaction, so a store or audit failure
+// revokes nothing.
+func (s *Server) revokeAllAgentDelegations(w http.ResponseWriter, r *http.Request, c *agentDelegationCaller, filter store.AgentDelegationGrantFilter, agent *store.Agent) {
+	ctx := r.Context()
+	grants, err := s.store.ListAgentDelegationGrants(ctx, filter)
+	if err != nil {
+		slog.Error("agent delegation grant list failed", "error", err)
+		InternalError(w)
+		return
+	}
+	resp := RevokeAllAgentDelegationsResponse{Revoked: []string{}, Skipped: []AgentDelegationRevokeAllSkip{}}
+	var targets []*store.AgentDelegationGrant
+	for _, g := range grants {
+		if g.RevokedAt != nil {
+			continue
+		}
+		switch {
+		case s.agentDelegationControlAllowed(ctx, c, g, agent, agentDelegationRevokeAllPermission):
+			targets = append(targets, g)
+		case s.agentDelegationControlAllowed(ctx, c, g, agent, agentDelegationReadPermission):
+			resp.Skipped = append(resp.Skipped, AgentDelegationRevokeAllSkip{GrantID: g.ID, AgentID: g.AgentID, Reason: revokeAllSkipForbidden})
+		}
+	}
+	if len(targets) == 0 {
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	var revoked []*store.AgentDelegationGrant
+	actor := auditActorFromContext(ctx)
+	now := time.Now().UTC()
+	err = s.store.WithTx(ctx, func(tx store.Store) error {
+		revoked = revoked[:0]
+		for _, g := range targets {
+			rg, err := revokeAgentDelegationGrantTx(ctx, tx, g.ID, c.revokedBy(), c.revokeReason(), actor, now,
+				func(record *store.MutationAuditRecord, grant *store.AgentDelegationGrant) {
+					agentDelegationAuditBlock(record, grant, c)
+				})
+			if err != nil {
+				return err
+			}
+			if rg != nil {
+				revoked = append(revoked, rg)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, errAgentDelegationAuditFailed) {
+			slog.Error("agent delegation grants not revoked: audit write failed", "count", len(targets), "error", err)
+			writeError(w, http.StatusInternalServerError, errCodeAuditFailed, "the revocation could not be recorded; nothing was revoked", nil)
+			return
+		}
+		slog.Error("agent delegation grants not revoked", "count", len(targets), "error", err)
+		InternalError(w)
+		return
+	}
+	notified := map[string]bool{}
+	for _, g := range revoked {
+		resp.Revoked = append(resp.Revoked, g.ID)
+		if !notified[g.AgentID] {
+			notified[g.AgentID] = true
+			s.publishConduitAuthzChanged(conduitAuthzMatch{AgentID: g.AgentID})
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // agentDelegatedCredentialRevokeRecord is the mutation audit of one

@@ -147,6 +147,10 @@ const (
 	OutcomeWouldCopy   Outcome = "would-copy"
 	// OutcomeFailed: the move stopped with Err; the source is left in place.
 	OutcomeFailed Outcome = "failed"
+	// OutcomeDeferred: the source was left in place on purpose this run
+	// (it is in use, for example the home of a running agent) and moves on
+	// a later run; it counts as something left to move.
+	OutcomeDeferred Outcome = "deferred"
 )
 
 // MigratedSuffix separates a copied source's name from its timestamp.
@@ -190,7 +194,7 @@ type Result struct {
 // anything: a second run over the same trees reports false for every Spec.
 func (r Result) Moved() bool {
 	switch r.Outcome {
-	case OutcomeRenamed, OutcomeMerged, OutcomeWouldRename, OutcomeWouldMerge:
+	case OutcomeRenamed, OutcomeMerged, OutcomeWouldRename, OutcomeWouldMerge, OutcomeDeferred:
 		return true
 	case OutcomeCopied, OutcomeWouldCopy:
 		if r.Copied > 0 {
