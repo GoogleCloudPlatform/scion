@@ -624,3 +624,28 @@ func TestAuxDiscovery_ActiveProfileFailureUnchanged(t *testing.T) {
 	assert.Equal(t, "degraded", health.Status)
 	assert.Equal(t, api.BrokerHealthUnavailable, health.Checks["profile_runtime.stale"])
 }
+
+// TestSuffixedCheckName: a suffixed check name never exceeds the maximum and
+// never panics, also when the suffix alone is at least the maximum.
+func TestSuffixedCheckName(t *testing.T) {
+	long := profileRuntimeCheckPrefix + strings.Repeat("a", 70)
+	for _, tc := range []struct {
+		name, base, suffix string
+		max                int
+		want               string
+		wantOK             bool
+	}{
+		{"fits", "profile_runtime.k8s", "-2", 64, "profile_runtime.k8s-2", true},
+		{"long name is cut before the suffix", long, "-2", 64, long[:62] + "-2", true},
+		{"suffix exactly the maximum", "abc", "-1234", 5, "abc", false},
+		{"suffix longer than the maximum", "abcdefgh", "-123456", 5, "abcde", false},
+		{"zero maximum", "abc", "-2", 0, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := suffixedCheckName(tc.base, tc.suffix, tc.max)
+			assert.Equal(t, tc.want, got)
+			assert.Equal(t, tc.wantOK, ok)
+			assert.LessOrEqual(t, len(got), tc.max)
+		})
+	}
+}

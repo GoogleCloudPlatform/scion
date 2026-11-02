@@ -204,7 +204,8 @@ func TestChatRetention_SweepSQLite(t *testing.T) {
 	}
 	assert.Equal(t, chatRetentionNoOrphans(), chatRetentionOrphans(t, f.db))
 	assert.Equal(t, len(keep), f.count(`SELECT COUNT(*) FROM webchat_message_star`))
-	// Phase 1: unlinked attachment metadata stays for the attachment GC.
+	// Without an attachment store, unlinked attachment metadata stays for
+	// the attachment GC.
 	assert.Equal(t, len(purge)+len(keep), f.count(`SELECT COUNT(*) FROM webchat_attachment`))
 
 	cur, err := f.crs.GetChatRetentionCursor(f.ctx, store.ChatRetentionPhaseMain)
@@ -230,19 +231,22 @@ func TestChatRetention_SweepSQLite(t *testing.T) {
 	assert.NotContains(t, policy+counts, "hello")
 }
 
-// TestChatRetention_GatingSQLite: with the experiment off, enabled off or
-// no window, the handler deletes nothing and records no run.
+// TestChatRetention_GatingSQLite: with the experiment off or enabled off
+// the handler deletes nothing and records no run. With no window it runs
+// only the deleted-conversation purge, so an old message of a live
+// conversation is kept (the run is recorded).
 func TestChatRetention_GatingSQLite(t *testing.T) {
 	tests := []struct {
 		name       string
 		experiment bool
 		doc        string
+		runs       int
 	}{
-		{"experiment off", false, `{"enabled":true,"messages_retention_days":30}`},
-		{"enabled off", true, `{"enabled":false,"messages_retention_days":30}`},
-		{"window null", true, `{"enabled":true}`},
-		{"section absent", true, ``},
-		{"malformed section fails closed", true, `{"enabled":true,"messages_retention_days":3}`},
+		{"experiment off", false, `{"enabled":true,"messages_retention_days":30}`, 0},
+		{"enabled off", true, `{"enabled":false,"messages_retention_days":30}`, 0},
+		{"window null", true, `{"enabled":true}`, 1},
+		{"section absent", true, ``, 0},
+		{"malformed section fails closed", true, `{"enabled":true,"messages_retention_days":3}`, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -251,7 +255,7 @@ func TestChatRetention_GatingSQLite(t *testing.T) {
 			id := f.message(chatRetentionSeed{created: time.Now().Add(-400 * 24 * time.Hour)})
 			f.srv.chatRetentionHandler()(f.ctx)
 			assert.True(t, f.exists(id))
-			assert.Equal(t, 0, f.count(`SELECT COUNT(*) FROM chat_retention_runs`))
+			assert.Equal(t, tt.runs, f.count(`SELECT COUNT(*) FROM chat_retention_runs`))
 		})
 	}
 }
@@ -415,6 +419,7 @@ func TestChatRetention_AcceptanceSQLite(t *testing.T) {
 		require.NoError(t, err)
 		rows, full = n, true
 	}
+	require.Positive(t, rows, "CHAT_RETENTION_ACCEPTANCE_ROWS must be positive")
 	ctx := context.Background()
 	s, err := newTestStoreAt(t, "file:"+filepath.Join(t.TempDir(), "hub.db"))
 	require.NoError(t, err)
@@ -506,10 +511,18 @@ VALUES (?, ?, 'user:alice', 'agent:bot', 'retention harness', 'chat', false, fal
 		}
 		prev = id
 	}
+	// The boundary tie: a dispatched message created exactly at the
+	// cutoff is not older than it, so it is kept. The seeded rows may or
+	// may not land on the cutoff (it depends on the row count); this one
+	// always does, and is asserted on its own below.
+	tieID := uuid.NewString()
+	_, err = insMsg.ExecContext(ctx, tieID, projects[0], store.MessageDispatchDispatched, "web", "topic", topicConvs[0], cutoff)
+	require.NoError(t, err)
 	require.NoError(t, tx.Commit())
 	seedTime := time.Since(seedStart)
 	total := chatRetentionCount(t, db, `SELECT COUNT(*) FROM messages`)
-	require.Equal(t, rows, total)
+	require.Equal(t, rows+1, total)
+	require.Equal(t, 1, chatRetentionCount(t, db, `SELECT COUNT(*) FROM messages WHERE id = ? AND created = ?`, tieID, cutoff), "the tie row sits exactly on the cutoff")
 	keptOld := chatRetentionCount(t, db, `SELECT COUNT(*) FROM messages WHERE created < ? AND dispatch_state IN ('pending', 'deferred')`, cutoff)
 	newer := chatRetentionCount(t, db, `SELECT COUNT(*) FROM messages WHERE created >= ?`, cutoff)
 	// The fixture must straddle the cutoff, or "nothing newer is purged"
@@ -540,6 +553,7 @@ VALUES (?, ?, 'user:alice', 'agent:bot', 'retention harness', 'chat', false, fal
 	assert.Equal(t, 0, chatRetentionCount(t, db, `SELECT COUNT(*) FROM messages WHERE created < ? AND dispatch_state NOT IN ('pending', 'deferred')`, cutoff))
 	assert.Equal(t, keptOld+newer, chatRetentionCount(t, db, `SELECT COUNT(*) FROM messages`))
 	assert.Equal(t, chatRetentionNoOrphans(), chatRetentionOrphans(t, db))
+	assert.Equal(t, 1, chatRetentionCount(t, db, `SELECT COUNT(*) FROM messages WHERE id = ?`, tieID), "the message created exactly at the cutoff is kept")
 
 	var sum time.Duration
 	for _, d := range timed.durations {
