@@ -31,9 +31,10 @@ var (
 	logLookback = 24 * time.Hour
 
 	// logQueryTimeout bounds one GetLogs read. It stays below the hub's
-	// 60s HTTP write timeout, so a slow read ends with an answer (the
-	// newest entries read so far, or an error) instead of a request the
-	// hub can no longer reply to (ptone/scion#7101).
+	// 60s HTTP write timeout, and below the 30s timeout common HTTP
+	// clients use, so a slow read ends with an answer (the newest entries
+	// read so far, or an error) instead of a request the caller has given
+	// up on or the hub can no longer reply to (ptone/scion#7101).
 	logQueryTimeout = 20 * time.Second
 
 	// logNow is the clock for the lookback bound; tests replace it.
