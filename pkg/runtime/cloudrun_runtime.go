@@ -399,8 +399,10 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	}
 
 	// Async-launch gate immediately before CreateInstance
-	// (ptone/scion#4761); a no-op on the synchronous path.
+	// (ptone/scion#4761); a no-op on the synchronous path. No create has
+	// been issued, so the agent directories this start created go again.
 	if err := hooks.checkpoint(ctx, CheckpointStepInstanceCreate); err != nil {
+		nfsPaths.rollbackCreated(err)
 		return "", err
 	}
 	// The handle is reported before the create is issued, so a create cut
@@ -730,7 +732,7 @@ var cloudRunRequireNFSFilesystem = requireNFSFilesystem
 // provisionCloudRunNFS prepares the agent's NFS directories. uid and gid
 // must already be defaulted by the caller (cloudRunOwnerIDs); they are
 // used as given.
-func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfig, agentID string, uid, gid int) (*cloudRunNFSProvisionPaths, error) {
+func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfig, agentID string, uid, gid int) (_ *cloudRunNFSProvisionPaths, retErr error) {
 	if cfg.WorkspaceBackendName != "nfs" {
 		return nil, nil
 	}
@@ -743,6 +745,13 @@ func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfi
 	if err != nil {
 		return nil, err
 	}
+	// A provision that fails part-way removes the agent directories it
+	// already created (the same rules as a failed start's rollback).
+	defer func() {
+		if retErr != nil {
+			paths.rollbackCreated(retErr)
+		}
+	}()
 	paths.server = server
 	if cfg.Workspace == "" {
 		return nil, fmt.Errorf("cloudrun: cannot provision NFS workspace because RunConfig.Workspace is empty; "+

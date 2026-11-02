@@ -129,3 +129,32 @@ func TestCloudRunRun_SuccessfulCreateKeepsAgentDirs(t *testing.T) {
 		assert.DirExists(t, filepath.Join(agentDir, leaf))
 	}
 }
+
+// An async launch stopped at the gate right before CreateInstance never
+// issued a create: the agent directories it provisioned go.
+func TestCloudRunRun_CreateGateAbortRemovesProvisionedAgentDirs(t *testing.T) {
+	rt, cfg, agentDir := rollbackTestRun(t, &fakeInstancesClient{getErr: notFoundErr()}, true)
+	rec := &sandboxHookRecorder{abortAt: CheckpointStepInstanceCreate}
+	rec.install(&cfg)
+
+	_, err := rt.Run(context.Background(), cfg)
+	require.ErrorIs(t, err, errTestAbort)
+	assert.NoDirExists(t, agentDir)
+}
+
+// A provision that fails part-way (here the secrets path is taken by a
+// file) removes what it created (the home) and keeps what it did not:
+// the existing agent directory and the file.
+func TestCloudRunProvisionNFS_PartialFailureRollsBack(t *testing.T) {
+	rt, cfg, agentDir := rollbackTestRun(t, &fakeInstancesClient{getErr: notFoundErr()}, true)
+	require.NoError(t, os.MkdirAll(agentDir, 0o770))
+	blocker := filepath.Join(agentDir, "secrets-"+crTestAgentID)
+	require.NoError(t, os.WriteFile(blocker, []byte("x"), 0o644))
+
+	_, err := rt.provisionCloudRunNFS(context.Background(), cfg, crTestAgentID, os.Getuid(), os.Getgid())
+	require.Error(t, err)
+	assert.NoDirExists(t, filepath.Join(agentDir, "home-"+crTestAgentID), "the home this provision created goes")
+	assert.NoDirExists(t, filepath.Join(agentDir, "workspace"), "the workspace this provision created goes")
+	assert.FileExists(t, blocker)
+	assert.DirExists(t, agentDir, "the agent directory existed before")
+}
