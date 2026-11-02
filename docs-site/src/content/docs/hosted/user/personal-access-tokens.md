@@ -427,7 +427,7 @@ common CLI flows need:
 | Any command run in a project | `project:read`, `project:list` |
 | `scion list` | `project:read`, `agent:list` |
 | `scion look`, `scion logs` | `project:read`, `agent:read` |
-| `scion start` / `scion create` | `project:read`, `agent:create`, `agent:read` |
+| `scion start` / `scion create` | `project:read`, `agent:create`, `agent:read`; for an agent role above `none`, also `skill:read`, `skill:list`, `template:read`, `template:list`, `harness_config:read`, `harness_config:list` (or pass `--role none`) |
 | `scion message` | `project:read`, `agent:message` |
 | `scion attach` | `project:read`, `agent:attach` |
 | `scion stop`, `scion suspend`, `scion resume`, `scion restore` | `project:read`, `agent:lifecycle` |

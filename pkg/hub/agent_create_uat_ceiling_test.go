@@ -20,6 +20,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
@@ -35,8 +36,52 @@ import (
 func TestUATDefaultedRoleWithNoFittingRoleDenied(t *testing.T) {
 	f := newUATCreateFixture(t, "uat-none-deny")
 	rec := f.create(t, f.uat(t, "agent:create", "project:read"), CreateAgentRequest{Name: "uat-none-deny"})
-	assert.Equal(t, reasonNoUsableRole, assertCeilingDenial(t, rec))
+	assert.Equal(t, "the token's scopes fit no usable agent role; the readonly role also needs the selectors "+
+		"harness_config:list, harness_config:read, skill:list, skill:read, template:list, template:read; "+
+		"add them, request role=none explicitly, or create from a session", assertCeilingDenial(t, rec))
 	assertCreateWroteNothing(t, f.store, f.proj.ID, "uat-none-deny", f.creator.ID)
+}
+
+// ptone/scion#7069: the selectors of the reported token (project read and
+// update plus the agent selectors) fit no role above none. The refusal names
+// exactly the read selectors the readonly role still needs, and the same
+// token with those selectors added creates an agent with a usable role.
+func TestUATNoUsableRoleNamesMissingSelectors(t *testing.T) {
+	reported := []string{
+		"project:read", "project:update",
+		"agent:create", "agent:read", "agent:list", "agent:lifecycle", "agent:delete", "agent:message", "agent:attach",
+	}
+	missing := []string{"harness_config:list", "harness_config:read", "skill:list", "skill:read", "template:list", "template:read"}
+
+	f := newUATCreateFixture(t, "uat-7069")
+	rec := f.create(t, f.uat(t, reported...), CreateAgentRequest{Name: "uat-7069"})
+	msg := assertCeilingDenial(t, rec)
+	assert.Equal(t, "the token's scopes fit no usable agent role; the readonly role also needs the selectors "+
+		strings.Join(missing, ", ")+"; add them, request role=none explicitly, or create from a session", msg)
+	for _, held := range reported {
+		assert.NotContains(t, msg, held, "a selector the token holds is not named")
+	}
+	assertCreateWroteNothing(t, f.store, f.proj.ID, "uat-7069", f.creator.ID)
+
+	// The named selectors are enough: adding them yields a usable role
+	// within the ceiling, and nothing more than the token covers.
+	rec = f.create(t, f.uat(t, append(append([]string{}, reported...), missing...)...), CreateAgentRequest{Name: "uat-7069-ok"})
+	agent, edge := f.createdAgent(t, rec, "uat-7069-ok")
+	assert.NotEqual(t, string(AgentRoleNone), agent.AppliedConfig.AgentRole)
+	assert.True(t, roleFitsCeiling(edge.EffectCeiling, AgentRole(agent.AppliedConfig.AgentRole)))
+	assert.False(t, agent.AppliedConfig.NoAuth)
+}
+
+// noUsableRoleMessage names selectors only for a bounded ceiling that lacks
+// some; every other case keeps the generic reason.
+func TestNoUsableRoleMessage(t *testing.T) {
+	assert.Equal(t, reasonNoUsableRole, noUsableRoleMessage(store.EffectCeiling{Kind: store.EffectCeilingPrincipal}))
+	assert.Equal(t, reasonNoUsableRole, noUsableRoleMessage(store.EffectCeiling{Kind: store.EffectCeilingUnrecorded}))
+	full := uatCeilingFromSelectors(t, readonlyRoleUATSelectors(t)...)
+	assert.Empty(t, missingRoleSelectors(full, AgentRoleReadOnly))
+	assert.Equal(t, reasonNoUsableRole, noUsableRoleMessage(full))
+	assert.Equal(t, readonlyRoleUATSelectors(t), missingRoleSelectors(boundedCeiling(), AgentRoleReadOnly),
+		"an empty bounded ceiling lacks every readonly selector")
 }
 
 // The same UAT with role=none explicit: created as none with NoAuth; the
@@ -174,7 +219,8 @@ func TestRoleCapRunsBeforeNoAuthMapping(t *testing.T) {
 func TestUATExplicitRoleOverCeilingForbidden(t *testing.T) {
 	f := newUATCreateFixture(t, "uat-over")
 	rec := f.create(t, f.uat(t, minimalSelectors(t)...), CreateAgentRequest{Name: "uat-over", AgentRole: string(AgentRoleFull)})
-	assert.Contains(t, assertCeilingDenial(t, rec), `agent role "full"`)
+	assert.Equal(t, `the credential's scopes do not cover agent role "full"; request a role the token covers, request role=none explicitly, or create from a session`,
+		assertCeilingDenial(t, rec), "the explicit-role message is unchanged")
 	assertCreateWroteNothing(t, f.store, f.proj.ID, "uat-over", f.creator.ID)
 }
 

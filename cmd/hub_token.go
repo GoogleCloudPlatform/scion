@@ -54,7 +54,11 @@ Scopes common CLI flows need:
   Any command run in a project   project:read
   scion list                     project:read, agent:list
   scion look, scion logs         project:read, agent:read
-  scion start / create           project:read, agent:create, agent:read
+  scion start / create           project:read, agent:create, agent:read,
+                                 and for any agent role above none:
+                                 skill:read, skill:list, template:read,
+                                 template:list, harness_config:read,
+                                 harness_config:list (or pass --role none)
   scion message                  project:read, agent:message
   scion attach                   project:read, agent:attach
   scion stop, suspend, resume    project:read, agent:lifecycle
@@ -74,7 +78,7 @@ Examples:
   scion hub token create \
     --project my-project \
     --name "github-actions" \
-    --scopes project:read,agent:create,agent:read,agent:list \
+    --scopes project:read,agent:create,agent:read,agent:list,skill:read,skill:list,template:read,template:list,harness_config:read,harness_config:list \
     --expires 90d
 
   # Create a hub-boundary token for "scion doctor" Platform Health
@@ -137,7 +141,7 @@ project:read. See "scion hub token --help" for the scopes common CLI flows
 need.
 
 Examples:
-  scion hub token create --project my-project --name ci-token --scopes project:read,agent:create,agent:read
+  scion hub token create --project my-project --name ci-token --scopes project:read,agent:create,agent:read,skill:read,skill:list,template:read,template:list,harness_config:read,harness_config:list
   scion hub token create --project my-project --name deploy --scopes project:read,agent:manage --expires 30d
   scion hub token create --boundary hub --name health-check --scopes hub_health:read,broker:read,agent:list`, permissions.UATScopeHelp(), expiryAcceptedForms, expiryUnitNote),
 	Args: cobra.NoArgs,

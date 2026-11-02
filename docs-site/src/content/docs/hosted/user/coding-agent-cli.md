@@ -22,7 +22,7 @@ Create it from your own signed-in shell:
 scion hub token create \
   --project my-project \
   --name "coding-agent" \
-  --scopes project:read,agent:list,agent:read,agent:create,agent:message \
+  --scopes project:read,agent:list,agent:read,agent:create,agent:message,skill:read,skill:list,template:read,template:list,harness_config:read,harness_config:list \
   --expires 30d
 ```
 
@@ -34,7 +34,7 @@ Most CLI commands that run in a project look the project up on the Hub first, wh
 | Any command run in a project | `project:read` |
 | `scion list` | `project:read`, `agent:list` |
 | `scion look`, `scion logs` | `project:read`, `agent:read` |
-| `scion start` / `scion create` | `project:read`, `agent:create`, `agent:read` |
+| `scion start` / `scion create` | `project:read`, `agent:create`, `agent:read`; for an agent role above `none`, also `skill:read`, `skill:list`, `template:read`, `template:list`, `harness_config:read`, `harness_config:list` (or pass `--role none`) |
 | `scion message` | `project:read`, `agent:message` |
 | `scion attach` | `project:read`, `agent:attach` |
 | `scion stop`, `scion suspend`, `scion resume`, `scion restore` | `project:read`, `agent:lifecycle` |
