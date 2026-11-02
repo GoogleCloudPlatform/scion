@@ -62,7 +62,10 @@ func (l Layout) checkShareHostBase() error {
 // exist below its host base (the hub's health reports it too): every project on a shared backend has its
 // tree there from create on, so a missing subpath root means the share is
 // not mounted (only the mount point is), and a deletion must report that,
-// never "absent".
+// never "absent". When the host base has no entries at all, the error also
+// wraps ErrShareEmpty; it wraps ErrNoProjectTree either way. The emptiness
+// is read through the same host-base descriptor as the walk
+// (shareddirs.TreeDirState), and a read error is an error, never "empty".
 func (l Layout) CheckTreeMounted() error {
 	root, err := l.subPathRoot()
 	if err != nil {
@@ -73,9 +76,13 @@ func (l Layout) CheckTreeMounted() error {
 	if err != nil {
 		return fmt.Errorf("%w: share not mounted: host base %s: %w", ErrRefused, l.HostBase, err)
 	}
-	if ok, err := shareddirs.DirExistsInTree(base, root); err != nil {
+	exists, empty, err := shareddirs.TreeDirState(base, root)
+	switch {
+	case err != nil:
 		return fmt.Errorf("%w: %w", ErrRefused, err)
-	} else if !ok {
+	case !exists && empty:
+		return fmt.Errorf("%w: %w: %w: share not mounted: %s is empty", ErrRefused, ErrNoProjectTree, ErrShareEmpty, l.HostBase)
+	case !exists:
 		return fmt.Errorf("%w: %w: share not mounted: %s has no %s directory", ErrRefused, ErrNoProjectTree, l.HostBase, root)
 	}
 	return nil

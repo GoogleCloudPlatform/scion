@@ -23,13 +23,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/cronzone"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/robfig/cron/v3"
 )
 
 // cronZonePrefixMessage is the user-facing error for a cron expression that
-// carries a zone prefix. Schedules are evaluated in UTC only.
-const cronZonePrefixMessage = "cron expressions are evaluated in UTC; zone prefixes (CRON_TZ=, TZ=) are not supported — convert the time to UTC"
+// carries a zone prefix. The zone is a separate schedule field instead.
+const cronZonePrefixMessage = "zone prefixes (CRON_TZ=, TZ=) are not supported in cron expressions — remove the prefix and set the schedule's time zone instead"
 
 // errCronZonePrefix is returned by parseScheduleCron for an expression that
 // begins with a CRON_TZ= or TZ= zone prefix.
@@ -50,11 +51,13 @@ func hasCronZonePrefix(expr string) bool {
 // only parser for schedule expressions in the hub: every create, update,
 // enable, resume and evaluation goes through it.
 //
-// Schedules are UTC-only. A zone prefix is rejected with errCronZonePrefix,
-// and the returned schedule is pinned to UTC explicitly: robfig/cron captures
-// time.Local when no prefix is given, and a time.Local schedule evaluates in
-// the zone of the time passed to Next, so pinning makes the result
-// independent of both the process zone and the caller's time value.
+// A zone prefix is rejected with errCronZonePrefix; the zone is the
+// schedule's separate time zone field. The returned schedule is pinned to
+// UTC: cronzone.Next uses it as a naive wall clock and maps the result into
+// the schedule's zone (scheduleNextRun). Pinning also keeps the result
+// independent of the process zone: robfig/cron captures time.Local when no
+// prefix is given, and a time.Local schedule evaluates in the zone of the
+// time passed to Next.
 func parseScheduleCron(expr string) (cron.Schedule, error) {
 	if hasCronZonePrefix(expr) {
 		return nil, errCronZonePrefix
@@ -67,6 +70,38 @@ func parseScheduleCron(expr string) (cron.Schedule, error) {
 		spec.Location = time.UTC
 	}
 	return sched, nil
+}
+
+// normalizeScheduleTimeZone validates a schedule time zone name and returns
+// the value to store: "" for UTC (an empty name or "UTC"), otherwise the
+// name as given. Every error matches cronzone.ErrInvalidZone.
+func normalizeScheduleTimeZone(name string) (string, error) {
+	loc, err := cronzone.ValidateZone(name)
+	if err != nil {
+		return "", err
+	}
+	if loc == time.UTC {
+		return "", nil
+	}
+	return name, nil
+}
+
+// scheduleNextRun returns the first run of a recurring schedule strictly
+// after `after`, as a UTC instant. The expression goes through
+// parseScheduleCron (so zone prefixes stay refused) and is evaluated in the
+// schedule's time zone; an empty zone is UTC and gives exactly the UTC-only
+// result. The error is a parseScheduleCron error or a zone error matching
+// cronzone.ErrInvalidZone; writeScheduleTimingError writes either.
+func scheduleNextRun(expr, zone string, after time.Time) (time.Time, error) {
+	sched, err := parseScheduleCron(expr)
+	if err != nil {
+		return time.Time{}, err
+	}
+	loc, err := cronzone.ValidateZone(zone)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return cronzone.Next(sched, loc, after), nil
 }
 
 // zonePrefixPassBatchSize is the number of rows pauseZonePrefixedSchedules
@@ -132,7 +167,7 @@ func (s *Server) pauseZonePrefixedSchedules(ctx context.Context) {
 				continue
 			}
 			paused++
-			log.Warn("schedule paused: cron zone prefixes are not supported; edit the expression to UTC and resume",
+			log.Warn("schedule paused: cron zone prefixes are not supported; remove the prefix, set the schedule's time zone, and resume",
 				"schedule_id", sched.ID, "project_id", sched.ProjectID,
 				"cron_expr", sched.CronExpr)
 		}
@@ -160,6 +195,16 @@ func (s *Server) pauseZonePrefixedSchedules(ctx context.Context) {
 func (s *Server) startScheduler(ctx context.Context) {
 	s.pauseZonePrefixedSchedules(ctx)
 	s.scheduler.Start(ctx)
+}
+
+// writeScheduleTimingError writes the 400 response for an error from
+// scheduleNextRun or normalizeScheduleTimeZone.
+func writeScheduleTimingError(w http.ResponseWriter, err error) {
+	if errors.Is(err, cronzone.ErrInvalidZone) {
+		ValidationError(w, err.Error(), map[string]interface{}{"field": "timeZone"})
+		return
+	}
+	writeCronParseError(w, err)
 }
 
 // writeCronParseError writes the 400 response for a cron expression that

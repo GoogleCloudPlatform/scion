@@ -39,6 +39,7 @@ var (
 	scheduleInterrupt bool
 	scheduleName      string
 	scheduleCron      string
+	scheduleTimeZone  string
 	scheduleListType  string // "events", "recurring", "all"
 )
 
@@ -87,7 +88,20 @@ var scheduleCreateRecurringCmd = &cobra.Command{
 	Short: "Create a recurring schedule",
 	Long: `Create a recurring schedule with a cron expression. Requires --name, --cron, --agent, and --message.
 
-Cron expressions are evaluated in UTC. Write the time in UTC, for example "0 14 * * 1-5" for 14:00 UTC on weekdays.`,
+The cron expression is evaluated in the zone given by --time-zone, an IANA
+name such as America/Los_Angeles; without it the expression is evaluated in
+UTC. A zoned schedule keeps its local time across daylight saving changes: a
+local time skipped when the clocks go forward runs once at the change, and a
+local time repeated when the clocks go back runs once, at its first
+occurrence. Next run times are reported in the display zone (see --tz).
+Zone prefixes in the expression (CRON_TZ=, TZ=) are not supported.
+
+Examples:
+  # 14:00 UTC on weekdays
+  scion schedule create-recurring --name standup --cron "0 14 * * 1-5" --agent lead --message "standup"
+
+  # 07:00 Pacific time every day, across daylight saving changes
+  scion schedule create-recurring --name digest --cron "0 7 * * *" --time-zone America/Los_Angeles --agent lead --message "digest"`,
 	RunE: runScheduleCreateRecurring,
 }
 
@@ -296,7 +310,7 @@ func runScheduleList(cmd *cobra.Command, args []string) error {
 				if sched.NextRunAt != nil {
 					nextRun = scheduleWhen(*sched.NextRunAt, sched.Status)
 				}
-				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", id, sched.Name, sched.CronExpr, nextRun, scheduleStatusLabel(sched.Status, sched.StatusReason))
+				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", id, sched.Name, scheduleCronLabel(sched.CronExpr, sched.TimeZone), nextRun, scheduleStatusLabel(sched.Status, sched.StatusReason))
 			}
 			_ = w.Flush()
 			printed = true
@@ -415,6 +429,7 @@ func printScheduleDetail(sched *hubclient.Schedule) {
 		fmt.Printf("  Reason:     %s\n", sched.StatusReason)
 	}
 	fmt.Printf("  Cron:       %s\n", sched.CronExpr)
+	fmt.Printf("  Zone:       %s\n", scheduleZoneLabel(sched.TimeZone))
 	if sched.NextRunAt != nil {
 		fmt.Printf("  Next Run:   %s (%s)\n", clitime.Format(*sched.NextRunAt, clitime.Full), scheduleWhen(*sched.NextRunAt, sched.Status))
 	}
@@ -578,15 +593,7 @@ func runScheduleCreateRecurring(cmd *cobra.Command, args []string) error {
 	}
 	defer cancel()
 
-	req := &hubclient.CreateScheduleRequest{
-		Name:      scheduleName,
-		CronExpr:  scheduleCron,
-		EventType: scheduleType,
-		AgentName: scheduleAgent,
-		Message:   scheduleMessage,
-		Interrupt: scheduleInterrupt,
-	}
-
+	req := buildCreateRecurringRequest()
 	sched, err := hubCtx.Client.Schedules(projectID).Create(ctx, req)
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to create recurring schedule: %w", err))
@@ -599,12 +606,45 @@ func runScheduleCreateRecurring(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Recurring schedule created: %s\n", sched.ID)
 	fmt.Printf("  Name:     %s\n", sched.Name)
 	fmt.Printf("  Cron:     %s\n", sched.CronExpr)
+	fmt.Printf("  Zone:     %s\n", scheduleZoneLabel(sched.TimeZone))
 	fmt.Printf("  Status:   %s\n", sched.Status)
 	if sched.NextRunAt != nil {
 		fmt.Printf("  Next Run: %s\n", clitime.Format(*sched.NextRunAt, clitime.Full))
 	}
 
 	return nil
+}
+
+// buildCreateRecurringRequest builds the create request from the
+// create-recurring flags.
+func buildCreateRecurringRequest() *hubclient.CreateScheduleRequest {
+	return &hubclient.CreateScheduleRequest{
+		Name:      scheduleName,
+		CronExpr:  scheduleCron,
+		TimeZone:  scheduleTimeZone,
+		EventType: scheduleType,
+		AgentName: scheduleAgent,
+		Message:   scheduleMessage,
+		Interrupt: scheduleInterrupt,
+	}
+}
+
+// scheduleZoneLabel returns the zone a schedule's cron expression is
+// evaluated in, for display: the stored IANA name, or UTC when empty.
+func scheduleZoneLabel(zone string) string {
+	if zone == "" {
+		return "UTC"
+	}
+	return zone
+}
+
+// scheduleCronLabel returns the cron column of the schedule list: the
+// expression, followed by its zone in parentheses when it is not UTC.
+func scheduleCronLabel(expr, zone string) string {
+	if zone == "" {
+		return expr
+	}
+	return expr + " (" + zone + ")"
 }
 
 func runSchedulePause(cmd *cobra.Command, args []string) error {
@@ -780,7 +820,8 @@ func init() {
 
 	// Create recurring flags
 	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleName, "name", "", "Schedule name (required)")
-	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleCron, "cron", "", "Cron expression in UTC (required, 5-field: minute hour day month weekday)")
+	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleCron, "cron", "", "Cron expression, evaluated in --time-zone (required, 5-field: minute hour day month weekday)")
+	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleTimeZone, "time-zone", "", "IANA time zone the cron expression is evaluated in, e.g. America/Los_Angeles (default UTC)")
 	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleType, "type", "message", "Event type")
 	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleAgent, "agent", "", "Target agent name")
 	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleMessage, "message", "", "Message body")

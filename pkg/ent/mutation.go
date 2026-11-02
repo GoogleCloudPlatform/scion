@@ -81267,6 +81267,7 @@ type ScheduleMutation struct {
 	project_id                            *uuid.UUID
 	name                                  *string
 	cron_expr                             *string
+	time_zone                             *string
 	event_type                            *string
 	payload                               *string
 	status                                *string
@@ -82245,6 +82246,42 @@ func (m *ScheduleMutation) ResetCronExpr() {
 	m.cron_expr = nil
 }
 
+// SetTimeZone sets the "time_zone" field.
+func (m *ScheduleMutation) SetTimeZone(s string) {
+	m.time_zone = &s
+}
+
+// TimeZone returns the value of the "time_zone" field in the mutation.
+func (m *ScheduleMutation) TimeZone() (r string, exists bool) {
+	v := m.time_zone
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTimeZone returns the old "time_zone" field's value of the Schedule entity.
+// If the Schedule object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduleMutation) OldTimeZone(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTimeZone is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTimeZone requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTimeZone: %w", err)
+	}
+	return oldValue.TimeZone, nil
+}
+
+// ResetTimeZone resets all changes to the "time_zone" field.
+func (m *ScheduleMutation) ResetTimeZone() {
+	m.time_zone = nil
+}
+
 // SetEventType sets the "event_type" field.
 func (m *ScheduleMutation) SetEventType(s string) {
 	m.event_type = &s
@@ -82865,7 +82902,7 @@ func (m *ScheduleMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *ScheduleMutation) Fields() []string {
-	fields := make([]string, 0, 31)
+	fields := make([]string, 0, 32)
 	if m.initiator_principal_kind != nil {
 		fields = append(fields, schedule.FieldInitiatorPrincipalKind)
 	}
@@ -82919,6 +82956,9 @@ func (m *ScheduleMutation) Fields() []string {
 	}
 	if m.cron_expr != nil {
 		fields = append(fields, schedule.FieldCronExpr)
+	}
+	if m.time_zone != nil {
+		fields = append(fields, schedule.FieldTimeZone)
 	}
 	if m.event_type != nil {
 		fields = append(fields, schedule.FieldEventType)
@@ -83003,6 +83043,8 @@ func (m *ScheduleMutation) Field(name string) (ent.Value, bool) {
 		return m.Name()
 	case schedule.FieldCronExpr:
 		return m.CronExpr()
+	case schedule.FieldTimeZone:
+		return m.TimeZone()
 	case schedule.FieldEventType:
 		return m.EventType()
 	case schedule.FieldPayload:
@@ -83074,6 +83116,8 @@ func (m *ScheduleMutation) OldField(ctx context.Context, name string) (ent.Value
 		return m.OldName(ctx)
 	case schedule.FieldCronExpr:
 		return m.OldCronExpr(ctx)
+	case schedule.FieldTimeZone:
+		return m.OldTimeZone(ctx)
 	case schedule.FieldEventType:
 		return m.OldEventType(ctx)
 	case schedule.FieldPayload:
@@ -83234,6 +83278,13 @@ func (m *ScheduleMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetCronExpr(v)
+		return nil
+	case schedule.FieldTimeZone:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTimeZone(v)
 		return nil
 	case schedule.FieldEventType:
 		v, ok := value.(string)
@@ -83596,6 +83647,9 @@ func (m *ScheduleMutation) ResetField(name string) error {
 		return nil
 	case schedule.FieldCronExpr:
 		m.ResetCronExpr()
+		return nil
+	case schedule.FieldTimeZone:
+		m.ResetTimeZone()
 		return nil
 	case schedule.FieldEventType:
 		m.ResetEventType()

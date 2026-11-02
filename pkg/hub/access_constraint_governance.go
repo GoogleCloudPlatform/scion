@@ -248,10 +248,20 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 	ctx = withAccessBoundaryAuditOperation(ctx)
 	now := gs.nowFunc()
 
+	// An update applies to the draft's ID, and every check below runs
+	// against req.ConstraintID: the two must name the same constraint.
+	// Refused before the token is validated, so the token is not consumed.
+	if req.Operation == "update" && (req.Draft == nil || req.ConstraintID == "" || req.Draft.ID != req.ConstraintID) {
+		return nil, &GovernanceError{
+			Code:    ErrCodeInvalidRequest,
+			Message: "an update draft must name the target constraint",
+		}
+	}
+
 	// Step a: Validate the preview token.
 	if err := gs.preview.ValidateToken(
 		ctx, req.PreviewToken, req.Actor, req.Operation,
-		req.Draft, req.BaseRevision,
+		req.ConstraintID, req.Draft, req.BaseRevision,
 	); err != nil {
 		if tve, ok := err.(*TokenValidationError); ok {
 			return nil, &GovernanceError{

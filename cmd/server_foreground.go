@@ -434,7 +434,11 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if enableHub {
 		// Before the database is opened: the boot-failure guard must know
 		// that this update target may have migrated the schema.
-		markUpdateStateBooting(maintenanceInstallRoot())
+		installRoot := maintenanceInstallRoot()
+		markUpdateStateBooting(installRoot)
+		// Before the plugin manager loads plugins: after a boot-failure
+		// guard rollback, the plugins of the restored release.
+		reconcilePluginsAfterRollback(installRoot)
 		s, entClient, err = initStore(ctx, cfg)
 		if err != nil {
 			// A stop during the migrations is a clean exit, not a failed
@@ -3035,6 +3039,9 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 
 	if err := hubSrv.RegisterConduitRelayReadinessGauge(mp); err != nil {
 		log.Printf("WARNING: hub conduit relay readiness gauge disabled: %v", err)
+	}
+	if err := hubSrv.RegisterConduitAgentSessionsAdmitted(mp); err != nil {
+		log.Printf("WARNING: hub conduit agent sessions admitted counter disabled: %v", err)
 	}
 	if err := hubSrv.RegisterBrokerPresenceMetrics(mp); err != nil {
 		log.Printf("WARNING: hub broker presence metrics disabled: %v", err)

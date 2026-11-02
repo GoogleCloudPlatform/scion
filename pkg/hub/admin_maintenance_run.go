@@ -372,6 +372,9 @@ func (s *Server) markRunRestarting(ctx context.Context, run *store.MaintenanceOp
 	if p.Snapshot != "" {
 		result["snapshot"] = p.Snapshot
 	}
+	if p.Commit != "" {
+		result["commit"] = p.Commit
+	}
 	resultJSON, err := json.Marshal(result)
 	if err != nil {
 		return fmt.Errorf("encode run result: %w", err)
@@ -389,6 +392,8 @@ func (s *Server) markRunRestarting(ctx context.Context, run *store.MaintenanceOp
 		Channel:  p.Channel,
 		Pin:      p.Pin,
 		SetBy:    run.StartedBy,
+		Mode:     p.Mode,
+		Commit:   p.Commit,
 	}
 	if err := s.writeHubSettingJSON(ctx, HubSettingSectionPendingUpdate, pending); err != nil {
 		return fmt.Errorf("record pending update: %w", err)

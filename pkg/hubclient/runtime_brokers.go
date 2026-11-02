@@ -584,7 +584,7 @@ func (s *runtimeBrokerService) List(ctx context.Context, opts *ListBrokersOption
 
 // Get returns a single runtime broker by ID.
 func (s *runtimeBrokerService) Get(ctx context.Context, brokerID string) (*RuntimeBroker, error) {
-	resp, err := s.c.get(ctx, "/api/v1/runtime-brokers/"+brokerID, nil)
+	resp, err := s.c.get(ctx, "/api/v1/runtime-brokers/"+url.PathEscape(brokerID), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -593,7 +593,7 @@ func (s *runtimeBrokerService) Get(ctx context.Context, brokerID string) (*Runti
 
 // Update updates broker metadata.
 func (s *runtimeBrokerService) Update(ctx context.Context, brokerID string, req *UpdateBrokerRequest) (*RuntimeBroker, error) {
-	resp, err := s.c.patch(ctx, "/api/v1/runtime-brokers/"+brokerID, req, nil)
+	resp, err := s.c.patch(ctx, "/api/v1/runtime-brokers/"+url.PathEscape(brokerID), req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -602,7 +602,7 @@ func (s *runtimeBrokerService) Update(ctx context.Context, brokerID string, req 
 
 // Delete removes a broker from all projects.
 func (s *runtimeBrokerService) Delete(ctx context.Context, brokerID string) error {
-	resp, err := s.c.delete(ctx, "/api/v1/runtime-brokers/"+brokerID, nil)
+	resp, err := s.c.delete(ctx, "/api/v1/runtime-brokers/"+url.PathEscape(brokerID), nil)
 	if err != nil {
 		return err
 	}
@@ -611,7 +611,7 @@ func (s *runtimeBrokerService) Delete(ctx context.Context, brokerID string) erro
 
 // ListProjects returns projects this broker contributes to.
 func (s *runtimeBrokerService) ListProjects(ctx context.Context, brokerID string) (*ListBrokerProjectsResponse, error) {
-	resp, err := s.c.get(ctx, "/api/v1/runtime-brokers/"+brokerID+"/projects", nil)
+	resp, err := s.c.get(ctx, "/api/v1/runtime-brokers/"+url.PathEscape(brokerID)+"/projects", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -620,7 +620,7 @@ func (s *runtimeBrokerService) ListProjects(ctx context.Context, brokerID string
 
 // Heartbeat sends a heartbeat for a broker.
 func (s *runtimeBrokerService) Heartbeat(ctx context.Context, brokerID string, status *BrokerHeartbeat) (*BrokerHeartbeatResponse, error) {
-	resp, err := s.c.post(ctx, "/api/v1/runtime-brokers/"+brokerID+"/heartbeat", status, nil)
+	resp, err := s.c.post(ctx, "/api/v1/runtime-brokers/"+url.PathEscape(brokerID)+"/heartbeat", status, nil)
 	if err != nil {
 		return nil, err
 	}
