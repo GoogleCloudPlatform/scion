@@ -322,7 +322,7 @@ func TestGetLogsDeadlineNoEntriesClearError(t *testing.T) {
 	if time.Since(start) > 5*time.Second {
 		t.Fatalf("GetLogs took %s, want it bounded by logQueryTimeout", time.Since(start))
 	}
-	for _, want := range []string{"no entries for instance agent", "within 20ms", "last 24h0m0s"} {
+	for _, want := range []string{"the read for instance agent returned no entries", "before its 20ms deadline", "last 24h0m0s"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error %q does not contain %q", err, want)
 		}
@@ -358,3 +358,90 @@ func TestGetLogsPermissionDeniedNamesPermission(t *testing.T) {
 		t.Fatalf("status code = %v, want the wrapped PermissionDenied", status.Code(err))
 	}
 }
+
+// A caller deadline shorter than logQueryTimeout still wins: the read ends
+// with the caller's error, not a partial result.
+func TestGetLogsShorterCallerDeadlineStaysError(t *testing.T) {
+	setLogQueryTimeout(t, time.Hour)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	client := &ctxLogEntryClient{entries: []*loggingpb.LogEntry{
+		logEntryAt(time.Date(2026, 11, 2, 11, 0, 0, 0, time.UTC), "line"),
+	}}
+	logClient := &LogClient{client: client, projectID: "project"}
+
+	entries, err := logClient.GetLogs(ctx, "agent", LogOptions{Lines: 100})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("entries = %#v, err = %v; want the caller's context.DeadlineExceeded", entries, err)
+	}
+}
+
+// After an entry has been seen, a poll is bounded by lastSeen only, with
+// no lookback term.
+func TestStreamLogsLaterPollUsesLastSeen(t *testing.T) {
+	fixLogClock(t)
+	oldPollInterval := logPollInterval
+	logPollInterval = time.Millisecond
+	t.Cleanup(func() { logPollInterval = oldPollInterval })
+
+	seen := time.Date(2026, 11, 2, 11, 30, 0, 0, time.UTC)
+	client := &notifyingLogEntryClient{
+		polls: make(chan *loggingpb.ListLogEntriesRequest, 16),
+		first: []*loggingpb.LogEntry{logEntryAt(seen, "first")},
+	}
+	logClient := &LogClient{client: client, projectID: "project"}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := logClient.StreamLogs(ctx, "agent", LogOptions{})
+	if err != nil {
+		t.Fatalf("StreamLogs returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		for range ch {
+		}
+	})
+
+	var reqs []*loggingpb.ListLogEntriesRequest
+	for len(reqs) < 2 {
+		select {
+		case req := <-client.polls:
+			reqs = append(reqs, req)
+		case entry := <-ch:
+			if entry.Message != "first" {
+				t.Fatalf("unexpected stream entry %#v", entry)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("got %d polls, want 2", len(reqs))
+		}
+	}
+	want := cloudRunInstanceLogFilter("agent", "project", seen, time.Time{})
+	if got := reqs[1].Filter; got != want {
+		t.Fatalf("second poll filter = %q, want %q", got, want)
+	}
+}
+
+// notifyingLogEntryClient sends each request on polls (the stream's
+// goroutine calls it), answering the first with first and later ones with
+// no entries.
+type notifyingLogEntryClient struct {
+	polls chan *loggingpb.ListLogEntriesRequest
+	first []*loggingpb.LogEntry
+	calls int
+}
+
+func (c *notifyingLogEntryClient) ListLogEntries(_ context.Context, req *loggingpb.ListLogEntriesRequest) logEntryIterator {
+	c.calls++
+	entries := c.first
+	if c.calls > 1 {
+		entries = nil
+	}
+	select {
+	case c.polls <- req:
+	default:
+	}
+	return &fakeLogEntryIterator{entries: entries}
+}
+
+func (c *notifyingLogEntryClient) Close() error { return nil }

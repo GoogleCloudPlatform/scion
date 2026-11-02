@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"time"
 
@@ -126,9 +127,13 @@ func (c *LogClient) GetLogs(ctx context.Context, instanceName string, opts LogOp
 			// caller context stays an error.
 			if ctx.Err() == nil && errors.Is(queryCtx.Err(), context.DeadlineExceeded) {
 				if len(entries) > 0 {
+					// The tail is cut short by time, not by Lines; the
+					// response cannot say so, the log does.
+					slog.Warn("Cloud Run log read stopped at its deadline; returning the newest entries read",
+						"instance", instanceName, "entries", len(entries), "deadline", logQueryTimeout.String())
 					break
 				}
-				return nil, fmt.Errorf("listing log entries: no entries for instance %s within %s (searching the last %s)",
+				return nil, fmt.Errorf("listing log entries: the read for instance %s returned no entries before its %s deadline (searching the last %s)",
 					instanceName, logQueryTimeout, logLookback)
 			}
 			if status.Code(err) == codes.PermissionDenied {
