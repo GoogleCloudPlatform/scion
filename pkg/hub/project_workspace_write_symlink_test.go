@@ -261,3 +261,34 @@ func TestProjectWorkspaceDelete_UnderNormalDirLinkAllowed(t *testing.T) {
 	_, err := os.Stat(filepath.Join(realDir, "stays.txt"))
 	assert.NoError(t, err)
 }
+
+// TestProjectWorkspaceDelete_TrailingSlash pins the answers to a DELETE path
+// with a trailing slash: an existing directory or file is refused and kept,
+// and a missing name is not found.
+func TestProjectWorkspaceDelete_TrailingSlash(t *testing.T) {
+	srv, _ := testServer(t)
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS Delete Trailing Slash")
+	require.NoError(t, os.MkdirAll(filepath.Join(workspacePath, "d"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "f"), []byte("f"), 0o644))
+	filesURL := fmt.Sprintf("/api/v1/projects/%s/workspace/files", project.ID)
+
+	for _, tc := range []struct {
+		name string
+		path string
+		want int
+		keep string
+	}{
+		{name: "empty_dir", path: "d/", want: http.StatusBadRequest, keep: "d"},
+		{name: "file", path: "f/", want: http.StatusBadRequest, keep: "f"},
+		{name: "missing", path: "x/", want: http.StatusNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doRequest(t, srv, http.MethodDelete, filesURL+"/"+tc.path, nil)
+			assert.Equal(t, tc.want, rec.Code, "body: %s", rec.Body.String())
+			if tc.keep != "" {
+				_, err := os.Lstat(filepath.Join(workspacePath, tc.keep))
+				assert.NoError(t, err, "%s was removed", tc.keep)
+			}
+		})
+	}
+}
