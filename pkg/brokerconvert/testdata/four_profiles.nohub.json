@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 1,
+  "tipNote": "Proposed only: nothing was written, registered or changed. Instance keys and names are proposals you may edit.",
+  "instances": [
+    {
+      "key": "docker-build",
+      "name": "docker-build",
+      "runtime_target": {
+        "type": "docker"
+      },
+      "agent_defaults": {
+        "image_registry": "reg.example/build"
+      }
+    },
+    {
+      "key": "docker-local",
+      "name": "docker-local",
+      "runtime_target": {
+        "type": "docker"
+      },
+      "agent_defaults": {
+        "image_registry": "reg.example/local"
+      }
+    },
+    {
+      "key": "k8s-prod-agents",
+      "name": "k8s-prod-agents",
+      "runtime_target": {
+        "type": "kubernetes",
+        "context": "prod",
+        "namespace": "agents"
+      }
+    }
+  ],
+  "profileMap": [
+    {
+      "profile": "build",
+      "instance": "docker-build"
+    },
+    {
+      "profile": "k8s",
+      "instance": "k8s-prod-agents"
+    },
+    {
+      "profile": "legacy-podman",
+      "blockedBy": "unsupported_flat_target_type"
+    },
+    {
+      "profile": "local",
+      "instance": "docker-local"
+    }
+  ],
+  "findings": [
+    {
+      "code": "profile_conflict",
+      "severity": "notice",
+      "path": "profiles.*",
+      "profiles": [
+        "build",
+        "local"
+      ],
+      "message": "profiles build, local on target docker differ in image_registry; they are split into instances docker-build (build), docker-local (local). To merge them, give the profiles the same values or add a field choice for target docker"
+    },
+    {
+      "code": "unsupported_flat_target_type",
+      "severity": "blocking",
+      "path": "runtimes.pod.type",
+      "profiles": [
+        "legacy-podman"
+      ],
+      "message": "runtime type podman has no flat Runtime Broker target; keep the profiles that use it on their legacy Runtime Broker"
+    }
+  ],
+  "capacity": {
+    "status": "needs_hub",
+    "note": "the per-instance agent limits need the Hub (the legacy Runtime Broker's maxAgents setting)"
+  },
+  "agents": null,
+  "projects": null,
+  "summary": {
+    "result": "blocking_findings",
+    "profilesInScope": 4,
+    "mappedProfiles": 3,
+    "instances": 3,
+    "blockingFindings": 1,
+    "noticeFindings": 1,
+    "decisionRequired": false,
+    "agents": 0,
+    "projects": 0
+  }
+}

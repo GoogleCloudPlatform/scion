@@ -127,17 +127,18 @@ func WriteHuman(w io.Writer, p *Plan) error {
 
 	b.WriteString("\nSummary\n")
 	s := p.Summary
-	fmt.Fprintf(&b, "   %d profiles in scope, %d mapped, %d proposed instances, %d blocking and %d notice findings",
-		s.ProfilesInScope, s.MappedProfiles, s.Instances, s.BlockingFindings, s.NoticeFindings)
+	fmt.Fprintf(&b, "   %s in scope, %d mapped, %s, %s, %s",
+		count(s.ProfilesInScope, "profile"), s.MappedProfiles, count(s.Instances, "proposed instance"),
+		count(s.BlockingFindings, "blocking finding"), count(s.NoticeFindings, "notice finding"))
 	if p.Agents != nil || p.Projects != nil {
-		fmt.Fprintf(&b, ", %d bound agents, %d providing projects", s.Agents, s.Projects)
+		fmt.Fprintf(&b, ", %s, %s", count(s.Agents, "bound agent"), count(s.Projects, "providing project"))
 	}
 	b.WriteString(".\n")
 	var verdict []string
 	if s.BlockingFindings == 0 {
 		verdict = append(verdict, "no blocking findings")
 	} else {
-		verdict = append(verdict, fmt.Sprintf("%d blocking findings", s.BlockingFindings))
+		verdict = append(verdict, count(s.BlockingFindings, "blocking finding"))
 	}
 	if s.DecisionRequired {
 		verdict = append(verdict, "operator decisions required")
@@ -196,7 +197,7 @@ func writeAgents(b *strings.Builder, s *AgentsSection) {
 		fmt.Fprintf(b, "     %s  %s  project %s  phase %s  %s\n", a.ID, a.Name, a.Project, a.Phase, refText(a.ProfileRef))
 	}
 	if s.TerminalCount > 0 {
-		fmt.Fprintf(b, "     (%d agents in a terminal phase not listed)\n", s.TerminalCount)
+		fmt.Fprintf(b, "     (%s in a terminal phase not listed)\n", count(s.TerminalCount, "agent"))
 	}
 	fmt.Fprintf(b, "     %s\n", AgentsNotMovableNote)
 }
@@ -224,4 +225,12 @@ func writeProjects(b *strings.Builder, s *ProjectsSection) {
 			fmt.Fprintf(b, "       service account for profile: %s\n", refText(r))
 		}
 	}
+}
+
+// count formats n with noun, adding "s" unless n is 1.
+func count(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
 }

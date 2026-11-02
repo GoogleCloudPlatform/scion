@@ -1,0 +1,186 @@
+{
+  "schemaVersion": 1,
+  "tipNote": "Proposed only: nothing was written, registered or changed. Instance keys and names are proposals you may edit.",
+  "legacyBrokerId": "b-legacy",
+  "legacyBroker": {
+    "id": "b-legacy",
+    "name": "build-host",
+    "profiles": [
+      "build",
+      "gpu",
+      "k8s"
+    ],
+    "localOnly": [
+      "legacy-podman",
+      "local"
+    ],
+    "hubOnly": [
+      "gpu"
+    ]
+  },
+  "instances": [
+    {
+      "key": "docker-build",
+      "name": "docker-build",
+      "runtime_target": {
+        "type": "docker"
+      },
+      "agent_defaults": {
+        "image_registry": "reg.example/build"
+      }
+    },
+    {
+      "key": "docker-local",
+      "name": "docker-local",
+      "runtime_target": {
+        "type": "docker"
+      },
+      "agent_defaults": {
+        "image_registry": "reg.example/local"
+      }
+    },
+    {
+      "key": "k8s-prod-agents",
+      "name": "k8s-prod-agents",
+      "runtime_target": {
+        "type": "kubernetes",
+        "context": "prod",
+        "namespace": "agents"
+      }
+    }
+  ],
+  "profileMap": [
+    {
+      "profile": "build",
+      "instance": "docker-build"
+    },
+    {
+      "profile": "k8s",
+      "instance": "k8s-prod-agents"
+    },
+    {
+      "profile": "legacy-podman",
+      "blockedBy": "unsupported_flat_target_type"
+    },
+    {
+      "profile": "local",
+      "instance": "docker-local"
+    }
+  ],
+  "findings": [
+    {
+      "code": "profile_conflict",
+      "severity": "notice",
+      "path": "profiles.*",
+      "profiles": [
+        "build",
+        "local"
+      ],
+      "message": "profiles build, local on target docker differ in image_registry; they are split into instances docker-build (build), docker-local (local). To merge them, give the profiles the same values or add a field choice for target docker"
+    },
+    {
+      "code": "unsupported_flat_target_type",
+      "severity": "blocking",
+      "path": "runtimes.pod.type",
+      "profiles": [
+        "legacy-podman"
+      ],
+      "message": "runtime type podman has no flat Runtime Broker target; keep the profiles that use it on their legacy Runtime Broker"
+    }
+  ],
+  "capacity": {
+    "status": "planned",
+    "outcome": "preserve_by_split",
+    "maxAgents": 10,
+    "allocations": [
+      {
+        "instance": "docker-build",
+        "maxAgents": 4
+      },
+      {
+        "instance": "docker-local",
+        "maxAgents": 3
+      },
+      {
+        "instance": "k8s-prod-agents",
+        "maxAgents": 3
+      }
+    ],
+    "flags": [
+      "enforcement_not_visible: whether the Hub enforces Runtime Broker agent limits is not visible from the CLI",
+      "proposed_instance_keys: allocations are keyed by the proposed instance keys; Runtime Broker IDs are assigned at registration"
+    ]
+  },
+  "agents": {
+    "items": [
+      {
+        "id": "a-4",
+        "name": "delta",
+        "projectId": "p-2",
+        "project": "api",
+        "phase": "created",
+        "profile": "",
+        "mapping": "profile_unknown"
+      },
+      {
+        "id": "a-3",
+        "name": "gamma",
+        "projectId": "p-2",
+        "project": "api",
+        "phase": "running",
+        "profile": "legacy-podman",
+        "mapping": "no_mapping"
+      },
+      {
+        "id": "a-1",
+        "name": "alpha",
+        "projectId": "p-1",
+        "project": "web",
+        "phase": "running",
+        "profile": "local",
+        "mapping": "mapped",
+        "instance": "docker-local"
+      }
+    ],
+    "terminalCount": 1
+  },
+  "projects": {
+    "items": [
+      {
+        "id": "p-2",
+        "name": "api"
+      },
+      {
+        "id": "p-1",
+        "name": "web",
+        "activeProfile": {
+          "profile": "k8s",
+          "mapping": "mapped",
+          "instance": "k8s-prod-agents"
+        },
+        "serviceAccountProfiles": [
+          {
+            "profile": "legacy-podman",
+            "mapping": "no_mapping"
+          },
+          {
+            "profile": "local",
+            "mapping": "mapped",
+            "instance": "docker-local"
+          }
+        ]
+      }
+    ]
+  },
+  "summary": {
+    "result": "blocking_findings",
+    "profilesInScope": 4,
+    "mappedProfiles": 3,
+    "instances": 3,
+    "blockingFindings": 1,
+    "noticeFindings": 1,
+    "decisionRequired": false,
+    "agents": 3,
+    "projects": 2
+  }
+}
