@@ -30,9 +30,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -321,6 +323,7 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 
 	c, err := r.client(ctx)
 	if err != nil {
+		nfsPaths.rollbackCreated(err)
 		return "", fmt.Errorf("failed to create client: %w", err)
 	}
 	defer func() { _ = c.Close() }()
@@ -415,6 +418,11 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	if err != nil {
 		if cloudRunServerRejected(ctx, err) {
 			clearCloudRunCreateInDoubt(getReq.Name, runID)
+			// The server refused the create (for example a missing actAs
+			// permission): no instance exists or will appear, so the agent
+			// directories this start created are removed again. A create
+			// that may still land keeps them.
+			nfsPaths.rollbackCreated(err)
 		}
 		return "", fmt.Errorf("failed to create instance: %w", err)
 	}
@@ -659,6 +667,60 @@ type cloudRunNFSProvisionPaths struct {
 	workspaceHostPath   string
 	homeHostPath        string
 	secretsHostPath     string
+	// created lists the agent directories this provision created (the
+	// agent directory agents/<slug> and the home, secrets and own
+	// workspace below it), parents first. A start whose instance was never
+	// created removes them again (rollbackCreated).
+	created []string
+}
+
+// mkdirAgentDir is mkdirNFSAgentDir for dir, a directory below the agent
+// directory (the parent of the home): it records in p.created every
+// directory from the agent directory down to dir that did not exist.
+func (p *cloudRunNFSProvisionPaths) mkdirAgentDir(dir string, uid, gid int) error {
+	agentDir := filepath.Dir(p.homeHostPath)
+	var missing []string
+	if dir == agentDir || strings.HasPrefix(dir, agentDir+string(filepath.Separator)) {
+		for d := dir; ; d = filepath.Dir(d) {
+			if _, err := os.Lstat(d); errors.Is(err, fs.ErrNotExist) {
+				missing = append([]string{d}, missing...)
+			}
+			if d == agentDir {
+				break
+			}
+		}
+	}
+	if err := mkdirNFSAgentDir(dir, uid, gid); err != nil {
+		return err
+	}
+	for _, d := range missing {
+		if !slices.Contains(p.created, d) {
+			p.created = append(p.created, d)
+		}
+	}
+	return nil
+}
+
+// rollbackCreated removes the agent directories this provision created,
+// newest first, for a start whose instance was never created
+// (ptone/scion#7100): nothing has used them. Each is removed only while
+// it is empty (os.Remove, never recursive), so anything another start put
+// there meanwhile is kept.
+func (p *cloudRunNFSProvisionPaths) rollbackCreated(reason error) {
+	if p == nil || len(p.created) == 0 {
+		return
+	}
+	var removed, kept []string
+	for i := len(p.created) - 1; i >= 0; i-- {
+		d := p.created[i]
+		if err := os.Remove(d); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			kept = append(kept, d)
+			continue
+		}
+		removed = append(removed, d)
+	}
+	runtimeLog().Info("cloudrun: removed the agent directories provisioned for a start whose instance was not created",
+		"removed", removed, "kept", kept, "reason", reason)
 }
 
 // cloudRunRequireNFSFilesystem is requireNFSFilesystem, replaceable in
@@ -739,7 +801,7 @@ func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfi
 	// clone-per-agent agent: only its own (empty until its first start)
 	// workspace directory is created.
 	if clonePerAgent {
-		if err := mkdirNFSAgentDir(paths.workspaceHostPath, uid, gid); err != nil {
+		if err := paths.mkdirAgentDir(paths.workspaceHostPath, uid, gid); err != nil {
 			return nil, fmt.Errorf("cloudrun: provision NFS agent workspace %s via Hub-mounted path %s: %w",
 				paths.workspaceExportPath, paths.workspaceHostPath, err)
 		}
@@ -757,11 +819,11 @@ func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfi
 			"verify the Hub Cloud Run service mounts the Filestore export read/write or run an external provisioner",
 			paths.workspaceExportPath, hostPaths.workspaceHostPath, err)
 	}
-	if err := mkdirNFSAgentDir(hostPaths.homeHostPath, uid, gid); err != nil {
+	if err := paths.mkdirAgentDir(hostPaths.homeHostPath, uid, gid); err != nil {
 		return nil, fmt.Errorf("cloudrun: provision NFS agent home %s via Hub-mounted path %s: %w",
 			paths.homeExportPath, hostPaths.homeHostPath, err)
 	}
-	if err := mkdirNFSAgentDir(hostPaths.secretsHostPath, uid, gid); err != nil {
+	if err := paths.mkdirAgentDir(hostPaths.secretsHostPath, uid, gid); err != nil {
 		return nil, fmt.Errorf("cloudrun: provision NFS agent secrets %s via Hub-mounted path %s: %w",
 			paths.secretsExportPath, hostPaths.secretsHostPath, err)
 	}
