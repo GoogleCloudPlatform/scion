@@ -3859,7 +3859,9 @@ describe('scion-page-admin-server-config', () => {
     });
 
     it('a type switch to Cloud Run names the Kubernetes keys it clears', async () => {
-      element = await load({ gke: k8s });
+      element = await load({
+        gke: { ...k8s, shared_dir_storage_class: 'rwx-class', shared_dir_size: '10Gi' },
+      });
       vi.mocked(showConfirm).mockClear();
       vi.mocked(showConfirm).mockResolvedValueOnce(false);
       const typeSelect = queryAll(element, 'sl-select').find((s) =>
@@ -3869,10 +3871,42 @@ describe('scion-page-admin-server-config', () => {
       typeSelect.dispatchEvent(new Event('sl-change'));
       await new Promise((resolve) => setTimeout(resolve, 0));
       const msg = vi.mocked(showConfirm).mock.calls[0][0] as string;
-      for (const k of ['node_selector', 'tolerations', 'kubernetes_service_account_mappings']) {
+      for (const k of [
+        'node_selector',
+        'tolerations',
+        'kubernetes_service_account_mappings',
+        'shared_dir_storage_class',
+        'shared_dir_size',
+      ]) {
         expect(msg).toContain(k);
       }
     });
+
+    // The shared-dir PVC defaults are Kubernetes-only and follow the other
+    // Kubernetes keys: a switch to Cloud Run clears them.
+    for (const [key, value] of [
+      ['shared_dir_storage_class', 'rwx-class'],
+      ['shared_dir_size', '10Gi'],
+    ] as const) {
+      it(`a type switch to Cloud Run clears ${key}`, async () => {
+        let captured: Record<string, any> | null = null;
+        element = await load({ gke: { ...k8s, [key]: value } }, (b) => (captured = b));
+        vi.mocked(showConfirm).mockClear();
+        const typeSelect = queryAll(element, 'sl-select').find((s) =>
+          s.querySelector('sl-option[value="cloudrun-instances"]')
+        ) as HTMLElement & { value: string };
+        typeSelect.value = 'cloudrun';
+        typeSelect.dispatchEvent(new Event('sl-change'));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(showConfirm).toHaveBeenCalledTimes(1);
+        expect(vi.mocked(showConfirm).mock.calls[0][0]).toContain(key);
+        await save(element);
+        expect(captured).not.toBeNull();
+        expect(captured!.runtimes.gke.type).toBe('cloudrun');
+        expect(captured!.runtimes.gke[key] ?? null).toBeNull();
+        expect(JSON.stringify(captured!.runtimes.gke)).not.toContain(value);
+      });
+    }
   });
 
   describe('Regression ptone/scion#1871 — masked secrets are not sent back', () => {

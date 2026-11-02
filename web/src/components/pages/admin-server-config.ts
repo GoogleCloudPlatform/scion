@@ -785,6 +785,8 @@ const CONTAINER_RUNTIME_KEYS = [
   'kubernetes_service_account_mappings',
   'kubernetes_block_service_account',
   'priority_class_name',
+  'shared_dir_storage_class',
+  'shared_dir_size',
 ] as const;
 
 /**
