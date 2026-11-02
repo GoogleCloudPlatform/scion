@@ -112,7 +112,10 @@ import './not-found.js';
 import { loadReviewEditor, preloadReviewEditor } from '../artifact-review/review-editor-loader.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { countTopLevelBlocks } from '../../utils/markdown-blocks.js';
-import type { ReviewEditorElement } from '../artifact-review/review-editor-loader.js';
+import type {
+  ReviewChangeDetail,
+  ReviewEditorElement,
+} from '../artifact-review/review-editor-loader.js';
 
 type Tab = 'preview' | 'files' | 'history';
 
@@ -2834,8 +2837,16 @@ export class ScionPageArtifactDetail extends LitElement {
                   .files=${v.files}
                   .noteAuthor=${this.createdBy(v)}
                   .scrollInset=${this.stickyInset}
-                  @review-change=${(e: CustomEvent<{ text: string }>): void => {
+                  @review-change=${(e: CustomEvent<ReviewChangeDetail>): void => {
                     this.reviewText = e.detail.text;
+                    // A change sent after typing pauses closes the hint. One
+                    // sent because focus left the editor keeps it, even when it
+                    // carries an edit made just before: focus leaves on the
+                    // press of a toolbar or hint button, and the strip closing
+                    // then would move the button from under the pointer before
+                    // the click. A later change sent after a pause, or the
+                    // view switch, also closes it.
+                    if (e.detail.blur) return;
                     if (this.graphicalHint !== 'load-failed') this.clearHint();
                   }}
                   @review-hint=${(e: CustomEvent<{ kind: ReviewHint }>): void =>
