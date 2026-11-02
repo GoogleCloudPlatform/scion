@@ -2048,6 +2048,15 @@ authDone:
 			sdLayout, sdSplit = l, split
 		}
 	}
+	// On the local layout, a shared-dir name that fails
+	// api.ValidateSharedDirs is skipped (logged, no directory) here, before
+	// resolveSharedDirs, so RunConfig.SharedDirs carries only valid names
+	// too: a runtime that creates directories from those names (the Cloud
+	// Run sandbox's /scion/shared/<name>) never sees an invalid one. On a
+	// shared backend, resolveSharedDirs refuses the start instead (design G5).
+	if usesLocalSharedDirLayout(sdLayout, sdSplit, m.Runtime.Name()) {
+		effectiveSharedDirs = validLocalSharedDirs(effectiveSharedDirs)
+	}
 	// A shared-backend Layout keys its tree on hubDispatchedProjectID,
 	// snapshotted above at Start entry — NOT the general projectID variable
 	// (which falls back to settings.Hub.ProjectID / the project-id file)
