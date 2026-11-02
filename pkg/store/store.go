@@ -3117,12 +3117,12 @@ type ScheduleStore interface {
 	ListActiveZonePrefixedSchedules(ctx context.Context, limit int, excludeIDs []string) ([]Schedule, error)
 
 	// UpdateSchedule writes the schedule's mutable fields named by `fields`
-	// (name, cron_expr, event_type, payload, status, next_run_at) from
-	// `schedule`; the Status field also writes status_reason from
-	// schedule.StatusReason, so a status and its reason are always written
-	// together. A field not named in `fields` is left completely untouched
-	// in the row, so a struct built from a stale read can never revert a
-	// column this call didn't intend to change.
+	// (name, cron_expr, time_zone, event_type, payload, status,
+	// next_run_at) from `schedule`; the Status field also writes
+	// status_reason from schedule.StatusReason, so a status and its reason
+	// are always written together. A field not named in `fields` is left
+	// completely untouched in the row, so a struct built from a stale read
+	// can never revert a column this call didn't intend to change.
 	//
 	// The write is ALWAYS conditioned on the schedule's current
 	// authorization_revision matching prevRevision (or being NULL, when

@@ -69,6 +69,7 @@ func entScheduleToStore(e *ent.Schedule) *store.Schedule {
 		ProjectID:     e.ProjectID.String(),
 		Name:          e.Name,
 		CronExpr:      e.CronExpr,
+		TimeZone:      e.TimeZone,
 		EventType:     e.EventType,
 		Payload:       e.Payload,
 		Status:        e.Status,
@@ -219,6 +220,7 @@ func (s *ScheduleStore) CreateSchedule(ctx context.Context, sc *store.Schedule) 
 		SetProjectID(pid).
 		SetName(sc.Name).
 		SetCronExpr(sc.CronExpr).
+		SetTimeZone(sc.TimeZone).
 		SetEventType(sc.EventType).
 		SetStatus(sc.Status).
 		SetRunCount(sc.RunCount).
@@ -527,6 +529,9 @@ func (s *ScheduleStore) UpdateSchedule(
 	}
 	if fields.CronExpr {
 		update = update.SetCronExpr(sc.CronExpr)
+	}
+	if fields.TimeZone {
+		update = update.SetTimeZone(sc.TimeZone)
 	}
 	if fields.EventType {
 		update = update.SetEventType(sc.EventType)

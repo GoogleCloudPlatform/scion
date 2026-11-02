@@ -95,10 +95,15 @@ var hostGitDoorAllowlist = map[string]hostGitDoorEntry{
 	// The Rebuild executors queue git in a step table, step{"<label>", "git",
 	// []string{...}, dir}, run with exec.CommandContext(ctx, step.cmd,
 	// step.args...): the table's literals and the dynamic start are counted.
-	"pkg/hub/unitdrift/check.go:GitRevision":                                 {1, hostGitDoorReasonHub},
-	"pkg/hub/maintenance/maintenance_executors.go:RebuildServerExecutor.Run": {6, hostGitDoorReasonHub},
-	"pkg/hub/maintenance/maintenance_executors.go:RebuildWebExecutor.Run":    {6, hostGitDoorReasonHub},
-	"pkg/hub/maintenance/maintenance_executors.go:CheckForUpdates":           {5, hostGitDoorReasonHub},
+	// rebuild-server builds its table and starts it in runRebuildSteps (4 git
+	// step literals + the dynamic start); its rev-parse reads, and
+	// CheckForUpdates' rev-parse and log reads, go through gitOutput (one git
+	// literal), so CheckForUpdates itself starts only git fetch.
+	"pkg/hub/unitdrift/check.go:GitRevision":                              {1, hostGitDoorReasonHub},
+	"pkg/hub/maintenance/maintenance_executors.go:runRebuildSteps":        {5, hostGitDoorReasonHub},
+	"pkg/hub/maintenance/maintenance_executors.go:gitOutput":              {1, hostGitDoorReasonHub},
+	"pkg/hub/maintenance/maintenance_executors.go:RebuildWebExecutor.Run": {6, hostGitDoorReasonHub},
+	"pkg/hub/maintenance/maintenance_executors.go:CheckForUpdates":        {1, hostGitDoorReasonHub},
 
 	// Process starts whose command is chosen at run time and is not git: the
 	// container runtime, a mount helper, the Hub's build script, a binary
@@ -108,6 +113,7 @@ var hostGitDoorAllowlist = map[string]hostGitDoorEntry{
 	"pkg/hub/maintenance/maintenance_executors.go:BuildHarnessConfigImageExecutor.Run": {3, hostGitDoorReasonNotGit + " (the container runtime)"},
 	"pkg/hub/maintenance/maintenance_executors.go:PullImagesExecutor.Run":              {1, hostGitDoorReasonNotGit + " (the container runtime)"},
 	"pkg/hub/maintenance/maintenance_executors.go:VerifyScionBinary":                   {1, hostGitDoorReasonNotGit + " (the scion binary being verified)"},
+	"pkg/hub/maintenance/git_build.go:VerifyGitBuild":                                  {1, hostGitDoorReasonNotGit + " (the scion binary built from Git, being verified)"},
 	"pkg/hub/system_handlers.go:Server.runImageBuild":                                  {1, hostGitDoorReasonNotGit + " (the image build script)"},
 	"pkg/runtimebroker/nfs_mount_run_unix.go:execRunCommand":                           {1, hostGitDoorReasonNotGit + " (the mount helper)"},
 	"pkg/runtimebroker/pty_classifier.go:tmuxHasSession":                               {1, hostGitDoorReasonNotGit + " (the container runtime)"},

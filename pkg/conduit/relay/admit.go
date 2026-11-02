@@ -149,6 +149,9 @@ func (a *admitter) Admit(ctx context.Context, hello *conduitv1.Hello) (*conduitv
 		r.log.Info("Conduit session admitted", "session_id", rec.SessionID, "principal_kind", p.Kind,
 			"principal_id", p.ID, "connection_epoch", epoch, "incarnation_source", inc.Source)
 	}
+	if p.Kind == registry.PrincipalAgent {
+		r.countAgentAdmit(inc.Source)
+	}
 
 	// endpoint_incarnation is the ADMITTED value (a launch id, or gen-N
 	// under the interim fallback), never the presented one: grants are

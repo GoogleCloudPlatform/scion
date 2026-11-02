@@ -58,6 +58,7 @@ func TestBuildPod_AgentPodPrivileges(t *testing.T) {
 			WorkspaceBackendName: "nfs",
 			NFSPVClaimName:       "scion-workspaces",
 			NFSSubPath:           "projects/proj-123/workspace",
+			ProjectID:            "proj-123",
 		}, wantInit: []string{k8sWorkspaceProvisionContainer}},
 		"nfs home": {cfg: nfsHome, wantInit: []string{k8sHomeLeafContainer, k8sHomePrepareContainer}},
 		// No pv_name: the pod mounts the share inline by server path.

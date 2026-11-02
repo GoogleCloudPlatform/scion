@@ -149,9 +149,15 @@ func CheckAllowedParams(params map[string]string, allowed []string) error {
 // PendingRestart describes an installed update whose hub restart is about to
 // be requested. It is passed to the before-restart hook.
 type PendingRestart struct {
-	From     string // running version ("" for a git build)
-	To       string // installed release tag
+	From     string // running version ("" for a git build); rebuild-server: RunningReleaseName
+	To       string // installed release tag, or git-<sha12> for a rebuild from Git
 	Strategy string // Installer.Name()
+	// Mode is UpdateModeRelease (update-binary) or UpdateModeGit
+	// (rebuild-server). Boot reconciliation records it in the selection.
+	Mode string
+	// Commit is the full commit id of a rebuild from Git ("" for a
+	// release).
+	Commit   string
 	Snapshot string // database snapshot path; "" when none could be taken (PostgreSQL)
 	Channel  string // the installed release's channel
 	Pin      string // PinLatest or the installed tag (the pin parameter)
@@ -161,6 +167,13 @@ type PendingRestart struct {
 	// previous_safe computation.
 	FromPublishedAt time.Time
 }
+
+// Update modes: how the hub binary is obtained. The release selection and
+// update-status report them.
+const (
+	UpdateModeRelease = "release"
+	UpdateModeGit     = "git"
+)
 
 // BeforeRestartFunc runs after the new binary is activated and before the
 // hub is restarted. The runner implements it to persist the run (status
@@ -676,6 +689,7 @@ func (e *BinaryUpdateExecutor) RunWithBeforeRestart(ctx context.Context, logger 
 			From:            e.current,
 			To:              target,
 			Strategy:        e.installer.Name(),
+			Mode:            UpdateModeRelease,
 			Snapshot:        snapshot,
 			Channel:         update.DetectChannel(target),
 			Pin:             pinParam(params),
@@ -711,21 +725,29 @@ func (e *BinaryUpdateExecutor) RunWithBeforeRestart(ctx context.Context, logger 
 // the new binary installed, and the error says it will run after the next
 // restart; its plugins stay replaced too, so they match the hub that runs.
 func (e *BinaryUpdateExecutor) undoActivation(ctx context.Context, logger io.Writer, target string, swap *pluginSwap, cause error) error {
-	d, ok := e.installer.(Deactivator)
+	return undoInstall(ctx, e.installer, e.installTimeout, logger, target, swap, cause)
+}
+
+// undoInstall rolls back the last Activate of inst when it implements
+// Deactivator (bounded by timeout), then restores the broker plugins swap
+// replaced (when swap is not nil), and returns cause annotated with the
+// outcome. It is shared by update-binary and rebuild-server (which installs
+// no plugins and passes a nil swap).
+func undoInstall(ctx context.Context, inst Installer, timeout time.Duration, logger io.Writer, target string, swap *pluginSwap, cause error) error {
+	d, ok := inst.(Deactivator)
 	if !ok {
 		if swap != nil {
 			swap.cleanup()
 		}
 		return fmt.Errorf("%w; %s cannot be rolled back by the %s installer (no backup of the previous binary is kept): %s stays installed and will run after the hub's next restart",
-			cause, target, e.installer.Name(), target)
+			cause, target, inst.Name(), target)
 	}
 	// ctx is the run's context, not the hook's or Restart's (their own
 	// deadlines never reach here). It may still have ended: the run's
-	// overall deadline (the 20-minute update-binary backstop) or a
-	// cancellation. The rollback must run regardless, so it is detached from
-	// that cancellation, keeps ctx's values (logging, trace) and is bounded
-	// on its own.
-	undoCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.installTimeout)
+	// overall deadline or a cancellation. The rollback must run
+	// regardless, so it is detached from that cancellation, keeps ctx's
+	// values (logging, trace) and is bounded on its own.
+	undoCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 	defer cancel()
 	if err := d.Deactivate(undoCtx); err != nil {
 		if swap != nil {
@@ -864,14 +886,24 @@ func (e *BinaryUpdateExecutor) CheckTarget(ctx context.Context, params map[strin
 // and says so in the run log. A failed snapshot fails the update before
 // anything is installed.
 func (e *BinaryUpdateExecutor) snapshot(ctx context.Context, logger io.Writer) (string, error) {
+	return takeUpdateSnapshot(ctx, e.snapshots, e.current, logger, "hub.maintenance.update-binary",
+		"Upgrades go ahead without one; downgrades are refused.")
+}
+
+// takeUpdateSnapshot takes the pre-update database snapshot (design D4)
+// shared by update-binary and rebuild-server, logging under subsystem. An
+// unsupported snapshotter (PostgreSQL) logs why, then the caller's
+// unsupportedNote (what happens without one), and returns "" with no error;
+// a failed snapshot is an error, and the caller installs nothing.
+func takeUpdateSnapshot(ctx context.Context, snaps DBSnapshotter, from string, logger io.Writer, subsystem, unsupportedNote string) (string, error) {
 	_, _ = fmt.Fprintf(logger, "\n==> Database snapshot\n")
-	st := e.snapshots.SnapshotStatus()
+	st := snaps.SnapshotStatus()
 	if !st.Supported {
-		logging.Subsystem("hub.maintenance.update-binary").Warn("Updating without a database snapshot", "reason", st.Reason)
-		_, _ = fmt.Fprintf(logger, "No database snapshot taken: %s. Upgrades go ahead without one; downgrades are refused.\n", st.Reason)
+		logging.Subsystem(subsystem).Warn("Updating without a database snapshot", "reason", st.Reason)
+		_, _ = fmt.Fprintf(logger, "No database snapshot taken: %s. %s\n", st.Reason, unsupportedNote)
 		return "", nil
 	}
-	path, err := e.snapshots.Snapshot(ctx, e.current, logger)
+	path, err := snaps.Snapshot(ctx, from, logger)
 	if err != nil {
 		return "", fmt.Errorf("database snapshot failed, nothing was installed: %w", err)
 	}
@@ -883,10 +915,18 @@ func (e *BinaryUpdateExecutor) snapshot(ctx context.Context, logger io.Writer) (
 // build or a failed lookup. It is best-effort: it only dates the
 // update-state file's from.
 func (e *BinaryUpdateExecutor) runningPublished(ctx context.Context) time.Time {
-	if !update.IsReleaseTag(e.current) || update.DetectChannel(e.current) == "nightly" {
+	return releasePublishedAt(ctx, e.releases, e.current)
+}
+
+// releasePublishedAt is the publish date of a preview or stable release tag,
+// looked up in releases; zero for a nightly (it carries its date), a Git
+// build, a nil source or a failed lookup. It dates an update's "from" for
+// the boot-failure guard's previous_safe computation.
+func releasePublishedAt(ctx context.Context, releases ReleaseSource, tag string) time.Time {
+	if releases == nil || !update.IsReleaseTag(tag) || update.DetectChannel(tag) == "nightly" {
 		return time.Time{}
 	}
-	rel, err := e.releases.ReleaseByTag(ctx, e.current)
+	rel, err := releases.ReleaseByTag(ctx, tag)
 	if err != nil || rel == nil {
 		return time.Time{}
 	}
