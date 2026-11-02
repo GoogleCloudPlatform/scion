@@ -435,6 +435,11 @@ func TestChatRetentionStore_PurgeFailedMessages(t *testing.T) {
 		assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM `+table+` WHERE message_id = ?`, keep), table)
 	}
 	assert.Equal(t, 0, f.count(`SELECT COUNT(*) FROM chat_retention_cursors`), "the purge transaction writes no cursor")
+	// The store purge only reports the unlinked attachment: its row stays
+	// until the sweeper has deleted the bytes (then DeleteUnlinkedChatAttachment).
+	assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM webchat_attachment WHERE id = ?`, "att-only-m1"),
+		"the unlinked attachment row survives the store purge")
+	assert.Equal(t, 2, f.count(`SELECT COUNT(*) FROM webchat_attachment`))
 
 	res, err = f.st.PurgeFailedMessages(f.ctx, []string{m1, m2}, nil)
 	require.NoError(t, err)
@@ -702,6 +707,118 @@ func TestChatRetentionStore_SelectConversationMessages(t *testing.T) {
 	got, err = f.st.SelectChatRetentionConversationMessages(f.ctx, uuid.NewString(), "no-such-topic", 100)
 	require.NoError(t, err)
 	assert.Empty(t, got)
+}
+
+// TestChatRetentionStore_SelectConversationPage: the preview's page walk
+// of one deleted conversation (or a legacy topic's thread) returns its
+// messages in (created, id) order from a position, never pending or
+// deferred, with their thread; it takes exactly one of the two IDs.
+func TestChatRetentionStore_SelectConversationPage(t *testing.T) {
+	f := newChatRetentionFixture(t)
+	project := uuid.New()
+	conv, other := uuid.New(), uuid.New()
+	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	var byConv []string
+	for i := 0; i < 5; i++ {
+		byConv = append(byConv, f.message(chatRetentionMsg{project: project, created: at.Add(time.Duration(i%3) * time.Minute), conv: &conv, thread: "topic-1"}))
+	}
+	_ = f.message(chatRetentionMsg{project: project, created: at, conv: &conv, state: "pending"})
+	_ = f.message(chatRetentionMsg{project: project, created: at, conv: &other})
+	byThread := []string{
+		f.message(chatRetentionMsg{project: project, created: at, thread: "topic-1"}),
+		f.message(chatRetentionMsg{project: project, created: at.Add(time.Hour), thread: "topic-1"}),
+	}
+	_ = f.message(chatRetentionMsg{project: project, created: at, thread: "topic-1", state: "deferred"})
+	_ = f.message(chatRetentionMsg{project: project, created: at, conv: &other, thread: "topic-1"}) // re-keyed elsewhere
+
+	walk := func(convID, thread string, limit int) []store.ChatRetentionCandidate {
+		t.Helper()
+		var out []store.ChatRetentionCandidate
+		var pos store.ChatRetentionPosition
+		for i := 0; i < 20; i++ {
+			got, err := f.st.SelectChatRetentionConversationPage(f.ctx, convID, thread, pos, limit)
+			require.NoError(t, err)
+			out = append(out, got...)
+			if len(got) < limit {
+				return out
+			}
+			pos = store.ChatRetentionPosition{Created: got[len(got)-1].Created, ID: got[len(got)-1].ID}
+		}
+		t.Fatal("the walk did not end")
+		return nil
+	}
+	got := walk(conv.String(), "", 2)
+	assert.ElementsMatch(t, byConv, candidateIDs(got))
+	assert.True(t, sort.SliceIsSorted(got, func(i, j int) bool {
+		if !got[i].Created.Equal(got[j].Created) {
+			return got[i].Created.Before(got[j].Created)
+		}
+		return got[i].ID < got[j].ID
+	}), "(created, id) order")
+	assert.Equal(t, "topic-1", got[0].ThreadID)
+	assert.Equal(t, conv.String(), got[0].ConversationID)
+
+	got = walk("", "topic-1", 1)
+	assert.Equal(t, byThread, candidateIDs(got))
+
+	_, err := f.st.SelectChatRetentionConversationPage(f.ctx, conv.String(), "topic-1", store.ChatRetentionPosition{}, 10)
+	require.Error(t, err, "both IDs")
+	_, err = f.st.SelectChatRetentionConversationPage(f.ctx, "", "", store.ChatRetentionPosition{}, 10)
+	require.Error(t, err, "neither ID")
+
+	cands, err := f.st.SelectChatRetentionCandidates(f.ctx, at.Add(2*time.Hour), store.ChatRetentionPosition{}, 100)
+	require.NoError(t, err)
+	threads := map[string]string{}
+	for _, c := range cands {
+		threads[c.ID] = c.ThreadID
+	}
+	assert.Equal(t, "topic-1", threads[byThread[0]], "the main walk returns the thread too")
+}
+
+// TestChatRetentionStore_ListRuns: runs are listed newest first, dry runs
+// included, filtered by trigger and by finish time, and capped.
+func TestChatRetentionStore_ListRuns(t *testing.T) {
+	f := newChatRetentionFixture(t)
+	base := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	save := func(trigger string, dry bool, started time.Time, finished *time.Time) string {
+		t.Helper()
+		r := &store.ChatRetentionRun{Trigger: trigger, DryRun: dry, StartedAt: started, FinishedAt: finished,
+			Status: store.ChatRetentionStatusOK, Actor: "u1",
+			Counts: map[string]store.ChatRetentionCounts{"p1": {Main: 1}}}
+		require.NoError(t, f.st.SaveChatRetentionRun(f.ctx, r))
+		return r.ID
+	}
+	fin := func(d time.Duration) *time.Time { v := base.Add(d); return &v }
+	sweep := save(store.ChatRetentionTriggerSweep, false, base, fin(time.Hour))
+	preview := save(store.ChatRetentionTriggerPreview, true, base.Add(2*time.Hour), fin(3*time.Hour))
+	manual := save(store.ChatRetentionTriggerManual, false, base.Add(4*time.Hour), nil)
+
+	ids := func(runs []store.ChatRetentionRun) []string {
+		out := make([]string, len(runs))
+		for i, r := range runs {
+			out[i] = r.ID
+		}
+		return out
+	}
+	all, err := f.st.ListChatRetentionRuns(f.ctx, store.ChatRetentionRunFilter{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{manual, preview, sweep}, ids(all))
+	assert.True(t, all[1].DryRun)
+	assert.Equal(t, "u1", all[1].Actor)
+	assert.Equal(t, int64(1), all[1].Counts["p1"].Main)
+
+	got, err := f.st.ListChatRetentionRuns(f.ctx, store.ChatRetentionRunFilter{Trigger: store.ChatRetentionTriggerPreview, Limit: 1})
+	require.NoError(t, err)
+	assert.Equal(t, []string{preview}, ids(got))
+
+	got, err = f.st.ListChatRetentionRuns(f.ctx, store.ChatRetentionRunFilter{FinishedAfter: base.Add(90 * time.Minute)})
+	require.NoError(t, err)
+	assert.Equal(t, []string{preview}, ids(got), "an unfinished run never matches a finish filter")
+
+	got, err = f.st.ListChatRetentionRuns(f.ctx, store.ChatRetentionRunFilter{Limit: 2})
+	require.NoError(t, err)
+	assert.Equal(t, []string{manual, preview}, ids(got))
 }
 
 // TestChatRetentionStore_UnlinkedAttachmentRow: an attachment row is
