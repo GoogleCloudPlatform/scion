@@ -959,8 +959,105 @@ authentication is needed — the agents are co-located with the Hub.
 
 ### CLI access (via IAP)
 
-To use the `scion` CLI from your local machine against the deployed Hub,
-configure it to authenticate through IAP using the Cloud Run proxy URL.
+IAP intercepts every request to the Cloud Run proxy URL. A browser follows
+IAP's Google sign-in, but the `scion` CLI cannot, so `scion hub auth login`
+against the proxy URL stops with an error saying the hub appears to be behind
+IAP. To use the CLI from your workstation, give it two credentials:
+
+- **Transport (outer):** a Google OIDC ID token that IAP accepts, sent as
+  `Proxy-Authorization`. IAP accepts an ID token for a service account whose
+  audience is the project's IAP OAuth client ID. A user account's own ID
+  token does not have that audience, so you mint the token by impersonating a
+  service account.
+- **Hub identity (inner):** a [user access token](https://googlecloudplatform.github.io/scion/hosted/user/personal-access-tokens/)
+  (UAT) in `SCION_HUB_TOKEN`. The Hub identifies you by the UAT, not by the
+  service account IAP sees. Create it in the web UI, which you reach through
+  IAP in the browser.
+
+**One-time setup (an admin runs these):**
+
+```bash
+PROJECT_ID=my-project
+REGION=us-central1
+HUB_NAME=my-hub
+SA_EMAIL="scion-cli-${HUB_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+
+# 1. A service account for workstation IAP access (or reuse an existing one).
+gcloud iam service-accounts create "scion-cli-${HUB_NAME}" --project="$PROJECT_ID"
+
+# 2. Let the service account through IAP on the proxy service.
+gcloud iap web add-iam-policy-binding \
+  --resource-type=cloud-run \
+  --service="scion-hub-${HUB_NAME}-iap-proxy" \
+  --region="$REGION" \
+  --project="$PROJECT_ID" \
+  --member="serviceAccount:${SA_EMAIL}" \
+  --role=roles/iap.httpsResourceAccessor
+
+# 3. Let each CLI user mint ID tokens for the service account.
+#    (roles/iam.serviceAccountTokenCreator also works, but grants more.)
+gcloud iam service-accounts add-iam-policy-binding "$SA_EMAIL" \
+  --project="$PROJECT_ID" \
+  --member=user:you@example.com \
+  --role=roles/iam.serviceAccountOpenIdTokenCreator
+```
+
+`roles/iap.httpsResourceAccessor` is the IAM ID of the **IAP-secured Web App
+User** role. Your own user account needs it too, for the browser.
+
+**Find the audience.** The token's audience is the project's IAP OAuth client
+ID, not the proxy URL and not the `auth.proxy.iap.audience` value in
+`settings.yaml` (that one is the audience of the assertion IAP sends to the
+Hub). `scripts/single-node-vm/hybrid-tier.sh` (`hybrid_discover_iap_client_id`)
+looks it up the same way for agent transport tokens:
+
+```bash
+CLIENT_ID="$(gcloud iap settings get --project="$PROJECT_ID" \
+  --resource-type=iap_web --format='value(accessSettings.oauthSettings.clientId)')"
+```
+
+If this prints nothing, the project's IAP settings have no OAuth client
+configured. See [Cross-org IAP: custom OAuth client required](agent-runbook-single-node-vm.md#cross-org-iap-custom-oauth-client-required)
+in the runbook.
+
+**Each session (on your workstation):**
+
+```bash
+mkdir -p ~/.scion
+# Write to a private temp file, then rename it into place, so the CLI never
+# reads a partly written token.
+tmp="$(mktemp ~/.scion/iap-transport-token.XXXXXX)"
+gcloud auth print-identity-token \
+  --impersonate-service-account="$SA_EMAIL" \
+  --audiences="$CLIENT_ID" \
+  --include-email > "$tmp" && mv "$tmp" ~/.scion/iap-transport-token || rm -f "$tmp"
+
+export SCION_TRANSPORT_MODE=iap
+export SCION_TRANSPORT_TOKEN_FILE=~/.scion/iap-transport-token
+export SCION_HUB_TOKEN=scion_pat_...   # your user access token
+export SCION_HUB_ENDPOINT=https://scion-hub-my-hub-iap-proxy-HASH-REGION.a.run.app
+
+scion list --project my-project
+```
+
+- `--include-email` is required: IAP checks the email claim of a service
+  account's ID token.
+- The ID token expires after about an hour. Re-run the `gcloud` command to
+  refresh the file; the CLI re-reads it when it changes. Setting
+  `SCION_TRANSPORT_TOKEN` to the token value instead of using a file also
+  works, until it expires.
+- A stored interactive login takes precedence over `SCION_HUB_TOKEN`; see
+  the user access token page.
+- If IAP rejects the token, the CLI reports that IAP did not accept the
+  transport token. Check the expiry, the audience, the email claim, and the
+  service account's IAP role.
+- With IAP external identities, the sign-in page is not on
+  `accounts.google.com`. The CLI then reports only that the hub returned an
+  HTML page instead of a JSON response; the same setup applies.
+
+The alternative needs no service account: SSH to the VM (see below) and run
+the CLI there against `http://localhost:8080` with `SCION_HUB_TOKEN` set to a
+user access token.
 
 ### SSH access (via gcloud)
 

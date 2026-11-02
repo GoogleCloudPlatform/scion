@@ -41,13 +41,13 @@ These are census keys (`<name>@<file>:<function>`). Methods are keyed `(*T).Name
 **Startup configuration and validation:**
 
 4. `resolveSessionSecret@cmd/server_foreground.go:buildHubServerConfig` sets `hub.ServerConfig.SharedSigningSecret` to the `legacy` entry (:2899). Its second reference (:2902) feeds `webSessionKeySource`, which ignores the value when a keyring file is loaded.
-5. `SharedSigningSecret@pkg/hub/keyring.go:validateKeyringConfig` requires `SharedSigningSecret` to equal the `legacy` entry (:126).
-6. `LegacySecret@pkg/hub/keyring.go:validateKeyringConfig` requires a `legacy` entry (:116). The plan moves 5 and 6 behind the `keyringReleaseCheck` seam in T7 and lifts them in T10.
+5. ~~validateKeyringConfig~~ (moved): its `legacy`-entry requirement and the `SharedSigningSecret` equality now live behind the `keyringReleaseCheck` seam (`releaseKeyringCheck`, listed under the release gate below). Lifting the release limits changes that one line.
+6. ~~validateKeyringConfig, legacy entry~~ (moved, with 5).
 7. `resolveSessionSecret@cmd/server_foreground.go:validateHostedBasic` (:1608) warns when the session secret is empty. Without a `legacy` entry it would warn in ring mode.
 8. `resolveSessionSecret@cmd/server_foreground.go:validateHostedHAPreflight` (:1644) refuses an empty session secret. Without a `legacy` entry, hosted HA would **refuse** ring mode.
 9. `SharedSigningSecret@cmd/server_foreground.go:initHubServer` (:3109) is a hosted warning on an empty `SharedSigningSecret`.
 
-**Relay-peer auth.** The HMAC signer already comes from the ring (`SigningRing`, `relay.NewHMACPeerAuthFromRing`). Only the PeerSecret inequality check still uses the `legacy` entry, and it compares against that entry alone. Obl 6 requires a comparison against every generation.
+**Relay-peer auth.** The HMAC signer already comes from the ring (`SigningRing`, `relay.NewHMACPeerAuthFromRing`). In ring mode the PeerSecret inequality check now also compares, in constant time, against the secret of every signing generation (`relay.CheckPeerSecretNotInRing`, from `validateConduitPeerSecret` and `NewConduitPeerAuth`), and refuses a ring with no usable generation or a generation with an empty secret. The session-secret reads below remain until the consumer sites move off the `legacy` entry.
 
 10. `resolveSessionSecret@cmd/server_conduit.go:conduitPeerAuthOptions` (:453) sets `ConduitPeerAuthOptions.SharedSecret`. The downstream comparison is `pkg/conduit/relay/conduit_peerauth.go:149` (`NewConduitPeerAuth`).
 11. `sessionSecretValue@cmd/server_conduit.go:externalPeerAuthOptions` (:743) does the same in external relay mode.
@@ -61,12 +61,14 @@ These are census keys (`<name>@<file>:<function>`). Methods are keyed `(*T).Name
 
 **Key status check.** `scion server keys check` applies the checks a starting Hub applies to a loaded keyring file.
 
-16. `LegacySecret@pkg/hub/keystatus.go:CheckKeyringFile` requires a `legacy` signing entry, as `validateKeyringConfig` does. The two checks change together.
+16. ~~CheckKeyringFile~~ (moved): it now calls `checkKeyringFile`, the implementation `validateKeyringConfig` uses, so its `legacy`-entry requirement is the release gate's.
 
 ### Release gate (T10 scope, not T7)
 
 - `LegacySecret@pkg/keyring/load.go:(*Keyring).CheckSessionPilot` (:495)
 - `DeriveLegacyEncryptionKey@pkg/keyring/load.go:(*Keyring).CheckSessionPilot` (:499): the active encryption key must equal the key derived from the `legacy` entry.
+- `LegacySecret@pkg/hub/keyring.go:releaseKeyringCheck`: the hub's release check (the `keyringReleaseCheck` seam) runs `CheckSessionPilot` and reads the `legacy` entry for the comparison below.
+- `SharedSigningSecret@pkg/hub/keyring.go:releaseKeyringCheck`: at startup `SharedSigningSecret` must equal the `legacy` entry.
 
 ### Corrections to the plan's T7 file list
 

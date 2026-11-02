@@ -74,8 +74,10 @@ type ConduitPeerAuthOptions struct {
 	// SigningRing is the hub's signing ring in managed ring mode (a
 	// keyring file; ptone/scion#1530 Phase 5). When set and PeerSecret is
 	// unset, the HMAC keys are derived from its generations
-	// (NewHMACPeerAuthFromRing) instead of from SharedSecret. A relay role
-	// never sets it: it never loads the keyring.
+	// (NewHMACPeerAuthFromRing) instead of from SharedSecret. When set and
+	// PeerSecret is set, PeerSecret must differ from every generation's
+	// secret (CheckPeerSecretNotInRing). A relay role never sets it: it
+	// never loads the keyring.
 	SigningRing *keyring.SigningRing
 	// Audience is the OIDC audience ("" = DefaultConduitPeerAudience).
 	Audience string
@@ -148,6 +150,11 @@ func NewConduitPeerAuth(o ConduitPeerAuthOptions) (PeerAuth, string, error) {
 		}
 		if o.SharedSecret != "" && o.SharedSecret == peerSecret {
 			return nil, mode, &SettingError{Key: peerSecretSetting, Err: fmt.Errorf("conduit peer auth (%s): server.hub.conduit.peer_secret must differ from the session secret", mode)}
+		}
+		// Managed ring mode: the peer secret must differ from every
+		// generation's secret, not only the session secret.
+		if err := CheckPeerSecretNotInRing(peerSecret, o.SigningRing); err != nil {
+			return nil, mode, &SettingError{Key: peerSecretSetting, Err: fmt.Errorf("conduit peer auth (%s): %w", mode, err)}
 		}
 		signer, err = NewHMACPeerAuthFromPeerSecret(HMACPeerAuthConfig{Secret: []byte(peerSecret), SelfID: o.SelfID})
 		if err != nil {

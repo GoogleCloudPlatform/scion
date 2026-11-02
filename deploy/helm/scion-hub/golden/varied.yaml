@@ -277,6 +277,7 @@ spec:
         checksum/settings: 3609ccd2676261e57737fc766d28b6558b51d0eef8631bc5d630c1a0ac28747a
     spec:
       serviceAccountName: scion-scion-hub
+      terminationGracePeriodSeconds: 45
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000

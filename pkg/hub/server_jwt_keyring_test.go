@@ -385,11 +385,11 @@ func (f *p3Fixture) start(t *testing.T, cfg ServerConfig) (*Server, error) {
 func allowVersionedJWTRings(t *testing.T) {
 	t.Helper()
 	prev := keyringReleaseCheck
-	keyringReleaseCheck = func(k *keyring.Keyring) error {
+	keyringReleaseCheck = func(k *keyring.Keyring, cfg *ServerConfig) error {
 		if k.Signing().Emit() == keyring.EmitVersioned {
 			return nil
 		}
-		return prev(k)
+		return prev(k, cfg)
 	}
 	t.Cleanup(func() { keyringReleaseCheck = prev })
 }
@@ -456,57 +456,45 @@ func TestP3_ManagedStartupRefusesWithoutAliasReads(t *testing.T) {
 	cases := []struct {
 		name string
 		cfg  func(f *p3Fixture) ServerConfig
-		// noopSeam swaps keyringReleaseCheck for a no-op: the refusal
-		// must not depend on the test seam.
-		noopSeam bool
 	}{
 		// (a) ring file missing or unreadable: cmd built no keyring.
-		{"file missing or unreadable", func(f *p3Fixture) ServerConfig { return f.config(nil, true) }, false},
+		{"file missing or unreadable", func(f *p3Fixture) ServerConfig { return f.config(nil, true) }},
 		// (a') a legacy adapter in place of the configured file.
 		{"legacy adapter instead of the file", func(f *p3Fixture) ServerConfig {
 			cfg := f.config(keyring.Legacy(jkLegacySecret), true)
 			cfg.SharedSigningSecret = jkLegacySecret
 			return cfg
-		}, false},
+		}},
 		// (b) active generation absent.
-		{"active generation absent (configured)", func(f *p3Fixture) ServerConfig { return f.config(&keyring.Keyring{}, true) }, false},
-		{"active generation absent (keyring only)", func(f *p3Fixture) ServerConfig { return f.config(&keyring.Keyring{}, false) }, false},
+		{"active generation absent (configured)", func(f *p3Fixture) ServerConfig { return f.config(&keyring.Keyring{}, true) }},
+		{"active generation absent (keyring only)", func(f *p3Fixture) ServerConfig { return f.config(&keyring.Keyring{}, false) }},
 		// (c) incomplete required signing material.
-		{"no legacy entry", func(f *p3Fixture) ServerConfig { return f.config(noLegacy, true) }, false},
-		{"no legacy entry, release check swapped out", func(f *p3Fixture) ServerConfig { return f.config(noLegacy, true) }, true},
+		{"no legacy entry", func(f *p3Fixture) ServerConfig { return f.config(noLegacy, true) }},
 		{"shared secret not the legacy entry", func(f *p3Fixture) ServerConfig {
 			cfg := f.config(good, true)
 			cfg.SharedSigningSecret = p3StaleAliasSecret
 			return cfg
-		}, false},
+		}},
 		// Explicit keys never combine with managed mode.
 		{"explicit agent key", func(f *p3Fixture) ServerConfig {
 			cfg := f.config(good, true)
 			cfg.AgentTokenConfig.SigningKey = p3StaleKey(SecretKeyAgentSigningKey)
 			return cfg
-		}, false},
+		}},
 		{"explicit user key", func(f *p3Fixture) ServerConfig {
 			cfg := f.config(good, true)
 			cfg.UserTokenConfig.SigningKey = p3StaleKey(SecretKeyUserSigningKey)
 			return cfg
-		}, false},
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.noopSeam {
-				prev := keyringReleaseCheck
-				keyringReleaseCheck = func(*keyring.Keyring) error { return nil }
-				t.Cleanup(func() { keyringReleaseCheck = prev })
-			}
 			f := newP3Fixture(t)
 			before := f.snapshot(t)
 			logs := captureLogs(t)
 			srv, err := f.start(t, tc.cfg(f))
 			require.Error(t, err)
 			require.Nil(t, srv)
-			if tc.noopSeam {
-				assert.Contains(t, err.Error(), `no "legacy" entry`)
-			}
 			requireNoAliasAccess(t, f)
 			// Every case refuses in validateKeyringConfig, before the startup
 			// encryption audit runs: no audit read either.
