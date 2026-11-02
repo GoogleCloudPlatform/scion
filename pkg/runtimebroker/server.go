@@ -1964,7 +1964,7 @@ func (s *Server) sortedAuxiliaryRuntimes() []namedAuxiliaryRuntime {
 // sweep (controlPathSweeper) reaches their agents only from then on. Scanning
 // the project dirs this broker has local agent state for is a follow-up (see
 // the Limitations in the Volume Source Restrictions reference).
-func (s *Server) discoverAuxiliaryRuntimesCtx(ctx context.Context) {
+func (s *Server) discoverAuxiliaryRuntimes(ctx context.Context) {
 	// Collect project paths to scan
 	var projectPaths []string
 

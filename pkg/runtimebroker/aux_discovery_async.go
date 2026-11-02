@@ -114,7 +114,7 @@ func (s *Server) startAuxiliaryRuntimeDiscovery(ctx context.Context) {
 			}
 			s.recoverLaunches()
 		}()
-		s.discoverAuxiliaryRuntimesCtx(pctx)
+		s.discoverAuxiliaryRuntimes(pctx)
 	}()
 }
 
