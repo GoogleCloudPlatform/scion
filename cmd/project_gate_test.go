@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/internal/writesonread"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -37,6 +38,9 @@ func TestHubAndBrokerCommandsRunOutsideProject(t *testing.T) {
 	}
 	for _, c := range cmds {
 		t.Run(c.CommandPath(), func(t *testing.T) {
+			// The hook turns the process-wide no-write switch on for a
+			// no-write command (runtime-broker convert); keep it per test.
+			writesonread.IsolateForTest(t)
 			setupNoProjectPreRun(t)
 			restoreSilenceUsage(t, c)
 			assert.NoError(t, rootCmd.PersistentPreRunE(c, []string{}))
