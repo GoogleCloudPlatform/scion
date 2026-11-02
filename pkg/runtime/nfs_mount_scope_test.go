@@ -32,6 +32,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path"
 	"path/filepath"
 	"slices"
@@ -568,36 +569,51 @@ func cloudRunShareMounts(t *testing.T, inst *runpb.Instance) []shareMount {
 	return out
 }
 
-// Cloud Run mounts the project workspace, the agent home and, read-only,
-// the agent secrets, whatever the workspace mode: buildCloudRunInstance does
-// not read it. It has no shared dirs on the share, and Run refuses
-// empty-per-agent before any path is built.
+// Cloud Run mounts the agent's workspace, its home and, read-only, its
+// secrets, with the paths provisionCloudRunNFS gives Run: the project
+// workspace for shared-plain and worktree-per-agent, the agent's own
+// agents/<slug>/workspace for clone-per-agent. It has no shared dirs on
+// the share, and Run refuses empty-per-agent before any path is built.
 func TestCloudRunInstance_NFSMountScope(t *testing.T) {
-	paths, err := cloudRunNFSExportPaths(scopeExport, scopeRoot, scopeProjectID, scopeAgent, scopeAgentID)
-	if err != nil {
-		t.Fatalf("cloudRunNFSExportPaths: %v", err)
-	}
-	paths.server = scopeServer
-	r := &CloudRunRuntime{}
+	orig := cloudRunRequireNFSFilesystem
+	cloudRunRequireNFSFilesystem = func(string) error { return nil }
+	t.Cleanup(func() { cloudRunRequireNFSFilesystem = orig })
+	r := &CloudRunRuntime{config: &config.CloudRunConfig{
+		ProjectID: "gcp-project", Location: "us-central1", NFSServer: scopeServer, NFSExport: scopeExport,
+	}}
 	home := "/home/" + r.ExecUser()
-	want := []shareMount{
-		{rel: scopeRel("workspace"), target: "/workspace"},
-		{rel: scopeRel("agents", scopeAgent, "home-"+scopeAgentID), target: home},
-		{rel: scopeRel("agents", scopeAgent, "secrets-"+scopeAgentID), target: home + "/.scion/secrets", readOnly: true},
-	}
 	cfgFor := func(mode string) RunConfig {
 		return RunConfig{
 			Name: scopeAgent, Image: "test-image", WorkspaceBackendName: "nfs", ProjectID: scopeProjectID,
 			NFSSubPathRoot: scopeRoot, Env: []string{"SCION_WORKSPACE_MODE=" + mode},
-			Labels: map[string]string{"agent_id": scopeAgentID},
+			Labels: map[string]string{"agent_id": scopeAgentID, "scion.name": scopeAgent},
 		}
 	}
-	// Every mode gets the same set today. For clone-per-agent that is the
-	// project workspace; ptone/scion#6926 moves it to a per-agent workspace, which
-	// will change its expected set on purpose.
-	for _, mode := range []string{"shared-plain", "clone-per-agent", "worktree-per-agent"} {
-		t.Run(mode, func(t *testing.T) {
-			assertMountScope(t, cloudRunShareMounts(t, r.buildCloudRunInstance(cfgFor(mode), 1000, 1000, paths)), want)
+	for _, tc := range []struct {
+		mode      string
+		gitClone  bool
+		workspace string
+	}{
+		{mode: "shared-plain", workspace: scopeRel("workspace")},
+		{mode: "worktree-per-agent", workspace: scopeRel("workspace")},
+		{mode: "clone-per-agent", gitClone: true, workspace: scopeRel("agents", scopeAgent, "workspace")},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			cfg := cfgFor(tc.mode)
+			cfg.Workspace = filepath.Join(t.TempDir(), filepath.FromSlash(scopeRel("workspace")))
+			if tc.gitClone {
+				// Cloned in-container on first start; never fetched here.
+				cfg.GitClone = &api.GitCloneConfig{URL: "file:///nonexistent/scion-test-repo.git"}
+			}
+			paths, err := r.provisionCloudRunNFS(t.Context(), cfg, scopeAgentID, os.Getuid(), os.Getgid())
+			if err != nil {
+				t.Fatalf("provisionCloudRunNFS: %v", err)
+			}
+			assertMountScope(t, cloudRunShareMounts(t, r.buildCloudRunInstance(cfg, 1000, 1000, paths)), []shareMount{
+				{rel: tc.workspace, target: "/workspace"},
+				{rel: scopeRel("agents", scopeAgent, "home-"+scopeAgentID), target: home},
+				{rel: scopeRel("agents", scopeAgent, "secrets-"+scopeAgentID), target: home + "/.scion/secrets", readOnly: true},
+			})
 		})
 	}
 
