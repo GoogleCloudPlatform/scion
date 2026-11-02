@@ -54,43 +54,47 @@ func TestProjectWorkspaceWrite_SymlinkIntoDotGitRefused(t *testing.T) {
 		links  map[string]string // link path (relative) -> target
 		path   string            // request path
 		gone   string            // workspace-relative path that must not exist afterwards
-		reason string            // expected refusal reason in the body, "" = not checked
+		reason string            // expected refusal text in the body
 	}{
 		{
-			name:  "dir_link_to_dotgit",
-			links: map[string]string{"gitlink": ".git"},
-			path:  "gitlink/config",
+			name:   "dir_link_to_dotgit",
+			links:  map[string]string{"gitlink": ".git"},
+			path:   "gitlink/config",
+			reason: ".git component",
 		},
 		{
-			name:  "dir_link_to_dotgit_new_file",
-			links: map[string]string{"gitlink": ".git"},
-			path:  "gitlink/hooks/pre-commit",
-			gone:  ".git/hooks/pre-commit",
+			name:   "dir_link_to_dotgit_new_file",
+			links:  map[string]string{"gitlink": ".git"},
+			path:   "gitlink/hooks/pre-commit",
+			gone:   ".git/hooks/pre-commit",
+			reason: ".git component",
 		},
 		{
-			name:  "nested_dir_link_to_hooks",
-			links: map[string]string{"sub/hooks": "../.git/hooks"},
-			path:  "sub/hooks/pre-commit",
-			gone:  ".git/hooks/pre-commit",
+			name:   "nested_dir_link_to_hooks",
+			links:  map[string]string{"sub/hooks": "../.git/hooks"},
+			path:   "sub/hooks/pre-commit",
+			gone:   ".git/hooks/pre-commit",
+			reason: ".git component",
 		},
 		{
-			name:  "top_dir_link_to_hooks",
-			links: map[string]string{"hookslink": ".git/hooks"},
-			path:  "hookslink/post-checkout",
-			gone:  ".git/hooks/post-checkout",
+			name:   "top_dir_link_to_hooks",
+			links:  map[string]string{"hookslink": ".git/hooks"},
+			path:   "hookslink/post-checkout",
+			gone:   ".git/hooks/post-checkout",
+			reason: ".git component",
 		},
 		{
 			name:   "final_file_link_to_config",
 			links:  map[string]string{"cfg": ".git/config"},
 			path:   "cfg",
-			reason: "target is not a regular file",
+			reason: "path is not accessible",
 		},
 		{
 			name:   "final_dangling_link_into_dotgit",
 			links:  map[string]string{"newhook": ".git/hooks/pre-push"},
 			path:   "newhook",
 			gone:   ".git/hooks/pre-push",
-			reason: "target is not a regular file",
+			reason: "path is not accessible",
 		},
 	}
 	for _, tc := range cases {

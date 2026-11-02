@@ -1667,6 +1667,18 @@ func validateWorkspaceWritePath(path string) error {
 	return nil
 }
 
+// writeWorkspaceRefusal answers a policy refusal (err wraps
+// errWorkspaceWriteRefused): the .git refusal when the path reaches a .git
+// directory, otherwise a neutral text that neither states the reason nor
+// echoes the path.
+func writeWorkspaceRefusal(w http.ResponseWriter, relPath string, err error) {
+	if errors.Is(err, errWorkspaceThroughDotGit) {
+		BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", relPath, errDotGitComponent.Error()))
+		return
+	}
+	BadRequest(w, "Invalid file path: path is not accessible")
+}
+
 // writeWorkspaceWalkError answers a failed download or delete walk: the .git
 // refusal (400) when the path reaches a .git directory, a neutral 400 that
 // does not echo the path for every other refusal (a symlink target, a
@@ -1674,10 +1686,8 @@ func validateWorkspaceWritePath(path string) error {
 // and notAccessible otherwise.
 func writeWorkspaceWalkError(w http.ResponseWriter, kind, relPath string, err error) {
 	switch {
-	case errors.Is(err, errWorkspaceThroughDotGit):
-		BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", relPath, errDotGitComponent.Error()))
 	case errors.Is(err, errWorkspaceWriteRefused):
-		BadRequest(w, "Invalid file path: path is not accessible")
+		writeWorkspaceRefusal(w, relPath, err)
 	case errors.Is(err, fs.ErrNotExist):
 		NotFound(w, "File")
 	default:
@@ -1705,14 +1715,15 @@ func skipDotGitEntry(d fs.DirEntry) (bool, error) {
 	return true, nil
 }
 
-// writeWorkspaceFileError answers a failed writeWorkspaceFile: 400 naming the
-// path for a refusal, notAccessible for a path os.Root would not resolve, and
-// 500 otherwise.
+// writeWorkspaceFileError answers a failed writeWorkspaceFile with the same
+// split as writeWorkspaceWalkError: the .git refusal when the path reaches a
+// .git directory, the neutral 400 for every other refusal, notAccessible for a
+// path os.Root would not resolve, and 500 otherwise.
 func writeWorkspaceFileError(w http.ResponseWriter, kind, relPath string, err error) {
 	var pathErr *fs.PathError
 	switch {
 	case errors.Is(err, errWorkspaceWriteRefused):
-		BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", relPath, err.Error()))
+		writeWorkspaceRefusal(w, relPath, err)
 	case errors.As(err, &pathErr):
 		notAccessible(w, kind, relPath, err)
 	default:
