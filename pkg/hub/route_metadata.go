@@ -1683,6 +1683,12 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 				return
 			}
 			r = admitted
+			// A list route's item filter writes one aggregated record
+			// when the request ends, including on a panic or a
+			// cancelled request (.design/agent-delegation.md §14.2).
+			if c := listFilterCollectorFromContext(r.Context()); c != nil {
+				defer s.flushListFilter(r.Context(), c)
+			}
 		}
 		switch meta.Classification {
 		case RoutePublic:
