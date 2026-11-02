@@ -95,13 +95,18 @@ func TestProjectTokenGet_OwnProjectOnly(t *testing.T) {
 		assert.Empty(t, list.Projects)
 		assert.Equal(t, 0, list.TotalCount)
 	})
-	t.Run("super-admin without membership reads its project", func(t *testing.T) {
+	t.Run("super-admin without membership cannot mint project:read for the project", func(t *testing.T) {
+		// System authority admits but never widens the flat project-role
+		// ceiling for a project-boundary mint, so no such token exists to
+		// read the project with.
 		admin := uuid.NewString()
 		createTestUserWithRole(t, f.s, admin, admin+"@test.com", "admin", store.SystemRoleSuperAdmin)
 		ensureHubMembership(context.Background(), f.s, admin)
-		code, id := getProjectByID(t, f, f.mint(t, admin, projectBoundary(f.projA), "project:read"), f.projA)
-		assert.Equal(t, http.StatusOK, code)
-		assert.Equal(t, f.projA, id)
+		_, _, err := f.srv.uatService.CreateTokenWithParams(rs4MintContext(admin), CreateTokenParams{
+			UserID: admin, Name: "super-admin-no-membership", Boundary: projectBoundary(f.projA), Scopes: []string{"project:read"},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "flat_role_insufficient")
 	})
 	t.Run("token for A gets nothing on B", func(t *testing.T) {
 		// f.admin owns both projects: only the boundary keeps B out.

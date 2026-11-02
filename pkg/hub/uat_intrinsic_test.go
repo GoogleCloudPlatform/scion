@@ -232,6 +232,9 @@ func TestUATIntrinsic_CeilingReadersUseHopCeiling(t *testing.T) {
 			"planAgentDelegatorReissue": true, // an agent parent's ceiling (agentRowEffectCeiling)
 			"dispatchAgentEventHandler": true, // scheduler edge ceiling with role none: not a token hop
 		},
+		// No exceptions: every caller passes uatHopEffectCeiling inline, so
+		// missingRoleSelectors (below) always reads a hop ceiling.
+		"noUsableRoleMessage": {},
 	}
 	// Functions whose .Frozen() receiver is a parameter (its callers pass a
 	// hop ceiling or a fold), a fold, or a scheduler or agent-row ceiling.
@@ -241,6 +244,7 @@ func TestUATIntrinsic_CeilingReadersUseHopCeiling(t *testing.T) {
 		"childEffectCeiling":      true, // source: agentRowEffectCeiling passes uatHopEffectCeiling
 		"foldWithChain":           true, // chain.Ceiling is a fold; the edge is wrapped
 		"intersectEffectCeilings": true, // scheduler revision and agent-row ceilings: not token hops
+		"missingRoleSelectors":    true, // c: noUsableRoleMessage passes it through; its callers pass uatHopEffectCeiling inline (checked above)
 	}
 	_, files := parseHubProduction(t)
 	seen := map[string]int{}

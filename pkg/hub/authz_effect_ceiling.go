@@ -409,9 +409,11 @@ func noUsableRoleMessage(c store.EffectCeiling) string {
 // a bounded ceiling c lacks for role's non-optional scopes, using the same
 // per-permission rule as ceilingAllowsScope (a self operation never
 // blocks). It returns nil for any other ceiling kind, and nil when a
-// blocking permission cannot be named (no UAT selector, or a scope with no
-// registry coverage), so the caller never presents an incomplete list as
-// the full set.
+// selector cannot be named (a covered permission without a UAT selector,
+// or a required scope with no registry coverage), so the caller never
+// presents an incomplete list as the full set. c must be a hop ceiling:
+// noUsableRoleMessage's only caller passes uatHopEffectCeiling inline,
+// which TestUATIntrinsic_CeilingReadersUseHopCeiling enforces.
 func missingRoleSelectors(c store.EffectCeiling, role AgentRole) []string {
 	if c.Kind != store.EffectCeilingBounded {
 		return nil
@@ -427,10 +429,7 @@ func missingRoleSelectors(c store.EffectCeiling, role AgentRole) []string {
 		}
 		coverage := agentScopeCoverage([]AgentTokenScope{scope})
 		if len(coverage) == 0 {
-			if !ceilingAllowsScope(c, scope) {
-				return nil
-			}
-			continue
+			return nil
 		}
 		for _, permID := range coverage {
 			if frozen.Allows(permID) || selfOperationSet[permID] {
