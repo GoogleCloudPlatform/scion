@@ -6,11 +6,15 @@ package supervisor
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 )
 
@@ -172,5 +176,67 @@ func mustWriteFile(t *testing.T, path, contents string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(contents), 0644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// TestLogChownEntryError_ReadOnlyFSIsDebug: an EROFS failure (the Cloud Run
+// runtime mounts the agent secrets read-only inside the home directory) is
+// logged at debug, not as an error, whether bare or wrapped; any other
+// failure is still an error and a hard-link skip is still a warning
+// (ptone/scion#7104).
+func TestLogChownEntryError_ReadOnlyFSIsDebug(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "agent.log")
+	log.SetLogPath(logPath)
+	// Initialize before SetDebug: initialization resets the debug switch.
+	log.Init()
+	t.Cleanup(func() {
+		log.SetLogPath("")
+		log.Init()
+	})
+
+	read := func(t *testing.T) string {
+		t.Helper()
+		data, err := os.ReadFile(logPath)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		_ = os.Remove(logPath)
+		log.SetLogPath(logPath)
+		return string(data)
+	}
+
+	cases := []struct {
+		name      string
+		debug     bool
+		err       error
+		wantLevel string // "" means nothing is written
+	}{
+		{"erofs, debug off", false, syscall.EROFS, ""},
+		{"wrapped erofs, debug off", false, fmt.Errorf("fchownat: %w", syscall.EROFS), ""},
+		{"erofs, debug on", true, syscall.EROFS, "DEBUG"},
+		{"eacces", false, syscall.EACCES, "ERROR"},
+		{"eperm", false, syscall.EPERM, "ERROR"},
+		{"hard link", false, dirfd.ErrHardlinkedRegularFile, "WARN"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			log.SetDebug(tc.debug)
+			_ = captureStderr(t, func() { logChownEntryError("secrets", tc.err) })
+			got := read(t)
+			if tc.wantLevel == "" {
+				if strings.TrimSpace(got) != "" {
+					t.Fatalf("logged %q, want nothing", got)
+				}
+				return
+			}
+			if !strings.Contains(got, tc.wantLevel) || !strings.Contains(got, "secrets") {
+				t.Fatalf("logged %q, want a %s line naming the entry", got, tc.wantLevel)
+			}
+			for _, other := range []string{"ERROR", "WARN", "DEBUG"} {
+				if other != tc.wantLevel && strings.Contains(got, other) {
+					t.Fatalf("logged %q, want only %s", got, tc.wantLevel)
+				}
+			}
+		})
 	}
 }
