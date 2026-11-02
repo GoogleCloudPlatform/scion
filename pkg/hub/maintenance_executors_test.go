@@ -25,7 +25,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/unitdrift"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
@@ -59,35 +58,29 @@ func TestSecretMigrationExecutor_NoSecrets(t *testing.T) {
 	// A full integration test would require GCP SM mock infrastructure.
 }
 
-func TestRebuildServerExecutor_BuildsToStagingThenInstalls(t *testing.T) {
+func TestRebuildServerExecutor_BuildsThenInstallsThroughSudoInstall(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("rebuild-server only runs on linux")
 	}
 
 	repoDir := t.TempDir()
-	binDir := t.TempDir()
 	stubDir := t.TempDir()
 	logFile := filepath.Join(t.TempDir(), "commands.log")
-	binaryDest := filepath.Join(binDir, "scion")
-
-	// Create stub scripts that record their invocation to a shared log file.
-	for _, cmd := range []string{"git", "make", "go", "sudo"} {
-		script := fmt.Sprintf("#!/bin/sh\necho '%s' \"$@\" >> '%s'\n", cmd, logFile)
-		stubPath := filepath.Join(stubDir, cmd)
-		if err := os.WriteFile(stubPath, []byte(script), 0o755); err != nil {
-			t.Fatalf("failed to write stub %s: %v", cmd, err)
-		}
+	binaryDest := filepath.Join(t.TempDir(), "scion")
+	writeRebuildStubs(t, stubDir, logFile)
+	t.Setenv("PATH", stubDir+":"+os.Getenv("PATH"))
+	installer := rebuildTestInstaller(t, repoDir, binaryDest)
+	if err := os.Remove(logFile); err != nil { // drop Detect's rule checks
+		t.Fatal(err)
 	}
 
-	t.Setenv("PATH", stubDir+":"+os.Getenv("PATH"))
-
 	// The temp repo has no unit template, so the drift check stops before
-	// locating the unit. Stub both lookups anyway so the command count above
+	// locating the unit. Stub both lookups anyway so the command list
 	// never depends on the host's systemctl or on extra git calls.
 	executor := NewRebuildServerExecutor(RebuildServerOptions{
 		RepoPath:    repoDir,
-		BinaryDest:  binaryDest,
-		ServiceName: "test-scion",
+		ServiceName: "scion-hub",
+		Installer:   installer,
 		UnitLocator: func(context.Context, string) (unitdrift.UnitInfo, error) {
 			return unitdrift.UnitInfo{}, fmt.Errorf("no systemd in tests")
 		},
@@ -95,61 +88,55 @@ func TestRebuildServerExecutor_BuildsToStagingThenInstalls(t *testing.T) {
 	})
 
 	var buf bytes.Buffer
-	err := executor.Run(context.Background(), &buf, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err := executor.Run(context.Background(), &buf, nil); err != nil {
+		t.Fatalf("unexpected error: %v\n%s", err, buf.String())
 	}
-
-	// The restart step is fire-and-forget (cmd.Start), so give the async
-	// stub script a moment to write its log line before we read the file.
-	time.Sleep(100 * time.Millisecond)
 
 	logData, err := os.ReadFile(logFile)
 	if err != nil {
 		t.Fatalf("failed to read command log: %v", err)
 	}
-	lines := strings.Split(strings.TrimSpace(string(logData)), "\n")
-
-	// Expect 7 commands: git rev-parse (branch detection, runs at step-building time),
-	// git fetch, git reset --hard, make web, go build, sudo install, systemctl restart.
-	if len(lines) != 7 {
-		t.Fatalf("expected 7 commands, got %d:\n%s", len(lines), string(logData))
+	var lines []string
+	for _, l := range strings.Split(strings.TrimSpace(string(logData)), "\n") {
+		if !strings.HasPrefix(l, "exited ") {
+			lines = append(lines, l)
+		}
 	}
-
-	// Verify branch detection + fetch + reset sequence.
-	if !strings.Contains(lines[0], "git rev-parse") {
-		t.Errorf("expected git rev-parse (branch detection), got: %s", lines[0])
+	staging := filepath.Join(repoDir, "scion.rebuild")
+	// Preflight (rule checks only), checkout, build into a temporary
+	// directory, then the starter hub's two sudoers commands.
+	wantPrefixes := []string{
+		"sudo -n -l install -m 755 " + staging + " " + binaryDest,
+		"sudo -n -l systemctl restart --no-block scion-hub",
+		"git rev-parse --abbrev-ref HEAD",
+		"git fetch origin",
+		"git reset --hard origin/main",
+		"git rev-parse HEAD",
+		"make web",
+		"go build -ldflags -X github.com/GoogleCloudPlatform/scion/pkg/version.Commit=" + rebuildStubCommit +
+			" -X github.com/GoogleCloudPlatform/scion/pkg/version.BuildTime=",
+		"sudo -n install -m 755 " + staging + " " + binaryDest,
+		"sudo -n systemctl restart --no-block scion-hub",
 	}
-	if !strings.Contains(lines[1], "git fetch origin") {
-		t.Errorf("expected git fetch origin, got: %s", lines[1])
+	if len(lines) != len(wantPrefixes) {
+		t.Fatalf("expected %d commands, got %d:\n%s", len(wantPrefixes), len(lines), strings.Join(lines, "\n"))
 	}
-	if !strings.Contains(lines[2], "git reset --hard") {
-		t.Errorf("expected git reset --hard, got: %s", lines[2])
+	for i, want := range wantPrefixes {
+		if !strings.HasPrefix(lines[i], want) {
+			t.Errorf("command %d = %q, want prefix %q", i+1, lines[i], want)
+		}
 	}
-
-	// Verify go build targets the staging path inside the repo dir, not the final binary.
-	goLine := lines[4]
-	stagingBinary := filepath.Join(repoDir, "scion.rebuild")
-	if !strings.Contains(goLine, "-o "+stagingBinary) {
-		t.Errorf("go build should target staging path %q, got: %s", stagingBinary, goLine)
+	// The build goes to a temporary directory, never straight to the
+	// staging path or the installed binary.
+	if strings.Contains(lines[7], "-o "+staging) || strings.Contains(lines[7], "-o "+binaryDest) {
+		t.Errorf("go build must target a temporary path, got: %s", lines[7])
 	}
-	if strings.Contains(goLine, "-o "+binaryDest+" ") {
-		t.Errorf("go build must NOT target the final binary directly, got: %s", goLine)
+	if !strings.HasSuffix(lines[7], " ./cmd/scion") {
+		t.Errorf("go build target = %s", lines[7])
 	}
-
-	// Verify sudo install moves the staging binary to the final destination.
-	sudoInstallLine := lines[5]
-	if !strings.Contains(sudoInstallLine, "sudo install") {
-		t.Errorf("expected sudo install command, got: %s", sudoInstallLine)
-	}
-	if !strings.Contains(sudoInstallLine, stagingBinary) || !strings.Contains(sudoInstallLine, binaryDest) {
-		t.Errorf("sudo install should reference staging %q and dest %q, got: %s", stagingBinary, binaryDest, sudoInstallLine)
-	}
-
-	// Verify restart uses sudo systemctl (not bare systemctl).
-	restartLine := lines[6]
-	if !strings.Contains(restartLine, "sudo systemctl restart test-scion") {
-		t.Errorf("expected 'sudo systemctl restart test-scion', got: %s", restartLine)
+	got, err := os.ReadFile(staging)
+	if err != nil || !strings.Contains(string(got), rebuildStubCommit) {
+		t.Fatalf("staged binary = %q, %v", got, err)
 	}
 }
 
@@ -160,7 +147,6 @@ func TestRebuildServerExecutor_NonLinux(t *testing.T) {
 
 	executor := NewRebuildServerExecutor(RebuildServerOptions{
 		RepoPath:    "/tmp/fake",
-		BinaryDest:  "/tmp/fake/scion",
 		ServiceName: "test",
 	})
 
@@ -180,7 +166,6 @@ func TestRebuildServerExecutor_MissingRepoPath(t *testing.T) {
 	}
 
 	executor := NewRebuildServerExecutor(RebuildServerOptions{
-		BinaryDest:  "/tmp/fake/scion",
 		ServiceName: "test",
 	})
 

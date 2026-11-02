@@ -712,6 +712,12 @@ func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfi
 		if err := validateUnixPathBelowRoot(paths.workspaceExportPath, exportRoot); err != nil {
 			return nil, fmt.Errorf("cloudrun: invalid NFS agent workspace path: %w", err)
 		}
+		// The instance mounts this directory as its workspace; it may not be
+		// the project root or its configuration directory
+		// (checkNFSMountScope), checked before anything is created.
+		if err := checkNFSMountScope(rel, cfg.NFSSubPathRoot, cfg.ProjectID); err != nil {
+			return nil, fmt.Errorf("cloudrun: NFS agent workspace volume: %w", err)
+		}
 		paths.workspaceHostPath = filepath.Join(hostPaths.hostBase, filepath.FromSlash(rel))
 	}
 

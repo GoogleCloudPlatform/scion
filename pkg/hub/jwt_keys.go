@@ -44,6 +44,26 @@ var (
 // key or fingerprint (the key ID is attacker-supplied input).
 var errJWTNoEligibleKey = errors.New("no eligible signing generation verifies the token")
 
+// errJWTLegacyKeyID is the verification error of a legacy-mode JWT whose
+// protected "kid" header is neither absent nor keyring.LegacyID. It names
+// no key ID (the key ID is attacker-supplied input).
+var errJWTLegacyKeyID = errors.New("legacy-mode JWTs accept no key ID other than the legacy generation")
+
+// checkLegacyJWTKeyID admits a JWT to legacy-mode (no keyring file)
+// verification only when it has one signature whose protected "kid" header
+// is absent or keyring.LegacyID: the single key a legacy-mode hub holds is
+// the keyring's "legacy" generation, so a token naming any other generation
+// is refused even when its MAC verifies under that key.
+func checkLegacyJWTKeyID(tok *jwt.JSONWebToken) error {
+	if len(tok.Headers) != 1 {
+		return errJWTLegacyKeyID
+	}
+	if kid := tok.Headers[0].KeyID; kid != "" && kid != keyring.LegacyID {
+		return errJWTLegacyKeyID
+	}
+	return nil
+}
+
 // ringJWTKeys signs and verifies one purpose's HS256 JWTs from the signing
 // ring (design §3, HS256 JWTs row). Exactly one active generation issues;
 // verification uses only the generation the token's protected "kid" header

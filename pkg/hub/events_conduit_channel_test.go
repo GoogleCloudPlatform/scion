@@ -91,6 +91,8 @@ func TestConduitChannelPublishesRelaySubjects(t *testing.T) {
 		{"project.p1.deleted", body, conduitNotice{Subject: "project.p1.deleted", ProjectID: "p1"}},
 		{conduitBrokerChangedSubject, conduitBrokerChange{BrokerID: "b1"}, conduitNotice{Subject: conduitBrokerChangedSubject, BrokerID: "b1"}},
 		{settingsUpdatedSubject, SettingsUpdatedEvent{Section: "experiments", Revision: 3}, conduitNotice{Subject: settingsUpdatedSubject, Section: "experiments"}},
+		// The subject only: the key id stays off the conduit channel.
+		{conduitGrantKeysChangedSubject, conduitGrantKeysChanged{KeyID: "kid-should-not-cross"}, conduitNotice{Subject: conduitGrantKeysChangedSubject}},
 	} {
 		t.Run(tc.subject, func(t *testing.T) {
 			p := newTestPostgresPublisher(nil)
@@ -102,6 +104,7 @@ func TestConduitChannelPublishesRelaySubjects(t *testing.T) {
 			assert.Less(t, len(notices[0]), 1024)
 			assert.NotContains(t, notices[0], "tok-should-never-cross")
 			assert.NotContains(t, notices[0], "an entity body")
+			assert.NotContains(t, notices[0], "kid-should-not-cross")
 			var got conduitNotice
 			dec := json.NewDecoder(strings.NewReader(notices[0]))
 			dec.DisallowUnknownFields()
@@ -125,7 +128,7 @@ func TestConduitChannelPublishesRelaySubjects(t *testing.T) {
 // stream re-check acts on, and the broker change subject, is a conduit
 // channel subject.
 func TestConduitChannelCoversRelayRechecks(t *testing.T) {
-	for _, s := range []string{conduitAuthzChangedSubject, "agent.x.deleted", "agent.x.ports", "project.x.deleted", conduitBrokerChangedSubject, settingsUpdatedSubject} {
+	for _, s := range []string{conduitAuthzChangedSubject, "agent.x.deleted", "agent.x.ports", "project.x.deleted", conduitBrokerChangedSubject, settingsUpdatedSubject, conduitGrantKeysChangedSubject} {
 		assert.True(t, conduitChannelSubject(s), s)
 	}
 	for _, p := range conduitAuthzEventPatterns {

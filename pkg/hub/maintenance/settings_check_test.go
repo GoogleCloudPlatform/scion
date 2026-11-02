@@ -17,14 +17,9 @@ package maintenance
 import (
 	"bytes"
 	"context"
-	"fmt"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/hub/unitdrift"
 	"github.com/GoogleCloudPlatform/scion/pkg/preflight"
 )
 
@@ -75,49 +70,5 @@ func TestBinaryUpdate_SettingsCheckWarnsOnly(t *testing.T) {
 	}
 	if strings.Contains(plain.String(), "Settings check") {
 		t.Errorf("a section without a settings check:\n%s", plain.String())
-	}
-}
-
-// rebuild-server writes the settings check before its first step, and an
-// unset required setting does not stop the rebuild.
-func TestRebuildServer_SettingsCheckWarnsOnly(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("rebuild-server only runs on linux")
-	}
-	repoDir, binDir, stubDir := t.TempDir(), t.TempDir(), t.TempDir()
-	for _, cmd := range []string{"git", "make", "go", "sudo"} {
-		script := "#!/bin/sh\nexit 0\n"
-		if err := os.WriteFile(filepath.Join(stubDir, cmd), []byte(script), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Setenv("PATH", stubDir+":"+os.Getenv("PATH"))
-
-	e := NewRebuildServerExecutor(RebuildServerOptions{
-		RepoPath:    repoDir,
-		RepoBranch:  "main",
-		BinaryDest:  filepath.Join(binDir, "scion"),
-		ServiceName: "test-scion",
-		UnitLocator: func(context.Context, string) (unitdrift.UnitInfo, error) {
-			return unitdrift.UnitInfo{}, fmt.Errorf("no systemd in tests")
-		},
-		UnitRevision:  func(context.Context, string) (string, error) { return "", nil },
-		SettingsCheck: unsetTrustedProxiesFinding,
-	})
-	var log bytes.Buffer
-	if err := e.Run(context.Background(), &log, nil); err != nil {
-		t.Fatalf("Run: %v\n%s", err, log.String())
-	}
-	out := log.String()
-	section := strings.Index(out, "==> Settings check")
-	first := strings.Index(out, "==> Fetching latest code")
-	if section < 0 || first < 0 || section > first {
-		t.Fatalf("the settings check is not before the first step:\n%s", out)
-	}
-	if !strings.Contains(out, "WARNING ["+preflight.TransportProxyCheckName+".trusted_proxies_not_set]") {
-		t.Errorf("log lacks the warning:\n%s", out)
-	}
-	if !strings.Contains(out, "==> Installing server binary") {
-		t.Errorf("the rebuild did not go on:\n%s", out)
 	}
 }

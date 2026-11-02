@@ -130,10 +130,16 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Build a map of brokerId -> localPath for quick lookup
+		// Build a map of brokerId -> localPath for quick lookup. The
+		// provider LocalPath is shown only to a caller that may read the
+		// project's provider records, decided once for the whole listing
+		// (the same gate as the project path refusal relay); anyone else
+		// gets the same list without it (ptone/scion#6844).
 		brokerLocalPaths := make(map[string]string)
-		for _, p := range providers {
-			brokerLocalPaths[p.BrokerID] = p.LocalPath
+		if s.callerMayReadProviders(ctx, projectID) {
+			for _, p := range providers {
+				brokerLocalPaths[p.BrokerID] = p.LocalPath
+			}
 		}
 
 		// The dispatch capability of a project-filtered listing follows the
