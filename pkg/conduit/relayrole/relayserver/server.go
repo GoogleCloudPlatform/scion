@@ -377,15 +377,17 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	// Subscribed before the events start, like the role's hooks.
 	var changed <-chan string
 	unsubscribe := func() {}
-	// keysCtx ends the grant key hint loop, which then removes its
-	// subscription and listen hook; a failed start cancels it.
-	keysCtx, cancelKeys := context.WithCancel(ctx)
+	// cancelKeys ends the grant key hint loop, which then removes its
+	// subscription and listen hook; a failed start calls it.
+	cancelKeys := func() {}
 	if cfg.Events != nil {
 		changed, unsubscribe = cfg.Events.Subscribe(SettingsUpdatedSubject)
 		keys, unsubscribeKeys := cfg.Events.Subscribe(GrantKeysChangedSubject)
 		reconnected := make(chan struct{}, 1)
 		removeHook := cfg.Events.AddOnListen(listenReconnectHook(reconnected))
-		go followGrantKeys(keysCtx, keys, reconnected, r.NotifyGrantKeysChanged, func() { cancelKeys(); unsubscribeKeys(); removeHook() })
+		keysCtx, cancel := context.WithCancel(ctx)
+		cancelKeys = cancel
+		go followGrantKeys(keysCtx, keys, reconnected, r.NotifyGrantKeysChanged, func() { cancel(); unsubscribeKeys(); removeHook() })
 	}
 	if cfg.StartEvents != nil {
 		cfg.StartEvents()
