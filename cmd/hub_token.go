@@ -139,8 +139,8 @@ Expiry (--expires) accepts %s.
 Default: 90 days. Maximum: 1 year.
 
 CLI use: most CLI commands look the project up first, which needs
-project:read and project:list. See "scion hub token --help" for the scopes common CLI flows
-need.
+project:read and project:list. See "scion hub token --help" for the
+scopes common CLI flows need.
 
 Examples:
   scion hub token create --project my-project --name ci-token --scopes project:read,project:list,agent:create,agent:read,skill:read,skill:list,template:read,template:list,harness_config:read,harness_config:list
