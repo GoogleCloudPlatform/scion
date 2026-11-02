@@ -493,7 +493,7 @@ func TestAuxDiscovery_ShutdownStopsPass(t *testing.T) {
 	start := time.Now()
 	srv.stopAuxiliaryRuntimeDiscovery()
 	assert.Less(t, time.Since(start), auxDiscoveryStopWait, "stopping waited for the blocked checks")
-	assert.True(t, srv.waitAuxiliaryRuntimeDiscovery(0), "the pass did not end on stop")
+	assert.True(t, srv.waitAuxiliaryRuntimeDiscovery(time.Second), "the pass did not end on stop")
 
 	close(release)
 	time.Sleep(100 * time.Millisecond)
