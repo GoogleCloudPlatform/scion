@@ -18,6 +18,7 @@ package relayserver
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -186,9 +187,11 @@ func (e *cleanupEvents) AddOnListen(func()) func() {
 }
 
 // TestStartFailureReleasesEventRegistrations: when the public listener
-// cannot bind, Start fails and releases what it registered on the events:
-// the settings and grant key subscriptions and the listen hook (the hint
-// loop ends with the failed start, not only when Start's context ends).
+// cannot bind, Start fails and releases everything it registered on the
+// events, each exactly once: the role's revocation subscription and listen
+// hook, the settings subscription, and the grant key subscription and
+// listen hook (the registrations end with the failed start, not only when
+// Start's context ends).
 func TestStartFailureReleasesEventRegistrations(t *testing.T) {
 	held, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -205,29 +208,31 @@ func TestStartFailureReleasesEventRegistrations(t *testing.T) {
 		t.Fatal("Start succeeded with its public listen address in use")
 	}
 
-	// The grant key listen hook is the last one Start registers (the
-	// role's own hook comes first).
+	revocation := strings.Join(RevocationSubjects, ",")
+	// state reports whether every registration was released exactly once.
+	state := func() (string, bool) {
+		ev.mu.Lock()
+		defer ev.mu.Unlock()
+		ok := ev.unsubscribed[revocation] == 1 && ev.unsubscribed[SettingsUpdatedSubject] == 1 &&
+			ev.unsubscribed[GrantKeysChangedSubject] == 1 && len(ev.hookRemoved) == 2
+		for _, n := range ev.hookRemoved {
+			ok = ok && n == 1
+		}
+		return fmt.Sprintf("revocation unsubscribed %d, settings %d, grant keys %d; listen hook removals %v (role's, then the grant key hook's)",
+			ev.unsubscribed[revocation], ev.unsubscribed[SettingsUpdatedSubject], ev.unsubscribed[GrantKeysChangedSubject], ev.hookRemoved), ok
+	}
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		ev.mu.Lock()
-		settings, keys := ev.unsubscribed[SettingsUpdatedSubject], ev.unsubscribed[GrantKeysChangedSubject]
-		hook := -1
-		if n := len(ev.hookRemoved); n > 0 {
-			hook = ev.hookRemoved[n-1]
-		}
-		ev.mu.Unlock()
-		if settings == 1 && keys == 1 && hook == 1 {
+		desc, ok := state()
+		if ok {
 			time.Sleep(200 * time.Millisecond)
-			ev.mu.Lock()
-			again := ev.unsubscribed[SettingsUpdatedSubject] == 1 && ev.unsubscribed[GrantKeysChangedSubject] == 1 && ev.hookRemoved[len(ev.hookRemoved)-1] == 1
-			ev.mu.Unlock()
-			if !again {
-				t.Fatal("a cleanup ran more than once")
+			if desc, ok := state(); !ok {
+				t.Fatalf("a cleanup ran more than once: %s", desc)
 			}
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("after the failed start: settings unsubscribed %d, grant keys unsubscribed %d, grant key listen hook removed %d; want exactly 1 each", settings, keys, hook)
+			t.Fatalf("after the failed start: %s; want each exactly once (2 hooks)", desc)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

@@ -220,6 +220,11 @@ type Server struct {
 	PublicAddr   net.Addr
 	InternalAddr net.Addr
 
+	// cancelRole ends the role's re-checks and releases its event
+	// registrations; a failed start calls it (on success the role runs
+	// until Start's context ends).
+	cancelRole context.CancelFunc
+
 	public   *http.Server
 	internal *http.Server
 }
@@ -373,7 +378,9 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	logRegisterRelayMetrics(log, cfg.MeterProvider, r, role, cfg.Singleton)
 	// Ingress dials are served only once the role is bound to the relay.
 	currentRole.Store(role)
-	role.Start(ctx)
+	roleCtx, cancelRole := context.WithCancel(ctx)
+	s.cancelRole = cancelRole
+	role.Start(roleCtx)
 	// Subscribed before the events start, like the role's hooks.
 	var changed <-chan string
 	unsubscribe := func() {}
@@ -398,10 +405,12 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		publicLn, err = net.Listen("tcp", cfg.PublicListen)
 		if err != nil {
 			// Release what was registered above: the hint loop (which
-			// removes its subscription and hook) and the settings
-			// subscription.
+			// removes its subscription and hook), the settings
+			// subscription, and the role's re-checks (which release its
+			// subscription and hook).
 			cancelKeys()
 			unsubscribe()
+			s.cancelRole()
 			r.Kill()
 			_ = s.internal.Close()
 			return nil, fmt.Errorf("relay public listener %s: %w", cfg.PublicListen, err)
