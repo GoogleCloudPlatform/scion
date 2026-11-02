@@ -406,9 +406,12 @@ func noUsableRoleMessage(c store.EffectCeiling) string {
 }
 
 // missingRoleSelectors returns, sorted, the UAT selectors whose permissions
-// a bounded ceiling c lacks for role's non-optional scopes. A permission
-// that is a self operation, or that has no UAT selector, is not listed. Any
-// other ceiling kind returns nil.
+// a bounded ceiling c lacks for role's non-optional scopes, using the same
+// per-permission rule as ceilingAllowsScope (a self operation never
+// blocks). It returns nil for any other ceiling kind, and nil when a
+// blocking permission cannot be named (no UAT selector, or a scope with no
+// registry coverage), so the caller never presents an incomplete list as
+// the full set.
 func missingRoleSelectors(c store.EffectCeiling, role AgentRole) []string {
 	if c.Kind != store.EffectCeilingBounded {
 		return nil
@@ -422,13 +425,22 @@ func missingRoleSelectors(c store.EffectCeiling, role AgentRole) []string {
 		if ceilingOptionalRoleScopes[scope] {
 			continue
 		}
-		for _, permID := range agentScopeCoverage([]AgentTokenScope{scope}) {
+		coverage := agentScopeCoverage([]AgentTokenScope{scope})
+		if len(coverage) == 0 {
+			if !ceilingAllowsScope(c, scope) {
+				return nil
+			}
+			continue
+		}
+		for _, permID := range coverage {
 			if frozen.Allows(permID) || selfOperationSet[permID] {
 				continue
 			}
-			if p, ok := registryPermission(permID); ok && p.UATScope != "" {
-				selectors = append(selectors, p.UATScope)
+			p, ok := registryPermission(permID)
+			if !ok || p.UATScope == "" {
+				return nil
 			}
+			selectors = append(selectors, p.UATScope)
 		}
 	}
 	return sortedUniqueIDs(selectors)

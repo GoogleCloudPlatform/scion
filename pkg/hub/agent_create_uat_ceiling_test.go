@@ -101,6 +101,28 @@ func TestNoUsableRoleMessage(t *testing.T) {
 		"an empty bounded ceiling lacks every readonly selector")
 }
 
+// Every permission that the readonly role's required scopes cover has a
+// UAT selector, so the no-usable-role message can always name the full
+// set. A registry row that breaks this makes missingRoleSelectors fall
+// back to the generic reason; this test makes the gap visible first.
+func TestReadonlyRoleRequiredPermissionsHaveUATSelectors(t *testing.T) {
+	checked := 0
+	for _, scope := range ScopesForRole(AgentRoleReadOnly) {
+		if ceilingOptionalRoleScopes[scope] {
+			continue
+		}
+		coverage := agentScopeCoverage([]AgentTokenScope{scope})
+		require.NotEmpty(t, coverage, "readonly scope %s covers no registry permission", scope)
+		for _, permID := range coverage {
+			p, ok := registryPermission(permID)
+			require.True(t, ok, permID)
+			assert.NotEmpty(t, p.UATScope, "%s (covered by readonly scope %s) has no UAT selector", permID, scope)
+			checked++
+		}
+	}
+	assert.Positive(t, checked)
+}
+
 // The same UAT with role=none explicit: created as none with NoAuth; the
 // launch request carries no LLM credentials and no project secret except
 // GITHUB_TOKEN.
