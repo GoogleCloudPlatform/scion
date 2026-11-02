@@ -276,6 +276,7 @@ type WebServer struct {
 	hubShutdown    func(context.Context) error // Hub resource cleanup, or nil
 	shutdownMark   shutdownState               // BeginShutdown mark (ptone/scion#5054)
 	shutdownHooks  ShutdownHooks               // optional shutdown seams (SetShutdownHooks)
+	onListening    func()                      // optional hook once the listener is bound (SetOnListening)
 	maintenance    *MaintenanceState           // runtime maintenance mode state (shared with Hub)
 	demotionSafe   *atomic.Bool                // shared with Hub; nil-safe (nil = false = don't demote)
 	authzService   *AuthzService               // authorization service for SSE subject checks
@@ -1241,8 +1242,7 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 			// redirect to login instead of letting the Hub return a raw JSON 401.
 			if isBrowserRequest(r) && isProxyRoute(r.URL.Path) {
 				if !ws.keepsNoAnonymousSession(r) {
-					session.Values[sessKeyReturnTo] = localRedirectPath(r.URL.RequestURI())
-					_ = session.Save(r, w)
+					_ = ws.saveReturnTo(w, r, session, localRedirectPath(r.URL.RequestURI()))
 					http.Redirect(w, r, "/auth/login", http.StatusFound)
 					return
 				}
@@ -2928,16 +2928,27 @@ func isPublicRoute(path string) bool {
 	}
 }
 
-// isRootLevelStaticFile returns true for root-level paths that look like
-// static file requests (e.g. /favicon.ico, /scion-notification-icon.png,
-// /robots.txt). These are files placed in web/public/ and served at the
-// root by Vite. They have a file extension and no sub-path segments.
+// rootStaticFiles are the files in web/public/, which Vite copies to the
+// root of the built client. They are the only root-level paths served
+// without a session (browsers fetch the app icons and the web app manifest
+// without credentials, see appIconPaths). Any other root-level path, with
+// or without a file extension, takes the normal session check. The match
+// is exact, so a path holding a backslash (such as /\evil.example, from
+// /%5Cevil.example) or any other spelling of a listed name never matches.
+var rootStaticFiles = map[string]bool{
+	"/apple-touch-icon.png":        true,
+	"/favicon.ico":                 true,
+	"/favicon.svg":                 true,
+	"/icon-192.png":                true,
+	"/icon-512.png":                true,
+	"/icon-maskable-512.png":       true,
+	"/manifest.webmanifest":        true,
+	"/scion-notification-icon.png": true,
+}
+
+// isRootLevelStaticFile reports whether path is one of rootStaticFiles.
 func isRootLevelStaticFile(path string) bool {
-	// Must start with / and have no further slashes (root-level only).
-	if len(path) < 2 || strings.Count(path, "/") != 1 {
-		return false
-	}
-	return filepath.Ext(path) != ""
+	return rootStaticFiles[path]
 }
 
 // isBrowserRequest returns true if the request appears to come from a browser.
@@ -3035,6 +3046,11 @@ func isCompressBypassPath(path string) bool {
 			if i+2 < len(segs) {
 				switch segs[i+2] {
 				case "pty", "ports", "workspace", "pending-config":
+					return true
+				case "workspace-download":
+					// The broker-self signed workspace download
+					// (/api/v1/runtime-brokers/{id}/agents/{agentId}/workspace-download)
+					// answers with signed object URLs.
 					return true
 				}
 			}
@@ -3669,8 +3685,7 @@ func (ws *WebServer) sessionAuthMiddleware(next http.Handler) http.Handler {
 				http.Redirect(w, r, ws.noSessionLoginLocation(r.URL.RequestURI()), http.StatusFound)
 				return
 			}
-			session.Values[sessKeyReturnTo] = localRedirectPath(r.URL.RequestURI())
-			_ = session.Save(r, w)
+			_ = ws.saveReturnTo(w, r, session, localRedirectPath(r.URL.RequestURI()))
 			http.Redirect(w, r, "/auth/login", http.StatusFound)
 			return
 		}
@@ -3682,6 +3697,44 @@ func (ws *WebServer) sessionAuthMiddleware(next http.Handler) http.Handler {
 			"error": "authentication required",
 		})
 	})
+}
+
+// saveReturnTo stores next, a path on this server, as the post-sign-in
+// return path and saves the session. When the session cannot be saved with
+// it (a long query can push the cookie past its size limit), it stores the
+// path without its query and fragment, checked again with localRedirectPath.
+// When that cannot be saved either, or no shorter local path exists, it drops
+// the return path and saves the session without it, so a return path saved
+// earlier in the session is cleared and sign-in lands on /. It returns an
+// error only when the session cannot be saved at all.
+//
+// Any save error gets the shorter path: securecookie's size error is not
+// detectable by value (an unexported sentinel formatted with %s, inside a
+// MultiError). A request with a failed save logs one Warn line, as the input
+// is client-controlled, with the error and the path length, never the path or
+// the cookie.
+func (ws *WebServer) saveReturnTo(w http.ResponseWriter, r *http.Request, session *sessions.Session, next string) error {
+	session.Values[sessKeyReturnTo] = next
+	err := session.Save(r, w)
+	if err == nil {
+		return nil
+	}
+	if i := strings.IndexAny(next, "?#"); i > 0 {
+		if short := localRedirectPath(next[:i]); short != "/" {
+			session.Values[sessKeyReturnTo] = short
+			saveErr := session.Save(r, w)
+			if saveErr == nil {
+				ws.logger().Warn("Sign-in return path stored without its query; the session could not be saved with the full path", "error", err, "path_len", len(next))
+				return nil
+			}
+			err = saveErr
+		}
+	}
+	delete(session.Values, sessKeyReturnTo)
+	ws.logger().Warn("Sign-in return path dropped; the session could not be saved with it, so sign-in returns to /", "error", err, "path_len", len(next))
+	// Best effort, with no second log line: a session that cannot be saved
+	// without the return path either has no cookie to update.
+	return session.Save(r, w)
 }
 
 // handleOAuthLogin initiates the OAuth flow for a given provider.
@@ -3699,8 +3752,7 @@ func (ws *WebServer) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
 			session, _ = ws.sessionStore.New(r, webSessionName)
 		}
 		if returnTo := r.URL.Query().Get("returnTo"); returnTo != "" {
-			session.Values[sessKeyReturnTo] = localRedirectPath(returnTo)
-			_ = session.Save(r, w)
+			_ = ws.saveReturnTo(w, r, session, localRedirectPath(returnTo))
 		}
 		http.Redirect(w, r, "/login", http.StatusFound)
 		return
@@ -3738,12 +3790,17 @@ func (ws *WebServer) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	session.Values[sessKeyOAuthState] = state
 	// The sign-in page passes returnTo on when a provider is picked; only
-	// a path on this server is stored.
+	// a path on this server is stored. A return path the session cannot
+	// hold is dropped, so the sign-in proceeds with the OAuth state and
+	// lands on /.
+	var saveErr error
 	if returnTo := r.URL.Query().Get("returnTo"); returnTo != "" {
-		session.Values[sessKeyReturnTo] = localRedirectPath(returnTo)
+		saveErr = ws.saveReturnTo(w, r, session, localRedirectPath(returnTo))
+	} else {
+		saveErr = session.Save(r, w)
 	}
-	if err := session.Save(r, w); err != nil {
-		ws.logger().Error("Failed to save OAuth state to session", "error", err)
+	if saveErr != nil {
+		ws.logger().Error("Failed to save OAuth state to session", "error", saveErr)
 		http.Error(w, "session error", http.StatusInternalServerError)
 		return
 	}
@@ -4375,9 +4432,15 @@ func (ws *WebServer) Start(ctx context.Context) error {
 
 	ws.logger().Info("Web frontend server starting", "host", ws.config.Host, "port", ws.config.Port, "h2c", true)
 
+	// Bind first, so the on-listening hook (SetOnListening) runs only once
+	// the port is ours; then serve.
+	ln, err := listenThenNotify(ws.httpServer.Addr, ws.onListening)
+	if err != nil {
+		return err
+	}
 	errCh := make(chan error, 1)
 	go func() {
-		if err := ws.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := ws.httpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
 		close(errCh)

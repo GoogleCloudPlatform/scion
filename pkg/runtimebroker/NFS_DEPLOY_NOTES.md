@@ -66,6 +66,36 @@ exports outside the broker. Alternatively, change the reconciler to call the
 `mount(2)` syscall directly (which does honor `CAP_SYS_ADMIN`) rather than
 shelling out to the `mount.nfs` helper.
 
+## `nosuid,nodev` on every broker mount
+
+Every NFS mount the broker makes carries `nosuid,nodev` as its last options
+(`HardenNFSMountOptions`), whatever `mount_options` says and whatever its
+origin; it is not configurable. A share
+counts as mounted correctly only when `/proc/mounts` shows both flags. The
+share's mount point is `<mount_root>/<share id>` with `mount_root` resolved
+through symlinks (`NFSShareTarget`), because the mount table lists resolved
+paths; the share's own mount point is never stat'ed for this.
+
+- `auto_mount: true` (and not verify-only): a share mounted from the right
+  source without them is remounted in place (`mount -o remount,nosuid,nodev`).
+  Containers already running keep their existing bind until they restart.
+- `auto_mount: false`: the share is reported unhealthy with reason
+  `mount_flags`. Mount it yourself with `nosuid,nodev`, for example in
+  `/etc/fstab`:
+  `10.0.0.2:/scion-workspaces /mnt/nfs/ws1 nfs vers=3,hard,nconnect=4,_netdev,nosuid,nodev 0 0`
+- Verify-only (default runtime Kubernetes or Cloud Run): the platform mounts
+  the export and takes no options; the broker logs it once and does not
+  mark the share unhealthy for it. A dispatch from such a broker to a
+  local-container runtime is still refused (see below); that refusal shows
+  only in the 503 response and the broker log.
+
+Agent create, start and restart on a local-container runtime re-read the
+mount table and are refused (`503 nfs_unavailable`) when the workspace share,
+or any mount below it, lacks either flag (from any source), or the table
+cannot be read, in every mode. The agent workspace is a Docker bind of a
+path under the share; this relies on the kernel copying the source mount's
+per-mount flags (`nosuid`, `nodev`) to a new bind mount.
+
 ## Config: `schema_version` required (NM1b finding)
 
 `settings.yaml` **must** include `schema_version: "1"` when it contains a

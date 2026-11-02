@@ -423,8 +423,9 @@ func TestAgentDelegation_OneRecordPerCheckAndNoReasonInResponses(t *testing.T) {
 	// project.read has the same checks in
 	// TestAgentDelegatedProjectRead_OneRecordPerCheckAndNoReason, and the
 	// message and attach routes in
-	// TestAgentDelegatedMessageAndAttach_OneRecordPerCheckAndNoReason.
-	require.Len(t, agentDelegationAdmittedRoutes, 5, "a new admitted route needs its own record and no-reason checks")
+	// TestAgentDelegatedMessageAndAttach_OneRecordPerCheckAndNoReason, and
+	// the hub agent list in TestAgentDelegatedAgentList_OneRecordEachAndNoReason.
+	require.Len(t, agentDelegationAdmittedRoutes, 6, "a new admitted route needs its own record and no-reason checks")
 	require.Len(t, allows, 1, "one record for the delegated agent.read check")
 	assert.Equal(t, "agent_delegation:"+grant.ID, allows[0].MatchedGrant)
 	assert.Equal(t, f.agentA.ID, allows[0].PrincipalID)

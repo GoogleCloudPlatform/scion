@@ -236,6 +236,7 @@ describe('scion-page-admin-federation — structured save errors (ptone/scion#39
     element = await createComponent(
       createHandler({
         status: 422,
+        // The body as earlier hubs sent it: a fixed message and string entries.
         body: {
           error: {
             code: 'validation_error',
@@ -252,6 +253,63 @@ describe('scion-page-admin-federation — structured save errors (ptone/scion#39
     expect(summary).toContain('federation config validation failed');
     expect(summary).toContain('trusted_issuers[0]: issuer_url is required');
     expect(element.shadowRoot?.querySelectorAll('[data-field-error]').length).toBe(0);
+  });
+
+  it('a nested validation_error with field entries shows each at its field and issuer row (ptone/scion#4450)', async () => {
+    element = await createComponent(
+      createHandler({
+        status: 422,
+        body: {
+          error: {
+            code: 'validation_error',
+            message: 'server.federation.refresh_interval: invalid refresh_interval',
+            details: {
+              field: 'server.federation.refresh_interval',
+              errors: [
+                {
+                  section: 'federation',
+                  field: 'server.federation.refresh_interval',
+                  message: 'invalid refresh_interval',
+                },
+                {
+                  section: 'federation',
+                  field: 'server.federation.trusted_issuers[1].issuer_url',
+                  message: 'is required',
+                },
+              ],
+            },
+          },
+        },
+      })
+    );
+
+    await clickSave(element);
+
+    expect(text(query(element, '[data-field-error="refresh_interval"]'))).toBe(
+      'invalid refresh_interval'
+    );
+    expect(text(query(element, '[data-field-error="trusted_issuers.1"]'))).toBe('is required');
+    expect(query(element, '.status-message.error')).toBeNull();
+  });
+
+  it('a nested 409 revision_conflict shows the changed-since-loaded notice', async () => {
+    element = await createComponent(
+      createHandler({
+        status: 409,
+        body: {
+          error: {
+            code: 'revision_conflict',
+            message: 'One or more sections have been modified since the expected revision.',
+            details: {
+              conflicted: [{ section: 'federation', expected_revision: 1, current_revision: 2 }],
+            },
+          },
+        },
+      })
+    );
+
+    await clickSave(element);
+    expect(text(query(element, '[data-settings-conflict]'))).toContain('federation');
   });
 
   it('revision_conflict shows the changed-since-loaded notice; Reload refetches', async () => {

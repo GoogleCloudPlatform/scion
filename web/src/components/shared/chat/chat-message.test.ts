@@ -1633,6 +1633,48 @@ describe('scion-chat-message attachment-only (ptone/scion#6146)', () => {
   });
 });
 
+describe('scion-chat-message reply preview', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('renders an available preview with the sender and jumps to the quoted message', async () => {
+    const el = await mount('reply');
+    el.replyPreview = { messageId: 'parent-1', senderName: 'Alice', content: 'original' };
+    await el.updateComplete;
+    const quote = el.shadowRoot?.querySelector<HTMLElement>('.reply-preview');
+    expect(quote).not.toBeNull();
+    expect(quote?.classList.contains('unavailable')).toBe(false);
+    expect(quote?.querySelector('.reply-sender')?.textContent).toBe('Alice');
+
+    const onJump = vi.fn();
+    el.addEventListener('scroll-to-message', onJump);
+    quote?.click();
+    expect(onJump).toHaveBeenCalledTimes(1);
+    expect((onJump.mock.calls[0][0] as CustomEvent).detail).toEqual({ messageId: 'parent-1' });
+  });
+
+  it('renders an unavailable preview as a muted quote with no sender and no jump', async () => {
+    const el = await mount('reply');
+    el.replyPreview = {
+      messageId: 'gone-1',
+      senderName: '',
+      content: '[no longer available]',
+      unavailable: true,
+    };
+    await el.updateComplete;
+    const quote = el.shadowRoot?.querySelector<HTMLElement>('.reply-preview');
+    expect(quote?.classList.contains('unavailable')).toBe(true);
+    expect(quote?.querySelector('.reply-sender')).toBeNull();
+    expect(quote?.querySelector('.reply-content')?.textContent).toBe('[no longer available]');
+
+    const onJump = vi.fn();
+    el.addEventListener('scroll-to-message', onJump);
+    quote?.click();
+    expect(onJump).not.toHaveBeenCalled();
+  });
+});
+
 describe('scion-chat-message More actions dots (ptone/scion#6556)', () => {
   interface CssBlock {
     prelude: string;

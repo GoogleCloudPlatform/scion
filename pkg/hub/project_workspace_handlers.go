@@ -1716,6 +1716,10 @@ func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Reque
 	if localFixture {
 		pullResult, err = util.PullSharedWorkspace(workspacePath, cloneURL, "")
 	} else {
+		if refuseErr := s.refuseSSHWithoutProjectSecret(ctx, project, cloneURL); refuseErr != nil {
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeInvalidRequest, refuseErr.Error(), nil)
+			return
+		}
 		token, hardening := s.hostGitAccess(ctx, project, cloneURL)
 		pullResult, err = util.PullSharedWorkspaceHardened(workspacePath, cloneURL, token, hardening)
 	}

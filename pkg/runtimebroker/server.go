@@ -282,13 +282,21 @@ type ServerConfig struct {
 	ColocatedStorage storage.Storage
 }
 
+// DefaultWriteTimeout is the broker HTTP server's default write timeout. A
+// broker handler can take as long as the hub's hub-to-broker request limit
+// (180s, ptone/scion#6829) before it answers, and the handlers do not extend
+// their own write deadline, so the default leaves 30s of margin above that
+// limit: otherwise a direct-HTTP answer after 120s would be cut off before
+// the hub gives up.
+const DefaultWriteTimeout = 210 * time.Second
+
 // DefaultServerConfig returns the default server configuration.
 func DefaultServerConfig() ServerConfig {
 	return ServerConfig{
 		Port:                 9800,
 		Host:                 "0.0.0.0",
 		ReadTimeout:          30 * time.Second,
-		WriteTimeout:         120 * time.Second,
+		WriteTimeout:         DefaultWriteTimeout,
 		CORSEnabled:          false, // off by default: nothing calls the broker from a browser (opt in with server.broker.cors)
 		CORSAllowedOrigins:   []string{},
 		CORSAllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
@@ -317,15 +325,16 @@ type Server struct {
 	// servicesStarted is set once startServices begins (Started).
 	servicesStarted bool
 
-	// nfsCleanupWG tracks background NFS project tree removals started by
-	// project delete (startNFSProjectTreeCleanup), so tests can wait for them.
-	nfsCleanupWG sync.WaitGroup
-
 	// workspaceDownload replaces gcp.SyncFromGCS for the GCS workspace
 	// bootstrap (create-time and handleWorkspaceApply) when set (see
 	// SetWorkspaceDownloader).
 	workspaceDownload func(ctx context.Context, bucket, prefix, localPath string) error
-	version           string
+	// signedDownload overrides the signed-URL workspace download's object
+	// client, page source and timing (tests only; zero values mean the
+	// defaults, see signedDownloadSettings).
+	signedDownload signedDownloadSettings
+
+	version string
 
 	// Workspace transfer and project delete steps, like workspaceDownload:
 	// each replaces its real implementation when set (see the setters in
@@ -475,6 +484,34 @@ type Server struct {
 	// findAuxiliaryRuntimeByType rather than indexing by type.
 	auxiliaryRuntimes   map[string]auxiliaryRuntime
 	auxiliaryRuntimesMu sync.RWMutex
+
+	// auxDiscoveryDone is closed when the background auxiliary runtime
+	// discovery pass (startAuxiliaryRuntimeDiscovery) has finished, nil
+	// when none was started; auxDiscoveryCancel stops the running pass
+	// (Shutdown); auxDiscoveryStopped, set by Shutdown, keeps a later start
+	// from starting a pass. All three are guarded by auxDiscoveryMu.
+	auxDiscoveryMu      sync.Mutex
+	auxDiscoveryDone    chan struct{}
+	auxDiscoveryCancel  context.CancelFunc
+	auxDiscoveryStopped bool
+
+	// auxCheckTimeout, when positive, overrides auxProfileCheckTimeout for
+	// this server; afterAuxDiscovery, when set, replaces recoverLaunches at
+	// the end of the pass; afterLateAuxResult, when set, is called when
+	// applyLateAuxResult returns. All for tests.
+	auxCheckTimeout    time.Duration
+	afterAuxDiscovery  func()
+	afterLateAuxResult func()
+
+	// onHubConnectionsStarted, when set (tests only), is called right after
+	// startServices has started every hub connection.
+	onHubConnectionsStarted func()
+
+	// profileRuntimeUnavailable holds the profile settings whose runtime was
+	// found not available, reported as profile_runtime.<name> self-health checks
+	// (profileRuntimeHealthChecks). Guarded by profileRuntimeHealthMu.
+	profileRuntimeHealthMu    sync.Mutex
+	profileRuntimeUnavailable map[string]string // auxProfileKey -> profile name
 
 	// resolveAuxiliaryRuntime resolves the runtime.Runtime for a project path
 	// and profile name when discovering or creating auxiliary runtimes, and
@@ -1095,6 +1132,12 @@ func (s *Server) createHubConnection(name string, creds *brokercredentials.Broke
 	if hubEndpoint == "" {
 		hubEndpoint = s.config.HubEndpoint
 	}
+	// No client is built for a hub this broker would reach unencrypted over
+	// the network: the connection carries the broker's credentials and,
+	// through the control channel and conduit, agent secrets.
+	if err := config.CheckHubTransport(hubEndpoint); err != nil {
+		return nil, fmt.Errorf("hub connection %q: %w", name, err)
+	}
 
 	// Build hub client options
 	opts := buildHubClientOpts(creds, secretKey, hubEndpoint)
@@ -1152,6 +1195,11 @@ func (s *Server) createHubConnection(name string, creds *brokercredentials.Broke
 // token reaches the hub only through DevAuthHubOptions (loopback hubs only);
 // a HubToken that is the dev token gets the same loopback rule.
 func (s *Server) createHubConnectionFromConfig() (*HubConnection, error) {
+	// The same transport rule as createHubConnection: the configured bearer
+	// token is never sent unencrypted to a network host.
+	if err := config.CheckHubTransport(s.config.HubEndpoint); err != nil {
+		return nil, fmt.Errorf("hub connection from config: %w", err)
+	}
 	var opts []hubclient.Option
 
 	switch {
@@ -1629,14 +1677,6 @@ func (s *Server) startServices(ctx context.Context, withListener bool) error {
 		slog.Warn("skipping legacy layout migration: could not resolve global directory", "error", err)
 	}
 
-	// Discover auxiliary runtimes (e.g. Kubernetes) from project settings
-	// so that agents running on non-default runtimes can be found after
-	// a broker restart. A flat instance serves only its single target and
-	// never resolves profiles, so it has no auxiliary runtimes.
-	if !s.isFlat() {
-		s.discoverAuxiliaryRuntimes()
-	}
-
 	// Check (and, with nfs.auto_mount, mount) the configured NFS shares.
 	// This runs in the background: an NFS mount or mountpoint check against
 	// an unreachable server can block for minutes, and a failed mount must
@@ -1663,6 +1703,10 @@ func (s *Server) startServices(ctx context.Context, withListener bool) error {
 		}
 	}
 
+	if s.onHubConnectionsStarted != nil {
+		s.onHubConnectionsStarted()
+	}
+
 	// Log a summary of all hub connections
 	s.logHubConnections()
 
@@ -1671,11 +1715,21 @@ func (s *Server) startServices(ctx context.Context, withListener bool) error {
 		s.startCredentialWatcher(ctx)
 	}
 
-	// Report and clean up the async launches a previous process of this
-	// broker left in its journal (design wave 3 §1 C-c). After the hub
-	// connections start, which the reports go out on, and after auxiliary
-	// runtime discovery, which resolves their managers.
-	s.recoverLaunches()
+	// Discover auxiliary runtimes (e.g. Kubernetes) from project settings
+	// so that agents running on non-default runtimes can be found after
+	// a broker restart, then report and clean up the async launches a
+	// previous process of this broker left in its journal (design wave 3
+	// §1 C-c), which need the discovered managers. Both run in the
+	// background AFTER the hub connections start: a profile whose runtime
+	// is slow or unreachable must not delay the control channel
+	// (ptone/scion#7010; see startAuxiliaryRuntimeDiscovery). A flat
+	// instance serves only its single target and never resolves profiles,
+	// so it has no auxiliary runtimes and recovers its launches here.
+	if s.isFlat() {
+		s.recoverLaunches()
+	} else {
+		s.startAuxiliaryRuntimeDiscovery(ctx)
+	}
 
 	return nil
 }
@@ -1729,6 +1783,10 @@ const ghResolutionCacheCloseTimeout = 10 * time.Second
 
 // Shutdown gracefully shuts down the server.
 func (s *Server) Shutdown(ctx context.Context) error {
+	// Stop the background auxiliary runtime discovery pass, bounded: it
+	// registers nothing more and skips launch recovery (ptone/scion#7010).
+	s.stopAuxiliaryRuntimeDiscovery()
+
 	// Stop the heartbeat service account report's background discovery.
 	s.saDiscovery().stop()
 
@@ -1911,7 +1969,7 @@ func (s *Server) sortedAuxiliaryRuntimes() []namedAuxiliaryRuntime {
 // sweep (controlPathSweeper) reaches their agents only from then on. Scanning
 // the project dirs this broker has local agent state for is a follow-up (see
 // the Limitations in the Volume Source Restrictions reference).
-func (s *Server) discoverAuxiliaryRuntimes() {
+func (s *Server) discoverAuxiliaryRuntimes(ctx context.Context) {
 	// Collect project paths to scan
 	var projectPaths []string
 
@@ -1942,7 +2000,7 @@ func (s *Server) discoverAuxiliaryRuntimes() {
 		projectPaths = append(projectPaths, pd)
 	}
 
-	s.discoverAuxiliaryRuntimesForProjects(projectPaths)
+	s.discoverAuxiliaryRuntimesForProjectsCtx(ctx, projectPaths)
 }
 
 // logUnresolvedAuxiliaryProfile reports a settings profile whose runtime
@@ -1983,6 +2041,13 @@ func logUnresolvedAuxiliaryProfile(profileName, activeProfile string, resolved s
 // de-duplication and registration directly, without depending on the
 // broker's on-disk project discovery.
 func (s *Server) discoverAuxiliaryRuntimesForProjects(projectPaths []string) {
+	s.discoverAuxiliaryRuntimesForProjectsCtx(context.Background(), projectPaths)
+}
+
+// discoverAuxiliaryRuntimesForProjectsCtx is discoverAuxiliaryRuntimesForProjects
+// on ctx: once ctx is done (the server is stopping) it stops waiting for
+// checks and registers nothing more.
+func (s *Server) discoverAuxiliaryRuntimesForProjectsCtx(ctx context.Context, projectPaths []string) {
 	defRT := s.currentRuntime()
 	// Compared against every resolved profile below so that a profile
 	// pointing at the broker's own runtime instance — not merely the same
@@ -1992,8 +2057,73 @@ func (s *Server) discoverAuxiliaryRuntimesForProjects(projectPaths []string) {
 	// types alone would wrongly treat it as "the default" and drop it.
 	defaultIdentity := auxiliaryRuntimeIdentity(defRT)
 
-	discoveredIdentities := make(map[string]bool)
+	cands := collectAuxProfileCandidates(projectPaths)
+	results := s.checkAuxProfileCandidates(ctx, cands, defaultIdentity)
+	if ctx.Err() != nil {
+		return
+	}
 
+	// Results are applied in candidate order (projects in the given order,
+	// profile names sorted), as when the checks ran one by one, so the
+	// sorted-first profile still wins a collapsed identity among the checks
+	// that finished in time; a timed-out check is skipped here and a later
+	// candidate of the same identity registers instead.
+	discoveredIdentities := make(map[string]bool)
+	for i, c := range cands {
+		r := results[i]
+		if r.timedOut || r.rt == nil {
+			// Reported when the check timed out (checkAuxProfileCandidates),
+			// before any late result could clear it; nil: stopped.
+			continue
+		}
+		if r.rt.Name() == "error" {
+			// Only the project's active profile is reported on a fast
+			// failure; a non-active one (for example a built-in profile on a
+			// broker without cluster access) keeps the Info line only
+			// (ptone/scion#3605).
+			s.setProfileRuntimeUnavailable(c.key, c.profile, c.profile == c.activeProfile)
+			logUnresolvedAuxiliaryProfile(c.profile, c.activeProfile, r.rt)
+			continue
+		}
+		s.setProfileRuntimeUnavailable(c.key, c.profile, false)
+
+		identity := auxiliaryRuntimeIdentity(r.rt)
+		if identity == defaultIdentity || discoveredIdentities[identity] {
+			continue
+		}
+		discoveredIdentities[identity] = true
+
+		mgr := agent.NewManager(r.rt)
+		s.auxiliaryRuntimesMu.Lock()
+		s.auxiliaryRuntimes[identity] = auxiliaryRuntime{Runtime: r.rt, Manager: mgr, Record: r.rec}
+		s.auxiliaryRuntimesMu.Unlock()
+
+		slog.Info("Discovered auxiliary runtime from project settings",
+			"runtime", r.rt.Name(), "identity", identity, "profile", c.profile)
+	}
+}
+
+// auxProfileCandidate is one profile runtime check of a discovery pass.
+type auxProfileCandidate struct {
+	projectPath   string
+	profile       string
+	activeProfile string
+	key           string // auxProfileKey
+}
+
+// collectAuxProfileCandidates lists the profiles of the given project
+// settings directories whose runtime entry exists, projects in the given
+// order and profile names sorted. A profile whose resolved settings
+// (name, runtime type and runtime config: auxProfileKey) equal an earlier
+// candidate's is checked once, with the FIRST project's path: one stale
+// profile shared by several projects costs one check per pass, not one per
+// project. This assumes equal runtime settings resolve to the same runtime
+// in every project, which holds while no runtime config value is resolved
+// relative to the project. The candidate counts as the active profile when
+// it is active in any of those projects.
+func collectAuxProfileCandidates(projectPaths []string) []auxProfileCandidate {
+	var cands []auxProfileCandidate
+	seen := make(map[string]int)
 	for _, gp := range projectPaths {
 		vs, _, _ := config.LoadEffectiveSettings(gp)
 		if vs == nil {
@@ -2008,34 +2138,117 @@ func (s *Server) discoverAuxiliaryRuntimesForProjects(projectPaths []string) {
 
 		for _, profileName := range profileNames {
 			// Only used here to skip profiles whose runtime entry doesn't
-			// exist at all; the actual default/de-dup comparisons below are
-			// by resolved IDENTITY, not by this settings-level type string,
+			// exist at all, and to recognise the same profile settings in
+			// another project; the default/de-dup comparisons are by
+			// resolved IDENTITY, not by this settings-level type string,
 			// so settings spellings that alias one runtime type (e.g. "k8s"
 			// and "kubernetes") don't register twice.
-			if _, _, err := vs.ResolveRuntime(profileName); err != nil {
+			rtConfig, runtimeType, err := vs.ResolveRuntime(profileName)
+			if err != nil {
 				continue
 			}
-
-			resolved, rec := s.resolveAuxiliaryRuntime(gp, "", profileName)
-			if resolved.Name() == "error" {
-				logUnresolvedAuxiliaryProfile(profileName, vs.ActiveProfile, resolved)
+			key := auxProfileKey(profileName, runtimeType, rtConfig, gp)
+			if i, ok := seen[key]; ok {
+				if profileName == vs.ActiveProfile {
+					cands[i].activeProfile = profileName
+				}
 				continue
 			}
-
-			identity := auxiliaryRuntimeIdentity(resolved)
-			if identity == defaultIdentity || discoveredIdentities[identity] {
-				continue
-			}
-			discoveredIdentities[identity] = true
-
-			mgr := agent.NewManager(resolved)
-			s.auxiliaryRuntimesMu.Lock()
-			s.auxiliaryRuntimes[identity] = auxiliaryRuntime{Runtime: resolved, Manager: mgr, Record: rec}
-			s.auxiliaryRuntimesMu.Unlock()
-
-			slog.Info("Discovered auxiliary runtime from project settings",
-				"runtime", resolved.Name(), "identity", identity, "profile", profileName)
+			seen[key] = len(cands)
+			cands = append(cands, auxProfileCandidate{projectPath: gp, profile: profileName, activeProfile: vs.ActiveProfile, key: key})
 		}
+	}
+	return cands
+}
+
+// auxCheckResult is the outcome of one profile runtime check.
+type auxCheckResult struct {
+	rt       scionrt.Runtime
+	rec      config.RuntimeBuildRecord
+	timedOut bool
+}
+
+// checkAuxProfileCandidates resolves every candidate's runtime,
+// auxDiscoveryConcurrency at a time, each bounded by the check timeout, and
+// returns the results in candidate order. A check that times out releases
+// its worker slot at once, is reported unavailable (and logged at Warn),
+// and is returned timedOut; its resolution keeps running and, if it later
+// succeeds, is registered by applyLateAuxResult. Once ctx is done no more
+// checks start, and the ones in flight are abandoned unreported (nil rt).
+func (s *Server) checkAuxProfileCandidates(ctx context.Context, cands []auxProfileCandidate, defaultIdentity string) []auxCheckResult {
+	resolver := s.resolveAuxiliaryRuntime
+	if resolver == nil {
+		resolver = agent.ResolveRuntimeWithRecord
+	}
+	timeout := s.auxProfileTimeout()
+	results := make([]auxCheckResult, len(cands))
+	sem := make(chan struct{}, auxDiscoveryConcurrency)
+	var wg sync.WaitGroup
+	for i, c := range cands {
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		wg.Add(1)
+		go func(i int, c auxProfileCandidate) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			done := make(chan auxCheckResult, 1)
+			go func() {
+				rt, rec := resolver(c.projectPath, "", c.profile)
+				done <- auxCheckResult{rt: rt, rec: rec}
+			}()
+			timer := time.NewTimer(timeout)
+			defer timer.Stop()
+			select {
+			case r := <-done:
+				results[i] = r
+			case <-timer.C:
+				results[i] = auxCheckResult{timedOut: true}
+				// Report first, then hand the result over: a late success
+				// clears the report, and must not be overwritten by it.
+				s.setProfileRuntimeUnavailable(c.key, c.profile, true)
+				logAuxProfileCheckTimedOut(c.profile, timeout)
+				go func() { s.applyLateAuxResult(ctx, c, <-done, defaultIdentity) }()
+			case <-ctx.Done():
+				go func() { <-done }()
+			}
+		}(i, c)
+	}
+	wg.Wait()
+	return results
+}
+
+// applyLateAuxResult handles a profile runtime check that finished after
+// the pass stopped waiting for it. Unless ctx is done (the server is
+// stopping), a runtime that resolved is registered under
+// auxiliaryRuntimesMu, the same lock and map every other registration uses,
+// unless its identity is the default's or is already registered, and the
+// profile's unavailable state is cleared. A failed one stays reported.
+func (s *Server) applyLateAuxResult(ctx context.Context, c auxProfileCandidate, r auxCheckResult, defaultIdentity string) {
+	if s.afterLateAuxResult != nil {
+		defer s.afterLateAuxResult()
+	}
+	if ctx.Err() != nil || r.rt == nil || r.rt.Name() == "error" {
+		return
+	}
+	s.setProfileRuntimeUnavailable(c.key, c.profile, false)
+	identity := auxiliaryRuntimeIdentity(r.rt)
+	if identity == defaultIdentity {
+		return
+	}
+	s.auxiliaryRuntimesMu.Lock()
+	_, exists := s.auxiliaryRuntimes[identity]
+	if !exists {
+		s.auxiliaryRuntimes[identity] = auxiliaryRuntime{Runtime: r.rt, Manager: agent.NewManager(r.rt), Record: r.rec}
+	}
+	s.auxiliaryRuntimesMu.Unlock()
+	if !exists {
+		slog.Info("Discovered auxiliary runtime from project settings after its check timed out",
+			"runtime", r.rt.Name(), "identity", identity, "profile", c.profile)
 	}
 }
 

@@ -8,7 +8,7 @@
 #
 # What it measures (design section 7, phase 1): queue-to-start latency, the
 # golangci-lint duration on the Cloud Run runner without the pkg/hub -c=1
-# compiler throttle, peak memory, and how much of /scratch the job uses.
+# compiler throttle, peak memory, and how much of the volume (HOME) the job uses.
 #
 # runs-on is the runner label ALONE: the mediator only serves jobs whose
 # labels are all RUNNER_LABEL (docs/architecture.md, "Labels"); a list such
@@ -17,7 +17,7 @@
 # RUNNER_LABEL's default in cr-ci/config.example.env (a test keeps them equal).
 #
 # memory.peak and memory.current are not available under gVisor (Cloud Run), so
-# the lint step samples /proc/meminfo and /scratch every 5 s and prints the peaks.
+# the lint step samples /proc/meminfo and the volume at HOME every 5 s and prints the peaks.
 # MemTotal-MemAvailable includes anything held in RAM files (tmpfs), such as the
 # RAM build cache.
 #
@@ -65,11 +65,13 @@ jobs:
           # paths relative to GITHUB_WORKSPACE and extracts them with
           # tar -C "$GITHUB_WORKSPACE", where ".." resolves physically. For
           # entries to land where Go and golangci-lint look, in both directions
-          # between ubuntu-latest and cr-ci, the work folder must be
-          # /home/runner/work (a link to /scratch/_work) and /scratch must
-          # mirror $HOME: ~/.cache -> /scratch/.cache, ~/go -> /scratch/go.
-          # Plus HOME=/home/runner and zstd (the cache version hashes the paths
-          # and the compression method). Fails the job if any of it is off.
+          # between ubuntu-latest and cr-ci, HOME must be /home/runner, on the
+          # runner's ephemeral-disk volume (mounted at HOME), with the work folder
+          # /home/runner/work, ~/.cache and ~/go as real directories on it (no
+          # links: physical paths equal logical ones; ~/.cache: see the RAM branch
+          # below, a link to the RAM directory with RUNNER_BUILD_CACHE_IN_RAM=true). Plus zstd (the cache
+          # version hashes the paths and the compression method). Fails the job
+          # if any of it is off.
           set -uo pipefail
           fail=0
           check() {
@@ -81,9 +83,17 @@ jobs:
             fi
           }
           check HOME "$HOME" /home/runner
-          check "work folder link /home/runner/work" "$(readlink /home/runner/work)" /scratch/_work
-          check "~/.cache link" "$(readlink "$HOME/.cache")" /scratch/.cache
-          check "~/go link" "$(readlink "$HOME/go")" /scratch/go
+          check "real directory /home/runner/work" "$(readlink -f /home/runner/work)" /home/runner/work
+          # RAM build cache (RUNNER_BUILD_CACHE_IN_RAM=true): ~/.cache is then a link to the
+          # entrypoint's RAM directory. The same branch as .github/actions/setup-go-cache
+          # (templates_test.go keeps the two in step).
+          if [ "${RUNNER_BUILD_CACHE_IN_RAM:-false}" = true ] && [ -L "$HOME/.cache" ]; then
+            check "HOME/.cache (RAM build cache)" "$(readlink -f "$HOME/.cache")" /tmp/cr-ci-build-cache
+          else
+            check "real directory ~/.cache" "$(readlink -f "$HOME/.cache")" /home/runner/.cache
+          fi
+          check "real directory ~/go" "$(readlink -f "$HOME/go")" /home/runner/go
+          check "HOME not on the root filesystem" "$([ "$(stat -c %d "$HOME")" != "$(stat -c %d /)" ] && echo volume)" volume
           check "go env GOCACHE" "$(go env GOCACHE)" /home/runner/.cache/go-build
           check "go env GOMODCACHE" "$(go env GOMODCACHE)" /home/runner/go/pkg/mod
           check "GITHUB_WORKSPACE parent" "${GITHUB_WORKSPACE%/*/*}" /home/runner/work
@@ -106,7 +116,7 @@ jobs:
           for v in GOCACHE GOMODCACHE GOLANGCI_LINT_CACHE TMPDIR RUNNER_TEMP; do echo "$v=${!v:-unset}"; done
           echo "go env GOCACHE=$(go env GOCACHE)"
           cat /sys/fs/cgroup/memory.max 2>/dev/null | sed 's/^/memory.max=/' || echo "memory.max unavailable"
-          df -h /scratch
+          df -h /home/runner /tmp
 
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -135,7 +145,7 @@ jobs:
             echo "gomoddownload=$(go env GOMODCACHE)/cache/download"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Restore the Go cache (on /scratch)
+      - name: Restore the Go cache (on the volume)
         id: restore
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -165,7 +175,7 @@ jobs:
             echo "go cache warm: yes"
           else
             echo "::warning title=cold Go cache::go cache warm: NO (key '${RESTORED_KEY:-none}', $files files in $gocache); compare the lint duration with CI's cold run, and check the parity step"
-            ls -la /scratch /home/runner 2>/dev/null || true
+            ls -la /home/runner 2>/dev/null || true
           fi
 
       # Same lint as ci.yml, but WITHOUT the pkg/hub -c=1 compiler throttle and
@@ -212,9 +222,9 @@ jobs:
               pbusy=$busy; ptot=$tot; psys=${s:-0}; pio=${w:-0}
               mt=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
               ma=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)
-              used_kb=$(df -k --output=used /scratch | tail -1 | tr -d ' ')
+              used_kb=$(df -k --output=used /home/runner | tail -1 | tr -d ' ')
               ncomp=$(pgrep -c -x compile || true)
-              echo "$(date -u +%H:%M:%S) mem_used_mb=$(( (mt - ma) / 1024 )) avail_mb=$(( ma / 1024 )) scratch_used_mb=$(( used_kb / 1024 )) compiles=$ncomp busy_cores=$cores sys_pct=$sysp iowait_cores=$iow t=$(( $(date +%s) - start ))" | tee -a "$samples"
+              echo "$(date -u +%H:%M:%S) mem_used_mb=$(( (mt - ma) / 1024 )) avail_mb=$(( ma / 1024 )) vol_used_mb=$(( used_kb / 1024 )) compiles=$ncomp busy_cores=$cores sys_pct=$sysp iowait_cores=$iow t=$(( $(date +%s) - start ))" | tee -a "$samples"
               if [ "$ma" -lt "$MEMGUARD_KB" ] && [ ! -e "$guard" ]; then
                 echo "$(date -u +%H:%M:%S) MemAvailable ${ma} KiB < ${MEMGUARD_KB} KiB at t=$(( $(date +%s) - start ))s" | tee "$guard"
                 echo "::error title=memory guard::MemAvailable fell below 2 GiB; stopping golangci-lint"
@@ -236,7 +246,7 @@ jobs:
           echo "golangci-lint exit=$rc duration=$(( end - start ))s"
           awk '{for (i = 2; i <= NF; i++) { split($i, kv, "="); v = kv[2] + 0; if (!(kv[1] in max) || v > max[kv[1]]) max[kv[1]] = v; if (!(kv[1] in min) || v < min[kv[1]]) min[kv[1]] = v }}
             {if ($0 ~ /busy_cores=/) {split($0, a, "busy_cores="); split(a[2], b, " "); sum += b[1]; n++}}
-            END {printf "sample peaks: mem_used_mb=%d scratch_used_mb=%d min avail_mb=%d max compiles=%d (%d samples)\n", max["mem_used_mb"], max["scratch_used_mb"], min["avail_mb"], max["compiles"], NR}
+            END {printf "sample peaks: mem_used_mb=%d vol_used_mb=%d min avail_mb=%d max compiles=%d (%d samples)\n", max["mem_used_mb"], max["vol_used_mb"], min["avail_mb"], max["compiles"], NR}
             END {printf "sample cpu: mean busy_cores=%.1f max sys_pct=%d max iowait_cores=%.1f\n", (n ? sum / n : 0), max["sys_pct"], max["iowait_cores"]}' "$samples"
           if [ -e "$guard" ]; then
             echo "MEMORY GUARD TRIPPED: $(cat "$guard")"
@@ -251,9 +261,7 @@ jobs:
           echo "memory.peak (bytes):"
           cat /sys/fs/cgroup/memory.peak 2>/dev/null || echo "unavailable (expected under gVisor; see the lint step's sample peaks)"
           grep -E '^(MemTotal|MemAvailable):' /proc/meminfo || true
-          df -h /scratch
-          du -sh /scratch/* 2>/dev/null || true
-          ls -ld "$HOME/.cache" 2>/dev/null || true
-          ls -ld "$HOME/go" /home/runner/work 2>/dev/null || true
-          du -sh "$HOME/.cache/" "$HOME/go/" 2>/dev/null || true   # trailing slash: follows the links to /scratch
-          du -shx "$HOME" 2>/dev/null || true             # what stayed on the in-memory root filesystem
+          df -h /home/runner
+          du -sh /home/runner/* /home/runner/.cache /home/runner/.npm 2>/dev/null || true
+          ls -ld "$HOME/.cache" "$HOME/go" /home/runner/work 2>/dev/null || true
+          du -shx /tmp 2>/dev/null || true                # temp files on the in-memory root filesystem (TMPDIR is unset)

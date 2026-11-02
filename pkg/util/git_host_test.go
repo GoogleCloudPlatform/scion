@@ -123,6 +123,7 @@ func TestHostGitArgs(t *testing.T) {
 		"-c", "merge.verifySignatures=false",
 		"-c", "commit.gpgsign=false",
 		"-c", "tag.gpgsign=false",
+		"-c", "http.emptyAuth=false",
 	}
 	if got := HostGitArgs(); !reflect.DeepEqual(got, want) {
 		t.Errorf("HostGitArgs() = %q, want %q", got, want)
@@ -235,7 +236,11 @@ func TestHostGitCommand_PolicyRefuses(t *testing.T) {
 				t.Run(name, func(t *testing.T) {
 					repo, _ := newHostGitRepo(t)
 					hostRunGit(t, repo, "config", c.key, c.value)
-					_, err := HostGitCommand(context.Background(), repo, HostGitOptions{Policy: mode, Network: network}, "status")
+					opts := HostGitOptions{Policy: mode, Network: network}
+					if network {
+						opts.Remote = NewHostGitRemote("https://git.example.test/r.git", "")
+					}
+					_, err := HostGitCommand(context.Background(), repo, opts, "status")
 					var refused *RepoConfigRefusedError
 					if !errors.As(err, &refused) {
 						t.Fatalf("error = %v, want *RepoConfigRefusedError", err)
@@ -354,7 +359,7 @@ func TestHostGitCommand_GlobalKeysNotChecked(t *testing.T) {
 	hostRunGit(t, repo, "config", "--file", global, "url.https://mirror.example/.insteadOf", "https://github.com/")
 	hostRunGit(t, repo, "config", "--file", global, "credential.helper", "store")
 	hostRunGit(t, repo, "config", "--file", global, "core.sshCommand", "ssh -v")
-	if _, err := HostGitCommand(context.Background(), repo, HostGitOptions{Policy: RepoPolicyManaged, Network: true}, "fetch"); err != nil {
+	if _, err := HostGitCommand(context.Background(), repo, HostGitOptions{Policy: RepoPolicyManaged, Network: true, Remote: NewHostGitRemote("https://git.example.test/r.git", "")}, "fetch"); err != nil {
 		t.Fatalf("global keys triggered a refusal: %v", err)
 	}
 }
@@ -593,6 +598,125 @@ func TestPullSharedWorkspace_ConfiguredUpstreamBranch(t *testing.T) {
 	}
 }
 
+// A workspace whose config the policy refuses is refused at the pull's first
+// local step, so a detached workspace reports the refusal (naming the key,
+// never the value) rather than that it is not on a branch.
+// Mutant this catches: the branch lookup back on raw hostGit (no policy
+// check), which reports "not on a branch" for (b).
+func TestPullSharedWorkspace_RefusedConfigRefusedBeforeBranchLookup(t *testing.T) {
+	const sentinel = "SCIONSENTINEL7f3a"
+	source, workspace, _ := sharedWorkspaceFixture(t)
+	hostRunGit(t, workspace, "checkout", "-q", "--detach")
+
+	// (a) Control: clean config, detached HEAD.
+	_, err := PullSharedWorkspace(workspace, source, "")
+	if err == nil || !strings.Contains(err.Error(), "not on a branch") {
+		t.Fatalf("control: PullSharedWorkspace error = %v, want \"not on a branch\"", err)
+	}
+
+	// (b) The same workspace with a key the managed policy refuses.
+	cfg := filepath.Join(workspace, ".git", "config")
+	data, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, []byte("[core]\n\tsshCommand = ssh -i /nonexistent/"+sentinel+"\n")...)
+	if err := os.WriteFile(cfg, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = PullSharedWorkspace(workspace, source, "")
+	if err == nil {
+		t.Fatal("PullSharedWorkspace succeeded with a refused workspace config")
+	}
+	msg := err.Error()
+	if !strings.Contains(strings.ToLower(msg), "core.sshcommand") {
+		t.Errorf("error = %q, want it to name core.sshCommand", msg)
+	}
+	if strings.Contains(msg, "not on a branch") {
+		t.Errorf("error = %q, want the refusal, not \"not on a branch\"", msg)
+	}
+	if strings.Contains(msg, sentinel) {
+		t.Errorf("error %q prints the refused value", msg)
+	}
+}
+
+// A workspace cloned from an empty repository is on an unborn branch; its
+// first pull updates it and reports Updated.
+// Mutant this catches: the HEAD reads returning "" on a non-zero exit (on an
+// unborn branch rev-parse prints HEAD and exits non-zero), which makes
+// Updated false.
+func TestPullSharedWorkspace_EmptySourceFirstCommitUpdates(t *testing.T) {
+	hostGitTestEnv(t)
+	source := filepath.Join(t.TempDir(), "source")
+	hostRunGit(t, filepath.Dir(source), "init", "-q", "-b", "main", source)
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	if err := CloneSharedWorkspace(workspace, source, "feature", ""); err != nil {
+		t.Fatalf("CloneSharedWorkspace: %v", err)
+	}
+	hostRunGit(t, source, "checkout", "-q", "-b", "feature")
+	commitFile(t, source, "first.txt", "first\n", "first commit")
+
+	result, err := PullSharedWorkspace(workspace, source, "")
+	if err != nil {
+		t.Fatalf("PullSharedWorkspace: %v", err)
+	}
+	if !result.Updated {
+		t.Errorf("result = %+v, want Updated", result)
+	}
+	if got, want := hostRunGit(t, workspace, "rev-parse", "HEAD"), hostRunGit(t, source, "rev-parse", "HEAD"); got != want {
+		t.Errorf("workspace HEAD = %s, want the source commit %s", got, want)
+	}
+}
+
+// The clone's fallback branch checkout keeps host global config isolated, as
+// the clone does: a host branch.autoSetupMerge=inherit does not give the new
+// branch the default branch's upstream.
+// Mutant this catches: the checkout running with baseEnv instead of the
+// remote layer. The checkout would then write branch.<name>.merge, a
+// sensitive key, so the test fails either at the clone (the door's after-run
+// check) or at the config assertion.
+func TestCloneSharedWorkspace_FallbackCheckoutIgnoresHostGlobalConfig(t *testing.T) {
+	source, _ := newHostGitRepo(t)
+	global := os.Getenv("GIT_CONFIG_GLOBAL")
+	f, err := os.OpenFile(global, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("[branch]\n\tautoSetupMerge = inherit\n"); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	if err := CloneSharedWorkspace(workspace, source, "not-on-remote", ""); err != nil {
+		t.Fatalf("CloneSharedWorkspace: %v", err)
+	}
+	if got := hostRunGit(t, workspace, "branch", "--show-current"); got != "not-on-remote" {
+		t.Fatalf("branch = %q, want not-on-remote", got)
+	}
+	out, err := exec.Command("git", "-C", workspace, "config", "--get", "branch.not-on-remote.merge").CombinedOutput()
+	if err == nil {
+		t.Errorf("branch.not-on-remote.merge = %q, want unset (the checkout read host global config)", strings.TrimSpace(string(out)))
+	}
+}
+
+// An upstream branch name that does not make a valid tracking ref fails the
+// pull before the fetch.
+// Mutant this catches: dropping the check-ref-format step (the error would
+// not name the invalid branch).
+func TestPullSharedWorkspace_InvalidUpstreamBranchName(t *testing.T) {
+	source, workspace, _ := sharedWorkspaceFixture(t)
+	branch := hostRunGit(t, workspace, "symbolic-ref", "--short", "HEAD")
+	hostRunGit(t, workspace, "config", "branch."+branch+".merge", "refs/heads/a..b")
+
+	_, err := PullSharedWorkspace(workspace, source, "")
+	if err == nil || !strings.Contains(err.Error(), `invalid branch name "a..b"`) {
+		t.Fatalf("PullSharedWorkspace error = %v, want the invalid branch name refusal", err)
+	}
+}
+
 // Host-side worktree creation leaves ordinary git use in the worktree
 // unchanged: commit, push, fetch and rebase work.
 func TestCreateWorktree_WorktreeSupportsCommitPushFetchRebase(t *testing.T) {
@@ -634,7 +758,11 @@ func TestCreateWorktree_WorktreeSupportsCommitPushFetchRebase(t *testing.T) {
 func TestHostGitCommand_CarriesFixedArgs(t *testing.T) {
 	repo, _ := newHostGitRepo(t)
 	for _, network := range []bool{false, true} {
-		cmd, err := HostGitCommand(context.Background(), repo, HostGitOptions{Network: network}, "merge", "--ff-only", "HEAD")
+		opts := HostGitOptions{Network: network}
+		if network {
+			opts.Remote = NewHostGitRemote("https://git.example.test/r.git", "")
+		}
+		cmd, err := HostGitCommand(context.Background(), repo, opts, "merge", "--ff-only", "HEAD")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -729,9 +857,125 @@ func TestHostGitEnv(t *testing.T) {
 		"GIT_CONFIG_PARAMETERS='a.b=c'", "GIT_EXEC_PATH=/e", "GIT_EDITOR=vi", "GIT_PAGER=less",
 		"GIT_CONFIG_GLOBAL=/g", "GIT_CONFIG_NOSYSTEM=1", "GIT_SSH_COMMAND=ssh", "GIT_TERMINAL_PROMPT=0",
 	}
-	want := []string{"HOME=/h", "PATH=/bin", "GIT_CONFIG_GLOBAL=/g", "GIT_CONFIG_NOSYSTEM=1", "GIT_SSH_COMMAND=ssh", "GIT_TERMINAL_PROMPT=0"}
+	want := []string{"HOME=/h", "PATH=/bin", "GIT_CONFIG_GLOBAL=/g", "GIT_CONFIG_NOSYSTEM=1", "GIT_SSH_COMMAND=ssh", "GIT_TERMINAL_PROMPT=0", "LC_ALL=C"}
 	if got := HostGitEnv(in); !reflect.DeepEqual(got, want) {
 		t.Errorf("HostGitEnv = %q, want %q", got, want)
+	}
+}
+
+// HostGitEnv drops every host authentication variable no host-side git call
+// relies on, one row each, and the TLS client certificate variables (GIT_*,
+// not kept).
+// Mutants this catches, one per row: deleting the SSH_AUTH_SOCK, SSH_ASKPASS,
+// NETRC, GSS_USE_PROXY, KRB5CCNAME, KRB5_CLIENT_KTNAME or remote-layer marker
+// entry from hostGitEnvDropped; adding GIT_SSL_CERT, GIT_SSL_KEY,
+// GIT_SSL_CERT_PASSWORD_PROTECTED or GIT_SSL_NO_VERIFY to hostGitEnvKept.
+func TestHostGitEnv_DropsHostAuthVariables(t *testing.T) {
+	for _, key := range []string{
+		"SSH_AUTH_SOCK", "SSH_ASKPASS", "NETRC", "GSS_USE_PROXY", "KRB5CCNAME", "KRB5_CLIENT_KTNAME",
+		hostGitRemoteLayerEnv,
+		"GIT_SSL_CERT", "GIT_SSL_KEY", "GIT_SSL_CERT_PASSWORD_PROTECTED", "GIT_SSL_NO_VERIFY",
+	} {
+		t.Run(key, func(t *testing.T) {
+			got := HostGitEnv([]string{"PATH=/bin", key + "=x", "LC_ALL=de_DE.UTF-8"})
+			want := []string{"PATH=/bin", "LC_ALL=C"}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("HostGitEnv = %q, want %q (%s dropped, LC_ALL=C kept)", got, want, key)
+			}
+		})
+	}
+}
+
+// envValues returns every value of key in env, in order.
+func envValues(env []string, key string) []string {
+	var vals []string
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == key {
+			vals = append(vals, v)
+		}
+	}
+	return vals
+}
+
+// HostGitEnv drops an inherited LC_ALL and sets exactly one LC_ALL=C, which is
+// also the effective value under os/exec's last-wins dedupe; inherited LANG,
+// LANGUAGE and LC_MESSAGES stay (LC_ALL overrides them). An input without
+// LC_ALL gains it.
+// Mutants this catches: deleting the LC_ALL=C append (no LC_ALL, or the
+// inherited de_DE value survives); appending before the scrub (the append is
+// scrubbed, or the inherited value is the last one); keeping the inherited
+// LC_ALL (two entries).
+func TestHostGitEnv_LCAllC(t *testing.T) {
+	in := []string{"PATH=/bin", "LC_ALL=de_DE.UTF-8", "LANG=de_DE.UTF-8", "LANGUAGE=de", "LC_MESSAGES=de_DE.UTF-8"}
+	got := HostGitEnv(in)
+	if vals := envValues(got, "LC_ALL"); len(vals) != 1 || vals[0] != "C" {
+		t.Errorf("LC_ALL values = %q, want exactly [C]", vals)
+	}
+	if last := got[len(got)-1]; last != "LC_ALL=C" {
+		t.Errorf("last entry = %q, want LC_ALL=C (the effective value after a last-wins dedupe)", last)
+	}
+	for _, kv := range []string{"LANG=de_DE.UTF-8", "LANGUAGE=de", "LC_MESSAGES=de_DE.UTF-8"} {
+		k, v, _ := strings.Cut(kv, "=")
+		if vals := envValues(got, k); len(vals) != 1 || vals[0] != v {
+			t.Errorf("%s values = %q, want it kept as %q", k, vals, v)
+		}
+	}
+	if vals := envValues(HostGitEnv([]string{"PATH=/bin"}), "LC_ALL"); len(vals) != 1 || vals[0] != "C" {
+		t.Errorf("without an inherited LC_ALL: LC_ALL values = %q, want exactly [C]", vals)
+	}
+}
+
+// setGermanLocale sets the four locale variables a user's environment could
+// carry to German values for the test.
+func setGermanLocale(t *testing.T) {
+	t.Helper()
+	t.Setenv("LC_ALL", "de_DE.UTF-8")
+	t.Setenv("LANG", "de_DE.UTF-8")
+	t.Setenv("LANGUAGE", "de")
+	t.Setenv("LC_MESSAGES", "de_DE.UTF-8")
+}
+
+// With a German locale inherited, the door still makes real git report in
+// English. The negative control runs plain git in the same directory with
+// the same locale: if it is also English, this host's git has no German
+// translation and the leak cannot be shown, so the test skips.
+// Mutant this catches (on a host whose git translates): deleting the
+// LC_ALL=C append from HostGitEnv (the door's stderr is translated).
+func TestRunHostGit_LocaleIsC(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	hostGitTestEnv(t)
+	setGermanLocale(t)
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := RunHostGit(context.Background(), dir, HostGitOptions{}, "rev-parse", "--is-inside-work-tree")
+	if res.Err != nil {
+		t.Fatalf("Err = %v", res.Err)
+	}
+	if !strings.HasPrefix(string(res.Stderr), "fatal: not a git repository") {
+		t.Errorf("door stderr = %q, want the English \"fatal: not a git repository\"", res.Stderr)
+	}
+	control := exec.Command("git", "rev-parse", "--is-inside-work-tree")
+	control.Dir = dir
+	control.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + t.TempDir(),
+		"GIT_CONFIG_GLOBAL=" + os.DevNull,
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CEILING_DIRECTORIES=" + filepath.Dir(dir),
+		"LC_ALL=de_DE.UTF-8",
+		"LANG=de_DE.UTF-8",
+		"LANGUAGE=de",
+		"LC_MESSAGES=de_DE.UTF-8",
+	}
+	var stderr bytes.Buffer
+	control.Stderr = &stderr
+	_ = control.Run()
+	if strings.HasPrefix(stderr.String(), "fatal: not a git repository") {
+		t.Skip("this host's git has no German translation (plain git under the German locale also reports in English), so a locale leak cannot be shown here")
 	}
 }
 
@@ -865,7 +1109,7 @@ func TestHostGitCommand_ChecksMainWorktreeConfig(t *testing.T) {
 // A remote operation carries the transport allow-list.
 func TestHostGitCommand_NetworkTransportAllowlist(t *testing.T) {
 	repo, _ := newHostGitRepo(t)
-	cmd, err := HostGitCommand(context.Background(), repo, HostGitOptions{Network: true}, "fetch")
+	cmd, err := HostGitCommand(context.Background(), repo, HostGitOptions{Network: true, Remote: NewHostGitRemote("https://git.example.test/r.git", "")}, "fetch")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1191,7 +1435,7 @@ func TestSafeGitCommandBuilderSkipsLFSSmudge(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !slices.Contains(cmd.Env, "GIT_LFS_SKIP_SMUDGE=1") {
-		t.Errorf("env lacks GIT_LFS_SKIP_SMUDGE=1: %v", cmd.Env)
+		t.Errorf("env lacks GIT_LFS_SKIP_SMUDGE=1 (env not printed: it is the real process environment)")
 	}
 }
 
@@ -1860,7 +2104,11 @@ func TestHostGitCommand_RefusesRootCommonDirRedirect(t *testing.T) {
 //     writes its PID to ./.fake-hold-pid, and exits 0;
 //   - fake-arm: creates ./.fake-armed and exits 0; from then on a config
 //     listing in that directory becomes sleep 120 (so the after-run check
-//     blocks).
+//     blocks);
+//   - fake-pwd: writes its physical working directory to $FAKE_PWD_FILE
+//     and exits 0;
+//   - with $FAKE_CONFIG_PWD_FILE set, every config listing appends its
+//     physical working directory to that file before running git.
 func fakeGitOnPath(t *testing.T) (log string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -1873,7 +2121,7 @@ func fakeGitOnPath(t *testing.T) (log string) {
 	dir := t.TempDir()
 	log = filepath.Join(dir, "calls.log")
 	script := "#!/bin/sh\n" +
-		"{ printf 'ARGV\\t%s\\n' \"$*\"; env | grep '^GIT_' | sort | sed 's/^/ENV\\t/'; printf 'END\\n'; } >> '" + log + "'\n" +
+		"{ printf 'ARGV\\t%s\\n' \"$*\"; env | grep -E '^(GIT_[A-Za-z0-9_]*|LC_ALL|LANG|LANGUAGE|LC_MESSAGES)=' | sort | sed 's/^/ENV\\t/'; printf 'END\\n'; } >> '" + log + "'\n" +
 		"case \" $* \" in\n" +
 		"*' fake-stderr '*) printf '" + strings.ReplaceAll(fakeGitStderr, "\n", "\\n") + "' >&2; exit 3;;\n" +
 		"*' fake-mutate '*) printf '[core]\\n\\tsshCommand = fake-marker-m1\\n' >> .git/config; exit 0;;\n" +
@@ -1881,7 +2129,9 @@ func fakeGitOnPath(t *testing.T) (log string) {
 		"*' fake-block '*) touch .fake-started; exec sleep 30;;\n" +
 		"*' fake-hold '*) sleep 30 & echo $! > .fake-hold-pid; exit 0;;\n" +
 		"*' fake-arm '*) touch .fake-armed; exit 0;;\n" +
-		"*' config --show-scope '*) if [ -e .fake-armed ]; then exec sleep 120; fi;;\n" +
+		"*' fake-pwd '*) pwd -P > \"$FAKE_PWD_FILE\"; exit 0;;\n" +
+		"*' config --show-scope '*) if [ -e .fake-armed ]; then exec sleep 120; fi; " +
+		"if [ -n \"$FAKE_CONFIG_PWD_FILE\" ]; then pwd -P >> \"$FAKE_CONFIG_PWD_FILE\"; fi;;\n" +
 		"esac\n" +
 		"exec '" + realGit + "' \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755); err != nil {
@@ -1897,8 +2147,9 @@ const fakeGitStderr = " raw: fake-marker-e1\n\tsecond line \n"
 
 // fakeGitCall is one recorded call of the wrapper.
 type fakeGitCall struct {
-	argv string
-	env  map[string]string // GIT_* variables only
+	argv   string
+	env    map[string]string // GIT_* variables only
+	locale map[string]string // LC_ALL, LANG, LANGUAGE and LC_MESSAGES as git saw them
 }
 
 // fakeGitCalls parses the wrapper's log.
@@ -1913,11 +2164,15 @@ func fakeGitCalls(t *testing.T, log string) []fakeGitCall {
 	for _, line := range strings.Split(string(data), "\n") {
 		switch {
 		case strings.HasPrefix(line, "ARGV\t"):
-			calls = append(calls, fakeGitCall{argv: strings.TrimPrefix(line, "ARGV\t"), env: map[string]string{}})
+			calls = append(calls, fakeGitCall{argv: strings.TrimPrefix(line, "ARGV\t"), env: map[string]string{}, locale: map[string]string{}})
 			cur = &calls[len(calls)-1]
 		case strings.HasPrefix(line, "ENV\t") && cur != nil:
 			k, v, _ := strings.Cut(strings.TrimPrefix(line, "ENV\t"), "=")
-			cur.env[k] = v
+			if strings.HasPrefix(k, "GIT_") {
+				cur.env[k] = v
+			} else {
+				cur.locale[k] = v
+			}
 		}
 	}
 	return calls
@@ -2227,8 +2482,10 @@ func ceilingLeaf(t *testing.T, parent, rel string) string {
 	return leaf
 }
 
+// ceilingEnv is the door's environment; HostGitEnv sets LC_ALL=C, so git's
+// messages are untranslated.
 func ceilingEnv() []string {
-	return append(HostGitEnv(os.Environ()), "LC_ALL=C")
+	return HostGitEnv(os.Environ())
 }
 
 // Ceiling (a): by default git in a non-repository leaf inside a repository
@@ -2346,16 +2603,22 @@ func TestRunHostGit_CeilingLeafBecomesRepository(t *testing.T) {
 		t.Fatal(err)
 	}
 	fakeGitOnPath(t)
-	res = RunHostGit(context.Background(), leaf, HostGitOptions{Env: ceilingEnv()}, "fake-mkgit")
+	res = RunHostGit(context.Background(), leaf, HostGitOptions{Env: ceilingEnv()}, "rev-parse", "fake-mkgit")
 	if !errors.Is(res.Err, ErrRepoConfigChanged) {
 		t.Errorf("a .git created during the run: Err = %v, want ErrRepoConfigChanged", res.Err)
+	}
+	// The after-run .git check fired, not the resolved-elsewhere one.
+	// Mutant: removing the after-run .git check (no error at all).
+	if res.Err == nil || !strings.Contains(res.Err.Error(), "a repository appeared in the command's directory while it ran") {
+		t.Errorf("Err = %v, want the after-run repository-appeared refusal", res.Err)
 	}
 }
 
 // The door's own listings (readFilterPins, and crossCheckAgainstGit through
 // the policy check) run with the door's environment and the HostGitArgs pins
 // first, and see no inherited variable that chooses a repository or adds
-// config. readFilterPins sees exactly the main command's environment,
+// config, and run with LC_ALL=C over an inherited German locale.
+// readFilterPins sees exactly the main command's environment,
 // GIT_CEILING_DIRECTORIES included when the door sets it. The global and
 // system config values are whatever HostGitEnv passes; an empty-config
 // assertion arrives with the change that sets those defaults in HostGitEnv.
@@ -2372,6 +2635,7 @@ func TestHostGitCheckers_DoorListingsUseDoorEnv(t *testing.T) {
 			}
 			log := fakeGitOnPath(t)
 			plantInheritedGitEnv(t)
+			setGermanLocale(t)
 			want := gitEnvMap(HostGitEnv(os.Environ()))
 			if mode == "discovery" {
 				resolved, err := filepath.EvalSymlinks(dir)
@@ -2397,6 +2661,12 @@ func TestHostGitCheckers_DoorListingsUseDoorEnv(t *testing.T) {
 				if d := diffEnvKeys(c.env, want); len(d) > 0 {
 					t.Errorf("call %q: environment differs from the door's in %v", c.argv, d)
 				}
+				// The effective LC_ALL git saw is C despite the inherited German
+				// locale. Mutant: deleting HostGitEnv's LC_ALL=C append (git sees
+				// de_DE.UTF-8).
+				if c.locale["LC_ALL"] != "C" {
+					t.Errorf("call %q ran with LC_ALL=%q, want C", c.argv, c.locale["LC_ALL"])
+				}
 				switch {
 				case strings.HasSuffix(c.argv, " rev-parse --is-inside-work-tree"):
 					main++
@@ -2417,4 +2687,259 @@ func TestHostGitCheckers_DoorListingsUseDoorEnv(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The caller's first argument must be the subcommand: an option there
+// (including "--"), or no argument at all, is refused before git runs, in
+// repository and discovery mode, with an error that names no path. Options
+// after the subcommand run.
+// Mutant this catches: removing the first-argument check (the fake git
+// records the call, and the error is not errHostGitArgsOption).
+func TestRunHostGit_RefusesLeadingOption(t *testing.T) {
+	repo, _ := newHostGitRepo(t)
+	leaf := ceilingLeaf(t, ceilingFixture(t, false), "sub/leaf")
+	log := fakeGitOnPath(t)
+	refused := [][]string{
+		{"-C", "x", "status"},
+		{"-C/x", "status"},
+		{"--git-dir=x", "status"},
+		{"--git-dir", "x", "status"},
+		{"--work-tree=x", "status"},
+		{"-c", "k=v", "status"},
+		{"--", "status"},
+		{""},
+		{},
+	}
+	for mode, dir := range map[string]string{"repository": repo, "discovery": leaf} {
+		for _, args := range refused {
+			res := RunHostGit(context.Background(), dir, HostGitOptions{Env: ceilingEnv()}, args...)
+			if !errors.Is(res.Err, errHostGitArgsOption) {
+				t.Errorf("%s %q: Err = %v, want the leading-option refusal", mode, args, res.Err)
+				continue
+			}
+			if res.ExitCode != -1 || strings.Contains(res.Err.Error(), dir) {
+				t.Errorf("%s %q: exit %d, err %q; want -1 and no path", mode, args, res.ExitCode, res.Err)
+			}
+		}
+	}
+	if calls := fakeGitCalls(t, log); len(calls) != 0 {
+		t.Errorf("git ran %d times for refused arguments", len(calls))
+	}
+	for _, args := range [][]string{{"rev-parse", "--git-dir"}, {"worktree", "list", "--porcelain"}} {
+		if res := RunHostGit(context.Background(), repo, HostGitOptions{Env: ceilingEnv()}, args...); res.Err != nil || res.ExitCode != 0 {
+			t.Errorf("repository %q: exit %d, err %v; want it to run", args, res.ExitCode, res.Err)
+		}
+	}
+}
+
+// Discovery mode runs only rev-parse: other subcommands are refused before
+// git runs.
+// Mutant this catches: removing the discovery subcommand check (the fake git
+// records the refused subcommands).
+func TestRunHostGit_DiscoveryRunsOnlyRevParse(t *testing.T) {
+	leaf := ceilingLeaf(t, ceilingFixture(t, false), "sub/leaf")
+	log := fakeGitOnPath(t)
+	for _, sub := range []string{"init", "clone", "config", "status", "worktree"} {
+		res := RunHostGit(context.Background(), leaf, HostGitOptions{Env: ceilingEnv()}, sub)
+		if !errors.Is(res.Err, errHostGitDiscoverySubcommand) || res.ExitCode != -1 {
+			t.Errorf("%s: exit %d, err %v; want the discovery subcommand refusal", sub, res.ExitCode, res.Err)
+		}
+		if strings.Contains(res.Err.Error(), leaf) {
+			t.Errorf("%s: refusal names the directory: %q", sub, res.Err)
+		}
+	}
+	if calls := fakeGitCalls(t, log); len(calls) != 0 {
+		t.Errorf("git ran %d times for refused subcommands", len(calls))
+	}
+	res := RunHostGit(context.Background(), leaf, HostGitOptions{Env: ceilingEnv()}, "rev-parse", "--is-inside-work-tree")
+	if res.Err != nil || res.ExitCode != 128 || !strings.Contains(string(res.Stderr), "not a git repository") {
+		t.Errorf("rev-parse: exit %d, err %v, stderr %q; want it to run and report not a git repository", res.ExitCode, res.Err, res.Stderr)
+	}
+}
+
+// Discovery mode runs git, and its config listing, in the directory as
+// resolved before it starts: a symlink repointed right after resolution
+// (here from the hostGitAfterResolve test hook) does not move them, and the
+// after-run check fails the command because the directory now resolves
+// elsewhere.
+// Mutants this catches: cmd.Dir = dir (the command runs in B);
+// readFilterPins(ctx, dir, ...) instead of runDir (the listing runs in B);
+// verify not re-resolving (Err is nil).
+func TestRunHostGit_DiscoveryPinsResolvedDir(t *testing.T) {
+	hostGitTestEnv(t)
+	base := t.TempDir()
+	dirA := filepath.Join(base, "a")
+	dirB := filepath.Join(base, "b")
+	for _, d := range []string{dirA, dirB} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(dirA, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	wantA, err := filepath.EvalSymlinks(dirA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeGitOnPath(t)
+	pwdFile := filepath.Join(t.TempDir(), "pwd")
+	listingFile := filepath.Join(t.TempDir(), "listing-pwd")
+	t.Setenv("FAKE_PWD_FILE", pwdFile)
+	t.Setenv("FAKE_CONFIG_PWD_FILE", listingFile)
+	orig := hostGitAfterResolve
+	hostGitAfterResolve = func(string) {
+		if err := os.Remove(link); err != nil {
+			t.Errorf("fixture: %v", err)
+		}
+		if err := os.Symlink(dirB, link); err != nil {
+			t.Errorf("fixture: %v", err)
+		}
+	}
+	t.Cleanup(func() { hostGitAfterResolve = orig })
+	res := RunHostGit(context.Background(), link, HostGitOptions{Env: ceilingEnv()}, "rev-parse", "fake-pwd")
+	got, err := os.ReadFile(pwdFile)
+	if err != nil {
+		t.Fatalf("the command did not run: %v (Err %v)", err, res.Err)
+	}
+	if strings.TrimSpace(string(got)) != wantA {
+		t.Errorf("git ran in %q, want the resolved %q", strings.TrimSpace(string(got)), wantA)
+	}
+	listing, err := os.ReadFile(listingFile)
+	if err != nil {
+		t.Fatalf("no config listing ran: %v", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(listing)), "\n") {
+		if line != wantA {
+			t.Errorf("the config listing ran in %q, want the resolved %q", line, wantA)
+		}
+	}
+	if target, _ := os.Readlink(link); target != dirB {
+		t.Fatalf("fixture: the link was not repointed (now %q)", target)
+	}
+	if !errors.Is(res.Err, ErrRepoConfigChanged) {
+		t.Errorf("Err = %v, want ErrRepoConfigChanged after the directory resolved elsewhere", res.Err)
+	}
+}
+
+// A .git that appears in the resolved directory after the first discovery
+// check (here from the hostGitAfterResolve test hook) is refused before git
+// runs there.
+// Mutant this catches: removing the re-check of the resolved directory (the
+// fake git records the config listing and the command, and Err is not the
+// before-run refusal).
+func TestRunHostGit_DiscoveryRechecksResolvedDir(t *testing.T) {
+	leaf := ceilingLeaf(t, ceilingFixture(t, false), "sub/leaf")
+	log := fakeGitOnPath(t)
+	orig := hostGitAfterResolve
+	hostGitAfterResolve = func(resolved string) {
+		if err := os.Mkdir(filepath.Join(resolved, ".git"), 0o755); err != nil {
+			t.Errorf("fixture: %v", err)
+		}
+	}
+	t.Cleanup(func() { hostGitAfterResolve = orig })
+	res := RunHostGit(context.Background(), leaf, HostGitOptions{Env: ceilingEnv(), Audience: AudienceRemote}, "rev-parse", "--is-inside-work-tree")
+	if !errors.Is(res.Err, ErrRepoConfigChanged) || !strings.Contains(res.Err.Error(), "before it ran") {
+		t.Fatalf("Err = %v, want the before-run repository-appeared refusal", res.Err)
+	}
+	if res.ExitCode != -1 || strings.Contains(res.Err.Error(), leaf) {
+		t.Errorf("exit %d, err %q; want -1 and no path", res.ExitCode, res.Err)
+	}
+	if calls := fakeGitCalls(t, log); len(calls) != 0 {
+		t.Errorf("git ran %d times after the directory became a repository", len(calls))
+	}
+}
+
+// The after-run check in discovery mode looks for a repository in the
+// resolved directory, where git ran, not in the caller's directory: a .git
+// that git creates in A is still found when the caller's symlink is
+// repointed to B (here from the hostGitBeforeVerifyDiscover test hook)
+// between the resolve comparison and the .git check.
+// Mutant this catches: verify calling hostGitDiscovers(dir, ...) (it would
+// inspect B, find no .git and pass, so Err would be nil).
+func TestRunHostGit_DiscoveryVerifyChecksResolvedDir(t *testing.T) {
+	setup := func(t *testing.T) (link, dirA, dirB string) {
+		t.Helper()
+		hostGitTestEnv(t)
+		base := t.TempDir()
+		dirA = filepath.Join(base, "a")
+		dirB = filepath.Join(base, "b")
+		for _, d := range []string{dirA, dirB} {
+			if err := os.MkdirAll(d, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		link = filepath.Join(base, "link")
+		if err := os.Symlink(dirA, link); err != nil {
+			t.Skipf("symlink: %v", err)
+		}
+		fakeGitOnPath(t)
+		return link, dirA, dirB
+	}
+	// repoint swaps link to dirB from the hook, between the resolve
+	// comparison and the .git check, with an atomic rename.
+	repoint := func(t *testing.T, link, dirB string) {
+		t.Helper()
+		orig := hostGitBeforeVerifyDiscover
+		hostGitBeforeVerifyDiscover = func(string) {
+			tmp := link + ".new"
+			if err := os.Symlink(dirB, tmp); err != nil {
+				t.Errorf("fixture: %v", err)
+				return
+			}
+			if err := os.Rename(tmp, link); err != nil {
+				t.Errorf("fixture: %v", err)
+			}
+		}
+		t.Cleanup(func() { hostGitBeforeVerifyDiscover = orig })
+	}
+
+	t.Run("repository appears in the resolved directory", func(t *testing.T) {
+		link, dirA, dirB := setup(t)
+		repoint(t, link, dirB)
+		res := RunHostGit(context.Background(), link, HostGitOptions{Env: ceilingEnv(), Audience: AudienceRemote}, "rev-parse", "fake-mkgit")
+		if target, _ := os.Readlink(link); target != dirB {
+			t.Fatalf("fixture: the link was not repointed (now %q)", target)
+		}
+		if _, err := os.Lstat(filepath.Join(dirA, ".git")); err != nil {
+			t.Fatalf("fixture: the fake git did not create A/.git: %v", err)
+		}
+		if !errors.Is(res.Err, ErrRepoConfigChanged) || !strings.Contains(res.Err.Error(), "a repository appeared in the command's directory while it ran") {
+			t.Fatalf("Err = %v, want the after-run repository-appeared refusal", res.Err)
+		}
+		for _, p := range []string{link, dirA, dirB} {
+			if strings.Contains(res.Err.Error(), p) {
+				t.Errorf("Err %q names the host path %q for a remote audience", res.Err, p)
+			}
+		}
+	})
+
+	// Negative control: the same repoint with a fake git that creates
+	// nothing. The repoint alone does not fail the command, so the failure
+	// above comes from the .git created in A.
+	t.Run("repoint alone does not fail the command", func(t *testing.T) {
+		link, dirA, dirB := setup(t)
+		wantA, err := filepath.EvalSymlinks(dirA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pwdFile := filepath.Join(t.TempDir(), "pwd")
+		t.Setenv("FAKE_PWD_FILE", pwdFile)
+		repoint(t, link, dirB)
+		res := RunHostGit(context.Background(), link, HostGitOptions{Env: ceilingEnv(), Audience: AudienceRemote}, "rev-parse", "fake-pwd")
+		if res.Err != nil || res.ExitCode != 0 {
+			t.Errorf("exit %d, err %v; want success", res.ExitCode, res.Err)
+		}
+		if target, _ := os.Readlink(link); target != dirB {
+			t.Errorf("fixture: the link was not repointed (now %q)", target)
+		}
+		got, err := os.ReadFile(pwdFile)
+		if err != nil {
+			t.Fatalf("the command did not run: %v", err)
+		}
+		if strings.TrimSpace(string(got)) != wantA {
+			t.Errorf("git ran in %q, want the resolved %q", strings.TrimSpace(string(got)), wantA)
+		}
+	})
 }

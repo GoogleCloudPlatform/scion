@@ -201,11 +201,13 @@ func TestBrokerMessageSweep_StuckLineNamesMessageIDs(t *testing.T) {
 	assert.EqualValues(t, 2, recs[0]["count"])
 	assert.Equal(t, ids, pendingLogIDs(t, recs[0]["message_ids"]), "oldest first")
 	assert.Equal(t, false, recs[0]["message_ids_truncated"])
+	assert.Equal(t, false, recs[0]["count_capped"])
 }
 
 // TestBrokerMessageSweep_StuckLineCapsMessageIDs pins the cap on the IDs the
 // sweep line names: the oldest stuckMessageLogIDCap rows, with
-// message_ids_truncated set and count still reporting every stuck row.
+// message_ids_truncated set and count still reporting every stuck row while
+// that number is at most stuckMessageCountCap.
 func TestBrokerMessageSweep_StuckLineCapsMessageIDs(t *testing.T) {
 	srv, cs := newSweepTestServer(t)
 	logger, logs := newPendingLogCapture()
@@ -223,6 +225,29 @@ func TestBrokerMessageSweep_StuckLineCapsMessageIDs(t *testing.T) {
 	for _, id := range ids[stuckMessageLogIDCap:] {
 		assert.False(t, strings.Contains(lines[0], id), "IDs past the cap are not on the line")
 	}
+}
+
+// TestBrokerMessageSweep_StuckCountIsBounded pins that the sweep reads at
+// most stuckMessageCountCap+1 stuck rows rather than counting the whole
+// backlog (ptone/scion#6648): past the cap the line and the gauge report the
+// cap, with count_capped set.
+func TestBrokerMessageSweep_StuckCountIsBounded(t *testing.T) {
+	srv, cs := newSweepTestServer(t)
+	logger, logs := newPendingLogCapture()
+	srv.agentLifecycleLog = logger
+	orig := stuckMessageCountCap
+	stuckMessageCountCap = 3
+	t.Cleanup(func() { stuckMessageCountCap = orig })
+	ids := seedStuckPending(t, cs, 5)
+
+	srv.brokerMessageSweepHandler()(context.Background())
+
+	recs, _ := logs.records(t, "sweep: stuck pending messages detected")
+	require.Len(t, recs, 1)
+	assert.EqualValues(t, 3, recs[0]["count"])
+	assert.Equal(t, true, recs[0]["count_capped"])
+	assert.Equal(t, ids[:3], pendingLogIDs(t, recs[0]["message_ids"]), "the oldest counted rows")
+	assert.Equal(t, true, recs[0]["message_ids_truncated"])
 }
 
 // cancelCallerDispatcher cancels the caller's context while the dispatch is

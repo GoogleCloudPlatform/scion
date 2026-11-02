@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -561,6 +562,8 @@ server:
 
 	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID, nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
+	// The project's storage is removed in the background after the commit.
+	srv.storageCleanupWG.Wait()
 
 	_, err := os.Stat(filepath.Join(hostBase, "projects", project.ID))
 	assert.True(t, os.IsNotExist(err), "the deleted project's NFS shared-dir tree must be removed")
@@ -821,6 +824,52 @@ func TestDeleteProject_HubManaged_DispatchesCleanupToBrokers(t *testing.T) {
 	// Verify project deleted from database
 	_, err := s.GetProject(ctx, project.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+// TestDeleteProject_Forced_BrokerKeepsDirIsAuditedNotFailed: on a forced
+// delete a remote broker that still has agents of the project keeps its
+// project directory and answers the cleanup with 409. The hub logs and
+// audits that as kept on that broker; the forced delete succeeds and is
+// never rolled back.
+func TestDeleteProject_Forced_BrokerKeepsDirIsAuditedNotFailed(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	project, broker, agent := setupOnlineBrokerAgent(t, s, "forced-kept")
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   broker.ID,
+		BrokerName: broker.Name,
+		LinkedBy:   "test",
+	}))
+	mockClient := &mockRuntimeBrokerClient{cleanupErr: &brokerStatusError{
+		StatusCode: http.StatusConflict,
+		Body:       `{"error":{"code":"conflict","message":"the project still has agents on this Runtime Broker"}}`,
+	}}
+	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, mockClient, false, slog.Default()))
+	logs := &syncLogBuffer{}
+	srv.projectsLog = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID+"?force=true", nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+
+	_, err := s.GetProject(ctx, project.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "the forced delete stands")
+	_, err = s.GetAgent(ctx, agent.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	assert.Equal(t, 1, mockClient.cleanupCalls)
+
+	out := logs.String()
+	kept := false
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(l, `msg="`+projectfs.AuditMessage+`"`) && strings.Contains(l, "tree=project-dir") &&
+			strings.Contains(l, "outcome=kept") && strings.Contains(l, "deleter=hub") &&
+			strings.Contains(l, "project_id="+project.ID) && strings.Contains(l, "Runtime Broker "+broker.ID) {
+			kept = true
+		}
+	}
+	assert.True(t, kept, "the broker's kept project directory must be audited as kept:\n%s", out)
+	assert.Contains(t, out, `msg="project directory kept on broker"`)
+	assert.NotContains(t, out, "failed to cleanup project on broker", "a 409 is the kept outcome, not a failure")
 }
 
 // TestDeleteProject_HubManaged_SkipsEmbeddedBroker verifies that the embedded broker

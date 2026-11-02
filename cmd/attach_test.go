@@ -555,10 +555,8 @@ func TestStartAgentViaHub_Site1_NoAttachAgent_ReturnsExplicitError(t *testing.T)
 	agentsPath := "/api/v1/projects/" + projectID + "/agents"
 	projectGetPath := "/api/v1/projects/" + projectID
 	ptyPath := "/api/v1/agents/" + agentID + "/pty"
-	// startAgentViaHub finalizes against resp.Agent.Slug, falling back to
-	// agentName when Slug is unset — the mock Create response below leaves
-	// Slug unset, so the finalize call lands on agentName.
-	finalizePath := "/api/v1/agents/" + agentName + "/workspace/sync-to/finalize"
+	// startAgentViaHub finalizes against the agent ID the create returns.
+	finalizePath := "/api/v1/agents/" + agentID + "/workspace/sync-to/finalize"
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

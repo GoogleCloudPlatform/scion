@@ -258,6 +258,19 @@ func (m *AgentManager) nfsExportWorkspace(projectPath, projectID, agentName stri
 	return nfsExportWorkspaceOnAnyRuntime(projectPath, projectID, agentName)
 }
 
+// nfsAgentDirExportWorkspace is nfsExportWorkspace for the agent's own
+// directory on the export (removeNFSAgentWorkspace): it also applies on the
+// Cloud Run runtime, whose clone-per-agent agents mount their own
+// <subpath_root>/<projectID>/agents/<agent>/workspace (cloudrun_runtime.go
+// cloudRunAgentWorkspaceRel). Worktrees stay Kubernetes-only
+// (RemoveNFSWorktree keeps nfsExportWorkspace).
+func (m *AgentManager) nfsAgentDirExportWorkspace(projectPath, projectID, agentName string) (resolvedHostBase, rel string, err error) {
+	if m.Runtime == nil || (!isKubernetesRuntime(m.Runtime.Name()) && !isCloudRunRuntime(m.Runtime.Name())) {
+		return "", "", nil
+	}
+	return nfsExportWorkspaceOnAnyRuntime(projectPath, projectID, agentName)
+}
+
 // nfsExportWorkspaceOnAnyRuntime is nfsExportWorkspace without the
 // Kubernetes condition: it resolves the project's workspace on the broker's
 // mount of the NFS export for any runtime.

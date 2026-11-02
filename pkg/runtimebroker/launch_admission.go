@@ -66,6 +66,15 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 	// from computing the directory is left to runLaunch's download step,
 	// which reports it as before.
 	if req.WorkspaceStoragePath != "" {
+		// A download mode this broker does not know is refused here with the
+		// synchronous path's 422, before a launch is accepted.
+		signed, modeErr := selectWorkspaceDownloadMode(req)
+		if modeErr != nil {
+			span.SetStatus(codes.Error, modeErr.Error())
+			markAttemptFailed(http.StatusUnprocessableEntity, "workspace download mode not supported")
+			writeWorkspaceDownloadModeUnsupported(w)
+			return false
+		}
 		if _, attemptMsg, httpMessage, err := s.resolveGCSWorkspaceDir(req); errors.Is(err, errInvalidWorkspaceDir) {
 			span.SetStatus(codes.Error, err.Error())
 			markAttemptFailed(http.StatusBadRequest, attemptMsg)
@@ -75,7 +84,7 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 		// Likewise a broker with no bucket for the upload refuses here with
 		// the synchronous path's 422, before accepting a launch that could
 		// only fail (ptone/scion#3422).
-		if s.workspaceStorageBucket(req) == "" {
+		if !signed && s.workspaceStorageBucket(req) == "" {
 			span.SetStatus(codes.Error, errWorkspaceStorageUnconfigured.Error())
 			markAttemptFailed(http.StatusUnprocessableEntity, "storage bucket not configured")
 			writeWorkspaceStorageUnconfigured(w)

@@ -329,6 +329,7 @@ func TestCompressBypass_SensitiveResponsesFromCatalog(t *testing.T) {
 		"POST /api/v1/artifacts/{id}/links",
 		"POST /api/v1/artifacts/{id}/versions/{seq}/view",
 		"POST /api/v1/agents/{id}/workspace/sync-from",
+		"POST /api/v1/runtime-brokers/{id}/agents/{agentId}/workspace-download",
 		"POST /api/v1/skills/resolve #ref=skill",
 		"pending POST /api/v1/skills/resolve #ref=registry",
 	} {

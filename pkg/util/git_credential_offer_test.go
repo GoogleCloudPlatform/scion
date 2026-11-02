@@ -40,6 +40,9 @@ type credentialTraceServer struct {
 	// askpassLog records every run of the GIT_ASKPASS program the server
 	// sets up (it answers "askpass-secret").
 	askpassLog string
+	// reqs counts every request, with or without credentials, so a
+	// no-credential assertion can first show git reached the server.
+	reqs int
 }
 
 // askpassRuns returns the logged GIT_ASKPASS prompts.
@@ -54,9 +57,9 @@ func (s *credentialTraceServer) seen() []string {
 	return append([]string(nil), s.auth...)
 }
 
-// newCredentialTraceServer starts the server and points the host user's git
-// config (GIT_CONFIG_GLOBAL, system config off) at its certificate. The
-// config also carries an ambient credential store holding
+// newCredentialTraceServer starts the server and trusts its certificate
+// through GIT_SSL_CAINFO. The host user's git config (GIT_CONFIG_GLOBAL,
+// system config off) carries an ambient credential store holding
 // "ambient:ambient-secret" for the server, so a test can tell whether git
 // offered the host user's own credentials.
 func newCredentialTraceServer(t *testing.T) *credentialTraceServer {
@@ -66,6 +69,9 @@ func newCredentialTraceServer(t *testing.T) *credentialTraceServer {
 	}
 	cs := &credentialTraceServer{}
 	cs.srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cs.mu.Lock()
+		cs.reqs++
+		cs.mu.Unlock()
 		if h := r.Header.Get("Authorization"); h != "" {
 			decoded := h
 			if b, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(h, "Basic ")); err == nil {
@@ -95,10 +101,11 @@ func newCredentialTraceServer(t *testing.T) *credentialTraceServer {
 		t.Fatal(err)
 	}
 	cfg := filepath.Join(dir, "gitconfig")
-	body := "[http]\n\tsslCAInfo = " + ca + "\n[credential]\n\thelper = store --file=" + store + "\n"
+	body := "[credential]\n\thelper = store --file=" + store + "\n"
 	if err := os.WriteFile(cfg, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("GIT_SSL_CAINFO", ca)
 	t.Setenv("GIT_CONFIG_GLOBAL", cfg)
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	cs.askpassLog = filepath.Join(dir, "askpass.log")
@@ -112,8 +119,24 @@ func newCredentialTraceServer(t *testing.T) *credentialTraceServer {
 
 func (s *credentialTraceServer) repoURL() string { return s.srv.URL + "/org/repo.git" }
 
+// hostPlainClone runs git clone of url with the test process's own
+// environment and none of Scion's layers: what the host user's git offers.
+// It is the control that shows a no-credential assertion is not vacuous.
+func hostPlainClone(t *testing.T, url string) {
+	t.Helper()
+	cmd := exec.Command("git", "clone", "-q", "--", url, filepath.Join(t.TempDir(), "ws"))
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	_ = cmd.Run()
+}
+
 func assertNoCredentialOffered(t *testing.T, cs *credentialTraceServer) {
 	t.Helper()
+	cs.mu.Lock()
+	reqs := cs.reqs
+	cs.mu.Unlock()
+	if reqs == 0 {
+		t.Fatal("git never reached the trace server; a no-credential assertion would be vacuous")
+	}
 	if got := cs.seen(); len(got) != 0 {
 		t.Errorf("git offered credentials %q; want none", got)
 	}
@@ -135,20 +158,18 @@ func assertOnlyTokenOffered(t *testing.T, cs *credentialTraceServer, token strin
 	}
 }
 
-// The trace server's ambient credential store answers a plain clone, so the
-// no-credential assertions below are not vacuous.
+// The trace server's ambient credential store answers a plain host git
+// clone, so the no-credential assertions below are not vacuous.
 func TestCredentialTrace_AmbientStoreAnswersPlainClone(t *testing.T) {
 	cs := newCredentialTraceServer(t)
-	if err := CloneSharedWorkspace(filepath.Join(t.TempDir(), "ws"), cs.repoURL(), "", ""); err == nil {
-		t.Fatal("the 401 endpoint cannot be cloned")
-	}
+	hostPlainClone(t, cs.repoURL())
 	got := cs.seen()
 	if len(got) == 0 || got[0] != "ambient:ambient-secret" {
 		t.Fatalf("want the ambient store's credential offered, got %q", got)
 	}
 }
 
-// GIT_ASKPASS answers a plain clone when no helper does, so the
+// GIT_ASKPASS answers a plain host git clone when no helper does, so the
 // no-askpass assertions below are not vacuous.
 func TestCredentialTrace_AskpassAnswersWithoutHelper(t *testing.T) {
 	cs := newCredentialTraceServer(t)
@@ -163,9 +184,7 @@ func TestCredentialTrace_AskpassAnswersWithoutHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("GIT_CONFIG_GLOBAL", cfg)
-	if err := CloneSharedWorkspace(filepath.Join(t.TempDir(), "ws"), cs.repoURL(), "", ""); err == nil {
-		t.Fatal("the 401 endpoint cannot be cloned")
-	}
+	hostPlainClone(t, cs.repoURL())
 	if cs.askpassRuns() == "" {
 		t.Fatal("want GIT_ASKPASS run")
 	}
@@ -248,8 +267,8 @@ func TestPullSharedWorkspaceHardened_ConfigOverridesNetworkArgs(t *testing.T) {
 
 // newAuthedDumbHTTPRepo serves a bare copy of source over https as a dumb
 // HTTP git repository at <url>/org/repo.git, answering 401 (Basic) unless a
-// request carries oauth2:<token> (no check when token is empty). The host
-// user's git config trusts its certificate. It returns the repository URL.
+// request carries oauth2:<token> (no check when token is empty). Its
+// certificate is trusted through GIT_SSL_CAINFO. It returns the repository URL.
 func newAuthedDumbHTTPRepo(t *testing.T, source, token string) string {
 	t.Helper()
 	root := t.TempDir()
@@ -280,9 +299,10 @@ func newAuthedDumbHTTPRepo(t *testing.T, source, token string) string {
 		t.Fatal(err)
 	}
 	cfg := filepath.Join(dir, "gitconfig")
-	if err := os.WriteFile(cfg, []byte("[http]\n\tsslCAInfo = "+ca+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(cfg, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("GIT_SSL_CAINFO", ca)
 	t.Setenv("GIT_CONFIG_GLOBAL", cfg)
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	return srv.URL + "/org/repo.git"
@@ -319,8 +339,9 @@ func (s *credentialTraceServer) seenHeaders() []string {
 	return append([]string(nil), s.headers...)
 }
 
-// useAmbientConfig replaces the host user's git config with one that
-// trusts the server and holds extra, given after the [http] section.
+// useAmbientConfig replaces the host user's git config with one that holds
+// extra, given after an [http] section header. The server's certificate
+// stays trusted through GIT_SSL_CAINFO.
 func (s *credentialTraceServer) useAmbientConfig(t *testing.T, extra string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -329,9 +350,10 @@ func (s *credentialTraceServer) useAmbientConfig(t *testing.T, extra string) {
 		t.Fatal(err)
 	}
 	cfg := filepath.Join(dir, "gitconfig")
-	if err := os.WriteFile(cfg, []byte("[http]\n\tsslCAInfo = "+ca+"\n"+extra), 0o600); err != nil {
+	if err := os.WriteFile(cfg, []byte("[http]\n"+extra), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("GIT_SSL_CAINFO", ca)
 	t.Setenv("GIT_CONFIG_GLOBAL", cfg)
 }
 
@@ -344,23 +366,30 @@ func (s *credentialTraceServer) ambientHeaderConfig() string {
 		"[http \"" + s.repoURL() + "\"]\n\textraHeader = X-Ambient: full\n"
 }
 
-// With NoCredentialHelpers no configured extra header is sent, whether it
-// is generic or scoped to the host or to the full URL, on clone and pull.
-// Without it all three are sent (the harness is live).
+// No configured extra header is sent, whether it is generic or scoped to the
+// host or to the full URL, on clone and pull, with or without a token. A
+// plain host git clone sends all three (the harness is live).
 func TestNoCredentialHelpers_ResetsExtraHeadersAtEveryURLScope(t *testing.T) {
 	_, workspace, _ := sharedWorkspaceFixture(t)
 	cs := newCredentialTraceServer(t)
 	cs.useAmbientConfig(t, cs.ambientHeaderConfig())
 
-	_ = CloneSharedWorkspace(filepath.Join(t.TempDir(), "ws"), cs.repoURL(), "", "")
+	hostPlainClone(t, cs.repoURL())
 	got := cs.seenHeaders()
 	for _, want := range []string{"generic", "host", "full"} {
 		if !slices.Contains(got, want) {
-			t.Fatalf("a plain clone must send the %s ambient header (harness), got %q", want, got)
+			t.Fatalf("a plain host git clone must send the %s ambient header (harness), got %q", want, got)
 		}
 	}
 
 	n := len(cs.seenHeaders())
+	_ = CloneSharedWorkspace(filepath.Join(t.TempDir(), "ws"), cs.repoURL(), "", "")
+	_ = CloneSharedWorkspace(filepath.Join(t.TempDir(), "ws"), cs.repoURL(), "", "project-token")
+	_, _ = PullSharedWorkspace(workspace, cs.repoURL(), "project-token")
+	if extra := cs.seenHeaders()[n:]; len(extra) != 0 {
+		t.Errorf("clone or pull without NoCredentialHelpers sent ambient headers %q", extra)
+	}
+	n = len(cs.seenHeaders())
 	_ = CloneSharedWorkspaceHardened(filepath.Join(t.TempDir(), "ws"), cs.repoURL(), "", "", HostGitHardening{NoCredentialHelpers: true})
 	if extra := cs.seenHeaders()[n:]; len(extra) != 0 {
 		t.Errorf("clone with NoCredentialHelpers sent ambient headers %q", extra)
@@ -372,8 +401,9 @@ func TestNoCredentialHelpers_ResetsExtraHeadersAtEveryURLScope(t *testing.T) {
 	}
 }
 
-// With NoCredentialHelpers a credential helper scoped to the host or to the
-// full URL is not asked either, on clone and pull; without it, it answers.
+// A credential helper scoped to the host or to the full URL is not asked
+// either, on clone and pull, with NoCredentialHelpers and with a token (where
+// only the token is offered); a plain host git clone uses it.
 func TestNoCredentialHelpers_ResetsURLScopedHelpers(t *testing.T) {
 	for _, scope := range []string{"host", "full URL"} {
 		t.Run(scope, func(t *testing.T) {
@@ -394,23 +424,32 @@ func TestNoCredentialHelpers_ResetsURLScopedHelpers(t *testing.T) {
 			// clone first would leave nothing for the checks to find.
 			_ = CloneSharedWorkspaceHardened(filepath.Join(t.TempDir(), "ws"), cs.repoURL(), "", "", HostGitHardening{NoCredentialHelpers: true})
 			_, _ = PullSharedWorkspaceHardened(workspace, cs.repoURL(), "", HostGitHardening{NoCredentialHelpers: true})
+			cs.mu.Lock()
+			reqs := cs.reqs
+			cs.mu.Unlock()
+			if reqs == 0 {
+				t.Fatal("git never reached the trace server; the no-credential check would be vacuous")
+			}
 			if got := cs.seen(); len(got) != 0 {
 				t.Errorf("NoCredentialHelpers offered %q", got)
 			}
 			if runs := cs.askpassRuns(); runs != "" {
 				t.Errorf("git ran GIT_ASKPASS:\n%s", runs)
 			}
-			_ = CloneSharedWorkspace(filepath.Join(t.TempDir(), "ws"), cs.repoURL(), "", "")
-			if got := cs.seen(); len(got) == 0 || got[0] != "scoped:scoped-secret" {
-				t.Fatalf("a plain clone must use the scoped helper (harness), got %q", got)
+			_ = CloneSharedWorkspace(filepath.Join(t.TempDir(), "ws"), cs.repoURL(), "", "project-token")
+			_, _ = PullSharedWorkspace(workspace, cs.repoURL(), "project-token")
+			assertOnlyTokenOffered(t, cs, "project-token")
+			n := len(cs.seen())
+			hostPlainClone(t, cs.repoURL())
+			if got := cs.seen()[n:]; len(got) == 0 || got[0] != "scoped:scoped-secret" {
+				t.Fatalf("a plain host git clone must use the scoped helper (harness), got %q", got)
 			}
 		})
 	}
 }
 
 // With NoCredentialHelpers an https clone and pull of a repository that
-// needs no credential still succeed (the CA from the host user's git config
-// still applies).
+// needs no credential still succeed (the CA from GIT_SSL_CAINFO applies).
 func TestNoCredentialHelpers_UnauthenticatedCloneAndPullSucceed(t *testing.T) {
 	source := setupGitRepo(t)
 	url := newAuthedDumbHTTPRepo(t, source, "")
@@ -438,9 +477,9 @@ func TestNoCredentialHelpers_ResetsGenericExtraHeaderForUnnormalizedURL(t *testi
 	cs.useAmbientConfig(t, cs.ambientHeaderConfig())
 	url := cs.srv.URL + "/../org/repo.git"
 
-	_ = CloneSharedWorkspace(filepath.Join(t.TempDir(), "ws"), url, "", "")
+	hostPlainClone(t, url)
 	if got := cs.seenHeaders(); !slices.Contains(got, "generic") {
-		t.Fatalf("a plain clone must send the generic ambient header (harness), got %q", got)
+		t.Fatalf("a plain host git clone must send the generic ambient header (harness), got %q", got)
 	}
 	n := len(cs.seenHeaders())
 	_ = CloneSharedWorkspaceHardened(filepath.Join(t.TempDir(), "ws"), url, "", "", HostGitHardening{NoCredentialHelpers: true})

@@ -79,16 +79,15 @@ var hostGitDoorAllowlist = map[string]hostGitDoorEntry{
 	"pkg/util/git_config_policy.go:crossCheckAgainstGit": {1, "the policy check's own listing; held by TestHostGitGoesThroughOneDoor_CheckerArgsArePinned, TestHostGitCheckers_DoorListingsUseDoorEnv and TestHostGitCheckers_SeedListingsPinGitDir"},
 	"pkg/util/git_seed_submodules.go:seedGitlinks":       {1, "the agent-start check's own index listing; held by TestHostGitGoesThroughOneDoor_CheckerArgsArePinned and TestHostGitCheckers_SeedListingsPinGitDir"},
 
-	"pkg/util/git.go:BaseRepoGitCommand":                   {1, "migrates in phase 2"},
-	"pkg/util/git.go:hardenedGitCommand":                   {1, "migrates in phase 2"},
-	"pkg/util/git_host.go:hostGit":                         {1, "migrates in phase 2"},
-	"pkg/agent/run.go:boundedRevParse":                     {1, "migrates in phase 2"},
-	"pkg/agent/provision.go:worktreeConfigEnabled":         {1, "migrates in phase 2"},
-	"pkg/provision/provision.go:sharedCheckoutGitCmd":      {1, "migrates in phase 2"},
-	"pkg/provision/provision.go:runGitClone":               {1, "migrates in phase 2"},
-	"pkg/provision/provision.go:checkBranchName":           {1, "migrates in phase 2"},
-	"pkg/provision/provision.go:currentBranch":             {1, "migrates in phase 2"},
-	"pkg/runtimebroker/workspace_git.go:workspaceGitProbe": {1, "migrates with the broker probe change (separate lane); becomes the single CeilingOff caller"},
+	"pkg/util/git.go:BaseRepoGitCommand":              {1, "migrates in phase 2"},
+	"pkg/util/git.go:hardenedGitCommand":              {1, "migrates in phase 2"},
+	"pkg/util/git_host.go:hostGit":                    {1, "migrates in phase 2"},
+	"pkg/agent/run.go:boundedRevParse":                {1, "migrates in phase 2"},
+	"pkg/agent/provision.go:worktreeConfigEnabled":    {1, "migrates in phase 2"},
+	"pkg/provision/provision.go:sharedCheckoutGitCmd": {1, "migrates in phase 2"},
+	"pkg/provision/provision.go:runGitClone":          {1, "migrates in phase 2"},
+	"pkg/provision/provision.go:checkBranchName":      {1, "migrates in phase 2"},
+	"pkg/provision/provision.go:currentBranch":        {1, "migrates in phase 2"},
 
 	// Permanent: accepted by security; conditions held by
 	// TestHostGitGoesThroughOneDoor (exact counts, step tables included). Git
@@ -96,10 +95,15 @@ var hostGitDoorAllowlist = map[string]hostGitDoorEntry{
 	// The Rebuild executors queue git in a step table, step{"<label>", "git",
 	// []string{...}, dir}, run with exec.CommandContext(ctx, step.cmd,
 	// step.args...): the table's literals and the dynamic start are counted.
-	"pkg/hub/unitdrift/check.go:GitRevision":                                 {1, hostGitDoorReasonHub},
-	"pkg/hub/maintenance/maintenance_executors.go:RebuildServerExecutor.Run": {6, hostGitDoorReasonHub},
-	"pkg/hub/maintenance/maintenance_executors.go:RebuildWebExecutor.Run":    {6, hostGitDoorReasonHub},
-	"pkg/hub/maintenance/maintenance_executors.go:CheckForUpdates":           {5, hostGitDoorReasonHub},
+	// rebuild-server builds its table and starts it in runRebuildSteps (4 git
+	// step literals + the dynamic start); its rev-parse reads, and
+	// CheckForUpdates' rev-parse and log reads, go through gitOutput (one git
+	// literal), so CheckForUpdates itself starts only git fetch.
+	"pkg/hub/unitdrift/check.go:GitRevision":                              {1, hostGitDoorReasonHub},
+	"pkg/hub/maintenance/maintenance_executors.go:runRebuildSteps":        {5, hostGitDoorReasonHub},
+	"pkg/hub/maintenance/maintenance_executors.go:gitOutput":              {1, hostGitDoorReasonHub},
+	"pkg/hub/maintenance/maintenance_executors.go:RebuildWebExecutor.Run": {6, hostGitDoorReasonHub},
+	"pkg/hub/maintenance/maintenance_executors.go:CheckForUpdates":        {1, hostGitDoorReasonHub},
 
 	// Process starts whose command is chosen at run time and is not git: the
 	// container runtime, a mount helper, the Hub's build script, a binary
@@ -109,6 +113,7 @@ var hostGitDoorAllowlist = map[string]hostGitDoorEntry{
 	"pkg/hub/maintenance/maintenance_executors.go:BuildHarnessConfigImageExecutor.Run": {3, hostGitDoorReasonNotGit + " (the container runtime)"},
 	"pkg/hub/maintenance/maintenance_executors.go:PullImagesExecutor.Run":              {1, hostGitDoorReasonNotGit + " (the container runtime)"},
 	"pkg/hub/maintenance/maintenance_executors.go:VerifyScionBinary":                   {1, hostGitDoorReasonNotGit + " (the scion binary being verified)"},
+	"pkg/hub/maintenance/git_build.go:VerifyGitBuild":                                  {1, hostGitDoorReasonNotGit + " (the scion binary built from Git, being verified)"},
 	"pkg/hub/system_handlers.go:Server.runImageBuild":                                  {1, hostGitDoorReasonNotGit + " (the image build script)"},
 	"pkg/runtimebroker/nfs_mount_run_unix.go:execRunCommand":                           {1, hostGitDoorReasonNotGit + " (the mount helper)"},
 	"pkg/runtimebroker/pty_classifier.go:tmuxHasSession":                               {1, hostGitDoorReasonNotGit + " (the container runtime)"},
@@ -125,7 +130,18 @@ var hostGitDoorAllowlist = map[string]hostGitDoorEntry{
 // with how many and why. Each needs every ancestor of its directory to be
 // host-owned, a git subcommand that runs no configured command, and a caller
 // that treats any unexpected outcome as unknown.
-var hostGitCeilingOffAllowlist = map[string]hostGitDoorEntry{}
+var hostGitCeilingOffAllowlist = map[string]hostGitDoorEntry{
+	// The broker's shared-workspace guard probe (rev-parse
+	// --is-inside-work-tree). (i) It is a fail-closed guard probe: only a
+	// clean "not a git repository" reads as "not git", and that answer must
+	// also cover a repository enclosing the workspace, so discovery cannot be
+	// bounded at the directory. (ii) The directory's ancestors are host- or
+	// broker-owned (the project's workspace on the broker's share Layout),
+	// and an enclosing repository can only yield git or an error (unknown),
+	// never "not git". rev-parse runs no configured command, and hooks and
+	// fsmonitor are off through the door's HostGitArgs.
+	"pkg/runtimebroker/workspace_git.go:workspaceGitProbe": {1, "fail-closed guard probe: \"not git\" must cover an enclosing repository; host- or broker-owned ancestors; an enclosing repository can only yield git or an error (unknown), never \"not git\"; hooks and fsmonitor off via the door"},
+}
 
 // TestHostGitGoesThroughOneDoor: host-side git runs through RunHostGit or
 // HostGitCommand. It parses (no type checking) the non-test code of

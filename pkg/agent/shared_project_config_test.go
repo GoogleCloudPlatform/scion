@@ -19,6 +19,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -116,6 +117,30 @@ func testDeleteSharedProjectLegacyDir(t *testing.T, hubID string) {
 	}
 	if got := config.ResolveAgentDir(filepath.Join(root, config.DotScion), "old"); got == legacy {
 		t.Error("a new agent of the same name must not resolve to the removed legacy dir")
+	}
+}
+
+// removeCheckedAgentDir removes the agent's scion-agent.json before the
+// rest of the directory; when it is a symbolic link, the link goes and its
+// target is left unchanged.
+func TestRemoveCheckedAgentDir_AgentJSONLinkNotFollowed(t *testing.T) {
+	outside := filepath.Join(t.TempDir(), "target.json")
+	if err := os.WriteFile(outside, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	agentDir := filepath.Join(t.TempDir(), "agents", "old")
+	mustMkdirAll(t, filepath.Join(agentDir, "home"))
+	if err := os.Symlink(outside, filepath.Join(agentDir, "scion-agent.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	removeCheckedAgentDir(agentDir, "")
+
+	if _, err := os.Lstat(agentDir); !os.IsNotExist(err) {
+		t.Fatalf("agent dir should be removed (err %v)", err)
+	}
+	if data, err := os.ReadFile(outside); err != nil || string(data) != "keep" {
+		t.Fatalf("the link's target must be left unchanged: %q, %v", data, err)
 	}
 }
 
@@ -407,5 +432,181 @@ func TestBrokerProjectRoot_SharedProjectRoot(t *testing.T) {
 	plain := filepath.Join(t.TempDir(), "proj", config.DotScion)
 	if got := brokerProjectRoot(nil, plain); got != filepath.Dir(plain) {
 		t.Errorf("brokerProjectRoot(plain) = %q, want %q", got, filepath.Dir(plain))
+	}
+}
+
+// A create (FreshProvision) of a new agent whose name resolves to a legacy
+// agent directory that no agent owns is refused before any side effect;
+// a start of an existing legacy agent, an agent with external state, a new
+// agent without a legacy dir and an ordinary project are not.
+func TestRefuseRetiredLegacyAgent(t *testing.T) {
+	root, home := sharedConfigProject(t)
+	scionDir := filepath.Join(root, config.DotScion)
+	legacyScion := filepath.Join(home, config.GlobalDir, config.ProjectsDir, "web", config.DotScion)
+	mustMkdirAll(t, legacyScion)
+	if err := config.WriteProjectID(legacyScion, sharedCfgProjectID); err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(legacyScion, "agents", "old")
+	mustMkdirAll(t, legacy)
+	if err := os.WriteFile(filepath.Join(legacy, "scion-agent.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	create := api.StartOptions{Name: "old", FreshProvision: true, HubProjectID: sharedCfgProjectID}
+	if err := refuseRetiredLegacyAgent(scionDir, create); !errors.Is(err, ErrLegacyAgentStateRetired) {
+		t.Fatalf("create over an orphan legacy dir: %v, want ErrLegacyAgentStateRetired", err)
+	}
+	if strings.Contains(ErrLegacyAgentStateRetired.Error(), home) {
+		t.Error("the refusal must not name a host path")
+	}
+	restart := create
+	restart.FreshProvision = false
+	if err := refuseRetiredLegacyAgent(scionDir, restart); err != nil {
+		t.Errorf("start of an existing legacy agent: %v", err)
+	}
+	fresh := create
+	fresh.Name = "new"
+	if err := refuseRetiredLegacyAgent(scionDir, fresh); err != nil {
+		t.Errorf("create of a new agent without a legacy dir: %v", err)
+	}
+	if err := refuseRetiredLegacyAgent(legacyScion, create); err != nil {
+		t.Errorf("ordinary project: %v", err)
+	}
+	ext, err := config.AgentDirForProject(scionDir, "zzz", false, sharedCfgProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	extOld := filepath.Join(filepath.Dir(ext), "old")
+	mustMkdirAll(t, extOld)
+	if err := os.WriteFile(filepath.Join(extOld, "scion-agent.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := refuseRetiredLegacyAgent(scionDir, create); err != nil {
+		t.Errorf("agent with external state: %v", err)
+	}
+}
+
+// A create of a new agent over a legacy dir no agent owns is refused
+// through Start, cleanly: nothing is provisioned in the external root and
+// the legacy dir is left as it was. (A start of the live legacy agent is
+// TestStart_SharedProjectRootRestartsLegacyClonePerAgent.)
+func TestStart_SharedProjectRootCreateOverOrphanLegacyDirRefused(t *testing.T) {
+	root, home := sharedConfigProject(t)
+	scionDir := filepath.Join(root, config.DotScion)
+	legacyScion := filepath.Join(home, config.GlobalDir, config.ProjectsDir, "web", config.DotScion)
+	mustMkdirAll(t, legacyScion)
+	if err := config.WriteProjectID(legacyScion, sharedCfgProjectID); err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(legacyScion, "agents", "old")
+	mustMkdirAll(t, filepath.Join(legacy, "workspace"))
+	if err := os.WriteFile(filepath.Join(legacy, "scion-agent.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacy, "workspace", "unpushed.txt"), []byte("work"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mockRT := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	_, err := NewManager(mockRT).Start(context.Background(), api.StartOptions{
+		Name:           "old",
+		ProjectPath:    root,
+		NoAuth:         true,
+		FreshProvision: true,
+		HubProjectID:   sharedCfgProjectID,
+		Env:            map[string]string{"SCION_AGENT_ID": "agent-new", "SCION_PROJECT_ID": sharedCfgProjectID},
+	})
+	if !errors.Is(err, ErrLegacyAgentStateRetired) {
+		t.Fatalf("create over an orphan legacy dir = %v, want ErrLegacyAgentStateRetired", err)
+	}
+	ext, _ := config.AgentDirForProject(scionDir, "zzz", false, sharedCfgProjectID)
+	if _, err := os.Stat(filepath.Join(filepath.Dir(ext), "old", "scion-agent.json")); !os.IsNotExist(err) {
+		t.Errorf("nothing may be provisioned in the external root (err %v)", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(legacy, "workspace", "unpushed.txt")); err != nil || string(data) != "work" {
+		t.Errorf("the legacy dir must be left as it was: %q %v", data, err)
+	}
+}
+
+// Delete removes an agent's state in the forced external root of a shared
+// project configuration, with or without a Hub project ID, and leaves the
+// configuration and other agents alone.
+func TestDeleteAgentFiles_SharedProjectExternalState(t *testing.T) {
+	for _, hubID := range []string{sharedCfgProjectID, ""} {
+		t.Run("hub id "+hubID, func(t *testing.T) {
+			root, _ := sharedConfigProject(t)
+			scionDir := filepath.Join(root, config.DotScion)
+			ext, err := config.AgentDirForProject(scionDir, "a1", false, sharedCfgProjectID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			other := filepath.Join(filepath.Dir(ext), "a2")
+			for _, d := range []string{ext, other} {
+				mustMkdirAll(t, filepath.Join(d, "home"))
+				if err := os.WriteFile(filepath.Join(d, "scion-agent.json"), []byte("{}"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if exists, err := LocalAgentDirExists("a1", root); err != nil || !exists {
+				t.Fatalf("LocalAgentDirExists = (%v, %v)", exists, err)
+			}
+			if _, err := DeleteAgentFilesForHubProject("a1", root, hubID, false); err != nil {
+				t.Fatalf("DeleteAgentFilesForHubProject: %v", err)
+			}
+			if _, err := os.Stat(ext); !os.IsNotExist(err) {
+				t.Errorf("the external state dir must be removed (err %v)", err)
+			}
+			if _, err := os.Stat(filepath.Join(other, "scion-agent.json")); err != nil {
+				t.Errorf("another agent's state must stay: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(scionDir, projectkeys.ProjectIDFile)); err != nil {
+				t.Errorf("the shared project configuration must stay: %v", err)
+			}
+		})
+	}
+}
+
+// The refusal is an agent-state conflict, so brokers answer it with 409 and
+// its message, never an opaque 500.
+func TestErrLegacyAgentStateRetiredIsStateConflict(t *testing.T) {
+	err := fmt.Errorf("start: %w", ErrLegacyAgentStateRetired)
+	if !config.IsAgentStateConflict(err) {
+		t.Fatal("ErrLegacyAgentStateRetired must be an agent-state conflict")
+	}
+	if !errors.Is(err, ErrLegacyAgentStateRetired) {
+		t.Fatal("errors.Is must match the refusal")
+	}
+	if !strings.Contains(err.Error(), "delete this agent") {
+		t.Errorf("the message must say what to do: %q", err.Error())
+	}
+}
+
+// The create refusal runs in Provision too, before anything runs: nothing
+// is provisioned in the external root and the legacy dir is left alone.
+func TestProvision_CreateOverOrphanLegacyDirRefused(t *testing.T) {
+	root, home := sharedConfigProject(t)
+	scionDir := filepath.Join(root, config.DotScion)
+	legacyScion := filepath.Join(home, config.GlobalDir, config.ProjectsDir, "web", config.DotScion)
+	mustMkdirAll(t, legacyScion)
+	if err := config.WriteProjectID(legacyScion, sharedCfgProjectID); err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(legacyScion, "agents", "old")
+	mustMkdirAll(t, legacy)
+	if err := os.WriteFile(filepath.Join(legacy, "scion-agent.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mgr := NewManager(&runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	_, err := mgr.Provision(context.Background(), api.StartOptions{
+		Name: "old", ProjectPath: root, FreshProvision: true, HubProjectID: sharedCfgProjectID,
+	})
+	if !errors.Is(err, ErrLegacyAgentStateRetired) {
+		t.Fatalf("Provision over an orphan legacy dir = %v, want ErrLegacyAgentStateRetired", err)
+	}
+	ext, _ := config.AgentDirForProject(scionDir, "zzz", false, sharedCfgProjectID)
+	if _, err := os.Stat(filepath.Join(filepath.Dir(ext), "old")); !os.IsNotExist(err) {
+		t.Errorf("nothing may be provisioned in the external root (err %v)", err)
+	}
+	if _, err := os.Stat(filepath.Join(legacy, "scion-agent.json")); err != nil {
+		t.Errorf("the legacy dir must be left alone: %v", err)
 	}
 }

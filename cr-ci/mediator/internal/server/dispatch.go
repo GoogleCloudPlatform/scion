@@ -304,6 +304,7 @@ func (s *Server) forgetRunner(name string) {
 	s.dispatchMu.Lock()
 	defer s.dispatchMu.Unlock()
 	delete(s.runners, name)
+	s.forgotten[name] = s.o.Now()
 	if id, ok := parseRunnerName(name); ok {
 		s.o.Claims.DropJob(id)
 	}

@@ -127,7 +127,7 @@ func TestDispatch_HubAgentDefaults_OnWire(t *testing.T) {
 			t.Fatal("fixture no longer yields a non-nil InlineConfig, so the A5-leak assertion " +
 				"below would evaluate nothing; restore it rather than deleting this check")
 		}
-		if req.InlineConfig.MaxTurns != 0 || req.InlineConfig.MaxModelCalls != 0 ||
+		if req.InlineConfig.MaxTurns != nil || req.InlineConfig.MaxModelCalls != nil ||
 			req.InlineConfig.MaxDuration != "" || req.InlineConfig.Resources != nil {
 			t.Errorf("hub defaults leaked into InlineConfig (alternative A5): %+v", req.InlineConfig)
 		}
@@ -403,7 +403,7 @@ func TestDispatch_HubAgentDefaults_ResourcesOnStartAndRestart(t *testing.T) {
 	check("start", client.lastStartExtras.HubAgentDefaults, "3", 50, 500, "2h")
 	// The limits ride only the low-precedence hubAgentDefaults field, never
 	// the top-of-chain inline config (rejected alternative A5).
-	if ic := client.lastInlineConfig; ic != nil && (ic.MaxTurns != 0 || ic.MaxModelCalls != 0 || ic.MaxDuration != "") {
+	if ic := client.lastInlineConfig; ic != nil && (ic.MaxTurns != nil || ic.MaxModelCalls != nil || ic.MaxDuration != "") {
 		t.Errorf("start inline config carries hub limits: %+v", ic)
 	}
 	if err := d.DispatchAgentRestart(ctx, ag); err != nil {

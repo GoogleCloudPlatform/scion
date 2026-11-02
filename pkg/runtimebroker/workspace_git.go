@@ -19,10 +19,8 @@ import (
 	"errors"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
@@ -106,60 +104,52 @@ func workspaceDirKnownNotGit(ctx context.Context, dir string) bool {
 // directory is on the share, where a hung mount can block it.
 var workspaceGitTimeout = projectfs.ShareVisibleTimeout
 
-// workspaceGitWaitDelay bounds how long Run waits, after the context ends or
-// git exits, for git's stderr to close (exec.Cmd.WaitDelay), so a descendant
-// holding the pipe cannot keep the probe running.
-const workspaceGitWaitDelay = 2 * time.Second
-
-// workspaceGitProbe runs `git rev-parse --is-inside-work-tree` in dir with the
-// host git arguments and environment (util.HostGitArgs, util.HostGitEnv) and
-// LC_ALL=C, and returns git's stderr and the run error. A variable so tests
-// can simulate exec failures.
+// workspaceGitProbe runs `git rev-parse --is-inside-work-tree` in dir through
+// the host git door (util.RunHostGit) and returns the door's result. A
+// variable so tests can simulate failures.
 //
-// ctx bounds the call (gitReportsNotARepository gives it
-// workspaceGitTimeout), and WaitDelay bounds the wait for the pipes after
-// that. A git process stuck in uninterruptible NFS IO cannot be killed
-// until that IO returns, so the probe can still outlive the bound in that
-// case; ShareDirVisible, which runs first with its own bound, makes that
-// unlikely.
-var workspaceGitProbe = func(ctx context.Context, dir string) (stderr string, err error) {
-	cmd := exec.CommandContext(ctx, "git", append(util.HostGitArgs(), "rev-parse", "--is-inside-work-tree")...)
-	cmd.Dir = dir
-	// Untranslated messages, so the "not a git repository" match is locale-stable.
-	cmd.Env = append(util.HostGitEnv(os.Environ()), "LC_ALL=C")
-	return runWorkspaceGitProbe(cmd)
-}
-
-// runWorkspaceGitProbe runs cmd with WaitDelay set and returns its stderr and
-// the run error.
-func runWorkspaceGitProbe(cmd *exec.Cmd) (string, error) {
-	cmd.WaitDelay = workspaceGitWaitDelay
-	var buf strings.Builder
-	cmd.Stderr = &buf
-	err := cmd.Run()
-	return buf.String(), err
+// The door supplies the host git arguments (hooks and fsmonitor off) and
+// environment, including LC_ALL=C, so the "not a git repository" match is
+// locale-stable. It runs in discovery mode (dir has no .git entry) with
+// CeilingOff: git may find a repository enclosing dir, and that must read
+// as git, never as "not git". AudienceRemote keeps host paths out of the
+// door's refusals.
+//
+// ctx bounds the git processes the door starts (gitReportsNotARepository
+// gives it workspaceGitTimeout): the door's config read (readFilterPins)
+// and the rev-parse both run under it, and the door's WaitDelay bounds the
+// wait for git's pipes after that. The door's discovery checks (Lstat of
+// dir/.git and dir/HEAD, before and after the run) are not bounded by ctx;
+// workspaceDirKnownNotGit already makes the same kind of Lstat on the share
+// before this. A git process stuck in uninterruptible NFS IO cannot be
+// killed until that IO returns, so the probe can still outlive the bound in
+// that case; ShareDirVisible, which runs first with its own bound, makes
+// that unlikely.
+var workspaceGitProbe = func(ctx context.Context, dir string) util.HostGitResult {
+	return util.RunHostGit(ctx, dir, util.HostGitOptions{
+		Ceiling:  util.CeilingOff,
+		Audience: util.AudienceRemote,
+	}, "rev-parse", "--is-inside-work-tree")
 }
 
 // gitReportsNotARepository reports whether git, run in dir within
-// workspaceGitTimeout, cleanly failed (a positive exit code) with a stderr
-// line starting "fatal: not a git repository": the only outcome read as
-// "not git". Success (a work tree), a missing git binary, an exec or IO
-// error, a timeout, a signal, or any other failure (such as an ownership
-// refusal) returns false: unknown, so SCION_WORKSPACE_GIT stays absent. It
-// is a separate helper from util.CheckGitRepoDir, whose (false, nil) for
-// any non-ownership failure its other callers rely on.
+// workspaceGitTimeout, cleanly failed (a positive exit code, no door error)
+// with a stderr line starting "fatal: not a git repository": the only
+// outcome read as "not git". Success (a work tree, including one enclosing
+// dir), a missing git binary, a door refusal (such as a HEAD entry in dir),
+// an exec or IO error, a timeout, a signal, a repository appearing while git
+// ran, or any other failure (such as an ownership refusal) returns false:
+// unknown, so SCION_WORKSPACE_GIT stays absent. It is a separate helper from
+// util.CheckGitRepoDir, whose (false, nil) for any non-ownership failure its
+// other callers rely on.
 func gitReportsNotARepository(ctx context.Context, dir string) bool {
 	ctx, cancel := context.WithTimeout(ctx, workspaceGitTimeout)
 	defer cancel()
-	stderr, err := workspaceGitProbe(ctx, dir)
-	if err == nil || ctx.Err() != nil {
+	res := workspaceGitProbe(ctx, dir)
+	if res.Err != nil || ctx.Err() != nil || res.ExitCode <= 0 {
 		return false
 	}
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) || !exitErr.Exited() || exitErr.ExitCode() <= 0 {
-		return false
-	}
-	return gitNotARepositoryMessage(stderr)
+	return gitNotARepositoryMessage(string(res.Stderr))
 }
 
 // gitNotARepositoryMessage reports whether a line of git's stderr starts with

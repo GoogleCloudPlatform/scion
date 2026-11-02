@@ -2454,27 +2454,3 @@ SELECT DISTINCT wm.conversation_key
 	}
 	return out, rows.Err()
 }
-
-// PurgeOrphanMentions deletes mention rows whose message row is gone.
-// message_id is a hub-minted UUID, so the cast lets the lookup use the
-// messages primary key. The cast sits inside a CASE so it only runs on
-// UUID-shaped values (Postgres does not promise OR evaluation order). A
-// non-UUID message_id maps to NULL, matches no message, and is deleted as
-// an orphan instead of failing the whole sweep.
-func (s *pgWebChatStore) PurgeOrphanMentions(ctx context.Context) (int, error) {
-	messagesTable, err := s.table(ctx, "messages")
-	if err != nil {
-		return 0, err
-	}
-	res, err := s.db.ExecContext(ctx, `
-DELETE FROM webchat_mention wm
- WHERE NOT EXISTS (SELECT 1 FROM `+messagesTable+` m WHERE m.id = (CASE
-        WHEN wm.message_id ~* `+pgUUIDShapeRegex+`
-        THEN wm.message_id::uuid END))
-`)
-	if err != nil {
-		return 0, fmt.Errorf("webchat store: purge orphan mentions: %w", err)
-	}
-	n, _ := res.RowsAffected()
-	return int(n), nil
-}

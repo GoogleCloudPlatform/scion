@@ -726,6 +726,7 @@ func TestCheckSeedModuleWorktree_AbsoluteR2(t *testing.T) {
 // no inherited variable that adds config.
 func TestHostGitCheckers_SeedListingsPinGitDir(t *testing.T) {
 	f := newSubFixture(t)
+	setGermanLocale(t)
 	// The fixture adds the submodule from a local path, a URL the seed policy
 	// refuses in the base config; give the base an https URL so the layer
 	// check runs through to its cross-check. CheckSeedSubmodules does not read
@@ -750,6 +751,11 @@ func TestHostGitCheckers_SeedListingsPinGitDir(t *testing.T) {
 		}
 		if c.env["GIT_CONFIG_GLOBAL"] != os.DevNull || c.env["GIT_CONFIG_NOSYSTEM"] != "1" {
 			t.Errorf("call %q reads global or system config", c.argv)
+		}
+		// seedGitEnv starts from HostGitEnv, so the inherited German locale
+		// does not reach git. Mutant: deleting HostGitEnv's LC_ALL=C append.
+		if c.locale["LC_ALL"] != "C" {
+			t.Errorf("call %q ran with LC_ALL=%q, want C", c.argv, c.locale["LC_ALL"])
 		}
 		// The whole GIT_* environment is exactly seedGitEnv's for the call's
 		// directories, so no inherited variable (GIT_INDEX_FILE, GIT_WORK_TREE,
