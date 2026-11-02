@@ -64,17 +64,28 @@ func TestProjectWorkspaceUpload_DotGitPathRefused(t *testing.T) {
 	srv, _ := testServer(t)
 	project, workspacePath := createTestHubManagedProject(t, srv, "WS Upload DotGit")
 
-	// A refused name refuses the whole upload: the allowed file in the same
-	// request is not written either.
-	files := map[string][]byte{
-		".Git/hooks/pre-commit": []byte("#!/bin/sh\n"),
-		"ok.txt":                []byte("fine"),
+	// A refused name refuses the whole upload: no allowed file in the same
+	// request is written either. The handler walks the form's file map, whose
+	// order is random, so a handler that validated inside its write loop
+	// would pass only when the refused name came first. With 16 allowed
+	// names that happens with probability 1/17 per request, and each request
+	// builds a fresh map, so uploadRounds requests miss it with probability
+	// 17^-3, below 2^-12.
+	const allowedFiles = 16
+	const uploadRounds = 3
+	files := map[string][]byte{".Git/hooks/pre-commit": []byte("#!/bin/sh\n")}
+	for i := range allowedFiles {
+		files[fmt.Sprintf("ok-%02d.txt", i)] = []byte("fine")
 	}
-	rec := doMultipartRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/projects/%s/workspace/files", project.ID), files)
-	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
-	assert.Contains(t, rec.Body.String(), ".git component")
-	assertNoEntry(t, workspacePath, ".Git")
-	assertNoEntry(t, workspacePath, "ok.txt")
+	for round := range uploadRounds {
+		rec := doMultipartRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/projects/%s/workspace/files", project.ID), files)
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "round %d body: %s", round, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), ".git component")
+		for name := range files {
+			assertNoEntry(t, workspacePath, name)
+		}
+		assertNoEntry(t, workspacePath, ".Git")
+	}
 }
 
 func TestProjectWorkspaceDelete_DotGitPathRefused(t *testing.T) {
