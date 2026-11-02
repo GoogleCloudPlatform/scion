@@ -161,6 +161,12 @@ const HISTORY_MAX_PAGE_SIZE = 200;
 /** How many around targets a deep starred-only refresh tries before the newest window. */
 const FILTER_AROUND_TRIES = 5;
 
+/** The code of the history around jump's 404 for a message that cannot be shown. */
+const MESSAGE_UNAVAILABLE_CODE = 'message_unavailable';
+
+/** The toast of a jump to a message that is no longer available. */
+export const MESSAGE_UNAVAILABLE_TOAST = 'That message is no longer available.';
+
 /**
  * Detail of `chat-message-filter-change`: the thread asks the page to show
  * the conversation under `filter`. `messageId`, when set, is the message a
@@ -4611,7 +4617,7 @@ export class ScionChatThread extends LitElement {
     // the thread shows a spinner, not the scroll container.
     let msgEl = this.shadowRoot?.getElementById(`msg-${messageId}`) ?? null;
     if (!msgEl) {
-      await this.fetchAroundMessage(messageId, isCurrent);
+      await this.fetchAroundMessage(messageId, isCurrent, true);
       await this.updateComplete;
       if (!isCurrent()) return;
       msgEl = this.shadowRoot?.getElementById(`msg-${messageId}`) ?? null;
@@ -4892,10 +4898,15 @@ export class ScionChatThread extends LitElement {
    * `isCurrent`, when given, is re-checked once the response arrives: a
    * caller superseded in the meantime (a restore overtaken by a jump) must
    * not replace the window that the newer request loaded.
+   *
+   * With `notifyUnavailable`, a 404 with code message_unavailable (the
+   * message was removed, for example by the hub's retention policy) shows
+   * the toast "That message is no longer available."
    */
   private async fetchAroundMessage(
     messageId: string,
-    isCurrent: () => boolean = () => true
+    isCurrent: () => boolean = () => true,
+    notifyUnavailable = false
   ): Promise<void> {
     if (!this.conversationKey) return;
 
@@ -4908,7 +4919,22 @@ export class ScionChatThread extends LitElement {
 
     try {
       const res = await apiFetch(this.historyUrl(params));
-      if (currentId !== this.fetchId || !res.ok || !isCurrent()) return;
+      if (currentId !== this.fetchId || !isCurrent()) return;
+      if (!res.ok) {
+        if (notifyUnavailable && res.status === 404) {
+          const body = (await res.json().catch(() => null)) as {
+            error?: { code?: string };
+          } | null;
+          if (
+            body?.error?.code === MESSAGE_UNAVAILABLE_CODE &&
+            currentId === this.fetchId &&
+            isCurrent()
+          ) {
+            showToast(MESSAGE_UNAVAILABLE_TOAST, 'warning');
+          }
+        }
+        return;
+      }
 
       const data = (await res.json()) as HistoryWindow;
       if (currentId !== this.fetchId || !isCurrent()) return;
