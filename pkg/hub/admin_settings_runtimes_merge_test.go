@@ -302,7 +302,7 @@ func TestPutServerConfig_ResourceQuantities(t *testing.T) {
 			rr, _ := fileModePutServerConfig(t, &Server{}, tt.body)
 			wantCode := http.StatusOK
 			if tt.wantErr {
-				wantCode = http.StatusBadRequest
+				wantCode = http.StatusUnprocessableEntity
 			}
 			if rr.Code != wantCode {
 				t.Fatalf("expected %d, got %d: %s", wantCode, rr.Code, rr.Body.String())

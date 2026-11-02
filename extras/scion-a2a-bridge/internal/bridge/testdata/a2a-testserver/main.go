@@ -300,6 +300,7 @@ func (m *mockProdHubClient) HubPreStartHooks() hubclient.HubPreStartHookService 
 func (m *mockProdHubClient) Artifacts() hubclient.ArtifactService               { return nil }
 func (m *mockProdHubClient) TestIdentities() hubclient.TestIdentityService      { return nil }
 func (m *mockProdHubClient) Messaging() hubclient.MessagingService              { return nil }
+func (m *mockProdHubClient) AdminSettings() hubclient.AdminSettingsService      { return nil }
 func (m *mockProdHubClient) TestIdentityDelegations() hubclient.TestIdentityDelegationService {
 	return nil
 }

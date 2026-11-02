@@ -59,6 +59,59 @@ func ConfidentialArrival(r *http.Request, trusted []*net.IPNet) bool {
 	return forwardedProtoIsHTTPS(r)
 }
 
+// Reasons ArrivalRefusal gives for a request ConfidentialArrival refuses.
+// They are sent to brokers in the refusal's details, so they are stable.
+const (
+	// ArrivalRefusalUntrustedLocalProxy: the peer is on this host and sent
+	// forwarding headers (a TLS-terminating proxy on this host), and
+	// server.trusted_proxies is set to an empty list.
+	ArrivalRefusalUntrustedLocalProxy = "untrusted_local_proxy"
+	// ArrivalRefusalLocalProxyNotTrusted: as above, but
+	// server.trusted_proxies lists other proxies and not this one.
+	ArrivalRefusalLocalProxyNotTrusted = "local_proxy_not_trusted"
+	// ArrivalRefusalProxyProtoNotHTTPS: the peer is a trusted proxy, but its
+	// forwarded protocol is not exactly one https value (http, missing,
+	// appended or ambiguous).
+	ArrivalRefusalProxyProtoNotHTTPS = "proxy_proto_not_https"
+	// ArrivalRefusalNotTLS: any other refusal, such as a plain HTTP request
+	// from a peer on another host.
+	ArrivalRefusalNotTLS = "not_tls"
+)
+
+// ArrivalRefusal classifies why ConfidentialArrival refuses r with trusted,
+// using the same helpers, or returns "" when ConfidentialArrival accepts it.
+// In order: an accepted request; a peer on this host with forwarding
+// headers that is not in trusted (ArrivalRefusalUntrustedLocalProxy when
+// trusted is empty, else ArrivalRefusalLocalProxyNotTrusted); a peer in
+// trusted (ArrivalRefusalProxyProtoNotHTTPS); everything else
+// (ArrivalRefusalNotTLS).
+func ArrivalRefusal(r *http.Request, trusted []*net.IPNet) string {
+	if ConfidentialArrival(r, trusted) {
+		return ""
+	}
+	peer := RemotePeerIP(r)
+	if peer == nil {
+		return ArrivalRefusalNotTLS
+	}
+	inTrusted := len(trusted) > 0 && IPInNets(peer, trusted)
+	if peer.IsLoopback() && hasForwardingHeader(r) && !inTrusted {
+		if len(trusted) == 0 {
+			return ArrivalRefusalUntrustedLocalProxy
+		}
+		return ArrivalRefusalLocalProxyNotTrusted
+	}
+	if inTrusted {
+		return ArrivalRefusalProxyProtoNotHTTPS
+	}
+	return ArrivalRefusalNotTLS
+}
+
+// IsLocalProxyRefusal reports whether reason (ArrivalRefusal) is a refusal
+// of a proxy on this host that server.trusted_proxies does not list.
+func IsLocalProxyRefusal(reason string) bool {
+	return reason == ArrivalRefusalUntrustedLocalProxy || reason == ArrivalRefusalLocalProxyNotTrusted
+}
+
 // RemotePeerIP is the IP of r's immediate peer, or nil when RemoteAddr does
 // not hold one.
 func RemotePeerIP(r *http.Request) net.IP {

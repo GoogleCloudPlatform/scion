@@ -143,11 +143,11 @@ func TestEnvValueMayBeShown(t *testing.T) {
 	}
 }
 
-// TestGetServerConfigDB_EnvValues covers the DB tier: the authorized domains
-// the hub runs with come from the environment (the saved value is never
-// applied, ptone/scion#6000), so the env value is in effect and the key is
-// not reported as superseded; a key whose managed row wins is not in effect;
-// a key with no row is in effect.
+// TestGetServerConfigDB_EnvValues covers the DB tier: a SCION_SERVER_*
+// variable pins the authorized domains on the node (ptone/scion#6000), so
+// the env value is in effect over the saved one and the key is not reported
+// as superseded; a key whose managed row wins is not in effect; a key with
+// no row is in effect.
 func TestGetServerConfigDB_EnvValues(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // no settings.yaml
 	envDomains := []any{"env-a.example", "env-b.example"}
@@ -215,7 +215,8 @@ func TestGetServerConfigDB_EnvValues(t *testing.T) {
 		}
 	}
 
-	// The saved authorized domains supersede nothing; admin_emails does.
+	// The saved authorized domains supersede nothing (the env pin wins);
+	// admin_emails does.
 	var supersededAccess []string
 	for _, sk := range resp.SupersededKeys["access"] {
 		supersededAccess = append(supersededAccess, sk.Key)

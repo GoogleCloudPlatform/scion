@@ -730,6 +730,21 @@ describe('dispositionSummary', () => {
     ).toBe('Saved model; takes effect at the next reincarnation.');
   });
 
+  it('says a pending reincarnation-held key is held as a whole', () => {
+    expect(
+      dispositionSummary(
+        {
+          applied: [],
+          held: ['config.model'],
+          heldForReincarnate: ['config.max_turns', 'config.skills'],
+        },
+        ['model', 'skills']
+      )
+    ).toBe(
+      'Saved model for the next start. Saved skills; held as a whole until a reincarnation, including parts a start could apply. Saved max_turns; takes effect at the next reincarnation.'
+    );
+  });
+
   it('names held keys', () => {
     expect(
       dispositionSummary({ applied: [], held: ['config.model'], heldForReincarnate: [] })

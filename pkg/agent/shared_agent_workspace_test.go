@@ -479,3 +479,26 @@ func TestStart_SharedLayoutDockerClonePerAgentRefusedAsBefore(t *testing.T) {
 	assert.Empty(t, cfg.NFSAgentDirName, "the runtime is never reached")
 	assert.Empty(t, cfg.Name, "no run is started")
 }
+
+// A Cloud Run broker on a shared nfs Layout runs a clone-per-agent agent
+// in its own workspace on the share, agents/<slug>/workspace, which the
+// cloudrun runtime creates and mounts (provisionCloudRunNFS) and the agent
+// clones into, so the broker-local <agentDir>/workspace is never mounted
+// and must not refuse the start. The runtime is reached with the clone, on
+// the nfs backend; the broker itself places nothing on the share (the
+// runtime is mocked here).
+func TestStart_SharedLayoutCloudRunClonePerAgentStarts(t *testing.T) {
+	cfg, root, ext, _, err := sharedLayoutStart(t, "cloudrun", func(o *api.StartOptions) {
+		o.GitClone = &api.GitCloneConfig{URL: "https://example.com/repo.git"}
+		o.Env["SCION_WORKSPACE_MODE"] = "clone-per-agent"
+	})
+	require.NoError(t, err, "a Cloud Run clone-per-agent start on a shared Layout is admitted")
+	require.NotNil(t, cfg.GitClone, "the runtime gets the clone to make in-container")
+	assert.Equal(t, "nfs", cfg.WorkspaceBackendName, "home and secrets stay on the nfs backend")
+	assert.Contains(t, cfg.Env, "SCION_WORKSPACE_MODE=clone-per-agent")
+	assert.Empty(t, cfg.NFSAgentDirName, "the broker selects no agent directory; the runtime creates the workspace")
+	assert.Equal(t, filepath.Join(root, "workspace"), cfg.Workspace,
+		"the runtime gets the project's workspace path on the share, from which it derives the agent's workspace, home and secrets")
+	assert.NoDirExists(t, filepath.Join(root, "agents", "test-agent"), "the broker places nothing in the agent's directory on the share; the runtime creates the workspace")
+	assert.FileExists(t, filepath.Join(ext, "scion-agent.json"), "agent state stays in the broker-local external root")
+}

@@ -115,6 +115,10 @@ type Client interface {
 	// Messaging returns the cross-project messaging operations interface.
 	Messaging() MessagingService
 
+	// AdminSettings returns the hub administrative settings operations
+	// interface (server configuration).
+	AdminSettings() AdminSettingsService
+
 	// ProjectInjectedSkills returns an InjectedSkillsService scoped to a project.
 	ProjectInjectedSkills(projectID string) InjectedSkillsService
 
@@ -184,6 +188,7 @@ type client struct {
 	allowList             *allowListService
 	invites               *inviteService
 	messaging             *messagingService
+	adminSettings         *adminSettingsService
 	artifacts             *artifactService
 	testIdentities        *testIdentityService
 	testIdentityDelegs    *testIdentityDelegationService
@@ -243,6 +248,7 @@ func New(baseURL string, opts ...Option) (Client, error) {
 	c.allowList = &allowListService{c: c}
 	c.invites = &inviteService{c: c}
 	c.messaging = &messagingService{c: c}
+	c.adminSettings = &adminSettingsService{c: c}
 	c.artifacts = &artifactService{c: c}
 	c.testIdentities = &testIdentityService{c: c}
 	c.testIdentityDelegs = &testIdentityDelegationService{c: c}
@@ -379,6 +385,11 @@ func (c *client) AllowList() AllowListService {
 // Invites returns the invite code management operations interface.
 func (c *client) Invites() InviteService {
 	return c.invites
+}
+
+// AdminSettings returns the hub administrative settings operations interface.
+func (c *client) AdminSettings() AdminSettingsService {
+	return c.adminSettings
 }
 
 // Messaging returns the cross-project messaging operations interface.

@@ -334,7 +334,7 @@ resource "google_secret_manager_secret_iam_member" "hub_reads_kubeconfig" {
 # --- OIDC signing key ---
 #
 # Not pre-provisioned by Terraform. The hub generates its own OIDC signing
-# key on first boot (pkg/hub/oidckeys.go) and stores it under the
+# key on first boot (pkg/hub/oidckeys/oidckeys.go) and stores it under the
 # hub-prefixed Secret Manager name, covered by hub-identity's
 # hub_secretmanager_admin_hub_prefixed grant, with a DB-store backup for
 # cold-start races.
