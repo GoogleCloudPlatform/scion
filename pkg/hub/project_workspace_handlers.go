@@ -784,17 +784,33 @@ func (s *Server) handleProjectWorkspaceUpload(w http.ResponseWriter, r *http.Req
 // When "format=json" is set, the file content is returned as a JSON object
 // with metadata, suitable for the inline file editor.
 func (s *Server) handleProjectWorkspaceDownload(w http.ResponseWriter, r *http.Request, root *os.Root, filePath string) {
-	// Validate the file path. This lexical check is kept as defence in depth:
-	// it rejects the obvious shapes early, but it cannot see symlinks, so the
-	// confinement that actually matters is the Root below. A path with a .git
-	// component is refused, as for writes.
-	if err := validateWorkspaceWritePath(filePath); err != nil {
+	// Validate the file path. This lexical check rejects the obvious shapes,
+	// including a path with a .git component (as for writes); it cannot see
+	// symlinks, which the walk below handles.
+	if err := validateWorkspaceReadPath(filePath); err != nil {
 		BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", filePath, err.Error()))
 		return
 	}
 
+	// Open the parent one directory at a time (as for writes, creating
+	// nothing) and refuse a symlink as the target, with the .git refusal.
+	parent, base, err := openWorkspaceReadTarget(root, filePath)
+	if err != nil {
+		switch {
+		case errors.Is(err, errWorkspaceWriteRefused):
+			BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", filePath, errDotGitComponent.Error()))
+		case errors.Is(err, fs.ErrNotExist):
+			NotFound(w, "File")
+		default:
+			notAccessible(w, "download", filePath, err)
+		}
+		return
+	}
+	defer parent.Close()
+	dir := parent.Dir()
+
 	// Check file exists and is not a directory
-	info, err := root.Stat(filePath)
+	info, err := dir.Stat(base)
 	if err != nil {
 		if os.IsNotExist(err) {
 			NotFound(w, "File")
@@ -827,7 +843,7 @@ func (s *Server) handleProjectWorkspaceDownload(w http.ResponseWriter, r *http.R
 			return
 		}
 
-		data, readErr := root.ReadFile(filePath)
+		data, readErr := dir.ReadFile(base)
 		if readErr != nil {
 			InternalError(w)
 			return
@@ -854,7 +870,7 @@ func (s *Server) handleProjectWorkspaceDownload(w http.ResponseWriter, r *http.R
 	}
 
 	// Open the file
-	f, err := root.Open(filePath)
+	f, err := dir.Open(base)
 	if err != nil {
 		InternalError(w)
 		return
@@ -1640,11 +1656,18 @@ func validateWorkspaceWritePath(path string) error {
 	}
 	for _, c := range strings.FieldsFunc(path, func(r rune) bool { return r == '/' || r == '\\' }) {
 		if util.IsDotGitComponent(c) {
-			return fmt.Errorf("paths with a .git component are not allowed")
+			return errDotGitComponent
 		}
 	}
 	return nil
 }
+
+// errDotGitComponent is the refusal of a path with a .git component; a
+// download through a symlink gets the same answer.
+var errDotGitComponent = errors.New("paths with a .git component are not allowed")
+
+// validateWorkspaceReadPath is validateWorkspaceWritePath for downloads.
+func validateWorkspaceReadPath(path string) error { return validateWorkspaceWritePath(path) }
 
 // skipDotGitEntry reports whether a listing or archive walk leaves out d, an
 // entry named .git under util.IsDotGitComponent (a directory or a gitfile),

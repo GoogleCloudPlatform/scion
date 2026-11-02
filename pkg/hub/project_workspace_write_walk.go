@@ -57,13 +57,41 @@ type workspaceWriteParent struct {
 // the same way; ".." in a target steps back to the previous handle and never
 // above the workspace root.
 func openWorkspaceWriteParent(root *os.Root, relPath string) (*workspaceWriteParent, string, error) {
+	return openWorkspaceParent(root, relPath, true)
+}
+
+// openWorkspaceReadTarget opens the parent of relPath like
+// openWorkspaceWriteParent, but creates nothing, and refuses when the final
+// component is a symlink: a download serves only an entry that is itself in
+// the opened parent. A missing parent or target is an fs.ErrNotExist error.
+func openWorkspaceReadTarget(root *os.Root, relPath string) (*workspaceWriteParent, string, error) {
+	p, base, err := openWorkspaceParent(root, relPath, false)
+	if err != nil {
+		return nil, "", err
+	}
+	if base == "" {
+		base = "." // a trailing slash names the parent itself
+	}
+	if info, err := p.Dir().Lstat(base); err != nil {
+		p.Close()
+		return nil, "", err
+	} else if info.Mode().Type() == fs.ModeSymlink {
+		p.Close()
+		return nil, "", fmt.Errorf("%w: target is a symlink", errWorkspaceWriteRefused)
+	}
+	return p, base, nil
+}
+
+// openWorkspaceParent is the walk behind openWorkspaceWriteParent and
+// openWorkspaceReadTarget; create makes missing directories on the way.
+func openWorkspaceParent(root *os.Root, relPath string, create bool) (*workspaceWriteParent, string, error) {
 	p := &workspaceWriteParent{stack: []*os.Root{root}}
 	if info, err := root.Stat(".git"); err == nil {
 		p.gitDir = info
 	}
 	dir, base := path.Split(relPath)
 	for _, c := range strings.Split(dir, "/") {
-		if err := p.step(c, true); err != nil {
+		if err := p.step(c, create); err != nil {
 			p.Close()
 			return nil, "", err
 		}

@@ -144,3 +144,33 @@ func TestProjectWorkspaceArchive_OmitsDotGit(t *testing.T) {
 		assert.True(t, names[p], "archive lacks %s", p)
 	}
 }
+
+// TestProjectWorkspaceRead_SymlinkIntoDotGitRefused: a download through a
+// planted symlink into .git, as the target or as a directory on the way, is
+// refused with the .git refusal, and a regular file is still served.
+func TestProjectWorkspaceRead_SymlinkIntoDotGitRefused(t *testing.T) {
+	srv, _ := testServer(t)
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS Read Symlink DotGit")
+	plantDotGitReadTree(t, workspacePath)
+	require.NoError(t, os.Symlink(".git/config", filepath.Join(workspacePath, "cfg")))
+	require.NoError(t, os.Symlink(".git", filepath.Join(workspacePath, "g")))
+	filesURL := fmt.Sprintf("/api/v1/projects/%s/workspace/files", project.ID)
+
+	for name, p := range map[string]string{
+		"final_link":      "cfg",
+		"final_link_json": "cfg?format=json",
+		"dir_link":        "g/config",
+		"dir_link_json":   "g/config?format=json",
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := doRequest(t, srv, http.MethodGet, filesURL+"/"+p, nil)
+			assert.Equal(t, http.StatusBadRequest, rec.Code, "download through a link into .git, body: %s", rec.Body.String())
+			assert.NotContains(t, rec.Body.String(), dotGitReadSecret, "the .git/config secret was served")
+			assert.Contains(t, rec.Body.String(), ".git component", "not the .git refusal")
+		})
+	}
+
+	rec := doRequest(t, srv, http.MethodGet, filesURL+"/docs/notes.txt", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	assert.Equal(t, "notes", rec.Body.String())
+}

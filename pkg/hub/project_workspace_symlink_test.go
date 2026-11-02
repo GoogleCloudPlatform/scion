@@ -123,10 +123,11 @@ func TestSymlink_Download(t *testing.T) {
 		}{
 			{"escaping leaf", "esc_leaf", http.StatusBadRequest, ""},
 			{"escaping intermediate dir", "esc_dir/secret.txt", http.StatusBadRequest, ""},
-			{"inside link is followed", "in_link", http.StatusOK, "inside content"},
+			// A symlink as the target is refused, even inside.
+			{"inside leaf link", "in_link", http.StatusBadRequest, ""},
 			{"inside dir link is followed", "in_dir/inside.txt", http.StatusOK, "inside content"},
 			{"dangling absolute", "dangling", http.StatusBadRequest, ""},
-			{"dangling relative", "dangling_rel", http.StatusNotFound, ""},
+			{"dangling relative", "dangling_rel", http.StatusBadRequest, ""},
 		}
 
 		for _, tc := range cases {
