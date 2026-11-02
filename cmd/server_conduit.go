@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -471,19 +472,24 @@ func conduitPeerAuthOptions(ctx context.Context, cfg *config.GlobalConfig, selfI
 // secret (design §3.9): it is required in external relay mode and, with
 // relayRole, on --role relay; when set, a hub refuses one equal to its
 // session secret (a relay never resolves the session secret and passes
-// ""). Strength is checked by HubConduitConfig.Validate. Errors name the
-// setting, never the value.
-func validateConduitPeerSecret(c config.HubConduitConfig, relayRole bool, sessionSecret string) error {
+// ""). In managed ring mode (ring is the keyring file's signing ring) it
+// must also differ from the secret of every signing generation
+// (relay.CheckPeerSecretNotInRing); a relay passes a nil ring. Strength is
+// checked by HubConduitConfig.Validate. Errors name the setting, never the
+// value.
+func validateConduitPeerSecret(c config.HubConduitConfig, relayRole bool, sessionSecret string, ring *keyring.SigningRing) error {
 	secret := c.PeerSecretValue() // a value that is only a newline is unset
 	switch {
 	case secret == "" && relayRole:
 		return errors.New("server.hub.conduit.peer_secret is required on --role relay")
 	case secret == "" && c.ExternalRelay():
 		return errors.New("server.hub.conduit.peer_secret is required when server.hub.conduit.relay_mode is external")
-	case secret != "" && sessionSecret != "" && secret == sessionSecret:
+	case secret == "":
+		return nil
+	case sessionSecret != "" && secret == sessionSecret:
 		return errors.New("server.hub.conduit.peer_secret must differ from the session secret")
 	}
-	return nil
+	return relay.CheckPeerSecretNotInRing(secret, ring)
 }
 
 // conduitInternalRelayAPIServed reports whether this node serves the

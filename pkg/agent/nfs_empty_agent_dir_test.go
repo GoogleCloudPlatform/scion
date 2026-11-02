@@ -236,9 +236,9 @@ func TestRemoveNFSAgentFiles_EmptyPerAgentKeepsSiblings(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(home, ".profile"), []byte("x"), 0o644))
 	runAgentWorkspacePurgeInline(t)
 
-	paths, err := kubernetesTestManager("kubernetes").RemoveNFSAgentFiles(context.Background(), f.projectScionDir, testNFSWorkspaceProjectID, "test-agent")
+	ds, err := kubernetesTestManager("kubernetes").RemoveNFSAgentFiles(context.Background(), f.projectScionDir, testNFSWorkspaceProjectID, "test-agent")
 	require.NoError(t, err)
-	assert.Contains(t, paths, agentDir)
+	assert.Contains(t, deletionPaths(ds), filepath.Join(agentDir, provision.AgentWorkspaceDir))
 	assert.NoDirExists(t, ws)
 	assert.FileExists(t, filepath.Join(home, ".profile"), "a sibling of the workspace is kept")
 	assert.DirExists(t, agentDir)

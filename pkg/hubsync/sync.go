@@ -2099,6 +2099,21 @@ func ScopedTokenProjectNotFoundError(projectID string) error {
 		ErrScopedTokenProjectNotFound, projectID)
 }
 
+// ScopedTokenProjectLookupEmptyError explains a project reference (slug,
+// name or git URL) that matched nothing under a user access token. The hub
+// lists projects to a token only with project:list (and reads them with
+// project:read), so an empty result is most likely a missing scope. The
+// message is the same whether or not the project exists. ref is the
+// reference the CLI looked up.
+func ScopedTokenProjectLookupEmptyError(ref string) error {
+	return fmt.Errorf("%w: the Hub found no project matching '%s' while using the user access token in SCION_HUB_TOKEN\n\n"+
+		"The token most likely lacks the project:read and project:list scopes, which the CLI needs to look up the project.\n"+
+		"project:manage does not include them. Create a token that includes them, for example:\n"+
+		"  scion hub token create --project <project> --name <name> --scopes project:read,project:list,agent:list,agent:read\n\n"+
+		"If the token already has both, check that the reference names the project the token is scoped to",
+		ErrScopedTokenProjectNotFound, ref)
+}
+
 // IsLocalhostEndpoint reports whether endpoint is a loopback hub: its host is
 // localhost, 127.0.0.1 or ::1. It is the one rule for where a dev credential
 // may go: the CLI reports one only for such a hub and sends one only to it.

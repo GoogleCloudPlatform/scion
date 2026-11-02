@@ -1513,7 +1513,7 @@ func (s *Server) applyCreateEffectCeiling(
 	// (uatHopEffectCeiling); the stored ceiling stays the token's verbatim.
 	capped, cause, allowed := childRoleWithinCeiling(uatHopEffectCeiling(prov.SourcePrincipalKind, prov.SourcePrincipalID, prov, ceiling), role, roleExplicit)
 	if !allowed {
-		msg := reasonNoUsableRole
+		msg := noUsableRoleMessage(uatHopEffectCeiling(prov.SourcePrincipalKind, prov.SourcePrincipalID, prov, ceiling))
 		if roleExplicit {
 			msg = fmt.Sprintf("the credential's scopes do not cover agent role %q; request a role the token covers, request role=none explicitly, or create from a session", role)
 		}

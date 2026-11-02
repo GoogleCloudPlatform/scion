@@ -19,6 +19,8 @@ package projectfs
 import (
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -153,11 +155,6 @@ func (l Layout) RemoveProjectTree(projectID string) ([]Deletion, error) {
 	return out, nil
 }
 
-// AgentWorkspacePendingReason is the reason of a kept agent directory: it
-// still holds entries the hub does not own, normally the agent's own
-// workspace, which only the broker removes.
-const AgentWorkspacePendingReason = "the agent directory is not empty: workspace pending broker removal"
-
 // RemoveAgentStorage removes what the hub owns of agent agentID (the hub agent ID,
 // ValidAgentID) with slug agent: its home-<agentID> and secrets-<agentID>
 // below agents/<slug> on the Layout homes resolve on, then the directory
@@ -193,10 +190,13 @@ func (l Layout) RemoveAgentStorage(projectID, agent, agentID string) ([]Deletion
 		if err != nil {
 			return nil, err
 		}
-		if err := hl.checkShareHostBase(); err != nil {
+		// A share that is not mounted (its subpath root missing below the
+		// host base) is a failure, never "absent": the trees are there,
+		// just not visible here (as for RemoveProjectTree).
+		if err := errors.Join(hl.checkShareHostBase(), hl.CheckTreeMounted()); err != nil {
 			out = append(out, deletion(TreeAgentHome, home.HostPath, false, err), deletion(TreeAgentSecrets, secrets.HostPath, false, err))
 		} else {
-			out = append(out, deleteShared(TreeAgentHome, home), deleteShared(TreeAgentSecrets, secrets))
+			out = append(out, verifyRemoved(deleteShared(TreeAgentHome, home)), verifyRemoved(deleteShared(TreeAgentSecrets, secrets)))
 		}
 	}
 	for _, sl := range l.sharedLayouts() {
@@ -204,13 +204,28 @@ func (l Layout) RemoveAgentStorage(projectID, agent, agentID string) ([]Deletion
 		if err != nil {
 			return out, err
 		}
-		if err := sl.checkShareHostBase(); err != nil {
+		if err := errors.Join(sl.checkShareHostBase(), sl.CheckTreeMounted()); err != nil {
 			out = append(out, deletion(TreeAgentRoot, r.HostPath, false, err))
 			continue
 		}
-		out = append(out, removeEmptyShared(TreeAgentRoot, r))
+		out = append(out, verifyRemoved(removeEmptyShared(TreeAgentRoot, r)))
 	}
 	return out, nil
+}
+
+// verifyRemoved turns a deleted or absent outcome into a failure when the
+// path is still there (Lstat, not following a link): a removal is never
+// reported as done unless the path is gone.
+func verifyRemoved(d Deletion) Deletion {
+	if d.Outcome != OutcomeDeleted && d.Outcome != OutcomeAbsent {
+		return d
+	}
+	if _, err := os.Lstat(d.Path); err == nil {
+		d.Outcome, d.Err = OutcomeFailed, fmt.Errorf("%w: %s", ErrStillPresent, d.Path)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		d.Outcome, d.Err = OutcomeFailed, fmt.Errorf("check %s after removal: %w", d.Path, err)
+	}
+	return d
 }
 
 // removeEmptyShared removes r (a directory on a shared Layout) only when it
