@@ -67,11 +67,11 @@ export interface ChatRetentionSettings {
   last_applied_cutoff: string | null;
   revision: number;
   /** The most recent retention runs, newest first. */
-  runs?: ChatRetentionRun[];
+  runs?: ChatRetentionRun[] | undefined;
   /** The most recent preview, or null when none was run. */
-  last_preview?: ChatRetentionRun | null;
+  last_preview?: ChatRetentionRun | null | undefined;
   /** Messages the sweep and manual runs deleted since the last preview started. */
-  purged_since_preview?: number;
+  purged_since_preview?: number | undefined;
 }
 
 /** One chat_retention_runs row, as pkg/hub/admin_chat_retention.go sends it. */
@@ -285,7 +285,8 @@ function formatWhen(iso: string | null): string {
  */
 export function lastPreviewSummary(run: ChatRetentionRun | null | undefined): string {
   if (!run) return 'No preview has been run yet.';
-  if (run.status === 'running') return `A preview is running (started ${formatWhen(run.started_at)}).`;
+  if (run.status === 'running')
+    return `A preview is running (started ${formatWhen(run.started_at)}).`;
   if (run.status === 'failed') {
     return `The last preview failed (${formatWhen(run.started_at)})${run.error ? `: ${run.error}` : '.'}`;
   }
@@ -903,9 +904,9 @@ export class ScionAdminChatRetention extends LitElement {
         <p class="last-preview">${lastPreviewSummary(s.last_preview)}</p>
         ${backlog !== null
           ? html`<p class="backlog">
-              Backlog draining: about ${plural(backlog, 'message', 'messages')} left to delete
-              (the last preview minus
-              ${plural(s.purged_since_preview ?? 0, 'message', 'messages')} deleted since).
+              Backlog draining: about ${plural(backlog, 'message', 'messages')} left to delete (the
+              last preview minus ${plural(s.purged_since_preview ?? 0, 'message', 'messages')}
+              deleted since).
             </p>`
           : nothing}
         <div class="actions">

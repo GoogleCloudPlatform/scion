@@ -222,7 +222,9 @@ describe('retentionWarning with an invalid window', () => {
 describe('lastPreviewSummary', () => {
   it('names the messages, projects, time and window', () => {
     const text = lastPreviewSummary(run());
-    expect(text).toMatch(/^Last preview: 1,200,000 messages in 14 projects, .*2026.* \(a 365-day window\)\.$/);
+    expect(text).toMatch(
+      /^Last preview: 1,200,000 messages in 14 projects, .*2026.* \(a 365-day window\)\.$/
+    );
   });
 
   it('covers no preview, one running, one failed and no window', () => {
@@ -230,13 +232,13 @@ describe('lastPreviewSummary', () => {
     expect(lastPreviewSummary(run({ status: 'running', finished_at: null }))).toContain(
       'A preview is running'
     );
-    expect(lastPreviewSummary(run({ status: 'failed', error: 'deadline' }))).toContain(
-      'failed'
+    expect(lastPreviewSummary(run({ status: 'failed', error: 'deadline' }))).toContain('failed');
+    expect(
+      lastPreviewSummary(run({ messages: 1, projects: 1, messages_retention_days: 0 }))
+    ).toContain('1 message in 1 project');
+    expect(lastPreviewSummary(run({ messages_retention_days: 0 }))).toContain(
+      'no retention window'
     );
-    expect(lastPreviewSummary(run({ messages: 1, projects: 1, messages_retention_days: 0 }))).toContain(
-      '1 message in 1 project'
-    );
-    expect(lastPreviewSummary(run({ messages_retention_days: 0 }))).toContain('no retention window');
   });
 });
 
@@ -257,14 +259,29 @@ describe('backlogEstimate', () => {
 describe('needsPurgeConfirmation', () => {
   const on = { enabled: true, messages_retention_days: 90 };
   it.each([
-    ['enabling', { enabled: false, messages_retention_days: null }, { enabled: true, messages_retention_days: null }, true],
-    ['setting a first window', { enabled: true, messages_retention_days: null }, { enabled: true, messages_retention_days: 30 }, true],
+    [
+      'enabling',
+      { enabled: false, messages_retention_days: null },
+      { enabled: true, messages_retention_days: null },
+      true,
+    ],
+    [
+      'setting a first window',
+      { enabled: true, messages_retention_days: null },
+      { enabled: true, messages_retention_days: 30 },
+      true,
+    ],
     ['shortening', on, { enabled: true, messages_retention_days: 30 }, true],
     ['lengthening', on, { enabled: true, messages_retention_days: 365 }, false],
     ['the same window', on, { enabled: true, messages_retention_days: 90 }, false],
     ['removing the window', on, { enabled: true, messages_retention_days: null }, false],
     ['disabling', on, { enabled: false, messages_retention_days: 7 }, false],
-    ['staying disabled', { enabled: false, messages_retention_days: null }, { enabled: false, messages_retention_days: 7 }, false],
+    [
+      'staying disabled',
+      { enabled: false, messages_retention_days: null },
+      { enabled: false, messages_retention_days: 7 },
+      false,
+    ],
   ])('%s: %s', (_name, saved, next, want) => {
     expect(needsPurgeConfirmation(saved, next)).toBe(want);
   });
@@ -463,22 +480,38 @@ describe('scion-admin-chat-retention', () => {
         runs: [
           run({ id: 'm', trigger: 'manual', dry_run: false, messages: 40, projects: 2 }),
           run({ id: 'p' }),
-          run({ id: 's', trigger: 'sweep', dry_run: false, status: 'partial', finished_at: null, messages: 0, projects: 0 }),
+          run({
+            id: 's',
+            trigger: 'sweep',
+            dry_run: false,
+            status: 'partial',
+            finished_at: null,
+            messages: 0,
+            projects: 0,
+          }),
         ],
         last_preview: run({ messages: 1000 }),
         purged_since_preview: 250,
       });
       const el = await mount();
 
-      expect(q(el, '.last-preview')?.textContent).toContain('Last preview: 1,000 messages in 14 projects');
+      expect(q(el, '.last-preview')?.textContent).toContain(
+        'Last preview: 1,000 messages in 14 projects'
+      );
       expect(q(el, '.backlog')?.textContent?.replace(/\s+/g, ' ')).toContain(
         'Backlog draining: about 750 messages left to delete'
       );
       const rows = Array.from(el.shadowRoot?.querySelectorAll('tr.run') ?? []);
-      expect(rows.map((r) => r.getAttribute('data-trigger'))).toEqual(['manual', 'preview', 'sweep']);
+      expect(rows.map((r) => r.getAttribute('data-trigger'))).toEqual([
+        'manual',
+        'preview',
+        'sweep',
+      ]);
       expect(rows[0]?.textContent?.replace(/\s+/g, ' ')).toContain('40 messages in 2 projects');
       expect(rows[1]?.textContent?.replace(/\s+/g, ' ')).toContain('Preview (dry run)');
-      expect(rows[1]?.textContent?.replace(/\s+/g, ' ')).toContain('would delete 1,200,000 messages');
+      expect(rows[1]?.textContent?.replace(/\s+/g, ' ')).toContain(
+        'would delete 1,200,000 messages'
+      );
       expect(rows[2]?.textContent).toContain('In progress');
     });
 
@@ -502,7 +535,9 @@ describe('scion-admin-chat-retention', () => {
 
       const dialog = q(el, '.confirm-dialog');
       expect(dialog?.hasAttribute('open')).toBe(true);
-      expect(q(el, '.confirm-preview')?.textContent).toContain('Last preview: 1,000 messages in 14 projects');
+      expect(q(el, '.confirm-preview')?.textContent).toContain(
+        'Last preview: 1,000 messages in 14 projects'
+      );
       expect(q(el, '.confirm-change')?.textContent).toContain('Enabling the retention sweep');
       expect(q(el, '.confirm-mismatch')).toBeNull();
       expect(puts()).toEqual([]);
@@ -513,11 +548,14 @@ describe('scion-admin-chat-retention', () => {
       expect(puts()).toEqual([]);
 
       await save(el);
-      putResponse = () => json(settings({ enabled: true, messages_retention_days: 365, revision: 4 }));
+      putResponse = () =>
+        json(settings({ enabled: true, messages_retention_days: 365, revision: 4 }));
       q(el, '.confirm-save')?.click();
       await settle();
       await el.updateComplete;
-      expect(puts()).toEqual([expect.objectContaining({ enabled: true, messages_retention_days: 365 })]);
+      expect(puts()).toEqual([
+        expect.objectContaining({ enabled: true, messages_retention_days: 365 }),
+      ]);
       expect(q(el, '.confirm-dialog')?.hasAttribute('open')).toBe(false);
     });
 
@@ -533,7 +571,9 @@ describe('scion-admin-chat-retention', () => {
       await save(el);
 
       expect(q(el, '.confirm-dialog')?.hasAttribute('open')).toBe(true);
-      expect(q(el, '.confirm-change')?.textContent).toContain('Shortening the retention window to 30 days');
+      expect(q(el, '.confirm-change')?.textContent).toContain(
+        'Shortening the retention window to 30 days'
+      );
       expect(q(el, '.confirm-mismatch')).not.toBeNull();
       expect(apiFetch.mock.calls.length).toBe(calls);
     });
@@ -561,7 +601,9 @@ describe('scion-admin-chat-retention', () => {
       await settle();
       await el.updateComplete;
 
-      const post = apiFetch.mock.calls.find(([path]) => path.endsWith('/chat-retention-preview/run'));
+      const post = apiFetch.mock.calls.find(([path]) =>
+        path.endsWith('/chat-retention-preview/run')
+      );
       expect(post?.[1]?.method).toBe('POST');
       expect(JSON.parse(post?.[1]?.body as string)).toEqual({
         params: { messages_retention_days: '180' },
