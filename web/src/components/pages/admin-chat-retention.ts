@@ -77,11 +77,13 @@ export interface ChatRetentionSettings {
 /** One chat_retention_runs row, as pkg/hub/admin_chat_retention.go sends it. */
 export interface ChatRetentionRun {
   id: string;
-  trigger: 'sweep' | 'manual' | 'preview' | string;
+  /** "sweep", "manual" or "preview"; any other value is shown as sent. */
+  trigger: string;
   dry_run: boolean;
   started_at: string;
   finished_at: string | null;
-  status: 'running' | 'ok' | 'partial' | 'failed' | string;
+  /** "running", "ok", "partial" or "failed"; any other value is shown as sent. */
+  status: string;
   actor?: string;
   error?: string;
   /** Messages deleted (a preview: that would be deleted). */
