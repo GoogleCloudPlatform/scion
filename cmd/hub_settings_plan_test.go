@@ -266,7 +266,7 @@ func TestBuildSettingsWrite_ProjectDefaultsRedirected(t *testing.T) {
 	ix := newSettingsKeyIndex(testSettingsSchema())
 	_, err := buildSettingsWrite(testServerConfig(t), ix, []settingsChange{{Key: "project_defaults.default_scratchpad", Value: false}}, settingsPlanOptions{})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "is a project default")
+	assert.Contains(t, err.Error(), "scion hub project-defaults")
 }
 
 func TestBuildSettingsWrite_RevisionPins(t *testing.T) {
