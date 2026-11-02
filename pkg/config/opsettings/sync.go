@@ -34,13 +34,21 @@ type SectionRow struct {
 	Value     json.RawMessage
 }
 
+// SettingsRevisionSection is the reserved hub_settings row that holds the
+// operational-settings revision counter. It equals
+// store.HubSettingsRevisionSection (a test in the store adapter checks
+// this); it is repeated here so this package does not import the store.
+const SettingsRevisionSection = "_settings_revision"
+
 // EffectiveOrigin is a row's origin after the store's BackfillOrigin: a row
 // still marked seeded but last written by someone other than the seed
-// (updated_by set and not "seed"), outside the _meta section, counts as
-// managed. A NULL updated_by is not "not seed" (SQL compares it as
-// unknown), so such a row stays seeded.
+// (updated_by set and not "seed"), outside the _meta section and the
+// reserved SettingsRevisionSection row, counts as managed. A NULL
+// updated_by is not "not seed" (SQL compares it as unknown), so such a row
+// stays seeded.
 func EffectiveOrigin(section, origin string, updatedBy *string) string {
-	if origin == OriginSeeded && section != "_meta" && updatedBy != nil && *updatedBy != "seed" {
+	if origin == OriginSeeded && section != "_meta" && section != SettingsRevisionSection &&
+		updatedBy != nil && *updatedBy != "seed" {
 		return OriginManaged
 	}
 	return origin

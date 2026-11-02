@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/cmd/internal/cliutil"
@@ -131,6 +132,14 @@ return an error instead of blocking.`,
 		// hub-profile gate, so every use gets the same guidance.
 		if noHub {
 			return errNoHubRemoved
+		}
+
+		// Windows build: a gated command refuses here, in the root pre-run
+		// hook, before the command runs or does any invocation-target,
+		// project or migration work of its own (cmd/platform_gate.go). The
+		// CLI mode resolved above may already have read the settings.
+		if err := windowsRefusal(cmd); err != nil {
+			return err
 		}
 
 		// Target-hub profiles (ptone/scion#4240): refuse commands outside
@@ -305,6 +314,12 @@ func Execute() {
 	}
 
 	applyModeRestrictions(rootCmd, mode)
+	applyPlatformRestrictions(rootCmd, runtime.GOOS)
+	// Shell completion of a command the Windows gate refused: no
+	// completion function of the command runs (cmd/platform_gate.go).
+	if completeGated(rootCmd, cliArgs, os.Stdout) {
+		return
+	}
 
 	// Suppress ASCII banner in agent mode. This runs in Execute rather
 	// than init(), where the mode cannot yet be resolved safely.

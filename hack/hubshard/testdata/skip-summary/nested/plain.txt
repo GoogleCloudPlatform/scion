@@ -1,0 +1,13 @@
+--- FAIL: TestNested (0.00s)
+    toy_test.go:67: parent before
+    --- FAIL: TestNested/a (0.00s)
+        toy_test.go:69: a log
+        --- FAIL: TestNested/a/deep (0.00s)
+            toy_test.go:70: deep boom
+                line2
+        toy_test.go:71: a after
+    toy_test.go:73: parent after
+    --- FAIL: TestNested/b (0.00s)
+        toy_test.go:74: b boom
+    toy_test.go:76: parent fail
+FAIL

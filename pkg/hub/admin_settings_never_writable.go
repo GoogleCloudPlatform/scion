@@ -33,18 +33,26 @@ import (
 // must not grow through the API), the proxy driver principals and driver
 // token audience (phase WS2, which decide who may carry test identity web
 // sessions behind the proxy), the relay-peer secret (design §3.9:
-// never stored in the database or returned by the API), and the server
-// keyring file path (ptone/scion#1530: the keyring is a deploy-time secret
-// input read once at startup) and its operator-only world-readable override.
-// A key matches itself and every key nested under it.
+// never stored in the database or returned by the API), the hub's GCP
+// project, which selects the service-account minting project
+// (ptone/scion#4942), and the server keyring file path (ptone/scion#1530:
+// the keyring is a deploy-time secret input read once at startup) and its
+// operator-only world-readable override, and server.trusted_proxies (the
+// transport policy's trust set). A key matches itself and every key nested
+// under it.
 var neverAPIWritableSettingsKeys = []string{
 	config.HubClassKey,
+	config.HubGCPProjectIDKey,
 	config.TestIdentitiesKey,
 	config.ProxyDriverPrincipalsKey,
 	config.ProxyDriverTokenAudienceKey,
 	config.ConduitPeerSecretKey,
 	config.KeyringFileKey,
 	config.KeyringFileAllowWorldReadableKey,
+	// The hub-broker transport policy's trusted proxy list: it decides
+	// whose X-Forwarded-Proto is trusted, so its trust set must not grow
+	// through the API.
+	config.TrustedProxiesKey,
 }
 
 // withoutNeverAPIWritableKeys returns keys without every never-API-writable
@@ -264,7 +272,6 @@ func (s *Server) rejectGateProtectedSettingsKeys(w http.ResponseWriter, rawBody 
 			break
 		}
 	}
-	writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, msg,
-		map[string]interface{}{"keys": keys})
+	writeSettingsKeysError(w, msg, keys)
 	return true
 }

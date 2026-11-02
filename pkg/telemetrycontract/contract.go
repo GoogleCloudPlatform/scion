@@ -91,9 +91,11 @@ type LabelKV struct{ Key, Value string }
 // worst). token_type is per-point (one of the TokenType* values) and added
 // by the caller alongside these.
 //
-// Unlike MetricAPICalls, which keeps agent_id/project_id for Cloud
-// descriptor compatibility, MetricUsageTokens's GCP allowlist does not
-// permit them: a point carrying any key outside {harness, model, token_type}
+// Neither MetricUsageTokens nor MetricAPICalls carries the unprefixed
+// agent_id/project_id point labels (calls dropped them in ptone/scion#3668);
+// identity comes from the exporter-stamped scion_* labels. For
+// MetricUsageTokens the GCP allowlist does not permit them at all: a point
+// carrying any key outside {harness, model, token_type}
 // gets the whole OTLP request rejected, taking the rest of that flush (calls,
 // tool and session metrics included) with it. This function is the single
 // place the hook handler (pkg/sciontool/hooks/handlers) and its admission

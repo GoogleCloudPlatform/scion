@@ -372,11 +372,14 @@ func firstJSONLLine(t *testing.T, path string) []byte {
 // documented sessionStart input delivered through the positional event path;
 // opencode is the first record of the real 1.18.33 capture
 // (session.created); muse-code has no capture, so it is a minimal payload
-// with the event name only.
+// with the event name only; pi is the first record of the bridge-generated
+// fixture (harnesses/pi/scion-bridge.test.mjs pins it to the bridge's real
+// output).
 //
-// The opencode and muse-code cases check the dialect mapping only, not
-// delivery gating: those harnesses use settle mode, so the runtime ignores
-// their marker.
+// The copilot, opencode, muse-code and pi cases check the dialect mapping
+// only, not delivery gating: those harnesses use ready strategy delay (the
+// strategies are hook and delay, pkg/agent/state/state.go), so the runtime
+// ignores their marker.
 func TestProcessHookData_DialectSessionStartReadiness(t *testing.T) {
 	type tc struct {
 		name      string
@@ -404,6 +407,9 @@ func TestProcessHookData_DialectSessionStartReadiness(t *testing.T) {
 			return firstJSONLLine(t, repoPath(t, "pkg/sciontool/hooks/dialects/testdata/opencode/hook-payloads-1.18.33.jsonl"))
 		}, true},
 		{"muse-code SessionStart", "muse-code", "harnesses/muse-code/dialect.yaml", raw(`{"hook_event_name":"SessionStart"}`), true},
+		{"pi session_start bridge payload", "pi", "harnesses/pi/dialect.yaml", func(t *testing.T) []byte {
+			return firstJSONLLine(t, repoPath(t, "pkg/sciontool/hooks/dialects/testdata/pi/bridge-payloads.jsonl"))
+		}, true},
 	}
 
 	for _, c := range cases {

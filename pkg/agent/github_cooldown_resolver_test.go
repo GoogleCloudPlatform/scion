@@ -16,7 +16,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -39,13 +38,13 @@ func serveTestCommit(mux *http.ServeMux, owner, repo string, calls *atomic.Int64
 	})
 }
 
-// serveTestSkill registers contents and raw handlers for
+// serveTestSkill registers git tree and raw handlers for
 // owner/repo/skills/name on mux, counting every request in calls. The
 // commit handler is registered separately, once per repo.
 func serveTestSkill(mux *http.ServeMux, owner, repo, name string, calls *atomic.Int64) {
-	mux.HandleFunc("/repos/"+owner+"/"+repo+"/contents/skills/"+name, func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/repos/"+owner+"/"+repo+"/git/trees/"+testCommitSHA+":skills/"+name, func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
-		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+		_ = writeTestTree(w, []fakeTreeFile{
 			{Name: "SKILL.md", Path: "skills/" + name + "/SKILL.md", Type: "file", Size: 5},
 		})
 	})
@@ -396,7 +395,7 @@ func TestGitHubSkillResolver_CooldownWritesNothingToDisk(t *testing.T) {
 		},
 		keyFor(noContentURI): {
 			Skill: ResolvedSkill{Name: "nocontent", URI: noContentURI, Version: "stale",
-				Files: []ResolvedFile{{Path: "SKILL.md"}}},
+				Files: []ResolvedFile{{Path: "SKILL.md", Mode: "0644"}}},
 			CachedAt: now.Add(-2 * time.Hour), ExpiresAt: now.Add(-time.Hour), IsBranchRef: true,
 		},
 	})

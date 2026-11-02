@@ -291,9 +291,9 @@ func TestReincarnateMove_SelfMoveRealPassthroughRefused(t *testing.T) {
 	f.assertNoMoveSideEffects(t, count)
 }
 
-// moveBrokerQuota: when the target has no room, the source reservation is
-// restored and the error returned.
-func TestMoveBrokerQuota_TargetFullRestoresSource(t *testing.T) {
+// moveBrokerQuota: when the target has no room, the error is returned and
+// the source reservation is kept.
+func TestMoveBrokerQuota_TargetFullKeepsSource(t *testing.T) {
 	f := setupMoveFixture(t, true, nil)
 	setBrokerAgentCeiling(t, f.s, 1)
 	reserveBrokerSlot(t, f.s, f.src, f.agent.ID)
@@ -301,7 +301,7 @@ func TestMoveBrokerQuota_TargetFullRestoresSource(t *testing.T) {
 
 	err := f.srv.moveBrokerQuota(context.Background(), f.agent, &reincarnationMove{SourceBrokerID: f.src.ID, TargetBrokerID: f.dst.ID})
 	require.Error(t, err)
-	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.src.ID), "the source reservation is restored")
+	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.src.ID), "the source reservation is kept")
 	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.dst.ID), "only the occupant")
 }
 
@@ -444,7 +444,7 @@ func TestReincarnationWorker_MoveRecheckFailsBeforeAnySideEffect(t *testing.T) {
 	fresh := *a.AppliedConfig
 	mv := &reincarnationMove{SourceBrokerID: f.src.ID, TargetBrokerID: f.dst.ID, ProjectID: f.project.ID, SelfMove: true, AgentDirWorkspace: true}
 
-	f.srv.runReincarnationWorker(ctx, a.ID, rec.ID, a.AppliedConfig, &fresh, "h", time.Now(), "", &ReincarnationPlan{}, 2, a.DeletionClaim, mv)
+	f.srv.runReincarnationWorker(ctx, a.ID, rec.ID, a.AppliedConfig, &fresh, "h", time.Now(), "", &ReincarnationPlan{}, 2, a.DeletionClaim, mv, nil)
 
 	got, err := f.s.GetAgentReincarnation(ctx, rec.ID)
 	require.NoError(t, err)
@@ -677,7 +677,7 @@ func TestReincarnationWorker_MoveRefusesReassignedAgent(t *testing.T) {
 	fresh := *a.AppliedConfig
 	mv := &reincarnationMove{SourceBrokerID: f.src.ID, TargetBrokerID: f.dst.ID, ProjectID: f.project.ID, SelfMove: true, AgentDirWorkspace: true}
 
-	f.srv.runReincarnationWorker(ctx, a.ID, rec.ID, a.AppliedConfig, &fresh, "h", time.Now(), "", &ReincarnationPlan{}, 2, a.DeletionClaim, mv)
+	f.srv.runReincarnationWorker(ctx, a.ID, rec.ID, a.AppliedConfig, &fresh, "h", time.Now(), "", &ReincarnationPlan{}, 2, a.DeletionClaim, mv, nil)
 
 	got, err := f.s.GetAgentReincarnation(ctx, rec.ID)
 	require.NoError(t, err)
@@ -795,7 +795,7 @@ func runMoveWorkerDirect(t *testing.T, f *moveFixture, mv *reincarnationMove) *s
 	}
 	require.NoError(t, f.s.CreateAgentReincarnation(ctx, rec))
 	fresh := *a.AppliedConfig
-	f.srv.runReincarnationWorker(ctx, a.ID, rec.ID, a.AppliedConfig, &fresh, "h", time.Now(), "", &ReincarnationPlan{}, 2, a.DeletionClaim, mv)
+	f.srv.runReincarnationWorker(ctx, a.ID, rec.ID, a.AppliedConfig, &fresh, "h", time.Now(), "", &ReincarnationPlan{}, 2, a.DeletionClaim, mv, nil)
 	got, err := f.s.GetAgentReincarnation(ctx, rec.ID)
 	require.NoError(t, err)
 	return got

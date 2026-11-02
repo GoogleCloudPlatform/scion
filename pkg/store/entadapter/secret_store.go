@@ -750,3 +750,51 @@ func (s *SecretStore) ListEnvVars(ctx context.Context, filter store.EnvVarFilter
 	}
 	return envVars, nil
 }
+
+// AttributeUserSecretToOwner sets created_by to scope_id on the user-scope
+// row with id, while its created_by still matches. No other column changes:
+// the updated timestamp is written back unchanged and the version is not
+// incremented. The version is deliberately not part of the predicate (see
+// store.SecretStore).
+func (s *SecretStore) AttributeUserSecretToOwner(ctx context.Context, id string, expectedCreatedBy string) (bool, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return false, err
+	}
+	applied := false
+	err = runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
+		q := c.Secret.Query().Where(entsecret.IDEQ(uid))
+		if isPostgres(c) {
+			q = q.ForUpdate()
+		}
+		row, err := q.Only(ctx)
+		if ent.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return mapError(err)
+		}
+		if row.Scope != store.ScopeUser || row.ScopeID == "" || row.CreatedBy != expectedCreatedBy {
+			return nil
+		}
+		n, err := c.Secret.Update().
+			Where(
+				entsecret.IDEQ(uid),
+				entsecret.ScopeEQ(store.ScopeUser),
+				entsecret.ScopeIDEQ(row.ScopeID),
+				entsecret.CreatedByEQ(expectedCreatedBy),
+			).
+			SetCreatedBy(row.ScopeID).
+			SetUpdated(row.Updated).
+			Save(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		applied = n == 1
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return applied, nil
+}

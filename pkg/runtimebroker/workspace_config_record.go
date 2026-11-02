@@ -173,7 +173,8 @@ func observeWorkspaceConfigStateData(projectPath string) (workspaceConfigState, 
 // root (a linked project, or a project's own .scion directory) or there is
 // no Hub project ID to key the record by.
 func workspaceConfigRecordFor(projectPath, hubProjectID string) (canonical, recordPath string, ok bool, err error) {
-	if projectPath == "" || hubProjectID == "" || filepath.Base(projectPath) == config.DotScion || !isHubManagedProjectPath(projectPath) {
+	if projectPath == "" || hubProjectID == "" || filepath.Base(projectPath) == config.DotScion ||
+		(!isHubManagedProjectPath(projectPath) && !isSharedHubProjectRoot(projectPath)) {
 		return "", "", false, nil
 	}
 	canonical, err = CanonicalWorkspacePath(projectPath)

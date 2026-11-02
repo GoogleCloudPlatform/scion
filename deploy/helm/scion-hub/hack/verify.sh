@@ -85,6 +85,15 @@ NAMESPACE="scion-system"
 
 HELM="${HELM:-helm}"
 KUBECONFORM="${KUBECONFORM:-kubeconform}"
+# kubeconform's default schema location is the master branch of
+# yannh/kubernetes-json-schema, which moves. Pin it to one commit, keeping the
+# "master" schema set the default reads, so every run validates against the
+# same schema bytes. Not overridable: a run against other schemas is a different
+# check. The location is printed in the toolchain banner below.
+KC_SCHEMA_COMMIT="f7d855e49c34b039c9ef2196444910275e31e09e"
+KC_KUBERNETES_VERSION="master"
+KC_SCHEMA_LOCATION="https://raw.githubusercontent.com/yannh/kubernetes-json-schema/${KC_SCHEMA_COMMIT}/{{.NormalizedKubernetesVersion}}-standalone{{.StrictSuffix}}/{{.ResourceKind}}{{.KindSuffix}}.json"
+KC_FLAGS=(-schema-location "$KC_SCHEMA_LOCATION" -kubernetes-version "$KC_KUBERNETES_VERSION")
 
 UPDATE=0
 [[ "${1:-}" == "--update" ]] && UPDATE=1
@@ -376,6 +385,7 @@ _pin_verdict() {  # $1 = the sha256 this run resolved, $2 = the pinned sha256
 }
 echo "toolchain  helm         $_hv  $_hp  sha256=${_hs:0:16}  $(_pin_verdict "$_hs" "$_helm_pin")"
 echo "toolchain  kubeconform  $_kv  $_kp  sha256=${_ks:0:16}  $(_pin_verdict "$_ks" "$_kc_pin")"
+echo "toolchain  schemas      kubernetes-version=$KC_KUBERNETES_VERSION  $KC_SCHEMA_LOCATION"
 echo "toolchain  stderr       $(wc -l <"$_tcerr" | tr -d ' ') lines$([[ -s "$_tcerr" ]] && printf ':\n%s' "$(cat "$_tcerr")")"
 rm -f "$_tcerr"
 
@@ -399,9 +409,9 @@ rm -f "$_tcerr"
 # instrument that cannot say "valid" about anything cannot be trusted when it
 # says "valid" about the chart.
 _kcprobe="$(printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: verify-sh-probe\ndata:\n  a: "b"\n' \
-  | "$KUBECONFORM" -strict -summary 2>&1 || true)"
+  | "$KUBECONFORM" "${KC_FLAGS[@]}" -strict -summary 2>&1 || true)"
 if ! grep -qF "Valid: 1, Invalid: 0, Errors: 0, Skipped: 0" <<<"$_kcprobe"; then
-  meta_failure "kubeconform cannot validate a known-good ConfigMap, so it cannot be asked about the chart. This is almost always the schema registry being unreachable - kubeconform's default -schema-location is remote. Output: $_kcprobe"
+  meta_failure "kubeconform cannot validate a known-good ConfigMap, so it cannot be asked about the chart. This is almost always the schema registry being unreachable - the pinned -schema-location ($KC_SCHEMA_LOCATION) is remote. Output: $_kcprobe"
 fi
 
 in_list() {
@@ -579,7 +589,7 @@ for name in "${PERMUTATIONS[@]}"; do
   # about what was checked. Skipped is asserted at 0 for the same reason one
   # layer down: a kind kubeconform has no schema for is a skip, not a failure,
   # the moment anyone adds --ignore-missing-schemas.
-  kcout="$("$KUBECONFORM" -strict -summary <"$WORK/$name.yaml" 2>&1 || true)"
+  kcout="$("$KUBECONFORM" "${KC_FLAGS[@]}" -strict -summary <"$WORK/$name.yaml" 2>&1 || true)"
   kcwant="Valid: ${EXPECTED_DOCS[$name]}, Invalid: 0, Errors: 0, Skipped: 0"
   if grep -qF "failed downloading schema" <<<"$kcout"; then
     # The preflight probe should have caught this. If it fires HERE the registry
@@ -591,7 +601,7 @@ for name in "${PERMUTATIONS[@]}"; do
     pass "kubeconform $name validated ${EXPECTED_DOCS[$name]} documents, none skipped"
   else
     fail "kubeconform $name: wanted '$kcwant', got '$kcout'"
-    "$KUBECONFORM" -strict <"$WORK/$name.yaml" || true
+    "$KUBECONFORM" "${KC_FLAGS[@]}" -strict <"$WORK/$name.yaml" || true
   fi
 done
 
@@ -654,7 +664,7 @@ if [[ ! -s "$kc_dep" ]] || ! grep -Eq '^kind: Deployment$' "$kc_dep" || ! grep -
   meta_failure "could not extract this chart's Deployment (with its proxy initContainers) from the settings render, so the control below would be validating something other than the chart."
 fi
 
-kc_summary() { "$KUBECONFORM" -strict -summary <"$1" 2>&1 || true; }
+kc_summary() { "$KUBECONFORM" "${KC_FLAGS[@]}" -strict -summary <"$1" 2>&1 || true; }
 
 # THE PAIRED POSITIVE. Without it, every negative below is satisfied by a
 # document kubeconform cannot parse at all - which is invalid for the wrong

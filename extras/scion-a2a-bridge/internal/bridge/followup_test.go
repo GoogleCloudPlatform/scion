@@ -184,6 +184,7 @@ func (m *mockHubClient) ThreadGroups() hubclient.ThreadGroupService             
 func (m *mockHubClient) AllowList() hubclient.AllowListService                        { return nil }
 func (m *mockHubClient) Invites() hubclient.InviteService                             { return nil }
 func (m *mockHubClient) Messaging() hubclient.MessagingService                        { return nil }
+func (m *mockHubClient) AdminSettings() hubclient.AdminSettingsService                { return nil }
 func (m *mockHubClient) Skills() hubclient.SkillService                               { return nil }
 func (m *mockHubClient) SkillRegistries() hubclient.SkillRegistryService              { return nil }
 func (m *mockHubClient) ProjectInjectedSkills(projectID string) hubclient.InjectedSkillsService {
@@ -202,6 +203,7 @@ func (m *mockHubClient) TestIdentities() hubclient.TestIdentityService      { re
 func (m *mockHubClient) TestIdentityDelegations() hubclient.TestIdentityDelegationService {
 	return nil
 }
+func (m *mockHubClient) AgentDelegations() hubclient.AgentDelegationService { return nil }
 func (m *mockHubClient) Health(ctx context.Context) (*hubclient.HealthResponse, error) {
 	return &hubclient.HealthResponse{}, nil
 }

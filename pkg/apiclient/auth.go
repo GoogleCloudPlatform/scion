@@ -14,7 +14,10 @@
 
 package apiclient
 
-import "net/http"
+import (
+	"errors"
+	"net/http"
+)
 
 // Authenticator provides authentication credentials for API requests.
 type Authenticator interface {
@@ -33,9 +36,16 @@ type BearerAuth struct {
 
 // ApplyAuth adds the Bearer token to the Authorization header.
 func (a *BearerAuth) ApplyAuth(req *http.Request) error {
-	if a.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+a.Token)
+	if a == nil || a.Token == "" {
+		return nil
 	}
+	if req == nil {
+		return errors.New("apiclient: nil request")
+	}
+	if req.Header == nil {
+		req.Header = make(http.Header)
+	}
+	req.Header.Set("Authorization", "Bearer "+a.Token)
 	return nil
 }
 
@@ -49,9 +59,16 @@ type BrokerTokenAuth struct {
 
 // ApplyAuth adds the broker token to the X-Scion-Broker-Token header.
 func (a *BrokerTokenAuth) ApplyAuth(req *http.Request) error {
-	if a.Token != "" {
-		req.Header.Set("X-Scion-Broker-Token", a.Token)
+	if a == nil || a.Token == "" {
+		return nil
 	}
+	if req == nil {
+		return errors.New("apiclient: nil request")
+	}
+	if req.Header == nil {
+		req.Header = make(http.Header)
+	}
+	req.Header.Set("X-Scion-Broker-Token", a.Token)
 	return nil
 }
 
@@ -68,11 +85,18 @@ type AgentTokenAuth struct {
 // ApplyAuth adds the agent token to the X-Scion-Agent-Token header, and
 // the run id to X-Scion-Run-Id.
 func (a *AgentTokenAuth) ApplyAuth(req *http.Request) error {
-	if a.Token != "" {
-		req.Header.Set("X-Scion-Agent-Token", a.Token)
-		if a.RunID != "" {
-			req.Header.Set("X-Scion-Run-Id", a.RunID)
-		}
+	if a == nil || a.Token == "" {
+		return nil
+	}
+	if req == nil {
+		return errors.New("apiclient: nil request")
+	}
+	if req.Header == nil {
+		req.Header = make(http.Header)
+	}
+	req.Header.Set("X-Scion-Agent-Token", a.Token)
+	if a.RunID != "" {
+		req.Header.Set("X-Scion-Run-Id", a.RunID)
 	}
 	return nil
 }

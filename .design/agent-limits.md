@@ -12,7 +12,7 @@ Agents need configurable limits on how long they run and how many LLM turns they
 
 Both settings are already defined in the configuration layer:
 
-- **Schema** (`agent-v1.schema.json`): `max_turns` (integer, min 1) and `max_duration` (string, pattern `^[0-9]+(s|m|h)$`), both gated on `schema_version: "1"`.
+- **Schema** (`agent-v1.schema.json`): `max_turns` (integer, min 1) and `max_duration` (string, pattern `^[0-9]+(s|m|h)$`), both gated on `schema_version: "1"`. (Superseded by ptone/scion#5605: `max_turns` and `max_model_calls` now allow 0, meaning no limit.)
 - **Go struct** (`pkg/api/types.go`): `ScionConfig.MaxTurns` and `ScionConfig.MaxDuration` with a `ParseMaxDuration()` helper.
 - **Environment injection** (`pkg/agent/run.go:280-286`): Both are injected into the container as `SCION_MAX_TURNS` and `SCION_MAX_DURATION`.
 

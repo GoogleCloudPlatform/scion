@@ -19,10 +19,10 @@ package hub
 // Tests for the internal delivery credential (ptone/scion#2228 part 2): the
 // hub_delivery type, its constructor, the identity classification arms,
 // Step 0b, the 7b delivery_credential restriction, the stage-2/progeny
-// evidence reads and the step-10 gate arm's terminal deny.
-// deliveryCredentialKinds stays empty throughout: these tests reach later
-// pipeline stages only through withDeliveryCredentialKinds or a direct
-// checkDelegationCeiling call.
+// evidence reads and the step-10 gate arm. Tests that reach later pipeline
+// stages set the delivery set explicitly with withDeliveryCredentialKinds,
+// or call checkDelegationCeiling directly. The admission walk itself is
+// tested in authz_delivery_admission_test.go.
 
 import (
 	"context"
@@ -66,8 +66,8 @@ func newHubDeliveryTestAgent(t *testing.T, s store.Store, agentID, projectID, ow
 // withDeliveryCredentialKinds(hub_delivery), a hub_delivery request for a
 // progeny child reaches the relationship stage, the progeny candidate is
 // accepted at stages 2-5 using the credential's stored-agent evidence, and
-// step 10 denies with the gate arm's terminal deny — deliveryCredentialKinds
-// gates Step 0 only; the step-10 admission walk is a separate, later change.
+// the step-10 admission walk admits it (one recorded principal hop from an
+// active, admitted user, then the provenance root).
 func TestHubDelivery_PipelineReachesRelationshipStage(t *testing.T) {
 	f := newGoldenFixture(t)
 	withDeliveryCredentialKinds(t, CredentialKindHubDelivery)
@@ -84,9 +84,11 @@ func TestHubDelivery_PipelineReachesRelationshipStage(t *testing.T) {
 	require.NoError(t, err)
 
 	d := decidePerm(f.authz, h, Resource{Type: "secret", ID: f.secretID}, ActionDeliver, "secret.deliver", true)
-	assert.False(t, d.Allowed, "reason %q", d.Reason)
-	assert.Equal(t, "delivery credential admission is not enabled", d.Reason)
+	assert.True(t, d.Allowed, "reason %q", d.Reason)
+	assert.Equal(t, ScopeTypeRelationship, d.Scope)
 	assert.Equal(t, DenyCause(""), d.DenyCause)
+	assert.True(t, hasDecisionStep(d.ExplainTrace, "delegation_ceiling_delivery_hop"), "trace: %+v", d.ExplainTrace)
+	assert.True(t, hasDecisionStep(d.ExplainTrace, "delegation_ceiling_delivery_root"), "trace: %+v", d.ExplainTrace)
 
 	r := relationshipResult(t, d, RelationshipRuleProgeny)
 	assert.True(t, r.Accepted, "progeny candidate must be accepted at stages 2-5: %+v", r)
@@ -291,16 +293,6 @@ func TestHubDelivery_Step10ArmDeniesWithoutStep0b(t *testing.T) {
 			resource:   secretRes,
 			wantReason: "delivery credential has no project",
 		},
-		{
-			// Every condition holds: the correct bound agent, a deliver
-			// permission, ActionDeliver and a non-empty project. The arm's
-			// terminal deny decides it.
-			name:       "valid",
-			identity:   baseIdentity(),
-			permission: "secret.deliver", action: ActionDeliver,
-			resource:   secretRes,
-			wantReason: "delivery credential admission is not enabled",
-		},
 	}
 
 	services := []struct {
@@ -342,6 +334,29 @@ func TestHubDelivery_Step10ArmDeniesWithoutStep0b(t *testing.T) {
 			})
 		}
 	}
+
+	// Every gate condition holds: the correct bound agent, a deliver
+	// permission, ActionDeliver and a non-empty project. The request then
+	// reaches the admission walk, which on the failing store denies on its
+	// first edge read with a nil error and cause ceiling_error, and never
+	// reaches the ordinary proof. (The admitting case is in
+	// TestHubDelivery_Step10Admission.)
+	t.Run("valid_reaches_admission_walk/failing_store", func(t *testing.T) {
+		req := AuthzRequest{
+			Principal:  PrincipalContext{Kind: PrincipalKindAgent, ID: validAgentID, Identity: baseIdentity()},
+			Resource:   secretRes,
+			Action:     ActionDeliver,
+			Permission: "secret.deliver",
+		}
+		var explain []DecisionStep
+		var cause DenyCause
+		allowed, reason, err := failing.checkDelegationCeiling(ctx, req, "secret.deliver", validAgentID, &explain, &cause)
+		require.NoError(t, err)
+		assert.False(t, allowed)
+		assert.Equal(t, "delivery ceiling check failed (fail-closed): injected edge lookup failure", reason)
+		assert.Equal(t, DenyCauseCeilingError, cause)
+		assert.False(t, hasDecisionStep(explain, "delegation_ceiling_allowed"), "the ordinary proof must never run for this type")
+	})
 }
 
 // hasDecisionStep reports whether explain contains a step named step.
@@ -394,9 +409,8 @@ func TestHubDelivery_RoleGrantExcludedNonExplain(t *testing.T) {
 // TestHubDelivery_ProgenyCandidatePassesStage5WithRoleBinding asserts that a
 // role binding does not short-circuit a progeny candidate: with both a role
 // binding naming secret.deliver and a progeny grant, Explain=true shows the
-// progeny candidate accepted at stage 5, the decision does not name the
-// role, and the step-10 gate arm's terminal deny is the reason the request
-// is denied.
+// progeny candidate accepted at stage 5, and the request is allowed by the
+// relationship grant, never by the role.
 func TestHubDelivery_ProgenyCandidatePassesStage5WithRoleBinding(t *testing.T) {
 	f := newGoldenFixture(t)
 	withDeliveryCredentialKinds(t, CredentialKindHubDelivery)
@@ -411,8 +425,7 @@ func TestHubDelivery_ProgenyCandidatePassesStage5WithRoleBinding(t *testing.T) {
 	require.NoError(t, err)
 
 	d := decidePerm(f.authz, h, Resource{Type: "secret", ID: f.secretID}, ActionDeliver, "secret.deliver", true)
-	assert.False(t, d.Allowed, "reason %q", d.Reason)
-	assert.Equal(t, "delivery credential admission is not enabled", d.Reason)
+	assert.True(t, d.Allowed, "reason %q", d.Reason)
 	assert.Empty(t, d.RoleName, "the decision must not name the excluded role grant")
 	assert.Equal(t, ScopeTypeRelationship, d.Scope, "the decision names the relationship grant, not the role")
 
@@ -710,13 +723,19 @@ func referencesIdent(node ast.Node, names ...string) bool {
 
 // TestHubDelivery_ConstructorCallSites pins, by AST scan, where a
 // hubDeliveryIdentity can be produced: newHubDeliveryIdentity is called only
-// from authz_delivery_credential.go and its test, and no other production
-// file builds the type as a composite literal or with new.
+// from authz_delivery_credential.go, material_delivery.go (its one production
+// caller, newLaunchDeliveryIdentity, which deliverySelector.mint and the
+// read-only census share) and the hub_delivery tests, and no other
+// production file builds the type as a composite literal or with new.
 func TestHubDelivery_ConstructorCallSites(t *testing.T) {
 	allowedCallers := map[string]bool{
 		"authz_delivery_credential.go":      true,
+		"material_delivery.go":              true,
 		"authz_delivery_credential_test.go": true,
+		"authz_delivery_admission_test.go":  true,
+		"authz_delivery_gate_test.go":       true,
 	}
+	productionCalls := map[string]int{}
 	calls := 0
 	for name, file := range hubPackageSyntax(t) {
 		isTest := strings.HasSuffix(name, "_test.go")
@@ -727,6 +746,9 @@ func TestHubDelivery_ConstructorCallSites(t *testing.T) {
 				if fn == "newHubDeliveryIdentity" {
 					calls++
 					assert.True(t, allowedCallers[name], "newHubDeliveryIdentity is called from %s", name)
+					if !isTest {
+						productionCalls[name]++
+					}
 				}
 				if fn == "new" && len(n.Args) == 1 && !isTest && name != "authz_delivery_credential.go" {
 					assert.False(t, referencesIdent(n.Args[0], "hubDeliveryIdentity"), "new(hubDeliveryIdentity) in %s", name)
@@ -740,6 +762,8 @@ func TestHubDelivery_ConstructorCallSites(t *testing.T) {
 		})
 	}
 	assert.Positive(t, calls, "the scan must find the test call sites, or it is not scanning this package")
+	// Exactly one production call site: newLaunchDeliveryIdentity.
+	assert.Equal(t, map[string]int{"material_delivery.go": 1}, productionCalls)
 }
 
 // TestHubDelivery_NotInRequestContext pins, by AST scan of the production
@@ -844,7 +868,7 @@ func TestHubDelivery_Stage2RejectsNonDeliverPermission(t *testing.T) {
 		c := progenyCandidate(t, principal, action, permissionID)
 		var rejectedBy, detail string
 		policyKind := permissions.RelationshipPrincipalKind(string(principal.Kind))
-		_, ok := f.authz.runRelationshipStages(ctx, principal, policyKind, secretRes, permissionID, nil, c, nil,
+		_, ok := f.authz.runRelationshipStages(ctx, principal, policyKind, secretRes, action, permissionID, nil, c, nil,
 			func(kind, d string) { rejectedBy, detail = kind, d })
 		return ok, rejectedBy, detail
 	}

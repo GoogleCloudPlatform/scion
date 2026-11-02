@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/hubtestutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -31,9 +32,9 @@ import (
 func assertListMessageIDsForAttachment(t *testing.T, wcs WebChatStore) {
 	t.Helper()
 	ctx := context.Background()
-	att := tid("ref-store-attachment")
-	other := tid("ref-store-other-attachment")
-	msgA, msgB, msgC := tid("ref-store-msg-a"), tid("ref-store-msg-b"), tid("ref-store-msg-c")
+	att := hubtestutil.TID("ref-store-attachment")
+	other := hubtestutil.TID("ref-store-other-attachment")
+	msgA, msgB, msgC := hubtestutil.TID("ref-store-msg-a"), hubtestutil.TID("ref-store-msg-b"), hubtestutil.TID("ref-store-msg-c")
 	for _, link := range [][2]string{{msgA, att}, {msgB, att}, {msgC, att}, {msgA, other}} {
 		require.NoError(t, wcs.LinkAttachmentToMessage(ctx, link[0], link[1]))
 	}
@@ -46,13 +47,13 @@ func assertListMessageIDsForAttachment(t *testing.T, wcs WebChatStore) {
 	require.NoError(t, err)
 	assert.Len(t, limited, 2, "the limit is applied")
 
-	none, err := wcs.ListMessageIDsForAttachment(ctx, tid("ref-store-unlinked"), 20)
+	none, err := wcs.ListMessageIDsForAttachment(ctx, hubtestutil.TID("ref-store-unlinked"), 20)
 	require.NoError(t, err)
 	assert.Empty(t, none)
 }
 
 func TestListMessageIDsForAttachment_SQLite(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite")
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
 	wcs := NewWebChatStore(db, "sqlite")
 	require.NoError(t, wcs.Init())
 	assertListMessageIDsForAttachment(t, wcs)
@@ -60,7 +61,7 @@ func TestListMessageIDsForAttachment_SQLite(t *testing.T) {
 }
 
 func TestListMessageIDsForAttachment_Postgres(t *testing.T) {
-	dsn := requirePostgresDSN(t)
+	dsn := hubtestutil.RequirePostgresDSN(t)
 	db, err := sql.Open("pgx", dsn)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
@@ -76,8 +77,8 @@ func TestListMessageIDsForAttachment_Postgres(t *testing.T) {
 func assertTopicLookupInProject(t *testing.T, wcs WebChatStore) {
 	t.Helper()
 	ctx := context.Background()
-	projA, projB := tid("ref-store-proj-a"), tid("ref-store-proj-b")
-	keep, live, gone := tid("ref-store-topic-keep"), tid("ref-store-topic-live"), tid("ref-store-topic-gone")
+	projA, projB := hubtestutil.TID("ref-store-proj-a"), hubtestutil.TID("ref-store-proj-b")
+	keep, live, gone := hubtestutil.TID("ref-store-topic-keep"), hubtestutil.TID("ref-store-topic-live"), hubtestutil.TID("ref-store-topic-gone")
 	for _, id := range []string{keep, live, gone} {
 		require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{ID: id, ProjectID: projB, Name: "t-" + id[:8], CreatedBy: "u", CreatedAt: time.Now().UTC()}))
 	}
@@ -100,13 +101,13 @@ func assertTopicLookupInProject(t *testing.T, wcs WebChatStore) {
 
 func TestTopicConversationLookupInProject_OtherProjectNotFound(t *testing.T) {
 	t.Run("sqlite", func(t *testing.T) {
-		db := openTestMemorySQLite(t, "sqlite")
+		db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
 		wcs := NewWebChatStore(db, "sqlite")
 		require.NoError(t, wcs.Init())
 		assertTopicLookupInProject(t, wcs)
 	})
 	t.Run("postgres", func(t *testing.T) {
-		dsn := requirePostgresDSN(t)
+		dsn := hubtestutil.RequirePostgresDSN(t)
 		db, err := sql.Open("pgx", dsn)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = db.Close() })

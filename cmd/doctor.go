@@ -678,6 +678,17 @@ func (r *doctorReport) localSettingsChecks() {
 	// that a Docker or Podman broker's agents share, and their current use.
 	r.add(&r.HubChecks, checkDoctorInotifyLimitsHere())
 
+	// D13: flat instance placement pre-upgrade scan (local check,
+	// read-only, counts only). Reported only on a host with flat instances.
+	if d13, ok := checkDoctorFlatPlacementPreflightHere(); ok {
+		r.add(&r.HubChecks, d13)
+	}
+	// D14: legacy placement pre-upgrade scan (local check, read-only,
+	// counts only). Reported on every host without flat instances.
+	if d14, ok := checkDoctorLegacyPlacementPreflightHere(); ok {
+		r.add(&r.HubChecks, d14)
+	}
+
 	// D6: Telemetry Pipeline (local check)
 	r.add(&r.HubChecks, checkDoctorTelemetry())
 	// D7: Container Images (local check)

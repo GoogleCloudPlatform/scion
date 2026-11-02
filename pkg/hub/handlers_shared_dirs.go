@@ -270,6 +270,13 @@ func (s *Server) handleProjectSharedDirByName(w http.ResponseWriter, r *http.Req
 		NotFound(w, "Shared directory")
 		return
 	}
+	// The scratchpad is a Required Mount while the hub's default makes
+	// every project have one (design OQ4): it cannot be undeclared.
+	if name == attachmentSharedDirName && s.defaultScratchpadEnabled() {
+		writeError(w, http.StatusConflict, ErrCodeConflict,
+			"the scratchpad shared directory is required while the hub's project default scratchpad is on; it cannot be removed", nil)
+		return
+	}
 
 	project.SharedDirs = updated
 	if err := s.store.UpdateProject(ctx, project); err != nil {
@@ -294,16 +301,9 @@ func (s *Server) handleProjectSharedDirByName(w http.ResponseWriter, r *http.Req
 	case resolution.Path == "" || resolution.Path == "/":
 		slog.WarnContext(ctx, "resolved shared directory path is empty or root, skipping removal",
 			"project_id", projectID, "name", name, "path", resolution.Path)
-	case resolution.onSharedBackend() && resolution.Source == sharedDirLayoutFromWorkspaceStorage:
-		// The shared dir is on the workspace export (the tree every agent
-		// mounts) only because server.workspace_storage is nfs. Removing a
-		// declaration does not delete that agent data in phase 1: the
-		// lifecycle phase (ptone/scion#5835) owns deletion of this leaf.
-		slog.InfoContext(ctx, "shared directory declaration removed; leaving its data on the workspace export",
-			"project_id", projectID, "name", name)
 	case resolution.onSharedBackend():
-		// NFS (server.shared_dir_storage): remove the leaf via
-		// DeleteSharedDir, an fd-based walk
+		// Shared backend (server.project_storage): remove the leaf, as
+		// on the local backend below, via DeleteSharedDir, an fd-based walk
 		// (subPathRoot/projectID/shared-dirs/<name>) that refuses a
 		// symlinked structural component and touches only this one
 		// named leaf.

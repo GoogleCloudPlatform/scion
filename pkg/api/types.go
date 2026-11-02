@@ -523,8 +523,8 @@ type ScionConfig struct {
 	// are the transport-agnostic config translated by each harness's
 	// container-side provisioner into native format.
 	MCPServers    map[string]MCPServerConfig `json:"mcp_servers,omitempty" yaml:"mcp_servers,omitempty"`
-	MaxTurns      int                        `json:"max_turns,omitempty" yaml:"max_turns,omitempty"`
-	MaxModelCalls int                        `json:"max_model_calls,omitempty" yaml:"max_model_calls,omitempty"`
+	MaxTurns      *int                       `json:"max_turns,omitempty" yaml:"max_turns,omitempty"`             // nil inherits, 0 is no limit (limits.go)
+	MaxModelCalls *int                       `json:"max_model_calls,omitempty" yaml:"max_model_calls,omitempty"` // nil inherits, 0 is no limit (limits.go)
 	MaxDuration   string                     `json:"max_duration,omitempty" yaml:"max_duration,omitempty"`
 	Hub           *AgentHubConfig            `json:"hub,omitempty" yaml:"hub,omitempty"`
 	Telemetry     *TelemetryConfig           `json:"telemetry,omitempty" yaml:"telemetry,omitempty"`
@@ -962,7 +962,23 @@ type GitCloneConfig struct {
 	URL    string `json:"url"`              // HTTPS clone URL (without credentials)
 	Branch string `json:"branch,omitempty"` // Branch to clone (default: main)
 	Depth  *int   `json:"depth,omitempty"`  // Clone depth (nil/omitted = shallow depth 1, 0 = full clone, >0 = that depth)
+
+	// TokenRemote is the project's recorded git remote (the hub's
+	// project.GitRemote, host/owner/repo), set by the hub on every dispatch
+	// from the project record, never from the clone URL or a label. The
+	// project's git token is offered to the clone only when URL is https and
+	// names this remote's host and owner/repo (provision.CloneTokenAllowed);
+	// when it is empty no token is offered. Brokers and runtimes relay it
+	// unchanged: to the agent container and to the Kubernetes provisioning
+	// init container as EnvGitTokenRemote.
+	TokenRemote string `json:"tokenRemote,omitempty"`
 }
+
+// EnvGitTokenRemote is the container environment variable that carries
+// GitCloneConfig.TokenRemote to sciontool (init's in-container clone and the
+// provision init container's clone). Without it no git token is offered to
+// the clone.
+const EnvGitTokenRemote = "SCION_GIT_TOKEN_REMOTE"
 
 type gitCloneContextKey struct{}
 
@@ -975,6 +991,22 @@ func ContextWithGitClone(ctx context.Context, gc *GitCloneConfig) context.Contex
 func GitCloneFromContext(ctx context.Context) *GitCloneConfig {
 	gc, _ := ctx.Value(gitCloneContextKey{}).(*GitCloneConfig)
 	return gc
+}
+
+type recordedOriginContextKey struct{}
+
+// ContextWithRecordedOrigin attaches the broker-recorded origin URL (the hub
+// project's repository), used to pin the git-lfs endpoint for a linked-checkout
+// worktree whose GitClone was cleared on the linked route. Prefer this over the
+// live remote.origin.url, which an agent can rewrite.
+func ContextWithRecordedOrigin(ctx context.Context, url string) context.Context {
+	return context.WithValue(ctx, recordedOriginContextKey{}, url)
+}
+
+// RecordedOriginFromContext returns the broker-recorded origin URL, or "" if unset.
+func RecordedOriginFromContext(ctx context.Context) string {
+	s, _ := ctx.Value(recordedOriginContextKey{}).(string)
+	return s
 }
 
 type freshProvisionContextKey struct{}
@@ -1025,6 +1057,24 @@ func ContextWithSharedWorkspace(ctx context.Context) context.Context {
 func IsSharedWorkspaceFromContext(ctx context.Context) bool {
 	v, _ := ctx.Value(sharedWorkspaceContextKey{}).(bool)
 	return v
+}
+
+type gitTokenRemoteContextKey struct{}
+
+// ContextWithGitTokenRemote attaches the project's recorded git remote of a
+// shared-plain workspace (StartOptions.SharedWorkspaceClone.TokenRemote, as
+// the hub sent it). Provisioning scopes the agent's git credential helper to
+// this remote's host (provision.TokenRemoteCredentialScope), never to the
+// clone-url label or the workspace's own git config.
+func ContextWithGitTokenRemote(ctx context.Context, remote string) context.Context {
+	return context.WithValue(ctx, gitTokenRemoteContextKey{}, remote)
+}
+
+// GitTokenRemoteFromContext returns the remote ContextWithGitTokenRemote
+// attached, or "" when there is none.
+func GitTokenRemoteFromContext(ctx context.Context) string {
+	s, _ := ctx.Value(gitTokenRemoteContextKey{}).(string)
+	return s
 }
 
 type hubProjectIDContextKey struct{}
@@ -1359,6 +1409,12 @@ type StartOptions struct {
 	Env               map[string]string
 	ResolvedSecrets   []ResolvedSecret
 	BrokerMode        bool // When true, auth gathering skips local sources (broker env + filesystem)
+	// RecordedOriginURL is the broker-recorded origin for the project (the hub
+	// project's repository), captured from GitClone before the linked-checkout
+	// route clears GitClone. It is threaded to worktree creation so the git-lfs
+	// endpoint is pinned from this trusted origin rather than the live,
+	// agent-writable remote.origin.url. Empty when there is no recorded origin.
+	RecordedOriginURL string
 	// TrustedHubEndpoint is the broker's own operator-derived resolution of
 	// the hub endpoint — set only in BrokerMode, only from the request
 	// HubEndpoint, the hub connection endpoint, or this broker's configured
@@ -1398,16 +1454,7 @@ type StartOptions struct {
 	TelemetryOverride *bool        // Explicit telemetry override from CLI flags (--enable-telemetry / --disable-telemetry)
 	InlineConfig      *ScionConfig // Inline config from --config flag, merged over template config
 	SharedDirs        []SharedDir  // Project-level shared directories (from Hub, merged with settings)
-	// SharedDirBackendChanges asks a Reprovision to change the recorded
-	// shared-dir storage backend of the named shared dirs (dir name to
-	// backend, "nfs" or "local"). Only the agent's record changes;
-	// no data is copied, moved or deleted. Ignored outside Reprovision.
-	SharedDirBackendChanges map[string]string
-	// AllowEmptySharedDir, with SharedDirBackendChanges, skips the start
-	// check that refuses an empty directory on the new backend while the
-	// dir's directory on its previous backend is not empty.
-	AllowEmptySharedDir bool
-	ExtraHosts          []string // Extra --add-host entries for container networking (e.g. "example.com:host-gateway")
+	ExtraHosts        []string     // Extra --add-host entries for container networking (e.g. "example.com:host-gateway")
 
 	// EmptyPerAgentWorkspace gives the agent a private, initially empty,
 	// non-git workspace at <projectDir>/agents/<slug>/workspace (design
@@ -1494,16 +1541,13 @@ type StartOptions struct {
 	// persisted, so it is recomputed on every dispatch.
 	HostCredentialFiles bool
 
-	// ColocatedHubDevToken is the workstation server's dev token, offered by
-	// the runtime broker for an agent that has no hub-issued token. The
-	// broker sets it only when the dispatch is bound to the hub co-located
-	// in its own process (the binding HostCredentialFiles also requires) and
-	// TrustedHubEndpoint is set. The agent manager uses it as the agent's
-	// hub token only in BrokerMode, and only when the agent's final hub
-	// endpoint, after the agent config and config env overrides, still
-	// equals TrustedHubEndpoint; otherwise it is dropped. Like
-	// HostCredentialFiles it is never persisted.
-	ColocatedHubDevToken string `json:"-"`
+	// HubIssuedToken is the agent token the hub issued for this start, set
+	// only by the runtime broker: the create request's dedicated agent token,
+	// or on start and restart the resolved env SCION_AUTH_TOKEN that the hub
+	// classified as secret-bootstrap. In BrokerMode it is the agent's only
+	// hub credential; a SCION_AUTH_TOKEN from any other source is dropped.
+	// Like HostCredentialFiles it is never persisted.
+	HubIssuedToken string `json:"-"`
 
 	// RerenderKeys are the provision-rendered config keys
 	// (RerenderableConfigKeys) whose files this start renders again before
@@ -1601,6 +1645,27 @@ const (
 // hub must not finalize the agent's row: that run is still on the broker
 // (ptone/scion#3080). Without one, the delete's 404 is "not found" as before.
 const BrokerErrorCodeRunMismatch = "run_mismatch"
+
+// Error-detail keys a runtime broker sets on a runtime_unavailable 503 that
+// refuses a dispatch because the Hub's stored profiles cannot resolve its
+// runtime profile (ptone/scion#4955): a requested or saved profile the
+// stored profiles lack, an active_profile that does not resolve, or a
+// stored profile whose runtime is not defined. The Hub writes its own
+// client text for it, naming the profile; the broker's text is not relayed.
+// The wire code stays runtime_unavailable, so every Hub classification of
+// that code is unchanged.
+const (
+	// BrokerErrorDetailReason is the refusal's reason; see
+	// BrokerErrorReasonProfileUnresolved.
+	BrokerErrorDetailReason = "reason"
+	// BrokerErrorDetailProfile is the profile that does not resolve; ""
+	// when the dispatch needed the default profile and active_profile is
+	// unset.
+	BrokerErrorDetailProfile = "profile"
+	// BrokerErrorReasonProfileUnresolved is the BrokerErrorDetailReason
+	// value for a stored-profile miss.
+	BrokerErrorReasonProfileUnresolved = "profile_unresolved"
+)
 
 // ResourceHandle.Kind values.
 const (

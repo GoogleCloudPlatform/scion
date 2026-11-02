@@ -574,11 +574,14 @@ func TestServer_SigningKeyBackupAfterBackendSet(t *testing.T) {
 	}
 
 	hubID := "test-backup-hub"
-	backend := secret.NewLocalBackend(s, hubID, "test-secret")
+	// The hub and the local backend share one cipher, as cmd wires them.
+	cipher := secret.NewLegacyValueCipher("test-secret")
+	backend := secret.NewLocalBackendWithCipher(s, hubID, cipher)
 
 	cfg := DefaultServerConfig()
 	cfg.HubID = hubID
 	cfg.SecretBackend = backend
+	cfg.ValueCipher = cipher
 
 	// Create server — generates new keys via backend
 	srv, err := newTestHubServer(t, cfg, s)
@@ -598,7 +601,12 @@ func TestServer_SigningKeyBackupAfterBackendSet(t *testing.T) {
 		t.Fatal("SQLite should contain the actual key value as backup, not an empty string")
 	}
 
-	decodedKey, err := base64.StdEncoding.DecodeString(val)
+	// The backup is encrypted at rest with the shared cipher.
+	plain, err := cipher.Decrypt(val)
+	if err != nil {
+		t.Fatalf("failed to decrypt key backup from SQLite: %v", err)
+	}
+	decodedKey, err := base64.StdEncoding.DecodeString(plain)
 	if err != nil {
 		t.Fatalf("failed to decode key from SQLite: %v", err)
 	}

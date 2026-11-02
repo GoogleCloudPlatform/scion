@@ -332,6 +332,10 @@ type RuntimeBrokerWithCapabilities struct {
 	// load balancer with several hub replicas it describes the replica
 	// that answered. Read-only and display-only; omitted when false.
 	HostedByThisServer bool `json:"hostedByThisServer,omitempty"`
+	// VersionStatus compares the broker's version with the fleet hub
+	// version: match, mismatch or unknown (see brokerVersionStatus).
+	// Omitted for a plugin record.
+	VersionStatus string `json:"versionStatus,omitempty"`
 }
 
 // MarshalJSON implements custom marshaling to avoid shadowing of fields by the embedded store.RuntimeBroker.
@@ -344,6 +348,7 @@ func (b RuntimeBrokerWithCapabilities) MarshalJSON() ([]byte, error) {
 		AgentCount         *int64        `json:"agentCount,omitempty"`
 		AgentLimitSource   string        `json:"agentLimitSource,omitempty"`
 		HostedByThisServer bool          `json:"hostedByThisServer,omitempty"`
+		VersionStatus      string        `json:"versionStatus,omitempty"`
 	}{
 		BrokerAlias:        BrokerAlias(b.RuntimeBroker),
 		Cap:                b.Cap,
@@ -351,6 +356,7 @@ func (b RuntimeBrokerWithCapabilities) MarshalJSON() ([]byte, error) {
 		AgentCount:         b.AgentCount,
 		AgentLimitSource:   b.AgentLimitSource,
 		HostedByThisServer: b.HostedByThisServer,
+		VersionStatus:      b.VersionStatus,
 	})
 }
 
@@ -364,6 +370,7 @@ func (b *RuntimeBrokerWithCapabilities) UnmarshalJSON(data []byte) error {
 		AgentCount         *int64        `json:"agentCount,omitempty"`
 		AgentLimitSource   string        `json:"agentLimitSource,omitempty"`
 		HostedByThisServer bool          `json:"hostedByThisServer,omitempty"`
+		VersionStatus      string        `json:"versionStatus,omitempty"`
 	}{
 		BrokerAlias: (*BrokerAlias)(&b.RuntimeBroker),
 	}
@@ -375,5 +382,6 @@ func (b *RuntimeBrokerWithCapabilities) UnmarshalJSON(data []byte) error {
 	b.AgentCount = aux.AgentCount
 	b.AgentLimitSource = aux.AgentLimitSource
 	b.HostedByThisServer = aux.HostedByThisServer
+	b.VersionStatus = aux.VersionStatus
 	return nil
 }

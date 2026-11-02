@@ -376,7 +376,7 @@ func TestSkillRefLog_GitHubStaleServeWarning(t *testing.T) {
 	r.resolutionCache.mu.Lock()
 	r.resolutionCache.entries[cacheKey] = &resolutionCacheEntry{
 		Skill: ResolvedSkill{Name: "s", URI: uri, Version: "stale",
-			Files: []ResolvedFile{{Path: "SKILL.md", Content: []byte("hello")}}},
+			Files: []ResolvedFile{{Path: "SKILL.md", Mode: "0644", Content: []byte("hello")}}},
 		CachedAt:    now.Add(-2 * time.Hour),
 		ExpiresAt:   now.Add(-time.Minute),
 		IsBranchRef: true,
@@ -401,6 +401,64 @@ func TestSkillRefLog_GitHubStaleServeWarning(t *testing.T) {
 		if strings.Contains(stderr, part) {
 			t.Errorf("stderr %q holds %q", stderr, part)
 		}
+	}
+}
+
+// TestSkillRefLog_GitHubModelessFallbackWarning checks the GitHub resolver's
+// stderr line for a cache entry from before file modes were recorded,
+// served because re-resolving it failed (ptone/scion#5781): it names the
+// reference in its redacted form and says the files may lack exec bits.
+func TestSkillRefLog_GitHubModelessFallbackWarning(t *testing.T) {
+	var calls atomic.Int64
+	mux := http.NewServeMux()
+	serveTestCommit(mux, "owner", "repo", &calls)
+	serveTestSkill(mux, "owner", "repo", "s", &calls)
+	clock := newFakeClock()
+	r := newCooldownTestResolver(t, mux, clock)
+	const token = "test-token-x"
+	r.provisionCredentials = map[string]string{"X": token}
+
+	const uri = "gh://owner/repo/s@main?token=X"
+	ghRef, err := ParseGitHubSkillURI(uri)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheKey := resolutionCacheKey(ghRef, token)
+	now := time.Now()
+	r.resolutionCache.mu.Lock()
+	r.resolutionCache.entries[cacheKey] = &resolutionCacheEntry{
+		Skill: ResolvedSkill{Name: "s", URI: uri, Version: "legacy",
+			Files: []ResolvedFile{{Path: "SKILL.md", Content: []byte("hello")}}},
+		CachedAt:    now.Add(-time.Minute),
+		ExpiresAt:   now.Add(time.Hour),
+		IsBranchRef: true,
+	}
+	r.resolutionCache.mu.Unlock()
+	r.cooldown.record(GitHubCooldownIdentity(token), clock.Now().Add(time.Minute))
+
+	stderr := refLogCaptureStderr(t, func() {
+		res, err := r.Resolve(context.Background(), []api.SkillReference{{URI: uri}}, ResolveOpts{})
+		if err != nil {
+			t.Errorf("Resolve: %v", err)
+			return
+		}
+		if len(res.Resolved) != 1 || res.Resolved[0].Version != "legacy" {
+			t.Errorf("expected the legacy entry, got %+v", res)
+		}
+	})
+	if want := "re-resolving " + refLogSchemeRedacted + " (named) failed"; !strings.Contains(stderr, want) {
+		t.Errorf("stderr %q does not hold %q", stderr, want)
+	}
+	if want := "may lack executable bits"; !strings.Contains(stderr, want) {
+		t.Errorf("stderr %q does not hold %q", stderr, want)
+	}
+	for _, part := range append([]string{uri}, refLogHiddenParts...) {
+		if strings.Contains(stderr, part) {
+			t.Errorf("stderr %q holds %q", stderr, part)
+		}
+	}
+	if n := calls.Load(); n != 0 {
+		t.Errorf("%d GitHub requests during the cooldown, want 0", n)
 	}
 }
 

@@ -67,6 +67,13 @@ export class ScionLoginPage extends LitElement {
   private _proxyMode = false;
 
   /**
+   * Whether the server signs browsers in from a dev sign-in link
+   * (a local workstation server)
+   */
+  @state()
+  private _devSignIn = false;
+
+  /**
    * Whether provider config is still loading
    */
   @state()
@@ -356,6 +363,7 @@ export class ScionLoginPage extends LitElement {
         const data = (await resp.json()) as {
           providers?: { id: string; name: string; enabled: boolean }[];
           authMode?: string;
+          devSignIn?: boolean;
           google?: boolean;
           github?: boolean;
         };
@@ -380,6 +388,7 @@ export class ScionLoginPage extends LitElement {
         }
 
         this._proxyMode = data.authMode === 'proxy';
+        this._devSignIn = data.devSignIn === true;
       }
     } catch {
       // If the fetch fails, leave providers empty
@@ -443,12 +452,7 @@ export class ScionLoginPage extends LitElement {
               `
             : hasProviders
               ? providers.map((provider) => this.renderProvider(provider))
-              : html`
-                  <div class="no-providers">
-                    <p>No authentication providers configured.</p>
-                    <p>Please configure OAuth credentials in the server settings.</p>
-                  </div>
-                `}
+              : this.renderNoProviders()}
         </div>
 
         <div class="footer">
@@ -457,6 +461,23 @@ export class ScionLoginPage extends LitElement {
             <a href="/terms">Terms of Service</a> and <a href="/privacy">Privacy Policy</a>.
           </p>
         </div>
+      </div>
+    `;
+  }
+
+  private renderNoProviders() {
+    if (this._devSignIn) {
+      return html`
+        <div class="no-providers dev-sign-in">
+          <p>This workstation server signs you in from a sign-in link.</p>
+          <p>Run <code>scion server open</code> in a terminal to open a new one.</p>
+        </div>
+      `;
+    }
+    return html`
+      <div class="no-providers">
+        <p>No authentication providers configured.</p>
+        <p>Please configure OAuth credentials in the server settings.</p>
       </div>
     `;
   }

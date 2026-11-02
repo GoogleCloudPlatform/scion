@@ -36,6 +36,9 @@ var layer0Prefixes = []string{
 	"server.keyring_file",
 	// Operator override for a world-readable keyring file: restart-bound.
 	"server.keyring_file_allow_world_readable",
+	// TLS-terminating proxy allowlist for the hub-broker transport check:
+	// operator-only and read once at startup.
+	"server.trusted_proxies",
 	// Database
 	"server.database",
 	// Listeners
@@ -56,6 +59,7 @@ var layer0Prefixes = []string{
 	// Secrets/storage
 	"server.secrets",
 	"server.storage",
+	"server.project_storage",
 	"server.workspace_storage",
 	"server.shared_dir_storage",
 	"server.home_storage",
@@ -90,6 +94,9 @@ var layer0Prefixes = []string{
 	// Request performance tracing — the middleware and the authorization
 	// store and audit-emitter decorators are installed at startup.
 	"server.hub.perf_trace",
+	// Browser policy report samples — the report handler is built at
+	// startup.
+	"server.hub.csp_report_raw_samples",
 	// Membership-standing sweep report-only mode — the sweep reads it from
 	// ServerConfig, set at startup.
 	"server.hub.membership_sweep_report_only",
@@ -573,8 +580,20 @@ func DetectDeprecatedServerEnv(serverEnvKoanf *koanf.Koanf) []DeprecatedEnvVar {
 // variable is the supported way to pin the value on a node, not a
 // deprecated seed input. server.hub.public_url resolves env first, then the
 // database, then settings.yaml (ptone/scion#3905).
+// server.auth.authorized_domains resolves the same way (ptone/scion#6000):
+// a node that restricts sign-in through SCION_SERVER_* keeps that list
+// whatever is saved. This differs on purpose from the other access keys,
+// where a saved value wins over SCION_SERVER_*.
 var envPinnedLayer1Keys = map[string]bool{
-	"server.hub.public_url": true,
+	"server.hub.public_url":          true,
+	"server.auth.authorized_domains": true,
+}
+
+// IsEnvPinnedLayer1Key reports whether a SCION_SERVER_* variable pins the
+// Layer-1 key on a node (envPinnedLayer1Keys), so the saved value does not
+// apply where the variable is set.
+func IsEnvPinnedLayer1Key(key string) bool {
+	return envPinnedLayer1Keys[key]
 }
 
 // koanfKeyToEnvSuffix converts a koanf key back to the env var suffix form:

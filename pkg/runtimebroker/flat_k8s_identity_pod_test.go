@@ -208,8 +208,8 @@ func assertBlockPod(t *testing.T, pod *corev1.Pod, wantSA string) {
 // assertAssignPod is assertBlockPod for GCP identity mode assign: the pod
 // runs as the mapped KSA (Workload Identity) in the instance namespace, so
 // the mode is passthrough with the GSA and project as informational env, no
-// metadata emulator redirect, and none of block's token or node-selector
-// settings.
+// metadata emulator redirect, automountServiceAccountToken false, as every
+// agent pod, and none of block's node-selector settings.
 func assertAssignPod(t *testing.T, pod *corev1.Pod, wantKSA string) {
 	t.Helper()
 	if pod.Namespace != "agents" {
@@ -218,8 +218,8 @@ func assertAssignPod(t *testing.T, pod *corev1.Pod, wantKSA string) {
 	if pod.Spec.ServiceAccountName != wantKSA {
 		t.Errorf("ServiceAccountName %q, want %q", pod.Spec.ServiceAccountName, wantKSA)
 	}
-	if a := pod.Spec.AutomountServiceAccountToken; a != nil && !*a {
-		t.Error("an assign pod must not get block's automountServiceAccountToken false")
+	if a := pod.Spec.AutomountServiceAccountToken; a == nil || *a {
+		t.Errorf("automountServiceAccountToken = %v, want false", a)
 	}
 	if _, ok := pod.Spec.NodeSelector[scionrt.KubernetesWorkloadIdentityNodeLabel]; ok {
 		t.Error("an assign pod must not get block's node selector")

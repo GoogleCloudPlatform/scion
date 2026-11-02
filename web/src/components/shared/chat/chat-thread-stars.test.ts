@@ -317,7 +317,7 @@ describe('scion-chat-thread starred messages', () => {
     expect(starAction(el, 'local-1700000000000')).toBeUndefined();
   });
 
-  it('renders the desktop toggle row without an orphan menu role', () => {
+  it('renders the desktop toggle row as a checked menu item', () => {
     const host = document.createElement('div');
     render(
       renderMenuRows([{ id: 'star', label: 'Unstar message', checked: true, run: () => {} }]),
@@ -325,8 +325,8 @@ describe('scion-chat-thread starred messages', () => {
     );
     const row = host.querySelector('.context-menu-item')!;
     expect(row.textContent).toContain('Unstar message');
-    expect(row.hasAttribute('role')).toBe(false);
-    expect(row.hasAttribute('aria-checked')).toBe(false);
+    expect(row.getAttribute('role')).toBe('menuitemcheckbox');
+    expect(row.getAttribute('aria-checked')).toBe('true');
   });
 
   it('sends no state request for a live message, which starts unstarred', async () => {
@@ -434,10 +434,42 @@ describe('scion-chat-thread starred messages', () => {
     await vi.waitFor(() => expect(starAction(el, M3)?.disabled).toBeFalsy());
   });
 
-  it('offers no star action in a DM in phase 1', async () => {
+  it('offers the star action in a DM and stars under the DM key', async () => {
     setFlag(true);
-    routeHub({});
-    const el = await mount('dm:user:user-me:agent:a1');
-    expect(starAction(el, M1)).toBeUndefined();
+    const key = 'dm:agent:a1:user:user-me';
+    routeHub({ starred: [M2] });
+    const el = await mount(key);
+    await vi.waitFor(() => expect(stateCalls()).toHaveLength(1));
+    await vi.waitFor(() =>
+      expect(starAction(el, M2)).toMatchObject({ checked: true, disabled: false })
+    );
+    expect(starAction(el, M1)).toMatchObject({ checked: false, disabled: false });
+    starAction(el, M1)!.run();
+    await vi.waitFor(() => expect(starAction(el, M1)?.checked).toBe(true));
+    const put = apiFetch.mock.calls.find(
+      (c) => (c[1] as RequestInit | undefined)?.method === 'PUT'
+    );
+    expect(put).toBeTruthy();
+    expect(JSON.parse((put![1] as RequestInit).body as string)).toEqual({ conversationKey: key });
+  });
+
+  it('a deleted message loses its star indicator at once, from any surface', async () => {
+    setFlag(true);
+    routeHub({ starred: [M1] });
+    const el = await mount();
+    await vi.waitFor(() => expect(starAction(el, M1)?.checked).toBe(true));
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-message-deleted', {
+        detail: {
+          data: { conversationKey: TOPIC, messageId: M1, deletedAt: '2026-10-22T10:00:00Z' },
+        },
+      })
+    );
+    // The action may be gone with the message; it is never shown starred.
+    await vi.waitFor(() => expect(starAction(el, M1)?.checked).not.toBe(true));
+    expect((el as unknown as { stars: { state(id: string): string } }).stars.state(M1)).toBe(
+      'unstarred'
+    );
+    expect(stateCalls()).toHaveLength(1);
   });
 });

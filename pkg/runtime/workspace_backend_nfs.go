@@ -120,9 +120,13 @@ func (b *nfsBackend) Realize(in RealizeInput) (MountDescriptor, error) {
 		SubPath:  in.Resolved.ServerRelativePath,
 	}
 
-	// Populate K8s PVC info from the first share if available.
-	if b.cfg != nil && len(b.cfg.Shares) > 0 && b.cfg.Shares[0].PVName != "" {
+	// Populate K8s PVC info from the first share if available, and the
+	// share's server and export (a Kubernetes pod mounts the share inline
+	// when it has no claim).
+	if b.cfg != nil && len(b.cfg.Shares) > 0 {
 		desc.PVClaimName = b.cfg.Shares[0].PVName
+		desc.NFSServer = b.cfg.Shares[0].Server
+		desc.NFSExportPath = b.cfg.Shares[0].Export
 	}
 
 	return desc, nil

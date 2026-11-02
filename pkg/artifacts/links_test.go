@@ -470,7 +470,7 @@ func TestLinkViewCapabilityBounds(t *testing.T) {
 		time.Now().Add(10*time.Minute).UTC().Format(sqliteTimeLayout), link.Link.ID)
 	loc := f.shared(RouteShared+tok, "").Header().Get("Location")
 	capability := strings.Split(strings.TrimPrefix(loc, RouteView), "/")[0]
-	vg, err := parseViewCapability(testViewKey, capability, time.Now())
+	vg, err := parseViewCapability(LegacyViewKeys(testViewKey), capability, time.Now())
 	if err != nil || vg.linkID != link.Link.ID || vg.id != id || vg.seq != 1 {
 		t.Fatalf("capability %q: %+v %v", capability, vg, err)
 	}
@@ -481,20 +481,20 @@ func TestLinkViewCapabilityBounds(t *testing.T) {
 	}
 	// Dropping the link id does not yield a valid session capability.
 	session := strings.Join([]string{parts[0], parts[1], parts[2], parts[4]}, ".")
-	if _, err := parseViewCapability(testViewKey, session, time.Now()); err == nil {
+	if _, err := parseViewCapability(LegacyViewKeys(testViewKey), session, time.Now()); err == nil {
 		t.Errorf("a link capability without its link id was accepted")
 	}
 	// Swapping in another link id breaks the signature.
 	_, other := f.mustMintLink(userU, id, "")
 	moved := strings.Join([]string{parts[0], parts[1], parts[2], other.Link.ID, parts[4]}, ".")
-	if _, err := parseViewCapability(testViewKey, moved, time.Now()); err == nil {
+	if _, err := parseViewCapability(LegacyViewKeys(testViewKey), moved, time.Now()); err == nil {
 		t.Errorf("a link capability moved to another link was accepted")
 	}
 	// A session capability with a link id inserted is refused.
 	sess := mintViewCapability(testViewKey, id, 1, time.Now().Add(ViewTTL))
 	sp := strings.Split(sess, ".")
 	forged := strings.Join([]string{sp[0], sp[1], sp[2], link.Link.ID, sp[3]}, ".")
-	if _, err := parseViewCapability(testViewKey, forged, time.Now()); err == nil {
+	if _, err := parseViewCapability(LegacyViewKeys(testViewKey), forged, time.Now()); err == nil {
 		t.Errorf("a session capability with a link id was accepted")
 	}
 	// A 5-part capability signed under the session domain over the same
@@ -504,14 +504,14 @@ func TestLinkViewCapabilityBounds(t *testing.T) {
 	mac.Write([]byte(viewSigDomain + "\n" + parts[0] + "\n" + parts[1] + "\n" + parts[2] + "\n" + parts[3]))
 	crossDomain := strings.Join([]string{parts[0], parts[1], parts[2], parts[3],
 		base64.RawURLEncoding.EncodeToString(mac.Sum(nil))}, ".")
-	if _, err := parseViewCapability(testViewKey, crossDomain, time.Now()); err == nil {
+	if _, err := parseViewCapability(LegacyViewKeys(testViewKey), crossDomain, time.Now()); err == nil {
 		t.Errorf("a link capability signed under the session domain was accepted")
 	}
 	// A link id that is not a canonical id is refused, even correctly
 	// signed, so it never reaches the store.
 	for _, bad := range []string{"x", strings.ToUpper(link.Link.ID), link.Link.ID + "0"} {
 		signed := mintLinkViewCapability(testViewKey, id, 1, time.Now().Add(ViewTTL), bad)
-		if _, err := parseViewCapability(testViewKey, signed, time.Now()); err == nil {
+		if _, err := parseViewCapability(LegacyViewKeys(testViewKey), signed, time.Now()); err == nil {
 			t.Errorf("link id %q was accepted", bad)
 		}
 	}

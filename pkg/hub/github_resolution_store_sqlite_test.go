@@ -43,7 +43,7 @@ func TestGitHubResolutionStore_GetPut(t *testing.T) {
 	entry := GitHubCacheEntry{
 		CommitSHA: "abcdef1234567890abcdef1234567890abcdef12",
 		FileEntries: []GitHubFileEntry{
-			{Path: "SKILL.md", URL: "https://raw.githubusercontent.com/test/repo/main/SKILL.md", Hash: "sha256:abc", Size: 100},
+			{Path: "SKILL.md", URL: "https://raw.githubusercontent.com/test/repo/main/SKILL.md", Hash: "sha256:abc", Size: 100, Mode: "0755"},
 		},
 		BundleHash:  "sha256:bundlehash",
 		TokenScope:  "public",
@@ -62,6 +62,7 @@ func TestGitHubResolutionStore_GetPut(t *testing.T) {
 	require.Equal(t, entry.CommitSHA, retrieved.CommitSHA)
 	require.Equal(t, entry.BundleHash, retrieved.BundleHash)
 	require.Len(t, retrieved.FileEntries, 1)
+	require.Equal(t, "0755", retrieved.FileEntries[0].Mode, "the file mode must survive the JSON column")
 
 	// Get non-existent entry (should miss)
 	_, hit, err = store.Get(ctx, "nonexistent")
@@ -86,7 +87,7 @@ func TestGitHubResolutionStore_Put_UpsertUpdatesExistingRow(t *testing.T) {
 
 	first := GitHubCacheEntry{
 		CommitSHA:   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com/a", Hash: "sha256:a", Size: 1}},
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com/a", Hash: "sha256:a", Size: 1, Mode: "0644"}},
 		BundleHash:  "sha256:first",
 		TokenScope:  "public",
 		ExpiresAt:   time.Now().Add(30 * time.Minute),
@@ -149,7 +150,7 @@ func TestGitHubResolutionStore_Put_ConflictTargetInSQL(t *testing.T) {
 	store := NewGitHubResolutionStore(client)
 	entry := GitHubCacheEntry{
 		CommitSHA:   "abcdef1234567890abcdef1234567890abcdef12",
-		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:abc", Size: 100}},
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:abc", Size: 100, Mode: "0644"}},
 		BundleHash:  "sha256:bundlehash",
 		TokenScope:  "public",
 		ExpiresAt:   time.Now().Add(30 * time.Minute),
@@ -187,7 +188,7 @@ func TestGitHubResolutionStore_Expiration(t *testing.T) {
 	cacheKey := "test-expired-key"
 	entry := GitHubCacheEntry{
 		CommitSHA:   "abcdef1234567890abcdef1234567890abcdef12",
-		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:abc", Size: 100}},
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:abc", Size: 100, Mode: "0644"}},
 		BundleHash:  "sha256:bundlehash",
 		TokenScope:  "public",
 		ExpiresAt:   time.Now().Add(-1 * time.Hour), // Already expired
@@ -216,7 +217,7 @@ func TestGitHubResolutionStore_PurgeExpired(t *testing.T) {
 	expiredKey := "expired-key"
 	expiredEntry := GitHubCacheEntry{
 		CommitSHA:   "abcdef1234567890abcdef1234567890abcdef12",
-		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:abc", Size: 100}},
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:abc", Size: 100, Mode: "0644"}},
 		BundleHash:  "sha256:bundlehash",
 		TokenScope:  "public",
 		ExpiresAt:   time.Now().Add(-(agent.MaxResolutionStaleAge + time.Hour)),
@@ -229,7 +230,7 @@ func TestGitHubResolutionStore_PurgeExpired(t *testing.T) {
 	validKey := "valid-key"
 	validEntry := GitHubCacheEntry{
 		CommitSHA:   "1234567890abcdef1234567890abcdef12345678",
-		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:def", Size: 200}},
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:def", Size: 200, Mode: "0644"}},
 		BundleHash:  "sha256:bundlehash2",
 		TokenScope:  "public",
 		ExpiresAt:   time.Now().Add(1 * time.Hour),
@@ -275,7 +276,7 @@ func TestGitHubResolutionStore_PurgeExpired_KeepsStaleServableBranchRow(t *testi
 	staleServableKey := "stale-servable-key"
 	require.NoError(t, store.Put(ctx, staleServableKey, GitHubCacheEntry{
 		CommitSHA:   "1111111111111111111111111111111111111111",
-		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:a", Size: 1}},
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:a", Size: 1, Mode: "0644"}},
 		BundleHash:  "sha256:stale-servable",
 		TokenScope:  "public",
 		ExpiresAt:   time.Now().Add(-time.Hour),
@@ -287,7 +288,7 @@ func TestGitHubResolutionStore_PurgeExpired_KeepsStaleServableBranchRow(t *testi
 	tooOldKey := "too-old-key"
 	require.NoError(t, store.Put(ctx, tooOldKey, GitHubCacheEntry{
 		CommitSHA:   "2222222222222222222222222222222222222222",
-		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:b", Size: 1}},
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:b", Size: 1, Mode: "0644"}},
 		BundleHash:  "sha256:too-old",
 		TokenScope:  "public",
 		ExpiresAt:   time.Now().Add(-(agent.MaxResolutionStaleAge + time.Hour)),
@@ -334,7 +335,7 @@ func TestGitHubResolutionStore_StaleCutoff_AccountsForTTLJitter(t *testing.T) {
 	justInsideKey := "just-inside"
 	require.NoError(t, store.Put(ctx, justInsideKey, GitHubCacheEntry{
 		CommitSHA:   "3333333333333333333333333333333333333333",
-		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:c", Size: 1}},
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:c", Size: 1, Mode: "0644"}},
 		BundleHash:  "sha256:just-inside",
 		TokenScope:  "public",
 		ExpiresAt:   cutoff.Add(time.Minute),
@@ -344,7 +345,7 @@ func TestGitHubResolutionStore_StaleCutoff_AccountsForTTLJitter(t *testing.T) {
 	justOutsideKey := "just-outside"
 	require.NoError(t, store.Put(ctx, justOutsideKey, GitHubCacheEntry{
 		CommitSHA:   "4444444444444444444444444444444444444444",
-		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:d", Size: 1}},
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:d", Size: 1, Mode: "0644"}},
 		BundleHash:  "sha256:just-outside",
 		TokenScope:  "public",
 		ExpiresAt:   cutoff.Add(-time.Minute),

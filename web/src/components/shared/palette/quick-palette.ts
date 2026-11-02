@@ -816,6 +816,52 @@ export class ScionQuickPalette extends LitElement {
     }
   }
 
+  /**
+   * Opens the palette and focuses its query input synchronously, for an open
+   * raised by a tap. iOS opens the on-screen keyboard only for a text field
+   * focused inside the tap, and a home-screen web app also refuses a later
+   * move of focus from one field to another, so the hidden field a host
+   * focuses first cannot pass the keyboard on there.
+   *
+   * Renders this element and its dialog now instead of at the next update,
+   * and shows the dialog's base, which Shoelace would unhide only after its
+   * own awaits: a `hidden` element cannot take focus. Shoelace then runs the
+   * rest of its show as usual (the open animation starts before the next
+   * paint, and its `sl-initial-focus` finds the input already focused).
+   *
+   * Needs the element mounted and rendered closed first, so Shoelace sees a
+   * real false -> true transition. Where the input cannot take focus here,
+   * the open still goes ahead at the next update and the host's hidden field
+   * keeps focus until the usual hand-off.
+   */
+  openAndFocusNow(): void {
+    if (!this.hasUpdated || !this.isConnected) return;
+    this.open = true;
+    this.performUpdate();
+    const dialog = this.renderRoot.querySelector('sl-dialog') as
+      | (HTMLElement & { hasUpdated?: boolean; performUpdate?: () => void })
+      | null;
+    // Shoelace's dialog, once upgraded and rendered: run its open now.
+    if (dialog?.hasUpdated && typeof dialog.performUpdate === 'function') {
+      dialog.performUpdate();
+      // Relies on Shoelace 2.x internals: the dialog's base part carries the
+      // `hidden` attribute while closed, and its own open clears it only after
+      // awaiting its animations. If a Shoelace upgrade changes that, the input
+      // stays hidden and the focus below does nothing; the e2e checks that the
+      // query input has focus as the tap ends (e2e/chat-mobile/
+      // palette-tap-focus.pw.ts, and e2e/chat-palette/touch-keyboard.pw.ts,
+      // which also runs on WebKit) then fail instead of passing on the
+      // hidden-field fallback.
+      const base = dialog.shadowRoot?.querySelector<HTMLElement>('[part~="base"]');
+      if (base) base.hidden = false;
+    }
+    const input = this.paletteInputEl;
+    if (!input) return;
+    input.focus({ preventScroll: true });
+    // A focus event applied any type-ahead; none fires in a window without focus.
+    this.applyTypeahead();
+  }
+
   private handlePaletteInitialFocus(e: Event): void {
     // Bound directly on the palette's own sl-dialog: a nested Shoelace
     // dialog/drawer added inside the palette later could otherwise bubble

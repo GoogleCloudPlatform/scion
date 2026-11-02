@@ -268,36 +268,33 @@ func (rs *ResourceStore) BootstrapSource(ctx context.Context, src ResourceSource
 	}
 	defer cleanup()
 
-	if err := transfer.NormalizeDir(dir); err != nil {
-		result.Failed++
-		return result, fmt.Errorf("%s: normalize staged dir: %w", p.Label(), err)
-	}
-
-	files, err := rs.collectFiles(dir)
+	// The staged directory is normalized and collected through one root.
+	cd, err := rs.normalizeAndCollect(dir)
 	if err != nil {
 		result.Failed++
-		return result, err
+		return result, fmt.Errorf("%s: staged dir: %w", p.Label(), err)
 	}
+	defer func() { _ = cd.root.Close() }()
 
 	// One pre-upload content check per resource; it covers the create, update
 	// and storage-repair branches below, so a refusal writes nothing.
-	if err := rs.checkDir(ctx, dir, files); err != nil {
+	if err := rs.checkDir(ctx, meta.Name, cd); err != nil {
 		result.Failed++
 		return result, err
 	}
 
 	if existing == nil {
-		return rs.bootstrapSourceCreate(ctx, meta, slug, dir, files, &result)
+		return rs.bootstrapSourceCreate(ctx, meta, slug, cd, &result)
 	}
-	return rs.bootstrapSourceUpdate(ctx, meta, existing, dir, files, opts, &result)
+	return rs.bootstrapSourceUpdate(ctx, meta, existing, cd, opts, &result)
 }
 
 // bootstrapSourceCreate handles the create path for a new resource.
 func (rs *ResourceStore) bootstrapSourceCreate(
 	ctx context.Context,
 	meta ResourceMetadata,
-	slug, dir string,
-	files []transfer.FileInfo,
+	slug string,
+	cd *collectedDir,
 	result *BootstrapResult,
 ) (BootstrapResult, error) {
 	srv := rs.srv
@@ -319,7 +316,7 @@ func (rs *ResourceStore) bootstrapSourceCreate(
 		StorageURI:    storage.ResourceStorageURI(rs.hubID, stor.Bucket(), kind, meta.Scope, meta.ScopeID, slug),
 		SourceURL:     meta.SourceURL,
 	}
-	if err := p.Create(ctx, rec, dir); err != nil {
+	if err := p.Create(ctx, rec, cd); err != nil {
 		if errors.Is(err, store.ErrAlreadyExists) {
 			srv.resourceLog.Info(p.Label()+": duplicate create race, re-reading",
 				"name", meta.Name)
@@ -328,13 +325,13 @@ func (rs *ResourceStore) bootstrapSourceCreate(
 				result.Failed++
 				return *result, fmt.Errorf("%s: create race recovery failed: %w", p.Label(), err)
 			}
-			return rs.bootstrapSourceUpdate(ctx, meta, existing, dir, files, BootstrapOptions{Force: true}, result)
+			return rs.bootstrapSourceUpdate(ctx, meta, existing, cd, BootstrapOptions{Force: true}, result)
 		}
 		result.Failed++
 		return *result, fmt.Errorf("%s: create failed: %w", p.Label(), err)
 	}
 
-	uploaded, _, err := rs.uploadFiles(ctx, stor, rec.StoragePath, files)
+	uploaded, _, err := rs.uploadFiles(ctx, stor, cd.root, rec.StoragePath, cd.files)
 	if err != nil {
 		result.Failed++
 		return *result, err
@@ -342,14 +339,14 @@ func (rs *ResourceStore) bootstrapSourceCreate(
 	rec.Files = uploaded
 	rec.ContentHash = rs.srv.computeContentHash(uploaded)
 	rec.Status = resourceStatusActive
-	if err := p.Update(ctx, rec, dir); err != nil {
+	if err := p.Update(ctx, rec, cd); err != nil {
 		result.Failed++
 		return *result, err
 	}
 
 	srv.resourceLog.Info(p.Label()+": created resource from source",
 		"name", meta.Name, "files", len(uploaded))
-	p.PostFinalize(ctx, rec, dir)
+	p.PostFinalize(ctx, rec, cd)
 	result.Created++
 	return *result, nil
 }
@@ -359,8 +356,7 @@ func (rs *ResourceStore) bootstrapSourceUpdate(
 	ctx context.Context,
 	meta ResourceMetadata,
 	existing *ResourceRecord,
-	dir string,
-	files []transfer.FileInfo,
+	cd *collectedDir,
 	opts BootstrapOptions,
 	result *BootstrapResult,
 ) (BootstrapResult, error) {
@@ -370,10 +366,10 @@ func (rs *ResourceStore) bootstrapSourceUpdate(
 	stor := srv.GetStorage()
 
 	if !opts.Force {
-		newHash := rs.srv.computeContentHash(toResourceFiles(files))
+		newHash := rs.srv.computeContentHash(toResourceFiles(cd.files))
 		if newHash == existing.ContentHash {
 			if opts.RepairStorage && IsBuiltinManaged(existing.SourceURL) {
-				repaired, err := rs.repairStorageIfNeeded(ctx, existing, dir, files)
+				repaired, err := rs.repairStorageIfNeeded(ctx, existing, cd)
 				if err != nil {
 					result.Failed++
 					return *result, err
@@ -393,7 +389,7 @@ func (rs *ResourceStore) bootstrapSourceUpdate(
 		storagePath = storage.ResourceStoragePath(rs.hubID, kind, existing.Scope, existing.ScopeID, existing.Slug)
 	}
 
-	uploaded, _, err := rs.uploadFiles(ctx, stor, storagePath, files)
+	uploaded, _, err := rs.uploadFiles(ctx, stor, cd.root, storagePath, cd.files)
 	if err != nil {
 		result.Failed++
 		return *result, err
@@ -403,14 +399,14 @@ func (rs *ResourceStore) bootstrapSourceUpdate(
 	existing.ContentHash = rs.srv.computeContentHash(uploaded)
 	existing.SourceURL = meta.SourceURL
 	existing.Status = resourceStatusActive
-	if err := rs.commitUploaded(ctx, existing, dir); err != nil {
+	if err := rs.commitUploaded(ctx, existing, cd); err != nil {
 		result.Failed++
 		return *result, err
 	}
 
 	srv.resourceLog.Info(p.Label()+": updated resource from source",
 		"name", meta.Name)
-	p.PostFinalize(ctx, existing, dir)
+	p.PostFinalize(ctx, existing, cd)
 	result.Updated++
 	return *result, nil
 }
@@ -420,8 +416,7 @@ func (rs *ResourceStore) bootstrapSourceUpdate(
 func (rs *ResourceStore) repairStorageIfNeeded(
 	ctx context.Context,
 	rec *ResourceRecord,
-	dir string,
-	files []transfer.FileInfo,
+	cd *collectedDir,
 ) (bool, error) {
 	report, err := rs.ValidateStorage(ctx, rec)
 	if err != nil {
@@ -444,7 +439,7 @@ func (rs *ResourceStore) repairStorageIfNeeded(
 	srv.resourceLog.Info(p.Label()+": repairing storage",
 		"name", rec.Name, "issues", len(report.Issues))
 
-	uploaded, _, err := rs.uploadFiles(ctx, stor, storagePath, files)
+	uploaded, _, err := rs.uploadFiles(ctx, stor, cd.root, storagePath, cd.files)
 	if err != nil {
 		return false, fmt.Errorf("repair upload: %w", err)
 	}
@@ -452,7 +447,7 @@ func (rs *ResourceStore) repairStorageIfNeeded(
 	rec.Files = uploaded
 	rec.ContentHash = rs.srv.computeContentHash(uploaded)
 	rec.Status = resourceStatusActive
-	if err := rs.commitUploaded(ctx, rec, dir); err != nil {
+	if err := rs.commitUploaded(ctx, rec, cd); err != nil {
 		return false, fmt.Errorf("repair update: %w", err)
 	}
 

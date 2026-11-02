@@ -1,0 +1,71 @@
+{
+  "_comment": "Container SCION_HARNESS cases for ptone/scion#5946. pkg/agent asserts that Start emits container_harness for each case; pkg/sciontool/telemetry reads this same file (by relative path) and runs the real usage deriver for container_harness and for stale_harness (the value main emitted before the fix) over the named capture fixture. Usage outcomes: parsed (rules selected and the capture yields derived usage), unmatched (rules selected but the capture yields nothing), unknown (no rule for the harness, so usage stays unknown). legacy: no stored harness and no harness-config from any tier (plain Generic). legacy-default: no stored harness, so the settings default harness-config (antigravity in the embedded defaults) resolves.",
+  "cases": [
+    {
+      "name": "switch",
+      "stored_harness": "claude",
+      "container_harness": "gemini-cli",
+      "stale_harness": "claude",
+      "fixture": "gemini-cli",
+      "want_usage": "parsed",
+      "stale_usage": "unmatched"
+    },
+    {
+      "name": "metadata-less",
+      "stored_harness": "claude",
+      "container_harness": "generic",
+      "stale_harness": "claude",
+      "fixture": "claude",
+      "want_usage": "unknown",
+      "stale_usage": "parsed"
+    },
+    {
+      "name": "legacy",
+      "stored_harness": "",
+      "container_harness": "generic",
+      "stale_harness": "",
+      "fixture": "claude",
+      "want_usage": "unknown",
+      "stale_usage": "unknown"
+    },
+    {
+      "name": "legacy-default",
+      "stored_harness": "",
+      "container_harness": "antigravity",
+      "stale_harness": "",
+      "fixture": "claude",
+      "want_usage": "unknown",
+      "stale_usage": "unknown"
+    },
+    {
+      "name": "legacy-gemini",
+      "stored_harness": "gemini",
+      "container_harness": "generic",
+      "stale_harness": "gemini",
+      "fixture": "gemini-cli",
+      "want_usage": "unknown",
+      "stale_usage": "unknown"
+    },
+    {
+      "name": "override",
+      "stored_harness": "claude",
+      "override": "claude",
+      "container_harness": "claude",
+      "stale_harness": "claude",
+      "fixture": "claude",
+      "want_usage": "parsed",
+      "stale_usage": "parsed"
+    },
+    {
+      "name": "override-settings-env",
+      "stored_harness": "claude",
+      "override": "claude",
+      "override_source": "settings harness_configs.hc-gemini.env",
+      "container_harness": "claude",
+      "stale_harness": "claude",
+      "fixture": "claude",
+      "want_usage": "parsed",
+      "stale_usage": "parsed"
+    }
+  ]
+}

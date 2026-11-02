@@ -5,12 +5,20 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { setPreferredTimeZone } from '../../../utils/time.js';
 
-vi.mock('../../../utils/markdown.js', () => ({
-  getMarkdownRenderer: () =>
-    Promise.resolve({
-      render: (markdown: string) => `<p>${markdown}</p>`,
-    }),
-}));
+vi.mock('../../../utils/markdown.js', () => {
+  const render = (markdown: string): string => `<p>${markdown}</p>`;
+  return {
+    getMarkdownRenderer: () =>
+      Promise.resolve({
+        render,
+        renderFragment: (markdown: string) => {
+          const tpl = document.createElement('template');
+          tpl.innerHTML = render(markdown);
+          return tpl.content;
+        },
+      }),
+  };
+});
 
 await import('./chat-interagent-marker.js');
 type ScionChatInteragentMarker = import('./chat-interagent-marker.js').ScionChatInteragentMarker;

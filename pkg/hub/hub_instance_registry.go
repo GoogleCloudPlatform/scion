@@ -31,7 +31,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
 
 // The hub-instance registry writer (health dashboard F3 design §5.3). Each
@@ -193,7 +192,7 @@ func (s *Server) hubInstanceSnapshot(ctx context.Context, label string) hubInsta
 		Integrations: s.hubInstanceIntegrations(ctx),
 		Features:     hubInstanceFeatures(),
 	}
-	return hubInstanceSnapshotFromChecks(label, version.Short(), checks, stats)
+	return hubInstanceSnapshotFromChecks(label, hubBuildToken(), checks, stats)
 }
 
 // hubInstanceFeatures lists the cross-node capabilities this hub process

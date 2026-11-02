@@ -187,12 +187,16 @@ func (e *ReservationScopeConflictError) Error() string {
 func (e *ReservationScopeConflictError) Unwrap() error { return ErrReservationScopeConflict }
 
 // QuotaExceededError is the store.ErrQuotaExceeded refusal of Reserve,
-// naming the exhausted scope. It unwraps to store.ErrQuotaExceeded, so
-// errors.Is callers are unchanged, and its message is that sentinel's.
+// naming the exhausted scope, the active count it found there and the
+// effective limit it compared that count against. It unwraps to
+// store.ErrQuotaExceeded, so errors.Is callers are unchanged, and its message
+// is that sentinel's.
 type QuotaExceededError struct {
 	Limit     string
 	ScopeType string
 	ScopeID   string
+	Count     int64
+	Max       int64
 }
 
 func (e *QuotaExceededError) Error() string { return store.ErrQuotaExceeded.Error() }
@@ -235,6 +239,14 @@ func (qs *QuotaService) CheckAndReserve(ctx context.Context, limitName string, s
 // so when created is true; otherwise they would release a reservation an
 // earlier call made.
 func (qs *QuotaService) Reserve(ctx context.Context, limitName string, subjectID string, scopeType string, scopeID string, resourceID string) (created bool, err error) {
+	// A reservation needs a subject. A limit counted across subjects counts
+	// its whole scope whatever the subject, so a resource with no subject
+	// (an agent with no recorded creator) is recorded under the scope ID;
+	// no binding names a scope ID, so its cap is the default, as for an
+	// empty subject.
+	if subjectID == "" && countsAcrossSubjects(limitName) {
+		subjectID = scopeID
+	}
 	// 1. Look up LimitDefinition by name.
 	limitDef, err := qs.store.GetLimitDefinitionByName(ctx, limitName)
 	if err != nil {
@@ -271,8 +283,26 @@ func (qs *QuotaService) Reserve(ctx context.Context, limitName string, subjectID
 		return false, fmt.Errorf("quota: resolve effective limit for %q: %w", limitName, err)
 	}
 
-	// 3. Unlimited — no enforcement.
+	// 3. Unlimited — no enforcement. A limit counted across subjects
+	// (countsAcrossSubjects) still records the resource, without a lock or a
+	// cap check: its total is shared by every subject in the scope, so a
+	// subject whose own cap is unlimited must still be in it, or a capped
+	// subject in the same scope would be admitted against an undercount
+	// (ptone/scion#6033). The unique active (limit, resource) index makes the
+	// record idempotent. An unlocked record racing a capped admission
+	// serializes as the capped admission first: it saw a total below its cap,
+	// and an unlimited subject may exceed any cap.
 	if effectiveLimit <= 0 {
+		if countsAcrossSubjects(limitName) {
+			return qs.recordUnchecked(ctx, limitName, &store.UsageReservation{
+				LimitDefinitionID: limitDef.ID,
+				SubjectID:         subjectID,
+				ScopeType:         scopeType,
+				ScopeID:           scopeID,
+				ResourceID:        resourceID,
+				Reserved:          1,
+			})
+		}
 		return false, nil
 	}
 
@@ -337,8 +367,9 @@ func (qs *QuotaService) Reserve(ctx context.Context, limitName string, subjectID
 		return false, fmt.Errorf("quota: check existing reservation for %q: %w", limitName, err)
 	}
 
-	// 5. Count active reservations.
-	count, err := qs.store.CountActiveReservations(ctx, limitDef.ID, subjectID, scopeType, scopeID)
+	// 5. Count active reservations: across every subject in the scope for a
+	// limit counted that way (countsAcrossSubjects), else the subject's own.
+	count, err := qs.countActive(ctx, limitName, limitDef.ID, subjectID, scopeType, scopeID)
 	if err != nil {
 		return false, fmt.Errorf("quota: count active reservations for %q: %w", limitName, err)
 	}
@@ -354,7 +385,7 @@ func (qs *QuotaService) Reserve(ctx context.Context, limitName string, subjectID
 				"limit", limitName, "scope_type", scopeType, "scope_id", scopeID,
 				"count", count, "effective_limit", effectiveLimit)
 		} else {
-			return false, &QuotaExceededError{Limit: limitName, ScopeType: scopeType, ScopeID: scopeID}
+			return false, &QuotaExceededError{Limit: limitName, ScopeType: scopeType, ScopeID: scopeID, Count: count, Max: effectiveLimit}
 		}
 	}
 
@@ -375,6 +406,152 @@ func (qs *QuotaService) Reserve(ctx context.Context, limitName string, subjectID
 	}
 
 	return true, nil
+}
+
+// countsAcrossSubjects reports whether limitName's cap is compared against
+// the active count of its whole scope, every subject included, rather than
+// the requesting subject's own count. max_agents_per_project is: its scope is
+// one project, and every creator's agents share that project's total, while
+// the cap compared against it is still resolved for the subject (the agent's
+// creator), so per-user and per-group raises keep working (ptone/scion#6033).
+// The broker and group limits use subject == scope, and
+// max_projects_per_user is per user, so they keep the per-subject count.
+func countsAcrossSubjects(limitName string) bool {
+	return limitName == store.LimitMaxAgentsPerProject
+}
+
+// countActive is Reserve's count of active reservations: the scope-wide
+// total for a limit counted across subjects, through the grouped per-scope
+// count, else the subject's own count in the scope.
+func (qs *QuotaService) countActive(ctx context.Context, limitName, limitDefID, subjectID, scopeType, scopeID string) (int64, error) {
+	if !countsAcrossSubjects(limitName) {
+		return qs.store.CountActiveReservations(ctx, limitDefID, subjectID, scopeType, scopeID)
+	}
+	counts, err := qs.store.CountActiveReservationsByScope(ctx, limitDefID, scopeType)
+	if err != nil {
+		return 0, err
+	}
+	return counts[scopeID], nil
+}
+
+// recordUnchecked records reservation without a cap check or a lock. created
+// is false when the resource already holds an active reservation for the
+// limit (the unique active index refuses a second one).
+func (qs *QuotaService) recordUnchecked(ctx context.Context, limitName string, reservation *store.UsageReservation) (bool, error) {
+	if _, err := qs.store.CreateUsageReservation(ctx, reservation); err != nil {
+		if errors.Is(err, store.ErrActiveReservationExists) {
+			return false, nil
+		}
+		return false, fmt.Errorf("quota: record reservation for %q: %w", limitName, err)
+	}
+	return true, nil
+}
+
+// TransferOpts are the TransferBrokerReservation request flags a caller of
+// QuotaService.TransferBroker or transferBrokerReservationUnchecked sets
+// (see store.BrokerReservationTransfer).
+type TransferOpts struct {
+	CreateIfAbsent    bool
+	RequireAgentOnTo  bool
+	FromReservationID string
+	Cond              *store.TransferAgentCond
+}
+
+// TransferBroker moves agentID's max_agents_per_broker reservation onto
+// toBroker atomically (store.TransferBrokerReservation), with the cap check
+// on toBroker. The source slot is freed only in the commit that secures the
+// target, so the source needs no lock. limited is false (and nothing is
+// written) when no limit definition exists.
+//
+// It joins Reserve's locking protocol on the target scope: on an unlimited
+// target it takes no lock and moves the row unchecked (Reserve writes no row
+// there, but the agent's existing row must not be lost); otherwise it takes
+// the in-process scope mutex, then the advisory lock, and counts inside the
+// transaction while holding both. Lock contention returns
+// ErrQuotaLockContention when enforcement is on, and proceeds unchecked when
+// it is off; with enforcement off the cap is not applied. Both unlocks are
+// deferred, so they run after the transaction has committed or rolled back.
+// A full target returns a *QuotaExceededError naming it, and the source
+// reservation is unchanged.
+func (qs *QuotaService) TransferBroker(ctx context.Context, agentID, toBroker string, o TransferOpts) (res store.BrokerReservationTransferResult, limited bool, err error) {
+	const limitName = store.LimitMaxAgentsPerBroker
+	req, limited, err := brokerTransferRequest(ctx, qs.store, agentID, toBroker, o)
+	if err != nil || !limited {
+		return res, false, err
+	}
+
+	effectiveLimit, err := qs.effectiveLimitForReserve(ctx, limitName, req.LimitDefinitionID, toBroker, store.QuotaScopeBroker, toBroker)
+	if err != nil {
+		return res, true, fmt.Errorf("quota: resolve effective limit for %q: %w", limitName, err)
+	}
+	if effectiveLimit > 0 {
+		scopeLock := qs.lockForScope(limitName, store.QuotaScopeBroker, toBroker)
+		scopeLock.Lock()
+		defer scopeLock.Unlock()
+
+		locker, ok := qs.store.(store.AdvisoryLocker)
+		if !ok {
+			return res, true, fmt.Errorf("quota enforcement unavailable: store does not support advisory locks")
+		}
+		acquired, release, err := locker.TryAdvisoryLockObject(ctx, store.LockQuotaEnforcement, store.StableProjectHash(toBroker))
+		if err != nil {
+			return res, true, fmt.Errorf("quota: advisory lock for %q: %w", limitName, err)
+		}
+		defer func() {
+			if releaseErr := release(); releaseErr != nil {
+				qs.logger.Warn("failed to release quota advisory lock",
+					"limit", limitName, "error", releaseErr)
+			}
+		}()
+		enforced := qs.isEnforced(limitName)
+		if !acquired && enforced {
+			return res, true, ErrQuotaLockContention
+		}
+		if enforced {
+			req.Cap = effectiveLimit
+		}
+	}
+
+	res, err = qs.store.TransferBrokerReservation(ctx, req)
+	if errors.Is(err, store.ErrQuotaExceeded) {
+		return res, true, &QuotaExceededError{Limit: limitName, ScopeType: store.QuotaScopeBroker, ScopeID: toBroker}
+	}
+	if err != nil {
+		return res, true, fmt.Errorf("quota: transfer reservation for %q: %w", limitName, err)
+	}
+	return res, true, nil
+}
+
+// brokerTransferRequest looks up the max_agents_per_broker limit definition
+// in st and builds the TransferBrokerReservation request moving agentID's
+// reservation onto toBroker with o's flags (Cap 0). limited is false, with
+// no error, when no limit definition exists. An empty toBroker is refused
+// with store.ErrInvalidTransfer before any lookup: no reservation may land
+// on an empty broker scope.
+func brokerTransferRequest(ctx context.Context, st store.Store, agentID, toBroker string, o TransferOpts) (req store.BrokerReservationTransfer, limited bool, err error) {
+	const limitName = store.LimitMaxAgentsPerBroker
+	if toBroker == "" {
+		return req, false, fmt.Errorf("quota: transfer reservation for %q to an empty broker ID: %w", limitName, store.ErrInvalidTransfer)
+	}
+	def, err := st.GetLimitDefinitionByName(ctx, limitName)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return req, false, nil
+		}
+		return req, false, fmt.Errorf("quota: lookup limit definition %q: %w", limitName, err)
+	}
+	if def == nil {
+		return req, false, nil
+	}
+	return store.BrokerReservationTransfer{
+		LimitDefinitionID: def.ID,
+		AgentID:           agentID,
+		ToBrokerID:        toBroker,
+		CreateIfAbsent:    o.CreateIfAbsent,
+		RequireAgentOnTo:  o.RequireAgentOnTo,
+		FromReservationID: o.FromReservationID,
+		Cond:              o.Cond,
+	}, true, nil
 }
 
 // maxBrokerReservationInserts bounds insertBrokerReservation: the first

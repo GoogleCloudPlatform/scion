@@ -226,7 +226,7 @@ the user does not have a preference. Validate each answer before moving on.
 | 5 | Disk size in GB | `200` | Must be a positive integer | `disk_size_gb` |
 | 6 | Container images: build on VM or use a registry? | `build` (build on VM) | Must be `build` or `registry`. If `registry`, ask for the registry path (e.g., `us-docker.pkg.dev/my-project/scion`). | `container_images.source`, `container_images.registry` |
 | 7 | Admin email | Active gcloud account | Must be a valid email address | `admin_email` |
-| 8 | Update policy | `auto` | Must be `auto`, `notify`, or `disabled`. Explain: **auto** = install updates automatically (recommended). **notify** = check for updates, show banner in admin UI. **disabled** = no automatic checking. | `update_policy` |
+| 8 | Update policy | `notify` | Must be `auto`, `notify`, or `disabled`. Explain: **notify** = check for updates, show banner in admin UI (the default). **auto** = install updates automatically; only set it if the user asks for it. **disabled** = no automatic checking. | `update_policy` |
 | 9 | Release channel | `nightly` | Must be `stable`, `preview`, or `nightly`. Defaults to nightly — only ask if the user wants to override. **stable** = GA releases. **preview** = pre-releases (rc, alpha, beta). **nightly** = nightly builds. | `release_channel` |
 | 10 | Chat plugins | none (empty list) | Each must be one of: `telegram`, `discord`, `slack`, `teams`. Multiple allowed. | `chat_plugins` |
 | 11 | Let the hub mint service accounts for agents? | `true` | Optional; only ask if the user raises it. Must be `true` or `false`. `true` grants the hub VM's service account `roles/iam.serviceAccountAdmin` on the project; `false` skips the grant, and the hub cannot mint service accounts. Explain the trade-off in §6.3c before deploying. | `hub_sa_minting` |
@@ -547,6 +547,13 @@ Enabling the tier does six things, all additive:
    PV and in `server.shared_dir_storage`, and the Cloud Run proxy's
    backend address.
 
+   `server.shared_dir_storage` is deprecated in favour of
+   `server.project_storage`. A hub that runs with it keeps its current
+   placement and logs a warning that prints the `server.project_storage`
+   block to write; see
+   [Upgrading to `server.project_storage`](hybrid-tier.md#upgrading-to-serverproject_storage)
+   for the sequence, which also moves workspaces onto the export.
+
    **Restricted user access.** With the tier on, both writes also set
    `server.auth.user_access_mode`: `invite_only` by default, or
    `domain_restricted` when the config file sets it, plus
@@ -762,6 +769,15 @@ re-run of `deploy.sh` (normally the first) narrows that rule in place to the
 hub VM only — any other VM that was relying on it for IAP SSH loses that
 access and needs its own firewall rule.
 
+**Existing VMs with the old binary layout.** A VM deployed before the
+`/opt/scion` install root keeps a plain binary at `/usr/local/bin/scion`, and
+its Maintenance page reports the update installer as `unsupported`. Convert
+it without changing the version with
+`bash scripts/single-node-vm/deploy.sh migrate-layout --config /tmp/scion-deploy-config.json`.
+This rewrites `update_policy: "auto"` to `"notify"` unless the user asked for
+auto (`--update-policy auto`). See "Binary layout and updates" in
+`docs/deploy/single-node-vm.md`.
+
 ### 5.3 Capture outputs
 
 When the script completes successfully, it prints a summary block. Capture these
@@ -836,8 +852,11 @@ not enable dev auth, so until the Phase 5 proxy settings are written every
 authenticated API call returns `401`. This is expected; do not treat it as a
 failed deploy. Dev auth is enabled only by `--dev-auth` or
 `server.auth.dev_mode: true`, and the server refuses to start with dev auth
-when the web server binds a non-loopback address. The Hub unit binds
-`0.0.0.0` so the IAP proxy can reach it, so do not enable dev auth on the VM.
+when the web server binds a non-loopback address. The Phase 3 bootstrap
+binds the Hub to `127.0.0.1` (the server refuses a non-loopback listener
+without an https base URL, which exists only once Phase 5 writes the IAP
+audience); from Phase 5 on the Hub binds `0.0.0.0` so the IAP proxy can
+reach it, so do not enable dev auth on the VM.
 If the user needs authenticated access before Phase 5, configure OAuth
 instead, or, for a short-lived test only, bind the Hub to `127.0.0.1` with
 dev auth and use an SSH tunnel; see the `settings.yaml` section of
@@ -985,9 +1004,9 @@ Things to know:
 - **Minted accounts start with no roles.** Grant a minted account whatever
   its agents need (for example `roles/aiplatform.user` for Vertex AI) before
   assigning it.
-- **Teardown does not delete minted accounts.** `deploy.sh --delete` deletes
-  the hub VM's service account, so its role bindings no longer apply, but
-  leaves any service accounts the hub minted.
+- **Teardown does not delete minted accounts.** `deploy.sh --delete` removes
+  the hub VM's service account's project role bindings and deletes the
+  account, but leaves any service accounts the hub minted.
 
 ### 6.4 Container images (if built locally)
 
@@ -1091,6 +1110,7 @@ Only when the hybrid tier is on.
 | IAP proxy deploy fails | IAP API not enabled or missing OAuth consent screen | Run `gcloud services enable iap.googleapis.com --project=PROJECT_ID`. Check the OAuth consent screen is configured in GCP Console > APIs & Services > OAuth consent screen. |
 | Hub health check fails after deploy | Binary crashed or settings invalid | SSH to VM, check logs: `gcloud compute ssh scion-hub-HUB_NAME --zone=ZONE --project=PROJECT_ID --command='sudo journalctl -u scion-hub.service --no-pager -n 50'` |
 | Hub health check fails after restart | Settings or IAP audience mismatch | SSH to VM, verify settings: `gcloud compute ssh scion-hub-HUB_NAME --zone=ZONE --project=PROJECT_ID --command='sudo -u scion cat /home/scion/.scion/settings.yaml'`. Confirm `auth.mode` is `proxy` and the `audience` string is correct. |
+| Proxy returns 5xx, or agents cannot reach the Hub, after a deploy that did not reach "Deployment Complete" (Hub healthy on the VM's localhost) | The Hub is still on the Phase 3 loopback bootstrap bind (`server.hub.host: 127.0.0.1` in `settings.yaml`); only the Phase 5 rewrite and restart remove it | Re-run `deploy.sh` to completion |
 | Agents lack `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION` | The hub env var write after the Phase 3 health check failed (a warning in the deploy output) | Run the manual `sqlite3` command from that warning, or set both as hub-scoped env vars (injection mode `always`) in the admin UI. See §6.3a. |
 | Admin's `default_gcp_identity_mode` change reverted to `passthrough` after a redeploy | `deploy.sh` rewrites the whole `settings.yaml`, not just the fields it manages | Expected — see §6.3b. Re-apply the change via the admin UI or API after redeploying. |
 | Minting a service account in the hub fails with `Permission 'iam.serviceAccounts.create' denied` | The hub mints service accounts as the hub VM's service account (`scion-hub-HUB_NAME@PROJECT_ID.iam.gserviceaccount.com`), not as the signed-in user, and that service account lacks `roles/iam.serviceAccountAdmin`. Current `deploy.sh` grants it by default; deploys made before that, or with `hub_sa_minting: false`, do not have it. | Re-run `deploy.sh`, or grant the role by hand (no hub restart; allow a few minutes for IAM to propagate): `gcloud projects add-iam-policy-binding PROJECT_ID --member=serviceAccount:scion-hub-HUB_NAME@PROJECT_ID.iam.gserviceaccount.com --role=roles/iam.serviceAccountAdmin --condition=None` and `gcloud services enable iamcredentials.googleapis.com --project=PROJECT_ID`. See §6.3c. |
@@ -1302,6 +1322,7 @@ stops if either finds an unmarked resource or cannot complete.
 | GCE VM instance | `scion-hub-HUB_NAME` |
 | Cloud NAT | `scion-hub-HUB_NAME-nat` |
 | Cloud Router | `scion-hub-HUB_NAME-router` |
+| Project IAM role bindings of the hub service account | The roles Phase 2 grants it (`roles/iam.serviceAccountAdmin` included, whatever `hub_sa_minting` says now), removed with one `--condition=None` call per role and member before the account is deleted. `deleted:serviceAccount:...?uid=` tombstones of the same account on those roles, left by an earlier delete, are removed too. Conditional bindings and every other member or role are not touched. |
 | Service account | `scion-hub-HUB_NAME@PROJECT_ID.iam.gserviceaccount.com` |
 | Cloud Run proxy service account | `scion-hub-HUB_NAME-proxy@PROJECT_ID.iam.gserviceaccount.com` (name truncated and hashed for long HUB_NAME values) |
 | IAP SSH firewall rule | `scion-hub-HUB_NAME-allow-iap-ssh` (scoped via `--target-tags` to instances tagged `scion-hub-HUB_NAME`; deleting the VM removes the tag along with it) |
@@ -1324,8 +1345,7 @@ stops if either finds an unmarked resource or cannot complete.
 - **The NFS export's own data**, since it has no separate teardown: it's
   deleted along with the VM's boot disk, not by an explicit step.
 - **Service accounts the hub minted for agents** (§6.3c). The hub VM's own
-  service account is deleted, so its project role bindings
-  (`roles/iam.serviceAccountAdmin` included) no longer apply, but minted
+  service account and its project role bindings are removed, but minted
   accounts stay.
 
 To remove it manually:

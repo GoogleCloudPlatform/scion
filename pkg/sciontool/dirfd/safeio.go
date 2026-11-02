@@ -1,3 +1,5 @@
+//go:build unix
+
 /*
 Copyright 2026 The Scion Authors.
 */
@@ -110,7 +112,7 @@ func ReadAtNoFollow(dirFd int, name string, max int64) ([]byte, error) {
 //
 // A regular file with no link left is refused with an error that wraps
 // both ErrNotSingleLinkRegular and ErrUnlinked.
-func ReadAtNoFollowStat(dirFd int, name string, max int64) ([]byte, syscall.Stat_t, error) {
+func ReadAtNoFollowStat(dirFd int, name string, max int64) ([]byte, Stat, error) {
 	var st syscall.Stat_t
 	f, err := OpenAt(dirFd, name, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
@@ -713,3 +715,6 @@ func readlinkAt(dirFd int, name string) (string, error) {
 	}
 	return string(buf[:n]), nil
 }
+
+// Stat is the stat result ReadAtNoFollowStat returns.
+type Stat = syscall.Stat_t

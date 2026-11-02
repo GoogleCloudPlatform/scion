@@ -72,6 +72,7 @@ const (
 	AgentRouteDelegationExchange   AgentSubRouteID = "agents.delegations.exchange"
 	AgentRouteDelegationItem       AgentSubRouteID = "agents.delegations.byId"
 	AgentRouteDelegationCredential AgentSubRouteID = "agents.delegations.credentials.byId"
+	AgentRouteDelegationRevokeAll  AgentSubRouteID = "agents.delegations.revokeAll"
 )
 
 // Agent sub-routes under /api/v1/projects/{projectId}/agents.
@@ -213,6 +214,7 @@ const (
 	opAgentDelegationRead             authzop.OperationID = "agent.delegation.read"
 	opAgentDelegationRevoke           authzop.OperationID = "agent.delegation.revoke"
 	opAgentDelegationCredentialRevoke authzop.OperationID = "agent.delegation.credential.revoke"
+	opAgentDelegationRevokeAll        authzop.OperationID = "agent.delegation.revokeall"
 )
 
 func postOp(op authzop.OperationID) map[string]authzop.OperationID {
@@ -283,13 +285,16 @@ var agentSubRouteTable = []agentSubRouteRow{
 	{id: AgentRoutePendingConfig, form: agentFormByID, segs: []string{"pending-config"}, ops: map[string]authzop.OperationID{http.MethodDelete: opAgentPendingDiscard}},
 	// Agent delegation (.design/agent-delegation.md §18.4): grant issuance
 	// and credential exchange, behind hub.agent_delegation; grant list,
-	// read and revoke, and delegated credential revoke, which answer while
-	// the experiment is off (§10).
+	// read, revoke and revoke-all, and delegated credential revoke, which
+	// answer while the experiment is off (§10).
 	{id: AgentRouteDelegations, form: agentFormByID, segs: []string{"delegations"}, ops: map[string]authzop.OperationID{
 		http.MethodPost: opAgentDelegationCreate,
 		http.MethodGet:  opAgentDelegationList,
 	}},
 	{id: AgentRouteDelegationExchange, form: agentFormByID, segs: []string{"delegations", agentRouteParam, "exchange"}, ops: postOp(opAgentDelegationExchange), paramNames: []string{"{grantId}"}},
+	// revoke-all is matched before the grant item row, which would
+	// otherwise take "revoke-all" as a grant ID.
+	{id: AgentRouteDelegationRevokeAll, form: agentFormByID, segs: []string{"delegations", "revoke-all"}, ops: postOp(opAgentDelegationRevokeAll)},
 	{id: AgentRouteDelegationItem, form: agentFormByID, segs: []string{"delegations", agentRouteParam}, ops: map[string]authzop.OperationID{
 		http.MethodGet:    opAgentDelegationRead,
 		http.MethodDelete: opAgentDelegationRevoke,

@@ -133,7 +133,8 @@ func TestAgentDelegatedMessage_SendsAsTheAgent(t *testing.T) {
 	f := newADTFixture(t, "adt-msg")
 	ctx := context.Background()
 	dispatcher := f.adtMessageWorld(t)
-	cred := f.delegated(t, f.adtIssueGrant(t, map[string]string{"kind": "hub"}, "agent:message").ID)
+	grant := f.adtIssueGrant(t, map[string]string{"kind": "hub"}, "agent:message")
+	cred := f.delegated(t, grant.ID)
 
 	for _, path := range []string{
 		agentMessagePath(f.agentB.ID),
@@ -166,6 +167,45 @@ func TestAgentDelegatedMessage_SendsAsTheAgent(t *testing.T) {
 		if assert.NotNil(t, m.RecipientProjectID) {
 			assert.Equal(t, f.agentB.ProjectID, *m.RecipientProjectID)
 		}
+		// §14.5: the issuer is recorded as the authorizing user, with the
+		// grant, and both are part of the message's API shape.
+		assert.Equal(t, f.alice.ID, m.AuthorizingUserID, "the issuer authorized the send")
+		assert.Equal(t, grant.ID, m.DelegationGrantID)
+		body, err := json.Marshal(m)
+		require.NoError(t, err)
+		var shape map[string]interface{}
+		require.NoError(t, json.Unmarshal(body, &shape))
+		assert.Equal(t, f.alice.ID, shape["authorizingUserId"])
+		assert.Equal(t, grant.ID, shape["delegationGrantId"])
+	}
+}
+
+// TestAgentDelegatedMessage_AttributionOnlyOnDelegatedSends: a message the
+// agent sends with its own agent token, and one a user sends, carry no
+// authorizing user and no grant; the fields are left out of the API shape.
+func TestAgentDelegatedMessage_AttributionOnlyOnDelegatedSends(t *testing.T) {
+	f := newADTFixture(t, "adt-msg-attr")
+	ctx := context.Background()
+	f.adtMessageWorld(t)
+	f.mutateAgent(t, f.agentC.ID, func(a *store.Agent) { a.Phase = "running"; a.RuntimeBrokerID = f.broker.ID })
+
+	rec := f.do(t, http.MethodPost, agentMessagePath(f.agentB.ID), adtText("own token"),
+		map[string]string{"X-Scion-Agent-Token": f.agentJWT(t, f.agentA)})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = f.sendMessage(t, f.session(t, f.carol), agentMessagePath(f.agentC.ID), adtText("from a user"))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	for _, recipient := range []string{f.agentB.ID, f.agentC.ID} {
+		stored, err := f.store.ListMessages(ctx, store.MessageFilter{RecipientID: recipient}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		require.Len(t, stored.Items, 1, recipient)
+		m := stored.Items[0]
+		assert.Empty(t, m.AuthorizingUserID)
+		assert.Empty(t, m.DelegationGrantID)
+		body, err := json.Marshal(m)
+		require.NoError(t, err)
+		assert.NotContains(t, string(body), "authorizingUserId")
+		assert.NotContains(t, string(body), "delegationGrantId")
 	}
 }
 

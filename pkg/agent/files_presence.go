@@ -15,16 +15,18 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 // FilesPresence is what AgentFilesPresence established about an agent's
@@ -116,10 +118,29 @@ func AgentFilesPresence(agentName, projectPath, hubProjectID string) FilesPresen
 	if sharedBaseWorktree != "" {
 		own = append(own, sharedBaseWorktree)
 	}
-	if p := worktreeEntryPresence(layout.repoRoot, own); p != FilesAbsent {
+	opts := presenceGitOptions(layout)
+	if p := worktreeEntryPresence(layout.repoRoot, opts, own); p != FilesAbsent {
 		return p
 	}
-	return branchPresence(layout.repoRoot, api.Slugify(agentName))
+	return branchPresence(layout.repoRoot, opts, api.Slugify(agentName))
+}
+
+// presenceGitTimeout bounds each host-side git read AgentFilesPresence makes.
+// A read that does not finish in time gives FilesUnknown.
+const presenceGitTimeout = 30 * time.Second
+
+// presenceGitOptions are the host-side git options for the presence reads in
+// layout.repoRoot. The shared base is a repository Scion created and owns,
+// checked with the managed-repository policy; otherwise repoRoot is the
+// user's own checkout, checked with the linked-checkout policy, as every
+// other host-side git command in it is. The result feeds a broker decision,
+// so errors use the remote audience.
+func presenceGitOptions(layout agentProjectLayout) util.HostGitOptions {
+	policy := util.RepoPolicyLinked
+	if layout.sharedBaseIsRepo {
+		policy = util.RepoPolicyManaged
+	}
+	return util.HostGitOptions{Policy: policy, Audience: util.AudienceRemote}
 }
 
 // pathPresence stats one path without following a final symlink.
@@ -136,12 +157,17 @@ func pathPresence(p string) FilesPresence {
 
 // worktreeEntryPresence reports whether git lists a worktree entry for one
 // of paths in the repository at repoRoot (an entry can outlive its
-// directory, which deleteAgentFiles removes as well).
-func worktreeEntryPresence(repoRoot string, paths []string) FilesPresence {
-	out, err := exec.Command("git", "-C", repoRoot, "worktree", "list", "--porcelain").Output()
-	if err != nil {
+// directory, which deleteAgentFiles removes as well). A refused repository
+// config, a config change while git ran, or a read that outlives
+// presenceGitTimeout is unknown.
+func worktreeEntryPresence(repoRoot string, opts util.HostGitOptions, paths []string) FilesPresence {
+	ctx, cancel := context.WithTimeout(context.Background(), presenceGitTimeout)
+	defer cancel()
+	res := util.RunHostGit(ctx, repoRoot, opts, "worktree", "list", "--porcelain")
+	if res.Err != nil || res.ExitCode != 0 {
 		return FilesUnknown
 	}
+	out := res.Stdout
 	want := map[string]bool{}
 	for _, p := range paths {
 		want[filepath.Clean(p)] = true
@@ -159,14 +185,19 @@ func worktreeEntryPresence(repoRoot string, paths []string) FilesPresence {
 
 // branchPresence reports whether the branch exists in the repository at
 // repoRoot. git show-ref exits 1 for a missing ref; anything else that is
-// not success is unknown.
-func branchPresence(repoRoot, branch string) FilesPresence {
-	err := exec.Command("git", "-C", repoRoot, "show-ref", "--verify", "--quiet", "refs/heads/"+branch).Run()
-	if err == nil {
-		return FilesPresent
+// not success, a refused repository config and a config change while git
+// ran included, is unknown.
+func branchPresence(repoRoot string, opts util.HostGitOptions, branch string) FilesPresence {
+	ctx, cancel := context.WithTimeout(context.Background(), presenceGitTimeout)
+	defer cancel()
+	res := util.RunHostGit(ctx, repoRoot, opts, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	if res.Err != nil {
+		return FilesUnknown
 	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+	switch res.ExitCode {
+	case 0:
+		return FilesPresent
+	case 1:
 		return FilesAbsent
 	}
 	return FilesUnknown

@@ -31,6 +31,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -155,6 +156,9 @@ func TestRunGitClone_ArgvEndsOptionsBeforeURL(t *testing.T) {
 		want := []string{}
 		if hardened {
 			want = append(want, HostCloneGitArgs()...)
+		} else {
+			// Union: a non-hardened clone still carries the base host-side git pins.
+			want = append(want, util.HostGitArgs()...)
 		}
 		want = append(want, "clone", "--branch", "main", "--", cloneURL, dest)
 		assert.Equal(t, want, argv, "hardened=%v", hardened)
@@ -163,6 +167,32 @@ func TestRunGitClone_ArgvEndsOptionsBeforeURL(t *testing.T) {
 		} else {
 			assert.Empty(t, allow)
 		}
+	}
+}
+
+// A non-hardened ProvisionShared clone still carries the base host-side git pins
+// unconditionally (no repository hooks, no fsmonitor, restricted ext transport),
+// so a cloned repository's config cannot change the clone's behaviour. Dropping the
+// unconditional pins (the else branch in runGitClone) makes this fail.
+func TestRunGitClone_NonHardenedCarriesBasePins(t *testing.T) {
+	const cloneURL = "https://git.example.com/org/repo.git"
+	dest := filepath.Join(t.TempDir(), "ws")
+	depth := 0
+	record := fakeGit(t)
+	err := runGitClone(context.Background(), ProvisionInput{
+		GitClone:        &api.GitCloneConfig{URL: cloneURL, Depth: &depth},
+		Resolved:        ResolvedWorkspace{HostPath: dest},
+		HostGitHardened: false,
+	})
+	require.Error(t, err, "the fake git fails")
+	argv, _ := readArgv(t, record)
+	joined := strings.Join(argv, " ")
+	for _, pin := range []string{
+		"core.hooksPath=" + os.DevNull,
+		"core.fsmonitor=false",
+		"protocol.ext.allow=never",
+	} {
+		assert.Contains(t, joined, pin, "a non-hardened clone must carry the base pin %q", pin)
 	}
 }
 
@@ -361,6 +391,9 @@ func TestRunGitClone_TokenBoundToRecordedRemoteAndNoRedirects(t *testing.T) {
 
 // A clone of a non-https URL never gets the token or a credential helper,
 // even when it names the recorded remote; the matching https URL gets both.
+// Every clone carries the remote layer's three credential resets
+// (credential.helper, http.extraHeader and its URL-scoped form); the scoped
+// helper adds two more entries (its own reset and the helper).
 func TestRunGitClone_TokenNotUsedForNonHTTPS(t *testing.T) {
 	depth := 0
 	clone := func(cloneURL string) string {
@@ -379,10 +412,10 @@ func TestRunGitClone_TokenNotUsedForNonHTTPS(t *testing.T) {
 	}
 	got := clone("http://git.example.com/org/repo.git")
 	assert.Contains(t, got, "SCOPED=\n", "a non-https URL gets no token")
-	assert.Contains(t, got, "CFG=\n", "no credential helper")
+	assert.Contains(t, got, "CFG=3\n", "no credential helper: the resets only")
 	assert.Contains(t, got, "TOKEN=\n", "the token never rides in GITHUB_TOKEN")
 	got = clone("https://git.example.com/org/repo.git")
 	assert.Contains(t, got, "SCOPED="+testCloneToken+"\n", "fixture check: the matching https URL gets the token via the scoped helper env")
-	assert.Contains(t, got, "CFG=2\n", "the host-scoped credential helper is installed")
+	assert.Contains(t, got, "CFG=5\n", "the host-scoped credential helper is installed after the resets")
 	assert.Contains(t, got, "TOKEN=\n", "the token is delivered via the scoped helper, never GITHUB_TOKEN")
 }

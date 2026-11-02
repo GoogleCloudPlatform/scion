@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Package projectfs is the single authority for where a project's storage
-// lives (design fs-cleanup design-v4 §P1, ptone/scion#5805). It answers
+// lives (design fs-cleanup design §P1, ptone/scion#5805). It answers
 // "host path / subPath / server path for (project, agent, Mount)" for every
 // component, keyed by the project UUID on shared backends and by today's
 // slug-keyed layout on the local backend.
@@ -205,17 +205,6 @@ func SharedDirMount(sd api.SharedDir, containerWorkspace string) Mount {
 	}
 }
 
-// Realize (design §P1) is deferred to phase 3 (fs-cleanup-arch R3): its
-// first callers are the k8s buildPod fold (ptone/scion#5823) and the
-// docker/podman/apple run arguments. The intended shape, so phases 3 and 5
-// implement one function rather than two:
-//
-//	func (l Layout) Realize(r Resolved, runtime RuntimeKind) (Realized, error)
-//
-// where Realized carries either a host bind mount (source HostPath, target
-// r.Target, read-only) or a pod volume plus volume mount (claim, SubPath,
-// target), and container targets are never computed by callers.
-
 // ErrNoMount is returned for a Mount the project does not declare.
 var ErrNoMount = errors.New("projectfs: mount is not declared for this project")
 
@@ -250,6 +239,26 @@ type Layout struct {
 	SubPathRoot string
 	Share       Share
 	UID, GID    int
+	// Homes is where agent homes live (design §P2 homes: local | nfs):
+	// BackendLocal (in the pod or on the broker host, the default when
+	// empty) or BackendNFS (on this Layout's share).
+	Homes Backend
+	// SharedDirs, when set, is where shared-dir Mounts (and nfs homes)
+	// resolve instead of this Layout: a transitional split kept only for a
+	// hub still on the deprecated storage blocks whose shared dirs are on
+	// an nfs export while its workspaces are not (design M1,
+	// ptone/scion#5821). It is never configurable and goes
+	// away with the old blocks in phase 6.
+	SharedDirs *Layout
+}
+
+// SharedDirLayout returns the Layout shared-dir Mounts resolve on: the
+// transitional SharedDirs split when set, else l.
+func (l Layout) SharedDirLayout() Layout {
+	if l.SharedDirs != nil {
+		return *l.SharedDirs
+	}
+	return l
 }
 
 // Project identifies the project a Mount is resolved for.
@@ -289,6 +298,23 @@ type Resolved struct {
 	// Kind and Name are the resolved Mount's.
 	Kind Kind
 	Name string
+	// ReadOnly is the resolved Mount's: the realized mount is read-only.
+	ReadOnly bool
+	// ClaimName is the PersistentVolumeClaim of the share this directory
+	// is on (the Layout's Share.PVName), for pod mounts; empty on local.
+	ClaimName string
+	// OwnerUID and OwnerGID are the Layout's UID and GID on a workspace or
+	// shared-dir Mount resolved on a shared backend (the leaves agents use):
+	// a root creator gives the leaf Open(true) creates that owner (Owner).
+	// They are zero on every other Resolved, including ProjectRoot,
+	// ProjectConfig and AgentRoot, whose directories never get the owner.
+	OwnerUID, OwnerGID int
+}
+
+// Owner is the shareddirs.Owner a root creator gives the directories it
+// creates for r: the Layout's UID and GID.
+func (r Resolved) Owner() shareddirs.Owner {
+	return shareddirs.Owner{UID: r.OwnerUID, GID: r.OwnerGID}
 }
 
 const (
@@ -402,6 +428,8 @@ func (l Layout) shared(rel string, m Mount) Resolved {
 		SubPathRoot: root,
 		SubPath:     filepath.ToSlash(rel),
 		Target:      m.Target,
+		ReadOnly:    m.ReadOnly,
+		ClaimName:   l.Share.PVName,
 		Kind:        m.Kind,
 		Name:        m.Name,
 	}
@@ -434,6 +462,12 @@ func (l Layout) Resolve(p Project, agent string, m Mount) (Resolved, error) {
 		if err := validSharedDirName(m.Name); err != nil {
 			return Resolved{}, err
 		}
+		if l.SharedDirs != nil {
+			if l.SharedDirs.SharedDirs != nil {
+				return Resolved{}, errors.New("projectfs: nested shared-dir layouts are not supported")
+			}
+			return l.SharedDirs.Resolve(p, agent, m)
+		}
 	}
 	if agent != "" {
 		if err := validAgentSlug(agent); err != nil {
@@ -462,7 +496,7 @@ func (l Layout) resolveShared(p Project, agent string, m Mount) (Resolved, error
 
 	switch m.Kind {
 	case KindSharedDir:
-		r := l.shared(filepath.Join(pr.RelPath, sharedDirsDir, m.Name), m)
+		r := l.mountLeaf(filepath.Join(pr.RelPath, sharedDirsDir, m.Name), m)
 		// Defense in depth alongside the validation above: the leaf must sit
 		// directly under this project's shared-dirs/.
 		if err := shareddirs.ConfineLeaf(r.HostPath, l.HostBase, root, p.ID, m.Name); err != nil {
@@ -472,22 +506,31 @@ func (l Layout) resolveShared(p Project, agent string, m Mount) (Resolved, error
 	default: // KindWorkspace
 		ws := filepath.Join(pr.RelPath, workspaceDir)
 		if agent == "" || m.Scope != ScopeAgent {
-			return l.shared(ws, m), nil
+			return l.mountLeaf(ws, m), nil
 		}
 		switch m.Mode {
 		case ModeWorktreePerAgent:
-			return l.shared(filepath.Join(ws, worktreesDir, agent), m), nil
+			return l.mountLeaf(filepath.Join(ws, worktreesDir, agent), m), nil
 		case ModeClonePerAgent, ModeEmptyPerAgent:
-			return l.shared(filepath.Join(pr.RelPath, agentsDir, agent, workspaceDir), m), nil
+			return l.mountLeaf(filepath.Join(pr.RelPath, agentsDir, agent, workspaceDir), m), nil
 		default:
 			return Resolved{}, fmt.Errorf("projectfs: mode %q has no agent-scoped workspace", m.Mode)
 		}
 	}
 }
 
+// mountLeaf is shared for a workspace or shared-dir Mount, the leaves
+// agents use: it also stamps the Layout's UID and GID as the owner a root
+// creator gives the leaf (Resolved.Owner).
+func (l Layout) mountLeaf(rel string, m Mount) Resolved {
+	r := l.shared(rel, m)
+	r.OwnerUID, r.OwnerGID = l.UID, l.GID
+	return r
+}
+
 func (l Layout) resolveLocal(p Project, agent string, m Mount) (Resolved, error) {
 	local := func(hostPath string) Resolved {
-		return Resolved{Backend: BackendLocal, HostPath: hostPath, Target: m.Target, Kind: m.Kind, Name: m.Name}
+		return Resolved{Backend: BackendLocal, HostPath: hostPath, Target: m.Target, Kind: m.Kind, Name: m.Name, ReadOnly: m.ReadOnly}
 	}
 	switch m.Kind {
 	case KindSharedDir:
@@ -541,4 +584,17 @@ func LocalConfigDirName(slug, projectID string) string {
 		short = short[:8]
 	}
 	return fmt.Sprintf("%s__%s", slug, short)
+}
+
+// Key is a value identity of l, stable across calls and copies: two Layouts
+// with the same fields (and the same transitional SharedDirs split, by
+// value) have the same Key. Use it, not fmt's %v of the struct, as a cache
+// key: SharedDirs is a pointer.
+func (l Layout) Key() string {
+	k := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%d|%d|%s",
+		l.Backend, l.HostBase, l.SubPathRoot, l.Share.ID, l.Share.Server, l.Share.Export, l.Share.PVName, l.UID, l.GID, l.Homes)
+	if l.SharedDirs != nil {
+		k += "|sd{" + l.SharedDirs.Key() + "}"
+	}
+	return k
 }

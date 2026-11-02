@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=208   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 14 (workspaceStorage.nfs: eleven refusals, one acceptance, two rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check).
+EXPECTED_TOTAL=212   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 18 (workspaceStorage.nfs: thirteen refusals, two acceptances, three rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -1019,7 +1019,7 @@ fi
 unset _sb _sd
 
 echo "== workspaceStorage.nfs =="
-# One value drives both server.workspace_storage and the hub pod's NFS mount,
+# One value drives both server.project_storage and the hub pod's NFS mount,
 # because with backend nfs the hub's /readyz fails unless
 # <mount_root>/<shares[0].id> is a mounted volume in the hub container. These
 # rows pin the guards in scion-hub.nfsWorkspace and the shape the two consumers
@@ -1030,9 +1030,14 @@ NFS=(--set workspaceStorage.nfs.enabled=true --set-string workspaceStorage.nfs.s
 reject "enabled without server" "requires workspaceStorage.nfs.server" "${NFS[@]}" --set-string workspaceStorage.nfs.server=
 reject "enabled without export" "requires workspaceStorage.nfs.export" "${NFS[@]}" --set-string workspaceStorage.nfs.export=
 reject "enabled without shareId" "requires workspaceStorage.nfs.shareId" "${NFS[@]}" --set-string workspaceStorage.nfs.shareId=
-reject "enabled without pvName" "requires workspaceStorage.nfs.pvName" "${NFS[@]}" --set-string workspaceStorage.nfs.pvName=
+accept "enabled without pvName (agent pods mount the share inline)" "${NFS[@]}" --set-string workspaceStorage.nfs.pvName=
+reject "pvName that is not an object name" "workspaceStorage.nfs.pvName is" "${NFS[@]}" --set-string workspaceStorage.nfs.pvName=Bad_Name
 reject "enabled with config.extra.server.workspace_storage" "config.extra also sets server.workspace_storage" \
   "${NFS[@]}" --set-string config.extra.server.workspace_storage.backend=local
+reject "enabled with config.extra.server.project_storage" "config.extra also sets server.project_storage" \
+  "${NFS[@]}" --set-string config.extra.server.project_storage.backend=local
+reject "enabled with config.extra.server.shared_dir_storage" "config.extra also sets server.shared_dir_storage" \
+  "${NFS[@]}" --set-string config.extra.server.shared_dir_storage.backend=local
 reject "enabled with config.existingSecret" "inline settings values (workspaceStorage.nfs.enabled, workspaceStorage.nfs.server, workspaceStorage.nfs.export, workspaceStorage.nfs.shareId, workspaceStorage.nfs.pvName)" \
   --set agents.imageRegistry= --set auth.proxy.iap.audience= --set config.existingSecret=operator-owned "${NFS[@]}"
 reject "share field set while disabled" "workspaceStorage.nfs.server set while workspaceStorage.nfs.enabled is false" \
@@ -1063,7 +1068,8 @@ if ! printf '%s\n' "$_nf" | grep -qE '^kind: Deployment$'; then
   failed=$((failed + 1))
 elif [ -n "$_nf_root" ] && [ -n "$_nf_id" ] && [ "$_nf_mount" = "${_nf_root}/${_nf_id}" ] \
   && [ "$_nf_mount" = "/srv/rg-root/rg-other" ] \
-  && printf '%s\n' "$_nf" | grep -qE '^      workspace_storage:$' \
+  && printf '%s\n' "$_nf" | grep -qE '^      project_storage:$' \
+  && ! printf '%s\n' "$_nf" | grep -qE '^      workspace_storage:$' \
   && printf '%s\n' "$_nf" | grep -qE '^        backend: nfs$' \
   && printf '%s\n' "$_nf" | grep -qE '^          subpath_root: team/projects$' \
   && printf '%s\n' "$_nf" | grep -qE '^          uid: 2001$' \
@@ -1075,22 +1081,41 @@ elif [ -n "$_nf_root" ] && [ -n "$_nf_id" ] && [ "$_nf_mount" = "${_nf_root}/${_
   && printf '%s\n' "$_nf_vol" | grep -qE '^            server: "192\.0\.2\.10"$' \
   && printf '%s\n' "$_nf_vol" | grep -qE '^            path: "/rg_share"$' \
   && printf '%s\n' "$_nf_vol" | grep -qE '^            readOnly: false$'; then
-  echo "ok    NFS renders server.workspace_storage and an inline nfs volume mounted at mount_root/shares[0].id (${_nf_mount})"
+  echo "ok    NFS renders server.project_storage and an inline nfs volume mounted at mount_root/shares[0].id (${_nf_mount})"
 else
   echo "FAIL  NFS shape: mountPath=${_nf_mount:-<none>} mount_root=${_nf_root:-<none>} shares[0].id=${_nf_id:-<none>}, or a settings or volume field is missing"
   failed=$((failed + 1))
 fi
 unset _nf _nf_root _nf_id _nf_mount _nf_vol
+# Without pvName the settings carry no pv_name (agent pods mount the share
+# inline) and the hub pod still mounts the export at mount_root/shares[0].id.
+executed=$((executed + 1))
+_ni="$(render "${NFS[@]}" --set-string workspaceStorage.nfs.pvName=)"
+_ni_mount="$(printf '%s\n' "$_ni" | grep -A1 -E '^            - name: workspace-nfs$' | sed -n 's/^              mountPath: "\(.*\)"$/\1/p')"
+if ! printf '%s\n' "$_ni" | grep -qE '^kind: Deployment$'; then
+  echo "FAIL  NFS without pvName: the render produced no Deployment, so nothing was inspected"
+  failed=$((failed + 1))
+elif printf '%s\n' "$_ni" | grep -qE '^      project_storage:$' \
+  && ! printf '%s\n' "$_ni" | grep -qE 'pv_name' \
+  && printf '%s\n' "$_ni" | grep -qE '^            server: 192\.0\.2\.10$' \
+  && printf '%s\n' "$_ni" | grep -qE '^          - export: /rg_share$' \
+  && [ "$_ni_mount" = "/mnt/scion-nfs/rg-share" ]; then
+  echo "ok    NFS without pvName renders shares[0] with no pv_name and keeps the hub mount (${_ni_mount})"
+else
+  echo "FAIL  NFS without pvName: mountPath=${_ni_mount:-<none>}, or pv_name rendered, or a settings field is missing"
+  failed=$((failed + 1))
+fi
+unset _ni _ni_mount
 # Disabled (the default) renders neither half.
 executed=$((executed + 1))
 _nd="$(render)"
 if ! printf '%s\n' "$_nd" | grep -qE '^kind: Deployment$'; then
   echo "FAIL  NFS disabled: the render produced no Deployment, so nothing was inspected"
   failed=$((failed + 1))
-elif ! printf '%s\n' "$_nd" | grep -qE 'workspace_storage:|workspace-nfs|^ +nfs:$'; then
-  echo "ok    NFS disabled renders no workspace_storage and no NFS volume or mount"
+elif ! printf '%s\n' "$_nd" | grep -qE 'project_storage:|workspace_storage:|workspace-nfs|^ +nfs:$'; then
+  echo "ok    NFS disabled renders no storage block and no NFS volume or mount"
 else
-  echo "FAIL  NFS disabled still rendered a workspace_storage block or an NFS volume"
+  echo "FAIL  NFS disabled still rendered a storage block or an NFS volume"
   failed=$((failed + 1))
 fi
 unset _nd

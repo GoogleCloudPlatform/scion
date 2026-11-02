@@ -26,7 +26,6 @@ import (
 	"testing"
 	"time"
 
-	entsql "entgo.io/ent/dialect/sql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -137,8 +136,8 @@ func TestWithUTCTimezone_MalformedQueryIsNotMasked(t *testing.T) {
 // §2.1.2, U3's reading approach).
 func sqlDBFromClient(t *testing.T, client *ent.Client) *sql.DB {
 	t.Helper()
-	drv, ok := client.Driver().(*entsql.Driver)
-	require.True(t, ok, "expected *entsql.Driver, got %T", client.Driver())
+	drv, ok := SQLDriver(client.Driver())
+	require.True(t, ok, "expected a driver backed by *sql.DB, got %T", client.Driver())
 	return drv.DB()
 }
 

@@ -113,6 +113,19 @@ type ServerConfigResponse struct {
 	// on this node. Present in both file-mode and DB-mode responses so the
 	// admin UI can show env-pinned fields regardless of settings tier.
 	EnvOverrides []string `json:"env_overrides,omitempty"`
+
+	// EnvValues maps each key in EnvOverrides to the value the environment
+	// gives it on this node (masked like the rest of the body; withheld when
+	// it cannot be shown safely) and whether the hub runs with that value.
+	// Additive: EnvOverrides is unchanged.
+	EnvValues map[string]EnvKeyValue `json:"env_values,omitempty"`
+
+	// StorageOverrideErrors lists, read-only, the removed per-runtime or
+	// per-profile storage overrides the settings file (as read at startup)
+	// or the stored settings still carry, one message per source with the
+	// keys and the migration (ptone/scion#6371). Agents of those profiles
+	// are refused at start. There is no request field for it.
+	StorageOverrideErrors []string `json:"storage_override_errors,omitempty"`
 }
 
 // ServerConfigUpdateRequest is the payload for updating settings.
@@ -288,11 +301,19 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 			"use DELETE /api/v1/admin/experiments", nil)
 		return
 	}
+	// The "chat_retention" section is written only through PUT
+	// /api/v1/admin/chat-retention, which is gated on hub.chat_retention,
+	// compare-and-sets the revision and writes the mutation audit record.
+	// This route does none of that, so it must not be a second write path.
+	if sectionName == opsettings.ChatRetentionSectionName {
+		writeError(w, http.StatusBadRequest, "validation_failed",
+			"use PUT /api/v1/admin/chat-retention with explicit nulls to reset its fields", nil)
+		return
+	}
 	// While the test admin tier is on, federation settings are refused on
 	// every write path, resets included (G8).
 	if sectionName == "federation" && s.testAdminTierOn() {
-		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-			errTestAdminFederationRefused.Error(), map[string]interface{}{"keys": []string{"federation"}})
+		writeFederationRefused(w, errTestAdminFederationRefused.Error())
 		return
 	}
 
@@ -300,6 +321,13 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 	if sec == nil {
 		writeError(w, http.StatusNotFound, ErrCodeNotFound,
 			"Unknown section: "+sectionName, nil)
+		return
+	}
+
+	// Resetting access returns it to the bootstrap values; like a save, it
+	// may not leave access settings that refuse sign-in for the account
+	// making it (ptone/scion#6000).
+	if sectionName == "access" && s.rejectAccessResetLockout(r.Context(), w, ops) {
 		return
 	}
 
@@ -345,7 +373,16 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 		}
 	}
 
-	err := ops.DeleteSection(r.Context(), sectionName)
+	var err error
+	if sectionName == "runtimes" || sectionName == "profiles" {
+		// The pair the reset leaves is validated and the delete guarded
+		// (resetPlacementSection); it writes its own error responses.
+		if !s.resetPlacementSection(r.Context(), w, ops, sectionName) {
+			return
+		}
+	} else {
+		err = ops.DeleteSection(r.Context(), sectionName)
+	}
 	if publicURLBefore != "" && err != nil {
 		s.auditPublicURLNotApplied(r.Context(), gcpIAMSurfaceReset, publicURLBefore, "", err)
 	}
@@ -377,7 +414,7 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 
 // handleGetServerConfig reads and returns the global settings.yaml.
 func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
-	resp, err := buildServerConfigFileResponse()
+	resp, err := buildServerConfigFileResponse(s.config.StartupServerSettings)
 	if err != nil {
 		var ue *serverConfigReadError
 		if errors.As(err, &ue) {
@@ -387,13 +424,16 @@ func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read settings", nil)
 		return
 	}
+	resp.StorageOverrideErrors = s.removedStorageOverrideErrors()
 	writeJSON(w, http.StatusOK, resp)
 }
 
 // buildServerConfigFileResponse builds the file-mode GET
 // /api/v1/admin/server-config body (sensitive fields masked). The file-mode
-// PUT also uses it as the reference view for echo detection.
-func buildServerConfigFileResponse() (*ServerConfigResponse, error) {
+// PUT also uses it as the reference view for echo detection. startup is
+// ServerConfig.StartupServerSettings (nil when unset), which env_values
+// compares environment values with for the keys start-up overrides.
+func buildServerConfigFileResponse(startup *config.V1ServerConfig) (*ServerConfigResponse, error) {
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		return nil, &serverConfigReadError{"Failed to resolve settings directory", err}
@@ -415,6 +455,7 @@ func buildServerConfigFileResponse() (*ServerConfigResponse, error) {
 				sort.Strings(envOverrides)
 				resp.EnvOverrides = envOverrides
 			}
+			resp.EnvValues = fileTierEnvValues(envK, resp.EnvOverrides, startup, nil)
 			return &resp, nil
 		}
 		return nil, &serverConfigReadError{"Failed to read settings file", err}
@@ -425,72 +466,26 @@ func buildServerConfigFileResponse() (*ServerConfigResponse, error) {
 		return nil, &serverConfigReadError{"Failed to parse settings file", err}
 	}
 
+	// The stored values, for env_values' saved_differs (taken before the
+	// view below hides or masks anything; never returned).
+	stored := fileStoredValues(&vs)
+
 	// Mask sensitive fields before sending to the client
-	resp := ServerConfigResponse{
-		ScionVersion:         version.Short(),
-		ScionCommit:          version.GetCommit(),
-		ScionBuildTime:       version.GetBuildTime(),
-		SettingsTier:         "file",
-		SchemaVersion:        vs.SchemaVersion,
-		ActiveProfile:        vs.ActiveProfile,
-		DefaultTemplate:      vs.DefaultTemplate,
-		DefaultHarnessConfig: vs.DefaultHarnessConfig,
-		ImageRegistry:        vs.ImageRegistry,
-		WorkspacePath:        vs.WorkspacePath,
-		Server:               vs.Server,
-		Telemetry:            vs.Telemetry,
-		Runtimes:             vs.Runtimes,
-		HarnessConfigs:       vs.HarnessConfigs,
-		Profiles:             vs.Profiles,
-		DefaultMaxTurns:      vs.DefaultMaxTurns,
-		DefaultMaxModelCalls: vs.DefaultMaxModelCalls,
-		DefaultMaxDuration:   vs.DefaultMaxDuration,
-		DefaultResources:     vs.DefaultResources,
-		DefaultModel:         vs.DefaultModel,
-		DefaultThinkingLevel: vs.DefaultThinkingLevel,
-		DefaultMaxAgentRole:  vs.DefaultMaxAgentRole,
-		DefaultAgentRole:     vs.DefaultAgentRole,
-		DefaultRuntimeBroker: vs.DefaultRuntimeBroker,
-		DefaultTimezone:      vs.DefaultTimezone,
-		AutoInjectGcloudADC:  vs.AutoInjectGcloudADC,
-		AutoExposePorts:      vs.AutoExposePorts,
-		Quotas:               vs.Quotas,
-		AgentSecrets:         vs.AgentSecrets,
-
-		DefaultGCPIdentityMode:             vs.DefaultGCPIdentityMode,
-		DefaultGCPIdentityServiceAccountID: vs.DefaultGCPIdentityServiceAccountID,
-	}
-
-	// Populate top-level federation field from the server config.
-	if vs.Server != nil && vs.Server.Federation != nil {
-		resp.Federation = vs.Server.Federation
-	}
-	// server.hub.class and server.hub.test_identities are never
-	// API-writable, so they are not shown either: a client that echoes
-	// this body back must not send them.
-	if resp.Server != nil && resp.Server.Hub != nil {
-		resp.Server.Hub.HubClass = ""
-		resp.Server.Hub.TestIdentities = nil
-		// Nor is the relay-peer secret, which is never returned.
-		if c := resp.Server.Hub.Conduit; c != nil {
-			c.PeerSecret = ""
-		}
-	}
-	// Likewise the proxy driver settings (WS2).
-	hideNeverAPIWritableProxyKeys(resp.Server)
-	// And the server keyring file path (ptone/scion#1530).
-	if resp.Server != nil {
-		resp.Server.KeyringFile = ""
-		resp.Server.KeyringFileAllowWorldReadable = false
-	}
+	resp := serverConfigResponseFromSettings(&vs)
+	resp.ScionVersion = version.Short()
+	resp.ScionCommit = version.GetCommit()
+	resp.ScionBuildTime = version.GetBuildTime()
+	resp.SettingsTier = "file"
+	hideNeverShownServerKeys(resp.Server)
 
 	// Env overrides — detect SCION_SERVER_* env vars so the admin UI can
-	// show env-pinned fields in file mode too (H1).
+	// show env-pinned fields in file mode too (H1), with their values.
 	envK := config.LoadEnvKoanf()
 	if envOverrides := withoutNeverAPIWritableKeys(opsettings.DetectEnvOverrides(envK)); len(envOverrides) > 0 {
 		sort.Strings(envOverrides)
 		resp.EnvOverrides = envOverrides
 	}
+	resp.EnvValues = fileTierEnvValues(envK, resp.EnvOverrides, startup, stored)
 
 	maskSensitiveFields(&resp)
 	return &resp, nil
@@ -561,14 +556,14 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// validated before anything is written.
 	instancesPresent, instances, err := brokerInstancesInBody(rawBody)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+		writeServerConfigFileError(w, err)
 		return
 	}
 	// Any other key the typed decode drops (unknown, misspelt, or a flat
 	// dotted "server.hub.x" key) is rejected with 422 before anything is
 	// written, unless it echoes the GET view (ptone/scion#3463). A key
 	// inside server.broker.instances was already decoded strictly above.
-	if rejectUnknownFileConfigKeys(w, rawBody) {
+	if rejectUnknownFileConfigKeys(w, rawBody, s.config.StartupServerSettings) {
 		return
 	}
 	if rejectInvalidThinkingLevel(w, req.DefaultThinkingLevel) {
@@ -587,7 +582,7 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	if req.Server != nil && req.Server.Hub != nil && req.Server.Hub.AgentEndpoint != "" {
 		normalized, err := config.ValidateAgentEndpoint(req.Server.Hub.AgentEndpoint)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+			writeSettingsFieldError(w, "server.hub.agent_endpoint", err.Error())
 			return
 		}
 		req.Server.Hub.AgentEndpoint = normalized
@@ -607,8 +602,8 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		doc, err := json.Marshal(opsettings.AccessSettings{DefaultUserRole: req.Server.Auth.DefaultUserRole})
 		if err == nil {
 			if errs := opsettings.Validate("access", doc); len(errs) > 0 {
-				writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
-					fmt.Sprintf("invalid server.auth.default_user_role %q: must be \"member\" or \"viewer\"", req.Server.Auth.DefaultUserRole), nil)
+				writeSettingsFieldError(w, "server.auth.default_user_role",
+					fmt.Sprintf("invalid server.auth.default_user_role %q: must be \"member\" or \"viewer\"", req.Server.Auth.DefaultUserRole))
 				return
 			}
 		}
@@ -618,72 +613,42 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// quantity; reject a bad value here, naming its key, rather than writing
 	// it to settings.yaml where it would fail every agent start.
 	if errs := config.ValidateSharedDirSizes(req.Runtimes, req.Profiles); len(errs) > 0 {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, errs[0].Error(), nil)
+		writeSettingsValidationErrors(w, errs)
 		return
 	}
 
-	// home_storage_backend and home_storage_leaf on runtime and profile
-	// entries, and server.home_storage, must hold known values.
-	if errs := config.ValidateHomeStorageOverrides(req.Runtimes, req.Profiles); len(errs) > 0 {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, errs[0].Error(), nil)
+	// The per-runtime and per-profile storage overrides are removed
+	// (server.project_storage decides storage; volumes: replaces node-local
+	// overrides), and the storage blocks in the request must resolve to
+	// one server.project_storage.
+	if errs := config.RemovedStorageOverrideErrors(req.Runtimes, req.Profiles, nil); len(errs) > 0 {
+		writeSettingsValidationErrors(w, errs)
+		return
+	}
+
+	// Resource quantities (ptone/scion#6581): a value that is not a
+	// Kubernetes quantity, memory or disk below 1Mi ("16" is 16 bytes) or a
+	// request above its limit is rejected, naming its key; a unitless byte
+	// count or low memory is accepted with a warning.
+	qErrs, qWarnings := config.ValidateResourceQuantities(req.DefaultResources, req.Profiles)
+	if len(qErrs) > 0 {
+		writeSettingsValidationErrors(w, qErrs)
 		return
 	}
 	if req.Server != nil {
-		if err := req.Server.HomeStorage.Validate(); err != nil {
-			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+		if _, _, err := config.SynthesizeProjectStorage(req.Server.ProjectStorage, req.Server.WorkspaceStorage, req.Server.SharedDirStorage, req.Server.HomeStorage); err != nil {
+			writeSettingsValidation(w, err.Error(), projectStorageEntries(err), nil)
 			return
 		}
 	}
 
-	// shared_dir_storage_backend on runtime and profile entries must be
-	// "local" or "nfs", and "nfs" needs a complete
-	// server.shared_dir_storage.nfs block (from this request, else the
-	// current global settings). When the request changes
-	// server.shared_dir_storage, it is also checked against the runtimes
-	// and profiles already stored, so removing or emptying the nfs block
-	// cannot strand an existing nfs override. Configuration only; no mount
-	// is checked.
-	sdInRequest := req.Server != nil && req.Server.SharedDirStorage != nil
-	// Values and per-dir names do not depend on the current settings, so
-	// they are checked even when those cannot be read below.
-	if errs := config.ValidateSharedDirStorageBackendValues(req.Runtimes, req.Profiles); len(errs) > 0 {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, errs[0].Error(), nil)
+	// A save that sends authorized_domains or admin_emails may not leave
+	// access settings that refuse sign-in for the saving account
+	// (ptone/scion#6000). In file mode (one node) a domain list
+	// SCION_SERVER_* sets stays in effect after the reload, so sending it
+	// alone is not checked.
+	if s.rejectFileAccessLockout(w, r, rawBody, &req) {
 		return
-	}
-	if req.Runtimes != nil || req.Profiles != nil || sdInRequest {
-		runtimes, profiles := req.Runtimes, req.Profiles
-		var sdGlobal *config.V1SharedDirStorageConfig
-		if sdInRequest {
-			sdGlobal = req.Server.SharedDirStorage
-		}
-		sdKnown := true
-		if !sdInRequest || runtimes == nil || profiles == nil {
-			gs, _, gErr := config.LoadGlobalSettings()
-			switch {
-			case gErr != nil:
-				// The current settings cannot be read, so the merged
-				// result is unknown; validation at agent start still
-				// applies.
-				sdKnown = false
-			case gs != nil:
-				if sdInRequest {
-					if runtimes == nil {
-						runtimes = gs.Runtimes
-					}
-					if profiles == nil {
-						profiles = gs.Profiles
-					}
-				} else if gs.Server != nil {
-					sdGlobal = gs.Server.SharedDirStorage
-				}
-			}
-		}
-		if sdKnown {
-			if errs := config.ValidateSharedDirStorageBackends(runtimes, profiles, sdGlobal); len(errs) > 0 {
-				writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, errs[0].Error(), nil)
-				return
-			}
-		}
 	}
 
 	globalDir, err := config.GetGlobalDir()
@@ -712,11 +677,18 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 
 	// Load existing settings to merge with updates
 	var raw map[string]interface{}
+	// The stored runtimes and profiles, typed, for the placement and
+	// identity save checks below (RuntimeSaveChecks).
+	var stored struct {
+		Runtimes map[string]config.V1RuntimeConfig `yaml:"runtimes"`
+		Profiles map[string]config.V1ProfileConfig `yaml:"profiles"`
+	}
 	if data, err := os.ReadFile(settingsPath); err == nil {
 		if err := yamlv3.Unmarshal(data, &raw); err != nil {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to parse existing settings", nil)
 			return
 		}
+		_ = yamlv3.Unmarshal(data, &stored)
 	}
 	if raw == nil {
 		raw = make(map[string]interface{})
@@ -757,7 +729,7 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// server.broker.instances is kept unless the body set it explicitly.
 	storedInstances := storedBrokerInstances(raw)
 	rawServer := rawServerObject(rawBody)
-	applySettingsUpdatesFromBody(raw, &req, rawBody)
+	runtimeMergeWarnings := applySettingsUpdatesFromBody(raw, &req, rawBody)
 	carryOverBrokerInstances(raw, storedInstances, instancesPresent, instances)
 	// default_thinking_level is cleared by an explicit null, which the typed
 	// decode leaves as a nil pointer (indistinguishable from an omitted key).
@@ -771,7 +743,11 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// only in part is validated again as merged with the stored fields.
 	if req.Server != nil {
 		if err := validateMergedServerSections(raw, rawServer); err != nil {
-			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+			if errors.Is(err, errServerSectionUnreadable) {
+				writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+				return
+			}
+			writeSettingsValidation(w, err.Error(), projectStorageEntries(err), nil)
 			return
 		}
 	}
@@ -785,7 +761,7 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 			tls = req.Telemetry.Cloud.TLS
 		}
 		if err := config.ValidateV1TelemetryTLS(tls); err != nil {
-			writeError(w, http.StatusBadRequest, ErrCodeValidationError, err.Error(), nil)
+			writeSettingsFieldError(w, "telemetry.cloud.tls", err.Error())
 			return
 		}
 	}
@@ -811,8 +787,8 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	if req.DefaultTimezone != nil {
 		tz := *req.DefaultTimezone
 		if err := validateDefaultTimezone(tz); err != nil {
-			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-				fmt.Sprintf("invalid default_timezone %q: %v", tz, err), nil)
+			writeSettingsFieldError(w, "default_timezone",
+				fmt.Sprintf("invalid default_timezone %q: %v", tz, err))
 			return
 		}
 	}
@@ -839,8 +815,21 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		if yamlv3.Unmarshal(newData, &merged) == nil {
 			saveWarnings = safeToEvictSaveWarnings(merged.Runtimes, merged.Profiles)
+			// Kubernetes placement and identity fields (ptone/scion#6580):
+			// a problem this save causes is refused, nothing is written; one
+			// already stored that the save does not touch is a warning.
+			pErrs, pWarnings := config.RuntimeSaveChecks(stored.Runtimes, merged.Runtimes, stored.Profiles, merged.Profiles)
+			if len(pErrs) > 0 {
+				writeSettingsValidationErrors(w, pErrs)
+				return
+			}
+			saveWarnings = append(saveWarnings, resourceQuantityWarnings(pWarnings)...)
+			saveWarnings = append(saveWarnings, config.PlacementIgnoredWarnings(merged.Runtimes, merged.Profiles)...)
+			saveWarnings = append(saveWarnings, config.PlacementSettingsWarnings(merged.Runtimes, merged.Profiles)...)
 		}
 	}
+	saveWarnings = append(saveWarnings, resourceQuantityWarnings(qWarnings)...)
+	saveWarnings = append(saveWarnings, runtimeMergeWarnings...)
 
 	if err := config.WriteSettingsFileLocked(settingsLock, settingsPath, newData); err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to write settings file", nil)
@@ -866,13 +855,11 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 // safeToEvictSaveWarnings returns, and logs, a warning for each runtime or
-// profile that sets safe_to_evict, or home_storage_backend "nfs", on a
-// non-Kubernetes runtime. The value is saved and ignored at agent start;
-// this is the same rule as config validate. Used by both the file-mode and
-// DB-mode PUT handlers.
+// profile that sets safe_to_evict on a non-Kubernetes runtime. The value is
+// saved and ignored at agent start; this is the same rule as config
+// validate. Used by both the file-mode and DB-mode PUT handlers.
 func safeToEvictSaveWarnings(runtimes map[string]config.V1RuntimeConfig, profiles map[string]config.V1ProfileConfig) []string {
 	warnings := config.SafeToEvictIgnoredWarnings(runtimes, profiles)
-	warnings = append(warnings, config.HomeStorageIgnoredWarnings(runtimes, profiles)...)
 	for _, msg := range warnings {
 		slog.Warn("Server config saved with an ignored setting", "warning", msg)
 	}
@@ -963,8 +950,9 @@ func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateReq
 // body, whose "server", "telemetry" and "federation" objects tell
 // mergeServerSettings and mergeSettingsSection which fields the client
 // sent. A nil rawBody derives that from req.Server, req.Telemetry and
-// req.Federation.
-func applySettingsUpdatesFromBody(raw map[string]interface{}, req *ServerConfigUpdateRequest, rawBody []byte) {
+// req.Federation. It returns the warnings of the runtimes merge
+// (mergeRuntimeEntries).
+func applySettingsUpdatesFromBody(raw map[string]interface{}, req *ServerConfigUpdateRequest, rawBody []byte) []string {
 	if req.SchemaVersion != nil {
 		raw["schema_version"] = *req.SchemaVersion
 	}
@@ -985,8 +973,12 @@ func applySettingsUpdatesFromBody(raw map[string]interface{}, req *ServerConfigU
 	if req.Telemetry != nil {
 		mergeSettingsSection(raw, "telemetry", req.Telemetry, rawRequestObject(rawBody, "Telemetry"))
 	}
+	// runtimes: each sent entry is merged key by key on the stored one, so
+	// a stored key the body leaves out is kept (ptone/scion#6580;
+	// mergeRuntimeEntries). An entry the body leaves out is deleted.
+	var runtimeMergeWarnings []string
 	if req.Runtimes != nil {
-		raw["runtimes"] = marshalToMap(req.Runtimes)
+		raw["runtimes"], runtimeMergeWarnings = mergeRuntimesFile(raw["runtimes"], req.Runtimes, sentRuntimesObject(rawBody))
 	}
 	if req.HarnessConfigs != nil {
 		raw["harness_configs"] = marshalToMap(req.HarnessConfigs)
@@ -1108,6 +1100,7 @@ func applySettingsUpdatesFromBody(raw map[string]interface{}, req *ServerConfigU
 			delete(raw, "server")
 		}
 	}
+	return runtimeMergeWarnings
 }
 
 // marshalToMap converts a struct to a map[string]interface{} via YAML round-trip.
@@ -1150,9 +1143,8 @@ func rejectInvalidDefaultThinkingLevel(w http.ResponseWriter, field string, leve
 	if level == nil || validDefaultThinkingLevel(*level) {
 		return false
 	}
-	writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-		fmt.Sprintf("invalid %s %d: must be between 1 and 100; send null to clear it", field, *level),
-		map[string]interface{}{"field": field})
+	writeSettingsFieldError(w, field,
+		fmt.Sprintf("invalid %s %d: must be between 1 and 100; send null to clear it", field, *level))
 	return true
 }
 
@@ -1171,11 +1163,10 @@ func rejectNullFederation(w http.ResponseWriter, rawBody []byte) bool {
 	if v, sent := top.sentFold("federation"); !sent || !isJSONNull(v) {
 		return false
 	}
-	writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+	writeFederationRefused(w,
 		"federation cannot be null: to restore the bootstrap federation settings use "+
 			"DELETE /api/v1/admin/server-config/sections/federation (database-backed hubs); "+
-			"to clear individual fields send them explicitly (false, [] or \"\")",
-		map[string]interface{}{"keys": []string{"federation"}})
+			"to clear individual fields send them explicitly (false, [] or \"\")")
 	return true
 }
 

@@ -135,7 +135,9 @@ func (s *HubSettingStore) ListHubSettings(ctx context.Context) ([]store.HubSetti
 // expectedRevision semantics:
 //
 //	0:  create-only — returns ErrRevisionConflict if the section already exists.
-//	-1: unconditional upsert (for seeding) — always succeeds.
+//	-1: unconditional upsert (for seeding) — succeeds unless every one of
+//	    a bounded number of attempts loses a concurrent create of the
+//	    same section (see below).
 //	>0: CAS update — returns ErrRevisionConflict if current revision != expectedRevision.
 //
 // The upsert is atomic: a transaction with SELECT FOR UPDATE (Postgres) or
@@ -143,8 +145,12 @@ func (s *HubSettingStore) ListHubSettings(ctx context.Context) ([]store.HubSetti
 // CAS writers cannot both succeed.
 //
 // For -1, a lost create race is retried in a fresh transaction (at most
-// upsertCreateRaceAttempts attempts), so the "always succeeds" contract
-// holds on Postgres too. Concurrent writers there all find no row (FOR
+// upsertCreateRaceAttempts attempts), so the write succeeds on Postgres
+// too unless every attempt loses; then it returns a wrapped
+// ErrRevisionConflict naming the section and the attempt count. Only a
+// unique violation on the section key counts as a lost create race
+// (isHubSettingSectionConflict); any other constraint error is returned
+// as it is, never retried. Concurrent writers there all find no row (FOR
 // UPDATE locks nothing), all INSERT, and the losers fail on the unique
 // section index once the winner commits. Postgres aborts the loser's whole
 // transaction, so nothing of it (no revision bump) survives. The retry runs
@@ -162,15 +168,31 @@ func (s *HubSettingStore) UpsertHubSetting(
 	expectedRevision int64,
 	origin string,
 ) (*store.HubSetting, error) {
+	return retryHubSettingCreateRace(section, expectedRevision, func() (*store.HubSetting, error) {
+		return s.upsertHubSettingOnce(ctx, section, value, updatedBy, expectedRevision, origin)
+	})
+}
+
+// retryHubSettingCreateRace runs once, retrying a lost create race
+// (errHubSettingCreateRace) for expectedRevision -1 until
+// upsertCreateRaceAttempts attempts have run. A lost race is reported as
+// store.ErrRevisionConflict: bare for create-only (0) and CAS (>0), and
+// for -1 wrapped with the section and the attempt count, so an exhausted
+// bound can be told apart from a CAS conflict in logs while errors.Is
+// still matches.
+func retryHubSettingCreateRace(section string, expectedRevision int64, once func() (*store.HubSetting, error)) (*store.HubSetting, error) {
 	for attempt := 1; ; attempt++ {
-		row, err := s.upsertHubSettingOnce(ctx, section, value, updatedBy, expectedRevision, origin)
-		if errors.Is(err, errHubSettingCreateRace) {
-			if expectedRevision == -1 && attempt < upsertCreateRaceAttempts {
-				continue
-			}
+		row, err := once()
+		if !errors.Is(err, errHubSettingCreateRace) {
+			return row, err
+		}
+		if expectedRevision != -1 {
 			return nil, store.ErrRevisionConflict
 		}
-		return row, err
+		if attempt >= upsertCreateRaceAttempts {
+			return nil, fmt.Errorf("%w: hub setting %q: lost a concurrent create in all %d attempts",
+				store.ErrRevisionConflict, section, attempt)
+		}
 	}
 }
 
@@ -179,7 +201,8 @@ func (s *HubSettingStore) UpsertHubSetting(
 const upsertCreateRaceAttempts = 3
 
 // errHubSettingCreateRace reports that the create path lost a concurrent
-// insert of the same section (a unique-constraint error).
+// insert of the same section (a unique violation on the section key,
+// isHubSettingSectionConflict).
 // UpsertHubSetting retries it for -1 and maps it to ErrRevisionConflict
 // otherwise.
 var errHubSettingCreateRace = errors.New("hub setting create lost a concurrent insert")
@@ -231,7 +254,7 @@ func (s *HubSettingStore) upsertHubSettingOnce(
 		}
 		row, err := create.Save(ctx)
 		if err != nil {
-			if ent.IsConstraintError(err) {
+			if isHubSettingSectionConflict(err) {
 				// Concurrent insert race — the other writer won.
 				return nil, errHubSettingCreateRace
 			}
@@ -244,7 +267,7 @@ func (s *HubSettingStore) upsertHubSettingOnce(
 			}
 		}
 		if err := tx.Commit(); err != nil {
-			if ent.IsConstraintError(err) {
+			if isHubSettingSectionConflict(err) {
 				return nil, errHubSettingCreateRace
 			}
 			return nil, fmt.Errorf("upsert hub setting: commit create: %w", err)
@@ -344,17 +367,23 @@ func (s *HubSettingStore) DeleteHubSettingRevision(ctx context.Context, section 
 // BackfillOrigin sets the origin column for existing rows that predate
 // the origin field. Rows with updated_by="seed" keep origin="seeded" (the
 // column default). Rows with updated_by!="seed" (admin writes) get
-// origin="managed". The _meta row is exempt. The
-// store.HubSettingsRevisionSection row is never matched: bumpSettingsRevision
-// leaves its updated_by NULL, as opsettings.EffectiveOrigin also reads it.
-// Idempotent — rows that
-// already have the correct origin are unaffected because the column
-// default is "seeded" and this only updates the non-seed rows.
+// origin="managed". The _meta row and the reserved
+// store.HubSettingsRevisionSection row are exempt by name, as in
+// opsettings.EffectiveOrigin. Idempotent — rows that already have the
+// correct origin are unaffected because the column default is "seeded"
+// and this only updates the non-seed rows.
 //
 // The origin of an operational section is part of the settings a reader
 // sees (a seeded endpoints row's public_url is not a saved value), so when
-// an operational row changes, the operational-settings revision is bumped
-// in the same transaction.
+// the update changes an operational row, the operational-settings revision
+// is bumped in the same transaction. The rows are updated in two
+// statements partitioned by section name (the sections registered in
+// opsettings.SectionNames), never by the rows a query found
+// first, so a row committed between the statements is still counted on
+// the right side; the bump is decided by the rows the operational update
+// changed. A replica that backfills concurrently finds its rows already
+// changed once the first replica commits (Postgres re-checks the predicate
+// after the row lock), updates none and does not bump.
 func (s *HubSettingStore) BackfillOrigin(ctx context.Context) error {
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
@@ -365,27 +394,35 @@ func (s *HubSettingStore) BackfillOrigin(ctx context.Context) error {
 	match := []predicate.HubSetting{
 		hubsetting.UpdatedByNEQ("seed"),
 		hubsetting.SectionNEQ("_meta"),
+		hubsetting.SectionNEQ(store.HubSettingsRevisionSection),
 		hubsetting.OriginEQ(hubsetting.OriginSeeded),
 	}
-	sections, err := tx.HubSetting.Query().Where(match...).Select(hubsetting.FieldSection).Strings(ctx)
+	// Early exit when nothing matches; the updates below do not depend on
+	// this read.
+	found, err := tx.HubSetting.Query().Where(match...).Exist(ctx)
 	if err != nil {
 		return fmt.Errorf("backfill origin: query: %w", err)
 	}
-	if len(sections) == 0 {
+	if !found {
 		return nil
 	}
+	operational := opsettings.SectionNames()
 	if _, err := tx.HubSetting.Update().
-		Where(match...).
+		Where(append(match, hubsetting.SectionNotIn(operational...))...).
 		SetOrigin(hubsetting.OriginManaged).
 		Save(ctx); err != nil {
 		return fmt.Errorf("backfill origin: %w", err)
 	}
-	for _, section := range sections {
-		if isOperationalSection(section) {
-			if _, err := bumpSettingsRevision(ctx, tx); err != nil {
-				return fmt.Errorf("backfill origin: %w", err)
-			}
-			break
+	n, err := tx.HubSetting.Update().
+		Where(append(match, hubsetting.SectionIn(operational...))...).
+		SetOrigin(hubsetting.OriginManaged).
+		Save(ctx)
+	if err != nil {
+		return fmt.Errorf("backfill origin: %w", err)
+	}
+	if n > 0 {
+		if _, err := bumpSettingsRevision(ctx, tx); err != nil {
+			return fmt.Errorf("backfill origin: %w", err)
 		}
 	}
 	if err := tx.Commit(); err != nil {

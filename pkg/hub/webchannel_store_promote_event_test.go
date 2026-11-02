@@ -20,24 +20,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestTitleCase verifies the titleCase helper function.
-func TestTitleCase(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected string
-	}{
-		{"code-reviewer", "Code Reviewer"},
-		{"my_agent", "My Agent"},
-		{"simple", "Simple"},
-		{"multi-word-agent", "Multi Word Agent"},
-		{"already Title", "Already Title"},
-	}
-	for _, tc := range tests {
-		got := titleCase(tc.input)
-		require.Equal(t, tc.expected, got, "titleCase(%q)", tc.input)
-	}
-}
-
 // TestDMPromotedEvent verifies the DMPromotedEvent struct serialization.
 func TestDMPromotedEvent(t *testing.T) {
 	evt := DMPromotedEvent{

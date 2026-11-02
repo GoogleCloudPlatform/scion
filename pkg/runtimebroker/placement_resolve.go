@@ -95,7 +95,7 @@ func (r runtimeResolution) forExistingAgent(agentName string) runtimeResolution 
 // projectPath; a load failure leaves them out.
 func (s *Server) placementForStart(ctx context.Context, res runtimeResolution, projectPath string) (*api.ResolvedPlacement, error) {
 	var projectVS *config.VersionedSettings
-	if res.Runtime != nil && res.Runtime.Name() == "kubernetes" && res.How != resolutionFlat {
+	if res.Runtime != nil && res.Runtime.Name() == "kubernetes" && res.How != resolutionFlat && !s.isFlat() {
 		// Without a resolved project directory the loader would fall back to
 		// the working directory's project; skip the warning input instead.
 		if projectDir, err := config.GetResolvedProjectDir(projectPath); err == nil {
@@ -113,11 +113,15 @@ func (s *Server) placementForStart(ctx context.Context, res runtimeResolution, p
 // nothing configured for this runtime), and a placementRefusal when the
 // placement cannot be determined.
 func (s *Server) resolvePlacement(ctx context.Context, res runtimeResolution, projectVS *config.VersionedSettings) (*api.ResolvedPlacement, error) {
-	switch res.How {
-	case resolutionFlat, resolutionErrorRuntime:
-		// Flat instance placement comes from its runtime target (a later
-		// change). A runtime that failed to build starts nothing.
+	if res.How == resolutionErrorRuntime {
+		// A runtime that failed to build starts nothing.
 		return nil, nil
+	}
+	if s.isFlat() || res.How == resolutionFlat {
+		// Every start on a flat instance, including an existing agent's
+		// start or restart on the runtime its container was found on,
+		// takes the instance's own placement.
+		return s.resolveFlatPlacement(res.Runtime, res.Agent)
 	}
 	if res.Runtime == nil || res.Runtime.Name() != "kubernetes" {
 		s.warnPlacementOffKubernetes(ctx, res)
@@ -243,22 +247,7 @@ func (s *Server) resolvePlacement(ctx context.Context, res runtimeResolution, pr
 		}
 	}
 
-	rp := &api.ResolvedPlacement{Sources: map[string][]string{}}
-	for _, name := range matched {
-		rt := gvs.Runtimes[name]
-		if len(rt.NodeSelector) > 0 {
-			rp.NodeSelector = config.MergeNodeSelector(rt.NodeSelector, nil)
-			rp.Sources["node_selector"] = append(rp.Sources["node_selector"], "runtimes."+name)
-		}
-		if len(rt.Tolerations) > 0 {
-			rp.Tolerations = config.MergeTolerations(rt.Tolerations, nil)
-			rp.Sources["tolerations"] = append(rp.Sources["tolerations"], "runtimes."+name)
-		}
-		if rt.RuntimeClassName != "" {
-			rp.RuntimeClassName = rt.RuntimeClassName
-			rp.Sources["runtime_class_name"] = append(rp.Sources["runtime_class_name"], "runtimes."+name)
-		}
-	}
+	rp := config.LegacyPlacementPolicy(gvs.Runtimes, matched, "", nil)
 
 	// Step 4: the profile rung.
 	pp := profilesOn(inE)
@@ -266,7 +255,7 @@ func (s *Server) resolvePlacement(ctx context.Context, res runtimeResolution, pr
 	profileGlobal = profileGlobal && res.Profile != ""
 	switch {
 	case res.How == resolutionProfile && profileGlobal && inE[profile.Runtime]:
-		applyProfilePlacement(rp, res.Profile, profile)
+		config.ApplyProfilePlacement(rp, res.Profile, profile)
 	case res.How == resolutionProfile && profileGlobal && defaultsOnlyMatched[profile.Runtime]:
 		// The selected global profile's runtime entry exists only in the
 		// built-in defaults and matches this runtime. Like the case above, it
@@ -307,6 +296,107 @@ func (s *Server) resolvePlacement(ctx context.Context, res runtimeResolution, pr
 	s.agentLifecycleLog.Debug("Kubernetes placement resolved", "agent", res.Agent,
 		"nodeSelector", rp.NodeSelector, "tolerations", rp.Tolerations, "runtimeClassName", rp.RuntimeClassName, "sources", rp.Sources)
 	return rp, nil
+}
+
+// Fixed causes of a flat instance's placement refusals.
+const (
+	placementFlatUnresolvedCause = "runtime placement is unresolved; reload the broker configuration"
+	placementFlatInvalidCause    = "the instance's runtime_target placement is not valid; fix it in the instance's settings and restart the agent runtime"
+	placementFlatRuntimeCause    = "the agent's runtime is not this instance's runtime target; restart the agent runtime, or re-create the agent on this instance"
+	// placementFlatRestartNoProjectCause refuses a restart on a flat
+	// instance whose project path is empty after every recovery (the
+	// request's path or slug, the matched container's recorded path).
+	placementFlatRestartNoProjectCause = "cannot check the agent's stored config before restart: no project path; restart the agent from its project"
+)
+
+// resolveFlatPlacement resolves the placement of a start on this flat
+// instance: the node selector, tolerations and runtime class of the
+// instance's runtime_target, from the policy activated when the instance
+// started (never the legacy runtime entries or profiles). The result is
+// operator-owned (api.ResolvedPlacement.OperatorOwned), even when the
+// target sets none of the fields, so the agent's own fields are always
+// checked against it. Nil for a target other than Kubernetes, which cannot
+// set placement. rt is the runtime the start resolved (nil before one is
+// resolved, as for a create's early check); for a Kubernetes target, a
+// runtime other than the instance's own refuses the start rather than
+// placing the pod by this target or starting it without placement. The target is validated again here; an invalid one refuses the
+// start.
+func (s *Server) resolveFlatPlacement(rt scionrt.Runtime, agentName string) (*api.ResolvedPlacement, error) {
+	p := s.flatInstancePolicy()
+	if p == nil {
+		s.agentLifecycleLog.Warn("Kubernetes placement: the flat instance has no activated policy", "agent", agentName)
+		return nil, placementRefusal(placementFlatUnresolvedCause)
+	}
+	t := p.Target
+	if t.Type != config.RuntimeTargetTypeKubernetes {
+		return nil, nil
+	}
+	if rt != nil {
+		if _, own, _ := s.defaultPair(); rt != own {
+			s.agentLifecycleLog.Warn("Kubernetes placement: the start resolved a runtime other than the instance's own", "agent", agentName, "runtime", rt.Name())
+			return nil, placementRefusal(placementFlatRuntimeCause)
+		}
+	}
+	source := "server.broker.instances[" + p.InstanceKey + "].runtime_target"
+	if errs := config.ValidatePlacementFields(source, t.NodeSelector, t.Tolerations, t.RuntimeClassName); len(errs) > 0 {
+		paths := make([]string, len(errs))
+		for i, e := range errs {
+			paths[i] = e.Path
+		}
+		s.agentLifecycleLog.Warn("Kubernetes placement: the flat instance's runtime_target placement is not valid", "agent", agentName, "fields", paths)
+		return nil, placementRefusal(placementFlatInvalidCause)
+	}
+	rp := &api.ResolvedPlacement{
+		NodeSelector:     config.MergeNodeSelector(t.NodeSelector, nil),
+		Tolerations:      config.MergeTolerations(t.Tolerations, nil),
+		RuntimeClassName: t.RuntimeClassName,
+		Sources:          map[string][]string{},
+		OperatorOwned:    true,
+	}
+	if len(rp.NodeSelector) > 0 {
+		rp.Sources["node_selector"] = []string{source}
+	}
+	if len(rp.Tolerations) > 0 {
+		rp.Sources["tolerations"] = []string{source}
+	}
+	if rp.RuntimeClassName != "" {
+		rp.Sources["runtime_class_name"] = []string{source}
+	}
+	if rp.InEffect() {
+		s.agentLifecycleLog.Debug("Kubernetes placement resolved", "agent", agentName,
+			"nodeSelector", rp.NodeSelector, "tolerations", rp.Tolerations, "runtimeClassName", rp.RuntimeClassName, "sources", rp.Sources)
+	}
+	return rp, nil
+}
+
+// checkFlatCreatePlacement checks, for a create on a flat instance, the
+// request's own kubernetes blocks (its inline config, which provisioning
+// writes into the agent's config, and its create config) against the
+// instance's operator-owned placement (config.CheckAgentPlacement), before
+// the create has any side effect. Nil on a legacy Runtime Broker, whose
+// create relies on Manager.Start's check.
+func (s *Server) checkFlatCreatePlacement(req CreateAgentRequest) error {
+	if !s.isFlat() {
+		return nil
+	}
+	rp, err := s.resolveFlatPlacement(nil, req.Name)
+	if err != nil || rp == nil {
+		return err
+	}
+	var blocks []*api.KubernetesConfig
+	if req.InlineConfig != nil {
+		blocks = append(blocks, req.InlineConfig.Kubernetes)
+	}
+	if req.Config != nil {
+		blocks = append(blocks, req.Config.Kubernetes)
+	}
+	for _, block := range blocks {
+		if err := config.CheckAgentPlacement(block, rp, config.AgentPlacementLayerRequest); err != nil {
+			s.agentLifecycleLog.Warn("Kubernetes placement: the request's kubernetes block conflicts with the instance's placement", "agent", req.Name, "error", err)
+			return placementRefusal(err.Error())
+		}
+	}
+	return nil
 }
 
 // profileRungCause is the fixed cause for a profile rung that could apply
@@ -354,22 +444,6 @@ func unionSet(a, b map[string]bool) map[string]bool {
 		out[k] = v
 	}
 	return out
-}
-
-// applyProfilePlacement applies profile p's placement over rp.
-func applyProfilePlacement(rp *api.ResolvedPlacement, name string, p config.V1ProfileConfig) {
-	if len(p.NodeSelector) > 0 {
-		rp.NodeSelector = config.MergeNodeSelector(rp.NodeSelector, p.NodeSelector)
-		rp.Sources["node_selector"] = append(rp.Sources["node_selector"], "profiles."+name)
-	}
-	if len(p.Tolerations) > 0 {
-		rp.Tolerations = config.MergeTolerations(rp.Tolerations, p.Tolerations)
-		rp.Sources["tolerations"] = append(rp.Sources["tolerations"], "profiles."+name)
-	}
-	if p.RuntimeClassName != "" {
-		rp.RuntimeClassName = p.RuntimeClassName
-		rp.Sources["runtime_class_name"] = append(rp.Sources["runtime_class_name"], "profiles."+name)
-	}
 }
 
 // kubernetesPlacementIdentity reads what the placement matcher needs from a
@@ -469,6 +543,9 @@ func samePlacement(aSel map[string]string, aTol []api.K8sToleration, aRC string,
 // nothing, so the inline block alone is checked; Manager.Start checks the
 // block it loads as a backstop.
 func (s *Server) checkStartLegacyPlacement(agentName, projectPath string, inlineConfig *api.ScionConfig, sharedWorkspace bool, rp *api.ResolvedPlacement) error {
+	if rp != nil && rp.OperatorOwned {
+		return s.checkStartOperatorPlacement(agentName, projectPath, inlineConfig, sharedWorkspace, rp)
+	}
 	if !rp.InEffect() {
 		return nil
 	}
@@ -499,6 +576,17 @@ func (s *Server) checkStartLegacyPlacement(agentName, projectPath string, inline
 // the agent's persisted kubernetes block against the placement in effect. A
 // config that cannot be read fails closed.
 func (s *Server) checkRestartLegacyPlacement(agentName, projectPath string, sharedWorkspace bool, rp *api.ResolvedPlacement) error {
+	if rp != nil && rp.OperatorOwned {
+		if projectPath == "" {
+			// Without a project path the stored config cannot be read
+			// before the stop, and operator-owned placement must be
+			// checked before it (the request names no project, and no
+			// container of the project recorded one).
+			s.agentLifecycleLog.Warn("Kubernetes placement: refusing a restart whose stored config cannot be checked before the stop", "agent", agentName)
+			return placementRefusal(placementFlatRestartNoProjectCause)
+		}
+		return s.checkRestartOperatorPlacement(agentName, projectPath, sharedWorkspace, rp)
+	}
 	if !rp.InEffect() || projectPath == "" {
 		// Without a project path there is no persisted config to check;
 		// Manager.Start checks the block it loads.
@@ -510,6 +598,65 @@ func (s *Server) checkRestartLegacyPlacement(agentName, projectPath string, shar
 		return placementRefusal(placementAgentConfigCause)
 	}
 	if err := config.CheckLegacyPlacement(loaded.cfg.Kubernetes, rp); err != nil {
+		s.agentLifecycleLog.Warn("Kubernetes placement: the agent's own kubernetes block conflicts with it", "agent", agentName, "error", err)
+		return placementRefusal(err.Error())
+	}
+	return nil
+}
+
+// checkStartOperatorPlacement is checkStartLegacyPlacement for
+// operator-owned placement (config.CheckAgentPlacement), run even when no
+// placement is in effect. The request's own block is checked first, so a
+// conflict it brings is reported as the request's; then the block the
+// inline update would leave (the stored config merged with the request, as
+// applyInlineConfigUpdate merges them), whose remaining conflicts come
+// from the stored config. A stored config that exists but cannot be read
+// or parsed fails closed, as on restart. One that does not exist yet (an
+// agent this Runtime Broker has not provisioned) leaves the request's block
+// checked: the inline update writes nothing then, and Manager.Start checks
+// the config it provisions.
+func (s *Server) checkStartOperatorPlacement(agentName, projectPath string, inlineConfig *api.ScionConfig, sharedWorkspace bool, rp *api.ResolvedPlacement) error {
+	refuse := func(err error) error {
+		s.agentLifecycleLog.Warn("Kubernetes placement: the agent's own kubernetes block conflicts with it", "agent", agentName, "error", err)
+		return placementRefusal(err.Error())
+	}
+	if inlineConfig != nil {
+		if err := config.CheckAgentPlacement(inlineConfig.Kubernetes, rp, config.AgentPlacementLayerRequest); err != nil {
+			return refuse(err)
+		}
+	}
+	if projectPath == "" {
+		return nil
+	}
+	loaded, err := readAgentScionConfig(agentName, projectPath, sharedWorkspace)
+	if err != nil {
+		if loaded.stage == "read" && errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		s.agentLifecycleLog.Warn("Kubernetes placement: the agent's config could not be read", "agent", agentName, "stage", loaded.stage, "error", err)
+		return placementRefusal(placementAgentConfigCause)
+	}
+	block := loaded.cfg.Kubernetes
+	if inlineConfig != nil {
+		block = config.MergeScionConfig(loaded.cfg, inlineConfig).Kubernetes
+	}
+	if err := config.CheckAgentPlacement(block, rp, config.AgentPlacementLayerStored); err != nil {
+		return refuse(err)
+	}
+	return nil
+}
+
+// checkRestartOperatorPlacement is checkRestartLegacyPlacement for
+// operator-owned placement, run even when no placement is in effect: the
+// agent's stored kubernetes block is checked before the restart's stop. A
+// config that cannot be read fails closed.
+func (s *Server) checkRestartOperatorPlacement(agentName, projectPath string, sharedWorkspace bool, rp *api.ResolvedPlacement) error {
+	loaded, err := readAgentScionConfig(agentName, projectPath, sharedWorkspace)
+	if err != nil {
+		s.agentLifecycleLog.Warn("Kubernetes placement: the agent's config could not be read", "agent", agentName, "stage", loaded.stage, "error", err)
+		return placementRefusal(placementAgentConfigCause)
+	}
+	if err := config.CheckAgentPlacement(loaded.cfg.Kubernetes, rp, config.AgentPlacementLayerStored); err != nil {
 		s.agentLifecycleLog.Warn("Kubernetes placement: the agent's own kubernetes block conflicts with it", "agent", agentName, "error", err)
 		return placementRefusal(err.Error())
 	}

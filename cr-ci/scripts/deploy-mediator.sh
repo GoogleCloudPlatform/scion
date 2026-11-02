@@ -65,20 +65,22 @@ IMAGE=$(crci_image_ref "${CFG[MEDIATOR_IMAGE_NAME]}" "$TAG")
 MEDIATOR=$(crci_sa_email "${CFG[MEDIATOR_SA_NAME]}")
 SCHEDULER=$(crci_sa_email "${CFG[SCHEDULER_SA_NAME]}")
 
-# Upgrade order: the runner image and job first. The mediator's JIT work folder
-# (/home/runner/work) relies on the runner image linking it to /scratch; an
-# older image would put the work folder on the in-memory root filesystem.
-crci_note "check: the runner job runs the current runner image (deploy it before the mediator)"
+# Upgrade order: the mediator first, then the runner job (deploy-job.sh). A newer
+# mediator only adds launch env that an older runner image ignores (GH_REPOS), while
+# a newer runner image can require it and fails closed under an older mediator (exit
+# 2, "GH_REPOS is not set"; redeploy #2, 2026-10-27). So this only reports whether
+# the job still runs another image than the current runner/ tree: deploy it next.
+crci_note "check: which runner image the job runs (upgrade order: the mediator first, then deploy-job.sh)"
 if crci_exists gcloud run jobs describe "${CFG[RUNNER_JOB_NAME]}" --region="$R" --project="$P" --format='value(metadata.name)'; then
   crci_read JOB_IMAGE "" gcloud run jobs describe "${CFG[RUNNER_JOB_NAME]}" --region="$R" --project="$P" \
     --format='value(spec.template.spec.template.spec.containers[0].image)'
   WANT_TAG=$(crci_try_default_tag runner)
   if [[ -n $WANT_TAG && -n $JOB_IMAGE && ${JOB_IMAGE##*:} != "$WANT_TAG" ]]; then
-    printf '%s: WARNING: job %s runs %s, not the current runner tag %s; run build-runner-image.sh and deploy-job.sh first (an older runner image puts the work folder in memory).\n' \
+    printf '%s: NOTE: job %s runs %s, not the current runner tag %s; after this deploy, run build-runner-image.sh and deploy-job.sh (the mediator goes first).\n' \
       "$CRCI_PROG" "${CFG[RUNNER_JOB_NAME]}" "$JOB_IMAGE" "$WANT_TAG" >&2
   fi
 elif [[ $CRCI_MODE == apply ]]; then
-  printf '%s: WARNING: runner job %s not found; run deploy-job.sh first.\n' "$CRCI_PROG" "${CFG[RUNNER_JOB_NAME]}" >&2
+  printf '%s: WARNING: runner job %s not found; run deploy-job.sh before any job is routed.\n' "$CRCI_PROG" "${CFG[RUNNER_JOB_NAME]}" >&2
 fi
 
 crci_note "mediator image ${CFG[MEDIATOR_IMAGE_NAME]}:$TAG"

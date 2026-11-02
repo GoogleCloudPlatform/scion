@@ -45,6 +45,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/pathcanon"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/urlredact"
 )
 
@@ -435,49 +436,26 @@ func HomeDir() (string, error) {
 	return home, nil
 }
 
-// ensurePrivateDir creates dir, which must be base or below it, with mode
-// 0700. base is ~/.scion/hub-profiles: it and every component from it down
-// to dir is inspected with Lstat, created when missing, and refused when it
-// is a symlink or not a directory, so an existing directory below a
-// symlinked component is never followed. Components above base (such as
-// ~/.scion) are created with MkdirAll when missing and not inspected.
-func ensurePrivateDir(base, dir string) error {
-	rel, err := filepath.Rel(base, dir)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return fmt.Errorf("refusing %s: not below %s", dir, base)
+// privateRel returns dir relative to base, which must be base itself or
+// below it: the containment is decided by pathcanon.Within on canonical
+// forms, never by comparing strings. The result is "." for base itself.
+func privateRel(base, dir string) (string, error) {
+	// Rel is lexical: it only names the components to walk, and explains a
+	// refusal. It decides nothing.
+	rel, relErr := filepath.Rel(base, dir) //winsec:not-containment containment is decided by pathcanon.Within below
+	in, err := pathcanon.Within(base, dir)
+	if err != nil {
+		return "", fmt.Errorf("refusing %s: %w", dir, err)
 	}
-	if _, err := os.Lstat(base); errors.Is(err, os.ErrNotExist) {
-		if err := os.MkdirAll(filepath.Dir(base), 0o700); err != nil {
-			return err
+	if !in || relErr != nil || !filepath.IsLocal(rel) && rel != "." {
+		if relErr == nil && filepath.IsLocal(rel) {
+			// Lexically below base, canonically elsewhere: a component
+			// on the way is a link leading out.
+			return "", fmt.Errorf("refusing %s: a symlink or junction below %s leads outside it", dir, base)
 		}
+		return "", fmt.Errorf("refusing %s: not below %s", dir, base)
 	}
-	cur := base
-	parts := []string{}
-	if rel != "." {
-		parts = strings.Split(rel, string(filepath.Separator))
-	}
-	for i := -1; i < len(parts); i++ {
-		if i >= 0 {
-			cur = filepath.Join(cur, parts[i])
-		}
-		fi, err := os.Lstat(cur)
-		if errors.Is(err, os.ErrNotExist) {
-			if err := os.Mkdir(cur, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-				return err
-			}
-			fi, err = os.Lstat(cur)
-		}
-		if err != nil {
-			return err
-		}
-		if fi.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("refusing %s: it is a symlink", cur)
-		}
-		if !fi.IsDir() {
-			return fmt.Errorf("refusing %s: it is not a directory", cur)
-		}
-	}
-	return nil
+	return rel, nil
 }
 
 // profilePath returns the profile file path, validating the name.
@@ -500,9 +478,11 @@ func Save(home string, p *Profile, replace bool) error {
 	if err != nil {
 		return err
 	}
-	if err := ensurePrivateDir(Dir(home), Dir(home)); err != nil {
+	t, err := ensurePrivateDir(Dir(home), Dir(home))
+	if err != nil {
 		return err
 	}
+	_ = t.Close()
 	data, err := yaml.Marshal(p)
 	if err != nil {
 		return err
@@ -515,7 +495,7 @@ func Save(home string, p *Profile, replace bool) error {
 			return fmt.Errorf("profile %q already exists; remove it first or use --replace", p.Name)
 		}
 	}
-	return writeFileAtomic(path, data)
+	return writeFileAtomic(home, p.Name+profileFileExt, data)
 }
 
 // Load reads and validates the named profile.
@@ -524,7 +504,7 @@ func Load(home, name string) (*Profile, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, err := readPrivateFile(path)
+	data, err := readPrivateFile(home, name+profileFileExt, path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("hub profile %q not found (add it with 'scion hub profile add %s ...')", name, name)
 	}

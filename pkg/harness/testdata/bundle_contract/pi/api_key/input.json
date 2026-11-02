@@ -1,0 +1,13 @@
+{
+  "auth_candidates": {
+    "schema_version": 1,
+    "env_vars": [
+      "ANTHROPIC_API_KEY"
+    ],
+    "env_secret_files": {
+      "ANTHROPIC_API_KEY": "$HOME/.scion/harness/secrets/ANTHROPIC_API_KEY"
+    },
+    "files": []
+  },
+  "harness_config": {}
+}

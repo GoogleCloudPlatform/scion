@@ -153,7 +153,7 @@ func TestTypeChat_NotDispatchedToAgent(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestWave2_ReadState_SetAndGet(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
+	store, db := hubNewTestWebChatStoreV2(t)
 	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
@@ -197,7 +197,7 @@ func TestWave2_ReadState_SetAndGet(t *testing.T) {
 }
 
 func TestWave2_UserPrefs_DefaultsAndOverride(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
+	store, db := hubNewTestWebChatStoreV2(t)
 	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
@@ -240,7 +240,7 @@ func TestWave2_UserPrefs_DefaultsAndOverride(t *testing.T) {
 }
 
 func TestChatV2_DM_UpsertAndList(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
+	store, db := hubNewTestWebChatStoreV2(t)
 	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
@@ -292,7 +292,7 @@ func TestChatV2_DM_UpsertAndList(t *testing.T) {
 }
 
 func TestChatV2_TouchTopicActivity(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
+	store, db := hubNewTestWebChatStoreV2(t)
 	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
@@ -336,7 +336,7 @@ func TestChatV2_TouchTopicActivity(t *testing.T) {
 }
 
 func TestWave2_DeleteTopic_LastThreadGuard(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
+	store, db := hubNewTestWebChatStoreV2(t)
 	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
@@ -384,7 +384,7 @@ func TestWave2_DeleteTopic_LastThreadGuard(t *testing.T) {
 }
 
 func TestWave2_TopicNameUniqueness(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
+	store, db := hubNewTestWebChatStoreV2(t)
 	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
@@ -424,7 +424,7 @@ func TestWave2_TopicNameUniqueness(t *testing.T) {
 }
 
 func TestWave2_TouchDMActivity(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
+	store, db := hubNewTestWebChatStoreV2(t)
 	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
@@ -467,7 +467,7 @@ func TestWave2_TouchDMActivity(t *testing.T) {
 }
 
 func TestWave2_GetReadStates_Batch(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
+	store, db := hubNewTestWebChatStoreV2(t)
 	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
@@ -5088,7 +5088,7 @@ func TestChatV2_Send_SenderUsesEmailNotDisplayName(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestAutoAdvanceSenderReadState(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
+	store, db := hubNewTestWebChatStoreV2(t)
 	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()

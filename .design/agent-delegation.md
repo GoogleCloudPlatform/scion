@@ -347,7 +347,7 @@ the claim transaction.
 | --- | --- | --- | --- |
 | `agent.delegation.revoke` | `DELETE /api/v1/agents/{agentId}/delegations/{grantId}` | session; the bound agent's own agent JWT | the issuer; the bound agent (relinquish its own grant); the agent's current owner; hub admins (any grant); project admins of P, for project(P)-bounded grants only |
 | `agent.delegation.credential.revoke` | `DELETE /api/v1/agents/{agentId}/delegations/{grantId}/credentials/{credentialId}` | as above | as above |
-| `agent.delegation.revoke_all` | `POST /api/v1/users/me/delegations/revoke-all` (the caller's own grants); `POST /api/v1/agents/{agentId}/delegations/revoke-all` | session | the issuer, for their own grants; per agent, the same rule per grant. Grants the caller may not revoke are skipped and reported, not revoked |
+| `agent.delegation.revokeall` (permission `agent.delegation.revoke_all`; operation IDs take no underscore) | `POST /api/v1/users/me/delegations/revoke-all` (the caller's own grants); `POST /api/v1/agents/{agentId}/delegations/revoke-all` | session | the issuer, for their own grants; per agent, the same rule per grant. Grants the caller may not revoke are skipped and reported, not revoked |
 | `agent.delegation.list` | `GET /api/v1/agents/{agentId}/delegations`; `GET /api/v1/users/me/delegations` | session; the bound agent's own agent JWT (its own grants, metadata only) | as revoke, per grant. Grants outside the caller's authority are left out, not counted |
 | `agent.delegation.read` | `GET /api/v1/agents/{agentId}/delegations/{grantId}` | as list | as list, per grant. A grant outside the caller's authority returns 404 `grant_not_found` |
 
@@ -753,33 +753,51 @@ cross-request cache needs its own staleness bound and review.
 
 ### 11.8 Delegated lists (G.3-L)
 
-The list slice (`agent.list` and listing of skills and templates) lands last, in G.3-L, from D.2's
-merged list shape. Until then, no list operation is in the admission table and no list permission
-is in the policy, so delegated list requests are refused at the route gate. The rules G.3-L keeps:
+The list slice lands in two steps. The first admits `agent.list` on the hub agent list,
+`GET /api/v1/agents` (`listAgentsDelegated`, `agent_delegation_list.go`). The second admits the
+project agent list, the skill list and the template list. Until a list route is in the admission
+table, a delegated request on it is refused at the route gate.
 
-- **Scope.** A delegated caller's list scope comes only from G's list arm: the issuer's own list
-  scopes for the operation's primary permission, intersected with the grant boundary, returned as a
-  tagged scope (none, an explicit project set, or all projects for a hub boundary). The agent's own
-  principals contribute nothing. `ResolveListScopes` returns an error, never a scope, for a delegated
-  identity, so `applyCredentialCaveats` (`authz_list.go:154`), whose default arm leaves scopes
-  unreduced, is never reached for it.
-- **Item filter.** Each delegable list operation declares exactly one per-item filter permission
-  (`agent.list → agent.read` and the matching skill and template reads). Every item is decided
-  through the same delegated procedure, including per-item `ProjectTargetAdmission` on the item's
-  own project. The UAT list-row widening (`listRowReadCeiling`, `authz.go:267`) does not apply to a
-  delegated ceiling: a grant without the filter permission returns no items.
-- **Paging.** Totals count only returned items, and denied item IDs never appear in a response or a
-  cursor. Delegated cursors are sealed (`listCursorSealer`, `authorized_list.go:531`). On the
-  endpoints that do not yet seal for other callers (the hub agent list, the project agent list and
-  the skill list, `authorized_list.go:469-479`), the delegated branch opens the cursor once and
-  seals once, following `listGroups` (`handlers_groups.go:102-190`). An invalid cursor answers 400
-  `invalid_cursor`, which clients treat as "restart from the first page". Cursors are bound by a
-  delegated arm in `scopedCursorBinding` (`authorized_list.go:404`) that includes agent, grant,
-  credential and boundary.
-- **Audit.** One primary decision record and one aggregated item-filter record per list request.
-- G.3-L confirms these against D.2's merged shape before coding. The planned store additions (a
-  template project-ID filter, an all-projects skill scope, and `SkipTotalCount` in the skill store)
-  are not on `main` yet.
+- **Scope.** A delegated caller's list scope comes only from the delegated list arm
+  (`delegatedListScope`). It runs the route, chain and permission checks of §11.2 for the
+  operation's primary permission, then resolves the issuer's own list scope for it through
+  `resolveListScopesForPrincipal` (`authz_list.go`). That function is `ResolveListScopes` for a
+  principal held as an argument; the issuer is never placed in the identity slot. The result is
+  intersected with the grant boundary and returned as a tagged scope: none, an explicit project
+  set, or all projects (a hub boundary and an unrestricted issuer), less the projects an access
+  constraint excludes. The agent's own principals contribute nothing. `ResolveListScopes` returns
+  `errDelegatedListScope`, never a scope, for a delegated identity. Any refusal by the arm answers 200
+  with an empty list plus the arm's deny record ("any error denies"), never a 403 that names the failed
+  check. A store error during the arm's checks is recorded as a `lookup_error` deny; an internal error in
+  the list arm itself is also logged at warn level, with no item IDs.
+- **Item filter.** Each admitted list route names exactly one per-item permission in its admission
+  entry (`agentDelegationAdmission.ItemFilter`; `agent.list → agent.read`). Only the item filter
+  (`delegatedListItemRead`) accepts that permission; a request that asks `Decide` for it on the
+  list route is refused like any permission the route does not admit. Every item is decided by the
+  same procedure as a single request: the route, chain and permission checks once per request, then
+  per item the item's project must be inside the list scope and `EvaluateBearerCeiling` (which
+  includes `ProjectTargetAdmission` on the item's own project) must allow the item permission. An
+  item without a project parent is never listed. The UAT list-row widening does not apply: a grant
+  without the item permission lists nothing. A listed item carries only the item filter's action
+  as its capability, its environment is redacted, and the list has no scope capabilities.
+- **Paging.** Delegated lists page through `listAuthorizedOrAll` with `authorizeEach` always set
+  (`listDelegated`), so they never take the direct store path. That helper opens the request cursor
+  and seals the returned cursor once (`listCursorSealer`), so a delegated cursor is opaque even on
+  endpoints whose other callers still receive plaintext store cursors. Totals count only returned
+  items, and denied item IDs never appear in a response or a cursor. A page can be empty and still
+  carry a cursor, and the total can be approximate past the candidate cap. An invalid cursor
+  answers 400 `invalid_cursor`, which clients treat as "restart from the first page". Cursors are
+  bound by the delegated arm of `scopedCursorBinding` (agent, grant, credential and boundary), so a
+  cursor never carries over to another credential. The hub agent list serves the default order
+  only: `sort=` or `ids=` answers 400 `delegated_list_sort_unsupported`. `scope=mine`,
+  `scope=shared` and `mine=true` list nothing, because the caller is not a user.
+- **Audit.** One primary decision record (the list arm) and one aggregated item-filter record per
+  list request (§14.2). routeGuard installs the request's collector on admitted list routes and
+  flushes it when the request ends, including on a panic or a cancelled request.
+- **Second step.** The project agent list (binding key `project-agents:<projectID>`), the skill
+  list (`skills`) and the template list (`templates`) get delegated branches on the same helpers,
+  with the store additions they need: a template project-ID filter and an all-projects skill scope.
+  The skill store already honours `SkipTotalCount`.
 
 ### 11.9 What a delegated decision bounds, and what it does not
 
@@ -904,7 +922,8 @@ each, with a test:
   | `project.read` | project, hub | `GET` project (operation `project.read`) | G.3-a |
   | `agent.message` | project, hub | the HTTP agent message route, operation `agent.action.message`, by ID (`agents.action.message`) and in the project form (`projects.agents.action.message`). `agent.message.send` (broker call) is not admitted | G.3-a |
   | `agent.attach` | project, hub | the PTY WebSocket (`agents.pty`, operation `agent.attach`) only. `agent.lifecycle.exec`, `.env` and `.resetauth` share the permission but are **not** admitted | G.3-a |
-  | `agent.list`; skill and template read and list | project, hub | per D.2's merged list operations (at `abc63c5`, skill and template listing is served by the `skill.read` and `template.read` operations) | G.3-L |
+  | `agent.list` | project, hub | the hub agent list `GET /api/v1/agents` (`agents.list`, exact resolution `agents.list.collection`, operation `agent.list`), with item filter `agent.read` (§11.8). The project form of the operation is not admitted yet | G.3-L, step 1 |
+  | skill and template list; the project agent list | project, hub | per D.2's merged list operations | G.3-L, step 2 |
 
   A key enters `AgentDelegableRegistry` in the same change that admits its first route, so the
   guard tests always hold.
@@ -965,10 +984,12 @@ renders `verified=true`, because the binding was checked at exchange, not per re
 - A deny from G's own issuance (§6) or exchange (§8) checks writes one decision record with the same
   `denied_by` and the code in `Reason`, built with `BuildDecisionAuditRecord`. An ordinary pipeline deny of those
   operations, before G's checks run, keeps the pipeline's own `denied_by`.
-- The list-scope arm and the item filter (G.3-L) emit through `BuildDecisionAuditRecord` with the
-  same flag. The item filter writes one aggregated record per list request, as a distinct record
-  kind, built from a decision with `DeniedBy` unset and carrying allowed, denied and
-  dropped-by-admission counts and up to 50 denied item IDs.
+- The list-scope arm and the item filter (§11.8) emit through `BuildDecisionAuditRecord` with the
+  same flag. The arm writes one allow or deny record for the list permission. The item filter writes
+  one aggregated record per list request, with `RecordKind = agent_delegation_list_filter`, built from
+  an allow decision with `DeniedBy` unset. Its `ListFilter` block carries allowed, denied and
+  dropped-by-admission counts of distinct items, up to 50 denied item IDs with a `Truncated` flag,
+  and `Incomplete` when the request ended before its list finished.
 
 ### 14.3 Mutation records
 
@@ -997,6 +1018,11 @@ domain. Many delegated decisions, for example `agent.read` on an agent inside a 
 produce no decision record even when the sink is on. G does not add its own per-request database
 writes.
 
+The aggregated list-filter record (§14.2) is in-memory only and is not persisted or logged. The
+decision-log adapter excludes every record with a `RecordKind` under its own disposition,
+`excluded_record_kind`, so the in-process counts still show it. It is carried once the typed-schema
+follow-up below adds a form for it.
+
 G does not rely on decision records for attribution. The mutation records (§14.3), which are
 written unconditionally, are the attribution source. Adding G actor fields to the typed
 `auditevent` decision schema is a separate follow-up, coordinated with the audit workstream
@@ -1008,7 +1034,9 @@ does not change that schema.
 
 A message sent with a delegated credential is stored with `Sender = "agent:<A>"` (A's slug),
 `SenderID = A` and `SenderProjectID` = A's project, like every other agent-sender row (from G.3-a),
-plus two new nullable columns (G.3-b), `AuthorizingUserID` and `DelegationGrantID`. Recipients, the web UI
+plus two new nullable columns (G.3-b), `AuthorizingUserID` and `DelegationGrantID` (stored as
+`authorizing_user_id` and `delegation_grant_id`, returned as `authorizingUserId` and
+`delegationGrantId`, empty on every other message). Recipients, the web UI
 and the CLI render it as "from agent A, authorized by <issuer> via delegation <grantId>". A
 recipient never sees it as sent by the issuer.
 
@@ -1037,8 +1065,9 @@ sciontool delegation helper can use it.
 ### 16.1 Transactional revocation through B.3 hooks
 
 G registers one `AgentTxHook` in each of the four registries (§3.4). Each hook revokes the agent's
-active grants and their credentials, with `revoke_reason` and a mutation audit, on the
-transaction-scoped store. A hook error rolls back the lifecycle operation.
+unrevoked grants (expired ones included) and their unrevoked credentials, with `revoke_reason` and a
+mutation audit, on the transaction-scoped store. A hook error rolls back the lifecycle operation.
+The revoke route (§7) and every lifecycle revocation share one per-grant revocation body.
 
 | Registry | Revoke reason | Why it must be transactional |
 | --- | --- | --- |
@@ -1076,7 +1105,14 @@ These cascades are best-effort, because use-time checks are authoritative:
   does. Revoke-all is the way to end grants.
 - **Project delete** (`ProjectDeletionService`): it runs no agent lifecycle hooks. G adds an
   explicit step that revokes grants and credentials of the project's agents to the project deletion
-  cascade.
+  cascade. The step runs inside the cascade transaction, like every other cascade step, so a
+  revocation failure fails the project delete.
+- **Revoke reasons of these paths:** `agent_suspended` (agent suspend and auto-suspend),
+  `issuer_suspended` (`updateUser` setting the status to suspended), `issuer_deleted` (after
+  `deleteUser` or the test identity purge commits) and `project_deleted`. The best-effort paths run
+  in a transaction of their own after the change has committed; a failure is logged and never fails
+  the change. Each revoked grant gets one `agent_delegation_grant_revoke` mutation record, as in §7,
+  attributed to the principal whose action caused it (the hub when there is none).
 - **Purge of soft-deleted agents:** no hooks. Grants were already revoked at soft delete.
 - **Failed-create cleanup** (`compensateAgentCreate`, `agent_create_tx.go`): no hooks. If a grant
   was issued for an agent whose create is later rolled back, the agent row is removed, so exchange
@@ -1339,7 +1375,7 @@ New catalog specs in a G-owned `pkg/hub/authzop/catalog_agent_delegation.go`:
 | `agent.delegation.create` | `session_jwt` | `SessionOnly(ReasonCredentialManagement)` | issue credential | governance and atomic audit |
 | `agent.delegation.exchange` | `agent_jwt` | `NonUser()` with a `Pin` naming G's UAT and session refusal test | mint credential | the bearer matrix skips non-user operations, so G pins its own test |
 | `agent.delegation.revoke`, `.credential.revoke`, `.list`, `.read` | `session_jwt`, `agent_jwt` | `SessionOnly(ReasonCredentialManagement)` | revoke authority (revokes); read (list, read) | the handler takes the bound-agent branch first and then requires a session, so a UAT gets 403 with `details.reason = CREDENTIAL_MANAGEMENT` and `details.credential = session_required` |
-| `agent.delegation.revoke_all` | `session_jwt` | `SessionOnly(ReasonCredentialManagement)` | revoke authority | |
+| `agent.delegation.revokeall` (permission `agent.delegation.revoke_all`; operation IDs take no underscore) | `session_jwt` | `SessionOnly(ReasonCredentialManagement)` | revoke authority | |
 
 No G operation lists `scoped_uat`. Operations admitted for delegated use (§13) add
 `PrincipalAgentDelegated` and `CredentialDelegatedAgent` as they are admitted.

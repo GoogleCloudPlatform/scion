@@ -321,11 +321,12 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 					}
 				}
 				if errors.Is(err, store.ErrQuotaExceeded) {
+					message, details := quotaRefusal(store.LimitMaxAgentsPerBroker, err)
 					return nil, &AgentDMError{
 						Code:       ErrCodeQuotaExceeded,
-						Message:    quotaExceededMessage(store.LimitMaxAgentsPerBroker),
+						Message:    message,
 						HTTPStatus: http.StatusTooManyRequests,
-						Details:    quotaExceededDetails(err),
+						Details:    details,
 					}
 				}
 				return nil, &AgentDMError{
@@ -394,6 +395,11 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 					Message:    "Failed to wake agent: " + err.Error(),
 					HTTPStatus: http.StatusPreconditionFailed,
 				}
+			}
+			if status, code, msg, ok := brokerProjectStorageRefusal(err); ok {
+				// The broker does not see the project storage share: its
+				// status and code, and only a known path-free message.
+				return nil, &AgentDMError{Code: code, Message: msg, HTTPStatus: status}
 			}
 			return nil, &AgentDMError{
 				Code:       ErrCodeRuntimeError,

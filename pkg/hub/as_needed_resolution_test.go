@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"testing"
 
@@ -26,6 +27,17 @@ import (
 )
 
 // --- resolveAsNeededForKeys tests ---
+
+// mustResolveAsNeeded calls resolveAsNeededForKeys and fails the test on
+// an error (a decrypt failure is the only error it returns).
+func mustResolveAsNeeded(t *testing.T, d *HTTPAgentDispatcher, ctx context.Context, agent *store.Agent, keys []string, alternatives map[string][]string) map[string]string {
+	t.Helper()
+	got, err := d.resolveAsNeededForKeys(ctx, agent, keys, alternatives)
+	if err != nil {
+		t.Fatalf("resolveAsNeededForKeys: %v", err)
+	}
+	return got
+}
 
 func TestResolveAsNeededForKeys_EnvVars(t *testing.T) {
 	ctx := context.Background()
@@ -69,7 +81,7 @@ func TestResolveAsNeededForKeys_EnvVars(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	result := d.resolveAsNeededForKeys(ctx, agent, []string{"GEMINI_API_KEY", "OTHER_KEY"}, nil)
+	result := mustResolveAsNeeded(t, d, ctx, agent, []string{"GEMINI_API_KEY", "OTHER_KEY"}, nil)
 
 	if v, ok := result["GEMINI_API_KEY"]; !ok {
 		t.Error("expected GEMINI_API_KEY in result")
@@ -141,7 +153,7 @@ func TestResolveAsNeededForKeys_Secrets(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	result := d.resolveAsNeededForKeys(ctx, agent, []string{"GEMINI_API_KEY", "ALWAYS_SECRET", "/tmp/secret.json"}, nil)
+	result := mustResolveAsNeeded(t, d, ctx, agent, []string{"GEMINI_API_KEY", "ALWAYS_SECRET", "/tmp/secret.json"}, nil)
 
 	if v, ok := result["GEMINI_API_KEY"]; !ok {
 		t.Error("expected GEMINI_API_KEY in result (as_needed environment secret)")
@@ -191,7 +203,7 @@ func TestResolveAsNeededForKeys_SecretNameFallback(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	result := d.resolveAsNeededForKeys(ctx, agent, []string{"MY_API_KEY"}, nil)
+	result := mustResolveAsNeeded(t, d, ctx, agent, []string{"MY_API_KEY"}, nil)
 
 	if v, ok := result["MY_API_KEY"]; !ok {
 		t.Error("expected MY_API_KEY in result (secret with empty Target should fall back to Name)")
@@ -242,7 +254,7 @@ func TestResolveAsNeededForKeys_ScopePrecedence(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	result := d.resolveAsNeededForKeys(ctx, agent, []string{"API_KEY"}, nil)
+	result := mustResolveAsNeeded(t, d, ctx, agent, []string{"API_KEY"}, nil)
 
 	// User scope should win over hub scope (higher precedence, last-wins)
 	if v, ok := result["API_KEY"]; !ok {
@@ -269,7 +281,7 @@ func TestResolveAsNeededForKeys_NoBackend(t *testing.T) {
 	}
 
 	// Should not panic with nil secret backend
-	result := d.resolveAsNeededForKeys(ctx, agent, []string{"SOME_KEY"}, nil)
+	result := mustResolveAsNeeded(t, d, ctx, agent, []string{"SOME_KEY"}, nil)
 
 	if len(result) != 0 {
 		t.Errorf("expected empty result with no matching env vars and no secret backend, got %v", result)
@@ -292,7 +304,7 @@ func TestResolveAsNeededForKeys_EmptyKeys(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	result := d.resolveAsNeededForKeys(ctx, agent, []string{}, nil)
+	result := mustResolveAsNeeded(t, d, ctx, agent, []string{}, nil)
 
 	if len(result) != 0 {
 		t.Errorf("expected empty result for empty keys, got %v", result)
@@ -344,7 +356,7 @@ func TestResolveAsNeededForKeys_EnvVarPriorityOverSecret(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	result := d.resolveAsNeededForKeys(ctx, agent, []string{"SHARED_KEY"}, nil)
+	result := mustResolveAsNeeded(t, d, ctx, agent, []string{"SHARED_KEY"}, nil)
 
 	// Env var should be found first; secret should not overwrite (alreadySet check)
 	if v, ok := result["SHARED_KEY"]; !ok {
@@ -692,7 +704,7 @@ func TestResolveAsNeededForKeys_AlternativeKeyMatching(t *testing.T) {
 		"GOOGLE_CLOUD_REGION": {"CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION"},
 	}
 
-	result := d.resolveAsNeededForKeys(ctx, agent, []string{"GOOGLE_CLOUD_REGION"}, alternatives)
+	result := mustResolveAsNeeded(t, d, ctx, agent, []string{"GOOGLE_CLOUD_REGION"}, alternatives)
 
 	// The stored var GOOGLE_CLOUD_LOCATION should match via alternatives and be
 	// stored under the canonical key GOOGLE_CLOUD_REGION.
@@ -745,7 +757,7 @@ func TestResolveAsNeededForKeys_AlternativeKeyMatchingSecrets(t *testing.T) {
 		"GOOGLE_CLOUD_REGION": {"CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION"},
 	}
 
-	result := d.resolveAsNeededForKeys(ctx, agent, []string{"GOOGLE_CLOUD_REGION"}, alternatives)
+	result := mustResolveAsNeeded(t, d, ctx, agent, []string{"GOOGLE_CLOUD_REGION"}, alternatives)
 
 	// The secret targeting GOOGLE_CLOUD_LOCATION should match and be stored under
 	// the canonical key GOOGLE_CLOUD_REGION.
@@ -800,7 +812,7 @@ func TestResolveAsNeededForKeys_CanonicalKeyWinsOverAlternative(t *testing.T) {
 		"GOOGLE_CLOUD_REGION": {"CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION"},
 	}
 
-	result := d.resolveAsNeededForKeys(ctx, agent, []string{"GOOGLE_CLOUD_REGION"}, alternatives)
+	result := mustResolveAsNeeded(t, d, ctx, agent, []string{"GOOGLE_CLOUD_REGION"}, alternatives)
 
 	// The canonical key's value must be preserved — the alternative must not
 	// overwrite it regardless of ListEnvVars iteration order.
@@ -847,7 +859,7 @@ func TestResolveAsNeededForKeys_NilAlternatives(t *testing.T) {
 	}
 
 	// nil alternatives should behave exactly like the old code path
-	result := d.resolveAsNeededForKeys(ctx, agent, []string{"GOOGLE_CLOUD_REGION"}, nil)
+	result := mustResolveAsNeeded(t, d, ctx, agent, []string{"GOOGLE_CLOUD_REGION"}, nil)
 
 	if v, ok := result["GOOGLE_CLOUD_REGION"]; !ok {
 		t.Error("expected GOOGLE_CLOUD_REGION in result (exact match, nil alternatives)")
@@ -963,5 +975,37 @@ func TestResolveSecrets_FileTypePassesThroughAsNeeded(t *testing.T) {
 	// Environment-type secret with always should pass through.
 	if _, ok := byName["ALWAYS_ENV"]; !ok {
 		t.Error("expected ALWAYS_ENV (environment-type, always) to pass through resolveSecrets")
+	}
+}
+
+// TestResolveAsNeededForKeys_DecryptFailurePropagates: a stored secret that
+// cannot be decrypted fails the as-needed pass with ErrResolveDecrypt
+// (ptone/scion#1530 §5) instead of answering the broker's needs as if the
+// secret were missing.
+func TestResolveAsNeededForKeys_DecryptFailurePropagates(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+	hubID := "test-hub-resolve-decrypt"
+	foreign, err := secret.NewLegacyValueCipher("FAKE-foreign-secret").Encrypt("fake-value")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := memStore.CreateSecret(ctx, &store.Secret{ID: tid("asneeded-undecryptable"), Key: "MY_API_KEY",
+		EncryptedValue: foreign, SecretType: store.SecretTypeEnvironment, Target: "MY_API_KEY",
+		Scope: store.ScopeProject, ScopeID: "project-1", InjectionMode: store.InjectionModeAsNeeded}); err != nil {
+		t.Fatal(err)
+	}
+	d := NewHTTPAgentDispatcherWithClient(memStore, &mockRuntimeBrokerClient{}, false, slog.Default())
+	d.SetHubID(hubID)
+	d.SetSecretBackend(secret.NewLocalBackend(memStore, hubID, "FAKE-hub-secret"))
+	agent := &store.Agent{ID: "agent-resolve-decrypt", Name: "resolve-decrypt", OwnerID: "user-1",
+		ProjectID: "project-1", AppliedConfig: &store.AgentAppliedConfig{}}
+
+	got, err := d.resolveAsNeededForKeys(ctx, agent, []string{"MY_API_KEY"}, nil)
+	if !errors.Is(err, secret.ErrResolveDecrypt) {
+		t.Fatalf("err = %v, want ErrResolveDecrypt", err)
+	}
+	if got != nil {
+		t.Fatalf("a failed pass returned %d values", len(got))
 	}
 }

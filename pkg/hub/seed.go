@@ -97,14 +97,14 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleSuperAdmin,
 			Description: "Full platform administrator with all permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    9, // R9: project.chat_post (ptone/scion#5518); R8: drop Reserved project.register (ptone/scion#2124); R7: add user.list, which the user list checks (ptone/scion#2124); R6: artifact.steward (ptone/scion#5144); R5: drop Reserved agent.log_append (ptone/scion#4230); R4: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R3: drop Reserved permissions (ptone/scion#3652); R2: add broker.auto_provide (ptone/scion#2104)
+			Revision:    10, // R10: agent.delegation.revoke_all (ptone/scion#2132); R9: project.chat_post (ptone/scion#5518); R8: drop Reserved project.register (ptone/scion#2124); R7: add user.list, which the user list checks (ptone/scion#2124); R6: artifact.steward (ptone/scion#5144); R5: drop Reserved agent.log_append (ptone/scion#4230); R4: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R3: drop Reserved permissions (ptone/scion#3652); R2: add broker.auto_provide (ptone/scion#2104)
 			Permissions: allPermissionIDs(),
 		},
 		{
 			Name:        store.SystemRoleHubAdmin,
 			Description: "Hub administrator with scopeable admin permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    9, // R9: project.chat_post (ptone/scion#5518); R8: project.manage_visitors (ptone/scion#4603); R7: agent delegation grant management (agent.delegation.revoke, .credential.revoke, .list, .read); R6: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R5: hub.env_vars.read
+			Revision:    10, // R10: agent.delegation.revoke_all (ptone/scion#2132); R9: project.chat_post (ptone/scion#5518); R8: project.manage_visitors (ptone/scion#4603); R7: agent delegation grant management (agent.delegation.revoke, .credential.revoke, .list, .read); R6: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R5: hub.env_vars.read
 			Permissions: hubAdminPermissionIDs(),
 		},
 		{
@@ -956,12 +956,13 @@ func hubAdminPermissionIDs() []string {
 		"access_constraint.read":  true,
 		"access_constraint.admin": true,
 		// Agent delegation grant management, for any grant
-		// (.design/agent-delegation.md §7, §18.5). Not issuance, not
-		// exchange.
+		// (.design/agent-delegation.md §7, §18.5), including revoke-all.
+		// Not issuance, not exchange.
 		"agent.delegation.revoke":            true,
 		"agent.delegation.credential.revoke": true,
 		"agent.delegation.list":              true,
 		"agent.delegation.read":              true,
+		"agent.delegation.revoke_all":        true,
 	}
 
 	var ids []string
@@ -1786,6 +1787,15 @@ func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails
 			if reconcileSkipsUser(u) {
 				if inAdminList {
 					slog.Warn("skipping admin promotion of a test identity listed in admin_emails", "user_id", u.ID)
+				}
+				continue
+			}
+			// A user being deleted (ptone/scion#2143) has had its role
+			// bindings removed and keeps none until the row is gone: it is
+			// neither promoted nor demoted.
+			if u.Status == store.UserStatusDeleting {
+				if inAdminList {
+					slog.Warn("skipping admin promotion of a user being deleted listed in admin_emails", "user_id", u.ID)
 				}
 				continue
 			}

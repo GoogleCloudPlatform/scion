@@ -110,9 +110,10 @@ first sign-in from the hub's configured policy.
 Running the command again with the same details is safe: it reports that
 the user is already pre-registered.
 
-Requires the user.invite permission (hub admins hold it) and an interactive
-sign-in (scion hub auth login); it is not available on a hub running with
-dev auth.
+Requires the user.invite permission (hub admins hold it), with an interactive
+sign-in (scion hub auth login) or, where no interactive login is stored, a
+hub-boundary user access token carrying user:invite (SCION_HUB_TOKEN); it is
+not available on a hub running with dev auth.
 
 Examples:
   scion hub users provision alice@example.com

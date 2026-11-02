@@ -36,11 +36,11 @@ export function starredMessagesEnabled(): boolean {
 }
 
 /**
- * Whether a conversation supports stars. Phase 1 serves project threads
- * only; DM keys (`dm:…`) come later.
+ * Whether a conversation supports stars: project threads, agent DMs and
+ * DMs between users all do; only a missing key does not.
  */
 export function conversationSupportsStars(conversationKey: string): boolean {
-  return conversationKey !== '' && !conversationKey.startsWith('dm:');
+  return conversationKey !== '';
 }
 
 /** The largest number of message IDs one state request may carry. */
@@ -234,6 +234,8 @@ export class ChatStarsController extends EventTarget {
   private readonly mutatedAt = new Map<string, number>();
   /** State requests in flight; `mutatedAt` is only needed while > 0. */
   private inflight = 0;
+  /** Messages deleted while tracked: never starred again (bounded). */
+  private readonly deleted = new Set<string>();
 
   constructor(private readonly api: StarsApi = defaultApi) {
     super();
@@ -254,6 +256,7 @@ export class ChatStarsController extends EventTarget {
     this.stale.clear();
     this.failed.clear();
     this.mutatedAt.clear();
+    this.deleted.clear();
     this.refreshAgain = false;
     this.appliedInvalidations = this.invalidations;
     this.emit('change');
@@ -306,6 +309,48 @@ export class ChatStarsController extends EventTarget {
     }
     if (changed) this.emit('change');
     if (fetch && !this.refreshing) void this.refresh();
+  }
+
+  /**
+   * Record messages a starred-only history page returned as starred,
+   * without a state request: that page already confirms it. Pending
+   * mutations and deleted messages are left alone.
+   */
+  markStarred(messageIds: readonly string[]): void {
+    let changed = false;
+    for (const id of messageIds) {
+      if (!isStarrableMessageId(id) || this.pending.has(id) || this.deleted.has(id)) continue;
+      if (this.states.get(id) === true) continue;
+      this.stale.delete(id);
+      this.failed.delete(id);
+      this.track(id, true);
+      changed = true;
+    }
+    if (changed) this.emit('change');
+  }
+
+  /**
+   * A message was deleted: it is unstarred everywhere at once (the hub
+   * removed every star of it). Its known state becomes unstarred, a pending
+   * mutation is dropped, and lists are told to refetch. A later state
+   * answer cannot restore it: every read path leaves deleted messages out.
+   */
+  evict(messageId: string): void {
+    if (!isStarrableMessageId(messageId)) return;
+    const known = this.states.get(messageId);
+    const wasPending = this.pending.delete(messageId);
+    this.stale.delete(messageId);
+    this.failed.delete(messageId);
+    this.deleted.delete(messageId);
+    this.deleted.add(messageId);
+    for (const oldest of this.deleted) {
+      if (this.deleted.size <= MAX_TRACKED) break;
+      this.deleted.delete(oldest);
+    }
+    this.markMutated(messageId);
+    this.track(messageId, false);
+    if (known !== false || wasPending) this.emit('change');
+    if (known === true) this.emit('collection-changed');
   }
 
   /** Refetch the IDs whose state request failed (a menu open), if any. */
@@ -434,7 +479,9 @@ export class ChatStarsController extends EventTarget {
 
   private track(messageId: string, starred: boolean): void {
     this.states.delete(messageId);
-    this.states.set(messageId, starred);
+    // A deleted message has no star, whatever a request that raced the
+    // deletion answered.
+    this.states.set(messageId, starred && !this.deleted.has(messageId));
     if (this.states.size <= MAX_TRACKED) return;
     // Maps iterate in insertion order: drop the least recently tracked.
     for (const oldest of this.states.keys()) {
@@ -445,5 +492,96 @@ export class ChatStarsController extends EventTarget {
 
   private emit(type: 'change' | 'collection-changed'): void {
     this.dispatchEvent(new Event(type));
+  }
+}
+
+/** A visible star collection surface reconciles at most this often. */
+export const STAR_SURFACE_RECONCILE_MS = 60_000;
+
+/**
+ * Two return signals closer than this (a tab switch fires both
+ * `visibilitychange` and the window's `focus`) refetch once.
+ */
+const RETURN_DEDUPE_MS = 2_000;
+
+/**
+ * Keeps a visible star collection surface (the header list while open,
+ * the starred-only center) in step when invalidations were missed:
+ *
+ * - while started and the document is visible, `run` is called once
+ *   `intervalMs` has passed since the last refetch, whatever caused it
+ *   (a null interval: no polling, only the return below);
+ * - returning to the page (visibility or window focus) calls `run` at once;
+ * - nothing runs while the document is hidden.
+ *
+ * The surface calls `noteRefetched()` whenever it refetched for another
+ * reason (an SSE invalidation, a reconnect, opening), which restarts the
+ * interval, so polls never add to that traffic.
+ */
+export class VisibleReconciler {
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  private last = 0;
+  private active = false;
+
+  constructor(
+    private readonly run: () => void,
+    private readonly intervalMs: number | null = STAR_SURFACE_RECONCILE_MS,
+    private readonly now: () => number = () => Date.now()
+  ) {}
+
+  get started(): boolean {
+    return this.active;
+  }
+
+  start(): void {
+    if (this.active) return;
+    this.active = true;
+    this.last = this.now();
+    document.addEventListener('visibilitychange', this.handleReturn);
+    window.addEventListener('focus', this.handleReturn);
+    this.schedule();
+  }
+
+  stop(): void {
+    if (!this.active) return;
+    this.active = false;
+    document.removeEventListener('visibilitychange', this.handleReturn);
+    window.removeEventListener('focus', this.handleReturn);
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+  }
+
+  /** The surface refetched for another reason: restart the interval. */
+  noteRefetched(): void {
+    if (!this.active) return;
+    this.last = this.now();
+    this.schedule();
+  }
+
+  private schedule(): void {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    if (this.intervalMs === null) return;
+    const wait = Math.max(0, this.last + this.intervalMs - this.now());
+    this.timer = setTimeout(this.tick, wait);
+  }
+
+  private tick = (): void => {
+    this.timer = null;
+    if (!this.active) return;
+    // Hidden: no poll, and no timer either; the return to the page refetches.
+    if (document.visibilityState === 'visible') this.fire();
+  };
+
+  private handleReturn = (): void => {
+    if (!this.active || document.visibilityState !== 'visible') return;
+    if (this.now() - this.last < RETURN_DEDUPE_MS) return;
+    this.fire();
+  };
+
+  private fire(): void {
+    this.last = this.now();
+    this.schedule();
+    this.run();
   }
 }

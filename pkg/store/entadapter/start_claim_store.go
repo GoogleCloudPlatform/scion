@@ -165,6 +165,26 @@ func holdsLiveClaim(row *ent.Agent, claimID, owner string, now time.Time) bool {
 
 func launchActive(row *ent.Agent) bool { return row.LaunchState == store.LaunchStateActive }
 
+// clearsEndedLaunchError reports whether a start claim on row clears the
+// row's launch error and cause: the row's last launch was a start or
+// restart launch, it has ended, and it left an error or cause. Kept:
+//   - a create launch's error: it marks an incomplete create
+//     (store.Agent.IsIncompleteCreate), which refuses the start;
+//   - an unconfirmed launch outcome (store.IsUnconfirmedLaunchError): the
+//     agent's runtime state is unknown after it, and later starts must keep
+//     treating it as unknown, so only a later launch or a running write
+//     replaces it;
+//   - an active launch: its own end writes its outcome.
+func clearsEndedLaunchError(row *ent.Agent) bool {
+	if launchActive(row) || (row.LaunchError == "" && row.LaunchCause == "") {
+		return false
+	}
+	if store.IsUnconfirmedLaunchError(row.LaunchError) {
+		return false
+	}
+	return row.LaunchKind == store.LaunchKindStart || row.LaunchKind == store.LaunchKindRestart
+}
+
 // ClaimAgentStart implements store.AgentStore.ClaimAgentStart.
 func (s *AgentStore) ClaimAgentStart(ctx context.Context, agentID, owner string, kind store.StartClaimKind, target string, ttl time.Duration) (store.StartClaim, error) {
 	if !kind.Valid() || kind == store.StartClaimStop {
@@ -196,7 +216,14 @@ func (s *AgentStore) ClaimAgentStart(ctx context.Context, agentID, owner string,
 			LeaseUntil:  now.Add(ttl),
 			RunIntentAt: intentAt,
 		}
-		if _, err := claimUpdate(c, row).
+		upd := claimUpdate(c, row)
+		if clearsEndedLaunchError(row) {
+			// A start that begins now replaces the outcome of the last
+			// start-kind launch: its launch error and cause would otherwise
+			// sit next to this start's own result (ptone/scion#5273).
+			upd.SetLaunchError("").SetLaunchCause("")
+		}
+		if _, err := upd.
 			SetStartClaimID(claim.ID).
 			SetStartClaimKind(string(kind)).
 			SetStartClaimState(string(store.StartClaimLive)).

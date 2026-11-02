@@ -124,6 +124,7 @@ import '@shoelace-style/shoelace/dist/components/spinner/spinner.js';
 import '@shoelace-style/shoelace/dist/components/progress-bar/progress-bar.js';
 import '@shoelace-style/shoelace/dist/components/textarea/textarea.js';
 import '@shoelace-style/shoelace/dist/components/tooltip/tooltip.js';
+import '@shoelace-style/shoelace/dist/components/popup/popup.js';
 import '@shoelace-style/shoelace/dist/components/dialog/dialog.js';
 import '@shoelace-style/shoelace/dist/components/divider/divider.js';
 import '@shoelace-style/shoelace/dist/components/dropdown/dropdown.js';
@@ -1432,13 +1433,13 @@ async function renderRoute(path: string): Promise<void> {
 
   // If the shell type changed, tear down and rebuild
   if (activeShell && activeShell.type !== shellType) {
-    appContainer.innerHTML = '';
+    appContainer.replaceChildren();
     activeShell = null;
   }
 
   if (shellType === 'standalone') {
     // Standalone pages render without a persistent shell
-    appContainer.innerHTML = '';
+    appContainer.replaceChildren();
     activeShell = null;
     const page = document.createElement(tag);
     appContainer.appendChild(page);
@@ -1489,7 +1490,7 @@ async function renderRoute(path: string): Promise<void> {
     shell.appendChild(page);
   } else {
     // Create the shell for the first time — clear any SSR-rendered content
-    appContainer.innerHTML = '';
+    appContainer.replaceChildren();
     const SHELL_TAGS: Record<ShellType, string> = {
       standalone: '', // handled above — standalone pages render without a shell
       chat: 'scion-chat-shell',

@@ -41,18 +41,19 @@ import (
 // cache hit reaches no further than the DB.
 type fakeGitHub struct {
 	*httptest.Server
-	calls       atomic.Int64 // total calls (commits + contents)
+	calls       atomic.Int64 // total calls (commits + trees)
 	commitCalls atomic.Int64 // commits/{ref} calls only
 }
 
-// newFakeGitHub serves the commits and contents endpoints for owner/repo,
-// returning commitSHA and a single-file listing under skillPath.
+// newFakeGitHub serves the commits and git trees endpoints for owner/repo,
+// returning commitSHA and a single-file listing for any skill path at that
+// commit. skillPath names the skill the caller resolves; it is not checked.
 func newFakeGitHub(t *testing.T, owner, repo, skillPath, commitSHA string) *fakeGitHub {
 	t.Helper()
 
 	f := &fakeGitHub{}
 	commitsPrefix := "/repos/" + owner + "/" + repo + "/commits/"
-	contentsPrefix := "/repos/" + owner + "/" + repo + "/contents/"
+	treesPrefix := "/repos/" + owner + "/" + repo + "/git/trees/"
 
 	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.calls.Add(1)
@@ -61,18 +62,20 @@ func newFakeGitHub(t *testing.T, owner, repo, skillPath, commitSHA string) *fake
 			f.commitCalls.Add(1)
 			// Accept: application/vnd.github.v3.sha — a bare SHA, not JSON.
 			_, _ = w.Write([]byte(commitSHA))
-		case strings.HasPrefix(r.URL.Path, contentsPrefix):
-			assert.Equal(t, commitSHA, r.URL.Query().Get("ref"),
-				"contents must be fetched at the resolved commit, not the symbolic ref")
+		case strings.HasPrefix(r.URL.Path, treesPrefix):
+			// Callers may resolve several skill paths against one fake (some
+			// pass a placeholder skillPath), so only the commit is checked.
+			assert.True(t, strings.HasPrefix(strings.TrimPrefix(r.URL.Path, treesPrefix), commitSHA+":"),
+				"the tree must be listed at the resolved commit, not the symbolic ref: %s", r.URL.Path)
+			assert.Equal(t, "1", r.URL.Query().Get("recursive"))
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`[{
-				"name": "SKILL.md",
-				"path": "` + skillPath + `/SKILL.md",
+			_, _ = w.Write([]byte(`{"sha":"t","truncated":false,"tree":[{
+				"path": "SKILL.md",
+				"mode": "100644",
+				"type": "blob",
 				"sha": "ce013625030ba8dba906f756967f9e9ca394464a",
-				"size": 6,
-				"type": "file",
-				"download_url": "https://example.invalid/should-be-ignored"
-			}]`))
+				"size": 6
+			}]}`))
 		default:
 			t.Errorf("unexpected GitHub API request: %s", r.URL.Path)
 			http.NotFound(w, r)
@@ -359,10 +362,10 @@ func TestResolveGitHubSkill_ConcurrentMissesCoalesce(t *testing.T) {
 		<-proceed
 		_, _ = w.Write([]byte(commitSHA))
 	})
-	mux.HandleFunc("/repos/"+owner+"/"+repo+"/contents/"+skillPath, func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc(ghTreeTestPath(owner, repo, commitSHA, skillPath), func(w http.ResponseWriter, _ *http.Request) {
 		contentsCalls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[{"name":"SKILL.md","path":"` + skillPath + `/SKILL.md","sha":"x","size":1,"type":"file"}]`))
+		_, _ = w.Write([]byte(ghTreeTestSingleFile))
 	})
 	gh := httptest.NewServer(mux)
 	t.Cleanup(gh.Close)
@@ -438,9 +441,9 @@ func TestResolveGitHubSkill_FollowerGetsItsOwnURI(t *testing.T) {
 		case <-r.Context().Done():
 		}
 	})
-	mux.HandleFunc("/repos/"+owner+"/"+repo+"/contents/"+skillPath, func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc(ghTreeTestPath(owner, repo, "9999999999999999999999999999999999999999", skillPath), func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[{"name":"SKILL.md","path":"` + skillPath + `/SKILL.md","sha":"x","size":1,"type":"file"}]`))
+		_, _ = w.Write([]byte(ghTreeTestSingleFile))
 	})
 	gh := httptest.NewServer(mux)
 	t.Cleanup(gh.Close)
@@ -566,9 +569,9 @@ func TestResolveGitHubSkill_CancelledRequestStartsNoNewFlights(t *testing.T) {
 	})
 	for _, p := range []string{"skills/a", "skills/b"} {
 		p := p
-		mux.HandleFunc("/repos/"+owner+"/"+repo+"/contents/"+p, func(w http.ResponseWriter, _ *http.Request) {
+		mux.HandleFunc(ghTreeTestPath(owner, repo, sha, p), func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`[{"name":"SKILL.md","path":"` + p + `/SKILL.md","sha":"x","size":1,"type":"file"}]`))
+			_, _ = w.Write([]byte(ghTreeTestSingleFile))
 		})
 	}
 	gh := httptest.NewServer(mux)
@@ -740,9 +743,9 @@ func TestResolveGitHubSkill_CancelledLeaderDoesNotFailWaiters(t *testing.T) {
 		case <-r.Context().Done():
 		}
 	})
-	mux.HandleFunc("/repos/"+owner+"/"+repo+"/contents/"+skillPath, func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc(ghTreeTestPath(owner, repo, commitSHA, skillPath), func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[{"name":"SKILL.md","path":"` + skillPath + `/SKILL.md","sha":"x","size":1,"type":"file"}]`))
+		_, _ = w.Write([]byte(ghTreeTestSingleFile))
 	})
 	gh := httptest.NewServer(mux)
 	t.Cleanup(gh.Close)
@@ -883,9 +886,9 @@ func TestResolveGitHubSkill_ShortDeadlineLeaderDoesNotFailWaiter(t *testing.T) {
 		case <-r.Context().Done():
 		}
 	})
-	mux.HandleFunc("/repos/"+owner+"/"+repo+"/contents/"+skillPath, func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc(ghTreeTestPath(owner, repo, commitSHA, skillPath), func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[{"name":"SKILL.md","path":"` + skillPath + `/SKILL.md","sha":"x","size":1,"type":"file"}]`))
+		_, _ = w.Write([]byte(ghTreeTestSingleFile))
 	})
 	gh := httptest.NewServer(mux)
 	t.Cleanup(gh.Close)
@@ -983,10 +986,10 @@ func TestResolveGitHubSkill_StaleServesImmediatelyAndRefreshesInBackground(t *te
 	mux.HandleFunc("/repos/"+owner+"/"+repo+"/commits/main", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(freshSHA))
 	})
-	mux.HandleFunc("/repos/"+owner+"/"+repo+"/contents/"+skillPath, func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc(ghTreeTestPath(owner, repo, freshSHA, skillPath), func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[{"name":"SKILL.md","path":"` + skillPath + `/SKILL.md","sha":"x","size":1,"type":"file"}]`))
-		close(refreshed) // the contents call is the last GitHub call a refresh makes
+		_, _ = w.Write([]byte(ghTreeTestSingleFile))
+		close(refreshed) // the tree call is the last GitHub call a refresh makes
 	})
 	gh := httptest.NewServer(mux)
 	t.Cleanup(gh.Close)
@@ -1000,7 +1003,7 @@ func TestResolveGitHubSkill_StaleServesImmediatelyAndRefreshesInBackground(t *te
 	ctx := context.Background()
 	require.NoError(t, srv.ghResolutionStore.Put(ctx, cacheKey, GitHubCacheEntry{
 		CommitSHA:   staleSHA,
-		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.invalid/SKILL.md", Hash: "x", Size: 1}},
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.invalid/SKILL.md", Hash: "x", Size: 1, Mode: "0644"}},
 		BundleHash:  "sha256:stale",
 		TokenScope:  "public",
 		ExpiresAt:   time.Now().Add(-time.Minute), // just past the branch-ref TTL
@@ -1053,10 +1056,10 @@ func TestResolveGitHubSkill_PastMaxStaleAgeResolvesSynchronously(t *testing.T) {
 		calls.Add(1)
 		_, _ = w.Write([]byte(freshSHA))
 	})
-	mux.HandleFunc("/repos/"+owner+"/"+repo+"/contents/"+skillPath, func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc(ghTreeTestPath(owner, repo, freshSHA, skillPath), func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[{"name":"SKILL.md","path":"` + skillPath + `/SKILL.md","sha":"x","size":1,"type":"file"}]`))
+		_, _ = w.Write([]byte(ghTreeTestSingleFile))
 	})
 	gh := httptest.NewServer(mux)
 	t.Cleanup(gh.Close)
@@ -1073,7 +1076,7 @@ func TestResolveGitHubSkill_PastMaxStaleAgeResolvesSynchronously(t *testing.T) {
 	lastResolvedAt := time.Now().Add(-(agent.MaxResolutionStaleAge + time.Hour))
 	require.NoError(t, srv.ghResolutionStore.Put(ctx, cacheKey, GitHubCacheEntry{
 		CommitSHA:   ancientSHA,
-		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.invalid/SKILL.md", Hash: "x", Size: 1}},
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.invalid/SKILL.md", Hash: "x", Size: 1, Mode: "0644"}},
 		BundleHash:  "sha256:ancient",
 		TokenScope:  "public",
 		ExpiresAt:   lastResolvedAt.Add(agent.DefaultResolutionCacheTTL),
@@ -1108,10 +1111,10 @@ func TestResolveGitHubSkill_SHARefNeverServedStale(t *testing.T) {
 	mux := http.NewServeMux()
 	// No commits handler is registered: a full-SHA ref is already resolved
 	// and must never trigger a commits/{ref} call (see isFullCommitSHA).
-	mux.HandleFunc("/repos/"+owner+"/"+repo+"/contents/"+skillPath, func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc(ghTreeTestPath(owner, repo, sha, skillPath), func(w http.ResponseWriter, _ *http.Request) {
 		contentsCalls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[{"name":"SKILL.md","path":"` + skillPath + `/SKILL.md","sha":"x","size":1,"type":"file"}]`))
+		_, _ = w.Write([]byte(ghTreeTestSingleFile))
 	})
 	gh := httptest.NewServer(mux)
 	t.Cleanup(gh.Close)
@@ -1125,7 +1128,7 @@ func TestResolveGitHubSkill_SHARefNeverServedStale(t *testing.T) {
 	ctx := context.Background()
 	require.NoError(t, srv.ghResolutionStore.Put(ctx, cacheKey, GitHubCacheEntry{
 		CommitSHA:   sha,
-		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.invalid/SKILL.md", Hash: "old", Size: 1}},
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.invalid/SKILL.md", Hash: "old", Size: 1, Mode: "0644"}},
 		BundleHash:  "sha256:old",
 		TokenScope:  "public",
 		// Expired, but well within MaxResolutionStaleAge — if this were a
@@ -1174,7 +1177,7 @@ func TestResolveGitHubSkill_RefreshFailureBackoffSkipsRetry(t *testing.T) {
 		calls.Add(1)
 		w.WriteHeader(http.StatusInternalServerError)
 	})
-	mux.HandleFunc("/repos/"+owner+"/"+repo+"/contents/"+skillPath, func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc(ghTreeTestPath(owner, repo, staleSHA, skillPath), func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
 	})
 	gh := httptest.NewServer(mux)
@@ -1189,7 +1192,7 @@ func TestResolveGitHubSkill_RefreshFailureBackoffSkipsRetry(t *testing.T) {
 	ctx := context.Background()
 	require.NoError(t, srv.ghResolutionStore.Put(ctx, cacheKey, GitHubCacheEntry{
 		CommitSHA:   staleSHA,
-		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.invalid/SKILL.md", Hash: "x", Size: 1}},
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.invalid/SKILL.md", Hash: "x", Size: 1, Mode: "0644"}},
 		BundleHash:  "sha256:stale",
 		TokenScope:  "public",
 		ExpiresAt:   time.Now().Add(-time.Minute),
@@ -1261,10 +1264,10 @@ func TestSkillsResolve_GHCacheHitForCredentialedBranchRef(t *testing.T) {
 		apiCalls.Add(1)
 		_, _ = w.Write([]byte(commitSHA))
 	})
-	mux.HandleFunc("/repos/"+owner+"/"+repo+"/contents/"+skillPath, func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc(ghTreeTestPath(owner, repo, commitSHA, skillPath), func(w http.ResponseWriter, _ *http.Request) {
 		apiCalls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[{"name":"SKILL.md","path":"` + skillPath + `/SKILL.md","sha":"x","size":1,"type":"file"}]`))
+		_, _ = w.Write([]byte(ghTreeTestSingleFile))
 	})
 	gh := httptest.NewServer(mux)
 	t.Cleanup(gh.Close)
@@ -1368,4 +1371,209 @@ func TestSkillsResolve_GHCacheEntryExpiryIsJittered(t *testing.T) {
 	}
 	assert.Positive(t, jittered,
 		"no stored entry is off the nominal TTL; the TTL does not look jittered on write")
+}
+
+// ghModesTestTree is a git trees API response for a skill with a regular
+// SKILL.md and an executable script in a subdirectory.
+const ghModesTestTree = `{"sha":"t","truncated":false,"tree":[
+	{"path":"SKILL.md","mode":"100644","type":"blob","sha":"ce013625030ba8dba906f756967f9e9ca394464a","size":6},
+	{"path":"scripts","mode":"040000","type":"tree","sha":"1111111111111111111111111111111111111111"},
+	{"path":"scripts/run.sh","mode":"100755","type":"blob","sha":"95d09f2b10159347eece71399a7e2e907ea3df4f","size":11}
+]}`
+
+// ghModesTestServer serves ghModesTestTree for owner/repo/skillPath at
+// commitSHA (ref "main"), or 500 for every request once failing is set.
+func ghModesTestServer(t *testing.T, srv *Server, owner, repo, skillPath, commitSHA string, treeCalls *atomic.Int64, failing *atomic.Bool) {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if failing.Load() {
+			http.Error(w, `{"message":"boom"}`, http.StatusInternalServerError)
+			return
+		}
+		switch r.URL.Path {
+		case "/repos/" + owner + "/" + repo + "/commits/main":
+			_, _ = w.Write([]byte(commitSHA))
+		case ghTreeTestPath(owner, repo, commitSHA, skillPath):
+			treeCalls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(ghModesTestTree))
+		default:
+			t.Errorf("unexpected GitHub API request: %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	})
+	gh := httptest.NewServer(mux)
+	t.Cleanup(gh.Close)
+	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
+	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+}
+
+func ghModesByPath(files []DownloadURLInfo) map[string]string {
+	m := make(map[string]string, len(files))
+	for _, f := range files {
+		m[f.Path] = f.Mode
+	}
+	return m
+}
+
+// TestResolveGitHubSkill_CarriesFileModes is the hub half of
+// ptone/scion#5781: an executable script in a gh:// skill, including one in
+// a subdirectory, reaches the broker as mode "0755", a regular file as
+// "0644", on the resolving call and on a later cache hit alike.
+func TestResolveGitHubSkill_CarriesFileModes(t *testing.T) {
+	const (
+		owner     = "acme"
+		repo      = "modes-repo"
+		skillPath = "skills/tool"
+		commitSHA = "7777777777777777777777777777777777777777"
+		uri       = "gh://" + owner + "/" + repo + "/tool@main"
+	)
+	srv, _, _, _, project := setupSkillAuthzTest(t)
+	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+	var treeCalls atomic.Int64
+	var failing atomic.Bool
+	ghModesTestServer(t, srv, owner, repo, skillPath, commitSHA, &treeCalls, &failing)
+
+	want := map[string]string{"SKILL.md": "0644", "scripts/run.sh": "0755"}
+	ctx := context.Background()
+	for i := 0; i < 2; i++ {
+		resp, err := srv.resolveGitHubSkill(ctx, uri, project.ID, nil)
+		require.NoError(t, err)
+		assert.Equal(t, want, ghModesByPath(resp.Files), "resolve %d", i+1)
+	}
+	assert.Equal(t, int64(1), treeCalls.Load(), "the second resolve must be served from the cache, modes included")
+}
+
+// TestResolveGitHubSkill_SubmoduleFails pins that a skill directory holding
+// a git submodule fails to resolve with a clear error (ptone/scion#5781).
+func TestResolveGitHubSkill_SubmoduleFails(t *testing.T) {
+	const (
+		owner     = "acme"
+		repo      = "sub-repo"
+		skillPath = "skills/tool"
+		commitSHA = "8888888888888888888888888888888888888888"
+		uri       = "gh://" + owner + "/" + repo + "/tool@" + commitSHA
+	)
+	srv, _, _, _, project := setupSkillAuthzTest(t)
+	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+	mux := http.NewServeMux()
+	mux.HandleFunc(ghTreeTestPath(owner, repo, commitSHA, skillPath), func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"truncated":false,"tree":[
+			{"path":"SKILL.md","mode":"100644","type":"blob","sha":"x","size":1},
+			{"path":"vendor/lib","mode":"160000","type":"commit","sha":"y"}]}`))
+	})
+	gh := httptest.NewServer(mux)
+	t.Cleanup(gh.Close)
+	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
+	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+
+	_, err := srv.resolveGitHubSkill(context.Background(), uri, project.ID, nil)
+	require.ErrorIs(t, err, agent.ErrGitHubTreeSubmodule)
+	assert.Contains(t, err.Error(), "vendor/lib")
+}
+
+// TestResolveGitHubSkill_ModelessRow covers a cache row written before file
+// modes were recorded (ptone/scion#5781): it is never served while a
+// re-resolve can replace it, and it is served, as before, when that
+// re-resolve fails, as long as it would have been servable (fresh, or a
+// branch ref within the stale window).
+func TestResolveGitHubSkill_ModelessRow(t *testing.T) {
+	const (
+		owner     = "acme"
+		repo      = "legacy-repo"
+		skillPath = "skills/tool"
+		commitSHA = "9999999999999999999999999999999999999999"
+	)
+	legacyFiles := []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.invalid/SKILL.md", Hash: "old", Size: 1}}
+
+	cases := []struct {
+		name      string
+		ref       string
+		expiresIn time.Duration
+		failing   bool
+		// served is true when the legacy row must come back.
+		served bool
+	}{
+		{name: "fresh row is re-resolved", ref: "main", expiresIn: time.Hour},
+		{name: "fresh row served when re-resolve fails", ref: "main", expiresIn: time.Hour, failing: true, served: true},
+		{name: "stale branch row served when re-resolve fails", ref: "main", expiresIn: -time.Minute, failing: true, served: true},
+		{name: "expired SHA row is not served", ref: commitSHA, expiresIn: -time.Minute, failing: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _, _, _, project := setupSkillAuthzTest(t)
+			srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+			var treeCalls atomic.Int64
+			var failing atomic.Bool
+			failing.Store(tc.failing)
+			ghModesTestServer(t, srv, owner, repo, skillPath, commitSHA, &treeCalls, &failing)
+
+			uri := "gh://" + owner + "/" + repo + "/tool@" + tc.ref
+			ghRef, err := agent.ParseGitHubSkillURI(uri)
+			require.NoError(t, err)
+			cacheKey := computeCacheKey(ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, "public")
+			ctx := context.Background()
+			require.NoError(t, srv.ghResolutionStore.Put(ctx, cacheKey, GitHubCacheEntry{
+				CommitSHA:   commitSHA,
+				FileEntries: legacyFiles,
+				BundleHash:  "sha256:old",
+				TokenScope:  "public",
+				ExpiresAt:   time.Now().Add(tc.expiresIn),
+				OriginalURI: uri,
+			}))
+
+			resp, err := srv.resolveGitHubSkill(ctx, uri, project.ID, nil)
+			switch {
+			case tc.served:
+				require.NoError(t, err)
+				assert.Equal(t, "sha256:old", resp.ContentHash)
+				assert.Equal(t, map[string]string{"SKILL.md": ""}, ghModesByPath(resp.Files),
+					"a legacy row carries no modes; the broker writes its files 0644 as before")
+			case tc.failing:
+				require.Error(t, err)
+			default:
+				require.NoError(t, err)
+				assert.NotEqual(t, "sha256:old", resp.ContentHash)
+				assert.Equal(t, map[string]string{"SKILL.md": "0644", "scripts/run.sh": "0755"}, ghModesByPath(resp.Files))
+				assert.Equal(t, int64(1), treeCalls.Load())
+			}
+		})
+	}
+}
+
+// TestSkillsResolve_GHTreeErrorCode pins the per-URI cause code for a skill
+// tree the hub refuses (ptone/scion#5781): unsupported_skill_content, the
+// same code the local resolver reports, not the generic resolve_failed.
+func TestSkillsResolve_GHTreeErrorCode(t *testing.T) {
+	const (
+		owner     = "acme"
+		repo      = "code-repo"
+		skillPath = "skills/tool"
+		commitSHA = "abababababababababababababababababababab"
+		uri       = "gh://" + owner + "/" + repo + "/tool@" + commitSHA
+	)
+	srv, _, alice, _, project := setupSkillAuthzTest(t)
+	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+	mux := http.NewServeMux()
+	mux.HandleFunc(ghTreeTestPath(owner, repo, commitSHA, skillPath), func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"truncated":false,"tree":[
+			{"path":"SKILL.md","mode":"100644","type":"blob","sha":"x","size":1},
+			{"path":"vendor/lib","mode":"160000","type":"commit","sha":"y"}]}`))
+	})
+	gh := httptest.NewServer(mux)
+	t.Cleanup(gh.Close)
+	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
+	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+
+	rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills/resolve", ResolveSkillsRequest{
+		Skills:    []ResolveSkillRef{{URI: uri}},
+		ProjectID: project.ID,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var resp ResolveSkillsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Empty(t, resp.Resolved)
+	require.Len(t, resp.Errors, 1)
+	assert.Equal(t, agent.SkillErrCodeUnsupportedContent, resp.Errors[0].Code)
 }

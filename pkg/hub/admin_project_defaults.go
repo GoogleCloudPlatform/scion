@@ -66,22 +66,27 @@ func (s *Server) handleAdminProjectDefaults(w http.ResponseWriter, r *http.Reque
 // the DB row with the compiled default. When no DB row exists, the compiled
 // default is returned (default_scratchpad: true).
 func (s *Server) handleGetProjectDefaults(w http.ResponseWriter) {
-	enabled := true // compiled default
-
-	if ops := s.GetOperationalSettings(); ops != nil {
-		enabled = ops.ProjectDefaultScratchpad()
-	} else {
-		s.mu.RLock()
-		if s.config.DefaultScratchpad != nil {
-			// No OperationalSettings: read from settings.yaml via ApplySnapshot.
-			enabled = *s.config.DefaultScratchpad
-		}
-		s.mu.RUnlock()
-	}
-
+	enabled := s.defaultScratchpadEnabled()
 	writeJSON(w, http.StatusOK, opsettings.ProjectDefaultsSettings{
 		DefaultScratchpad: &enabled,
 	})
+}
+
+// defaultScratchpadEnabled reports the hub's project_defaults
+// default_scratchpad: the operational settings when present, else the
+// server config, else the compiled default (true). While it is on, every
+// project's scratchpad shared dir is a Required Mount.
+func (s *Server) defaultScratchpadEnabled() bool {
+	if ops := s.GetOperationalSettings(); ops != nil {
+		return ops.ProjectDefaultScratchpad()
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.config.DefaultScratchpad != nil {
+		// No OperationalSettings: read from settings.yaml via ApplySnapshot.
+		return *s.config.DefaultScratchpad
+	}
+	return true
 }
 
 // handlePutProjectDefaults accepts a partial update to the project_defaults
@@ -118,10 +123,7 @@ func (s *Server) handlePutProjectDefaults(w http.ResponseWriter, r *http.Request
 
 	// Validate the document against the section schema.
 	if errs := opsettings.Validate("project_defaults", doc); len(errs) > 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"error":  "validation_failed",
-			"errors": errs,
-		})
+		writeSettingsValidation(w, "", sectionValidationEntries("project_defaults", errs), nil)
 		return
 	}
 
@@ -148,17 +150,15 @@ func (s *Server) handlePutProjectDefaults(w http.ResponseWriter, r *http.Request
 			return
 		}
 		if errs := opsettings.Validate("project_defaults", merged); len(errs) > 0 {
-			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-				"error":  "validation_failed",
-				"errors": errs,
-			})
+			writeSettingsValidation(w, "", sectionValidationEntries("project_defaults", errs), nil)
 			return
 		}
 		if _, same := unchangedManagedRow(r.Context(), ops, "project_defaults", merged, baseRev); !same {
 			if _, err := ops.Update(r.Context(), "project_defaults", merged, updatedBy, baseRev, "managed"); err != nil {
 				if errors.Is(err, store.ErrRevisionConflict) {
-					writeError(w, http.StatusConflict, ErrCodeConflict,
-						"Project defaults changed concurrently; retry", nil)
+					writeSettingsRevisionConflict(w, "Project defaults changed concurrently; reload and save again.",
+						[]map[string]interface{}{settingsConflictEntry("project_defaults", baseRev,
+							s.getCurrentRevision(ops, "project_defaults"))}, nil)
 					return
 				}
 				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,

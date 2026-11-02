@@ -37,10 +37,10 @@ const (
 	// the same path as on GitHub-hosted ubuntu-latest, because actions/cache
 	// stores paths relative to GITHUB_WORKSPACE (under the work folder): only
 	// an identical work folder lets cache entries restore to the same place in
-	// both directions. The runner image makes it a symlink to the /scratch
-	// ephemeral disk (cr-ci cache parity contract, item 2). The runner keeps
-	// this path as configured (Path.GetFullPath does not resolve symlinks), so
-	// GITHUB_WORKSPACE is /home/runner/work/<repo>/<repo>.
+	// both directions. On the cr-ci runner it is a real directory on the
+	// ephemeral disk, which the job mounts at HOME (cr-ci cache parity
+	// contract, item 2), so GITHUB_WORKSPACE is /home/runner/work/<repo>/<repo>,
+	// physically too.
 	WorkFolder = "/home/runner/work"
 
 	maxWebhookBody          = 5 << 20
@@ -150,6 +150,15 @@ type Server struct {
 	cancelled   map[string]time.Time     // execution refs this process cancelled
 	offlineSeen map[string]time.Time     // runner name -> first seen offline
 	noticed     map[string]bool          // reconcile notices already logged (pruned each pass)
+	// hijacked: runners killed as hijacked whose registration GitHub has not let go
+	// yet (busy while it still shows the untrusted job running), -> first kill time.
+	// Later kills of the same runner log at WARNING; cleared once the registration is
+	// gone, or by reconcile after cancelledTTL.
+	hijacked map[string]time.Time
+	// forgotten: runners whose job's completed webhook dropped their record, -> when.
+	// Reconcile skips them (its discovery may predate the webhook); pruned after
+	// cancelledTTL.
+	forgotten map[string]time.Time
 }
 
 // New returns a Server.
@@ -175,6 +184,8 @@ func New(o Options) *Server {
 		cancelled:   map[string]time.Time{},
 		offlineSeen: map[string]time.Time{},
 		noticed:     map[string]bool{},
+		hijacked:    map[string]time.Time{},
+		forgotten:   map[string]time.Time{},
 	}
 }
 
@@ -298,6 +309,26 @@ func (s *Server) runnerRepo(fullName string) githubapp.Repo {
 	return githubapp.Repo{}
 }
 
+// servedRepos lists the repos whose jobs GitHub may hand a runner registered
+// through r (the runner's job guard allowlist, GH_REPOS): r alone in repo scope;
+// in org scope every target repo of r's owner, since org-level runners take any
+// of their jobs with the label.
+func (s *Server) servedRepos(r githubapp.Repo) []string {
+	if !s.o.OrgScope {
+		return []string{r.String()}
+	}
+	var out []string
+	for _, t := range s.o.TargetRepos {
+		if strings.EqualFold(t.Owner, r.Owner) {
+			out = append(out, t.String())
+		}
+	}
+	if len(out) == 0 {
+		out = []string{r.String()}
+	}
+	return out
+}
+
 // scopeKey identifies the runner list a repo's runners live in.
 func (s *Server) scopeKey(r githubapp.Repo) string {
 	if s.o.OrgScope {
@@ -313,13 +344,20 @@ func headRepo(run *githubapp.Run) string {
 	return run.HeadRepository.FullName
 }
 
-// forkReason returns why run must not get a runner, or "" if it may.
-// pull_request_target and workflow_run runs execute with the base repo's
-// privileges, typically on behalf of fork PRs, so both are refused.
+// allowedEvents are the only workflow-run events whose jobs may get a cr-ci
+// runner: the same two the workflows' routing expression routes (same-repo
+// push and pull_request). It is an allowlist, so any other event, named or
+// not yet known (pull_request_target, workflow_run, issue_comment,
+// repository_dispatch, workflow_dispatch, schedule, merge_group, ...), is
+// refused (fail closed), even if a workflow edit routes it.
+var allowedEvents = map[string]bool{"push": true, "pull_request": true}
+
+// forkReason returns why run must not get a runner, or "" if it may. It
+// guards dispatch (webhook and reconcile backfill) and the hijack guard.
 func forkReason(run *githubapp.Run, repo githubapp.Repo) string {
 	switch {
-	case run.Event == "pull_request_target" || run.Event == "workflow_run":
-		return run.Event
+	case !allowedEvents[run.Event]:
+		return "event_not_allowed:" + run.Event
 	case run.Repository == nil || !strings.EqualFold(run.Repository.FullName, repo.String()):
 		return "repository_mismatch"
 	case run.HeadRepository == nil:

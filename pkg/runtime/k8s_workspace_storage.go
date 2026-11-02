@@ -93,7 +93,7 @@ func isLocalSlashPath(p string) bool {
 // Only the provisioning init container gets it. The agent container never
 // gets it, and the project directory itself is never mounted (it holds every
 // agent's directory).
-func nfsProvisionStateInitMount(config RunConfig, nfsAgentDir bool) (*corev1.VolumeMount, *corev1.EnvVar, error) {
+func nfsProvisionStateInitMount(config RunConfig, nfsAgentDir bool, vols *nfsPodVolumes) (*corev1.VolumeMount, *corev1.EnvVar, error) {
 	// An empty NFSSubPath mounts the claim's root as the workspace: there is
 	// no project directory to put a sibling in, so the sentinel stays in the
 	// workspace as before.
@@ -104,7 +104,9 @@ func nfsProvisionStateInitMount(config RunConfig, nfsAgentDir bool) (*corev1.Vol
 	if err != nil {
 		return nil, nil, err
 	}
-	return &corev1.VolumeMount{Name: "workspace", MountPath: NFSProvisionStateMountPath, SubPath: subPath},
-		&corev1.EnvVar{Name: NFSProvisionStateEnv, Value: NFSProvisionStateMountPath},
-		nil
+	m, err := vols.mount(nfsVolProvisionState, subPath, NFSProvisionStateMountPath, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &m, &corev1.EnvVar{Name: NFSProvisionStateEnv, Value: NFSProvisionStateMountPath}, nil
 }

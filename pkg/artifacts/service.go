@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -74,7 +75,7 @@ type Service struct {
 	store    Store
 	blobs    storage.Storage
 	hubID    string
-	viewKey  []byte
+	viewKeys ViewKeys
 	limits   func(context.Context) Limits
 	provider func() Backend
 	// reviewNotifier is told about each finalized review version.
@@ -98,6 +99,10 @@ type Service struct {
 
 	// logFn yields the decision logger (SetLogger; auditlog.go).
 	logFn func() *slog.Logger
+
+	// viewIssuanceClosedWarned makes the view issuance-closed warning
+	// appear once (warnViewIssuanceClosed).
+	viewIssuanceClosedWarned atomic.Bool
 }
 
 // Backend is what a request needs from the service's environment: the
@@ -107,9 +112,9 @@ type Backend struct {
 	Store Store
 	Blobs storage.Storage
 	HubID string
-	// ViewKey signs view capabilities (see RouteView). Without one, HTML
-	// entries cannot be viewed.
-	ViewKey []byte
+	// ViewKeys sign and check view capabilities (see RouteView). Without
+	// them (the zero ViewKeys), HTML entries cannot be viewed.
+	ViewKeys ViewKeys
 }
 
 // Limits are the size limits the service enforces.
@@ -217,11 +222,17 @@ func (s *Service) SetBlobStorage(blobs storage.Storage, hubID string) {
 	s.mu.Unlock()
 }
 
-// SetViewKey sets the key that signs view capabilities, when no backend
-// provider supplies one.
+// SetViewKey sets one fixed key that signs view capabilities in the legacy
+// form, when no backend provider supplies keys (see LegacyViewKeys).
 func (s *Service) SetViewKey(key []byte) {
+	s.SetViewKeys(LegacyViewKeys(key))
+}
+
+// SetViewKeys sets the keys that sign and check view capabilities, when no
+// backend provider supplies them.
+func (s *Service) SetViewKeys(keys ViewKeys) {
 	s.mu.Lock()
-	s.viewKey = key
+	s.viewKeys = keys
 	s.mu.Unlock()
 }
 
@@ -266,21 +277,21 @@ func (s *Service) SetLimits(fn func(context.Context) Limits) {
 
 // backend is a consistent snapshot of the service's configuration.
 type backend struct {
-	store   Store
-	blobs   storage.Storage
-	hubID   string
-	viewKey []byte
-	limits  func(context.Context) Limits
+	store    Store
+	blobs    storage.Storage
+	hubID    string
+	viewKeys ViewKeys
+	limits   func(context.Context) Limits
 }
 
 func (s *Service) backend() (backend, bool) {
 	s.mu.RLock()
-	b := backend{store: s.store, blobs: s.blobs, hubID: s.hubID, viewKey: s.viewKey, limits: s.limits}
+	b := backend{store: s.store, blobs: s.blobs, hubID: s.hubID, viewKeys: s.viewKeys, limits: s.limits}
 	provider := s.provider
 	s.mu.RUnlock()
 	if provider != nil {
 		p := provider()
-		b.store, b.blobs, b.hubID, b.viewKey = p.Store, p.Blobs, p.HubID, p.ViewKey
+		b.store, b.blobs, b.hubID, b.viewKeys = p.Store, p.Blobs, p.HubID, p.ViewKeys
 	}
 	return b, b.store != nil && b.blobs != nil && b.hubID != ""
 }

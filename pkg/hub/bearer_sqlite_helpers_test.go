@@ -98,7 +98,12 @@ func newBearerMatrixFixture(t *testing.T) *bearerMatrixFixture {
 	agent.MessageMode = store.MessageModeProject
 	require.NoError(t, s.UpdateAgent(ctx, agent))
 
-	return &bearerMatrixFixture{srv: srv, store: s, ids: ids, adminID: adminID, otherProject: other, tokens: map[string]string{}}
+	// The user the user delete row removes: a member with no role binding,
+	// so a token's delete passes the system-scope binding rule.
+	userDelete := tid("bdm-user-delete")
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: userDelete, Email: userDelete + "@test.com", DisplayName: "BDM User Delete", Role: "member", Status: "active"}))
+
+	return &bearerMatrixFixture{srv: srv, store: s, ids: ids, adminID: adminID, otherProject: other, userDelete: userDelete, tokens: map[string]string{}}
 }
 
 // sessionOnlyDetailsOf returns details.reason and details.credential of an
@@ -125,7 +130,9 @@ type bearerMatrixFixture struct {
 	ids          idFixtures
 	adminID      string
 	otherProject string
-	tokens       map[string]string
+	// userDelete is the user the user delete row removes.
+	userDelete string
+	tokens     map[string]string
 	// tokenIDs are the tokens mint and tryMint created since the last
 	// releaseTokens.
 	tokenIDs []string
@@ -280,6 +287,13 @@ func bearerMatrixBodyOverrides(f idFixtures) map[overrideKey]map[string]interfac
 			"roleDefinitionId": f.projectMemberRoleID, "principalType": "user", "principalId": f.user,
 		},
 		{"project.membership.transfer", "/api/v1/projects/{id}/transfer-ownership"}: {"newOwnerId": f.member},
+		// Env and secret writes validate the body (a value is required)
+		// before the scope's credential check: user scope is the default,
+		// and hub-level writes name the scope in the body.
+		{"env.user.write", "/api/v1/env/{key}"}:        {"value": "bdm"},
+		{"secret.user.write", "/api/v1/secrets/{key}"}: {"value": "YmRt"},
+		{"env.hub.write", "/api/v1/env/{key}"}:         {"scope": "hub", "value": "bdm"},
+		{"secret.hub.write", "/api/v1/secrets/{key}"}:  {"scope": "hub", "value": "YmRt"},
 		// The delegation ceiling applies to the role an agent is granted:
 		// a token carrying only agent:create covers no usable role, so the
 		// probe asks for agentRole "none", which every creator may grant.
@@ -339,12 +353,14 @@ func bearerMatrixBodyOverrides(f idFixtures) map[overrideKey]map[string]interfac
 	}
 }
 
-// callerPatternOverrides holds per-operation path parameters that name the
-// matrix's own super-admin, for entry points told apart by whether the path
-// names the caller's own record.
+// callerPatternOverrides holds per-operation path parameters that name
+// records the matrix fixture seeds itself: the matrix's own super-admin,
+// for entry points told apart by whether the path names the caller's own
+// record, and the user the user delete row removes.
 func (m *bearerMatrixFixture) callerPatternOverrides() map[overrideKey]map[string]string {
 	return map[overrideKey]map[string]string{
-		{"user.self.update", "/api/v1/users/{id}"}: {"id": m.adminID},
+		{"user.self.update", "/api/v1/users/{id}"}:  {"id": m.adminID},
+		{"user.admin.delete", "/api/v1/users/{id}"}: {"id": m.userDelete},
 	}
 }
 
@@ -356,6 +372,15 @@ func bearerMatrixQueryOverrides(f idFixtures) map[overrideKey]string {
 		{"chat.search.topic", "/api/v1/chat/search"}:   "q=chat&key=" + f.chatTopic,
 		{"chat.search.project", "/api/v1/chat/search"}: "q=chat&projectId=" + f.project,
 		{"chat.search.dm", "/api/v1/chat/search"}:      "q=chat&key=" + f.chat.dmAgent,
+		// The starred-only history variant.
+		{"chat.conversation.history.starred", "/api/v1/chat/conversations/{id}/messages"}: "starred=true",
+		// Hub-level env and secret variants (user scope is the default).
+		{"env.hub.list", "/api/v1/env"}:               "scope=hub",
+		{"env.hub.read", "/api/v1/env/{key}"}:         "scope=hub",
+		{"env.hub.write", "/api/v1/env/{key}"}:        "scope=hub",
+		{"secret.hub.read", "/api/v1/secrets"}:        "scope=hub",
+		{"secret.hub.read", "/api/v1/secrets/{key}"}:  "scope=hub",
+		{"secret.hub.write", "/api/v1/secrets/{key}"}: "scope=hub",
 	}
 }
 

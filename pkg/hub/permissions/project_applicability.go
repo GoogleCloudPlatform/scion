@@ -47,6 +47,7 @@ var ProjectTargetApplicability = map[string]bool{
 	// Grant management is held on a project for grants bounded to it.
 	"agent.delegation.revoke": true, "agent.delegation.credential.revoke": true,
 	"agent.delegation.list": true, "agent.delegation.read": true,
+	"agent.delegation.revoke_all": true,
 
 	// project.* — read/update/delete/manage/set_messaging_policy target an
 	// existing project; create/register/clone/list are hub-level collection
@@ -253,6 +254,7 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	"group.removeMember": {BoundaryKindHub},
 	"user.read":          {BoundaryKindHub}, "user.invite": {BoundaryKindHub}, "user.list": {BoundaryKindHub},
 	"user.update": {BoundaryKindHub}, "user.suspend": {BoundaryKindHub},
+	"user.promote": {BoundaryKindHub}, "user.delete": {BoundaryKindHub},
 	"broker.read": {BoundaryKindHub}, "broker.list": {BoundaryKindHub},
 	"gcp_service_account.read": {BoundaryKindHub}, "gcp_service_account.list": {BoundaryKindHub},
 	"gcp_service_account.verify": {BoundaryKindHub}, "gcp_service_account.assign": {BoundaryKindProject, BoundaryKindHub},
@@ -464,6 +466,8 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	"user.list": {TargetClassKindHubResource},
 	// user.update and user.suspend target the hub-level user record.
 	"user.update": {TargetClassKindHubResource}, "user.suspend": {TargetClassKindHubResource},
+	// user.promote and user.delete target the hub-level user record.
+	"user.promote": {TargetClassKindHubResource}, "user.delete": {TargetClassKindHubResource},
 
 	// broker.* — user-owned hub resource.
 	"broker.read": {TargetClassKindHubResource}, "broker.list": {TargetClassKindHubResource},

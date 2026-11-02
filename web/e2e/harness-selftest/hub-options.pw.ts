@@ -34,6 +34,10 @@
  *   experiments API and restarts the server on the same database, port,
  *   HOME and hub id; without it there is one start and no API call; a
  *   failure before the restart completes leaves no hub running;
+ * - experiments turns each experiment on through the admin experiments
+ *   API with no restart and reads the listing back; if one is not enabled
+ *   afterwards, or the PUT fails, startHub throws and no hub is left
+ *   running;
  * - restartHubWithoutDevAuth restarts the server with the same arguments
  *   except --dev-auth and rewrites the state file (new PID, no dev token);
  *   if the restarted server never gets healthy it is killed and the state
@@ -68,7 +72,7 @@ const RECORDED_ENV = [
   'SCION_SERVER_HUB_HUBID',
   'SCION_SERVER_HUB_CLASS',
   'SCION_SERVER_RUNTIMEBROKER_HOST',
-  'SCION_SERVER_HUB_ASYNCAGENTLAUNCH',
+  'SCION_SERVER_HUB_LAUNCHTIMEOUT',
   'SCION_IMAGE_REGISTRY',
 ];
 
@@ -87,6 +91,9 @@ if (argv[0] === 'server' && argv[1] === 'start') {
   const port = Number(argv[argv.indexOf('--web-port') + 1]);
   const tokenFile = process.env.HARNESS_SELFTEST_LOG + '.dev-token';
   fs.writeFileSync(tokenFile, 'scion_dev_0123456789abcdef\\n', { mode: 0o600 });
+  // Experiments a PUT set; a GET lists them, enabled unless
+  // HARNESS_SELFTEST_EXPERIMENTS_OFF=1 (an override the hub does not apply).
+  const overrides = {};
   http
     .createServer((req, res) => {
       if (req.url === '/api/v1/admin/experiments') {
@@ -96,8 +103,15 @@ if (argv[0] === 'server' && argv[1] === 'start') {
           const record = { method: req.method, auth: req.headers.authorization, body };
           fs.appendFileSync(process.env.HARNESS_SELFTEST_LOG + '.requests', JSON.stringify(record) + '\\n');
           const fail = req.method === 'PUT' && process.env.HARNESS_SELFTEST_FAIL_PUT === '1';
+          if (req.method === 'PUT' && !fail) Object.assign(overrides, JSON.parse(body).overrides);
+          const off = process.env.HARNESS_SELFTEST_EXPERIMENTS_OFF === '1';
+          const experiments = Object.keys(overrides).map((name) => ({
+            name,
+            enabled: !off,
+            override: true,
+          }));
           res.writeHead(fail ? 500 : 200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ revision: 7, experiments: [] }));
+          res.end(JSON.stringify({ revision: 7, experiments }));
         });
         return;
       }
@@ -187,7 +201,7 @@ test('runtimeBroker with testIdentities marks the database before the server sta
     binary,
     stateFile,
     env: {
-      SCION_SERVER_HUB_ASYNCAGENTLAUNCH: 'true',
+      SCION_SERVER_HUB_LAUNCHTIMEOUT: '15m',
       SCION_IMAGE_REGISTRY: 'registry.invalid/e2e',
     },
   });
@@ -217,9 +231,9 @@ test('runtimeBroker with testIdentities marks the database before the server sta
   expect(start.env.SCION_SERVER_RUNTIMEBROKER_HOST).toBe('127.0.0.1');
 
   // The caller's settings reach the server, not the mark step.
-  expect(start.env.SCION_SERVER_HUB_ASYNCAGENTLAUNCH).toBe('true');
+  expect(start.env.SCION_SERVER_HUB_LAUNCHTIMEOUT).toBe('15m');
   expect(start.env.SCION_IMAGE_REGISTRY).toBe('registry.invalid/e2e');
-  expect(mark.env.SCION_SERVER_HUB_ASYNCAGENTLAUNCH).toBeUndefined();
+  expect(mark.env.SCION_SERVER_HUB_LAUNCHTIMEOUT).toBeUndefined();
 
   // Private HOME under the temp dir, human CLI mode.
   expect(start.env.HOME).toBe(state.homeDir);
@@ -255,7 +269,7 @@ for (const key of [
         build: false,
         binary,
         stateFile,
-        env: { SCION_SERVER_HUB_ASYNCAGENTLAUNCH: 'true', [key]: 'x' },
+        env: { SCION_SERVER_HUB_LAUNCHTIMEOUT: '15m', [key]: 'x' },
       })
     ).rejects.toThrow(`startHub: env may not set harness-owned keys: ${key}`);
     expect(invocations(), 'nothing ran').toEqual([]);
@@ -263,7 +277,7 @@ for (const key of [
 }
 
 test('ordinary settings are not harness-owned', () => {
-  for (const key of ['SCION_SERVER_HUB_ASYNCAGENTLAUNCH', 'SCION_IMAGE_REGISTRY', 'PATH']) {
+  for (const key of ['SCION_SERVER_HUB_LAUNCHTIMEOUT', 'SCION_IMAGE_REGISTRY', 'PATH']) {
     expect(isHarnessOwnedEnv(key)).toBe(false);
   }
 });
@@ -379,6 +393,63 @@ test('a failed startupExperiments restart leaves no hub running', async () => {
   await expect.poll(() => alive(starts[0].pid), { message: 'the hub was stopped' }).toBe(false);
   expect(fs.existsSync(stateFile), 'no state file').toBe(false);
 });
+
+test('experiments sets the overrides without a restart and reads them back', async () => {
+  const state = await startHub({
+    testLogin: false,
+    testIdentities: true,
+    build: false,
+    binary,
+    stateFile,
+    experiments: ['hub.async_agent_launch'],
+  });
+
+  const starts = invocations().filter((c) => c.argv[1] === 'start');
+  expect(starts, 'one start, no restart').toHaveLength(1);
+  expect(state.pid).toBe(starts[0].pid);
+  const requests = experimentsRequests();
+  expect(requests.map((r) => r.method)).toEqual(['GET', 'PUT', 'GET']);
+  for (const r of requests) expect(r.auth).toBe(`Bearer ${state.devToken}`);
+  expect(JSON.parse(requests[1].body)).toEqual({
+    overrides: { 'hub.async_agent_launch': true },
+    expected_revision: 7,
+  });
+});
+
+for (const [name, envKey, message] of [
+  [
+    'an experiment that is not enabled after the PUT',
+    'HARNESS_SELFTEST_EXPERIMENTS_OFF',
+    'startHub: experiments not enabled after setting them on: hub.async_agent_launch',
+  ],
+  [
+    'a failed experiments PUT',
+    'HARNESS_SELFTEST_FAIL_PUT',
+    'startHub: PUT /api/v1/admin/experiments answered 500',
+  ],
+] as const) {
+  test(`${name} fails startHub and leaves no hub running`, async () => {
+    process.env[envKey] = '1';
+    try {
+      await expect(
+        startHub({
+          testLogin: false,
+          testIdentities: true,
+          build: false,
+          binary,
+          stateFile,
+          experiments: ['hub.async_agent_launch'],
+        })
+      ).rejects.toThrow(message);
+    } finally {
+      delete process.env[envKey];
+    }
+    const starts = invocations().filter((c) => c.argv[1] === 'start');
+    expect(starts).toHaveLength(1);
+    await expect.poll(() => alive(starts[0].pid), { message: 'the hub was stopped' }).toBe(false);
+    expect(fs.existsSync(stateFile), 'no state file').toBe(false);
+  });
+}
 
 test('restartHubWithoutDevAuth restarts without --dev-auth and rewrites the state', async () => {
   const before = await startHub({

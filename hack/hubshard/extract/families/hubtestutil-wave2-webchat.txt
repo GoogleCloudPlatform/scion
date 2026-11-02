@@ -1,0 +1,17 @@
+# P1-7 wave 2, partial (ptone/scion#4361), step 2 of 2: the generic database
+# helpers of the web chat store tests move to pkg/hub/internal/hubtestutil,
+# so the pkg/hub/webchat tests (ptone/scion#4269) and pkg/hub's own tests use
+# one copy. pkg/hub keeps their names through zz_alias_hubtestutil_chatdb_test.go.
+#
+#   extract export -dir pkg/hub -to pkg/hub/internal/hubtestutil \
+#       -alias zz_alias_hubtestutil_chatdb_test.go \
+#       -family hack/hubshard/extract/families/hubtestutil-wave2-webchat.txt
+#
+# export writes only a fresh alias file, so this wave uses its own alias file.
+
+# chatdb_helpers_test.go (gathered by hubtestutil-wave2-webchat-move.txt)
+conversationsTableDDL
+getTopicConvID
+rawText
+requireUTCInstant
+requirePostgresDSN

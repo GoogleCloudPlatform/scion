@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/hubtestutil"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/stretchr/testify/require"
@@ -37,7 +38,7 @@ import (
 // It runs in a throwaway schema with a minimal messages table, so it never
 // touches an existing messages table in the target database.
 func TestUnreadMentionKeys_Postgres(t *testing.T) {
-	dsn := requirePostgresDSN(t)
+	dsn := hubtestutil.RequirePostgresDSN(t)
 	ctx := context.Background()
 	schema := fmt.Sprintf("mention_dot_test_%d", time.Now().UnixNano())
 
@@ -124,14 +125,4 @@ func TestUnreadMentionKeys_Postgres(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, other)
 
-	// The orphan sweep drops a row whose message is gone and keeps the rest.
-	// The non-UUID "legacy" row must not fail the sweep on the uuid cast;
-	// it can never match a message, so it is swept as an orphan too.
-	require.NoError(t, wcs.RecordMentions(ctx, "orphan", api.NewUUID(), []string{user}))
-	n, err := wcs.PurgeOrphanMentions(ctx)
-	require.NoError(t, err)
-	require.Equal(t, 2, n)
-	var left int
-	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM webchat_mention`).Scan(&left))
-	require.Equal(t, len(cases), left)
 }

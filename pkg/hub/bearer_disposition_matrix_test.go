@@ -394,6 +394,10 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the star state filters each message by the caller's current access to its thread instead of refusing the request, so a project token for another project gets 200 with no starred IDs rather than 403 or 404 (no existence oracle)",
 		Pin:    "TestChatStars_TokenSelectors",
 	},
+	{OperationID: "chat.star.conversations", Method: "GET", Pattern: "/api/v1/chat/starred-conversations"}: {
+		Reason: "the Starred rail filters each conversation by the caller's current access instead of refusing the request, so a project token for another project gets 200 with no rows rather than 403 or 404 (no existence oracle)",
+		Pin:    "TestChatStarredConversations_TokenSelectors",
+	},
 	{OperationID: "chat.star.remove", Method: "DELETE", Pattern: "/api/v1/chat/stars/{messageId}"}: {
 		Reason: "removing a star always answers an empty 204 (design: ownership-only, no target lookup); a project token removes a row only inside its boundary, and outside it the answer is the same empty 204 with nothing removed, so the boundary probe sees 204 rather than a refusal",
 		Pin:    "TestChatStars_TokenSelectors",
@@ -401,6 +405,10 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 	{OperationID: "web.events.stream", Method: "GET", Pattern: "/events"}: {
 		Reason: "the web server serves the event stream, not the hub API handler the matrix drives; the web server admits only a signed-in web session",
 		Pin:    "TestWebEventStream_RefusesUserAccessToken",
+	},
+	{OperationID: "user.admin.provision", Method: "POST", Pattern: "/api/v1/users"}: {
+		Reason: "the matrix server runs with dev authentication, and user provisioning is refused for every caller on such a hub (403 dev_auth_not_supported); the dedicated test drives the route on a hub without dev authentication with real tokens on both boundaries and with sessions",
+		Pin:    "TestProvisionToken_RequiresInviteSelectorAndHubBoundary",
 	},
 }
 
@@ -510,7 +518,9 @@ var bearerMatrixCompanionSelectors = map[authzop.OperationID][]string{
 	"chat.star.read":                         {"project:read"},
 	"chat.star.state":                        {"project:read"},
 	"chat.star.list":                         {"project:read"},
+	"chat.conversation.history.starred":      {"project:read"},
 	"chat.star.remove":                       {"project:read"},
+	"chat.star.conversations":                {"project:read"},
 	"quota.brokersettings.update":            {"broker:read"},
 }
 

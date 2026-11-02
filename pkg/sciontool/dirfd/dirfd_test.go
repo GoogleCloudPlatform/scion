@@ -1,3 +1,5 @@
+//go:build unix
+
 /*
 Copyright 2026 The Scion Authors.
 */

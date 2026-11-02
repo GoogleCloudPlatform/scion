@@ -102,9 +102,9 @@ func TestHandleHealthSummary_HubPausedSchedulesListed(t *testing.T) {
 		}
 	}
 	assert.Contains(t, resp.Attention, item(creator, "creator-gone",
-		"Scheduled event paused-alpha / creator-gone was paused by the hub: the agent that created it was deleted"))
+		"Scheduled event paused-alpha / creator-gone was paused by the hub: the agent or user it runs under was deleted"))
 	assert.Contains(t, resp.Attention, item(zone, "zoned",
-		"Scheduled event paused-alpha / zoned was paused by the hub: its cron expression names a time zone, which is not supported"))
+		"Scheduled event paused-alpha / zoned was paused by the hub: its cron expression has a zone prefix, which is not supported: set its time zone field instead"))
 	assert.Contains(t, resp.Attention, item(later, "later-reason",
 		"Scheduled event paused-alpha / later-reason was paused by the hub: a reason this hub does not recognize"))
 	for _, it := range resp.Attention {

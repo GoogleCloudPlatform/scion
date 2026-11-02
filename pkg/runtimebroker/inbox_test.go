@@ -475,8 +475,14 @@ func TestInboxPrune_OnlyInboxDirs(t *testing.T) {
 	require.NoError(t, os.Symlink(outside, link))
 	nfs := filepath.Join(inbox, ".nfs0000123")
 	require.NoError(t, os.WriteFile(nfs, []byte("x"), 0o600))
+	// Stale claims without a message directory: a claim file, and a claim
+	// directory from an older broker.
+	staleFile := filepath.Join(inbox, ".claim-gone-file")
+	require.NoError(t, os.WriteFile(staleFile, nil, 0o600))
+	staleDir := filepath.Join(inbox, ".claim-gone-dir")
+	require.NoError(t, os.MkdirAll(staleDir, 0o700))
 	past := time.Now().Add(-30 * 24 * time.Hour)
-	for _, p := range []string{old, filepath.Join(inbox, ".claim-old-message"), outside} {
+	for _, p := range []string{old, filepath.Join(inbox, ".claim-old-message"), outside, staleFile, staleDir} {
 		require.NoError(t, os.Chtimes(p, past, past))
 	}
 	s.maybePruneInbox(rt, "c1", "agent-1", 7)
@@ -484,6 +490,10 @@ func TestInboxPrune_OnlyInboxDirs(t *testing.T) {
 	require.True(t, os.IsNotExist(err), "an old message directory is pruned")
 	_, err = os.Stat(filepath.Join(inbox, ".claim-old-message"))
 	require.True(t, os.IsNotExist(err), "its claim is pruned with it")
+	for _, p := range []string{staleFile, staleDir} {
+		_, err = os.Lstat(p)
+		require.True(t, os.IsNotExist(err), "a stale claim without a message directory is pruned: %s", p)
+	}
 	_, err = os.Lstat(link)
 	require.NoError(t, err, "a symlink is left alone")
 	b, err := os.ReadFile(filepath.Join(outside, "keep.txt"))
@@ -557,11 +567,22 @@ const inboxMoveLine = `    mv "$tmp" "$inbox/$1"`
 // move, while a second writer of the same message runs. The second finds
 // the claim taken and counts the message as delivered without moving
 // anything; when the first is released it moves its directory, and nothing
-// is nested.
+// is nested. The second writer runs once with the system mkdir and once
+// with a mkdir that also succeeds when the directory already exists (as
+// uutils coreutils 0.8 does when it loses a race, ptone/scion#6281): the
+// claim must not depend on mkdir(1) failing on an existing directory.
 func TestInboxWriter_ClaimHoldsAConcurrentWriter(t *testing.T) {
+	t.Run("system mkdir", func(t *testing.T) { testClaimHoldsAConcurrentWriter(t, false) })
+	t.Run("mkdir that succeeds on an existing directory", func(t *testing.T) { testClaimHoldsAConcurrentWriter(t, true) })
+}
+
+func testClaimHoldsAConcurrentWriter(t *testing.T, lenientMkdir bool) {
 	s := inboxServer(t)
 	held := newInboxRuntime(t, "docker")
 	other := &inboxRuntime{name: "docker", home: held.home}
+	if lenientMkdir {
+		other.rewrite = lenientMkdirRewrite(t)
+	}
 	reached := filepath.Join(held.home, ".reached")
 	release := filepath.Join(held.home, ".release")
 	require.Contains(t, inboxWriteScript, inboxMoveLine)
@@ -588,4 +609,22 @@ func TestInboxWriter_ClaimHoldsAConcurrentWriter(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, entries, 1, "nothing nested")
 	require.Equal(t, "one", readInbox(t, held.home, msgID, "a.txt"), "the claim holder's files")
+}
+
+// lenientMkdirRewrite returns a command rewrite that puts first on the
+// script's PATH a mkdir which also succeeds when its directory already
+// exists, without -p.
+func lenientMkdirRewrite(t *testing.T) func([]string) []string {
+	t.Helper()
+	realMkdir, err := exec.LookPath("mkdir")
+	require.NoError(t, err)
+	dir := t.TempDir()
+	shim := "#!/bin/sh\nfor last; do :; done\n" + shellQuote(realMkdir) + ` "$@" 2>/dev/null || [ -d "$last" ]` + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "mkdir"), []byte(shim), 0o755))
+	require.Contains(t, inboxScriptPath, "PATH=/usr/local/sbin:")
+	return func(cmd []string) []string {
+		out := append([]string(nil), cmd...)
+		out[len(out)-1] = strings.Replace(out[len(out)-1], "PATH=/usr/local/sbin:", "PATH="+dir+":/usr/local/sbin:", 1)
+		return out
+	}
 }

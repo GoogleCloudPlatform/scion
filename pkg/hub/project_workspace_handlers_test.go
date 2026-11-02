@@ -347,6 +347,7 @@ func assertSandboxed(t *testing.T, rec *httptest.ResponseRecorder) {
 	t.Helper()
 	csp := rec.Header().Get("Content-Security-Policy")
 	assert.Equal(t, untrustedContentSandboxCSP, csp)
+	assert.Equal(t, untrustedContentPermissionsPolicy, rec.Header().Get("Permissions-Policy"))
 	assert.True(t, strings.HasPrefix(csp, "sandbox"), "CSP must start with the sandbox directive: %q", csp)
 	assert.Contains(t, csp, "allow-scripts", "scripts stay enabled so generated reports keep working")
 	assert.NotContains(t, csp, "allow-same-origin", "allow-same-origin would undo the isolation")
@@ -909,7 +910,7 @@ func TestSharedDirFiles_NFSBackend_LocalBackendExplicit_Unchanged(t *testing.T) 
 		[]byte("schema_version: \"1\"\nserver:\n  shared_dir_storage:\n    backend: local\n"), 0644))
 
 	srv, _ := testServer(t)
-	srv.config.SharedDirStorageConfig = &config.V1SharedDirStorageConfig{Backend: "local"}
+	srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{Backend: "local"}
 	project, _ := createTestHubManagedProject(t, srv, "Local Backend Explicit Test")
 	addSharedDirToProject(t, srv, project.ID, "build-cache")
 
@@ -1284,7 +1285,7 @@ func TestSharedDirFilesNFS_PreexistingFileAtPidComponent_ErrorsNothingCreated(t 
 }
 
 // TestSharedDirFilesNFS_InvalidNFSBlock_ConflictNeverFallsToLocal: an nfs
-// block that fails V1SharedDirStorageConfig.Validate() (here, an empty
+// block the hub cannot build a Layout from (here, an empty
 // mount_root) must report 409 Conflict, and must NEVER fall through to the
 // local-layout resolution -- a configured nfs block that fails to build a
 // Layout short-circuits resolveSharedDirPath. A sanity
@@ -1308,7 +1309,7 @@ func TestSharedDirFilesNFS_InvalidNFSBlock_ConflictNeverFallsToLocal(t *testing.
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
 	// backend: nfs but nfs.mount_root is empty -- fails Validate().
-	srv.config.SharedDirStorageConfig = invalidNFSSharedDirStorageTestConfig()
+	srv.config.ProjectStorageConfig = invalidNFSSharedDirStorageTestConfig()
 
 	rec = doRequest(t, srv, http.MethodGet, url, nil)
 	assert.Equal(t, http.StatusConflict, rec.Code,
@@ -1339,7 +1340,7 @@ func TestSharedDirArchiveNFS_InvalidNFSBlock_ConflictBodyIsFixedMessage(t *testi
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
 	// backend: nfs but nfs.mount_root is empty -- fails Validate().
-	srv.config.SharedDirStorageConfig = invalidNFSSharedDirStorageTestConfig()
+	srv.config.ProjectStorageConfig = invalidNFSSharedDirStorageTestConfig()
 
 	rec = doRequest(t, srv, http.MethodGet, archiveURL, nil)
 	require.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
@@ -1365,7 +1366,7 @@ func TestSharedDirFilesNFS_EmptyBackendStringWithNFSBlock_UsesLocal(t *testing.T
 	require.NoError(t, os.MkdirAll(hostBase, 0o2775))
 
 	srv, _ := testServer(t)
-	srv.config.SharedDirStorageConfig = &config.V1SharedDirStorageConfig{
+	srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{
 		Backend: "",
 		NFS: &config.V1NFSConfig{
 			MountRoot: tmpHome,
@@ -1421,21 +1422,18 @@ func TestSharedDirFiles_InvalidNFSBlock_FailsClosed_FixedMessage(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodGet, url, nil)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
-	for name, cfg := range map[string]*config.V1SharedDirStorageConfig{
+	for name, cfg := range map[string]*config.V1ProjectStorageConfig{
 		"missing mount_root": invalidNFSSharedDirStorageTestConfig(),
 		"no nfs block":       {Backend: "nfs"},
 		"unknown backend":    {Backend: "NFS"},
 		"relative mount_root": {Backend: "nfs", NFS: &config.V1NFSConfig{
 			MountRoot: "relative", Shares: []config.V1NFSShare{{ID: "nfs-export"}}}},
-		"unloadable settings file": nil,
+		"escaping subpath_root": {Backend: "nfs", NFS: &config.V1NFSConfig{
+			MountRoot: tmpHome, SubPathRoot: "../x", Shares: []config.V1NFSShare{{ID: "nfs-export"}}}},
+		"volume without block": {Backend: "gke-shared-volume"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			srv.config.SharedDirStorageConfig = cfg
-			srv.config.SharedDirStorageError = nil
-			if cfg == nil {
-				// config.LoadHubSharedDirStorage failed closed at startup.
-				srv.config.SharedDirStorageError = errors.New("server.shared_dir_storage: global settings unreadable")
-			}
+			srv.config.ProjectStorageConfig = cfg
 			buf := captureAuditLogs(t)
 			rec := doRequest(t, srv, http.MethodGet, url, nil)
 			assert.Equal(t, http.StatusConflict, rec.Code, "an unusable nfs block must fail closed, not serve the local layout")
@@ -1509,7 +1507,7 @@ func TestSharedDirConfigDelete_UnreadableSettings_LogsAndSkipsCleanup_NoLocalTou
 	_, err := os.Stat(localFile)
 	require.NoError(t, err, "sanity: the local file must exist before settings break")
 
-	srv.config.SharedDirStorageConfig = invalidNFSSharedDirStorageTestConfig()
+	srv.config.ProjectStorageConfig = invalidNFSSharedDirStorageTestConfig()
 
 	buf := captureAuditLogs(t)
 	rec = doRequest(t, srv, http.MethodDelete, fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts", project.ID), nil)
@@ -1904,6 +1902,8 @@ func createTestSharedWorkspaceProject(t *testing.T, srv *Server, name, remote st
 		cmd.Dir = sourceDir
 		require.NoError(t, cmd.Run(), "git %v", args)
 	}
+
+	allowLocalCloneFixture(t, sourceDir)
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{
 		Name:          name,

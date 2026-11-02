@@ -49,7 +49,7 @@ func TestWorkspaceWriteBlocked_LocalBackendExplicit(t *testing.T) {
 	srv, _ := testServer(t)
 	t.Setenv("K_SERVICE", "hub-service")
 
-	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+	srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{
 		Backend: "local",
 	}
 	assert.True(t, srv.workspaceWriteBlocked())
@@ -59,7 +59,7 @@ func TestWorkspaceWriteBlocked_NFSBackendOnCloudRun(t *testing.T) {
 	srv, _ := testServer(t)
 	t.Setenv("K_SERVICE", "hub-service")
 
-	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+	srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{
 		Backend: "nfs",
 		NFS: &config.V1NFSConfig{
 			MountRoot: "/mnt/nfs",
@@ -73,7 +73,7 @@ func TestWorkspaceWriteBlocked_CloudRunVolumeOnCloudRun(t *testing.T) {
 	srv, _ := testServer(t)
 	t.Setenv("K_SERVICE", "hub-service")
 
-	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+	srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{
 		Backend: "cloudrun-volume",
 		CloudRunVolume: &config.V1CloudRunVolumeConfig{
 			VolumeName: "workspace-vol",
@@ -86,7 +86,7 @@ func TestWorkspaceWriteBlocked_GKESharedVolumeOnCloudRun(t *testing.T) {
 	srv, _ := testServer(t)
 	t.Setenv("K_SERVICE", "hub-service")
 
-	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+	srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{
 		Backend: "gke-shared-volume",
 		GKESharedVolume: &config.V1GKESharedVolumeConfig{
 			VolumeName:  "workspace-vol",
@@ -132,7 +132,7 @@ func TestWorkspaceWriteBlocked_VolumeBackendMissingVolumeName(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			srv, _ := testServer(t)
 			t.Setenv("K_SERVICE", "hub-service")
-			srv.config.WorkspaceStorageConfig = tt.cfg
+			srv.config.ProjectStorageConfig = projectStorageFromWorkspace(tt.cfg)
 			assert.True(t, srv.workspaceWriteBlocked())
 		})
 	}
@@ -178,7 +178,7 @@ func TestWorkspaceWriteBlocked_CloudRunInstanceEvenWithLocalBackend(t *testing.T
 	t.Setenv("K_SERVICE", "")
 	t.Setenv("CLOUD_RUN_INSTANCE", "my-instance")
 
-	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+	srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{
 		Backend: "local",
 	}
 	assert.False(t, srv.workspaceWriteBlocked())
@@ -250,7 +250,7 @@ func TestSafetyGate_WritesAllowedWithNFS(t *testing.T) {
 	// uuid tree agents mount.
 	mountRoot := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share1"), 0o755))
-	srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
+	srv.config.ProjectStorageConfig = projectStorageFromWorkspace(nfsConfig(mountRoot))
 
 	project, _ := createTestHubManagedProject(t, srv, "Gate NFS Test")
 
@@ -360,7 +360,7 @@ func TestHealthCheck_NFSHealthy(t *testing.T) {
 	shareDir := filepath.Join(nfsMount, "test-share")
 	require.NoError(t, os.MkdirAll(shareDir, 0755))
 
-	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+	srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{
 		Backend: "nfs",
 		NFS: &config.V1NFSConfig{
 			MountRoot: nfsMount,
@@ -379,7 +379,7 @@ func TestHealthCheck_NFSHealthy(t *testing.T) {
 func TestHealthCheck_NFSUnhealthy(t *testing.T) {
 	srv, _ := testServer(t)
 
-	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+	srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{
 		Backend: "nfs",
 		NFS: &config.V1NFSConfig{
 			MountRoot: "/nonexistent/nfs/mount",
@@ -400,7 +400,7 @@ func TestHealthCheck_NFSUnhealthy(t *testing.T) {
 func TestReadiness_NFSUnavailable(t *testing.T) {
 	srv, _ := testServer(t)
 
-	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+	srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{
 		Backend: "nfs",
 		NFS: &config.V1NFSConfig{
 			MountRoot: "/nonexistent/nfs/mount",
@@ -424,7 +424,7 @@ func TestReadiness_NFSAvailable(t *testing.T) {
 	shareDir := filepath.Join(nfsMount, "test-share")
 	require.NoError(t, os.MkdirAll(shareDir, 0755))
 
-	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+	srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{
 		Backend: "nfs",
 		NFS: &config.V1NFSConfig{
 			MountRoot: nfsMount,
@@ -546,7 +546,7 @@ func TestCheckWorkspaceStorageHealth_MountPathPerBackend(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv.config.WorkspaceStorageConfig = tt.cfg
+			srv.config.ProjectStorageConfig = projectStorageFromWorkspace(tt.cfg)
 
 			checks := make(map[string]string)
 			srv.checkWorkspaceStorageHealth(checks)
@@ -621,7 +621,7 @@ func TestCheckWorkspaceStorageHealth_GKEOverlayDirIsUnhealthy(t *testing.T) {
 	setContainerRootPath(t, mountBase)
 	require.NoError(t, os.MkdirAll(filepath.Join(mountBase, "workspace-vol"), 0755))
 
-	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+	srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{
 		Backend: "gke-shared-volume",
 		GKESharedVolume: &config.V1GKESharedVolumeConfig{
 			VolumeName:  "workspace-vol",
@@ -644,7 +644,7 @@ func TestReadiness_GKEOverlayDirNotReady(t *testing.T) {
 	setContainerRootPath(t, mountBase)
 	require.NoError(t, os.MkdirAll(filepath.Join(mountBase, "workspace-vol"), 0755))
 
-	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+	srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{
 		Backend:         "gke-shared-volume",
 		GKESharedVolume: &config.V1GKESharedVolumeConfig{VolumeName: "workspace-vol"},
 	}
@@ -665,7 +665,7 @@ func TestCheckWorkspaceStorageHealth_GKEMountedVolumeIsHealthy(t *testing.T) {
 	mountDir := distinctDeviceDir(t)
 	setVolumeMountBase(t, filepath.Dir(mountDir))
 
-	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+	srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{
 		Backend: "gke-shared-volume",
 		GKESharedVolume: &config.V1GKESharedVolumeConfig{
 			VolumeName:  filepath.Base(mountDir),
@@ -690,7 +690,7 @@ func TestCheckWorkspaceStorageHealth_GKEVolumeMountedAtBaseIsHealthy(t *testing.
 	setVolumeMountBase(t, mountDir)
 	require.NoError(t, os.MkdirAll(filepath.Join(mountDir, "workspace-vol"), 0755))
 
-	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+	srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{
 		Backend:         "gke-shared-volume",
 		GKESharedVolume: &config.V1GKESharedVolumeConfig{VolumeName: "workspace-vol"},
 	}
@@ -752,7 +752,7 @@ func TestCheckWorkspaceStorageHealth_GKEUnverifiableMountStaysReady(t *testing.T
 	setContainerRootPath(t, filepath.Join(mountBase, "absent-root"))
 	require.NoError(t, os.MkdirAll(filepath.Join(mountBase, "workspace-vol"), 0755))
 
-	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+	srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{
 		Backend:         "gke-shared-volume",
 		GKESharedVolume: &config.V1GKESharedVolumeConfig{VolumeName: "workspace-vol"},
 	}
@@ -782,7 +782,7 @@ func TestCheckWorkspaceStorageHealth_CloudRunPlainDirIsHealthy(t *testing.T) {
 	setContainerRootPath(t, mountBase)
 	require.NoError(t, os.MkdirAll(filepath.Join(mountBase, "workspace-vol"), 0755))
 
-	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+	srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{
 		Backend:        "cloudrun-volume",
 		CloudRunVolume: &config.V1CloudRunVolumeConfig{VolumeName: "workspace-vol"},
 	}
@@ -817,7 +817,7 @@ func TestWorkspaceStorage_WriteVerifySurvivesRestart(t *testing.T) {
 
 	// Verify path selection
 	srv, _ := testServer(t)
-	srv.config.WorkspaceStorageConfig = wsCfg
+	srv.config.ProjectStorageConfig = projectStorageFromWorkspace(wsCfg)
 
 	project := &store.Project{ID: "aaaaaaaa-0000-4000-8000-0000000000aa", Slug: "restart-test"}
 	res, err := srv.projectWorkspaceResolved(project)
@@ -832,7 +832,7 @@ func TestWorkspaceStorage_WriteVerifySurvivesRestart(t *testing.T) {
 
 	// "Restart" — create a new server instance with the same config
 	srv2, _ := testServer(t)
-	srv2.config.WorkspaceStorageConfig = wsCfg
+	srv2.config.ProjectStorageConfig = projectStorageFromWorkspace(wsCfg)
 
 	// Verify the file is still accessible from the new instance
 	res2, err := srv2.projectWorkspaceResolved(project)

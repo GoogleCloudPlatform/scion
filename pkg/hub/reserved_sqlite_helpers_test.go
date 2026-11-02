@@ -79,4 +79,5 @@ func (f *fakeProxyAuthenticator) Authenticate(_ *http.Request) (*ProxyUserInfo, 
 	return f.info, f.err
 }
 
-func (f *fakeProxyAuthenticator) Name() string { return "fake" }
+func (f *fakeProxyAuthenticator) Name() string               { return "fake" }
+func (f *fakeProxyAuthenticator) AssertionHeaders() []string { return nil }

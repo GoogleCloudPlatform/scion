@@ -1985,11 +1985,18 @@ func ReadAgentTokenFile() string {
 // for this change — tracked as https://github.com/ptone/scion/issues/2213.
 func createHubClient(settings *config.Settings, endpoint string) (hubclient.Client, CredentialKind, error) {
 	authOpt, kind := selectHubCredential(endpoint)
+	// The broker-injected agent token to the broker-injected endpoint is
+	// the only exception to the transport rule (NewInjectedAgentHubClient).
+	if kind == CredentialKindAgentToken {
+		if client, ok := NewInjectedAgentHubClient(endpoint, 30*time.Second); ok {
+			return client, kind, nil
+		}
+	}
 	opts := []hubclient.Option{hubclient.WithTimeout(30 * time.Second)}
 	if authOpt != nil {
 		opts = append(opts, authOpt)
 	}
-	client, err := hubclient.New(endpoint, opts...)
+	client, err := NewUserHubClient(endpoint, opts...)
 	return client, kind, err
 }
 
@@ -2137,8 +2144,9 @@ func wrapHubError(endpoint string, err error) error {
 		return fmt.Errorf("authentication failed, login to hub with 'scion hub auth login'")
 	}
 	// No hint without an endpoint: the error already says how to configure
-	// one, and there is no hub to check.
-	if config.IsHubManagedAgent() || endpoint == "" {
+	// one, and there is no hub to check. A transport refusal sent nothing,
+	// and its text already names the fix.
+	if config.IsHubManagedAgent() || endpoint == "" || errors.Is(err, config.ErrPlaintextNonLoopback) {
 		return err
 	}
 	return fmt.Errorf("%w\n\n%s", err, HubCheckHint(endpoint))

@@ -296,7 +296,7 @@ func (s *Server) registerFlatRuntimeBroker(ctx context.Context, reg flatRegistra
 		if err := hostSAClaimWriteAllowed(hostSAClaim{}, hostSAClaimOf(b), reg.HostSAClaim); err != nil {
 			return nil, false, err
 		}
-		if err := s.store.CreateRuntimeBroker(ctx, b); err != nil {
+		if err := s.store.CreateRuntimeBrokerClearingCredentials(ctx, b); err != nil {
 			// A row that took the target after the check above.
 			var refusal *RuntimeTargetRefusal
 			if errors.Is(err, store.ErrAlreadyExists) && errors.As(s.refuseRuntimeTargetInUse(ctx, reg.Target.ID, reg.BrokerID), &refusal) {
@@ -447,9 +447,9 @@ func (s *Server) registerEmbeddedFlat(ctx context.Context, id *brokeridentity.Id
 			b.Endpoint = o.Endpoint
 			b.AutoProvide = o.AutoProvide
 			b.LastHeartbeat = time.Now()
-			if created {
-				b.Version = "0.1.0"
-			}
+			// The embedded broker runs in the hub binary, so its version is
+			// the hub's build token, written on every registration.
+			b.Version = hubBuildToken()
 			if o.Capabilities != nil {
 				caps := *o.Capabilities
 				b.Capabilities = &caps

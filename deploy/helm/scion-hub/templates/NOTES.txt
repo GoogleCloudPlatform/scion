@@ -512,10 +512,18 @@ WHAT THIS RELEASE DOES NOT YET DO
 
   workspaceStorage.nfs is enabled. The hub pod mounts the NFS export at
     {{ (include "scion-hub.nfsWorkspace" . | fromYaml).mountPath }}
-  and settings.yaml carries server.workspace_storage. The chart does not create
-  the Filestore instance, set the export's ownership, or create the
-  PersistentVolumeClaim agent pods mount the share through:
+  and settings.yaml carries server.project_storage. The chart does not create
+  the Filestore instance or set the export's ownership.
+{{- if (include "scion-hub.nfsWorkspace" . | fromYaml).pvName }}
+  Nor does it create the PersistentVolumeClaim agent pods mount the share through:
     {{ (include "scion-hub.nfsWorkspace" . | fromYaml).pvName }}
+{{- else }}
+  workspaceStorage.nfs.pvName is not set, so agent pods mount the share inline,
+  one NFS volume per directory by server path, with no NFS mount options. The
+  agent runtime creates each directory first through the hub pod's mount of the
+  export, so the export must be writable by hub.securityContext.runAsUser and
+  runAsGroup (writes not mapped to an anonymous user that cannot write).
+{{- end }}
 {{- end }}
 
   The Cloud SQL wiring is RENDERED BUT UNRUN. No part of it has been applied to

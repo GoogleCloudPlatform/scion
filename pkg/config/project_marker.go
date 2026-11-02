@@ -380,6 +380,10 @@ func mkdirAllInDir(dir, name string, perm os.FileMode) error {
 // while keeping worktrees in-repo.
 // Returns ("", nil) if the project-id file does not exist (not yet initialized for split storage).
 func GetGitProjectExternalConfigDir(projectDir string) (string, error) {
+	if IsSharedProjectConfigDir(projectDir) {
+		// A shared project configuration is its own config dir.
+		return "", nil
+	}
 	projectID, err := ReadProjectID(projectDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -449,6 +453,13 @@ func GetAgentHomePath(projectDir, agentName string) string {
 // recompute the root with this function rather than assuming
 // <projectDir>/agents.
 func SelectAgentsRoot(projectDir string, sharedWorkspace bool) string {
+	// A shared project configuration keeps every agent's state in the
+	// broker-local external root, whatever the sharing mode.
+	if root, ok, _ := sharedProjectExternalAgentsDir(projectDir); ok {
+		// Never the in-project agents root, which is on the share; on an
+		// error root is the unused empty-slug broker-local root.
+		return root
+	}
 	if sharedWorkspace {
 		if externalDir, err := GetGitProjectExternalAgentsDir(projectDir); err == nil && externalDir != "" {
 			return externalDir
@@ -472,6 +483,9 @@ func SelectAgentsRoot(projectDir string, sharedWorkspace bool) string {
 // <projectDir>/agents/<name>/ — preserving the worktree-relative layout that
 // git's worktree pointers depend on.
 func GetAgentDir(projectDir, agentName string, sharedWorkspace bool) string {
+	if dir, ok, _ := sharedProjectAgentDir(projectDir, agentName); ok {
+		return dir
+	}
 	return filepath.Join(SelectAgentsRoot(projectDir, sharedWorkspace), agentName)
 }
 
@@ -487,6 +501,9 @@ func GetAgentDir(projectDir, agentName string, sharedWorkspace bool) string {
 // external in worktree mode — only home/ does). Otherwise returns the
 // in-project path.
 func ResolveAgentDir(projectDir, agentName string) string {
+	if dir, ok, _ := sharedProjectAgentDir(projectDir, agentName); ok {
+		return dir
+	}
 	if externalDir, err := GetGitProjectExternalAgentsDir(projectDir); err == nil && externalDir != "" {
 		ext := filepath.Join(externalDir, agentName)
 		if _, err := os.Stat(filepath.Join(ext, "scion-agent.json")); err == nil {
@@ -564,6 +581,18 @@ func IsAgentStateConflict(err error) bool {
 // It does not check existence; callers decide whether the agent's dir must
 // already exist.
 func AgentsRootForProject(projectDir string, sharedWorkspace bool, hubProjectID string) (string, error) {
+	// A shared project configuration: the broker-local external root, for
+	// every sharing mode, and only for the project it names.
+	if id, ok := sharedProjectConfigID(projectDir); ok {
+		if hubProjectID != "" && hubProjectID != id {
+			return "", fmt.Errorf("%w: the shared project configuration names another project", ErrAgentStateDirUnavailable)
+		}
+		root, _, err := sharedProjectExternalAgentsDir(projectDir)
+		if err != nil {
+			return "", fmt.Errorf("%w: %v", ErrAgentStateDirUnavailable, err)
+		}
+		return root, nil
+	}
 	if !sharedWorkspace {
 		return filepath.Join(projectDir, "agents"), nil
 	}
@@ -602,6 +631,13 @@ func AgentDirForProject(projectDir, agentName string, sharedWorkspace bool, hubP
 	dir := filepath.Clean(filepath.Join(root, agentName))
 	if filepath.Dir(dir) != root || filepath.Base(dir) != agentName {
 		return "", fmt.Errorf("agent %q is not a single path element under %s", agentName, root)
+	}
+	if IsSharedProjectConfigDir(projectDir) {
+		// An agent provisioned before its project's configuration moved to
+		// the project root keeps its in-project state (look-up fallback).
+		if resolved, ok, err := sharedProjectAgentDir(projectDir, agentName); ok && err == nil {
+			return resolved, nil
+		}
 	}
 	return dir, nil
 }

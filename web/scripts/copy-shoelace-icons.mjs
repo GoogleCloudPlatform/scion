@@ -145,6 +145,7 @@ const USED_ICONS = [
   'house',
   'hourglass-bottom',
   'hourglass-split',
+  'image',
   'info-circle',
   'info-circle-fill',
   'journal-text',

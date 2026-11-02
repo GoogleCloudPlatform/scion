@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -73,12 +72,11 @@ func TestGitHubSkillResolver_HappyPath(t *testing.T) {
 		_, _ = w.Write([]byte(testCommitSHA))
 	})
 
-	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, r *http.Request) {
-		ref := r.URL.Query().Get("ref")
-		if ref != testCommitSHA {
-			t.Errorf("expected ref=%s, got %s", testCommitSHA, ref)
+	mux.HandleFunc("/repos/owner/repo/git/trees/"+testCommitSHA+":skills/my-skill", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("recursive"); got != "1" {
+			t.Errorf("expected recursive=1, got %q", got)
 		}
-		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+		_ = writeTestTree(w, []fakeTreeFile{
 			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: len(skillContent)},
 			{Name: "README.md", Path: "skills/my-skill/README.md", Type: "file", Size: len(readmeContent)},
 		})
@@ -147,8 +145,8 @@ func TestGitHubSkillResolver_AuthHeader(t *testing.T) {
 		gotAuth = r.Header.Get("Authorization")
 		_, _ = w.Write([]byte(testCommitSHA))
 	})
-	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+	mux.HandleFunc("/repos/owner/repo/git/trees/"+testCommitSHA+":skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+		_ = writeTestTree(w, []fakeTreeFile{
 			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
 		})
 	})
@@ -204,7 +202,7 @@ func TestGitHubSkillResolver_NotFound_SkillDir(t *testing.T) {
 	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(testCommitSHA))
 	})
-	mux.HandleFunc("/repos/owner/repo/contents/skills/missing-skill", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/repos/owner/repo/git/trees/"+testCommitSHA+":skills/missing-skill", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	})
 
@@ -306,8 +304,8 @@ func TestGitHubSkillResolver_RetryOn5xx(t *testing.T) {
 		}
 		_, _ = w.Write([]byte(testCommitSHA))
 	})
-	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+	mux.HandleFunc("/repos/owner/repo/git/trees/"+testCommitSHA+":skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+		_ = writeTestTree(w, []fakeTreeFile{
 			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
 		})
 	})
@@ -755,8 +753,8 @@ func TestGitHubSkillResolver_RawDownloadStall_FailsFast(t *testing.T) {
 	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(testCommitSHA))
 	})
-	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+	mux.HandleFunc("/repos/owner/repo/git/trees/"+testCommitSHA+":skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+		_ = writeTestTree(w, []fakeTreeFile{
 			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
 		})
 	})
@@ -863,8 +861,8 @@ func TestGitHubSkillResolver_TransientThenSuccess_FitsWithinBudget(t *testing.T)
 		}
 		_, _ = w.Write([]byte(testCommitSHA))
 	})
-	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+	mux.HandleFunc("/repos/owner/repo/git/trees/"+testCommitSHA+":skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+		_ = writeTestTree(w, []fakeTreeFile{
 			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
 		})
 	})
@@ -914,8 +912,8 @@ func TestGitHubSkillResolver_BackoffLogsStatusAndRetryAfterAtWarn(t *testing.T) 
 		}
 		_, _ = w.Write([]byte(testCommitSHA))
 	})
-	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+	mux.HandleFunc("/repos/owner/repo/git/trees/"+testCommitSHA+":skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+		_ = writeTestTree(w, []fakeTreeFile{
 			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
 		})
 	})
@@ -957,9 +955,9 @@ func TestGitHubSkillResolver_ResolutionCacheHit(t *testing.T) {
 		apiCalls++
 		_, _ = w.Write([]byte(testCommitSHA))
 	})
-	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/repos/owner/repo/git/trees/"+testCommitSHA+":skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
 		apiCalls++
-		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+		_ = writeTestTree(w, []fakeTreeFile{
 			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
 		})
 	})
@@ -1035,8 +1033,8 @@ func TestGitHubSkillResolver_DefaultBranch(t *testing.T) {
 		requestedPath = r.URL.Path
 		_, _ = w.Write([]byte(testCommitSHA))
 	})
-	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+	mux.HandleFunc("/repos/owner/repo/git/trees/"+testCommitSHA+":skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+		_ = writeTestTree(w, []fakeTreeFile{
 			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
 		})
 	})
@@ -1064,8 +1062,8 @@ func TestGitHubSkillResolver_MixedBatch(t *testing.T) {
 	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(testCommitSHA))
 	})
-	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+	mux.HandleFunc("/repos/owner/repo/git/trees/"+testCommitSHA+":skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+		_ = writeTestTree(w, []fakeTreeFile{
 			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
 		})
 	})
@@ -1269,8 +1267,8 @@ func TestGitHubSkillResolver_PerURIToken(t *testing.T) {
 		gotAuth = r.Header.Get("Authorization")
 		_, _ = w.Write([]byte(testCommitSHA))
 	})
-	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+	mux.HandleFunc("/repos/owner/repo/git/trees/"+testCommitSHA+":skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+		_ = writeTestTree(w, []fakeTreeFile{
 			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
 		})
 	})
@@ -1338,9 +1336,9 @@ func TestGitHubSkillResolver_CacheHitCredentialCheck(t *testing.T) {
 		apiCalls++
 		_, _ = w.Write([]byte(testCommitSHA))
 	})
-	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/repos/owner/repo/git/trees/"+testCommitSHA+":skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
 		apiCalls++
-		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+		_ = writeTestTree(w, []fakeTreeFile{
 			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
 		})
 	})
@@ -1445,9 +1443,9 @@ func TestGitHubSkillResolver_CrossCredentialCacheIsolation(t *testing.T) {
 		apiCalls++
 		_, _ = w.Write([]byte(testCommitSHA))
 	})
-	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/repos/owner/repo/git/trees/"+testCommitSHA+":skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
 		apiCalls++
-		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+		_ = writeTestTree(w, []fakeTreeFile{
 			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
 		})
 	})
@@ -1547,12 +1545,12 @@ func TestGitHubPrivateRepoInstall_NoDoubleDownload(t *testing.T) {
 	})
 
 	// Contents listing — requires auth.
-	mux.HandleFunc("/repos/private-org/private-repo/contents/skills/secret-skill", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/repos/private-org/private-repo/git/trees/"+testCommitSHA+":skills/secret-skill", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") == "" {
 			http.NotFound(w, r)
 			return
 		}
-		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+		_ = writeTestTree(w, []fakeTreeFile{
 			{Name: "SKILL.md", Path: "skills/secret-skill/SKILL.md", Type: "file", Size: len(skillContent)},
 			{Name: "README.md", Path: "skills/secret-skill/README.md", Type: "file", Size: len(readmeContent)},
 		})
@@ -1814,8 +1812,8 @@ func TestGitHubSkillResolver_FullSHAPinnedSkill(t *testing.T) {
 	})
 
 	// Contents and raw endpoints are needed for the full resolution flow.
-	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+	mux.HandleFunc("/repos/owner/repo/git/trees/"+testCommitSHA+":skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+		_ = writeTestTree(w, []fakeTreeFile{
 			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
 		})
 	})
@@ -1858,9 +1856,9 @@ func TestGitHubSkillResolver_SharedCacheSingleton(t *testing.T) {
 		apiCalls++
 		_, _ = w.Write([]byte(testCommitSHA))
 	})
-	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/repos/owner/repo/git/trees/"+testCommitSHA+":skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
 		apiCalls++
-		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+		_ = writeTestTree(w, []fakeTreeFile{
 			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
 		})
 	})
@@ -2083,8 +2081,8 @@ func TestTokenForRef_ConventionKeyIntegration(t *testing.T) {
 		gotAuth = r.Header.Get("Authorization")
 		_, _ = w.Write([]byte(testCommitSHA))
 	})
-	mux.HandleFunc("/repos/scion-frontiers/scion-repo-contrib/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+	mux.HandleFunc("/repos/scion-frontiers/scion-repo-contrib/git/trees/"+testCommitSHA+":skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+		_ = writeTestTree(w, []fakeTreeFile{
 			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
 		})
 	})
@@ -2127,8 +2125,8 @@ func TestTokenForRef_OwnerKeyIntegration(t *testing.T) {
 		gotAuth = r.Header.Get("Authorization")
 		_, _ = w.Write([]byte(testCommitSHA))
 	})
-	mux.HandleFunc("/repos/scion-frontiers/other-repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+	mux.HandleFunc("/repos/scion-frontiers/other-repo/git/trees/"+testCommitSHA+":skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+		_ = writeTestTree(w, []fakeTreeFile{
 			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
 		})
 	})
@@ -2171,8 +2169,8 @@ func TestTokenForRef_ExplicitTokenWinsOverConvention(t *testing.T) {
 		gotAuth = r.Header.Get("Authorization")
 		_, _ = w.Write([]byte(testCommitSHA))
 	})
-	mux.HandleFunc("/repos/scion-frontiers/scion-repo-contrib/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+	mux.HandleFunc("/repos/scion-frontiers/scion-repo-contrib/git/trees/"+testCommitSHA+":skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+		_ = writeTestTree(w, []fakeTreeFile{
 			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
 		})
 	})
@@ -2237,15 +2235,15 @@ func (s *stubSkillResolver) Resolve(_ context.Context, _ []api.SkillReference, _
 	return s.result, nil
 }
 
-// serveSkillWithRawResponder wires the commit and contents endpoints for
+// serveSkillWithRawResponder wires the commit and git tree endpoints for
 // gh://owner/repo/my-skill@main to succeed, and hands the raw SKILL.md
 // download to raw, so tests can script the download path alone.
 func serveSkillWithRawResponder(mux *http.ServeMux, raw http.HandlerFunc) {
 	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(testCommitSHA))
 	})
-	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+	mux.HandleFunc("/repos/owner/repo/git/trees/"+testCommitSHA+":skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+		_ = writeTestTree(w, []fakeTreeFile{
 			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
 		})
 	})
@@ -2429,8 +2427,8 @@ func TestGitHubSkillResolver_RawDownloadBodyTimeout_ClassifiedAsTimeout(t *testi
 	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(testCommitSHA))
 	})
-	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+	mux.HandleFunc("/repos/owner/repo/git/trees/"+testCommitSHA+":skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+		_ = writeTestTree(w, []fakeTreeFile{
 			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 1024},
 		})
 	})
@@ -2521,8 +2519,8 @@ func TestGitHubSkillResolver_RouteFilter_CredentialedRefRoutesDirectlyToFallback
 	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(testCommitSHA))
 	})
-	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+	mux.HandleFunc("/repos/owner/repo/git/trees/"+testCommitSHA+":skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+		_ = writeTestTree(w, []fakeTreeFile{
 			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
 		})
 	})
@@ -2597,12 +2595,12 @@ func TestGitHubSkillResolver_CrossProjectCredentialIsolation(t *testing.T) {
 		<-proceed
 		_, _ = w.Write([]byte(testCommitSHA))
 	})
-	mux.HandleFunc("/repos/acme/private/contents/skills/s", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/repos/acme/private/git/trees/"+testCommitSHA+":skills/s", func(w http.ResponseWriter, r *http.Request) {
 		if !authOK(r) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+		_ = writeTestTree(w, []fakeTreeFile{
 			{Name: "SKILL.md", Path: "skills/s/SKILL.md", Type: "file", Size: 6},
 		})
 	})
@@ -2715,12 +2713,12 @@ func TestGitHubSkillResolver_SameProjectDifferentUserCredentialIsolation(t *test
 		<-proceed
 		_, _ = w.Write([]byte(testCommitSHA))
 	})
-	mux.HandleFunc("/repos/acme/private/contents/skills/s", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/repos/acme/private/git/trees/"+testCommitSHA+":skills/s", func(w http.ResponseWriter, r *http.Request) {
 		if !authOK(r) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+		_ = writeTestTree(w, []fakeTreeFile{
 			{Name: "SKILL.md", Path: "skills/s/SKILL.md", Type: "file", Size: 6},
 		})
 	})
@@ -2868,12 +2866,12 @@ func TestGitHubSkillResolver_SameProjectSameUserDifferentTokenIsolation(t *testi
 				}
 				_, _ = w.Write([]byte(testCommitSHA))
 			})
-			mux.HandleFunc("/repos/acme/private/contents/skills/s", func(w http.ResponseWriter, r *http.Request) {
+			mux.HandleFunc("/repos/acme/private/git/trees/"+testCommitSHA+":skills/s", func(w http.ResponseWriter, r *http.Request) {
 				if !authOK(r) {
 					w.WriteHeader(http.StatusNotFound)
 					return
 				}
-				_ = json.NewEncoder(w).Encode([]githubContentEntry{
+				_ = writeTestTree(w, []fakeTreeFile{
 					{Name: "SKILL.md", Path: "skills/s/SKILL.md", Type: "file", Size: 6},
 				})
 			})
@@ -3026,12 +3024,12 @@ func TestGitHubSkillResolver_ScopeLayeringIsolation(t *testing.T) {
 				}
 				_, _ = w.Write([]byte(testCommitSHA))
 			})
-			mux.HandleFunc("/repos/acme/shared/contents/skills/s", func(w http.ResponseWriter, r *http.Request) {
+			mux.HandleFunc("/repos/acme/shared/git/trees/"+testCommitSHA+":skills/s", func(w http.ResponseWriter, r *http.Request) {
 				if !authOK(r) {
 					w.WriteHeader(http.StatusNotFound)
 					return
 				}
-				_ = json.NewEncoder(w).Encode([]githubContentEntry{
+				_ = writeTestTree(w, []fakeTreeFile{
 					{Name: "SKILL.md", Path: "skills/s/SKILL.md", Type: "file", Size: 6},
 				})
 			})
@@ -3143,9 +3141,9 @@ func TestGitHubSkillResolver_FullSHARefNeverServedStale(t *testing.T) {
 	var contentsCalls int32
 	var content atomic.Value
 	content.Store("v1")
-	mux.HandleFunc("/repos/acme/private/contents/skills/s", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/repos/acme/private/git/trees/"+testCommitSHA+":skills/s", func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&contentsCalls, 1)
-		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+		_ = writeTestTree(w, []fakeTreeFile{
 			{Name: "SKILL.md", Path: "skills/s/SKILL.md", Type: "file", Size: 6},
 		})
 	})
@@ -3201,8 +3199,8 @@ func TestGitHubSkillResolver_CoalescedCallersKeepOwnAlias(t *testing.T) {
 		<-proceed
 		_, _ = w.Write([]byte(testCommitSHA))
 	})
-	mux.HandleFunc("/repos/acme/shared/contents/skills/s", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+	mux.HandleFunc("/repos/acme/shared/git/trees/"+testCommitSHA+":skills/s", func(w http.ResponseWriter, r *http.Request) {
+		_ = writeTestTree(w, []fakeTreeFile{
 			{Name: "SKILL.md", Path: "skills/s/SKILL.md", Type: "file", Size: 6},
 		})
 	})
@@ -3285,8 +3283,8 @@ func TestGitHubSkillResolver_CacheHitKeepsOwnScopeAndOptional(t *testing.T) {
 		commitCalls.Add(1)
 		_, _ = w.Write([]byte(testCommitSHA))
 	})
-	mux.HandleFunc("/repos/acme/shared/contents/skills/s", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+	mux.HandleFunc("/repos/acme/shared/git/trees/"+testCommitSHA+":skills/s", func(w http.ResponseWriter, r *http.Request) {
+		_ = writeTestTree(w, []fakeTreeFile{
 			{Name: "SKILL.md", Path: "skills/s/SKILL.md", Type: "file", Size: 7},
 		})
 	})

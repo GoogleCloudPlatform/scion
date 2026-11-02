@@ -56,7 +56,7 @@ func (c *ghCooldownClock) Advance(d time.Duration) {
 	c.t = c.t.Add(d)
 }
 
-// ghCooldownFake serves the commits and contents endpoints for acme/skills,
+// ghCooldownFake serves the commits and git trees endpoints for acme/skills,
 // and answers every request for acme/limited with a 429.
 type ghCooldownFake struct {
 	*httptest.Server
@@ -72,11 +72,10 @@ func newGHCooldownFake(t *testing.T) *ghCooldownFake {
 		f.calls.Add(1)
 		_, _ = w.Write([]byte(ghCooldownTestSHA))
 	})
-	mux.HandleFunc("/repos/acme/skills/contents/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/repos/acme/skills/git/trees/", func(w http.ResponseWriter, _ *http.Request) {
 		f.calls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[{"name":"SKILL.md","path":"` + r.URL.Path[len("/repos/acme/skills/contents/"):] +
-			`/SKILL.md","sha":"x","size":1,"type":"file"}]`))
+		_, _ = w.Write([]byte(ghTreeTestSingleFile))
 	})
 	mux.HandleFunc("/repos/acme/limited/", func(w http.ResponseWriter, _ *http.Request) {
 		f.limitedCalls.Add(1)
@@ -121,7 +120,7 @@ func putGHCooldownEntry(t *testing.T, srv *Server, uri string, expiresAt time.Ti
 	cacheKey := computeCacheKey(ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, "public")
 	require.NoError(t, srv.ghResolutionStore.Put(context.Background(), cacheKey, GitHubCacheEntry{
 		CommitSHA:   ghCooldownTestSHA,
-		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.invalid/SKILL.md", Hash: "x", Size: 1}},
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.invalid/SKILL.md", Hash: "x", Size: 1, Mode: "0644"}},
 		BundleHash:  "sha256:cached",
 		TokenScope:  "public",
 		ExpiresAt:   expiresAt,
@@ -159,7 +158,7 @@ func TestSkillsResolve_GHRateLimitedRefInBatch(t *testing.T) {
 		assert.Equal(t, "rate limited by the skill source", e.Message, "%s", e.URI)
 	}
 	assert.Equal(t, int64(1), gh.limitedCalls.Load(), "the limited ref must be requested once, with no retry")
-	assert.Equal(t, int64(2), gh.calls.Load(), "only the first ref's commit + contents may be requested")
+	assert.Equal(t, int64(2), gh.calls.Load(), "only the first ref's commit + tree may be requested")
 
 	resp = resolve(t, limited, later)
 	require.Len(t, resp.Errors, 2)

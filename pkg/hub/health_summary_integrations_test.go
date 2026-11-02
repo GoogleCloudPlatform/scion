@@ -773,7 +773,7 @@ func TestHandleHealthSummary_OneBrokerPassForIntegrations(t *testing.T) {
 	srv.store = counting
 
 	// One standalone pass, for the expected page count.
-	list, pluginNames, err := srv.healthSummaryBrokers(ctx, nil)
+	list, pluginNames, err := srv.healthSummaryBrokers(ctx, nil, "")
 	require.NoError(t, err)
 	onePass := counting.calls
 	require.Greater(t, onePass, 1, "the listing must span several pages")

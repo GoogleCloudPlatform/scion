@@ -111,8 +111,16 @@ func hasLegacyPlacement(k *api.KubernetesConfig) bool {
 // or when they configure placement on a Kubernetes runtime entry or on a
 // profile of one (a profile whose runtime entry is not defined counts).
 // It reads the request's settings view, so a flat instance request, which
-// has no profile tier, is checked against its runtime entries only.
+// has no profile tier, is checked against its runtime entries; and a
+// request of a flat instance with a Kubernetes runtime target always fails
+// here, because that instance's placement (and its check of the agent's
+// own fields) applies to every start, even with none configured.
 func checkUnresolvedPlacement(ctx context.Context, agentName string) error {
+	if p := config.FlatInstancePolicyFrom(ctx); p != nil && p.Target.Type == config.RuntimeTargetTypeKubernetes {
+		slog.Warn("Start: the flat instance's placement was not resolved by the agent runtime server",
+			"agent", agentName, "instance", p.InstanceKey)
+		return errors.New(placementUnresolvedCause)
+	}
 	gs, _, err := config.LoadGlobalSettingsWithOverlayFor(ctx)
 	if err != nil {
 		slog.Warn("Start: global settings could not be read; refusing a Kubernetes start without resolved placement",

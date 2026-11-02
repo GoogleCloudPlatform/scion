@@ -55,13 +55,24 @@ import { TouchPrimaryController } from '../../../utils/input-modality.js';
 import { LongPressController, type LongPressPoint } from './long-press.js';
 import { PullToRefreshController, type PullState } from './pull-to-refresh.js';
 import {
+  MenuFocus,
   placeMenuInViewport,
-  renderMenuRows,
+  renderMenu,
   runMenuAction,
   shouldUseMenuSheet,
   type MenuAction,
 } from './context-menu.js';
 import type { ActionSheetSelectDetail } from './chat-action-sheet.js';
+import { stateManager } from '../../../client/state.js';
+import { chatStarsLocalChanges, starredMessagesEnabled } from '../../../client/chat-stars.js';
+import { FEATURE_FLAGS_CHANGED_EVENT } from '../../../utils/feature-flags.js';
+import {
+  STARRED_RAIL_RECONCILE_MS,
+  StarredRailController,
+  groupStarredRows,
+  starredRailSort,
+  type StarredConversationRow,
+} from '../../../client/chat-starred-rail.js';
 import './chat-action-sheet.js';
 import './chat-avatar.js';
 import { focusElement } from '../focus-moved.js';
@@ -445,6 +456,8 @@ export interface DMSelectDetail {
   peerId: string;
   peerKind: 'user' | 'agent';
   displayName: string;
+  /** 'starred' when chosen from the Starred rail: open the starred-only center. */
+  messageFilter?: 'starred';
 }
 
 /** Event detail for thread selection. */
@@ -454,6 +467,39 @@ export interface ThreadSelectDetail {
   projectSlug: string;
   threadName: string;
   defaultAgent: string;
+  /** 'starred' when chosen from the Starred rail: open the starred-only center. */
+  messageFilter?: 'starred';
+}
+
+/** The rail's conversation filter. */
+export type RailFilter = 'all' | 'unread' | 'starred';
+
+/** Detail of the rail's `rail-filter-change` event, sent when the user picks a filter. */
+export interface RailFilterChangeDetail {
+  filter: RailFilter;
+}
+
+/** localStorage key of the selected rail filter (the only thing persisted). */
+export const RAIL_FILTER_STORAGE_KEY = 'scion-chat-space-filter';
+
+/**
+ * The peer of a DM key for `userId` (the slot that is not the caller's user
+ * slot), or null for a malformed key.
+ */
+export function dmKeyPeer(
+  key: string,
+  userId: string
+): { kind: 'user' | 'agent'; id: string } | null {
+  const parts = key.split(':');
+  if (parts.length !== 5 || parts[0] !== 'dm') return null;
+  let kind = parts[1];
+  let id = parts[2];
+  if (kind === 'user' && id === userId) {
+    kind = parts[3];
+    id = parts[4];
+  }
+  if ((kind !== 'user' && kind !== 'agent') || !id) return null;
+  return { kind, id };
 }
 
 /**
@@ -499,6 +545,15 @@ export class ScionChatSpaceRail extends LitElement {
   @property({ attribute: false })
   dms: ChatDMListEntry[] = [];
 
+  /**
+   * The open conversation's center filter ('starred' for the starred-only
+   * center), from the page. A change keeps the rail consistent with it: a
+   * starred-only center shows the Starred rail, and leaving it for full
+   * context (a jump, Show all, a permalink) returns the rail to All.
+   */
+  @property({ attribute: false })
+  centerFilter: '' | 'starred' = '';
+
   @state() private spaces: ChatSpace[] = [];
   @state() private threadsBySpace = new Map<string, ChatSpaceThread[]>();
   /** Spaces whose thread list is being fetched (drives the per-space loading state). */
@@ -539,8 +594,17 @@ export class ScionChatSpaceRail extends LitElement {
   });
   @state() private renamingThread: string | null = null;
   @state() private renameValue = '';
-  /** Space filter: 'all' shows everything, 'unread' shows only spaces with unread. */
-  @state() private spaceFilter: 'all' | 'unread' = 'all';
+  /**
+   * Space filter: 'all' shows everything, 'unread' only spaces with unread,
+   * 'starred' the conversations with the user's stars (from the hub's
+   * starred-conversations endpoint, never from the loaded rail).
+   */
+  @state() private spaceFilter: RailFilter = 'all';
+  /** The Starred rail's rows and paging (active only under the Starred filter). */
+  private readonly starred = new StarredRailController();
+  /** Bumped by every Starred rail change, so the rail re-renders. */
+  @state() private starredVersion = 0;
+  private _starredPoll: ReturnType<typeof setInterval> | null = null;
   /** Project id of the space header currently being dragged, if any. */
   @state() private draggingSpaceId: string | null = null;
   /** Project id of the space header the drag is hovering over. */
@@ -1054,8 +1118,15 @@ export class ScionChatSpaceRail extends LitElement {
       color: var(--scion-text, #1e293b);
     }
 
-    .context-menu-item:hover {
+    .context-menu-item:hover,
+    .context-menu-item:focus {
       background: var(--scion-bg-subtle, #f1f5f9);
+      outline: none;
+    }
+
+    .context-menu-item:focus-visible {
+      outline: 2px solid var(--scion-primary, #3b82f6);
+      outline-offset: -2px;
     }
 
     .context-menu-item.danger {
@@ -1179,6 +1250,44 @@ export class ScionChatSpaceRail extends LitElement {
 
     .filter-toggle button sl-icon {
       font-size: var(--chat-fs-sm);
+    }
+
+    .filter-toggle button:focus-visible {
+      outline: 2px solid var(--scion-primary, #3b82f6);
+      outline-offset: -2px;
+    }
+
+    .starred-state {
+      padding: 0.75rem;
+      font-size: var(--chat-fs-sm);
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .starred-state p {
+      margin: 0 0 0.5rem;
+    }
+
+    .starred-empty-title {
+      font-size: var(--chat-fs-md);
+      color: var(--scion-text, #1e293b);
+      font-weight: 500;
+    }
+
+    .starred-refresh-error {
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+      flex-wrap: wrap;
+    }
+
+    .starred-more {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      padding: 0.5rem;
+      font-size: var(--chat-fs-sm);
+      color: var(--scion-text-muted, #64748b);
     }
 
     .sort-btn {
@@ -1312,9 +1421,21 @@ export class ScionChatSpaceRail extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
-    // Restore persisted filter/sort from localStorage
-    const savedFilter = localStorage.getItem('scion-chat-space-filter');
+    // Restore persisted filter/sort from localStorage. A stored Starred
+    // filter is ignored while the experiment is off.
+    const savedFilter = localStorage.getItem(RAIL_FILTER_STORAGE_KEY);
     if (savedFilter === 'unread') this.spaceFilter = 'unread';
+    if (savedFilter === 'starred' && starredMessagesEnabled()) this.spaceFilter = 'starred';
+    this.starred.addEventListener('change', this.handleStarredChange);
+    stateManager.addEventListener('chat-stars-updated', this.handleStarredInvalidate);
+    stateManager.addEventListener('connected', this.handleStarredInvalidate);
+    chatStarsLocalChanges.addEventListener('changed', this.handleStarredInvalidate);
+    // Returning to the tab refetches once (visibilitychange covers it; a
+    // window focus listener as well would refetch twice).
+    document.addEventListener('visibilitychange', this.handleStarredVisibility);
+    // A flag change re-runs syncStarredFilter (leaving Starred if it is off).
+    window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.handleFlagsChanged);
+    if (this.spaceFilter === 'starred') this.startStarred();
     // Collapsed thread-groups are restored in willUpdate, not here — see its
     // doc comment (round-4 review, N7).
     void this.loadData();
@@ -1343,6 +1464,7 @@ export class ScionChatSpaceRail extends LitElement {
       this._collapseLoadedFor = this.currentUserId;
       this.collapsedGroups = loadCollapsedGroupIds(this.currentUserId);
     }
+    this.syncStarredFilter(_changedProperties);
     // Expanding a space is asking for its threads: one whose last load
     // failed (and is out of automatic retries) tries again.
     const wasCollapsed = _changedProperties.get('collapsedSpaces') as Set<string> | undefined;
@@ -1365,10 +1487,9 @@ export class ScionChatSpaceRail extends LitElement {
 
   override updated(changedProperties: Map<string, unknown>): void {
     if ((this.contextMenuTarget || this.groupContextMenuTarget) && !this.menuAsSheet) {
-      placeMenuInViewport(
-        this.renderRoot.querySelector<HTMLElement>('.context-menu'),
-        this.contextMenuPos
-      );
+      const menu = this.renderRoot.querySelector<HTMLElement>('.context-menu');
+      placeMenuInViewport(menu, this.contextMenuPos);
+      this.menuFocus.afterRender(menu);
     }
     if (changedProperties.has('selectedProjectId') && this.selectedProjectId) {
       this.expandSpaceForSelectedKey();
@@ -1508,6 +1629,13 @@ export class ScionChatSpaceRail extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.pullToRefresh.detach();
+    this.starred.removeEventListener('change', this.handleStarredChange);
+    stateManager.removeEventListener('chat-stars-updated', this.handleStarredInvalidate);
+    stateManager.removeEventListener('connected', this.handleStarredInvalidate);
+    chatStarsLocalChanges.removeEventListener('changed', this.handleStarredInvalidate);
+    document.removeEventListener('visibilitychange', this.handleStarredVisibility);
+    window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.handleFlagsChanged);
+    this.stopStarred();
     if (this._pullAnnounceTimer) {
       clearTimeout(this._pullAnnounceTimer);
       this._pullAnnounceTimer = null;
@@ -1541,13 +1669,14 @@ export class ScionChatSpaceRail extends LitElement {
   private _outsideClickHandler: ((e: Event) => void) | null = null;
 
   private handleOutsideClick(): void {
-    if (this.contextMenuTarget) {
-      this.contextMenuTarget = null;
-    }
-    if (this.groupContextMenuTarget) {
-      this.groupContextMenuTarget = null;
-    }
+    if (!this.contextMenuTarget && !this.groupContextMenuTarget) return;
+    this.contextMenuTarget = null;
+    this.groupContextMenuTarget = null;
+    this.menuFocus.closed();
   }
+
+  /** Keyboard focus around the thread and group popup menus. */
+  private readonly menuFocus = new MenuFocus();
 
   /**
    * Reload all data (called externally when SSE events indicate changes).
@@ -1557,6 +1686,9 @@ export class ScionChatSpaceRail extends LitElement {
    * the call will do.
    */
   async reload(options: { startedAfter?: number } = {}): Promise<void> {
+    // Topic and activity changes reach the rail through reload: the Starred
+    // rail refetches too (coalesced by its controller).
+    if (this.spaceFilter === 'starred') void this.starred.refresh();
     await this.loadData(options.startedAfter);
   }
 
@@ -1598,6 +1730,15 @@ export class ScionChatSpaceRail extends LitElement {
       await this.visibleThreadLoads();
       return ok;
     })();
+    // Under the Starred filter a refresh refetches the starred conversations.
+    if (this.spaceFilter === 'starred') {
+      extra.push(
+        (async (): Promise<boolean> => {
+          await this.starred.refresh();
+          return this.starred.error === '';
+        })()
+      );
+    }
     const results = await Promise.allSettled([rail, ...extra]);
     if (!this.pullToRefresh.showingRefresh) return;
     const ok = results.every((r) => r.status === 'fulfilled' && r.value !== false);
@@ -3563,6 +3704,7 @@ export class ScionChatSpaceRail extends LitElement {
     this.contextMenuTarget = { type: 'thread', thread, projectId };
     this.contextMenuPos = at;
     this.menuAsSheet = shouldUseMenuSheet();
+    if (!this.menuAsSheet) this.menuFocus.opened();
   }
 
   /** Close whichever row menu is open, popup or sheet. */
@@ -4226,20 +4368,32 @@ export class ScionChatSpaceRail extends LitElement {
   private renderToolbar() {
     return html`
       <div class="rail-toolbar">
-        <div class="filter-toggle">
+        <div class="filter-toggle" role="group" aria-label="Show conversations">
           <button
             class=${this.spaceFilter === 'all' ? 'active' : ''}
-            @click=${() => this.setSpaceFilter('all')}
+            aria-pressed=${this.spaceFilter === 'all' ? 'true' : 'false'}
+            @click=${() => this.setSpaceFilter('all', true)}
           >
             All
           </button>
           <button
             class=${this.spaceFilter === 'unread' ? 'active' : ''}
-            @click=${() => this.setSpaceFilter('unread')}
+            aria-pressed=${this.spaceFilter === 'unread' ? 'true' : 'false'}
+            @click=${() => this.setSpaceFilter('unread', true)}
           >
-            <sl-icon name="envelope"></sl-icon>
+            <sl-icon name="envelope" aria-hidden="true"></sl-icon>
             Unread
           </button>
+          ${starredMessagesEnabled()
+            ? html`<button
+                class=${this.spaceFilter === 'starred' ? 'active' : ''}
+                aria-pressed=${this.spaceFilter === 'starred' ? 'true' : 'false'}
+                @click=${() => this.setSpaceFilter('starred', true)}
+              >
+                <sl-icon name="star" aria-hidden="true"></sl-icon>
+                Starred
+              </button>`
+            : nothing}
         </div>
         <sl-dropdown>
           <sl-icon-button
@@ -4282,16 +4436,130 @@ export class ScionChatSpaceRail extends LitElement {
     `;
   }
 
-  /** Set space filter and persist to localStorage. */
-  private setSpaceFilter(filter: 'all' | 'unread'): void {
+  /**
+   * Set the space filter. `fromUser` is a pick in the filter control: only
+   * that is persisted to localStorage (the only thing the rail persists),
+   * and the page is told (`rail-filter-change`) so it can apply or clear
+   * the starred-only center of an open conversation. A change the page or
+   * the experiment drives (a full-context permalink, a jump, the
+   * experiment turning off) leaves the stored preference alone.
+   */
+  private setSpaceFilter(filter: RailFilter, fromUser = false): void {
+    if (filter === 'starred' && !starredMessagesEnabled()) filter = 'all';
     if (this.spaceFilter === filter) return;
     this.spaceFilter = filter;
-    if (filter === 'all') {
-      localStorage.removeItem('scion-chat-space-filter');
-    } else {
-      localStorage.setItem('scion-chat-space-filter', filter);
+    if (fromUser) {
+      if (filter === 'all') {
+        localStorage.removeItem(RAIL_FILTER_STORAGE_KEY);
+      } else {
+        localStorage.setItem(RAIL_FILTER_STORAGE_KEY, filter);
+      }
+    }
+    if (filter === 'starred') this.startStarred();
+    else this.stopStarred();
+    if (fromUser) {
+      this.dispatchEvent(
+        new CustomEvent<RailFilterChangeDetail>('rail-filter-change', {
+          detail: { filter },
+          bubbles: true,
+          composed: true,
+        })
+      );
     }
   }
+
+  /** The current filter (the page reads it to keep the center consistent). */
+  get filter(): RailFilter {
+    return this.spaceFilter;
+  }
+
+  /**
+   * Show every conversation: the page calls this when the open conversation
+   * leaves the starred-only center for full context.
+   */
+  showAllConversations(): void {
+    if (this.spaceFilter === 'starred') this.setSpaceFilter('all');
+  }
+
+  // ---------------------------------------------------------------------------
+  // Starred rail
+  // ---------------------------------------------------------------------------
+
+  private startStarred(): void {
+    void this.starred.start(starredRailSort(this.prefs.spaceSortMode));
+    if (!this._starredPoll) {
+      // Visibility-aware reconcile while the Starred rail shows; no request
+      // while the page is hidden.
+      this._starredPoll = setInterval(() => {
+        if (document.visibilityState === 'visible' && this.spaceFilter === 'starred') {
+          void this.starred.refresh();
+        }
+      }, STARRED_RAIL_RECONCILE_MS);
+    }
+  }
+
+  /**
+   * Keep the filter consistent with the page, reacting only to changes from
+   * the page (the open conversation or its center filter), never to the
+   * user's own pick: an open starred-only center shows the Starred rail;
+   * an open conversation in full context never does (it returns to All).
+   * A user switch restarts the Starred rail, and a sort preference loaded or
+   * changed after it started applies to it.
+   */
+  private syncStarredFilter(changed: Map<string, unknown>): void {
+    // The experiment turned off in this browser: Starred is no longer offered.
+    if (this.spaceFilter === 'starred' && !starredMessagesEnabled()) {
+      this.setSpaceFilter('all');
+      return;
+    }
+    if (changed.has('centerFilter') || changed.has('selectedKey')) {
+      if (this.selectedKey && this.centerFilter === 'starred' && this.spaceFilter !== 'starred') {
+        this.setSpaceFilter('starred');
+      } else if (this.selectedKey && this.centerFilter === '' && this.spaceFilter === 'starred') {
+        this.setSpaceFilter('all');
+      }
+    }
+    if (this.spaceFilter !== 'starred') return;
+    if (changed.has('currentUserId') && changed.get('currentUserId') !== undefined) {
+      this.starred.stop();
+      this.startStarred();
+      return;
+    }
+    if (changed.has('prefs')) {
+      const sort = starredRailSort(this.prefs.spaceSortMode);
+      if (sort !== this.starred.sort) void this.starred.start(sort);
+    }
+  }
+
+  private stopStarred(): void {
+    if (this._starredPoll) {
+      clearInterval(this._starredPoll);
+      this._starredPoll = null;
+    }
+    if (this.starred.isActive) this.starred.stop();
+  }
+
+  private handleStarredChange = (): void => {
+    // The hub turned the experiment off: leave Starred and stop polling.
+    if (this.starred.unavailable && this.spaceFilter === 'starred') {
+      this.setSpaceFilter('all');
+      return;
+    }
+    this.starredVersion++;
+  };
+
+  /** A stars invalidation, a local star change, reconnect or focus: refetch. */
+  private handleStarredInvalidate = (): void => {
+    if (this.spaceFilter === 'starred') void this.starred.refresh();
+  };
+
+  private handleFlagsChanged = (): void => {
+    this.requestUpdate();
+  };
+
+  private handleStarredVisibility = (): void => {
+    if (document.visibilityState === 'visible') this.handleStarredInvalidate();
+  };
 
   /**
    * Alphabetical/Recent is a single, rail-wide choice: it sets
@@ -4317,6 +4585,7 @@ export class ScionChatSpaceRail extends LitElement {
     // Space + thread sort modes
     if (value === 'activity' || value === 'alpha') {
       void this.savePrefs({ spaceSortMode: value, threadSortMode: value, threadOrder: {} });
+      if (this.spaceFilter === 'starred') void this.starred.start(value);
       return;
     }
     if (value === 'custom') {
@@ -4376,6 +4645,7 @@ export class ScionChatSpaceRail extends LitElement {
   }
 
   private renderSpaces() {
+    if (this.spaceFilter === 'starred') return this.renderStarred();
     const filtered = this.getFilteredSpaces();
     if (this.spaceFilter === 'unread') {
       const dmRows = railUnreadDMs(this.dms, this.selectedKey);
@@ -4441,6 +4711,217 @@ export class ScionChatSpaceRail extends LitElement {
         </div>
       </div>
     `;
+  }
+
+  /**
+   * The Starred rail: the DMs section and project headings of the
+   * conversations with the user's stars, from the hub's endpoint. Loading,
+   * a retryable error, a continuation (more rows, or more to scan) and the
+   * empty collection are distinct states.
+   */
+  private renderStarred() {
+    void this.starredVersion;
+    const st = this.starred;
+    if (st.status === 'idle' || st.status === 'loading') {
+      return html`<div class="loading-state" role="status">
+        <sl-spinner></sl-spinner><span class="sr-only">Loading starred conversations</span>
+      </div>`;
+    }
+    if (st.status === 'error') {
+      return html`<div class="starred-state" role="alert">
+        <p>Couldn’t load starred conversations.</p>
+        <sl-button size="small" @click=${() => void this.starred.refresh()}>Retry</sl-button>
+      </div>`;
+    }
+    if (st.rows.length === 0 && !st.nextCursor) {
+      return html`<div class="starred-state starred-empty">
+        <p class="starred-empty-title">No starred conversations yet</p>
+        <p>
+          Choose <strong>Star message</strong> in a message’s menu to save it. Its conversation
+          appears here.
+        </p>
+      </div>`;
+    }
+    const groups = groupStarredRows(st.rows, st.sort, {
+      byName: (a, b, ai, bi) => this.compareByName(a, b, ai, bi),
+      byActivity: (a, b, ai, bi) => this.compareByActivity(a, b, ai, bi),
+    });
+    const spaces = new Map(this.spaces.map((sp) => [sp.projectId, sp]));
+    return html`
+      ${st.error
+        ? html`<div class="starred-state starred-refresh-error" role="alert">
+            <span>Couldn’t refresh starred conversations.</span>
+            <sl-button size="small" variant="text" @click=${() => void this.starred.refresh()}
+              >Retry</sl-button
+            >
+          </div>`
+        : nothing}
+      ${groups.dms.length > 0
+        ? html`<div class="space-section dm-section">
+            <div class="space-header dm-header">
+              <span class="space-name">Direct messages</span>
+            </div>
+            <div class="thread-list">${groups.dms.map((row) => this.renderStarredDM(row))}</div>
+          </div>`
+        : nothing}
+      ${groups.projects.map((p) => {
+        const space = spaces.get(p.projectId);
+        return html`<div class="space-section" data-starred-project=${p.projectId}>
+          <div class="space-header starred-project-header">
+            ${space?.emoji ? html`<span class="space-emoji">${space.emoji}</span>` : nothing}
+            <span class="space-name">${space?.projectName || p.projectName}</span>
+          </div>
+          <div class="thread-list">
+            ${p.rows.map((row) => this.renderStarredThread(row, space?.projectSlug ?? ''))}
+          </div>
+        </div>`;
+      })}
+      ${st.rows.length === 0
+        ? html`<div class="starred-state" role="status">No starred conversations found yet.</div>`
+        : nothing}
+      ${st.nextCursor ? this.renderStarredMore() : nothing}
+    `;
+  }
+
+  private renderStarredMore() {
+    const st = this.starred;
+    if (st.moreStatus === 'error') {
+      return html`<div class="starred-more" role="alert">
+        <span>Couldn’t load more conversations.</span>
+        <sl-button size="small" @click=${() => void this.loadMoreStarred()}>Retry</sl-button>
+      </div>`;
+    }
+    return html`<div class="starred-more">
+      <sl-button
+        size="small"
+        ?loading=${st.moreStatus === 'loading'}
+        @click=${() => void this.loadMoreStarred()}
+        >Load more conversations</sl-button
+      >
+    </div>`;
+  }
+
+  /**
+   * Load the next Starred page, keeping the first visible row where it was:
+   * rows of the new page can be grouped above it.
+   */
+  private async loadMoreStarred(): Promise<void> {
+    const body = this.shadowRoot?.querySelector<HTMLElement>('.rail-body');
+    let anchorKey = '';
+    let anchorTop = 0;
+    if (body) {
+      const top = body.getBoundingClientRect().top;
+      for (const el of body.querySelectorAll<HTMLElement>('[data-starred-key]')) {
+        const r = el.getBoundingClientRect();
+        if (r.bottom > top) {
+          anchorKey = el.dataset.starredKey ?? '';
+          anchorTop = r.top;
+          break;
+        }
+      }
+    }
+    await this.starred.loadMore();
+    await this.updateComplete;
+    if (!body || !anchorKey) return;
+    const el = [...body.querySelectorAll<HTMLElement>('[data-starred-key]')].find(
+      (e) => e.dataset.starredKey === anchorKey
+    );
+    if (el) body.scrollTop += el.getBoundingClientRect().top - anchorTop;
+  }
+
+  private renderStarredThread(row: StarredConversationRow, projectSlug: string) {
+    const selected = row.conversationKey === this.selectedKey;
+    const projectId = row.projectId ?? '';
+    // The thread's existing menu, when the rail has loaded the thread (no
+    // conversation-wide star action is added).
+    const known = this.threadsBySpace.get(projectId)?.find((t) => t.id === row.conversationKey);
+    return html`<div
+      class="thread-item ${selected ? 'selected' : ''}"
+      role="button"
+      tabindex="0"
+      aria-current=${selected ? 'true' : nothing}
+      data-starred-key=${row.conversationKey}
+      @click=${() => this.handleStarredThreadClick(row, projectSlug)}
+      @keydown=${(e: KeyboardEvent) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        e.preventDefault();
+        this.handleStarredThreadClick(row, projectSlug);
+      }}
+      @pointerdown=${known
+        ? (e: PointerEvent): void =>
+            this.longPress.pointerDown(e, (at) => this.openThreadMenu(known, projectId, at))
+        : nothing}
+      @contextmenu=${known
+        ? (e: MouseEvent) => this.handleContextMenu(e, known, projectId)
+        : nothing}
+    >
+      <span class="hash">#</span>
+      <span class="thread-name">${row.conversationName}</span>
+    </div>`;
+  }
+
+  private renderStarredDM(row: StarredConversationRow) {
+    const selected = row.conversationKey === this.selectedKey;
+    const peer = dmKeyPeer(row.conversationKey, this.currentUserId);
+    const who = peer?.kind === 'agent' ? 'agent' : 'user';
+    return html`<div
+      class="thread-item dm-item ${selected ? 'selected' : ''}"
+      role="button"
+      tabindex="0"
+      aria-label=${`Direct message with ${who} ${row.conversationName}`}
+      aria-current=${selected ? 'true' : nothing}
+      data-starred-key=${row.conversationKey}
+      data-dm-key=${row.conversationKey}
+      @click=${() => this.handleStarredDMClick(row)}
+      @keydown=${(e: KeyboardEvent) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        e.preventDefault();
+        this.handleStarredDMClick(row);
+      }}
+    >
+      <sl-icon class="dm-icon" name=${peer?.kind === 'agent' ? 'robot' : 'person'}></sl-icon>
+      <span class="thread-name">${row.conversationName}</span>
+    </div>`;
+  }
+
+  /** A Starred thread row opens the conversation's starred-only center. */
+  private handleStarredThreadClick(row: StarredConversationRow, projectSlug: string): void {
+    const known = this.threadsBySpace
+      .get(row.projectId ?? '')
+      ?.find((t) => t.id === row.conversationKey);
+    this.dispatchEvent(
+      new CustomEvent<ThreadSelectDetail>('thread-select', {
+        detail: {
+          conversationKey: row.conversationKey,
+          projectId: row.projectId ?? '',
+          projectSlug,
+          threadName: row.conversationName,
+          defaultAgent: known?.defaultAgent ?? '',
+          messageFilter: 'starred',
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
+  }
+
+  /** A Starred DM row opens the DM's starred-only center. */
+  private handleStarredDMClick(row: StarredConversationRow): void {
+    const peer = dmKeyPeer(row.conversationKey, this.currentUserId);
+    if (!peer) return;
+    this.dispatchEvent(
+      new CustomEvent<DMSelectDetail>('dm-select', {
+        detail: {
+          conversationKey: row.conversationKey,
+          peerId: peer.id,
+          peerKind: peer.kind,
+          displayName: row.conversationName,
+          messageFilter: 'starred',
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
   }
 
   /** Enter or Space on a focused DM row opens it, as a click does. */
@@ -4699,6 +5180,7 @@ export class ScionChatSpaceRail extends LitElement {
     this.groupContextMenuTarget = { group, projectId };
     this.contextMenuPos = at;
     this.menuAsSheet = shouldUseMenuSheet();
+    if (!this.menuAsSheet) this.menuFocus.opened();
   }
 
   /**
@@ -5057,22 +5539,22 @@ export class ScionChatSpaceRail extends LitElement {
   private renderContextMenu() {
     if (!this.contextMenuTarget) return nothing;
     const { thread, projectId } = this.contextMenuTarget;
-    return html`
-      <div class="context-menu" @click=${(e: Event) => e.stopPropagation()}>
-        ${renderMenuRows(this.threadMenuActions(thread, projectId))}
-      </div>
-    `;
+    return renderMenu(this.threadMenuActions(thread, projectId), {
+      label: `Actions for #${thread.name}`,
+      focus: this.menuFocus,
+      close: () => this.closeRowMenus(),
+    });
   }
 
   /** Render context menu for a group header. */
   private renderGroupContextMenu() {
     if (!this.groupContextMenuTarget) return nothing;
     const { group, projectId } = this.groupContextMenuTarget;
-    return html`
-      <div class="context-menu" @click=${(e: Event) => e.stopPropagation()}>
-        ${renderMenuRows(this.groupMenuActions(group, projectId))}
-      </div>
-    `;
+    return renderMenu(this.groupMenuActions(group, projectId), {
+      label: `Actions for ${group.name}`,
+      focus: this.menuFocus,
+      close: () => this.closeRowMenus(),
+    });
   }
 
   /** The mobile presentation of the thread and group menus. */

@@ -18,11 +18,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
@@ -396,14 +398,17 @@ func evaluateMoveChecks(in moveEligibilityInput, recreate bool) (MoveVerdict, *m
 		for _, b := range []*store.RuntimeBroker{src, dst} {
 			if b.WorkspaceStorage.NFS.ExportID == "" {
 				return fail(http.StatusPreconditionFailed, ErrCodeUnsupportedCapability, fmt.Sprintf(
-					"broker %s has not reported the export identity marker (%s/%s on its NFS export); upgrade it, or check that its export mount is healthy and writable",
-					brokerDisplayName(b), b.WorkspaceStorage.NFS.SubPathRoot, api.ExportIDMarkerName))
+					"broker %s has not reported the export identity marker (<subpath_root>/%s on its NFS export); upgrade it, or check that its export mount is healthy and writable",
+					brokerDisplayName(b), api.ExportIDMarkerName))
 			}
 		}
 		if srcID, dstID := src.WorkspaceStorage.NFS.ExportID, dst.WorkspaceStorage.NFS.ExportID; srcID != dstID {
+			// The refusal names the field only; the values go to the log.
+			slog.Warn("refusing move: brokers see different export identity markers",
+				"diff", projectfs.LayoutIssueSummary([]projectfs.LayoutIssue{projectfs.ExportIDIssue(srcName, srcID, dstName, dstID)}, projectfs.ViewLog))
 			return fail(http.StatusConflict, ErrCodeConflict, fmt.Sprintf(
-				"brokers %s and %s configure the same NFS export but see different export identity markers (%s and %s), so they do not mount the same directory. --broker requires both brokers to mount the same NFS export",
-				srcName, dstName, srcID, dstID))
+				"brokers %s and %s configure the same NFS export but see different export identity markers, so they do not mount the same directory (%s). --broker requires both brokers to mount the same NFS export",
+				srcName, dstName, projectfs.LayoutIssuesRemediation))
 		}
 		pass()
 
@@ -656,18 +661,16 @@ func brokerProfileAvailable(b *store.RuntimeBroker, name string) bool {
 	return false
 }
 
-// sameExportMessage names the source export and what the target mounts.
+// sameExportMessage is the refusal of a move between brokers that do not
+// report the same NFS export. It names the differing fields only
+// (projectfs.ViewPublic); the values are logged.
 func sameExportMessage(src, dst *store.RuntimeBroker) string {
-	where := "is not on an NFS export"
-	if s := src.WorkspaceStorage; s.Backend == api.WorkspaceStorageBackendNFS && s.NFS != nil {
-		where = fmt.Sprintf("is on NFS export %s:%s (subpath root %q)", s.NFS.Server, s.NFS.Export, s.NFS.SubPathRoot)
-	}
-	mounts := "backend " + dst.WorkspaceStorage.Backend
-	if d := dst.WorkspaceStorage; d.Backend == api.WorkspaceStorageBackendNFS && d.NFS != nil {
-		mounts = fmt.Sprintf("NFS export %s:%s (subpath root %q)", d.NFS.Server, d.NFS.Export, d.NFS.SubPathRoot)
-	}
-	return fmt.Sprintf("agent workspace %s on broker %s; broker %s mounts %s. --broker requires both brokers to mount the same NFS export",
-		where, brokerDisplayName(src), brokerDisplayName(dst), mounts)
+	srcName, dstName := brokerDisplayName(src), brokerDisplayName(dst)
+	issues := projectfs.ExportIssues(srcName, src.WorkspaceStorage, dstName, dst.WorkspaceStorage)
+	slog.Warn("refusing move: brokers do not report the same NFS export",
+		"source", src.ID, "target", dst.ID, "diff", projectfs.LayoutIssueSummary(issues, projectfs.ViewLog))
+	return fmt.Sprintf("agent workspace on broker %s is not on the NFS export broker %s mounts (%s). --broker requires both brokers to mount the same NFS export",
+		srcName, dstName, projectfs.LayoutIssueSummary(issues, projectfs.ViewPublic))
 }
 
 // resolveMoveTargetBroker resolves a --broker value to a runtime broker

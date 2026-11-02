@@ -48,6 +48,18 @@ var (
 	// GetActiveReservation to tell a retry from a conflict.
 	ErrActiveReservationExists = fmt.Errorf("%w: resource holds an active usage reservation for this limit", ErrAlreadyExists)
 
+	// ErrTransferRaced is returned by TransferBrokerReservation when its
+	// release matched no row although the row was read under lock.
+	// Unreachable by construction; returned (after rollback) so the
+	// contract fails closed. Retryable.
+	ErrTransferRaced = errors.New("store: reservation transfer raced")
+
+	// ErrInvalidTransfer is returned by TransferBrokerReservation for a
+	// contradictory request (CreateIfAbsent together with
+	// FromReservationID), before the transaction starts. The hub also wraps
+	// it when it refuses a transfer to an empty broker ID.
+	ErrInvalidTransfer = errors.New("store: invalid reservation transfer request")
+
 	// ErrTransient marks a database conflict that a retry resolves: a
 	// Postgres serialization failure or deadlock, or a busy or locked
 	// SQLite database. The entadapter WithTx wraps such errors with it.
@@ -442,6 +454,9 @@ type Store interface {
 
 	// User Access Token operations
 	UserAccessTokenStore
+
+	// Forced user deletion tombstones (ptone/scion#2143)
+	UserDeletionStore
 
 	// Broker Secret operations (Runtime Broker authentication)
 	BrokerSecretStore
@@ -1659,6 +1674,14 @@ type RuntimeBrokerStore interface {
 	// CreateRuntimeBroker creates a new runtime broker record.
 	CreateRuntimeBroker(ctx context.Context, broker *RuntimeBroker) error
 
+	// CreateRuntimeBrokerClearingCredentials creates a new runtime broker
+	// record and, in the same transaction, deletes any broker secret and join
+	// token stored for its ID, so a row created with an ID an earlier row had
+	// starts without that row's credential. Used where the ID is fixed or
+	// supplied by the caller (plugin, co-located, flat and registered
+	// brokers).
+	CreateRuntimeBrokerClearingCredentials(ctx context.Context, broker *RuntimeBroker) error
+
 	// GetRuntimeBroker retrieves a runtime broker by ID.
 	// Returns ErrNotFound if the broker doesn't exist.
 	GetRuntimeBroker(ctx context.Context, id string) (*RuntimeBroker, error)
@@ -1701,10 +1724,11 @@ type RuntimeBrokerStore interface {
 	// RefreshRuntimeBrokerState is the heartbeat's write. It reads the
 	// broker, calls refresh on that copy and, when refresh reports a
 	// change, writes only Capabilities, WorkspaceStorage, DefaultProfile,
-	// Health and Profiles, as a compare-and-set on the row's version. A
-	// concurrent write between the read and the write makes it retry with
-	// a fresh read, so refresh may run more than once and must change only
-	// those fields; changes it makes to any other field are not stored.
+	// Health, Profiles and Version (the broker's build token), as a
+	// compare-and-set on the row's lock version. A concurrent write
+	// between the read and the write makes it retry with a fresh read, so
+	// refresh may run more than once and must change only those fields;
+	// changes it makes to any other field are not stored.
 	// Every other column keeps whatever a concurrent writer stored. On a
 	// flat row Profiles and DefaultProfile are stored empty, as
 	// UpdateRuntimeBroker does. Returns ErrNotFound if the broker doesn't
@@ -1934,8 +1958,9 @@ type BrokerDispatchStore interface {
 	// "pending", or "failed" with reason == expiredReason, by the pre-fix
 	// nc-promote-busy bug (a storeMsg persisted without stamping
 	// DispatchState). The exact complement of ExpireStuckPendingMessages'
-	// and PurgeFailedMessages' agent-only scoping: only an agent recipient
-	// is ever legitimately in either state. Returns the number repaired.
+	// and ChatRetentionStore.SelectFailedMessages' agent-only scoping: only
+	// an agent recipient is ever legitimately in either state. Returns the
+	// number repaired.
 	BackfillNonAgentDispatchState(ctx context.Context, expiredReason string) (int, error)
 }
 
@@ -2153,7 +2178,10 @@ type UserStore interface {
 	GetUserByEmail(ctx context.Context, email string) (*User, error)
 
 	// UpdateUser updates an existing user.
-	// Returns ErrNotFound if the user doesn't exist.
+	// Returns ErrNotFound if the user doesn't exist, and ErrUserDeleting if
+	// the user's status is UserStatusDeleting or the update would set it
+	// (only MarkUserDeleting writes that status, and only the deletion's
+	// completion ends it).
 	UpdateUser(ctx context.Context, user *User) error
 
 	// UpdateUserLastLogin sets only the last_login timestamp for a user.
@@ -2165,6 +2193,11 @@ type UserStore interface {
 	// DeleteUser removes a user by ID.
 	// Returns ErrNotFound if the user doesn't exist.
 	DeleteUser(ctx context.Context, id string) error
+
+	// MarkUserDeleting sets the status of user id to UserStatusDeleting
+	// (ptone/scion#2143). It is the only write of that status. Returns
+	// ErrNotFound if the user does not exist.
+	MarkUserDeleting(ctx context.Context, id string) error
 
 	// LockUserRow locks the user row until the surrounding transaction ends
 	// (ptone/scion#2769). On PostgreSQL exclusive=true runs
@@ -2504,6 +2537,20 @@ type SecretStore interface {
 	// The replacement passes the encryption policy fence like every other
 	// payload write.
 	ReplaceSecretCiphertext(ctx context.Context, id string, expectedVersion int, expectedCiphertext, replacement string) (applied bool, err error)
+
+	// AttributeUserSecretToOwner sets created_by to scope_id on the
+	// user-scope secret row with this ID, and only while its created_by
+	// equals expectedCreatedBy. It is the repair write of the legacy user
+	// secret attribution migration, which moves rows captured by an agent
+	// before ptone/scion#1557 from "agent:<uuid>" to their owner. The
+	// decision depends only on the row's identity, scope, owner and
+	// created_by, never on its payload, so a concurrent value write (for
+	// example a credential refresh) does not defeat it. Version,
+	// timestamps, the payload and every other column are preserved, so the
+	// repair is never seen as a credential change. It returns applied=false
+	// (no error) when the row is gone, is not user-scoped, has an empty
+	// scope_id, or its created_by differs.
+	AttributeUserSecretToOwner(ctx context.Context, id string, expectedCreatedBy string) (applied bool, err error)
 }
 
 // MaxSecretPayloadScan is the largest ScanSecretPayloads page.
@@ -2735,6 +2782,10 @@ type UserAccessTokenStore interface {
 	// CountUserAccessTokens returns the number of active (non-revoked) tokens for a user.
 	CountUserAccessTokens(ctx context.Context, userID string) (int, error)
 
+	// RevokeUserAccessTokensForUser revokes every unrevoked token of userID
+	// and returns how many it revoked (ptone/scion#2143).
+	RevokeUserAccessTokensForUser(ctx context.Context, userID string) (int, error)
+
 	// DeleteUserAccessTokensByProject permanently removes all "project"-boundary
 	// tokens scoped to projectID. A hub-boundary token belonging to one of the
 	// project's members is never removed by this call, even if that member
@@ -2816,6 +2867,12 @@ type BrokerSecretStore interface {
 	// CleanExpiredJoinTokens removes all expired join tokens and returns how
 	// many were removed.
 	CleanExpiredJoinTokens(ctx context.Context) (int, error)
+
+	// DeleteOrphanBrokerCredentials removes, in one transaction, every broker
+	// secret and join token whose broker ID has no runtime broker row, and
+	// returns how many of each were removed. A later row with the same ID
+	// then starts without a credential. Idempotent.
+	DeleteOrphanBrokerCredentials(ctx context.Context) (secrets, joinTokens int, err error)
 }
 
 // =============================================================================
@@ -3061,12 +3118,12 @@ type ScheduleStore interface {
 	ListActiveZonePrefixedSchedules(ctx context.Context, limit int, excludeIDs []string) ([]Schedule, error)
 
 	// UpdateSchedule writes the schedule's mutable fields named by `fields`
-	// (name, cron_expr, event_type, payload, status, next_run_at) from
-	// `schedule`; the Status field also writes status_reason from
-	// schedule.StatusReason, so a status and its reason are always written
-	// together. A field not named in `fields` is left completely untouched
-	// in the row, so a struct built from a stale read can never revert a
-	// column this call didn't intend to change.
+	// (name, cron_expr, time_zone, event_type, payload, status,
+	// next_run_at) from `schedule`; the Status field also writes
+	// status_reason from schedule.StatusReason, so a status and its reason
+	// are always written together. A field not named in `fields` is left
+	// completely untouched in the row, so a struct built from a stale read
+	// can never revert a column this call didn't intend to change.
 	//
 	// The write is ALWAYS conditioned on the schedule's current
 	// authorization_revision matching prevRevision (or being NULL, when
@@ -3248,17 +3305,6 @@ type MessageStore interface {
 
 	// MarkAllMessagesRead marks all messages for a recipient as read.
 	MarkAllMessagesRead(ctx context.Context, recipientID string) error
-
-	// PurgeOldMessages removes read messages older than readCutoff and
-	// unread messages older than unreadCutoff. Returns count removed.
-	PurgeOldMessages(ctx context.Context, readCutoff time.Time, unreadCutoff time.Time) (int, error)
-
-	// PurgeFailedMessages removes messages with dispatch_state="failed" whose
-	// created timestamp is before cutoff. Returns the number of messages
-	// removed. Unlike PurgeOldMessages (read/unread semantics, which would
-	// also delete successfully delivered history), this filters strictly on
-	// dispatch_state so delivered messages are never touched.
-	PurgeFailedMessages(ctx context.Context, cutoff time.Time) (int, error)
 
 	// SetMessageConversationID updates the conversation_id on an existing
 	// message. Used by the Phase 4 backfill to link legacy messages to
@@ -3561,6 +3607,38 @@ type HubSettingRevisionDeleter interface {
 	DeleteHubSettingRevision(ctx context.Context, section string) (int64, error)
 }
 
+// HubSettingWrite is one section write of a guarded batch
+// (HubSettingGuardedBatchWriter). ExpectedRevision has UpsertHubSetting's
+// meaning: -1 unconditional, 0 create-only, >0 the current revision. A
+// Delete write removes the row instead (Value unused): the row must exist,
+// at ExpectedRevision unless that is -1 (a missing row is then
+// ErrNotFound), and its returned HubSetting has only Section and
+// SettingsRevision set.
+type HubSettingWrite struct {
+	Section          string
+	Value            json.RawMessage
+	ExpectedRevision int64
+	Delete           bool
+}
+
+// HubSettingGuardedBatchWriter is an optional HubSettingStore method: write
+// several sections in one transaction, guarded by the revisions of other
+// sections the caller read to validate the write. Guarded batches are
+// serialized against each other (on Postgres by a transaction-scoped
+// advisory lock, which also covers a read section with no row), every
+// existing written and read row is locked, and all are compared inside the
+// transaction: a read section must still be at its given revision (0: it
+// must not exist), and each write's ExpectedRevision must hold. Any
+// mismatch returns ErrRevisionConflict and writes nothing. The
+// operational-settings revision is bumped once for the batch and returned
+// in every row's SettingsRevision. A section may appear once, as a write
+// or as a read; HubSettingsRevisionSection may not appear. The rows are
+// returned in the order of writes.
+type HubSettingGuardedBatchWriter interface {
+	UpsertHubSettingsGuarded(ctx context.Context, writes []HubSettingWrite, reads map[string]int64,
+		updatedBy, origin string) ([]HubSetting, error)
+}
+
 // HubSettingStore defines persistence operations for operational hub settings.
 // Each setting is a section (e.g. "access", "telemetry") with a JSON value.
 type HubSettingStore interface {
@@ -3574,7 +3652,11 @@ type HubSettingStore interface {
 
 	// UpsertHubSetting creates or updates a hub setting with CAS semantics.
 	//   expectedRevision == 0:  create-only; returns ErrRevisionConflict if the section already exists.
-	//   expectedRevision == -1: unconditional upsert (used for seeding); always succeeds.
+	//   expectedRevision == -1: unconditional upsert (used for seeding). A create that loses a
+	//                           concurrent create of the same section is retried a bounded number
+	//                           of times; if every attempt loses, it returns a wrapped
+	//                           ErrRevisionConflict. Other errors (a different constraint
+	//                           error included) are returned as they are.
 	//   expectedRevision > 0:   CAS update; returns ErrRevisionConflict if current revision != expectedRevision.
 	// origin must be "seeded" or "managed" — seed-writes pass "seeded", admin-PUT writes pass "managed".
 	// A write of an operational section bumps the HubSettingsRevisionSection
@@ -4543,6 +4625,131 @@ type QuotaStore interface {
 	// none. At most one exists (the unique active (limit_definition_id,
 	// resource_id) index). Released reservations are never returned.
 	GetActiveReservation(ctx context.Context, limitDefinitionID, resourceID string) (*UsageReservation, error)
+
+	// TransferBrokerReservation leaves req.AgentID with exactly one active
+	// reservation for req.LimitDefinitionID, broker-scoped on req.ToBrokerID,
+	// in one transaction:
+	//  1. Locks the agent row (FOR UPDATE on Postgres; SQLite serializes
+	//     writers). A missing or soft-deleted (DeletedAt set) agent row
+	//     returns ErrNotFound.
+	//  2. RequireAgentOnTo: checks RuntimeBrokerID (TransferAgentElsewhere).
+	//     Cond: evaluates it (TransferStale).
+	//  3. Reads the agent's active reservation for the limit, locked.
+	//     FromReservationID set: the row must exist with that ID
+	//     (TransferStale).
+	//  4. Row is broker-scoped on ToBrokerID: TransferAlreadyOn.
+	//  5. No row and !CreateIfAbsent: TransferAbsent.
+	//  6. Cap > 0: counts active rows with the predicate Reserve uses
+	//     (CountActiveReservations: subject = scope = (broker, ToBrokerID));
+	//     count >= Cap returns ErrQuotaExceeded.
+	//  7. Releases the held row, if any (released_at = now WHERE id AND
+	//     released_at IS NULL); affected rows != 1 rolls back with
+	//     ErrTransferRaced. Never falls through to the insert.
+	//  8. Inserts a new broker-scoped row on ToBrokerID (subject ToBrokerID,
+	//     reserved 1, created_at now). A unique violation returns
+	//     ErrActiveReservationExists.
+	// Every error rolls the whole transaction back: the agent keeps the
+	// reservation it had. CreateIfAbsent together with FromReservationID
+	// returns ErrInvalidTransfer before any read. Must not be called from
+	// inside WithTx.
+	TransferBrokerReservation(ctx context.Context, req BrokerReservationTransfer) (BrokerReservationTransferResult, error)
+}
+
+// BrokerReservationTransfer asks TransferBrokerReservation to leave AgentID
+// with exactly one active reservation for LimitDefinitionID, on ToBrokerID.
+type BrokerReservationTransfer struct {
+	LimitDefinitionID string
+	AgentID           string
+	ToBrokerID        string
+	// Cap > 0 counts the active broker-scoped reservations on ToBrokerID
+	// inside the transaction and refuses with ErrQuotaExceeded, writing
+	// nothing, when count >= Cap. Cap <= 0 is unchecked.
+	Cap int64
+	// CreateIfAbsent inserts the reservation on ToBrokerID when the agent
+	// holds none. When false, an agent holding none reports TransferAbsent
+	// and nothing is written.
+	CreateIfAbsent bool
+	// RequireAgentOnTo requires the locked agent row's RuntimeBrokerID to
+	// equal ToBrokerID, else TransferAgentElsewhere and nothing is written.
+	RequireAgentOnTo bool
+	// FromReservationID, when set, requires the agent's held active row to
+	// be exactly this ID (a caller acting on a row it read never moves a
+	// newer one). A different row, or none, reports TransferStale and
+	// nothing is written. CreateIfAbsent must be false when it is set:
+	// both set returns ErrInvalidTransfer before any read.
+	FromReservationID string
+	// Cond, when non-nil, is evaluated on the locked agent row; if it does
+	// not hold, TransferStale and nothing is written.
+	Cond *TransferAgentCond
+}
+
+// TransferAgentCond holds preconditions on the agent row that
+// TransferBrokerReservation has locked, for callers acting on an earlier
+// read. Every set field must hold. It differs from AgentReleaseCond (the
+// condition of ReleaseReservationIfAgent) on purpose: NoClaim excludes stop
+// claims too, HoldsCapacity is the inverse of NotCounted, and NotInFlight
+// has no release counterpart.
+type TransferAgentCond struct {
+	// CheckRunID: the row's RunID must equal ExpectedRunID (empty included).
+	CheckRunID    bool
+	ExpectedRunID string
+	// NoClaim: StartClaimID must be "" (no claim of any kind, stop included).
+	NoClaim bool
+	// HoldsCapacity: AgentHoldsBrokerCapacity(row) must be true.
+	HoldsCapacity bool
+	// NotInFlight: !ReincarnationInFlight(row.ReincarnationState).
+	NotInFlight bool
+}
+
+// Holds reports whether c holds for the agent row a.
+func (c TransferAgentCond) Holds(a *Agent) bool {
+	if c.CheckRunID && a.RunID != c.ExpectedRunID {
+		return false
+	}
+	if c.NoClaim && a.StartClaimID != "" {
+		return false
+	}
+	if c.HoldsCapacity && !AgentHoldsBrokerCapacity(a) {
+		return false
+	}
+	if c.NotInFlight && ReincarnationInFlight(a.ReincarnationState) {
+		return false
+	}
+	return true
+}
+
+// BrokerReservationTransferOutcome is what TransferBrokerReservation did.
+type BrokerReservationTransferOutcome string
+
+const (
+	// TransferAlreadyOn: the active row was already on ToBrokerID; no write.
+	TransferAlreadyOn BrokerReservationTransferOutcome = "already_on"
+	// TransferMoved: the old row was released and a new row inserted.
+	TransferMoved BrokerReservationTransferOutcome = "moved"
+	// TransferCreated: none was held and CreateIfAbsent inserted one.
+	TransferCreated BrokerReservationTransferOutcome = "created"
+	// TransferAbsent: none was held, !CreateIfAbsent and no
+	// FromReservationID; no write.
+	TransferAbsent BrokerReservationTransferOutcome = "absent"
+	// TransferAgentElsewhere: RequireAgentOnTo failed; no write.
+	TransferAgentElsewhere BrokerReservationTransferOutcome = "agent_elsewhere"
+	// TransferStale: FromReservationID or Cond failed; no write.
+	TransferStale BrokerReservationTransferOutcome = "stale"
+)
+
+// BrokerReservationTransferResult is the result of
+// TransferBrokerReservation.
+type BrokerReservationTransferResult struct {
+	Outcome BrokerReservationTransferOutcome
+	// FromScopeType and FromScopeID are the scope of the released row
+	// (TransferMoved).
+	FromScopeType string
+	FromScopeID   string
+	// ReleasedID is the ID of the released row (TransferMoved).
+	ReleasedID string
+	// ReservationID is the active row on ToBrokerID afterwards (empty when
+	// no row is on it).
+	ReservationID string
 }
 
 // =============================================================================

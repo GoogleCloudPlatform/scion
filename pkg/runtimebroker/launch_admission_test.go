@@ -462,20 +462,25 @@ func TestAsyncCreate_ProvisionOnlyStaysSynchronous(t *testing.T) {
 
 // --- B-2: answer handling per the §3.8.2 table. ---
 
-func TestAsyncCreate_FailureAfterCompletedClaim_NoCleanupNoExtraReport(t *testing.T) {
+// A Start failure after a completed claim is still reported, and the
+// applied answer cleans up (ptone/scion#5368). A failure before Start after
+// a completed claim still sends nothing (run_launch_completed_failure_test.go).
+func TestAsyncCreate_FailureAfterCompletedClaim_ReportsAndCleansUp(t *testing.T) {
 	mgr := newAsyncManager()
 	mgr.setStartErr(errors.New("boom"))
 	srv, rtb := newAsyncTestServer(t, mgr)
 
-	var sawExtra bool
+	var sawFailed bool
 	var mu sync.Mutex
 	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
 		if claimState(req) {
 			return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultCompleted}, nil
 		}
-		mu.Lock()
-		sawExtra = true
-		mu.Unlock()
+		if req.State == hubclient.AgentLaunchReportStateFailed {
+			mu.Lock()
+			sawFailed = true
+			mu.Unlock()
+		}
 		return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
 	}
 
@@ -487,17 +492,13 @@ func TestAsyncCreate_FailureAfterCompletedClaim_NoCleanupNoExtraReport(t *testin
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
 
-	if !waitUntil(t, 2*time.Second, func() bool { return mgr.StartCallCount() >= 1 }) {
-		t.Fatal("Start was never called")
-	}
-	time.Sleep(100 * time.Millisecond) // let the (no-op) failure branch finish
-	if n := mgr.CleanupCallCount(); n != 0 {
-		t.Fatalf("expected no cleanup after an earlier completed answer, got %d calls", n)
+	if !waitUntil(t, 2*time.Second, func() bool { return mgr.CleanupCallCount() >= 1 }) {
+		t.Fatalf("expected the applied failed report to clean up after an earlier completed answer, got %d calls", mgr.CleanupCallCount())
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if sawExtra {
-		t.Fatal("expected no report after a completed claim and a subsequent failure (send nothing)")
+	if !sawFailed {
+		t.Fatal("expected a failed report for a Start failure after a completed claim")
 	}
 }
 

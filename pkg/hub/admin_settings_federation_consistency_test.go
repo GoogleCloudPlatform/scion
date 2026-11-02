@@ -56,9 +56,8 @@ func TestServerConfigDB_GetFederationOneSource(t *testing.T) {
 	require.NotNil(t, resp.Server)
 	assert.Nil(t, resp.Server.Federation, "server.federation must not show the settings.yaml seed")
 
-	// One trusted issuer, so the GET conversion reports the section even
-	// though it is disabled (a disabled, issuer-less section is omitted
-	// from GET; that is tracked separately).
+	// A stored section is reported whether or not it has trusted issuers
+	// (see TestServerConfigDB_GetDisabledIssuerlessFederationShown).
 	rr := putServerConfigDB(t, srv, ops, `{"federation":{"enabled":false,`+
 		`"trusted_issuers":[{"issuer_url":"https://issuer-z.example.com","issuer_type":"hub"}],`+
 		`"algorithms":["ES256"],"refresh_interval":"3h"}}`)
@@ -73,6 +72,57 @@ func TestServerConfigDB_GetFederationOneSource(t *testing.T) {
 	assert.Equal(t, "3h0m0s", resp.Federation.RefreshInterval, "GET formats the interval as a Go duration")
 	require.Len(t, resp.Federation.TrustedIssuers, 1, "only the stored issuer, not the settings.yaml seed issuers")
 	assert.Equal(t, "https://issuer-z.example.com", resp.Federation.TrustedIssuers[0].IssuerURL)
+}
+
+// DB tier: a stored federation section that is disabled and has no
+// trusted issuers is reported by GET in both places, with its stored
+// algorithms and intervals, so the Federation page shows (and diffs
+// against) the stored values rather than defaults (ptone/scion#5694).
+func TestServerConfigDB_GetDisabledIssuerlessFederationShown(t *testing.T) {
+	tempSettingsHome(t)
+	srv, _, ops := newTestDBServer(t)
+
+	resp := getServerConfigDB(t, srv, ops)
+	assert.Nil(t, resp.Federation, "nothing stored: no federation")
+
+	rr := putServerConfigDB(t, srv, ops, `{"federation":{"enabled":false,"algorithms":["ES256"],"refresh_interval":"3h"}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	resp = getServerConfigDB(t, srv, ops)
+	require.NotNil(t, resp.Federation, "the stored disabled, issuer-less section is shown")
+	require.NotNil(t, resp.Federation.Enabled)
+	assert.False(t, *resp.Federation.Enabled)
+	assert.Equal(t, []string{"ES256"}, resp.Federation.Algorithms)
+	assert.Equal(t, "3h0m0s", resp.Federation.RefreshInterval)
+	assert.Empty(t, resp.Federation.TrustedIssuers)
+	require.NotNil(t, resp.Server)
+	assert.Equal(t, resp.Federation, resp.Server.Federation, "both places report the same federation")
+}
+
+// TestServerConfigDB_EnvValuesAgainstDisabledIssuerlessFederation: the
+// server-config GET reports a stored federation section that is disabled
+// and has no trusted issuers (ptone/scion#5694), and env_values compares each
+// SCION_SERVER_FEDERATION_* value with that reported view. A value equal to
+// the applied stored value is in effect; a different one is not and is
+// labelled as differing from the saved row. A federation key whose name
+// looks secret is masked and its value never appears.
+func TestServerConfigDB_EnvValuesAgainstDisabledIssuerlessFederation(t *testing.T) {
+	secretKey := "server.federation.client_secret"
+	values := dbEnvValuesGET(t, map[string][2]string{
+		"federation": {"managed", `{"enabled":false,"algorithms":["RS256"],"refresh_interval":"3h0m0s"}`},
+	}, nil, map[string]any{
+		"server.federation.enabled":          true,
+		"server.federation.algorithms":       []any{"ES256"},
+		"server.federation.refresh_interval": "3h0m0s",
+		secretKey:                            envSecretSentinel(secretKey),
+	}, nil)
+	wantEnvValue(t, values, "server.federation.enabled", EnvKeyValue{Value: true, InEffect: boolPtr(false), SavedDiffers: true})
+	wantEnvValue(t, values, "server.federation.algorithms", EnvKeyValue{Value: []any{"ES256"}, InEffect: boolPtr(false), SavedDiffers: true})
+	wantEnvValue(t, values, "server.federation.refresh_interval", EnvKeyValue{Value: "3h0m0s", InEffect: boolPtr(true)})
+	wantEnvValue(t, values, secretKey, maskedEnvKeyValue())
+	raw, err := json.Marshal(values)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), envSecretSentinel(secretKey), "a secret-looking federation value is never shown")
 }
 
 // File tier: both places read the same settings.yaml block.

@@ -63,6 +63,7 @@ type idFixtures struct {
 	groupDel                string
 	user                    string
 	userDel                 string
+	userDeletion            string
 	member                  string
 	skill                   string
 	skillDel                string
@@ -329,6 +330,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 		groupDel:             tid("li-group-del"),
 		user:                 tid("li-user"),
 		userDel:              tid("li-user-del"),
+		userDeletion:         tid("li-user-deletion"),
 		member:               tid("li-member"),
 		skill:                tid("li-skill"),
 		skillDel:             tid("li-skill-del"),
@@ -424,6 +426,10 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 
 	require.NoError(t, s.CreateUser(ctx, &store.User{ID: f.user, Email: "li-user@test.com", DisplayName: "LI User", Role: "member", Status: "active"}))
 	require.NoError(t, s.CreateUser(ctx, &store.User{ID: f.userDel, Email: "li-user-del@test.com", DisplayName: "LI User Del", Role: "member", Status: "active"}))
+	// A user with a recorded forced deletion, for GET
+	// /api/v1/users/{id}/deletion (ptone/scion#2143).
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: f.userDeletion, Email: "li-user-deletion@test.com", DisplayName: "LI User Deletion", Role: "member", Status: "active"}))
+	require.NoError(t, s.CreateUserDeletion(ctx, &store.UserDeletion{UserID: f.userDeletion, RequestedByKind: "user", RequestedByID: DevUserID, CredentialKind: "session", RequestedAt: time.Now()}))
 	require.NoError(t, s.CreateUser(ctx, &store.User{ID: f.member, Email: "li-member@test.com", DisplayName: "LI Member", Role: "member", Status: "active"}))
 	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{GroupID: f.group, MemberID: f.member, MemberType: store.GroupMemberTypeUser, Role: store.GroupMemberRoleMember}))
 
@@ -693,7 +699,8 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	var active []experiments.Experiment
 	for _, e := range srv.experimentRegistry().All() {
 		if e.Name == conduitExperiment || e.Name == experiments.AgentDelegation || e.Name == experiments.FederationProjectVisitors ||
-			e.Name == experiments.ChatStarredMessages || e.Name == experiments.AgentEditHeld {
+			e.Name == experiments.ChatStarredMessages || e.Name == experiments.AgentEditHeld ||
+			e.Name == experiments.UserDeleteForceCascade {
 			e.Default = true
 		}
 		active = append(active, e)
@@ -707,6 +714,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.True(t, srv.experimentEnabled(experiments.FederationProjectVisitors))
 	require.True(t, srv.experimentEnabled(experiments.ChatStarredMessages))
 	require.True(t, srv.experimentEnabled(experiments.AgentEditHeld))
+	require.True(t, srv.experimentEnabled(experiments.UserDeleteForceCascade))
 	// POST /api/v1/auth/federation-token also answers 404 while the OIDC
 	// provider is off: install a test key manager and allow the audience
 	// that bodyOverrides sends, so the route reaches its caller checks.
@@ -882,6 +890,8 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 		// Grant revoke and grant read share their pattern; revoke takes
 		// the disposable twin grant.
 		{"agent.delegation.revoke", "/api/v1/agents/{id}/delegations/{grantId}"}: {"id": f.agent, "grantId": f.delegation.grantRevoke},
+		// Per-agent revoke-all takes the disposable agent and its grant.
+		{"agent.delegation.revokeall", "/api/v1/agents/{id}/delegations/revoke-all"}: {"id": f.delegation.revokeAllAgent},
 
 		// Group and direct conversation reads share their patterns.
 		{"project.conversation.read", "/api/v1/conversations/{id}"}:                           {"id": f.inbox.groupConversation},
@@ -1059,6 +1069,8 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		// --- user family ---
 		"/api/v1/users/{id}":                 {"id": f.user},
 		"/api/v1/users/{id}/revoke-sessions": {"id": f.user},
+		"/api/v1/users/{id}/delete-blockers": {"id": f.user},
+		"/api/v1/users/{id}/deletion":        {"id": f.userDeletion},
 
 		// --- skill family ---
 		"/api/v1/skills/{id}":                          {"id": f.skill},
@@ -1145,16 +1157,17 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/env/{key}": {"key": f.envVarKey},
 
 		// --- runtime broker family ---
-		"/api/v1/runtime-brokers/{id}":                         {"id": f.runtimeBroker},
-		"/api/v1/runtime-brokers/{id}/settings":                {"id": f.runtimeBroker},
-		"/api/v1/runtime-brokers/{id}/heartbeat":               {"id": f.runtimeBroker},
-		"/api/v1/runtime-brokers/{id}/projects":                {"id": f.runtimeBroker},
-		"/api/v1/runtime-brokers/{id}/env":                     {"id": f.runtimeBroker},
-		"/api/v1/runtime-brokers/{id}/env/{key}":               {"id": f.runtimeBroker, "key": f.brokerEnvKey},
-		"/api/v1/runtime-brokers/{id}/secrets":                 {"id": f.runtimeBroker},
-		"/api/v1/runtime-brokers/{id}/secrets/{key}":           {"id": f.runtimeBroker, "key": f.brokerSecretKey},
-		"/api/v1/runtime-brokers/{id}/message-failures":        {"id": f.runtimeBroker},
-		"/api/v1/runtime-brokers/{id}/agents/{agentId}/launch": {"id": f.runtimeBroker, "agentId": f.agent},
+		"/api/v1/runtime-brokers/{id}":                                     {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/settings":                            {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/heartbeat":                           {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/projects":                            {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/env":                                 {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/env/{key}":                           {"id": f.runtimeBroker, "key": f.brokerEnvKey},
+		"/api/v1/runtime-brokers/{id}/secrets":                             {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/secrets/{key}":                       {"id": f.runtimeBroker, "key": f.brokerSecretKey},
+		"/api/v1/runtime-brokers/{id}/message-failures":                    {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/agents/{agentId}/launch":             {"id": f.runtimeBroker, "agentId": f.agent},
+		"/api/v1/runtime-brokers/{id}/agents/{agentId}/workspace-download": {"id": f.runtimeBroker, "agentId": f.agent},
 
 		// --- github app family ---
 		"/api/v1/github-app/installations/{id}": {"id": f.githubInstallationID},
@@ -1432,11 +1445,15 @@ func seedLiveInventoryArtifact(t *testing.T, ctx context.Context, st artifacts.S
 
 // liveInventoryDelegation is the agent delegation fixture of the live
 // method inventory: a grant bound to the fixture agent, a disposable twin
-// grant for the revoke entry, and an active credential of the first grant.
+// grant for the revoke entry, an active credential of the first grant, and
+// for the per-agent revoke-all entry a disposable agent ID (no agent row:
+// grants outlive their agent) with one grant of its own, so revoke-all
+// leaves the fixture agent's grants alone.
 type liveInventoryDelegation struct {
-	grant       string
-	grantRevoke string
-	credential  string
+	grant          string
+	grantRevoke    string
+	credential     string
+	revokeAllAgent string
 }
 
 // seedLiveInventoryDelegation writes the live inventory's grants and
@@ -1444,9 +1461,9 @@ type liveInventoryDelegation struct {
 // token reaches them as hub authority.
 func seedLiveInventoryDelegation(t *testing.T, ctx context.Context, s store.Store, agentID, projectID string) liveInventoryDelegation {
 	t.Helper()
-	grant := func(name string) string {
+	grantOn := func(boundAgentID, name string) string {
 		g := &store.AgentDelegationGrant{
-			AgentID: agentID, AgentProjectID: projectID, IssuerUserID: DevUserID,
+			AgentID: boundAgentID, AgentProjectID: projectID, IssuerUserID: DevUserID,
 			BoundaryKind: "hub", CeilingVersion: 1, CeilingPermissionIDs: []string{"agent.read"},
 			Name: name, MaxCredentialTTLSeconds: agentDelegationCredentialDefaultTTL,
 			ExpiresAt: time.Now().Add(time.Hour), IssuanceAuditID: uuid.New().String(),
@@ -1454,7 +1471,9 @@ func seedLiveInventoryDelegation(t *testing.T, ctx context.Context, s store.Stor
 		require.NoError(t, s.CreateAgentDelegationGrant(ctx, g))
 		return g.ID
 	}
-	out := liveInventoryDelegation{grant: grant("li-grant"), grantRevoke: grant("li-grant-revoke")}
+	grant := func(name string) string { return grantOn(agentID, name) }
+	out := liveInventoryDelegation{grant: grant("li-grant"), grantRevoke: grant("li-grant-revoke"), revokeAllAgent: uuid.New().String()}
+	grantOn(out.revokeAllAgent, "li-grant-revoke-all")
 	_, hash, err := newDelegatedCredentialToken()
 	require.NoError(t, err)
 	cred := &store.AgentDelegatedCredential{

@@ -150,27 +150,9 @@ func LoadHarnessConfigDir(dirPath string) (*HarnessConfigDir, error) {
 		return nil, fmt.Errorf("failed to read config.yaml: %w", err)
 	}
 
-	if validationErrors, err := ValidateHarnessConfig(data); err != nil {
+	entry, err := parseValidatedHarnessConfig(data)
+	if err != nil {
 		return nil, err
-	} else if len(validationErrors) > 0 {
-		return nil, fmt.Errorf("invalid config.yaml: %s", validationErrors[0].Error())
-	}
-
-	var entry HarnessConfigEntry
-	if err := yaml.Unmarshal(data, &entry); err != nil {
-		return nil, fmt.Errorf("failed to parse config.yaml: %w", err)
-	}
-
-	// The schema cannot express ordering or duration ranges; enforce them
-	// here so a bad block fails at load like any other schema error.
-	if err := entry.Thinking.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid config.yaml: %w", err)
-	}
-	if err := entry.Ready.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid config.yaml: %w", err)
-	}
-	if err := entry.Delivery.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid config.yaml: %w", err)
 	}
 	// Agent Plugins support comes from the bundle sidecar when present; a
 	// capabilities.agent_plugins value in config.yaml is the fallback.
@@ -178,12 +160,9 @@ func LoadHarnessConfigDir(dirPath string) (*HarnessConfigDir, error) {
 	// load.
 	ApplyAgentPluginsSidecarDir(&entry, absPath)
 
-	name := filepath.Base(absPath)
-	if entry.Name != "" {
-		if entry.Name == "." || entry.Name == ".." || strings.ContainsAny(entry.Name, "/\\") {
-			return nil, fmt.Errorf("invalid name in config.yaml: %q contains path components or separators", entry.Name)
-		}
-		name = entry.Name
+	name, err := harnessConfigDirName(entry, filepath.Base(absPath))
+	if err != nil {
+		return nil, err
 	}
 
 	return &HarnessConfigDir{
@@ -191,6 +170,114 @@ func LoadHarnessConfigDir(dirPath string) (*HarnessConfigDir, error) {
 		Path:   absPath,
 		Config: entry,
 	}, nil
+}
+
+// LoadHarnessConfigFromFiles is LoadHarnessConfigDir for a harness-config
+// directory whose files the caller reads: read returns the content of a file
+// of the directory by its name (config.yaml, AgentPluginsSidecarFile), and an
+// error wrapping fs.ErrNotExist when the file is absent. dirName is the
+// directory's base name (the Name fallback) and where locates the directory
+// in messages; it is also the returned Path. The validation, the sidecar
+// handling and the name rules are LoadHarnessConfigDir's. It reads nothing
+// itself, so a caller can serve read from verified content (for example
+// files read through an os.Root).
+func LoadHarnessConfigFromFiles(dirName, where string, read func(name string) ([]byte, error)) (*HarnessConfigDir, error) {
+	data, err := read("config.yaml")
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config.yaml: %w", err)
+	}
+
+	entry, err := parseValidatedHarnessConfig(data)
+	if err != nil {
+		return nil, err
+	}
+	sidecarPath := filepath.Join(where, AgentPluginsSidecarFile)
+	sidecar, err := read(AgentPluginsSidecarFile)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+	case err != nil:
+		c := invalidAgentPluginsSidecar(fmt.Errorf("invalid %s: %w", AgentPluginsSidecarFile, err), sidecarPath)
+		entry.AgentPluginsSidecar = &c
+	default:
+		applyAgentPluginsSidecar(&entry, sidecar, sidecarPath)
+	}
+
+	name, err := harnessConfigDirName(entry, dirName)
+	if err != nil {
+		return nil, err
+	}
+
+	return &HarnessConfigDir{
+		Name:   name,
+		Path:   where,
+		Config: entry,
+	}, nil
+}
+
+// parseValidatedHarnessConfig validates config.yaml bytes against the
+// schema, parses them and checks the blocks the schema cannot express
+// (LoadHarnessConfigDir's and LoadHarnessConfigFromFiles' shared rules).
+func parseValidatedHarnessConfig(data []byte) (HarnessConfigEntry, error) {
+	if validationErrors, err := ValidateHarnessConfig(data); err != nil {
+		return HarnessConfigEntry{}, err
+	} else if len(validationErrors) > 0 {
+		return HarnessConfigEntry{}, fmt.Errorf("invalid config.yaml: %s", validationErrors[0].Error())
+	}
+
+	var entry HarnessConfigEntry
+	if err := yaml.Unmarshal(data, &entry); err != nil {
+		return HarnessConfigEntry{}, fmt.Errorf("failed to parse config.yaml: %w", err)
+	}
+
+	if err := ValidateHarnessHomePaths(entry); err != nil {
+		return HarnessConfigEntry{}, fmt.Errorf("invalid config.yaml: %w", err)
+	}
+
+	// The schema cannot express ordering or duration ranges; enforce them
+	// here so a bad block fails at load like any other schema error.
+	if err := entry.Thinking.Validate(); err != nil {
+		return HarnessConfigEntry{}, fmt.Errorf("invalid config.yaml: %w", err)
+	}
+	if err := entry.Ready.Validate(); err != nil {
+		return HarnessConfigEntry{}, fmt.Errorf("invalid config.yaml: %w", err)
+	}
+	if err := entry.Delivery.Validate(); err != nil {
+		return HarnessConfigEntry{}, fmt.Errorf("invalid config.yaml: %w", err)
+	}
+	return entry, nil
+}
+
+// ValidateHarnessHomePaths checks the harness-config fields that name a
+// path in the agent home: system_prompt_file, instructions_file, skills_dir
+// and config_dir. Each must be empty or a local relative path
+// (filepath.IsLocal: not absolute, no ".." component, not empty after
+// cleaning), so it cannot name a path outside the home. The error names the
+// field, not its value.
+func ValidateHarnessHomePaths(entry HarnessConfigEntry) error {
+	for _, f := range []struct{ key, val string }{
+		{"system_prompt_file", entry.SystemPromptFile},
+		{"instructions_file", entry.InstructionsFile},
+		{"skills_dir", entry.SkillsDir},
+		{"config_dir", entry.ConfigDir},
+	} {
+		if f.val != "" && (!filepath.IsLocal(f.val) || filepath.Clean(f.val) == ".") {
+			return fmt.Errorf("%s must be a relative path inside the agent home", f.key)
+		}
+	}
+	return nil
+}
+
+// harnessConfigDirName is the harness-config's name: config.yaml's name when
+// set (it must not contain path components or separators), otherwise
+// dirName.
+func harnessConfigDirName(entry HarnessConfigEntry, dirName string) (string, error) {
+	if entry.Name == "" {
+		return dirName, nil
+	}
+	if entry.Name == "." || entry.Name == ".." || strings.ContainsAny(entry.Name, "/\\") {
+		return "", fmt.Errorf("invalid name in config.yaml: %q contains path components or separators", entry.Name)
+	}
+	return entry.Name, nil
 }
 
 // ParseHarnessConfigYAML unmarshals raw config.yaml bytes into a
@@ -256,6 +343,14 @@ func FindHarnessConfigDir(name string, projectPath string, templatePaths ...stri
 	// The "generic" harness has no embedded files and therefore no on-disk
 	// directory.  Return a synthetic entry so callers (e.g. template-sync
 	// agents) can proceed without a physical harness-config dir.
+	//
+	// Its image is the shared base, scion-base:latest (moved under the
+	// configured image_registry like any short-form image), not a
+	// harness-specific image. A deployment that moves only the harness
+	// :latest tags after a rebuild leaves generic agents on the old base, so
+	// scion-base:latest must be moved together with them; image-build/README.md
+	// ("Tagging") says so. A generic harness-config dir with its own image
+	// takes precedence over this entry.
 	if name == "generic" {
 		return &HarnessConfigDir{
 			Name:   "generic",
@@ -563,6 +658,9 @@ func SeedHarnessConfigFromDir(targetDir string, sourceFS fs.FS, sourcePath strin
 	var entry HarnessConfigEntry
 	if err := yaml.Unmarshal(configData, &entry); err != nil {
 		return fmt.Errorf("failed to parse config.yaml: %w", err)
+	}
+	if err := ValidateHarnessHomePaths(entry); err != nil {
+		return fmt.Errorf("invalid config.yaml: %w", err)
 	}
 
 	configDir := entry.ConfigDir

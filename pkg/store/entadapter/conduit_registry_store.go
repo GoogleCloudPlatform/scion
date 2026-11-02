@@ -25,12 +25,12 @@ import (
 	"time"
 
 	"entgo.io/ent/dialect"
-	entsql "entgo.io/ent/dialect/sql"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitprincipalepoch"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitsession"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/relayinstance"
 )
 
@@ -98,7 +98,7 @@ func (t *conduitTx) rollback() {
 // read-only REPEATABLE READ snapshot on Postgres (so a multi-query read is
 // one consistent view); SQLite transactions are already serializable.
 func (s *ConduitRegistryStore) begin(ctx context.Context, readOnly bool) (*conduitTx, error) {
-	drv, ok := s.client.Driver().(*entsql.Driver)
+	drv, ok := entc.SQLDriver(s.client.Driver())
 	if !ok || drv.DB() == nil {
 		return nil, errors.New("conduit registry store: not backed by a *sql.DB")
 	}

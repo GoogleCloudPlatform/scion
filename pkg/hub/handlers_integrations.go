@@ -17,18 +17,23 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/pgprovider"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
@@ -44,6 +49,10 @@ import (
 // and must be carried over during reconfigure (they are not in config files).
 var pluginBrokerNS = uuid.MustParse("5c104390-a1d0-5e9a-9b1e-5c104390a1d0")
 
+// hubKeys lists the hub wiring keys that getPluginHubCreds supplies. It has
+// two uses: resolveIntegrationMergedConfig keeps these keys out of the
+// cached-config carry-over (the live hub values override them), and
+// filterSensitiveConfig omits them from integration settings responses.
 var hubKeys = map[string]bool{
 	"hub_url": true, "broker_id": true, "hmac_key": true,
 	"plugin_name": true, "project_slug_map": true,
@@ -525,12 +534,19 @@ func (s *Server) handleUpdateIntegrationConfig(w http.ResponseWriter, r *http.Re
 			allowedSecrets[m.ConfigKey] = m.SecretKey
 		}
 
-		for configKey, value := range req.Secrets {
-			secretKey, ok := allowedSecrets[configKey]
-			if !ok {
-				BadRequest(w, "unknown secret key: "+configKey)
-				return
+		// Every unknown key is refused before any secret is stored.
+		var unknown []settingsFieldError
+		for _, configKey := range slices.Sorted(maps.Keys(req.Secrets)) {
+			if _, ok := allowedSecrets[configKey]; !ok {
+				unknown = append(unknown, settingsFieldError{Field: "secrets." + configKey, Message: "unknown secret key: " + configKey})
 			}
+		}
+		if len(unknown) > 0 {
+			writeSettingsValidation(w, unknown[0].Message, unknown, nil)
+			return
+		}
+		for configKey, value := range req.Secrets {
+			secretKey := allowedSecrets[configKey]
 			if err := s.SetChatIntegrationSecret(ctx, secretKey, value, ChatSecretDescription(secretKey), userID); err != nil {
 				slog.Error("Failed to store integration secret", "plugin", name, "key", configKey, "error", err)
 				InternalError(w)
@@ -1443,22 +1459,19 @@ func (s *Server) checkIntegrationSecrets(ctx context.Context, name string) map[s
 	return result
 }
 
-// filterSensitiveConfig returns a copy of the config map with secret values
-// and internal runtime keys removed.
+// filterSensitiveConfig returns a copy of the config map with secret values,
+// hub wiring keys (hubKeys) and internal runtime keys removed.
 func filterSensitiveConfig(name string, cfg map[string]string) map[string]string {
 	filtered := make(map[string]string, len(cfg))
 
 	secretKeys := allSecretConfigKeys(name)
 	internalKeys := map[string]bool{
-		"hub_url":     true,
-		"hmac_key":    true,
-		"broker_id":   true,
 		"bot_id":      true,
 		"config_file": true,
 	}
 
 	for k, v := range cfg {
-		if secretKeys[k] || internalKeys[k] {
+		if secretKeys[k] || hubKeys[k] || internalKeys[k] {
 			continue
 		}
 		filtered[k] = v
@@ -1534,6 +1547,38 @@ func releasePluginBuildLock(name string) {
 	}
 }
 
+// ensurePluginBroker creates the runtime broker row for the named broker
+// plugin when it does not exist, with the same fields server startup
+// (cmd/server_foreground.go) uses. A plugin activated or reconfigured
+// without a restart, or whose row was deleted, then has the live row its
+// HMAC secret authenticates against. A failure is logged, as at startup.
+func (s *Server) ensurePluginBroker(ctx context.Context, name, brokerID string) {
+	if s.store == nil {
+		return
+	}
+	if _, err := s.store.GetRuntimeBroker(ctx, brokerID); err == nil || !errors.Is(err, store.ErrNotFound) {
+		if err != nil {
+			slog.WarnContext(ctx, "Failed to look up plugin broker", "plugin", name, "brokerId", brokerID, "error", err)
+		}
+		return
+	}
+	now := time.Now()
+	b := &store.RuntimeBroker{
+		ID:              brokerID,
+		Name:            "plugin-" + name,
+		Slug:            api.Slugify("plugin-" + name),
+		Version:         "0.1.0",
+		Status:          store.BrokerStatusOnline,
+		ConnectionState: "embedded",
+		Labels:          map[string]string{pluginBrokerLabel: name},
+		Created:         now,
+		Updated:         now,
+	}
+	if err := s.store.CreateRuntimeBrokerClearingCredentials(ctx, b); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+		slog.WarnContext(ctx, "Failed to register broker entity for plugin", "plugin", name, "brokerId", brokerID, "error", err)
+	}
+}
+
 // getPluginHubCreds reconstructs the hub wiring credentials for a broker
 // plugin from live, authoritative sources — the same values that
 // server_foreground.go injects via ConfigureBroker at startup. This avoids
@@ -1553,7 +1598,10 @@ func (s *Server) getPluginHubCreds(ctx context.Context, name string) map[string]
 	creds["broker_id"] = brokerID
 
 	// hmac_key: from BrokerAuthService (idempotent — returns existing key).
+	// A broker secret authenticates only a live broker row, so the plugin's
+	// row is ensured first, as startup does.
 	if authSvc := s.GetBrokerAuthService(); authSvc != nil {
+		s.ensurePluginBroker(ctx, name, brokerID)
 		if secretKey, err := authSvc.GenerateAndStoreSecret(ctx, brokerID); err != nil {
 			slog.Error("Failed to generate or retrieve HMAC key", "plugin", name, "error", err)
 		} else {

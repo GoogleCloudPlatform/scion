@@ -70,9 +70,12 @@ export class ScionChatInteragentMarker extends LitElement {
   @state()
   private expandedMessage: Message | null = null;
 
-  /** Rendered HTML for the expanded message popover. */
+  /**
+   * Rendered body of the expanded message popover (an `.ia-full-body`
+   * element), or null to show the text as is.
+   */
   @state()
-  private expandedHtml = '';
+  private expandedContent: HTMLElement | null = null;
 
   /** Set of message IDs whose `.ia-body` is truncated by the line clamp. */
   @state()
@@ -350,17 +353,22 @@ export class ScionChatInteragentMarker extends LitElement {
   /** Open the full-content popover for a message. */
   private async openMessagePreview(msg: Message, e: Event): Promise<void> {
     e.stopPropagation(); // Don't toggle the marker collapse.
-    // Await markdown rendering first, then set both expandedHtml and
+    // Await markdown rendering first, then set both expandedContent and
     // expandedMessage in the same microtask so Lit batches into one render,
     // avoiding a content flash from plain text to rendered HTML.
-    let htmlContent: string;
+    let content: HTMLElement | null = null;
     try {
       const renderer = await getMarkdownRenderer();
-      htmlContent = renderer.render(msg.msg);
+      const fragment = renderer.renderFragment(msg.msg);
+      if (fragment.hasChildNodes()) {
+        content = document.createElement('div');
+        content.className = 'ia-full-body';
+        content.append(fragment);
+      }
     } catch {
-      htmlContent = '';
+      content = null;
     }
-    this.expandedHtml = htmlContent;
+    this.expandedContent = content;
     this.expandedMessage = msg;
   }
 
@@ -368,7 +376,7 @@ export class ScionChatInteragentMarker extends LitElement {
   private closeMessagePreview(e: Event): void {
     if (e.target === e.currentTarget) {
       this.expandedMessage = null;
-      this.expandedHtml = '';
+      this.expandedContent = null;
     }
   }
 
@@ -454,9 +462,7 @@ export class ScionChatInteragentMarker extends LitElement {
               </span>`
             : nothing}
         </div>
-        ${this.expandedHtml
-          ? html`<div class="ia-full-body" .innerHTML=${this.expandedHtml}></div>`
-          : html`<div class="ia-full-body-plain">${msg.msg}</div>`}
+        ${this.expandedContent ?? html`<div class="ia-full-body-plain">${msg.msg}</div>`}
       </sl-dialog>
     `;
   }

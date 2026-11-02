@@ -28,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/internal/settingslockhook"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/filelock"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 	"gopkg.in/yaml.v3"
 )
 
@@ -279,9 +280,16 @@ func updateCLIContext(fn func(*CLIContext) error, force bool) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	// Missing components of the global directory are created private
+	// (mode 0700; on Windows an owner-only ACL); an existing one is left as
+	// it is. context.yaml is written private by writeFileAtomicMode (mode
+	// 0600 is Private), and the lock file gets the private descriptor
+	// (filelock.Acquire with mode 0600).
+	tree, err := privatefs.OpenTree(dir, privatefs.TreeOptions{CreateAnchor: true})
+	if err != nil {
 		return fmt.Errorf("create %s: %w", dir, err)
 	}
+	_ = tree.Close()
 	unlock, err := lockCLIContext(filepath.Join(dir, cliContextLockFileName))
 	if err != nil {
 		return err

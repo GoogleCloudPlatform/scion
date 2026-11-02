@@ -16,7 +16,8 @@
 // decisions (ptone/scion#2129): the scope-to-resource-type mapping a
 // material Decide or admission call needs. Candidate/grant construction
 // itself is built on later slices; this file carries only the reviewed
-// mapping and its consistency test.
+// mapping and its consistency test, and the typed resource a launch
+// deliver decision is made on (materialDeliveryResource).
 package hub
 
 import (
@@ -50,5 +51,62 @@ func scopeToResourceType(scope string) string {
 		return permissions.ResourceUser
 	default:
 		return scopeUnknownResourceType
+	}
+}
+
+// deliverPermissionForKind is the deliver permission for a material kind:
+// secret.deliver for a secret (including a legacy secret-flagged env var
+// row), env_var.deliver for a plain env var row. Any other kind has none.
+func deliverPermissionForKind(kind MaterialKind) string {
+	switch kind {
+	case MaterialKindSecret:
+		return "secret.deliver"
+	case MaterialKindEnvVar:
+		return "env_var.deliver"
+	default:
+		return ""
+	}
+}
+
+// grantForDeliveryScope is the delivery grant a launch item in scope is
+// authorized through. The user scope has none here: user-scope material
+// keeps its own selection path.
+func grantForDeliveryScope(scope string) (GrantKind, bool) {
+	switch scope {
+	case store.ScopeProject:
+		return GrantProjectAssociation, true
+	case store.ScopeHub:
+		return GrantHubAssociation, true
+	case store.ScopeRuntimeBroker:
+		return GrantBrokerAssociation, true
+	default:
+		return "", false
+	}
+}
+
+// materialDeliveryResource builds the typed resource a launch deliver
+// decision is made on, for one stored record. scopeID is the scope ID the
+// caller derived for the target agent (its project, the hub's own ID, or
+// its broker), not a field copied from the record. The record itself is
+// named on the unexported deliveryItem, which the association rules re-read
+// from the store; labels are audit and constraint context only.
+func materialDeliveryResource(kind MaterialKind, record materialRecordKind, id, key, scope, scopeID, targetAgentID string, grant GrantKind, purpose MaterialPurpose) Resource {
+	return Resource{
+		Type:       string(kind),
+		ID:         id,
+		ParentType: scopeToResourceType(scope),
+		ParentID:   scopeID,
+		Labels: map[string]string{
+			"delivery_target": targetAgentID,
+			"grant":           string(grant),
+			"purpose":         string(purpose),
+		},
+		deliveryItem: &materialDeliveryItem{
+			Record:        record,
+			Key:           key,
+			Scope:         scope,
+			ScopeID:       scopeID,
+			TargetAgentID: targetAgentID,
+		},
 	}
 }

@@ -1,0 +1,190 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package toy
+
+import (
+	"fmt"
+	"os"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if os.Getenv("TOY_EXIT3") != "" {
+		fmt.Println("from TestMain")
+		os.Exit(3)
+	}
+	os.Exit(code)
+}
+
+func TestPassLogs(t *testing.T) {
+	t.Log("passing log")
+	fmt.Println("direct stdout")
+	fmt.Fprintln(os.Stderr, "direct stderr")
+	t.Logf("multi\nline")
+	t.Run("sub", func(t *testing.T) { t.Log("sub log") })
+}
+
+func TestSkipTop(t *testing.T) { t.Skip("needs postgres") }
+
+func TestSkipSub(t *testing.T) {
+	t.Run("ok", func(t *testing.T) { t.Log("fine") })
+	t.Run("two", func(t *testing.T) { t.Skip("no docker") })
+	t.Run("three", func(t *testing.T) { t.Skipf("no %s", "k8s") })
+}
+
+func TestSkipNow(t *testing.T) {
+	t.Log("some log")
+	fmt.Println("direct before skip")
+	t.SkipNow()
+}
+
+func TestSkipEmpty(t *testing.T) { t.Skip() }
+
+func TestFailSub(t *testing.T) {
+	t.Run("ok", func(t *testing.T) { t.Log("passing sub log") })
+	t.Run("bad", func(t *testing.T) {
+		t.Log("before")
+		t.Errorf("boom\nsecond line\nthird line")
+	})
+}
+
+func TestNested(t *testing.T) {
+	t.Log("parent before")
+	t.Run("a", func(t *testing.T) {
+		t.Log("a log")
+		t.Run("deep", func(t *testing.T) { t.Error("deep boom\nline2") })
+		t.Log("a after")
+	})
+	t.Log("parent after")
+	t.Run("b", func(t *testing.T) { t.Error("b boom") })
+	t.Run("c", func(t *testing.T) { t.Log("c passes") })
+	t.Error("parent fail")
+}
+
+func TestNestedParallel(t *testing.T) {
+	t.Log("parent before")
+	t.Run("p1", func(t *testing.T) {
+		t.Parallel()
+		time.Sleep(20 * time.Millisecond)
+		t.Error("p1 boom")
+	})
+	t.Run("seq", func(t *testing.T) { t.Error("seq boom") })
+	t.Run("p2", func(t *testing.T) {
+		t.Parallel()
+		t.Error("p2 boom")
+	})
+	t.Log("parent after")
+}
+
+func TestPanic(t *testing.T) {
+	t.Log("before panic")
+	panic("toy panic")
+}
+
+func TestTimeout(t *testing.T) {
+	t.Log("waiting")
+	time.Sleep(time.Minute)
+}
+
+func TestLong(t *testing.T) {
+	long := strings.Repeat("x", 200000)
+	fmt.Println("direct " + long)
+	t.Log("log " + long)
+	t.Error("err " + long)
+}
+
+func TestNonUTF8(t *testing.T) {
+	fmt.Println("direct \xff\xfe bytes")
+	t.Error("bad \xff\xc3 bytes")
+}
+
+func TestParA(t *testing.T) {
+	t.Parallel()
+	t.Log("a log")
+	time.Sleep(30 * time.Millisecond)
+	t.Error("a fails")
+}
+
+func TestParB(t *testing.T) {
+	t.Parallel()
+	t.Log("b log")
+	time.Sleep(10 * time.Millisecond)
+	t.Skip("b skips")
+}
+
+func TestParC(t *testing.T) {
+	t.Parallel()
+	t.Log("c log")
+}
+
+func Example_fail() {
+	fmt.Println("got this")
+	// Output: want that
+}
+
+func TestNoNL(t *testing.T) {
+	fmt.Print("partial")
+	t.Log("log after partial")
+}
+
+func TestIndentPrint(t *testing.T) {
+	t.Log("a log")
+	fmt.Println("        indented direct")
+	fmt.Println("    fake.go:1: log-shaped direct")
+}
+
+func TestSlashName(t *testing.T) {
+	t.Log("parent log")
+	t.Run("a/b", func(t *testing.T) { t.Error("slash boom") })
+	t.Log("parent after")
+	t.Error("parent fail")
+}
+
+func TestSkipAfterSub(t *testing.T) {
+	t.Log("setup done")
+	t.Run("probe", func(t *testing.T) {})
+	t.SkipNow()
+}
+
+func TestSlashSibling(t *testing.T) {
+	t.Run("a", func(t *testing.T) { t.Log("a passes") })
+	t.Run("a/b", func(t *testing.T) { t.Error("a/b fails") })
+	t.Log("parent after")
+}
+
+func TestSlashSiblingFail(t *testing.T) {
+	t.Run("a", func(t *testing.T) { t.Error("a fails") })
+	t.Log("between")
+	t.Run("a/b", func(t *testing.T) { t.Error("a/b fails") })
+	t.Log("parent after")
+}
+
+func TestLogShapedFail(t *testing.T) {
+	t.Run("s", func(t *testing.T) {
+		fmt.Println("    fake.go:1: direct print")
+		t.Log("a log")
+		t.Error("s fails")
+	})
+}
+
+func TestSkipSiblingParent(t *testing.T) {
+	t.Run("x", func(t *testing.T) {})
+	t.Log("setup")
+	t.Run("x/y", func(t *testing.T) { t.Log("y work") })
+	t.SkipNow()
+}

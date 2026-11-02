@@ -48,6 +48,13 @@
 #                                 A URL whose basename has no matching
 #                                 fixture file fails like a 404.
 #
+#   CURL_STUB_LATEST_TAG=TAG   — a GitHub Releases API request
+#                                 (api.github.com/repos/...) answers
+#                                 {"tag_name":"TAG"}, for a test that
+#                                 drives deploy.sh's release auto-detect
+#                                 (no --version). Unset: falls through to
+#                                 the real curl, as before.
+#
 # With neither env knob set, a SHA256SUMS request succeeds with an empty
 # body (an -I probe needs no body at all; a bare -o download gets an
 # empty placeholder file) -- equivalent to "the release publishes
@@ -92,6 +99,11 @@ real_curl() {
 
 if [[ -z "$url" ]]; then
   real_curl
+fi
+
+if [[ -n "${CURL_STUB_LATEST_TAG:-}" && "$url" == https://api.github.com/repos/* ]]; then
+  printf '{"tag_name":"%s"}\n' "$CURL_STUB_LATEST_TAG"
+  exit 0
 fi
 
 base="$(basename -- "$url")"

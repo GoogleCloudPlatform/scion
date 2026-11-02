@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -488,10 +489,14 @@ func TestAppleCLIVersion(t *testing.T) {
 	}
 }
 
-// In the full-repo-root fallback the Apple runtime masks /repo-root/.scion
-// with --tmpfs and checks after the start that the mask is mounted
-// (different device from /repo-root).
+// An unregistered workspace outside the repo root is refused on the Apple runtime
+// before any mount or run: the start fails fail-closed and no container is created
+// (the removed full-repo-root fallback no longer masks /repo-root/.scion).
 func TestAppleContainerRuntime_Run_FallbackScionMask(t *testing.T) {
+	// #5865 removed the full-repo-root fallback: an unregistered workspace outside
+	// the repo root is refused, so the Apple run never reaches a /repo-root/.scion
+	// mask. (A registered outside-root worktree is covered by the
+	// registered-outside-worktree project-config test.)
 	t.Setenv("HOME", t.TempDir())
 	command, calls := appleGateMock(t, appleGateOpts{version: "container CLI version 1.6.0", statOut: "41\n40"})
 	rt := &AppleContainerRuntime{Command: command}
@@ -503,30 +508,30 @@ func TestAppleContainerRuntime_Run_FallbackScionMask(t *testing.T) {
 	if err := os.MkdirAll(ws, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := rt.Run(context.Background(), RunConfig{
+	before := fsSnapshot(t, root, ws)
+	id, err := rt.Run(context.Background(), RunConfig{
 		Harness: &harness.Generic{}, Name: "test-agent", UnixUsername: "scion",
 		Image: "scion-agent:latest", RepoRoot: root, Workspace: ws,
-	}); err != nil {
-		t.Fatalf("Run: %v", err)
+	})
+	// Refusal triple: typed error + message + fail-closed.
+	if !errors.Is(err, errOutsideRootNotRegistered) {
+		t.Fatalf("Run error = %v, want errOutsideRootNotRegistered", err)
 	}
-	b, err := os.ReadFile(calls)
-	if err != nil {
-		t.Fatal(err)
+	if !strings.Contains(err.Error(), "is not a registered worktree") {
+		t.Errorf("error message lacks the registered-worktree reason: %v", err)
 	}
-	log := string(b)
-	if !strings.Contains(log, "--tmpfs /repo-root/.scion") || strings.Contains(log, "type=tmpfs") {
-		t.Errorf("run args: %s", log)
+	if id != "" {
+		t.Errorf("fail-closed: expected empty container id, got %q", id)
 	}
-	var execs [][]string
-	for _, line := range strings.Split(strings.TrimSpace(log), "\n") {
-		if f := strings.Fields(line); len(f) > 0 && f[0] == "exec" {
-			execs = append(execs, f)
+	// No container was created and nothing was written to the checkout.
+	if data, rerr := os.ReadFile(calls); rerr == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "run ") || line == "run" {
+				t.Errorf("refused start still issued a container run: %q", line)
+			}
 		}
 	}
-	want := []string{"exec", "cid", "/usr/bin/env", "-i", "/usr/bin/stat", "-c", "%d", "/repo-root/.scion", "/repo-root"}
-	if len(execs) != 1 || !slices.Equal(execs[0], want) {
-		t.Errorf("mask check argv = %q, want exactly %q", execs, want)
-	}
+	assertNothingCreated(t, before, root, ws)
 }
 
 func TestMountinfoReadOnly(t *testing.T) {

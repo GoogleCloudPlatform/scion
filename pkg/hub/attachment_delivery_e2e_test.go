@@ -166,6 +166,7 @@ func TestAttachmentDelivery_EndToEnd(t *testing.T) {
 	rt := &e2eHomeRuntime{home: t.TempDir()}
 	mgr := &e2eMessageManager{rt: rt}
 	cfg := runtimebroker.DefaultServerConfig()
+	cfg.BrokerAuthEnabled = false // no hub keys here: serve the broker API without auth
 	cfg.BrokerID = f.brokerID
 	cfg.BrokerName = "send-broker"
 	cfg.StateDir = t.TempDir()

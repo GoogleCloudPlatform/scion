@@ -16,13 +16,7 @@ profiles:
     runtime: cluster
     kubernetes_service_account_mappings:
       agent@proj.iam.gserviceaccount.com: ksa-a
-    shared_dir_storage_backends:
-      data: nfs
-      logs: local
   b:
     runtime: cluster
     kubernetes_service_account_mappings:
       agent@proj.iam.gserviceaccount.com: ksa-b
-    shared_dir_storage_backends:
-      data: local
-      logs: local

@@ -1056,9 +1056,11 @@ func (d *UsageDeriver) recordAnalytics(obs UsageObservation) {
 }
 
 // record emits the canonical increments. Point labels are exactly the
-// producer set from design §3.2: gen_ai.api.calls gets agent_id, project_id,
-// harness, model, status (matching the existing hook descriptor);
-// scion.usage.tokens gets harness, model, token_type only.
+// producer set from design §3.2: gen_ai.api.calls gets harness, model,
+// status (matching the hook path, apiCallsAttrs); scion.usage.tokens gets
+// harness, model, token_type only. Neither carries the unprefixed
+// agent_id/project_id: the pipeline stamps the canonical scion_* identity
+// labels on every exported point (ptone/scion#3668).
 func (d *UsageDeriver) record(ctx context.Context, increment usageIncrement) {
 	if d.sessionUsage != nil {
 		if u := sessionUsageFromIncrement(increment); !u.IsZero() {
@@ -1070,18 +1072,11 @@ func (d *UsageDeriver) record(ctx context.Context, increment usageIncrement) {
 	harness := os.Getenv("SCION_HARNESS")
 
 	if increment.Calls != 0 && d.calls != nil {
-		attrs := []attribute.KeyValue{}
-		if agentID := os.Getenv("SCION_AGENT_ID"); agentID != "" {
-			attrs = append(attrs, attribute.String("agent_id", agentID))
-		}
-		if projectID := projectkeys.ProjectIDFromEnv(os.Getenv); projectID != "" {
-			attrs = append(attrs, attribute.String("project_id", projectID))
-		}
-		attrs = append(attrs,
+		attrs := []attribute.KeyValue{
 			attribute.String(telemetrycontract.HarnessLabel, harness),
 			attribute.String(telemetrycontract.ModelLabel, model),
 			attribute.String(telemetrycontract.StatusLabel, increment.Status),
-		)
+		}
 		d.calls.Add(ctx, increment.Calls, otelmetric.WithAttributes(attrs...))
 	}
 	if d.tokens == nil {

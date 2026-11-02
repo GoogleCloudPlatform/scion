@@ -20,28 +20,9 @@ import (
 	"database/sql"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/hubtestutil"
 	"github.com/stretchr/testify/require"
 )
-
-// conversationsTableDDL is the schema for the Ent-managed conversations table,
-// reproduced here for testing the dual-write paths that depend on it.
-const conversationsTableDDL = `
-CREATE TABLE IF NOT EXISTS conversations (
-    id              TEXT PRIMARY KEY,
-    project_id      TEXT,
-    kind            TEXT NOT NULL,
-    surface         TEXT NOT NULL,
-    external_ref    TEXT NOT NULL DEFAULT '',
-    parent_ref      TEXT NOT NULL DEFAULT '',
-    display_name    TEXT NOT NULL DEFAULT '',
-    drift_state     TEXT NOT NULL DEFAULT 'active',
-    default_agent_id TEXT,
-    last_activity_at TEXT,
-    created_at      TEXT,
-    archived_at     TEXT,
-    deleted_at      TEXT
-)
-`
 
 // newTestWebChatStoreWithConversations creates a WebChatStore backed by an
 // in-memory SQLite DB that includes the conversations table (Ent-managed in
@@ -49,10 +30,10 @@ CREATE TABLE IF NOT EXISTS conversations (
 // hasConversationsTable() to return true.
 func newTestWebChatStoreWithConversations(t *testing.T) (WebChatStore, *sql.DB) {
 	t.Helper()
-	db := openTestMemorySQLite(t, "sqlite")
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
 
 	// Create the conversations table BEFORE Init so migrations can see it.
-	_, err := db.Exec(conversationsTableDDL)
+	_, err := db.Exec(hubtestutil.ConversationsTableDDL)
 	require.NoError(t, err)
 
 	s := NewWebChatStore(db, "sqlite")
@@ -65,7 +46,7 @@ func newTestWebChatStoreWithConversations(t *testing.T) (WebChatStore, *sql.DB) 
 // SQLite DB that includes both the messages table AND the conversations table.
 func newPromoteTestStoreWithConversations(t *testing.T) (WebChatStore, *sql.DB) {
 	t.Helper()
-	db := openTestMemorySQLite(t, "sqlite")
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
 
 	// Create the Ent messages table manually.
 	_, err := db.Exec(`
@@ -88,7 +69,7 @@ CREATE TABLE IF NOT EXISTS messages (
 	require.NoError(t, err)
 
 	// Create the conversations table.
-	_, err = db.Exec(conversationsTableDDL)
+	_, err = db.Exec(hubtestutil.ConversationsTableDDL)
 	require.NoError(t, err)
 
 	s := NewWebChatStore(db, "sqlite")
@@ -112,20 +93,11 @@ func getConversation(t *testing.T, db *sql.DB, convID string) *conversationRow {
 	return &c
 }
 
-// getTopicConvID reads conversation_id directly from the webchat_topic table.
-func getTopicConvID(t *testing.T, db *sql.DB, topicID string) string {
-	t.Helper()
-	var convID string
-	err := db.QueryRow("SELECT COALESCE(conversation_id, '') FROM webchat_topic WHERE id = ?", topicID).Scan(&convID)
-	require.NoError(t, err)
-	return convID
-}
-
 // newTestWebChatStoreV2 creates a WebChatStore backed by an in-memory SQLite DB
 // for testing wave-2 features. The caller should close the returned *sql.DB.
 func newTestWebChatStoreV2(t *testing.T) (WebChatStore, *sql.DB) {
 	t.Helper()
-	db := openTestMemorySQLite(t, "sqlite")
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
 
 	store := NewWebChatStore(db, "sqlite")
 	require.NoError(t, store.Init())

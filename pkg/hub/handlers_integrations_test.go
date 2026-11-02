@@ -1098,8 +1098,12 @@ func TestUpdateConfig_UnknownSecretKey(t *testing.T) {
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
+	}
+	entries := settingsErrorEntries(t, rr)
+	if entries[0].Field != "secrets.unknown_key" {
+		t.Errorf("field = %q, want secrets.unknown_key", entries[0].Field)
 	}
 }
 
@@ -1223,6 +1227,43 @@ func TestFilterSensitiveConfig_Slack(t *testing.T) {
 	}
 	if filtered["agent_cache_ttl"] != "5m" {
 		t.Errorf("expected agent_cache_ttl 5m, got %s", filtered["agent_cache_ttl"])
+	}
+}
+
+func TestFilterSensitiveConfig_DatabaseSettings(t *testing.T) {
+	cfg := map[string]string{
+		"webhook_listen":   ":9094",
+		"database_driver":  "postgres",
+		"database_url":     "host=db.example.internal dbname=hub",
+		"plugin_name":      "telegram",
+		"project_slug_map": "p1:s1",
+	}
+	for key := range hubKeys {
+		if _, ok := cfg[key]; !ok {
+			cfg[key] = "value-" + key
+		}
+	}
+	if len(cfg) != len(hubKeys)+1 {
+		t.Fatalf("test input must hold every hub key plus webhook_listen, got %v", cfg)
+	}
+
+	filtered := filterSensitiveConfig("telegram", cfg)
+
+	for _, key := range []string{"database_driver", "database_url", "plugin_name", "project_slug_map"} {
+		if _, ok := filtered[key]; ok {
+			t.Errorf("%s should be filtered", key)
+		}
+	}
+	for key := range hubKeys {
+		if _, ok := filtered[key]; ok {
+			t.Errorf("hub key %s should be filtered", key)
+		}
+	}
+	if filtered["webhook_listen"] != ":9094" {
+		t.Errorf("expected webhook_listen :9094, got %s", filtered["webhook_listen"])
+	}
+	if len(filtered) != 1 {
+		t.Errorf("expected only webhook_listen to remain, got %v", filtered)
 	}
 }
 

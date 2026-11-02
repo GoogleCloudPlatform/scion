@@ -651,7 +651,7 @@ func TestTargetTemplatePersistence_NeverCreates(t *testing.T) {
 	_, err = p.GetBySlug(ctx, "pinned", store.TemplateScopeProject, "p1")
 	assert.Error(t, err, "a scope mismatch is refused")
 
-	assert.Error(t, p.Create(ctx, &ResourceRecord{}, t.TempDir()))
+	assert.Error(t, p.Create(ctx, &ResourceRecord{}, nil))
 
 	missing := srv.targetTemplateStore(tid("missing")).pers
 	_, err = missing.GetBySlug(ctx, "pinned", store.TemplateScopeGlobal, "")
@@ -855,10 +855,11 @@ func TestTargetTemplatePersistence_HashMatchWritesNothing(t *testing.T) {
 	p := srv.targetTemplateStore(tmpl.ID).pers
 	rec, err := p.GetBySlug(ctx, "hashmatch", store.TemplateScopeGlobal, "")
 	require.NoError(t, err)
-	changed, err := p.OnHashMatch(ctx, rec, dir)
+	cd := collectTestDir(t, dir)
+	changed, err := p.OnHashMatch(ctx, rec, cd)
 	require.NoError(t, err)
 	assert.False(t, changed)
-	p.PostFinalize(ctx, rec, dir)
+	p.PostFinalize(ctx, rec, cd)
 
 	got, err := s.GetTemplate(ctx, tmpl.ID)
 	require.NoError(t, err)

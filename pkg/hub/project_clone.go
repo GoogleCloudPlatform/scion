@@ -420,7 +420,7 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 			return
 		}
 	} else if clone.GitRemote == "" {
-		if err := s.initHubManagedProject(clone); err != nil {
+		if err := s.initHubManagedProject(ctx, clone); err != nil {
 			// Workspace storage did not respond: return before committed is
 			// set, so the deferred rollback stack removes the clone, and
 			// answer 503. Other failures stay best-effort, as before.
@@ -432,6 +432,10 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 			slog.Warn("project clone: failed to initialize hub-managed workspace",
 				"clone_id", clone.ID, "error", err)
 		}
+	} else {
+		// Per-agent git clone: seed only the project identity files on a
+		// shared backend (best-effort), as createProject does.
+		s.ensureSharedProjectIdentityBestEffort(clone)
 	}
 
 	// ── Step 15: Auto-link providers (best-effort) ───────────────────────

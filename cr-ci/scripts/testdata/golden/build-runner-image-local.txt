@@ -6,4 +6,4 @@
 + gcloud auth print-access-token --impersonate-service-account=cr-runner-build-sa@example-project.iam.gserviceaccount.com | docker login -u oauth2accesstoken --password-stdin https://us-central1-docker.pkg.dev
 + docker push us-central1-docker.pkg.dev/example-project/cr-runners/gh-runner:golden
 + docker logout https://us-central1-docker.pkg.dev
-# done; next: deploy-job.sh --tag golden
+# done; next: deploy-mediator.sh if the mediator changed too, then deploy-job.sh --tag golden

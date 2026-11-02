@@ -24,15 +24,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/tunnelclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/filelock"
 )
 
 const (
@@ -78,12 +79,21 @@ const (
 // directory.
 type vscodePaths struct{ home string }
 
-func (p vscodePaths) dir() string        { return filepath.Join(p.home, ".scion", "vscode") }
+// The directories scion vscode creates, relative to the home directory
+// (slash-separated, constant), for ensureSSHDir.
+const (
+	vscodeDirRel         = ".scion/vscode"
+	vscodeSettingsDirRel = vscodeDirRel + "/user-data/User"
+)
+
+func (p vscodePaths) dir() string        { return filepath.Join(p.home, filepath.FromSlash(vscodeDirRel)) }
 func (p vscodePaths) sshConfig() string  { return filepath.Join(p.dir(), "ssh_config") }
 func (p vscodePaths) knownHosts() string { return filepath.Join(p.dir(), "known_hosts") }
 func (p vscodePaths) lockFile() string   { return filepath.Join(p.dir(), ".lock") }
 func (p vscodePaths) userData() string   { return filepath.Join(p.dir(), "user-data") }
-func (p vscodePaths) settings() string   { return filepath.Join(p.userData(), "User", "settings.json") }
+func (p vscodePaths) settings() string {
+	return filepath.Join(p.home, filepath.FromSlash(vscodeSettingsDirRel), "settings.json")
+}
 
 var (
 	vscodeFolder string
@@ -265,7 +275,24 @@ type vscodeUpdate struct {
 // concurrent runs keep each other's entries. It reports whether u.host had
 // a different pin before.
 func updateVSCodeFiles(p vscodePaths, u vscodeUpdate) (changed bool, err error) {
-	if err := ensureSSHDir(p.home, p.dir()); err != nil {
+	// A refusal leaves nothing behind:
+	// every file this call may write is checked first (creating nothing),
+	// then both directories are verified before either is created, all
+	// before the lock file.
+	// settings.json only when it will be written: a
+	// file the operation leaves alone is not checked; ensureVSCodeSettings
+	// re-plans under the lock, and writeFileAtomic checks whatever it
+	// writes.
+	leaves := []string{p.sshConfig(), p.knownHosts()}
+	if _, write, err := planVSCodeSettings(p); err != nil {
+		return false, err
+	} else if write {
+		leaves = append(leaves, p.settings())
+	}
+	if err := preflightSSHWrites(leaves...); err != nil {
+		return false, err
+	}
+	if err := ensureSSHDir(p.home, vscodeDirRel, vscodeSettingsDirRel); err != nil {
 		return false, fmt.Errorf("creating %s: %w", p.dir(), err)
 	}
 	unlock, err := lockVSCodeDir(p.lockFile())
@@ -313,21 +340,23 @@ func updateVSCodeFiles(p vscodePaths, u vscodeUpdate) (changed bool, err error) 
 	return hadPin && old != u.key, nil
 }
 
+// vscodeLockWait bounds the wait for the vscode directory lock. A var so
+// tests can shorten it.
+var vscodeLockWait = 2 * time.Minute
+
 // lockVSCodeDir takes an exclusive advisory lock on path, which works
-// across processes (as for context.yaml).
+// across processes (filelock: flock on unix, LockFileEx on Windows, a
+// private lock file for mode 0600). It waits at most vscodeLockWait and
+// then fails with an error wrapping filelock.ErrTimeout.
 func lockVSCodeDir(path string) (func(), error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, sshFileMode)
+	l, err := filelock.Acquire(path, sshFileMode, vscodeLockWait)
 	if err != nil {
-		return nil, fmt.Errorf("open lock %s: %w", path, err)
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		_ = f.Close()
+		if errors.Is(err, filelock.ErrTimeout) {
+			return nil, fmt.Errorf("lock %s: another scion vscode is still updating these files after %s: %w", path, vscodeLockWait, err)
+		}
 		return nil, fmt.Errorf("lock %s: %w", path, err)
 	}
-	return func() {
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-		_ = f.Close()
-	}, nil
+	return l.Unlock, nil
 }
 
 // vscodeBlockHub returns the hub endpoint, normalized, that a Host block's
@@ -351,6 +380,8 @@ func vscodeBlockHub(block string) string {
 func sshShellUnquote(w string) string {
 	if len(w) >= 2 && strings.HasPrefix(w, "'") && strings.HasSuffix(w, "'") {
 		w = strings.ReplaceAll(w[1:len(w)-1], `'\''`, "'")
+	} else if len(w) >= 2 && strings.HasPrefix(w, `"`) && strings.HasSuffix(w, `"`) {
+		w = w[1 : len(w)-1]
 	}
 	return strings.ReplaceAll(w, "%%", "%")
 }
@@ -492,42 +523,60 @@ func mergeVSCodeSettings(m map[string]any, configFile string) {
 // the vscode directory lock.
 func ensureVSCodeSettings(p vscodePaths) error {
 	path := p.settings()
-	if err := ensureSSHDir(p.home, filepath.Dir(path)); err != nil {
+	if err := ensureSSHDir(p.home, vscodeSettingsDirRel); err != nil {
 		return fmt.Errorf("creating %s: %w", filepath.Dir(path), err)
 	}
-	data, err := os.ReadFile(path)
+	data, write, err := planVSCodeSettings(p)
+	if err != nil || !write {
+		return err
+	}
+	return writeVSCodeSettingsData(path, data)
+}
+
+// planVSCodeSettings decides, without writing anything, what
+// ensureVSCodeSettings writes: write reports whether settings.json must be
+// (re)written, and data is its new content. A missing directory or file
+// counts as empty. updateVSCodeFiles uses it to preflight settings.json
+// only when it will be written.
+func planVSCodeSettings(p vscodePaths) (data []byte, write bool, err error) {
+	path := p.settings()
+	data, err = os.ReadFile(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("reading %s: %w", path, err)
+		return nil, false, fmt.Errorf("reading %s: %w", path, err)
 	}
 	if t := strings.TrimSpace(string(data)); t == "" || t == "null" {
 		m := map[string]any{}
 		mergeVSCodeSettings(m, p.sshConfig())
-		return writeVSCodeSettings(path, m)
+		out, err := encodeVSCodeSettings(m)
+		if err != nil {
+			return nil, false, err
+		}
+		return out, true, nil
 	}
 	if m, err := decodeVSCodeSettingsJSON(data); err == nil {
 		before, err := encodeVSCodeSettings(m)
 		if err != nil {
-			return err
+			return nil, false, err
 		}
 		mergeVSCodeSettings(m, p.sshConfig())
 		after, err := encodeVSCodeSettings(m)
 		if err != nil {
-			return err
+			return nil, false, err
 		}
 		if bytes.Equal(before, after) {
-			return nil
+			return nil, false, nil
 		}
-		return writeVSCodeSettingsData(path, after)
+		return after, true, nil
 	}
 	if m, err := decodeVSCodeSettingsJSON(stripJSONComments(data)); err == nil {
 		before, berr := encodeVSCodeSettings(m)
 		mergeVSCodeSettings(m, p.sshConfig())
 		after, aerr := encodeVSCodeSettings(m)
 		if berr == nil && aerr == nil && bytes.Equal(before, after) {
-			return nil
+			return nil, false, nil
 		}
 	}
-	return fmt.Errorf("%s is not plain JSON and lacks the scion vscode settings; set %s to %s and the scion terminal profiles (%s, %s, %s) in it, or remove the file",
+	return nil, false, fmt.Errorf("%s is not plain JSON and lacks the scion vscode settings; set %s to %s and the scion terminal profiles (%s, %s, %s) in it, or remove the file",
 		path, vscodeConfigFileSetting, p.sshConfig(), vscodeProfilesKey, vscodeDefaultProfileKey, vscodeSendKeysKey)
 }
 
@@ -561,14 +610,6 @@ func encodeVSCodeSettings(m map[string]any) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
-}
-
-func writeVSCodeSettings(path string, m map[string]any) error {
-	data, err := encodeVSCodeSettings(m)
-	if err != nil {
-		return err
-	}
-	return writeVSCodeSettingsData(path, data)
 }
 
 func writeVSCodeSettingsData(path string, data []byte) error {
@@ -630,6 +671,41 @@ func stripJSONComments(data []byte) []byte {
 	return out
 }
 
+// vscodeOnWindows selects the Windows launcher check (checkVSCodeBatchArgs).
+// It is a variable so tests can exercise it on every OS.
+var vscodeOnWindows = runtime.GOOS == "windows"
+
+// vscodeArg is one argument passed to the VS Code CLI, with the flag it
+// belongs to for error messages.
+type vscodeArg struct{ flag, value string }
+
+// checkVSCodeBatchArgs validates the arguments for a VS Code CLI that is a
+// .cmd or .bat file on Windows (VS Code's own bin\code.cmd is). Windows
+// runs such a file through cmd.exe, and os/exec does not escape arguments
+// for cmd.exe, so each argument may contain only ASCII letters and digits,
+// @+=:,./_-, backslashes, '~' (8.3 short names), spaces, and the non-ASCII
+// letters, digits and combining marks isNonASCIIWordRune accepts. Any other
+// character is an error naming the argument, before VS Code is started. A
+// CLI that is not a .cmd or .bat, and every other OS, is not affected.
+func checkVSCodeBatchArgs(bin string, args []vscodeArg) error {
+	if !vscodeOnWindows {
+		return nil
+	}
+	ext := strings.ToLower(filepath.Ext(bin))
+	if ext != ".cmd" && ext != ".bat" {
+		return nil
+	}
+	for _, a := range args {
+		for _, r := range a.value {
+			if isSSHWordSafe(r) || r == ' ' || r == '\\' || r == '~' || isNonASCIIWordRune(r) {
+				continue
+			}
+			return tunnelclient.Errorf(tunnelclient.ExitError, "%s %q contains %q, which cannot be passed to the VS Code launcher %s (a %s file run by cmd.exe); use a home directory and a --path with only letters, digits, spaces and the characters @+=:,./_-~\\", a.flag, a.value, r, bin, ext)
+		}
+	}
+	return nil
+}
+
 // launchVSCode runs the VS Code CLI on host and folder with the scion user
 // data directory. Any failure to find or start it is exit 1.
 func launchVSCode(ctx context.Context, env *sshCommandEnv, p vscodePaths, host, folder string) error {
@@ -638,6 +714,11 @@ func launchVSCode(ctx context.Context, env *sshCommandEnv, p vscodePaths, host, 
 		return tunnelclient.Errorf(tunnelclient.ExitError, "VS Code CLI %s not found on PATH", vscodeCodeBinary)
 	}
 	args := []string{vscodeUserDataFlag, p.userData(), "--remote", "ssh-remote+" + host, folder}
+	if err := checkVSCodeBatchArgs(bin, []vscodeArg{
+		{vscodeUserDataFlag, p.userData()}, {"--remote", args[3]}, {"--path", folder},
+	}); err != nil {
+		return err
+	}
 	if err := vscodeRunCode(ctx, bin, args, env.stdout, env.stderr); err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
