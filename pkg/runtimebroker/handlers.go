@@ -3610,7 +3610,7 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 			// Each removal is audited with what it did: deleted, absent
 			// (nothing was there) or failed. A workspace moved aside is
 			// purged in the background, which audits its own result.
-			ds, rmErr := remover.RemoveNFSAgentFiles(ctx, projectPath, agentProjectID, target.name)
+			ds, rmErr := remover.RemoveNFSAgentFiles(agent.WithStorageAuditLogger(ctx, s.agentLifecycleLog), projectPath, agentProjectID, target.name)
 			if rmErr != nil {
 				s.agentLifecycleLog.Warn("Agent delete: could not remove the agent's files on the NFS workspace; left in place",
 					"agent_id", id, "project_id", agentProjectID, "error", rmErr)

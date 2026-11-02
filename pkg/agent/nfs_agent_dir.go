@@ -88,18 +88,39 @@ func nfsOwnAgentDirSelection(runtimeName string, ws *config.V1WorkspaceStorageCo
 // agent directory's lock. A variable so tests can shorten it.
 var nfsAgentDirLockWait = 30 * time.Second
 
+// storageAuditLoggerKey carries the logger storage deletions are audited
+// to (WithStorageAuditLogger).
+type storageAuditLoggerKey struct{}
+
+// WithStorageAuditLogger returns ctx with logger as the log the agent's
+// storage removals started under ctx are audited to, including those that
+// finish in the background (the purge of a moved-aside workspace). The
+// broker passes its agent lifecycle log.
+func WithStorageAuditLogger(ctx context.Context, logger *slog.Logger) context.Context {
+	return context.WithValue(ctx, storageAuditLoggerKey{}, logger)
+}
+
+// storageAuditLogger returns ctx's storage audit logger, or slog.Default.
+func storageAuditLogger(ctx context.Context) *slog.Logger {
+	if l, ok := ctx.Value(storageAuditLoggerKey{}).(*slog.Logger); ok && l != nil {
+		return l
+	}
+	return slog.Default()
+}
+
 // purgeRemovedAgentWorkspaces deletes the workspaces RemoveNFSAgentFiles
 // moved aside in an agent directory, in the background and without a
-// deadline, and audits the result (the workspace's removal was audited
-// when it was moved aside). A variable so tests can run it inline.
-var purgeRemovedAgentWorkspaces = func(agentDir, projectID, agentName string) {
+// deadline, and audits the result to log, for the workspace's path (its
+// removal from that path was audited when it was moved aside). A variable
+// so tests can run it inline.
+var purgeRemovedAgentWorkspaces = func(agentDir, projectID, agentName string, log *slog.Logger) {
 	go func() {
-		d := projectfs.Deletion{Tree: projectfs.TreeAgentWorkspace, Path: agentDir, Outcome: projectfs.OutcomeDeleted,
-			Reason: "background purge of the agent's moved-aside workspace"}
+		d := projectfs.Deletion{Tree: projectfs.TreeAgentWorkspace, Path: filepath.Join(agentDir, provision.AgentWorkspaceDir),
+			Outcome: projectfs.OutcomeDeleted, Reason: "background purge of the agent's moved-aside workspace"}
 		if err := provision.PurgeRemovedAgentWorkspaces(agentDir); err != nil {
 			d.Outcome, d.Err = projectfs.OutcomeFailed, err
 		}
-		projectfs.Audit(context.Background(), slog.Default(), projectfs.DeleterBroker, projectID, agentName, d)
+		projectfs.Audit(context.Background(), log, projectfs.DeleterBroker, projectID, agentName, d)
 	}()
 }
 
@@ -191,7 +212,7 @@ func (m *AgentManager) removeNFSAgentWorkspace(ctx context.Context, projectPath,
 		d.Outcome = projectfs.OutcomeAbsent
 		return d, true
 	}
-	purgeRemovedAgentWorkspaces(checkedDir, projectID, agentName)
+	purgeRemovedAgentWorkspaces(checkedDir, projectID, agentName, storageAuditLogger(ctx))
 	slog.Info("workspace_storage nfs: removed the agent's workspace", "path", d.Path)
 	d.Outcome = projectfs.OutcomeDeleted
 	return d, true

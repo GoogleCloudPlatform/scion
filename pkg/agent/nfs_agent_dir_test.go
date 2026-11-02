@@ -437,7 +437,7 @@ func runAgentWorkspacePurgeInline(t *testing.T) *[]string {
 	t.Helper()
 	var purged []string
 	orig := purgeRemovedAgentWorkspaces
-	purgeRemovedAgentWorkspaces = func(dir, _, _ string) {
+	purgeRemovedAgentWorkspaces = func(dir, _, _ string, _ *slog.Logger) {
 		purged = append(purged, dir)
 		require.NoError(t, provision.PurgeRemovedAgentWorkspaces(dir))
 	}
@@ -573,22 +573,37 @@ func TestRemoveNFSAgentFiles_NoWorkspaceAbsent(t *testing.T) {
 	assert.Empty(t, *purged, "no purge when nothing was moved aside")
 }
 
-// The background purge of a moved-aside workspace audits its own result.
+// The background purge of a moved-aside workspace audits its own result,
+// for the workspace's path, to the log it is given.
 func TestPurgeRemovedAgentWorkspaces_Audits(t *testing.T) {
 	var buf syncBuffer
-	orig := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
-	t.Cleanup(func() { slog.SetDefault(orig) })
 	agentDir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(agentDir, ".removing-workspace-x", "f"), 0o755))
 
-	purgeRemovedAgentWorkspaces(agentDir, testNFSWorkspaceProjectID, "test-agent")
+	purgeRemovedAgentWorkspaces(agentDir, testNFSWorkspaceProjectID, "test-agent", slog.New(slog.NewTextHandler(&buf, nil)))
 	require.Eventually(t, func() bool { return strings.Contains(buf.String(), "storage_delete") }, 10*time.Second, 20*time.Millisecond)
 	l := buf.String()
-	for _, want := range []string{"deleter=broker", "tree=agent-workspace", "outcome=deleted", "agent=test-agent", "background purge"} {
+	for _, want := range []string{"deleter=broker", "tree=agent-workspace", "outcome=deleted", "agent=test-agent", "background purge",
+		"path=" + filepath.Join(agentDir, provision.AgentWorkspaceDir)} {
 		assert.Contains(t, l, want)
 	}
 	assert.NoDirExists(t, filepath.Join(agentDir, ".removing-workspace-x"))
+}
+
+// RemoveNFSAgentFiles audits the background purge to the log its context
+// carries (the broker's lifecycle log), not the process default.
+func TestRemoveNFSAgentFiles_PurgeAuditsToContextLogger(t *testing.T) {
+	f := newSharedDirStorageRunFixture(t)
+	mountRoot := filepath.Join(t.TempDir(), "nfs")
+	f.writeGlobalSettings(t, fmt.Sprintf(nfsWorkspaceStartYAML, mountRoot))
+	agentDir := provisionTestAgentDir(t, mountRoot, "test-agent")
+	var buf syncBuffer
+	ctx := WithStorageAuditLogger(context.Background(), slog.New(slog.NewTextHandler(&buf, nil)))
+
+	_, err := kubernetesTestManager("kubernetes").RemoveNFSAgentFiles(ctx, f.projectScionDir, testNFSWorkspaceProjectID, "test-agent")
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { return strings.Contains(buf.String(), "background purge") }, 10*time.Second, 20*time.Millisecond)
+	assert.Contains(t, buf.String(), "path="+filepath.Join(agentDir, provision.AgentWorkspaceDir))
 }
 
 // syncBuffer is a bytes.Buffer safe for a background writer.
