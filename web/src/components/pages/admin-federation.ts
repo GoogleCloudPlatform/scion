@@ -41,6 +41,7 @@ import {
 } from '../../shared/settings-save-errors.js';
 import { diffPayload } from '../../shared/settings-diff.js';
 import type { SettingsFieldError, SettingsSaveError } from '../../shared/settings-save-errors.js';
+import { revisionsFromMetadata } from '../../shared/settings-dirty.js';
 import {
   renderConflictNotice,
   renderFieldErrorMessages,
@@ -128,6 +129,13 @@ export class ScionPageAdminFederation extends LitElement {
 
   // Structured error from the last failed save (ptone/scion#3923)
   @state() private saveError: SettingsSaveError | null = null;
+  /**
+   * The federation section's revision at load, sent as expected_revisions so
+   * a change another admin saved meanwhile answers 409 (ptone/scion#3922):
+   * the stored revision, 0 when no row is stored (create-only), null on a
+   * file-tier hub (no revisions, nothing sent).
+   */
+  private federationRevision: number | null = null;
   // Section -> koanf paths from the schema endpoint, fetched on the first
   // validation error so its path can be placed at its field (see
   // sectionKoanfPaths()).
@@ -489,7 +497,13 @@ export class ScionPageAdminFederation extends LitElement {
           debounce_interval?: string;
           trusted_issuers?: TrustedIssuerConfig[];
         };
+        settings_tier?: 'db' | 'file';
+        section_metadata?: Record<string, { source?: string; revision?: number }>;
       };
+      this.federationRevision =
+        data.settings_tier === 'db'
+          ? (revisionsFromMetadata(data.section_metadata).federation ?? 0)
+          : null;
       // GET leaves the whole block out when federation is unconfigured;
       // every field then shows its default (and is reset, so values from
       // before a save that removed them do not linger).
@@ -541,7 +555,11 @@ export class ScionPageAdminFederation extends LitElement {
       const res = await apiFetch('/api/v1/admin/server-config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ federation }),
+        body: JSON.stringify(
+          this.federationRevision === null
+            ? { federation }
+            : { federation, expected_revisions: { federation: this.federationRevision } }
+        ),
       });
       if (!res.ok) {
         const err = await this.classifySaveError(res);

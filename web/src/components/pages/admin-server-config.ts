@@ -44,6 +44,7 @@ import {
   readSettingsSaveError,
   sectionPathsFromSchema,
 } from '../../shared/settings-save-errors.js';
+import { dirtySectionsPayload, revisionsFromMetadata } from '../../shared/settings-dirty.js';
 import { diffPayload } from '../../shared/settings-diff.js';
 import type {
   SettingsConflict,
@@ -1027,6 +1028,13 @@ export class ScionPageAdminServerConfig extends LitElement {
    * Layer-0 leaves, whatever defaults the form filled in.
    */
   private layer0Snapshot: Record<string, unknown> = {};
+  /**
+   * DB-tier (and workstation) Layer-1 payload as loaded, and each section's
+   * revision at load (ptone/scion#3922): a save sends only the sections the
+   * user changed, each guarded by its revision. null in the file tier.
+   */
+  private layer1Baseline: Record<string, unknown> | null = null;
+  private loadedRevisions: Record<string, number> = {};
 
   // Cross-project agent messaging (from admin/messaging API, not server-config)
   @state() private crossProjectMessagingEnabled = false;
@@ -2004,6 +2012,15 @@ export class ScionPageAdminServerConfig extends LitElement {
       // Load GitHub App config before releasing the loading gate so values
       // are present when the form first renders (avoids Shoelace timing issues).
       await this.loadGitHubAppConfig();
+      // The baseline is taken after every field is loaded, so an unchanged
+      // form compares equal section by section.
+      if (this.settingsTier === 'db') {
+        this.layer1Baseline = this.buildLayer1Payload();
+        this.loadedRevisions = revisionsFromMetadata(data.section_metadata);
+      } else {
+        this.layer1Baseline = null;
+        this.loadedRevisions = {};
+      }
     } catch (e) {
       this.error = 'Failed to connect to server';
     } finally {
@@ -2921,7 +2938,24 @@ export class ScionPageAdminServerConfig extends LitElement {
    */
   private buildSavePayload(): Record<string, unknown> {
     if (this.settingsTier !== 'db') return this.buildFilePayload();
-    const payload = this.buildLayer1Payload();
+    let payload = this.buildLayer1Payload();
+    // Only the sections changed since load, each whole, with the revision
+    // read at load (0 for a section with no stored row): a section another
+    // admin changed meanwhile answers 409 instead of being overwritten
+    // (ptone/scion#3922). Without the schema mapping the full payload is
+    // sent, as before.
+    if (this.layer1Baseline && this.sectionKoanfPaths) {
+      const dirty = dirtySectionsPayload(
+        payload,
+        this.layer1Baseline,
+        this.sectionKoanfPaths,
+        this.loadedRevisions
+      );
+      payload = dirty.payload;
+      if (Object.keys(dirty.expectedRevisions).length > 0) {
+        payload.expected_revisions = dirty.expectedRevisions;
+      }
+    }
     if (this.layer0Editable) mergePayload(payload, this.buildLayer0Payload());
     return payload;
   }
@@ -3316,6 +3350,10 @@ export class ScionPageAdminServerConfig extends LitElement {
       // A workstation hub splits the full payload itself: Layer-1 keys go to
       // the DB, the rest to settings.yaml.
       const payload = this.buildSavePayload();
+      if (Object.keys(payload).filter((k) => k !== 'expected_revisions').length === 0) {
+        this.successMessage = 'No changes to save';
+        return;
+      }
       const res = await apiFetch('/api/v1/admin/server-config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -7582,6 +7620,54 @@ export class ScionPageAdminServerConfig extends LitElement {
     `;
   }
 
+  /**
+   * Keeps the main save's baseline in step with the github_app echo the
+   * page rewrites after load (a GitHub App card save, or a reload of the
+   * card). The echo is not an edit of the main form, so the section must
+   * not count as changed on the next main save (ptone/scion#3922). No-op
+   * before the first baseline (the initial load takes it afterwards).
+   */
+  private syncGitHubAppBaseline(): void {
+    if (!this.layer1Baseline) return;
+    const server = this.buildLayer1Payload().server as Record<string, unknown> | undefined;
+    const current = server?.github_app;
+    const base = this.layer1Baseline;
+    if (current === undefined) {
+      const baseServer = base.server as Record<string, unknown> | undefined;
+      if (baseServer) delete baseServer.github_app;
+      return;
+    }
+    if (typeof base.server !== 'object' || base.server === null) base.server = {};
+    (base.server as Record<string, unknown>).github_app = JSON.parse(JSON.stringify(current));
+  }
+
+  /**
+   * Re-reads one section's revision from GET /api/v1/admin/server-config
+   * after a save made outside the main form changed it. Leaves the loaded
+   * revision as it was if the read fails (a later save then answers 409
+   * and the reload banner, which is safe).
+   */
+  private async refreshSectionRevision(section: string): Promise<void> {
+    if (this.settingsTier !== 'db') return;
+    try {
+      const res = await apiFetch('/api/v1/admin/server-config');
+      if (!res.ok) return;
+      const data = (await res.json()) as ServerConfigResponse;
+      const rev = revisionsFromMetadata(data.section_metadata)[section];
+      if (typeof rev === 'number') {
+        this.loadedRevisions = { ...this.loadedRevisions, [section]: rev };
+      }
+      if (this.sectionMetadata && data.section_metadata?.[section]) {
+        this.sectionMetadata = {
+          ...this.sectionMetadata,
+          [section]: data.section_metadata[section],
+        };
+      }
+    } catch {
+      // keep the loaded revision
+    }
+  }
+
   private async loadGitHubAppConfig(): Promise<void> {
     try {
       const res = await apiFetch('/api/v1/github-app');
@@ -7612,6 +7698,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         this.githubAppPrivateKey = '';
         this.githubAppWebhookSecret = '';
         this.githubAppLoaded = true;
+        this.syncGitHubAppBaseline();
       } else {
         this.githubAppLoaded = false;
         this.githubAppError = await extractApiError(res, 'Failed to load GitHub App configuration');
@@ -7816,6 +7903,12 @@ export class ScionPageAdminServerConfig extends LitElement {
           this.githubAppWebhooksEnabled
         );
       }
+      // The card's save bumped the github_app section's revision: re-read it
+      // BEFORE the card reload below, which re-baselines the echo. A save by
+      // someone else in between then leaves an older revision next to a
+      // newer echo, so a later main save of github_app fails safe with a
+      // 409, never a newer revision next to an older echo.
+      await this.refreshSectionRevision('github_app');
       // Reload to get fresh state (has_private_key, has_webhook_secret, configured)
       await this.loadGitHubAppConfig();
       // Reload installations if now configured
