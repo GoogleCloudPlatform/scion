@@ -559,7 +559,7 @@ tmp="$(mktemp ~/.scion/iap-transport-token.XXXXXX)"
 gcloud auth print-identity-token \
   --impersonate-service-account=SA_EMAIL \
   --audiences="$CLIENT_ID" \
-  --include-email > "$tmp" && mv "$tmp" ~/.scion/iap-transport-token
+  --include-email > "$tmp" && mv "$tmp" ~/.scion/iap-transport-token || rm -f "$tmp"
 
 export SCION_TRANSPORT_MODE=iap
 export SCION_TRANSPORT_TOKEN_FILE=~/.scion/iap-transport-token
