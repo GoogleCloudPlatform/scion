@@ -63,23 +63,38 @@ func openWorkspaceWriteParent(root *os.Root, relPath string) (*workspaceWritePar
 // openWorkspaceReadTarget opens the parent of relPath like
 // openWorkspaceWriteParent, but creates nothing, and refuses when the final
 // component is a symlink: a download serves only an entry that is itself in
-// the opened parent. A missing parent or target is an fs.ErrNotExist error.
-func openWorkspaceReadTarget(root *os.Root, relPath string) (*workspaceWriteParent, string, error) {
+// the opened parent. It also returns the target's Lstat info, which the
+// caller compares with the handle it opens. A missing parent or target is an
+// fs.ErrNotExist error.
+func openWorkspaceReadTarget(root *os.Root, relPath string) (*workspaceWriteParent, string, fs.FileInfo, error) {
 	p, base, err := openWorkspaceParent(root, relPath, false)
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	if base == "" {
 		base = "." // a trailing slash names the parent itself
 	}
-	if info, err := p.Dir().Lstat(base); err != nil {
+	info, err := p.Dir().Lstat(base)
+	if err != nil {
 		p.Close()
-		return nil, "", err
+		return nil, "", nil, err
 	} else if info.Mode().Type() == fs.ModeSymlink {
 		p.Close()
-		return nil, "", fmt.Errorf("%w: target is a symlink", errWorkspaceWriteRefused)
+		return nil, "", nil, fmt.Errorf("%w: target is a symlink", errWorkspaceWriteRefused)
 	}
-	return p, base, nil
+	return p, base, info, nil
+}
+
+// openWorkspaceDeleteTarget opens the parent of relPath like
+// openWorkspaceReadTarget (creating nothing) and returns it with the final
+// component and a function that closes the walk. The final component may be
+// a symlink: a delete removes the link itself.
+func openWorkspaceDeleteTarget(root *os.Root, relPath string) (*os.Root, string, func(), error) {
+	p, base, err := openWorkspaceParent(root, relPath, false)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	return p.Dir(), base, p.Close, nil
 }
 
 // openWorkspaceParent is the walk behind openWorkspaceWriteParent and

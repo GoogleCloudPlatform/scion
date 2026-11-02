@@ -794,33 +794,36 @@ func (s *Server) handleProjectWorkspaceDownload(w http.ResponseWriter, r *http.R
 
 	// Open the parent one directory at a time (as for writes, creating
 	// nothing) and refuse a symlink as the target, with the .git refusal.
-	parent, base, err := openWorkspaceReadTarget(root, filePath)
+	parent, base, linfo, err := openWorkspaceReadTarget(root, filePath)
 	if err != nil {
-		switch {
-		case errors.Is(err, errWorkspaceWriteRefused):
-			BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", filePath, errDotGitComponent.Error()))
-		case errors.Is(err, fs.ErrNotExist):
-			NotFound(w, "File")
-		default:
-			notAccessible(w, "download", filePath, err)
-		}
+		writeWorkspaceWalkError(w, "download", filePath, err)
 		return
 	}
 	defer parent.Close()
-	dir := parent.Dir()
-
-	// Check file exists and is not a directory
-	info, err := dir.Stat(base)
-	if err != nil {
-		if os.IsNotExist(err) {
-			NotFound(w, "File")
-			return
-		}
-		notAccessible(w, "download", filePath, err)
+	if linfo.IsDir() {
+		BadRequest(w, "Cannot download a directory")
 		return
 	}
-	if info.IsDir() {
-		BadRequest(w, "Cannot download a directory")
+	if !linfo.Mode().IsRegular() {
+		notAccessible(w, "download", filePath, fmt.Errorf("not a regular file (%v)", linfo.Mode().Type()))
+		return
+	}
+
+	// Open once and serve every mode from this handle: it must be the entry
+	// Lstat saw, so an entry swapped for a symlink in between is refused.
+	f, err := parent.Dir().Open(base)
+	if err != nil {
+		writeWorkspaceWalkError(w, "download", filePath, err)
+		return
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		InternalError(w)
+		return
+	}
+	if !os.SameFile(info, linfo) {
+		writeWorkspaceWalkError(w, "download", filePath, fmt.Errorf("%w: target changed while opening it", errWorkspaceWriteRefused))
 		return
 	}
 
@@ -843,7 +846,7 @@ func (s *Server) handleProjectWorkspaceDownload(w http.ResponseWriter, r *http.R
 			return
 		}
 
-		data, readErr := dir.ReadFile(base)
+		data, readErr := io.ReadAll(f)
 		if readErr != nil {
 			InternalError(w)
 			return
@@ -868,14 +871,6 @@ func (s *Server) handleProjectWorkspaceDownload(w http.ResponseWriter, r *http.R
 		})
 		return
 	}
-
-	// Open the file
-	f, err := dir.Open(base)
-	if err != nil {
-		InternalError(w)
-		return
-	}
-	defer func() { _ = f.Close() }()
 
 	// Determine content type from extension, default to octet-stream
 	fileName := filepath.Base(filePath)
@@ -1154,9 +1149,10 @@ func (s *Server) handleProjectWorkspaceWrite(w http.ResponseWriter, r *http.Requ
 
 // handleProjectWorkspaceDelete deletes a file from a project workspace.
 //
-// Existence is checked with Lstat and the removal is a Root.Remove, both of
-// which act on the named entry itself rather than on what it points to. A
-// symlink is therefore deletable — it shows up in the listing, so refusing to
+// The parent is opened through the per-directory walk
+// (openWorkspaceDeleteTarget), then existence is checked with Lstat and the
+// removal is a Root.Remove in that parent, both of which act on the named
+// entry itself rather than on what it points to. A symlink is therefore deletable — it shows up in the listing, so refusing to
 // delete it would strand it — and deleting it unlinks the link and never the
 // file at the other end, inside or outside the workspace.
 func (s *Server) handleProjectWorkspaceDelete(w http.ResponseWriter, root *os.Root, filePath string, gate writeGate) {
@@ -1172,9 +1168,18 @@ func (s *Server) handleProjectWorkspaceDelete(w http.ResponseWriter, root *os.Ro
 		return
 	}
 
+	// Open the parent one directory at a time (as for downloads, creating
+	// nothing), so a directory link on the way into .git is refused.
+	dir, base, closeDir, err := openWorkspaceDeleteTarget(root, filePath)
+	if err != nil {
+		writeWorkspaceWalkError(w, "delete", filePath, err)
+		return
+	}
+	defer closeDir()
+
 	// Check the entry exists. Lstat, not Stat: a dangling or outward-pointing
 	// symlink still exists as an entry and is still removable.
-	if _, err := root.Lstat(filePath); err != nil {
+	if _, err := dir.Lstat(base); err != nil {
 		if os.IsNotExist(err) {
 			NotFound(w, "File")
 			return
@@ -1183,8 +1188,8 @@ func (s *Server) handleProjectWorkspaceDelete(w http.ResponseWriter, root *os.Ro
 		return
 	}
 
-	// Remove the file
-	if err := root.Remove(filePath); err != nil {
+	// Remove the entry through the opened parent
+	if err := dir.Remove(base); err != nil {
 		notAccessible(w, "delete", filePath, err)
 		return
 	}
@@ -1660,6 +1665,20 @@ func validateWorkspaceWritePath(path string) error {
 		}
 	}
 	return nil
+}
+
+// writeWorkspaceWalkError answers a failed download or delete walk: the .git
+// refusal (400) for a policy refusal, 404 for a missing entry, and
+// notAccessible otherwise.
+func writeWorkspaceWalkError(w http.ResponseWriter, kind, relPath string, err error) {
+	switch {
+	case errors.Is(err, errWorkspaceWriteRefused):
+		BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", relPath, errDotGitComponent.Error()))
+	case errors.Is(err, fs.ErrNotExist):
+		NotFound(w, "File")
+	default:
+		notAccessible(w, kind, relPath, err)
+	}
 }
 
 // errDotGitComponent is the refusal of a path with a .git component; a

@@ -201,3 +201,63 @@ func TestProjectWorkspaceDelete_SymlinkToDotGitRemovesLinkOnly(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, fi.IsDir(), ".git/hooks was removed")
 }
+
+// TestProjectWorkspaceDelete_ThroughLinkIntoDotGitRefused covers a DELETE
+// that reaches .git through a directory symlink on the way, or through the
+// .git alias: each is refused and .git keeps its content.
+func TestProjectWorkspaceDelete_ThroughLinkIntoDotGitRefused(t *testing.T) {
+	cases := []struct {
+		name  string
+		alias bool   // .git is a symlink to gitdir-real
+		path  string // request path
+		keep  string // workspace-relative file that must survive
+	}{
+		{name: "dir_link_config", path: "g/config", keep: ".git/config"},
+		{name: "dir_link_hook", path: "g/hooks/pre-commit", keep: ".git/hooks/pre-commit"},
+		{name: "alias_config", alias: true, path: "gitdir-real/config", keep: "gitdir-real/config"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := testServer(t)
+			project, workspacePath := createTestHubManagedProject(t, srv, "WS Delete Through Link")
+			gitDir := ".git"
+			if tc.alias {
+				gitDir = "gitdir-real"
+				require.NoError(t, os.Symlink("gitdir-real", filepath.Join(workspacePath, ".git")))
+			}
+			require.NoError(t, os.MkdirAll(filepath.Join(workspacePath, gitDir, "hooks"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(workspacePath, gitDir, "config"), []byte(gitConfigContent), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(workspacePath, gitDir, "hooks", "pre-commit"), []byte("#!/bin/sh\n"), 0o755))
+			if !tc.alias {
+				require.NoError(t, os.Symlink(".git", filepath.Join(workspacePath, "g")))
+			}
+
+			rec := doRequest(t, srv, http.MethodDelete,
+				fmt.Sprintf("/api/v1/projects/%s/workspace/files/%s", project.ID, tc.path), nil)
+			assert.Equal(t, http.StatusBadRequest, rec.Code, "delete through a link into .git, body: %s", rec.Body.String())
+			_, err := os.Stat(filepath.Join(workspacePath, filepath.FromSlash(tc.keep)))
+			assert.NoError(t, err, "the delete removed %s", tc.keep)
+		})
+	}
+}
+
+// TestProjectWorkspaceDelete_UnderNormalDirLinkAllowed is the control: a
+// DELETE beneath a symlink to an ordinary in-tree directory removes the file
+// in that directory.
+func TestProjectWorkspaceDelete_UnderNormalDirLinkAllowed(t *testing.T) {
+	srv, _ := testServer(t)
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS Delete Control")
+	plantGitWorkspace(t, workspacePath)
+	realDir := filepath.Join(workspacePath, "docs", "real")
+	require.NoError(t, os.MkdirAll(realDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(realDir, "gone.txt"), []byte("x"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(realDir, "stays.txt"), []byte("y"), 0o644))
+	require.NoError(t, os.Symlink("docs/real", filepath.Join(workspacePath, "linked")))
+
+	rec := doRequest(t, srv, http.MethodDelete,
+		fmt.Sprintf("/api/v1/projects/%s/workspace/files/linked/gone.txt", project.ID), nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
+	assertNoEntry(t, workspacePath, "docs/real/gone.txt")
+	_, err := os.Stat(filepath.Join(realDir, "stays.txt"))
+	assert.NoError(t, err)
+}
