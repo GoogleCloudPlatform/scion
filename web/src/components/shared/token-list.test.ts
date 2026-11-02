@@ -939,6 +939,61 @@ describe('scion-token-list — hub boundary, purpose and labels (ptone/scion#212
     expect((el2 as any).scopesErrorKey).toBe('hub');
   });
 
+  it('a failed project eligibility request leaves out hub-only scopes for a project token', async () => {
+    const el = await createComponent(
+      baseFetch({
+        projects: () => jsonResponse({ projects: [{ id: 'p1', name: 'P1' }, { id: 'p2' }] }),
+        scopes: (url) =>
+          url.includes('projectId=p1') || url.includes('boundary=hub')
+            ? jsonResponse({ error: { code: 'forbidden', message: 'forbidden' } }, 403)
+            : jsonResponse(CATALOG_WITH_BOUNDARIES),
+      })
+    );
+
+    (el as any).openCreateDialog();
+    (el as any).handleProjectChange('p1');
+    await new Promise((r) => setTimeout(r, 10));
+    await el.updateComplete;
+
+    const values = (el as any).availableScopes.map((s: any) => s.value);
+    expect(values).not.toContain('broker:create'); // hub-only
+    expect(values).toContain('agent:delete'); // project-only
+    expect(values).toContain('agent:read');
+    expect(values).toContain('agent:manage'); // every member allows project
+    expect((el as any).scopesErrorKey).toBe('project:p1');
+    // The cached plain catalog stays unfiltered.
+    const cached = (el as any).scopesCache.get('').map((s: any) => s.value);
+    expect(cached).toContain('broker:create');
+
+    // A failed hub request then filters that same catalog for hub: the
+    // hub-only scope is offered again and the project-only one is not.
+    (el as any).handleBoundaryChange('hub');
+    await new Promise((r) => setTimeout(r, 10));
+    const hubValues = (el as any).availableScopes.map((s: any) => s.value);
+    expect(hubValues).toContain('broker:create');
+    expect(hubValues).not.toContain('agent:delete');
+    expect((el as any).scopesErrorKey).toBe('hub');
+
+    // A network error on the project request filters the same way.
+    document.body.innerHTML = '';
+    const el2 = await createComponent(
+      baseFetch({
+        scopes: (url) =>
+          url.includes('projectId=p1')
+            ? Promise.reject(new TypeError('network down'))
+            : jsonResponse(CATALOG_WITH_BOUNDARIES),
+      })
+    );
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    (el2 as any).openCreateDialog();
+    (el2 as any).handleProjectChange('p1');
+    await new Promise((r) => setTimeout(r, 10));
+    const values2 = (el2 as any).availableScopes.map((s: any) => s.value);
+    expect(values2).not.toContain('broker:create');
+    expect(values2).toContain('agent:delete');
+    expect((el2 as any).scopesErrorKey).toBe('project:p1');
+  });
+
   it('an older hub response without boundary is treated as project when projectId is set', () => {
     expect(tokenBoundaryKind({ projectId: 'p1' })).toBe('project');
     expect(tokenBoundaryKind({ boundary: { kind: 'hub' } })).toBe('hub');

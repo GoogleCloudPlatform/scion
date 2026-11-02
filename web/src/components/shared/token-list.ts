@@ -1081,7 +1081,9 @@ function groupScopesByResource(scopes: ScopeOption[]): [string, ScopeOption[]][]
 
 /**
  * The catalog without the scopes a token of this boundary may not select,
- * for a hub that cannot answer boundary eligibility. A scope with no
+ * for a hub that cannot answer boundary eligibility or when the eligibility
+ * request fails. Returns a new list; the cached catalog is not changed so
+ * the other boundary can still filter from it. A scope with no
  * allowedBoundaries (e.g. the offline fallback list) is kept; an alias is
  * kept only when none of its members was removed.
  */
@@ -1528,10 +1530,10 @@ export class ScionTokenList extends LitElement {
         // back to the plain catalog (server enforcement still applies
         // regardless of what this picker shows) and surface the failure --
         // only when a boundary was requested; the parameterless catalog
-        // call has nothing to blame. For a hub target, leave out the
-        // scopes a hub token may not select, as on the path above.
-        this.availableScopes =
-          target.kind === 'hub' ? filterScopesForBoundary(catalog, 'hub') : catalog;
+        // call has nothing to blame. Leave out the scopes a token of the
+        // target's boundary may not select, as on the path above; the
+        // cached catalog itself stays unfiltered.
+        this.availableScopes = filterScopesForBoundary(catalog, target.kind);
         this.scopesUnsupportedKey = null;
         if (cacheKey) this.scopesErrorKey = cacheKey;
         return;
@@ -1599,8 +1601,7 @@ export class ScionTokenList extends LitElement {
     } catch {
       if (seq !== this.scopesRequestSeq) return; // superseded before the catch
       const catalog = this.scopesCache.get('') ?? [...FALLBACK_SCOPES];
-      this.availableScopes =
-        target.kind === 'hub' ? filterScopesForBoundary(catalog, 'hub') : catalog;
+      this.availableScopes = filterScopesForBoundary(catalog, target.kind);
       this.scopesUnsupportedKey = null;
       if (cacheKey) this.scopesErrorKey = cacheKey;
       console.warn('Failed to fetch scopes from /api/v1/auth/scopes');
