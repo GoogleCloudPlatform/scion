@@ -703,14 +703,13 @@ func (s *Server) handleProjectWorkspaceUpload(w http.ResponseWriter, r *http.Req
 	}
 
 	// Apply total request body size limit
-	r.Body = http.MaxBytesReader(w, r.Body, maxUploadTotalSize)
+	r.Body = http.MaxBytesReader(w, r.Body, s.workspaceBodyLimit())
 
 	// Parse multipart form
 	cleanup, err := parseMultipartUpload(r, s.uploadFormMaxMemory())
 	defer cleanup()
 	if err != nil {
-		if err.Error() == "http: request body too large" {
-			BadRequest(w, "Request body exceeds 100MB limit")
+		if writeWorkspaceBodyTooLarge(w, err) {
 			return
 		}
 		BadRequest(w, "Invalid multipart form: "+err.Error())
@@ -722,24 +721,27 @@ func (s *Server) handleProjectWorkspaceUpload(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// Validate every file (the field name is its relative path) before
+	// writing any, so a refused file leaves the workspace unchanged.
+	for relPath, fileHeaders := range r.MultipartForm.File {
+		if err := validateWorkspaceWritePath(relPath); err != nil {
+			BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", relPath, err.Error()))
+			return
+		}
+		for _, fh := range fileHeaders {
+			if fh.Size > maxUploadFileSize {
+				BadRequest(w, fmt.Sprintf("File %q exceeds 50MB limit", relPath))
+				return
+			}
+		}
+	}
+
 	var uploaded []ProjectWorkspaceFile
 
 	for fieldName, fileHeaders := range r.MultipartForm.File {
 		for _, fh := range fileHeaders {
 			// The field name is the relative file path
 			relPath := fieldName
-
-			// Validate the file path
-			if err := validateWorkspaceFilePath(relPath); err != nil {
-				BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", relPath, err.Error()))
-				return
-			}
-
-			// Check per-file size limit
-			if fh.Size > maxUploadFileSize {
-				BadRequest(w, fmt.Sprintf("File %q exceeds 50MB limit", relPath))
-				return
-			}
 
 			// Open the uploaded file
 			src, err := fh.Open()
@@ -1098,13 +1100,17 @@ func (s *Server) handleProjectWorkspaceWrite(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Validate the file path
-	if err := validateWorkspaceFilePath(filePath); err != nil {
+	if err := validateWorkspaceWritePath(filePath); err != nil {
 		BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", filePath, err.Error()))
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, s.workspaceBodyLimit())
 	var req ProjectWorkspaceWriteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if writeWorkspaceBodyTooLarge(w, err) {
+			return
+		}
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
@@ -1174,7 +1180,7 @@ func (s *Server) handleProjectWorkspaceDelete(w http.ResponseWriter, root *os.Ro
 	}
 
 	// Validate the file path
-	if err := validateWorkspaceFilePath(filePath); err != nil {
+	if err := validateWorkspaceWritePath(filePath); err != nil {
 		BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", filePath, err.Error()))
 		return
 	}
@@ -1645,6 +1651,44 @@ func validateWorkspaceFilePath(path string) error {
 	}
 
 	return nil
+}
+
+// validateWorkspaceWritePath is validateWorkspaceFilePath for the handlers
+// that create, change or remove workspace files (write, upload, delete). It
+// also refuses a path with a .git component under util.IsDotGitComponent.
+func validateWorkspaceWritePath(path string) error {
+	if err := validateWorkspaceFilePath(path); err != nil {
+		return err
+	}
+	for _, c := range strings.FieldsFunc(path, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if util.IsDotGitComponent(c) {
+			return fmt.Errorf("paths with a .git component are not allowed")
+		}
+	}
+	return nil
+}
+
+// workspaceBodyLimit returns the request body cap for workspace file writes
+// and uploads: maxUploadTotalSize, unless a test lowered it through
+// workspaceBodyLimitForTest.
+func (s *Server) workspaceBodyLimit() int64 {
+	if s.workspaceBodyLimitForTest > 0 {
+		return s.workspaceBodyLimitForTest
+	}
+	return maxUploadTotalSize
+}
+
+// writeWorkspaceBodyTooLarge answers 413 when err is, or wraps, the error
+// http.MaxBytesReader returns past the workspace body limit, and reports
+// whether it did.
+func writeWorkspaceBodyTooLarge(w http.ResponseWriter, err error) bool {
+	var tooLarge *http.MaxBytesError
+	if !errors.As(err, &tooLarge) {
+		return false
+	}
+	writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
+		fmt.Sprintf("Request body exceeds the %d byte limit", tooLarge.Limit), nil)
+	return true
 }
 
 // handleProjectWorkspacePull performs a `git pull --ff-only` on a shared-workspace project.

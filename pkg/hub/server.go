@@ -1813,6 +1813,11 @@ type Server struct {
 	// the in-memory multipart limit (uploadFormMaxMemory). Set by tests only.
 	uploadFormMemoryForTest int64
 
+	// workspaceBodyLimitForTest, when positive, replaces maxUploadTotalSize as
+	// the workspace file write and upload body cap (workspaceBodyLimit). Set
+	// by tests only.
+	workspaceBodyLimitForTest int64
+
 	// generalTopicWarned records project IDs whose #general ensure already
 	// logged a Warn, so a space that keeps failing (it is retried on every
 	// open) logs later failures at Debug. Cleared on success.
