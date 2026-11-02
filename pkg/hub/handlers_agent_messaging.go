@@ -3488,11 +3488,11 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				recipDispatchState = store.MessageDispatchDeferred
 			}
 
-			// A held member (ptone/scion#3433) is refused like on every
-			// other send path (ptone/scion#6859): nothing is stored or
-			// dispatched for it, and the other members still get the
-			// message. A lookup fault refuses that member. A deferred
-			// (reincarnating) member is saved for catch-up instead.
+			// A held member (ptone/scion#3433) is refused, like a direct
+			// send (ptone/scion#6859): nothing is stored or dispatched for
+			// it, and the other members still get the message. A lookup
+			// fault refuses that member. A deferred (reincarnating) member
+			// is saved for catch-up instead.
 			if !recipDeferred {
 				if dmErr := s.heldTargetRefusal(ctx, agent); dmErr != nil {
 					results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: dmErr.Message}
@@ -4419,11 +4419,12 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 			mentionDispatchState = store.MessageDispatchDeferred
 		}
 
-		// A held mentioned agent (ptone/scion#3433) is refused like on
-		// every other send path (ptone/scion#6859): nothing is stored or
-		// dispatched for it, and the primary send is unaffected. A lookup
-		// fault refuses that mention. A deferred (reincarnating) agent is
-		// saved for catch-up instead.
+		// A held mentioned agent (ptone/scion#3433) is refused, like a
+		// direct send (ptone/scion#6859): nothing is stored or dispatched
+		// for it, and the primary send is unaffected. An agent-send
+		// mention of a held agent is kept deferred by ExecuteAgentDM
+		// instead (ptone/scion#3433). A lookup fault refuses that mention.
+		// A deferred (reincarnating) agent is saved for catch-up instead.
 		if !mentionDeferred {
 			if dmErr := s.heldTargetRefusal(ctx, mentionAgent); dmErr != nil {
 				results[i].Status = "error"

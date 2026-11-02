@@ -361,27 +361,20 @@ func TestHeldTargetSend_RoutedLookupFault(t *testing.T) {
 	assert.Zero(t, storedForAgent(t, env.store, env.agent2.ID))
 }
 
-// fanoutHoldFixture is a project with a runtime broker and running agents
-// named by slugs, and a recording dispatcher.
+// fanoutHoldFixture is setupGroupTest's project, runtime broker, project
+// provider and running agents (named by slugs), with a recording
+// dispatcher.
 func fanoutHoldFixture(t *testing.T, name string, slugs ...string) (*Server, store.Store, string, map[string]*store.Agent, *brokerMockDispatcher) {
 	t.Helper()
 	srv, s := testServer(t)
-	ctx := context.Background()
-	broker := &store.RuntimeBroker{ID: tid(name + "-broker"), Name: name + "-broker", Slug: name + "-broker",
-		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline}
-	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-	project := &store.Project{ID: tid(name + "-project"), Slug: name + "-project", Name: name + "-project"}
-	require.NoError(t, s.CreateProject(ctx, project))
-	agents := map[string]*store.Agent{}
+	phases := map[string]string{}
 	for _, slug := range slugs {
-		a := &store.Agent{ID: tid(slug), Slug: slug, Name: slug, ProjectID: project.ID,
-			Phase: string(state.PhaseRunning), RuntimeBrokerID: broker.ID}
-		require.NoError(t, s.CreateAgent(ctx, a))
-		agents[slug] = a
+		phases[slug] = string(state.PhaseRunning)
 	}
+	projectID, agents := setupGroupTest(t, s, name, phases)
 	dispatcher := &brokerMockDispatcher{}
 	srv.SetDispatcher(dispatcher)
-	return srv, s, project.ID, agents, dispatcher
+	return srv, s, projectID, agents, dispatcher
 }
 
 // groupResults sends a group[] message through anchor to the named agents
@@ -548,4 +541,63 @@ func TestHeldTargetSend_MentionLookupFault(t *testing.T) {
 	assert.Zero(t, storedForAgent(t, s, target.ID))
 	assert.Equal(t, "delivered", byslug[peer.Slug].Status)
 	assert.True(t, dispatchedTo(dispatcher, peer.Slug))
+}
+
+// deferredRowsFor returns the stored messages for agentID.
+func deferredRowsFor(t *testing.T, s store.Store, agentID string) []store.Message {
+	t.Helper()
+	rows, err := s.ListMessages(context.Background(), store.MessageFilter{AgentID: agentID}, store.ListOptions{Limit: 100})
+	require.NoError(t, err)
+	return rows.Items
+}
+
+// A held group[] member that is reincarnating is saved for catch-up
+// (status deferred, one deferred row, no dispatch), not refused.
+func TestHeldTargetSend_GroupMemberReincarnating(t *testing.T) {
+	srv, s, projectID, a, dispatcher := fanoutHoldFixture(t, "group-reinc", "group-reinc-anchor", "group-reinc-target", "group-reinc-peer")
+	target, peer := a["group-reinc-target"], a["group-reinc-peer"]
+	target.Phase = string(state.PhaseProvisioning)
+	setReincarnationState(t, s, target, store.ReincarnationStateProvisioning)
+	holdAgentFor(t, s, target.ID, projectID, tid("group-reinc-root"))
+
+	res := groupResults(t, srv, a["group-reinc-anchor"], target.Slug, peer.Slug)
+
+	assert.Equal(t, "deferred", res["agent:"+target.Slug].Status)
+	assert.False(t, dispatchedTo(dispatcher, target.Slug), "no dispatch to a reincarnating member")
+	rows := deferredRowsFor(t, s, target.ID)
+	require.Len(t, rows, 1, "the deferred member's message is saved for catch-up")
+	assert.Equal(t, store.MessageDispatchDeferred, rows[0].DispatchState)
+	assert.Equal(t, "delivered", res["agent:"+peer.Slug].Status)
+}
+
+// A held mentioned agent that is reincarnating is saved for catch-up on a
+// user send (status deferred, one deferred row with its catch-up
+// conversation, no dispatch), not refused.
+func TestHeldTargetSend_MentionReincarnating(t *testing.T) {
+	srv, s, projectID, a, dispatcher := fanoutHoldFixture(t, "mention-reinc", "mention-reinc-primary", "mention-reinc-target")
+	primary, target := a["mention-reinc-primary"], a["mention-reinc-target"]
+	target.Phase = string(state.PhaseStarting)
+	setReincarnationState(t, s, target, store.ReincarnationStateStarting)
+	holdAgentFor(t, s, target.ID, projectID, tid("mention-reinc-root"))
+
+	body := map[string]interface{}{
+		"structured_message": &messages.StructuredMessage{
+			Sender: "user:test", Recipient: "agent:" + primary.Slug,
+			Msg: "hey @mention-reinc-target", Type: messages.TypeInstruction,
+		},
+		"mentions": []string{target.Slug},
+	}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+primary.ID+"/message", body)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp MessageDeliveryResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	require.Len(t, resp.MentionResults, 1)
+	assert.Equal(t, "deferred", resp.MentionResults[0].Status, resp.MentionResults[0].Error)
+	assert.False(t, dispatchedTo(dispatcher, target.Slug), "no dispatch to a reincarnating mentioned agent")
+	rows := deferredRowsFor(t, s, target.ID)
+	require.Len(t, rows, 1, "the deferred mention is saved for catch-up")
+	assert.Equal(t, store.MessageDispatchDeferred, rows[0].DispatchState)
+	assert.NotEmpty(t, rows[0].ConversationID, "the deferred mention has its catch-up conversation")
+	assert.True(t, dispatchedTo(dispatcher, primary.Slug), "the primary send is delivered")
 }
