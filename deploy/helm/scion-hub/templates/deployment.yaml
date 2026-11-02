@@ -215,6 +215,7 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "scion-hub.serviceAccountName" . }}
+      terminationGracePeriodSeconds: {{ int .Values.hub.terminationGracePeriodSeconds }}
       {{- with .Values.image.pullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}

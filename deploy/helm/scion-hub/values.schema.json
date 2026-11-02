@@ -220,6 +220,11 @@
         },
         "affinity": {
           "type": "object"
+        },
+        "terminationGracePeriodSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Seconds the kubelet waits after SIGTERM before it kills the hub pod. Default 45: the Runtime Broker's launch drain (up to 10s) comes out of the server's 30s shutdown budget, and the Kubernetes default of 30s leaves that little margin."
         }
       }
     },

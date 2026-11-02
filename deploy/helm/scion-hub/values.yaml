@@ -283,6 +283,15 @@ hub:
   nodeSelector: {}
   tolerations: []
   affinity: {}
+  # Seconds the kubelet waits after SIGTERM before it kills the pod. This pod
+  # runs the Hub and the Runtime Broker in one process. On SIGTERM the broker
+  # refuses new launches, then spends up to 10s ending the asynchronous launches
+  # in flight and reporting them failed (broker_restarted). Those 10s come out of
+  # the server's 30s shutdown budget, so the Kubernetes default of 30s fits but
+  # leaves little margin. 45 gives the rest of the shutdown room after the drain.
+  # Below about 40 a slow drain can be cut off, and a launch it did not report
+  # is ended later by the Hub as broker_lost.
+  terminationGracePeriodSeconds: 45
 
 probes:
   # The readiness endpoint is /readyz, at the root, and the chart hardcodes it.

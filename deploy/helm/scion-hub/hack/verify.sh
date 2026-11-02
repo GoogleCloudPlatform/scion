@@ -254,7 +254,14 @@ NO_RENDERED_SETTINGS=(existing-secret)
 #        so new leaves add no assertion
 # 363 - 1 = 362. Summed, then read off the driver's output:
 #   bash hack/verify.sh 2>&1 | sed -n 's/^assertions: \([0-9]*\)\/.*/\1/p'
-EXPECTED_TOTAL=362
+#
+# 362 -> 365 for hub.terminationGracePeriodSeconds (ptone/scion#7070):
+#    +3  grace-period: the default render sets 45 once on the pod spec, an
+#        override replaces it, and 0 is refused by the schema
+#     0  the values walk picks the new leaf up on its own (it asserts in
+#        aggregate, so a new leaf adds no assertion)
+# 362 + 3 = 365. Summed, then read off the driver's output.
+EXPECTED_TOTAL=365
 
 failures=0
 assertions=0
@@ -963,6 +970,36 @@ if "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
 else
   fail "hub.extraEnv POD_NAME was refused, duplicated or ignored - existing releases that set it there would fail or change on upgrade"
 fi
+
+# --------------------------------------------------------------------------
+step "grace-period: the hub pod gets 45s to shut down unless hub.terminationGracePeriodSeconds says otherwise"
+# --------------------------------------------------------------------------
+# The pod runs the Runtime Broker, whose SIGTERM launch drain (up to 10s) comes
+# out of the server's 30s shutdown budget. With the Kubernetes default grace of
+# 30s that fits only tightly (ptone/scion#7070), so the chart renders 45. The
+# match is anchored at the pod spec's six-space indent: a container-level or
+# commented copy would not set the pod's grace period.
+grace_default="$WORK/grace-default.yaml"
+if "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+    "${BASE[@]}" >"$grace_default" 2>>"$_tcerr" \
+    && [[ $(grep -cE '^      terminationGracePeriodSeconds: 45$' "$grace_default") -eq 1 ]] \
+    && [[ $(grep -cF 'terminationGracePeriodSeconds:' "$grace_default") -eq 1 ]]; then
+  pass "the default render sets the hub pod's terminationGracePeriodSeconds to 45, once"
+else
+  fail "the default render does not set terminationGracePeriodSeconds: 45 exactly once on the hub pod spec"
+fi
+grace_user="$WORK/grace-user.yaml"
+if "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+    "${BASE[@]}" --set hub.terminationGracePeriodSeconds=90 >"$grace_user" 2>>"$_tcerr" \
+    && [[ $(grep -cE '^      terminationGracePeriodSeconds: 90$' "$grace_user") -eq 1 ]] \
+    && [[ $(grep -cF 'terminationGracePeriodSeconds:' "$grace_user") -eq 1 ]]; then
+  pass "hub.terminationGracePeriodSeconds replaces the default on the hub pod spec"
+else
+  fail "hub.terminationGracePeriodSeconds=90 did not render as the hub pod's only terminationGracePeriodSeconds"
+fi
+expect_render_failure "hub.terminationGracePeriodSeconds=0" \
+  "hub.terminationGracePeriodSeconds: Must be greater than or equal to 1" \
+  "${BASE[@]}" --set hub.terminationGracePeriodSeconds=0
 
 # --------------------------------------------------------------------------
 step "migration-rename-hazard: schema_version is present in every rendered settings.yaml"
