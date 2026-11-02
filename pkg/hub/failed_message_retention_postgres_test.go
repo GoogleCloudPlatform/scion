@@ -115,5 +115,13 @@ func TestFailedMessageRetention_Postgres_SameRowsNoOrphans(t *testing.T) {
 		assert.Equal(t, len(keep), count(`SELECT COUNT(*) FROM `+table), table)
 	}
 	assert.Equal(t, 0, count(`SELECT COUNT(*) FROM chat_retention_runs`), "chat retention off: no run is opened")
-	assert.Equal(t, 1, count(`SELECT COUNT(*) FROM chat_retention_cursors WHERE phase = $1`, store.ChatRetentionPhaseFailed))
+	assert.Zero(t, count(`SELECT COUNT(*) FROM chat_retention_cursors WHERE phase = $1 AND cursor_created IS NOT NULL`, store.ChatRetentionPhaseFailed), "a complete pass leaves the failed cursor at the start")
+
+	// The dispatched row, as old as the purged ones, fails after the pass;
+	// the next run starts at the oldest failed row and purges it.
+	late := keep[3]
+	exec(`UPDATE messages SET dispatch_state = $1 WHERE id = $2`, store.MessageDispatchFailed, late)
+	srv.failedMessageRetentionHandler()(ctx)
+	assert.Zero(t, count(`SELECT COUNT(*) FROM messages WHERE id = $1`, late), "a row that fails behind the cursor is purged by the next pass")
+	assert.Equal(t, len(keep)-1, count(`SELECT COUNT(*) FROM messages`))
 }

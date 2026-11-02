@@ -67,7 +67,7 @@ func TestFailedMessageRetention_SameRowsNoOrphansSQLite(t *testing.T) {
 	}
 	assert.Equal(t, 0, f.count(`SELECT COUNT(*) FROM chat_retention_runs`), "chat retention off: no run is opened")
 	assert.Equal(t, 0, f.count(`SELECT COUNT(*) FROM chat_retention_cursors WHERE phase = ?`, store.ChatRetentionPhaseMain), "the main cursor is not written")
-	assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM chat_retention_cursors WHERE phase = ?`, store.ChatRetentionPhaseFailed), "the failed purge keeps its own cursor")
+	assert.Zero(t, f.count(`SELECT COUNT(*) FROM chat_retention_cursors WHERE phase = ? AND cursor_created IS NOT NULL`, store.ChatRetentionPhaseFailed), "a complete pass leaves the failed cursor at the start")
 }
 
 // TestFailedMessageRetention_WindowChangeWithoutRestartSQLite: a PUT of
@@ -131,21 +131,23 @@ func TestFailedMessageRetention_AddsToOpenSweepRunSQLite(t *testing.T) {
 // upstream's TestFailedMessageRetentionHandler_DrainsBacklogAcrossTicks):
 // with a budget that allows one step per run, a backlog larger than a
 // chunk drains over several runs, each run resumes from the saved cursor,
-// and kept rows (failed "user:" rows, failed rows newer than the cutoff)
-// survive.
+// the run that completes the pass saves the cursor at the start, and kept
+// rows (failed "user:" rows, failed rows newer than the cutoff) survive. A
+// dispatched row created behind every saved position that fails after the
+// pass is purged by the next run.
 func TestFailedMessageRetention_DrainsBacklogAcrossRunsSQLite(t *testing.T) {
 	f := newChatRetentionHubFixture(t)
 	// A 1 s budget and a 1 s pause: each run takes one step of at most 25
 	// rows (the smallest chunk) and stops before the pause.
 	setChatRetentionSettings(t, f.srv, false, `{"sweep":{"chunk_size":25,"pause_ms":1000,"tick_budget_seconds":1}}`)
 	now := time.Now().UTC()
-	// Older than cutoff - 24 h, so the saved cursor is not clamped.
 	old := now.Add(-9 * 24 * time.Hour)
 	var purge []string
 	for i := 0; i < 60; i++ {
 		purge = append(purge, f.message(chatRetentionSeed{created: old.Add(time.Duration(i) * time.Second), state: store.MessageDispatchFailed}))
 	}
 	keepUser := f.message(chatRetentionSeed{created: old.Add(90 * time.Second), state: store.MessageDispatchFailed, recipient: "user:alice@test.com"})
+	late := f.message(chatRetentionSeed{created: old.Add(10500 * time.Millisecond), state: store.MessageDispatchDispatched})
 	keepRecent := f.message(chatRetentionSeed{created: now.Add(-time.Hour), state: store.MessageDispatchFailed})
 	remaining := func() int {
 		n := 0
@@ -170,6 +172,14 @@ func TestFailedMessageRetention_DrainsBacklogAcrossRunsSQLite(t *testing.T) {
 	}
 	assert.NotEqual(t, seen[0], seen[1], "each run moves the cursor on")
 	assert.Equal(t, purge[24], seen[0], "the first run stops after its first chunk")
+	assert.Empty(t, seen[2], "the run that completes the pass saves the cursor at the start")
+
+	// The dispatched row fails long after it was created (behind both
+	// saved positions); the next run starts at the oldest failed row.
+	require.True(t, f.exists(late))
+	f.exec(`UPDATE messages SET dispatch_state = ? WHERE id = ?`, store.MessageDispatchFailed, late)
+	f.srv.failedMessageRetentionHandler()(f.ctx)
+	assert.False(t, f.exists(late), "a row that fails behind the cursor is purged by the next pass")
 	assert.True(t, f.exists(keepUser), "failed user: rows are never purged")
 	assert.True(t, f.exists(keepRecent), "failed rows inside the retention window survive")
 	assert.Equal(t, chatRetentionNoOrphans(), chatRetentionOrphans(t, f.db))

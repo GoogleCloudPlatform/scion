@@ -25,9 +25,9 @@ import (
 // The failed-message purge (design chat message retention §7.4) deletes
 // messages to agents whose dispatch failed once they are older than
 // messaging.failed_message_retention_days. It is not gated by
-// hub.chat_retention or by chat_retention.enabled. It walks the created
-// index in capped scans and deletes the failed agent messages each scan
-// finds with the chat retention cascade, so no message_addressees,
+// hub.chat_retention or by chat_retention.enabled. It walks the partial
+// failed (created, id) index in capped scans and deletes the failed agent
+// messages each scan finds with the chat retention cascade, so no message_addressees,
 // webchat_mention, webchat_message_ext, webchat_message_attachment or
 // webchat_message_star row is left behind. The pacing is the chat
 // retention sweep's: chat_retention.sweep's chunk size (adapted to the
@@ -36,24 +36,17 @@ import (
 //
 // Each scan ranges over the partial (created, id) WHERE dispatch_state =
 // 'failed' index, so it reads failed rows only, and at most
-// chatRetentionFailedScanCap of them, under the chunk timeout. The walk
-// resumes from a persisted cursor (phase "failed") instead of the oldest
-// row. The cursor is saved at least failedCursorLag behind the
-// cutoff: a pending message expires to failed only stuckMessageExpireTTL
-// after it was created, so rows the walk passed while they were pending
-// are scanned again once they can have failed. Lengthening the window
-// moves the clamp, and with it the next walk, back.
+// chatRetentionFailedScanCap of them, under the chunk timeout. A run that
+// stops before the cutoff saves its position in a persisted cursor (phase
+// "failed"), and the next run resumes from it. A run that reaches the
+// cutoff completes the pass and saves the cursor at the start, so the next
+// run begins again at the oldest failed row. A row can turn failed long
+// after it was created (a pending message expires, a dispatched or
+// long-deferred one fails), behind the position of a pass in progress; the
+// next pass reaches it. A full pass reads failed rows only, so it is cheap.
 
 // chatRetentionFailedScanCap bounds the rows one failed-message scan reads.
 const chatRetentionFailedScanCap = 1000
-
-// failedCursorLag is how far behind the cutoff, at least, the failed
-// purge's cursor is saved.
-const failedCursorLag = stuckMessageExpireTTL
-
-// chatRetentionNilID is the smallest message ID; a position at (t, nil ID)
-// resumes with every row created at t.
-const chatRetentionNilID = "00000000-0000-0000-0000-000000000000"
 
 // failedPurgeResult describes one failed-message purge run.
 type failedPurgeResult struct {
@@ -65,7 +58,8 @@ type failedPurgeResult struct {
 	// counted under Failed.
 	ByProject map[string]store.ChatRetentionCounts
 	// Done is true when the walk reached the cutoff: every failed agent
-	// message older than it, from the cursor on, is gone.
+	// message older than it, from the cursor on, is gone, and the cursor
+	// is saved at the start.
 	Done bool
 	// BudgetExhausted is true when the run stopped at its budget.
 	BudgetExhausted bool
@@ -92,16 +86,6 @@ func (sw *chatRetentionSweeper) failedScanCap() int {
 	return chatRetentionFailedScanCap
 }
 
-// clampFailedCursor returns pos, or the position at cutoff -
-// failedCursorLag when pos is past it.
-func clampFailedCursor(pos store.ChatRetentionPosition, cutoff time.Time) store.ChatRetentionPosition {
-	limit := cutoff.Add(-failedCursorLag).UTC()
-	if pos.IsStart() || pos.Created.Before(limit) {
-		return pos
-	}
-	return store.ChatRetentionPosition{Created: limit, ID: chatRetentionNilID}
-}
-
 // samePosition reports whether a and b are the same walk position.
 func samePosition(a, b store.ChatRetentionPosition) bool {
 	return a.ID == b.ID && a.Created.Equal(b.Created)
@@ -112,7 +96,8 @@ func samePosition(a, b store.ChatRetentionPosition) bool {
 // the cutoff, the budget passes, ctx ends or a step fails. A step is one
 // capped scan, under the chunk timeout, and a purge transaction of the
 // failed rows it found, under the chunk timeout too. The cursor is saved at
-// the end, also when ctx is done.
+// the end, also when ctx is done: at the start when the walk reached the
+// cutoff, else at the last position scanned.
 func (sw *chatRetentionSweeper) PurgeFailed(ctx context.Context, cutoff time.Time, cfg opsettings.ChatRetentionConfig) (failedPurgeResult, error) {
 	res := failedPurgeResult{ByProject: map[string]store.ChatRetentionCounts{}}
 	start := sw.now()
@@ -123,10 +108,14 @@ func (sw *chatRetentionSweeper) PurgeFailed(ctx context.Context, cutoff time.Tim
 	if err != nil {
 		return res, err
 	}
-	pos := clampFailedCursor(cursor.Position, cutoff)
+	pos := cursor.Position
 	walkErr := sw.walkFailed(ctx, cutoff, cfg, budgetEnd, &pos, &res)
 
-	if next := clampFailedCursor(pos, cutoff); !samePosition(next, cursor.Position) {
+	next := pos
+	if res.Done {
+		next = store.ChatRetentionPosition{} // the pass is complete
+	}
+	if !samePosition(next, cursor.Position) {
 		wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), chatRetentionFinalWriteTimeout)
 		defer cancel()
 		cursor.Phase = store.ChatRetentionPhaseFailed

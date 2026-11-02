@@ -42,13 +42,15 @@ gated by `hub.chat_retention` and keeps its 7-day default.
   `tick_budget_seconds` that also stops before the handler deadline. Each
   purge deletes the dependent rows with its messages, which fixes the
   `message_addressees` orphans the old `DELETE` left.
-- **Cursor** (phase `failed` in `chat_retention_cursors`). The walk resumes
-  where the last run stopped instead of at the oldest row. The cursor is
-  saved at the end of every run (also when the handler's context is done),
-  and never closer than 24 h (`stuckMessageExpireTTL`) behind the cutoff. A
-  pending message expires to failed only 24 h after it was created, so rows
-  the walk passed while pending are scanned again once they can have
-  failed. Lengthening the window moves the clamp, and the next walk, back.
+- **Cursor** (phase `failed` in `chat_retention_cursors`). A run that stops
+  before the cutoff (budget, deadline, error) saves its position, also when
+  the handler's context is done, and the next run resumes from it. A run
+  that reaches the cutoff completes the pass and saves the cursor at the
+  start, so the next run begins again at the oldest failed row. A row can
+  turn failed long after it was created (a pending message expires after
+  24 h; a dispatched or long-deferred message fails on dispatch), behind
+  the position of a pass in progress; the next pass reaches it. A full pass
+  reads only failed rows through the partial index, so it is cheap.
 - **Run counts.** When chat retention is active (experiment and `enabled`)
   and a sweep run started in the last 24 h, the counts are added to that
   run under `failed`. The update holds the in-process tick guard and
@@ -75,12 +77,14 @@ gated by `hub.chat_retention` and keeps its 7-day default.
   `failedPurge` state are removed. Upstream's tests were ported to the new
   path, or dropped where superseded; the dispositions are in the review
   report.
-- The scan cap stays (1000 failed rows per statement) and the cursor stays.
-  With the index, a scan reads only failed rows, so the cap matters only
-  when many failed "user:" rows sit in the range. A row whose `created` is
-  older than the cursor and that turns failed more than 24 h after creation
-  (only possible when the hub was down past the pending expiry) waits until
-  a longer window moves the clamp back.
+- The scan cap stays (1000 failed rows per statement) and the cursor stays,
+  but only to resume an unfinished pass. With the index, a scan reads only
+  failed rows, so the cap matters only when many failed "user:" rows sit in
+  the range. An earlier revision kept the cursor at least 24 h behind the
+  cutoff and never reset it; that missed rows that turned failed behind it
+  more than 24 h after creation (a dispatched or long-deferred message that
+  fails days later) while chat retention was off. Resetting at the end of
+  each pass, as upstream #4427's in-memory cursor did, reaches them.
 - Kept counts live in one replica's memory. A restart before they are
   added loses them from the run (the rows are still purged), and they go to
   whichever run is open when they are added.
@@ -104,14 +108,18 @@ gated by `hub.chat_retention` and keeps its 7-day default.
   B-tree sort. `TestMessagesFailedCreatedIDIndex_AutoMigrate` (upstream,
   unchanged) pins the index on both dialects.
 - `pkg/hub`: unit tests of the paced walk (capped scans over
-  sparse rows, resume from the cursor, the 24 h clamp), SQLite handler
-  tests on the real web chat tables (same rows, no orphans, window change
-  without restart, counts added to an open sweep run, counts deferred
+  sparse rows, resume from the cursor, a completed pass restarts at the
+  oldest failed row so a row that fails behind the cursor is purged),
+  SQLite handler tests on the real web chat tables (same rows, no orphans,
+  backlog over several runs and a dispatched row that fails behind the
+  cursor, window change without restart, counts added to an open sweep
+  run, counts deferred
   while a tick holds the run, no store), admin messaging
   validation, schema and fallback, and member/admin authz.
 - `pkg/hub` `-tags integration`:
   `TestFailedMessageRetention_Postgres_SameRowsNoOrphans` (60 rows in
-  chunks of 25).
+  chunks of 25, then a dispatched row as old as them fails and the next
+  run purges it).
 
 ## Known gaps and follow-ups
 

@@ -40,8 +40,8 @@ func (h *chatRetentionUnitHarness) seedFailed(n int, project string) {
 // TestFailedPurge_DeletesOnlyFailedAgentRows: the walk deletes every failed
 // agent message older than the cutoff over several chunks and stops once a
 // scan reaches the cutoff; pending, deferred, delivered, "user:" recipient
-// and newer rows stay. It counts under Failed, saves its own cursor (not
-// the main one) and opens no run.
+// and newer rows stay. It counts under Failed, leaves its own cursor at
+// the start (the pass is complete), writes no main cursor and opens no run.
 func TestFailedPurge_DeletesOnlyFailedAgentRows(t *testing.T) {
 	h := newChatRetentionUnitHarness()
 	h.seedFailed(5, "p1")
@@ -69,9 +69,8 @@ func TestFailedPurge_DeletesOnlyFailedAgentRows(t *testing.T) {
 	}
 	assert.ElementsMatch(t, []string{"keep-pending", "keep-deferred", "keep-dispatched", "keep-user", "keep-recent"}, kept)
 	assert.False(t, h.st.hasCursor, "the main cursor is not written")
-	require.True(t, h.st.hasFailedCursor, "the failed cursor is saved")
-	assert.Equal(t, store.ChatRetentionPhaseFailed, h.st.failedCursor.Phase)
-	assert.True(t, h.st.failedCursor.Position.Created.Equal(old), "it rests at the last row scanned")
+	assert.Zero(t, h.st.failedSaves, "a complete pass from the start leaves the cursor at the start")
+	assert.True(t, h.st.failedCursor.Position.IsStart())
 	assert.Empty(t, h.st.runs, "no run is opened")
 	assert.Zero(t, h.st.purgeCalls, "the main purge is not used")
 }
@@ -207,11 +206,62 @@ func TestFailedPurge_ResumesFromCursor(t *testing.T) {
 	assert.Equal(t, "m-0029", h.st.failedCursor.Position.ID)
 }
 
-// TestFailedPurge_CursorStaysBehindCutoff: the cursor is saved at least
-// failedCursorLag behind the cutoff, so a row the walk passed before it
-// failed (a pending message expires to failed only after
-// stuckMessageExpireTTL) is purged by a later run.
-func TestFailedPurge_CursorStaysBehindCutoff(t *testing.T) {
+// TestFailedPurge_CompletedPassRestartsAtStart: a run that reaches the
+// cutoff saves the cursor at the start, so a row that turns failed behind
+// the position of an earlier run (a dispatched or long-deferred message
+// that fails days after it was created) is purged by the next run, even
+// with the same cutoff.
+func TestFailedPurge_CompletedPassRestartsAtStart(t *testing.T) {
+	h := newChatRetentionUnitHarness()
+	h.sw.scanCap = 10
+	base := h.clock.t.Add(-30 * 24 * time.Hour)
+	for i := 0; i < 25; i++ {
+		// Failed "user:" rows: read by every scan, never purged.
+		h.st.msgs = append(h.st.msgs, fakeChatRetentionMsg{id: fmt.Sprintf("m-%04d", i), created: base.Add(time.Duration(i) * time.Minute), project: "p1", state: store.MessageDispatchFailed, recipient: "user:alice"})
+	}
+	h.st.add("late", base.Add(5*time.Minute+30*time.Second), "p1", store.MessageDispatchDispatched)
+	cutoff := h.clock.t.Add(-7 * 24 * time.Hour)
+	// A 1 s budget with a 500 ms pause: two scans, stopped mid-pass.
+	cfg := chatRetentionTestConfig(func(c *opsettings.ChatRetentionConfig) { c.TickBudgetSeconds = 1; c.PauseMS = 500 })
+
+	res, err := h.sw.PurgeFailed(context.Background(), cutoff, cfg)
+	require.NoError(t, err)
+	assert.False(t, res.Done)
+	require.True(t, h.st.hasFailedCursor)
+	assert.Equal(t, "m-0019", h.st.failedCursor.Position.ID)
+
+	// The next run finishes the pass and saves the cursor at the start.
+	res, err = h.sw.PurgeFailed(context.Background(), cutoff, cfg)
+	require.NoError(t, err)
+	assert.True(t, res.Done)
+	assert.Zero(t, res.Total().Failed)
+	assert.Equal(t, "m-0019", h.st.lastSelect.ID, "it resumed mid-pass")
+	assert.True(t, h.st.failedCursor.Position.IsStart(), "a complete pass resets the cursor: %+v", h.st.failedCursor.Position)
+	assert.Equal(t, 2, h.st.failedSaves)
+
+	// The dispatched row, created behind both saved positions, fails; the
+	// next run starts at the oldest failed row and purges it.
+	for i := range h.st.msgs {
+		if h.st.msgs[i].id == "late" {
+			h.st.msgs[i].state = store.MessageDispatchFailed
+		}
+	}
+	res, err = h.sw.PurgeFailed(context.Background(), cutoff, chatRetentionTestConfig(func(c *opsettings.ChatRetentionConfig) { c.PauseMS = 0 }))
+	require.NoError(t, err)
+	assert.True(t, res.Done)
+	assert.Equal(t, int64(1), res.Total().Failed)
+	assert.Len(t, h.st.msgs, 25)
+	for _, m := range h.st.msgs {
+		assert.NotEqual(t, "late", m.id)
+	}
+	assert.True(t, h.st.failedCursor.Position.IsStart())
+}
+
+// TestFailedPurge_PendingExpiryBehindCursor: a pending row the walk passed
+// expires to failed (stuckMessageExpireTTL after creation); because the
+// completed pass reset the cursor, the next run with the same cutoff
+// purges it.
+func TestFailedPurge_PendingExpiryBehindCursor(t *testing.T) {
 	h := newChatRetentionUnitHarness()
 	cutoff := h.clock.t.Add(-7 * 24 * time.Hour)
 	h.st.add("late", cutoff.Add(-12*time.Hour), "p1", store.MessageDispatchPending)
@@ -223,31 +273,12 @@ func TestFailedPurge_CursorStaysBehindCutoff(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, res.Done)
 	assert.Zero(t, res.Total().Failed)
-	require.True(t, h.st.hasFailedCursor)
-	assert.True(t, h.st.failedCursor.Position.Created.Equal(cutoff.Add(-failedCursorLag)), "clamped to cutoff - lag: %v", h.st.failedCursor.Position.Created)
-	assert.Equal(t, chatRetentionNilID, h.st.failedCursor.Position.ID)
+	assert.True(t, h.st.failedCursor.Position.IsStart())
 
-	// The pending row expires to failed; the next run, with the same
-	// cutoff, scans it again and purges it.
 	h.st.msgs[0].state = store.MessageDispatchFailed
 	res, err = h.sw.PurgeFailed(context.Background(), cutoff, cfg)
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), res.Total().Failed)
 	require.Len(t, h.st.msgs, 1)
 	assert.Equal(t, "recent-ok", h.st.msgs[0].id)
-}
-
-// TestClampFailedCursor: the start and positions older than cutoff - lag
-// are kept; newer ones move back to cutoff - lag.
-func TestClampFailedCursor(t *testing.T) {
-	cutoff := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
-	limit := cutoff.Add(-failedCursorLag)
-	assert.True(t, clampFailedCursor(store.ChatRetentionPosition{}, cutoff).IsStart())
-	old := store.ChatRetentionPosition{Created: limit.Add(-time.Second), ID: "x"}
-	assert.Equal(t, old, clampFailedCursor(old, cutoff))
-	for _, p := range []store.ChatRetentionPosition{{Created: limit, ID: "x"}, {Created: cutoff.Add(-time.Minute), ID: "y"}} {
-		got := clampFailedCursor(p, cutoff)
-		assert.True(t, got.Created.Equal(limit))
-		assert.Equal(t, chatRetentionNilID, got.ID)
-	}
 }
