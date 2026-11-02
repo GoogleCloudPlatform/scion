@@ -1794,7 +1794,13 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// profile was refused (422) before the attempt, buildStartContext
 		// resolves only the instance's runtime, and checkFlatCreatePlacement
 		// already checked the policy and its target before the attempt.
+		// On a legacy Runtime Broker the request's own kubernetes blocks are
+		// checked here against the operator-owned placement, before the
+		// agent is provisioned or started and before any 201.
 		rp, perr := s.placementForStart(ctx, sc.Resolution, opts.ProjectPath)
+		if perr == nil {
+			perr = s.checkCreatePlacement(req, rp)
+		}
 		if perr != nil {
 			span.SetStatus(codes.Error, perr.Error())
 			status := s.writeStartContextError(w, perr, "create agent", "agent_id", req.ID, "profile", createRequestProfile(req))

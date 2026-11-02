@@ -106,7 +106,7 @@ func admKeyring(t *testing.T, active string, emit keyring.Emit, readers []string
 func admAllowVersioned(t *testing.T) {
 	t.Helper()
 	orig := keyringReleaseCheck
-	keyringReleaseCheck = func(*keyring.Keyring) error { return nil }
+	keyringReleaseCheck = func(*keyring.Keyring, *ServerConfig) error { return nil }
 	t.Cleanup(func() { keyringReleaseCheck = orig })
 }
 

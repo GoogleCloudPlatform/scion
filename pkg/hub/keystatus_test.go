@@ -24,6 +24,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -693,7 +694,7 @@ func TestCheckKeyringFile(t *testing.T) {
 	assert.ErrorContains(t, CheckKeyringFile(ksVersionedKeyring(t, "k1")), "not supported in this release")
 
 	noLegacy := ksFile(t, ksPilotDoc("rev-n", "gen1", []any{ksEntry("gen1", krGen1Secret, nil, nil)}, []any{"gen1"}))
-	assert.ErrorContains(t, CheckKeyringFile(noLegacy), `no "legacy" entry`)
+	assert.ErrorContains(t, CheckKeyringFile(noLegacy), `signing key with id "legacy"`)
 
 	notReader := ksFile(t, ksPilotDoc("rev-r", "gen1",
 		[]any{ksEntry("legacy", krLegacySecret, nil, nil), ksEntry("gen1", krGen1Secret, nil, nil)}, []any{"legacy"}))
@@ -701,8 +702,9 @@ func TestCheckKeyringFile(t *testing.T) {
 }
 
 // `scion server keys check` (CheckKeyringFile) and startup
-// (validateKeyringConfig) accept and refuse the same keyring files. Until
-// the two share one implementation, this table pins them together.
+// (validateKeyringConfig) accept and refuse the same keyring files. They
+// share validateKeyringFile; this table guards against the two diverging
+// again, with the production release check and with it relaxed.
 func TestCheckKeyringFile_ParityWithValidateKeyringConfig(t *testing.T) {
 	for name, k := range map[string]*keyring.Keyring{
 		"pilot active legacy": ksKeyringA(t),
@@ -720,21 +722,26 @@ func TestCheckKeyringFile_ParityWithValidateKeyringConfig(t *testing.T) {
 			[]any{ksEntry("legacy", krLegacySecret, krTime(time.Hour), krTime(48*time.Hour)), ksEntry("gen1", krGen1Secret, nil, nil)},
 			[]any{"legacy", "gen1"})),
 	} {
-		t.Run(name, func(t *testing.T) {
-			cfg := DefaultServerConfig()
-			cfg.KeyringConfigured = true
-			cfg.Keyring = k
-			cfg.SharedSigningSecret = krLegacySecret
-			startupErr := validateKeyringConfig(cfg)
-			checkErr := CheckKeyringFile(k)
-			assert.Equal(t, startupErr == nil, checkErr == nil, "startup: %v; check: %v", startupErr, checkErr)
-		})
+		for _, relaxed := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/relaxed %v", name, relaxed), func(t *testing.T) {
+				if relaxed {
+					relaxKeyringReleaseCheck(t)
+				}
+				cfg := DefaultServerConfig()
+				cfg.KeyringConfigured = true
+				cfg.Keyring = k
+				cfg.SharedSigningSecret = krLegacySecret
+				startupErr := validateKeyringConfig(cfg)
+				checkErr := CheckKeyringFile(k)
+				assert.Equal(t, startupErr == nil, checkErr == nil, "startup: %v; check: %v", startupErr, checkErr)
+			})
+		}
 	}
 }
 
 // The report's signing readiness reason equals /readyz's
-// (signingNotReadyReason) for every keyring state and clock, until the two
-// share one implementation.
+// (signingNotReadyReason) for every keyring state and clock. Both call
+// signingIssuanceReason; this guards against the two diverging again.
 func TestKeyStatus_SigningReasonParityWithReadyz(t *testing.T) {
 	closing := ksFile(t, ksPilotDoc("rev-s", "legacy",
 		[]any{ksEntry("legacy", krLegacySecret, krTime(time.Hour), krTime(48*time.Hour))}, []any{"legacy"}))

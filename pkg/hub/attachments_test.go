@@ -250,6 +250,116 @@ func TestLocalDiskAttachmentStore_Delete(t *testing.T) {
 	require.Error(t, err)
 }
 
+// newDeleteFixture returns a store under <tmp>/store, a saved witness
+// attachment in project proj-1, and a directory OUTSIDE the store
+// (<tmp>/outside) holding keep.txt, for the Delete confinement tests.
+func newDeleteFixture(t *testing.T) (store *LocalDiskAttachmentStore, base, outside string, witness AttachmentMeta) {
+	t.Helper()
+	tmp := t.TempDir()
+	base = filepath.Join(tmp, "store")
+	store, err := NewLocalDiskAttachmentStore(base)
+	require.NoError(t, err)
+	content := []byte("witness")
+	witness, err = store.Save(context.Background(), "proj-1", "w.txt", bytes.NewReader(content), int64(len(content)), "text/plain")
+	require.NoError(t, err)
+	outside = filepath.Join(tmp, "outside")
+	require.NoError(t, os.MkdirAll(outside, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(outside, "keep.txt"), []byte("keep"), 0o644))
+	return store, base, outside, witness
+}
+
+// requireSurvives asserts that the outside file and the witness attachment
+// are still there.
+func requireSurvives(t *testing.T, store *LocalDiskAttachmentStore, outside string, witness AttachmentMeta) {
+	t.Helper()
+	got, err := os.ReadFile(filepath.Join(outside, "keep.txt"))
+	require.NoError(t, err, "the file outside the store must survive")
+	assert.Equal(t, "keep", string(got))
+	r, _, err := store.Get(context.Background(), "proj-1", witness.ID)
+	require.NoError(t, err, "the witness attachment must survive")
+	_ = r.Close()
+}
+
+// Delete validates projectID and id exactly as Get does, so nothing outside
+// one attachment's directory can be removed: an empty, ".", ".." or
+// separator-bearing component is refused with an error that names only the
+// ID, and neither the store, the project directory nor anything outside the
+// store is touched.
+func TestLocalDiskAttachmentStore_DeleteRefusesInvalidIDs(t *testing.T) {
+	store, _, outside, witness := newDeleteFixture(t)
+	ctx := context.Background()
+	cases := []struct{ name, projectID, id string }{
+		{"empty id", "proj-1", ""},
+		{"dot id", "proj-1", "."},
+		{"dotdot id", "proj-1", ".."},
+		{"separator id", "proj-1", "a/b"},
+		{"relative escape id", "proj-1", "../x"},
+		{"escape to outside", "proj-1", "../../outside"},
+		{"absolute id", "proj-1", outside},
+		{"dotdot project", "..", "outside"},
+		{"separator project", "proj-1/..", "x"},
+		{"dm dotdot id", "", ".."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := store.Delete(ctx, tc.projectID, tc.id)
+			require.Error(t, err)
+			assert.Equal(t, "attachment delete refused: "+tc.id, err.Error(), "the error names only the ID")
+			requireSurvives(t, store, outside, witness)
+		})
+	}
+}
+
+// A valid ID is removed.
+func TestLocalDiskAttachmentStore_DeleteValidRemoves(t *testing.T) {
+	store, base, outside, witness := newDeleteFixture(t)
+	ctx := context.Background()
+	content := []byte("gone")
+	meta, err := store.Save(ctx, "proj-1", "g.txt", bytes.NewReader(content), int64(len(content)), "text/plain")
+	require.NoError(t, err)
+
+	require.NoError(t, store.Delete(ctx, "proj-1", meta.ID))
+	_, err = os.Lstat(filepath.Join(base, "proj-1", meta.ID))
+	require.ErrorIs(t, err, os.ErrNotExist)
+	_, _, err = store.Get(ctx, "proj-1", meta.ID)
+	require.Error(t, err)
+	requireSurvives(t, store, outside, witness)
+}
+
+// A missing attachment, or a store whose base does not exist, is a no-op.
+func TestLocalDiskAttachmentStore_DeleteMissingIsNoOp(t *testing.T) {
+	store, base, _, _ := newDeleteFixture(t)
+	ctx := context.Background()
+	require.NoError(t, store.Delete(ctx, "proj-1", "no-such-id"))
+	require.NoError(t, store.Delete(ctx, "", "no-such-id"))
+
+	require.NoError(t, os.RemoveAll(base))
+	require.NoError(t, store.Delete(ctx, "proj-1", "no-such-id"), "a missing store is not an error")
+}
+
+// A symlink in the attachment path is not followed out of the store: a
+// symlinked attachment directory is removed as a link (its target survives),
+// and a symlinked project directory pointing outside cannot be traversed.
+func TestLocalDiskAttachmentStore_DeleteSymlinkNotFollowed(t *testing.T) {
+	t.Run("leaf", func(t *testing.T) {
+		store, base, outside, witness := newDeleteFixture(t)
+		require.NoError(t, os.Symlink(outside, filepath.Join(base, "proj-1", "leaf-link")))
+		_ = store.Delete(context.Background(), "proj-1", "leaf-link")
+		requireSurvives(t, store, outside, witness)
+	})
+	t.Run("project dir", func(t *testing.T) {
+		store, base, outside, witness := newDeleteFixture(t)
+		require.NoError(t, os.MkdirAll(filepath.Join(outside, "victim"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(outside, "victim", "v.txt"), []byte("v"), 0o644))
+		require.NoError(t, os.Symlink(outside, filepath.Join(base, "proj-link")))
+		err := store.Delete(context.Background(), "proj-link", "victim")
+		require.Error(t, err, "a project directory that escapes the store is refused")
+		_, err = os.Stat(filepath.Join(outside, "victim", "v.txt"))
+		require.NoError(t, err, "the target outside the store must survive")
+		requireSurvives(t, store, outside, witness)
+	})
+}
+
 func TestLocalDiskAttachmentStore_OversizedFile(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewLocalDiskAttachmentStore(dir)
