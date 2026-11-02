@@ -3488,6 +3488,18 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				recipDispatchState = store.MessageDispatchDeferred
 			}
 
+			// A held member (ptone/scion#3433) is refused like on every
+			// other send path (ptone/scion#6859): nothing is stored or
+			// dispatched for it, and the other members still get the
+			// message. A lookup fault refuses that member. A deferred
+			// (reincarnating) member is saved for catch-up instead.
+			if !recipDeferred {
+				if dmErr := s.heldTargetRefusal(ctx, agent); dmErr != nil {
+					results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: dmErr.Message}
+					continue
+				}
+			}
+
 			// ptone/scion#1839: per-member deliverability gate, mirroring
 			// the phase gate on direct sends (handleAgentMessage,
 			// ExecuteAgentDM, deliverToAgent). A non-running member cannot
@@ -4138,6 +4150,17 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 		agentMsg.Recipient = "agent:" + agent.Slug
 		agentMsg.RecipientID = agent.ID
 
+		// A held agent (ptone/scion#3433) is not delivered to, as on the
+		// broker path (deliverToAgent, ptone/scion#6859): nothing is
+		// stored or dispatched for it, an agent sender is told, and the
+		// other agents still get the broadcast. A lookup fault refuses it.
+		if dmErr := s.heldTargetRefusal(ctx, &agent); dmErr != nil {
+			s.messageLog.Warn("Broadcast not delivered to held agent",
+				"agent_id", agent.ID, "agentSlug", agent.Slug, "reason", dmErr.Message)
+			s.publishBroadcastDeliveryFailed(ctx, &agent, &agentMsg, errors.New(dmErr.Message))
+			continue
+		}
+
 		storeMsg := &store.Message{
 			ID:            api.NewUUID(),
 			ProjectID:     projectID,
@@ -4394,6 +4417,19 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 		mentionDispatchState := store.MessageDispatchDispatched
 		if mentionDeferred {
 			mentionDispatchState = store.MessageDispatchDeferred
+		}
+
+		// A held mentioned agent (ptone/scion#3433) is refused like on
+		// every other send path (ptone/scion#6859): nothing is stored or
+		// dispatched for it, and the primary send is unaffected. A lookup
+		// fault refuses that mention. A deferred (reincarnating) agent is
+		// saved for catch-up instead.
+		if !mentionDeferred {
+			if dmErr := s.heldTargetRefusal(ctx, mentionAgent); dmErr != nil {
+				results[i].Status = "error"
+				results[i].Error = dmErr.Message
+				continue
+			}
 		}
 
 		// F3 (p2a-r2 review, A25.2 option (a)): a deferred mention has no

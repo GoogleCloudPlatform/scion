@@ -28,6 +28,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -358,4 +359,193 @@ func TestHeldTargetSend_RoutedLookupFault(t *testing.T) {
 	assert.Empty(t, env.dispatcher.getCalls(), "no dispatch, and no fan-out")
 	assert.Zero(t, storedForAgent(t, env.store, env.agent1.ID))
 	assert.Zero(t, storedForAgent(t, env.store, env.agent2.ID))
+}
+
+// fanoutHoldFixture is a project with a runtime broker and running agents
+// named by slugs, and a recording dispatcher.
+func fanoutHoldFixture(t *testing.T, name string, slugs ...string) (*Server, store.Store, string, map[string]*store.Agent, *brokerMockDispatcher) {
+	t.Helper()
+	srv, s := testServer(t)
+	ctx := context.Background()
+	broker := &store.RuntimeBroker{ID: tid(name + "-broker"), Name: name + "-broker", Slug: name + "-broker",
+		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	project := &store.Project{ID: tid(name + "-project"), Slug: name + "-project", Name: name + "-project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+	agents := map[string]*store.Agent{}
+	for _, slug := range slugs {
+		a := &store.Agent{ID: tid(slug), Slug: slug, Name: slug, ProjectID: project.ID,
+			Phase: string(state.PhaseRunning), RuntimeBrokerID: broker.ID}
+		require.NoError(t, s.CreateAgent(ctx, a))
+		agents[slug] = a
+	}
+	dispatcher := &brokerMockDispatcher{}
+	srv.SetDispatcher(dispatcher)
+	return srv, s, project.ID, agents, dispatcher
+}
+
+// groupResults sends a group[] message through anchor to the named agents
+// and returns the per-recipient results by recipient.
+func groupResults(t *testing.T, srv *Server, anchor *store.Agent, slugs ...string) map[string]GroupMessageRecipientResult {
+	t.Helper()
+	recipient := "group["
+	for i, slug := range slugs {
+		if i > 0 {
+			recipient += ","
+		}
+		recipient += "agent:" + slug
+	}
+	recipient += "]"
+	body := map[string]interface{}{
+		"structured_message": &messages.StructuredMessage{
+			Version: messages.Version, Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Sender: "user:test", SenderID: tid("group-hold-sender"),
+			Recipient: recipient, Msg: "hello", Type: messages.TypeInstruction,
+		},
+	}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+anchor.ID+"/message", body)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp GroupMessageResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	out := map[string]GroupMessageRecipientResult{}
+	for _, r := range resp.Results {
+		out[r.Recipient] = r
+	}
+	return out
+}
+
+// A group[] send does not deliver to a held member: nothing is stored or
+// dispatched for it, and the unheld member still gets the message.
+func TestHeldTargetSend_GroupMembers(t *testing.T) {
+	srv, s, projectID, a, dispatcher := fanoutHoldFixture(t, "group-hold", "group-hold-anchor", "group-hold-held", "group-hold-peer")
+	held, peer := a["group-hold-held"], a["group-hold-peer"]
+	holdAgentFor(t, s, held.ID, projectID, tid("group-hold-root"))
+
+	res := groupResults(t, srv, a["group-hold-anchor"], held.Slug, peer.Slug)
+
+	require.Contains(t, res, "agent:"+held.Slug)
+	assert.Equal(t, "failed", res["agent:"+held.Slug].Status)
+	assert.Equal(t, heldTargetDMError(held).Message, res["agent:"+held.Slug].Error)
+	assert.False(t, dispatchedTo(dispatcher, held.Slug), "no dispatch to a held member")
+	assert.Zero(t, storedForAgent(t, s, held.ID), "nothing stored for a held member")
+	assert.Equal(t, "delivered", res["agent:"+peer.Slug].Status, "the unheld member is delivered")
+	assert.True(t, dispatchedTo(dispatcher, peer.Slug))
+	assert.Equal(t, 1, storedForAgent(t, s, peer.ID))
+}
+
+// A group[] member whose hold cannot be read is refused; the other member
+// still gets the message.
+func TestHeldTargetSend_GroupMemberLookupFault(t *testing.T) {
+	srv, s, _, a, dispatcher := fanoutHoldFixture(t, "group-fault", "group-fault-anchor", "group-fault-target", "group-fault-peer")
+	target, peer := a["group-fault-target"], a["group-fault-peer"]
+	orig := srv.store
+	srv.store = &targetHoldFaultStore{Store: orig, agentID: target.ID}
+	t.Cleanup(func() { srv.store = orig })
+
+	res := groupResults(t, srv, a["group-fault-anchor"], target.Slug, peer.Slug)
+
+	assert.Equal(t, "failed", res["agent:"+target.Slug].Status)
+	assert.Equal(t, heldLookupFaultDMError().Message, res["agent:"+target.Slug].Error)
+	assert.False(t, dispatchedTo(dispatcher, target.Slug))
+	assert.Zero(t, storedForAgent(t, s, target.ID))
+	assert.Equal(t, "delivered", res["agent:"+peer.Slug].Status)
+	assert.True(t, dispatchedTo(dispatcher, peer.Slug))
+}
+
+// The broker-less project broadcast (broadcastDirect) does not deliver to a
+// held agent: nothing is stored or dispatched for it, the agent sender is
+// told, and the unheld sibling still gets the broadcast. A hold lookup
+// fault is refused the same way.
+func TestHeldTargetSend_BroadcastFallback(t *testing.T) {
+	srv, s, projectID, a, dispatcher := fanoutHoldFixture(t, "bcast-hold",
+		"bcast-hold-sender", "bcast-hold-held", "bcast-hold-fault", "bcast-hold-sibling")
+	sender, held, fault, sibling := a["bcast-hold-sender"], a["bcast-hold-held"], a["bcast-hold-fault"], a["bcast-hold-sibling"]
+	holdAgentFor(t, s, held.ID, projectID, tid("bcast-hold-root"))
+	orig := srv.store
+	srv.store = &targetHoldFaultStore{Store: orig, agentID: fault.ID}
+	t.Cleanup(func() { srv.store = orig })
+
+	msg := messages.NewInstruction("agent:"+sender.Slug, "project:all", "broadcast hello")
+	msg.SenderID = sender.ID
+	msg.Broadcasted = true
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+projectID+"/broadcast", nil)
+	ok := srv.broadcastDirect(httptest.NewRecorder(), req, projectID, msg, false, []store.Agent{*held, *fault, *sibling})
+	require.True(t, ok)
+
+	for _, refused := range []*store.Agent{held, fault} {
+		assert.False(t, dispatchedTo(dispatcher, refused.Slug), "no broadcast dispatch to %s", refused.Slug)
+		assert.Zero(t, storedForAgent(t, s, refused.ID), "nothing stored for %s", refused.Slug)
+	}
+	assert.True(t, dispatchedTo(dispatcher, sibling.Slug), "the unheld sibling still gets the broadcast")
+	assert.Equal(t, 1, storedForAgent(t, s, sibling.ID))
+	notices := 0
+	for _, d := range dispatcher.getMessages() {
+		if d.agentSlug == sender.Slug && d.structured != nil && d.structured.Status == "DELIVERY_FAILED" {
+			notices++
+		}
+	}
+	assert.Equal(t, 2, notices, "the agent sender is told once per refused agent")
+}
+
+// A user send that mentions a held agent delivers to the primary and to the
+// unheld mentioned agent; the held mention is refused with nothing stored
+// or dispatched for it.
+func TestHeldTargetSend_UserMentions(t *testing.T) {
+	srv, s, projectID, a, dispatcher := fanoutHoldFixture(t, "mention-hold",
+		"mention-hold-primary", "mention-hold-held", "mention-hold-peer")
+	primary, held, peer := a["mention-hold-primary"], a["mention-hold-held"], a["mention-hold-peer"]
+	holdAgentFor(t, s, held.ID, projectID, tid("mention-hold-root"))
+
+	body := map[string]interface{}{
+		"structured_message": &messages.StructuredMessage{
+			Sender: "user:test", Recipient: "agent:" + primary.Slug,
+			Msg: "hey @mention-hold-held and @mention-hold-peer", Type: messages.TypeInstruction,
+		},
+		"mentions": []string{held.Slug, peer.Slug},
+	}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+primary.ID+"/message", body)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp MessageDeliveryResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	assert.True(t, dispatchedTo(dispatcher, primary.Slug), "the primary send is delivered")
+	byslug := map[string]messages.MentionResult{}
+	for _, r := range resp.MentionResults {
+		byslug[r.Slug] = r
+	}
+	require.Contains(t, byslug, held.Slug)
+	assert.Equal(t, "error", byslug[held.Slug].Status)
+	assert.Equal(t, heldTargetDMError(held).Message, byslug[held.Slug].Error)
+	assert.False(t, dispatchedTo(dispatcher, held.Slug), "no dispatch to a held mentioned agent")
+	assert.Zero(t, storedForAgent(t, s, held.ID), "nothing stored for a held mentioned agent")
+	assert.Equal(t, "delivered", byslug[peer.Slug].Status)
+	assert.True(t, dispatchedTo(dispatcher, peer.Slug))
+	assert.Equal(t, 1, storedForAgent(t, s, peer.ID))
+}
+
+// A mentioned agent whose hold cannot be read is refused; the other mention
+// is delivered.
+func TestHeldTargetSend_MentionLookupFault(t *testing.T) {
+	srv, s, _, a, dispatcher := fanoutHoldFixture(t, "mention-fault",
+		"mention-fault-primary", "mention-fault-target", "mention-fault-peer")
+	primary, target, peer := a["mention-fault-primary"], a["mention-fault-target"], a["mention-fault-peer"]
+	orig := srv.store
+	srv.store = &targetHoldFaultStore{Store: orig, agentID: target.ID}
+	t.Cleanup(func() { srv.store = orig })
+
+	admin := NewAuthenticatedUser(tid("mention-fault-admin"), "mention-fault-admin@test.com", "Admin", "admin", "cli")
+	original := messages.NewInstruction("user:tester", "agent:"+primary.Slug, "hey @mention-fault-target @mention-fault-peer")
+	original.SenderID = tid("mention-fault-user")
+	results := srv.processMentions(contextWithIdentity(context.Background(), admin), []string{target.Slug, peer.Slug}, primary, original, "", "")
+
+	byslug := map[string]messages.MentionResult{}
+	for _, r := range results {
+		byslug[r.Slug] = r
+	}
+	assert.Equal(t, "error", byslug[target.Slug].Status)
+	assert.Equal(t, heldLookupFaultDMError().Message, byslug[target.Slug].Error)
+	assert.False(t, dispatchedTo(dispatcher, target.Slug))
+	assert.Zero(t, storedForAgent(t, s, target.ID))
+	assert.Equal(t, "delivered", byslug[peer.Slug].Status)
+	assert.True(t, dispatchedTo(dispatcher, peer.Slug))
 }
