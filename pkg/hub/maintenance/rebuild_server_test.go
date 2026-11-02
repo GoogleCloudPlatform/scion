@@ -622,7 +622,7 @@ func TestRebuildServer_DetachedHeadWithoutBranchRefused(t *testing.T) {
 	inst := &fakeInstaller{}
 	e := NewRebuildServerExecutor(RebuildServerOptions{RepoPath: f.repo, Installer: inst})
 	err := e.Run(context.Background(), &bytes.Buffer{}, nil)
-	if err == nil || !strings.Contains(err.Error(), "the checkout is on a detached HEAD; set server.maintenance.repo_branch or pass branch=") {
+	if err == nil || !strings.Contains(err.Error(), "the checkout is on a detached HEAD; set server.maintenance.repo_branch or pass the branch parameter") {
 		t.Fatalf("Run = %v, want the detached-HEAD refusal", err)
 	}
 	if calls := f.callLog(t); strings.TrimSpace(calls) != "git rev-parse --abbrev-ref HEAD" {
@@ -647,7 +647,7 @@ func TestRebuildWeb_DetachedHeadWithoutBranchRefused(t *testing.T) {
 	f := newRebuildFixture(t, "")
 	detachedGitStub(t, f)
 	err := NewRebuildWebExecutor(RebuildWebOptions{RepoPath: f.repo}).Run(context.Background(), &bytes.Buffer{}, nil)
-	if err == nil || !strings.Contains(err.Error(), "rebuild-web: the checkout is on a detached HEAD") {
+	if err == nil || !strings.Contains(err.Error(), "rebuild-web: the checkout is on a detached HEAD; set server.maintenance.repo_branch or pass the branch parameter") {
 		t.Fatalf("Run = %v, want the detached-HEAD refusal", err)
 	}
 	if calls := f.callLog(t); strings.TrimSpace(calls) != "git rev-parse --abbrev-ref HEAD" {

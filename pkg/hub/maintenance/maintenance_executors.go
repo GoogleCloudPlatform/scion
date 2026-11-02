@@ -704,7 +704,7 @@ func runRebuildSteps(ctx context.Context, logger io.Writer, phase rebuildPhase, 
 // is on a detached HEAD (git rev-parse --abbrev-ref HEAD says "HEAD") and no
 // branch is configured or requested, so "origin/HEAD" would be reset to.
 func errDetachedHead(op string) error {
-	return fmt.Errorf("%s: the checkout is on a detached HEAD; set server.maintenance.repo_branch or pass branch=...", op)
+	return fmt.Errorf("%s: the checkout is on a detached HEAD; set server.maintenance.repo_branch or pass the branch parameter", op)
 }
 
 // gitOutput runs git in dir and returns its trimmed stdout.
