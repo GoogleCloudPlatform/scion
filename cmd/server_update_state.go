@@ -44,7 +44,8 @@ func maintenanceInstallRoot() string {
 // the boot-failure guard. Best-effort: a failure is logged and startup
 // goes on.
 func markUpdateStateBooting(installRoot string) {
-	changed, st, err := maintenance.MarkUpdateStateBooting(installRoot, version.Version, version.DowngradeFloor)
+	running := maintenance.RunningReleaseName(version.Version, version.GetCommit())
+	changed, st, err := maintenance.MarkUpdateStateBooting(installRoot, running, version.DowngradeFloor)
 	switch {
 	case err != nil:
 		slog.Warn("Failed to update the update state before migrations", "install_root", installRoot, "error", err)
