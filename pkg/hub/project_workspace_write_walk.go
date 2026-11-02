@@ -126,7 +126,9 @@ func (p *workspaceWriteParent) step(name string, create bool) error {
 		p.pop()
 		return nil
 	}
-	if util.IsDotGitComponent(name) {
+	if create && util.IsDotGitComponent(name) {
+		// Request components are refused lexically before the walk; this
+		// keeps the walk from ever creating a .git directory.
 		return fmt.Errorf("%w: path resolves through a .git directory", errWorkspaceWriteRefused)
 	}
 	cur := p.Dir()
@@ -177,12 +179,22 @@ func (p *workspaceWriteParent) step(name string, create bool) error {
 		_ = next.Close()
 		return fmt.Errorf("%w: directory changed while opening it", errWorkspaceWriteRefused)
 	}
-	if p.gitDir != nil && os.SameFile(opened, p.gitDir) {
+	if p.isDotGit(name, opened) {
 		_ = next.Close()
 		return fmt.Errorf("%w: path resolves through a .git directory", errWorkspaceWriteRefused)
 	}
 	p.stack = append(p.stack, next)
 	return nil
+}
+
+// isDotGit reports whether the directory opened as name is a .git directory:
+// by name under util.IsDotGitComponent, or as the workspace root's .git entry
+// (compared through the opened handle, so an alias is caught too).
+func (p *workspaceWriteParent) isDotGit(name string, opened fs.FileInfo) bool {
+	if util.IsDotGitComponent(name) {
+		return true
+	}
+	return p.gitDir != nil && os.SameFile(opened, p.gitDir)
 }
 
 // writeWorkspaceFile writes src to relPath under root through
