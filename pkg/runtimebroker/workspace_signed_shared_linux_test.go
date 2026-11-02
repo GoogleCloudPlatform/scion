@@ -312,3 +312,18 @@ func TestSignedCaseB_CommittedAttributesMatchDirectCreation(t *testing.T) {
 		}
 	}
 }
+
+// TestSignedCaseB_LogsOneInfoLine: a committed case B bootstrap logs exactly
+// one Info line with the file count, byte total and duration, and the log
+// carries no signed URL, object path, stage name or workspace path.
+func TestSignedCaseB_LogsOneInfoLine(t *testing.T) {
+	f := newCaseBFixture(t, map[string]string{"a.txt": "A", "d/b.txt": "BB"})
+	logs := captureLifecycleJSONLog(f.srv)
+	if skipped, err := f.run(); err != nil || skipped {
+		t.Fatalf("run = (skipped %v, err %v)", skipped, err)
+	}
+	requireOneSignedBootstrapDone(t, logs.String(), f.req.Name, 2, 3)
+	if leaks := bootstrapLogLeaks(logs.String(), f.h, []string{f.ws, f.root}); len(leaks) != 0 {
+		t.Errorf("broker log leaks %v:\n%s", leaks, logs.String())
+	}
+}
