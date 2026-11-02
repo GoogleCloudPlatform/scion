@@ -262,6 +262,11 @@ type DeferredDeletion struct {
 // a share outside the mount root). Retrying cannot help with it.
 var ErrRefused = errors.New("projectfs: deletion refused")
 
+// AgentWorkspacePendingReason is the reason of a kept agent directory: it
+// still holds entries the hub does not own, normally the agent's own
+// workspace, which only the broker removes.
+const AgentWorkspacePendingReason = "the agent directory is not empty: workspace pending broker removal"
+
 // ErrStillPresent marks a tree that was reported removed (or absent) but
 // is still there when checked right after.
 var ErrStillPresent = errors.New("projectfs: still present after removal")

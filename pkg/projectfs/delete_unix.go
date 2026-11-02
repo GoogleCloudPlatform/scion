@@ -155,11 +155,6 @@ func (l Layout) RemoveProjectTree(projectID string) ([]Deletion, error) {
 	return out, nil
 }
 
-// AgentWorkspacePendingReason is the reason of a kept agent directory: it
-// still holds entries the hub does not own, normally the agent's own
-// workspace, which only the broker removes.
-const AgentWorkspacePendingReason = "the agent directory is not empty: workspace pending broker removal"
-
 // RemoveAgentStorage removes what the hub owns of agent agentID (the hub agent ID,
 // ValidAgentID) with slug agent: its home-<agentID> and secrets-<agentID>
 // below agents/<slug> on the Layout homes resolve on, then the directory
