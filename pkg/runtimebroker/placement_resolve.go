@@ -182,6 +182,9 @@ func (s *Server) resolvePlacement(ctx context.Context, res runtimeResolution, pr
 		s.agentLifecycleLog.Warn("Kubernetes placement: legacy-format global settings mention a placement key", "agent", res.Agent)
 		return nil, placementRefusal(placementLegacyGlobalCause)
 	}
+	if gvs == nil {
+		gvs = &config.VersionedSettings{}
+	}
 	// Malformed or invalid placement in the Hub's stored runtimes and
 	// profiles fails every Kubernetes start closed: it is never read as no
 	// placement. The findings come with the runtimes and profiles gvs was
@@ -190,9 +193,6 @@ func (s *Server) resolvePlacement(ctx context.Context, res runtimeResolution, pr
 	if paths := gvs.PlacementErrors(); len(paths) > 0 {
 		s.agentLifecycleLog.Warn("Kubernetes placement: the stored runtimes and profiles have invalid placement", "agent", res.Agent, "paths", paths)
 		return nil, placementRefusal(placementOverlayInvalidCause)
-	}
-	if gvs == nil {
-		gvs = &config.VersionedSettings{}
 	}
 	s.warnProjectPlacement(res.Agent, gvs, projectVS)
 
