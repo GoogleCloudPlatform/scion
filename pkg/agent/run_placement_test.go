@@ -214,3 +214,23 @@ func TestFlatPlacementRequiresResolution(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "pool selector conflicts with inherited placement")
 }
+
+// On a legacy Runtime Broker a restart of an agent with no stored config
+// yet is not checked before the stop; the start then applies the
+// operator-owned placement to the config it provisions, so an agent block
+// that conflicts with the operator policy (here an empty one) is refused,
+// never applied.
+func TestApplyStartPlacement_LegacyOperatorOwnedRefusesProvisionedConflict(t *testing.T) {
+	opts := api.StartOptions{Name: "a", ResolvedPlacement: &api.ResolvedPlacement{OperatorOwned: true}, PlacementResolved: true}
+	for name, k8s := range map[string]*api.KubernetesConfig{
+		"toleration":    {Tolerations: []api.K8sToleration{{Key: "dedicated", Operator: "Exists"}}},
+		"runtime class": {RuntimeClassName: "kata"},
+	} {
+		out, _, err := managerOn("kubernetes").applyStartPlacement(context.Background(), opts, k8s)
+		require.Error(t, err, name)
+		assert.Nil(t, out, name)
+	}
+	out, _, err := managerOn("kubernetes").applyStartPlacement(context.Background(), opts, &api.KubernetesConfig{NodeSelector: map[string]string{"disk": "ssd"}})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"disk": "ssd"}, out.NodeSelector)
+}
