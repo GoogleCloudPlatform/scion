@@ -111,6 +111,11 @@ func TestRelayRoleIgnoresLoadedKeyring(t *testing.T) {
 // cmdKRStagedSecret is a synthetic staged-generation secret (test only).
 const cmdKRStagedSecret = "test-only-cmd-keyring-staged-generation-0123456789"
 
+// cmdKRPeerSecret is a synthetic relay-peer secret that differs from every
+// keyring generation (test only). This file builds in every tag set, so it
+// declares its own value instead of using one from a !no_sqlite file.
+const cmdKRPeerSecret = "test-only-cmd-distinct-relay-peer-secret-0123456789"
+
 // writeCmdKeyringWithStaged is the cmd keyring with a staged gen2 that is
 // neither active nor a legacy reader.
 func writeCmdKeyringWithStaged(t *testing.T) string {
@@ -164,7 +169,7 @@ func TestValidateServerPreflight_PeerSecretAgainstEveryGeneration(t *testing.T) 
 	assert.Contains(t, err.Error(), "every signing generation")
 
 	c := external
-	c.PeerSecret = relayModeTestPeerSecret
+	c.PeerSecret = cmdKRPeerSecret
 	assert.NoError(t, validateServerPreflight(&config.GlobalConfig{Hub: config.HubServerConfig{Conduit: c}}))
 	// The relay role passes no ring: only the session-secret rule applies.
 	assert.NoError(t, validateConduitPeerSecret(config.HubConduitConfig{PeerSecret: cmdKRStagedSecret}, true, "", nil))
