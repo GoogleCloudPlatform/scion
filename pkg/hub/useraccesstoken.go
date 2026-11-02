@@ -87,16 +87,15 @@ var (
 
 // UATScopeViolationError names the selector and machine-readable reason when
 // CanMintSelector (pkg/hub/authz_boundary.go) denies a requested selector at
-// mint time. Unwrap returns ErrUATScopeViolation so existing
-// errors.Is(err, ErrUATScopeViolation) callers (handlers_auth.go's error
-// mapping, TestRS4_DenialCodeStability) keep working unchanged.
-// handlers_auth.go's scope_violation response already writes err.Error() as
-// its message, so the 403 body now includes the selector and reason text
-// (e.g. `requested scopes exceed issuer authority: selector "agent:delete"
-// denied (flat_role_insufficient)`), where it previously carried only the
-// sentinel text. For a project boundary this is reached only once project
-// admission has succeeded, never on the uniform ErrUATProjectForbidden path
-// (see CreateToken below); for a hub boundary, which names no project, every
+// mint time. Unwrap returns ErrUATScopeViolation, so
+// errors.Is(err, ErrUATScopeViolation) matches it (handlers_auth.go's error
+// mapping, TestRS4_DenialCodeStability). handlers_auth.go's scope_violation
+// response writes err.Error() as its message, so the 403 body carries the
+// selector and reason text (e.g. `requested scopes exceed issuer authority:
+// selector "agent:delete" denied (flat_role_insufficient)`). For a project
+// boundary this error is returned only after project admission has
+// succeeded, never on the uniform ErrUATProjectForbidden path (see
+// CreateToken below); for a hub boundary, which names no project, every
 // per-selector denial is reported this way.
 type UATScopeViolationError struct {
 	Selector string

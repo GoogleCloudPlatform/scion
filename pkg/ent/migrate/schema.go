@@ -1097,6 +1097,14 @@ var (
 				Unique:  false,
 				Columns: []*schema.Column{ConversationsColumns[2]},
 			},
+			{
+				Name:    "conversation_deleted_at",
+				Unique:  false,
+				Columns: []*schema.Column{ConversationsColumns[12]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "deleted_at IS NOT NULL",
+				},
+			},
 		},
 	}
 	// ConversationParticipantsColumns holds the columns for the "conversation_participants" table.

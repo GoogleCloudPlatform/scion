@@ -22,6 +22,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -311,4 +312,76 @@ func TestSignedCaseB_CommittedAttributesMatchDirectCreation(t *testing.T) {
 			t.Errorf("%s: committed attributes %+v, direct creation %+v", p, got, want)
 		}
 	}
+}
+
+// TestSignedCaseB_LogsOneInfoLine: a committed case B bootstrap logs exactly
+// one Info line with the file count, byte total and duration, and the log
+// carries no signed URL, object path, stage name or workspace path.
+func TestSignedCaseB_LogsOneInfoLine(t *testing.T) {
+	f := newCaseBFixture(t, map[string]string{"a.txt": "A", "d/b.txt": "BB"})
+	logs := captureLifecycleJSONLog(f.srv)
+	if skipped, err := f.run(); err != nil || skipped {
+		t.Fatalf("run = (skipped %v, err %v)", skipped, err)
+	}
+	requireOneSignedBootstrapDone(t, logs.String(), f.req.Name, 2, 3)
+	if leaks := bootstrapLogLeaks(logs.String(), f.h, []string{f.ws, f.root}); len(leaks) != 0 {
+		t.Errorf("broker log leaks %v:\n%s", leaks, logs.String())
+	}
+}
+
+// TestSignedCaseB_NoSuccessLineWithoutCompletion: a case B bootstrap that is
+// skipped, fails after its final rename, or fails to write the provisioned
+// marker logs no success line.
+func TestSignedCaseB_NoSuccessLineWithoutCompletion(t *testing.T) {
+	t.Run("sentinel already present", func(t *testing.T) {
+		f := newCaseBFixture(t, map[string]string{"a.txt": "A"})
+		if err := os.MkdirAll(filepath.Dir(f.sentinel), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(f.sentinel, []byte("provisioned_at=x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		logs := captureLifecycleJSONLog(f.srv)
+		if skipped, err := f.run(); err != nil || !skipped {
+			t.Fatalf("run = (skipped %v, err %v), want a skip", skipped, err)
+		}
+		requireNoSignedBootstrapDone(t, logs.String())
+	})
+	t.Run("failure after the final rename", func(t *testing.T) {
+		f := newCaseBFixture(t, map[string]string{"a.txt": "A"})
+		logs := captureLifecycleJSONLog(f.srv)
+		crashAt(t, "after_rename")
+		if _, err := f.run(); !errors.Is(err, errSignedBootstrapCrash) {
+			t.Fatalf("err = %v, want the injected failure", err)
+		}
+		requireNoSignedBootstrapDone(t, logs.String())
+	})
+	t.Run("provisioned marker write fails", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("a read-only directory does not stop root from writing")
+		}
+		f := newCaseBFixture(t, map[string]string{"a.txt": "A"})
+		stateDir := filepath.Dir(f.sentinel)
+		logs := captureLifecycleJSONLog(f.srv)
+		// After the commit, the state directory is made read-only, so the
+		// provisioned marker cannot be written.
+		testHookSignedBootstrap = func(step string) error {
+			if step == "after_rename" {
+				return os.Chmod(stateDir, 0o555)
+			}
+			return nil
+		}
+		t.Cleanup(func() {
+			testHookSignedBootstrap = nil
+			_ = os.Chmod(stateDir, 0o755)
+		})
+		_, err := f.run()
+		if err == nil || !strings.Contains(err.Error(), "create temp sentinel") {
+			t.Fatalf("err = %v, want the marker write failure", err)
+		}
+		if f.sentinelPresent() {
+			t.Fatal("the marker must not have been written")
+		}
+		requireNoSignedBootstrapDone(t, logs.String())
+	})
 }
