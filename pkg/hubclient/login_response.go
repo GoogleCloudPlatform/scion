@@ -96,8 +96,9 @@ func (e *HTMLResponseError) Is(target error) bool { return target == ErrHubHTMLR
 
 // checkLoginResponse inspects a response to one of the early login calls
 // before it is decoded. It returns an *IAPResponseError when IAP answered
-// (an IAP-generated response, or a redirect that ended on the Google
-// sign-in page) and an *HTMLResponseError for any other HTML page. On a nil
+// (an IAP-generated response, IAP's plain-text "Invalid IAP credentials"
+// 401/403, or a redirect that ended on the Google sign-in page) and an
+// *HTMLResponseError for any other HTML page. On a nil
 // return resp.Body still yields the full, unread body. On an error the
 // body is closed.
 func (c *client) checkLoginResponse(resp *http.Response) error {
