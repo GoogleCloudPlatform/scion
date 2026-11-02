@@ -567,9 +567,10 @@ spec:
               - key: settings.yaml
                 path: settings.yaml
         {{- /*
-        Inline nfs, not a PVC: the hub needs only the mount, and the claim
-        agents use (workspaceStorage.nfs.pvName) lives in the agent namespace,
-        which may not be this one. GKE Autopilot allows the nfs volume type.
+        Inline nfs, not a PVC: the hub needs only the mount. When
+        workspaceStorage.nfs.pvName is set, it names a claim in the agent
+        namespace, which may not be this one; when it is empty, agent pods
+        mount the share inline too. GKE Autopilot allows the nfs volume type.
         No fsGroup is set for it - see the defaultMode note above for why.
         */}}
         {{- if $nfsWs }}
