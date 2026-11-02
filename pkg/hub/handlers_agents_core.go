@@ -4178,9 +4178,14 @@ func (s *Server) writeAgentGetResponse(w http.ResponseWriter, r *http.Request, a
 		resp.TimezoneSource = &tz.Source
 	}
 
-	// The authority state is always included on the single-agent GET,
-	// for the agent itself too (agent_authority_handlers.go).
-	resp.Authority = s.newAgentAuthorityReader(GetIdentityFromContext(ctx)).authority(ctx, agent)
+	// The authority state is included on the single-agent GET, for the
+	// agent itself too (agent_authority_handlers.go). A request made with
+	// an agent delegated credential gets none, as on the delegated agent
+	// list: its principal visibility would be decided through the
+	// delegated procedure, so the state is left out rather than redacted.
+	if identity := GetIdentityFromContext(ctx); !isDelegatedAgentIdentity(identity) {
+		resp.Authority = s.newAgentAuthorityReader(identity).authority(ctx, agent)
+	}
 
 	resp.AppliedConfig, resp.PendingConfig = s.redactAgentConfigsForResponse(resp.AppliedConfig, resp.PendingConfig, s.envViewAllowed(ctx, GetIdentityFromContext(ctx), agent, resp.Cap))
 	if r.URL.Query().Get("view") == agentViewEdit && s.heldEditsEnabled() {

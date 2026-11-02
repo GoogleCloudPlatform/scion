@@ -137,7 +137,7 @@ An orphaned or revoked agent keeps running until it is stopped, but every reques
 
 - **Web:** an **Orphaned** or **Revoked** badge on the agent's page and in the project's agent list; its tooltip names the cause and the remediation.
 - **CLI:** `scion list` marks the agent in the PHASE column, for example `running (ORPHANED)`, and `scion look` prints the cause on stderr. Both do so in human CLI mode only.
-- **API:** `authority` on `GET /api/v1/agents/{id}`, and on agent lists with `include=authority`. The ID of the principal the cause names is shown only to readers who may read that principal; for a user, that is hub admins.
+- **API:** `authority` on `GET /api/v1/agents/{id}`, and on agent lists with `include=authority`; a request made with an agent delegated credential gets none. The ID of the principal the cause names is shown only to readers who may read that principal; for a user, that is hub admins.
 - **Operators:** `GET /api/v1/admin/orphaned-agents` pages over the hub's non-deleted agents and lists those whose computed state is orphaned or revoked (follow `nextCursor`; a page can be empty). It is an operator diagnostic under `hub.health.read`, the same permission as the admin health summary, and needs a sign-in session; access tokens are refused.
 
 To remediate:

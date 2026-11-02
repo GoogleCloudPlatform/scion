@@ -54,8 +54,9 @@ type AgentWithCapabilities struct {
 	ResolvedTimezone *string `json:"resolvedTimezone,omitempty"`
 	TimezoneSource   *string `json:"timezoneSource,omitempty"`
 	// Authority is the agent's authority state (agent_authority_state.go):
-	// always set on the single-agent GET, and on full-view list items when
-	// the request carries include=authority.
+	// set on the single-agent GET, and on full-view list items when the
+	// request carries include=authority; never for a request made with an
+	// agent delegated credential.
 	Authority *api.AgentAuthority `json:"authority,omitempty"`
 }
 
