@@ -622,7 +622,8 @@ USER_DELETION_POSTGRES_TESTS := TestForceDeleteUser_RestoreRacesRequest_Postgres
 # race, the broker reservation transfer tests
 # (BROKER_RESERVATION_TRANSFER_POSTGRES_TESTS) and the forced user delete
 # tests (USER_DELETION_POSTGRES_TESTS), the chat retention cascade and
-# replica race test, and the two-replica project quota admission test.
+# replica race and deleted-conversation tests, and the two-replica project
+# quota admission test.
 # Each must print a PASS line, and any skip fails (shard.sh postgres).
 HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock \
 	TestScheduledSend_TwoHubReplicasPostgres_OneDelivery \
@@ -634,6 +635,7 @@ HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock
 	$(USER_DELETION_POSTGRES_TESTS) \
 	TestHubInternal_ReplayAcrossHubReplicas \
 	TestChatRetention_Postgres_CascadeAndReplicaRace \
+	TestChatRetention_Postgres_DeletedConversationsAndAttachments \
 	TestProjectQuota_TwoHubReplicasPostgres_OneAdmission
 
 ## test-hub-postgres: Run the pkg/hub Postgres tests of shard SHARD=K (SHARD=all: every shard holding one)

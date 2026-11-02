@@ -93,6 +93,13 @@ func (Conversation) Indexes() []ent.Index {
 			),
 		index.Fields("project_id"),
 		index.Fields("kind"),
+		// Partial index of the soft-deleted conversations: chat retention
+		// lists the ones deleted before its grace cutoff without scanning
+		// the table.
+		index.Fields("deleted_at").
+			Annotations(
+				entsql.IndexWhere("deleted_at IS NOT NULL"),
+			),
 	}
 }
 

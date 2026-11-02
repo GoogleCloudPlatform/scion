@@ -81,7 +81,7 @@ func TestAdminChatRetention_AdminRoundTrip(t *testing.T) {
 
 	rec := doRequestAsUser(t, srv, admin, http.MethodGet, chatRetentionAdminPath, nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.JSONEq(t, `{"enabled":false,"messages_retention_days":null,"sweep":{"chunk_size":200,"pause_ms":500,"tick_budget_seconds":30,"tick_interval_minutes":10},"last_applied_cutoff":null,"revision":0}`, rec.Body.String())
+	assert.JSONEq(t, `{"enabled":false,"messages_retention_days":null,"deleted_conversation_grace_days":30,"sweep":{"chunk_size":200,"pause_ms":500,"tick_budget_seconds":30,"tick_interval_minutes":10},"last_applied_cutoff":null,"revision":0}`, rec.Body.String())
 
 	got := decodeChatRetention(t, doRequestAsUser(t, srv, admin, http.MethodPut, chatRetentionAdminPath, map[string]any{
 		"enabled": true, "messages_retention_days": 30, "sweep": map[string]any{"chunk_size": 100}, "expected_revision": 0,
@@ -109,11 +109,23 @@ func TestAdminChatRetention_AdminRoundTrip(t *testing.T) {
 	assert.Nil(t, got.MessagesRetentionDays)
 	assert.Equal(t, chatRetentionSweepJSON{ChunkSize: 200, PauseMS: 500, TickBudgetSeconds: 30, TickIntervalMinutes: 10}, got.Sweep)
 	assert.True(t, got.Enabled)
+	assert.Equal(t, 30, got.DeletedConversationGraceDays)
+
+	// The grace is set with the revision, and null resets it to 30 days.
+	got = decodeChatRetention(t, doRequestAsUser(t, srv, admin, http.MethodPut, chatRetentionAdminPath, map[string]any{
+		"deleted_conversation_grace_days": 1, "expected_revision": got.Revision,
+	}))
+	assert.Equal(t, 1, got.DeletedConversationGraceDays)
+	assert.Equal(t, 1, srv.GetOperationalSettings().ChatRetention().DeletedConversationGraceDays)
+	got = decodeChatRetention(t, doRequestAsUser(t, srv, admin, http.MethodPut, chatRetentionAdminPath, map[string]any{
+		"deleted_conversation_grace_days": nil, "expected_revision": got.Revision,
+	}))
+	assert.Equal(t, 30, got.DeletedConversationGraceDays)
 }
 
-// TestAdminChatRetention_CASAndValidation: changing enabled or the window
-// needs the current expected_revision; out-of-range values, unknown fields
-// and later-phase keys are refused.
+// TestAdminChatRetention_CASAndValidation: changing enabled, the window or
+// the grace needs the current expected_revision; out-of-range values,
+// unknown fields and later-phase keys are refused.
 func TestAdminChatRetention_CASAndValidation(t *testing.T) {
 	srv, _, admin, _ := chatRetentionAdminServer(t, true)
 	put := func(body map[string]any) *httptest.ResponseRecorder {
@@ -123,6 +135,8 @@ func TestAdminChatRetention_CASAndValidation(t *testing.T) {
 	rec := put(map[string]any{"enabled": true})
 	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	rec = put(map[string]any{"messages_retention_days": 30})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	rec = put(map[string]any{"deleted_conversation_grace_days": 10})
 	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	rec = put(map[string]any{"enabled": true, "expected_revision": 5})
 	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
@@ -138,7 +152,8 @@ func TestAdminChatRetention_CASAndValidation(t *testing.T) {
 		{"sweep": map[string]any{"tick_budget_seconds": 41}},
 		{"sweep": map[string]any{"pause_ms": 10001}},
 		{"sweep": map[string]any{"tick_interval_minutes": 0}},
-		{"deleted_conversation_grace_days": 30},
+		{"deleted_conversation_grace_days": 0, "expected_revision": 0},
+		{"deleted_conversation_grace_days": 36501, "expected_revision": 0},
 		{"failed_message_retention_days": 7},
 		{"sweep": map[string]any{"bogus": 1}},
 	} {
@@ -200,8 +215,8 @@ func TestAdminChatRetention_SaveIsAudited(t *testing.T) {
 	assert.Equal(t, "hub_setting_update", r.MutationType)
 	assert.Equal(t, "hub_setting", r.TargetType)
 	assert.Equal(t, admin.ID, r.ActorPrincipalID)
-	assert.Equal(t, "enabled=false,messages_retention_days=null,chunk_size=200,pause_ms=500,tick_budget_seconds=30,tick_interval_minutes=10", r.BeforeSummary)
-	assert.Equal(t, "enabled=true,messages_retention_days=30,chunk_size=200,pause_ms=500,tick_budget_seconds=30,tick_interval_minutes=10", r.AfterSummary)
+	assert.Equal(t, "enabled=false,messages_retention_days=null,deleted_conversation_grace_days=30,chunk_size=200,pause_ms=500,tick_budget_seconds=30,tick_interval_minutes=10", r.BeforeSummary)
+	assert.Equal(t, "enabled=true,messages_retention_days=30,deleted_conversation_grace_days=30,chunk_size=200,pause_ms=500,tick_budget_seconds=30,tick_interval_minutes=10", r.AfterSummary)
 
 	decodeChatRetention(t, doRequestAsUser(t, srv, admin, http.MethodPut, chatRetentionAdminPath, map[string]any{
 		"enabled": true, "expected_revision": got.Revision,

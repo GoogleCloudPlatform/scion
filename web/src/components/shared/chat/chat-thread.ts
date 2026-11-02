@@ -101,6 +101,7 @@ import {
   renderRetentionDivider,
   chatDateDividerStyles,
 } from './chat-date-divider.js';
+import { hasMessagesAfter, unreadDividerAfter } from './chat-unread-divider.js';
 import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
 import { effectiveTimeZone, formatInstantWithZone, toWallClockInput } from '../../../utils/time.js';
 import '../code-editor.js';
@@ -3097,6 +3098,19 @@ export class ScionChatThread extends LitElement {
   }
 
   /**
+   * The index of the message the "New messages" divider follows, -1 for
+   * the top of the thread (the watermark was purged by retention), or
+   * null for none.
+   */
+  private unreadDividerIndex(): number | null {
+    return unreadDividerAfter(
+      this.messages.map((m) => m.id),
+      this.lastReadMessageId,
+      this.retentionPurgedBefore !== null
+    );
+  }
+
+  /**
    * Fetch the current user's read watermark for this conversation.
    * Used to position the unread divider on thread open.
    */
@@ -3115,9 +3129,9 @@ export class ScionChatThread extends LitElement {
       if (currentId !== this.fetchId) return;
       if (data?.lastReadMessageId) {
         this.lastReadMessageId = data.lastReadMessageId;
-        // Show divider if there are messages after the watermark.
-        const idx = this.messages.findIndex((m) => m.id === this.lastReadMessageId);
-        if (idx >= 0 && idx < this.messages.length - 1) {
+        // Show divider if there are messages after the watermark (all of
+        // them when retention purged the watermark).
+        if (hasMessagesAfter(this.unreadDividerIndex(), this.messages.length)) {
           this.showUnreadDivider = true;
         }
       }
@@ -7170,9 +7184,10 @@ export class ScionChatThread extends LitElement {
     // Unread divider: find the position of the last-read message so we can
     // insert the divider after it.
     let unreadDividerInserted = false;
-    let lastReadIdx = -1;
+    // null: no divider; -1: before the first message.
+    let lastReadIdx: number | null = null;
     if (this.showUnreadDivider && this.lastReadMessageId) {
-      lastReadIdx = this.messages.findIndex((m) => m.id === this.lastReadMessageId);
+      lastReadIdx = this.unreadDividerIndex();
     }
 
     // Inter-agent messages are dated items like any other row: a run of
@@ -7250,7 +7265,7 @@ export class ScionChatThread extends LitElement {
       }
 
       // Unread divider: insert between the last-read message and the next one.
-      if (!unreadDividerInserted && lastReadIdx >= 0 && mi > lastReadIdx) {
+      if (!unreadDividerInserted && lastReadIdx !== null && mi > lastReadIdx) {
         unreadDividerInserted = true;
         rows.push({
           key: 'unread',
