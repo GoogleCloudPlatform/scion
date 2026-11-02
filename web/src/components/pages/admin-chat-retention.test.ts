@@ -102,7 +102,9 @@ async function save(el: Panel): Promise<void> {
 
 describe('buildRetentionPutBody', () => {
   it('sends an empty window as an explicit null with the loaded revision', () => {
-    expect(buildRetentionPutBody({ enabled: true, days: '', graceDays: '30', sweep: SWEEP }, 4)).toEqual({
+    expect(
+      buildRetentionPutBody({ enabled: true, days: '', graceDays: '30', sweep: SWEEP }, 4)
+    ).toEqual({
       ok: true,
       body: {
         enabled: true,
@@ -120,7 +122,10 @@ describe('buildRetentionPutBody', () => {
   });
 
   it('accepts a window of at least 7 days', () => {
-    const r = buildRetentionPutBody({ enabled: true, days: ' 30 ', graceDays: '30', sweep: SWEEP }, 1);
+    const r = buildRetentionPutBody(
+      { enabled: true, days: ' 30 ', graceDays: '30', sweep: SWEEP },
+      1
+    );
     expect(r.ok && r.body.messages_retention_days).toBe(30);
   });
 

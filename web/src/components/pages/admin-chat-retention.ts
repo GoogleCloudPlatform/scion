@@ -151,7 +151,11 @@ export function buildRetentionPutBody(
     }
   }
   const graceDays = parseWholeNumber(form.graceDays);
-  if (graceDays === null || graceDays < RETENTION_MIN_GRACE_DAYS || graceDays > RETENTION_MAX_DAYS) {
+  if (
+    graceDays === null ||
+    graceDays < RETENTION_MIN_GRACE_DAYS ||
+    graceDays > RETENTION_MAX_DAYS
+  ) {
     errors.push(
       `Deleted conversation grace must be a whole number of days from ${RETENTION_MIN_GRACE_DAYS} to ${RETENTION_MAX_DAYS}.`
     );
