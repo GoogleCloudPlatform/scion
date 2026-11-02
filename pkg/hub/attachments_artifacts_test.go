@@ -48,7 +48,9 @@ import (
 
 // setAttachmentExperiments installs a registry in which
 // hub.attachment_artifacts is on or off and hub.artifacts is on only when
-// artifactsOn is set.
+// artifactsOn is set. hub.attachment_artifacts is also stored as an
+// override (storeAttachmentArtifactsOverride): a hub whose artifact service
+// is ready defaults it on, so only a stored override turns it off there.
 func setAttachmentExperiments(t *testing.T, srv *Server, attachmentsOn, artifactsOn bool) {
 	t.Helper()
 	var active []experiments.Experiment
@@ -64,8 +66,43 @@ func setAttachmentExperiments(t *testing.T, srv *Server, attachmentsOn, artifact
 	reg, err := experiments.NewRegistry(active, nil)
 	require.NoError(t, err)
 	srv.experiments = reg
+	storeAttachmentArtifactsOverride(t, srv, attachmentsOn)
 	require.Equal(t, attachmentsOn, srv.experimentEnabled(experiments.AttachmentArtifacts))
 	require.Equal(t, artifactsOn, srv.experimentEnabled(experiments.Artifacts))
+}
+
+// storeAttachmentArtifactsOverride stores an explicit override of
+// hub.attachment_artifacts in srv's operational settings, as an admin's
+// setting is stored. Turning it off on a server without operational
+// settings installs settings over an empty store; turning it on there
+// stores nothing, because it already resolves on.
+func storeAttachmentArtifactsOverride(t *testing.T, srv *Server, on bool) {
+	t.Helper()
+	ops := srv.GetOperationalSettings()
+	if ops == nil {
+		if on {
+			// Without stored settings the experiment already resolves on
+			// (the deployment default, or the test registry's compiled
+			// default). Installing settings here would also change other
+			// values the server reads from them, such as the conversation
+			// envelope switch the agent messages stream applies.
+			return
+		}
+		ops = NewOperationalSettings(newFakeHubSettingStore(), emptyKoanf(), emptyKoanf())
+		_, err := ops.Refresh(context.Background())
+		require.NoError(t, err)
+		srv.SetOperationalSettings(ops)
+	}
+	snap := ops.ExperimentsSnapshot()
+	overrides := make(map[string]bool, len(snap.Overrides)+1)
+	for k, v := range snap.Overrides {
+		overrides[k] = v
+	}
+	overrides[experiments.AttachmentArtifacts] = on
+	doc, err := json.Marshal(map[string]interface{}{"overrides": overrides})
+	require.NoError(t, err)
+	_, err = ops.Update(context.Background(), "experiments", doc, "test", snap.Revision, "managed")
+	require.NoError(t, err)
 }
 
 // enableAttachmentArtifacts turns hub.attachment_artifacts on for f's

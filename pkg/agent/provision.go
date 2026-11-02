@@ -80,11 +80,13 @@ func DeleteAgentFilesForHubProject(agentName, projectPath, hubProjectID string, 
 }
 
 // Seams for tests that force a failure of the last sharer's worktree
-// teardown (deleteAgentFiles).
+// teardown and of the directory removals in deleteAgentFiles. Every
+// removal result is handled.
 var (
 	removeWorktree      = util.RemoveWorktree
 	removeWorktreeEntry = util.RemoveWorktreeEntryIn
 	deleteBranchByName  = util.DeleteBranchIn
+	removeAllSafe       = util.RemoveAllSafe
 )
 
 // DeleteHubAgentFiles is DeleteAgentFiles for a hub agent: sharerKey is the
@@ -209,10 +211,11 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 	var repoRoot string
 	var externalAgentDir string
 	var hubAgentDir string // state dir resolved from hubProjectID, when distinct
-	// legacyAgentDir is the in-project state dir an agent of a shared
-	// project configuration had before the configuration moved to the
-	// project root (config.LegacySharedProjectAgentDir); removed with the
-	// agent so a later agent of the same name never resolves to it.
+	// legacyAgentDir is the retired in-project state dir an agent of a
+	// shared project configuration had before the configuration moved to
+	// the project root (config.LegacySharedProjectAgentDir); removed with
+	// the agent (ptone/scion#5835). Its state in the broker-local external
+	// root is externalAgentDir (layout.externalAgentsRoot).
 	var legacyAgentDir string
 	var worktreeDir string // worktree-per-agent: agent's worktree path
 	// ownWorktreePaths lists the paths where this agent's own worktree may
@@ -390,7 +393,7 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 		if _, err := os.Stat(filepath.Join(worktreeDir, ".git")); err == nil {
 			util.Debugf("delete: removing worktree-per-agent workspace at %s", worktreeDir)
 			worktreeStart := time.Now()
-			if deleted, err := util.RemoveWorktree(repoRoot, worktreeDir, repoRoot, branchToDelete(removeBranch, api.Slugify(agentName))); err == nil {
+			if deleted, err := removeWorktree(repoRoot, worktreeDir, repoRoot, branchToDelete(removeBranch, api.Slugify(agentName))); err == nil {
 				if deleted {
 					branchDeleted = true
 				}
@@ -398,11 +401,13 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 			} else {
 				util.Debugf("delete: worktree-per-agent removal failed in %v: %v", time.Since(worktreeStart), err)
 				if !errors.Is(err, util.ErrPathNotContained) {
-					_ = util.RemoveAllSafe(worktreeRemove)
+					if rmErr := removeAllSafe(worktreeRemove); rmErr != nil {
+						return branchDeleted, fmt.Errorf("delete: remove worktree %s: %w", worktreeDir, rmErr)
+					}
 				}
 			}
-		} else {
-			_ = util.RemoveAllSafe(worktreeRemove)
+		} else if err := removeAllSafe(worktreeRemove); err != nil {
+			return branchDeleted, fmt.Errorf("delete: remove worktree directory %s: %w", worktreeDir, err)
 		}
 	}
 
@@ -427,7 +432,7 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 				}
 				util.Debugf("delete: removing workspace at %s", agentWorkspace)
 				worktreeStart := time.Now()
-				if deleted, err := util.RemoveWorktree(agentDir, agentWorkspace, repoRoot, branchToDelete(removeBranch, api.Slugify(agentName))); err == nil {
+				if deleted, err := removeWorktree(agentDir, agentWorkspace, repoRoot, branchToDelete(removeBranch, api.Slugify(agentName))); err == nil {
 					if deleted {
 						branchDeleted = true
 					}
@@ -435,7 +440,9 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 				} else {
 					util.Debugf("delete: worktree removal failed in %v: %v", time.Since(worktreeStart), err)
 					if !errors.Is(err, util.ErrPathNotContained) {
-						_ = util.RemoveAllSafe(workspaceRemove)
+						if rmErr := removeAllSafe(workspaceRemove); rmErr != nil {
+							return branchDeleted, fmt.Errorf("delete: remove workspace %s: %w", agentWorkspace, rmErr)
+						}
 					}
 				}
 			}
@@ -516,7 +523,7 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 				if err != nil {
 					return branchDeleted, fmt.Errorf("delete: %w", err)
 				}
-				if err := util.RemoveAllSafe(entryRemove); err != nil {
+				if err := removeAllSafe(entryRemove); err != nil {
 					return branchDeleted, fmt.Errorf("failed to remove agent directory entry: %w", err)
 				}
 			}
@@ -525,7 +532,7 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 		}
 		util.Debugf("delete: removing directory: %s", agentDir)
 		removeStart := time.Now()
-		if err := util.RemoveAllSafe(dirRemove); err != nil {
+		if err := removeAllSafe(dirRemove); err != nil {
 			util.Debugf("delete: removal failed in %v: %v", time.Since(removeStart), err)
 			return branchDeleted, fmt.Errorf("failed to remove agent directory: %w", err)
 		}
@@ -541,8 +548,11 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 	//
 	// In podman rootless mode, files created as root inside the container are
 	// owned by a mapped subuid on the host, making them inaccessible to the
-	// normal user. If standard removal fails, try `podman unshare rm -rf`
-	// which enters the user namespace where the mapped UIDs are accessible.
+	// normal user. When the removal fails with a permission error or
+	// ENOTEMPTY, the unix build retries it with `podman unshare rm -rf`,
+	// which enters the user namespace where the mapped UIDs are accessible
+	// (retryRemovalInUserNamespace). Any other failure, and any failure the
+	// retry cannot clear, is returned.
 	//
 	// The state dir resolved from the Hub project ID (hubAgentDir) is
 	// removed the same way: it holds a shared-workspace agent's state and
@@ -558,13 +568,10 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 				return branchDeleted, fmt.Errorf("delete: %w", err)
 			}
 			util.Debugf("delete: removing external agent state dir: %s", extDir)
-			if err := util.RemoveAllSafe(extRemove); err != nil {
-				util.Debugf("delete: standard removal failed, trying podman unshare: %v", err)
-				unshareCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				if unshareErr := exec.CommandContext(unshareCtx, "podman", "unshare", "rm", "-rf", extRemove).Run(); unshareErr != nil {
-					util.Debugf("delete: podman unshare removal also failed: %v", unshareErr)
+			if err := removeAllSafe(extRemove); err != nil {
+				if err := retryRemovalInUserNamespace(extRemove, err); err != nil {
+					return branchDeleted, fmt.Errorf("delete: remove external agent state dir %s: %w", extDir, err)
 				}
-				cancel()
 			}
 		}
 	}
@@ -918,6 +925,9 @@ func buildProvisionContext(ctx context.Context, opts api.StartOptions) (context.
 	}
 	if opts.SharedWorkspace {
 		ctx = api.ContextWithSharedWorkspace(ctx)
+		if gc := opts.SharedWorkspaceClone; gc != nil {
+			ctx = api.ContextWithGitTokenRemote(ctx, gc.TokenRemote)
+		}
 	}
 	ctx = api.ContextWithHubProjectID(ctx, opts.HubProjectID)
 	if opts.EmptyPerAgentWorkspace {
@@ -945,6 +955,10 @@ func buildProvisionContext(ctx context.Context, opts api.StartOptions) (context.
 	}
 	return ctx, inlineCfg
 }
+
+// provisionFinish is Provision's call of finishProvision, replaceable in
+// tests to fail a create after GetAgent has made the agent directory.
+var provisionFinish = (*AgentManager).finishProvision
 
 // finishProvision performs the steps common to Provision and Reprovision once
 // the agent's on-disk config exists: persist the lightweight agent-config
@@ -1325,6 +1339,16 @@ func reprovisionEmptyPerAgentPreflight(projectDir, agentName string, rt runtime.
 }
 
 func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	// A create over a legacy agent directory no agent owns is refused
+	// before anything runs. A project dir that does not resolve fails here
+	// too (fail closed), as GetAgent would.
+	projectDir, err := config.GetResolvedProjectDir(opts.ProjectPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := refuseRetiredLegacyAgent(projectDir, opts); err != nil {
+		return nil, err
+	}
 	// A forced move's provision never touches an agent directory it did not
 	// create: an existing one (even an empty leftover that GetAgent would
 	// clear as stale) refuses the provision before anything runs.
@@ -1345,13 +1369,18 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 		return cfg, err
 	}
 
-	if err := m.finishProvision(opts, agentDir, agentHome, cfg); err != nil {
-		return cfg, err
-	}
 	// A create: the later start must not mistake this agent for one that
-	// predates per-agent NFS directories (see nfsKeepSharedCheckout).
+	// predates per-agent NFS directories (see nfsKeepSharedCheckout and
+	// cloudRunKeepSharedCheckout). Recorded as soon as GetAgent has made
+	// the agent directory, before anything else can fail: a create that
+	// fails later and is started afterwards (not as a create) would
+	// otherwise be pinned to the shared checkout for good.
 	if opts.FreshProvision {
 		recordNFSAgentDir(agentDir, opts.Name)
+		recordCloudRunAgentWorkspace(agentDir, opts.Name)
+	}
+	if err := provisionFinish(m, opts, agentDir, agentHome, cfg); err != nil {
+		return cfg, err
 	}
 
 	// A provision-only create carries no run (the hub mints runs only for
@@ -1591,6 +1620,17 @@ func plainProjectWorkspaceSource(projectDir string) string {
 	return filepath.Dir(projectDir)
 }
 
+// checkedPlainProjectWorkspaceSource is plainProjectWorkspaceSource for
+// provisioning: it refuses a projectDir that is not a .scion directory, so a
+// plain workspace is never the parent of a bare directory. The delete guard
+// keeps the unchecked form, where protecting the parent is the safe side.
+func checkedPlainProjectWorkspaceSource(projectDir string) (string, error) {
+	if filepath.Base(projectDir) != config.DotScion {
+		return "", ErrProjectPathNotInitialized
+	}
+	return plainProjectWorkspaceSource(projectDir), nil
+}
+
 // resolveProjectRoot determines the project root directory on this broker.
 // Used for resolving relative --workspace paths against the project's logical root.
 func resolveProjectRoot(settings *config.VersionedSettings, projectDir string) string {
@@ -1824,6 +1864,12 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if err != nil {
 		return "", "", nil, err
 	}
+	// A plain project's explicit path must hold its .scion entry, checked
+	// before anything is written under it (checkExplicitProjectPath).
+	ownWorkspace := api.GitCloneFromContext(ctx) != nil || api.IsEmptyPerAgentWorkspaceFromContext(ctx) || api.IsSharedWorkspaceFromContext(ctx)
+	if err := checkExplicitProjectPath(projectPath, projectDir, workspace, ownWorkspace); err != nil {
+		return "", "", nil, err
+	}
 
 	settings, warnings, _ := config.LoadEffectiveSettingsFor(ctx, projectDir)
 	config.PrintDeprecationWarnings(warnings)
@@ -1966,6 +2012,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if err != nil {
 		return "", "", nil, err
 	}
+	logTemplateUnlimitedCounts(ctx, rt.Chain)
 	// Claim the agent dir and home by creating them: os.Mkdir succeeds only
 	// for the caller that actually creates the directory, so of two
 	// concurrent first provisions only one treats it as its own, and a
@@ -2291,7 +2338,16 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 				return "", "", nil, fmt.Errorf("failed to create workspace directory: %w", err)
 			}
 		} else {
-			workspaceSource = plainProjectWorkspaceSource(projectDir)
+			// The workspace is the directory holding projectDir, so
+			// projectDir must be a .scion directory: never mount the
+			// parent of a bare directory (checkExplicitProjectPath refused
+			// an explicit path above; this keeps every other way here
+			// fail-closed).
+			src, err := checkedPlainProjectWorkspaceSource(projectDir)
+			if err != nil {
+				return "", "", nil, &ProjectPathNotInitializedError{Path: projectPathForError(projectPath, projectDir)}
+			}
+			workspaceSource = src
 		}
 	}
 
@@ -2902,12 +2958,16 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// 2f. Configure git credential helper for shared-workspace projects.
 	// The credential helper is written to $HOME/.gitconfig so it doesn't
 	// pollute the shared workspace. This pre-configures a basic credential
-	// helper using GITHUB_TOKEN env var. When GitHub App is enabled,
-	// sciontool init's configureSharedWorkspaceGit() will upgrade this to
-	// use `sciontool credential-helper` for on-demand token refresh.
-	if api.IsSharedWorkspaceFromContext(ctx) {
+	// helper using GITHUB_TOKEN env var, scoped to the host of the project's
+	// recorded git remote (the hub's token remote), so the token is offered
+	// to that host only; without a recorded remote no helper is written.
+	// When GitHub App is enabled, sciontool init's
+	// configureSharedWorkspaceGit() will upgrade this to use
+	// `sciontool credential-helper` for on-demand token refresh.
+	scope, scoped := provision.TokenRemoteCredentialScope(api.GitTokenRemoteFromContext(ctx))
+	if api.IsSharedWorkspaceFromContext(ctx) && scoped {
 		gitconfigPath := filepath.Join(agentHome, ".gitconfig")
-		credentialSection := "\n[credential]\n\thelper = !f() { echo \"username=oauth2\"; echo \"password=${GITHUB_TOKEN}\"; }; f\n"
+		credentialSection := "\n[credential \"" + scope + "\"]\n\thelper = !f() { echo \"username=oauth2\"; echo \"password=${GITHUB_TOKEN}\"; }; f\n"
 		// Append to existing .gitconfig (which may have [safe] directory config)
 		f, err := os.OpenFile(gitconfigPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
@@ -4354,6 +4414,11 @@ func removeCheckedAgentDir(agentDir, agentWorkspace string) {
 		_ = os.Chmod(path, 0755)
 		return nil
 	})
+	// The agent's scion-agent.json goes first (a link is removed, never
+	// followed): a removal that then fails part-way leaves a directory the
+	// legacy agent look-up (config.LegacySharedProjectAgentDir) no longer
+	// recognises as the agent's.
+	_ = os.Remove(filepath.Join(agentDir, "scion-agent.json"))
 	_ = os.RemoveAll(agentDir)
 	removeWorkspaceWorktreeEntry(agentWorkspace)
 }
@@ -4587,6 +4652,13 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 					}
 				}
 				if err := util.CreateWorktreeWithOrigin(agentWorkspace, targetBranch, recordedOrigin); err != nil {
+					// A repository config refusal is a policy decision, not a failed
+					// recovery: refuse the start rather than continue without a
+					// workspace.
+					var refused *util.RepoConfigRefusedError
+					if errors.As(err, &refused) {
+						return "", "", "", nil, fmt.Errorf("recreate the missing worktree for agent %q: %w", agentName, err)
+					}
 					slog.Warn("GetAgent: could not recreate the missing worktree; continuing without a workspace",
 						"agent", agentName, "path", agentWorkspace, "branch", targetBranch, "error", err)
 					agentWorkspace = ""
@@ -4982,8 +5054,9 @@ func injectPromptFiles(h api.Harness, agentHome string, chain []*config.Template
 		// where a template author creates the file but forgets to reference it
 		// in scion-agent.yaml.
 		if finalScionCfg.AgentInstructions == "" {
-			conventionPath := filepath.Join(lastTpl.Path, "agents.md")
-			if _, err := os.Stat(conventionPath); err == nil {
+			// Detected only as a plain file inside the template directory,
+			// looked up as the content read will read it (no link followed).
+			if config.TemplateHasContentFile(lastTpl, "agents.md") {
 				util.Debugf("ProvisionAgent: agent_instructions not set in config, auto-detected agents.md in template %s", lastTpl.Path)
 				finalScionCfg.AgentInstructions = "agents.md"
 			}
@@ -5024,8 +5097,9 @@ func injectPromptFiles(h api.Harness, agentHome string, chain []*config.Template
 		// Step 5: Inject system prompt
 		// Convention-based auto-detection for system prompt as well.
 		if finalScionCfg.SystemPrompt == "" {
-			conventionPath := filepath.Join(lastTpl.Path, "system-prompt.md")
-			if _, err := os.Stat(conventionPath); err == nil {
+			// Detected only as a plain file inside the template directory,
+			// looked up as the content read will read it (no link followed).
+			if config.TemplateHasContentFile(lastTpl, "system-prompt.md") {
 				util.Debugf("ProvisionAgent: system_prompt not set in config, auto-detected system-prompt.md in template %s", lastTpl.Path)
 				finalScionCfg.SystemPrompt = "system-prompt.md"
 			}

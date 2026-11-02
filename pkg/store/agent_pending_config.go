@@ -49,11 +49,25 @@ type AgentPendingConfig struct {
 	BaseGeneration   int   `json:"baseGeneration"`
 	BaseStateVersion int64 `json:"baseStateVersion"`
 
-	// EnvSaverCanViewEnv records whether the caller who last saved
-	// config.env could read the agent's env. Applying the edit passes it to
-	// the env-removal rules the live PATCH gates on the caller's env access.
-	// Persisted, never returned (MarshalJSON drops it).
-	EnvSaverCanViewEnv bool `json:"envSaverCanViewEnv,omitempty"`
+	// KeySavers maps each Config key (the same key) to the principal that
+	// saved its current value, by its precise kind ("user:<id>",
+	// "dev:<id>", "agent:<id>", "agent_delegated:<id>", ...). A fold
+	// re-authorizes each key against its saver's current grants
+	// (ptone/scion#5864). A key with no entry (a row written before the
+	// field existed) falls back to SavedBy. Persisted, never returned
+	// (MarshalJSON drops it).
+	KeySavers map[string]string `json:"keySavers,omitempty"`
+
+	// LimitsFormat is the storage format of the count limits (max_turns,
+	// max_model_calls) in Config (ptone/scion#5605). Rows written before
+	// the count limits were typed have none (0): their 0 meant "clear",
+	// because an int field encoded a null clear as 0. Format 2 rows keep
+	// a clear as null and Unlimited as 0. Storage always writes
+	// PendingLimitsFormatTyped (MarshalPendingConfigForStorage), and
+	// loading normalizes an older row (UnmarshalPendingConfigFromStorage),
+	// so every in-memory value is format 2. Persisted, never returned
+	// (MarshalJSON drops it).
+	LimitsFormat int `json:"limitsFormat,omitempty"`
 
 	// envResponseVisible gates whether MarshalJSON includes config.env and
 	// the telemetry cloud-export headers, exactly like
@@ -81,6 +95,12 @@ func (p *AgentPendingConfig) Clone() *AgentPendingConfig {
 			out.Config[k] = append(json.RawMessage(nil), v...)
 		}
 	}
+	if p.KeySavers != nil {
+		out.KeySavers = make(map[string]string, len(p.KeySavers))
+		for k, v := range p.KeySavers {
+			out.KeySavers[k] = v
+		}
+	}
 	return &out
 }
 
@@ -98,15 +118,40 @@ func (p *AgentPendingConfig) ResponseView(canAttach bool) *AgentPendingConfig {
 	return view
 }
 
-// MarshalJSON is the response encoding: it drops EnvSaverCanViewEnv, and
+// MarshalJSON is the response encoding: it drops KeySavers, and
 // redacts config.env and config.telemetry.cloud.headers unless ResponseView
 // allowed them (GITHUB_TOKEN is always dropped from env).
 func (p AgentPendingConfig) MarshalJSON() ([]byte, error) {
 	type alias AgentPendingConfig
 	out := alias(p)
-	out.EnvSaverCanViewEnv = false
+	out.KeySavers = nil
+	out.LimitsFormat = 0
 	out.Config = redactPendingConfigForResponse(p.Config, p.envResponseVisible)
 	return json.Marshal(out)
+}
+
+// PendingLimitsFormatTyped is the AgentPendingConfig.LimitsFormat of a row
+// whose count limits are typed: a null clears, 0 is Unlimited.
+const PendingLimitsFormatTyped = 2
+
+// pendingCountLimitKeys are the config keys of the count limits, lower-cased.
+var pendingCountLimitKeys = map[string]bool{"max_turns": true, "max_model_calls": true}
+
+// normalizePendingLimits brings a row of an older format to
+// PendingLimitsFormatTyped, in place: a count-limit value of 0, which then
+// could only mean "clear", becomes null. Keys are matched
+// case-insensitively, as encoding/json decodes them. Any other value is
+// left as it is.
+func normalizePendingLimits(p *AgentPendingConfig) {
+	if p == nil || p.LimitsFormat >= PendingLimitsFormatTyped {
+		return
+	}
+	for k, v := range p.Config {
+		if pendingCountLimitKeys[strings.ToLower(k)] && strings.TrimSpace(string(v)) == "0" {
+			p.Config[k] = json.RawMessage("null")
+		}
+	}
+	p.LimitsFormat = PendingLimitsFormatTyped
 }
 
 // MarshalPendingConfigForStorage encodes p for the agents.pending_config
@@ -116,8 +161,13 @@ func MarshalPendingConfigForStorage(p *AgentPendingConfig) (string, error) {
 	if p.IsEmpty() {
 		return "", nil
 	}
+	// Every row written is typed: a fresh row built in memory carries no
+	// format, and all in-memory rows hold typed values (loading
+	// normalizes older ones), so the format is stamped here.
+	out := *p
+	out.LimitsFormat = PendingLimitsFormatTyped
 	type alias AgentPendingConfig
-	data, err := json.Marshal((*alias)(p))
+	data, err := json.Marshal((*alias)(&out))
 	if err != nil {
 		return "", err
 	}
@@ -125,7 +175,9 @@ func MarshalPendingConfigForStorage(p *AgentPendingConfig) (string, error) {
 }
 
 // UnmarshalPendingConfigFromStorage decodes a stored agents.pending_config
-// value; "" decodes to nil.
+// value; "" decodes to nil. It is the one load path of a stored row, so a
+// row of an older format is normalized here (normalizePendingLimits): every
+// reader and writer of a loaded row sees typed count limits.
 func UnmarshalPendingConfigFromStorage(raw string) (*AgentPendingConfig, error) {
 	if raw == "" {
 		return nil, nil
@@ -137,6 +189,7 @@ func UnmarshalPendingConfigFromStorage(raw string) (*AgentPendingConfig, error) 
 	if p.IsEmpty() {
 		return nil, nil
 	}
+	normalizePendingLimits(&p)
 	return &p, nil
 }
 

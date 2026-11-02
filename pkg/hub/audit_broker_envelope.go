@@ -240,7 +240,8 @@ func brokerAuthFailureCode(err error) auditevent.BrokerFailureCode {
 		// caller fill the internal bucket at will. Error() text and the
 		// order of the checks are unchanged; only the audit code differs.
 		return auditevent.BrokerFailureUnknownBroker
-	case errors.Is(err, errBrokerAuthNonceCheck), errors.Is(err, errBrokerAuthSecretLookup), errors.Is(err, errBrokerAuthSecretsLookup):
+	case errors.Is(err, errBrokerAuthNonceCheck), errors.Is(err, errBrokerAuthSecretLookup), errors.Is(err, errBrokerAuthSecretsLookup),
+		errors.Is(err, errBrokerAuthBrokerLookup):
 		return auditevent.BrokerFailureInternal
 	case errors.Is(err, errBrokerAuthUnknownBroker), errors.Is(err, errBrokerAuthNoValidSecrets):
 		return auditevent.BrokerFailureUnknownBroker

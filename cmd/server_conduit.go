@@ -442,7 +442,9 @@ func conduitHopTLS(c config.HubConduitConfig) (server, client *tls.Config, err e
 }
 
 // conduitPeerAuthOptions builds the relay-peer auth options from config
-// and the environment.
+// and the environment: the shared session secret, plus the keyring file's
+// signing ring when one is loaded. The relay role builds its own options
+// (relayServerConfig) and never carries either.
 func conduitPeerAuthOptions(ctx context.Context, cfg *config.GlobalConfig, selfID string, onGCP bool) hub.ConduitPeerAuthOptions {
 	o := hub.ConduitPeerAuthOptions{
 		Mode:            cfg.Hub.Conduit.PeerAuthMode(),
@@ -452,6 +454,11 @@ func conduitPeerAuthOptions(ctx context.Context, cfg *config.GlobalConfig, selfI
 		Audience:        cfg.Hub.Conduit.PeerAudience,
 		ServiceAccounts: cfg.Hub.Conduit.PeerServiceAccounts,
 	}
+	// Managed ring mode (ptone/scion#1530 Phase 5): without a dedicated
+	// peer secret the relay-peer keys come from the keyring file's signing
+	// ring rather than from the "legacy" entry alone. Legacy mode keeps
+	// the shared secret.
+	o.SigningRing = serverSigningRingFromFile()
 	if onGCP {
 		if email, err := metadata.EmailWithContext(ctx, "default"); err == nil {
 			o.OwnServiceAccount = email

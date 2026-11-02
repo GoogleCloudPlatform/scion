@@ -541,6 +541,16 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 
 	// -------------------------------------------------------------------------
+	// Port page view (behind the hub.port_view experiment). The route serves
+	// an agent's exposed port on the page link in its path only (the handler
+	// checks it, and the user's port access, on every request).
+	// -------------------------------------------------------------------------
+	"/api/v1/portview/": {
+		Pattern: "/api/v1/portview/", RouteID: "ports.view",
+		Classification: RoutePublic,
+	},
+
+	// -------------------------------------------------------------------------
 	// Policy: Skills
 	// -------------------------------------------------------------------------
 	"/api/v1/skills": {
@@ -829,6 +839,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RouteHubAdmin,
 		Permission:     "hub.maintenance.execute", Resource: "hub", Action: "execute",
 	},
+	"/api/v1/admin/maintenance/releases": {
+		Pattern: "/api/v1/admin/maintenance/releases", RouteID: "admin.maintenance.releases",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.maintenance.execute", Resource: "hub", Action: "execute",
+	},
 	"/api/v1/admin/scheduler": {
 		Pattern: "/api/v1/admin/scheduler", RouteID: "admin.scheduler",
 		Classification: RouteHubAdmin,
@@ -906,6 +921,15 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Permission:     "hub.config.update", Resource: "hub", Action: "update",
 		SessionOnly: authzop.ReasonHostOperations,
 	},
+	// Chat message retention settings (DB-only "chat_retention" section,
+	// behind hub.chat_retention). Session only: the window decides what is
+	// deleted, irreversibly, across every user's history.
+	"/api/v1/admin/chat-retention": {
+		Pattern: "/api/v1/admin/chat-retention", RouteID: "admin.chatRetention",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.config.update", Resource: "hub", Action: "update",
+		SessionOnly: authzop.ReasonIrreversibleCascade,
+	},
 	// Conduit grant key rotation, behind hub.conduit. Returns kids and
 	// timestamps only.
 	"/api/v1/admin/conduit/grant-keys/rotate": {
@@ -921,6 +945,14 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RouteHubAdmin,
 		Permission:     "hub.conduit_grant_keys.execute", Resource: "hub", Action: "execute",
 		SessionOnly: authzop.ReasonCredentialManagement,
+	},
+	// Server key status, behind
+	// server.secret_rotation. Deliberately no registered permission: the
+	// guard falls back to requireAdmin, so only an unscoped platform admin
+	// on a session or dev credential reads it, and it cannot be delegated.
+	"/api/v1/admin/keys/status": {
+		Pattern: "/api/v1/admin/keys/status", RouteID: "admin.keys.status",
+		Classification: RouteHubAdmin,
 	},
 	// Bulk agent auth reset. Session only: a session-recovery route, like
 	// revoke-sessions.
@@ -1651,6 +1683,12 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 				return
 			}
 			r = admitted
+			// A list route's item filter writes one aggregated record
+			// when the request ends, including on a panic or a
+			// cancelled request (.design/agent-delegation.md §14.2).
+			if c := listFilterCollectorFromContext(r.Context()); c != nil {
+				defer s.flushListFilter(r.Context(), c)
+			}
 		}
 		switch meta.Classification {
 		case RoutePublic:

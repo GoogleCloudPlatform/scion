@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -62,10 +63,20 @@ func wantLimitEnv(t *testing.T, label string, rc runtime.RunConfig, turns, calls
 func wantPersistedLimits(t *testing.T, label, project string, turns, calls int, duration string) {
 	t.Helper()
 	cfg, raw := persistedEnvAgentConfig(t, project)
-	if cfg.MaxTurns != turns || cfg.MaxModelCalls != calls || cfg.MaxDuration != duration {
-		t.Errorf("%s: persisted limits = (%d, %d, %q), want (%d, %d, %q): %s", label,
-			cfg.MaxTurns, cfg.MaxModelCalls, cfg.MaxDuration, turns, calls, duration, raw)
+	if !api.IntPtrEqual(cfg.MaxTurns, wantCount(turns)) || !api.IntPtrEqual(cfg.MaxModelCalls, wantCount(calls)) || cfg.MaxDuration != duration {
+		t.Errorf("%s: persisted limits = (%s, %s, %q), want (%d, %d, %q): %s", label,
+			api.FormatCountLimit(cfg.MaxTurns), api.FormatCountLimit(cfg.MaxModelCalls), cfg.MaxDuration, turns, calls, duration, raw)
 	}
+}
+
+// wantCount is a test's expected count limit: 0 means unset (nil), as in
+// the tests written before count limits could be an explicit 0; a test of
+// an explicit "no limit" compares with api.IntPtr(0) directly.
+func wantCount(n int) *int {
+	if n == 0 {
+		return nil
+	}
+	return api.IntPtr(n)
 }
 
 // globalTemplatePath is the default template envFixture writes.
@@ -100,17 +111,55 @@ func TestStart_OwnLimitsWinOverDefaults(t *testing.T) {
 	mustWrite(t, globalTemplatePath(project), `{"default_harness_config": "test-harness", "max_turns": 5}`)
 	mustWrite(t, settingsPath, envSettingsV1.yaml()+"default_max_turns: 9\ndefault_max_model_calls: 99\ndefault_max_duration: 9m\n")
 
-	inline := &api.ScionConfig{MaxModelCalls: 7}
+	inline := &api.ScionConfig{MaxModelCalls: api.IntPtr(7)}
 	rc := startEnvCtx(t, hubLimitsCtx(20, 200, "2h"), project, func(o *api.StartOptions) { o.InlineConfig = inline })
 	wantLimitEnv(t, "first start", rc, "5", "7", "2h")
 	wantPersistedLimits(t, "after first start", project, 5, 7, "")
-	if inline.MaxTurns != 0 || inline.MaxModelCalls != 7 || inline.MaxDuration != "" {
+	if inline.MaxTurns != nil || !api.IntPtrEqual(inline.MaxModelCalls, api.IntPtr(7)) || inline.MaxDuration != "" {
 		t.Errorf("Start wrote defaults into the requester's inline config: %+v", inline)
 	}
 
 	rc = startEnvCtx(t, hubLimitsCtx(30, 300, "3h"), project, nil)
 	wantLimitEnv(t, "restart after hub change", rc, "5", "7", "3h")
 	wantPersistedLimits(t, "after restart", project, 5, 7, "")
+}
+
+// An explicit "no limit" (a count limit of 0) is the agent's own value
+// (ptone/scion#5605): it beats the template's limit, the hub default and the
+// settings default, sets no SCION_MAX_* env var on any start, and is
+// persisted as 0, so a restart without the inline config keeps it.
+func TestStart_UnlimitedCountBeatsTemplateAndDefaults(t *testing.T) {
+	project, settingsPath := envFixture(t, envSettingsV1)
+	mustWrite(t, globalTemplatePath(project), `{"default_harness_config": "test-harness", "max_turns": 5, "max_model_calls": 6}`)
+	mustWrite(t, settingsPath, envSettingsV1.yaml()+"default_max_turns: 9\ndefault_max_model_calls: 99\n")
+
+	inline := &api.ScionConfig{MaxTurns: api.IntPtr(0), MaxModelCalls: api.IntPtr(0)}
+	rc := startEnvCtx(t, hubLimitsCtx(20, 200, ""), project, func(o *api.StartOptions) { o.InlineConfig = inline })
+	wantLimitEnv(t, "first start", rc, "", "", "")
+	cfg, raw := persistedEnvAgentConfig(t, project)
+	if !api.IsUnlimitedCount(cfg.MaxTurns) || !api.IsUnlimitedCount(cfg.MaxModelCalls) {
+		t.Fatalf("persisted limits = %s/%s, want 0/0: %s", api.FormatCountLimit(cfg.MaxTurns), api.FormatCountLimit(cfg.MaxModelCalls), raw)
+	}
+
+	rc = startEnvCtx(t, hubLimitsCtx(30, 300, ""), project, nil)
+	wantLimitEnv(t, "restart", rc, "", "", "")
+}
+
+// A persisted explicit "no limit" from an earlier start is kept when a later
+// start's inline config leaves the limit unset, and replaced when it sets a
+// value.
+func TestStart_PersistedUnlimitedOverlay(t *testing.T) {
+	project, _ := envFixture(t, envSettingsV1)
+	rc := startEnvCtx(t, hubLimitsCtx(20, 0, ""), project, func(o *api.StartOptions) {
+		o.InlineConfig = &api.ScionConfig{MaxTurns: api.IntPtr(0)}
+	})
+	wantLimitEnv(t, "unlimited", rc, "", "", "")
+	rc = startEnvCtx(t, hubLimitsCtx(20, 0, ""), project, func(o *api.StartOptions) { o.InlineConfig = &api.ScionConfig{} })
+	wantLimitEnv(t, "inline unset keeps unlimited", rc, "", "", "")
+	rc = startEnvCtx(t, hubLimitsCtx(20, 0, ""), project, func(o *api.StartOptions) {
+		o.InlineConfig = &api.ScionConfig{MaxTurns: api.IntPtr(4)}
+	})
+	wantLimitEnv(t, "inline value replaces unlimited", rc, "4", "", "")
 }
 
 // With no hub default and no settings default, no limit is set and nothing
@@ -145,7 +194,7 @@ func TestStart_SettingsDefaultLimitsPerStartBelowHub(t *testing.T) {
 // without being persisted, so a later hub change still reaches the agent.
 func TestStart_ClearedLimitNotRepinnedToHubDefault(t *testing.T) {
 	project, _ := envFixture(t, envSettingsV1)
-	inline := &api.ScionConfig{MaxTurns: 5}
+	inline := &api.ScionConfig{MaxTurns: api.IntPtr(5)}
 	rc := startEnvCtx(t, hubLimitsCtx(20, 0, ""), project, func(o *api.StartOptions) { o.InlineConfig = inline })
 	wantLimitEnv(t, "explicit", rc, "5", "", "")
 	wantPersistedLimits(t, "explicit", project, 5, 0, "")
@@ -231,7 +280,7 @@ func TestProvision_HarnessAuthRewriteDoesNotPersistDefaultLimits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
-	if cfg == nil || cfg.MaxTurns != 10 || cfg.MaxModelCalls != 100 || cfg.MaxDuration != "1h" {
+	if cfg == nil || !api.IntPtrEqual(cfg.MaxTurns, api.IntPtr(10)) || !api.IntPtrEqual(cfg.MaxModelCalls, api.IntPtr(100)) || cfg.MaxDuration != "1h" {
 		t.Errorf("returned config = %+v, want the effective limits 10/100/1h", cfg)
 	}
 	persisted, raw := persistedEnvAgentConfig(t, project)
@@ -250,7 +299,7 @@ func TestStart_LegacyPersistedLimitsKeepApplying(t *testing.T) {
 
 	cfgPath := filepath.Join(project, "agents", "env-agent", "scion-agent.json")
 	cfg, _ := persistedEnvAgentConfig(t, project)
-	cfg.MaxTurns = 50
+	cfg.MaxTurns = api.IntPtr(50)
 	data, _ := json.Marshal(cfg)
 	mustWrite(t, cfgPath, string(data))
 
@@ -258,9 +307,9 @@ func TestStart_LegacyPersistedLimitsKeepApplying(t *testing.T) {
 }
 
 func TestApplyDefaultLimits(t *testing.T) {
-	cfg := &api.ScionConfig{MaxTurns: 3}
+	cfg := &api.ScionConfig{MaxTurns: api.IntPtr(3)}
 	applyDefaultLimits(hubLimitsCtx(20, 200, ""), cfg, nil)
-	if cfg.MaxTurns != 3 || cfg.MaxModelCalls != 200 || cfg.MaxDuration != "" {
+	if !api.IntPtrEqual(cfg.MaxTurns, api.IntPtr(3)) || !api.IntPtrEqual(cfg.MaxModelCalls, api.IntPtr(200)) || cfg.MaxDuration != "" {
 		t.Errorf("applyDefaultLimits = %+v, want own max_turns 3 kept and hub max_model_calls 200 filled", cfg)
 	}
 	applyDefaultLimits(context.Background(), nil, nil) // nil config is a no-op
@@ -278,7 +327,7 @@ func TestReadPersistedAgentLimits(t *testing.T) {
 		t.Fatal(err)
 	}
 	l, ok := readPersistedAgentLimits(dir)
-	if !ok || l != (agentLimits{MaxTurns: 4, MaxDuration: "4m"}) {
+	if !ok || !reflect.DeepEqual(l, agentLimits{MaxTurns: api.IntPtr(4), MaxDuration: "4m"}) {
 		t.Errorf("readPersistedAgentLimits = %+v, %v", l, ok)
 	}
 }

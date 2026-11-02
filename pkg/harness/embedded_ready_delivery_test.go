@@ -139,6 +139,7 @@ func TestEmbeddedHarnessConfigs_AgentPluginsCapability(t *testing.T) {
 		"antigravity": api.SupportNo,
 		"hermes":      api.SupportNo,
 		"opencode":    api.SupportNo,
+		"pi":          api.SupportNo,
 	}
 	for name, level := range want {
 		_, entry := loadEmbeddedEntry(t, name)

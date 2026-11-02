@@ -483,7 +483,7 @@ func TestAttachmentArtifacts_RegisteredDefaultOff(t *testing.T) {
 
 // TestAsyncAgentLaunchExperimentRegistered pins hub.async_agent_launch: it
 // changes what the hub sends to brokers, so it is server-layer only (the
-// web form opts in unconditionally), and it ships off.
+// web form opts in unconditionally), and it ships on (ptone/scion#6640).
 func TestAsyncAgentLaunchExperimentRegistered(t *testing.T) {
 	e, ok := Default().Lookup(AsyncAgentLaunch)
 	if !ok {
@@ -492,8 +492,8 @@ func TestAsyncAgentLaunchExperimentRegistered(t *testing.T) {
 	if AsyncAgentLaunch != "hub.async_agent_launch" {
 		t.Fatalf("frozen name changed: %q", AsyncAgentLaunch)
 	}
-	if e.Default {
-		t.Fatal("async agent launch must default to off")
+	if !e.Default {
+		t.Fatal("async agent launch must default to on")
 	}
 	if !e.HasLayer(LayerServer) || e.HasLayer(LayerWeb) {
 		t.Fatalf("must be a server-layer (only) experiment, got %v", e.Layers)

@@ -63,7 +63,16 @@ func RedactGitConfigSecrets(raw []byte) (out []byte, stripped []string, err erro
 	if err != nil {
 		return nil, nil, err
 	}
-	kept := make([]gitConfigVar, 0, len(vars))
+	kept, stripped := redactGitConfigVars(vars)
+	return serializeGitConfig(kept), stripped, nil
+}
+
+// redactGitConfigVars applies RedactGitConfigSecrets' key policy to vars that
+// are already parsed and returns the variables to keep, with userinfo scrubbed,
+// together with the redacted names of the keys it changed or dropped. It reads
+// no file and runs no git; vars itself is not modified.
+func redactGitConfigVars(vars []gitConfigVar) (kept []gitConfigVar, stripped []string) {
+	kept = make([]gitConfigVar, 0, len(vars))
 	seen := map[string]struct{}{}
 	note := func(key string) {
 		if _, ok := seen[key]; !ok {
@@ -98,8 +107,10 @@ func RedactGitConfigSecrets(raw []byte) (out []byte, stripped []string, err erro
 			}
 		}
 		// includeIf "hasconfig:remote.*.url:<url>" — sanitize the <url> after the
-		// prefix; drop the key if that would drop.
-		if v.Section == "includeif" && v.HasSubsection && strings.HasPrefix(v.Subsection, hasConfigURLPrefix) {
+		// prefix; drop the key if that would drop. A rewrite keeps the prefix
+		// bytes as written. The prefix is matched case-insensitively on purpose
+		// (see hasConfigURLPrefix); git itself matches it case-sensitively.
+		if v.Section == "includeif" && v.HasSubsection && hasPrefixFold(v.Subsection, hasConfigURLPrefix) {
 			clean, changed, drop := sanitizeURLUserinfo(v.Subsection[len(hasConfigURLPrefix):])
 			if drop {
 				note(notedKeyName(v))
@@ -107,7 +118,7 @@ func RedactGitConfigSecrets(raw []byte) (out []byte, stripped []string, err erro
 			}
 			if changed {
 				note(notedKeyName(v))
-				v.Subsection = hasConfigURLPrefix + clean
+				v.Subsection = v.Subsection[:len(hasConfigURLPrefix)] + clean
 			}
 		}
 		// Userinfo in a url.<base>.*, http.<base>.* or lfs.<base>.* subsection (the
@@ -126,7 +137,7 @@ func RedactGitConfigSecrets(raw []byte) (out []byte, stripped []string, err erro
 		}
 		kept = append(kept, v)
 	}
-	return serializeGitConfig(kept), stripped, nil
+	return kept, stripped
 }
 
 // StripGitConfigKeys re-serialises raw with every variable for which drop
@@ -347,37 +358,22 @@ func dropSchemelessProxyUserinfo(s string) bool {
 }
 
 // hasConfigURLPrefix is the includeIf condition prefix whose remainder is a URL
-// that may carry userinfo. It is shared by the redaction branch and notedKeyName so
-// both strip the same prefix before sanitizing the <url>.
+// that may carry userinfo. It is shared by the redaction branch and
+// safeSubsectionLabel. git matches the includeIf hasconfig prefix
+// case-sensitively; we match case-insensitively on purpose, which can only
+// over-redact, and every includeif key is refused by the policy anyway.
 const hasConfigURLPrefix = "hasconfig:remote.*.url:"
 
-// notedKeyName returns a key name safe to record in the stripped list: a
-// subsection that carries userinfo is never included verbatim. The subsection is
-// run through sanitizeURLUserinfo — its cleaned form if that changed it,
-// "<redacted>" if it would be dropped. Any credential.<url> subsection is always
-// "<redacted>"; for an includeIf "hasconfig:remote.*.url:<url>" subsection only the
-// <url> after the prefix can carry userinfo, so the name is redacted when sanitizing
-// that <url> would change or drop it.
+// notedKeyName returns a key name safe to record or print: the subsection is
+// replaced by safeSubsectionLabel (a URL by its scheme and host only, a plain
+// name unchanged, credential.<url> and anything unclassifiable by
+// "<redacted>"). It names keys in the stripped list and in refusals; it never
+// rewrites config content kept for git.
 func notedKeyName(v gitConfigVar) string {
 	if !v.HasSubsection {
 		return v.Key()
 	}
-	sub := v.Subsection
-	switch {
-	case v.Section == "credential":
-		sub = "<redacted>"
-	case v.Section == "includeif" && strings.HasPrefix(v.Subsection, hasConfigURLPrefix):
-		if _, changed, drop := sanitizeURLUserinfo(v.Subsection[len(hasConfigURLPrefix):]); changed || drop {
-			sub = "<redacted>"
-		}
-	default:
-		if clean, changed, drop := sanitizeURLUserinfo(v.Subsection); drop {
-			sub = "<redacted>"
-		} else if changed {
-			sub = clean
-		}
-	}
-	return v.Section + "." + sub + "." + v.Name
+	return v.Section + "." + safeSubsectionLabel(v.Section, v.Subsection) + "." + v.Name
 }
 
 // hasUserinfoBeforePath reports whether s has an "@" before the first "/" of its

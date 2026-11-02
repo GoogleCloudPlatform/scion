@@ -86,7 +86,7 @@ func TestBrokerEnvelope_T5_ProductionConstructor(t *testing.T) {
 	require.NotEmpty(t, successID)
 
 	member := newHubMemberUser(t, s, "t5-register-member")
-	regRec := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: "t5-register-broker"})
+	regRec := doRequestAsUserLoopback(t, srv, member, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: "t5-register-broker"})
 	require.Equal(t, http.StatusCreated, regRec.Code, regRec.Body.String())
 	regID := regRec.Header().Get("X-Request-ID")
 	require.NotEmpty(t, regID)
@@ -118,7 +118,7 @@ func TestBrokerEnvelope_T5_ProductionConstructor(t *testing.T) {
 	assert.Equal(t, regID, reg[0]["correlation_id"])
 	assert.Equal(t, map[string]any{"kind": "user", "id": member.ID}, auditGroup(t, reg[0], "principal"))
 	assert.Equal(t, map[string]any{"kind": "runtime_broker", "id": resp.BrokerID}, auditGroup(t, reg[0], "resource"))
-	assert.Equal(t, map[string]any{"operation": "register", "source_ip": "192.0.2.1"}, auditGroup(t, reg[0], "payload"))
+	assert.Equal(t, map[string]any{"operation": "register", "source_ip": "127.0.0.1"}, auditGroup(t, reg[0], "payload"))
 	assertSessionCredential(t, reg[0])
 	require.NotEmpty(t, resp.JoinToken)
 	assert.NotContains(t, fmt.Sprint(capture.records()), resp.JoinToken, "the join token never reaches an audit record")
@@ -158,7 +158,7 @@ func TestBrokerEnvelope_T6_StatusUnchangedWithWriterBlockedAndFull(t *testing.T)
 		assert.Contains(t, rec.Body.String(), "missing X-Scion-Timestamp header", "body unchanged while full")
 	}
 	member := newHubMemberUser(t, s, "t6-register-member")
-	regRec := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: "t6-register-broker"})
+	regRec := doRequestAsUserLoopback(t, srv, member, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: "t6-register-broker"})
 	require.Equal(t, http.StatusCreated, regRec.Code, "registration is not blocked by a full audit writer: %s", regRec.Body.String())
 
 	after := srv.auditWriter.Snapshot()

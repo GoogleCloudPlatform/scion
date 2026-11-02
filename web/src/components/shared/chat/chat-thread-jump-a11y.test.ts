@@ -19,7 +19,7 @@
  * message, and a popup menu opened while a jump is still settling.
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, onTestFinished, vi } from 'vitest';
 
 const fakeStateManager = new (class extends EventTarget {
   currentScope = null;
@@ -300,28 +300,46 @@ describe('scion-chat-thread popup menu while the thread scrolls', () => {
 });
 
 describe('scion-chat-thread message menu keyboard contract', () => {
-  it('opens as a named menu with focus on its first item; Escape restores the opener', async () => {
-    const el = await mount();
-    const opener = document.createElement('button');
-    document.body.appendChild(opener);
-    opener.focus();
-    msgEl(el, 'm2').dispatchEvent(
-      new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 5, clientY: 5 })
-    );
-    await el.updateComplete;
-    await el.updateComplete;
-    const menu = el.shadowRoot!.querySelector<HTMLElement>('[role="menu"]')!;
-    expect(menu.getAttribute('aria-label')).toMatch(/^Message actions/);
-    const items = [...menu.querySelectorAll('[role="menuitem"], [role="menuitemcheckbox"]')];
-    expect(items.length).toBeGreaterThan(1);
-    expect(el.shadowRoot!.activeElement).toBe(items[0]);
-    menu.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
-    expect(el.shadowRoot!.activeElement).toBe(items[1]);
-    menu.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-    await el.updateComplete;
-    expect((el as unknown as Internals).contextMenuMessage).toBeNull();
-    expect(document.activeElement).toBe(opener);
-  });
+  it.each([
+    { stars: false, returnsTo: 'the focused opener' },
+    { stars: true, returnsTo: "the message's More actions button" },
+  ])(
+    'opens as a named menu with focus on its first item; Escape returns focus to $returnsTo (stars $stars)',
+    async ({ stars }) => {
+      (window as unknown as { __SCION_FEATURES__?: Record<string, boolean> }).__SCION_FEATURES__ = {
+        'web.chat_starred_messages': stars,
+      };
+      onTestFinished(() => {
+        delete (window as unknown as { __SCION_FEATURES__?: unknown }).__SCION_FEATURES__;
+      });
+      const el = await mount();
+      const opener = document.createElement('button');
+      document.body.appendChild(opener);
+      opener.focus();
+      msgEl(el, 'm2').dispatchEvent(
+        new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 5, clientY: 5 })
+      );
+      await el.updateComplete;
+      await el.updateComplete;
+      const menu = el.shadowRoot!.querySelector<HTMLElement>('[role="menu"]')!;
+      expect(menu.getAttribute('aria-label')).toMatch(/^Message actions/);
+      const items = [...menu.querySelectorAll('[role="menuitem"], [role="menuitemcheckbox"]')];
+      expect(items.length).toBeGreaterThan(1);
+      expect(el.shadowRoot!.activeElement).toBe(items[0]);
+      menu.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+      expect(el.shadowRoot!.activeElement).toBe(items[1]);
+      menu.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await el.updateComplete;
+      expect((el as unknown as Internals).contextMenuMessage).toBeNull();
+      if (stars) {
+        const row = msgEl(el, 'm2') as HTMLElement & { actionsButton: HTMLButtonElement | null };
+        expect(row.actionsButton).not.toBeNull();
+        expect(row.shadowRoot!.activeElement).toBe(row.actionsButton);
+      } else {
+        expect(document.activeElement).toBe(opener);
+      }
+    }
+  );
 
   it('a click on the overlay closes without pulling focus back', async () => {
     const el = await mount();
@@ -593,7 +611,7 @@ describe('scion-chat-thread message list tab stop (More actions)', () => {
     expect(arrow.defaultPrevented).toBe(false);
   });
 
-  it('a headerless starred row marks its bubble so the button sits past the gutter star', async () => {
+  it('a headerless starred row keeps its star in the gutter and the button inside the bubble', async () => {
     setFlag(true);
     const el = await mount();
     await settled(el);
@@ -601,11 +619,12 @@ describe('scion-chat-thread message list tab stop (More actions)', () => {
     row.starred = true;
     await row.updateComplete;
     const bubble = row.shadowRoot!.querySelector('.bubble')!;
-    expect(bubble.classList.contains('has-star-meta')).toBe(true);
-    expect(bubble.querySelector('.star-meta .star-indicator')).not.toBeNull();
-    expect(bubble.querySelector('.msg-actions')).not.toBeNull();
+    const star = bubble.querySelector('.star-meta .star-indicator');
+    expect(star).not.toBeNull();
+    expect(star!.closest('.bubble-content')).toBeNull();
+    expect(row.actionsButton!.parentElement!.classList.contains('bubble-content')).toBe(true);
     row.starred = false;
     await row.updateComplete;
-    expect(bubble.classList.contains('has-star-meta')).toBe(false);
+    expect(bubble.querySelector('.star-meta')).toBeNull();
   });
 });

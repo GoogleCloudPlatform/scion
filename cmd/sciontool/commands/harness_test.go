@@ -121,6 +121,98 @@ func TestRunHarnessProvision_RejectsManifestWithEscapingPaths(t *testing.T) {
 	}
 }
 
+func TestValidateManifestPaths_SeparatorBoundary(t *testing.T) {
+	home := "/home/agent"
+	bundleRoot := "/home/agent/.scion/harness"
+	extraRoot := "/run/scion/mem/outputs"
+
+	tests := []struct {
+		name    string
+		mutate  func(m *containerProvisionManifest)
+		extra   []string // extra roots; nil means {extraRoot}
+		wantErr bool
+	}{
+		{
+			name: "sibling home directory prefix escape",
+			mutate: func(m *containerProvisionManifest) {
+				m.Inputs["auth_candidates"] = "/home/agent_victim/confidential.json"
+			},
+			wantErr: true,
+		},
+		{
+			name: "sibling bundle directory prefix escape",
+			mutate: func(m *containerProvisionManifest) {
+				m.HarnessBundleDir = "/home/agent_victim/.scion/harness"
+			},
+			wantErr: true,
+		},
+		{
+			name: "sibling extraRoot prefix escape",
+			mutate: func(m *containerProvisionManifest) {
+				m.Outputs.Env = "/run/scion/mem/outputs_other/env.json"
+			},
+			wantErr: true,
+		},
+		{
+			name: "valid nested paths",
+			mutate: func(m *containerProvisionManifest) {
+				m.Inputs["auth_candidates"] = "/home/agent/auth.json"
+				m.Outputs.Env = "/run/scion/mem/outputs/env.json"
+				m.Outputs.ResolvedAuth = "/home/agent/.scion/harness/outputs/auth.json"
+			},
+			wantErr: false,
+		},
+		{
+			name: "exact home and extra roots",
+			mutate: func(m *containerProvisionManifest) {
+				m.Inputs["auth_candidates"] = home
+				m.Outputs.Env = extraRoot
+			},
+			wantErr: false,
+		},
+		{
+			name: "dot-dot-prefixed name directly under root is inside",
+			mutate: func(m *containerProvisionManifest) {
+				m.Inputs["auth_candidates"] = "/home/agent/..foo/auth.json"
+			},
+			wantErr: false,
+		},
+		{
+			name: "empty extra root does not accept outside paths",
+			mutate: func(m *containerProvisionManifest) {
+				m.Outputs.Env = "/etc/outside/env.json"
+			},
+			extra:   []string{""},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := &containerProvisionManifest{
+				HarnessBundleDir: bundleRoot,
+				Inputs:           map[string]string{},
+				Outputs: containerOutputs{
+					Env:          filepath.Join(bundleRoot, "outputs", "env.json"),
+					ResolvedAuth: filepath.Join(bundleRoot, "outputs", "resolved-auth.json"),
+				},
+			}
+			tt.mutate(m)
+			extra := tt.extra
+			if extra == nil {
+				extra = []string{extraRoot}
+			}
+			err := validateManifestPaths(m, bundleRoot, home, extra...)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validateManifestPaths() error = %v, wantErr = %v", err, tt.wantErr)
+			}
+			if tt.wantErr && !strings.Contains(err.Error(), "escapes allowed roots") {
+				t.Errorf("expected 'escapes allowed roots' in error, got: %v", err)
+			}
+		})
+	}
+}
+
 func TestRunHarnessProvision_TimesOut(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

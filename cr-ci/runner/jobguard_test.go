@@ -509,7 +509,7 @@ func TestEntrypointTestOverridesNeedTestMode(t *testing.T) {
 				"ignoring CR_JOB_GUARD_HOOK: test overrides take effect only in test mode",
 				"ignoring CR_JOB_GUARD_SHA_FILE",
 				"ignoring CR_JOB_GUARD_OWNER_UID",
-				"ignoring CR_SCRATCH_DIR",
+				"ignoring CR_MOUNTINFO",
 				"job guard: ",
 			} {
 				if !strings.Contains(res.stderr, want) {

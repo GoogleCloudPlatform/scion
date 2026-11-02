@@ -46,18 +46,29 @@ vi.mock('../shared/confirm-dialog.js', () => ({
     return Promise.resolve(confirm.answer);
   },
 }));
-/** The block count: real, or held until released (to act while a size is pending). */
-const blocks = vi.hoisted(() => ({ defer: false, pending: [] as (() => void)[] }));
+/**
+ * The block count: real, or held until released (to act while a size is
+ * pending). A text in `counts` counts as the number given there, so a test
+ * can be over the block ceiling without lexing 10,000 blocks (the real
+ * count at the limits is pinned in artifact-detail-review-size.test.ts).
+ */
+const blocks = vi.hoisted(() => ({
+  defer: false,
+  pending: [] as (() => void)[],
+  counts: new Map<string, number>(),
+}));
 vi.mock('../../utils/markdown-blocks.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../../utils/markdown-blocks.js')>();
+  const count = (md: string): Promise<number> => {
+    const n = blocks.counts.get(md);
+    return n === undefined ? real.countTopLevelBlocks(md) : Promise.resolve(n);
+  };
   return {
     countTopLevelBlocks: (md: string): Promise<number> =>
       blocks.defer
         ? // Counted now, handed over when released.
-          real
-            .countTopLevelBlocks(md)
-            .then((n) => new Promise<number>((r) => blocks.pending.push(() => r(n))))
-        : real.countTopLevelBlocks(md),
+          count(md).then((n) => new Promise<number>((r) => blocks.pending.push(() => r(n))))
+        : count(md),
   };
 });
 vi.mock('../artifact-review/review-editor-loader.js', () => ({
@@ -80,6 +91,8 @@ class FakeReviewEditor extends HTMLElement {
   /** flush() reports that the document cannot be written. */
   unwritable = false;
   comments = 0;
+  /** Height of the sticky block, as the page passes it. */
+  scrollInset = 0;
   /** hasOwnMarks() answer. */
   own = false;
   hasOwnMarks(): boolean {
@@ -209,6 +222,13 @@ async function chooseView(
   await settle(el);
 }
 
+/** A short text that counts as one block over the graphical view's ceiling. */
+function overBlockCeiling(): string {
+  const md = 'p\n\n'.repeat(3);
+  blocks.counts.set(md, MAX_GRAPHICAL_BLOCKS + 1);
+  return md;
+}
+
 describe('artifact page: graphical review editor experiment', () => {
   beforeAll(async () => {
     const hd = (
@@ -229,6 +249,7 @@ describe('artifact page: graphical review editor experiment', () => {
     confirm.defer = false;
     blocks.defer = false;
     blocks.pending.length = 0;
+    blocks.counts.clear();
   });
 
   afterEach(() => {
@@ -246,6 +267,7 @@ describe('artifact page: graphical review editor experiment', () => {
     expect($(el, '.review-panes scion-code-editor.review-editor')).not.toBeNull();
     expect($(el, 'scion-review-editor')).toBeNull();
     expect($(el, '.g-toolbar')).toBeNull();
+    expect($(el, '.g-sticky')).toBeNull();
     expect($(el, 'sl-badge.reviewing')).toBeNull();
     expect(loader.load).not.toHaveBeenCalled();
     expect(loader.preload).not.toHaveBeenCalled();
@@ -380,7 +402,7 @@ describe('artifact page: graphical review editor experiment', () => {
     await startReview(el);
     expect(loader.load).not.toHaveBeenCalled();
     expect($(el, '.hint-strip')!.textContent).toContain('This document is large');
-  });
+  }, 30_000);
 
   it('opens a document at the limits in the graphical view', async () => {
     const edge = 'a'.repeat(LARGE_REVIEW_BYTES - 1) + '\n';
@@ -535,7 +557,7 @@ describe('artifact page: graphical review editor experiment', () => {
     mockFetch();
     const el = await mount(true);
     await startReview(el);
-    const many = 'p\n\n'.repeat(MAX_GRAPHICAL_BLOCKS + 1);
+    const many = overBlockCeiling();
     expect(new TextEncoder().encode(many).length).toBeLessThan(LARGE_REVIEW_BYTES);
     await typeSource(el, many);
     // Typing pauses look at bytes only: the toggle stays enabled.
@@ -698,11 +720,12 @@ describe('artifact page: graphical review editor experiment', () => {
     mockFetch();
     const el = await mount(true);
     await startReview(el);
-    const many = 'p\n\n'.repeat(MAX_GRAPHICAL_BLOCKS + 1);
+    const many = overBlockCeiling();
     await typeSource(el, many);
     await chooseView(el, 'graphical');
     expect(graphicalButton(el).hasAttribute('disabled')).toBe(true);
     // Still over the block ceiling (few bytes): the pause keeps it.
+    blocks.counts.set(many + 'q\n', MAX_GRAPHICAL_BLOCKS + 2);
     await typeSource(el, many + 'q\n');
     await previewPause();
     await settle(el);
@@ -854,7 +877,7 @@ describe('artifact page: graphical review editor experiment', () => {
     editor.next = 'We {++really ++}ship in Q3.\n';
     editor.dispatchEvent(
       new CustomEvent('review-change', {
-        detail: { text: editor.next },
+        detail: { text: editor.next, blur: false },
         bubbles: true,
         composed: true,
       })
@@ -915,7 +938,7 @@ describe('artifact page: graphical review editor experiment', () => {
     expect(save().hasAttribute('disabled')).toBe(true);
     editor.dispatchEvent(
       new CustomEvent('review-change', {
-        detail: { text: 'We {++really ++}ship in Q3.\n' },
+        detail: { text: 'We {++really ++}ship in Q3.\n', blur: false },
         bubbles: true,
         composed: true,
       })
@@ -940,6 +963,37 @@ describe('artifact page: graphical review editor experiment', () => {
     expect($(el, '.g-work scion-code-editor.review-editor')).not.toBeNull();
   });
 
+  it('keeps the hint on a review-change sent by focus leaving the editor, and takes its text (ptone/scion#6952)', async () => {
+    mockFetch();
+    const el = await mount(true);
+    await startReview(el);
+    const editor = $<FakeReviewEditor>(el, 'scion-review-editor')!;
+    editor.dispatchEvent(
+      new CustomEvent('review-hint', { detail: { kind: 'code' }, bubbles: true, composed: true })
+    );
+    await settle(el);
+    expect($(el, '.hint-strip')!.textContent).toContain("Code blocks can't take suggestions.");
+    const save = (): HTMLElement => byText(el, '.edit-footer sl-button', 'Save review')!;
+    expect(save().hasAttribute('disabled')).toBe(true);
+    // The press of a toolbar button blurs the editor, which sends the text:
+    // the strip, and with it the button under the pointer, stays in place.
+    editor.dispatchEvent(
+      new CustomEvent('review-change', {
+        detail: { text: 'We {++really ++}ship in Q3.\n', blur: true },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await settle(el);
+    expect($(el, '.hint-strip')).not.toBeNull();
+    expect($(el, '.hint-strip')!.textContent).toContain("Code blocks can't take suggestions.");
+    expect(save().hasAttribute('disabled')).toBe(false);
+    // The switch the press was for still closes it.
+    await chooseView(el, 'source');
+    expect($(el, '.g-work scion-code-editor.review-editor')).not.toBeNull();
+    expect($(el, '.hint-strip')).toBeNull();
+  });
+
   it('keeps one live region mounted, and the earlier-review hint has no Source pointer', async () => {
     mockFetch();
     const el = await mount(true);
@@ -959,6 +1013,73 @@ describe('artifact page: graphical review editor experiment', () => {
     expect(strip.textContent).toContain('This suggestion is from an earlier review.');
     expect(strip.textContent).toContain('You can comment on it.');
     expect(byText(el, '.hint-strip sl-button', 'Open Source view')).toBeUndefined();
+  });
+
+  it('pins the review tools and the hint strip in one sticky block, with one toolbar', async () => {
+    mockFetch();
+    const el = await mount(true);
+    await startReview(el);
+    const sticky = $(el, '.g-sticky')!;
+    expect(sticky).not.toBeNull();
+    expect(all(el, '[role="toolbar"]')).toHaveLength(1);
+    expect(sticky.querySelector('.g-toolbar[role="toolbar"]')).not.toBeNull();
+    // The document scrolls under the block, not inside it.
+    expect(sticky.querySelector('scion-review-editor')).toBeNull();
+    const editor = $<FakeReviewEditor>(el, 'scion-review-editor')!;
+    editor.dispatchEvent(
+      new CustomEvent('review-hint', { detail: { kind: 'moved' }, bubbles: true, composed: true })
+    );
+    await settle(el);
+    expect(sticky.querySelector('.hint-strip')?.textContent).toContain(
+      'This edit would move an earlier comment.'
+    );
+    // The pinned Comment button is the toolbar's own: the same comment action.
+    const comment = Array.from(sticky.querySelectorAll<HTMLElement>('sl-button.comment'));
+    expect(comment).toHaveLength(1);
+    comment[0].click();
+    expect(editor.comments).toBe(1);
+  });
+
+  it('gives the editor the sticky block height as it changes', async () => {
+    type Entry = { target: Element };
+    const observers: { cb: (e: Entry[]) => void; targets: Element[]; live: boolean }[] = [];
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        private o: (typeof observers)[number];
+        constructor(cb: (e: Entry[]) => void) {
+          this.o = { cb, targets: [], live: true };
+          observers.push(this.o);
+        }
+        observe(t: Element): void {
+          this.o.targets.push(t);
+          this.o.live = true;
+        }
+        unobserve(): void {}
+        disconnect(): void {
+          this.o.targets = [];
+          this.o.live = false;
+        }
+      }
+    );
+    mockFetch();
+    const el = await mount(true);
+    await startReview(el);
+    const sticky = $(el, '.g-sticky')!;
+    const watching = observers.filter((o) => o.live && o.targets.includes(sticky));
+    expect(watching).toHaveLength(1);
+    const resize = async (height: number): Promise<void> => {
+      vi.spyOn(sticky, 'getBoundingClientRect').mockReturnValue({ height } as DOMRect);
+      watching[0].cb([{ target: sticky }]);
+      await settle(el, 3);
+    };
+    await resize(52);
+    expect($<FakeReviewEditor>(el, 'scion-review-editor')!.scrollInset).toBe(52);
+    // The toolbar wraps or a hint strip opens: the editor gets the new height.
+    await resize(131);
+    expect($<FakeReviewEditor>(el, 'scion-review-editor')!.scrollInset).toBe(131);
+    el.remove();
+    expect(observers.every((o) => !o.live)).toBe(true);
   });
 
   it('shows the moved-comment hint with Open Source view', async () => {
@@ -1037,7 +1158,7 @@ describe('artifact page: graphical review editor experiment', () => {
     const editor = $<FakeReviewEditor>(el, 'scion-review-editor')!;
     editor.dispatchEvent(
       new CustomEvent('review-change', {
-        detail: { text: 'We {++really ++}ship in Q3.\n' },
+        detail: { text: 'We {++really ++}ship in Q3.\n', blur: false },
         bubbles: true,
         composed: true,
       })

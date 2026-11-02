@@ -28,6 +28,13 @@ const (
 	// bound response_header_timeout.
 	PortProxyMinResponseHeaderTimeout = 5 * time.Second
 	PortProxyMaxResponseHeaderTimeout = 10 * time.Minute
+
+	// PortProxyDefaultViewTTL is the default lifetime of a page view link
+	// (server.hub.port_proxy.view_ttl, experiment hub.port_view).
+	PortProxyDefaultViewTTL = 2 * time.Hour
+	// PortProxyMinViewTTL and PortProxyMaxViewTTL bound view_ttl.
+	PortProxyMinViewTTL = 15 * time.Minute
+	PortProxyMaxViewTTL = 24 * time.Hour
 )
 
 // HubPortProxyConfig holds the agent port proxy settings of the hub server
@@ -39,10 +46,15 @@ type HubPortProxyConfig struct {
 	// ("" = PortProxyDefaultResponseHeaderTimeout). The body is not
 	// time-limited.
 	ResponseHeaderTimeout string `json:"responseHeaderTimeout,omitempty" yaml:"responseHeaderTimeout,omitempty" koanf:"responseHeaderTimeout"`
+	// ViewTTL is how long a page view link minted when a user opens an
+	// exposed port from the hub stays valid (experiment hub.port_view;
+	// "" = PortProxyDefaultViewTTL). Opening the port's link again mints
+	// a new one.
+	ViewTTL string `json:"viewTtl,omitempty" yaml:"viewTtl,omitempty" koanf:"viewTtl"`
 }
 
 // IsZero reports whether no port proxy setting is configured.
-func (c HubPortProxyConfig) IsZero() bool { return c.ResponseHeaderTimeout == "" }
+func (c HubPortProxyConfig) IsZero() bool { return c.ResponseHeaderTimeout == "" && c.ViewTTL == "" }
 
 // ResponseHeaderTimeoutDuration parses ResponseHeaderTimeout
 // ("" = PortProxyDefaultResponseHeaderTimeout). Zero is not accepted.
@@ -60,8 +72,27 @@ func (c HubPortProxyConfig) ResponseHeaderTimeoutDuration() (time.Duration, erro
 	return d, nil
 }
 
+// ViewTTLDuration parses ViewTTL ("" = PortProxyDefaultViewTTL), which
+// must lie between PortProxyMinViewTTL and PortProxyMaxViewTTL.
+func (c HubPortProxyConfig) ViewTTLDuration() (time.Duration, error) {
+	if c.ViewTTL == "" {
+		return PortProxyDefaultViewTTL, nil
+	}
+	d, err := time.ParseDuration(c.ViewTTL)
+	if err != nil {
+		return 0, fmt.Errorf("invalid server.hub.port_proxy.view_ttl %q: %w", c.ViewTTL, err)
+	}
+	if d < PortProxyMinViewTTL || d > PortProxyMaxViewTTL {
+		return 0, fmt.Errorf("invalid server.hub.port_proxy.view_ttl %q: must be between %s and %s", c.ViewTTL, PortProxyMinViewTTL, PortProxyMaxViewTTL)
+	}
+	return d, nil
+}
+
 // Validate checks every port proxy setting.
 func (c HubPortProxyConfig) Validate() error {
-	_, err := c.ResponseHeaderTimeoutDuration()
+	if _, err := c.ResponseHeaderTimeoutDuration(); err != nil {
+		return err
+	}
+	_, err := c.ViewTTLDuration()
 	return err
 }

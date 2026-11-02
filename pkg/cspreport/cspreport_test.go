@@ -324,26 +324,33 @@ func TestRecordsPerRequestAreBounded(t *testing.T) {
 	}
 }
 
-func TestLimiterRefusalAnswers429(t *testing.T) {
+// TestLimiterRefusalAnswers204: a request the per-client budget refuses is
+// answered 204, writes no report record and is counted; the refusal shows
+// in one refusal summary record.
+func TestLimiterRefusalAnswers204(t *testing.T) {
 	var buf bytes.Buffer
 	allow := false
 	calls := 0
 	h := &Handler{
 		Log: recordingLog(&buf),
-		Allow: func(*http.Request) (bool, int) {
+		Allow: func(*http.Request) bool {
 			calls++
-			return allow, 7
+			return allow
 		},
 	}
 	rec := post(h, "application/reports+json", reportingAPIBody)
-	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("refused: status = %d, want 429", rec.Code)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("refused: status = %d, want 204", rec.Code)
 	}
-	if got := rec.Header().Get("Retry-After"); got != "7" {
-		t.Errorf("Retry-After = %q, want 7", got)
+	if got := rec.Header().Get("Retry-After"); got != "" {
+		t.Errorf("Retry-After = %q, want none", got)
 	}
-	if got := records(t, &buf); len(got) != 0 {
-		t.Fatalf("refused: %d records logged, want none", len(got))
+	got := records(t, &buf)
+	if len(got) != 1 || got[0]["msg"] != RefusedLogMessage || got[0]["refused_reports"] != float64(1) {
+		t.Fatalf("refused: records %v, want one %s record with refused_reports 1", got, RefusedLogMessage)
+	}
+	if c := h.Counts(); c.RefusedReports != 1 || c.RefusedRequests != 0 {
+		t.Errorf("counts = %+v, want one refused report", c)
 	}
 
 	// Positive control: the same request is logged once the limiter allows.
@@ -351,8 +358,8 @@ func TestLimiterRefusalAnswers429(t *testing.T) {
 	if rec := post(h, "application/reports+json", reportingAPIBody); rec.Code != http.StatusNoContent {
 		t.Fatalf("allowed: status = %d, want 204", rec.Code)
 	}
-	if got := records(t, &buf); len(got) != 1 {
-		t.Fatalf("allowed: %d records logged, want 1", len(got))
+	if got := records(t, &buf); len(got) != 1 || got[0]["msg"] != LogMessage {
+		t.Fatalf("allowed: records %v, want one %s record", got, LogMessage)
 	}
 	if calls != 2 {
 		t.Errorf("limiter consulted %d times, want 2", calls)
@@ -362,13 +369,13 @@ func TestLimiterRefusalAnswers429(t *testing.T) {
 // budget is a RecordLimiter with n tokens that counts how often it is asked.
 type budget struct{ left, asked int }
 
-func (b *budget) allow() (bool, int) {
+func (b *budget) allow() bool {
 	b.asked++
 	if b.left == 0 {
-		return false, 3
+		return false
 	}
 	b.left--
-	return true, 0
+	return true
 }
 
 // manyReports is a Reporting API body with n policy reports.
@@ -411,13 +418,16 @@ func TestRecordLimiterStopsMidRequest(t *testing.T) {
 		t.Fatalf("status = %d, want 204", rec.Code)
 	}
 	got := records(t, &buf)
-	if len(got) != 3 {
-		t.Fatalf("%d records written, want 3", len(got))
+	if len(got) != 4 {
+		t.Fatalf("%d records written, want 3 report records and a refusal summary", len(got))
 	}
-	for _, r := range got {
+	for _, r := range got[:3] {
 		if r["msg"] != LogMessage {
-			t.Fatalf("record %v, want only %s records", r, LogMessage)
+			t.Fatalf("record %v, want %s", r, LogMessage)
 		}
+	}
+	if r := got[3]; r["msg"] != RefusedLogMessage || r["refused_reports"] != float64(2) || r["refused_requests"] != float64(0) {
+		t.Fatalf("last record %v, want a %s record with refused_reports 2", r, RefusedLogMessage)
 	}
 
 	if b.asked != 4 {
@@ -425,29 +435,29 @@ func TestRecordLimiterStopsMidRequest(t *testing.T) {
 	}
 }
 
-// TestRecordLimiterRefusingFirstRecordAnswers429: no record can be written,
-// so the request is refused like an over-limit request.
-func TestRecordLimiterRefusingFirstRecordAnswers429(t *testing.T) {
+// TestRecordLimiterRefusingFirstRecordAnswers204: no record can be
+// written; the request is still answered 204, and the refusal is counted.
+func TestRecordLimiterRefusingFirstRecordAnswers204(t *testing.T) {
 	var buf bytes.Buffer
 	b := &budget{left: 0}
 	h := &Handler{Log: recordingLog(&buf), AllowRecord: b.allow}
 	rec := post(h, "application/reports+json", reportingAPIBody)
-	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("status = %d, want 429", rec.Code)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", rec.Code)
 	}
-	if got := rec.Header().Get("Retry-After"); got != "3" {
-		t.Errorf("Retry-After = %q, want 3", got)
+	if got := rec.Header().Get("Retry-After"); got != "" {
+		t.Errorf("Retry-After = %q, want none", got)
 	}
-	if got := records(t, &buf); len(got) != 0 {
-		t.Fatalf("%d records written, want none", len(got))
+	if got := records(t, &buf); len(got) != 1 || got[0]["msg"] != RefusedLogMessage {
+		t.Fatalf("records %v, want only a %s record", got, RefusedLogMessage)
 	}
 	// Positive control: with a token, the same report is written.
 	b.left = 1
 	if rec := post(h, "application/reports+json", reportingAPIBody); rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want 204", rec.Code)
 	}
-	if got := records(t, &buf); len(got) != 1 {
-		t.Fatalf("%d records written, want 1", len(got))
+	if got := records(t, &buf); len(got) != 1 || got[0]["msg"] != LogMessage {
+		t.Fatalf("records %v, want one %s record", got, LogMessage)
 	}
 }
 
@@ -476,8 +486,8 @@ func TestPackageStoresNothing(t *testing.T) {
 	allowed := map[string]bool{
 		"encoding/json": true, "errors": true, "io": true, "log/slog": true, "mime": true,
 		"net/http": true, "strconv": true, "strings": true, "unicode": true, "unicode/utf8": true,
-		// Dedupe keeps its counts in memory only.
-		"sync": true, "time": true,
+		// Dedupe and the refusal counts are kept in memory only.
+		"sync": true, "sync/atomic": true, "time": true,
 		// Summary records are logged without a request's context.
 		"context": true,
 	}

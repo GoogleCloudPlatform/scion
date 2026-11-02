@@ -148,13 +148,20 @@ const imageRegistryProvenanceKey = "image_registry_provenance"
 // changed in between (a broker heartbeat changes it at any time); the key is
 // never stored. Any other body is returned as it is.
 func dropImageRegistryProvenance(rawBody []byte) []byte {
+	return dropTopLevelMember(rawBody, imageRegistryProvenanceKey)
+}
+
+// dropTopLevelMember returns rawBody without its top-level member key
+// (matched as encoding/json matches names, foldJSONMemberName), or rawBody
+// itself when it has none or does not decode as an object.
+func dropTopLevelMember(rawBody []byte, key string) []byte {
 	dec := json.NewDecoder(bytes.NewReader(rawBody))
 	dec.UseNumber()
 	var top map[string]json.RawMessage
 	if err := dec.Decode(&top); err != nil || top == nil {
 		return rawBody
 	}
-	want := foldJSONMemberName(imageRegistryProvenanceKey)
+	want := foldJSONMemberName(key)
 	dropped := false
 	for name := range top {
 		if foldJSONMemberName(name) == want {

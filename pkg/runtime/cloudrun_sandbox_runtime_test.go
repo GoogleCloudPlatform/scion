@@ -1,3 +1,5 @@
+//go:build unix
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,7 +18,6 @@ package runtime
 
 import (
 	"context"
-	"embed"
 	"errors"
 	"os"
 	"path/filepath"
@@ -1016,35 +1017,6 @@ func TestP3a_EnvForBehaviourIdentity(t *testing.T) {
 // -----------------------------------------------------------------------
 // buildEntrypoint tests
 // -----------------------------------------------------------------------
-
-type mockHarness struct {
-	command []string
-	env     map[string]string
-}
-
-func (h *mockHarness) Name() string { return "mock" }
-func (h *mockHarness) AdvancedCapabilities() api.HarnessAdvancedCapabilities {
-	return api.HarnessAdvancedCapabilities{}
-}
-func (h *mockHarness) GetCommand(task string, resume bool, baseArgs []string) []string {
-	return h.command
-}
-func (h *mockHarness) GetEnv(agentName, agentHome, unixUsername string) map[string]string {
-	return h.env
-}
-func (h *mockHarness) DefaultConfigDir() string                                        { return "" }
-func (h *mockHarness) SkillsDir() string                                               { return "" }
-func (h *mockHarness) HasSystemPrompt(agentHome string) bool                           { return false }
-func (h *mockHarness) Provision(ctx context.Context, name, dir, home, ws string) error { return nil }
-func (h *mockHarness) GetInterruptKey() string                                         { return "C-c" }
-func (h *mockHarness) GetInterruptSequence() []string                                  { return nil }
-func (h *mockHarness) DeliverySpec() api.DeliverySpec                                  { return api.DeliverySpec{} }
-func (h *mockHarness) ReadySpec() api.ReadySpec                                        { return api.ReadySpec{} }
-func (h *mockHarness) GetHarnessEmbedsFS() (embed.FS, string)                          { return embed.FS{}, "" }
-func (h *mockHarness) InjectAgentInstructions(agentHome string, content []byte) error  { return nil }
-func (h *mockHarness) InjectSystemPrompt(agentHome string, content []byte) error       { return nil }
-func (h *mockHarness) GetTelemetryEnv() map[string]string                              { return nil }
-func (h *mockHarness) ResolveAuth(auth api.AuthConfig) (*api.ResolvedAuth, error)      { return nil, nil }
 
 func TestBuildEntrypoint_WithHarness(t *testing.T) {
 	cfg := RunConfig{

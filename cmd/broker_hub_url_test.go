@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"errors"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -24,6 +25,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -86,6 +88,75 @@ func brokerHubURLRefused(t *testing.T, run func() error) {
 			return rerr
 		}
 		assert.NotContains(t, string(data), "s3cret", "%s holds the user info", path)
+		return nil
+	}))
+}
+
+// A broker registration sends the join token and receives the broker's HMAC
+// secret, so it is refused for a hub reached by plain http on a network
+// host, before any request and without saving anything.
+func TestBrokerJoin_PlaintextNonLoopbackHubRefused(t *testing.T) {
+	brokerHubPlaintextRefused(t, func() error {
+		t.Setenv(envBrokerJoinToken, "scion_join_abc")
+		brokerJoinBrokerID = "11111111-2222-3333-4444-555555555555"
+		return runBrokerJoin(brokerJoinCmd, nil)
+	})
+}
+
+func TestBrokerRegister_PlaintextNonLoopbackHubRefused(t *testing.T) {
+	brokerHubPlaintextRefused(t, func() error { return runBrokerRegister(brokerRegisterCmd, nil) })
+}
+
+func TestBrokerRegisterInstance_PlaintextNonLoopbackHubRefused(t *testing.T) {
+	brokerHubPlaintextRefused(t, func() error { return runBrokerRegisterInstance(brokerRegisterCmd, "inst") })
+}
+
+// The transport rule accepts the loopback http hubs a workstation uses.
+func TestCheckBrokerHubURL_LoopbackAndHTTPSAccepted(t *testing.T) {
+	for _, u := range []string{"http://127.0.0.1:8080", "http://localhost:8080", "https://hub.example.com"} {
+		assert.NoError(t, checkBrokerHubURL(u), u)
+	}
+	err := checkBrokerHubURL("http://hub.example.com")
+	assert.True(t, errors.Is(err, config.ErrPlaintextNonLoopback), "got %v", err)
+}
+
+// brokerHubPlaintextRefused runs a registration against http://hub.invalid
+// (a non-loopback host; .invalid never resolves, so a run that is not
+// refused fails fast instead of reaching a network) and checks that the
+// transport rule refuses it and nothing names that hub in the settings.
+func brokerHubPlaintextRefused(t *testing.T, run func() error) {
+	isolateJoinEnv(t)
+	origInstance := brokerRegisterInstance
+	t.Cleanup(func() { brokerRegisterInstance = origInstance })
+	brokerRegisterInstance = ""
+	if f := brokerRegisterCmd.Flags().Lookup("broker-name"); f != nil {
+		origChanged := f.Changed
+		t.Cleanup(func() { f.Changed = origChanged })
+		f.Changed = false
+	}
+	home, _ := brokerTestHome(t)
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	projectPath = setupSecretProject(t, home, srv.URL)
+	useHubForTest(t, "http://hub.invalid:8080")
+
+	err := run()
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, config.ErrPlaintextNonLoopback), "want the transport refusal, got %v", err)
+	assert.Zero(t, requests.Load(), "no request is sent")
+	require.NoError(t, filepath.WalkDir(home, func(path string, d fs.DirEntry, werr error) error {
+		if werr != nil || d.IsDir() {
+			return werr
+		}
+		data, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		assert.NotContains(t, string(data), "hub.invalid", "%s names the refused hub", path)
 		return nil
 	}))
 }

@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 360
+**Operations:** 370
 
 ## Table of Contents
 
@@ -16,7 +16,7 @@
 - [agent.hold.lift](#agentholdlift) — Lift the holds of a suspended agent whose owners are admitted to its project again (hub admin)
 - [agent.lifecycle.reincarnate](#agentlifecyclereincarnate) — Reincarnate an agent
 - [agent.read](#agentread) — Read a single agent's metadata by ID
-- [agent.list](#agentlist) — List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project
+- [agent.list](#agentlist) — List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project. An agent delegated credential is admitted on the hub form only: its scope is the authorizing user's list scope within the grant boundary, and each item is also decided for agent.read
 - [agent.update](#agentupdate) — Update agent configuration or metadata
 - [agent.update.pendingconfig.delete](#agentupdatependingconfigdelete) — Discard an agent's pending config edits (behind hub.agent_edit_held; 404 while it is off)
 - [agent.status.update](#agentstatusupdate) — Report an agent's status: the agent itself, or a user who may update the agent
@@ -214,10 +214,10 @@
 - [user.admin.suspend](#useradminsuspend) — Suspend or reactivate a user account (dispatched from PATCH /api/v1/users/{id} when status field is present). A token needs user:suspend on a hub boundary, checked on the hub-level user record. The caller's own status and activating an invited user are refused for every credential
 - [user.admin.invite](#useradmininvite) — Invite users to the platform (single or bulk) and manage invitation codes (list, create, read stats, read, revoke, delete). The invited record has status invited, the placeholder role member and no role binding or group membership; an invitation code names no role. A token needs user:invite on the hub boundary and the holder's live user.invite authority
 - [user.admin.provision](#useradminprovision) — Pre-register a user (status invited) through POST /api/v1/users; invitation-equivalent, shares the invite creation core; no role, no grants. A token needs user:invite on the hub boundary and the holder's live user.invite authority, checked at the hub user collection; the user_provision audit records the token as the credential. Refused for every caller on a hub running with dev authentication
-- [user.admin.promote](#useradminpromote) — Promote or demote a user's administrative level (dispatched from PATCH /api/v1/users/{id} when role field is present)
-- [user.admin.delete](#useradmindelete) — Delete a user account
-- [user.admin.deleteblockers](#useradmindeleteblockers) — List what blocks deleting a user (agents and active delegations), without deleting
-- [user.admin.deletion](#useradmindeletion) — Read the forced deletion of a user: its state and the outcome of each of the user's agents
+- [user.admin.promote](#useradminpromote) — Promote or demote a user's administrative level (dispatched from PATCH /api/v1/users/{id} when role field is present). A token needs user:promote on a hub boundary, checked on the hub-level user record. CanDelegate applies to every change that involves a super-admin binding, so a token never creates or removes one; the last super-admin, self-demotion, invited-user and binding-drift guards apply to every credential, and a token's own role is session-only
+- [user.admin.delete](#useradmindelete) — Delete a user account. A token needs user:delete on a hub boundary, checked on the hub-level user record, and is refused while the user holds a direct system-scope role binding of any lifecycle state (403 forbidden, details.reason system_role_binding_held; judged again in the transaction on the bindings the delete removes, 409 conflict with details.reason binding_state_drift), with or without force. The completion of a forced deletion a token requested applies the same rule
+- [user.admin.deleteblockers](#useradmindeleteblockers) — List what blocks deleting a user (agents and active delegations), without deleting. A token needs user:delete on a hub boundary, checked on the hub-level user record
+- [user.admin.deletion](#useradmindeletion) — Read the forced deletion of a user: its state and the outcome of each of the user's agents. A token needs user:delete on a hub boundary, checked on the hub-level user record
 - [group.read](#groupread) — Read group details
 - [group.list](#grouplist) — List groups. Each row is shown only when the caller may read it (group.read); a user access token needs group:read on a hub boundary, and a group with no project resolves to the hub
 - [group.create](#groupcreate) — Create a new group. A user access token needs group:create on a hub boundary; the target is the hub's group collection. Creating under a parent group runs the member-add delegation check on the parent
@@ -255,6 +255,7 @@
 - [hub.config.update](#hubconfigupdate) — Update server configuration sections. The route guard checks hub.config.read, so a token needs hub_config:read and hub_config:update, and writes configuration keys only
 - [hub.messaging.update](#hubmessagingupdate) — Read and update messaging configuration switches
 - [hub.profiling.update](#hubprofilingupdate) — Read and update the profiling switches (session only)
+- [hub.chatretention.update](#hubchatretentionupdate) — Read and update the chat message retention settings (session only)
 - [hub.experiments.update](#hubexperimentsupdate) — Read and update hub-wide experiment overrides
 - [hub.conduitgrantkeys.rotate](#hubconduitgrantkeysrotate) — Rotate the conduit grant signing key (kids and timestamps only in the response)
 - [hub.conduitgrantkeys.revoke](#hubconduitgrantkeysrevoke) — Revoke a conduit grant key at once (the kid only in the response)
@@ -333,6 +334,7 @@
 - [broker.delete](#brokerdelete) — Deregister a runtime broker: unlink it from every project, clear project defaults that name it, and remove its credentials. A user needs an interactive session and broker.delete on the broker
 - [broker.heartbeat](#brokerheartbeat) — Record a broker heartbeat: broker liveness and the state of the agents it runs. The broker sends its own; a user needs an interactive session and broker.update on the broker from a role binding (the owner relationship does not apply)
 - [broker.agent.launchreport](#brokeragentlaunchreport) — Record a broker's launch report for an agent it runs
+- [broker.agent.workspacedownload](#brokeragentworkspacedownload) — Issue signed download URLs for the uploaded workspace files of an agent the broker runs
 - [broker.messagefailures.report](#brokermessagefailuresreport) — Record buffered message delivery failures reported by a broker
 - [broker.attachment.redeem](#brokerattachmentredeem) — Redeem an attachment delivery capability (ptone/scion#4596): the broker the hub issued it to downloads one attachment, once, before it expires, to write it into the recipient agent's home
 - [broker.controlchannel.call](#brokercontrolchannelcall) — Carry a call between the hub and a connected broker over the control channel; each call runs under the operation that initiated it
@@ -340,12 +342,20 @@
 - [gcp.identity.delete](#gcpidentitydelete) — Delete a GCP service account binding
 - [gcp.identity.assign](#gcpidentityassign) — Assign a GCP service account to an agent
 - [gcp.identity.mint](#gcpidentitymint) — Mint a GCP access or identity token for the agent's assigned service account
-- [secret.read](#secretread) — Read project secrets or environment variables containing secrets
-- [secret.write](#secretwrite) — Create, update or delete secrets. At user scope, the default, the secrets are the caller's own and a federated caller is refused (requireProfileWriter)
+- [secret.read](#secretread) — Read project or broker secrets (scope=project or runtime_broker). User and hub scope are the session-only operations secret.user.read and secret.hub.read
+- [secret.write](#secretwrite) — Create, update or delete project or broker secrets (scope=project or runtime_broker). User and hub scope are the session-only operations secret.user.write and secret.hub.write
 - [gcp.identity.read](#gcpidentityread) — Read GCP service account details or list accounts. A project's list requires project.read on it (members, and agents of that project only); the hub-scoped list requires gcp_service_account.list at hub scope (hub members)
 - [gcp.identity.verify](#gcpidentityverify) — Verify a GCP service account's IAM configuration
-- [env.read](#envread) — Read project environment variables
-- [env.hub.list](#envhublist) — List hub-level environment variables (scope=hub), without secret entries
+- [env.read](#envread) — Read project or broker environment variables (scope=project or runtime_broker). User and hub scope are the session-only operations env.user.read, env.hub.read and env.hub.list
+- [env.hub.list](#envhublist) — List hub-level environment variables (scope=hub). Session only: an unscoped admin lists every entry, and a session holder of hub.env_vars.read lists them without secret entries; every user access token is refused
+- [env.user.read](#envuserread) — Read the caller's own user-level environment variables (scope=user, the default). A federated caller reads its own (retained prior behaviour)
+- [env.user.write](#envuserwrite) — Create, update or delete the caller's own user-level environment variables (scope=user, the default). A federated caller is refused (requireProfileWriter)
+- [secret.user.read](#secretuserread) — Read the caller's own user-level secrets (scope=user, the default). A federated caller reads its own (retained prior behaviour)
+- [secret.user.write](#secretuserwrite) — Create, update or delete the caller's own user-level secrets (scope=user, the default). A federated caller is refused (requireProfileWriter)
+- [env.hub.read](#envhubread) — Read one hub-level environment variable (scope=hub). Agents may read; a user must be an unscoped admin
+- [env.hub.write](#envhubwrite) — Create, update or delete hub-level environment variables (scope=hub). A user must be an unscoped admin
+- [secret.hub.read](#secrethubread) — Read hub-level secrets (scope=hub). Agents may read; a user must be an unscoped admin
+- [secret.hub.write](#secrethubwrite) — Create, update or delete hub-level secrets (scope=hub). A user must be an unscoped admin
 - [testidentity.create](#testidentitycreate) — Issue a short-lived synthetic member or viewer test identity and one access token for it (no refresh token, no cookie)
 - [testidentity.list](#testidentitylist) — List test identities: the caller's own, or every identity for an unscoped platform admin session
 - [testidentity.token.issue](#testidentitytokenissue) — Re-issue one access token for a live test identity, for its issuer or an unscoped platform admin session; an admin-kind identity's token is re-issued only through the admin-scope workload delegation that issued it (phase X4b)
@@ -731,7 +741,7 @@
 
 **Domain:** agent
 
-**Description:** List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project
+**Description:** List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project. An agent delegated credential is admitted on the hub form only: its scope is the authorizing user's list scope within the grant boundary, and each item is also decided for agent.read
 
 ### Entry Points
 
@@ -740,9 +750,9 @@
 | http_route | GET | `/api/v1/agents` |
 | http_route | GET | `/api/v1/projects/{id}/agents` |
 
-**Principals:** `user`, `agent`
+**Principals:** `user`, `agent`, `agent_delegated`
 
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `delegated_agent`
 
 **Bearer:** `admit` (target `list_scope`; boundaries `project`, `hub`)
 
@@ -761,7 +771,7 @@
 | no-broad-query-on-none | security | ScopeSetNone produces empty list without issuing any resource query | Yes |
 | slug-not-oracle | security | Project slug lookup for agent list filter must not distinguish unauthorized from nonexistent | Yes |
 
-**Denial Codes:** `forbidden`, `credential_insufficient`, `user_suspended`
+**Denial Codes:** `forbidden`, `credential_insufficient`, `user_suspended`, `credential_not_admitted`, `delegated_list_sort_unsupported`
 
 ### Tests
 
@@ -783,6 +793,8 @@
 - `pkg/hub:TestListCaveats_ProjectBoundaryRequiresListPermissionInCeiling`
 - `pkg/hub:TestProjectAgentListToken_RequiresAgentListOnTheProject`
 - `pkg/hub:TestListFilters_CannotEnlargeTokenResults`
+- `pkg/hub:TestAgentDelegatedAgentList_ExplicitScopeAcrossProjects`
+- `pkg/hub:TestAgentDelegatedAgentList_MixedItemsAndCounts`
 
 ---
 
@@ -8186,7 +8198,7 @@
 
 **Domain:** user.admin
 
-**Description:** Promote or demote a user's administrative level (dispatched from PATCH /api/v1/users/{id} when role field is present)
+**Description:** Promote or demote a user's administrative level (dispatched from PATCH /api/v1/users/{id} when role field is present). A token needs user:promote on a hub boundary, checked on the hub-level user record. CanDelegate applies to every change that involves a super-admin binding, so a token never creates or removes one; the last super-admin, self-demotion, invited-user and binding-drift guards apply to every credential, and a token's own role is session-only
 
 ### Entry Points
 
@@ -8196,9 +8208,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
 
-**Bearer:** `session_only` (reason `GOV_PENDING`)
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`; pinned by `TestUserRoleToken_PromotionToAdminDenied`)
 
 **Base Permission:** `user.promote`
 
@@ -8221,11 +8233,14 @@
 - **After Fields:** new_level
 - **Atomic:** Yes
 
-**Denial Codes:** `forbidden`
+**Denial Codes:** `forbidden`, `conflict`
 
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserRoleToken_PromotionToAdminDenied`
+- `pkg/hub:TestUserRoleToken_LastSuperAdminProtected`
+- `pkg/hub:TestUserPatchToken_MixedRoleAndStatusAllOrNothing`
 
 ---
 
@@ -8233,7 +8248,7 @@
 
 **Domain:** user.admin
 
-**Description:** Delete a user account
+**Description:** Delete a user account. A token needs user:delete on a hub boundary, checked on the hub-level user record, and is refused while the user holds a direct system-scope role binding of any lifecycle state (403 forbidden, details.reason system_role_binding_held; judged again in the transaction on the bindings the delete removes, 409 conflict with details.reason binding_state_drift), with or without force. The completion of a forced deletion a token requested applies the same rule
 
 ### Entry Points
 
@@ -8243,9 +8258,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
 
-**Bearer:** `session_only` (reason `GOV_PENDING`)
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `user.delete`
 
@@ -8260,13 +8275,19 @@
 - **Before Fields:** target_user_id, email, role, status
 - **Atomic:** Yes
 
-**Denial Codes:** `forbidden`, `last_owner`, `user_delete_blocked`, `conflict`, `user_delete_force_forbidden`, `user_delete_blockers_changed`, `user_deletion_in_progress`
+**Denial Codes:** `forbidden`, `last_owner`, `user_delete_blocked`, `conflict`, `user_delete_force_forbidden`, `user_delete_blockers_changed`, `user_deletion_in_progress`, `not_found`
 
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestDeleteUser_GuardOrder`
 - `pkg/hub:TestForceDeleteUser_ForbiddenWritesNothing`
+- `pkg/hub:TestUserDeleteToken_LastProjectOwnerProtected`
+- `pkg/hub:TestUserDeleteToken_SystemBindingHolderRefused`
+- `pkg/hub:TestUserDeleteToken_ForceUsesTokenAgentDelete`
+- `pkg/hub:TestUserDeleteToken_BindingAddedAfterPreCheckRefused`
+- `pkg/hub:TestUserDeleteToken_ForcedCompletionKeepsSystemBinding`
+- `pkg/hub:TestUserDeleteToken_ConcurrentlyDeletedUserNotFound`
 
 ---
 
@@ -8274,7 +8295,7 @@
 
 **Domain:** user.admin
 
-**Description:** List what blocks deleting a user (agents and active delegations), without deleting
+**Description:** List what blocks deleting a user (agents and active delegations), without deleting. A token needs user:delete on a hub boundary, checked on the hub-level user record
 
 ### Entry Points
 
@@ -8284,9 +8305,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
 
-**Bearer:** `session_only` (reason `GOV_PENDING`)
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `user.delete`
 
@@ -8300,7 +8321,7 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestUserDeleteBlockers_RequiresUserDelete`
-- `pkg/hub:TestSessionOnlyGate_ReasonIsReported`
+- `pkg/hub:TestUserDeleteReadsToken_RequireDeleteSelectorAndHubBoundary`
 
 ---
 
@@ -8308,7 +8329,7 @@
 
 **Domain:** user.admin
 
-**Description:** Read the forced deletion of a user: its state and the outcome of each of the user's agents
+**Description:** Read the forced deletion of a user: its state and the outcome of each of the user's agents. A token needs user:delete on a hub boundary, checked on the hub-level user record
 
 ### Entry Points
 
@@ -8318,9 +8339,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
 
-**Bearer:** `session_only` (reason `GOV_PENDING`)
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `user.delete`
 
@@ -8334,6 +8355,7 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestUserDeletion_RequiresUserDelete`
+- `pkg/hub:TestUserDeleteReadsToken_RequireDeleteSelectorAndHubBoundary`
 
 ---
 
@@ -9669,6 +9691,39 @@
 
 ---
 
+## hub.chatretention.update
+
+**Domain:** hub
+
+**Description:** Read and update the chat message retention settings (session only)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/admin/chat-retention` |
+| http_route | PUT | `/api/v1/admin/chat-retention` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `IRREVERSIBLE_CASCADE`)
+
+**Base Permission:** `hub.config.update`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestAdminChatRetention_TokenRefused`
+
+---
+
 ## hub.experiments.update
 
 **Domain:** hub
@@ -9786,6 +9841,7 @@
 | http_route | GET | `/api/v1/admin/maintenance/update-available` |
 | http_route | DELETE | `/api/v1/admin/maintenance/update-available` |
 | http_route | GET | `/api/v1/admin/maintenance/update-status` |
+| http_route | GET | `/api/v1/admin/maintenance/releases` |
 
 **Principals:** `user`
 
@@ -12345,6 +12401,40 @@
 
 ---
 
+## broker.agent.workspacedownload
+
+**Domain:** broker
+
+**Description:** Issue signed download URLs for the uploaded workspace files of an agent the broker runs
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/runtime-brokers/{id}/agents/{agentId}/workspace-download` |
+
+**Principals:** `broker`
+
+**Credentials:** `broker_token`
+
+**Bearer:** `non_user`
+
+**Resource Resolver:** broker-self
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDisposition_EveryRoutePatternCovered`
+
+### Exemptions
+
+- **internal_only:** The broker authenticates with its own HMAC credential for an agent assigned to it in a project it still provides for; no user permission applies (scope: broker self access) — waives: `base_permission`
+
+---
+
 ## broker.messagefailures.report
 
 **Domain:** broker
@@ -12426,9 +12516,9 @@
 |------|--------|---------|
 | broker_call | — | `TunnelRequest:controlchannel` |
 | broker_call | — | `OpenStream:controlchannel` |
-| broker_call | — | `SendStreamData:controlchannel` |
-| broker_call | — | `ResizeStream:controlchannel` |
-| broker_call | — | `CloseStream:controlchannel` |
+| broker_call | — | `SendStreamData:brokerconnection` |
+| broker_call | — | `ResizeStream:brokerconnection` |
+| broker_call | — | `CloseStream:brokerconnection` |
 | broker_call | — | `handleResponse:controlchannel` |
 | broker_call | — | `handleStreamData:controlchannel` |
 | broker_call | — | `handleStreamClose:controlchannel` |
@@ -12626,7 +12716,7 @@
 
 **Domain:** secret
 
-**Description:** Read project secrets or environment variables containing secrets
+**Description:** Read project or broker secrets (scope=project or runtime_broker). User and hub scope are the session-only operations secret.user.read and secret.hub.read
 
 ### Entry Points
 
@@ -12663,7 +12753,7 @@
 
 **Domain:** secret
 
-**Description:** Create, update or delete secrets. At user scope, the default, the secrets are the caller's own and a federated caller is refused (requireProfileWriter)
+**Description:** Create, update or delete project or broker secrets (scope=project or runtime_broker). User and hub scope are the session-only operations secret.user.write and secret.hub.write
 
 ### Entry Points
 
@@ -12694,8 +12784,6 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestUserEnvSecretWrites_FederatedUserRefused`
-- `pkg/hub:TestUserEnvSecretWrites_SessionAndTokenUnchanged`
 
 ---
 
@@ -12777,7 +12865,7 @@
 
 **Domain:** env
 
-**Description:** Read project environment variables
+**Description:** Read project or broker environment variables (scope=project or runtime_broker). User and hub scope are the session-only operations env.user.read, env.hub.read and env.hub.list
 
 ### Entry Points
 
@@ -12808,7 +12896,7 @@
 
 **Domain:** env
 
-**Description:** List hub-level environment variables (scope=hub), without secret entries
+**Description:** List hub-level environment variables (scope=hub). Session only: an unscoped admin lists every entry, and a session holder of hub.env_vars.read lists them without secret entries; every user access token is refused
 
 ### Entry Points
 
@@ -12818,7 +12906,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
 
 **Base Permission:** `hub.env_vars.read`
 
@@ -12831,6 +12921,363 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestHubEnvSecret_ProjectBoundaryTokenRefused`
+- `pkg/hub:TestHubEnvSecret_HubBoundaryTokenWithoutHubMaterialScopeRefused`
+
+---
+
+## env.user.read
+
+**Domain:** env
+
+**Description:** Read the caller's own user-level environment variables (scope=user, the default). A federated caller reads its own (retained prior behaviour)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/env` |
+| http_route | GET | `/api/v1/env/{key}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `federated_user`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Resource Resolver:** self-principal
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserEnvSecret_ProjectBoundaryTokenRefused`
+- `pkg/hub:TestUserEnvSecretWrites_SessionAllowedTokenRefused`
+- `pkg/hub:TestUserEnvSecretWrites_FederatedUserRefused`
+- `pkg/hub:TestUserEnvSecretReads_FederatedOwnScopeAllowed`
+
+### Exemptions
+
+- **authentication_only:** User-level env and secret material is the caller's own record, so no resource permission applies; a session credential is required (scope: caller's own user-level environment variables and secrets) — waives: `base_permission`
+
+---
+
+## env.user.write
+
+**Domain:** env
+
+**Description:** Create, update or delete the caller's own user-level environment variables (scope=user, the default). A federated caller is refused (requireProfileWriter)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/env/{key}` |
+| http_route | DELETE | `/api/v1/env/{key}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`, `update-resource`, `delete-resource`
+
+### Audit
+
+- **Event Type:** `env.write`
+- **Context Fields:** actor_id
+- **Before Fields:** env_key
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserEnvSecret_ProjectBoundaryTokenRefused`
+- `pkg/hub:TestUserEnvSecretWrites_SessionAllowedTokenRefused`
+- `pkg/hub:TestUserEnvSecretWrites_FederatedUserRefused`
+
+### Exemptions
+
+- **authentication_only:** User-level env and secret material is the caller's own record, so no resource permission applies; a session credential is required (scope: caller's own user-level environment variables and secrets) — waives: `base_permission`
+
+---
+
+## secret.user.read
+
+**Domain:** secret
+
+**Description:** Read the caller's own user-level secrets (scope=user, the default). A federated caller reads its own (retained prior behaviour)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/secrets` |
+| http_route | GET | `/api/v1/secrets/{key}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `federated_user`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Resource Resolver:** self-principal
+
+**Effects:** `read-secret`
+
+### Audit
+
+- **Event Type:** `secret.read`
+- **Context Fields:** actor_id
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserEnvSecret_ProjectBoundaryTokenRefused`
+- `pkg/hub:TestUserEnvSecretWrites_SessionAllowedTokenRefused`
+- `pkg/hub:TestUserEnvSecretWrites_FederatedUserRefused`
+- `pkg/hub:TestUserEnvSecretReads_FederatedOwnScopeAllowed`
+
+### Exemptions
+
+- **authentication_only:** User-level env and secret material is the caller's own record, so no resource permission applies; a session credential is required (scope: caller's own user-level environment variables and secrets) — waives: `base_permission`
+
+---
+
+## secret.user.write
+
+**Domain:** secret
+
+**Description:** Create, update or delete the caller's own user-level secrets (scope=user, the default). A federated caller is refused (requireProfileWriter)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/secrets/{key}` |
+| http_route | PATCH | `/api/v1/secrets/{key}` |
+| http_route | DELETE | `/api/v1/secrets/{key}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`, `update-resource`, `delete-resource`
+
+### Audit
+
+- **Event Type:** `secret.write`
+- **Context Fields:** actor_id
+- **Before Fields:** secret_key
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserEnvSecret_ProjectBoundaryTokenRefused`
+- `pkg/hub:TestUserEnvSecretWrites_SessionAllowedTokenRefused`
+- `pkg/hub:TestUserEnvSecretWrites_FederatedUserRefused`
+
+### Exemptions
+
+- **authentication_only:** User-level env and secret material is the caller's own record, so no resource permission applies; a session credential is required (scope: caller's own user-level environment variables and secrets) — waives: `base_permission`
+
+---
+
+## env.hub.read
+
+**Domain:** env
+
+**Description:** Read one hub-level environment variable (scope=hub). Agents may read; a user must be an unscoped admin
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/env/{key}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `agent_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestHubEnvSecret_ProjectBoundaryTokenRefused`
+- `pkg/hub:TestHubEnvSecret_HubBoundaryTokenWithoutHubMaterialScopeRefused`
+- `pkg/hub:TestHubEnvSecret_SessionAdminAllowed`
+- `pkg/hub:TestHubEnvSecret_NonAdminSessionRefused`
+- `pkg/hub:TestHubEnvSecret_TestAdminSessionRefused`
+
+### Exemptions
+
+- **hub_admin:** Unscoped local platform admin on a session credential (IsUnscopedLocalPlatformAdmin); no registered permission covers hub-level env and secret material (scope: hub-level environment variables and secrets) — waives: `base_permission`
+
+---
+
+## env.hub.write
+
+**Domain:** env
+
+**Description:** Create, update or delete hub-level environment variables (scope=hub). A user must be an unscoped admin
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/env/{key}` |
+| http_route | DELETE | `/api/v1/env/{key}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `create-resource`, `update-resource`, `delete-resource`
+
+### Audit
+
+- **Event Type:** `env.write`
+- **Context Fields:** actor_id
+- **Before Fields:** env_key
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestHubEnvSecret_ProjectBoundaryTokenRefused`
+- `pkg/hub:TestHubEnvSecret_HubBoundaryTokenWithoutHubMaterialScopeRefused`
+- `pkg/hub:TestHubEnvSecret_SessionAdminAllowed`
+- `pkg/hub:TestHubEnvSecret_NonAdminSessionRefused`
+- `pkg/hub:TestHubEnvSecret_TestAdminSessionRefused`
+
+### Exemptions
+
+- **hub_admin:** Unscoped local platform admin on a session credential (IsUnscopedLocalPlatformAdmin); no registered permission covers hub-level env and secret material (scope: hub-level environment variables and secrets) — waives: `base_permission`
+
+---
+
+## secret.hub.read
+
+**Domain:** secret
+
+**Description:** Read hub-level secrets (scope=hub). Agents may read; a user must be an unscoped admin
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/secrets` |
+| http_route | GET | `/api/v1/secrets/{key}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `agent_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-secret`
+
+### Audit
+
+- **Event Type:** `secret.read`
+- **Context Fields:** actor_id
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestHubEnvSecret_ProjectBoundaryTokenRefused`
+- `pkg/hub:TestHubEnvSecret_HubBoundaryTokenWithoutHubMaterialScopeRefused`
+- `pkg/hub:TestHubEnvSecret_SessionAdminAllowed`
+- `pkg/hub:TestHubEnvSecret_NonAdminSessionRefused`
+- `pkg/hub:TestHubEnvSecret_TestAdminSessionRefused`
+
+### Exemptions
+
+- **hub_admin:** Unscoped local platform admin on a session credential (IsUnscopedLocalPlatformAdmin); no registered permission covers hub-level env and secret material (scope: hub-level environment variables and secrets) — waives: `base_permission`
+
+---
+
+## secret.hub.write
+
+**Domain:** secret
+
+**Description:** Create, update or delete hub-level secrets (scope=hub). A user must be an unscoped admin
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/secrets/{key}` |
+| http_route | PATCH | `/api/v1/secrets/{key}` |
+| http_route | DELETE | `/api/v1/secrets/{key}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `create-resource`, `update-resource`, `delete-resource`
+
+### Audit
+
+- **Event Type:** `secret.write`
+- **Context Fields:** actor_id
+- **Before Fields:** secret_key
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestHubEnvSecret_ProjectBoundaryTokenRefused`
+- `pkg/hub:TestHubEnvSecret_HubBoundaryTokenWithoutHubMaterialScopeRefused`
+- `pkg/hub:TestHubEnvSecret_SessionAdminAllowed`
+- `pkg/hub:TestHubEnvSecret_NonAdminSessionRefused`
+- `pkg/hub:TestHubEnvSecret_TestAdminSessionRefused`
+
+### Exemptions
+
+- **hub_admin:** Unscoped local platform admin on a session credential (IsUnscopedLocalPlatformAdmin); no registered permission covers hub-level env and secret material (scope: hub-level environment variables and secrets) — waives: `base_permission`
 
 ---
 

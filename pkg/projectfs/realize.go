@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"path"
 	"path/filepath"
+	"strings"
 )
 
 // KindProjectConfig is the repository configuration entry (.scion) inside
@@ -66,9 +67,18 @@ type RuntimeKind string
 const (
 	// RuntimeBind: a host bind mount (Docker, Podman, Apple).
 	RuntimeBind RuntimeKind = "bind"
-	// RuntimePod: a Kubernetes volume mount by subPath of a claim.
+	// RuntimePod: a Kubernetes volume mount, by subPath of a claim, or an
+	// inline NFS volume of the directory's server path when the nfs share
+	// has no claim.
 	RuntimePod RuntimeKind = "pod"
 )
+
+// NFSSource is an inline NFS volume of a pod mount: the share's server and
+// the directory's own server path. A pod mounts it with no subPath.
+type NFSSource struct {
+	Server string
+	Path   string
+}
 
 // Realized is a resolved directory realized for one runtime. Target is
 // always the Resolved's (the Mount's) container target, unchanged: callers
@@ -81,14 +91,22 @@ type Realized struct {
 	// the share's pv_name (nfs) or claim (gke-shared-volume).
 	ClaimName string
 	// SubPath is the claim-relative path of a pod mount (RuntimePod).
-	SubPath  string
+	SubPath string
+	// NFS is the inline NFS volume of a pod mount (RuntimePod) on an nfs
+	// share that has no claim. Exactly one of ClaimName and NFS is set for
+	// a pod mount; SubPath is empty when NFS is set.
+	NFS      *NFSSource
 	Target   string
 	ReadOnly bool
 }
 
 // Realize places r in a container of runtime kind: a bind mount of
 // r.HostPath, or (on a shared backend) a pod mount of the share's claim at
-// r.SubPath. The target is r.Target and read-only follows r.
+// r.SubPath. On an nfs share with no claim, the pod mount is an inline NFS
+// volume of r.ServerPath on the share's server instead. A directory that
+// came through the transitional SharedDirs split is never mounted inline:
+// without that share's claim it fails closed. The target is r.Target and
+// read-only follows r.
 func (l Layout) Realize(r Resolved, kind RuntimeKind) (Realized, error) {
 	if r.Target == "" {
 		return Realized{}, errors.New("projectfs: cannot realize a mount without a container target")
@@ -114,9 +132,58 @@ func (l Layout) Realize(r Resolved, kind RuntimeKind) (Realized, error) {
 		if claim == "" {
 			claim = l.Share.PVName
 		}
-		out.ClaimName, out.SubPath = claim, r.SubPath
+		if claim != "" {
+			out.ClaimName, out.SubPath = claim, r.SubPath
+			break
+		}
+		src, err := l.inlineNFSSource(r)
+		if err != nil {
+			return Realized{}, err
+		}
+		out.NFS = src
 	default:
 		return Realized{}, fmt.Errorf("projectfs: unknown runtime kind %q", kind)
 	}
 	return out, nil
+}
+
+// inlineNFSSource returns the inline NFS volume of r, a directory with no
+// claim: only on l's own nfs share (never the transitional split, never
+// another backend), and only with the share's server and r's server path.
+func (l Layout) inlineNFSSource(r Resolved) (*NFSSource, error) {
+	switch {
+	case l.SharedDirs != nil || (r.Backend == BackendNFS && r.HostBase != l.HostBase):
+		return nil, fmt.Errorf("projectfs: %q is on the legacy shared-dir split, which needs that share's pv_name; it is not mounted inline", r.SubPath)
+	case l.Backend != BackendNFS || r.Backend != BackendNFS:
+		return nil, fmt.Errorf("projectfs: the %s share has no claim for %q; cannot mount it in a pod", r.Backend, r.SubPath)
+	}
+	if l.Share.Server == "" || r.ServerPath == "" || !path.IsAbs(r.ServerPath) || path.Clean(r.ServerPath) != r.ServerPath {
+		return nil, fmt.Errorf("projectfs: the nfs share has no claim (pv_name) and no server and server path for %q; cannot mount it in a pod", r.SubPath)
+	}
+	return &NFSSource{Server: l.Share.Server, Path: r.ServerPath}, nil
+}
+
+// ProjectLeaf resolves a directory of a project's tree on a shared backend
+// from its export-relative subPath, as a Kubernetes pod mounts it: subPath
+// must be a clean relative path strictly under <SubPathRoot>/<projectID>/
+// (never the project root itself, another project's tree or the export
+// root). The result is built the way Resolve builds a Mount's, so its
+// ServerPath is <export>/<subPath>.
+func (l Layout) ProjectLeaf(projectID, subPath, target string, readOnly bool) (Resolved, error) {
+	pr, err := l.ProjectRoot(projectID)
+	if err != nil {
+		return Resolved{}, err
+	}
+	if subPath == "" || path.IsAbs(subPath) || strings.ContainsRune(subPath, 0) || path.Clean(subPath) != subPath {
+		return Resolved{}, fmt.Errorf("projectfs: subPath %q is not a clean relative path", subPath)
+	}
+	for _, comp := range strings.Split(subPath, "/") {
+		if comp == ".." || comp == "." {
+			return Resolved{}, fmt.Errorf("projectfs: subPath %q is not a clean relative path", subPath)
+		}
+	}
+	if !strings.HasPrefix(subPath, pr.SubPath+"/") {
+		return Resolved{}, fmt.Errorf("projectfs: subPath %q is not under project %q's tree %q", subPath, projectID, pr.SubPath)
+	}
+	return l.shared(filepath.FromSlash(subPath), Mount{Target: target, ReadOnly: readOnly}), nil
 }

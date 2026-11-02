@@ -1,5 +1,5 @@
 {
-  "comment": "Documents for the edit sweep (sweep.test.ts) beside the shared CriticMarkup corpus: lists with star, plus and odd-numbered markers, tables with alignment colons, backslashed pipes and uneven padding, nested and quoted lists, syntax the serializer writes differently from the source, a mark across list items, a CRLF document, literal openers of every mark kind, a literal replacement opener with a later closer, blocks sharing a line run, reference links, and a sample review.",
+  "comment": "Documents for the edit sweep (sweep.test.ts) beside the shared CriticMarkup corpus: lists with star, plus and odd-numbered markers, tables with alignment colons, backslashed pipes and uneven padding, nested and quoted lists, syntax the serializer writes differently from the source, a mark across list items, a CRLF document, literal openers of every mark kind, a literal replacement opener with a later closer, blocks sharing a line run, reference links, task lists with strikethrough and a footnote, and a sample review.",
   "cases": [
     {
       "name": "review sample",
@@ -48,6 +48,10 @@
     {
       "name": "a literal replacement opener with a later closer",
       "in": "Use {~~ to start.\n\nSome text here.\n\nAnd ~~} to end.\n\nA closing paragraph.\n"
+    },
+    {
+      "name": "task lists, strikethrough and footnotes",
+      "in": "# Tasks, strikethrough and footnotes\n\n- [ ] Write the plan\n- [x] Review the **draft** with `code`\n- [ ] Parent task\n  - [x] Nested done\n  - [ ] Nested open\n\nSingle ~tilde~ and double ~~struck words~~ strike.\n\nA {--~~struck deletion~~--} and ~~struck {--inner--} text~~ here.\n\nA claim with a note.[^1]\n\n[^1]: The footnote text.\n"
     }
   ]
 }

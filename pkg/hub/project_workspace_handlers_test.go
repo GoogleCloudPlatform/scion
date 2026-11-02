@@ -1903,6 +1903,8 @@ func createTestSharedWorkspaceProject(t *testing.T, srv *Server, name, remote st
 		require.NoError(t, cmd.Run(), "git %v", args)
 	}
 
+	allowLocalCloneFixture(t, sourceDir)
+
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{
 		Name:          name,
 		GitRemote:     remote,

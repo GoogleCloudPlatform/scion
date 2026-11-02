@@ -1,0 +1,8 @@
+on:
+  schedule:
+    - cron: '0 6 * * *'
+jobs:
+  "build":
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok

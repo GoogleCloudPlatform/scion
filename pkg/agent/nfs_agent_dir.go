@@ -113,9 +113,11 @@ var purgeRemovedAgentWorkspaces = func(agentDir string) {
 // Nothing outside worktrees/<agentName> and agents/<agentName> is touched.
 // It returns the paths it looked at and any failures, joined; each failure
 // leaves that path in place, and an agent created again with the same name
-// reuses it. It does nothing unless the runtime is Kubernetes, the
-// project's workspace_storage backend is nfs and the export is mounted on
-// the broker.
+// reuses it. The worktree is removed only on Kubernetes and the agent's
+// workspace on Kubernetes or Cloud Run (whose clone-per-agent agents mount
+// agents/<agentName>/workspace); either needs the project's
+// workspace_storage backend to be nfs and the export mounted on the
+// broker.
 func (m *AgentManager) RemoveNFSAgentFiles(ctx context.Context, projectPath, projectID, agentName string) (paths []string, err error) {
 	var errs []error
 	if path, err := m.RemoveNFSWorktree(ctx, projectPath, projectID, agentName); path != "" || err != nil {
@@ -145,7 +147,7 @@ func (m *AgentManager) RemoveNFSAgentFiles(ctx context.Context, projectPath, pro
 // directory is not an error. Every component from the export down to the
 // agent directory must be a real directory, not a symlink.
 func (m *AgentManager) removeNFSAgentWorkspace(ctx context.Context, projectPath, projectID, agentName string) (path string, err error) {
-	resolvedHostBase, rel, err := m.nfsExportWorkspace(projectPath, projectID, agentName)
+	resolvedHostBase, rel, err := m.nfsAgentDirExportWorkspace(projectPath, projectID, agentName)
 	if err != nil || resolvedHostBase == "" {
 		return "", err
 	}
@@ -213,6 +215,53 @@ func nfsKeepSharedCheckout(fresh bool, agentDir string, resolved runtime.Resolve
 		return false, ""
 	}
 	return true, "existing agent without its own NFS agent directory keeps the shared checkout"
+}
+
+// cloudRunAgentWorkspaceRecordFile is the per-agent file, in the agent's
+// broker directory, that records that a Cloud Run clone-per-agent agent
+// uses its own workspace on the share (agents/<agent name>/workspace).
+// Every create writes it, like nfsAgentDirRecordFile, so only an agent
+// created before Cloud Run clone-per-agent agents got their own workspace
+// can lack it. nfsAgentDirRecordFile cannot serve: creates have written it
+// on every runtime since ptone/scion#3998, while Cloud Run agents kept
+// working in the shared checkout.
+const cloudRunAgentWorkspaceRecordFile = "cloudrun-agent-workspace.json"
+
+// cloudRunKeepSharedCheckout reports whether a Cloud Run clone-per-agent
+// agent keeps mounting the project's shared checkout instead of its own
+// workspace, and why: only an existing agent that worked there before, i.e.
+// a start that is not a create, with no cloudRunAgentWorkspaceRecordFile in
+// agentDir, on a broker with the export mounted, where the agent's own
+// workspace does not exist. As in nfsKeepSharedCheckout, a create, a
+// record, an existing workspace, an unmounted export or any other stat
+// error keep the agent's own workspace. The check only reads.
+func cloudRunKeepSharedCheckout(fresh bool, agentDir string, resolved runtime.ResolvedWorkspace, agentName string) (bool, string) {
+	if fresh {
+		return false, ""
+	}
+	if _, err := os.Stat(filepath.Join(agentDir, cloudRunAgentWorkspaceRecordFile)); err == nil {
+		return false, ""
+	}
+	sub, err := runtime.NFSAgentDirSubPath(resolved.ServerRelativePath, agentName)
+	if err != nil || resolved.HostBase == "" {
+		return false, ""
+	}
+	if _, err := os.Stat(resolved.HostBase); err != nil {
+		return false, ""
+	}
+	if _, err := os.Lstat(filepath.Join(resolved.HostBase, sub, provision.AgentWorkspaceDir)); !errors.Is(err, fs.ErrNotExist) {
+		return false, ""
+	}
+	return true, "existing Cloud Run agent without its own workspace keeps the shared checkout"
+}
+
+// recordCloudRunAgentWorkspace writes cloudRunAgentWorkspaceRecordFile. A
+// failure is logged and does not fail the start: the workspace stat still
+// decides next time.
+func recordCloudRunAgentWorkspace(agentDir, agentName string) {
+	if err := os.WriteFile(filepath.Join(agentDir, cloudRunAgentWorkspaceRecordFile), []byte("{\"layout\":\"agent-workspace\"}\n"), 0o600); err != nil {
+		slog.Warn("cloudrun: could not record the agent's own workspace", "agent", agentName, "error", err)
+	}
 }
 
 // recordNFSAgentDir writes nfsAgentDirRecordFile. A failure is logged and

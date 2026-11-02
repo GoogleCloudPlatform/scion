@@ -362,14 +362,14 @@ func openOrCreateDirNoFollow(parentFd int, comp string, mode uint32) (fd int, ex
 func classifyComponentOpenError(parentFd int, comp string, err error) error {
 	switch {
 	case errors.Is(err, unix.ELOOP):
-		return fmt.Errorf("path component %q is a symlink; refusing to use a symlinked path", comp)
+		return &confinementError{fmt.Sprintf("path component %q is a symlink; refusing to use a symlinked path", comp)}
 	case errors.Is(err, unix.ENOTDIR):
 		var st unix.Stat_t
 		if statErr := unix.Fstatat(parentFd, comp, &st, unix.AT_SYMLINK_NOFOLLOW); statErr == nil &&
 			st.Mode&unix.S_IFMT == unix.S_IFLNK {
-			return fmt.Errorf("path component %q is a symlink; refusing to use a symlinked path", comp)
+			return &confinementError{fmt.Sprintf("path component %q is a symlink; refusing to use a symlinked path", comp)}
 		}
-		return fmt.Errorf("path component %q exists but is not a directory", comp)
+		return &confinementError{fmt.Sprintf("path component %q exists but is not a directory", comp)}
 	default:
 		return fmt.Errorf("open path component %q: %w", comp, err)
 	}

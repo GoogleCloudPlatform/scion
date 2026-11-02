@@ -17,7 +17,6 @@ package maintenance
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -38,39 +37,48 @@ type ReleaseUpdateCheckResult struct {
 	ReleaseURL string `json:"release_url,omitempty"`
 }
 
+// CatalogSource is the release catalog as the checker and the update
+// executor read it. *Catalog implements it; the hub passes its one shared
+// Catalog so every reader uses the same cache and fetch budget.
+type CatalogSource interface {
+	Get(ctx context.Context, refresh bool) (Snapshot, error)
+}
+
 // ReleaseCheckOptions configures CheckForReleaseUpdates.
 type ReleaseCheckOptions struct {
 	// CurrentVersion is the running version ("" for a git build).
 	CurrentVersion string
 	// CurrentBuildTime dates a running git build; zero when unknown.
 	CurrentBuildTime time.Time
-	// Channel is the effective channel to check (configured release_channel,
-	// else the running version's channel). Empty means no check.
+	// Channel is the effective channel to check (the hub's release
+	// selection, else the configured release_channel, else the running
+	// version's channel). Empty means no check.
 	Channel string
 	// Repo is the release repository (owner/name); default DefaultGitHubRepo.
 	Repo string
-	// ManifestURL is LATEST.json; default
-	// https://raw.githubusercontent.com/<Repo>/main/LATEST.json.
-	ManifestURL string
-	// HTTPClient fetches LATEST.json; default the update package's client.
-	HTTPClient *http.Client
-	// Releases looks up publish dates for cross-channel comparisons; default
-	// GitHub's API for Repo (through HTTPClient when set).
+	// Catalog lists the channel's releases. Default: a new Catalog for Repo
+	// over Releases (no cache survives the call; callers that check
+	// repeatedly pass a shared one).
+	Catalog CatalogSource
+	// Refresh asks the catalog for a fresh list (still throttled by the
+	// catalog's refresh interval), as a manual check does.
+	Refresh bool
+	// Releases dates a running release that the catalog does not list, for
+	// a cross-channel comparison; default GitHub's API for Repo.
 	Releases ReleaseSource
 }
 
-// CheckForReleaseUpdates finds the latest release of the effective channel
-// (from LATEST.json) and reports an update when it is an upgrade (same
-// channel, newer) or a switch to a release published after the running one
-// (update.ClassSwitchNewer).
+// CheckForReleaseUpdates finds the latest installable release of the
+// effective channel in the release catalog and reports an update when it is
+// an upgrade (same channel, newer) or a switch to a release published after
+// the running one (update.ClassSwitchNewer).
 //
 // It compares against opts.Channel only. It does not re-detect the channel
 // from the running version, so a nightly hub configured for preview is
 // offered the latest preview once that preview is newer than the nightly.
-// A cross-channel comparison uses publish dates: the manifest's date for the
-// latest release and a single-tag lookup for the running release (nightly
-// tags carry their own date when the lookup fails). Without a date the
-// order is unknown and no update is reported.
+// A cross-channel comparison uses publish dates (see RunningRef). Without a
+// date the order is unknown and no update is reported. A stale catalog (the
+// last fetch failed) is still used: its releases did not change.
 func CheckForReleaseUpdates(ctx context.Context, opts ReleaseCheckOptions) (*ReleaseUpdateCheckResult, error) {
 	log := logging.Subsystem("hub.maintenance.check-release-updates")
 
@@ -88,44 +96,39 @@ func CheckForReleaseUpdates(ctx context.Context, opts ReleaseCheckOptions) (*Rel
 		return result, nil
 	}
 
-	manifestURL := opts.ManifestURL
-	if manifestURL == "" {
-		manifestURL = fmt.Sprintf("https://raw.githubusercontent.com/%s/main/LATEST.json", repo)
-	}
-	mopts := []update.Option{update.WithManifestURL(manifestURL)}
-	if opts.HTTPClient != nil {
-		mopts = append(mopts, update.WithHTTPClient(opts.HTTPClient))
-	}
-	manifest, err := update.FetchManifest(ctx, mopts...)
-	if err != nil {
-		return nil, fmt.Errorf("fetch release manifest: %w", err)
-	}
-
-	latest := manifest.Channels[opts.Channel]
-	if latest.Version == "" {
-		log.Debug("No release published for channel", "channel", opts.Channel)
-		return result, nil
-	}
-	if !update.IsReleaseTag(latest.Version) || update.DetectChannel(latest.Version) != opts.Channel {
-		return nil, fmt.Errorf("release manifest lists %q as latest %s, which is not a %s release tag",
-			latest.Version, opts.Channel, opts.Channel)
-	}
-	result.LatestVersion = latest.Version
-	result.ReleaseURL = latest.URL
-
 	releases := opts.Releases
 	if releases == nil {
-		gh := NewGitHubReleases(repo)
-		if opts.HTTPClient != nil {
-			c := *opts.HTTPClient
-			c.Timeout = releaseAPITimeout
-			gh.Client = &c
-		}
-		releases = gh
+		releases = NewGitHubReleases(repo)
+	}
+	catalog := opts.Catalog
+	if catalog == nil {
+		catalog = NewCatalog(CatalogOptions{Repo: repo, Lister: catalogLister(releases, repo)})
+	}
+	snap, err := catalog.Get(ctx, opts.Refresh)
+	if err != nil {
+		return nil, fmt.Errorf("read the release catalog: %w", err)
+	}
+	if snap.Stale {
+		log.Warn("Checking against a stale release catalog", "fetched_at", snap.FetchedAt, "error", snap.Error)
+	}
+
+	latest, ok := snap.Latest(opts.Channel)
+	if !ok {
+		log.Debug("No installable release published for channel", "channel", opts.Channel)
+		return result, nil
+	}
+	result.LatestVersion = latest.Tag
+	result.ReleaseURL = latest.NotesURL
+
+	// Only a cross-channel comparison needs the running release's date; a
+	// same-channel one compares the versions.
+	var dater ReleaseSource
+	if update.DetectChannel(opts.CurrentVersion) != opts.Channel {
+		dater = releases
 	}
 	class := update.CompareRefs(
-		currentRef(ctx, releases, opts, manifest),
-		update.Ref{Version: latest.Version, Date: manifestDate(ctx, releases, latest)},
+		RunningRef(ctx, snap, dater, opts.CurrentVersion, opts.CurrentBuildTime),
+		update.Ref{Version: latest.Tag, Date: latest.PublishedAt},
 	)
 	result.Class = string(class)
 	result.UpdateAvailable = class == update.ClassUpgrade || class == update.ClassSwitchNewer
@@ -139,40 +142,35 @@ func CheckForReleaseUpdates(ctx context.Context, opts ReleaseCheckOptions) (*Rel
 	return result, nil
 }
 
-// currentRef dates the running version for a comparison against the
-// channel's latest release. A same-channel comparison needs no date. Across
-// channels a release is dated by its publish date (a manifest entry naming
-// it, else a single-tag lookup); a git build by its build time.
-func currentRef(ctx context.Context, releases ReleaseSource, opts ReleaseCheckOptions, m *update.Manifest) update.Ref {
-	cur := update.Ref{Version: opts.CurrentVersion}
-	if !update.IsReleaseTag(cur.Version) {
-		cur.Date = opts.CurrentBuildTime
+// RunningRef dates the running version for a comparison against catalog
+// releases. A git build ("" or any non-release version) is dated by
+// buildTime. A release is dated by its publish date in snap, else by a
+// single-tag lookup through releases (nil skips the lookup); when neither
+// has it the date stays zero, and update.CompareRefs falls back to a
+// nightly tag's own date.
+func RunningRef(ctx context.Context, snap Snapshot, releases ReleaseSource, current string, buildTime time.Time) update.Ref {
+	cur := update.Ref{Version: current}
+	if !update.IsReleaseTag(current) {
+		cur.Date = buildTime
 		return cur
 	}
-	ch := update.DetectChannel(cur.Version)
-	if ch == opts.Channel {
+	if r, ok := snap.Lookup(current); ok && !r.PublishedAt.IsZero() {
+		cur.Date = r.PublishedAt
 		return cur
 	}
-	if entry := m.Channels[ch]; entry.Version == cur.Version {
-		if t, err := time.Parse(time.RFC3339, entry.Date); err == nil {
-			cur.Date = t
-			return cur
+	if releases != nil {
+		if rel, err := releases.ReleaseByTag(ctx, current); err == nil && !rel.PublishedAt.IsZero() {
+			cur.Date = rel.PublishedAt
 		}
-	}
-	if rel, err := releases.ReleaseByTag(ctx, cur.Version); err == nil && !rel.PublishedAt.IsZero() {
-		cur.Date = rel.PublishedAt
 	}
 	return cur
 }
 
-// manifestDate returns the publish date of a manifest entry, looking the
-// release up when the manifest has no usable date.
-func manifestDate(ctx context.Context, releases ReleaseSource, entry update.ChannelInfo) time.Time {
-	if t, err := time.Parse(time.RFC3339, entry.Date); err == nil {
-		return t
+// catalogLister is the ReleaseLister for a default catalog: releases itself
+// when it can list (GitHubReleases can), else GitHub's API for repo.
+func catalogLister(releases ReleaseSource, repo string) ReleaseLister {
+	if l, ok := releases.(ReleaseLister); ok {
+		return l
 	}
-	if rel, err := releases.ReleaseByTag(ctx, entry.Version); err == nil {
-		return rel.PublishedAt
-	}
-	return time.Time{}
+	return NewGitHubReleases(repo)
 }

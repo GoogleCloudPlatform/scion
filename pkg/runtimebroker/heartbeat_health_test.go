@@ -33,9 +33,17 @@ import (
 // in, as HubConnection.Start does, and returns it.
 func sendHealthHeartbeat(t *testing.T, srv *Server) *hubclient.BrokerHeartbeat {
 	t.Helper()
+	return sendConnectionHealthHeartbeat(t, srv, nil)
+}
+
+// sendConnectionHealthHeartbeat sends one heartbeat of hub connection hc
+// (nil: none), with its health wired in as HubConnection.Start does, and
+// returns it.
+func sendConnectionHealthHeartbeat(t *testing.T, srv *Server, hc *HubConnection) *hubclient.BrokerHeartbeat {
+	t.Helper()
 	client := &mockRuntimeBrokerService{}
 	hb := NewHeartbeatService(client, "test-host", time.Hour, nil, nil, slog.Default())
-	hb.health = srv.heartbeatHealthReport
+	hb.health = srv.heartbeatHealthReportFor(hc)
 	if err := hb.ForceHeartbeat(context.Background()); err != nil {
 		t.Fatalf("ForceHeartbeat failed: %v", err)
 	}

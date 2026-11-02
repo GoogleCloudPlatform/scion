@@ -44,9 +44,12 @@ type startDispatch struct {
 	// across repeated failures (ptone/scion#4669). rollback restores
 	// priorPhase, the stored phase, not this.
 	priorRestingPhase string
-	// reserved reports whether beginStartDispatch created the reservation
-	// (as opposed to finding one the agent already held).
+	// reserved reports whether beginStartDispatch created the broker
+	// reservation (as opposed to finding one the agent already held).
 	reserved bool
+	// projectReserved reports the same for the max_agents_per_project
+	// reservation (ptone/scion#6033).
+	projectReserved bool
 	// marked reports whether beginStartDispatch wrote PhaseStarting.
 	marked bool
 	// settled is set once rollback or settle has run.
@@ -65,9 +68,13 @@ var errStartingWrite = errors.New("record starting phase before dispatch")
 //
 //  1. It reserves agent's broker slot with the cap check
 //     (checkAndReserveBrokerQuota; idempotent, so an agent that already holds
-//     a reservation keeps it, however old). On a reservation error it returns
-//     that error (store.ErrQuotaExceeded, ErrQuotaLockContention, ...) and
-//     changes nothing.
+//     a reservation keeps it, however old), then its project slot the same
+//     way (checkAndReserveProjectQuota, ptone/scion#6033). On a reservation
+//     error it returns that error (store.ErrQuotaExceeded,
+//     ErrQuotaLockContention, ...) and changes nothing: a broker reservation
+//     this call created is released when the project reserve fails. In that
+//     short window the broker slot is held, so a concurrent start on the
+//     same broker can be refused at its cap.
 //  2. If agent.Phase (the caller's copy) is not counted toward the cap
 //     (isBrokerQuotaCountedPhase: stopped, suspended, error), it writes
 //     PhaseStarting with UpdateAgentStatus conditional on the stored phase
@@ -145,12 +152,20 @@ func (s *Server) beginStartDispatch(ctx context.Context, agent *store.Agent) (*s
 	if err != nil {
 		return nil, err
 	}
+	projectReserved, err := s.checkAndReserveProjectQuota(ctx, agent)
+	if err != nil {
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), startDispatchRollbackTimeout)
+		s.rollbackBrokerQuota(rctx, agent, reserved)
+		cancel()
+		return nil, err
+	}
 	d := &startDispatch{
 		s:                 s,
 		agent:             agent,
 		priorPhase:        agent.Phase,
 		priorRestingPhase: store.EffectiveRestingPhase(agent),
 		reserved:          reserved,
+		projectReserved:   projectReserved,
 	}
 	if !isBrokerQuotaCountedPhase(agent.Phase) {
 		if err := s.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
@@ -161,6 +176,7 @@ func (s *Server) beginStartDispatch(ctx context.Context, agent *store.Agent) (*s
 			// release on a detached, bounded context, as rollback does.
 			rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), startDispatchRollbackTimeout)
 			s.rollbackBrokerQuota(rctx, agent, reserved)
+			s.rollbackProjectQuota(rctx, agent, projectReserved)
 			cancel()
 			if errors.Is(err, store.ErrPhaseMismatch) && s.deleteHoldsRow(ctx, agent.ID) {
 				// A delete claimed the row after it moved on from the
@@ -211,7 +227,7 @@ func (s *Server) deleteHoldsRow(ctx context.Context, agentID string) bool {
 // rollback undoes beginStartDispatch after a failed dispatch or an early
 // return: if this dispatch wrote PhaseStarting it restores the prior phase,
 // in one write conditional on the row still reading PhaseStarting, and it
-// releases a reservation beginStartDispatch created. Runs detached from
+// releases the broker and project reservations beginStartDispatch created. Runs detached from
 // ctx's cancellation. Only the first rollback or settle on d has any effect.
 func (d *startDispatch) rollback(ctx context.Context) {
 	if d == nil || d.settled {
@@ -234,10 +250,12 @@ func (d *startDispatch) rollback(ctx context.Context) {
 		}
 	}
 	d.s.rollbackBrokerQuota(ctx, d.agent, d.reserved)
+	d.s.rollbackProjectQuota(ctx, d.agent, d.projectReserved)
 }
 
-// reassertReservation re-records the agent's reservation, without the cap
-// check, if it no longer holds one (reassertBrokerReservation). A restart
+// reassertReservation re-records the agent's broker and project
+// reservations, without the cap check, if it no longer holds them
+// (reassertBrokerReservation, reassertProjectReservation). A restart
 // calls it after its stop leg: the dying container's own status report
 // (phase stopped) can release the slot while the stop leg runs, on any
 // replica. A reservation re-created here belongs to this dispatch from then
@@ -248,6 +266,9 @@ func (d *startDispatch) reassertReservation(ctx context.Context) {
 	}
 	if d.s.reassertBrokerReservation(ctx, d.agent) {
 		d.reserved = true
+	}
+	if d.s.reassertProjectReservation(ctx, d.agent, backstopSiteRestart) != "" {
+		d.projectReserved = true
 	}
 }
 
@@ -277,18 +298,19 @@ func (d *startDispatch) settle() {
 
 // keepForUnknownOutcome prepares d's rollback for a start whose outcome is
 // unknown (ptone/scion#5143): the rollback then releases nothing, so the
-// reservation this hold created or re-asserted stays held, and it restores
-// stopped, not the prior phase, when this hold wrote starting (any
-// uncounted prior phase: a restored suspended, halted or error phase would
-// keep the agent from reading running if the start did land, and a
-// suspended one would resume the old session on the next start). The start
-// claim's settlement frees the slot: the reaper's release, then the idle
-// release. Nil-safe; a no-op once d is settled.
+// broker and project reservations this hold created or re-asserted stay
+// held, and it restores stopped, not the prior phase, when this hold wrote
+// starting (any uncounted prior phase: a restored suspended, halted or error
+// phase would keep the agent from reading running if the start did land, and
+// a suspended one would resume the old session on the next start). The
+// start claim's settlement frees the slots: the reaper's release, then the
+// idle releases. Nil-safe; a no-op once d is settled.
 func (d *startDispatch) keepForUnknownOutcome() {
 	if d == nil || d.settled {
 		return
 	}
 	d.reserved = false
+	d.projectReserved = false
 	if d.marked {
 		d.priorPhase = string(state.PhaseStopped)
 	}

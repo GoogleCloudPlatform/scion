@@ -677,9 +677,19 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		agentID = msg.SenderID
 	}
 
+	// The row takes the id and creation time the sending handler already
+	// reported (PersistMessageID, PersistCreatedAt), so the receipt's
+	// message_id and the published Timestamp name this row.
 	storeID := msg.StoredMessageID
 	if storeID == "" {
+		storeID = msg.PersistMessageID
+	}
+	if storeID == "" {
 		storeID = api.NewUUID()
+	}
+	createdAt := msg.PersistCreatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now()
 	}
 	storeMsg := &store.Message{
 		ID:          storeID,
@@ -698,7 +708,7 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		// This delivery *is* the dispatch; Ent defaults dispatch_state to
 		// "pending" if left unset (nc-promote-busy).
 		DispatchState: store.MessageDispatchDispatched,
-		CreatedAt:     time.Now(),
+		CreatedAt:     createdAt,
 	}
 	// A message the sending handler already stored (StoredMessageID,
 	// ptone/scion#4596 decision D2): the handler resolved its conversation,

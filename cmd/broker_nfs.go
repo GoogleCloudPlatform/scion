@@ -18,10 +18,8 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -31,35 +29,32 @@ import (
 )
 
 // brokerNFSConfig returns the NFS settings for the runtime broker's
-// ServerConfig.NFSConfig, taken from server.workspace_storage in the
-// broker's global settings. It returns nil (NFS handling off, the broker
-// behaves exactly as without NFS) unless the backend is "nfs" and the block
-// is valid (see validateBrokerNFS). The returned value is a copy with the workspace
-// storage defaults applied; vs is not modified.
+// ServerConfig.NFSConfig: the nfs block of the broker's resolved project
+// storage (config.ResolveProjectStorage: server.project_storage, or the
+// block synthesized from server.workspace_storage), with defaults applied
+// and the field rules of config.ValidateProjectStorage passed. It returns
+// nil (NFS handling off, the broker behaves exactly as without NFS) unless
+// the backend is "nfs" and the block is valid. The returned value is a
+// copy; vs is not modified.
 //
 // The second return value is a warning for the caller to log, set when the
-// backend is "nfs" but the block is unusable.
+// backend is "nfs" but the block is unusable. The broker's agent starts are
+// then refused as well (brokerStorageLayout).
 func brokerNFSConfig(vs *config.VersionedSettings) (*config.V1NFSConfig, string) {
 	if vs == nil || vs.Server == nil || vs.Server.EffectiveWorkspaceStorage() == nil {
 		return nil, ""
 	}
-	ws := *vs.Server.EffectiveWorkspaceStorage()
-	if ws.Backend != "nfs" {
+	if vs.Server.EffectiveWorkspaceStorage().Backend != config.WorkspaceStorageBackendNFS {
 		return nil, ""
 	}
-	if ws.NFS != nil {
-		nfsCopy := *ws.NFS
-		nfsCopy.Shares = append([]config.V1NFSShare(nil), ws.NFS.Shares...)
-		ws.NFS = &nfsCopy
-	}
-	ws.ApplyNFSDefaults()
-	if err := ws.ValidateNFS(); err != nil {
+	ps, _, err := config.ResolveProjectStorage(vs.Server)
+	if err != nil {
 		return nil, "NFS mount checks disabled: " + err.Error()
 	}
-	if err := validateBrokerNFS(ws.NFS); err != nil {
-		return nil, "NFS mount checks disabled: " + err.Error()
+	if ps.EffectiveBackend() != config.WorkspaceStorageBackendNFS || ps.NFS == nil {
+		return nil, ""
 	}
-	return ws.NFS, ""
+	return ps.NFS, ""
 }
 
 // brokerWorkspaceStorageWarning returns a startup warning when the
@@ -97,7 +92,10 @@ func brokerWorkspaceStorageBackend(vs *config.VersionedSettings) string {
 func brokerRegistrationWorkspaceStorage(vs *config.VersionedSettings) *api.BrokerWorkspaceStorage {
 	nfs, _ := brokerNFSConfig(vs)
 	desc := runtimebroker.BuildWorkspaceStorageDescriptor(brokerWorkspaceStorageBackend(vs), nfs, nil)
-	layout, _ := brokerStorageLayout(vs)
+	layout, _, storageErr := brokerStorageLayout(vs)
+	if storageErr != nil {
+		return runtimebroker.InvalidStorageDescriptor(desc)
+	}
 	desc.Homes = runtimebroker.StorageHomes(layout)
 	desc.Volume = runtimebroker.StorageVolume(layout)
 	desc.SharedDirs = projectfs.SharedDirsPlacement(layout)
@@ -107,31 +105,42 @@ func brokerRegistrationWorkspaceStorage(vs *config.VersionedSettings) *api.Broke
 // brokerStorageLayout builds the broker's projectfs Layout from its global
 // settings: the same server.project_storage struct the hub builds its Layout
 // from (config.ResolveProjectStorage: the block as written, or synthesized
-// from the deprecated blocks), translated by config.ProjectStorageLayout.
-// The returned warnings are for the caller to log once at startup: the
-// synthesis warnings, or the reason the block is unusable (the broker then
-// reports the local Layout, which the hub refuses for shared-mode
-// dispatches on a shared hub; the broker does not refuse to start).
-func brokerStorageLayout(vs *config.VersionedSettings) (projectfs.Layout, []string) {
+// from the deprecated blocks, with the field rules of
+// config.ValidateProjectStorage), translated by config.ProjectStorageLayout.
+// The returned warnings are for the caller to log once at startup.
+//
+// When the block is unusable, storageErr says why and the Layout is the
+// zero Layout: the broker still starts, so its existing agents can be
+// stopped and deleted, but it reports its storage as invalid, refuses every
+// agent start with storageErr and reports degraded health
+// (runtimebroker.ServerConfig.StorageError). It never falls back to the
+// local layout, whose placement would differ from the configured one.
+func brokerStorageLayout(vs *config.VersionedSettings) (layout projectfs.Layout, warnings []string, storageErr error) {
 	local := projectfs.Layout{Backend: projectfs.BackendLocal, Homes: projectfs.BackendLocal}
 	if vs == nil {
-		return local, nil
+		return local, nil, nil
 	}
 	ps, warnings, err := config.ResolveProjectStorage(vs.Server)
 	if err != nil {
-		return local, []string{fmt.Sprintf("project storage settings are unusable, reporting the local layout: %v", err)}
+		return projectfs.Layout{}, nil, fmt.Errorf("invalid project storage settings: %w", err)
 	}
-	layout, err := config.ProjectStorageLayout(ps, config.DefaultVolumeMountBase)
+	layout, err = config.ProjectStorageLayout(ps, config.DefaultVolumeMountBase)
 	if err != nil {
-		return local, append(warnings, fmt.Sprintf("project storage settings are unusable, reporting the local layout: %v", err))
+		return projectfs.Layout{}, warnings, fmt.Errorf("invalid project storage settings: %w", err)
 	}
-	return layout, append(warnings, brokerSharedDirLayoutWarnings(layout, os.Stat)...)
+	return layout, append(warnings, brokerSharedDirLayoutWarnings(layout, os.Stat)...), nil
+}
+
+// brokerStorageUnavailableWarning is the startup warning for a broker whose
+// storage settings are unusable.
+func brokerStorageUnavailableWarning(err error) string {
+	return fmt.Sprintf("%v; this broker refuses agent starts until it is fixed and restarted (stop, delete and logs keep working)", err)
 }
 
 // brokerSharedDirLayoutWarnings returns startup warnings for a shared-dir
 // Layout that would fail Kubernetes agent starts with shared dirs (every
-// project has the default scratchpad): a share without a claim (nfs
-// shares[0].pv_name, gke_shared_volume.pv_claim_name) or a gke-shared-volume
+// project has the default scratchpad): a share without a claim (the legacy
+// split's nfs shares[0].pv_name, gke_shared_volume.pv_claim_name) or a gke-shared-volume
 // this broker has not mounted. Agent starts still refuse; this says so once,
 // at startup, instead of only per start.
 func brokerSharedDirLayoutWarnings(layout projectfs.Layout, stat func(string) (os.FileInfo, error)) []string {
@@ -139,7 +148,10 @@ func brokerSharedDirLayoutWarnings(layout projectfs.Layout, stat func(string) (o
 	var out []string
 	switch sd.Backend {
 	case projectfs.BackendNFS:
-		if sd.Share.PVName == "" {
+		// Without a pv_name, Kubernetes pods mount the Layout's own share
+		// inline (logged once at startup); only the legacy split still
+		// needs its claim.
+		if sd.Share.PVName == "" && layout.SharedDirs != nil {
 			out = append(out, "project storage: the nfs share has no pv_name; Kubernetes agent starts with shared dirs will fail until nfs.shares[0].pv_name is set")
 		}
 	case projectfs.BackendGKESharedVolume:
@@ -164,40 +176,13 @@ func loadBrokerRegistrationWorkspaceStorage() *api.BrokerWorkspaceStorage {
 	return brokerRegistrationWorkspaceStorage(vs)
 }
 
-// validateBrokerNFS checks the fields the broker uses to build each mount:
-// an absolute mount_root, and per share a unique id that is a single path
-// element, a server, and an absolute export.
-func validateBrokerNFS(nfs *config.V1NFSConfig) error {
-	if nfs.MountRoot == "" || !filepath.IsAbs(nfs.MountRoot) {
-		return fmt.Errorf("server.workspace_storage.nfs.mount_root must be an absolute path (got %q)", nfs.MountRoot)
-	}
-	seen := make(map[string]bool, len(nfs.Shares))
-	for i, share := range nfs.Shares {
-		switch {
-		case share.ID == "" || share.ID == "." || share.ID == ".." || strings.ContainsAny(share.ID, `/\`):
-			return fmt.Errorf("server.workspace_storage.nfs.shares[%d].id must be a single path element (got %q)", i, share.ID)
-		case seen[share.ID]:
-			return fmt.Errorf("server.workspace_storage.nfs.shares[%d].id %q is duplicated", i, share.ID)
-		case share.Server == "":
-			return fmt.Errorf("server.workspace_storage.nfs.shares[%d].server is empty", i)
-		case strings.IndexFunc(share.Server, unicode.IsSpace) >= 0 || strings.HasPrefix(share.Server, "-"):
-			return fmt.Errorf("server.workspace_storage.nfs.shares[%d].server must be a hostname or IPv4 address (got %q)", i, share.Server)
-		case strings.ContainsAny(share.Server, ":[]"):
-			return fmt.Errorf("server.workspace_storage.nfs.shares[%d].server %q looks like an IPv6 literal, which is not supported; use a hostname or IPv4 address", i, share.Server)
-		case !strings.HasPrefix(share.Export, "/") || strings.IndexFunc(share.Export, unicode.IsSpace) >= 0:
-			return fmt.Errorf("server.workspace_storage.nfs.shares[%d].export must be an absolute path without whitespace (got %q)", i, share.Export)
-		}
-		seen[share.ID] = true
-	}
-	return nil
-}
-
 // nfsDoctorProbe is the read-only system access the doctor NFS check needs.
 // Tests replace it with fakes.
 type nfsDoctorProbe struct {
-	// mountSource returns the source device (server:export for NFS) mounted
-	// at path, and whether path is a mountpoint at all.
-	mountSource func(path string) (source string, mounted bool, err error)
+	// mountEntry returns the mount table entry at path (the source,
+	// server:export for NFS, and the mount options), and whether path is a
+	// mountpoint at all.
+	mountEntry func(path string) (entry runtimebroker.MountEntry, mounted bool, err error)
 	// dial checks TCP reachability of addr (host:port).
 	dial func(addr string) error
 }
@@ -207,7 +192,7 @@ const nfsServerPort = "2049"
 
 func defaultNFSDoctorProbe() nfsDoctorProbe {
 	return nfsDoctorProbe{
-		mountSource: runtimebroker.ProcMountSource,
+		mountEntry: runtimebroker.ProcMountEntry,
 		dial: func(addr string) error {
 			conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
 			if err != nil {
@@ -267,27 +252,41 @@ func checkDoctorNFSMounts(vs *config.VersionedSettings, probe nfsDoctorProbe) sc
 		remediation = "The broker mounts the shares itself: check the broker log (broker.nfs-mount) and that the broker runs as root"
 	}
 
+	// Inline pod volumes are selected by shares[0] alone, as in the
+	// project-storage Layout and the runtime: no shares[0].pv_name on a
+	// Kubernetes default runtime.
+	inline := verifyOnlyRuntime != "" && kubernetesRuntimeType(verifyOnlyRuntime) &&
+		len(nfsCfg.Shares) > 0 && nfsCfg.Shares[0].PVName == ""
+
 	// A missing mount is a failure only where the broker is expected to
 	// mount it: with auto_mount on, no pv_name, and a local-container
-	// default runtime. With auto_mount off the operator may mount it
-	// elsewhere; a pv_name share is mounted into pods by the kubelet; and
-	// on a Kubernetes or Cloud Run default runtime the broker does not
-	// mount. Those are warnings, as in the broker's health. A wrong source,
-	// an unreachable server, or an unusable block are failures.
+	// default runtime; and, in inline mode, for shares[0], which agent
+	// starts need (the broker creates each directory before the pod).
+	// With auto_mount off the operator may mount it elsewhere; a pv_name
+	// share is mounted into pods by the kubelet; and on a Kubernetes or
+	// Cloud Run default runtime the broker does not mount. Those are
+	// warnings, as in the broker's health. A wrong source, an unreachable
+	// server, or an unusable block are failures.
 	var ok, problems []string
 	failed := false
-	for _, share := range nfsCfg.Shares {
-		target := filepath.Join(nfsCfg.MountRoot, share.ID)
+	for i, share := range nfsCfg.Shares {
+		target := runtimebroker.NFSShareTarget(nfsCfg.MountRoot, share.ID)
 		want := share.Server + ":" + share.Export
 		var issues []string
 
-		source, mounted, err := probe.mountSource(target)
+		entry, mounted, err := probe.mountEntry(target)
+		source := entry.Source
 		switch {
 		case err != nil:
 			issues = append(issues, fmt.Sprintf("mount state unknown (%v)", err))
 			failed = true
 		case !mounted && share.PVName != "":
 			issues = append(issues, fmt.Sprintf("not mounted at %s (pv_name is set, so the export is mounted into pods and this host need not mount it)", target))
+		case !mounted && inline && i == 0:
+			// No pv_name on Kubernetes: pods mount each directory inline,
+			// and the broker must create it first through this mount.
+			issues = append(issues, fmt.Sprintf("not mounted at %s (no pv_name: Kubernetes pods mount the share inline, and this broker must mount the export, writable, to create each directory first)", target))
+			failed = true
 		case !mounted && !nfsCfg.AutoMount:
 			issues = append(issues, fmt.Sprintf("not mounted at %s (auto_mount is off, so the broker does not mount it)", target))
 		case !mounted && verifyOnlyRuntime != "":
@@ -298,6 +297,21 @@ func checkDoctorNFSMounts(vs *config.VersionedSettings, probe nfsDoctorProbe) sc
 		case source != want:
 			issues = append(issues, fmt.Sprintf("%s is mounted from %s, expected %s", target, source, want))
 			failed = true
+		case verifyOnlyRuntime != "":
+			// The platform mounts the export and cannot set options; the
+			// broker does not require nosuid,nodev here.
+		default:
+			// As the broker's health: a mount without nosuid,nodev is
+			// remounted by a broker with auto_mount on, and refused
+			// (mount_flags) otherwise.
+			if missing := runtimebroker.MissingNFSMountFlags(entry.Options); len(missing) > 0 {
+				if nfsCfg.AutoMount {
+					issues = append(issues, fmt.Sprintf("%s is mounted without %s (the broker remounts it with nosuid,nodev when it runs as root; otherwise it refuses NFS dispatches)", target, strings.Join(missing, ",")))
+				} else {
+					issues = append(issues, fmt.Sprintf("%s is mounted without %s (auto_mount is off: remount it with nosuid,nodev, or the broker refuses NFS dispatches)", target, strings.Join(missing, ",")))
+					failed = true
+				}
+			}
 		}
 
 		if err := probe.dial(net.JoinHostPort(share.Server, nfsServerPort)); err != nil {
@@ -308,6 +322,12 @@ func checkDoctorNFSMounts(vs *config.VersionedSettings, probe nfsDoctorProbe) sc
 		if len(issues) == 0 {
 			ok = append(ok, share.ID)
 			continue
+		}
+		if inline && i == 0 {
+			// Agent starts need the broker's mount of shares[0], so every
+			// failure of it points there, whatever the cause. Pods do not
+			// mount the other shares, which keep the mode's remediation.
+			remediation = fmt.Sprintf("Mount %s at %s on this host, writable by the broker (no pv_name: agent pods mount the share inline and the broker creates each directory first), or set nfs.shares[0].pv_name", want, target)
 		}
 		problems = append(problems, share.ID+": "+strings.Join(issues, ", "))
 	}
@@ -329,4 +349,11 @@ func checkDoctorNFSMounts(vs *config.VersionedSettings, probe nfsDoctorProbe) sc
 		Message:     fmt.Sprintf("%s (%s)", strings.Join(problems, "; "), mode),
 		Remediation: remediation,
 	}
+}
+
+// kubernetesRuntimeType reports whether a resolved runtime type is the
+// Kubernetes runtime ("kubernetes", "k8s" or "remote"), using the settings
+// package's runtime-entry predicate.
+func kubernetesRuntimeType(rtType string) bool {
+	return config.IsKubernetesRuntimeEntry(rtType, config.V1RuntimeConfig{})
 }

@@ -17,9 +17,11 @@ package config
 import (
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"gopkg.in/yaml.v3"
 )
@@ -39,9 +41,14 @@ var agentSchemaFiles = map[string]string{
 // ValidationError represents a single schema validation error.
 type ValidationError struct {
 	// Path is the JSON pointer to the field that failed validation (e.g., "hub/endpoint").
-	Path string
+	Path string `json:"path"`
 	// Message describes the validation failure.
-	Message string
+	Message string `json:"message"`
+	// StorageField marks a project storage field rule
+	// (ValidateProjectStorage). Path is then the field's settings path. A
+	// settings migration converts the file anyway and reports these as
+	// warnings, so the operator gets the file to fix.
+	StorageField bool `json:"storage_field,omitempty"`
 }
 
 func (e ValidationError) Error() string {
@@ -108,7 +115,13 @@ func DetectSettingsFormat(data []byte) (version string, isLegacy bool) {
 // V1RuntimeConfig, not on the legacy RuntimeConfig. A file using any of them
 // without schema_version is loaded as v1 so the key is not dropped by the
 // legacy loader.
-var v1RuntimeIndicatorKeys = []string{"type", "cloudrun", "gke", "list_all_namespaces", "shared_dir_storage_class", "shared_dir_size", "safe_to_evict", "shared_dir_storage_backend", "shared_dir_storage_backends", "home_storage_backend", "home_storage_leaf"}
+var v1RuntimeIndicatorKeys = []string{
+	"type", "cloudrun", "gke", "list_all_namespaces", "shared_dir_storage_class", "shared_dir_size", "safe_to_evict",
+	"shared_dir_storage_backend", "shared_dir_storage_backends", "home_storage_backend", "home_storage_leaf",
+	"priority_class_name", "runtime_class_name", "node_selector", "tolerations",
+	"cloudrun_instances", "cloudrun_sandbox", "substrate",
+	"kubernetes_service_account_mappings", "kubernetes_block_service_account",
+}
 
 // hasV1RuntimeIndicators reports whether a parsed settings map contains v1-only
 // runtime fields (v1RuntimeIndicatorKeys) that are absent from the legacy
@@ -175,7 +188,14 @@ func ValidateSettings(data []byte, schemaVersion string) ([]ValidationError, err
 		errs = append(errs, ValidateSharedDirSizes(vs.Runtimes, vs.Profiles)...)
 		errs = append(errs, RemovedStorageOverrideErrors(vs.Runtimes, vs.Profiles, RuntimeBrokerInstanceTargets(vs.Server.Broker.Instances))...)
 		if err := ValidateStorageBlocks(vs.Server.ProjectStorage, vs.Server.WorkspaceStorage, vs.Server.SharedDirStorage, vs.Server.HomeStorage); err != nil {
-			errs = append(errs, ValidationError{Path: ProjectStorageKey, Message: err.Error()})
+			var fields FieldErrorList
+			if errors.As(err, &fields) {
+				for _, f := range fields {
+					errs = append(errs, ValidationError{Path: f.Path, Message: strings.TrimPrefix(strings.TrimPrefix(f.Error(), f.Path), ": "), StorageField: true})
+				}
+			} else {
+				errs = append(errs, ValidationError{Path: ProjectStorageKey, Message: err.Error()})
+			}
 		}
 		errs = append(errs, ValidatePlacement(vs.Runtimes, vs.Profiles, LiteralSiblingGroups(vs.Runtimes))...)
 		errs = append(errs, RuntimeBrokerInstanceDuplicateKeys(vs.Server.Broker.Instances)...)
@@ -193,9 +213,10 @@ func SettingsWarnings(data []byte, schemaVersion string) []string {
 		return nil
 	}
 	var vs struct {
-		Runtimes map[string]V1RuntimeConfig `yaml:"runtimes"`
-		Profiles map[string]V1ProfileConfig `yaml:"profiles"`
-		Server   struct {
+		Runtimes         map[string]V1RuntimeConfig `yaml:"runtimes"`
+		Profiles         map[string]V1ProfileConfig `yaml:"profiles"`
+		DefaultResources *api.ResourceSpec          `yaml:"default_resources"`
+		Server           struct {
 			HomeStorage *V1HomeStorageConfig `yaml:"home_storage"`
 		} `yaml:"server"`
 	}
@@ -203,6 +224,13 @@ func SettingsWarnings(data []byte, schemaVersion string) []string {
 		return nil
 	}
 	warnings := SafeToEvictIgnoredWarnings(vs.Runtimes, vs.Profiles)
+	// Resource quantities the server-config API rejects or warns about
+	// (ptone/scion#6581) are warnings here: a loaded file is never refused
+	// for them.
+	qErrs, qWarnings := ValidateResourceQuantities(vs.DefaultResources, vs.Profiles)
+	for _, e := range append(qErrs, qWarnings...) {
+		warnings = append(warnings, e.Error())
+	}
 	warnings = append(warnings, PlacementIgnoredWarnings(vs.Runtimes, vs.Profiles)...)
 	warnings = append(warnings, PlacementSettingsWarnings(vs.Runtimes, vs.Profiles)...)
 	return append(warnings, HomeStorageWindowWarnings(vs.Server.HomeStorage)...)

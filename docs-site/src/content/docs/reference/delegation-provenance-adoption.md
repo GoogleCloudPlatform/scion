@@ -82,6 +82,13 @@ this cohort:
 - with an adoption record under policy V1 (`adopted` or `recognized`) for
   that edge.
 
+This exception covers the owner's own user secrets, through `secret.use`. A
+separate fallback covers the Project, Hub and Broker variables and secrets of
+legacy agents, through the delivery permissions: see
+[Launch material for legacy agents](#launch-material-for-legacy-agents). Its
+`legacy_adopted_*` groups are keyed on the adopted edge's ceiling at any depth,
+so an agent can fall in that group and not in this one, or in both.
+
 For such an agent the ceiling lets the missing `secret.use` pass, and every
 other check still applies: a held or deleted agent, an agent-delegated chain,
 an edge recorded any other way, a terminal user who is inactive or not
@@ -282,6 +289,44 @@ because its provenance version is not supported keeps the same denial
 without these keys, because adoption does not apply to it. So does a denial
 of a permission that no adopted ceiling carries, such as the artifact
 permissions, which unrecorded chains never held.
+
+## Launch material for legacy agents
+
+When the Hub starts or restarts an agent, it authorizes each Project, Hub and Broker variable and secret, and each Project secret it sends for the broker to fetch a `gh://` skill, with the delivery permissions above (`secret.deliver`, `env_var.deliver`, `skill_injection.deliver`), walking the agent's delegation chain. Agents whose chain fails that walk only because of legacy data keep receiving that material, as they did before the check existed. A hop is legacy when it is one of:
+
+| Group (`cohort` in the log) | The hop's agent has |
+| :--- | :--- |
+| `legacy_no_edge` | no active edge in the project |
+| `legacy_sentinel_edge` | only the backfill's migration edge (`user:system/migration`) |
+| `legacy_unadopted_edge` | only an edge with unrecorded provenance, including scheduled children with role `none`, which adoption skips |
+| `uat_descendant_legacy` | only an edge recorded by its parent agent that lacks the delivery permissions only because, when the edge was recorded, the parent's chain did not allow them: an ancestor was created from a user access token before the delivery permissions applied to such an agent. Every agent between it and that ancestor must be of the same kind. Edges recorded since carry the delivery permissions and need no exception. Unlike the other groups, it still requires the root user's project admission, as its token-created ancestor does. The census counts this group; it is removed once the census reads zero. A remaining agent is moved off it by a reincarnate by its owner, which re-records its chain. |
+| `legacy_adopted_readonly`, `legacy_adopted_baseline`, `legacy_adopted_capped` | only an adopted edge (source `system_migration`) whose ceiling lacks the delivery permissions only because policy V1 capped it: the ceiling lies within the V1 row of the edge's own role. The group is named after the lowest V1 row the ceiling fits in (`readonly`, then `baseline`; `capped` if neither), whatever the edge role. Adoption keeps the edge role but caps the ceiling at the lower of the edge and applied roles, and intersects a child's ceiling with its adopted parent's. So an edge of role `full` can carry the `baseline` or `readonly` row, and it is served here. An edge re-issued by an agent delegator keeps the `system_migration` source and is judged the same way. |
+
+This fallback covers Project, Hub and Broker items only. The owner's own user secrets of adopted `baseline` and `readonly` agents follow their own exception, under different rules (an exact V1 row, an adoption record and the owner as delegator): see [Legacy exception: the owner's own user secrets for adopted baseline and readonly agents](#legacy-exception-the-owners-own-user-secrets-for-adopted-baseline-and-readonly-agents). One start can use both, each for its own items.
+
+Each item delivered this way is logged at `Warn` at most once an hour per agent and item, as `launch material delivered through the legacy fallback`. The line has the agent ID, the group, `exception` (`legacy`), and the item's name and scope. The Hub remembers the 16384 most recently logged items; beyond that it forgets the oldest first.
+
+### Agents created from a user access token
+
+An agent created from a user access token is not a legacy group. Its edge records the token's frozen permission list, which names API actions only, so it never lists the agent-only permissions `secret.deliver`, `env_var.deliver`, `skill_injection.deliver` and `secret.use`. The Hub treats these four as intrinsic to such an edge (`uat_intrinsic`): the token's list does not narrow them, as for an agent created from a sign-in. The stored edge stays the token's list verbatim. The rule applies only to an edge with recorded provenance whose source credential is a user access token of a user, and only at that edge: a narrower hop elsewhere on the chain still bounds it. `project.secret_read` and `agent.identity_token` are not intrinsic.
+
+So the delivery walk admits these agents strictly, with no fallback and no `Warn`, and applies the root user's project admission, as for any recorded chain. Each use of the rule is counted in the metric `scion.hub.authz.uat_intrinsic` (attributes `permission` and `path`), and the explain output names the step `uat_intrinsic`.
+
+The fallback only ever admits the three delivery permissions. It grants nothing else, whatever group an agent falls in.
+
+The fallback never applies when:
+
+- any agent on the chain is held;
+- a delegator or ancestor agent is deleted, missing or held, or the root user is not active;
+- the agent has more than one active edge in the project. Such agents are withheld for now: the `Warn` line names the cause `ceiling_provenance_ambiguous`, and the census counts them as `duplicate_edges`. This will be revisited once census numbers from real Hubs are available;
+- a hop has local-development provenance and the Hub does not run dev auth;
+- a recorded hop that is not one of the groups above has a ceiling without the permission. Examples: an agent whose parent's ceiling does hold the permission, or an adopted edge whose ceiling is not within the V1 row of its role;
+- an earlier check (the item's association with the agent, an access constraint, the test-admin policy) refuses the item;
+- the chain is fully recorded, which leaves the root user's project admission as the deciding check.
+
+When the walk cannot follow edges past a hop (`legacy_no_edge`, `legacy_sentinel_edge`), the agent's stored ancestry stands in for the rest of the chain: its root user must be active and every ancestor agent must exist, not be deleted and not be held. An agent with no stored ancestry is refused. The root user's project membership is not checked for these agents, which is the behaviour before the check existed.
+
+The fallback applies to start and restart selection, to the skill-fetch credentials sent with them, and to the create-time check for whether a requested key exists. Other users of the delivery permissions get the strict walk. To find the affected agents before or after an upgrade, run the read-only census against a copy of the Hub database or a read replica: `go run ./hack/delivery-census -driver sqlite -db <hub.db>` (add `-dev-auth` for a workstation Hub), or `-driver postgres -db <url>`. It opens the database read-only and reports, per agent, the group it falls in and what a start delivers, with counts by group and by deny cause.
 
 ## Admin recovery API
 

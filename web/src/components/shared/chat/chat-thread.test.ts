@@ -129,6 +129,20 @@ function historyCalls(): number {
   return apiFetch.mock.calls.filter((c) => String(c[0]).includes('/messages?')).length;
 }
 
+// Starred messages are on by default (DEFAULT_ON_FLAGS). This file tests the
+// thread without them: pin the experiment off, so the star-state request that
+// a history load schedules (a 50 ms debounce through the mocked apiFetch)
+// can never take a response a test queued for another call. The star paths
+// are tested in chat-thread-stars.test.ts and its siblings.
+beforeEach(() => {
+  (window as unknown as { __SCION_FEATURES__?: Record<string, boolean> }).__SCION_FEATURES__ = {
+    'web.chat_starred_messages': false,
+  };
+});
+afterEach(() => {
+  delete (window as unknown as { __SCION_FEATURES__?: unknown }).__SCION_FEATURES__;
+});
+
 describe('scion-chat-thread route-to-agent indicator', () => {
   beforeEach(() => {
     apiFetch.mockReset();

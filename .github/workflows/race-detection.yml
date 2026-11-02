@@ -8,9 +8,12 @@ on:
 permissions:
   contents: read
 
+# Fork CI gate (hack/check-fork-ci-gate.sh, cr-ci/workflows/README.md): on push
+# and schedule every job runs only in GoogleCloudPlatform/scion; forks stage PRs.
 jobs:
   race-detection:
     name: Race Detection — all packages (reporting only)
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     runs-on: ubuntu-latest
     continue-on-error: true
     timeout-minutes: 120
@@ -60,6 +63,7 @@ jobs:
 
   race-detection-hub:
     name: Race Detection — pkg/hub tagged (reporting only)
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     runs-on: ubuntu-latest
     continue-on-error: true
     # The pkg/hub package runs shard by shard (make test-hub-shards; the

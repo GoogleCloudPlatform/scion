@@ -179,15 +179,16 @@ var SecurityMutationSymbols = map[string]string{
 	"UpdateEncryptionMigration": "update-resource",
 
 	// Broker secret operations
-	"CreateBrokerSecret":     "create-resource",
-	"UpdateBrokerSecret":     "update-resource",
-	"DeleteBrokerSecret":     "delete-resource",
-	"CreateJoinToken":        "mint-credential",
-	"UpsertJoinToken":        "mint-credential",
-	"DeleteJoinToken":        "delete-resource",
-	"ConsumeJoinToken":       "delete-resource",
-	"DeleteExpiredJoinToken": "delete-resource",
-	"CleanExpiredJoinTokens": "delete-resource",
+	"CreateBrokerSecret":            "create-resource",
+	"UpdateBrokerSecret":            "update-resource",
+	"DeleteBrokerSecret":            "delete-resource",
+	"CreateJoinToken":               "mint-credential",
+	"UpsertJoinToken":               "mint-credential",
+	"DeleteJoinToken":               "delete-resource",
+	"ConsumeJoinToken":              "delete-resource",
+	"DeleteExpiredJoinToken":        "delete-resource",
+	"CleanExpiredJoinTokens":        "delete-resource",
+	"DeleteOrphanBrokerCredentials": "delete-resource",
 
 	// Invite code operations
 	"CreateInviteCode": "mint-credential",
@@ -285,6 +286,11 @@ var EntryPointExemptions = []EntryPointExemption{
 	// read access was checked; the artifact service verifies the
 	// capability on every request and never uses a session here.
 	{Pattern: "/api/v1/artifacts/view/", Kind: ExemptionPublicEndpoint, Reason: "Artifact view capability (minted on POST /api/v1/artifacts/{id}/versions/{seq}/view after artifact.read; HMAC over artifact, version and expiry, verified by the artifact service on every GET/HEAD), experiment-gated", Owner: "route_metadata.go"},
+	// Port page view (hub.port_view experiment): an agent's exposed port
+	// served on the short-lived page link in the path; the handler checks
+	// the link and the bound user's port access on every request and never
+	// authorizes by a session here.
+	{Pattern: "/api/v1/portview/", Kind: ExemptionPublicEndpoint, Reason: "Port page view link (created by the port link for a signed-in user after agent.port_access; checked on every request together with that user's current agent.port_access on the agent), experiment-gated", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/telegram/link", Kind: ExemptionInternalOnly, Reason: "Chat account link registration, broker-authenticated", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/telegram/link/status", Kind: ExemptionInternalOnly, Reason: "Chat account link status, broker-authenticated", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/discord/link", Kind: ExemptionInternalOnly, Reason: "Chat account link registration, broker-authenticated", Owner: "route_metadata.go"},
@@ -295,6 +301,7 @@ var EntryPointExemptions = []EntryPointExemption{
 	{Pattern: "/api/v1/admin/delegation-adoption", Kind: ExemptionHubAdmin, Reason: "Delegation-provenance adoption status; hub system admin on a session or local development credential only (route guard plus handler check). No registered permission, so it cannot be delegated.", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/admin/delegation-adoption/previews", Kind: ExemptionHubAdmin, Reason: "Delegation-provenance adoption preview; read-only planning, hub system admin on a session or local development credential only.", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/admin/delegation-adoption/commits", Kind: ExemptionHubAdmin, Reason: "Delegation-provenance adoption commit (adopt or revert); hub system admin on a session or local development credential only, rechecked in the commit transaction; per-hop mutation audit. Operation contract deferred, as for the other hub-admin exemptions.", Owner: "route_metadata.go"},
+	{Pattern: "/api/v1/admin/keys/status", Kind: ExemptionHubAdmin, Reason: "Server key status report (IDs, deadlines, policy state, aggregate counts; never key material or record identifiers), behind server.secret_rotation; unscoped platform admin on a session or local development credential only (route guard falls back to requireAdmin). No registered permission, so it cannot be delegated.", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/experiments", Kind: ExemptionAuthenticationOnly, Reason: "Resolved experiments map for signed-in callers, no resource-level authorization", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/profiling", Kind: ExemptionAuthenticationOnly, Reason: "Profiling switches for signed-in callers (one boolean), no resource-level authorization", Owner: "route_metadata.go"},
 
@@ -507,8 +514,8 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/user_delete_force.go", Function: "forceDeleteUserTx", Symbol: "MarkUserDeleting", OperationID: "user.admin.delete"},
 	{File: "pkg/hub/useraccesstoken.go", Function: "revokeUserAccessTokensForUserTx", Symbol: "RevokeUserAccessTokensForUser", OperationID: "user.admin.delete"},
 	{File: "pkg/hub/handlers_users_core.go", Function: "deleteUserRowCascadeModeTx", Symbol: "DeleteGroupMembershipsForUser", OperationID: "user.admin.delete"},
-	{File: "pkg/hub/handlers_users_core.go", Function: "guardAndCascadeUserRoleBindingsTx", Symbol: "DeleteRoleBindingsForPrincipal", OperationID: "user.admin.delete"},
-	{File: "pkg/hub/handlers_users_core.go", Function: "guardAndCascadeUserRoleBindingsTx", Symbol: "DeleteRoleBinding", OperationID: "user.admin.delete"},
+	{File: "pkg/hub/handlers_users_core.go", Function: "guardAndCascadeUserRoleBindingsCheckTx", Symbol: "DeleteRoleBindingsForPrincipal", OperationID: "user.admin.delete"},
+	{File: "pkg/hub/handlers_users_core.go", Function: "guardAndCascadeUserRoleBindingsCheckTx", Symbol: "DeleteRoleBinding", OperationID: "user.admin.delete"},
 	{File: "pkg/hub/handlers_users_core.go", Function: "updateUser", Symbol: "UpdateUser", OperationID: "user.update"},
 	{File: "pkg/hub/handlers_test_identities.go", Function: "handleCreateTestIdentity", Symbol: "CreateTestFixtureUser", OperationID: "testidentity.create"},
 	{File: "pkg/hub/handlers_test_admin_identities.go", Function: "handleIssueTestAdminIdentity", Symbol: "CreateTestAdminUser", OperationID: "testidentity.admin.create"},
@@ -709,15 +716,15 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/server.go", Function: "ensureSigningKeyWithSource", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key load, server infrastructure", Scope: "pkg/hub/server.go"}},
 
 	// -----------------------------------------------------------------------
-	// pkg/hub/oidckeys.go — OIDC key infrastructure
+	// pkg/hub/oidckeys/oidckeys.go — OIDC key infrastructure
 	// -----------------------------------------------------------------------
-	{File: "pkg/hub/oidckeys.go", Function: "backupKeyToStore", Symbol: "UpdateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset backup, cryptographic infrastructure", Scope: "pkg/hub/oidckeys.go"}},
-	{File: "pkg/hub/oidckeys.go", Function: "backupKeyToStore", Symbol: "UpsertSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset backup, cryptographic infrastructure", Scope: "pkg/hub/oidckeys.go"}},
-	{File: "pkg/hub/oidckeys.go", Function: "casCreateKeyInStore", Symbol: "CreateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset CAS create, cryptographic infrastructure", Scope: "pkg/hub/oidckeys.go"}},
-	{File: "pkg/hub/oidckeys.go", Function: "casCreateKeyInStore", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset CAS read, cryptographic infrastructure", Scope: "pkg/hub/oidckeys.go"}},
-	{File: "pkg/hub/oidckeys.go", Function: "loadKeysetFromDB", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset load, cryptographic infrastructure", Scope: "pkg/hub/oidckeys.go"}},
-	{File: "pkg/hub/oidckeys.go", Function: "loadOrCreateKey", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset load-or-create, cryptographic infrastructure", Scope: "pkg/hub/oidckeys.go"}},
-	{File: "pkg/hub/oidckeys.go", Function: "saveKeysetToDB", Symbol: "UpsertSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset save, cryptographic infrastructure", Scope: "pkg/hub/oidckeys.go"}},
+	{File: "pkg/hub/oidckeys/oidckeys.go", Function: "backupKeyToStore", Symbol: "UpdateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset backup, cryptographic infrastructure", Scope: "pkg/hub/oidckeys/oidckeys.go"}},
+	{File: "pkg/hub/oidckeys/oidckeys.go", Function: "backupKeyToStore", Symbol: "UpsertSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset backup, cryptographic infrastructure", Scope: "pkg/hub/oidckeys/oidckeys.go"}},
+	{File: "pkg/hub/oidckeys/oidckeys.go", Function: "casCreateKeyInStore", Symbol: "CreateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset CAS create, cryptographic infrastructure", Scope: "pkg/hub/oidckeys/oidckeys.go"}},
+	{File: "pkg/hub/oidckeys/oidckeys.go", Function: "casCreateKeyInStore", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset CAS read, cryptographic infrastructure", Scope: "pkg/hub/oidckeys/oidckeys.go"}},
+	{File: "pkg/hub/oidckeys/oidckeys.go", Function: "loadKeysetFromDB", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset load, cryptographic infrastructure", Scope: "pkg/hub/oidckeys/oidckeys.go"}},
+	{File: "pkg/hub/oidckeys/oidckeys.go", Function: "loadOrCreateKey", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset load-or-create, cryptographic infrastructure", Scope: "pkg/hub/oidckeys/oidckeys.go"}},
+	{File: "pkg/hub/oidckeys/oidckeys.go", Function: "saveKeysetToDB", Symbol: "UpsertSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset save, cryptographic infrastructure", Scope: "pkg/hub/oidckeys/oidckeys.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/conduit_grants.go — Conduit grant signing key ring
@@ -758,17 +765,14 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/brokerauth.go", Function: "CompleteBrokerJoin", Symbol: "CreateBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker join completion, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
 	{File: "pkg/hub/brokerauth.go", Function: "CompleteBrokerJoin", Symbol: "DeleteBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker join completion, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
 	{File: "pkg/hub/brokerauth.go", Function: "CompleteBrokerJoin", Symbol: "ConsumeJoinToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker join completion: single-use join token consumed in the join transaction, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
+	{File: "pkg/hub/brokerauth.go", Function: "RevokeExposedJoinToken", Symbol: "ConsumeJoinToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Plaintext join refusal: consumes the presented join token only when it is the broker's pending token (same hash, broker, unexpired), broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
+	{File: "pkg/hub/broker_orphan_credentials.go", Function: "sweepOrphanBrokerCredentials", Symbol: "DeleteOrphanBrokerCredentials", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Startup removal of broker secrets and join tokens that have no broker row, no caller", Scope: "pkg/hub/broker_orphan_credentials.go"}},
 	{File: "pkg/hub/server.go", Function: "brokerJoinTokenCleanupHandler", Symbol: "CleanExpiredJoinTokens", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Scheduled removal of expired broker join tokens, no caller", Scope: "pkg/hub/server.go"}},
 	{File: "pkg/hub/brokerauth.go", Function: "classifyUnconsumedJoinToken", Symbol: "DeleteExpiredJoinToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker join completion, expired join token cleanup, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
 	{File: "pkg/hub/brokerauth.go", Function: "issueJoinToken", Symbol: "UpsertJoinToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker registration, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
 	{File: "pkg/hub/brokerauth.go", Function: "GenerateAndStoreSecret", Symbol: "CreateBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker secret generation, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
+	{File: "pkg/hub/brokerauth.go", Function: "MintSecretIfAbsent", Symbol: "CreateBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "First broker secret on the deprecated embedded registration path, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
 	{File: "pkg/hub/brokerauth.go", Function: "RotateBrokerSecret", Symbol: "UpdateBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker secret rotation, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
-
-	// -----------------------------------------------------------------------
-	// pkg/hub/handlers_runtime_brokers.go — broker deregistration cleanup
-	// -----------------------------------------------------------------------
-	{File: "pkg/hub/handlers_runtime_brokers.go", Function: "deleteRuntimeBroker", Symbol: "DeleteBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker deregistration cleanup: delete HMAC secret for removed broker", Scope: "pkg/hub/handlers_runtime_brokers.go"}},
-	{File: "pkg/hub/handlers_runtime_brokers.go", Function: "deleteRuntimeBroker", Symbol: "DeleteJoinToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker deregistration cleanup: delete join token for removed broker", Scope: "pkg/hub/handlers_runtime_brokers.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/brokerclient.go / controlchannel_client.go / httpdispatcher.go

@@ -369,7 +369,8 @@ func newNFSHomeStoragePlan(in homeStorageInput, gs *config.VersionedSettings, le
 		return nil, homeStorageUnavailable("%v", err)
 	}
 	if hl.Share.PVName == "" {
-		return nil, homeStorageUnavailable("home storage nfs needs a claim (shares[0].pv_name) on the project storage share for profile %q", in.Profile)
+		return nil, homeStorageUnavailable("home storage nfs needs a claim (shares[0].pv_name) on the project storage share for profile %q: "+
+			"without it Kubernetes pods mount the share inline, which NFS homes do not support yet", in.Profile)
 	}
 	return &homeStoragePlan{
 		Backend:     config.HomeStorageBackendNFS,

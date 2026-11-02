@@ -268,15 +268,11 @@ func (rs *ResourceStore) BootstrapSource(ctx context.Context, src ResourceSource
 	}
 	defer cleanup()
 
-	if err := transfer.NormalizeDir(dir); err != nil {
-		result.Failed++
-		return result, fmt.Errorf("%s: normalize staged dir: %w", p.Label(), err)
-	}
-
-	cd, err := rs.collectFiles(dir)
+	// The staged directory is normalized and collected through one root.
+	cd, err := rs.normalizeAndCollect(dir)
 	if err != nil {
 		result.Failed++
-		return result, err
+		return result, fmt.Errorf("%s: staged dir: %w", p.Label(), err)
 	}
 	defer func() { _ = cd.root.Close() }()
 

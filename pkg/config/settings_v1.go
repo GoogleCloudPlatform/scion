@@ -171,7 +171,9 @@ func applyHarnessOverride(result HarnessConfigEntry, override V1HarnessOverride)
 // *ActiveProfileError naming the configured value and the stored profiles.
 // A named profile missing
 // from an overlaid map gives a *StoredProfileNotFoundError naming it and
-// the stored profiles.
+// the stored profiles. When the overlay supplied the profiles and the
+// resolved profile names a runtime the runtimes do not define, the error
+// is a *StoredProfileRuntimeNotFoundError (ptone/scion#4889).
 // The runtime type is V1RuntimeConfig.Type if set, otherwise the map key name.
 func (vs *VersionedSettings) ResolveRuntime(profileName string) (V1RuntimeConfig, string, error) {
 	if profileName == "" {
@@ -189,6 +191,9 @@ func (vs *VersionedSettings) ResolveRuntime(profileName string) (V1RuntimeConfig
 	}
 	rtConfig, ok := vs.Runtimes[profile.Runtime]
 	if !ok {
+		if vs.storedProfileNames != nil {
+			return V1RuntimeConfig{}, "", &StoredProfileRuntimeNotFoundError{Profile: profileName, Runtime: profile.Runtime, Available: sortedNames(vs.Runtimes)}
+		}
 		return V1RuntimeConfig{}, "", fmt.Errorf("runtime %q not found for profile %q", profile.Runtime, profileName)
 	}
 
@@ -1396,6 +1401,14 @@ type V1ServerConfig struct {
 	// world-readable keyring file (server.keyring_file_allow_world_readable).
 	// See GlobalConfig.KeyringFileAllowWorldReadable.
 	KeyringFileAllowWorldReadable bool `json:"keyring_file_allow_world_readable,omitempty" yaml:"keyring_file_allow_world_readable,omitempty" koanf:"keyring_file_allow_world_readable"`
+	// TrustedProxies lists the TLS-terminating proxies whose
+	// X-Forwarded-Proto the hub trusts for its hub-broker transport check
+	// (server.trusted_proxies, TrustedProxiesKey). See GlobalConfig.TrustedProxies.
+	// A pointer, so that "not set" (nil: a proxy on this host is trusted)
+	// and an explicit empty list (trust no proxy) both survive a struct
+	// round trip: omitempty drops only nil, and a non-nil empty list is
+	// written as trusted_proxies: []. A null value decodes as nil (not set).
+	TrustedProxies *[]string `json:"trusted_proxies,omitempty" yaml:"trusted_proxies,omitempty" koanf:"trusted_proxies"`
 
 	// Maintenance holds binary auto-update and deployment tier settings.
 	Maintenance *V1MaintenanceConfig `json:"maintenance,omitempty" yaml:"maintenance,omitempty" koanf:"maintenance"`
@@ -1726,6 +1739,9 @@ type V1ServerHubPortProxyConfig struct {
 	// headers, the WebSocket handshake included (e.g. "60s"; default
 	// "60s", between "5s" and "10m"). The body is not time-limited.
 	ResponseHeaderTimeout string `json:"response_header_timeout,omitempty" yaml:"response_header_timeout,omitempty" koanf:"response_header_timeout"`
+	// ViewTTL is how long a page view link stays valid (experiment
+	// hub.port_view; e.g. "2h"; default "2h", between "15m" and "24h").
+	ViewTTL string `json:"view_ttl,omitempty" yaml:"view_ttl,omitempty" koanf:"view_ttl"`
 }
 
 // V1ServerHubConduitConfig holds the conduit settings of the hub server
@@ -4160,6 +4176,10 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 	if v1.KeyringFileAllowWorldReadable {
 		gc.KeyringFileAllowWorldReadable = true
 	}
+	if v1.TrustedProxies != nil {
+		gc.TrustedProxies = append([]string(nil), (*v1.TrustedProxies)...)
+		gc.TrustedProxiesSet = true
+	}
 
 	// Hub server config
 	if v1.Hub != nil {
@@ -4317,7 +4337,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 			}
 		}
 		if p := v1.Hub.PortProxy; p != nil {
-			gc.Hub.PortProxy = HubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout}
+			gc.Hub.PortProxy = HubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout, ViewTTL: p.ViewTTL}
 		}
 		if o := v1.Hub.Observability; o != nil {
 			gc.Hub.Observability = HubObservabilityConfig{
@@ -4648,6 +4668,11 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 
 		KeyringFileAllowWorldReadable: gc.KeyringFileAllowWorldReadable,
 	}
+	if gc.TrustedProxiesSet || len(gc.TrustedProxies) > 0 {
+		// Non-nil even when empty, so an explicit [] is written back.
+		list := append([]string{}, gc.TrustedProxies...)
+		v1.TrustedProxies = &list
+	}
 
 	// Hub server config
 	v1Hub := &V1ServerHubConfig{
@@ -4716,7 +4741,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		}
 	}
 	if p := gc.Hub.PortProxy; !p.IsZero() {
-		v1Hub.PortProxy = &V1ServerHubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout}
+		v1Hub.PortProxy = &V1ServerHubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout, ViewTTL: p.ViewTTL}
 	}
 	if o := gc.Hub.Observability; !o.IsZero() {
 		v1Hub.Observability = &V1ServerHubObservabilityConfig{
@@ -6589,6 +6614,13 @@ func writeVersionedSettingsFile(lock *SettingsLock, dir, targetPath string, vs *
 	return writeSettingsFileAtomic(lock, targetPath, data)
 }
 
+// storageFieldMigrationWarning is the migration warning for a project
+// storage field that breaks a rule: the file is still converted, but
+// `scion config validate` and a server start refuse it until it is fixed.
+func storageFieldMigrationWarning(ve ValidationError) string {
+	return fmt.Sprintf("%s; fix it before starting the server (scion config validate reports it, and a hub refuses to start)", ve.Error())
+}
+
 // MigrateSettingsFile migrates a single legacy settings file in dir to versioned format.
 // If a server.yaml exists in the same directory, it is also merged into the settings
 // under the "server" key and backed up.
@@ -6731,11 +6763,17 @@ func migrateSettingsFileLocked(lock *SettingsLock, dir string, dryRun bool) (*Mi
 	if err != nil {
 		return nil, fmt.Errorf("validation error: %w", err)
 	}
-	if len(validationErrors) > 0 {
-		var errMsgs []string
-		for _, ve := range validationErrors {
-			errMsgs = append(errMsgs, ve.Error())
+	var errMsgs []string
+	for _, ve := range validationErrors {
+		if ve.StorageField {
+			// The file is converted anyway, so the operator has the file
+			// to fix; validation and server start still refuse it.
+			result.Warnings = append(result.Warnings, storageFieldMigrationWarning(ve))
+			continue
 		}
+		errMsgs = append(errMsgs, ve.Error())
+	}
+	if len(errMsgs) > 0 {
 		return nil, fmt.Errorf("migrated settings failed validation: %s", strings.Join(errMsgs, "; "))
 	}
 
@@ -6761,6 +6799,10 @@ func migrateSettingsFileLocked(lock *SettingsLock, dir string, dryRun bool) (*Mi
 			return nil, fmt.Errorf("validation error: %w", err)
 		}
 		for _, ve := range carriedErrors {
+			if ve.StorageField {
+				result.Warnings = append(result.Warnings, storageFieldMigrationWarning(ve))
+				continue
+			}
 			result.Warnings = append(result.Warnings,
 				fmt.Sprintf("kept setting does not match the v1 schema: %s", ve.Error()))
 		}
@@ -6883,6 +6925,9 @@ func loadServerConfigOnly(path string) (*GlobalConfig, error) {
 	if err := k.Unmarshal("", &gc); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal server config: %w", err)
 	}
+	// trustedProxies: [] is an explicit choice (trust no proxy), so the
+	// migrated settings.yaml keeps it (ConvertGlobalToV1ServerConfig).
+	gc.TrustedProxiesSet = k.Exists("trustedProxies")
 	return &gc, nil
 }
 

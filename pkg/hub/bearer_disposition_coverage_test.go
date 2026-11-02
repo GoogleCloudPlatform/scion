@@ -488,7 +488,8 @@ func TestProjectSubRoutes_EveryRecordedPathReachesItsBranch(t *testing.T) {
 // nonHTTPDetailReceivers maps a "<function>:<detail>" detail to the
 // receiver type that must declare the function.
 var nonHTTPDetailReceivers = map[string]string{
-	"controlchannel": "ControlChannelManager",
+	"controlchannel":   "ControlChannelManager",
+	"brokerconnection": "BrokerConnection",
 }
 
 // catalogNonHTTPEntryProblem returns why a non-HTTP catalog entry point

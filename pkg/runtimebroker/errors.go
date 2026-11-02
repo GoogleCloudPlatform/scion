@@ -53,20 +53,23 @@ type ErrorResponse struct {
 
 // Error codes matching the Runtime Broker API specification.
 const (
-	ErrCodeInvalidRequest     = "invalid_request"
-	ErrCodeValidationError    = "validation_error"
-	ErrCodeUnauthorized       = "unauthorized"
-	ErrCodeForbidden          = "forbidden"
-	ErrCodeAgentNotFound      = "agent_not_found"
-	ErrCodeNotFound           = "not_found"
-	ErrCodeConflict           = "conflict"
-	ErrCodeMethodNotAllowed   = "method_not_allowed"
-	ErrCodeInternalError      = "internal_error"
-	ErrCodeRuntimeError       = "runtime_error"
-	ErrCodeRuntimeUnavailable = "runtime_unavailable"
-	ErrCodeHubUnreachable     = "hub_unreachable"
-	ErrCodeTemplateError      = "template_error"
-	ErrCodeSkillResolution    = api.BrokerErrCodeSkillResolution
+	ErrCodeInvalidRequest  = "invalid_request"
+	ErrCodeValidationError = "validation_error"
+	ErrCodeUnauthorized    = "unauthorized"
+	ErrCodeForbidden       = "forbidden"
+	ErrCodeAgentNotFound   = "agent_not_found"
+	ErrCodeNotFound        = "not_found"
+	ErrCodeConflict        = "conflict"
+	// ErrCodeProjectPathNotInitialized: a plain project's explicit project
+	// path holds no .scion directory or marker (agent.ErrProjectPathNotInitialized).
+	ErrCodeProjectPathNotInitialized = agent.ProjectPathNotInitializedCode
+	ErrCodeMethodNotAllowed          = "method_not_allowed"
+	ErrCodeInternalError             = "internal_error"
+	ErrCodeRuntimeError              = "runtime_error"
+	ErrCodeRuntimeUnavailable        = "runtime_unavailable"
+	ErrCodeHubUnreachable            = "hub_unreachable"
+	ErrCodeTemplateError             = "template_error"
+	ErrCodeSkillResolution           = api.BrokerErrCodeSkillResolution
 
 	// ErrCodeWorkspaceStorageUnconfigured marks a create whose workspace was
 	// uploaded to bucket storage (workspaceStoragePath set) when neither the
@@ -74,6 +77,10 @@ const (
 	// answered with 422 before anything is provisioned, and the hub relays
 	// it unchanged instead of folding it into a 502 (ptone/scion#3422).
 	ErrCodeWorkspaceStorageUnconfigured = api.BrokerErrCodeWorkspaceStorageUnconfigured
+
+	// ErrCodeWorkspaceDownloadModeUnsupported marks a create whose
+	// workspaceDownloadMode this broker does not know (422).
+	ErrCodeWorkspaceDownloadModeUnsupported = api.BrokerErrCodeWorkspaceDownloadModeUnsupported
 
 	// ErrCodeIdentityNotMapped and ErrCodeIdentityKSAMismatch mark a GCP
 	// identity "assign" dispatch on Kubernetes refused for a missing or
@@ -114,8 +121,8 @@ const (
 
 	// ErrCodeProjectStorageUnavailable is the 503 code for a dispatch of a
 	// project on shared project storage whose share is not mounted on the
-	// broker (ptone/scion#5823).
-	ErrCodeProjectStorageUnavailable = "project_storage_unavailable"
+	// broker (ptone/scion#5823); see api.BrokerErrCodeProjectStorageUnavailable.
+	ErrCodeProjectStorageUnavailable = api.BrokerErrCodeProjectStorageUnavailable
 
 	// ErrCodeRuntimeLogsUnsupported marks a logs request that a runtime
 	// declines to serve at all, rather than one that failed. The broker uses
@@ -480,6 +487,11 @@ func notFoundResourceText(err error, templateSlug string) string {
 // text for the same failure (ptone/scion#3113).
 const opCreateAgent = "create agent"
 
+// opStartAgent is the runtimeOpError op for a start launch's Manager.Start
+// failure: the same "Failed to start agent" lead the synchronous start
+// handler writes.
+const opStartAgent = "start agent"
+
 // runtimeCauseCodes maps the Kubernetes reasons that get a details.cause
 // code on a create's 500 to that code: an api.BrokerRuntimeCause value, the
 // set the hub relays. The reasons are kept few on purpose
@@ -742,8 +754,9 @@ func skillResolutionFailedWithDetails(w http.ResponseWriter, err *agent.SkillRes
 // this package): a plain error still gets the pre-existing generic 500
 // behavior. The exceptions are errSavedProfileUnresolved (a saved profile
 // that no longer resolves), errDefaultProfileUnresolved (a dispatch needing
-// a default profile the Hub's stored profiles lack) and
-// errProfileUnresolved (a named profile the Hub's stored profiles lack),
+// a default profile the Hub's stored profiles lack),
+// errProfileUnresolved (a named profile the Hub's stored profiles lack) and
+// errProfileRuntimeUnresolved (a stored profile whose runtime is missing),
 // which are checked ahead of every other case and written as the retryable
 // 503 from writeProfileUnresolved; their text is client-safe by
 // construction.
@@ -779,8 +792,9 @@ func (s *Server) writeStartContextError(w http.ResponseWriter, err error, op str
 	// errSavedProfileUnresolved's text names only the agent, the profile
 	// and a fixed or ResolveRuntime cause, and is client-safe as is;
 	// errDefaultProfileUnresolved's and errProfileUnresolved's also name
-	// the stored profile names.
-	if errors.Is(err, errSavedProfileUnresolved) || errors.Is(err, errDefaultProfileUnresolved) || errors.Is(err, errProfileUnresolved) {
+	// the stored profile names, and errProfileRuntimeUnresolved's the
+	// stored runtime names.
+	if errors.Is(err, errSavedProfileUnresolved) || errors.Is(err, errDefaultProfileUnresolved) || errors.Is(err, errProfileUnresolved) || errors.Is(err, errProfileRuntimeUnresolved) {
 		writeProfileUnresolved(w, err)
 		return http.StatusServiceUnavailable
 	}
@@ -812,8 +826,10 @@ func (s *Server) writeStartContextError(w http.ResponseWriter, err error, op str
 		return http.StatusInternalServerError
 	}
 	if sce.Status == http.StatusServiceUnavailable && sce.Code == ErrCodeProjectStorageUnavailable {
-		// Its message names only the share's mount point (operator
-		// configuration) and the remedy.
+		// Its message is one of the path-free project storage texts
+		// (runtime.ProjectShareClientTexts): it names the mount point only
+		// as "its configured mount point" and gives the remedy; the path is
+		// in the broker log.
 		writeError(w, sce.Status, sce.Code, sce.Message, sce.Details)
 		return sce.Status
 	}

@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -33,6 +34,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
@@ -94,6 +96,10 @@ type ServerConfigDBResponse struct {
 	// reports a node env, and each profile's value (ptone/scion#3916).
 	// Read-only.
 	ImageRegistryProvenance *ImageRegistryProvenance `json:"image_registry_provenance,omitempty"`
+
+	// PlacementPreflight is the read-only Kubernetes placement pre-upgrade
+	// report (counts only). Set by the GET handler only.
+	PlacementPreflight *PlacementPreflightView `json:"placement_preflight,omitempty"`
 }
 
 // SupersededKey represents a bootstrap-material key whose value in the
@@ -127,7 +133,9 @@ type ServerConfigUpdateDBRequest struct {
 	// A section merged on its current row (mergeSectionOnCurrent) that has
 	// no entry uses the revision the merge read as an implicit CAS; the
 	// map sections (runtimes, profiles, harness_configs) use
-	// last-writer-wins.
+	// last-writer-wins. runtimes and profiles are written together in one
+	// transaction that also compares the revision of the one the body
+	// leaves out (placementPairForSave).
 	ExpectedRevisions map[string]int64 `json:"expected_revisions,omitempty"`
 }
 
@@ -148,6 +156,7 @@ func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	resp.StorageOverrideErrors = s.removedStorageOverrideErrors()
+	resp.PlacementPreflight = s.placementPreflight(r.Context(), ops)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -529,10 +538,12 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 
 		var superseded []SupersededKey
 		for key, bootstrapVal := range bootstrapMap {
-			if koanfPath := opsettings.KoanfPathFromSectionKey(sec.Name, key); startupOnlyLayer1Keys[koanfPath] != nil {
-				// The hub does not apply the saved value of this key, so it
-				// supersedes nothing: the startup value stays in effect
-				// (ptone/scion#6000).
+			if koanfPath := opsettings.KoanfPathFromSectionKey(sec.Name, key); opsettings.IsEnvPinnedLayer1Key(koanfPath) &&
+				koanfPath != config.PublicURLKey && ops.envOverrides[koanfPath] {
+				// A SCION_SERVER_* variable pins this key on this node, so
+				// the database value does not supersede it; the field's
+				// environment badge says so (authorized_domains,
+				// ptone/scion#6000; public_url is handled below).
 				continue
 			}
 			if sec.Name == "endpoints" && key == "public_url" && publicURLPinned {
@@ -656,8 +667,13 @@ func unseededSectionMap(unseededK *koanf.Koanf, sectionName string) map[string]i
 // endpoints hub_name and public_url: a managed endpoints row carries them
 // only after an admin sets them, and Snapshot falls back to the bootstrap
 // value (for public_url, so does the hub's endpoint resolution at startup,
-// ptone/scion#3905).
+// ptone/scion#3905). It is also the case for access authorized_domains: a
+// row without a list (a cleared list is stored that way) runs with the
+// startup list (authorizedDomainsForSnapshot, ptone/scion#6000).
 func bootstrapAppliesWhenAbsent(section, key string) bool {
+	if section == "access" && key == "authorized_domains" {
+		return true
+	}
 	return section == "endpoints" && (key == "hub_name" || key == "public_url" || key == endpointsImageRegistryKey)
 }
 
@@ -681,6 +697,14 @@ func (s *Server) applyRunningValuesForUnsetKeys(resp *ServerConfigResponse, snap
 	if snap.SoftDeleteRetainFiles == nil {
 		resp.Server.Hub.SoftDeleteRetainFiles = &retainFiles
 	}
+	// authorized_domains: with no saved list the hub runs with the startup
+	// list (authorizedDomainsForSnapshot, ptone/scion#6000), so GET shows
+	// it rather than an empty list that reads as "every domain".
+	if len(snap.AuthorizedDomains) == 0 && resp.Server.Auth != nil {
+		if running := s.AuthorizedDomains(); len(running) > 0 {
+			resp.Server.Auth.AuthorizedDomains = running
+		}
+	}
 	// image_registry: the managed value, else this replica's file tier,
 	// never a node env; profiles show managed values only. A save compares
 	// with exactly these values (ptone/scion#3916).
@@ -697,8 +721,8 @@ const (
 	softDeleteRetainFilesKey = "server.hub.soft_delete_retain_files"
 )
 
-// echoedRunningValueKeys returns the keys of soft_delete_retention and
-// soft_delete_retain_files that the request sends back
+// echoedRunningValueKeys returns the keys of soft_delete_retention,
+// soft_delete_retain_files and authorized_domains that the request sends back
 // as the running value GET showed for them while no value is stored
 // (applyRunningValuesForUnsetKeys). Such a value is an echo, not a change:
 // writing it would pin this replica's startup value (which may come from
@@ -720,6 +744,14 @@ func (s *Server) echoedRunningValueKeys(ctx context.Context, ops *OperationalSet
 	s.mu.RUnlock()
 
 	echoed := map[string]bool{}
+	// authorized_domains: GET shows the running list while none is saved
+	// (ptone/scion#6000); sending it back is an echo.
+	if req.Server != nil && req.Server.Auth != nil && len(req.Server.Auth.AuthorizedDomains) > 0 {
+		if running := s.AuthorizedDomains(); len(running) > 0 && sameDomainSet(req.Server.Auth.AuthorizedDomains, running) &&
+			storedKeyUnset(ctx, ops, authorizedDomainsKey) {
+			echoed[authorizedDomainsKey] = true
+		}
+	}
 	if req.Server != nil && req.Server.Hub != nil {
 		hub := req.Server.Hub
 		if retention > 0 && hub.SoftDeleteRetention != "" {
@@ -1042,6 +1074,8 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// ignored, so the echo of a changed report is not refused
 	// (ptone/scion#3916).
 	rawBody = dropImageRegistryProvenance(rawBody)
+	// Likewise the read-only placement pre-upgrade report of a GET body.
+	rawBody = dropTopLevelMember(rawBody, placementPreflightKey)
 	if s.rejectGateProtectedSettingsKeys(w, rawBody) {
 		return
 	}
@@ -1065,6 +1099,9 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	rawBody = cl.body
+	if rejectRepeatedPlacementSections(w, rawBody) {
+		return
+	}
 	var req ServerConfigUpdateDBRequest
 	if err := json.Unmarshal(rawBody, &req); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
@@ -1181,11 +1218,8 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		if len(owned) > 0 {
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]interface{}{
-				"error":   "hub_owned_keys_rejected",
-				"message": "The broker ID and token are written by the hub itself and cannot be changed through the server config API.",
-				"keys":    owned,
-			})
+			writeSettingsCodedKeysError(w, "hub_owned_keys_rejected",
+				"The broker ID and token are written by the hub itself and cannot be changed through the server config API.", owned)
 			return
 		}
 	}
@@ -1193,11 +1227,8 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// Reject if any Layer-0 keys are present — 422 before any write.
 	if len(layer0Keys) > 0 {
 		sort.Strings(layer0Keys)
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]interface{}{
-			"error":   "layer0_rejected",
-			"message": "Bootstrap settings are managed via settings.yaml / deployment tooling; restart required.",
-			"keys":    layer0Keys,
-		})
+		writeSettingsCodedKeysError(w, "layer0_rejected",
+			"Bootstrap settings are managed via settings.yaml / deployment tooling; restart required.", layer0Keys)
 		return
 	}
 
@@ -1213,11 +1244,8 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			"keys", unclassifiedKeys,
 			"user", updatedBy,
 		)
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]interface{}{
-			"error":   "unclassified_keys_rejected",
-			"message": "These settings cannot be persisted in database mode. They must be configured via settings.yaml / deployment tooling.",
-			"keys":    unclassifiedKeys,
-		})
+		writeSettingsCodedKeysError(w, "unclassified_keys_rejected",
+			"These settings cannot be persisted in database mode. They must be configured via settings.yaml / deployment tooling.", unclassifiedKeys)
 		return
 	}
 
@@ -1286,10 +1314,12 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// NestedDurations) must parse as a Go duration; "" or null clears.
 	// Checked on the documents built from the body, before any merge, so
 	// only the values sent are checked.
-	if fieldErr := validateDurationSettings(sectionDocs); fieldErr != nil {
-		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, fieldErr.Error(), map[string]interface{}{
-			"field": fieldErr.field,
-		})
+	if bad := validateDurationSettings(sectionDocs); len(bad) > 0 {
+		entries := make([]settingsFieldError, 0, len(bad))
+		for _, fe := range bad {
+			entries = append(entries, settingsFieldError{Field: fe.field, Message: fe.msg})
+		}
+		writeSettingsValidation(w, bad[0].msg, entries, nil)
 		return
 	}
 
@@ -1343,6 +1373,39 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
+	// A save that sends authorized_domains or admin_emails may not leave
+	// access settings that refuse sign-in for the saving account
+	// (ptone/scion#6000). The check reads the merged access document, so a
+	// value kept from the row counts. It always checks the lists as saved:
+	// they apply on every replica that does not pin the domain list, and
+	// on this node once its pin is removed. When this node pins the list
+	// through SCION_SERVER_*, a save that sends admin_emails is also
+	// checked against the pinned list, which applies here. Either refuses.
+	if doc, ok := sectionDocs["access"]; ok {
+		fp := sectionBodyPresence("access", rawBody)
+		domainsSent := fp.has("authorized_domains") && !echoedRunning[authorizedDomainsKey]
+		adminsSent := fp.has("admin_emails")
+		pinned := slices.Contains(ops.EnvOverriddenKeys(), authorizedDomainsKey)
+		if adminsSent || domainsSent {
+			var merged opsettings.AccessSettings
+			if err := json.Unmarshal(doc, &merged); err != nil {
+				slog.Error("PUT server-config: failed to decode access document", "error", err)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+				return
+			}
+			domains, admins := s.accessListsAfterDBSave(merged, false)
+			if s.rejectAuthorizedDomainsLockout(r.Context(), w, updatedBy, domains, admins) {
+				return
+			}
+			if pinned && adminsSent {
+				domains, admins = s.accessListsAfterDBSave(merged, true)
+				if s.rejectAuthorizedDomainsLockout(r.Context(), w, updatedBy, domains, admins) {
+					return
+				}
+			}
+		}
+	}
+
 	// profiles replaces the section wholesale: a profile the body leaves
 	// out is deleted with its values, and a profile's omitted or ""
 	// image_registry stores none. GET shows managed profile registries
@@ -1374,6 +1437,44 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
+	// runtimes: the body's map decides which entries exist, and each sent
+	// entry is merged key by key on the stored one, so a stored key the
+	// body leaves out, including one V1RuntimeConfig does not model, is
+	// kept (ptone/scion#6580; mergeRuntimeEntries). The row revision read
+	// is the CAS base.
+	var runtimeMergeWarnings []string
+	var runtimesBefore map[string]config.V1RuntimeConfig
+	if _, ok := sectionDocs["runtimes"]; ok {
+		var rowValue []byte
+		rev := int64(0)
+		got, err := ops.store.GetHubSetting(r.Context(), "runtimes")
+		switch {
+		case err == nil:
+			rowValue, rev = got.Value, got.Revision
+		case errors.Is(err, store.ErrNotFound):
+		default:
+			slog.Error("PUT server-config: failed to read runtimes section", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
+			return
+		}
+		// The stored runtimes for the placement save checks: the row, or
+		// the effective runtimes when there is no row or it does not
+		// decode (a bootstrap-origin hub), so a stored value never counts
+		// as one this save sets.
+		if len(bytes.TrimSpace(rowValue)) == 0 || json.Unmarshal(rowValue, &runtimesBefore) != nil {
+			runtimesBefore = ops.Snapshot().Runtimes
+		}
+		merged, warnings, err := mergeRuntimesRow(rowValue, req.Runtimes, sentRuntimesObject(rawBody))
+		if err != nil {
+			slog.Error("PUT server-config: failed to build runtimes document", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+			return
+		}
+		sectionDocs["runtimes"] = merged
+		mergedBaseRevs["runtimes"] = rev
+		runtimeMergeWarnings = warnings
+	}
+
 	// The start-claim keys are checked on the merged lifecycle document,
 	// so a value carried from the row counts as well. They follow the same
 	// contract as the other lifecycle keys: omitted keeps, "" or null
@@ -1384,7 +1485,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		var lc opsettings.LifecycleSettings
 		if err := json.Unmarshal(doc, &lc); err == nil {
 			if err := validateStartClaimSettingStrings(s.config.StartClaim, lc); err != nil {
-				writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, err.Error(), nil)
+				writeSettingsFieldError(w, startClaimErrorField(err), err.Error())
 				return
 			}
 		}
@@ -1428,16 +1529,10 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			// read, so the write must be a CAS on that row's revision. A
 			// client revision that differs (-1 included) cannot carry it.
 			if pinned, ok := req.ExpectedRevisions["telemetry"]; ok && restored > 0 && pinned != rev {
-				writeJSON(w, http.StatusConflict, map[string]interface{}{
-					"error":   "revision_conflict",
-					"message": "telemetry.cloud.headers holds masked values, which are kept only on the current revision of the telemetry section; reload and save again.",
-					"applied": map[string]int64{},
-					"conflicted": []map[string]interface{}{{
-						"section":           "telemetry",
-						"expected_revision": pinned,
-						"current_revision":  rev,
-					}},
-				})
+				writeSettingsRevisionConflict(w,
+					"telemetry.cloud.headers holds masked values, which are kept only on the current revision of the telemetry section; reload and save again.",
+					[]map[string]interface{}{settingsConflictEntry("telemetry", pinned, rev)},
+					map[string]interface{}{"applied": map[string]int64{}})
 				return
 			}
 		}
@@ -1504,38 +1599,12 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	if doc, ok := sectionDocs["federation"]; ok {
 		var fedSettings opsettings.FederationSettings
 		if err := json.Unmarshal(doc, &fedSettings); err == nil {
-			// Validate duration strings before conversion (which silently
-			// falls back to zero for invalid values). Invalid durations like
-			// "1hour" would fail at time.ParseDuration during ApplySnapshot.
-			// A value sent in the body was checked by validateDurationSettings;
-			// this catches one carried over from the stored row by the merge.
-			if fedSettings.RefreshInterval != "" {
-				if _, err := time.ParseDuration(fedSettings.RefreshInterval); err != nil {
-					writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-						fmt.Sprintf("invalid refresh_interval %q: %v", fedSettings.RefreshInterval, err),
-						map[string]interface{}{"field": "server.federation.refresh_interval"})
-					return
-				}
-			}
-			if fedSettings.DebounceInterval != "" {
-				if _, err := time.ParseDuration(fedSettings.DebounceInterval); err != nil {
-					writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-						fmt.Sprintf("invalid debounce_interval %q: %v", fedSettings.DebounceInterval, err),
-						map[string]interface{}{"field": "server.federation.debounce_interval"})
-					return
-				}
-			}
-
-			fedCfg := convertFederationSettingsToConfig(fedSettings)
-			if errs := fedCfg.Validate(); len(errs) > 0 {
-				var errMsgs []string
-				for _, e := range errs {
-					errMsgs = append(errMsgs, e.Error())
-				}
-				writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-					"federation config validation failed", map[string]interface{}{
-						"errors": errMsgs,
-					})
+			// Every failure is reported in one response (ptone/scion#4450).
+			if entries := federationSaveErrors(fedSettings); len(entries) > 0 {
+				// The message is the first entry's "<field>: <message>", so
+				// it names the key like the other settings errors
+				// (ptone/scion#4451).
+				writeSettingsValidation(w, "", entries, nil)
 				return
 			}
 		} else {
@@ -1550,6 +1619,9 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// schema — Kubernetes quantity check), naming the offending key so a bad
 	// value is rejected here instead of failing every agent start later.
 	var saveWarnings []string
+	// runtimes and profiles are written below in one transaction that
+	// compares the revision of an omitted section the save checks used.
+	var placement placementPair
 	{
 		var runtimes opsettings.RuntimesSettings
 		var profiles opsettings.ProfilesSettings
@@ -1559,15 +1631,16 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		if doc, ok := sectionDocs["profiles"]; ok {
 			_ = json.Unmarshal(doc, &profiles)
 		}
+		sentProfiles := profiles
 		if errs := config.ValidateSharedDirSizes(runtimes, profiles); len(errs) > 0 {
-			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, errs[0].Error(), nil)
+			writeSettingsValidationErrors(w, errs)
 			return
 		}
 		// The per-runtime and per-profile storage overrides are removed
 		// (server.project_storage decides storage; volumes: replaces
 		// node-local overrides).
 		if errs := config.RemovedStorageOverrideErrors(runtimes, profiles, nil); len(errs) > 0 {
-			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, errs[0].Error(), nil)
+			writeSettingsValidationErrors(w, errs)
 			return
 		}
 		// safe_to_evict on a non-Kubernetes runtime is accepted and ignored,
@@ -1576,7 +1649,15 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		_, hasRuntimes := sectionDocs["runtimes"]
 		_, hasProfiles := sectionDocs["profiles"]
 		if hasRuntimes || hasProfiles {
+			// The guard revision of an omitted section is read before the
+			// snapshot the checks use, so a write that lands after it fails
+			// the guarded write below (409) rather than passing a check
+			// made on an older value.
+			placement = placementPairForSave(ops, sectionDocs)
 			snap := ops.Snapshot()
+			if placementSnapshotHook != nil {
+				placementSnapshotHook()
+			}
 			if !hasRuntimes {
 				runtimes = snap.Runtimes
 			}
@@ -1584,7 +1665,43 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 				profiles = snap.Profiles
 			}
 			saveWarnings = safeToEvictSaveWarnings(runtimes, profiles)
+			// Kubernetes placement and identity fields (ptone/scion#6580):
+			// a problem this save causes is refused; one already stored
+			// that the save does not touch is a warning.
+			profilesBefore := snap.Profiles
+			if !hasRuntimes {
+				runtimesBefore = snap.Runtimes
+			}
+			pErrs, pWarnings := config.RuntimeSaveChecks(runtimesBefore, runtimes, profilesBefore, profiles)
+			// The rules across runtime entries and profiles, in the same
+			// form (PlacementPairSaveChecks).
+			xErrs, xWarnings := config.PlacementPairSaveChecks(runtimesBefore, runtimes, profilesBefore, profiles)
+			pErrs, pWarnings = append(pErrs, xErrs...), append(pWarnings, xWarnings...)
+			if len(pErrs) > 0 {
+				writeSettingsValidationErrors(w, pErrs)
+				return
+			}
+			saveWarnings = append(saveWarnings, resourceQuantityWarnings(pWarnings)...)
+			saveWarnings = append(saveWarnings, config.PlacementIgnoredWarnings(runtimes, profiles)...)
+			saveWarnings = append(saveWarnings, config.PlacementSettingsWarnings(runtimes, profiles)...)
 		}
+		// Resource quantities (ptone/scion#6581): the profiles the body
+		// sends, and default_resources when the body sends it.
+		var defaultResources *api.ResourceSpec
+		if doc, ok := sectionDocs["agent_defaults"]; ok {
+			adSent := applySectionPatch("agent_defaults", map[string]json.RawMessage{}, nil, agentDefaultsPresence(topFP))
+			var agentDefaults opsettings.AgentDefaultsSettings
+			if adSent["default_resources"] && json.Unmarshal(doc, &agentDefaults) == nil {
+				defaultResources = agentDefaults.DefaultResources
+			}
+		}
+		qErrs, qWarnings := config.ValidateResourceQuantities(defaultResources, sentProfiles)
+		if len(qErrs) > 0 {
+			writeSettingsValidationErrors(w, qErrs)
+			return
+		}
+		saveWarnings = append(saveWarnings, resourceQuantityWarnings(qWarnings)...)
+		saveWarnings = append(saveWarnings, runtimeMergeWarnings...)
 	}
 	// Validate hub-level default_timezone (IANA name check; rejects "Local",
 	// same rule as the file-mode handler and as the per-user display
@@ -1598,8 +1715,8 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			adSent := applySectionPatch("agent_defaults", map[string]json.RawMessage{}, nil, agentDefaultsPresence(topFP))
 			if adSent["default_timezone"] {
 				if err := validateDefaultTimezone(agentDefaults.DefaultTimezone); err != nil {
-					writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-						fmt.Sprintf("invalid default_timezone %q: %v", agentDefaults.DefaultTimezone, err), nil)
+					writeSettingsFieldError(w, "default_timezone",
+						fmt.Sprintf("invalid default_timezone %q: %v", agentDefaults.DefaultTimezone, err))
 					return
 				}
 			}
@@ -1629,10 +1746,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		}
 	}
 	if len(allValidationErrors) > 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"error":  "validation_failed",
-			"errors": allValidationErrors,
-		})
+		writeSettingsValidation(w, "", sortedSectionValidationEntries(allValidationErrors), nil)
 		return
 	}
 
@@ -1645,9 +1759,12 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		if err := validateServerConfigFileKeys(&req.ServerConfigUpdateRequest, fileKeys, ops); err != nil {
 			var fieldErr *serverConfigFileFieldError
 			if errors.As(err, &fieldErr) {
-				writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, fieldErr.Error(), map[string]interface{}{
-					"field": fieldErr.field,
-				})
+				writeSettingsFieldError(w, fieldErr.field, fieldErr.Error())
+				return
+			}
+			var valErr *serverConfigFileValidationError
+			if errors.As(err, &valErr) {
+				writeSettingsValidation(w, valErr.Error(), valErr.entries, nil)
 				return
 			}
 			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
@@ -1664,8 +1781,8 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 				return
 			}
 			if errors.Is(err, config.ErrSettingsPathEditUnsupported) {
-				writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-					"settings.yaml cannot be edited in place (it uses YAML anchors/aliases or is JSON); edit the file by hand", nil)
+				writeSettingsFieldError(w, "settings",
+					"settings.yaml cannot be edited in place (it uses YAML anchors/aliases or is JSON); edit the file by hand")
 				return
 			}
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to write settings file", nil)
@@ -1683,11 +1800,8 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		}
 		if len(bad) > 0 {
 			fileTxn.abort()
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]interface{}{
-				"error":   "unsaved_keys_rejected",
-				"message": "These settings would not take effect as sent; nothing was saved.",
-				"keys":    bad,
-			})
+			writeSettingsCodedKeysError(w, "unsaved_keys_rejected",
+				"These settings would not take effect as sent; nothing was saved.", bad)
 			return
 		}
 	}
@@ -1719,7 +1833,85 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	}
 	sort.Strings(sortedSections)
 
+	// runtimes and profiles are saved first, together, in one guarded
+	// transaction: either both are written or neither is, and a conflict
+	// leaves every section of the save unwritten. The runtimes write's
+	// expected revision is the row the merge read (ptone/scion#6580).
+	if placement.active {
+		var writes []guardedSectionWrite
+		reads := placement.reads
+		for _, secName := range placementSections {
+			doc, sent := sectionDocs[secName]
+			if !sent {
+				continue
+			}
+			expectedRev := int64(-1)
+			if rev, ok := req.ExpectedRevisions[secName]; ok {
+				expectedRev = rev
+			} else if rev, ok := mergedBaseRevs[secName]; ok {
+				expectedRev = rev
+			}
+			if rev, ok := noopRevs[secName]; ok && expectedRev == rev {
+				applied[secName] = rev
+				unchanged = append(unchanged, secName)
+				reads[secName] = rev
+				continue
+			}
+			if rev, same := unchangedManagedRow(r.Context(), ops, secName, doc, expectedRev); same {
+				applied[secName] = rev
+				unchanged = append(unchanged, secName)
+				reads[secName] = rev
+				continue
+			}
+			writes = append(writes, guardedSectionWrite{section: secName, doc: doc, expectedRevision: expectedRev})
+		}
+		if len(writes) > 0 {
+			revs, notApplied, err := ops.updateGuarded(r.Context(), writes, reads, updatedBy, "managed")
+			switch {
+			case errors.Is(err, store.ErrRevisionConflict):
+				written := map[string]bool{}
+				for _, wr := range writes {
+					written[wr.section] = true
+					conflicted = append(conflicted, map[string]interface{}{
+						"section":           wr.section,
+						"expected_revision": wr.expectedRevision,
+						"current_revision":  s.getCurrentRevision(ops, wr.section),
+					})
+				}
+				// The sections checked but not written, whose revision
+				// changed, are listed too.
+				conflicted = append(conflicted, placementReadConflicts(r.Context(), ops, reads, written)...)
+			case errors.Is(err, errGuardedBatchUnsupported):
+				slog.Error("PUT server-config: the settings store cannot save runtimes and profiles together", "error", err)
+				fileTxn.abort()
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"Failed to save runtimes and profiles: the settings store cannot save them in one transaction", nil)
+				return
+			case err != nil:
+				slog.Error("Failed to update runtimes and profiles", "error", err)
+				fileTxn.abort()
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to update runtimes and profiles", nil)
+				return
+			default:
+				for sec, rev := range revs {
+					applied[sec] = rev
+					if notApplied[sec] {
+						notInEffect[sec] = true
+					}
+				}
+			}
+		}
+	}
+
 	for _, secName := range sortedSections {
+		if len(conflicted) > 0 {
+			// A conflict on the runtimes and profiles save writes nothing
+			// else.
+			break
+		}
+		if placement.active && (secName == "runtimes" || secName == "profiles") {
+			continue
+		}
 		doc := sectionDocs[secName]
 		expectedRev := int64(-1) // last-writer-wins by default
 		if rev, ok := req.ExpectedRevisions[secName]; ok {
@@ -1798,11 +1990,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			if errors.Is(err, store.ErrRevisionConflict) {
 				// Report the conflict with current revision.
 				currentRev := s.getCurrentRevision(ops, secName)
-				conflicted = append(conflicted, map[string]interface{}{
-					"section":           secName,
-					"expected_revision": expectedRev,
-					"current_revision":  currentRev,
-				})
+				conflicted = append(conflicted, settingsConflictEntry(secName, expectedRev, currentRev))
 				// Stop writing further sections on CAS conflict.
 				break
 			}
@@ -1877,16 +2065,14 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		for _, sec := range unchanged {
 			unchangedRevs[sec] = applied[sec]
 		}
-		writeJSON(w, http.StatusConflict, map[string]interface{}{
-			"error":               "revision_conflict",
-			"message":             "One or more sections have been modified since the expected revision.",
-			"applied":             written,
-			"unchanged_revisions": unchangedRevs,
-			"conflicted":          conflicted,
-			"applied_keys":        keyReport.Applied,
-			"pending_restart":     keyReport.PendingRestart,
-			"skipped":             keyReport.Skipped,
-		})
+		writeSettingsRevisionConflict(w, "One or more sections have been modified since the expected revision.",
+			conflicted, map[string]interface{}{
+				"applied":             written,
+				"unchanged_revisions": unchangedRevs,
+				"applied_keys":        keyReport.Applied,
+				"pending_restart":     keyReport.PendingRestart,
+				"skipped":             keyReport.Skipped,
+			})
 		return
 	}
 	slog.Info("Server config updated via admin API (DB-backed)",
@@ -1971,14 +2157,14 @@ func (s *Server) validateHubDefaultGCPIdentity(w http.ResponseWriter, ctx contex
 	switch d.DefaultGCPIdentityMode {
 	case "", store.GCPMetadataModeBlock, store.GCPMetadataModePassthrough, store.GCPMetadataModeAssign:
 	default:
-		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-			fmt.Sprintf("invalid default_gcp_identity_mode %q: must be one of block, passthrough, assign", d.DefaultGCPIdentityMode), nil)
+		writeSettingsFieldError(w, "default_gcp_identity_mode",
+			fmt.Sprintf("invalid default_gcp_identity_mode %q: must be one of block, passthrough, assign", d.DefaultGCPIdentityMode))
 		return false
 	}
 
 	if d.DefaultGCPIdentityMode == store.GCPMetadataModeAssign && d.DefaultGCPIdentityServiceAccountID == "" {
-		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-			"default GCP identity mode 'assign' requires a service account; set default_gcp_identity_service_account_id or choose another mode", nil)
+		writeSettingsFieldError(w, "default_gcp_identity_service_account_id",
+			"default GCP identity mode 'assign' requires a service account; set default_gcp_identity_service_account_id or choose another mode")
 		return false
 	}
 
@@ -1993,8 +2179,8 @@ func (s *Server) validateHubDefaultGCPIdentity(w http.ResponseWriter, ctx contex
 	}
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-				"default GCP service account not found", nil)
+			writeSettingsFieldError(w, "default_gcp_identity_service_account_id",
+				"default GCP service account not found")
 			return false
 		}
 		writeErrorFromErr(w, err, "")
@@ -2002,20 +2188,23 @@ func (s *Server) validateHubDefaultGCPIdentity(w http.ResponseWriter, ctx contex
 	}
 
 	if !gcpServiceAccountVerified(sa) {
-		writeError(w, http.StatusUnprocessableEntity, ErrCodeIdentityNotVerified,
-			"GCP service account is not verified; verify it before setting it as the hub default. "+
-				identityVerifyRemedy(sa.Scope), nil)
+		msg := "GCP service account is not verified; verify it before setting it as the hub default. " +
+			identityVerifyRemedy(sa.Scope)
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeIdentityNotVerified, msg, map[string]interface{}{
+			"field":  "default_gcp_identity_service_account_id",
+			"errors": []settingsFieldError{{Field: "default_gcp_identity_service_account_id", Message: msg}},
+		})
 		return false
 	}
 
 	if sa.Scope != store.ScopeHub {
-		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-			"hub default service account must be hub-scoped; a project-scoped account is unavailable in every other project", nil)
+		writeSettingsFieldError(w, "default_gcp_identity_service_account_id",
+			"hub default service account must be hub-scoped; a project-scoped account is unavailable in every other project")
 		return false
 	}
 
 	if saReferencePreconditions(sa) != nil {
-		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, saAssignTranslationRecordMsg, nil)
+		writeSettingsFieldError(w, "default_gcp_identity_service_account_id", saAssignTranslationRecordMsg)
 		return false
 	}
 
@@ -2023,9 +2212,9 @@ func (s *Server) validateHubDefaultGCPIdentity(w http.ResponseWriter, ctx contex
 	mode := s.saAssignCheckMode
 	s.mu.RUnlock()
 	if mode != SAAssignCheckEnforce {
-		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+		writeSettingsFieldError(w, "default_gcp_identity_service_account_id",
 			"hub-scoped service account assignment requires gcpIamCheckMode=enforce; "+
-				"agent creation would be denied for every user until it is enabled", nil)
+				"agent creation would be denied for every user until it is enabled")
 		return false
 	}
 
@@ -3203,6 +3392,7 @@ var serverConfigTokenSections = map[string]settingsTokenClass{
 	"artifacts":         settingsTokenConfiguration, // artifact limits
 
 	"agent_delegation_policy": settingsTokenRefused, // which permissions may be delegated to agents
+	"chat_retention":          settingsTokenRefused, // written through PUT /api/v1/admin/chat-retention
 }
 
 // serverConfigTokenKeys classifies each key of a settingsTokenPerKey

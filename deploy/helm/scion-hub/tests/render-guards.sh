@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=273   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 16 (workspaceStorage.nfs: thirteen refusals, one acceptance, two rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check) + 11 (conduit.internalTls: eight refusals, two acceptances, one rendered-shape check) + 3 (relay hop: cert-without-key refusals on non-loopback and loopback listeners, no relay-level trusted_proxies) + 3 (internal_listen loopback needs host:port and a valid 127.x: no-port IP, no-port localhost, out-of-range octet) + 5 (internal_listen: leading and trailing whitespace, port 65536, port 0, no port with TLS files) + 4 (TLS settings as written: server name with a slash, server name with trailing whitespace, blank cert path, padded key path) + 9 (minimum hub image for the relay wiring: older and minimum semver, newer semver, older and minimum nightly, no gate with the relay off, the unverified annotation, no annotation on a checked tag, the NOTES warning present and absent) + 8 (older tag with build metadata, minimum with build metadata, pre-release of the minimum, malformed version, config.extra listener on an older tag and on a digest, the digest annotation, padded CA path; the gate block now runs 16 rows) + 4 (overflowing version number, newer pre-release, newer tag with build metadata, config.extra loopback listener on an older tag; the gate block now runs 20 rows) + 1 (localhost:port without TLS is not loopback, as the hub reads it) + 1 (the default-tag refusal names image.tag and image.digest; the gate block now runs 21 rows) + 6 (the semver refusal names no placeholder floor, so the gate block now runs 22 rows; whitespace-only listen: spaces and tab, with TLS files and without; SCION_SERVER_HUB_CONDUIT_INTERNAL* refused in hub.extraEnv) + 2 (the malformed-version remedy by mode; the config.extra path names removing that listener; the gate block now runs 24 rows) + 1 (the NOTES warning on the config.extra path names removing that listener; the gate block now runs 25 rows) + 1 (the same NOTES check for an image.digest; the gate block now runs 26 rows) + 4 (conduit.internalTls auto: one refusal, three acceptances).
+EXPECTED_TOTAL=275   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 18 (workspaceStorage.nfs: thirteen refusals, two acceptances, three rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check) + 11 (conduit.internalTls: eight refusals, two acceptances, one rendered-shape check) + 3 (relay hop: cert-without-key refusals on non-loopback and loopback listeners, no relay-level trusted_proxies) + 3 (internal_listen loopback needs host:port and a valid 127.x: no-port IP, no-port localhost, out-of-range octet) + 5 (internal_listen: leading and trailing whitespace, port 65536, port 0, no port with TLS files) + 4 (TLS settings as written: server name with a slash, server name with trailing whitespace, blank cert path, padded key path) + 9 (minimum hub image for the relay wiring: older and minimum semver, newer semver, older and minimum nightly, no gate with the relay off, the unverified annotation, no annotation on a checked tag, the NOTES warning present and absent) + 8 (older tag with build metadata, minimum with build metadata, pre-release of the minimum, malformed version, config.extra listener on an older tag and on a digest, the digest annotation, padded CA path; the gate block now runs 16 rows) + 4 (overflowing version number, newer pre-release, newer tag with build metadata, config.extra loopback listener on an older tag; the gate block now runs 20 rows) + 1 (localhost:port without TLS is not loopback, as the hub reads it) + 1 (the default-tag refusal names image.tag and image.digest; the gate block now runs 21 rows) + 6 (the semver refusal names no placeholder floor, so the gate block now runs 22 rows; whitespace-only listen: spaces and tab, with TLS files and without; SCION_SERVER_HUB_CONDUIT_INTERNAL* refused in hub.extraEnv) + 2 (the malformed-version remedy by mode; the config.extra path names removing that listener; the gate block now runs 24 rows) + 1 (the NOTES warning on the config.extra path names removing that listener; the gate block now runs 25 rows) + 1 (the same NOTES check for an image.digest; the gate block now runs 26 rows) + 4 (conduit.internalTls auto: one refusal, three acceptances).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -1330,7 +1330,8 @@ NFS=(--set workspaceStorage.nfs.enabled=true --set-string workspaceStorage.nfs.s
 reject "enabled without server" "requires workspaceStorage.nfs.server" "${NFS[@]}" --set-string workspaceStorage.nfs.server=
 reject "enabled without export" "requires workspaceStorage.nfs.export" "${NFS[@]}" --set-string workspaceStorage.nfs.export=
 reject "enabled without shareId" "requires workspaceStorage.nfs.shareId" "${NFS[@]}" --set-string workspaceStorage.nfs.shareId=
-reject "enabled without pvName" "requires workspaceStorage.nfs.pvName" "${NFS[@]}" --set-string workspaceStorage.nfs.pvName=
+accept "enabled without pvName (agent pods mount the share inline)" "${NFS[@]}" --set-string workspaceStorage.nfs.pvName=
+reject "pvName that is not an object name" "workspaceStorage.nfs.pvName is" "${NFS[@]}" --set-string workspaceStorage.nfs.pvName=Bad_Name
 reject "enabled with config.extra.server.workspace_storage" "config.extra also sets server.workspace_storage" \
   "${NFS[@]}" --set-string config.extra.server.workspace_storage.backend=local
 reject "enabled with config.extra.server.project_storage" "config.extra also sets server.project_storage" \
@@ -1386,6 +1387,25 @@ else
   failed=$((failed + 1))
 fi
 unset _nf _nf_root _nf_id _nf_mount _nf_vol
+# Without pvName the settings carry no pv_name (agent pods mount the share
+# inline) and the hub pod still mounts the export at mount_root/shares[0].id.
+executed=$((executed + 1))
+_ni="$(render "${NFS[@]}" --set-string workspaceStorage.nfs.pvName=)"
+_ni_mount="$(printf '%s\n' "$_ni" | grep -A1 -E '^            - name: workspace-nfs$' | sed -n 's/^              mountPath: "\(.*\)"$/\1/p')"
+if ! printf '%s\n' "$_ni" | grep -qE '^kind: Deployment$'; then
+  echo "FAIL  NFS without pvName: the render produced no Deployment, so nothing was inspected"
+  failed=$((failed + 1))
+elif printf '%s\n' "$_ni" | grep -qE '^      project_storage:$' \
+  && ! printf '%s\n' "$_ni" | grep -qE 'pv_name' \
+  && printf '%s\n' "$_ni" | grep -qE '^            server: 192\.0\.2\.10$' \
+  && printf '%s\n' "$_ni" | grep -qE '^          - export: /rg_share$' \
+  && [ "$_ni_mount" = "/mnt/scion-nfs/rg-share" ]; then
+  echo "ok    NFS without pvName renders shares[0] with no pv_name and keeps the hub mount (${_ni_mount})"
+else
+  echo "FAIL  NFS without pvName: mountPath=${_ni_mount:-<none>}, or pv_name rendered, or a settings field is missing"
+  failed=$((failed + 1))
+fi
+unset _ni _ni_mount
 # Disabled (the default) renders neither half.
 executed=$((executed + 1))
 _nd="$(render)"

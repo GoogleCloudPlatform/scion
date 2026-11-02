@@ -235,6 +235,8 @@ Rules:
 - **Harness override presence.** A harness override that only some profiles of a group set is reported for its presence only when none of its sub-fields conflicts; a sub-field conflict already names the override.
 - **Docker targets.** A Kubernetes-only key on a profile or runtime entry whose target is docker is not copied (a docker runtime ignores it) and is reported as the notice `field_not_valid_for_target_type`.
 
+**Errata (preserve by splitting).** This replaces rules 3 and 4 for representable fields; no frozen name, type or code changes. Profiles of one group that differ in a field a flat instance holds (placement included) are split into one instance per set of profiles with equal values, never blocked. Each split instance has the group key plus its profile names (the operator Split scheme). One notice, `profile_conflict` at `Path` `profiles.*`, names the differing fields (no values) and the new instances. A field choice for the group key consolidates that field on the chosen value, and `profile_conflict_resolved` still lists every dropped value. A profile pool that differs from its runtime entry's is kept, with a notice at `profiles.<p>.node_selector`. Runtime entries that may share a cluster and namespace but disagree on placement keep their own placement, with a notice at `runtimes.<r>`. Blocking findings remain only for details no flat instance can hold (rules 6 and 7, invalid choices).
+
 ## FC7. Zero, false and unknown-key rules
 
 | Field | Unset | Explicit values |

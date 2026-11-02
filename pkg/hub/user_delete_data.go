@@ -136,10 +136,17 @@ var ownedAgentsPageSize = 100
 // store.ErrNotFound if the user does not exist, a
 // *userDeletionInProgressError while a forced deletion of the user is in
 // progress (its status is deleting, ptone/scion#2143), and a
-// *userDeleteBlockedError when anything blocks.
+// *userDeleteBlockedError when anything blocks. A missing user is
+// errDeleteTargetMissing, which wraps store.ErrNotFound.
 func checkUserDeleteBlockersTx(ctx context.Context, tx store.Store, userID string) error {
 	return checkUserDeleteBlockersModeTx(ctx, tx, userID, false)
 }
+
+// errDeleteTargetMissing is returned by checkUserDeleteBlockersModeTx when
+// the user to delete does not exist in the delete transaction. It wraps
+// store.ErrNotFound, which callers also test for; DELETE
+// /api/v1/users/{id} answers 404 for it and for no other not-found.
+var errDeleteTargetMissing = fmt.Errorf("the user does not exist: %w", store.ErrNotFound)
 
 // checkUserDeleteBlockersModeTx is checkUserDeleteBlockersTx. completing is
 // set only by the completion of a forced deletion, which is the one delete
@@ -149,11 +156,17 @@ func checkUserDeleteBlockersModeTx(ctx context.Context, tx store.Store, userID s
 	// cannot own an agent, and it names no user row to lock.
 	if _, err := uuid.Parse(userID); err == nil {
 		if err := tx.LockUserRow(ctx, userID, true); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return errDeleteTargetMissing
+			}
 			return err
 		}
 		if !completing {
 			u, err := tx.GetUser(ctx, userID)
 			if err != nil {
+				if errors.Is(err, store.ErrNotFound) {
+					return errDeleteTargetMissing
+				}
 				return err
 			}
 			if u.Status == store.UserStatusDeleting {

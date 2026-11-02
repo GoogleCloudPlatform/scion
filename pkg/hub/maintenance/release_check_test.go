@@ -23,34 +23,33 @@ import (
 	"time"
 )
 
-// f25Manifest is LATEST.json as it was for the findings' §2.5 reproduction.
-const f25Manifest = `{"channels":{
-	"stable":{"version":"","date":"","url":""},
-	"preview":{"version":"v0.3.0-preview.4","date":"2026-10-24T00:21:09Z","url":"https://github.com/GoogleCloudPlatform/scion/releases/tag/v0.3.0-preview.4"},
-	"nightly":{"version":"nightly-20261023","date":"2026-10-23T02:10:00Z","url":"https://github.com/GoogleCloudPlatform/scion/releases/tag/nightly-20261023"}}}`
-
-func newCheckGitHub(t *testing.T, manifest string) (*fakeGitHub, ReleaseCheckOptions) {
+// newCheckGitHub returns a fake GitHub that publishes the releases of the
+// findings' §2.5 reproduction (the latest nightly and preview.4; stable is
+// empty) and check options that read it through the release catalog.
+func newCheckGitHub(t *testing.T) (*fakeGitHub, ReleaseCheckOptions) {
 	t.Helper()
 	gh := newFakeGitHub(t)
-	gh.latest = manifest
+	gh.addRelease("nightly-20261023", "2026-10-23T02:10:00Z", "nightly-20261023")
+	gh.addRelease("v0.3.0-preview.4", "2026-10-24T00:21:09Z", "v0.3.0-preview.4")
 	client := &http.Client{Transport: gh}
 	return gh, ReleaseCheckOptions{
-		Repo:       testRepo,
-		HTTPClient: client,
-		Releases:   &GitHubReleases{Repo: testRepo, Client: client},
+		Repo:     testRepo,
+		Releases: &GitHubReleases{Repo: testRepo, Client: client},
 	}
 }
 
 // TestCheckForReleaseUpdates_F25Table covers the six rows of findings §2.5
 // (the checker re-detected the channel from the running version, so an
 // up-to-date nightly hub configured for preview was never offered preview),
-// plus the edges of the cross-channel date comparison.
+// plus the edges of the cross-channel date comparison, with the latest
+// release read from the release catalog.
 func TestCheckForReleaseUpdates_F25Table(t *testing.T) {
 	tests := []struct {
 		name      string
 		current   string
-		channel   string // effective channel
-		releases  map[string]string
+		channel   string            // effective channel
+		listed    map[string]string // extra listed releases (tag → published), not installable
+		unlisted  map[string]string // releases only a single-tag lookup finds
 		wantAvail bool
 		wantLatst string
 		wantClass string
@@ -64,9 +63,9 @@ func TestCheckForReleaseUpdates_F25Table(t *testing.T) {
 		// F§2.5 row 3: the bug. An up-to-date nightly is offered the newer preview.
 		{name: "latest nightly, preview channel (nightly to preview)", current: "nightly-20261023", channel: "preview",
 			wantAvail: true, wantLatst: "v0.3.0-preview.4", wantClass: "switch-newer"},
-		// F§2.5 row 4: preview.3's publish date comes from the release API.
+		// F§2.5 row 4: preview.3's publish date comes from the catalog.
 		{name: "older preview, nightly channel", current: "v0.3.0-preview.3", channel: "nightly",
-			releases:  map[string]string{"v0.3.0-preview.3": "2026-10-15T10:00:00Z"},
+			listed:    map[string]string{"v0.3.0-preview.3": "2026-10-15T10:00:00Z"},
 			wantAvail: true, wantLatst: "nightly-20261023", wantClass: "switch-newer"},
 		// F§2.5 row 5: stable is empty.
 		{name: "preview, empty stable channel", current: "v0.3.0-preview.4", channel: "stable",
@@ -77,11 +76,14 @@ func TestCheckForReleaseUpdates_F25Table(t *testing.T) {
 
 		{name: "same nightly", current: "nightly-20261023", channel: "nightly",
 			wantAvail: false, wantLatst: "nightly-20261023", wantClass: "same"},
-		{name: "newer nightly than the manifest", current: "nightly-20261024", channel: "nightly",
+		{name: "newer nightly than the catalog's latest", current: "nightly-20261024", channel: "nightly",
 			wantAvail: false, wantLatst: "nightly-20261023", wantClass: "downgrade"},
 		{name: "nightly published after the latest preview", current: "nightly-20261024", channel: "preview",
-			releases:  map[string]string{"nightly-20261024": "2026-10-24T02:08:49Z"},
+			listed:    map[string]string{"nightly-20261024": "2026-10-24T02:08:49Z"},
 			wantAvail: false, wantLatst: "v0.3.0-preview.4", wantClass: "switch-older"},
+		{name: "preview past the catalog, dated by a single-tag lookup", current: "v0.3.0-preview.1", channel: "nightly",
+			unlisted:  map[string]string{"v0.3.0-preview.1": "2026-09-01T10:00:00Z"},
+			wantAvail: true, wantLatst: "nightly-20261023", wantClass: "switch-newer"},
 		{name: "preview with no publish date known", current: "v0.3.0-preview.3", channel: "nightly",
 			wantAvail: false, wantLatst: "nightly-20261023", wantClass: "unknown"},
 		{name: "git build with build time, preview channel", current: "", channel: "preview",
@@ -89,9 +91,13 @@ func TestCheckForReleaseUpdates_F25Table(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gh, opts := newCheckGitHub(t, f25Manifest)
-			for tag, published := range tt.releases {
+			gh, opts := newCheckGitHub(t)
+			for tag, published := range tt.listed {
 				gh.setRelease(tag, published, "", "")
+			}
+			for tag, published := range tt.unlisted {
+				gh.setRelease(tag, published, "", "")
+				gh.unlisted[tag] = true
 			}
 			opts.CurrentVersion = tt.current
 			opts.Channel = tt.channel
@@ -117,68 +123,103 @@ func TestCheckForReleaseUpdates_F25Table(t *testing.T) {
 	}
 }
 
-// TestCheckForReleaseUpdates_ReleaseLookup checks the publish-date lookup of
-// the running release through the GitHub API: it is made only for a
-// cross-channel comparison whose running release is not the manifest entry.
+// TestCheckForReleaseUpdates_ReleaseLookup checks where the running
+// release's publish date comes from: the catalog when it lists the release,
+// a single-tag lookup otherwise, and nothing for a same-channel check.
 func TestCheckForReleaseUpdates_ReleaseLookup(t *testing.T) {
-	t.Run("cross channel looks up the running release", func(t *testing.T) {
-		gh, opts := newCheckGitHub(t, f25Manifest)
-		gh.setRelease("v0.3.0-preview.3", "2026-10-15T10:00:00Z", "", "")
-		opts.CurrentVersion, opts.Channel = "v0.3.0-preview.3", "nightly"
+	tagLookup := "api.github.com/repos/" + testRepo + "/releases/tags/"
+
+	t.Run("cross channel, running release not listed: single-tag lookup", func(t *testing.T) {
+		gh, opts := newCheckGitHub(t)
+		gh.setRelease("v0.3.0-preview.1", "2026-09-01T10:00:00Z", "", "")
+		gh.unlisted["v0.3.0-preview.1"] = true
+		opts.CurrentVersion, opts.Channel = "v0.3.0-preview.1", "nightly"
 		if _, err := CheckForReleaseUpdates(context.Background(), opts); err != nil {
 			t.Fatal(err)
 		}
-		if !gh.requested("api.github.com/repos/" + testRepo + "/releases/tags/v0.3.0-preview.3") {
+		if !gh.requested(tagLookup + "v0.3.0-preview.1") {
 			t.Errorf("expected a single-tag lookup of the running release, got %v", gh.requests)
 		}
 	})
-	t.Run("running release named by the manifest needs no lookup", func(t *testing.T) {
-		gh, opts := newCheckGitHub(t, f25Manifest)
-		opts.CurrentVersion, opts.Channel = "nightly-20261023", "preview"
-		if _, err := CheckForReleaseUpdates(context.Background(), opts); err != nil {
-			t.Fatal(err)
-		}
-		if gh.requested("api.github.com") {
-			t.Errorf("unexpected API request: %v", gh.requests)
-		}
-	})
-	t.Run("same channel needs no lookup", func(t *testing.T) {
-		gh, opts := newCheckGitHub(t, f25Manifest)
-		opts.CurrentVersion, opts.Channel = "nightly-20261020", "nightly"
-		if _, err := CheckForReleaseUpdates(context.Background(), opts); err != nil {
-			t.Fatal(err)
-		}
-		if gh.requested("api.github.com") {
-			t.Errorf("unexpected API request: %v", gh.requests)
-		}
-	})
-	t.Run("manifest entry without a date is looked up", func(t *testing.T) {
-		gh, opts := newCheckGitHub(t, strings.Replace(f25Manifest, `"date":"2026-10-24T00:21:09Z"`, `"date":""`, 1))
-		gh.setRelease("v0.3.0-preview.4", "2026-10-24T00:21:09Z", "", "")
+	t.Run("running release listed in the catalog needs no lookup", func(t *testing.T) {
+		gh, opts := newCheckGitHub(t)
 		opts.CurrentVersion, opts.Channel = "nightly-20261023", "preview"
 		got, err := CheckForReleaseUpdates(context.Background(), opts)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !got.UpdateAvailable || got.Class != "switch-newer" {
-			t.Errorf("got %+v, want switch-newer available", got)
+		if gh.requested(tagLookup) {
+			t.Errorf("unexpected single-tag lookup: %v", gh.requests)
+		}
+		if got.Class != "switch-newer" {
+			t.Errorf("got %+v", got)
+		}
+	})
+	t.Run("same channel needs no lookup", func(t *testing.T) {
+		gh, opts := newCheckGitHub(t)
+		opts.CurrentVersion, opts.Channel = "nightly-20261020", "nightly"
+		if _, err := CheckForReleaseUpdates(context.Background(), opts); err != nil {
+			t.Fatal(err)
+		}
+		if gh.requested(tagLookup) {
+			t.Errorf("unexpected single-tag lookup: %v", gh.requests)
 		}
 	})
 }
 
-func TestCheckForReleaseUpdates_Errors(t *testing.T) {
-	t.Run("manifest fetch failure", func(t *testing.T) {
-		_, opts := newCheckGitHub(t, "not json")
+// TestCheckForReleaseUpdates_Catalog checks the catalog-specific behaviour:
+// latest is the newest installable release, a shared catalog is reused, and
+// a catalog that cannot be read at all is an error.
+func TestCheckForReleaseUpdates_Catalog(t *testing.T) {
+	t.Run("latest is the newest installable release", func(t *testing.T) {
+		gh, opts := newCheckGitHub(t)
+		// A newer nightly without a checksum line for the tarball.
+		gh.addRelease("nightly-20261024", "2026-10-24T02:08:49Z", "nightly-20261024")
+		gh.files[downloadPath("nightly-20261024", ChecksumsAssetName)] = []byte(emptySHA256 + "  SHA256SUMS\n")
 		opts.CurrentVersion, opts.Channel = "nightly-20261020", "nightly"
-		if _, err := CheckForReleaseUpdates(context.Background(), opts); err == nil {
-			t.Fatal("expected an error for an unreadable manifest")
+		got, err := CheckForReleaseUpdates(context.Background(), opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.LatestVersion != "nightly-20261023" || !got.UpdateAvailable {
+			t.Errorf("got %+v, want the installable nightly-20261023", got)
 		}
 	})
-	t.Run("manifest entry from another channel", func(t *testing.T) {
-		_, opts := newCheckGitHub(t, `{"channels":{"preview":{"version":"nightly-20261023","date":"2026-10-23T02:10:00Z"}}}`)
-		opts.CurrentVersion, opts.Channel = "v0.3.0-preview.3", "preview"
+	t.Run("a shared catalog is reused across checks", func(t *testing.T) {
+		gh, opts := newCheckGitHub(t)
+		opts.Catalog = NewCatalog(CatalogOptions{Repo: testRepo, Lister: opts.Releases.(*GitHubReleases)})
+		opts.CurrentVersion, opts.Channel = "nightly-20261020", "nightly"
+		for i := 0; i < 2; i++ {
+			if _, err := CheckForReleaseUpdates(context.Background(), opts); err != nil {
+				t.Fatal(err)
+			}
+		}
+		lists := 0
+		for _, r := range gh.requests {
+			if strings.Contains(r, "/repos/"+testRepo+"/releases?") {
+				lists++
+			}
+		}
+		if lists != 1 {
+			t.Errorf("release list fetched %d times, want 1 (cached)", lists)
+		}
+	})
+	t.Run("catalog unavailable", func(t *testing.T) {
+		gh, opts := newCheckGitHub(t)
+		gh.listStatus = http.StatusInternalServerError
+		opts.CurrentVersion, opts.Channel = "nightly-20261020", "nightly"
 		if _, err := CheckForReleaseUpdates(context.Background(), opts); err == nil {
-			t.Fatal("expected an error for a manifest entry that is not a preview tag")
+			t.Fatal("expected an error when the release list cannot be read")
+		}
+	})
+	t.Run("LATEST.json is not read", func(t *testing.T) {
+		gh, opts := newCheckGitHub(t)
+		opts.CurrentVersion, opts.Channel = "nightly-20261020", "nightly"
+		if _, err := CheckForReleaseUpdates(context.Background(), opts); err != nil {
+			t.Fatal(err)
+		}
+		if gh.requested("LATEST.json") || gh.requested("raw.githubusercontent.com") {
+			t.Errorf("the checker read LATEST.json: %v", gh.requests)
 		}
 	})
 }
@@ -187,7 +228,7 @@ func TestCheckForReleaseUpdates_Errors(t *testing.T) {
 // longer carries asset URLs: update-binary resolves and pins them itself and
 // refuses download_url/checksums_url.
 func TestReleaseUpdateCheckResult_NoDownloadURLs(t *testing.T) {
-	_, opts := newCheckGitHub(t, f25Manifest)
+	_, opts := newCheckGitHub(t)
 	opts.CurrentVersion, opts.Channel = "nightly-20261020", "nightly"
 	got, err := CheckForReleaseUpdates(context.Background(), opts)
 	if err != nil {

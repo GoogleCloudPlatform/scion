@@ -156,31 +156,57 @@ func TestStartNFSEmptyAgentDir_FailsClosed(t *testing.T) {
 	}
 }
 
-// NFS storage whose share has no pv_name: the pod could not mount the
-// agent's directory, so the start stops instead of using the project's
-// workspace path.
-func TestStartNFSEmptyAgentDir_NoClaimFailsClosed(t *testing.T) {
+// NFS storage whose share has no pv_name: the pod mounts the share inline,
+// so the agent's directory is still created on the export before the pod,
+// and the runtime gets the share's server and export with no claim.
+func TestStartNFSEmptyAgentDir_NoClaimMountsInline(t *testing.T) {
 	mountRoot := filepath.Join(t.TempDir(), "nfs")
 	require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share-1"), 0o755))
+	cfg, ran, err := startNFSEmptyAgentDirNoClaim(t, mountRoot)
+	require.NoError(t, err)
+	require.True(t, ran)
+	assert.Empty(t, cfg.NFSPVClaimName)
+	assert.Equal(t, "10.0.0.2", cfg.NFSShareServer)
+	assert.Equal(t, "/scion-workspaces", cfg.NFSShareExport)
+	assert.Equal(t, "test-agent", cfg.NFSAgentDirName)
+	assert.True(t, cfg.NFSAgentDirEmpty)
+	assert.True(t, cfg.NFSWorkspacePreCreated)
+	assert.DirExists(t, filepath.Join(nfsTestAgentDir(mountRoot, "test-agent"), provision.AgentWorkspaceDir))
+}
+
+// Inline (no pv_name) with the export not mounted on the broker: the node
+// cannot create an inline volume's directory, so the start is refused as a
+// share the broker does not see (inline remedy), and the pod is not created.
+func TestStartNFSEmptyAgentDir_NoClaimExportNotMountedRefused(t *testing.T) {
+	mountRoot := filepath.Join(t.TempDir(), "nfs")
+	_, ran, err := startNFSEmptyAgentDirNoClaim(t, mountRoot)
+	require.Error(t, err)
+	assert.False(t, ran, "the pod must not be created")
+	assert.True(t, errors.Is(err, ErrProjectShareNotMounted), "err = %v", err)
+	assert.Contains(t, err.Error(), runtime.ProjectShareInlineUnavailableText(filepath.Join(mountRoot, "share-1")))
+	assert.NoDirExists(t, mountRoot)
+}
+
+// startNFSEmptyAgentDirNoClaim starts an empty-per-agent agent on
+// Kubernetes with NFS storage whose share has no pv_name.
+func startNFSEmptyAgentDirNoClaim(t *testing.T, mountRoot string) (cfg runtime.RunConfig, ran bool, err error) {
+	t.Helper()
 	f := newSharedDirStorageRunFixture(t)
 	f.writeGlobalSettings(t, strings.Replace(fmt.Sprintf(nfsWorkspaceStartYAML, mountRoot), "          pv_name: ws-pv\n", "", 1))
-	ran := false
 	mockRT := &runtime.MockRuntime{
 		NameFunc: func() string { return "kubernetes" },
 		RunFunc: func(ctx context.Context, rc runtime.RunConfig) (string, error) {
-			ran = true
+			ran, cfg = true, rc
 			return "mock-id", nil
 		},
 	}
-	_, err := NewManager(mockRT).Start(context.Background(), api.StartOptions{
+	_, err = NewManager(mockRT).Start(context.Background(), api.StartOptions{
 		Name:        "test-agent",
 		ProjectPath: f.projectScionDir,
 		NoAuth:      true,
 		Env:         map[string]string{"SCION_PROJECT_ID": testNFSWorkspaceProjectID, "SCION_WORKSPACE_MODE": "empty-per-agent"},
 	})
-	require.ErrorIs(t, err, errEmptyPerAgentNFSNoClaim)
-	assert.False(t, ran, "the pod must not be created")
-	assert.Empty(t, nfsDirNames(t, filepath.Join(mountRoot, "share-1")), "nothing is created on the export")
+	return cfg, ran, err
 }
 
 // Delete with files of an empty-per-agent agent on the NFS export, through

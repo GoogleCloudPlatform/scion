@@ -46,7 +46,11 @@ declare global {
  * Go-side consistency test extracts this set with a regex that only sees
  * literals.
  */
-const DEFAULT_ON_FLAGS = new Set(['web.native_chat', 'web.agent_edit']);
+const DEFAULT_ON_FLAGS = new Set([
+  'web.native_chat',
+  'web.agent_edit',
+  'web.chat_starred_messages',
+]);
 
 /**
  * The window event sent after the flag bag changes (server flags applied, or
@@ -220,3 +224,12 @@ export const ARTIFACT_REVIEW_EDITOR_FLAG = 'web.artifact_review_editor';
  * request and on the deletion resource. Default OFF.
  */
 export const USER_DELETE_FORCE_CASCADE_FLAG = 'hub.user_delete_force_cascade';
+
+/**
+ * Chat message retention (hub.chat_retention): the Chat retention panel in
+ * Admin > Server Config and the history divider at the top of a thread
+ * whose older messages the retention policy removed. Presentation only: the
+ * hub checks the experiment in the settings API, the sweep and the history
+ * marker. Default OFF.
+ */
+export const CHAT_RETENTION_FLAG = 'hub.chat_retention';

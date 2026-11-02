@@ -1,0 +1,15 @@
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+jobs:
+  ok:
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok
+        if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}

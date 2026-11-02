@@ -143,6 +143,9 @@ type conduitExternalRuntime struct {
 	// legs counts the hub's open proxied legs; the drain step holds them
 	// and closes the ones left at its deadline.
 	legs conduitIngressLegs
+	// ingressPending holds this hub's placements the relays' session
+	// counts may not include yet (see conduitIngressPending).
+	ingressPending conduitIngressPending
 }
 
 // StartConduitExternal starts the hub's side of external relay mode: the
@@ -158,7 +161,7 @@ func (s *Server) StartConduitExternal(ctx context.Context, opts ConduitExternalO
 		return errors.New("conduit already started")
 	}
 	// Admission tokens minted on one hub replica must open on every other.
-	if _, err := s.conduitAdmissionAEAD(); err != nil {
+	if err := s.checkConduitAdmissionKeys(); err != nil {
 		return fmt.Errorf("conduit external relay mode: %w", err)
 	}
 	if opts.PeerAuth == nil {

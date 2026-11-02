@@ -1,10 +1,19 @@
 server:
   broker:
     instances:
-      - key: k8s-agents
-        name: k8s-agents
+      - key: k8s-agents-a
+        name: k8s-agents-a
         runtime_target:
           type: kubernetes
           namespace: agents
           kubernetes_service_account_mappings:
             shared@proj.iam.gserviceaccount.com: ksa-shared
+            agent@proj.iam.gserviceaccount.com: ksa-a
+      - key: k8s-agents-b
+        name: k8s-agents-b
+        runtime_target:
+          type: kubernetes
+          namespace: agents
+          kubernetes_service_account_mappings:
+            shared@proj.iam.gserviceaccount.com: ksa-shared
+            agent@proj.iam.gserviceaccount.com: ksa-b

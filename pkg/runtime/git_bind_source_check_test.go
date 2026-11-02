@@ -303,7 +303,7 @@ func TestCheckedBindSource_CreateWindowComponentSwapRefused(t *testing.T) {
 //
 // It drives registerReadOnlyBaseGitMounts directly with the broker-trusted name
 // "agent-1": routing through buildCommonRunArgs would mask the gitdir case, because a
-// symlinked worktrees/agent-1/gitdir makes trustedWorktreeAdminName fail to resolve
+// symlinked worktrees/agent-1/gitdir makes util.TrustedWorktreeAdminName fail to resolve
 // the admin name, so the layout is never reached. The worktrees/agent-1 cases in
 // TestNarrowSources_* go through narrowWorktreesDir, whose own-worktree
 // branch this layout does not use.

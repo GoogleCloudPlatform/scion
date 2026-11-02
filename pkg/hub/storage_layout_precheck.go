@@ -18,14 +18,14 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // storageLayoutMismatchDetail is the refusal's details key holding the
-// per-field disagreement lines (projectfs.Layout.DescriptorDiff).
+// differing fields (projectfs.LayoutIssueDetails, public view: field names
+// only, never their values).
 const storageLayoutMismatchDetail = "storageLayoutDiff"
 
 // SetStorageLayout gives the dispatcher the hub's projectfs Layout source
@@ -81,18 +81,20 @@ func (d *HTTPAgentDispatcher) storageLayoutPrecheck(ctx context.Context, agent *
 	if err != nil || broker == nil {
 		return nil
 	}
-	diff := layout.DescriptorDiff(broker.WorkspaceStorage, "")
-	if len(diff) == 0 {
+	issues := layout.DescriptorIssues(broker.WorkspaceStorage, "")
+	if len(issues) == 0 {
 		return nil
 	}
 	d.log.Warn("refusing dispatch: broker storage layout disagrees with the hub's",
-		"agent_id", agent.ID, "broker", broker.ID, "diff", strings.Join(diff, "; "))
+		"agent_id", agent.ID, "broker", broker.ID, "diff", projectfs.LayoutIssueSummary(issues, projectfs.ViewLog))
+	// The requester may not be a hub admin: the refusal names the
+	// differing fields only (projectfs.ViewPublic).
 	return &RuntimeTargetRefusal{
 		Code:   ErrCodeConflict,
 		Status: http.StatusConflict,
 		Message: fmt.Sprintf("broker %s places project storage differently from this hub (%s); "+
 			"configure the same server.project_storage on the broker, or use a per-agent workspace mode",
-			brokerDisplayName(broker), strings.Join(diff, "; ")),
-		Details: map[string]interface{}{storageLayoutMismatchDetail: diff, "broker": broker.ID},
+			brokerDisplayName(broker), projectfs.LayoutIssueSummary(issues, projectfs.ViewPublic)),
+		Details: map[string]interface{}{storageLayoutMismatchDetail: projectfs.LayoutIssueDetails(issues, projectfs.ViewPublic), "broker": broker.ID},
 	}
 }

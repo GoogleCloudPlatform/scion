@@ -606,6 +606,13 @@ func (t *Transport) Delete(ctx context.Context, path string, headers http.Header
 	return t.Do(ctx, req)
 }
 
+// DeleteJSON performs an HTTP DELETE request with a JSON body, for
+// endpoints whose delete takes parameters in the body (for example a
+// compare-and-set revision).
+func (t *Transport) DeleteJSON(ctx context.Context, path string, body interface{}, headers http.Header) (*http.Response, error) {
+	return t.doJSON(ctx, http.MethodDelete, path, body, headers)
+}
+
 // doJSON performs an HTTP request with a JSON body.
 func (t *Transport) doJSON(ctx context.Context, method, path string, body interface{}, headers http.Header) (*http.Response, error) {
 	return t.doJSONVia(ctx, t.Do, method, path, body, headers)
@@ -689,7 +696,12 @@ func decode[T any](resp *http.Response, required bool) (*T, error) {
 // CheckResponse checks if a response indicates an error.
 // Returns nil on success (2xx status codes), otherwise returns an APIError.
 func CheckResponse(resp *http.Response) error {
-	defer func() { _ = resp.Body.Close() }()
+	if resp == nil {
+		return errors.New("apiclient: nil response")
+	}
+	if resp.Body != nil {
+		defer func() { _ = resp.Body.Close() }()
+	}
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return ParseErrorResponse(resp)

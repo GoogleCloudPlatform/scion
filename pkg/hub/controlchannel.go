@@ -49,6 +49,15 @@ type ControlChannelConfig struct {
 	Debug bool
 }
 
+// requestTimeout is the bound on one tunneled request: RequestTimeout, or
+// the hub-to-broker request limit (brokerRequestTimeout) when it is unset.
+func (c ControlChannelConfig) requestTimeout() time.Duration {
+	if c.RequestTimeout == 0 {
+		return brokerRequestTimeout
+	}
+	return c.RequestTimeout
+}
+
 // DefaultControlChannelConfig returns the default control channel configuration.
 func DefaultControlChannelConfig() ControlChannelConfig {
 	return ControlChannelConfig{
@@ -56,7 +65,7 @@ func DefaultControlChannelConfig() ControlChannelConfig {
 		PongWait:       60 * time.Second,
 		WriteWait:      10 * time.Second,
 		MaxMessageSize: 1024 * 1024, // 1MB — must be large enough to carry RemoteCreateAgentRequest payloads (see issue #165)
-		RequestTimeout: 120 * time.Second,
+		RequestTimeout: brokerRequestTimeout,
 		Debug:          false,
 	}
 }
@@ -75,6 +84,15 @@ type ControlChannelManager struct {
 	// does not start connect work that races the store close
 	// (ptone/scion#4869).
 	closed bool
+
+	// Test hooks, nil in production (ptone/scion#5869). HandleUpgrade calls
+	// beforeConnectedWrite with the new connection right before it writes
+	// the connected message, beforePublish after that write and before it
+	// takes the lock to publish, and afterPublish right after the publish,
+	// before the connection's handler starts.
+	beforeConnectedWrite func(*wsprotocol.Connection)
+	beforePublish        func()
+	afterPublish         func(brokerID string)
 }
 
 // errControlChannelClosed is returned by HandleUpgrade once Shutdown has
@@ -170,6 +188,14 @@ type StreamProxy struct {
 	limit  int
 	// notify has capacity 1; Write signals it after queueing a frame.
 	notify chan struct{}
+
+	// owner is the control channel connection the stream was opened on, set
+	// by BrokerConnection.OpenStream. A stream id is valid only on that
+	// connection, so per-stream writes (data, resize, close) go to owner and
+	// never to the broker's current connection: after a reconnect that
+	// would be a session that never had the stream (ptone/scion#5869). nil
+	// for a proxy built directly with NewStreamProxy.
+	owner *BrokerConnection
 }
 
 // StreamClosedError is returned by StreamProxy.Read once the stream has been
@@ -345,14 +371,44 @@ func (m *ControlChannelManager) HandleUpgrade(w http.ResponseWriter, r *http.Req
 		cancel:          cancel,
 	}
 
+	// Send the connected message before the connection is published or its
+	// handler starts. Until it is published nothing else can write on it, so
+	// connected is always the first frame of the session: a by-ID writer
+	// (OpenStream, TunnelRequest) reaches this connection only afterwards.
+	// The broker's handshake rejects any other first frame, drops the socket
+	// and is marked offline until it reconnects (ptone/scion#5869).
+	m.mu.RLock()
+	closed = m.closed
+	m.mu.RUnlock()
+	if closed {
+		// Shutdown ran during the upgrade: refuse before telling the broker
+		// it is connected.
+		cancel()
+		_ = conn.Close()
+		return "", errControlChannelClosed
+	}
+	if m.beforeConnectedWrite != nil {
+		m.beforeConnectedWrite(wsConn)
+	}
+	connectedMsg := wsprotocol.NewConnectedMessage(brokerID, sessionID, int(m.config.PingInterval.Milliseconds()))
+	if err := wsConn.WriteJSON(connectedMsg); err != nil {
+		// Nothing was published, so a still-registered older connection of
+		// this broker stays in place and no disconnect is reported.
+		m.log.Error("Failed to send connected message", "brokerID", brokerID, "error", err)
+		brokerConn.Close()
+		return "", err
+	}
+	if m.beforePublish != nil {
+		m.beforePublish()
+	}
+
 	// Register the connection
 	m.mu.Lock()
 	if m.closed {
-		// Shutdown ran during the upgrade: it no longer sees this
+		// Shutdown ran after the connected message: it no longer sees this
 		// connection, so close it here.
 		m.mu.Unlock()
-		cancel()
-		_ = conn.Close()
+		brokerConn.Close()
 		return "", errControlChannelClosed
 	}
 	if existing, ok := m.connections[brokerID]; ok {
@@ -361,20 +417,14 @@ func (m *ControlChannelManager) HandleUpgrade(w http.ResponseWriter, r *http.Req
 	}
 	m.connections[brokerID] = brokerConn
 	m.mu.Unlock()
+	if m.afterPublish != nil {
+		m.afterPublish(brokerID)
+	}
 
 	m.log.Info("Broker control channel connected", "brokerID", brokerID, "sessionID", sessionID)
 
 	// Start message handler
 	go m.handleConnection(brokerConn)
-
-	// Send connected message
-	connectedMsg := wsprotocol.NewConnectedMessage(brokerID, sessionID, int(m.config.PingInterval.Milliseconds()))
-	if err := wsConn.WriteJSON(connectedMsg); err != nil {
-		m.log.Error("Failed to send connected message", "brokerID", brokerID, "error", err)
-		brokerConn.Close()
-		m.removeConnection(brokerID, sessionID)
-		return "", err
-	}
 
 	return sessionID, nil
 }
@@ -696,36 +746,6 @@ func (m *ControlChannelManager) OpenStream(ctx context.Context, brokerID, stream
 	return hc.OpenStream(ctx, streamType, agentID, projectID, cols, rows)
 }
 
-// SendStreamData sends data on an existing stream.
-func (m *ControlChannelManager) SendStreamData(brokerID, streamID string, data []byte) error {
-	hc := m.GetConnection(brokerID)
-	if hc == nil {
-		return fmt.Errorf("broker %s not connected", brokerID)
-	}
-
-	return hc.SendStreamData(streamID, data)
-}
-
-// CloseStream closes a stream.
-func (m *ControlChannelManager) CloseStream(brokerID, streamID, reason string) error {
-	hc := m.GetConnection(brokerID)
-	if hc == nil {
-		return fmt.Errorf("broker %s not connected", brokerID)
-	}
-
-	return hc.CloseStream(streamID, reason)
-}
-
-// ResizeStream sends a resize message for a stream.
-func (m *ControlChannelManager) ResizeStream(brokerID, streamID string, cols, rows int) error {
-	hc := m.GetConnection(brokerID)
-	if hc == nil {
-		return fmt.Errorf("broker %s not connected", brokerID)
-	}
-
-	return hc.ResizeStream(streamID, cols, rows)
-}
-
 // ListConnectedBrokers returns a list of currently connected broker IDs.
 func (m *ControlChannelManager) ListConnectedBrokers() []string {
 	m.mu.RLock()
@@ -788,10 +808,7 @@ func (hc *BrokerConnection) TunnelRequest(ctx context.Context, req *wsprotocol.R
 	}
 
 	// Wait for response with timeout
-	timeout := hc.config.RequestTimeout
-	if timeout == 0 {
-		timeout = 120 * time.Second
-	}
+	timeout := hc.config.requestTimeout()
 
 	select {
 	case resp := <-respCh:
@@ -830,6 +847,7 @@ func (hc *BrokerConnection) sendCancel(requestID string) {
 func (hc *BrokerConnection) OpenStream(ctx context.Context, streamType, agentID, projectID string, cols, rows int) (*StreamProxy, error) {
 	streamID := uuid.New().String()
 	stream := NewStreamProxy(streamID, streamType, agentID)
+	stream.owner = hc
 
 	hc.streamsMu.Lock()
 	hc.streams[streamID] = stream

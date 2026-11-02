@@ -433,6 +433,12 @@ DELETE /api/v1/agents/{agentId}
 POST /api/v1/agents/{agentId}/start
 ```
 
+**Request Body (optional):**
+| Field | Type | Description |
+|-------|------|-------------|
+| `forceResume` | bool | For an agent in phase `error`: resume the interrupted harness session instead of starting a fresh one (default: false) |
+| `acceptAsyncLaunch` | bool | Opt in to an asynchronous start (default: false). Honoured only while the `hub.async_agent_start` and `hub.async_agent_launch` experiments are both on, every live hub instance advertises `async_start_v1`, and the agent and broker qualify; the hub then answers as soon as the broker accepts, with the agent in phase `starting` and an active `launch` |
+
 #### Stop Agent
 ```
 POST /api/v1/agents/{agentId}/stop
@@ -442,6 +448,9 @@ POST /api/v1/agents/{agentId}/stop
 ```
 POST /api/v1/agents/{agentId}/restart
 ```
+
+Accepts the same optional body as start, for `acceptAsyncLaunch` only: it
+applies to the restart's start leg (the stop leg stays synchronous).
 
 #### Send Message
 ```
@@ -936,11 +945,14 @@ POST /api/v1/runtime-brokers/{brokerId}/agents/{agentId}/launch
 ```
 
 Internal endpoint for a runtime broker to report progress and the terminal
-outcome of a non-blocking ("async") agent launch (design §3.2, §3.7). Only
-meaningful for an agent whose create request opted in via
-`acceptAsyncLaunch` while the `hub.async_agent_launch` experiment is on;
-with the feature off and no earlier launch left (no agent has a launch),
-every authorized, well-formed call ends in a 404 or 409 below.
+outcome of a non-blocking ("async") agent launch (design §3.2, §3.7): an
+asynchronous create, or an asynchronous start or restart of an existing
+agent. Only meaningful for an agent whose create, start or restart request
+opted in via `acceptAsyncLaunch` while the experiments allowed it
+(`hub.async_agent_launch`, on by default, and for a start
+`hub.async_agent_start`); with them off and no earlier launch left (no
+agent has a launch), every authorized, well-formed call ends in a 404 or
+409 below.
 
 Only the broker itself may call this endpoint (HMAC broker identity must
 match `{brokerId}`); a non-broker caller, or a broker identity that does not
@@ -1046,10 +1058,54 @@ POST /api/v1/agents
 The create request body accepts an optional `acceptAsyncLaunch: boolean`
 field (default `false`). It is the client's opt-in to a non-blocking launch
 and is persisted as-is regardless of whether the `hub.async_agent_launch`
-experiment is on; the experiment (checked at each create send) and the
-opt-in must both be on for a launch to actually be non-blocking.
+experiment is on; the experiment (on by default, checked at each create
+send) and the opt-in must both be on for a launch to actually be
+non-blocking. Existing agents opt in per request instead, with the same
+field in the start and restart bodies (§3.6).
 
 ---
+
+### 5.11 Runtime Broker Workspace Download
+
+```
+POST /api/v1/runtime-brokers/{brokerId}/agents/{agentId}/workspace-download
+```
+
+Internal endpoint a runtime broker pages through to bootstrap a hub-managed
+workspace upload without storage credentials of its own. The Hub asks for it
+by sending `workspaceDownloadMode: "signed_urls"` in the create request (only
+when its storage is GCS). The Hub lists the agent's uploaded files under
+`<WorkspaceStoragePath>/files/` with its own credential and answers each page
+with one GET-only signed URL per file. The response is never compressed.
+
+Checks, in order, all failing closed:
+1. HMAC broker identity matching `{brokerId}`, else `403`.
+2. The agent exists and is assigned to that broker, else `404`.
+3. The broker still provides for the agent's project, else `403`.
+4. The agent has a workspace upload at the prefix the Hub derives from the
+   agent row, and is not being deleted, else `409`.
+5. The Hub's storage is GCS, else `409 workspace_download_unsupported`.
+6. The body is at most 4 KiB and the cursor lies inside the agent's prefix,
+   else `400`.
+
+**Request Body:** `{"cursor": "string"}`; empty or absent for the first page.
+
+**Response:** `200 OK`
+```json
+{
+  "files": [{"path": "src/main.go", "url": "<signed GET URL>", "size": 123}],
+  "nextCursor": "string",   // empty on the last page; a page can be empty while nextCursor is set
+  "expires": "2026-01-01T00:15:00Z",  // on the Hub's clock
+  "expiresInSeconds": 900   // the same lifetime, relative; the broker measures it on its own clock
+}
+```
+
+A page lists at most 500 objects. Names are filtered by one shared rule table
+(`transfer.ExcludeWorkspaceObject`): the root `.scion` entry and everything
+under it (in any letter case, because a case-insensitive filesystem resolves
+`.SCION` to the same entry), directory objects and invalid relative paths are
+left out, and the broker applies the same table again, also when it writes. URLs expire after 15 minutes; the broker
+fetches a page again with the same cursor when they expire or are refused.
 
 ## 6. Template Endpoints
 

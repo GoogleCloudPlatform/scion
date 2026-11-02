@@ -10,12 +10,15 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 )
 
-// runProvisionCapture runs runProvision for a shared-plain workspace with
-// provision.ProvisionShared replaced, and returns the input it was given.
-func runProvisionCapture(t *testing.T, cloneURL, token string) provision.ProvisionInput {
+// runProvisionCaptureRemote runs runProvision for a shared-plain workspace
+// with provision.ProvisionShared replaced, with token in GITHUB_TOKEN and
+// tokenRemote in api.EnvGitTokenRemote ("" leaves it unset), and returns the
+// input ProvisionShared was given.
+func runProvisionCaptureRemote(t *testing.T, cloneURL, token, tokenRemote string) provision.ProvisionInput {
 	t.Helper()
 	wsDir := filepath.Join(t.TempDir(), "workspace")
 	if err := os.MkdirAll(wsDir, 0o770); err != nil {
@@ -45,6 +48,12 @@ func runProvisionCapture(t *testing.T, cloneURL, token string) provision.Provisi
 	t.Setenv("SCION_PROVISION_STATE_DIR", "")
 	t.Setenv("SCION_PROJECT_ID", "test-proj")
 	t.Setenv(provision.GitTokenEnv, token)
+	t.Setenv(api.EnvGitTokenRemote, tokenRemote)
+	if tokenRemote == "" {
+		if err := os.Unsetenv(api.EnvGitTokenRemote); err != nil {
+			t.Fatal(err)
+		}
+	}
 	t.Setenv("GIT_CONFIG_COUNT", "")
 
 	if err := runProvision(context.Background()); err != nil {
@@ -66,19 +75,32 @@ func runProvisionCapture(t *testing.T, cloneURL, token string) provision.Provisi
 	return got
 }
 
-func TestRunProvision_CloneWithToken(t *testing.T) {
+// The init container's clone gets the token only through CloneToken, bound
+// to the project's recorded remote (CloneTokenRemote): never the unbound
+// CloneWithToken, and none at all without a token remote or for a clone URL
+// that does not name it.
+func TestRunProvision_CloneTokenBoundToRemote(t *testing.T) {
+	const remote = "github.com/org/private"
 	for _, tc := range []struct {
-		name, url, token string
-		want             bool
+		name, url, token, remote string
+		want                     bool
 	}{
-		{"token and clone URL", "https://github.com/org/private.git", "test-token-value", true},
-		{"no token", "https://github.com/org/public.git", "", false},
-		{"token without clone URL", "", "test-token-value", false},
+		{"token, clone URL and matching remote", "https://github.com/org/private.git", "test-token-value", remote, true},
+		{"token and clone URL, no remote", "https://github.com/org/private.git", "test-token-value", "", false},
+		{"label naming another host", "https://mirror.example/org/private.git", "test-token-value", remote, false},
+		{"no token", "https://github.com/org/private.git", "", remote, false},
+		{"token without clone URL", "", "test-token-value", remote, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			in := runProvisionCapture(t, tc.url, tc.token)
-			if in.CloneWithToken != tc.want {
-				t.Errorf("CloneWithToken = %v, want %v", in.CloneWithToken, tc.want)
+			in := runProvisionCaptureRemote(t, tc.url, tc.token, tc.remote)
+			if in.CloneWithToken {
+				t.Error("CloneWithToken (unbound) must never be set")
+			}
+			if got := in.CloneToken != ""; got != tc.want {
+				t.Errorf("CloneToken set = %v, want %v", got, tc.want)
+			}
+			if in.CloneTokenRemote != tc.remote {
+				t.Errorf("CloneTokenRemote = %q, want %q", in.CloneTokenRemote, tc.remote)
 			}
 			if in.GitClone != nil && strings.Contains(in.GitClone.URL, "test-token-value") {
 				t.Error("the token must not be added to the clone URL")

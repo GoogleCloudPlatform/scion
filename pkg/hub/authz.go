@@ -150,6 +150,14 @@ type Resource struct {
 	// launcher status-read rule (authz_launcher_read.go) decides from it
 	// alone. It is unexported so no decoded request can carry it.
 	launchedTarget *store.Agent
+
+	// deliveryItem names the stored material record a deliver request is
+	// for, set only by materialDeliveryResource (material_resources.go).
+	// The association rules (authz_material_association.go) re-read the
+	// record it names from the store and decide from that record and the
+	// delivery credential's stored agent. It is unexported so no decoded
+	// request can carry it.
+	deliveryItem *materialDeliveryItem
 }
 
 // PrincipalKind describes the authenticated actor evaluated by an authorization request.
@@ -539,6 +547,10 @@ type AuthzService struct {
 	// latch catches up as soon as the backfill completes.
 	backfillDone atomic.Bool
 
+	// legacyDeliveryLog rate-limits the launch legacy fallback Warn
+	// (deliverySelector.warnLegacyFallback). Nil logs every line.
+	legacyDeliveryLog *deliveryLogDedup
+
 	// legacyFallbackUses counts uses of the legacy adopted-agent fallback
 	// for owner user secrets (user_secret_legacy_adopted_fallback.go);
 	// legacyFallbackMetrics, when set, exports them; legacyFallbackWarn
@@ -547,6 +559,12 @@ type AuthzService struct {
 	legacyFallbackMetrics  legacyAdoptedFallbackMetrics
 	legacyFallbackWarn     *hookRefusalLimiter
 	legacyFallbackWarnOnce sync.Once
+
+	// uatIntrinsicUses counts uses of the intrinsic set of token-recorded
+	// hops (authz_uat_intrinsic_metrics.go); uatIntrinsicMetrics, when set,
+	// exports them.
+	uatIntrinsicUses    atomic.Int64
+	uatIntrinsicMetrics uatIntrinsicMetrics
 
 	// relationshipResolver handles progeny relationship grants. Lazily
 	// initialized on first use.
@@ -600,6 +618,7 @@ func NewAuthzService(s store.Store, logger *slog.Logger) *AuthzService {
 		logger:                  logger,
 		DecisionAuditSampleRate: 1.0,
 		relationshipResolver:    NewRelationshipGrantResolver(s),
+		legacyDeliveryLog:       newDeliveryLogDedup(legacyDeliveryLogDedupSize, legacyDeliveryLogDedupWindow),
 	}
 	// ptone/scion#2128: personal (user-scoped) skills are a progeny sharing
 	// source keyed on the owning user's bucket (see authz_skill_progeny.go).
