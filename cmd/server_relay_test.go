@@ -122,7 +122,7 @@ func TestValidateRelayRoleConfig(t *testing.T) {
 
 			external := loaded.Hub.Conduit
 			external.RelayMode = config.ConduitRelayModeExternal
-			assert.ErrorContains(t, validateConduitPeerSecret(external, false, ""), "server.hub.conduit.peer_secret is required when server.hub.conduit.relay_mode is external")
+			assert.ErrorContains(t, validateConduitPeerSecret(external, false, "", nil), "server.hub.conduit.peer_secret is required when server.hub.conduit.relay_mode is external")
 		})
 	}
 }
