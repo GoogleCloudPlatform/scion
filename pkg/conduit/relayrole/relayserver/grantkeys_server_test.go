@@ -161,7 +161,7 @@ func TestServerHintsTargetsOnListenReconnect(t *testing.T) {
 type cleanupEvents struct {
 	mu           sync.Mutex
 	unsubscribed map[string]int
-	hooksRemoved int
+	hookRemoved  []int // removals per listen hook, in registration order
 }
 
 func (e *cleanupEvents) Subscribe(subjects ...string) (<-chan string, func()) {
@@ -174,9 +174,13 @@ func (e *cleanupEvents) Subscribe(subjects ...string) (<-chan string, func()) {
 }
 
 func (e *cleanupEvents) AddOnListen(func()) func() {
+	e.mu.Lock()
+	i := len(e.hookRemoved)
+	e.hookRemoved = append(e.hookRemoved, 0)
+	e.mu.Unlock()
 	return func() {
 		e.mu.Lock()
-		e.hooksRemoved++
+		e.hookRemoved[i]++
 		e.mu.Unlock()
 	}
 }
@@ -201,16 +205,29 @@ func TestStartFailureReleasesEventRegistrations(t *testing.T) {
 		t.Fatal("Start succeeded with its public listen address in use")
 	}
 
+	// The grant key listen hook is the last one Start registers (the
+	// role's own hook comes first).
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		ev.mu.Lock()
-		settings, keys, hooks := ev.unsubscribed[SettingsUpdatedSubject], ev.unsubscribed[GrantKeysChangedSubject], ev.hooksRemoved
+		settings, keys := ev.unsubscribed[SettingsUpdatedSubject], ev.unsubscribed[GrantKeysChangedSubject]
+		hook := -1
+		if n := len(ev.hookRemoved); n > 0 {
+			hook = ev.hookRemoved[n-1]
+		}
 		ev.mu.Unlock()
-		if settings == 1 && keys == 1 && hooks >= 1 {
+		if settings == 1 && keys == 1 && hook == 1 {
+			time.Sleep(200 * time.Millisecond)
+			ev.mu.Lock()
+			again := ev.unsubscribed[SettingsUpdatedSubject] == 1 && ev.unsubscribed[GrantKeysChangedSubject] == 1 && ev.hookRemoved[len(ev.hookRemoved)-1] == 1
+			ev.mu.Unlock()
+			if !again {
+				t.Fatal("a cleanup ran more than once")
+			}
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("after the failed start: settings unsubscribed %d, grant keys unsubscribed %d, listen hooks removed %d; want 1, 1, at least 1", settings, keys, hooks)
+			t.Fatalf("after the failed start: settings unsubscribed %d, grant keys unsubscribed %d, grant key listen hook removed %d; want exactly 1 each", settings, keys, hook)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
