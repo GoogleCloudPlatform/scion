@@ -236,9 +236,9 @@ first:
 | `resources` | `scion.io/default-resources-cpu-request`, `-memory-request`, `-cpu-limit`, `-memory-limit`, `-disk` |
 
 A project setting is an *override*: it takes precedence over the template the
-project uses. Leave it blank to let the template — and then the rest of the
+project uses. Leave it blank (`null` in `PUT /api/v1/projects/:id/settings`) to let the template — and then the rest of the
 chain — decide. Blank means **unset, falls through** — it does not mean "set to
-whatever the default happens to be".
+whatever the default happens to be". For the two project count limits (`defaultMaxTurns` / `scion.io/default-max-turns` and `defaultMaxModelCalls` / `scion.io/default-max-model-calls`), `0` is **Unlimited** — an explicit "no limit" that new agents receive in their inline config, overriding any template, Hub, or Runtime Broker default limit — while `null` clears the project setting back to inheriting and a negative value is refused with `422 validation_error` (the Project Settings and Agent Configuration forms in the Web UI provide a **Limited / Unlimited** selector for both fields). Changing a project default count limit to `0` records a `project_settings_limit_unlimited` mutation audit event (and logs a warning when the field was previously unset, since a browser tab opened before the upgrade sends `0` for an empty field) and returns a `warnings` entry when a Runtime Broker providing the project does not advertise `unlimitedCountLimits` (agents on such a broker keep the inherited limit).
 
 :::note[This is a partial ordering, and it does not cover environment variables]
 The three ranks above are the top of a longer chain, not the whole of it — below
