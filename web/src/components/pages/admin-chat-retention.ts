@@ -39,6 +39,7 @@ import {
   isFeatureEnabled,
 } from '../../utils/feature-flags.js';
 import { formatInstantWithZone } from '../../utils/time.js';
+import { formatNumber } from '../../utils/format-number.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 const API_PATH = '/api/v1/admin/chat-retention';
@@ -273,7 +274,7 @@ export function retentionWarning(
 }
 
 function plural(n: number, one: string, many: string): string {
-  return `${n.toLocaleString()} ${n === 1 ? one : many}`;
+  return `${formatNumber(n)} ${n === 1 ? one : many}`;
 }
 
 function formatWhen(iso: string | null): string {
