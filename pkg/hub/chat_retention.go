@@ -401,10 +401,20 @@ func (sw *chatRetentionSweeper) RunTick(ctx context.Context, p chatRetentionPoli
 			Status:    store.ChatRetentionStatusRunning,
 		}
 	}
+	budgetEnd := chatRetentionBudgetEnd(start, remaining, hasDeadline, cfg)
+	return res, sw.sweepAndRecord(ctx, p, run, &res, start, budgetEnd, true)
+}
+
+// sweepAndRecord runs both phases into run and res until budgetEnd, then
+// records run (status, policy, finish time) and prunes old runs. With
+// splitBudget, the deleted-conversation phase gets at most half of the
+// time when the main walk follows (a tick); without it each phase may use
+// all of it (a manual run).
+func (sw *chatRetentionSweeper) sweepAndRecord(ctx context.Context, p chatRetentionPolicy, run *store.ChatRetentionRun, res *chatRetentionTickResult, start, budgetEnd time.Time, splitBudget bool) error {
+	cfg := p.Config
 	if run.Counts == nil {
 		run.Counts = map[string]store.ChatRetentionCounts{}
 	}
-	budgetEnd := chatRetentionBudgetEnd(start, remaining, hasDeadline, cfg)
 	hasWindow := !p.MainCutoff.IsZero()
 
 	// The deleted-conversation phase first, with at most half of the tick
@@ -412,11 +422,11 @@ func (sw *chatRetentionSweeper) RunTick(ctx context.Context, p chatRetentionPoli
 	// purge of deleted conversations, nor a large deleted conversation the
 	// main walk.
 	deletedEnd := budgetEnd
-	if hasWindow {
+	if hasWindow && splitBudget {
 		deletedEnd = start.Add(budgetEnd.Sub(start) / 2)
 	}
 	pacer := &chatRetentionPacer{sw: sw, pause: cfg.Pause()}
-	tickErr := sw.walkDeleted(ctx, p, run, &res, pacer, deletedEnd)
+	tickErr := sw.walkDeleted(ctx, p, run, res, pacer, deletedEnd)
 
 	// A deleted-conversation failure does not hold back the main walk: it
 	// is recorded on the run, and the main walk still runs unless the
@@ -445,7 +455,7 @@ func (sw *chatRetentionSweeper) RunTick(ctx context.Context, p chatRetentionPoli
 				cursor.Position = store.ChatRetentionPosition{}
 				cursorDirty = true
 			}
-			tickErr = firstChatRetentionErr(tickErr, sw.walk(ctx, p, &cursor, run, &res, budgetEnd, &cursorDirty))
+			tickErr = firstChatRetentionErr(tickErr, sw.walk(ctx, p, &cursor, run, res, budgetEnd, &cursorDirty))
 		}
 	} else if tickErr == nil && !res.DeletedDone {
 		res.BudgetExhausted = true
@@ -477,12 +487,7 @@ func (sw *chatRetentionSweeper) RunTick(ctx context.Context, p chatRetentionPoli
 		}
 	}
 
-	run.Policy = store.ChatRetentionPolicy{
-		MessagesRetentionDays:        cfg.MessagesRetentionDays,
-		MainCutoff:                   p.MainCutoff.UTC(),
-		DeletedConversationGraceDays: p.GraceDays,
-		GraceCutoff:                  p.GraceCutoff.UTC(),
-	}
+	run.Policy = chatRetentionRunPolicy(p)
 	run.FinishedAt = &now
 	// A sweep run that failed stays failed, with its first error, until it
 	// closes (24 h after it started); later clean ticks still add their
@@ -510,7 +515,17 @@ func (sw *chatRetentionSweeper) RunTick(ctx context.Context, p chatRetentionPoli
 	if _, err := sw.store.PruneChatRetentionRuns(wctx, now.Add(-chatRetentionRunKeep)); err != nil && tickErr == nil {
 		tickErr = err
 	}
-	return res, tickErr
+	return tickErr
+}
+
+// chatRetentionRunPolicy is the policy recorded on a run row.
+func chatRetentionRunPolicy(p chatRetentionPolicy) store.ChatRetentionPolicy {
+	return store.ChatRetentionPolicy{
+		MessagesRetentionDays:        p.Config.MessagesRetentionDays,
+		MainCutoff:                   p.MainCutoff.UTC(),
+		DeletedConversationGraceDays: p.GraceDays,
+		GraceCutoff:                  p.GraceCutoff.UTC(),
+	}
 }
 
 // firstChatRetentionErr returns first unless it is nil, then next.
@@ -537,7 +552,14 @@ func chatRetentionTimeLeft(ctx context.Context) (time.Duration, bool) {
 // chatRetentionChunkTimeout) and the end-of-tick writes still fit before
 // it. remaining is wall-clock time applied to the sweeper's clock.
 func chatRetentionBudgetEnd(start time.Time, remaining time.Duration, hasDeadline bool, cfg opsettings.ChatRetentionConfig) time.Time {
-	end := start.Add(cfg.TickBudget())
+	return chatRetentionWalkEnd(start, cfg.TickBudget(), remaining, hasDeadline)
+}
+
+// chatRetentionWalkEnd is start + budget, or earlier when the context has a
+// deadline (remaining, measured at start), so that a last chunk and the
+// final writes still fit before it.
+func chatRetentionWalkEnd(start time.Time, budget, remaining time.Duration, hasDeadline bool) time.Time {
+	end := start.Add(budget)
 	if hasDeadline {
 		if byDeadline := start.Add(remaining - chatRetentionChunkTimeout - chatRetentionDeadlineMargin); byDeadline.Before(end) {
 			end = byDeadline
@@ -618,7 +640,7 @@ func (sw *chatRetentionSweeper) chunk(ctx context.Context, p chatRetentionPolicy
 		res.MaxTx = tx
 	}
 	addChatRetentionCounts(run, res, pr.ByProject)
-	sw.deleteAttachments(ctx, pr.UnlinkedAttachments, run, res)
+	addChatRetentionAttachments(run, res, sw.deleteAttachments(ctx, pr.UnlinkedAttachments))
 	return len(cands) < limit, tx, nil
 }
 
@@ -697,7 +719,8 @@ func (sw *chatRetentionSweeper) walkDeleted(ctx context.Context, p chatRetention
 			return err
 		})
 		if err != nil {
-			return err
+			// An earlier candidate's error stays the first one reported.
+			return firstChatRetentionErr(candidateErr, err)
 		}
 		for _, id := range ids {
 			seen[id] = true
@@ -719,7 +742,7 @@ func (sw *chatRetentionSweeper) walkDeleted(ctx context.Context, p chatRetention
 			return err
 		})
 		if err != nil {
-			return err
+			return firstChatRetentionErr(candidateErr, err)
 		}
 		for _, t := range topics {
 			conv := t.ConversationID
@@ -798,12 +821,33 @@ func (sw *chatRetentionSweeper) drainDeleted(ctx context.Context, conversationID
 			pr.ByProject[project] = c
 		}
 		addChatRetentionCounts(run, res, pr.ByProject)
-		sw.deleteAttachments(ctx, pr.UnlinkedAttachments, run, res)
+		addChatRetentionAttachments(run, res, sw.deleteAttachments(ctx, pr.UnlinkedAttachments))
 		*chunk = nextChatRetentionChunk(*chunk, maxChunk, tx)
 		if len(cands) < limit {
 			return true, nil
 		}
 	}
+}
+
+// chatRetentionAttachmentResult is what deleteAttachments did.
+type chatRetentionAttachmentResult struct {
+	// ByProject counts the rows and bytes deleted per project
+	// (AttachmentRows, AttachmentBytes).
+	ByProject map[string]store.ChatRetentionCounts
+	// Failures counts attachments whose bytes could not be deleted; their
+	// rows stay for the attachment GC.
+	Failures int
+	// Relinked counts attachments linked again between the link re-check
+	// and the byte delete: their bytes are gone, their rows kept.
+	Relinked int
+}
+
+// addChatRetentionAttachments adds an attachment result to the run and the
+// tick result.
+func addChatRetentionAttachments(run *store.ChatRetentionRun, res *chatRetentionTickResult, ar chatRetentionAttachmentResult) {
+	addChatRetentionCounts(run, res, ar.ByProject)
+	res.AttachmentDeleteFailures += ar.Failures
+	res.AttachmentRelinked += ar.Relinked
 }
 
 // deleteAttachments deletes, for each attachment a committed purge left
@@ -815,14 +859,15 @@ func (sw *chatRetentionSweeper) drainDeleted(ctx context.Context, conversationID
 // its bytes while its row is kept (the row delete is conditional on no
 // link); that window is milliseconds, the legacy GC shares it, and it is
 // logged. Without a blob store every row is left for the attachment GC.
-// Failures are logged and never fail the tick.
-func (sw *chatRetentionSweeper) deleteAttachments(ctx context.Context, atts []store.ChatRetentionAttachment, run *store.ChatRetentionRun, res *chatRetentionTickResult) {
+// Failures are logged and never fail the purge.
+func (sw *chatRetentionSweeper) deleteAttachments(ctx context.Context, atts []store.ChatRetentionAttachment) chatRetentionAttachmentResult {
+	ar := chatRetentionAttachmentResult{ByProject: map[string]store.ChatRetentionCounts{}}
 	if sw.attachments == nil {
-		return
+		return ar
 	}
 	for _, a := range atts {
 		if ctx.Err() != nil {
-			return
+			return ar
 		}
 		// Attachment and project IDs are UUIDs the hub generated ("" for
 		// an upload with no project); anything else is not a path to
@@ -841,7 +886,7 @@ func (sw *chatRetentionSweeper) deleteAttachments(ctx context.Context, atts []st
 				return nil
 			}
 			if err := sw.attachments.Delete(cctx, a.ProjectID, a.ID); err != nil {
-				res.AttachmentDeleteFailures++
+				ar.Failures++
 				slog.Warn("chat retention: attachment bytes not deleted; left for the attachment GC", "attachment", a.ID, "error", err)
 				return nil
 			}
@@ -851,17 +896,18 @@ func (sw *chatRetentionSweeper) deleteAttachments(ctx context.Context, atts []st
 				return nil
 			}
 			if !deleted {
-				res.AttachmentRelinked++
+				ar.Relinked++
 				slog.Warn("chat retention: attachment bytes deleted but the attachment was linked again; row kept",
 					"attachment", a.ID)
 				return nil
 			}
-			addChatRetentionCounts(run, res, map[string]store.ChatRetentionCounts{
-				a.ProjectID: {AttachmentRows: 1, AttachmentBytes: a.Size},
-			})
+			acc := ar.ByProject[a.ProjectID]
+			acc.Add(store.ChatRetentionCounts{AttachmentRows: 1, AttachmentBytes: a.Size})
+			ar.ByProject[a.ProjectID] = acc
 			return nil
 		})
 	}
+	return ar
 }
 
 // chatHistoryRetentionMarker returns the retention marker for a history

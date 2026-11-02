@@ -2949,6 +2949,16 @@ func hasAgentReplyAfter(ctx context.Context, s store.Store, threadID string, aft
 // Message History
 // ---------------------------------------------------------------------------
 
+// errCodeMessageUnavailable is the code of the history around jump's 404
+// for an anchor message that cannot be shown.
+const errCodeMessageUnavailable = "message_unavailable"
+
+// writeAroundMessageUnavailable writes the history around jump's 404: the
+// usual "Message not found" with code message_unavailable.
+func writeAroundMessageUnavailable(w http.ResponseWriter) {
+	writeError(w, http.StatusNotFound, errCodeMessageUnavailable, "Message not found", nil)
+}
+
 // handleConversationHistory handles GET /api/v1/chat/conversations/{key}/messages.
 //
 // Query params:
@@ -3060,14 +3070,19 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 
 	var result *store.ListResult[store.Message]
 	if aroundID := q.Get("around"); aroundID != "" {
+		// Every anchor that cannot be shown here (no such message, one
+		// purged by chat retention or deleted, one in another
+		// conversation) gets the same not-found response, with code
+		// message_unavailable so the web can say so (design chat message
+		// retention §8.3); the response does not tell them apart.
 		if _, err := uuid.Parse(aroundID); err != nil {
-			NotFound(w, "Message")
+			writeAroundMessageUnavailable(w)
 			return
 		}
 		anchor, err := s.store.GetMessage(ctx, aroundID)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
-				NotFound(w, "Message")
+				writeAroundMessageUnavailable(w)
 			} else {
 				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch message", nil)
 			}
@@ -3076,7 +3091,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		if (filter.Channel != "" && anchor.Channel != filter.Channel) ||
 			(filter.ConversationID != "" && anchor.ConversationID != filter.ConversationID) ||
 			(filter.ThreadID != "" && anchor.ThreadID != filter.ThreadID) {
-			NotFound(w, "Message")
+			writeAroundMessageUnavailable(w)
 			return
 		}
 
