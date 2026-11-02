@@ -49,8 +49,12 @@ type chatRetentionSweepJSON struct {
 type chatRetentionResponse struct {
 	Enabled bool `json:"enabled"`
 	// MessagesRetentionDays is null when no window is set (keep forever).
-	MessagesRetentionDays *int                   `json:"messages_retention_days"`
-	Sweep                 chatRetentionSweepJSON `json:"sweep"`
+	MessagesRetentionDays *int `json:"messages_retention_days"`
+	// DeletedConversationGraceDays is how long after a conversation or
+	// topic is deleted its messages are purged (while enabled), whatever
+	// the window.
+	DeletedConversationGraceDays int                    `json:"deleted_conversation_grace_days"`
+	Sweep                        chatRetentionSweepJSON `json:"sweep"`
 	// LastAppliedCutoff is the cutoff the sweep last reached (every
 	// eligible message older than it is gone); null until it reaches one.
 	LastAppliedCutoff *time.Time `json:"last_applied_cutoff"`
@@ -69,10 +73,11 @@ type chatRetentionSweepPut struct {
 
 // chatRetentionPutRequest is the body of PUT /api/v1/admin/chat-retention.
 type chatRetentionPutRequest struct {
-	Enabled               *bool                  `json:"enabled,omitempty"`
-	MessagesRetentionDays *int                   `json:"messages_retention_days,omitempty"`
-	Sweep                 *chatRetentionSweepPut `json:"sweep,omitempty"`
-	ExpectedRevision      *int64                 `json:"expected_revision,omitempty"`
+	Enabled                      *bool                  `json:"enabled,omitempty"`
+	MessagesRetentionDays        *int                   `json:"messages_retention_days,omitempty"`
+	DeletedConversationGraceDays *int                   `json:"deleted_conversation_grace_days,omitempty"`
+	Sweep                        *chatRetentionSweepPut `json:"sweep,omitempty"`
+	ExpectedRevision             *int64                 `json:"expected_revision,omitempty"`
 }
 
 // handleAdminChatRetention handles GET/PUT /api/v1/admin/chat-retention,
@@ -83,10 +88,11 @@ type chatRetentionPutRequest struct {
 //
 // PUT semantics:
 //   - omitted field = unchanged; explicit null = compiled default (enabled
-//     false, no window, default sweep tuning; "sweep": null resets all of
-//     the tuning);
-//   - changing enabled or messages_retention_days (both decide what is
-//     deleted) requires expected_revision; a stale one is a 409;
+//     false, no window, a 30-day grace, default sweep tuning; "sweep": null
+//     resets all of the tuning);
+//   - changing enabled, messages_retention_days or
+//     deleted_conversation_grace_days (each decides what is deleted)
+//     requires expected_revision; a stale one is a 409;
 //   - every save is written with a compare-and-set on the read revision and
 //     is recorded in the mutation audit before it is written.
 func (s *Server) handleAdminChatRetention(w http.ResponseWriter, r *http.Request) {
@@ -109,7 +115,8 @@ func (s *Server) handleAdminChatRetention(w http.ResponseWriter, r *http.Request
 
 func chatRetentionResponseFor(cfg opsettings.ChatRetentionConfig, revision int64, cutoff *time.Time) chatRetentionResponse {
 	resp := chatRetentionResponse{
-		Enabled: cfg.Enabled,
+		Enabled:                      cfg.Enabled,
+		DeletedConversationGraceDays: cfg.DeletedConversationGraceDays,
 		Sweep: chatRetentionSweepJSON{
 			ChunkSize:           cfg.ChunkSize,
 			PauseMS:             cfg.PauseMS,
@@ -167,12 +174,13 @@ func (s *Server) handlePutChatRetention(w http.ResponseWriter, r *http.Request) 
 	cur := ops.ChatRetention()
 	curRev := ops.SectionRevision(opsettings.ChatRetentionSectionName)
 
-	// enabled and messages_retention_days decide what is deleted: a change
-	// to either must name the revision it was made against.
-	if fp.has("enabled") || fp.has("messages_retention_days") {
+	// enabled, messages_retention_days and deleted_conversation_grace_days
+	// decide what is deleted: a change to any of them must name the
+	// revision it was made against.
+	if fp.has("enabled") || fp.has("messages_retention_days") || fp.has("deleted_conversation_grace_days") {
 		if body.ExpectedRevision == nil {
 			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
-				"expected_revision is required when changing enabled or messages_retention_days", nil)
+				"expected_revision is required when changing enabled, messages_retention_days or deleted_conversation_grace_days", nil)
 			return
 		}
 	}
@@ -199,6 +207,18 @@ func (s *Server) handlePutChatRetention(w http.ResponseWriter, r *http.Request) 
 		next.MessagesRetentionDays = d
 	} else if fp.has("messages_retention_days") {
 		next.MessagesRetentionDays = 0
+	}
+	if body.DeletedConversationGraceDays != nil {
+		g := *body.DeletedConversationGraceDays
+		if g < opsettings.ChatRetentionMinGraceDays || g > opsettings.ChatRetentionMaxDays {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+				fmt.Sprintf("deleted_conversation_grace_days must be between %d and %d",
+					opsettings.ChatRetentionMinGraceDays, opsettings.ChatRetentionMaxDays), nil)
+			return
+		}
+		next.DeletedConversationGraceDays = g
+	} else if fp.has("deleted_conversation_grace_days") {
+		next.DeletedConversationGraceDays = opsettings.ChatRetentionDefaultGraceDays
 	}
 	if fp.has("sweep") {
 		def := opsettings.DefaultChatRetentionConfig()
@@ -282,8 +302,8 @@ func chatRetentionAuditSummary(c opsettings.ChatRetentionConfig) string {
 	if c.HasWindow() {
 		days = strconv.Itoa(c.MessagesRetentionDays)
 	}
-	return fmt.Sprintf("enabled=%t,messages_retention_days=%s,chunk_size=%d,pause_ms=%d,tick_budget_seconds=%d,tick_interval_minutes=%d",
-		c.Enabled, days, c.ChunkSize, c.PauseMS, c.TickBudgetSeconds, c.TickIntervalMinutes)
+	return fmt.Sprintf("enabled=%t,messages_retention_days=%s,deleted_conversation_grace_days=%d,chunk_size=%d,pause_ms=%d,tick_budget_seconds=%d,tick_interval_minutes=%d",
+		c.Enabled, days, c.DeletedConversationGraceDays, c.ChunkSize, c.PauseMS, c.TickBudgetSeconds, c.TickIntervalMinutes)
 }
 
 // auditChatRetentionChange writes one mutation audit record for a change of

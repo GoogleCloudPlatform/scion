@@ -33,6 +33,13 @@ const (
 	// ChatRetentionMaxDays bounds messages_retention_days (100 years).
 	ChatRetentionMaxDays = 36500
 
+	// ChatRetentionDefaultGraceDays is the default
+	// deleted_conversation_grace_days: the messages of a soft-deleted
+	// conversation or topic are purged this long after the deletion.
+	ChatRetentionDefaultGraceDays = 30
+	// ChatRetentionMinGraceDays is the shortest grace a hub admin may set.
+	ChatRetentionMinGraceDays = 1
+
 	ChatRetentionDefaultChunkSize = 200
 	ChatRetentionMinChunkSize     = 25
 	ChatRetentionMaxChunkSize     = 1000
@@ -62,6 +69,10 @@ type ChatRetentionSettings struct {
 	// MessagesRetentionDays is the hub-wide age window. Absent = keep
 	// forever. When set it is at least ChatRetentionMinDays.
 	MessagesRetentionDays *int `json:"messages_retention_days,omitempty"`
+	// DeletedConversationGraceDays is how long after a conversation or
+	// topic is soft-deleted its messages are purged, whatever the window
+	// (while enabled). Absent = ChatRetentionDefaultGraceDays.
+	DeletedConversationGraceDays *int `json:"deleted_conversation_grace_days,omitempty"`
 	// Sweep holds the sweep tuning; absent fields take their defaults.
 	Sweep *ChatRetentionSweepSettings `json:"sweep,omitempty"`
 }
@@ -85,19 +96,23 @@ type ChatRetentionConfig struct {
 	Enabled bool
 	// MessagesRetentionDays is 0 when no window is set (keep forever).
 	MessagesRetentionDays int
-	ChunkSize             int
-	PauseMS               int
-	TickBudgetSeconds     int
-	TickIntervalMinutes   int
+	// DeletedConversationGraceDays is always set (at least
+	// ChatRetentionMinGraceDays).
+	DeletedConversationGraceDays int
+	ChunkSize                    int
+	PauseMS                      int
+	TickBudgetSeconds            int
+	TickIntervalMinutes          int
 }
 
 // DefaultChatRetentionConfig is the resolved value of an absent section.
 func DefaultChatRetentionConfig() ChatRetentionConfig {
 	return ChatRetentionConfig{
-		ChunkSize:           ChatRetentionDefaultChunkSize,
-		PauseMS:             ChatRetentionDefaultPauseMS,
-		TickBudgetSeconds:   ChatRetentionDefaultTickBudgetSeconds,
-		TickIntervalMinutes: ChatRetentionDefaultTickIntervalMinutes,
+		DeletedConversationGraceDays: ChatRetentionDefaultGraceDays,
+		ChunkSize:                    ChatRetentionDefaultChunkSize,
+		PauseMS:                      ChatRetentionDefaultPauseMS,
+		TickBudgetSeconds:            ChatRetentionDefaultTickBudgetSeconds,
+		TickIntervalMinutes:          ChatRetentionDefaultTickIntervalMinutes,
 	}
 }
 
@@ -107,6 +122,11 @@ func (c ChatRetentionConfig) HasWindow() bool { return c.MessagesRetentionDays >
 // Pause is PauseMS as a duration.
 func (c ChatRetentionConfig) Pause() time.Duration {
 	return time.Duration(c.PauseMS) * time.Millisecond
+}
+
+// Grace is DeletedConversationGraceDays as a duration.
+func (c ChatRetentionConfig) Grace() time.Duration {
+	return time.Duration(c.DeletedConversationGraceDays) * 24 * time.Hour
 }
 
 // TickBudget is TickBudgetSeconds as a duration.
@@ -123,9 +143,11 @@ func (c ChatRetentionConfig) TickInterval() time.Duration {
 // A config without a window stores no messages_retention_days.
 func (c ChatRetentionConfig) Settings() ChatRetentionSettings {
 	enabled := c.Enabled
+	grace := c.DeletedConversationGraceDays
 	chunk, pause, budget, interval := c.ChunkSize, c.PauseMS, c.TickBudgetSeconds, c.TickIntervalMinutes
 	s := ChatRetentionSettings{
-		Enabled: &enabled,
+		Enabled:                      &enabled,
+		DeletedConversationGraceDays: &grace,
 		Sweep: &ChatRetentionSweepSettings{
 			ChunkSize:           &chunk,
 			PauseMS:             &pause,
@@ -166,6 +188,13 @@ func (s ChatRetentionSettings) Resolve() (ChatRetentionConfig, error) {
 		}
 		c.MessagesRetentionDays = d
 	}
+	if s.DeletedConversationGraceDays != nil {
+		g := *s.DeletedConversationGraceDays
+		if g < ChatRetentionMinGraceDays || g > ChatRetentionMaxDays {
+			return ChatRetentionConfig{}, fmt.Errorf("chat_retention settings: deleted_conversation_grace_days must be between %d and %d", ChatRetentionMinGraceDays, ChatRetentionMaxDays)
+		}
+		c.DeletedConversationGraceDays = g
+	}
 	if sw := s.Sweep; sw != nil {
 		for _, f := range []struct {
 			name     string
@@ -200,8 +229,9 @@ func chatRetentionSchema() map[string]interface{} {
 	return map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
-			"enabled":                 map[string]interface{}{"type": "boolean"},
-			"messages_retention_days": intRange(ChatRetentionMinDays, ChatRetentionMaxDays),
+			"enabled":                         map[string]interface{}{"type": "boolean"},
+			"messages_retention_days":         intRange(ChatRetentionMinDays, ChatRetentionMaxDays),
+			"deleted_conversation_grace_days": intRange(ChatRetentionMinGraceDays, ChatRetentionMaxDays),
 			"sweep": map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
