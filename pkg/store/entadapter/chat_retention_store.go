@@ -62,6 +62,28 @@ func NewChatRetentionStore(client *ent.Client) *ChatRetentionStore {
 
 var _ store.ChatRetentionStore = (*ChatRetentionStore)(nil)
 
+// failedScanQuery is the statement of one failed-message scan. The
+// dispatch_state filter is a literal, not a bound parameter, so the query
+// textually implies the WHERE of the partial failed index: SQLite, and a
+// Postgres generic plan, use a partial index only when the query proves its
+// predicate without parameter values. The recipient check is the former
+// DELETE's (LIKE 'agent:%', with each dialect's case rules), computed per
+// row so the rows read are reported whether or not they qualify.
+func (s *ChatRetentionStore) failedScanQuery(cutoff time.Time, after store.ChatRetentionPosition, scanLimit int) (string, []any) {
+	query := `SELECT id, created, project_id, conversation_id,
+  CASE WHEN recipient LIKE 'agent:%' THEN 1 ELSE 0 END
+  FROM messages WHERE dispatch_state = '` + store.MessageDispatchFailed + `' AND created < ?`
+	args := []any{cutoff.UTC()}
+	if !after.IsStart() {
+		c := after.Created.UTC()
+		query += ` AND created >= ? AND (created > ? OR id > ?)`
+		args = append(args, c, c, after.ID)
+	}
+	query += ` ORDER BY created, id LIMIT ?`
+	args = append(args, scanLimit)
+	return s.rebind(query), args
+}
+
 // placeholders returns n bind placeholders starting at bind position
 // start (1-based): "?, ?, ..." on SQLite and "$start, $start+1, ..." on
 // Postgres.
@@ -129,10 +151,15 @@ func (s *ChatRetentionStore) SelectChatRetentionCandidates(ctx context.Context, 
 	}
 	query += ` AND dispatch_state NOT IN ('pending', 'deferred') ORDER BY created, id LIMIT ?`
 	args = append(args, limit)
+	return s.selectCandidates(ctx, "candidates", query, args, limit)
+}
 
+// selectCandidates runs a candidate selection (id, created, project_id,
+// conversation_id) and scans its rows. what names the selection in errors.
+func (s *ChatRetentionStore) selectCandidates(ctx context.Context, what, query string, args []any, limit int) ([]store.ChatRetentionCandidate, error) {
 	rows, err := s.db.QueryContext(ctx, s.rebind(query), args...)
 	if err != nil {
-		return nil, fmt.Errorf("chat retention: select candidates: %w", err)
+		return nil, fmt.Errorf("chat retention: select %s: %w", what, err)
 	}
 	defer func() { _ = rows.Close() }()
 	out := make([]store.ChatRetentionCandidate, 0, limit)
@@ -140,14 +167,14 @@ func (s *ChatRetentionStore) SelectChatRetentionCandidates(ctx context.Context, 
 		var c store.ChatRetentionCandidate
 		var conv sql.NullString
 		if err := rows.Scan(&c.ID, &c.Created, &c.ProjectID, &conv); err != nil {
-			return nil, fmt.Errorf("chat retention: scan candidate: %w", err)
+			return nil, fmt.Errorf("chat retention: scan %s: %w", what, err)
 		}
 		c.Created = c.Created.UTC()
 		c.ConversationID = conv.String
 		out = append(out, c)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("chat retention: select candidates: %w", err)
+		return nil, fmt.Errorf("chat retention: select %s: %w", what, err)
 	}
 	return out, nil
 }
@@ -181,7 +208,7 @@ func (s *ChatRetentionStore) PurgeChatMessages(ctx context.Context, ids []string
 	defer func() { _ = tx.Rollback() }()
 
 	if len(ids) > 0 {
-		if err := s.purgeTx(ctx, tx, ids, projectOf, &res); err != nil {
+		if err := s.purgeTx(ctx, tx, ids, projectOf, countMain, &res); err != nil {
 			return store.ChatRetentionPurgeResult{ByProject: map[string]store.ChatRetentionCounts{}}, err
 		}
 	}
@@ -194,8 +221,84 @@ func (s *ChatRetentionStore) PurgeChatMessages(ctx context.Context, ids []string
 	return res, nil
 }
 
-// purgeTx runs the cascade of one chunk on tx.
-func (s *ChatRetentionStore) purgeTx(ctx context.Context, tx *sql.Tx, ids []string, projectOf map[string]string, res *store.ChatRetentionPurgeResult) error {
+// countMain and countFailed select the counter a purge adds its deleted
+// messages to.
+func countMain(c *store.ChatRetentionCounts) *int64   { return &c.Main }
+func countFailed(c *store.ChatRetentionCounts) *int64 { return &c.Failed }
+
+// SelectFailedMessages implements store.ChatRetentionStore. The statement
+// (failedScanQuery) ranges over the partial (created, id) WHERE
+// dispatch_state = 'failed' index (message_failed_created_id), so it reads
+// failed rows only, in index order, and stops after scanLimit of them.
+// Failed "user:" rows are read but not returned, and the position moves
+// past them, so they are not rescanned on every step.
+func (s *ChatRetentionStore) SelectFailedMessages(ctx context.Context, cutoff time.Time, after store.ChatRetentionPosition, scanLimit, limit int) (store.FailedMessageScan, error) {
+	out := store.FailedMessageScan{Next: after}
+	if err := s.requireDB(); err != nil {
+		return out, err
+	}
+	if scanLimit <= 0 || limit <= 0 {
+		return out, nil
+	}
+	query, args := s.failedScanQuery(cutoff, after, scanLimit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return out, fmt.Errorf("chat retention: select failed messages: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	scanned, truncated := 0, false
+	for rows.Next() {
+		var c store.ChatRetentionCandidate
+		var conv sql.NullString
+		var eligible int
+		if err := rows.Scan(&c.ID, &c.Created, &c.ProjectID, &conv, &eligible); err != nil {
+			return out, fmt.Errorf("chat retention: scan failed messages: %w", err)
+		}
+		c.Created = c.Created.UTC()
+		c.ConversationID = conv.String
+		scanned++
+		out.Next = store.ChatRetentionPosition{Created: c.Created, ID: c.ID}
+		if eligible == 1 {
+			out.Candidates = append(out.Candidates, c)
+			if len(out.Candidates) == limit {
+				truncated = true
+				break
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return out, fmt.Errorf("chat retention: select failed messages: %w", err)
+	}
+	out.Exhausted = !truncated && scanned < scanLimit
+	return out, nil
+}
+
+// PurgeFailedMessages implements store.ChatRetentionStore.
+func (s *ChatRetentionStore) PurgeFailedMessages(ctx context.Context, ids []string, projectOf map[string]string) (store.ChatRetentionPurgeResult, error) {
+	res := store.ChatRetentionPurgeResult{ByProject: map[string]store.ChatRetentionCounts{}}
+	if len(ids) == 0 {
+		return res, nil
+	}
+	if err := s.requireDB(); err != nil {
+		return res, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return res, fmt.Errorf("chat retention: begin failed-message purge: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := s.purgeTx(ctx, tx, ids, projectOf, countFailed, &res); err != nil {
+		return store.ChatRetentionPurgeResult{ByProject: map[string]store.ChatRetentionCounts{}}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return store.ChatRetentionPurgeResult{ByProject: map[string]store.ChatRetentionCounts{}}, fmt.Errorf("chat retention: commit failed-message purge: %w", err)
+	}
+	return res, nil
+}
+
+// purgeTx runs the cascade of one chunk on tx. countMessage selects the
+// counter the deleted messages add to.
+func (s *ChatRetentionStore) purgeTx(ctx context.Context, tx *sql.Tx, ids []string, projectOf map[string]string, countMessage func(*store.ChatRetentionCounts) *int64, res *store.ChatRetentionPurgeResult) error {
 	in := s.placeholders(1, len(ids))
 	args := make([]any, len(ids))
 	for i, id := range ids {
@@ -257,7 +360,7 @@ func (s *ChatRetentionStore) purgeTx(ctx context.Context, tx *sql.Tx, ids []stri
 		if err := rows.Scan(&mid); err != nil {
 			return err
 		}
-		add(mid, func(c *store.ChatRetentionCounts) *int64 { return &c.Main })
+		add(mid, countMessage)
 		return nil
 	}); err != nil {
 		return fmt.Errorf("chat retention: purge messages: %w", err)
