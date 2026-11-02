@@ -54,6 +54,8 @@ type Schedule struct {
 	Name string `json:"name,omitempty"`
 	// CronExpr holds the value of the "cron_expr" field.
 	CronExpr string `json:"cron_expr,omitempty"`
+	// TimeZone holds the value of the "time_zone" field.
+	TimeZone string `json:"time_zone,omitempty"`
 	// EventType holds the value of the "event_type" field.
 	EventType string `json:"event_type,omitempty"`
 	// Payload holds the value of the "payload" field.
@@ -92,7 +94,7 @@ func (*Schedule) scanValues(columns []string) ([]any, error) {
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
 		case schedule.FieldAttributionVersion, schedule.FieldAuthorizationRevision, schedule.FieldAuthorityCeilingVersion, schedule.FieldRunCount, schedule.FieldErrorCount:
 			values[i] = new(sql.NullInt64)
-		case schedule.FieldInitiatorPrincipalKind, schedule.FieldInitiatorPrincipalID, schedule.FieldInitiatorCredentialKind, schedule.FieldInitiatorCredentialID, schedule.FieldInitiatorCredentialSnapshot, schedule.FieldAuthorityCeilingKind, schedule.FieldAuthorityCeilingPermissionIds, schedule.FieldAuthorityCeilingBoundaryKind, schedule.FieldAuthorityCeilingBoundaryProjectID, schedule.FieldName, schedule.FieldCronExpr, schedule.FieldEventType, schedule.FieldPayload, schedule.FieldStatus, schedule.FieldStatusReason, schedule.FieldLastRunStatus, schedule.FieldLastRunError, schedule.FieldCreatedBy:
+		case schedule.FieldInitiatorPrincipalKind, schedule.FieldInitiatorPrincipalID, schedule.FieldInitiatorCredentialKind, schedule.FieldInitiatorCredentialID, schedule.FieldInitiatorCredentialSnapshot, schedule.FieldAuthorityCeilingKind, schedule.FieldAuthorityCeilingPermissionIds, schedule.FieldAuthorityCeilingBoundaryKind, schedule.FieldAuthorityCeilingBoundaryProjectID, schedule.FieldName, schedule.FieldCronExpr, schedule.FieldTimeZone, schedule.FieldEventType, schedule.FieldPayload, schedule.FieldStatus, schedule.FieldStatusReason, schedule.FieldLastRunStatus, schedule.FieldLastRunError, schedule.FieldCreatedBy:
 			values[i] = new(sql.NullString)
 		case schedule.FieldAuthorityCeilingSourceExpiresAt, schedule.FieldNextRunAt, schedule.FieldLastRunAt, schedule.FieldCreated, schedule.FieldUpdated:
 			values[i] = new(sql.NullTime)
@@ -237,6 +239,12 @@ func (_m *Schedule) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field cron_expr", values[i])
 			} else if value.Valid {
 				_m.CronExpr = value.String
+			}
+		case schedule.FieldTimeZone:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field time_zone", values[i])
+			} else if value.Valid {
+				_m.TimeZone = value.String
 			}
 		case schedule.FieldEventType:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -429,6 +437,9 @@ func (_m *Schedule) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("cron_expr=")
 	builder.WriteString(_m.CronExpr)
+	builder.WriteString(", ")
+	builder.WriteString("time_zone=")
+	builder.WriteString(_m.TimeZone)
 	builder.WriteString(", ")
 	builder.WriteString("event_type=")
 	builder.WriteString(_m.EventType)

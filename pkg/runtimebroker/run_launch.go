@@ -1024,6 +1024,10 @@ func launchOp(kind string) string {
 	return opStartAgent
 }
 
+// projectPathNotInitializedLaunchText is the launch report's fixed text for
+// agent.ErrProjectPathNotInitialized (no host path).
+const projectPathNotInitializedLaunchText = "the project path on the Runtime Broker is not initialized as a project (no .scion directory or marker inside it); a project or broker admin must create a .scion directory inside the project path (not a symlink to another location) and retry"
+
 // classifyStartErrorCode is classifyStartError's cases that do not depend on
 // the launch step or a runtime-typed failure. It returns "" when none
 // matches. op names the operation in the template-not-found text (see
@@ -1065,6 +1069,11 @@ func classifyStartErrorCode(err error, templateSlug, op string) (code, message s
 		return api.LaunchCodeTemplateNotFound, notFoundMessage(op, err, templateSlug)
 	case errors.Is(err, config.ErrAgentStateDirUnavailable):
 		return LaunchErrCodeAgentStateUnavailable, err.Error()
+	case errors.Is(err, agent.ErrProjectPathNotInitialized):
+		// Before the generic agent-state conflict it also unwraps to. The
+		// launch report is stored by the hub and shown to clients, so it
+		// carries a fixed text, never the host path.
+		return ErrCodeProjectPathNotInitialized, projectPathNotInitializedLaunchText
 	case errors.Is(err, config.ErrAgentStateConflict):
 		return LaunchErrCodeAgentStateConflict, err.Error()
 	case errors.Is(err, agent.ErrProjectShareNotMounted):

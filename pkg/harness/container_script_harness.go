@@ -150,14 +150,15 @@ func (c *ContainerScriptHarness) GetHarnessEmbedsFS() (embed.FS, string) {
 
 // HasSystemPrompt reports whether the harness has a native system prompt file
 // staged in the agent home. Container-script harnesses always advertise the
-// declared file path; the script writes the file during pre-start.
+// declared file path; the script writes the file during pre-start. The file
+// is looked up inside the home only, without following a symbolic link
+// (readHomeFile).
 func (c *ContainerScriptHarness) HasSystemPrompt(agentHome string) bool {
 	if c.entry.SystemPromptFile == "" {
 		return false
 	}
-	target := filepath.Join(agentHome, c.entry.SystemPromptFile)
-	_, err := os.Stat(target)
-	return err == nil
+	_, ok := readHomeFile(agentHome, c.entry.SystemPromptFile)
+	return ok
 }
 
 // AdvancedCapabilities returns the configured capability matrix from

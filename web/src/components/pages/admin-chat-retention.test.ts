@@ -31,7 +31,7 @@ vi.mock('../../client/api.js', async () => {
 });
 
 const mod = await import('./admin-chat-retention.js');
-const { buildRetentionPutBody, retentionSaveErrors } = mod;
+const { buildRetentionPutBody, retentionSaveErrors, retentionWarning } = mod;
 type Panel = import('./admin-chat-retention.js').ScionAdminChatRetention;
 type Settings = import('./admin-chat-retention.js').ChatRetentionSettings;
 
@@ -47,6 +47,7 @@ function settings(over: Partial<Settings> = {}): Settings {
   return {
     enabled: false,
     messages_retention_days: null,
+    deleted_conversation_grace_days: 30,
     sweep: { chunk_size: 200, pause_ms: 500, tick_budget_seconds: 30, tick_interval_minutes: 10 },
     last_applied_cutoff: null,
     revision: 3,
@@ -101,11 +102,14 @@ async function save(el: Panel): Promise<void> {
 
 describe('buildRetentionPutBody', () => {
   it('sends an empty window as an explicit null with the loaded revision', () => {
-    expect(buildRetentionPutBody({ enabled: true, days: '', sweep: SWEEP }, 4)).toEqual({
+    expect(
+      buildRetentionPutBody({ enabled: true, days: '', graceDays: '30', sweep: SWEEP }, 4)
+    ).toEqual({
       ok: true,
       body: {
         enabled: true,
         messages_retention_days: null,
+        deleted_conversation_grace_days: 30,
         sweep: {
           chunk_size: 200,
           pause_ms: 500,
@@ -118,19 +122,40 @@ describe('buildRetentionPutBody', () => {
   });
 
   it('accepts a window of at least 7 days', () => {
-    const r = buildRetentionPutBody({ enabled: true, days: ' 30 ', sweep: SWEEP }, 1);
+    const r = buildRetentionPutBody(
+      { enabled: true, days: ' 30 ', graceDays: '30', sweep: SWEEP },
+      1
+    );
     expect(r.ok && r.body.messages_retention_days).toBe(30);
   });
 
   it.each(['6', '0', '-7', '7.5', 'abc', '36501'])('refuses a window of %j', (days) => {
-    const r = buildRetentionPutBody({ enabled: true, days, sweep: SWEEP }, 1);
+    const r = buildRetentionPutBody({ enabled: true, days, graceDays: '30', sweep: SWEEP }, 1);
     expect(r.ok).toBe(false);
     expect(!r.ok && r.errors[0]).toContain('Retention window');
   });
 
+  it('accepts a grace of at least 1 day', () => {
+    const r = buildRetentionPutBody({ enabled: true, days: '', graceDays: '1', sweep: SWEEP }, 1);
+    expect(r.ok && r.body.deleted_conversation_grace_days).toBe(1);
+  });
+
+  it.each(['', '0', '-1', '1.5', 'x', '36501'])('refuses a grace of %j', (graceDays) => {
+    const r = buildRetentionPutBody({ enabled: true, days: '', graceDays, sweep: SWEEP }, 1);
+    expect(r.ok).toBe(false);
+    expect(!r.ok && r.errors).toEqual([
+      'Deleted conversation grace must be a whole number of days from 1 to 36500.',
+    ]);
+  });
+
   it('refuses sweep tuning outside its bounds', () => {
     const r = buildRetentionPutBody(
-      { enabled: false, days: '', sweep: { ...SWEEP, chunk_size: '10', pause_ms: '' } },
+      {
+        enabled: false,
+        days: '',
+        graceDays: '30',
+        sweep: { ...SWEEP, chunk_size: '10', pause_ms: '' },
+      },
       1
     );
     expect(r.ok).toBe(false);
@@ -138,6 +163,34 @@ describe('buildRetentionPutBody', () => {
       'Chunk size must be a whole number from 25 to 1000.',
       'Pause between chunks (ms) must be a whole number from 0 to 10000.',
     ]);
+  });
+});
+
+describe('retentionWarning', () => {
+  it('names the window and the grace', () => {
+    expect(retentionWarning(30, 1)).toBe(
+      'While enabled, messages older than 30 days are permanently deleted from this hub. ' +
+        'Messages of conversations and topics deleted more than 1 day ago are permanently deleted.'
+    );
+  });
+
+  it('says only deleted conversations are purged without a window', () => {
+    expect(retentionWarning(null, 30)).toBe(
+      'No retention window is set: only the messages of deleted conversations and topics are purged. ' +
+        'Messages of conversations and topics deleted more than 30 days ago are permanently deleted.'
+    );
+  });
+});
+
+describe('retentionWarning with an invalid window', () => {
+  it('leaves the window out and keeps the grace', () => {
+    expect(retentionWarning('invalid', 30)).toBe(
+      'Messages of conversations and topics deleted more than 30 days ago are permanently deleted.'
+    );
+  });
+
+  it('says nothing when neither field is valid', () => {
+    expect(retentionWarning('invalid', null)).toBe('');
   });
 });
 
@@ -207,7 +260,11 @@ describe('scion-admin-chat-retention', () => {
       const el = await mount();
 
       const intro = q(el, '.intro')?.textContent ?? '';
-      expect(intro).toContain('Nothing is deleted until the sweep is enabled');
+      expect(intro).toContain('Nothing is deleted while the sweep is disabled');
+      expect(q(el, '.grace-explanation')?.textContent?.replace(/\s+/g, ' ')).toContain(
+        'With the sweep enabled and no retention window, only the messages of deleted conversations and topics are purged'
+      );
+      expect(q<HTMLInputElement>(el, '.retention-grace-days')?.value).toBe('30');
       expect(intro).toContain('permanent');
       expect(intro).toContain('database backup');
       expect(intro).toContain('all chat messages on this hub');
@@ -233,6 +290,7 @@ describe('scion-admin-chat-retention', () => {
         {
           enabled: false,
           messages_retention_days: null,
+          deleted_conversation_grace_days: 30,
           sweep: {
             chunk_size: 100,
             pause_ms: 500,
@@ -244,6 +302,39 @@ describe('scion-admin-chat-retention', () => {
       ]);
       expect(q(el, '.status-message.success')?.textContent).toContain('saved');
       expect(q(el, '.meta')?.textContent).toContain('Revision: 4');
+    });
+
+    it('warns that only deleted conversations are purged when enabled without a window', async () => {
+      current = settings({ enabled: true, deleted_conversation_grace_days: 14 });
+      const el = await mount();
+      expect(q(el, '.delete-warning')?.textContent).toContain(
+        'No retention window is set: only the messages of deleted conversations and topics are purged.'
+      );
+      expect(q(el, '.delete-warning')?.textContent).toContain('deleted more than 14 days ago');
+    });
+
+    it('does not describe a window the field does not hold', async () => {
+      current = settings({ enabled: true, messages_retention_days: 30 });
+      const el = await mount();
+      for (const typed of ['abc', '3']) {
+        await type(el, '.retention-days', typed);
+        const text = q(el, '.delete-warning')?.textContent ?? '';
+        expect(text).not.toContain('No retention window is set');
+        expect(text).not.toContain('messages older than');
+        expect(text).toContain('deleted more than 30 days ago');
+      }
+      await type(el, '.retention-grace-days', 'x');
+      expect(q(el, '.delete-warning')).toBeNull();
+    });
+
+    it('saves a changed grace', async () => {
+      const el = await mount();
+      await type(el, '.retention-grace-days', '7');
+      putResponse = () => json(settings({ revision: 4, deleted_conversation_grace_days: 7 }));
+      await save(el);
+
+      expect(puts()[0]).toMatchObject({ deleted_conversation_grace_days: 7, expected_revision: 3 });
+      expect(q<HTMLInputElement>(el, '.retention-grace-days')?.value).toBe('7');
     });
 
     it('does not send a window shorter than 7 days', async () => {

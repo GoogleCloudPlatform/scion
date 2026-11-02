@@ -45,6 +45,7 @@ type personalTokenFixture struct {
 	st      store.Store
 	client  *mockRuntimeBrokerClient
 	d       *HTTPAgentDispatcher
+	minter  *recordingGitHubAppMinter
 	project *store.Project
 	agent   *store.Agent
 }
@@ -53,7 +54,7 @@ type personalTokenOpts struct {
 	gitRemote    string
 	shared       bool
 	installation bool   // the project has its own GitHub App installation
-	sourceLabel  bool   // the App token comes from another project (label)
+	sourceLabel  bool   // an agent label names another project that has an installation
 	apiBaseURL   string // configured GitHub API base URL ("" = github.com)
 	userSecret   bool   // the agent owner has a user-scope GITHUB_TOKEN
 	brokerSecret bool   // the broker has a broker-scope GITHUB_TOKEN
@@ -120,7 +121,8 @@ func newPersonalTokenFixture(t *testing.T, o personalTokenOpts) *personalTokenFi
 	client := &mockRuntimeBrokerClient{}
 	d := NewHTTPAgentDispatcherWithClient(st, client, false, slog.Default())
 	d.SetSecretBackend(secret.NewLocalBackend(st, "test-hub-id", "test-secret"))
-	d.SetGitHubAppMinter(&recordingGitHubAppMinter{})
+	minter := &recordingGitHubAppMinter{}
+	d.SetGitHubAppMinter(minter)
 	apiBase := o.apiBaseURL
 	d.SetGitHubWebHostProvider(func() string { return githubapp.WebHostForAPIBaseURL(apiBase) })
 
@@ -144,7 +146,7 @@ func newPersonalTokenFixture(t *testing.T, o personalTokenOpts) *personalTokenFi
 	require.NoError(t, err)
 	// Start and restart deliver launch secrets only under a delivery grant.
 	grantLaunchDelivery(t, st, d, agent)
-	return &personalTokenFixture{st: st, client: client, d: d, project: project, agent: agent}
+	return &personalTokenFixture{st: st, client: client, d: d, minter: minter, project: project, agent: agent}
 }
 
 // sentTokenRemote returns the token remote the broker received for the
@@ -222,7 +224,7 @@ func TestDispatch_PersonalTokenOnlyToGitHubHost(t *testing.T) {
 		{"no token at dispatch, attacker host", personalTokenOpts{gitRemote: attacker}, true},
 		{"no-auth user token fallback, attacker host", personalTokenOpts{gitRemote: attacker, userSecret: true, noAuth: true}, true},
 		{"user token precedence over the App, attacker host", personalTokenOpts{gitRemote: attacker, installation: true, userSecret: true}, true},
-		{"App token from another project's installation, attacker host", personalTokenOpts{gitRemote: attacker, sourceLabel: true}, true},
+		{"label naming another project's installation (no App token), attacker host", personalTokenOpts{gitRemote: attacker, sourceLabel: true}, true},
 		{"github.com when GHES is configured", personalTokenOpts{gitRemote: "github.com/org/repo", userSecret: true, apiBaseURL: "https://ghe.example.com/api/v3"}, true},
 		{"spoofed github.com subdomain", personalTokenOpts{gitRemote: "github.com.attacker.example/org/repo", userSecret: true}, true},
 
@@ -244,6 +246,9 @@ func TestDispatch_PersonalTokenOnlyToGitHubHost(t *testing.T) {
 					o.shared = shared
 					f := newPersonalTokenFixture(t, o)
 					require.NoError(t, op.dispatch(context.Background(), f))
+					if o.sourceLabel {
+						assert.False(t, f.minter.called, "no App token may be minted for a project named by a label")
+					}
 					got, sent := op.sent(f, shared)
 					require.True(t, sent, "fixture check: the clone settings were not sent")
 					if tc.withheld {
@@ -254,6 +259,59 @@ func TestDispatch_PersonalTokenOnlyToGitHubHost(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+// resolvedEnvOf returns the env the broker received for the dispatch.
+func resolvedEnvOf(f *personalTokenFixture, op string) map[string]string {
+	switch op {
+	case "create":
+		if f.client.lastCreateReq == nil {
+			return nil
+		}
+		return f.client.lastCreateReq.ResolvedEnv
+	case "start":
+		return f.client.lastResolvedEnv
+	case "restart":
+		return f.client.lastRestartResolvedEnv
+	}
+	return nil
+}
+
+// A GitHub App token is minted only for the agent's own project. On create
+// (buildCreateRequest) and on start and restart
+// (injectLifecycleGitHubToken), a label naming another project that has an
+// installation mints nothing when the agent's own project has none: the
+// minter is never called and no App token variables reach the broker. The
+// agent's own project with an installation still mints.
+// Mutant this catches: restoring the label-driven project selection at
+// either site (the minter records a call for that dispatch).
+func TestDispatch_GitHubAppTokenOnlyForOwnProject(t *testing.T) {
+	appKeys := []string{"GITHUB_TOKEN", "SCION_GITHUB_APP_ENABLED", "SCION_GITHUB_TOKEN_EXPIRY", "SCION_GITHUB_TOKEN_PATH"}
+	for _, op := range personalTokenDispatches {
+		t.Run("label naming another project/"+op.name, func(t *testing.T) {
+			f := newPersonalTokenFixture(t, personalTokenOpts{gitRemote: "github.com/org/repo", sourceLabel: true})
+			require.NoError(t, op.dispatch(context.Background(), f))
+			_, sent := op.sent(f, false)
+			require.True(t, sent, "fixture check: the dispatch did not reach the broker")
+			env := resolvedEnvOf(f, op.name)
+			assert.False(t, f.minter.called, "the minter must not be called for a project named by a label")
+			for _, key := range appKeys {
+				_, has := env[key]
+				assert.False(t, has, "%s must not reach the broker", key)
+			}
+		})
+		t.Run("own project with an installation/"+op.name, func(t *testing.T) {
+			f := newPersonalTokenFixture(t, personalTokenOpts{gitRemote: "github.com/org/repo", installation: true})
+			require.NoError(t, op.dispatch(context.Background(), f))
+			_, sent := op.sent(f, false)
+			require.True(t, sent, "fixture check: the dispatch did not reach the broker")
+			env := resolvedEnvOf(f, op.name)
+			assert.True(t, f.minter.called, "the agent's own project must mint")
+			assert.True(t, f.minter.projectID == f.project.ID, "the token must be minted for the agent's own project")
+			assert.True(t, env["GITHUB_TOKEN"] == "github-app-token", "GITHUB_TOKEN must be the App token")
+			assert.True(t, env["SCION_GITHUB_APP_ENABLED"] == "true", "SCION_GITHUB_APP_ENABLED must be set")
+		})
 	}
 }
 

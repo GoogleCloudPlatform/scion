@@ -561,3 +561,34 @@ func (h *captureHandler) count(key, value string) int {
 	}
 	return n
 }
+
+// TestAgentSessionsAdmittedBySource: each admitted agent session is counted
+// once under its incarnation source (generation for a Hello without a
+// launch id, launch_id for one with it); user sessions are not counted.
+func TestAgentSessionsAdmittedBySource(t *testing.T) {
+	w := relaytest.NewWorld(t)
+	a := w.StartNode("relay-a", nil)
+	w.SetPrincipal("a", agentPrincipal("L2", 3))
+	w.SetPrincipal("user", relay.Principal{Kind: registry.PrincipalUser, ID: "user-1"})
+
+	want := func(launchID, generation uint64) {
+		t.Helper()
+		got := a.Relay.AgentSessionsAdmitted()
+		if got[relay.IncarnationSourceLaunchID] != launchID || got[relay.IncarnationSourceGeneration] != generation {
+			t.Fatalf("AgentSessionsAdmitted = %v; want launch_id=%d generation=%d", got, launchID, generation)
+		}
+	}
+	want(0, 0)
+
+	// No session of the current launch is live, so the fallback is admitted.
+	fb, _ := a.MustDial("a", relaytest.AgentHello(agentID, "", "", "pty"), conduit.Config{})
+	want(0, 1)
+	_ = fb.Close()
+	_ = relaytest.Wait(t, a.Served, "fallback session to end")
+
+	_, _ = a.MustDial("a", relaytest.AgentHello(agentID, "L2", "", "pty"), conduit.Config{})
+	want(1, 1)
+
+	_, _ = a.MustDial("user", relaytest.UserHello("user-1"), conduit.Config{})
+	want(1, 1)
+}

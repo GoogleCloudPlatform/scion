@@ -617,55 +617,6 @@ func TestUnresolvedMentionNames(t *testing.T) {
 	}
 }
 
-// The failed-message retention job hard-deletes messages; it also drops
-// the mention rows of messages that no longer exist.
-func TestFailedMessageRetention_PurgesOrphanMentions(t *testing.T) {
-	srv, s, wcs, proj, db := setupMentionDotTest(t)
-	srv.config.FailedMessageRetentionDays = 1
-	ctx := context.Background()
-	topicID := tid("md-retention")
-	if err := wcs.CreateTopic(ctx, WebChatTopic{ID: topicID, ProjectID: proj.ID, Name: "retention",
-		CreatedBy: "dev", CreatedAt: time.Now().UTC()}); err != nil {
-		t.Fatal(err)
-	}
-	newMsg := func(name string, at time.Time) string {
-		m := &store.Message{ID: tid("md-ret-" + name), ProjectID: proj.ID, Sender: "user:dev@localhost",
-			SenderID: DevUserID, Recipient: "agent:a", Msg: name, Type: messages.TypeChat, Channel: "web",
-			ThreadID: topicID, DispatchState: store.MessageDispatchFailed, CreatedAt: at}
-		if err := s.CreateMessage(ctx, m); err != nil {
-			t.Fatal(err)
-		}
-		if err := wcs.RecordMentions(ctx, topicID, m.ID, []string{tid("md-ret-user")}); err != nil {
-			t.Fatal(err)
-		}
-		return m.ID
-	}
-	old := newMsg("old", time.Now().Add(-48*time.Hour))
-	kept := newMsg("kept", time.Now())
-
-	srv.failedMessageRetentionHandler()(ctx)
-
-	if _, err := s.GetMessage(ctx, old); err == nil {
-		t.Fatal("old failed message was not purged")
-	}
-	var got []string
-	rows, err := db.QueryContext(ctx, `SELECT message_id FROM webchat_mention`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			t.Fatal(err)
-		}
-		got = append(got, id)
-	}
-	if len(got) != 1 || got[0] != kept {
-		t.Fatalf("mention rows = %v; want only %s", got, kept)
-	}
-}
-
 // RecordMentions writes the batch in one transaction: empty IDs are
 // skipped, duplicates collapse on (message_id, user_id), and a repeat call
 // is a no-op.

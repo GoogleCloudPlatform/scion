@@ -329,3 +329,34 @@ func TestCacheParityRAMBranchInSync(t *testing.T) {
 	}
 	requireRAMBranch(t, action, string(b))
 }
+
+// TestCacheParityActionNewLayoutOnly: the live parity check accepts only the new
+// runner layout (the volume at HOME, real directories). Its old-layout branch, for
+// /scratch links, was removed after the switch (cr-ci/docs/operations.md, "Runner
+// layout switch"), so a runner on the old layout fails the "real directory" checks.
+// SKIPs in a cr-ci-only archive, as TestCacheParityRAMBranchInSync does.
+func TestCacheParityActionNewLayoutOnly(t *testing.T) {
+	const action = "../../.github/actions/setup-go-cache/action.yml"
+	b, err := os.ReadFile(action)
+	if os.IsNotExist(err) {
+		t.Skipf("%s is not in this tree (a cr-ci-only archive)", action)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	for _, banned := range []string{"/scratch", "[ -L /home/runner/work ]", "old cr-ci runner layout"} {
+		if strings.Contains(s, banned) {
+			t.Errorf("%s contains %q; the old-layout branch was removed after the runner layout switch", action, banned)
+		}
+	}
+	for _, want := range []string{
+		`check "real directory $d" "$(readlink -f "$d")" "$d"`,
+		`echo "ok   HOME is a volume (device $home_dev)"`,
+		`check "device of $d" "$(stat -c %d "$d" 2>/dev/null)" "$home_dev"`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("%s: parity check lacks %q", action, want)
+		}
+	}
+}

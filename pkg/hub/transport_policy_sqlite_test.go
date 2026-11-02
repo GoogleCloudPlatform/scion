@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -302,6 +303,15 @@ func TestNeverAPIWritable_TrustedProxies(t *testing.T) {
 	assert.Contains(t, getRR.Body.String(), `"log_level":"warn"`, "control: the settings file was read")
 	assert.NotContains(t, getRR.Body.String(), "trusted_proxies")
 
+	// An explicit empty list is not shown either, although it is now kept
+	// as a non-nil list (it must survive settings.yaml rewrites).
+	require.NoError(t, os.WriteFile(path, []byte("schema_version: \"1\"\nserver:\n  log_level: warn\n  trusted_proxies: []\n"), 0o600))
+	getRR = httptest.NewRecorder()
+	srv.handleGetServerConfig(getRR)
+	require.Equal(t, http.StatusOK, getRR.Code, getRR.Body.String())
+	assert.Contains(t, getRR.Body.String(), `"log_level":"warn"`, "control: the settings file was read")
+	assert.NotContains(t, getRR.Body.String(), "trusted_proxies")
+
 	db, _, ops := newSQLiteHubInMode(t, false, nil)
 	rr := httptest.NewRecorder()
 	db.handleGetServerConfigDB(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
@@ -376,5 +386,88 @@ func TestNeverAPIWritable_TrustedProxiesRefusedInDBAndWorkstationMode(t *testing
 				assert.Equal(t, before, hubSettingRevisions(t, st), "a refused PUT writes no DB row")
 			})
 		}
+	}
+}
+
+// New resolves server.trusted_proxies with config.TransportTrustedProxies:
+// not set, a proxy on this host (loopback) is trusted and one WARN names
+// the setting and the [] opt-out; an explicit empty list trusts none; a
+// list is used as given. The relay is checked against the same helper in
+// cmd (TestRelayServerConfigTrustedProxies_ParityWithHub).
+func TestNew_TransportTrustedProxiesResolution(t *testing.T) {
+	for name, tc := range map[string]struct {
+		list     []string
+		set      bool
+		wantWarn bool
+	}{
+		"not set":        {wantWarn: true},
+		"explicit empty": {set: true},
+		"listed":         {list: []string{tpProxyCIDR}, set: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			logs := captureSlog(t)
+			st, err := newTestStore(t, ":memory:")
+			require.NoError(t, err)
+			cfg := testServerConfig()
+			cfg.TransportTrustedProxies, cfg.TransportTrustedProxiesSet = tc.list, tc.set
+			srv, _ := testServerWithStoreConfig(t, st, cfg)
+
+			want, _, err := config.TransportTrustedProxies(tc.list, tc.set)
+			require.NoError(t, err)
+			var got, wantStr []string
+			for _, n := range srv.transportTrustedNets {
+				got = append(got, n.String())
+			}
+			for _, n := range want {
+				wantStr = append(wantStr, n.String())
+			}
+			assert.Equal(t, wantStr, got)
+			assert.Equal(t, tc.wantWarn, strings.Contains(logs.String(), "is not set; trusting a TLS-terminating proxy on this host only"), logs.String())
+			if tc.wantWarn {
+				assert.Equal(t, 1, strings.Count(logs.String(), config.TransportTrustedProxiesDefaultWarning[:40]), "one startup WARN")
+			}
+		})
+	}
+}
+
+// With server.trusted_proxies not set, the control channel upgrade from a
+// proxy on this host saying https passes the transport policy (it reaches
+// broker authentication), while a peer on another host sending the same
+// header, or the local proxy appending the protocol, is refused.
+func TestRuntimeBrokerConnect_DefaultTrustsLocalProxyOnly(t *testing.T) {
+	srv, _ := testServer(t)
+	require.Len(t, srv.transportTrustedNets, 2, "testServer leaves server.trusted_proxies unset")
+	broker := map[string]string{HeaderBrokerID: tid("tp-default-broker")}
+	with := func(extra map[string]string) map[string]string {
+		h := map[string]string{}
+		for k, v := range broker {
+			h[k] = v
+		}
+		for k, v := range extra {
+			h[k] = v
+		}
+		return h
+	}
+
+	rec := httptest.NewRecorder()
+	srv.handleRuntimeBrokerConnect(rec, upgradeRequestFrom("/api/v1/runtime-brokers/connect", tpLoopbackPeer,
+		with(map[string]string{"X-Forwarded-Proto": "https", "X-Forwarded-For": "198.51.100.7"})))
+	if rec.Code == http.StatusForbidden {
+		assert.NotEqual(t, ErrCodeTransportNotConfidential, errorCode(t, rec), "the local proxy passes the transport policy")
+	}
+	assert.NotEqual(t, http.StatusSwitchingProtocols, rec.Code, "an unsigned upgrade is not admitted")
+
+	for name, tc := range map[string]struct {
+		remote string
+		extra  map[string]string
+	}{
+		"remote peer with XFP https":       {tpNetworkPeer, map[string]string{"X-Forwarded-Proto": "https"}},
+		"local proxy appends the protocol": {tpLoopbackPeer, map[string]string{"X-Forwarded-Proto": "https, http"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			srv.handleRuntimeBrokerConnect(rec, upgradeRequestFrom("/api/v1/runtime-brokers/connect", tc.remote, with(tc.extra)))
+			assertTransportRefusal(t, rec)
+		})
 	}
 }

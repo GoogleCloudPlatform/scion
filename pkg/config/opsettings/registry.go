@@ -559,6 +559,7 @@ func compileSchemas() {
 				"offload_threshold_runes":         map[string]interface{}{"type": "integer", "minimum": 0},
 				"attachment_delivery_max_bytes":   map[string]interface{}{"type": "integer", "minimum": 0},
 				"attachment_inbox_retention_days": map[string]interface{}{"type": "integer", "minimum": 1},
+				"failed_message_retention_days":   map[string]interface{}{"type": "integer", "minimum": 1},
 			},
 			"additionalProperties": false,
 		},

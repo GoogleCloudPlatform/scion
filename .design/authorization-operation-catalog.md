@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 369
+**Operations:** 375
 
 ## Table of Contents
 
@@ -16,7 +16,7 @@
 - [agent.hold.lift](#agentholdlift) — Lift the holds of a suspended agent whose owners are admitted to its project again (hub admin)
 - [agent.lifecycle.reincarnate](#agentlifecyclereincarnate) — Reincarnate an agent
 - [agent.read](#agentread) — Read a single agent's metadata by ID
-- [agent.list](#agentlist) — List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project
+- [agent.list](#agentlist) — List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project. An agent delegated credential is admitted on the hub form only: its scope is the authorizing user's list scope within the grant boundary, and each item is also decided for agent.read
 - [agent.update](#agentupdate) — Update agent configuration or metadata
 - [agent.update.pendingconfig.delete](#agentupdatependingconfigdelete) — Discard an agent's pending config edits (behind hub.agent_edit_held; 404 while it is off)
 - [agent.status.update](#agentstatusupdate) — Report an agent's status: the agent itself, or a user who may update the agent
@@ -287,6 +287,11 @@
 - [quota.brokersettings.update](#quotabrokersettingsupdate) — Replace a runtime broker's settings document. Requires broker.read on the broker and quota.update on the hub-scoped quota target for every write, including one that changes no key, and each changed key's declared permission (maxAgents declares quota.update)
 - [quota.delete](#quotadelete) — Delete limit definitions and entitlement bindings. The route guard checks quota.read, so a token needs quota:read and quota:delete
 - [quota.usage.self.read](#quotausageselfread) — Read the caller's own quota usage: each limit's effective value and active count for the caller only
+- [hub.experiments.read](#hubexperimentsread) — Read the resolved experiment flags. Any signed-in identity (user, agent or broker) reads them, and any user access token reads them
+- [hub.profiling.read](#hubprofilingread) — Read the client profiling switch. Any signed-in identity (user, agent or broker) reads it, and any user access token reads it
+- [hub.injectedskills.read](#hubinjectedskillsread) — Read the hub injected skill references. Any signed-in identity reads them, and any token reads them
+- [hub.conduitgrantkeys.read](#hubconduitgrantkeysread) — Read the conduit grant verification keys (public halves only). Any signed-in identity reads them, and any token reads them; 404 while the hub.conduit experiment is off
+- [hub.prestarthooks.read](#hubprestarthooksread) — Read hub pre-start hooks. Any signed-in user reads them; the script body is returned only to a holder of hub.lifecycle_hooks.read on an interactive session or dev credential; every other credential, a user access token included, gets it redacted
 - [hub.policies.removed](#hubpoliciesremoved) — Removed policy API; every method and sub-path answers 410 Gone and points callers to role bindings
 - [skill.list](#skilllist) — List skills; each row is filtered by skill read. A user access token needs skill:list on either boundary; its page, total and cursor count only the rows it may read
 - [skill.read](#skillread) — Read a skill, its versions, its download URLs, its resolved version and its files. A record the caller may not read answers as not found
@@ -334,6 +339,7 @@
 - [broker.delete](#brokerdelete) — Deregister a runtime broker: unlink it from every project, clear project defaults that name it, and remove its credentials. A user needs an interactive session and broker.delete on the broker
 - [broker.heartbeat](#brokerheartbeat) — Record a broker heartbeat: broker liveness and the state of the agents it runs. The broker sends its own; a user needs an interactive session and broker.update on the broker from a role binding (the owner relationship does not apply)
 - [broker.agent.launchreport](#brokeragentlaunchreport) — Record a broker's launch report for an agent it runs
+- [broker.agent.workspacedownload](#brokeragentworkspacedownload) — Issue signed download URLs for the uploaded workspace files of an agent the broker runs
 - [broker.messagefailures.report](#brokermessagefailuresreport) — Record buffered message delivery failures reported by a broker
 - [broker.attachment.redeem](#brokerattachmentredeem) — Redeem an attachment delivery capability (ptone/scion#4596): the broker the hub issued it to downloads one attachment, once, before it expires, to write it into the recipient agent's home
 - [broker.controlchannel.call](#brokercontrolchannelcall) — Carry a call between the hub and a connected broker over the control channel; each call runs under the operation that initiated it
@@ -740,7 +746,7 @@
 
 **Domain:** agent
 
-**Description:** List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project
+**Description:** List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project. An agent delegated credential is admitted on the hub form only: its scope is the authorizing user's list scope within the grant boundary, and each item is also decided for agent.read
 
 ### Entry Points
 
@@ -749,9 +755,9 @@
 | http_route | GET | `/api/v1/agents` |
 | http_route | GET | `/api/v1/projects/{id}/agents` |
 
-**Principals:** `user`, `agent`
+**Principals:** `user`, `agent`, `agent_delegated`
 
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `delegated_agent`
 
 **Bearer:** `admit` (target `list_scope`; boundaries `project`, `hub`)
 
@@ -770,7 +776,7 @@
 | no-broad-query-on-none | security | ScopeSetNone produces empty list without issuing any resource query | Yes |
 | slug-not-oracle | security | Project slug lookup for agent list filter must not distinguish unauthorized from nonexistent | Yes |
 
-**Denial Codes:** `forbidden`, `credential_insufficient`, `user_suspended`
+**Denial Codes:** `forbidden`, `credential_insufficient`, `user_suspended`, `credential_not_admitted`, `delegated_list_sort_unsupported`
 
 ### Tests
 
@@ -792,6 +798,8 @@
 - `pkg/hub:TestListCaveats_ProjectBoundaryRequiresListPermissionInCeiling`
 - `pkg/hub:TestProjectAgentListToken_RequiresAgentListOnTheProject`
 - `pkg/hub:TestListFilters_CannotEnlargeTokenResults`
+- `pkg/hub:TestAgentDelegatedAgentList_ExplicitScopeAcrossProjects`
+- `pkg/hub:TestAgentDelegatedAgentList_MixedItemsAndCounts`
 
 ---
 
@@ -4594,7 +4602,9 @@
 
 **Principals:** `user`, `agent`, `broker`
 
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `broker_token`
+**Credentials:** `session_jwt`, `agent_jwt`, `broker_token`
+
+**Bearer:** `non_user`
 
 **Base Permission:** `agent.message`
 
@@ -10768,6 +10778,183 @@
 
 ---
 
+## hub.experiments.read
+
+**Domain:** hub
+
+**Description:** Read the resolved experiment flags. Any signed-in identity (user, agent or broker) reads them, and any user access token reads them
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/experiments` |
+
+**Principals:** `user`, `agent`, `broker`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `broker_token`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestExperimentsRead_AnyTokenReads`)
+
+**Resource Resolver:** none
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestExperimentsRead_AnyTokenReads`
+- `pkg/hub:TestAuthenticatedReads_AgentTokenReads`
+- `pkg/hub:TestAuthenticatedReads_BrokerReads`
+
+### Exemptions
+
+- **authentication_only:** Resolved web-layer experiment flags; carries no authority and no other user's records (scope: resolved experiment flags) — waives: `base_permission`
+
+---
+
+## hub.profiling.read
+
+**Domain:** hub
+
+**Description:** Read the client profiling switch. Any signed-in identity (user, agent or broker) reads it, and any user access token reads it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/profiling` |
+
+**Principals:** `user`, `agent`, `broker`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `broker_token`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestProfilingRead_AnyTokenReads`)
+
+**Resource Resolver:** none
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestProfilingRead_AnyTokenReads`
+- `pkg/hub:TestAuthenticatedReads_AgentTokenReads`
+- `pkg/hub:TestAuthenticatedReads_BrokerReads`
+
+### Exemptions
+
+- **authentication_only:** One client profiling boolean; carries no authority and no other user's records (scope: client profiling switch) — waives: `base_permission`
+
+---
+
+## hub.injectedskills.read
+
+**Domain:** hub
+
+**Description:** Read the hub injected skill references. Any signed-in identity reads them, and any token reads them
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/hub/settings/injected-skills` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestHubInjectedSkillsRead_AnyTokenReads`)
+
+**Resource Resolver:** none
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestHubInjectedSkillsRead_AnyTokenReads`
+
+### Exemptions
+
+- **authentication_only:** Hub skill references every user and agent reads at provision time; carries no authority (scope: hub injected skill references) — waives: `base_permission`
+
+---
+
+## hub.conduitgrantkeys.read
+
+**Domain:** hub
+
+**Description:** Read the conduit grant verification keys (public halves only). Any signed-in identity reads them, and any token reads them; 404 while the hub.conduit experiment is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/conduit/grant-keys` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestConduitGrantKeysRead_AnyTokenReads`)
+
+**Resource Resolver:** none
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestConduitGrantKeysRead_AnyTokenReads`
+- `pkg/hub:TestConduitGrantKeysEndpoint`
+
+### Exemptions
+
+- **authentication_only:** Public verification key halves only; carries no authority (scope: conduit grant public keys) — waives: `base_permission`
+
+---
+
+## hub.prestarthooks.read
+
+**Domain:** hub
+
+**Description:** Read hub pre-start hooks. Any signed-in user reads them; the script body is returned only to a holder of hub.lifecycle_hooks.read on an interactive session or dev credential; every other credential, a user access token included, gets it redacted
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/pre-start-hooks` |
+| http_route | GET | `/api/v1/pre-start-hooks/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestHubPreStartHookRead_MemberAndProjectTokensRead`)
+
+**Resource Resolver:** none
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestHubPreStartHookRead_TokenGetsRedactedScript`
+- `pkg/hub:TestHubPreStartHookRead_MemberAndProjectTokensRead`
+
+### Exemptions
+
+- **authentication_only:** Hook metadata for the inherited-hook banner; the script is redacted for every token and non-admin (scope: hub pre-start hook metadata) — waives: `base_permission`
+
+---
+
 ## hub.policies.removed
 
 **Domain:** hub
@@ -12398,6 +12585,40 @@
 
 ---
 
+## broker.agent.workspacedownload
+
+**Domain:** broker
+
+**Description:** Issue signed download URLs for the uploaded workspace files of an agent the broker runs
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/runtime-brokers/{id}/agents/{agentId}/workspace-download` |
+
+**Principals:** `broker`
+
+**Credentials:** `broker_token`
+
+**Bearer:** `non_user`
+
+**Resource Resolver:** broker-self
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDisposition_EveryRoutePatternCovered`
+
+### Exemptions
+
+- **internal_only:** The broker authenticates with its own HMAC credential for an agent assigned to it in a project it still provides for; no user permission applies (scope: broker self access) — waives: `base_permission`
+
+---
+
 ## broker.messagefailures.report
 
 **Domain:** broker
@@ -12479,9 +12700,9 @@
 |------|--------|---------|
 | broker_call | — | `TunnelRequest:controlchannel` |
 | broker_call | — | `OpenStream:controlchannel` |
-| broker_call | — | `SendStreamData:controlchannel` |
-| broker_call | — | `ResizeStream:controlchannel` |
-| broker_call | — | `CloseStream:controlchannel` |
+| broker_call | — | `SendStreamData:brokerconnection` |
+| broker_call | — | `ResizeStream:brokerconnection` |
+| broker_call | — | `CloseStream:brokerconnection` |
 | broker_call | — | `handleResponse:controlchannel` |
 | broker_call | — | `handleStreamData:controlchannel` |
 | broker_call | — | `handleStreamClose:controlchannel` |
@@ -12647,6 +12868,8 @@
 **Principals:** `agent`
 
 **Credentials:** `agent_jwt`
+
+**Bearer:** `non_user`
 
 **Base Permission:** `gcp_service_account.use`
 

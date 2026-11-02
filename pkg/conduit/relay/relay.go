@@ -318,6 +318,12 @@ type Relay struct {
 	// handlers) so tests can prove none leak.
 	bridges       sync.WaitGroup
 	activeBridges atomic.Int64
+
+	// agentAdmitsLaunchID and agentAdmitsGeneration count the agent
+	// sessions admitted by this relay, by incarnation source
+	// (AgentSessionsAdmitted).
+	agentAdmitsLaunchID   atomic.Uint64
+	agentAdmitsGeneration atomic.Uint64
 	// testHookAfterOpen runs after the target accepted a bridged stream
 	// and before the late-accept check (test seam for the cancel race).
 	testHookAfterOpen func(hop *wsStream)
@@ -1174,6 +1180,28 @@ func (r *Relay) NotifyGrantKeysChanged() int {
 		n++
 	}
 	return n
+}
+
+// AgentSessionsAdmitted returns how many agent sessions this relay has
+// admitted since it started, by incarnation source: IncarnationSourceLaunchID
+// (the Hello presented the agent's launch id) and IncarnationSourceGeneration
+// (the interim fallback for a Hello without one).
+func (r *Relay) AgentSessionsAdmitted() map[string]uint64 {
+	return map[string]uint64{
+		IncarnationSourceLaunchID:   r.agentAdmitsLaunchID.Load(),
+		IncarnationSourceGeneration: r.agentAdmitsGeneration.Load(),
+	}
+}
+
+// countAgentAdmit records one admitted agent session with incarnation
+// source src.
+func (r *Relay) countAgentAdmit(src string) {
+	switch src {
+	case IncarnationSourceLaunchID:
+		r.agentAdmitsLaunchID.Add(1)
+	case IncarnationSourceGeneration:
+		r.agentAdmitsGeneration.Add(1)
+	}
 }
 
 // Sessions returns the number of live local sessions.

@@ -15,11 +15,12 @@
  */
 
 /**
- * Tests for the UTC-only cron presentation in the recurring schedule list:
- * a schedule whose stored expression carries a CRON_TZ=/TZ= prefix shows a
- * "zone prefix not supported" badge, and the cron field keeps its "(UTC)"
- * help text. Also covers next-run display: the next run is shown in the
- * display zone with a zone label, beside the UTC cron expression.
+ * Tests for the cron presentation in the recurring schedule list: a
+ * schedule whose stored expression carries a CRON_TZ=/TZ= prefix shows a
+ * "zone prefix not supported" badge, and each schedule shows the time zone
+ * its expression is evaluated in (UTC when it has none). Also covers
+ * next-run display: the next run is shown in the display zone with a zone
+ * label, beside the cron expression.
  */
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
@@ -151,12 +152,16 @@ describe('scion-schedule-list zone-prefix badge', () => {
     );
   });
 
-  it('keeps the "(UTC)" help text on the cron field', async () => {
+  it('points the cron field at the time zone field, which defaults to UTC', async () => {
     const el = await mount([]);
-    const cronInput = Array.from((el.shadowRoot as ShadowRoot).querySelectorAll('sl-input')).find(
-      (i) => (i.getAttribute('help-text') ?? '').includes('cron')
+    const root = el.shadowRoot as ShadowRoot;
+    const cronInput = Array.from(root.querySelectorAll('sl-input')).find((i) =>
+      (i.getAttribute('help-text') ?? '').includes('cron')
     );
-    expect(cronInput?.getAttribute('help-text')).toContain('(UTC)');
+    expect(cronInput?.getAttribute('help-text')).toContain('in the time zone below');
+    const zoneInput = root.querySelector('sl-input.create-time-zone');
+    expect(zoneInput?.getAttribute('placeholder')).toBe('UTC');
+    expect(zoneInput?.getAttribute('help-text')).toContain('Empty means UTC');
   });
 });
 
@@ -192,11 +197,13 @@ describe('scion-schedule-list next-run in the display zone', () => {
     expect(row.textContent).toContain('in 3 hours');
     const absolute = row.querySelector('.next-run-absolute');
     expect(absolute?.textContent?.trim()).toBe('Oct 2, 2026, 00:00 (Asia/Tokyo)');
-    // The cron column stays labelled UTC, next to the zoned next run.
+    // The cron column names the schedule's zone (UTC here), next to the
+    // next run in the display zone.
     const headers = Array.from((el.shadowRoot as ShadowRoot).querySelectorAll('thead th')).map(
       (th) => th.textContent?.trim()
     );
-    expect(headers).toContain('Cron (UTC)');
+    expect(headers).toContain('Cron');
+    expect(row.querySelector('.schedule-zone')?.textContent?.trim()).toBe('UTC');
   });
 
   it('shows a next run days away in days, not hours, beside the labelled absolute', async () => {
@@ -234,14 +241,15 @@ describe('scion-schedule-list next-run in the display zone', () => {
     expect(absolute()).toBe('Oct 2, 2026, 00:00 (Asia/Tokyo)');
   });
 
-  it('shows the zoned next run in the detail dialog beside the UTC cron', async () => {
+  it('shows the zoned next run in the detail dialog beside the cron and its zone', async () => {
     useFakeNow();
     setPreferredTimeZone('Asia/Tokyo');
     const el = await mount([schedule({ name: 'nightly', nextRunAt: NEXT_RUN })]);
     rowFor(el, 'nightly').click();
     await settle(el as unknown as { updateComplete: Promise<unknown> });
     const dialog = (el.shadowRoot as ShadowRoot).querySelector('sl-dialog[label^="Schedule:"]');
-    expect(dialog?.textContent).toContain('Cron (UTC):');
+    expect(dialog?.textContent).toContain('Cron:');
+    expect(dialog?.querySelector('.schedule-zone')?.textContent?.trim()).toBe('UTC');
     expect(dialog?.querySelector('.next-run-absolute')?.textContent?.trim()).toBe(
       'Oct 2, 2026, 00:00 (Asia/Tokyo)'
     );
@@ -360,6 +368,26 @@ describe('buildScheduleEdit', () => {
     expect(
       mod.buildScheduleEdit(base, { name: 'standup', cronExpr: '0 9 * * *', resume: true })
     ).toEqual({ patch: {} });
+  });
+
+  it('sends the time zone only when it changed, with UTC as empty', () => {
+    const edit = (sched: Record<string, unknown>, timeZone: string): unknown =>
+      mod.buildScheduleEdit(sched, {
+        name: 'standup',
+        cronExpr: '0 9 * * *',
+        timeZone,
+        resume: false,
+      });
+    expect(edit(base, ' America/Los_Angeles ')).toEqual({
+      patch: { timeZone: 'America/Los_Angeles' },
+    });
+    expect(edit(base, '')).toEqual({ patch: {} });
+    expect(edit(base, 'UTC')).toEqual({ patch: {} });
+    const zoned = { ...base, timeZone: 'Europe/London' };
+    expect(edit(zoned, 'Europe/London')).toEqual({ patch: {} });
+    expect(edit(zoned, '')).toEqual({ patch: { timeZone: '' } });
+    expect(edit(zoned, 'UTC')).toEqual({ patch: { timeZone: '' } });
+    expect(edit(zoned, 'Asia/Tokyo')).toEqual({ patch: { timeZone: 'Asia/Tokyo' } });
   });
 
   it('rejects empty fields and a zone prefix', () => {
@@ -518,6 +546,22 @@ describe('scion-schedule-list edit dialog', () => {
     expect(root(el).querySelector('sl-dialog[label^="Edit Schedule"]')).not.toBeNull();
     expect(root(el).querySelector('sl-dialog[label^="Schedule:"]')?.hasAttribute('open')).toBe(
       false
+    );
+  });
+
+  it('edits the time zone and shows it after the reload', async () => {
+    const { el, calls } = await mountWithHub(schedule({ id: 's-1', name: 'plain' }));
+    const dialog = await openEdit(el, 'plain');
+    const zone = dialog.querySelector('sl-input.edit-time-zone') as HTMLInputElement;
+    expect(zone.value).toBe('');
+    setInput(zone, 'America/New_York');
+    await settle(el as unknown as { updateComplete: Promise<unknown> });
+    (dialog.querySelector('sl-button.edit-save') as HTMLElement).click();
+    await settle(el as unknown as { updateComplete: Promise<unknown> });
+    const patch = calls.find((c) => c.method === 'PATCH');
+    expect(patch?.body).toEqual({ timeZone: 'America/New_York' });
+    expect(rowFor(el, 'plain').querySelector('.schedule-zone')?.textContent?.trim()).toBe(
+      'America/New_York'
     );
   });
 
@@ -807,5 +851,76 @@ describe('scion-schedule-list status reason', () => {
     expect(dialog?.querySelector('.status-reason')?.getAttribute('data-reason')).toBe(
       'creator_deleted'
     );
+  });
+});
+
+describe('scion-schedule-list create with a time zone', () => {
+  beforeAll(async () => {
+    mod = await import('./schedule-list.js');
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  async function createWith(timeZone: string): Promise<Record<string, unknown> | undefined> {
+    const bodies: Record<string, unknown>[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        if ((init?.method ?? 'GET') === 'POST') {
+          bodies.push(JSON.parse(requestBodyText(init!.body!)) as Record<string, unknown>);
+          return Promise.resolve(new Response('{}', { status: 201 }));
+        }
+        void input;
+        return Promise.resolve(
+          new Response(JSON.stringify({ schedules: [] }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      })
+    );
+    const el = document.createElement('scion-schedule-list') as HTMLElement & {
+      projectId: string;
+      updateComplete: Promise<unknown>;
+    };
+    el.projectId = 'proj-1';
+    document.body.appendChild(el);
+    await settle(el);
+    const d = el as unknown as {
+      dialogName: string;
+      dialogCron: string;
+      dialogTimeZone: string;
+      dialogAgent: string;
+      dialogMessage: string;
+      handleCreate(e: Event): Promise<void>;
+    };
+    d.dialogName = 'digest';
+    d.dialogCron = '0 7 * * *';
+    d.dialogTimeZone = timeZone;
+    d.dialogAgent = 'lead';
+    d.dialogMessage = 'digest';
+    await d.handleCreate(new Event('submit'));
+    return bodies[0];
+  }
+
+  it('sends the zone, trimmed', async () => {
+    const body = await createWith(' America/Los_Angeles ');
+    expect(body?.timeZone).toBe('America/Los_Angeles');
+    expect(body?.cronExpr).toBe('0 7 * * *');
+  });
+
+  it('omits the zone when it is empty or UTC', async () => {
+    expect(await createWith('')).not.toHaveProperty('timeZone');
+    expect(await createWith('UTC')).not.toHaveProperty('timeZone');
+  });
+
+  it('labels a missing zone as UTC', () => {
+    expect(mod.scheduleZoneLabel(undefined)).toBe('UTC');
+    expect(mod.scheduleZoneLabel('')).toBe('UTC');
+    expect(mod.scheduleZoneLabel('Asia/Tokyo')).toBe('Asia/Tokyo');
   });
 });

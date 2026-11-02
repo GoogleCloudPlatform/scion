@@ -223,6 +223,49 @@ a different release, re-run `deploy.sh --version <tag>`, or update from the
 Maintenance page. A re-run without `--version` keeps the release `current`
 points at (see [Re-running the deploy script](#re-running-the-deploy-script)).
 
+### Chat plugins and updates
+
+When the Hub updates itself (Maintenance page or auto-update), it updates
+the chat plugins in `/home/scion/.scion/plugins/broker/` with it. Plugins
+are separate binaries that the Hub talks to over a protocol that has only
+one version, so a plugin from a different release can fail on its first
+call:
+
+- Each regular `scion-plugin-<name>` file in that directory is replaced
+  with `scion-plugin-<name>-linux-<arch>.tar.gz` from the **same release**.
+  The plugin is verified against the same `SHA256SUMS` file as the Hub
+  binary. Each plugin is swapped in with one atomic rename after the new
+  release is activated and before the Hub restarts. The restart also
+  restarts the plugins.
+- If a downloaded plugin does not match its `SHA256SUMS` line, or its
+  download URL is outside the release, or its archive is malformed, the
+  whole update fails before anything is installed.
+- A plugin the release does not publish, or whose `SHA256SUMS` line is
+  missing or unusable, is left as it is, with a warning in the run log.
+  Nothing unverified is installed. A downgrade's confirmation lists these
+  plugins as risks. Symlinks and plugins configured with a path outside
+  that directory are left alone too.
+- If the directory is not writable by the Hub, or is itself a symlink,
+  the plugins are not updated, and the run log has a warning.
+- If the update fails after activation (a plugin cannot be swapped in, or
+  the restart cannot be recorded or requested), the Hub goes back to the
+  previous release and the previous plugins are put back. If a plugin
+  cannot be put back, its old binary is kept in a
+  `.scion-update-*/old/` directory inside the plugin directory, and the
+  error says so. The next update removes such directories, with a warning
+  in the run log.
+- Each release keeps a copy of the plugins installed with it in
+  `/opt/scion/releases/<tag>/plugins/`. After the boot-failure guard rolls
+  back, the restored Hub copies its own plugins back at startup, before
+  loading them. It only replaces a plugin whose file is exactly the build
+  of the release that failed. A plugin you rebuilt or reinstalled by hand
+  is never replaced.
+- A downgrade is an ordinary update, so it installs the plugins of the
+  older release.
+
+`deploy.sh` still installs the plugins you select from the release it
+installs.
+
 ### Boot-failure guard
 
 A release that crashes on startup cannot roll itself back, so `deploy.sh`
@@ -301,7 +344,7 @@ run as the `scion` user (through `runuser`):
    from swapping a Hub you stopped is `Result=timeout` being excluded, and
    the update state (step 5): a release that ran is verified as soon as its
    listener binds, and an unverified update is rolled back only within 30
-   minutes of the switch. Four residual cases are accepted:
+   minutes of the switch. Five residual cases are accepted:
 
    - If the previous release used four or more of the window's five starts
      (for example **Restart Hub** several times, then an update within five
@@ -328,6 +371,21 @@ run as the `scion` user (through `runuser`):
      is rolled back like a crash loop (a special case of the previous
      release-older-than-the-update-state-contract case). The first boot
      after a switch (a count of 1) is never rolled back.
+   - Builds from Git (**Rebuild from Git**, installed as
+     `releases/git-<sha12>`). A rebuild on top of a release is protected
+     like a release update: the Hub records the publish date of a preview or
+     stable `from`, so `previous_safe` is decided as for a release. When
+     `from` is itself a Git build (Git to Git, or a release installed on top
+     of a Git build), `previous_safe` is `false`, because the database
+     schema of an arbitrary commit cannot be checked against the downgrade
+     floor. The new build marks itself `migrated` on every start, before it
+     opens the database, so a crash loop of such a switch is not rolled
+     back: the guard leaves the Hub stopped (fail closed) and its journal
+     points to [Restoring after a failed update](#restoring-after-a-failed-update).
+     A rebuild takes the same pre-update database snapshot as a release
+     update (in `/opt/scion/snapshots/`, named after the build it replaces,
+     for example `hub-git-<sha12>-<timestamp>.db`), so that procedure
+     applies unchanged.
 4. It refuses unless `/opt/scion/current` and `/opt/scion/previous` each
    resolve to a release directory directly inside `/opt/scion/releases/`,
    and `previous` contains a `scion` binary. A link that leaves `releases/`
@@ -382,7 +440,10 @@ one JSON object:
   migration statement, and sets `previous_safe`: whether `from` is at or
   above its downgrade floor (`pkg/version.DowngradeFloor`), that is,
   whether `from` can still run on the migrated database. It may also
-  record `from_published_at`, which the guard ignores.
+  record `from_published_at`, which the guard ignores. `previous_safe` is
+  `false` when that cannot be shown: a `from` that is a Git build
+  (`git-<sha12>`), or a preview or stable `from` whose publish date the
+  Hub could not look up.
 - The Hub sets `verified` to `true` as soon as its listener is bound,
   independently of the boot reconciliation. A release that crash-loops
   before it can listen (for example, because port 8080 is taken right after
@@ -511,6 +572,28 @@ together with the release:
 
 A release that is no longer in `releases/` (the Hub keeps the last five) can
 be installed again with `deploy.sh --version <tag>` before step 4.
+
+`deploy.sh --version` installs releases only. If the snapshot was taken from
+a Git build (`hub-git-<sha12>-<timestamp>.db`) and `releases/git-<sha12>` has
+been pruned, either:
+
+- rebuild that commit into `releases/` by hand before step 4, as the `scion`
+  user in the maintenance repository (the stamped commit is what names the
+  build):
+
+  ```bash
+  cd <maintenance repo>
+  sudo -u scion git checkout <full commit>
+  sudo -u scion make web
+  sudo -u scion mkdir -p /opt/scion/releases/git-<sha12>
+  sudo -u scion go build -o /opt/scion/releases/git-<sha12>/scion \
+    -ldflags "-X github.com/GoogleCloudPlatform/scion/pkg/version.Commit=<full commit> -X github.com/GoogleCloudPlatform/scion/pkg/version.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    ./cmd/scion
+  ```
+
+- or skip that snapshot: install a release with `deploy.sh --version <tag>`
+  and restore an older snapshot taken from a release (`hub-<tag>-<timestamp>.db`),
+  if one is retained. Changes made after that snapshot are lost.
 
 ### Converting an existing VM (`migrate-layout`)
 
@@ -808,6 +891,8 @@ installed to `/home/scion/.scion/plugins/broker/`. Each plugin runs as a
 broker plugin within the Hub process. Like the main binary, each plugin
 tarball is verified against the release's `SHA256SUMS` asset before
 installation (see [Quick Start](#quick-start)).
+When the Hub later updates itself, it updates these plugins to the same
+release (see [Chat plugins and updates](#chat-plugins-and-updates)).
 
 ## Container Images
 
@@ -874,8 +959,105 @@ authentication is needed — the agents are co-located with the Hub.
 
 ### CLI access (via IAP)
 
-To use the `scion` CLI from your local machine against the deployed Hub,
-configure it to authenticate through IAP using the Cloud Run proxy URL.
+IAP intercepts every request to the Cloud Run proxy URL. A browser follows
+IAP's Google sign-in, but the `scion` CLI cannot, so `scion hub auth login`
+against the proxy URL stops with an error saying the hub appears to be behind
+IAP. To use the CLI from your workstation, give it two credentials:
+
+- **Transport (outer):** a Google OIDC ID token that IAP accepts, sent as
+  `Proxy-Authorization`. IAP accepts an ID token for a service account whose
+  audience is the project's IAP OAuth client ID. A user account's own ID
+  token does not have that audience, so you mint the token by impersonating a
+  service account.
+- **Hub identity (inner):** a [user access token](https://googlecloudplatform.github.io/scion/hosted/user/personal-access-tokens/)
+  (UAT) in `SCION_HUB_TOKEN`. The Hub identifies you by the UAT, not by the
+  service account IAP sees. Create it in the web UI, which you reach through
+  IAP in the browser.
+
+**One-time setup (an admin runs these):**
+
+```bash
+PROJECT_ID=my-project
+REGION=us-central1
+HUB_NAME=my-hub
+SA_EMAIL="scion-cli-${HUB_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+
+# 1. A service account for workstation IAP access (or reuse an existing one).
+gcloud iam service-accounts create "scion-cli-${HUB_NAME}" --project="$PROJECT_ID"
+
+# 2. Let the service account through IAP on the proxy service.
+gcloud iap web add-iam-policy-binding \
+  --resource-type=cloud-run \
+  --service="scion-hub-${HUB_NAME}-iap-proxy" \
+  --region="$REGION" \
+  --project="$PROJECT_ID" \
+  --member="serviceAccount:${SA_EMAIL}" \
+  --role=roles/iap.httpsResourceAccessor
+
+# 3. Let each CLI user mint ID tokens for the service account.
+#    (roles/iam.serviceAccountTokenCreator also works, but grants more.)
+gcloud iam service-accounts add-iam-policy-binding "$SA_EMAIL" \
+  --project="$PROJECT_ID" \
+  --member=user:you@example.com \
+  --role=roles/iam.serviceAccountOpenIdTokenCreator
+```
+
+`roles/iap.httpsResourceAccessor` is the IAM ID of the **IAP-secured Web App
+User** role. Your own user account needs it too, for the browser.
+
+**Find the audience.** The token's audience is the project's IAP OAuth client
+ID, not the proxy URL and not the `auth.proxy.iap.audience` value in
+`settings.yaml` (that one is the audience of the assertion IAP sends to the
+Hub). `scripts/single-node-vm/hybrid-tier.sh` (`hybrid_discover_iap_client_id`)
+looks it up the same way for agent transport tokens:
+
+```bash
+CLIENT_ID="$(gcloud iap settings get --project="$PROJECT_ID" \
+  --resource-type=iap_web --format='value(accessSettings.oauthSettings.clientId)')"
+```
+
+If this prints nothing, the project's IAP settings have no OAuth client
+configured. See [Cross-org IAP: custom OAuth client required](agent-runbook-single-node-vm.md#cross-org-iap-custom-oauth-client-required)
+in the runbook.
+
+**Each session (on your workstation):**
+
+```bash
+mkdir -p ~/.scion
+# Write to a private temp file, then rename it into place, so the CLI never
+# reads a partly written token.
+tmp="$(mktemp ~/.scion/iap-transport-token.XXXXXX)"
+gcloud auth print-identity-token \
+  --impersonate-service-account="$SA_EMAIL" \
+  --audiences="$CLIENT_ID" \
+  --include-email > "$tmp" && mv "$tmp" ~/.scion/iap-transport-token || rm -f "$tmp"
+
+export SCION_TRANSPORT_MODE=iap
+export SCION_TRANSPORT_TOKEN_FILE=~/.scion/iap-transport-token
+export SCION_HUB_TOKEN=scion_pat_...   # your user access token
+export SCION_HUB_ENDPOINT=https://scion-hub-my-hub-iap-proxy-HASH-REGION.a.run.app
+
+scion list --project my-project
+```
+
+- `--include-email` is required: IAP checks the email claim of a service
+  account's ID token.
+- The ID token expires after about an hour. Re-run the `gcloud` command to
+  refresh the file; the CLI re-reads it when it changes. Setting
+  `SCION_TRANSPORT_TOKEN` to the token value instead of using a file also
+  works, until it expires.
+- A stored interactive login takes precedence over `SCION_HUB_TOKEN`; see
+  the user access token page.
+- If IAP rejects the token, the CLI reports that IAP did not accept the
+  transport token. Check the expiry, the audience, the email claim, and the
+  service account's IAP role.
+- With IAP external identities, the sign-in page is not on
+  `accounts.google.com`. The CLI then reports only that the hub returned an
+  HTML page instead of a JSON response; the same setup applies.
+
+The alternative needs no service account: SSH to the VM (see below) and run
+the CLI there against `http://localhost:8080` with `SCION_HUB_TOKEN` set to a
+user access token.
 
 ### SSH access (via gcloud)
 

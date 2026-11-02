@@ -308,11 +308,6 @@ type WebChatStore interface {
 	// unread check: handleListThreads only reports hasUnreadMention when
 	// hasUnread is also true.
 	UnreadMentionKeys(ctx context.Context, userID string, conversationKeys []string) (map[string]bool, error)
-
-	// PurgeOrphanMentions deletes mention rows whose message no longer
-	// exists in the messages table (hard-deleted by a retention purge).
-	// Returns the number of rows removed.
-	PurgeOrphanMentions(ctx context.Context) (int, error)
 }
 
 // ThreadPrefs holds per-thread display preferences from webchat_thread_prefs.
@@ -558,6 +553,10 @@ CREATE TABLE IF NOT EXISTS webchat_topic (
 
 CREATE INDEX IF NOT EXISTS idx_webchat_topic_project_activity
     ON webchat_topic (project_id, deleted_at, last_activity_at);
+
+-- Soft-deleted topics, for the chat retention grace purge.
+CREATE INDEX IF NOT EXISTS idx_webchat_topic_deleted
+    ON webchat_topic (deleted_at) WHERE deleted_at IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS webchat_read_state (
     user_id          TEXT NOT NULL,
@@ -2905,19 +2904,6 @@ SELECT DISTINCT wm.conversation_key
 		out[key] = true
 	}
 	return out, rows.Err()
-}
-
-// PurgeOrphanMentions deletes mention rows whose message row is gone.
-func (s *sqliteWebChatStore) PurgeOrphanMentions(ctx context.Context) (int, error) {
-	res, err := s.db.ExecContext(ctx, `
-DELETE FROM webchat_mention
- WHERE NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = webchat_mention.message_id)
-`)
-	if err != nil {
-		return 0, fmt.Errorf("webchat store: purge orphan mentions: %w", err)
-	}
-	n, _ := res.RowsAffected()
-	return int(n), nil
 }
 
 // AttachmentMeta holds metadata about a stored attachment.

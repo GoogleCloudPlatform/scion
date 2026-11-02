@@ -28,16 +28,16 @@ import (
 // several broker requests (a hash-mismatch retry, a second-pass finalize, or
 // a cross-node deferred wait); the bound covers them all together.
 //
-// It equals the hub-to-broker request limit: the control channel's
-// RequestTimeout (set in New, server.go:2007; default in
-// DefaultControlChannelConfig, controlchannel.go:59) and the
-// broker HTTP transport's client timeout (broker_http_transport.go). When it
+// It is the hub-to-broker request limit, brokerRequestTimeout (180s,
+// ptone/scion#6829), which also sets the control channel's RequestTimeout
+// (in New and in DefaultControlChannelConfig) and the broker HTTP
+// transport's client timeout (broker_http_transport.go). When it
 // fires, the dispatch ctx is done, and what the broker sees depends on the
 // transport: on the control channel, BrokerConnection.TunnelRequest sends a
 // cancel frame; on direct HTTP, the request is aborted; on a cross-node
 // deferred dispatch, nothing is sent, and the owning node runs the durable
 // intent to its end. A variable so tests can shorten it.
-var syncDispatchTimeout = 120 * time.Second
+var syncDispatchTimeout = brokerRequestTimeout
 
 // detachLaunchFromClient returns a context for the rest of a synchronous
 // launch: it keeps ctx's values (identity, trace, dispatch warnings) but not

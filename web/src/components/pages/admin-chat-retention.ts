@@ -51,6 +51,8 @@ export interface ChatRetentionSettings {
   enabled: boolean;
   /** null = no window: messages are kept forever. */
   messages_retention_days: number | null;
+  /** Days after a conversation or topic is deleted until its messages are purged. */
+  deleted_conversation_grace_days: number;
   sweep: ChatRetentionSweep;
   last_applied_cutoff: string | null;
   revision: number;
@@ -59,6 +61,8 @@ export interface ChatRetentionSettings {
 /** Bounds of the settings, as pkg/config/opsettings/chat_retention.go sets them. */
 export const RETENTION_MIN_DAYS = 7;
 export const RETENTION_MAX_DAYS = 36500;
+export const RETENTION_MIN_GRACE_DAYS = 1;
+export const RETENTION_DEFAULT_GRACE_DAYS = 30;
 
 type SweepKey = keyof ChatRetentionSweep;
 
@@ -103,6 +107,7 @@ const SWEEP_FIELDS: ReadonlyArray<{
 interface RetentionForm {
   enabled: boolean;
   days: string;
+  graceDays: string;
   sweep: Record<SweepKey, string>;
 }
 
@@ -113,6 +118,7 @@ export type RetentionPutBody =
       body: {
         enabled: boolean;
         messages_retention_days: number | null;
+        deleted_conversation_grace_days: number;
         sweep: ChatRetentionSweep;
         expected_revision: number;
       };
@@ -131,7 +137,7 @@ function parseWholeNumber(value: string): number | null {
  * form was loaded at.
  */
 export function buildRetentionPutBody(
-  form: { enabled: boolean; days: string; sweep: Record<SweepKey, string> },
+  form: { enabled: boolean; days: string; graceDays: string; sweep: Record<SweepKey, string> },
   revision: number
 ): RetentionPutBody {
   const errors: string[] = [];
@@ -143,6 +149,16 @@ export function buildRetentionPutBody(
         `Retention window must be a whole number of days from ${RETENTION_MIN_DAYS} to ${RETENTION_MAX_DAYS}, or empty to keep messages forever.`
       );
     }
+  }
+  const graceDays = parseWholeNumber(form.graceDays);
+  if (
+    graceDays === null ||
+    graceDays < RETENTION_MIN_GRACE_DAYS ||
+    graceDays > RETENTION_MAX_DAYS
+  ) {
+    errors.push(
+      `Deleted conversation grace must be a whole number of days from ${RETENTION_MIN_GRACE_DAYS} to ${RETENTION_MAX_DAYS}.`
+    );
   }
   const sweep = {} as ChatRetentionSweep;
   for (const f of SWEEP_FIELDS) {
@@ -159,6 +175,7 @@ export function buildRetentionPutBody(
     body: {
       enabled: form.enabled,
       messages_retention_days: days,
+      deleted_conversation_grace_days: graceDays as number,
       sweep,
       expected_revision: revision,
     },
@@ -189,10 +206,41 @@ export function retentionSaveErrors(body: unknown, fallback: string): string[] {
   return [apiErrorMessageFromBody(body) ?? fallback];
 }
 
+/**
+ * The warning shown while the sweep is enabled: what it deletes, with the
+ * window (null when none is set, 'invalid' while the field holds a value
+ * that is not a valid window, which then goes unmentioned: the save shows
+ * the validation error) and the deleted-conversation grace (null while the
+ * field is not a valid grace).
+ */
+export function retentionWarning(
+  days: number | null | 'invalid',
+  graceDays: number | null
+): string {
+  const parts: string[] = [];
+  if (days === null) {
+    parts.push(
+      'No retention window is set: only the messages of deleted conversations and topics are purged.'
+    );
+  } else if (days !== 'invalid') {
+    parts.push(
+      `While enabled, messages older than ${days} days are permanently deleted from this hub.`
+    );
+  }
+  if (graceDays !== null) {
+    const unit = graceDays === 1 ? 'day' : 'days';
+    parts.push(
+      `Messages of conversations and topics deleted more than ${graceDays} ${unit} ago are permanently deleted.`
+    );
+  }
+  return parts.join(' ');
+}
+
 function formFrom(s: ChatRetentionSettings): RetentionForm {
   return {
     enabled: s.enabled,
     days: s.messages_retention_days === null ? '' : String(s.messages_retention_days),
+    graceDays: String(s.deleted_conversation_grace_days ?? RETENTION_DEFAULT_GRACE_DAYS),
     sweep: {
       chunk_size: String(s.sweep.chunk_size),
       pause_ms: String(s.sweep.pause_ms),
@@ -426,9 +474,11 @@ export class ScionAdminChatRetention extends LitElement {
       <div class="section chat-retention">
         <h3 class="section-title">Chat retention</h3>
         <ul class="intro">
-          <li>
-            Nothing is deleted until the sweep is enabled <strong>and</strong> a retention window is
-            set.
+          <li>Nothing is deleted while the sweep is disabled.</li>
+          <li class="grace-explanation">
+            With the sweep enabled and no retention window, only the messages of deleted
+            conversations and topics are purged, once the grace period after their deletion has
+            passed.
           </li>
           <li>Deletes are permanent: removed messages cannot be restored.</li>
           <li>Take a database backup before enabling.</li>
@@ -453,7 +503,16 @@ export class ScionAdminChatRetention extends LitElement {
     }
     const form = this.form;
     const days = parseWholeNumber(form.days);
-    const deleting = form.enabled && form.days.trim() !== '' && days !== null;
+    const windowSet = form.days.trim() !== '';
+    const windowValid = days !== null && days >= RETENTION_MIN_DAYS && days <= RETENTION_MAX_DAYS;
+    const grace = parseWholeNumber(form.graceDays);
+    const graceDays =
+      grace !== null && grace >= RETENTION_MIN_GRACE_DAYS && grace <= RETENTION_MAX_DAYS
+        ? grace
+        : null;
+    const warning = form.enabled
+      ? retentionWarning(!windowSet ? null : windowValid ? days : 'invalid', graceDays)
+      : '';
     const cutoff = this.settings.last_applied_cutoff;
     return html`
       <div class="form-grid">
@@ -490,6 +549,25 @@ export class ScionAdminChatRetention extends LitElement {
           >
         </div>
         <div class="form-field">
+          <label for="retention-grace-days">Deleted conversation grace (days)</label>
+          <sl-input
+            id="retention-grace-days"
+            class="retention-grace-days"
+            type="number"
+            min=${RETENTION_MIN_GRACE_DAYS}
+            max=${RETENTION_MAX_DAYS}
+            .value=${form.graceDays}
+            ?disabled=${this.saving}
+            @sl-input=${(e: Event) =>
+              this.updateForm({ graceDays: (e.target as HTMLInputElement).value })}
+          ></sl-input>
+          <span class="hint"
+            >The messages of a deleted conversation or topic are purged this many days after the
+            deletion, even when the retention window is longer or empty (default
+            ${RETENTION_DEFAULT_GRACE_DAYS}).</span
+          >
+        </div>
+        <div class="form-field">
           <label>Last applied cutoff</label>
           <span class="last-applied-cutoff"
             >${cutoff ? formatInstantWithZone(cutoff) || cutoff : 'None yet'}</span
@@ -522,10 +600,8 @@ export class ScionAdminChatRetention extends LitElement {
           )}
         </div>
       </details>
-      ${deleting
-        ? html`<div class="status-message warning delete-warning">
-            While enabled, messages older than ${days} days are permanently deleted from this hub.
-          </div>`
+      ${warning
+        ? html`<div class="status-message warning delete-warning">${warning}</div>`
         : nothing}
       ${this.saveErrors.length > 0
         ? html`<div class="status-message error save-errors" role="alert">

@@ -494,6 +494,12 @@ type MessagingSettings struct {
 	// as the default.
 	AttachmentInboxRetentionDays *int `json:"attachment_inbox_retention_days,omitempty"`
 
+	// FailedMessageRetentionDays is how long a message to an agent whose
+	// dispatch failed is kept before the failed-message purge deletes it,
+	// with its dependent rows. Compiled default 7; values below 1 are
+	// treated as the default.
+	FailedMessageRetentionDays *int `json:"failed_message_retention_days,omitempty"`
+
 	// Stale fields — kept for backward-compatible deserialization only.
 	// New code must not read or write these.
 	ConversationReadSwitch      *bool `json:"conversation_read_switch,omitempty"`
