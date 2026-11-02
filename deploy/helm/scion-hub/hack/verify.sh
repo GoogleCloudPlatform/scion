@@ -261,7 +261,10 @@ NO_RENDERED_SETTINGS=(existing-secret)
 #     0  the values walk picks the new leaf up on its own (it asserts in
 #        aggregate, so a new leaf adds no assertion)
 # 362 + 3 = 365. Summed, then read off the driver's output.
-EXPECTED_TOTAL=365
+#
+# 365 -> 366: grace-period gains the explicit-null arm (null deletes the key,
+# so it must fall back to 45, not int(nil) = 0). Summed, then read off a run.
+EXPECTED_TOTAL=366
 
 failures=0
 assertions=0
@@ -996,6 +999,18 @@ if "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
   pass "hub.terminationGracePeriodSeconds replaces the default on the hub pod spec"
 else
   fail "hub.terminationGracePeriodSeconds=90 did not render as the hub pod's only terminationGracePeriodSeconds"
+fi
+grace_null="$WORK/grace-null.yaml"
+# An explicit null deletes the key, so the schema's minimum never runs; the
+# template must fall back to 45 rather than render int(nil) = 0, which is an
+# immediate SIGKILL with no launch drain.
+if "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+    "${BASE[@]}" --set hub.terminationGracePeriodSeconds=null >"$grace_null" 2>>"$_tcerr" \
+    && [[ $(grep -cE '^      terminationGracePeriodSeconds: 45$' "$grace_null") -eq 1 ]] \
+    && [[ $(grep -cF 'terminationGracePeriodSeconds:' "$grace_null") -eq 1 ]]; then
+  pass "hub.terminationGracePeriodSeconds=null falls back to 45, not 0"
+else
+  fail "hub.terminationGracePeriodSeconds=null did not render 45 exactly once - a null that renders 0 kills the pod without a drain"
 fi
 expect_render_failure "hub.terminationGracePeriodSeconds=0" \
   "hub.terminationGracePeriodSeconds: Must be greater than or equal to 1" \

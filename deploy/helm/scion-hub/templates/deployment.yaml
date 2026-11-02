@@ -215,7 +215,14 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "scion-hub.serviceAccountName" . }}
-      terminationGracePeriodSeconds: {{ int .Values.hub.terminationGracePeriodSeconds }}
+      {{- /*
+      default 45, not a bare int: an explicit null (--set ...=null, or null or ~
+      in a values file) makes Helm delete the key, so the schema has nothing to
+      check (its minimum of 1 never runs) and int of nil renders 0, an
+      immediate SIGKILL with no drain. 0 itself is refused by the schema before
+      this line, so default only ever replaces the deleted key.
+      */}}
+      terminationGracePeriodSeconds: {{ int (default 45 .Values.hub.terminationGracePeriodSeconds) }}
       {{- with .Values.image.pullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
