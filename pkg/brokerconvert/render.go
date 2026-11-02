@@ -1,0 +1,227 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package brokerconvert
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"strings"
+
+	yamlv3 "gopkg.in/yaml.v3"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+)
+
+// AgentsNotMovableNote closes the bound-agents section.
+const AgentsNotMovableNote = "Agents cannot be moved onto a flat Runtime Broker today: finish or recreate them before the host switches."
+
+// WriteJSON writes the plan as one indented JSON object.
+func WriteJSON(w io.Writer, p *Plan) error {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(p)
+}
+
+// InstancesYAML is the proposed server.broker.instances block, ready to
+// paste into the global settings file.
+func InstancesYAML(instances []config.V1RuntimeBrokerInstanceConfig) (string, error) {
+	doc := map[string]any{
+		"server": map[string]any{
+			"broker": map[string]any{
+				"instances": instances,
+			},
+		},
+	}
+	var buf bytes.Buffer
+	enc := yamlv3.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(doc); err != nil {
+		return "", err
+	}
+	if err := enc.Close(); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
+// WriteHuman writes the plan's five sections and the summary, in a fixed
+// order.
+func WriteHuman(w io.Writer, p *Plan) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s\n", TipNote)
+	if p.LegacyBroker != nil {
+		fmt.Fprintf(&b, "Legacy Runtime Broker: %s (%s)\n", p.LegacyBroker.Name, p.LegacyBroker.ID)
+	}
+	if p.Summary.ProfilesInScope == 0 {
+		b.WriteString("\nNothing to convert: no profiles in scope.\n")
+		_, err := io.WriteString(w, b.String())
+		return err
+	}
+
+	b.WriteString("\n1. Proposed instances\n")
+	if len(p.Instances) == 0 {
+		b.WriteString("   (none: every profile in scope has a blocking finding)\n")
+	} else {
+		y, err := InstancesYAML(p.Instances)
+		if err != nil {
+			return err
+		}
+		b.WriteString("# Proposed, not applied. Keys and names are editable.\n")
+		b.WriteString(y)
+	}
+
+	b.WriteString("\n2. Profile map\n")
+	for _, m := range p.ProfileMap {
+		if m.Instance != "" {
+			fmt.Fprintf(&b, "   %s -> %s\n", m.Profile, m.Instance)
+		} else {
+			fmt.Fprintf(&b, "   %s -> (no mapping: %s)\n", m.Profile, m.BlockedBy)
+		}
+	}
+	if lb := p.LegacyBroker; lb != nil && (len(lb.LocalOnly) > 0 || len(lb.HubOnly) > 0) {
+		b.WriteString("   Notice: the Hub's profile list for this Runtime Broker differs from the local settings.\n")
+		if len(lb.LocalOnly) > 0 {
+			fmt.Fprintf(&b, "     local only: %s\n", strings.Join(lb.LocalOnly, ", "))
+		}
+		if len(lb.HubOnly) > 0 {
+			fmt.Fprintf(&b, "     Hub only: %s\n", strings.Join(lb.HubOnly, ", "))
+		}
+	}
+
+	b.WriteString("\n3. Findings\n")
+	if len(p.Findings) == 0 {
+		b.WriteString("   (none)\n")
+	}
+	for _, f := range p.Findings {
+		fmt.Fprintf(&b, "   [%s] %s %s", f.Severity, f.Code, f.Path)
+		if len(f.Profiles) > 0 {
+			fmt.Fprintf(&b, " (profiles: %s)", strings.Join(f.Profiles, ", "))
+		}
+		fmt.Fprintf(&b, "\n     %s\n", f.Message)
+	}
+
+	b.WriteString("\n4. Capacity\n")
+	writeCapacity(&b, p.Capacity)
+
+	b.WriteString("\n5. Still bound on the Hub\n")
+	if p.Agents == nil && p.Projects == nil {
+		b.WriteString("   (skipped: needs the Hub)\n")
+	} else {
+		writeAgents(&b, p.Agents)
+		writeProjects(&b, p.Projects)
+	}
+
+	b.WriteString("\nSummary\n")
+	s := p.Summary
+	fmt.Fprintf(&b, "   %d profiles in scope, %d mapped, %d proposed instances, %d blocking and %d notice findings",
+		s.ProfilesInScope, s.MappedProfiles, s.Instances, s.BlockingFindings, s.NoticeFindings)
+	if p.Agents != nil || p.Projects != nil {
+		fmt.Fprintf(&b, ", %d bound agents, %d providing projects", s.Agents, s.Projects)
+	}
+	b.WriteString(".\n")
+	var verdict []string
+	if s.BlockingFindings == 0 {
+		verdict = append(verdict, "no blocking findings")
+	} else {
+		verdict = append(verdict, fmt.Sprintf("%d blocking findings", s.BlockingFindings))
+	}
+	if s.DecisionRequired {
+		verdict = append(verdict, "operator decisions required")
+	}
+	fmt.Fprintf(&b, "   Result: %s.\n", strings.Join(verdict, "; "))
+
+	_, err := io.WriteString(w, b.String())
+	return err
+}
+
+func writeCapacity(b *strings.Builder, c Capacity) {
+	switch c.Status {
+	case CapacityPlanned:
+		fmt.Fprintf(b, "   Outcome: %s\n", c.Outcome)
+		if c.MaxAgents != nil {
+			fmt.Fprintf(b, "   Legacy maxAgents: %d\n", *c.MaxAgents)
+		} else {
+			b.WriteString("   Legacy maxAgents: not set (inherited)\n")
+		}
+		for _, a := range c.Allocations {
+			fmt.Fprintf(b, "   %s: maxAgents %d\n", a.Instance, a.MaxAgents)
+		}
+		for _, r := range c.Reasons {
+			fmt.Fprintf(b, "   Decision: %s\n", r)
+		}
+		for _, f := range c.Flags {
+			fmt.Fprintf(b, "   Note: %s\n", f)
+		}
+	default:
+		fmt.Fprintf(b, "   (%s) %s\n", c.Status, c.Note)
+	}
+}
+
+func refText(r ProfileRef) string {
+	switch r.Mapping {
+	case MappingMapped:
+		return fmt.Sprintf("%s -> %s", r.Profile, r.Instance)
+	case MappingProfileUnknown:
+		return "(profile not recorded)"
+	}
+	return fmt.Sprintf("%s -> (no mapping)", r.Profile)
+}
+
+func writeAgents(b *strings.Builder, s *AgentsSection) {
+	b.WriteString("   Agents:\n")
+	if s == nil {
+		return
+	}
+	if s.Note != "" {
+		fmt.Fprintf(b, "     (%s)\n", s.Note)
+	}
+	if len(s.Items) == 0 && s.Note == "" {
+		b.WriteString("     (none)\n")
+	}
+	for _, a := range s.Items {
+		fmt.Fprintf(b, "     %s  %s  project %s  phase %s  %s\n", a.ID, a.Name, a.Project, a.Phase, refText(a.ProfileRef))
+	}
+	if s.TerminalCount > 0 {
+		fmt.Fprintf(b, "     (%d agents in a terminal phase not listed)\n", s.TerminalCount)
+	}
+	fmt.Fprintf(b, "     %s\n", AgentsNotMovableNote)
+}
+
+func writeProjects(b *strings.Builder, s *ProjectsSection) {
+	b.WriteString("   Projects:\n")
+	if s == nil {
+		return
+	}
+	if s.Note != "" {
+		fmt.Fprintf(b, "     (%s)\n", s.Note)
+	}
+	if len(s.Items) == 0 && s.Note == "" {
+		b.WriteString("     (none)\n")
+	}
+	for _, e := range s.Items {
+		fmt.Fprintf(b, "     %s  %s\n", e.ID, e.Name)
+		if e.Note != "" {
+			fmt.Fprintf(b, "       (%s)\n", e.Note)
+		}
+		if e.ActiveProfile != nil {
+			fmt.Fprintf(b, "       activeProfile: %s\n", refText(*e.ActiveProfile))
+		}
+		for _, r := range e.ServiceAccountProfiles {
+			fmt.Fprintf(b, "       service account for profile: %s\n", refText(r))
+		}
+	}
+}

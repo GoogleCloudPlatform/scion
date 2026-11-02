@@ -33,6 +33,7 @@ func TestHubAndBrokerCommandsRunOutsideProject(t *testing.T) {
 		hubStatusCmd, hubEnableCmd, hubDisableCmd,
 		brokerRegisterCmd, brokerDeregisterCmd, brokerStartCmd, brokerStopCmd,
 		brokerRestartCmd, brokerStatusCmd, brokerHubsCmd, brokerJoinCmd,
+		brokerConvertCmd,
 	}
 	for _, c := range cmds {
 		t.Run(c.CommandPath(), func(t *testing.T) {
