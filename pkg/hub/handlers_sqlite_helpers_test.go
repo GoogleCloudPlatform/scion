@@ -346,6 +346,8 @@ func def49Setup(t *testing.T) (srv *Server, s store.Store, projectID string, tar
 	return srv, s, projectID, targetAgent, userID
 }
 
+func strPtr(s string) *string { return &s }
+
 // alwaysDropUserBus is an eventbus.EventBus whose Publish always reports a
 // subscriber-buffer-full drop, simulating InProcessEventBus.Publish when a
 // project's user-message subscriber is saturated (ptone/scion#2311).
