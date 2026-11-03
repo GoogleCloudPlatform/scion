@@ -61,8 +61,10 @@ func writeMockBin(t *testing.T, script string) string {
 // exited and its state write is done.
 //
 // Limit: Delete (cancelSandboxWatch) and a same-name re-Run drop a
-// registration while its watcher may still run. A test that does either
-// must not rely on this wait, so its mock `wait` must write nothing.
+// registration while its watcher may still run: a dropped watcher whose
+// `wait` has already returned still writes the state file, with no
+// registration held. A test that does either must keep that watcher's
+// `wait` blocked until it is cancelled.
 func stopWatchersOnCleanup(t *testing.T, statePath string, rts ...*CloudRunSandboxRuntime) {
 	t.Helper()
 	t.Cleanup(func() {
