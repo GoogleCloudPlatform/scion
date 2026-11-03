@@ -40,6 +40,14 @@ func TestDoctorSharedDirStorage(t *testing.T) {
 		NFS:     &config.V1NFSConfig{MountRoot: "/mnt/scion-nfs", Shares: []config.V1NFSShare{{ID: "a", Server: "10.0.0.2", Export: "/vol-a", PVName: "pv-a"}}},
 	}}
 	local := &config.V1ServerConfig{ProjectStorage: &config.V1ProjectStorageConfig{Backend: "local"}}
+	gke := &config.V1ServerConfig{ProjectStorage: &config.V1ProjectStorageConfig{
+		Backend:         "gke-shared-volume",
+		GKESharedVolume: &config.V1GKESharedVolumeConfig{VolumeName: "v", PVClaimName: "c"},
+	}}
+	// A gke-shared-volume backend without its volume name: the Layout does
+	// not resolve, so it is reported as not shared (the start refuses on the
+	// settings error itself).
+	invalid := &config.V1ServerConfig{ProjectStorage: &config.V1ProjectStorageConfig{Backend: "gke-shared-volume"}}
 
 	for _, tc := range []struct {
 		name       string
@@ -54,6 +62,8 @@ func TestDoctorSharedDirStorage(t *testing.T) {
 		{"profile without a class on any rung", vs, nil, "other", "", false},
 		{"local project storage", vs, local, "", "runtime-rwx", false},
 		{"nfs project storage is shared", vs, nfs, "", "runtime-rwx", true},
+		{"gke-shared-volume project storage is shared", vs, gke, "", "runtime-rwx", true},
+		{"invalid layout is not shared", vs, invalid, "", "runtime-rwx", false},
 		{"no settings", nil, nil, "", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
