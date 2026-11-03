@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/brokerconvert"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
@@ -85,10 +86,10 @@ func convertTestHome(t *testing.T, settings string) (home, settingsPath string) 
 	return home, settingsPath
 }
 
-// treeSnapshot records every path under root with its mode, modification
+// convertTreeSnapshot records every path under root with its mode, modification
 // time and content hash, so a test can prove the command wrote (even the
 // same bytes), created and removed nothing.
-func treeSnapshot(t *testing.T, root string) map[string]string {
+func convertTreeSnapshot(t *testing.T, root string) map[string]string {
 	t.Helper()
 	snap := map[string]string{}
 	require.NoError(t, filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -114,7 +115,7 @@ func treeSnapshot(t *testing.T, root string) map[string]string {
 	return snap
 }
 
-func fileSHA(t *testing.T, path string) string {
+func convertFileSHA(t *testing.T, path string) string {
 	t.Helper()
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
@@ -218,7 +219,7 @@ func TestBrokerConvert_SkipHubWritesNothing(t *testing.T) {
 		t.Error("--skip-hub must not open a Hub client")
 		return nil, errors.New("unexpected")
 	})
-	before, beforeSHA := treeSnapshot(t, home), fileSHA(t, settingsPath)
+	before, beforeSHA := convertTreeSnapshot(t, home), convertFileSHA(t, settingsPath)
 
 	out, err := runConvertForTest(t)
 	require.NoError(t, err, "no blocking finding, and capacity needs the Hub: exit 0")
@@ -228,8 +229,8 @@ func TestBrokerConvert_SkipHubWritesNothing(t *testing.T) {
 	assert.Contains(t, out, "(needs_hub)")
 	assert.Contains(t, out, "(skipped: needs the Hub)")
 
-	assert.Equal(t, beforeSHA, fileSHA(t, settingsPath), "the settings file is unchanged")
-	assert.Equal(t, before, treeSnapshot(t, home), "nothing under HOME was written, created or removed")
+	assert.Equal(t, beforeSHA, convertFileSHA(t, settingsPath), "the settings file is unchanged")
+	assert.Equal(t, before, convertTreeSnapshot(t, home), "nothing under HOME was written, created or removed")
 }
 
 // Blocking findings exit 3, through the exit status the CLI reports.
@@ -258,7 +259,7 @@ func TestBrokerConvert_HubSectionsGETOnlyAndWriteNothing(t *testing.T) {
 	setConvertHubClient(t, func(*config.Settings) (hubclient.Client, error) {
 		return hubclient.New(hub.URL)
 	})
-	before, beforeSHA := treeSnapshot(t, home), fileSHA(t, settingsPath)
+	before, beforeSHA := convertTreeSnapshot(t, home), convertFileSHA(t, settingsPath)
 
 	out, err := runConvertForTest(t)
 	require.NoError(t, err)
@@ -303,8 +304,8 @@ func TestBrokerConvert_HubSectionsGETOnlyAndWriteNothing(t *testing.T) {
 	assert.Empty(t, hub.nonGET, "GET requests only")
 	assert.Positive(t, hub.gets)
 	hub.mu.Unlock()
-	assert.Equal(t, beforeSHA, fileSHA(t, settingsPath), "the settings file is unchanged")
-	assert.Equal(t, before, treeSnapshot(t, home), "nothing under HOME was written, created or removed")
+	assert.Equal(t, beforeSHA, convertFileSHA(t, settingsPath), "the settings file is unchanged")
+	assert.Equal(t, before, convertTreeSnapshot(t, home), "nothing under HOME was written, created or removed")
 }
 
 // No Hub configured: the local sections only, as with --skip-hub.
@@ -389,11 +390,12 @@ func TestBrokerConvert_SkipHubFlagAndRootNoHubRefusal(t *testing.T) {
 }
 
 // legacyHomeFixture adds what the settings loaders and the startup layout
-// migration rewrite on a normal command: a legacy hub.grove_id key in the
+// migration rewrite on a normal command: the legacy hub project key
+// (projectkeys.LegacyConfigHubProjectIDKey) in the
 // global settings and a legacy global layout entry.
 func legacyHomeFixture(t *testing.T) (home, settingsPath string) {
 	t.Helper()
-	home, settingsPath = convertTestHome(t, convertTestSettings+"hub:\n  grove_id: legacy-project-id\n")
+	home, settingsPath = convertTestHome(t, convertTestSettings+"hub:\n  "+projectkeys.LegacyConfigProjectIDKey+": legacy-project-id\n")
 	legacyDir := filepath.Join(home, ".scion", legacyLayoutDir, "acme")
 	require.NoError(t, os.MkdirAll(legacyDir, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(legacyDir, "f"), []byte("x"), 0o644))
@@ -405,7 +407,7 @@ func legacyHomeFixture(t *testing.T) (home, settingsPath string) {
 
 // convert --plan loads the settings read-only: run as the CLI runs it (the
 // pre-run hooks, the root hook, then the command), it leaves a legacy
-// hub.grove_id key and a legacy layout entry exactly as they were, with
+// hub project key and a legacy layout entry exactly as they were, with
 // the Hub skipped and with the fake Hub. The controls show the same
 // fixture is rewritten by a normal settings load and a normal command.
 func TestBrokerConvert_ReadOnlyLoadLeavesLegacyFilesAlone(t *testing.T) {
@@ -426,7 +428,7 @@ func TestBrokerConvert_ReadOnlyLoadLeavesLegacyFilesAlone(t *testing.T) {
 				return hubclient.New(hub.URL)
 			})
 			home, settingsPath := legacyHomeFixture(t)
-			before, beforeSHA := treeSnapshot(t, home), fileSHA(t, settingsPath)
+			before, beforeSHA := convertTreeSnapshot(t, home), convertFileSHA(t, settingsPath)
 
 			target := prepareInvocation(tc.args)
 			require.Equal(t, brokerConvertCmd, target)
@@ -444,18 +446,18 @@ func TestBrokerConvert_ReadOnlyLoadLeavesLegacyFilesAlone(t *testing.T) {
 			require.NoError(t, runBrokerConvert(c, nil))
 			assert.Contains(t, out.String(), "1. Proposed instances")
 
-			assert.Equal(t, beforeSHA, fileSHA(t, settingsPath), "the settings file's bytes are unchanged")
-			assert.Equal(t, before, treeSnapshot(t, home), "no rewrite, migration, lock or backup file under HOME")
+			assert.Equal(t, beforeSHA, convertFileSHA(t, settingsPath), "the settings file's bytes are unchanged")
+			assert.Equal(t, before, convertTreeSnapshot(t, home), "no rewrite, migration, lock or backup file under HOME")
 		})
 	}
 
-	t.Run("control: a normal settings load rewrites hub.grove_id", func(t *testing.T) {
+	t.Run("control: a normal settings load rewrites the legacy hub project key", func(t *testing.T) {
 		writesonread.IsolateForTest(t)
 		home, settingsPath := legacyHomeFixture(t)
-		beforeSHA := fileSHA(t, settingsPath)
+		beforeSHA := convertFileSHA(t, settingsPath)
 		_, err := config.LoadSettings(filepath.Join(home, ".scion"))
 		require.NoError(t, err)
-		assert.NotEqual(t, beforeSHA, fileSHA(t, settingsPath), "the fixture's legacy key is migrated by a normal load")
+		assert.NotEqual(t, beforeSHA, convertFileSHA(t, settingsPath), "the fixture's legacy key is migrated by a normal load")
 	})
 	t.Run("control: a normal command migrates the legacy layout", func(t *testing.T) {
 		writesonread.IsolateForTest(t)
@@ -479,20 +481,20 @@ func TestBrokerConvert_IsNoWriteCommand(t *testing.T) {
 }
 
 // A direct call of the command (no root hook) still turns the no-write
-// switch on before it loads the settings: a legacy hub.grove_id key is left
+// switch on before it loads the settings: the legacy hub project key is left
 // in the file.
 func TestBrokerConvert_DirectCallSetsNoWriteSwitch(t *testing.T) {
 	setConvertFlags(t, true, true, "", "build", "local", "k8s")
 	home, settingsPath := legacyHomeFixture(t)
-	before, beforeSHA := treeSnapshot(t, home), fileSHA(t, settingsPath)
+	before, beforeSHA := convertTreeSnapshot(t, home), convertFileSHA(t, settingsPath)
 	require.False(t, writesonread.Disabled(), "the switch starts off")
 
 	_, err := runConvertForTest(t)
 	require.NoError(t, err)
 
 	assert.True(t, writesonread.Disabled(), "RunE turned the switch on")
-	assert.Equal(t, beforeSHA, fileSHA(t, settingsPath), "the legacy key is not migrated")
-	assert.Equal(t, before, treeSnapshot(t, home), "nothing under HOME was written, created or removed")
+	assert.Equal(t, beforeSHA, convertFileSHA(t, settingsPath), "the legacy key is not migrated")
+	assert.Equal(t, before, convertTreeSnapshot(t, home), "nothing under HOME was written, created or removed")
 }
 
 const convertTestEnvToken = "PLANTED-ENV-TOKEN-cmd-77"
