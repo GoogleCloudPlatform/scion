@@ -27,6 +27,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
@@ -524,10 +525,13 @@ func newSourceRepo(t *testing.T) string {
 
 // cloneLocalFixture makes the hub's shared-workspace provisioning clone the
 // local repository src in place of the project's https clone URL, which the
-// URL check requires (and a hardened clone refuses local paths). It records
-// every provisioning input the hub passed and returns them.
+// URL check requires (and a hardened clone refuses local paths). src is
+// registered as a local clone fixture (provision.AllowLocalCloneFixture),
+// which ProvisionShared otherwise refuses. It records every provisioning
+// input the hub passed and returns them.
 func cloneLocalFixture(t *testing.T, src string) *[]provision.ProvisionInput {
 	t.Helper()
+	provision.AllowLocalCloneFixture(t, src)
 	var seen []provision.ProvisionInput
 	orig := provisionSharedClone
 	provisionSharedClone = func(in provision.ProvisionInput) error {
@@ -1066,4 +1070,34 @@ func TestCreateSharedWorkspaceProject_SharedBackend_CloneFailureKeepsExistingRoo
 	got, err := os.ReadFile(filepath.Join(root, "keep.txt"))
 	require.NoError(t, err, "a project root that existed before the create is not removed")
 	assert.Equal(t, "existing", string(got))
+}
+
+// TestProvisionSharedCloneRefusesHostCloneURLs: the hub's provisioning entry
+// point itself (provisionSharedClone, unwrapped), given the input the hub
+// builds, refuses a local path, file://, http://, a <transport>::<address>
+// URL and a value starting with "-", independently of the hub's own URL
+// check ahead of it.
+func TestProvisionSharedCloneRefusesHostCloneURLs(t *testing.T) {
+	local := filepath.Join(t.TempDir(), "repo.git")
+	for name, cloneURL := range map[string]string{
+		"local path":   local,
+		"file":         "file://" + local,
+		"http":         "http://git.example.invalid/test/repo.git",
+		"transport":    "ext::git-remote-probe",
+		"leading dash": "--upload-pack=git-remote-probe",
+	} {
+		t.Run(name, func(t *testing.T) {
+			workspace := filepath.Join(t.TempDir(), "workspace")
+			err := provisionSharedClone(provision.ProvisionInput{
+				Resolved:        provision.ResolvedWorkspace{HostPath: workspace},
+				ProjectID:       "project-refused-clone",
+				Mode:            store.SharingModeSharedPlain,
+				GitClone:        &api.GitCloneConfig{URL: cloneURL},
+				HostGitHardened: true,
+				SentinelDir:     filepath.Dir(workspace),
+			})
+			require.ErrorIs(t, err, provision.ErrHostCloneURLRefused)
+			assert.NoDirExists(t, workspace)
+		})
+	}
 }
