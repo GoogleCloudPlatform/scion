@@ -1719,7 +1719,7 @@ export class ScionChatMessage extends LitElement {
     }
 
     .reply-preview.unavailable:hover {
-      background: var(--scion-surface-50, #f8fafc);
+      background: var(--scion-bg, #f8fafc);
     }
 
     /* primary-600 in the light theme and primary-300 in the dark one, so the

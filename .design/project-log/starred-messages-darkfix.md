@@ -9,23 +9,24 @@ In the dark theme the starred-only view's footer banner kept a light
 background, so its bold "Starred messages only" title (light text) nearly
 disappeared. The banner read `var(--scion-surface-2, #f8fafc)`, and
 `theme.css` never declares `--scion-surface-2`, so the light fallback always
-applied. Six other chat rules had the same defect: each read a token that
+applied. Seven other chat rules had the same defect: each read a token that
 `theme.css` does not declare.
 
 ## What changed
 
-All seven now read declared theme tokens. The light theme looks the same as
+All eight now read declared theme tokens. The light theme looks the same as
 before, except for the artifact picker's row lines.
 
-| Rule                                                | Was                     | Now                 |
-| --------------------------------------------------- | ----------------------- | ------------------- |
-| `chat-thread.ts` `.star-filter-banner` background   | `--scion-surface-2`     | `--scion-bg`        |
-| `chat-message.ts` `.reply-preview` background       | `--scion-surface-50`    | `--scion-bg`        |
-| `chat-message.ts` `.reply-preview:hover` background | `--scion-surface-100`   | `--scion-bg-subtle` |
-| `chat-composer.ts` `.reply-bar` background          | `--scion-surface-50`    | `--scion-bg`        |
-| `chat-search.ts` `.result-item` row line            | `--scion-border-subtle` | `--scion-bg-subtle` |
-| `artifact-picker.ts` `td` row line                  | `--scion-border-subtle` | `--scion-border`    |
-| `chat-members.ts` hover background                  | `--scion-surface-hover` | `--scion-bg-subtle` |
+| Rule                                                            | Was                     | Now                 |
+| --------------------------------------------------------------- | ----------------------- | ------------------- |
+| `chat-thread.ts` `.star-filter-banner` background               | `--scion-surface-2`     | `--scion-bg`        |
+| `chat-message.ts` `.reply-preview` background                   | `--scion-surface-50`    | `--scion-bg`        |
+| `chat-message.ts` `.reply-preview:hover` background             | `--scion-surface-100`   | `--scion-bg-subtle` |
+| `chat-message.ts` `.reply-preview.unavailable:hover` background | `--scion-surface-50`    | `--scion-bg`        |
+| `chat-composer.ts` `.reply-bar` background                      | `--scion-surface-50`    | `--scion-bg`        |
+| `chat-search.ts` `.result-item` row line                        | `--scion-border-subtle` | `--scion-bg-subtle` |
+| `artifact-picker.ts` `td` row line                              | `--scion-border-subtle` | `--scion-border`    |
+| `chat-members.ts` hover background                              | `--scion-surface-hover` | `--scion-bg-subtle` |
 
 - `--scion-bg` is neutral-50 in the light theme (the old fallback colour) and
   neutral-900 in the dark one, so the banner, the reply preview and the reply
@@ -52,6 +53,10 @@ before, except for the artifact picker's row lines.
   neutral-800 fill. The tokens make the button independent of that order.
   In the light theme its label is one step darker (neutral-800, was
   neutral-700).
+- The `.reply-preview.unavailable:hover` rule arrived from upstream while
+  this change was in review, with the same undeclared `--scion-surface-50`.
+  It now reads `--scion-bg`, the same colour as the preview at rest, as the
+  upstream fallback intended.
 - No new tokens were added to `theme.css`.
 
 ## Tests
@@ -70,7 +75,7 @@ before, except for the artifact picker's row lines.
   the reply preview (text, sender and hover) and the reply bar (text and
   sender) actually use, in the light and dark token maps, and need at least
   4.5:1 (4:1 for the hover state, whose light pair has always been 4.34:1).
-- On the code before this fix the guard lists the seven references, and the
+- On the code before this fix the guard lists the seven references it was written against, and the
   contrast checks fail because `--scion-surface-2` and `--scion-surface-50`
   cannot be resolved.
 
