@@ -63,9 +63,12 @@ func (User) Fields() []ent.Field {
 		// pending is used only by federated rows: an account recorded for a
 		// user of a trusted external issuer before that user's first
 		// verified request. It is distinct from invited, which feeds the
-		// local invite and sign-up flow.
+		// local invite and sign-up flow. deleting marks a user whose forced
+		// deletion is in progress (ptone/scion#2143, see UserDeletion):
+		// only the store's MarkUserDeleting writes it, and the status
+		// leaves it only when the deletion completes and removes the row.
 		field.Enum("status").
-			Values("active", "suspended", "invited", "pending").
+			Values("active", "suspended", "invited", "pending", "deleting").
 			Default("active"),
 		field.JSON("preferences", &UserPreferences{}).
 			Optional(),

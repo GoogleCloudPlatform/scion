@@ -20,8 +20,8 @@ const CI = !!process.env.CI;
 
 // Async agent create from the web form, end to end against the real Go hub
 // binary. By default the global setup starts a throwaway member-level test
-// hub with the co-located runtime broker and server.hub.async_agent_launch
-// on (../harness/hub.ts); E2E_TARGET_URL points the journey at an existing
+// hub with the co-located runtime broker and the hub.async_agent_launch
+// experiment on (../harness/hub.ts); E2E_TARGET_URL points the journey at an existing
 // non-IAP hub instead (see state.ts). The spec acts as a member test
 // identity. Checks that need a real launch skip, with the reason, where no
 // container runtime is usable.

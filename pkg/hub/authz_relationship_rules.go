@@ -61,9 +61,10 @@ const (
 	RelationshipRuleProgeny           RelationshipRuleID = "progeny"
 	RelationshipRuleHubMemberSAAssign RelationshipRuleID = "hub_member_sa_assign"
 
-	// Association relationships are typed so delivery rules can name them.
-	// They have no policy rows until their permissions are registered, so
-	// they currently admit nothing.
+	// Association relationships admit launch delivery of a project-, hub-
+	// or broker-scope secret or env var to the delivery credential's agent
+	// (authz_material_association.go). Their policy rows name only
+	// secret.deliver and env_var.deliver.
 	RelationshipRuleProjectAssociation RelationshipRuleID = "project_association"
 	RelationshipRuleHubAssociation     RelationshipRuleID = "hub_association"
 	RelationshipRuleBrokerAssociation  RelationshipRuleID = "broker_association"
@@ -180,7 +181,7 @@ func isHubScopedServiceAccount(resource Resource) bool {
 }
 
 // relationshipCandidates lists, in a stable order (ancestor, launcher,
-// owner, hub-member assign, creator skill, progeny), the relationships that
+// owner, hub-member assign, creator skill, progeny, association), the relationships that
 // structurally hold for this principal and resource.
 func (a *AuthzService) relationshipCandidates(principal PrincipalContext, resource Resource, action Action, permissionID string) []relationshipCandidate {
 	var out []relationshipCandidate
@@ -299,6 +300,14 @@ func (a *AuthzService) relationshipCandidates(principal PrincipalContext, resour
 				}
 			}
 		}
+	}
+
+	// Association: launch delivery of a project-, hub- or broker-scope
+	// item to the delivery credential's agent (authz_material_association.go).
+	// Built only for a hub_delivery principal requesting a deliver
+	// permission on a named delivery item.
+	if c, ok := a.materialAssociationCandidate(principal, resource, action, permissionID); ok {
+		out = append(out, c)
 	}
 
 	return out

@@ -49,9 +49,14 @@ export type HintKind =
   | 'paste-multi'
   | 'earlier'
   | 'moved'
+  | 'code-run'
   | 'generic';
 
-/** Classes of document-changing transactions. */
+/**
+ * Classes of document-changing transactions. 'list' and 'table' are
+ * changes to the structure of a list or table (items, rows, cells, their
+ * nesting); text edits inside an item or a cell are 'inline'.
+ */
 export type EditClass =
   | 'inline'
   | 'split'
@@ -136,13 +141,16 @@ export function classify(tr: Transaction, before: EditorState): EditClass {
   const step = tr.steps[0] as ReplaceStep & { from: number; to: number; structure: boolean };
   const $from = doc.resolve(step.from);
   const $to = doc.resolve(step.to);
+  if ($from.parent.type.spec.code || $to.parent.type.spec.code) return 'code';
+  // Text edits inside one list item's or table cell's paragraph are inline
+  // edits like any other; changing the structure of a list or table is not.
   const container = containerClass($from) ?? containerClass($to);
-  if (container) return container;
   if (!$from.sameParent($to) || !$from.parent.isTextblock) {
+    if (container) return container;
     return $from.parent.isTextblock && $to.parent.isTextblock ? 'join' : 'cross-block';
   }
   const frag = step.slice.size ? inlineContent(step.slice) : null;
-  if (step.slice.size && !frag) return 'split';
+  if (step.slice.size && !frag) return container ?? 'split';
   const inserted: Node[] = [];
   frag?.forEach((n) => inserted.push(n));
   if (touchesHtml(doc, step.from, step.to, inserted)) return 'html';

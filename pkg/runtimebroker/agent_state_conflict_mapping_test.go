@@ -25,6 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // TestAgentStateConflictMapsTo409 pins every broker path's mapping of an
@@ -99,10 +100,10 @@ func TestLegacyAgentStateRetiredMapsTo409(t *testing.T) {
 // an unavailable state directory from an unusable state record.
 func TestClassifyStartError_AgentState(t *testing.T) {
 	ctx := context.Background()
-	if code, _, _ := classifyStartError(ctx, fmt.Errorf("%w: x", config.ErrAgentStateDirUnavailable), "", ""); code != LaunchErrCodeAgentStateUnavailable {
+	if code, _, _ := classifyStartError(ctx, fmt.Errorf("%w: x", config.ErrAgentStateDirUnavailable), "", "", store.LaunchKindCreate); code != LaunchErrCodeAgentStateUnavailable {
 		t.Errorf("unavailable dir: code %q", code)
 	}
-	if code, _, _ := classifyStartError(ctx, fmt.Errorf("%w: x", config.ErrAgentStateConflict), "", ""); code != LaunchErrCodeAgentStateConflict {
+	if code, _, _ := classifyStartError(ctx, fmt.Errorf("%w: x", config.ErrAgentStateConflict), "", "", store.LaunchKindCreate); code != LaunchErrCodeAgentStateConflict {
 		t.Errorf("unusable record: code %q", code)
 	}
 }
@@ -140,5 +141,52 @@ func TestBuildStartContext_ReusesPrehydratedTemplate(t *testing.T) {
 	}
 	if sc.Opts.Template != prehydrated {
 		t.Fatalf("launch template = %q, want the prehydrated %q", sc.Opts.Template, prehydrated)
+	}
+}
+
+// TestProjectPathNotInitializedMapsTo409: the refusal of a plain project
+// whose explicit project path holds no .scion entry answers 409 with the
+// stable code project_path_not_initialized and a message naming the
+// configured path, on every broker path, and the async launch report
+// carries the same code with a fixed text that omits the path.
+func TestProjectPathNotInitializedMapsTo409(t *testing.T) {
+	const configured = "/srv/local-path"
+	refusal := fmt.Errorf("start: %w", &agent.ProjectPathNotInitializedError{Path: configured})
+	for _, tc := range []struct {
+		name, path, body string
+		arm              func(*mockManager)
+	}{
+		{"sync create", "/api/v1/agents", `{"name": "path-agent", "config": {"template": "claude"}}`,
+			func(m *mockManager) { m.startErr = refusal }},
+		{"provision-only create", "/api/v1/agents", `{"name": "path-agent", "provisionOnly": true, "config": {"template": "claude"}}`,
+			func(m *mockManager) { m.provisionErr = refusal }},
+		{"start", "/api/v1/agents/test-agent-1/start", `{}`,
+			func(m *mockManager) { m.startErr = refusal }},
+		{"restart", "/api/v1/agents/test-agent-1/restart", `{}`,
+			func(m *mockManager) { m.startErr = refusal }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newTestServer(t)
+			tc.arm(srv.manager.(*mockManager))
+			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+			if w.Code != http.StatusConflict {
+				t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+			}
+			body := w.Body.String()
+			if !strings.Contains(body, `"`+ErrCodeProjectPathNotInitialized+`"`) {
+				t.Errorf("expected the code %q in the answer: %s", ErrCodeProjectPathNotInitialized, body)
+			}
+			if !strings.Contains(body, configured) {
+				t.Errorf("expected the answer to name the configured path %q: %s", configured, body)
+			}
+		})
+	}
+	// The launch report is stored by the hub and shown to clients: the code,
+	// and a fixed text without the host path.
+	if code, _, msg := classifyStartError(context.Background(), refusal, "", "", store.LaunchKindCreate); code != ErrCodeProjectPathNotInitialized || strings.Contains(msg, configured) {
+		t.Errorf("launch report: code %q, message %q; want %q without the path %q", code, msg, ErrCodeProjectPathNotInitialized, configured)
 	}
 }

@@ -130,6 +130,36 @@ func TestHarnessConfigContentAndMetadata_DoNotRevertEachOther(t *testing.T) {
 	assert.Equal(t, "registry/built:1", got.BuiltImage)
 }
 
+// TestHarnessConfigMetadataUpdate_KeepsSourceURLAndImageStatus: a metadata
+// write from a stale read does not revert a concurrent commit's source URL
+// or a concurrent image check's status and check time (ptone/scion#4967).
+func TestHarnessConfigMetadataUpdate_KeepsSourceURLAndImageStatus(t *testing.T) {
+	ts := newTestTemplateStore(t)
+	ctx := context.Background()
+	hc := newCASHarnessConfig(t, ts)
+	stale := *hc // stale read: no source URL, no image status
+
+	content := *hc
+	content.SourceURL = "https://example.com/source/v2"
+	content.ContentHash = "sha256:h1"
+	content.Status = store.HarnessConfigStatusActive
+	require.NoError(t, ts.UpdateHarnessConfigContent(ctx, &content, store.HarnessConfigContentPrecondition{}))
+
+	checkedAt := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	require.NoError(t, ts.UpdateHarnessConfigImageStatus(ctx, hc.ID, store.HarnessConfigImageStatusValid, checkedAt))
+
+	stale.Name = "renamed"
+	require.NoError(t, ts.UpdateHarnessConfig(ctx, &stale))
+
+	got, err := ts.GetHarnessConfig(ctx, hc.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "renamed", got.Name)
+	assert.Equal(t, "https://example.com/source/v2", got.SourceURL, "metadata write must not revert the commit's source URL")
+	assert.Equal(t, store.HarnessConfigImageStatusValid, got.ImageStatus, "metadata write must not revert the image status")
+	require.NotNil(t, got.ImageStatusCheckedAt, "metadata write must not clear the image check time")
+	assert.WithinDuration(t, checkedAt, *got.ImageStatusCheckedAt, time.Second)
+}
+
 // TestHarnessConfigBuiltImage_RoundTrip: built_image is stored by create,
 // read back, written only by the narrow writer, which keeps Updated.
 func TestHarnessConfigBuiltImage_RoundTrip(t *testing.T) {

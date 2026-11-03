@@ -182,6 +182,7 @@ func TestJobGuardRefuses(t *testing.T) {
 	}{
 		{"fork pull_request", "pull_request", prPayload("contributor/example-repo"), testRepoFull, "reason=head_repository_differs"},
 		{"pull_request without head", "pull_request", `{"pull_request":{}}`, testRepoFull, "reason=head_repository_missing"},
+		{"pull_request, head repository null (fork deleted)", "pull_request", `{"pull_request":{"head":{"repo":null}}}`, testRepoFull, "reason=head_repository_missing"},
 		{"pull_request, payload unparsable", "pull_request", `{not json`, testRepoFull, "reason=payload_unparsable"},
 		{"pull_request, payload missing", "pull_request", "-", testRepoFull, "reason=payload_missing"},
 		{"pull_request_target", "pull_request_target", prPayload(testRepoFull), testRepoFull, "reason=event_not_allowed event=pull_request_target"},
@@ -508,7 +509,7 @@ func TestEntrypointTestOverridesNeedTestMode(t *testing.T) {
 				"ignoring CR_JOB_GUARD_HOOK: test overrides take effect only in test mode",
 				"ignoring CR_JOB_GUARD_SHA_FILE",
 				"ignoring CR_JOB_GUARD_OWNER_UID",
-				"ignoring CR_SCRATCH_DIR",
+				"ignoring CR_MOUNTINFO",
 				"job guard: ",
 			} {
 				if !strings.Contains(res.stderr, want) {

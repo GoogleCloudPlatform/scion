@@ -335,6 +335,7 @@ func TestAgentDelegablePermissions_EachExercisedThroughItsRoute(t *testing.T) {
 	f := newADTFixture(t, "adt-keys")
 	f.adtMessageWorld(t)
 	attachTarget, _ := f.adtAttachTarget(t, "adt-keys")
+	decisions := f.captureDecisions(t)
 	cases := map[string]struct {
 		selector string
 		request  func(token string) *httptest.ResponseRecorder
@@ -349,6 +350,9 @@ func TestAgentDelegablePermissions_EachExercisedThroughItsRoute(t *testing.T) {
 		"agent.attach": {"agent:attach", func(token string) *httptest.ResponseRecorder {
 			return f.do(t, http.MethodGet, adtPTYPath(attachTarget.ID), nil, adtBearer(token))
 		}},
+		"agent.list": {"agent:list", func(token string) *httptest.ResponseRecorder {
+			return f.do(t, http.MethodGet, "/api/v1/agents", nil, adtBearer(token))
+		}},
 	}
 	for perm := range permissions.AgentDelegableRegistry {
 		tc, ok := cases[perm]
@@ -357,8 +361,27 @@ func TestAgentDelegablePermissions_EachExercisedThroughItsRoute(t *testing.T) {
 		}
 		t.Run(perm, func(t *testing.T) {
 			cred := f.delegated(t, f.adtIssueGrant(t, map[string]string{"kind": "hub"}, tc.selector).ID)
+			decisions.reset()
 			rec := tc.request(cred.Token)
 			assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			if perm == "agent.list" {
+				// A list answers 200 whether the arm allows or refuses, so the arm's record must be the allow,
+				// and the item filter (agent:read is not in the grant) refuses every item.
+				var primary, agg []*store.DecisionAuditRecord
+				for _, r := range decisions.delegated() {
+					if r.RecordKind == store.DecisionAuditRecordKindListFilter {
+						agg = append(agg, r)
+					} else {
+						primary = append(primary, r)
+					}
+				}
+				require.Len(t, primary, 1)
+				assert.Equal(t, "allow", primary[0].Result, "the list arm allows a grant holding agent:list")
+				assert.Equal(t, "agent.list", primary[0].PermissionID)
+				require.Len(t, agg, 1)
+				assert.Positive(t, agg[0].ListFilter.Denied, "without agent:read every item is refused")
+				assert.Zero(t, agg[0].ListFilter.Allowed)
+			}
 		})
 	}
 }

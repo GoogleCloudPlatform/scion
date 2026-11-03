@@ -146,7 +146,9 @@ func TestRestartAgent_NoSavedProfile_StartsOnFoundAuxRuntime(t *testing.T) {
 	f.srv.auxiliaryRuntimesMu.Unlock()
 
 	w := lifecyclePost(t, f.srv, "/api/v1/agents/"+name+"/restart", map[string]any{
-		"hubEndpoint": lifecycleHubEndpoint,
+		"hubEndpoint":        lifecycleHubEndpoint,
+		"resolvedEnv":        lifecycleHubTokenEnv(),
+		"envClassifications": lifecycleHubTokenClass(),
 	})
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusAccepted, w.Body.String())
@@ -182,7 +184,9 @@ func TestRestartAgent_SavedProfile_NotPinnedToFoundRuntime(t *testing.T) {
 	f.defaultMgr.agents = []api.AgentInfo{lifecycleAgent(name, f.projectPath, "")}
 
 	w := lifecyclePost(t, f.srv, "/api/v1/agents/"+name+"/restart", map[string]any{
-		"hubEndpoint": lifecycleHubEndpoint,
+		"hubEndpoint":        lifecycleHubEndpoint,
+		"resolvedEnv":        lifecycleHubTokenEnv(),
+		"envClassifications": lifecycleHubTokenClass(),
 	})
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusAccepted, w.Body.String())
@@ -217,7 +221,9 @@ func TestRestartAgent_NoContainer_FollowsActiveProfile(t *testing.T) {
 	f.defaultMgr.agents = []api.AgentInfo{entry}
 
 	w := lifecyclePost(t, f.srv, "/api/v1/agents/"+name+"/restart?projectId="+projectID, map[string]any{
-		"hubEndpoint": lifecycleHubEndpoint,
+		"hubEndpoint":        lifecycleHubEndpoint,
+		"resolvedEnv":        lifecycleHubTokenEnv(),
+		"envClassifications": lifecycleHubTokenClass(),
 	})
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusAccepted, w.Body.String())

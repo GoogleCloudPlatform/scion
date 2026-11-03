@@ -134,7 +134,9 @@ func defaultSSHCommandEnv() (*sshCommandEnv, error) {
 		stderr:   os.Stderr,
 		probe:    probeSSHHubEndpoint,
 	}
-	if endpoint != "" {
+	// No credential is read for a hub the transport rule refuses; the
+	// hub connection (newSSHHubConn) reports the refusal.
+	if endpoint != "" && checkUserHubTransport(endpoint) == nil {
 		env.token = getHubAccessToken(endpoint)
 	}
 	return env, nil
@@ -218,6 +220,11 @@ func resolveSSHHub(env *sshCommandEnv) (*sshHubTarget, error) {
 	u, err := sshEndpointURL(normalized)
 	if err != nil {
 		return nil, tunnelclient.Errorf(tunnelclient.ExitUsage, "%v", err)
+	}
+	// The transport rule comes before the missing-credential message: no
+	// credential is read for a refused hub (defaultSSHCommandEnv).
+	if err := checkUserHubTransport(env.endpoint); err != nil {
+		return nil, tunnelclient.Errorf(tunnelclient.ExitError, "%v", err)
 	}
 	if env.token == "" {
 		return nil, tunnelclient.Errorf(tunnelclient.ExitCredential, "no usable credential for hub %s; run scion hub auth login --hub %s", normalized, normalized)

@@ -34,10 +34,10 @@ and only one of them can be configured today:
 - **Hub side (the create timeout).** There is **no hub setting** for this. A
   substrate broker serves every create synchronously (it does not support
   async launch, so `hub.launch_timeout` does not apply). The hub waits on a
-  fixed 120-second request timeout, whether it dispatches over the control
+  fixed 180-second request timeout, whether it dispatches over the control
   channel or calls the broker directly over HTTP.
 
-The hub's fixed 120 seconds is shorter than the broker's worst-case start
+The hub's fixed 180 seconds is shorter than the broker's worst-case start
 budget, so the invariant only holds when the start actually finishes inside
 the hub's window. Warming the template (below) keeps the golden build out of
 the request path. Until the hub timeout becomes configurable, treat a create
@@ -480,9 +480,9 @@ this broker are:
 - **The broker's own CA/trust-bundle is read once, at dial time.** Rotating
   the CA or trust bundle a broker uses to reach ateapi/the router requires
   restarting the broker process — there is no live-reload path.
-- **The broker container runs as root.** `Dockerfile.hub` has no `USER`
-  directive, so `broker.yaml`'s pod spec deliberately does not set
-  `runAsNonRoot`/`runAsUser` (setting them against a root-only image would
+- **The broker container runs as root.** The default target of the repo-root
+  `Dockerfile` has no `USER` directive, so `broker.yaml`'s pod spec
+  deliberately does not set `runAsNonRoot`/`runAsUser` (setting them against a root-only image would
   just `CrashLoopBackOff` the container). It does set
   `allowPrivilegeEscalation: false`, drops all Linux capabilities, and sets
   `seccompProfile: RuntimeDefault` — the hardening that doesn't depend on

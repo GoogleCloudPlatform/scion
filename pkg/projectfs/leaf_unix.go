@@ -37,14 +37,24 @@ import (
 // a shared backend with the leaf contract (shareddirs.EnsureLeaf: every
 // component opened without following symlinks, a new leaf mode 2775 with the
 // default ACL) and returns the leaf's open descriptor, which the caller
-// closes with shareddirs.CloseFd.
+// closes with shareddirs.CloseFd. It is EnsureSharedLeafOwned with the zero
+// owner: a new leaf keeps its creator's ownership.
 func EnsureSharedLeaf(hostBase, rel string) (fd int, existed bool, err error) {
-	return shareddirs.EnsureLeaf(hostBase, rel)
+	return EnsureSharedLeafOwned(hostBase, rel, shareddirs.Owner{})
+}
+
+// EnsureSharedLeafOwned is EnsureSharedLeaf that gives a leaf this call
+// creates the owner (shareddirs.EnsureLeafOwned: only for a root creator
+// and a non-root owner, by fchown on the walk's descriptor, before the
+// leaf's mode and default ACL). A directory that already existed is never
+// changed.
+func EnsureSharedLeafOwned(hostBase, rel string, owner shareddirs.Owner) (fd int, existed bool, err error) {
+	return shareddirs.EnsureLeafOwned(hostBase, rel, owner)
 }
 
 // EnsureLeaf creates the directory r if it is missing and reports whether it
-// already existed. On a shared backend it is EnsureSharedLeaf below r's
-// resolved host base. On the local backend it is the directory created as
+// already existed. On a shared backend it is EnsureSharedLeafOwned below r's
+// resolved host base with r's owner (Resolved.Owner), as Open creates it. On the local backend it is the directory created as
 // before (mode 0755, missing parents included), unchanged.
 func (r Resolved) EnsureLeaf() (existed bool, err error) {
 	switch {
@@ -53,7 +63,7 @@ func (r Resolved) EnsureLeaf() (existed bool, err error) {
 		if err != nil {
 			return false, err
 		}
-		fd, existed, err := EnsureSharedLeaf(base, r.RelPath)
+		fd, existed, err := EnsureSharedLeafOwned(base, r.RelPath, r.Owner())
 		if err != nil {
 			return false, fmt.Errorf("create %s %q: %w", r.Kind, r.Name, err)
 		}

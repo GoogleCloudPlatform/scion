@@ -142,7 +142,7 @@ func newPlacementServer(t *testing.T, global string, conn k8s.ConnectionMode, re
 
 	f.rt = fakeKubernetesRuntime("ctx-a", "agents")
 	f.rt.Client.Connection = conn
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	f.srv = New(cfg, mgr, f.rt, rec)
@@ -790,13 +790,18 @@ func TestResolvePlacement_ProjectValuesIgnored(t *testing.T) {
 	}
 }
 
-// Flat instances and runtimes that failed to build resolve no placement.
+// A runtime that failed to build resolves no placement. A flat resolution
+// on a server without an activated flat instance policy fails closed; it
+// never falls back to the legacy runtime entries (see
+// TestResolvePlacementFlatTarget for a flat instance).
 func TestResolvePlacement_FlatAndErrorRuntime(t *testing.T) {
 	f := newPlacementFixture(t, plGlobal(plGPUProfile), k8s.ConnUnknown, config.RuntimeBuildRecord{})
-	for _, how := range []resolutionKind{resolutionFlat, resolutionErrorRuntime} {
-		if rp, err := f.srv.resolvePlacement(context.Background(), f.res(how, "", ""), nil); rp != nil || err != nil {
-			t.Errorf("%v: got %+v, %v", how, rp, err)
-		}
+	if rp, err := f.srv.resolvePlacement(context.Background(), f.res(resolutionErrorRuntime, "", ""), nil); rp != nil || err != nil {
+		t.Errorf("error runtime: got %+v, %v", rp, err)
+	}
+	rp, err := f.srv.resolvePlacement(context.Background(), f.res(resolutionFlat, "", ""), nil)
+	if rp != nil || err == nil || !strings.Contains(err.Error(), placementFlatUnresolvedCause) {
+		t.Errorf("flat without a policy: got %+v, %v", rp, err)
 	}
 }
 

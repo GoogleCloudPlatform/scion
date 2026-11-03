@@ -347,6 +347,7 @@ func assertSandboxed(t *testing.T, rec *httptest.ResponseRecorder) {
 	t.Helper()
 	csp := rec.Header().Get("Content-Security-Policy")
 	assert.Equal(t, untrustedContentSandboxCSP, csp)
+	assert.Equal(t, untrustedContentPermissionsPolicy, rec.Header().Get("Permissions-Policy"))
 	assert.True(t, strings.HasPrefix(csp, "sandbox"), "CSP must start with the sandbox directive: %q", csp)
 	assert.Contains(t, csp, "allow-scripts", "scripts stay enabled so generated reports keep working")
 	assert.NotContains(t, csp, "allow-same-origin", "allow-same-origin would undo the isolation")
@@ -1901,6 +1902,8 @@ func createTestSharedWorkspaceProject(t *testing.T, srv *Server, name, remote st
 		cmd.Dir = sourceDir
 		require.NoError(t, cmd.Run(), "git %v", args)
 	}
+
+	allowLocalCloneFixture(t, sourceDir)
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{
 		Name:          name,

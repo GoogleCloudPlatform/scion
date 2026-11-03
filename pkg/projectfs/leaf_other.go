@@ -19,6 +19,8 @@ package projectfs
 import (
 	"errors"
 	"fmt"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 )
 
 // Leaf creation is done by the hub and the brokers, which are unix-only
@@ -28,6 +30,12 @@ import (
 
 // EnsureSharedLeaf always fails with errors.ErrUnsupported on this platform.
 func EnsureSharedLeaf(hostBase, rel string) (fd int, existed bool, err error) {
+	return -1, false, fmt.Errorf("create shared leaf: %w on this platform", errors.ErrUnsupported)
+}
+
+// EnsureSharedLeafOwned always fails with errors.ErrUnsupported on this
+// platform.
+func EnsureSharedLeafOwned(hostBase, rel string, owner shareddirs.Owner) (fd int, existed bool, err error) {
 	return -1, false, fmt.Errorf("create shared leaf: %w on this platform", errors.ErrUnsupported)
 }
 

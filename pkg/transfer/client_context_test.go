@@ -100,7 +100,12 @@ func TestClient_CanceledBatchBeforeFileAccess(t *testing.T) {
 	client := NewClient(nil)
 	t.Run("upload", func(t *testing.T) {
 		dir := t.TempDir()
-		err := client.UploadFiles(ctx,
+		root, err := os.OpenRoot(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = root.Close() }()
+		err = client.UploadFiles(ctx, root,
 			[]FileInfo{{Path: "file.txt", FullPath: filepath.Join(dir, "missing-source")}},
 			[]UploadURLInfo{{Path: "file.txt", URL: "file://" + filepath.Join(dir, "dest.txt")}}, nil)
 		if !errors.Is(err, context.Canceled) {
@@ -147,7 +152,7 @@ func TestClient_TransferCancelBetweenFiles(t *testing.T) {
 					if err := os.WriteFile(dst, []byte("keep"), 0600); err != nil {
 						t.Fatal(err)
 					}
-					files = append(files, FileInfo{Path: path, FullPath: src, Size: 11})
+					files = append(files, FileInfo{Path: path, FullPath: src, Size: 11, Hash: HashBytes([]byte("replacement"))})
 					uploads = append(uploads, UploadURLInfo{Path: path, URL: "file://" + dst})
 					downloads = append(downloads, DownloadURLInfo{Path: path, URL: "file://" + src, Size: 11})
 				}
@@ -160,7 +165,13 @@ func TestClient_TransferCancelBetweenFiles(t *testing.T) {
 					return nil // The context, rather than a callback error, stops the batch.
 				}
 				if operation == "upload" {
-					err = client.UploadFiles(ctx, files, uploads, progress)
+					var root *os.Root
+					root, err = os.OpenRoot(source)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer func() { _ = root.Close() }()
+					err = client.UploadFiles(ctx, root, files, uploads, progress)
 				} else {
 					err = client.DownloadFiles(ctx, downloads, dest, progress)
 				}

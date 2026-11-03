@@ -66,6 +66,9 @@ func BuildWorkspaceStorageDescriptor(backend string, nfs *config.V1NFSConfig, sh
 // share, or a marker that cannot be read in time, reports no ExportID.
 func (s *Server) workspaceStorageDescriptor() *api.BrokerWorkspaceStorage {
 	desc := BuildWorkspaceStorageDescriptor(s.config.WorkspaceStorageBackend, s.config.NFSConfig, s.nfsShareHealthy)
+	if s.storageInvalid() {
+		return InvalidStorageDescriptor(desc)
+	}
 	desc.Homes = StorageHomes(s.config.StorageLayout)
 	desc.Volume = StorageVolume(s.config.StorageLayout)
 	desc.SharedDirs = projectfs.SharedDirsPlacement(s.config.StorageLayout)

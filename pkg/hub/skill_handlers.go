@@ -1129,7 +1129,7 @@ func (s *Server) publishSkillVersion(w http.ResponseWriter, r *http.Request, ski
 			uploadURLs, _, err := generateUploadURLs(ctx, stor, versionPath, req.Files)
 			if err == nil && len(uploadURLs) > 0 {
 				if stor.Provider() == storage.ProviderLocal {
-					hubURL := requestBaseURL(r)
+					hubURL := s.requestBaseURL(r)
 					uploadURLs = rewriteLocalUploadURLs(uploadURLs, hubURL, "skills", skillID)
 					uploadURLs = withSkillVersionUploadQuery(uploadURLs, req.Version)
 				}
@@ -1407,7 +1407,7 @@ func (s *Server) handleSkillUpload(w http.ResponseWriter, r *http.Request, skill
 	}
 
 	if stor.Provider() == storage.ProviderLocal {
-		hubURL := requestBaseURL(r)
+		hubURL := s.requestBaseURL(r)
 		uploadURLs = rewriteLocalUploadURLs(uploadURLs, hubURL, "skills", skillID)
 		uploadURLs = withSkillVersionUploadQuery(uploadURLs, req.Version)
 	}
@@ -1525,7 +1525,12 @@ func (s *Server) handleSkillFinalize(w http.ResponseWriter, r *http.Request, ski
 		if writeInvalidFilePathError(w, err) {
 			return
 		}
-		ValidationError(w, err.Error(), nil)
+		var notFound *fileNotFoundError
+		if errors.As(err, &notFound) {
+			ValidationError(w, err.Error(), nil)
+			return
+		}
+		writeErrorFromErr(w, err, "")
 		return
 	}
 
@@ -1599,7 +1604,7 @@ func (s *Server) handleSkillDownload(w http.ResponseWriter, r *http.Request, ski
 	}
 
 	if stor.Provider() == storage.ProviderLocal {
-		hubURL := requestBaseURL(r)
+		hubURL := s.requestBaseURL(r)
 		downloadURLs = rewriteLocalDownloadURLs(downloadURLs, hubURL, "skills", skillID)
 		downloadURLs = withSkillVersionDownloadQuery(downloadURLs, sv.Version)
 	}
@@ -1761,7 +1766,7 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 
 		baseURL := ""
 		if stor != nil && stor.Provider() == storage.ProviderLocal {
-			baseURL = requestBaseURL(r)
+			baseURL = s.requestBaseURL(r)
 		}
 		entry, resolveErr := s.resolveRegistrySkillRef(ctx, GetIdentityFromContext(ctx), skillRef.URI, uri,
 			req.ProjectID, req.UserID, baseURL)

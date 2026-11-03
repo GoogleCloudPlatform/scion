@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -104,7 +105,7 @@ func ValidateRuntimeBrokerInstances(instances []V1RuntimeBrokerInstanceConfig) [
 			for _, f := range []struct{ field, v string }{{"context", t.Context}, {"namespace", t.Namespace}, {"kubeconfig", t.Kubeconfig},
 				{"kubernetes_block_service_account", t.KubernetesBlockServiceAccount},
 				{"shared_dir_storage_class", t.SharedDirStorageClass}, {"shared_dir_size", t.SharedDirSize},
-				{"priority_class_name", t.PriorityClassName}} {
+				{"priority_class_name", t.PriorityClassName}, {"runtime_class_name", t.RuntimeClassName}} {
 				if field, v := f.field, f.v; v != "" {
 					errs = append(errs, ValidationError{Path: p + ".runtime_target." + field,
 						Message: "field not valid for runtime target type docker"})
@@ -116,7 +117,8 @@ func ValidateRuntimeBrokerInstances(instances []V1RuntimeBrokerInstanceConfig) [
 				field string
 				set   bool
 			}{{"kubernetes_service_account_mappings", len(t.KubernetesServiceAccountMappings) > 0},
-				{"gke", t.GKE}, {"safe_to_evict", t.SafeToEvict != nil}} {
+				{"gke", t.GKE}, {"safe_to_evict", t.SafeToEvict != nil},
+				{"node_selector", len(t.NodeSelector) > 0}, {"tolerations", len(t.Tolerations) > 0}} {
 				if f.set {
 					errs = append(errs, ValidationError{Path: p + ".runtime_target." + f.field,
 						Message: "field not valid for runtime target type docker"})
@@ -145,6 +147,7 @@ func ValidateRuntimeBrokerInstances(instances []V1RuntimeBrokerInstanceConfig) [
 						Message: fmt.Sprintf("%q is not a valid Kubernetes PriorityClass name: %s", t.PriorityClassName, strings.Join(verrs, "; "))})
 				}
 			}
+			errs = append(errs, ValidatePlacementFields(p+".runtime_target", t.NodeSelector, t.Tolerations, t.RuntimeClassName)...)
 			errs = append(errs, validateInstanceRemovedStorageOverrides(p, t)...)
 		default:
 			errs = append(errs, ValidationError{Path: p + ".runtime_target.type",
@@ -338,7 +341,7 @@ func checkInstanceScalarsAreStrings(instRaw interface{}) error {
 			}
 			if err := checkStrings(p+".runtime_target", tm, "type", "display_name", "context", "namespace", "kubeconfig",
 				"kubernetes_block_service_account",
-				"shared_dir_storage_class", "shared_dir_size", "priority_class_name",
+				"shared_dir_storage_class", "shared_dir_size", "priority_class_name", "runtime_class_name",
 				"shared_dir_storage_backend", "home_storage_backend", "home_storage_leaf"); err != nil {
 				return err
 			}
@@ -378,6 +381,9 @@ func checkInstanceScalarsAreStrings(instRaw interface{}) error {
 					}
 				}
 			}
+			if err := checkRawPlacement(p+".runtime_target", tm); err != nil {
+				return err
+			}
 		}
 		if d, present := m["agent_defaults"]; present && d != nil {
 			dm, ok := d.(map[string]interface{})
@@ -407,6 +413,50 @@ func checkInstanceScalarsAreStrings(instRaw interface{}) error {
 				sort.Strings(envKeys)
 				if err := checkStrings(op+".env", env, envKeys...); err != nil {
 					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// rawTolerationKeys are the only keys of a raw toleration entry.
+var rawTolerationKeys = map[string]bool{"key": true, "operator": true, "value": true, "effect": true}
+
+// checkRawPlacement checks the raw placement fields of a runtime_target
+// mapping before the decoder can coerce or drop them: node_selector must be
+// a mapping of strings (an entry is named by its index in key order, so a
+// malformed key is never echoed), and tolerations a list of mappings with
+// only key, operator, value and effect, each a string. Malformed placement
+// is refused, never read as no placement.
+func checkRawPlacement(path string, tm map[string]interface{}) error {
+	if v, present := tm["node_selector"]; present {
+		m, isMap := v.(map[string]interface{})
+		if !isMap {
+			return fmt.Errorf("%s.node_selector must be a mapping", path)
+		}
+		for i, k := range rawMapKeys(m) {
+			if _, isString := m[k].(string); !isString {
+				return fmt.Errorf("%s.node_selector entry %d (in key order) must have a string value", path, i)
+			}
+		}
+	}
+	if v, present := tm["tolerations"]; present {
+		list, isList := v.([]interface{})
+		if !isList {
+			return fmt.Errorf("%s.tolerations must be a list", path)
+		}
+		for i, e := range list {
+			em, isMap := e.(map[string]interface{})
+			if !isMap {
+				return fmt.Errorf("%s.tolerations[%d] must be a mapping", path, i)
+			}
+			for _, k := range rawMapKeys(em) {
+				if !rawTolerationKeys[k] {
+					return fmt.Errorf("%s.tolerations[%d]: only key, operator, value and effect are supported", path, i)
+				}
+				if _, isString := em[k].(string); !isString {
+					return fmt.Errorf("%s.tolerations[%d].%s must be a string", path, i, k)
 				}
 			}
 		}
@@ -740,6 +790,9 @@ func v1InstancesToGlobal(in []V1RuntimeBrokerInstanceConfig) []RuntimeBrokerInst
 				GKE:                              i.RuntimeTarget.GKE,
 				PriorityClassName:                i.RuntimeTarget.PriorityClassName,
 				SafeToEvict:                      copyBoolPtr(i.RuntimeTarget.SafeToEvict),
+				NodeSelector:                     copyStringMap(i.RuntimeTarget.NodeSelector),
+				Tolerations:                      slices.Clone(i.RuntimeTarget.Tolerations),
+				RuntimeClassName:                 i.RuntimeTarget.RuntimeClassName,
 				SharedDirStorageBackend:          i.RuntimeTarget.SharedDirStorageBackend,
 				SharedDirStorageBackends:         copyStringMap(i.RuntimeTarget.SharedDirStorageBackends),
 				HomeStorageBackend:               i.RuntimeTarget.HomeStorageBackend,
@@ -784,6 +837,9 @@ func globalInstancesToV1(in []RuntimeBrokerInstanceConfig) []V1RuntimeBrokerInst
 				GKE:                              i.RuntimeTarget.GKE,
 				PriorityClassName:                i.RuntimeTarget.PriorityClassName,
 				SafeToEvict:                      copyBoolPtr(i.RuntimeTarget.SafeToEvict),
+				NodeSelector:                     copyStringMap(i.RuntimeTarget.NodeSelector),
+				Tolerations:                      slices.Clone(i.RuntimeTarget.Tolerations),
+				RuntimeClassName:                 i.RuntimeTarget.RuntimeClassName,
 				SharedDirStorageBackend:          i.RuntimeTarget.SharedDirStorageBackend,
 				SharedDirStorageBackends:         copyStringMap(i.RuntimeTarget.SharedDirStorageBackends),
 				HomeStorageBackend:               i.RuntimeTarget.HomeStorageBackend,

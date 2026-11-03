@@ -20,7 +20,6 @@ import (
 	"context"
 	"testing"
 
-	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -31,7 +30,7 @@ import (
 // disturbing existing rows, which read back with NULL provenance.
 func TestMessageProvenanceColumns_AdditiveUpgrade(t *testing.T) {
 	client := newTestClient(t)
-	driver, ok := client.Driver().(*entsql.Driver)
+	driver, ok := SQLDriver(client.Driver())
 	require.True(t, ok)
 	db := driver.DB()
 	ctx := context.Background()
@@ -80,7 +79,7 @@ func TestMessageProvenanceColumns_AdditiveUpgrade(t *testing.T) {
 // columns, a legacy row reads back with neither, and new values round-trip.
 func TestMessageDelegationAttributionColumns_AdditiveUpgrade(t *testing.T) {
 	client := newTestClient(t)
-	driver, ok := client.Driver().(*entsql.Driver)
+	driver, ok := SQLDriver(client.Driver())
 	require.True(t, ok)
 	db := driver.DB()
 	ctx := context.Background()

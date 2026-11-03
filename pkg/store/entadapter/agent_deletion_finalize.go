@@ -17,6 +17,7 @@ package entadapter
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
@@ -75,7 +76,8 @@ func (c *CompositeStore) finalizeAgentDeletionOnce(ctx context.Context, uid uuid
 	if !pred.Matches(current) {
 		return 0, false, nil
 	}
-	txStore := newTxCompositeStore(tx)
+	txStore := c.newTxStore(tx)
+	obs := c.lifecycle.load()
 
 	hookAgent := current
 	switch mode {
@@ -117,6 +119,15 @@ func (c *CompositeStore) finalizeAgentDeletionOnce(ctx context.Context, uid uuid
 		}
 	}
 
+	if obs != nil {
+		w := store.AgentWrite{Op: store.AgentWriteHardDelete, Before: current, Now: time.Now()}
+		if mode == store.DeletionFinalizeSoft {
+			w.Op, w.After = store.AgentWriteSoftDelete, hookAgent
+		}
+		if err := observeAgentWrite(ctx, obs, tx.Client(), tx, w); err != nil {
+			return 0, false, err
+		}
+	}
 	if hook != nil {
 		if err := hook(ctx, txStore, hookAgent, mode); err != nil {
 			return 0, false, err

@@ -818,7 +818,7 @@ describe('scion-page-health-dashboard hub-paused schedules (ptone/scion#5404)', 
     expect(panel.pausedSchedules).toEqual([paused]);
     const detail = panel.shadowRoot!.querySelector('.paused-detail')!;
     expect(detail.textContent).toContain(
-      'Paused by the hub: its cron expression names a time zone, which is not supported'
+      'Paused by the hub: its cron expression has a zone prefix, which is not supported: set its time zone field instead'
     );
   });
 

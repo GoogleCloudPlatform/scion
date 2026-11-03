@@ -1,0 +1,11 @@
+{"hook_event_name":"session_start","reason":"startup"}
+{"hook_event_name":"input"}
+{"hook_event_name":"tool_execution_start","tool_name":"bash","tool_input":{"command":"ls -la","timeout":30}}
+{"hook_event_name":"tool_execution_end","tool_name":"bash","success":true}
+{"hook_event_name":"tool_execution_start","tool_name":"read","tool_input":{"path":"missing.txt"}}
+{"hook_event_name":"tool_execution_end","tool_name":"read","success":false}
+{"hook_event_name":"agent_end"}
+{"hook_event_name":"input"}
+{"hook_event_name":"agent_end","error":"429 rate limited: retry later"}
+{"hook_event_name":"session_start","reason":"resume"}
+{"hook_event_name":"session_start","reason":"reload"}

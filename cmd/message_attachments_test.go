@@ -157,7 +157,7 @@ func TestAttachUpload_SendCarriesIDs(t *testing.T) {
 	dir := t.TempDir()
 	a := writeAttachFile(t, dir, "a.txt", "alpha")
 	b := writeAttachFile(t, dir, "b.log", "beta")
-	upload, err := prepareAttachmentUpload(attachHubClient(t, srv), []string{a, b}, true)
+	upload, _, err := prepareAttachmentUpload(attachHubClient(t, srv), []string{a, b}, true)
 	require.NoError(t, err)
 	require.NotNil(t, upload)
 	useAttachUpload(t, upload)
@@ -177,7 +177,7 @@ func TestAttachUpload_HumanSessionSendsIDs(t *testing.T) {
 	t.Setenv("SCION_AGENT_NAME", "")
 	h, srv := newAttachHub(t, "artifact")
 	a := writeAttachFile(t, t.TempDir(), "a.txt", "alpha")
-	upload, err := prepareAttachmentUpload(attachHubClient(t, srv), []string{a}, true)
+	upload, _, err := prepareAttachmentUpload(attachHubClient(t, srv), []string{a}, true)
 	require.NoError(t, err)
 	require.NotNil(t, upload, "a session gets artifact from the probe")
 	useAttachUpload(t, upload)
@@ -194,7 +194,7 @@ func TestAttachUpload_HumanSessionSendsIDs(t *testing.T) {
 func TestAttachUpload_LegacyAnswerKeepsTodaysPath(t *testing.T) {
 	h, srv := newAttachHub(t, "legacy")
 	page := writeAttachFile(t, t.TempDir(), "page.html", "<html></html>")
-	upload, err := prepareAttachmentUpload(attachHubClient(t, srv), []string{page}, true)
+	upload, _, err := prepareAttachmentUpload(attachHubClient(t, srv), []string{page}, true)
 	require.NoError(t, err)
 	require.Nil(t, upload, "today's staging path")
 	probes, uploads := h.counts()
@@ -213,7 +213,7 @@ func TestAttachUpload_OldHubFallsBack(t *testing.T) {
 			h, srv := newAttachHub(t, "artifact")
 			h.probeStatus = status
 			a := writeAttachFile(t, t.TempDir(), "a.txt", "alpha")
-			upload, err := prepareAttachmentUpload(attachHubClient(t, srv), []string{a}, true)
+			upload, _, err := prepareAttachmentUpload(attachHubClient(t, srv), []string{a}, true)
 			require.NoError(t, err)
 			require.Nil(t, upload)
 		})
@@ -221,7 +221,7 @@ func TestAttachUpload_OldHubFallsBack(t *testing.T) {
 	h, srv := newAttachHub(t, "artifact")
 	h.probeStatus = http.StatusInternalServerError
 	a := writeAttachFile(t, t.TempDir(), "a.txt", "alpha")
-	_, err := prepareAttachmentUpload(attachHubClient(t, srv), []string{a}, true)
+	_, _, err := prepareAttachmentUpload(attachHubClient(t, srv), []string{a}, true)
 	require.Error(t, err, "any other probe error stops the send")
 }
 
@@ -236,7 +236,7 @@ func TestAttachUpload_HTMLAndSVGRefusedBeforeUpload(t *testing.T) {
 		writeAttachFile(t, dir, "img.dat", "<?xml version=\"1.0\"?><svg xmlns=\"x\">"),
 	} {
 		h, srv := newAttachHub(t, "artifact")
-		_, err := prepareAttachmentUpload(attachHubClient(t, srv), []string{p}, false)
+		_, _, err := prepareAttachmentUpload(attachHubClient(t, srv), []string{p}, false)
 		require.Error(t, err, p)
 		require.Contains(t, err.Error(), htmlRefusal)
 		var usage *usageError
@@ -252,7 +252,7 @@ func TestAttachUpload_DuplicateNamesAndBudgetRefusedBeforeUpload(t *testing.T) {
 	d1, d2 := t.TempDir(), t.TempDir()
 	a := writeAttachFile(t, d1, "Report.txt", "one")
 	b := writeAttachFile(t, d2, "report.TXT", "two")
-	_, err := prepareAttachmentUpload(attachHubClient(t, srv), []string{a, b}, false)
+	_, _, err := prepareAttachmentUpload(attachHubClient(t, srv), []string{a, b}, false)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "same file name")
 
@@ -260,10 +260,10 @@ func TestAttachUpload_DuplicateNamesAndBudgetRefusedBeforeUpload(t *testing.T) {
 	h.budget = &budget
 	c := writeAttachFile(t, d1, "c.txt", "four")
 	e := writeAttachFile(t, d2, "e.txt", "four")
-	_, err = prepareAttachmentUpload(attachHubClient(t, srv), []string{c, e}, true)
+	_, _, err = prepareAttachmentUpload(attachHubClient(t, srv), []string{c, e}, true)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "over the hub's limit")
-	upload, err := prepareAttachmentUpload(attachHubClient(t, srv), []string{c, e}, false)
+	upload, _, err := prepareAttachmentUpload(attachHubClient(t, srv), []string{c, e}, false)
 	require.NoError(t, err, "the budget applies only with an agent recipient")
 	require.NotNil(t, upload)
 	_, uploads := h.counts()
@@ -275,7 +275,7 @@ func TestAttachUpload_MarkdownHint(t *testing.T) {
 	big := writeAttachFile(t, t.TempDir(), "notes.md", strings.Repeat("# x\n", markdownHintBytes/4+1))
 	var err error
 	_, stderr := captureStdoutStderr(t, func() {
-		_, err = prepareAttachmentUpload(attachHubClient(t, srv), []string{big}, false)
+		_, _, err = prepareAttachmentUpload(attachHubClient(t, srv), []string{big}, false)
 	})
 	require.NoError(t, err)
 	require.Contains(t, stderr, "large Markdown is easier to review as an artifact: scion artifact publish")
@@ -289,7 +289,7 @@ func TestAttachUpload_PartialFailureSendsNothing(t *testing.T) {
 	h, srv := newAttachHub(t, "artifact")
 	h.failName = "b.txt"
 	dir := t.TempDir()
-	upload, err := prepareAttachmentUpload(attachHubClient(t, srv),
+	upload, _, err := prepareAttachmentUpload(attachHubClient(t, srv),
 		[]string{writeAttachFile(t, dir, "a.txt", "a"), writeAttachFile(t, dir, "b.txt", "b")}, true)
 	require.NoError(t, err)
 	useAttachUpload(t, upload)
@@ -309,7 +309,7 @@ func TestAttachUpload_GroupUploadsOncePerRecipient(t *testing.T) {
 	msgAttach = nil
 	t.Setenv("SCION_AGENT_NAME", "sender")
 	h, srv := newAttachHub(t, "artifact")
-	upload, err := prepareAttachmentUpload(attachHubClient(t, srv), []string{writeAttachFile(t, t.TempDir(), "a.txt", "a")}, true)
+	upload, _, err := prepareAttachmentUpload(attachHubClient(t, srv), []string{writeAttachFile(t, t.TempDir(), "a.txt", "a")}, true)
 	require.NoError(t, err)
 	useAttachUpload(t, upload)
 	hubCtx := &HubContext{Client: attachHubClient(t, srv), Endpoint: srv.URL, ProjectID: "proj-attach"}
@@ -338,7 +338,7 @@ func TestAttachUpload_SlowUploadKeepsSendTime(t *testing.T) {
 	t.Cleanup(func() { msgSendTimeout = orig })
 	h, srv := newAttachHub(t, "artifact")
 	h.uploadDelay = 3 * time.Second
-	upload, err := prepareAttachmentUpload(attachHubClient(t, srv), []string{writeAttachFile(t, t.TempDir(), "a.txt", "a")}, true)
+	upload, _, err := prepareAttachmentUpload(attachHubClient(t, srv), []string{writeAttachFile(t, t.TempDir(), "a.txt", "a")}, true)
 	require.NoError(t, err)
 	useAttachUpload(t, upload)
 	hubCtx := &HubContext{Client: attachHubClient(t, srv), Endpoint: srv.URL, ProjectID: "proj-attach"}
@@ -380,13 +380,13 @@ func TestResolveAttachMode(t *testing.T) {
 			h, srv := newAttachHub(t, tc.uploads)
 			h.probeStatus = tc.status
 			c := attachHubClient(t, srv)
-			_, _, err := resolveAttachMode(c, []string{"/etc/passwd"}, true)
+			_, _, _, err := resolveAttachMode(c, []string{"/etc/passwd"}, true)
 			require.Error(t, err)
 			require.Contains(t, err.Error(), "outside allowed roots")
-			_, _, err = resolveAttachMode(c, []string{root}, true)
+			_, _, _, err = resolveAttachMode(c, []string{root}, true)
 			require.Error(t, err)
 			require.Contains(t, err.Error(), "is a directory, not a regular file")
-			upload, staged, err := resolveAttachMode(c, []string{inRoot}, true)
+			upload, staged, _, err := resolveAttachMode(c, []string{inRoot}, true)
 			require.NoError(t, err)
 			require.Nil(t, upload)
 			require.Equal(t, []string{inRoot}, staged, "today's staging gets the paths unchanged")
@@ -395,12 +395,131 @@ func TestResolveAttachMode(t *testing.T) {
 		})
 	}
 	h, srv := newAttachHub(t, "artifact")
-	upload, staged, err := resolveAttachMode(attachHubClient(t, srv), []string{writeAttachFile(t, t.TempDir(), "a.txt", "a")}, true)
+	upload, staged, _, err := resolveAttachMode(attachHubClient(t, srv), []string{writeAttachFile(t, t.TempDir(), "a.txt", "a")}, true)
 	require.NoError(t, err)
 	require.NotNil(t, upload)
 	require.Nil(t, staged, "nothing is staged when the files are uploaded")
 	_, uploads := h.counts()
 	require.Zero(t, uploads, "nothing is uploaded before the send")
+}
+
+// noUploadClient is a hub client that cannot upload attachments: embedding
+// the interface hides hubclient.AttachmentUploader.
+type noUploadClient struct{ hubclient.Client }
+
+// TestResolveAttachMode_FallbackReason: when the --attach files fall back
+// to staging, resolveAttachMode names the reason; an upload, a send without
+// --attach files or an invalid path gives none and prints nothing
+// (ptone/scion#6549).
+func TestResolveAttachMode_FallbackReason(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	origRoots := attachmentRoots
+	attachmentRoots = []string{root}
+	t.Cleanup(func() { attachmentRoots = origRoots })
+	inRoot := writeAttachFile(t, root, "notes.txt", "notes")
+	for _, tc := range []struct {
+		name    string
+		uploads string
+		status  int
+		noUp    bool
+		want    string
+	}{
+		{"legacy", "legacy", 0, false, `the hub answered "legacy"`},
+		{"empty answer", "", 0, false, "the hub did not offer uploads"},
+		{"status 403", "artifact", http.StatusForbidden, false, "the hub refused the upload probe with status 403"},
+		{"status 404", "artifact", http.StatusNotFound, false, "the hub refused the upload probe with status 404"},
+		{"status 405", "artifact", http.StatusMethodNotAllowed, false, "the hub refused the upload probe with status 405"},
+		{"client cannot upload", "artifact", 0, true, "this client cannot upload attachments"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, srv := newAttachHub(t, tc.uploads)
+			h.probeStatus = tc.status
+			c := attachHubClient(t, srv)
+			if tc.noUp {
+				c = noUploadClient{c}
+			}
+			var staged []string
+			var fallback string
+			stderr := captureStderr(t, func() {
+				var err error
+				_, staged, fallback, err = resolveAttachMode(c, []string{inRoot}, true)
+				require.NoError(t, err)
+			})
+			require.Equal(t, []string{inRoot}, staged)
+			require.Equal(t, tc.want, fallback)
+			require.Empty(t, stderr, "the warning waits for staging")
+		})
+	}
+	t.Run("invalid path on a legacy hub", func(t *testing.T) {
+		_, srv := newAttachHub(t, "legacy")
+		stderr := captureStderr(t, func() {
+			_, _, fallback, err := resolveAttachMode(attachHubClient(t, srv), []string{"/etc/passwd"}, true)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "outside allowed roots")
+			require.Empty(t, fallback)
+		})
+		// resolveAttachmentPath's own outside-roots warning may print; the
+		// fallback line does not.
+		require.NotContains(t, stderr, "attachments are staged")
+	})
+	t.Run("artifact", func(t *testing.T) {
+		_, srv := newAttachHub(t, "artifact")
+		stderr := captureStderr(t, func() {
+			upload, _, fallback, err := resolveAttachMode(attachHubClient(t, srv), []string{writeAttachFile(t, t.TempDir(), "a.txt", "a")}, true)
+			require.NoError(t, err)
+			require.NotNil(t, upload)
+			require.Empty(t, fallback)
+		})
+		require.Empty(t, stderr)
+	})
+}
+
+// TestStageAttachmentsWithWarning: one stderr line naming the reason is
+// printed only after the files are staged; a staging failure or no files
+// prints nothing.
+func TestStageAttachmentsWithWarning(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	origRoots := attachmentRoots
+	attachmentRoots = []string{root}
+	t.Cleanup(func() { attachmentRoots = origRoots })
+	t.Setenv("SCION_AGENT_NAME", "sender")
+	file := writeAttachFile(t, root, "notes.txt", "notes")
+	const reason = `the hub answered "legacy"`
+
+	t.Run("staged", func(t *testing.T) {
+		withScratchpadTargets(t, t.TempDir())
+		var staged []string
+		stderr := captureStderr(t, func() {
+			var err error
+			staged, err = stageAttachmentsWithWarning([]string{file}, reason)
+			require.NoError(t, err)
+		})
+		require.Len(t, staged, 1)
+		require.Equal(t, 1, strings.Count(stderr, "\n"), "one line: %q", stderr)
+		require.Contains(t, stderr, "Warning: attachments are staged on the local scratchpad")
+		require.Contains(t, stderr, reason)
+		require.Contains(t, stderr, "they may not reach the hub or recipients on another broker")
+	})
+	t.Run("staging fails", func(t *testing.T) {
+		withScratchpadTargets(t, filepath.Join(t.TempDir(), "missing"))
+		stderr := captureStderr(t, func() {
+			_, err := stageAttachmentsWithWarning([]string{file}, reason)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "scratchpad volume not available")
+		})
+		require.Empty(t, stderr)
+	})
+	t.Run("no files", func(t *testing.T) {
+		withScratchpadTargets(t, filepath.Join(t.TempDir(), "missing"))
+		stderr := captureStderr(t, func() {
+			staged, err := stageAttachmentsWithWarning(nil, reason)
+			require.NoError(t, err)
+			require.Empty(t, staged)
+		})
+		require.Empty(t, stderr)
+	})
 }
 
 // TestAttachUpload_ReducedNameCollisionRefusedBeforeUpload: two files whose
@@ -409,7 +528,7 @@ func TestAttachUpload_ReducedNameCollisionRefusedBeforeUpload(t *testing.T) {
 	h, srv := newAttachHub(t, "artifact")
 	a := writeAttachFile(t, t.TempDir(), "a b.txt", "one")
 	b := writeAttachFile(t, t.TempDir(), "a_b.txt", "two")
-	_, err := prepareAttachmentUpload(attachHubClient(t, srv), []string{a, b}, false)
+	_, _, err := prepareAttachmentUpload(attachHubClient(t, srv), []string{a, b}, false)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "would be delivered under one file name")
 	var usage *usageError
@@ -425,7 +544,7 @@ func TestAttachUpload_OutboundAndConversationRefSendIDs(t *testing.T) {
 	msgAttach = nil
 	t.Setenv("SCION_AGENT_NAME", "sender")
 	h, srv := newAttachHub(t, "artifact")
-	upload, err := prepareAttachmentUpload(attachHubClient(t, srv), []string{writeAttachFile(t, t.TempDir(), "a.txt", "a")}, false)
+	upload, _, err := prepareAttachmentUpload(attachHubClient(t, srv), []string{writeAttachFile(t, t.TempDir(), "a.txt", "a")}, false)
 	require.NoError(t, err)
 	useAttachUpload(t, upload)
 	hubCtx := &HubContext{Client: attachHubClient(t, srv), Endpoint: srv.URL, ProjectID: "proj-attach"}

@@ -30,9 +30,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,6 +47,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/cloudrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/startuplistener"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -259,8 +262,9 @@ func cloudRunOwnerIDs(cfg RunConfig) (uid, gid int) {
 }
 
 func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error) {
-	// Checked before anything is resolved or provisioned: this runtime
-	// always mounts the project's shared NFS workspace (see
+	// Checked before anything is resolved or provisioned: other than a
+	// clone-per-agent agent, which mounts its own workspace on the share,
+	// this runtime mounts the project's shared NFS workspace (see
 	// provisionCloudRunNFS), which would break empty-per-agent isolation.
 	if err := rejectEmptyPerAgentOnCloudRun(cfg); err != nil {
 		return "", err
@@ -272,6 +276,13 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 		return "", err
 	}
 	if err := r.checkOwnerLabel(cfg); err != nil {
+		return "", err
+	}
+	// The instance's CPU and memory from the resolved resources, checked
+	// against the Cloud Run limits before anything is provisioned or any
+	// API call is made.
+	resources, err := cloudRunContainerResources(cfg.Resources)
+	if err != nil {
 		return "", err
 	}
 	// Deliver resolved secrets through the instance env: env-type secrets as
@@ -312,6 +323,7 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 
 	c, err := r.client(ctx)
 	if err != nil {
+		nfsPaths.rollbackCreated(err)
 		return "", fmt.Errorf("failed to create client: %w", err)
 	}
 	defer func() { _ = c.Close() }()
@@ -377,6 +389,8 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 
 	// Instance doesn't exist, proceed to create.
 	inst := r.buildCloudRunInstance(cfg, uid, gid, nfsPaths)
+	inst.Containers[0].Resources = resources
+	logCloudRunResources(instanceID, resources, cfg.Resources)
 
 	req := &runpb.CreateInstanceRequest{
 		Parent:     parent,
@@ -385,8 +399,10 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	}
 
 	// Async-launch gate immediately before CreateInstance
-	// (ptone/scion#4761); a no-op on the synchronous path.
+	// (ptone/scion#4761); a no-op on the synchronous path. No create has
+	// been issued, so the agent directories this start created go again.
 	if err := hooks.checkpoint(ctx, CheckpointStepInstanceCreate); err != nil {
+		nfsPaths.rollbackCreated(err)
 		return "", err
 	}
 	// The handle is reported before the create is issued, so a create cut
@@ -404,6 +420,11 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	if err != nil {
 		if cloudRunServerRejected(ctx, err) {
 			clearCloudRunCreateInDoubt(getReq.Name, runID)
+			// The server refused the create (for example a missing actAs
+			// permission): no instance exists or will appear, so the agent
+			// directories this start created are removed again. A create
+			// that may still land keeps them.
+			nfsPaths.rollbackCreated(err)
 		}
 		return "", fmt.Errorf("failed to create instance: %w", err)
 	}
@@ -461,6 +482,9 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 	var volumes []*runpb.Volume
 	var volumeMounts []*runpb.VolumeMount
 
+	// Cloud Run NFS volumes take no mount options, so the nosuid,nodev a
+	// Runtime Broker adds to its own NFS mounts are not set here: Cloud Run
+	// instances run sandboxed, and that is the boundary relied on.
 	if nfsPaths != nil {
 		workspaceMount := cfg.ContainerWorkspace
 		if workspaceMount == "" {
@@ -645,12 +669,76 @@ type cloudRunNFSProvisionPaths struct {
 	workspaceHostPath   string
 	homeHostPath        string
 	secretsHostPath     string
+	// created lists the agent directories this provision created (the
+	// agent directory agents/<slug> and the home, secrets and own
+	// workspace below it), parents first. A start whose instance was never
+	// created removes them again (rollbackCreated).
+	created []string
 }
+
+// mkdirAgentDir is mkdirNFSAgentDir for dir, a directory below the agent
+// directory (the parent of the home): it records in p.created every
+// directory from the agent directory down to dir that did not exist and
+// does now, also when the mkdir fails part-way.
+func (p *cloudRunNFSProvisionPaths) mkdirAgentDir(dir string, uid, gid int) error {
+	agentDir := filepath.Dir(p.homeHostPath)
+	var missing []string
+	if dir == agentDir || strings.HasPrefix(dir, agentDir+string(filepath.Separator)) {
+		for d := dir; ; d = filepath.Dir(d) {
+			if _, err := os.Lstat(d); errors.Is(err, fs.ErrNotExist) {
+				missing = append([]string{d}, missing...)
+			}
+			if d == agentDir {
+				break
+			}
+		}
+	}
+	err := cloudRunMkdirNFSAgentDir(dir, uid, gid)
+	// Record each directory that was missing and exists now: all of them on
+	// success, and on a failure part-way the ones already created, so the
+	// rollback removes those too (they did not exist before this start).
+	for _, d := range missing {
+		if _, statErr := os.Lstat(d); statErr == nil && !slices.Contains(p.created, d) {
+			p.created = append(p.created, d)
+		}
+	}
+	return err
+}
+
+// cloudRunMkdirNFSAgentDir is mkdirNFSAgentDir; tests replace it to fail
+// after creating directories.
+var cloudRunMkdirNFSAgentDir = mkdirNFSAgentDir
+
+// rollbackCreated removes the agent directories this provision created,
+// newest first, for a start whose instance was never created
+// (ptone/scion#7100): nothing has used them. Each is removed only while
+// it is empty (os.Remove, never recursive), so anything another start put
+// there meanwhile is kept.
+func (p *cloudRunNFSProvisionPaths) rollbackCreated(reason error) {
+	if p == nil || len(p.created) == 0 {
+		return
+	}
+	var removed, kept []string
+	for i := len(p.created) - 1; i >= 0; i-- {
+		d := p.created[i]
+		if err := os.Remove(d); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			kept = append(kept, d)
+			continue
+		}
+		removed = append(removed, d)
+	}
+	runtimeLog().Info("cloudrun: removed the agent directories provisioned for a start whose instance was not created",
+		"removed", removed, "kept", kept, "reason", reason)
+}
+
+// cloudRunRequireNFSFilesystem is requireNFSFilesystem, replaceable in
+// tests, which have no NFS mount to provision on.
+var cloudRunRequireNFSFilesystem = requireNFSFilesystem
 
 // provisionCloudRunNFS prepares the agent's NFS directories. uid and gid
 // must already be defaulted by the caller (cloudRunOwnerIDs); they are
 // used as given.
-func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfig, agentID string, uid, gid int) (*cloudRunNFSProvisionPaths, error) {
+func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfig, agentID string, uid, gid int) (_ *cloudRunNFSProvisionPaths, retErr error) {
 	if cfg.WorkspaceBackendName != "nfs" {
 		return nil, nil
 	}
@@ -663,6 +751,13 @@ func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfi
 	if err != nil {
 		return nil, err
 	}
+	// A provision that fails part-way removes the agent directories it
+	// already created (the same rules as a failed start's rollback).
+	defer func() {
+		if retErr != nil {
+			paths.rollbackCreated(retErr)
+		}
+	}()
 	paths.server = server
 	if cfg.Workspace == "" {
 		return nil, fmt.Errorf("cloudrun: cannot provision NFS workspace because RunConfig.Workspace is empty; "+
@@ -678,7 +773,32 @@ func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfi
 	paths.homeHostPath = hostPaths.homeHostPath
 	paths.secretsHostPath = hostPaths.secretsHostPath
 
-	if err := requireNFSFilesystem(hostPaths.hostBase); err != nil {
+	// A clone-per-agent agent mounts its own workspace on the share,
+	// <subpath_root>/<project>/agents/<slug>/workspace (the Kubernetes
+	// agent directory layout, which the broker's delete path removes), and
+	// clones into it in-container on its first start (sciontool init); a
+	// later start finds it populated and keeps the work.
+	clonePerAgent := isClonePerAgentRun(cfg)
+	if clonePerAgent {
+		rel, err := cloudRunAgentWorkspaceRel(hostPaths.serverRelativePath, slug)
+		if err != nil {
+			return nil, err
+		}
+		exportRoot := path.Clean(export)
+		paths.workspaceExportPath = path.Join(exportRoot, rel)
+		if err := validateUnixPathBelowRoot(paths.workspaceExportPath, exportRoot); err != nil {
+			return nil, fmt.Errorf("cloudrun: invalid NFS agent workspace path: %w", err)
+		}
+		// The instance mounts this directory as its workspace; it may not be
+		// the project root or its configuration directory
+		// (checkNFSMountScope), checked before anything is created.
+		if err := checkNFSMountScope(rel, cfg.NFSSubPathRoot, cfg.ProjectID); err != nil {
+			return nil, fmt.Errorf("cloudrun: NFS agent workspace volume: %w", err)
+		}
+		paths.workspaceHostPath = filepath.Join(hostPaths.hostBase, filepath.FromSlash(rel))
+	}
+
+	if err := cloudRunRequireNFSFilesystem(hostPaths.hostBase); err != nil {
 		return nil, err
 	}
 	if err := refuseUnmigratedCloudRunHome(hostPaths, cfg.NFSSubPathRoot, cfg.ProjectID, agentID); err != nil {
@@ -692,7 +812,15 @@ func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfi
 		Backend:            "nfs",
 		SharedDirs:         map[string]ResolvedSharedDir{},
 	}
-	if err := ProvisionShared(ProvisionInput{
+	// The project's shared workspace is neither cloned nor mounted for a
+	// clone-per-agent agent: only its own (empty until its first start)
+	// workspace directory is created.
+	if clonePerAgent {
+		if err := paths.mkdirAgentDir(paths.workspaceHostPath, uid, gid); err != nil {
+			return nil, fmt.Errorf("cloudrun: provision NFS agent workspace %s via Hub-mounted path %s: %w",
+				paths.workspaceExportPath, paths.workspaceHostPath, err)
+		}
+	} else if err := ProvisionShared(ProvisionInput{
 		Ctx:       ctx,
 		Resolved:  resolved,
 		ProjectID: cfg.ProjectID,
@@ -706,11 +834,11 @@ func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfi
 			"verify the Hub Cloud Run service mounts the Filestore export read/write or run an external provisioner",
 			paths.workspaceExportPath, hostPaths.workspaceHostPath, err)
 	}
-	if err := mkdirNFSAgentDir(hostPaths.homeHostPath, uid, gid); err != nil {
+	if err := paths.mkdirAgentDir(hostPaths.homeHostPath, uid, gid); err != nil {
 		return nil, fmt.Errorf("cloudrun: provision NFS agent home %s via Hub-mounted path %s: %w",
 			paths.homeExportPath, hostPaths.homeHostPath, err)
 	}
-	if err := mkdirNFSAgentDir(hostPaths.secretsHostPath, uid, gid); err != nil {
+	if err := paths.mkdirAgentDir(hostPaths.secretsHostPath, uid, gid); err != nil {
 		return nil, fmt.Errorf("cloudrun: provision NFS agent secrets %s via Hub-mounted path %s: %w",
 			paths.secretsExportPath, hostPaths.secretsHostPath, err)
 	}
@@ -797,6 +925,15 @@ func cloudRunNFSExportPaths(nfsExport, subPathRoot, projectID, slug, agentID str
 		if err := validateUnixPathBelowRoot(p, exportRoot); err != nil {
 			return nil, fmt.Errorf("cloudrun: invalid NFS %s path: %w", name, err)
 		}
+		// The instance mounts these directories of the share; none may be
+		// the project root or its configuration directory
+		// (checkNFSMountScope). Defense in depth: the inputs validated
+		// above (project and agent IDs, the slug through the layout) cannot
+		// produce such a path today.
+		rel := strings.TrimPrefix(strings.TrimPrefix(p, exportRoot), "/")
+		if err := checkNFSMountScope(rel, root, projectID); err != nil {
+			return nil, fmt.Errorf("cloudrun: NFS %s volume: %w", name, err)
+		}
 	}
 	return paths, nil
 }
@@ -882,6 +1019,20 @@ func refuseUnmigratedCloudRunHome(hp *cloudRunNFSHostProvisionPaths, subPathRoot
 		return fmt.Errorf("cloudrun: agent %s has its home at the location used before this version; run the project-storage-migrate maintenance operation (with the agent stopped) before starting it", agentID)
 	}
 	return nil
+}
+
+// cloudRunAgentWorkspaceRel returns the export-relative path of a
+// clone-per-agent agent's own workspace, <subpath_root>/<project>/agents/
+// <slug>/workspace, derived from the project's workspace path the same way
+// the broker's delete path derives it (NFSAgentDirSubPath and
+// provision.AgentWorkspaceDir), so the directory created here is the one
+// removed when the agent is deleted.
+func cloudRunAgentWorkspaceRel(projectWorkspaceRel, slug string) (string, error) {
+	agentDir, err := NFSAgentDirSubPath(filepath.FromSlash(projectWorkspaceRel), slug)
+	if err != nil {
+		return "", fmt.Errorf("cloudrun: %w", err)
+	}
+	return filepath.ToSlash(filepath.Join(agentDir, provision.AgentWorkspaceDir)), nil
 }
 
 // cloudRunAgentLeaves returns an agent's home and secrets paths relative to
@@ -1386,7 +1537,7 @@ func sanitizeGCPLabelValue(value string) string {
 // errEmptyPerAgentCloudRun is returned by CloudRunRuntime.Run for an
 // empty-per-agent agent (design #2703).
 var errEmptyPerAgentCloudRun = errors.New("cloudrun: \"Empty directory per agent\" (empty-per-agent) workspaces are not supported on the Cloud Run runtime, " +
-	"which always mounts the project's shared workspace; use a Docker, Podman, Apple or Kubernetes broker for this project")
+	"which mounts the project's shared workspace; use a Docker, Podman, Apple or Kubernetes broker for this project")
 
 // errCloudRunNeedsNFSWorkspace is returned, wrapped with the backend name,
 // by CloudRunRuntime.Run for a workspace backend other than "nfs"
@@ -1418,6 +1569,24 @@ func isEmptyPerAgentRun(cfg RunConfig) bool {
 	for _, kv := range cfg.Env {
 		k, v, ok := strings.Cut(kv, "=")
 		if ok && k == "SCION_WORKSPACE_MODE" && store.ResolveWorkspaceSharingMode(v) == store.SharingModeEmptyPerAgent {
+			return true
+		}
+	}
+	return false
+}
+
+// isClonePerAgentRun reports whether cfg starts a clone-per-agent agent:
+// SCION_WORKSPACE_MODE clone-per-agent in its env and a git clone to make,
+// the same test the agent start uses (isClonePerAgentStart). A start that
+// keeps an existing agent on the shared checkout sends shared-plain
+// instead (pkg/agent cloudRunKeepSharedCheckout).
+func isClonePerAgentRun(cfg RunConfig) bool {
+	if cfg.GitClone == nil {
+		return false
+	}
+	for _, kv := range cfg.Env {
+		k, v, ok := strings.Cut(kv, "=")
+		if ok && k == "SCION_WORKSPACE_MODE" && store.ResolveWorkspaceSharingMode(v) == store.SharingModeClonePerAgent {
 			return true
 		}
 	}

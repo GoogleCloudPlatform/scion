@@ -125,8 +125,8 @@ that URL unless `SCION_PUBLIC_URL` was provided.
 
 ## CPU allocation and async agent launch
 
-With asynchronous agent create (the `hub.async_agent_launch` experiment on
-the Hub), the Hub answers the create request as soon as the broker accepts it, and the
+With asynchronous agent create (the `hub.async_agent_launch` experiment,
+on by default on the Hub), the Hub answers the create request as soon as the broker accepts it, and the
 broker finishes the launch in the background. On Cloud Run that background
 work needs CPU outside requests:
 

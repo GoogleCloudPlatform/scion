@@ -116,7 +116,7 @@ func TestLoadServerKeyring_RingMode(t *testing.T) {
 	assert.Equal(t, cmdKRLegacySecret, resolveSessionSecret())
 	assert.Equal(t, cmdKRLegacySecret, sessionSecretValue())
 	assert.Equal(t, hub.SigningKeySourceKeyring, webSessionKeySource(resolveSessionSecret()))
-	assert.Contains(t, logs.String(), "session cookies and those capabilities only")
+	assert.Contains(t, logs.String(), "those capabilities, admission tokens and relay-peer signatures only")
 	assertNoCmdKRSecret(t, logs.String())
 }
 
@@ -315,6 +315,40 @@ func TestLoadServerKeyring_WorldReadablePolicy(t *testing.T) {
 	}
 }
 
+// TestLoadServerKeyring_UnreadableRingNeverSelectsLegacy (ptone/scion#1530
+// Phase 3): a configured keyring file that is missing, unreadable or not a
+// regular file refuses startup; no keyring is kept and the legacy-mode
+// notice is never printed (missing managed material never selects legacy
+// mode). hub.New refuses the same configuration on its own through
+// KeyringConfigured.
+func TestLoadServerKeyring_UnreadableRingNeverSelectsLegacy(t *testing.T) {
+	unreadable := writeCmdKeyring(t, nil)
+	require.NoError(t, os.Chmod(unreadable, 0))
+	if f, err := os.Open(unreadable); err == nil {
+		_ = f.Close()
+		t.Skip("running with privileges that read mode-000 files")
+	}
+	for name, path := range map[string]string{
+		"missing":    filepath.Join(t.TempDir(), "absent.json"),
+		"unreadable": unreadable,
+		"directory":  t.TempDir(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			isolateKeyring(t)
+			logs := captureSecretEnvSlog(t)
+			cfg := &config.GlobalConfig{KeyringFile: path}
+			err := loadServerKeyring(cfg)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), config.KeyringFileKey)
+			assert.Nil(t, serverKeyringFromFile())
+			assert.NotContains(t, logs.String(), "legacy single-secret mode")
+			hubCfg := buildHubServerConfig(cfg, "https://hub.example.com", "", nil, false, "", nil)
+			assert.True(t, hubCfg.KeyringConfigured)
+			assert.Nil(t, hubCfg.Keyring)
+		})
+	}
+}
+
 // TestApplyKeyringFlagOverrides: flags win over the loaded settings (which
 // already put env over settings.yaml); an unset flag leaves them alone.
 func TestApplyKeyringFlagOverrides(t *testing.T) {
@@ -404,4 +438,44 @@ func TestBuildServerValueCipher(t *testing.T) {
 		assert.Nil(t, serverValueCipher)
 		assertNoCmdKRSecret(t, err.Error())
 	})
+}
+
+// TestBuildHubServerConfig_KeyringConfigured: the hub is told a keyring
+// file is configured exactly when server.keyring_file is set.
+func TestBuildHubServerConfig_KeyringConfigured(t *testing.T) {
+	isolateKeyring(t)
+	assert.False(t, buildHubServerConfig(&config.GlobalConfig{}, "https://hub.example.com", "", nil, false, "", nil).KeyringConfigured)
+	cfg := &config.GlobalConfig{KeyringFile: writeCmdKeyring(t, nil)}
+	require.NoError(t, loadServerKeyring(cfg))
+	hubCfg := buildHubServerConfig(cfg, "https://hub.example.com", "", nil, false, "", nil)
+	assert.True(t, hubCfg.KeyringConfigured)
+	require.NotNil(t, hubCfg.Keyring)
+	assert.Equal(t, "gen1", hubCfg.Keyring.Signing().ActiveID())
+}
+
+// TestLoadServerKeyring_ReleaseCheckGoesThroughTheHubSeam: the server's
+// load of the keyring file applies the hub's release check
+// (hub.CheckKeyringRelease), so lifting the release limits in that one
+// place also admits the file here. A ring without the "legacy" entry is
+// refused under the production check and loads with the check relaxed.
+func TestLoadServerKeyring_ReleaseCheckGoesThroughTheHubSeam(t *testing.T) {
+	path := writeCmdKeyring(t, func(doc map[string]any) {
+		s := doc["signing"].(map[string]any)
+		s["keys"] = []any{map[string]any{"id": "gen1", "secret": cmdKRGen1Secret, "sign_until": nil, "verify_until": nil}}
+		s["legacy_read_ids"] = []any{"gen1"}
+	})
+
+	isolateKeyring(t)
+	err := loadServerKeyring(&config.GlobalConfig{KeyringFile: path})
+	require.Error(t, err, "the production release check refuses a ring without the legacy entry")
+	assert.Contains(t, err.Error(), `signing key with id "legacy"`)
+	assertNoCmdKRSecret(t, err.Error())
+	assert.Nil(t, serverKeyringFromFile())
+
+	isolateKeyring(t)
+	t.Cleanup(hub.RelaxKeyringReleaseForTest())
+	require.NoError(t, loadServerKeyring(&config.GlobalConfig{KeyringFile: path}))
+	require.NotNil(t, serverKeyringFromFile())
+	_, ok := serverKeyringFromFile().Signing().LegacySecret()
+	assert.False(t, ok)
 }

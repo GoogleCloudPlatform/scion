@@ -88,7 +88,7 @@ func newSharerFixture(t *testing.T) *sharerFixture {
 	}
 	t.Cleanup(func() { _ = os.Chdir(origWd) })
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	mgr := &sharerFilesManager{}

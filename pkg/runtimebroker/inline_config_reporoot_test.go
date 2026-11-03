@@ -100,8 +100,8 @@ func TestApplyInlineConfigUpdate_RepoRootOverrideIsInert(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig after update: %v", err)
 	}
-	if updatedCfg.MaxTurns != 7 {
-		t.Fatalf("MaxTurns = %d, want 7 (the update should have applied the legitimate field)", updatedCfg.MaxTurns)
+	if !api.IntPtrEqual(updatedCfg.MaxTurns, api.IntPtr(7)) {
+		t.Fatalf("MaxTurns = %s, want 7 (the update should have applied the legitimate field)", api.FormatCountLimit(updatedCfg.MaxTurns))
 	}
 
 	// The persisted state file — the only place the repo root lives — must be

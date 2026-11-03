@@ -40,6 +40,12 @@
  *                         large one through a shared helper);
  *   - requiredChunks:     chunk file name prefixes that must exist (proves a
  *                         lazy split still happens);
+ *   - requiredStrings:    per chunk file name prefix, strings that must
+ *                         occur exactly once in the built JS, in a chunk of
+ *                         that prefix: marker strings of modules that must
+ *                         survive tree shaking, such as the review editor's
+ *                         rendering and input rules (a second copy anywhere
+ *                         could stand in for a module the build left out);
  *   - forbiddenModules:   source modules that must not be in the static
  *                         closure of the given routes, by base name
  *                         (pattern) or by full path (pathPattern, for
@@ -276,6 +282,30 @@ export function checkBudget({ manifest, budget, readFile, listFiles, readMapModu
   for (const prefix of budget.requiredChunks ?? []) {
     const found = built.filter((f) => f.startsWith(prefix) && f.endsWith('.js'));
     report.push(`required chunk ${prefix}*.js: ${found.length ? found.join(', ') : 'none'}`);
+    if (!found.length) failures.push(`no chunk matching ${prefix}*.js`);
+  }
+
+  for (const [prefix, strings] of Object.entries(budget.requiredStrings ?? {})) {
+    if (prefix.startsWith('$')) continue;
+    const found = built.filter((f) => f.startsWith(prefix) && f.endsWith('.js'));
+    const count = (text, x) => text.split(x).length - 1;
+    const texts = built
+      .filter((f) => f.endsWith('.js'))
+      .map((f) => ({ f, text: readFile(f)?.toString('utf-8') ?? '' }));
+    let ok = 0;
+    for (const x of strings) {
+      const where = texts.filter((t) => count(t.text, x) > 0);
+      const total = where.reduce((n, t) => n + count(t.text, x), 0);
+      if (total === 0) failures.push(`${prefix}*.js: missing required string ${JSON.stringify(x)}`);
+      else if (total > 1 || !where[0].f.startsWith(prefix)) {
+        failures.push(
+          `${prefix}*.js: required string ${JSON.stringify(x)} occurs ${total} time(s), in ${where.map((t) => t.f).join(', ')}; EXPECT once, in ${prefix}*.js`
+        );
+      } else ok++;
+    }
+    report.push(
+      `required strings in ${prefix}*.js: ${ok} of ${strings.length} present, each exactly once in the build`
+    );
     if (!found.length) failures.push(`no chunk matching ${prefix}*.js`);
   }
 

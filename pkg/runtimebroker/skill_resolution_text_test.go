@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
@@ -347,7 +348,7 @@ func TestSkillResolutionFailed_FixedReasonPhrase(t *testing.T) {
 
 func TestClassifyStartError_SkillResolverError_FixedReasonPhrase(t *testing.T) {
 	e := &agent.SkillResolutionError{URI: "gh://o/r/s@v", Code: agent.SkillErrCodeResolveFailed, Status: 422, Message: resolverTestBody}
-	code, _, msg := classifyStartError(context.Background(), fmt.Errorf("start: %w", e), "", "")
+	code, _, msg := classifyStartError(context.Background(), fmt.Errorf("start: %w", e), "", "", store.LaunchKindCreate)
 	if code != ErrCodeSkillResolution {
 		t.Fatalf("code = %q, want %q", code, ErrCodeSkillResolution)
 	}

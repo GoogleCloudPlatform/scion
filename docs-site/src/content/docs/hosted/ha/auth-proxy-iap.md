@@ -46,6 +46,16 @@ The proxy authenticator runs **after** higher-priority app-layer credentials:
 
 This means agents and brokers traversing IAP are identified by their own credentials, not by the IAP service-account assertion.
 
+### Browser requests that change state
+
+In proxy mode, state-changing API requests from browsers are checked for the Hub's expected request properties. Browser `POST` requests with a body are also checked for the expected content type (JSON, multipart on file upload routes, browser policy reports on the report route). Requests that do not match get `403 Forbidden` or `415 Unsupported Media Type`. Requests from Scion's own clients (agents, brokers and the CLI) are unaffected.
+
+The front proxy must pass the public `Host` header through unchanged. IAP does this by default.
+
+### Port proxy behind the front proxy
+
+Behind a front proxy, how the follow-on requests of a page opened through the [port proxy](/scion/hosted/user/port-forwarding/) are handled depends on the front proxy's configuration, so multi-file pages opened through the port proxy may not work reliably. Point users to `scion tunnel` for full-fidelity access.
+
 ### Configuration
 
 In `settings.yaml` (under the `server` key):
@@ -508,6 +518,58 @@ The `scion attach` flow resolves transport-layer authentication **before** check
 - If no transport source is configured, the command falls back to requiring a standard Hub access token (via `scion hub auth login` or `SCION_HUB_TOKEN`).
 
 This unblocks seamless interactive attachments to agents executing under IAP-secured Hubs.
+
+## Workstation CLI access (a person)
+
+A browser follows IAP's Google sign-in page; the `scion` CLI cannot. Against a Hub behind IAP, `scion hub auth login` stops with an error that says the Hub appears to be behind IAP, instead of trying to decode the sign-in page. If the CLI already sent a transport token and IAP rejected it, the error says so instead.
+
+The CLI recognises IAP by its `X-Goog-IAP-Generated-Response` header, by its plain-text `Invalid IAP credentials` 401 or 403, or by a redirect to `accounts.google.com`. With IAP [external identities](https://cloud.google.com/iap/docs/enable-external-identities), the sign-in page is on another host, so the CLI reports only that the Hub returned an HTML page instead of a JSON response. The same transport setup applies.
+
+A person's CLI uses the same dual-layer model as agents:
+
+| Layer | Credential | How the CLI gets it |
+|-------|------------|---------------------|
+| **Outer (transport)** | Google OIDC ID token for a service account, audience = the IAP OAuth client ID, with the email claim | `SCION_TRANSPORT_MODE=iap` plus `SCION_TRANSPORT_TOKEN_FILE` (or `SCION_TRANSPORT_TOKEN`), sent as `Proxy-Authorization` |
+| **Inner (app)** | [User access token](/scion/hosted/user/personal-access-tokens/) (UAT) | `SCION_HUB_TOKEN`, sent as `Authorization: Bearer` |
+
+The Hub identifies the person by the UAT; the service account only gets the request through IAP (see [Middleware precedence](#middleware-precedence)). A user account's own ID token does not carry the IAP client ID as its audience, so the transport token is minted by impersonating a service account.
+
+**One-time IAM setup:**
+
+- The service account needs the **IAP-secured Web App User** role (`roles/iap.httpsResourceAccessor`) on the IAP-protected resource.
+- Each CLI user needs `roles/iam.serviceAccountOpenIdTokenCreator` on that service account. `roles/iam.serviceAccountTokenCreator` (Service Account Token Creator) also works but grants more.
+- Each CLI user needs a UAT, created in the web UI through the browser.
+
+**Find the audience.** It is the project's IAP OAuth client ID. For a custom OAuth client (an HA deployment), it is the client ID you created. Otherwise, read it from the project's IAP settings:
+
+```bash
+CLIENT_ID="$(gcloud iap settings get --project=PROJECT_ID \
+  --resource-type=iap_web --format='value(accessSettings.oauthSettings.clientId)')"
+```
+
+This is not the `auth.proxy.iap.audience` value, which is the audience of the assertion IAP sends to the Hub.
+
+**Each session:**
+
+```bash
+mkdir -p ~/.scion
+# Write to a private temp file, then rename it into place, so the CLI never
+# reads a partly written token.
+tmp="$(mktemp ~/.scion/iap-transport-token.XXXXXX)"
+gcloud auth print-identity-token \
+  --impersonate-service-account=SA_EMAIL \
+  --audiences="$CLIENT_ID" \
+  --include-email > "$tmp" && mv "$tmp" ~/.scion/iap-transport-token || rm -f "$tmp"
+
+export SCION_TRANSPORT_MODE=iap
+export SCION_TRANSPORT_TOKEN_FILE=~/.scion/iap-transport-token
+export SCION_HUB_TOKEN=scion_pat_...
+export SCION_HUB_ENDPOINT=https://HUB_IAP_URL
+```
+
+The ID token expires after about an hour. Re-run `gcloud` to refresh the file; the CLI re-reads it when it changes. The token file must be a regular file, not a symbolic link. A stored interactive login takes precedence over `SCION_HUB_TOKEN`.
+
+For the single-node VM deployment, the [single-node VM guide](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/single-node-vm.md#cli-access-via-iap) has the full command sequence with that deployment's resource names. That guide also describes the alternative of running the CLI on the Hub VM over IAP SSH.
 
 ## Brokers behind IAP
 

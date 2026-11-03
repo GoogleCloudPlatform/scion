@@ -20,7 +20,7 @@ GOLANGCI_LINT         ?= $(GOLANGCI_LINT_PATCHED)
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-sqlite-nonhub test-cmd-sqlite test-fast-ci test-launch-store-postgres test-store-postgres test-store-postgres-others test-store-postgres-env-check test-store-postgres-integrationtest test-store-postgres-entadapter test-store-postgres-tail testpart-selftest hubshard-skip-summary-selftest test-hub-postgres test-hub-postgres-env-check test-hub-postgres-default test-hub-postgres-integration hub-postgres-integration-shards test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage hubshard-parity build-hub-shard test-hub-shard test-hub-shards vet-hub-shard vet lint lint-ci vet-integration vet-integration-ci vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-store-delete-callers check-scan-coverage check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-image-go-dirs check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-debug-defaults check-sqlite-coverage sqlite-ci-pkgs check-extras-go-images check-custom golangci-lint golangci-lint-build golangci-lint-split-selftest web web-budget web-typecheck web-lint web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check tidy-check
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-sqlite-nonhub test-cmd-sqlite test-fast-ci test-launch-store-postgres test-store-postgres test-store-postgres-others test-store-postgres-env-check test-store-postgres-integrationtest test-store-postgres-entadapter test-store-postgres-tail testpart-selftest hubshard-skip-summary-selftest test-hub-postgres test-hub-postgres-env-check test-hub-postgres-default test-hub-postgres-integration hub-postgres-integration-shards test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage hubshard-parity build-hub-shard test-hub-shard test-hub-shards vet-hub-shard vet lint lint-ci vet-integration vet-integration-ci vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-store-delete-callers check-scan-coverage check-security-marker-gates check-agent-mutators cli-time-zones time-literals check-setenv-guard check-harness-coverage check-image-go-dirs check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-debug-defaults check-sqlite-coverage sqlite-ci-pkgs check-extras-go-images check-custom golangci-lint golangci-lint-build golangci-lint-split-selftest web web-budget web-typecheck web-lint web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check tidy-check check-entsql-driver-assert
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -146,7 +146,8 @@ test-hub-sqlite: test-sqlite-nonhub test-hub-shards
 SQLITE_NONHUB_PKGS := ./pkg/hub/... ./perf/bench/seed/... ./pkg/conduit/... \
 	./pkg/store/entadapter/... ./pkg/artifacts/... ./pkg/brokerownership/... \
 	./pkg/brokerregistration/... ./pkg/ent/entc/... ./pkg/secret/... \
-	./pkg/store/storetest/... ./pkg/store/relaydb ./pkg/testinfra/...
+	./pkg/store/storetest/... ./pkg/store/relaydb ./pkg/testinfra/... \
+	./pkg/observability/txdiag
 SQLITE_NONHUB_PKGS_CMD = go list $(SQLITE_NONHUB_PKGS) | grep -vx '$(HUB_PKG)'
 
 # SQLITE_CI_PKGS are the package patterns that blocking CI jobs test with
@@ -600,14 +601,29 @@ BROKER_RESERVATION_TRANSFER_POSTGRES_TESTS := TestMoveBrokerQuota_SourceAtCapTar
 	TestTransferBroker_TargetLockHeldAcrossTransaction_Postgres \
 	TestTransferBroker_ConcurrentReserveSoak_Postgres
 
+# USER_DELETION_POSTGRES_TESTS are the forced user delete concurrency tests
+# (ptone/scion#2143): a restore racing the delete request, a restore racing
+# the completion, two hub processes completing one deletion, and a finalize
+# racing the completion's reopen of a blocking agent; and a token's user
+# delete refused in its transaction for a system-scope binding the
+# pre-check did not see.
+USER_DELETION_POSTGRES_TESTS := TestForceDeleteUser_RestoreRacesRequest_Postgres \
+	TestForceDeleteUser_RestoreRacesCompletion_Postgres \
+	TestForceDeleteUser_TwoReconcilersOneCompletion_Postgres \
+	TestForceDeleteUser_FinalizeRacesCompletionReopen_Postgres \
+	TestUserDeleteToken_InTransactionBindingRefused_Postgres
+
 # HUB_INTEGRATION_POSTGRES_TESTS are the pkg/hub Postgres tests that need
 # -tags integration (the integration TestMain sets up the ent test
 # database): the project-delete lock-order test, the two-replica scheduled
 # send test, the membership loss and test identity concurrency tests, and
 # the broker presence registry test (its conduit registry runs on the ent
 # test database), the agent delegation issuance vs reincarnation claim
-# race, and the broker reservation transfer tests
-# (BROKER_RESERVATION_TRANSFER_POSTGRES_TESTS).
+# race, the broker reservation transfer tests
+# (BROKER_RESERVATION_TRANSFER_POSTGRES_TESTS) and the forced user delete
+# tests (USER_DELETION_POSTGRES_TESTS), the chat retention cascade and
+# replica race and deleted-conversation tests, and the two-replica project
+# quota admission test.
 # Each must print a PASS line, and any skip fails (shard.sh postgres).
 HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock \
 	TestScheduledSend_TwoHubReplicasPostgres_OneDelivery \
@@ -616,7 +632,11 @@ HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock
 	$(MEMBERSHIP_LOSS_POSTGRES_TESTS) \
 	$(TEST_IDENTITY_POSTGRES_TESTS) \
 	$(BROKER_RESERVATION_TRANSFER_POSTGRES_TESTS) \
-	TestHubInternal_ReplayAcrossHubReplicas
+	$(USER_DELETION_POSTGRES_TESTS) \
+	TestHubInternal_ReplayAcrossHubReplicas \
+	TestChatRetention_Postgres_CascadeAndReplicaRace \
+	TestChatRetention_Postgres_DeletedConversationsAndAttachments \
+	TestProjectQuota_TwoHubReplicasPostgres_OneAdmission
 
 ## test-hub-postgres: Run the pkg/hub Postgres tests of shard SHARD=K (SHARD=all: every shard holding one)
 # Requires SCION_TEST_POSTGRES_URL (integration tests) and
@@ -844,6 +864,10 @@ check-hub-store-reassign:
 check-store-delete-callers:
 	@./hack/check-store-delete-callers.sh
 
+## check-agent-mutators: Verify no package outside pkg/store mutates agent rows directly (WP1 lifecycle observer; type-checks pkg/hub, so ci-full and the CI workflow, not make ci)
+check-agent-mutators:
+	@./hack/check-agent-mutators.sh
+
 ## check-scan-coverage: Every enumeration call in a pkg/hub source-scanning test needs a pkg/hub-wide scan-covers claim (self-test first)
 check-scan-coverage:
 	@./hack/check-scan-coverage.sh --self-test
@@ -897,6 +921,11 @@ check-route-authz-manifest:
 check-method-not-allowed:
 	@./hack/check-method-not-allowed.sh
 
+## check-entsql-driver-assert: Flag type assertions of an ent driver to *entsql.Driver (use entc.SQLDriver / entc.SQLDB, which unwrap the transaction diagnostics wrapper)
+check-entsql-driver-assert:
+	@./hack/check-entsql-driver-assert.sh --self-test >/dev/null
+	@./hack/check-entsql-driver-assert.sh
+
 ## check-debug-defaults: Verify setup scripts, deploy templates and hosted setup docs keep debug off by default
 check-debug-defaults:
 	@./hack/check-debug-defaults.sh --self-test
@@ -915,7 +944,7 @@ check-extras-go-images:
 	@./hack/check-extras-go-images.sh
 
 ## check-custom: Run all custom CI lint checks (see hack/LINT-CONVENTIONS.md)
-check-custom: hubshard-parity hubshard-skip-summary-selftest testpart-selftest compat-literals check-annotation-prefix check-authz-guards check-setenv-guard check-conversation-upsert-guard check-hub-store-reassign check-store-delete-callers check-scan-coverage check-security-marker-gates check-image-go-dirs check-authorization-catalog check-route-authz-manifest cli-time-zones time-literals check-method-not-allowed check-debug-defaults check-sqlite-coverage check-extras-go-images
+check-custom: hubshard-parity hubshard-skip-summary-selftest testpart-selftest compat-literals check-annotation-prefix check-authz-guards check-setenv-guard check-conversation-upsert-guard check-hub-store-reassign check-store-delete-callers check-scan-coverage check-security-marker-gates check-image-go-dirs check-authorization-catalog check-route-authz-manifest cli-time-zones time-literals check-method-not-allowed check-entsql-driver-assert check-debug-defaults check-sqlite-coverage check-extras-go-images
 	@echo "All custom checks passed."
 
 ## golangci-lint-build: Build the patched golangci-lint CI uses into ./build/tools/ (skipped when up to date)
@@ -1031,7 +1060,7 @@ ci: fmt-check lint check-custom test-fast build
 	@echo "CI passed."
 
 ## ci-full: Run the full CI pipeline locally (mirrors GitHub Actions, includes web + golangci-lint)
-ci-full: fmt-check web web-budget web-typecheck web-lint web-test lint vet-integration vet-integration-extras check-custom golangci-lint-split-selftest golangci-lint test-fast test-fixture-coverage build
+ci-full: fmt-check web web-budget web-typecheck web-lint web-test lint vet-integration vet-integration-extras check-custom check-agent-mutators golangci-lint-split-selftest golangci-lint test-fast test-fixture-coverage build
 	@echo ""
 	@echo "CI (full) passed."
 

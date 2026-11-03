@@ -37,6 +37,7 @@ import '../shared/effective-access-boundary-notice.js';
 import '../shared/security-review-dialog.js';
 import { formatRelative } from '../../utils/time.js';
 import { apiFetch, extractApiError, parseApiError } from '../../client/api.js';
+import { isFeatureEnabled, USER_DELETE_FORCE_CASCADE_FLAG } from '../../utils/feature-flags.js';
 
 type SortField = 'name' | 'created';
 type SortDir = 'asc' | 'desc';
@@ -57,6 +58,8 @@ interface ConfirmAction {
   action: () => Promise<void>;
   /** Delete dialogs only: what blocks the delete, once known. */
   blockers?: UserDeleteBlockers;
+  /** Delete dialogs only: Force delete was clicked once and awaits confirmation. */
+  forceConfirm?: boolean;
 }
 
 /** An agent of the user that blocks the delete. */
@@ -121,6 +124,112 @@ export function parseUserDeleteBlockers(value: unknown): UserDeleteBlockers | nu
 
 function hasDeleteBlockers(b: UserDeleteBlockers | undefined): b is UserDeleteBlockers {
   return !!b && (b.agents.length > 0 || b.edges.length > 0);
+}
+
+/** The confirming label of the Force delete button, naming the agents stopped. */
+function forceDeleteConfirmLabel(b: UserDeleteBlockers | undefined): string {
+  const n = b?.agents.length ?? 0;
+  if (n === 0) return 'Confirm force delete';
+  return `Stop ${n} ${n === 1 ? 'agent' : 'agents'} and delete`;
+}
+
+/**
+ * One agent of a forced user deletion. outcome is pending, stopping,
+ * failed, stopped (the agent delete confirmed its teardown) or removed
+ * (its record is gone without that confirmation).
+ */
+export interface UserDeletionAgent {
+  id: string;
+  slug: string;
+  projectId: string;
+  outcome: string;
+  attempts: number;
+  lastError: string;
+}
+
+/** Agent counts of a forced user deletion, by outcome. */
+export interface UserDeletionCounts {
+  pending: number;
+  stopping: number;
+  failed: number;
+  stopped: number;
+  removed: number;
+}
+
+/**
+ * A forced user deletion: the body of GET /api/v1/users/{id}/deletion and
+ * of the 202 answer to DELETE /api/v1/users/{id}?force=true. state is
+ * stopping until every agent is stopped or removed, then completed.
+ */
+export interface UserDeletion {
+  deletionId: string;
+  userId: string;
+  state: string;
+  requestedAt: string;
+  completedAt: string | null;
+  lastError: string;
+  agents: UserDeletionAgent[];
+  counts: UserDeletionCounts;
+}
+
+/** Display labels for deletion agent outcomes. */
+export const USER_DELETION_OUTCOME_LABELS: Record<string, string> = {
+  pending: 'Waiting',
+  stopping: 'Stopping',
+  failed: 'Failed',
+  stopped: 'Stopped',
+  removed: 'Removed (stop not confirmed)',
+};
+
+/** Reads a deletion resource. Returns null for anything that is not one. */
+export function parseUserDeletion(value: unknown): UserDeletion | null {
+  if (!value || typeof value !== 'object') return null;
+  const v = value as Record<string, unknown>;
+  if (typeof v.deletionId !== 'string' || typeof v.state !== 'string') return null;
+  const str = (x: unknown): string => (typeof x === 'string' ? x : '');
+  const num = (x: unknown): number => (typeof x === 'number' ? x : 0);
+  const c = (v.counts ?? {}) as Record<string, unknown>;
+  return {
+    deletionId: str(v.deletionId),
+    userId: str(v.userId),
+    state: str(v.state),
+    requestedAt: str(v.requestedAt),
+    completedAt: typeof v.completedAt === 'string' ? v.completedAt : null,
+    lastError: str(v.lastError),
+    agents: (Array.isArray(v.agents) ? v.agents : []).map((a) => {
+      const r = (a ?? {}) as Record<string, unknown>;
+      return {
+        id: str(r.id),
+        slug: str(r.slug),
+        projectId: str(r.projectId),
+        outcome: str(r.outcome),
+        attempts: num(r.attempts),
+        lastError: str(r.lastError),
+      };
+    }),
+    counts: {
+      pending: num(c.pending),
+      stopping: num(c.stopping),
+      failed: num(c.failed),
+      stopped: num(c.stopped),
+      removed: num(c.removed),
+    },
+  };
+}
+
+/** How often an open deletion panel reloads a deletion in state stopping. */
+export const DELETION_POLL_INTERVAL_MS = 5000;
+
+/** The deletion panel's error when its deletion cannot be loaded. */
+const DELETION_STATUS_UNAVAILABLE =
+  'The deletion status is not available. Use Refresh to try again.';
+
+/** The deletion panel's state. */
+interface DeletionPanel {
+  user: AdminUser;
+  deletion: UserDeletion | null;
+  loading: boolean;
+  error: string | null;
 }
 
 interface InviteCodeEntry {
@@ -324,6 +433,16 @@ export class ScionPageAdminUsers extends LitElement {
   @state()
   private showSecurityReview = false;
 
+  /** The forced deletion panel, when open. */
+  @state()
+  private deletionPanel: DeletionPanel | null = null;
+
+  /** The next reload of an open deletion panel in state stopping. */
+  private deletionPollTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Counts deletion panel sessions: each open, close and page removal starts a new one. */
+  private deletionPanelSession = 0;
+
   static override styles = css`
     :host {
       display: block;
@@ -514,6 +633,30 @@ export class ScionPageAdminUsers extends LitElement {
 
     .status-badge.suspended {
       background: var(--sl-color-danger-100, #fee2e2);
+      color: var(--sl-color-danger-700, #b91c1c);
+    }
+
+    .status-badge.deleting {
+      background: var(--sl-color-warning-100, #fef3c7);
+      color: var(--sl-color-warning-700, #b45309);
+    }
+
+    .deletion-summary {
+      margin: 0 0 0.75rem;
+    }
+
+    .deletion-agents {
+      margin: 0.25rem 0 0.75rem;
+      padding-left: 1.25rem;
+    }
+
+    .deletion-outcome,
+    .deletion-error {
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .deletion-outcome.failed,
+    .deletion-error.failed {
       color: var(--sl-color-danger-700, #b91c1c);
     }
 
@@ -894,6 +1037,13 @@ export class ScionPageAdminUsers extends LitElement {
     void this.loadUsers();
   }
 
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    // Ends the panel session too, so a request in flight that answers
+    // after the page is removed neither changes the panel nor polls again.
+    this.closeDeletionPanel();
+  }
+
   private async loadCurrentUser(): Promise<void> {
     try {
       const res = await apiFetch('/auth/me');
@@ -1024,7 +1174,7 @@ export class ScionPageAdminUsers extends LitElement {
   private async deleteUser(
     userId: string,
     userLabel?: string
-  ): Promise<{ securityReview: boolean; blockers?: UserDeleteBlockers }> {
+  ): Promise<{ securityReview: boolean; blockers?: UserDeleteBlockers; inProgress?: boolean }> {
     const response = await apiFetch(`/api/v1/users/${userId}`, {
       method: 'DELETE',
     });
@@ -1037,6 +1187,9 @@ export class ScionPageAdminUsers extends LitElement {
         if (response.status === 409 && apiError?.code === 'user_delete_blocked') {
           const blockers = parseUserDeleteBlockers(apiError.details);
           if (blockers) return { securityReview: false, blockers };
+        }
+        if (response.status === 409 && apiError?.code === 'user_deletion_in_progress') {
+          return { securityReview: false, inProgress: true };
         }
 
         const lockout = parseLockoutResponse(errorBody);
@@ -1199,6 +1352,10 @@ export class ScionPageAdminUsers extends LitElement {
           this.confirmAction = { ...confirm, blockers: result.blockers };
           return;
         }
+        if (result.inProgress) {
+          void this.openDeletionPanel(user);
+          return;
+        }
         if (result.securityReview) return;
         this.showFeedback(
           'success',
@@ -1211,6 +1368,240 @@ export class ScionPageAdminUsers extends LitElement {
     };
     this.confirmAction = confirm;
     void this.loadDeleteBlockers(confirm);
+  }
+
+  /** Whether the hub offers the forced delete (presentation only). */
+  private forceDeleteEnabled(): boolean {
+    return isFeatureEnabled(USER_DELETE_FORCE_CASCADE_FLAG);
+  }
+
+  /**
+   * Sends DELETE /api/v1/users/{id}?force=true. Returns the deletion in
+   * progress (202), or null when the user was deleted at once (204).
+   * Throws with the hub's message otherwise; a 403
+   * user_delete_force_forbidden names the agents the caller may not delete,
+   * by slug when slugs knows it. The caller shows the error inline, so the
+   * global access-denied toast is suppressed.
+   */
+  private async requestForceDelete(
+    user: AdminUser,
+    slugs?: Map<string, string>
+  ): Promise<UserDeletion | null> {
+    const response = await apiFetch(`/api/v1/users/${user.id}?force=true`, {
+      method: 'DELETE',
+      suppressAccessDeniedToast: true,
+    });
+    if (response.status === 204) return null;
+    const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+    if (response.ok) {
+      const deletion = parseUserDeletion(body);
+      if (!deletion) throw new Error('Unexpected response to the force delete');
+      return deletion;
+    }
+    const apiError = (body?.error ?? {}) as Record<string, unknown>;
+    if (apiError.code === 'user_delete_force_forbidden') {
+      const details = (apiError.details ?? {}) as Record<string, unknown>;
+      const names = (Array.isArray(details.agents) ? details.agents : [])
+        .map((a) => ((a ?? {}) as Record<string, unknown>).id)
+        .filter((id): id is string => typeof id === 'string')
+        .map((id) => slugs?.get(id) || id);
+      const list = names.length ? `: ${names.join(', ')}` : '';
+      throw new Error(`You may not delete some of this user's agents${list}.`);
+    }
+    const msg = typeof apiError.message === 'string' ? apiError.message : undefined;
+    throw new Error(msg ?? `HTTP ${response.status}`);
+  }
+
+  /** Reloads the users list at the current page. */
+  private reloadUsersPage(): void {
+    void this.loadUsers(
+      this.currentPage > 1 ? this.cursorHistory[this.cursorHistory.length - 1] : undefined
+    );
+  }
+
+  /**
+   * The Force delete button of the delete dialog: the first click asks for
+   * confirmation, naming how many agents are stopped; the second runs the
+   * forced delete.
+   */
+  private onForceDeleteClick(): void {
+    const current = this.confirmAction;
+    if (!current) return;
+    if (!current.forceConfirm) {
+      this.confirmAction = { ...current, forceConfirm: true };
+      return;
+    }
+    void this.executeForceDelete();
+  }
+
+  /** Runs the forced delete from the delete dialog. */
+  private async executeForceDelete(): Promise<void> {
+    const current = this.confirmAction;
+    if (!current) return;
+    const user = current.user;
+    const label = user.displayName || user.email;
+    const slugs = new Map<string, string>(
+      (current.blockers?.agents ?? []).map((a): [string, string] => [a.id, a.slug])
+    );
+    this.actionInProgress = true;
+    let failed = false;
+    try {
+      const deletion = await this.requestForceDelete(user, slugs);
+      if (this.confirmAction === current) this.confirmAction = null;
+      if (deletion) {
+        this.showDeletionPanel({ user, deletion, loading: false, error: null });
+        this.scheduleDeletionPoll();
+        this.showFeedback('primary', `Deleting ${label}: stopping the user's agents.`);
+      } else {
+        this.showFeedback('success', `${label} has been deleted.`);
+      }
+      this.reloadUsersPage();
+    } catch (err) {
+      failed = true;
+      this.showFeedback('danger', err instanceof Error ? err.message : 'Force delete failed');
+    } finally {
+      this.actionInProgress = false;
+    }
+    if (failed && this.confirmAction === current) {
+      // The confirmation named the agents as they were; ask again, with
+      // the blockers reloaded, before another force request.
+      const reset: ConfirmAction = { ...current, forceConfirm: false };
+      this.confirmAction = reset;
+      void this.loadDeleteBlockers(reset);
+    }
+  }
+
+  /**
+   * Shows a deletion panel, starting a new panel session: a request of an
+   * earlier session that answers late changes nothing.
+   */
+  private showDeletionPanel(panel: DeletionPanel): void {
+    this.stopDeletionPoll();
+    this.deletionPanelSession += 1;
+    this.deletionPanel = panel;
+  }
+
+  /**
+   * Whether the panel of session is the one shown on a connected page. Every
+   * step that resumes after a request checks it before changing the panel
+   * or arming the poll.
+   */
+  private deletionPanelCurrent(session: number): boolean {
+    return this.isConnected && this.deletionPanel !== null && this.deletionPanelSession === session;
+  }
+
+  /** Opens the deletion panel of a user and loads its deletion. */
+  private async openDeletionPanel(user: AdminUser): Promise<void> {
+    this.showDeletionPanel({ user, deletion: null, loading: true, error: null });
+    await this.refreshDeletionPanel();
+  }
+
+  /** Closes the deletion panel and stops reloading it. */
+  private closeDeletionPanel(): void {
+    this.stopDeletionPoll();
+    this.deletionPanelSession += 1;
+    this.deletionPanel = null;
+  }
+
+  private stopDeletionPoll(): void {
+    if (this.deletionPollTimer !== null) {
+      clearTimeout(this.deletionPollTimer);
+      this.deletionPollTimer = null;
+    }
+  }
+
+  /**
+   * Reloads the open panel after DELETION_POLL_INTERVAL_MS while its
+   * deletion is stopping. Stops on a terminal state, when the panel closes
+   * and when the page is removed.
+   */
+  private scheduleDeletionPoll(): void {
+    this.stopDeletionPoll();
+    const session = this.deletionPanelSession;
+    if (!this.deletionPanelCurrent(session)) return;
+    if (this.deletionPanel?.deletion?.state !== 'stopping') return;
+    this.deletionPollTimer = setTimeout(() => {
+      this.deletionPollTimer = null;
+      if (this.deletionPanelCurrent(session)) void this.refreshDeletionPanel(true);
+    }, DELETION_POLL_INTERVAL_MS);
+  }
+
+  /**
+   * Reloads the open deletion panel from GET /api/v1/users/{id}/deletion.
+   * quiet (a poll) keeps the buttons as they are. When the deletion turns
+   * completed, the users list is reloaded. A failed load shows the error
+   * and stops the poll; Refresh tries again and resumes it.
+   */
+  private async refreshDeletionPanel(quiet = false): Promise<void> {
+    const panel = this.deletionPanel;
+    if (!panel) return;
+    const session = this.deletionPanelSession;
+    if (!quiet) this.deletionPanel = { ...panel, loading: true, error: null };
+    let next: DeletionPanel;
+    let loaded = false;
+    try {
+      const res = await apiFetch(`/api/v1/users/${panel.user.id}/deletion`, {
+        suppressAccessDeniedToast: true,
+      });
+      const body: unknown = await res.json().catch(() => null);
+      const deletion = res.ok ? parseUserDeletion(body) : null;
+      loaded = deletion !== null;
+      next = deletion
+        ? { ...panel, deletion, loading: false, error: null }
+        : { ...panel, loading: false, error: DELETION_STATUS_UNAVAILABLE };
+    } catch {
+      next = { ...panel, loading: false, error: DELETION_STATUS_UNAVAILABLE };
+    }
+    if (!this.deletionPanelCurrent(session)) return;
+    this.deletionPanel = next;
+    if (panel.deletion?.state !== 'completed' && next.deletion?.state === 'completed') {
+      this.reloadUsersPage();
+    }
+    if (loaded) {
+      this.scheduleDeletionPoll();
+    } else {
+      this.stopDeletionPoll();
+    }
+  }
+
+  /**
+   * Asks the hub to retry the deletion: a repeated force request joins
+   * the deletion in progress and retries its agents. A 204, or an error
+   * (a deletion that completed since the panel loaded answers 404), is
+   * followed by a reload of the panel, which then shows what the hub
+   * reports; the error stays shown unless the deletion is completed.
+   */
+  private async retryDeletion(): Promise<void> {
+    const panel = this.deletionPanel;
+    if (!panel) return;
+    const session = this.deletionPanelSession;
+    this.deletionPanel = { ...panel, loading: true, error: null };
+    const slugs = new Map<string, string>(
+      (panel.deletion?.agents ?? []).map((a): [string, string] => [a.id, a.slug])
+    );
+    let retryError: string | null = null;
+    try {
+      const deletion = await this.requestForceDelete(panel.user, slugs);
+      if (!this.deletionPanelCurrent(session)) return;
+      if (deletion) {
+        this.deletionPanel = { ...panel, deletion, loading: false, error: null };
+        this.scheduleDeletionPoll();
+        return;
+      }
+    } catch (err) {
+      retryError = err instanceof Error ? err.message : 'Retry failed';
+    }
+    if (!this.deletionPanelCurrent(session)) return;
+    await this.refreshDeletionPanel(true);
+    const latest = this.deletionPanel;
+    if (
+      retryError &&
+      latest &&
+      this.deletionPanelCurrent(session) &&
+      latest.deletion?.state !== 'completed'
+    ) {
+      this.deletionPanel = { ...latest, error: retryError };
+    }
   }
 
   /**
@@ -1693,9 +2084,9 @@ export class ScionPageAdminUsers extends LitElement {
             ? this.renderError()
             : this.renderUsers()
         : this.renderInvitesTab()}
-      ${this.renderConfirmDialog()} ${this.renderInviteUserDialog()} ${this.renderImportDialog()}
-      ${this.renderCreateInviteDialog()} ${this.renderInviteRevealDialog()}
-      ${this.renderViewRolesDialog()}
+      ${this.renderConfirmDialog()} ${this.renderDeletionPanel()} ${this.renderInviteUserDialog()}
+      ${this.renderImportDialog()} ${this.renderCreateInviteDialog()}
+      ${this.renderInviteRevealDialog()} ${this.renderViewRolesDialog()}
       <scion-security-review-dialog
         ?open=${this.showSecurityReview}
         .detail=${this.securityReviewDetail}
@@ -1999,6 +2390,27 @@ export class ScionPageAdminUsers extends LitElement {
       `;
     }
 
+    if (user.status === 'deleting') {
+      // A forced deletion is in progress: only its status (requires delete).
+      if (!canDelete) return nothing;
+      return html`
+        <sl-dropdown placement="bottom-end" hoist>
+          <sl-button slot="trigger" size="small" variant="text" caret>
+            <sl-icon name="three-dots-vertical"></sl-icon>
+          </sl-button>
+          <sl-menu>
+            <sl-menu-item
+              class="menu-item-deletion"
+              @click=${() => void this.openDeletionPanel(user)}
+            >
+              <sl-icon slot="prefix" name="hourglass-split"></sl-icon>
+              Deletion status
+            </sl-menu-item>
+          </sl-menu>
+        </sl-dropdown>
+      `;
+    }
+
     if (user.status === 'suspended') {
       // Suspended users: Reactivate (requires suspend), Delete (requires delete)
       if (!canSuspend && !canDelete) return nothing;
@@ -2075,6 +2487,11 @@ export class ScionPageAdminUsers extends LitElement {
   private renderConfirmDialog() {
     const action = this.confirmAction;
     if (!action) return nothing;
+    const forceLabel = action.forceConfirm
+      ? forceDeleteConfirmLabel(action.blockers)
+      : 'Force delete';
+    const forceAgents = action.blockers?.agents.length ?? 0;
+    const userLabel = action.user.displayName || action.user.email;
     return html`
       <sl-dialog
         label=${action.title}
@@ -2105,6 +2522,12 @@ export class ScionPageAdminUsers extends LitElement {
           ${hasDeleteBlockers(action.blockers)
             ? this.renderDeleteBlockers(action.blockers)
             : html`<p>${action.message}</p>`}
+          ${action.forceConfirm
+            ? html`<sl-alert class="force-delete-confirm" variant="danger" open>
+                Force delete ends the access of ${userLabel} at once, stops ${forceAgents} of their
+                agents, then deletes the user. This cannot be undone.
+              </sl-alert>`
+            : nothing}
         </div>
         <sl-button
           slot="footer"
@@ -2115,6 +2538,17 @@ export class ScionPageAdminUsers extends LitElement {
           }}
           >Cancel</sl-button
         >
+        ${hasDeleteBlockers(action.blockers) && this.forceDeleteEnabled()
+          ? html`<sl-button
+              slot="footer"
+              class="force-delete-button"
+              variant="danger"
+              ?outline=${!action.forceConfirm}
+              ?loading=${this.actionInProgress}
+              @click=${() => this.onForceDeleteClick()}
+              >${forceLabel}</sl-button
+            >`
+          : nothing}
         <sl-button
           slot="footer"
           variant=${action.variant}
@@ -2127,6 +2561,103 @@ export class ScionPageAdminUsers extends LitElement {
     `;
   }
 
+  /** The forced deletion panel: state, counts and each agent's outcome. */
+  private renderDeletionPanel() {
+    const panel = this.deletionPanel;
+    if (!panel) return nothing;
+    const d = panel.deletion;
+    const stopping = d?.state === 'stopping';
+    return html`
+      <sl-dialog
+        label="User deletion"
+        class="deletion-panel"
+        open
+        @sl-request-close=${() => {
+          this.closeDeletionPanel();
+        }}
+      >
+        <div class="confirm-body">
+          <div class="user-info">
+            <span class="user-name">${panel.user.displayName || panel.user.email}</span>
+            <span class="user-email">${panel.user.email}</span>
+          </div>
+          ${panel.error
+            ? html`<p class="deletion-error failed" role="alert">${panel.error}</p>`
+            : nothing}
+          ${d
+            ? html`
+                <p class="deletion-summary">
+                  ${stopping
+                    ? 'Deleting: the user cannot sign in, and is removed once every agent below has stopped or been removed.'
+                    : 'Deleted.'}
+                </p>
+                <p class="deletion-counts">
+                  Stopped ${d.counts.stopped} · Removed (stop not confirmed) ${d.counts.removed} ·
+                  Failed ${d.counts.failed} · Stopping ${d.counts.stopping} · Waiting
+                  ${d.counts.pending}
+                </p>
+                ${d.lastError
+                  ? html`<p class="deletion-error failed" role="alert">${d.lastError}</p>`
+                  : nothing}
+                ${d.agents.length > 0
+                  ? html`<ul class="deletion-agents">
+                      ${d.agents.map(
+                        (a) => html`
+                          <li>
+                            <a href="/agents/${a.id}">${a.slug || a.id}</a>
+                            <span class="deletion-outcome ${a.outcome}"
+                              >${USER_DELETION_OUTCOME_LABELS[a.outcome] ?? a.outcome}</span
+                            >
+                            ${a.lastError
+                              ? html`<span class="deletion-error ${a.outcome}"
+                                  >— ${a.lastError}</span
+                                >`
+                              : nothing}
+                          </li>
+                        `
+                      )}
+                    </ul>`
+                  : nothing}
+                ${stopping && d.counts.failed > 0
+                  ? html`<p class="deletion-help">
+                      An agent whose Runtime Broker is gone stays failed until you delete it with
+                      force from its page; it is then reported as removed.
+                    </p>`
+                  : nothing}
+              `
+            : nothing}
+        </div>
+        <sl-button
+          slot="footer"
+          variant="default"
+          @click=${() => {
+            this.closeDeletionPanel();
+          }}
+          >Close</sl-button
+        >
+        <sl-button
+          slot="footer"
+          variant="default"
+          ?loading=${panel.loading}
+          @click=${() => void this.refreshDeletionPanel()}
+          >Refresh</sl-button
+        >
+        ${stopping
+          ? html`<sl-button
+              slot="footer"
+              class="retry-deletion-button"
+              variant="primary"
+              ?loading=${panel.loading}
+              @click=${() => void this.retryDeletion()}
+            >
+              <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+              Retry
+            </sl-button>`
+          : nothing}
+      </sl-dialog>
+    `;
+  }
+
   /** Lists what blocks a user delete inside the confirm dialog. */
   private renderDeleteBlockers(blockers: UserDeleteBlockers): TemplateResult {
     return html`
@@ -2135,6 +2666,13 @@ export class ScionPageAdminUsers extends LitElement {
           This user cannot be deleted while these exist. Delete these agents first, including agents
           started by them; the user's delegations end with them.
         </p>
+        ${this.forceDeleteEnabled()
+          ? html`<p class="force-delete-help">
+              Force delete ends this user's access at once (sign-in, roles, tokens, delegations),
+              stops these agents, and removes the user once every agent has stopped. It needs
+              permission to delete each of these agents.
+            </p>`
+          : nothing}
         ${blockers.agents.length > 0
           ? html`
               <div class="delete-blockers-heading">Agents</div>

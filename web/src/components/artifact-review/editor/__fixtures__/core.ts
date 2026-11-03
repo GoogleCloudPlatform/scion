@@ -74,3 +74,14 @@ export async function destroyCores(): Promise<void> {
   for (const c of open.splice(0)) await c.destroy();
   document.body.replaceChildren();
 }
+
+/** A document of the edit sweep's own fixture set. */
+export interface SweepDoc {
+  name: string;
+  in: string;
+}
+
+/** Lists, tables and normalized syntax the shared corpus lacks (sweep-docs.json). */
+export const sweepDocs: SweepDoc[] = (
+  JSON.parse(readFileSync(join(__dirname, 'sweep-docs.json'), 'utf-8')) as { cases: SweepDoc[] }
+).cases;

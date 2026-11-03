@@ -328,6 +328,20 @@ func (_u *ScheduleUpdate) SetNillableCronExpr(v *string) *ScheduleUpdate {
 	return _u
 }
 
+// SetTimeZone sets the "time_zone" field.
+func (_u *ScheduleUpdate) SetTimeZone(v string) *ScheduleUpdate {
+	_u.mutation.SetTimeZone(v)
+	return _u
+}
+
+// SetNillableTimeZone sets the "time_zone" field if the given value is not nil.
+func (_u *ScheduleUpdate) SetNillableTimeZone(v *string) *ScheduleUpdate {
+	if v != nil {
+		_u.SetTimeZone(*v)
+	}
+	return _u
+}
+
 // SetEventType sets the "event_type" field.
 func (_u *ScheduleUpdate) SetEventType(v string) *ScheduleUpdate {
 	_u.mutation.SetEventType(v)
@@ -700,6 +714,9 @@ func (_u *ScheduleUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.CronExpr(); ok {
 		_spec.SetField(schedule.FieldCronExpr, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.TimeZone(); ok {
+		_spec.SetField(schedule.FieldTimeZone, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.EventType(); ok {
 		_spec.SetField(schedule.FieldEventType, field.TypeString, value)
@@ -1076,6 +1093,20 @@ func (_u *ScheduleUpdateOne) SetCronExpr(v string) *ScheduleUpdateOne {
 func (_u *ScheduleUpdateOne) SetNillableCronExpr(v *string) *ScheduleUpdateOne {
 	if v != nil {
 		_u.SetCronExpr(*v)
+	}
+	return _u
+}
+
+// SetTimeZone sets the "time_zone" field.
+func (_u *ScheduleUpdateOne) SetTimeZone(v string) *ScheduleUpdateOne {
+	_u.mutation.SetTimeZone(v)
+	return _u
+}
+
+// SetNillableTimeZone sets the "time_zone" field if the given value is not nil.
+func (_u *ScheduleUpdateOne) SetNillableTimeZone(v *string) *ScheduleUpdateOne {
+	if v != nil {
+		_u.SetTimeZone(*v)
 	}
 	return _u
 }
@@ -1482,6 +1513,9 @@ func (_u *ScheduleUpdateOne) sqlSave(ctx context.Context) (_node *Schedule, err 
 	}
 	if value, ok := _u.mutation.CronExpr(); ok {
 		_spec.SetField(schedule.FieldCronExpr, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.TimeZone(); ok {
+		_spec.SetField(schedule.FieldTimeZone, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.EventType(); ok {
 		_spec.SetField(schedule.FieldEventType, field.TypeString, value)

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -23,6 +24,14 @@ const (
 	maxBody      = 10 << 20
 	errBodySize  = 1024
 )
+
+// servedRepoRE is one GH_REPOS entry exactly as cr-ci/runner/entrypoint.sh accepts it
+// (its pattern without the list repetition), and maxServedRepos is the entrypoint's cap
+// on the list. A launch the entrypoint would refuse (exit 2 at startup) fails here
+// instead. TestServedReposMatchEntrypoint keeps both in step with the entrypoint.
+var servedRepoRE = regexp.MustCompile(`^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$`)
+
+const maxServedRepos = 100
 
 // TokenSource returns an OAuth2 access token for Google APIs.
 type TokenSource interface {
@@ -69,8 +78,11 @@ func (l *JobsLauncher) Launch(ctx context.Context, spec LaunchSpec) (string, err
 	if spec.ClaimToken == "" || spec.RunnerName == "" || spec.JobID == 0 || len(spec.ServedRepos) == 0 || l.MediatorURL == "" {
 		return "", errors.New("launch: incomplete launch spec")
 	}
+	if len(spec.ServedRepos) > maxServedRepos {
+		return "", fmt.Errorf("launch: %d served repositories, at most %d (the runner's GH_REPOS cap)", len(spec.ServedRepos), maxServedRepos)
+	}
 	for _, r := range spec.ServedRepos {
-		if owner, name, ok := strings.Cut(r, "/"); !ok || owner == "" || name == "" || strings.ContainsAny(r, ", ") {
+		if !servedRepoRE.MatchString(r) {
 			return "", fmt.Errorf("launch: served repository %q is not owner/name", r)
 		}
 	}

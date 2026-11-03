@@ -760,6 +760,7 @@ func TestGCSLink_Allowed_ProjectTopic(t *testing.T) {
 	require.Equal(t, `attachment; filename*=UTF-8''o.txt`, rec.Header().Get("Content-Disposition"))
 	require.Equal(t, "nosniff", rec.Header().Get("X-Content-Type-Options"))
 	require.Equal(t, untrustedContentSandboxCSP, rec.Header().Get("Content-Security-Policy"))
+	require.Equal(t, untrustedContentPermissionsPolicy, rec.Header().Get("Permissions-Policy"))
 	require.Equal(t, "private, no-store", rec.Header().Get("Cache-Control"))
 	require.Equal(t, "42", rec.Header().Get("X-Scion-Gcs-Generation"))
 
@@ -1452,9 +1453,10 @@ func TestGCSLink_SAReassignment(t *testing.T) {
 	})
 	f.source.putObject("bkt", "o.txt", &storage.ObjectAttrs{Size: 2, Generation: 1}, []byte("hi"))
 
-	// Reassign the agent to sa-b.
+	// Reassign the agent to sa-b, recorded as the assignment handlers would.
 	agent.AppliedConfig.GCPIdentity = gcsAssignedIdentity(saB)
 	require.NoError(t, f.store.UpdateAgent(context.Background(), agent))
+	gcsRecordAssignment(t, f.store, agent, saB.ID)
 
 	rec := doRequestAsUser(t, f.srv, viewer, http.MethodGet, gcsRequestPath(msg.ID, "bkt", "o.txt"), nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())

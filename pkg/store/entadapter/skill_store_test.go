@@ -21,7 +21,9 @@ import (
 	"encoding/base64"
 	"fmt"
 	"testing"
+	"time"
 
+	entskillversion "github.com/GoogleCloudPlatform/scion/pkg/ent/skillversion"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -398,6 +400,148 @@ func TestSkillStore_ResolveVersion_ContentHash(t *testing.T) {
 
 	_, err = cs.ResolveSkillVersion(ctx, skillID, "sha256:notfound")
 	assert.Error(t, err)
+}
+
+// TestSkillStore_ResolveVersion_ContentHashOldestWins covers ptone/scion#6248:
+// when several versions share a content hash (the same files republished
+// under a new version number), a "sha256:" constraint resolves to the oldest
+// version (created ascending, then ID ascending), the same order as the hub's
+// v2 content-hash lookup. Each case inserts the expected winner second, so
+// insertion (rowid) order alone would return the wrong row. The test runs on
+// whichever backend enttest selects (SQLite by default, Postgres with
+// -tags integration).
+func TestSkillStore_ResolveVersion_ContentHashOldestWins(t *testing.T) {
+	const hash = "sha256:republished"
+	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	lowID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	highID := uuid.MustParse("00000000-0000-0000-0000-000000000002")
+
+	type row struct {
+		id      uuid.UUID
+		version string
+		created time.Time
+	}
+	tests := []struct {
+		name string
+		rows []row // in insertion order
+		want uuid.UUID
+	}{
+		{
+			name: "older created wins",
+			rows: []row{
+				{id: lowID, version: "2.0.0", created: base.Add(time.Hour)},
+				{id: highID, version: "1.0.0", created: base},
+			},
+			want: highID,
+		},
+		{
+			name: "equal created, lower ID wins",
+			rows: []row{
+				{id: highID, version: "2.0.0", created: base},
+				{id: lowID, version: "1.0.0", created: base},
+			},
+			want: lowID,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cs := newTestCompositeStore(t)
+			ctx := context.Background()
+
+			skillID := uuid.New().String()
+			require.NoError(t, cs.CreateSkill(ctx, &store.Skill{
+				ID:     skillID,
+				Name:   "republished",
+				Slug:   "republished",
+				Scope:  "global",
+				Status: "active",
+			}))
+
+			// CreateSkillVersion stamps Created with time.Now(), so insert
+			// through the ent client to control it.
+			for _, r := range tt.rows {
+				_, err := cs.client.SkillVersion.Create().
+					SetID(r.id).
+					SetSkillID(skillID).
+					SetVersion(r.version).
+					SetStatus(entskillversion.StatusPublished).
+					SetContentHash(hash).
+					SetCreated(r.created).
+					Save(ctx)
+				require.NoError(t, err)
+			}
+
+			sv, err := cs.ResolveSkillVersion(ctx, skillID, hash)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want.String(), sv.ID)
+		})
+	}
+}
+
+// TestSkillStore_ResolveVersion_ContentHashUsesStatusFilter: a "sha256:"
+// constraint considers the same statuses as the semver forms, published and
+// deprecated. It runs on whichever backend enttest selects (SQLite by default,
+// Postgres with -tags integration).
+func TestSkillStore_ResolveVersion_ContentHashUsesStatusFilter(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+
+	skillID := uuid.New().String()
+	require.NoError(t, cs.CreateSkill(ctx, &store.Skill{
+		ID:     skillID,
+		Name:   "hash-status",
+		Slug:   "hash-status",
+		Scope:  "global",
+		Status: "active",
+	}))
+
+	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	create := func(version string, status entskillversion.Status, hash string, created time.Time) uuid.UUID {
+		t.Helper()
+		e, err := cs.client.SkillVersion.Create().
+			SetSkillID(skillID).
+			SetVersion(version).
+			SetStatus(status).
+			SetContentHash(hash).
+			SetCreated(created).
+			Save(ctx)
+		require.NoError(t, err)
+		return e.ID
+	}
+
+	t.Run("each status with its own hash", func(t *testing.T) {
+		for i, tc := range []struct {
+			status   entskillversion.Status
+			resolves bool
+		}{
+			{entskillversion.StatusPublished, true},
+			{entskillversion.StatusDeprecated, true},
+			{entskillversion.StatusDraft, false},
+			{entskillversion.StatusArchived, false},
+		} {
+			hash := "sha256:status-" + string(tc.status)
+			id := create(fmt.Sprintf("1.%d.0", i), tc.status, hash, base)
+
+			sv, err := cs.ResolveSkillVersion(ctx, skillID, hash)
+			if tc.resolves {
+				require.NoError(t, err, tc.status)
+				assert.Equal(t, id.String(), sv.ID, tc.status)
+			} else {
+				assert.ErrorIs(t, err, store.ErrNotFound, tc.status)
+			}
+		}
+	})
+
+	t.Run("older draft and archived versions sharing a hash are skipped", func(t *testing.T) {
+		const hash = "sha256:shared-status"
+		create("2.0.0", entskillversion.StatusDraft, hash, base)
+		create("2.1.0", entskillversion.StatusArchived, hash, base.Add(time.Minute))
+		published := create("2.2.0", entskillversion.StatusPublished, hash, base.Add(time.Hour))
+
+		sv, err := cs.ResolveSkillVersion(ctx, skillID, hash)
+		require.NoError(t, err)
+		assert.Equal(t, published.String(), sv.ID)
+	})
 }
 
 func TestSkillStore_ResolveVersion_ExcludesDrafts(t *testing.T) {

@@ -184,11 +184,14 @@ func (s *Server) handleAdminAllowListByEmail(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		var lastOwnerErr *lastProjectOwnerDeleteError
 		var blockedErr *userDeleteBlockedError
+		var inProgressErr *userDeletionInProgressError
 		switch {
 		case errors.As(err, &lastOwnerErr):
 			writeLastProjectOwnerDeleteError(w, lastOwnerErr)
 		case errors.As(err, &blockedErr):
 			writeUserDeleteBlockedError(w, blockedErr)
+		case errors.As(err, &inProgressErr):
+			writeUserDeletionInProgress(w, inProgressErr)
 		case errors.Is(err, errUserRoleBindingsChanged):
 			writeUserRoleBindingsChangedError(w)
 		case errors.Is(err, errAllowListUserNotFound):

@@ -46,6 +46,8 @@
 # Usage: verify-base-contract.sh
 #   GO_MIN_VERSION   minimum acceptable Go (default 1.26.1; see go.mod)
 #   NODE_MIN_VERSION minimum acceptable Node major (default 24)
+#   HELM_VERSION     exact helm version the build pinned (unset: presence and
+#                    a working binary are checked, the version is not)
 #   TARGETARCH       BuildKit automatic arg — the arch being built (e.g. arm64)
 #   BUILDARCH        BuildKit automatic arg — the arch doing the building
 #
@@ -442,6 +444,32 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Playwright WebKit/Firefox system libraries — installed by
+# install-core-toolchain.sh playwright-deps on the suites it has a list for
+# (keyed on ID/VERSION_ID; keep this case in step with playwright_deps_for_os).
+# Three sentinels, one per heavy group, catch the step being dropped; the full
+# list is not re-checked here.
+# ---------------------------------------------------------------------------
+# shellcheck source=/dev/null
+pw_os="$(. /etc/os-release 2>/dev/null && printf '%s%s' "${ID:-}" "${VERSION_ID:-}")"
+case "$pw_os" in
+debian13)
+  for pw_pkg in libgtk-4-1 gstreamer1.0-plugins-bad libavcodec61; do
+    # shellcheck disable=SC2016 # ${Status} is a dpkg-query field, not a shell variable
+    if dpkg-query -W -f='${Status}' "$pw_pkg" 2>/dev/null | grep -q 'install ok installed'; then
+      ok "Playwright library package $pw_pkg installed"
+    else
+      fail "$pw_pkg not installed — run install-core-toolchain.sh playwright-deps;
+      without it Playwright's WebKit and Firefox cannot start for non-root agents"
+    fi
+  done
+  ;;
+*)
+  note "no Playwright WebKit/Firefox library list for '${pw_os:-unknown}'; not checked"
+  ;;
+esac
+
+# ---------------------------------------------------------------------------
 # Timezone data — the agent TZ (defaulted to UTC by sciontool's harness
 # provisioning, cmd/sciontool/commands/harness.go) only takes effect if the
 # zone files exist. glibc treats an unknown zone as UTC without any error, so
@@ -508,6 +536,35 @@ else
 fi
 
 need_cmd npm "global harness installs (chrome-devtools-mcp, @playwright/cli)"
+
+# helm — an exact pin, not a floor (install-core-toolchain.sh step_helm): chart
+# work on deploy/helm/scion-hub regenerates golden output, and two helm
+# versions can render different manifests. The Dockerfiles forward the pin as
+# HELM_VERSION; a running container re-checked without it gets presence and a
+# working binary only, with a note.
+if command -v helm >/dev/null 2>&1; then
+  helm_path="$(command -v helm)"
+  helm_ver="$(helm version --template '{{.Version}}' 2>/dev/null | sed 's/^v//')"
+  helm_want="${HELM_VERSION:-}"
+  helm_want="${helm_want#v}"
+  if [ -z "$helm_ver" ]; then
+    fail "helm at $helm_path does not run ('helm version' failed) — chart
+      rendering (deploy/helm/scion-hub) needs a working helm"
+  elif [ -z "$helm_want" ]; then
+    ok "helm $helm_ver present ($helm_path)"
+    note "HELM_VERSION unset, so the pinned helm version is not checked"
+  elif [ "$helm_ver" = "$helm_want" ]; then
+    ok "helm $helm_ver = pinned $helm_want ($helm_path)"
+  else
+    fail "helm at $helm_path is $helm_ver, expected the pinned $helm_want —
+      another copy is earlier on PATH, or the pin and the install disagree;
+      two helm versions can render different manifests for
+      deploy/helm/scion-hub"
+  fi
+else
+  fail "helm missing — chart work on deploy/helm/scion-hub (pinned to match
+      .github/workflows/chart-ci.yml)"
+fi
 
 echo "--- end base contract ---"
 

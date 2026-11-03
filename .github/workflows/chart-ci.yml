@@ -38,9 +38,12 @@ on:
 permissions:
   contents: read
 
+# Fork CI gate (hack/check-fork-ci-gate.sh, cr-ci/workflows/README.md): on push
+# and schedule every job runs only in GoogleCloudPlatform/scion; forks stage PRs.
 jobs:
   helm-lint:
     name: Helm Lint
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
@@ -68,6 +71,7 @@ jobs:
 
   helm-template:
     name: Helm Template (${{ matrix.name }})
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -144,6 +148,7 @@ jobs:
 
   schema-validation:
     name: Schema Validation
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
@@ -179,6 +184,7 @@ jobs:
 
   yamllint:
     name: YAML Lint
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code

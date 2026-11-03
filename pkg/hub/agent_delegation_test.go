@@ -340,7 +340,7 @@ func TestAgentDelegationIssuance_Refusals(t *testing.T) {
 	})
 	t.Run("mintable but not delegable", func(t *testing.T) {
 		body := hubRead()
-		body["permissions"] = []string{"agent:list"}
+		body["permissions"] = []string{"harness_config:list"}
 		rec := f.issue(t, alice, f.agentA.ID, body)
 		adtAssertAPIError(t, rec, http.StatusForbidden, errCodePermissionNotDelegable)
 	})
@@ -419,6 +419,34 @@ func TestAgentDelegationIssuance_Refusals(t *testing.T) {
 	})
 
 	assert.Empty(t, adtAudits(t, f.store, mutationAgentDelegationGrantCreate), "no refused request wrote a grant")
+}
+
+// TestAgentDelegationIssuance_HubDenialNamesSelector pins the eligibility
+// refusal shapes of delegation issuance: a hub-boundary selector the issuer
+// holds through no role is refused with 403 scope_violation naming the
+// selector and authority_required, and a project-boundary request for a
+// project the issuer cannot reach gets the bare 403 with no details. No
+// grant is issued either way.
+func TestAgentDelegationIssuance_HubDenialNamesSelector(t *testing.T) {
+	f := newADTFixture(t, "adt-hubdeny")
+	alice := f.session(t, f.alice)
+
+	rec := f.issue(t, alice, f.agentA.ID, map[string]interface{}{
+		"boundary": map[string]string{"kind": "hub"}, "permissions": []string{"agent:read", "hub_config:read"}, "name": "n",
+	})
+	apiErr := adtAssertAPIError(t, rec, http.StatusForbidden, errCodeScopeViolation)
+	assert.Equal(t, "hub_config:read", apiErr.Details["selector"])
+	assert.Equal(t, string(MintDenialAuthorityRequired), apiErr.Details["reason"])
+
+	rec = f.issue(t, alice, f.agentA.ID, map[string]interface{}{
+		"boundary":    map[string]string{"kind": "project", "projectId": tid("adt-hubdeny-no-project")},
+		"permissions": []string{"agent:read"}, "name": "n",
+	})
+	apiErr = adtAssertAPIError(t, rec, http.StatusForbidden, ErrCodeForbidden)
+	assert.Empty(t, apiErr.Details)
+	assert.NotContains(t, rec.Body.String(), "selector")
+
+	assert.Empty(t, adtAudits(t, f.store, mutationAgentDelegationGrantCreate))
 }
 
 func TestAgentDelegationIssuance_AuditFailureRollsBack(t *testing.T) {
@@ -652,7 +680,8 @@ func TestAgentDelegation_RouteGateDeniesEverythingElse(t *testing.T) {
 	cases := []struct{ method, path string }{
 		{http.MethodPatch, "/api/v1/agents/" + f.agentB.ID},
 		{http.MethodDelete, "/api/v1/agents/" + f.agentB.ID},
-		{http.MethodGet, "/api/v1/agents"},
+		// GET /api/v1/agents is admitted (agent.list); other methods on it are not.
+		{http.MethodHead, "/api/v1/agents"},
 		{http.MethodPost, "/api/v1/agents/" + f.agentB.ID + "/pty"},
 		{http.MethodGet, "/api/v1/agents/" + f.agentB.ID + "/pty/"},
 		{http.MethodPost, "/api/v1/agents/" + f.agentB.ID + "/env"},
@@ -696,6 +725,16 @@ func TestAgentDelegation_RouteGateDeniesEverythingElse(t *testing.T) {
 		})
 	}
 	assert.Len(t, adtAudits(t, f.store, mutationAgentDelegationCredentialIssue), rowsBefore, "no denied request issued a credential")
+	// The hub agent list is admitted: a grant without agent:list gets an empty list, not a refusal.
+	rec := f.do(t, http.MethodGet, "/api/v1/agents", nil, adtBearer(cred.Token))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var list struct {
+		Agents     []json.RawMessage `json:"agents"`
+		TotalCount int               `json:"totalCount"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &list))
+	assert.Empty(t, list.Agents)
+	assert.Zero(t, list.TotalCount)
 	g, err := f.store.GetAgentDelegationGrant(context.Background(), grant.ID)
 	require.NoError(t, err)
 	assert.Nil(t, g.RevokedAt, "no denied request revoked the grant")

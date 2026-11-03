@@ -180,3 +180,49 @@ func TestAuthenticatedHTTPClient_PreservesCookieJar(t *testing.T) {
 		})
 	}
 }
+
+func TestAuthenticatedHTTPClient_NilHeader(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("User-Agent"); got != "test-client" {
+			t.Errorf("User-Agent = %q, want %q", got, "test-client")
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Errorf("Authorization = %q, want %q", got, "Bearer test-token")
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := authenticatedClientForTest(t, server.Client(), false, server.URL)
+	u, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := &http.Request{
+		Method: http.MethodGet,
+		URL:    u,
+		Header: nil,
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("client.Do with nil header: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	// Calling RoundTrip directly with nil header
+	rt := client.Transport
+	reqDirect := &http.Request{
+		Method: http.MethodGet,
+		URL:    u,
+		Header: nil,
+	}
+	respDirect, err := rt.RoundTrip(reqDirect)
+	if err != nil {
+		t.Fatalf("RoundTrip with nil header: %v", err)
+	}
+	_ = respDirect.Body.Close()
+
+	if _, err := rt.RoundTrip(nil); err == nil {
+		t.Error("RoundTrip(nil) want error, got nil")
+	}
+}

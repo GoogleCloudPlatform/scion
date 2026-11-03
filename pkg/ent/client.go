@@ -25,6 +25,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentdelegationgrant"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agenthold"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentidentitykey"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentlifecyclecursor"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentlifecycleoutbox"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentrecovery"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentreincarnation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentserviceaccountassignment"
@@ -38,6 +40,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokertargetinventory"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatretentioncursor"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatretentionrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitprincipalepoch"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitsession"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
@@ -101,6 +105,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/userdeletion"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/userdeletionagent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userterminalworkspace"
 )
 
@@ -127,6 +133,10 @@ type Client struct {
 	AgentHold *AgentHoldClient
 	// AgentIdentityKey is the client for interacting with the AgentIdentityKey builders.
 	AgentIdentityKey *AgentIdentityKeyClient
+	// AgentLifecycleCursor is the client for interacting with the AgentLifecycleCursor builders.
+	AgentLifecycleCursor *AgentLifecycleCursorClient
+	// AgentLifecycleOutbox is the client for interacting with the AgentLifecycleOutbox builders.
+	AgentLifecycleOutbox *AgentLifecycleOutboxClient
 	// AgentRecovery is the client for interacting with the AgentRecovery builders.
 	AgentRecovery *AgentRecoveryClient
 	// AgentReincarnation is the client for interacting with the AgentReincarnation builders.
@@ -153,6 +163,10 @@ type Client struct {
 	BrokerTargetInventory *BrokerTargetInventoryClient
 	// ChatLinkCode is the client for interacting with the ChatLinkCode builders.
 	ChatLinkCode *ChatLinkCodeClient
+	// ChatRetentionCursor is the client for interacting with the ChatRetentionCursor builders.
+	ChatRetentionCursor *ChatRetentionCursorClient
+	// ChatRetentionRun is the client for interacting with the ChatRetentionRun builders.
+	ChatRetentionRun *ChatRetentionRunClient
 	// ConduitPrincipalEpoch is the client for interacting with the ConduitPrincipalEpoch builders.
 	ConduitPrincipalEpoch *ConduitPrincipalEpochClient
 	// ConduitSession is the client for interacting with the ConduitSession builders.
@@ -279,6 +293,10 @@ type Client struct {
 	User *UserClient
 	// UserAccessToken is the client for interacting with the UserAccessToken builders.
 	UserAccessToken *UserAccessTokenClient
+	// UserDeletion is the client for interacting with the UserDeletion builders.
+	UserDeletion *UserDeletionClient
+	// UserDeletionAgent is the client for interacting with the UserDeletionAgent builders.
+	UserDeletionAgent *UserDeletionAgentClient
 	// UserTerminalWorkspace is the client for interacting with the UserTerminalWorkspace builders.
 	UserTerminalWorkspace *UserTerminalWorkspaceClient
 }
@@ -301,6 +319,8 @@ func (c *Client) init() {
 	c.AgentDelegationGrant = NewAgentDelegationGrantClient(c.config)
 	c.AgentHold = NewAgentHoldClient(c.config)
 	c.AgentIdentityKey = NewAgentIdentityKeyClient(c.config)
+	c.AgentLifecycleCursor = NewAgentLifecycleCursorClient(c.config)
+	c.AgentLifecycleOutbox = NewAgentLifecycleOutboxClient(c.config)
 	c.AgentRecovery = NewAgentRecoveryClient(c.config)
 	c.AgentReincarnation = NewAgentReincarnationClient(c.config)
 	c.AgentServiceAccountAssignment = NewAgentServiceAccountAssignmentClient(c.config)
@@ -314,6 +334,8 @@ func (c *Client) init() {
 	c.BrokerSetting = NewBrokerSettingClient(c.config)
 	c.BrokerTargetInventory = NewBrokerTargetInventoryClient(c.config)
 	c.ChatLinkCode = NewChatLinkCodeClient(c.config)
+	c.ChatRetentionCursor = NewChatRetentionCursorClient(c.config)
+	c.ChatRetentionRun = NewChatRetentionRunClient(c.config)
 	c.ConduitPrincipalEpoch = NewConduitPrincipalEpochClient(c.config)
 	c.ConduitSession = NewConduitSessionClient(c.config)
 	c.Conversation = NewConversationClient(c.config)
@@ -377,6 +399,8 @@ func (c *Client) init() {
 	c.UsageReservation = NewUsageReservationClient(c.config)
 	c.User = NewUserClient(c.config)
 	c.UserAccessToken = NewUserAccessTokenClient(c.config)
+	c.UserDeletion = NewUserDeletionClient(c.config)
+	c.UserDeletionAgent = NewUserDeletionAgentClient(c.config)
 	c.UserTerminalWorkspace = NewUserTerminalWorkspaceClient(c.config)
 }
 
@@ -479,6 +503,8 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		AgentDelegationGrant:          NewAgentDelegationGrantClient(cfg),
 		AgentHold:                     NewAgentHoldClient(cfg),
 		AgentIdentityKey:              NewAgentIdentityKeyClient(cfg),
+		AgentLifecycleCursor:          NewAgentLifecycleCursorClient(cfg),
+		AgentLifecycleOutbox:          NewAgentLifecycleOutboxClient(cfg),
 		AgentRecovery:                 NewAgentRecoveryClient(cfg),
 		AgentReincarnation:            NewAgentReincarnationClient(cfg),
 		AgentServiceAccountAssignment: NewAgentServiceAccountAssignmentClient(cfg),
@@ -492,6 +518,8 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		BrokerSetting:                 NewBrokerSettingClient(cfg),
 		BrokerTargetInventory:         NewBrokerTargetInventoryClient(cfg),
 		ChatLinkCode:                  NewChatLinkCodeClient(cfg),
+		ChatRetentionCursor:           NewChatRetentionCursorClient(cfg),
+		ChatRetentionRun:              NewChatRetentionRunClient(cfg),
 		ConduitPrincipalEpoch:         NewConduitPrincipalEpochClient(cfg),
 		ConduitSession:                NewConduitSessionClient(cfg),
 		Conversation:                  NewConversationClient(cfg),
@@ -555,6 +583,8 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		UsageReservation:              NewUsageReservationClient(cfg),
 		User:                          NewUserClient(cfg),
 		UserAccessToken:               NewUserAccessTokenClient(cfg),
+		UserDeletion:                  NewUserDeletionClient(cfg),
+		UserDeletionAgent:             NewUserDeletionAgentClient(cfg),
 		UserTerminalWorkspace:         NewUserTerminalWorkspaceClient(cfg),
 	}, nil
 }
@@ -584,6 +614,8 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		AgentDelegationGrant:          NewAgentDelegationGrantClient(cfg),
 		AgentHold:                     NewAgentHoldClient(cfg),
 		AgentIdentityKey:              NewAgentIdentityKeyClient(cfg),
+		AgentLifecycleCursor:          NewAgentLifecycleCursorClient(cfg),
+		AgentLifecycleOutbox:          NewAgentLifecycleOutboxClient(cfg),
 		AgentRecovery:                 NewAgentRecoveryClient(cfg),
 		AgentReincarnation:            NewAgentReincarnationClient(cfg),
 		AgentServiceAccountAssignment: NewAgentServiceAccountAssignmentClient(cfg),
@@ -597,6 +629,8 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		BrokerSetting:                 NewBrokerSettingClient(cfg),
 		BrokerTargetInventory:         NewBrokerTargetInventoryClient(cfg),
 		ChatLinkCode:                  NewChatLinkCodeClient(cfg),
+		ChatRetentionCursor:           NewChatRetentionCursorClient(cfg),
+		ChatRetentionRun:              NewChatRetentionRunClient(cfg),
 		ConduitPrincipalEpoch:         NewConduitPrincipalEpochClient(cfg),
 		ConduitSession:                NewConduitSessionClient(cfg),
 		Conversation:                  NewConversationClient(cfg),
@@ -660,6 +694,8 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		UsageReservation:              NewUsageReservationClient(cfg),
 		User:                          NewUserClient(cfg),
 		UserAccessToken:               NewUserAccessTokenClient(cfg),
+		UserDeletion:                  NewUserDeletionClient(cfg),
+		UserDeletionAgent:             NewUserDeletionAgentClient(cfg),
 		UserTerminalWorkspace:         NewUserTerminalWorkspaceClient(cfg),
 	}, nil
 }
@@ -692,27 +728,30 @@ func (c *Client) Use(hooks ...Hook) {
 	for _, n := range []interface{ Use(...Hook) }{
 		c.AccessConstraint, c.AccessConstraintHistory, c.AccessPolicy, c.Agent,
 		c.AgentCredential, c.AgentDelegatedCredential, c.AgentDelegationGrant,
-		c.AgentHold, c.AgentIdentityKey, c.AgentRecovery, c.AgentReincarnation,
+		c.AgentHold, c.AgentIdentityKey, c.AgentLifecycleCursor,
+		c.AgentLifecycleOutbox, c.AgentRecovery, c.AgentReincarnation,
 		c.AgentServiceAccountAssignment, c.AgentSessionMetrics, c.AllowListEntry,
 		c.ApiKey, c.BrokerDispatch, c.BrokerJoinToken, c.BrokerReportedRun,
 		c.BrokerSecret, c.BrokerSetting, c.BrokerTargetInventory, c.ChatLinkCode,
-		c.ConduitPrincipalEpoch, c.ConduitSession, c.Conversation,
-		c.ConversationParticipant, c.DelegationAdoption, c.DelegationEdge,
-		c.EntitlementBinding, c.EnvVar, c.ExternalIdentity, c.GCPServiceAccount,
-		c.GitHubResolutionCache, c.GithubInstallation, c.Group, c.GroupMembership,
-		c.HarnessConfig, c.HubEncryptionMigration, c.HubEncryptionPolicy,
-		c.HubInstance, c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate,
-		c.InviteCode, c.LaunchReaperState, c.LifecycleHook, c.LifecycleHookAgentPhase,
-		c.LimitDefinition, c.MaintenanceOperation, c.MaintenanceOperationRun,
-		c.MembershipLossCheck, c.Message, c.MessageAddressee, c.MutationAudit,
-		c.NonceCache, c.Notification, c.NotificationSubscription, c.PolicyBinding,
-		c.Project, c.ProjectContributor, c.ProjectPreStartHook, c.ProjectSyncState,
-		c.ProjectVisitorExclusion, c.ProjectVisitorRule, c.RelayInstance,
-		c.RoleBinding, c.RoleDefinition, c.RuntimeBroker, c.Schedule, c.ScheduledEvent,
-		c.Secret, c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
-		c.SubscriptionTemplate, c.Template, c.TestIdentityDelegation,
-		c.TestIdentityLoginCode, c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember,
-		c.UsageReservation, c.User, c.UserAccessToken, c.UserTerminalWorkspace,
+		c.ChatRetentionCursor, c.ChatRetentionRun, c.ConduitPrincipalEpoch,
+		c.ConduitSession, c.Conversation, c.ConversationParticipant,
+		c.DelegationAdoption, c.DelegationEdge, c.EntitlementBinding, c.EnvVar,
+		c.ExternalIdentity, c.GCPServiceAccount, c.GitHubResolutionCache,
+		c.GithubInstallation, c.Group, c.GroupMembership, c.HarnessConfig,
+		c.HubEncryptionMigration, c.HubEncryptionPolicy, c.HubInstance, c.HubSetting,
+		c.IntegrationConfig, c.IntegrationUpdate, c.InviteCode, c.LaunchReaperState,
+		c.LifecycleHook, c.LifecycleHookAgentPhase, c.LimitDefinition,
+		c.MaintenanceOperation, c.MaintenanceOperationRun, c.MembershipLossCheck,
+		c.Message, c.MessageAddressee, c.MutationAudit, c.NonceCache, c.Notification,
+		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
+		c.ProjectPreStartHook, c.ProjectSyncState, c.ProjectVisitorExclusion,
+		c.ProjectVisitorRule, c.RelayInstance, c.RoleBinding, c.RoleDefinition,
+		c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret, c.Skill,
+		c.SkillInjection, c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate,
+		c.Template, c.TestIdentityDelegation, c.TestIdentityLoginCode,
+		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.UsageReservation,
+		c.User, c.UserAccessToken, c.UserDeletion, c.UserDeletionAgent,
+		c.UserTerminalWorkspace,
 	} {
 		n.Use(hooks...)
 	}
@@ -724,27 +763,30 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 	for _, n := range []interface{ Intercept(...Interceptor) }{
 		c.AccessConstraint, c.AccessConstraintHistory, c.AccessPolicy, c.Agent,
 		c.AgentCredential, c.AgentDelegatedCredential, c.AgentDelegationGrant,
-		c.AgentHold, c.AgentIdentityKey, c.AgentRecovery, c.AgentReincarnation,
+		c.AgentHold, c.AgentIdentityKey, c.AgentLifecycleCursor,
+		c.AgentLifecycleOutbox, c.AgentRecovery, c.AgentReincarnation,
 		c.AgentServiceAccountAssignment, c.AgentSessionMetrics, c.AllowListEntry,
 		c.ApiKey, c.BrokerDispatch, c.BrokerJoinToken, c.BrokerReportedRun,
 		c.BrokerSecret, c.BrokerSetting, c.BrokerTargetInventory, c.ChatLinkCode,
-		c.ConduitPrincipalEpoch, c.ConduitSession, c.Conversation,
-		c.ConversationParticipant, c.DelegationAdoption, c.DelegationEdge,
-		c.EntitlementBinding, c.EnvVar, c.ExternalIdentity, c.GCPServiceAccount,
-		c.GitHubResolutionCache, c.GithubInstallation, c.Group, c.GroupMembership,
-		c.HarnessConfig, c.HubEncryptionMigration, c.HubEncryptionPolicy,
-		c.HubInstance, c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate,
-		c.InviteCode, c.LaunchReaperState, c.LifecycleHook, c.LifecycleHookAgentPhase,
-		c.LimitDefinition, c.MaintenanceOperation, c.MaintenanceOperationRun,
-		c.MembershipLossCheck, c.Message, c.MessageAddressee, c.MutationAudit,
-		c.NonceCache, c.Notification, c.NotificationSubscription, c.PolicyBinding,
-		c.Project, c.ProjectContributor, c.ProjectPreStartHook, c.ProjectSyncState,
-		c.ProjectVisitorExclusion, c.ProjectVisitorRule, c.RelayInstance,
-		c.RoleBinding, c.RoleDefinition, c.RuntimeBroker, c.Schedule, c.ScheduledEvent,
-		c.Secret, c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
-		c.SubscriptionTemplate, c.Template, c.TestIdentityDelegation,
-		c.TestIdentityLoginCode, c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember,
-		c.UsageReservation, c.User, c.UserAccessToken, c.UserTerminalWorkspace,
+		c.ChatRetentionCursor, c.ChatRetentionRun, c.ConduitPrincipalEpoch,
+		c.ConduitSession, c.Conversation, c.ConversationParticipant,
+		c.DelegationAdoption, c.DelegationEdge, c.EntitlementBinding, c.EnvVar,
+		c.ExternalIdentity, c.GCPServiceAccount, c.GitHubResolutionCache,
+		c.GithubInstallation, c.Group, c.GroupMembership, c.HarnessConfig,
+		c.HubEncryptionMigration, c.HubEncryptionPolicy, c.HubInstance, c.HubSetting,
+		c.IntegrationConfig, c.IntegrationUpdate, c.InviteCode, c.LaunchReaperState,
+		c.LifecycleHook, c.LifecycleHookAgentPhase, c.LimitDefinition,
+		c.MaintenanceOperation, c.MaintenanceOperationRun, c.MembershipLossCheck,
+		c.Message, c.MessageAddressee, c.MutationAudit, c.NonceCache, c.Notification,
+		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
+		c.ProjectPreStartHook, c.ProjectSyncState, c.ProjectVisitorExclusion,
+		c.ProjectVisitorRule, c.RelayInstance, c.RoleBinding, c.RoleDefinition,
+		c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret, c.Skill,
+		c.SkillInjection, c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate,
+		c.Template, c.TestIdentityDelegation, c.TestIdentityLoginCode,
+		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.UsageReservation,
+		c.User, c.UserAccessToken, c.UserDeletion, c.UserDeletionAgent,
+		c.UserTerminalWorkspace,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -771,6 +813,10 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.AgentHold.mutate(ctx, m)
 	case *AgentIdentityKeyMutation:
 		return c.AgentIdentityKey.mutate(ctx, m)
+	case *AgentLifecycleCursorMutation:
+		return c.AgentLifecycleCursor.mutate(ctx, m)
+	case *AgentLifecycleOutboxMutation:
+		return c.AgentLifecycleOutbox.mutate(ctx, m)
 	case *AgentRecoveryMutation:
 		return c.AgentRecovery.mutate(ctx, m)
 	case *AgentReincarnationMutation:
@@ -797,6 +843,10 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.BrokerTargetInventory.mutate(ctx, m)
 	case *ChatLinkCodeMutation:
 		return c.ChatLinkCode.mutate(ctx, m)
+	case *ChatRetentionCursorMutation:
+		return c.ChatRetentionCursor.mutate(ctx, m)
+	case *ChatRetentionRunMutation:
+		return c.ChatRetentionRun.mutate(ctx, m)
 	case *ConduitPrincipalEpochMutation:
 		return c.ConduitPrincipalEpoch.mutate(ctx, m)
 	case *ConduitSessionMutation:
@@ -923,6 +973,10 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.User.mutate(ctx, m)
 	case *UserAccessTokenMutation:
 		return c.UserAccessToken.mutate(ctx, m)
+	case *UserDeletionMutation:
+		return c.UserDeletion.mutate(ctx, m)
+	case *UserDeletionAgentMutation:
+		return c.UserDeletionAgent.mutate(ctx, m)
 	case *UserTerminalWorkspaceMutation:
 		return c.UserTerminalWorkspace.mutate(ctx, m)
 	default:
@@ -2268,6 +2322,272 @@ func (c *AgentIdentityKeyClient) mutate(ctx context.Context, m *AgentIdentityKey
 		return (&AgentIdentityKeyDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown AgentIdentityKey mutation op: %q", m.Op())
+	}
+}
+
+// AgentLifecycleCursorClient is a client for the AgentLifecycleCursor schema.
+type AgentLifecycleCursorClient struct {
+	config
+}
+
+// NewAgentLifecycleCursorClient returns a client for the AgentLifecycleCursor from the given config.
+func NewAgentLifecycleCursorClient(c config) *AgentLifecycleCursorClient {
+	return &AgentLifecycleCursorClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `agentlifecyclecursor.Hooks(f(g(h())))`.
+func (c *AgentLifecycleCursorClient) Use(hooks ...Hook) {
+	c.hooks.AgentLifecycleCursor = append(c.hooks.AgentLifecycleCursor, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `agentlifecyclecursor.Intercept(f(g(h())))`.
+func (c *AgentLifecycleCursorClient) Intercept(interceptors ...Interceptor) {
+	c.inters.AgentLifecycleCursor = append(c.inters.AgentLifecycleCursor, interceptors...)
+}
+
+// Create returns a builder for creating a AgentLifecycleCursor entity.
+func (c *AgentLifecycleCursorClient) Create() *AgentLifecycleCursorCreate {
+	mutation := newAgentLifecycleCursorMutation(c.config, OpCreate)
+	return &AgentLifecycleCursorCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of AgentLifecycleCursor entities.
+func (c *AgentLifecycleCursorClient) CreateBulk(builders ...*AgentLifecycleCursorCreate) *AgentLifecycleCursorCreateBulk {
+	return &AgentLifecycleCursorCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *AgentLifecycleCursorClient) MapCreateBulk(slice any, setFunc func(*AgentLifecycleCursorCreate, int)) *AgentLifecycleCursorCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &AgentLifecycleCursorCreateBulk{err: fmt.Errorf("calling to AgentLifecycleCursorClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*AgentLifecycleCursorCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &AgentLifecycleCursorCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for AgentLifecycleCursor.
+func (c *AgentLifecycleCursorClient) Update() *AgentLifecycleCursorUpdate {
+	mutation := newAgentLifecycleCursorMutation(c.config, OpUpdate)
+	return &AgentLifecycleCursorUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *AgentLifecycleCursorClient) UpdateOne(_m *AgentLifecycleCursor) *AgentLifecycleCursorUpdateOne {
+	mutation := newAgentLifecycleCursorMutation(c.config, OpUpdateOne, withAgentLifecycleCursor(_m))
+	return &AgentLifecycleCursorUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *AgentLifecycleCursorClient) UpdateOneID(id uuid.UUID) *AgentLifecycleCursorUpdateOne {
+	mutation := newAgentLifecycleCursorMutation(c.config, OpUpdateOne, withAgentLifecycleCursorID(id))
+	return &AgentLifecycleCursorUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for AgentLifecycleCursor.
+func (c *AgentLifecycleCursorClient) Delete() *AgentLifecycleCursorDelete {
+	mutation := newAgentLifecycleCursorMutation(c.config, OpDelete)
+	return &AgentLifecycleCursorDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *AgentLifecycleCursorClient) DeleteOne(_m *AgentLifecycleCursor) *AgentLifecycleCursorDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *AgentLifecycleCursorClient) DeleteOneID(id uuid.UUID) *AgentLifecycleCursorDeleteOne {
+	builder := c.Delete().Where(agentlifecyclecursor.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &AgentLifecycleCursorDeleteOne{builder}
+}
+
+// Query returns a query builder for AgentLifecycleCursor.
+func (c *AgentLifecycleCursorClient) Query() *AgentLifecycleCursorQuery {
+	return &AgentLifecycleCursorQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeAgentLifecycleCursor},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a AgentLifecycleCursor entity by its id.
+func (c *AgentLifecycleCursorClient) Get(ctx context.Context, id uuid.UUID) (*AgentLifecycleCursor, error) {
+	return c.Query().Where(agentlifecyclecursor.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *AgentLifecycleCursorClient) GetX(ctx context.Context, id uuid.UUID) *AgentLifecycleCursor {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *AgentLifecycleCursorClient) Hooks() []Hook {
+	return c.hooks.AgentLifecycleCursor
+}
+
+// Interceptors returns the client interceptors.
+func (c *AgentLifecycleCursorClient) Interceptors() []Interceptor {
+	return c.inters.AgentLifecycleCursor
+}
+
+func (c *AgentLifecycleCursorClient) mutate(ctx context.Context, m *AgentLifecycleCursorMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&AgentLifecycleCursorCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&AgentLifecycleCursorUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&AgentLifecycleCursorUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&AgentLifecycleCursorDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown AgentLifecycleCursor mutation op: %q", m.Op())
+	}
+}
+
+// AgentLifecycleOutboxClient is a client for the AgentLifecycleOutbox schema.
+type AgentLifecycleOutboxClient struct {
+	config
+}
+
+// NewAgentLifecycleOutboxClient returns a client for the AgentLifecycleOutbox from the given config.
+func NewAgentLifecycleOutboxClient(c config) *AgentLifecycleOutboxClient {
+	return &AgentLifecycleOutboxClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `agentlifecycleoutbox.Hooks(f(g(h())))`.
+func (c *AgentLifecycleOutboxClient) Use(hooks ...Hook) {
+	c.hooks.AgentLifecycleOutbox = append(c.hooks.AgentLifecycleOutbox, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `agentlifecycleoutbox.Intercept(f(g(h())))`.
+func (c *AgentLifecycleOutboxClient) Intercept(interceptors ...Interceptor) {
+	c.inters.AgentLifecycleOutbox = append(c.inters.AgentLifecycleOutbox, interceptors...)
+}
+
+// Create returns a builder for creating a AgentLifecycleOutbox entity.
+func (c *AgentLifecycleOutboxClient) Create() *AgentLifecycleOutboxCreate {
+	mutation := newAgentLifecycleOutboxMutation(c.config, OpCreate)
+	return &AgentLifecycleOutboxCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of AgentLifecycleOutbox entities.
+func (c *AgentLifecycleOutboxClient) CreateBulk(builders ...*AgentLifecycleOutboxCreate) *AgentLifecycleOutboxCreateBulk {
+	return &AgentLifecycleOutboxCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *AgentLifecycleOutboxClient) MapCreateBulk(slice any, setFunc func(*AgentLifecycleOutboxCreate, int)) *AgentLifecycleOutboxCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &AgentLifecycleOutboxCreateBulk{err: fmt.Errorf("calling to AgentLifecycleOutboxClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*AgentLifecycleOutboxCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &AgentLifecycleOutboxCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for AgentLifecycleOutbox.
+func (c *AgentLifecycleOutboxClient) Update() *AgentLifecycleOutboxUpdate {
+	mutation := newAgentLifecycleOutboxMutation(c.config, OpUpdate)
+	return &AgentLifecycleOutboxUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *AgentLifecycleOutboxClient) UpdateOne(_m *AgentLifecycleOutbox) *AgentLifecycleOutboxUpdateOne {
+	mutation := newAgentLifecycleOutboxMutation(c.config, OpUpdateOne, withAgentLifecycleOutbox(_m))
+	return &AgentLifecycleOutboxUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *AgentLifecycleOutboxClient) UpdateOneID(id int64) *AgentLifecycleOutboxUpdateOne {
+	mutation := newAgentLifecycleOutboxMutation(c.config, OpUpdateOne, withAgentLifecycleOutboxID(id))
+	return &AgentLifecycleOutboxUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for AgentLifecycleOutbox.
+func (c *AgentLifecycleOutboxClient) Delete() *AgentLifecycleOutboxDelete {
+	mutation := newAgentLifecycleOutboxMutation(c.config, OpDelete)
+	return &AgentLifecycleOutboxDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *AgentLifecycleOutboxClient) DeleteOne(_m *AgentLifecycleOutbox) *AgentLifecycleOutboxDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *AgentLifecycleOutboxClient) DeleteOneID(id int64) *AgentLifecycleOutboxDeleteOne {
+	builder := c.Delete().Where(agentlifecycleoutbox.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &AgentLifecycleOutboxDeleteOne{builder}
+}
+
+// Query returns a query builder for AgentLifecycleOutbox.
+func (c *AgentLifecycleOutboxClient) Query() *AgentLifecycleOutboxQuery {
+	return &AgentLifecycleOutboxQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeAgentLifecycleOutbox},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a AgentLifecycleOutbox entity by its id.
+func (c *AgentLifecycleOutboxClient) Get(ctx context.Context, id int64) (*AgentLifecycleOutbox, error) {
+	return c.Query().Where(agentlifecycleoutbox.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *AgentLifecycleOutboxClient) GetX(ctx context.Context, id int64) *AgentLifecycleOutbox {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *AgentLifecycleOutboxClient) Hooks() []Hook {
+	return c.hooks.AgentLifecycleOutbox
+}
+
+// Interceptors returns the client interceptors.
+func (c *AgentLifecycleOutboxClient) Interceptors() []Interceptor {
+	return c.inters.AgentLifecycleOutbox
+}
+
+func (c *AgentLifecycleOutboxClient) mutate(ctx context.Context, m *AgentLifecycleOutboxMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&AgentLifecycleOutboxCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&AgentLifecycleOutboxUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&AgentLifecycleOutboxUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&AgentLifecycleOutboxDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown AgentLifecycleOutbox mutation op: %q", m.Op())
 	}
 }
 
@@ -4013,6 +4333,272 @@ func (c *ChatLinkCodeClient) mutate(ctx context.Context, m *ChatLinkCodeMutation
 		return (&ChatLinkCodeDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown ChatLinkCode mutation op: %q", m.Op())
+	}
+}
+
+// ChatRetentionCursorClient is a client for the ChatRetentionCursor schema.
+type ChatRetentionCursorClient struct {
+	config
+}
+
+// NewChatRetentionCursorClient returns a client for the ChatRetentionCursor from the given config.
+func NewChatRetentionCursorClient(c config) *ChatRetentionCursorClient {
+	return &ChatRetentionCursorClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `chatretentioncursor.Hooks(f(g(h())))`.
+func (c *ChatRetentionCursorClient) Use(hooks ...Hook) {
+	c.hooks.ChatRetentionCursor = append(c.hooks.ChatRetentionCursor, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `chatretentioncursor.Intercept(f(g(h())))`.
+func (c *ChatRetentionCursorClient) Intercept(interceptors ...Interceptor) {
+	c.inters.ChatRetentionCursor = append(c.inters.ChatRetentionCursor, interceptors...)
+}
+
+// Create returns a builder for creating a ChatRetentionCursor entity.
+func (c *ChatRetentionCursorClient) Create() *ChatRetentionCursorCreate {
+	mutation := newChatRetentionCursorMutation(c.config, OpCreate)
+	return &ChatRetentionCursorCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of ChatRetentionCursor entities.
+func (c *ChatRetentionCursorClient) CreateBulk(builders ...*ChatRetentionCursorCreate) *ChatRetentionCursorCreateBulk {
+	return &ChatRetentionCursorCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *ChatRetentionCursorClient) MapCreateBulk(slice any, setFunc func(*ChatRetentionCursorCreate, int)) *ChatRetentionCursorCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &ChatRetentionCursorCreateBulk{err: fmt.Errorf("calling to ChatRetentionCursorClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*ChatRetentionCursorCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &ChatRetentionCursorCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for ChatRetentionCursor.
+func (c *ChatRetentionCursorClient) Update() *ChatRetentionCursorUpdate {
+	mutation := newChatRetentionCursorMutation(c.config, OpUpdate)
+	return &ChatRetentionCursorUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *ChatRetentionCursorClient) UpdateOne(_m *ChatRetentionCursor) *ChatRetentionCursorUpdateOne {
+	mutation := newChatRetentionCursorMutation(c.config, OpUpdateOne, withChatRetentionCursor(_m))
+	return &ChatRetentionCursorUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *ChatRetentionCursorClient) UpdateOneID(id string) *ChatRetentionCursorUpdateOne {
+	mutation := newChatRetentionCursorMutation(c.config, OpUpdateOne, withChatRetentionCursorID(id))
+	return &ChatRetentionCursorUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for ChatRetentionCursor.
+func (c *ChatRetentionCursorClient) Delete() *ChatRetentionCursorDelete {
+	mutation := newChatRetentionCursorMutation(c.config, OpDelete)
+	return &ChatRetentionCursorDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *ChatRetentionCursorClient) DeleteOne(_m *ChatRetentionCursor) *ChatRetentionCursorDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *ChatRetentionCursorClient) DeleteOneID(id string) *ChatRetentionCursorDeleteOne {
+	builder := c.Delete().Where(chatretentioncursor.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &ChatRetentionCursorDeleteOne{builder}
+}
+
+// Query returns a query builder for ChatRetentionCursor.
+func (c *ChatRetentionCursorClient) Query() *ChatRetentionCursorQuery {
+	return &ChatRetentionCursorQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeChatRetentionCursor},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a ChatRetentionCursor entity by its id.
+func (c *ChatRetentionCursorClient) Get(ctx context.Context, id string) (*ChatRetentionCursor, error) {
+	return c.Query().Where(chatretentioncursor.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *ChatRetentionCursorClient) GetX(ctx context.Context, id string) *ChatRetentionCursor {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *ChatRetentionCursorClient) Hooks() []Hook {
+	return c.hooks.ChatRetentionCursor
+}
+
+// Interceptors returns the client interceptors.
+func (c *ChatRetentionCursorClient) Interceptors() []Interceptor {
+	return c.inters.ChatRetentionCursor
+}
+
+func (c *ChatRetentionCursorClient) mutate(ctx context.Context, m *ChatRetentionCursorMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&ChatRetentionCursorCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&ChatRetentionCursorUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&ChatRetentionCursorUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&ChatRetentionCursorDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown ChatRetentionCursor mutation op: %q", m.Op())
+	}
+}
+
+// ChatRetentionRunClient is a client for the ChatRetentionRun schema.
+type ChatRetentionRunClient struct {
+	config
+}
+
+// NewChatRetentionRunClient returns a client for the ChatRetentionRun from the given config.
+func NewChatRetentionRunClient(c config) *ChatRetentionRunClient {
+	return &ChatRetentionRunClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `chatretentionrun.Hooks(f(g(h())))`.
+func (c *ChatRetentionRunClient) Use(hooks ...Hook) {
+	c.hooks.ChatRetentionRun = append(c.hooks.ChatRetentionRun, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `chatretentionrun.Intercept(f(g(h())))`.
+func (c *ChatRetentionRunClient) Intercept(interceptors ...Interceptor) {
+	c.inters.ChatRetentionRun = append(c.inters.ChatRetentionRun, interceptors...)
+}
+
+// Create returns a builder for creating a ChatRetentionRun entity.
+func (c *ChatRetentionRunClient) Create() *ChatRetentionRunCreate {
+	mutation := newChatRetentionRunMutation(c.config, OpCreate)
+	return &ChatRetentionRunCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of ChatRetentionRun entities.
+func (c *ChatRetentionRunClient) CreateBulk(builders ...*ChatRetentionRunCreate) *ChatRetentionRunCreateBulk {
+	return &ChatRetentionRunCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *ChatRetentionRunClient) MapCreateBulk(slice any, setFunc func(*ChatRetentionRunCreate, int)) *ChatRetentionRunCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &ChatRetentionRunCreateBulk{err: fmt.Errorf("calling to ChatRetentionRunClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*ChatRetentionRunCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &ChatRetentionRunCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for ChatRetentionRun.
+func (c *ChatRetentionRunClient) Update() *ChatRetentionRunUpdate {
+	mutation := newChatRetentionRunMutation(c.config, OpUpdate)
+	return &ChatRetentionRunUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *ChatRetentionRunClient) UpdateOne(_m *ChatRetentionRun) *ChatRetentionRunUpdateOne {
+	mutation := newChatRetentionRunMutation(c.config, OpUpdateOne, withChatRetentionRun(_m))
+	return &ChatRetentionRunUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *ChatRetentionRunClient) UpdateOneID(id uuid.UUID) *ChatRetentionRunUpdateOne {
+	mutation := newChatRetentionRunMutation(c.config, OpUpdateOne, withChatRetentionRunID(id))
+	return &ChatRetentionRunUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for ChatRetentionRun.
+func (c *ChatRetentionRunClient) Delete() *ChatRetentionRunDelete {
+	mutation := newChatRetentionRunMutation(c.config, OpDelete)
+	return &ChatRetentionRunDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *ChatRetentionRunClient) DeleteOne(_m *ChatRetentionRun) *ChatRetentionRunDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *ChatRetentionRunClient) DeleteOneID(id uuid.UUID) *ChatRetentionRunDeleteOne {
+	builder := c.Delete().Where(chatretentionrun.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &ChatRetentionRunDeleteOne{builder}
+}
+
+// Query returns a query builder for ChatRetentionRun.
+func (c *ChatRetentionRunClient) Query() *ChatRetentionRunQuery {
+	return &ChatRetentionRunQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeChatRetentionRun},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a ChatRetentionRun entity by its id.
+func (c *ChatRetentionRunClient) Get(ctx context.Context, id uuid.UUID) (*ChatRetentionRun, error) {
+	return c.Query().Where(chatretentionrun.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *ChatRetentionRunClient) GetX(ctx context.Context, id uuid.UUID) *ChatRetentionRun {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *ChatRetentionRunClient) Hooks() []Hook {
+	return c.hooks.ChatRetentionRun
+}
+
+// Interceptors returns the client interceptors.
+func (c *ChatRetentionRunClient) Interceptors() []Interceptor {
+	return c.inters.ChatRetentionRun
+}
+
+func (c *ChatRetentionRunClient) mutate(ctx context.Context, m *ChatRetentionRunMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&ChatRetentionRunCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&ChatRetentionRunUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&ChatRetentionRunUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&ChatRetentionRunDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown ChatRetentionRun mutation op: %q", m.Op())
 	}
 }
 
@@ -12859,6 +13445,304 @@ func (c *UserAccessTokenClient) mutate(ctx context.Context, m *UserAccessTokenMu
 	}
 }
 
+// UserDeletionClient is a client for the UserDeletion schema.
+type UserDeletionClient struct {
+	config
+}
+
+// NewUserDeletionClient returns a client for the UserDeletion from the given config.
+func NewUserDeletionClient(c config) *UserDeletionClient {
+	return &UserDeletionClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `userdeletion.Hooks(f(g(h())))`.
+func (c *UserDeletionClient) Use(hooks ...Hook) {
+	c.hooks.UserDeletion = append(c.hooks.UserDeletion, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `userdeletion.Intercept(f(g(h())))`.
+func (c *UserDeletionClient) Intercept(interceptors ...Interceptor) {
+	c.inters.UserDeletion = append(c.inters.UserDeletion, interceptors...)
+}
+
+// Create returns a builder for creating a UserDeletion entity.
+func (c *UserDeletionClient) Create() *UserDeletionCreate {
+	mutation := newUserDeletionMutation(c.config, OpCreate)
+	return &UserDeletionCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of UserDeletion entities.
+func (c *UserDeletionClient) CreateBulk(builders ...*UserDeletionCreate) *UserDeletionCreateBulk {
+	return &UserDeletionCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *UserDeletionClient) MapCreateBulk(slice any, setFunc func(*UserDeletionCreate, int)) *UserDeletionCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &UserDeletionCreateBulk{err: fmt.Errorf("calling to UserDeletionClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*UserDeletionCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &UserDeletionCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for UserDeletion.
+func (c *UserDeletionClient) Update() *UserDeletionUpdate {
+	mutation := newUserDeletionMutation(c.config, OpUpdate)
+	return &UserDeletionUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *UserDeletionClient) UpdateOne(_m *UserDeletion) *UserDeletionUpdateOne {
+	mutation := newUserDeletionMutation(c.config, OpUpdateOne, withUserDeletion(_m))
+	return &UserDeletionUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *UserDeletionClient) UpdateOneID(id uuid.UUID) *UserDeletionUpdateOne {
+	mutation := newUserDeletionMutation(c.config, OpUpdateOne, withUserDeletionID(id))
+	return &UserDeletionUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for UserDeletion.
+func (c *UserDeletionClient) Delete() *UserDeletionDelete {
+	mutation := newUserDeletionMutation(c.config, OpDelete)
+	return &UserDeletionDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *UserDeletionClient) DeleteOne(_m *UserDeletion) *UserDeletionDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *UserDeletionClient) DeleteOneID(id uuid.UUID) *UserDeletionDeleteOne {
+	builder := c.Delete().Where(userdeletion.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &UserDeletionDeleteOne{builder}
+}
+
+// Query returns a query builder for UserDeletion.
+func (c *UserDeletionClient) Query() *UserDeletionQuery {
+	return &UserDeletionQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeUserDeletion},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a UserDeletion entity by its id.
+func (c *UserDeletionClient) Get(ctx context.Context, id uuid.UUID) (*UserDeletion, error) {
+	return c.Query().Where(userdeletion.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *UserDeletionClient) GetX(ctx context.Context, id uuid.UUID) *UserDeletion {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// QueryAgents queries the agents edge of a UserDeletion.
+func (c *UserDeletionClient) QueryAgents(_m *UserDeletion) *UserDeletionAgentQuery {
+	query := (&UserDeletionAgentClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(userdeletion.Table, userdeletion.FieldID, id),
+			sqlgraph.To(userdeletionagent.Table, userdeletionagent.FieldID),
+			sqlgraph.Edge(sqlgraph.O2M, false, userdeletion.AgentsTable, userdeletion.AgentsColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
+// Hooks returns the client hooks.
+func (c *UserDeletionClient) Hooks() []Hook {
+	return c.hooks.UserDeletion
+}
+
+// Interceptors returns the client interceptors.
+func (c *UserDeletionClient) Interceptors() []Interceptor {
+	return c.inters.UserDeletion
+}
+
+func (c *UserDeletionClient) mutate(ctx context.Context, m *UserDeletionMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&UserDeletionCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&UserDeletionUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&UserDeletionUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&UserDeletionDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown UserDeletion mutation op: %q", m.Op())
+	}
+}
+
+// UserDeletionAgentClient is a client for the UserDeletionAgent schema.
+type UserDeletionAgentClient struct {
+	config
+}
+
+// NewUserDeletionAgentClient returns a client for the UserDeletionAgent from the given config.
+func NewUserDeletionAgentClient(c config) *UserDeletionAgentClient {
+	return &UserDeletionAgentClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `userdeletionagent.Hooks(f(g(h())))`.
+func (c *UserDeletionAgentClient) Use(hooks ...Hook) {
+	c.hooks.UserDeletionAgent = append(c.hooks.UserDeletionAgent, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `userdeletionagent.Intercept(f(g(h())))`.
+func (c *UserDeletionAgentClient) Intercept(interceptors ...Interceptor) {
+	c.inters.UserDeletionAgent = append(c.inters.UserDeletionAgent, interceptors...)
+}
+
+// Create returns a builder for creating a UserDeletionAgent entity.
+func (c *UserDeletionAgentClient) Create() *UserDeletionAgentCreate {
+	mutation := newUserDeletionAgentMutation(c.config, OpCreate)
+	return &UserDeletionAgentCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of UserDeletionAgent entities.
+func (c *UserDeletionAgentClient) CreateBulk(builders ...*UserDeletionAgentCreate) *UserDeletionAgentCreateBulk {
+	return &UserDeletionAgentCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *UserDeletionAgentClient) MapCreateBulk(slice any, setFunc func(*UserDeletionAgentCreate, int)) *UserDeletionAgentCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &UserDeletionAgentCreateBulk{err: fmt.Errorf("calling to UserDeletionAgentClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*UserDeletionAgentCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &UserDeletionAgentCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for UserDeletionAgent.
+func (c *UserDeletionAgentClient) Update() *UserDeletionAgentUpdate {
+	mutation := newUserDeletionAgentMutation(c.config, OpUpdate)
+	return &UserDeletionAgentUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *UserDeletionAgentClient) UpdateOne(_m *UserDeletionAgent) *UserDeletionAgentUpdateOne {
+	mutation := newUserDeletionAgentMutation(c.config, OpUpdateOne, withUserDeletionAgent(_m))
+	return &UserDeletionAgentUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *UserDeletionAgentClient) UpdateOneID(id uuid.UUID) *UserDeletionAgentUpdateOne {
+	mutation := newUserDeletionAgentMutation(c.config, OpUpdateOne, withUserDeletionAgentID(id))
+	return &UserDeletionAgentUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for UserDeletionAgent.
+func (c *UserDeletionAgentClient) Delete() *UserDeletionAgentDelete {
+	mutation := newUserDeletionAgentMutation(c.config, OpDelete)
+	return &UserDeletionAgentDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *UserDeletionAgentClient) DeleteOne(_m *UserDeletionAgent) *UserDeletionAgentDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *UserDeletionAgentClient) DeleteOneID(id uuid.UUID) *UserDeletionAgentDeleteOne {
+	builder := c.Delete().Where(userdeletionagent.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &UserDeletionAgentDeleteOne{builder}
+}
+
+// Query returns a query builder for UserDeletionAgent.
+func (c *UserDeletionAgentClient) Query() *UserDeletionAgentQuery {
+	return &UserDeletionAgentQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeUserDeletionAgent},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a UserDeletionAgent entity by its id.
+func (c *UserDeletionAgentClient) Get(ctx context.Context, id uuid.UUID) (*UserDeletionAgent, error) {
+	return c.Query().Where(userdeletionagent.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *UserDeletionAgentClient) GetX(ctx context.Context, id uuid.UUID) *UserDeletionAgent {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// QueryDeletion queries the deletion edge of a UserDeletionAgent.
+func (c *UserDeletionAgentClient) QueryDeletion(_m *UserDeletionAgent) *UserDeletionQuery {
+	query := (&UserDeletionClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(userdeletionagent.Table, userdeletionagent.FieldID, id),
+			sqlgraph.To(userdeletion.Table, userdeletion.FieldID),
+			sqlgraph.Edge(sqlgraph.M2O, true, userdeletionagent.DeletionTable, userdeletionagent.DeletionColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
+// Hooks returns the client hooks.
+func (c *UserDeletionAgentClient) Hooks() []Hook {
+	return c.hooks.UserDeletionAgent
+}
+
+// Interceptors returns the client interceptors.
+func (c *UserDeletionAgentClient) Interceptors() []Interceptor {
+	return c.inters.UserDeletionAgent
+}
+
+func (c *UserDeletionAgentClient) mutate(ctx context.Context, m *UserDeletionAgentMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&UserDeletionAgentCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&UserDeletionAgentUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&UserDeletionAgentUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&UserDeletionAgentDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown UserDeletionAgent mutation op: %q", m.Op())
+	}
+}
+
 // UserTerminalWorkspaceClient is a client for the UserTerminalWorkspace schema.
 type UserTerminalWorkspaceClient struct {
 	config
@@ -13013,10 +13897,11 @@ type (
 	hooks struct {
 		AccessConstraint, AccessConstraintHistory, AccessPolicy, Agent, AgentCredential,
 		AgentDelegatedCredential, AgentDelegationGrant, AgentHold, AgentIdentityKey,
-		AgentRecovery, AgentReincarnation, AgentServiceAccountAssignment,
-		AgentSessionMetrics, AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken,
-		BrokerReportedRun, BrokerSecret, BrokerSetting, BrokerTargetInventory,
-		ChatLinkCode, ConduitPrincipalEpoch, ConduitSession, Conversation,
+		AgentLifecycleCursor, AgentLifecycleOutbox, AgentRecovery, AgentReincarnation,
+		AgentServiceAccountAssignment, AgentSessionMetrics, AllowListEntry, ApiKey,
+		BrokerDispatch, BrokerJoinToken, BrokerReportedRun, BrokerSecret,
+		BrokerSetting, BrokerTargetInventory, ChatLinkCode, ChatRetentionCursor,
+		ChatRetentionRun, ConduitPrincipalEpoch, ConduitSession, Conversation,
 		ConversationParticipant, DelegationAdoption, DelegationEdge,
 		EntitlementBinding, EnvVar, ExternalIdentity, GCPServiceAccount,
 		GitHubResolutionCache, GithubInstallation, Group, GroupMembership,
@@ -13031,15 +13916,17 @@ type (
 		Schedule, ScheduledEvent, Secret, Skill, SkillInjection, SkillRegistry,
 		SkillVersion, SubscriptionTemplate, Template, TestIdentityDelegation,
 		TestIdentityLoginCode, TestInfraMarker, ThreadGroup, ThreadGroupMember,
-		UsageReservation, User, UserAccessToken, UserTerminalWorkspace []ent.Hook
+		UsageReservation, User, UserAccessToken, UserDeletion, UserDeletionAgent,
+		UserTerminalWorkspace []ent.Hook
 	}
 	inters struct {
 		AccessConstraint, AccessConstraintHistory, AccessPolicy, Agent, AgentCredential,
 		AgentDelegatedCredential, AgentDelegationGrant, AgentHold, AgentIdentityKey,
-		AgentRecovery, AgentReincarnation, AgentServiceAccountAssignment,
-		AgentSessionMetrics, AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken,
-		BrokerReportedRun, BrokerSecret, BrokerSetting, BrokerTargetInventory,
-		ChatLinkCode, ConduitPrincipalEpoch, ConduitSession, Conversation,
+		AgentLifecycleCursor, AgentLifecycleOutbox, AgentRecovery, AgentReincarnation,
+		AgentServiceAccountAssignment, AgentSessionMetrics, AllowListEntry, ApiKey,
+		BrokerDispatch, BrokerJoinToken, BrokerReportedRun, BrokerSecret,
+		BrokerSetting, BrokerTargetInventory, ChatLinkCode, ChatRetentionCursor,
+		ChatRetentionRun, ConduitPrincipalEpoch, ConduitSession, Conversation,
 		ConversationParticipant, DelegationAdoption, DelegationEdge,
 		EntitlementBinding, EnvVar, ExternalIdentity, GCPServiceAccount,
 		GitHubResolutionCache, GithubInstallation, Group, GroupMembership,
@@ -13054,7 +13941,7 @@ type (
 		Schedule, ScheduledEvent, Secret, Skill, SkillInjection, SkillRegistry,
 		SkillVersion, SubscriptionTemplate, Template, TestIdentityDelegation,
 		TestIdentityLoginCode, TestInfraMarker, ThreadGroup, ThreadGroupMember,
-		UsageReservation, User, UserAccessToken,
+		UsageReservation, User, UserAccessToken, UserDeletion, UserDeletionAgent,
 		UserTerminalWorkspace []ent.Interceptor
 	}
 )

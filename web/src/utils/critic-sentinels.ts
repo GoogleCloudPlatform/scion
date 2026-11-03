@@ -118,9 +118,27 @@ export function alphabetOf(chars: readonly string[]): SentinelAlphabet | null {
  * punctuation with no Markdown meaning), so the real sentinel form parses
  * the same way. shown(text) returns every string the parser yields for
  * text (the tagged form, as the editor opens it). Needs twenty-four free
- * candidates; null otherwise.
+ * candidates; null otherwise. Without a numeric character reference in md,
+ * the probe's result is known without calling shown (see below).
  */
 export function chooseOpeningAlphabet(
+  md: string,
+  shown: (sentinelText: string) => string
+): SentinelAlphabet | null {
+  const free = SENTINEL_CANDIDATES.filter((c) => !md.includes(c));
+  if (free.length < 2 * ROLES.length) return null;
+  // The parser yields a candidate that is not in its input only by
+  // decoding a numeric character reference: a backslash only keeps ASCII
+  // punctuation literal, and no named reference decodes to a candidate
+  // (critic-sentinels.test.ts checks the installed table). Without one, the
+  // probe would exclude nothing but its own characters, so its result is
+  // known without parsing.
+  if (!md.includes('&#')) return alphabetOf(free.slice(0, -ROLES.length));
+  return probeOpeningAlphabet(md, shown);
+}
+
+/** chooseOpeningAlphabet by the probe parse, whatever md holds. */
+export function probeOpeningAlphabet(
   md: string,
   shown: (sentinelText: string) => string
 ): SentinelAlphabet | null {

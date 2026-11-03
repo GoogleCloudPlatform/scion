@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/txdiag"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 )
@@ -50,7 +51,7 @@ var migratedTestStoreSeq atomic.Int64
 func OpenMigratedTestStore(t testing.TB) (store.Store, error) {
 	t.Helper()
 	dsn := fmt.Sprintf("file:hubtestmigrated%d?mode=memory&cache=shared", migratedTestStoreSeq.Add(1))
-	client, err := entc.OpenSQLite(dsn, entc.PoolConfig{MaxOpenConns: 1})
+	client, err := entc.OpenSQLite(dsn, entc.PoolConfig{MaxOpenConns: 1, Diag: txdiag.QuietConfig()})
 	if err != nil {
 		return nil, err
 	}

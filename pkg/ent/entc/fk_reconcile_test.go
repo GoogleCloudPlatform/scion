@@ -28,7 +28,6 @@ import (
 	"strings"
 	"testing"
 
-	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
@@ -286,7 +285,7 @@ func openHubFile(t *testing.T, path string) (*ent.Client, *sql.DB) {
 	client, err := OpenSQLite(path, PoolConfig{MaxOpenConns: 1})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close() })
-	return client, client.Driver().(*entsql.Driver).DB()
+	return client, SQLDB(client.Driver())
 }
 
 // insertRow inserts a row with the given values, filling every other

@@ -353,9 +353,12 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 		<-retired.pollDone
 	}
 	if retired != nil {
+		// Read the logger here: the goroutine outlives Configure and must
+		// not read mutable broker fields.
+		log := b.log
 		go func() {
 			defer b.retiring.Done()
-			retired.shutdown(b.log)
+			retired.shutdown(log)
 		}()
 	}
 	return err
@@ -2325,7 +2328,7 @@ func (b *TelegramBrokerV2) handleGroupMessage(g *configGen, tgMsg *TGMessage) {
 
 	// Get project agents (cached per user, refreshed as the sender).
 	agents, agentsErr := b.getProjectAgents(ctx, link.ProjectID, senderLookup)
-	listUnavailable := func(replyTo string) {
+	listUnavailable := func(replyTo int64) {
 		b.replyAgentListUnavailable(ctx, api, chatID, replyTo, agentsErr, senderLookup.email(), link.ProjectSlug)
 	}
 	// replyDenied tells a sender the hub denies why their message was not
@@ -2334,11 +2337,7 @@ func (b *TelegramBrokerV2) handleGroupMessage(g *configGen, tgMsg *TGMessage) {
 		if b.shouldSuppressError(chatID, int(tgMsg.MessageThreadID), agentListSuppressKey(agentsErr, tgMsg.From)) {
 			return
 		}
-		replyTo := ""
-		if tgMsg.MessageID != 0 {
-			replyTo = strconv.FormatInt(tgMsg.MessageID, 10)
-		}
-		listUnavailable(replyTo)
+		listUnavailable(tgMsg.MessageID)
 	}
 
 	// Resolve target agents from @-mentions.
@@ -2408,15 +2407,11 @@ func (b *TelegramBrokerV2) handleGroupMessage(g *configGen, tgMsg *TGMessage) {
 					errorType = agentListSuppressKey(agentsErr, tgMsg.From)
 				}
 				if !b.shouldSuppressError(chatID, threadID, errorType) {
-					replyTo := ""
-					if tgMsg.MessageID != 0 {
-						replyTo = strconv.FormatInt(int64(tgMsg.MessageID), 10)
-					}
 					if agentsErr != nil {
-						listUnavailable(replyTo)
+						listUnavailable(tgMsg.MessageID)
 					} else {
 						errMsg := fmt.Sprintf("Default agent %q is no longer available. Use /agents to see available agents, or /default to change the default.", effectiveDefault)
-						api.SendMessage(ctx, chatID, errMsg, replyTo) //nolint:errcheck
+						api.SendMessageWithKeyboard(ctx, chatID, errMsg, "", nil, tgMsg.MessageID) //nolint:errcheck
 					}
 				}
 				return
@@ -2436,7 +2431,7 @@ func (b *TelegramBrokerV2) handleGroupMessage(g *configGen, tgMsg *TGMessage) {
 					return
 				}
 				if agentsErr != nil {
-					listUnavailable("")
+					listUnavailable(0)
 					return
 				}
 				errMsg := fmt.Sprintf("No agent named %q found in this project. Use /agents to see available agents.", unresolved[0])
@@ -2461,7 +2456,7 @@ func (b *TelegramBrokerV2) handleGroupMessage(g *configGen, tgMsg *TGMessage) {
 				if len(typos) > 0 && isForbiddenHubError(agentsErr) {
 					replyDenied()
 				} else if len(typos) > 0 && agentsErr != nil {
-					listUnavailable("")
+					listUnavailable(0)
 				} else if len(typos) > 0 {
 					errMsg := fmt.Sprintf("Unknown agent(s): %s. Use /agents to see available agents.", strings.Join(typos, ", "))
 					api.SendMessage(ctx, chatID, errMsg, "") //nolint:errcheck
@@ -2686,11 +2681,7 @@ func (b *TelegramBrokerV2) handleGroupMessage(g *configGen, tgMsg *TGMessage) {
 				errorType = "permission_denied"
 			}
 			if !b.shouldSuppressError(chatID, threadID, errorType) {
-				replyTo := ""
-				if tgMsg.MessageID != 0 {
-					replyTo = strconv.FormatInt(int64(tgMsg.MessageID), 10)
-				}
-				api.SendMessage(ctx, chatID, "Message delivery failed: "+deliveryErr, replyTo) //nolint:errcheck
+				api.SendMessageWithKeyboard(ctx, chatID, "Message delivery failed: "+deliveryErr, "", nil, tgMsg.MessageID) //nolint:errcheck
 			}
 		}
 	}
@@ -3395,10 +3386,11 @@ func agentListErrorKind(err error) string {
 
 // replyAgentListUnavailable tells the sender why their message could not be
 // routed when no agent list is available, instead of reporting the
-// addressed agent as missing.
-func (b *TelegramBrokerV2) replyAgentListUnavailable(ctx context.Context, api *TelegramAPIClient, chatID int64, replyTo string, listErr error, email, project string) {
+// addressed agent as missing. A nonzero replyTo threads the reply to that
+// message.
+func (b *TelegramBrokerV2) replyAgentListUnavailable(ctx context.Context, api *TelegramAPIClient, chatID int64, replyTo int64, listErr error, email, project string) {
 	text := hubErrorText(listErr, email, project, "Couldn't fetch the agent list for this project. Please try again later.")
-	api.SendMessage(ctx, chatID, text, replyTo) //nolint:errcheck
+	api.SendMessageWithKeyboard(ctx, chatID, text, "", nil, replyTo) //nolint:errcheck
 }
 
 // --- Hub delivery (reuses the same pattern as v1) ---

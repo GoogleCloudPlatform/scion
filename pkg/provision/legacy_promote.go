@@ -128,8 +128,9 @@ func PromoteLegacyMarker(ctx context.Context, workspacePath string) (LegacyPromo
 		}
 		out.ExcludeRemoved = removed
 		// The server clock is probed in the state directory, so nothing
-		// is written into the workspace.
-		out.LitterRemoved = sweepLockLitter(workspacePath, stateDir)
+		// is written into the workspace. Best effort: what is left is
+		// swept by a later run.
+		_, out.LitterRemoved, _ = sweepLockLitterIn(workspacePath, stateDir, LockLitterMinAge())
 		return nil
 	})
 	return out, err

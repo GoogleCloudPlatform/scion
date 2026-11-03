@@ -1,0 +1,10 @@
+# (GATE && always()) || always(): the trailing OR runs on fork push.
+on:
+  push:
+    branches: [ main ]
+jobs:
+  summary:
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (always()) || (always()) }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok

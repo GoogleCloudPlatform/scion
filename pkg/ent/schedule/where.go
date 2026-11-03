@@ -145,6 +145,11 @@ func CronExpr(v string) predicate.Schedule {
 	return predicate.Schedule(sql.FieldEQ(FieldCronExpr, v))
 }
 
+// TimeZone applies equality check predicate on the "time_zone" field. It's identical to TimeZoneEQ.
+func TimeZone(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldTimeZone, v))
+}
+
 // EventType applies equality check predicate on the "event_type" field. It's identical to EventTypeEQ.
 func EventType(v string) predicate.Schedule {
 	return predicate.Schedule(sql.FieldEQ(FieldEventType, v))
@@ -1313,6 +1318,71 @@ func CronExprEqualFold(v string) predicate.Schedule {
 // CronExprContainsFold applies the ContainsFold predicate on the "cron_expr" field.
 func CronExprContainsFold(v string) predicate.Schedule {
 	return predicate.Schedule(sql.FieldContainsFold(FieldCronExpr, v))
+}
+
+// TimeZoneEQ applies the EQ predicate on the "time_zone" field.
+func TimeZoneEQ(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEQ(FieldTimeZone, v))
+}
+
+// TimeZoneNEQ applies the NEQ predicate on the "time_zone" field.
+func TimeZoneNEQ(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNEQ(FieldTimeZone, v))
+}
+
+// TimeZoneIn applies the In predicate on the "time_zone" field.
+func TimeZoneIn(vs ...string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldIn(FieldTimeZone, vs...))
+}
+
+// TimeZoneNotIn applies the NotIn predicate on the "time_zone" field.
+func TimeZoneNotIn(vs ...string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldNotIn(FieldTimeZone, vs...))
+}
+
+// TimeZoneGT applies the GT predicate on the "time_zone" field.
+func TimeZoneGT(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGT(FieldTimeZone, v))
+}
+
+// TimeZoneGTE applies the GTE predicate on the "time_zone" field.
+func TimeZoneGTE(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldGTE(FieldTimeZone, v))
+}
+
+// TimeZoneLT applies the LT predicate on the "time_zone" field.
+func TimeZoneLT(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLT(FieldTimeZone, v))
+}
+
+// TimeZoneLTE applies the LTE predicate on the "time_zone" field.
+func TimeZoneLTE(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldLTE(FieldTimeZone, v))
+}
+
+// TimeZoneContains applies the Contains predicate on the "time_zone" field.
+func TimeZoneContains(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldContains(FieldTimeZone, v))
+}
+
+// TimeZoneHasPrefix applies the HasPrefix predicate on the "time_zone" field.
+func TimeZoneHasPrefix(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldHasPrefix(FieldTimeZone, v))
+}
+
+// TimeZoneHasSuffix applies the HasSuffix predicate on the "time_zone" field.
+func TimeZoneHasSuffix(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldHasSuffix(FieldTimeZone, v))
+}
+
+// TimeZoneEqualFold applies the EqualFold predicate on the "time_zone" field.
+func TimeZoneEqualFold(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldEqualFold(FieldTimeZone, v))
+}
+
+// TimeZoneContainsFold applies the ContainsFold predicate on the "time_zone" field.
+func TimeZoneContainsFold(v string) predicate.Schedule {
+	return predicate.Schedule(sql.FieldContainsFold(FieldTimeZone, v))
 }
 
 // EventTypeEQ applies the EQ predicate on the "event_type" field.

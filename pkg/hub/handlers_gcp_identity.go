@@ -1482,6 +1482,13 @@ func (s *Server) handleAgentGCPToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The use decision with the account's parent ceiling, then actAs on
+	// the recorded source in enforce mode (authorizeAgentGCPMint).
+	if !s.authorizeAgentGCPMint(r.Context(), agentRecord, gcpID) {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, msgGCPMintNotAuthorized, nil)
+		return
+	}
+
 	// Parse requested scopes (or default)
 	var req gcpTokenRequest
 	if r.Body != nil {
@@ -1573,6 +1580,13 @@ func (s *Server) handleAgentGCPIdentityToken(w http.ResponseWriter, r *http.Requ
 	// facts from the store on every mint request.
 	if !s.resolveAgentGCPMintFacts(r.Context(), gcpID, agentRecord.ProjectID, agentRecord.RuntimeBrokerID) {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "no GCP identity assigned", nil)
+		return
+	}
+
+	// The use decision with the account's parent ceiling, then actAs on
+	// the recorded source in enforce mode (authorizeAgentGCPMint).
+	if !s.authorizeAgentGCPMint(r.Context(), agentRecord, gcpID) {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, msgGCPMintNotAuthorized, nil)
 		return
 	}
 

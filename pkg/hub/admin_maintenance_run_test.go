@@ -64,7 +64,7 @@ func TestExecuteOperation_ParamAllowlist(t *testing.T) {
 		{"missing target", "update-binary", `{"params":{}}`, http.StatusBadRequest, maintenance.CodeInvalidParam},
 		{"not a tag", "update-binary", `{"params":{"target_version":"../../x"}}`, http.StatusBadRequest, maintenance.CodeInvalidParam},
 		{"same version", "update-binary", `{"params":{"target_version":"nightly-20261023"}}`, http.StatusConflict, maintenance.CodeAlreadyRunning},
-		{"older version", "update-binary", `{"params":{"target_version":"nightly-20261020"}}`, http.StatusConflict, maintenance.CodeDowngradeNotYetSupported},
+		{"older version (in-memory database: no snapshot)", "update-binary", `{"params":{"target_version":"nightly-20261020"}}`, http.StatusConflict, maintenance.CodeDowngradeUnsupportedDriver},
 		{"rebuild-server unknown", "rebuild-server", `{"params":{"branch":"main","repo":"/tmp/x"}}`, http.StatusBadRequest, maintenance.CodeUnknownParam},
 	}
 	for _, tt := range tests {

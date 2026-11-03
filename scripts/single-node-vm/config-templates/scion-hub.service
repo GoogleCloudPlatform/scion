@@ -2,6 +2,13 @@
 Description=Scion Hub
 After=network.target docker.service
 Requires=docker.service
+# Boot-failure guard (design D1): five starts within 300 s leave the unit
+# failed (systemd stops restarting it), and OnFailure= then runs the root
+# oneshot scion-hub-rollback.service, which restores the previous release.
+# StartLimit* belong in [Unit] (systemd >= 230; the VM image has 249).
+StartLimitIntervalSec=300
+StartLimitBurst=5
+OnFailure=scion-hub-rollback.service
 
 [Service]
 Type=simple
@@ -9,6 +16,10 @@ User=scion
 Group=scion
 WorkingDirectory=/home/scion
 EnvironmentFile=/home/scion/.scion/hub.env
+# Counts the starts of the release current points at in
+# /opt/scion/start-attempts, for the boot-failure guard. "-": its failure
+# never blocks the start.
+ExecStartPre=-/usr/local/libexec/scion/scion-hub-start-attempt.sh
 ExecStart=/opt/scion/current/scion server start --foreground --hosted --enable-hub --enable-web --web-port 8080 --enable-runtime-broker
 Restart=always
 RestartSec=5

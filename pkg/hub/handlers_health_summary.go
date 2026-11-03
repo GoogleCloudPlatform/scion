@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
@@ -241,9 +242,10 @@ type HealthBrokerStorage struct {
 	// NFSHealthy is set only when Backend is "nfs".
 	NFSHealthy *bool `json:"nfs_healthy,omitempty"`
 	// LayoutMismatch lists how the broker's reported storage layout
-	// disagrees with this hub's (projectfs.Layout.DescriptorDiff), when the
-	// hub's layout is shared and they disagree. The hub refuses
-	// shared-mode dispatches to such a broker.
+	// disagrees with this hub's (projectfs.Layout.DescriptorIssues), when
+	// the hub's layout is shared and they disagree. The hub refuses
+	// shared-mode dispatches to such a broker. The values are shown to hub
+	// admins only; other readers get the differing fields by name.
 	LayoutMismatch []string `json:"layout_mismatch,omitempty"`
 }
 
@@ -578,7 +580,7 @@ func (s *Server) healthSummaryBrokers(ctx context.Context, agentAgg *store.Agent
 			}
 			row := healthSummaryBroker(b, agentAgg, hubVersion)
 			if layoutErr == nil && row.WorkspaceStorage != nil {
-				row.WorkspaceStorage.LayoutMismatch = hubLayout.DescriptorDiff(b.WorkspaceStorage, "")
+				row.WorkspaceStorage.LayoutMismatch = projectfs.RenderLayoutIssues(hubLayout.DescriptorIssues(b.WorkspaceStorage, ""), s.storageIssueView(ctx))
 			}
 			list.Items = append(list.Items, row)
 		}

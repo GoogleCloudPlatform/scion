@@ -27,23 +27,38 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/stretchr/testify/require"
 )
 
-// worktreeRemovingManager records RemoveNFSAgentFiles calls and returns err.
+// worktreeRemovingManager records RemoveNFSAgentFiles calls. It reports
+// the worktree and own workspace failed with err when err is set, ds when
+// set, and both deleted otherwise.
 type worktreeRemovingManager struct {
 	*filteringMockManager
 	calls []string
 	err   error
+	ds    []projectfs.Deletion
 }
 
-func (m *worktreeRemovingManager) RemoveNFSAgentFiles(_ context.Context, projectPath, projectID, agentName string) ([]string, error) {
+func (m *worktreeRemovingManager) RemoveNFSAgentFiles(_ context.Context, projectPath, projectID, agentName string) ([]projectfs.Deletion, error) {
 	m.calls = append(m.calls, projectPath+"|"+projectID+"|"+agentName)
-	return []string{
+	if m.ds != nil {
+		return m.ds, m.err
+	}
+	outcome := projectfs.OutcomeDeleted
+	if m.err != nil {
+		outcome = projectfs.OutcomeFailed
+	}
+	var ds []projectfs.Deletion
+	for _, p := range []string{
 		"/export/projects/" + projectID + "/workspace/worktrees/" + agentName,
-		"/export/projects/" + projectID + "/agents/" + agentName,
-	}, m.err
+		"/export/projects/" + projectID + "/agents/" + agentName + "/workspace",
+	} {
+		ds = append(ds, projectfs.Deletion{Tree: projectfs.TreeAgentWorkspace, Path: p, Outcome: outcome, Err: m.err})
+	}
+	return ds, m.err
 }
 
 func newWorktreeRemovalServer(t *testing.T, mgr *worktreeRemovingManager) (*Server, string, *bytes.Buffer) {
@@ -59,7 +74,7 @@ func newWorktreeRemovalServer(t *testing.T, mgr *worktreeRemovingManager) (*Serv
 	}
 	t.Cleanup(func() { _ = os.Chdir(origWd) })
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
@@ -70,8 +85,8 @@ func newWorktreeRemovalServer(t *testing.T, mgr *worktreeRemovingManager) (*Serv
 }
 
 // A delete with files asks the manager to remove the agent's worktree and
-// own workspace on the NFS workspace; a failure there is logged with the
-// paths and the delete still succeeds.
+// own workspace on the NFS workspace; a failure there is logged, audited as
+// failed with the paths, and the delete still succeeds.
 func TestDeleteAgent_NFSWorktreeRemovalFailureDoesNotFailDelete(t *testing.T) {
 	mgr := &worktreeRemovingManager{filteringMockManager: &filteringMockManager{}, err: errors.New("provisioning lock busy")}
 	srv, home, logBuf := newWorktreeRemovalServer(t, mgr)
@@ -90,8 +105,31 @@ func TestDeleteAgent_NFSWorktreeRemovalFailureDoesNotFailDelete(t *testing.T) {
 	}
 	logs := logBuf.String()
 	if !strings.Contains(logs, "left in place") || !strings.Contains(logs, "/export/projects/"+scopeProjA+"/workspace/worktrees/dev") ||
-		!strings.Contains(logs, "/export/projects/"+scopeProjA+"/agents/dev") {
-		t.Errorf("expected a warning with the worktree and agent directory paths, got: %s", logs)
+		!strings.Contains(logs, "/export/projects/"+scopeProjA+"/agents/dev/workspace") {
+		t.Errorf("expected a warning and audit lines with the worktree and workspace paths, got: %s", logs)
+	}
+	if strings.Contains(logs, "outcome=deleted") || !strings.Contains(logs, "outcome=failed") {
+		t.Errorf("a failed removal must be audited as failed, never deleted: %s", logs)
+	}
+}
+
+// A removal that found nothing is audited as absent, not deleted
+// (ptone/scion#7100).
+func TestDeleteAgent_NFSRemovalAbsentAuditedAbsent(t *testing.T) {
+	mgr := &worktreeRemovingManager{filteringMockManager: &filteringMockManager{}, ds: []projectfs.Deletion{
+		{Tree: projectfs.TreeAgentWorkspace, Path: "/export/projects/" + scopeProjA + "/agents/dev/workspace", Outcome: projectfs.OutcomeAbsent},
+	}}
+	srv, home, logBuf := newWorktreeRemovalServer(t, mgr)
+	scionDir, _ := makeHubProject(t, home, "proj-a", scopeProjA, "dev")
+	mgr.agents = []api.AgentInfo{labelled("dev", "cid-a", scopeProjA, scionDir)}
+
+	rec := doDelete(t, srv, "dev", "projectId="+scopeProjA+"&deleteFiles=true")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	logs := logBuf.String()
+	if !strings.Contains(logs, "tree=agent-workspace") || !strings.Contains(logs, "outcome=absent") || strings.Contains(logs, "outcome=deleted") {
+		t.Errorf("expected one agent-workspace audit line with outcome=absent, got: %s", logs)
 	}
 }
 

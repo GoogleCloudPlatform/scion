@@ -99,13 +99,13 @@ func TestTemplateLegacyColumnsDrop_UpgradeRestart(t *testing.T) {
 	}
 	client := open()
 	require.NoError(t, AutoMigrate(ctx, client))
-	db := client.Driver().(*entsql.Driver).DB()
+	db := SQLDB(client.Driver())
 	addTemplateLegacyColumns(t, db, "image", "config")
 	require.NoError(t, client.Close())
 
 	client = open()
 	defer func() { require.NoError(t, client.Close()) }()
-	db = client.Driver().(*entsql.Driver).DB()
+	db = SQLDB(client.Driver())
 	require.NoError(t, AutoMigrate(ctx, client))
 	requireNoTemplateLegacyColumns(t, db)
 	// Re-running AutoMigrate is a no-op.
@@ -129,7 +129,7 @@ func TestTemplateLegacyColumnsDrop_PartialSQLite(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { require.NoError(t, client.Close()) }()
 	require.NoError(t, AutoMigrate(ctx, client))
-	db := client.Driver().(*entsql.Driver).DB()
+	db := SQLDB(client.Driver())
 	// A fresh database has neither column; the step is a no-op.
 	require.NoError(t, dropTemplateLegacyColumns(ctx, client))
 	requireNoTemplateLegacyColumns(t, db)

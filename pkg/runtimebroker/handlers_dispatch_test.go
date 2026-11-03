@@ -82,7 +82,7 @@ runtimes:
 		t.Fatal(err)
 	}
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.ForceRuntime = "mock"

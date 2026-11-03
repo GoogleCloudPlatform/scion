@@ -217,6 +217,77 @@ test_layout_install_over_old_layout_keeps_old_binary_as_previous() {
   rm -rf "$LH_DIR"
 }
 
+# The boot-failure guard's update state (scion-hub-rollback.sh): install
+# writes update-state.json whenever it switches current with a previous
+# release, so deploy.sh installs get the same protection as hub updates.
+test_layout_install_writes_update_state() {
+  _layout_new_host
+  _fake_scion "${LH_DIR}/a" "nightly-20261022"
+  _fake_scion "${LH_DIR}/b" "nightly-20261023"
+  _layout install nightly-20261022 "${LH_DIR}/a"
+  assert_false "$([[ -e "$LH_ROOT/update-state.json" ]] && echo true)" "a first install (no previous) must not write update state"
+  _layout install nightly-20261023 "${LH_DIR}/b"
+  assert_eq "0" "$LAYOUT_RC" "the second install must succeed (output: ${LAYOUT_OUT})"
+  assert_eq '{"target":"nightly-20261023","from":"nightly-20261022","runId":"deploy.sh","verified":false,"migrated":false,"previous_safe":true}' \
+    "$(cat "$LH_ROOT/update-state.json")" "the switch must be recorded with runId deploy.sh"
+  assert_eq "644" "$(stat -c %a "$LH_ROOT/update-state.json")" "update-state.json must be 0644"
+  assert_eq "" "$(find "$LH_ROOT" -maxdepth 1 -name 'update-state.json.*')" "no temporary file may be left"
+
+  # A re-run on the same release keeps the hub's own record.
+  printf '{"target":"nightly-20261023","from":"nightly-20261022","runId":"r","verified":true,"migrated":true,"previous_safe":true}\n' > "$LH_ROOT/update-state.json"
+  local hub_record
+  hub_record="$(cat "$LH_ROOT/update-state.json")"
+  _layout install nightly-20261023 "${LH_DIR}/b"
+  assert_eq "$hub_record" "$(cat "$LH_ROOT/update-state.json")" "re-installing the current release must not reset the update state"
+
+  # A planted symlink is replaced, not written through.
+  printf 'keep\n' > "${LH_DIR}/victim"
+  rm -f "$LH_ROOT/update-state.json"
+  ln -s "${LH_DIR}/victim" "$LH_ROOT/update-state.json"
+  _fake_scion "${LH_DIR}/c" "nightly-20261024"
+  _layout install nightly-20261024 "${LH_DIR}/c"
+  assert_eq "keep" "$(cat "${LH_DIR}/victim")" "the symlink target must not be written"
+  assert_contains "$(cat "$LH_ROOT/update-state.json")" '"target":"nightly-20261024","from":"nightly-20261023"' "the state must be rewritten"
+  rm -rf "$LH_DIR"
+}
+
+# A failed update-state write does not fail the install, and the warning
+# says what the guard will do (here a directory blocks the rename).
+test_layout_install_update_state_write_failure_warns() {
+  _layout_new_host
+  _fake_scion "${LH_DIR}/a" "nightly-20261022"
+  _fake_scion "${LH_DIR}/b" "nightly-20261023"
+  _layout install nightly-20261022 "${LH_DIR}/a"
+  mkdir "$LH_ROOT/update-state.json"
+  _layout install nightly-20261023 "${LH_DIR}/b"
+  assert_eq "0" "$LAYOUT_RC" "a failed update-state write must not fail the install (output: ${LAYOUT_OUT})"
+  assert_eq "releases/nightly-20261023" "$(readlink "$LH_ROOT/current")" "the release must still be installed"
+  assert_contains "$LAYOUT_OUT" "will not roll this release back automatically unless that file is absent or unreadable and current was switched within the last 30 minutes" \
+    "the warning must describe the guard's behaviour"
+  assert_not_contains "$LAYOUT_OUT" "falls back to the switch time" "the old, misleading wording must be gone"
+  assert_eq "" "$(find "$LH_ROOT" -maxdepth 1 -name 'update-state.json.*')" "no temporary file may be left"
+  rm -rf "$LH_DIR"
+}
+
+test_layout_install_over_old_layout_writes_update_state() {
+  _layout_new_host
+  _fake_scion "$LH_BIN" "nightly-20261001"
+  _fake_scion "${LH_DIR}/new" "nightly-20261023"
+  _layout install nightly-20261023 "${LH_DIR}/new"
+  assert_contains "$(cat "$LH_ROOT/update-state.json" 2>&1)" '"target":"nightly-20261023","from":"nightly-20261001"' \
+    "the switch from the adopted binary must be recorded"
+  rm -rf "$LH_DIR"
+}
+
+test_layout_adopt_writes_no_update_state() {
+  _layout_new_host
+  _fake_scion "$LH_BIN" "nightly-20261001"
+  _layout adopt
+  assert_eq "0" "$LAYOUT_RC" "adopt must succeed (output: ${LAYOUT_OUT})"
+  assert_false "$([[ -e "$LH_ROOT/update-state.json" ]] && echo true)" "adopting (no switch from a previous release) must not write update state"
+  rm -rf "$LH_DIR"
+}
+
 test_layout_install_rejects_unsafe_tags() {
   local tag
   for tag in "../evil" "a/b" "-x" ".hidden" "nightly.partial" ""; do
@@ -559,8 +630,109 @@ test_layout_unit_template_runs_current_symlink() {
   assert_contains "$unit" $'\nExecStart=/opt/scion/current/scion server start ' \
     "the unit must run the binary through /opt/scion/current"
   assert_not_contains "$unit" "/usr/local/bin/scion" "the unit must not run /usr/local/bin/scion"
-  assert_not_contains "$unit" "OnFailure" "no boot-failure guard in this phase"
-  assert_not_contains "$unit" "StartLimit" "no start-limit settings in this phase"
+  assert_contains "$unit" $'\nOnFailure=scion-hub-rollback.service\n' "the unit must start the boot-failure guard on failure"
+}
+
+# _layout_unit_install_cmd LOG -- the create path's unit install command
+# (the --command body of the compute ssh call that writes scion-hub.service
+# and starts it).
+_layout_unit_install_cmd() {
+  printf '%s\n' "$1" | awk '
+    /^compute / { if (on && buf ~ /sudo systemctl start scion-hub\.service/) { printf "%s", buf; done = 1; exit } on = 0 }
+    /^compute ssh .*--command=$/ { buf = ""; on = 1; next }
+    on { buf = buf $0 "\n" }
+    END { if (!done && on && buf ~ /sudo systemctl start scion-hub\.service/) printf "%s", buf }
+  '
+}
+
+# _layout_guard_block CMD -- the boot-failure guard install text inside a
+# VM command: from the rollback script heredoc through the rollback unit.
+_layout_guard_block() {
+  printf '%s\n' "$1" | awk '
+    /SCION_ROLLBACK_SH="\$\(mktemp\)"/ { on = 1 }
+    on { print }
+    on && /^SERVICEEOF$/ { exit }
+  '
+}
+
+# _layout_assert_guard CMD WHAT -- CMD installs the boot-failure guard
+# (script through scion-layout.sh install-guard, then the rollback unit)
+# before it writes scion-hub.service, under set -e.
+_layout_assert_guard() {
+  local cmd="$1" what="$2" guard_line unit_line rb_unit_line
+  assert_contains "$cmd" "SCIONROLLBACKEOF" "${what}: the guard script must travel with the command"
+  assert_contains "$cmd" "$(cat "${TIER_DIR}/scion-hub-rollback.sh")" "${what}: the guard script must be carried byte for byte"
+  # shellcheck disable=SC2016 # a literal from the generated command
+  assert_contains "$cmd" 'sudo bash "$SCION_LAYOUT_SH" install-guard "$SCION_ROLLBACK_SH" "$SCION_START_ATTEMPT_SH"' \
+    "${what}: the guard and start-attempt scripts must be installed root-owned through scion-layout.sh install-guard"
+  assert_contains "$cmd" "SCIONSTARTATTEMPTEOF" "${what}: the start-attempt script must travel with the command"
+  assert_contains "$cmd" "$(cat "${TIER_DIR}/scion-hub-start-attempt.sh")" "${what}: the start-attempt script must be carried byte for byte"
+  assert_contains "$cmd" "sudo tee /etc/systemd/system/scion-hub-rollback.service" "${what}: the rollback unit must be written"
+  assert_contains "$cmd" "$(cat "${TIER_DIR}/config-templates/scion-hub-rollback.service")" "${what}: the rollback unit must match the template"
+  assert_contains "$cmd" "set -euo pipefail" "${what}: a failed guard install must stop the command"
+  local trap_line
+  trap_line="$(line_number "trap 'rm -f \"\$SCION_ROLLBACK_SH\" \"\$SCION_START_ATTEMPT_SH\" \"\${SCION_LAYOUT_SH:-}\"' EXIT" "$cmd")"
+  assert_true "$([[ -n "$trap_line" && -n "$(line_number 'SCION_LAYOUT_SH" install-guard' "$cmd")" && "$trap_line" -lt "$(line_number 'SCION_LAYOUT_SH" install-guard' "$cmd")" ]] && echo true || echo false)" \
+    "${what}: the guard temp file must be removed on any exit, including a failed install-guard"
+  guard_line="$(line_number 'SCION_LAYOUT_SH" install-guard' "$cmd")"
+  rb_unit_line="$(line_number 'sudo tee /etc/systemd/system/scion-hub-rollback.service' "$cmd")"
+  unit_line="$(line_number 'sudo tee /etc/systemd/system/scion-hub.service' "$cmd")"
+  assert_true "$([[ -n "$guard_line" && -n "$rb_unit_line" && -n "$unit_line" && "$guard_line" -lt "$unit_line" && "$rb_unit_line" -lt "$unit_line" ]] && echo true || echo false)" \
+    "${what}: the guard must be in place before scion-hub.service names it in OnFailure="
+}
+
+# _layout_deploy_to_unit_install CONFIG_JSON -- layout_deploy_through_settings,
+# stopped inside the unit install call: the stub holds deploy.sh there
+# (GCLOUD_STUB_UNIT_INSTALL_BLOCKS) until it is stopped, so it never races
+# ahead into later phases while the test stops it.
+_layout_deploy_to_unit_install() {
+  export GCLOUD_STUB_UNIT_INSTALL_BLOCKS=true
+  layout_deploy_through_settings "$@"
+  unset GCLOUD_STUB_UNIT_INSTALL_BLOCKS
+}
+
+test_layout_deploy_installs_boot_failure_guard() {
+  fresh_gcloud_state
+  LAYOUT_SENTINEL=hub-unit-installed _layout_deploy_to_unit_install "$(layout_config_json "$HUB" notify)"
+  assert_eq "true" "$LAYOUT_REACHED_SETTINGS" "deploy must reach the unit install (log: ${DEPLOY_LOG: -400})"
+  local cmd
+  cmd="$(_layout_unit_install_cmd "$(gcloud_log)")"
+  _layout_assert_guard "$cmd" "create path"
+  assert_contains "$cmd" "OnFailure=scion-hub-rollback.service" "the installed hub unit must carry OnFailure="
+}
+
+# An ssh --command is one argv word, which Linux caps at 128 KiB
+# (MAX_ARG_STRLEN): a bigger one fails to exec (E2BIG, exit 126) before
+# gcloud even starts. Each command carries scion-layout.sh at most once.
+test_layout_vm_commands_fit_one_argument() {
+  fresh_gcloud_state
+  LAYOUT_SENTINEL=hub-unit-installed _layout_deploy_to_unit_install "$(layout_config_json "$HUB" notify)"
+  local unit_cmd migrate_cmd limit=131072
+  unit_cmd="$(_layout_unit_install_cmd "$(gcloud_log)")"
+  fresh_gcloud_state
+  layout_run_migrate "$(layout_config_json "$HUB")"
+  assert_eq "0" "$RUN_EXIT_CODE" "migrate-layout must run (output: ${RUN_OUTPUT: -400})"
+  migrate_cmd="$(_layout_migrate_cmd "$(gcloud_log)")"
+  local name cmd
+  for name in unit migrate; do
+    if [[ "$name" == unit ]]; then cmd="$unit_cmd"; else cmd="$migrate_cmd"; fi
+    assert_true "$([[ -n "$cmd" ]] && echo true || echo false)" "${name}: the command must be found"
+    assert_true "$([[ "$(printf '%s' "$cmd" | wc -c)" -lt $(( limit - 16384 )) ]] && echo true || echo false)" \
+      "${name}: the --command must stay well under 128 KiB (is $(printf '%s' "$cmd" | wc -c) bytes)"
+    assert_eq "1" "$(printf '%s\n' "$cmd" | grep -c "<< 'SCIONLAYOUTEOF'")" "${name}: scion-layout.sh must be carried exactly once"
+  done
+}
+
+test_layout_deploy_and_migrate_install_the_same_guard() {
+  fresh_gcloud_state
+  LAYOUT_SENTINEL=hub-unit-installed _layout_deploy_to_unit_install "$(layout_config_json "$HUB" notify)"
+  local deploy_guard migrate_guard
+  deploy_guard="$(_layout_guard_block "$(_layout_unit_install_cmd "$(gcloud_log)")")"
+  fresh_gcloud_state
+  layout_run_migrate "$(layout_config_json "$HUB")"
+  migrate_guard="$(_layout_guard_block "$(_layout_migrate_cmd "$(gcloud_log)")")"
+  assert_contains "$deploy_guard" "install-guard" "the create path's guard block must be found"
+  assert_eq "$deploy_guard" "$migrate_guard" "a fresh install and migrate-layout must install exactly the same guard"
 }
 
 # _layout_exec_install_cmd CMD WORKDIR -- runs deploy.sh's generated binary
@@ -754,6 +926,7 @@ test_layout_migrate_converts_and_restarts() {
     "the layout must be in place before the unit points at it"
   assert_contains "$cmd" "set -euo pipefail" "a failed adopt must stop the command before the unit changes"
   assert_contains "$RUN_OUTPUT" "Post-migration health check passed" "migrate-layout must wait for the hub to come back"
+  _layout_assert_guard "$cmd" "migrate-layout"
 }
 
 test_layout_migrate_downloads_nothing_and_creates_nothing() {
@@ -838,9 +1011,11 @@ test_layout_migrate_vm_command_runs_twice_to_same_state() {
   mkdir -p "${LH_DIR}/work"
   _layout_fake_sudo_dir "${LH_DIR}/work"
   cmd="${cmd//\/home\/scion\/.scion\/settings.yaml/${LH_DIR}/settings.yaml}"
+  local guard="${LH_DIR}/usr/local/libexec/scion/scion-hub-rollback.sh"
 
   local out rc first
   out="$(PATH="${LH_DIR}/work/shim:${PATH}" SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" SCION_INSTALL_OWNER="" \
+    SCION_ROLLBACK_PATH="$guard" SCION_START_ATTEMPT_PATH="${guard%/*}/scion-hub-start-attempt.sh" \
     SCION_LAYOUT_YAML_TO_JSON="$LAYOUT_YAML_TO_JSON" bash -c "$cmd" 2>&1)"
   rc=$?
   assert_eq "0" "$rc" "the generated migrate command must succeed on an old-layout host (output: ${out})"
@@ -850,9 +1025,21 @@ test_layout_migrate_vm_command_runs_twice_to_same_state() {
     "ExecStart=/opt/scion/current/scion" "the unit must be written with the new ExecStart"
   assert_contains "$(cat "${LH_DIR}/settings.yaml")" '    update_policy: "notify"' "auto must become notify"
   assert_contains "$(cat "${LH_DIR}/settings.yaml")" "    install_root: \"${LH_ROOT}\"" "install_root must be written"
+  assert_true "$(cmp -s "${TIER_DIR}/scion-hub-rollback.sh" "$guard" && echo true || echo false)" \
+    "the boot-failure guard script must be installed (P1-migrated VMs get it too)"
+  assert_eq "755" "$(stat -c %a "$guard")" "the guard script must be mode 0755"
+  assert_true "$(cmp -s "${TIER_DIR}/scion-hub-start-attempt.sh" "${guard%/*}/scion-hub-start-attempt.sh" && echo true || echo false)" \
+    "the start-attempt counter must be installed next to the guard (P1-migrated VMs get it too)"
+  assert_contains "$(cat "${LH_DIR}/work/etc/systemd/system/scion-hub.service")" \
+    "ExecStartPre=-/usr/local/libexec/scion/scion-hub-start-attempt.sh" "the re-rendered hub unit must count its starts"
+  assert_eq "$(cat "${TIER_DIR}/config-templates/scion-hub-rollback.service")" \
+    "$(cat "${LH_DIR}/work/etc/systemd/system/scion-hub-rollback.service")" "the rollback unit must be written"
+  assert_contains "$(cat "${LH_DIR}/work/etc/systemd/system/scion-hub.service")" \
+    "OnFailure=scion-hub-rollback.service" "the re-rendered hub unit must carry OnFailure="
   first="$(_layout_state; cat "${LH_DIR}/settings.yaml")"
 
   out="$(PATH="${LH_DIR}/work/shim:${PATH}" SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" SCION_INSTALL_OWNER="" \
+    SCION_ROLLBACK_PATH="$guard" SCION_START_ATTEMPT_PATH="${guard%/*}/scion-hub-start-attempt.sh" \
     SCION_LAYOUT_YAML_TO_JSON="$LAYOUT_YAML_TO_JSON" bash -c "$cmd" 2>&1)"
   rc=$?
   assert_eq "0" "$rc" "a second run must succeed (output: ${out})"
@@ -885,7 +1072,7 @@ test_layout_rerun_without_version_keeps_current_release() {
   assert_not_contains "$LAYOUT_CURL_LOG" "SHA256SUMS" "with no chat plugins, no checksum probe is needed"
   assert_not_contains "$log" "Downloading scion binary" "the binary must not be downloaded"
   # shellcheck disable=SC2016 # a literal from the generated command
-  assert_not_contains "$log" 'SCION_LAYOUT_SH" install' "current must not be switched"
+  assert_not_contains "$log" 'SCION_LAYOUT_SH" install ' "current must not be switched"
   assert_contains "$DEPLOY_LOG" "Keeping the installed scion binary" "Phase 3 must say the binary is kept"
 }
 

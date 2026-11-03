@@ -41,6 +41,10 @@ const (
 	// metricIngressHeaderRefused: dials whose ingress headers the relay did
 	// not use, by cause (ingress_header_untrusted, ingress_cap_invalid).
 	metricIngressHeaderRefused = "scion.relay.ingress_headers_refused"
+	// metricAgentSessionsAdmitted: agent sessions admitted, by
+	// incarnation_source (launch_id, or generation for the interim
+	// fallback of a Hello without a launch id).
+	metricAgentSessionsAdmitted = "scion.relay.agent_sessions_admitted"
 )
 
 // registerRelayMetrics registers the relay's observable instruments on mp
@@ -71,6 +75,14 @@ func registerRelayMetrics(mp metric.MeterProvider, r *relay.Relay, role *relayro
 			return nil
 		}))
 	errs = append(errs, err)
+	_, err = m.Int64ObservableCounter(metricAgentSessionsAdmitted,
+		metric.WithUnit("{session}"),
+		metric.WithDescription("Agent conduit sessions admitted, by incarnation source; generation counts Hellos without a launch id"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			observeAgentSessionsAdmitted(o, r.AgentSessionsAdmitted())
+			return nil
+		}))
+	errs = append(errs, err)
 	return errors.Join(errs...)
 }
 
@@ -79,5 +91,13 @@ func registerRelayMetrics(mp metric.MeterProvider, r *relay.Relay, role *relayro
 func logRegisterRelayMetrics(log *slog.Logger, mp metric.MeterProvider, r *relay.Relay, role *relayrole.Role, singleton bool) {
 	if err := registerRelayMetrics(mp, r, role, singleton); err != nil {
 		log.Warn("Conduit relay: registering metrics failed", "error", err)
+	}
+}
+
+// observeAgentSessionsAdmitted reports the per-source admission counts, in
+// a fixed order of the two known sources.
+func observeAgentSessionsAdmitted(o metric.Int64Observer, counts map[string]uint64) {
+	for _, src := range []string{relay.IncarnationSourceLaunchID, relay.IncarnationSourceGeneration} {
+		o.Observe(int64(counts[src]), metric.WithAttributes(attribute.String("incarnation_source", src)))
 	}
 }

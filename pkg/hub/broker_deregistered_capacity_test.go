@@ -369,7 +369,7 @@ func TestOfflineBroker_ClaimHeld_SlotHeld(t *testing.T) {
 // does.
 func registerBrokerWithID(t *testing.T, srv *Server, id, name string) {
 	t.Helper()
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{BrokerID: id, Name: name})
+	rec := doRequestLoopback(t, srv, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{BrokerID: id, Name: name})
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	reg := decodeRegistration(t, rec)
 	require.Equal(t, id, reg.BrokerID)

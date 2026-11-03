@@ -52,9 +52,12 @@ env:
   TF_VERSION: '1.9.8'
   TF_IN_AUTOMATION: 'true'
 
+# Fork CI gate (hack/check-fork-ci-gate.sh, cr-ci/workflows/README.md): on push
+# and schedule every job runs only in GoogleCloudPlatform/scion; forks stage PRs.
 jobs:
   fmt-validate-test:
     name: fmt / validate / terraform test
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
@@ -144,6 +147,7 @@ jobs:
 
   tflint:
     name: tflint
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
@@ -189,6 +193,7 @@ jobs:
 
   destroy-protection-selftest:
     name: verify-destroy-protection.sh --selftest
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
@@ -218,6 +223,7 @@ jobs:
 
   settingscheck:
     name: settingscheck (settings.yaml.tftpl decode)
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:

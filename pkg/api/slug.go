@@ -19,6 +19,7 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"golang.org/x/text/unicode/norm"
@@ -35,17 +36,50 @@ const (
 var (
 	// nonAlphanumeric matches any character that isn't a lowercase letter or digit
 	nonAlphanumeric = regexp.MustCompile(`[^a-z0-9]+`)
-	// leadingTrailingDash matches leading or trailing dashes
-	leadingTrailingDash = regexp.MustCompile(`^-+|-+$`)
 )
+
+// isAlreadySlug reports whether s is already a valid canonical slug:
+// non-empty, at most MaxSlugLength, no leading or trailing dashes,
+// containing only lowercase alphanumeric ASCII and non-consecutive dashes.
+func isAlreadySlug(s string) bool {
+	if len(s) == 0 || len(s) > MaxSlugLength {
+		return false
+	}
+	if s[0] == '-' || s[len(s)-1] == '-' {
+		return false
+	}
+	nextCanBeDash := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+			nextCanBeDash = true
+		} else if c == '-' {
+			if !nextCanBeDash {
+				return false
+			}
+			nextCanBeDash = false
+		} else {
+			return false
+		}
+	}
+	return true
+}
 
 // Slugify converts a string to a URL-safe slug.
 // It normalizes unicode, converts to lowercase, replaces non-alphanumeric
 // characters with dashes, and enforces length limits.
 func Slugify(s string) string {
+	if s == "" {
+		return ""
+	}
+	if isAlreadySlug(s) {
+		return s
+	}
+
 	// Normalize unicode (NFD decomposition then remove combining marks)
 	s = norm.NFD.String(s)
 	var builder strings.Builder
+	builder.Grow(len(s))
 	for _, r := range s {
 		if !unicode.Is(unicode.Mn, r) { // Mn = Mark, Nonspacing
 			builder.WriteRune(r)
@@ -60,7 +94,7 @@ func Slugify(s string) string {
 	s = nonAlphanumeric.ReplaceAllString(s, "-")
 
 	// Remove leading/trailing dashes
-	s = leadingTrailingDash.ReplaceAllString(s, "")
+	s = strings.Trim(s, "-")
 
 	// Enforce length limit
 	if len(s) > MaxSlugLength {
@@ -117,15 +151,19 @@ var reservedDisplayNameKeys = map[string]bool{
 // exactly one ASCII alphanumeric character keeps the persisted key visibly
 // tied to what the name displays.
 func ValidateDisplayName(name string) (key string, err error) {
-	runes := []rune(name)
-	if len(runes) == 0 {
+	if name == "" {
 		return "", fmt.Errorf("display name must not be empty")
 	}
-	if len(runes) > MaxDisplayNameLength {
+	if utf8.RuneCountInString(name) > MaxDisplayNameLength {
 		return "", fmt.Errorf("display name %q is too long: must be at most %d characters", name, MaxDisplayNameLength)
 	}
-	for _, r := range runes {
+	for _, r := range name {
 		if r == ' ' || r == '-' || r == '_' || r == '.' {
+			continue
+		}
+		// Fast-path: ASCII alphanumeric characters always slugify to a single ASCII character,
+		// equivalent to the len(Slugify(string(r))) == 1 check below.
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
 			continue
 		}
 		if len(Slugify(string(r))) == 1 {

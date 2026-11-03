@@ -37,10 +37,10 @@ const (
 	// the same path as on GitHub-hosted ubuntu-latest, because actions/cache
 	// stores paths relative to GITHUB_WORKSPACE (under the work folder): only
 	// an identical work folder lets cache entries restore to the same place in
-	// both directions. The runner image makes it a symlink to the /scratch
-	// ephemeral disk (cr-ci cache parity contract, item 2). The runner keeps
-	// this path as configured (Path.GetFullPath does not resolve symlinks), so
-	// GITHUB_WORKSPACE is /home/runner/work/<repo>/<repo>.
+	// both directions. On the cr-ci runner it is a real directory on the
+	// ephemeral disk, which the job mounts at HOME (cr-ci cache parity
+	// contract, item 2), so GITHUB_WORKSPACE is /home/runner/work/<repo>/<repo>,
+	// physically too.
 	WorkFolder = "/home/runner/work"
 
 	maxWebhookBody          = 5 << 20
@@ -150,6 +150,15 @@ type Server struct {
 	cancelled   map[string]time.Time     // execution refs this process cancelled
 	offlineSeen map[string]time.Time     // runner name -> first seen offline
 	noticed     map[string]bool          // reconcile notices already logged (pruned each pass)
+	// hijacked: runners killed as hijacked whose registration GitHub has not let go
+	// yet (busy while it still shows the untrusted job running), -> first kill time.
+	// Later kills of the same runner log at WARNING; cleared once the registration is
+	// gone, or by reconcile after cancelledTTL.
+	hijacked map[string]time.Time
+	// forgotten: runners whose job's completed webhook dropped their record, -> when.
+	// Reconcile skips them (its discovery may predate the webhook); pruned after
+	// cancelledTTL.
+	forgotten map[string]time.Time
 }
 
 // New returns a Server.
@@ -175,6 +184,8 @@ func New(o Options) *Server {
 		cancelled:   map[string]time.Time{},
 		offlineSeen: map[string]time.Time{},
 		noticed:     map[string]bool{},
+		hijacked:    map[string]time.Time{},
+		forgotten:   map[string]time.Time{},
 	}
 }
 

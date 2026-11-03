@@ -139,7 +139,7 @@ func TestDeleteAgent_HubManagedProject_NoContainer(t *testing.T) {
 	// Verify that deleting an agent in a hub-managed project resolves the correct
 	// project path even when the container doesn't exist (e.g. created-only
 	// agent, pruned container).
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 
@@ -194,7 +194,7 @@ func TestDeleteAgent_HubManagedProject_NoContainer(t *testing.T) {
 // operation runs, checked independently of whatever the request routing
 // already filtered.
 func TestDeleteAgent_RejectsTraversalName(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 
@@ -255,7 +255,7 @@ func TestDeleteAgent_ContainerOnlyRemovalSurvivesBadName(t *testing.T) {
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	// No deleteFiles, no softDelete: a plain container-record removal.
 	// Decodes to id="..", action="".
@@ -288,7 +288,7 @@ func TestDeleteAgent_InvalidIDWithDeleteFilesRejected(t *testing.T) {
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/agents/a%5Cb?deleteFiles=true", nil)
 	rec := httptest.NewRecorder()

@@ -994,6 +994,38 @@ func TestLaunchCarriesServedRepos(t *testing.T) {
 	}
 }
 
+// TestOrgScopeServedReposForOtherTarget: in org scope, a job of a target repo that is
+// not the first gets a runner whose GH_REPOS includes that repo, and a job of a
+// same-owner repo that is not a target gets no runner at all. So servedRepos is only
+// ever called with a target repo, and the job guard's allowlist never has to add the
+// triggering repo itself (gemini on #4204, declined: it would only widen the guard).
+func TestOrgScopeServedReposForOtherTarget(t *testing.T) {
+	targets := []githubapp.Repo{{Owner: "example-owner", Name: "example-repo"}, {Owner: "example-owner", Name: "second-repo"}}
+	h := newHarness(t, harnessOpts{orgScope: true, targets: targets})
+
+	const second = "example-owner/second-repo"
+	h.gh.AddRun(fakes.GitHubRun{ID: 20, Repo: second, HeadRepo: second, Event: "push", Status: "queued"})
+	h.gh.EnsureJob(20, fakes.GitHubJob{ID: 200, Status: "queued", Labels: []string{testLabel}, CreatedAt: h.clock.Now()})
+	h.webhook(jobPayload("queued", 200, 20, second, []string{testLabel}, ""))
+	ex := h.executions()
+	if len(ex) != 1 {
+		t.Fatalf("executions = %d, want 1", len(ex))
+	}
+	if got, want := ex[0].Env[launcher.EnvRepos], "example-owner/example-repo,example-owner/second-repo"; got != want {
+		t.Errorf("GH_REPOS = %q, want %q", got, want)
+	}
+
+	const other = "example-owner/not-a-target"
+	h.gh.AddRun(fakes.GitHubRun{ID: 30, Repo: other, HeadRepo: other, Event: "push", Status: "queued"})
+	h.gh.EnsureJob(30, fakes.GitHubJob{ID: 300, Status: "queued", Labels: []string{testLabel}, CreatedAt: h.clock.Now()})
+	if code, out := h.webhook(jobPayload("queued", 300, 30, other, []string{testLabel}, "")); code != http.StatusOK || !strings.Contains(out, "ignored") {
+		t.Errorf("non-target repo's job: %d %q, want 200 ignored", code, out)
+	}
+	if n := len(h.executions()); n != 1 {
+		t.Errorf("executions = %d after a non-target repo's job, want still 1", n)
+	}
+}
+
 // ---- no secrets in logs ------------------------------------------------------
 
 // TestNoSecretsInLogs drives every path (accepted and rejected webhooks,

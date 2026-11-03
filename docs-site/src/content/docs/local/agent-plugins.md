@@ -130,7 +130,7 @@ A plugin that a user removes by hand inside the agent is reinstalled at the next
 | `copilot` | yes | 1.0.74 | 1.0.97 | Installed with `copilot plugin install <dir>`. See the [copilot notes](#copilot). |
 | `muse-code` | partial | 1.4.6 | 1.4.6, 1.4.7; 1.4.9 (live check) | Skills install natively with `muse plugins install`. muse 1.4.9 and earlier keeps Agent Plugins MCP servers **inactive**: they are listed but never started. |
 | `claude` | partial | 2.1.157 (approximate) | 2.1.296 | Installed as a skills-dir plugin with a generated manifest. See the [claude notes](#claude). |
-| `gemini-cli`, `grok-build`, `antigravity`, `hermes`, `opencode` | no | — | — | Bundles are staged but not installed. The start prints a warning. |
+| `gemini-cli`, `grok-build`, `antigravity`, `hermes`, `opencode`, `pi` | no | — | — | Bundles are staged but not installed. The start prints a warning. |
 
 ¹ CLI-level smoke tests: the real harness CLI driven by Scion's installer with staged inputs. None of the four harnesses has yet been verified end to end in a Scion-provisioned agent; for claude in particular, the path through `scion start` is not yet verified.
 
@@ -306,6 +306,6 @@ To fix this:
 
 - Only Agent Plugins **1.0.0** is supported.
 - Sources are template-relative paths only: no GitHub or registry sources, no CLI flag and no Hub API to add plugins to an agent.
-- gemini-cli, grok-build, antigravity, hermes and opencode do not install plugins yet.
+- gemini-cli, grok-build, antigravity, hermes, opencode and pi do not install plugins yet.
 - Plugin MCP servers are not added to Scion's own MCP configuration (`mcp_servers`); each harness reads them from the plugin.
 - Install results inside the container (`status-<harness>.json`) are not reported back to the Hub.

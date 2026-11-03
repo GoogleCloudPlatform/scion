@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/gorilla/sessions"
 )
 
@@ -280,6 +281,38 @@ func (ws *WebServer) keepsNoAnonymousSession(r *http.Request) bool {
 	}
 	_, err := r.Cookie(webSessionName)
 	return err != nil
+}
+
+// noSessionLoginLocation is the login redirect for a browser request
+// without a session cookie on a dev sign-in server (see
+// keepsNoAnonymousSession). With web OAuth providers configured, it is the
+// sign-in page with the requested path as returnTo, limited to a path on
+// this server: the page passes returnTo on when a provider is picked, and
+// nothing is saved in a cookie that would replace a dev session. Otherwise
+// it is /auth/login.
+func (ws *WebServer) noSessionLoginLocation(requested string) string {
+	if !ws.webOAuthConfigured() {
+		return "/auth/login"
+	}
+	next := localRedirectPath(requested)
+	if next == "/" {
+		return "/login"
+	}
+	return "/login?" + url.Values{"returnTo": {next}}.Encode()
+}
+
+// webOAuthConfigured reports whether at least one OAuth provider is
+// configured for web sign-in.
+func (ws *WebServer) webOAuthConfigured() bool {
+	if ws.oauthService == nil || ws.config.AuthMode == "proxy" {
+		return false
+	}
+	for _, pid := range hubclient.OAuthProviderOrder() {
+		if ws.oauthService.IsProviderConfiguredForClient(OAuthClientTypeWeb, pid) {
+			return true
+		}
+	}
+	return false
 }
 
 // localRedirectPath returns next when it is a path on this server, and "/"

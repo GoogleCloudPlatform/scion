@@ -200,6 +200,11 @@ async function openMenuItem(
       }
       await msgLocator(page, id).click({ button: 'right', timeout: 2_000 });
       await expect(item).toBeVisible({ timeout: 1_000 });
+      // At phone width the menu is exactly one bottom action sheet, which
+      // guards the mirrored MENU_SHEET_MAX_WIDTH_PX threshold above.
+      if ((page.viewportSize()?.width ?? Number.MAX_SAFE_INTEGER) <= MENU_SHEET_MAX_WIDTH_PX) {
+        await expect(openSheets).toHaveCount(1);
+      }
     } catch (e) {
       previousError = shortError(e);
       throw e;
@@ -208,12 +213,13 @@ async function openMenuItem(
   await item.click();
 }
 
-test.describe('Starred messages (phase 1)', () => {
+test.describe('Starred messages', () => {
   const env = getE2EEnv();
   let projectId = '';
   let topicId = '';
   let targetId = '';
   let memberToken = '';
+  let memberId = '';
 
   test.beforeAll(async () => {
     // Seeding pauses for the hub's send rate limit (below), about a minute per run.
@@ -273,6 +279,7 @@ test.describe('Starred messages (phase 1)', () => {
       displayName: 'Stars Member',
     });
     memberToken = member.accessToken;
+    memberId = member.user.id;
     const roles = await api(
       env.devToken,
       'GET',
@@ -372,6 +379,84 @@ test.describe('Starred messages (phase 1)', () => {
     await second.close();
   });
 
+  test('human DM: star, list in the header after reload, jump; the peer has no star', async ({
+    page,
+  }) => {
+    // The admin's user ID is the sender of the seeded thread messages.
+    const hist = await api(
+      env.devToken,
+      'GET',
+      `/api/v1/chat/conversations/${topicId}/messages?limit=1`
+    );
+    expect(hist.status).toBe(200);
+    const adminId =
+      (hist.body as { messages: Array<{ senderId?: string }> }).messages[0]?.senderId ?? '';
+    expect(adminId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(memberId).toMatch(/^[0-9a-f-]{36}$/);
+    // The canonical DM key orders the two participants' tokens.
+    const [a, b] = [`user:${adminId}`, `user:${memberId}`].sort();
+    const dmKey = `dm:${a}:${b}`;
+    const dmPath = `/api/v1/chat/conversations/${encodeURIComponent(dmKey)}/messages`;
+
+    // The member writes to the admin: a target, then a few later messages.
+    const sendAsMember = async (content: string): Promise<string> => {
+      const res = await api(memberToken, 'POST', dmPath, { content });
+      expect(res.status, JSON.stringify(res.body)).toBeLessThan(300);
+      const body = res.body as { id?: string; message?: { id: string } };
+      return body.id ?? body.message?.id ?? '';
+    };
+    const dmTargetId = await sendAsMember('Mock DM target: keep the retry budget small.');
+    for (let i = 0; i < 3; i++) await sendAsMember(`Mock DM filler ${i}`);
+    expect(dmTargetId).toMatch(/^[0-9a-f-]{36}$/);
+
+    const loadedAt = Date.now();
+    await page.goto(`/chat/dm/${encodeURIComponent(dmKey)}#msg-${dmTargetId}`, {
+      waitUntil: 'domcontentloaded',
+    });
+    await expect(msgLocator(page, dmTargetId)).toBeVisible({ timeout: 20_000 });
+    await expect(msgLocator(page, dmTargetId)).toBeInViewport({ ratio: 1, timeout: 20_000 });
+    await threadScrollIdle(page);
+    await openMenuItem(page, dmTargetId, 'Star message', loadedAt);
+    await expect(indicator(page, dmTargetId)).toBeVisible();
+
+    // The hub lists it as a DM star without project fields or a raw address.
+    const list = await api(
+      env.devToken,
+      'GET',
+      `/api/v1/chat/stars?conversationKey=${encodeURIComponent(dmKey)}`
+    );
+    expect(list.status).toBe(200);
+    const items = (list.body as { items: Array<Record<string, unknown>> }).items;
+    expect(items.map((i) => i.messageId)).toEqual([dmTargetId]);
+    expect(items[0].conversationKind).toBe('dm');
+    expect(items[0].projectId).toBeUndefined();
+    expect(items[0].projectName).toBeUndefined();
+    expect(items[0].conversationName).toBe('Stars Member');
+    expect(items[0].senderName).toBe('Stars Member');
+
+    // The peer of the DM has no star of their own.
+    const peerState = await api(
+      memberToken,
+      'GET',
+      `/api/v1/chat/stars/state?messageId=${dmTargetId}`
+    );
+    expect(peerState.status).toBe(200);
+    expect((peerState.body as { starredMessageIds: string[] }).starredMessageIds).toEqual([]);
+
+    // Reload without the fragment, open the header list and jump.
+    await page.goto(`/chat/dm/${encodeURIComponent(dmKey)}`, { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('scion-chat-message').first()).toBeVisible({ timeout: 20_000 });
+    await page.getByRole('button', { name: 'Starred messages in this conversation' }).click();
+    const entry = page.locator('scion-chat-starred-list a.entry', { hasText: 'Mock DM target' });
+    await expect(entry).toBeVisible();
+    await entry.click();
+    await expect(msgLocator(page, dmTargetId)).toBeInViewport({ timeout: 20_000 });
+    await expect(indicator(page, dmTargetId)).toBeVisible();
+
+    const del = await api(env.devToken, 'DELETE', `/api/v1/chat/stars/${dmTargetId}`);
+    expect(del.status).toBe(204);
+  });
+
   test('flag off: routes answer 404 and the UI shows no star surfaces', async ({ page }) => {
     await setExperiment(env.devToken, false);
     try {
@@ -387,6 +472,65 @@ test.describe('Starred messages (phase 1)', () => {
       await expect(menuItem(page, 'Star message')).toHaveCount(0);
     } finally {
       await setExperiment(env.devToken, true);
+    }
+  });
+
+  test('starred-only center: only the starred message, jump to it in full context, Back restores', async ({
+    page,
+  }) => {
+    // Phase 3. Star the target (outside the latest page) through the API, so this case
+    // does not depend on the order of the others.
+    const put = await api(env.devToken, 'PUT', `/api/v1/chat/stars/${targetId}`, {
+      conversationKey: topicId,
+    });
+    expect(put.status, JSON.stringify(put.body)).toBe(200);
+    try {
+      const filtered = await api(
+        env.devToken,
+        'GET',
+        `/api/v1/chat/conversations/${topicId}/messages?starred=true`
+      );
+      expect(filtered.status, JSON.stringify(filtered.body)).toBe(200);
+      const body = filtered.body as { messages: Array<{ id: string }>; totalCount: number };
+      expect(body.messages.map((m) => m.id)).toEqual([targetId]);
+      expect(body.totalCount).toBe(1);
+
+      const loadedAt = Date.now();
+      await page.goto(`/chat/space/${projectId}/thread/${topicId}?messages=starred`, {
+        waitUntil: 'domcontentloaded',
+      });
+      const banner = page.locator('scion-chat-thread .star-filter-banner');
+      await expect(banner).toBeVisible({ timeout: 20_000 });
+      await expect(banner).toContainText('Starred messages only');
+      // Slug canonicalization keeps the filter.
+      await expect(page).toHaveURL(
+        new RegExp(`/chat/(?!space/)[^/]+/${topicId}\\?messages=starred$`),
+        {
+          timeout: 20_000,
+        }
+      );
+      await expect(msgLocator(page, targetId)).toBeVisible({ timeout: 20_000 });
+      await expect(page.locator('scion-chat-thread scion-chat-message')).toHaveCount(1);
+      await expect(page.getByText('Mock filler message', { exact: false })).toHaveCount(0);
+      await expect(page.locator('scion-chat-thread scion-chat-composer')).toHaveCount(0);
+
+      await threadScrollIdle(page);
+      await openMenuItem(page, targetId, 'Jump to message in conversation', loadedAt);
+      await expect(page).toHaveURL(new RegExp(`/${topicId}#msg-${targetId}$`), { timeout: 20_000 });
+      await expect(banner).toHaveCount(0);
+      await expect(msgLocator(page, targetId)).toBeInViewport({ timeout: 20_000 });
+      // Full context: the unstarred filler is there too.
+      await expect(page.getByText('Mock filler message 0', { exact: true })).toBeAttached({
+        timeout: 20_000,
+      });
+
+      await page.goBack();
+      await expect(page).toHaveURL(/\?messages=starred$/, { timeout: 20_000 });
+      await expect(banner).toBeVisible({ timeout: 20_000 });
+      await expect(page.locator('scion-chat-thread scion-chat-message')).toHaveCount(1);
+      await expect(msgLocator(page, targetId)).toBeVisible();
+    } finally {
+      await api(env.devToken, 'DELETE', `/api/v1/chat/stars/${targetId}`);
     }
   });
 });

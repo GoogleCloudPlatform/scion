@@ -144,11 +144,6 @@ var execSiteAllowlist = map[execSite]string{
 	{
 		File: "cmd/sciontool/commands/init.go",
 		Func: "gitCloneWorkspace",
-		Call: `exec.Command("git", "config", "--file", gitconfigPath, "credential.helper", credentialHelper)`,
-	}: reasonCloneCredential,
-	{
-		File: "cmd/sciontool/commands/init.go",
-		Func: "gitCloneWorkspace",
 		Call: `exec.Command("git", "-C", workspacePath, "checkout", branchName)`,
 	}: reasonCloneCredential,
 	{

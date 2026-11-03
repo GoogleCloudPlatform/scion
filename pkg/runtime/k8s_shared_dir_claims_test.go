@@ -211,12 +211,12 @@ func TestReleaseProjectSharedDirClaims_UIDPrecondition(t *testing.T) {
 // for this project's shared dir.
 func TestEnsureProjectRWXClaim_RefusesAnotherProjectsClaim(t *testing.T) {
 	r, _ := claimRuntime(t, claim("agents", "scion-shared-web-a", claimLabels("a", "web", "another-project")))
-	err := r.ensureProjectRWXClaim(context.Background(), "agents", "web", claimTestProjectID, "a", "", resource.MustParse("1Gi"))
+	err := r.ensureProjectRWXClaim(context.Background(), "agents", "web", claimTestProjectID, "a", sharedDirClaimPolicy{}, resource.MustParse("1Gi"))
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "belongs to another project")
+	assert.Contains(t, err.Error(), "is labelled for project another-project")
 
 	r2, _ := claimRuntime(t, claim("agents", "scion-shared-web-a", claimLabels("a", "web", claimTestProjectID)))
-	assert.NoError(t, r2.ensureProjectRWXClaim(context.Background(), "agents", "web", claimTestProjectID, "a", "", resource.MustParse("1Gi")), "its own claim is reused")
+	assert.NoError(t, r2.ensureProjectRWXClaim(context.Background(), "agents", "web", claimTestProjectID, "a", sharedDirClaimPolicy{}, resource.MustParse("1Gi")), "its own claim is reused")
 	r3, _ := claimRuntime(t, claim("agents", "scion-shared-web-a", claimLabels("a", "web", "")))
-	assert.NoError(t, r3.ensureProjectRWXClaim(context.Background(), "agents", "web", claimTestProjectID, "a", "", resource.MustParse("1Gi")), "a claim without the label is reused as before")
+	assert.NoError(t, r3.ensureProjectRWXClaim(context.Background(), "agents", "web", claimTestProjectID, "a", sharedDirClaimPolicy{}, resource.MustParse("1Gi")), "a claim without the label is reused as before")
 }

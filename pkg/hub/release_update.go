@@ -41,7 +41,8 @@ const autoUpdateStartedBy = "system:auto-update"
 
 // shouldRegisterReleaseUpdateCheck reports whether the scheduled release
 // update check runs: whenever the update policy is not disabled, whatever
-// the deployment tier (the handler skips hubs whose effective mode is git).
+// the deployment tier (the handler skips hubs whose effective mode is git,
+// and never auto-updates a pinned hub).
 func shouldRegisterReleaseUpdateCheck(mc MaintenanceConfig) bool {
 	return mc.UpdatePolicy != "disabled"
 }
@@ -76,21 +77,30 @@ func (s *Server) releaseUpdateCheckHandler() func(ctx context.Context) {
 	}
 }
 
-// runReleaseUpdateCheck checks the effective channel for a newer release.
-// Hubs whose effective mode is git are skipped. Under the notify policy an
-// update is stored in system.update_available for the admin UI. Under auto
-// it starts an update-binary run for latest:<channel> through the same
-// executor and installer as the UI; when the installer is unsupported no
-// run is created (nothing is downloaded) and the update is only stored.
+// runReleaseUpdateCheck checks the effective channel (release selection,
+// else configuration, else the running version's) for a newer release in
+// the release catalog. Hubs whose effective mode is git are skipped. Under
+// the notify policy an update is stored in system.update_available for the
+// admin UI. Under auto it starts an update-binary run for latest:<channel>
+// through the same executor and installer as the UI. A hub pinned to a
+// release (pin != latest) stays put and is only notified (design D7), and
+// when the installer is unsupported no run is created (nothing is
+// downloaded) and the update is only stored.
 func (s *Server) runReleaseUpdateCheck(ctx context.Context, deps releaseCheckDeps) {
 	log := logging.Subsystem("hub.maintenance.release-update-check")
 	mc := s.config.MaintenanceConfig
 
-	if mode := effectiveUpdateMode(mc); mode != UpdateModeRelease {
+	sel, err := s.readReleaseSelection(ctx)
+	if err != nil {
+		log.Error("Failed to read the release selection, skipping scheduled update check", "error", err)
+		return
+	}
+	if mode := effectiveUpdateMode(mc, sel); mode != UpdateModeRelease {
 		log.Debug("Effective update mode is not release, skipping scheduled update check", "mode", mode)
 		return
 	}
-	channel, source := effectiveReleaseChannel(mc, deps.running)
+	channel, source := effectiveReleaseChannel(mc, deps.running, sel)
+	pin := effectivePin(sel)
 	if channel == "" {
 		log.Debug("No release channel (git build without release_channel), skipping scheduled update check",
 			"version", deps.running)
@@ -99,13 +109,15 @@ func (s *Server) runReleaseUpdateCheck(ctx context.Context, deps releaseCheckDep
 
 	log.Debug("Running scheduled release update check",
 		"current_version", deps.running, "channel", channel, "channel_source", source,
-		"repo", mc.GitHubRepo, "policy", mc.UpdatePolicy)
+		"pin", pin, "repo", mc.GitHubRepo, "policy", mc.UpdatePolicy)
 
 	result, err := deps.check(ctx, maintenance.ReleaseCheckOptions{
 		CurrentVersion:   deps.running,
 		CurrentBuildTime: deps.buildTime,
 		Channel:          channel,
 		Repo:             mc.GitHubRepo,
+		Catalog:          s.updateReleaseCatalog(),
+		Releases:         s.updateReleaseSource(),
 	})
 	if err != nil {
 		// A transient GitHub failure must not crash the scheduler; the next
@@ -126,6 +138,12 @@ func (s *Server) runReleaseUpdateCheck(ctx context.Context, deps releaseCheckDep
 
 	switch mc.UpdatePolicy {
 	case "auto":
+		if pin != maintenance.PinLatest {
+			log.Info("Auto update skipped: the hub is pinned to a release; storing a notification instead",
+				"pin", pin)
+			s.storeUpdateAvailable(ctx, result)
+			return
+		}
 		if st := s.updateInstaller().Status(); !st.Supported {
 			log.Warn("Auto update skipped: this hub cannot install releases; storing a notification instead",
 				"installer", st.Strategy, "reason", st.Reason)

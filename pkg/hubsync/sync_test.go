@@ -2619,6 +2619,91 @@ func TestEnsureHubReady_ScopedTokenWithoutProjectRead(t *testing.T) {
 	}
 }
 
+// emptyProjectListHub serves a hub whose project list is always empty, as
+// the hub answers a user access token without project:list. It counts
+// project list calls.
+func emptyProjectListHub(t *testing.T, lists *int) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz":
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects":
+			*lists++
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"projects": []interface{}{}, "totalCount": 0})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+// projectRefsMatchingNothing are the reference forms that resolve through
+// the project list: a slug or name, and a git URL.
+var projectRefsMatchingNothing = []struct{ name, ref, plain string }{
+	{"slug", "wo-c-git", "project 'wo-c-git' not found on hub"},
+	{"git URL", "https://github.com/x/y.git", "no project found for git URL 'https://github.com/x/y.git'"},
+}
+
+// TestEnsureHubReady_ScopedTokenProjectRefMatchesNothing covers a project
+// reference (a slug or a git URL) that the hub's project list does not
+// match under a user access token (ptone/scion#7068): the CLI names the
+// likely missing project:read and project:list scopes instead of only
+// reporting that the project was not found. The hub answers the same way
+// whether or not the project exists, and so does the message.
+func TestEnsureHubReady_ScopedTokenProjectRefMatchesNothing(t *testing.T) {
+	for _, tc := range projectRefsMatchingNothing {
+		t.Run(tc.name, func(t *testing.T) {
+			var lists int
+			server := emptyProjectListHub(t, &lists)
+			setupGlobalHubProject(t, "11111111-2222-3333-4444-555555555555", server.URL)
+			t.Setenv("SCION_HUB_TOKEN", "scion_pat_testtoken")
+
+			_, err := EnsureHubReady(tc.ref, EnsureHubReadyOptions{EndpointOverride: server.URL})
+			if !errors.Is(err, ErrScopedTokenProjectNotFound) {
+				t.Fatalf("error = %v, want ErrScopedTokenProjectNotFound", err)
+			}
+			for _, want := range []string{"'" + tc.ref + "'", "project:read", "project:list", "project:manage does not include them"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error should contain %q, got: %v", want, err)
+				}
+			}
+			if lists == 0 {
+				t.Error("expected the project list lookup to reach the hub")
+			}
+		})
+	}
+}
+
+// TestEnsureHubReady_SessionProjectRefMatchesNothing pins that a caller
+// without a user access token keeps the plain not-found error, for each
+// reference form.
+func TestEnsureHubReady_SessionProjectRefMatchesNothing(t *testing.T) {
+	for _, tc := range projectRefsMatchingNothing {
+		t.Run(tc.name, func(t *testing.T) {
+			var lists int
+			server := emptyProjectListHub(t, &lists)
+			setupGlobalHubProject(t, "11111111-2222-3333-4444-555555555555", server.URL)
+			t.Setenv("SCION_HUB_TOKEN", "")
+			t.Setenv("SCION_DEV_TOKEN", "test-dev-token")
+
+			_, err := EnsureHubReady(tc.ref, EnsureHubReadyOptions{EndpointOverride: server.URL})
+			var notFound *ProjectNotFoundError
+			if !errors.As(err, &notFound) {
+				t.Fatalf("error = %v, want *ProjectNotFoundError", err)
+			}
+			if err.Error() != tc.plain {
+				t.Errorf("error = %q, want %q", err.Error(), tc.plain)
+			}
+			if errors.Is(err, ErrScopedTokenProjectNotFound) || strings.Contains(err.Error(), "project:list") {
+				t.Errorf("a session caller must not get the scoped-token hint, got: %v", err)
+			}
+		})
+	}
+}
+
 // TestEnsureHubReady_NonInteractiveAmbiguousProject covers the path commands
 // such as list and start take: an unregistered project with several
 // same-name matches on the Hub must error under --non-interactive instead

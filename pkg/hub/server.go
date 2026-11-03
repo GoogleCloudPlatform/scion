@@ -17,7 +17,6 @@ package hub
 import (
 	"bufio"
 	"context"
-	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -49,6 +48,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/cronzone"
 	"github.com/GoogleCloudPlatform/scion/pkg/cspreport"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
@@ -56,6 +56,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/keymaterial"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/portview"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
 	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
 	"github.com/GoogleCloudPlatform/scion/pkg/lifecyclehooks"
@@ -72,7 +74,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/asyncwrite"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
-	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/GoogleCloudPlatform/scion/resources"
 	"github.com/google/uuid"
 )
@@ -145,12 +146,20 @@ type ServerConfig struct {
 	RequireStableSigningKey bool
 	// Keyring is the server keyring loaded from server.keyring_file
 	// (ptone/scion#1530), or nil without one (legacy single-secret mode). In
-	// this release only the web session cookies use its signing ring; every
-	// other purpose uses SharedSigningSecret, which must then be the
-	// keyring's "legacy" signing entry. Explicit AgentTokenConfig/
-	// UserTokenConfig signing keys are refused with it. When the active
-	// signing generation reaches its sign_until, /readyz reports not ready.
+	// this release the web session cookies, the agent and user JWTs and the
+	// signed capabilities (skill file download URLs, artifact views, list
+	// cursors and attachment deliveries) use its signing ring; every other
+	// purpose uses SharedSigningSecret, which must then be the keyring's
+	// "legacy" signing entry. Explicit
+	// AgentTokenConfig/UserTokenConfig signing keys are refused with it.
+	// When the active signing generation reaches its sign_until, /readyz
+	// reports not ready and no JWT is issued.
 	Keyring *keyring.Keyring
+	// KeyringConfigured reports that server.keyring_file is set for this
+	// hub. Keyring must then be a usable file keyring: anything else
+	// refuses New before any signing key is read, so missing managed
+	// material never selects legacy signing-key resolution.
+	KeyringConfigured bool
 	// KeyringNow is the clock for keyring deadlines (nil: time.Now). A seam
 	// for tests; production leaves it nil.
 	KeyringNow func() time.Time
@@ -203,6 +212,11 @@ type ServerConfig struct {
 	// The range (5s to 10m) is enforced at startup by config validation.
 	// On timeout the proxy answers 504.
 	PortProxyResponseHeaderTimeout time.Duration
+	// PortViewTTL is the lifetime of a page view link minted when a user
+	// opens an exposed port from the hub (server.hub.port_proxy.view_ttl,
+	// experiment hub.port_view; 0 = 2h). The range (15m to 24h) is
+	// enforced at startup by config validation.
+	PortViewTTL time.Duration
 	// AuthMode is the configured human auth mode (server.auth.mode). "proxy"
 	// is the only value the code checks: the auth handlers then list no
 	// OAuth providers and treat logout as a no-op. Any other value,
@@ -222,6 +236,22 @@ type ServerConfig struct {
 	ProxyDriverPrincipals []string
 	// TrustedProxies is a list of trusted proxy IPs/CIDRs for forwarded headers.
 	TrustedProxies []string
+	// TransportTrustedProxies is server.trusted_proxies: the IPs/CIDRs of
+	// the TLS-terminating proxies whose X-Forwarded-Proto the hub-broker
+	// transport policy trusts (config.ConfidentialArrival). It is read by that
+	// policy only, never by TrustedProxies' users (proxy header login,
+	// client IP rate limits). New resolves it with
+	// TransportTrustedProxiesSet (config.TransportTrustedProxies): when the
+	// setting is not set, a proxy on this host (loopback) is trusted; set to
+	// an empty list, a forwarded protocol is never trusted. The server
+	// command validates it at startup (config.ParseTrustedProxies); New
+	// drops an invalid list (logged), which only narrows what is accepted.
+	// Startup config only; never API-writable.
+	TransportTrustedProxies []string
+	// TransportTrustedProxiesSet reports whether server.trusted_proxies is
+	// set in any source, even as an empty list
+	// (config.GlobalConfig.TrustedProxiesSet).
+	TransportTrustedProxiesSet bool
 	// Debug enables verbose debug logging.
 	Debug bool
 	// OAuthConfig holds OAuth provider credentials for CLI authentication.
@@ -369,6 +399,10 @@ type ServerConfig struct {
 	// replica of one logical hub must share one pinned id. Every --test-mode
 	// level but off requires it (ValidateTestModeConfig).
 	HubIDPinned bool
+	// HubIDSource is where HubID came from (lifecycleevents.HubIDSource*:
+	// pinned, persisted_file, hostname, k_service). The lifecycle observer
+	// runs only on a stable ID (lifecycle_events.go).
+	HubIDSource string
 	// HubName is the human-readable hub display name for HA deployments.
 	HubName string
 	// MonitoringDashboardURL is the optional external monitoring dashboard
@@ -537,6 +571,12 @@ type ServerConfig struct {
 	// when the block was synthesized from the deprecated blocks); the hub
 	// reports them as a degraded health check until the block is written.
 	ProjectStorageWarnings []string
+	// RemovedStorageOverridesFileError is the public message of the removed
+	// per-runtime or per-profile storage overrides the global settings file
+	// carried at startup (config.RemovedStorageOverridesError), or "". The
+	// hub reports it as a degraded health check and in the admin server
+	// config (ptone/scion#6371).
+	RemovedStorageOverridesFileError string
 
 	// NativeChatEnabled controls whether the built-in chat feature is active:
 	// the /api/v1/chat/* routes are registered and the web UI is told to show
@@ -548,13 +588,6 @@ type ServerConfig struct {
 	// AuditRetentionDays is the number of days to retain authorization audit records.
 	// Default: 90. Used by CleanupAuditRecords for periodic retention cleanup.
 	AuditRetentionDays int
-
-	// FailedMessageRetentionDays is the number of days to retain messages in
-	// dispatch_state="failed" before the failed-message-retention sweep
-	// purges them. Default: 7 (see defaultFailedMessageRetentionDays). Mirrors
-	// the AuditRetentionDays pattern. Zero or negative falls back to the
-	// default rather than disabling the sweep.
-	FailedMessageRetentionDays int
 
 	// Experiments is the compiled experiments registry used to resolve
 	// hub-wide feature flags (pkg/experiments). Production leaves this nil;
@@ -609,6 +642,17 @@ type MaintenanceConfig struct {
 	// detected once at startup (DetectMaintenanceInstaller); nil means
 	// unsupported.
 	Installer maintenance.Installer
+	// ReleaseCatalog lists and classifies the releases of GitHubRepo. nil:
+	// the hub builds one maintenance.Catalog on first use, persisted in the
+	// hub_settings row system.release_catalog (see updateReleaseCatalog).
+	ReleaseCatalog maintenance.CatalogSource
+	// ReleaseSource looks a single release up by tag (and, when it also
+	// implements maintenance.ReleaseLister, backs the default catalog).
+	// nil: GitHub's API for GitHubRepo.
+	ReleaseSource maintenance.ReleaseSource
+	// DBSnapshotter takes the database snapshot before each update. nil:
+	// derived from the store (see updateSnapshotter).
+	DBSnapshotter maintenance.DBSnapshotter
 }
 
 // GitHubAppServerConfig holds the GitHub App configuration for the Hub server.
@@ -881,6 +925,14 @@ type StartExtras struct {
 	// (wire key previousProjectIds; see previousProjectIDs). Set on start
 	// and restart; empty sends nothing.
 	PreviousProjectIDs []string
+	// EnvClassifications is the hub's classification of the resolved env
+	// sent on this start or restart (wire key envClassifications), the
+	// same map create sends. The broker accepts the agent credential the
+	// hub issued for the start from the resolved env only when this map
+	// classifies it secret-bootstrap (setStartEnvToken). Nil sends
+	// nothing, which the broker reads as "classification unavailable"; an
+	// empty non-nil map is sent as an empty object.
+	EnvClassifications map[string]api.EnvKind
 }
 
 // applyStartExtras writes extras onto payload as flat top-level wire keys.
@@ -978,6 +1030,9 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if extras.LaunchKeepaliveSeconds > 0 {
 		payload["launchKeepaliveSeconds"] = extras.LaunchKeepaliveSeconds
+	}
+	if extras.EnvClassifications != nil {
+		payload["envClassifications"] = extras.EnvClassifications
 	}
 }
 
@@ -1428,6 +1483,15 @@ type RemoteCreateAgentRequest struct {
 	// request (hub-side only, never sent). The dispatch signs it for the
 	// request's run and records its credential before setting AgentToken.
 	tokenGrant *AgentTokenGrant
+	// projectGitRemote is the project's recorded git remote, githubAppToken
+	// the App installation token minted for the agent's own project in this
+	// dispatch, and noAuthProjectToken the project-scope GITHUB_TOKEN the
+	// no-auth path put into ResolvedEnv ("" when none); hub-side only, never
+	// sent. restrictCreateRequestTokenRemote decides the token remote from
+	// them.
+	projectGitRemote   string
+	githubAppToken     string
+	noAuthProjectToken string
 	// CreatorName is the human-readable identity of who created this agent.
 	// Injected as the SCION_CREATOR environment variable in the agent container.
 	CreatorName string `json:"creatorName,omitempty"`
@@ -1474,6 +1538,12 @@ type RemoteCreateAgentRequest struct {
 	// WorkspaceStorageBucket is the GCS bucket holding WorkspaceStoragePath.
 	// Brokers that predate it ignore it and use their own bucket setting.
 	WorkspaceStorageBucket string `json:"workspaceStorageBucket,omitempty"`
+	// WorkspaceDownloadMode mirrors
+	// runtimebroker.CreateAgentRequest.WorkspaceDownloadMode: "signed_urls"
+	// (api.WorkspaceDownloadModeSignedURLs) when the broker must bootstrap the
+	// workspace through the Hub's signed-URL workspace download; empty for
+	// the bucket download. Set by buildCreateRequestFor only.
+	WorkspaceDownloadMode string `json:"workspaceDownloadMode,omitempty"`
 
 	// GatherEnv indicates the broker should evaluate env completeness before starting.
 	// If required keys are missing, the broker returns HTTP 202 with env requirements.
@@ -1545,7 +1615,7 @@ type ResolvedSecret struct {
 	Target string `json:"target"`        // Projection target
 	Value  string `json:"value"`         // Decrypted secret value
 	Source string `json:"source"`        // Scope that provided this secret
-	Ref    string `json:"ref,omitempty"` // External secret reference (e.g., "gcpsm:projects/123/secrets/name")
+	Ref    string `json:"ref,omitempty"` // External secret reference: for GCP Secret Manager the resource path "projects/123/secrets/name" (no "gcpsm:" prefix), which brokers mount as <ref>/versions/latest
 }
 
 // RemoteAgentConfig contains agent configuration for remote creation.
@@ -1740,6 +1810,14 @@ type RemoteAgentInfo struct {
 	// where the start this answers placed the agent's workspace. Empty
 	// when no start resolved it (provision-only, older brokers).
 	WorkspacePlacement string `json:"workspacePlacement,omitempty"`
+	// The broker's effective configuration (runtimebroker.AgentResponse,
+	// WP1 slice 3): untrusted broker strings, validated by
+	// brokerEffectiveConfigOf before the hub records them.
+	TemplateHash          string `json:"templateHash,omitempty"`
+	Harness               string `json:"harness,omitempty"`
+	Model                 string `json:"model,omitempty"`
+	HarnessConfigRevision string `json:"harnessConfigRevision,omitempty"`
+	BrokerBuild           string `json:"brokerBuild,omitempty"`
 }
 
 // Server is the Hub API HTTP server.
@@ -1811,6 +1889,12 @@ type Server struct {
 	downloadKeys           capabilityKeys
 	artifactViewKeys       capabilityKeys
 	attachmentDeliveryKeys capabilityKeys
+	// portViewKeys sign page view capabilities (port_view.go): a
+	// signing-ring purpose of its own in keyring mode, one fixed key of its
+	// own otherwise; separate from every other key.
+	portViewKeys capabilityKeys
+	// portViewClock replaces time.Now on the page view route (tests only).
+	portViewClock func() time.Time
 
 	// chatSpacesBatch sets the GET /chat/spaces rollup batch sizes; the
 	// zero value uses the defaults (handlers_chat_v2.go).
@@ -1839,15 +1923,14 @@ type Server struct {
 	// the last check (-1: not checked yet), read by the readiness gauge.
 	conduitEligibleRelays atomic.Int64
 	// brokerPresenceRegistryFallbacks counts broker presence reads whose
-	// conduit registry read failed and fell back to the legacy signals
-	// (broker_presence.go).
+	// conduit registry read failed and fell back to the legacy signals,
+	// exported as scion.hub.broker.presence_registry_fallbacks with
+	// cause=registry_read (broker_presence.go).
 	brokerPresenceRegistryFallbacks atomic.Int64
-	// conduitAdmissionAEADv is the admission token cipher
-	// (conduit_admission.go), derived once; conduitAdmissionKeyErr is why
-	// it could not be.
-	conduitAdmissionKeyOnce sync.Once
-	conduitAdmissionAEADv   cipher.AEAD
-	conduitAdmissionKeyErr  error
+	// brokerPresenceRecordReadFallbacks counts BrokerPresent broker record
+	// reads that failed (the startup repair then counts the broker as
+	// present), exported on the same counter with cause=broker_record_read.
+	brokerPresenceRecordReadFallbacks atomic.Int64
 	// conduitStreamRenewer is the renewal path of relay-held streams
 	// (conduit_renewal.go); nil until StartConduitExternal installs it.
 	conduitStreamRenewer atomic.Pointer[conduitStreamRenewer]
@@ -1868,6 +1951,9 @@ type Server struct {
 	// portProxyMetrics counts agent port proxy events
 	// (port_proxy_metrics.go); nil until SetPortProxyMetrics.
 	portProxyMetrics atomic.Pointer[portProxyMetrics]
+	// portViewMetrics counts page view outcomes (port_view_metrics.go);
+	// nil until SetPortViewMetrics.
+	portViewMetrics atomic.Pointer[OTelPortViewMetrics]
 	// conduitRefreshMetrics counts agent AuthRefresh outcomes
 	// (conduit_agent_refresh.go); nil until SetConduitAgentRefreshMetrics.
 	conduitRefreshMetrics atomic.Pointer[OTelConduitAgentRefreshMetrics]
@@ -1996,6 +2082,10 @@ type Server struct {
 	// users' user-scope data ends (startUserScopedDataSweep).
 	userScopedDataSweepDone <-chan struct{}
 
+	// userDeletionLocks holds one *sync.Mutex per forced user deletion
+	// this process is reconciling (userDeletionLock, ptone/scion#2143).
+	userDeletionLocks sync.Map
+
 	// auditWriter is the bounded asynchronous writer under the decision
 	// log; decisionAuditLogger is Decide's audit emitter (P1). Both are set
 	// in New and never replaced.
@@ -2039,6 +2129,9 @@ type Server struct {
 
 	// Web chat store for webchat_* tables (thread prefs, chat threads, etc.) — nil = disabled.
 	webChatStore WebChatStore
+
+	// chatRetention is the chat message retention wiring (chat_retention.go).
+	chatRetention chatRetentionState
 
 	// Artifact store for the artifact_* tables (pkg/artifacts) — nil = artifacts unavailable.
 	artifactStore artifacts.Store
@@ -2176,6 +2269,9 @@ type Server struct {
 	oidcIssuerURL        string
 	oidcTokenRateLimiter *GCPTokenRateLimiter // per-agent rate limiter for OIDC identity token requests
 	oidcTokenLifetime    time.Duration        // validity duration for OIDC identity tokens
+	// oidcHandlers serves the OIDC endpoints over a live view of this
+	// server (deps_oidckeys.go); set in New before registerRoutes.
+	oidcHandlers *OIDCHandlers
 
 	// GCP token generator for agent identity (nil = GCP identity disabled)
 	gcpTokenGenerator GCPTokenGenerator
@@ -2227,6 +2323,16 @@ type Server struct {
 	// difference behind a single innocuous-looking setting.
 	hookIdentityChecker   store.CallerPermissionChecker
 	hookIdentityCheckMode string
+
+	// hookFireLimiter rate limits fire-time actAs refusal audit records per
+	// lifecycle hook (hookFireActAsAudit); created on first use.
+	hookFireLimiter     *hookRefusalLimiter
+	hookFireLimiterOnce sync.Once
+
+	// userSecretWithheldLimiter rate limits the runtime read's Warn of a
+	// user secret withheld by authorization; created on first use.
+	userSecretWithheldLimiter     *hookRefusalLimiter
+	userSecretWithheldLimiterOnce sync.Once
 
 	// GCP token rate limiter (nil = no rate limiting)
 	gcpTokenRateLimiter *GCPTokenRateLimiter
@@ -2332,6 +2438,10 @@ type Server struct {
 	// asyncStartGate caches whether every live hub instance advertises
 	// async_start_v1 (async_start_gate.go). The zero value reads false.
 	asyncStartGate asyncStartGate
+
+	// onListening runs once Start has bound the hub API listener
+	// (SetOnListening; guarded by mu).
+	onListening func()
 
 	// Subsystem loggers for handler methods
 	agentLifecycleLog *slog.Logger
@@ -2439,6 +2549,10 @@ type Server struct {
 	// sweeper (ptone/scion#4424) so CleanupResources can join it.
 	threadGroupMigration threadGroupMigrationRuntime
 
+	// messageStarUpkeep is the starred-message upkeep loop
+	// (chat_star_upkeep.go), joined by CleanupResources.
+	messageStarUpkeep messageStarUpkeepRuntime
+
 	// timestampAutoRun tracks the background stored-timestamp check and its
 	// run of utc-timestamp-normalize at start (see startStoredTimestampCheck).
 	timestampAutoRun timestampAutoRunner
@@ -2477,6 +2591,15 @@ type Server struct {
 	cspReports       *cspreport.Handler
 	cspReportLimiter *cspReportLimiter
 
+	// transportTrustedNets is ServerConfig.TransportTrustedProxies,
+	// resolved once in New (config.TransportTrustedProxies) for
+	// config.ConfidentialArrival.
+	transportTrustedNets []*net.IPNet
+	// transportProxyRefusals records refused broker requests from a proxy
+	// on this host (transport_policy.go): the rate-limited ERROR log and
+	// the broker_transport_proxy health check read it.
+	transportProxyRefusals transportProxyRefusals
+
 	// experiments is the compiled feature-flag registry (pkg/experiments).
 	// Nil in production and in most tests; always read through the
 	// nil-safe experimentRegistry() accessor, never directly.
@@ -2508,6 +2631,18 @@ type Server struct {
 	// hubRestartReservedAt is the UnixNano time Restart Hub reserved the
 	// hub-binary exclusive group (0: none); see reserveHubRestart.
 	hubRestartReservedAt atomic.Int64
+
+	// lifecycleEvents is the agent lifecycle event pipeline
+	// (lifecycle_events.go).
+	lifecycleEvents lifecycleEventsRuntime
+
+	// updateCatalog is the hub's release catalog and updateDater the
+	// remembered running-release lookup, each built once on first use
+	// (updateReleaseCatalog, runningReleaseDater).
+	updateCatalogOnce sync.Once
+	updateCatalog     maintenance.CatalogSource
+	updateDaterOnce   sync.Once
+	updateDater       maintenance.ReleaseSource
 }
 
 // groupsLogger returns the groups subsystem logger, falling back to
@@ -2760,50 +2895,18 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 
 	_, isGCPBackend := srv.secretBackend.(*secret.GCPBackend)
 
-	// Initialize agent token service
-	agentKey, err := srv.ensureSigningKey(ctx, SecretKeyAgentSigningKey, cfg.AgentTokenConfig.SigningKey)
-	if err != nil {
-		// Fail-fast for a GCP backend (production) or when stable keys are
-		// required. Otherwise a non-fatal error would fall through to
-		// NewAgentTokenService generating an ephemeral random key, reintroducing
-		// the silent token-invalidation this guard exists to prevent.
-		if isGCPBackend || cfg.RequireStableSigningKey {
-			return nil, fmt.Errorf("agent signing key: %w", err)
+	// Initialize the agent and user token services. In managed ring mode
+	// (a keyring file) the signing ring is authoritative for both keys
+	// (ptone/scion#1530 Phase 3, design §4): no stored or backend signing
+	// key is read, published, rewritten or deleted, and validateKeyringConfig
+	// has already refused missing or incomplete ring material. Legacy mode
+	// resolves the keys exactly as before.
+	if managedSigning(cfg) {
+		if err := srv.initRingTokenServices(cfg); err != nil {
+			return nil, err
 		}
-		logSigningKeyFailure("agent", err)
-		// NewAgentTokenService generates an in-memory key below.
-		srv.recordSigningKeySource(SecretKeyAgentSigningKey, signingKeySourceEphemeral)
-	} else {
-		cfg.AgentTokenConfig.SigningKey = agentKey
-	}
-	tokenService, err := NewAgentTokenService(cfg.AgentTokenConfig)
-	if err != nil {
-		slog.Warn("Failed to initialize agent token service", "error", err)
-	} else {
-		srv.agentTokenService = tokenService
-		fp := sha256.Sum256(tokenService.config.SigningKey)
-		slog.Info("Agent token service initialized", "key_fingerprint", hex.EncodeToString(fp[:8]))
-	}
-
-	// Initialize user token service
-	userKey, err := srv.ensureSigningKey(ctx, SecretKeyUserSigningKey, cfg.UserTokenConfig.SigningKey)
-	if err != nil {
-		if isGCPBackend || cfg.RequireStableSigningKey {
-			return nil, fmt.Errorf("user signing key: %w", err)
-		}
-		logSigningKeyFailure("user", err)
-		// NewUserTokenService generates an in-memory key below.
-		srv.recordSigningKeySource(SecretKeyUserSigningKey, signingKeySourceEphemeral)
-	} else {
-		cfg.UserTokenConfig.SigningKey = userKey
-	}
-	userTokenService, err := NewUserTokenService(cfg.UserTokenConfig)
-	if err != nil {
-		slog.Warn("Failed to initialize user token service", "error", err)
-	} else {
-		srv.userTokenService = userTokenService
-		fp := sha256.Sum256(userTokenService.config.SigningKey)
-		slog.Info("User token service initialized", "key_fingerprint", hex.EncodeToString(fp[:8]))
+	} else if err := srv.initLegacyTokenServices(ctx, cfg, isGCPBackend); err != nil {
+		return nil, err
 	}
 
 	// Initialize the dedicated download-URL signing key (#1792).
@@ -2813,6 +2916,11 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 
 	// Initialize the artifact view capability key (pkg/artifacts RouteView).
 	if err := srv.initArtifactViewKey(ctx); err != nil {
+		return nil, err
+	}
+
+	// Initialize the page view capability key (port_view.go).
+	if err := srv.initPortViewKey(ctx); err != nil {
 		return nil, err
 	}
 
@@ -2880,6 +2988,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// Initialize broker auth service if enabled
 	if cfg.BrokerAuthConfig.Enabled {
 		srv.brokerAuthService = NewBrokerAuthService(cfg.BrokerAuthConfig, s)
+		srv.brokerAuthService.deferNonce = srv.conduitIngressDefersBrokerNonce
 		srv.metrics = NewBrokerAuthMetrics()
 		slog.Info("Broker HMAC authentication enabled")
 	}
@@ -3031,7 +3140,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		PongWait:       60 * time.Second,
 		WriteWait:      10 * time.Second,
 		MaxMessageSize: 1024 * 1024, // 1MB — see issue #165
-		RequestTimeout: 120 * time.Second,
+		RequestTimeout: brokerRequestTimeout,
 		Debug:          cfg.Debug,
 	}, logging.Subsystem("hub.control-channel"))
 	// Set disconnect callback to mark broker offline when WebSocket drops.
@@ -3235,6 +3344,13 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		seedDevUser(ctx, s, cfg.DevUserConfig)
 	}
 
+	// Remove broker secrets and join tokens that have no broker row, once,
+	// before anything re-creates a broker row with a fixed ID. Non-fatal;
+	// see sweepOrphanBrokerCredentials.
+	if s != nil {
+		_, _, _ = sweepOrphanBrokerCredentials(ctx, s)
+	}
+
 	// Remove user-scope secrets and env vars whose user no longer exists
 	// (ptone/scion#2769). Runs after seedDevUser so the dev user exists. The
 	// whole sweep, lookup and removal, runs in the background under one time
@@ -3254,8 +3370,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 
 	// Reconcile an update whose hub restart was pending (the restart that
 	// started this process, usually) before the abort sweep below: the run
-	// is completed or failed from the version this binary reports.
-	if err := srv.reconcilePendingUpdate(ctx, version.Version); err != nil {
+	// is completed or failed from the release name this binary reports
+	// (its version, or git-<sha12> for a build from Git).
+	if err := srv.reconcilePendingUpdate(ctx, runningReleaseName()); err != nil {
 		slog.Warn("Failed to reconcile the pending update", "error", err)
 	}
 
@@ -3448,6 +3565,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// external-bearer path, both of which resolve through this instance.
 	googleResolver.SetPlatformAuthSA(cfg.PlatformAuthSA)
 	googleResolver.SetDriverPrincipals(srv.proxyDrivers)
+	googleResolver.SetOrphanUserCleanup(srv.cleanupOrphanedProvisionedUser)
 	// Same policy as isUserAuthorized above, in its code-returning form,
 	// so a refusal's audit entry records the code the decision returned.
 	googleResolver.SetSignInDenial(srv.signInDenial)
@@ -3503,6 +3621,15 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	srv.authConfig.ExternalBearerLimiter = srv.externalBearerRateLimiter
 
 	srv.cspReportLimiter = newCSPReportLimiter(cfg.TrustedProxies)
+
+	if nets, usedDefault, err := config.TransportTrustedProxies(cfg.TransportTrustedProxies, cfg.TransportTrustedProxiesSet); err != nil {
+		slog.Error("Ignoring an invalid trusted proxy list; X-Forwarded-Proto is not trusted from any peer", "error", err)
+	} else {
+		srv.transportTrustedNets = nets
+		if usedDefault {
+			slog.Warn(config.TransportTrustedProxiesDefaultWarning)
+		}
+	}
 	srv.cspReports = newCSPReportHandler(srv.cspReportLimiter, cfg.CSPReportRawSamples)
 	if cfg.CSPReportRawSamples {
 		slog.Warn("Browser policy report samples are logged (server.hub.csp_report_raw_samples); samples can hold page content")
@@ -3526,9 +3653,87 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 
 	srv.experiments = cfg.Experiments
 
+	srv.oidcHandlers = NewOIDCHandlers(oidcDeps{srv})
+
 	srv.registerRoutes()
 
 	return srv, nil
+}
+
+// initLegacyTokenServices resolves the agent and user JWT signing keys of
+// a legacy-mode hub (no keyring file) and builds the token services:
+// explicit keys first, then the shared-secret derivation (published to the
+// secret backend), then the stored keys. Unchanged by ptone/scion#1530.
+func (s *Server) initLegacyTokenServices(ctx context.Context, cfg ServerConfig, isGCPBackend bool) error {
+	// Initialize agent token service
+	agentKey, err := s.ensureSigningKey(ctx, SecretKeyAgentSigningKey, cfg.AgentTokenConfig.SigningKey)
+	if err != nil {
+		// Fail-fast for a GCP backend (production) or when stable keys are
+		// required. Otherwise a non-fatal error would fall through to
+		// NewAgentTokenService generating an ephemeral random key, reintroducing
+		// the silent token-invalidation this guard exists to prevent.
+		if isGCPBackend || cfg.RequireStableSigningKey {
+			return fmt.Errorf("agent signing key: %w", err)
+		}
+		logSigningKeyFailure("agent", err)
+		// NewAgentTokenService generates an in-memory key below.
+		s.recordSigningKeySource(SecretKeyAgentSigningKey, signingKeySourceEphemeral)
+	} else {
+		cfg.AgentTokenConfig.SigningKey = agentKey
+	}
+	tokenService, err := NewAgentTokenService(cfg.AgentTokenConfig)
+	if err != nil {
+		slog.Warn("Failed to initialize agent token service", "error", err)
+	} else {
+		s.agentTokenService = tokenService
+		fp := sha256.Sum256(tokenService.config.SigningKey)
+		slog.Info("Agent token service initialized", "key_fingerprint", hex.EncodeToString(fp[:8]))
+	}
+
+	// Initialize user token service
+	userKey, err := s.ensureSigningKey(ctx, SecretKeyUserSigningKey, cfg.UserTokenConfig.SigningKey)
+	if err != nil {
+		if isGCPBackend || cfg.RequireStableSigningKey {
+			return fmt.Errorf("user signing key: %w", err)
+		}
+		logSigningKeyFailure("user", err)
+		// NewUserTokenService generates an in-memory key below.
+		s.recordSigningKeySource(SecretKeyUserSigningKey, signingKeySourceEphemeral)
+	} else {
+		cfg.UserTokenConfig.SigningKey = userKey
+	}
+	userTokenService, err := NewUserTokenService(cfg.UserTokenConfig)
+	if err != nil {
+		slog.Warn("Failed to initialize user token service", "error", err)
+	} else {
+		s.userTokenService = userTokenService
+		fp := sha256.Sum256(userTokenService.config.SigningKey)
+		slog.Info("User token service initialized", "key_fingerprint", hex.EncodeToString(fp[:8]))
+	}
+	return nil
+}
+
+// initRingTokenServices builds the agent and user token services from the
+// keyring file's signing ring (managed mode). It reads no stored or
+// backend signing key.
+func (s *Server) initRingTokenServices(cfg ServerConfig) error {
+	ring := cfg.Keyring.Signing()
+	agentSvc, err := newRingAgentTokenService(ring, cfg.AgentTokenConfig, s.keyringNow)
+	if err != nil {
+		return err
+	}
+	userSvc, err := newRingUserTokenService(ring, cfg.UserTokenConfig, s.keyringNow)
+	if err != nil {
+		return err
+	}
+	s.agentTokenService = agentSvc
+	s.userTokenService = userSvc
+	s.recordSigningKeySource(SecretKeyAgentSigningKey, SigningKeySourceKeyring)
+	s.recordSigningKeySource(SecretKeyUserSigningKey, SigningKeySourceKeyring)
+	active, ids := agentSvc.ring.generationIDs()
+	slog.Info("Agent and user token services initialized from the keyring signing ring",
+		"active_id", active, "ids", ids, "emit", string(ring.Emit()))
+	return nil
 }
 
 // deriveSharedSigningKey deterministically derives a 32-byte HS256 signing key
@@ -3916,26 +4121,34 @@ func logSigningKeyFailure(keyType string, err error) {
 // EncryptedValue is updated — the SecretRef is preserved so the UI and other consumers
 // can see that the secret is backed by Secret Manager.
 //
-// It refuses (errExistingRecordUnreadable) to overwrite an existing record
-// that is unreadable with the configured keys (ptone/scion#1530 §5).
+// It refuses (keymaterial.ErrExistingRecordUnreadable) to overwrite an
+// existing record that is unreadable with the configured keys
+// (ptone/scion#1530 §5).
+//
+// An existing record that the active writer key already seals, in the
+// active write format, over the same key bytes is left as it is: a restart
+// with an unchanged keyring then writes nothing and does not bump Version.
 func (s *Server) backupSigningKeyToStore(ctx context.Context, keyName, encodedValue, hubID string) error {
 	if err := s.guardBackupOverwrite(ctx, keyName, store.ScopeHub, hubID); err != nil {
 		return err
 	}
+	existing, err := s.store.GetSecret(ctx, keyName, store.ScopeHub, hubID)
+	if err != nil && err != store.ErrNotFound {
+		return fmt.Errorf("checking existing secret record: %w", err)
+	}
+	if err == nil && keymaterial.BackupIsCurrent(s.cipher, existing.EncryptedValue, encodedValue, decodeBase64Key) {
+		return nil
+	}
 	// Encrypt with the shared cipher, consistent with LocalBackend.Set().
-	valueToStore, err := s.cipher.Encrypt(encodedValue)
-	if err != nil {
-		return fmt.Errorf("encrypting signing key backup: %w", err)
+	valueToStore, encErr := s.cipher.Encrypt(encodedValue)
+	if encErr != nil {
+		return fmt.Errorf("encrypting signing key backup: %w", encErr)
 	}
 
-	existing, err := s.store.GetSecret(ctx, keyName, store.ScopeHub, hubID)
 	if err == nil {
 		// Record exists — update value only, preserving SecretRef and other metadata.
 		existing.EncryptedValue = valueToStore
 		return s.store.UpdateSecret(ctx, existing)
-	}
-	if err != store.ErrNotFound {
-		return fmt.Errorf("checking existing secret record: %w", err)
 	}
 	// No existing record — create a new one.
 	sec := &store.Secret{
@@ -3949,6 +4162,12 @@ func (s *Server) backupSigningKeyToStore(ctx context.Context, keyName, encodedVa
 	}
 	_, err = s.store.UpsertSecret(ctx, sec)
 	return err
+}
+
+// decodeBase64Key decodes a signing-key backup plaintext (standard base64).
+func decodeBase64Key(v string) ([]byte, bool) {
+	b, err := base64.StdEncoding.DecodeString(v)
+	return b, err == nil
 }
 
 // signingKeySecretID returns a deterministic primary key for a signing key record,
@@ -3971,6 +4190,7 @@ func (s *Server) SetDispatcher(d AgentDispatcher) {
 	if hd, ok := d.(*HTTPAgentDispatcher); ok && hd != nil {
 		hd.SetRequiredStandingCheck(s.dispatchStandingCheck)
 		hd.SetShutdownGate(s.dispatchShutdownGate)
+		hd.SetLifecycleCounters(s.lifecycleCounters)
 		hd.SetAttachmentIssuer(s.attachmentDelivery())
 	}
 	s.mu.Lock()
@@ -4944,7 +5164,7 @@ func (s *Server) StartLifecycleHookEvaluator(opts ...EvaluatorOption) {
 		allOpts = append([]EvaluatorOption{WithDBDriver(driver)}, opts...)
 	}
 
-	executor := NewHTTPExecutor(s.store, s.gcpTokenGenerator, s.auditLogger, logging.Subsystem("hub.lifecycle-hooks.executor"))
+	executor := NewHTTPExecutor(s.store, s.gcpTokenGenerator, s.auditLogger, logging.Subsystem("hub.lifecycle-hooks.executor"), s)
 	ev := NewLifecycleHookEvaluator(s.store, s.events, executor, logging.Subsystem("hub.lifecycle-hooks"), allOpts...)
 	s.lifecycleHookEvaluator = ev
 	s.lifecycleHookEvaluator.Start()
@@ -5044,6 +5264,7 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 
 	dispatcher := NewHTTPAgentDispatcherWithClient(s.store, client, s.config.Debug, logging.Subsystem("hub.dispatcher"))
 	dispatcher.SetStorageLayout(s.projectStorageLayout)
+	dispatcher.SetWorkspaceStorage(s.GetStorage)
 
 	// Configure token generator if available
 	if s.agentTokenService != nil {
@@ -5093,6 +5314,9 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	if s.config.GitHubAppConfig.AppID != 0 {
 		dispatcher.SetGitHubAppMinter(s)
 	}
+	// Personal git tokens go only to the GitHub host, which follows the
+	// configured GitHub API base URL whether or not an App is configured.
+	dispatcher.SetGitHubWebHostProvider(s.personalTokenGitHubHost)
 
 	// Wire cross-node lifecycle dispatch deps (B4-2) so the dispatcher
 	// can handle ErrLifecycleDeferred from route-gated Start/Stop/Restart
@@ -5124,11 +5348,17 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	// (ptone/scion#1994).
 	dispatcher.SetCreatorSkillPreResolver(s.preResolveAgentSkillsAsCreator)
 
+	// Provision credentials are limited to the keys the agent's gh://
+	// skill references can use, so the dispatcher reads the same merged
+	// references the pre-resolvers do.
+	dispatcher.SetSkillRefLister(s.dispatchSkillRefs)
+
 	// Refuse a start or restart of an agent that is held or not in good
 	// standing before any broker call (ptone/scion#3433). SetDispatcher
 	// installs it too, for every dispatcher attached to the server.
 	dispatcher.SetRequiredStandingCheck(s.dispatchStandingCheck)
 	dispatcher.SetShutdownGate(s.dispatchShutdownGate)
+	dispatcher.SetLifecycleCounters(s.lifecycleCounters)
 
 	// Wire the hub's operational agent_defaults so dispatch can carry the
 	// limit/resource ones to the broker's low-precedence tier. The accessor
@@ -5375,8 +5605,9 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 			return false
 		}
 	}
-	// The superseded start claim is released last on each path below,
-	// after the status write and the quota release (see suspendAgent).
+	// The superseded start claim is released last on each path below:
+	// after the status write and, once the suspension is recorded, after
+	// the grant revocation and the quota release (see suspendAgent).
 	releaseClaim := func() {
 		if agent.RuntimeBrokerID != "" {
 			s.releaseSupersededClaim(ctx, agent.ID, supersedes, intentAt)
@@ -5405,17 +5636,23 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 		return false
 	}
 
+	// As for suspendAgent: the agent's delegation grants end with the
+	// suspension, best effort (.design/agent-delegation.md §16.3). The
+	// revocation selects grants by agent, so it runs before the claim is
+	// released: released first, a new start could take the claim and then
+	// lose its own run's grants to it.
+	s.revokeAgentDelegationGrantsBestEffort(ctx, store.AgentDelegationGrantFilter{AgentID: agent.ID}, revokeReasonAgentSuspended)
+
 	agent.Phase = string(state.PhaseSuspended)
 	agent.ContainerStatus = "stopped"
 	agent.Activity = ""
 	// A suspended agent has no running container: release its
-	// max_agents_per_broker reservation (ptone/scion#1963), mirroring
+	// max_agents_per_broker reservation (ptone/scion#1963) and its
+	// max_agents_per_project one (ptone/scion#6033), mirroring
 	// suspendAgent's HTTP-path behavior.
 	s.releaseBrokerQuota(ctx, agent)
+	s.releaseProjectQuota(ctx, agent)
 	releaseClaim()
-	// As for suspendAgent: the agent's delegation grants end with the
-	// suspension, best effort (.design/agent-delegation.md §16.3).
-	s.revokeAgentDelegationGrantsBestEffort(ctx, store.AgentDelegationGrantFilter{AgentID: agent.ID}, revokeReasonAgentSuspended)
 	s.events.PublishAgentStatus(ctx, agent)
 	return true
 }
@@ -6447,28 +6684,31 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 				"cron_expr", sched.CronExpr, "error", err)
 			return
 		}
-		log.Warn("schedule paused: cron zone prefixes are not supported; edit the expression to UTC and resume",
+		log.Warn("schedule paused: cron zone prefixes are not supported; remove the prefix, set the schedule's time zone, and resume",
 			"cron_expr", sched.CronExpr)
 		return
 	}
 
-	// Backstop for a schedule whose authority agent was deleted by a path
-	// that did not pause it (ptone/scion#5403): pause it with status reason
+	// Backstop for a schedule whose authority agent or user was deleted
+	// (or the user is being deleted) by a path that did not pause it
+	// (ptone/scion#5403, ptone/scion#2143): pause it with status reason
 	// creator_deleted instead of firing it to be refused.
-	if s.pauseScheduleIfAuthorityAgentGone(ctx, sched, log) {
+	if s.pauseScheduleIfAuthorityGone(ctx, sched, log) {
 		return
 	}
 
 	// Compute next run time
-	cronSchedule, err := parseScheduleCron(sched.CronExpr)
+	nextRunAt, err := scheduleNextRun(sched.CronExpr, sched.TimeZone, now)
 	if err != nil {
-		log.Error("schedule-evaluator: invalid cron expression",
-			"cron_expr", sched.CronExpr, "error", err)
-		_ = s.store.UpdateScheduleAfterRun(ctx, sched.ID, now, time.Time{},
-			fmt.Sprintf("invalid cron expression: %v", err))
+		msg := fmt.Sprintf("invalid cron expression: %v", err)
+		if errors.Is(err, cronzone.ErrInvalidZone) {
+			msg = fmt.Sprintf("invalid schedule time zone: %v", err)
+		}
+		log.Error("schedule-evaluator: invalid schedule timing",
+			"cron_expr", sched.CronExpr, "time_zone", sched.TimeZone, "error", err)
+		_ = s.store.UpdateScheduleAfterRun(ctx, sched.ID, now, time.Time{}, msg)
 		return
 	}
-	nextRunAt := cronSchedule.Next(now)
 
 	// Create a one-shot event from the schedule
 	evt := store.ScheduledEvent{
@@ -6591,18 +6831,30 @@ func (s *Server) registerSchedulerHandlers() {
 	s.scheduler.RegisterRecurring("broker-provider-selfheal", 1, s.brokerProviderSelfHealHandler())
 	s.scheduler.RegisterRecurringSingleton("broker-message-sweep", 5, store.LockBrokerMessageSweep, s.brokerMessageSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("failed-message-retention", 60, store.LockFailedMessageRetention, s.failedMessageRetentionHandler())
+	// Chat message retention (hub.chat_retention): checked every minute;
+	// the handler runs a tick only while the sweep is active and once
+	// tick_interval_minutes have passed since the last one.
+	s.scheduler.RegisterRecurringSingleton("chat-retention", 1, store.LockChatRetention, s.chatRetentionHandler())
 	s.scheduler.RegisterRecurringSingleton("exposed-ports-sweep", 5, store.LockExposedPortsSweep, s.exposedPortsSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("notification-dispatch-sweep", 5, store.LockNotificationDispatchSweep, s.notificationDispatchSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("notification-orphan-gc", 60, store.LockNotificationOrphanGC, s.notificationOrphanGCHandler())
 	// Hourly: delete hub-instance registry rows 24 h after their last write.
 	s.registerHubInstancePrune(s.scheduler)
-	// Reconcile stale max_agents_per_broker reservations (ptone/scion#1963):
-	// runs immediately at tick 0 (startup) and then hourly, fixing rows left
-	// with released_at IS NULL by the pre-fix stop/suspend paths (or any
-	// future drift) without a separate one-shot migration.
-	s.scheduler.RegisterRecurringSingleton("broker-quota-reconcile", 60, store.LockBrokerQuotaReconcile, s.ReconcileStaleBrokerQuotaReservations)
+	// Reconcile stale max_agents_per_broker reservations (ptone/scion#1963),
+	// then max_agents_per_project ones (ptone/scion#6033): runs immediately
+	// at tick 0 (startup) and then hourly, fixing rows left with
+	// released_at IS NULL by the pre-fix stop/suspend paths (or any future
+	// drift) and backfilling agents that hold capacity, without a separate
+	// one-shot migration.
+	s.scheduler.RegisterRecurringSingleton("broker-quota-reconcile", 60, store.LockBrokerQuotaReconcile, s.reconcileQuotaReservations)
 	s.scheduler.RegisterRecurringSingleton("reincarnation-sweep", 5, store.LockReincarnationSweep, s.reincarnationSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("start-claim-reaper", 1, store.LockStartClaimReaper, s.startClaimReaperHandler())
+	// Forced user deletions (ptone/scion#2143): every minute, on every
+	// replica (the engine's per-agent lease and the completion's
+	// compare-and-set make concurrent runs safe). It runs whether or not
+	// hub.user_delete_force_cascade is on, so deletions accepted while it
+	// was on complete (see userDeletionReconcileHandler).
+	s.scheduler.RegisterRecurring("user-deletion-reconcile", 1, s.userDeletionReconcileHandler())
 	go func() {
 		// Bounded: a store that does not answer at startup must not leave
 		// this goroutine behind.
@@ -6792,6 +7044,10 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// a misconfiguration at startup (requests answer 503 meanwhile).
 	s.validateMessageStarStore()
 
+	// Start the starred-message upkeep loop (exits when ctx is cancelled).
+	// It runs with native chat enabled, whether or not the experiment is.
+	s.startMessageStarUpkeep(ctx)
+
 	// Start the migration of personal chat thread groups into project
 	// thread groups (ptone/scion#4424). It exits when ctx is cancelled.
 	s.startThreadGroupMigrationSweeper(ctx)
@@ -6817,6 +7073,9 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// startHubInstanceRegistry records the loop's stop handle on s;
 	// CleanupResources uses it to join the loop and mark the row stopped.
 	_ = s.startHubInstanceRegistry(registryCtx)
+
+	// Start the lifecycle outbox drainer, only when it has work.
+	s.startLifecycleEvents(ctx)
 }
 
 func (s *Server) Start(ctx context.Context) error {
@@ -6831,15 +7090,22 @@ func (s *Server) Start(ctx context.Context) error {
 		ReadTimeout:  s.config.ReadTimeout,
 		WriteTimeout: s.config.WriteTimeout,
 	}
+	onListening := s.onListening
 	s.mu.Unlock()
 
 	s.StartBackgroundServices(ctx)
 
 	slog.Info("Hub API server starting", "host", s.config.Host, "port", s.config.Port)
 
+	// Bind first, so the on-listening hook (SetOnListening) runs only once
+	// the port is ours; then serve.
+	ln, err := listenThenNotify(s.httpServer.Addr, onListening)
+	if err != nil {
+		return err
+	}
 	errCh := make(chan error, 1)
 	go func() {
-		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := s.httpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
 		close(errCh)
@@ -6920,7 +7186,15 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 // 5s drain timeout). Records emitted afterwards are counted as closed. It is
 // idempotent and nil-safe. It returns asyncwrite.ErrWorkerStuck when a
 // noncooperative log handler is still blocked at the deadline.
+//
+// Every after-drain path calls it, so it first writes the browser policy
+// report refusals counted while requests were draining (the report
+// handler's Close is idempotent; CleanupBackgroundResources closed it
+// before the drain in combined mode).
 func (s *Server) CloseAuditWriter(ctx context.Context) error {
+	if s.cspReports != nil {
+		s.cspReports.Close()
+	}
 	if s.auditWriter == nil {
 		return nil
 	}
@@ -6966,6 +7240,10 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		// Runs while the store is still open.
 		s.stopHubInstanceRegistry(ctx)
 
+		// Stop the lifecycle drainer after its bounded final pass, while
+		// the store is still open.
+		s.stopLifecycleEvents(ctx)
+
 		// Stop the DB pool-stats sampler. Safe to call more than once: it
 		// wraps either a context.CancelFunc or a no-op from
 		// StartPoolSampler. Lives in the Once body so combined mode (which
@@ -6992,6 +7270,9 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		// Wait for a thread group migration pass in progress; the cancelled
 		// ctx above makes its store calls return.
 		s.stopThreadGroupMigrationSweeper()
+
+		// Likewise for a starred-message upkeep pass (bounded at 5 s).
+		s.stopMessageStarUpkeep()
 
 		// Stop the stored-timestamp check and its run at start, and wait for
 		// it (bounded by its own grace) so that a snapshot being copied is
@@ -7064,6 +7345,11 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 			if err := s.metricsDashboard.Close(); err != nil {
 				slog.Warn("Failed to close metrics dashboard", "error", err)
 			}
+		}
+		// Stop the browser policy report flush timer and write the
+		// refusals still pending.
+		if s.cspReports != nil {
+			s.cspReports.Close()
 		}
 	})
 	return nil
@@ -7281,6 +7567,9 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("/api/v1/artifacts/", s.artifactsGuard("/api/v1/artifacts/", artifactsHandler))
 	s.mux.Handle("/api/v1/artifacts/shared/", s.artifactsGuard("/api/v1/artifacts/shared/", artifactsHandler))
 	s.mux.Handle("/api/v1/artifacts/view/", s.artifactsGuard("/api/v1/artifacts/view/", artifactsHandler))
+	// Page view of an agent's exposed port (hub.port_view experiment,
+	// checked per request in the handler).
+	s.mux.HandleFunc("/api/v1/portview/", s.guarded("/api/v1/portview/", s.handlePortView))
 
 	s.mux.HandleFunc("/api/v1/skills", s.guarded("/api/v1/skills", s.handleSkills))
 	s.mux.HandleFunc("/api/v1/skills/", s.guarded("/api/v1/skills/", s.handleSkillByID))
@@ -7377,6 +7666,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/maintenance/update-available", s.guarded("/api/v1/admin/maintenance/update-available", s.handleUpdateAvailable))
 	s.mux.HandleFunc("/api/v1/admin/maintenance/restart", s.guarded("/api/v1/admin/maintenance/restart", s.handleAdminRestart))
 	s.mux.HandleFunc("/api/v1/admin/maintenance/update-status", s.guarded("/api/v1/admin/maintenance/update-status", s.handleUpdateStatus))
+	s.mux.HandleFunc("/api/v1/admin/maintenance/releases", s.guarded("/api/v1/admin/maintenance/releases", s.handleMaintenanceReleases))
 	s.mux.HandleFunc("/api/v1/admin/scheduler", s.guarded("/api/v1/admin/scheduler", s.handleAdminScheduler))
 	s.mux.HandleFunc("/api/v1/admin/allow-list", s.guarded("/api/v1/admin/allow-list", s.handleAdminAllowList))
 	s.mux.HandleFunc("/api/v1/admin/allow-list/", s.guarded("/api/v1/admin/allow-list/", s.handleAdminAllowListByEmail))
@@ -7391,8 +7681,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/messaging", s.guarded("/api/v1/admin/messaging", s.handleAdminMessaging))
 	s.mux.HandleFunc("/api/v1/admin/experiments", s.guarded("/api/v1/admin/experiments", s.handleAdminExperiments))
 	s.mux.HandleFunc("/api/v1/admin/profiling", s.guarded("/api/v1/admin/profiling", s.handleAdminProfiling))
+	// Chat message retention settings (hub.chat_retention; 404 while off).
+	s.mux.HandleFunc("/api/v1/admin/chat-retention", s.guarded("/api/v1/admin/chat-retention", s.handleAdminChatRetention))
 	s.mux.HandleFunc("/api/v1/admin/conduit/grant-keys/rotate", s.guarded("/api/v1/admin/conduit/grant-keys/rotate", s.handleAdminConduitGrantKeyRotate))
 	s.mux.HandleFunc("/api/v1/admin/conduit/grant-keys/revoke", s.guarded("/api/v1/admin/conduit/grant-keys/revoke", s.handleAdminConduitGrantKeyRevoke))
+	s.mux.HandleFunc("/api/v1/admin/keys/status", s.guarded("/api/v1/admin/keys/status", s.adminKeyStatusHandler()))
 	s.mux.HandleFunc("/api/v1/admin/agents/reset-auth-all", s.guarded("/api/v1/admin/agents/reset-auth-all", s.handleAdminResetAuthAll))
 	s.mux.HandleFunc("/api/v1/admin/delegation-adoption", s.guarded("/api/v1/admin/delegation-adoption", s.handleDelegationAdoption))
 	s.mux.HandleFunc("/api/v1/admin/delegation-adoption/previews", s.guarded("/api/v1/admin/delegation-adoption/previews", s.handleDelegationAdoptionPreviews))
@@ -7478,6 +7771,7 @@ func (s *Server) registerRoutes() {
 		// Starred messages (web.chat_starred_messages; 404 while off).
 		s.mux.HandleFunc("/api/v1/chat/stars", s.guarded("/api/v1/chat/stars", s.chatRoute(s.handleChatStars)))
 		s.mux.HandleFunc("/api/v1/chat/stars/", s.guarded("/api/v1/chat/stars/", s.chatRoute(s.handleChatStarRoutes)))
+		s.mux.HandleFunc("/api/v1/chat/starred-conversations", s.guarded("/api/v1/chat/starred-conversations", s.chatRoute(s.handleChatStarredConversations)))
 		s.mux.HandleFunc("/api/v1/chat/attachments", s.guarded("/api/v1/chat/attachments", s.chatAttachmentRoute(s.handleChatAttachments)))
 		s.mux.HandleFunc("/api/v1/chat/attachments/", s.guarded("/api/v1/chat/attachments/", s.chatAttachmentRoute(s.handleChatAttachmentByID)))
 	}
@@ -7588,9 +7882,10 @@ func (s *Server) registerRoutes() {
 
 	// OIDC Identity Provider endpoints (unauthenticated — public metadata)
 	if s.oidcKeyManager != nil {
-		s.mux.HandleFunc("GET /.well-known/openid-configuration", s.guarded("GET /.well-known/openid-configuration", s.handleOIDCDiscovery))
-		s.mux.HandleFunc("GET /.well-known/jwks.json", s.guarded("GET /.well-known/jwks.json", s.handleJWKS))
-		s.mux.HandleFunc("POST /api/v1/agent/identity-token", s.guarded("POST /api/v1/agent/identity-token", s.handleAgentIdentityToken))
+		oidc := s.oidcArea()
+		s.mux.HandleFunc("GET /.well-known/openid-configuration", s.guarded("GET /.well-known/openid-configuration", oidc.HandleOIDCDiscovery))
+		s.mux.HandleFunc("GET /.well-known/jwks.json", s.guarded("GET /.well-known/jwks.json", oidc.HandleJWKS))
+		s.mux.HandleFunc("POST /api/v1/agent/identity-token", s.guarded("POST /api/v1/agent/identity-token", oidc.HandleAgentIdentityToken))
 	}
 
 	// Workstation-only filesystem endpoints: declarative guard enforces workstation token.
@@ -7649,6 +7944,11 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// This handles all authentication types: agent tokens, user tokens, API keys, dev tokens
 	h = UnifiedAuthMiddleware(s.authConfig)(h)
 
+	// Behind an authenticating front proxy (AuthMode == "proxy"), check
+	// state-changing /api/v1 requests before authentication (see
+	// proxyModeWriteGuard). No-op in other auth modes.
+	h = s.proxyModeWriteGuard(h)
+
 	// The audit operation context (remaining-audit P4-1) sits directly
 	// inside the request logger, which mints the request ID it adopts, and
 	// outside every auth middleware, so broker auth audit events carry it.
@@ -7692,6 +7992,12 @@ func traceableRequest(r *http.Request) bool {
 // corsMiddleware adds CORS headers.
 func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The page view route answers its own preflights and sets its own
+		// CORS headers (handlePortView).
+		if strings.HasPrefix(r.URL.Path, portview.Route) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		origin := r.Header.Get("Origin")
 		if origin == "" {
 			next.ServeHTTP(w, r)
@@ -7926,6 +8232,10 @@ func (s *Server) handleRuntimeBrokerConnect(w http.ResponseWriter, r *http.Reque
 	// Verify this is a WebSocket upgrade request
 	if !isWebSocketUpgrade(r) {
 		writeError(w, 400, ErrCodeInvalidRequest, "WebSocket upgrade required", nil)
+		return
+	}
+	// Transport policy: the control channel carries agent secrets.
+	if !s.requireConfidentialArrival(w, r) {
 		return
 	}
 

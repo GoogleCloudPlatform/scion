@@ -13,7 +13,7 @@ names refer to [`config.example.env`](../config.example.env).
 | :--- | :--- | :--- |
 | GitHub App | Sends `workflow_job` webhooks and lets the mediator mint just-in-time (JIT) runner registrations | Installed on `TARGET_REPOS` |
 | Mediator | Go Cloud Run service `MEDIATOR_SERVICE_NAME` (scale to zero, small, `max-instances=1`: claims live in memory) | `MEDIATOR_SA_NAME` |
-| Runner job | Cloud Run Job `RUNNER_JOB_NAME`. Each execution is one ephemeral runner: `RUNNER_CPU` / `RUNNER_MEMORY`, with a `RUNNER_DISK_GI` ephemeral disk at `/scratch` | `EXEC_SA_NAME` (no roles) |
+| Runner job | Cloud Run Job `RUNNER_JOB_NAME`. Each execution is one ephemeral runner: `RUNNER_CPU` / `RUNNER_MEMORY`, with a `RUNNER_DISK_GI` ephemeral disk mounted at HOME (`/home/runner`) | `EXEC_SA_NAME` (no roles) |
 | Reconciler | Cloud Scheduler job `RECONCILER_JOB_NAME` calling `POST /reconcile` | `SCHEDULER_SA_NAME` |
 | Secrets | Secret Manager: `GITHUB_APP_PRIVATE_KEY_SECRET_NAME`, `GITHUB_WEBHOOK_SECRET_NAME` | Readable by `MEDIATOR_SA_NAME` only |
 | Image | Artifact Registry `ARTIFACT_REPO`, image `RUNNER_IMAGE_NAME` | Pushed by `BUILD_SA_NAME` |
@@ -103,19 +103,18 @@ a runner's execution by its `RUNNER_NAME` env, never by job ID.
      `work_folder` `/home/runner/work`, the same path as on GitHub-hosted
      `ubuntu-latest`. `actions/cache` stores paths relative to
      `GITHUB_WORKSPACE`, so only an identical work folder (and `HOME`) lets
-     cache entries move between the two runner types in both directions. The
-     runner image links that folder to the `/scratch` disk (cache parity
-     contract). The runner keeps the configured path as is: its work directory
-     is `Path.GetFullPath(...)`, which does not resolve symlinks (checked in
-     the actions/runner source at the pinned version), so `GITHUB_WORKSPACE`
-     is `/home/runner/work/<repo>/<repo>`. The JIT config is stored under a fresh
+     cache entries move between the two runner types in both directions. On
+     the cr-ci runner that folder is a real directory on the ephemeral disk,
+     which the job mounts at HOME (cache parity contract), so
+     `GITHUB_WORKSPACE` is `/home/runner/work/<repo>/<repo>`, physically too.
+     The JIT config is stored under a fresh
      claim token, then `jobs.run` starts one execution with the env
      overrides below. If `jobs.run` fails, the mediator deletes the
      registration, drops the claim, logs `launch_failed` and answers 503;
      `/reconcile` retries the job later.
-3. **Runner start.** The entrypoint points the workspace, temp dirs and Go
-   caches at `/scratch`, so they do not consume RAM. Cloud Run's root
-   filesystem is in memory. The entrypoint exchanges the claim token for the
+3. **Runner start.** The entrypoint checks that HOME is the ephemeral disk and
+   creates the work folder and the Go and npm caches on it as real directories,
+   so they do not consume RAM. Cloud Run's root filesystem is in memory. The entrypoint exchanges the claim token for the
    JIT config (contract below) and starts `run.sh --jitconfig` as its child
    (it forwards Cloud Run's SIGTERM and reports the runner's real exit code;
    [runner README](../runner/README.md)). GitHub assigns exactly one job; the
@@ -386,6 +385,28 @@ uid, or passing the JIT config by file and deleting it once the listener has sta
   `services:` containers do not work. Only host-process jobs may be routed:
   `lint`, `build-and-test`, `sqlite-nonhub-tests`, the full test suite and race
   detection. Jobs that use `postgres` services stay on GitHub-hosted runners.
+- **Runner layout (cr-ci FIXUP-5):** the ephemeral disk is mounted at HOME
+  (`/home/runner`), the runner is installed at `/opt/actions-runner` (its `_diag`
+  stays on the root filesystem), and the entrypoint creates `~/work`, `~/.cache`,
+  `~/go` and `~/.npm` as real directories on the disk, with no symlinks: physical
+  paths equal logical ones (actions/setup-node's lock-file hashing compares
+  `process.cwd()` with `GITHUB_WORKSPACE`), and whole-directory cache archives
+  restore in place. `TMPDIR` is unset, as on ubuntu-latest (`/tmp`); `GOTMPDIR` is
+  on the disk. Residuals:
+  - **HOME is the volume root, created world-writable** ("so that any user can read
+    or write to it", per Cloud Run). The entrypoint logs its owner and mode at every
+    start and sets it to 0755 only if the runner's uid owns it. Otherwise HOME stays
+    777. Only the runner's uid runs in the container, and the tools in use check
+    file modes (ssh) or the repository's owner (git), not HOME's; starting as root
+    to chmod it was rejected (a trust-model change).
+  - **Temp files are in RAM.** `/tmp` is on the in-memory root filesystem, so Go
+    tests' `t.TempDir()` and other temp files count against `RUNNER_MEMORY`. Go's
+    build and test temp work is on the disk (`GOTMPDIR`). Measure peak memory
+    before routing temp-heavy jobs such as ci.yml's `build-and-test` (not routed).
+    extras-ci.yml's `build-and-test` (a per-module `go test -count=1 ./...` matrix)
+    **is** already routed, so its `t.TempDir()` files are now in RAM too: its fixtures
+    are small, but check its peak memory in the live verification job after the
+    layout switch ([operations.md, "Runner layout switch"](operations.md#runner-layout-switch)).
 - **Shape limits:** at most 8 vCPU / 32 GiB, and memory must fit the CPU count
   (4 vCPU up to 16 GiB, 6 up to 24 GiB, 8 up to 32 GiB). The loader enforces
   this. The design's "> 16 GiB needs 4 vCPU" statement is wrong (see the
@@ -408,10 +429,11 @@ uid, or passing the JIT config by file and deleting it once the listener has sta
   `launch_failed` (`RESOURCE_EXHAUSTED`)
   ([gcp-setup.md, "Quotas"](gcp-setup.md#9-quotas)).
 - **RAM build cache (`RUNNER_BUILD_CACHE_IN_RAM=true`):** the alternative for a
-  small `/scratch`. The entrypoint makes `/scratch/.cache` a link to a directory on
-  the in-memory root filesystem, so `~/.cache` (the Go build cache and
-  golangci-lint's analysis cache) lives in RAM while `~/.cache` still points to
-  `/scratch/.cache` (cache parity holds; tar follows links in parent components).
+  small disk. The entrypoint makes `~/.cache` a link to a directory on the
+  in-memory root filesystem, so the Go build cache and golangci-lint's analysis
+  cache live in RAM (archive entries under `~/.cache/...` still restore there: tar
+  follows a link in a leading component; a whole-`~/.cache` archive would replace
+  the link).
   It counts against `RUNNER_MEMORY`: in P6 PoC run 4 the lint passed at 27.9 GB of
   32 GiB (a ~21 GB compile plus the cache grown to ~9.5 GB), leaving about 4 GB.
   It requires `RUNNER_MEMORY=32Gi` (the config loaders reject less), and the

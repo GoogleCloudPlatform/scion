@@ -46,6 +46,16 @@ func TestParseMountTable(t *testing.T) {
 			t.Errorf("Lookup(%q) = %q, %v; want %q, %v", tc.path, src, mounted, tc.wantSource, tc.wantMounted)
 		}
 	}
+	mt, err := ParseMountTable(strings.NewReader(table))
+	if err != nil {
+		t.Fatalf("ParseMountTable: %v", err)
+	}
+	if e, ok := mt.LookupEntry("/mnt/nfs/ws1"); !ok || e.Options != "rw,vers=3" {
+		t.Errorf("LookupEntry options = %q, %v; want rw,vers=3 (last entry)", e.Options, ok)
+	}
+	if e, _ := mt.LookupEntry("/mnt/nfs/my share"); e.Options != "rw" {
+		t.Errorf("LookupEntry options = %q, want rw", e.Options)
+	}
 	if got := unescapeMountField(`a\134b\0`); got != `a\b\0` {
 		t.Errorf("unescapeMountField = %q", got)
 	}

@@ -627,6 +627,9 @@ func TestAttachmentDownload_SetsNosniffAndDisposition(t *testing.T) {
 		if h := got.Header().Get("Content-Security-Policy"); h != untrustedContentSandboxCSP {
 			t.Errorf("%s: Content-Security-Policy = %q, want %q", att.Name, h, untrustedContentSandboxCSP)
 		}
+		if h := got.Header().Get("Permissions-Policy"); h != untrustedContentPermissionsPolicy {
+			t.Errorf("%s: Permissions-Policy = %q, want %q", att.Name, h, untrustedContentPermissionsPolicy)
+		}
 		if h := got.Header().Get("Content-Type"); h != expected.mime {
 			t.Errorf("%s: Content-Type = %q, want %q", att.Name, h, expected.mime)
 		}

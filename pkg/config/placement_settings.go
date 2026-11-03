@@ -93,20 +93,11 @@ func tolerationSet(ts []api.K8sToleration) map[tolerationIdentity]struct{} {
 // entry are an error naming both. Results are sorted by path, then message.
 func ValidatePlacement(runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig, groups [][]string) []ValidationError {
 	var errs []ValidationError
-	add := func(path string, err error) {
-		if err != nil {
-			errs = append(errs, ValidationError{Path: path, Message: err.Error()})
-		}
-	}
 	for name, rt := range runtimes {
-		add("runtimes."+name+".node_selector", ValidateNodeSelector(rt.NodeSelector))
-		add("runtimes."+name+".tolerations", ValidateTolerations(rt.Tolerations))
-		add("runtimes."+name+".runtime_class_name", ValidateRuntimeClassName(rt.RuntimeClassName))
+		errs = append(errs, ValidatePlacementFields("runtimes."+name, rt.NodeSelector, rt.Tolerations, rt.RuntimeClassName)...)
 	}
 	for name, p := range profiles {
-		add("profiles."+name+".node_selector", ValidateNodeSelector(p.NodeSelector))
-		add("profiles."+name+".tolerations", ValidateTolerations(p.Tolerations))
-		add("profiles."+name+".runtime_class_name", ValidateRuntimeClassName(p.RuntimeClassName))
+		errs = append(errs, ValidatePlacementFields("profiles."+name, p.NodeSelector, p.Tolerations, p.RuntimeClassName)...)
 	}
 	reported := map[[2]string]bool{}
 	for _, group := range groups {
@@ -138,6 +129,25 @@ func ValidatePlacement(runtimes map[string]V1RuntimeConfig, profiles map[string]
 		}
 		return errs[i].Message < errs[j].Message
 	})
+	return errs
+}
+
+// ValidatePlacementFields checks one layer's placement fields (node
+// selector, tolerations, runtime class) as the Kubernetes API server does
+// and returns one error per invalid field, at path + ".node_selector",
+// ".tolerations" or ".runtime_class_name". It is the field check shared by
+// runtime entries, profiles and flat instance runtime targets, at load and
+// per start.
+func ValidatePlacementFields(path string, selector map[string]string, tolerations []api.K8sToleration, runtimeClassName string) []ValidationError {
+	var errs []ValidationError
+	add := func(field string, err error) {
+		if err != nil {
+			errs = append(errs, ValidationError{Path: path + "." + field, Message: err.Error()})
+		}
+	}
+	add("node_selector", ValidateNodeSelector(selector))
+	add("tolerations", ValidateTolerations(tolerations))
+	add("runtime_class_name", ValidateRuntimeClassName(runtimeClassName))
 	return errs
 }
 

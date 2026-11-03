@@ -785,7 +785,13 @@ func (s *Server) purgeFixtureUser(ctx context.Context, run fixturePurgeRun, basi
 	}
 	var lastOwnerErr *lastProjectOwnerDeleteError
 	var blockedErr *userDeleteBlockedError
+	var inProgressErr *userDeletionInProgressError
 	switch {
+	case errors.As(err, &inProgressErr):
+		// A forced deletion of the identity is in progress; it removes
+		// the identity when it completes.
+		report.IdentityKeptReason = "deletion_in_progress"
+		return nil
 	case errors.Is(err, store.ErrNotFound):
 		// Deleted concurrently: nothing is left to do.
 		report.IdentityDeleted = false

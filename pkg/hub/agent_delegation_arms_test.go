@@ -238,6 +238,10 @@ func TestAgentDelegationAdmission_MatchesCatalog(t *testing.T) {
 			route, ok := resolveProjectResourceRoute(entry.Method, "/api/v1/projects/p-1")
 			found = ok && route.OperationID == entry.Operation
 		}
+		if entry.RouteID == agentsCollectionRouteID {
+			route, ok := resolveAgentsCollectionRoute(entry.Method, "/api/v1/agents")
+			found = ok && route.OperationID == entry.Operation
+		}
 		assert.True(t, found, "entry %s %s matches no exact route resolution with that operation", entry.Method, entry.RouteID)
 		assert.True(t, permissions.AgentDelegable(spec.BasePermission, permissions.BoundaryKindHub) ||
 			permissions.AgentDelegable(spec.BasePermission, permissions.BoundaryKindProject),

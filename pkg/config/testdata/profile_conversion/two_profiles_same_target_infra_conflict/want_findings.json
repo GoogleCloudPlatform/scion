@@ -1,18 +1,20 @@
 {
-  "profile_map": {},
+  "profile_map": {
+    "scratch": "k8s-agents-scratch",
+    "shared": "k8s-agents-shared"
+  },
   "findings": [
     {
       "code": "profile_conflict",
-      "severity": "blocking",
-      "path": "profiles.*.shared_dir_size",
+      "severity": "notice",
+      "path": "profiles.*",
       "profiles": [
         "scratch",
         "shared"
       ],
       "message_contains": [
-        "scratch: 50Gi from profiles.scratch.shared_dir_size",
-        "shared: 20Gi from profiles.shared.shared_dir_size",
-        "kubernetes.shared_dir_size"
+        "profiles scratch, shared on target k8s-agents differ in shared_dir_size;",
+        "split into instances k8s-agents-scratch (scratch), k8s-agents-shared (shared)"
       ]
     },
     {

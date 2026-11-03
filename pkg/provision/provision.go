@@ -1445,7 +1445,7 @@ func acquireFileLockWithin(ctx context.Context, dir string, wait time.Duration) 
 // is litter to age, so an open with nothing to sweep writes nothing. The
 // live lock name itself is never touched.
 func garbageCollectLockLitter(dir string) {
-	sweepLockLitter(dir, dir)
+	_, _ = SweepLockLitter(dir)
 }
 
 // GarbageCollectStateDir sweeps the aged lock litter of the provisioning
@@ -1456,47 +1456,114 @@ func GarbageCollectStateDir(dir string) {
 	garbageCollectLockLitter(dir)
 }
 
-// sweepLockLitter is garbageCollectLockLitter for the litter in dir, with
-// the server clock probed in clockDir (a directory on the same export) and
-// the number of entries removed returned. The one-shot promotion of the
-// workspace root sweeps litter there while probing the clock in the state
-// directory, so it writes nothing into the workspace.
-func sweepLockLitter(dir, clockDir string) int {
-	litter, err := lockLitterEntries(dir)
-	if err != nil && len(litter) == 0 {
-		return 0
+// LockLitterMinAge is the age past which provisioning-lock litter may be
+// removed: the garbage-collection cutoff 2S of acquireFileLock's
+// correctness argument.
+func LockLitterMinAge() time.Duration {
+	return 2 * provisionLockStaleAfter
+}
+
+// LockLitter is what SweepLockLitter left in place.
+type LockLitter struct {
+	// Pending is how long the youngest remaining aged entry still needs
+	// before it may be removed (0 when none is left).
+	Pending time.Duration
+	// Unaged counts ".evict-*" entries without their evicted-at marker.
+	// They have no eviction time and are never removed automatically, so
+	// waiting does not help (see garbageCollectLockLitter).
+	Unaged int
+}
+
+// SweepLockLitter removes dir's provisioning-lock litter older than
+// LockLitterMinAge and reports what it left. ".evict-*" entries are aged
+// from their evicted-at marker (see garbageCollectLockLitter); one without
+// the marker is never guessed at (counted in Unaged). Other litter
+// (staging directories, clock probes a crashed caller left) is aged from
+// its own mtime; a concurrent caller's probe is young and kept. The live
+// lock itself and anything not under the lock's name prefix are never
+// touched. Ages are measured against the file server's clock (serverNow).
+// The directory is listed first and the clock is probed only when there is
+// litter to age, so a sweep with nothing to do writes nothing. One sweep
+// examines at most lockLitterMaxEntries entries (lockLitterEntries); a
+// later sweep handles the rest. The first removal error is returned; the
+// sweep continues past it.
+//
+// The cutoff is fixed: a caller MUST NOT remove litter younger than
+// LockLitterMinAge by any other means, since a younger ".evict-*" entry
+// can still be the destination a stale observer's rename relies on (the
+// invariant in acquireFileLock's correctness argument).
+func SweepLockLitter(dir string) (LockLitter, error) {
+	return sweepLockLitter(dir, LockLitterMinAge())
+}
+
+// sweepLockLitter is SweepLockLitter with the cutoff as a parameter, for
+// tests only.
+func sweepLockLitter(dir string, minAge time.Duration) (LockLitter, error) {
+	left, _, err := sweepLockLitterIn(dir, dir, minAge)
+	return left, err
+}
+
+// sweepLockLitterIn is the sweep behind SweepLockLitter for the litter in
+// dir, with the server clock probed in clockDir (a directory on the same
+// export) and the number of entries removed returned too. The one-shot
+// promotion of the workspace root sweeps litter there while probing the
+// clock in the state directory, so it writes nothing into the workspace.
+func sweepLockLitterIn(dir, clockDir string, minAge time.Duration) (left LockLitter, removed int, err error) {
+	litter, listErr := lockLitterEntries(dir)
+	if listErr != nil {
+		if errors.Is(listErr, fs.ErrNotExist) {
+			return left, 0, nil
+		}
+		if len(litter) == 0 {
+			return left, 0, listErr
+		}
 	}
 	if len(litter) == 0 {
-		return 0
+		return left, 0, nil
 	}
 	now, err := serverNow(clockDir)
 	if err != nil {
-		return 0
+		left.Pending = minAge
+		return left, 0, err
 	}
-	cutoff := 2 * provisionLockStaleAfter
-	removed := 0
+	// A listing that failed part-way is swept as far as it got and its
+	// error reported.
+	firstErr := listErr
+	keep := func(age time.Duration) {
+		left.Pending = max(left.Pending, minAge-age)
+	}
 	for _, e := range litter {
 		name := e.Name()
 		path := filepath.Join(dir, name)
-		var aged time.Time
+		var age time.Duration
 		if strings.Contains(name, ".evict-") {
 			info, err := os.Stat(filepath.Join(path, provisionLockEvictedAtFile))
 			if err != nil {
-				continue // no confirmed eviction time yet; never guess (see doc)
+				left.Unaged++ // no confirmed eviction time; never guess
+				continue
 			}
-			aged = info.ModTime()
+			age = now.Sub(info.ModTime())
 		} else {
 			info, err := e.Info()
 			if err != nil {
+				keep(0)
 				continue
 			}
-			aged = info.ModTime()
+			age = now.Sub(info.ModTime())
 		}
-		if now.Sub(aged) > cutoff && os.RemoveAll(path) == nil {
-			removed++
+		if age <= minAge {
+			keep(age)
+			continue
 		}
+		if err := os.RemoveAll(path); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		removed++
 	}
-	return removed
+	return left, removed, firstErr
 }
 
 // lockLitterMaxEntries bounds the lock litter entries one listing returns
@@ -2900,15 +2967,18 @@ func runGitClone(ctx context.Context, in ProvisionInput) error {
 			withToken, token = true, in.CloneToken
 		}
 	}
+	offered := ""
 	if withToken {
-		// Host-scoped credential helper: the token is offered only to the clone
-		// URL's host, carried in the environment and never in argv/URL/config; the
-		// helper first clears any inherited unscoped credential.helper. For a
-		// non-http(s) URL the token is ignored (git uses its own transport auth).
-		if scoped, ok := util.ScopedCredentialHelperEnv(env, gc.URL, token); ok {
-			env = scoped
-		}
+		offered = token
 	}
+	// Remote authentication: no host credential of any kind (credential
+	// helpers, askpass, extra headers, netrc, client certificates, Kerberos,
+	// ssh identity, host global/system config), on every clone, the
+	// project's recorded remote included. With no token offered the clone is
+	// anonymous; with one, the token is the only credential, offered only to
+	// the clone URL's host through a scoped helper, carried in the environment
+	// and never in argv/URL/config. A non-http(s) URL ignores the token.
+	env = util.HostGitRemoteEnv(env, gc.URL, offered)
 	cmd.Env = env
 	output, err := cmd.CombinedOutput()
 	if err == nil {

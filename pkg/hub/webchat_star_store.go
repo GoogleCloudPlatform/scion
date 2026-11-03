@@ -119,6 +119,56 @@ func (ref StarredMessageRef) matches(sel StarSelector) bool {
 	return ref.ThreadID == sel.ThreadID
 }
 
+// MessagePosition is a keyset position in history order: a message's
+// creation instant and its canonical lowercase ID.
+type MessagePosition struct {
+	Created time.Time
+	ID      string
+}
+
+// StarHistoryQuery selects one page of a user's starred messages in one
+// conversation, in history order (the starred-only center).
+type StarHistoryQuery struct {
+	UserID   string
+	Selector StarSelector
+	// Cursor resumes strictly past this position in the page's order
+	// (the (created, id) tuple, so a message sharing the cursor's instant
+	// is still found); nil starts at the newest (or, ascending, the
+	// oldest) message. The two halves of an around page are the anchor's
+	// position in both directions.
+	Cursor *MessagePosition
+	// Ascending orders oldest first; the default is newest first.
+	Ascending bool
+	// Limit is the page size (at least 1).
+	Limit int
+}
+
+// StarHistoryPage is one page of starred history. Items are in the
+// query's order; Next is the position to resume after when more may
+// remain, nil at the end.
+type StarHistoryPage struct {
+	Items []MessagePosition
+	Next  *MessagePosition
+	Total int
+}
+
+// trimStarHistoryPage cuts a page fetched with limit+1 rows to limit and
+// sets Next when the extra row showed that more remain.
+func trimStarHistoryPage(page StarHistoryPage, limit int) StarHistoryPage {
+	if len(page.Items) > limit {
+		page.Items = page.Items[:limit]
+		last := page.Items[limit-1]
+		page.Next = &last
+	}
+	return page
+}
+
+// validStarHistoryQuery reports whether q names a user, a conversation
+// and a page size.
+func validStarHistoryQuery(q StarHistoryQuery) bool {
+	return q.UserID != "" && q.Selector.ConversationKey != "" && q.Limit >= 1
+}
+
 // MessageStarStore persists starred messages. Both webchat store dialects
 // implement it; obtain it with messageStarStoreFrom. Every method takes
 // the owner's user ID and matches it, so one user can never read or
@@ -143,6 +193,83 @@ type MessageStarStore interface {
 	// ListStarredMessageIDs returns which of messageIDs the user starred
 	// and are live (not deleted), with their routing fields.
 	ListStarredMessageIDs(ctx context.Context, userID string, messageIDs []string) ([]StarredMessageRef, error)
+	// ListStarredHistory returns one page of the user's starred messages in
+	// the selector's conversation, in history order: the live messages of
+	// its history scope that the user starred, (created, id) newest first,
+	// or oldest first when q.Ascending. Total counts every live starred
+	// message of the conversation, whatever the bounds.
+	ListStarredHistory(ctx context.Context, q StarHistoryQuery) (StarHistoryPage, error)
+	// ListStarredConversationCandidates returns one page of the distinct
+	// conversations in which the user has at least one live star (the
+	// Starred rail), grouped by the current conversation key before the
+	// page is cut, in f.Sort order. It applies no read access: the handler
+	// authorizes every candidate.
+	ListStarredConversationCandidates(ctx context.Context, f StarredConversationFilter) (StarredConversationPage, error)
+
+	// Lifecycle. These are not scoped to one owner: they remove or repair
+	// the associations of a message, conversation, user or project that
+	// changed, and never return message content.
+
+	// MarkMessageDeletedAndClearStars soft-deletes the message as
+	// SetMessageDeleted does (the extension row and its mentions) and
+	// deletes every star of it in the same transaction. It returns the
+	// distinct owners whose star was deleted, collected inside that
+	// transaction. SetMessageDeleted shares the transaction and discards
+	// the owners.
+	MarkMessageDeletedAndClearStars(ctx context.Context, messageID string, deletedAt time.Time) ([]string, error)
+	// DeleteMessageStarsForConversation deletes the stars listed under a
+	// conversation key (a deleted topic or DM); it returns how many.
+	DeleteMessageStarsForConversation(ctx context.Context, conversationKey string) (int64, error)
+	// DeleteMessageStarsForUser deletes every star a user owns.
+	DeleteMessageStarsForUser(ctx context.Context, userID string) (int64, error)
+	// DeleteMessageStarsForProject deletes the stars stored under a
+	// project (its threads and the DMs with its agents).
+	DeleteMessageStarsForProject(ctx context.Context, projectID string) (int64, error)
+	// PurgeMessageStarCandidates examines at most limit associations after
+	// the position, in (user_id, message_id) order. It repairs the stored
+	// conversation key and project of a star whose message now sits in a
+	// different live topic (a promotion an older binary ran), keeping the
+	// owner and save time, then deletes the examined stars whose user,
+	// message, stored project or topic no longer exists, or whose message
+	// or topic is soft-deleted. It never looks at permissions or a user's
+	// status. The result's Next is the last examined position, or the zero
+	// position when the scan reached the end (the next pass starts over).
+	PurgeMessageStarCandidates(ctx context.Context, after StarCleanupPosition, limit int) (StarCleanupResult, error)
+}
+
+// StarCleanupPosition is a position in the (user_id, message_id) order of
+// the upkeep scan; the zero value is the start.
+type StarCleanupPosition struct {
+	UserID    string
+	MessageID string
+}
+
+// StarCleanupResult is the outcome of one upkeep batch.
+type StarCleanupResult struct {
+	// Next is where the next batch resumes; zero when the scan wrapped.
+	Next StarCleanupPosition
+	// Examined, Repaired and Purged count associations.
+	Examined int
+	Repaired int64
+	Purged   int64
+}
+
+// starCleanupRange reads the (user_id, message_id) rows of an upkeep batch
+// and returns the first and last positions and how many there are.
+func starCleanupRange(rows *sql.Rows) (first, last StarCleanupPosition, n int, err error) {
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var p StarCleanupPosition
+		if err := rows.Scan(&p.UserID, &p.MessageID); err != nil {
+			return first, last, 0, err
+		}
+		if n == 0 {
+			first = p
+		}
+		last = p
+		n++
+	}
+	return first, last, n, rows.Err()
 }
 
 // messageStarStoreFrom returns the star store behind a webchat store, or
@@ -432,4 +559,255 @@ SELECT st.message_id, st.conversation_key, COALESCE(st.project_id, ''),
 		return nil, fmt.Errorf("webchat store: list starred message ids: %w", err)
 	}
 	return out, nil
+}
+
+// sqliteMessageCreatedExpr is messages.created on SQLite (Go's default time
+// text in UTC) without the monotonic-clock suffix (" m=+0.03") a row
+// written before the UTC store boundary may still carry; the entadapter's
+// timeColumnExpr form. Comparisons and order use it so such a row sorts
+// at its instant.
+const sqliteMessageCreatedExpr = `(CASE WHEN instr(m.created, ' m=') > 0 THEN substr(m.created, 1, instr(m.created, ' m=') - 1) ELSE m.created END)`
+
+// sqliteMessageTimeLayout is the layout of that text.
+const sqliteMessageTimeLayout = "2006-01-02 15:04:05.999999999 -0700 MST"
+
+// sqliteMessageTime is the text an instant compares equal to in
+// sqliteMessageCreatedExpr (the entadapter's timeArg on SQLite).
+func sqliteMessageTime(t time.Time) string {
+	return t.UTC().String()
+}
+
+func (s *sqliteWebChatStore) ListStarredHistory(ctx context.Context, q StarHistoryQuery) (StarHistoryPage, error) {
+	if !validStarHistoryQuery(q) {
+		return StarHistoryPage{}, fmt.Errorf("webchat store: list starred history: %w", store.ErrInvalidInput)
+	}
+	selCond, selArgs := sqliteStarSelectorSQL(q.Selector)
+	base := []string{"st.user_id = ?", "st.conversation_key = ?", selCond,
+		"NOT EXISTS (SELECT 1 FROM webchat_message_ext e WHERE e.message_id = st.message_id AND e.deleted_at IS NOT NULL)"}
+	baseArgs := append([]any{q.UserID, q.Selector.ConversationKey}, selArgs...)
+	from := `
+  FROM webchat_message_star st
+  JOIN messages m ON m.id = st.message_id
+ WHERE `
+
+	page := StarHistoryPage{Items: []MessagePosition{}}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*)`+from+strings.Join(base, " AND "), baseArgs...).Scan(&page.Total); err != nil {
+		return StarHistoryPage{}, fmt.Errorf("webchat store: list starred history: count: %w", err)
+	}
+
+	conds := append([]string{}, base...)
+	args := append([]any{}, baseArgs...)
+	cmp, dir := "<", "DESC"
+	if q.Ascending {
+		cmp, dir = ">", "ASC"
+	}
+	if q.Cursor != nil {
+		at := sqliteMessageTime(q.Cursor.Created)
+		conds = append(conds, "("+sqliteMessageCreatedExpr+" "+cmp+" ? OR ("+sqliteMessageCreatedExpr+" = ? AND m.id "+cmp+" ?))")
+		args = append(args, at, at, strings.ToLower(q.Cursor.ID))
+	}
+	args = append(args, q.Limit+1)
+	rows, err := s.db.QueryContext(ctx, `SELECT m.id, `+sqliteMessageCreatedExpr+from+strings.Join(conds, " AND ")+`
+ ORDER BY `+sqliteMessageCreatedExpr+` `+dir+`, m.id `+dir+`
+ LIMIT ?`, args...)
+	if err != nil {
+		return StarHistoryPage{}, fmt.Errorf("webchat store: list starred history: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id, created string
+		if err := rows.Scan(&id, &created); err != nil {
+			return StarHistoryPage{}, fmt.Errorf("webchat store: list starred history: %w", err)
+		}
+		t, err := time.Parse(sqliteMessageTimeLayout, created)
+		if err != nil {
+			return StarHistoryPage{}, fmt.Errorf("webchat store: list starred history: message time: %w", err)
+		}
+		page.Items = append(page.Items, MessagePosition{Created: t.UTC(), ID: id})
+	}
+	if err := rows.Err(); err != nil {
+		return StarHistoryPage{}, fmt.Errorf("webchat store: list starred history: %w", err)
+	}
+	return trimStarHistoryPage(page, q.Limit), nil
+}
+
+// ---------------------------------------------------------------------------
+// SQLite lifecycle
+// ---------------------------------------------------------------------------
+
+// markMessageDeletedTx is the deletion transaction SetMessageDeleted and
+// MarkMessageDeletedAndClearStars share: the extension upsert first (it
+// takes SQLite's write lock, so a concurrent star add, whose guarded insert
+// is its first statement, is ordered before or after the whole deletion),
+// then mentions, then the stars, whose owners it returns.
+func (s *sqliteWebChatStore) markMessageDeletedTx(ctx context.Context, messageID string, deletedAt time.Time) ([]string, error) {
+	const query = `
+INSERT INTO webchat_message_ext (message_id, deleted_at)
+VALUES (?, ?)
+ON CONFLICT (message_id)
+DO UPDATE SET deleted_at = excluded.deleted_at
+`
+	// One transaction: the soft delete, its mention cleanup and its star
+	// cleanup land together, so a deleted message never keeps lighting a
+	// mention dot or a star.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: set message deleted begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if _, err := tx.ExecContext(ctx, query, messageID, deletedAt.UTC().Format(time.RFC3339Nano)); err != nil {
+		return nil, fmt.Errorf("webchat store: set message deleted: %w", err)
+	}
+	// A deleted message no longer mentions anyone.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM webchat_mention WHERE message_id = ?`, messageID); err != nil {
+		return nil, fmt.Errorf("webchat store: delete message mentions: %w", err)
+	}
+	owners, err := queryStarOwners(ctx, tx, `SELECT DISTINCT user_id FROM webchat_message_star WHERE message_id = ? ORDER BY user_id`, messageID)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: list message star owners: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM webchat_message_star WHERE message_id = ?`, messageID); err != nil {
+		return nil, fmt.Errorf("webchat store: delete message stars: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("webchat store: set message deleted: %w", err)
+	}
+	return owners, nil
+}
+
+// queryStarOwners reads a single column of user IDs.
+func queryStarOwners(ctx context.Context, tx *sql.Tx, query string, args ...any) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	owners := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		owners = append(owners, id)
+	}
+	return owners, rows.Err()
+}
+
+func (s *sqliteWebChatStore) MarkMessageDeletedAndClearStars(ctx context.Context, messageID string, deletedAt time.Time) ([]string, error) {
+	return s.markMessageDeletedTx(ctx, messageID, deletedAt)
+}
+
+func (s *sqliteWebChatStore) DeleteMessageStarsForConversation(ctx context.Context, conversationKey string) (int64, error) {
+	return s.deleteStarsWhere(ctx, "conversation", `conversation_key = ?`, conversationKey)
+}
+
+func (s *sqliteWebChatStore) DeleteMessageStarsForUser(ctx context.Context, userID string) (int64, error) {
+	return s.deleteStarsWhere(ctx, "user", `user_id = ?`, userID)
+}
+
+func (s *sqliteWebChatStore) DeleteMessageStarsForProject(ctx context.Context, projectID string) (int64, error) {
+	return s.deleteStarsWhere(ctx, "project", `project_id = ?`, projectID)
+}
+
+func (s *sqliteWebChatStore) deleteStarsWhere(ctx context.Context, what, cond, value string) (int64, error) {
+	if value == "" {
+		return 0, fmt.Errorf("webchat store: delete message stars for %s: %w", what, store.ErrInvalidInput)
+	}
+	res, err := s.db.ExecContext(ctx, `DELETE FROM webchat_message_star WHERE `+cond, value)
+	if err != nil {
+		return 0, fmt.Errorf("webchat store: delete message stars for %s: %w", what, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("webchat store: delete message stars for %s: %w", what, err)
+	}
+	return n, nil
+}
+
+// sqliteStarRange is the predicate selecting the stars between first and
+// last (inclusive) in (user_id, message_id) order.
+func sqliteStarRange(first, last StarCleanupPosition) (string, []any) {
+	const t = "webchat_message_star."
+	return `(` + t + `user_id > ? OR (` + t + `user_id = ? AND ` + t + `message_id >= ?))
+   AND (` + t + `user_id < ? OR (` + t + `user_id = ? AND ` + t + `message_id <= ?))`,
+		[]any{first.UserID, first.UserID, first.MessageID, last.UserID, last.UserID, last.MessageID}
+}
+
+func (s *sqliteWebChatStore) PurgeMessageStarCandidates(ctx context.Context, after StarCleanupPosition, limit int) (StarCleanupResult, error) {
+	if limit < 1 {
+		return StarCleanupResult{}, fmt.Errorf("webchat store: purge message stars: %w", store.ErrInvalidInput)
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT user_id, message_id FROM webchat_message_star
+ WHERE user_id > ? OR (user_id = ? AND message_id > ?)
+ ORDER BY user_id, message_id
+ LIMIT ?`, after.UserID, after.UserID, after.MessageID, limit)
+	if err != nil {
+		return StarCleanupResult{}, fmt.Errorf("webchat store: purge message stars: %w", err)
+	}
+	first, last, n, err := starCleanupRange(rows)
+	if err != nil {
+		return StarCleanupResult{}, fmt.Errorf("webchat store: purge message stars: %w", err)
+	}
+	res := StarCleanupResult{Examined: n}
+	if n == limit {
+		res.Next = last
+	}
+	if n == 0 {
+		return res, nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return StarCleanupResult{}, fmt.Errorf("webchat store: purge message stars: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	// Repair first: a star whose live message sits in a different live
+	// topic follows it (owner and save time unchanged).
+	rng, rngArgs := sqliteStarRange(first, last)
+	repaired, err := tx.ExecContext(ctx, `
+UPDATE webchat_message_star
+   SET conversation_key = t.id, project_id = t.project_id
+  FROM messages m
+  JOIN webchat_topic t ON t.id = m.thread_id AND t.deleted_at IS NULL
+ WHERE m.id = webchat_message_star.message_id
+   AND `+rng+`
+   AND (webchat_message_star.conversation_key <> t.id OR webchat_message_star.project_id IS NOT t.project_id)
+   AND NOT EXISTS (SELECT 1 FROM webchat_message_ext e WHERE e.message_id = m.id AND e.deleted_at IS NOT NULL)`, rngArgs...)
+	if err != nil {
+		return StarCleanupResult{}, fmt.Errorf("webchat store: repair message stars: %w", err)
+	}
+	if res.Repaired, err = repaired.RowsAffected(); err != nil {
+		return StarCleanupResult{}, fmt.Errorf("webchat store: repair message stars: %w", err)
+	}
+
+	// Then purge targets that are permanently gone. Nothing here reads a
+	// permission or a user's status.
+	purged, err := tx.ExecContext(ctx, `
+DELETE FROM webchat_message_star
+ WHERE `+rng+`
+   AND (NOT EXISTS (SELECT 1 FROM users u WHERE u.id = webchat_message_star.user_id)
+     OR NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = webchat_message_star.message_id)
+     OR EXISTS (SELECT 1 FROM webchat_message_ext e
+                 WHERE e.message_id = webchat_message_star.message_id AND e.deleted_at IS NOT NULL)
+     OR (COALESCE(webchat_message_star.project_id, '') <> ''
+         AND NOT EXISTS (SELECT 1 FROM projects p WHERE p.id = webchat_message_star.project_id))
+     OR (substr(webchat_message_star.conversation_key, 1, 3) <> 'dm:'
+         AND NOT EXISTS (SELECT 1 FROM webchat_topic t
+                          WHERE t.id = webchat_message_star.conversation_key AND t.deleted_at IS NULL))
+     OR EXISTS (SELECT 1 FROM messages m JOIN webchat_topic t ON t.id = m.thread_id
+                 WHERE m.id = webchat_message_star.message_id AND t.deleted_at IS NOT NULL))`, rngArgs...)
+	if err != nil {
+		return StarCleanupResult{}, fmt.Errorf("webchat store: purge message stars: %w", err)
+	}
+	if res.Purged, err = purged.RowsAffected(); err != nil {
+		return StarCleanupResult{}, fmt.Errorf("webchat store: purge message stars: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return StarCleanupResult{}, fmt.Errorf("webchat store: purge message stars: %w", err)
+	}
+	return res, nil
 }

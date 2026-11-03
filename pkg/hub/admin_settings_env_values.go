@@ -120,15 +120,6 @@ func dbStoredValues(file map[string]any, ops *OperationalSettings) map[string]an
 	return out
 }
 
-// startupOnlyLayer1Keys are Layer-1 keys whose saved value ApplySnapshot does
-// not apply, so the hub runs with the startup value (the bootstrap merge,
-// SCION_SERVER_* included) whatever is saved. Each maps to the running
-// value. See layer1ExemptKeys in layer1_apply_coverage_test.go and
-// ptone/scion#6000.
-var startupOnlyLayer1Keys = map[string]func(s *Server) any{
-	"server.auth.authorized_domains": func(s *Server) any { return s.AuthorizedDomains() },
-}
-
 // withheldEnvValueRoots are settings roots whose environment values are never
 // shown: their maps (env, secrets, credentials of runtimes, profiles and
 // harness configs) have no masking in the GET view.
@@ -204,8 +195,9 @@ func serverConfigResponseFromSettings(vs *config.VersionedSettings) ServerConfig
 // back must not send them;
 // nor is the relay-peer secret ever returned, nor the proxy driver settings
 // (WS2), nor the server keyring file path and its world-readable override
-// (ptone/scion#1530). Both tiers' GET builders and the env_values view use
-// it, so the three cannot drift.
+// (ptone/scion#1530), nor server.trusted_proxies (the transport policy's
+// trust set). Both tiers' GET builders and the env_values view use it, so
+// the three cannot drift.
 func hideNeverShownServerKeys(srv *config.V1ServerConfig) {
 	if srv == nil {
 		return
@@ -221,6 +213,7 @@ func hideNeverShownServerKeys(srv *config.V1ServerConfig) {
 	hideNeverAPIWritableProxyKeys(srv)
 	srv.KeyringFile = ""
 	srv.KeyringFileAllowWorldReadable = false
+	srv.TrustedProxies = nil
 }
 
 // shownEnvValue returns the value the GET may show for the environment
@@ -373,8 +366,9 @@ func fileTierEnvValues(envK *koanf.Koanf, keys []string, startup *config.V1Serve
 // hub runs with (the snapshot, a saved database value winning over the
 // bootstrap merge). A key start-up overrides compares with the start-up
 // value (startupEnvInEffect). A Layer-1 environment value is in effect when
-// it equals the value in view, or for startupOnlyLayer1Keys when it equals
-// the running value; a pinned public URL is in effect. Other Layer-0 keys
+// it equals the value in view; a pinned public URL is in effect, and so is
+// a key a SCION_SERVER_* variable pins (authorized_domains,
+// ptone/scion#6000). Other Layer-0 keys
 // are read at startup from the bootstrap merge, where SCION_SERVER_* is the
 // top layer, so they are in effect.
 //
@@ -417,16 +411,11 @@ func (s *Server) dbTierEnvInEffect(envK *koanf.Koanf, key string, running map[st
 	if key == config.PublicURLKey && s.HubEndpoints().Pin != "" {
 		return true
 	}
-	if runningValue, ok := startupOnlyLayer1Keys[key]; ok {
-		cur, err := config.FlattenSettingsJSON(map[string]any{"v": runningValue(s)})
-		if err != nil {
-			return false
-		}
-		single := map[string]any{}
-		if v, ok := cur["v"]; ok {
-			single[key] = v
-		}
-		return envValueEqualsShown(envK, key, single)
+	if key != config.PublicURLKey && opsettings.IsEnvPinnedLayer1Key(key) {
+		// The variable pins the key on this node: the hub started with
+		// its value and keeps it whatever is saved
+		// (authorizedDomainsForSnapshot).
+		return true
 	}
 	return envValueEqualsShown(envK, key, running)
 }

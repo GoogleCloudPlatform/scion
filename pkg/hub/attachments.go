@@ -16,8 +16,10 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"mime"
 	"os"
 	"path/filepath"
@@ -213,12 +215,11 @@ func SanitizeFilename(name string) (string, error) {
 	// Check for refused extensions. This is the one gate both entry points
 	// share — the browser upload handler and the agent --attach path — so both
 	// classes of refusal are judged here, off the same canonical extension.
-	// Markup is refused because it would be served back as its own document
-	// type; #1098 tracks re-admitting it safely.
+	// Both lists share one refusal message. Markup is refused because it
+	// would be served back as its own document type; #1098 tracks
+	// re-admitting it safely.
 	switch ext := attachmentExt(name); {
-	case DangerousExtensions[ext]:
-		return "", fmt.Errorf("files with a %s extension are not accepted", ext)
-	case refusedMarkupExtensions[ext]:
+	case DangerousExtensions[ext], refusedMarkupExtensions[ext]:
 		return "", fmt.Errorf("files with a %s extension are not accepted", ext)
 	}
 	// Truncate if too long (preserve extension). This parse is about keeping a
@@ -384,13 +385,30 @@ func (s *LocalDiskAttachmentStore) Get(_ context.Context, projectID, id string) 
 	return f, meta, nil
 }
 
-// Delete removes the attachment directory and all its contents.
+// Delete removes the attachment directory and all its contents. projectID
+// and id are validated exactly as Get validates them (storeRelDir), and the
+// removal goes through an os.Root anchored on the store's base, so nothing
+// outside the store can be removed: an ID that is empty, "." or ".." or holds
+// a path separator is refused, and a symlink in the path is not followed out
+// of the base. A missing store or attachment is not an error (idempotent).
 func (s *LocalDiskAttachmentStore) Delete(_ context.Context, projectID, id string) error {
-	dir := filepath.Join(s.baseDir, projectID, id)
-	if _, err := os.Stat(dir); os.IsNotExist(err) {
+	rel, err := storeRelDir(projectID, id)
+	if err != nil {
+		return fmt.Errorf("attachment delete refused: %s", id)
+	}
+	root, err := os.OpenRoot(s.baseDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil // No store yet: nothing to delete.
+	}
+	if err != nil {
+		return fmt.Errorf("attachment store: open base: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+
+	if _, err := root.Lstat(rel); errors.Is(err, fs.ErrNotExist) {
 		return nil // Already deleted — idempotent.
 	}
-	return os.RemoveAll(dir)
+	return root.RemoveAll(rel)
 }
 
 // sweep removes attachment directories older than cutoff (by their

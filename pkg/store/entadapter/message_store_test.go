@@ -79,6 +79,29 @@ func TestMessageInvalidInput(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrInvalidInput)
 }
 
+// An attachment-only chat message has no text, so the store accepts an
+// empty body and reads it back unchanged (ptone/scion#6146). The send
+// handlers decide whether a body is required.
+func TestCreateMessage_EmptyBodyRoundTrips(t *testing.T) {
+	s := newTestMessageStore(t)
+	ctx := context.Background()
+	msg := newTestMessage(uuid.NewString(), "agent-1")
+	msg.Msg = ""
+	msg.Type = "chat"
+
+	require.NoError(t, s.CreateMessage(ctx, msg))
+
+	got, err := s.GetMessage(ctx, msg.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "", got.Msg)
+	assert.Equal(t, "chat", got.Type)
+
+	// The identifiers stay required.
+	noProject := newTestMessage("", "agent-1")
+	noProject.Msg = ""
+	assert.ErrorIs(t, s.CreateMessage(ctx, noProject), store.ErrInvalidInput)
+}
+
 func TestMarkMessageRead(t *testing.T) {
 	s := newTestMessageStore(t)
 	ctx := context.Background()
@@ -168,107 +191,6 @@ func TestListMessagesExcludeTypeAndSkipCount(t *testing.T) {
 	assert.Equal(t, "chat", next.Items[0].Type)
 	assert.Equal(t, 2, next.TotalCount)
 	assert.Empty(t, next.NextCursor)
-}
-
-func TestPurgeOldMessages(t *testing.T) {
-	s := newTestMessageStore(t)
-	ctx := context.Background()
-	projectID := uuid.NewString()
-
-	oldRead := newTestMessage(projectID, "agent-1")
-	oldRead.Read = true
-	oldRead.CreatedAt = time.Now().Add(-72 * time.Hour).UTC().Truncate(time.Second)
-	require.NoError(t, s.CreateMessage(ctx, oldRead))
-
-	oldUnread := newTestMessage(projectID, "agent-1")
-	oldUnread.CreatedAt = time.Now().Add(-72 * time.Hour).UTC().Truncate(time.Second)
-	require.NoError(t, s.CreateMessage(ctx, oldUnread))
-
-	recent := newTestMessage(projectID, "agent-1")
-	require.NoError(t, s.CreateMessage(ctx, recent))
-
-	// readCutoff 24h ago purges oldRead; unreadCutoff 96h ago keeps oldUnread.
-	readCutoff := time.Now().Add(-24 * time.Hour)
-	unreadCutoff := time.Now().Add(-96 * time.Hour)
-	n, err := s.PurgeOldMessages(ctx, readCutoff, unreadCutoff)
-	require.NoError(t, err)
-	assert.Equal(t, 1, n)
-
-	_, err = s.GetMessage(ctx, oldRead.ID)
-	assert.ErrorIs(t, err, store.ErrNotFound)
-	_, err = s.GetMessage(ctx, oldUnread.ID)
-	require.NoError(t, err)
-	_, err = s.GetMessage(ctx, recent.ID)
-	require.NoError(t, err)
-}
-
-func TestPurgeFailedMessages(t *testing.T) {
-	s := newTestMessageStore(t)
-	ctx := context.Background()
-	projectID := uuid.NewString()
-
-	oldFailed := newTestMessage(projectID, "agent-1")
-	oldFailed.DispatchState = store.MessageDispatchFailed
-	oldFailed.CreatedAt = time.Now().Add(-10 * 24 * time.Hour).UTC().Truncate(time.Second)
-	require.NoError(t, s.CreateMessage(ctx, oldFailed))
-
-	recentFailed := newTestMessage(projectID, "agent-1")
-	recentFailed.DispatchState = store.MessageDispatchFailed
-	require.NoError(t, s.CreateMessage(ctx, recentFailed))
-
-	// A dispatched (successfully delivered) message old enough to be purged
-	// by PurgeOldMessages semantics, but must survive PurgeFailedMessages
-	// since it filters strictly on dispatch_state=failed.
-	oldDelivered := newTestMessage(projectID, "agent-1")
-	oldDelivered.DispatchState = store.MessageDispatchDispatched
-	oldDelivered.CreatedAt = time.Now().Add(-10 * 24 * time.Hour).UTC().Truncate(time.Second)
-	require.NoError(t, s.CreateMessage(ctx, oldDelivered))
-
-	cutoff := time.Now().Add(-7 * 24 * time.Hour)
-	n, err := s.PurgeFailedMessages(ctx, cutoff)
-	require.NoError(t, err)
-	assert.Equal(t, 1, n, "only the old failed message is purged")
-
-	_, err = s.GetMessage(ctx, oldFailed.ID)
-	assert.ErrorIs(t, err, store.ErrNotFound)
-	_, err = s.GetMessage(ctx, recentFailed.ID)
-	require.NoError(t, err, "recent failed message is within the retention window")
-	_, err = s.GetMessage(ctx, oldDelivered.ID)
-	require.NoError(t, err, "delivered message history is never purged by this sweep")
-}
-
-// TestPurgeFailedMessages_SkipsUserRecipients is a regression test for
-// nc-promote-busy round 2 (R1): only a message addressed to an agent can
-// have genuinely and irrecoverably failed dispatch. A "user:" recipient row
-// reaching dispatch_state "failed" only ever got there because
-// ExpireStuckPendingMessages swept a writer bug that left it "pending"
-// (nc-promote-busy); hard-deleting it here would destroy real chat history
-// the user never saw fail.
-func TestPurgeFailedMessages_SkipsUserRecipients(t *testing.T) {
-	s := newTestMessageStore(t)
-	ctx := context.Background()
-	projectID := uuid.NewString()
-
-	oldFailedUser := newTestMessage(projectID, "user-alice")
-	oldFailedUser.Recipient = "user:alice"
-	oldFailedUser.DispatchState = store.MessageDispatchFailed
-	oldFailedUser.CreatedAt = time.Now().Add(-10 * 24 * time.Hour).UTC().Truncate(time.Second)
-	require.NoError(t, s.CreateMessage(ctx, oldFailedUser))
-
-	oldFailedAgent := newTestMessage(projectID, "agent-1")
-	oldFailedAgent.DispatchState = store.MessageDispatchFailed
-	oldFailedAgent.CreatedAt = time.Now().Add(-10 * 24 * time.Hour).UTC().Truncate(time.Second)
-	require.NoError(t, s.CreateMessage(ctx, oldFailedAgent))
-
-	cutoff := time.Now().Add(-7 * 24 * time.Hour)
-	n, err := s.PurgeFailedMessages(ctx, cutoff)
-	require.NoError(t, err)
-	assert.Equal(t, 1, n, "only the agent-recipient failed message is purged")
-
-	_, err = s.GetMessage(ctx, oldFailedUser.ID)
-	require.NoError(t, err, "user-recipient failed row must survive — it is never a real dispatch failure")
-	_, err = s.GetMessage(ctx, oldFailedAgent.ID)
-	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
 // fakePublisher records PublishUserMessage calls to verify the LISTEN/NOTIFY

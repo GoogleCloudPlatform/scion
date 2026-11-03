@@ -103,9 +103,12 @@ var fixedCapabilityKeyPurpose = keyring.NewPurpose("fixed_capability_key", func(
 	return slices.Clone(secret)
 })
 
-// fixedCapabilityKeys returns keys over one fixed key, issuing and reading
-// only the legacy forms: a legacy-mode key resolved by ensureSigningKey, or
-// a test key. An empty key returns unconfigured keys.
+// fixedCapabilityKeys returns keys over one fixed key: a legacy-mode key
+// resolved by ensureSigningKey, or a test key. They issue only the legacy
+// (ID-less) forms. They read the legacy forms and the versioned forms whose
+// key ID is "legacy" (keyring.LegacyID), the one generation of
+// keyring.Legacy, which is the same key; a versioned value naming any other
+// key ID is refused. An empty key returns unconfigured keys.
 func fixedCapabilityKeys(key []byte) capabilityKeys {
 	if len(key) == 0 {
 		return capabilityKeys{}

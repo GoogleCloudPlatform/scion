@@ -21,6 +21,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentdelegationgrant"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agenthold"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentidentitykey"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentlifecyclecursor"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentlifecycleoutbox"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentrecovery"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentreincarnation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentserviceaccountassignment"
@@ -34,6 +36,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokertargetinventory"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatretentioncursor"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatretentionrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitprincipalepoch"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitsession"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
@@ -97,6 +101,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/userdeletion"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/userdeletionagent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userterminalworkspace"
 )
 
@@ -167,6 +173,8 @@ func checkColumn(t, c string) error {
 			agentdelegationgrant.Table:          agentdelegationgrant.ValidColumn,
 			agenthold.Table:                     agenthold.ValidColumn,
 			agentidentitykey.Table:              agentidentitykey.ValidColumn,
+			agentlifecyclecursor.Table:          agentlifecyclecursor.ValidColumn,
+			agentlifecycleoutbox.Table:          agentlifecycleoutbox.ValidColumn,
 			agentrecovery.Table:                 agentrecovery.ValidColumn,
 			agentreincarnation.Table:            agentreincarnation.ValidColumn,
 			agentserviceaccountassignment.Table: agentserviceaccountassignment.ValidColumn,
@@ -180,6 +188,8 @@ func checkColumn(t, c string) error {
 			brokersetting.Table:                 brokersetting.ValidColumn,
 			brokertargetinventory.Table:         brokertargetinventory.ValidColumn,
 			chatlinkcode.Table:                  chatlinkcode.ValidColumn,
+			chatretentioncursor.Table:           chatretentioncursor.ValidColumn,
+			chatretentionrun.Table:              chatretentionrun.ValidColumn,
 			conduitprincipalepoch.Table:         conduitprincipalepoch.ValidColumn,
 			conduitsession.Table:                conduitsession.ValidColumn,
 			conversation.Table:                  conversation.ValidColumn,
@@ -243,6 +253,8 @@ func checkColumn(t, c string) error {
 			usagereservation.Table:              usagereservation.ValidColumn,
 			user.Table:                          user.ValidColumn,
 			useraccesstoken.Table:               useraccesstoken.ValidColumn,
+			userdeletion.Table:                  userdeletion.ValidColumn,
+			userdeletionagent.Table:             userdeletionagent.ValidColumn,
 			userterminalworkspace.Table:         userterminalworkspace.ValidColumn,
 		})
 	})

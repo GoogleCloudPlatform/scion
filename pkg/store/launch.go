@@ -41,6 +41,11 @@ type BeginLaunchOptions struct {
 	// RevokeOnFail records whether a failed end of this start revokes the
 	// credential the start issued (launch_revoke_on_fail).
 	RevokeOnFail bool
+	// RunID is the run the dispatcher minted for this launch: the run ID
+	// beginRun returned, never a later read of the agent's mutable run.
+	// BeginLaunch binds it as launch_run_id only when the row still holds
+	// it; "" binds nothing (WP1 slice 3 addendum v12 section 1).
+	RunID string
 }
 
 // LaunchState values for Agent.LaunchState.
@@ -124,6 +129,10 @@ type LaunchReport struct {
 	// failed report's runtime_error, or "" (ptone/scion#4666). The hub
 	// filters it before it gets here; it is stored with ErrorCode.
 	Cause string
+	// RunID is the run the launch started (the hub-minted run ID the broker
+	// echoes); empty when the broker does not send it. The store only
+	// compares it with the row's run ID; it is never stored.
+	RunID string
 
 	// AgentConfig is applied on a succeeded terminal with
 	// ApplyBrokerAgentConfig, the same rules a synchronous dispatch uses

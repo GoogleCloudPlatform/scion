@@ -30,7 +30,7 @@ sequenceDiagram
     participant Med as Mediator (Cloud Run service)
     participant SM as Secret Manager
     participant CR as Cloud Run Jobs API
-    participant Run as Runner execution (8 vCPU / 32 GiB, /scratch disk)
+    participant Run as Runner execution (8 vCPU / 32 GiB, disk at HOME)
     GH->>Med: workflow_job queued (HMAC-signed webhook)
     Med->>Med: verify signature, repo in TARGET_REPOS, labels = RUNNER_LABEL, not a fork PR, job still queued, capacity free
     Med->>SM: App private key (cached)
@@ -143,7 +143,7 @@ go build -o /dev/null ./... && go vet ./... && go test ./... && gofmt -l .
 | :--- | :--- | :--- |
 | P1 | Skeleton, config contract, docs outline, complete permissions matrix | done |
 | P2 | Mediator: HMAC, fork guard, idempotency, JIT, RunJob, claim endpoint, `/reconcile`, backpressure | implemented (in review) |
-| P3 | Runner image and entrypoint (`/scratch` redirection, claim exchange) | implemented (in review) |
+| P3 | Runner image and entrypoint (work folder and caches on the disk at HOME, claim exchange) | implemented (in review) |
 | P4 | Idempotent deploy and teardown scripts with `--dry-run` | implemented (in review) |
 | P5 | GitHub setup guide, App manifest, workflow templates | implemented (in review) |
 | P6 | Live PoC on the chosen target (needs ptone's go-ahead); [checklist](docs/poc-checklist.md) | gated |

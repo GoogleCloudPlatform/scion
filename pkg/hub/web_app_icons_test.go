@@ -42,15 +42,16 @@ var appIconContentTypes = map[string]string{
 }
 
 // newAppIconWebServer returns a web server (no dev auth, so no session)
-// serving a temp assets dir holding every app icon path plus an unrelated
-// root-level file.
+// serving a temp assets dir holding every app icon path plus
+// scion-notification-icon.png, a root-level file served without a session
+// that is not an app icon.
 func newAppIconWebServer(t *testing.T, maintenance bool) *WebServer {
 	t.Helper()
 	dir := t.TempDir()
 	for p := range appIconContentTypes {
 		require.NoError(t, os.WriteFile(filepath.Join(dir, strings.TrimPrefix(p, "/")), []byte("data"), 0o644))
 	}
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "robots.txt"), []byte("data"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "scion-notification-icon.png"), []byte("data"), 0o644))
 	ws := newTestWebServer(t, WebServerConfig{AssetsDir: dir})
 	if maintenance {
 		ws.SetMaintenanceState(NewMaintenanceState(true, ""))
@@ -77,21 +78,21 @@ func TestAppIcons_ServedWithoutSession(t *testing.T) {
 }
 
 func TestAppIcons_AdminModeStillBlocksOtherPaths(t *testing.T) {
-	// robots.txt is a real root-level file that skips session auth: the
-	// admin-mode allowlist must stay exact rather than letting every
-	// root-level static file through.
+	// scion-notification-icon.png is a real root-level file that skips
+	// session auth: the admin-mode allowlist must stay exact rather than
+	// letting every root-level static file through.
 	ws := newAppIconWebServer(t, true)
-	req := httptest.NewRequest(http.MethodGet, "/robots.txt", nil)
+	req := httptest.NewRequest(http.MethodGet, "/scion-notification-icon.png", nil)
 	rec := httptest.NewRecorder()
 	ws.Handler().ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "GET /robots.txt in admin mode")
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "GET /scion-notification-icon.png in admin mode")
 
 	// Without a session the full chain redirects other paths to /login
 	// before admin mode runs, so check the middleware directly.
 	mw := newTestWebServerWithMaintenance(true, "")
 	mw.mux.HandleFunc("/", passthrough)
 	handler := mw.adminModeWebMiddleware(mw.mux)
-	for _, p := range []string{"/robots.txt", "/dashboard", "/manifest.webmanifest/x", "/icon-1024.png"} {
+	for _, p := range []string{"/scion-notification-icon.png", "/robots.txt", "/dashboard", "/manifest.webmanifest/x", "/icon-1024.png"} {
 		req := httptest.NewRequest(http.MethodGet, p, nil)
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)

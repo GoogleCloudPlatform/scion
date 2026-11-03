@@ -292,6 +292,42 @@ func (c *ValueCipher) decrypt(stored string, admitPlaintext bool) (string, error
 	return "", ErrDecrypt
 }
 
+// DecryptWriter opens stored only with the active (writer) key in the
+// configured write format, so ok means c.Encrypt would write a value of
+// the same format under the same key. Unlike Decrypt, no other key is
+// tried: an enc:v1: value sealed under another legacy v1 reader, an
+// enc:v2: value naming another key ID, a value in the other format, a
+// plaintext value and a disabled, nil or zero cipher all return ok
+// false. It never returns a plaintext with ok false.
+func (c *ValueCipher) DecryptWriter(stored string) (string, bool) {
+	if !c.Enabled() {
+		return "", false
+	}
+	env, err := secretenvelope.Parse(stored)
+	if err != nil {
+		return "", false
+	}
+	active := c.ring.Active()
+	var aad []byte
+	switch {
+	case env.Format == secretenvelope.FormatV1 && c.ring.WriteFormat() == keyring.WriteV1:
+	case env.Format == secretenvelope.FormatV2 && c.ring.WriteFormat() == keyring.WriteV2 && env.KID == active.ID:
+		aad = secretenvelope.AADV2(active.ID)
+	default:
+		return "", false
+	}
+	gcm, err := newGCM(active.Bytes())
+	if err != nil {
+		return "", false
+	}
+	nonce, sealed := env.Sealed[:secretenvelope.NonceSize], env.Sealed[secretenvelope.NonceSize:]
+	pt, err := gcm.Open(nil, nonce, sealed, aad)
+	if err != nil {
+		return "", false
+	}
+	return string(pt), true
+}
+
 // Inspect parses a stored value without decrypting it.
 func (c *ValueCipher) Inspect(stored string) (secretenvelope.Envelope, error) {
 	return secretenvelope.Parse(stored)

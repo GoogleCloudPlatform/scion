@@ -160,15 +160,15 @@ as soon as the Hub answers, as before, possibly while the agent is still
 provisioning. A synchronous launch runs on the Hub independently of the CLI
 request: if the CLI gives up or you press Ctrl-C mid-dispatch, the Hub keeps
 going instead of rolling the agent back (`scion start` and `scion create` send
-the initial agent create request and any env-gather submission with a 3-minute
+the initial agent create request and any env-gather submission with a 4-minute
 client timeout instead of the standard 30-second client timeout so synchronous
 creates can complete). Each dispatch attempt is bounded at
-120 seconds, so a slow cold start (for example on Kubernetes) can still fail on
-a synchronous launch; enable [asynchronous agent create](/scion/reference/server-config/#asynchronous-agent-create) for those. While waiting, each launch step is printed to stderr with a readable label, for example
+180 seconds, so a slow cold start (for example on Kubernetes) can still fail on
+a synchronous launch; [asynchronous agent create](/scion/reference/server-config/#asynchronous-agent-create), on by default, avoids that limit. While waiting, each launch step is printed to stderr with a readable label, for example
 `my-agent: provisioning (waiting to be scheduled)` (nothing extra under `--format json`). If the
 launch fails, the error gives the failure code (with its label, unless the message already says
 it), the step and the message, for example `agent 'my-agent' create did not complete
-(image_pull_failed) while pulling the image: ...`. A create, including `scion start` of a new
+(image_pull_failed) while preparing the container (image pull, volume mounts): ...`. A create, including `scion start` of a new
 agent, reports `create did not complete`; a start or resume of an existing agent reports `did not
 start`. A launch that ended with an error ends the wait whatever phase the agent reports. If the wait times out, or you press Ctrl-C, only
 the wait stops: the launch continues on the Hub, and re-running `scion start
@@ -403,7 +403,7 @@ Sends a message to a running agent or user.
     - `--body-file <path>`: Read the message body from a file instead of passing it inline. Useful for long messages and scripted workflows. `--body-file -` reads the body from stdin, like a `-` message argument. Mutually exclusive with the inline `<message>` argument.
     - `--attach <path>`: Attach a file as part of this message (repeatable, at most 10). Use `--artifact` instead for work product to review, version or find later. The CLI first asks the Hub where uploads go (`GET /api/v1/chat/attachments`):
         - **Stored as artifacts** (the `hub.attachment_artifacts` experiment on): the files are checked before anything is uploaded. Each must be a readable regular file at any path, no two may have the same file name (compared case-insensitively), and with an agent recipient their total must fit the Hub's delivery limit (`messaging.attachment_delivery_max_bytes`). An `.html`, `.htm` or `.svg` file, or one whose first bytes contain `<html` or `<svg`, fails with exit code `2`: publish it with `scion artifact publish` and send it with `--artifact`. A Markdown file over 64 KiB prints a hint to publish it as an artifact and is still sent. The files are uploaded in one request, once per recipient for a group send, and the send names them by id. If any file is not stored, nothing is sent. An agent recipient gets the files in `~/.scion/inbox/<message-id>/` before the message text (see [Messaging](/scion/hosted/user/messaging/#attachments-for-agents)).
-        - **Otherwise** (the Hub answers `legacy`, or a Hub from before the probe refuses it): file paths must be within allowed roots (`/workspace` or `/scion-volumes`), where relative paths resolve against `/workspace`, and the files are staged in the shared directory. A path that is not a regular file (for example a directory) or is outside allowed roots fails the command.
+        - **Otherwise** (the Hub answers `legacy`, or a Hub from before the probe refuses it): file paths must be within allowed roots (`/workspace` or `/scion-volumes`), where relative paths resolve against `/workspace`, and the files are staged in the shared directory. The CLI prints `Warning: attachments are staged on the local scratchpad instead of uploaded to the hub (<reason>); they may not reach the hub or recipients on another broker` on stderr naming why the Hub upload path was not used (for example `the hub.attachment_artifacts experiment is off on the hub`). A path that is not a regular file (for example a directory) or is outside allowed roots fails the command.
         - **Constraints:** Cannot be combined with `--in` or `--at`.
         - **Undelivered attachments (staged files):** When an agent sends the message and the Hub cannot read an attached file (for example, it was staged on a different Runtime Broker's host than the Hub's), the message is still delivered without it, and the command prints `Warning: attachment <path> was not delivered: <reason>` on stderr for each such file. With `--format json`, the warnings are in the result's `attachment_warnings` field instead. Messages sent by a human from the CLI do not report undelivered attachments yet.
     - `--artifact <ref>`: Reference a published artifact, `scion://artifact/<id>` or `scion://artifact/<id>@<seq>` (repeatable, at most 10). The reference is added to the message text, and an agent recipient's message ends with one line per artifact showing how to fetch it (`Artifact: v2 - scion artifact get <ref>`, or `current` for an unpinned reference). The Hub attaches only artifacts the sender can read and prints a warning for the rest; a recipient still needs its own access to read an artifact. See [Artifacts](/scion/reference/artifacts/#artifacts-in-messages).
@@ -419,18 +419,18 @@ Sends a message to a running agent or user.
     - `--at <time>`: *(Deprecated — use `scion schedule create --at` instead.)* Schedule message delivery at an absolute time.
 
 - **Output:**
-  A successful send ends with a confirmation that names the message the Hub created, as a `(message <id>)` suffix, for example `Message accepted for agent 'reviewer' (message 0f3c…).` or `Message sent to user:alice@example.com via Hub (conversation 7b1e…, message 0f3c…).` A group send prints the ID on each recipient's line (`  Accepted: agent:a (message 0f3c…)`), because every recipient gets its own message. The ID is the one agents see as `message_id` in the delivered message. For a message recorded in a conversation, it is also the `<message-id>` that `scion conversation get-message conv:<conversation-id> <message-id>` takes; a message with no conversation (for example a broadcast) cannot be fetched that way. A Hub that does not report an ID gets the confirmation without the suffix. `scion broadcast` prints no ID. With `--format json`, a single send's result has the ID in `message_id`, and a group send's `results` entries carry `message_id` for each accepted (`delivered`), deferred or `unknown` (ambiguous) recipient; a failed recipient has none.
+  A successful send ends with a confirmation that names the conversation the message landed in and the message the Hub created, as a `(conversation <id>, message <id>)` suffix, for example `Message accepted for agent 'reviewer' (conversation 7b1e…, message 0f3c…).` or `Message sent to user:alice@example.com via Hub (conversation 7b1e…, message 0f3c…).` The conversation ID is the one to reply into. A group send prints both IDs on each recipient's line (`  Accepted: agent:a (conversation 7b1e…, message 0f3c…)`), because every recipient gets its own message. The ID is the one agents see as `message_id` in the delivered message. For a message recorded in a conversation, it is also the `<message-id>` that `scion conversation get-message conv:<conversation-id> <message-id>` takes; a message with no conversation (for example a broadcast) cannot be fetched that way. Each part of the suffix is left out when the Hub does not report it: a message the Hub did not record in a conversation has no conversation ID, and a Hub that predates this field reports none. `scion broadcast` prints no ID. With `--format json`, a single send's result has the IDs in `message_id` and `conversation_id`, and a group send's `results` entries carry `message_id` and `conversation_id` for each accepted (`delivered`), deferred or `unknown` (ambiguous) recipient; a failed recipient has neither.
 
 - **What the confirmation means:**
   The Hub reports a status for each agent send, and the CLI words its confirmation by what that status actually confirms. "Accepted" means the Hub handed the message to the agent's runtime, which buffered it as input. It does not confirm that the agent has read or acted on it. No send status currently confirms that.
 
   | Hub status | Meaning | CLI confirmation |
   |---|---|---|
-  | `dispatched`, `delivered` | The runtime accepted and buffered the message. | `Message accepted for agent 'x' (message <id>).` |
+  | `dispatched`, `delivered` | The runtime accepted and buffered the message. | `Message accepted for agent 'x' (conversation <id>, message <id>).` |
   | `delivered_not_persisted` | Accepted as above, but the Hub could not save it to history, so there is no message ID. | `Message accepted for agent 'x'.` |
-  | `ambiguous` (HTTP `202`) | The Hub could not tell whether the runtime took the message. Check before you resend. | `Message accepted for agent 'x' (delivery unconfirmed) (message <id>).` |
-  | `deduplicated` | An agent sent an `@mention` notification that repeats one the Hub sent moments earlier for the same message, so it was not sent again. The ID is the earlier message's. | `Message accepted for agent 'x' (duplicate of an earlier send) (message <id>).` |
-  | `deferred` (HTTP `202`) | The agent is reincarnating. The message was saved to history and not sent yet. The new generation sees it on catch-up. | `agent x is reincarnating; message saved to history and will be seen on catch-up (message <id>).` |
+  | `ambiguous` (HTTP `202`) | The Hub could not tell whether the runtime took the message. Check before you resend. | `Message accepted for agent 'x' (delivery unconfirmed) (conversation <id>, message <id>).` |
+  | `deduplicated` | An agent sent an `@mention` notification that repeats one the Hub sent moments earlier for the same message, so it was not sent again. The ID is the earlier message's. | `Message accepted for agent 'x' (duplicate of an earlier send) (conversation <id>, message <id>).` |
+  | `deferred` (HTTP `202`) | The agent is reincarnating. The message was saved to history and not sent yet. The new generation sees it on catch-up. | `agent x is reincarnating; message saved to history and will be seen on catch-up (conversation <id>, message <id>).` |
   | failed (an error response) | The message was not sent. | An error, and no confirmation. |
 
   `scion broadcast` prints a `Broadcast accepted (…)` line, followed by a note when some targeted agents are still starting (the message is held until they are ready), or `No running agents …` when it reached none. With `--all` it prints `Broadcasting message to <n> agents...`, then `Message accepted for agent 'x' via Hub.` for each agent it reached, whatever the status, and a warning for each send that failed. With `--format json`, a single `scion message` send prints the Hub's response, with its raw `status` value, except a human's `@<agent-name>` send, which prints nothing on success; group sends report the statuses described below.
@@ -442,7 +442,7 @@ Sends a message to a running agent or user.
     "group_id": "…",
     "total": 3, "delivered": 1, "deferred": 0, "failed": 1, "unknown": 1,
     "results": [
-      {"recipient": "agent:a", "status": "delivered", "message_id": "…"},
+      {"recipient": "agent:a", "status": "delivered", "message_id": "…", "conversation_id": "…"},
       {"recipient": "agent:b", "status": "failed", "error": "…"},
       {"recipient": "agent:c", "status": "unknown", "error": "…"}
     ],
@@ -1347,6 +1347,19 @@ scion hub test-identity delete "$FIXTURE_ID" --purge
     - `set`: Set hub-wide messaging settings.
         - Flags: `--cross-project-enabled <bool>` (enable or disable cross-project messaging), `--revision <int>` (required, optimistic concurrency revision).
     - `get`: Show the current hub-wide messaging settings and revision.
+- `scion hub settings`: View and change the Hub's server configuration (operational settings, agent defaults, runtimes, profiles, harness configs, telemetry, federation) over `/api/v1/admin/server-config`. Keys are the dotted paths `scion hub settings schema` lists (for example `server.hub.public_url`, `default_max_turns`, `runtimes`); a key below a listed key (`runtimes.k8s.namespace`) changes that part of the current value and saves the whole value, so other entries are kept. Every change is compare-and-set: it sends the revision of each section it changes as read just before (`expected_revisions`), so a change made in between is reported as a conflict instead of being overwritten. Field errors are printed one per line with the key, and a conflict lists each section's expected and current revision and what was already saved. Needs a Hub admin login, or an access token on a hub boundary with `hub_config:read` (`get`, `schema`) or `hub_config:update` (`set`, `unset`).
+    - `get [KEY]`: With no argument, list the sections with their source (`db`, `file` or `default`), revision and last change. With `KEY`, print its value; `--section NAME` prints every key of a section. Secret values are shown masked.
+    - `set KEY VALUE [KEY VALUE ...]`: Change keys in one save. `VALUE` is read as YAML (`true`, `42`, `"text"`, `[a, b]`, `{k: v}`); `--string` sends values as text. `--file <path|->` reads a YAML or JSON document of keys instead; a null in it unsets the key.
+    - `unset KEY [KEY ...]`: Clear keys, so the Hub uses its default. A key below a listed key (`runtimes.old`) is removed from the current value. The GCP permission-check keys and the agent role defaults cannot be cleared this way. `--section NAME --reset` deletes the section's saved values instead, so the Hub uses its startup configuration for the section (asks for confirmation; `--yes` answers it).
+    - `schema [SECTION]`: List the sections and their keys (keys that apply only after a Hub restart are marked); with `SECTION`, print its JSON schema.
+    - Flags on `set` and `unset`: `--revision SECTION=N` (repeatable; pin a section's expected revision), `--dry-run` (print the request body without sending it; values of secret keys are masked), `--no-validate` (send keys the schema does not list and let the Hub decide).
+- `scion hub project-defaults`: View and change the Hub's defaults for new projects (for example `default_scratchpad`) over `/api/v1/admin/project-defaults`: `get [KEY]`, `set KEY VALUE ...`, `unset KEY ...`. Unknown keys are refused, since the Hub would ignore them. Needs a Hub admin login, or a hub-boundary access token with `hub_project_defaults:read` or `hub_project_defaults:update`.
+- `scion hub experiments`: View and override the Hub's [experiments](/scion/reference/experiments/) over `/api/v1/admin/experiments`. Needs a Hub admin login, or a hub-boundary access token with `hub_experiments:update` (also needed to list them).
+    - `list` (alias `ls`): Show each experiment's stage, default, override and whether it is on, with the settings revision.
+    - `enable NAME ...` / `disable NAME ...`: Override experiments on or off hub-wide.
+    - `reset NAME ...`: Remove overrides, returning experiments to their defaults. `--all` removes every override, including those of experiments the Hub no longer knows (asks for confirmation; `--yes` answers it); when the stored overrides are unreadable it also needs `--confirm-malformed`.
+    - `--revision N` on `enable`, `disable` and `reset` pins the expected settings revision (default: the revision just read).
+- None of `scion hub settings`, `scion hub project-defaults` or `scion hub experiments` is available in agent mode.
 
 ### `scion service-accounts`
 
@@ -1520,10 +1533,10 @@ Manages the local host as a Runtime Broker. The old name `scion broker` still wo
 
 **Broker name.** A broker registers on the Hub under its hostname unless `register --broker-name` gives another name. The Hub reuses an existing broker with the same name, so when you run several brokers on one host, give each its own `--broker-name` (and its own `HOME`, so each has its own settings, broker ID and credentials). The name is saved in the global settings as `server.broker.broker_nickname`, where `register`, `join`, `provide`, `withdraw`, `status`, project registration and the broker server itself read it instead of the hostname. An existing `server.broker.broker_name` or `server.broker.broker_nickname` setting is used the same way, so `register`, `join` and project registration send that name rather than the hostname, matching the name `scion server start` already gives the broker. If such a host was registered under its hostname, a `register --force`, or a register after its credentials and broker ID are lost, no longer matches the hostname-named broker on the Hub and creates a new one.
 
-- `scion runtime-broker status`: Show status of the local broker server, including the projects it provides for. Providers added with `--auto-provide` are listed right away. Right after a broker start or restart (a daemon started under 30 seconds ago, or a broker uptime under 30 seconds), `status` waits for the broker to serve and for its Hub connections to report. All of this waiting shares one 5-second budget. A connection the running broker has not reported yet is shown as `pending` (it connects on its first heartbeat). `unknown` means no broker answered on the port.
+- `scion runtime-broker status`: Show status of the local Runtime Broker server, including the projects it provides for. Providers added with `--auto-provide` are listed right away. Right after a Runtime Broker start or restart (a daemon started under 30 seconds ago, or a Runtime Broker uptime under 30 seconds), `status` waits for the Runtime Broker to serve and for its Hub connections to report. All of this waiting shares one 5-second budget. A connection the running Runtime Broker has not reported yet is shown as `pending` (it connects on its first heartbeat), and a connection whose control-channel handshake has not yet completed is shown as `connecting`. `unknown` means no Runtime Broker answered on the port. Each Hub connection (when it runs a control channel) and each online Runtime Broker status block also prints a `Commands:` line showing whether the Hub can send commands to the Runtime Broker over the control channel (`yes (control channel connected)`, `no (the broker reports its control channel to the Hub is not connected; it is online but cannot receive commands)`, `no (the Hub refused the control channel under its transport policy; check server.trusted_proxies on the Hub)` on a live Hub connection, `pending (control channel connecting)` on a live Hub connection, or `not reported`), and the Hub status block prints `Hub API: reachable (<status>)` or `Hub API: unreachable`.
     - `--json`: Output in JSON format.
-    - `--broker <id>`: Show the status of another broker as the Hub sees it, instead of the local one.
-    - `--port <port>`: Port of the local broker.
+    - `--broker <id>`: Show the status of another Runtime Broker as the Hub sees it, instead of the local one.
+    - `--port <port>`: Port of the local Runtime Broker.
 - `scion runtime-broker start`: Start the broker server as a background daemon.
     - `--foreground`: Run in the current process instead of daemonizing. Use this as the `ExecStart` of a systemd `Type=simple` unit.
     - `--port <port>`: Listen on a custom port (default: `server.broker.port` from settings, else 9800).
@@ -1602,6 +1615,10 @@ Manages Scion server components (Hub and Broker).
         - `--batch-size <int>`: Number of messages to process per batch (default: 100).
         - `--checkpoint <string>`: Resume from this pagination cursor (project-scoped).
         - `--db <string>`: Database DSN (overrides configuration/environment DSN).
+- `scion server keys status`: Inspect the server's keyring file (`server.keyring_file`), database encryption policy and migration, and run a fresh encryption audit (`audit.scope: "fresh"`) against the local database (read-only), printing the same report as `GET /api/v1/admin/keys/status` without starting services or requiring the `server.secret_rotation` experiment. Exits `0` whenever it produces a report (including a `NOT READY` report), `1` (`keysExitFailure`) when the operation fails (for example the database could not be opened or read, or the audit failed), and `2` (`keysExitInvalid`) on invalid configuration or an unmet precondition.
+    - Flags: `--config <path>` (server settings file), `--keyring-file <path>`, `--keyring-file-allow-world-readable`, `--db <dsn>`, `--no-store` (report the keyring only; do not open the database), `--format json`.
+- `scion server keys check`: Validate the keyring file and configuration (`server.keyring_file`) without starting services or opening the database. Exits `0` when valid and `2` (`keysExitInvalid`) when invalid.
+    - Flags: `--config <path>`, `--keyring-file <path>`, `--keyring-file-allow-world-readable`.
 
 ## Administration
 
@@ -1663,8 +1680,10 @@ available inside agent containers.
 - **Hub Health**: Hub reachability (`/healthz`), authentication, where the Hub credential came
   from (`hub-credential`, see the credential sources below), unmapped GCP service accounts of
   the linked project, and checks of this machine's settings (NFS mounts, Kubernetes profiles,
-  the deprecated server hub endpoint source on hosts configured as a server, telemetry, container
-  images, broker credentials).
+  `flat-placement-preflight` for existing agents pinned to flat Kubernetes Runtime Brokers in
+  `server.broker.instances` whose stored pod placement disagrees with their instance's
+  `runtime_target`, the deprecated server hub endpoint source on hosts configured as a server,
+  telemetry, container images, broker credentials).
 - **Platform Health**: The Hub's health summary (`GET /api/v1/admin/health/summary`), the same
   data as the [health dashboard](/scion/workstation/dashboard/). It shows the overall status, then
   every "Needs attention" item in the Hub's order (critical items as failures, warnings as

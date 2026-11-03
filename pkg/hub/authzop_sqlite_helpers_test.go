@@ -63,6 +63,7 @@ type idFixtures struct {
 	groupDel                string
 	user                    string
 	userDel                 string
+	userDeletion            string
 	member                  string
 	skill                   string
 	skillDel                string
@@ -109,6 +110,7 @@ type idFixtures struct {
 	integrationName         string
 	lifecycleHook           string
 	hubPreStartHook         string
+	hubPreStartHookDel      string
 	chatTopic               string
 	agentLifecycle          string
 	agentRestore            string
@@ -329,6 +331,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 		groupDel:             tid("li-group-del"),
 		user:                 tid("li-user"),
 		userDel:              tid("li-user-del"),
+		userDeletion:         tid("li-user-deletion"),
 		member:               tid("li-member"),
 		skill:                tid("li-skill"),
 		skillDel:             tid("li-skill-del"),
@@ -424,6 +427,10 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 
 	require.NoError(t, s.CreateUser(ctx, &store.User{ID: f.user, Email: "li-user@test.com", DisplayName: "LI User", Role: "member", Status: "active"}))
 	require.NoError(t, s.CreateUser(ctx, &store.User{ID: f.userDel, Email: "li-user-del@test.com", DisplayName: "LI User Del", Role: "member", Status: "active"}))
+	// A user with a recorded forced deletion, for GET
+	// /api/v1/users/{id}/deletion (ptone/scion#2143).
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: f.userDeletion, Email: "li-user-deletion@test.com", DisplayName: "LI User Deletion", Role: "member", Status: "active"}))
+	require.NoError(t, s.CreateUserDeletion(ctx, &store.UserDeletion{UserID: f.userDeletion, RequestedByKind: "user", RequestedByID: DevUserID, CredentialKind: "session", RequestedAt: time.Now()}))
 	require.NoError(t, s.CreateUser(ctx, &store.User{ID: f.member, Email: "li-member@test.com", DisplayName: "LI Member", Role: "member", Status: "active"}))
 	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{GroupID: f.group, MemberID: f.member, MemberType: store.GroupMemberTypeUser, Role: store.GroupMemberRoleMember}))
 
@@ -679,6 +686,18 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	})
 	require.NoError(t, err)
 	f.hubPreStartHook = hubHook.ID
+	// A disposable second hub hook for the update and delete routes, so the
+	// fixture hook above is never deleted and stays readable by GET
+	// /api/v1/pre-start-hooks/{id}. Creating it archives the fixture hook
+	// (a new hub hook archives the active one in the same scope); the walk's
+	// POST /api/v1/pre-start-hooks/{id}/activate entry re-activates the
+	// fixture hook before the DELETE, and the GET reads either state.
+	hubHookDel, err := s.CreateHubPreStartHook(ctx, &store.ProjectPreStartHook{
+		Scope: store.PreStartHookScopeHub, Name: "li-hub-pre-start-hook-del", Slug: "li-hub-pre-start-hook-del",
+		Script: "#!/bin/sh\necho li-del\n", CreatedBy: "li@test.com", UpdatedBy: "li@test.com",
+	})
+	require.NoError(t, err)
+	f.hubPreStartHookDel = hubHookDel.ID
 
 	// Artifact service: on (experiment, store, blob storage) with one
 	// single-file artifact owned by the dev user, homed in f.project.
@@ -693,7 +712,8 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	var active []experiments.Experiment
 	for _, e := range srv.experimentRegistry().All() {
 		if e.Name == conduitExperiment || e.Name == experiments.AgentDelegation || e.Name == experiments.FederationProjectVisitors ||
-			e.Name == experiments.ChatStarredMessages || e.Name == experiments.AgentEditHeld {
+			e.Name == experiments.ChatStarredMessages || e.Name == experiments.AgentEditHeld ||
+			e.Name == experiments.UserDeleteForceCascade {
 			e.Default = true
 		}
 		active = append(active, e)
@@ -707,6 +727,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.True(t, srv.experimentEnabled(experiments.FederationProjectVisitors))
 	require.True(t, srv.experimentEnabled(experiments.ChatStarredMessages))
 	require.True(t, srv.experimentEnabled(experiments.AgentEditHeld))
+	require.True(t, srv.experimentEnabled(experiments.UserDeleteForceCascade))
 	// POST /api/v1/auth/federation-token also answers 404 while the OIDC
 	// provider is off: install a test key manager and allow the audience
 	// that bodyOverrides sends, so the route reaches its caller checks.
@@ -850,6 +871,7 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 		{"agent.lifecycle.delete", "/api/v1/projects/{projectId}/agents/{id}"}:          {"projectId": f.project, "id": f.agentDelProject},
 		{"agent.port.register", "/api/v1/agents/{id}/ports"}:                            {"id": f.agentPorts},
 		{"project.lifecycle.delete", "/api/v1/projects/{id}"}:                           {"id": f.projectDel},
+		{"hub.lifecyclehooks.update", "/api/v1/pre-start-hooks/{id}"}:                   {"id": f.hubPreStartHookDel},
 		{"group.delete", "/api/v1/groups/{id}"}:                                         {"id": f.groupDel},
 		{"user.admin.delete", "/api/v1/users/{id}"}:                                     {"id": f.userDel},
 		{"testidentity.delete", "/api/v1/test-identities/{id}"}:                         {"id": f.testIdentityDel},
@@ -1062,6 +1084,7 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/users/{id}":                 {"id": f.user},
 		"/api/v1/users/{id}/revoke-sessions": {"id": f.user},
 		"/api/v1/users/{id}/delete-blockers": {"id": f.user},
+		"/api/v1/users/{id}/deletion":        {"id": f.userDeletion},
 
 		// --- skill family ---
 		"/api/v1/skills/{id}":                          {"id": f.skill},
@@ -1148,16 +1171,17 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/env/{key}": {"key": f.envVarKey},
 
 		// --- runtime broker family ---
-		"/api/v1/runtime-brokers/{id}":                         {"id": f.runtimeBroker},
-		"/api/v1/runtime-brokers/{id}/settings":                {"id": f.runtimeBroker},
-		"/api/v1/runtime-brokers/{id}/heartbeat":               {"id": f.runtimeBroker},
-		"/api/v1/runtime-brokers/{id}/projects":                {"id": f.runtimeBroker},
-		"/api/v1/runtime-brokers/{id}/env":                     {"id": f.runtimeBroker},
-		"/api/v1/runtime-brokers/{id}/env/{key}":               {"id": f.runtimeBroker, "key": f.brokerEnvKey},
-		"/api/v1/runtime-brokers/{id}/secrets":                 {"id": f.runtimeBroker},
-		"/api/v1/runtime-brokers/{id}/secrets/{key}":           {"id": f.runtimeBroker, "key": f.brokerSecretKey},
-		"/api/v1/runtime-brokers/{id}/message-failures":        {"id": f.runtimeBroker},
-		"/api/v1/runtime-brokers/{id}/agents/{agentId}/launch": {"id": f.runtimeBroker, "agentId": f.agent},
+		"/api/v1/runtime-brokers/{id}":                                     {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/settings":                            {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/heartbeat":                           {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/projects":                            {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/env":                                 {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/env/{key}":                           {"id": f.runtimeBroker, "key": f.brokerEnvKey},
+		"/api/v1/runtime-brokers/{id}/secrets":                             {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/secrets/{key}":                       {"id": f.runtimeBroker, "key": f.brokerSecretKey},
+		"/api/v1/runtime-brokers/{id}/message-failures":                    {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/agents/{agentId}/launch":             {"id": f.runtimeBroker, "agentId": f.agent},
+		"/api/v1/runtime-brokers/{id}/agents/{agentId}/workspace-download": {"id": f.runtimeBroker, "agentId": f.agent},
 
 		// --- github app family ---
 		"/api/v1/github-app/installations/{id}": {"id": f.githubInstallationID},

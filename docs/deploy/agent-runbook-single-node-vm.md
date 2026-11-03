@@ -1004,9 +1004,9 @@ Things to know:
 - **Minted accounts start with no roles.** Grant a minted account whatever
   its agents need (for example `roles/aiplatform.user` for Vertex AI) before
   assigning it.
-- **Teardown does not delete minted accounts.** `deploy.sh --delete` deletes
-  the hub VM's service account, so its role bindings no longer apply, but
-  leaves any service accounts the hub minted.
+- **Teardown does not delete minted accounts.** `deploy.sh --delete` removes
+  the hub VM's service account's project role bindings and deletes the
+  account, but leaves any service accounts the hub minted.
 
 ### 6.4 Container images (if built locally)
 
@@ -1322,6 +1322,7 @@ stops if either finds an unmarked resource or cannot complete.
 | GCE VM instance | `scion-hub-HUB_NAME` |
 | Cloud NAT | `scion-hub-HUB_NAME-nat` |
 | Cloud Router | `scion-hub-HUB_NAME-router` |
+| Project IAM role bindings of the hub service account | The roles Phase 2 grants it (`roles/iam.serviceAccountAdmin` included, whatever `hub_sa_minting` says now), removed with one `--condition=None` call per role and member before the account is deleted. `deleted:serviceAccount:...?uid=` tombstones of the same account on those roles, left by an earlier delete, are removed too. Conditional bindings and every other member or role are not touched. |
 | Service account | `scion-hub-HUB_NAME@PROJECT_ID.iam.gserviceaccount.com` |
 | Cloud Run proxy service account | `scion-hub-HUB_NAME-proxy@PROJECT_ID.iam.gserviceaccount.com` (name truncated and hashed for long HUB_NAME values) |
 | IAP SSH firewall rule | `scion-hub-HUB_NAME-allow-iap-ssh` (scoped via `--target-tags` to instances tagged `scion-hub-HUB_NAME`; deleting the VM removes the tag along with it) |
@@ -1344,8 +1345,7 @@ stops if either finds an unmarked resource or cannot complete.
 - **The NFS export's own data**, since it has no separate teardown: it's
   deleted along with the VM's boot disk, not by an explicit step.
 - **Service accounts the hub minted for agents** (§6.3c). The hub VM's own
-  service account is deleted, so its project role bindings
-  (`roles/iam.serviceAccountAdmin` included) no longer apply, but minted
+  service account and its project role bindings are removed, but minted
   accounts stay.
 
 To remove it manually:

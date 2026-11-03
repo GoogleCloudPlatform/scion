@@ -38,6 +38,7 @@ import (
 
 func resetConduitFlags() {
 	conduitInternalListen, conduitInternalAdvertise = "", ""
+	conduitInternalTLSCert, conduitInternalTLSKey, conduitInternalTLSCA, conduitInternalTLSName = "", "", "", ""
 	conduitGrantKeyActivation, conduitReconnectWindow = "", ""
 	conduitLifetimeCap = ""
 	conduitUserStreamAuthzMax = ""
@@ -68,9 +69,13 @@ func TestConduitAdvertiseEndpoint(t *testing.T) {
 		advertise string
 		bound     net.Addr
 		podIP     string
+		tls       bool
 		want      string
 	}{
 		{name: "configured wins", advertise: "https://relay.internal:9443", bound: tcp("10.0.0.5:9810"), podIP: "10.1.1.1", want: "https://relay.internal:9443"},
+		{name: "TLS listener derives https", bound: tcp("0.0.0.0:9810"), podIP: "10.1.1.1", tls: true, want: "https://10.1.1.1:9810"},
+		{name: "TLS listener on a specific host", bound: tcp("10.0.0.5:9810"), tls: true, want: "https://10.0.0.5:9810"},
+		{name: "loopback listener without TLS", bound: tcp("127.0.0.1:9810"), want: "http://127.0.0.1:9810"},
 		{name: "specific listen host", bound: tcp("10.0.0.5:9810"), podIP: "10.1.1.1", want: "http://10.0.0.5:9810"},
 		{name: "wildcard uses pod IP", bound: tcp("0.0.0.0:9810"), podIP: "10.1.1.1", want: "http://10.1.1.1:9810"},
 		{name: "IPv6 wildcard uses pod IP", bound: tcp("[::]:9810"), podIP: "fd00::5", want: "http://[fd00::5]:9810"},
@@ -79,7 +84,7 @@ func TestConduitAdvertiseEndpoint(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, conduitAdvertiseEndpoint(tt.advertise, tt.bound, tt.podIP))
+			assert.Equal(t, tt.want, conduitAdvertiseEndpoint(tt.advertise, tt.bound, tt.podIP, tt.tls))
 		})
 	}
 }
@@ -98,10 +103,14 @@ func TestApplyConduitFlagOverrides(t *testing.T) {
 		{
 			name: "every flag overrides",
 			args: []string{"--internal-listen=:9810", "--internal-advertise=http://b:9810", "--conduit-grant-key-activation=30m",
-				"--conduit-reconnect-window=0s", "--conduit-tcp-allowed-ports=3000,8080", "--conduit-lifetime-cap=90s"},
+				"--conduit-reconnect-window=0s", "--conduit-tcp-allowed-ports=3000,8080", "--conduit-lifetime-cap=90s",
+				"--internal-tls-cert-file=/tls/tls.crt", "--internal-tls-key-file=/tls/tls.key", "--internal-tls-ca-file=/tls/ca.crt",
+				"--internal-tls-server-name=scion-relay.internal"},
 			want: config.HubConduitConfig{
 				InternalListen: ":9810", InternalAdvertise: "http://b:9810", GrantKeyActivation: "30m",
 				ReconnectWindow: "0s", TCPAllowedPorts: []int{3000, 8080}, PeerAuth: "hmac", LifetimeCap: "90s",
+				InternalTLSCertFile: "/tls/tls.crt", InternalTLSKeyFile: "/tls/tls.key", InternalTLSCAFile: "/tls/ca.crt",
+				InternalTLSServerName: "scion-relay.internal",
 			},
 		},
 		{
@@ -143,6 +152,11 @@ func TestAppendConduitDaemonArgs(t *testing.T) {
 			name: "every flag",
 			args: []string{"--internal-advertise=http://b:9810", "--conduit-grant-key-activation=30m", "--conduit-lifetime-cap=1h"},
 			want: []string{"server", "start", "--internal-advertise=http://b:9810", "--conduit-grant-key-activation=30m", "--conduit-lifetime-cap=1h"},
+		},
+		{
+			name: "internal hop TLS flags",
+			args: []string{"--internal-tls-cert-file=/tls/tls.crt", "--internal-tls-key-file=/tls/tls.key", "--internal-tls-ca-file=/tls/ca.crt", "--internal-tls-server-name=scion-relay.internal"},
+			want: []string{"server", "start", "--internal-tls-cert-file=/tls/tls.crt", "--internal-tls-key-file=/tls/tls.key", "--internal-tls-ca-file=/tls/ca.crt", "--internal-tls-server-name=scion-relay.internal"},
 		},
 	}
 	for _, tt := range tests {
@@ -490,8 +504,8 @@ func TestStartConduit(t *testing.T) {
 
 // TestStartConduitRelay_AdvertiseHostCheckOnlyInHA: the public-host rule
 // applies only in hosted HA. A single-node hub on http://localhost may
-// advertise localhost on its internal port; in hosted HA the same setting
-// is refused.
+// advertise https://localhost on its internal port; in hosted HA the same
+// setting is refused.
 func TestStartConduitRelay_AdvertiseHostCheckOnlyInHA(t *testing.T) {
 	t.Cleanup(resetServerFlags)
 	const hubEndpoint = "http://localhost:9810"
@@ -501,9 +515,9 @@ func TestStartConduitRelay_AdvertiseHostCheckOnlyInHA(t *testing.T) {
 		advertise string
 		wantErr   string // "" = the advertise check passes
 	}{
-		{name: "single node, localhost", advertise: "http://localhost:9811"},
+		{name: "single node, localhost", advertise: "https://localhost:9811"},
 		{name: "single node, cloud run host", advertise: "https://x.a.run.app"},
-		{name: "hosted HA, public hub host", requireHA: true, advertise: "http://localhost:9811", wantErr: "public hub host"},
+		{name: "hosted HA, public hub host", requireHA: true, advertise: "https://localhost:9811", wantErr: "public hub host"},
 		{name: "hosted HA, cloud run host", requireHA: true, advertise: "https://x.a.run.app", wantErr: "Cloud Run host"},
 	}
 	for _, tt := range tests {
