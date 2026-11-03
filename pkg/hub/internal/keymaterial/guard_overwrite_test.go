@@ -64,7 +64,7 @@ func guardCipher(t *testing.T) *secret.ValueCipher {
 func guardSealForeign(t *testing.T, plaintext string) string {
 	t.Helper()
 	foreign := ciphertest.Cipher(t, ciphertest.Ring{Active: guardTestKID, IDs: []string{guardTestKID}, WriteFormat: keyring.WriteV2,
-		Keys: map[string][]byte{guardTestKID: []byte("FAKE-FOREIGN-KEY-0000000000000000")[:32]}})
+		Keys: map[string][]byte{guardTestKID: ciphertest.FakeKey("foreign")}})
 	v, err := foreign.Encrypt(plaintext)
 	require.NoError(t, err)
 	return v
