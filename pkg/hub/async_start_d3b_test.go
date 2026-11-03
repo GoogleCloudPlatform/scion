@@ -247,8 +247,10 @@ func TestAsyncStartGate_ExpiredAnswerNotUsed(t *testing.T) {
 }
 
 // TestAsyncStartAllowed_ExperimentFirst pins that the registry is not read
-// while hub.async_agent_start is off (an admin override; it is on by
-// default since ptone/scion#7250).
+// while hub.async_agent_start resolves off. The test turns it off through
+// the test registry's default (it is on by default since
+// ptone/scion#7250); TestAsyncStartAllowed_OverrideOffRollback covers a
+// real admin override.
 func TestAsyncStartAllowed_ExperimentFirst(t *testing.T) {
 	st := &hubInstanceListStore{now: time.Now()}
 	srv := &Server{store: st}
@@ -718,6 +720,42 @@ func TestAsyncStartAllowed_DefaultOn(t *testing.T) {
 
 	srv.asyncStartGateRefreshTick(context.Background())
 	assert.Equal(t, reads+1, st.reads.Load(), "a refresh-loop tick reads the registry under the default")
+}
+
+// TestAsyncStartAllowed_OverrideOffRollback pins the rollback path of the
+// default-on (ptone/scion#7250), following hub.async_agent_launch's toggle
+// test: on with no stored override; an admin override to false turns both
+// experiment checks off (no start-time and no loop registry read) without
+// a restart; clearing it back to true turns them on again.
+func TestAsyncStartAllowed_OverrideOffRollback(t *testing.T) {
+	now := time.Now()
+	st := &hubInstanceListStore{now: now, rows: []store.HubInstance{hubRow(t, "a", now, time.Second, false, api.HubInstanceFeatureAsyncStartV1)}}
+	srv := &Server{store: st}
+	settings := newFakeHubSettingStore()
+	ops := NewOperationalSettings(settings, emptyKoanf(), emptyKoanf())
+	seed := func(doc string) {
+		t.Helper()
+		settings.seed("experiments", json.RawMessage(doc))
+		_, err := ops.Refresh(context.Background())
+		require.NoError(t, err)
+	}
+	seed(`{"overrides":{}}`)
+	srv.SetOperationalSettings(ops)
+	require.True(t, srv.experimentEnabled(experiments.AsyncAgentStart), "on with no stored override (the default)")
+
+	seed(fmt.Sprintf(`{"overrides":{%q:false}}`, experiments.AsyncAgentStart))
+	require.False(t, srv.experimentEnabled(experiments.AsyncAgentStart), "off once an admin turns it off")
+	assert.False(t, srv.asyncStartAllowed())
+	srv.asyncStartGateRefreshTick(context.Background())
+	time.Sleep(20 * time.Millisecond)
+	assert.Equal(t, int32(0), st.reads.Load(), "no registry read while an admin has it off")
+
+	// Same Server, no restart: the next read sees the change.
+	seed(fmt.Sprintf(`{"overrides":{%q:true}}`, experiments.AsyncAgentStart))
+	require.True(t, srv.experimentEnabled(experiments.AsyncAgentStart), "on again once the admin turns it back on")
+	srv.asyncStartGateRefreshTick(context.Background())
+	assert.Equal(t, int32(1), st.reads.Load(), "the loop reads the registry again")
+	assert.True(t, srv.asyncStartAllowed(), "and starts answer async")
 }
 
 // TestStartAgentURL_AgentID pins design R1: both transports send the hub's

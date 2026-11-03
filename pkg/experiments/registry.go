@@ -247,11 +247,14 @@ const AsyncAgentLaunch = "hub.async_agent_launch"
 // AsyncAgentStart gates asynchronous start, resume and restart of existing
 // agents (ptone/scion#4669). It applies only while hub.async_agent_launch is
 // on too. It is on by default (ptone/scion#7250); an admin override turns it
-// off. While any live hub instance lacks async_start_v1 in the hub-instance
-// registry, starts stay synchronous whatever its value, so a rolling upgrade
-// stays synchronous until every node advertises it. To roll back, turn it off
-// with an admin override and wait launch_timeout plus 15 seconds before
-// downgrading any node.
+// off. While any live hub instance in the hub-instance registry lacks
+// async_start_v1, starts stay synchronous whatever its value. The check sees
+// only nodes that write the registry: a node on a version from before the
+// registry (ptone/scion#3078) writes no row and is not counted, so an
+// operator upgrading a multi-node hub from such a version turns this off
+// until every node is upgraded. To roll back, turn it off with an admin
+// override and wait launch_timeout plus 15 seconds before downgrading any
+// node.
 const AsyncAgentStart = "hub.async_agent_start"
 
 // AgentBadges gates the agent badges (ptone/scion#5503): a harness vendor
@@ -366,7 +369,7 @@ var compiled = []Experiment{
 	{
 		Name:        AsyncAgentStart,
 		Title:       "Asynchronous agent start",
-		Description: "Lets the hub answer a start, resume or restart of an existing agent as soon as the Runtime Broker accepts it, like an asynchronous create; it applies only while hub.async_agent_launch is also on. On by default. While any live hub instance lacks async_start_v1 (a node on an older version), starts stay synchronous. To roll back, turn it off and wait launch_timeout plus 15 seconds before downgrading any node.",
+		Description: "Lets the hub answer a start, resume or restart of an existing agent as soon as the Runtime Broker accepts it, like an asynchronous create; it applies only while hub.async_agent_launch is also on. On by default. While any live hub instance in the hub-instance registry lacks async_start_v1, starts stay synchronous; nodes on a version from before the registry are not seen, so turn it off while upgrading a multi-node hub from such a version, until every node is upgraded. To roll back, turn it off and wait launch_timeout plus 15 seconds before downgrading any node.",
 		Default:     true,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,
