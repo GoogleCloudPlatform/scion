@@ -667,16 +667,22 @@ export class ScionAdminChatRetention extends LitElement {
   }
 
   /**
-   * Start a preview: of the window in the form when it holds a valid one,
-   * else of the saved settings. The hub runs it in the background; the
-   * panel checks it until it ends, then reloads the history.
+   * Start a preview: of the window in the form when it holds one, else
+   * (empty field) of the saved settings. An invalid window is reported and
+   * no preview starts, so the result is never mistaken for the typed value.
+   * The hub runs it in the background; the panel checks it until it ends,
+   * then reloads the history.
    */
   private async startPreview(): Promise<void> {
     if (!this.form) return;
     this.previewError = null;
-    const days = parseWholeNumber(this.form.days);
     const params: Record<string, string> = {};
-    if (days !== null && days >= RETENTION_MIN_DAYS && days <= RETENTION_MAX_DAYS) {
+    if (this.form.days.trim() !== '') {
+      const days = parseWholeNumber(this.form.days);
+      if (days === null || days < RETENTION_MIN_DAYS || days > RETENTION_MAX_DAYS) {
+        this.previewError = `The retention window must be a whole number of days from ${RETENTION_MIN_DAYS} to ${RETENTION_MAX_DAYS}.`;
+        return;
+      }
       params.messages_retention_days = String(days);
     }
     this.previewStarting = true;

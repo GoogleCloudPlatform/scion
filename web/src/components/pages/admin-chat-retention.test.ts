@@ -642,6 +642,47 @@ describe('scion-admin-chat-retention', () => {
       el.remove(); // stops the status check
     });
 
+    it.each(['abc', '3', '36501'])(
+      'reports an invalid window %s and starts no preview',
+      async (value) => {
+        const el = await mount();
+        await type(el, '.retention-days', value);
+        q(el, '.run-preview')?.click();
+        await settle();
+        await el.updateComplete;
+
+        expect(
+          apiFetch.mock.calls.filter(([path]) => path.endsWith('/chat-retention-preview/run'))
+        ).toEqual([]);
+        expect(q(el, '.preview-error')?.textContent).toContain(
+          'The retention window must be a whole number of days from 7 to 36500.'
+        );
+      }
+    );
+
+    it('starts a preview of the saved settings when the window is empty', async () => {
+      const el = await mount();
+      apiFetch.mockImplementation((path, init) => {
+        if (path.endsWith('/chat-retention-preview/run')) {
+          return Promise.resolve(json({ runId: 'run-9', status: 'running' }));
+        }
+        if (path.includes('/runs/')) return Promise.resolve(json({ status: 'running' }));
+        return Promise.resolve(init?.method === 'PUT' ? putResponse() : json(current));
+      });
+      await type(el, '.retention-days', '');
+      q(el, '.run-preview')?.click();
+      await settle();
+      await el.updateComplete;
+
+      const post = apiFetch.mock.calls.find(([path]) =>
+        path.endsWith('/chat-retention-preview/run')
+      );
+      expect(post?.[1]?.method).toBe('POST');
+      expect(JSON.parse(post?.[1]?.body as string)).toEqual({ params: {} });
+      expect(q(el, '.preview-error')).toBeNull();
+      el.remove(); // stops the status check
+    });
+
     it('shows why a preview could not start', async () => {
       const el = await mount();
       apiFetch.mockImplementation((path) =>
