@@ -592,3 +592,46 @@ func TestAgentSessionsAdmittedBySource(t *testing.T) {
 	_, _ = a.MustDial("user", relaytest.UserHello("user-1"), conduit.Config{})
 	want(1, 1)
 }
+
+// keyCount returns how many records carry an attribute named key.
+func (h *captureHandler) keyCount(key string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := 0
+	for _, r := range h.recs {
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == key {
+				n++
+			}
+			return true
+		})
+	}
+	return n
+}
+
+// TestSessionAdmittedLogsIngressInstance (ptone/scion#6562): a session a
+// hub's ingress proxied is logged at admission with ingress_instance, the
+// hub instance it came in through; a direct session has no such field.
+func TestSessionAdmittedLogsIngressInstance(t *testing.T) {
+	logs := &captureHandler{}
+	w := relaytest.NewWorld(t)
+	a := w.StartNode("relay-a", func(c *relay.Config) { c.Logger = slog.New(logs) })
+	proxied := agentPrincipal("L1", 1)
+	proxied.IngressInstance = "hub-7"
+	w.SetPrincipal("proxied", proxied)
+	_, _ = a.MustDial("proxied", relaytest.AgentHello(agentID, "L1", "", "pty"), conduit.Config{})
+	if n := logs.count("ingress_instance", "hub-7"); n != 1 {
+		t.Fatalf("ingress_instance=hub-7 on %d admission records, want 1", n)
+	}
+
+	direct := relay.Principal{Kind: registry.PrincipalAgent, ID: "agent-direct", ProjectID: project,
+		Agent: relay.AgentIncarnationFacts{LaunchID: "L9", Generation: 1}}
+	w.SetPrincipal("direct", direct)
+	_, _ = a.MustDial("direct", relaytest.AgentHello("agent-direct", "L9", "", "pty"), conduit.Config{})
+	if n := logs.count("principal_id", "agent-direct"); n == 0 {
+		t.Fatal("the direct session was not logged at admission")
+	}
+	if n := logs.keyCount("ingress_instance"); n != 1 {
+		t.Fatalf("%d records carry ingress_instance, want 1 (the proxied session only)", n)
+	}
+}
