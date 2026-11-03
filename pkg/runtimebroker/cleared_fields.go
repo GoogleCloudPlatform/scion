@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path"
 	"strings"
 
@@ -98,8 +99,10 @@ func (s *Server) applyClearedFields(ctx context.Context, merged *api.ScionConfig
 // when the chain does not resolve.
 func (s *Server) clearedFieldsInheritance(ctx context.Context, projectPath, projectDir, agentDir, agentName string) (*api.ScionConfig, error) {
 	templateRef := "default"
+	operatorDefault := ""
 	if vs, _, _ := config.LoadEffectiveSettingsFor(ctx, projectDir); vs != nil && vs.DefaultTemplate != "" {
 		templateRef = vs.DefaultTemplate
+		operatorDefault = vs.DefaultTemplate
 	}
 	defaultRef := templateRef
 	var hash string
@@ -112,8 +115,14 @@ func (s *Server) clearedFieldsInheritance(ctx context.Context, projectPath, proj
 				if hash == "" {
 					hash = info.Template
 				}
-			} else if info.Template != "" {
+			} else if config.IsTemplateSlug(info.Template) {
+				// agent-info.json is agent-writable: its template is used
+				// only when it is a template slug, never as a host
+				// directory or a remote source.
 				templateRef = info.Template
+			} else if info.Template != "" {
+				// The value is not logged: the agent wrote it.
+				slog.Warn("Ignoring the template recorded in agent-info.json for cleared-field inheritance: not a template name", "agent", agentName)
 			}
 		}
 	}
@@ -142,7 +151,13 @@ func (s *Server) clearedFieldsInheritance(ctx context.Context, projectPath, proj
 		}
 		templateRef = dir
 	}
-	chain, err := config.GetTemplateChainInProject(templateRef, projectPath)
+	var chain []*config.Template
+	var err error
+	if operatorDefault != "" && templateRef == operatorDefault {
+		chain, err = config.GetOperatorTemplateChainInProject(templateRef, projectPath)
+	} else {
+		chain, err = config.GetTemplateChainInProject(templateRef, projectPath)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("resolve template chain: %w", err)
 	}
