@@ -139,8 +139,9 @@ func (s *Server) failedMessageRetentionDays() int {
 // delivered history and "user:" rows are never touched, and deletes in
 // paced, capped steps from a persisted cursor with the chat retention
 // cascade (see PurgeFailed), so the dependent rows of every deleted message
-// go with it. The counts are added to the open chat retention sweep run
-// when there is one (see addFailedPurgeToSweepRun), and logged.
+// go with it, and the attachments it unlinks lose their bytes and rows. The
+// counts are added to the open chat retention sweep run when there is one
+// (see addFailedPurgeToSweepRun), and logged.
 func (s *Server) failedMessageRetentionHandler() func(ctx context.Context) {
 	return func(ctx context.Context) {
 		ctx, cancel := context.WithTimeout(ctx, failedMessageRetentionTimeout)
@@ -156,7 +157,16 @@ func (s *Server) failedMessageRetentionHandler() func(ctx context.Context) {
 		retentionDays := s.failedMessageRetentionDays()
 		cutoff := time.Now().UTC().AddDate(0, 0, -retentionDays)
 
-		res, err := newChatRetentionSweeper(st).PurgeFailed(ctx, cutoff, s.chatRetentionConfig())
+		sw := newChatRetentionSweeper(st)
+		// The attachments a purge unlinks lose their bytes, then their
+		// rows; without an attachment store the rows stay for the
+		// attachment GC.
+		s.mu.RLock()
+		if as := s.attachmentStore; as != nil {
+			sw.attachments = as
+		}
+		s.mu.RUnlock()
+		res, err := sw.PurgeFailed(ctx, cutoff, s.chatRetentionConfig())
 		total := res.Total()
 		var inRun string
 		if total.Failed > 0 {
@@ -172,6 +182,7 @@ func (s *Server) failedMessageRetentionHandler() func(ctx context.Context) {
 		}
 		attrs := []any{"count", total.Failed, "addressees", total.Addressees, "mentions", total.Mentions,
 			"stars", total.Stars, "ext", total.Ext, "attachments", total.Attachments,
+			"attachment_rows", total.AttachmentRows, "attachment_byte_failures", res.AttachmentDeleteFailures,
 			"chunks", res.Chunks, "scans", res.Scans, "done", res.Done, "max_tx_ms", res.MaxTx.Milliseconds(),
 			"chat_retention_run", inRun, "retentionDays", retentionDays, "cutoff", cutoff}
 		switch {

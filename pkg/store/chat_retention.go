@@ -30,7 +30,9 @@ const ChatRetentionPhaseFailed = "failed"
 
 // Chat retention run triggers and statuses (chat_retention_runs).
 const (
-	ChatRetentionTriggerSweep = "sweep"
+	ChatRetentionTriggerSweep   = "sweep"
+	ChatRetentionTriggerManual  = "manual"
+	ChatRetentionTriggerPreview = "preview"
 
 	ChatRetentionStatusRunning = "running"
 	ChatRetentionStatusOK      = "ok"
@@ -62,6 +64,10 @@ type ChatRetentionCandidate struct {
 	Created        time.Time
 	ProjectID      string
 	ConversationID string // "" when the message has no conversation
+	// ThreadID is the message's thread_id ("" when none). Only
+	// SelectChatRetentionCandidates and SelectChatRetentionConversationPage
+	// fill it.
+	ThreadID string
 }
 
 // ChatRetentionPosition is a position in the (created, id) walk. The zero
@@ -194,6 +200,18 @@ type ChatRetentionRun struct {
 	Error      string
 }
 
+// ChatRetentionRunFilter selects chat_retention_runs rows. Zero fields do
+// not filter.
+type ChatRetentionRunFilter struct {
+	// Trigger keeps the runs of one trigger.
+	Trigger string
+	// FinishedAfter keeps the runs that finished after it (an unfinished
+	// run never matches).
+	FinishedAfter time.Time
+	// Limit caps the rows returned; at most 500.
+	Limit int
+}
+
 // ChatRetentionStore is the persistence of chat message retention (design
 // chat message retention §6). The selection and the purge are raw SQL over
 // the database the ent client and the web chat tables share, so one
@@ -232,6 +250,15 @@ type ChatRetentionStore interface {
 	// Served by the conversation_id and thread_id indexes.
 	SelectChatRetentionConversationMessages(ctx context.Context, conversationID, threadID string, limit int) ([]ChatRetentionCandidate, error)
 
+	// SelectChatRetentionConversationPage returns up to limit messages of
+	// one deleted conversation after the position after, in (created, id)
+	// order, skipping pending and deferred messages, for a walk that
+	// deletes nothing (the preview). Exactly one of the IDs is set:
+	// conversationID selects conversation_id = conversationID, threadID
+	// selects a legacy topic's messages (thread_id = threadID and no
+	// conversation_id).
+	SelectChatRetentionConversationPage(ctx context.Context, conversationID, threadID string, after ChatRetentionPosition, limit int) ([]ChatRetentionCandidate, error)
+
 	// ChatAttachmentLinked reports whether any message links attachment
 	// id.
 	ChatAttachmentLinked(ctx context.Context, id string) (bool, error)
@@ -240,6 +267,7 @@ type ChatRetentionStore interface {
 	// id unless a message links it again, and reports whether it deleted
 	// it.
 	DeleteUnlinkedChatAttachment(ctx context.Context, id string) (bool, error)
+
 	// SelectFailedMessages scans at most scanLimit messages in
 	// dispatch_state "failed" created before cutoff and after the position
 	// after, oldest first in (created, id) order over the partial failed
@@ -266,6 +294,16 @@ type ChatRetentionStore interface {
 	// LatestChatRetentionRun returns the most recent run with the given
 	// trigger started at or after since, or nil when there is none.
 	LatestChatRetentionRun(ctx context.Context, trigger string, since time.Time) (*ChatRetentionRun, error)
+
+	// ListChatRetentionRuns returns the runs that match filter, newest
+	// first by started_at, dry runs included.
+	ListChatRetentionRuns(ctx context.Context, filter ChatRetentionRunFilter) ([]ChatRetentionRun, error)
+
+	// FailRunningChatRetentionRuns marks the runs of the given triggers that
+	// are still "running" and started before before as "failed" with errMsg
+	// and finished at finishedAt, and returns how many it changed. The hub
+	// calls it at start for preview and manual runs a restart interrupted.
+	FailRunningChatRetentionRuns(ctx context.Context, triggers []string, before time.Time, errMsg string, finishedAt time.Time) (int, error)
 
 	// SaveChatRetentionRun inserts run when its ID is empty (setting it)
 	// and otherwise updates its finished_at, status, policy, counts and

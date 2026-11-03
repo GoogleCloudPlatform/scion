@@ -16,8 +16,9 @@
 
 /**
  * The Chat retention panel of Admin > Server Config (hub.chat_retention):
- * shown only with the web flag on, revision-CAS saves, and validation
- * errors from the form and from the hub.
+ * shown only with the web flag on, revision-CAS saves, validation errors
+ * from the form and from the hub, the run history and last preview, and
+ * the confirmation before a save that deletes more.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -31,9 +32,34 @@ vi.mock('../../client/api.js', async () => {
 });
 
 const mod = await import('./admin-chat-retention.js');
-const { buildRetentionPutBody, retentionSaveErrors, retentionWarning } = mod;
+const {
+  buildRetentionPutBody,
+  retentionSaveErrors,
+  retentionWarning,
+  lastPreviewSummary,
+  backlogEstimate,
+  needsPurgeConfirmation,
+  previewMatchesSaved,
+} = mod;
 type Panel = import('./admin-chat-retention.js').ScionAdminChatRetention;
 type Settings = import('./admin-chat-retention.js').ChatRetentionSettings;
+type Run = import('./admin-chat-retention.js').ChatRetentionRun;
+
+function run(over: Partial<Run> = {}): Run {
+  return {
+    id: 'r1',
+    trigger: 'preview',
+    dry_run: true,
+    started_at: '2026-10-29T10:00:00Z',
+    finished_at: '2026-10-29T10:14:00Z',
+    status: 'ok',
+    messages: 1200000,
+    projects: 14,
+    messages_retention_days: 365,
+    deleted_conversation_grace_days: 30,
+    ...over,
+  };
+}
 
 function json(body: unknown, status = 200): Response {
   return {
@@ -194,6 +220,89 @@ describe('retentionWarning with an invalid window', () => {
   });
 });
 
+describe('lastPreviewSummary', () => {
+  it('names the messages, projects, time and window', () => {
+    const text = lastPreviewSummary(run());
+    expect(text).toMatch(
+      /^Last preview: 1,200,000 messages in 14 projects, .*2026.* \(a 365-day window\)\.$/
+    );
+  });
+
+  it('covers no preview, one running, one failed and no window', () => {
+    expect(lastPreviewSummary(null)).toBe('No preview has been run yet.');
+    expect(lastPreviewSummary(run({ status: 'running', finished_at: null }))).toContain(
+      'A preview is running'
+    );
+    expect(lastPreviewSummary(run({ status: 'failed', error: 'deadline' }))).toContain('failed');
+    expect(
+      lastPreviewSummary(run({ messages: 1, projects: 1, messages_retention_days: 0 }))
+    ).toContain('1 message in 1 project');
+    expect(lastPreviewSummary(run({ messages_retention_days: 0 }))).toContain(
+      'no retention window'
+    );
+  });
+});
+
+describe('backlogEstimate', () => {
+  it('is the preview minus what was purged since, never below zero', () => {
+    expect(backlogEstimate(run({ messages: 1000 }), 300)).toBe(700);
+    expect(backlogEstimate(run({ messages: 1000 }), 5000)).toBe(0);
+    expect(backlogEstimate(run({ messages: 1000 }), undefined)).toBe(1000);
+  });
+
+  it('is null without a finished preview', () => {
+    expect(backlogEstimate(null, 0)).toBeNull();
+    expect(backlogEstimate(run({ status: 'running' }), 0)).toBeNull();
+    expect(backlogEstimate(run({ status: 'failed' }), 0)).toBeNull();
+  });
+});
+
+describe('previewMatchesSaved', () => {
+  it('matches the same window and grace, with no window as 0', () => {
+    const saved = { messages_retention_days: 365, deleted_conversation_grace_days: 30 };
+    expect(previewMatchesSaved(run(), saved)).toBe(true);
+    expect(previewMatchesSaved(run({ messages_retention_days: 30 }), saved)).toBe(false);
+    expect(previewMatchesSaved(run({ deleted_conversation_grace_days: 7 }), saved)).toBe(false);
+    expect(
+      previewMatchesSaved(run({ messages_retention_days: 0 }), {
+        messages_retention_days: null,
+        deleted_conversation_grace_days: 30,
+      })
+    ).toBe(true);
+  });
+});
+
+describe('needsPurgeConfirmation', () => {
+  const on = { enabled: true, messages_retention_days: 90 };
+  it.each([
+    [
+      'enabling',
+      { enabled: false, messages_retention_days: null },
+      { enabled: true, messages_retention_days: null },
+      true,
+    ],
+    [
+      'setting a first window',
+      { enabled: true, messages_retention_days: null },
+      { enabled: true, messages_retention_days: 30 },
+      true,
+    ],
+    ['shortening', on, { enabled: true, messages_retention_days: 30 }, true],
+    ['lengthening', on, { enabled: true, messages_retention_days: 365 }, false],
+    ['the same window', on, { enabled: true, messages_retention_days: 90 }, false],
+    ['removing the window', on, { enabled: true, messages_retention_days: null }, false],
+    ['disabling', on, { enabled: false, messages_retention_days: 7 }, false],
+    [
+      'staying disabled',
+      { enabled: false, messages_retention_days: null },
+      { enabled: false, messages_retention_days: 7 },
+      false,
+    ],
+  ])('%s: %s', (_name, saved, next, want) => {
+    expect(needsPurgeConfirmation(saved, next)).toBe(want);
+  });
+});
+
 describe('retentionSaveErrors', () => {
   it('lists the per-field errors of a validation_failed body', () => {
     expect(
@@ -325,6 +434,11 @@ describe('scion-admin-chat-retention', () => {
       }
       await type(el, '.retention-grace-days', 'x');
       expect(q(el, '.delete-warning')).toBeNull();
+      expect(q(el, '.invalid-form')?.textContent).toContain('nothing is saved until then');
+      expect(q(el, '.retention-save')?.hasAttribute('disabled')).toBe(true);
+      await type(el, '.retention-grace-days', '30');
+      expect(q(el, '.invalid-form')).toBeNull();
+      expect(q(el, '.retention-save')?.hasAttribute('disabled')).toBe(false);
     });
 
     it('saves a changed grace', async () => {
@@ -373,6 +487,215 @@ describe('scion-admin-chat-retention', () => {
       expect(q(el, '.save-errors')?.textContent).toContain('changed by another administrator');
       expect(q<HTMLInputElement>(el, '.retention-days')?.value).toBe('90');
       expect(q(el, '.meta')?.textContent).toContain('Revision: 9');
+    });
+
+    it('lists the runs, the last preview and the backlog estimate', async () => {
+      current = settings({
+        enabled: true,
+        messages_retention_days: 365,
+        runs: [
+          run({ id: 'm', trigger: 'manual', dry_run: false, messages: 40, projects: 2 }),
+          run({ id: 'p' }),
+          run({
+            id: 's',
+            trigger: 'sweep',
+            dry_run: false,
+            status: 'partial',
+            finished_at: null,
+            messages: 0,
+            projects: 0,
+          }),
+        ],
+        last_preview: run({ messages: 1000 }),
+        purged_since_preview: 250,
+      });
+      const el = await mount();
+
+      expect(q(el, '.last-preview')?.textContent).toContain(
+        'Last preview: 1,000 messages in 14 projects'
+      );
+      expect(q(el, '.backlog')?.textContent?.replace(/\s+/g, ' ')).toContain(
+        'Backlog draining: about 750 messages left to delete'
+      );
+      const rows = Array.from(el.shadowRoot?.querySelectorAll('tr.run') ?? []);
+      expect(rows.map((r) => r.getAttribute('data-trigger'))).toEqual([
+        'manual',
+        'preview',
+        'sweep',
+      ]);
+      expect(rows[0]?.textContent?.replace(/\s+/g, ' ')).toContain('40 messages in 2 projects');
+      expect(rows[1]?.textContent?.replace(/\s+/g, ' ')).toContain('Preview (dry run)');
+      expect(rows[1]?.textContent?.replace(/\s+/g, ' ')).toContain(
+        'would delete 1,200,000 messages'
+      );
+      expect(rows[2]?.textContent).toContain('In progress');
+    });
+
+    it('shows no backlog estimate for a preview of another window, and says why', async () => {
+      current = settings({
+        enabled: true,
+        messages_retention_days: 365,
+        last_preview: run({ messages: 1000, messages_retention_days: 30 }),
+        purged_since_preview: 250,
+      });
+      const el = await mount();
+      expect(q(el, '.backlog')).toBeNull();
+      expect(q(el, '.backlog-mismatch')?.textContent?.replace(/\s+/g, ' ')).toContain(
+        'The last preview was for a different window or grace than the saved settings'
+      );
+    });
+
+    it('shows no backlog while disabled, and says when nothing has run', async () => {
+      current = settings({ runs: [], last_preview: null });
+      const el = await mount();
+      expect(q(el, '.backlog')).toBeNull();
+      expect(q(el, '.no-runs')).not.toBeNull();
+      expect(q(el, '.last-preview')?.textContent).toContain('No preview has been run yet.');
+    });
+
+    it('asks for confirmation with the last preview before enabling, and saves only on confirm', async () => {
+      current = settings({ last_preview: run({ messages: 1000, messages_retention_days: 365 }) });
+      const el = await mount();
+      const sw = q<HTMLInputElement>(el, '.retention-enabled');
+      if (sw) sw.checked = true;
+      sw?.dispatchEvent(new Event('sl-change'));
+      await el.updateComplete;
+      await type(el, '.retention-days', '365');
+      await save(el);
+
+      const dialog = q(el, '.confirm-dialog');
+      expect(dialog?.hasAttribute('open')).toBe(true);
+      expect(q(el, '.confirm-preview')?.textContent).toContain(
+        'Last preview: 1,000 messages in 14 projects'
+      );
+      expect(q(el, '.confirm-change')?.textContent).toContain('Enabling the retention sweep');
+      expect(q(el, '.confirm-mismatch')).toBeNull();
+      expect(puts()).toEqual([]);
+
+      q(el, '.confirm-cancel')?.click();
+      await el.updateComplete;
+      expect(q(el, '.confirm-dialog')?.hasAttribute('open')).toBe(false);
+      expect(puts()).toEqual([]);
+
+      await save(el);
+      putResponse = () =>
+        json(settings({ enabled: true, messages_retention_days: 365, revision: 4 }));
+      q(el, '.confirm-save')?.click();
+      await settle();
+      await el.updateComplete;
+      expect(puts()).toEqual([
+        expect.objectContaining({ enabled: true, messages_retention_days: 365 }),
+      ]);
+      expect(q(el, '.confirm-dialog')?.hasAttribute('open')).toBe(false);
+    });
+
+    it('asks before shortening the window, says when the preview was for another window, and never counts', async () => {
+      current = settings({
+        enabled: true,
+        messages_retention_days: 365,
+        last_preview: run({ messages_retention_days: 365 }),
+      });
+      const el = await mount();
+      const calls = apiFetch.mock.calls.length;
+      await type(el, '.retention-days', '30');
+      await save(el);
+
+      expect(q(el, '.confirm-dialog')?.hasAttribute('open')).toBe(true);
+      expect(q(el, '.confirm-change')?.textContent).toContain(
+        'Shortening the retention window to 30 days'
+      );
+      expect(q(el, '.confirm-mismatch')).not.toBeNull();
+      expect(apiFetch.mock.calls.length).toBe(calls);
+    });
+
+    it('saves a longer window without asking', async () => {
+      current = settings({ enabled: true, messages_retention_days: 30 });
+      const el = await mount();
+      await type(el, '.retention-days', '90');
+      await save(el);
+      expect(q(el, '.confirm-dialog')?.hasAttribute('open')).toBe(false);
+      expect(puts()).toEqual([expect.objectContaining({ messages_retention_days: 90 })]);
+    });
+
+    it('starts a preview of the window in the form', async () => {
+      const el = await mount();
+      apiFetch.mockImplementation((path, init) => {
+        if (path.endsWith('/chat-retention-preview/run')) {
+          return Promise.resolve(json({ runId: 'run-9', status: 'running' }));
+        }
+        if (path.includes('/runs/')) return Promise.resolve(json({ status: 'running' }));
+        return Promise.resolve(init?.method === 'PUT' ? putResponse() : json(current));
+      });
+      await type(el, '.retention-days', '180');
+      q(el, '.run-preview')?.click();
+      await settle();
+      await el.updateComplete;
+
+      const post = apiFetch.mock.calls.find(([path]) =>
+        path.endsWith('/chat-retention-preview/run')
+      );
+      expect(post?.[1]?.method).toBe('POST');
+      expect(JSON.parse(post?.[1]?.body as string)).toEqual({
+        params: { messages_retention_days: '180' },
+      });
+      expect(q(el, '.run-preview')?.hasAttribute('disabled')).toBe(true);
+      el.remove(); // stops the status check
+    });
+
+    it.each(['abc', '3', '36501'])(
+      'reports an invalid window %s and starts no preview',
+      async (value) => {
+        const el = await mount();
+        await type(el, '.retention-days', value);
+        q(el, '.run-preview')?.click();
+        await settle();
+        await el.updateComplete;
+
+        expect(
+          apiFetch.mock.calls.filter(([path]) => path.endsWith('/chat-retention-preview/run'))
+        ).toEqual([]);
+        expect(q(el, '.preview-error')?.textContent).toContain(
+          'The retention window must be a whole number of days from 7 to 36500.'
+        );
+      }
+    );
+
+    it('starts a preview of the saved settings when the window is empty', async () => {
+      const el = await mount();
+      apiFetch.mockImplementation((path, init) => {
+        if (path.endsWith('/chat-retention-preview/run')) {
+          return Promise.resolve(json({ runId: 'run-9', status: 'running' }));
+        }
+        if (path.includes('/runs/')) return Promise.resolve(json({ status: 'running' }));
+        return Promise.resolve(init?.method === 'PUT' ? putResponse() : json(current));
+      });
+      await type(el, '.retention-days', '');
+      q(el, '.run-preview')?.click();
+      await settle();
+      await el.updateComplete;
+
+      const post = apiFetch.mock.calls.find(([path]) =>
+        path.endsWith('/chat-retention-preview/run')
+      );
+      expect(post?.[1]?.method).toBe('POST');
+      expect(JSON.parse(post?.[1]?.body as string)).toEqual({ params: {} });
+      expect(q(el, '.preview-error')).toBeNull();
+      el.remove(); // stops the status check
+    });
+
+    it('shows why a preview could not start', async () => {
+      const el = await mount();
+      apiFetch.mockImplementation((path) =>
+        Promise.resolve(
+          path.endsWith('/run')
+            ? json({ error: { code: 'not_found', message: 'Operation not found' } }, 404)
+            : json(current)
+        )
+      );
+      q(el, '.run-preview')?.click();
+      await settle();
+      await el.updateComplete;
+      expect(q(el, '.preview-error')?.textContent).toContain('Operation not found');
     });
 
     it('says the experiment is off when the hub answers 404', async () => {
