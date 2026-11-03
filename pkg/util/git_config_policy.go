@@ -227,6 +227,9 @@ type RepoConfigRefusals struct {
 }
 
 func (e *RepoConfigRefusals) Error() string {
+	if e == nil || len(e.Refusals) == 0 {
+		return "agent git config refused"
+	}
 	n := len(e.Refusals)
 	// With each key's reason when the whole list fits.
 	if text := e.text(n, true, ""); len(text) <= maxRefusalsTextBytes {
@@ -311,6 +314,9 @@ func (e *RepoConfigRefusals) text(listed int, withReasons bool, firstKey string)
 // Unwrap returns each refusal, so errors.As(err, **RepoConfigRefusedError)
 // matches the first.
 func (e *RepoConfigRefusals) Unwrap() []error {
+	if e == nil {
+		return nil
+	}
 	errs := make([]error, len(e.Refusals))
 	for i, r := range e.Refusals {
 		errs[i] = r

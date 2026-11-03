@@ -492,8 +492,14 @@ func writeGitConfigRefusal(w http.ResponseWriter, err error, details map[string]
 	if !ok {
 		return false
 	}
-	writeError(w, http.StatusUnprocessableEntity, api.BrokerErrCodeGitConfigRefused, text, details)
+	writeGitConfigRefusalText(w, text, details)
 	return true
+}
+
+// writeGitConfigRefusalText writes the 422 git_config_refused answer for a
+// refusal text already found by util.StartRefusalText.
+func writeGitConfigRefusalText(w http.ResponseWriter, text string, details map[string]interface{}) {
+	writeError(w, http.StatusUnprocessableEntity, api.BrokerErrCodeGitConfigRefused, text, details)
 }
 
 // opCreateAgent is the runtimeOpError op for a create's Manager.Start

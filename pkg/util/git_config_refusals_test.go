@@ -220,3 +220,16 @@ func TestShortenKey(t *testing.T) {
 		}
 	}
 }
+
+// A nil or empty RepoConfigRefusals gives the generic text and no wrapped errors, instead of panicking.
+func TestRepoConfigRefusals_NilAndEmpty(t *testing.T) {
+	var nilList *RepoConfigRefusals
+	for name, e := range map[string]*RepoConfigRefusals{"nil": nilList, "empty": {}, "nil slice": {Refusals: nil}} {
+		if got := e.Error(); got != "agent git config refused" {
+			t.Errorf("%s: Error() = %q, want the generic text", name, got)
+		}
+		if got := e.Unwrap(); len(got) != 0 {
+			t.Errorf("%s: Unwrap() = %v, want none", name, got)
+		}
+	}
+}
