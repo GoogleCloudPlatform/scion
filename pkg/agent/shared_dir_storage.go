@@ -463,8 +463,9 @@ const retiredSharedDirRecordSuffix = ".retired"
 const retiredSharedDirRecordMaxBytes = 64 << 10
 
 // readRetiredSharedDirRecord reads the retired record at path: a regular
-// file (a symlink or anything else is refused, checked with Lstat and again
-// on the opened file), at most retiredSharedDirRecordMaxBytes. The record is
+// file (a symlink or anything else is refused, checked with Lstat, by the
+// open itself on unix (openRetiredSharedDirRecord, O_NOFOLLOW) and again on
+// the opened file), at most retiredSharedDirRecordMaxBytes. The record is
 // in the broker-local agent directory, which the agent container does not
 // mount (it mounts the home below it), so this is defence in depth; a
 // larger file is refused rather than read.
@@ -474,7 +475,7 @@ func readRetiredSharedDirRecord(path string) ([]byte, error) {
 	} else if !fi.Mode().IsRegular() {
 		return nil, fmt.Errorf("%s is not a regular file", path)
 	}
-	f, err := os.Open(path)
+	f, err := openRetiredSharedDirRecord(path)
 	if err != nil {
 		return nil, err
 	}

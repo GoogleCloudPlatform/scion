@@ -93,8 +93,9 @@ func isNFSWorktreeName(name string) bool {
 //
 // The directory is only created once the shared checkout has been
 // provisioned (its .scion-provisioned file exists). Before the first clone
-// the workspace directory must stay empty, so the clone can run; the init container then creates the worktree
-// itself before the agent container starts.
+// the workspace directory must stay empty, so the clone can run; the init
+// container then creates the worktree itself before the agent container
+// starts.
 //
 // It has the same no-op and fallback cases as ensureNFSWorkspaceLeaf (not
 // Kubernetes, no claim, export not mounted on the broker, or a directory

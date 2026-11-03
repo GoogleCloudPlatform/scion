@@ -144,7 +144,7 @@ func TestRunProvision_AgentDirMode_NeedsSlugAndBranch(t *testing.T) {
 // pod mounts (the only place it is kept), nothing is written in the
 // mounted directory's root, and the workspace the broker created stays empty
 // for the agent container's clone.
-func TestRunProvision_AgentDir_OlderImageFallback(t *testing.T) {
+func TestRunProvision_AgentDir_WithoutCloneEnvProvisionsSharedPlain(t *testing.T) {
 	agentDir := newTestAgentDir(t)
 	setupProvisionCmd(t, agentDir, "shared-plain", "")
 

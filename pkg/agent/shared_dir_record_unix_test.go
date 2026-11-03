@@ -68,3 +68,26 @@ func TestSharedDirRecordPinRefusal_BoundedRead(t *testing.T) {
 		assert.NoError(t, sharedDirRecordPinRefusal(dir, local, nil))
 	})
 }
+
+// The retired record's open refuses a symlink at the last component
+// (O_NOFOLLOW), so a link swapped in after readRetiredSharedDirRecord's
+// Lstat is never followed to a regular file elsewhere; a regular file opens.
+func TestOpenRetiredSharedDirRecord_SymlinkRefused(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(t.TempDir(), "elsewhere.json")
+	require.NoError(t, os.WriteFile(target, []byte(`{"backend":"nfs"}`), 0o644))
+	link := filepath.Join(dir, legacySharedDirStorageRecordFile+retiredSharedDirRecordSuffix)
+	require.NoError(t, os.Symlink(target, link))
+
+	f, err := openRetiredSharedDirRecord(link)
+	if err == nil {
+		_ = f.Close()
+		t.Fatal("a symlinked retired record was opened; want a refusal")
+	}
+
+	regular := filepath.Join(dir, "regular.json")
+	require.NoError(t, os.WriteFile(regular, []byte(`{"backend":"local"}`), 0o644))
+	f, err = openRetiredSharedDirRecord(regular)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+}
