@@ -19,7 +19,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,27 +34,42 @@ import (
 // launch report, claim settlement and the self-report guard), so a start is
 // sent asynchronously only while every live hub instance advertises
 // api.HubInstanceFeatureAsyncStartV1 in its registry row. The answer is
-// cached: a start reads the cached value (false until the first refresh) and,
-// when it is older than asyncStartGateTTL, starts one refresh in the
-// background, so a slow registry read never delays a start. An answer older
-// than asyncStartGateMaxAge (two TTLs: an idle gate) is not used: the start
-// runs synchronously while the refresh runs, as for a fresh process. Stale
-// and stopped rows are ignored: a node whose registry writes fail stops
-// blocking after hubInstanceStaleAfter. The check fails safe: on any doubt
-// the start runs synchronously. It does not replace the rollback rule (turn
-// the experiment off, then wait launch_timeout plus 15 seconds before
-// downgrading any node).
+// cached and a start never waits for a registry read. While the
+// hub.async_agent_start experiment is on, a background loop
+// (startAsyncStartGateRefresher) re-reads the registry every
+// asyncStartGateRefreshInterval, so the answer stays fresh however rarely
+// starts arrive (ptone/scion#7250); while it is off, the loop reads nothing.
+// A start also triggers one background refresh when the answer is missing
+// or older than asyncStartGateTTL (for a server without the loop, and
+// before its first tick). An answer older than asyncStartGateMaxAge is not
+// used: that only happens when refreshes are failing or stalled, and the
+// start then runs synchronously. Stale and stopped rows are ignored: a node
+// whose registry writes fail stops blocking after hubInstanceStaleAfter.
+// The check fails safe: on any doubt (a read error, a panic, a node without
+// the feature) the start runs synchronously. It does not replace the
+// rollback rule (turn the experiment off, then wait launch_timeout plus 15
+// seconds before downgrading any node).
 
 const (
 	// asyncStartGateTTL is how long a computed answer is used before a
 	// start triggers a refresh.
 	asyncStartGateTTL = 30 * time.Second
-	// asyncStartGateMaxAge is the oldest answer a start may use. Steady
-	// traffic refreshes every TTL and never reaches it; after an idle
-	// period the first starts run synchronously until the refresh lands.
+	// asyncStartGateMaxAge is the oldest answer a start may use. The
+	// refresh loop keeps the answer well below it while the experiment
+	// is on; it is reached only when refreshes fail to land.
 	asyncStartGateMaxAge = 2 * asyncStartGateTTL
 	// asyncStartGateRefreshTimeout bounds one registry read.
 	asyncStartGateRefreshTimeout = 5 * time.Second
+	// asyncStartGateRefreshInterval is the refresh loop's cadence (±
+	// hubInstanceTickJitter). With the read timeout, a healthy answer is
+	// never older than about 22 seconds.
+	asyncStartGateRefreshInterval = asyncStartGateTTL / 2
+	// asyncStartGateReadFailed starts the reason of every false answer
+	// caused by a failed refresh (a registry read error or a panic). All
+	// such reasons count as one for logging, and their warning is logged
+	// at most once per hubInstanceWarnEvery, so a persistent failure does
+	// not warn on every refresh.
+	asyncStartGateReadFailed = "hub instance registry read failed"
 )
 
 // asyncStartGate is the cached answer. The zero value reads false and
@@ -62,10 +79,15 @@ type asyncStartGate struct {
 	value       bool
 	refreshedAt time.Time // zero until the first refresh completes
 	inFlight    bool
-	// reason is the last logged reason the value is false ("" while true):
-	// the answer is logged once per change of its value or reason.
+	// reason is the last reason the value is false ("" while true), with
+	// every read failure folded into asyncStartGateReadFailed: the answer
+	// is logged once per change of its value or reason.
 	reason string
 	logged bool
+	// readFailWarnedAt is when a read failure was last logged, and
+	// readFailSuppressed counts the read failures since then that were not.
+	readFailWarnedAt   time.Time
+	readFailSuppressed int
 }
 
 // asyncStartGateNow is the gate's clock (tests replace it).
@@ -85,8 +107,8 @@ func (s *Server) asyncStartAllowed() bool {
 // allLiveHubsHaveAsyncStart returns the cached answer: false before the
 // first refresh and false for an answer older than asyncStartGateMaxAge.
 // When the answer is missing or older than asyncStartGateTTL and no
-// refresh is running, it starts one in the background; it never waits for
-// it.
+// refresh is running (the refresh loop normally keeps it younger), it
+// starts one in the background; it never waits for it.
 func (s *Server) allLiveHubsHaveAsyncStart() bool {
 	g := &s.asyncStartGate
 	g.mu.Lock()
@@ -103,34 +125,120 @@ func (s *Server) allLiveHubsHaveAsyncStart() bool {
 }
 
 // refreshAsyncStartGate computes the answer from the registry and stores
-// it. It runs the read with its own bounded context. It logs when the
-// answer or the reason for a false answer changes (a different node, or a
-// different error), so each distinct cause is logged once.
+// it; the caller has set inFlight, which it clears. It runs the read with
+// its own bounded context. A panic in the read is recovered and stored as a
+// false answer, so a background refresh can neither stop the hub process
+// nor leave inFlight set. When ctx is cancelled (shutdown), nothing is
+// stored or logged.
 func (s *Server) refreshAsyncStartGate(ctx context.Context) {
-	rctx, cancel := context.WithTimeout(ctx, asyncStartGateRefreshTimeout)
-	defer cancel()
-	value, reason := s.computeAsyncStartGate(rctx)
+	value, reason := func() (value bool, reason string) {
+		defer func() {
+			if p := recover(); p != nil {
+				value, reason = false, fmt.Sprintf("%s: refresh panicked: %v", asyncStartGateReadFailed, p)
+			}
+		}()
+		rctx, cancel := context.WithTimeout(ctx, asyncStartGateRefreshTimeout)
+		defer cancel()
+		return s.computeAsyncStartGate(rctx)
+	}()
 	g := &s.asyncStartGate
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.inFlight = false
-	g.refreshedAt = asyncStartGateNow()
-	changed := !g.logged || g.value != value || g.reason != reason
-	g.value = value
-	g.reason = reason
-	g.logged = true
-	if !changed {
+	if ctx.Err() != nil {
 		return
 	}
+	now := asyncStartGateNow()
+	g.refreshedAt = now
+	readFailed := strings.HasPrefix(reason, asyncStartGateReadFailed+":")
+	key := reason
+	if readFailed {
+		key = asyncStartGateReadFailed
+	}
+	changed := !g.logged || g.value != value || g.reason != key
+	g.value = value
+	g.reason = key
+	g.logged = true
 	log := s.agentLifecycleLog
 	if log == nil {
 		log = slog.Default()
+	}
+	if readFailed {
+		// Rate-limited whether or not the answer changed: a failing or
+		// flapping registry logs at most once per hubInstanceWarnEvery.
+		if !g.readFailWarnedAt.IsZero() && now.Sub(g.readFailWarnedAt) < hubInstanceWarnEvery {
+			g.readFailSuppressed++
+			return
+		}
+		suppressed := g.readFailSuppressed
+		g.readFailSuppressed = 0
+		g.readFailWarnedAt = now
+		log.Warn("async start disabled: "+reason, "suppressed_since_last_log", suppressed)
+		return
+	}
+	if !changed {
+		return
 	}
 	if value {
 		log.Info("async start enabled: every live hub instance advertises " + api.HubInstanceFeatureAsyncStartV1)
 	} else {
 		log.Warn("async start disabled: " + reason)
 	}
+}
+
+// startAsyncStartGateRefresher starts the gate's refresh loop on ctx (the
+// server-lifetime context) and returns a channel closed when the loop has
+// exited. See startAsyncStartGateRefresherEvery.
+func (s *Server) startAsyncStartGateRefresher(ctx context.Context) <-chan struct{} {
+	return s.startAsyncStartGateRefresherEvery(ctx, jitteredAsyncStartGateInterval)
+}
+
+// startAsyncStartGateRefresherEvery runs one refresh tick at once and then
+// one per interval until ctx is cancelled. Ticks run on the loop's
+// goroutine and never overlap.
+func (s *Server) startAsyncStartGateRefresherEvery(ctx context.Context, interval func() time.Duration) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.asyncStartGateRefreshTick(ctx)
+		for {
+			timer := time.NewTimer(interval())
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+				s.asyncStartGateRefreshTick(ctx)
+			}
+		}
+	}()
+	return done
+}
+
+// asyncStartGateRefreshTick refreshes the answer when the experiment is on
+// and no refresh is running. While the experiment is off it does nothing
+// beyond the in-memory experiment check: no lock and no registry read.
+func (s *Server) asyncStartGateRefreshTick(ctx context.Context) {
+	if !s.experimentEnabled(experiments.AsyncAgentStart) {
+		return
+	}
+	g := &s.asyncStartGate
+	g.mu.Lock()
+	if g.inFlight {
+		g.mu.Unlock()
+		return
+	}
+	g.inFlight = true
+	g.mu.Unlock()
+	s.refreshAsyncStartGate(ctx)
+}
+
+// jitteredAsyncStartGateInterval returns asyncStartGateRefreshInterval ±
+// hubInstanceTickJitter, so replicas started together do not read in lock
+// step.
+func jitteredAsyncStartGateInterval() time.Duration {
+	f := 1 + hubInstanceTickJitter*(2*rand.Float64()-1)
+	return time.Duration(float64(asyncStartGateRefreshInterval) * f)
 }
 
 // computeAsyncStartGate reads the hub-instance registry and reports
@@ -143,7 +251,7 @@ func (s *Server) computeAsyncStartGate(ctx context.Context) (bool, string) {
 	}
 	rows, now, err := s.store.ListHubInstances(ctx, hubInstanceStaleAfter)
 	if err != nil {
-		return false, fmt.Sprintf("hub instance registry read failed: %v", err)
+		return false, fmt.Sprintf("%s: %v", asyncStartGateReadFailed, err)
 	}
 	live := 0
 	for _, row := range rows {

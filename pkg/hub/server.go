@@ -7094,6 +7094,12 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// CleanupResources uses it to join the loop and mark the row stopped.
 	_ = s.startHubInstanceRegistry(registryCtx)
 
+	// Keep the async start gate's answer fresh while hub.async_agent_start
+	// is on (ptone/scion#7250); it reads nothing while the experiment is
+	// off. Started after the registry, so this replica's own row usually
+	// exists for its first read. It exits when the context is cancelled.
+	_ = s.startAsyncStartGateRefresher(registryCtx)
+
 	// Start the lifecycle outbox drainer, only when it has work.
 	s.startLifecycleEvents(ctx)
 }

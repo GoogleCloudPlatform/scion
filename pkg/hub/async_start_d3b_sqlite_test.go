@@ -37,7 +37,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -600,23 +599,6 @@ func (d *asyncHubDispatcher) calls() ([]StartDispatchOptions, int, []bool) {
 	return append([]StartDispatchOptions(nil), d.opts...), d.plain, append([]bool(nil), d.resumes...)
 }
 
-// setAsyncStartExperiment sets hub.async_agent_start's default on srv's
-// registry.
-func setAsyncStartExperiment(t *testing.T, srv *Server, on bool) {
-	t.Helper()
-	var active []experiments.Experiment
-	for _, e := range experiments.Default().All() {
-		if e.Name == experiments.AsyncAgentStart {
-			e.Default = on
-		}
-		active = append(active, e)
-	}
-	reg, err := experiments.NewRegistry(active, nil)
-	require.NoError(t, err)
-	srv.experiments = reg
-	require.Equal(t, on, srv.experimentEnabled(experiments.AsyncAgentStart))
-}
-
 // seedAsyncStartGate sets the all-live-hubs answer as a fresh refresh would.
 func seedAsyncStartGate(srv *Server, value bool) {
 	g := &srv.asyncStartGate
@@ -625,6 +607,29 @@ func seedAsyncStartGate(srv *Server, value bool) {
 	g.value = value
 	g.refreshedAt = asyncStartGateNow()
 	g.logged = true
+}
+
+// TestStartBackgroundServices_RefreshesAsyncStartGate pins the wiring of
+// ptone/scion#7250: with the experiment on, StartBackgroundServices starts
+// the gate's refresh loop, which reads the registry (this replica's own
+// row) without any start asking for it.
+func TestStartBackgroundServices_RefreshesAsyncStartGate(t *testing.T) {
+	s, err := newTestStore(t, ":memory:")
+	require.NoError(t, err)
+	srv, err := newTestHubServer(t, DefaultServerConfig(), s)
+	require.NoError(t, err)
+	setAsyncStartExperiment(t, srv, true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv.StartBackgroundServices(ctx)
+
+	g := &srv.asyncStartGate
+	require.Eventually(t, func() bool {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		return !g.refreshedAt.IsZero() && g.value
+	}, 10*time.Second, 10*time.Millisecond, "the refresh loop read the registry and every live row has async_start_v1")
 }
 
 // newAsyncStartFixture is newClaimFixture (start claims on) with an
