@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hub
+package hubtestutil
 
 import (
 	"io"
@@ -28,9 +28,9 @@ import (
 // minimal settings.yaml, and returns the path to that file. It also isolates
 // the shared log level state, because server-config saves and reloads
 // apply server.log_level to it.
-func tempSettingsHome(t *testing.T) string {
+func TempSettingsHome(t *testing.T) string {
 	t.Helper()
-	isolateLogLevelState(t)
+	IsolateLogLevelState(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	globalDir := filepath.Join(home, ".scion")
@@ -47,7 +47,7 @@ func tempSettingsHome(t *testing.T) string {
 // isolateLogLevelState clears leaked level variables and resets the shared
 // level state and the standard-library log bridge level, restoring both
 // when the test ends.
-func isolateLogLevelState(t *testing.T) {
+func IsolateLogLevelState(t *testing.T) {
 	t.Helper()
 	t.Setenv(loglevel.EnvLogLevel, "")
 	t.Setenv(loglevel.EnvDebug, "")
