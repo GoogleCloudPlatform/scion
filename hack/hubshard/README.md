@@ -130,7 +130,8 @@ Parity does not see a top-level name declared twice in two shards' files:
 each shard builds, and every whole-package build (`go vet ./pkg/hub/`)
 fails with "redeclared in this block". `make hub-dupcheck`
 ([`hack/dupdecl`](../dupdecl/main.go), parse only, a few seconds) checks
-`pkg/hub` and its test files for that under every tag set CI compiles
+`pkg/hub` and its test files for that (and for a top-level name that
+clashes with an import's name) under every tag set CI compiles
 `pkg/hub` with; Build & Test runs it next to the parity check.
 
 Each shard job also compares its compiled binary's `-test.list` with

@@ -26,9 +26,15 @@
 // GOOS/GOARCH) decides which files compile. Within each package clause (the
 // package itself, and an external package_test as its own namespace) it
 // counts top-level funcs, types, vars and consts, and methods as
-// Receiver.Name. The blank identifier and init are skipped. Dot imports and
-// clashes between a method and a struct field need type information and are
-// not checked.
+// Receiver.Name. The blank identifier and init are skipped. It also reports
+// an import whose local name is declared in the package block of the same
+// package clause ("already declared through import of package"); the local
+// name is the explicit one, else the last import path element without a /vN
+// (or gopkg.in .vN) suffix, which is a guess where the package clause differs
+// from the path. Blank and dot imports are skipped. Not checked, because they
+// need type information: dot imports, methods declared through an alias
+// receiver (type A = T; func (A) m() against func (*T) m()), and clashes
+// between a method and a struct field.
 //
 // Usage:
 //
@@ -36,7 +42,7 @@
 //
 // Each -tags is one comma-separated tag set ("" is the default build); no
 // -tags checks the default build only. Exit codes: 0 clean, 1 duplicates,
-// 2 usage or parse error.
+// 2 usage or parse error, or a tag set that matched no Go file.
 package main
 
 import (
@@ -50,6 +56,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -99,7 +106,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if found {
-		_, _ = fmt.Fprintln(stdout, "dupdecl: a whole-package build (go vet, go test) fails with \"redeclared in this block\"; rename or remove one declaration")
+		_, _ = fmt.Fprintln(stdout, "dupdecl: a whole-package build (go vet, go test) fails with \"redeclared in this block\" or \"already declared through import\"; rename or remove one declaration")
 		return 1
 	}
 	return 0
@@ -128,6 +135,8 @@ func check(dir string, tags []string) ([]string, int, error) {
 	fset := token.NewFileSet()
 	// package name -> identifier -> positions
 	decls := map[string]map[string][]token.Position{}
+	// package name -> import local name -> positions
+	imports := map[string]map[string][]token.Position{}
 	nfiles := 0
 	for _, e := range entries {
 		name := e.Name()
@@ -149,6 +158,16 @@ func check(dir string, tags []string) ([]string, int, error) {
 		pkg := f.Name.Name
 		if decls[pkg] == nil {
 			decls[pkg] = map[string][]token.Position{}
+			imports[pkg] = map[string][]token.Position{}
+		}
+		for _, im := range f.Imports {
+			name := importName(im)
+			if name == "" || name == "_" || name == "." {
+				continue
+			}
+			p := fset.Position(im.Pos())
+			p.Filename = filepath.Base(p.Filename)
+			imports[pkg][name] = append(imports[pkg][name], p)
 		}
 		add := func(id *ast.Ident, key string) {
 			if id.Name == "_" {
@@ -190,16 +209,74 @@ func check(dir string, tags []string) ([]string, int, error) {
 			if len(pos) < 2 {
 				continue
 			}
-			where := make([]string, len(pos))
-			for i, p := range pos {
-				where[i] = fmt.Sprintf("%s:%d", p.Filename, p.Line)
+			dups = append(dups, fmt.Sprintf("package %s: %s declared at %s", pkg, key, joinPos(pos)))
+		}
+	}
+	for pkg, m := range imports {
+		for name, ipos := range m {
+			// Methods are keyed Recv.Name and never match an import name.
+			dpos := decls[pkg][name]
+			if len(dpos) == 0 {
+				continue
 			}
-			sort.Strings(where)
-			dups = append(dups, fmt.Sprintf("package %s: %s declared at %s", pkg, key, strings.Join(where, " and ")))
+			dups = append(dups, fmt.Sprintf("package %s: %s imported at %s and declared at %s", pkg, name, firstPos(ipos, 3), joinPos(dpos)))
 		}
 	}
 	sort.Strings(dups)
+	if nfiles == 0 {
+		return nil, 0, fmt.Errorf("%s: no Go files matched -tags %q", dir, strings.Join(tags, ","))
+	}
 	return dups, nfiles, nil
+}
+
+func joinPos(pos []token.Position) string {
+	where := make([]string, len(pos))
+	for i, p := range pos {
+		where[i] = fmt.Sprintf("%s:%d", p.Filename, p.Line)
+	}
+	sort.Strings(where)
+	return strings.Join(where, " and ")
+}
+
+// firstPos is joinPos limited to the first limit positions, with a count of
+// the rest (a common package such as strings is imported by many files).
+func firstPos(pos []token.Position, limit int) string {
+	all := strings.Split(joinPos(pos), " and ")
+	if len(all) <= limit {
+		return strings.Join(all, " and ")
+	}
+	return fmt.Sprintf("%s and %d more files", strings.Join(all[:limit], " and "), len(all)-limit)
+}
+
+// importName returns the name an import declares in its file block: the
+// explicit name, else the last path element without a /vN or gopkg.in .vN
+// suffix. It returns "" for an unparsable path.
+func importName(im *ast.ImportSpec) string {
+	if im.Name != nil {
+		return im.Name.Name
+	}
+	path, err := strconv.Unquote(im.Path.Value)
+	if err != nil {
+		return ""
+	}
+	elems := strings.Split(path, "/")
+	last := elems[len(elems)-1]
+	if len(elems) > 1 && isMajorVersion(last) {
+		last = elems[len(elems)-2]
+	}
+	if i := strings.LastIndex(last, ".v"); i > 0 && strings.HasPrefix(path, "gopkg.in/") && isMajorVersion(last[i+1:]) {
+		last = last[:i]
+	}
+	return last
+}
+
+// isMajorVersion reports whether s is v2, v3, ... (a major-version suffix).
+func isMajorVersion(s string) bool {
+	if len(s) < 2 || s[0] != 'v' {
+		return false
+	}
+	n, err := strconv.Atoi(s[1:])
+	return err == nil && n >= 2 && s[1] != '0'
 }
 
 // recvName returns the base type name of a method receiver: T for (T),
