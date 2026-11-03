@@ -57,7 +57,7 @@ func golden(t *testing.T, name string, got []byte) {
 func render(t *testing.T, p *Plan) (human, js []byte) {
 	t.Helper()
 	var h, j bytes.Buffer
-	require.NoError(t, WriteHuman(&h, p))
+	require.NoError(t, WriteHuman(&h, p, HumanOptions{}))
 	require.NoError(t, WriteJSON(&j, p))
 	return h.Bytes(), j.Bytes()
 }

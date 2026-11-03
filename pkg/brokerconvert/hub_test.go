@@ -292,6 +292,49 @@ func TestCollectHub_ServerErrorOnSecondaryCallExits1(t *testing.T) {
 	require.NoError(t, err, "the plan is still produced")
 	require.NotNil(t, p.Projects)
 	assert.Equal(t, ExitError, p.ExitCode())
+	var note string
+	for _, e := range p.Projects.Items {
+		if e.ID == "p-2" {
+			note = e.Note
+		}
+	}
+	assert.Equal(t, "could not be read from the Hub (HTTP 500): this project's settings", note)
+	assertNoHubAddress(t, h, p)
+}
+
+func TestCollectHub_AgentList5xxNoteAndExit1(t *testing.T) {
+	h := newFakeHub(t)
+	h.agentsStatus = http.StatusInternalServerError
+	p, err := hubPlan(t, h)
+	require.NoError(t, err, "the plan is still produced")
+	require.NotNil(t, p.Agents)
+	assert.Equal(t, "could not be read from the Hub (HTTP 500): the agent list", p.Agents.Note)
+	assert.Empty(t, p.Agents.Items)
+	assert.Equal(t, ExitError, p.ExitCode())
+	assertNoHubAddress(t, h, p)
+}
+
+func TestCollectHub_VisibilityNotesAreFixedText(t *testing.T) {
+	h := newFakeHub(t)
+	h.agentsStatus = http.StatusForbidden
+	h.settingsStatus = http.StatusForbidden
+	p, err := hubPlan(t, h)
+	require.NoError(t, err)
+	assert.Equal(t, "not visible to you: the agent list", p.Agents.Note)
+	assert.Equal(t, "not visible to you: the Runtime Broker's settings", p.Capacity.Note)
+	assertNoHubAddress(t, h, p)
+}
+
+// assertNoHubAddress checks that no part of the plan, in either format,
+// carries the Hub's address or the fake Hub's error message.
+func assertNoHubAddress(t *testing.T, h *fakeHub, p *Plan) {
+	t.Helper()
+	human, js := render(t, p)
+	host := strings.TrimPrefix(h.URL, "http://")
+	for _, out := range []string{string(human), string(js)} {
+		assert.NotContains(t, out, host)
+		assert.NotContains(t, out, "refused", "the Hub's error message is not quoted")
+	}
 }
 
 func TestCollectHub_FlatRowRefused(t *testing.T) {

@@ -1,4 +1,4 @@
-Proposed only: nothing was written, registered or changed. Instance keys and names are proposals you may edit.
+Proposed only: nothing was written, registered or changed. Instance keys and names are proposals you may edit. Harness env values are shown as <redacted>; --show-env-values prints them in the human output, which then contains secrets and must not be shared.
 Legacy Runtime Broker: build-host (b-legacy)
 
 1. Proposed instances
@@ -36,9 +36,9 @@ server:
 
 3. Findings
    [notice] profile_conflict profiles.* (profiles: build, local)
-     profiles build, local on target docker differ in image_registry; they are split into instances docker-build (build), docker-local (local). To merge them, give the profiles the same values or add a field choice for target docker
+     these profiles share a target but differ in one or more settings, so they keep separate instances; compare the proposed instances, then give the profiles the same values or add a field choice to merge them
    [blocking] unsupported_flat_target_type runtimes.pod.type (profiles: legacy-podman)
-     runtime type podman has no flat Runtime Broker target; keep the profiles that use it on their legacy Runtime Broker
+     this runtime type has no flat Runtime Broker target; keep these profiles on the legacy Runtime Broker
 
 4. Capacity
    Outcome: preserve_by_split

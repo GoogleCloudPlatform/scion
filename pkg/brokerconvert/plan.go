@@ -25,14 +25,19 @@ import (
 	"errors"
 	"sort"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
 // SchemaVersion is the version of the JSON plan document.
 const SchemaVersion = 1
 
-// TipNote heads every plan: the plan proposes, it never applies.
-const TipNote = "Proposed only: nothing was written, registered or changed. Instance keys and names are proposals you may edit."
+// TipNote heads every plan: the plan proposes, it never applies, and it
+// prints no harness env value unless asked.
+const TipNote = "Proposed only: nothing was written, registered or changed. Instance keys and names are proposals you may edit. Harness env values are shown as " + RedactedValue + "; --show-env-values prints them in the human output, which then contains secrets and must not be shared."
+
+// RedactedValue replaces a harness env value in the plan.
+const RedactedValue = "<redacted>"
 
 // Summary results, in order of precedence.
 const (
@@ -84,18 +89,26 @@ type Input struct {
 // Plan is the plan document. Its JSON field names are part of the CLI
 // contract (schemaVersion 1).
 type Plan struct {
-	SchemaVersion  int                                    `json:"schemaVersion"`
-	TipNote        string                                 `json:"tipNote"`
-	LegacyBrokerID string                                 `json:"legacyBrokerId,omitempty"`
-	LegacyBroker   *LegacyBroker                          `json:"legacyBroker,omitempty"`
-	Instances      []config.V1RuntimeBrokerInstanceConfig `json:"instances"`
-	ProfileMap     []ProfileMapping                       `json:"profileMap"`
-	Findings       []Finding                              `json:"findings"`
-	Capacity       Capacity                               `json:"capacity"`
+	SchemaVersion  int           `json:"schemaVersion"`
+	TipNote        string        `json:"tipNote"`
+	LegacyBrokerID string        `json:"legacyBrokerId,omitempty"`
+	LegacyBroker   *LegacyBroker `json:"legacyBroker,omitempty"`
+	// Instances are the proposed instances in their publishable form
+	// (config.PresentInstance), the shape a Runtime Broker publishes to the
+	// Hub: no kubeconfig, context, service-account policy, env value or
+	// secret target. The paste-ready settings block is human output only.
+	Instances  []api.RuntimeTargetPresentation `json:"instances"`
+	ProfileMap []ProfileMapping                `json:"profileMap"`
+	Findings   []Finding                       `json:"findings"`
+	Capacity   Capacity                        `json:"capacity"`
 	// Agents and Projects are nil when the Hub sections were skipped.
 	Agents   *AgentsSection   `json:"agents"`
 	Projects *ProjectsSection `json:"projects"`
 	Summary  Summary          `json:"summary"`
+
+	// settingsInstances are the proposed instances in settings form, for
+	// the human output's paste-ready block only.
+	settingsInstances []config.V1RuntimeBrokerInstanceConfig
 
 	// hubIncomplete records a Hub call that failed for a reason other
 	// than visibility; the plan is still printed, and the command exits 1.
@@ -125,13 +138,16 @@ type ProfileMapping struct {
 	BlockedBy string `json:"blockedBy,omitempty"`
 }
 
-// Finding is one converter finding. Message is shown locally only.
+// Finding is one converter finding, rendered from its code and settings
+// key path only. The converter's own message is never carried: it can
+// quote settings values.
 type Finding struct {
 	Code     string   `json:"code"`
 	Severity string   `json:"severity"`
 	Path     string   `json:"path"`
 	Profiles []string `json:"profiles"`
-	Message  string   `json:"message"`
+	// Text is the fixed text for Code (FindingText).
+	Text string `json:"text"`
 }
 
 // Capacity is the proposed per-instance agent limit.
@@ -253,7 +269,7 @@ func BuildLocal(in Input) (*Plan, error) {
 	p := &Plan{
 		SchemaVersion: SchemaVersion,
 		TipNote:       TipNote,
-		Instances:     []config.V1RuntimeBrokerInstanceConfig{},
+		Instances:     []api.RuntimeTargetPresentation{},
 		ProfileMap:    []ProfileMapping{},
 		Findings:      []Finding{},
 		Capacity: Capacity{
@@ -273,8 +289,9 @@ func BuildLocal(in Input) (*Plan, error) {
 		Choices:            in.Choices,
 		ConfiguredRuntimes: in.ConfiguredRuntimes,
 	})
-	if res.Instances != nil {
-		p.Instances = res.Instances
+	p.settingsInstances = res.Instances
+	for _, inst := range res.Instances {
+		p.Instances = append(p.Instances, config.PresentInstance(inst).API())
 	}
 	blockedBy := map[string]string{}
 	for _, f := range res.Findings {
@@ -283,7 +300,7 @@ func BuildLocal(in Input) (*Plan, error) {
 			Severity: f.Severity,
 			Path:     f.Path,
 			Profiles: nonNil(f.Profiles),
-			Message:  f.Message,
+			Text:     FindingText(f.Code),
 		})
 		if f.Severity == config.ConversionSeverityBlocking {
 			for _, name := range f.Profiles {
@@ -389,4 +406,25 @@ func nonNil(s []string) []string {
 		return []string{}
 	}
 	return append([]string(nil), s...)
+}
+
+// findingTexts are the fixed texts of the converter's finding codes. They
+// quote no settings value; the finding's key path and profiles say where.
+var findingTexts = map[string]string{
+	config.ConversionUnsupportedFlatTargetType:  "this runtime type has no flat Runtime Broker target; keep these profiles on the legacy Runtime Broker",
+	config.ConversionFlatTargetScopeViolation:   "this setting reaches beyond one target scope, which a flat Runtime Broker instance cannot hold",
+	config.ConversionProfileConflict:            "these profiles share a target but differ in one or more settings, so they keep separate instances; compare the proposed instances, then give the profiles the same values or add a field choice to merge them",
+	config.ConversionProfileConflictResolved:    "an operator choice consolidated this field on one profile's value; the other profiles' values are not carried over",
+	config.ConversionLegacyFieldNoEffect:        "this legacy setting has no effect on a flat Runtime Broker instance",
+	config.ConversionLegacyFieldRemoved:         "this setting was removed and is not converted",
+	config.ConversionUnknownSettingsKey:         "this key, profile or operator choice is not recognised or cannot be applied, so it is not converted",
+	config.ConversionFieldNotValidForTargetType: "this field is not valid for the instance's target type and is not converted",
+}
+
+// FindingText is the fixed text for a finding code.
+func FindingText(code string) string {
+	if t, ok := findingTexts[code]; ok {
+		return t
+	}
+	return "see the conversion rules for this finding code"
 }

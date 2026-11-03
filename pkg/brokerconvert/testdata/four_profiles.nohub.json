@@ -1,34 +1,37 @@
 {
   "schemaVersion": 1,
-  "tipNote": "Proposed only: nothing was written, registered or changed. Instance keys and names are proposals you may edit.",
+  "tipNote": "Proposed only: nothing was written, registered or changed. Instance keys and names are proposals you may edit. Harness env values are shown as \u003credacted\u003e; --show-env-values prints them in the human output, which then contains secrets and must not be shared.",
   "instances": [
     {
+      "schemaVersion": 1,
       "key": "docker-build",
       "name": "docker-build",
-      "runtime_target": {
+      "target": {
         "type": "docker"
       },
-      "agent_defaults": {
-        "image_registry": "reg.example/build"
+      "agentDefaults": {
+        "imageRegistry": "reg.example/build"
       }
     },
     {
+      "schemaVersion": 1,
       "key": "docker-local",
       "name": "docker-local",
-      "runtime_target": {
+      "target": {
         "type": "docker"
       },
-      "agent_defaults": {
-        "image_registry": "reg.example/local"
+      "agentDefaults": {
+        "imageRegistry": "reg.example/local"
       }
     },
     {
+      "schemaVersion": 1,
       "key": "k8s-prod-agents",
       "name": "k8s-prod-agents",
-      "runtime_target": {
+      "target": {
         "type": "kubernetes",
-        "context": "prod",
-        "namespace": "agents"
+        "namespace": "agents",
+        "placementReported": true
       }
     }
   ],
@@ -59,7 +62,7 @@
         "build",
         "local"
       ],
-      "message": "profiles build, local on target docker differ in image_registry; they are split into instances docker-build (build), docker-local (local). To merge them, give the profiles the same values or add a field choice for target docker"
+      "text": "these profiles share a target but differ in one or more settings, so they keep separate instances; compare the proposed instances, then give the profiles the same values or add a field choice to merge them"
     },
     {
       "code": "unsupported_flat_target_type",
@@ -68,7 +71,7 @@
       "profiles": [
         "legacy-podman"
       ],
-      "message": "runtime type podman has no flat Runtime Broker target; keep the profiles that use it on their legacy Runtime Broker"
+      "text": "this runtime type has no flat Runtime Broker target; keep these profiles on the legacy Runtime Broker"
     }
   ],
   "capacity": {

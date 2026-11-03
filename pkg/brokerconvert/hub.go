@@ -104,15 +104,29 @@ func legacyBroker(row *hubclient.RuntimeBroker, p *Plan) *LegacyBroker {
 	return lb
 }
 
-// noteFor turns a failed secondary Hub call into a section note. A
-// visibility answer (401, 403, 404) is a partial view; any other failure
-// also marks the plan incomplete.
+// What a section note names: a noun phrase for each secondary Hub read.
+const (
+	whatAgentList        = "the agent list"
+	whatProjectList      = "the projects this Runtime Broker provides"
+	whatProjectSettings  = "this project's settings"
+	whatRuntimeBrokerSet = "the Runtime Broker's settings"
+)
+
+// noteFor turns a failed secondary Hub call into a section note with fixed
+// text: what was not read, and the HTTP status when there is one. The
+// error's own text is never used, since it can carry the Hub's URL or a
+// server message. A visibility answer (401, 403, 404) is a partial view;
+// any other failure also marks the plan incomplete.
 func noteFor(p *Plan, what string, err error) string {
 	if apiclient.IsForbiddenError(err) || apiclient.IsUnauthorizedError(err) || apiclient.IsNotFoundError(err) {
-		return what + " not visible to you"
+		return "not visible to you: " + what
 	}
 	p.hubIncomplete = true
-	return fmt.Sprintf("%s could not be read from the Hub: %v", what, err)
+	var apiErr *apiclient.APIError
+	if errors.As(err, &apiErr) && apiErr.StatusCode > 0 {
+		return fmt.Sprintf("could not be read from the Hub (HTTP %d): %s", apiErr.StatusCode, what)
+	}
+	return "could not be read from the Hub (request failed): " + what
 }
 
 func isTerminalPhase(phase string) bool {
@@ -129,12 +143,13 @@ func collectAgents(ctx context.Context, client hubclient.Client, brokerID string
 	seen := map[string]bool{}
 	for page := 0; ; page++ {
 		if page == maxAgentPages {
-			sec.Note = noteFor(p, "the full agent list", fmt.Errorf("more than %d pages", maxAgentPages))
+			p.hubIncomplete = true
+			sec.Note = fmt.Sprintf("incomplete: %s has more than %d pages", whatAgentList, maxAgentPages)
 			break
 		}
 		resp, err := client.Agents().List(ctx, opts)
 		if err != nil {
-			sec.Note = noteFor(p, "the agents on this Runtime Broker are", err)
+			sec.Note = noteFor(p, whatAgentList, err)
 			return sec, 0, false
 		}
 		for _, a := range resp.Agents {
@@ -181,14 +196,14 @@ func collectProjects(ctx context.Context, client hubclient.Client, brokers hubcl
 	sec := &ProjectsSection{Items: []ProjectEntry{}}
 	resp, err := brokers.ListProjects(ctx, brokerID)
 	if err != nil {
-		sec.Note = noteFor(p, "the projects this Runtime Broker provides are", err)
+		sec.Note = noteFor(p, whatProjectList, err)
 		return sec
 	}
 	for _, info := range resp.Projects {
 		e := ProjectEntry{ID: info.ProjectID, Name: info.ProjectName}
 		settings, err := client.Projects().GetSettings(ctx, info.ProjectID)
 		if err != nil {
-			e.Note = noteFor(p, "this project's settings are", err)
+			e.Note = noteFor(p, whatProjectSettings, err)
 			sec.Items = append(sec.Items, e)
 			continue
 		}
@@ -228,7 +243,7 @@ func collectCapacity(ctx context.Context, brokers hubclient.RuntimeBrokerService
 	}
 	settings, err := getter.GetSettings(ctx, brokerID)
 	if err != nil {
-		return Capacity{Status: CapacityUnavailable, Note: noteFor(p, "the Runtime Broker's settings are", err)}
+		return Capacity{Status: CapacityUnavailable, Note: noteFor(p, whatRuntimeBrokerSet, err)}
 	}
 	ids := make([]string, 0, len(p.Instances))
 	for _, inst := range p.Instances {

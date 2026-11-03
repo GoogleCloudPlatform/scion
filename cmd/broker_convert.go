@@ -33,11 +33,20 @@ var (
 	brokerConvertProfiles []string
 	brokerConvertChoices  string
 	brokerConvertSkipHub  bool
+	brokerConvertShowEnv  bool
 )
 
 // errConvertPlanOnly refuses convert without --plan, keeping the command
 // shape free for a later apply mode.
 var errConvertPlanOnly = errors.New("convert currently supports only --plan (read-only)")
+
+// errShowEnvValuesJSON refuses --show-env-values with JSON output: the JSON
+// plan never carries env values.
+var errShowEnvValuesJSON = errors.New("--show-env-values applies to the human output only; the JSON plan never contains env values")
+
+// brokerConvertShort is the command's one-line description, also used in
+// the runtime-broker command list.
+const brokerConvertShort = "Plan a move to flat Runtime Brokers (read-only, experimental)"
 
 // brokerConvertCmd plans the move of this legacy Runtime Broker host to
 // flat Runtime Broker instances. It is read-only: it writes no file (not
@@ -45,10 +54,10 @@ var errConvertPlanOnly = errors.New("convert currently supports only --plan (rea
 // requests to the Hub.
 var brokerConvertCmd = &cobra.Command{
 	Use:   "convert --plan",
-	Short: "Plan a move from this legacy Runtime Broker to flat Runtime Brokers (read-only)",
+	Short: brokerConvertShort,
 	Long: `Plan a move from this host's legacy, profile-based Runtime Broker to flat
-Runtime Broker instances. Nothing is written, registered or changed, locally
-or on the Hub.
+Runtime Broker instances (experimental, like flat Runtime Brokers themselves).
+Nothing is written, registered or changed, locally or on the Hub.
 
 The plan has five sections:
   1. the proposed server.broker.instances entries, as YAML to paste into the
@@ -62,10 +71,21 @@ Sections 4 and 5 use your Hub login and this host's registered Runtime Broker
 ID. With --skip-hub, or when no Hub is configured, only the local sections are
 printed.
 
+Harness env values are shown as <redacted>, in both formats. With
+--show-env-values the human output prints them, and then contains secrets:
+do not share it. --show-env-values is refused with --format json; the JSON
+plan never contains env values, kubeconfig paths, contexts or secret
+targets (it carries the instances in their publishable form). Findings are
+printed from their code and settings key path with a fixed text, never with
+a settings value.
+
 --plan is required.
 
 Exit status: 0 when the plan has no blocking finding and needs no decision,
 3 when it has a blocking finding or needs an operator decision, 1 on error.
+A capacity plan the Hub could not supply (no Hub, or the Runtime Broker's
+settings not visible to you) does not change the exit status; the summary
+says so.
 
 Examples:
   # Plan the move of every profile
@@ -86,6 +106,7 @@ func init() {
 	brokerConvertCmd.Flags().StringSliceVar(&brokerConvertProfiles, "profiles", nil, "Limit the conversion to these profiles (default: all)")
 	brokerConvertCmd.Flags().StringVar(&brokerConvertChoices, "choices", "", "YAML or JSON file of reviewed operator choices (split groups or field choices)")
 	brokerConvertCmd.Flags().BoolVar(&brokerConvertSkipHub, "skip-hub", false, "Plan from the local settings only: no Hub requests, no Hub sections")
+	brokerConvertCmd.Flags().BoolVar(&brokerConvertShowEnv, "show-env-values", false, "Print harness env values in the human output; the output then contains secrets and must not be shared (refused with --format json)")
 }
 
 // convertPlanExit carries the exit status of a produced plan (exitCoder).
@@ -118,6 +139,9 @@ var convertHubClient = func(settings *config.Settings) (hubclient.Client, error)
 func runBrokerConvert(cmd *cobra.Command, _ []string) error {
 	if !brokerConvertPlan {
 		return errConvertPlanOnly
+	}
+	if brokerConvertShowEnv && isJSONOutput() {
+		return errShowEnvValuesJSON
 	}
 	// Read-only: the settings loaders keep a legacy key's value in memory
 	// instead of rewriting the file. The root hook already set this before
@@ -154,7 +178,7 @@ func runBrokerConvert(cmd *cobra.Command, _ []string) error {
 	if isJSONOutput() {
 		err = brokerconvert.WriteJSON(out, plan)
 	} else {
-		err = brokerconvert.WriteHuman(out, plan)
+		err = brokerconvert.WriteHuman(out, plan, brokerconvert.HumanOptions{ShowEnvValues: brokerConvertShowEnv})
 	}
 	if err != nil {
 		return err

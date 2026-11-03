@@ -130,11 +130,12 @@ func setConvertFlags(t *testing.T, plan, skipHub bool, format string, profiles .
 	t.Helper()
 	// convert turns the process-wide no-write switch on; keep it per test.
 	writesonread.IsolateForTest(t)
-	oldPlan, oldSkipHub, oldProfiles, oldChoices, oldFormat := brokerConvertPlan, brokerConvertSkipHub, brokerConvertProfiles, brokerConvertChoices, outputFormat
+	oldPlan, oldSkipHub, oldProfiles, oldChoices, oldFormat, oldShowEnv := brokerConvertPlan, brokerConvertSkipHub, brokerConvertProfiles, brokerConvertChoices, outputFormat, brokerConvertShowEnv
 	t.Cleanup(func() {
-		brokerConvertPlan, brokerConvertSkipHub, brokerConvertProfiles, brokerConvertChoices, outputFormat = oldPlan, oldSkipHub, oldProfiles, oldChoices, oldFormat
+		brokerConvertPlan, brokerConvertSkipHub, brokerConvertProfiles, brokerConvertChoices, outputFormat, brokerConvertShowEnv = oldPlan, oldSkipHub, oldProfiles, oldChoices, oldFormat, oldShowEnv
 	})
 	brokerConvertPlan, brokerConvertSkipHub, brokerConvertProfiles, brokerConvertChoices, outputFormat = plan, skipHub, profiles, "", format
+	brokerConvertShowEnv = false
 }
 
 func setConvertHubClient(t *testing.T, f func(*config.Settings) (hubclient.Client, error)) {
@@ -475,4 +476,66 @@ func TestBrokerConvert_IsNoWriteCommand(t *testing.T) {
 	assert.False(t, isNoWriteCommand(brokerRegisterCmd))
 	stray := &cobra.Command{Use: "convert"}
 	assert.False(t, isNoWriteCommand(stray), "a convert outside runtime-broker is not matched")
+}
+
+// A direct call of the command (no root hook) still turns the no-write
+// switch on before it loads the settings: a legacy hub.grove_id key is left
+// in the file.
+func TestBrokerConvert_DirectCallSetsNoWriteSwitch(t *testing.T) {
+	setConvertFlags(t, true, true, "", "build", "local", "k8s")
+	home, settingsPath := legacyHomeFixture(t)
+	before, beforeSHA := treeSnapshot(t, home), fileSHA(t, settingsPath)
+	require.False(t, writesonread.Disabled(), "the switch starts off")
+
+	_, err := runConvertForTest(t)
+	require.NoError(t, err)
+
+	assert.True(t, writesonread.Disabled(), "RunE turned the switch on")
+	assert.Equal(t, beforeSHA, fileSHA(t, settingsPath), "the legacy key is not migrated")
+	assert.Equal(t, before, treeSnapshot(t, home), "nothing under HOME was written, created or removed")
+}
+
+const convertTestEnvToken = "PLANTED-ENV-TOKEN-cmd-77"
+
+// convertEnvSettings has a harness env value in the k8s profile.
+const convertEnvSettings = convertTestSettings + `    harness_overrides:
+      claude:
+        env:
+          API_TOKEN: ` + convertTestEnvToken + `
+`
+
+// --show-env-values is refused with JSON output, before any output.
+func TestBrokerConvert_ShowEnvValuesRefusedWithJSON(t *testing.T) {
+	convertTestHome(t, convertEnvSettings)
+	setConvertFlags(t, true, true, "json", "build", "local", "k8s")
+	brokerConvertShowEnv = true
+	out, err := runConvertForTest(t)
+	assert.ErrorIs(t, err, errShowEnvValuesJSON)
+	assert.Equal(t, 1, exitCodeFor(err))
+	assert.Empty(t, out)
+}
+
+// Env values are redacted by default in both formats; --show-env-values
+// prints them in the human output only.
+func TestBrokerConvert_EnvValuesRedactedByDefault(t *testing.T) {
+	convertTestHome(t, convertEnvSettings)
+	for _, format := range []string{"", "json"} {
+		setConvertFlags(t, true, true, format, "build", "local", "k8s")
+		out, err := runConvertForTest(t)
+		require.NoError(t, err, format)
+		assert.NotContains(t, out, convertTestEnvToken, "format %q", format)
+		assert.Contains(t, out, "API_TOKEN", "format %q: the key is kept", format)
+	}
+	setConvertFlags(t, true, true, "", "build", "local", "k8s")
+	brokerConvertShowEnv = true
+	out, err := runConvertForTest(t)
+	require.NoError(t, err)
+	assert.Contains(t, out, convertTestEnvToken)
+	assert.Contains(t, out, brokerconvert.ShowEnvValuesWarning)
+}
+
+// The runtime-broker command list and convert's Short use one wording.
+func TestBrokerConvert_ShortMatchesCommandList(t *testing.T) {
+	assert.Equal(t, brokerConvertShort, brokerConvertCmd.Short)
+	assert.Contains(t, brokerCmd.Long, "  convert      "+brokerConvertShort)
 }

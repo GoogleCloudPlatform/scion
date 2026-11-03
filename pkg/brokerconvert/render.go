@@ -36,9 +36,23 @@ func WriteJSON(w io.Writer, p *Plan) error {
 	return enc.Encode(p)
 }
 
+// HumanOptions are the human output's options.
+type HumanOptions struct {
+	// ShowEnvValues prints harness env values in the settings block
+	// instead of RedactedValue. The output then contains secrets.
+	ShowEnvValues bool
+}
+
+// ShowEnvValuesWarning heads a human plan printed with ShowEnvValues.
+const ShowEnvValuesWarning = "WARNING: this output contains harness env values from your settings, which can be secrets. Do not share it."
+
 // InstancesYAML is the proposed server.broker.instances block, ready to
-// paste into the global settings file.
-func InstancesYAML(instances []config.V1RuntimeBrokerInstanceConfig) (string, error) {
+// paste into the global settings file. Harness env values are replaced by
+// RedactedValue unless showEnvValues is set; keys are kept.
+func InstancesYAML(instances []config.V1RuntimeBrokerInstanceConfig, showEnvValues bool) (string, error) {
+	if !showEnvValues {
+		instances = redactEnvValues(instances)
+	}
 	doc := map[string]any{
 		"server": map[string]any{
 			"broker": map[string]any{
@@ -58,11 +72,41 @@ func InstancesYAML(instances []config.V1RuntimeBrokerInstanceConfig) (string, er
 	return buf.String(), nil
 }
 
+// redactEnvValues returns a copy of instances whose harness env values are
+// RedactedValue. instances itself is not changed.
+func redactEnvValues(instances []config.V1RuntimeBrokerInstanceConfig) []config.V1RuntimeBrokerInstanceConfig {
+	out := make([]config.V1RuntimeBrokerInstanceConfig, len(instances))
+	for i, inst := range instances {
+		out[i] = inst
+		if inst.AgentDefaults == nil || len(inst.AgentDefaults.HarnessOverrides) == 0 {
+			continue
+		}
+		ad := *inst.AgentDefaults
+		overrides := make(map[string]config.V1HarnessOverride, len(ad.HarnessOverrides))
+		for name, o := range ad.HarnessOverrides {
+			if len(o.Env) > 0 {
+				env := make(map[string]string, len(o.Env))
+				for k := range o.Env {
+					env[k] = RedactedValue
+				}
+				o.Env = env
+			}
+			overrides[name] = o
+		}
+		ad.HarnessOverrides = overrides
+		out[i].AgentDefaults = &ad
+	}
+	return out
+}
+
 // WriteHuman writes the plan's five sections and the summary, in a fixed
 // order.
-func WriteHuman(w io.Writer, p *Plan) error {
+func WriteHuman(w io.Writer, p *Plan, opts HumanOptions) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s\n", TipNote)
+	if opts.ShowEnvValues {
+		fmt.Fprintf(&b, "%s\n", ShowEnvValuesWarning)
+	}
 	if p.LegacyBroker != nil {
 		fmt.Fprintf(&b, "Legacy Runtime Broker: %s (%s)\n", p.LegacyBroker.Name, p.LegacyBroker.ID)
 	}
@@ -73,10 +117,10 @@ func WriteHuman(w io.Writer, p *Plan) error {
 	}
 
 	b.WriteString("\n1. Proposed instances\n")
-	if len(p.Instances) == 0 {
+	if len(p.settingsInstances) == 0 {
 		b.WriteString("   (none: every profile in scope has a blocking finding)\n")
 	} else {
-		y, err := InstancesYAML(p.Instances)
+		y, err := InstancesYAML(p.settingsInstances, opts.ShowEnvValues)
 		if err != nil {
 			return err
 		}
@@ -111,7 +155,7 @@ func WriteHuman(w io.Writer, p *Plan) error {
 		if len(f.Profiles) > 0 {
 			fmt.Fprintf(&b, " (profiles: %s)", strings.Join(f.Profiles, ", "))
 		}
-		fmt.Fprintf(&b, "\n     %s\n", f.Message)
+		fmt.Fprintf(&b, "\n     %s\n", f.Text)
 	}
 
 	b.WriteString("\n4. Capacity\n")
@@ -142,6 +186,12 @@ func WriteHuman(w io.Writer, p *Plan) error {
 	}
 	if s.DecisionRequired {
 		verdict = append(verdict, "operator decisions required")
+	}
+	switch p.Capacity.Status {
+	case CapacityNeedsHub:
+		verdict = append(verdict, "capacity not planned (needs the Hub)")
+	case CapacityUnavailable:
+		verdict = append(verdict, "capacity not planned (the Runtime Broker's settings were not read)")
 	}
 	fmt.Fprintf(&b, "   Result: %s.\n", strings.Join(verdict, "; "))
 
