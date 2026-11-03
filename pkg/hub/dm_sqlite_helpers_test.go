@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/require"
@@ -56,20 +55,3 @@ func setupDMConversation(t *testing.T, s store.Store, agentAID, agentBID string)
 
 	return conv
 }
-
-// nullSpokeEventBus is a no-op EventBus used as a non-inprocess spoke in the
-// FanOutEventBus so that ListChannels() returns "web" without triggering
-// handler panics. It accepts nil handlers and discards published messages.
-type nullSpokeEventBus struct{}
-
-type nullSub struct{}
-
-func (nullSpokeEventBus) Publish(context.Context, string, *messages.StructuredMessage) error {
-	return nil
-}
-func (nullSpokeEventBus) Subscribe(string, eventbus.EventHandler) (eventbus.Subscription, error) {
-	return nullSub{}, nil
-}
-func (nullSpokeEventBus) Close() error { return nil }
-
-func (nullSub) Unsubscribe() error { return nil }

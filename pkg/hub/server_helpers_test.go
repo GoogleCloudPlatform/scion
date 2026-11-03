@@ -29,9 +29,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// testDevToken is the development token used for testing.
-const testDevToken = "scion_dev_test_token_for_unit_tests_1234567890"
-
 // testServer creates a test server with an in-memory SQLite store.
 // The server is configured with dev auth enabled using testDevToken.
 func testServer(t *testing.T) (*Server, store.Store) {

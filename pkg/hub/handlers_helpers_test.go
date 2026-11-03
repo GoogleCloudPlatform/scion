@@ -22,8 +22,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -57,26 +55,6 @@ func setSpaceMembersMaxAgents(t *testing.T, maxAgents int) {
 }
 
 const spaceMembersCapWarning = "agent list truncated at safety cap"
-
-// tempSettingsHome points config.GetGlobalDir() at a temp directory holding a
-// minimal settings.yaml, and returns the path to that file. It also isolates
-// the shared log level state, because server-config saves and reloads
-// apply server.log_level to it.
-func tempSettingsHome(t *testing.T) string {
-	t.Helper()
-	isolateLogLevelState(t)
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	globalDir := filepath.Join(home, ".scion")
-	if err := os.MkdirAll(globalDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	settingsPath := filepath.Join(globalDir, "settings.yaml")
-	if err := os.WriteFile(settingsPath, []byte("schema_version: \"1\"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return settingsPath
-}
 
 const githubAppUpdateBody = `{"app_id":999,"api_base_url":"https://ghe.example.com/api/v3",` +
 	`"webhooks_enabled":true,"installation_url":"https://github.com/apps/x"}`

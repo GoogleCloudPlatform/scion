@@ -1,0 +1,92 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package hub
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+)
+
+// testDevToken is the development token used for testing.
+const testDevToken = "scion_dev_test_token_for_unit_tests_1234567890"
+
+func strPtr(s string) *string { return &s }
+
+func intPtr(i int) *int { return &i }
+
+// itoa is a minimal int-to-string without importing strconv.
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+	return string(buf[i:])
+}
+
+// alwaysAuthorized is a permissive authChecker for tests that don't exercise
+// the authorization policy path.
+func alwaysAuthorized(_ context.Context, _ string) bool { return true }
+
+// require_NoError is a test helper that fails immediately on error.
+func require_NoError(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func waitClosed(t *testing.T, ch <-chan struct{}, within time.Duration, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(within):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+// nullSpokeEventBus is a no-op EventBus used as a non-inprocess spoke in the
+// FanOutEventBus so that ListChannels() returns "web" without triggering
+// handler panics. It accepts nil handlers and discards published messages.
+type nullSpokeEventBus struct{}
+
+type nullSub struct{}
+
+func (nullSpokeEventBus) Publish(context.Context, string, *messages.StructuredMessage) error {
+	return nil
+}
+func (nullSpokeEventBus) Subscribe(string, eventbus.EventHandler) (eventbus.Subscription, error) {
+	return nullSub{}, nil
+}
+func (nullSpokeEventBus) Close() error { return nil }
+
+func (nullSub) Unsubscribe() error { return nil }

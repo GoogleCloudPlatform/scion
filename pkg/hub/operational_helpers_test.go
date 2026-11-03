@@ -21,8 +21,6 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/knadh/koanf/providers/confmap"
-	"github.com/knadh/koanf/v2"
 )
 
 // setEnvForTest sets an env var and returns a cleanup function.
@@ -42,28 +40,6 @@ func newFakeHubSettingStore() *fakeHubSettingStore {
 		settings: make(map[string]*store.HubSetting),
 		nextRev:  make(map[string]int64),
 	}
-}
-
-func newFileKoanf(t *testing.T, flat map[string]interface{}) *koanf.Koanf {
-	t.Helper()
-	k := koanf.New(".")
-	if err := k.Load(confmap.Provider(flat, "."), nil); err != nil {
-		t.Fatalf("failed to build file koanf: %v", err)
-	}
-	return k
-}
-
-func newEnvKoanf(t *testing.T, flat map[string]interface{}) *koanf.Koanf {
-	t.Helper()
-	k := koanf.New(".")
-	if err := k.Load(confmap.Provider(flat, "."), nil); err != nil {
-		t.Fatalf("failed to build env koanf: %v", err)
-	}
-	return k
-}
-
-func emptyKoanf() *koanf.Koanf {
-	return koanf.New(".")
 }
 
 func (f *fakeHubSettingStore) GetHubSetting(_ context.Context, section string) (*store.HubSetting, error) {
