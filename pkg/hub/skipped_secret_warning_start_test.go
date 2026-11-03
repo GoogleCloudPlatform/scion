@@ -400,21 +400,52 @@ func TestSkippedSecretWarning_AsyncAcceptedStart(t *testing.T) {
 }
 
 // Test 3: restart.
+// Test 3: restart. The restart endpoint is a stop leg followed by a start
+// leg (startAgentCore, DispatchAgentStart): the start send carries B and not
+// A, and the warning says "started", because the restart's start leg is a
+// start. TestSkippedSecretWarning_DispatchAgentRestartVerb pins the
+// "restarted" verb of DispatchAgentRestart (the restart mint site).
 func TestSkippedSecretWarning_Restart(t *testing.T) {
 	f := newSWFixture(t, "sw-restart", swOptions{})
 	rec := f.lifecycle(t, f.owner, "restart", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	requireFetched(t, f.fb, swItemA, swItemB)
 
-	require.True(t, f.client.restartCalled)
+	require.True(t, f.client.stopCalled, "precondition: the restart's stop leg ran")
+	require.True(t, f.client.startCalled, "precondition: the restart's start leg sent a start")
+	assert.False(t, f.client.restartCalled, "the restart endpoint never sends a broker restart")
+	assert.Contains(t, sentSecretNames(f.client.lastStartResolvedSecrets), swItemB, "the start leg carries B")
+	assert.NotContains(t, sentSecretNames(f.client.lastStartResolvedSecrets), swItemA)
+	assert.Equal(t, swItemBValue, f.client.lastResolvedEnv[swItemB])
+	assert.NotContains(t, f.client.lastResolvedEnv, swItemA)
+
+	assert.Equal(t, []string{swWarning(swItemA+" (project)", "started")}, lifecycleWarnings(t, rec.Body.Bytes()))
+	assertOneSkipLine(t, f.logs, f.agent.ID, PurposeDispatch, []skippedSecretLogItem{{swItemA, "project", skipClassAccess}})
+	assertNoSWLeak(t, rec.Body.Bytes(), f.logs)
+}
+
+// DispatchAgentRestart (the restart mint site) words its warning "restarted"
+// and sends the broker restart with B and not A. It is reached by a
+// reconcile "restart" row, not by the restart endpoint (see Test 3).
+func TestSkippedSecretWarning_DispatchAgentRestartVerb(t *testing.T) {
+	f := newSWFixture(t, "sw-restartverb", swOptions{})
+	ctx, warns := withDispatchWarnings(context.Background())
+	require.NoError(t, f.d.DispatchAgentRestart(ctx, f.agent))
+	requireFetched(t, f.fb, swItemA, swItemB)
+
+	require.True(t, f.client.restartCalled, "precondition: the broker restart was sent")
 	assert.Contains(t, sentSecretNames(f.client.lastRestartExtras.ResolvedSecrets), swItemB, "the restart request carries B")
 	assert.NotContains(t, sentSecretNames(f.client.lastRestartExtras.ResolvedSecrets), swItemA)
 	assert.Equal(t, swItemBValue, f.client.lastRestartResolvedEnv[swItemB])
 	assert.NotContains(t, f.client.lastRestartResolvedEnv, swItemA)
 
-	assert.Equal(t, []string{swWarning(swItemA+" (project)", "restarted")}, lifecycleWarnings(t, rec.Body.Bytes()))
+	assert.Equal(t, []string{swWarning(swItemA+" (project)", "restarted")}, warns.Warnings())
 	assertOneSkipLine(t, f.logs, f.agent.ID, PurposeRestart, []skippedSecretLogItem{{swItemA, "project", skipClassAccess}})
-	assertNoSWLeak(t, rec.Body.Bytes(), f.logs)
+	var all string
+	for _, w := range warns.Warnings() {
+		all += w
+	}
+	assertNoSWLeak(t, []byte(all), f.logs)
 }
 
 // swOwnerNode wraps the owner node's real dispatcher. Once its start or
@@ -539,7 +570,10 @@ func TestSkippedSecretWarning_CrossNode(t *testing.T) {
 		purpose MaterialPurpose
 	}{
 		{"start", "started", PurposeDispatch},
-		{"restart", "restarted", PurposeRestart},
+		// The restart endpoint is a stop leg plus a start leg (see Test 3):
+		// the owner executes the deferred stop row, then the deferred start
+		// row, so the warning says "started".
+		{"restart", "started", PurposeDispatch},
 	} {
 		t.Run(tc.action, func(t *testing.T) {
 			f := newSWFixture(t, "sw-xn-"+tc.action, swOptions{})
@@ -549,15 +583,12 @@ func TestSkippedSecretWarning_CrossNode(t *testing.T) {
 			requireFetched(t, c.ownerFB, swItemA, swItemB)
 			requireFetched(t, c.reqFB, swItemA)
 
-			if tc.action == "start" {
-				require.True(t, c.ownerClient.startCalled, "precondition: the owner sent the start")
-				assert.Contains(t, sentSecretNames(c.ownerClient.lastStartResolvedSecrets), swItemB)
-				assert.NotContains(t, sentSecretNames(c.ownerClient.lastStartResolvedSecrets), swItemA)
-			} else {
-				require.True(t, c.ownerClient.restartCalled, "precondition: the owner sent the restart")
-				assert.Contains(t, sentSecretNames(c.ownerClient.lastRestartExtras.ResolvedSecrets), swItemB)
-				assert.NotContains(t, sentSecretNames(c.ownerClient.lastRestartExtras.ResolvedSecrets), swItemA)
+			if tc.action == "restart" {
+				require.True(t, c.ownerClient.stopCalled, "precondition: the owner ran the restart's stop leg")
 			}
+			require.True(t, c.ownerClient.startCalled, "precondition: the owner sent the start")
+			assert.Contains(t, sentSecretNames(c.ownerClient.lastStartResolvedSecrets), swItemB)
+			assert.NotContains(t, sentSecretNames(c.ownerClient.lastStartResolvedSecrets), swItemA)
 
 			assert.Equal(t, []string{swWarning(swItemA+" (project)", tc.verb)}, lifecycleWarnings(t, rec.Body.Bytes()),
 				"the owner's warning, and only it, reaches the requester's response")
