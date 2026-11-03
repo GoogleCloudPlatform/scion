@@ -5747,11 +5747,14 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 				"agent has been deleted", nil)
 			return
 		}
-		if agent.Phase == "suspended" {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"agent is suspended", nil)
-			return
-		}
+	}
+	// A suspended agent gets no new token, whatever kind of token it
+	// presents. A nil agent (a lookup with no row and no error) is left to
+	// AuthorizeAgentToken, which refuses it.
+	if agent != nil && agent.Phase == string(state.PhaseSuspended) {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"agent is suspended", nil)
+		return
 	}
 
 	// The refreshed token keeps the run binding of the presented one: a

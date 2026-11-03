@@ -560,7 +560,7 @@ var MutationClassifications = []MutationClassification{
 	// -----------------------------------------------------------------------
 	// pkg/hub/handlers_agent_lifecycle.go
 	// -----------------------------------------------------------------------
-	{File: "pkg/hub/handlers_agent_lifecycle.go", Function: "revokeSuspendedCredentials", Symbol: "RevokeAgentCredentialsByAgent", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Agent suspend revokes credentials (reached only from suspendAgent), route-guarded by agent.update permission", Scope: "pkg/hub/handlers_agent_lifecycle.go"}},
+	{File: "pkg/hub/handlers_agent_lifecycle.go", Function: "revokeSuspendedCredentials", Symbol: "RevokeAgentCredentialsByAgent", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Agent suspend revokes every credential of the agent. Reached from suspendAgent, route-guarded by agent.update permission, and from the scheduler's autoSuspendStalledAgent, which is hub-internal (no request; the route guard covers only the suspendAgent entry); it only narrows access", Scope: "pkg/hub/handlers_agent_lifecycle.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/agent_credential_revoke.go — shared best-effort revoke helper
