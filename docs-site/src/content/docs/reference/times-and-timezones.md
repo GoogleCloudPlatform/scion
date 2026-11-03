@@ -27,6 +27,7 @@ Each user picks a zone with the **Display timezone** card on the profile setting
 - **Auto**, the default, follows the browser's zone.
 - The value is stored as the `timezone` user preference, an IANA name; empty means Auto. `PATCH /api/v1/users/:id` with an invalid name returns `400` (see the [Users API](/scion/reference/api/)).
 - The display zone never changes an agent's `TZ`.
+- When a user with a non-empty `timezone` preference sends a message to an agent, the Hub attaches `sender_timezone` to the message's `metadata` (see [Inbound Message Type Discrimination](/scion/hosted/user/messaging/#3-inbound-message-type-discrimination)).
 
 ### Metrics dashboard day buckets
 

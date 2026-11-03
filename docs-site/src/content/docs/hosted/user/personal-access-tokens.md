@@ -192,14 +192,14 @@ curl -H "Authorization: Bearer $SESSION_TOKEN" \
      "https://scion.example.com/api/v1/auth/scopes?projectId=<project-id>"
 ```
 
-For a hub boundary, send `?boundary=hub` with no `projectId`. A scope that a hub boundary allows
+For a hub boundary, send `?boundary=hub` with no `projectId` (or run `scion hub token scopes --boundary hub`). Under a hub boundary, a project-level scope is eligible when your user holds a system-level grant for its permissions, holds an active role binding in at least one project that grants them, or satisfies a relationship source (such as `agent:attach` or `agent:port_access` with admission to a project). A scope that a hub boundary allows
 but you cannot select is reported with the reason `authority_required`; a scope that a hub boundary
 does not allow reports `boundary_not_allowed`.
 
 Each scope in the response reports `eligibility.eligible` and, when it is not, a machine-readable
 `eligibility.reason` (for an alias such as `agent:manage`, `eligibility.ineligibleMembers` names the
 member scopes that are ineligible). The **Create Token** form in the web UI uses the same
-information: once you pick a project, scopes you cannot select are shown with the reason.
+information: once you pick a **Project** or **Hub** boundary (and a project when the boundary is Project), scopes you cannot select are disabled and shown with the reason.
 
 This answers only "may I select this restriction" — it never lists which agents or other targets
 the resulting token could reach. If you request eligibility for a project you cannot access, or
@@ -255,7 +255,9 @@ scion hub token create --boundary hub \
   --expires 30d
 ```
 
-The web UI's **Create Token** form always mints project tokens. Through the API, send
+In the web UI's **Create Token** dialog, switch **Boundary** from **Project** to **Hub** to mint a
+hub-bound token (changing the boundary or the selected project clears any selected scopes and reloads
+scope eligibility for the new boundary). Through the API, send
 `"boundary": {"kind": "hub"}` instead of `projectId` to `POST /api/v1/auth/tokens`. A missing
 boundary never means hub: a request that names neither `projectId` nor `boundary` is rejected
 with `400` (`details.reason` `boundary_required`). A hub boundary that also names a project, or a
@@ -442,8 +444,11 @@ common CLI flows need:
 | `scion delete` | `project:read`, `agent:delete` |
 | `scion project service-accounts list`, `scion service-accounts list` | `project:read` (a project's accounts) |
 
-A token without `project:read` gets `404 Not Found` on the project lookup. The CLI reports this
-as a likely missing `project:read` scope and stops. A user access token cannot register a new
+A token without `project:read` gets `404 Not Found` on a direct project lookup, and a token
+without `project:read` and `project:list` gets an empty list when the CLI resolves a project by
+its slug, name, or git remote URL. In both cases the CLI reports the likely missing
+`project:read` and `project:list` scopes (noting that `project:manage` does not include them)
+and stops instead of suggesting `scion hub link`. A user access token cannot register a new
 project, so the CLI does not try to link or register the project under one. Link the project
 once with an interactive login (`scion hub link`), then use the token.
 
@@ -532,8 +537,11 @@ Tokens can be managed either via the CLI or the Web UI.
 
 ### Using the Web UI
 The easiest way to administer your tokens is through the **Web UI management interface**
-available in your user profile. It lets you create, view, and revoke tokens visually, and
-configure action permissions and project-level scopes.
+available in your user profile. It lets you create, view, and revoke tokens visually: choose a
+**Project** or **Hub** boundary (shown as the project name or a **Hub** badge in the Boundary
+column), pick eligible action scopes, and optionally set an immutable **Purpose** (up to 128
+bytes) and up to 8 `key`/`value` **Labels**. If the Hub rejects a requested scope with `403`
+`scope_violation`, the dialog names the denied scope (`details.selector`).
 
 ### Using the CLI
 

@@ -55,9 +55,10 @@ IAP; see [Running a hub on GKE instead of Cloud Run](/scion/hosted/ha/terraform/
 
 The chart defaults to `replicaCount: 1`. With more than one replica, the web
 terminal, exec, log tailing, and port forwarding fail for roughly (N-1)/N of
-requests: the agent control channel, presence, and port tunnels are held in the
-memory of the pod that owns them, and load-balancer session affinity does not fix
-that.
+requests unless the `hub.conduit` experiment is on and cross-node relay TLS is
+configured (see [Relay TLS between hub nodes](#relay-tls-between-hub-nodes)):
+the agent control channel, presence, and port tunnels are held in the memory of
+the pod that owns them, and load-balancer session affinity does not fix that.
 
 ---
 
