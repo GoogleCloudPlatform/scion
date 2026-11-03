@@ -972,28 +972,6 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		classifyEnv(&req.EnvClassifications, "SCION_THINKING_LEVEL", api.EnvKindPlain)
 	}
 
-	// TZ comes only from the agent TZ resolver (pin > storage env > hub
-	// default > none). Any other TZ in the env built so far is dropped; the
-	// writers below (storage merge, env secrets) skip the key.
-	//
-	// A storage read error never lets a lower rung stand in: create,
-	// create-with-gather and finalize-env fail like a stored env settings
-	// read error below; provision and reprovision send no TZ (they do not
-	// start the container, and the start resolves TZ again and fails closed).
-	tz, err := d.resolveAgentTZ(ctx, agent, false)
-	if err != nil && secrets == failOnSecretResolutionError {
-		d.log.WarnContext(ctx, callerName+": failed to read stored TZ settings; agent not created",
-			"agent_id", agent.ID, "scope", tzReadScope(err))
-		return nil, &secretResolutionError{Verb: "created", Source: resolutionSourceEnvSettings, Err: err}
-	}
-	if err != nil {
-		// continueOnSecretResolutionError (provision, reprovision).
-		d.log.WarnContext(ctx, callerName+": failed to read stored TZ settings; provisioning without TZ",
-			"agent_id", agent.ID, "scope", tzReadScope(err))
-		tz = agentTZ{Source: TZSourceNone}
-	}
-	setResolvedAgentTZ(req.ResolvedEnv, &req.EnvClassifications, tz)
-
 	// Inject hub name so agents can label their Cloud Logging entries with the
 	// hub identity, matching the hub-scoped log query filter (labels.hub).
 	if d.hubName != "" {
@@ -1040,6 +1018,30 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 			}
 		}
 	}
+
+	// TZ comes only from the agent TZ resolver (pin > storage env > hub
+	// default > none). Any other TZ in the env built so far is dropped; the
+	// storage merge above and the env secrets below skip the key. It runs after
+	// the stored env settings read, so when the whole store is down that
+	// read's error is the one reported.
+	//
+	// A storage read error never lets a lower rung stand in: create,
+	// create-with-gather and finalize-env fail like the stored env settings
+	// read error above; provision and reprovision send no TZ (they do not
+	// start the container, and the start resolves TZ again and fails closed).
+	tz, err := d.resolveAgentTZ(ctx, agent, false)
+	if err != nil && secrets == failOnSecretResolutionError {
+		d.log.WarnContext(ctx, callerName+": failed to read stored TZ settings; agent not created",
+			"agent_id", agent.ID, "scope", tzReadScope(err))
+		return nil, &secretResolutionError{Verb: "created", Source: resolutionSourceEnvSettings, Err: err}
+	}
+	if err != nil {
+		// continueOnSecretResolutionError (provision, reprovision).
+		d.log.WarnContext(ctx, callerName+": failed to read stored TZ settings; provisioning without TZ",
+			"agent_id", agent.ID, "scope", tzReadScope(err))
+		tz = agentTZ{Source: TZSourceNone}
+	}
+	setResolvedAgentTZ(req.ResolvedEnv, &req.EnvClassifications, tz)
 
 	// Include the template's secret declarations for broker env-gather,
 	// from the template's job config (its stripped AgentConfig snapshot,
