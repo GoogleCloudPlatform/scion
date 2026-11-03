@@ -355,7 +355,7 @@ export class ScionChatMembers extends LitElement {
     }
 
     .member-item:hover {
-      background: var(--scion-surface-hover, rgba(0, 0, 0, 0.05));
+      background: var(--scion-bg-subtle, #f1f5f9);
     }
 
     .member-item.active-peer {

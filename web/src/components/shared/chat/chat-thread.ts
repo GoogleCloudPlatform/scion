@@ -1511,7 +1511,7 @@ export class ScionChatThread extends LitElement {
         padding: 0.625rem 1rem calc(0.625rem + env(safe-area-inset-bottom, 0px));
         font-size: var(--chat-fs-base);
         border-top: 1px solid var(--scion-border, #e2e8f0);
-        background: var(--scion-surface-2, #f8fafc);
+        background: var(--scion-bg, #f8fafc);
       }
 
       .star-filter-banner > sl-icon {
@@ -1533,6 +1533,20 @@ export class ScionChatThread extends LitElement {
 
       .star-filter-show-all {
         flex-shrink: 0;
+      }
+
+      /* The theme maps Shoelace's neutral scale to the same slate values in
+         both themes, so a default button's label (neutral-700) would sit
+         on a neutral-800 button in the dark theme. Theme tokens keep the
+         label, border and fill readable in both. */
+      .star-filter-show-all::part(base) {
+        background: var(--scion-surface, #ffffff);
+        border-color: var(--scion-border-hover, #cbd5e1);
+        color: var(--scion-text, #1e293b);
+      }
+
+      .star-filter-show-all::part(base):hover {
+        color: var(--scion-primary-hover, #2563eb);
       }
 
       /* A 44 px touch target on a phone or tablet; Shoelace centres the
