@@ -230,6 +230,25 @@ func TestDiagnosticsSharedDirClaimClasses_ListCapped(t *testing.T) {
 	if !strings.Contains(c.Message, "and 3 more") || !strings.Contains(c.Message, "13 shared-dir claims") {
 		t.Errorf("message = %q", c.Message)
 	}
+	// The first sharedDirClaimClassesListMax names in sorted order are named,
+	// in that order; the rest are only counted.
+	last := -1
+	for i := 0; i < sharedDirClaimClassesListMax; i++ {
+		name := fmt.Sprintf("scion-shared-p-d%02d (class standard)", i)
+		at := strings.Index(c.Message, name)
+		if at < 0 {
+			t.Fatalf("message does not name %q: %q", name, c.Message)
+		}
+		if at <= last {
+			t.Errorf("%q is out of sorted order in %q", name, c.Message)
+		}
+		last = at
+	}
+	for i := sharedDirClaimClassesListMax; i < sharedDirClaimClassesListMax+3; i++ {
+		if name := fmt.Sprintf("scion-shared-p-d%02d", i); strings.Contains(c.Message, name) {
+			t.Errorf("message names %q past the cap: %q", name, c.Message)
+		}
+	}
 }
 
 func TestDiagnosticsSharedDirClaimClasses_AllMatch(t *testing.T) {
