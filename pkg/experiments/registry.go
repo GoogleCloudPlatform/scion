@@ -250,7 +250,7 @@ const AsyncAgentLaunch = "hub.async_agent_launch"
 // off. While any live hub instance in the hub-instance registry lacks
 // async_start_v1, starts stay synchronous whatever its value. The check sees
 // only nodes that write the registry: a node on a version from before the
-// registry (ptone/scion#3078) writes no row and is not counted, so an
+// registry (GoogleCloudPlatform/scion#3078) writes no row and is not counted, so an
 // operator upgrading a multi-node hub from such a version turns this off
 // until every node is upgraded. To roll back, turn it off with an admin
 // override and wait launch_timeout plus 15 seconds before downgrading any

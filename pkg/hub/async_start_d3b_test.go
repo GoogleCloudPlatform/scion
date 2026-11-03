@@ -751,7 +751,6 @@ func TestAsyncStartAllowed_OverrideOffRollback(t *testing.T) {
 	require.False(t, srv.experimentEnabled(experiments.AsyncAgentStart), "off once an admin turns it off")
 	assert.False(t, srv.asyncStartAllowed(), "starts are synchronous at once: the cached true is not used while off")
 	srv.asyncStartGateRefreshTick(context.Background())
-	time.Sleep(20 * time.Millisecond)
 	assert.Equal(t, int32(1), st.reads.Load(), "no registry read while an admin has it off")
 
 	// Same Server, no restart: the next read sees the change.
