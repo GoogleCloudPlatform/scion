@@ -1054,6 +1054,65 @@ func TestListScopes(t *testing.T) {
 	})
 }
 
+// TestListScopes_HubBoundaryQuery verifies a hub-boundary request sends
+// boundary=hub without a projectId, decodes authority_required, and
+// surfaces unsupported_boundary from a hub without hub eligibility as a
+// typed APIError.
+func TestListScopes_HubBoundaryQuery(t *testing.T) {
+	t.Run("hub eligibility", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if got := r.URL.Query().Get("boundary"); got != BoundaryHub {
+				t.Errorf("expected boundary=hub, got %q", got)
+			}
+			if _, ok := r.URL.Query()["projectId"]; ok {
+				t.Errorf("hub boundary must not send projectId, got %q", r.URL.RawQuery)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(ScopesResponse{
+				Scopes: []ScopeInfo{{
+					ID: "broker:read", Resource: "broker", Action: "read", AllowedBoundaries: []string{BoundaryHub},
+					Eligibility: &ScopeEligibility{
+						Boundary: TokenBoundary{Kind: BoundaryHub},
+						Reason:   "authority_required",
+					},
+				}},
+			})
+		}))
+		defer server.Close()
+
+		client, _ := New(server.URL)
+		resp, err := client.Tokens().ListScopes(context.Background(), &ListScopesOptions{Boundary: BoundaryHub})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(resp.Scopes) != 1 || resp.Scopes[0].Eligibility == nil {
+			t.Fatalf("unexpected scopes: %+v", resp.Scopes)
+		}
+		e := resp.Scopes[0].Eligibility
+		if e.Eligible || e.Reason != "authority_required" || e.Boundary.Kind != BoundaryHub {
+			t.Errorf("unexpected eligibility: %+v", e)
+		}
+	})
+
+	t.Run("hub without hub eligibility answers unsupported_boundary", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": map[string]interface{}{"code": "unsupported_boundary", "message": "hub boundary eligibility is not available"},
+			})
+		}))
+		defer server.Close()
+
+		client, _ := New(server.URL)
+		_, err := client.Tokens().ListScopes(context.Background(), &ListScopesOptions{Boundary: BoundaryHub})
+		var apiErr *apiclient.APIError
+		if !errors.As(err, &apiErr) || apiErr.Code != "unsupported_boundary" {
+			t.Fatalf("expected APIError with code unsupported_boundary, got %v", err)
+		}
+	})
+}
+
 // TestAsScopeViolation verifies the typed helper extracts the selector and
 // reason from a 403 scope_violation error, and returns ok=false for the
 // detail-free, oracle-resistant project-forbidden error.
