@@ -2541,7 +2541,7 @@ authDone:
 				// the private copy only where the runtime binds that copy over
 				// .git/config (docker, podman); the Apple runtime reads the
 				// repository config directly, so there they are refused.
-				stripNeverCarry := m.Runtime.Name() == "docker" || m.Runtime.Name() == "podman"
+				stripNeverCarry := bindsPrivateGitConfig(m.Runtime.Name())
 				src, neverCarried, seedErr := seedCheckedPrivateGitConfigStrip(ctx, repoRoot, effectiveWorkspace, agentDir, seedBranch, stripNeverCarry)
 				if seedErr != nil {
 					return nil, fmt.Errorf("seed private git config for agent %q: %w", opts.Name, seedErr)

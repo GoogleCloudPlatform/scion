@@ -38,6 +38,15 @@ const maxPrivateGitConfigSize = 1 << 20 // 1 MiB
 // fails closed; it is otherwise exactly (*os.File).Close.
 var tmpConfigClose = func(f *os.File) error { return f.Close() }
 
+// bindsPrivateGitConfig reports whether the runtime binds the agent's private
+// copy of .git/config over the repository's (docker, podman). Only there can
+// keys that name a command or a hook location be left out of what the agent's
+// git reads; the Apple container runtime reads the repository config
+// directly, so there they are refused.
+func bindsPrivateGitConfig(runtimeName string) bool {
+	return runtimeName == "docker" || runtimeName == "podman"
+}
+
 // seedCheckedPrivateGitConfig checks every repository config layer the agent's
 // git reads raw (util.CheckSeedRepoConfigLayers: the common and the agent's own
 // config.worktree, cross-checked against git) and then seeds the private copy

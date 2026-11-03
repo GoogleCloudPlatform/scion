@@ -156,3 +156,15 @@ func TestSeedCheckedPrivateGitConfigStrip_RunsNoPlantedCommand(t *testing.T) {
 		}
 	}
 }
+
+// Keys are left out of the copy only on the runtimes that bind it.
+func TestBindsPrivateGitConfig(t *testing.T) {
+	for name, want := range map[string]bool{
+		"docker": true, "podman": true,
+		"container": false, "apple-container": false, "kubernetes": false, "cloudrun": false, "": false,
+	} {
+		if got := bindsPrivateGitConfig(name); got != want {
+			t.Errorf("bindsPrivateGitConfig(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
