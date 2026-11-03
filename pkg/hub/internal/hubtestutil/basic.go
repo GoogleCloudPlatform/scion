@@ -20,14 +20,14 @@ import (
 	"time"
 )
 
-// DevToken is the development token used for testing.
+// testDevToken is the development token used for testing.
 const DevToken = "scion_dev_test_token_for_unit_tests_1234567890"
 
 func StrPtr(s string) *string { return &s }
 
 func IntPtr(i int) *int { return &i }
 
-// Itoa is a minimal int-to-string without importing strconv.
+// itoa is a minimal int-to-string without importing strconv.
 func Itoa(n int) string {
 	if n == 0 {
 		return "0"
@@ -50,11 +50,11 @@ func Itoa(n int) string {
 	return string(buf[i:])
 }
 
-// AlwaysAuthorized is a permissive pkg/hub authChecker for tests that don't exercise
+// alwaysAuthorized is a permissive authChecker for tests that don't exercise
 // the authorization policy path.
 func AlwaysAuthorized(_ context.Context, _ string) bool { return true }
 
-// RequireNoError is a test helper that fails immediately on error.
+// require_NoError is a test helper that fails immediately on error.
 func RequireNoError(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
