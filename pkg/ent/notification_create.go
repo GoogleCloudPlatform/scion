@@ -150,6 +150,48 @@ func (_c *NotificationCreate) SetNillableNextAttemptAt(v *time.Time) *Notificati
 	return _c
 }
 
+// SetKind sets the "kind" field.
+func (_c *NotificationCreate) SetKind(v string) *NotificationCreate {
+	_c.mutation.SetKind(v)
+	return _c
+}
+
+// SetNillableKind sets the "kind" field if the given value is not nil.
+func (_c *NotificationCreate) SetNillableKind(v *string) *NotificationCreate {
+	if v != nil {
+		_c.SetKind(*v)
+	}
+	return _c
+}
+
+// SetResourceType sets the "resource_type" field.
+func (_c *NotificationCreate) SetResourceType(v string) *NotificationCreate {
+	_c.mutation.SetResourceType(v)
+	return _c
+}
+
+// SetNillableResourceType sets the "resource_type" field if the given value is not nil.
+func (_c *NotificationCreate) SetNillableResourceType(v *string) *NotificationCreate {
+	if v != nil {
+		_c.SetResourceType(*v)
+	}
+	return _c
+}
+
+// SetResourceID sets the "resource_id" field.
+func (_c *NotificationCreate) SetResourceID(v string) *NotificationCreate {
+	_c.mutation.SetResourceID(v)
+	return _c
+}
+
+// SetNillableResourceID sets the "resource_id" field if the given value is not nil.
+func (_c *NotificationCreate) SetNillableResourceID(v *string) *NotificationCreate {
+	if v != nil {
+		_c.SetResourceID(*v)
+	}
+	return _c
+}
+
 // SetCreated sets the "created" field.
 func (_c *NotificationCreate) SetCreated(v time.Time) *NotificationCreate {
 	_c.mutation.SetCreated(v)
@@ -233,6 +275,18 @@ func (_c *NotificationCreate) defaults() {
 		v := notification.DefaultDispatchReason
 		_c.mutation.SetDispatchReason(v)
 	}
+	if _, ok := _c.mutation.Kind(); !ok {
+		v := notification.DefaultKind
+		_c.mutation.SetKind(v)
+	}
+	if _, ok := _c.mutation.ResourceType(); !ok {
+		v := notification.DefaultResourceType
+		_c.mutation.SetResourceType(v)
+	}
+	if _, ok := _c.mutation.ResourceID(); !ok {
+		v := notification.DefaultResourceID
+		_c.mutation.SetResourceID(v)
+	}
 	if _, ok := _c.mutation.Created(); !ok {
 		v := notification.DefaultCreated()
 		_c.mutation.SetCreated(v)
@@ -305,6 +359,15 @@ func (_c *NotificationCreate) check() error {
 	}
 	if _, ok := _c.mutation.DispatchReason(); !ok {
 		return &ValidationError{Name: "dispatch_reason", err: errors.New(`ent: missing required field "Notification.dispatch_reason"`)}
+	}
+	if _, ok := _c.mutation.Kind(); !ok {
+		return &ValidationError{Name: "kind", err: errors.New(`ent: missing required field "Notification.kind"`)}
+	}
+	if _, ok := _c.mutation.ResourceType(); !ok {
+		return &ValidationError{Name: "resource_type", err: errors.New(`ent: missing required field "Notification.resource_type"`)}
+	}
+	if _, ok := _c.mutation.ResourceID(); !ok {
+		return &ValidationError{Name: "resource_id", err: errors.New(`ent: missing required field "Notification.resource_id"`)}
 	}
 	if _, ok := _c.mutation.Created(); !ok {
 		return &ValidationError{Name: "created", err: errors.New(`ent: missing required field "Notification.created"`)}
@@ -396,6 +459,18 @@ func (_c *NotificationCreate) createSpec() (*Notification, *sqlgraph.CreateSpec)
 	if value, ok := _c.mutation.NextAttemptAt(); ok {
 		_spec.SetField(notification.FieldNextAttemptAt, field.TypeTime, value)
 		_node.NextAttemptAt = &value
+	}
+	if value, ok := _c.mutation.Kind(); ok {
+		_spec.SetField(notification.FieldKind, field.TypeString, value)
+		_node.Kind = value
+	}
+	if value, ok := _c.mutation.ResourceType(); ok {
+		_spec.SetField(notification.FieldResourceType, field.TypeString, value)
+		_node.ResourceType = value
+	}
+	if value, ok := _c.mutation.ResourceID(); ok {
+		_spec.SetField(notification.FieldResourceID, field.TypeString, value)
+		_node.ResourceID = value
 	}
 	if value, ok := _c.mutation.Created(); ok {
 		_spec.SetField(notification.FieldCreated, field.TypeTime, value)
@@ -618,6 +693,42 @@ func (u *NotificationUpsert) UpdateNextAttemptAt() *NotificationUpsert {
 // ClearNextAttemptAt clears the value of the "next_attempt_at" field.
 func (u *NotificationUpsert) ClearNextAttemptAt() *NotificationUpsert {
 	u.SetNull(notification.FieldNextAttemptAt)
+	return u
+}
+
+// SetKind sets the "kind" field.
+func (u *NotificationUpsert) SetKind(v string) *NotificationUpsert {
+	u.Set(notification.FieldKind, v)
+	return u
+}
+
+// UpdateKind sets the "kind" field to the value that was provided on create.
+func (u *NotificationUpsert) UpdateKind() *NotificationUpsert {
+	u.SetExcluded(notification.FieldKind)
+	return u
+}
+
+// SetResourceType sets the "resource_type" field.
+func (u *NotificationUpsert) SetResourceType(v string) *NotificationUpsert {
+	u.Set(notification.FieldResourceType, v)
+	return u
+}
+
+// UpdateResourceType sets the "resource_type" field to the value that was provided on create.
+func (u *NotificationUpsert) UpdateResourceType() *NotificationUpsert {
+	u.SetExcluded(notification.FieldResourceType)
+	return u
+}
+
+// SetResourceID sets the "resource_id" field.
+func (u *NotificationUpsert) SetResourceID(v string) *NotificationUpsert {
+	u.Set(notification.FieldResourceID, v)
+	return u
+}
+
+// UpdateResourceID sets the "resource_id" field to the value that was provided on create.
+func (u *NotificationUpsert) UpdateResourceID() *NotificationUpsert {
+	u.SetExcluded(notification.FieldResourceID)
 	return u
 }
 
@@ -865,6 +976,48 @@ func (u *NotificationUpsertOne) UpdateNextAttemptAt() *NotificationUpsertOne {
 func (u *NotificationUpsertOne) ClearNextAttemptAt() *NotificationUpsertOne {
 	return u.Update(func(s *NotificationUpsert) {
 		s.ClearNextAttemptAt()
+	})
+}
+
+// SetKind sets the "kind" field.
+func (u *NotificationUpsertOne) SetKind(v string) *NotificationUpsertOne {
+	return u.Update(func(s *NotificationUpsert) {
+		s.SetKind(v)
+	})
+}
+
+// UpdateKind sets the "kind" field to the value that was provided on create.
+func (u *NotificationUpsertOne) UpdateKind() *NotificationUpsertOne {
+	return u.Update(func(s *NotificationUpsert) {
+		s.UpdateKind()
+	})
+}
+
+// SetResourceType sets the "resource_type" field.
+func (u *NotificationUpsertOne) SetResourceType(v string) *NotificationUpsertOne {
+	return u.Update(func(s *NotificationUpsert) {
+		s.SetResourceType(v)
+	})
+}
+
+// UpdateResourceType sets the "resource_type" field to the value that was provided on create.
+func (u *NotificationUpsertOne) UpdateResourceType() *NotificationUpsertOne {
+	return u.Update(func(s *NotificationUpsert) {
+		s.UpdateResourceType()
+	})
+}
+
+// SetResourceID sets the "resource_id" field.
+func (u *NotificationUpsertOne) SetResourceID(v string) *NotificationUpsertOne {
+	return u.Update(func(s *NotificationUpsert) {
+		s.SetResourceID(v)
+	})
+}
+
+// UpdateResourceID sets the "resource_id" field to the value that was provided on create.
+func (u *NotificationUpsertOne) UpdateResourceID() *NotificationUpsertOne {
+	return u.Update(func(s *NotificationUpsert) {
+		s.UpdateResourceID()
 	})
 }
 
@@ -1279,6 +1432,48 @@ func (u *NotificationUpsertBulk) UpdateNextAttemptAt() *NotificationUpsertBulk {
 func (u *NotificationUpsertBulk) ClearNextAttemptAt() *NotificationUpsertBulk {
 	return u.Update(func(s *NotificationUpsert) {
 		s.ClearNextAttemptAt()
+	})
+}
+
+// SetKind sets the "kind" field.
+func (u *NotificationUpsertBulk) SetKind(v string) *NotificationUpsertBulk {
+	return u.Update(func(s *NotificationUpsert) {
+		s.SetKind(v)
+	})
+}
+
+// UpdateKind sets the "kind" field to the value that was provided on create.
+func (u *NotificationUpsertBulk) UpdateKind() *NotificationUpsertBulk {
+	return u.Update(func(s *NotificationUpsert) {
+		s.UpdateKind()
+	})
+}
+
+// SetResourceType sets the "resource_type" field.
+func (u *NotificationUpsertBulk) SetResourceType(v string) *NotificationUpsertBulk {
+	return u.Update(func(s *NotificationUpsert) {
+		s.SetResourceType(v)
+	})
+}
+
+// UpdateResourceType sets the "resource_type" field to the value that was provided on create.
+func (u *NotificationUpsertBulk) UpdateResourceType() *NotificationUpsertBulk {
+	return u.Update(func(s *NotificationUpsert) {
+		s.UpdateResourceType()
+	})
+}
+
+// SetResourceID sets the "resource_id" field.
+func (u *NotificationUpsertBulk) SetResourceID(v string) *NotificationUpsertBulk {
+	return u.Update(func(s *NotificationUpsert) {
+		s.SetResourceID(v)
+	})
+}
+
+// UpdateResourceID sets the "resource_id" field to the value that was provided on create.
+func (u *NotificationUpsertBulk) UpdateResourceID() *NotificationUpsertBulk {
+	return u.Update(func(s *NotificationUpsert) {
+		s.UpdateResourceID()
 	})
 }
 

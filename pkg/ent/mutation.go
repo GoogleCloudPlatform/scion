@@ -67006,6 +67006,9 @@ type NotificationMutation struct {
 	dispatch_outcome     *string
 	dispatch_reason      *string
 	next_attempt_at      *time.Time
+	kind                 *string
+	resource_type        *string
+	resource_id          *string
 	created              *time.Time
 	clearedFields        map[string]struct{}
 	done                 bool
@@ -67618,6 +67621,114 @@ func (m *NotificationMutation) ResetNextAttemptAt() {
 	delete(m.clearedFields, notification.FieldNextAttemptAt)
 }
 
+// SetKind sets the "kind" field.
+func (m *NotificationMutation) SetKind(s string) {
+	m.kind = &s
+}
+
+// Kind returns the value of the "kind" field in the mutation.
+func (m *NotificationMutation) Kind() (r string, exists bool) {
+	v := m.kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldKind returns the old "kind" field's value of the Notification entity.
+// If the Notification object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *NotificationMutation) OldKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldKind: %w", err)
+	}
+	return oldValue.Kind, nil
+}
+
+// ResetKind resets all changes to the "kind" field.
+func (m *NotificationMutation) ResetKind() {
+	m.kind = nil
+}
+
+// SetResourceType sets the "resource_type" field.
+func (m *NotificationMutation) SetResourceType(s string) {
+	m.resource_type = &s
+}
+
+// ResourceType returns the value of the "resource_type" field in the mutation.
+func (m *NotificationMutation) ResourceType() (r string, exists bool) {
+	v := m.resource_type
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldResourceType returns the old "resource_type" field's value of the Notification entity.
+// If the Notification object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *NotificationMutation) OldResourceType(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldResourceType is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldResourceType requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldResourceType: %w", err)
+	}
+	return oldValue.ResourceType, nil
+}
+
+// ResetResourceType resets all changes to the "resource_type" field.
+func (m *NotificationMutation) ResetResourceType() {
+	m.resource_type = nil
+}
+
+// SetResourceID sets the "resource_id" field.
+func (m *NotificationMutation) SetResourceID(s string) {
+	m.resource_id = &s
+}
+
+// ResourceID returns the value of the "resource_id" field in the mutation.
+func (m *NotificationMutation) ResourceID() (r string, exists bool) {
+	v := m.resource_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldResourceID returns the old "resource_id" field's value of the Notification entity.
+// If the Notification object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *NotificationMutation) OldResourceID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldResourceID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldResourceID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldResourceID: %w", err)
+	}
+	return oldValue.ResourceID, nil
+}
+
+// ResetResourceID resets all changes to the "resource_id" field.
+func (m *NotificationMutation) ResetResourceID() {
+	m.resource_id = nil
+}
+
 // SetCreated sets the "created" field.
 func (m *NotificationMutation) SetCreated(t time.Time) {
 	m.created = &t
@@ -67688,7 +67799,7 @@ func (m *NotificationMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *NotificationMutation) Fields() []string {
-	fields := make([]string, 0, 14)
+	fields := make([]string, 0, 17)
 	if m.subscription_id != nil {
 		fields = append(fields, notification.FieldSubscriptionID)
 	}
@@ -67728,6 +67839,15 @@ func (m *NotificationMutation) Fields() []string {
 	if m.next_attempt_at != nil {
 		fields = append(fields, notification.FieldNextAttemptAt)
 	}
+	if m.kind != nil {
+		fields = append(fields, notification.FieldKind)
+	}
+	if m.resource_type != nil {
+		fields = append(fields, notification.FieldResourceType)
+	}
+	if m.resource_id != nil {
+		fields = append(fields, notification.FieldResourceID)
+	}
 	if m.created != nil {
 		fields = append(fields, notification.FieldCreated)
 	}
@@ -67765,6 +67885,12 @@ func (m *NotificationMutation) Field(name string) (ent.Value, bool) {
 		return m.DispatchReason()
 	case notification.FieldNextAttemptAt:
 		return m.NextAttemptAt()
+	case notification.FieldKind:
+		return m.Kind()
+	case notification.FieldResourceType:
+		return m.ResourceType()
+	case notification.FieldResourceID:
+		return m.ResourceID()
 	case notification.FieldCreated:
 		return m.Created()
 	}
@@ -67802,6 +67928,12 @@ func (m *NotificationMutation) OldField(ctx context.Context, name string) (ent.V
 		return m.OldDispatchReason(ctx)
 	case notification.FieldNextAttemptAt:
 		return m.OldNextAttemptAt(ctx)
+	case notification.FieldKind:
+		return m.OldKind(ctx)
+	case notification.FieldResourceType:
+		return m.OldResourceType(ctx)
+	case notification.FieldResourceID:
+		return m.OldResourceID(ctx)
 	case notification.FieldCreated:
 		return m.OldCreated(ctx)
 	}
@@ -67903,6 +68035,27 @@ func (m *NotificationMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetNextAttemptAt(v)
+		return nil
+	case notification.FieldKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetKind(v)
+		return nil
+	case notification.FieldResourceType:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetResourceType(v)
+		return nil
+	case notification.FieldResourceID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetResourceID(v)
 		return nil
 	case notification.FieldCreated:
 		v, ok := value.(time.Time)
@@ -68022,6 +68175,15 @@ func (m *NotificationMutation) ResetField(name string) error {
 		return nil
 	case notification.FieldNextAttemptAt:
 		m.ResetNextAttemptAt()
+		return nil
+	case notification.FieldKind:
+		m.ResetKind()
+		return nil
+	case notification.FieldResourceType:
+		m.ResetResourceType()
+		return nil
+	case notification.FieldResourceID:
+		m.ResetResourceID()
 		return nil
 	case notification.FieldCreated:
 		m.ResetCreated()

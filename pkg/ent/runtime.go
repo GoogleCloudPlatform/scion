@@ -2095,8 +2095,20 @@ func init() {
 	notificationDescDispatchReason := notificationFields[12].Descriptor()
 	// notification.DefaultDispatchReason holds the default value on creation for the dispatch_reason field.
 	notification.DefaultDispatchReason = notificationDescDispatchReason.Default.(string)
+	// notificationDescKind is the schema descriptor for kind field.
+	notificationDescKind := notificationFields[14].Descriptor()
+	// notification.DefaultKind holds the default value on creation for the kind field.
+	notification.DefaultKind = notificationDescKind.Default.(string)
+	// notificationDescResourceType is the schema descriptor for resource_type field.
+	notificationDescResourceType := notificationFields[15].Descriptor()
+	// notification.DefaultResourceType holds the default value on creation for the resource_type field.
+	notification.DefaultResourceType = notificationDescResourceType.Default.(string)
+	// notificationDescResourceID is the schema descriptor for resource_id field.
+	notificationDescResourceID := notificationFields[16].Descriptor()
+	// notification.DefaultResourceID holds the default value on creation for the resource_id field.
+	notification.DefaultResourceID = notificationDescResourceID.Default.(string)
 	// notificationDescCreated is the schema descriptor for created field.
-	notificationDescCreated := notificationFields[14].Descriptor()
+	notificationDescCreated := notificationFields[17].Descriptor()
 	// notification.DefaultCreated holds the default value on creation for the created field.
 	notification.DefaultCreated = notificationDescCreated.Default.(func() time.Time)
 	// notificationDescID is the schema descriptor for id field.
