@@ -42,6 +42,7 @@ func initBareRepoWithTree(t *testing.T) string {
 	runIn(t, work, "git", "add", "-A")
 	runIn(t, work, "git", "-c", "user.name=test", "-c", "user.email=test@test.com", "commit", "-m", "tree")
 	runIn(t, work, "git", "push", "origin", "main")
+	AllowLocalCloneFixture(t, bare)
 	return bare
 }
 
