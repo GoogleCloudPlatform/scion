@@ -173,6 +173,8 @@ func (r *KubernetesRuntime) checkSharedDirClaimClasses(namespace string, opts Di
 		Status:  "warn",
 		Message: msg,
 		Remediation: "Existing claims are never changed; a new shared_dir_storage_class applies only to new claims. " +
-			"To move a claim to the new class, delete it while no agent uses it (its data is lost); the next start creates it again",
+			"A different class can be expected: a template's or agent's kubernetes block, or another profile using this namespace, " +
+			"may set it. Delete a claim only if its class is really wrong, and only while no agent uses it (its data is lost); " +
+			"the next start creates it again",
 	}, true
 }

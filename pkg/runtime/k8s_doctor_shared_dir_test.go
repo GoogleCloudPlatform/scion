@@ -190,8 +190,10 @@ func TestDiagnosticsSharedDirClaimClasses_Mismatch(t *testing.T) {
 			t.Errorf("message %q must not name %q", c.Message, unwanted)
 		}
 	}
-	if c.Remediation == "" {
-		t.Errorf("a differing claim needs a remediation")
+	for _, want := range []string{"template's or agent's kubernetes block", "another profile using this namespace", "only if its class is really wrong"} {
+		if !strings.Contains(c.Remediation, want) {
+			t.Errorf("remediation %q does not contain %q", c.Remediation, want)
+		}
 	}
 
 	// Read-only and namespace-scoped: the claim check only lists, in the
