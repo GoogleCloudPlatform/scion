@@ -248,6 +248,11 @@ func TestDiagnosticsSharedDirClaimClasses_ListForbidden(t *testing.T) {
 	if c.Status != "warn" || !strings.Contains(c.Message, "Could not list") {
 		t.Fatalf("check = %+v, want a could-not-list warning (never fail)", c)
 	}
+	want := "To have doctor check existing claims, grant list on persistentvolumeclaims in this namespace; " +
+		"the Runtime Broker also uses it, with delete, to release a deleted project's shared-dir claims"
+	if c.Remediation != want {
+		t.Errorf("remediation = %q, want %q", c.Remediation, want)
+	}
 }
 
 func TestDiagnosticsSharedDirClaimClasses_ListError(t *testing.T) {

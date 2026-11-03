@@ -1171,7 +1171,7 @@ This checks:
 - Pod CRUD and exec permissions
 - Secret management permissions
 - That the StorageClass named by `shared_dir_storage_class` in the settings exists. When the Runtime Broker cannot read StorageClasses, which are cluster-scoped, this is only a warning. Whether the class supports `ReadWriteMany` is not checked. With no class set, an information line says that starts needing a new claim are refused.
-- Existing shared-dir claims in the namespace whose storage class differs from `shared_dir_storage_class`, as a warning (existing claims are never changed)
+- Existing shared-dir claims in the namespace whose storage class differs from `shared_dir_storage_class`, as a warning (existing claims are never changed). Without `list` on persistentvolumeclaims in the namespace, this check is a warning that it could not list the claims.
 - (GKE mode) SecretProviderClass CRD availability
 - (GKE mode) Secrets Store CSI driver installation
 - (GKE mode) GCS FUSE CSI driver installation

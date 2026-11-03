@@ -116,6 +116,15 @@ func (r *KubernetesRuntime) checkSharedDirClaimClasses(namespace string, opts Di
 	ctx, cancel := r.diagnosticContext()
 	defer cancel()
 	list, err := r.Client.Clientset.CoreV1().PersistentVolumeClaims(namespace).List(ctx, metav1.ListOptions{LabelSelector: sharedDirClaimLabel})
+	if k8serrors.IsForbidden(err) {
+		return CheckResult{
+			Name:    sharedDirClaimClassesCheck,
+			Status:  "warn",
+			Message: fmt.Sprintf("Could not list shared-dir claims in namespace %q: listing persistentvolumeclaims is not allowed", namespace),
+			Remediation: "To have doctor check existing claims, grant list on persistentvolumeclaims in this namespace; " +
+				"the Runtime Broker also uses it, with delete, to release a deleted project's shared-dir claims",
+		}, true
+	}
 	if err != nil {
 		return CheckResult{
 			Name:    sharedDirClaimClassesCheck,
