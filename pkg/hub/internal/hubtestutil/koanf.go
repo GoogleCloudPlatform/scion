@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hub
+package hubtestutil
 
 import (
 	"testing"
@@ -21,11 +21,11 @@ import (
 	"github.com/knadh/koanf/v2"
 )
 
-func emptyKoanf() *koanf.Koanf {
+func EmptyKoanf() *koanf.Koanf {
 	return koanf.New(".")
 }
 
-func newFileKoanf(t *testing.T, flat map[string]interface{}) *koanf.Koanf {
+func NewFileKoanf(t *testing.T, flat map[string]interface{}) *koanf.Koanf {
 	t.Helper()
 	k := koanf.New(".")
 	if err := k.Load(confmap.Provider(flat, "."), nil); err != nil {
@@ -34,7 +34,7 @@ func newFileKoanf(t *testing.T, flat map[string]interface{}) *koanf.Koanf {
 	return k
 }
 
-func newEnvKoanf(t *testing.T, flat map[string]interface{}) *koanf.Koanf {
+func NewEnvKoanf(t *testing.T, flat map[string]interface{}) *koanf.Koanf {
 	t.Helper()
 	k := koanf.New(".")
 	if err := k.Load(confmap.Provider(flat, "."), nil); err != nil {
