@@ -21,8 +21,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -48,17 +48,24 @@ const (
 )
 
 // tzKeyErrStore fails only the TZ storage rung's reads: ListEnvVars filtered
-// on the TZ key at scope (any scope when scope is empty), once armed. The
-// general env settings reads, which list a scope without a key filter, pass
-// through, so the TZ path is tested on its own.
+// on the TZ key at scope (any scope when scope is empty), while its switch
+// is active. The general env settings reads, which list a scope without a key
+// filter, pass through, so the TZ path is tested on its own. On a Server it
+// is installed with installStoreFault at construction and armed later (see
+// store_fault_helpers_test.go; never assign srv.store after setup).
 type tzKeyErrStore struct {
 	store.Store
 	scope string
-	armed atomic.Bool
+	fault *storeFaultSwitch
+}
+
+// tzFaultWrap is the installStoreFault wrapper: a user-scope tzKeyErrStore.
+func tzFaultWrap(inner store.Store, fault *storeFaultSwitch) *tzKeyErrStore {
+	return &tzKeyErrStore{Store: inner, scope: store.ScopeUser, fault: fault}
 }
 
 func (s *tzKeyErrStore) ListEnvVars(ctx context.Context, filter store.EnvVarFilter) ([]store.EnvVar, error) {
-	if s.armed.Load() && filter.Key == agentTZEnvKey && (s.scope == "" || filter.Scope == s.scope) {
+	if s.fault.Active() && filter.Key == agentTZEnvKey && (s.scope == "" || filter.Scope == s.scope) {
 		return nil, errors.New(tzReadBackendError)
 	}
 	return s.Store.ListEnvVars(ctx, filter)
@@ -67,19 +74,20 @@ func (s *tzKeyErrStore) ListEnvVars(ctx context.Context, filter store.EnvVarFilt
 // newTZStoreErrFixture returns an envReadFixture whose dispatcher store
 // fails the user-scope TZ read (armed when armed is true), with a usable
 // project-scope TZ and a hub default below it.
-func newTZStoreErrFixture(t *testing.T, armed bool) (*envReadFixture, *tzKeyErrStore) {
+func newTZStoreErrFixture(t *testing.T, armed bool) (*envReadFixture, *storeFaultSwitch) {
 	t.Helper()
-	var es *tzKeyErrStore
+	fault := &storeFaultSwitch{}
+	if armed {
+		fault.Arm()
+	}
 	f := newEnvReadFixture(t, func(s store.Store) store.Store {
-		es = &tzKeyErrStore{Store: s, scope: store.ScopeUser}
-		es.armed.Store(armed)
-		return es
+		return tzFaultWrap(s, fault)
 	})
 	tzTestEnvVar(t, f.store, store.EnvVar{Value: tzErrProjectTZ, Scope: store.ScopeProject, ScopeID: f.agent.ProjectID})
 	f.d.SetHubAgentDefaultsProvider(func() opsettings.AgentDefaultsSettings {
 		return opsettings.AgentDefaultsSettings{DefaultTimezone: tzErrHubDefaultTZ}
 	})
-	return f, es
+	return f, fault
 }
 
 // assertNoTZErrDetail checks text carries no backend error, scope name or
@@ -155,14 +163,14 @@ func TestAgentTZStoreError_ProvisionSendsNoTZ(t *testing.T) {
 // placeholder, never the lower-precedence zones.
 func TestAgentTZStoreError_GatherAnswer(t *testing.T) {
 	setup := func(t *testing.T) (*envReadFixture, *[]*RemoteCreateAgentRequest) {
-		f, es := newTZStoreErrFixture(t, false)
+		f, fault := newTZStoreErrFixture(t, false)
 		// No TZ in the first request, so the old broker asks for one.
 		f.d.SetHubAgentDefaultsProvider(func() opsettings.AgentDefaultsSettings { return opsettings.AgentDefaultsSettings{} })
 		require.NoError(t, f.store.DeleteEnvVar(context.Background(), agentTZEnvKey, store.ScopeProject, f.agent.ProjectID))
 		var reqs []*RemoteCreateAgentRequest
 		old := oldBrokerReportingTZ(&reqs)
 		f.client.createWithGatherFunc = func(ctx context.Context, brokerID, endpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
-			es.armed.Store(true)
+			fault.Arm()
 			f.d.SetHubAgentDefaultsProvider(func() opsettings.AgentDefaultsSettings {
 				return opsettings.AgentDefaultsSettings{DefaultTimezone: tzErrHubDefaultTZ}
 			})
@@ -190,18 +198,19 @@ func TestAgentTZStoreError_GatherAnswer(t *testing.T) {
 	})
 }
 
-// armTZStoreError seeds a usable project-scope TZ for agent and the hub
-// default below it, then makes the server fail the user-scope TZ read: on
-// its own store, and on its HTTP dispatcher's when one is installed
-// (Server.agentTZ resolves through it).
-func armTZStoreError(t *testing.T, srv *Server, s store.Store, agent *store.Agent) {
+// seedTZErrRungs seeds a usable project-scope TZ for agent and the hub
+// default below it, so a skipped user-scope read would resolve one of them.
+func seedTZErrRungs(t *testing.T, srv *Server, s store.Store, agent *store.Agent) {
 	t.Helper()
 	tzTestEnvVar(t, s, store.EnvVar{Value: tzErrProjectTZ, Scope: store.ScopeProject, ScopeID: agent.ProjectID})
 	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultTimezone: tzErrHubDefaultTZ})
-	es := &tzKeyErrStore{Store: s, scope: store.ScopeUser}
-	es.armed.Store(true)
-	srv.store = es
-	t.Cleanup(func() { srv.store = s })
+}
+
+// useTZFaultOnDispatcher points the server's HTTP dispatcher, when one is
+// installed, at the wrapper too (Server.agentTZ resolves through it). Call
+// it before the dispatcher serves anything.
+func useTZFaultOnDispatcher(t *testing.T, srv *Server, es *tzKeyErrStore) {
+	t.Helper()
 	if d, ok := srv.GetDispatcher().(*HTTPAgentDispatcher); ok && d != nil {
 		prev := d.store
 		d.store = es
@@ -209,12 +218,50 @@ func armTZStoreError(t *testing.T, srv *Server, s store.Store, agent *store.Agen
 	}
 }
 
-// tzStoreErrServer is tzPatchServer with armTZStoreError applied.
-func tzStoreErrServer(t *testing.T, phase string, mutate func(a *store.Agent)) (*Server, store.Store, *store.Agent) {
+// tzStoreErrServer is tzPatchServer with a tzKeyErrStore installed at server
+// construction (before any setup) and the TZ rungs below the user scope
+// seeded. The returned switch is disarmed: arm it where the fault starts.
+func tzStoreErrServer(t *testing.T, phase string, mutate func(a *store.Agent)) (*Server, store.Store, *store.Agent, *storeFaultSwitch) {
 	t.Helper()
-	srv, s, agent := tzPatchServer(t, phase, mutate)
-	armTZStoreError(t, srv, s, agent)
-	return srv, s, agent
+	var fault *storeFaultSwitch
+	srv, s, project, broker := setupReincarnateTestServerWith(t, newReincarnateTestDispatcher(), func(srv *Server) {
+		_, fault = installStoreFault(t, srv, tzFaultWrap)
+	})
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = phase
+		if mutate != nil {
+			mutate(a)
+		}
+	})
+	seedTZErrRungs(t, srv, s, agent)
+	return srv, s, agent, fault
+}
+
+// tzStoreErrDemoServer is setupDemoPolicyTest with a tzKeyErrStore installed
+// at server construction. The switch is disarmed.
+func tzStoreErrDemoServer(t *testing.T) (*Server, store.Store, *store.User, *store.Project, *storeFaultSwitch) {
+	t.Helper()
+	srv, s, alice, _, project, es, fault := setupDemoPolicyTestWithFault(t, tzFaultWrap)
+	useTZFaultOnDispatcher(t, srv, es)
+	return srv, s, alice, project, fault
+}
+
+// newTZErrOwnedAgent creates a stopped agent owned by owner in project,
+// with the TZ rungs below the user scope seeded.
+func newTZErrOwnedAgent(t *testing.T, srv *Server, s store.Store, owner *store.User, project *store.Project, name string) *store.Agent {
+	t.Helper()
+	agent := &store.Agent{
+		ID:            tid("agent-" + name),
+		Slug:          name,
+		Name:          name,
+		ProjectID:     project.ID,
+		OwnerID:       owner.ID,
+		Phase:         string(state.PhaseStopped),
+		AppliedConfig: &store.AgentAppliedConfig{},
+	}
+	require.NoError(t, s.CreateAgent(context.Background(), agent))
+	seedTZErrRungs(t, srv, s, agent)
+	return agent
 }
 
 // assertEnvSettingsUnavailable checks a 503 with exactly the fixed body text.
@@ -239,9 +286,10 @@ func assertEnvSettingsUnavailable(t *testing.T, code int, body []byte) {
 func TestAgentTZStoreError_PatchAnswers503NothingWritten(t *testing.T) {
 	for _, phase := range []string{string(state.PhaseStopped), string(state.PhaseRunning)} {
 		t.Run(phase, func(t *testing.T) {
-			srv, s, agent := tzStoreErrServer(t, phase, func(a *store.Agent) {
+			srv, s, agent, fault := tzStoreErrServer(t, phase, func(a *store.Agent) {
 				a.AppliedConfig.ExplicitTimezone = "Europe/Paris"
 			})
+			fault.Arm()
 			rec := doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+agent.ID,
 				map[string]interface{}{"explicitTimezone": "", "taskSummary": "changed"})
 			assertEnvSettingsUnavailable(t, rec.Code, rec.Body.Bytes())
@@ -259,28 +307,61 @@ func TestAgentTZStoreError_PatchAnswers503NothingWritten(t *testing.T) {
 // TestAgentGet_ResolvedTimezoneGatedOnEnvView); it answers 503 with the
 // fixed body rather than a lower rung.
 func TestAgentTZStoreError_GetAnswers503(t *testing.T) {
-	srv, s, alice, _, project := setupDemoPolicyTest(t)
-	agent := &store.Agent{
-		ID:            tid("agent-get-tz-err"),
-		Slug:          "agent-get-tz-err",
-		Name:          "Get TZ Error Agent",
-		ProjectID:     project.ID,
-		OwnerID:       alice.ID,
-		Phase:         string(state.PhaseStopped),
-		AppliedConfig: &store.AgentAppliedConfig{},
-	}
-	require.NoError(t, s.CreateAgent(context.Background(), agent))
-	armTZStoreError(t, srv, s, agent)
+	srv, s, alice, project, fault := tzStoreErrDemoServer(t)
+	agent := newTZErrOwnedAgent(t, srv, s, alice, project, "get-tz-err")
+	fault.Arm()
 
 	rec := doRequestAsUser(t, srv, alice, http.MethodGet, "/api/v1/agents/"+agent.ID, nil)
 	assertEnvSettingsUnavailable(t, rec.Code, rec.Body.Bytes())
+}
+
+// TestAgentTZStoreError_RestoreSucceedsWithoutTZFields: the restore answers
+// with the agent response only after restoreAgentTx has committed, so a TZ
+// read error there must not turn the committed restore into a 503. The
+// response omits resolvedTimezone and timezoneSource (as for a caller
+// without env view) and reports no lower-precedence zone. The unarmed
+// control shows the caller does see the fields when the read succeeds, so
+// their absence is the TZ error's doing.
+func TestAgentTZStoreError_RestoreSucceedsWithoutTZFields(t *testing.T) {
+	srv, s, alice, project, fault := tzStoreErrDemoServer(t)
+	srv.config.SoftDeleteRetention = 24 * time.Hour
+	control := newTZErrOwnedAgent(t, srv, s, alice, project, "restore-tz-control")
+	target := newTZErrOwnedAgent(t, srv, s, alice, project, "restore-tz-err")
+	softDeleteAgentRow(t, s, control.ID)
+	softDeleteAgentRow(t, s, target.ID)
+
+	restore := func(t *testing.T, agentID string) map[string]json.RawMessage {
+		t.Helper()
+		rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/agents/"+agentID+"/restore", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var body map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		got, err := s.GetAgent(context.Background(), agentID)
+		require.NoError(t, err)
+		assert.True(t, got.DeletedAt.IsZero(), "the restore is committed")
+		return body
+	}
+
+	ctl := restore(t, control.ID)
+	assert.Equal(t, `"`+tzErrProjectTZ+`"`, string(ctl["resolvedTimezone"]), "control: the caller sees the resolved zone")
+	assert.Equal(t, `"`+TZSourceProject+`"`, string(ctl["timezoneSource"]))
+
+	fault.Arm()
+	body := restore(t, target.ID)
+	assert.NotContains(t, body, "resolvedTimezone", "no zone after a failed TZ read")
+	assert.NotContains(t, body, "timezoneSource")
+	raw, err := json.Marshal(body)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), tzErrProjectTZ, "no lower-precedence zone")
+	assert.NotContains(t, string(raw), tzErrHubDefaultTZ, "no lower-precedence zone")
 }
 
 // TestAgentTZStoreError_EnvGatherOmitsTZLabel: the env-gather provenance is
 // advisory, so a failed TZ read omits the TZ label rather than failing the
 // response or reporting a lower rung.
 func TestAgentTZStoreError_EnvGatherOmitsTZLabel(t *testing.T) {
-	srv, _, agent := tzStoreErrServer(t, string(state.PhaseStopped), nil)
+	srv, _, agent, fault := tzStoreErrServer(t, string(state.PhaseStopped), nil)
+	fault.Arm()
 	resp := srv.buildEnvGatherResponse(context.Background(), agent, &RemoteEnvRequirementsResponse{
 		AgentID:  agent.ID,
 		Required: []string{agentTZEnvKey},
@@ -301,8 +382,8 @@ func TestAgentTZStoreError_HappyPathResolves(t *testing.T) {
 	require.NotNil(t, f.client.lastCreateReq)
 	assert.Equal(t, tzErrProjectTZ, f.client.lastCreateReq.ResolvedEnv[agentTZEnvKey])
 
-	srv, s, agent := tzPatchServer(t, string(state.PhaseStopped), nil)
-	tzTestEnvVar(t, s, store.EnvVar{Value: tzErrProjectTZ, Scope: store.ScopeProject, ScopeID: agent.ProjectID})
+	// The same fault server, never armed: the wrapper is transparent.
+	srv, _, agent, _ := tzStoreErrServer(t, string(state.PhaseStopped), nil)
 	code, resp := patchAgentTZ(t, srv, agent.ID, map[string]interface{}{"taskSummary": "hello"})
 	require.Equal(t, http.StatusOK, code)
 	assert.Equal(t, tzErrProjectTZ, *resp.ResolvedTimezone)
