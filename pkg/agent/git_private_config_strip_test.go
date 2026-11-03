@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
@@ -166,5 +167,94 @@ func TestBindsPrivateGitConfig(t *testing.T) {
 		if got := bindsPrivateGitConfig(name); got != want {
 			t.Errorf("bindsPrivateGitConfig(%q) = %v, want %v", name, got, want)
 		}
+	}
+}
+
+// As above for the filter, diff, ssh and proxy commands: the seed's host git runs on the REAL .git/config while
+// these never-carry keys are still in it. With .gitattributes routing every path through the planted filter and
+// diff driver, and a tracked file left stat-dirty, the seed runs none of the planted commands, the copy lacks every
+// planted key, and the notice names them. The control shows plain git status and git add do run the filter.
+func TestSeedCheckedPrivateGitConfigStrip_RunsNoFilterOrDiffCommand(t *testing.T) {
+	repo, ws, git := stripTestRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, ".gitattributes"), []byte("* filter=snt diff=snt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := git(repo, "add", ".gitattributes"); err != nil {
+		t.Fatal(err)
+	}
+	if err := git(repo, "commit", "-q", "-m", "attributes"); err != nil {
+		t.Fatal(err)
+	}
+	sent := t.TempDir()
+	s := func(n string) string { return filepath.Join(sent, n) }
+	plant := "[filter \"snt\"]\n" +
+		"\tclean = \": > '" + s("clean") + "'; cat\"\n" +
+		"\tsmudge = \": > '" + s("smudge") + "'; cat\"\n" +
+		"\tprocess = \": > '" + s("process") + "'\"\n" +
+		"[diff \"snt\"]\n" +
+		"\ttextconv = \": > '" + s("textconv") + "'; cat\"\n" +
+		"[diff]\n" +
+		"\texternal = \": > '" + s("external") + "'\"\n" +
+		"[core]\n" +
+		"\tsshCommand = \": > '" + s("ssh") + "'\"\n" +
+		"\tgitProxy = \": > '" + s("gitproxy") + "'\"\n"
+	f, err := os.OpenFile(filepath.Join(repo, ".git", "config"), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(plant); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// A tracked file whose stat no longer matches the index but whose size does (same length, new content and a
+	// new mtime), so a status or add must read it through the clean filter to compare it.
+	if err := os.WriteFile(filepath.Join(repo, "f"), []byte("y\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	later := time.Now().Add(time.Hour)
+	if err := os.Chtimes(filepath.Join(repo, "f"), later, later); err != nil {
+		t.Fatal(err)
+	}
+
+	dest, never, err := seedCheckedPrivateGitConfigStrip(context.Background(), repo, ws, t.TempDir(), "agent-x", true)
+	// Sentinels first: a seed whose git call ran a planted command must fail here, even if it then errors.
+	if entries, _ := os.ReadDir(sent); len(entries) != 0 {
+		for _, e := range entries {
+			t.Errorf("the seed ran a planted command: sentinel %s exists", e.Name())
+		}
+	}
+	if err != nil {
+		t.Fatalf("seed with stripping refused: %v", err)
+	}
+	copyBytes, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copyText := strings.ToLower(string(copyBytes))
+	for _, k := range []string{"snt", "external", "sshcommand", "gitproxy", sent} {
+		if strings.Contains(copyText, strings.ToLower(k)) {
+			t.Errorf("the agent's copy still carries %q:\n%s", k, copyBytes)
+		}
+	}
+	want := []string{"filter.snt.clean", "filter.snt.smudge", "filter.snt.process", "diff.snt.textconv", "diff.external", "core.sshcommand", "core.gitproxy"}
+	if strings.Join(never, ",") != strings.Join(want, ",") {
+		t.Errorf("left out %v, want %v", never, want)
+	}
+	notice := util.NeverCarriedNotice(never)
+	for _, k := range want {
+		if !strings.Contains(notice, k) {
+			t.Errorf("notice does not name %s: %q", k, notice)
+		}
+	}
+
+	// Control: the filter plant is live under plain git in the work tree.
+	_ = git(repo, "status")
+	_ = git(repo, "add", "f")
+	_, cerr := os.Stat(s("clean"))
+	_, perr := os.Stat(s("process"))
+	if cerr != nil && perr != nil {
+		t.Error("control: plain git status/add ran neither the clean nor the process filter, so the plant proves nothing")
 	}
 }
