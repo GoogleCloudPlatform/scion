@@ -1177,7 +1177,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// the host BEFORE the container starts, then dual-mount it. This avoids
 	// the full in-container clone. Falls through to clone-per-agent on error
 	// or if git is too old (< 2.48) — but only when this call has not yet
-	// created the agent's own worktree; see tryProvisionWorktree.
+	// created the agent's own worktree, and never when provisioning refuses
+	// the clone URL; see tryProvisionWorktree. (A refused URL is normally
+	// refused before this, by the project clone URL check above.)
 	worktreeProvisioned := false
 	var provisionedWorktreeRoot string
 	if !linkedCheckout && in.Config != nil && in.Config.GitClone != nil && in.WorkspaceMode == store.WorkspaceModeWorktreePerAgent {
@@ -1829,6 +1831,11 @@ func worktreeBaseIsProvisioned(in provision.ProvisionInput) bool {
 	return true
 }
 
+// provisionSharedWorktree runs the broker's host-side shared-base
+// provisioning (provision.ProvisionShared). A variable so tests can observe
+// the input.
+var provisionSharedWorktree = provision.ProvisionShared
+
 // tryProvisionWorktree attempts to provision a per-agent worktree on the host
 // for worktree-per-agent mode. On success it sets opts.Workspace to the
 // worktree path and returns (true, repoRoot, nil), where repoRoot is the
@@ -1837,9 +1844,10 @@ func worktreeBaseIsProvisioned(in provision.ProvisionInput) bool {
 // ordinary fallback condition (git too old, no valid worktree-per-agent
 // input) it logs a warning and returns (false, "", nil) so the caller falls
 // through to clone-per-agent. On a condition that must not silently fall
-// back (missing agent identity on a start dispatch, or a pre-existing
-// worktree this call must not touch or replace), it returns a non-nil error
-// instead so the caller fails the dispatch.
+// back (missing agent identity on a start dispatch, a pre-existing
+// worktree this call must not touch or replace, or a clone URL that
+// provisioning refuses), it returns a non-nil error instead so the caller
+// fails the dispatch.
 //
 // The caller threads repoRoot onto ctx via
 // api.ContextWithProvisionedWorktreeRepoRoot; see that function's doc for why.
@@ -1968,7 +1976,16 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 		return false, "", fmt.Errorf("worktree-per-agent: the existing worktree for agent %q is missing its provisioning marker or the shared base's .git; refusing to provision to avoid replacing it", in.AgentID)
 	}
 
-	if err := provision.ProvisionShared(result.ProvisionInput); err != nil {
+	if err := provisionSharedWorktree(result.ProvisionInput); err != nil {
+		// A clone URL that provisioning refuses fails the dispatch, with
+		// the refusal as its error. It never falls back to the in-container
+		// clone: the agent would start in another workspace mode than the
+		// project's, from the same URL.
+		if errors.Is(err, provision.ErrHostCloneURLRefused) {
+			slog.Warn("worktree-per-agent: the project's clone URL is not accepted for a host-side clone; failing the dispatch",
+				"agent_id", in.AgentID)
+			return false, "", fmt.Errorf("worktree-per-agent: %w", provision.ErrHostCloneURLRefused)
+		}
 		cloneURL := ""
 		rawCloneURL := ""
 		if result.ProvisionInput.GitClone != nil {
@@ -2222,6 +2239,9 @@ func resolveWorktreeProvision(in worktreeProvisionInput) worktreeProvisionResult
 			ProjectID: in.ProjectID,
 			AgentID:   in.AgentID,
 			AgentName: agentName,
+			// The clone runs on the broker host from a project-supplied
+			// URL: https, ssh and git transports only.
+			HostGitHardened: true,
 		},
 		WorktreePath: worktreePath,
 		ProjectRoot:  resolved.HostPath,

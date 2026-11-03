@@ -255,6 +255,7 @@ func setupNFSWorktreeRemoval(t *testing.T) (sharedDirStorageRunFixture, string) 
 	require.NoError(t, os.WriteFile(filepath.Join(origin, "README.md"), []byte("hi\n"), 0o644))
 	nfsWorktreeGit(t, origin, "add", ".")
 	nfsWorktreeGit(t, origin, "commit", "-m", "init")
+	provision.AllowLocalCloneFixture(t, origin)
 
 	ws := nfsTestWorkspaceDir(mountRoot)
 	for _, agent := range []string{"test-agent", "other-agent"} {
