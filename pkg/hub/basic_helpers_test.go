@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hubtestutil
+package hub
 
 import (
 	"context"
@@ -21,14 +21,14 @@ import (
 )
 
 // testDevToken is the development token used for testing.
-const DevToken = "scion_dev_test_token_for_unit_tests_1234567890"
+const testDevToken = "scion_dev_test_token_for_unit_tests_1234567890"
 
-func StrPtr(s string) *string { return &s }
+func strPtr(s string) *string { return &s }
 
-func IntPtr(i int) *int { return &i }
+func intPtr(i int) *int { return &i }
 
 // itoa is a minimal int-to-string without importing strconv.
-func Itoa(n int) string {
+func itoa(n int) string {
 	if n == 0 {
 		return "0"
 	}
@@ -52,17 +52,17 @@ func Itoa(n int) string {
 
 // alwaysAuthorized is a permissive authChecker for tests that don't exercise
 // the authorization policy path.
-func AlwaysAuthorized(_ context.Context, _ string) bool { return true }
+func alwaysAuthorized(_ context.Context, _ string) bool { return true }
 
 // require_NoError is a test helper that fails immediately on error.
-func RequireNoError(t *testing.T, err error) {
+func require_NoError(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
-func WaitClosed(t *testing.T, ch <-chan struct{}, within time.Duration, what string) {
+func waitClosed(t *testing.T, ch <-chan struct{}, within time.Duration, what string) {
 	t.Helper()
 	select {
 	case <-ch:

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hubtestutil
+package hub
 
 import (
 	"bytes"
@@ -27,7 +27,7 @@ import (
 // slog.Default() into a fixed subsystem logger, e.g. logging.Subsystem).
 // Capturing after construction can leave the test's absence assertions
 // vacuous: see requireLogCaptureLive below.
-func CaptureSlog(t *testing.T) *bytes.Buffer {
+func captureSlog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
 	handler := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
@@ -39,7 +39,7 @@ func CaptureSlog(t *testing.T) *bytes.Buffer {
 
 // captureSlogDefault swaps slog's default logger for a text handler writing
 // to the returned buffer, and restores the previous default on test cleanup.
-func CaptureSlogDefault(t *testing.T) *bytes.Buffer {
+func captureSlogDefault(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
 	prev := slog.Default()
@@ -51,7 +51,7 @@ func CaptureSlogDefault(t *testing.T) *bytes.Buffer {
 // installSentinelLogCapture points the slog default logger at an in-memory
 // buffer, at Debug level so brokerHTTPTransport's debug-only logging is
 // captured too, and restores the previous default logger on test cleanup.
-func InstallSentinelLogCapture(t *testing.T) *bytes.Buffer {
+func installSentinelLogCapture(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
 	prev := slog.Default()
@@ -62,7 +62,7 @@ func InstallSentinelLogCapture(t *testing.T) *bytes.Buffer {
 
 // attrMap flattens a slog.Record's top-level attributes (including nested
 // groups, dotted) into a map for easy lookup in assertions.
-func RecordAttrs(r slog.Record) map[string]any {
+func recordAttrs(r slog.Record) map[string]any {
 	out := map[string]any{}
 	var walk func(prefix string, a slog.Attr)
 	walk = func(prefix string, a slog.Attr) {
@@ -90,7 +90,7 @@ func RecordAttrs(r slog.Record) map[string]any {
 	return out
 }
 
-func FindRecord(records []slog.Record, msg string) (slog.Record, bool) {
+func findRecord(records []slog.Record, msg string) (slog.Record, bool) {
 	for i := len(records) - 1; i >= 0; i-- {
 		if records[i].Message == msg {
 			return records[i], true
@@ -100,7 +100,7 @@ func FindRecord(records []slog.Record, msg string) (slog.Record, bool) {
 }
 
 // recordAttr reads a single attribute off a captured record.
-func RecordAttr(r slog.Record, key string) (slog.Value, bool) {
+func recordAttr(r slog.Record, key string) (slog.Value, bool) {
 	var found slog.Value
 	var ok bool
 	r.Attrs(func(a slog.Attr) bool {
