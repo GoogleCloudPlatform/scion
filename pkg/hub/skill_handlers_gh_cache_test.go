@@ -1285,8 +1285,7 @@ func TestSkillsResolve_GHCacheHitForCredentialedBranchRef(t *testing.T) {
 		AppID:          1,
 		Status:         store.GitHubInstallationStatusActive,
 	}))
-	project.GitHubInstallationID = &instID
-	require.NoError(t, s.UpdateProject(ctx, project))
+	bindProjectForTest(t, srv, s, project, instID, owner, repo)
 
 	body := ResolveSkillsRequest{Skills: []ResolveSkillRef{{URI: uri}}, ProjectID: project.ID}
 

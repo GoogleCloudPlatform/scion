@@ -1752,11 +1752,15 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 }
 
 // autoAssociateGitHubInstallation searches active GitHub App installations for one
-// that covers the project's repository. If found, it sets GitHubInstallationID on the
-// project and persists the association. This handles the case where a GitHub App was
-// installed (and its webhook processed) before the project was created.
+// that covers the project's repository and records it on the project, but
+// only when the association is authorized (authorizeGitHubAppAssociation:
+// the remote is on the configured GitHub host, the installation's account
+// owns the repository, and the project creator's own GitHub identity has
+// access to it). An owner/repo match alone never associates. This handles
+// the case where a GitHub App was installed (and its webhook processed)
+// before the project was created.
 func (s *Server) autoAssociateGitHubInstallation(ctx context.Context, project *store.Project) {
-	ownerRepo := extractOwnerRepo(project.GitRemote)
+	ownerRepo := s.githubOwnerRepo(project.GitRemote)
 	if ownerRepo == "" {
 		return
 	}
@@ -1770,29 +1774,41 @@ func (s *Server) autoAssociateGitHubInstallation(ctx context.Context, project *s
 		return
 	}
 
-	ownerRepoLower := strings.ToLower(ownerRepo)
 	for _, inst := range installations {
-		for _, repo := range inst.Repositories {
-			if strings.ToLower(repo) == ownerRepoLower {
-				installID := inst.InstallationID
-				project.GitHubInstallationID = &installID
-				project.GitHubAppStatus = &store.GitHubAppProjectStatus{
-					State:       store.GitHubAppStateUnchecked,
-					LastChecked: timeNow(),
-				}
-				if err := s.store.UpdateProject(ctx, project); err != nil {
-					s.projectsLogger().Warn("failed to persist GitHub App installation association",
-						"project_id", project.ID, "installation_id", installID, "error", err)
-				} else {
-					s.projectsLogger().Info("auto-associated project with GitHub App installation at creation time",
-						"project_id", project.ID, "project_name", project.Name,
-						"installation_id", installID, "account", inst.AccountLogin)
-					s.events.PublishProjectUpdated(ctx, project)
-				}
-				return
-			}
+		if !installationListsRepo(inst, ownerRepo) {
+			continue
+		}
+		installID := inst.InstallationID
+		if _, authzErr := s.authorizeGitHubAppAssociation(ctx, project, installID); authzErr != nil {
+			s.projectsLogger().Info("not auto-associating project with GitHub App installation: association not authorized",
+				"project_id", project.ID, "installation_id", installID, "error", authzErr)
+			continue
+		}
+		s.setGitHubInstallationAssociation(project, installID)
+		if err := s.store.UpdateProject(ctx, project); err != nil {
+			s.projectsLogger().Warn("failed to persist GitHub App installation association",
+				"project_id", project.ID, "installation_id", installID, "error", err)
+		} else {
+			s.invalidateGitHubAssociation(project.ID)
+			s.projectsLogger().Info("auto-associated project with GitHub App installation at creation time",
+				"project_id", project.ID, "project_name", project.Name,
+				"installation_id", installID, "account", inst.AccountLogin)
+			s.events.PublishProjectUpdated(ctx, project)
+		}
+		return
+	}
+}
+
+// installationListsRepo reports whether inst's recorded repositories include
+// ownerRepo (case-insensitive). It only selects candidates; authorization is
+// decided by authorizeGitHubAppAssociation.
+func installationListsRepo(inst store.GitHubInstallation, ownerRepo string) bool {
+	for _, repo := range inst.Repositories {
+		if strings.EqualFold(repo, ownerRepo) {
+			return true
 		}
 	}
+	return false
 }
 
 // resolveCloneToken resolves a GitHub token for cloning a project's repository.

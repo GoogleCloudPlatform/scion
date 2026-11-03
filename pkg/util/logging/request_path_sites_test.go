@@ -107,6 +107,7 @@ var requestPathSites = []requestPathSite{
 	{"handlers_chat_v2.go", "Server.handleChatTopicRoutes", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"handlers_gcp_identity_scoped.go", "Server.handleGCPServiceAccountByID", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"handlers_github_app.go", "parseInstallationIDFromPath", "URL.Path", 1, "routing: extracts the installation id"},
+	{"handlers_github_app.go", "Server.handleGitHubAppInstallationByIDRead", "URL.Path", 1, "routing: selects the association-report sub-route (compared with a constant; not logged or returned)"},
 	{"handlers_groups.go", "Server.handleGroupRoutes", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"handlers_integrations.go", "Server.handleAdminIntegrationByName", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"handlers_principals.go", "Server.handlePrincipalRoutes", "URL.Path", 1, "routing: extracts ids and sub-routes"},
