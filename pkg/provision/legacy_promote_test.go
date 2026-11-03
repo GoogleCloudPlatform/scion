@@ -260,3 +260,99 @@ func mustReadDir(t *testing.T, dir string) []os.DirEntry {
 	require.NoError(t, err)
 	return entries
 }
+
+// legacyMarkedTree is a workspace as a pre-state-dir image left it: no
+// state-directory sentinel, the marker in the workspace root and its git
+// exclude line between two other lines.
+func legacyMarkedTree(t *testing.T) string {
+	t.Helper()
+	ws := newWorkspaceTree(t)
+	require.NoError(t, writeSentinel(filepath.Join(ws, ProvisionSentinelFile)))
+	info := filepath.Join(ws, ".git", "info")
+	require.NoError(t, os.MkdirAll(info, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(info, "exclude"), []byte("/keep-me\n"+legacyExcludeLine+"\n/keep-me-too\n"), 0o644))
+	return ws
+}
+
+// assertNotPromoted checks that a promotion attempt changed nothing: no
+// state-directory sentinel, the workspace-root marker and its exclude line
+// still there.
+func assertNotPromoted(t *testing.T, ws string) {
+	t.Helper()
+	assert.NoFileExists(t, filepath.Join(ProjectStateDir(ws), ProvisionSentinelFile), "no state-directory sentinel")
+	assert.FileExists(t, filepath.Join(ws, ProvisionSentinelFile), "the workspace-root marker is untouched")
+	assert.Contains(t, readExcludeLines(t, ws), legacyExcludeLine, "the exclude line is untouched")
+}
+
+// The promotion runs under the project's provisioning locks: while a
+// current provisioner holds the state-directory lock, or the project-root
+// lock, the promotion waits, and when its wait ends it fails and writes
+// nothing (no sentinel; the marker and its exclude line stay). Once the
+// lock is released, the promotion goes ahead.
+func TestPromoteLegacyMarker_WaitsForProvisioningLock(t *testing.T) {
+	withFastFileLockTiming(t)
+	origRetries := fileLockRetries
+	fileLockRetries = 5 // a lock budget of about 100ms
+	t.Cleanup(func() { fileLockRetries = origRetries })
+
+	for _, tc := range []struct {
+		name string
+		dir  func(ws string) string
+	}{
+		{"state-directory lock", ProjectStateDir},
+		{"project-root lock", filepath.Dir},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := legacyMarkedTree(t)
+			held, err := acquireFileLock(t.Context(), tc.dir(ws))
+			require.NoError(t, err)
+
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer cancel()
+			_, err = PromoteLegacyMarker(ctx, ws)
+			require.Error(t, err, "the promotion must not run while the lock is held")
+			assertNotPromoted(t, ws)
+
+			require.NoError(t, held.release())
+			res, err := PromoteLegacyMarker(t.Context(), ws)
+			require.NoError(t, err)
+			assert.True(t, res.Promoted, "after the release the promotion goes ahead")
+			assertPromoted(t, ws)
+		})
+	}
+}
+
+// The state-directory sentinel is irreversible: when the provisioning lock
+// is lost right before it would be written, the promotion fails and writes
+// no sentinel, and leaves the marker and its exclude line in place.
+func TestPromoteLegacyMarker_LostLockWritesNoSentinel(t *testing.T) {
+	ws := legacyMarkedTree(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	orig := legacyPromoteBeforeSentinel
+	legacyPromoteBeforeSentinel = func(context.Context) { cancel() }
+	t.Cleanup(func() { legacyPromoteBeforeSentinel = orig })
+
+	_, err := PromoteLegacyMarker(ctx, ws)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "provisioning lock lost")
+	assertNotPromoted(t, ws)
+}
+
+// A directory named like the marker is never removed, so it is not
+// something to promote: the lock-free pre-check ignores it (no lock taken
+// at every start), while a marker file or a symlink of that name counts.
+func TestLegacyPromotionNeeded_DirectoryMarkerIgnored(t *testing.T) {
+	ws := newWorkspaceTree(t)
+	marker := filepath.Join(ws, ProvisionSentinelFile)
+	require.NoError(t, os.Mkdir(marker, 0o755))
+	assert.False(t, LegacyPromotionNeeded(ws), "a directory named like the marker is nothing to do")
+	res, err := PromoteLegacyMarker(t.Context(), ws)
+	require.NoError(t, err)
+	assert.Equal(t, LegacyPromotion{}, res)
+	assert.DirExists(t, marker, "the directory is left alone")
+
+	require.NoError(t, os.Remove(marker))
+	require.NoError(t, os.Symlink(filepath.Join(t.TempDir(), "target"), marker))
+	assert.True(t, LegacyPromotionNeeded(ws), "a symlink named like the marker is removed, so it counts")
+}

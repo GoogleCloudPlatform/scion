@@ -106,6 +106,7 @@ func PromoteLegacyMarker(ctx context.Context, workspacePath string) (LegacyPromo
 			if !SentinelPresent(stateDir) {
 				// The sentinel is irreversible: never write it under a
 				// lost lock.
+				legacyPromoteBeforeSentinel(lockCtx)
 				if err := lockCtx.Err(); err != nil {
 					return fmt.Errorf("provisioning lock lost: %w", err)
 				}
@@ -149,7 +150,10 @@ func legacyMarkerPresent(workspacePath string) bool {
 // litter entries other than the live lock. The workspace is agent-writable,
 // so every read here is bounded (readLegacyExclude, lockLitterEntries).
 func LegacyPromotionNeeded(workspacePath string) bool {
-	if _, err := os.Lstat(filepath.Join(workspacePath, ProvisionSentinelFile)); err == nil {
+	// A marker entry is anything but a directory (the removal condition);
+	// a directory of that name is never removed, so it is not something
+	// to do and takes no lock.
+	if fi, err := os.Lstat(filepath.Join(workspacePath, ProvisionSentinelFile)); err == nil && !fi.IsDir() {
 		return true
 	}
 	if hasLegacyExcludeLine(workspacePath) {
@@ -218,7 +222,8 @@ func readLegacyExclude(workspacePath string) (*os.File, []byte, error) {
 func hasLegacyExcludeLine(workspacePath string) bool {
 	f, data, err := readLegacyExclude(workspacePath)
 	if err != nil {
-		slog.Warn("provisioning state promotion: skipping the workspace's git exclude file", "path", workspacePath, "error", err)
+		slog.Warn("provisioning state promotion: skipping the workspace's git exclude file",
+			"project_id", legacyPromotionProjectID(workspacePath), "reason", legacyExcludeSkipReason(err))
 		return false
 	}
 	if f == nil {
@@ -240,7 +245,8 @@ func hasLegacyExcludeLine(workspacePath string) bool {
 func removeLegacyExcludeLine(workspacePath string) (bool, error) {
 	f, data, err := readLegacyExclude(workspacePath)
 	if err != nil {
-		slog.Warn("provisioning state promotion: leaving the workspace's git exclude file as it is", "path", workspacePath, "error", err)
+		slog.Warn("provisioning state promotion: leaving the workspace's git exclude file as it is",
+			"project_id", legacyPromotionProjectID(workspacePath), "reason", legacyExcludeSkipReason(err))
 		return false, nil
 	}
 	if f == nil {
@@ -269,4 +275,25 @@ func removeLegacyExcludeLine(workspacePath string) (bool, error) {
 		return false, fmt.Errorf("write %s: %w", f.Name(), err)
 	}
 	return true, nil
+}
+
+// legacyPromoteBeforeSentinel runs right before the lost-lock check that
+// guards the state-directory sentinel; a no-op outside tests, which use it
+// to lose the lock at that point.
+var legacyPromoteBeforeSentinel = func(context.Context) {}
+
+// legacyPromotionProjectID is the project directory name of the workspace at
+// workspacePath (<subpath_root>/<project-id>/workspace), logged instead of
+// the host path.
+func legacyPromotionProjectID(workspacePath string) string {
+	return filepath.Base(filepath.Dir(workspacePath))
+}
+
+// legacyExcludeSkipReason is the fixed reason logged for an exclude file the
+// promotion does not read (no host path or OS error text).
+func legacyExcludeSkipReason(err error) string {
+	if errors.Is(err, errLegacyExcludeTooLarge) {
+		return "larger than the read limit"
+	}
+	return "cannot be read safely (a symlink, not a regular file, or a read error)"
 }

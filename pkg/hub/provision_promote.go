@@ -81,13 +81,13 @@ func (s *Server) promoteLegacyProvisionMarkers(ctx context.Context) legacyPromot
 	layout, err := s.workspaceLayout()
 	if err != nil || !layout.Backend.Shared() {
 		if err != nil {
-			logger.Warn("provisioning state promotion: no shared workspace layout", "error", err)
+			logger.Warn("provisioning state promotion: no shared workspace layout", "error", sanitizedStorageError(err))
 		}
 		return counts
 	}
 	ids, err := layout.ProjectTreeIDs()
 	if err != nil {
-		logger.Warn("provisioning state promotion: could not list the project trees", "error", err)
+		logger.Warn("provisioning state promotion: could not list the project trees", "error", sanitizedStorageError(err))
 		counts.failed++
 		return counts
 	}
@@ -101,7 +101,7 @@ func (s *Server) promoteLegacyProvisionMarkers(ctx context.Context) legacyPromot
 		switch {
 		case err != nil:
 			counts.failed++
-			logger.Warn("provisioning state promotion", "project_id", id, "outcome", "failed", "error", err)
+			logger.Warn("provisioning state promotion", "project_id", id, "outcome", "failed", "error", sanitizedStorageError(err))
 		case res.Changed():
 			if res.Promoted {
 				counts.promoted++

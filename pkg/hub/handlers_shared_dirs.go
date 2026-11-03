@@ -206,12 +206,12 @@ func (s *Server) createSharedDirLeaf(ctx context.Context, project *store.Project
 	resolution, err := s.resolveSharedDirPath(ctx, project, sd.Name)
 	if err != nil {
 		s.projectsLogger().Debug("shared dir leaf not created at declaration; it is created on first use",
-			"project_id", project.ID, "shared_dir", sd.Name, "error", err)
+			"project_id", project.ID, "shared_dir", sd.Name, "error", sanitizedStorageError(err))
 		return
 	}
 	if _, err := (provisioner.Provisioner{}).EnsureLeaf(resolution.Resolved); err != nil {
 		s.projectsLogger().Warn("failed to create the shared dir leaf at declaration; it is created on first use",
-			"project_id", project.ID, "shared_dir", sd.Name, "error", err)
+			"project_id", project.ID, "shared_dir", sd.Name, "error", sanitizedStorageError(err))
 	}
 }
 
