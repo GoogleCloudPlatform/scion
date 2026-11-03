@@ -68,16 +68,18 @@ func nfsAgentDirSelection(env map[string]string, gitClone *api.GitCloneConfig, a
 // on the NFS workspace export (<subpath_root>/<projectID>/agents/<agent
 // name>), and returns its name in emptyDirName for an empty-per-agent agent
 // (nfsEmptyAgentDirSelection) or in cloneDirName, with the agent's branch,
-// for a clone-per-agent agent on Kubernetes (nfsAgentDirSelection). All
-// three are empty when the agent gets none. Start uses it to lay out the
-// workspace and CheckMoveWorkspaceAbsent to find what a start would use,
-// so both always agree.
-func nfsOwnAgentDirSelection(runtimeName string, ws *config.V1WorkspaceStorageConfig, emptyPerAgent bool, env map[string]string, gitClone *api.GitCloneConfig, agentName string) (emptyDirName, cloneDirName, cloneBranch string, err error) {
+// for a clone-per-agent agent on Kubernetes, or on a local container
+// runtime for a project on a shared Layout (agentDirOnShare for runtimeName
+// and projectDir; nfsAgentDirSelection). All three are empty when the agent
+// gets none. Start uses it to lay out the workspace and
+// CheckMoveWorkspaceAbsent to find what a start would use, so both always
+// agree.
+func nfsOwnAgentDirSelection(runtimeName, projectDir string, ws *config.V1WorkspaceStorageConfig, emptyPerAgent bool, env map[string]string, gitClone *api.GitCloneConfig, agentName string) (emptyDirName, cloneDirName, cloneBranch string, err error) {
 	if emptyPerAgent {
-		emptyDirName, err = nfsEmptyAgentDirSelection(runtimeName, ws, agentName)
+		emptyDirName, err = nfsEmptyAgentDirSelection(runtimeName, projectDir, ws, agentName)
 		return emptyDirName, "", "", err
 	}
-	if !isKubernetesRuntime(runtimeName) || ws == nil || ws.Backend != "nfs" {
+	if !agentDirOnShare(runtimeName, projectDir) || ws == nil || ws.Backend != "nfs" {
 		return "", "", "", nil
 	}
 	cloneDirName, cloneBranch, err = nfsAgentDirSelection(env, gitClone, agentName)
