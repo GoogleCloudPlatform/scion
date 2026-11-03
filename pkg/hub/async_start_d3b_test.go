@@ -247,10 +247,12 @@ func TestAsyncStartGate_ExpiredAnswerNotUsed(t *testing.T) {
 }
 
 // TestAsyncStartAllowed_ExperimentFirst pins that the registry is not read
-// while hub.async_agent_start is off (its registry default).
+// while hub.async_agent_start is off (an admin override; it is on by
+// default since ptone/scion#7250).
 func TestAsyncStartAllowed_ExperimentFirst(t *testing.T) {
 	st := &hubInstanceListStore{now: time.Now()}
 	srv := &Server{store: st}
+	setAsyncStartExperiment(t, srv, false)
 	assert.False(t, srv.asyncStartAllowed())
 	time.Sleep(20 * time.Millisecond)
 	assert.Equal(t, int32(0), st.reads.Load(), "no registry read while the experiment is off")
@@ -696,6 +698,26 @@ func TestAsyncStartGate_CancelledRefreshClearsInFlight(t *testing.T) {
 	assert.True(t, g.refreshedAt.IsZero(), "nothing is stored")
 	assert.False(t, g.value)
 	assert.Empty(t, rec.records, "nothing is logged")
+}
+
+// TestAsyncStartAllowed_DefaultOn pins the default-on of
+// hub.async_agent_start (ptone/scion#7250): with no override (the registry
+// default), both experiment checks see it on. A start consults the registry
+// and answers async once the refresh lands, and a refresh-loop tick reads
+// the registry.
+func TestAsyncStartAllowed_DefaultOn(t *testing.T) {
+	now := time.Now()
+	st := &hubInstanceListStore{now: now, rows: []store.HubInstance{hubRow(t, "a", now, time.Second, false, api.HubInstanceFeatureAsyncStartV1)}}
+	srv := &Server{store: st}
+	require.True(t, srv.experimentEnabled(experiments.AsyncAgentStart), "on by default")
+
+	assert.False(t, srv.asyncStartAllowed(), "false until the first refresh lands")
+	require.Eventually(t, srv.asyncStartAllowed, 5*time.Second, 5*time.Millisecond, "the default-on start check reads the registry and answers async")
+	reads := st.reads.Load()
+	require.GreaterOrEqual(t, reads, int32(1))
+
+	srv.asyncStartGateRefreshTick(context.Background())
+	assert.Equal(t, reads+1, st.reads.Load(), "a refresh-loop tick reads the registry under the default")
 }
 
 // TestStartAgentURL_AgentID pins design R1: both transports send the hub's
