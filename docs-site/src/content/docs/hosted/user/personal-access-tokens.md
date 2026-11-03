@@ -192,7 +192,7 @@ curl -H "Authorization: Bearer $SESSION_TOKEN" \
      "https://scion.example.com/api/v1/auth/scopes?projectId=<project-id>"
 ```
 
-For a hub boundary, send `?boundary=hub` with no `projectId` (or run `scion hub token scopes --boundary hub`). Under a hub boundary, a project-level scope is eligible when your user holds a system-level grant for its permissions, holds an active role binding in at least one project that grants them, or satisfies a relationship source (such as `agent:attach` or `agent:port_access` with admission to a project). A scope that a hub boundary allows
+For a hub boundary, send `?boundary=hub` with no `projectId`. Under a hub boundary, a project-level scope is eligible when your user holds a system-level grant for its permissions, holds an active role binding in at least one project that grants them, or satisfies a relationship source (such as `agent:attach` or `agent:port_access` with admission to a project). A scope that a hub boundary allows
 but you cannot select is reported with the reason `authority_required`; a scope that a hub boundary
 does not allow reports `boundary_not_allowed`.
 
