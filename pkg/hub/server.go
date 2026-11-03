@@ -3330,7 +3330,15 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// permission lists. Roles are created if missing, or updated if the
 	// code revision is higher than the stored revision.
 	// Must run BEFORE seedDefaultGroupsAndBindings so the hub-member role exists.
+	// A custom role that holds a newer built-in role's name is renamed first;
+	// if that fails the start fails (ptone/scion#5519).
+	if err := renameCustomRolesHoldingBuiltInNames(ctx, s); err != nil {
+		return nil, fmt.Errorf("built-in role names (fail-closed): %w", err)
+	}
 	reconcileBuiltInRoles(ctx, s)
+	// Report (never change) a built-in membership role row that is not a
+	// system row: such a row would be treated as a custom role.
+	builtInMembershipRoleRowsNotSystem(ctx, s)
 
 	// PG1: Seed the hub-members group and a system-scoped RoleBinding of the
 	// hub-member role to that group. This replaces ~13 individual seeded policies

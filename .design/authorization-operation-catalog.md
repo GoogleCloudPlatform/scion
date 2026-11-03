@@ -26,7 +26,7 @@
 - [agent.messages.read](#agentmessagesread) — Read and stream an agent's message history and message logs. agent.attach gives the full history; agent.read alone gives the messages the caller sent or received. A stream opened by a token ends once the token stops validating or loses the permission that admitted it
 - [agent.metrics.read](#agentmetricsread) — Read an agent's aggregate session metrics
 - [agent.lifecycle.keys](#agentlifecyclekeys) — Send keystrokes to an agent's session
-- [agent.action.message](#agentactionmessage) — Send a message to an agent through its message action
+- [agent.action.message](#agentactionmessage) — Send a message to an agent through its message action. A user's post into a thread by thread key also needs the post action of chat-thread-access on the agent's project (project:read, then project.chat_post; 403 chat_post_denied with reason read_only), decided before any wake or row
 - [agent.attach](#agentattach) — Attach to an agent session via WebSocket. A session opened by a token closes with 4401 once the token stops validating or loses agent.attach
 - [agent.portaccess](#agentportaccess) — Access forwarded ports on an agent
 - [agent.port.list](#agentportlist) — List an agent's exposed ports
@@ -120,11 +120,11 @@
 - [inbox.channels.list](#inboxchannelslist) — List the registered message channels: static capability metadata with no records
 - [inbox.capabilities.read](#inboxcapabilitiesread) — Read the hub messaging capabilities: static capability metadata with no records
 - [inbox.conversation.list](#inboxconversationlist) — List the caller's conversations. A group conversation is listed only while the caller can read it (project:read on its project, or the participant rule for a group with no project; a token is checked as its user); a participant row alone does not list it. A token lists only conversations inside its boundary, and a direct conversation with an agent only with agent:read on that agent; the project group union also needs project:read
-- [inbox.conversation.create](#inboxconversationcreate) — Create a group conversation in a project. Needs project:read on the project; a token also needs inbox:write for it
+- [inbox.conversation.create](#inboxconversationcreate) — Create a group conversation in a project. Order: project:read on the project, then (for a token) inbox:write for it, then for a user the create_group action of chat-space-access (project.chat_post on the account; 403 chat_post_denied with details.chat_action create_group and reason read_only without it), all before anything is minted. Agents are not decided by chat-space-access; their message-mode join check follows
 - [project.conversation.read](#projectconversationread) — Read a group conversation, its messages and one message. Needs project:read on the conversation's project; a group with no project needs participation, and a token needs inbox:read on a hub boundary for it
 - [inbox.conversation.direct.read](#inboxconversationdirectread) — Read a direct conversation, its messages and one message. A token needs inbox:read for the peer agent's project and agent:read on the peer agent; a direct conversation between users needs a hub boundary
-- [inbox.conversation.defaultagent.set](#inboxconversationdefaultagentset) — Set the default agent of a group conversation. Needs project:read on the conversation's project; a token also needs inbox:write for it
-- [inbox.conversation.participant.add](#inboxconversationparticipantadd) — Add a participant to a group conversation. Every caller needs project:read on the conversation's project; an added agent must be in that project and an added user must be a member of it; a token also needs inbox:write for it. A caller who is not a participant or cannot read the group gets the unknown-conversation answer, and an agent of another project the unknown-agent answer
+- [inbox.conversation.defaultagent.set](#inboxconversationdefaultagentset) — Set the default agent of a group conversation. Needs project:read on the conversation's project; a token also needs inbox:write for it. A user on a project conversation then needs the set_default_agent action of chat-thread-access (project.chat_post on the account; 403 chat_post_denied with details.chat_action set_default_agent and reason read_only without it), decided before the body is read; agents and groups with no project are not decided by it
+- [inbox.conversation.participant.add](#inboxconversationparticipantadd) — Add a participant to a group conversation. Every caller needs project:read on the conversation's project; an added agent must be in that project and an added user must be a member of it; a token also needs inbox:write for it. A caller who is not a participant or cannot read the group gets the unknown-conversation answer, and an agent of another project the unknown-agent answer. A user on a project conversation then needs the add_participant action of chat-thread-access (project.chat_post on the account; 403 chat_post_denied with details.chat_action add_participant and reason read_only without it), decided before the body is read; agents and groups with no project are not decided by it
 - [inbox.conversation.leave](#inboxconversationleave) — Leave a conversation the caller takes part in. A token needs inbox:write for the conversation
 - [inbox.conversation.resolve](#inboxconversationresolve) — Resolve a conversation reference. A group reference needs project:read on its project and an agent reference needs agent:read on the agent, for every user caller; a token also needs inbox:read for the result
 - [project.threadgroup.list](#projectthreadgrouplist) — List a project's chat thread groups. Needs project:read on the project; an agent must belong to it
@@ -147,21 +147,21 @@
 - [chat.prefs.update](#chatprefsupdate) — Write the caller's visibility preference for an agent's chat thread. Needs agent:read on the agent; a token also needs inbox:write for the agent's project
 - [chat.space.list](#chatspacelist) — List the chat spaces: the projects the caller can read. A project token lists only its boundary project; the caller's rail preferences need inbox:read on a hub boundary
 - [chat.unreadcount.read](#chatunreadcountread) — Count the caller's conversations with unread messages. A token needs inbox:read; threads count only in projects it can read and DMs only where the DM rule passes
-- [chat.thread.list](#chatthreadlist) — List the threads of a chat space. Needs project:read on the space's project
-- [chat.thread.create](#chatthreadcreate) — Create a thread in a chat space. Needs project:read on the space's project; a token also needs inbox:write for it
+- [chat.thread.list](#chatthreadlist) — List the threads of a chat space. Needs project:read on the space's project; each thread carries _capabilities, what the caller may do in it (chat-thread-access)
+- [chat.thread.create](#chatthreadcreate) — Create a thread in a chat space. Order: project:read on the space's project, then (for a token) inbox:write for it (plain 403), then, before the body is validated and before any write, a default agent on create needs the set_default_agent action of chat-thread-access and the thread needs the create_thread action of chat-space-access (both project.chat_post on the account; 403 chat_post_denied with details.chat_action and reason read_only without it)
 - [chat.space.members.read](#chatspacemembersread) — List the members of a chat space. Needs project:read on the space's project; agent rows also need the agent list scope
 - [chat.space.markread](#chatspacemarkread) — Mark every thread of a chat space read for the caller. Needs project:read on the space's project; a token also needs inbox:write for it
 - [chat.space.emoji.update](#chatspaceemojiupdate) — Set or clear the emoji of a chat space. Needs project:update on the space's project
 - [chat.topic.read](#chattopicread) — Read a chat thread. Needs project:read on the thread's project
-- [chat.topic.update](#chattopicupdate) — Rename a chat thread or set its default agent. Needs project:read on the thread's project; a token also needs inbox:write for it
-- [chat.topic.delete](#chattopicdelete) — Delete a chat thread (soft delete; the last thread of a space stays). Needs project:read on the thread's project; a token also needs inbox:write for it
-- [chat.conversation.history.topic](#chatconversationhistorytopic) — Read the messages of a chat thread. Needs project:read on the thread's project; canPost reports whether the caller's account holds project.chat_post on it
+- [chat.topic.update](#chattopicupdate) — Rename a chat thread or set its default agent. Needs project:read on the thread's project; a token also needs inbox:write for it. Then chat-thread-access decides, before the body is validated: a name needs the rename action and a default agent the set_default_agent action (project.chat_post on the account); a reader without them gets 403 chat_post_denied with details.chat_action and reason read_only, and nothing changes
+- [chat.topic.delete](#chattopicdelete) — Delete a chat thread (soft delete; the last thread of a space stays). Needs project:read on the thread's project; a token also needs inbox:write for it. Then the delete action of chat-thread-access (project.chat_post on the account); a reader without it gets 403 chat_post_denied with details.chat_action delete and reason read_only, and the thread stays
+- [chat.conversation.history.topic](#chatconversationhistorytopic) — Read the messages of a chat thread. Decided by chat-thread-access: needs project:read on the thread's project (a caller without it gets the missing-thread answer). _capabilities lists what the caller may do in the thread (post needs project.chat_post on the account, and for a token inbox:write for the project), with reason read_only or token_scope when post is missing; canPost is its post action
 - [chat.conversation.history.dm](#chatconversationhistorydm) — Read the messages of one of the caller's DMs. A token needs inbox:read: a DM with an agent needs the agent's project inside its boundary and agent:read on the agent; a DM between users needs a hub boundary
-- [chat.conversation.send.topic](#chatconversationsendtopic) — Post a message to a chat thread. Needs project:read and project.chat_post on the thread's project; a caller that reads the thread but lacks project.chat_post gets 403 chat_post_denied. A token also needs inbox:write for it; project.chat_post is checked on the token holder's account, and the project:chat_post selector is not needed (it only lets a token delegate roles that include project.chat_post). Agent recipients need agent:message
+- [chat.conversation.send.topic](#chatconversationsendtopic) — Post a message to a chat thread. Decided by chat-thread-access: needs project:read and project.chat_post on the thread's project; a caller without project:read gets the missing-thread answer, and one that reads the thread but may not post gets 403 chat_post_denied with details.reason read_only (no project.chat_post) or token_scope (a token without inbox:write for the project). project.chat_post is checked on a token holder's account, and the project:chat_post selector is not needed (it only lets a token delegate roles that include project.chat_post). Agent recipients need agent:message
 - [chat.conversation.send.dmagent](#chatconversationsenddmagent) — Post a message to one of the caller's DMs with an agent. Needs agent:message on the agent; a token also needs inbox:write for the agent's project
 - [chat.conversation.send.dmuser](#chatconversationsenddmuser) — Post a message to one of the caller's DMs with another user. Every caller needs read access to the peer user record; a token also needs inbox:write on a hub boundary
-- [chat.message.edit](#chatmessageedit) — Edit one of the caller's chat messages. Only the author edits, and only before an agent replies. A token needs inbox:write, and the message's conversation is re-checked: project:read for a thread, the DM rule for a DM
-- [chat.message.delete](#chatmessagedelete) — Delete one of the caller's chat messages (soft delete). Only the author deletes, and only before an agent replies. A token needs inbox:write, and the message's conversation is re-checked: project:read for a thread, the DM rule for a DM
+- [chat.message.edit](#chatmessageedit) — Edit one of the caller's chat messages. Only the author edits, and only before an agent replies. A token needs inbox:write, and the message's conversation is re-checked for it first: for a thread, project:read and inbox:write for the thread's project, with a plain 403 when either is missing or the thread is missing or deleted; for a DM, the DM rule. A thread message is then decided by chat-thread-access: project:read on the thread's project now (a session sender who lost it, or a session's message of a deleted thread or of a key that is no thread, gets the missing-thread answer, 404), then the edit_own action (project.chat_post on the account; 403 chat_post_denied with details.chat_action edit_own and reason read_only without it). A DM message is not decided by it
+- [chat.message.delete](#chatmessagedelete) — Delete one of the caller's chat messages (soft delete). Only the author deletes, and only before an agent replies. A token needs inbox:write, and the message's conversation is re-checked for it first: for a thread, project:read and inbox:write for the thread's project, with a plain 403 when either is missing or the thread is missing or deleted; for a DM, the DM rule. A thread message is then decided by chat-thread-access: project:read on the thread's project now (a session sender who lost it, or a session's message of a deleted thread or of a key that is no thread, gets the missing-thread answer, 404), then the delete_own action, which every reader of the thread holds. A DM message is not decided by it
 - [chat.conversation.readstate.topic](#chatconversationreadstatetopic) — Read the caller's read state on a chat thread. Needs project:read on the thread's project
 - [chat.conversation.readstate.dm](#chatconversationreadstatedm) — Read the caller's read state on one of its DMs. A token needs inbox:read under the DM rule
 - [chat.conversation.markread.topic](#chatconversationmarkreadtopic) — Move the caller's read marker on a chat thread. Needs project:read on the thread's project; a token also needs inbox:write for it
@@ -190,12 +190,12 @@
 - [chat.star.conversations](#chatstarconversations) — List the conversations in which the caller has at least one live star (the Starred rail): one row per conversation with its current name, activity and project, no excerpt or count, sorted by activity or name, with a sealed cursor. Each conversation is kept only while the caller can read it now (project:read for a thread; the caller in a user slot of a DM key); a token keeps only conversations it may read under inbox:read (a thread's or agent DM's project inside its boundary, agent:read on a DM's agent; a hub boundary for a DM between users). An optional projectId must be a project the caller can read. 404 while web.chat_starred_messages is off
 - [chat.conversation.history.starred](#chatconversationhistorystarred) — Read only the caller's starred messages of one conversation (?starred=true), in history order with a sealed cursor bound to the conversation, the caller and the filter. Needs the conversation's normal read access (project:read on a thread's project, participation in a DM) and inbox:read: a token needs inbox:read for the thread's or peer agent's project, or a hub boundary for a DM between users. An around target must itself be starred. 404 while web.chat_starred_messages is off, never unfiltered history
 - [chat.star.remove](#chatstarremove) — Remove the caller's own star of a message; always 204. No message or conversation lookup; a project token removes only a star whose stored project is inside its boundary. 404 while web.chat_starred_messages is off
-- [chat.attachment.upload.project](#chatattachmentuploadproject) — Upload chat attachments to a space. Needs project:read on the space's project; a token also needs inbox:write for it
+- [chat.attachment.upload.project](#chatattachmentuploadproject) — Upload chat attachments to a space. Needs project:read on the space's project, a token also inbox:write for it, and then the post action of chat-thread-access (project.chat_post on the account; 403 chat_post_denied without it)
 - [chat.attachment.upload.noproject](#chatattachmentuploadnoproject) — Upload project-less chat attachments, reachable only through the messages that reference them. A federated caller is refused. A token needs inbox:write on a hub boundary
 - [chat.attachment.upload.agent](#chatattachmentuploadagent) — Upload attachments as the calling agent, stored as artifacts in the agent's own upload scope (ptone/scion#4596). The agent must be in good standing (agentMaySend); the upload is readable only by the agent until a send binds it
 - [chat.attachment.probe](#chatattachmentprobe) — Answer where the caller's attachment uploads go (artifact or legacy) and the delivery budget (ptone/scion#4596). Reads and writes nothing
 - [chat.attachment.download.project](#chatattachmentdownloadproject) — Download a chat attachment of a project. Needs project:read on the project; a session also reads its own uploads and files attached to messages it can read
-- [chat.conversation.promote](#chatconversationpromote) — Promote one of the caller's DMs with an agent into a thread of the agent's space. Needs DM participation, and project:read and project.chat_post on the agent's project (403 chat_post_denied without project.chat_post); a token also needs inbox:write under the DM rule, and project.chat_post is checked on its holder's account (the project:chat_post selector is not needed)
+- [chat.conversation.promote](#chatconversationpromote) — Promote one of the caller's DMs with an agent into a thread of the agent's space. Needs DM participation, project:read on the agent's project, and the create_thread action of chat-space-access (project.chat_post; 403 chat_post_denied without it); a token also needs inbox:write under the DM rule, and project.chat_post is checked on its holder's account (the project:chat_post selector is not needed)
 - [role.definition.create](#roledefinitioncreate) — Create a custom role definition (create, import, duplicate). A token needs role:create and role:read on a hub boundary and the holder's live role.create authority; the holder must hold every permission of the role within the token's selectors. A project-scoped definition can be bound in every project, so it is judged on the holder's system-scope authority; a system-scoped definition is refused to every token
 - [role.definition.update](#roledefinitionupdate) — Update a custom role definition. A token needs role:update and role:read on a hub boundary and the holder's live role.update authority; the holder must hold every permission of the updated role within the token's selectors, judged as for create
 - [role.definition.delete](#roledefinitiondelete) — Delete a custom role definition. A token needs role:delete and role:read on a hub boundary and the holder's live role.delete authority; system roles and roles that are still bound are kept
@@ -1115,7 +1115,7 @@
 
 **Domain:** agent
 
-**Description:** Send a message to an agent through its message action
+**Description:** Send a message to an agent through its message action. A user's post into a thread by thread key also needs the post action of chat-thread-access on the agent's project (project:read, then project.chat_post; 403 chat_post_denied with reason read_only), decided before any wake or row
 
 ### Entry Points
 
@@ -4853,7 +4853,7 @@
 
 **Domain:** inbox
 
-**Description:** Create a group conversation in a project. Needs project:read on the project; a token also needs inbox:write for it
+**Description:** Create a group conversation in a project. Order: project:read on the project, then (for a token) inbox:write for it, then for a user the create_group action of chat-space-access (project.chat_post on the account; 403 chat_post_denied with details.chat_action create_group and reason read_only without it), all before anything is minted. Agents are not decided by chat-space-access; their message-mode join check follows
 
 ### Entry Points
 
@@ -4879,6 +4879,7 @@
 ### Tests
 
 - `pkg/hub:TestConversationCreateToken_RequiresInboxWriteAndProjectRead`
+- `pkg/hub:TestChatCreateConversation_RequiresCreateGroupAction`
 
 ---
 
@@ -4954,7 +4955,7 @@
 
 **Domain:** inbox
 
-**Description:** Set the default agent of a group conversation. Needs project:read on the conversation's project; a token also needs inbox:write for it
+**Description:** Set the default agent of a group conversation. Needs project:read on the conversation's project; a token also needs inbox:write for it. A user on a project conversation then needs the set_default_agent action of chat-thread-access (project.chat_post on the account; 403 chat_post_denied with details.chat_action set_default_agent and reason read_only without it), decided before the body is read; agents and groups with no project are not decided by it
 
 ### Entry Points
 
@@ -4979,6 +4980,7 @@
 ### Tests
 
 - `pkg/hub:TestConversationCreateToken_RequiresInboxWriteAndProjectRead`
+- `pkg/hub:TestChatConversationDefaultAgent_RequiresSetDefaultAgentAction`
 
 ---
 
@@ -4986,7 +4988,7 @@
 
 **Domain:** inbox
 
-**Description:** Add a participant to a group conversation. Every caller needs project:read on the conversation's project; an added agent must be in that project and an added user must be a member of it; a token also needs inbox:write for it. A caller who is not a participant or cannot read the group gets the unknown-conversation answer, and an agent of another project the unknown-agent answer
+**Description:** Add a participant to a group conversation. Every caller needs project:read on the conversation's project; an added agent must be in that project and an added user must be a member of it; a token also needs inbox:write for it. A caller who is not a participant or cannot read the group gets the unknown-conversation answer, and an agent of another project the unknown-agent answer. A user on a project conversation then needs the add_participant action of chat-thread-access (project.chat_post on the account; 403 chat_post_denied with details.chat_action add_participant and reason read_only without it), decided before the body is read; agents and groups with no project are not decided by it
 
 ### Entry Points
 
@@ -5013,6 +5015,7 @@
 - `pkg/hub:TestConversationAddParticipant_RequiresProjectReadAndMemberPrincipals`
 - `pkg/hub:TestConversationAddParticipant_UnreadableGroupMatchesUnknownConversation`
 - `pkg/hub:TestConversationAddParticipant_AgentOfOtherProjectMatchesUnknownAgent`
+- `pkg/hub:TestChatConversationAddParticipant_RequiresAddParticipantAction`
 
 ---
 
@@ -5761,7 +5764,7 @@
 
 **Domain:** chat
 
-**Description:** List the threads of a chat space. Needs project:read on the space's project
+**Description:** List the threads of a chat space. Needs project:read on the space's project; each thread carries _capabilities, what the caller may do in it (chat-thread-access)
 
 ### Entry Points
 
@@ -5793,7 +5796,7 @@
 
 **Domain:** chat
 
-**Description:** Create a thread in a chat space. Needs project:read on the space's project; a token also needs inbox:write for it
+**Description:** Create a thread in a chat space. Order: project:read on the space's project, then (for a token) inbox:write for it (plain 403), then, before the body is validated and before any write, a default agent on create needs the set_default_agent action of chat-thread-access and the thread needs the create_thread action of chat-space-access (both project.chat_post on the account; 403 chat_post_denied with details.chat_action and reason read_only without it)
 
 ### Entry Points
 
@@ -5818,6 +5821,8 @@
 ### Tests
 
 - `pkg/hub:TestChatWriteToken_RequiresInboxWrite`
+- `pkg/hub:TestChatCreateThread_RequiresCreateThreadAction`
+- `pkg/hub:TestChatCreateThread_DefaultAgentNeedsSetDefaultAgent`
 
 ---
 
@@ -5953,7 +5958,7 @@
 
 **Domain:** chat
 
-**Description:** Rename a chat thread or set its default agent. Needs project:read on the thread's project; a token also needs inbox:write for it
+**Description:** Rename a chat thread or set its default agent. Needs project:read on the thread's project; a token also needs inbox:write for it. Then chat-thread-access decides, before the body is validated: a name needs the rename action and a default agent the set_default_agent action (project.chat_post on the account); a reader without them gets 403 chat_post_denied with details.chat_action and reason read_only, and nothing changes
 
 ### Entry Points
 
@@ -5978,6 +5983,8 @@
 ### Tests
 
 - `pkg/hub:TestChatWriteToken_RequiresInboxWrite`
+- `pkg/hub:TestChatTopicRename_RequiresRenameAction`
+- `pkg/hub:TestChatTopicDefaultAgent_RequiresSetDefaultAgentAction`
 
 ---
 
@@ -5985,7 +5992,7 @@
 
 **Domain:** chat
 
-**Description:** Delete a chat thread (soft delete; the last thread of a space stays). Needs project:read on the thread's project; a token also needs inbox:write for it
+**Description:** Delete a chat thread (soft delete; the last thread of a space stays). Needs project:read on the thread's project; a token also needs inbox:write for it. Then the delete action of chat-thread-access (project.chat_post on the account); a reader without it gets 403 chat_post_denied with details.chat_action delete and reason read_only, and the thread stays
 
 ### Entry Points
 
@@ -6010,6 +6017,7 @@
 ### Tests
 
 - `pkg/hub:TestChatWriteToken_RequiresInboxWrite`
+- `pkg/hub:TestChatTopicDelete_RequiresDeleteAction`
 
 ---
 
@@ -6017,7 +6025,7 @@
 
 **Domain:** chat
 
-**Description:** Read the messages of a chat thread. Needs project:read on the thread's project; canPost reports whether the caller's account holds project.chat_post on it
+**Description:** Read the messages of a chat thread. Decided by chat-thread-access: needs project:read on the thread's project (a caller without it gets the missing-thread answer). _capabilities lists what the caller may do in the thread (post needs project.chat_post on the account, and for a token inbox:write for the project), with reason read_only or token_scope when post is missing; canPost is its post action
 
 ### Entry Points
 
@@ -6033,7 +6041,7 @@
 
 **Base Permission:** `project.read`
 
-**Resource Resolver:** conversation-project
+**Resource Resolver:** chat-thread-access
 
 **Effects:** `read-one`, `list-scoped`
 
@@ -6082,7 +6090,7 @@
 
 **Domain:** chat
 
-**Description:** Post a message to a chat thread. Needs project:read and project.chat_post on the thread's project; a caller that reads the thread but lacks project.chat_post gets 403 chat_post_denied. A token also needs inbox:write for it; project.chat_post is checked on the token holder's account, and the project:chat_post selector is not needed (it only lets a token delegate roles that include project.chat_post). Agent recipients need agent:message
+**Description:** Post a message to a chat thread. Decided by chat-thread-access: needs project:read and project.chat_post on the thread's project; a caller without project:read gets the missing-thread answer, and one that reads the thread but may not post gets 403 chat_post_denied with details.reason read_only (no project.chat_post) or token_scope (a token without inbox:write for the project). project.chat_post is checked on a token holder's account, and the project:chat_post selector is not needed (it only lets a token delegate roles that include project.chat_post). Agent recipients need agent:message
 
 ### Entry Points
 
@@ -6098,7 +6106,7 @@
 
 **Base Permission:** `inbox.write`
 
-**Resource Resolver:** conversation-project
+**Resource Resolver:** chat-thread-access
 
 **Effects:** `create-resource`, `emit-external-effect`
 
@@ -6211,7 +6219,7 @@
 
 **Domain:** chat
 
-**Description:** Edit one of the caller's chat messages. Only the author edits, and only before an agent replies. A token needs inbox:write, and the message's conversation is re-checked: project:read for a thread, the DM rule for a DM
+**Description:** Edit one of the caller's chat messages. Only the author edits, and only before an agent replies. A token needs inbox:write, and the message's conversation is re-checked for it first: for a thread, project:read and inbox:write for the thread's project, with a plain 403 when either is missing or the thread is missing or deleted; for a DM, the DM rule. A thread message is then decided by chat-thread-access: project:read on the thread's project now (a session sender who lost it, or a session's message of a deleted thread or of a key that is no thread, gets the missing-thread answer, 404), then the edit_own action (project.chat_post on the account; 403 chat_post_denied with details.chat_action edit_own and reason read_only without it). A DM message is not decided by it
 
 ### Entry Points
 
@@ -6236,6 +6244,8 @@
 ### Tests
 
 - `pkg/hub:TestChatMessageEdit_RechecksTargetConversation`
+- `pkg/hub:TestChatMessageEdit_RequiresEditOwnAction`
+- `pkg/hub:TestChatMessageEdit_SenderWithoutProjectRead_NotFound`
 
 ---
 
@@ -6243,7 +6253,7 @@
 
 **Domain:** chat
 
-**Description:** Delete one of the caller's chat messages (soft delete). Only the author deletes, and only before an agent replies. A token needs inbox:write, and the message's conversation is re-checked: project:read for a thread, the DM rule for a DM
+**Description:** Delete one of the caller's chat messages (soft delete). Only the author deletes, and only before an agent replies. A token needs inbox:write, and the message's conversation is re-checked for it first: for a thread, project:read and inbox:write for the thread's project, with a plain 403 when either is missing or the thread is missing or deleted; for a DM, the DM rule. A thread message is then decided by chat-thread-access: project:read on the thread's project now (a session sender who lost it, or a session's message of a deleted thread or of a key that is no thread, gets the missing-thread answer, 404), then the delete_own action, which every reader of the thread holds. A DM message is not decided by it
 
 ### Entry Points
 
@@ -6268,6 +6278,8 @@
 ### Tests
 
 - `pkg/hub:TestChatMessageEdit_RechecksTargetConversation`
+- `pkg/hub:TestChatMessageDelete_DeleteOwnAction`
+- `pkg/hub:TestChatMessageDelete_SenderWithoutProjectRead_NotFound`
 
 ---
 
@@ -7184,7 +7196,7 @@
 
 **Domain:** chat
 
-**Description:** Upload chat attachments to a space. Needs project:read on the space's project; a token also needs inbox:write for it
+**Description:** Upload chat attachments to a space. Needs project:read on the space's project, a token also inbox:write for it, and then the post action of chat-thread-access (project.chat_post on the account; 403 chat_post_denied without it)
 
 ### Entry Points
 
@@ -7350,7 +7362,7 @@
 
 **Domain:** chat
 
-**Description:** Promote one of the caller's DMs with an agent into a thread of the agent's space. Needs DM participation, and project:read and project.chat_post on the agent's project (403 chat_post_denied without project.chat_post); a token also needs inbox:write under the DM rule, and project.chat_post is checked on its holder's account (the project:chat_post selector is not needed)
+**Description:** Promote one of the caller's DMs with an agent into a thread of the agent's space. Needs DM participation, project:read on the agent's project, and the create_thread action of chat-space-access (project.chat_post; 403 chat_post_denied without it); a token also needs inbox:write under the DM rule, and project.chat_post is checked on its holder's account (the project:chat_post selector is not needed)
 
 ### Entry Points
 

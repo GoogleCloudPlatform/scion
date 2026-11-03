@@ -729,7 +729,7 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     value: 'project:chat_post',
     label: 'project:chat_post',
     description:
-      "Post messages into the project's chat threads (project owner/admin/member, hub admin). Checked on the account: a user access token posts with inbox:write. On a token, project:chat_post only lets the token grant roles that include this permission",
+      "Keep project.chat_post on the token so it can grant roles that include it, such as project-member. It does not post: a token posts in a project's chat threads with inbox:write, and project.chat_post is checked on the account (project owner/admin/member, hub admin)",
     resource: 'project',
     isAlias: false,
   },

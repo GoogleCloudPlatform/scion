@@ -77,8 +77,26 @@ type MessageDecision struct {
 // error. Both refuse delivery, but infrastructure failure should be retryable.
 type EffectiveMembershipResult struct {
 	IsMember bool
-	Role     string // highest built-in role found: owner, admin, member, or "" (custom-only or non-member)
+	Role     string // highest built-in role found: owner, admin, member, viewer, or "" (custom-only or non-member)
 	Err      error  // non-nil only for infrastructure/store errors
+	// ViewerOnly is true when the only membership the user holds is the
+	// built-in project-viewer role (it reads chat and cannot post messages). That membership does
+	// not admit a principal to act through the project: the cross-project
+	// "members" inbound policy and material runtime admission refuse it
+	// (ptone/scion#5519, AdmitsBeyondViewer).
+	ViewerOnly bool
+}
+
+// AdmitsBeyondViewer reports whether the result is a membership that admits
+// acting through the project: any membership other than project-viewer
+// alone.
+func (r EffectiveMembershipResult) AdmitsBeyondViewer() bool {
+	return r.IsMember && !r.ViewerOnly
+}
+
+// isBuiltInViewerRole reports whether rd is the seeded project-viewer role.
+func isBuiltInViewerRole(rd *store.RoleDefinition) bool {
+	return rd != nil && rd.System && rd.Name == store.ProjectRoleViewer
 }
 
 // CheckEffectiveMembership checks whether a user is an active member of a
@@ -140,6 +158,7 @@ func checkEffectiveMembership(ctx context.Context, st store.Store, authz *AuthzS
 	}
 
 	isMember := false
+	beyondViewer := false
 	bestRole := ""
 	for _, rb := range directBindings {
 		if rb.ScopeType != store.RoleScopeProject || rb.ScopeID != projectID {
@@ -160,7 +179,10 @@ func checkEffectiveMembership(ctx context.Context, st store.Store, authz *AuthzS
 		// Any other active project binding confers membership; Role
 		// tracks only the built-in tier.
 		isMember = true
-		if store.IsBuiltInProjectMembershipRole(rd.Name) {
+		if !isBuiltInViewerRole(rd) {
+			beyondViewer = true
+		}
+		if store.IsBuiltInProjectMembershipRoleDef(rd) {
 			bestRole = higherProjectRole(bestRole, rd.Name)
 		}
 	}
@@ -198,11 +220,14 @@ func checkEffectiveMembership(ctx context.Context, st store.Store, authz *AuthzS
 			// check is defensive: the store binds such a role only to a user
 			// principal (CreateVisitorRoleBinding), so no group binding of
 			// one is written today.
-			if rd.Name == store.ProjectRoleOwner || !rd.ConfersProjectMembership() {
+			if builtInRoleName(rd) == store.ProjectRoleOwner || !rd.ConfersProjectMembership() {
 				continue
 			}
 			isMember = true
-			if store.IsBuiltInProjectMembershipRole(rd.Name) {
+			if !isBuiltInViewerRole(rd) {
+				beyondViewer = true
+			}
+			if store.IsBuiltInProjectMembershipRoleDef(rd) {
 				bestRole = higherProjectRole(bestRole, rd.Name)
 			}
 		}
@@ -211,7 +236,7 @@ func checkEffectiveMembership(ctx context.Context, st store.Store, authz *AuthzS
 	if !isMember {
 		return EffectiveMembershipResult{IsMember: false}
 	}
-	return EffectiveMembershipResult{IsMember: true, Role: bestRole}
+	return EffectiveMembershipResult{IsMember: true, Role: bestRole, ViewerOnly: !beyondViewer}
 }
 
 // messageReasonSenderNotPermitted is the message denial reason for an agent
@@ -680,7 +705,9 @@ func (s *Server) evaluateCrossProject(
 			decision.Reason = "membership check failed: " + memberResult.Err.Error()
 			return decision
 		}
-		if !memberResult.IsMember {
+		// A project-viewer is not a member for this policy: the
+		// role does not let its holder act through the project.
+		if !memberResult.AdmitsBeyondViewer() {
 			decision.Code = MessageDenialCrossProjectNotMember
 			decision.Reason = "origin user is not an active member of the destination project"
 			return decision

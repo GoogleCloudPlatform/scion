@@ -193,6 +193,11 @@ func (svc *ProjectMembershipService) customRoleAuthorities(ctx context.Context, 
 // rd) is nil is a caller bug and is refused with an internal error rather
 // than a panic.
 func (svc *ProjectMembershipService) memberRoleDecision(ctx context.Context, actor UserIdentity, projectID string, a *memberActorAuthority, ch planChange, rd *store.RoleDefinition, checks memberRoleCheck) (*MembershipDecision, string) {
+	// With the role definition at hand, it decides whether the change is a
+	// built-in role (a system row of a built-in name), whatever ch says.
+	if rd != nil {
+		ch.builtIn = store.IsBuiltInProjectMembershipRoleDef(rd)
+	}
 	if checks&memberRoleCheckCredential != 0 {
 		if a == nil {
 			return memberRoleDecisionMissingInput("actor authority"), ""
