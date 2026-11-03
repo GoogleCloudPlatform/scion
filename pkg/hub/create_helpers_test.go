@@ -14,19 +14,6 @@
 
 package hub
 
-import (
-	"context"
-	"testing"
-	"time"
-)
-
-// testDevToken is the development token used for testing.
-const testDevToken = "scion_dev_test_token_for_unit_tests_1234567890"
-
-func strPtr(s string) *string { return &s }
-
-func intPtr(i int) *int { return &i }
-
 // itoa is a minimal int-to-string without importing strconv.
 func itoa(n int) string {
 	if n == 0 {
@@ -48,25 +35,4 @@ func itoa(n int) string {
 		buf[i] = '-'
 	}
 	return string(buf[i:])
-}
-
-// alwaysAuthorized is a permissive authChecker for tests that don't exercise
-// the authorization policy path.
-func alwaysAuthorized(_ context.Context, _ string) bool { return true }
-
-// require_NoError is a test helper that fails immediately on error.
-func require_NoError(t *testing.T, err error) {
-	t.Helper()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func waitClosed(t *testing.T, ch <-chan struct{}, within time.Duration, what string) {
-	t.Helper()
-	select {
-	case <-ch:
-	case <-time.After(within):
-		t.Fatalf("timed out waiting for %s", what)
-	}
 }
