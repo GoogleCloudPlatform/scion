@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -35,27 +36,31 @@ func startWithRepoKey(t *testing.T, runtimeName string) (*api.AgentInfo, runtime
 	// Real git worktree detection in ProvisionAgent is off when SCION_HOST_UID is set (inside an agent container).
 	t.Setenv("SCION_HOST_UID", "")
 	tmpDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	_ = os.Chdir(tmpDir)
-	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	t.Chdir(tmpDir)
 	t.Setenv("HOME", tmpDir)
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
-	_ = os.MkdirAll(hcDir, 0755)
-	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	must(os.MkdirAll(hcDir, 0755))
+	must(os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644))
 	tplDir := filepath.Join(globalScionDir, "templates", "default")
-	_ = os.MkdirAll(tplDir, 0755)
-	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
-	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte("schema_version: \"1\"\nactive_profile: local\nprofiles:\n  local:\n    runtime: docker\n"), 0644)
+	must(os.MkdirAll(tplDir, 0755))
+	must(os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644))
+	must(os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte("schema_version: \"1\"\nactive_profile: local\nprofiles:\n  local:\n    runtime: docker\n"), 0644))
 
 	agentName := "strip-agent"
 	targetBranch := api.Slugify(agentName)
 	projectDir := filepath.Join(tmpDir, "project")
 	setupTestGitRepoWithBranch(t, projectDir, targetBranch)
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	_ = os.MkdirAll(projectScionDir, 0755)
-	_ = os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte("agents/\n"), 0644)
+	must(os.MkdirAll(projectScionDir, 0755))
+	must(os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte("agents/\n"), 0644))
 	wt := filepath.Join(tmpDir, "project-worktree-sibling")
 	if out, err := exec.Command("git", "-C", projectDir, "worktree", "add", wt, targetBranch).CombinedOutput(); err != nil {
 		t.Fatalf("git worktree add: %v: %s", err, out)
@@ -107,7 +112,7 @@ func TestStart_NeverCarryKeyStrippedOrRefusedByRuntime(t *testing.T) {
 		if info == nil || info.StartNotice != want {
 			t.Errorf("StartNotice = %q, want %q", infoNotice(info), want)
 		}
-		if info == nil || !containsString(info.RelayedWarnings, want) {
+		if info == nil || !slices.Contains(info.RelayedWarnings, want) {
 			t.Errorf("RelayedWarnings do not carry the notice: %v", info)
 		}
 	})
@@ -127,13 +132,4 @@ func infoNotice(info *api.AgentInfo) string {
 		return "<nil info>"
 	}
 	return info.StartNotice
-}
-
-func containsString(list []string, s string) bool {
-	for _, v := range list {
-		if v == s {
-			return true
-		}
-	}
-	return false
 }
