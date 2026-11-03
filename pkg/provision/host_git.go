@@ -68,7 +68,7 @@ func hostGitArgs() []string {
 
 // ErrHostCloneURLRefused is returned by CheckHostCloneURL. Its text names no
 // part of the refused URL.
-var ErrHostCloneURLRefused = errors.New("the repository URL must use https, ssh or git; local paths and other URL schemes are not cloned on the hub")
+var ErrHostCloneURLRefused = errors.New("the repository URL must use https, ssh or git; local paths and other URL schemes are not cloned")
 
 // CheckHostCloneURL accepts only a URL a hardened host-side clone may use:
 // https://, ssh:// or git:// with a host, or an scp-style ssh address

@@ -37,6 +37,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -1117,4 +1118,36 @@ func TestReservedPluginLabelNeverStoredFromClient(t *testing.T) {
 	_, has := b.Labels[pluginBrokerLabel]
 	assert.False(t, has, "registration must not store the plugin label")
 	assert.Equal(t, "c", b.Labels["team"])
+}
+
+// G7 at construction in keyring mode: the hub re-check refuses with
+// keyring_signing, before (and whatever) SharedSigningSecret says; the
+// source-order guard TestValidateTestAdminGateConfig_KeyringRefusalPrecedesSharedSecret
+// pins that the shared secret is not read on that path. The legacy adapter
+// is legacy mode: the shared-secret refusal still applies there.
+func TestTestAdminGate_KeyringModeRefusesBeforeSharedSecret(t *testing.T) {
+	ka, _ := krRollout(t)
+	for name, mutate := range map[string]func(*ServerConfig){
+		"keyring file": func(c *ServerConfig) { c.Keyring = ka; c.KeyringConfigured = true },
+		"keyring file and a shared secret": func(c *ServerConfig) {
+			c.Keyring = ka
+			c.KeyringConfigured = true
+			c.SharedSigningSecret = "synthetic-test-secret"
+		},
+		"configured, not loaded": func(c *ServerConfig) { c.KeyringConfigured = true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := tiaGateServerConfig()
+			mutate(&cfg)
+			err := validateTestAdminGateConfig(cfg, true)
+			require.Error(t, err)
+			assert.True(t, errors.Is(err, ErrTestAdminKeyringSigning), "got %v", err)
+		})
+	}
+	cfg := tiaGateServerConfig()
+	cfg.Keyring = keyring.Legacy("synthetic-test-secret")
+	cfg.SharedSigningSecret = "synthetic-test-secret"
+	err := validateTestAdminGateConfig(cfg, true)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrTestAdminSharedSigningSecret), "got %v", err)
 }

@@ -579,6 +579,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.ContentHashV2:                testAdminPolicyDeny,
 	experiments.LifecycleEvents:              testAdminPolicyDeny,
 	experiments.ArtifactReviewEditor:         testAdminPolicyDeny,
+	experiments.ArtifactManageAccess:         testAdminPolicyDeny,
 	experiments.SkillContentHashV2:           testAdminPolicyDeny,
 	experiments.UserDeleteForceCascade:       testAdminPolicyDeny,
 }

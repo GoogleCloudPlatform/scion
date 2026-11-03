@@ -167,7 +167,7 @@ func TestResolveProjectNameOrID(t *testing.T) {
 			client, err := hubclient.New(srv.URL)
 			require.NoError(t, err)
 
-			got, err := resolveProjectNameOrID(context.Background(), client, tt.arg)
+			got, err := resolveProjectNameOrID(context.Background(), client, tt.arg, false)
 			if tt.wantErr != "" {
 				require.Error(t, err)
 				assert.Equal(t, tt.wantErr, err.Error())

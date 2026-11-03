@@ -17,8 +17,9 @@
 /**
  * Chat retention in the thread (hub.chat_retention): the oldest history
  * page's `retention.purgedBefore` renders a divider at the top of the
- * thread, and a reply whose quoted message is gone renders a muted
- * "[no longer available]" quote.
+ * thread, a reply whose quoted message is gone renders a muted
+ * "[no longer available]" quote, and a jump to a message the hub reports
+ * as message_unavailable shows a toast.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -35,6 +36,9 @@ const stateManager = vi.hoisted(() =>
 );
 
 const apiFetch = vi.hoisted(() => vi.fn<(path: string, init?: unknown) => Promise<Response>>());
+const showToast = vi.hoisted(() => vi.fn());
+
+vi.mock('../../../utils/toast.js', () => ({ showToast }));
 
 vi.mock('../../../client/main.js', async () => ({
   ...(await import('../../../client/__fixtures__/main-stub.js')),
@@ -104,6 +108,7 @@ beforeEach(() => {
   setPreferredTimeZone('UTC');
   setFeatureFlag(CHAT_RETENTION_FLAG, true);
   history = { messages: [] };
+  showToast.mockReset();
   apiFetch.mockReset();
   apiFetch.mockImplementation((path) => {
     if (path.includes('/messages?')) return Promise.resolve(json(history));
@@ -207,5 +212,41 @@ describe('unavailable reply quote', () => {
     await msg?.updateComplete;
     const quote = msg?.shadowRoot?.querySelector('.reply-preview.unavailable');
     expect(quote?.textContent?.trim()).toBe('[no longer available]');
+  });
+});
+
+describe('jump to a message that is no longer available', () => {
+  /** Serve the thread's history, and `around` with the given response. */
+  function serveAround(response: Response): void {
+    apiFetch.mockImplementation((path) => {
+      if (path.includes('around=')) return Promise.resolve(response);
+      if (path.includes('/messages?')) return Promise.resolve(json(history));
+      return Promise.resolve(json({ items: [] }));
+    });
+  }
+
+  it('shows the toast when the hub answers message_unavailable', async () => {
+    history = { messages: [message('m1', '2026-08-01T10:00:00Z')] };
+    const el = await open('topic-jump-gone');
+    serveAround(
+      json({ error: { code: 'message_unavailable', message: 'Message not found' } }, 404)
+    );
+
+    await el.scrollToMessageById('purged-1');
+    await settle();
+
+    expect(showToast).toHaveBeenCalledWith('That message is no longer available.', 'warning');
+    expect(el.shadowRoot?.querySelector('#msg-m1')).not.toBeNull();
+  });
+
+  it('shows no toast for another 404 code', async () => {
+    history = { messages: [message('m1', '2026-08-01T10:00:00Z')] };
+    const el = await open('topic-jump-other');
+    serveAround(json({ error: { code: 'not_found', message: 'Conversation not found' } }, 404));
+
+    await el.scrollToMessageById('x-1');
+    await settle();
+
+    expect(showToast).not.toHaveBeenCalled();
   });
 });

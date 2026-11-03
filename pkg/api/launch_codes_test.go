@@ -52,6 +52,7 @@ func TestLaunchVocabularyValues(t *testing.T) {
 		{LaunchCodeHarnessConfigUnusable, "harness_config_unusable"},
 		{LaunchCodeAgentStateUnavailable, "agent_state_unavailable"},
 		{LaunchCodeAgentStateConflict, "agent_state_conflict"},
+		{LaunchCodeGitConfigRefused, "git_config_refused"},
 		{LaunchCodeImagePullFailed, "image_pull_failed"},
 		{LaunchCodeInvalidImage, "invalid_image"},
 		{LaunchCodeContainerConfig, "container_config"},

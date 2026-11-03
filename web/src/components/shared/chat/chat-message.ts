@@ -1698,17 +1698,17 @@ export class ScionChatMessage extends LitElement {
       padding: 0.25rem 0.5rem;
       margin-bottom: 0.25rem;
       border-left: 3px solid var(--scion-primary-400, #60a5fa);
-      background: var(--scion-surface-50, #f8fafc);
+      background: var(--scion-bg, #f8fafc);
       border-radius: 0 0.25rem 0.25rem 0;
       cursor: pointer;
       font-size: var(--chat-fs-base);
-      color: var(--scion-neutral-500, #64748b);
+      color: var(--scion-text-muted, #64748b);
       max-width: 100%;
       overflow: hidden;
     }
 
     .reply-preview:hover {
-      background: var(--scion-surface-100, #f1f5f9);
+      background: var(--scion-bg-subtle, #f1f5f9);
     }
 
     .reply-preview.unavailable {
@@ -1719,12 +1719,14 @@ export class ScionChatMessage extends LitElement {
     }
 
     .reply-preview.unavailable:hover {
-      background: var(--scion-surface-50, #f8fafc);
+      background: var(--scion-bg, #f8fafc);
     }
 
+    /* primary-600 in the light theme and primary-300 in the dark one, so the
+       name keeps AA contrast on the reply background in both. */
     .reply-preview .reply-sender {
       font-weight: 600;
-      color: var(--scion-primary-600, #2563eb);
+      color: var(--scion-primary-hover, #2563eb);
       white-space: nowrap;
     }
 

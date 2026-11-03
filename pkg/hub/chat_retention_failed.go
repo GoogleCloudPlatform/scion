@@ -27,9 +27,12 @@ import (
 // messaging.failed_message_retention_days. It is not gated by
 // hub.chat_retention or by chat_retention.enabled. It walks the partial
 // failed (created, id) index in capped scans and deletes the failed agent
-// messages each scan finds with the chat retention cascade, so no message_addressees,
-// webchat_mention, webchat_message_ext, webchat_message_attachment or
-// webchat_message_star row is left behind. The pacing is the chat
+// messages each scan finds with the chat retention cascade, so no
+// message_addressees, webchat_mention, webchat_message_ext,
+// webchat_message_attachment or webchat_message_star row is left behind.
+// The attachments a purge leaves with no message link lose their bytes and
+// then their metadata row, as in the chat retention sweep; a failed byte
+// delete keeps the row for the attachment GC. The pacing is the chat
 // retention sweep's: chat_retention.sweep's chunk size (adapted to the
 // transaction time), pause and tick budget, with the budget also bounded by
 // the handler's deadline.
@@ -67,6 +70,9 @@ type failedPurgeResult struct {
 	MaxTx time.Duration
 	// ChunkSizes are the requested chunk sizes, in order.
 	ChunkSizes []int
+	// AttachmentDeleteFailures counts unlinked attachments whose bytes
+	// could not be deleted; their rows stay for the attachment GC.
+	AttachmentDeleteFailures int
 }
 
 // Total sums r over every project.
@@ -181,14 +187,16 @@ func (sw *chatRetentionSweeper) scanFailed(ctx context.Context, cutoff time.Time
 	return sw.store.SelectFailedMessages(cctx, cutoff, pos, sw.failedScanCap(), limit)
 }
 
-// purgeFailedChunk deletes one chunk under the chunk timeout and adds its
-// counts to res. It returns the transaction's duration.
+// purgeFailedChunk deletes one chunk under the chunk timeout, then the
+// bytes and rows of the attachments it left with no message link
+// (deleteAttachments, each under its own chunk timeout), and adds the
+// counts to res. It returns the purge transaction's duration.
 func (sw *chatRetentionSweeper) purgeFailedChunk(ctx context.Context, ids []string, projectOf map[string]string, res *failedPurgeResult) (time.Duration, error) {
 	cctx, cancel := context.WithTimeout(ctx, chatRetentionChunkTimeout)
-	defer cancel()
 	t0 := sw.now()
 	pr, err := sw.store.PurgeFailedMessages(cctx, ids, projectOf)
 	tx := sw.now().Sub(t0)
+	cancel()
 	if err != nil {
 		return tx, err
 	}
@@ -196,10 +204,14 @@ func (sw *chatRetentionSweeper) purgeFailedChunk(ctx context.Context, ids []stri
 	if tx > res.MaxTx {
 		res.MaxTx = tx
 	}
-	for project, c := range pr.ByProject {
-		acc := res.ByProject[project]
-		acc.Add(c)
-		res.ByProject[project] = acc
+	ar := sw.deleteAttachments(ctx, pr.UnlinkedAttachments)
+	res.AttachmentDeleteFailures += ar.Failures
+	for _, byProject := range []map[string]store.ChatRetentionCounts{pr.ByProject, ar.ByProject} {
+		for project, c := range byProject {
+			acc := res.ByProject[project]
+			acc.Add(c)
+			res.ByProject[project] = acc
+		}
 	}
 	return tx, nil
 }

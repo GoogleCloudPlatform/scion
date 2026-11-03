@@ -984,7 +984,16 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 					if provenance.Template != "" {
 						tplName = provenance.Template
 					}
-				case finalScionCfg != nil && finalScionCfg.Info != nil && finalScionCfg.Info.Template != "":
+				case finalScionCfg != nil && finalScionCfg.Info != nil && config.IsTemplateSlug(finalScionCfg.Info.Template):
+					// agent-info.json's template (agent-writable) is used
+					// only when it is a template slug: a live, fail-closed
+					// check for the harness-config choice. GetAgent
+					// (provision.go) is the primary control for the
+					// template chain and already replaces a non-slug
+					// agent-info template before finalScionCfg reaches
+					// here; this check keeps a Start path that builds its
+					// config without GetAgent from choosing an
+					// agent-written path.
 					tplName = finalScionCfg.Info.Template
 				}
 			}
@@ -2064,6 +2073,15 @@ authDone:
 			}
 			sdLayout, sdSplit = l, split
 		}
+	}
+	// On the local layout, a shared-dir name that fails
+	// api.ValidateSharedDirs is skipped (logged, no directory) here, before
+	// resolveSharedDirs, so RunConfig.SharedDirs carries only valid names
+	// too: a runtime that creates directories from those names (the Cloud
+	// Run sandbox's /scion/shared/<name>) never sees an invalid one. On a
+	// shared backend, resolveSharedDirs refuses the start instead (design G5).
+	if usesLocalSharedDirLayout(sdLayout, sdSplit, m.Runtime.Name()) {
+		effectiveSharedDirs = validLocalSharedDirs(effectiveSharedDirs)
 	}
 	// A shared-backend Layout keys its tree on hubDispatchedProjectID,
 	// snapshotted above at Start entry — NOT the general projectID variable

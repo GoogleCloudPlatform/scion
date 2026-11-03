@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 // gateAction classifies a claim/checkpoint/keepalive answer (design
@@ -1047,6 +1048,13 @@ func classifyStartErrorCode(err error, templateSlug, op string) (code, message s
 	}
 	if se, ok := storageMigrationRequiredFrom(err); ok {
 		return ErrCodeStorageMigrationRequired, se.PublicMessage()
+	}
+	if text, ok := util.StartRefusalText(err); ok {
+		// The repository's git config sets keys agents may not be given.
+		// The refusal's own text names every refused key and its remedy,
+		// never a value or a host path; what wraps it can name the agent
+		// directory, so only the refusal is reported.
+		return api.LaunchCodeGitConfigRefused, text
 	}
 	var skillErr *agent.SkillResolutionError
 	switch {

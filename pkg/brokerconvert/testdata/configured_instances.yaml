@@ -1,0 +1,11 @@
+schema_version: "1"
+server:
+  broker:
+    instances:
+      - key: local-docker
+        name: local-docker
+        runtime_target:
+          type: docker
+profiles:
+  local:
+    runtime: docker

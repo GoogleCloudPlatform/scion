@@ -5309,6 +5309,11 @@ type AgentDelegationGrant struct {
 	AgentProjectID    string
 	AgentGeneration   int
 	AgentStateVersion int64
+	// IssuedRunID is the agent's RunID at issuance, read under the agent row
+	// lock; "" for a grant issued before the column existed or to an agent
+	// not yet dispatched. A suspend that finds a newer run already started
+	// keeps the grants keyed to that run (ptone/scion#6403).
+	IssuedRunID string
 	// IssuerUserID is the user who created the grant.
 	IssuerUserID string
 	// BoundaryKind is "project" or "hub"; BoundaryProjectID is set iff

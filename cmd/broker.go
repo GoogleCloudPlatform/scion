@@ -117,7 +117,8 @@ Commands:
   deregister   Remove this broker from the Hub
   hubs         List hub connections
   provide      Add this broker as a provider for a project
-  withdraw     Remove this broker as a provider from a project`,
+  withdraw     Remove this broker as a provider from a project
+  convert      Plan a move to flat Runtime Brokers (read-only, experimental)`,
 }
 
 // brokerRegisterCmd registers this broker with the Hub
@@ -1387,6 +1388,9 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 
 	// Load Hub client: use --hub flag if specified, otherwise fall back to project settings
 	var client hubclient.Client
+	// uat: the client sends a user access token. A named hub connection
+	// uses the broker's own credentials, never one.
+	uat := false
 	if brokerHubFlag != "" {
 		var err error
 		client, err = getHubClientForConnection(brokerHubFlag)
@@ -1403,7 +1407,7 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("failed to load settings: %w", err)
 		}
 
-		client, err = getHubClient(settings)
+		client, uat, err = getHubClientUAT(settings)
 		if err != nil {
 			return err
 		}
@@ -1414,7 +1418,7 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 
 	// If we used --project flag, resolve project by name or ID
 	if brokerProjectID != "" {
-		project, err := resolveProjectByNameOrID(ctx, client, brokerProjectID)
+		project, err := resolveProjectByNameOrID(ctx, client, brokerProjectID, uat)
 		if err != nil {
 			return fmt.Errorf("failed to find project '%s': %w", brokerProjectID, err)
 		}
@@ -1641,6 +1645,9 @@ func runBrokerWithdraw(cmd *cobra.Command, args []string) error {
 
 	// Load Hub client: use --hub flag if specified, otherwise fall back to project settings
 	var client hubclient.Client
+	// uat: the client sends a user access token. A named hub connection
+	// uses the broker's own credentials, never one.
+	uat := false
 	if brokerHubFlag != "" {
 		var err error
 		client, err = getHubClientForConnection(brokerHubFlag)
@@ -1658,7 +1665,7 @@ func runBrokerWithdraw(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("failed to load settings: %w", err)
 		}
 
-		client, err = getHubClient(settings)
+		client, uat, err = getHubClientUAT(settings)
 		if err != nil {
 			return err
 		}
@@ -1669,7 +1676,7 @@ func runBrokerWithdraw(cmd *cobra.Command, args []string) error {
 
 	// If we used --project flag, resolve project by name or ID
 	if brokerProjectID != "" {
-		project, err := resolveProjectByNameOrID(ctx, client, brokerProjectID)
+		project, err := resolveProjectByNameOrID(ctx, client, brokerProjectID, uat)
 		if err != nil {
 			return fmt.Errorf("failed to find project '%s': %w", brokerProjectID, err)
 		}
@@ -2238,7 +2245,11 @@ type brokerProjectStatus struct {
 // resolveProjectByNameOrID resolves a project identifier (name, slug, or ID) to a project.
 // It tries multiple strategies in order: direct ID lookup, slug, then name.
 // Returns the project if found, or an error if not found or multiple matches.
-func resolveProjectByNameOrID(ctx context.Context, client hubclient.Client, nameOrID string) (*hubclient.Project, error) {
+// uat reports that client sends a user access token (hubsync.UsesUserAccessToken,
+// or authSourceIsUserAccessToken for a getHubClient client): then a lookup
+// that finds nothing returns hubsync.ScopedTokenProjectLookupEmptyError,
+// which reads the same whether or not the project exists (ptone/scion#5294).
+func resolveProjectByNameOrID(ctx context.Context, client hubclient.Client, nameOrID string, uat bool) (*hubclient.Project, error) {
 	// First try to fetch by ID directly
 	project, err := client.Projects().Get(ctx, nameOrID)
 	if err == nil {
@@ -2271,6 +2282,9 @@ func resolveProjectByNameOrID(ctx context.Context, client hubclient.Client, name
 
 	switch len(resp.Projects) {
 	case 0:
+		if uat {
+			return nil, hubsync.ScopedTokenProjectLookupEmptyError(nameOrID)
+		}
 		return nil, fmt.Errorf("project '%s' not found", nameOrID)
 	case 1:
 		return &resp.Projects[0], nil

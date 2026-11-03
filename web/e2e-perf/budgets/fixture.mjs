@@ -177,6 +177,7 @@ export function buildFixture() {
           'hub.user_delete_force_cascade': false,
           'web.agent_badges': false,
           'web.agent_edit': true,
+          'web.artifact_manage_access': false,
           'web.artifact_review_editor': false,
           'web.chat_scheduled_send': false,
           'web.chat_starred_messages': true,

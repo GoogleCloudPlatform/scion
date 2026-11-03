@@ -278,6 +278,9 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	if ops.envKoanf != nil {
 		resp.EnvValues = s.dbTierEnvValues(ops.envKoanf, resp.EnvOverrides, &resp.ServerConfigResponse, dbStoredValues(fileStored, ops))
 	}
+	// The running values of the keys start-up sets, compared with the
+	// unmasked view (ptone/scion#3722).
+	resp.RunningValues = startupRunningValues(ops.envKoanf, s.config.StartupServerSettings, &resp.ServerConfigResponse)
 
 	// Mask sensitive fields — same logic as file mode.
 	maskSensitiveFields(&resp.ServerConfigResponse)
@@ -2154,23 +2157,56 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 //
 // Used by both the DB-mode and file-mode PUT handlers.
 func (s *Server) validateHubDefaultGCPIdentity(w http.ResponseWriter, ctx context.Context, d opsettings.AgentDefaultsSettings) bool {
+	p := s.hubDefaultGCPIdentityProblem(ctx, d)
+	if p == nil {
+		return true
+	}
+	switch {
+	case p.err != nil:
+		writeErrorFromErr(w, p.err, "")
+	case p.notVerified:
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeIdentityNotVerified, p.msg, map[string]interface{}{
+			"field":  p.field,
+			"errors": []settingsFieldError{{Field: p.field, Message: p.msg}},
+		})
+	default:
+		writeSettingsFieldError(w, p.field, p.msg)
+	}
+	return false
+}
+
+// gcpIdentityProblem is why a hub default GCP identity pair is refused:
+// a validation failure on field (msg; notVerified for an unverified
+// account, which has its own error code), or err, a store error.
+type gcpIdentityProblem struct {
+	field       string
+	msg         string
+	notVerified bool
+	err         error
+}
+
+// hubDefaultGCPIdentityProblem checks a hub default GCP identity pair and
+// returns why it is refused, or nil. It writes nothing:
+// validateHubDefaultGCPIdentity turns the result into the response, and the
+// settings.yaml-mode PUT also uses it to warn about a stored pair that is
+// valid only because the environment pins one of its keys.
+func (s *Server) hubDefaultGCPIdentityProblem(ctx context.Context, d opsettings.AgentDefaultsSettings) *gcpIdentityProblem {
+	const saField = "default_gcp_identity_service_account_id"
 	switch d.DefaultGCPIdentityMode {
 	case "", store.GCPMetadataModeBlock, store.GCPMetadataModePassthrough, store.GCPMetadataModeAssign:
 	default:
-		writeSettingsFieldError(w, "default_gcp_identity_mode",
-			fmt.Sprintf("invalid default_gcp_identity_mode %q: must be one of block, passthrough, assign", d.DefaultGCPIdentityMode))
-		return false
+		return &gcpIdentityProblem{field: "default_gcp_identity_mode",
+			msg: fmt.Sprintf("invalid default_gcp_identity_mode %q: must be one of block, passthrough, assign", d.DefaultGCPIdentityMode)}
 	}
 
 	if d.DefaultGCPIdentityMode == store.GCPMetadataModeAssign && d.DefaultGCPIdentityServiceAccountID == "" {
-		writeSettingsFieldError(w, "default_gcp_identity_service_account_id",
-			"default GCP identity mode 'assign' requires a service account; set default_gcp_identity_service_account_id or choose another mode")
-		return false
+		return &gcpIdentityProblem{field: saField,
+			msg: "default GCP identity mode 'assign' requires a service account; set default_gcp_identity_service_account_id or choose another mode"}
 	}
 
 	if d.DefaultGCPIdentityServiceAccountID == "" {
 		// Empty means clear. Clearing must always be permitted.
-		return true
+		return nil
 	}
 
 	sa, err := s.store.GetGCPServiceAccount(ctx, d.DefaultGCPIdentityServiceAccountID)
@@ -2179,46 +2215,36 @@ func (s *Server) validateHubDefaultGCPIdentity(w http.ResponseWriter, ctx contex
 	}
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			writeSettingsFieldError(w, "default_gcp_identity_service_account_id",
-				"default GCP service account not found")
-			return false
+			return &gcpIdentityProblem{field: saField, msg: "default GCP service account not found"}
 		}
-		writeErrorFromErr(w, err, "")
-		return false
+		return &gcpIdentityProblem{err: err}
 	}
 
 	if !gcpServiceAccountVerified(sa) {
-		msg := "GCP service account is not verified; verify it before setting it as the hub default. " +
-			identityVerifyRemedy(sa.Scope)
-		writeError(w, http.StatusUnprocessableEntity, ErrCodeIdentityNotVerified, msg, map[string]interface{}{
-			"field":  "default_gcp_identity_service_account_id",
-			"errors": []settingsFieldError{{Field: "default_gcp_identity_service_account_id", Message: msg}},
-		})
-		return false
+		return &gcpIdentityProblem{field: saField, notVerified: true,
+			msg: "GCP service account is not verified; verify it before setting it as the hub default. " +
+				identityVerifyRemedy(sa.Scope)}
 	}
 
 	if sa.Scope != store.ScopeHub {
-		writeSettingsFieldError(w, "default_gcp_identity_service_account_id",
-			"hub default service account must be hub-scoped; a project-scoped account is unavailable in every other project")
-		return false
+		return &gcpIdentityProblem{field: saField,
+			msg: "hub default service account must be hub-scoped; a project-scoped account is unavailable in every other project"}
 	}
 
 	if saReferencePreconditions(sa) != nil {
-		writeSettingsFieldError(w, "default_gcp_identity_service_account_id", saAssignTranslationRecordMsg)
-		return false
+		return &gcpIdentityProblem{field: saField, msg: saAssignTranslationRecordMsg}
 	}
 
 	s.mu.RLock()
 	mode := s.saAssignCheckMode
 	s.mu.RUnlock()
 	if mode != SAAssignCheckEnforce {
-		writeSettingsFieldError(w, "default_gcp_identity_service_account_id",
-			"hub-scoped service account assignment requires gcpIamCheckMode=enforce; "+
-				"agent creation would be denied for every user until it is enabled")
-		return false
+		return &gcpIdentityProblem{field: saField,
+			msg: "hub-scoped service account assignment requires gcpIamCheckMode=enforce; " +
+				"agent creation would be denied for every user until it is enabled"}
 	}
 
-	return true
+	return nil
 }
 
 // getCurrentRevision reads the current revision for a section from the cache.

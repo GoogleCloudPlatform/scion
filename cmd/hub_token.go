@@ -281,7 +281,7 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 	}
 	hubBoundary := tokenCreateBoundary == tokenBoundaryHub
 
-	_, client, err := loadHubClient()
+	_, client, uat, err := loadHubClientUAT()
 	if err != nil {
 		return err
 	}
@@ -292,7 +292,7 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 	// Resolve project name/slug to ID
 	var project *hubclient.Project
 	if !hubBoundary {
-		project, err = resolveProjectByNameOrID(ctx, client, tokenCreateProject)
+		project, err = resolveProjectByNameOrID(ctx, client, tokenCreateProject, uat)
 		if err != nil {
 			return fmt.Errorf("failed to resolve project %q: %w", tokenCreateProject, err)
 		}
@@ -380,7 +380,7 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 }
 
 func runTokenList(cmd *cobra.Command, args []string) error {
-	_, client, err := loadHubClient()
+	_, client, uat, err := loadHubClientUAT()
 	if err != nil {
 		return err
 	}
@@ -396,7 +396,7 @@ func runTokenList(cmd *cobra.Command, args []string) error {
 	// Optionally filter by project
 	var projectID string
 	if tokenListProject != "" {
-		project, err := resolveProjectByNameOrID(ctx, client, tokenListProject)
+		project, err := resolveProjectByNameOrID(ctx, client, tokenListProject, uat)
 		if err != nil {
 			return fmt.Errorf("failed to resolve project %q: %w", tokenListProject, err)
 		}
@@ -455,7 +455,7 @@ func runTokenList(cmd *cobra.Command, args []string) error {
 }
 
 func runTokenScopes(cmd *cobra.Command, args []string) error {
-	_, client, err := loadHubClient()
+	_, client, uat, err := loadHubClientUAT()
 	if err != nil {
 		return err
 	}
@@ -465,7 +465,7 @@ func runTokenScopes(cmd *cobra.Command, args []string) error {
 
 	opts := &hubclient.ListScopesOptions{}
 	if tokenScopesProject != "" {
-		project, err := resolveProjectByNameOrID(ctx, client, tokenScopesProject)
+		project, err := resolveProjectByNameOrID(ctx, client, tokenScopesProject, uat)
 		if err != nil {
 			return fmt.Errorf("failed to resolve project %q: %w", tokenScopesProject, err)
 		}

@@ -1982,21 +1982,31 @@ func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace s
 // warning makes that visible, with the phase when the claim is still Pending
 // (for example because its class cannot provision ReadWriteMany volumes).
 func warnOnStorageClassMismatch(pvc *corev1.PersistentVolumeClaim, requested string) {
-	if pvc == nil || requested == "" {
-		return
-	}
-	existing := ""
-	if pvc.Spec.StorageClassName != nil {
-		existing = *pvc.Spec.StorageClassName
-	}
-	if existing == requested {
+	existing, pending, differs := storageClassMismatch(pvc, requested)
+	if !differs {
 		return
 	}
 	args := []any{"pvc", pvc.Name, "existing_storage_class", existing, "requested_storage_class", requested}
-	if pvc.Status.Phase == corev1.ClaimPending {
-		args = append(args, "phase", string(pvc.Status.Phase))
+	if pending {
+		args = append(args, "phase", string(corev1.ClaimPending))
 	}
 	runtimeLog().Warn("Reusing existing shared-dir PVC whose storage class differs from the requested class; existing claims are not changed", args...)
+}
+
+// storageClassMismatch reports whether claim pvc's storage class differs
+// from the requested (non-empty) class, with the claim's class (empty when
+// it names none) and whether the claim is still Pending. A nil claim or an
+// empty requested class never differs. It is the comparison both the
+// start-time warning (warnOnStorageClassMismatch) and the doctor's
+// shared-dir-claim-classes check use.
+func storageClassMismatch(pvc *corev1.PersistentVolumeClaim, requested string) (existing string, pending, differs bool) {
+	if pvc == nil || requested == "" {
+		return "", false, false
+	}
+	if pvc.Spec.StorageClassName != nil {
+		existing = *pvc.Spec.StorageClassName
+	}
+	return existing, pvc.Status.Phase == corev1.ClaimPending, existing != requested
 }
 
 // ensureProjectRWXClaim is the idempotent get-or-create core for project-scoped

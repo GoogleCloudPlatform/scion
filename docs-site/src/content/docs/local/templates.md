@@ -138,6 +138,8 @@ scion start coord --type gh://scion-frontiers/agent-team/templates/coordinator
 scion start coord --type ./templates/coordinator
 ```
 
+The CLI resolves a path or URI on your own machine and uploads the template to the Hub. What reaches the Hub, and from there a Runtime Broker, is always a template name or ID: an agent create request, a scheduled `dispatch_agent` event or schedule, a project default template and a hub default template must name a template, not a directory or a remote source. A Runtime Broker loads a template directory by absolute path only from its own template cache or, when it runs with a Hub that stores files locally, from that Hub's template storage. A remote `default_template` in the broker's settings is still fetched.
+
 ### Which harness-config is used
 
 When you do not pass `--harness-config`, Scion resolves it in this order:

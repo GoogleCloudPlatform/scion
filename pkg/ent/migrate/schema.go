@@ -410,6 +410,7 @@ var (
 		{Name: "agent_project_id", Type: field.TypeString},
 		{Name: "agent_generation", Type: field.TypeInt, Default: 0},
 		{Name: "agent_state_version", Type: field.TypeInt64, Default: 0},
+		{Name: "issued_run_id", Type: field.TypeString, Default: ""},
 		{Name: "issuer_user_id", Type: field.TypeString},
 		{Name: "boundary_kind", Type: field.TypeString},
 		{Name: "boundary_project_id", Type: field.TypeString, Nullable: true},
@@ -445,17 +446,17 @@ var (
 			{
 				Name:    "agentdelegationgrant_issuer_user_id",
 				Unique:  false,
-				Columns: []*schema.Column{AgentDelegationGrantsColumns[5]},
+				Columns: []*schema.Column{AgentDelegationGrantsColumns[6]},
 			},
 			{
 				Name:    "agentdelegationgrant_agent_id_revoked_at",
 				Unique:  false,
-				Columns: []*schema.Column{AgentDelegationGrantsColumns[1], AgentDelegationGrantsColumns[20]},
+				Columns: []*schema.Column{AgentDelegationGrantsColumns[1], AgentDelegationGrantsColumns[21]},
 			},
 			{
 				Name:    "agentdelegationgrant_issuer_user_id_revoked_at",
 				Unique:  false,
-				Columns: []*schema.Column{AgentDelegationGrantsColumns[5], AgentDelegationGrantsColumns[20]},
+				Columns: []*schema.Column{AgentDelegationGrantsColumns[6], AgentDelegationGrantsColumns[21]},
 			},
 		},
 	}

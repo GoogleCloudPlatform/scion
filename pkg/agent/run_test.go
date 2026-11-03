@@ -511,6 +511,7 @@ profiles:
 
 	mgr := NewManager(mockRT)
 
+	allowHydratedTemplate(t, hydratedTplDir)
 	_, err := mgr.Start(context.Background(), api.StartOptions{
 		Name:        "test-agent",
 		Template:    hydratedTplDir, // absolute path, simulating hydrated template

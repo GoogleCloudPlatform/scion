@@ -60,6 +60,122 @@ type chatRetentionResponse struct {
 	LastAppliedCutoff *time.Time `json:"last_applied_cutoff"`
 	// Revision is the section revision, for expected_revision.
 	Revision int64 `json:"revision"`
+	// Runs are the most recent chat_retention_runs rows, newest first
+	// (sweep, manual and preview runs).
+	Runs []chatRetentionRunJSON `json:"runs"`
+	// LastPreview is the most recent preview, or null when none was run
+	// (or none is kept).
+	LastPreview *chatRetentionRunJSON `json:"last_preview"`
+	// PurgedSincePreview is how many messages the sweep and manual runs
+	// that finished after the last preview started deleted; the panel's
+	// "backlog draining" estimate is the preview's messages minus this.
+	// 0 without a preview.
+	PurgedSincePreview int64 `json:"purged_since_preview"`
+}
+
+// chatRetentionRunJSON is one chat_retention_runs row in the admin API: its
+// totals, never per-project detail, a message ID or content.
+type chatRetentionRunJSON struct {
+	ID         string     `json:"id"`
+	Trigger    string     `json:"trigger"`
+	DryRun     bool       `json:"dry_run"`
+	StartedAt  time.Time  `json:"started_at"`
+	FinishedAt *time.Time `json:"finished_at"`
+	Status     string     `json:"status"`
+	// Actor is the user ID of the administrator who started a manual run
+	// or a preview; "" for a sweep.
+	Actor string `json:"actor,omitempty"`
+	Error string `json:"error,omitempty"`
+	// Messages is the messages deleted (or, for a preview, that would be
+	// deleted): by the window plus of deleted conversations, plus failed
+	// agent messages for a sweep run.
+	Messages int64 `json:"messages"`
+	// Projects counts the projects with at least one such message.
+	Projects int `json:"projects"`
+	// Totals are the run's counts summed over every project.
+	Totals store.ChatRetentionCounts `json:"totals"`
+	// MessagesRetentionDays is the window the run applied (0 = none) and
+	// DeletedConversationGraceDays its grace.
+	MessagesRetentionDays        int `json:"messages_retention_days"`
+	DeletedConversationGraceDays int `json:"deleted_conversation_grace_days"`
+}
+
+// chatRetentionHistoryRuns is how many runs the admin response lists.
+const chatRetentionHistoryRuns = 10
+
+// chatRetentionRunMessages is the messages a run counted: by the window,
+// of deleted conversations and failed agent messages.
+func chatRetentionRunMessages(c store.ChatRetentionCounts) int64 {
+	return c.Main + c.DeletedConv + c.Failed
+}
+
+func chatRetentionRunJSONFor(r store.ChatRetentionRun) chatRetentionRunJSON {
+	out := chatRetentionRunJSON{
+		ID: r.ID, Trigger: r.Trigger, DryRun: r.DryRun, StartedAt: r.StartedAt.UTC(), Status: r.Status,
+		Actor: r.Actor, Error: r.Error,
+		MessagesRetentionDays:        r.Policy.MessagesRetentionDays,
+		DeletedConversationGraceDays: r.Policy.DeletedConversationGraceDays,
+	}
+	if r.FinishedAt != nil {
+		t := r.FinishedAt.UTC()
+		out.FinishedAt = &t
+	}
+	for _, c := range r.Counts {
+		out.Totals.Add(c)
+		if chatRetentionRunMessages(c) > 0 {
+			out.Projects++
+		}
+	}
+	out.Messages = chatRetentionRunMessages(out.Totals)
+	return out
+}
+
+// chatRetentionHistory fills the run history, the last preview and the
+// messages purged since it. It reads at most a few small indexed pages of
+// chat_retention_runs (about one row a day), never the messages. A failed
+// read is logged and leaves the history empty.
+func (s *Server) chatRetentionHistory(ctx context.Context, resp *chatRetentionResponse) {
+	resp.Runs = []chatRetentionRunJSON{}
+	st := s.chatRetentionStore()
+	if st == nil {
+		return
+	}
+	runs, err := st.ListChatRetentionRuns(ctx, store.ChatRetentionRunFilter{Limit: chatRetentionHistoryRuns})
+	if err != nil {
+		slog.Warn("chat retention: read run history", "error", err)
+		return
+	}
+	for _, r := range runs {
+		resp.Runs = append(resp.Runs, chatRetentionRunJSONFor(r))
+	}
+	previews, err := st.ListChatRetentionRuns(ctx, store.ChatRetentionRunFilter{Trigger: store.ChatRetentionTriggerPreview, Limit: 1})
+	if err != nil {
+		slog.Warn("chat retention: read last preview", "error", err)
+		return
+	}
+	if len(previews) == 0 {
+		return
+	}
+	last := chatRetentionRunJSONFor(previews[0])
+	resp.LastPreview = &last
+	// Runs that finished after the preview started: a sweep run open
+	// since before it counts whole, so the estimate errs towards a
+	// smaller backlog.
+	since, err := st.ListChatRetentionRuns(ctx, store.ChatRetentionRunFilter{FinishedAfter: previews[0].StartedAt})
+	if err != nil {
+		slog.Warn("chat retention: read runs since the last preview", "error", err)
+		return
+	}
+	for _, r := range since {
+		if r.DryRun {
+			continue
+		}
+		var t store.ChatRetentionCounts
+		for _, c := range r.Counts {
+			t.Add(c)
+		}
+		resp.PurgedSincePreview += t.Main + t.DeletedConv
+	}
 }
 
 // chatRetentionSweepPut is the sweep part of a PUT: omitted = unchanged,
@@ -143,7 +259,9 @@ func (s *Server) writeChatRetentionResponse(ctx context.Context, w http.Response
 		cfg = ops.ChatRetention()
 		rev = ops.SectionRevision(opsettings.ChatRetentionSectionName)
 	}
-	writeJSON(w, http.StatusOK, chatRetentionResponseFor(cfg, rev, s.chatRetentionLastAppliedCutoff(ctx, time.Now())))
+	resp := chatRetentionResponseFor(cfg, rev, s.chatRetentionLastAppliedCutoff(ctx, time.Now()))
+	s.chatRetentionHistory(ctx, &resp)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handlePutChatRetention(w http.ResponseWriter, r *http.Request) {

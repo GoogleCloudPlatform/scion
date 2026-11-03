@@ -177,6 +177,9 @@ type testModeInputs struct {
 	HubClass      string
 	Federation    config.FederationConfig
 
+	// KeyringSigning: a keyring file supplies the signing keys. It is
+	// decided first; SharedSigningSecret is read only when it is false.
+	KeyringSigning          bool
 	SharedSigningSecret     bool
 	PreconfiguredSigningKey bool
 
@@ -288,7 +291,11 @@ func resolveTestMode(in testModeInputs) (testModeResolution, error) {
 		if in.Federation.Enabled || len(in.Federation.TrustedIssuers) > 0 {
 			return refuse(hub.ErrTestAdminFederationConfigured)
 		}
-		// G7: no shared or pre-configured signing key.
+		// G7: no keyring, shared or pre-configured signing key. Keyring
+		// mode refuses before the shared secret is looked at.
+		if in.KeyringSigning {
+			return refuse(hub.ErrTestAdminKeyringSigning)
+		}
 		if in.SharedSigningSecret {
 			return refuse(hub.ErrTestAdminSharedSigningSecret)
 		}
@@ -355,7 +362,8 @@ func resolveTestMode(in testModeInputs) (testModeResolution, error) {
 
 // testModeInputsFor assembles the gate inputs at hub construction.
 func testModeInputsFor(ctx context.Context, cfg *config.GlobalConfig, hubCfg hub.ServerConfig, hasStore bool, entClient *ent.Client) testModeInputs {
-	return testModeInputs{
+	keyringSigning := hubCfg.KeyringConfigured || serverKeyringFromFile() != nil
+	in := testModeInputs{
 		Level:                   testModeLevel,
 		BindingHubID:            testModeHubID,
 		ProductionFlagExplicit:  productionFlagIsExplicit,
@@ -366,7 +374,7 @@ func testModeInputsFor(ctx context.Context, cfg *config.GlobalConfig, hubCfg hub
 		Workstation:             hubCfg.Workstation,
 		HubClass:                cfg.Hub.HubClass,
 		Federation:              hubCfg.Federation,
-		SharedSigningSecret:     hubCfg.SharedSigningSecret != "",
+		KeyringSigning:          keyringSigning,
 		PreconfiguredSigningKey: len(hubCfg.UserTokenConfig.SigningKey) > 0 || len(hubCfg.AgentTokenConfig.SigningKey) > 0,
 		AdminWebSessions:        cfg.Hub.TestIdentityAdminWebSessions(),
 		ReadMarker: func() (*testinfra.Marker, error) {
@@ -376,7 +384,20 @@ func testModeInputsFor(ctx context.Context, cfg *config.GlobalConfig, hubCfg hub
 			return testinfra.Read(ctx, entClient)
 		},
 	}
+	if !keyringSigning {
+		in.SharedSigningSecret = testModeSharedSecretSet(hubCfg)
+	}
+	return in
 }
+
+// testModeSharedSecretSet reads whether a shared signing secret is set, for
+// G7 in legacy mode only. A variable so tests can prove the keyring-mode
+// path never reads it.
+var testModeSharedSecretSet = sharedSigningSecretSet
+
+// sharedSigningSecretSet reports whether hubCfg carries a shared signing
+// secret.
+func sharedSigningSecretSet(hubCfg hub.ServerConfig) bool { return hubCfg.SharedSigningSecret != "" }
 
 // webSessionKeySource is the signingKeySource label of the web session
 // cookie key: initWebServer passes resolveSessionSecret() to NewWebServer,
