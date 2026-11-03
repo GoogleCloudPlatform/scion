@@ -299,6 +299,12 @@ type ChatRetentionStore interface {
 	// first by started_at, dry runs included.
 	ListChatRetentionRuns(ctx context.Context, filter ChatRetentionRunFilter) ([]ChatRetentionRun, error)
 
+	// FailRunningChatRetentionRuns marks the runs of the given triggers that
+	// are still "running" and started before before as "failed" with errMsg
+	// and finished at finishedAt, and returns how many it changed. The hub
+	// calls it at start for preview and manual runs a restart interrupted.
+	FailRunningChatRetentionRuns(ctx context.Context, triggers []string, before time.Time, errMsg string, finishedAt time.Time) (int, error)
+
 	// SaveChatRetentionRun inserts run when its ID is empty (setting it)
 	// and otherwise updates its finished_at, status, policy, counts and
 	// error.

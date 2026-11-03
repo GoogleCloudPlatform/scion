@@ -31,7 +31,9 @@ Phase 4 of hub-wide chat message retention (design §9 Phase 4; §6.5, §7.2,
   walk stopping early enough for the final writes). It waits for the
   in-process tick guard and `LockChatRetention`, polling every 2 s, then
   takes the policy snapshot, and records a `trigger=manual` row with the
-  actor. `RunTick` was split so both share `sweepAndRecord` (phases, cursor
+  actor. Its main walk starts at the beginning (the cursor is reset as the
+  daily reset does), so it also deletes rows a tick skipped while pending
+  and dispatched since, exactly what a preview counts. `RunTick` was split so both share `sweepAndRecord` (phases, cursor
   and last applied cutoff, run status, prune); a manual run gives each
   phase the whole time instead of halving it. Refused before a run is
   created with `409 chat_retention_disabled` while the sweep is not active.
@@ -64,6 +66,14 @@ Phase 4 of hub-wide chat message retention (design §9 Phase 4; §6.5, §7.2,
   failed-message retention, the around response, the large-hub runbook and
   the SQLite file size note), `reference/api.md` and the maintenance list in
   `hosted/single-node/hub-server.md`.
+- **Interrupted runs.** At hub start, `ReconcileInterruptedChatRetentionRuns`
+  (called after the store is wired) marks preview and manual rows still
+  `running` from before this process as `failed` ("interrupted"), as
+  `AbortRunningMaintenanceOps` does for their maintenance runs. A preview
+  that reaches its own time limit is `partial`, not `failed`.
+- **Backlog estimate.** Shown only when the last preview's recorded window
+  and grace equal the saved settings; otherwise the panel says the preview
+  was for something else.
 
 ## Follow-ups folded in
 
@@ -95,10 +105,8 @@ Phase 4 of hub-wide chat message retention (design §9 Phase 4; §6.5, §7.2,
 
 ## Notes for later work
 
-- A manual run or preview saves its row at start and end only. A crash
-  leaves it `running`; nothing resets chat retention run rows the way
-  `AbortRunningMaintenanceOps` resets maintenance runs.
 - The preview's conversation pages sort within one conversation (no index
   orders a conversation's messages by (created, id) across channels), so a
-  very large deleted conversation costs more per page than the purge does.
+  very large deleted conversation costs more per page than the purge does
+  (tracked in ptone/scion#7165, with manual-run progress saving).
 - The panel polls a started preview every 2 s, for up to 30 minutes.

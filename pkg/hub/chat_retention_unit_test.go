@@ -445,6 +445,21 @@ func (f *fakeChatRetentionStore) SaveChatRetentionRun(ctx context.Context, run *
 	return errors.New("no such run")
 }
 
+func (f *fakeChatRetentionStore) FailRunningChatRetentionRuns(ctx context.Context, triggers []string, before time.Time, errMsg string, finishedAt time.Time) (int, error) {
+	n := 0
+	for _, r := range f.runs {
+		for _, t := range triggers {
+			if r.Trigger == t && r.Status == store.ChatRetentionStatusRunning && r.StartedAt.Before(before) {
+				r.Status, r.Error = store.ChatRetentionStatusFailed, errMsg
+				fin := finishedAt
+				r.FinishedAt = &fin
+				n++
+			}
+		}
+	}
+	return n, nil
+}
+
 func (f *fakeChatRetentionStore) PruneChatRetentionRuns(ctx context.Context, before time.Time) (int, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err

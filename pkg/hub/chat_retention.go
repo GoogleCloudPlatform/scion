@@ -402,15 +402,28 @@ func (sw *chatRetentionSweeper) RunTick(ctx context.Context, p chatRetentionPoli
 		}
 	}
 	budgetEnd := chatRetentionBudgetEnd(start, remaining, hasDeadline, cfg)
-	return res, sw.sweepAndRecord(ctx, p, run, &res, start, budgetEnd, true)
+	return res, sw.sweepAndRecord(ctx, p, run, &res, start, budgetEnd, chatRetentionSweepTick)
 }
 
+// chatRetentionSweepMode is how sweepAndRecord runs the two phases.
+type chatRetentionSweepMode int
+
+const (
+	// chatRetentionSweepTick is a scheduled tick: the deleted-conversation
+	// phase gets at most half of the time when the main walk follows, and
+	// the main walk resumes at the cursor (reset to the start once a day).
+	chatRetentionSweepTick chatRetentionSweepMode = iota
+	// chatRetentionSweepManual is a manual run: each phase may use all of
+	// the time, and the main walk starts at the beginning (the cursor is
+	// reset as the daily reset does), so it picks up the messages a tick
+	// skipped while they were pending or deferred, as a preview counts them.
+	chatRetentionSweepManual
+)
+
 // sweepAndRecord runs both phases into run and res until budgetEnd, then
-// records run (status, policy, finish time) and prunes old runs. With
-// splitBudget, the deleted-conversation phase gets at most half of the
-// time when the main walk follows (a tick); without it each phase may use
-// all of it (a manual run).
-func (sw *chatRetentionSweeper) sweepAndRecord(ctx context.Context, p chatRetentionPolicy, run *store.ChatRetentionRun, res *chatRetentionTickResult, start, budgetEnd time.Time, splitBudget bool) error {
+// records run (status, policy, finish time) and prunes old runs. mode
+// decides how the time is shared and where the main walk starts.
+func (sw *chatRetentionSweeper) sweepAndRecord(ctx context.Context, p chatRetentionPolicy, run *store.ChatRetentionRun, res *chatRetentionTickResult, start, budgetEnd time.Time, mode chatRetentionSweepMode) error {
 	cfg := p.Config
 	if run.Counts == nil {
 		run.Counts = map[string]store.ChatRetentionCounts{}
@@ -422,7 +435,7 @@ func (sw *chatRetentionSweeper) sweepAndRecord(ctx context.Context, p chatRetent
 	// purge of deleted conversations, nor a large deleted conversation the
 	// main walk.
 	deletedEnd := budgetEnd
-	if hasWindow && splitBudget {
+	if hasWindow && mode == chatRetentionSweepTick {
 		deletedEnd = start.Add(budgetEnd.Sub(start) / 2)
 	}
 	pacer := &chatRetentionPacer{sw: sw, pause: cfg.Pause()}
@@ -449,7 +462,7 @@ func (sw *chatRetentionSweeper) sweepAndRecord(ctx context.Context, p chatRetent
 				break
 			}
 			mainRan = true
-			if cursor.ResetAt == nil || start.Sub(*cursor.ResetAt) >= chatRetentionCursorResetEvery {
+			if mode == chatRetentionSweepManual || cursor.ResetAt == nil || start.Sub(*cursor.ResetAt) >= chatRetentionCursorResetEvery {
 				t := start.UTC()
 				cursor.ResetAt = &t
 				cursor.Position = store.ChatRetentionPosition{}

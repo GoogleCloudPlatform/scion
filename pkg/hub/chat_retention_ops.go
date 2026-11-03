@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"sort"
 	"strconv"
 	"time"
@@ -91,8 +92,9 @@ type chatRetentionPreview struct {
 // Preview walks the selections a sweep under p would delete, in the same
 // order, chunk sizes and pause, and deletes nothing. The
 // deleted-conversation phase runs first, as in a sweep, and its messages
-// are not counted again by the main window, so on an unchanged database
-// the counts equal those of a manual run.
+// are not counted again by the main window. The main walk starts at the
+// beginning, as a manual run's does, so on an unchanged database the counts
+// equal those of a manual run.
 func (sw *chatRetentionSweeper) Preview(ctx context.Context, p chatRetentionPolicy) (chatRetentionPreviewResult, error) {
 	res := chatRetentionPreviewResult{ByProject: map[string]store.ChatRetentionCounts{}}
 	if !p.purges() {
@@ -317,6 +319,13 @@ func (s *Server) runChatRetentionPreview(ctx context.Context, logger io.Writer, 
 	run.FinishedAt = &now
 	run.Counts = res.ByProject
 	switch {
+	case err != nil && errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil:
+		// The walk reached its own deadline (chatRetentionWalkContext), not
+		// the caller's: the counts so far are kept, as a sweep or manual
+		// run that stops at its budget is partial.
+		run.Status = store.ChatRetentionStatusPartial
+		err = nil
+		_, _ = fmt.Fprintln(logger, "The preview stopped at its time limit; the counts are partial")
 	case err != nil:
 		run.Status = store.ChatRetentionStatusFailed
 		run.Error = err.Error()
@@ -392,9 +401,10 @@ func (s *Server) tryChatRetentionLock(ctx context.Context) (func(), bool, error)
 }
 
 // runChatRetentionManual runs the sweep once, as a tick would but with no
-// tick budget (the pause between chunks stays), under the lock the sweep
-// ticks hold, and records it as a manual run with actor. It refuses while
-// the sweep is not active (hub.chat_retention and enabled).
+// tick budget (the pause between chunks stays) and with the main walk from
+// the beginning (chatRetentionSweepManual), under the lock the sweep ticks
+// hold, and records it as a manual run with actor. It refuses while the
+// sweep is not active (hub.chat_retention and enabled).
 func (s *Server) runChatRetentionManual(ctx context.Context, logger io.Writer, actor string) (*store.ChatRetentionRun, chatRetentionTickResult, error) {
 	var res chatRetentionTickResult
 	st := s.chatRetentionStore()
@@ -439,7 +449,7 @@ func (s *Server) runChatRetentionManual(ctx context.Context, logger io.Writer, a
 	remaining, hasDeadline := chatRetentionTimeLeft(ctx)
 	budgetEnd := chatRetentionWalkEnd(start, chatRetentionOpMaxDuration, remaining, hasDeadline)
 	res.Ran = true
-	err = sw.sweepAndRecord(ctx, p, run, &res, start, budgetEnd, false)
+	err = sw.sweepAndRecord(ctx, p, run, &res, start, budgetEnd, chatRetentionSweepManual)
 	if res.LastAppliedCutoff != nil {
 		s.noteChatRetentionCutoff(*res.LastAppliedCutoff, time.Now())
 	}
@@ -460,6 +470,43 @@ func (s *Server) runChatRetentionManual(ctx context.Context, logger io.Writer, a
 		return run, res, fmt.Errorf("chat retention run: %w", err)
 	}
 	return run, res, nil
+}
+
+// chatRetentionInterruptedError is the error recorded on a preview or
+// manual run that a hub restart interrupted.
+const chatRetentionInterruptedError = "interrupted: the hub stopped before the run finished"
+
+// chatRetentionReconcileTimeout bounds the start-up reconciliation.
+const chatRetentionReconcileTimeout = 10 * time.Second
+
+// ReconcileInterruptedChatRetentionRuns marks the preview and manual runs
+// still "running" that started before this hub process as failed
+// (interrupted), as AbortRunningMaintenanceOps does for their maintenance
+// runs: each holds its run row only in the process that started it, which
+// is gone. Sweep runs are left alone; the next tick continues the open one.
+// Call it once at start, after SetChatRetentionStore. Failures are logged.
+func (s *Server) ReconcileInterruptedChatRetentionRuns(ctx context.Context) int {
+	st := s.chatRetentionStore()
+	if st == nil {
+		return 0
+	}
+	started := s.startTime
+	if started.IsZero() {
+		started = time.Now()
+	}
+	ctx, cancel := context.WithTimeout(ctx, chatRetentionReconcileTimeout)
+	defer cancel()
+	n, err := st.FailRunningChatRetentionRuns(ctx,
+		[]string{store.ChatRetentionTriggerPreview, store.ChatRetentionTriggerManual},
+		started, chatRetentionInterruptedError, time.Now())
+	if err != nil {
+		slog.Warn("chat retention: reconcile interrupted preview and manual runs", "error", err)
+		return 0
+	}
+	if n > 0 {
+		slog.Info("chat retention: marked interrupted preview and manual runs failed", "count", n)
+	}
+	return n
 }
 
 // writeChatRetentionPolicy writes the policy line of a run log.

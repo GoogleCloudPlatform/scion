@@ -139,8 +139,9 @@ func (s *Server) failedMessageRetentionDays() int {
 // delivered history and "user:" rows are never touched, and deletes in
 // paced, capped steps from a persisted cursor with the chat retention
 // cascade (see PurgeFailed), so the dependent rows of every deleted message
-// go with it, and the attachments it unlinks lose their bytes and rows. The counts are added to the open chat retention sweep run
-// when there is one (see addFailedPurgeToSweepRun), and logged.
+// go with it, and the attachments it unlinks lose their bytes and rows. The
+// counts are added to the open chat retention sweep run when there is one
+// (see addFailedPurgeToSweepRun), and logged.
 func (s *Server) failedMessageRetentionHandler() func(ctx context.Context) {
 	return func(ctx context.Context) {
 		ctx, cancel := context.WithTimeout(ctx, failedMessageRetentionTimeout)

@@ -334,7 +334,7 @@ func TestChatRetention_Postgres_PreviewEqualsPurge(t *testing.T) {
 	run := &store.ChatRetentionRun{Trigger: store.ChatRetentionTriggerManual, StartedAt: now}
 	var res chatRetentionTickResult
 	start := time.Now()
-	require.NoError(t, sw.sweepAndRecord(ctx, p, run, &res, start, start.Add(chatRetentionOpMaxDuration), false))
+	require.NoError(t, sw.sweepAndRecord(ctx, p, run, &res, start, start.Add(chatRetentionOpMaxDuration), chatRetentionSweepManual))
 	for project, want := range preview.ByProject {
 		assert.Equal(t, want.Main, run.Counts[project].Main, "project %s main", project)
 		assert.Equal(t, want.DeletedConv, run.Counts[project].DeletedConv, "project %s deleted_conv", project)

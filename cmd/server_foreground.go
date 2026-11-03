@@ -830,6 +830,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 						ChatRetention() store.ChatRetentionStore
 					}); ok {
 						hubSrv.SetChatRetentionStore(crp.ChatRetention())
+						// Preview and manual runs a restart interrupted
+						// would otherwise stay "running" forever.
+						hubSrv.ReconcileInterruptedChatRetentionRuns(context.Background())
 					}
 
 					// W7: Initialize local-disk attachment store.

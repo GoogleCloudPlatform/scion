@@ -944,3 +944,49 @@ func TestChatRetentionStore_NoAddresseeForeignKey(t *testing.T) {
 	}
 	assert.Equal(t, 0, f.count(`SELECT COUNT(*) FROM pragma_foreign_key_list('message_addressees')`))
 }
+
+// TestChatRetentionStore_FailRunningRuns: only running runs of the given
+// triggers started before the bound become failed with the error and
+// finish time; others are untouched; no triggers changes nothing.
+func TestChatRetentionStore_FailRunningRuns(t *testing.T) {
+	f := newChatRetentionFixture(t)
+	bound := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	save := func(trigger, status string, started time.Time) string {
+		t.Helper()
+		r := &store.ChatRetentionRun{Trigger: trigger, DryRun: trigger == store.ChatRetentionTriggerPreview, StartedAt: started, Status: status}
+		require.NoError(t, f.st.SaveChatRetentionRun(f.ctx, r))
+		return r.ID
+	}
+	early := bound.Add(-time.Hour)
+	preview := save(store.ChatRetentionTriggerPreview, store.ChatRetentionStatusRunning, early)
+	manual := save(store.ChatRetentionTriggerManual, store.ChatRetentionStatusRunning, early)
+	sweep := save(store.ChatRetentionTriggerSweep, store.ChatRetentionStatusRunning, early)
+	okPreview := save(store.ChatRetentionTriggerPreview, store.ChatRetentionStatusOK, early)
+	late := save(store.ChatRetentionTriggerPreview, store.ChatRetentionStatusRunning, bound.Add(time.Minute))
+
+	n, err := f.st.FailRunningChatRetentionRuns(f.ctx, nil, bound, "x", bound)
+	require.NoError(t, err)
+	assert.Zero(t, n, "no triggers, no change")
+
+	fin := bound.Add(time.Second)
+	n, err = f.st.FailRunningChatRetentionRuns(f.ctx,
+		[]string{store.ChatRetentionTriggerPreview, store.ChatRetentionTriggerManual}, bound, "interrupted", fin)
+	require.NoError(t, err)
+	assert.Equal(t, 2, n)
+
+	runs, err := f.st.ListChatRetentionRuns(f.ctx, store.ChatRetentionRunFilter{})
+	require.NoError(t, err)
+	byID := map[string]store.ChatRetentionRun{}
+	for _, r := range runs {
+		byID[r.ID] = r
+	}
+	for _, id := range []string{preview, manual} {
+		assert.Equal(t, store.ChatRetentionStatusFailed, byID[id].Status)
+		assert.Equal(t, "interrupted", byID[id].Error)
+		require.NotNil(t, byID[id].FinishedAt)
+		assert.True(t, byID[id].FinishedAt.Equal(fin))
+	}
+	assert.Equal(t, store.ChatRetentionStatusRunning, byID[sweep].Status)
+	assert.Equal(t, store.ChatRetentionStatusOK, byID[okPreview].Status)
+	assert.Equal(t, store.ChatRetentionStatusRunning, byID[late].Status)
+}

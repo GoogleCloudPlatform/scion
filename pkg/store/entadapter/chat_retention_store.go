@@ -873,6 +873,31 @@ func (s *ChatRetentionStore) SaveChatRetentionRun(ctx context.Context, run *stor
 	return nil
 }
 
+// FailRunningChatRetentionRuns implements store.ChatRetentionStore.
+func (s *ChatRetentionStore) FailRunningChatRetentionRuns(ctx context.Context, triggers []string, before time.Time, errMsg string, finishedAt time.Time) (int, error) {
+	if len(triggers) == 0 {
+		return 0, nil
+	}
+	ts := make([]chatretentionrun.Trigger, len(triggers))
+	for i, t := range triggers {
+		ts[i] = chatretentionrun.Trigger(t)
+	}
+	n, err := s.client.ChatRetentionRun.Update().
+		Where(
+			chatretentionrun.StatusEQ(chatretentionrun.StatusRunning),
+			chatretentionrun.TriggerIn(ts...),
+			chatretentionrun.StartedAtLT(before.UTC()),
+		).
+		SetStatus(chatretentionrun.StatusFailed).
+		SetError(errMsg).
+		SetFinishedAt(finishedAt.UTC()).
+		Save(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("chat retention: fail interrupted runs: %w", err)
+	}
+	return n, nil
+}
+
 // PruneChatRetentionRuns implements store.ChatRetentionStore.
 func (s *ChatRetentionStore) PruneChatRetentionRuns(ctx context.Context, before time.Time) (int, error) {
 	n, err := s.client.ChatRetentionRun.Delete().

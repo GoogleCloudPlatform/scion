@@ -328,3 +328,85 @@ func TestChatHistory_AroundPurgedMessageUnavailable(t *testing.T) {
 	code, body := around(kept)
 	require.Equal(t, http.StatusOK, code, fmt.Sprint(body))
 }
+
+// TestChatRetention_ReconcileInterruptedRunsSQLite: at start, the preview
+// and manual runs still "running" from before this process are marked
+// failed (interrupted); a sweep run, a finished preview and a preview this
+// process started are left alone. The panel then reports the failure
+// instead of a preview running forever.
+func TestChatRetention_ReconcileInterruptedRunsSQLite(t *testing.T) {
+	f := newChatRetentionHubFixture(t)
+	setChatRetentionSettings(t, f.srv, true, `{"enabled":true,"messages_retention_days":30}`)
+	f.srv.startTime = time.Now().UTC()
+	before := f.srv.startTime.Add(-time.Hour)
+	fin := before.Add(time.Minute)
+	save := func(trigger string, dry bool, started time.Time, status string, finished *time.Time) string {
+		t.Helper()
+		r := &store.ChatRetentionRun{Trigger: trigger, DryRun: dry, StartedAt: started, Status: status, FinishedAt: finished, Actor: f.alice.ID}
+		require.NoError(t, f.crs.SaveChatRetentionRun(f.ctx, r))
+		return r.ID
+	}
+	stuckPreview := save(store.ChatRetentionTriggerPreview, true, before, store.ChatRetentionStatusRunning, nil)
+	stuckManual := save(store.ChatRetentionTriggerManual, false, before, store.ChatRetentionStatusRunning, nil)
+	openSweep := save(store.ChatRetentionTriggerSweep, false, before, store.ChatRetentionStatusRunning, nil)
+	donePreview := save(store.ChatRetentionTriggerPreview, true, before.Add(-time.Hour), store.ChatRetentionStatusOK, &fin)
+	livePreview := save(store.ChatRetentionTriggerPreview, true, f.srv.startTime.Add(time.Second), store.ChatRetentionStatusRunning, nil)
+
+	assert.Equal(t, 2, f.srv.ReconcileInterruptedChatRetentionRuns(f.ctx))
+
+	runs, err := f.crs.ListChatRetentionRuns(f.ctx, store.ChatRetentionRunFilter{})
+	require.NoError(t, err)
+	byID := map[string]store.ChatRetentionRun{}
+	for _, r := range runs {
+		byID[r.ID] = r
+	}
+	for _, id := range []string{stuckPreview, stuckManual} {
+		assert.Equal(t, store.ChatRetentionStatusFailed, byID[id].Status, id)
+		assert.Equal(t, chatRetentionInterruptedError, byID[id].Error, id)
+		assert.NotNil(t, byID[id].FinishedAt, id)
+	}
+	assert.Equal(t, store.ChatRetentionStatusRunning, byID[openSweep].Status, "the open sweep run is the next tick's")
+	assert.Equal(t, store.ChatRetentionStatusOK, byID[donePreview].Status)
+	assert.Equal(t, store.ChatRetentionStatusRunning, byID[livePreview].Status, "a run of this process is not interrupted")
+	assert.Zero(t, f.srv.ReconcileInterruptedChatRetentionRuns(f.ctx), "idempotent")
+
+	got := decodeChatRetentionGET(t, f)
+	require.NotNil(t, got.LastPreview)
+	assert.Equal(t, livePreview, got.LastPreview.ID)
+}
+
+// decodeChatRetentionGET reads the settings GET as the fixture's admin view
+// would, through the handler's own history assembly.
+func decodeChatRetentionGET(t *testing.T, f *chatRetentionHubFixture) chatRetentionResponse {
+	t.Helper()
+	resp := chatRetentionResponseFor(f.srv.chatRetentionConfig(), 0, nil)
+	f.srv.chatRetentionHistory(f.ctx, &resp)
+	return resp
+}
+
+// TestChatRetention_PreviewDeadlineIsPartialSQLite: a preview that reaches
+// its own time limit (not the caller's) is recorded as partial with the
+// counts so far, and the operation does not fail.
+func TestChatRetention_PreviewDeadlineIsPartialSQLite(t *testing.T) {
+	f := newChatRetentionHubFixture(t)
+	// A pause far longer than the walk's time: the walk ends at its deadline
+	// during the pause after the first selection.
+	setChatRetentionSettings(t, f.srv, true, `{"enabled":false,"messages_retention_days":30,"sweep":{"chunk_size":25,"pause_ms":10000}}`)
+	old := time.Now().UTC().Add(-40 * 24 * time.Hour)
+	for i := 0; i < 30; i++ {
+		f.message(chatRetentionSeed{created: old.Add(time.Duration(i) * time.Second)})
+	}
+	// The caller's deadline leaves the walk about 1 s (chatRetentionWalkEnd
+	// keeps a chunk timeout and a margin before it).
+	ctx, cancel := context.WithTimeout(f.ctx, chatRetentionChunkTimeout+chatRetentionDeadlineMargin+time.Second)
+	defer cancel()
+	var log bytes.Buffer
+	run, err := f.srv.runChatRetentionPreview(ctx, &log, 0, f.alice.ID)
+	require.NoError(t, err, log.String())
+	assert.Equal(t, store.ChatRetentionStatusPartial, run.Status)
+	assert.Empty(t, run.Error)
+	assert.Equal(t, int64(25), run.Counts[f.project.ID].Main, "the first chunk's count is kept")
+	assert.Contains(t, log.String(), "stopped at its time limit")
+	assert.NoError(t, ctx.Err(), "the caller's context is still live")
+	assert.Equal(t, 30, f.count(`SELECT COUNT(*) FROM messages`), "nothing deleted")
+}

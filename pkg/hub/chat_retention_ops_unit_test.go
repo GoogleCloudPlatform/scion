@@ -96,7 +96,7 @@ func TestChatRetentionPreview_CountsEqualPurge(t *testing.T) {
 	run := &store.ChatRetentionRun{Trigger: store.ChatRetentionTriggerManual, StartedAt: h.clock.t}
 	var res chatRetentionTickResult
 	start := h.clock.t
-	require.NoError(t, h.sw.sweepAndRecord(context.Background(), p, run, &res, start, start.Add(chatRetentionOpMaxDuration), false))
+	require.NoError(t, h.sw.sweepAndRecord(context.Background(), p, run, &res, start, start.Add(chatRetentionOpMaxDuration), chatRetentionSweepManual))
 	for project, want := range preview.ByProject {
 		got := run.Counts[project]
 		assert.Equal(t, want.Main, got.Main, "project %s main", project)
@@ -255,4 +255,53 @@ func TestChatRetentionRunJSON(t *testing.T) {
 	assert.Equal(t, 30, got.MessagesRetentionDays)
 	assert.Equal(t, 7, got.DeletedConversationGraceDays)
 	assert.Equal(t, "u1", got.Actor)
+}
+
+// TestChatRetentionManual_ResetsCursorSoPreviewMatches: a message skipped
+// by an earlier tick while it was pending, and dispatched since, lies behind
+// the main cursor. A tick (inside the daily reset) still skips it, but the
+// preview counts it and a manual run starts its walk at the beginning, so
+// the manual run purges it and the counts agree.
+func TestChatRetentionManual_ResetsCursorSoPreviewMatches(t *testing.T) {
+	setup := func() *chatRetentionUnitHarness {
+		h := newChatRetentionUnitHarness()
+		old := h.clock.t.Add(-100 * 24 * time.Hour)
+		h.st.add("a-was-pending", old, "p1", "pending")
+		h.st.add("b-old", old.Add(time.Minute), "p1", "delivered")
+		h.st.add("c-old", old.Add(2*time.Minute), "p1", "delivered")
+		// A tick earlier today walked past all three (skipping the pending
+		// one) and stopped at c-old; its reset is recent.
+		reset := h.clock.t.Add(-time.Hour)
+		h.st.cursor = store.ChatRetentionCursor{Phase: store.ChatRetentionPhaseMain,
+			Position: store.ChatRetentionPosition{Created: old.Add(2 * time.Minute), ID: "c-old"}, ResetAt: &reset}
+		h.st.hasCursor = true
+		// b-old and c-old were purged by that tick.
+		h.st.msgs = h.st.msgs[:1]
+		h.st.msgs[0].state = "delivered" // dispatched since
+		return h
+	}
+	cfg := chatRetentionTestConfig(nil)
+
+	// Control: a tick inside the daily reset resumes at the cursor and
+	// skips the dispatched row.
+	h := setup()
+	res, err := h.sw.RunTick(context.Background(), h.policy(cfg))
+	require.NoError(t, err)
+	assert.Zero(t, res.Purged.Main)
+	assert.True(t, h.st.has("a-was-pending"), "a tick skips the row behind its cursor")
+
+	h = setup()
+	p := h.policy(cfg)
+	preview, err := h.sw.Preview(context.Background(), p)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), preview.ByProject["p1"].Main, "the preview counts it")
+
+	run := &store.ChatRetentionRun{Trigger: store.ChatRetentionTriggerManual, StartedAt: h.clock.t}
+	var mres chatRetentionTickResult
+	start := h.clock.t
+	require.NoError(t, h.sw.sweepAndRecord(context.Background(), p, run, &mres, start, start.Add(chatRetentionOpMaxDuration), chatRetentionSweepManual))
+	assert.False(t, h.st.has("a-was-pending"), "the manual run purges it")
+	assert.Equal(t, preview.ByProject["p1"].Main, run.Counts["p1"].Main)
+	require.NotNil(t, h.st.cursor.ResetAt)
+	assert.True(t, h.st.cursor.ResetAt.Equal(start.UTC()), "the manual run recorded its reset")
 }
