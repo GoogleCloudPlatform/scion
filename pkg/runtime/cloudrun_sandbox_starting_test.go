@@ -110,7 +110,7 @@ func newStartingRuntime(t *testing.T, sc startScripts) (*CloudRunSandboxRuntime,
 		rootDir:      t.TempDir(),
 		watchCancels: make(map[string]context.CancelFunc),
 	}
-	cancelWatchersOnCleanup(t, rt)
+	stopWatchersOnCleanup(t, rt.state.path, rt)
 	return rt, env
 }
 
