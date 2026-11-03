@@ -384,8 +384,10 @@ func keyStatusPolicy(ctx context.Context, st store.SecretEncryptionStore) (*KeyS
 }
 
 // signingIssuanceReason is the /readyz signing reason of a keyring file's
-// signing ring at now (Server.signingNotReadyReason, without its log
-// line): "" while the active generation can issue.
+// signing ring at now, shared by Server.signingNotReadyReason (which adds
+// its log line) and the key status report: "" while the active generation
+// can issue, signing_issuance_closed at or after its sign_until, and
+// signing_no_active_generation for any other failure.
 func signingIssuanceReason(r *keyring.SigningRing, now time.Time) string {
 	_, err := r.Active(keyStatusIDPurpose, now)
 	switch {
@@ -452,21 +454,14 @@ func LocalKeyStatus(ctx context.Context, k *keyring.Keyring, c *secret.ValueCiph
 }
 
 // CheckKeyringFile applies the keyring-file checks a starting Hub applies
-// to a loaded file beyond the loader's own validation: the "legacy" signing
-// entry, this release's limits (keyringReleaseCheck) and, with emit
-// "legacy", the active generation as a legacy reader. Errors name no key
-// material.
+// to a loaded file beyond the loader's own validation (validateKeyringFile,
+// the same implementation validateKeyringConfig uses). Errors name no
+// key material.
 func CheckKeyringFile(k *keyring.Keyring) error {
 	if k == nil || k.Source() != keyring.SourceFile {
 		return errors.New("keyring file: not loaded from a keyring file")
 	}
-	if _, ok := k.Signing().LegacySecret(); !ok {
-		return errors.New("keyring mode: the signing ring has no \"legacy\" entry; every purpose that does not use the ring yet still needs it")
-	}
-	if err := keyringReleaseCheck(k); err != nil {
-		return err
-	}
-	return checkLegacyEmitActiveReader(k.Signing())
+	return validateKeyringFile(k)
 }
 
 // handleAdminKeyStatus serves GET /api/v1/admin/keys/status. The route

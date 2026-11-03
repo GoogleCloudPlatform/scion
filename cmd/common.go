@@ -750,6 +750,12 @@ func resolveProjectIDByGitRemote(hubCtx *HubContext, failOnAmbiguousGitRemote bo
 	}
 
 	if len(resp.Projects) == 0 {
+		// Under a user access token the hub lists nothing without
+		// project:list, whether or not the project exists: name the
+		// likely missing scopes (ptone/scion#7068).
+		if hubsync.UsesUserAccessToken(hubCtx.CredentialKind) {
+			return "", hubsync.ScopedTokenProjectLookupEmptyError(gitRemote)
+		}
 		return "", fmt.Errorf("no project found for git remote: %s\n\nRun 'scion hub link' to link this project with the Hub", gitRemote)
 	}
 

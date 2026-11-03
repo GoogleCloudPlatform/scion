@@ -30,38 +30,18 @@ Each consumer is in exactly one class. The census uses the same names.
 
 ## Ring-mode legacy-entry readers (T7 scope)
 
-These are census keys (`<name>@<file>:<function>`). Methods are keyed `(*T).Name`. `TestRingModeLegacyEntryReadersInConsumerMap` requires this section and the release-gate section to list exactly the census keys of their class, no more and no fewer. When T7 has removed them all, this section must hold a line reading exactly `ring-mode legacy-entry readers: none` (and only then).
+These are census keys (`<name>@<file>:<function>`). Methods are keyed `(*T).Name`. `TestRingModeLegacyEntryReadersInConsumerMap` requires this section and the release-gate section to list exactly the census keys of their class, no more and no fewer.
 
-**The root of the chain.** With a keyring file loaded, every cmd consumer below reads the `legacy` entry through these three functions:
+ring-mode legacy-entry readers: none
 
-1. `LegacySecret@cmd/server_keyring.go:keyringLegacySecret` returns the file's `legacy` signing entry.
-2. `keyringLegacySecret@cmd/server_foreground.go:resolveSessionSecret` (:2599) returns it as the session secret.
-3. `keyringLegacySecret@cmd/server_foreground.go:sessionSecretValue` (:2621) does the same.
+No consumer reads the keyring `legacy` entry, or `SharedSigningSecret` as that entry, in managed ring mode. What changed, by former item:
 
-**Startup configuration and validation:**
-
-4. `resolveSessionSecret@cmd/server_foreground.go:buildHubServerConfig` sets `hub.ServerConfig.SharedSigningSecret` to the `legacy` entry (:2899). Its second reference (:2902) feeds `webSessionKeySource`, which ignores the value when a keyring file is loaded.
-5. `SharedSigningSecret@pkg/hub/keyring.go:validateKeyringConfig` requires `SharedSigningSecret` to equal the `legacy` entry (:126).
-6. `LegacySecret@pkg/hub/keyring.go:validateKeyringConfig` requires a `legacy` entry (:116). The plan moves 5 and 6 behind the `keyringReleaseCheck` seam in T7 and lifts them in T10.
-7. `resolveSessionSecret@cmd/server_foreground.go:validateHostedBasic` (:1608) warns when the session secret is empty. Without a `legacy` entry it would warn in ring mode.
-8. `resolveSessionSecret@cmd/server_foreground.go:validateHostedHAPreflight` (:1644) refuses an empty session secret. Without a `legacy` entry, hosted HA would **refuse** ring mode.
-9. `SharedSigningSecret@cmd/server_foreground.go:initHubServer` (:3109) is a hosted warning on an empty `SharedSigningSecret`.
-
-**Relay-peer auth.** The HMAC signer already comes from the ring (`SigningRing`, `relay.NewHMACPeerAuthFromRing`). Only the PeerSecret inequality check still uses the `legacy` entry, and it compares against that entry alone. Obl 6 requires a comparison against every generation.
-
-10. `resolveSessionSecret@cmd/server_conduit.go:conduitPeerAuthOptions` (:453) sets `ConduitPeerAuthOptions.SharedSecret`. The downstream comparison is `pkg/conduit/relay/conduit_peerauth.go:149` (`NewConduitPeerAuth`).
-11. `sessionSecretValue@cmd/server_conduit.go:externalPeerAuthOptions` (:743) does the same in external relay mode.
-12. `sessionSecretValue@cmd/server_foreground.go:validateServerPreflight` (:1738) passes the value to `validateConduitPeerSecret`. Its comparison is at `cmd/server_conduit.go:483`.
-
-**Test admin tier G7.** These refuse a non-empty `SharedSigningSecret`, which in ring mode is the `legacy` entry. The keyring source is also refused by `signing_keys_hub_local`, so the tier stays closed. T7 must show that the refusal still holds without the `legacy` entry.
-
-13. `SharedSigningSecret@cmd/server_test_admin_gate.go:testModeInputsFor` (:369)
-14. `SharedSigningSecret@cmd/server_test_admin_gate.go:resolveTestMode` (:292)
-15. `SharedSigningSecret@pkg/hub/test_admin_gate.go:validateTestAdminGateConfig` (:194)
-
-**Key status check.** `scion server keys check` applies the checks a starting Hub applies to a loaded keyring file.
-
-16. `LegacySecret@pkg/hub/keystatus.go:CheckKeyringFile` requires a `legacy` signing entry, as `validateKeyringConfig` does. The two checks change together.
+- The three root resolvers: the keyring-entry helper is gone, and resolveSessionSecret and sessionSecretValue return "" with a keyring file, so every cmd caller below gets "" in ring mode (legacy-only now).
+- Startup: buildHubServerConfig sets an empty SharedSigningSecret in ring mode. validateKeyringConfig refuses a non-empty one (a ring-mode guard: an emptiness check, no secret compared). The release check (releaseKeyringCheck) no longer compares it; only the `legacy`-entry requirement stays behind the seam.
+- Hosted: validateHostedBasic and initHubServer return before the session secret in ring mode. validateHostedHAPreflight keeps a present-key assertion: with a keyring file it requires a usable active signing generation and never reads the session secret; in legacy mode it requires the secret (hostedHALegacySessionSecret).
+- Relay-peer auth: the HMAC keys come from the ring, and the PeerSecret inequality check compares, in constant time, against every signing generation. The session-secret arguments are "" in ring mode.
+- Test admin tier G7: keyring mode refuses first (keyring_signing), in cmd (KeyringSigning) and in the hub re-check (managedSigning); the shared-secret reads run only in legacy mode (sharedSigningSecretSet).
+- Key status check: `scion server keys check` shares validateKeyringFile with startup.
 
 ### Release gate (T10 scope, not T7)
 

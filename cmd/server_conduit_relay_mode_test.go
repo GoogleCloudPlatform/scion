@@ -68,7 +68,7 @@ func TestValidateConduitPeerSecret(t *testing.T) {
 		{name: "only a newline is unset (relay role)", conduit: withSecret(config.HubConduitConfig{}, "\n"), relayRole: true, wantErr: "server.hub.conduit.peer_secret is required on --role relay"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateConduitPeerSecret(tc.conduit, tc.relayRole, tc.session)
+			err := validateConduitPeerSecret(tc.conduit, tc.relayRole, tc.session, nil)
 			if tc.wantErr == "" {
 				assert.NoError(t, err)
 				return

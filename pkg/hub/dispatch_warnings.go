@@ -27,6 +27,54 @@ import (
 type dispatchWarnings struct {
 	mu   sync.Mutex
 	list []string
+	// answer is the last synchronous broker answer of the request, for
+	// lifecycle evidence (WP1 r7 N1; lifecycle_events.go).
+	answer *dispatchAnswer
+}
+
+// dispatchAnswer is what a synchronous broker answer said about the run
+// the Hub dispatched (WP1 design 2.4a E(iv), r7 N1).
+type dispatchAnswer struct {
+	AgentID string
+	// RunID is the row's run after adoptBrokerRunID.
+	RunID string
+	// BrokerPhaseRunning: the answer reported phase running.
+	BrokerPhaseRunning bool
+	// BrokerRunID is the run the answer named ("" for a legacy broker).
+	BrokerRunID string
+}
+
+// recordDispatchAnswer stores a on the collector carried by ctx, if any;
+// a later answer replaces an earlier one (the env-gather two-pass).
+func recordDispatchAnswer(ctx context.Context, a dispatchAnswer) {
+	if ctx == nil {
+		return
+	}
+	w, _ := ctx.Value(dispatchWarningsKey{}).(*dispatchWarnings)
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.answer = &a
+}
+
+// dispatchAnswerFrom returns the answer recorded for agentID on the
+// collector carried by ctx.
+func dispatchAnswerFrom(ctx context.Context, agentID string) (dispatchAnswer, bool) {
+	if ctx == nil {
+		return dispatchAnswer{}, false
+	}
+	w, _ := ctx.Value(dispatchWarningsKey{}).(*dispatchWarnings)
+	if w == nil {
+		return dispatchAnswer{}, false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.answer == nil || w.answer.AgentID != agentID {
+		return dispatchAnswer{}, false
+	}
+	return *w.answer, true
 }
 
 type dispatchWarningsKey struct{}

@@ -205,8 +205,9 @@ func (s *TemplateStore) GetTemplateBySlug(ctx context.Context, slug, scope, scop
 
 // UpdateTemplate updates an existing template's metadata. It leaves the
 // content columns (files, content_hash, harness, default_harness_config,
-// agent_config) and the storage columns (layout, storage_path,
-// storage_bucket, storage_uri) alone; see store.TemplateStore.UpdateTemplate.
+// agent_config, source_url, status) and the storage columns (layout,
+// storage_path, storage_bucket, storage_uri) alone; see
+// store.TemplateStore.UpdateTemplate.
 func (s *TemplateStore) UpdateTemplate(ctx context.Context, template *store.Template) error {
 	uid, err := parseUUID(template.ID)
 	if err != nil {
@@ -224,8 +225,6 @@ func (s *TemplateStore) UpdateTemplate(ctx context.Context, template *store.Temp
 		SetScopeID(template.ScopeID).
 		SetProjectID(template.ProjectID).
 		SetBaseTemplate(template.BaseTemplate).
-		SetSourceURL(template.SourceURL).
-		SetStatus(enttemplate.Status(template.Status)).
 		SetOwnerID(template.OwnerID).
 		SetUpdatedBy(template.UpdatedBy).
 		SetUpdated(template.Updated).
@@ -628,9 +627,10 @@ func (s *TemplateStore) GetHarnessConfigBySlug(ctx context.Context, slug, scope,
 }
 
 // UpdateHarnessConfig updates an existing harness config's metadata. It
-// leaves the content columns (files, content_hash, harness, config, status)
-// and the storage columns (layout, storage_path, storage_bucket, storage_uri) alone,
-// and never writes built_image; see store.HarnessConfigStore.UpdateHarnessConfig.
+// leaves the content columns (files, content_hash, harness, config, status,
+// source_url) and the storage columns (layout, storage_path, storage_bucket,
+// storage_uri) alone, and never writes built_image, image_status or
+// image_status_checked_at; see store.HarnessConfigStore.UpdateHarnessConfig.
 func (s *TemplateStore) UpdateHarnessConfig(ctx context.Context, hc *store.HarnessConfig) error {
 	uid, err := parseUUID(hc.ID)
 	if err != nil {
@@ -638,26 +638,18 @@ func (s *TemplateStore) UpdateHarnessConfig(ctx context.Context, hc *store.Harne
 	}
 
 	hc.Updated = time.Now()
-	if hc.ImageStatus == "" {
-		hc.ImageStatus = store.HarnessConfigImageStatusUnknown
-	}
 
-	update := s.client.HarnessConfig.UpdateOneID(uid).
+	_, err = s.client.HarnessConfig.UpdateOneID(uid).
 		SetName(hc.Name).
 		SetSlug(hc.Slug).
 		SetDisplayName(hc.DisplayName).
 		SetDescription(hc.Description).
 		SetScope(hc.Scope).
 		SetScopeID(hc.ScopeID).
-		SetSourceURL(hc.SourceURL).
-		SetImageStatus(entharnessconfig.ImageStatus(hc.ImageStatus)).
 		SetOwnerID(hc.OwnerID).
 		SetUpdatedBy(hc.UpdatedBy).
-		SetUpdated(hc.Updated)
-	if hc.ImageStatusCheckedAt != nil {
-		update.SetImageStatusCheckedAt(*hc.ImageStatusCheckedAt)
-	}
-	_, err = update.Save(ctx)
+		SetUpdated(hc.Updated).
+		Save(ctx)
 	if err != nil {
 		return mapError(err)
 	}

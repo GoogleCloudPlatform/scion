@@ -66,7 +66,7 @@ func validateServerRole(role string) error {
 // validateRelayRoleConfig checks the configuration a separate relay needs.
 // Errors name the setting, never a value.
 func validateRelayRoleConfig(cfg *config.GlobalConfig) error {
-	if err := validateConduitPeerSecret(cfg.Hub.Conduit, true, ""); err != nil {
+	if err := validateConduitPeerSecret(cfg.Hub.Conduit, true, "", nil); err != nil {
 		return err
 	}
 	if err := config.ValidatePeerSecret(cfg.Hub.Conduit.PeerSecretValue()); err != nil {

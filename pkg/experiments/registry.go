@@ -292,6 +292,15 @@ const SecretRotation = "server.secret_rotation"
 // ptone/scion#5995 makes it the default and removes the gate.
 const ContentHashV2 = "hub.content_hash_v2"
 
+// LifecycleEvents gates the agent lifecycle event pipeline (WP1): with it
+// on, every authoritative agent-row write records versioned
+// agent.lifecycle events in a transactional outbox, which the hub delivers
+// to the Cloud Logging log scion-analytics. It takes effect only with a
+// pinned hub ID and a configured sink; the state is exported as
+// lifecycle_observer_state. Turning it off stops new events; pending rows
+// are still delivered.
+const LifecycleEvents = "hub.lifecycle_events"
+
 // SkillContentHashV2 gates the skill content hash v2 transition
 // (ptone/scion#5935). Skill hash v2 is transfer.ComputeContentHashV2 over a
 // skill's files (paths, normalised modes and per-file hashes); v1
@@ -323,6 +332,12 @@ const SkillContentHashV2 = "hub.skill_content_hash_v2"
 // whether or not it is on.
 const ArtifactReviewEditor = "web.artifact_review_editor"
 
+// ArtifactManageAccess gates the Manage access button and dialog on the
+// artifact page (ptone/scion#7107). It is web-only: the dialog calls the
+// existing grant, link and expiry routes, which decide every change the
+// same way whether or not it is on.
+const ArtifactManageAccess = "web.artifact_manage_access"
+
 // UserDeleteForceCascade gates the forced user delete (ptone/scion#2143):
 // DELETE /api/v1/users/{id}?force=true, which revokes the user's authority,
 // records a deletion tombstone and stops the user's agents, the GET
@@ -336,6 +351,17 @@ const UserDeleteForceCascade = "hub.user_delete_force_cascade"
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
 var compiled = []Experiment{
+	{
+		Name:        LifecycleEvents,
+		Title:       "Agent lifecycle events",
+		Description: "Records a versioned agent.lifecycle event for every authoritative agent transition (create, launch, start, stop, delete and the rest) in the transaction that commits it, and delivers them to the Cloud Logging log scion-analytics. Takes effect only with a pinned hub ID (server.hub.hub_id) and server Cloud Logging enabled; lifecycle_observer_state reports why it is not in effect. Enable it on every replica together. Turning it off stops new events; events already recorded are still delivered.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#5900",
+		Owner:       "telemetry",
+		ReviewBy:    "2027-03-31",
+	},
 	{
 		Name:        AsyncAgentStart,
 		Title:       "Asynchronous agent start",
@@ -558,6 +584,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#5913",
 		Owner:       "artifacts",
 		ReviewBy:    "2027-01-21",
+	},
+	{
+		Name:        ArtifactManageAccess,
+		Title:       "Manage access dialog",
+		Description: "Replaces Share, Grant review access and Retention… on the artifact page with one Manage access button and dialog for review access, link sharing and retention. Needs hub.artifacts. Web only; the hub decides every change the same way whether or not it is on.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#7107",
+		Owner:       "artifacts",
+		ReviewBy:    "2027-02-01",
 	},
 	{
 		Name:        UserDeleteForceCascade,

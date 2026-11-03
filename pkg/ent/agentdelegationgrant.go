@@ -26,6 +26,8 @@ type AgentDelegationGrant struct {
 	AgentGeneration int `json:"agent_generation,omitempty"`
 	// AgentStateVersion holds the value of the "agent_state_version" field.
 	AgentStateVersion int64 `json:"agent_state_version,omitempty"`
+	// IssuedRunID holds the value of the "issued_run_id" field.
+	IssuedRunID string `json:"issued_run_id,omitempty"`
 	// IssuerUserID holds the value of the "issuer_user_id" field.
 	IssuerUserID string `json:"issuer_user_id,omitempty"`
 	// BoundaryKind holds the value of the "boundary_kind" field.
@@ -78,7 +80,7 @@ func (*AgentDelegationGrant) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullBool)
 		case agentdelegationgrant.FieldAgentGeneration, agentdelegationgrant.FieldAgentStateVersion, agentdelegationgrant.FieldCeilingVersion, agentdelegationgrant.FieldDepth, agentdelegationgrant.FieldMaxCredentialTTLSeconds:
 			values[i] = new(sql.NullInt64)
-		case agentdelegationgrant.FieldAgentID, agentdelegationgrant.FieldAgentProjectID, agentdelegationgrant.FieldIssuerUserID, agentdelegationgrant.FieldBoundaryKind, agentdelegationgrant.FieldBoundaryProjectID, agentdelegationgrant.FieldCeilingPermissionIds, agentdelegationgrant.FieldName, agentdelegationgrant.FieldPurpose, agentdelegationgrant.FieldLabels, agentdelegationgrant.FieldParentGrantID, agentdelegationgrant.FieldRevokedBy, agentdelegationgrant.FieldRevokeReason, agentdelegationgrant.FieldIssuanceAuditID, agentdelegationgrant.FieldRevocationAuditID:
+		case agentdelegationgrant.FieldAgentID, agentdelegationgrant.FieldAgentProjectID, agentdelegationgrant.FieldIssuedRunID, agentdelegationgrant.FieldIssuerUserID, agentdelegationgrant.FieldBoundaryKind, agentdelegationgrant.FieldBoundaryProjectID, agentdelegationgrant.FieldCeilingPermissionIds, agentdelegationgrant.FieldName, agentdelegationgrant.FieldPurpose, agentdelegationgrant.FieldLabels, agentdelegationgrant.FieldParentGrantID, agentdelegationgrant.FieldRevokedBy, agentdelegationgrant.FieldRevokeReason, agentdelegationgrant.FieldIssuanceAuditID, agentdelegationgrant.FieldRevocationAuditID:
 			values[i] = new(sql.NullString)
 		case agentdelegationgrant.FieldExpiresAt, agentdelegationgrant.FieldCreated, agentdelegationgrant.FieldLastExchangedAt, agentdelegationgrant.FieldRevokedAt:
 			values[i] = new(sql.NullTime)
@@ -128,6 +130,12 @@ func (_m *AgentDelegationGrant) assignValues(columns []string, values []any) err
 				return fmt.Errorf("unexpected type %T for field agent_state_version", values[i])
 			} else if value.Valid {
 				_m.AgentStateVersion = value.Int64
+			}
+		case agentdelegationgrant.FieldIssuedRunID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field issued_run_id", values[i])
+			} else if value.Valid {
+				_m.IssuedRunID = value.String
 			}
 		case agentdelegationgrant.FieldIssuerUserID:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -305,6 +313,9 @@ func (_m *AgentDelegationGrant) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("agent_state_version=")
 	builder.WriteString(fmt.Sprintf("%v", _m.AgentStateVersion))
+	builder.WriteString(", ")
+	builder.WriteString("issued_run_id=")
+	builder.WriteString(_m.IssuedRunID)
 	builder.WriteString(", ")
 	builder.WriteString("issuer_user_id=")
 	builder.WriteString(_m.IssuerUserID)

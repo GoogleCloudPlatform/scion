@@ -299,7 +299,7 @@ scion message --non-interactive @reviewer "PR #42 is ready for review.\n\nBranch
 The `scion conversation` command (alias `conv`) provides a surface-agnostic interface for managing conversations — the containers for message threads that span across the web chat, external channels, and CLI.
 
 Conversations are referenced using one of three forms:
-- `conv:<uuid>` — by conversation ID.
+- `conv:<uuid>` — by conversation ID. `scion conversation list` prints full conversation IDs, so a listed ID can be used as `conv:<id>`.
 - `@<agent-name>` — resolves the direct conversation with the named agent.
 - `#<thread-name>` — resolves a named group conversation.
 

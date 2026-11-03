@@ -111,6 +111,10 @@ type Agent struct {
 
 	// Applied configuration (stored as JSON)
 	AppliedConfig *AgentAppliedConfig `json:"appliedConfig,omitempty"`
+	// EffectiveConfig is the broker's verified effective configuration for
+	// one run (AgentEffectiveConfig), or nil. Written only by
+	// SetAgentEffectiveConfig; never by UpdateAgent.
+	EffectiveConfig *AgentEffectiveConfig `json:"-"`
 
 	// PendingConfig holds config edits the hub stored instead of applying
 	// (see AgentPendingConfig); nil when there are none. UpdateAgent writes
@@ -168,6 +172,7 @@ type Agent struct {
 	// (§3.3).
 	LaunchAsyncOptIn   bool      `json:"-"`
 	LaunchID           string    `json:"-"`
+	LaunchRunID        string    `json:"-"` // the run the launch dispatched (agents.launch_run_id); "" when unknown
 	LaunchState        string    `json:"-"` // "" | "active" | "ended"
 	LaunchEndReason    string    `json:"-"`
 	LaunchKind         string    `json:"-"` // "create" | "start" | "restart"
@@ -5304,6 +5309,11 @@ type AgentDelegationGrant struct {
 	AgentProjectID    string
 	AgentGeneration   int
 	AgentStateVersion int64
+	// IssuedRunID is the agent's RunID at issuance, read under the agent row
+	// lock; "" for a grant issued before the column existed or to an agent
+	// not yet dispatched. A suspend that finds a newer run already started
+	// keeps the grants keyed to that run (ptone/scion#6403).
+	IssuedRunID string
 	// IssuerUserID is the user who created the grant.
 	IssuerUserID string
 	// BoundaryKind is "project" or "hub"; BoundaryProjectID is set iff

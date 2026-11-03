@@ -401,7 +401,8 @@
       "properties": {
         "default_scratchpad": {
           "type": "boolean",
-          "description": "Whether new projects get the default scratchpad shared directory. Default true when absent."
+          "description": "Whether new projects get the default scratchpad shared directory. Default true when absent.",
+          "x-env-var": "SCION_SERVER_PROJECTDEFAULTS_DEFAULTSCRATCHPAD"
         }
       },
       "additionalProperties": false
@@ -2824,25 +2825,31 @@
       "description": "Hub-hub federation authentication.",
       "x-since": "1",
       "properties": {
-        "enabled": { "type": "boolean" },
+        "enabled": { "type": "boolean", "x-env-var": "SCION_SERVER_FEDERATION_ENABLED" },
         "trusted_issuers": {
           "type": "array",
           "items": { "$ref": "#/$defs/serverTrustedIssuer" }
         },
-        "algorithms": { "type": "array", "items": { "type": "string", "enum": ["RS256", "ES256"] } },
+        "algorithms": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["RS256", "ES256"] },
+          "x-env-var": "SCION_SERVER_FEDERATION_ALGORITHMS"
+        },
         "refresh_interval": {
           "anyOf": [
             { "type": "string", "pattern": "^(|[-+]?0|[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|\u00b5s|\u03bcs|ms|s|m|h))+)$" },
             { "type": "integer", "const": 0 }
           ],
-          "description": "Go duration, e.g. \"1h\". Empty means the default. An unquoted 0 is accepted (it loads as \"0\")."
+          "description": "Go duration, e.g. \"1h\". Empty means the default. An unquoted 0 is accepted (it loads as \"0\").",
+          "x-env-var": "SCION_SERVER_FEDERATION_REFRESHINTERVAL"
         },
         "debounce_interval": {
           "anyOf": [
             { "type": "string", "pattern": "^(|[-+]?0|[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|\u00b5s|\u03bcs|ms|s|m|h))+)$" },
             { "type": "integer", "const": 0 }
           ],
-          "description": "Go duration, e.g. \"30s\". Empty means the default. An unquoted 0 is accepted (it loads as \"0\")."
+          "description": "Go duration, e.g. \"30s\". Empty means the default. An unquoted 0 is accepted (it loads as \"0\").",
+          "x-env-var": "SCION_SERVER_FEDERATION_DEBOUNCEINTERVAL"
         }
       },
       "additionalProperties": false

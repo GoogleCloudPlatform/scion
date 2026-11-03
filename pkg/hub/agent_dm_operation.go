@@ -400,13 +400,26 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// phase-conflict error below, in favor of the deferred outcome.
 	deferred := reincarnationInFlight(input.TargetAgent)
 
-	// ── Phase 1b: Wake handling (#1691) ─────────────────────────────────
+	// ── Phase 1b: Hold check, then wake handling (#1691) ────────────────
+	// A held target (ptone/scion#3433) is never dispatched to, whether or
+	// not wake was requested (ptone/scion#6859): a mention is kept,
+	// undispatched, like a migrating target; any other send is refused like
+	// a suspended target, and is never woken. A lookup fault refuses.
+	//
 	// Wake runs after all admission checks so that denied, oversized, or
 	// unauthorized requests cannot resume an agent (AC-2). Resume failure
 	// or readiness timeout returns an explicit error and no message is
 	// dispatched (AC-4).
 	if !deferred {
-		if input.Wake {
+		held, holdErr := s.agentHeld(ctx, input.TargetAgent.ID)
+		switch {
+		case holdErr != nil:
+			return nil, heldLookupFaultDMError()
+		case held && input.SkipPhaseGate && input.Type == messages.TypeMention:
+			deferred = true
+		case held:
+			return nil, heldTargetDMError(input.TargetAgent)
+		case input.Wake:
 			if denial := s.wakeResumeDenial(ctx, input.SenderIdentity, input.TargetAgent); denial != nil {
 				LogDMAdmission(DMAuditEntryForDenial(input, denial.Code, denial.Message))
 				return nil, denial
@@ -422,20 +435,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 				// Another start is in progress: keep the message, deferred.
 				deferred = true
 			}
-		} else if held, holdErr := s.agentHeld(ctx, input.TargetAgent.ID); holdErr != nil || held {
-			// A held target (ptone/scion#3433) is never dispatched to: a
-			// mention is kept, undispatched, like a migrating target; any
-			// other send is refused like a suspended target. A lookup
-			// fault refuses.
-			if holdErr != nil {
-				return nil, heldLookupFaultDMError()
-			}
-			if input.SkipPhaseGate && input.Type == messages.TypeMention {
-				deferred = true
-			} else {
-				return nil, heldTargetDMError(input.TargetAgent)
-			}
-		} else if !input.SkipPhaseGate || input.Type != messages.TypeMention {
+		case !input.SkipPhaseGate || input.Type != messages.TypeMention:
 			// SkipPhaseGate applies only to mention deliveries — a non-mention
 			// send always gets the phase gate, regardless of the flag, so a
 			// caller cannot use it to bypass phase checks for a primary send.

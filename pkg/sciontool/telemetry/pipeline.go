@@ -315,15 +315,33 @@ func (p *Pipeline) Start(ctx context.Context) error {
 			log.Info("Cloud exporter initialized (%s, project: %s)", mode, p.config.ProjectID)
 		}
 	} else {
-		if p.config.CloudEnabled {
+		switch {
+		case p.config.CloudEnabled && p.config.CloudEnabledExplicit:
+			// Cloud export was asked for explicitly but has nowhere to go:
+			// a real misconfiguration, so the pipeline refuses to start.
 			p.deliveryState.Store("failed")
 			p.logDeliverySnapshot(true)
 			if p.config.IsGCP() && p.config.ProjectID == "" {
 				slog.Warn("telemetry cloud export disabled — GCP mode requires a project ID", "env_checked", EnvProjectID)
 			}
 			return fmt.Errorf("cloud telemetry enabled but destination is not configured")
+		case p.config.CloudEnabled:
+			// Cloud export is on only by default and no destination is
+			// configured: leave it off and run the local pipeline, the
+			// same as with cloud export disabled (ptone/scion#7104).
+			// CloudEnabled is cleared so intake, delivery state and Stop
+			// all behave exactly as they do with cloud export disabled;
+			// left set, intake would reject every batch as "cloud
+			// exporter unavailable".
+			p.config.CloudEnabled = false
+			if p.config.IsGCP() && p.config.ProjectID == "" {
+				slog.Warn("telemetry cloud export disabled — GCP mode requires a project ID", "env_checked", EnvProjectID)
+			} else {
+				slog.Info("telemetry cloud export disabled: no destination configured")
+			}
+		default:
+			slog.Info("telemetry cloud export disabled")
 		}
-		slog.Info("telemetry cloud export disabled")
 	}
 
 	// Create receiver with span and metric handlers

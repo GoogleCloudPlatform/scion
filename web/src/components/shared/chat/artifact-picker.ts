@@ -502,7 +502,7 @@ export class ScionArtifactPicker extends LitElement {
     }
     td {
       padding: 0.5rem;
-      border-bottom: 1px solid var(--scion-border-subtle, #f1f5f9);
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
     }
     tbody tr {
       cursor: pointer;

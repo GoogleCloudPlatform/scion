@@ -1095,7 +1095,11 @@ The revoke route (§7) and every lifecycle revocation share one per-grant revoca
 These cascades are best-effort, because use-time checks are authoritative:
 
 - **Agent suspend** (`suspendAgent`, auto-suspend): use denies on the suspended phase. G.3 revokes
-  grants best-effort.
+  grants best-effort. The revocation locks and re-reads the agent row. If the row holds a newer,
+  non-empty run that is not deleted, suspended or stopped (a resume that started after the
+  suspension was recorded), the grants keyed to that run (`issued_run_id`) are kept. Every other
+  grant of the agent is revoked, unkeyed ones included
+  ([ptone/scion#6403](https://github.com/ptone/scion/issues/6403)).
 - **Agent holds** (membership loss): `agentStanding` refuses a held agent at exchange and use. If an
   admin lifts the hold, unrevoked grants work again, as after an issuer is unsuspended.
 - **Issuer suspend or delete** (`updateUser`, `deleteUser`): use and exchange deny on the issuer
@@ -1281,6 +1285,7 @@ credentials, or re-run `decideAgentDelegation` when the ticket is redeemed.
 agent_delegation_grants
   id uuid pk
   agent_id uuid (index)   agent_project_id uuid   agent_generation int   agent_state_version int
+  issued_run_id string default ''                                    -- the agent's run at issuance
   issuer_user_id uuid (index)
   boundary_kind enum(project, hub)   boundary_project_id uuid NULL   -- hub ⇒ NULL, project ⇒ NOT NULL
   ceiling_version int NOT NULL (>= 1)   ceiling_permission_ids text (JSON array)

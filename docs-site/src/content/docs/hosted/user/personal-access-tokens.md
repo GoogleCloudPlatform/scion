@@ -37,7 +37,7 @@ permissions). Available scopes:
 | `project:read` | Read project metadata |
 | `project:list` | List projects. A project token lists only its own project; on a hub token this scope can be selected only by holders of a hub-wide role that grants it |
 | `project:update` | Update project settings, configurations, and annotations |
-| `project:manage` | Manage project membership through your own project role, under the same governance rules as a signed-in session; hub role-binding authority is not used through a token. A role is granted only when the token also carries a scope for every permission of that role |
+| `project:manage` | Manage project membership through your own project role, under the same governance rules as a signed-in session; hub role-binding authority is not used through a token. A role is granted only when the token also carries a scope for every permission of that role. It is not a read/write alias and does not include `project:read` or `project:list` |
 | `project:create` | Create and register projects. Hub tokens only; your user must hold `project.create`, and the token must also carry a scope for every permission of the project owner role |
 | `project:chat_post` | Keep `project.chat_post` on the token so it can grant roles that include it, such as the built-in `project-member` role through `project:manage`. It does not post: a token posts in a project's chat threads with `inbox:write`, and your own account must hold `project.chat_post` there |
 | `project:clone` | Clone a project, together with `project:read` and `project:create` on a hub token; your user must be able to read the source project and hold `project.create`. Selecting this scope needs `project.clone`, which the built-in super-admin role carries |
@@ -176,22 +176,30 @@ along the way denies the request:
 ### Checking what you can select
 
 Before minting a token, you can ask which scopes you are currently eligible to select for a given
-project, and why a particular scope is not available to you:
+project, or for a hub boundary, and why a particular scope is not available to you. Eligibility is
+answered only for an interactive login (`scion hub auth login`). A request authenticated with a
+user access token gets the scope catalog only; naming a project or a boundary with a token is
+refused with `403`.
 
 ```bash
+scion hub auth login
 scion hub token scopes --project my-project
 ```
 
-Or via the API:
+Or via the API, with a session credential:
 ```bash
-curl -H "Authorization: Bearer $SCION_HUB_TOKEN" \
+curl -H "Authorization: Bearer $SESSION_TOKEN" \
      "https://scion.example.com/api/v1/auth/scopes?projectId=<project-id>"
 ```
 
-Each scope in the response reports `eligible` and, when it is not, a machine-readable
-`eligibilityReason` (for an alias such as `agent:manage`, also which member scopes are
-ineligible). The **Create Token** form in the web UI uses the same information: once you pick a
-project, scopes you cannot select are shown with the reason.
+For a hub boundary, send `?boundary=hub` with no `projectId`. A scope that a hub boundary allows
+but you cannot select is reported with the reason `authority_required`; a scope that a hub boundary
+does not allow reports `boundary_not_allowed`.
+
+Each scope in the response reports `eligibility.eligible` and, when it is not, a machine-readable
+`eligibility.reason` (for an alias such as `agent:manage`, `eligibility.ineligibleMembers` names the
+member scopes that are ineligible). The **Create Token** form in the web UI uses the same
+information: once you pick a project, scopes you cannot select are shown with the reason.
 
 This answers only "may I select this restriction" — it never lists which agents or other targets
 the resulting token could reach. If you request eligibility for a project you cannot access, or
@@ -427,7 +435,7 @@ common CLI flows need:
 | Any command run in a project | `project:read`, `project:list` |
 | `scion list` | `project:read`, `agent:list` |
 | `scion look`, `scion logs` | `project:read`, `agent:read` |
-| `scion start` / `scion create` | `project:read`, `agent:create`, `agent:read` |
+| `scion start` / `scion create` | `project:read`, `agent:create`, `agent:read`; for an agent role above `none`, also `skill:read`, `skill:list`, `template:read`, `template:list`, `harness_config:read`, `harness_config:list` (or pass `--role none`) |
 | `scion message` | `project:read`, `agent:message` |
 | `scion attach` | `project:read`, `agent:attach` |
 | `scion stop`, `scion suspend`, `scion resume`, `scion restore` | `project:read`, `agent:lifecycle` |

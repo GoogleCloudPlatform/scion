@@ -593,6 +593,30 @@ jobs:
           esac
           exit "$rc"
 
+      - name: Check Agent Mutators
+        run: |
+          # WP1 lifecycle events: only pkg/store writers run the lifecycle
+          # observer, so no other package may mutate agent rows directly.
+          # Invoked directly, like check-security-marker-gates, so exit 1
+          # (finding) and exit 2 (nothing analysed) stay distinct.
+          set +e
+          ./hack/check-agent-mutators.sh --self-test
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            set -e
+            echo "::error title=Agent mutators NOT checked::check-agent-mutators --self-test failed (exit $rc) — the guard itself is broken or could not run, so nothing was analysed."
+            exit "$rc"
+          fi
+          ./hack/check-agent-mutators.sh
+          rc=$?
+          set -e
+          case "$rc" in
+            0) ;;
+            1) echo "::error title=Agent mutators::An ent agent mutation outside pkg/store bypasses the lifecycle observer (WP1 design 2.8). Route it through a store method that observes the write. See the step log above." ;;
+            *) echo "::error title=Agent mutators NOT checked::check-agent-mutators could not run (exit $rc) — NOTHING WAS ANALYSED. This is an environment failure, not a statement about the codebase." ;;
+          esac
+          exit "$rc"
+
       - name: Check Route Authorization Manifest
         run: |
           # Invoked directly rather than via `make check-route-authz-manifest`:

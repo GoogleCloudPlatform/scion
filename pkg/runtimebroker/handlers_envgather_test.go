@@ -3539,6 +3539,7 @@ profiles:
 	if err != nil {
 		t.Fatalf("NewLocal: %v", err)
 	}
+	allowHydrationRoot(t, stor.ObjectFSPath(storage.ResourceRootPaths("", storage.ResourceKindTemplate)[0]))
 	hydratedDir := stor.ObjectFSPath(storage.TemplateStoragePath("", "global", "", "mytpl"))
 	hydratedHC := filepath.Join(hydratedDir, "harness-configs", "claude")
 	if err := os.MkdirAll(hydratedHC, 0o755); err != nil {
@@ -3726,6 +3727,7 @@ func TestEnvGather_CreateAgent_ScoresHydratedTemplate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLocal: %v", err)
 	}
+	allowHydrationRoot(t, stor.ObjectFSPath(storage.ResourceRootPaths("", storage.ResourceKindTemplate)[0]))
 	hydratedDir := stor.ObjectFSPath(storage.TemplateStoragePath("", "global", "", "mytpl"))
 	writeHarnessConfigDirAt(t, filepath.Join(hydratedDir, "harness-configs", "claude"),
 		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\nenv:\n  GOOGLE_CLOUD_PROJECT: hydrated-proj\n"+claudeAuthBlock)

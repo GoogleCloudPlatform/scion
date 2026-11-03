@@ -993,6 +993,14 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A request's template is a template slug or ID, never a host directory
+	// or a remote source: the broker resolves an absolute template directory
+	// only for the templates it hydrated itself (requestTemplateAllowed).
+	if req.Config != nil && !requestTemplateAllowed(req.Config.Template) {
+		ValidationError(w, requestTemplateRefusal, nil)
+		return
+	}
+
 	// ProjectSlug is joined onto the global projects directory below (to
 	// resolve req.ProjectPath) and again later to compute the GCS-bootstrap
 	// workspace directory, in both cases as a single path segment: a value
@@ -1794,7 +1802,13 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// profile was refused (422) before the attempt, buildStartContext
 		// resolves only the instance's runtime, and checkFlatCreatePlacement
 		// already checked the policy and its target before the attempt.
+		// On a legacy Runtime Broker the request's own kubernetes blocks are
+		// checked here against the operator-owned placement, before the
+		// agent is provisioned or started and before any 201.
 		rp, perr := s.placementForStart(ctx, sc.Resolution, opts.ProjectPath)
+		if perr == nil {
+			perr = s.checkCreatePlacement(req, rp)
+		}
 		if perr != nil {
 			span.SetStatus(codes.Error, perr.Error())
 			status := s.writeStartContextError(w, perr, "create agent", "agent_id", req.ID, "profile", createRequestProfile(req))
@@ -3601,18 +3615,16 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	// kept, whatever removeBranch says.
 	if filesToDelete && !localOnly && agentProjectID != "" {
 		if remover, ok := target.mgr.(nfsAgentFilesRemover); ok {
-			if paths, rmErr := remover.RemoveNFSAgentFiles(ctx, projectPath, agentProjectID, target.name); rmErr != nil {
+			// Each removal is audited with what it did: deleted, absent
+			// (nothing was there) or failed. A workspace moved aside is
+			// purged in the background, which audits its own result.
+			ds, rmErr := remover.RemoveNFSAgentFiles(agent.WithStorageAuditLogger(ctx, s.agentLifecycleLog), projectPath, agentProjectID, target.name)
+			if rmErr != nil {
 				s.agentLifecycleLog.Warn("Agent delete: could not remove the agent's files on the NFS workspace; left in place",
-					"agent_id", id, "project_id", agentProjectID, "paths", paths, "error", rmErr)
-				projectfs.Audit(ctx, s.agentLifecycleLog, projectfs.DeleterBroker, agentProjectID, target.name, projectfs.Deletion{
-					Tree: projectfs.TreeAgentWorkspace, Path: strings.Join(paths, ","), Outcome: projectfs.OutcomeFailed, Err: rmErr,
-				})
-			} else {
-				for _, p := range paths {
-					projectfs.Audit(ctx, s.agentLifecycleLog, projectfs.DeleterBroker, agentProjectID, target.name, projectfs.Deletion{
-						Tree: projectfs.TreeAgentWorkspace, Path: p, Outcome: projectfs.OutcomeDeleted,
-					})
-				}
+					"agent_id", id, "project_id", agentProjectID, "error", rmErr)
+			}
+			for _, d := range ds {
+				projectfs.Audit(ctx, s.agentLifecycleLog, projectfs.DeleterBroker, agentProjectID, target.name, d)
 			}
 		}
 	}
@@ -3904,6 +3916,13 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	ctx = withStartHubAgentDefaults(ctx, startReq.HubAgentDefaults)
 
 	s.agentLifecycleLog.Debug("startAgent called", "agent_id", id, "task", startReq.Task, "projectPath", startReq.ProjectPath, "projectSlug", startReq.ProjectSlug, "harnessConfig", startReq.HarnessConfig, "resolvedEnvCount", len(startReq.ResolvedEnv))
+
+	// The start's template name is used for naming (and recorded with the
+	// agent); like create's template it must be a template slug or ID.
+	if !requestTemplateAllowed(startReq.TemplateName) {
+		ValidationError(w, requestTemplateRefusal, nil)
+		return
+	}
 
 	// Build config for buildStartContext (startAgent uses a subset of CreateAgentConfig)
 	var cfg *CreateAgentConfig
@@ -5138,6 +5157,11 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 			}
 			s.agentLifecycleLog.Debug("No resolvedEnv in restart request body (ignoring decode error)", "agent_id", id, "error", err)
 		}
+	}
+	// As on start: the template name must be a template slug or ID.
+	if !requestTemplateAllowed(restartReq.TemplateName) {
+		ValidationError(w, requestTemplateRefusal, nil)
+		return
 	}
 	// Checked before the stop leg and any runtime call, as on start.
 	if refusal := s.expectedTargetRefusal(restartReq.ExpectedRuntimeTargetID, false); refusal != nil {
@@ -8751,7 +8775,7 @@ var errDeleteTargetUnknown = errors.New("could not list agents to resolve delete
 // agent's worktree or own workspace from the NFS workspace export on
 // delete.
 type nfsAgentFilesRemover interface {
-	RemoveNFSAgentFiles(ctx context.Context, projectPath, projectID, agentName string) (paths []string, err error)
+	RemoveNFSAgentFiles(ctx context.Context, projectPath, projectID, agentName string) ([]projectfs.Deletion, error)
 }
 
 var _ nfsAgentFilesRemover = (*agent.AgentManager)(nil)

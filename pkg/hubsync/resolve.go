@@ -16,6 +16,7 @@ package hubsync
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -108,6 +109,10 @@ func resolveHubProjectRef(ref string, opts EnsureHubReadyOptions) (*HubContext, 
 	// Resolve the project on the hub
 	project, err := resolveProjectOnHub(ctx, client, ref)
 	if err != nil {
+		var notFound *ProjectNotFoundError
+		if errors.As(err, &notFound) && UsesUserAccessToken(credentialKind) {
+			return nil, ScopedTokenProjectLookupEmptyError(ref)
+		}
 		return nil, err
 	}
 
@@ -162,7 +167,7 @@ func resolveProjectOnHub(ctx context.Context, client hubclient.Client, ref strin
 		}
 		switch len(resp.Projects) {
 		case 0:
-			return nil, fmt.Errorf("no project found for git URL '%s'", ref)
+			return nil, &ProjectNotFoundError{Ref: ref, GitURL: true}
 		case 1:
 			return &resp.Projects[0], nil
 		default:
@@ -203,9 +208,14 @@ func resolveProjectOnHub(ctx context.Context, client hubclient.Client, ref strin
 type ProjectNotFoundError struct {
 	// Ref is the reference that was looked up.
 	Ref string
+	// GitURL is true when Ref was looked up as a git URL.
+	GitURL bool
 }
 
 func (e *ProjectNotFoundError) Error() string {
+	if e.GitURL {
+		return fmt.Sprintf("no project found for git URL '%s'", e.Ref)
+	}
 	return fmt.Sprintf("project '%s' not found on hub", e.Ref)
 }
 
