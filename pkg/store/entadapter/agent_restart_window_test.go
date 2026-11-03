@@ -25,6 +25,7 @@ package entadapter
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -55,6 +56,9 @@ func TestAgentRestartWindow_OldRunDroppedAfterSetRunID(t *testing.T) {
 	s, id := restartWindowAgent(t, ctx, "rw-old")
 	before, err := s.GetAgent(ctx, id)
 	require.NoError(t, err)
+	// newHaltAgent writes last-seen an hour in the past, so the advance
+	// below is checked against the write time, not at clock resolution.
+	require.True(t, before.LastSeen.Before(time.Now().Add(-30*time.Minute)), "fixture last-seen is in the past")
 
 	apply(t, ctx, s, id, restartWindowHeartbeat("run-1", "exited (143)", "old run"))
 	oldSelf := selfReport("error", "")
@@ -70,7 +74,7 @@ func TestAgentRestartWindow_OldRunDroppedAfterSetRunID(t *testing.T) {
 	assert.Equal(t, before.ContainerStatus, got.ContainerStatus)
 	assert.Equal(t, before.Message, got.Message)
 	assert.Equal(t, before.ExitReason, got.ExitReason)
-	assert.True(t, got.LastSeen.After(before.LastSeen), "last-seen still advances")
+	assert.WithinDuration(t, time.Now(), got.LastSeen, time.Minute, "last-seen still advances to the report time")
 }
 
 func TestAgentRestartWindow_NewRunApplied(t *testing.T) {
