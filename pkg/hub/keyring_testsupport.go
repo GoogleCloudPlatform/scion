@@ -39,6 +39,6 @@ func relaxKeyringRelease(inTestBinary func() bool) (restore func()) {
 		panic("hub.RelaxKeyringReleaseForTest called outside a test binary")
 	}
 	prev := keyringReleaseCheck
-	keyringReleaseCheck = func(*keyring.Keyring, *ServerConfig) error { return nil }
+	keyringReleaseCheck = func(*keyring.Keyring) error { return nil }
 	return func() { keyringReleaseCheck = prev }
 }
