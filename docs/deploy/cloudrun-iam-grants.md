@@ -72,10 +72,11 @@ The cloudrun runtime creates each agent Instance to run as the configured
 `cloudrun.service_account`. Cloud Run only allows that when the identity
 creating the Instance (the Hub SA, which runs the co-located broker) holds
 `iam.serviceAccounts.actAs` on that service account, which
-`roles/iam.serviceAccountUser` grants. Without it every agent start fails with:
+`roles/iam.serviceAccountUser` grants. Without it every agent start fails
+with an error that contains:
 
 ```
-iam.serviceaccounts.actAs denied
+Permission 'iam.serviceaccounts.actAs' denied on service account <cloudrun.service_account> (or it may not exist)
 ```
 
 This applies even when `cloudrun.service_account` is the Hub SA itself: a

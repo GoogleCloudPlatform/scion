@@ -43,7 +43,7 @@ func TestCloudRunActAsCheck_Denied(t *testing.T) {
 	if got.Status != "warn" {
 		t.Fatalf("Status = %q, want warn (%+v)", got.Status, got)
 	}
-	for _, want := range []string{"iam.serviceaccounts.actAs denied", "credentials doctor runs with", testInstanceSA} {
+	for _, want := range []string{"Permission 'iam.serviceaccounts.actAs' denied on service account " + testInstanceSA + " (or it may not exist)", "credentials doctor runs with", testInstanceSA} {
 		if !strings.Contains(got.Message, want) {
 			t.Errorf("Message %q lacks %q", got.Message, want)
 		}

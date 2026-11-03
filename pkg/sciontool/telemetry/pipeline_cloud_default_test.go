@@ -43,10 +43,19 @@ func TestLoadConfig_CloudEnabledExplicit(t *testing.T) {
 		{"", true, false},
 		{"true", true, true},
 		{"false", false, true},
+		// Set but empty, or misspelt: ParseBoolEnv takes the default, so
+		// the value is not explicit either.
+		{"<set-empty>", true, false},
+		{"ture", true, false},
 	}
 	for _, tc := range cases {
 		t.Run("env="+tc.env, func(t *testing.T) {
-			cloudDefaultEnv(t, tc.env)
+			if tc.env == "<set-empty>" {
+				cloudDefaultEnv(t, "")
+				t.Setenv(EnvCloudEnabled, "")
+			} else {
+				cloudDefaultEnv(t, tc.env)
+			}
 			cfg := LoadConfig()
 			if cfg.CloudEnabled != tc.wantEnabled || cfg.CloudEnabledExplicit != tc.wantExplicit {
 				t.Fatalf("CloudEnabled=%v CloudEnabledExplicit=%v, want %v %v",
@@ -91,6 +100,26 @@ func TestPipeline_DefaultCloudWithoutDestination_RunsLocally(t *testing.T) {
 	}
 	if got := p.DeliveryState(); got != "disabled" {
 		t.Errorf("DeliveryState() after Stop = %q, want disabled", got)
+	}
+}
+
+// TestPipeline_EmptyCloudEnabledWithoutDestination_RunsLocally: a set but
+// empty SCION_TELEMETRY_CLOUD_ENABLED is the default, not an explicit
+// request, so Start does not fail.
+func TestPipeline_EmptyCloudEnabledWithoutDestination_RunsLocally(t *testing.T) {
+	cloudDefaultEnv(t, "")
+	t.Setenv(EnvCloudEnabled, "")
+	p := New()
+	if p == nil {
+		t.Fatal("New() = nil, want a pipeline")
+	}
+	if err := p.Start(context.Background()); err != nil {
+		t.Fatalf("Start() = %v, want nil", err)
+	}
+	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := p.Stop(stopCtx); err != nil {
+		t.Fatalf("Stop() = %v", err)
 	}
 }
 

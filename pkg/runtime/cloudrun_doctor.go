@@ -105,7 +105,8 @@ func testActAsIAM(ctx context.Context, sa string) (bool, error) {
 
 // cloudRunActAsCheck checks that the caller may act as the configured
 // cloudrun.service_account. Without iam.serviceAccounts.actAs on it every
-// agent start fails with "iam.serviceaccounts.actAs denied", including when
+// agent start fails with "Permission 'iam.serviceaccounts.actAs' denied on
+// service account <sa> (or it may not exist)", including when
 // it is the hub's own service account. testIamPermissions answers for the
 // identity doctor runs as, which is the launching identity only when doctor
 // runs with the hub's (broker's) credentials, so a missing grant is a warning
@@ -130,7 +131,7 @@ func cloudRunActAsCheck(ctx context.Context, sa string, test actAsTester) CheckR
 		check.Message = fmt.Sprintf("The credentials doctor runs with hold %s on %s", actAsPermission, sa)
 	default:
 		check.Status = "warn"
-		check.Message = fmt.Sprintf("The credentials doctor runs with lack %s on %s. If these are the credentials that start agents, every start fails with \"iam.serviceaccounts.actAs denied\"; if not, run doctor with the hub's credentials to check the identity that starts agents.", actAsPermission, sa)
+		check.Message = fmt.Sprintf("The credentials doctor runs with lack %s on %s. If these are the credentials that start agents, every start fails with \"Permission 'iam.serviceaccounts.actAs' denied on service account %s (or it may not exist)\"; if not, run doctor with the hub's credentials to check the identity that starts agents.", actAsPermission, sa, sa)
 		check.Remediation = remediation
 	}
 	return check

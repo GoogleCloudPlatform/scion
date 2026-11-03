@@ -161,10 +161,11 @@ The cloudrun runtime creates each agent Instance to run as
 `hub-settings-template.yaml`). Cloud Run allows that only when the identity
 creating the Instance, the Hub service account, holds
 `iam.serviceAccounts.actAs` on that service account, which
-`roles/iam.serviceAccountUser` grants. Without it every agent start fails with:
+`roles/iam.serviceAccountUser` grants. Without it every agent start fails
+with an error that contains:
 
 ```
-iam.serviceaccounts.actAs denied
+Permission 'iam.serviceaccounts.actAs' denied on service account <cloudrun.service_account> (or it may not exist)
 ```
 
 This also applies when `cloudrun.service_account` is the Hub service account
@@ -255,7 +256,7 @@ gcloud iap web add-iam-policy-binding \
 
 ## Troubleshooting
 
-### Every agent start fails with `iam.serviceaccounts.actAs denied`
+### Every agent start fails with `Permission 'iam.serviceaccounts.actAs' denied`
 
 The Hub service account lacks `roles/iam.serviceAccountUser` on
 `cloudrun.service_account`, possibly its own account. Grant it as shown in
