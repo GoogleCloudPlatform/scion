@@ -135,15 +135,21 @@ func newKRReplica(t *testing.T, st store.Store, k *keyring.Keyring, clk *krClock
 	// (the derivation a legacy-mode hub uses), so these cookie tests do not
 	// depend on which generation is active; hub.New builds it from the
 	// signing ring (see server_jwt_keyring_test.go).
-	// Rollout rings without the "legacy" entry (rolloutWithoutLegacy) pin it
-	// to gen1 instead, which both rollout replicas hold.
-	pinned, ok := k.Signing().LegacySecret()
-	if !ok {
+	// A ring without the "legacy" entry (only under withRolloutWithoutLegacy)
+	// has no such derivation: the user token service is then built from the
+	// ring exactly as a keyring-mode hub builds it (initRingTokenServices),
+	// which is the service production hands the web server.
+	var svc *UserTokenService
+	if legacy, ok := k.Signing().LegacySecret(); ok {
+		var err error
+		svc, err = NewUserTokenService(UserTokenConfig{SigningKey: deriveSharedSigningKey(legacy, SecretKeyUserSigningKey)})
+		require.NoError(t, err)
+	} else {
 		require.True(t, rolloutWithoutLegacy, "a ring without the legacy entry outside withRolloutWithoutLegacy")
-		pinned = krGen1Secret
+		var err error
+		svc, err = newRingUserTokenService(k.Signing(), UserTokenConfig{}, clk.now)
+		require.NoError(t, err)
 	}
-	svc, err := NewUserTokenService(UserTokenConfig{SigningKey: deriveSharedSigningKey(pinned, SecretKeyUserSigningKey)})
-	require.NoError(t, err)
 	r.ws.userTokenSvc = svc
 	r.ws.MountHubAPI(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		r.hubAuth = req.Header.Get("Authorization")
