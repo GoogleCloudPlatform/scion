@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"unicode/utf8"
 )
 
 // Deny-by-default repository config policy.
@@ -193,22 +194,26 @@ func seededRemedy(key, layer string, each bool) string {
 	return "remove " + it + " from the repository's .git/config"
 }
 
-// maxRefusalsTextBytes bounds a RepoConfigRefusals text. The Hub stores at
-// most 512 bytes of a start failure message, so the list is shortened (with
-// "and N more") to fit rather than being cut mid-key.
+// maxRefusalsTextBytes bounds a RepoConfigRefusals text. The Hub keeps at
+// most 512 bytes of a launch report's message (sanitizeFailureReason in
+// pkg/hub) and stores it as "<step>: <message>"; the 32 bytes left are
+// headroom for that prefix (step names are short constants). Within the
+// bound the list is shortened with "and N more", and a single over-long key
+// with an ellipsis, so the count and the note always survive.
 const maxRefusalsTextBytes = 480
 
 // refusalsGitChecksNote ends a RepoConfigRefusals text when the checks that
 // run git were skipped.
-const refusalsGitChecksNote = " Checks that run git run once these are fixed and can report more."
+const refusalsGitChecksNote = " The git-based checks (the cross-check and the submodule check) run once these are fixed and can report more."
 
 // RepoConfigRefusals reports every key an agent-start (seed) check refused in
 // the config files it read as data, so one start names them all rather than
 // one per attempt. It holds two or more seeded refusals; one refusal is
 // returned as a plain *RepoConfigRefusedError (joinSeedRefusals).
 //
-// Its text names each key and, per config layer, the remedy (the per-key
-// reasons are left out to keep the text short enough to store). Like
+// Its text names each key and, per config layer, the remedy, with each key's
+// reason when the whole list fits maxRefusalsTextBytes (the reasons are left
+// out otherwise). Like
 // RepoConfigRefusedError, it never includes a value: every fmt verb and every
 // slog handler prints Error() (Format, LogValue). Unwrap returns the
 // refusals, so errors.As finds the first *RepoConfigRefusedError.
@@ -222,23 +227,48 @@ type RepoConfigRefusals struct {
 }
 
 func (e *RepoConfigRefusals) Error() string {
-	text := e.text(len(e.Refusals))
-	for listed := len(e.Refusals) - 1; len(text) > maxRefusalsTextBytes && listed >= 1; listed-- {
-		text = e.text(listed)
+	n := len(e.Refusals)
+	// With each key's reason when the whole list fits.
+	if text := e.text(n, true, ""); len(text) <= maxRefusalsTextBytes {
+		return text
 	}
-	return text
+	// Otherwise keys and remedies only, dropping whole keys from the end.
+	for listed := n; listed >= 1; listed-- {
+		if text := e.text(listed, false, ""); len(text) <= maxRefusalsTextBytes {
+			return text
+		}
+	}
+	// One key alone is too long: shorten its name.
+	over := len(e.text(1, false, "")) - maxRefusalsTextBytes
+	return e.text(1, false, shortenKey(e.Refusals[0].Key, len(e.Refusals[0].Key)-over))
+}
+
+// shortenKey cuts key to at most limit bytes on a rune boundary and marks the
+// cut with an ellipsis (counted in limit).
+func shortenKey(key string, limit int) string {
+	const ellipsis = "\u2026"
+	if len(key) <= limit {
+		return key
+	}
+	cut := max(limit-len(ellipsis), 0)
+	for cut > 0 && !utf8.RuneStart(key[cut]) {
+		cut--
+	}
+	return key[:cut] + ellipsis
 }
 
 // text renders the first listed refusals, grouped in first-seen order by
-// remedy and layer, and counts the rest as "and N more".
-func (e *RepoConfigRefusals) text(listed int) string {
+// remedy and layer as "<keys>: <remedy>", and counts the rest as "and N
+// more". withReasons adds each key's reason; firstKey, when set, replaces
+// the first key's name (a shortened one).
+func (e *RepoConfigRefusals) text(listed int, withReasons bool, firstKey string) string {
 	type group struct {
 		remedy string
 		keys   []string
 	}
 	var groups []*group
 	byRemedy := map[string]*group{}
-	for _, r := range e.Refusals[:listed] {
+	for i, r := range e.Refusals[:listed] {
 		remedy := seededRemedy(r.Key, r.Layer, true)
 		if r.Layer != "" {
 			remedy += ", in " + r.Layer
@@ -249,11 +279,22 @@ func (e *RepoConfigRefusals) text(listed int) string {
 			byRemedy[remedy] = g
 			groups = append(groups, g)
 		}
-		g.keys = append(g.keys, r.Key)
+		key := r.Key
+		if i == 0 && firstKey != "" {
+			key = firstKey
+		}
+		if withReasons {
+			reason := r.Reason
+			if reason == "" {
+				reason = "not on the host-side git allow-list"
+			}
+			key += " (" + reason + ")"
+		}
+		g.keys = append(g.keys, key)
 	}
 	parts := make([]string, len(groups))
 	for i, g := range groups {
-		parts[i] = strings.Join(g.keys, ", ") + " (" + g.remedy + ")"
+		parts[i] = strings.Join(g.keys, ", ") + ": " + g.remedy
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "agent git config refused: repository config sets %d keys that are not allowed: %s", len(e.Refusals), strings.Join(parts, "; "))

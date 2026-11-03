@@ -282,7 +282,7 @@ func TestCheckSeedRepoConfigLayers_JoinsLayersWithoutRunningGit(t *testing.T) {
 	if strings.Contains(msg, "layermarker-j") || strings.Contains(msg, "read differently") {
 		t.Errorf("text leaks a value or reports the cross-check: %s", msg)
 	}
-	if !strings.Contains(msg, "core.pager (remove each from the git config file that sets it, in "+seedLayerOwnWorktree+")") || !strings.HasSuffix(msg, refusalsGitChecksNote) {
+	if !strings.Contains(msg, "core.pager (a setting that runs a command in the agent's git): remove each from the git config file that sets it, in "+seedLayerOwnWorktree+".") || !strings.HasSuffix(msg, refusalsGitChecksNote) {
 		t.Errorf("text lacks the per-layer remedy or the note: %s", msg)
 	}
 }

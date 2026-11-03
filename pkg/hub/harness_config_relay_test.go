@@ -40,7 +40,7 @@ const (
 	// (runtime.ProjectShareUnavailableText).
 	// The broker's git config refusal text (util.RepoConfigRefusals): every
 	// refused key and its remedy, no value or path (ptone/scion#6835).
-	gitConfigRefusedMessage = `agent git config refused: repository config sets 2 keys that are not allowed: core.editor, grep.threads (remove each from the repository's .git/config). Checks that run git run once these are fixed and can report more.`
+	gitConfigRefusedMessage = `agent git config refused: repository config sets 2 keys that are not allowed: core.editor (not on the linked-checkout allow-list), grep.threads (not on the linked-checkout allow-list): remove each from the repository's .git/config. The git-based checks (the cross-check and the submodule check) run once these are fixed and can report more.`
 	projectStorageMessage   = `project storage share is not visible on this broker at its configured mount point: make the share (the same storage the hub uses) available in this broker's container at that path`
 )
 
