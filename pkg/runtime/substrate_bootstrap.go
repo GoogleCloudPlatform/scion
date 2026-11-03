@@ -178,7 +178,7 @@ func buildBootstrapEnv(cfg RunConfig) map[string]string {
 	}
 
 	for _, s := range cfg.ResolvedSecrets {
-		if s.Type == "environment" || s.Type == "" {
+		if (s.Type == "environment" || s.Type == "") && !reservedSecretEnvTarget(s.Target) {
 			env[s.Target] = s.Value
 		}
 	}

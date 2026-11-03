@@ -19,6 +19,9 @@ package hub
 import (
 	"fmt"
 	"syscall"
+	"testing"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 )
@@ -99,7 +102,34 @@ func readTokenAtStat(dirFd int, leaf, path string) (string, dirfd.Stat, error) {
 		return "", st, fmt.Errorf("%s: %w", path, err)
 	}
 	if enforceTokenFileOwnerChecks.Load() && st.Uid != 0 && st.Uid != dirSt.Uid {
-		return "", st, fmt.Errorf("refusing to read %s: unexpected owner", path)
+		return "", st, fmt.Errorf("refusing to read %s: %w", path, errTokenFileOwner)
 	}
 	return string(data), st, nil
+}
+
+// RemoveUnreadableRegularTokenFile unlinks the canonical token file when
+// it is a regular file with exactly one link, checked with fstatat on the
+// parent directory without following the leaf, and leaves anything else
+// (a link, a directory, a FIFO, a hard-linked file) in place with an
+// error. The parent is reached without following links, and the unlink
+// itself never follows the leaf. Callers use it only for a file the
+// guarded reader could not read (TokenFileUnreadable), so a fresh value
+// can replace it.
+func RemoveUnreadableRegularTokenFile() error {
+	if testing.Testing() && !tokenHomeOverridden {
+		panic("scion/hub: RemoveUnreadableRegularTokenFile called during a test without SetTokenHome()")
+	}
+	dirFd, leaf, err := dirfd.OpenParentNoFollow(TokenFilePath())
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dirfd.Close(dirFd) }()
+	var st unix.Stat_t
+	if err := unix.Fstatat(dirFd, leaf, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return fmt.Errorf("stat token file: %w", err)
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG || st.Nlink != 1 {
+		return fmt.Errorf("refusing to remove token file: %w", dirfd.ErrNotSingleLinkRegular)
+	}
+	return dirfd.UnlinkAt(dirFd, leaf)
 }
