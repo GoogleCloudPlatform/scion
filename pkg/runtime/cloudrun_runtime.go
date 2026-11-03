@@ -289,11 +289,23 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	if err != nil {
 		return "", err
 	}
+	// The instance mounts its own home leaf from the NFS share in every
+	// homes mode, never cfg.HomeDir, so the hub-issued credential pkg/agent
+	// wrote there is carried in the staged blob (Staged.HubToken, never an
+	// env var of its own) and sciontool init writes it to the instance's
+	// token file. A refused read stages nothing and is reported by
+	// condition only; the instance then logs that its hub client is not
+	// configured.
+	hubToken, hubTokenCond := readCloudRunHubToken(cfg.HomeDir)
+	if hubTokenCond != "" {
+		runtimeLog().Warn("Cloud Run start: the agent's hub credential is not staged",
+			"agent_id", cfg.Labels["agent_id"], "condition", hubTokenCond)
+	}
 	// Deliver resolved secrets through the instance env: env-type secrets as
-	// plain variables, file/variable secrets as the staged blob that
-	// sciontool init writes out. Done before any provisioning so an
-	// oversized secret fails fast.
-	if _, err := applyResolvedSecretsToEnv(&cfg, cloudRunEnvLimit, cloudRunRuntimeEnvKeys...); err != nil {
+	// plain variables, file/variable secrets (and the hub credential) as the
+	// staged blob that sciontool init writes out. Done before any
+	// provisioning so an oversized secret fails fast.
+	if _, err := applyStagedSecretsToEnv(&cfg, cloudRunEnvLimit, hubToken, cloudRunRuntimeEnvKeys...); err != nil {
 		return "", fmt.Errorf("cloudrun: %w", err)
 	}
 	if err := r.resolveConfig(ctx); err != nil {
@@ -373,6 +385,15 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 		// would skip it anyway).
 		if want != "" && run == want {
 			hooks.created(api.ResourceHandle{Kind: api.ResourceKindCloudRunInstance, Namespace: parent, Name: instanceID, UID: cfg.Labels[api.LabelRunID]})
+		}
+		// The Instances API has no update, so a started existing instance
+		// keeps the staged secrets it was created with, including the hub
+		// credential; the one this start read is not delivered. When a
+		// crash or kill left a newer token file in the instance's home,
+		// sciontool init keeps it (its iat rule) over the creation-time one.
+		if hubToken != "" {
+			runtimeLog().Warn("Cloud Run start: reusing the existing instance; it keeps its creation-time staged secrets, including the hub credential",
+				"instance", instanceID, "agent_id", agentID)
 		}
 		startReq := &runpb.StartInstanceRequest{
 			Name: getReq.Name,

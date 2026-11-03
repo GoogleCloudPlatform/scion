@@ -841,7 +841,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		if s.Type != "environment" && s.Type != "" {
 			continue
 		}
-		if _, collides := envKeys[s.Target]; collides || s.Target == SupplementalGIDsEnvVar || s.Target == MetadataInterceptionEnvVar {
+		if _, collides := envKeys[s.Target]; collides || s.Target == SupplementalGIDsEnvVar || s.Target == MetadataInterceptionEnvVar || reservedSecretEnvTarget(s.Target) {
 			continue
 		}
 		addArg("-e", fmt.Sprintf("%s=%s", s.Target, s.Value))
@@ -2289,15 +2289,31 @@ func copyFileIntoHome(src string, home *agenthome.Home, rel string) error {
 // the combined environment at ~128KB.
 const stagedSecretWarnThreshold = 100 * 1024
 
+// reservedSecretEnvTarget reports whether an environment-type secret may
+// not set name on any runtime: sciontool init reads it as its own marker
+// (stagedsecrets.HubTokenStagedEnvVar), so a secret supplying it would make
+// init treat a broker-provided token file as one it staged.
+func reservedSecretEnvTarget(name string) bool {
+	return name == stagedsecrets.HubTokenStagedEnvVar
+}
+
 // prepareContainerSecretEnv adds the shared secret-related environment needed
 // by local container runtimes.
 func prepareContainerSecretEnv(config *RunConfig) error {
-	if len(config.ResolvedSecrets) == 0 {
+	return prepareStagedSecretEnv(config, "")
+}
+
+// prepareStagedSecretEnv is prepareContainerSecretEnv that also stages
+// hubToken (the agent's hub-issued credential) in the blob when it is
+// non-empty. Only the Cloud Run runtime passes a token; every other caller
+// goes through prepareContainerSecretEnv and its output is unchanged.
+func prepareStagedSecretEnv(config *RunConfig, hubToken string) error {
+	if len(config.ResolvedSecrets) == 0 && hubToken == "" {
 		return nil
 	}
 
 	containerHome := util.GetHomeDir(config.UnixUsername)
-	encoded, err := serializeSecrets(containerHome, config.ResolvedSecrets)
+	encoded, err := serializeStaged(containerHome, config.ResolvedSecrets, hubToken)
 	if err != nil {
 		return fmt.Errorf("failed to serialize secrets: %w", err)
 	}
@@ -2362,20 +2378,31 @@ func (l envSizeLimit) unit() string {
 // It returns the env-type secret keys it added, in order. config.Env is
 // clipped before appending, so a caller's backing array is never written.
 func applyResolvedSecretsToEnv(config *RunConfig, limit envSizeLimit, reservedKeys ...string) ([]string, error) {
-	if len(config.ResolvedSecrets) == 0 {
+	return applyStagedSecretsToEnv(config, limit, "", reservedKeys...)
+}
+
+// applyStagedSecretsToEnv is applyResolvedSecretsToEnv that also stages
+// hubToken in the SCION_STAGED_SECRETS blob when it is non-empty (see
+// prepareStagedSecretEnv). The token never becomes an env entry of its own.
+func applyStagedSecretsToEnv(config *RunConfig, limit envSizeLimit, hubToken string, reservedKeys ...string) ([]string, error) {
+	if len(config.ResolvedSecrets) == 0 && hubToken == "" {
 		return nil, nil
 	}
 
 	staged := *config
 	staged.Env = nil
-	if err := prepareContainerSecretEnv(&staged); err != nil {
+	if err := prepareStagedSecretEnv(&staged, hubToken); err != nil {
 		return nil, err
 	}
 	for _, e := range staged.Env {
 		key, val, _ := strings.Cut(e, "=")
 		if key == stagedsecrets.EnvVar && limit.exceeds(key, val) {
-			return nil, fmt.Errorf("file/variable secrets do not fit: %s is %d bytes, over the %d-byte limit for one %s on this runtime (largest secret: %q)",
-				stagedsecrets.EnvVar, limit.size(key, val), limit.maxBytes, limit.unit(), largestStagedSecretName(config.ResolvedSecrets))
+			carries := ""
+			if hubToken != "" {
+				carries = "; it also carries the agent's hub credential"
+			}
+			return nil, fmt.Errorf("file/variable secrets do not fit: %s is %d bytes, over the %d-byte limit for one %s on this runtime (largest secret: %q%s)",
+				stagedsecrets.EnvVar, limit.size(key, val), limit.maxBytes, limit.unit(), largestStagedSecretName(config.ResolvedSecrets), carries)
 		}
 	}
 
@@ -2387,6 +2414,7 @@ func applyResolvedSecretsToEnv(config *RunConfig, limit envSizeLimit, reservedKe
 	// The staged keys are reserved even when this call does not set them:
 	// sciontool init reads them, so a secret must not supply them.
 	envKeys[stagedsecrets.EnvVar] = struct{}{}
+	envKeys[stagedsecrets.HubTokenStagedEnvVar] = struct{}{}
 	envKeys[telemetryGCPCredentialsEnvVar] = struct{}{}
 	for _, key := range reservedKeys {
 		envKeys[key] = struct{}{}
@@ -2443,7 +2471,14 @@ func largestStagedSecretName(secrets []api.ResolvedSecret) string {
 // an environment variable. Returns "" when there are no file or variable secrets.
 // The containerHome parameter is used to expand ~/ prefixes in file target paths.
 func serializeSecrets(containerHome string, secrets []api.ResolvedSecret) (string, error) {
-	var staged stagedsecrets.Staged
+	return serializeStaged(containerHome, secrets, "")
+}
+
+// serializeStaged is serializeSecrets that also carries hubToken in the
+// blob's dedicated HubToken field when it is non-empty; the blob is then
+// produced even with no file or variable secrets.
+func serializeStaged(containerHome string, secrets []api.ResolvedSecret, hubToken string) (string, error) {
+	staged := stagedsecrets.Staged{HubToken: hubToken}
 
 	// Collect file secrets, deduplicating by container target path (last wins).
 	targetIndex := make(map[string]int) // target → index in FileSecrets
@@ -2490,7 +2525,7 @@ func serializeSecrets(containerHome string, secrets []api.ResolvedSecret) (strin
 		staged.VariableSecrets[s.Target] = s.Value
 	}
 
-	if len(staged.FileSecrets) == 0 && len(staged.VariableSecrets) == 0 {
+	if len(staged.FileSecrets) == 0 && len(staged.VariableSecrets) == 0 && staged.HubToken == "" {
 		return "", nil
 	}
 
