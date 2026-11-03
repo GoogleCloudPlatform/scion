@@ -983,13 +983,13 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 	tz, err := d.resolveAgentTZ(ctx, agent, false)
 	if err != nil && secrets == failOnSecretResolutionError {
 		d.log.WarnContext(ctx, callerName+": failed to read stored TZ settings; agent not created",
-			"agent_id", agent.ID, "error", err)
+			"agent_id", agent.ID, "scope", tzReadScope(err))
 		return nil, &secretResolutionError{Verb: "created", Source: resolutionSourceEnvSettings, Err: err}
 	}
 	if err != nil {
 		// continueOnSecretResolutionError (provision, reprovision).
 		d.log.WarnContext(ctx, callerName+": failed to read stored TZ settings; provisioning without TZ",
-			"agent_id", agent.ID, "error", err)
+			"agent_id", agent.ID, "scope", tzReadScope(err))
 		tz = agentTZ{Source: TZSourceNone}
 	}
 	setResolvedAgentTZ(req.ResolvedEnv, &req.EnvClassifications, tz)
@@ -2119,7 +2119,7 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 					// and fails closed): answer the need with the no-TZ
 					// placeholder, never a lower rung.
 					d.log.WarnContext(ctx, callerName+": failed to read stored TZ settings; answering the TZ need without them",
-						"agent_id", agent.ID, "error", tzErr)
+						"agent_id", agent.ID, "scope", tzReadScope(tzErr))
 					tz = agentTZ{TZ: gatherAnswerTZ, Source: TZSourceNone}
 				}
 				setResolvedAgentTZ(req.ResolvedEnv, &req.EnvClassifications, tz)
@@ -3321,7 +3321,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	tz, err := d.resolveAgentTZ(ctx, agent, false)
 	if err != nil {
 		d.log.WarnContext(ctx, caller+": failed to read stored TZ settings; agent not "+startedVerb,
-			"agent_id", agent.ID, "error", err)
+			"agent_id", agent.ID, "scope", tzReadScope(err))
 		return startEnvResult{}, &secretResolutionError{Verb: startedVerb, Source: resolutionSourceEnvSettings, Err: err}
 	}
 	setResolvedAgentTZ(resolvedEnv, &envClassifications, tz)

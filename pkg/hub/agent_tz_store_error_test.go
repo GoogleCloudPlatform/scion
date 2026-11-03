@@ -132,6 +132,7 @@ func TestAgentTZStoreError_DispatchFailsClosed(t *testing.T) {
 			assert.Equal(t, envReadFixedMessage(tc.verb), err.Error())
 			assertNoTZErrDetail(t, err.Error(), "the error text")
 			assert.False(t, f.brokerCalled(), "nothing is sent to the broker, so no lower-precedence TZ is used")
+			assertTZLogScopeOnly(t, f.logs.String())
 		})
 	}
 }
@@ -145,6 +146,7 @@ func TestAgentTZStoreError_ProvisionSendsNoTZ(t *testing.T) {
 	require.NotNil(t, f.client.lastCreateReq)
 	assert.NotContains(t, f.client.lastCreateReq.ResolvedEnv, agentTZEnvKey)
 	assert.Contains(t, f.logs.String(), "failed to read stored TZ settings; provisioning without TZ")
+	assertTZLogScopeOnly(t, f.logs.String())
 }
 
 // TestAgentTZStoreError_GatherAnswer covers the TZ need an older broker
@@ -177,6 +179,7 @@ func TestAgentTZStoreError_GatherAnswer(t *testing.T) {
 		assert.Equal(t, envReadFixedMessage("created"), err.Error())
 		assertNoTZErrDetail(t, err.Error(), "the error text")
 		assert.Len(t, *reqs, 1, "no replay is sent")
+		assertTZLogScopeOnly(t, f.logs.String())
 	})
 
 	t.Run("provision answers with the placeholder", func(t *testing.T) {
@@ -304,4 +307,36 @@ func TestAgentTZStoreError_HappyPathResolves(t *testing.T) {
 	require.Equal(t, http.StatusOK, code)
 	assert.Equal(t, tzErrProjectTZ, *resp.ResolvedTimezone)
 	assert.Equal(t, TZSourceProject, resp.TimezoneSource)
+}
+
+// assertTZLogScopeOnly checks the hub log names the failed scope kind and
+// carries no backend error text (sec-review condition: a TZ read warning
+// logs a fixed reason and the scope kind only).
+func assertTZLogScopeOnly(t *testing.T, logs string) {
+	t.Helper()
+	assert.Contains(t, logs, "failed to read stored TZ settings")
+	assert.Contains(t, logs, "scope="+store.ScopeUser)
+	assert.NotContains(t, logs, tzReadBackendError, "a TZ read warning must not log the backend error")
+}
+
+// TestTZStorageReadError_FixedText: the resolver's error text is a fixed
+// reason plus the scope kind; the backend error is reachable only through
+// Unwrap.
+func TestTZStorageReadError_FixedText(t *testing.T) {
+	backend := errors.New(tzReadBackendError)
+	err := error(&tzStorageReadError{Scope: store.ScopeProject, Err: backend})
+	assert.Equal(t, "stored TZ settings could not be read (project scope)", err.Error())
+	assert.ErrorIs(t, err, backend)
+	assert.Equal(t, store.ScopeProject, tzReadScope(err))
+	wrapped := &secretResolutionError{Verb: "started", Source: resolutionSourceEnvSettings, Err: err}
+	assert.Equal(t, store.ScopeProject, tzReadScope(wrapped))
+	assert.NotContains(t, wrapped.Error(), tzReadBackendError)
+	assert.Equal(t, "unknown", tzReadScope(backend))
+
+	// The resolver returns it for a failed scope read.
+	f, _ := newTZStoreErrFixture(t, true)
+	_, rerr := f.d.resolveAgentTZ(context.Background(), f.agent, false)
+	require.Error(t, rerr)
+	assert.Equal(t, store.ScopeUser, tzReadScope(rerr))
+	assert.NotContains(t, rerr.Error(), tzReadBackendError)
 }

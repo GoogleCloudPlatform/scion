@@ -380,6 +380,9 @@ func TestResolveAgentTZ_StoreErrorsAreReturned(t *testing.T) {
 			if got != (agentTZ{}) {
 				t.Fatalf("resolveAgentTZ() = %+v with error; want the zero agentTZ", got)
 			}
+			if strings.Contains(err.Error(), "simulated") {
+				t.Fatalf("error text %q carries the backend error", err.Error())
+			}
 			if gather, err := d.resolveAgentTZ(context.Background(), newAgent(), true); err == nil || gather != (agentTZ{}) {
 				t.Fatalf("gather answer: resolveAgentTZ() = %+v, %v; want the zero agentTZ and an error", gather, err)
 			}

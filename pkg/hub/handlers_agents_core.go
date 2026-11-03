@@ -3349,7 +3349,7 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 			tz, err := s.agentTZ(ctx, agent)
 			if err != nil {
 				slog.WarnContext(ctx, "env-gather provenance: reading stored TZ settings failed; omitting the TZ label",
-					"agent_id", agent.ID, "error", err)
+					"agent_id", agent.ID, "scope", tzReadScope(err))
 				continue
 			}
 			resp.HubHas = append(resp.HubHas, EnvSource{Key: key, Scope: tz.Source})
@@ -4214,7 +4214,7 @@ func (s *Server) writeAgentGetResponse(w http.ResponseWriter, r *http.Request, a
 	if s.envViewAllowed(ctx, GetIdentityFromContext(ctx), agent, resp.Cap) {
 		tz, err := s.agentTZ(ctx, agent)
 		if err != nil {
-			slog.WarnContext(ctx, "agent detail: reading stored TZ settings failed", "agent_id", agent.ID, "error", err)
+			slog.WarnContext(ctx, "agent detail: reading stored TZ settings failed", "agent_id", agent.ID, "scope", tzReadScope(err))
 			writeEnvSettingsUnavailable(w)
 			return
 		}
@@ -4687,7 +4687,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		if live {
 			tzBefore, err := s.agentTZ(ctx, agent)
 			if err != nil {
-				slog.WarnContext(ctx, "agent update: reading stored TZ settings failed; nothing written", "agent_id", agent.ID, "error", err)
+				slog.WarnContext(ctx, "agent update: reading stored TZ settings failed; nothing written", "agent_id", agent.ID, "scope", tzReadScope(err))
 				writeEnvSettingsUnavailable(w)
 				return
 			}
@@ -4702,7 +4702,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		if live && changed {
 			tzAfter, err := s.agentTZ(ctx, agent)
 			if err != nil {
-				slog.WarnContext(ctx, "agent update: reading stored TZ settings failed; nothing written", "agent_id", agent.ID, "error", err)
+				slog.WarnContext(ctx, "agent update: reading stored TZ settings failed; nothing written", "agent_id", agent.ID, "scope", tzReadScope(err))
 				writeEnvSettingsUnavailable(w)
 				return
 			}
@@ -4718,7 +4718,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 	// input of the TZ chain beyond the in-memory agent already updated.
 	tz, tzErr := s.agentTZ(ctx, agent)
 	if tzErr != nil {
-		slog.WarnContext(ctx, "agent update: reading stored TZ settings failed; nothing written", "agent_id", agent.ID, "error", tzErr)
+		slog.WarnContext(ctx, "agent update: reading stored TZ settings failed; nothing written", "agent_id", agent.ID, "scope", tzReadScope(tzErr))
 		writeEnvSettingsUnavailable(w)
 		return
 	}
