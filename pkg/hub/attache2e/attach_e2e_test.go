@@ -459,8 +459,9 @@ func (f *fixture) dialOK(t *testing.T, cols, rows int) *websocket.Conn {
 // The broker sends it when the attach exec never started even though the
 // container is running, which includes a transient failure to start the
 // local PTY exec (ptone/scion#7227: "fork/exec ...: operation not
-// permitted"). The broker has ended that stream before it sends the close,
-// so the next dial starts from the same state. Any other close fails.
+// permitted"). The cause of that failure is tracked in ptone/scion#7232.
+// The broker has ended that stream before it sends the close, so the next
+// dial starts from the same state. Any other close fails.
 func (f *fixture) attach(t *testing.T, cols, rows int) *websocket.Conn {
 	t.Helper()
 	for attempt := 1; ; attempt++ {
