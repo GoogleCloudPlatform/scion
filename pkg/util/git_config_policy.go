@@ -990,7 +990,7 @@ func seedNeverCarry(v gitConfigVar) bool {
 		switch v.Name {
 		case "clean", "smudge", "process":
 			want, std := standardLFSFilter[v.Name]
-			return !(v.Subsection == "lfs" && std && v.Value == want)
+			return v.Subsection != "lfs" || !std || v.Value != want
 		}
 	case "remote":
 		return sub && (v.Name == "uploadpack" || v.Name == "receivepack" || v.Name == "vcs")
