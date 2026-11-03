@@ -17,10 +17,12 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -32,9 +34,10 @@ import (
 // AgentTxHook each, so the revocation commits or rolls back with the
 // lifecycle change (§16.1). Agent suspend, issuer suspend and issuer delete
 // revoke best effort after their own change has committed, because the
-// use-time and exchange checks already deny in those states (§16.3). The
-// project delete revokes the grants of the project's agents inside its
-// cascade transaction.
+// use-time and exchange checks already deny in those states (§16.3). An
+// agent suspend keeps the grants of a newer run that started before its
+// revocation ran (ptone/scion#6403). The project delete revokes the grants
+// of the project's agents inside its cascade transaction.
 
 // Revoke reasons of the lifecycle revocations.
 const (
@@ -189,16 +192,96 @@ func agentDelegationCascadeRevokedBy(actor AuditActor) string {
 // exchange and use deny in the states these paths create. The conduit
 // streams of every agent whose grant was revoked are re-checked.
 func (s *Server) revokeAgentDelegationGrantsBestEffort(ctx context.Context, filter store.AgentDelegationGrantFilter, reason string) {
+	s.revokeAgentDelegationGrantsBestEffortWith(ctx, filter, reason, nil)
+}
+
+// revokeSuspendedRunDelegationGrantsBestEffort is the best-effort grant
+// revocation of an agent suspend whose stop was dispatched for the run
+// stopRunID (§16.3). It revokes every grant of the agent, as
+// revokeAgentDelegationGrantsBestEffort does, except when the agent row,
+// locked and re-read in the revocation's transaction, shows that a newer
+// run has started since the suspension was recorded: then the grants keyed
+// to that run are kept (ptone/scion#6403). Issuance keys a grant to the
+// run under the same row lock, so a grant is either written before the
+// re-read, keyed to the run it shows, or after the revocation commits.
+// When the row cannot be locked or read, the revocation fails closed: it
+// revokes every grant of the agent in a transaction of its own, since a
+// failed statement may leave the first transaction unusable.
+func (s *Server) revokeSuspendedRunDelegationGrantsBestEffort(ctx context.Context, agentID, stopRunID string) {
+	filter := store.AgentDelegationGrantFilter{AgentID: agentID}
+	s.revokeAgentDelegationGrantsBestEffortWith(ctx, filter, revokeReasonAgentSuspended,
+		func(ctx context.Context, tx store.Store) (store.AgentDelegationGrantFilter, error) {
+			if err := tx.LockAgentRows(ctx, []string{agentID}); err != nil {
+				return filter, fmt.Errorf("lock agent: %w", err)
+			}
+			current, err := tx.GetAgent(ctx, agentID)
+			if errors.Is(err, store.ErrNotFound) {
+				// No row to tell a newer run from: revoke them all.
+				return filter, nil
+			}
+			if err != nil {
+				return filter, fmt.Errorf("re-read agent: %w", err)
+			}
+			if newerRunStarted(current, stopRunID) {
+				filter.ExceptIssuedRunID = current.RunID
+			}
+			return filter, nil
+		})
+}
+
+// newerRunStarted reports whether agent, re-read after a suspend recorded
+// for the run stopRunID, holds a different, non-empty run that is not
+// itself at rest: the row is not deleted and its phase is neither
+// suspended nor stopped. A run ID minted for a resume that has not moved
+// the phase yet does not count; no grant can have been issued to it, since
+// issuance refuses a suspended agent.
+func newerRunStarted(agent *store.Agent, stopRunID string) bool {
+	if agent == nil || agent.RunID == "" || agent.RunID == stopRunID || !agent.DeletedAt.IsZero() {
+		return false
+	}
+	switch state.Phase(agent.Phase) {
+	case state.PhaseSuspended, state.PhaseStopped:
+		return false
+	}
+	return true
+}
+
+// errNarrowRevocation wraps an error from the narrow step of
+// revokeAgentDelegationGrantsBestEffortWith.
+var errNarrowRevocation = errors.New("narrow agent delegation revocation")
+
+// revokeAgentDelegationGrantsBestEffortWith is the body of the best-effort
+// revocations. When narrow is non-nil it runs first in the revocation's
+// transaction and returns the filter to revoke with in place of filter. If
+// narrow fails, that transaction rolls back and filter is revoked in a new
+// one, so a failure to narrow never revokes less than filter.
+func (s *Server) revokeAgentDelegationGrantsBestEffortWith(ctx context.Context, filter store.AgentDelegationGrantFilter, reason string,
+	narrow func(ctx context.Context, tx store.Store) (store.AgentDelegationGrantFilter, error)) {
 	if s.store == nil {
 		return
 	}
 	actor := auditActorFromContext(ctx)
 	var revoked []*store.AgentDelegationGrant
-	err := s.store.WithTx(ctx, func(tx store.Store) error {
-		var err error
-		revoked, err = revokeAgentDelegationGrantsTx(ctx, tx, filter, reason, actor, time.Now().UTC())
-		return err
-	})
+	attempt := func(narrowed bool) error {
+		return s.store.WithTx(ctx, func(tx store.Store) error {
+			f := filter
+			if narrowed && narrow != nil {
+				var err error
+				if f, err = narrow(ctx, tx); err != nil {
+					return fmt.Errorf("%w: %w", errNarrowRevocation, err)
+				}
+			}
+			var err error
+			revoked, err = revokeAgentDelegationGrantsTx(ctx, tx, f, reason, actor, time.Now().UTC())
+			return err
+		})
+	}
+	err := attempt(true)
+	if errors.Is(err, errNarrowRevocation) {
+		slog.Warn("agent delegation revocation not narrowed; revoking every matching grant", "agent_id", filter.AgentID,
+			"issuer_user_id", filter.IssuerUserID, "reason", reason, "error", err)
+		err = attempt(false)
+	}
 	if err != nil {
 		slog.Warn("agent delegation grants not revoked", "agent_id", filter.AgentID,
 			"issuer_user_id", filter.IssuerUserID, "reason", reason, "error", err)

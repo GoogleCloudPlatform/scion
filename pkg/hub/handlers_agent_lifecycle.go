@@ -589,8 +589,9 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	s.revokeSuspendedCredentials(ctx, agent.ID)
 	// The agent's delegation grants end with the suspension, best effort:
 	// exchange and use already deny a suspended agent
-	// (.design/agent-delegation.md §16.3).
-	s.revokeAgentDelegationGrantsBestEffort(ctx, store.AgentDelegationGrantFilter{AgentID: agent.ID}, revokeReasonAgentSuspended)
+	// (.design/agent-delegation.md §16.3). A newer run started since the
+	// status write keeps its own grants (ptone/scion#6403).
+	s.revokeSuspendedRunDelegationGrantsBestEffort(ctx, agent.ID, stopRunID)
 
 	agent.Phase = newPhase
 	agent.ContainerStatus = "stopped"

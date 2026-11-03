@@ -14020,6 +14020,7 @@ type AgentDelegationGrantMutation struct {
 	addagent_generation           *int
 	agent_state_version           *int64
 	addagent_state_version        *int64
+	issued_run_id                 *string
 	issuer_user_id                *string
 	boundary_kind                 *string
 	boundary_project_id           *string
@@ -14335,6 +14336,42 @@ func (m *AgentDelegationGrantMutation) AddedAgentStateVersion() (r int64, exists
 func (m *AgentDelegationGrantMutation) ResetAgentStateVersion() {
 	m.agent_state_version = nil
 	m.addagent_state_version = nil
+}
+
+// SetIssuedRunID sets the "issued_run_id" field.
+func (m *AgentDelegationGrantMutation) SetIssuedRunID(s string) {
+	m.issued_run_id = &s
+}
+
+// IssuedRunID returns the value of the "issued_run_id" field in the mutation.
+func (m *AgentDelegationGrantMutation) IssuedRunID() (r string, exists bool) {
+	v := m.issued_run_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldIssuedRunID returns the old "issued_run_id" field's value of the AgentDelegationGrant entity.
+// If the AgentDelegationGrant object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentDelegationGrantMutation) OldIssuedRunID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldIssuedRunID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldIssuedRunID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldIssuedRunID: %w", err)
+	}
+	return oldValue.IssuedRunID, nil
+}
+
+// ResetIssuedRunID resets all changes to the "issued_run_id" field.
+func (m *AgentDelegationGrantMutation) ResetIssuedRunID() {
+	m.issued_run_id = nil
 }
 
 // SetIssuerUserID sets the "issuer_user_id" field.
@@ -15268,7 +15305,7 @@ func (m *AgentDelegationGrantMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentDelegationGrantMutation) Fields() []string {
-	fields := make([]string, 0, 24)
+	fields := make([]string, 0, 25)
 	if m.agent_id != nil {
 		fields = append(fields, agentdelegationgrant.FieldAgentID)
 	}
@@ -15280,6 +15317,9 @@ func (m *AgentDelegationGrantMutation) Fields() []string {
 	}
 	if m.agent_state_version != nil {
 		fields = append(fields, agentdelegationgrant.FieldAgentStateVersion)
+	}
+	if m.issued_run_id != nil {
+		fields = append(fields, agentdelegationgrant.FieldIssuedRunID)
 	}
 	if m.issuer_user_id != nil {
 		fields = append(fields, agentdelegationgrant.FieldIssuerUserID)
@@ -15357,6 +15397,8 @@ func (m *AgentDelegationGrantMutation) Field(name string) (ent.Value, bool) {
 		return m.AgentGeneration()
 	case agentdelegationgrant.FieldAgentStateVersion:
 		return m.AgentStateVersion()
+	case agentdelegationgrant.FieldIssuedRunID:
+		return m.IssuedRunID()
 	case agentdelegationgrant.FieldIssuerUserID:
 		return m.IssuerUserID()
 	case agentdelegationgrant.FieldBoundaryKind:
@@ -15414,6 +15456,8 @@ func (m *AgentDelegationGrantMutation) OldField(ctx context.Context, name string
 		return m.OldAgentGeneration(ctx)
 	case agentdelegationgrant.FieldAgentStateVersion:
 		return m.OldAgentStateVersion(ctx)
+	case agentdelegationgrant.FieldIssuedRunID:
+		return m.OldIssuedRunID(ctx)
 	case agentdelegationgrant.FieldIssuerUserID:
 		return m.OldIssuerUserID(ctx)
 	case agentdelegationgrant.FieldBoundaryKind:
@@ -15490,6 +15534,13 @@ func (m *AgentDelegationGrantMutation) SetField(name string, value ent.Value) er
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetAgentStateVersion(v)
+		return nil
+	case agentdelegationgrant.FieldIssuedRunID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetIssuedRunID(v)
 		return nil
 	case agentdelegationgrant.FieldIssuerUserID:
 		v, ok := value.(string)
@@ -15811,6 +15862,9 @@ func (m *AgentDelegationGrantMutation) ResetField(name string) error {
 		return nil
 	case agentdelegationgrant.FieldAgentStateVersion:
 		m.ResetAgentStateVersion()
+		return nil
+	case agentdelegationgrant.FieldIssuedRunID:
+		m.ResetIssuedRunID()
 		return nil
 	case agentdelegationgrant.FieldIssuerUserID:
 		m.ResetIssuerUserID()

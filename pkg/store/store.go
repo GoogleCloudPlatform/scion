@@ -4489,6 +4489,9 @@ type AgentDelegationStore interface {
 type AgentDelegationGrantFilter struct {
 	AgentID      string
 	IssuerUserID string
+	// ExceptIssuedRunID, when set, leaves out the grants whose IssuedRunID
+	// equals it. Grants with an empty IssuedRunID are never left out.
+	ExceptIssuedRunID string
 }
 
 // =============================================================================

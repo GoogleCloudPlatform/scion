@@ -5640,8 +5640,9 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 	// suspension, best effort (.design/agent-delegation.md §16.3). The
 	// revocation selects grants by agent, so it runs before the claim is
 	// released: released first, a new start could take the claim and then
-	// lose its own run's grants to it.
-	s.revokeAgentDelegationGrantsBestEffort(ctx, store.AgentDelegationGrantFilter{AgentID: agent.ID}, revokeReasonAgentSuspended)
+	// lose its own run's grants to it. A newer run already dispatched
+	// keeps the grants keyed to it (ptone/scion#6403).
+	s.revokeSuspendedRunDelegationGrantsBestEffort(ctx, agent.ID, stopRunID)
 
 	agent.Phase = string(state.PhaseSuspended)
 	agent.ContainerStatus = "stopped"
