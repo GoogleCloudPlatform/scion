@@ -39,6 +39,7 @@ const {
   lastPreviewSummary,
   backlogEstimate,
   needsPurgeConfirmation,
+  previewMatchesSaved,
 } = mod;
 type Panel = import('./admin-chat-retention.js').ScionAdminChatRetention;
 type Settings = import('./admin-chat-retention.js').ChatRetentionSettings;
@@ -253,6 +254,21 @@ describe('backlogEstimate', () => {
     expect(backlogEstimate(null, 0)).toBeNull();
     expect(backlogEstimate(run({ status: 'running' }), 0)).toBeNull();
     expect(backlogEstimate(run({ status: 'failed' }), 0)).toBeNull();
+  });
+});
+
+describe('previewMatchesSaved', () => {
+  it('matches the same window and grace, with no window as 0', () => {
+    const saved = { messages_retention_days: 365, deleted_conversation_grace_days: 30 };
+    expect(previewMatchesSaved(run(), saved)).toBe(true);
+    expect(previewMatchesSaved(run({ messages_retention_days: 30 }), saved)).toBe(false);
+    expect(previewMatchesSaved(run({ deleted_conversation_grace_days: 7 }), saved)).toBe(false);
+    expect(
+      previewMatchesSaved(run({ messages_retention_days: 0 }), {
+        messages_retention_days: null,
+        deleted_conversation_grace_days: 30,
+      })
+    ).toBe(true);
   });
 });
 
@@ -513,6 +529,20 @@ describe('scion-admin-chat-retention', () => {
         'would delete 1,200,000 messages'
       );
       expect(rows[2]?.textContent).toContain('In progress');
+    });
+
+    it('shows no backlog estimate for a preview of another window, and says why', async () => {
+      current = settings({
+        enabled: true,
+        messages_retention_days: 365,
+        last_preview: run({ messages: 1000, messages_retention_days: 30 }),
+        purged_since_preview: 250,
+      });
+      const el = await mount();
+      expect(q(el, '.backlog')).toBeNull();
+      expect(q(el, '.backlog-mismatch')?.textContent?.replace(/\s+/g, ' ')).toContain(
+        'The last preview was for a different window or grace than the saved settings'
+      );
     });
 
     it('shows no backlog while disabled, and says when nothing has run', async () => {

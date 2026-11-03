@@ -318,6 +318,21 @@ export function backlogEstimate(
 }
 
 /**
+ * Whether a preview was of the saved settings: the same window (none = 0)
+ * and the same deleted-conversation grace. Only such a preview can anchor
+ * the backlog estimate, which subtracts what the saved settings purged.
+ */
+export function previewMatchesSaved(
+  preview: Pick<ChatRetentionRun, 'messages_retention_days' | 'deleted_conversation_grace_days'>,
+  saved: Pick<ChatRetentionSettings, 'messages_retention_days' | 'deleted_conversation_grace_days'>
+): boolean {
+  return (
+    preview.messages_retention_days === (saved.messages_retention_days ?? 0) &&
+    preview.deleted_conversation_grace_days === saved.deleted_conversation_grace_days
+  );
+}
+
+/**
  * Whether saving body deletes more than the saved settings do: it enables
  * the sweep, or, while enabled, sets a window where none was or shortens
  * it. Such a save asks for confirmation first.
@@ -899,7 +914,10 @@ export class ScionAdminChatRetention extends LitElement {
     const s = this.settings;
     if (!s) return nothing;
     const runs = s.runs ?? [];
-    const backlog = s.enabled ? backlogEstimate(s.last_preview, s.purged_since_preview) : null;
+    const preview = s.last_preview;
+    const previewDone = s.enabled && preview?.status === 'ok';
+    const matches = previewDone && preview ? previewMatchesSaved(preview, s) : false;
+    const backlog = matches ? backlogEstimate(preview, s.purged_since_preview) : null;
     const busy = this.previewStarting || this.previewRunning;
     return html`
       <div class="history">
@@ -911,7 +929,12 @@ export class ScionAdminChatRetention extends LitElement {
               last preview minus ${plural(s.purged_since_preview ?? 0, 'message', 'messages')}
               deleted since).
             </p>`
-          : nothing}
+          : previewDone
+            ? html`<p class="hint backlog-mismatch">
+                The last preview was for a different window or grace than the saved settings; run a
+                preview of the saved settings to estimate the backlog.
+              </p>`
+            : nothing}
         <div class="actions">
           <sl-button
             class="run-preview"
