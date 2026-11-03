@@ -276,6 +276,63 @@ func TestSharerRegistry_OverCapFailsClosed(t *testing.T) {
 	assert.False(t, found)
 }
 
+// A registry of exactly sharerMarkersMax markers is read whole and is not
+// truncated; one marker more truncates the scan, which keeps
+// sharerMarkersMax names.
+func TestListSharerMarkers_ExactMarkerCap(t *testing.T) {
+	dir := fillSharerRegistry(t, t.TempDir(), sharerMarkersMax)
+	names, truncated, err := listSharerMarkers(dir)
+	require.NoError(t, err)
+	assert.False(t, truncated, "exactly the cap is not truncated")
+	assert.Len(t, names, sharerMarkersMax)
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "zz-one-more.json"), []byte("{}"), 0o644))
+	names, truncated, err = listSharerMarkers(dir)
+	require.NoError(t, err)
+	assert.True(t, truncated, "one marker beyond the cap truncates")
+	assert.Len(t, names, sharerMarkersMax)
+}
+
+// A registry of exactly sharerScanMaxEntries entries is read whole; one
+// entry more truncates the scan. The entry cap is lowered for the test.
+func TestListSharerMarkers_ExactEntryCap(t *testing.T) {
+	old := sharerScanMaxEntries
+	sharerScanMaxEntries = 8
+	t.Cleanup(func() { sharerScanMaxEntries = old })
+	dir := fillSharerRegistry(t, t.TempDir(), 2)
+	for i := 0; i < 6; i++ {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, fmt.Sprintf("note%d.txt", i)), nil, 0o644))
+	}
+	names, truncated, err := listSharerMarkers(dir)
+	require.NoError(t, err)
+	assert.False(t, truncated, "exactly the entry cap is not truncated")
+	assert.Len(t, names, 2)
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "note-one-more.txt"), nil, 0o644))
+	_, truncated, err = listSharerMarkers(dir)
+	require.NoError(t, err)
+	assert.True(t, truncated, "one entry beyond the cap truncates")
+}
+
+// At exactly the marker cap, "not registered" can still be stated: no
+// error. Above it the error names the registry directory, so an operator
+// knows where to remove stale markers.
+func TestSharerRegistry_ExactCapNotRefused(t *testing.T) {
+	base := t.TempDir()
+	dir := fillSharerRegistry(t, base, sharerMarkersMax)
+	_, _, found, err := FindBranchForAgent(base, "", "agent-1")
+	require.NoError(t, err)
+	assert.False(t, found)
+	_, err = UnregisterSharerElsewhere(base, "agent-1", "")
+	require.NoError(t, err)
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "zz-one-more.json"), []byte("{}"), 0o644))
+	_, _, _, err = FindBranchForAgent(base, "", "agent-1")
+	require.ErrorIs(t, err, errSharerRegistryTooLarge)
+	assert.Contains(t, err.Error(), dir)
+	assert.Contains(t, err.Error(), "remove stale marker files")
+}
+
 // A symlinked registry directory is not followed.
 func TestListSharerMarkers_SymlinkedDirRefused(t *testing.T) {
 	base := t.TempDir()

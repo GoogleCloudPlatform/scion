@@ -491,23 +491,29 @@ func UnregisterSharerElsewhere(base, agentID, keep string) (rewritten []string, 
 
 // sharerMarkersMax caps the marker names one registry scan keeps, and
 // sharerScanMaxEntries the directory entries it examines. A registry holds
-// about one marker per active sharer of the project, far below both.
-const (
+// about one marker per active sharer of the project, far below both. A
+// registry of exactly a cap is read whole; only a marker or an entry beyond
+// it truncates the scan. Variables so tests can lower them.
+var (
 	sharerMarkersMax     = 4096
 	sharerScanMaxEntries = 65536
 )
 
 // errSharerRegistryTooLarge marks a sharer registry directory above the scan
-// caps.
-var errSharerRegistryTooLarge = errors.New("the sharer registry holds more entries than a scan reads")
+// caps. Callers wrap it with the directory, so an operator knows where to
+// remove stale marker files.
+var errSharerRegistryTooLarge = errors.New("the sharer registry holds more entries than a scan reads (more than 4096 markers or 65536 entries); remove stale marker files from it")
 
 // listSharerMarkers returns the sorted names of the marker files (regular
 // entries named *.json) in the registry directory dir, which is in the
 // agent-writable shared .git: the directory is opened without following a
 // symlink (openDirNoFollow) and read in chunks, keeping only marker names,
 // at most sharerMarkersMax of them and examining at most
-// sharerScanMaxEntries entries. truncated reports that a cap was hit (a
-// warning is logged). A missing directory is an fs.ErrNotExist error.
+// sharerScanMaxEntries entries. truncated reports that the registry holds
+// more than a cap allows: a marker after sharerMarkersMax of them, or an
+// entry after sharerScanMaxEntries, was seen (a warning is logged). A
+// registry of exactly a cap is not truncated. A missing directory is an
+// fs.ErrNotExist error.
 func listSharerMarkers(dir string) (names []string, truncated bool, err error) {
 	f, err := openDirNoFollow(dir)
 	if err != nil {
@@ -518,14 +524,21 @@ func listSharerMarkers(dir string) (names []string, truncated bool, err error) {
 	for !truncated {
 		chunk, rerr := f.ReadDir(256)
 		for _, e := range chunk {
-			scanned++
-			if !e.IsDir() && filepath.Ext(e.Name()) == ".json" {
-				names = append(names, e.Name())
-			}
-			if len(names) >= sharerMarkersMax || scanned >= sharerScanMaxEntries {
+			if scanned == sharerScanMaxEntries {
+				// One more entry than the scan examines.
 				truncated = true
 				break
 			}
+			scanned++
+			if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
+				continue
+			}
+			if len(names) == sharerMarkersMax {
+				// One more marker than the scan keeps.
+				truncated = true
+				break
+			}
+			names = append(names, e.Name())
 		}
 		if errors.Is(rerr, io.EOF) {
 			break
