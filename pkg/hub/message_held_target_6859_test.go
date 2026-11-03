@@ -162,37 +162,51 @@ func TestHeldTargetSend_Agent(t *testing.T) {
 	}
 }
 
-// targetHoldFaultStore fails the hold lookup for one agent.
+// targetHoldFaultStore fails the hold lookup for one agent while its fault
+// switch is armed. It is installed once, before any setup, through
+// testServerWithStoreFault (store_fault_helpers_test.go), so the test arms
+// the switch instead of reassigning srv.store.
 type targetHoldFaultStore struct {
 	store.Store
+	fault   *storeFaultSwitch
 	agentID string
 }
 
 func (h *targetHoldFaultStore) HasActiveAgentHold(ctx context.Context, agentID string) (bool, error) {
-	if agentID == h.agentID {
+	if h.fault.Active() && agentID == h.agentID {
 		return false, errors.New("injected hold lookup fault")
 	}
 	return h.Store.HasActiveAgentHold(ctx, agentID)
 }
 
+// newTargetHoldFaultStore is the wrap function for testServerWithStoreFault.
+func newTargetHoldFaultStore(inner store.Store, fault *storeFaultSwitch) *targetHoldFaultStore {
+	return &targetHoldFaultStore{Store: inner, fault: fault}
+}
+
 // A user send whose target's hold cannot be read is refused with the
 // lookup-fault refusal (500), and nothing is resumed, dispatched or stored.
 func TestHeldTargetSend_UserLookupFault(t *testing.T) {
-	srv, s, _, target, disp := heldSendFixture(t, string(state.PhaseRunning), false)
-	u := wakeLifecycleUser(t, s, "held-user-fault", target.ProjectID, "agent.message", "agent.read", "agent.lifecycle")
-	orig := srv.store
-	srv.store = &targetHoldFaultStore{Store: orig, agentID: target.ID}
-	t.Cleanup(func() { srv.store = orig })
+	srv, s, _, a, dispatcher, faulty, sw := fanoutHoldFaultFixture(t, "user-fault", "user-fault-target")
+	target := a["user-fault-target"]
+	faulty.agentID = target.ID
+	sw.Arm()
 
 	for _, wake := range []bool{false, true} {
-		rec := requestAsIdentity(t, srv, authUser(u), http.MethodPost, "/api/v1/agents/"+target.ID+"/message",
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+target.ID+"/message",
 			map[string]interface{}{"message": "fault", "wake": wake})
 		require.Equal(t, http.StatusInternalServerError, rec.Code, "wake=%v: %s", wake, rec.Body.String())
 		apiErr := decodeTargetAPIError(t, rec)
 		assert.Equal(t, heldLookupFaultDMError().Code, apiErr.Code, "wake=%v", wake)
 		assert.Equal(t, heldLookupFaultDMError().Message, apiErr.Message, "wake=%v", wake)
 	}
-	assertNothingHappened(t, s, target, disp)
+	assert.False(t, dispatchedTo(dispatcher, target.Slug), "no dispatch")
+	assert.Zero(t, len(storedRowsFor(t, s, target.ID)), "nothing stored")
+	// No resume: the target's phase is unchanged (brokerMockDispatcher does
+	// not record start dispatches, so the stored phase is the check).
+	got, err := s.GetAgent(context.Background(), target.ID)
+	require.NoError(t, err)
+	assert.Equal(t, target.Phase, got.Phase, "a lookup fault resumes nothing")
 }
 
 // routedHeldRequest is a chat-integration message from env's user to alpha,
@@ -344,10 +358,10 @@ func TestHeldTargetSend_BrokerProjectBroadcast(t *testing.T) {
 // with the lookup-fault refusal (500), not a dispatch failure; nothing is
 // dispatched or stored.
 func TestHeldTargetSend_RoutedLookupFault(t *testing.T) {
-	env := setupRoutedTestEnv(t)
-	orig := env.srv.store
-	env.srv.store = &targetHoldFaultStore{Store: orig, agentID: env.agent1.ID}
-	t.Cleanup(func() { env.srv.store = orig })
+	srv, s, faulty, sw := testServerWithStoreFault(t, newTargetHoldFaultStore)
+	env := setupRoutedTestEnvOn(t, srv, s)
+	faulty.agentID = env.agent1.ID
+	sw.Arm()
 
 	rec := env.doRoutedRequest(t, routedHeldRequest(env, "hello @beta"))
 
@@ -375,6 +389,22 @@ func fanoutHoldFixture(t *testing.T, name string, slugs ...string) (*Server, sto
 	dispatcher := &brokerMockDispatcher{}
 	srv.SetDispatcher(dispatcher)
 	return srv, s, projectID, agents, dispatcher
+}
+
+// fanoutHoldFaultFixture is fanoutHoldFixture on a server whose store is
+// wrapped by a targetHoldFaultStore (disarmed) before any setup; the setup
+// writes through the raw store.
+func fanoutHoldFaultFixture(t *testing.T, name string, slugs ...string) (*Server, store.Store, string, map[string]*store.Agent, *brokerMockDispatcher, *targetHoldFaultStore, *storeFaultSwitch) {
+	t.Helper()
+	srv, s, faulty, sw := testServerWithStoreFault(t, newTargetHoldFaultStore)
+	phases := map[string]string{}
+	for _, slug := range slugs {
+		phases[slug] = string(state.PhaseRunning)
+	}
+	projectID, agents := setupGroupTest(t, s, name, phases)
+	dispatcher := &brokerMockDispatcher{}
+	srv.SetDispatcher(dispatcher)
+	return srv, s, projectID, agents, dispatcher, faulty, sw
 }
 
 // groupResults sends a group[] message through anchor to the named agents
@@ -429,11 +459,10 @@ func TestHeldTargetSend_GroupMembers(t *testing.T) {
 // A group[] member whose hold cannot be read is refused; the other member
 // still gets the message.
 func TestHeldTargetSend_GroupMemberLookupFault(t *testing.T) {
-	srv, s, _, a, dispatcher := fanoutHoldFixture(t, "group-fault", "group-fault-anchor", "group-fault-target", "group-fault-peer")
+	srv, s, _, a, dispatcher, faulty, sw := fanoutHoldFaultFixture(t, "group-fault", "group-fault-anchor", "group-fault-target", "group-fault-peer")
 	target, peer := a["group-fault-target"], a["group-fault-peer"]
-	orig := srv.store
-	srv.store = &targetHoldFaultStore{Store: orig, agentID: target.ID}
-	t.Cleanup(func() { srv.store = orig })
+	faulty.agentID = target.ID
+	sw.Arm()
 
 	res := groupResults(t, srv, a["group-fault-anchor"], target.Slug, peer.Slug)
 
@@ -450,13 +479,12 @@ func TestHeldTargetSend_GroupMemberLookupFault(t *testing.T) {
 // told, and the unheld sibling still gets the broadcast. A hold lookup
 // fault is refused the same way.
 func TestHeldTargetSend_BroadcastFallback(t *testing.T) {
-	srv, s, projectID, a, dispatcher := fanoutHoldFixture(t, "bcast-hold",
+	srv, s, projectID, a, dispatcher, faulty, sw := fanoutHoldFaultFixture(t, "bcast-hold",
 		"bcast-hold-sender", "bcast-hold-held", "bcast-hold-fault", "bcast-hold-sibling")
 	sender, held, fault, sibling := a["bcast-hold-sender"], a["bcast-hold-held"], a["bcast-hold-fault"], a["bcast-hold-sibling"]
 	holdAgentFor(t, s, held.ID, projectID, tid("bcast-hold-root"))
-	orig := srv.store
-	srv.store = &targetHoldFaultStore{Store: orig, agentID: fault.ID}
-	t.Cleanup(func() { srv.store = orig })
+	faulty.agentID = fault.ID
+	sw.Arm()
 
 	msg := messages.NewInstruction("agent:"+sender.Slug, "project:all", "broadcast hello")
 	msg.SenderID = sender.ID
@@ -519,12 +547,11 @@ func TestHeldTargetSend_UserMentions(t *testing.T) {
 // A mentioned agent whose hold cannot be read is refused; the other mention
 // is delivered.
 func TestHeldTargetSend_MentionLookupFault(t *testing.T) {
-	srv, s, _, a, dispatcher := fanoutHoldFixture(t, "mention-fault",
+	srv, s, _, a, dispatcher, faulty, sw := fanoutHoldFaultFixture(t, "mention-fault",
 		"mention-fault-primary", "mention-fault-target", "mention-fault-peer")
 	primary, target, peer := a["mention-fault-primary"], a["mention-fault-target"], a["mention-fault-peer"]
-	orig := srv.store
-	srv.store = &targetHoldFaultStore{Store: orig, agentID: target.ID}
-	t.Cleanup(func() { srv.store = orig })
+	faulty.agentID = target.ID
+	sw.Arm()
 
 	admin := NewAuthenticatedUser(tid("mention-fault-admin"), "mention-fault-admin@test.com", "Admin", "admin", "cli")
 	original := messages.NewInstruction("user:tester", "agent:"+primary.Slug, "hey @mention-fault-target @mention-fault-peer")
