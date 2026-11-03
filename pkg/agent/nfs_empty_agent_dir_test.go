@@ -56,7 +56,7 @@ func TestNFSEmptyAgentDirSelection(t *testing.T) {
 		{name: "nfs with a non-slug name", runtime: "kubernetes", cfg: nfs, agent: "My_Agent"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := nfsEmptyAgentDirSelection(tc.runtime, tc.cfg, tc.agent)
+			got, err := nfsEmptyAgentDirSelection(tc.runtime, "", tc.cfg, tc.agent)
 			switch {
 			case tc.wantErr != nil:
 				require.ErrorIs(t, err, tc.wantErr)

@@ -263,10 +263,25 @@ func (m *AgentManager) nfsExportWorkspace(projectPath, projectID, agentName stri
 // directory on the export (removeNFSAgentWorkspace): it also applies on the
 // Cloud Run runtime, whose clone-per-agent agents mount their own
 // <subpath_root>/<projectID>/agents/<agent>/workspace (cloudrun_runtime.go
-// cloudRunAgentWorkspaceRel). Worktrees stay Kubernetes-only
-// (RemoveNFSWorktree keeps nfsExportWorkspace).
+// cloudRunAgentWorkspaceRel), and on a local container runtime for a
+// project on a shared Layout, whose agent-scoped workspaces are in the
+// agent's directory on the share too (localRuntimeAgentDirOnShare).
+// Worktrees stay Kubernetes-only (RemoveNFSWorktree keeps
+// nfsExportWorkspace).
 func (m *AgentManager) nfsAgentDirExportWorkspace(projectPath, projectID, agentName string) (resolvedHostBase, rel string, err error) {
-	if m.Runtime == nil || (!isKubernetesRuntime(m.Runtime.Name()) && !isCloudRunRuntime(m.Runtime.Name())) {
+	if m.Runtime == nil {
+		return "", "", nil
+	}
+	rt := m.Runtime.Name()
+	if isLocalContainerRuntime(rt) {
+		projectDir, err := config.GetResolvedProjectDir(projectPath)
+		if err != nil {
+			return "", "", fmt.Errorf("workspace_storage nfs: resolve project directory: %w", err)
+		}
+		if !localRuntimeAgentDirOnShare(rt, projectDir) {
+			return "", "", nil
+		}
+	} else if !isKubernetesRuntime(rt) && !isCloudRunRuntime(rt) {
 		return "", "", nil
 	}
 	return nfsExportWorkspaceOnAnyRuntime(projectPath, projectID, agentName)

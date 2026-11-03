@@ -257,6 +257,22 @@ func TestBuildCommonRunArgs_NFSMountScope(t *testing.T) {
 		// setup returns the run config of the mode on f and the allowed
 		// share mounts besides the shared dirs.
 		setup func(t *testing.T, f *dockerScopeFixture, cfg RunConfig) (RunConfig, []shareMount)
+		// agentDir marks a mode whose workspace is the agent's own
+		// directory on the share; it also runs on Apple's container
+		// runtime, which refuses git-backed shared checkouts.
+		agentDir bool
+	}
+	// agentDirMode is clone-per-agent or empty-per-agent on a shared
+	// layout (ptone/scion#7224): pkg/agent places the workspace in the
+	// agent's own directory on the share, creates it, and names the agent
+	// in NFSAgentDirName.
+	agentDirMode := func(name string) modeCase {
+		return modeCase{name: name, agentDir: true, setup: func(t *testing.T, f *dockerScopeFixture, cfg RunConfig) (RunConfig, []shareMount) {
+			ws := filepath.Join(f.layout.HostBase, filepath.FromSlash(scopeRel("agents", scopeAgent, "workspace")))
+			mkdirs(t, ws)
+			cfg.Workspace, cfg.NFSAgentDirName = ws, scopeAgent
+			return cfg, []shareMount{{rel: scopeRel("agents", scopeAgent, "workspace"), target: "/workspace"}}
+		}}
 	}
 	modes := []modeCase{
 		{name: "shared-plain", setup: func(t *testing.T, f *dockerScopeFixture, cfg RunConfig) (RunConfig, []shareMount) {
@@ -296,13 +312,20 @@ func TestBuildCommonRunArgs_NFSMountScope(t *testing.T) {
 				{rel: git("scion-sharers"), target: "/workspace/.git/scion-sharers", readOnly: true},
 			}
 		}},
-		// Clone-per-agent is not on the share for these runtimes
-		// (TestSelectWorkspaceBackend_NFSClonePerAgentIsLocal), and
-		// empty-per-agent on NFS is refused for them in pkg/agent
+		// Clone-per-agent and empty-per-agent of a project on a shared
+		// layout: the agent's own directory on the share. For any other
+		// project, clone-per-agent stays on the node
+		// (TestSelectWorkspaceBackend_NFSClonePerAgentIsLocal) and
+		// empty-per-agent on NFS is refused in pkg/agent
 		// (errEmptyPerAgentNFSRuntime).
+		agentDirMode("clone-per-agent"),
+		agentDirMode("empty-per-agent"),
 	}
-	for _, rt := range []string{"docker", "podman"} {
+	for _, rt := range []string{"docker", "podman", "container"} {
 		for _, mc := range modes {
+			if rt == "container" && !mc.agentDir {
+				continue
+			}
 			t.Run(rt+"/"+mc.name, func(t *testing.T) {
 				f := newDockerScopeFixture(t)
 				cfg, want := mc.setup(t, f, RunConfig{
