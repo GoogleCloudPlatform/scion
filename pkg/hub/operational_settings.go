@@ -24,6 +24,7 @@ import (
 	"math/rand"
 	"reflect"
 	"slices"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -224,6 +225,13 @@ type Layer1Snapshot struct {
 
 	// HarnessConfigs — map of named harness configurations (DB > bootstrap fallback)
 	HarnessConfigs map[string]config.HarnessConfigEntry
+
+	// PlacementErrors and PlacementWarnings are the Kubernetes placement
+	// findings of Runtimes and Profiles (config.OverlaySections): paths
+	// whose placement is malformed or invalid, which make the co-located
+	// Runtime Broker refuse Kubernetes starts, and ignored unknown keys.
+	PlacementErrors   []string
+	PlacementWarnings []string
 
 	// EnvOverrides lists Layer-1 koanf keys that are overridden by env vars
 	// on this node — used for drift warnings.
@@ -786,6 +794,16 @@ func (o *OperationalSettings) populateMapSections(snap *Layer1Snapshot, dbSectio
 	}
 	if !failed["harness_configs"] {
 		snap.HarnessConfigs = sections.HarnessConfigs
+	}
+	snap.PlacementErrors, snap.PlacementWarnings = sections.PlacementErrors, sections.Warnings
+	if failed["runtimes"] || failed["profiles"] {
+		// A section that does not decode cannot be checked: fail closed.
+		for _, sec := range []string{"profiles", "runtimes"} {
+			if failed[sec] && !slices.Contains(snap.PlacementErrors, sec) {
+				snap.PlacementErrors = append(slices.Clone(snap.PlacementErrors), sec)
+			}
+		}
+		sort.Strings(snap.PlacementErrors)
 	}
 }
 
@@ -1613,6 +1631,25 @@ func (a *settingsApplyState) recordLocked(snap Layer1Snapshot) {
 	}
 }
 
+// UpdateSettingsOverlay applies snap's runtimes, profiles and harness
+// configs (nil: no change) and their Kubernetes placement findings to
+// overlay under one lock (config.SettingsOverlay.UpdateWithPlacementFindings),
+// and logs the findings when they change. ApplySnapshot and the co-located
+// Runtime Broker's overlay install both use it, so a snapshot's findings are
+// recorded the same way from the first dispatch on.
+func UpdateSettingsOverlay(overlay *config.SettingsOverlay, snap Layer1Snapshot) {
+	if !overlay.UpdateWithPlacementFindings(snap.Runtimes, snap.Profiles, snap.HarnessConfigs, snap.PlacementErrors, snap.PlacementWarnings) {
+		return
+	}
+	for _, w := range snap.PlacementWarnings {
+		slog.Warn("Stored runtimes and profiles: " + w)
+	}
+	if len(snap.PlacementErrors) > 0 {
+		slog.Error("Stored runtimes and profiles have invalid Kubernetes placement; the co-located Runtime Broker refuses Kubernetes starts until they are fixed",
+			"paths", snap.PlacementErrors)
+	}
+}
+
 // ApplySnapshot writes the Layer1Snapshot values into the Server's config
 // and MaintenanceState. This is the refactored body of the old reloadSettings()
 // logic — no consumer sites change; request-path code keeps reading s.config.*
@@ -1988,9 +2025,16 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	if snap.FromOperationalSettings {
 		feedImageRegistryOverlay(s.GetOperationalSettings())
 	}
-	if snap.Runtimes != nil || snap.Profiles != nil || snap.HarnessConfigs != nil {
+	// The placement findings are recorded with the maps under one lock,
+	// and for every DB-backed snapshot even when no map changed: a stored
+	// runtimes document that does not decode leaves the runtimes map nil
+	// but is still a finding.
+	mapsChanged := snap.Runtimes != nil || snap.Profiles != nil || snap.HarnessConfigs != nil
+	if overlay := config.GetGlobalSettingsOverlay(); overlay != nil && (mapsChanged || snap.FromOperationalSettings) {
+		UpdateSettingsOverlay(overlay, snap)
+	}
+	if mapsChanged {
 		if overlay := config.GetGlobalSettingsOverlay(); overlay != nil {
-			overlay.Update(snap.Runtimes, snap.Profiles, snap.HarnessConfigs)
 			// Recount the built-in profile references the overlay retains
 			// (ptone/scion#5113); never blocks.
 			s.triggerProfileReferences()

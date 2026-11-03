@@ -853,10 +853,10 @@ func TestRunConversationList_NameColumn(t *testing.T) {
 		names[fields[0]] = fields[3]
 	}
 	assert.Equal(t, map[string]string{
-		"conv-dm-agen": "DM:reviewer",
-		"conv-thread":  "design-chat",
-		"conv-named":   "release",
-		"conv-dm-unkn": "-",
+		"conv-dm-agent":   "DM:reviewer",
+		"conv-thread":     "design-chat",
+		"conv-named":      "release",
+		"conv-dm-unknown": "-",
 		// The display name takes precedence over the thread name.
 		"conv-both": "named-wins",
 		// dmPeer only labels direct conversations; a group falls through.
@@ -872,6 +872,82 @@ func TestRunConversationList_NameColumn(t *testing.T) {
 	assert.Equal(t, "reviewer", got.Conversations[0]["dmPeer"].(map[string]any)["name"])
 	assert.Equal(t, "design-chat", got.Conversations[1]["threadName"])
 	assert.NotContains(t, got.Conversations[2], "dmPeer")
+}
+
+// TestRunConversationList_FullIDsRoundTrip covers ptone/scion#7131: the
+// list table prints the full conversation and default-agent UUIDs, so a
+// listed ID resolves unchanged when passed back as conv:<id>.
+func TestRunConversationList_FullIDsRoundTrip(t *testing.T) {
+	orig := saveConversationListTestState()
+	defer orig.restore()
+
+	const convID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+	const agentID = "5f6e7d8c-9b0a-4f1e-8d2c-3b4a5f6e7d8c"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/conversations" || r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"conversations":[{"id":"` + convID + `","kind":"group","surface":"native",
+			"driftState":"active","threadName":"design-chat","defaultAgentId":"` + agentID + `"}]}`))
+	}))
+	defer server.Close()
+
+	isolateHubEnvForTest(t, server.URL, "")
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	projectPath = setupConversationCreateProject(t, tmpHome, server.URL, "")
+	convProject = ""
+	convJSON = false
+	outputFormat = ""
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	out := captureStdout(t, func() { require.NoError(t, runConversationList(cmd, nil)) })
+
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	require.Len(t, lines, 2, out)
+	fields := strings.Fields(lines[1])
+	require.Len(t, fields, 6, "row: %q", lines[1])
+	assert.Len(t, fields[0], 36)
+	assert.Equal(t, convID, fields[0])
+	assert.Equal(t, agentID, fields[4], "DEFAULT AGENT must not be truncated")
+
+	got, err := resolveConversationRef(context.Background(), nil, "conv:"+fields[0])
+	require.NoError(t, err)
+	assert.Equal(t, convID, got)
+
+	// JSON output carries the same full IDs.
+	convJSON = true
+	jsonOut := captureStdout(t, func() { require.NoError(t, runConversationList(cmd, nil)) })
+	var parsed struct {
+		Conversations []map[string]any `json:"conversations"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(jsonOut), &parsed))
+	require.Len(t, parsed.Conversations, 1)
+	assert.Equal(t, convID, parsed.Conversations[0]["id"])
+	assert.Equal(t, agentID, parsed.Conversations[0]["defaultAgentId"])
+}
+
+// TestConversationParticipantTables_FullIDs covers ptone/scion#7131 for
+// both participant tables: a UUID principal ID is printed in full.
+func TestConversationParticipantTables_FullIDs(t *testing.T) {
+	const id = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+	ps := []hubclient.ConversationParticipantDetail{{
+		ConversationParticipant: store.ConversationParticipant{
+			PrincipalKind: "agent", PrincipalID: id, Role: "member", JoinedAt: time.Now(),
+		},
+		MessageMode: "project",
+	}}
+
+	var get bytes.Buffer
+	writeConversationGetParticipants(&get, ps)
+	assert.Equal(t, map[string]string{id: "project"}, modeColumnByID(t, get.String(), 1))
+
+	var list bytes.Buffer
+	require.NoError(t, writeConversationParticipantsTable(&list, ps))
+	assert.Equal(t, map[string]string{id: "project"}, modeColumnByID(t, list.String(), 1))
 }
 
 // modeTestParticipants is a participant list with a restricted agent, an
@@ -916,10 +992,10 @@ func TestWriteConversationGetParticipants_MessageMode(t *testing.T) {
 	assert.Contains(t, out, "MSG MODE")
 	got := modeColumnByID(t, out, 1)
 	assert.Equal(t, map[string]string{
-		"agent-branch": "branch",
-		"agent-projec": "project", // IDs are truncated to 12 runes
-		"agent-foreig": "-",
-		"user-1":       "-",
+		"agent-branch":  "branch",
+		"agent-project": "project", // IDs are printed in full
+		"agent-foreign": "-",
+		"user-1":        "-",
 	}, got)
 	assert.Contains(t, out, conversationModeHint, "a branch agent should trigger the mode hint")
 }

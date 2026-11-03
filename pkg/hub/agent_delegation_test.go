@@ -421,6 +421,34 @@ func TestAgentDelegationIssuance_Refusals(t *testing.T) {
 	assert.Empty(t, adtAudits(t, f.store, mutationAgentDelegationGrantCreate), "no refused request wrote a grant")
 }
 
+// TestAgentDelegationIssuance_HubDenialNamesSelector pins the eligibility
+// refusal shapes of delegation issuance: a hub-boundary selector the issuer
+// holds through no role is refused with 403 scope_violation naming the
+// selector and authority_required, and a project-boundary request for a
+// project the issuer cannot reach gets the bare 403 with no details. No
+// grant is issued either way.
+func TestAgentDelegationIssuance_HubDenialNamesSelector(t *testing.T) {
+	f := newADTFixture(t, "adt-hubdeny")
+	alice := f.session(t, f.alice)
+
+	rec := f.issue(t, alice, f.agentA.ID, map[string]interface{}{
+		"boundary": map[string]string{"kind": "hub"}, "permissions": []string{"agent:read", "hub_config:read"}, "name": "n",
+	})
+	apiErr := adtAssertAPIError(t, rec, http.StatusForbidden, errCodeScopeViolation)
+	assert.Equal(t, "hub_config:read", apiErr.Details["selector"])
+	assert.Equal(t, string(MintDenialAuthorityRequired), apiErr.Details["reason"])
+
+	rec = f.issue(t, alice, f.agentA.ID, map[string]interface{}{
+		"boundary":    map[string]string{"kind": "project", "projectId": tid("adt-hubdeny-no-project")},
+		"permissions": []string{"agent:read"}, "name": "n",
+	})
+	apiErr = adtAssertAPIError(t, rec, http.StatusForbidden, ErrCodeForbidden)
+	assert.Empty(t, apiErr.Details)
+	assert.NotContains(t, rec.Body.String(), "selector")
+
+	assert.Empty(t, adtAudits(t, f.store, mutationAgentDelegationGrantCreate))
+}
+
 func TestAgentDelegationIssuance_AuditFailureRollsBack(t *testing.T) {
 	f := newADTFixture(t, "adt-issue-audit")
 	session := f.session(t, f.alice)

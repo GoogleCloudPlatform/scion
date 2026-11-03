@@ -50,7 +50,7 @@ const SCHEMA = {
 
 function createHandler(
   put: { status: number; body: unknown } | { raw: Response },
-  opts: { schemaStatus?: number } = {}
+  opts: { schemaStatus?: number; config?: Record<string, unknown> } = {}
 ): Handler {
   let gets = 0;
   let schemaGets = 0;
@@ -72,7 +72,7 @@ function createHandler(
           return Promise.resolve('raw' in put ? put.raw : json(put.body, put.status));
         }
         gets++;
-        return Promise.resolve(json(makeConfig()));
+        return Promise.resolve(json({ ...makeConfig(), ...(opts.config ?? {}) }));
       }
       return Promise.resolve(json({}));
     },
@@ -393,5 +393,75 @@ describe('scion-page-admin-federation — structured save errors (ptone/scion#39
 
     expect(handler.puts).toEqual([]);
     expect(text(query(element, '.status-message.success'))).toBe('No changes to save');
+  });
+});
+
+describe('scion-page-admin-federation — revision on save (ptone/scion#3922)', () => {
+  let element: HTMLElement | null = null;
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+  });
+
+  const ok = { status: 200, body: { reload: { applied: [] } } };
+
+  it('sends the federation revision from section_metadata on a DB-backed hub', async () => {
+    const handler = createHandler(ok, {
+      config: {
+        settings_tier: 'db',
+        section_metadata: { federation: { source: 'db', revision: 6 } },
+      },
+    });
+    element = await createComponent(handler);
+    await clickSave(element);
+    expect(handler.puts).toHaveLength(1);
+    expect(handler.puts[0]!.expected_revisions).toEqual({ federation: 6 });
+    expect(handler.puts[0]).toHaveProperty('federation');
+  });
+
+  it('sends revision 0 when no federation row is stored', async () => {
+    const handler = createHandler(ok, {
+      config: { settings_tier: 'db', section_metadata: { federation: { source: 'file' } } },
+    });
+    element = await createComponent(handler);
+    await clickSave(element);
+    expect(handler.puts[0]!.expected_revisions).toEqual({ federation: 0 });
+  });
+
+  it('sends no revision on a file-tier hub', async () => {
+    const handler = createHandler(ok, { config: { settings_tier: 'file' } });
+    element = await createComponent(handler);
+    await clickSave(element);
+    expect(handler.puts).toHaveLength(1);
+    expect(handler.puts[0]).not.toHaveProperty('expected_revisions');
+  });
+
+  it('a stale federation section shows the changed-since-loaded notice', async () => {
+    const handler = createHandler(
+      {
+        status: 409,
+        body: {
+          error: {
+            code: 'revision_conflict',
+            message: 'One or more sections have been modified since the expected revision.',
+            details: {
+              conflicted: [{ section: 'federation', expected_revision: 6, current_revision: 7 }],
+            },
+          },
+        },
+      },
+      {
+        config: {
+          settings_tier: 'db',
+          section_metadata: { federation: { source: 'db', revision: 6 } },
+        },
+      }
+    );
+    element = await createComponent(handler);
+    await clickSave(element);
+    expect(handler.puts[0]!.expected_revisions).toEqual({ federation: 6 });
+    expect(text(query(element, '[data-settings-conflict]'))).toContain('federation');
   });
 });

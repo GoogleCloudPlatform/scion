@@ -1768,7 +1768,7 @@ func validateServerPreflight(cfg *config.GlobalConfig) error {
 	if err := cfg.Relay.Validate(); err != nil {
 		return err
 	}
-	if err := validateConduitPeerSecret(cfg.Hub.Conduit, false, sessionSecretValue()); err != nil {
+	if err := validateConduitPeerSecret(cfg.Hub.Conduit, false, sessionSecretValue(), serverSigningRingFromFile()); err != nil {
 		return err
 	}
 	if _, err := hub.ParseAgentRunScope(cfg.Auth.AgentRunScope, cfg.Auth.AgentRunScopeLegacyUntil); err != nil {

@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=275   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 18 (workspaceStorage.nfs: thirteen refusals, two acceptances, three rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check) + 11 (conduit.internalTls: eight refusals, two acceptances, one rendered-shape check) + 3 (relay hop: cert-without-key refusals on non-loopback and loopback listeners, no relay-level trusted_proxies) + 3 (internal_listen loopback needs host:port and a valid 127.x: no-port IP, no-port localhost, out-of-range octet) + 5 (internal_listen: leading and trailing whitespace, port 65536, port 0, no port with TLS files) + 4 (TLS settings as written: server name with a slash, server name with trailing whitespace, blank cert path, padded key path) + 9 (minimum hub image for the relay wiring: older and minimum semver, newer semver, older and minimum nightly, no gate with the relay off, the unverified annotation, no annotation on a checked tag, the NOTES warning present and absent) + 8 (older tag with build metadata, minimum with build metadata, pre-release of the minimum, malformed version, config.extra listener on an older tag and on a digest, the digest annotation, padded CA path; the gate block now runs 16 rows) + 4 (overflowing version number, newer pre-release, newer tag with build metadata, config.extra loopback listener on an older tag; the gate block now runs 20 rows) + 1 (localhost:port without TLS is not loopback, as the hub reads it) + 1 (the default-tag refusal names image.tag and image.digest; the gate block now runs 21 rows) + 6 (the semver refusal names no placeholder floor, so the gate block now runs 22 rows; whitespace-only listen: spaces and tab, with TLS files and without; SCION_SERVER_HUB_CONDUIT_INTERNAL* refused in hub.extraEnv) + 2 (the malformed-version remedy by mode; the config.extra path names removing that listener; the gate block now runs 24 rows) + 1 (the NOTES warning on the config.extra path names removing that listener; the gate block now runs 25 rows) + 1 (the same NOTES check for an image.digest; the gate block now runs 26 rows) + 4 (conduit.internalTls auto: one refusal, three acceptances).
+EXPECTED_TOTAL=286   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 18 (workspaceStorage.nfs: thirteen refusals, two acceptances, three rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check) + 11 (conduit.internalTls: eight refusals, two acceptances, one rendered-shape check) + 3 (relay hop: cert-without-key refusals on non-loopback and loopback listeners, no relay-level trusted_proxies) + 3 (internal_listen loopback needs host:port and a valid 127.x: no-port IP, no-port localhost, out-of-range octet) + 5 (internal_listen: leading and trailing whitespace, port 65536, port 0, no port with TLS files) + 4 (TLS settings as written: server name with a slash, server name with trailing whitespace, blank cert path, padded key path) + 9 (minimum hub image for the relay wiring: older and minimum semver, newer semver, older and minimum nightly, no gate with the relay off, the unverified annotation, no annotation on a checked tag, the NOTES warning present and absent) + 8 (older tag with build metadata, minimum with build metadata, pre-release of the minimum, malformed version, config.extra listener on an older tag and on a digest, the digest annotation, padded CA path; the gate block now runs 16 rows) + 4 (overflowing version number, newer pre-release, newer tag with build metadata, config.extra loopback listener on an older tag; the gate block now runs 20 rows) + 1 (localhost:port without TLS is not loopback, as the hub reads it) + 1 (the default-tag refusal names image.tag and image.digest; the gate block now runs 21 rows) + 6 (the semver refusal names no placeholder floor, so the gate block now runs 22 rows; whitespace-only listen: spaces and tab, with TLS files and without; SCION_SERVER_HUB_CONDUIT_INTERNAL* refused in hub.extraEnv) + 2 (the malformed-version remedy by mode; the config.extra path names removing that listener; the gate block now runs 24 rows) + 1 (the NOTES warning on the config.extra path names removing that listener; the gate block now runs 25 rows) + 1 (the same NOTES check for an image.digest; the gate block now runs 26 rows) + 4 (conduit.internalTls auto: one refusal, three acceptances) + 8 (the relay version floor set to v0.3.0-preview.5: v0.3.0-preview.4, v0.2.99 and nightly-20261028 refused, v0.3.0-preview.5, v0.3.0, v0.3.1-preview.1 and nightly-20261029 accepted, the default-tag refusal offers the release floor; the empty-floor case moves to a chart copy; the pre-release-of-the-minimum row is dropped, the preview.4 row covering it; the gate block now runs 34 rows) + 3 (v0.3.0-preview.10 accepted, numeric pre-release precedence at the floor's core version; the empty-floor chart copy also refuses the default tag and a malformed version tag; the gate block now runs 37 rows).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -1112,51 +1112,94 @@ echo "== conduit.internalTls minimum hub image =="
 _rt_min="$(sed -n '/define "scion-hub.relayTlsMinHub"/,/end/p' "$CHART/templates/_helpers.tpl" | sed -n 's/^version: "\(.*\)"$/\1/p')"
 _rt_min_n="$(sed -n '/define "scion-hub.relayTlsMinHub"/,/end/p' "$CHART/templates/_helpers.tpl" | sed -n 's/^nightly: "\(.*\)"$/\1/p')"
 _rt_vlines="$(sed -n '/define "scion-hub.relayTlsMinHub"/,/end/p' "$CHART/templates/_helpers.tpl" | grep -c '^version: "')"
-_rt_major="${_rt_min%%.*}"
+# The major version, without a leading v (the floor is written v0.3.0-preview.5).
+_rt_mv="${_rt_min#v}"
+_rt_major="${_rt_mv%%.*}"
 RT_TAG=(--set conduit.internalTls.enabled=true --set conduit.internalTls.existingSecret=rg-relay-cert)
-# Two modes, the same row count in each. Version mode: the version floor is set,
-# and semver tags are compared with it. Placeholder mode: the version floor is
-# empty (no versioned release carries the change yet), every semver tag is
-# refused with a message that names the nightly, and no refusal may print a
-# version floor. A tag that passes the check: the version floor, else the
-# nightly floor.
-if [ -n "$_rt_min" ]; then _rt_ok_tag="$_rt_min"; _rt_semver_refusal="is older than ${_rt_min}"; else _rt_ok_tag="nightly-${_rt_min_n}"; _rt_semver_refusal="no versioned hub release serves the relay hop"; fi
-if [ "$_rt_vlines" -ne 1 ] || [ -z "$_rt_min_n" ] || { [ -n "$_rt_min" ] && ! [[ "$_rt_major" =~ ^[0-9]+$ ]]; }; then
-  executed=$((executed + 26)); failed=$((failed + 26))
-  echo "FAIL  relay image gate: could not read scion-hub.relayTlsMinHub (version lines $_rt_vlines, version '$_rt_min', nightly '$_rt_min_n'); none of its 26 rows ran"
+# The chart ships a version floor, and semver tags are compared with it. An
+# empty version floor (every semver tag refused, the message naming only the
+# nightly) is still handled by the template, and one row below covers it by
+# rendering a copy of the chart with the floor emptied; an empty floor in the
+# chart itself fails this block closed. A tag that passes the check: the
+# version floor.
+_rt_ok_tag="$_rt_min"; _rt_semver_refusal="is older than ${_rt_min}"
+if [ "$_rt_vlines" -ne 1 ] || [ -z "$_rt_min_n" ] || [ -z "$_rt_min" ] || ! [[ "$_rt_major" =~ ^[0-9]+$ ]]; then
+  executed=$((executed + 37)); failed=$((failed + 37))
+  echo "FAIL  relay image gate: could not read scion-hub.relayTlsMinHub (version lines $_rt_vlines, version '$_rt_min', nightly '$_rt_min_n'); none of its 37 rows ran"
 else
   reject "relay wiring with an older semver tag" "$_rt_semver_refusal" "${RT_TAG[@]}" --set-string image.tag=0.0.1
-  if [ -n "$_rt_min" ]; then
-    accept "relay wiring with the minimum semver tag" "${RT_TAG[@]}" --set-string "image.tag=${_rt_min}"
-    accept "relay wiring with a newer semver tag" "${RT_TAG[@]}" --set-string "image.tag=v$((_rt_major + 1)).0.0"
-  else
-    reject "placeholder: relay wiring with any semver tag (1.2.3)" "$_rt_semver_refusal" "${RT_TAG[@]}" --set-string image.tag=1.2.3
-    reject "placeholder: relay wiring with a high semver tag (v100.0.0)" "$_rt_semver_refusal" "${RT_TAG[@]}" --set-string image.tag=v100.0.0
+  accept "relay wiring with the minimum semver tag" "${RT_TAG[@]}" --set-string "image.tag=${_rt_min}"
+  accept "relay wiring with a newer semver tag" "${RT_TAG[@]}" --set-string "image.tag=v$((_rt_major + 1)).0.0"
+  # The shipped floor, v0.3.0-preview.5 and nightly-20261029, by literal tag:
+  # these rows change only when the floor does.
+  reject "floor: v0.3.0-preview.4 is refused, naming the nightly and the release floor" \
+    "Use nightly-20261029 or later or a release at or after v0.3.0-preview.5," "${RT_TAG[@]}" --set-string image.tag=v0.3.0-preview.4
+  accept "floor: v0.3.0-preview.5" "${RT_TAG[@]}" --set-string image.tag=v0.3.0-preview.5
+  # Numeric pre-release identifiers compare as numbers (10 > 5), not as text.
+  accept "floor: v0.3.0-preview.10" "${RT_TAG[@]}" --set-string image.tag=v0.3.0-preview.10
+  accept "floor: v0.3.0" "${RT_TAG[@]}" --set-string image.tag=v0.3.0
+  accept "floor: v0.3.1-preview.1" "${RT_TAG[@]}" --set-string image.tag=v0.3.1-preview.1
+  reject "floor: v0.2.99 is refused" "is older than v0.3.0-preview.5" "${RT_TAG[@]}" --set-string image.tag=v0.2.99
+  reject "floor: nightly-20261028 is refused" "is older than nightly-20261029" "${RT_TAG[@]}" --set-string image.tag=nightly-20261028
+  accept "floor: nightly-20261029" "${RT_TAG[@]}" --set-string image.tag=nightly-20261029
+  reject "floor: the default tag (appVersion) refusal offers a release at or after v0.3.0-preview.5" \
+    "set image.tag to nightly-20261029 or later or a release at or after v0.3.0-preview.5," "${RT_TAG[@]}"
+  # An empty version floor, in a copy of the chart. All three empty-floor
+  # branches of the template are covered: a version tag at any height, the
+  # default tag (appVersion) and a malformed version tag are each refused with a
+  # nightly-only message, and no refusal names a version floor.
+  _rt_ph="$(mktemp -d)"
+  _rt_ph_ok=0
+  # An empty _rt_ph (mktemp failed) must not copy to /c; the rows then FAIL.
+  if [ -n "$_rt_ph" ] && cp -r "$CHART" "$_rt_ph/c" \
+    && sed '/define "scion-hub.relayTlsMinHub"/,/end/s/^version: ".*"$/version: ""/' "$_rt_ph/c/templates/_helpers.tpl" > "$_rt_ph/c/templates/_helpers.tpl.new" \
+    && mv "$_rt_ph/c/templates/_helpers.tpl.new" "$_rt_ph/c/templates/_helpers.tpl"; then
+    _rt_ph_ok=1
   fi
-  # No refusal names a version floor while it is a placeholder; with the floor
-  # set, the refusal names it.
+  # rt_empty_floor NAME EXPECTED_SUBSTRING [helm args...]: one row. The render
+  # must fail with EXPECTED_SUBSTRING, name the nightly and name no version floor.
+  rt_empty_floor() {
+    local name="$1" want="$2" out=""; shift 2
+    executed=$((executed + 1))
+    if [ "$_rt_ph_ok" -ne 1 ]; then
+      echo "FAIL  relay image gate: ${name}: the chart copy with an empty floor could not be made"; failed=$((failed + 1))
+    elif out="$("$HELM" template t "$_rt_ph/c" "${BASE[@]}" "${RT_TAG[@]}" "$@" 2>&1)"; then
+      echo "FAIL  relay image gate: ${name}: the render was accepted"; failed=$((failed + 1))
+    elif printf '%s\n' "$out" | grep -qF "$want" && printf '%s\n' "$out" | grep -qF "nightly-${_rt_min_n} or later" \
+      && ! printf '%s\n' "$out" | grep -qE 'a release at or after|is older than|Use a valid version tag'; then
+      echo "ok    ${name}"
+    else
+      echo "FAIL  relay image gate: ${name}: wrong refusal: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"; failed=$((failed + 1))
+    fi
+  }
+  rt_empty_floor "an empty version floor refuses v100.0.0, naming the nightly and no version floor" \
+    "no versioned hub release serves the relay hop" --set-string image.tag=v100.0.0
+  rt_empty_floor "an empty version floor refuses the default tag (appVersion), naming the nightly and no version floor" \
+    "image.tag is not set, so the tag is the chart's appVersion"
+  rt_empty_floor "an empty version floor refuses a malformed version tag, naming the nightly and no version floor" \
+    "is not a valid semantic version, and no versioned hub release serves the relay hop" --set-string image.tag=1.2.0-01
+  unset -f rt_empty_floor
+  [ -n "$_rt_ph" ] && [ -d "$_rt_ph" ] && rm -rf "$_rt_ph"
+  unset _rt_ph _rt_ph_ok
+  # The semver refusal names the version floor.
   executed=$((executed + 1))
   _rt_sv="$(render "${RT_TAG[@]}" --set-string image.tag=0.0.1)"
-  if [ -z "$_rt_min" ] && printf '%s\n' "$_rt_sv" | grep -qF "$_rt_semver_refusal" && ! printf '%s\n' "$_rt_sv" | grep -qE '99\.0\.0|a release at or after|is older than'; then
-    echo "ok    placeholder: the semver refusal names the nightly and no version floor (no 99.0.0, 'a release at or after' or 'is older than')"
-  elif [ -n "$_rt_min" ] && printf '%s\n' "$_rt_sv" | grep -qF "$_rt_min"; then
+  if printf '%s\n' "$_rt_sv" | grep -qF "$_rt_min"; then
     echo "ok    the semver refusal names the version floor ${_rt_min}"
   else
-    echo "FAIL  relay image gate: the semver refusal's wording is wrong for this mode: $(printf '%s' "$_rt_sv" | tr '\n' ' ' | cut -c1-200)"; failed=$((failed + 1))
+    echo "FAIL  relay image gate: the semver refusal does not name the version floor: $(printf '%s' "$_rt_sv" | tr '\n' ' ' | cut -c1-200)"; failed=$((failed + 1))
   fi
   unset _rt_sv
-  # The malformed-version refusal advises a valid version tag only when a version
-  # floor exists; in placeholder mode every version tag is refused anyway.
+  # The malformed-version refusal advises a valid version tag (a version floor
+  # exists).
   executed=$((executed + 1))
   _rt_mf="$(render "${RT_TAG[@]}" --set-string image.tag=1.2.0-01)"
   if ! printf '%s\n' "$_rt_mf" | grep -qF 'is not a valid semantic version'; then
     echo "FAIL  relay image gate: no malformed-version refusal for 1.2.0-01"; failed=$((failed + 1))
-  elif [ -z "$_rt_min" ] && ! printf '%s\n' "$_rt_mf" | grep -qF 'valid version tag' && printf '%s\n' "$_rt_mf" | grep -qF "nightly-${_rt_min_n} or later or an image digest"; then
-    echo "ok    placeholder: the malformed-version refusal does not advise a valid version tag"
-  elif [ -n "$_rt_min" ] && printf '%s\n' "$_rt_mf" | grep -qF 'Use a valid version tag'; then
+  elif printf '%s\n' "$_rt_mf" | grep -qF 'Use a valid version tag'; then
     echo "ok    the malformed-version refusal advises a valid version tag (a version floor exists)"
   else
-    echo "FAIL  relay image gate: the malformed-version remedy is wrong for this mode: $(printf '%s' "$_rt_mf" | tr '\n' ' ' | cut -c1-200)"; failed=$((failed + 1))
+    echo "FAIL  relay image gate: the malformed-version remedy is wrong: $(printf '%s' "$_rt_mf" | tr '\n' ' ' | cut -c1-200)"; failed=$((failed + 1))
   fi
   unset _rt_mf
   # On the config.extra path (wiring off), the off-remedy is to remove that
@@ -1173,32 +1216,21 @@ else
   accept "relay wiring with the minimum nightly tag" "${RT_TAG[@]}" --set-string "image.tag=nightly-${_rt_min_n}"
   accept "relay off with an older tag (no gate)" --set-string image.tag=0.0.1
   # With image.tag unset the tag is the chart's appVersion, which stays below
-  # the floor until a versioned release carries the change; the refusal must
+  # the floor (versioned images are not published per release); the refusal must
   # tell the operator to set image.tag or image.digest.
   reject "relay wiring on the default tag (appVersion) names image.tag and image.digest" "image.tag is not set, so the tag is the chart's appVersion" "${RT_TAG[@]}"
-  # Build metadata does not change precedence; a pre-release sorts below its
-  # release; a tag that starts like a version but is not one gets the chart's
-  # own refusal.
+  # Build metadata does not change precedence (an earlier pre-release sorting
+  # below the floor is the v0.3.0-preview.4 row above); a tag that starts like
+  # a version but is not one gets the chart's own refusal.
   reject "relay wiring with an older tag carrying build metadata" "$_rt_semver_refusal" "${RT_TAG[@]}" --set-string image.tag=0.0.1+build
-  if [ -n "$_rt_min" ]; then
-    accept "relay wiring with the minimum tag carrying build metadata" "${RT_TAG[@]}" --set-string "image.tag=${_rt_min}+build.1"
-    reject "relay wiring with a pre-release of the minimum" "$_rt_semver_refusal" "${RT_TAG[@]}" --set-string "image.tag=${_rt_min}-rc.1"
-  else
-    reject "placeholder: relay wiring with a tag carrying build metadata (1.0.0+build.1)" "$_rt_semver_refusal" "${RT_TAG[@]}" --set-string image.tag=1.0.0+build.1
-    reject "placeholder: relay wiring with a pre-release tag (1.0.0-rc.1)" "$_rt_semver_refusal" "${RT_TAG[@]}" --set-string image.tag=1.0.0-rc.1
-  fi
+  accept "relay wiring with the minimum tag carrying build metadata" "${RT_TAG[@]}" --set-string "image.tag=${_rt_min}+build.1"
   reject "relay wiring with a malformed version tag" "is not a valid semantic version" "${RT_TAG[@]}" --set-string image.tag=1.2.0-01
   reject "relay wiring with an overflowing version number" "is not a valid semantic version" "${RT_TAG[@]}" --set-string image.tag=99999999999999999999.0.0
   # Rows that do not lean on appVersion being below the floor.
-  if [ -n "$_rt_min" ]; then
-    _rt_core="${_rt_min%%[-+]*}"
-    _rt_patch="${_rt_core##*.}"
-    accept "relay wiring with a newer pre-release (patch+1, -preview.10)" "${RT_TAG[@]}" --set-string "image.tag=${_rt_core%.*}.$((_rt_patch + 1))-preview.10"
-    accept "relay wiring with a newer tag carrying build metadata" "${RT_TAG[@]}" --set-string "image.tag=v$((_rt_major + 1)).0.0+meta.1"
-  else
-    reject "placeholder: relay wiring with a pre-release tag (1.0.1-preview.10)" "$_rt_semver_refusal" "${RT_TAG[@]}" --set-string image.tag=1.0.1-preview.10
-    reject "placeholder: relay wiring with a high tag carrying build metadata (v100.0.0+meta.1)" "$_rt_semver_refusal" "${RT_TAG[@]}" --set-string image.tag=v100.0.0+meta.1
-  fi
+  _rt_core="${_rt_min%%[-+]*}"
+  _rt_patch="${_rt_core##*.}"
+  accept "relay wiring with a newer pre-release (patch+1, -preview.10)" "${RT_TAG[@]}" --set-string "image.tag=${_rt_core%.*}.$((_rt_patch + 1))-preview.10"
+  accept "relay wiring with a newer tag carrying build metadata" "${RT_TAG[@]}" --set-string "image.tag=v$((_rt_major + 1)).0.0+meta.1"
   accept "config.extra loopback relay listener on an older tag (loopback is not gated)" --set-string image.tag=0.0.1 \
     --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"127.0.0.1:9443","internal_tls_cert_file":"/x/tls.crt","internal_tls_key_file":"/x/tls.key"}}}}'
   unset _rt_core _rt_patch
@@ -1244,7 +1276,10 @@ else
   _rt_warn='RELAY TLS: THE HUB IMAGE VERSION COULD NOT BE CHECKED'
   _rt_notes() { "$HELM" template t "$_rt_tmp/c" --debug "${BASE[@]}" "${RT_TAG[@]}" "$@" --show-only templates/zz-notes-probe.txt 2>/dev/null \
     | sed -n '/^# Source: .*zz-notes-probe\.txt$/,$p'; }
-  if cp -r "$CHART" "$_rt_tmp/c" && mv "$_rt_tmp/c/templates/NOTES.txt" "$_rt_tmp/c/templates/zz-notes-probe.txt"; then
+  # If the copy cannot be made (including an empty _rt_tmp when mktemp fails),
+  # the probes stay empty and every NOTES row below FAILs on the missing anchor.
+  _rt_n_latest="" _rt_n_ok="" _rt_n_extra="" _rt_n_extra_digest=""
+  if [ -n "$_rt_tmp" ] && cp -r "$CHART" "$_rt_tmp/c" && mv "$_rt_tmp/c/templates/NOTES.txt" "$_rt_tmp/c/templates/zz-notes-probe.txt"; then
     _rt_n_latest="$(_rt_notes --set-string image.tag=latest)"
     _rt_n_ok="$(_rt_notes --set-string "image.tag=${_rt_ok_tag}")"
     # The config.extra path (wiring off), on a tag and on a digest: rendered
@@ -1277,10 +1312,10 @@ else
       echo "FAIL  relay image gate: the NOTES remedy on the config.extra path ($_rt_label) is wrong, or the probe rendered nothing"; failed=$((failed + 1))
     fi
   done
-  case "$_rt_tmp" in /tmp/*) rm -rf "$_rt_tmp" ;; esac
+  [ -n "$_rt_tmp" ] && [ -d "$_rt_tmp" ] && rm -rf "$_rt_tmp"
   unset -f _rt_notes _rt_notes_extra; unset _rt_n_latest _rt_n_ok _rt_n_extra _rt_n_extra_digest _rt_warn _rt_case _rt_label _rt_out
 fi
-unset _rt_min _rt_min_n _rt_major _rt_latest _rt_ok _rt_tmp RT_TAG _rt_vlines _rt_ok_tag _rt_semver_refusal
+unset _rt_min _rt_min_n _rt_mv _rt_major _rt_latest _rt_ok _rt_tmp RT_TAG _rt_vlines _rt_ok_tag _rt_semver_refusal
 
 echo "== secrets.backend =="
 # local renders nothing; gcpsm renders server.secrets and needs a project. The

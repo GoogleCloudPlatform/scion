@@ -266,6 +266,28 @@ async function createComponent(
   return el;
 }
 
+/**
+ * Changes one agent default so a DB-tier save has a dirty section to send:
+ * the page sends only the sections changed since load (ptone/scion#3922),
+ * so an untouched form sends no PUT. Tests about the save response use this
+ * to get a PUT; tests about which keys are sent assert on the other
+ * sections.
+ */
+async function markDirty(el: HTMLElement): Promise<void> {
+  (el as any).defaultMaxTurns = ((el as any).defaultMaxTurns || 0) + 7;
+  await (el as any).updateComplete;
+}
+
+/**
+ * Sends the full Layer-1 payload the form builds, as before section-level
+ * saves: clears the load baseline, so a DB-tier save does not filter to the
+ * changed sections. For tests of the payload builders and of the save
+ * response; the section filter has its own tests.
+ */
+function withoutSectionFilter(el: HTMLElement): void {
+  (el as any).layer1Baseline = null;
+}
+
 function shadowText(el: HTMLElement): string {
   return el.shadowRoot?.textContent ?? '';
 }
@@ -446,6 +468,8 @@ describe('scion-page-admin-server-config', () => {
         })
       );
 
+      withoutSectionFilter(element);
+
       const buttons = queryAll(element, 'sl-button[variant="primary"]');
       const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
       expect(saveBtn).not.toBeNull();
@@ -484,6 +508,8 @@ describe('scion-page-admin-server-config', () => {
         })
       );
 
+      await markDirty(element);
+
       const buttons = queryAll(element, 'sl-button[variant="primary"]');
       const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
       (saveBtn as HTMLElement).click();
@@ -520,6 +546,7 @@ describe('scion-page-admin-server-config', () => {
       const before = settingsCalls();
 
       const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      withoutSectionFilter(element);
       const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
       (saveBtn as HTMLElement).click();
       await new Promise((resolve) => setTimeout(resolve, 300));
@@ -643,6 +670,8 @@ describe('scion-page-admin-server-config', () => {
         })
       );
 
+      await markDirty(element);
+
       const buttons = queryAll(element, 'sl-button[variant="primary"]');
       const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
       (saveBtn as HTMLElement).click();
@@ -703,6 +732,7 @@ describe('scion-page-admin-server-config', () => {
       );
       mutate(element as any);
       const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      withoutSectionFilter(element);
       const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
       (saveBtn as HTMLElement).click();
       await new Promise((resolve) => setTimeout(resolve, 300));
@@ -1122,6 +1152,7 @@ describe('scion-page-admin-server-config', () => {
       el.autoExposePortsEnabled = false;
       el.enforceBrokerQuotas = false;
       el.agentSecretsUserScopeOnly = false;
+      withoutSectionFilter(element);
       const saveBtn = queryAll(element, 'sl-button[variant="primary"]').find(
         (b) => b.textContent?.trim() === 'Save & Reload'
       );
@@ -1179,6 +1210,7 @@ describe('scion-page-admin-server-config', () => {
           })
         );
         expect(shadowText(element)).toContain('ptone/scion#3067');
+        await markDirty(element);
         const buttons = queryAll(element, 'sl-button[variant="primary"]');
         (buttons.find((b) => b.textContent?.trim() === 'Save & Reload') as HTMLElement).click();
         await new Promise((resolve) => setTimeout(resolve, 300));
@@ -1201,6 +1233,7 @@ describe('scion-page-admin-server-config', () => {
             }),
           })
         );
+        await markDirty(element);
         const buttons = queryAll(element, 'sl-button[variant="primary"]');
         (buttons.find((b) => b.textContent?.trim() === 'Save & Reload') as HTMLElement).click();
         await new Promise((resolve) => setTimeout(resolve, 300));
@@ -1490,6 +1523,8 @@ describe('scion-page-admin-server-config', () => {
         })
       );
 
+      await markDirty(element);
+
       const buttons = queryAll(element, 'sl-button[variant="primary"]');
       const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
       (saveBtn as HTMLElement).click();
@@ -1531,6 +1566,8 @@ describe('scion-page-admin-server-config', () => {
         })
       );
 
+      await markDirty(element);
+
       const buttons = queryAll(element, 'sl-button[variant="primary"]');
       const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
       (saveBtn as HTMLElement).click();
@@ -1564,6 +1601,8 @@ describe('scion-page-admin-server-config', () => {
         })
       );
 
+      await markDirty(element);
+
       const buttons = queryAll(element, 'sl-button[variant="primary"]');
       const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
       (saveBtn as HTMLElement).click();
@@ -1590,6 +1629,8 @@ describe('scion-page-admin-server-config', () => {
           }),
         })
       );
+
+      await markDirty(element);
 
       const buttons = queryAll(element, 'sl-button[variant="primary"]');
       const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
@@ -1628,6 +1669,8 @@ describe('scion-page-admin-server-config', () => {
           }),
         })
       );
+
+      await markDirty(element);
 
       const buttons = queryAll(element, 'sl-button[variant="primary"]');
       const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
@@ -1670,6 +1713,8 @@ describe('scion-page-admin-server-config', () => {
         })
       );
 
+      await markDirty(element);
+
       const buttons = queryAll(element, 'sl-button[variant="primary"]');
       const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
       (saveBtn as HTMLElement).click();
@@ -1695,6 +1740,8 @@ describe('scion-page-admin-server-config', () => {
           }),
         })
       );
+
+      await markDirty(element);
 
       const buttons = queryAll(element, 'sl-button[variant="primary"]');
       const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
@@ -1731,6 +1778,8 @@ describe('scion-page-admin-server-config', () => {
           }),
         })
       );
+
+      await markDirty(element);
 
       const buttons = queryAll(element, 'sl-button[variant="primary"]');
       const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
@@ -1770,6 +1819,8 @@ describe('scion-page-admin-server-config', () => {
         })
       );
 
+      await markDirty(element);
+
       const buttons = queryAll(element, 'sl-button[variant="primary"]');
       const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
       (saveBtn as HTMLElement).click();
@@ -1798,6 +1849,7 @@ describe('scion-page-admin-server-config', () => {
           })
         );
 
+        await markDirty(element);
         const buttons = queryAll(element, 'sl-button[variant="primary"]');
         const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
         (saveBtn as HTMLElement).click();
@@ -2565,6 +2617,7 @@ describe('scion-page-admin-server-config', () => {
         const clickSave = async () => {
           capturedPayload = null;
           const buttons = queryAll(element!, 'sl-button[variant="primary"]');
+          withoutSectionFilter(element!);
           const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
           (saveBtn as HTMLElement).click();
           await new Promise((resolve) => setTimeout(resolve, 300));
@@ -3677,6 +3730,7 @@ describe('scion-page-admin-server-config', () => {
 
     async function save(el: HTMLElement): Promise<void> {
       await (el as any).updateComplete;
+      withoutSectionFilter(el);
       const btn = queryAll(el, 'sl-button[variant="primary"]').find(
         (b) => b.textContent?.trim() === 'Save & Reload'
       ) as HTMLElement;
@@ -3805,7 +3859,9 @@ describe('scion-page-admin-server-config', () => {
     });
 
     it('a type switch to Cloud Run names the Kubernetes keys it clears', async () => {
-      element = await load({ gke: k8s });
+      element = await load({
+        gke: { ...k8s, shared_dir_storage_class: 'rwx-class', shared_dir_size: '10Gi' },
+      });
       vi.mocked(showConfirm).mockClear();
       vi.mocked(showConfirm).mockResolvedValueOnce(false);
       const typeSelect = queryAll(element, 'sl-select').find((s) =>
@@ -3815,10 +3871,42 @@ describe('scion-page-admin-server-config', () => {
       typeSelect.dispatchEvent(new Event('sl-change'));
       await new Promise((resolve) => setTimeout(resolve, 0));
       const msg = vi.mocked(showConfirm).mock.calls[0][0] as string;
-      for (const k of ['node_selector', 'tolerations', 'kubernetes_service_account_mappings']) {
+      for (const k of [
+        'node_selector',
+        'tolerations',
+        'kubernetes_service_account_mappings',
+        'shared_dir_storage_class',
+        'shared_dir_size',
+      ]) {
         expect(msg).toContain(k);
       }
     });
+
+    // The shared-dir PVC defaults are Kubernetes-only and follow the other
+    // Kubernetes keys: a switch to Cloud Run clears them.
+    for (const [key, value] of [
+      ['shared_dir_storage_class', 'rwx-class'],
+      ['shared_dir_size', '10Gi'],
+    ] as const) {
+      it(`a type switch to Cloud Run clears ${key}`, async () => {
+        let captured: Record<string, any> | null = null;
+        element = await load({ gke: { ...k8s, [key]: value } }, (b) => (captured = b));
+        vi.mocked(showConfirm).mockClear();
+        const typeSelect = queryAll(element, 'sl-select').find((s) =>
+          s.querySelector('sl-option[value="cloudrun-instances"]')
+        ) as HTMLElement & { value: string };
+        typeSelect.value = 'cloudrun';
+        typeSelect.dispatchEvent(new Event('sl-change'));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(showConfirm).toHaveBeenCalledTimes(1);
+        expect(vi.mocked(showConfirm).mock.calls[0][0]).toContain(key);
+        await save(element);
+        expect(captured).not.toBeNull();
+        expect(captured!.runtimes.gke.type).toBe('cloudrun');
+        expect(captured!.runtimes.gke[key] ?? null).toBeNull();
+        expect(JSON.stringify(captured!.runtimes.gke)).not.toContain(value);
+      });
+    }
   });
 
   describe('Regression ptone/scion#1871 — masked secrets are not sent back', () => {
@@ -3915,6 +4003,7 @@ describe('scion-page-admin-server-config', () => {
       );
       await edit(element);
       await (element as any).updateComplete;
+      withoutSectionFilter(element);
       const saveBtn = queryAll(element, 'sl-button[variant="primary"]').find(
         (b) => b.textContent?.trim() === 'Save & Reload'
       );
@@ -4043,6 +4132,7 @@ describe('scion-page-admin-server-config', () => {
       (element as any).hubPublicUrl = 'https://other.example.com';
       (element as any).hubMonitoringDashboardUrl = 'https://dash.example.com/d';
       await (element as any).updateComplete;
+      await markDirty(element);
       const saveBtn = queryAll(element, 'sl-button[variant="primary"]').find(
         (b) => b.textContent?.trim() === 'Save & Reload'
       );
@@ -4216,6 +4306,7 @@ describe('scion-page-admin-server-config', () => {
           },
         })
       );
+      withoutSectionFilter(element);
       await clickSave(element);
 
       expect(sent).toBe('https://hub.example.com');
@@ -4284,6 +4375,7 @@ describe('scion-page-admin-server-config', () => {
         })
       );
 
+      await markDirty(element);
       await clickButton(element, 'Save & Reload');
 
       expect(fieldError(element, 'server.hub.public_url')).toEqual(['must be an absolute URL']);
@@ -4312,6 +4404,7 @@ describe('scion-page-admin-server-config', () => {
         })
       );
 
+      await markDirty(element);
       await clickButton(element, 'Save & Reload');
 
       const top = query(element, '.validation-errors')!.textContent ?? '';
@@ -4341,6 +4434,7 @@ describe('scion-page-admin-server-config', () => {
         return base(url, init);
       });
 
+      await markDirty(element);
       await clickButton(element, 'Save & Reload');
 
       const banner = query(element, '.conflict-banner');
@@ -4372,6 +4466,7 @@ describe('scion-page-admin-server-config', () => {
         })
       );
 
+      await markDirty(element);
       await clickButton(element, 'Save & Reload');
 
       const [msg] = fieldError(element, 'server.mode');
@@ -4391,6 +4486,7 @@ describe('scion-page-admin-server-config', () => {
         })
       );
 
+      await markDirty(element);
       await clickButton(element, 'Save & Reload');
 
       expect(query(element, '.status-message.error')!.textContent?.trim()).toBe(
@@ -4410,6 +4506,7 @@ describe('scion-page-admin-server-config', () => {
         })
       );
 
+      await markDirty(element);
       await clickButton(element, 'Save & Reload');
 
       expect(query(element, '.status-message.error')!.textContent?.trim()).toBe(
@@ -4533,6 +4630,7 @@ describe('scion-page-admin-server-config', () => {
         })
       );
 
+      withoutSectionFilter(element);
       await clickButton(element, 'Save & Reload');
       await clickButton(element, 'Save & Reload');
 
@@ -4594,6 +4692,7 @@ describe('scion-page-admin-server-config', () => {
         })
       );
 
+      await markDirty(element);
       await clickButton(element, 'Save & Reload');
 
       expect(element.shadowRoot!.querySelector('img')).toBeNull();
@@ -5132,6 +5231,7 @@ describe('scion-page-admin-server-config', () => {
       const { el, puts } = await renderShownKeys(
         makeFullConfig({ settings_tier: 'db', layer0_editable: true })
       );
+      await markDirty(element);
       await clickSave(el, 'Save & Reload');
       const put = puts.find((p) => p.path.includes('/api/v1/admin/server-config'));
       expect(unknownPayloadKeys(put!.body, 'settings')).toEqual([]);
@@ -5324,6 +5424,111 @@ describe('scion-page-admin-server-config', () => {
       });
     });
 
+    // A card save bumps the github_app section's revision outside the main
+    // form (ptone/scion#3922): the main save must not treat github_app as
+    // changed, and a later real change must carry the new revision.
+    describe('card save and the main section-level save', () => {
+      function withMainPuts(config: Record<string, unknown>): {
+        handler: (url: string | URL | Request, init?: RequestInit) => Promise<Response>;
+        mainPuts: Array<Record<string, unknown>>;
+      } {
+        const { handler: gh } = statefulGitHubApp(config);
+        const mainPuts: Array<Record<string, unknown>> = [];
+        const handler = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+          const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+          if (path.endsWith('/api/v1/github-app') && init?.method === 'PUT') {
+            // The hub bumps the section's revision on the card's save.
+            const meta = config.section_metadata as Record<string, { revision?: number }>;
+            meta.github_app = {
+              ...meta.github_app,
+              revision: (meta.github_app?.revision ?? 0) + 1,
+            };
+          }
+          if (
+            path.includes('/api/v1/admin/server-config') &&
+            !path.includes('/schema') &&
+            init?.method === 'PUT'
+          ) {
+            mainPuts.push(JSON.parse(init.body as string) as Record<string, unknown>);
+            return jsonResponse({ reload: { applied: [] } });
+          }
+          return gh(url, init);
+        };
+        return { handler, mainPuts };
+      }
+
+      const config = (): Record<string, unknown> =>
+        makeBaseConfig({
+          settings_tier: 'db',
+          section_metadata: {
+            github_app: { source: 'db', revision: 3 },
+            agent_defaults: { source: 'db', revision: 5 },
+          },
+        });
+
+      it('after a card save the main save sends no github_app and no github_app revision', async () => {
+        const { handler, mainPuts } = withMainPuts(config());
+        element = await createComponent(handler);
+        const el = element as unknown as CardElement;
+        el.githubAppApiBaseUrl = 'https://ghe-new.example.com/api/v3';
+        await el.handleSaveGitHubApp();
+
+        await markDirty(element);
+        const saveBtn = queryAll(element, 'sl-button[variant="primary"]').find(
+          (b) => b.textContent?.trim() === 'Save & Reload'
+        );
+        (saveBtn as HTMLElement).click();
+        await new Promise((resolve) => setTimeout(resolve, 300));
+
+        expect(mainPuts).toHaveLength(1);
+        const server = mainPuts[0]!.server as Record<string, unknown> | undefined;
+        expect(server?.github_app).toBeUndefined();
+        expect(mainPuts[0]!.expected_revisions).toEqual({ agent_defaults: 5 });
+      });
+
+      it('control: after a card save an unchanged form says there is nothing to save', async () => {
+        const { handler, mainPuts } = withMainPuts(config());
+        element = await createComponent(handler);
+        const el = element as unknown as CardElement;
+        el.githubAppApiBaseUrl = 'https://ghe-new.example.com/api/v3';
+        await el.handleSaveGitHubApp();
+
+        const saveBtn = queryAll(element, 'sl-button[variant="primary"]').find(
+          (b) => b.textContent?.trim() === 'Save & Reload'
+        );
+        (saveBtn as HTMLElement).click();
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        await (element as any).updateComplete;
+
+        expect(mainPuts).toHaveLength(0);
+        expect(shadowText(element)).toContain('No changes to save');
+      });
+
+      it('a later github_app change carries the revision the card save left', async () => {
+        const { handler, mainPuts } = withMainPuts(config());
+        element = await createComponent(handler);
+        const el = element as unknown as CardElement;
+        el.githubAppApiBaseUrl = 'https://ghe-new.example.com/api/v3';
+        await el.handleSaveGitHubApp();
+        expect((element as any).loadedRevisions.github_app).toBe(4);
+
+        // A github_app value the main save sends that differs from the
+        // baseline (the echo is the only way the main form carries it).
+        (element as any).rawConfig.server.github_app = {
+          ...(element as any).rawConfig.server.github_app,
+          installation_url: 'https://github.com/apps/z/installations/new',
+        };
+        const saveBtn = queryAll(element, 'sl-button[variant="primary"]').find(
+          (b) => b.textContent?.trim() === 'Save & Reload'
+        );
+        (saveBtn as HTMLElement).click();
+        await new Promise((resolve) => setTimeout(resolve, 300));
+
+        expect(mainPuts).toHaveLength(1);
+        expect(mainPuts[0]!.expected_revisions).toEqual({ github_app: 4 });
+      });
+    });
+
     // A card that did not load holds defaults (app_id 0, empty URLs), not
     // the stored config. Saving them would clear the stored App, so the
     // card cannot be saved and the main save leaves github_app out.
@@ -5484,6 +5689,7 @@ describe('save report', () => {
         putHandler: () => ({ status: 200, body: { status: 'saved', reload } }),
       })
     );
+    withoutSectionFilter(el);
     const saveBtn = queryAll(el, 'sl-button[variant="primary"]').find(
       (b) => b.textContent?.trim() === 'Save & Reload'
     );
@@ -5666,6 +5872,7 @@ describe('hub observability export switches', () => {
 
   async function save(el: HTMLElement): Promise<void> {
     await (el as any).updateComplete;
+    withoutSectionFilter(el);
     const btn = queryAll(el, 'sl-button[variant="primary"]').find(
       (b) => b.textContent?.trim() === 'Save & Reload'
     );
@@ -5922,6 +6129,7 @@ describe('settings the page must not write unless changed (ptone/scion#3913)', (
   }
 
   async function save(el: HTMLElement): Promise<void> {
+    withoutSectionFilter(el);
     const btn = queryAll(el, 'sl-button[variant="primary"]').find(
       (b) => b.textContent?.trim() === 'Save & Reload'
     );
@@ -6405,5 +6613,188 @@ describe('env values in effect (env_values)', () => {
     );
     expect(field.querySelector('.env-value-in-effect')).toBeNull();
     expect(field.querySelector('.env-value-not-in-effect')).toBeNull();
+  });
+});
+
+// ── Section-level saves with revisions (ptone/scion#3922) ──
+
+describe('scion-page-admin-server-config — section-level saves with revisions', () => {
+  let element: HTMLElement | null = null;
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+  });
+
+  const META = {
+    access: { source: 'db', revision: 4 },
+    endpoints: { source: 'db', revision: 9 },
+    telemetry: { source: 'db', revision: 2 },
+    agent_defaults: { source: 'default' },
+  };
+
+  async function clickSaveButton(el: HTMLElement): Promise<void> {
+    const saveBtn = queryAll(el, 'sl-button[variant="primary"]').find(
+      (b) => b.textContent?.trim() === 'Save & Reload'
+    );
+    (saveBtn as HTMLElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await (el as any).updateComplete;
+  }
+
+  it('sends only the changed section, whole, with its revision; untouched sections are not sent', async () => {
+    let captured: Record<string, unknown> | null = null;
+    element = await createComponent(
+      createFetchHandler(makeBaseConfig({ settings_tier: 'db', section_metadata: META }), {
+        putHandler: (body) => {
+          captured = body;
+          return { status: 200, body: { reload: { applied: [] } } };
+        },
+      })
+    );
+    (element as any).hubPublicUrl = 'https://changed.example.com';
+    await (element as any).updateComplete;
+    await clickSaveButton(element);
+
+    expect(captured).not.toBeNull();
+    const body = captured!;
+    expect(body.expected_revisions).toEqual({ endpoints: 9 });
+    const server = body.server as Record<string, Record<string, unknown>>;
+    expect(server.hub.public_url).toBe('https://changed.example.com');
+    // The endpoints section is sent whole (its other field too).
+    expect(body.image_registry).toBe('ghcr.io/test');
+    // Untouched sections are not sent.
+    expect(server.hub).not.toHaveProperty('admin_emails');
+    expect(server.hub).not.toHaveProperty('soft_delete_retention');
+    expect(server).not.toHaveProperty('auth');
+    expect(body).not.toHaveProperty('telemetry');
+    expect(body).not.toHaveProperty('default_template');
+  });
+
+  it('a section with no stored row at load is sent with revision 0 (create-only)', async () => {
+    let captured: Record<string, unknown> | null = null;
+    element = await createComponent(
+      createFetchHandler(makeBaseConfig({ settings_tier: 'db', section_metadata: META }), {
+        putHandler: (body) => {
+          captured = body;
+          return { status: 200, body: { reload: { applied: [] } } };
+        },
+      })
+    );
+    await markDirty(element);
+    await clickSaveButton(element);
+    expect(captured).not.toBeNull();
+    expect(captured!.expected_revisions).toEqual({ agent_defaults: 0 });
+  });
+
+  it('an unchanged form sends no PUT and says there is nothing to save', async () => {
+    let puts = 0;
+    element = await createComponent(
+      createFetchHandler(makeBaseConfig({ settings_tier: 'db', section_metadata: META }), {
+        putHandler: () => {
+          puts++;
+          return { status: 200, body: { reload: { applied: [] } } };
+        },
+      })
+    );
+    await clickSaveButton(element);
+    expect(puts).toBe(0);
+    expect(shadowText(element)).toContain('No changes to save');
+  });
+
+  it('a stale section shows the reload banner; Reload re-baselines and the next save sends the new revision', async () => {
+    const config = makeBaseConfig({
+      settings_tier: 'db',
+      section_metadata: { ...META, endpoints: { source: 'db', revision: 9 } },
+    });
+    const bodies: Record<string, unknown>[] = [];
+    element = await createComponent(
+      createFetchHandler(config, {
+        putHandler: (body) => {
+          bodies.push(body);
+          return bodies.length === 1
+            ? {
+                status: 409,
+                body: {
+                  error: {
+                    code: 'revision_conflict',
+                    message: 'One or more sections have been modified since the expected revision.',
+                    details: {
+                      conflicted: [
+                        { section: 'endpoints', expected_revision: 9, current_revision: 10 },
+                      ],
+                    },
+                  },
+                },
+              }
+            : { status: 200, body: { reload: { applied: [] } } };
+        },
+      })
+    );
+    (element as any).hubPublicUrl = 'https://mine.example.com';
+    await (element as any).updateComplete;
+    await clickSaveButton(element);
+
+    const banner = query(element, '.conflict-banner');
+    expect(banner).not.toBeNull();
+    expect(banner!.textContent ?? '').toContain('endpoints');
+    expect((bodies[0] as Record<string, unknown>).expected_revisions).toEqual({ endpoints: 9 });
+
+    // Another admin's save is now the stored state.
+    (config as Record<string, unknown>).section_metadata = {
+      ...META,
+      endpoints: { source: 'db', revision: 10 },
+    };
+    ((config.server as Record<string, unknown>).hub as Record<string, unknown>).public_url =
+      'https://theirs.example.com';
+    (banner!.querySelector('sl-button') as HTMLElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await (element as any).updateComplete;
+    expect(query(element, '.conflict-banner')).toBeNull();
+    expect((element as any).hubPublicUrl).toBe('https://theirs.example.com');
+
+    (element as any).hubPublicUrl = 'https://mine-again.example.com';
+    await (element as any).updateComplete;
+    await clickSaveButton(element);
+    expect(bodies).toHaveLength(2);
+    expect((bodies[1] as Record<string, unknown>).expected_revisions).toEqual({ endpoints: 10 });
+  });
+
+  it('the file tier sends the full payload with no expected_revisions', async () => {
+    let captured: Record<string, unknown> | null = null;
+    element = await createComponent(
+      createFetchHandler(makeBaseConfig({ settings_tier: 'file' }), {
+        putHandler: (body) => {
+          captured = body;
+          return { status: 200, body: { reload: { applied: [] } } };
+        },
+      })
+    );
+    await clickSaveButton(element);
+    expect(captured).not.toBeNull();
+    expect(captured!).not.toHaveProperty('expected_revisions');
+    expect(captured!).toHaveProperty('server');
+  });
+
+  it('a workstation save still sends a changed Layer-0 field when no Layer-1 section changed', async () => {
+    let captured: Record<string, unknown> | null = null;
+    element = await createComponent(
+      createFetchHandler(
+        makeBaseConfig({ settings_tier: 'db', layer0_editable: true, section_metadata: META }),
+        {
+          putHandler: (body) => {
+            captured = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        }
+      )
+    );
+    (element as any).logLevel = 'debug';
+    await (element as any).updateComplete;
+    await clickSaveButton(element);
+    expect(captured).not.toBeNull();
+    expect((captured!.server as Record<string, unknown>).log_level).toBe('debug');
+    expect(captured!).not.toHaveProperty('expected_revisions');
   });
 });

@@ -4624,17 +4624,22 @@ The first hub release whose relay listener honours the internal_tls_*
 settings. An older hub ignores them and serves the relay hop in plaintext, so
 the chart refuses its relay wiring for an image older than this.
 
-The nightly floor is set: nightly-20261029 is the first nightly that carries
-the change. No versioned release carries it yet, so the version floor is
-empty, a placeholder: while it is empty every semver tag is refused (fails
-closed) with a message that names the nightly instead. Set it to the first
-versioned release carrying the change once that is cut and verified (a
-pre-release if that is the first). Chart.yaml appVersion, the default image
-tag, stays below the floor until that release, so with the relay wiring on an
-operator sets image.tag or image.digest.
+The floor is v0.3.0-preview.5, the first versioned release that carries the
+change, and nightly-20261029, the first nightly that carries it. A semver tag
+is compared with the version floor by semver precedence, so an earlier
+pre-release such as v0.3.0-preview.4 is refused and v0.3.0 or any later
+release passes; a nightly tag is compared with the nightly floor by date.
+
+Chart.yaml appVersion, the default image tag, stays below the floor and is not
+bumped, because versioned hub images are not yet published for each release.
+So with the relay wiring on, an operator sets image.tag or image.digest.
+
+An empty version floor is still handled (every semver tag is refused, failing
+closed, with a message that names only the nightly), but the chart no longer
+ships one.
 */}}
 {{- define "scion-hub.relayTlsMinHub" -}}
-version: ""
+version: "v0.3.0-preview.5"
 nightly: "20261029"
 {{- end }}
 
@@ -4677,8 +4682,8 @@ chart's appVersion, so the operator has to set one. */}}
 {{- $minVersion := trim (toString ($min.version | default "")) }}
 {{- /* $orRelease reads inside a remedy ("nightly-X or later or a release at or
 after Y"); $orReleaseParen inside a parenthesis ("(nightly-X or later, or a
-release at or after Y)"). Both are empty while the version floor is a
-placeholder. */}}
+release at or after Y)"). Both are empty when the version floor is empty.
+*/}}
 {{- $orRelease := "" }}
 {{- $orReleaseParen := "" }}
 {{- if $minVersion }}{{- $orRelease = printf " or a release at or after %s" $minVersion }}{{- $orReleaseParen = printf ", or a release at or after %s" $minVersion }}{{- end }}
@@ -4707,7 +4712,7 @@ real image tag is affected.
 {{- if $root.Values.image.digest }}
 {{- print "unverified" }}
 {{- else if and (regexMatch $semverRe $tag) (not $minVersion) }}
-{{- /* No versioned release carries the change yet: every version tag fails, and the message names the nightly, never a version floor. */}}
+{{- /* With an empty version floor, every version tag fails, and the message names the nightly, never a version floor. */}}
 {{- if $defaultTag }}
 {{- fail (printf "image.tag is not set, so the tag is the chart's appVersion (%s), a version tag, and no versioned hub release serves the relay hop with the internal_tls_* settings yet, so a version tag cannot pass: set image.tag to nightly-%s or later, or set image.digest, or %s." $root.Chart.AppVersion $min.nightly $off) }}
 {{- end }}

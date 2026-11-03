@@ -428,3 +428,42 @@ func TestDeleteAfterTombstoneOutsideAgentMounts(t *testing.T) {
 		assert.True(t, strings.HasPrefix(rel, ".."), "mount %s must not be inside the tombstone dir", m)
 	}
 }
+
+// A share that is not mounted (the host base is there, its subpath root is
+// not) fails every tree; nothing reports absent, which reads as success.
+func TestDeleteAgent_UnmountedShareFails(t *testing.T) {
+	hostBase := t.TempDir()
+	ds, err := delNFSLayout(hostBase).RemoveAgentStorage(testPID, "dev", testAgentID)
+	require.NoError(t, err)
+	require.Len(t, ds, 3)
+	for _, d := range ds {
+		assert.Equal(t, OutcomeFailed, d.Outcome, string(d.Tree))
+		assert.ErrorIs(t, d.Err, ErrNoProjectTree, string(d.Tree))
+		assert.Equal(t, "refused: no project tree below the host base (share not mounted)", Redact(d, hostBase).Err.Error())
+	}
+}
+
+// verifyRemoved never lets a removal be reported done while the path is
+// still there.
+func TestVerifyRemoved(t *testing.T) {
+	dir := t.TempDir()
+	present := filepath.Join(dir, "home-x")
+	require.NoError(t, os.Mkdir(present, 0o755))
+	gone := filepath.Join(dir, "gone")
+
+	d := verifyRemoved(Deletion{Tree: TreeAgentHome, Path: present, Outcome: OutcomeDeleted})
+	assert.Equal(t, OutcomeFailed, d.Outcome)
+	assert.ErrorIs(t, d.Err, ErrStillPresent)
+	assert.Equal(t, "still present after removal", Redact(d, dir).Err.Error())
+
+	d = verifyRemoved(Deletion{Tree: TreeAgentHome, Path: present, Outcome: OutcomeAbsent})
+	assert.Equal(t, OutcomeFailed, d.Outcome, "absent but there is a failure too")
+
+	for _, o := range []Outcome{OutcomeDeleted, OutcomeAbsent} {
+		d = verifyRemoved(Deletion{Tree: TreeAgentHome, Path: gone, Outcome: o})
+		assert.Equal(t, o, d.Outcome)
+		assert.NoError(t, d.Err)
+	}
+	d = verifyRemoved(Deletion{Tree: TreeAgentRoot, Path: present, Outcome: OutcomeKept})
+	assert.Equal(t, OutcomeKept, d.Outcome, "a kept tree is meant to be there")
+}

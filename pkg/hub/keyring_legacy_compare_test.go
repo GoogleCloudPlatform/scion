@@ -25,9 +25,12 @@ import (
 )
 
 // TestValidateKeyringConfig_LegacyEntryComparedInConstantTime pins how
-// validateKeyringConfig compares SharedSigningSecret with the keyring's
-// "legacy" signing entry: through exactly one crypto/subtle
-// ConstantTimeCompare call, never with == or !=. A plain comparison returns
+// startup compares SharedSigningSecret with the keyring's "legacy" signing
+// entry: in the release check (releaseKeyringCheck, behind the
+// keyringReleaseCheck seam), through exactly one crypto/subtle
+// ConstantTimeCompare call, never with == or !=; and validateKeyringConfig
+// itself compares SharedSigningSecret in no form, so no comparison can be
+// added outside the seam. A plain comparison returns
 // the same results, so no behavioural test can tell the two apart, and the
 // timing difference is not measurable reliably in a unit test; the
 // comparison form is therefore asserted on the source.
@@ -51,13 +54,15 @@ func TestValidateKeyringConfig_LegacyEntryComparedInConstantTime(t *testing.T) {
 
 	f, err = parser.ParseFile(fset, "keyring.go", nil, 0)
 	require.NoError(t, err)
-	var fn *ast.FuncDecl
+	funcs := map[string]*ast.FuncDecl{}
 	for _, d := range f.Decls {
-		if fd, ok := d.(*ast.FuncDecl); ok && fd.Recv == nil && fd.Name.Name == "validateKeyringConfig" {
-			fn = fd
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Recv == nil {
+			funcs[fd.Name.Name] = fd
 		}
 	}
-	require.NotNil(t, fn, "validateKeyringConfig not found in keyring.go")
+	for _, name := range []string{"releaseKeyringCheck", "validateKeyringConfig"} {
+		require.NotNil(t, funcs[name], "%s not found in keyring.go", name)
+	}
 
 	// isField reports whether e is the SharedSigningSecret field itself,
 	// possibly parenthesized or inside one conversion ([]byte(x), string(x)).
@@ -77,25 +82,32 @@ func TestValidateKeyringConfig_LegacyEntryComparedInConstantTime(t *testing.T) {
 		return ok && sel.Sel.Name == "SharedSigningSecret"
 	}
 
-	constantTime, plain := 0, 0
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		switch x := n.(type) {
-		case *ast.CallExpr:
-			sel, ok := x.Fun.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != "ConstantTimeCompare" {
-				return true
+	// count returns the constant-time and the plain comparisons of the
+	// field in fn.
+	count := func(fn *ast.FuncDecl) (constantTime, plain int) {
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.CallExpr:
+				sel, ok := x.Fun.(*ast.SelectorExpr)
+				if !ok || sel.Sel.Name != "ConstantTimeCompare" {
+					return true
+				}
+				pkg, ok := sel.X.(*ast.Ident)
+				if ok && pkg.Name == "subtle" && len(x.Args) == 2 && (isField(x.Args[0]) || isField(x.Args[1])) {
+					constantTime++
+				}
+			case *ast.BinaryExpr:
+				if (x.Op == token.EQL || x.Op == token.NEQ) && (isField(x.X) || isField(x.Y)) {
+					plain++
+				}
 			}
-			pkg, ok := sel.X.(*ast.Ident)
-			if ok && pkg.Name == "subtle" && len(x.Args) == 2 && (isField(x.Args[0]) || isField(x.Args[1])) {
-				constantTime++
-			}
-		case *ast.BinaryExpr:
-			if (x.Op == token.EQL || x.Op == token.NEQ) && (isField(x.X) || isField(x.Y)) {
-				plain++
-			}
-		}
-		return true
-	})
-	assert.Equal(t, 1, constantTime, "SharedSigningSecret must be compared with one subtle.ConstantTimeCompare call")
-	assert.Zero(t, plain, "SharedSigningSecret must never be compared with == or !=")
+			return true
+		})
+		return constantTime, plain
+	}
+	constantTime, plain := count(funcs["releaseKeyringCheck"])
+	assert.Equal(t, 1, constantTime, "releaseKeyringCheck must compare SharedSigningSecret with one subtle.ConstantTimeCompare call")
+	assert.Zero(t, plain, "releaseKeyringCheck must never compare SharedSigningSecret with == or !=")
+	constantTime, plain = count(funcs["validateKeyringConfig"])
+	assert.Zero(t, constantTime+plain, "validateKeyringConfig must not compare SharedSigningSecret itself: the comparison lives behind the release-check seam")
 }
