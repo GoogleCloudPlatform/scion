@@ -207,7 +207,7 @@ func loadConvertInput(cmd *cobra.Command) (brokerconvert.Input, *config.Settings
 		return in, nil, fmt.Errorf("reading the global settings: %w", err)
 	}
 	for _, w := range warnings {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s\n", w)
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s\n", w)
 	}
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
