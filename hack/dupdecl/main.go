@@ -30,8 +30,10 @@
 // an import whose local name is declared in the package block of the same
 // package clause ("already declared through import of package"); the local
 // name is the explicit one, else a guess from the import path (guessName:
-// goimports' rule plus a trailing /vN element of any N); a guess that is not
-// an identifier is skipped. Blank and dot imports are skipped. Not checked,
+// the last element after a trailing /vN, with a gopkg.in .vN suffix, a go-
+// prefix and a -go suffix stripped; more conservative than goimports); a
+// guess that is not an identifier is skipped, and a clash on a guessed name
+// says so. Blank and dot imports are skipped. Not checked,
 // because they need type information: dot imports, methods declared through
 // an alias receiver (type A = T; func (A) m() against func (*T) m()), and
 // clashes between a method and a struct field.
@@ -137,6 +139,8 @@ func check(dir string, tags []string) ([]string, int, error) {
 	decls := map[string]map[string][]token.Position{}
 	// package name -> import local name -> positions
 	imports := map[string]map[string][]token.Position{}
+	// package name -> import local names guessed from an unaliased path
+	guessed := map[string]map[string]bool{}
 	nfiles := 0
 	for _, e := range entries {
 		name := e.Name()
@@ -159,6 +163,7 @@ func check(dir string, tags []string) ([]string, int, error) {
 		if decls[pkg] == nil {
 			decls[pkg] = map[string][]token.Position{}
 			imports[pkg] = map[string][]token.Position{}
+			guessed[pkg] = map[string]bool{}
 		}
 		for _, im := range f.Imports {
 			name := importName(im)
@@ -168,6 +173,9 @@ func check(dir string, tags []string) ([]string, int, error) {
 			p := fset.Position(im.Pos())
 			p.Filename = filepath.Base(p.Filename)
 			imports[pkg][name] = append(imports[pkg][name], p)
+			if im.Name == nil {
+				guessed[pkg][name] = true
+			}
 		}
 		add := func(id *ast.Ident, key string) {
 			if id.Name == "_" {
@@ -219,7 +227,11 @@ func check(dir string, tags []string) ([]string, int, error) {
 			if len(dpos) == 0 {
 				continue
 			}
-			dups = append(dups, fmt.Sprintf("package %s: %s imported at %s and declared at %s", pkg, name, firstPos(ipos, 3), joinPos(dpos)))
+			line := fmt.Sprintf("package %s: %s imported at %s and declared at %s", pkg, name, firstPos(ipos, 3), joinPos(dpos))
+			if guessed[pkg][name] {
+				line += " (name guessed from the import path; if the package's real name differs, alias the import)"
+			}
+			dups = append(dups, line)
 		}
 	}
 	sort.Strings(dups)
@@ -229,19 +241,31 @@ func check(dir string, tags []string) ([]string, int, error) {
 	return dups, nfiles, nil
 }
 
-func joinPos(pos []token.Position) string {
+// sortedPos returns the positions as file:line, sorted by file name, then
+// line number.
+func sortedPos(pos []token.Position) []string {
+	pos = append([]token.Position(nil), pos...)
+	sort.Slice(pos, func(i, j int) bool {
+		if pos[i].Filename != pos[j].Filename {
+			return pos[i].Filename < pos[j].Filename
+		}
+		return pos[i].Line < pos[j].Line
+	})
 	where := make([]string, len(pos))
 	for i, p := range pos {
 		where[i] = fmt.Sprintf("%s:%d", p.Filename, p.Line)
 	}
-	sort.Strings(where)
-	return strings.Join(where, " and ")
+	return where
+}
+
+func joinPos(pos []token.Position) string {
+	return strings.Join(sortedPos(pos), " and ")
 }
 
 // firstPos is joinPos limited to the first limit positions, with a count of
 // the rest (a common package such as strings is imported by many files).
 func firstPos(pos []token.Position, limit int) string {
-	all := strings.Split(joinPos(pos), " and ")
+	all := sortedPos(pos)
 	if len(all) <= limit {
 		return strings.Join(all, " and ")
 	}
@@ -265,9 +289,10 @@ func importName(im *ast.ImportSpec) string {
 // guessName guesses the package name of an import path without loading it:
 // the last path element, after a trailing /vN element (any N, so
 // google.golang.org/api/iam/v1 gives iam), with a gopkg.in .vN suffix, a
-// go- prefix and a -go suffix stripped (goimports' rule: go-jose gives jose,
-// gax-go gives gax). It returns "" when the result is not an identifier, so
-// no clash is reported on a name it cannot stand behind.
+// go- prefix and a -go suffix stripped (go-jose gives jose, gax-go gives
+// gax). It returns "" when the result is not an identifier, so no clash is
+// reported on a name it cannot stand behind; goimports would instead cut
+// the name at the first non-identifier rune (my-lib gives my).
 func guessName(path string) string {
 	elems := strings.Split(path, "/")
 	last := elems[len(elems)-1]

@@ -17,6 +17,8 @@ package main
 import (
 	"bytes"
 	"go/token"
+	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"sort"
@@ -40,8 +42,13 @@ func TestCheck(t *testing.T) {
 		tags []string
 		want []string
 	}{
+		// Also a multi-param generic receiver and a name from a grouped
+		// iota const block (the parenthesized receiver is in
+		// TestCheckParenReceiver: gofmt strips it from a committed file).
 		{"testdata/dup", nil, []string{
+			"package p: Map.f declared at c_test.go:5 and d_test.go:3",
 			"package p: Server.helperForTest declared at a_test.go:5 and b_test.go:9",
+			"package p: b declared at c_test.go:9 and d_test.go:5",
 			"package p: putWarnings declared at a_test.go:3 and b_test.go:7",
 		}},
 		// init, _, methods of the same name on different receivers, a func
@@ -67,14 +74,14 @@ func TestCheck(t *testing.T) {
 		// clause. Blank and dot imports, methods and the external test
 		// package are not clashes.
 		{"testdata/imports", nil, []string{
-			"package p: gax imported at c_test.go:6 and declared at b_test.go:26",
-			"package p: iam imported at c_test.go:7 and declared at b_test.go:26",
-			"package p: iamcredentials imported at c_test.go:8 and declared at b_test.go:26",
-			"package p: jose imported at c_test.go:5 and declared at b_test.go:24",
-			"package p: rand imported at a_test.go:6 and declared at b_test.go:9",
+			"package p: gax imported at c_test.go:6 and declared at b_test.go:26 (name guessed from the import path; if the package's real name differs, alias the import)",
+			"package p: iam imported at c_test.go:7 and declared at b_test.go:26 (name guessed from the import path; if the package's real name differs, alias the import)",
+			"package p: iamcredentials imported at c_test.go:8 and declared at b_test.go:26 (name guessed from the import path; if the package's real name differs, alias the import)",
+			"package p: jose imported at c_test.go:5 and declared at b_test.go:24 (name guessed from the import path; if the package's real name differs, alias the import)",
+			"package p: rand imported at a_test.go:6 and declared at b_test.go:9 (name guessed from the import path; if the package's real name differs, alias the import)",
 			"package p: str imported at a_test.go:7 and declared at b_test.go:11",
-			"package p: strings imported at a_test.go:8 and b_test.go:3 and declared at b_test.go:7",
-			"package p: yaml imported at a_test.go:10 and declared at b_test.go:13",
+			"package p: strings imported at a_test.go:8 and b_test.go:3 and declared at b_test.go:7 (name guessed from the import path; if the package's real name differs, alias the import)",
+			"package p: yaml imported at a_test.go:10 and declared at b_test.go:13 (name guessed from the import path; if the package's real name differs, alias the import)",
 		}},
 	}
 	for _, c := range cases {
@@ -130,6 +137,11 @@ func TestFirstPos(t *testing.T) {
 	if got, want := firstPos(pos[:2], 2), "a.go:2 and d.go:1"; got != want {
 		t.Errorf("firstPos(2, 2) = %q, want %q", got, want)
 	}
+	// Lines sort as numbers, not as text.
+	lines := []token.Position{{Filename: "a.go", Line: 10}, {Filename: "a.go", Line: 9}}
+	if got, want := joinPos(lines), "a.go:9 and a.go:10"; got != want {
+		t.Errorf("joinPos = %q, want %q", got, want)
+	}
 }
 
 func TestGuessName(t *testing.T) {
@@ -150,5 +162,27 @@ func TestGuessName(t *testing.T) {
 		if got := guessName(path); got != want {
 			t.Errorf("guessName(%q) = %q, want %q", path, got, want)
 		}
+	}
+}
+
+// A parenthesized receiver, func ((T)) g(), is the same method as func (T)
+// g(). gofmt rewrites it to (T), so the fixture is written here.
+func TestCheckParenReceiver(t *testing.T) {
+	dir := t.TempDir()
+	for name, src := range map[string]string{
+		"a.go": "package p\n\ntype T struct{}\n\nfunc ((T)) g() {}\n\nfunc ((*T)) h() {}\n",
+		"b.go": "package p\n\nfunc (T) g() {}\n\nfunc (*T) h() {}\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, _, err := check(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"package p: T.g declared at a.go:5 and b.go:3", "package p: T.h declared at a.go:7 and b.go:5"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %q\nwant %q", got, want)
 	}
 }
