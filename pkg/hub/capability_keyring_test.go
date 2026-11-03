@@ -120,7 +120,7 @@ func capKeyring(t *testing.T, active, emit string, legacyReads []string, entries
 func allowVersionedRings(t *testing.T) {
 	t.Helper()
 	orig := keyringReleaseCheck
-	keyringReleaseCheck = func(*keyring.Keyring, *ServerConfig) error { return nil }
+	keyringReleaseCheck = func(*keyring.Keyring) error { return nil }
 	t.Cleanup(func() { keyringReleaseCheck = orig })
 }
 
@@ -138,13 +138,16 @@ func capRollout(t *testing.T, emit string) (a, b *keyring.Keyring) {
 	if emit == "legacy" {
 		reads = []string{"legacy", "gen1", "gen2"}
 	}
-	legacy := krEntry{id: "legacy", secret: krLegacySecret}
-	a = capKeyring(t, "gen1", emit, reads, legacy,
+	legacy := []krEntry{{id: "legacy", secret: krLegacySecret}}
+	if rolloutWithoutLegacy {
+		reads, legacy = withoutLegacyID(reads), nil
+	}
+	a = capKeyring(t, "gen1", emit, reads, append(legacy,
 		krEntry{id: "gen1", secret: krGen1Secret},
-		krEntry{id: "gen2", secret: krGen2Secret})
-	b = capKeyring(t, "gen2", emit, reads, legacy,
+		krEntry{id: "gen2", secret: krGen2Secret})...)
+	b = capKeyring(t, "gen2", emit, reads, append(legacy,
 		krEntry{id: "gen1", secret: krGen1Secret, signUntil: krTime(time.Hour), verifyUntl: krTime(48 * time.Hour)},
-		krEntry{id: "gen2", secret: krGen2Secret})
+		krEntry{id: "gen2", secret: krGen2Secret})...)
 	return a, b
 }
 
@@ -159,13 +162,15 @@ func capClosing(t *testing.T) *keyring.Keyring {
 }
 
 // newCapReplica builds a real hub Server over st with keyring k (nil: a
-// legacy-mode replica of the same deployment), sharing the legacy secret
-// as every other purpose requires, and the ring clock clk.
+// legacy-mode replica of the same deployment, keyed by the legacy secret
+// that the ring's "legacy" entry holds) and the ring clock clk.
 func newCapReplica(t *testing.T, st store.Store, k *keyring.Keyring, clk *krClock) *Server {
 	t.Helper()
 	cfg := testServerConfig()
 	cfg.Keyring = k
-	cfg.SharedSigningSecret = krLegacySecret
+	if k == nil {
+		cfg.SharedSigningSecret = krLegacySecret
+	}
 	cfg.KeyringNow = clk.now
 	srv, err := newTestHubServer(t, cfg, st)
 	require.NoError(t, err)
@@ -249,29 +254,29 @@ func TestValidateKeyringConfig_EmitLegacyActiveMustBeLegacyReader(t *testing.T) 
 	gen1 := krEntry{id: "gen1", secret: krGen1Secret}
 
 	bad := capKeyring(t, "gen1", "legacy", []string{"legacy"}, legacy, gen1)
-	err := validateKeyringConfig(ServerConfig{Keyring: bad, SharedSigningSecret: krLegacySecret})
+	err := validateKeyringConfig(ServerConfig{Keyring: bad})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "legacy_read_ids")
 	assert.NotContains(t, err.Error(), "gen1")
 	assertNoCapabilityKeyMaterial(t, err.Error())
-	_, err = New(ServerConfig{Keyring: bad, SharedSigningSecret: krLegacySecret}, nil)
+	_, err = New(ServerConfig{Keyring: bad}, nil)
 	require.Error(t, err, "New refuses before serving")
 
 	good := capKeyring(t, "gen1", "legacy", []string{"legacy", "gen1"}, legacy, gen1)
-	assert.NoError(t, validateKeyringConfig(ServerConfig{Keyring: good, SharedSigningSecret: krLegacySecret}))
+	assert.NoError(t, validateKeyringConfig(ServerConfig{Keyring: good}))
 	imported := capKeyring(t, "legacy", "legacy", []string{"legacy"}, legacy, gen1)
-	assert.NoError(t, validateKeyringConfig(ServerConfig{Keyring: imported, SharedSigningSecret: krLegacySecret}))
+	assert.NoError(t, validateKeyringConfig(ServerConfig{Keyring: imported}))
 
 	// A deadline already passed does not change membership.
 	expired := capKeyring(t, "gen1", "legacy", []string{"legacy", "gen1"}, legacy,
 		krEntry{id: "gen1", secret: krGen1Secret, signUntil: krTime(-48 * time.Hour), verifyUntl: krTime(-time.Hour)})
-	assert.NoError(t, validateKeyringConfig(ServerConfig{Keyring: expired, SharedSigningSecret: krLegacySecret}))
+	assert.NoError(t, validateKeyringConfig(ServerConfig{Keyring: expired}))
 
 	// Versioned emission issues key-ID-carrying values: the rule does not
 	// apply (the release check is bypassed only to reach it).
 	allowVersionedRings(t)
 	versioned := capKeyring(t, "gen1", "versioned", []string{"legacy"}, legacy, gen1)
-	assert.NoError(t, validateKeyringConfig(ServerConfig{Keyring: versioned, SharedSigningSecret: krLegacySecret}))
+	assert.NoError(t, validateKeyringConfig(ServerConfig{Keyring: versioned}))
 
 	// Legacy mode is unaffected.
 	assert.NoError(t, validateKeyringConfig(ServerConfig{Keyring: keyring.Legacy("s")}))
@@ -283,7 +288,7 @@ func TestValidateKeyringConfig_EmitLegacyActiveMustBeLegacyReader(t *testing.T) 
 // before serving, and the refusal names no key material.
 func TestNew_ReleaseCheckRefusesVersionedRing(t *testing.T) {
 	k := capKeyring(t, "legacy", "versioned", []string{"legacy"}, krEntry{id: "legacy", secret: krLegacySecret})
-	_, err := New(ServerConfig{Keyring: k, SharedSigningSecret: krLegacySecret}, nil)
+	_, err := New(ServerConfig{Keyring: k}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not supported in this release")
 	assertNoCapabilityKeyMaterial(t, err.Error())

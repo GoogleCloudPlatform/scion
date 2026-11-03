@@ -105,6 +105,8 @@ var (
 		`the test infrastructure marker class is not "test"`)
 	ErrTestAdminMarkerUnreadable = testAdminGateErr("G6", "marker_unreadable",
 		"the test infrastructure marker could not be read")
+	ErrTestAdminKeyringSigning = testAdminGateErr("G7", "keyring_signing",
+		"a keyring file (server.keyring_file) supplies deployment-wide signing keys; the test admin tier requires hub-local signing keys")
 	ErrTestAdminSharedSigningSecret = testAdminGateErr("G7", "shared_signing_secret",
 		"a shared signing secret (--session-secret / SCION_SERVER_SESSION_SECRET) is configured; the test admin tier requires hub-local signing keys")
 	ErrTestAdminPreconfiguredSigningKey = testAdminGateErr("G7", "preconfigured_signing_key",
@@ -192,6 +194,9 @@ func validateTestAdminGateConfig(cfg ServerConfig, hasStore bool) error {
 		return ErrTestAdminMarkerClassNotTest
 	case federationConfigured(&cfg.Federation):
 		return ErrTestAdminFederationConfigured
+	case managedSigning(cfg):
+		// Keyring mode refuses here, before SharedSigningSecret is read.
+		return ErrTestAdminKeyringSigning
 	case cfg.SharedSigningSecret != "":
 		return ErrTestAdminSharedSigningSecret
 	case len(cfg.UserTokenConfig.SigningKey) > 0 || len(cfg.AgentTokenConfig.SigningKey) > 0:

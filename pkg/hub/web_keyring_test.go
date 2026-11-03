@@ -96,7 +96,9 @@ func krKeyring(t *testing.T, active string, entries ...krEntry) *keyring.Keyring
 	require.NoError(t, err)
 	k, err := keyring.Parse(data)
 	require.NoError(t, err)
-	require.NoError(t, k.CheckSessionPilot())
+	// Through the release-check seam: a test that relaxes it (a ring without
+	// the "legacy" entry) gets that ring.
+	require.NoError(t, keyringReleaseCheck(k))
 	return k
 }
 
@@ -133,10 +135,21 @@ func newKRReplica(t *testing.T, st store.Store, k *keyring.Keyring, clk *krClock
 	// (the derivation a legacy-mode hub uses), so these cookie tests do not
 	// depend on which generation is active; hub.New builds it from the
 	// signing ring (see server_jwt_keyring_test.go).
-	legacy, ok := k.Signing().LegacySecret()
-	require.True(t, ok)
-	svc, err := NewUserTokenService(UserTokenConfig{SigningKey: deriveSharedSigningKey(legacy, SecretKeyUserSigningKey)})
-	require.NoError(t, err)
+	// A ring without the "legacy" entry (only under withRolloutWithoutLegacy)
+	// has no such derivation: the user token service is then built from the
+	// ring exactly as a keyring-mode hub builds it (initRingTokenServices),
+	// which is the service production hands the web server.
+	var svc *UserTokenService
+	if legacy, ok := k.Signing().LegacySecret(); ok {
+		var err error
+		svc, err = NewUserTokenService(UserTokenConfig{SigningKey: deriveSharedSigningKey(legacy, SecretKeyUserSigningKey)})
+		require.NoError(t, err)
+	} else {
+		require.True(t, rolloutWithoutLegacy, "a ring without the legacy entry outside withRolloutWithoutLegacy")
+		var err error
+		svc, err = newRingUserTokenService(k.Signing(), UserTokenConfig{}, clk.now)
+		require.NoError(t, err)
+	}
 	r.ws.userTokenSvc = svc
 	r.ws.MountHubAPI(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		r.hubAuth = req.Header.Get("Authorization")
@@ -215,15 +228,18 @@ func decodesUnderAny(ws *WebServer, c *http.Cookie) bool {
 // krRollout returns the keyrings of two replicas mid-rollout: A still has
 // gen1 active; B has activated gen2 and keeps gen1 as the outgoing entry
 // (issuance closed at T0+1h, verification until T0+48h). Both carry the
-// imported legacy entry, which every other purpose still uses.
+// imported legacy entry, unless rolloutWithoutLegacy is set.
 func krRollout(t *testing.T) (a, b *keyring.Keyring) {
-	legacy := krEntry{id: "legacy", secret: krLegacySecret}
-	a = krKeyring(t, "gen1", legacy,
+	legacy := []krEntry{{id: "legacy", secret: krLegacySecret}}
+	if rolloutWithoutLegacy {
+		legacy = nil
+	}
+	a = krKeyring(t, "gen1", append(legacy,
 		krEntry{id: "gen1", secret: krGen1Secret},
-		krEntry{id: "gen2", secret: krGen2Secret})
-	b = krKeyring(t, "gen2", legacy,
+		krEntry{id: "gen2", secret: krGen2Secret})...)
+	b = krKeyring(t, "gen2", append(legacy,
 		krEntry{id: "gen1", secret: krGen1Secret, signUntil: krTime(time.Hour), verifyUntl: krTime(48 * time.Hour)},
-		krEntry{id: "gen2", secret: krGen2Secret})
+		krEntry{id: "gen2", secret: krGen2Secret})...)
 	return a, b
 }
 
@@ -438,11 +454,11 @@ func TestWebKeyring_CookieSizeLimitKept(t *testing.T) {
 
 // TestNew_KeyringModeRefusesExplicitSigningKeys: explicit agent or user
 // JWT signing keys keep precedence in legacy mode but are refused with a
-// keyring file, as is a SharedSigningSecret that is not the keyring's
-// legacy entry.
+// keyring file, as is any non-empty SharedSigningSecret (the legacy secret
+// itself included): with a keyring file no purpose reads it.
 func TestNew_KeyringModeRefusesExplicitSigningKeys(t *testing.T) {
 	ka, _ := krRollout(t)
-	base := ServerConfig{Keyring: ka, SharedSigningSecret: krLegacySecret}
+	base := ServerConfig{Keyring: ka}
 	require.NoError(t, validateKeyringConfig(base))
 
 	agent := base
@@ -457,22 +473,17 @@ func TestNew_KeyringModeRefusesExplicitSigningKeys(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "UserTokenConfig.SigningKey")
 
-	mismatch := base
-	mismatch.SharedSigningSecret = "some-other-secret"
-	err = validateKeyringConfig(mismatch)
-	require.Error(t, err)
-	assert.NotContains(t, err.Error(), krLegacySecret)
-	assert.NotContains(t, err.Error(), "some-other-secret")
-	// The same mismatch with a secret of equal length, so the comparison
-	// runs over every byte instead of stopping at the length check.
-	sameLength := base
-	sameLength.SharedSigningSecret = "test-only-wrong0-session-secret"
-	require.Len(t, sameLength.SharedSigningSecret, len(krLegacySecret))
-	err = validateKeyringConfig(sameLength)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "SharedSigningSecret")
-	assert.NotContains(t, err.Error(), krLegacySecret)
-	assert.NotContains(t, err.Error(), sameLength.SharedSigningSecret)
+	for _, shared := range []string{krLegacySecret, "some-other-secret", " "} {
+		withShared := base
+		withShared.SharedSigningSecret = shared
+		err = validateKeyringConfig(withShared)
+		require.Error(t, err, "SharedSigningSecret %q", shared)
+		assert.Contains(t, err.Error(), "SharedSigningSecret must be empty")
+		assert.NotContains(t, err.Error(), krLegacySecret)
+		if strings.TrimSpace(shared) != "" {
+			assert.NotContains(t, err.Error(), shared)
+		}
+	}
 
 	// Legacy mode: explicit keys are allowed (precedence unchanged).
 	legacy := ServerConfig{Keyring: keyring.Legacy("s"), AgentTokenConfig: AgentTokenConfig{SigningKey: []byte("k")}}

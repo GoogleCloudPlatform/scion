@@ -568,10 +568,8 @@ func TestJWTRing_ServicesRefuseExplicitKeyAndNoActive(t *testing.T) {
 // seam to the release check New uses in production.
 func TestKeyringReleaseCheck_ProductionDefault(t *testing.T) {
 	versioned := jkRing(t, "versioned", "legacy", []string{"legacy"}, jkEntry{id: "legacy", secret: jkLegacySecret})
-	assert.Error(t, keyringReleaseCheck(versioned, nil), "the production default refuses emit versioned")
-	assert.Equal(t, versioned.CheckSessionPilot() == nil, keyringReleaseCheck(versioned, nil) == nil)
+	assert.Error(t, keyringReleaseCheck(versioned), "the production default refuses emit versioned")
+	assert.Equal(t, versioned.CheckSessionPilot() == nil, keyringReleaseCheck(versioned) == nil)
 	ok := jkRing(t, "legacy", "legacy", []string{"legacy"}, jkEntry{id: "legacy", secret: jkLegacySecret})
-	assert.NoError(t, keyringReleaseCheck(ok, nil))
-	assert.NoError(t, keyringReleaseCheck(ok, &ServerConfig{SharedSigningSecret: jkLegacySecret}))
-	assert.Error(t, keyringReleaseCheck(ok, &ServerConfig{SharedSigningSecret: jkLegacySecret + "x"}), "startup also requires SharedSigningSecret == the legacy entry")
+	assert.NoError(t, keyringReleaseCheck(ok))
 }

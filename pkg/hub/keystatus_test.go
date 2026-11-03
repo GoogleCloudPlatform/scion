@@ -156,7 +156,9 @@ func ksServer(t *testing.T, st store.Store, k *keyring.Keyring, clk *krClock) *S
 	cfg.HubID = encTestHubID
 	cfg.Keyring = k
 	cfg.KeyringConfigured = k != nil
-	cfg.SharedSigningSecret = krLegacySecret
+	if k == nil {
+		cfg.SharedSigningSecret = krLegacySecret
+	}
 	cfg.KeyringNow = clk.now
 	srv, err := newTestHubServer(t, cfg, st)
 	require.NoError(t, err)
@@ -730,7 +732,6 @@ func TestCheckKeyringFile_ParityWithValidateKeyringConfig(t *testing.T) {
 				cfg := DefaultServerConfig()
 				cfg.KeyringConfigured = true
 				cfg.Keyring = k
-				cfg.SharedSigningSecret = krLegacySecret
 				startupErr := validateKeyringConfig(cfg)
 				checkErr := CheckKeyringFile(k)
 				assert.Equal(t, startupErr == nil, checkErr == nil, "startup: %v; check: %v", startupErr, checkErr)

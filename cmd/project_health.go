@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/cobra"
 )
@@ -137,7 +138,7 @@ func runProjectHealth(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load settings: %w", err)
 	}
 
-	client, err := getHubClient(settings)
+	client, uat, err := getHubClientUAT(settings)
 	if err != nil {
 		return fmt.Errorf("failed to initialize Hub client: %w", err)
 	}
@@ -162,6 +163,11 @@ func runProjectHealth(cmd *cobra.Command, args []string) error {
 			}
 		}
 		if len(targetProjects) == 0 {
+			// A user access token without project:list sees an empty list
+			// (ptone/scion#5294).
+			if uat {
+				return hubsync.ScopedTokenProjectLookupEmptyError(query)
+			}
 			return fmt.Errorf("project '%s' not found on Hub", query)
 		}
 	} else {

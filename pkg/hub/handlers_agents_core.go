@@ -1609,6 +1609,15 @@ func (s *Server) createAgentInProject(
 		return
 	}
 
+	// The request's template, before any persistence or the existing-agent
+	// handling below: a template name or ID, never a host directory or a
+	// remote source (templateRefAllowed). Defaults are checked where they
+	// are filled in.
+	if !templateRefAllowed(req.Template) {
+		ValidationError(w, templateRefRefusal, nil)
+		return
+	}
+
 	// Verify project exists and get its configuration
 	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
@@ -1921,9 +1930,11 @@ func (s *Server) createAgentInProject(
 	}
 
 	// Apply project-level default template if no template specified in request
+	templateFromProjectDefault := false
 	if req.Template == "" && project != nil && project.Annotations != nil {
 		if dt := project.Annotations[projectSettingDefaultTemplate]; dt != "" {
 			req.Template = dt
+			templateFromProjectDefault = true
 		}
 	}
 
@@ -2003,6 +2014,24 @@ func (s *Server) createAgentInProject(
 	// as evidence — with one honest difference: that code can only log and do
 	// nothing, whereas here the caller is still on the other end of an HTTP
 	// request, so the ambiguous branch can and should return a real error.
+	// The template after defaults are filled in, checked again before the
+	// lookup, so an unmatched value can never reach a broker with local
+	// access as anything but a template name. A hub-default value that fails
+	// degrades like an unusable hub default; a project-default value is
+	// refused naming the setting; any other is refused.
+	if !templateRefAllowed(req.Template) {
+		if templateFromProjectDefault {
+			ValidationError(w, projectDefaultTemplateRefusal, nil)
+			return
+		}
+		if !templateFromHubDefault {
+			ValidationError(w, templateRefRefusal, nil)
+			return
+		}
+		s.warnHubDefaultTemplateUnusable(ctx, req.Template, projectID, "not a template name")
+		req.Template = ""
+	}
+
 	var resolvedTemplate *store.Template
 	if req.Template != "" {
 		resolvedTemplate, err = s.resolveTemplate(ctx, req.Template, projectID)
