@@ -478,6 +478,12 @@ interface ServerConfigResponse {
   env_overrides?: string[];
   /** Per env_overrides key: the environment value (masked) and whether it is in effect. */
   env_values?: Record<string, EnvKeyValue>;
+  /**
+   * The value this node runs with for a server key that start-up sets
+   * (a workstation default or a start flag), where it differs from the
+   * value shown (ptone/scion#3722). A secret key never has an entry.
+   */
+  running_values?: Record<string, RunningKeyValue>;
   public_url_status?: PublicURLStatus;
   observability_export?: HubObservabilityExport;
   /** Where the image_registry in effect comes from (read-only, ptone/scion#3916). */
@@ -515,6 +521,12 @@ interface ReloadResult {
   // in applied, next to the section names).
   file_applied?: string[];
   error?: string;
+}
+
+/** One running_values entry: the running value and its source ("startup"). */
+interface RunningKeyValue {
+  value: unknown;
+  source: string;
 }
 
 /**
@@ -1152,6 +1164,7 @@ export class ScionPageAdminServerConfig extends LitElement {
   // ── Settings-DB metadata (DB-backed hubs, any driver) ──
   @state() private envOverrides: string[] = [];
   @state() private envValues: Record<string, EnvKeyValue> = {};
+  @state() private runningValues: Record<string, RunningKeyValue> = {};
   @state() private publicUrlStatus: PublicURLStatus | null = null;
   @state() private imageRegistryProvenance: ImageRegistryProvenance | null = null;
   @state() private observabilityExport: HubObservabilityExport | null = null;
@@ -2266,6 +2279,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.envOverrides = data.env_overrides || [];
     this.envKeys = new Set(this.envOverrides);
     this.envValues = data.env_values || {};
+    this.runningValues = data.running_values || {};
     this.publicUrlStatus = data.public_url_status || null;
     this.imageRegistryProvenance = data.image_registry_provenance || null;
     this.observabilityExport = data.observability_export || null;
@@ -2523,7 +2537,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         placeholder=${WORKSTATION_BROKER_HOST_DEFAULT}
         @sl-input=${onInput}
       ></sl-input>`
-    )}${unset
+    )}${unset && !this.runningValues['server.broker.host']
       ? html`<span class="hint broker-host-effective"
           >Effective: ${WORKSTATION_BROKER_HOST_DEFAULT} (empty or 0.0.0.0 counts as unset)</span
         >`
@@ -2574,13 +2588,19 @@ export class ScionPageAdminServerConfig extends LitElement {
           : this.renderReadOnlyBadge(reason)}${this.envBadgeTemplate(
           false,
           cause
-        )}${configuredLabel}<span class="read-only-value">${displayValue || '—'}</span
+        )}${this.renderRunningValueLine(koanfKey)}${configuredLabel}<span class="read-only-value"
+          >${displayValue || '—'}</span
         >${this.renderEnvValueLine(env.ev, cause)}${this.renderFieldErrors(koanfKey)}`;
     }
     if (reason) {
-      return html`${this.renderReadOnlyBadge(reason)}<span class="read-only-value"
-          >${displayValue || '—'}</span
-        >${this.renderFieldErrors(koanfKey)}`;
+      const running = this.renderRunningValueLine(koanfKey);
+      return html`${this.renderReadOnlyBadge(reason)}${running}${running === nothing
+          ? nothing
+          : html`<span class="hint env-value-configured-label"
+              >Configured value (settings.yaml or default), not the value in effect:</span
+            >`}<span class="read-only-value">${displayValue || '—'}</span>${this.renderFieldErrors(
+          koanfKey
+        )}`;
     }
     // A key whose environment value is in effect is not superseded by the
     // saved value, whatever superseded_keys says.
@@ -2588,9 +2608,23 @@ export class ScionPageAdminServerConfig extends LitElement {
     const envInEffect = own !== null && hasInEffect(own.ev) && own.ev.in_effect;
     return html`${envInEffect
       ? nothing
-      : this.renderSupersededBadge(koanfKey)}${editableTemplate}${this.renderFieldErrors(
+      : this.renderSupersededBadge(koanfKey)}${editableTemplate}${this.renderRunningValueLine(
       koanfKey
-    )}`;
+    )}${this.renderFieldErrors(koanfKey)}`;
+  }
+
+  /**
+   * The value this node runs with for a key start-up sets (a workstation
+   * default or a start flag), when the server reports that it differs from
+   * the value shown (running_values, ptone/scion#3722). Nothing otherwise.
+   */
+  private renderRunningValueLine(koanfKey: string): typeof nothing | ReturnType<typeof html> {
+    const rv = this.runningValues[koanfKey];
+    if (!rv) return nothing;
+    const text = formatEnvValue({ value: rv.value }) || '—';
+    return html`<span class="env-value-in-effect running-value-in-effect"
+      >In effect on this node: <code>${text}</code> (start-up default or flag)</span
+    >`;
   }
 
   /**
@@ -2638,8 +2672,8 @@ export class ScionPageAdminServerConfig extends LitElement {
    * when the admin picks another mode in the form.
    *
    * When the mode itself is read-only (env-pinned or deployment-managed),
-   * the form mode is not the effective mode and the page cannot see the
-   * effective one, so the form mode must not drive clearing
+   * the form mode is not the effective mode (the account field follows
+   * effectiveGCPIdentityMode), so the form mode must not drive clearing
    * (ptone/scion#2720). In that case the account is sent only when the
    * admin edited it. An unchanged account is left out, so the server
    * neither clears it nor re-checks it on unrelated saves. In the db tier
@@ -2652,6 +2686,20 @@ export class ScionPageAdminServerConfig extends LitElement {
       return said === this.loadedGCPIdentitySAID ? undefined : said;
     }
     return this.defaultGCPIdentityMode === 'assign' ? said : '';
+  }
+
+  /**
+   * The hub default GCP identity mode this node runs with: the environment
+   * value when env_values reports it in effect (a file-tier hub), else the
+   * form value (ptone/scion#3071). It decides whether the account field
+   * shows; the save still sends the mode only when the form may edit it.
+   */
+  private get effectiveGCPIdentityMode(): string {
+    const env = envValueFor(this.envValues, ['default_gcp_identity_mode']);
+    if (env && hasInEffect(env.ev) && env.ev.in_effect && typeof env.ev.value === 'string') {
+      return env.ev.value;
+    }
+    return this.defaultGCPIdentityMode;
   }
 
   private buildLayer1Payload(): Record<string, unknown> {
@@ -4754,7 +4802,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                       </sl-select>`
                   )}
                 </div>
-                ${this.defaultGCPIdentityMode === 'assign'
+                ${this.effectiveGCPIdentityMode === 'assign'
                   ? html`
                       <div class="form-field">
                         <label>Default GCP Identity Service Account</label>
