@@ -64,11 +64,12 @@ const (
 	// hubInstanceTickJitter). With the read timeout, a healthy answer is
 	// never older than about 22 seconds.
 	asyncStartGateRefreshInterval = asyncStartGateTTL / 2
-	// asyncStartGateReadFailed starts the reason of a false answer caused
-	// by a registry read error. Such refreshes bypass the once-per-change
-	// logging: their warning is rate-limited by readFailWarnedAt (at most
-	// once per hubInstanceWarnEvery), because the error text can differ on
-	// every read.
+	// asyncStartGateReadFailed starts the reason computeAsyncStartGate
+	// returns for a registry read error, and is the reason class the gate
+	// stores for one (the error text can differ on every read). Such
+	// refreshes bypass the once-per-change logging: their warning is
+	// rate-limited by readFailWarnedAt (at most once per
+	// hubInstanceWarnEvery).
 	asyncStartGateReadFailed = "hub instance registry read failed"
 	// asyncStartGatePanicked is the reason stored when a refresh panicked.
 	// The panic is logged at error with a stack, rate-limited by
@@ -86,12 +87,18 @@ type asyncStartGate struct {
 	value       bool
 	refreshedAt time.Time // zero until the first refresh completes
 	inFlight    bool
-	// reason is the last reason the value is false ("" while true). An
-	// answer that is not a read error or a panic is logged once per change
-	// of its value or reason; read errors and panics have their own rate
-	// limits below.
+	// reason is the current reason the value is false ("" while true):
+	// asyncStartGateReadFailed for any read error, asyncStartGatePanicked
+	// for a panic, otherwise the computed reason.
 	reason string
-	logged bool
+	// loggedValue and loggedReason are the last answer logged by the
+	// once-per-change rule (logged is false until the first). Read errors
+	// and panics have their own rate limits below and do not update them,
+	// so an answer that returns after a failed read (a flapping registry)
+	// is not logged again unless it differs from the last one logged.
+	loggedValue  bool
+	loggedReason string
+	logged       bool
 	// readFailWarnedAt is when a read error was last logged, and
 	// readFailSuppressed counts the read errors since then that were not.
 	readFailWarnedAt   time.Time
@@ -175,15 +182,14 @@ func (s *Server) refreshAsyncStartGate(ctx context.Context) {
 		return
 	}
 	now := asyncStartGateNow()
+	readFailed := recovered == nil && strings.HasPrefix(reason, asyncStartGateReadFailed+":")
 	g.refreshedAt = now
-	changed := !g.logged || g.value != value || g.reason != reason
 	g.value = value
 	g.reason = reason
-	g.logged = true
-	log := s.agentLifecycleLog
-	if log == nil {
-		log = slog.Default()
+	if readFailed {
+		g.reason = asyncStartGateReadFailed
 	}
+	log := s.asyncStartGateLog()
 	switch {
 	case recovered != nil:
 		if !g.panicWarnedAt.IsZero() && now.Sub(g.panicWarnedAt) < hubInstanceWarnEvery {
@@ -200,7 +206,7 @@ func (s *Server) refreshAsyncStartGate(ctx context.Context) {
 			"panic", fmt.Sprint(recovered),
 			"suppressed_since_last_log", suppressed,
 			"stack", string(stack))
-	case strings.HasPrefix(reason, asyncStartGateReadFailed+":"):
+	case readFailed:
 		if !g.readFailWarnedAt.IsZero() && now.Sub(g.readFailWarnedAt) < hubInstanceWarnEvery {
 			g.readFailSuppressed++
 			return
@@ -209,45 +215,72 @@ func (s *Server) refreshAsyncStartGate(ctx context.Context) {
 		g.readFailSuppressed = 0
 		g.readFailWarnedAt = now
 		log.Warn("async start disabled: "+reason, "suppressed_since_last_log", suppressed)
-	case !changed:
-	case value:
-		log.Info("async start enabled: every live hub instance advertises " + api.HubInstanceFeatureAsyncStartV1)
+	case g.logged && g.loggedValue == value && g.loggedReason == reason:
+		// Unchanged since the last answer logged by this rule.
 	default:
-		log.Warn("async start disabled: " + reason)
+		g.logged, g.loggedValue, g.loggedReason = true, value, reason
+		if value {
+			log.Info("async start enabled: every live hub instance advertises " + api.HubInstanceFeatureAsyncStartV1)
+		} else {
+			log.Warn("async start disabled: " + reason)
+		}
 	}
 }
 
-// startAsyncStartGateRefresher starts the gate's refresh loop on ctx (the
-// server-lifetime context) and records its done channel on the server, so
-// CleanupBackgroundResources can join it (stopAsyncStartGateRefresher).
+// asyncStartGateLog is the logger for the gate's lines: the agent
+// lifecycle log, or slog.Default when it is not set.
+func (s *Server) asyncStartGateLog() *slog.Logger {
+	if s.agentLifecycleLog != nil {
+		return s.agentLifecycleLog
+	}
+	return slog.Default()
+}
+
+// asyncStartGateRefresherStop is the handle CleanupBackgroundResources
+// uses to stop the gate's refresh loop: cancel ends the loop's own context
+// and done is closed when its goroutine has exited.
+type asyncStartGateRefresherStop struct {
+	cancel context.CancelFunc
+	done   <-chan struct{}
+}
+
+// startAsyncStartGateRefresher starts the gate's refresh loop on a child of
+// ctx (the server-lifetime context) and records its stop handle on the
+// server, so CleanupBackgroundResources can stop and join the loop
+// (stopAsyncStartGateRefresher) before the registry row is marked stopped.
 // See startAsyncStartGateRefresherEvery.
 func (s *Server) startAsyncStartGateRefresher(ctx context.Context) {
-	done := s.startAsyncStartGateRefresherEvery(ctx, func() time.Duration {
+	loopCtx, cancel := context.WithCancel(ctx)
+	done := s.startAsyncStartGateRefresherEvery(loopCtx, func() time.Duration {
 		return jitteredInterval(asyncStartGateRefreshInterval)
 	})
 	s.mu.Lock()
-	s.asyncStartGateRefresherDone = done
+	s.asyncStartGateRefresherStop = &asyncStartGateRefresherStop{cancel: cancel, done: done}
 	s.mu.Unlock()
 }
 
-// stopAsyncStartGateRefresher waits, at most asyncStartGateStopWait, for
-// the refresh loop to exit once the server context has been cancelled, so
-// no registry read runs after the store closes. It is a no-op when the
-// loop was never started.
+// stopAsyncStartGateRefresher cancels the refresh loop's context and waits
+// for the loop to exit, at most asyncStartGateStopWait (one bounded read).
+// CleanupBackgroundResources calls it before it marks this instance's
+// registry row stopped, so a tick cannot read the registry during shutdown
+// (a lone replica would then see no live row and warn), and before the
+// store closes. It is a no-op when the loop was never started, and safe to
+// call twice.
 func (s *Server) stopAsyncStartGateRefresher() {
 	s.mu.Lock()
-	done := s.asyncStartGateRefresherDone
-	s.asyncStartGateRefresherDone = nil
+	h := s.asyncStartGateRefresherStop
+	s.asyncStartGateRefresherStop = nil
 	s.mu.Unlock()
-	if done == nil {
+	if h == nil {
 		return
 	}
+	h.cancel()
 	timer := time.NewTimer(asyncStartGateStopWait)
 	defer timer.Stop()
 	select {
-	case <-done:
+	case <-h.done:
 	case <-timer.C:
-		slog.Warn("async start gate: refresh loop did not stop in time", "wait", asyncStartGateStopWait)
+		s.asyncStartGateLog().Warn("async start gate: refresh loop did not stop in time", "wait", asyncStartGateStopWait)
 	}
 }
 

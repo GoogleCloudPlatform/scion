@@ -413,10 +413,50 @@ func TestAsyncStartGate_RefresherStopsOnCancel(t *testing.T) {
 	assert.Equal(t, reads, st.reads.Load(), "no read after the loop exited")
 }
 
+// TestAsyncStartGate_StopCancelsLoopOwnContext pins that the refresh loop
+// runs on its own child context: stopAsyncStartGateRefresher ends it while
+// the server context is still live (CleanupBackgroundResources stops it
+// before the registry row is marked stopped), takes the handle, and is a
+// no-op the second time.
+func TestAsyncStartGate_StopCancelsLoopOwnContext(t *testing.T) {
+	now := time.Now()
+	st := &hubInstanceListStore{now: now, rows: []store.HubInstance{hubRow(t, "a", now, time.Second, false, api.HubInstanceFeatureAsyncStartV1)}}
+	srv := &Server{store: st}
+	setAsyncStartExperiment(t, srv, true)
+
+	serverCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv.startAsyncStartGateRefresher(serverCtx)
+	require.Eventually(t, func() bool { return st.reads.Load() >= 1 }, 5*time.Second, time.Millisecond, "the first tick ran")
+	srv.mu.RLock()
+	h := srv.asyncStartGateRefresherStop
+	srv.mu.RUnlock()
+	require.NotNil(t, h)
+
+	stopped := make(chan struct{})
+	go func() { srv.stopAsyncStartGateRefresher(); close(stopped) }()
+	select {
+	case <-stopped:
+	case <-time.After(asyncStartGateStopWait - time.Second):
+		t.Fatal("stopAsyncStartGateRefresher waited: the loop did not stop on its own context")
+	}
+	select {
+	case <-h.done:
+	default:
+		t.Fatal("the loop had not exited when stopAsyncStartGateRefresher returned")
+	}
+	require.NoError(t, serverCtx.Err(), "the server context was never cancelled")
+	srv.mu.RLock()
+	assert.Nil(t, srv.asyncStartGateRefresherStop)
+	srv.mu.RUnlock()
+	srv.stopAsyncStartGateRefresher() // a second call is a no-op
+}
+
 // TestAsyncStartGate_ReadErrorWarnRateLimited pins that a persistent read
 // failure, whose error text differs on every read, warns once per
-// hubInstanceWarnEvery rather than on every refresh, and that recovery is
-// logged once.
+// hubInstanceWarnEvery rather than on every refresh, that recovery is
+// logged once, and that a registry flapping between failed and good reads
+// logs nothing more: the good answer equals the last one logged.
 func TestAsyncStartGate_ReadErrorWarnRateLimited(t *testing.T) {
 	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
 	advance := fakeAsyncStartGateClock(t, now)
@@ -432,6 +472,10 @@ func TestAsyncStartGate_ReadErrorWarnRateLimited(t *testing.T) {
 		assert.False(t, srv.asyncStartAllowed())
 		advance(asyncStartGateRefreshInterval)
 	}
+	g := &srv.asyncStartGate
+	g.mu.Lock()
+	assert.Equal(t, asyncStartGateReadFailed, g.reason, "a read error stores the reason class, not the error text")
+	g.mu.Unlock()
 	warns, infos := h.counts()
 	assert.Equal(t, 1, warns, "10 failing refreshes warn once")
 	assert.Equal(t, 0, infos)
@@ -450,6 +494,24 @@ func TestAsyncStartGate_ReadErrorWarnRateLimited(t *testing.T) {
 	assert.Equal(t, 2, warns)
 	assert.Equal(t, 1, infos, "recovery is logged once")
 	assert.True(t, srv.asyncStartAllowed())
+
+	// Flapping: failed and good reads alternate, inside one warn window.
+	good := []store.HubInstance{hubRow(t, "a", now, time.Second, false, api.HubInstanceFeatureAsyncStartV1)}
+	for i := range 10 {
+		advance(asyncStartGateRefreshInterval)
+		st.set(nil, fmt.Errorf("db blip %d", i))
+		srv.asyncStartGateRefreshTick(ctx)
+		advance(asyncStartGateRefreshInterval)
+		st.set(good, nil)
+		srv.asyncStartGateRefreshTick(ctx)
+		assert.True(t, srv.asyncStartAllowed())
+	}
+	warns, infos = h.counts()
+	assert.Equal(t, 3, warns, "the flapping reads warn once more, when the 5-minute window reopens (the 10th failed read)")
+	assert.Equal(t, 1, infos, "a recovery to the last logged answer is not logged again")
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	assert.Equal(t, "", g.reason)
 }
 
 // gateLogRecorder keeps the level, message and attributes of every record.

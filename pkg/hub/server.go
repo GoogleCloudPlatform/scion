@@ -2438,10 +2438,10 @@ type Server struct {
 	// asyncStartGate caches whether every live hub instance advertises
 	// async_start_v1 (async_start_gate.go). The zero value reads false.
 	asyncStartGate asyncStartGate
-	// asyncStartGateRefresherDone is closed when the gate's refresh loop
-	// exits; set by startAsyncStartGateRefresher, taken (and cleared) by
+	// asyncStartGateRefresherStop stops the gate's refresh loop; set by
+	// startAsyncStartGateRefresher, taken (and cleared) by
 	// stopAsyncStartGateRefresher. Guarded by mu.
-	asyncStartGateRefresherDone <-chan struct{}
+	asyncStartGateRefresherStop *asyncStartGateRefresherStop
 
 	// onListening runs once Start has bound the hub API listener
 	// (SetOnListening; guarded by mu).
@@ -7101,8 +7101,9 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// Keep the async start gate's answer fresh while hub.async_agent_start
 	// is on (ptone/scion#7250); it reads nothing while the experiment is
 	// off. Started after the registry, so this replica's own row usually
-	// exists for its first read. It exits when the context is cancelled;
-	// CleanupBackgroundResources joins it (stopAsyncStartGateRefresher).
+	// exists for its first read. It runs on its own child context;
+	// CleanupBackgroundResources cancels and joins it
+	// (stopAsyncStartGateRefresher) before the registry row is stopped.
 	s.startAsyncStartGateRefresher(registryCtx)
 
 	// Start the lifecycle outbox drainer, only when it has work.
@@ -7265,6 +7266,12 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		// session gets GoAway and the relay deletes its rows (bounded by ctx).
 		s.shutdownConduitRelay(ctx)
 
+		// Stop and join the async start gate's refresh loop first (bounded:
+		// at most one registry read), so no gate tick reads the registry
+		// once this instance's row is marked stopped below (a lone replica
+		// would see no live row and log "async start disabled").
+		s.stopAsyncStartGateRefresher()
+
 		// Stop the hub-instance registry loop, join it, then mark this
 		// instance's row stopped (bounded by hubInstanceStopBudget), so the
 		// health summary shows a clean stop as stopped rather than stale.
@@ -7293,11 +7300,6 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		if s.ctxCancel != nil {
 			s.ctxCancel()
 		}
-
-		// Join the async start gate's refresh loop (bounded: at most one
-		// registry read, which the cancelled ctx above ends) while the
-		// store is still open.
-		s.stopAsyncStartGateRefresher()
 
 		// Let a scheduled chat message being delivered finish (bounded)
 		// while the stores and event publisher are still open.

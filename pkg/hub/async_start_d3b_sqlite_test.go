@@ -635,9 +635,10 @@ func TestStartBackgroundServices_RefreshesAsyncStartGate(t *testing.T) {
 	}, 30*time.Second, 10*time.Millisecond, "the refresh loop read the registry with no start")
 
 	srv.mu.RLock()
-	done := srv.asyncStartGateRefresherDone
+	h := srv.asyncStartGateRefresherStop
 	srv.mu.RUnlock()
-	require.NotNil(t, done, "the loop's done channel is recorded")
+	require.NotNil(t, h, "the loop's stop handle is recorded")
+	done := h.done
 	require.NoError(t, srv.CleanupBackgroundResources(context.Background()))
 	select {
 	case <-done:
@@ -646,7 +647,7 @@ func TestStartBackgroundServices_RefreshesAsyncStartGate(t *testing.T) {
 	}
 	srv.mu.RLock()
 	defer srv.mu.RUnlock()
-	assert.Nil(t, srv.asyncStartGateRefresherDone, "CleanupBackgroundResources took the loop's done channel to join it")
+	assert.Nil(t, srv.asyncStartGateRefresherStop, "CleanupBackgroundResources took the loop's stop handle to join it")
 }
 
 // newAsyncStartFixture is newClaimFixture (start claims on) with an
