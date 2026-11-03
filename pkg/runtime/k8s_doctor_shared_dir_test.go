@@ -254,8 +254,39 @@ func TestDiagnosticsSharedDirClaimClasses_ListCapped(t *testing.T) {
 func TestDiagnosticsSharedDirClaimClasses_AllMatch(t *testing.T) {
 	rt, _ := sharedDirDoctorRuntime(sharedDirClaim("agents", "scion-shared-p-cache", strPtr("rwx-files"), corev1.ClaimBound))
 	report := rt.RunDiagnostics(DiagnosticOpts{Namespace: "agents", SharedDirStorageClass: "rwx-files"})
-	if c := mustCheck(t, report, sharedDirClaimClassesCheck); c.Status != "pass" {
+	c := mustCheck(t, report, sharedDirClaimClassesCheck)
+	if c.Status != "pass" {
 		t.Fatalf("status = %q, want pass: %+v", c.Status, c)
+	}
+	if want := `The 1 shared-dir claim in namespace "agents" uses StorageClass "rwx-files"`; c.Message != want {
+		t.Errorf("message = %q, want %q", c.Message, want)
+	}
+
+	rt, _ = sharedDirDoctorRuntime(
+		sharedDirClaim("agents", "scion-shared-p-cache", strPtr("rwx-files"), corev1.ClaimBound),
+		sharedDirClaim("agents", "scion-shared-p-data", strPtr("rwx-files"), corev1.ClaimBound),
+	)
+	report = rt.RunDiagnostics(DiagnosticOpts{Namespace: "agents", SharedDirStorageClass: "rwx-files"})
+	if c := mustCheck(t, report, sharedDirClaimClassesCheck); c.Message != `All 2 shared-dir claims in namespace "agents" use StorageClass "rwx-files"` {
+		t.Errorf("message = %q", c.Message)
+	}
+}
+
+func TestDiagnosticsSharedDirClaimClasses_NoClaims(t *testing.T) {
+	rt, _ := sharedDirDoctorRuntime()
+	report := rt.RunDiagnostics(DiagnosticOpts{Namespace: "agents", SharedDirStorageClass: "rwx-files"})
+	c := mustCheck(t, report, sharedDirClaimClassesCheck)
+	if c.Status != "pass" || c.Message != `No shared-dir claims in namespace "agents"` {
+		t.Fatalf("check = %+v, want a pass saying there are no claims", c)
+	}
+}
+
+func TestDiagnosticsSharedDirClaimClasses_SingleMismatch(t *testing.T) {
+	rt, _ := sharedDirDoctorRuntime(sharedDirClaim("agents", "scion-shared-p-cache", strPtr("standard"), corev1.ClaimBound))
+	report := rt.RunDiagnostics(DiagnosticOpts{Namespace: "agents", SharedDirStorageClass: "rwx-files"})
+	c := mustCheck(t, report, sharedDirClaimClassesCheck)
+	if !strings.HasPrefix(c.Message, `1 shared-dir claim in namespace "agents" uses a storage class other than "rwx-files": `) {
+		t.Errorf("message = %q", c.Message)
 	}
 }
 

@@ -150,10 +150,19 @@ func (r *KubernetesRuntime) checkSharedDirClaimClasses(namespace string, opts Di
 		differing = append(differing, entry+")")
 	}
 	if len(differing) == 0 {
+		var msg string
+		switch n := len(list.Items); n {
+		case 0:
+			msg = fmt.Sprintf("No shared-dir claims in namespace %q", namespace)
+		case 1:
+			msg = fmt.Sprintf("The 1 shared-dir claim in namespace %q uses StorageClass %q", namespace, class)
+		default:
+			msg = fmt.Sprintf("All %s in namespace %q use StorageClass %q", sharedDirClaimCount(n), namespace, class)
+		}
 		return CheckResult{
 			Name:    sharedDirClaimClassesCheck,
 			Status:  "pass",
-			Message: fmt.Sprintf("All %d shared-dir claims in namespace %q use StorageClass %q", len(list.Items), namespace, class),
+			Message: msg,
 		}, true
 	}
 
@@ -163,8 +172,12 @@ func (r *KubernetesRuntime) checkSharedDirClaimClasses(namespace string, opts Di
 	if total > sharedDirClaimClassesListMax {
 		shown = differing[:sharedDirClaimClassesListMax]
 	}
-	msg := fmt.Sprintf("%d shared-dir claims in namespace %q use a storage class other than %q: %s",
-		total, namespace, class, strings.Join(shown, ", "))
+	verb := "use"
+	if total == 1 {
+		verb = "uses"
+	}
+	msg := fmt.Sprintf("%s in namespace %q %s a storage class other than %q: %s",
+		sharedDirClaimCount(total), namespace, verb, class, strings.Join(shown, ", "))
 	if total > len(shown) {
 		msg += fmt.Sprintf(", and %d more", total-len(shown))
 	}
@@ -177,4 +190,12 @@ func (r *KubernetesRuntime) checkSharedDirClaimClasses(namespace string, opts Di
 			"may set it. Delete a claim only if its class is really wrong, and only while no agent uses it (its data is lost); " +
 			"the next start creates it again",
 	}, true
+}
+
+// sharedDirClaimCount is "1 shared-dir claim" or "N shared-dir claims".
+func sharedDirClaimCount(n int) string {
+	if n == 1 {
+		return "1 shared-dir claim"
+	}
+	return fmt.Sprintf("%d shared-dir claims", n)
 }
