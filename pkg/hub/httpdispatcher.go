@@ -177,7 +177,7 @@ const githubTokenSourceProjectLabel = "scion.dev/github-token-source-project"
 // project's own installation association before minting.
 //
 // Every token delivery leg that starts from an agent resolves its source
-// here: agent create, the lifecycle injection at start and restart, and the
+// here: agent create, the start/restart token step, and the
 // agent token-refresh endpoint. A refresh therefore names exactly the
 // project a create would, and never more.
 func resolveGitHubMintProject(ctx context.Context, st store.Store, minter GitHubAppTokenMinter, log *slog.Logger, agent *store.Agent, project *store.Project) *store.Project {

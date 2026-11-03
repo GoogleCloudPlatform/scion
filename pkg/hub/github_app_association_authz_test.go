@@ -1026,11 +1026,11 @@ func TestGitHubInstallationBindingAnnotation_NotWritableViaSettingsOrClone(t *te
 // --- token refresh resolves its source exactly like create --------------------
 
 // The agent token-refresh endpoint resolves the token source through the
-// same resolver as agent create and the lifecycle injection: the agent's own
+// same resolver as agent create and the start/restart token step: the agent's own
 // project, or the token-source project label only when the agent's source
 // user may create agents there, and in either case only when that project's
 // association is authorized at mint. For each case the refresh outcome
-// matches the lifecycle injection's. Revert check: with the refresh reading
+// matches the start/restart token step's. Revert check: with the refresh reading
 // only the agent's own project, the authorized-source case gets 400 while
 // create delivers a token; with the label honoured without the source gate,
 // the outsider case mints.
@@ -1069,7 +1069,7 @@ func TestGitHubTokenRefresh_ResolvesSourceLikeCreate(t *testing.T) {
 	require.NoError(t, err)
 
 	// refreshAndCreate runs the refresh endpoint and the create-time
-	// lifecycle injection for agent and reports both outcomes and the
+	// start/restart token step for agent and reports both outcomes and the
 	// number of mints the refresh made.
 	refreshAndCreate := func(t *testing.T) (refreshCode int, refreshToken, createToken string, refreshMints int) {
 		t.Helper()

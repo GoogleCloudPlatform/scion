@@ -325,9 +325,9 @@ func TestDispatch_GitHubAppTokenOnlyForOwnProject(t *testing.T) {
 // GitHub host stays withheld.
 // Mutant this catches: reporting a token-source project's token as the
 // agent's own App token (dropping the mintProject.ID == project.ID check at
-// either site); the attacker-host token remote is then sent.
+// either site); the token remote for the non-GitHub host is then sent.
 func TestDispatch_AuthorizedSourceTokenNotProjectBound(t *testing.T) {
-	const attacker = "attacker.example/org/repo"
+	const nonGitHubRemote = "other.example/org/repo"
 	for _, shared := range []bool{false, true} {
 		for _, op := range personalTokenDispatches {
 			mode := "clone-per-agent"
@@ -335,7 +335,7 @@ func TestDispatch_AuthorizedSourceTokenNotProjectBound(t *testing.T) {
 				mode = "shared-workspace"
 			}
 			t.Run(mode+"/"+op.name, func(t *testing.T) {
-				f := newPersonalTokenFixture(t, personalTokenOpts{gitRemote: attacker, shared: shared, sourceLabel: true, allowSource: true})
+				f := newPersonalTokenFixture(t, personalTokenOpts{gitRemote: nonGitHubRemote, shared: shared, sourceLabel: true, allowSource: true})
 				require.NoError(t, op.dispatch(context.Background(), f))
 				got, sent := op.sent(f, shared)
 				require.True(t, sent, "fixture check: the clone settings were not sent")
@@ -343,7 +343,7 @@ func TestDispatch_AuthorizedSourceTokenNotProjectBound(t *testing.T) {
 				assert.Equal(t, tid("project-token-source"), f.minter.projectID, "minted from the token-source project's installation")
 				env := resolvedEnvOf(f, op.name)
 				assert.Equal(t, "github-app-token", env["GITHUB_TOKEN"], "the source token is delivered as GITHUB_TOKEN")
-				assert.Empty(t, got, "a token-source project's token is not project-bound: the attacker-host token remote must be withheld")
+				assert.Empty(t, got, "a token-source project's token is not project-bound: the token remote for a non-GitHub host must be withheld")
 			})
 		}
 	}
@@ -351,7 +351,7 @@ func TestDispatch_AuthorizedSourceTokenNotProjectBound(t *testing.T) {
 
 // injectLifecycleGitHubToken returns a token as the agent's own App token
 // only when it was minted for the agent's own project.
-func TestInjectLifecycleGitHubToken_SourceTokenIsNotOwn(t *testing.T) {
+func TestLifecycleGitHubToken_SourceTokenIsNotOwn(t *testing.T) {
 	f := newPersonalTokenFixture(t, personalTokenOpts{gitRemote: "github.com/org/repo", sourceLabel: true, allowSource: true})
 	env := make(map[string]string)
 	var classifications map[string]api.EnvKind
