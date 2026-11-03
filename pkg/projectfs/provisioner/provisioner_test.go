@@ -43,7 +43,8 @@ func permBits(t *testing.T, path string) uint32 {
 	t.Helper()
 	var st syscall.Stat_t
 	require.NoError(t, syscall.Stat(path, &st))
-	return st.Mode & 0o7777
+	// Stat_t.Mode is uint32 on linux and uint16 on darwin.
+	return uint32(st.Mode) & 0o7777
 }
 
 // OpenStateDir creates <ProjectRoot>/provision with the leaf contract and
