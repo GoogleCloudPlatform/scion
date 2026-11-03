@@ -34,7 +34,7 @@ const SchemaVersion = 1
 
 // TipNote heads every plan: the plan proposes, it never applies, and it
 // prints no harness env value unless asked.
-const TipNote = "Proposed only: nothing was written, registered or changed. Instance keys and names are proposals you may edit. Harness env values are shown as " + RedactedValue + "; --show-env-values prints them in the human output, which then contains secrets and must not be shared."
+const TipNote = "Proposed only: nothing was written, registered or changed. Instance keys and names are proposals you may edit. Harness env values are redacted: shown as " + RedactedValue + " in the human output and omitted from JSON (keys only); --show-env-values prints them in the human output, which then contains secrets and must not be shared."
 
 // RedactedValue replaces a harness env value in the plan.
 const RedactedValue = "<redacted>"

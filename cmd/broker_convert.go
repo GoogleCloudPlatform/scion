@@ -71,7 +71,8 @@ Sections 4 and 5 use your Hub login and this host's registered Runtime Broker
 ID. With --skip-hub, or when no Hub is configured, only the local sections are
 printed.
 
-Harness env values are shown as <redacted>, in both formats. With
+Harness env values are redacted: shown as <redacted> in the human output,
+and omitted from the JSON plan, which lists their keys only. With
 --show-env-values the human output prints them, and then contains secrets:
 do not share it. --show-env-values is refused with --format json; the JSON
 plan never contains env values, kubeconfig paths, contexts or secret

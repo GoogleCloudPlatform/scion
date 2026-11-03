@@ -43,12 +43,15 @@ type fakeHub struct {
 	requests []string
 
 	// Per-test answers; a status overrides the body for its route.
-	row             map[string]any
-	rowStatus       int
-	settings        map[string]any
-	settingsStatus  int
-	agentPages      [][]map[string]any
-	agentsStatus    int
+	row            map[string]any
+	rowStatus      int
+	settings       map[string]any
+	settingsStatus int
+	agentPages     [][]map[string]any
+	agentsStatus   int
+	// agentsHangup closes the connection on the agent list request, a
+	// transport failure with no HTTP status.
+	agentsHangup    bool
 	projects        []map[string]any
 	projectSettings map[string]map[string]any
 	projectStatus   map[string]int
@@ -129,6 +132,18 @@ func (h *fakeHub) serve(w http.ResponseWriter, r *http.Request) {
 		reply(h.settingsStatus, h.settings)
 	case r.URL.Path == base+"/projects":
 		reply(0, map[string]any{"projects": h.projects})
+	case r.URL.Path == "/api/v1/agents" && h.agentsHangup:
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			h.t.Errorf("the fake Hub cannot hijack the connection")
+			return
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			h.t.Errorf("hijack: %v", err)
+			return
+		}
+		_ = conn.Close()
 	case r.URL.Path == "/api/v1/agents":
 		if got := r.URL.Query().Get("runtimeBrokerId"); got != testBrokerID {
 			h.t.Errorf("agent list filter: got %q", got)
@@ -310,6 +325,20 @@ func TestCollectHub_AgentList5xxNoteAndExit1(t *testing.T) {
 	require.NotNil(t, p.Agents)
 	assert.Equal(t, "could not be read from the Hub (HTTP 500): the agent list", p.Agents.Note)
 	assert.Empty(t, p.Agents.Items)
+	assert.Equal(t, ExitError, p.ExitCode())
+	assertNoHubAddress(t, h, p)
+}
+
+// A transport failure (no HTTP status) on a secondary read gets the fixed
+// "(request failed)" note; the transport error, which names the Hub's
+// address, is never used.
+func TestCollectHub_TransportFailureNoteIsFixedText(t *testing.T) {
+	h := newFakeHub(t)
+	h.agentsHangup = true
+	p, err := hubPlan(t, h)
+	require.NoError(t, err, "the plan is still produced")
+	require.NotNil(t, p.Agents)
+	assert.Equal(t, "could not be read from the Hub (request failed): the agent list", p.Agents.Note)
 	assert.Equal(t, ExitError, p.ExitCode())
 	assertNoHubAddress(t, h, p)
 }

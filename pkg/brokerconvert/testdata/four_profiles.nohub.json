@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "tipNote": "Proposed only: nothing was written, registered or changed. Instance keys and names are proposals you may edit. Harness env values are shown as \u003credacted\u003e; --show-env-values prints them in the human output, which then contains secrets and must not be shared.",
+  "tipNote": "Proposed only: nothing was written, registered or changed. Instance keys and names are proposals you may edit. Harness env values are redacted: shown as \u003credacted\u003e in the human output and omitted from JSON (keys only); --show-env-values prints them in the human output, which then contains secrets and must not be shared.",
   "instances": [
     {
       "schemaVersion": 1,
