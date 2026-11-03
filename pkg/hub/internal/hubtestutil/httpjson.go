@@ -42,7 +42,7 @@ func DecodeItems(t *testing.T, raw json.RawMessage) []map[string]json.RawMessage
 	return items
 }
 
-// errorBody decodes the standard error envelope.
+// ErrorBody decodes the standard error envelope.
 func ErrorBody(t *testing.T, rec *httptest.ResponseRecorder) (string, map[string]interface{}) {
 	t.Helper()
 	var body struct {
@@ -73,7 +73,7 @@ func DecodeAPIError(t *testing.T, body []byte) ApiErrorBody {
 	return resp
 }
 
-// apiErrorBody mirrors the JSON shape written by writeError, for assertions
+// ApiErrorBody mirrors the JSON shape written by pkg/hub's writeError, for assertions
 // on the error code and message returned to the client.
 type ApiErrorBody struct {
 	Error struct {
