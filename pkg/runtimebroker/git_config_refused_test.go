@@ -36,15 +36,15 @@ import (
 // value and none of the wrapping (the agent directory).
 const gitConfigRefusedTestDir = "/var/lib/scion/agents/dirmarker-g7"
 
-// gitConfigRefusedErr returns a real seed refusal of two keys, wrapped as the
-// agent start wraps it, and the refusal's own text.
-func gitConfigRefusedErr(t *testing.T) (error, string) {
+// gitConfigRefusedErr returns the refusal's own text and a real seed refusal of
+// two keys, wrapped as the agent start wraps it.
+func gitConfigRefusedErr(t *testing.T) (string, error) {
 	t.Helper()
 	_, _, refusal := util.PrepareSeededGitConfig([]byte("[core]\n\teditor = vi-valmarker-g8\n[grep]\n\tthreads = 8\n"), util.RepoPolicyLinked, nil)
 	if refusal == nil {
 		t.Fatal("fixture: the config was not refused")
 	}
-	return fmt.Errorf("seed private git config for agent %q (%s): seed private git config: %w", "test-agent-1", gitConfigRefusedTestDir, refusal), refusal.Error()
+	return refusal.Error(), fmt.Errorf("seed private git config for agent %q (%s): seed private git config: %w", "test-agent-1", gitConfigRefusedTestDir, refusal)
 }
 
 func checkGitConfigRefusedText(t *testing.T, got, want string) {
@@ -67,7 +67,7 @@ func TestGitConfigRefused_SyncPaths(t *testing.T) {
 		{"restart", "/api/v1/agents/test-agent-1/restart", `{}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			startErr, want := gitConfigRefusedErr(t)
+			want, startErr := gitConfigRefusedErr(t)
 			srv := newTestServer(t)
 			srv.manager.(*mockManager).startErr = startErr
 			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
@@ -96,7 +96,7 @@ func TestGitConfigRefused_SyncPaths(t *testing.T) {
 
 func TestClassifyStartError_GitConfigRefused(t *testing.T) {
 	for _, kind := range []string{store.LaunchKindCreate, store.LaunchKindStart} {
-		startErr, want := gitConfigRefusedErr(t)
+		want, startErr := gitConfigRefusedErr(t)
 		code, step, message := classifyStartError(context.Background(), startErr, "", api.LaunchStepPreClean, kind)
 		if code != api.LaunchCodeGitConfigRefused {
 			t.Errorf("%s: code = %q, want %q", kind, code, api.LaunchCodeGitConfigRefused)
