@@ -21,10 +21,13 @@ import (
 	"github.com/knadh/koanf/v2"
 )
 
+// EmptyKoanf returns an empty koanf instance with "." as the key delimiter.
 func EmptyKoanf() *koanf.Koanf {
 	return koanf.New(".")
 }
 
+// NewFileKoanf returns a koanf instance loaded from flat, standing in for
+// file-sourced settings.
 func NewFileKoanf(t *testing.T, flat map[string]interface{}) *koanf.Koanf {
 	t.Helper()
 	k := koanf.New(".")
@@ -34,6 +37,8 @@ func NewFileKoanf(t *testing.T, flat map[string]interface{}) *koanf.Koanf {
 	return k
 }
 
+// NewEnvKoanf returns a koanf instance loaded from flat, standing in for
+// environment-sourced settings.
 func NewEnvKoanf(t *testing.T, flat map[string]interface{}) *koanf.Koanf {
 	t.Helper()
 	k := koanf.New(".")

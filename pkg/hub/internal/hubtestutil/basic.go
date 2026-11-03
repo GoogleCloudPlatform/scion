@@ -20,14 +20,16 @@ import (
 	"time"
 )
 
-// testDevToken is the development token used for testing.
+// DevToken is the development token used for testing.
 const DevToken = "scion_dev_test_token_for_unit_tests_1234567890"
 
+// StrPtr returns a pointer to a copy of s.
 func StrPtr(s string) *string { return &s }
 
+// IntPtr returns a pointer to a copy of i.
 func IntPtr(i int) *int { return &i }
 
-// itoa is a minimal int-to-string without importing strconv.
+// Itoa is a minimal int-to-string without importing strconv.
 func Itoa(n int) string {
 	if n == 0 {
 		return "0"
@@ -50,11 +52,11 @@ func Itoa(n int) string {
 	return string(buf[i:])
 }
 
-// alwaysAuthorized is a permissive authChecker for tests that don't exercise
+// AlwaysAuthorized is a permissive pkg/hub authChecker for tests that don't exercise
 // the authorization policy path.
 func AlwaysAuthorized(_ context.Context, _ string) bool { return true }
 
-// require_NoError is a test helper that fails immediately on error.
+// RequireNoError is a test helper that fails immediately on error.
 func RequireNoError(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
@@ -62,6 +64,8 @@ func RequireNoError(t *testing.T, err error) {
 	}
 }
 
+// WaitClosed fails the test if ch is not closed within the given duration;
+// what names the awaited event in the failure message.
 func WaitClosed(t *testing.T, ch <-chan struct{}, within time.Duration, what string) {
 	t.Helper()
 	select {
