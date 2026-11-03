@@ -69,6 +69,11 @@ type HarnessConfigDir struct {
 	// HarnessConfigSource). Empty when loaded directly via
 	// LoadHarnessConfigDir outside the resolvers.
 	Source HarnessConfigSource
+
+	// root and rel record the trusted directory loadHarnessConfigTier found
+	// this directory from and its slash-separated path below it, for
+	// OpenDir; both are empty for a directory loaded another way.
+	root, rel string
 }
 
 // HarnessConfigSource names the resolution branch a harness-config came from.
@@ -259,10 +264,8 @@ func parseValidatedHarnessConfig(data []byte) (HarnessConfigEntry, error) {
 
 // ValidateHarnessHomePaths checks the harness-config fields that name a
 // path in the agent home: system_prompt_file, instructions_file, skills_dir
-// and config_dir. Each must be empty or a local relative path
-// (filepath.IsLocal: not absolute, no ".." component, not empty after
-// cleaning), so it cannot name a path outside the home. The error names the
-// field, not its value.
+// and config_dir. Each must be empty or pass IsHomeRelPath, so it cannot
+// name a path outside the home. The error names the field, not its value.
 func ValidateHarnessHomePaths(entry HarnessConfigEntry) error {
 	for _, f := range []struct{ key, val string }{
 		{"system_prompt_file", entry.SystemPromptFile},
@@ -270,11 +273,28 @@ func ValidateHarnessHomePaths(entry HarnessConfigEntry) error {
 		{"skills_dir", entry.SkillsDir},
 		{"config_dir", entry.ConfigDir},
 	} {
-		if f.val != "" && (!filepath.IsLocal(f.val) || filepath.Clean(f.val) == ".") {
+		if f.val != "" && !IsHomeRelPath(f.val) {
 			return fmt.Errorf("%s must be a relative path inside the agent home", f.key)
 		}
 	}
 	return nil
+}
+
+// IsHomeRelPath reports whether value names an entry below a directory:
+// a local relative path (filepath.IsLocal: not absolute, not empty, not
+// leaving the directory), not the directory itself after cleaning, and
+// with no ".." element even before cleaning ("a/../b" is refused), the
+// same rule pkg/agenthome applies to paths below an agent home.
+func IsHomeRelPath(value string) bool {
+	if !filepath.IsLocal(value) || filepath.Clean(value) == "." {
+		return false
+	}
+	for _, p := range strings.Split(filepath.ToSlash(value), "/") {
+		if p == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 // harnessConfigDirName is the harness-config's name: config.yaml's name when
@@ -917,7 +937,31 @@ func loadHarnessConfigTier(root, rel, name, tier string) *HarnessConfigDir {
 	if err != nil {
 		return nil
 	}
+	hcDir.root, hcDir.rel = absRoot, below
 	return hcDir
+}
+
+// OpenDir opens the harness-config directory for reading or copying from.
+// A directory found by FindHarnessConfigDir or ResolveHarnessConfigDir, whose
+// Path still names that directory, is reopened from the trusted root it was
+// found from, every component from there down opened without following a
+// symbolic link (agenthome.OpenBelow), so it is the directory that was
+// loaded. Otherwise (no root recorded, or Path changed since the lookup) the
+// directory Path names is opened without following a link, below its
+// parent, the way Template.openDir does. A missing directory
+// satisfies errors.Is(err, fs.ErrNotExist).
+func (d *HarnessConfigDir) OpenDir() (*agenthome.Home, error) {
+	clean := filepath.Clean(d.Path)
+	if d.Path == "" || clean == "." || clean == string(filepath.Separator) {
+		return nil, fs.ErrNotExist
+	}
+	// The trusted root is used only while Path still names the directory it
+	// was found as; a Path changed since is opened on its own, below its
+	// parent, still without following a link.
+	if d.root != "" && filepath.Join(d.root, filepath.FromSlash(d.rel)) == clean {
+		return agenthome.OpenBelow(d.root, d.rel)
+	}
+	return agenthome.OpenBelow(filepath.Dir(clean), filepath.Base(clean))
 }
 
 // warnHarnessConfigTierRefused logs that a harness-config directory in tier

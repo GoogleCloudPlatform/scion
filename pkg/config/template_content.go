@@ -50,6 +50,11 @@ func templateBelow(name, root, rel, scope string) *Template {
 	}
 }
 
+// OpenDir opens the template directory for reading or copying from, with
+// openDir's rules: every component from the trusted directory the template
+// was found from down is opened without following a symbolic link.
+func (t *Template) OpenDir() (*agenthome.Home, error) { return t.openDir() }
+
 // openDir opens the template directory for content reads. When the
 // Template records the trusted directory it was found from (templateBelow),
 // every component from there down is opened without following a link;
@@ -70,17 +75,7 @@ func (t *Template) openDir() (*agenthome.Home, error) {
 // isTemplateContentFileName reports whether value names a file inside the
 // template directory: filepath.IsLocal, no ".." element before cleaning,
 // and not the directory itself.
-func isTemplateContentFileName(value string) bool {
-	if !filepath.IsLocal(value) || filepath.Clean(value) == "." {
-		return false
-	}
-	for _, p := range strings.Split(filepath.ToSlash(value), "/") {
-		if p == ".." {
-			return false
-		}
-	}
-	return true
-}
+func isTemplateContentFileName(value string) bool { return IsHomeRelPath(value) }
 
 // refusedContent returns the error for a refused content file: a fixed
 // reason with a fix, wrapping ErrTemplateContentRefused, never the value or

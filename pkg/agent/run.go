@@ -1073,7 +1073,10 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 				// The carry-over is logged in summary form: the number of
 				// skills copied, or a fixed warning with the failed step
 				// and the error class.
-				if copied, cpErr := carryOverSkillsDir(agentHome, prevSkillsDir, h.SkillsDir()); cpErr != nil {
+				// An invalid skills_dir was refused by harness.Resolve;
+				// harnessSkillsDir checks it again, and "" copies nothing.
+				newSkillsDir, _ := harnessSkillsDir(h)
+				if copied, cpErr := carryOverSkillsDir(agentHome, prevSkillsDir, newSkillsDir); cpErr != nil {
 					stage, class := carryOverFailureSummary(cpErr)
 					slog.WarnContext(ctx, "Start: skills carry-over after the harness-config switch failed")
 					slog.DebugContext(ctx, "Start: skills carry-over failure", "stage", stage, "class", class)
