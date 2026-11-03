@@ -87,8 +87,10 @@ It refuses, writing nothing, unless all of these hold:
 - `--ttl` is between 1 minute and 24 hours (default 8 hours), `--member-cap` is between 1 and 5
   (default 5), and the hub holds fewer than 4 live offline delegations.
 
-The delegation covers **member and viewer identities only**. There is no option for an admin
-tier: admin-tier delegations still need a live human super-admin (see
+By default (`--scope member`) the delegation covers **member and viewer identities only**. A
+hub that opts in can also take an offline delegation for test hub-admin issuance (see
+[Offline hub-admin delegation](#offline-hub-admin-delegation-systemd-test-hubs)). Test
+super-admin delegations always need a live human super-admin (see
 [Admin-tier delegations](#admin-tier-delegations-systemd-test-hubs)). The command writes a
 `test_identity_delegation_create_offline` audit record (operator, host, time) and prints the
 delegation id, which is not a secret. It never prints a token. Use the id in the profile as in
@@ -111,6 +113,53 @@ the hub admits through an offline delegation writes a `test_identity_delegation_
 audit record (grantor kind, hub id, marker, test-mode level, delegation, subject, route, time).
 Identities it issued are ordinary member-tier test identities: they expire on their own and can
 be torn down as in step 8.
+
+#### Offline hub-admin delegation (systemd test hubs)
+
+A test hub can also let one allow-listed workload issue **test hub-admin** identities without
+a human sign-in. It needs three things, all on the hub host:
+
+1. The startup setting `server.hub.test_identities.offline_admin_delegations`, set to the hub's
+   own pinned hub id, in the settings file or the environment:
+
+    ```yaml
+    server:
+      hub:
+        test_identities:
+          offline_admin_delegations: <hub-id>
+    ```
+
+   The hub refuses to start when the setting is present and `--test-mode` is below `admin`, when
+   its value is another hub id, or when the test admin audit sink is not configured. The settings
+   API never writes it.
+2. A restart at `--test-mode=admin:<hub-id>` (or `super-admin`).
+3. The offline command with `--scope hub-admin`:
+
+    ```bash
+    scion server test-infra delegate --hub-id <hub id> \
+      --workload-sub 123456789012345678901 --scope hub-admin --ttl 4h --admin-cap 1 \
+      --i-understand-this-hub-can-mint-super-admins
+    ```
+
+   On top of the checks above, it refuses, writing nothing, unless the same configuration carries
+   the setting for `--hub-id`, the subject's `max_tier` is `admin`, `--ttl` is between 1 minute
+   and 8 hours (default 4 hours), `--admin-cap` is 1 or 2 (default 1), and the hub holds no other
+   live offline hub-admin delegation.
+
+The delegation lets its workload issue test hub-admins through the profile's admin delegation
+(`scion hub test-identity issue-admin --admin-role hub-admin`), within the usual limits: at most
+the delegation's admin cap live at once, 4 admin identities per hub, 6 issuances per hour,
+identities of at most 60 minutes and tokens of at most 30 minutes. It cannot re-issue their
+tokens, mint web-login codes for them, or issue test super-admins. Issue a new identity when a
+token runs out.
+
+The hub honours it only while the setting is on, the hub runs at `--test-mode=admin` or above,
+and every condition of an offline delegation listed above holds. It checks these on every
+request and again when it issues the identity. A hub that starts **without** the setting revokes
+every offline hub-admin delegation and revokes the identities they issued, before it serves
+requests, with audit records for each. Each issuance writes a `test_admin_issue` audit record
+and a test admin audit sink line that carry the delegation id, the workload subject, the
+delegation's admin cap and the grantor kind `test_infra_offline`.
 
 ## 2. Add the profile (runner)
 

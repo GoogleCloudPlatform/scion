@@ -195,6 +195,11 @@ type testModeInputs struct {
 	// server.hub.test_identities.admin_web_sessions: the hub id the admin
 	// web session setting is bound to, or "" (off). Phase WS4.
 	AdminWebSessions string
+
+	// OfflineAdminDelegations is the value of
+	// server.hub.test_identities.offline_admin_delegations: the hub id the
+	// offline hub-admin delegation setting is bound to, or "" (off).
+	OfflineAdminDelegations string
 }
 
 // testAdminPolicyComplete is the G3 check. A variable only so tests can
@@ -207,6 +212,8 @@ type testModeResolution struct {
 	TestAdminGate        hub.TestAdminGateConfig
 	TestMode             hub.TestModeConfig
 	TestAdminWebSessions hub.TestAdminWebSessionsConfig
+	// OfflineAdminDelegations is the offline hub-admin delegation setting.
+	OfflineAdminDelegations hub.OfflineAdminDelegationsConfig
 }
 
 // resolveTestMode checks every precondition of the requested level and
@@ -226,6 +233,11 @@ type testModeResolution struct {
 // value is the resolved hub id; it is never ignored and never lowers the
 // level. The Helm chart renders only --test-mode=member (G9), so a Helm
 // hub with the setting refuses to start.
+//
+// The offline hub-admin delegation setting
+// (server.hub.test_identities.offline_admin_delegations) follows the same
+// rules: it refuses startup unless the level is admin or super-admin and
+// its value is the resolved hub id.
 func resolveTestMode(in testModeInputs) (testModeResolution, error) {
 	var off testModeResolution
 	level := in.Level
@@ -235,6 +247,13 @@ func resolveTestMode(in testModeInputs) (testModeResolution, error) {
 			shown = hub.TestModeOff
 		}
 		return off, fmt.Errorf("%s with --test-mode=%s: %w", config.TestIdentityAdminWebSessionsKey, shown, hub.ErrTestAdminWebSessionsBelowAdmin)
+	}
+	if in.OfflineAdminDelegations != "" && !level.IsAdminLevel() {
+		shown := level
+		if shown == "" {
+			shown = hub.TestModeOff
+		}
+		return off, fmt.Errorf("%s with --test-mode=%s: %w", config.TestIdentityOfflineAdminDelegationsKey, shown, hub.ErrOfflineAdminDelegationsBelowAdmin)
 	}
 	if level == "" || level == hub.TestModeOff {
 		return off, nil
@@ -346,6 +365,15 @@ func resolveTestMode(in testModeInputs) (testModeResolution, error) {
 		}
 		res.TestAdminWebSessions = hub.TestAdminWebSessionsConfig{HubID: in.AdminWebSessions}
 	}
+	if in.OfflineAdminDelegations != "" {
+		// The level is admin or super-admin (checked first). The binding is
+		// this hub's resolved id (G2).
+		if in.OfflineAdminDelegations != in.ResolvedHubID {
+			return refuse(fmt.Errorf("%w: %s is %q, resolved hub id %q", hub.ErrOfflineAdminDelegationsHubIDMismatch,
+				config.TestIdentityOfflineAdminDelegationsKey, in.OfflineAdminDelegations, in.ResolvedHubID))
+		}
+		res.OfflineAdminDelegations = hub.OfflineAdminDelegationsConfig{HubID: in.OfflineAdminDelegations}
+	}
 	if level.IsAdminLevel() {
 		res.TestAdminGate = hub.TestAdminGateConfig{
 			HubAdmin:        true,
@@ -377,6 +405,7 @@ func testModeInputsFor(ctx context.Context, cfg *config.GlobalConfig, hubCfg hub
 		KeyringSigning:          keyringSigning,
 		PreconfiguredSigningKey: len(hubCfg.UserTokenConfig.SigningKey) > 0 || len(hubCfg.AgentTokenConfig.SigningKey) > 0,
 		AdminWebSessions:        cfg.Hub.TestIdentityAdminWebSessions(),
+		OfflineAdminDelegations: cfg.Hub.TestIdentityOfflineAdminDelegations(),
 		ReadMarker: func() (*testinfra.Marker, error) {
 			if entClient == nil {
 				return nil, testinfra.ErrMarkerAbsent

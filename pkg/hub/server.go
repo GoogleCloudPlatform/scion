@@ -526,6 +526,12 @@ type ServerConfig struct {
 	// is admin or super-admin and its hub id equals HubID
 	// (test_admin_web_sessions.go). The zero value is off.
 	TestAdminWebSessions TestAdminWebSessionsConfig
+	// OfflineAdminDelegations is the offline hub-admin delegation setting
+	// (server.hub.test_identities.offline_admin_delegations) cmd validated
+	// at startup. New refuses it unless the level is admin or super-admin,
+	// its hub id equals HubID and the test admin audit sink is configured
+	// (test_identity_offline_admin_delegation.go). The zero value is off.
+	OfflineAdminDelegations OfflineAdminDelegationsConfig
 	// WebSessionKeySource is the signingKeySource label of the web session
 	// cookie key, set by cmd from the same session secret it passes to
 	// NewWebServer: "generated" (no shared secret: a random per-process
@@ -2274,6 +2280,10 @@ type Server struct {
 	// by New (test_admin_web_sessions.go).
 	testAdminWeb testAdminWebState
 
+	// offlineAdmin is the immutable offline hub-admin delegation switch
+	// captured by New (test_identity_offline_admin_delegation.go).
+	offlineAdmin offlineAdminState
+
 	// testAdminIssuance is the state of admin-kind test identity issuance
 	// (handlers_test_admin_identities.go).
 	testAdminIssuance testAdminIssuanceState
@@ -2795,6 +2805,11 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	if err := validateTestAdminWebSessionsConfig(cfg); err != nil {
 		return nil, err
 	}
+	// Offline hub-admin delegations: only at an admin level, bound to this
+	// hub's id.
+	if err := validateOfflineAdminDelegationsConfig(cfg); err != nil {
+		return nil, err
+	}
 	// Workload issuer allowlist and issuer audience (X2, X4): refuse a
 	// malformed allowlist, an admin-tier entry below --test-mode=admin, a
 	// missing hub id, or an issuer audience shared with another accepted
@@ -3090,6 +3105,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		// serves), and the per-redeem audit goes through the test
 		// identity audit hook.
 		srv.workloadIssuer.testModeLevel = srv.TestModeLevel
+		srv.workloadIssuer.offlineAdmin = cfg.OfflineAdminDelegations.requested()
 		srv.workloadIssuer.writeAudit = func(ctx context.Context, st store.Store, record *store.MutationAuditRecord) error {
 			return srv.testIdentities.hooks.writeAudit(ctx, st, record)
 		}
@@ -3196,6 +3212,16 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	}
 	srv.testAdminWeb = testAdminWebState{on: cfg.TestAdminWebSessions.requested()}
 	srv.logTestAdminWebSessionState()
+	// Offline hub-admin delegations need the test admin audit sink, which
+	// records every admin issuance they make.
+	if cfg.OfflineAdminDelegations.requested() && (srv.testAdminAudit == nil || srv.testAdminAudit.out == nil) {
+		return nil, ErrOfflineAdminDelegationsRequiresAuditSink
+	}
+	srv.offlineAdmin = offlineAdminState{on: cfg.OfflineAdminDelegations.requested()}
+	if srv.offlineAdmin.on {
+		slog.Warn("Offline hub-admin test identity delegations are ENABLED: an offline delegation can let one allow-listed workload issue test hub-admins without a human super-admin. Test hubs only.",
+			"setting", config.TestIdentityOfflineAdminDelegationsKey)
+	}
 	// One startup line through the test admin audit sink for any level but
 	// off: the gate-start banner for the admin levels (it carries the level
 	// and preconditions too), the test-mode line for member.

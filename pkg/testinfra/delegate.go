@@ -30,8 +30,11 @@ import (
 	"github.com/google/uuid"
 )
 
-// Offline member-tier workload issuer delegations (ptone/scion#4240, phase
-// DL). Delegate is the only writer of a delegation whose grantor kind is
+// Offline workload issuer delegations (ptone/scion#4240, phase DL): the
+// member scope, and the hub-admin scope behind the startup setting
+// server.hub.test_identities.offline_admin_delegations. The test
+// super-admin scope is never delegable offline. Delegate is the only
+// writer of a delegation whose grantor kind is
 // store.DelegationGrantorTestInfraOffline; it is called only by the offline
 // host command `scion server test-infra delegate`. The hub API's store path
 // refuses that kind, and a pkg/hub source test pins that no non-test pkg/hub
@@ -55,12 +58,15 @@ var (
 	ErrDelegateHubIDRequired     = errors.New("test-infra delegate: hub id must be non-empty and carry no surrounding whitespace")
 	ErrDelegateMarkerHubMismatch = errors.New("test-infra delegate: the test infrastructure marker names a different hub id")
 	ErrDelegateMarkerClass       = errors.New(`test-infra delegate: the test infrastructure marker class is not "test"`)
-	ErrDelegateNotAllowlisted    = errors.New("test-infra delegate: the workload subject is not on server.hub.test_identities.workload_issuers with a max_tier covering member")
-	ErrDelegateScope             = errors.New("test-infra delegate: an offline delegation holds only the member scope " + store.TestInfraOfflineDelegationScope)
+	ErrDelegateNotAllowlisted    = errors.New("test-infra delegate: the workload subject is not on server.hub.test_identities.workload_issuers with a max_tier covering the delegation's tier")
+	ErrDelegateScope             = errors.New("test-infra delegate: an offline delegation holds only the member scope " + store.TestInfraOfflineDelegationScope + " or the hub-admin scope " + store.TestInfraOfflineAdminDelegationScope)
+	ErrDelegateAdminOptIn        = errors.New("test-infra delegate: a hub-admin delegation requires " + config.TestIdentityOfflineAdminDelegationsKey + " set to this hub id")
 	ErrDelegateTTL               = errors.New("test-infra delegate: the lifetime is out of bounds")
 	ErrDelegateMemberCap         = errors.New("test-infra delegate: the member cap is out of bounds")
+	ErrDelegateAdminCap          = errors.New("test-infra delegate: the admin cap is out of bounds")
 	ErrDelegateLabel             = errors.New("test-infra delegate: the label is too long or has control characters")
 	ErrDelegateTooManyLive       = errors.New("test-infra delegate: this hub already holds the maximum number of live offline delegations")
+	ErrDelegateTooManyLiveAdmin  = errors.New("test-infra delegate: this hub already holds the maximum number of live offline hub-admin delegations")
 	ErrDelegationNotFound        = errors.New("test-infra delegate revoke: no such delegation")
 	ErrDelegationNotOffline      = errors.New("test-infra delegate revoke: the delegation is not an offline delegation; revoke it through the hub API")
 	ErrDelegationOtherHub        = errors.New("test-infra delegate revoke: the delegation is bound to a different hub id")
@@ -74,10 +80,14 @@ type DelegateInput struct {
 	HubID string
 	// WorkloadSub is the pinned Google subject of the delegated workload.
 	WorkloadSub string
-	// Scope must be store.TestInfraOfflineDelegationScope (empty means
-	// that scope). Any other value, an admin scope in particular, is
-	// refused.
+	// Scope is store.TestInfraOfflineDelegationScope (empty means that
+	// scope) or store.TestInfraOfflineAdminDelegationScope. Any other
+	// value, the super-admin scope in particular, is refused.
 	Scope string
+	// AdminOptIn is the configuration's
+	// server.hub.test_identities.offline_admin_delegations value. A
+	// hub-admin delegation requires it to equal HubID.
+	AdminOptIn string
 	// WorkloadIssuers is the hub's startup allowlist
 	// (server.hub.test_identities.workload_issuers) from the same
 	// configuration; WorkloadSub must be on it with a max_tier covering
@@ -86,9 +96,15 @@ type DelegateInput struct {
 	// TTL is the delegation's lifetime; zero means
 	// store.TestInfraOfflineDelegationDefaultTTL.
 	TTL time.Duration
-	// MemberCap is the per-delegation identity cap; zero means
-	// store.TestInfraOfflineDelegationMaxMemberCap.
+	// MemberCap is the per-delegation identity cap of a member-scope
+	// delegation; zero means store.TestInfraOfflineDelegationMaxMemberCap.
+	// It must be zero for a hub-admin delegation.
 	MemberCap int
+	// AdminCap is the per-delegation identity cap of a hub-admin
+	// delegation; zero means
+	// store.TestInfraOfflineAdminDelegationDefaultAdminCap. It must be zero
+	// for a member-scope delegation.
+	AdminCap int
 	// Label is an optional short label for the test window.
 	Label string
 	// Operator identifies who ran the command, for the audit row.
@@ -111,15 +127,30 @@ func subCoversMember(issuers []config.TestIdentityWorkloadIssuer, sub string) bo
 	return false
 }
 
-// Delegate creates an offline member-tier workload issuer delegation bound
-// to in.HubID and to the current marker instance, and writes a
-// DelegateMutationType audit row, in one transaction. It refuses (writing
-// nothing) an empty or padded hub id, any scope but the member scope, a
-// subject off the allowlist, a lifetime or cap out of bounds, a missing
-// marker (ErrMarkerAbsent), a marker for another hub id or of another
-// class, and a hub that already holds
-// store.TestInfraOfflineMaxLiveDelegations live offline delegations. It
-// returns the created delegation; it holds no secret.
+// subCoversAdmin reports whether sub is on issuers with max_tier admin.
+func subCoversAdmin(issuers []config.TestIdentityWorkloadIssuer, sub string) bool {
+	for _, e := range issuers {
+		if e.Sub != sub {
+			continue
+		}
+		return e.MaxTier == config.WorkloadIssuerTierAdmin
+	}
+	return false
+}
+
+// Delegate creates an offline workload issuer delegation bound to in.HubID
+// and to the current marker instance, and writes a DelegateMutationType
+// audit row, in one transaction. It refuses (writing nothing) an empty or
+// padded hub id; any super-admin scope, and any scope but the member scope
+// and the hub-admin scope; a hub-admin scope without in.AdminOptIn equal
+// to the hub id; a subject off the allowlist for the scope's tier; a
+// lifetime or cap out of the scope's bounds; a missing marker
+// (ErrMarkerAbsent), a marker for another hub id or of another class; a
+// hub that already holds store.TestInfraOfflineMaxLiveDelegations live
+// offline delegations; and, for the hub-admin scope, a hub that already
+// holds store.TestInfraOfflineMaxLiveAdminDelegations live offline
+// hub-admin delegations. It returns the created delegation; it holds no
+// secret.
 func Delegate(ctx context.Context, client *ent.Client, in DelegateInput) (*store.TestIdentityDelegation, error) {
 	if client == nil {
 		return nil, errors.New("test-infra delegate: no database client")
@@ -132,26 +163,62 @@ func Delegate(ctx context.Context, client *ent.Client, in DelegateInput) (*store
 	if scope == "" {
 		scope = store.TestInfraOfflineDelegationScope
 	}
-	if scope != store.TestInfraOfflineDelegationScope {
+	var admin bool
+	switch {
+	case store.IsSuperAdminIssueVariant(scope):
+		// First, whatever else the input says: never delegable offline.
+		return nil, fmt.Errorf("%w (requested %q)", ErrDelegateScope, scope)
+	case scope == store.TestInfraOfflineDelegationScope:
+	case scope == store.TestInfraOfflineAdminDelegationScope:
+		admin = true
+	default:
 		return nil, fmt.Errorf("%w (requested %q)", ErrDelegateScope, scope)
 	}
+	if admin && in.AdminOptIn != hubID {
+		return nil, ErrDelegateAdminOptIn
+	}
 	sub := in.WorkloadSub
-	if sub == "" || strings.TrimSpace(sub) != sub || !subCoversMember(in.WorkloadIssuers, sub) {
+	covered := subCoversMember(in.WorkloadIssuers, sub)
+	if admin {
+		covered = subCoversAdmin(in.WorkloadIssuers, sub)
+	}
+	if sub == "" || strings.TrimSpace(sub) != sub || !covered {
 		return nil, ErrDelegateNotAllowlisted
+	}
+	minTTL, maxTTL, defaultTTL := store.TestInfraOfflineDelegationMinTTL, store.TestInfraOfflineDelegationMaxTTL, store.TestInfraOfflineDelegationDefaultTTL
+	if admin {
+		maxTTL, defaultTTL = store.TestInfraOfflineAdminDelegationMaxTTL, store.TestInfraOfflineAdminDelegationDefaultTTL
 	}
 	ttl := in.TTL
 	if ttl == 0 {
-		ttl = store.TestInfraOfflineDelegationDefaultTTL
+		ttl = defaultTTL
 	}
-	if ttl < store.TestInfraOfflineDelegationMinTTL || ttl > store.TestInfraOfflineDelegationMaxTTL {
-		return nil, fmt.Errorf("%w: must be between %s and %s", ErrDelegateTTL, store.TestInfraOfflineDelegationMinTTL, store.TestInfraOfflineDelegationMaxTTL)
+	if ttl < minTTL || ttl > maxTTL {
+		return nil, fmt.Errorf("%w: must be between %s and %s", ErrDelegateTTL, minTTL, maxTTL)
 	}
-	memberCap := in.MemberCap
-	if memberCap == 0 {
-		memberCap = store.TestInfraOfflineDelegationMaxMemberCap
-	}
-	if memberCap < 1 || memberCap > store.TestInfraOfflineDelegationMaxMemberCap {
-		return nil, fmt.Errorf("%w: must be between 1 and %d", ErrDelegateMemberCap, store.TestInfraOfflineDelegationMaxMemberCap)
+	var identityCap int
+	if admin {
+		if in.MemberCap != 0 {
+			return nil, fmt.Errorf("%w: a hub-admin delegation takes an admin cap, not a member cap", ErrDelegateMemberCap)
+		}
+		identityCap = in.AdminCap
+		if identityCap == 0 {
+			identityCap = store.TestInfraOfflineAdminDelegationDefaultAdminCap
+		}
+		if identityCap < 1 || identityCap > store.TestInfraOfflineAdminDelegationMaxAdminCap {
+			return nil, fmt.Errorf("%w: must be between 1 and %d", ErrDelegateAdminCap, store.TestInfraOfflineAdminDelegationMaxAdminCap)
+		}
+	} else {
+		if in.AdminCap != 0 {
+			return nil, fmt.Errorf("%w: a member delegation takes a member cap, not an admin cap", ErrDelegateAdminCap)
+		}
+		identityCap = in.MemberCap
+		if identityCap == 0 {
+			identityCap = store.TestInfraOfflineDelegationMaxMemberCap
+		}
+		if identityCap < 1 || identityCap > store.TestInfraOfflineDelegationMaxMemberCap {
+			return nil, fmt.Errorf("%w: must be between 1 and %d", ErrDelegateMemberCap, store.TestInfraOfflineDelegationMaxMemberCap)
+		}
 	}
 	label := strings.TrimSpace(in.Label)
 	if utf8.RuneCountInString(label) > delegationLabelMaxRunes || !utf8.ValidString(label) || strings.ContainsFunc(label, isControl) {
@@ -213,6 +280,23 @@ func Delegate(ctx context.Context, client *ent.Client, in DelegateInput) (*store
 	if live >= store.TestInfraOfflineMaxLiveDelegations {
 		return rollback(fmt.Errorf("%w (%d)", ErrDelegateTooManyLive, store.TestInfraOfflineMaxLiveDelegations))
 	}
+	if admin {
+		liveAdmin, err := tx.TestIdentityDelegation.Query().
+			Where(
+				testidentitydelegation.GrantorKindEQ(testidentitydelegation.GrantorKindTestInfraOffline),
+				testidentitydelegation.HubIDEQ(hubID),
+				testidentitydelegation.ScopeEQ(store.TestInfraOfflineAdminDelegationScope),
+				testidentitydelegation.RevokedAtIsNil(),
+				testidentitydelegation.ExpiresAtGT(now),
+			).
+			Count(ctx)
+		if err != nil {
+			return rollback(fmt.Errorf("count live offline hub-admin delegations: %w", err))
+		}
+		if liveAdmin >= store.TestInfraOfflineMaxLiveAdminDelegations {
+			return rollback(fmt.Errorf("%w (%d)", ErrDelegateTooManyLiveAdmin, store.TestInfraOfflineMaxLiveAdminDelegations))
+		}
+	}
 
 	markerAt := marker.CreatedAt
 	grantorID := store.TestInfraOfflineGrantorID(hubID)
@@ -221,7 +305,7 @@ func Delegate(ctx context.Context, client *ent.Client, in DelegateInput) (*store
 		SetGrantorID(grantorID).
 		SetWorkloadSub(sub).
 		SetScope(scope).
-		SetMemberCap(memberCap).
+		SetMemberCap(identityCap).
 		SetLabel(label).
 		SetCreatedAt(now).
 		SetExpiresAt(expiresAt).
@@ -233,6 +317,10 @@ func Delegate(ctx context.Context, client *ent.Client, in DelegateInput) (*store
 		return rollback(fmt.Errorf("write offline delegation: %w", err))
 	}
 
+	capName := "member_cap"
+	if admin {
+		capName = "admin_cap"
+	}
 	audit := entadapter.NewMutationAuditStore(tx.Client())
 	if err := audit.CreateMutationAudit(ctx, &store.MutationAuditRecord{
 		Timestamp:          now,
@@ -241,8 +329,8 @@ func Delegate(ctx context.Context, client *ent.Client, in DelegateInput) (*store
 		ActorPrincipalID:   operator,
 		TargetType:         "test_identity_delegation",
 		TargetID:           row.ID.String(),
-		AfterSummary: fmt.Sprintf("offline issuer delegation created: grantor_kind=%s hub_id=%s marker_id=%s marker_created_at=%s workload_sub=%s scope=%s member_cap=%d expires_at=%s host=%s operator=%s",
-			store.DelegationGrantorTestInfraOffline, hubID, MarkerID, markerAt.UTC().Format(time.RFC3339Nano), sub, scope, memberCap,
+		AfterSummary: fmt.Sprintf("offline issuer delegation created: grantor_kind=%s hub_id=%s marker_id=%s marker_created_at=%s workload_sub=%s scope=%s %s=%d expires_at=%s host=%s operator=%s",
+			store.DelegationGrantorTestInfraOffline, hubID, MarkerID, markerAt.UTC().Format(time.RFC3339Nano), sub, scope, capName, identityCap,
 			expiresAt.Format(time.RFC3339), in.Host, operator),
 	}); err != nil {
 		return rollback(fmt.Errorf("write %s audit row: %w", DelegateMutationType, err))

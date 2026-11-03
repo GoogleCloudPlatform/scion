@@ -516,8 +516,8 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/handlers_users_core.go", Function: "updateUser", Symbol: "UpdateUser", OperationID: "user.update"},
 	{File: "pkg/hub/handlers_test_identities.go", Function: "handleCreateTestIdentity", Symbol: "CreateTestFixtureUser", OperationID: "testidentity.create"},
 	{File: "pkg/hub/handlers_test_admin_identities.go", Function: "handleIssueTestAdminIdentity", Symbol: "CreateTestAdminUser", OperationID: "testidentity.admin.create"},
-	{File: "pkg/hub/handlers_test_admin_identities.go", Function: "revokeTestAdminIdentity", Symbol: "DeleteRoleBindingsForPrincipal", OperationID: "testidentity.admin.revokeall"},
-	{File: "pkg/hub/handlers_test_admin_identities.go", Function: "revokeTestAdminIdentity", Symbol: "UpdateUser", OperationID: "testidentity.admin.revokeall"},
+	{File: "pkg/hub/handlers_test_admin_identities.go", Function: "revokeTestAdminIdentityWith", Symbol: "DeleteRoleBindingsForPrincipal", OperationID: "testidentity.admin.revokeall"},
+	{File: "pkg/hub/handlers_test_admin_identities.go", Function: "revokeTestAdminIdentityWith", Symbol: "UpdateUser", OperationID: "testidentity.admin.revokeall"},
 	// Test identity purge (ptone/scion#4240, Phase 3b): resources selected
 	// by their fixture_root_id stamp, removed under testidentity.delete.
 	{File: "pkg/hub/fixture_purge.go", Function: "purgeFixtureGroup", Symbol: "DeleteGroup", OperationID: "testidentity.delete"},

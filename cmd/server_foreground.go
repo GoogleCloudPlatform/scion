@@ -3317,6 +3317,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	hubCfg.TestAdminGate = testMode.TestAdminGate
 	hubCfg.TestMode = testMode.TestMode
 	hubCfg.TestAdminWebSessions = testMode.TestAdminWebSessions
+	hubCfg.OfflineAdminDelegations = testMode.OfflineAdminDelegations
 	if testMode.EnableTestIdentities {
 		slog.Warn("Test identity issuance is ENABLED (--test-mode). Holders of test_identity.issue can create short-lived synthetic users on this hub. Use on test hubs only; MUST NOT be enabled in production!",
 			"test_mode", string(testMode.TestMode.Level), "preconditions", testMode.TestMode.Preconditions)
@@ -3526,6 +3527,12 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	// Test admin tier G8, second half: no federation in the stored
 	// operational settings either.
 	if err := hubSrv.VerifyTestAdminFederationOff(); err != nil {
+		return nil, err
+	}
+	// A hub that starts without the offline hub-admin delegation setting
+	// ends every offline hub-admin delegation and revokes the identities
+	// they issued. Nothing listens yet; a failure refuses startup.
+	if err := hubSrv.EndOfflineAdminDelegationsWhenOff(ctx); err != nil {
 		return nil, err
 	}
 	// A keyring file needs the server.secret_rotation experiment, read

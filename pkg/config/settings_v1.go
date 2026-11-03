@@ -1734,6 +1734,10 @@ type V1TestIdentitiesConfig struct {
 	// AdminWebSessions is server.hub.test_identities.admin_web_sessions
 	// (see TestIdentitiesConfig.AdminWebSessions).
 	AdminWebSessions string `json:"admin_web_sessions,omitempty" yaml:"admin_web_sessions,omitempty" koanf:"admin_web_sessions"`
+	// OfflineAdminDelegations is
+	// server.hub.test_identities.offline_admin_delegations (see
+	// TestIdentitiesConfig.OfflineAdminDelegations).
+	OfflineAdminDelegations string `json:"offline_admin_delegations,omitempty" yaml:"offline_admin_delegations,omitempty" koanf:"offline_admin_delegations"`
 }
 
 // V1TestIdentityWorkloadIssuer is one server.hub.test_identities.workload_issuers
@@ -4395,7 +4399,10 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 			gc.Hub.GCPProjectID = v1.Hub.GCPProjectID
 		}
 		if v1.Hub.TestIdentities != nil {
-			ti := &TestIdentitiesConfig{AdminWebSessions: v1.Hub.TestIdentities.AdminWebSessions}
+			ti := &TestIdentitiesConfig{
+				AdminWebSessions:        v1.Hub.TestIdentities.AdminWebSessions,
+				OfflineAdminDelegations: v1.Hub.TestIdentities.OfflineAdminDelegations,
+			}
 			for _, e := range v1.Hub.TestIdentities.WorkloadIssuers {
 				ti.WorkloadIssuers = append(ti.WorkloadIssuers, TestIdentityWorkloadIssuer(e))
 			}
@@ -4882,7 +4889,10 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		},
 	}
 	if gc.Hub.TestIdentities != nil {
-		ti := &V1TestIdentitiesConfig{AdminWebSessions: gc.Hub.TestIdentities.AdminWebSessions}
+		ti := &V1TestIdentitiesConfig{
+			AdminWebSessions:        gc.Hub.TestIdentities.AdminWebSessions,
+			OfflineAdminDelegations: gc.Hub.TestIdentities.OfflineAdminDelegations,
+		}
 		for _, e := range gc.Hub.TestIdentities.WorkloadIssuers {
 			ti.WorkloadIssuers = append(ti.WorkloadIssuers, V1TestIdentityWorkloadIssuer(e))
 		}
