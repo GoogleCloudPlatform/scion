@@ -1030,11 +1030,11 @@ When Scion runs on GCE or GKE and the kubeconfig's exec credential plugin fails 
 | `""` | pods/exec | create | Attach, exec, home and workspace sync, readiness checks |
 | `""` | pods/log | get | Agent logs |
 | `""` | secrets | create, get, list, delete | Per-agent Secrets and their cleanup |
-| `""` | persistentvolumeclaims | create, get | The [claim check before the pod](#claim-check-before-the-pod), and creating shared-dir claims on the local backend |
+| `""` | persistentvolumeclaims | create, get, list, delete | The [claim check before the pod](#claim-check-before-the-pod), creating shared-dir claims on the local backend, and releasing a deleted project's shared-dir claims (list and delete; `scion doctor`'s claim check also uses list) |
 | `""` | events | list | The reason shown for a claim that is not ready, and for a pod that disappeared |
 | `secrets-store.csi.x-k8s.io` | secretproviderclasses | create, get, list, delete | GKE mode only: Secret Manager mounts |
 
-Without `get` on persistentvolumeclaims or `list` on events, agents still start: the claim check is skipped or uses the claim phase only, and a vanished pod gets a generic reason. `create` on persistentvolumeclaims is needed only to create shared-dir claims.
+Without `get` on persistentvolumeclaims or `list` on events, agents still start: the claim check is skipped or uses the claim phase only, and a vanished pod gets a generic reason. `create` on persistentvolumeclaims is needed only to create shared-dir claims. Without `list` and `delete` on persistentvolumeclaims, a deleted project's shared-dir claims are not released: the failure is logged, and the project delete still succeeds.
 
 The names below are examples. Replace the namespace and the subject:
 
@@ -1059,7 +1059,7 @@ rules:
   verbs: ["create", "get", "list", "delete"]
 - apiGroups: [""]
   resources: ["persistentvolumeclaims"]
-  verbs: ["create", "get"]
+  verbs: ["create", "get", "list", "delete"]
 - apiGroups: [""]
   resources: ["events"]
   verbs: ["list"]
@@ -1170,6 +1170,8 @@ This checks:
 - Namespace existence and access
 - Pod CRUD and exec permissions
 - Secret management permissions
+- That the StorageClass named by `shared_dir_storage_class` in the settings exists. When the Runtime Broker cannot read StorageClasses, which are cluster-scoped, this is only a warning. Whether the class supports `ReadWriteMany` is not checked. With no class set, an information line says that starts needing a new claim are refused.
+- Existing shared-dir claims in the namespace whose storage class differs from `shared_dir_storage_class`, as a warning (existing claims are never changed). Without `list` on persistentvolumeclaims in the namespace, this check is a warning that it could not list the claims.
 - (GKE mode) SecretProviderClass CRD availability
 - (GKE mode) Secrets Store CSI driver installation
 - (GKE mode) GCS FUSE CSI driver installation
