@@ -24,7 +24,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 )
 
-// TempSettingsHome points config.GetGlobalDir() at a temp directory holding a
+// tempSettingsHome points config.GetGlobalDir() at a temp directory holding a
 // minimal settings.yaml, and returns the path to that file. It also isolates
 // the shared log level state, because server-config saves and reloads
 // apply server.log_level to it.
@@ -44,7 +44,7 @@ func TempSettingsHome(t *testing.T) string {
 	return settingsPath
 }
 
-// IsolateLogLevelState clears leaked level variables and resets the shared
+// isolateLogLevelState clears leaked level variables and resets the shared
 // level state and the standard-library log bridge level, restoring both
 // when the test ends.
 func IsolateLogLevelState(t *testing.T) {
