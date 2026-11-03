@@ -184,10 +184,11 @@ func LoadConfig() *Config {
 		MetricsDebug:       util.ParseBoolEnv(EnvMetricsDebug, false),
 	}
 
-	// Explicit only when set to a recognised boolean, the same values
-	// ParseBoolEnv accepts above: an empty or misspelt value takes the
-	// default and so counts as the default here too.
-	_, cfg.CloudEnabledExplicit = util.LookupBoolEnv(EnvCloudEnabled)
+	// Explicit only when the value parses: ParseBoolEnv returns each default
+	// for an unset, empty or misspelt value, so the two calls agree only for a
+	// recognised boolean. Uses only ParseBoolEnv, which the cmd/sciontool
+	// exec-audit allowlist permits on the PID-1 path (no LookupBoolEnv there).
+	cfg.CloudEnabledExplicit = util.ParseBoolEnv(EnvCloudEnabled, true) == util.ParseBoolEnv(EnvCloudEnabled, false)
 
 	// Fallback: if SCION_OTEL_GCP_CREDENTIALS is not set, probe the
 	// well-known path where the broker mounts the telemetry SA key file.
