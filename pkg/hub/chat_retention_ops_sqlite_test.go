@@ -410,3 +410,86 @@ func TestChatRetention_PreviewDeadlineIsPartialSQLite(t *testing.T) {
 	assert.NoError(t, ctx.Err(), "the caller's context is still live")
 	assert.Equal(t, 30, f.count(`SELECT COUNT(*) FROM messages`), "nothing deleted")
 }
+
+// chunkTimeoutChatRetentionStore fails the main walk's selection the way a
+// selection that runs past its chunk timeout fails (a wrapped
+// context.DeadlineExceeded), while the walk's own deadline is far away.
+type chunkTimeoutChatRetentionStore struct {
+	store.ChatRetentionStore
+}
+
+func (s chunkTimeoutChatRetentionStore) SelectChatRetentionCandidates(context.Context, time.Time, store.ChatRetentionPosition, int) ([]store.ChatRetentionCandidate, error) {
+	return nil, fmt.Errorf("chat retention: select candidates: %w", context.DeadlineExceeded)
+}
+
+// TestChatRetention_PreviewChunkTimeoutIsFailedSQLite: a selection that
+// times out on its chunk timeout is a failure, not a partial preview: the
+// run is recorded failed with the error and the operation reports it. Only
+// the walk's own deadline makes a preview partial
+// (TestChatRetention_PreviewDeadlineIsPartialSQLite).
+func TestChatRetention_PreviewChunkTimeoutIsFailedSQLite(t *testing.T) {
+	f := newChatRetentionHubFixture(t)
+	setChatRetentionSettings(t, f.srv, true, `{"enabled":false,"messages_retention_days":30,"sweep":{"pause_ms":0}}`)
+	f.message(chatRetentionSeed{created: time.Now().UTC().Add(-40 * 24 * time.Hour)})
+	f.srv.SetChatRetentionStore(chunkTimeoutChatRetentionStore{f.crs})
+
+	var log bytes.Buffer
+	run, err := f.srv.runChatRetentionPreview(f.ctx, &log, 0, f.alice.ID)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	require.NotNil(t, run)
+	assert.Equal(t, store.ChatRetentionStatusFailed, run.Status)
+	assert.Contains(t, run.Error, "deadline exceeded")
+	assert.NotContains(t, log.String(), "stopped at its time limit")
+
+	stored, err := f.crs.ListChatRetentionRuns(f.ctx, store.ChatRetentionRunFilter{Trigger: store.ChatRetentionTriggerPreview})
+	require.NoError(t, err)
+	require.Len(t, stored, 1)
+	assert.Equal(t, store.ChatRetentionStatusFailed, stored[0].Status)
+}
+
+// lockHeldStore is the hub store with LockChatRetention held by another
+// replica (a live manual run or a sweep tick there).
+type lockHeldStore struct {
+	store.Store
+}
+
+func (lockHeldStore) TryAdvisoryLock(context.Context, store.AdvisoryLockKey) (bool, func() error, error) {
+	return false, func() error { return nil }, nil
+}
+
+func (lockHeldStore) TryAdvisoryLockObject(context.Context, store.AdvisoryLockKey, int32) (bool, func() error, error) {
+	return false, func() error { return nil }, nil
+}
+
+// TestChatRetention_ReconcileWhileLockHeldSQLite: while another replica
+// holds LockChatRetention, a manual run started before this process may be
+// live there and is left running; only a manual row older than any run can
+// last is failed. Previews take no lock and are reconciled by start time.
+func TestChatRetention_ReconcileWhileLockHeldSQLite(t *testing.T) {
+	f := newChatRetentionHubFixture(t)
+	installStoreFault(t, f.srv, func(inner store.Store, _ *storeFaultSwitch) lockHeldStore { return lockHeldStore{inner} })
+	f.srv.startTime = time.Now().UTC()
+	save := func(trigger string, started time.Time) string {
+		t.Helper()
+		r := &store.ChatRetentionRun{Trigger: trigger, DryRun: trigger == store.ChatRetentionTriggerPreview,
+			StartedAt: started, Status: store.ChatRetentionStatusRunning}
+		require.NoError(t, f.crs.SaveChatRetentionRun(f.ctx, r))
+		return r.ID
+	}
+	recentManual := save(store.ChatRetentionTriggerManual, f.srv.startTime.Add(-time.Hour))
+	staleManual := save(store.ChatRetentionTriggerManual, f.srv.startTime.Add(-chatRetentionRunMaxAge-time.Hour))
+	preview := save(store.ChatRetentionTriggerPreview, f.srv.startTime.Add(-time.Hour))
+
+	assert.Equal(t, 2, f.srv.ReconcileInterruptedChatRetentionRuns(f.ctx))
+
+	runs, err := f.crs.ListChatRetentionRuns(f.ctx, store.ChatRetentionRunFilter{})
+	require.NoError(t, err)
+	status := map[string]string{}
+	for _, r := range runs {
+		status[r.ID] = r.Status
+	}
+	assert.Equal(t, store.ChatRetentionStatusRunning, status[recentManual], "may be live on the replica holding the lock")
+	assert.Equal(t, store.ChatRetentionStatusFailed, status[staleManual], "older than any run can last")
+	assert.Equal(t, store.ChatRetentionStatusFailed, status[preview])
+}

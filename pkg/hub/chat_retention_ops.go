@@ -313,16 +313,21 @@ func (s *Server) runChatRetentionPreview(ctx context.Context, logger io.Writer, 
 	remaining, hasDeadline := chatRetentionTimeLeft(ctx)
 	wctx, cancel := chatRetentionWalkContext(ctx, start, remaining, hasDeadline)
 	res, err := sw.Preview(wctx, p)
+	// Read before cancel(): whether the walk's own deadline passed. A
+	// selection that times out on its chunk timeout (a child of wctx) also
+	// wraps context.DeadlineExceeded but leaves wctx live; it is a failure.
+	walkExpired := errors.Is(wctx.Err(), context.DeadlineExceeded)
 	cancel()
 
 	now := sw.now().UTC()
 	run.FinishedAt = &now
 	run.Counts = res.ByProject
 	switch {
-	case err != nil && errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil:
+	case err != nil && walkExpired && ctx.Err() == nil:
 		// The walk reached its own deadline (chatRetentionWalkContext), not
 		// the caller's: the counts so far are kept, as a sweep or manual
-		// run that stops at its budget is partial.
+		// run that stops at its budget is partial. A chunk timeout is not
+		// this case and is recorded as failed below.
 		run.Status = store.ChatRetentionStatusPartial
 		err = nil
 		_, _ = fmt.Fprintln(logger, "The preview stopped at its time limit; the counts are partial")
@@ -479,34 +484,75 @@ const chatRetentionInterruptedError = "interrupted: the hub stopped before the r
 // chatRetentionReconcileTimeout bounds the start-up reconciliation.
 const chatRetentionReconcileTimeout = 10 * time.Second
 
+// chatRetentionRunMaxAge is past the longest a preview or manual run can
+// run (its maintenance run timeout), so a row still "running" that started
+// longer ago belongs to no live run on any hub replica.
+const chatRetentionRunMaxAge = chatRetentionOpMaxDuration + time.Hour
+
 // ReconcileInterruptedChatRetentionRuns marks the preview and manual runs
-// still "running" that started before this hub process as failed
-// (interrupted), as AbortRunningMaintenanceOps does for their maintenance
-// runs: each holds its run row only in the process that started it, which
-// is gone. Sweep runs are left alone; the next tick continues the open one.
-// Call it once at start, after SetChatRetentionStore. Failures are logged.
+// still "running" that a hub restart interrupted as failed (interrupted), as
+// AbortRunningMaintenanceOps does for their maintenance runs: each run's row
+// is written only by the process that started it. Sweep runs are left
+// alone; the next tick continues the open one. Call it once at start, after
+// SetChatRetentionStore. Failures are logged.
+//
+// What counts as interrupted:
+//   - a manual run started before this process, when this process can take
+//     LockChatRetention: a live manual run holds that lock on whichever
+//     replica runs it. While another replica holds the lock (a live manual
+//     run, or a sweep tick), only manual rows older than
+//     chatRetentionRunMaxAge are failed; the rest wait for the next start.
+//   - a preview started before this process. A preview takes no lock, so
+//     with several replicas a preview still running on another one is
+//     marked failed too; that replica's final save overwrites the status
+//     and clears the error when its preview ends, so the panel shows it
+//     failed only until then. On a single hub (SQLite) every such row is
+//     interrupted.
 func (s *Server) ReconcileInterruptedChatRetentionRuns(ctx context.Context) int {
 	st := s.chatRetentionStore()
 	if st == nil {
 		return 0
 	}
+	s.mu.RLock()
 	started := s.startTime
+	s.mu.RUnlock()
+	now := time.Now()
 	if started.IsZero() {
-		started = time.Now()
+		started = now
 	}
 	ctx, cancel := context.WithTimeout(ctx, chatRetentionReconcileTimeout)
 	defer cancel()
-	n, err := st.FailRunningChatRetentionRuns(ctx,
-		[]string{store.ChatRetentionTriggerPreview, store.ChatRetentionTriggerManual},
-		started, chatRetentionInterruptedError, time.Now())
-	if err != nil {
-		slog.Warn("chat retention: reconcile interrupted preview and manual runs", "error", err)
-		return 0
+
+	manualBefore := now.Add(-chatRetentionRunMaxAge)
+	if release, acquired, err := s.tryChatRetentionLock(ctx); err != nil {
+		slog.Warn("chat retention: reconcile: advisory lock", "error", err)
+	} else if acquired {
+		manualBefore = started
+		defer release()
 	}
-	if n > 0 {
-		slog.Info("chat retention: marked interrupted preview and manual runs failed", "count", n)
+	if manualBefore.After(started) {
+		manualBefore = started
 	}
-	return n
+
+	total := 0
+	for _, step := range []struct {
+		trigger string
+		before  time.Time
+	}{
+		{store.ChatRetentionTriggerPreview, started},
+		{store.ChatRetentionTriggerManual, manualBefore},
+	} {
+		n, err := st.FailRunningChatRetentionRuns(ctx, []string{step.trigger}, step.before, chatRetentionInterruptedError, now)
+		if err != nil {
+			slog.Warn("chat retention: reconcile interrupted runs", "trigger", step.trigger, "error", err)
+			continue
+		}
+		total += n
+	}
+	if total > 0 {
+		slog.Info("chat retention: marked interrupted preview and manual runs failed", "count", total)
+	}
+	return total
 }
 
 // writeChatRetentionPolicy writes the policy line of a run log.

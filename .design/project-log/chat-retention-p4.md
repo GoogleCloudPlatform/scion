@@ -33,9 +33,10 @@ Phase 4 of hub-wide chat message retention (design §9 Phase 4; §6.5, §7.2,
   takes the policy snapshot, and records a `trigger=manual` row with the
   actor. Its main walk starts at the beginning (the cursor is reset as the
   daily reset does), so it also deletes rows a tick skipped while pending
-  and dispatched since, exactly what a preview counts. `RunTick` was split so both share `sweepAndRecord` (phases, cursor
-  and last applied cutoff, run status, prune); a manual run gives each
-  phase the whole time instead of halving it. Refused before a run is
+  and dispatched since, exactly what a preview counts. `RunTick` was split
+  so both share `sweepAndRecord` (phases, cursor and last applied cutoff,
+  run status, prune); a manual run gives each phase the whole time instead
+  of halving it. Refused before a run is
   created with `409 chat_retention_disabled` while the sweep is not active.
 - **Maintenance wiring.** Both keys are seeded as routine operations, have
   a parameter allowlist and a run timeout, and are hidden from the list and
@@ -69,8 +70,14 @@ Phase 4 of hub-wide chat message retention (design §9 Phase 4; §6.5, §7.2,
 - **Interrupted runs.** At hub start, `ReconcileInterruptedChatRetentionRuns`
   (called after the store is wired) marks preview and manual rows still
   `running` from before this process as `failed` ("interrupted"), as
-  `AbortRunningMaintenanceOps` does for their maintenance runs. A preview
-  that reaches its own time limit is `partial`, not `failed`.
+  `AbortRunningMaintenanceOps` does for their maintenance runs. A manual
+  row is failed only while this process can take `LockChatRetention` (a
+  live manual run on any replica holds it); otherwise only manual rows
+  older than the longest possible run are. A preview takes no lock, so with
+  several replicas a preview still live on another one can be marked failed
+  until that replica's final save overwrites the status. A preview that
+  reaches its own time limit is `partial`; a selection that hits its chunk
+  timeout is `failed` with the error.
 - **Backlog estimate.** Shown only when the last preview's recorded window
   and grace equal the saved settings; otherwise the panel says the preview
   was for something else.
