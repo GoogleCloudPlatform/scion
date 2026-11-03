@@ -29,39 +29,46 @@ type hubScopeResolver func(*cobra.Command, *config.Settings) (string, string, er
 // loadHubClient returns the resolved settings alongside the client for callers
 // that need project or endpoint metadata after client construction.
 func loadHubClient() (*config.Settings, hubclient.Client, error) {
+	settings, client, _, err := loadHubClientUAT()
+	return settings, client, err
+}
+
+// loadHubClientUAT is loadHubClient that also reports whether the client
+// sends a user access token (see authSourceIsUserAccessToken).
+func loadHubClientUAT() (*config.Settings, hubclient.Client, bool, error) {
 	// A hub profile names the hub: no local project settings are read.
 	if hubProfileSelected() {
-		client, err := getHubClient(nil)
+		client, uat, err := getHubClientUAT(nil)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, false, err
 		}
-		return &config.Settings{}, client, nil
+		return &config.Settings{}, client, uat, nil
 	}
 	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to resolve project path: %w", err)
+		return nil, nil, false, fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
 	// An explicit --project or --global wins over SCION_PROJECT_ID in the
 	// environment (ptone/scion#3251).
 	settings, err := loadSettingsForTarget(resolvedPath)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to load settings: %w", err)
+		return nil, nil, false, fmt.Errorf("failed to load settings: %w", err)
 	}
 
-	client, err := getHubClient(settings)
+	client, uat, err := getHubClientUAT(settings)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 
-	return settings, client, nil
+	return settings, client, uat, nil
 }
 
 func resolveHubScope(
 	cmd *cobra.Command,
 	resolve hubScopeResolver,
 ) (hubclient.Client, string, string, context.Context, context.CancelFunc, error) {
-	settings, client, err := loadHubClient()
+	settings, client, uat, err := loadHubClientUAT()
 	if err != nil {
 		return nil, "", "", nil, nil, err
 	}
@@ -72,7 +79,7 @@ func resolveHubScope(
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	scopeID, err = resolveScopeID(ctx, client, scope, scopeID)
+	scopeID, err = resolveScopeID(ctx, client, scope, scopeID, uat)
 	if err != nil {
 		cancel()
 		return nil, "", "", nil, nil, err
