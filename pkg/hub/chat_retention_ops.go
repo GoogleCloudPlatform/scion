@@ -466,10 +466,10 @@ func (s *Server) runChatRetentionManual(ctx context.Context, logger io.Writer, a
 func writeChatRetentionPolicy(logger io.Writer, verb string, p chatRetentionPolicy) {
 	window := "no retention window (only deleted conversations)"
 	if !p.MainCutoff.IsZero() {
-		window = fmt.Sprintf("messages older than %d days (before %s)", p.Config.MessagesRetentionDays, p.MainCutoff.Format(time.RFC3339))
+		window = fmt.Sprintf("messages older than %d days (before %s)", p.Config.MessagesRetentionDays, p.MainCutoff.UTC().Format(time.RFC3339))
 	}
 	_, _ = fmt.Fprintf(logger, "%s: %s; messages of conversations and topics deleted more than %d days ago (before %s)\n",
-		verb, window, p.GraceDays, p.GraceCutoff.Format(time.RFC3339))
+		verb, window, p.GraceDays, p.GraceCutoff.UTC().Format(time.RFC3339))
 }
 
 // writeChatRetentionCounts writes the per-project message counts of a run
