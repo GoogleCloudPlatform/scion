@@ -19,6 +19,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -157,4 +158,39 @@ func TestCloudRunProvisionNFS_PartialFailureRollsBack(t *testing.T) {
 	assert.NoDirExists(t, filepath.Join(agentDir, "workspace"), "the workspace this provision created goes")
 	assert.FileExists(t, blocker)
 	assert.DirExists(t, agentDir, "the agent directory existed before")
+}
+
+// failMkdirAfterCreate makes cloudRunMkdirNFSAgentDir create the directory
+// and then fail (as a failure after MkdirAll would) for the directory
+// whose name starts with prefix.
+func failMkdirAfterCreate(t *testing.T, prefix string) {
+	t.Helper()
+	orig := cloudRunMkdirNFSAgentDir
+	cloudRunMkdirNFSAgentDir = func(dir string, uid, gid int) error {
+		if strings.HasPrefix(filepath.Base(dir), prefix) {
+			require.NoError(t, os.MkdirAll(dir, 0o770))
+			return errors.New("injected failure after the directory was created")
+		}
+		return orig(dir, uid, gid)
+	}
+	t.Cleanup(func() { cloudRunMkdirNFSAgentDir = orig })
+}
+
+// A mkdir that fails after creating its directories still records them:
+// the provision's rollback removes everything it created, the agent
+// directory included.
+func TestCloudRunProvisionNFS_MkdirFailingAfterCreateRollsBack(t *testing.T) {
+	for name, prefix := range map[string]string{
+		"secrets (after home)":              "secrets-",
+		"workspace (creates agents/<slug>)": "workspace",
+	} {
+		t.Run(name, func(t *testing.T) {
+			rt, cfg, agentDir := rollbackTestRun(t, &fakeInstancesClient{getErr: notFoundErr()}, true)
+			failMkdirAfterCreate(t, prefix)
+
+			_, err := rt.provisionCloudRunNFS(context.Background(), cfg, crTestAgentID, os.Getuid(), os.Getgid())
+			require.Error(t, err)
+			assert.NoDirExists(t, agentDir, "nothing this provision created is left")
+		})
+	}
 }
