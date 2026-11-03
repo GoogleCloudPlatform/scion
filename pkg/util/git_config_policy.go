@@ -16,6 +16,7 @@ package util
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -25,6 +26,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"unicode/utf8"
 )
 
 // Deny-by-default repository config policy.
@@ -132,40 +134,246 @@ func refusalKeyName(key string) string {
 }
 
 func (e *RepoConfigRefusedError) Error() string {
+	if e.Seeded {
+		return "agent git config refused: repository config sets " + e.seededEntry()
+	}
 	reason := e.Reason
 	if reason == "" {
 		reason = "not on the host-side git allow-list"
 	}
-	var msg string
-	if e.Seeded {
-		// The agent reads no host global git config, so the only remedy is to
-		// remove the setting from the layer that sets it. A structural refusal
-		// (a <placeholder> key) names a submodule directory or git link, and a
-		// ".git/<name>" key names a file, not a setting. No config key starts
-		// with either: a section name starts with a letter, digit or '-'
-		// (isConfigNameChar), and a legacy [section.sub] header cannot start
-		// with '.' (parseSection).
-		remedy := "remove it from the repository's .git/config"
-		switch {
-		case strings.HasPrefix(e.Key, "<"):
-			remedy = "remove or repair the submodule directory or git link it names"
-		case strings.HasPrefix(e.Key, ".git/"):
-			remedy = "remove that file from the repository's .git directory"
-		case e.Layer != "":
-			remedy = "remove it from the git config file that sets it"
-		}
-		msg = fmt.Sprintf("agent git config refused: repository config sets %s, which is %s; %s", e.Key, reason, remedy)
-	} else {
-		where := e.Dir
-		if e.Audience == AudienceRemote {
-			where = "the project repository"
-		}
-		msg = fmt.Sprintf("git in %s refused: repository config sets %s, which is %s; remove it from the repository's .git/config (or config.worktree)", where, e.Key, reason)
+	where := e.Dir
+	if e.Audience == AudienceRemote {
+		where = "the project repository"
 	}
+	msg := fmt.Sprintf("git in %s refused: repository config sets %s, which is %s; remove it from the repository's .git/config (or config.worktree)", where, e.Key, reason)
 	if e.Layer != "" {
 		msg += " (in " + e.Layer + ")"
 	}
 	return msg
+}
+
+// seededEntry is the text a single seeded refusal prints after "repository
+// config sets ": the key, why it is refused, the remedy and, when set, the
+// layer.
+func (e *RepoConfigRefusedError) seededEntry() string {
+	reason := e.Reason
+	if reason == "" {
+		reason = "not on the host-side git allow-list"
+	}
+	msg := fmt.Sprintf("%s, which is %s; %s", e.Key, reason, seededRemedy(e.Key, e.Layer, false))
+	if e.Layer != "" {
+		msg += " (in " + e.Layer + ")"
+	}
+	return msg
+}
+
+// seededRemedy is the remedy for a seeded refusal of key in layer. The agent
+// reads no host global git config, so the only remedy is to remove the
+// setting from the layer that sets it. A structural refusal (a <placeholder>
+// key) names a submodule directory or git link, and a ".git/<name>" key names
+// a file, not a setting. No config key starts with either: a section name
+// starts with a letter, digit or '-' (isConfigNameChar), and a legacy
+// [section.sub] header cannot start with '.' (parseSection). each words the
+// remedy for a list of keys.
+func seededRemedy(key, layer string, each bool) string {
+	it := "it"
+	if each {
+		it = "each"
+	}
+	switch {
+	case strings.HasPrefix(key, "<"):
+		return "remove or repair the submodule directory or git link " + it + " names"
+	case strings.HasPrefix(key, ".git/"):
+		if each {
+			return "remove each file from the repository's .git directory"
+		}
+		return "remove that file from the repository's .git directory"
+	case layer != "":
+		return "remove " + it + " from the git config file that sets it"
+	}
+	return "remove " + it + " from the repository's .git/config"
+}
+
+// maxRefusalsTextBytes bounds a RepoConfigRefusals text. The Hub keeps at
+// most 512 bytes of a launch report's message (sanitizeFailureReason in
+// pkg/hub) and stores it as "<step>: <message>"; the 32 bytes left are
+// headroom for that prefix (step names are short constants). Within the
+// bound the list is shortened with "and N more", and a single over-long key
+// with an ellipsis, so the count and the note always survive.
+const maxRefusalsTextBytes = 480
+
+// refusalsGitChecksNote ends a RepoConfigRefusals text when the checks that
+// run git were skipped.
+const refusalsGitChecksNote = " The git-based checks (the cross-check and the submodule check) run once these are fixed and can report more."
+
+// RepoConfigRefusals reports every key an agent-start (seed) check refused in
+// the config files it read as data, so one start names them all rather than
+// one per attempt. It holds two or more seeded refusals; one refusal is
+// returned as a plain *RepoConfigRefusedError (joinSeedRefusals).
+//
+// Its text names each key and, per config layer, the remedy, with each key's
+// reason when the whole list fits maxRefusalsTextBytes (the reasons are left
+// out otherwise). Like
+// RepoConfigRefusedError, it never includes a value: every fmt verb and every
+// slog handler prints Error() (Format, LogValue). Unwrap returns the
+// refusals, so errors.As finds the first *RepoConfigRefusedError.
+type RepoConfigRefusals struct {
+	Refusals []*RepoConfigRefusedError
+	// GitChecksPending marks that the checks that run git (the cross-check
+	// against git's own reading and the submodule check) were not run,
+	// because git must not run on a config that was refused. Fixing the
+	// listed keys can make a later start report more.
+	GitChecksPending bool
+}
+
+func (e *RepoConfigRefusals) Error() string {
+	if e == nil || len(e.Refusals) == 0 {
+		return "agent git config refused"
+	}
+	n := len(e.Refusals)
+	// With each key's reason when the whole list fits.
+	if text := e.text(n, true, ""); len(text) <= maxRefusalsTextBytes {
+		return text
+	}
+	// Otherwise keys and remedies only, dropping whole keys from the end.
+	for listed := n; listed >= 1; listed-- {
+		if text := e.text(listed, false, ""); len(text) <= maxRefusalsTextBytes {
+			return text
+		}
+	}
+	// One key alone is too long: shorten its name.
+	over := len(e.text(1, false, "")) - maxRefusalsTextBytes
+	return e.text(1, false, shortenKey(e.Refusals[0].Key, len(e.Refusals[0].Key)-over))
+}
+
+// shortenKey cuts key to at most limit bytes on a rune boundary and marks the
+// cut with an ellipsis (counted in limit).
+func shortenKey(key string, limit int) string {
+	const ellipsis = "\u2026"
+	if len(key) <= limit {
+		return key
+	}
+	cut := max(limit-len(ellipsis), 0)
+	for cut > 0 && !utf8.RuneStart(key[cut]) {
+		cut--
+	}
+	return key[:cut] + ellipsis
+}
+
+// text renders the first listed refusals, grouped in first-seen order by
+// remedy and layer as "<keys>: <remedy>", and counts the rest as "and N
+// more". withReasons adds each key's reason; firstKey, when set, replaces
+// the first key's name (a shortened one).
+func (e *RepoConfigRefusals) text(listed int, withReasons bool, firstKey string) string {
+	type group struct {
+		remedy string
+		keys   []string
+	}
+	var groups []*group
+	byRemedy := map[string]*group{}
+	for i, r := range e.Refusals[:listed] {
+		remedy := seededRemedy(r.Key, r.Layer, true)
+		if r.Layer != "" {
+			remedy += ", in " + r.Layer
+		}
+		g := byRemedy[remedy]
+		if g == nil {
+			g = &group{remedy: remedy}
+			byRemedy[remedy] = g
+			groups = append(groups, g)
+		}
+		key := r.Key
+		if i == 0 && firstKey != "" {
+			key = firstKey
+		}
+		if withReasons {
+			reason := r.Reason
+			if reason == "" {
+				reason = "not on the host-side git allow-list"
+			}
+			key += " (" + reason + ")"
+		}
+		g.keys = append(g.keys, key)
+	}
+	parts := make([]string, len(groups))
+	for i, g := range groups {
+		parts[i] = strings.Join(g.keys, ", ") + ": " + g.remedy
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "agent git config refused: repository config sets %d keys that are not allowed: %s", len(e.Refusals), strings.Join(parts, "; "))
+	if rest := len(e.Refusals) - listed; rest > 0 {
+		fmt.Fprintf(&b, "; and %d more", rest)
+	}
+	b.WriteString(".")
+	if e.GitChecksPending {
+		b.WriteString(refusalsGitChecksNote)
+	}
+	return b.String()
+}
+
+// Unwrap returns each refusal, so errors.As(err, **RepoConfigRefusedError)
+// matches the first.
+func (e *RepoConfigRefusals) Unwrap() []error {
+	if e == nil {
+		return nil
+	}
+	errs := make([]error, len(e.Refusals))
+	for i, r := range e.Refusals {
+		errs[i] = r
+	}
+	return errs
+}
+
+// Format prints Error() for every verb and flag, as RepoConfigRefusedError's
+// does.
+func (e RepoConfigRefusals) Format(f fmt.State, _ rune) {
+	_, _ = io.WriteString(f, e.Error())
+}
+
+// LogValue makes every slog handler log Error(), never the fields.
+func (e RepoConfigRefusals) LogValue() slog.Value {
+	return slog.StringValue(e.Error())
+}
+
+// joinSeedRefusals returns nil for no refusals, the refusal itself for one
+// (its text is unchanged), and a *RepoConfigRefusals for more. A refusal of
+// the same key in the same layer is listed once.
+func joinSeedRefusals(refusals []*RepoConfigRefusedError, gitChecksPending bool) error {
+	type id struct{ layer, key string }
+	seen := make(map[id]bool, len(refusals))
+	var uniq []*RepoConfigRefusedError
+	for _, r := range refusals {
+		k := id{r.Layer, r.Key}
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		uniq = append(uniq, r)
+	}
+	switch len(uniq) {
+	case 0:
+		return nil
+	case 1:
+		return uniq[0]
+	}
+	return &RepoConfigRefusals{Refusals: uniq, GitChecksPending: gitChecksPending}
+}
+
+// StartRefusalText returns the text of an agent-start git config refusal in
+// err's chain, and whether there is one. Only a refusal that names no host
+// directory qualifies (a seeded refusal, or a host-side one for the remote
+// audience), so the text can be shown to whoever started the agent. The text
+// is the refusal's own, without whatever err wraps it in.
+func StartRefusalText(err error) (string, bool) {
+	var many *RepoConfigRefusals
+	if errors.As(err, &many) {
+		return many.Error(), true
+	}
+	var one *RepoConfigRefusedError
+	if errors.As(err, &one) && one.Dir == "" && (one.Seeded || one.Audience == AudienceRemote) {
+		return one.Error(), true
+	}
+	return "", false
 }
 
 // Format prints Error() for every verb and flag (%v, %+v, %#v, %s, %q, ...),
@@ -644,24 +852,44 @@ func checkRepoConfigPolicy(ctx context.Context, dir string, env []string, policy
 // subsection, is never printed verbatim. A key whose subsection has no '@' and
 // is not credential.<url> is named exactly as v.Key().
 func checkRepoConfigVars(dir, layer string, vars []gitConfigVar, policy RepoConfigPolicy, opts repoConfigAllowOptions, exempt func(gitConfigVar) bool) error {
-	refused := func(v gitConfigVar, reason string) error {
-		return newRepoConfigRefusedError(dir, layer, v.Key(), v.Value, reason, opts.seed, refusalAudience(opts.seed, opts.audience))
-	}
 	for _, v := range vars {
-		if v.Section == "include" || v.Section == "includeif" {
-			return refused(v, "an include directive")
-		}
-		if opts.seed && seedKeyMatchesAny(seedUnpinnedRefuse, v) {
-			return refused(v, "a setting that runs a command in the agent's git")
-		}
-		if exempt != nil && exempt(v) {
-			continue
-		}
-		if ok, reason := allowVar(policy, v, opts); !ok {
-			return refused(v, reason)
+		if reason, refused := refuseConfigVar(v, policy, opts, exempt); refused {
+			return newRepoConfigRefusedError(dir, layer, v.Key(), v.Value, reason, opts.seed, refusalAudience(opts.seed, opts.audience))
 		}
 	}
 	return nil
+}
+
+// collectSeedRefusals applies the seed rules of checkRepoConfigVars to every
+// variable and returns a refusal for each one refused, in order, rather than
+// stopping at the first. It reads no file and runs no git.
+func collectSeedRefusals(layer string, vars []gitConfigVar, policy RepoConfigPolicy, exempt func(gitConfigVar) bool) []*RepoConfigRefusedError {
+	opts := repoConfigAllowOptions{seed: true}
+	var out []*RepoConfigRefusedError
+	for _, v := range vars {
+		if reason, refused := refuseConfigVar(v, policy, opts, exempt); refused {
+			out = append(out, newRepoConfigRefusedError("", layer, v.Key(), v.Value, reason, true, AudienceRemote))
+		}
+	}
+	return out
+}
+
+// refuseConfigVar is the per-variable decision checkRepoConfigVars and
+// collectSeedRefusals share, in the order checkRepoConfigVars documents.
+func refuseConfigVar(v gitConfigVar, policy RepoConfigPolicy, opts repoConfigAllowOptions, exempt func(gitConfigVar) bool) (string, bool) {
+	if v.Section == "include" || v.Section == "includeif" {
+		return "an include directive", true
+	}
+	if opts.seed && seedKeyMatchesAny(seedUnpinnedRefuse, v) {
+		return "a setting that runs a command in the agent's git", true
+	}
+	if exempt != nil && exempt(v) {
+		return "", false
+	}
+	if ok, reason := allowVar(policy, v, opts); !ok {
+		return reason, true
+	}
+	return "", false
 }
 
 // seedKeyRule names one config key exactly: section and variable name
@@ -727,9 +955,10 @@ var seedUnpinnedSafe = []seedKeyRule{
 // PrepareSeededGitConfig builds the agent's seeded copy of a repository
 // config from raw. It parses raw exactly once and then, on those parsed
 // variables only:
-//   - checks them against policy (checkRepoConfigVars with the seed option and
-//     the isDroppedKey exemption), returning a *RepoConfigRefusedError naming the
-//     first refused key;
+//   - checks them against policy (the seed rules of checkRepoConfigVars and
+//     the isDroppedKey exemption), returning one error that names every
+//     refused key (a *RepoConfigRefusedError for one, a *RepoConfigRefusals
+//     for more);
 //   - removes credential-bearing material (redactGitConfigVars, as
 //     RedactGitConfigSecrets does);
 //   - removes every variable for which strip returns true (strip may be nil);
@@ -752,7 +981,7 @@ func prepareSeededGitConfig(raw []byte, parse func([]byte) ([]gitConfigVar, erro
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := checkRepoConfigVars("", "", vars, policy, repoConfigAllowOptions{seed: true}, isDroppedKey); err != nil {
+	if err := joinSeedRefusals(collectSeedRefusals("", vars, policy, isDroppedKey), false); err != nil {
 		return nil, nil, err
 	}
 	kept, stripped := redactGitConfigVars(vars)

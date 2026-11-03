@@ -2257,6 +2257,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			}()
 		}
 		span.SetStatus(codes.Error, spanErrorText(err))
+		gitRefusal, isGitRefusal := util.StartRefusalText(err)
 		switch {
 		case isPolicyErr:
 			s.writeHarnessPolicyRefusal(w, policyDecision, "create agent", req.ID, nil)
@@ -2279,6 +2280,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, ErrCodeNotFound, notFoundMessage(opCreateAgent, err, opts.TemplateName), nil)
 		case isSkillErr:
 			SkillResolutionFailed(w, skillErr, createSkill.ref)
+		case isGitRefusal:
+			// The repository's git config sets keys agents may not be given.
+			writeGitConfigRefusalText(w, gitRefusal, nil)
 		case errors.Is(err, agent.ErrProjectPathNotInitialized):
 			writeError(w, http.StatusConflict, ErrCodeProjectPathNotInitialized, err.Error(), nil)
 		case config.IsAgentStateConflict(err):
@@ -4261,6 +4265,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		details := s.startFailureDetails(ctx, mgr, id, projectID, opts.RunID)
 		var skillErr *agent.SkillResolutionError
 		ue, unusable := unusableProvisionerFrom(err)
+		gitRefusal, isGitRefusal := util.StartRefusalText(err)
 		storageErr, isStorageRefusal := storageMigrationRequiredFrom(err)
 		switch {
 		case unusable:
@@ -4278,6 +4283,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			writeError(w, http.StatusConflict, ErrCodeConflict, scionrt.ErrRunConflict.Error(), details)
 		case errors.As(err, &skillErr):
 			skillResolutionFailedWithDetails(w, skillErr, startSkill.ref, details)
+		case isGitRefusal:
+			// The repository's git config sets keys agents may not be given.
+			writeGitConfigRefusalText(w, gitRefusal, details)
 		case errors.Is(err, agent.ErrProjectPathNotInitialized):
 			writeError(w, http.StatusConflict, ErrCodeProjectPathNotInitialized, err.Error(), details)
 		case config.IsAgentStateConflict(err):
@@ -5492,6 +5500,9 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		var skillErr *agent.SkillResolutionError
 		if errors.As(err, &skillErr) {
 			skillResolutionFailedWithDetails(w, skillErr, restartSkill.ref, details)
+			return
+		}
+		if writeGitConfigRefusal(w, err, details) {
 			return
 		}
 		if errors.Is(err, agent.ErrProjectPathNotInitialized) {

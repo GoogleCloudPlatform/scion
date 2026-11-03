@@ -55,8 +55,12 @@ const (
 // (crossCheckAgainstGit), run with GIT_DIR and GIT_COMMON_DIR set explicitly so
 // git never resolves a work-tree gitfile, and with no global or system config.
 //
-// It returns a *RepoConfigRefusedError (Layer names the file) for the first
-// refused key, and an error for anything it cannot read or parse (fail closed).
+// Every layer is checked before any refusal is returned, so one error names
+// every refused key in every layer: a *RepoConfigRefusedError (Layer names the
+// file) for one, a *RepoConfigRefusals for more. The cross-check runs only
+// when no key is refused, because git must not run on a refused config; a
+// cross-check refusal therefore comes alone. Anything it cannot read or parse
+// is an error (fail closed).
 func CheckSeedRepoConfigLayers(ctx context.Context, commonDir, adminName string) error {
 	return checkSeedRepoConfigLayers(ctx, commonDir, adminName, readSeedConfigLayer)
 }
@@ -83,15 +87,19 @@ func checkSeedRepoConfigLayers(ctx context.Context, commonDir, adminName string,
 		layers = append(layers, layer{filepath.Join(gitDir, "config.worktree"), seedLayerOwnWorktree, nil})
 	}
 	var parsed []gitConfigVar
+	var refusals []*RepoConfigRefusedError
 	for _, l := range layers {
 		vars, err := read(l.path, l.label)
 		if err != nil {
 			return err
 		}
-		if err := checkRepoConfigVars("", l.label, vars, RepoPolicyLinked, repoConfigAllowOptions{seed: true}, l.exempt); err != nil {
-			return err
-		}
+		refusals = append(refusals, collectSeedRefusals(l.label, vars, RepoPolicyLinked, l.exempt)...)
 		parsed = append(parsed, vars...)
+	}
+	// git must not run on a config with a refused key (an include among them),
+	// so the cross-check runs only when every layer passes.
+	if err := joinSeedRefusals(refusals, true); err != nil {
+		return err
 	}
 	return crossCheckAgainstGit(ctx, commonDir, seedGitEnv(gitDir, commonDir), parsed, seedLayerCombined, true, AudienceRemote)
 }
