@@ -36,8 +36,13 @@ Leave one update path in the UI. Sweep the docs loose ends. Validate the admin `
     - starts with `-`;
     - fails `git check-ref-format --branch`;
     - is returned changed by check-ref-format (`@{-N}` expansion).
-  - With git ≥ 2.24 (read from `git version`), `--end-of-options` goes before the branch in `git checkout` and
-    `git reset --hard`.
+  - With git ≥ 2.44 (read from `git version`), `--end-of-options` goes before the branch in `git checkout` and
+    `git reset --hard`. git 2.24 added the flag, but checkout and reset accept it only from 2.44 (before that they
+    read it as a revision or path), so on Ubuntu 22.04/24.04 and Debian 12 it is not passed. The leading-`-` refusal
+    and check-ref-format are the security boundary either way. (The first version used 2.24; the #6987 review
+    found it, C1.)
+  - The errors quote the name and never echo git's output; a git that cannot run is reported as "could not
+    validate branch", not as an invalid branch (review O1, O2).
   - Both checks run through `gitOutput`. The host-git door counts in `pkg/util/git_host_door_test.go` are therefore
     unchanged:
 
@@ -84,7 +89,9 @@ Leave one update path in the UI. Sweep the docs loose ends. Validate the admin `
     - option-shaped names run nothing;
     - a configured `-c` is refused;
     - an invalid name stops after check-ref-format;
-    - `--end-of-options` is passed on git 2.43 and omitted on git 2.20.
+    - `--end-of-options` is omitted on git 2.43 and passed on git 2.44 (both executors), with a boundary table for
+      endOfOptionsSupported;
+    - a git that cannot run gives "could not validate branch", and no error carries a raw control character.
 
 ## Gates
 - Web lane at `2b7732c5b`: prettier, vitest 306/306, typecheck, lint (0 errors), build: all pass.

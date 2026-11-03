@@ -723,13 +723,29 @@ func gitOutput(ctx context.Context, dir string, args ...string) (string, error) 
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		if detail := strings.TrimSpace(stderr.String()); detail != "" {
-			return "", fmt.Errorf("git %s: %s", strings.Join(args, " "), detail)
-		}
-		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+		return "", &gitOutputError{args: args, detail: strings.TrimSpace(stderr.String()), err: err}
 	}
 	return strings.TrimSpace(stdout.String()), nil
 }
+
+// gitOutputError is a failed gitOutput run. Its text is unchanged ("git
+// <args>: <stderr>", or the run error when stderr is empty); Unwrap exposes
+// the run error so callers can tell a non-zero exit (*exec.ExitError) from a
+// git that could not start.
+type gitOutputError struct {
+	args   []string
+	detail string
+	err    error
+}
+
+func (e *gitOutputError) Error() string {
+	if e.detail != "" {
+		return fmt.Sprintf("git %s: %s", strings.Join(e.args, " "), e.detail)
+	}
+	return fmt.Sprintf("git %s: %v", strings.Join(e.args, " "), e.err)
+}
+
+func (e *gitOutputError) Unwrap() error { return e.err }
 
 // UnitDriftStatus is the stored result of the last systemd unit check,
 // shown on Admin -> Maintenance. Only "match" and "drift" are stored.

@@ -27,7 +27,8 @@ import (
 
 // Branch-param validation in both rebuild executors (ptone/scion#6987).
 // The fixture's git stub logs every call; its check-ref-format echoes the
-// name back (as git does for a valid name) and it reports git 2.43.0.
+// name back (as git does for a valid name) and it reports git 2.43.0, the
+// last release whose checkout/reset do NOT accept --end-of-options.
 
 // optionShapedBranches would be read as options by git checkout or reset.
 var optionShapedBranches = []string{"--upload-pack=touch /tmp/pwned", "-b", "--orphan=x", "-"}
@@ -65,7 +66,7 @@ func TestRebuildServer_InvalidBranchRunsNoCheckout(t *testing.T) {
 	}
 	inst, _, signals := symlinkInstallerForRebuild(t, "nightly-20261022")
 	err := f.executor(inst).Run(context.Background(), &bytes.Buffer{}, map[string]string{"branch": "a..b"})
-	if err == nil || !strings.Contains(err.Error(), `invalid branch "a..b"`) || !strings.Contains(err.Error(), "not a valid branch name") {
+	if err == nil || err.Error() != `invalid branch "a..b": not a valid git branch name` {
 		t.Fatalf("Run = %v, want the branch refused by check-ref-format", err)
 	}
 	if calls := f.callLog(t); strings.TrimSpace(calls) != "git check-ref-format --branch a..b" {
@@ -76,7 +77,25 @@ func TestRebuildServer_InvalidBranchRunsNoCheckout(t *testing.T) {
 	}
 }
 
-func TestRebuildServer_ValidBranchUsesEndOfOptions(t *testing.T) {
+// setStubGitVersion makes the fixture's git stub report version v.
+func setStubGitVersion(t *testing.T, v string) {
+	t.Helper()
+	gitStub := filepath.Join(filepath.SplitList(os.Getenv("PATH"))[0], "git")
+	data, err := os.ReadFile(gitStub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "git version 2.43.0") {
+		t.Fatal("fixture git stub does not report 2.43.0")
+	}
+	if err := os.WriteFile(gitStub, []byte(strings.Replace(string(data), "git version 2.43.0", "git version "+v, 1)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// On git 2.43 (Ubuntu 24.04; Debian 12 and Ubuntu 22.04 are older) checkout
+// and reset read --end-of-options as a revision or path, so it is not passed.
+func TestRebuildServer_Git243OmitsEndOfOptions(t *testing.T) {
 	f := newRebuildFixture(t, "")
 	inst, _, _ := symlinkInstallerForRebuild(t, "nightly-20261022")
 	var log bytes.Buffer
@@ -86,37 +105,34 @@ func TestRebuildServer_ValidBranchUsesEndOfOptions(t *testing.T) {
 	calls := f.callLog(t)
 	for _, want := range []string{
 		"git check-ref-format --branch feature/x\n",
+		"git checkout feature/x\n",
+		"git reset --hard origin/feature/x\n",
+	} {
+		if !strings.Contains(calls, want) {
+			t.Errorf("missing %q in calls:\n%s", want, calls)
+		}
+	}
+	if strings.Contains(calls, "--end-of-options") {
+		t.Fatalf("--end-of-options passed to git 2.43:\n%s", calls)
+	}
+}
+
+func TestRebuildServer_Git244UsesEndOfOptions(t *testing.T) {
+	f := newRebuildFixture(t, "")
+	setStubGitVersion(t, "2.44.0")
+	inst, _, _ := symlinkInstallerForRebuild(t, "nightly-20261022")
+	var log bytes.Buffer
+	if err := f.executor(inst).Run(context.Background(), &log, map[string]string{"branch": "feature/x"}); err != nil {
+		t.Fatalf("Run: %v\n%s", err, log.String())
+	}
+	calls := f.callLog(t)
+	for _, want := range []string{
 		"git checkout --end-of-options feature/x\n",
 		"git reset --hard --end-of-options origin/feature/x\n",
 	} {
 		if !strings.Contains(calls, want) {
 			t.Errorf("missing %q in calls:\n%s", want, calls)
 		}
-	}
-}
-
-func TestRebuildServer_OldGitOmitsEndOfOptions(t *testing.T) {
-	f := newRebuildFixture(t, "")
-	gitStub := filepath.Join(filepath.SplitList(os.Getenv("PATH"))[0], "git")
-	data, err := os.ReadFile(gitStub)
-	if err != nil {
-		t.Fatal(err)
-	}
-	old := strings.Replace(string(data), "git version 2.43.0", "git version 2.20.1", 1)
-	if err := os.WriteFile(gitStub, []byte(old), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	inst, _, _ := symlinkInstallerForRebuild(t, "nightly-20261022")
-	var log bytes.Buffer
-	if err := f.executor(inst).Run(context.Background(), &log, map[string]string{"branch": "main"}); err != nil {
-		t.Fatalf("Run: %v\n%s", err, log.String())
-	}
-	calls := f.callLog(t)
-	if !strings.Contains(calls, "git checkout main\n") || !strings.Contains(calls, "git reset --hard origin/main\n") {
-		t.Fatalf("git 2.20 must get plain checkout/reset:\n%s", calls)
-	}
-	if strings.Contains(calls, "--end-of-options") {
-		t.Fatalf("--end-of-options passed to git 2.20:\n%s", calls)
 	}
 }
 
@@ -148,23 +164,40 @@ func TestRebuildWeb_ConfiguredInvalidBranchIsRefused(t *testing.T) {
 	}
 }
 
-func TestRebuildWeb_ValidBranchUsesEndOfOptions(t *testing.T) {
-	f := newRebuildFixture(t, "")
-	e := NewRebuildWebExecutor(RebuildWebOptions{RepoPath: f.repo})
-	var log bytes.Buffer
-	if err := e.Run(context.Background(), &log, map[string]string{"branch": "feature/x"}); err != nil {
-		t.Fatalf("Run: %v\n%s", err, log.String())
-	}
-	calls := f.callLog(t)
-	for _, want := range []string{
-		"git check-ref-format --branch feature/x\n",
-		"git fetch origin\n",
-		"git checkout --end-of-options feature/x\n",
-		"git reset --hard --end-of-options origin/feature/x\n",
-		"make web\n",
-	} {
-		if !strings.Contains(calls, want) {
-			t.Errorf("missing %q in calls:\n%s", want, calls)
-		}
+func TestRebuildWeb_EndOfOptionsByGitVersion(t *testing.T) {
+	for _, tc := range []struct {
+		version string
+		flag    bool
+	}{{"2.43.0", false}, {"2.44.0", true}} {
+		t.Run(tc.version, func(t *testing.T) {
+			f := newRebuildFixture(t, "")
+			if tc.version != "2.43.0" {
+				setStubGitVersion(t, tc.version)
+			}
+			e := NewRebuildWebExecutor(RebuildWebOptions{RepoPath: f.repo})
+			var log bytes.Buffer
+			if err := e.Run(context.Background(), &log, map[string]string{"branch": "feature/x"}); err != nil {
+				t.Fatalf("Run: %v\n%s", err, log.String())
+			}
+			eoo := ""
+			if tc.flag {
+				eoo = "--end-of-options "
+			}
+			calls := f.callLog(t)
+			for _, want := range []string{
+				"git check-ref-format --branch feature/x\n",
+				"git fetch origin\n",
+				"git checkout " + eoo + "feature/x\n",
+				"git reset --hard " + eoo + "origin/feature/x\n",
+				"make web\n",
+			} {
+				if !strings.Contains(calls, want) {
+					t.Errorf("missing %q in calls:\n%s", want, calls)
+				}
+			}
+			if !tc.flag && strings.Contains(calls, "--end-of-options") {
+				t.Fatalf("--end-of-options passed to git %s:\n%s", tc.version, calls)
+			}
+		})
 	}
 }

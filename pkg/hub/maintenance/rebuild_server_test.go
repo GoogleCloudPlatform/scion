@@ -643,8 +643,9 @@ func TestRebuildServer_DetachedHeadWithoutBranchRefused(t *testing.T) {
 	if err := e2.Run(context.Background(), &bytes.Buffer{}, map[string]string{"branch": "main"}); err != nil {
 		t.Fatalf("Run with branch=main: %v", err)
 	}
-	// The stub reports git 2.43, so --end-of-options precedes the ref (#6987).
-	if !strings.Contains(f.callLog(t), "git reset --hard --end-of-options origin/main") {
+	// The stub reports git 2.43, whose reset does not accept
+	// --end-of-options, so it is not passed (#6987).
+	if !strings.Contains(f.callLog(t), "git reset --hard origin/main\n") {
 		t.Fatalf("branch=main did not reset to origin/main:\n%s", f.callLog(t))
 	}
 }

@@ -16,7 +16,9 @@ package maintenance
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os/exec"
 	"strconv"
 	"strings"
 )
@@ -30,6 +32,11 @@ import (
 // unchanged: that rejects names such as "a..b", "x.lock" or "HEAD", and the
 // unchanged check refuses "@{-N}", which git would expand to another branch.
 // It runs through gitOutput, the package's one git door for plain reads.
+//
+// The errors never carry git's raw output: the name is quoted, and a failure
+// that is not git rejecting the name (git missing, the checkout path gone, a
+// cancelled context) is reported as such, quoted, rather than as an invalid
+// branch.
 func validateBranchName(ctx context.Context, repoPath, branch string) error {
 	if branch == "" {
 		return nil
@@ -39,7 +46,11 @@ func validateBranchName(ctx context.Context, repoPath, branch string) error {
 	}
 	out, err := gitOutput(ctx, repoPath, "check-ref-format", "--branch", branch)
 	if err != nil {
-		return fmt.Errorf("invalid branch %q: %w", branch, err)
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && ctx.Err() == nil {
+			return fmt.Errorf("invalid branch %q: not a valid git branch name", branch)
+		}
+		return fmt.Errorf("could not validate branch %q: %s", branch, strconv.Quote(err.Error()))
 	}
 	if out != branch {
 		return fmt.Errorf("invalid branch %q: git resolves it to %q; name the branch itself", branch, out)
@@ -47,9 +58,11 @@ func validateBranchName(ctx context.Context, repoPath, branch string) error {
 	return nil
 }
 
-// endOfOptionsMinGit is the first git release whose option parser accepts
-// --end-of-options (git 2.24).
-var endOfOptionsMinGit = [2]int{2, 24}
+// endOfOptionsMinGit is the first git release whose checkout and reset accept
+// --end-of-options (git 2.44). git 2.24 added the flag, but until 2.44 commands
+// that keep "--" in argv (checkout, reset) also kept --end-of-options there and
+// then read it as a revision or path (git RelNotes 2.44.0).
+var endOfOptionsMinGit = [2]int{2, 44}
 
 // gitSupportsEndOfOptions reports whether the host git accepts
 // --end-of-options. An unreadable version counts as unsupported, so an old
@@ -64,6 +77,12 @@ func gitSupportsEndOfOptions(ctx context.Context, dir string) bool {
 	if !ok {
 		return false
 	}
+	return endOfOptionsSupported(major, minor)
+}
+
+// endOfOptionsSupported reports whether git major.minor is at least
+// endOfOptionsMinGit.
+func endOfOptionsSupported(major, minor int) bool {
 	return major > endOfOptionsMinGit[0] || (major == endOfOptionsMinGit[0] && minor >= endOfOptionsMinGit[1])
 }
 

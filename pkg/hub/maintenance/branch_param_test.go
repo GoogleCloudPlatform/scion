@@ -17,6 +17,7 @@ package maintenance
 import (
 	"context"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -43,19 +44,24 @@ func TestValidateBranchName(t *testing.T) {
 		{"--orphan", "cannot start with '-'"},
 		{"-", "cannot start with '-'"},
 		// Not valid branch names: refused by git check-ref-format --branch.
-		{"a..b", "check-ref-format"},
-		{"a b", "check-ref-format"},
-		{"x.lock", "check-ref-format"},
-		{"HEAD", "check-ref-format"},
-		{"feature/", "check-ref-format"},
-		{"/feature", "check-ref-format"},
-		{"a~1", "check-ref-format"},
-		{"a:b", "check-ref-format"},
-		{"a\nb", "check-ref-format"},
+		{"a..b", "not a valid git branch name"},
+		{"a b", "not a valid git branch name"},
+		{"x.lock", "not a valid git branch name"},
+		{"HEAD", "not a valid git branch name"},
+		{"feature/", "not a valid git branch name"},
+		{"/feature", "not a valid git branch name"},
+		{"a~1", "not a valid git branch name"},
+		{"a:b", "not a valid git branch name"},
+		{"a\nb", "not a valid git branch name"},
 	} {
 		err := validateBranchName(ctx, dir, tc.name)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("validateBranchName(%q) = %v, want an error containing %q", tc.name, err, tc.want)
+		}
+		// The name is quoted and git's output is not echoed, so no raw
+		// control character can reach a run log line.
+		if err != nil && strings.ContainsAny(err.Error(), "\n\r\t") {
+			t.Errorf("validateBranchName(%q) error carries a raw control character: %q", tc.name, err.Error())
 		}
 	}
 }
@@ -113,5 +119,37 @@ func TestBranchArgs(t *testing.T) {
 	}
 	if got, want := branchArgs(false, "main", "checkout"), []string{"checkout", "main"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("branchArgs(false) = %q, want %q", got, want)
+	}
+}
+
+// A git that cannot run (here: the checkout directory is gone) is reported
+// as such, quoted, not as an invalid branch name.
+func TestValidateBranchName_GitCannotRun(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	missing := filepath.Join(t.TempDir(), "gone")
+	err := validateBranchName(context.Background(), missing, "main")
+	if err == nil || !strings.HasPrefix(err.Error(), `could not validate branch "main": "`) {
+		t.Fatalf("validateBranchName(missing dir) = %v, want a could-not-validate error", err)
+	}
+	if strings.Contains(err.Error(), "invalid branch") || strings.ContainsAny(err.Error(), "\n\r") {
+		t.Fatalf("validateBranchName(missing dir) = %q", err.Error())
+	}
+}
+
+// git 2.24 added --end-of-options, but checkout and reset accept it only
+// from 2.44 (#6987 review C1).
+func TestEndOfOptionsSupported(t *testing.T) {
+	for _, tc := range []struct {
+		major, minor int
+		want         bool
+	}{
+		{2, 24, false}, {2, 34, false}, {2, 39, false}, {2, 43, false},
+		{2, 44, true}, {2, 51, true}, {3, 0, true}, {1, 99, false},
+	} {
+		if got := endOfOptionsSupported(tc.major, tc.minor); got != tc.want {
+			t.Errorf("endOfOptionsSupported(%d, %d) = %v, want %v", tc.major, tc.minor, got, tc.want)
+		}
 	}
 }
