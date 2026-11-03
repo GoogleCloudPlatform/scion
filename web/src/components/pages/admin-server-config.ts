@@ -382,6 +382,8 @@ interface V1RuntimeConfig {
   kubernetes_service_account_mappings?: Record<string, string>;
   kubernetes_block_service_account?: string;
   priority_class_name?: string;
+  shared_dir_storage_class?: string;
+  shared_dir_size?: string;
 }
 
 // Sets or clears one key in a runtime's Cloud Run block, and drops the
@@ -785,6 +787,8 @@ const CONTAINER_RUNTIME_KEYS = [
   'kubernetes_service_account_mappings',
   'kubernetes_block_service_account',
   'priority_class_name',
+  'shared_dir_storage_class',
+  'shared_dir_size',
 ] as const;
 
 /**
