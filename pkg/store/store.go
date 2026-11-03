@@ -716,6 +716,14 @@ type AgentStore interface {
 	// When cred is non-nil it is created in the same transaction as the
 	// run-ID write, with RunID set to runID: either both are recorded or
 	// neither is.
+	//
+	// runID MUST be newly generated for this dispatch (a fresh UUID): the
+	// lifecycle run attribution trusts an observed mint as a fresh run
+	// (WP1 attribution design v2.8, section 6.1). Reusing an older run ID
+	// here is a contract violation; the producer rejects detectable reuse
+	// and fails closed, but an older run whose previous-run record was
+	// cleared by a settle is not detectable. The single production caller
+	// is pinned by pkg/hub TestSetAgentRunIDHasOneFreshMintCaller.
 	SetAgentRunID(ctx context.Context, agentID, runID string, cred *AgentCredential) (previous string, err error)
 
 	// SetAgentSSHHostKey records publicKey (an authorized_keys line) as the
@@ -748,10 +756,11 @@ type AgentStore interface {
 
 	// AdoptAgentRunID is CompareAndSwapAgentRunID (expectedRunID to
 	// newRunID, clearing PreviousRunIDs) for the hub's heartbeat adoption
-	// of a stranded run (ptone/scion#3661) and for the settle of a
-	// succeeded launch report (ptone/scion#2965). It swaps only while
-	// RunIDUpdatedAt is set and no later than unchangedSince, so a run_id
-	// that changed and changed back after the caller's read is not
+	// of a stranded run (ptone/scion#3661) and for the settle of an applied
+	// succeeded launch report (ptone/scion#2965). The adoption is observed
+	// with the adoption_source RunAdoptionSourceFrom(ctx) returns. It swaps
+	// only while RunIDUpdatedAt is set and no later than unchangedSince, so a
+	// run_id that changed and changed back after the caller's read is not
 	// adopted. Like SetAgentRunID, it writes nothing while the row is
 	// soft-deleted or a delete holds it, so a delete's claim snapshot never
 	// misses the adopted run. It reports whether it swapped; a missing
@@ -761,6 +770,19 @@ type AgentStore interface {
 	// also sets RunIDUpdatedAt in the same write; a write that leaves the
 	// value unchanged does not.
 	AdoptAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string, unchangedSince time.Time) (bool, error)
+
+	// SettleLaunchedRun settles the run of an async launch whose succeeded
+	// report was answered Completed (the launch had already ended, for
+	// example RunningObserved, or the report is a resend after a settle that
+	// failed or never ran): one conditional swap from f.FromRunID to
+	// f.ToRunID, clearing PreviousRunIDs, applied only while the row still
+	// holds f.FromRunID as both run_id and launch_run_id, run_id_updated_at
+	// is set and no later than f.UnchangedSince, launch_id, runtime_broker_id
+	// and generation equal the fence's, and the row is not soft-deleted and
+	// held by no delete (WP1 slice 3b, ptone/scion#5927). It is observed as a
+	// run_adopt with adoption_source cas. It reports whether it swapped; a
+	// missing agent reports false with no error.
+	SettleLaunchedRun(ctx context.Context, agentID string, f LaunchSettleFence) (bool, error)
 
 	// RecordBrokerReportedRuns records that brokerID, which is not the
 	// agent's assigned broker, reported a runtime entry of each listed
@@ -925,6 +947,13 @@ type AgentStore interface {
 	// not created or provisioning. Returns ErrNotFound if the agent doesn't
 	// exist.
 	BeginLaunch(ctx context.Context, agentID, kind string, timeout time.Duration) (launchID string, err error)
+
+	// BeginLaunchWithOptions is BeginLaunch with the dispatcher's options:
+	// opts.RunID is the run beginRun minted for this launch, bound as the
+	// launch's launch_run_id only when the row still holds it (otherwise
+	// ""). Only opts.RunID is used for a create launch. BeginLaunch is
+	// BeginLaunchWithOptions with zero options (no binding).
+	BeginLaunchWithOptions(ctx context.Context, agentID, kind string, timeout time.Duration, opts BeginLaunchOptions) (launchID string, err error)
 
 	// BeginStartLaunch starts a new start or restart launch for agentID
 	// (ptone/scion#4669), with BeginLaunch's other rules. kind must be

@@ -90,6 +90,8 @@ const (
 	FieldMessage = "message"
 	// FieldAppliedConfig holds the string denoting the applied_config field in the database.
 	FieldAppliedConfig = "applied_config"
+	// FieldEffectiveConfig holds the string denoting the effective_config field in the database.
+	FieldEffectiveConfig = "effective_config"
 	// FieldPendingConfig holds the string denoting the pending_config field in the database.
 	FieldPendingConfig = "pending_config"
 	// FieldHarnessConfig holds the string denoting the harness_config field in the database.
@@ -120,6 +122,8 @@ const (
 	FieldLaunchAsyncOptIn = "launch_async_opt_in"
 	// FieldLaunchID holds the string denoting the launch_id field in the database.
 	FieldLaunchID = "launch_id"
+	// FieldLaunchRunID holds the string denoting the launch_run_id field in the database.
+	FieldLaunchRunID = "launch_run_id"
 	// FieldRunID holds the string denoting the run_id field in the database.
 	FieldRunID = "run_id"
 	// FieldPreviousRunIds holds the string denoting the previous_run_ids field in the database.
@@ -291,6 +295,7 @@ var Columns = []string{
 	FieldTaskSummary,
 	FieldMessage,
 	FieldAppliedConfig,
+	FieldEffectiveConfig,
 	FieldPendingConfig,
 	FieldHarnessConfig,
 	FieldAncestry,
@@ -306,6 +311,7 @@ var Columns = []string{
 	FieldReincarnationUpdatedAt,
 	FieldLaunchAsyncOptIn,
 	FieldLaunchID,
+	FieldLaunchRunID,
 	FieldRunID,
 	FieldPreviousRunIds,
 	FieldRunIDUpdatedAt,
@@ -394,6 +400,8 @@ var (
 	DefaultLaunchAsyncOptIn bool
 	// DefaultLaunchID holds the default value on creation for the "launch_id" field.
 	DefaultLaunchID string
+	// DefaultLaunchRunID holds the default value on creation for the "launch_run_id" field.
+	DefaultLaunchRunID string
 	// DefaultRunID holds the default value on creation for the "run_id" field.
 	DefaultRunID string
 	// DefaultLaunchState holds the default value on creation for the "launch_state" field.
@@ -684,6 +692,11 @@ func ByAppliedConfig(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldAppliedConfig, opts...).ToFunc()
 }
 
+// ByEffectiveConfig orders the results by the effective_config field.
+func ByEffectiveConfig(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldEffectiveConfig, opts...).ToFunc()
+}
+
 // ByPendingConfig orders the results by the pending_config field.
 func ByPendingConfig(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldPendingConfig, opts...).ToFunc()
@@ -752,6 +765,11 @@ func ByLaunchAsyncOptIn(opts ...sql.OrderTermOption) OrderOption {
 // ByLaunchID orders the results by the launch_id field.
 func ByLaunchID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldLaunchID, opts...).ToFunc()
+}
+
+// ByLaunchRunID orders the results by the launch_run_id field.
+func ByLaunchRunID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldLaunchRunID, opts...).ToFunc()
 }
 
 // ByRunID orders the results by the run_id field.

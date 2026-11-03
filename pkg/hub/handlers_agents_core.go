@@ -1165,7 +1165,7 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 		if refusal, ok := placementRefusalOf(deleteErr); ok {
 			s.agentLifecycleLog.Warn("Create-failure cleanup: agent placement is inconsistent; nothing was dispatched, keeping the agent row",
 				"agent_id", agent.ID, "code", refusal.Code, "stage", rb.Stage)
-			s.markCreateCleanupRefused(ctx, agent.ID, createCleanupTargetRun(deleteErr), createCleanupRefusedPrefix+refusal.Message)
+			s.markCreateCleanupRefused(lifecycleCreateFailed(ctx, rb.Stage), agent.ID, createCleanupTargetRun(deleteErr), createCleanupRefusedPrefix+refusal.Message)
 			return ""
 		}
 		// The broker holds a different run of the agent than the row
@@ -1178,7 +1178,7 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 		if refused != nil && refuseDeleteRunMismatch(false, true) {
 			s.agentLifecycleLog.Warn("Create-failure cleanup: broker holds a different run than the hub recorded; keeping the agent row",
 				"agent_id", agent.ID, "hub_run_id", refused.RequestedRunID, "broker_run_id", refused.CurrentRunID, "stage", rb.Stage)
-			s.markCreateCleanupRefused(ctx, agent.ID, refused.RequestedRunID, createCleanupRefusedMessage(refused))
+			s.markCreateCleanupRefused(lifecycleCreateFailed(ctx, rb.Stage), agent.ID, refused.RequestedRunID, createCleanupRefusedMessage(refused))
 			return ""
 		}
 	}
@@ -1220,7 +1220,7 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 		// The row delete is retried a few times; if it still fails, the row
 		// is left visibly failed rather than in phase created with no
 		// message.
-		derr := s.deleteFailedCreateRow(ctx, agent, opID)
+		derr := s.deleteFailedCreateRow(lifecycleCreateRollback(ctx, rb.Stage), agent, opID)
 		if errors.Is(derr, errCreateRowDeleteHeld) {
 			// A delete claimed the row since: it owns the row and its
 			// edge. The failed compensation's correlation ID is logged
@@ -1242,7 +1242,7 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 		}
 		if derr != nil {
 			s.agentLifecycleLog.Warn("Create-failure cleanup: agent row delete failed", "agent_id", agent.ID, "error", derr)
-			mctx, mcancel := detachedCleanupContext(ctx, createCleanupStoreTimeout)
+			mctx, mcancel := detachedCleanupContext(lifecycleCreateFailed(ctx, rb.Stage), createCleanupStoreTimeout)
 			defer mcancel()
 			if err := s.store.UpdateAgentStatus(mctx, agent.ID, store.AgentStatusUpdate{
 				Phase:   string(state.PhaseError),
@@ -3122,6 +3122,7 @@ func (s *Server) preserveTerminalPhase(ctx context.Context, agent *store.Agent) 
 }
 
 func (s *Server) updateAgentAfterDispatch(ctx context.Context, agent *store.Agent) error {
+	ctx = lifecycleDispatchResult(ctx, agent) // WP1 E(iv): the broker's answer about agent's run
 	// One retry is intentional here: we only need to recover the common case
 	// where a single concurrent status update bumps StateVersion while dispatch
 	// is in flight. If a second write wins the race too, return the conflict to

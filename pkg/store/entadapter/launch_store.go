@@ -157,12 +157,19 @@ func storeNow(ctx context.Context, tx *sql.Tx, isPostgres bool) (time.Time, erro
 
 // BeginLaunch implements store.AgentStore.BeginLaunch.
 func (s *AgentStore) BeginLaunch(ctx context.Context, agentID, kind string, timeout time.Duration) (string, error) {
+	return s.BeginLaunchWithOptions(ctx, agentID, kind, timeout, store.BeginLaunchOptions{})
+}
+
+// BeginLaunchWithOptions implements store.AgentStore.BeginLaunchWithOptions:
+// a create launch whose launch_run_id is bound to opts.RunID when the row
+// still holds it. Only RunID is taken from opts.
+func (s *AgentStore) BeginLaunchWithOptions(ctx context.Context, agentID, kind string, timeout time.Duration, opts store.BeginLaunchOptions) (string, error) {
 	// Start and restart launches go through BeginStartLaunch, which carries
 	// their options (ptone/scion#4669).
 	if kind != store.LaunchKindCreate {
 		return "", fmt.Errorf("%w: BeginLaunch kind must be %q, got %q", store.ErrInvalidInput, store.LaunchKindCreate, kind)
 	}
-	return s.beginLaunch(ctx, agentID, kind, timeout, store.BeginLaunchOptions{})
+	return s.beginLaunch(ctx, agentID, kind, timeout, store.BeginLaunchOptions{RunID: opts.RunID})
 }
 
 // BeginStartLaunch implements store.AgentStore.BeginStartLaunch.
@@ -197,6 +204,7 @@ func (s *AgentStore) beginLaunch(ctx context.Context, agentID, kind string, time
 	if err != nil {
 		return "", err
 	}
+	obs := s.lifecycle.load()
 
 	ltx, err := s.beginLaunchTx(ctx)
 	if err != nil {
@@ -249,7 +257,8 @@ func (s *AgentStore) beginLaunch(ctx context.Context, agentID, kind string, time
 		SetLaunchError("").
 		SetLaunchCause("").
 		SetLaunchPriorPhase(opts.PriorPhase).
-		SetLaunchRevokeOnFail(opts.RevokeOnFail)
+		SetLaunchRevokeOnFail(opts.RevokeOnFail).
+		SetLaunchRunID(boundLaunchRunID(current.RunID, opts.RunID))
 	if kind == store.LaunchKindRestart && current.Phase != string(state.PhaseStarting) {
 		// A restart's start leg moves the row to starting, as a phase
 		// change, so it bumps state_version (v11 §3.13).
@@ -258,14 +267,24 @@ func (s *AgentStore) beginLaunch(ctx context.Context, agentID, kind string, time
 	}
 	// Link the start claim of the matching kind to this launch, so only
 	// this launch's end settles it.
-	if _, err := linkLaunchClaim(upd, current, kind, newID, now).Save(ctx); err != nil {
+	updated, err := linkLaunchClaim(upd, current, kind, newID, now).Save(ctx)
+	if err != nil {
 		return "", mapError(err)
+	}
+	// Observed for the fingerprint only: beginning a launch is not a
+	// transition (design 2.1).
+	var hooks commitHooks
+	if err := observeAgentWriteDeferred(ctx, obs, ltx.client, &hooks, store.AgentWrite{
+		Op: store.AgentWriteLaunch, Before: entAgentToStore(current), After: entAgentToStore(updated), Now: now,
+	}); err != nil {
+		return "", err
 	}
 
 	if err := ltx.tx.Commit(); err != nil {
 		return "", fmt.Errorf("launch store: commit BeginLaunch: %w", err)
 	}
 	committed = true
+	hooks.run()
 	return newID, nil
 }
 
@@ -275,6 +294,7 @@ func (s *AgentStore) MarkLaunchAccepted(ctx context.Context, agentID, launchID, 
 	if err != nil {
 		return store.Agent{}, err
 	}
+	obs := s.lifecycle.load()
 
 	ltx, err := s.beginLaunchTx(ctx)
 	if err != nil {
@@ -320,11 +340,25 @@ func (s *AgentStore) MarkLaunchAccepted(ctx context.Context, agentID, launchID, 
 	if err != nil {
 		return store.Agent{}, mapError(err)
 	}
+	// launch_accepted on the launch's first acceptance: the acknowledged
+	// branch (an owner) or the unknown-outcome branch (no owner, the row
+	// still created). A repeated acceptance records nothing.
+	var hooks commitHooks
+	hints := store.AgentWriteHints{
+		LaunchAccepted: current.LaunchOwner == "" && (owner != "" || state.Phase(current.Phase) == state.PhaseCreated),
+		LaunchOwner:    updated.LaunchOwner,
+	}
+	if err := observeAgentWriteDeferred(ctx, obs, ltx.client, &hooks, store.AgentWrite{
+		Op: store.AgentWriteLaunch, Before: entAgentToStore(current), After: entAgentToStore(updated), Now: time.Now(), Hints: hints,
+	}); err != nil {
+		return store.Agent{}, err
+	}
 
 	if err := ltx.tx.Commit(); err != nil {
 		return store.Agent{}, fmt.Errorf("launch store: commit MarkLaunchAccepted: %w", err)
 	}
 	committed = true
+	hooks.run()
 	return *entAgentToStore(updated), nil
 }
 
@@ -345,6 +379,7 @@ func (s *AgentStore) endLaunch(ctx context.Context, agentID, launchID, reason, c
 	if err != nil {
 		return err
 	}
+	obs := s.lifecycle.load()
 
 	ltx, err := s.beginLaunchTx(ctx)
 	if err != nil {
@@ -387,15 +422,28 @@ func (s *AgentStore) endLaunch(ctx context.Context, agentID, launchID, reason, c
 	if code != "" {
 		upd.SetLaunchError(code)
 	}
-	if _, err := withLaunchEndSettlement(upd, current, reason, now).
-		Save(ctx); err != nil {
+	updated, err := withLaunchEndSettlement(upd, current, reason, now).Save(ctx)
+	if err != nil {
 		return mapError(err)
+	}
+	// A coded end is a failed launch (launch_failed); a codeless one (an
+	// env-gather end) derives nothing (design 2.3).
+	var hooks commitHooks
+	var hints store.AgentWriteHints
+	if code != "" {
+		hints.LaunchEnd = &store.LaunchEndHint{Reason: reason, Code: code}
+	}
+	if err := observeAgentWriteDeferred(ctx, obs, ltx.client, &hooks, store.AgentWrite{
+		Op: store.AgentWriteLaunch, Before: entAgentToStore(current), After: entAgentToStore(updated), Now: now, Hints: hints,
+	}); err != nil {
+		return err
 	}
 
 	if err := ltx.tx.Commit(); err != nil {
 		return fmt.Errorf("launch store: commit EndLaunch: %w", err)
 	}
 	committed = true
+	hooks.run()
 	return nil
 }
 
@@ -435,4 +483,16 @@ func releaseBrokerQuotaTx(ctx context.Context, txClient *ent.Client, row *ent.Ag
 		SetReleasedAt(now).
 		Save(ctx)
 	return err
+}
+
+// boundLaunchRunID is the launch_run_id a new launch records (WP1 slice 3
+// addendum v12 section 1, slice 3b design section 3b): the run the
+// dispatcher minted for it, only while the row still holds that run. A run
+// minted concurrently between beginRun and BeginLaunch, or a caller that
+// passes no run, binds "" (unknown).
+func boundLaunchRunID(rowRunID, mintedRunID string) string {
+	if mintedRunID != "" && rowRunID == mintedRunID {
+		return mintedRunID
+	}
+	return ""
 }

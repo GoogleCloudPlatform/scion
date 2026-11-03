@@ -512,6 +512,12 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 
 			HarnessConfigSource: sr.info.HarnessConfigSource,
 			WorkspacePlacement:  sr.info.WorkspacePlacement,
+
+			TemplateHash:          sr.info.TemplateHash,
+			Harness:               sr.info.Harness,
+			Model:                 sr.info.Model,
+			HarnessConfigRevision: sr.info.HarnessConfigRevision,
+			BrokerBuild:           effectiveBrokerBuild(*sr.info),
 		}
 	}
 	// Journalled before it is sent (design wave 3 §1 C-a write 3): a

@@ -144,6 +144,17 @@ type AgentLaunchReportInfo struct {
 	// WorkspacePlacement is where the launch's start placed the agent's
 	// workspace (api.WorkspacePlacementExport or WorkspacePlacementLocal).
 	WorkspacePlacement string `json:"workspacePlacement,omitempty"`
+	// The broker's effective configuration of the start (WP1 slice 3
+	// addendum v13 section 5): the template content hash, the harness and
+	// the effective model Start resolved, the harness-config revision, and
+	// the broker build (sent only when the start resolved the
+	// configuration). Older brokers omit them, and the hub then records
+	// nothing.
+	TemplateHash          string `json:"templateHash,omitempty"`
+	Harness               string `json:"harness,omitempty"`
+	Model                 string `json:"model,omitempty"`
+	HarnessConfigRevision string `json:"harnessConfigRevision,omitempty"`
+	BrokerBuild           string `json:"brokerBuild,omitempty"`
 }
 
 // AgentLaunchReportResult is ApplyLaunchReport's answer (design §3.2),
