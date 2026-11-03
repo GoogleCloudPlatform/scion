@@ -15,7 +15,10 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"reflect"
 	"strings"
 
@@ -418,4 +421,68 @@ func (s *Server) dbTierEnvInEffect(envK *koanf.Koanf, key string, running map[st
 		return true
 	}
 	return envValueEqualsShown(envK, key, running)
+}
+
+// Settings keys of the hub default GCP identity pair.
+const (
+	defaultGCPIdentityModeKey = "default_gcp_identity_mode"
+	defaultGCPIdentitySAKey   = "default_gcp_identity_service_account_id"
+)
+
+// effectiveFileGCPIdentity returns the hub default GCP identity pair a
+// file-tier hub runs with after a PUT: each key from the environment when a
+// SCION_SERVER_* variable sets it (the settings loader layers the
+// environment above settings.yaml, and start-up does not override these
+// keys), else from merged, the settings.yaml document the PUT would write
+// (ptone/scion#3071). It only chooses which value to validate: it changes
+// neither what is written nor which keys the environment overrides.
+func effectiveFileGCPIdentity(envK *koanf.Koanf, merged map[string]any) opsettings.AgentDefaultsSettings {
+	mode, _ := merged[defaultGCPIdentityModeKey].(string)
+	saID, _ := merged[defaultGCPIdentitySAKey].(string)
+	if envK != nil {
+		if envK.Exists(defaultGCPIdentityModeKey) {
+			mode = envK.String(defaultGCPIdentityModeKey)
+		}
+		if envK.Exists(defaultGCPIdentitySAKey) {
+			saID = envK.String(defaultGCPIdentitySAKey)
+		}
+	}
+	return opsettings.AgentDefaultsSettings{
+		DefaultGCPIdentityMode:             mode,
+		DefaultGCPIdentityServiceAccountID: saID,
+	}
+}
+
+// storedGCPIdentityPinWarning returns a save warning when the environment
+// sets a key of the hub default GCP identity pair and the pair as stored in
+// settings.yaml (merged, the document the PUT writes) would be refused on
+// its own: the save is accepted because the environment value is in effect,
+// but the stored pair applies, unchecked, once the variable is removed
+// (ptone/scion#3071). "" when the environment sets neither key or the stored
+// pair is valid. A store error while checking gives no warning (the save
+// itself passed); it is logged.
+func (s *Server) storedGCPIdentityPinWarning(ctx context.Context, envK *koanf.Koanf, merged map[string]any) string {
+	if envK == nil {
+		return ""
+	}
+	var pinned []string
+	for _, k := range []string{defaultGCPIdentityModeKey, defaultGCPIdentitySAKey} {
+		if envK.Exists(k) {
+			pinned = append(pinned, k)
+		}
+	}
+	if len(pinned) == 0 {
+		return ""
+	}
+	p := s.hubDefaultGCPIdentityProblem(ctx, effectiveFileGCPIdentity(nil, merged))
+	if p == nil {
+		return ""
+	}
+	if p.err != nil {
+		slog.Warn("PUT server-config: could not check the stored hub default GCP identity", "error", p.err)
+		return ""
+	}
+	return fmt.Sprintf("The hub default GCP identity saved in settings.yaml is not valid on its own (%s: %s). "+
+		"It is accepted because the environment sets %s on this node, and it would apply when that variable is removed.",
+		p.field, p.msg, strings.Join(pinned, " and "))
 }

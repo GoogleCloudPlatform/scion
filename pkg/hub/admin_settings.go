@@ -120,6 +120,13 @@ type ServerConfigResponse struct {
 	// Additive: EnvOverrides is unchanged.
 	EnvValues map[string]EnvKeyValue `json:"env_values,omitempty"`
 
+	// RunningValues maps the server keys that start-up sets after the
+	// settings load (a workstation default or a command-line flag) to the
+	// value this node runs with, where it differs from the value shown
+	// (ptone/scion#3722). Read-only; a secret key never has an entry. See
+	// startupRunningValues.
+	RunningValues map[string]RunningKeyValue `json:"running_values,omitempty"`
+
 	// StorageOverrideErrors lists, read-only, the removed per-runtime or
 	// per-profile storage overrides the settings file (as read at startup)
 	// or the stored settings still carry, one message per source with the
@@ -456,6 +463,7 @@ func buildServerConfigFileResponse(startup *config.V1ServerConfig) (*ServerConfi
 				resp.EnvOverrides = envOverrides
 			}
 			resp.EnvValues = fileTierEnvValues(envK, resp.EnvOverrides, startup, nil)
+			resp.RunningValues = startupRunningValues(envK, startup, &resp)
 			return &resp, nil
 		}
 		return nil, &serverConfigReadError{"Failed to read settings file", err}
@@ -486,6 +494,8 @@ func buildServerConfigFileResponse(startup *config.V1ServerConfig) (*ServerConfi
 		resp.EnvOverrides = envOverrides
 	}
 	resp.EnvValues = fileTierEnvValues(envK, resp.EnvOverrides, startup, stored)
+	// Compared with the unmasked view, so before the masking below.
+	resp.RunningValues = startupRunningValues(envK, startup, &resp)
 
 	maskSensitiveFields(&resp)
 	return &resp, nil
@@ -766,18 +776,18 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Validate the effective hub default GCP identity (the merged result, so
+	// Validate the effective hub default GCP identity: the merged result, so
 	// a PUT that changes only one of the pair is checked against the other's
-	// stored value). Same checks as the DB-mode handler.
+	// stored value, with each key the environment sets taken from the
+	// environment, because in this mode the environment value is the one in
+	// effect (ptone/scion#3071). Same checks as the DB-mode handler.
+	var gcpIdentityWarning string
 	if req.DefaultGCPIdentityMode != nil || req.DefaultGCPIdentityServiceAccountID != nil {
-		mode, _ := raw["default_gcp_identity_mode"].(string)
-		saID, _ := raw["default_gcp_identity_service_account_id"].(string)
-		if !s.validateHubDefaultGCPIdentity(w, r.Context(), opsettings.AgentDefaultsSettings{
-			DefaultGCPIdentityMode:             mode,
-			DefaultGCPIdentityServiceAccountID: saID,
-		}) {
+		envK := config.LoadEnvKoanf()
+		if !s.validateHubDefaultGCPIdentity(w, r.Context(), effectiveFileGCPIdentity(envK, raw)) {
 			return
 		}
+		gcpIdentityWarning = s.storedGCPIdentityPinWarning(r.Context(), envK, raw)
 	}
 
 	// Validate the hub default timezone (IANA name check) before writing.
@@ -830,6 +840,9 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	saveWarnings = append(saveWarnings, resourceQuantityWarnings(qWarnings)...)
 	saveWarnings = append(saveWarnings, runtimeMergeWarnings...)
+	if gcpIdentityWarning != "" {
+		saveWarnings = append(saveWarnings, gcpIdentityWarning)
+	}
 
 	if err := config.WriteSettingsFileLocked(settingsLock, settingsPath, newData); err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to write settings file", nil)
