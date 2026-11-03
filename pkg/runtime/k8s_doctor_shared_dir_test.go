@@ -217,8 +217,10 @@ func TestDiagnosticsSharedDirClaimClasses_Mismatch(t *testing.T) {
 }
 
 func TestDiagnosticsSharedDirClaimClasses_ListCapped(t *testing.T) {
+	// Inserted in reverse name order, so the sorted-order assertion below
+	// does not depend on the order the fake clientset lists them in.
 	var objs []k8sruntime.Object
-	for i := 0; i < sharedDirClaimClassesListMax+3; i++ {
+	for i := sharedDirClaimClassesListMax + 2; i >= 0; i-- {
 		objs = append(objs, sharedDirClaim("agents", fmt.Sprintf("scion-shared-p-d%02d", i), strPtr("standard"), corev1.ClaimBound))
 	}
 	rt, _ := sharedDirDoctorRuntime(objs...)

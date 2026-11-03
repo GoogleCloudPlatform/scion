@@ -1034,7 +1034,7 @@ When Scion runs on GCE or GKE and the kubeconfig's exec credential plugin fails 
 | `""` | events | list | The reason shown for a claim that is not ready, and for a pod that disappeared |
 | `secrets-store.csi.x-k8s.io` | secretproviderclasses | create, get, list, delete | GKE mode only: Secret Manager mounts |
 
-Without `get` on persistentvolumeclaims or `list` on events, agents still start: the claim check is skipped or uses the claim phase only, and a vanished pod gets a generic reason. `create` on persistentvolumeclaims is needed only to create shared-dir claims.
+Without `get` on persistentvolumeclaims or `list` on events, agents still start: the claim check is skipped or uses the claim phase only, and a vanished pod gets a generic reason. `create` on persistentvolumeclaims is needed only to create shared-dir claims. Without `list` and `delete` on persistentvolumeclaims, a deleted project's shared-dir claims are not released: the failure is logged, and the project delete still succeeds.
 
 The names below are examples. Replace the namespace and the subject:
 
