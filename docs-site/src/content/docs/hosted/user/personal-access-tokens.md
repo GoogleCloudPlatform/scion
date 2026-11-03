@@ -176,22 +176,30 @@ along the way denies the request:
 ### Checking what you can select
 
 Before minting a token, you can ask which scopes you are currently eligible to select for a given
-project, and why a particular scope is not available to you:
+project, or for a hub boundary, and why a particular scope is not available to you. Eligibility is
+answered only for an interactive login (`scion hub auth login`). A request authenticated with a
+user access token gets the scope catalog only; naming a project or a boundary with a token is
+refused with `403`.
 
 ```bash
+scion hub auth login
 scion hub token scopes --project my-project
 ```
 
-Or via the API:
+Or via the API, with a session credential:
 ```bash
-curl -H "Authorization: Bearer $SCION_HUB_TOKEN" \
+curl -H "Authorization: Bearer $SESSION_TOKEN" \
      "https://scion.example.com/api/v1/auth/scopes?projectId=<project-id>"
 ```
 
-Each scope in the response reports `eligible` and, when it is not, a machine-readable
-`eligibilityReason` (for an alias such as `agent:manage`, also which member scopes are
-ineligible). The **Create Token** form in the web UI uses the same information: once you pick a
-project, scopes you cannot select are shown with the reason.
+For a hub boundary, send `?boundary=hub` with no `projectId`. A scope that a hub boundary allows
+but you cannot select is reported with the reason `authority_required`; a scope that a hub boundary
+does not allow reports `boundary_not_allowed`.
+
+Each scope in the response reports `eligibility.eligible` and, when it is not, a machine-readable
+`eligibility.reason` (for an alias such as `agent:manage`, `eligibility.ineligibleMembers` names the
+member scopes that are ineligible). The **Create Token** form in the web UI uses the same
+information: once you pick a project, scopes you cannot select are shown with the reason.
 
 This answers only "may I select this restriction" — it never lists which agents or other targets
 the resulting token could reach. If you request eligibility for a project you cannot access, or
