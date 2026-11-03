@@ -105,10 +105,13 @@ func (f runInitStagedFixture) runWithStopForwarding(t *testing.T, script string)
 		InitRunOptions{DisableReExec: true})
 }
 
-func (f runInitStagedFixture) run(t *testing.T, script string) int {
+func (f runInitStagedFixture) run(t *testing.T, script string, extra ...string) int {
 	t.Helper()
-	return RunInit([]string{"sh", "-c", script, "sh", f.tokenPath},
-		InitRunOptions{DisableTermSignalForwarding: true, DisableReExec: true})
+	// The script gets the token path as $1 and any extra paths after it.
+	// Credential values never go on the command line (init logs it); a
+	// script that needs one reads it from a file.
+	args := append([]string{"sh", "-c", script, "sh", f.tokenPath}, extra...)
+	return RunInit(args, InitRunOptions{DisableTermSignalForwarding: true, DisableReExec: true})
 }
 
 // Children in these tests sleep 0.5s so they outlive RunInit's 100ms
@@ -158,21 +161,30 @@ func TestRunInit_StagedHubToken_CrashKeepsRefreshedTokenForRestart(t *testing.T)
 	t.Setenv(stagedsecrets.EnvVar, stagedBlob(t, createTime))
 
 	// The harness stands in for the refresh loop, writing a newer
-	// credential, then crashes.
-	script := `printf '%s' '` + refreshed + `' > "$1.tmp" && mv "$1.tmp" "$1"; sleep 0.5; exit 3`
-	if got := f.run(t, script); got == 0 {
+	// credential (copied from a file, so no credential value is on the
+	// command line or in the log), then crashes.
+	refreshedFile := filepath.Join(t.TempDir(), "refreshed")
+	if err := os.WriteFile(refreshedFile, []byte(refreshed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := `cp "$2" "$1.tmp" && mv "$1.tmp" "$1"; sleep 0.5; exit 3`
+	if got := f.run(t, script, refreshedFile); got == 0 {
 		t.Fatalf("RunInit() = 0, want a crash exit")
 	}
 	if got := readFileString(t, f.tokenPath); got != refreshed {
 		t.Fatal("the refreshed token file was not kept after a crash exit")
 	}
-	if !strings.Contains(f.readLog(), "Kept the staged hub credential file for a restart") {
+	out := f.readLog()
+	if !strings.Contains(out, "Kept the staged hub credential file for a restart") {
 		t.Error("log lacks the kept-for-restart line")
+	}
+	if strings.Contains(out, refreshed) || strings.Contains(out, createTime) {
+		t.Error("log carries a credential value")
 	}
 
 	// The container restarts with the same payload.
 	t.Setenv(stagedsecrets.EnvVar, stagedBlob(t, createTime))
-	if got := f.run(t, `test "$(cat "$1")" = '`+refreshed+`' || exit 7; sleep 0.5`); got != 0 {
+	if got := f.run(t, `cmp -s "$1" "$2" || exit 7; sleep 0.5`, refreshedFile); got != 0 {
 		t.Fatalf("restart RunInit() = %d, want 0 (the harness must see the refreshed credential)", got)
 	}
 	if _, err := os.Lstat(f.tokenPath); !os.IsNotExist(err) {
