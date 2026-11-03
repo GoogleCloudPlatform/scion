@@ -115,15 +115,16 @@ func TestTokenIssuedAt(t *testing.T) {
 	}
 	enc := base64.RawURLEncoding.EncodeToString
 	for name, tok := range map[string]string{
-		"dev token":        conditionCanary,
-		"two parts":        "a.b",
-		"bad base64":       "a.!!!.c",
-		"claims not json":  "a." + enc([]byte("not json")) + ".c",
-		"no iat":           "a." + enc([]byte(`{"sub":"x"}`)) + ".c",
-		"zero iat":         "a." + enc([]byte(`{"iat":0}`)) + ".c",
-		"non-numeric iat":  "a." + enc([]byte(`{"iat":"soon"}`)) + ".c",
-		"fractional iat":   "a." + enc([]byte(`{"iat":1.5}`)) + ".c",
-		"empty first part": "." + enc([]byte(`{"iat":5}`)) + ".c",
+		"dev token":         conditionCanary,
+		"two parts":         "a.b",
+		"bad base64":        "a.!!!.c",
+		"claims not json":   "a." + enc([]byte("not json")) + ".c",
+		"no iat":            "a." + enc([]byte(`{"sub":"x"}`)) + ".c",
+		"zero iat":          "a." + enc([]byte(`{"iat":0}`)) + ".c",
+		"non-numeric iat":   "a." + enc([]byte(`{"iat":"soon"}`)) + ".c",
+		"fractional iat":    "a." + enc([]byte(`{"iat":1.5}`)) + ".c",
+		"empty first part":  "." + enc([]byte(`{"iat":5}`)) + ".c",
+		"empty claims part": "a..c",
 	} {
 		if _, ok := TokenIssuedAt(tok); ok {
 			t.Errorf("TokenIssuedAt(%s) ok, want not ok", name)
