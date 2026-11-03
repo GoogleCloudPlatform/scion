@@ -200,7 +200,9 @@ runtimes:
 				require.NoError(t, err)
 				// The agent's own project edge from a project member: a hub
 				// Server issues an agent credential only to an agent with
-				// recorded provenance in good standing.
+				// recorded provenance in good standing. The built-in roles
+				// come first: the member binding that standing needs uses one.
+				reconcileBuiltInRoles(ctx, s)
 				seedAgentEdge(t, s, tid("user-e2e-cred"), a)
 				if tc.running {
 					mgr.run(name, "cid-before", projectID, scionDir, "run-before")
