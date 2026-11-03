@@ -1030,7 +1030,7 @@ When Scion runs on GCE or GKE and the kubeconfig's exec credential plugin fails 
 | `""` | pods/exec | create | Attach, exec, home and workspace sync, readiness checks |
 | `""` | pods/log | get | Agent logs |
 | `""` | secrets | create, get, list, delete | Per-agent Secrets and their cleanup |
-| `""` | persistentvolumeclaims | create, get | The [claim check before the pod](#claim-check-before-the-pod), and creating shared-dir claims on the local backend |
+| `""` | persistentvolumeclaims | create, get, list, delete | The [claim check before the pod](#claim-check-before-the-pod), creating shared-dir claims on the local backend, and releasing a deleted project's shared-dir claims (list and delete; `scion doctor`'s claim check also uses list) |
 | `""` | events | list | The reason shown for a claim that is not ready, and for a pod that disappeared |
 | `secrets-store.csi.x-k8s.io` | secretproviderclasses | create, get, list, delete | GKE mode only: Secret Manager mounts |
 
@@ -1059,7 +1059,7 @@ rules:
   verbs: ["create", "get", "list", "delete"]
 - apiGroups: [""]
   resources: ["persistentvolumeclaims"]
-  verbs: ["create", "get"]
+  verbs: ["create", "get", "list", "delete"]
 - apiGroups: [""]
   resources: ["events"]
   verbs: ["list"]
