@@ -23,8 +23,10 @@ import (
 // DevToken is the development token used for testing.
 const DevToken = "scion_dev_test_token_for_unit_tests_1234567890"
 
+// StrPtr returns a pointer to a copy of s.
 func StrPtr(s string) *string { return &s }
 
+// IntPtr returns a pointer to a copy of i.
 func IntPtr(i int) *int { return &i }
 
 // Itoa is a minimal int-to-string without importing strconv.
@@ -62,6 +64,8 @@ func RequireNoError(t *testing.T, err error) {
 	}
 }
 
+// WaitClosed fails the test if ch is not closed within the given duration;
+// what names the awaited event in the failure message.
 func WaitClosed(t *testing.T, ch <-chan struct{}, within time.Duration, what string) {
 	t.Helper()
 	select {

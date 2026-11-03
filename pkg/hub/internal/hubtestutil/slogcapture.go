@@ -70,9 +70,9 @@ func RecordAttrs(r slog.Record) map[string]any {
 		if prefix != "" {
 			key = prefix + "." + a.Key
 		}
-		// Resolve LogValuer values (e.g. CredentialDecoration.LogValue())
+		// Resolve LogValuer values (e.g. principal.CredentialDecoration.LogValue())
 		// before inspecting Kind: a captured record from a bare handler like
-		// capturingHandler never resolves them itself (only the standard
+		// pkg/hub's capturingHandler never resolves them itself (only the standard
 		// Text/JSON handlers do that internally when formatting).
 		a.Value = a.Value.Resolve()
 		if a.Value.Kind() == slog.KindGroup {
@@ -90,6 +90,7 @@ func RecordAttrs(r slog.Record) map[string]any {
 	return out
 }
 
+// FindRecord returns the last record in records whose message is msg.
 func FindRecord(records []slog.Record, msg string) (slog.Record, bool) {
 	for i := len(records) - 1; i >= 0; i-- {
 		if records[i].Message == msg {
