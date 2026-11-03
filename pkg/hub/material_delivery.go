@@ -304,8 +304,13 @@ type secretDeliveryCandidate struct {
 //   - values are fetched only for the kept secrets, by recorded metadata,
 //     after every authorization, and not for a scope the test-admin
 //     restriction withholds. An item whose record is gone since it was
-//     listed (store.ErrNotFound), or whose Secret Manager read fails
-//     (secret.ErrValueAccess), is skipped, as Resolve skips it. Any other
+//     listed (store.ErrNotFound), whose Secret Manager read fails
+//     (secret.ErrValueAccess), or for which the backend returned no
+//     result, is skipped, as Resolve skips it, and returned in skipped
+//     (classes not_found, access and missing) so the caller can warn
+//     that the agent goes without it. An item the test-admin restriction
+//     withholds or the delivery decision refuses is never in skipped:
+//     that is policy, not a read failure. Any other
 //     fetch failure fails the selection, as it fails Resolve: stored
 //     values that cannot be decrypted are reported together as one
 //     *secret.ResolveDecryptError (errors.Is secret.ErrResolveDecrypt),
@@ -321,10 +326,10 @@ type secretDeliveryCandidate struct {
 //     then the highest scope wins per type and target.
 //
 // A list error, a credential that cannot be minted or a fetch failure other
-// than the two skipped above is an error.
-func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *deliverySelector, agent *store.Agent) ([]ResolvedSecret, error) {
+// than the ones skipped above is an error; skipped is then nil.
+func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *deliverySelector, agent *store.Agent) ([]ResolvedSecret, []skippedSecret, error) {
 	if d.secretBackend == nil || agent == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	type scopeEntry struct{ scope, scopeID string }
@@ -348,7 +353,7 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 	for _, sc := range scopes {
 		metas, err := d.secretBackend.List(ctx, secret.Filter{Scope: sc.scope, ScopeID: sc.scopeID})
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		for _, m := range metas {
 			if m.SecretType == store.SecretTypeInternal {
@@ -357,7 +362,7 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 			if sc.scope != store.ScopeUser {
 				allowed, err := sel.authorize(ctx, MaterialKindSecret, materialRecordSecret, m.ID, m.Name, sc.scope, sc.scopeID)
 				if err != nil {
-					return nil, err
+					return nil, nil, err
 				}
 				if !allowed {
 					continue
@@ -377,7 +382,7 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 	if startOpts != nil && startOpts.AuthzCheck != nil {
 		progeny, err := d.store.ListProgenySecrets(ctx, agent.Ancestry)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		check := startOpts.AuthzCheck
 		for i := range progeny {
@@ -397,7 +402,7 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 		d.log.WarnContext(ctx, "launch material withheld: items not authorized for delivery", "agent_id", agent.ID, "purpose", string(sel.purpose), "count", sel.denied)
 	}
 	if len(kept) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	// The test-admin scope restriction is decided before the fetch, so no
@@ -422,11 +427,12 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 		var err error
 		values, err = d.secretBackend.FetchValues(ctx, metas)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
 	merged := make(map[string]secret.SecretWithValue)
+	var skipped []skippedSecret
 	var decryptFailures []secret.ResolveFailure
 	for _, c := range kept {
 		// A progeny secret fills only names no scope set (kept lists every
@@ -440,7 +446,8 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 		sv := secret.SecretWithValue{SecretMeta: c.meta}
 		if !withheld(c.meta.Scope) {
 			r, ok := values[c.meta.ID]
-			if !ok || errors.Is(r.Err, store.ErrNotFound) || errors.Is(r.Err, secret.ErrValueAccess) {
+			if class := deliverySkipClass(r, ok); class != "" {
+				skipped = append(skipped, skippedSecret{Name: c.meta.Name, Scope: c.meta.Scope, Class: class})
 				continue
 			}
 			if r.Err != nil {
@@ -449,7 +456,7 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 					decryptFailures = append(decryptFailures, rde.Failures...)
 					continue
 				}
-				return nil, fmt.Errorf("fetching secret %s (%s scope): %w", c.meta.Name, c.meta.Scope, r.Err)
+				return nil, nil, fmt.Errorf("fetching secret %s (%s scope): %w", c.meta.Name, c.meta.Scope, r.Err)
 			}
 			sv.Value = r.Value
 			// The backend's external reference for the value it read, in
@@ -466,7 +473,7 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 		merged[c.meta.Name] = sv
 	}
 	if len(decryptFailures) > 0 {
-		return nil, &secret.ResolveDecryptError{Failures: decryptFailures}
+		return nil, nil, &secret.ResolveDecryptError{Failures: decryptFailures}
 	}
 	names := make([]string, 0, len(merged))
 	for n := range merged {
@@ -502,7 +509,22 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 			Ref:    sv.SecretRef,
 		})
 	}
-	return result, nil
+	return result, skipped, nil
+}
+
+// deliverySkipClass is the skip class of a fetch result r (ok is false when
+// the backend returned none), or "" when the item is not skipped: its value
+// was read, or its error fails the selection.
+func deliverySkipClass(r secret.FetchResult, ok bool) string {
+	switch {
+	case !ok:
+		return skipClassMissing
+	case errors.Is(r.Err, store.ErrNotFound):
+		return skipClassNotFound
+	case errors.Is(r.Err, secret.ErrValueAccess):
+		return skipClassAccess
+	}
+	return ""
 }
 
 // secretMetaFromStore converts a stored secret row to backend metadata,

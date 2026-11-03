@@ -3215,6 +3215,15 @@ type startEnvResult struct {
 	// experiments is the dispatch experiment set read for this start; the
 	// caller sends it to the broker so both see the same set.
 	experiments []string
+	// skippedSecrets are the secrets the secret store could not return
+	// (selectDeliverySecrets); the start goes on without them.
+	// skippedSecretWarning is their warning for this request's audience
+	// (formatSkippedSecretWarning), "" when none was skipped. purpose is
+	// the selection purpose the WARN line names. The caller reports them
+	// with reportSkippedSecrets once it has sent the start.
+	skippedSecrets       []skippedSecret
+	skippedSecretWarning string
+	purpose              MaterialPurpose
 }
 
 // buildStartEnv assembles the full resolved environment used to start or
@@ -3322,7 +3331,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	// lookup and before any agent or transport token is minted below, so
 	// nothing reaches the broker and there is nothing to revoke. Absence is
 	// not an error: an agent with no secrets resolves to an empty list.
-	resolvedSecrets, err := d.selectDeliverySecrets(ctx, sel, agent)
+	resolvedSecrets, skippedSecrets, err := d.selectDeliverySecrets(ctx, sel, agent)
 	if err != nil {
 		d.log.WarnContext(ctx, caller+": failed to resolve secrets; agent not "+startedVerb,
 			"agent_id", agent.ID, "error", err)
@@ -3527,7 +3536,38 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 		workspace:       wsSpec,
 		tokenGrant:      tokenGrant,
 		experiments:     experiments,
+		// The warning's audience is this request's: the agent's owner
+		// sees user-scope names, everyone else a count.
+		skippedSecrets:       skippedSecrets,
+		skippedSecretWarning: formatSkippedSecretWarning(skippedSecrets, startedVerb, skippedSecretAudienceIsOwner(ctx, agent)),
+		purpose:              purpose,
 	}, nil
+}
+
+// reportSkippedSecrets reports the secrets a start or restart went without
+// (startEnv.skippedSecrets). sendErr is the error of the start or restart
+// send (nil for an accepted asynchronous launch, including one whose
+// outcome is unknown).
+//
+//   - The server log gets one WARN line whenever this node sent the
+//     request, failed or not: the skip happened either way.
+//   - The request's dispatch-warnings collector gets the warning only when
+//     the send succeeded, so a failed start never says the agent was
+//     started without them.
+//   - A send the client deferred to another hub node reports nothing here:
+//     the owner node selects and sends again, reports its own skips, and its
+//     warning reaches this request through the dispatch row
+//     (LifecycleDispatchResult.Warnings). A dispatch so logs one WARN line,
+//     on the node that sent it, and its response carries the owner's
+//     warning only.
+func (d *HTTPAgentDispatcher) reportSkippedSecrets(ctx context.Context, agent *store.Agent, startEnv startEnvResult, sendErr error) {
+	if len(startEnv.skippedSecrets) == 0 || errors.Is(sendErr, ErrLifecycleDeferred) {
+		return
+	}
+	logSkippedSecrets(ctx, d.log, agent.ID, startEnv.purpose, startEnv.skippedSecrets)
+	if sendErr == nil {
+		addDispatchWarnings(ctx, startEnv.skippedSecretWarning)
+	}
 }
 
 // DispatchAgentStart starts an agent on the runtime broker. When resume is
@@ -3838,8 +3878,10 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 			// launch for the reaper to fail.
 			d.endLaunchNotLaunched(ctx, agent, launchID)
 		}
+		d.reportSkippedSecrets(ctx, agent, startEnv, err)
 	default:
 		resp, err = send(ctx, nil)
+		d.reportSkippedSecrets(ctx, agent, startEnv, err)
 	}
 	if accepted != nil {
 		// The broker accepted the start as an asynchronous launch (or its
@@ -4062,6 +4104,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	extras.EnvClassifications = envClassifications
 
 	resp, err := d.client.RestartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, resolvedEnv, extras)
+	d.reportSkippedSecrets(ctx, agent, startEnv, err)
 	if errors.Is(err, ErrLifecycleDeferred) {
 		// The owning node mints and records its own run ID.
 		d.revertRun(ctx, agent, runID, previousRunID)
