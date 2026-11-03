@@ -364,14 +364,6 @@ func msgAuthzGrantAgentMessage(t *testing.T, s store.Store, userID, projectID st
 	}
 }
 
-// require_NoError is a test helper that fails immediately on error.
-func require_NoError(t *testing.T, err error) {
-	t.Helper()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
 // msgAuthzAgent creates a store.Agent with the specified properties and
 // persists it. Returns the agent.
 func msgAuthzAgent(t *testing.T, s store.Store, id, projectID, mode string, ancestry []string) *store.Agent {
