@@ -763,6 +763,11 @@ type AgentInfo struct {
 	// metadata mode that is not enforced under the agent's network mode. They
 	// are also included in Warnings.
 	RelayedWarnings []string `json:"relayedWarnings,omitempty"`
+	// StartNotice is a fact about this start for the agent's status
+	// message, for example the repository git config keys left out of the
+	// agent's private copy. The broker reports it with a successful launch.
+	// It is also in Warnings and RelayedWarnings.
+	StartNotice string `json:"startNotice,omitempty"`
 
 	// ExplicitImage and ExplicitImagePullPolicy record the image /
 	// kubernetes.imagePullPolicy that the INLINE config (--config), not a

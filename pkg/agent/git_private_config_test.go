@@ -580,7 +580,7 @@ func TestSeedPrivateGitConfig_WritesPreparedBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared, _, err := util.PrepareSeededGitConfig(raw, util.RepoPolicyLinked, staleUpstreamKey("agent-x"))
+	prepared, _, _, err := util.PrepareSeededGitConfig(raw, util.RepoPolicyLinked, staleUpstreamKey("agent-x"), false)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -617,6 +617,12 @@ func failedAfterRunningObservedApplies(current *ent.Agent, r store.LaunchReport,
 // (no AppliedConfig, as on the sync path) or not valid JSON keeps it
 // untouched.
 func applySucceededAgentInfo(upd *ent.AgentUpdateOne, current *ent.Agent, r store.LaunchReport) {
+	// A succeeded report's message is a notice about the start (for example
+	// the repository git config keys left out of the agent's private copy);
+	// it becomes the agent's status message.
+	if r.Message != "" && r.Message != current.Message {
+		upd.SetMessage(r.Message)
+	}
 	a := store.Agent{
 		Template:              current.Template,
 		Runtime:               current.Runtime,

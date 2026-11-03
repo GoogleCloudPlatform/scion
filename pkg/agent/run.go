@@ -2523,6 +2523,7 @@ authDone:
 	// (k8sSharedRepoShapeRefusal). clone-per-agent and empty-per-agent have no
 	// shared .git to protect.
 	privateGitConfigSource := ""
+	startNotice := ""
 	switch m.Runtime.Name() {
 	case "docker", "podman", "container", "apple-container":
 		if repoRoot != "" {
@@ -2536,11 +2537,21 @@ authDone:
 				if seedBranch == "" {
 					seedBranch = api.Slugify(opts.Name)
 				}
-				src, seedErr := seedCheckedPrivateGitConfig(ctx, repoRoot, effectiveWorkspace, agentDir, seedBranch)
+				// Keys that name a command or a hook location are left out of
+				// the private copy only where the runtime binds that copy over
+				// .git/config (docker, podman); the Apple runtime reads the
+				// repository config directly, so there they are refused.
+				stripNeverCarry := m.Runtime.Name() == "docker" || m.Runtime.Name() == "podman"
+				src, neverCarried, seedErr := seedCheckedPrivateGitConfigStrip(ctx, repoRoot, effectiveWorkspace, agentDir, seedBranch, stripNeverCarry)
 				if seedErr != nil {
 					return nil, fmt.Errorf("seed private git config for agent %q: %w", opts.Name, seedErr)
 				}
 				privateGitConfigSource = src
+				if notice := util.NeverCarriedNotice(neverCarried); notice != "" {
+					startNotice = notice
+					warnings = append(warnings, notice)
+					relayedWarnings = append(relayedWarnings, notice)
+				}
 			}
 		}
 	}
@@ -2927,6 +2938,7 @@ authDone:
 				a.Warnings = warnings
 				a.HubOnlyEnvWarnings = hubOnlyEnvWarnings
 				a.RelayedWarnings = relayedWarnings
+				a.StartNotice = startNotice
 				a.Phase = successPhase
 				a.HarnessConfig = harnessConfigName
 				a.HarnessConfigRevision = harnessConfigRevision
@@ -2957,6 +2969,7 @@ authDone:
 		Warnings:              warnings,
 		HubOnlyEnvWarnings:    hubOnlyEnvWarnings,
 		RelayedWarnings:       relayedWarnings,
+		StartNotice:           startNotice,
 		HarnessConfig:         harnessConfigName,
 		HarnessConfigRevision: harnessConfigRevision,
 		HarnessConfigSource:   harnessConfigSource,
