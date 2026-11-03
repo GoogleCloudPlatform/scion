@@ -425,9 +425,9 @@ jobs:
 
       # Parse only: pkg/hub plus its test files declares no top-level
       # identifier twice (nor one an import also declares) under any tag
-      # set CI compiles it with. The shards
-      # compile apart, so a duplicate across two shards passes them and
-      # breaks every whole-package build (go vet ./pkg/hub/).
+      # set CI compiles it with. The shards compile apart, so a duplicate
+      # across two shards passes them and breaks every whole-package build
+      # (go vet ./pkg/hub/).
       - name: Check pkg/hub for duplicate declarations
         run: |
           if ! make hub-dupcheck; then

@@ -67,6 +67,10 @@ func TestCheck(t *testing.T) {
 		// clause. Blank and dot imports, methods and the external test
 		// package are not clashes.
 		{"testdata/imports", nil, []string{
+			"package p: gax imported at c_test.go:6 and declared at b_test.go:26",
+			"package p: iam imported at c_test.go:7 and declared at b_test.go:26",
+			"package p: iamcredentials imported at c_test.go:8 and declared at b_test.go:26",
+			"package p: jose imported at c_test.go:5 and declared at b_test.go:24",
 			"package p: rand imported at a_test.go:6 and declared at b_test.go:9",
 			"package p: str imported at a_test.go:7 and declared at b_test.go:11",
 			"package p: strings imported at a_test.go:8 and b_test.go:3 and declared at b_test.go:7",
@@ -125,5 +129,26 @@ func TestFirstPos(t *testing.T) {
 	}
 	if got, want := firstPos(pos[:2], 2), "a.go:2 and d.go:1"; got != want {
 		t.Errorf("firstPos(2, 2) = %q, want %q", got, want)
+	}
+}
+
+func TestGuessName(t *testing.T) {
+	for path, want := range map[string]string{
+		"strings":                                 "strings",
+		"math/rand/v2":                            "rand",
+		"gopkg.in/yaml.v3":                        "yaml",
+		"github.com/go-jose/go-jose/v4":           "jose",
+		"github.com/googleapis/gax-go/v2":         "gax",
+		"google.golang.org/api/iam/v1":            "iam",
+		"google.golang.org/api/iamcredentials/v1": "iamcredentials",
+		"v1": "v1",
+		// Not an identifier after the rules: no guess, nothing reported.
+		"github.com/example/my-lib":  "",
+		"example.com/pkg.with.dots":  "",
+		"github.com/example/go-go-x": "",
+	} {
+		if got := guessName(path); got != want {
+			t.Errorf("guessName(%q) = %q, want %q", path, got, want)
+		}
 	}
 }

@@ -29,12 +29,12 @@
 // Receiver.Name. The blank identifier and init are skipped. It also reports
 // an import whose local name is declared in the package block of the same
 // package clause ("already declared through import of package"); the local
-// name is the explicit one, else the last import path element without a /vN
-// (or gopkg.in .vN) suffix, which is a guess where the package clause differs
-// from the path. Blank and dot imports are skipped. Not checked, because they
-// need type information: dot imports, methods declared through an alias
-// receiver (type A = T; func (A) m() against func (*T) m()), and clashes
-// between a method and a struct field.
+// name is the explicit one, else a guess from the import path (guessName:
+// goimports' rule plus a trailing /vN element of any N); a guess that is not
+// an identifier is skipped. Blank and dot imports are skipped. Not checked,
+// because they need type information: dot imports, methods declared through
+// an alias receiver (type A = T; func (A) m() against func (*T) m()), and
+// clashes between a method and a struct field.
 //
 // Usage:
 //
@@ -249,8 +249,8 @@ func firstPos(pos []token.Position, limit int) string {
 }
 
 // importName returns the name an import declares in its file block: the
-// explicit name, else the last path element without a /vN or gopkg.in .vN
-// suffix. It returns "" for an unparsable path.
+// explicit name, else guessName of the path. It returns "" for an
+// unparsable path or a guess that is not an identifier.
 func importName(im *ast.ImportSpec) string {
 	if im.Name != nil {
 		return im.Name.Name
@@ -259,24 +259,39 @@ func importName(im *ast.ImportSpec) string {
 	if err != nil {
 		return ""
 	}
+	return guessName(path)
+}
+
+// guessName guesses the package name of an import path without loading it:
+// the last path element, after a trailing /vN element (any N, so
+// google.golang.org/api/iam/v1 gives iam), with a gopkg.in .vN suffix, a
+// go- prefix and a -go suffix stripped (goimports' rule: go-jose gives jose,
+// gax-go gives gax). It returns "" when the result is not an identifier, so
+// no clash is reported on a name it cannot stand behind.
+func guessName(path string) string {
 	elems := strings.Split(path, "/")
 	last := elems[len(elems)-1]
-	if len(elems) > 1 && isMajorVersion(last) {
+	if len(elems) > 1 && isVersion(last) {
 		last = elems[len(elems)-2]
 	}
-	if i := strings.LastIndex(last, ".v"); i > 0 && strings.HasPrefix(path, "gopkg.in/") && isMajorVersion(last[i+1:]) {
+	if i := strings.LastIndex(last, ".v"); i > 0 && strings.HasPrefix(path, "gopkg.in/") && isVersion(last[i+1:]) {
 		last = last[:i]
+	}
+	last = strings.TrimPrefix(last, "go-")
+	last = strings.TrimSuffix(last, "-go")
+	if !token.IsIdentifier(last) {
+		return ""
 	}
 	return last
 }
 
-// isMajorVersion reports whether s is v2, v3, ... (a major-version suffix).
-func isMajorVersion(s string) bool {
+// isVersion reports whether s is a major-version element: v0, v1, v2, ...
+func isVersion(s string) bool {
 	if len(s) < 2 || s[0] != 'v' {
 		return false
 	}
-	n, err := strconv.Atoi(s[1:])
-	return err == nil && n >= 2 && s[1] != '0'
+	_, err := strconv.ParseUint(s[1:], 10, 32)
+	return err == nil
 }
 
 // recvName returns the base type name of a method receiver: T for (T),

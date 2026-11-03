@@ -12,10 +12,20 @@ const str = "x"
 
 type yaml struct{}
 
-// Not reported: blank and dot imports declare no file-block name.
+// Not reported: a blank import declares no name; dot imports need type
+// information (a documented limit, see main.go).
 func embed() {}
 
 func Println() {}
 
 // A method is not in the package block.
 func (yaml) strings() {}
+
+func jose() {}
+
+var gax, iam, iamcredentials int
+
+// The guess for my-lib is not an identifier: no clash is reported.
+func lib() {}
+
+func my() {}
