@@ -82,15 +82,17 @@ var swDrop = errors.New("sw: drop the result")
 // gives each item named in sentinel the sentinel ref and scope ID in its
 // metadata (selection authorizes by the listed scope, not the metadata's
 // scope ID). Each item named in faults gets that error from FetchValues
-// instead of its value (swDrop: no result at all). It records every name
-// FetchValues was asked for.
+// instead of its value (swDrop: no result at all). An item it passes through
+// to the real backend is fetched with its original metadata, as listed by
+// the real backend. It records every name FetchValues was asked for.
 type swFaultBackend struct {
 	secret.SecretBackend
 	faults   map[string]error
 	sentinel map[string]bool
 
-	mu      sync.Mutex
-	fetched []string
+	mu       sync.Mutex
+	fetched  []string
+	original map[string]secret.SecretMeta // by ID, for the rewritten items
 }
 
 func (b *swFaultBackend) List(ctx context.Context, filter secret.Filter) ([]secret.SecretMeta, error) {
@@ -98,8 +100,14 @@ func (b *swFaultBackend) List(ctx context.Context, filter secret.Filter) ([]secr
 	if err != nil {
 		return nil, err
 	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	for i := range metas {
 		if b.sentinel[metas[i].Name] {
+			if b.original == nil {
+				b.original = map[string]secret.SecretMeta{}
+			}
+			b.original[metas[i].ID] = metas[i]
 			metas[i].SecretRef = swRefStored
 			metas[i].ScopeID = swScopeIDSentinel
 		}
@@ -116,6 +124,9 @@ func (b *swFaultBackend) FetchValues(ctx context.Context, metas []secret.SecretM
 		if err, ok := b.faults[m.Name]; ok {
 			faulted[m.ID] = err
 			continue
+		}
+		if orig, ok := b.original[m.ID]; ok {
+			m = orig
 		}
 		pass = append(pass, m)
 	}
