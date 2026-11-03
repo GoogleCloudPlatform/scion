@@ -830,21 +830,16 @@ func k8sHomeHooksGuardCommand(home string) []string {
 done`, "sh", home}
 }
 
-// Paths, relative to the agent home, of the harness bundle's secrets and
-// outputs on the broker. For NFS-home pods they are never transferred into
-// the home on the export: the secrets are staged in memory
-// (k8sHarnessSecretsDir) and the outputs are regenerated in the pod
-// (k8sHarnessOutputsDir).
-const (
-	harnessBundleSecretsRel = ".scion/harness/secrets"
-	harnessBundleOutputsRel = ".scion/harness/outputs"
-)
-
 // nfsHomeSyncExcludes returns what the home transfer of an NFS-home pod
-// leaves out: the link targets and the harness bundle's secrets and
-// outputs.
+// leaves out: the shared home transfer set's excludes (homeTransferExcludes:
+// the link targets and the harness bundle's secrets and outputs). The
+// harness secrets are staged in memory (k8sHarnessSecretsDir) and the
+// outputs are regenerated in the pod (k8sHarnessOutputsDir).
 func (r *KubernetesRuntime) nfsHomeSyncExcludes(config RunConfig) []string {
-	return append(r.k8sHomeLinkTargets(config), harnessBundleSecretsRel, harnessBundleOutputsRel)
+	if k8sHomeFileModeFor(config) != k8sHomeFilesLink {
+		return []string{harnessBundleSecretsRel, harnessBundleOutputsRel}
+	}
+	return homeTransferExcludes(config, !r.useGKESecretsPath(config))
 }
 
 // k8sHarnessSecretsDirCommand creates the in-memory harness secrets

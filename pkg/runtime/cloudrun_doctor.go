@@ -18,6 +18,17 @@ func (r *CloudRunRuntime) RunDiagnostics(opts DiagnosticOpts) DiagnosticReport {
 		Checks:  []CheckResult{},
 	}
 
+	// The homes storage setting does not apply to this runtime: say so
+	// (fixed text, no paths), as the broker does at start.
+	if w := CloudRunHomesWarningFor(r.Name(), opts.Server); w != "" {
+		report.Checks = append(report.Checks, CheckResult{
+			Name:        "Cloud Run Agent Homes",
+			Status:      "warn",
+			Message:     w,
+			Remediation: "No action is needed for Cloud Run agents; remove the setting if no other runtime on this broker uses it.",
+		})
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 

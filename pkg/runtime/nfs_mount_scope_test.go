@@ -573,6 +573,10 @@ func cloudRunShareMounts(t *testing.T, inst *runpb.Instance) []shareMount {
 			if !ok {
 				t.Fatalf("container mounts unknown volume %q", vm.GetName())
 			}
+			if v.GetName() == cloudRunMemVolume && v.GetEmptyDir() != nil {
+				// The in-memory harness volume is not on the share.
+				continue
+			}
 			nfs := v.GetNfs()
 			if nfs == nil {
 				t.Errorf("volume %q is not an NFS volume", vm.GetName())

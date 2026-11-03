@@ -230,3 +230,55 @@ func readDirSorted(src *os.Root, rel string) ([]fs.DirEntry, error) {
 	slices.SortFunc(entries, func(a, b fs.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
 	return entries, err
 }
+
+// SeedOptions configures Home.SeedTree.
+type SeedOptions struct {
+	// Exclude reports whether the source entry rel (slash-separated,
+	// relative to the source root) is left out. An excluded directory is
+	// not descended into. Nil excludes nothing.
+	Exclude func(rel string) bool
+	// UID and GID own every directory SeedTree creates and every file it
+	// writes (fchown on the new entry's own descriptor). A failed chown
+	// fails the copy.
+	UID, GID int
+	// Limits bounds the copy; exceeding one fails with a *LimitError.
+	Limits Limits
+}
+
+// SeedResult counts what Home.SeedTree did. Skipped lists, by path
+// relative to the source root, the links, special files and hard-linked
+// files it skipped; Replaced lists the home entries that were links and
+// were replaced.
+type SeedResult struct {
+	Dirs     int
+	Files    int
+	Bytes    int64
+	Skipped  []string
+	Replaced []string
+}
+
+// SeedConflictError reports that the home has a symbolic link or an entry
+// of the wrong type where SeedTree would put a directory or a file. Rel is
+// the entry's path relative to the home; it holds no host path.
+type SeedConflictError struct {
+	Rel    string
+	Reason string
+}
+
+func (e *SeedConflictError) Error() string {
+	return "agenthome: " + e.Rel + ": " + e.Reason
+}
+
+// seedFileMode is the mode SeedTree gives a copied file: the source's
+// permission bits capped at 0755 when any execute bit is set and at 0644
+// otherwise. Setuid, setgid and sticky never survive (Perm drops them).
+func seedFileMode(src fs.FileMode) fs.FileMode {
+	perm := src.Perm()
+	if perm&0o111 != 0 {
+		return perm & 0o755
+	}
+	return perm & 0o644
+}
+
+// seedDirMode is the mode of a directory SeedTree creates.
+const seedDirMode fs.FileMode = 0o700

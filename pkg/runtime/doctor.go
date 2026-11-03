@@ -14,6 +14,8 @@
 
 package runtime
 
+import "github.com/GoogleCloudPlatform/scion/pkg/config"
+
 // CheckResult represents the outcome of a single diagnostic check.
 type CheckResult struct {
 	Name        string `json:"name"`
@@ -48,4 +50,8 @@ type DiagnosticOpts struct {
 	// shared server.shared_dir_storage backend), so no per-dir claim and no
 	// shared_dir_storage_class is used.
 	SharedDirStorageShared bool
+
+	// Server is the global server settings (server.*), or nil when they
+	// could not be read. The cloudrun runtime reads its homes setting.
+	Server *config.V1ServerConfig
 }

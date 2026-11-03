@@ -2308,14 +2308,45 @@ func prepareContainerSecretEnv(config *RunConfig) error {
 // non-empty. Only the Cloud Run runtime passes a token; every other caller
 // goes through prepareContainerSecretEnv and its output is unchanged.
 func prepareStagedSecretEnv(config *RunConfig, hubToken string) error {
-	if len(config.ResolvedSecrets) == 0 && hubToken == "" {
-		return nil
+	return prepareStagedSecretEnvExtras(config, stagedExtras{HubToken: hubToken})
+}
+
+// stagedExtras is what a runtime stages in the blob besides the resolved
+// file and variable secrets. Only the Cloud Run runtime sets any of it.
+type stagedExtras struct {
+	// HubToken is the agent's hub-issued credential (Staged.HubToken).
+	HubToken string
+	// HarnessSecrets are the harness bundle's staged secret files
+	// (Staged.HarnessSecrets).
+	HarnessSecrets []stagedsecrets.HarnessSecret
+	// FieldClassErrors makes an oversize error name only the largest
+	// field class (stagedSizes.largestClass), never a secret name, key or path.
+	FieldClassErrors bool
+}
+
+// empty reports whether e stages nothing.
+func (e stagedExtras) empty() bool {
+	return e.HubToken == "" && len(e.HarnessSecrets) == 0
+}
+
+// prepareStagedSecretEnvExtras is prepareStagedSecretEnv for any extras.
+func prepareStagedSecretEnvExtras(config *RunConfig, extras stagedExtras) error {
+	_, err := stageSecretEnv(config, extras)
+	return err
+}
+
+// stageSecretEnv is prepareStagedSecretEnvExtras that also returns the
+// staged structure it encoded (empty when nothing is staged).
+func stageSecretEnv(config *RunConfig, extras stagedExtras) (stagedsecrets.Staged, error) {
+	if len(config.ResolvedSecrets) == 0 && extras.empty() {
+		return stagedsecrets.Staged{}, nil
 	}
 
 	containerHome := util.GetHomeDir(config.UnixUsername)
-	encoded, err := serializeStaged(containerHome, config.ResolvedSecrets, hubToken)
+	built := buildStaged(containerHome, config.ResolvedSecrets, extras)
+	encoded, err := encodeStaged(built)
 	if err != nil {
-		return fmt.Errorf("failed to serialize secrets: %w", err)
+		return stagedsecrets.Staged{}, fmt.Errorf("failed to serialize secrets: %w", err)
 	}
 	if encoded != "" {
 		config.Env = append(config.Env, stagedsecrets.EnvVar+"="+encoded)
@@ -2324,7 +2355,7 @@ func prepareStagedSecretEnv(config *RunConfig, hubToken string) error {
 	if credPath := findGCPTelemetryCredentialPath(config.ResolvedSecrets, containerHome); credPath != "" {
 		config.Env = append(config.Env, telemetryGCPCredentialsEnvVar+"="+credPath)
 	}
-	return nil
+	return built, nil
 }
 
 // envSizeLimit is the largest environment entry a runtime accepts.
@@ -2385,23 +2416,40 @@ func applyResolvedSecretsToEnv(config *RunConfig, limit envSizeLimit, reservedKe
 // hubToken in the SCION_STAGED_SECRETS blob when it is non-empty (see
 // prepareStagedSecretEnv). The token never becomes an env entry of its own.
 func applyStagedSecretsToEnv(config *RunConfig, limit envSizeLimit, hubToken string, reservedKeys ...string) ([]string, error) {
-	if len(config.ResolvedSecrets) == 0 && hubToken == "" {
-		return nil, nil
+	order, _, err := applyStagedSecretsToEnvExtras(config, limit, stagedExtras{HubToken: hubToken}, reservedKeys...)
+	return order, err
+}
+
+// applyStagedSecretsToEnvExtras is applyStagedSecretsToEnv for any extras.
+// It also returns the sizes of the staged blob (stagedSizes, zero when no
+// blob is staged), for a runtime to log.
+func applyStagedSecretsToEnvExtras(config *RunConfig, limit envSizeLimit, extras stagedExtras, reservedKeys ...string) ([]string, stagedSizes, error) {
+	if len(config.ResolvedSecrets) == 0 && extras.empty() {
+		return nil, stagedSizes{}, nil
 	}
 
 	staged := *config
 	staged.Env = nil
-	if err := prepareStagedSecretEnv(&staged, hubToken); err != nil {
-		return nil, err
+	built, err := stageSecretEnv(&staged, extras)
+	if err != nil {
+		return nil, stagedSizes{}, err
+	}
+	sizes, err := measureStaged(built)
+	if err != nil {
+		return nil, stagedSizes{}, err
 	}
 	for _, e := range staged.Env {
 		key, val, _ := strings.Cut(e, "=")
 		if key == stagedsecrets.EnvVar && limit.exceeds(key, val) {
+			if extras.FieldClassErrors {
+				return nil, sizes, fmt.Errorf("staged secrets do not fit: %s is %d bytes, over the %d-byte limit for one %s on this runtime; the largest part is the %s",
+					stagedsecrets.EnvVar, limit.size(key, val), limit.maxBytes, limit.unit(), sizes.largestClass())
+			}
 			carries := ""
-			if hubToken != "" {
+			if extras.HubToken != "" {
 				carries = "; it also carries the agent's hub credential"
 			}
-			return nil, fmt.Errorf("file/variable secrets do not fit: %s is %d bytes, over the %d-byte limit for one %s on this runtime (largest secret: %q%s)",
+			return nil, sizes, fmt.Errorf("file/variable secrets do not fit: %s is %d bytes, over the %d-byte limit for one %s on this runtime (largest secret: %q%s)",
 				stagedsecrets.EnvVar, limit.size(key, val), limit.maxBytes, limit.unit(), largestStagedSecretName(config.ResolvedSecrets), carries)
 		}
 	}
@@ -2438,7 +2486,7 @@ func applyStagedSecretsToEnv(config *RunConfig, limit envSizeLimit, hubToken str
 	for _, target := range order {
 		s := values[target]
 		if limit.exceeds(target, s.Value) {
-			return nil, fmt.Errorf("secret %q (env %s) is %d bytes, over the %d-byte limit for one %s on this runtime",
+			return nil, sizes, fmt.Errorf("secret %q (env %s) is %d bytes, over the %d-byte limit for one %s on this runtime",
 				s.Name, s.Target, limit.size(target, s.Value), limit.maxBytes, limit.unit())
 		}
 	}
@@ -2448,7 +2496,63 @@ func applyStagedSecretsToEnv(config *RunConfig, limit envSizeLimit, hubToken str
 		config.Env = append(config.Env, target+"="+values[target].Value)
 	}
 	config.Env = append(config.Env, staged.Env...)
-	return order, nil
+	return order, sizes, nil
+}
+
+// Field classes of the staged blob, as named in logs and oversize errors.
+const (
+	stagedClassHubToken       = "hub credential"
+	stagedClassFileSecrets    = "file and variable secrets"
+	stagedClassHarnessSecrets = "harness secrets"
+)
+
+// stagedSizes are the encoded sizes, in bytes, of a staged blob and of
+// what each field class adds to it. A class's size is the encoded size of
+// a blob with that class alone, so the parts do not add up exactly to the
+// total. Sizes only: no names, keys or values.
+type stagedSizes struct {
+	Total          int
+	HubToken       int
+	FileSecrets    int
+	HarnessSecrets int
+}
+
+// measureStaged returns the sizes of staged.
+func measureStaged(staged stagedsecrets.Staged) (stagedSizes, error) {
+	size := func(part stagedsecrets.Staged) (int, error) {
+		if stagedIsEmpty(part) {
+			return 0, nil
+		}
+		enc, err := marshalStaged(part)
+		return len(enc), err
+	}
+	var s stagedSizes
+	var err error
+	if s.Total, err = size(staged); err != nil {
+		return stagedSizes{}, err
+	}
+	if s.HubToken, err = size(stagedsecrets.Staged{HubToken: staged.HubToken}); err != nil {
+		return stagedSizes{}, err
+	}
+	if s.FileSecrets, err = size(stagedsecrets.Staged{FileSecrets: staged.FileSecrets, VariableSecrets: staged.VariableSecrets}); err != nil {
+		return stagedSizes{}, err
+	}
+	if s.HarnessSecrets, err = size(stagedsecrets.Staged{HarnessSecrets: staged.HarnessSecrets}); err != nil {
+		return stagedSizes{}, err
+	}
+	return s, nil
+}
+
+// largestClass names the field class with the largest size.
+func (s stagedSizes) largestClass() string {
+	class, size := stagedClassFileSecrets, s.FileSecrets
+	if s.HarnessSecrets > size {
+		class, size = stagedClassHarnessSecrets, s.HarnessSecrets
+	}
+	if s.HubToken > size {
+		class = stagedClassHubToken
+	}
+	return class
 }
 
 // largestStagedSecretName returns the name of the largest file or variable
@@ -2478,7 +2582,13 @@ func serializeSecrets(containerHome string, secrets []api.ResolvedSecret) (strin
 // blob's dedicated HubToken field when it is non-empty; the blob is then
 // produced even with no file or variable secrets.
 func serializeStaged(containerHome string, secrets []api.ResolvedSecret, hubToken string) (string, error) {
-	staged := stagedsecrets.Staged{HubToken: hubToken}
+	return encodeStaged(buildStaged(containerHome, secrets, stagedExtras{HubToken: hubToken}))
+}
+
+// buildStaged collects the file and variable secrets and the extras into
+// the staged blob's structure.
+func buildStaged(containerHome string, secrets []api.ResolvedSecret, extras stagedExtras) stagedsecrets.Staged {
+	staged := stagedsecrets.Staged{HubToken: extras.HubToken, HarnessSecrets: extras.HarnessSecrets}
 
 	// Collect file secrets, deduplicating by container target path (last wins).
 	targetIndex := make(map[string]int) // target → index in FileSecrets
@@ -2525,22 +2635,42 @@ func serializeStaged(containerHome string, secrets []api.ResolvedSecret, hubToke
 		staged.VariableSecrets[s.Target] = s.Value
 	}
 
-	if len(staged.FileSecrets) == 0 && len(staged.VariableSecrets) == 0 && staged.HubToken == "" {
+	return staged
+}
+
+// stagedIsEmpty reports whether staged carries nothing, so no blob is set.
+func stagedIsEmpty(staged stagedsecrets.Staged) bool {
+	return len(staged.FileSecrets) == 0 && len(staged.VariableSecrets) == 0 &&
+		staged.HubToken == "" && len(staged.HarnessSecrets) == 0
+}
+
+// encodeStaged serializes staged into the blob's encoded form, or "" when
+// it carries nothing.
+func encodeStaged(staged stagedsecrets.Staged) (string, error) {
+	if stagedIsEmpty(staged) {
 		return "", nil
 	}
 
-	jsonData, err := json.Marshal(staged)
+	encoded, err := marshalStaged(staged)
 	if err != nil {
-		return "", fmt.Errorf("failed to serialize staged secrets: %w", err)
+		return "", err
 	}
-
-	encoded := base64.StdEncoding.EncodeToString(jsonData)
 	if len(encoded) > stagedSecretWarnThreshold {
 		slog.Warn("serialized secrets blob exceeds size warning threshold",
 			"size_bytes", len(encoded), "threshold_bytes", stagedSecretWarnThreshold)
 	}
 
 	return encoded, nil
+}
+
+// marshalStaged is encodeStaged without the empty check and the size
+// warning.
+func marshalStaged(staged stagedsecrets.Staged) (string, error) {
+	jsonData, err := json.Marshal(staged)
+	if err != nil {
+		return "", fmt.Errorf("failed to serialize staged secrets: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(jsonData), nil
 }
 
 // phaseFromContainerStatus derives an agent phase from a container status string.

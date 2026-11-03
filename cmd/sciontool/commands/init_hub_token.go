@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
@@ -122,4 +123,18 @@ func hubModeLogLine(mode hub.Mode, configured bool, endpoint string, reason func
 			"Hub status, heartbeat, readiness reporting and the conduit are disabled", endpoint, why)
 	}
 	return false, fmt.Sprintf("Operating mode: %s (endpoint: %s)", mode, endpoint)
+}
+
+// prepareHarnessMemDirs creates the in-memory harness secrets and outputs
+// directories (SCION_HARNESS_SECRETS_DIR, SCION_HARNESS_OUTPUTS_DIR) below
+// hooks.DefaultHarnessDirsRoot for the workload user, mode 0700, when init
+// runs as root and the variables are set. An unprivileged init (as in
+// Kubernetes pods, which create them by exec) changes nothing.
+func prepareHarnessMemDirs() error {
+	for _, name := range []string{hooks.HarnessSecretsDirEnv, hooks.HarnessOutputsDirEnv} {
+		if err := stagedsecrets.PrepareHarnessDir(hooks.DefaultHarnessDirsRoot, os.Getenv(name)); err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+	}
+	return nil
 }

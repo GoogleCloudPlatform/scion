@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 
@@ -520,4 +521,285 @@ func copyFileInto(src *os.Root, s string, fi os.FileInfo, dstFd int, name string
 		err = cerr
 	}
 	return err
+}
+
+// SeedTree copies the tree src (a broker-owned directory, from its root)
+// into the home, over what is there: entries of the home that the copy
+// does not write are kept. It never follows a link on either side.
+//
+//   - The source is walked without following links: a link, special file
+//     or hard-linked file is skipped (listed in SeedResult.Skipped, still
+//     counted against the limits), and a file replaced since it was listed
+//     is refused.
+//   - Every directory of the home is opened relative to its parent's
+//     descriptor with O_DIRECTORY|O_NOFOLLOW. A missing one is created
+//     (mkdirat, mode 0700, then fchown to opts.UID:GID); an existing one is
+//     kept only when fstat on that descriptor shows a directory.
+//   - Every file is written to a new temporary file created with
+//     O_CREAT|O_EXCL|O_NOFOLLOW in its directory, fchowned to
+//     opts.UID:GID, given seedFileMode of the source mode, and renamed
+//     over its name relative to the same directory descriptor.
+//   - A link in the home where a file goes is replaced by that rename,
+//     never written through. A link where a directory goes is confirmed a
+//     link (fstatat without following), unlinked (never AT_REMOVEDIR),
+//     replaced by a new directory and reopened without following; a link
+//     there again at the reopen fails closed. Replaced entries are listed in
+//     SeedResult.Replaced.
+//   - Any other entry of the wrong type (a directory where a file goes, a
+//     file where a directory goes, a FIFO or socket) fails the copy with a
+//     *SeedConflictError naming the home-relative entry.
+//   - A source file with more than one hard link is skipped like a link.
+//
+// Exceeding opts.Limits fails with a *LimitError. A failure part-way
+// leaves the entries already renamed into place; each one is complete, and
+// a later SeedTree replaces them again.
+func (h *Home) SeedTree(src *os.Root, opts SeedOptions) (SeedResult, error) {
+	var res SeedResult
+	fd, err := unix.Openat(h.fd, ".", dirOpenFlags, 0)
+	if err != nil {
+		return res, pathErr("open", h.path, nil, err)
+	}
+	defer func() { _ = unix.Close(fd) }()
+	b := &treeBudget{lim: opts.Limits}
+	err = seedInto(src, ".", "", fd, opts, b, 0, &res)
+	res.Bytes = b.bytes
+	return res, err
+}
+
+// seedInto copies the contents of the source directory srcRel (rel in
+// slash form, "" for the root) into the home directory dstFd refers to.
+func seedInto(src *os.Root, srcRel, rel string, dstFd int, opts SeedOptions, b *treeBudget, depth int, res *SeedResult) error {
+	entries, err := readDirSorted(src, srcRel)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		name := e.Name()
+		childRel := name
+		if rel != "" {
+			childRel = rel + "/" + name
+		}
+		if opts.Exclude != nil && opts.Exclude(childRel) {
+			continue
+		}
+		s := filepath.Join(srcRel, name)
+		fi, err := src.Lstat(s)
+		if err != nil {
+			return err
+		}
+		switch {
+		case fi.IsDir():
+			if err := b.depth(depth + 1); err != nil {
+				return err
+			}
+			if err := b.entry(); err != nil {
+				return err
+			}
+			var replaced bool
+			cfd, err := seedDir(dstFd, name, childRel, opts, &replaced)
+			if replaced {
+				res.Replaced = append(res.Replaced, childRel)
+			}
+			if err != nil {
+				return err
+			}
+			res.Dirs++
+			err = seedInto(src, s, childRel, cfd, opts, b, depth+1, res)
+			_ = unix.Close(cfd)
+			if err != nil {
+				return err
+			}
+		case fi.Mode().IsRegular() && hardLinked(fi):
+			// A file with more than one hard link is skipped like a link,
+			// as agenthome reads refuse it.
+			if err := b.entry(); err != nil {
+				return err
+			}
+			res.Skipped = append(res.Skipped, childRel)
+		case fi.Mode().IsRegular():
+			if err := b.entry(); err != nil {
+				return err
+			}
+			var replaced bool
+			err := seedFile(src, s, fi, dstFd, name, childRel, opts, b, &replaced)
+			if err != nil {
+				return err
+			}
+			if replaced {
+				res.Replaced = append(res.Replaced, childRel)
+			}
+			res.Files++
+		default:
+			if err := b.entry(); err != nil {
+				return err
+			}
+			res.Skipped = append(res.Skipped, childRel)
+		}
+	}
+	return nil
+}
+
+// seedDir opens the directory name in dstFd for SeedTree, creating it
+// when missing. The caller owns the returned descriptor.
+func seedDir(dstFd int, name, rel string, opts SeedOptions, replaced *bool) (int, error) {
+	created := false
+	cfd, err := unix.Openat(dstFd, name, dirOpenFlags, 0)
+	firstErr := err
+	if errors.Is(err, unix.ENOENT) {
+		merr := unix.Mkdirat(dstFd, name, uint32(seedDirMode))
+		if merr != nil && !errors.Is(merr, unix.EEXIST) {
+			return -1, fmt.Errorf("agenthome: %s: mkdir: %w", rel, merr)
+		}
+		created = merr == nil
+		if seedDirAfterMkdirHook != nil {
+			seedDirAfterMkdirHook(dstFd, name)
+		}
+		// A link at this reopen appeared after this start's own mkdirat (a
+		// race): it is not replaced; the open below fails and the copy is
+		// refused.
+		cfd, err = unix.Openat(dstFd, name, dirOpenFlags, 0)
+	}
+	// Only a link found by the FIRST open is replaced.
+	if firstErr != nil && !errors.Is(firstErr, unix.ENOENT) && errors.Is(componentErr(dstFd, name, firstErr), ErrLinkComponent) {
+		// A link where a directory goes is replaced, never followed: fstatat
+		// without following must show a link, which is unlinked (never
+		// AT_REMOVEDIR), then a real directory is created and reopened
+		// without following. A link there again at the reopen (a race)
+		// fails closed; there is no retry.
+		var lst unix.Stat_t
+		if serr := unix.Fstatat(dstFd, name, &lst, unix.AT_SYMLINK_NOFOLLOW); serr != nil {
+			return -1, fmt.Errorf("agenthome: %s: stat: %w", rel, serr)
+		}
+		if lst.Mode&unix.S_IFMT != unix.S_IFLNK {
+			return -1, &SeedConflictError{Rel: rel, Reason: "is not a directory"}
+		}
+		if uerr := unix.Unlinkat(dstFd, name, 0); uerr != nil {
+			return -1, fmt.Errorf("agenthome: %s: unlink link: %w", rel, uerr)
+		}
+		*replaced = true
+		if merr := unix.Mkdirat(dstFd, name, uint32(seedDirMode)); merr != nil {
+			return -1, fmt.Errorf("agenthome: %s: mkdir: %w", rel, merr)
+		}
+		created = true
+		cfd, err = unix.Openat(dstFd, name, dirOpenFlags, 0)
+		if err != nil {
+			return -1, &SeedConflictError{Rel: rel, Reason: "changed while being replaced"}
+		}
+	}
+	if err != nil {
+		switch cerr := componentErr(dstFd, name, err); {
+		case errors.Is(cerr, ErrLinkComponent):
+			return -1, &SeedConflictError{Rel: rel, Reason: "is a symbolic link"}
+		case errors.Is(cerr, ErrNotDirectory):
+			return -1, &SeedConflictError{Rel: rel, Reason: "is not a directory"}
+		default:
+			return -1, fmt.Errorf("agenthome: %s: open: %w", rel, cerr)
+		}
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(cfd, &st); err != nil {
+		_ = unix.Close(cfd)
+		return -1, fmt.Errorf("agenthome: %s: stat: %w", rel, err)
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFDIR {
+		_ = unix.Close(cfd)
+		return -1, &SeedConflictError{Rel: rel, Reason: "is not a directory"}
+	}
+	if created {
+		// mkdirat applied the umask; set the mode exactly, then the owner.
+		if err := unix.Fchmod(cfd, uint32(seedDirMode)); err != nil {
+			_ = unix.Close(cfd)
+			return -1, fmt.Errorf("agenthome: %s: chmod: %w", rel, err)
+		}
+		if err := unix.Fchown(cfd, opts.UID, opts.GID); err != nil {
+			_ = unix.Close(cfd)
+			return -1, fmt.Errorf("agenthome: %s: chown: %w", rel, err)
+		}
+	}
+	return cfd, nil
+}
+
+// seedFile writes the regular source file s (fi is its Lstat) to name in
+// the home directory dstFd refers to, for SeedTree.
+func seedFile(src *os.Root, s string, fi os.FileInfo, dstFd int, name, rel string, opts SeedOptions, b *treeBudget, replaced *bool) (err error) {
+	var st unix.Stat_t
+	switch serr := unix.Fstatat(dstFd, name, &st, unix.AT_SYMLINK_NOFOLLOW); {
+	case errors.Is(serr, unix.ENOENT):
+	case serr != nil:
+		return fmt.Errorf("agenthome: %s: stat: %w", rel, serr)
+	case st.Mode&unix.S_IFMT == unix.S_IFLNK:
+		// Replaced by the rename below, which swaps the directory entry and
+		// never writes through the link.
+		*replaced = true
+	case st.Mode&unix.S_IFMT != unix.S_IFREG:
+		return &SeedConflictError{Rel: rel, Reason: "is not a regular file"}
+	}
+
+	in, err := src.Open(s)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+	if ist, err := in.Stat(); err != nil {
+		return err
+	} else if !ist.Mode().IsRegular() || !os.SameFile(fi, ist) {
+		return fmt.Errorf("agenthome: %s changed while being copied", rel)
+	}
+
+	tmp, err := tempName(name)
+	if err != nil {
+		return err
+	}
+	out, err := dirfd.CreateExclAt(dstFd, tmp, 0o600)
+	if err != nil {
+		return fmt.Errorf("agenthome: %s: create: %w", rel, err)
+	}
+	renamed := false
+	defer func() {
+		if !renamed {
+			_ = unix.Unlinkat(dstFd, tmp, 0)
+		}
+	}()
+	var r io.Reader = in
+	if rem := b.remainingBytes(); rem >= 0 {
+		r = io.LimitReader(in, rem+1)
+	}
+	n, err := io.Copy(out, r)
+	if err == nil {
+		err = b.addBytes(n)
+	}
+	if err == nil {
+		if cerr := unix.Fchown(int(out.Fd()), opts.UID, opts.GID); cerr != nil {
+			err = fmt.Errorf("agenthome: %s: chown: %w", rel, cerr)
+		}
+	}
+	if err == nil {
+		err = out.Chmod(seedFileMode(fi.Mode()))
+	}
+	if err == nil {
+		err = out.Sync()
+	}
+	if cerr := out.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	if err := dirfd.RenameAt(dstFd, tmp, name); err != nil {
+		return fmt.Errorf("agenthome: %s: rename: %w", rel, err)
+	}
+	renamed = true
+	return nil
+}
+
+// seedDirAfterMkdirHook, when set, runs in seedDir between its mkdirat of a
+// missing directory and the reopen. It is nil outside tests, which use it to
+// inject a race.
+var seedDirAfterMkdirHook func(dstFd int, name string)
+
+// hardLinked reports whether the file fi describes has more than one hard
+// link.
+func hardLinked(fi os.FileInfo) bool {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	return ok && st.Nlink > 1
 }
