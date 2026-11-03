@@ -262,7 +262,9 @@ func provisionCloneWithTokenRemote(t *testing.T, cloneURL, tokenRemote string) e
 	t.Setenv("SCION_CLONE_URL", cloneURL)
 	t.Setenv("SCION_CLONE_BRANCH", "main")
 	t.Setenv("SCION_WORKSPACE_MODE", "")
-	t.Setenv("SCION_PROVISION_STATE_DIR", "")
+	// The provisioning state directory beside the workspace, as the
+	// Kubernetes runtime mounts it: the shared modes require it.
+	t.Setenv(provisionStateDirEnv, testStateDir(t, wsDir))
 	t.Setenv("SCION_PROJECT_ID", "test-proj")
 	t.Setenv("SCION_SHARED_DIR_PATHS", "")
 	t.Setenv(provision.ChownBestEffortEnv, "1")
