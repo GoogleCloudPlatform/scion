@@ -359,6 +359,15 @@ func init() {
 			KoanfPaths: nil,
 			New:        func() any { return &AgentDelegationPolicySettings{} },
 		},
+		{
+			// chat_retention is durable via DB but has no settings.yaml
+			// representation; it is written through PUT
+			// /api/v1/admin/chat-retention. Absent DB row = retention off,
+			// no window. Seeding skips this section (KoanfPaths nil).
+			Name:       ChatRetentionSectionName,
+			KoanfPaths: nil,
+			New:        func() any { return &ChatRetentionSettings{} },
+		},
 	}
 
 	ensureIndexes()
@@ -550,6 +559,7 @@ func compileSchemas() {
 				"offload_threshold_runes":         map[string]interface{}{"type": "integer", "minimum": 0},
 				"attachment_delivery_max_bytes":   map[string]interface{}{"type": "integer", "minimum": 0},
 				"attachment_inbox_retention_days": map[string]interface{}{"type": "integer", "minimum": 1},
+				"failed_message_retention_days":   map[string]interface{}{"type": "integer", "minimum": 1},
 			},
 			"additionalProperties": false,
 		},
@@ -614,6 +624,9 @@ func compileSchemas() {
 		// agent_delegation_policy schema is hand-written -- runtime state
 		// with no $defs in settings-v1.schema.json.
 		AgentDelegationPolicySectionName: agentDelegationPolicySchema(),
+		// chat_retention schema is hand-written -- runtime state with no
+		// $defs in settings-v1.schema.json.
+		ChatRetentionSectionName: chatRetentionSchema(),
 		"artifacts": {
 			"type": "object",
 			"properties": map[string]interface{}{

@@ -1514,6 +1514,11 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			// lifecycle events.
 			persisting := bp.subscribeProjectUserMessages(agent.ProjectID)
 			recordLogged = persisting
+			// The persisting subscriber stores the row under the id and
+			// creation time already used for the receipt (message_id) and
+			// the published Timestamp.
+			structuredMsg.PersistMessageID = storeMsg.ID
+			structuredMsg.PersistCreatedAt = storeMsg.CreatedAt
 			err := bp.PublishUserMessage(ctx, agent.ProjectID, result.RecipientID, structuredMsg)
 			if errors.Is(err, eventbus.ErrReservedChannel) {
 				// Nothing was published or stored: the request named a
@@ -2199,10 +2204,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
 				_ = json.NewEncoder(w).Encode(MessageDeliveryResponse{
-					MessageID:  existing.ID,
-					Status:     "deduplicated",
-					Agent:      agent.Slug,
-					AgentPhase: agent.Phase,
+					MessageID:      existing.ID,
+					Status:         "deduplicated",
+					Agent:          agent.Slug,
+					AgentPhase:     agent.Phase,
+					ConversationID: existing.ConversationID,
 				})
 				return
 			}
@@ -2471,8 +2477,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// to "dispatched" (no new pending rows per delivery policy).
 	var persistedMsgID string
 	// persistedConversationID is the conversation the persisted message
-	// landed in; the response reports it to a project visitor only
-	// (visitorDeliveryConversation).
+	// landed in; the response reports it to every sender.
 	var persistedConversationID string
 	// artifactWarning reports artifact references not attached on the
 	// non-agent-sender path below (admitMessageArtifacts).
@@ -2979,6 +2984,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				AgentPhase:     agent.Phase,
 				MentionResults: mentionResults,
 				Deferred:       deferredNote,
+				ConversationID: dmResult.ConversationID,
 				// ptone/scion#3667: attachments the hub could not record.
 				AttachmentWarnings: dmResult.AttachmentWarnings,
 				ArtifactWarning:    dmResult.ArtifactWarning,
@@ -3002,6 +3008,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		// envelope rendered below tells the agent that a project visitor
 		// sent it.
 		structuredMsg.Metadata = stampVisitorSender(structuredMsg.Metadata, GetIdentityFromContext(ctx))
+		// A human sender's profile time zone travels with the message.
+		structuredMsg.Metadata = s.stampSenderTimezone(ctx, structuredMsg.Metadata, structuredMsg.Sender, structuredMsg.SenderID)
 
 		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 			s.messageLog.Error("Failed to persist message", "error", err)
@@ -3264,10 +3272,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		mentionResults = s.processMentions(ctx, req.Mentions, agent, structuredMsg, mentionParticipantGroupID, groupConversationThreadKey)
 	}
 
-	// A project visitor learns the conversation and DM key its message
-	// landed in, so it can read the DM; no other sender's response
-	// changes.
-	visitorConvID, visitorConvKey := visitorDeliveryConversation(GetIdentityFromContext(ctx), agent, persistedConversationID)
+	// Every sender learns the conversation its message landed in, so it
+	// can reply there. A project visitor also learns its DM key, which the
+	// visitor DM read routes take.
+	visitorConvKey := visitorDMKey(GetIdentityFromContext(ctx), agent)
 
 	if deferDelivery {
 		w.Header().Set("Content-Type", "application/json")
@@ -3280,7 +3288,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			MentionResults:  mentionResults,
 			Deferred:        deferredReason(agent),
 			ArtifactWarning: artifactWarning,
-			ConversationID:  visitorConvID,
+			ConversationID:  persistedConversationID,
 			ConversationKey: visitorConvKey,
 		})
 		return
@@ -3295,7 +3303,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		AgentPhase:      agent.Phase,
 		MentionResults:  mentionResults,
 		ArtifactWarning: artifactWarning,
-		ConversationID:  visitorConvID,
+		ConversationID:  persistedConversationID,
 		ConversationKey: visitorConvKey,
 	})
 }
@@ -3319,12 +3327,14 @@ type MessageDeliveryResponse struct {
 	// ArtifactWarning is set when artifact references the request named
 	// were not attached (ptone/scion#3222).
 	ArtifactWarning string `json:"artifact_warning,omitempty"`
-	// ConversationID and ConversationKey are set only for a project
-	// visitor sender (ptone/scion#4603): the conversation its message was
-	// persisted in, and the visitor's DM key with the agent
+	// ConversationID is the conversation the message was persisted in, so
+	// the sender can reply into it. Omitted only when the message was not
+	// recorded in a conversation.
+	ConversationID string `json:"conversation_id,omitempty"`
+	// ConversationKey is set only for a project visitor sender
+	// (ptone/scion#4603): the visitor's DM key with the agent
 	// (dm:agent:<agentId>:user:<visitorId>), which the visitor DM read
 	// routes take. Omitted for every other sender.
-	ConversationID  string `json:"conversation_id,omitempty"`
 	ConversationKey string `json:"conversation_key,omitempty"`
 }
 
@@ -3369,6 +3379,8 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 	// dispatched. Every `agentMsg := *msg` copy below aliases msg.Metadata's
 	// map, so stripping it once here covers all of them.
 	msg.Metadata = messaging.StripReservedMetadata(msg.Metadata)
+	// A human sender's profile time zone travels with every member's copy.
+	msg.Metadata = s.stampSenderTimezone(ctx, msg.Metadata, msg.Sender, msg.SenderID)
 
 	recipients, err := messages.ParseGroupRecipient(msg.Recipient)
 	if err != nil {
@@ -4111,6 +4123,8 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 	// map, so stripping it once here covers all of them. No offload here —
 	// broadcast rows have no ConversationID (design §10 P4 site 2).
 	msg.Metadata = messaging.StripReservedMetadata(msg.Metadata)
+	// A human sender's profile time zone travels with every copy.
+	msg.Metadata = s.stampSenderTimezone(ctx, msg.Metadata, msg.Sender, msg.SenderID)
 
 	for _, agent := range runningAgents {
 		agentMsg := *msg
@@ -4363,6 +4377,7 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 		// #2257 P2: strip on this copy too (U5(a) row), even though
 		// NewMention's own metadata never carries client input today.
 		mentionMsg.Metadata = messaging.StripReservedMetadata(mentionMsg.Metadata)
+		mentionMsg.Metadata = s.stampSenderTimezone(ctx, mentionMsg.Metadata, mentionMsg.Sender, mentionMsg.SenderID)
 
 		// Migration gate (design agent-reincarnate §3.7, R3 p2a-r1 review):
 		// a mentioned agent is a recipient in its own right, independent of

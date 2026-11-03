@@ -120,7 +120,7 @@ func capKeyring(t *testing.T, active, emit string, legacyReads []string, entries
 func allowVersionedRings(t *testing.T) {
 	t.Helper()
 	orig := keyringReleaseCheck
-	keyringReleaseCheck = func(*keyring.Keyring) error { return nil }
+	keyringReleaseCheck = func(*keyring.Keyring, *ServerConfig) error { return nil }
 	t.Cleanup(func() { keyringReleaseCheck = orig })
 }
 
@@ -234,10 +234,10 @@ func hmacB64(key []byte, msg string) string {
 // Seam, configuration and golden bytes
 // ---------------------------------------------------------------------------
 
-// TestKeyringReleaseCheck_DefaultIsCheckSessionPilot: production refuses
+// TestKeyringReleaseCheck_DefaultIsReleaseKeyringCheck: production refuses
 // what this release does not support.
-func TestKeyringReleaseCheck_DefaultIsCheckSessionPilot(t *testing.T) {
-	assert.Equal(t, reflect.ValueOf((*keyring.Keyring).CheckSessionPilot).Pointer(), reflect.ValueOf(keyringReleaseCheck).Pointer())
+func TestKeyringReleaseCheck_DefaultIsReleaseKeyringCheck(t *testing.T) {
+	assert.Equal(t, reflect.ValueOf(releaseKeyringCheck).Pointer(), reflect.ValueOf(keyringReleaseCheck).Pointer())
 }
 
 // TestValidateKeyringConfig_EmitLegacyActiveMustBeLegacyReader (A1): with

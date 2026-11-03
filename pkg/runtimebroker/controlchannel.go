@@ -23,10 +23,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
@@ -173,7 +176,18 @@ type ControlChannelClient struct {
 	connected   bool
 	sessionID   string
 	connectedAt time.Time
-	mu          sync.RWMutex
+	// disconnectedSince is when the channel last stopped being connected:
+	// the client's creation, or the last drop. It is zero while connected.
+	// Guarded by mu.
+	disconnectedSince time.Time
+	// now is the clock of disconnectedSince and CommandPathState. It is nil
+	// in production (time.Now); tests set it.
+	now func() time.Time
+	// transportRefusal is the hub's transport refusal of the last dial, or
+	// nil when the last dial was not refused that way (cleared on a
+	// successful handshake). Guarded by mu.
+	transportRefusal *hubRefusalError
+	mu               sync.RWMutex
 
 	// Lifecycle
 	ctx    context.Context
@@ -309,11 +323,18 @@ func NewControlChannelClient(config ControlChannelConfig, handlers http.Handler,
 		streams:        make(map[string]*StreamHandler),
 		dispatchSem:    make(chan struct{}, defaultMaxConcurrentDispatches),
 		cancels:        make(map[string]*requestCancel),
+		// Not connected yet: the command path grace starts now.
+		disconnectedSince: time.Now(),
 	}
 }
 
 // Connect establishes the WebSocket connection to the Hub.
 func (c *ControlChannelClient) Connect(ctx context.Context) error {
+	// A hub URL the transport rule refuses never becomes valid by retrying,
+	// so it ends Connect at once instead of entering the reconnect loop.
+	if err := config.CheckHubTransport(c.config.HubEndpoint); err != nil {
+		return fmt.Errorf("refusing to open the control channel: %w", err)
+	}
 	c.mu.Lock()
 	if c.connected {
 		c.mu.Unlock()
@@ -347,7 +368,13 @@ func (c *ControlChannelClient) connectWithBackoff() error {
 				c.log.Debug("Control channel connect ended: client closed or context cancelled", "error", err)
 				return c.ctx.Err()
 			}
-			c.log.Error("Control channel connection failed", "error", err, "retry_in", backoff)
+			var refusal *hubRefusalError
+			if errors.As(err, &refusal) && refusal.transportPolicy() {
+				c.log.Error(refusal.logMessage("control channel"),
+					"reason", refusal.Reason, "setting", refusal.Setting, "status", refusal.Status, "retry_in", backoff)
+			} else {
+				c.log.Error("Control channel connection failed", "error", err, "retry_in", backoff)
+			}
 
 			select {
 			case <-c.ctx.Done():
@@ -394,8 +421,9 @@ func (c *ControlChannelClient) doConnect() error {
 	// Connect. gorilla/websocket's Dialer returns a non-nil *http.Response on
 	// handshake failure (e.g. 401/403), and the application is responsible
 	// for closing resp.Body in that case — otherwise the transport holds the
-	// connection open and leaks the file descriptor. Drain-and-close before
-	// returning the error.
+	// connection open and leaks the file descriptor. Read the first bytes of
+	// the body (the hub's JSON error, parsed into a *hubRefusalError), drain
+	// the rest and close it before returning the error.
 	//
 	// Use DialWithConfig so the broker's read limit matches the hub's write
 	// limit. The default 64KB was too small for RemoteCreateAgentRequest
@@ -406,8 +434,14 @@ func (c *ControlChannelClient) doConnect() error {
 	conn, resp, err := wsprotocol.DialWithConfig(c.ctx, wsURL, headers, connCfg)
 	if err != nil {
 		if resp != nil {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, hubRefusalBodyLimit))
 			_, _ = io.Copy(io.Discard, resp.Body)
 			_ = resp.Body.Close()
+			refusal := parseHubRefusal(resp.StatusCode, body)
+			c.setTransportRefusal(refusal)
+			if refusal != nil {
+				return fmt.Errorf("websocket dial failed (status %d): %w: %w", resp.StatusCode, err, refusal)
+			}
 			return fmt.Errorf("websocket dial failed (status %d): %w", resp.StatusCode, err)
 		}
 		return fmt.Errorf("websocket dial failed: %w", err)
@@ -449,6 +483,8 @@ func (c *ControlChannelClient) doConnect() error {
 	c.mu.Lock()
 	c.connected = true
 	c.connectedAt = time.Now()
+	c.disconnectedSince = time.Time{}
+	c.transportRefusal = nil
 	cb := c.config.OnConnectionStateChange
 	c.mu.Unlock()
 	if cb != nil {
@@ -459,22 +495,83 @@ func (c *ControlChannelClient) doConnect() error {
 	return nil
 }
 
+// setTransportRefusal records refusal as the last dial's transport refusal
+// when it is one, and clears the record otherwise.
+func (c *ControlChannelClient) setTransportRefusal(refusal *hubRefusalError) {
+	if !refusal.transportPolicy() {
+		refusal = nil
+	}
+	c.mu.Lock()
+	c.transportRefusal = refusal
+	c.mu.Unlock()
+}
+
+// commandPathGrace is how long a control channel may be not connected
+// before CommandPathState reports it unhealthy: the first dial plus the
+// longest reconnect backoff (ReconnectMax, 60s), so a broker that is
+// starting or reconnecting normally is not reported as failing.
+const commandPathGrace = 90 * time.Second
+
+// clock returns the current time from c.now, or time.Now.
+func (c *ControlChannelClient) clock() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
+}
+
+// CommandPathState reports whether the hub can send commands to this broker
+// over the control channel, as a fixed broker health value:
+//
+//   - api.BrokerHealthHealthy: connected (the handshake completed);
+//   - api.BrokerHealthUnhealthy: the last dial was refused by the hub's
+//     transport policy, or the channel has not been connected for longer
+//     than commandPathGrace;
+//   - api.BrokerHealthUnknown: not connected, within the grace (starting
+//     or reconnecting).
+func (c *ControlChannelClient) CommandPathState() string {
+	c.mu.RLock()
+	connected, refused, since := c.connected, c.transportRefusal != nil, c.disconnectedSince
+	c.mu.RUnlock()
+	switch {
+	case connected:
+		return api.BrokerHealthHealthy
+	case refused:
+		return api.BrokerHealthUnhealthy
+	case !since.IsZero() && c.clock().Sub(since) > commandPathGrace:
+		return api.BrokerHealthUnhealthy
+	default:
+		return api.BrokerHealthUnknown
+	}
+}
+
+// TransportRefused reports whether the last dial was refused by the hub's
+// transport policy (until a later dial completes the handshake or is
+// refused otherwise).
+func (c *ControlChannelClient) TransportRefused() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.transportRefusal != nil
+}
+
 // buildWebSocketURL constructs the WebSocket URL from the Hub endpoint.
+// The endpoint must pass config.CheckHubTransport: the channel carries
+// agent secrets, so a plaintext (ws) URL is built only for a loopback hub,
+// and any other scheme is refused instead of being mapped to ws.
 func (c *ControlChannelClient) buildWebSocketURL() (string, error) {
+	if err := config.CheckHubTransport(c.config.HubEndpoint); err != nil {
+		return "", fmt.Errorf("refusing to open the control channel: %w", err)
+	}
 	u, err := url.Parse(c.config.HubEndpoint)
 	if err != nil {
 		return "", err
 	}
 
 	// Convert http(s) to ws(s)
-	switch u.Scheme {
-	case "https":
+	switch strings.ToLower(u.Scheme) {
+	case "https", "wss":
 		u.Scheme = "wss"
-	case "http":
-		u.Scheme = "ws"
-	case "wss", "ws":
-		// Already WebSocket scheme
-	default:
+	default: // http or ws on a loopback host (CheckHubTransport)
 		u.Scheme = "ws"
 	}
 
@@ -1267,6 +1364,9 @@ func (c *ControlChannelClient) CloseStream(streamID, reason string, code int) er
 // markDisconnected updates the connection state.
 func (c *ControlChannelClient) markDisconnected() {
 	c.mu.Lock()
+	if c.connected {
+		c.disconnectedSince = c.clock()
+	}
 	c.connected = false
 	cb := c.config.OnConnectionStateChange
 	c.mu.Unlock()

@@ -17,10 +17,15 @@
 package hub
 
 import (
+	"context"
+	"errors"
+	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -314,4 +319,222 @@ func TestFederationPrincipalCheck_ServiceAccountUserTokenRefused(t *testing.T) {
 		_, ok := identity.(*FederatedUserIdentity)
 		assert.True(t, ok, "identity = %T, want *FederatedUserIdentity", identity)
 	})
+}
+
+// googleUserIssuerFixture is the Google issuer (issuer_type user, with an
+// expected_audience) trusted through a real, validated
+// FederationAuthenticator whose JWKS is a test server, so credentials it
+// signs verify on the federation-token path. cfg carries the same
+// authenticator for UnifiedAuthMiddleware.
+type googleUserIssuerFixture struct {
+	auth *FederationAuthenticator
+	cfg  AuthConfig
+	sign func(t *testing.T, claims interface{}) string
+}
+
+// newGoogleUserIssuerFixture builds the Google user issuer with the given
+// allowed_domains and allowed_emails. validator and resolver serve the
+// external-bearer path of cfg and may be nil when only the federation-token
+// path is exercised.
+func newGoogleUserIssuerFixture(t *testing.T, allowedDomains, allowedEmails []string, validator GoogleCredentialValidator, resolver *GoogleIdentityResolver) *googleUserIssuerFixture {
+	t.Helper()
+	key, jwks, kid := setupFederationTestServer(t)
+	auth := newTestAuthenticatorWithConfig(t, config.FederationConfig{
+		Enabled: true,
+		TrustedIssuers: []config.TrustedIssuerConfig{{
+			IssuerURL:        googleIssuerHTTPS,
+			IssuerType:       string(IssuerTypeUser),
+			JWKSURL:          jwks.URL,
+			ExpectedAudience: externalBearerTestAudience,
+			AllowedDomains:   allowedDomains,
+			AllowedEmails:    allowedEmails,
+		}},
+	}, "https://hub.example.com")
+	userTokenSvc, err := NewUserTokenService(UserTokenConfig{})
+	require.NoError(t, err)
+	cfg := AuthConfig{
+		Mode:           "production",
+		UserTokenSvc:   userTokenSvc,
+		FederationAuth: federationAuthPointer(auth),
+		Logger:         slog.Default(),
+	}
+	if validator != nil {
+		cfg.GoogleValidator = validator
+		cfg.GoogleResolver = resolver
+	}
+	return &googleUserIssuerFixture{
+		auth: auth,
+		cfg:  cfg,
+		sign: func(t *testing.T, claims interface{}) string { return signGenericToken(t, key, kid, claims) },
+	}
+}
+
+// token returns a Google user credential for subject and email.
+func (g *googleUserIssuerFixture) token(t *testing.T, subject, email string) string {
+	t.Helper()
+	now := time.Now()
+	return g.sign(t, map[string]interface{}{
+		"iss":            googleIssuerHTTPS,
+		"sub":            subject,
+		"aud":            []string{externalBearerTestAudience},
+		"iat":            now.Add(-time.Minute).Unix(),
+		"exp":            now.Add(10 * time.Minute).Unix(),
+		"email":          email,
+		"email_verified": true,
+	})
+}
+
+// through sends token in the federation-token header through
+// UnifiedAuthMiddleware and reports whether the handler ran.
+func (g *googleUserIssuerFixture) through(t *testing.T, token string) (*httptest.ResponseRecorder, bool) {
+	t.Helper()
+	result := &probeResult{}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+	req.Header.Set(FederationTokenHeader, token)
+	rec := httptest.NewRecorder()
+	UnifiedAuthMiddleware(g.cfg)(probeHandler(result)).ServeHTTP(rec, req)
+	return rec, result.reached
+}
+
+// On the federation-token path, the issuer's allowed_domains applies to a
+// user identity as on the external bearer path and to hub user access
+// credentials: an empty list adds no constraint, the domain match is exact
+// and case-insensitive with no subdomain match, an email whose domain
+// cannot be parsed is refused, and allowed_emails applies unchanged
+// alongside it. The refusal cause is asserted on Authenticate; the
+// middleware answers every refusal with the same 401.
+func TestFederationPrincipalCheck_UserIssuerAllowedDomains(t *testing.T) {
+	const (
+		causeDomains = "not in allowed_domains"
+		causeEmails  = "not in allowed_emails"
+	)
+	for _, tc := range []struct {
+		name    string
+		domains []string
+		emails  []string
+		email   string
+		cause   string // "" means admitted
+	}{
+		{name: "unlisted domain refused", domains: []string{"corp.com"}, email: "user@elsewhere.com", cause: causeDomains},
+		{name: "listed domain admitted", domains: []string{"corp.com"}, email: "user@corp.com"},
+		{name: "second listed domain admitted", domains: []string{"corp.com", "partner.com"}, email: "user@partner.com"},
+		{name: "mixed-case list entry admitted", domains: []string{"Corp.COM"}, email: "user@corp.com"},
+		{name: "mixed-case email domain admitted", domains: []string{"corp.com"}, email: "user@CORP.com"},
+		{name: "subdomain of listed domain refused", domains: []string{"corp.com"}, email: "user@sub.corp.com", cause: causeDomains},
+		{name: "suffix look-alike refused", domains: []string{"corp.com"}, email: "user@xcorp.com", cause: causeDomains},
+		{name: "empty list adds no constraint", email: "user@anything-goes.com"},
+		{name: "two @ refused", domains: []string{"corp.com"}, email: "user@x@corp.com", cause: causeDomains},
+		{name: "trailing dot refused", domains: []string{"corp.com"}, email: "user@corp.com.", cause: causeDomains},
+		{name: "no @ refused", domains: []string{"corp.com"}, email: "corp.com", cause: causeDomains},
+		{name: "empty email refused", domains: []string{"corp.com"}, email: "", cause: causeDomains},
+		{name: "both lists: in both admitted", domains: []string{"corp.com"}, emails: []string{"*@corp.com", "*@elsewhere.com"}, email: "alice@corp.com"},
+		{name: "both lists: emails pass, domain unlisted refused", domains: []string{"corp.com"}, emails: []string{"*@corp.com", "*@elsewhere.com"}, email: "bob@elsewhere.com", cause: causeDomains},
+		{name: "both lists: listed domain, email unlisted refused", domains: []string{"corp.com"}, emails: []string{"alice@corp.com"}, email: "bob@corp.com", cause: causeEmails},
+		{name: "emails only: unchanged", emails: []string{"alice@elsewhere.com"}, email: "alice@elsewhere.com"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newGoogleUserIssuerFixture(t, tc.domains, tc.emails, nil, nil)
+			token := g.token(t, "google-sub", tc.email)
+
+			identity, err := g.auth.Authenticate(token)
+			rec, reached := g.through(t, token)
+			if tc.cause != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.cause)
+				assert.Nil(t, identity)
+				assert.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+				assert.False(t, reached, "the handler never runs")
+				return
+			}
+			require.NoError(t, err)
+			fu, ok := identity.(*FederatedUserIdentity)
+			require.True(t, ok, "identity = %T, want *FederatedUserIdentity", identity)
+			assert.Equal(t, tc.email, fu.Email())
+			assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			assert.True(t, reached)
+		})
+	}
+}
+
+// Parity: for the same issuer allowed_domains, the external bearer path
+// (Google ID token), the hub user access credential path (peer hub issuer
+// with accept_user_tokens) and the federation-token path (Google user
+// issuer) admit and refuse the same user emails. Each path's refusal is
+// also checked for its allowed_domains cause, since the middleware answers
+// every refusal with the same 401.
+func TestFederationPrincipalCheck_AllowedDomainsParity(t *testing.T) {
+	const causeDomains = "not in allowed_domains"
+	f := newPeerTokFixture(t, nil)
+	for _, tc := range []struct {
+		name     string
+		domains  []string
+		email    string
+		admitted bool
+	}{
+		{"listed domain", []string{"corp.com"}, "user@corp.com", true},
+		{"unlisted domain", []string{"corp.com"}, "user@elsewhere.com", false},
+		{"mixed-case list entry", []string{"Corp.COM"}, "user@corp.com", true},
+		{"subdomain of listed domain", []string{"corp.com"}, "user@sub.corp.com", false},
+		{"empty list", nil, "user@anything-goes.com", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			domain := tc.email[len("user@"):]
+
+			// External bearer: a Google ID token in the Authorization header.
+			kp := newGCVTestKeyPair("parity-kid")
+			endpoints := newTestEndpoints(
+				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write(gcvJWKSJSON(kp))
+				}),
+				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+			)
+			defer endpoints.close()
+			resolver := NewGoogleIdentityResolver(newFakeUserStore(), newMemExtIDStore(), alwaysAuthorized, nil, slog.Default())
+			g := newGoogleUserIssuerFixture(t, tc.domains, nil, newTestValidator(endpoints), resolver)
+			claims := validIDTokenClaims()
+			claims["aud"] = externalBearerTestAudience
+			claims["email"] = tc.email
+			claims["hd"] = domain
+			idToken := signIDToken(kp, claims)
+			w, result := doExternalBearerRequest(g.cfg, idToken)
+			externalBearer := w.Code == http.StatusOK && result.reached
+
+			// Federation token: a Google user credential in the
+			// federation-token header, same issuer configuration.
+			fedToken := g.token(t, "google-sub", tc.email)
+			rec, reached := g.through(t, fedToken)
+			federationToken := rec.Code == http.StatusOK && reached
+
+			// Hub user token: a peer hub user access credential, the same
+			// allowed_domains on the peer issuer.
+			f.configure(t, func(c *config.TrustedIssuerConfig) { c.AllowedDomains = tc.domains })
+			hubToken := f.signAsPeer(t, peerUserClaims("sub-parity", tc.email))
+			_, _, hubRec := f.through(t, hubToken)
+			hubUserToken := hubRec.Code == http.StatusOK
+
+			assert.Equal(t, tc.admitted, externalBearer, "external bearer: %s", w.Body.String())
+			assert.Equal(t, tc.admitted, hubUserToken, "hub user token: %s", hubRec.Body.String())
+			assert.Equal(t, tc.admitted, federationToken, "federation token: %s", rec.Body.String())
+			if tc.admitted {
+				return
+			}
+
+			// The refusal cause on each path is allowed_domains.
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+			_, _, ebErr := authenticateExternalBearer(context.Background(), req, idToken, g.cfg)
+			assert.True(t, errors.Is(ebErr, errDomainNotAllowed), "external bearer cause: %v", ebErr)
+
+			_, fedErr := g.auth.Authenticate(fedToken)
+			require.Error(t, fedErr, "federation token")
+			assert.Contains(t, fedErr.Error(), causeDomains, "federation token cause")
+
+			hubAuth := f.srv.federationAuth.Load()
+			require.NotNil(t, hubAuth)
+			_, hubErr := hubAuth.Authenticate(hubToken, FederationAuthOptions{AcceptHubUserTokens: true})
+			require.Error(t, hubErr, "hub user token")
+			assert.Contains(t, hubErr.Error(), causeDomains, "hub user token cause")
+		})
+	}
 }

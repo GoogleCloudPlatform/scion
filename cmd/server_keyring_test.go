@@ -452,3 +452,30 @@ func TestBuildHubServerConfig_KeyringConfigured(t *testing.T) {
 	require.NotNil(t, hubCfg.Keyring)
 	assert.Equal(t, "gen1", hubCfg.Keyring.Signing().ActiveID())
 }
+
+// TestLoadServerKeyring_ReleaseCheckGoesThroughTheHubSeam: the server's
+// load of the keyring file applies the hub's release check
+// (hub.CheckKeyringRelease), so lifting the release limits in that one
+// place also admits the file here. A ring without the "legacy" entry is
+// refused under the production check and loads with the check relaxed.
+func TestLoadServerKeyring_ReleaseCheckGoesThroughTheHubSeam(t *testing.T) {
+	path := writeCmdKeyring(t, func(doc map[string]any) {
+		s := doc["signing"].(map[string]any)
+		s["keys"] = []any{map[string]any{"id": "gen1", "secret": cmdKRGen1Secret, "sign_until": nil, "verify_until": nil}}
+		s["legacy_read_ids"] = []any{"gen1"}
+	})
+
+	isolateKeyring(t)
+	err := loadServerKeyring(&config.GlobalConfig{KeyringFile: path})
+	require.Error(t, err, "the production release check refuses a ring without the legacy entry")
+	assert.Contains(t, err.Error(), `signing key with id "legacy"`)
+	assertNoCmdKRSecret(t, err.Error())
+	assert.Nil(t, serverKeyringFromFile())
+
+	isolateKeyring(t)
+	t.Cleanup(hub.RelaxKeyringReleaseForTest())
+	require.NoError(t, loadServerKeyring(&config.GlobalConfig{KeyringFile: path}))
+	require.NotNil(t, serverKeyringFromFile())
+	_, ok := serverKeyringFromFile().Signing().LegacySecret()
+	assert.False(t, ok)
+}

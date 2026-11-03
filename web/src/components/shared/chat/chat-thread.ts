@@ -65,7 +65,7 @@ import {
   type StarItem,
 } from '../../../client/chat-stars.js';
 import type { ChatMessageFilter } from '../../../client/chat-routes.js';
-import { isFeatureEnabled } from '../../../utils/feature-flags.js';
+import { CHAT_RETENTION_FLAG, isFeatureEnabled } from '../../../utils/feature-flags.js';
 import {
   ARTIFACTS_FLAG,
   ARTIFACTS_METADATA_KEY,
@@ -91,10 +91,17 @@ import {
   type WakeOffer,
 } from './chat-wake.js';
 import './chat-message.js';
+import type { ReplyPreviewInfo } from './chat-message.js';
 import './chat-system-line.js';
 import './chat-composer.js';
 import './chat-interagent-marker.js';
-import { formatChatDate, renderDateDivider, chatDateDividerStyles } from './chat-date-divider.js';
+import {
+  formatChatDate,
+  renderDateDivider,
+  renderRetentionDivider,
+  chatDateDividerStyles,
+} from './chat-date-divider.js';
+import { hasMessagesAfter, unreadDividerAfter } from './chat-unread-divider.js';
 import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
 import { effectiveTimeZone, formatInstantWithZone, toWallClockInput } from '../../../utils/time.js';
 import '../code-editor.js';
@@ -181,7 +188,15 @@ interface HistoryWindow {
     string,
     { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
   >;
-  replyPreviews?: Record<string, { messageId: string; senderName: string; content: string }>;
+  replyPreviews?: Record<string, ReplyPreviewInfo>;
+  /** On the oldest page only: where the retention policy cut the history. */
+  retention?: HistoryRetention;
+}
+
+/** A history page's retention marker (hub.chat_retention). */
+interface HistoryRetention {
+  /** RFC 3339 instant; messages before it are removed by the policy. */
+  purgedBefore?: string;
 }
 
 /** Where the full conversation opens when the starred-only center is left. */
@@ -770,6 +785,13 @@ export class ScionChatThread extends LitElement {
   @state() private sendErrorTruncated = false;
   @state() private loadingOlder = false;
   @state() private hasOlderMessages = true;
+
+  /**
+   * The retention cutoff of the oldest history page (its
+   * `retention.purgedBefore`), or null. Rendered as a divider at the top of
+   * the thread once no older page remains.
+   */
+  @state() private retentionPurgedBefore: string | null = null;
   @state() private loaded = false;
 
   private messageRowsVersion = 0;
@@ -972,10 +994,7 @@ export class ScionChatThread extends LitElement {
   >();
 
   /** Reply previews keyed by reply-to message ID. */
-  private v2ReplyPreviewMap = new Map<
-    string,
-    { messageId: string; senderName: string; content: string }
-  >();
+  private v2ReplyPreviewMap = new Map<string, ReplyPreviewInfo>();
 
   /** Bound listener for v2 SSE message-edited events. */
   private _v2EditHandler = this.handleV2MessageEdited.bind(this);
@@ -1954,6 +1973,7 @@ export class ScionChatThread extends LitElement {
     this.viewingAroundMessage = false;
     this.lastKnownTimestamp = null;
     this.hasOlderMessages = true;
+    this.retentionPurgedBefore = null;
     this.loaded = false;
     this.error = null;
     this.sendError = null;
@@ -2560,7 +2580,8 @@ export class ScionChatThread extends LitElement {
           string,
           { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
         >;
-        replyPreviews?: Record<string, { messageId: string; senderName: string; content: string }>;
+        replyPreviews?: Record<string, ReplyPreviewInfo>;
+        retention?: HistoryRetention;
         canPost?: boolean;
       };
 
@@ -2610,6 +2631,10 @@ export class ScionChatThread extends LitElement {
         if (data?.nextCursor) {
           this.nextCursor = data.nextCursor;
         }
+      }
+      if (!data?.nextCursor) {
+        // The oldest page: it alone carries the retention marker.
+        this.retentionPurgedBefore = data?.retention?.purgedBefore || null;
       }
 
       this.mergeMessages(items);
@@ -3047,7 +3072,7 @@ export class ScionChatThread extends LitElement {
         string,
         { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
       >;
-      replyPreviews?: Record<string, { messageId: string; senderName: string; content: string }>;
+      replyPreviews?: Record<string, ReplyPreviewInfo>;
     };
     // See fetchHistoryV2: re-checked once the body has been read.
     if (currentId !== this.fetchId) return;
@@ -3087,6 +3112,19 @@ export class ScionChatThread extends LitElement {
   }
 
   /**
+   * The index of the message the "New messages" divider follows, -1 for
+   * the top of the thread (the watermark was purged by retention), or
+   * null for none.
+   */
+  private unreadDividerIndex(): number | null {
+    return unreadDividerAfter(
+      this.messages.map((m) => m.id),
+      this.lastReadMessageId,
+      this.retentionPurgedBefore !== null
+    );
+  }
+
+  /**
    * Fetch the current user's read watermark for this conversation.
    * Used to position the unread divider on thread open.
    */
@@ -3105,9 +3143,9 @@ export class ScionChatThread extends LitElement {
       if (currentId !== this.fetchId) return;
       if (data?.lastReadMessageId) {
         this.lastReadMessageId = data.lastReadMessageId;
-        // Show divider if there are messages after the watermark.
-        const idx = this.messages.findIndex((m) => m.id === this.lastReadMessageId);
-        if (idx >= 0 && idx < this.messages.length - 1) {
+        // Show divider if there are messages after the watermark (all of
+        // them when retention purged the watermark).
+        if (hasMessagesAfter(this.unreadDividerIndex(), this.messages.length)) {
           this.showUnreadDivider = true;
         }
       }
@@ -4524,6 +4562,7 @@ export class ScionChatThread extends LitElement {
       this.v2ReplyPreviewMap.clear();
       this.nextCursor = null;
       this.hasOlderMessages = true;
+      this.retentionPurgedBefore = null;
       this.pinnedToBottom = true;
 
       try {
@@ -4928,6 +4967,7 @@ export class ScionChatThread extends LitElement {
 
       this.nextCursor = data.nextCursor || null;
       this.hasOlderMessages = this.nextCursor !== null;
+      this.retentionPurgedBefore = this.nextCursor ? null : data.retention?.purgedBefore || null;
       this.mergeMessages(items);
       this.afterHistoryPage(items);
       this.recordRecentFilesForHistory(items, recentFilesGeneration);
@@ -7066,6 +7106,7 @@ export class ScionChatThread extends LitElement {
     // markers. Only show the empty state when there is nothing at all to render.
     if (this.messages.length === 0 && !this.hasInteragentMessages) {
       return html`
+        ${this.renderRetentionNotice()}
         <div class="state-msg">
           <sl-icon name="chat-dots"></sl-icon>
           <span>No messages yet. Start a conversation!</span>
@@ -7090,6 +7131,7 @@ export class ScionChatThread extends LitElement {
           ${this.loadingOlder
             ? html`<div class="loading-older"><sl-spinner></sl-spinner></div>`
             : nothing}
+          ${this.renderRetentionNotice()}
           ${guard([this.messageRowsVersion, this.seenExpired], () => this.renderMessages())}
           ${
             // On a phone or tablet the typing indicator is the last item in
@@ -7115,6 +7157,19 @@ export class ScionChatThread extends LitElement {
 
   private get seenExpired(): boolean {
     return this.peerReadAt > 0 && Date.now() - this.peerReadAt >= SEEN_VISIBLE_MS;
+  }
+
+  /**
+   * The divider at the top of the thread saying where the hub's retention
+   * policy cut its history: shown once the oldest page (the only one that
+   * carries the marker) is loaded, outside the starred-only center, with
+   * hub.chat_retention on.
+   */
+  private renderRetentionNotice() {
+    if (!this.retentionPurgedBefore || this.filtered || !isFeatureEnabled(CHAT_RETENTION_FLAG)) {
+      return nothing;
+    }
+    return renderRetentionDivider(this.retentionPurgedBefore);
   }
 
   private renderMessages() {
@@ -7143,9 +7198,10 @@ export class ScionChatThread extends LitElement {
     // Unread divider: find the position of the last-read message so we can
     // insert the divider after it.
     let unreadDividerInserted = false;
-    let lastReadIdx = -1;
+    // null: no divider; -1: before the first message.
+    let lastReadIdx: number | null = null;
     if (this.showUnreadDivider && this.lastReadMessageId) {
-      lastReadIdx = this.messages.findIndex((m) => m.id === this.lastReadMessageId);
+      lastReadIdx = this.unreadDividerIndex();
     }
 
     // Inter-agent messages are dated items like any other row: a run of
@@ -7223,7 +7279,7 @@ export class ScionChatThread extends LitElement {
       }
 
       // Unread divider: insert between the last-read message and the next one.
-      if (!unreadDividerInserted && lastReadIdx >= 0 && mi > lastReadIdx) {
+      if (!unreadDividerInserted && lastReadIdx !== null && mi > lastReadIdx) {
         unreadDividerInserted = true;
         rows.push({
           key: 'unread',

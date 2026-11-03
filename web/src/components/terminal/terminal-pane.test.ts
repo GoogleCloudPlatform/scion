@@ -3,6 +3,7 @@ import type { ScionTerminalPane } from './terminal-pane.js';
 import { TerminalSessionRegistry } from '../../client/terminal-sessions.js';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
 import { getPublicSettings, invalidatePublicSettings } from '../../client/server-feature-flags.js';
+import { TERMINAL_PANE_DIALOG_OPEN_EVENT } from '../../client/terminal-workspace-events.js';
 
 /**
  * The automatic reconnect after a 4503 close waits a full-jitter delay;
@@ -1398,6 +1399,94 @@ describe('Capture Auth scope dialog (design ptone/scion#2291 §7)', () => {
     );
     expect(radio('project')?.hasAttribute('disabled')).toBe(true); // restricted
     expect(radio('user')?.hasAttribute('disabled')).toBe(false);
+  });
+
+  // ptone/scion#2612: both dialogs render already open and fire no sl-show,
+  // so the pane announces each one for the workspace's palette to close.
+  describe('pane dialog open event', () => {
+    /** Records each event that reaches the document, with whether `dialog` was rendered by then. */
+    function recordDialogOpens(dialog: () => HTMLElement | null): {
+      events: Event[];
+      rendered: boolean[];
+      stop: () => void;
+    } {
+      const events: Event[] = [];
+      const rendered: boolean[] = [];
+      const listener = (e: Event): void => {
+        events.push(e);
+        rendered.push(dialog() !== null);
+      };
+      document.addEventListener(TERMINAL_PANE_DIALOG_OPEN_EVENT, listener);
+      return {
+        events,
+        rendered,
+        stop: () => document.removeEventListener(TERMINAL_PANE_DIALOG_OPEN_EVENT, listener),
+      };
+    }
+
+    function conflictDialog(): HTMLElement | null {
+      return (
+        page.shadowRoot?.querySelector<HTMLElement>('sl-dialog[label*="already exist"]') ?? null
+      );
+    }
+
+    it('the scope dialog dispatches one bubbling, composed event per open, after it renders', async () => {
+      await makeCaptureEligible();
+      fetcher.mockImplementation((url) => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+        if (path.includes('/api/v1/settings/public')) {
+          return Promise.resolve(json({ agentSecretsUserScopeOnly: false }));
+        }
+        return Promise.resolve(json(noAuthAgent));
+      });
+      const record = recordDialogOpens(scopeDialog);
+      try {
+        await openDialog();
+        // Re-renders of the open dialog announce nothing new.
+        (page as unknown as { captureAuthSelectedScope: string }).captureAuthSelectedScope = 'user';
+        await page.updateComplete;
+        expect(record.events).toHaveLength(1);
+        expect(record.events[0].target).toBe(page);
+        expect(record.events[0].bubbles).toBe(true);
+        expect(record.events[0].composed).toBe(true);
+        expect(record.rendered).toEqual([true]);
+
+        (page as unknown as { captureAuthScopeDialogOpen: boolean }).captureAuthScopeDialogOpen =
+          false;
+        await page.updateComplete;
+        expect(record.events).toHaveLength(1);
+        await openDialog();
+        expect(record.events).toHaveLength(2);
+      } finally {
+        record.stop();
+      }
+    });
+
+    it('the secret-conflict dialog dispatches the event when the capture response opens it', async () => {
+      await makeCaptureEligible();
+      fetcher.mockImplementation((url) => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+        if (path.includes('/api/v1/settings/public')) {
+          return Promise.resolve(json({ agentSecretsUserScopeOnly: false }));
+        }
+        if (path.includes('/exec')) {
+          return Promise.resolve(json({ output: 'secret "API_KEY" already exists', exitCode: 1 }));
+        }
+        return Promise.resolve(json(noAuthAgent));
+      });
+      await openDialog();
+      const record = recordDialogOpens(conflictDialog);
+      try {
+        clickCapture();
+        await vi.waitFor(() => expect(conflictDialog()).not.toBeNull());
+        await page.updateComplete;
+
+        expect(record.events).toHaveLength(1);
+        expect(record.rendered).toEqual([true]);
+      } finally {
+        record.stop();
+      }
+    });
   });
 });
 

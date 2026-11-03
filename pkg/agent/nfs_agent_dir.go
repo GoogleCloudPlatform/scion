@@ -27,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -87,14 +88,39 @@ func nfsOwnAgentDirSelection(runtimeName string, ws *config.V1WorkspaceStorageCo
 // agent directory's lock. A variable so tests can shorten it.
 var nfsAgentDirLockWait = 30 * time.Second
 
+// storageAuditLoggerKey carries the logger storage deletions are audited
+// to (WithStorageAuditLogger).
+type storageAuditLoggerKey struct{}
+
+// WithStorageAuditLogger returns ctx with logger as the log the agent's
+// storage removals started under ctx are audited to, including those that
+// finish in the background (the purge of a moved-aside workspace). The
+// broker passes its agent lifecycle log.
+func WithStorageAuditLogger(ctx context.Context, logger *slog.Logger) context.Context {
+	return context.WithValue(ctx, storageAuditLoggerKey{}, logger)
+}
+
+// storageAuditLogger returns ctx's storage audit logger, or slog.Default.
+func storageAuditLogger(ctx context.Context) *slog.Logger {
+	if l, ok := ctx.Value(storageAuditLoggerKey{}).(*slog.Logger); ok && l != nil {
+		return l
+	}
+	return slog.Default()
+}
+
 // purgeRemovedAgentWorkspaces deletes the workspaces RemoveNFSAgentFiles
 // moved aside in an agent directory, in the background and without a
-// deadline. A variable so tests can run it inline.
-var purgeRemovedAgentWorkspaces = func(agentDir string) {
+// deadline, and audits the result to log, for the workspace's path (its
+// removal from that path was audited when it was moved aside). A variable
+// so tests can run it inline.
+var purgeRemovedAgentWorkspaces = func(agentDir, projectID, agentName string, log *slog.Logger) {
 	go func() {
+		d := projectfs.Deletion{Tree: projectfs.TreeAgentWorkspace, Path: filepath.Join(agentDir, provision.AgentWorkspaceDir),
+			Outcome: projectfs.OutcomeDeleted, Reason: "background purge of the agent's moved-aside workspace"}
 		if err := provision.PurgeRemovedAgentWorkspaces(agentDir); err != nil {
-			slog.Warn("workspace_storage nfs: could not delete a removed agent workspace's files", "path", agentDir, "error", err)
+			d.Outcome, d.Err = projectfs.OutcomeFailed, err
 		}
+		projectfs.Audit(context.Background(), log, projectfs.DeleterBroker, projectID, agentName, d)
 	}()
 }
 
@@ -113,66 +139,83 @@ var purgeRemovedAgentWorkspaces = func(agentDir string) {
 // Nothing outside worktrees/<agentName> and agents/<agentName> is touched.
 // It returns the paths it looked at and any failures, joined; each failure
 // leaves that path in place, and an agent created again with the same name
-// reuses it. It does nothing unless the runtime is Kubernetes, the
-// project's workspace_storage backend is nfs and the export is mounted on
-// the broker.
-func (m *AgentManager) RemoveNFSAgentFiles(ctx context.Context, projectPath, projectID, agentName string) (paths []string, err error) {
+// reuses it. The worktree is removed only on Kubernetes and the agent's
+// workspace on Kubernetes or Cloud Run (whose clone-per-agent agents mount
+// agents/<agentName>/workspace); either needs the project's
+// workspace_storage backend to be nfs and the export mounted on the
+// broker.
+func (m *AgentManager) RemoveNFSAgentFiles(ctx context.Context, projectPath, projectID, agentName string) (ds []projectfs.Deletion, err error) {
 	var errs []error
-	if path, err := m.RemoveNFSWorktree(ctx, projectPath, projectID, agentName); path != "" || err != nil {
-		if path != "" {
-			paths = append(paths, path)
-		}
-		if err != nil {
-			errs = append(errs, err)
+	if d, ok := m.removeNFSWorktreeOutcome(ctx, projectPath, projectID, agentName); ok {
+		ds = append(ds, d)
+		if d.Err != nil {
+			errs = append(errs, d.Err)
 		}
 	}
-	if path, err := m.removeNFSAgentWorkspace(ctx, projectPath, projectID, agentName); path != "" || err != nil {
-		if path != "" {
-			paths = append(paths, path)
-		}
-		if err != nil {
-			errs = append(errs, err)
+	if d, ok := m.removeNFSAgentWorkspace(ctx, projectPath, projectID, agentName); ok {
+		ds = append(ds, d)
+		if d.Err != nil {
+			errs = append(errs, d.Err)
 		}
 	}
-	return paths, errors.Join(errs...)
+	return ds, errors.Join(errs...)
 }
 
 // removeNFSAgentWorkspace removes the workspace of the clone-per-agent agent
 // named agentName from its agent directory on the export: under the agent
 // directory's lock, the workspace is moved aside and the branch record
-// dropped (provision.RemoveAgentWorkspace), then the files are deleted in
-// the background. It returns the agent directory. A missing agent
-// directory is not an error. Every component from the export down to the
-// agent directory must be a real directory, not a symlink.
-func (m *AgentManager) removeNFSAgentWorkspace(ctx context.Context, projectPath, projectID, agentName string) (path string, err error) {
-	resolvedHostBase, rel, err := m.nfsExportWorkspace(projectPath, projectID, agentName)
-	if err != nil || resolvedHostBase == "" {
-		return "", err
+// dropped (provision.RemoveAgentWorkspaceOutcome), then the files are
+// deleted in the background. It reports what happened to the workspace
+// (<agent directory>/workspace): deleted when it was moved aside, absent
+// when there was none, failed with the error; ok is false when the
+// project's workspace is not on an NFS export this broker has mounted.
+// Every component from the export down to the agent directory must be a
+// real directory, not a symlink.
+func (m *AgentManager) removeNFSAgentWorkspace(ctx context.Context, projectPath, projectID, agentName string) (d projectfs.Deletion, ok bool) {
+	d = projectfs.Deletion{Tree: projectfs.TreeAgentWorkspace}
+	fail := func(err error) (projectfs.Deletion, bool) {
+		d.Outcome, d.Err = projectfs.OutcomeFailed, err
+		return d, true
+	}
+	resolvedHostBase, rel, err := m.nfsAgentDirExportWorkspace(projectPath, projectID, agentName)
+	if err != nil {
+		return fail(err)
+	}
+	if resolvedHostBase == "" {
+		return d, false
 	}
 	agentRel, err := runtime.NFSAgentDirSubPath(rel, agentName)
 	if err != nil {
-		return "", fmt.Errorf("workspace_storage nfs: %w", err)
+		return fail(fmt.Errorf("workspace_storage nfs: %w", err))
 	}
 	agentDir := filepath.Join(resolvedHostBase, agentRel)
+	d.Path = filepath.Join(agentDir, provision.AgentWorkspaceDir)
 	if _, err := os.Lstat(agentDir); errors.Is(err, fs.ErrNotExist) {
-		return agentDir, nil
+		d.Outcome = projectfs.OutcomeAbsent
+		return d, true
 	}
 	if real, err := filepath.EvalSymlinks(agentDir); err != nil || real != agentDir {
-		return agentDir, fmt.Errorf("workspace_storage nfs: %s is not a plain directory on the export; left in place", agentDir)
+		return fail(fmt.Errorf("workspace_storage nfs: %s is not a plain directory on the export; left in place", agentDir))
 	}
 	// The agent directory is the agent's; the project's shared checkout
 	// next to it is never removed (agentFilesGuard). The removal acts on
 	// the path the guard returns.
 	checkedDir, err := newAgentFilesGuard(agentName, []string{resolvedHostBase}, []string{agentDir}, []string{filepath.Join(resolvedHostBase, rel)}).check(agentDir)
 	if err != nil {
-		return agentDir, fmt.Errorf("workspace_storage nfs: %w", err)
+		return fail(fmt.Errorf("workspace_storage nfs: %w", err))
 	}
-	if err := provision.RemoveAgentWorkspace(ctx, checkedDir, nfsAgentDirLockWait); err != nil {
-		return agentDir, err
+	removed, err := provision.RemoveAgentWorkspaceOutcome(ctx, checkedDir, nfsAgentDirLockWait)
+	if err != nil {
+		return fail(err)
 	}
-	purgeRemovedAgentWorkspaces(checkedDir)
-	slog.Info("workspace_storage nfs: removed the agent's workspace", "path", filepath.Join(agentDir, provision.AgentWorkspaceDir))
-	return agentDir, nil
+	if !removed {
+		d.Outcome = projectfs.OutcomeAbsent
+		return d, true
+	}
+	purgeRemovedAgentWorkspaces(checkedDir, projectID, agentName, storageAuditLogger(ctx))
+	slog.Info("workspace_storage nfs: removed the agent's workspace", "path", d.Path)
+	d.Outcome = projectfs.OutcomeDeleted
+	return d, true
 }
 
 // nfsAgentDirRecordFile is the per-agent file, in the agent's broker
@@ -213,6 +256,53 @@ func nfsKeepSharedCheckout(fresh bool, agentDir string, resolved runtime.Resolve
 		return false, ""
 	}
 	return true, "existing agent without its own NFS agent directory keeps the shared checkout"
+}
+
+// cloudRunAgentWorkspaceRecordFile is the per-agent file, in the agent's
+// broker directory, that records that a Cloud Run clone-per-agent agent
+// uses its own workspace on the share (agents/<agent name>/workspace).
+// Every create writes it, like nfsAgentDirRecordFile, so only an agent
+// created before Cloud Run clone-per-agent agents got their own workspace
+// can lack it. nfsAgentDirRecordFile cannot serve: creates have written it
+// on every runtime since ptone/scion#3998, while Cloud Run agents kept
+// working in the shared checkout.
+const cloudRunAgentWorkspaceRecordFile = "cloudrun-agent-workspace.json"
+
+// cloudRunKeepSharedCheckout reports whether a Cloud Run clone-per-agent
+// agent keeps mounting the project's shared checkout instead of its own
+// workspace, and why: only an existing agent that worked there before, i.e.
+// a start that is not a create, with no cloudRunAgentWorkspaceRecordFile in
+// agentDir, on a broker with the export mounted, where the agent's own
+// workspace does not exist. As in nfsKeepSharedCheckout, a create, a
+// record, an existing workspace, an unmounted export or any other stat
+// error keep the agent's own workspace. The check only reads.
+func cloudRunKeepSharedCheckout(fresh bool, agentDir string, resolved runtime.ResolvedWorkspace, agentName string) (bool, string) {
+	if fresh {
+		return false, ""
+	}
+	if _, err := os.Stat(filepath.Join(agentDir, cloudRunAgentWorkspaceRecordFile)); err == nil {
+		return false, ""
+	}
+	sub, err := runtime.NFSAgentDirSubPath(resolved.ServerRelativePath, agentName)
+	if err != nil || resolved.HostBase == "" {
+		return false, ""
+	}
+	if _, err := os.Stat(resolved.HostBase); err != nil {
+		return false, ""
+	}
+	if _, err := os.Lstat(filepath.Join(resolved.HostBase, sub, provision.AgentWorkspaceDir)); !errors.Is(err, fs.ErrNotExist) {
+		return false, ""
+	}
+	return true, "existing Cloud Run agent without its own workspace keeps the shared checkout"
+}
+
+// recordCloudRunAgentWorkspace writes cloudRunAgentWorkspaceRecordFile. A
+// failure is logged and does not fail the start: the workspace stat still
+// decides next time.
+func recordCloudRunAgentWorkspace(agentDir, agentName string) {
+	if err := os.WriteFile(filepath.Join(agentDir, cloudRunAgentWorkspaceRecordFile), []byte("{\"layout\":\"agent-workspace\"}\n"), 0o600); err != nil {
+		slog.Warn("cloudrun: could not record the agent's own workspace", "agent", agentName, "error", err)
+	}
 }
 
 // recordNFSAgentDir writes nfsAgentDirRecordFile. A failure is logged and

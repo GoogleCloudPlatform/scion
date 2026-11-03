@@ -40,6 +40,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -407,6 +408,26 @@ func TestStartDelivery_ParityWithRuntimeRead(t *testing.T) {
 			constrainAllBut(t, f.Store, "agent", id, secretUsePermission)
 			return built{id, tok}
 		}, true, false, true},
+		// A hop recorded from the owner's access token: secret.use is
+		// intrinsic to it (uatHopEffectCeiling) and every other clause still
+		// applies. The read here uses an unfiltered token to show step 10
+		// agrees with start; the token the hub mints lacks
+		// project:secret:read, so the real read stops at check 4
+		// (TestUATIntrinsic_RuntimeReadRefused).
+		{"owner/token hop", true, func(t *testing.T, f *sdFixture) built {
+			id, tok := f.uiDirect(t, "pm-o-uat", nil)
+			return built{id, tok}
+		}, true, true, true},
+		{"owner/token hop, terminal user secret.use constraint (S4b)", true, func(t *testing.T, f *sdFixture) built {
+			id, tok := f.uiDirect(t, "pm-o-uat-s4b", nil)
+			constrainAllBut(t, f.Store, "user", f.UserID, secretUsePermission)
+			return built{id, tok}
+		}, false, false, true},
+		{"owner/token hop, agent secret.use constraint (read only)", true, func(t *testing.T, f *sdFixture) built {
+			id, tok := f.uiDirect(t, "pm-o-uat-agentc", nil)
+			constrainAllBut(t, f.Store, "agent", id, secretUsePermission)
+			return built{id, tok}
+		}, true, false, true},
 		{"owner/edge without provenance (legacy)", true, func(t *testing.T, f *sdFixture) built {
 			id, tok := f.direct(t, "pm-o-unrec", false)
 			createDCEdge(t, f.Store, store.DelegationPrincipalUser, f.UserID, store.DelegationPrincipalAgent, id,
@@ -703,4 +724,179 @@ func sdWarnRecordsFor(t *testing.T, raw, secretName string) []map[string]any {
 		}
 	}
 	return out
+}
+
+// TestStartDelivery_UATHopBoundedByCeiling: the intrinsic secret.use of a
+// hop recorded from a user access token enters the start-time user-secret
+// ceiling (EvaluateUserSecretParentCeiling) only at S3c
+// of that hop. Every case holds at create (resolveSecrets), as_needed
+// (resolveAsNeededForKeys) and the start and restart selection
+// (selectDeliverySecrets, inside sdStartDelivery), and agrees with the
+// step-10 verdict. The owner's unshared row is unchanged in every case.
+func TestStartDelivery_UATHopBoundedByCeiling(t *testing.T) {
+	cases := []struct {
+		name  string
+		build func(t *testing.T, f *sdFixture) string
+		want  bool
+		cause DenyCause
+	}{
+		{"owner path, token hop, clean chain", func(t *testing.T, f *sdFixture) string {
+			id, _ := f.uiDirect(t, "ub-clean", nil)
+			return id
+		}, true, ""},
+		{"terminal user secret.use constraint (S4b)", func(t *testing.T, f *sdFixture) string {
+			id, _ := f.uiDirect(t, "ub-s4b", nil)
+			constrainAllBut(t, f.Store, "user", f.UserID, secretUsePermission)
+			return id
+		}, false, DenyCauseCeilingDelegatorLacksPermission},
+		{"source principal is another user", func(t *testing.T, f *sdFixture) string {
+			other := tid("ub-src-other")
+			createDCUser(t, f.Store, other, "ub-src-other@test.com", f.ProjectID, store.ProjectRoleOwner)
+			id, _ := f.uiDirect(t, "ub-src", func(e *store.DelegationEdge) { e.SourcePrincipalID = other })
+			return id
+		}, false, ""},
+		{"delegator is another user (S8)", func(t *testing.T, f *sdFixture) string {
+			other := tid("ub-dlg-other")
+			createDCUser(t, f.Store, other, "ub-dlg-other@test.com", f.ProjectID, store.ProjectRoleOwner)
+			id, _ := f.direct(t, "ub-dlg", false)
+			f.recordEdge(t, store.DelegationPrincipalUser, other, id, boundedCeiling(), uiUATEdge(uiTokenList...))
+			return id
+		}, false, DenyCauseCeilingSourceNotAllowed},
+		{"terminal user inactive (S4)", func(t *testing.T, f *sdFixture) string {
+			id, _ := f.uiDirect(t, "ub-inactive", nil)
+			setUserStatus(t, f.Store, f.UserID, store.UserStatusSuspended)
+			return id
+		}, false, ""},
+		{"terminal user not admitted to the project (S4a)", func(t *testing.T, f *sdFixture) string {
+			id, _ := f.uiDirect(t, "ub-admit", nil)
+			removeUserProjectBindings(t, f.Store, f.UserID, f.ProjectID)
+			return id
+		}, false, DenyCauseCeilingDelegatorLacksPermission},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSDFixture(t, "sd-ub-"+string(rune('a'+i)))
+			id := tc.build(t, f)
+			got := sdStartDelivery(t, f.disp, f.Store, id)
+			assert.Equal(t, tc.want, got.always, "create (resolveSecrets) and the launch selection")
+			assert.Equal(t, tc.want, got.asNeeded, "as_needed (resolveAsNeededForKeys)")
+			d := f.ceiling(t, id, sdAlwaysKey)
+			assert.Equal(t, d.Allowed, got.always, "start equals the step-10 verdict (reason %q)", d.Reason)
+			if tc.cause != "" {
+				assert.Equal(t, tc.cause, d.DenyCause, "reason %q", d.Reason)
+			}
+			if !tc.want {
+				assert.False(t, d.uatIntrinsic)
+			}
+		})
+	}
+
+	// S7: the owner's shared rows are attributed to another author. The
+	// author is in the agent's ancestry (as in the secret parent ceiling's
+	// T13), so S5 and S6 find the row and S7 is the clause that refuses it;
+	// the explain trace shows the token hop passed S3c first. The fixture
+	// writes the rows that way from the start (an update keeps the recorded
+	// creator).
+	t.Run("secret author is not its owner (S7)", func(t *testing.T) {
+		base := &userScopeCeilingFixture{materialFixture: newMaterialFixture(t, "sd-ub-s7")}
+		setBackfillCompleted(t, base.Store)
+		other := tid("ub-s7-author")
+		createDCUser(t, base.Store, other, "ub-s7-author@test.com", base.ProjectID, store.ProjectRoleOwner)
+		backend := base.Server.secretBackend
+		usaSetUserSecret(t, backend, base.UserID, sdAlwaysKey, sdAlwaysValue, other, true, store.InjectionModeAlways)
+		usaSetUserSecret(t, backend, base.UserID, sdAsNeededKey, sdAsNeededValue, other, true, store.InjectionModeAsNeeded)
+		f := &sdFixture{userScopeCeilingFixture: base, disp: sdDispatcher(base.Server, base.Store)}
+		id, _ := f.agent(t, "ub-s7", []string{base.UserID, other})
+		f.recordEdge(t, store.DelegationPrincipalUser, base.UserID, id, boundedCeiling(uiTokenList...), uiUATEdge(uiTokenList...))
+
+		ctx := context.Background()
+		agent, err := f.Store.GetAgent(ctx, id)
+		require.NoError(t, err)
+		meta, err := backend.GetMeta(ctx, sdAlwaysKey, store.ScopeUser, base.UserID)
+		require.NoError(t, err)
+		var steps []DecisionStep
+		d, _ := f.Server.authzService.evaluateUserSecretParentCeiling(ctx,
+			newFullAgentIdentity(id, f.ProjectID, agent.Ancestry, []AgentTokenScope{ScopeProjectSecretRead}),
+			userSecretResource(meta.ID, meta.ScopeID), &steps)
+		require.False(t, d.Allowed)
+		assert.Equal(t, DenyCauseCeilingSourceNotAllowed, d.DenyCause, "S7 refuses; reason %q", d.Reason)
+		assert.Equal(t, "secret author is not its owner", d.Reason, "the S7 clause, not S8 (same cause)")
+		assert.True(t, slices.ContainsFunc(steps, func(s DecisionStep) bool { return s.Step == "secret_parent_ceiling_uat_intrinsic" }),
+			"the token hop passed S3c through the intrinsic rule before S7: %+v", steps)
+
+		got := sdStartDelivery(t, f.disp, f.Store, id)
+		assert.False(t, got.always, "withheld at start")
+		assert.False(t, got.asNeeded, "withheld at as_needed")
+	})
+
+	t.Run("row not shared with progeny: unchanged", func(t *testing.T) {
+		f := newSDFixture(t, "sd-ub-private")
+		id, _ := f.uiDirect(t, "ub-private", nil)
+		assert.True(t, sdStartDelivery(t, f.disp, f.Store, id).private, "the unshared row is delivered as on main")
+	})
+
+	// An agent-recorded hop at depth 0 under a token hop: S3c applies to the
+	// agent hop with its own stored list, and S3d still checks that the
+	// delegator agent holds secret.use.
+	t.Run("agent hop under a token hop", func(t *testing.T) {
+		f := newSDFixture(t, "sd-ub-agenthop")
+		p, _ := f.uiDirect(t, "ub-ah-parent", nil)
+		c, _ := f.agent(t, "ub-ah-child", []string{f.UserID, p})
+		f.recordEdge(t, store.DelegationPrincipalAgent, p, c, boundedCeiling(uiTokenList...), nil)
+		d := f.ceiling(t, c, sdAlwaysKey)
+		require.False(t, d.Allowed)
+		assert.Equal(t, DenyCauseCeilingEffectExceeded, d.DenyCause, "S3c on the agent hop; reason %q", d.Reason)
+		assert.Equal(t, sdDelivery{}, sdStartDelivery(t, f.disp, f.Store, c))
+
+		f2 := newSDFixture(t, "sd-ub-agenthop-s3d")
+		p2, _ := f2.uiDirect(t, "ub-s3d-parent", nil)
+		setAgentRole(t, f2.Store, p2, AgentRoleReadOnly)
+		c2, _ := f2.agent(t, "ub-s3d-child", []string{f2.UserID, p2})
+		f2.recordEdge(t, store.DelegationPrincipalAgent, p2, c2, boundedCeiling(append([]string{secretUsePermission}, uiTokenList...)...), nil)
+		d2 := f2.ceiling(t, c2, sdAlwaysKey)
+		require.False(t, d2.Allowed)
+		assert.Equal(t, DenyCauseCeilingDelegatorLacksPermission, d2.DenyCause, "S3d: the delegator agent does not hold secret.use; reason %q", d2.Reason)
+	})
+
+	// The fold: an agent hop whose list lacks a deliver permission, under a
+	// token hop, keeps the fold without it, so a new child's edge does not
+	// carry it.
+	t.Run("fold keeps a narrower agent hop", func(t *testing.T) {
+		f := newSDFixture(t, "sd-ub-fold")
+		p, _ := f.uiDirect(t, "ub-fold-parent", nil)
+		c, _ := f.agent(t, "ub-fold-child", []string{f.UserID, p})
+		f.recordEdge(t, store.DelegationPrincipalAgent, p, c,
+			boundedCeiling(append([]string{"secret.deliver", "skill_injection.deliver"}, uiTokenList...)...), nil)
+		ctx := context.Background()
+		child, err := f.Store.GetAgent(ctx, c)
+		require.NoError(t, err)
+		deliver, err := f.Server.authzService.parentDeliverEligibility(ctx, child)
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{"secret.deliver", "skill_injection.deliver"}, deliver, "env_var.deliver stays out")
+		ceiling, err := f.Server.authzService.agentRowEffectCeiling(ctx, child)
+		require.NoError(t, err)
+		assert.NotContains(t, ceiling.PermissionIDs, "env_var.deliver", "a new child's edge does not carry it")
+		assert.Contains(t, ceiling.PermissionIDs, "secret.deliver", "control: the hop's own deliver permissions pass")
+	})
+
+	// Negative: no intrinsic permission reaches a hop for which
+	// uatRecordedHop is false (session, scheduler, adoption, dev_local and
+	// unrecorded provenance at S3c; the full table is
+	// TestUATIntrinsic_NotOtherHops).
+	t.Run("no intrinsic secret.use on other hops", func(t *testing.T) {
+		for i, mutate := range []func(*store.DelegationEdge){
+			func(e *store.DelegationEdge) { e.SourceCredentialKind = store.SourceCredentialSession },
+			func(e *store.DelegationEdge) {
+				e.AuthorityProvenance = schedulerProv(store.DelegationPrincipalUser, e.DelegatorID, store.InitiatorCredentialKindUAT)
+			},
+			func(e *store.DelegationEdge) { e.SourceCredentialKind = store.SourceCredentialSystemMigration },
+		} {
+			f := newSDFixture(t, "sd-ub-neg-"+string(rune('a'+i)))
+			id, _ := f.direct(t, "ub-neg", false)
+			f.recordEdge(t, store.DelegationPrincipalUser, f.UserID, id, boundedCeiling(uiTokenList...), mutate)
+			d := f.ceiling(t, id, sdAlwaysKey)
+			assert.False(t, d.uatIntrinsic, "case %d", i)
+			assert.Equal(t, d.Allowed, sdStartDelivery(t, f.disp, f.Store, id).always, "case %d: start equals the verdict", i)
+		}
+	})
 }

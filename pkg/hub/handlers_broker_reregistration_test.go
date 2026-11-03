@@ -88,7 +88,7 @@ func TestBrokerReregistration_NonOwnerByNameDenied(t *testing.T) {
 	nonOwner := newPlainUser(t, s, "reregistration-nonowner-a")
 	broker := createReregistrationTestBroker(t, s, "reregistration-broker-name-a", owner.ID)
 
-	rec := doRequestAsUser(t, srv, nonOwner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestAsUserLoopback(t, srv, nonOwner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name:        broker.Name,
 		AutoProvide: true,
 		Labels:      map[string]string{"env": "requested"},
@@ -107,7 +107,7 @@ func TestBrokerReregistration_NonOwnerByIDDenied(t *testing.T) {
 	nonOwner := newPlainUser(t, s, "reregistration-nonowner-b")
 	broker := createReregistrationTestBroker(t, s, "reregistration-broker-id-b", owner.ID)
 
-	rec := doRequestAsUser(t, srv, nonOwner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestAsUserLoopback(t, srv, nonOwner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		BrokerID:    broker.ID,
 		Name:        "a different requested name",
 		AutoProvide: true,
@@ -130,7 +130,7 @@ func TestBrokerReregistration_BrokerReadOnlyMemberDenied(t *testing.T) {
 	grantSystemBrokerReadPermission(t, s, reader.ID)
 	broker := createReregistrationTestBroker(t, s, "reregistration-broker-readonly", owner.ID)
 
-	rec := doRequestAsUser(t, srv, reader, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestAsUserLoopback(t, srv, reader, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name:        broker.Name,
 		AutoProvide: true,
 	})
@@ -153,7 +153,7 @@ func TestBrokerReregistration_OrdinaryHubMemberDenied(t *testing.T) {
 
 	// No auto-provide in the body, so the denial comes from the
 	// re-registration target check alone.
-	rec := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestAsUserLoopback(t, srv, member, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name:   broker.Name,
 		Labels: map[string]string{"env": "requested"},
 	})
@@ -174,7 +174,7 @@ func TestBrokerReregistration_OwnerAllowed(t *testing.T) {
 	owner := newHubMemberUser(t, s, "reregistration-owner-c")
 	broker := createReregistrationTestBroker(t, s, "reregistration-broker-owner-c", owner.ID)
 
-	rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestAsUserLoopback(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name:   broker.Name,
 		Labels: map[string]string{"zone": "added"},
 	})
@@ -205,7 +205,7 @@ func TestBrokerReregistration_OwnerWithoutBrokerCreateDenied(t *testing.T) {
 		owner := newPlainUser(t, s, "reregistration-owner-nogrant-name")
 		broker := createReregistrationTestBroker(t, s, "reregistration-broker-nogrant-name", owner.ID)
 
-		rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+		rec := doRequestAsUserLoopback(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 			Name:        broker.Name,
 			AutoProvide: true,
 		})
@@ -220,7 +220,7 @@ func TestBrokerReregistration_OwnerWithoutBrokerCreateDenied(t *testing.T) {
 		owner := newPlainUser(t, s, "reregistration-owner-nogrant-id")
 		broker := createReregistrationTestBroker(t, s, "reregistration-broker-nogrant-id", owner.ID)
 
-		rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+		rec := doRequestAsUserLoopback(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 			BrokerID:    broker.ID,
 			Name:        "a different requested name",
 			AutoProvide: true,
@@ -239,7 +239,7 @@ func TestBrokerReregistration_SuperAdminAllowed(t *testing.T) {
 	admin := newSuperAdminUser(t, s, "reregistration-admin-d")
 	broker := createReregistrationTestBroker(t, s, "reregistration-broker-admin-d", owner.ID)
 
-	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestAsUserLoopback(t, srv, admin, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name:        broker.Name,
 		AutoProvide: true,
 	})
@@ -265,7 +265,7 @@ func TestBrokerRegistration_NewRegistrationRequiresBrokerCreate(t *testing.T) {
 	srv, s := testServer(t)
 	requester := newHubMemberUser(t, s, "reregistration-newuser-e")
 
-	rec := doRequestAsUser(t, srv, requester, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestAsUserLoopback(t, srv, requester, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name: "a brand new broker name never seen before",
 	})
 
@@ -291,7 +291,7 @@ func TestBrokerRegistration_NewRegistrationWithoutBrokerCreateDenied(t *testing.
 	srv, s := testServer(t)
 	requester := newPlainUser(t, s, "reregistration-newuser-nogrant")
 
-	rec := doRequestAsUser(t, srv, requester, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestAsUserLoopback(t, srv, requester, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name: "a brand new broker name that must not be created",
 	})
 
@@ -319,7 +319,7 @@ func TestBrokerReregistration_OwnerlessBrokerDenied(t *testing.T) {
 	nonOwner := newPlainUser(t, s, "reregistration-nonowner-f")
 	broker := createReregistrationTestBroker(t, s, "reregistration-broker-ownerless-f", "" /* CreatedBy unset, as for an embedded broker */)
 
-	rec := doRequestAsUser(t, srv, nonOwner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestAsUserLoopback(t, srv, nonOwner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name:        broker.Name,
 		AutoProvide: true,
 	})
@@ -471,6 +471,7 @@ func TestBrokerRotateSecret_SelfAllowed(t *testing.T) {
 	// signer real brokers use) and dispatched through srv.Handler().ServeHTTP,
 	// the same as a real broker's outbound call.
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/brokers/"+broker.ID+"/rotate-secret", nil)
+	req.RemoteAddr = tpLoopbackPeer // the transport policy admits a client on the hub host
 	require.NoError(t, (&apiclient.HMACAuth{BrokerID: broker.ID, SecretKey: originalKey}).ApplyAuth(req))
 	rec := httptest.NewRecorder()
 

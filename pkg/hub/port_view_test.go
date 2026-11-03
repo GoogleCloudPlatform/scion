@@ -217,6 +217,8 @@ func TestPortView_PortLinkRedirectsAndServes(t *testing.T) {
 // view_ttl after the time it is created (2h by default).
 func TestPortView_ViewTTL(t *testing.T) {
 	f := newPortViewFixture(t, nil)
+	// A page link is created only for an agent a transport reaches.
+	f.startAgent(t)
 	now := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
 	f.srv.portViewClock = func() time.Time { return now }
 	for _, tc := range []struct {
@@ -942,8 +944,14 @@ func TestPortView_AuthStepOrder(t *testing.T) {
 // page view requests (both request loggers, auth debug, the proxy line,
 // failures, redirects and transport errors), and the request log line of
 // any request whose Referer is a page link, holds no part of the
-// capability; such requests are not traced.
+// capability; such requests are not traced. It runs over both transports.
 func TestPortView_LogsNeverHoldTheLink(t *testing.T) {
+	for _, transport := range portViewTransports {
+		t.Run(transport, func(t *testing.T) { testPortViewLogsNeverHoldTheLink(t, transport) })
+	}
+}
+
+func testPortViewLogsNeverHoldTheLink(t *testing.T, transport string) {
 	var buf safeBuffer
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
@@ -980,7 +988,7 @@ func TestPortView_LogsNeverHoldTheLink(t *testing.T) {
 		f.send(t, http.MethodGet, f.viewURL(valid, "a.js"), h(subHeader()), nil)
 	}
 	f.base = f.public.URL
-	f.startAgent(t)
+	f.startOver(t, transport)
 	for _, b := range bases {
 		f.base = b
 		link := f.portLink("p.html?x=1")
@@ -1252,10 +1260,17 @@ func TestPortView_StripsFrontProxyAssertionHeaders(t *testing.T) {
 // only decodes to the page view prefix (a dot segment, or an encoded slash
 // or dot after it), is refused by the checks before any handler runs. A
 // page view request still reaches the page view route: a valid link serves
-// the app and an invalid one gets the route's own answer.
+// the app and an invalid one gets the route's own answer. It runs over both
+// transports.
 func TestPortView_ProxyModeWriteGuardWithRouting(t *testing.T) {
+	for _, transport := range portViewTransports {
+		t.Run(transport, func(t *testing.T) { testPortViewProxyModeWriteGuardWithRouting(t, transport) })
+	}
+}
+
+func testPortViewProxyModeWriteGuardWithRouting(t *testing.T, transport string) {
 	f := newPortViewFixture(t, nil)
-	f.startAgent(t)
+	f.startOver(t, transport)
 	prevMode, prevAuth, prevProv, prevBase := f.srv.authConfig.AuthMode, f.srv.authConfig.ProxyAuthenticator, f.srv.authConfig.ProxyUserProvisioner, f.base
 	t.Cleanup(func() {
 		f.srv.authConfig.AuthMode, f.srv.authConfig.ProxyAuthenticator, f.srv.authConfig.ProxyUserProvisioner = prevMode, prevAuth, prevProv

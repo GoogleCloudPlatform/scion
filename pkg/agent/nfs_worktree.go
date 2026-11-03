@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
@@ -258,6 +259,19 @@ func (m *AgentManager) nfsExportWorkspace(projectPath, projectID, agentName stri
 	return nfsExportWorkspaceOnAnyRuntime(projectPath, projectID, agentName)
 }
 
+// nfsAgentDirExportWorkspace is nfsExportWorkspace for the agent's own
+// directory on the export (removeNFSAgentWorkspace): it also applies on the
+// Cloud Run runtime, whose clone-per-agent agents mount their own
+// <subpath_root>/<projectID>/agents/<agent>/workspace (cloudrun_runtime.go
+// cloudRunAgentWorkspaceRel). Worktrees stay Kubernetes-only
+// (RemoveNFSWorktree keeps nfsExportWorkspace).
+func (m *AgentManager) nfsAgentDirExportWorkspace(projectPath, projectID, agentName string) (resolvedHostBase, rel string, err error) {
+	if m.Runtime == nil || (!isKubernetesRuntime(m.Runtime.Name()) && !isCloudRunRuntime(m.Runtime.Name())) {
+		return "", "", nil
+	}
+	return nfsExportWorkspaceOnAnyRuntime(projectPath, projectID, agentName)
+}
+
 // nfsExportWorkspaceOnAnyRuntime is nfsExportWorkspace without the
 // Kubernetes condition: it resolves the project's workspace on the broker's
 // mount of the NFS export for any runtime.
@@ -335,36 +349,64 @@ func nfsExportWorkspaceOnAnyRuntime(projectPath, projectID, agentName string) (r
 // for the caller to log; the worktree is then left in place, and an agent
 // created again with the same name reuses it.
 func (m *AgentManager) RemoveNFSWorktree(ctx context.Context, projectPath, projectID, agentName string) (path string, err error) {
+	d, ok := m.removeNFSWorktreeOutcome(ctx, projectPath, projectID, agentName)
+	if !ok {
+		return "", nil
+	}
+	return d.Path, d.Err
+}
+
+// removeNFSWorktreeOutcome is RemoveNFSWorktree reporting what happened to
+// the worktree: deleted, absent when there was none, failed with the
+// error (Path empty when it could not be resolved); ok is false when the
+// project's workspace is not on an NFS export this broker has mounted.
+func (m *AgentManager) removeNFSWorktreeOutcome(ctx context.Context, projectPath, projectID, agentName string) (d projectfs.Deletion, ok bool) {
+	d = projectfs.Deletion{Tree: projectfs.TreeAgentWorkspace}
+	path, existed, err := m.removeNFSWorktree(ctx, projectPath, projectID, agentName)
+	switch {
+	case err != nil:
+		d.Path, d.Outcome, d.Err = path, projectfs.OutcomeFailed, err
+	case path == "":
+		return d, false
+	case !existed:
+		d.Path, d.Outcome = path, projectfs.OutcomeAbsent
+	default:
+		d.Path, d.Outcome = path, projectfs.OutcomeDeleted
+	}
+	return d, true
+}
+
+func (m *AgentManager) removeNFSWorktree(ctx context.Context, projectPath, projectID, agentName string) (path string, existed bool, err error) {
 	resolvedHostBase, rel, err := m.nfsExportWorkspace(projectPath, projectID, agentName)
 	if err != nil || resolvedHostBase == "" {
-		return "", err
+		return "", false, err
 	}
 	workspace := filepath.Join(resolvedHostBase, rel)
 	worktree := filepath.Join(resolvedHostBase, nfsWorktreeSubPath(rel, agentName))
 	if _, err := os.Lstat(worktree); errors.Is(err, fs.ErrNotExist) {
-		return worktree, nil
+		return worktree, false, nil
 	}
 	// Every component from the export down to worktrees/ must be a real
 	// directory, not a symlink.
 	if real, err := filepath.EvalSymlinks(filepath.Dir(worktree)); err != nil || real != filepath.Dir(worktree) {
-		return worktree, fmt.Errorf("workspace_storage nfs: %s is not a plain directory on the export; left in place", filepath.Dir(worktree))
+		return worktree, true, fmt.Errorf("workspace_storage nfs: %s is not a plain directory on the export; left in place", filepath.Dir(worktree))
 	}
 
 	// The worktree is the agent's; the project's shared checkout around it
 	// is never removed (agentFilesGuard). RemoveMountedWorktree removes
 	// the worktree by name under the checkout checked here.
 	if _, err := newAgentFilesGuard(agentName, []string{resolvedHostBase}, []string{worktree}, []string{workspace}).check(worktree); err != nil {
-		return worktree, fmt.Errorf("workspace_storage nfs: %w", err)
+		return worktree, true, fmt.Errorf("workspace_storage nfs: %w", err)
 	}
 
 	stateDir, err := nfsRemovalStateDir(resolvedHostBase, rel, projectID)
 	if err != nil {
-		return worktree, err
+		return worktree, true, err
 	}
 	if err := provision.RemoveMountedWorktree(ctx, workspace, stateDir, agentName, nfsWorktreeLockWait); err != nil {
-		return worktree, err
+		return worktree, true, err
 	}
 	purgeRemovedWorktrees(workspace)
 	slog.Info("workspace_storage nfs: removed the agent's worktree", "path", worktree)
-	return worktree, nil
+	return worktree, true, nil
 }

@@ -32,37 +32,30 @@ var invalidProjectStorageBodies = map[string]string{
 	`{"server":{"project_storage":{"backend":"nfs","nfs":{"mount_root":"/mnt/x","mount_options":"-oexec","shares":[{"id":"a","server":"10.0.0.2","export":"/e"}]}}}}`: "server.project_storage.nfs.mount_options",
 }
 
-// assertProjectStorageFieldRefusal checks a 400 whose details list the
-// field errors and name want.
+// assertProjectStorageFieldRefusal checks a 422 validation_error whose
+// details.errors name want.
 func assertProjectStorageFieldRefusal(t *testing.T, rr *httptest.ResponseRecorder, want string) {
 	t.Helper()
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
 	}
 	var resp struct {
 		Error struct {
 			Message string `json:"message"`
-			Details struct {
-				FieldErrors []struct {
-					Field string `json:"field"`
-					Rule  string `json:"rule"`
-					Value string `json:"value"`
-				} `json:"fieldErrors"`
-			} `json:"details"`
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v (%s)", err, rr.Body.String())
 	}
 	found := false
-	for _, fe := range resp.Error.Details.FieldErrors {
-		// This route is admin-only, so the field error carries the value.
-		if fe.Field == want && fe.Rule != "" && fe.Value != "" {
+	for _, e := range settingsErrorEntries(t, rr) {
+		// This route is admin-only, so the entry's message carries the value.
+		if e.Field == want && strings.Contains(e.Message, "(got ") {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("details.fieldErrors = %+v, want one for %s (body %s)", resp.Error.Details.FieldErrors, want, rr.Body.String())
+		t.Errorf("details.errors has no entry for %s with its value (body %s)", want, rr.Body.String())
 	}
 	if !strings.Contains(resp.Error.Message, want) {
 		t.Errorf("message %q does not name %s", resp.Error.Message, want)
@@ -73,7 +66,7 @@ func assertProjectStorageFieldRefusal(t *testing.T, rr *httptest.ResponseRecorde
 }
 
 // TestHandlePutServerConfig_ProjectStorageFieldsValidated: a file-mode PUT
-// of an invalid server.project_storage is refused with 400 and the field
+// of an invalid server.project_storage is refused with 422 and the field
 // errors, and nothing is written.
 func TestHandlePutServerConfig_ProjectStorageFieldsValidated(t *testing.T) {
 	for body, want := range invalidProjectStorageBodies {

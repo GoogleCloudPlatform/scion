@@ -11,6 +11,24 @@
 - All container images built and published to Artifact Registry (core-base, scion-base, scion-claude, scion-gemini, scion-opencode, scion-codex)
 
 ### Changed
+- **A project's default count limits now have an explicit Unlimited.** On the project settings
+  `PUT`, `defaultMaxTurns` and `defaultMaxModelCalls` now take `0` as Unlimited (an explicit "no
+  limit" that new agents get above the template, hub and Runtime Broker defaults) and `null` to
+  clear; `0` used to clear. A negative value is refused with `422`. **Reload any open hub web tabs
+  after upgrading:** a project settings page loaded before the upgrade sends `0` for an empty count
+  limit on every save, which now sets Unlimited for every new agent of the project. The Hub records
+  the audit event `project_settings_limit_unlimited` (and logs a warning) for such a change, so it
+  can be found and reverted. (ptone/scion#3925)
+- **Clearing one resources sub-field now applies at the next start.** A `config` PATCH whose
+  `resources` leaves out a sub-field the agent stores (requests or limits `cpu`/`memory`, or `disk`)
+  now clears just that sub-field, and the resource defaults fill it again at the next start, on a
+  Runtime Broker that advertises `clearedResourceSubfields`. Upgrade the Hub first, then the
+  brokers; with an older broker the clear still waits for the next reincarnation. A sub-field drop
+  that an older broker held before this change keeps its stale value until the agent is
+  reincarnated, because the Hub's inline config no longer holds that value and a later PATCH
+  cannot detect the drop. The Hub records such a clear on every broker, so an agent whose broker is
+  upgraded after the edit applies it at its next start, which can be earlier than the reincarnation
+  the edit was reported as waiting for. (ptone/scion#5676)
 - **`SCION_SHARED_WORKSPACE` removed.** The broker no longer sets `SCION_SHARED_WORKSPACE` in agent
   containers, and `sciontool init` no longer reads it. Use `SCION_WORKSPACE_MODE=shared-plain` with
   `SCION_WORKSPACE_GIT=true` to detect a shared git workspace. An agent image with this change,

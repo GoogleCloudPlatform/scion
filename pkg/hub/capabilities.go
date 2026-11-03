@@ -437,6 +437,17 @@ func delegatedCapabilities(ctx context.Context, resource Resource) *Capabilities
 	if !ok {
 		return none
 	}
+	// On a list route, a listed item carries the item filter's action, and
+	// only when the item filter allowed that item in this request; no
+	// other resource carries any action.
+	if entry.ItemFilter != "" {
+		c := listFilterCollectorFromContext(ctx)
+		action, ok := registryActionFor(entry.ItemFilter)
+		if c == nil || !ok || action == ActionAttach || !c.allowedItem(resource) {
+			return none
+		}
+		return &Capabilities{Actions: []string{string(action)}}
+	}
 	spec, ok := catalogOperationByID(entry.Operation)
 	if !ok {
 		return none

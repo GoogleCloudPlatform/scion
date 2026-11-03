@@ -154,7 +154,7 @@ func loadServerKeyring(cfg *config.GlobalConfig) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", config.KeyringFileKey, err)
 	}
-	if err := k.CheckSessionPilot(); err != nil {
+	if err := hub.CheckKeyringRelease(k); err != nil {
 		return fmt.Errorf("%s: %w", config.KeyringFileKey, err)
 	}
 	serverKeyring = k

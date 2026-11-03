@@ -427,6 +427,17 @@ func (a *FederationAuthenticator) AuthenticateWithOptions(tokenString string, op
 				return nil, fmt.Errorf("federation: email %q not in allowed_emails", email)
 			}
 		}
+		// allowed_domains applies to user identities, as on the external
+		// bearer path and in extractHubUserClaims: an empty list adds no
+		// constraint, the domain match is exact and case-insensitive, and
+		// an email domainOf cannot parse is refused. A service account
+		// identity is not subject to it.
+		if uid, ok := identity.(*FederatedUserIdentity); ok && len(entry.config.AllowedDomains) > 0 {
+			domain, parsed := domainOf(uid.Email())
+			if !parsed || !containsFold(entry.config.AllowedDomains, domain) {
+				return nil, fmt.Errorf("federation: email domain of %q not in allowed_domains", uid.Email())
+			}
+		}
 	}
 
 	// 10. Refuse principals that are not people, whatever the claims say

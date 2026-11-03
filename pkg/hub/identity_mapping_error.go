@@ -214,7 +214,8 @@ func identityMappingFailureText(err error) (string, bool) {
 // create. It is the hub's identity_not_mapped or identity_ksa_mismatch
 // message for a Kubernetes identity mapping refusal (ptone/scion#4024), the
 // code and filtered message of a broker 503 project_storage_unavailable
-// (brokerProjectStorageRefusal), otherwise err's own text, and "" for a nil
+// (brokerProjectStorageRefusal), the code and the hub's path-free text of a
+// broker 409 project_path_not_initialized, otherwise err's own text, and "" for a nil
 // err or a typed nil *brokerStatusError.
 func dispatchFailureText(err error) string {
 	if err == nil {
@@ -231,6 +232,11 @@ func dispatchFailureText(err error) string {
 	}
 	if _, code, msg, ok := brokerProjectStorageRefusal(err); ok {
 		return code + ": " + msg
+	}
+	// The broker's project_path_not_initialized text names a host path; the
+	// recorded text is the hub's own (ptone/scion#6647).
+	if isProjectPathNotInitialized(err) {
+		return projectPathNotInitializedErrorCode + ": " + projectPathRefusalGeneric
 	}
 	return err.Error()
 }

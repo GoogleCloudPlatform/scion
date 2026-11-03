@@ -67,6 +67,8 @@ export const LAUNCH_CODE_LABELS: Readonly<Record<string, string>> = {
   harness_config_unusable: 'the harness config cannot be used',
   agent_state_unavailable: "the agent's state on the broker is unavailable",
   agent_state_conflict: "the agent's state on the broker cannot be used",
+  project_path_not_initialized:
+    'the project path on the runtime broker is not initialized as a project',
   skill_resolution_failed: 'a required skill could not be resolved',
   storage_migration_required: "the agent's storage settings must be migrated first",
   image_pull_failed: 'the agent image could not be pulled',

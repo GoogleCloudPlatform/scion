@@ -15,14 +15,16 @@
 // Command delivery-census reports, READ-ONLY, which live agents on a hub
 // database the launch material delivery admission would refuse at start or
 // restart, which of those the fallback still serves (legacy_* cohorts: no
-// edge, sentinel edge, unadopted edge, adopted; and, counted separately, the
-// uat_created_no_deliver_mapping product-gap exception; see
-// pkg/hub/material_delivery_legacy.go), and which stay
+// edge, sentinel edge, unadopted edge, adopted; and uat_descendant_legacy,
+// counted separately; see pkg/hub/material_delivery_legacy.go), and which stay
 // withheld (deleted or held parent, held agent, duplicate edges, recorded
 // ceiling, ...), with counts by cohort and by deny cause with and without
 // the fallback. It runs hub.(*AuthzService).LaunchDeliveryCensus, the same
 // admission and fallback a start runs, and reads no secret or env value.
-// Not part of the product.
+// For agents created from a user access token it also reports the stored
+// role against the role their chain allows, and how many of their owner's
+// progeny-shared user secrets the start-time check admits (counts only, no
+// names). Not part of the product.
 //
 // The database is opened read-only: sqlite with mode=ro and query_only(1)
 // (entc.OpenSQLiteReadOnly), postgres with default_transaction_read_only=on
@@ -34,8 +36,9 @@
 // Pass -dev-auth when the hub runs with dev auth (the workstation server),
 // because the admission refuses local-development provenance without it.
 // Output: a summary (counts by cohort and cause) on stdout, then one TSV row
-// per agent not served by the strict admission (fallback and withheld); -all
-// adds the agents that deliver; -json prints the
+// per agent not served by the strict admission (fallback and withheld) and
+// per agent created from a user access token; -all adds the other agents
+// that deliver; -json prints the
 // whole report as JSON instead.
 package main
 
@@ -137,8 +140,12 @@ func withQueryParam(dsn, key, value string) string {
 func writeText(w io.Writer, rep *hub.LaunchDeliveryCensusReport, devAuth, all bool) error {
 	o := &textOut{w: w}
 	o.printf("# launch delivery census (read-only), dev_auth=%t\n", devAuth)
-	o.printf("agents\t%d\nwithheld\t%d\nlegacy_fallback\t%d\nproduct_gap_uat_no_deliver_mapping\t%d\nstrict_withheld\t%d\n",
-		rep.Agents, rep.Withheld, rep.Fallback, rep.ProductGap, rep.StrictWithheld)
+	o.printf("agents\t%d\nwithheld\t%d\nlegacy_fallback\t%d\nstrict_withheld\t%d\nuat_descendant_legacy\t%d\n",
+		rep.Agents, rep.Withheld, rep.Fallback, rep.StrictWithheld, rep.UATDescendantLegacy)
+	o.printf("%s\n", "# agents created from a user access token (intrinsic set)")
+	o.printf("uat_created\t%d\nuat_role_filtered\t%d\nuat_owner_shared_rows\t%d\nuat_owner_shared_admitted\t%d\nuat_owner_shared_intrinsic\t%d\nuat_root_not_admitted\t%d\nscheduler_uat_initiated\t%d\n",
+		rep.UATCreated, rep.UATRoleFiltered, rep.UATOwnerSharedRows, rep.UATOwnerSharedAdmitted, rep.UATOwnerSharedIntrinsic,
+		rep.UATRootNotAdmitted, rep.SchedulerUATInitiated)
 	o.printf("%s\n", "# by cohort")
 	for _, k := range sortedKeys(rep.ByCohort) {
 		o.printf("cohort\t%s\t%d\n", k, rep.ByCohort[k])
@@ -152,12 +159,13 @@ func writeText(w io.Writer, rep *hub.LaunchDeliveryCensusReport, devAuth, all bo
 		o.printf("strict_cause\t%s\t%d\n", k, rep.ByStrictCause[k])
 	}
 	o.printf("%s\n", "# rows")
-	cols := []string{"agent_id", "project_id", "owner_id", "phase", "cohort", "strict_cohort", "edges", "delegator", "role", "prov_version", "source_kind", "ceiling_kind"}
+	cols := []string{"agent_id", "project_id", "owner_id", "phase", "cohort", "strict_cohort", "edges", "delegator", "role", "prov_version", "source_kind", "ceiling_kind",
+		"initiator_kind", "uat_stored_role", "uat_filtered_role", "uat_owner_shared", "uat_owner_admitted", "uat_owner_intrinsic"}
 	cols = append(cols, hub.LaunchDeliveryCensusPermissions...)
 	cols = append(cols, "first_reason")
 	o.printf("%s\n", strings.Join(cols, "\t"))
 	for _, r := range rep.Rows {
-		if r.Cohort == "delivers" && !all {
+		if r.Cohort == "delivers" && r.UAT == nil && !all {
 			continue
 		}
 		e := r.Edge
@@ -166,7 +174,12 @@ func writeText(w io.Writer, rep *hub.LaunchDeliveryCensusReport, devAuth, all bo
 			delegator = e.DelegatorType + ":" + e.DelegatorID
 		}
 		f := []string{r.AgentID, r.ProjectID, r.OwnerID, r.Phase, r.Cohort, r.StrictCohort, fmt.Sprint(e.ActiveEdges), delegator, e.Role,
-			fmt.Sprint(e.ProvenanceVersion), e.SourceCredentialKind, e.CeilingKind}
+			fmt.Sprint(e.ProvenanceVersion), e.SourceCredentialKind, e.CeilingKind, e.InitiatorCredentialKind}
+		if u := r.UAT; u != nil {
+			f = append(f, u.StoredRole, u.FilteredRole, fmt.Sprint(u.OwnerSharedRows), fmt.Sprint(u.OwnerSharedAdmitted), fmt.Sprint(u.OwnerSharedIntrinsic))
+		} else {
+			f = append(f, "-", "-", "-", "-", "-")
+		}
 		reason := r.MintError
 		for _, p := range hub.LaunchDeliveryCensusPermissions {
 			v, ok := r.Verdicts[p]

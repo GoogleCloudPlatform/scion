@@ -316,7 +316,7 @@ func TestBinaryUpdate_Success(t *testing.T) {
 		t.Fatalf("calls = %v, want %v", inst.calls, want)
 	}
 	if hooked == nil || *hooked != (PendingRestart{From: "nightly-20261022", To: "nightly-20261023", Strategy: "fake",
-		Channel: "nightly", Pin: PinLatest}) {
+		Mode: UpdateModeRelease, Channel: "nightly", Pin: PinLatest}) {
 		t.Fatalf("hook got %+v", hooked)
 	}
 	if !strings.Contains(string(inst.stagedBin), `"version":"nightly-20261023"`) {
@@ -795,7 +795,7 @@ func TestBinaryUpdate_RollbackRunsWhenRunCtxIsCancelled(t *testing.T) {
 		e := newTestExecutor(newFakeGitHub(t), inst, "nightly-20261022")
 		parent, cancel := context.WithCancel(context.WithValue(context.Background(), testCtxKey{}, "trace-1"))
 		cancel()
-		err := e.undoActivation(parent, &bytes.Buffer{}, "nightly-20261023", errors.New("hook failed"))
+		err := e.undoActivation(parent, &bytes.Buffer{}, "nightly-20261023", nil, errors.New("hook failed"))
 		if err == nil || !strings.Contains(err.Error(), "rolled back, nothing changed") {
 			t.Fatalf("err = %v, want a completed rollback", err)
 		}

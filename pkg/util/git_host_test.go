@@ -123,6 +123,7 @@ func TestHostGitArgs(t *testing.T) {
 		"-c", "merge.verifySignatures=false",
 		"-c", "commit.gpgsign=false",
 		"-c", "tag.gpgsign=false",
+		"-c", "http.emptyAuth=false",
 	}
 	if got := HostGitArgs(); !reflect.DeepEqual(got, want) {
 		t.Errorf("HostGitArgs() = %q, want %q", got, want)
@@ -235,7 +236,11 @@ func TestHostGitCommand_PolicyRefuses(t *testing.T) {
 				t.Run(name, func(t *testing.T) {
 					repo, _ := newHostGitRepo(t)
 					hostRunGit(t, repo, "config", c.key, c.value)
-					_, err := HostGitCommand(context.Background(), repo, HostGitOptions{Policy: mode, Network: network}, "status")
+					opts := HostGitOptions{Policy: mode, Network: network}
+					if network {
+						opts.Remote = NewHostGitRemote("https://git.example.test/r.git", "")
+					}
+					_, err := HostGitCommand(context.Background(), repo, opts, "status")
 					var refused *RepoConfigRefusedError
 					if !errors.As(err, &refused) {
 						t.Fatalf("error = %v, want *RepoConfigRefusedError", err)
@@ -354,7 +359,7 @@ func TestHostGitCommand_GlobalKeysNotChecked(t *testing.T) {
 	hostRunGit(t, repo, "config", "--file", global, "url.https://mirror.example/.insteadOf", "https://github.com/")
 	hostRunGit(t, repo, "config", "--file", global, "credential.helper", "store")
 	hostRunGit(t, repo, "config", "--file", global, "core.sshCommand", "ssh -v")
-	if _, err := HostGitCommand(context.Background(), repo, HostGitOptions{Policy: RepoPolicyManaged, Network: true}, "fetch"); err != nil {
+	if _, err := HostGitCommand(context.Background(), repo, HostGitOptions{Policy: RepoPolicyManaged, Network: true, Remote: NewHostGitRemote("https://git.example.test/r.git", "")}, "fetch"); err != nil {
 		t.Fatalf("global keys triggered a refusal: %v", err)
 	}
 }
@@ -593,6 +598,125 @@ func TestPullSharedWorkspace_ConfiguredUpstreamBranch(t *testing.T) {
 	}
 }
 
+// A workspace whose config the policy refuses is refused at the pull's first
+// local step, so a detached workspace reports the refusal (naming the key,
+// never the value) rather than that it is not on a branch.
+// Mutant this catches: the branch lookup back on raw hostGit (no policy
+// check), which reports "not on a branch" for (b).
+func TestPullSharedWorkspace_RefusedConfigRefusedBeforeBranchLookup(t *testing.T) {
+	const sentinel = "SCIONSENTINEL7f3a"
+	source, workspace, _ := sharedWorkspaceFixture(t)
+	hostRunGit(t, workspace, "checkout", "-q", "--detach")
+
+	// (a) Control: clean config, detached HEAD.
+	_, err := PullSharedWorkspace(workspace, source, "")
+	if err == nil || !strings.Contains(err.Error(), "not on a branch") {
+		t.Fatalf("control: PullSharedWorkspace error = %v, want \"not on a branch\"", err)
+	}
+
+	// (b) The same workspace with a key the managed policy refuses.
+	cfg := filepath.Join(workspace, ".git", "config")
+	data, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, []byte("[core]\n\tsshCommand = ssh -i /nonexistent/"+sentinel+"\n")...)
+	if err := os.WriteFile(cfg, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = PullSharedWorkspace(workspace, source, "")
+	if err == nil {
+		t.Fatal("PullSharedWorkspace succeeded with a refused workspace config")
+	}
+	msg := err.Error()
+	if !strings.Contains(strings.ToLower(msg), "core.sshcommand") {
+		t.Errorf("error = %q, want it to name core.sshCommand", msg)
+	}
+	if strings.Contains(msg, "not on a branch") {
+		t.Errorf("error = %q, want the refusal, not \"not on a branch\"", msg)
+	}
+	if strings.Contains(msg, sentinel) {
+		t.Errorf("error %q prints the refused value", msg)
+	}
+}
+
+// A workspace cloned from an empty repository is on an unborn branch; its
+// first pull updates it and reports Updated.
+// Mutant this catches: the HEAD reads returning "" on a non-zero exit (on an
+// unborn branch rev-parse prints HEAD and exits non-zero), which makes
+// Updated false.
+func TestPullSharedWorkspace_EmptySourceFirstCommitUpdates(t *testing.T) {
+	hostGitTestEnv(t)
+	source := filepath.Join(t.TempDir(), "source")
+	hostRunGit(t, filepath.Dir(source), "init", "-q", "-b", "main", source)
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	if err := CloneSharedWorkspace(workspace, source, "feature", ""); err != nil {
+		t.Fatalf("CloneSharedWorkspace: %v", err)
+	}
+	hostRunGit(t, source, "checkout", "-q", "-b", "feature")
+	commitFile(t, source, "first.txt", "first\n", "first commit")
+
+	result, err := PullSharedWorkspace(workspace, source, "")
+	if err != nil {
+		t.Fatalf("PullSharedWorkspace: %v", err)
+	}
+	if !result.Updated {
+		t.Errorf("result = %+v, want Updated", result)
+	}
+	if got, want := hostRunGit(t, workspace, "rev-parse", "HEAD"), hostRunGit(t, source, "rev-parse", "HEAD"); got != want {
+		t.Errorf("workspace HEAD = %s, want the source commit %s", got, want)
+	}
+}
+
+// The clone's fallback branch checkout keeps host global config isolated, as
+// the clone does: a host branch.autoSetupMerge=inherit does not give the new
+// branch the default branch's upstream.
+// Mutant this catches: the checkout running with baseEnv instead of the
+// remote layer. The checkout would then write branch.<name>.merge, a
+// sensitive key, so the test fails either at the clone (the door's after-run
+// check) or at the config assertion.
+func TestCloneSharedWorkspace_FallbackCheckoutIgnoresHostGlobalConfig(t *testing.T) {
+	source, _ := newHostGitRepo(t)
+	global := os.Getenv("GIT_CONFIG_GLOBAL")
+	f, err := os.OpenFile(global, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("[branch]\n\tautoSetupMerge = inherit\n"); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	if err := CloneSharedWorkspace(workspace, source, "not-on-remote", ""); err != nil {
+		t.Fatalf("CloneSharedWorkspace: %v", err)
+	}
+	if got := hostRunGit(t, workspace, "branch", "--show-current"); got != "not-on-remote" {
+		t.Fatalf("branch = %q, want not-on-remote", got)
+	}
+	out, err := exec.Command("git", "-C", workspace, "config", "--get", "branch.not-on-remote.merge").CombinedOutput()
+	if err == nil {
+		t.Errorf("branch.not-on-remote.merge = %q, want unset (the checkout read host global config)", strings.TrimSpace(string(out)))
+	}
+}
+
+// An upstream branch name that does not make a valid tracking ref fails the
+// pull before the fetch.
+// Mutant this catches: dropping the check-ref-format step (the error would
+// not name the invalid branch).
+func TestPullSharedWorkspace_InvalidUpstreamBranchName(t *testing.T) {
+	source, workspace, _ := sharedWorkspaceFixture(t)
+	branch := hostRunGit(t, workspace, "symbolic-ref", "--short", "HEAD")
+	hostRunGit(t, workspace, "config", "branch."+branch+".merge", "refs/heads/a..b")
+
+	_, err := PullSharedWorkspace(workspace, source, "")
+	if err == nil || !strings.Contains(err.Error(), `invalid branch name "a..b"`) {
+		t.Fatalf("PullSharedWorkspace error = %v, want the invalid branch name refusal", err)
+	}
+}
+
 // Host-side worktree creation leaves ordinary git use in the worktree
 // unchanged: commit, push, fetch and rebase work.
 func TestCreateWorktree_WorktreeSupportsCommitPushFetchRebase(t *testing.T) {
@@ -634,7 +758,11 @@ func TestCreateWorktree_WorktreeSupportsCommitPushFetchRebase(t *testing.T) {
 func TestHostGitCommand_CarriesFixedArgs(t *testing.T) {
 	repo, _ := newHostGitRepo(t)
 	for _, network := range []bool{false, true} {
-		cmd, err := HostGitCommand(context.Background(), repo, HostGitOptions{Network: network}, "merge", "--ff-only", "HEAD")
+		opts := HostGitOptions{Network: network}
+		if network {
+			opts.Remote = NewHostGitRemote("https://git.example.test/r.git", "")
+		}
+		cmd, err := HostGitCommand(context.Background(), repo, opts, "merge", "--ff-only", "HEAD")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -732,6 +860,29 @@ func TestHostGitEnv(t *testing.T) {
 	want := []string{"HOME=/h", "PATH=/bin", "GIT_CONFIG_GLOBAL=/g", "GIT_CONFIG_NOSYSTEM=1", "GIT_SSH_COMMAND=ssh", "GIT_TERMINAL_PROMPT=0", "LC_ALL=C"}
 	if got := HostGitEnv(in); !reflect.DeepEqual(got, want) {
 		t.Errorf("HostGitEnv = %q, want %q", got, want)
+	}
+}
+
+// HostGitEnv drops every host authentication variable no host-side git call
+// relies on, one row each, and the TLS client certificate variables (GIT_*,
+// not kept).
+// Mutants this catches, one per row: deleting the SSH_AUTH_SOCK, SSH_ASKPASS,
+// NETRC, GSS_USE_PROXY, KRB5CCNAME, KRB5_CLIENT_KTNAME or remote-layer marker
+// entry from hostGitEnvDropped; adding GIT_SSL_CERT, GIT_SSL_KEY,
+// GIT_SSL_CERT_PASSWORD_PROTECTED or GIT_SSL_NO_VERIFY to hostGitEnvKept.
+func TestHostGitEnv_DropsHostAuthVariables(t *testing.T) {
+	for _, key := range []string{
+		"SSH_AUTH_SOCK", "SSH_ASKPASS", "NETRC", "GSS_USE_PROXY", "KRB5CCNAME", "KRB5_CLIENT_KTNAME",
+		hostGitRemoteLayerEnv,
+		"GIT_SSL_CERT", "GIT_SSL_KEY", "GIT_SSL_CERT_PASSWORD_PROTECTED", "GIT_SSL_NO_VERIFY",
+	} {
+		t.Run(key, func(t *testing.T) {
+			got := HostGitEnv([]string{"PATH=/bin", key + "=x", "LC_ALL=de_DE.UTF-8"})
+			want := []string{"PATH=/bin", "LC_ALL=C"}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("HostGitEnv = %q, want %q (%s dropped, LC_ALL=C kept)", got, want, key)
+			}
+		})
 	}
 }
 
@@ -958,7 +1109,7 @@ func TestHostGitCommand_ChecksMainWorktreeConfig(t *testing.T) {
 // A remote operation carries the transport allow-list.
 func TestHostGitCommand_NetworkTransportAllowlist(t *testing.T) {
 	repo, _ := newHostGitRepo(t)
-	cmd, err := HostGitCommand(context.Background(), repo, HostGitOptions{Network: true}, "fetch")
+	cmd, err := HostGitCommand(context.Background(), repo, HostGitOptions{Network: true, Remote: NewHostGitRemote("https://git.example.test/r.git", "")}, "fetch")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1284,7 +1435,7 @@ func TestSafeGitCommandBuilderSkipsLFSSmudge(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !slices.Contains(cmd.Env, "GIT_LFS_SKIP_SMUDGE=1") {
-		t.Errorf("env lacks GIT_LFS_SKIP_SMUDGE=1: %v", cmd.Env)
+		t.Errorf("env lacks GIT_LFS_SKIP_SMUDGE=1 (env not printed: it is the real process environment)")
 	}
 }
 

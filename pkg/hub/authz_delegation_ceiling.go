@@ -244,6 +244,9 @@ func (a *AuthzService) checkUserSecretParentCeiling(
 	}
 	d, hop := a.evaluateUserSecretParentCeiling(ctx, principal, req.Resource, explain)
 	if d.Allowed {
+		if d.uatIntrinsic {
+			a.recordUATIntrinsic(ctx, secretUsePermission, uatIntrinsicPathStep10)
+		}
 		return true, "user secret parent ceiling passed", nil
 	}
 	setCause(d.DenyCause)
@@ -272,7 +275,7 @@ func descendantReadPassesHop(edge *store.DelegationEdge, permissionID string, de
 	if !descendantRead || permissionID != permissionAgentRead || edge == nil || edge.Kind != store.EffectCeilingBounded {
 		return false
 	}
-	frozen, ok := edge.Frozen()
+	frozen, ok := uatHopEffectCeiling(edge.DelegatorType, edge.DelegatorID, edge.AuthorityProvenance, edge.EffectCeiling).Frozen()
 	if !ok {
 		return false
 	}
@@ -649,8 +652,9 @@ func adoptionCeilingCovers(permissionID string) bool {
 //     missing or inactive delegator);
 //   - a hop whose provenance version is not understood denies every
 //     permission in recordedProvenanceRequired;
-//   - a bounded hop denies a permission its ceiling does not allow, with the
-//     self-operation exception only when the resource is the acting agent;
+//   - a bounded hop denies a permission its ceiling (uatHopEffectCeiling)
+//     does not allow, with the self-operation exception only when the
+//     resource is the acting agent;
 //   - an unrecorded hop denies every permission in
 //     recordedProvenanceRequired or legacyChainExcludedPermissions and
 //     passes the rest;
@@ -691,7 +695,7 @@ func hopEffectCeilingDenyFor(edge *store.DelegationEdge, permissionID string, re
 			return "", ""
 		}
 		selfTarget := resource.Type == "agent" && resource.ID != "" && resource.ID == actingAgentID
-		if !EffectCeilingAllows(edge.EffectCeiling, permissionID, selfTarget) {
+		if !EffectCeilingAllows(uatHopEffectCeiling(edge.DelegatorType, edge.DelegatorID, edge.AuthorityProvenance, edge.EffectCeiling), permissionID, selfTarget) {
 			return DenyCauseCeilingEffectExceeded, fmt.Sprintf("delegation ceiling: %s is outside the frozen effect ceiling", permissionID)
 		}
 		return "", ""

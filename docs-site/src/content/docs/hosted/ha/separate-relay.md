@@ -15,7 +15,7 @@ A relay is **policy-free**:
 
 - **Admission.** The relay forwards the dialer's credential headers to a hub, and the hub decides whether to admit the dialer and as whom. Only an allowlist of credential headers is forwarded, and proxy identity headers never are.
 - **RPCs and refreshes.** The hub answers every RPC a user sends on a relay-held session and checks every in-band credential refresh.
-- **Re-checks.** The relay schedules re-checks of its sessions and user streams: periodically, on the hub's revocation events, and whenever its event connection reconnects. The hub evaluates each one, and the relay acts on the answer: close, renew or keep.
+- **Re-checks.** The relay schedules re-checks of its sessions and user streams: periodically, on the hub's revocation events (`conduit.authz.changed`, `agent.*.deleted`, `agent.*.ports`, `project.*.deleted`, `conduit.broker.changed`), and whenever its event connection reconnects. The hub evaluates each one, and the relay acts on the answer: close, renew or keep. When a Conduit grant signing key is rotated (`POST /api/v1/admin/conduit/grant-keys/rotate`) or revoked (`POST /api/v1/admin/conduit/grant-keys/revoke` with `{"kid": "..."}`), the hub publishes `conduit.grant_keys.changed` (`{"kid": "<kid>"}`): each hub node that receives it (or reconnects its `LISTEN` connection) invalidates its cached grant key ring so the next use reloads the ring from the store, and each relay (`followGrantKeys` / `NotifyGrantKeysChanged`) sends `GrantKeysChanged` on every `conduit.grant_keys.changed` event and every `LISTEN` reconnect to its live `stream_renewal.v2` target sessions so targets fetch the updated public keys from `GET /api/v1/conduit/grant-keys` at once.
 
 The relay keeps each session's hub admission token and presents it unchanged. It never opens, parses or logs it.
 
@@ -47,7 +47,7 @@ Proxy ingress needs HMAC relay-peer authentication (`server.hub.conduit.peer_aut
 A relay reads its own configuration file, never the hub's. It needs:
 
 - `server.relay.hub_internal_url`: the hub internal API, reachable only inside the cluster or VPC. It must be `https://` unless its host is loopback (a loopback IP literal: 127.0.0.0/8 or `::1`, not `localhost`).
-- `server.relay.public_url`: the URL dialers reach this relay at.
+- `server.relay.public_url`: the URL dialers reach this relay at. The relay admits a conduit dial on its public listener only over TLS, from its own host, or from a trusted TLS-terminating proxy; any other dial gets `403` `transport_not_confidential` before admission. While `server.trusted_proxies` is not set, only a proxy on the relay's own host (`127.0.0.1`, `::1`) is trusted; a relay behind a TLS terminator on another host works only when the terminator's addresses are listed there, and `[]` trusts no proxy.
 - `server.hub.conduit.peer_secret`: the same secret the hubs use.
 - `server.hub.conduit.internal_listen`, and `internal_advertise` where the bound address is not reachable: the relay internal API that the hubs and other relays call.
 - `server.hub.conduit.internal_tls_cert_file` and `internal_tls_key_file`, unless `internal_listen` is a loopback address (a loopback IP literal: 127.0.0.0/8 or `::1`, not `localhost`), and `internal_tls_ca_file` for a private or internal CA (on the hubs too). The relay and the hubs refuse a plaintext internal hop to a host that is not loopback; see [TLS on the internal hop](/scion/reference/server-config/#conduit-serverhubconduit).

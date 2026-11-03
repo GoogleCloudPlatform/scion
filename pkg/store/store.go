@@ -1958,8 +1958,9 @@ type BrokerDispatchStore interface {
 	// "pending", or "failed" with reason == expiredReason, by the pre-fix
 	// nc-promote-busy bug (a storeMsg persisted without stamping
 	// DispatchState). The exact complement of ExpireStuckPendingMessages'
-	// and PurgeFailedMessages' agent-only scoping: only an agent recipient
-	// is ever legitimately in either state. Returns the number repaired.
+	// and ChatRetentionStore.SelectFailedMessages' agent-only scoping: only
+	// an agent recipient is ever legitimately in either state. Returns the
+	// number repaired.
 	BackfillNonAgentDispatchState(ctx context.Context, expiredReason string) (int, error)
 }
 
@@ -1981,11 +1982,12 @@ type TemplateStore interface {
 	//
 	// It does not write the content columns: Files, ContentHash, the
 	// fields derived from the files (Harness, DefaultHarnessConfig,
-	// AgentConfig), and the storage location of the files (Layout,
-	// StoragePath, StorageBucket, StorageURI). Those are written only by
-	// CreateTemplate and UpdateTemplateContent, so a metadata edit can
-	// never revert a concurrent commit or point a blob-layout row back at a
-	// legacy path (ptone/scion#4221).
+	// AgentConfig), the storage location of the files (Layout,
+	// StoragePath, StorageBucket, StorageURI), and the commit's SourceURL
+	// and Status. Those are written only by CreateTemplate and
+	// UpdateTemplateContent, so a metadata edit can never revert a
+	// concurrent commit or point a blob-layout row back at a legacy path
+	// (ptone/scion#4221, ptone/scion#4967).
 	UpdateTemplate(ctx context.Context, template *Template) error
 
 	// UpdateTemplateContent writes the columns a commit owns (Files,
@@ -2095,13 +2097,14 @@ type HarnessConfigStore interface {
 	GetHarnessConfigBySlug(ctx context.Context, slug, scope, scopeID string) (*HarnessConfig, error)
 
 	// UpdateHarnessConfig updates an existing harness config's metadata
-	// (name, slug, display name, description, scope, owner, source URL,
-	// image status and the audit fields). It does not write the content
-	// columns (Files, ContentHash, Harness, Config, Status, Layout,
-	// StorageURI, StorageBucket, StoragePath) nor BuiltImage (ptone/scion#4219): those
-	// change only through UpdateHarnessConfigContent and
-	// UpdateHarnessConfigBuiltImage, so a metadata write from a stale read
-	// cannot revert a commit.
+	// (name, slug, display name, description, scope, owner and the audit
+	// fields). It does not write the content columns (Files, ContentHash,
+	// Harness, Config, Status, SourceURL, Layout, StorageURI, StorageBucket,
+	// StoragePath) nor BuiltImage (ptone/scion#4219), ImageStatus or
+	// ImageStatusCheckedAt (ptone/scion#4967): those change only through
+	// UpdateHarnessConfigContent, UpdateHarnessConfigBuiltImage and
+	// UpdateHarnessConfigImageStatus, so a metadata write from a stale read
+	// cannot revert a commit or an image check.
 	// Returns ErrNotFound if the harness config doesn't exist.
 	UpdateHarnessConfig(ctx context.Context, hc *HarnessConfig) error
 
@@ -3117,12 +3120,12 @@ type ScheduleStore interface {
 	ListActiveZonePrefixedSchedules(ctx context.Context, limit int, excludeIDs []string) ([]Schedule, error)
 
 	// UpdateSchedule writes the schedule's mutable fields named by `fields`
-	// (name, cron_expr, event_type, payload, status, next_run_at) from
-	// `schedule`; the Status field also writes status_reason from
-	// schedule.StatusReason, so a status and its reason are always written
-	// together. A field not named in `fields` is left completely untouched
-	// in the row, so a struct built from a stale read can never revert a
-	// column this call didn't intend to change.
+	// (name, cron_expr, time_zone, event_type, payload, status,
+	// next_run_at) from `schedule`; the Status field also writes
+	// status_reason from schedule.StatusReason, so a status and its reason
+	// are always written together. A field not named in `fields` is left
+	// completely untouched in the row, so a struct built from a stale read
+	// can never revert a column this call didn't intend to change.
 	//
 	// The write is ALWAYS conditioned on the schedule's current
 	// authorization_revision matching prevRevision (or being NULL, when
@@ -3304,17 +3307,6 @@ type MessageStore interface {
 
 	// MarkAllMessagesRead marks all messages for a recipient as read.
 	MarkAllMessagesRead(ctx context.Context, recipientID string) error
-
-	// PurgeOldMessages removes read messages older than readCutoff and
-	// unread messages older than unreadCutoff. Returns count removed.
-	PurgeOldMessages(ctx context.Context, readCutoff time.Time, unreadCutoff time.Time) (int, error)
-
-	// PurgeFailedMessages removes messages with dispatch_state="failed" whose
-	// created timestamp is before cutoff. Returns the number of messages
-	// removed. Unlike PurgeOldMessages (read/unread semantics, which would
-	// also delete successfully delivered history), this filters strictly on
-	// dispatch_state so delivered messages are never touched.
-	PurgeFailedMessages(ctx context.Context, cutoff time.Time) (int, error)
 
 	// SetMessageConversationID updates the conversation_id on an existing
 	// message. Used by the Phase 4 backfill to link legacy messages to
@@ -3615,6 +3607,38 @@ const HubSettingsRevisionSection = "_settings_revision"
 // settings after a delete instead.
 type HubSettingRevisionDeleter interface {
 	DeleteHubSettingRevision(ctx context.Context, section string) (int64, error)
+}
+
+// HubSettingWrite is one section write of a guarded batch
+// (HubSettingGuardedBatchWriter). ExpectedRevision has UpsertHubSetting's
+// meaning: -1 unconditional, 0 create-only, >0 the current revision. A
+// Delete write removes the row instead (Value unused): the row must exist,
+// at ExpectedRevision unless that is -1 (a missing row is then
+// ErrNotFound), and its returned HubSetting has only Section and
+// SettingsRevision set.
+type HubSettingWrite struct {
+	Section          string
+	Value            json.RawMessage
+	ExpectedRevision int64
+	Delete           bool
+}
+
+// HubSettingGuardedBatchWriter is an optional HubSettingStore method: write
+// several sections in one transaction, guarded by the revisions of other
+// sections the caller read to validate the write. Guarded batches are
+// serialized against each other (on Postgres by a transaction-scoped
+// advisory lock, which also covers a read section with no row), every
+// existing written and read row is locked, and all are compared inside the
+// transaction: a read section must still be at its given revision (0: it
+// must not exist), and each write's ExpectedRevision must hold. Any
+// mismatch returns ErrRevisionConflict and writes nothing. The
+// operational-settings revision is bumped once for the batch and returned
+// in every row's SettingsRevision. A section may appear once, as a write
+// or as a read; HubSettingsRevisionSection may not appear. The rows are
+// returned in the order of writes.
+type HubSettingGuardedBatchWriter interface {
+	UpsertHubSettingsGuarded(ctx context.Context, writes []HubSettingWrite, reads map[string]int64,
+		updatedBy, origin string) ([]HubSetting, error)
 }
 
 // HubSettingStore defines persistence operations for operational hub settings.

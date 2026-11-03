@@ -381,9 +381,10 @@ func (s *Server) handleCreateAgentDelegation(w http.ResponseWriter, r *http.Requ
 		if result.OK {
 			continue
 		}
-		if result.Reason == MintDenialProjectAccessRequired {
-			// The uniform answer UAT mint gives, so the response does not
-			// confirm whether the project exists.
+		if uniformMintRefusal(boundary, result.Reason) {
+			// For a project boundary, the uniform answer token mint gives,
+			// so the response does not confirm whether the project exists.
+			// A hub-boundary denial names the selector and its reason.
 			refuse(http.StatusForbidden, ErrCodeForbidden, "forbidden", nil)
 			return
 		}

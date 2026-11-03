@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -351,15 +352,31 @@ func healthSummaryBrokersLine(s *hubclient.HealthSummary, verbose bool) string {
 	if b.NotReported {
 		return "Runtime broker data not available"
 	}
-	online := 0
+	online, noCommands := 0, 0
 	for _, it := range b.Items {
 		if it.Status == "online" {
 			online++
+			if brokerCommandPath(it) == commandPathNo {
+				noCommands++
+			}
 		}
 	}
 	line := fmt.Sprintf("%d of %d listed online, %d registered", online, len(b.Items), b.Total)
+	if noCommands > 0 {
+		line += fmt.Sprintf(", %d online but cannot receive commands", noCommands)
+	}
 	if b.Truncated {
 		line += " (list truncated)"
+	}
+	profileWarnings := false
+	for _, it := range b.Items {
+		for _, w := range brokerProfileRuntimeWarnings(it) {
+			line += "\n    " + w
+			profileWarnings = true
+		}
+	}
+	if profileWarnings {
+		line += "\n    " + brokerProfileRuntimeNameNote
 	}
 	if !verbose {
 		return line
@@ -402,6 +419,11 @@ func healthSummaryBrokerRow(b hubclient.HealthSummaryBroker) string {
 		parts = append(parts, self)
 	} else {
 		parts = append(parts, "self-health not reported")
+	}
+	if b.Status == "online" {
+		if cp := brokerCommandPath(b); cp != "" {
+			parts = append(parts, "commands "+cp)
+		}
 	}
 	parts = append(parts, fmt.Sprintf("agents running %d, attention %d", b.Agents.Running, b.Agents.Attention))
 	if b.LastHeartbeat != nil {
@@ -529,6 +551,54 @@ func healthSummaryInstancesLine(s *hubclient.HealthSummary) string {
 		line += "\n    " + strings.Join(parts, "; ")
 	}
 	return line
+}
+
+// brokerCommandPath is whether the hub can send commands to broker b, from
+// its self-reported control_channel check (brokerReportedCommandPath):
+// yes or no, or "" when there is nothing to report (an older broker, no
+// control channel, or starting within its grace). Only fixed words are
+// returned.
+func brokerCommandPath(b hubclient.HealthSummaryBroker) string {
+	if b.Health == nil {
+		return ""
+	}
+	word := brokerReportedCommandPath(&api.BrokerHealthReport{Checks: b.Health.Checks})
+	if word == commandPathNotReported {
+		return ""
+	}
+	return word
+}
+
+// brokerProfileRuntimeCheckPrefix starts a broker self-health check that
+// reports a profile whose runtime is not available on that broker
+// (ptone/scion#7010).
+const brokerProfileRuntimeCheckPrefix = "profile_runtime."
+
+// brokerProfileRuntimeNameNote explains the profile names in the
+// profile_runtime lines: they are check names, not always the exact
+// profile name.
+const brokerProfileRuntimeNameNote = "(profile names are shown reduced to letters, digits, '_', '.' and '-'; a -2, -3 suffix marks a same-named profile with other runtime settings in another project)"
+
+// brokerProfileRuntimeWarnings returns one line per profile the broker
+// reports as having an unavailable runtime, sorted by profile name.
+func brokerProfileRuntimeWarnings(b hubclient.HealthSummaryBroker) []string {
+	if b.Health == nil {
+		return nil
+	}
+	name := b.Name
+	if name == "" {
+		name = b.ID
+	}
+	var out []string
+	for check, value := range b.Health.Checks {
+		profile, ok := strings.CutPrefix(check, brokerProfileRuntimeCheckPrefix)
+		if !ok || profile == "" || value != "unavailable" {
+			continue
+		}
+		out = append(out, fmt.Sprintf("broker %s: the runtime of profile %s is not available on this broker; check the profile's runtime configuration if agents use it", name, profile))
+	}
+	sort.Strings(out)
+	return out
 }
 
 // nonHealthyCheckList lists "name: value" for every check that did not

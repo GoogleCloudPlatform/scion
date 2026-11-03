@@ -2469,8 +2469,18 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			}
 			broker.Status = store.BrokerStatusOnline
 			broker.ConnectionState = "connected"
-			broker.Capabilities = req.Broker.Capabilities
-			broker.Profiles = req.Broker.Profiles
+			// A re-register that sends no capabilities keeps the stored
+			// ones; capabilities it sends replace them.
+			if req.Broker.Capabilities != nil {
+				broker.Capabilities = req.Broker.Capabilities
+			}
+			// A re-register that sends no profiles (absent, null or an
+			// empty list) keeps the stored ones; heartbeats do not carry
+			// profiles, only a broker join or server start rewrites them.
+			// A non-empty list replaces them.
+			if len(req.Broker.Profiles) > 0 {
+				broker.Profiles = req.Broker.Profiles
+			}
 
 			if err := s.store.UpdateRuntimeBroker(ctx, broker); err != nil {
 				writeErrorFromErr(w, err, "")
@@ -2554,11 +2564,19 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 
 		// Generate HMAC credentials for the broker if broker auth service is available
 		// (deprecated flow only - new flow gets secrets from /brokers/join).
-		// The response carries a secret only when this request minted the
-		// broker's first one. A broker that already has a secret gets none
-		// back: its stored secret is never returned here, and a new one comes
-		// only from POST /brokers/{id}/rotate-secret or /brokers/join.
-		if s.brokerAuthService != nil {
+		// The response carries a secret only when BOTH hold:
+		//  - transport policy: the request arrived over TLS or from this host
+		//    (config.ConfidentialArrival), as for join and rotate. Otherwise the
+		//    project and broker are still registered, no secret is minted or
+		//    returned, and the broker gets its secret by joining;
+		//  - this request minted the broker's first secret. A broker that already
+		//    has a secret gets none back: its stored secret is never returned here,
+		//    and a new one comes only from POST /brokers/{id}/rotate-secret or
+		//    /brokers/join.
+		if !config.ConfidentialArrival(r, s.transportTrustedNets) {
+			slog.Warn("Project register: broker secret withheld; the request did not arrive over TLS or from this host",
+				"brokerID", broker.ID, "remote_addr", r.RemoteAddr)
+		} else if s.brokerAuthService != nil {
 			var err error
 			secretKey, _, err = s.brokerAuthService.MintSecretIfAbsent(ctx, broker.ID)
 			if err != nil {
@@ -3178,7 +3196,7 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 	agents := make([]AgentWithCapabilities, 0, len(result.Items))
 	for i := range result.Items {
 		item := result.Items[i]
-		item.AppliedConfig, item.PendingConfig = redactAgentConfigsForResponse(item.AppliedConfig, item.PendingConfig, s.envViewAllowed(ctx, identity, &item, caps[i]))
+		item.AppliedConfig, item.PendingConfig = s.redactAgentConfigsForResponse(item.AppliedConfig, item.PendingConfig, s.envViewAllowed(ctx, identity, &item, caps[i]))
 		agents = append(agents, AgentWithCapabilities{Agent: item, Cap: caps[i]})
 	}
 	capsDone()
@@ -4203,18 +4221,33 @@ func (s *Server) dispatchAgentDeletions(ctx context.Context, agents []store.Agen
 					// Nothing was sent: the agent's saved placement is
 					// inconsistent. Its workload stays running on the
 					// Runtime Broker with no agent record left.
-					s.agentLifecycleLog.Error("project deletion: agent delete refused for an inconsistent placement; its workload is left running on the Runtime Broker",
-						"agent_id", agent.ID, "agent", agent.Slug, "project_id", agent.ProjectID, "code", refusal.Code,
-						"broker", agent.RuntimeBrokerID, "pinned_runtime_broker_id", agent.PinnedRuntimeBrokerID,
-						"pinned_runtime_target_id", agent.PinnedRuntimeTargetID)
+					s.logProjectDeletePlacementRefusal(agent, refusal.Code)
 				} else {
 					s.agentLifecycleLog.Warn("failed to dispatch agent delete during project deletion",
 						"agent_id", agent.ID, "broker", agent.RuntimeBrokerID, "error", err)
 				}
 			}
+		} else if dispatcher != nil && agent.IsPinned() {
+			// A pinned agent with no Runtime Broker assigned: its saved
+			// placement is inconsistent (requirePinnedPlacement answers
+			// runtime_target_pin_stale), so nothing is dispatched, and
+			// any workload it has on the Runtime Broker it is pinned to
+			// is left running with no agent record.
+			s.logProjectDeletePlacementRefusal(agent, ErrCodeRuntimeTargetPinStale)
 		}
 		s.events.PublishAgentDeleted(ctx, agent.ID, agent.ProjectID)
 	}
+}
+
+// logProjectDeletePlacementRefusal logs, at error, a project delete's agent
+// that was not deleted on any Runtime Broker because its saved placement is
+// inconsistent (code is the placement refusal's): the agent, its Runtime
+// Broker and its pin, so an operator can remove the workload by hand.
+func (s *Server) logProjectDeletePlacementRefusal(agent *store.Agent, code string) {
+	s.agentLifecycleLog.Error("project deletion: agent delete refused for an inconsistent placement; its workload is left running on the Runtime Broker",
+		"agent_id", agent.ID, "agent", agent.Slug, "project_id", agent.ProjectID, "code", code,
+		"broker", agent.RuntimeBrokerID, "pinned_runtime_broker_id", agent.PinnedRuntimeBrokerID,
+		"pinned_runtime_target_id", agent.PinnedRuntimeTargetID)
 }
 
 // deleteStorageFiles deletes external storage files for templates and

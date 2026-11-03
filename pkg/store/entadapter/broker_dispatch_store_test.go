@@ -342,7 +342,7 @@ func TestCountStuckPendingMessages_ExcludesUserRecipients(t *testing.T) {
 // TestExpireStuckPendingMessages_SkipsUserRecipients is the ExpireStuck
 // counterpart of TestCountStuckPendingMessages_ExcludesUserRecipients: a
 // user-recipient pending row past the TTL must survive untouched (not be
-// flipped to failed, which would put it on the PurgeFailedMessages clock).
+// flipped to failed, which would put it on the failed-message purge clock).
 func TestExpireStuckPendingMessages_SkipsUserRecipients(t *testing.T) {
 	client := enttest.NewClient(t)
 	cs := NewCompositeStore(client)

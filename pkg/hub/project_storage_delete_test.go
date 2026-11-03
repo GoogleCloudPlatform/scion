@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -626,39 +627,28 @@ func TestProjectStorageCleanup_FailedRemovalRetriedByPass(t *testing.T) {
 	assertAbsent(t, tree, "the pass removes it")
 }
 
-// R1: the hub's health reports a shared backend whose mount point has no
-// project tree (the share is not mounted) before any delete needs it, as a
-// non-critical (degraded) check; a mounted tree is healthy; the local
-// backend has no such check; a hung probe times out.
+// R1: on nfs the project tree is part of the critical workspace_storage
+// check (handlers_health_storage_test.go). checkProjectStorageTree reports
+// no project_storage_tree for nfs whatever the tree's state (present,
+// missing on a fresh hub, missing with projects), and nothing on the local
+// backend.
 func TestHealth_ProjectStorageTree(t *testing.T) {
 	e := newStorageCleanupEnv(t)
-	checks := map[string]string{}
-	e.srv.checkProjectStorageTree(checks)
-	assert.Equal(t, "healthy", checks[projectStorageTreeCheck])
-
-	require.NoError(t, os.RemoveAll(e.subRoot))
-	checks = map[string]string{}
-	e.srv.checkProjectStorageTree(checks)
-	assert.Equal(t, "healthy", checks[projectStorageTreeCheck], "no project yet: a mount point without the tree is expected")
-
-	require.NoError(t, e.s.CreateProject(context.Background(), &store.Project{ID: tid("health-p"), Slug: "health-p", Name: "health-p"}))
-	checks = map[string]string{}
-	e.srv.checkProjectStorageTree(checks)
-	assert.Contains(t, checks[projectStorageTreeCheck], "the share may not be mounted")
-	assert.False(t, criticalHealthChecks[projectStorageTreeCheck], "degraded, never unhealthy")
-	assert.Equal(t, HealthStatusDegraded, deriveHealthStatus(map[string]string{"database": "healthy", projectStorageTreeCheck: checks[projectStorageTreeCheck]}))
-
-	prevProbe, prevTimeout := projectStorageTreeProbe, workspaceHealthTimeout
-	block := make(chan struct{})
-	projectStorageTreeProbe = func(projectfs.Layout) error { <-block; return nil }
-	workspaceHealthTimeout = 10 * time.Millisecond
-	t.Cleanup(func() { close(block); projectStorageTreeProbe, workspaceHealthTimeout = prevProbe, prevTimeout })
-	checks = map[string]string{}
-	e.srv.checkProjectStorageTree(checks)
-	assert.Contains(t, checks[projectStorageTreeCheck], "timed out")
+	steps := []func(){
+		func() {},
+		func() { require.NoError(t, os.RemoveAll(e.subRoot)) },
+		func() { e.addProject(t, "health-p") },
+	}
+	for i, step := range steps {
+		step()
+		checks := map[string]string{}
+		e.srv.checkProjectStorageTree(checks)
+		_, has := checks[projectStorageTreeCheck]
+		assert.False(t, has, "step %d: no project_storage_tree on nfs: %v", i, checks)
+	}
 
 	e.srv.config.ProjectStorageConfig = nil
-	checks = map[string]string{}
+	checks := map[string]string{}
 	e.srv.checkProjectStorageTree(checks)
 	_, has := checks[projectStorageTreeCheck]
 	assert.False(t, has, "no check on the local backend")
@@ -710,4 +700,183 @@ func TestForcedProjectDelete_NonSharedDeletesPrefixNow(t *testing.T) {
 	assert.Contains(t, l, "outcome=deleted")
 	assert.Contains(t, l, "no broker workspace touched")
 	assert.DirExists(t, filepath.Join(nfsTree, "workspace", ".git"), "no tree is touched on a non-shared backend")
+}
+
+// brokerRemovedAgentWorkspace does what the broker's delete does to a
+// clone-per-agent agent's directory: it moves the workspace aside under
+// the directory's provisioning lock and purges it. The lock's release
+// leaves its ".evict-*" litter behind (ptone/scion#7100); it returns that
+// entry.
+func brokerRemovedAgentWorkspace(t *testing.T, agentDir string) string {
+	t.Helper()
+	removed, err := provision.RemoveAgentWorkspaceOutcome(context.Background(), agentDir, 30*time.Second)
+	require.NoError(t, err)
+	require.True(t, removed)
+	require.NoError(t, provision.PurgeRemovedAgentWorkspaces(agentDir))
+	matches, err := filepath.Glob(filepath.Join(agentDir, ".scion-provision.lock.evict-*"))
+	require.NoError(t, err)
+	require.Len(t, matches, 1, "the lock release leaves its .evict entry")
+	return matches[0]
+}
+
+// End to end on disk: after the broker's removal of the agent's workspace,
+// the hub's cleanup removes the agent's home, secrets, the lock litter old
+// enough to remove, and agents/<slug> itself: nothing of the agent is left.
+// Cloud Run (home and secrets on the share) and Kubernetes (an NFS home,
+// no secrets directory) layouts.
+func TestAgentStorageCleanup_LockLitterAgedAgentRootGone(t *testing.T) {
+	for name, leaves := range map[string][]string{
+		"cloudrun":   {"home-", "secrets-"},
+		"kubernetes": {"home-"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newStorageCleanupEnv(t)
+			projectID := tid("asc-litter-" + name)
+			tree := e.seedTree(t, e.subRoot, projectID)
+			a := &store.Agent{ID: tid("asc-litter-agent-" + name), Slug: "dev", ProjectID: projectID}
+			agentDir := filepath.Join(tree, "agents", "dev")
+			for _, leaf := range leaves {
+				require.NoError(t, os.MkdirAll(filepath.Join(agentDir, leaf+a.ID, ".config"), 0o755))
+			}
+			evict := brokerRemovedAgentWorkspace(t, agentDir)
+			old := time.Now().Add(-provision.LockLitterMinAge() - time.Minute)
+			require.NoError(t, os.Chtimes(filepath.Join(evict, "evicted-at"), old, old))
+
+			e.srv.startAgentStorageCleanup(a, true)
+			e.srv.storageCleanupWG.Wait()
+
+			assertAbsent(t, agentDir, "nothing of the agent is left on the share")
+			assert.DirExists(t, filepath.Join(tree, "workspace", ".git"))
+			l := e.auditLine(t, "agent-root")
+			assert.Contains(t, l, "outcome=deleted")
+			for _, leaf := range leaves {
+				tree := map[string]string{"home-": "agent-home", "secrets-": "agent-secrets"}[leaf]
+				assert.Contains(t, e.auditLine(t, tree), "outcome=deleted", tree)
+			}
+		})
+	}
+}
+
+// Litter still younger than the cutoff is kept, and with it agents/<slug>,
+// audited with the litter reason. A wait longer than the cleanup's budget
+// is not attempted. Home and secrets go; the project tree is untouched.
+func TestAgentStorageCleanup_YoungLockLitterKept(t *testing.T) {
+	origTimeout := agentStorageCleanupTimeout
+	agentStorageCleanupTimeout = time.Minute // shorter than the cutoff's wait
+	t.Cleanup(func() { agentStorageCleanupTimeout = origTimeout })
+
+	e := newStorageCleanupEnv(t)
+	projectID := tid("asc-young")
+	tree := e.seedTree(t, e.subRoot, projectID)
+	a := &store.Agent{ID: tid("asc-young-agent"), Slug: "dev", ProjectID: projectID}
+	agentDir := filepath.Join(tree, "agents", "dev")
+	for _, leaf := range []string{"home-", "secrets-"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(agentDir, leaf+a.ID), 0o755))
+	}
+	evict := brokerRemovedAgentWorkspace(t, agentDir)
+
+	e.srv.startAgentStorageCleanup(a, true)
+	e.srv.storageCleanupWG.Wait()
+
+	assert.DirExists(t, evict, "young litter is kept")
+	assertAbsent(t, filepath.Join(agentDir, "home-"+a.ID), "own home removed")
+	assertAbsent(t, filepath.Join(agentDir, "secrets-"+a.ID), "own secrets removed")
+	assert.DirExists(t, filepath.Join(tree, "workspace", ".git"))
+	l := e.auditLine(t, "agent-root")
+	assert.Contains(t, l, "outcome=kept")
+	assert.Contains(t, l, agentLockLitterPendingReason)
+	assert.NotContains(t, l, agentRootOtherFilesReason)
+}
+
+// retryingLitterSweep stands in for provision.SweepLockLitter: the first
+// call reports the litter as pending for wait, later calls remove it.
+func retryingLitterSweep(t *testing.T, wait time.Duration) *int {
+	t.Helper()
+	calls := 0
+	orig, origMargin := agentLockLitterSweep, agentLockLitterRetryMargin
+	agentLockLitterSweep = func(dir string) (provision.LockLitter, error) {
+		calls++
+		if calls == 1 {
+			return provision.LockLitter{Pending: wait}, nil
+		}
+		matches, err := filepath.Glob(filepath.Join(dir, ".scion-provision.lock.*"))
+		require.NoError(t, err)
+		for _, m := range matches {
+			require.NoError(t, os.RemoveAll(m))
+		}
+		return provision.LockLitter{}, nil
+	}
+	agentLockLitterRetryMargin = 50 * time.Millisecond
+	t.Cleanup(func() { agentLockLitterSweep, agentLockLitterRetryMargin = orig, origMargin })
+	return &calls
+}
+
+// When the litter becomes old enough within the cleanup's budget, the
+// cleanup waits and retries once, and the agent directory goes.
+func TestAgentStorageCleanup_LockLitterRetried(t *testing.T) {
+	calls := retryingLitterSweep(t, 200*time.Millisecond)
+	e := newStorageCleanupEnv(t)
+	projectID := tid("asc-retry")
+	tree := e.seedTree(t, e.subRoot, projectID)
+	a := &store.Agent{ID: tid("asc-retry-agent"), Slug: "dev", ProjectID: projectID}
+	agentDir := filepath.Join(tree, "agents", "dev")
+	require.NoError(t, os.MkdirAll(filepath.Join(agentDir, "home-"+a.ID), 0o755))
+	brokerRemovedAgentWorkspace(t, agentDir)
+
+	e.srv.startAgentStorageCleanup(a, true)
+	e.srv.storageCleanupWG.Wait()
+
+	assert.Equal(t, 2, *calls, "one sweep, one retry")
+	assertAbsent(t, agentDir, "the retry removes the agent directory")
+	assert.Contains(t, e.auditLine(t, "agent-root"), "outcome=deleted")
+}
+
+// Home and secrets are audited before the retry wait: a hub that stops
+// while waiting has still recorded the deletions it made. Only the agent
+// directory's line comes after the wait.
+func TestAgentStorageCleanup_AuditsBeforeRetryWait(t *testing.T) {
+	retryingLitterSweep(t, 2*time.Second)
+	e := newStorageCleanupEnv(t)
+	projectID := tid("asc-early")
+	tree := e.seedTree(t, e.subRoot, projectID)
+	a := &store.Agent{ID: tid("asc-early-agent"), Slug: "dev", ProjectID: projectID}
+	agentDir := filepath.Join(tree, "agents", "dev")
+	for _, leaf := range []string{"home-", "secrets-"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(agentDir, leaf+a.ID), 0o755))
+	}
+	brokerRemovedAgentWorkspace(t, agentDir)
+
+	e.srv.startAgentStorageCleanup(a, true)
+	require.Eventually(t, func() bool {
+		return strings.Contains(e.logs.String(), "tree=agent-home") && strings.Contains(e.logs.String(), "tree=agent-secrets")
+	}, time.Second, 10*time.Millisecond, "home and secrets are audited before the wait")
+	assert.NotContains(t, e.logs.String(), "tree=agent-root", "the agent directory waits for the retry")
+	e.srv.storageCleanupWG.Wait()
+	assert.Contains(t, e.auditLine(t, "agent-root"), "outcome=deleted")
+	assert.Equal(t, 1, strings.Count(e.logs.String(), "tree=agent-home"), "home is audited once")
+}
+
+// An evicted lock without its eviction marker is never aged: there is no
+// wait for it, and the kept agent directory says why.
+func TestAgentStorageCleanup_UnagedLockLitterKept(t *testing.T) {
+	e := newStorageCleanupEnv(t)
+	projectID := tid("asc-unaged")
+	tree := e.seedTree(t, e.subRoot, projectID)
+	a := &store.Agent{ID: tid("asc-unaged-agent"), Slug: "dev", ProjectID: projectID}
+	agentDir := filepath.Join(tree, "agents", "dev")
+	require.NoError(t, os.RemoveAll(filepath.Join(agentDir, "workspace")))
+	unaged := filepath.Join(agentDir, ".scion-provision.lock.evict-unaged")
+	require.NoError(t, os.MkdirAll(unaged, 0o755))
+	old := time.Now().Add(-24 * time.Hour)
+	require.NoError(t, os.Chtimes(unaged, old, old))
+
+	start := time.Now()
+	e.srv.startAgentStorageCleanup(a, true)
+	e.srv.storageCleanupWG.Wait()
+
+	assert.Less(t, time.Since(start), 10*time.Second, "no wait for litter that never ages")
+	assert.DirExists(t, unaged)
+	l := e.auditLine(t, "agent-root")
+	assert.Contains(t, l, "outcome=kept")
+	assert.Contains(t, l, agentLockLitterUnagedReason)
 }

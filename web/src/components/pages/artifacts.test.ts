@@ -176,7 +176,8 @@ describe('artifacts list page', () => {
     expect(r).toHaveLength(2);
 
     const link = r[0].querySelector('a')!;
-    expect(link.getAttribute('href')).toBe(`/projects/proj-1/artifacts/${mine.id}`);
+    // The list records itself as the origin (ptone/scion#6847).
+    expect(link.getAttribute('href')).toBe(`/projects/proj-1/artifacts/${mine.id}?from=artifacts`);
     expect(link.textContent).toBe('Weekly');
     expect(r[0].querySelector('.key')!.textContent).toBe('weekly-report');
     expect(r[0].textContent).toContain('You');
@@ -252,7 +253,7 @@ describe('artifacts list page', () => {
     try {
       const el = await mount(true);
       rows(el)[0].click();
-      expect(paths).toEqual([`/projects/proj-9/artifacts/${a.id}`]);
+      expect(paths).toEqual([`/projects/proj-9/artifacts/${a.id}?from=artifacts`]);
     } finally {
       document.removeEventListener('nav-click', onNav);
     }
@@ -893,7 +894,7 @@ describe('artifacts list page: New artifact (ptone/scion#5477)', () => {
     );
     await settle(el);
     document.removeEventListener('nav-click', onNav);
-    expect(paths).toEqual(['/projects/g-1/artifacts/new-1']);
+    expect(paths).toEqual(['/projects/g-1/artifacts/new-1?from=artifacts']);
   });
 
   it('does not check where to publish when the experiment is off', async () => {

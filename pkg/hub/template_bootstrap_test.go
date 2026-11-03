@@ -488,8 +488,10 @@ func TestSyncExistingTemplate_ActivatesPendingRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Status is a commit-owned column (ptone/scion#4967), so it is seeded
+	// through the content writer.
 	existing.Status = resourceStatusPending
-	if err := s.UpdateTemplate(ctx, existing); err != nil {
+	if err := setTemplateContentForTest(ctx, s, existing); err != nil {
 		t.Fatalf("seed pending status: %v", err)
 	}
 	existing, err = s.GetTemplateBySlug(ctx, "recover", store.TemplateScopeGlobal, "")

@@ -47,3 +47,8 @@ func newSymlinkInstaller(DetectOptions) *symlinkInstaller {
 func copyExecutable(string, string) error {
 	return fmt.Errorf("installing a binary: %w on this platform", errors.ErrUnsupported)
 }
+
+// ReconcilePluginsAfterRollback is unix-only (plugin_reconcile_unix.go).
+func ReconcilePluginsAfterRollback(string, string) ([]string, error) {
+	return nil, fmt.Errorf("reconciling broker plugins: %w on this platform", errors.ErrUnsupported)
+}

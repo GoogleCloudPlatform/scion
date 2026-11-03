@@ -948,6 +948,47 @@ var (
 			},
 		},
 	}
+	// ChatRetentionCursorsColumns holds the columns for the "chat_retention_cursors" table.
+	ChatRetentionCursorsColumns = []*schema.Column{
+		{Name: "phase", Type: field.TypeString},
+		{Name: "cursor_created", Type: field.TypeTime, Nullable: true},
+		{Name: "cursor_id", Type: field.TypeString, Default: ""},
+		{Name: "reset_at", Type: field.TypeTime, Nullable: true},
+		{Name: "last_applied_cutoff", Type: field.TypeTime, Nullable: true},
+		{Name: "updated_at", Type: field.TypeTime},
+	}
+	// ChatRetentionCursorsTable holds the schema information for the "chat_retention_cursors" table.
+	ChatRetentionCursorsTable = &schema.Table{
+		Name:       "chat_retention_cursors",
+		Columns:    ChatRetentionCursorsColumns,
+		PrimaryKey: []*schema.Column{ChatRetentionCursorsColumns[0]},
+	}
+	// ChatRetentionRunsColumns holds the columns for the "chat_retention_runs" table.
+	ChatRetentionRunsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "trigger", Type: field.TypeEnum, Enums: []string{"sweep", "manual", "preview"}},
+		{Name: "dry_run", Type: field.TypeBool, Default: false},
+		{Name: "started_at", Type: field.TypeTime},
+		{Name: "finished_at", Type: field.TypeTime, Nullable: true},
+		{Name: "status", Type: field.TypeEnum, Enums: []string{"running", "ok", "partial", "failed"}, Default: "running"},
+		{Name: "actor", Type: field.TypeString, Nullable: true},
+		{Name: "policy", Type: field.TypeJSON, Nullable: true},
+		{Name: "counts", Type: field.TypeJSON, Nullable: true},
+		{Name: "error", Type: field.TypeString, Nullable: true},
+	}
+	// ChatRetentionRunsTable holds the schema information for the "chat_retention_runs" table.
+	ChatRetentionRunsTable = &schema.Table{
+		Name:       "chat_retention_runs",
+		Columns:    ChatRetentionRunsColumns,
+		PrimaryKey: []*schema.Column{ChatRetentionRunsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "chatretentionrun_started_at",
+				Unique:  false,
+				Columns: []*schema.Column{ChatRetentionRunsColumns[3]},
+			},
+		},
+	}
 	// ConduitPrincipalEpochsColumns holds the columns for the "conduit_principal_epochs" table.
 	ConduitPrincipalEpochsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeInt, Increment: true},
@@ -1055,6 +1096,14 @@ var (
 				Name:    "conversation_kind",
 				Unique:  false,
 				Columns: []*schema.Column{ConversationsColumns[2]},
+			},
+			{
+				Name:    "conversation_deleted_at",
+				Unique:  false,
+				Columns: []*schema.Column{ConversationsColumns[12]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "deleted_at IS NOT NULL",
+				},
 			},
 		},
 	}
@@ -1973,6 +2022,22 @@ var (
 				Unique:  false,
 				Columns: []*schema.Column{MessagesColumns[1], MessagesColumns[2], MessagesColumns[23], MessagesColumns[0]},
 			},
+			{
+				Name:    "message_created_id",
+				Unique:  false,
+				Columns: []*schema.Column{MessagesColumns[23], MessagesColumns[0]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "dispatch_state = 'pending'",
+				},
+			},
+			{
+				Name:    "message_failed_created_id",
+				Unique:  false,
+				Columns: []*schema.Column{MessagesColumns[23], MessagesColumns[0]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "dispatch_state = 'failed'",
+				},
+			},
 		},
 	}
 	// MessageAddresseesColumns holds the columns for the "message_addressees" table.
@@ -2597,6 +2662,7 @@ var (
 		{Name: "project_id", Type: field.TypeUUID},
 		{Name: "name", Type: field.TypeString},
 		{Name: "cron_expr", Type: field.TypeString},
+		{Name: "time_zone", Type: field.TypeString, Default: ""},
 		{Name: "event_type", Type: field.TypeString},
 		{Name: "payload", Type: field.TypeString, Default: "{}"},
 		{Name: "status", Type: field.TypeString, Default: "active"},
@@ -2635,7 +2701,7 @@ var (
 			{
 				Name:    "schedule_next_run_at",
 				Unique:  false,
-				Columns: []*schema.Column{SchedulesColumns[23]},
+				Columns: []*schema.Column{SchedulesColumns[24]},
 			},
 		},
 	}
@@ -3357,6 +3423,8 @@ var (
 		BrokerSettingsTable,
 		BrokerTargetInventoriesTable,
 		ChatLinkCodesTable,
+		ChatRetentionCursorsTable,
+		ChatRetentionRunsTable,
 		ConduitPrincipalEpochsTable,
 		ConduitSessionsTable,
 		ConversationsTable,
@@ -3475,6 +3543,12 @@ func init() {
 	}
 	ChatLinkCodesTable.Annotation = &entsql.Annotation{
 		Table: "chat_link_codes",
+	}
+	ChatRetentionCursorsTable.Annotation = &entsql.Annotation{
+		Table: "chat_retention_cursors",
+	}
+	ChatRetentionRunsTable.Annotation = &entsql.Annotation{
+		Table: "chat_retention_runs",
 	}
 	ConduitPrincipalEpochsTable.Annotation = &entsql.Annotation{
 		Table: "conduit_principal_epochs",
