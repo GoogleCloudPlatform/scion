@@ -82,7 +82,7 @@ Every message send to a held agent is also refused before any wake, store write,
 or Runtime Broker dispatch (even if the agent's container is still `running`):
 direct sends from a user or an agent (with or without `wake`) and inbound
 chat-integration messages routed to a held primary agent return
-`409 agent_not_running` (`"agent \"<slug>\" is suspended. A hub admin can lift the hold."`);
+`409 agent_not_running` (message `agent "<slug>" is suspended. A hub admin can lift the hold.`);
 `@`-mentions of a held agent on a user or routed message report `not_running` /
 `error` for that mention while unheld recipients still receive the message; topic
 messages and project broadcasts skip held agents without storing or dispatching to
