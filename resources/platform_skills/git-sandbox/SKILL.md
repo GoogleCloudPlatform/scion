@@ -35,7 +35,7 @@ You are operating in a restricted, non-interactive sandbox environment. Follow t
   - **Standard Merge:** `git merge main --no-edit`
   - **Manual Commit:** `git commit -m "Your message" --no-edit`
   - **Any Other Command:** Set the editor per command: `GIT_EDITOR=true git <subcommand>`, or `git -c core.editor=true <subcommand>`.
-  - **Never** run `git config core.editor ...` or otherwise write `core.editor` into the repository config: brokers refuse to start or resume an agent whose checkout sets it.
+  - **Never** run `git config core.editor ...` or otherwise write `core.editor`, `core.hooksPath` or any other key outside the repository git config allow-list (`pkg/util/git_config_policy.go`) into the repository config: brokers refuse to start or resume an agent whose checkout sets one. Pass such options per command (`git -c core.editor=true <subcommand>`).
 
 ## 4. Conflict Resolution Loop
 
