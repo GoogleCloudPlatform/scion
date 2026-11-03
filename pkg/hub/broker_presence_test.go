@@ -27,6 +27,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
@@ -251,7 +252,8 @@ func TestBrokerPresence_RegistryErrorFallsBack(t *testing.T) {
 	assert.Equal(t, brokerPresenceResult{Source: brokerPresenceNone}, f.srv.brokerPresence(ctx, offline),
 		"the registry session is not read, so the legacy signals decide")
 	assert.Equal(t, int64(2), f.srv.brokerPresenceRegistryFallbacks.Load())
-	assert.Equal(t, int64(2), brokerPresenceFallbacksExported(t, reader))
+	assert.Equal(t, int64(2), brokerPresenceFallbacksExported(t, reader, brokerPresenceFallbackCauseRegistry))
+	assert.Zero(t, brokerPresenceFallbacksExported(t, reader, brokerPresenceFallbackCauseRecord), "a registry fallback is not a record read error")
 
 	setConduitExperiment(t, f.srv, false)
 	f.srv.brokerPresence(ctx, online)
@@ -272,8 +274,10 @@ func TestBrokerPresence_CallerContextEndedNotCounted(t *testing.T) {
 }
 
 // brokerPresenceFallbacksExported collects
-// scion.hub.broker.presence_registry_fallbacks.
-func brokerPresenceFallbacksExported(t *testing.T, reader *sdkmetric.ManualReader) int64 {
+// scion.hub.broker.presence_registry_fallbacks and returns the data point
+// whose cause attribute is cause. Every cause is observed, so each export
+// has exactly one data point per cause (ptone/scion#5479).
+func brokerPresenceFallbacksExported(t *testing.T, reader *sdkmetric.ManualReader, cause string) int64 {
 	t.Helper()
 	var rm metricdata.ResourceMetrics
 	require.NoError(t, reader.Collect(context.Background(), &rm))
@@ -284,8 +288,15 @@ func brokerPresenceFallbacksExported(t *testing.T, reader *sdkmetric.ManualReade
 			}
 			sum, ok := m.Data.(metricdata.Sum[int64])
 			require.True(t, ok, "counter type %T", m.Data)
-			require.Len(t, sum.DataPoints, 1)
-			return sum.DataPoints[0].Value
+			require.Len(t, sum.DataPoints, 2, "one data point per cause")
+			for _, dp := range sum.DataPoints {
+				v, ok := dp.Attributes.Value(attribute.Key("cause"))
+				require.True(t, ok, "data point without a cause attribute: %v", dp.Attributes)
+				if v.AsString() == cause {
+					return dp.Value
+				}
+			}
+			t.Fatalf("%s: no data point with cause=%s", brokerPresenceFallbacksMetric, cause)
 		}
 	}
 	t.Fatalf("%s not exported", brokerPresenceFallbacksMetric)
@@ -511,8 +522,10 @@ func TestBrokerPresent_ReadErrorLoggedAndCounted(t *testing.T) {
 	assert.Contains(t, logs.String(), "level=WARN")
 	assert.Contains(t, logs.String(), line)
 	assert.Contains(t, logs.String(), id)
-	assert.Equal(t, int64(1), srv.brokerPresenceRegistryFallbacks.Load())
-	assert.Equal(t, int64(1), brokerPresenceFallbacksExported(t, reader))
+	assert.Equal(t, int64(1), srv.brokerPresenceRecordReadFallbacks.Load())
+	assert.Zero(t, srv.brokerPresenceRegistryFallbacks.Load(), "a record read error is not a registry fallback")
+	assert.Equal(t, int64(1), brokerPresenceFallbacksExported(t, reader, brokerPresenceFallbackCauseRecord))
+	assert.Zero(t, brokerPresenceFallbacksExported(t, reader, brokerPresenceFallbackCauseRegistry))
 
 	logs.Reset()
 	cancelled, cancel := context.WithCancel(context.Background())
@@ -520,7 +533,7 @@ func TestBrokerPresent_ReadErrorLoggedAndCounted(t *testing.T) {
 	_, err = srv.BrokerPresent(cancelled, id)
 	require.ErrorIs(t, err, context.Canceled)
 	assert.NotContains(t, logs.String(), line, "a cancelled caller context is not logged")
-	assert.Equal(t, int64(1), srv.brokerPresenceRegistryFallbacks.Load(), "a cancelled caller context is not counted")
+	assert.Equal(t, int64(1), srv.brokerPresenceRecordReadFallbacks.Load(), "a cancelled caller context is not counted")
 }
 
 // TestPlacement_OfflineProviderRowStaysOut: presence decides only the

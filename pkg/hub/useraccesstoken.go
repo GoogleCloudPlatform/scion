@@ -92,9 +92,11 @@ var (
 // mapping, TestRS4_DenialCodeStability). handlers_auth.go's scope_violation
 // response writes err.Error() as its message, so the 403 body carries the
 // selector and reason text (e.g. `requested scopes exceed issuer authority:
-// selector "agent:delete" denied (flat_role_insufficient)`). This error is
-// returned only after project admission has succeeded, never on the uniform
-// ErrUATProjectForbidden path (see CreateToken below).
+// selector "agent:delete" denied (flat_role_insufficient)`). For a project
+// boundary this error is returned only after project admission has
+// succeeded, never on the uniform ErrUATProjectForbidden path (see
+// CreateToken below); for a hub boundary, which names no project, every
+// per-selector denial is reported this way.
 type UATScopeViolationError struct {
 	Selector string
 	Reason   MintDenialReason
@@ -403,17 +405,20 @@ func (s *UserAccessTokenService) CreateTokenWithParams(ctx context.Context, para
 		if result.OK {
 			continue
 		}
-		// Oracle resistance: MintDenialProjectAccessRequired means
-		// CanMintSelector's ONE admission check for the whole batch failed
-		// (no membership and no exact-permission system authority) -- every
-		// selector gets this same reason uniformly in that case. Preserve
-		// the existing contract that a non-member and a nonexistent project
-		// both get the bare ErrUATProjectForbidden, with no selector
-		// detail, so neither is distinguishable from the other or from
-		// "authority exists but not for this selector." Only a per-selector
-		// eligibility denial (admission passed, this specific selector
-		// didn't) surfaces the typed UATScopeViolationError.
-		if result.Reason == MintDenialProjectAccessRequired {
+		// Uniform refusal: for a project boundary,
+		// MintDenialProjectAccessRequired means CanMintSelector's ONE
+		// admission check for the whole batch failed (no membership and no
+		// exact-permission system authority) -- every selector gets this
+		// same reason uniformly in that case. A non-member and a
+		// nonexistent project both get the bare ErrUATProjectForbidden,
+		// with no selector detail, so neither is distinguishable from the
+		// other or from "authority exists but not for this selector." Only
+		// a per-selector eligibility denial (admission passed, this
+		// specific selector didn't) surfaces the typed
+		// UATScopeViolationError. A hub boundary names no project, so every
+		// hub denial is the typed UATScopeViolationError naming the
+		// selector and its reason (uniformMintRefusal).
+		if uniformMintRefusal(boundary, result.Reason) {
 			return "", nil, ErrUATProjectForbidden
 		}
 		return "", nil, &UATScopeViolationError{Selector: result.Selector, Reason: result.Reason}

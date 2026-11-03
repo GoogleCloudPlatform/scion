@@ -14,13 +14,15 @@
 
 // Package keymaterial holds the Hub's shared signing-key bookkeeping that
 // both package hub and its key-manager area packages use: the signing-key
-// source labels and the overwrite guard for infrastructure backups. It
+// source labels, the overwrite guard for infrastructure backups and the
+// check that lets a startup skip re-saving a backup that is already current. It
 // imports only leaf packages (pkg/store, pkg/secret), never pkg/hub; package
 // hub keeps its historical names for these as aliases.
 package keymaterial
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 
@@ -74,4 +76,27 @@ func GuardOverwrite(ctx context.Context, st store.SecretStore, c *secret.ValueCi
 		return ErrExistingRecordUnreadable
 	}
 	return nil
+}
+
+// BackupIsCurrent reports whether stored, an existing backup record's
+// value, is sealed by c's active writer key in c's active write format
+// (secret.ValueCipher.DecryptWriter) and holds the same key as value.
+// decode turns a backup plaintext into its key bytes; the bytes are
+// compared in constant time. Anything else (another key or format, a
+// decode failure, an empty key, a disabled cipher) is false, and the
+// caller writes the backup as before.
+func BackupIsCurrent(c *secret.ValueCipher, stored, value string, decode func(string) ([]byte, bool)) bool {
+	plaintext, ok := c.DecryptWriter(stored)
+	if !ok {
+		return false
+	}
+	have, ok := decode(plaintext)
+	if !ok {
+		return false
+	}
+	want, ok := decode(value)
+	if !ok {
+		return false
+	}
+	return len(want) > 0 && subtle.ConstantTimeCompare(have, want) == 1
 }

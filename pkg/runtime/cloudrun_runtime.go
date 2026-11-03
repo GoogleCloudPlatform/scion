@@ -678,7 +678,8 @@ type cloudRunNFSProvisionPaths struct {
 
 // mkdirAgentDir is mkdirNFSAgentDir for dir, a directory below the agent
 // directory (the parent of the home): it records in p.created every
-// directory from the agent directory down to dir that did not exist.
+// directory from the agent directory down to dir that did not exist and
+// does now, also when the mkdir fails part-way.
 func (p *cloudRunNFSProvisionPaths) mkdirAgentDir(dir string, uid, gid int) error {
 	agentDir := filepath.Dir(p.homeHostPath)
 	var missing []string
@@ -692,16 +693,21 @@ func (p *cloudRunNFSProvisionPaths) mkdirAgentDir(dir string, uid, gid int) erro
 			}
 		}
 	}
-	if err := mkdirNFSAgentDir(dir, uid, gid); err != nil {
-		return err
-	}
+	err := cloudRunMkdirNFSAgentDir(dir, uid, gid)
+	// Record each directory that was missing and exists now: all of them on
+	// success, and on a failure part-way the ones already created, so the
+	// rollback removes those too (they did not exist before this start).
 	for _, d := range missing {
-		if !slices.Contains(p.created, d) {
+		if _, statErr := os.Lstat(d); statErr == nil && !slices.Contains(p.created, d) {
 			p.created = append(p.created, d)
 		}
 	}
-	return nil
+	return err
 }
+
+// cloudRunMkdirNFSAgentDir is mkdirNFSAgentDir; tests replace it to fail
+// after creating directories.
+var cloudRunMkdirNFSAgentDir = mkdirNFSAgentDir
 
 // rollbackCreated removes the agent directories this provision created,
 // newest first, for a start whose instance was never created

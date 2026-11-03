@@ -1982,11 +1982,12 @@ type TemplateStore interface {
 	//
 	// It does not write the content columns: Files, ContentHash, the
 	// fields derived from the files (Harness, DefaultHarnessConfig,
-	// AgentConfig), and the storage location of the files (Layout,
-	// StoragePath, StorageBucket, StorageURI). Those are written only by
-	// CreateTemplate and UpdateTemplateContent, so a metadata edit can
-	// never revert a concurrent commit or point a blob-layout row back at a
-	// legacy path (ptone/scion#4221).
+	// AgentConfig), the storage location of the files (Layout,
+	// StoragePath, StorageBucket, StorageURI), and the commit's SourceURL
+	// and Status. Those are written only by CreateTemplate and
+	// UpdateTemplateContent, so a metadata edit can never revert a
+	// concurrent commit or point a blob-layout row back at a legacy path
+	// (ptone/scion#4221, ptone/scion#4967).
 	UpdateTemplate(ctx context.Context, template *Template) error
 
 	// UpdateTemplateContent writes the columns a commit owns (Files,
@@ -2096,13 +2097,14 @@ type HarnessConfigStore interface {
 	GetHarnessConfigBySlug(ctx context.Context, slug, scope, scopeID string) (*HarnessConfig, error)
 
 	// UpdateHarnessConfig updates an existing harness config's metadata
-	// (name, slug, display name, description, scope, owner, source URL,
-	// image status and the audit fields). It does not write the content
-	// columns (Files, ContentHash, Harness, Config, Status, Layout,
-	// StorageURI, StorageBucket, StoragePath) nor BuiltImage (ptone/scion#4219): those
-	// change only through UpdateHarnessConfigContent and
-	// UpdateHarnessConfigBuiltImage, so a metadata write from a stale read
-	// cannot revert a commit.
+	// (name, slug, display name, description, scope, owner and the audit
+	// fields). It does not write the content columns (Files, ContentHash,
+	// Harness, Config, Status, SourceURL, Layout, StorageURI, StorageBucket,
+	// StoragePath) nor BuiltImage (ptone/scion#4219), ImageStatus or
+	// ImageStatusCheckedAt (ptone/scion#4967): those change only through
+	// UpdateHarnessConfigContent, UpdateHarnessConfigBuiltImage and
+	// UpdateHarnessConfigImageStatus, so a metadata write from a stale read
+	// cannot revert a commit or an image check.
 	// Returns ErrNotFound if the harness config doesn't exist.
 	UpdateHarnessConfig(ctx context.Context, hc *HarnessConfig) error
 

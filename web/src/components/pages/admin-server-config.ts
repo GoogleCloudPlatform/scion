@@ -87,6 +87,17 @@ import {
   formatEnvValue,
   hasInEffect,
 } from './admin-server-config-env-values.js';
+import {
+  type EnvNotInEffectCause,
+  envBadgeStyles,
+  readOnlyFieldStyles,
+  renderEnvBadge as envBadgeView,
+  renderEnvLockBadge,
+  renderEnvBadgeUnder as envBadgeUnderView,
+  renderEnvValueLine as envValueLineView,
+  renderEnvValuesList as envValuesListView,
+  renderKeysEnvBadge,
+} from '../shared/env-badge-views.js';
 
 /** GET /api/v1/admin/server-config returns this in place of each secret. */
 const MASKED_VALUE = '********';
@@ -382,6 +393,8 @@ interface V1RuntimeConfig {
   kubernetes_service_account_mappings?: Record<string, string>;
   kubernetes_block_service_account?: string;
   priority_class_name?: string;
+  shared_dir_storage_class?: string;
+  shared_dir_size?: string;
 }
 
 // Sets or clears one key in a runtime's Cloud Run block, and drops the
@@ -715,6 +728,43 @@ const KEYS_REJECTED_CODES = new Set([
 type ReadOnlyReason = 'bootstrap' | 'env' | 'flag' | 'pinned' | 'startup';
 
 /**
+ * What wins over an environment value that is not in effect, for a field's
+ * read-only reason: a start-up default or flag for 'flag' and 'bootstrap',
+ * else the saved setting.
+ */
+function envCause(reason?: ReadOnlyReason): EnvNotInEffectCause {
+  return reason === 'flag' || reason === 'bootstrap' ? 'startup' : 'saved';
+}
+
+/** koanf path of the project default scratchpad toggle (ptone/scion#3837). */
+const SCRATCHPAD_KEY = 'project_defaults.default_scratchpad';
+
+/** The Agent Defaults sub-tabs, in order, with their labels. */
+type AgentDefaultsTab = 'general' | 'limits' | 'resources';
+const AGENT_DEFAULTS_TABS: ReadonlyArray<readonly [AgentDefaultsTab, string]> = [
+  ['general', 'General'],
+  ['limits', 'Limits'],
+  ['resources', 'Resources'],
+];
+
+/**
+ * The panel name of an Agent Defaults sub-tab. It is prefixed so it never
+ * equals a top-level panel name (the top-level General panel is
+ * "general"), and the panels bind active as well as the tabs, so the
+ * selected sub-tab shows without waiting for the tab group to initialise
+ * (ptone/scion#4109).
+ */
+export function agentDefaultsPanelName(tab: AgentDefaultsTab): string {
+  return `agent-defaults-${tab}`;
+}
+
+/** The sub-tab of an Agent Defaults panel name; an unknown name is General. */
+function agentDefaultsTabFromPanel(panel: string): AgentDefaultsTab {
+  const tab = AGENT_DEFAULTS_TABS.find(([t]) => agentDefaultsPanelName(t) === panel);
+  return tab ? tab[0] : 'general';
+}
+
+/**
  * The hub's direct Cloud Logging switch. The hub reads it only at startup,
  * from SCION_CLOUD_LOGGING or settings.yaml, before the settings database is
  * opened; a database-backed hub refuses a changed value (ptone/scion#5664),
@@ -785,6 +835,8 @@ const CONTAINER_RUNTIME_KEYS = [
   'kubernetes_service_account_mappings',
   'kubernetes_block_service_account',
   'priority_class_name',
+  'shared_dir_storage_class',
+  'shared_dir_size',
 ] as const;
 
 /**
@@ -909,7 +961,7 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private hubGCPServiceAccounts: GCPServiceAccount[] = [];
 
   // Agent defaults sub-tab
-  @state() private agentDefaultsTab = 'general';
+  @state() private agentDefaultsTab: AgentDefaultsTab = 'general';
 
   // Project defaults
   @state() private scratchpadEnabled = true;
@@ -1138,6 +1190,8 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   static override styles = css`
     ${settingsErrorStyles}
+    ${envBadgeStyles}
+    ${readOnlyFieldStyles}
 
     :host {
       display: block;
@@ -1567,73 +1621,6 @@ export class ScionPageAdminServerConfig extends LitElement {
       background: var(--sl-color-warning-100, #fef3c7);
       padding: 0.125rem 0.375rem;
       border-radius: 0.25rem;
-    }
-
-    /* ── Layer-aware: read-only field rendering ── */
-
-    .read-only-value {
-      font-size: 0.875rem;
-      color: var(--scion-text, #1e293b);
-      padding: 0.5rem 0.75rem;
-      background: var(--scion-bg, #f8fafc);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius, 0.5rem);
-      min-height: 1.5em;
-    }
-
-    .read-only-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.25rem;
-      font-size: 0.6875rem;
-      font-weight: 500;
-      color: var(--sl-color-neutral-600, #475569);
-      background: var(--sl-color-neutral-100, #f1f5f9);
-      border: 1px solid var(--sl-color-neutral-200, #e2e8f0);
-      padding: 0.125rem 0.5rem;
-      border-radius: 9999px;
-      white-space: nowrap;
-      font-style: italic;
-    }
-
-    /* ── Settings-DB: per-field env badge ── */
-
-    .env-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.25rem;
-      font-size: 0.6875rem;
-      font-weight: 500;
-      color: var(--sl-color-warning-700, #b45309);
-      background: var(--sl-color-warning-50, #fffbeb);
-      border: 1px solid var(--sl-color-warning-200, #fde68a);
-      padding: 0.125rem 0.5rem;
-      border-radius: 9999px;
-      white-space: nowrap;
-    }
-
-    .env-value-in-effect {
-      display: block;
-      font-size: 0.8125rem;
-      font-weight: 600;
-      margin: 0.25rem 0;
-    }
-
-    .env-value-saved-label,
-    .env-value-saved,
-    .env-value-configured-label,
-    .env-value-not-in-effect {
-      display: block;
-    }
-
-    .env-values-under {
-      margin: 0.25rem 0;
-      padding-left: 1.25rem;
-      font-size: 0.75rem;
-    }
-
-    .env-badge sl-icon {
-      font-size: 0.75rem;
     }
 
     /* ── Settings-DB: section metadata caption ── */
@@ -2502,7 +2489,8 @@ export class ScionPageAdminServerConfig extends LitElement {
             ? '🔒 Managed via deployment configuration'
             : reason === 'flag'
               ? '🔒 Set by workstation startup defaults / server flags'
-              : '🔒 Set via environment variable';
+              : null;
+    if (text === null) return renderEnvLockBadge();
     return html`<span class="read-only-badge">${text}</span>`;
   }
 
@@ -3572,14 +3560,7 @@ export class ScionPageAdminServerConfig extends LitElement {
    * env_overrides. Pass one or more koanf keys; badge renders if any match.
    */
   private renderEnvBadge(...koanfKeys: string[]): typeof nothing | ReturnType<typeof html> {
-    const overridden = koanfKeys.some((k) => this.envOverrides.includes(k));
-    if (!overridden) return nothing;
-    // With several keys, only the first one env_values reports is shown
-    // (envValueFor).
-    const env = envValueFor(this.envValues, koanfKeys);
-    // No entry, or a masked one (no in-effect state reported): the plain badge.
-    if (!env || !hasInEffect(env.ev)) return this.envBadgeTemplate();
-    return html`${this.envBadgeTemplate(env.ev.in_effect)}${this.renderEnvValueLine(env.ev)}`;
+    return renderKeysEnvBadge(this.envOverrides, this.envValues, koanfKeys);
   }
 
   /**
@@ -3589,26 +3570,7 @@ export class ScionPageAdminServerConfig extends LitElement {
    * saved value winning.
    */
   private renderEnvValueLine(ev: EnvKeyValue, reason?: ReadOnlyReason): ReturnType<typeof html> {
-    const text = formatEnvValue(ev) || '—';
-    if (ev.in_effect) {
-      // The control below holds the stored value; label it only when a
-      // stored value exists and differs (saved_differs), never a default or
-      // the environment value itself.
-      return html`<span class="env-value-in-effect"
-          >In effect on this node: <code>${text}</code> (environment variable)</span
-        >${ev.saved_differs
-          ? html`<span class="hint env-value-saved-label"
-              >Saved value below, not in effect on this node:</span
-            >`
-          : nothing}`;
-    }
-    const cause =
-      reason === 'flag' || reason === 'bootstrap'
-        ? 'a start-up default or flag wins'
-        : 'the saved value wins';
-    return html`<span class="hint env-value-not-in-effect"
-      >Environment value on this node, not in effect: <code>${text}</code> (${cause})</span
-    >`;
+    return envValueLineView(ev, envCause(reason));
   }
 
   /**
@@ -3696,16 +3658,7 @@ export class ScionPageAdminServerConfig extends LitElement {
    * environment value) says so instead of claiming an override.
    */
   private envBadgeTemplate(inEffect = true, reason?: ReadOnlyReason): ReturnType<typeof html> {
-    const notInEffect =
-      reason === 'flag' || reason === 'bootstrap'
-        ? 'Environment value not in effect on this node'
-        : 'Environment value superseded by the saved setting';
-    return html`
-      <span class="env-badge">
-        <sl-icon name="exclamation-triangle"></sl-icon>
-        ${inEffect ? 'Overridden by environment on this node' : notInEffect}
-      </span>
-    `;
+    return envBadgeView(inEffect, envCause(reason));
   }
 
   /**
@@ -3714,34 +3667,14 @@ export class ScionPageAdminServerConfig extends LitElement {
    * (e.g. profiles.local.runtime from SCION_SERVER_PROFILES_LOCAL_RUNTIME).
    */
   private renderEnvBadgeUnder(prefix: string): typeof nothing | ReturnType<typeof html> {
-    const overridden = this.envOverrides.some((k) => k === prefix || k.startsWith(`${prefix}.`));
-    if (!overridden) return nothing;
-    const entries = envValuesUnder(this.envValues, prefix);
-    if (entries.length === 0) return this.envBadgeTemplate();
-    return this.renderEnvValuesList(entries);
+    return envBadgeUnderView(this.envOverrides, this.envValues, prefix);
   }
 
   /** The section badge and the list of env_values entries of a map section. */
   private renderEnvValuesList(
     entries: Array<{ key: string; ev: EnvKeyValue }>
   ): ReturnType<typeof html> {
-    // Entries without an in-effect state (masked) make no claim; the badge
-    // says "not in effect" only when every reported state is false.
-    const known = entries.filter((e) => hasInEffect(e.ev));
-    return html`${this.envBadgeTemplate(known.length === 0 || known.some((e) => e.ev.in_effect))}
-      <ul class="env-values-under">
-        ${entries.map(
-          (e) =>
-            html`<li>
-              <code>${e.key}</code> = <code>${formatEnvValue(e.ev) || '—'}</code>
-              (${!hasInEffect(e.ev)
-                ? 'masked: whether it is in effect is not reported'
-                : e.ev.in_effect
-                  ? 'in effect on this node'
-                  : 'not in effect: the saved value wins'})
-            </li>`
-        )}
-      </ul>`;
+    return envValuesListView(entries);
   }
 
   /**
@@ -4166,6 +4099,10 @@ export class ScionPageAdminServerConfig extends LitElement {
     return html`
       <sl-tab-group
         @sl-tab-show=${(e: CustomEvent) => {
+          // The nested Agent Defaults tab group's sl-tab-show bubbles here;
+          // only this group's own events select a top-level tab
+          // (ptone/scion#4109).
+          if (e.target !== e.currentTarget) return;
           this.activeTab = (e.detail as { name: string }).name;
         }}
       >
@@ -4468,21 +4405,28 @@ export class ScionPageAdminServerConfig extends LitElement {
         ${this.renderSectionMeta('agent_defaults')}
         <div class="agent-defaults-tabs">
           <sl-tab-group
+            class="agent-defaults-tab-group"
             @sl-tab-show=${(e: CustomEvent) => {
-              this.agentDefaultsTab = (e.detail as { name: string }).name;
+              if (e.target !== e.currentTarget) return;
+              this.agentDefaultsTab = agentDefaultsTabFromPanel(
+                (e.detail as { name: string }).name
+              );
             }}
           >
-            <sl-tab slot="nav" panel="general" ?active=${this.agentDefaultsTab === 'general'}
-              >General</sl-tab
-            >
-            <sl-tab slot="nav" panel="limits" ?active=${this.agentDefaultsTab === 'limits'}
-              >Limits</sl-tab
-            >
-            <sl-tab slot="nav" panel="resources" ?active=${this.agentDefaultsTab === 'resources'}
-              >Resources</sl-tab
-            >
+            ${AGENT_DEFAULTS_TABS.map(
+              ([tab, label]) =>
+                html`<sl-tab
+                  slot="nav"
+                  panel=${agentDefaultsPanelName(tab)}
+                  ?active=${this.agentDefaultsTab === tab}
+                  >${label}</sl-tab
+                >`
+            )}
 
-            <sl-tab-panel name="general">
+            <sl-tab-panel
+              name=${agentDefaultsPanelName('general')}
+              ?active=${this.agentDefaultsTab === 'general'}
+            >
               <div class="form-grid">
                 <div class="form-field">
                   <label>Default Template</label>
@@ -4854,7 +4798,10 @@ export class ScionPageAdminServerConfig extends LitElement {
               </div>
             </sl-tab-panel>
 
-            <sl-tab-panel name="limits">
+            <sl-tab-panel
+              name=${agentDefaultsPanelName('limits')}
+              ?active=${this.agentDefaultsTab === 'limits'}
+            >
               <div class="form-grid">
                 <div class="form-field">
                   <label>Default Max Turns</label>
@@ -4908,7 +4855,10 @@ export class ScionPageAdminServerConfig extends LitElement {
               </div>
             </sl-tab-panel>
 
-            <sl-tab-panel name="resources">
+            <sl-tab-panel
+              name=${agentDefaultsPanelName('resources')}
+              ?active=${this.agentDefaultsTab === 'resources'}
+            >
               ${this.renderFieldValue(
                 'default_resources',
                 [
@@ -4991,6 +4941,13 @@ export class ScionPageAdminServerConfig extends LitElement {
               <h3 class="section-title">Project Default Settings</h3>
               <div class="form-grid">
                 <div class="form-field full-width">
+                  ${
+                    // The toggle's value comes from /admin/project-defaults,
+                    // not this page's server-config GET, so this badge does
+                    // not go through renderEnvBadge (whose keys the
+                    // env-keys test checks against the GET's values).
+                    renderKeysEnvBadge(this.envOverrides, this.envValues, [SCRATCHPAD_KEY])
+                  }
                   <sl-switch
                     ?checked=${this.scratchpadEnabled}
                     ?disabled=${this.scratchpadLoading}
@@ -6502,6 +6459,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         ${this.renderSectionHeader('Harness Configs', 'harness_configs')}
         ${this.renderSectionMeta('harness_configs')}
         ${hcReadOnly ? html`${this.renderReadOnlyBadge(hcReadOnly)}` : nothing}
+        ${this.renderEnvBadgeUnder('harness_configs')}
         ${configNames.length === 0
           ? html`<p class="hint">No harness configs configured.</p>`
           : configNames.map((name) => this.renderHarnessConfigEntry(name, !!hcReadOnly))}
