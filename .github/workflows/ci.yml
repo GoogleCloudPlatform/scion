@@ -423,6 +423,17 @@ jobs:
             exit 1
           fi
 
+      # Parse only: pkg/hub plus its test files declares no top-level
+      # identifier twice under any tag set CI compiles it with. The shards
+      # compile apart, so a duplicate across two shards passes them and
+      # breaks every whole-package build (go vet ./pkg/hub/).
+      - name: Check pkg/hub for duplicate declarations
+        run: |
+          if ! make hub-dupcheck; then
+            echo "::error title=pkg/hub duplicate declarations::two pkg/hub files declare the same top-level identifier (listed in the step log above); each shard builds, but go vet ./pkg/hub/ fails. See hack/dupdecl/main.go."
+            exit 1
+          fi
+
       # Bash only: the skipped-tests summary the shard jobs print
       # (hack/hubshard/lib.sh run_skip_summary), with a fake test binary.
       - name: Test the pkg/hub shard skip summary
