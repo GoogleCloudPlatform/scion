@@ -36,8 +36,8 @@ Phase 4 of hub-wide chat message retention (design §9 Phase 4; §6.5, §7.2,
   and dispatched since, exactly what a preview counts. `RunTick` was split
   so both share `sweepAndRecord` (phases, cursor and last applied cutoff,
   run status, prune); a manual run gives each phase the whole time instead
-  of halving it. Refused before a run is
-  created with `409 chat_retention_disabled` while the sweep is not active.
+  of halving it. Refused before a run is created with
+  `409 chat_retention_disabled` while the sweep is not active.
 - **Maintenance wiring.** Both keys are seeded as routine operations, have
   a parameter allowlist and a run timeout, and are hidden from the list and
   answer `404 Operation not found` on every route while `hub.chat_retention`
