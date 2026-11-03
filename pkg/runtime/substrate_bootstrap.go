@@ -178,7 +178,7 @@ func buildBootstrapEnv(cfg RunConfig) map[string]string {
 	}
 
 	for _, s := range cfg.ResolvedSecrets {
-		if (s.Type == "environment" || s.Type == "") && !reservedSecretEnvTarget(s.Target) {
+		if (s.Type == "environment" || s.Type == "") && !reservedAgentEnvName(s.Target) {
 			env[s.Target] = s.Value
 		}
 	}
@@ -234,6 +234,8 @@ func buildBootstrapEnv(cfg RunConfig) map[string]string {
 		env[k] = v
 	}
 
+	// A reserved name never reaches the container, whatever its source.
+	dropReservedAgentEnv(env)
 	return env
 }
 

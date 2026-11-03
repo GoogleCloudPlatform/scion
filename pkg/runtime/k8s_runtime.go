@@ -27,6 +27,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -2290,7 +2291,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 
 			for _, s := range config.ResolvedSecrets {
 				if s.Type == "environment" {
-					if _, collides := envVarNames[s.Target]; collides || reservedSecretEnvTarget(s.Target) {
+					if _, collides := envVarNames[s.Target]; collides || reservedAgentEnvName(s.Target) {
 						continue
 					}
 					envVars = append(envVars, corev1.EnvVar{
@@ -2317,7 +2318,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			// volume projects only the file keys, not the env values.
 			for _, s := range config.ResolvedSecrets {
 				if s.Type == "environment" {
-					if _, collides := envVarNames[s.Target]; collides || reservedSecretEnvTarget(s.Target) {
+					if _, collides := envVarNames[s.Target]; collides || reservedAgentEnvName(s.Target) {
 						continue
 					}
 					envVars = append(envVars, corev1.EnvVar{
@@ -2450,6 +2451,8 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// $(VAR) reference in a retained entry resolves to the same value as
 	// before de-duplication.
 	envVars = dedupeEnvVars(envVars)
+	// A reserved name never reaches the container, whatever its source.
+	envVars = slices.DeleteFunc(envVars, func(ev corev1.EnvVar) bool { return reservedAgentEnvName(ev.Name) })
 
 	// Security context: run agent pods as the image's non-root scion user.
 	// FSGroup is branched by workspace backend (N2-4):

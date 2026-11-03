@@ -596,6 +596,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 			log.Info("RunInit embedded: skipping environ-purge re-exec")
 		}
 	} else if transportCleared {
+		// Only the staging pass above arms the staged-token marker; this
+		// re-exec carries none.
+		_ = os.Unsetenv(envHubTokenStaged)
 		// Restart init with the cleaned environment, as above. On the
 		// second pass the env var is absent and the file already exists,
 		// so this branch is not taken again. Skipped for an embedded

@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
 
 // captureSciontoolLog points the sciontool log file at a fresh path for the
@@ -340,5 +341,30 @@ func TestLogHubOperatingMode(t *testing.T) {
 	}
 	if strings.Contains(out, initHubTokenCanary) {
 		t.Error("log carries the credential")
+	}
+}
+
+// Only the staging pass arms the staged-token marker: a pass that takes
+// the transport-token re-exec path (no staged payload) clears an inherited
+// marker, so a broker-provided token file is not removed at a clean exit.
+func TestRunInit_TransportReexecPathClearsInheritedMarker(t *testing.T) {
+	f := newRunInitStagedFixture(t)
+	if err := os.MkdirAll(filepath.Dir(f.tokenPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.tokenPath, []byte(initHubTokenCanary), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envHubTokenStaged, "1")
+	t.Setenv(transportauth.EnvTransportToken, "fake-transport-token-canary-7239")
+	t.Setenv(transportauth.EnvTransportTokenFile, "")
+	if got := f.run(t, "sleep 0.5"); got != 0 {
+		t.Fatalf("RunInit() = %d, want 0", got)
+	}
+	if got := readFileString(t, f.tokenPath); got != initHubTokenCanary {
+		t.Error("a broker-provided token file was removed on the transport re-exec path")
+	}
+	if strings.Contains(f.readLog(), "Removed the staged hub credential file") {
+		t.Error("init treated an inherited marker as its own")
 	}
 }

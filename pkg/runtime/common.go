@@ -305,6 +305,13 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	args := []string{"run", "-d", "-i"}
 	addArg := func(flag string, values ...string) {
 		for _, v := range values {
+			if flag == "-e" {
+				// Every container env entry passes here; a reserved name
+				// never reaches the container (reservedAgentEnvName).
+				if name, _, _ := strings.Cut(v, "="); reservedAgentEnvName(name) {
+					continue
+				}
+			}
 			args = append(args, flag, v)
 		}
 	}
@@ -841,7 +848,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		if s.Type != "environment" && s.Type != "" {
 			continue
 		}
-		if _, collides := envKeys[s.Target]; collides || s.Target == SupplementalGIDsEnvVar || s.Target == MetadataInterceptionEnvVar || reservedSecretEnvTarget(s.Target) {
+		if _, collides := envKeys[s.Target]; collides || s.Target == SupplementalGIDsEnvVar || s.Target == MetadataInterceptionEnvVar || reservedAgentEnvName(s.Target) {
 			continue
 		}
 		addArg("-e", fmt.Sprintf("%s=%s", s.Target, s.Value))
@@ -2289,12 +2296,25 @@ func copyFileIntoHome(src string, home *agenthome.Home, rel string) error {
 // the combined environment at ~128KB.
 const stagedSecretWarnThreshold = 100 * 1024
 
-// reservedSecretEnvTarget reports whether an environment-type secret may
-// not set name on any runtime: sciontool init reads it as its own marker
-// (stagedsecrets.HubTokenStagedEnvVar), so a secret supplying it would make
-// init treat a broker-provided token file as one it staged.
-func reservedSecretEnvTarget(name string) bool {
+// reservedAgentEnvName reports whether name may not reach an agent
+// container's environment from any source, secret or not, on any runtime:
+// sciontool init reads it as its own marker
+// (stagedsecrets.HubTokenStagedEnvVar) and only init itself sets it, so a
+// value supplied from outside would make init treat a broker-provided
+// token file as one it staged. Each runtime drops it where it assembles
+// the container environment.
+func reservedAgentEnvName(name string) bool {
 	return name == stagedsecrets.HubTokenStagedEnvVar
+}
+
+// dropReservedAgentEnv deletes the reservedAgentEnvName entries from an
+// environment map.
+func dropReservedAgentEnv(env map[string]string) {
+	for k := range env {
+		if reservedAgentEnvName(k) {
+			delete(env, k)
+		}
+	}
 }
 
 // prepareContainerSecretEnv adds the shared secret-related environment needed

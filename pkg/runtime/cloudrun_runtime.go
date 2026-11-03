@@ -579,6 +579,8 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 	// Previously, cfg.CommandArgs was passed as Container.Command (which
 	// overrides ENTRYPOINT), bypassing both GetCommand() and tmux. The CLI
 	// then ran without a PTY and crashed: "bubbletea: could not open TTY".
+	// A reserved name never reaches the instance, whatever its source.
+	envVars = slices.DeleteFunc(envVars, func(ev *runpb.EnvVar) bool { return reservedAgentEnvName(ev.GetName()) })
 	container := &runpb.Container{
 		Name:         "scion-agent",
 		Image:        cfg.Image,
