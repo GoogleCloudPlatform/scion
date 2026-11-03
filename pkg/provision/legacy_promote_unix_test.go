@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -162,4 +163,31 @@ func TestLockLitterEntries_KeepsOnlyLitter(t *testing.T) {
 		names = append(names, e.Name())
 	}
 	assert.ElementsMatch(t, []string{provisionFileLockName + ".evict-a", provisionFileLockName + ".stage-b"}, names)
+}
+
+// One listing returns at most lockLitterMaxEntries litter entries: with one
+// litter entry more than the cap (next to non-litter entries and the live
+// lock, which are never returned), exactly the cap is returned, each a
+// distinct litter name, and a later sweep handles the rest.
+func TestLockLitterEntries_StopsAtCap(t *testing.T) {
+	dir := t.TempDir()
+	prefix := provisionFileLockName + "."
+	for i := 0; i <= lockLitterMaxEntries; i++ {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, fmt.Sprintf("%sevict-%05d", prefix, i)), nil, 0o644))
+	}
+	for i := 0; i < 100; i++ {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, fmt.Sprintf("file-%03d", i)), nil, 0o644))
+	}
+	require.NoError(t, os.Mkdir(filepath.Join(dir, provisionFileLockName), 0o755))
+
+	got, err := lockLitterEntries(dir)
+	require.NoError(t, err)
+	require.Len(t, got, lockLitterMaxEntries, "one listing stops at the cap")
+	seen := make(map[string]bool, len(got))
+	for _, e := range got {
+		name := e.Name()
+		assert.True(t, strings.HasPrefix(name, prefix), "not a litter entry: %s", name)
+		assert.False(t, seen[name], "returned twice: %s", name)
+		seen[name] = true
+	}
 }
