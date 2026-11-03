@@ -14,8 +14,9 @@
 
 // Package hubtestutil holds generic test helpers for pkg/hub and its
 // subpackages: deterministic test IDs, in-memory SQLite, the TestMain memory
-// and leak guards, hermetic git runners and small fault-injection and buffer
-// types.
+// and leak guards, hermetic git runners, small fault-injection and buffer
+// types, JSON response decoding, slog capture, koanf builders, a temporary
+// settings home and small value helpers.
 //
 // Only test code imports it. It must never import pkg/hub
 // (no_hub_import_test.go enforces this), so that future pkg/hub/<area>
@@ -31,6 +32,10 @@
 // database helpers (chatdb.go) followed the same way (family
 // hack/hubshard/extract/families/hubtestutil-wave2-webchat.txt; pkg/hub
 // keeps their names through pkg/hub/zz_alias_hubtestutil_chatdb_test.go).
+// So did the generic helpers in basic.go, httpjson.go, koanf.go,
+// settingshome.go and slogcapture.go (family
+// hack/hubshard/extract/families/hubtestutil-wave2.txt; pkg/hub keeps their
+// names through pkg/hub/zz_alias_hubtestutil_wave2_test.go).
 //
 // Hand-written: OpenMigratedTestStore (teststore.go), a migrated test store
 // for area packages, and RunTestMain (runtestmain.go and

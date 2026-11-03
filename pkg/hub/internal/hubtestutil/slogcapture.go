@@ -20,13 +20,13 @@ import (
 	"testing"
 )
 
-// captureSlog replaces the default slog logger with one that writes to a
+// CaptureSlog replaces the default slog logger with one that writes to a
 // buffer and returns the buffer. Restores the original logger on cleanup.
 //
 // Call this BEFORE constructing a Server (or anything else that snapshots
 // slog.Default() into a fixed subsystem logger, e.g. logging.Subsystem).
 // Capturing after construction can leave the test's absence assertions
-// vacuous: see requireLogCaptureLive below.
+// vacuous: see pkg/hub's requireLogCaptureLive.
 func CaptureSlog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
@@ -37,7 +37,7 @@ func CaptureSlog(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-// captureSlogDefault swaps slog's default logger for a text handler writing
+// CaptureSlogDefault swaps slog's default logger for a text handler writing
 // to the returned buffer, and restores the previous default on test cleanup.
 func CaptureSlogDefault(t *testing.T) *bytes.Buffer {
 	t.Helper()
@@ -48,8 +48,8 @@ func CaptureSlogDefault(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-// installSentinelLogCapture points the slog default logger at an in-memory
-// buffer, at Debug level so brokerHTTPTransport's debug-only logging is
+// InstallSentinelLogCapture points the slog default logger at an in-memory
+// buffer, at Debug level so the debug-only logging of pkg/hub's brokerHTTPTransport is
 // captured too, and restores the previous default logger on test cleanup.
 func InstallSentinelLogCapture(t *testing.T) *bytes.Buffer {
 	t.Helper()
@@ -60,7 +60,7 @@ func InstallSentinelLogCapture(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-// attrMap flattens a slog.Record's top-level attributes (including nested
+// RecordAttrs flattens a slog.Record's top-level attributes (including nested
 // groups, dotted) into a map for easy lookup in assertions.
 func RecordAttrs(r slog.Record) map[string]any {
 	out := map[string]any{}
@@ -99,7 +99,7 @@ func FindRecord(records []slog.Record, msg string) (slog.Record, bool) {
 	return slog.Record{}, false
 }
 
-// recordAttr reads a single attribute off a captured record.
+// RecordAttr reads a single attribute off a captured record.
 func RecordAttr(r slog.Record, key string) (slog.Value, bool) {
 	var found slog.Value
 	var ok bool
