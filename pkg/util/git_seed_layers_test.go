@@ -241,3 +241,48 @@ func TestCheckSeedRepoConfigLayers_ParserDifferentialRefuses(t *testing.T) {
 	}
 	_ = name
 }
+
+// Refused keys in different layers are reported together, and git is not run
+// while any key is refused: a reader that also makes the parsed set differ
+// from git (which the cross-check would refuse) still yields the key list,
+// with the note that the git checks are still to run.
+func TestCheckSeedRepoConfigLayers_JoinsLayersWithoutRunningGit(t *testing.T) {
+	commonDir, _, name := seedLayersRepo(t)
+	f, err := os.OpenFile(filepath.Join(commonDir, "config"), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("[core]\n\teditor = vi-layermarker-j1\n\tsparseCheckout = true\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	writeLayer(t, filepath.Join(commonDir, "worktrees", name, "config.worktree"), "[core]\n\tpager = less-layermarker-j2\n")
+	dropping := func(path, label string) ([]gitConfigVar, error) {
+		vars, err := readSeedConfigLayer(path, label)
+		var kept []gitConfigVar
+		for _, v := range vars {
+			if v.Key() != "core.sparsecheckout" {
+				kept = append(kept, v)
+			}
+		}
+		return kept, err
+	}
+	err = checkSeedRepoConfigLayers(context.Background(), commonDir, name, dropping)
+	var many *RepoConfigRefusals
+	if !errors.As(err, &many) {
+		t.Fatalf("error = %v, want *RepoConfigRefusals (no cross-check while keys are refused)", err)
+	}
+	if len(many.Refusals) != 2 || many.Refusals[0].Key != "core.editor" || many.Refusals[0].Layer != "" ||
+		many.Refusals[1].Key != "core.pager" || many.Refusals[1].Layer != seedLayerOwnWorktree || !many.GitChecksPending {
+		t.Fatalf("refusals = %+v, want core.editor in .git/config then core.pager in the own config.worktree, git checks pending", many.Refusals)
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "layermarker-j") || strings.Contains(msg, "read differently") {
+		t.Errorf("text leaks a value or reports the cross-check: %s", msg)
+	}
+	if !strings.Contains(msg, "core.pager (remove each from the git config file that sets it, in "+seedLayerOwnWorktree+")") || !strings.HasSuffix(msg, refusalsGitChecksNote) {
+		t.Errorf("text lacks the per-layer remedy or the note: %s", msg)
+	}
+}

@@ -5989,6 +5989,10 @@ func relayBrokerRefusal(w http.ResponseWriter, err error) bool {
 	case se.StatusCode == http.StatusBadRequest && code == ErrCodeValidationError:
 	case se.StatusCode == http.StatusUnprocessableEntity && code == harnessConfigUnusableErrorCode:
 	case se.StatusCode == http.StatusUnprocessableEntity && code == storageMigrationRequiredErrorCode:
+	case se.StatusCode == http.StatusUnprocessableEntity && code == api.BrokerErrCodeGitConfigRefused:
+		// The repository's git config sets keys agents may not be given.
+		// The broker's text names every refused key and its remedy, never
+		// a value or a host path.
 	case se.StatusCode == http.StatusServiceUnavailable && code == projectStorageUnavailableErrorCode:
 		// The broker does not see the project storage share. Its message is
 		// relayed only when it is one of the known path-free texts; a broker

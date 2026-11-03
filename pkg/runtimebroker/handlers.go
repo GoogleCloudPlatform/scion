@@ -2271,6 +2271,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, ErrCodeNotFound, notFoundMessage(opCreateAgent, err, opts.TemplateName), nil)
 		case isSkillErr:
 			SkillResolutionFailed(w, skillErr, createSkill.ref)
+		case writeGitConfigRefusal(w, err, nil):
+			// The repository's git config sets keys agents may not be given.
 		case errors.Is(err, agent.ErrProjectPathNotInitialized):
 			writeError(w, http.StatusConflict, ErrCodeProjectPathNotInitialized, err.Error(), nil)
 		case config.IsAgentStateConflict(err):
@@ -4263,6 +4265,8 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			writeError(w, http.StatusConflict, ErrCodeConflict, scionrt.ErrRunConflict.Error(), details)
 		case errors.As(err, &skillErr):
 			skillResolutionFailedWithDetails(w, skillErr, startSkill.ref, details)
+		case writeGitConfigRefusal(w, err, details):
+			// The repository's git config sets keys agents may not be given.
 		case errors.Is(err, agent.ErrProjectPathNotInitialized):
 			writeError(w, http.StatusConflict, ErrCodeProjectPathNotInitialized, err.Error(), details)
 		case config.IsAgentStateConflict(err):
@@ -5472,6 +5476,9 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		var skillErr *agent.SkillResolutionError
 		if errors.As(err, &skillErr) {
 			skillResolutionFailedWithDetails(w, skillErr, restartSkill.ref, details)
+			return
+		}
+		if writeGitConfigRefusal(w, err, details) {
 			return
 		}
 		if errors.Is(err, agent.ErrProjectPathNotInitialized) {
