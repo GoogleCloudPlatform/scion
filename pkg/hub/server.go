@@ -2438,6 +2438,10 @@ type Server struct {
 	// asyncStartGate caches whether every live hub instance advertises
 	// async_start_v1 (async_start_gate.go). The zero value reads false.
 	asyncStartGate asyncStartGate
+	// asyncStartGateRefresherDone is closed when the gate's refresh loop
+	// exits; set by startAsyncStartGateRefresher, taken (and cleared) by
+	// stopAsyncStartGateRefresher. Guarded by mu.
+	asyncStartGateRefresherDone <-chan struct{}
 
 	// onListening runs once Start has bound the hub API listener
 	// (SetOnListening; guarded by mu).
@@ -7097,8 +7101,9 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// Keep the async start gate's answer fresh while hub.async_agent_start
 	// is on (ptone/scion#7250); it reads nothing while the experiment is
 	// off. Started after the registry, so this replica's own row usually
-	// exists for its first read. It exits when the context is cancelled.
-	_ = s.startAsyncStartGateRefresher(registryCtx)
+	// exists for its first read. It exits when the context is cancelled;
+	// CleanupBackgroundResources joins it (stopAsyncStartGateRefresher).
+	s.startAsyncStartGateRefresher(registryCtx)
 
 	// Start the lifecycle outbox drainer, only when it has work.
 	s.startLifecycleEvents(ctx)
@@ -7288,6 +7293,11 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		if s.ctxCancel != nil {
 			s.ctxCancel()
 		}
+
+		// Join the async start gate's refresh loop (bounded: at most one
+		// registry read, which the cancelled ctx above ends) while the
+		// store is still open.
+		s.stopAsyncStartGateRefresher()
 
 		// Let a scheduled chat message being delivered finish (bounded)
 		// while the stores and event publisher are still open.

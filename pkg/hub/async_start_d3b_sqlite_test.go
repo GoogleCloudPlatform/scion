@@ -611,8 +611,8 @@ func seedAsyncStartGate(srv *Server, value bool) {
 
 // TestStartBackgroundServices_RefreshesAsyncStartGate pins the wiring of
 // ptone/scion#7250: with the experiment on, StartBackgroundServices starts
-// the gate's refresh loop, which reads the registry (this replica's own
-// row) without any start asking for it.
+// the gate's refresh loop, which reads the registry without any start
+// asking for it, and CleanupBackgroundResources joins the loop.
 func TestStartBackgroundServices_RefreshesAsyncStartGate(t *testing.T) {
 	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
@@ -624,12 +624,29 @@ func TestStartBackgroundServices_RefreshesAsyncStartGate(t *testing.T) {
 	defer cancel()
 	srv.StartBackgroundServices(ctx)
 
+	// The loop's first tick runs at once. Only that a refresh landed is
+	// asserted, not its value: if this replica's first registry write is
+	// slow, that first read may see no live row.
 	g := &srv.asyncStartGate
 	require.Eventually(t, func() bool {
 		g.mu.Lock()
 		defer g.mu.Unlock()
-		return !g.refreshedAt.IsZero() && g.value
-	}, 10*time.Second, 10*time.Millisecond, "the refresh loop read the registry and every live row has async_start_v1")
+		return !g.refreshedAt.IsZero()
+	}, 30*time.Second, 10*time.Millisecond, "the refresh loop read the registry with no start")
+
+	srv.mu.RLock()
+	done := srv.asyncStartGateRefresherDone
+	srv.mu.RUnlock()
+	require.NotNil(t, done, "the loop's done channel is recorded")
+	require.NoError(t, srv.CleanupBackgroundResources(context.Background()))
+	select {
+	case <-done:
+	default:
+		t.Fatal("CleanupBackgroundResources returned before the refresh loop exited")
+	}
+	srv.mu.RLock()
+	defer srv.mu.RUnlock()
+	assert.Nil(t, srv.asyncStartGateRefresherDone, "CleanupBackgroundResources took the loop's done channel to join it")
 }
 
 // newAsyncStartFixture is newClaimFixture (start claims on) with an

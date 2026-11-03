@@ -452,37 +452,126 @@ func TestAsyncStartGate_ReadErrorWarnRateLimited(t *testing.T) {
 	assert.True(t, srv.asyncStartAllowed())
 }
 
+// gateLogRecorder keeps the level, message and attributes of every record.
+type gateLogRecorder struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *gateLogRecorder) Enabled(context.Context, slog.Level) bool { return true }
+func (h *gateLogRecorder) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r.Clone())
+	return nil
+}
+func (h *gateLogRecorder) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *gateLogRecorder) WithGroup(string) slog.Handler      { return h }
+
+// at returns the attributes (plus "msg") of every record at exactly level.
+func (h *gateLogRecorder) at(level slog.Level) []map[string]string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var out []map[string]string
+	for _, r := range h.records {
+		if r.Level != level {
+			continue
+		}
+		m := map[string]string{"msg": r.Message}
+		r.Attrs(func(a slog.Attr) bool { m[a.Key] = a.Value.String(); return true })
+		out = append(out, m)
+	}
+	return out
+}
+
 // TestAsyncStartGate_RefreshPanicFailsClosed pins that a panic in a
 // registry read, on the loop or on a start's background refresh, does not
 // stop the process, turns the answer false and clears inFlight, so the
-// next refresh runs.
+// next refresh runs. The panic is logged at error with a stack cut to
+// hubInstancePanicStackBytes, once per hubInstanceWarnEvery, and a read
+// error warned just before does not suppress it (separate rate limits).
 func TestAsyncStartGate_RefreshPanicFailsClosed(t *testing.T) {
 	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
 	advance := fakeAsyncStartGateClock(t, now)
-	st := &hubInstanceListStore{now: now, rows: []store.HubInstance{hubRow(t, "a", now, time.Second, false, api.HubInstanceFeatureAsyncStartV1)}}
-	srv := &Server{store: st, agentLifecycleLog: slog.New(&countingHandler{})}
+	good := []store.HubInstance{hubRow(t, "a", now, time.Second, false, api.HubInstanceFeatureAsyncStartV1)}
+	st := &hubInstanceListStore{now: now, rows: good}
+	rec := &gateLogRecorder{}
+	srv := &Server{store: st, agentLifecycleLog: slog.New(rec)}
 	setAsyncStartExperiment(t, srv, true)
 	ctx := context.Background()
 	srv.asyncStartGateRefreshTick(ctx)
 	require.True(t, srv.asyncStartAllowed())
 
-	// On the loop.
+	// A read error warns first.
+	st.set(nil, errors.New("db down"))
+	advance(asyncStartGateRefreshInterval)
+	srv.asyncStartGateRefreshTick(ctx)
+	require.Len(t, rec.at(slog.LevelWarn), 1)
+	st.set(good, nil)
+	advance(asyncStartGateRefreshInterval)
+	srv.asyncStartGateRefreshTick(ctx)
+	require.True(t, srv.asyncStartAllowed())
+
+	// A panic on the loop.
 	st.panicNext.Store(true)
 	advance(asyncStartGateRefreshInterval)
 	srv.asyncStartGateRefreshTick(ctx)
 	assert.False(t, srv.asyncStartAllowed(), "a panicked refresh fails closed")
+	errs := rec.at(slog.LevelError)
+	require.Len(t, errs, 1, "the panic is logged at error, not suppressed by the read-error warning")
+	assert.Contains(t, errs[0]["msg"], "panicked")
+	assert.Equal(t, "registry read exploded", errs[0]["panic"])
+	assert.NotEmpty(t, errs[0]["stack"])
+	assert.LessOrEqual(t, len(errs[0]["stack"]), hubInstancePanicStackBytes)
+	assert.Len(t, rec.at(slog.LevelWarn), 1, "the panic is not logged as a read error")
 	advance(asyncStartGateRefreshInterval)
 	srv.asyncStartGateRefreshTick(ctx)
 	assert.True(t, srv.asyncStartAllowed(), "the next tick refreshed: inFlight was cleared")
 
-	// On a start's background refresh (no loop tick).
+	// A panic on a start's background refresh (no loop tick), within
+	// hubInstanceWarnEvery of the first: not logged again.
 	st.panicNext.Store(true)
 	advance(asyncStartGateTTL)
 	assert.True(t, srv.asyncStartAllowed(), "the cached answer while the background refresh runs")
 	require.Eventually(t, func() bool { return !srv.asyncStartAllowed() }, 5*time.Second, time.Millisecond, "the panicked background refresh fails closed")
+	assert.Len(t, rec.at(slog.LevelError), 1, "a second panic within the window is suppressed")
 	advance(asyncStartGateRefreshInterval)
 	srv.asyncStartGateRefreshTick(ctx)
 	assert.True(t, srv.asyncStartAllowed(), "inFlight was cleared after the background panic")
+
+	// After the window, a panic is logged again with the suppressed count.
+	advance(hubInstanceWarnEvery)
+	st.panicNext.Store(true)
+	srv.asyncStartGateRefreshTick(ctx)
+	errs = rec.at(slog.LevelError)
+	require.Len(t, errs, 2)
+	assert.Equal(t, "1", errs[1]["suppressed_since_last_log"])
+}
+
+// TestAsyncStartGate_CancelledRefreshClearsInFlight pins the shutdown
+// path: a refresh whose context is cancelled stores and logs nothing, but
+// clears inFlight, so the gate is never left wedged.
+func TestAsyncStartGate_CancelledRefreshClearsInFlight(t *testing.T) {
+	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	fakeAsyncStartGateClock(t, now)
+	st := &hubInstanceListStore{now: now, rows: []store.HubInstance{hubRow(t, "a", now, time.Second, false, api.HubInstanceFeatureAsyncStartV1)}}
+	rec := &gateLogRecorder{}
+	srv := &Server{store: st, agentLifecycleLog: slog.New(rec)}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	g := &srv.asyncStartGate
+	g.mu.Lock()
+	g.inFlight = true
+	g.mu.Unlock()
+	srv.refreshAsyncStartGate(ctx)
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	assert.False(t, g.inFlight, "inFlight is cleared on a cancelled refresh")
+	assert.True(t, g.refreshedAt.IsZero(), "nothing is stored")
+	assert.False(t, g.value)
+	assert.Empty(t, rec.records, "nothing is logged")
 }
 
 // TestStartAgentURL_AgentID pins design R1: both transports send the hub's
