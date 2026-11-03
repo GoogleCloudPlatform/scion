@@ -332,6 +332,12 @@ const SkillContentHashV2 = "hub.skill_content_hash_v2"
 // whether or not it is on.
 const ArtifactReviewEditor = "web.artifact_review_editor"
 
+// ArtifactManageAccess gates the Manage access button and dialog on the
+// artifact page (ptone/scion#7107). It is web-only: the dialog calls the
+// existing grant, link and expiry routes, which decide every change the
+// same way whether or not it is on.
+const ArtifactManageAccess = "web.artifact_manage_access"
+
 // UserDeleteForceCascade gates the forced user delete (ptone/scion#2143):
 // DELETE /api/v1/users/{id}?force=true, which revokes the user's authority,
 // records a deletion tombstone and stops the user's agents, the GET
@@ -578,6 +584,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#5913",
 		Owner:       "artifacts",
 		ReviewBy:    "2027-01-21",
+	},
+	{
+		Name:        ArtifactManageAccess,
+		Title:       "Manage access dialog",
+		Description: "Replaces Share, Grant review access and Retention… on the artifact page with one Manage access button and dialog for review access, link sharing and retention. Needs hub.artifacts. Web only; the hub decides every change the same way whether or not it is on.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#7107",
+		Owner:       "artifacts",
+		ReviewBy:    "2027-02-01",
 	},
 	{
 		Name:        UserDeleteForceCascade,

@@ -35,9 +35,13 @@
  * access) for canGrantReview without canManage. Retention… (the Retention
  * and access dialog: expiry, revoke links, remove grants) is shown for
  * canShare without canManage (a steward), and Delete… for canRetire
- * (ptone/scion#4535). An artifact whose owner was deleted has the Owner
- * deleted badge and its owner struck through; the meta row shows when it
- * expires.
+ * (ptone/scion#4535). With the experiment web.artifact_manage_access on
+ * (ptone/scion#7107), one Manage access button, shown for canShare or
+ * canGrantReview, replaces Share, Grant review access and Retention…; it
+ * opens the Share dialog in manage mode, with each section decided from the
+ * same flags. Move… and Delete… are unchanged. An artifact whose owner
+ * was deleted has the Owner deleted badge and its owner struck through;
+ * the meta row shows when it expires.
  * Route: /projects/{projectId}/artifacts/{artifactId}[/v/{seq}]
  */
 
@@ -49,7 +53,11 @@ import type { PageData } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { navigateTo, stripBasePath } from '../../client/navigation.js';
-import { ARTIFACT_REVIEW_EDITOR_FLAG, isFeatureEnabled } from '../../utils/feature-flags.js';
+import {
+  ARTIFACT_MANAGE_ACCESS_FLAG,
+  ARTIFACT_REVIEW_EDITOR_FLAG,
+  isFeatureEnabled,
+} from '../../utils/feature-flags.js';
 import { formatInstant } from '../../utils/time.js';
 import { showToast } from '../../utils/toast.js';
 import {
@@ -105,6 +113,8 @@ import '../shared/detail-header.js';
 import '../shared/artifact-publish-dialog.js';
 import '../shared/artifact-move-dialog.js';
 import '../shared/artifact-share-dialog.js';
+import { capabilitiesFrom, showManageAccess } from '../shared/artifact-access-sections.js';
+import type { AccessCapabilities } from '../shared/artifact-access-sections.js';
 import '../shared/artifact-delete-dialog.js';
 import { ownerDeletedBadge, ownerDeletedStyles } from '../shared/artifact-owner-deleted.js';
 import '../shared/code-editor.js';
@@ -402,6 +412,8 @@ export class ScionPageArtifactDetail extends LitElement {
   @state() private moveOpen = false;
   /** The Retention and access dialog is open. */
   @state() private retentionOpen = false;
+  /** The Manage access dialog is open (experiment web.artifact_manage_access). */
+  @state() private accessOpen = false;
   /** The Delete artifact confirmation is open. */
   @state() private deleteOpen = false;
   /**
@@ -1286,6 +1298,19 @@ export class ScionPageArtifactDetail extends LitElement {
   }
 
   /**
+   * One Manage access button and dialog replace Share, Grant review access
+   * and Retention… (experiment web.artifact_manage_access, ptone/scion#7107).
+   */
+  private get manageAccess(): boolean {
+    return isFeatureEnabled(ARTIFACT_MANAGE_ACCESS_FLAG);
+  }
+
+  /** The capability flags the Manage access dialog reads. */
+  private get accessCaps(): AccessCapabilities {
+    return capabilitiesFrom(this.data);
+  }
+
+  /**
    * Where the back link goes, and where a delete returns to: the Artifacts
    * list when the page was opened from it (ptone/scion#6847) or the home
    * project was deleted, the home project otherwise.
@@ -1858,7 +1883,23 @@ export class ScionPageArtifactDetail extends LitElement {
           this.publishOpen = false;
         }}
       ></scion-artifact-publish-dialog>
-      ${this.data?.canManage || this.canGrantReview
+      ${this.manageAccess && showManageAccess(this.accessCaps)
+        ? html`<scion-artifact-share-dialog
+            class="access-dialog"
+            .artifact=${this.data.artifact}
+            .currentUserId=${this.pageData?.user?.id ?? ''}
+            .mode=${'manage'}
+            .capabilities=${this.accessCaps}
+            ?open=${this.accessOpen}
+            @artifact-changed=${(e: CustomEvent<Artifact>): void => {
+              if (this.data) this.data = { ...this.data, artifact: e.detail };
+            }}
+            @artifact-share-closed=${(): void => {
+              this.accessOpen = false;
+            }}
+          ></scion-artifact-share-dialog>`
+        : nothing}
+      ${!this.manageAccess && (this.data?.canManage || this.canGrantReview)
         ? html`<scion-artifact-share-dialog
             .artifact=${this.data.artifact}
             .currentUserId=${this.pageData?.user?.id ?? ''}
@@ -1872,7 +1913,7 @@ export class ScionPageArtifactDetail extends LitElement {
             }}
           ></scion-artifact-share-dialog>`
         : nothing}
-      ${this.canRetention
+      ${!this.manageAccess && this.canRetention
         ? html`<scion-artifact-share-dialog
             class="retention-dialog"
             .artifact=${this.data.artifact}
@@ -1989,16 +2030,13 @@ export class ScionPageArtifactDetail extends LitElement {
     // Every action needs a version, edit rights or (for Share and Grant
     // review access) the right to manage the artifact or give review
     // access; all are hidden while editing or reviewing.
+    const accessActions = this.manageAccess
+      ? showManageAccess(this.accessCaps)
+      : !!this.data?.canManage || this.canGrantReview || this.canRetention;
     const hasActions =
       !this.editing &&
       !this.reviewing &&
-      (!!v ||
-        this.canEdit ||
-        this.canReview ||
-        !!this.data?.canManage ||
-        this.canGrantReview ||
-        this.canRetention ||
-        this.canRetire);
+      (!!v || this.canEdit || this.canReview || accessActions || this.canRetire);
     // A deleted home project has no page: go back to the artifacts list
     // instead (ptone/scion#4588).
     const back = this.backTarget;
@@ -2072,17 +2110,21 @@ export class ScionPageArtifactDetail extends LitElement {
                       Review
                     </sl-button>`
                   : nothing}
-                ${this.data!.canManage
+                ${this.manageAccess && showManageAccess(this.accessCaps)
                   ? html`<sl-button
                       size="small"
+                      class="manage-access"
                       @click=${(): void => {
-                        this.shareOpen = true;
+                        this.accessOpen = true;
                       }}
                     >
-                      <sl-icon slot="prefix" name="person-plus"></sl-icon>
-                      Share
+                      <sl-icon slot="prefix" name="shield-lock"></sl-icon>
+                      Manage access
                     </sl-button>`
-                  : this.canGrantReview
+                  : nothing}
+                ${this.manageAccess
+                  ? nothing
+                  : this.data!.canManage
                     ? html`<sl-button
                         size="small"
                         @click=${(): void => {
@@ -2090,10 +2132,20 @@ export class ScionPageArtifactDetail extends LitElement {
                         }}
                       >
                         <sl-icon slot="prefix" name="person-plus"></sl-icon>
-                        Grant review access
+                        Share
                       </sl-button>`
-                    : nothing}
-                ${this.canRetention
+                    : this.canGrantReview
+                      ? html`<sl-button
+                          size="small"
+                          @click=${(): void => {
+                            this.shareOpen = true;
+                          }}
+                        >
+                          <sl-icon slot="prefix" name="person-plus"></sl-icon>
+                          Grant review access
+                        </sl-button>`
+                      : nothing}
+                ${!this.manageAccess && this.canRetention
                   ? html`<sl-button
                       size="small"
                       class="retention"
