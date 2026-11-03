@@ -160,3 +160,57 @@ it finds there.
   kept, at most 4096 per pass (`lockLitterEntries`, shared with the
   recurring state-directory sweep). A root with very many entries is never
   held in memory as a whole.
+
+## Merge with main after phase 5a landed (2026-11-03)
+
+Phase 5a reached main as one squashed commit, while this branch carried
+phase 5a's history as merges. The branch was brought onto main by a merge
+commit, never a rebase (`0babe834`, main at `84bf9deb`). Files this branch
+never changed take main's version; checks found no leftover of the older
+phase 5a history anywhere else. Main had moved on in four areas that touch
+this phase, and the merge carries each of them:
+
+- **Workspace-root lock re-added on main.** Main's newer code passed the
+  removed workspace-root lock directory again: `sciontool provision`, the
+  hub's provisioning at create (for git projects) and the broker's
+  shared-plain backstop. All three are removed in the merge, so the state
+  directory stays the only home of the sentinel and lock.
+- **Clone token bound to the recorded remote.** Main offers the clone token
+  only when the clone URL names the project's recorded remote. This phase's
+  Provisioner predated that rule and passed the clone URL as the remote. The
+  hub and the broker now compute the gated token and remote before calling
+  the Provisioner, which passes them through. The hub's refusal of an ssh
+  URL without a project credential now runs before any filesystem work.
+- **Leaf owner.** Main gives a root creator's new Mount leaves the Layout's
+  owner. The single leaf primitive gained `projectfs.EnsureSharedLeafOwned`,
+  and `Resolved.EnsureLeaf` uses the owner the Layout assigns, as
+  `Resolved.Open` does. The provisioning state directory keeps the zero
+  owner. No code outside `pkg/shareddirs` and `pkg/projectfs` calls the
+  `shareddirs` leaf functions directly.
+- **One lock-litter sweep.** Main added an exported `SweepLockLitter` for
+  agent directories. It is now the only implementation, over this phase's
+  bounded listing; the promotion step and the state-directory sweep on open
+  call it.
+
+**Behaviour change, signed-URL bootstrap.** A hub-managed shared workspace
+that holds only a provisioning lock or sentinel left in the workspace root
+by an older image is now treated as existing content: the bootstrap skips
+it and writes nothing into it, where main failed it as busy. This follows
+from the state directory being the only place provisioning bookkeeping
+lives. A test checks that the leaf's listing is byte-identical before and
+after. The earlier "busy" test keeps its fixture, now asserts the skip, and
+is renamed `TestSignedCaseB_ArtifactsOnlyLeafIsExistingContent` so that its
+name matches what it asserts.
+
+**Sharer registry at the cap.** A worktree sharer registry of exactly 4096
+markers (or 65536 entries) was reported as truncated, so finding or
+unregistering a sharer failed closed although everything had been read.
+Truncation is now reported only for a marker or an entry beyond a cap. The
+error names the registry directory and asks for stale markers to be removed
+(`2a6bdc69`).
+
+Recorded with the merge: the per-file resolution, the security-relevant
+hunks, and the no-compile checks (conflict markers, gofmt, the
+workspace-root marker scan emulated over the tree, the duplicate-identifier
+scan in four platform contexts, a secret-shape scan). The compile and test
+gate follows.
