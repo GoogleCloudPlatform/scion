@@ -150,7 +150,7 @@ func runBrokerConvert(cmd *cobra.Command, _ []string) error {
 	// direct call too.
 	writesonread.Set()
 
-	in, settings, err := loadConvertInput()
+	in, settings, err := loadConvertInput(cmd)
 	if err != nil {
 		return err
 	}
@@ -198,15 +198,16 @@ func planExit(plan *brokerconvert.Plan) error {
 }
 
 // loadConvertInput reads this host's effective legacy settings, the raw
-// global settings file and the choices file. It only reads.
-func loadConvertInput() (brokerconvert.Input, *config.Settings, error) {
+// global settings file and the choices file. It only reads. Settings
+// warnings go to cmd's error stream.
+func loadConvertInput(cmd *cobra.Command) (brokerconvert.Input, *config.Settings, error) {
 	var in brokerconvert.Input
 	vs, warnings, err := config.LoadGlobalSettingsWithOverlay()
 	if err != nil {
 		return in, nil, fmt.Errorf("reading the global settings: %w", err)
 	}
 	for _, w := range warnings {
-		fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s\n", w)
 	}
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {

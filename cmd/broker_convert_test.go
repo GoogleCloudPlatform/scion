@@ -27,6 +27,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -540,4 +541,23 @@ func TestBrokerConvert_EnvValuesRedactedByDefault(t *testing.T) {
 func TestBrokerConvert_ShortMatchesCommandList(t *testing.T) {
 	assert.Equal(t, brokerConvertShort, brokerConvertCmd.Short)
 	assert.Contains(t, brokerCmd.Long, "  convert      "+brokerConvertShort)
+}
+
+// Settings warnings go to the command's error stream, not the process's.
+func TestBrokerConvert_SettingsWarningsGoToCommandStderr(t *testing.T) {
+	// v1 runtime fields without the schema_version line: the settings
+	// loader warns.
+	settings := strings.TrimPrefix(convertTestSettings, "schema_version: \"1\"\n")
+	require.NotEqual(t, convertTestSettings, settings, "the fixture starts with the schema_version line")
+	convertTestHome(t, settings)
+	setConvertFlags(t, true, true, "", "build", "local", "k8s")
+	var out, errOut bytes.Buffer
+	c := &cobra.Command{}
+	c.SetOut(&out)
+	c.SetErr(&errOut)
+	c.SetContext(context.Background())
+	require.NoError(t, runBrokerConvert(c, nil))
+	assert.Contains(t, errOut.String(), "Warning: ")
+	assert.Contains(t, errOut.String(), "schema_version")
+	assert.NotContains(t, out.String(), "Warning: ", "warnings are not on stdout")
 }

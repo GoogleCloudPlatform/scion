@@ -44,6 +44,11 @@ var ErrFlatRuntimeBroker = errors.New("this host is registered as a flat Runtime
 // ErrNotRegistered is returned when the host has no Runtime Broker ID.
 var ErrNotRegistered = errors.New("this host is not registered as a Runtime Broker; run with --skip-hub for the local conversion only")
 
+// errEmptyResponse stands for a Hub call that returned neither a value nor
+// an error. The plan treats it as a failed request: a section note, or an
+// error for the legacy row, never a nil dereference.
+var errEmptyResponse = errors.New("the Hub returned an empty response")
+
 // maxAgentPages bounds the agent list paging, so a Hub that keeps
 // returning a cursor cannot loop the command forever.
 const maxAgentPages = 1000
@@ -59,6 +64,9 @@ func CollectHub(ctx context.Context, client hubclient.Client, brokerID string, p
 	}
 	brokers := client.RuntimeBrokers()
 	row, err := brokers.Get(ctx, brokerID)
+	if err == nil && row == nil {
+		err = errEmptyResponse
+	}
 	if err != nil {
 		if apiclient.IsNotFoundError(err) {
 			return fmt.Errorf("the Hub has no Runtime Broker with ID %s, the ID this host is registered under; check it with 'scion hub brokers info'", brokerID)
@@ -148,6 +156,9 @@ func collectAgents(ctx context.Context, client hubclient.Client, brokerID string
 			break
 		}
 		resp, err := client.Agents().List(ctx, opts)
+		if err == nil && resp == nil {
+			err = errEmptyResponse
+		}
 		if err != nil {
 			sec.Note = noteFor(p, whatAgentList, err)
 			return sec, 0, false
@@ -195,6 +206,9 @@ func collectAgents(ctx context.Context, client hubclient.Client, brokerID string
 func collectProjects(ctx context.Context, client hubclient.Client, brokers hubclient.RuntimeBrokerService, brokerID string, p *Plan) *ProjectsSection {
 	sec := &ProjectsSection{Items: []ProjectEntry{}}
 	resp, err := brokers.ListProjects(ctx, brokerID)
+	if err == nil && resp == nil {
+		err = errEmptyResponse
+	}
 	if err != nil {
 		sec.Note = noteFor(p, whatProjectList, err)
 		return sec
@@ -202,6 +216,9 @@ func collectProjects(ctx context.Context, client hubclient.Client, brokers hubcl
 	for _, info := range resp.Projects {
 		e := ProjectEntry{ID: info.ProjectID, Name: info.ProjectName}
 		settings, err := client.Projects().GetSettings(ctx, info.ProjectID)
+		if err == nil && settings == nil {
+			err = errEmptyResponse
+		}
 		if err != nil {
 			e.Note = noteFor(p, whatProjectSettings, err)
 			sec.Items = append(sec.Items, e)
@@ -242,6 +259,9 @@ func collectCapacity(ctx context.Context, brokers hubclient.RuntimeBrokerService
 		return Capacity{Status: CapacityUnavailable, Note: "this Hub client cannot read Runtime Broker settings"}
 	}
 	settings, err := getter.GetSettings(ctx, brokerID)
+	if err == nil && settings == nil {
+		err = errEmptyResponse
+	}
 	if err != nil {
 		return Capacity{Status: CapacityUnavailable, Note: noteFor(p, whatRuntimeBrokerSet, err)}
 	}

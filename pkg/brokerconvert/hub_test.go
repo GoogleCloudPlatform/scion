@@ -389,3 +389,117 @@ func TestCollectHub_NotRegistered(t *testing.T) {
 	err = CollectHub(context.Background(), h.client(t), "", p)
 	assert.ErrorIs(t, err, ErrNotRegistered)
 }
+
+// nilHubClient wraps a real client so that one chosen call returns neither a
+// value nor an error, which the real client never does; the plan must treat
+// it as a failed request, never dereference it.
+type nilHubClient struct {
+	hubclient.Client
+	nilGet, nilAgents, nilProjectList, nilProjectSettings, nilBrokerSettings bool
+}
+
+func (c nilHubClient) RuntimeBrokers() hubclient.RuntimeBrokerService {
+	return nilBrokers{RuntimeBrokerService: c.Client.RuntimeBrokers(), c: c}
+}
+
+func (c nilHubClient) Agents() hubclient.AgentService {
+	return nilAgents{AgentService: c.Client.Agents(), nilList: c.nilAgents}
+}
+
+func (c nilHubClient) Projects() hubclient.ProjectService {
+	return nilProjects{ProjectService: c.Client.Projects(), nilSettings: c.nilProjectSettings}
+}
+
+type nilBrokers struct {
+	hubclient.RuntimeBrokerService
+	c nilHubClient
+}
+
+func (b nilBrokers) Get(ctx context.Context, id string) (*hubclient.RuntimeBroker, error) {
+	if b.c.nilGet {
+		return nil, nil
+	}
+	return b.RuntimeBrokerService.Get(ctx, id)
+}
+
+func (b nilBrokers) ListProjects(ctx context.Context, id string) (*hubclient.ListBrokerProjectsResponse, error) {
+	if b.c.nilProjectList {
+		return nil, nil
+	}
+	return b.RuntimeBrokerService.ListProjects(ctx, id)
+}
+
+func (b nilBrokers) GetSettings(ctx context.Context, id string) (*hubclient.RuntimeBrokerSettings, error) {
+	if b.c.nilBrokerSettings {
+		return nil, nil
+	}
+	return b.RuntimeBrokerService.(hubclient.RuntimeBrokerSettingsGetter).GetSettings(ctx, id)
+}
+
+type nilAgents struct {
+	hubclient.AgentService
+	nilList bool
+}
+
+func (a nilAgents) List(ctx context.Context, opts *hubclient.ListAgentsOptions) (*hubclient.ListAgentsResponse, error) {
+	if a.nilList {
+		return nil, nil
+	}
+	return a.AgentService.List(ctx, opts)
+}
+
+type nilProjects struct {
+	hubclient.ProjectService
+	nilSettings bool
+}
+
+func (p nilProjects) GetSettings(ctx context.Context, id string) (*hubclient.ProjectSettings, error) {
+	if p.nilSettings {
+		return nil, nil
+	}
+	return p.ProjectService.GetSettings(ctx, id)
+}
+
+// An empty legacy row is an error (the plan needs the row), never a panic.
+func TestCollectHub_NilRowIsAnError(t *testing.T) {
+	h := newFakeHub(t)
+	p, err := BuildLocal(loadInput(t, "four_profiles.yaml"))
+	require.NoError(t, err)
+	err = CollectHub(context.Background(), nilHubClient{Client: h.client(t), nilGet: true}, testBrokerID, p)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errEmptyResponse)
+	assert.Contains(t, err.Error(), testBrokerID)
+}
+
+// An empty response on a secondary read is a fixed "(request failed)" note
+// and exit 1, never a panic.
+func TestCollectHub_NilSecondaryResponsesAreRequestFailedNotes(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		client func(hubclient.Client) nilHubClient
+		note   func(*Plan) string
+		want   string
+	}{
+		{"agent list", func(c hubclient.Client) nilHubClient { return nilHubClient{Client: c, nilAgents: true} },
+			func(p *Plan) string { return p.Agents.Note }, "could not be read from the Hub (request failed): the agent list"},
+		{"project list", func(c hubclient.Client) nilHubClient { return nilHubClient{Client: c, nilProjectList: true} },
+			func(p *Plan) string { return p.Projects.Note }, "could not be read from the Hub (request failed): the projects this Runtime Broker provides"},
+		{"project settings", func(c hubclient.Client) nilHubClient { return nilHubClient{Client: c, nilProjectSettings: true} },
+			func(p *Plan) string { return p.Projects.Items[0].Note }, "could not be read from the Hub (request failed): this project's settings"},
+		{"broker settings", func(c hubclient.Client) nilHubClient { return nilHubClient{Client: c, nilBrokerSettings: true} },
+			func(p *Plan) string { return p.Capacity.Note }, "could not be read from the Hub (request failed): the Runtime Broker's settings"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newFakeHub(t)
+			p, err := BuildLocal(loadInput(t, "four_profiles.yaml"))
+			require.NoError(t, err)
+			require.NotPanics(t, func() {
+				err = CollectHub(context.Background(), tc.client(h.client(t)), testBrokerID, p)
+			})
+			require.NoError(t, err, "the plan is still produced")
+			assert.Equal(t, tc.want, tc.note(p))
+			assert.Equal(t, ExitError, p.ExitCode())
+			h.assertGETOnly(t)
+		})
+	}
+}
