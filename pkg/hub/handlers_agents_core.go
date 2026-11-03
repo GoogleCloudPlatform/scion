@@ -1165,7 +1165,7 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 		if refusal, ok := placementRefusalOf(deleteErr); ok {
 			s.agentLifecycleLog.Warn("Create-failure cleanup: agent placement is inconsistent; nothing was dispatched, keeping the agent row",
 				"agent_id", agent.ID, "code", refusal.Code, "stage", rb.Stage)
-			s.markCreateCleanupRefused(ctx, agent.ID, createCleanupTargetRun(deleteErr), createCleanupRefusedPrefix+refusal.Message)
+			s.markCreateCleanupRefused(lifecycleCreateFailed(ctx, rb.Stage), agent.ID, createCleanupTargetRun(deleteErr), createCleanupRefusedPrefix+refusal.Message)
 			return ""
 		}
 		// The broker holds a different run of the agent than the row
@@ -1178,7 +1178,7 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 		if refused != nil && refuseDeleteRunMismatch(false, true) {
 			s.agentLifecycleLog.Warn("Create-failure cleanup: broker holds a different run than the hub recorded; keeping the agent row",
 				"agent_id", agent.ID, "hub_run_id", refused.RequestedRunID, "broker_run_id", refused.CurrentRunID, "stage", rb.Stage)
-			s.markCreateCleanupRefused(ctx, agent.ID, refused.RequestedRunID, createCleanupRefusedMessage(refused))
+			s.markCreateCleanupRefused(lifecycleCreateFailed(ctx, rb.Stage), agent.ID, refused.RequestedRunID, createCleanupRefusedMessage(refused))
 			return ""
 		}
 	}
@@ -1220,7 +1220,7 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 		// The row delete is retried a few times; if it still fails, the row
 		// is left visibly failed rather than in phase created with no
 		// message.
-		derr := s.deleteFailedCreateRow(ctx, agent, opID)
+		derr := s.deleteFailedCreateRow(lifecycleCreateRollback(ctx, rb.Stage), agent, opID)
 		if errors.Is(derr, errCreateRowDeleteHeld) {
 			// A delete claimed the row since: it owns the row and its
 			// edge. The failed compensation's correlation ID is logged
@@ -1242,7 +1242,7 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 		}
 		if derr != nil {
 			s.agentLifecycleLog.Warn("Create-failure cleanup: agent row delete failed", "agent_id", agent.ID, "error", derr)
-			mctx, mcancel := detachedCleanupContext(ctx, createCleanupStoreTimeout)
+			mctx, mcancel := detachedCleanupContext(lifecycleCreateFailed(ctx, rb.Stage), createCleanupStoreTimeout)
 			defer mcancel()
 			if err := s.store.UpdateAgentStatus(mctx, agent.ID, store.AgentStatusUpdate{
 				Phase:   string(state.PhaseError),
@@ -1513,7 +1513,7 @@ func (s *Server) applyCreateEffectCeiling(
 	// (uatHopEffectCeiling); the stored ceiling stays the token's verbatim.
 	capped, cause, allowed := childRoleWithinCeiling(uatHopEffectCeiling(prov.SourcePrincipalKind, prov.SourcePrincipalID, prov, ceiling), role, roleExplicit)
 	if !allowed {
-		msg := reasonNoUsableRole
+		msg := noUsableRoleMessage(uatHopEffectCeiling(prov.SourcePrincipalKind, prov.SourcePrincipalID, prov, ceiling))
 		if roleExplicit {
 			msg = fmt.Sprintf("the credential's scopes do not cover agent role %q; request a role the token covers, request role=none explicitly, or create from a session", role)
 		}
@@ -1606,6 +1606,15 @@ func (s *Server) createAgentInProject(
 	// Field-level GCP identity validation, before any persistence or SA
 	// resolution. Both create routes reach it here.
 	if !validateGCPIdentityRequest(w, req.GCPIdentity) {
+		return
+	}
+
+	// The request's template, before any persistence or the existing-agent
+	// handling below: a template name or ID, never a host directory or a
+	// remote source (templateRefAllowed). Defaults are checked where they
+	// are filled in.
+	if !templateRefAllowed(req.Template) {
+		ValidationError(w, templateRefRefusal, nil)
 		return
 	}
 
@@ -1921,9 +1930,11 @@ func (s *Server) createAgentInProject(
 	}
 
 	// Apply project-level default template if no template specified in request
+	templateFromProjectDefault := false
 	if req.Template == "" && project != nil && project.Annotations != nil {
 		if dt := project.Annotations[projectSettingDefaultTemplate]; dt != "" {
 			req.Template = dt
+			templateFromProjectDefault = true
 		}
 	}
 
@@ -2003,6 +2014,24 @@ func (s *Server) createAgentInProject(
 	// as evidence — with one honest difference: that code can only log and do
 	// nothing, whereas here the caller is still on the other end of an HTTP
 	// request, so the ambiguous branch can and should return a real error.
+	// The template after defaults are filled in, checked again before the
+	// lookup, so an unmatched value can never reach a broker with local
+	// access as anything but a template name. A hub-default value that fails
+	// degrades like an unusable hub default; a project-default value is
+	// refused naming the setting; any other is refused.
+	if !templateRefAllowed(req.Template) {
+		if templateFromProjectDefault {
+			ValidationError(w, projectDefaultTemplateRefusal, nil)
+			return
+		}
+		if !templateFromHubDefault {
+			ValidationError(w, templateRefRefusal, nil)
+			return
+		}
+		s.warnHubDefaultTemplateUnusable(ctx, req.Template, projectID, "not a template name")
+		req.Template = ""
+	}
+
 	var resolvedTemplate *store.Template
 	if req.Template != "" {
 		resolvedTemplate, err = s.resolveTemplate(ctx, req.Template, projectID)
@@ -3122,6 +3151,7 @@ func (s *Server) preserveTerminalPhase(ctx context.Context, agent *store.Agent) 
 }
 
 func (s *Server) updateAgentAfterDispatch(ctx context.Context, agent *store.Agent) error {
+	ctx = lifecycleDispatchResult(ctx, agent) // WP1 E(iv): the broker's answer about agent's run
 	// One retry is intentional here: we only need to recover the common case
 	// where a single concurrent status update bumps StateVersion while dispatch
 	// is in flight. If a second write wins the race too, return the conflict to

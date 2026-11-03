@@ -151,7 +151,9 @@ func TestProvisionShared_StateDir_LegacySentinelHonoured(t *testing.T) {
 
 	for _, mode := range []store.WorkspaceSharingMode{store.SharingModeSharedPlain, store.SharingModeWorktreePerAgent} {
 		t.Run(string(mode), func(t *testing.T) {
-			in := stateDirInput(workspace, stateDir, filepath.Join(t.TempDir(), "missing.git"), mode)
+			missing := filepath.Join(t.TempDir(), "missing.git")
+			AllowLocalCloneFixture(t, missing)
+			in := stateDirInput(workspace, stateDir, missing, mode)
 			if mode == store.SharingModeWorktreePerAgent {
 				in.AgentID = "agent-1"
 				in.AgentName = "agent-1"

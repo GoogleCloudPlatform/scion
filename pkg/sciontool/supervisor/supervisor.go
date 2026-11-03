@@ -608,7 +608,8 @@ func indexByte(s string, c byte) int {
 // is new behaviour that must not change non-substrate runtimes.
 //
 // Per-entry chown failures and hard-link-guard skips are logged (entry name
-// only) rather than silently discarded.
+// only) rather than silently discarded; see logChownEntryError for the
+// level each one gets.
 func chownRecursive(root string, uid, gid int, requirePrivilegeDrop bool) error {
 	if err := fsutil.CheckRoot(root); err != nil {
 		return err
@@ -616,14 +617,25 @@ func chownRecursive(root string, uid, gid int, requirePrivilegeDrop bool) error 
 	if err := checkMountSource(root); err != nil {
 		return err
 	}
-	_, _, err := dirfd.ChownTreeNoFollow(root, uid, gid, func(uint32) bool { return true }, requirePrivilegeDrop, func(name string, cerr error) {
-		if errors.Is(cerr, dirfd.ErrHardlinkedRegularFile) {
-			log.Warn("chownRecursive: skipping %s: %v", name, cerr)
-			return
-		}
-		log.Error("chownRecursive: failed to chown %s: %v", name, cerr)
-	})
+	_, _, err := dirfd.ChownTreeNoFollow(root, uid, gid, func(uint32) bool { return true }, requirePrivilegeDrop, logChownEntryError)
 	return err
+}
+
+// logChownEntryError logs one per-entry failure from chownRecursive's walk.
+// A hard-link-guard skip is a warning. EROFS is logged at debug only: the
+// home directory may hold a mount that is read-only by design (the Cloud Run
+// runtime mounts the agent secrets read-only at ~/.scion/secrets), so its
+// chown is expected to fail and is not an error (ptone/scion#7104). Every
+// other failure stays an error.
+func logChownEntryError(name string, cerr error) {
+	switch {
+	case errors.Is(cerr, dirfd.ErrHardlinkedRegularFile):
+		log.Warn("chownRecursive: skipping %s: %v", name, cerr)
+	case errors.Is(cerr, syscall.EROFS):
+		log.Debug("chownRecursive: skipping %s on a read-only file system: %v", name, cerr)
+	default:
+		log.Error("chownRecursive: failed to chown %s: %v", name, cerr)
+	}
 }
 
 // checkMountSource is fsutil.CheckMountSource, held behind a package

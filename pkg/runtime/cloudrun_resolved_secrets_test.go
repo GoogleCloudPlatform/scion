@@ -131,13 +131,7 @@ func newSandboxSecretsHarness(t *testing.T) *sandboxSecretsHarness {
 		rootDir:      filepath.Join(tmpDir, "scion"),
 		watchCancels: make(map[string]context.CancelFunc),
 	}
-	t.Cleanup(func() {
-		h.rt.watchMu.Lock()
-		for _, cancel := range h.rt.watchCancels {
-			cancel()
-		}
-		h.rt.watchMu.Unlock()
-	})
+	stopWatchersOnCleanup(t, h.rt.state.path, h.rt)
 	h.cfg = RunConfig{
 		Name:         "secrets-agent",
 		HomeDir:      homeDir,

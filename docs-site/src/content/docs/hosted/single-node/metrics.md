@@ -92,7 +92,7 @@ Environment variables override any settings file value and are the most convenie
 | Variable | Settings Path | Default | Description |
 |----------|--------------|---------|-------------|
 | `SCION_TELEMETRY_ENABLED` | `telemetry.enabled` | `true` | Enable/disable collection entirely |
-| `SCION_TELEMETRY_CLOUD_ENABLED` | `telemetry.cloud.enabled` | `true` | Enable forwarding to cloud backend |
+| `SCION_TELEMETRY_CLOUD_ENABLED` | `telemetry.cloud.enabled` | `true` | Enable forwarding to cloud backend. Under the default, with no destination configured (no endpoint, or no GCP project ID in GCP mode), cloud forwarding stays off and local collection still runs. Set explicitly to `true` with no destination, telemetry fails to start with `cloud telemetry enabled but destination is not configured`. |
 | `SCION_OTEL_ENDPOINT` | `telemetry.cloud.endpoint` | (required) | Cloud OTLP endpoint URL |
 | `SCION_OTEL_PROTOCOL` | `telemetry.cloud.protocol` | `grpc` | Protocol: `grpc` or `http` |
 | `SCION_OTEL_INSECURE` | `telemetry.cloud.tls.enabled` (inverted) | `false` | Use plaintext transport instead of TLS (dev only) |

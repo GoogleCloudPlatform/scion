@@ -32,7 +32,7 @@ import (
 func relaxKeyringReleaseCheck(t *testing.T) {
 	t.Helper()
 	prev := keyringReleaseCheck
-	keyringReleaseCheck = func(*keyring.Keyring, *ServerConfig) error { return nil }
+	keyringReleaseCheck = func(*keyring.Keyring) error { return nil }
 	t.Cleanup(func() { keyringReleaseCheck = prev })
 }
 
@@ -58,14 +58,14 @@ func seamConfig(k *keyring.Keyring, shared string) ServerConfig {
 
 // The "legacy" entry requirement lives only behind the release check:
 // production (the default seam) refuses a ring without it, at startup and
-// in `scion server keys check`; with the seam relaxed both admit it, with
-// or without a session secret. A second, seam-independent legacy check
-// would make the relaxed half fail; dropping the requirement from the
-// production seam would make the default half fail.
+// in `scion server keys check`; with the seam relaxed both admit it. A
+// second, seam-independent legacy check would make the relaxed half fail;
+// dropping the requirement from the production seam would make the default
+// half fail.
 func TestKeyringReleaseSeam_NoLegacyEntryBehindSeam(t *testing.T) {
 	k := seamNoLegacyKeyring(t)
 
-	err := validateKeyringConfig(seamConfig(k, krLegacySecret))
+	err := validateKeyringConfig(seamConfig(k, ""))
 	require.Error(t, err, "production refuses a ring without the legacy entry")
 	assert.Contains(t, err.Error(), `signing key with id "legacy"`)
 	assert.NotContains(t, err.Error(), krGen1Secret)
@@ -75,31 +75,30 @@ func TestKeyringReleaseSeam_NoLegacyEntryBehindSeam(t *testing.T) {
 
 	relaxKeyringReleaseCheck(t)
 	assert.NoError(t, validateKeyringConfig(seamConfig(k, "")))
-	assert.NoError(t, validateKeyringConfig(seamConfig(k, krLegacySecret)))
 	assert.NoError(t, CheckKeyringFile(k))
 }
 
-// SharedSigningSecret == the "legacy" entry is a release requirement too:
-// production refuses a mismatch (every byte compared, see
-// TestNew_KeyringModeRefusesExplicitSigningKeys); keys check, which has no
-// session secret, does not check it; the relaxed seam drops it.
-func TestKeyringReleaseSeam_SharedSecretBehindSeam(t *testing.T) {
-	k := ksKeyringA(t)
-	require.NoError(t, validateKeyringConfig(seamConfig(k, krLegacySecret)))
-	for _, shared := range []string{"", "some-other-secret", krGen1Secret} {
-		err := validateKeyringConfig(seamConfig(k, shared))
-		require.Error(t, err, "production refuses SharedSigningSecret %q", shared)
-		assert.Contains(t, err.Error(), "SharedSigningSecret")
-		assert.NotContains(t, err.Error(), krLegacySecret)
-		if shared != "" {
+// A non-empty SharedSigningSecret in keyring mode is refused OUTSIDE the
+// release check: under the production seam and with it relaxed, for a ring
+// with and without the "legacy" entry, whatever the value (the legacy
+// secret itself included). An empty one passes. Lifting the release limits
+// therefore never re-admits a shared secret alongside a keyring file.
+func TestKeyringMode_NonEmptySharedSecretRefusedOutsideSeam(t *testing.T) {
+	withLegacy, noLegacy := ksKeyringA(t), seamNoLegacyKeyring(t)
+	check := func(t *testing.T, k *keyring.Keyring) {
+		t.Helper()
+		require.NoError(t, validateKeyringConfig(seamConfig(k, "")))
+		for _, shared := range []string{krLegacySecret, "some-other-secret", krGen1Secret} {
+			err := validateKeyringConfig(seamConfig(k, shared))
+			require.Error(t, err, "SharedSigningSecret %q", shared)
+			assert.Contains(t, err.Error(), "SharedSigningSecret must be empty")
 			assert.NotContains(t, err.Error(), shared)
 		}
 	}
-	require.NoError(t, CheckKeyringFile(k))
-
+	check(t, withLegacy)
 	relaxKeyringReleaseCheck(t)
-	assert.NoError(t, validateKeyringConfig(seamConfig(k, "some-other-secret")))
-	assert.NoError(t, validateKeyringConfig(seamConfig(k, "")))
+	check(t, withLegacy)
+	check(t, noLegacy)
 }
 
 // Relaxing the release check relaxes nothing else: a missing keyring, a
@@ -156,7 +155,7 @@ func TestRelaxKeyringReleaseForTest_RefusesOutsideTests(t *testing.T) {
 	// Restore even if an assertion below stops the test, so the relaxed
 	// check never leaks into later tests (restoring twice is harmless).
 	t.Cleanup(restore)
-	require.NoError(t, keyringReleaseCheck(seamNoLegacyKeyring(t), nil), "inside a test binary the hook relaxes the check")
+	require.NoError(t, keyringReleaseCheck(seamNoLegacyKeyring(t)), "inside a test binary the hook relaxes the check")
 	restore()
 	assert.Equal(t, reflect.ValueOf(releaseKeyringCheck).Pointer(), reflect.ValueOf(keyringReleaseCheck).Pointer(), "restore reinstates the production check")
 }

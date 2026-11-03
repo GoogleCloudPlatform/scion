@@ -79,8 +79,8 @@ or register this machine's Runtime Broker: `harness-config install`, `sync`, `pu
 Runtime Broker, or the server run outside a project without `--global` or `--project`:
 `scion use`, `scion hub status`, `scion hub add`, `scion hub list`, `scion hub rename`,
 `scion hub remove`, the `scion hub auth` commands,
-`scion runtime-broker register`, `deregister`, `start`, `stop`, `restart`, `status`, `hubs` and
-`join`, and the `server`, `admin` and `project` commands. Outside a project, the `scion hub`
+`scion runtime-broker register`, `deregister`, `start`, `stop`, `restart`, `status`, `hubs`,
+`join` and `convert`, and the `server`, `admin` and `project` commands. Outside a project, the `scion hub`
 connection commands read and write the global settings, as with `--global`. The hub list
 commands (`add`, `list`, `rename`, `remove`) act on `~/.scion/context.yaml`.
 `scion runtime-broker provide` and `withdraw` act on a project and still need one.
@@ -1576,6 +1576,13 @@ Manages the local host as a Runtime Broker. The old name `scion broker` still wo
     - `--broker <name|id>`, `--hub <name>`: Operate on another broker or Hub connection.
     - Confirmation: `provide` asks before adding the provider. Without a terminal on stdin (a script, `ssh` without a TTY, a systemd unit), or at end of input, it fails with a message to re-run with `--yes` instead of waiting for an answer.
 - `scion runtime-broker withdraw`: Remove this broker as a provider from a project.
+- `scion runtime-broker convert --plan` (experimental): Plan a move from this host's legacy, profile-based Runtime Broker to [flat Runtime Broker](/scion/hosted/ha/multi-broker/#flat-runtime-brokers-experimental) instances. It is read-only: it writes no file (it does not even migrate legacy settings keys or the legacy `~/.scion` layout, as other commands do), registers nothing, and sends only `GET` requests to the Hub. It prints five sections: the proposed `server.broker.instances` entries as YAML to paste into the global `settings.yaml` (keys and names are proposals you may edit); the profile -> instance map, with `(no mapping: <code>)` for a profile a blocking finding leaves out; the conversion findings, blocking and notice; the proposed per-instance `maxAgents` split of the legacy Runtime Broker's limit, or the decision it needs; and the agents and projects on the Hub still bound to this Runtime Broker. Agents cannot be moved onto a flat Runtime Broker: finish or recreate them before the host switches. The Hub sections use your Hub login and this host's registered Runtime Broker ID; a section you cannot read is noted, not an error. **Values in the output.** Harness env values are redacted: shown as `<redacted>` in the human output and omitted from the JSON output, which lists their keys only. The human output's settings block otherwise keeps the values you need to paste (image registries, contexts and namespaces). The JSON output carries the proposed instances only in their publishable form, the shape a Runtime Broker reports to the Hub: no env value, kubeconfig path, context or secret target. Findings are printed from their code, settings key path and profiles with a fixed text, never with a settings value. Exit status: `0` when the plan has no blocking finding and needs no decision, `3` when it has a blocking finding or needs an operator decision, `1` on an error (including a host that already declares `server.broker.instances`, or is registered as a flat Runtime Broker). A capacity plan the Hub could not supply (no Hub, or the Runtime Broker's settings not visible to you) does not change the exit status; the summary says so. Available in human mode on Linux and macOS; not inside agents and not on Windows.
+    - `--plan`: Required. Prints the plan without changing anything.
+    - `--profiles <a,b>`: Limit the conversion to these profiles. Default: all profiles in the effective global settings, including those from the built-in defaults.
+    - `--choices <file>`: A YAML or JSON list of reviewed operator choices, each with `target_group` and either `split` (profiles kept on their own instance) or `field` and `chosen_profile` (consolidate a differing field on one profile's value, or `template:<name>` to leave it unset). A choice that cannot be applied is a blocking finding at `choices[<i>]`, not an error.
+    - `--skip-hub`: Plan from the local settings only, with no Hub requests. Also the behaviour when no Hub is configured.
+    - `--show-env-values`: Print harness env values in the human output. The output then contains secrets and must not be shared. Refused with `--format json`.
+    - `--format json`: One JSON object with `schemaVersion: 1`. Its `instances` use the publishable presentation shape (camelCase, with its own `schemaVersion`).
 
 ### `scion server`
 

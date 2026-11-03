@@ -24,6 +24,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/lifecycleevents"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
@@ -154,6 +155,11 @@ func (s *Server) commitAgentCreate(ctx context.Context, w agentCreateWrite) erro
 	}
 	w.Edge.EffectCeiling = w.Ceiling
 	w.Edge.AuthorityProvenance = w.Provenance
+	// The creating principal is not on the agent row; the lifecycle
+	// observer records it on the created event (WP1 design 2.1).
+	ctx = lifecycleevents.WithCreateContext(ctx, lifecycleevents.CreateContext{
+		CreatorType: w.Edge.DelegatorType, CreatorID: w.Edge.DelegatorID,
+	})
 
 	return s.store.WithTx(ctx, func(tx store.Store) error {
 		if err := lockAgentGuardUserTx(ctx, tx, w.Agent); err != nil {
@@ -355,7 +361,7 @@ func (s *Server) compensateAgentCreate(ctx context.Context, c createCompensation
 	// check rolls it all back. A delete claim that lands after the read
 	// bumps state_version, so the row delete misses and the attempt is
 	// retried from a fresh read, which then refuses.
-	n, err := s.store.FinalizeAgentDeletion(ctx, agentID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
+	n, err := s.store.FinalizeAgentDeletion(lifecycleCreateRollback(ctx, c.Stage), agentID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
 		createRowHeldCheck(edgesAndAudit))
 	if errors.Is(err, errCreateRowDeleteHeld) {
 		return errCreateRowDeleteHeld

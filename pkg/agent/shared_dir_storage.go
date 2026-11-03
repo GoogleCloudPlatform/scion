@@ -106,10 +106,19 @@ func resolveSharedDirs(
 	}
 
 	mountsShare := isLocalContainerRuntime(runtimeName) || isKubernetesRuntime(runtimeName)
-	if !sdLayout.Backend.Shared() || (!mountsShare && !split) {
+	if usesLocalSharedDirLayout(sdLayout, split, runtimeName) {
 		// The local layout. Errors here are logged and swallowed, not
 		// propagated — this preserves exact pre-existing behaviour (design
 		// AC1).
+		//
+		// Names that fail api.ValidateSharedDirs are skipped with a log line
+		// and get no directory; the valid ones are created and mounted. This
+		// filter is defensive, for direct callers: Start already passes a
+		// filtered list (run.go).
+		dirs = validLocalSharedDirs(dirs)
+		if len(dirs) == 0 {
+			return nil, nil, nil
+		}
 		if err := config.EnsureSharedDirs(projectDir, dirs); err != nil {
 			util.Debugf("Start: failed to ensure shared dirs: %v", err)
 		}
@@ -435,6 +444,47 @@ func writeAgentRecordFile(agentDir, name string, v any) error {
 		_ = d.Close()
 	}
 	return nil
+}
+
+// usesLocalSharedDirLayout reports whether resolveSharedDirs takes its local
+// layout branch for this start: the shared-dir Layout is not on a shared
+// backend, or the runtime neither bind-mounts host paths nor consumes
+// RunConfig.SharedDirStorage (Cloud Run) and the shared dirs are not on the
+// split legacy export.
+func usesLocalSharedDirLayout(sdLayout projectfs.Layout, split bool, runtimeName string) bool {
+	mountsShare := isLocalContainerRuntime(runtimeName) || isKubernetesRuntime(runtimeName)
+	return !sdLayout.Backend.Shared() || (!mountsShare && !split)
+}
+
+// validLocalSharedDirs returns the entries of dirs that pass
+// api.ValidateSharedDirs, in order: a name that is not a slug, or that
+// repeats a kept name, is skipped with one warning naming the entry, its
+// position in dirs and the reason (never a host path), so no directory is
+// created for it.
+func validLocalSharedDirs(dirs []api.SharedDir) []api.SharedDir {
+	kept := make([]api.SharedDir, 0, len(dirs))
+	for i, d := range dirs {
+		if err := api.ValidateSharedDirs(append(kept, d)); err != nil {
+			slog.Warn("shared dirs: skipping an invalid shared-dir name; no directory is created for it",
+				"index", i, "name", d.Name, "reason", sharedDirReason(err))
+			continue
+		}
+		kept = append(kept, d)
+	}
+	return kept
+}
+
+// sharedDirReason returns err's text without the "shared_dirs[N]: " prefix
+// api.ValidateSharedDirs adds, whose N is a position in the list it was
+// given, not in the project's list.
+func sharedDirReason(err error) string {
+	msg := err.Error()
+	if rest, ok := strings.CutPrefix(msg, "shared_dirs["); ok {
+		if _, reason, ok := strings.Cut(rest, "]: "); ok {
+			return reason
+		}
+	}
+	return msg
 }
 
 // agentSharedDirs returns the agent's shared dirs: the project

@@ -271,9 +271,10 @@ type ProvisionInput struct {
 	// URL: with HostCloneGitArgs ahead of the subcommand and
 	// GIT_ALLOW_PROTOCOL limited to HostCloneProtocols, so only the https,
 	// ssh and git transports can be used (no local path, file://, ext:: or
-	// other helper transport) and no hook, fsmonitor or pager runs. The hub
-	// sets it when it clones a project's shared workspace at create; the
-	// caller also checks the URL first (CheckHostCloneURL).
+	// other helper transport) and no hook, fsmonitor or pager runs. The hub,
+	// the broker, the Cloud Run runtime and the Kubernetes provisioning init
+	// container (sciontool provision) set it for their clones. Independently of it, ProvisionShared refuses any GitClone.URL
+	// that CheckHostCloneURL refuses.
 	HostGitHardened bool
 
 	// NFSUID and NFSGID are the stable NFS ownership values (default 1000:1000).
@@ -502,6 +503,12 @@ func ProvisionShared(in ProvisionInput) error {
 	}
 	if in.ProjectID == "" {
 		return fmt.Errorf("ProvisionShared: ProjectID is required")
+	}
+	// The clone URL is checked before anything else, for every caller and
+	// also when the workspace is already provisioned: only an https, ssh or
+	// git URL is accepted.
+	if err := checkProvisionCloneURL(in); err != nil {
+		return fmt.Errorf("ProvisionShared: %w", err)
 	}
 
 	sentinelDir := resolveSentinelDir(in)
@@ -1489,40 +1496,102 @@ func acquireFileLockWithin(ctx context.Context, dir string, wait time.Duration) 
 // not revisited. Accepted: it does not accumulate further once contention
 // stops, and it is already git-excluded.
 func garbageCollectLockLitter(dir string) {
-	now, err := serverNow(dir)
-	if err != nil {
-		return
-	}
+	_, _ = SweepLockLitter(dir)
+}
+
+// LockLitterMinAge is the age past which provisioning-lock litter may be
+// removed: the garbage-collection cutoff 2S of acquireFileLock's
+// correctness argument.
+func LockLitterMinAge() time.Duration {
+	return 2 * provisionLockStaleAfter
+}
+
+// LockLitter is what SweepLockLitter left in place.
+type LockLitter struct {
+	// Pending is how long the youngest remaining aged entry still needs
+	// before it may be removed (0 when none is left).
+	Pending time.Duration
+	// Unaged counts ".evict-*" entries without their evicted-at marker.
+	// They have no eviction time and are never removed automatically, so
+	// waiting does not help (see garbageCollectLockLitter).
+	Unaged int
+}
+
+// SweepLockLitter removes dir's provisioning-lock litter older than
+// LockLitterMinAge and reports what it left. ".evict-*" entries are aged
+// from their evicted-at marker (see garbageCollectLockLitter); one without
+// the marker is never guessed at (counted in Unaged). Other litter
+// (staging directories, clock probes a crashed caller left) is aged from
+// its own mtime; a concurrent caller's probe is young and kept. The live
+// lock itself and anything not under the lock's name prefix are never
+// touched. Ages are measured against the file server's clock (serverNow).
+// The first removal error is returned; the sweep continues past it.
+//
+// The cutoff is fixed: a caller MUST NOT remove litter younger than
+// LockLitterMinAge by any other means, since a younger ".evict-*" entry
+// can still be the destination a stale observer's rename relies on (the
+// invariant in acquireFileLock's correctness argument).
+func SweepLockLitter(dir string) (LockLitter, error) {
+	return sweepLockLitter(dir, LockLitterMinAge())
+}
+
+// sweepLockLitter is SweepLockLitter with the cutoff as a parameter, for
+// tests only.
+func sweepLockLitter(dir string, minAge time.Duration) (left LockLitter, err error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return
-	}
-	cutoff := 2 * provisionLockStaleAfter
-	prefix := provisionFileLockName + "."
-	for _, e := range entries {
-		name := e.Name()
-		if name == provisionFileLockName || !strings.HasPrefix(name, prefix) {
-			continue // the live lock name itself, or not one of ours
+		if errors.Is(err, fs.ErrNotExist) {
+			return left, nil
 		}
+		return left, err
+	}
+	prefix := provisionFileLockName + "."
+	var litter []os.DirEntry
+	for _, e := range entries {
+		if name := e.Name(); name != provisionFileLockName && strings.HasPrefix(name, prefix) {
+			litter = append(litter, e)
+		}
+	}
+	if len(litter) == 0 {
+		return left, nil
+	}
+	now, err := serverNow(dir)
+	if err != nil {
+		left.Pending = minAge
+		return left, err
+	}
+	var firstErr error
+	keep := func(age time.Duration) {
+		left.Pending = max(left.Pending, minAge-age)
+	}
+	for _, e := range litter {
+		name := e.Name()
 		path := filepath.Join(dir, name)
+		var age time.Duration
 		if strings.Contains(name, ".evict-") {
 			info, err := os.Stat(filepath.Join(path, provisionLockEvictedAtFile))
 			if err != nil {
-				continue // no confirmed eviction time yet; never guess (see doc)
+				left.Unaged++ // no confirmed eviction time; never guess
+				continue
 			}
-			if now.Sub(info.ModTime()) > cutoff {
-				_ = os.RemoveAll(path)
+			age = now.Sub(info.ModTime())
+		} else {
+			info, err := e.Info()
+			if err != nil {
+				keep(0)
+				continue
 			}
+			age = now.Sub(info.ModTime())
+		}
+		if age <= minAge {
+			keep(age)
 			continue
 		}
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		if now.Sub(info.ModTime()) > cutoff {
-			_ = os.RemoveAll(path)
+		if err := os.RemoveAll(path); err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
+	return left, firstErr
 }
 
 // tryCreateFileLock atomically publishes a fully-formed, already-owned lock
@@ -2841,8 +2910,12 @@ func removeCloneTempDirs(dir string) error {
 // rejected credential.
 func runGitClone(ctx context.Context, in ProvisionInput) error {
 	gc := in.GitClone
+	// A test's registered local fixture (AllowLocalCloneFixture) is cloned
+	// without the hardened settings, which refuse local paths
+	// (hostCloneHardened, clone_fixture.go).
+	hardened := hostCloneHardened(in)
 	var args []string
-	if in.HostGitHardened {
+	if hardened {
 		args = append(args, HostCloneGitArgs()...)
 	} else {
 		// Non-hardened clones still carry the base host-side git pins unconditionally
@@ -2884,7 +2957,7 @@ func runGitClone(ctx context.Context, in ProvisionInput) error {
 	// http.followRedirects=false and the protocol allow list are applied as fixed
 	// args by HostCloneGitArgs when HostGitHardened (the hub project-create clone).
 	env := append(util.HostGitEnv(os.Environ()), "GIT_TERMINAL_PROMPT=0", "GIT_LFS_SKIP_SMUDGE=1")
-	if in.HostGitHardened {
+	if hardened {
 		env = append(env, "GIT_ALLOW_PROTOCOL="+HostCloneProtocols)
 	}
 	// Decide which token, if any, is offered. A project-supplied CloneToken is

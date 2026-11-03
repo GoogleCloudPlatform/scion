@@ -1142,6 +1142,52 @@ func beginClaimedRunningObservedLaunch(t *testing.T, ctx context.Context, s *Age
 	return a, launchID
 }
 
+func TestApplyLaunchReport_SucceededAfterRunningObserved_SettlesLinkedClaim(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	succeeded := func(launchID string) store.LaunchReport {
+		return store.LaunchReport{LaunchID: launchID, InstanceID: "i1", State: store.LaunchReportStateSucceeded}
+	}
+
+	t.Run("a claim linked to this launch is released", func(t *testing.T) {
+		a, launchID := beginClaimedRunningObservedLaunch(t, ctx, s, projectID, "ro-succ-linked")
+		answer, _, err := s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, succeeded(launchID))
+		require.NoError(t, err)
+		assert.Equal(t, store.LaunchReportResultCompleted, answer.Result)
+		assert.True(t, answer.Changed)
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.LaunchEndReasonSucceeded, got.LaunchEndReason)
+		assert.Empty(t, got.StartClaimID, "the succeeded report releases the claim the status-ended launch kept")
+		assert.Empty(t, got.StartClaimLaunchID)
+	})
+	t.Run("a claim for another launch is kept", func(t *testing.T) {
+		a, launchID := beginClaimedRunningObservedLaunch(t, ctx, s, projectID, "ro-succ-unlinked")
+		updateRow(t, ctx, s, a.ID, func(u *ent.AgentUpdateOne) { u.SetStartClaimLaunchID("launch-later") })
+		before, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		_, _, err = s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, succeeded(launchID))
+		require.NoError(t, err)
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.LaunchEndReasonSucceeded, got.LaunchEndReason)
+		assert.Equal(t, before.StartClaimID, got.StartClaimID, "a claim not linked to this launch is not this report's to settle")
+	})
+	t.Run("a resend after the release writes nothing", func(t *testing.T) {
+		a, launchID := beginClaimedRunningObservedLaunch(t, ctx, s, projectID, "ro-succ-resend")
+		_, _, err := s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, succeeded(launchID))
+		require.NoError(t, err)
+		before, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		answer, _, err := s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, succeeded(launchID))
+		require.NoError(t, err)
+		assert.False(t, answer.Changed)
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, before.StateVersion, got.StateVersion)
+	})
+}
+
 func TestApplyLaunchReport_FailedAfterRunningObserved_UnlinkedStartClaim_Completed(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)

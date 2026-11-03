@@ -48,7 +48,9 @@ func TestTemplateNotFoundError_FromLookup(t *testing.T) {
 	})
 
 	t.Run("absolute path", func(t *testing.T) {
-		abs := filepath.Join(t.TempDir(), "broker-only", "secret-tpl")
+		root := t.TempDir()
+		withHydrationRoots(t, root)
+		abs := filepath.Join(root, "broker-only", "secret-tpl")
 		_, err := FindTemplateInProjectPath(abs, projectPath)
 		var tplErr *TemplateNotFoundError
 		if !errors.As(err, &tplErr) || !errors.Is(err, ErrTemplateNotFound) {
@@ -60,14 +62,21 @@ func TestTemplateNotFoundError_FromLookup(t *testing.T) {
 		if strings.Contains(tplErr.Name, "broker-only") || strings.Contains(tplErr.Name, string(filepath.Separator)) {
 			t.Errorf("Name %q carries a path", tplErr.Name)
 		}
-		if want := fmt.Sprintf("template path %s not found or not a directory: %v", abs, ErrTemplateNotFound); err.Error() != want {
-			t.Errorf("Error() = %q, want the unchanged text %q", err.Error(), want)
+		// A missing directory below a hydration root has fixed text that
+		// never names the broker path.
+		if want := fmt.Sprintf("hydrated template directory not found: %v", ErrTemplateNotFound); err.Error() != want {
+			t.Errorf("Error() = %q, want %q", err.Error(), want)
+		}
+		if strings.Contains(err.Error(), root) {
+			t.Errorf("Error() %q names the broker path", err.Error())
 		}
 	})
 
 	t.Run("content-hash cache directory", func(t *testing.T) {
 		hash := "sha256:" + strings.Repeat("ab", 32)
-		abs := filepath.Join(t.TempDir(), "cache", hash)
+		cache := filepath.Join(t.TempDir(), "cache")
+		withHydrationRoots(t, cache)
+		abs := filepath.Join(cache, hash)
 		_, err := FindTemplateInProjectPath(abs, projectPath)
 		var tplErr *TemplateNotFoundError
 		if !errors.As(err, &tplErr) {

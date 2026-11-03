@@ -100,14 +100,24 @@ func init() {
 	f.StringVarP(&preflightConfigPath, "config", "c", "", "Path to the server configuration file the hub was started with")
 }
 
-// isNoWriteCommand reports whether cmd is "scion server preflight", which
-// must not write: the root hook turns internal/writesonread on for it.
+// isNoWriteCommand reports whether cmd is "scion server preflight" or
+// "scion runtime-broker convert", which must not write: the root hook turns
+// internal/writesonread on for them.
 func isNoWriteCommand(cmd *cobra.Command) bool {
-	if cmd == nil || cmd.Name() != "preflight" {
+	if cmd == nil {
 		return false
 	}
-	server := cmd.Parent()
-	return server != nil && server.Name() == "server" && server.Parent() != nil && !server.Parent().HasParent()
+	var parentName string
+	switch cmd.Name() {
+	case "preflight":
+		parentName = "server"
+	case "convert":
+		parentName = "runtime-broker"
+	default:
+		return false
+	}
+	parent := cmd.Parent()
+	return parent != nil && parent.Name() == parentName && parent.Parent() != nil && !parent.Parent().HasParent()
 }
 
 // applyNoWriteGuard turns internal/writesonread on when cmd must not

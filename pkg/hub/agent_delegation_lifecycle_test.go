@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -29,6 +30,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -49,22 +51,42 @@ type lifecycleGrant struct {
 // issuerID, and one unexpired credential exchanged from it.
 func seedLifecycleGrant(t *testing.T, s store.Store, agent *store.Agent, issuerID string) lifecycleGrant {
 	t.Helper()
+	return seedLifecycleGrantForRun(t, s, agent, issuerID, "")
+}
+
+// seedLifecycleGrantForRun is seedLifecycleGrant with the grant keyed to
+// the agent run runID ("" for an unkeyed grant).
+func seedLifecycleGrantForRun(t *testing.T, s store.Store, agent *store.Agent, issuerID, runID string) lifecycleGrant {
+	t.Helper()
+	lg, err := createLifecycleGrant(s, agent, issuerID, runID)
+	require.NoError(t, err)
+	return lg
+}
+
+// createLifecycleGrant writes the grant and credential of
+// seedLifecycleGrantForRun and returns any error, for a caller that is
+// not on the test goroutine.
+func createLifecycleGrant(s store.Store, agent *store.Agent, issuerID, runID string) (lifecycleGrant, error) {
 	ctx := context.Background()
 	g := &store.AgentDelegationGrant{
 		AgentID: agent.ID, AgentProjectID: agent.ProjectID, AgentGeneration: agent.Generation,
-		AgentStateVersion: agent.StateVersion, IssuerUserID: issuerID, BoundaryKind: "hub",
+		AgentStateVersion: agent.StateVersion, IssuedRunID: runID, IssuerUserID: issuerID, BoundaryKind: "hub",
 		CeilingVersion: 1, CeilingPermissionIDs: []string{"agent.read"}, Name: "lifecycle",
 		MaxCredentialTTLSeconds: agentDelegationCredentialDefaultTTL, ExpiresAt: time.Now().Add(time.Hour),
 		IssuanceAuditID: uuid.NewString(),
 	}
-	require.NoError(t, s.CreateAgentDelegationGrant(ctx, g))
+	if err := s.CreateAgentDelegationGrant(ctx, g); err != nil {
+		return lifecycleGrant{}, err
+	}
 	c := &store.AgentDelegatedCredential{
 		GrantID: g.ID, AgentID: agent.ID, KeyHash: "lifecycle-" + uuid.NewString(), Prefix: delegatedCredentialPrefix,
 		Audience: "scion-hub", CeilingPermissionIDs: []string{"agent.read"}, ExchangeAgentCredentialID: uuid.NewString(),
 		ExpiresAt: time.Now().Add(10 * time.Minute),
 	}
-	require.NoError(t, s.CreateAgentDelegatedCredential(ctx, c))
-	return lifecycleGrant{grant: g, cred: c}
+	if err := s.CreateAgentDelegatedCredential(ctx, c); err != nil {
+		return lifecycleGrant{}, err
+	}
+	return lifecycleGrant{grant: g, cred: c}, nil
 }
 
 // assertGrantRevoked asserts that lg's grant and credential are revoked
@@ -499,6 +521,307 @@ func TestAgentDelegationLifecycle_AutoSuspendKeepsNewRunGrants(t *testing.T) {
 	require.Equal(t, newClaim.ID, after.StartClaimID, "the new start's claim survives the auto-suspend")
 	assertGrantRevoked(t, s, suspendedRun, revokeReasonAgentSuspended)
 	assertGrantActive(t, s, newRun)
+}
+
+// resumeAfterSuspendStore calls onRecorded once, right after a suspend's
+// status write (phase suspended, conditional on the stopped run) succeeds:
+// the first point at which a resume can start a new run before the
+// suspend's grant revocation runs.
+type resumeAfterSuspendStore struct {
+	store.Store
+	onRecorded func()
+	fired      atomic.Bool
+}
+
+func (r *resumeAfterSuspendStore) UpdateAgentStatus(ctx context.Context, id string, su store.AgentStatusUpdate) error {
+	err := r.Store.UpdateAgentStatus(ctx, id, su)
+	if err == nil && su.IfRunID != "" && su.Phase == string(state.PhaseSuspended) && r.fired.CompareAndSwap(false, true) {
+		r.onRecorded()
+	}
+	return err
+}
+
+// installResumeAfterSuspend wraps srv.store so that onRecorded runs right
+// after the suspension is recorded.
+func installResumeAfterSuspend(t *testing.T, srv *Server, onRecorded func()) *resumeAfterSuspendStore {
+	t.Helper()
+	w, _ := installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *resumeAfterSuspendStore {
+		return &resumeAfterSuspendStore{Store: inner, onRecorded: onRecorded}
+	})
+	return w
+}
+
+// resumeToRun is a resume racing the suspend, on the unwrapped store s: it
+// starts the run runID and, unless phase is "", moves the row to phase,
+// then issues a grant keyed to the new run, as issuance would.
+func resumeToRun(s store.Store, agentID, issuerID, runID string, phase state.Phase) (lifecycleGrant, error) {
+	ctx := context.Background()
+	if _, err := s.SetAgentRunID(ctx, agentID, runID, nil); err != nil {
+		return lifecycleGrant{}, err
+	}
+	if phase != "" {
+		db := s.(*entadapter.CompositeStore).DB()
+		if _, err := db.ExecContext(ctx, "UPDATE agents SET phase = ? WHERE id = ?", string(phase), agentID); err != nil {
+			return lifecycleGrant{}, err
+		}
+	}
+	a, err := s.GetAgent(ctx, agentID)
+	if err != nil {
+		return lifecycleGrant{}, err
+	}
+	return createLifecycleGrant(s, a, issuerID, a.RunID)
+}
+
+// lifecycleSuspendPaths are the two suspend paths that revoke grants: the
+// suspend route and the scheduler's auto-suspend.
+var lifecycleSuspendPaths = []struct {
+	name    string
+	suspend func(t *testing.T, srv *Server, s store.Store, agentID string)
+}{
+	{"suspend", func(t *testing.T, srv *Server, _ store.Store, agentID string) {
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agentID+"/suspend", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	}},
+	{"auto-suspend", func(t *testing.T, srv *Server, s store.Store, agentID string) {
+		markAgentStalled(t, s, agentID)
+		srv.autoSuspendStalledAgents(context.Background(), []store.Agent{*mustGetAgent(t, s, agentID)})
+	}},
+}
+
+// runAgentWithRun creates a running broker agent whose current run is
+// runID, and an issuer for its grants.
+func runAgentWithRun(t *testing.T, s store.Store, name, runID string) (*store.Agent, *store.User) {
+	t.Helper()
+	agent := setupBrokerAgentInPhase(t, s, name, state.PhaseRunning)
+	_, err := s.SetAgentRunID(context.Background(), agent.ID, runID, nil)
+	require.NoError(t, err)
+	return mustGetAgent(t, s, agent.ID), lifecycleIssuer(t, s, name)
+}
+
+// A suspend whose revocation runs after a resume has started a new run
+// revokes the suspended run's grants, and unkeyed and older-run ones, but
+// keeps the grants issued to the new run (ptone/scion#6403).
+func TestAgentDelegationLifecycle_SuspendKeepsResumedRunGrants(t *testing.T) {
+	for i, path := range lifecycleSuspendPaths {
+		t.Run(path.name, func(t *testing.T) {
+			srv, s, _, _ := engineTestServer(t)
+			agent, issuer := runAgentWithRun(t, s, fmt.Sprintf("adtlc-resumed-%d", i), "run-1")
+			suspended := seedLifecycleGrantForRun(t, s, agent, issuer.ID, "run-1")
+			earlier := seedLifecycleGrantForRun(t, s, agent, issuer.ID, "run-0")
+			unkeyed := seedLifecycleGrant(t, s, agent, issuer.ID)
+
+			var resumed lifecycleGrant
+			var resumeErr error
+			w := installResumeAfterSuspend(t, srv, func() {
+				resumed, resumeErr = resumeToRun(s, agent.ID, issuer.ID, "run-2", state.PhaseStarting)
+			})
+
+			path.suspend(t, srv, s, agent.ID)
+
+			require.True(t, w.fired.Load(), "the suspension was recorded")
+			require.NoError(t, resumeErr)
+			require.NotNil(t, resumed.grant)
+			assert.Equal(t, "run-2", resumed.grant.IssuedRunID)
+			assertGrantRevoked(t, s, suspended, revokeReasonAgentSuspended)
+			assertGrantRevoked(t, s, earlier, revokeReasonAgentSuspended)
+			assertGrantRevoked(t, s, unkeyed, revokeReasonAgentSuspended)
+			assertGrantActive(t, s, resumed)
+		})
+	}
+}
+
+// A newer run ID that is not a live run keeps no grant: a resume that
+// minted its run but left the row suspended (it failed before the phase
+// moved), or a newer run already stopped again. The suspend revokes every
+// grant of the agent.
+func TestAgentDelegationLifecycle_SuspendRevokesAllWhenNewerRunNotLive(t *testing.T) {
+	cases := []struct {
+		name  string
+		phase state.Phase // "" leaves the row suspended
+	}{
+		{"still-suspended", ""},
+		{"stopped", state.PhaseStopped},
+	}
+	for i, path := range lifecycleSuspendPaths {
+		for j, tc := range cases {
+			t.Run(path.name+"/"+tc.name, func(t *testing.T) {
+				srv, s, _, _ := engineTestServer(t)
+				agent, issuer := runAgentWithRun(t, s, fmt.Sprintf("adtlc-notlive-%d-%d", i, j), "run-1")
+				suspended := seedLifecycleGrantForRun(t, s, agent, issuer.ID, "run-1")
+
+				var newer lifecycleGrant
+				var resumeErr error
+				w := installResumeAfterSuspend(t, srv, func() {
+					newer, resumeErr = resumeToRun(s, agent.ID, issuer.ID, "run-2", tc.phase)
+				})
+
+				path.suspend(t, srv, s, agent.ID)
+
+				require.True(t, w.fired.Load(), "the suspension was recorded")
+				require.NoError(t, resumeErr)
+				require.NotNil(t, newer.grant)
+				assertGrantRevoked(t, s, suspended, revokeReasonAgentSuspended)
+				assertGrantRevoked(t, s, newer, revokeReasonAgentSuspended)
+			})
+		}
+	}
+}
+
+// lockFailOnceStore fails, once armed, the first LockAgentRows on a
+// transaction-scoped store.
+type lockFailOnceStore struct {
+	store.Store
+	armed atomic.Bool
+}
+
+func (l *lockFailOnceStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return l.Store.WithTx(ctx, func(tx store.Store) error { return fn(&lockFailOnceTx{Store: tx, parent: l}) })
+}
+
+type lockFailOnceTx struct {
+	store.Store
+	parent *lockFailOnceStore
+}
+
+var errInjectedAgentLock = errors.New("injected agent row lock fault")
+
+func (t *lockFailOnceTx) LockAgentRows(ctx context.Context, ids []string) error {
+	if t.parent.armed.CompareAndSwap(true, false) {
+		return errInjectedAgentLock
+	}
+	return t.Store.LockAgentRows(ctx, ids)
+}
+
+// When the suspend's revocation cannot lock or read the agent row, it
+// fails closed: a newer run's grants are revoked with every other grant,
+// in a transaction of its own, with one revocation record per grant.
+func TestAgentDelegationLifecycle_SuspendRevokesAllWhenRunUnread(t *testing.T) {
+	for i, path := range lifecycleSuspendPaths {
+		t.Run(path.name, func(t *testing.T) {
+			srv, s, _, _ := engineTestServer(t)
+			agent, issuer := runAgentWithRun(t, s, fmt.Sprintf("adtlc-unread-%d", i), "run-1")
+			suspended := seedLifecycleGrantForRun(t, s, agent, issuer.ID, "run-1")
+
+			var resumed lifecycleGrant
+			var resumeErr error
+			w := installResumeAfterSuspend(t, srv, nil)
+			lockFault, _ := installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *lockFailOnceStore {
+				return &lockFailOnceStore{Store: inner}
+			})
+			w.onRecorded = func() {
+				resumed, resumeErr = resumeToRun(s, agent.ID, issuer.ID, "run-2", state.PhaseStarting)
+				lockFault.armed.Store(true)
+			}
+
+			path.suspend(t, srv, s, agent.ID)
+
+			require.True(t, w.fired.Load(), "the suspension was recorded")
+			require.NoError(t, resumeErr)
+			require.NotNil(t, resumed.grant)
+			assert.False(t, lockFault.armed.Load(), "the revocation's row lock failed")
+			assertGrantRevoked(t, s, suspended, revokeReasonAgentSuspended)
+			assertGrantRevoked(t, s, resumed, revokeReasonAgentSuspended)
+		})
+	}
+}
+
+// With no newer run, a suspend revokes every grant of the agent, whatever
+// run it is keyed to: a grant issued while the agent was stopped after an
+// earlier run ends with the suspension of the run that used it.
+func TestAgentDelegationLifecycle_SuspendRevokesEveryRunsGrants(t *testing.T) {
+	for i, path := range lifecycleSuspendPaths {
+		t.Run(path.name, func(t *testing.T) {
+			srv, s, _, _ := engineTestServer(t)
+			agent, issuer := runAgentWithRun(t, s, fmt.Sprintf("adtlc-everyrun-%d", i), "run-1")
+			current := seedLifecycleGrantForRun(t, s, agent, issuer.ID, "run-1")
+			earlier := seedLifecycleGrantForRun(t, s, agent, issuer.ID, "run-0")
+			unkeyed := seedLifecycleGrant(t, s, agent, issuer.ID)
+
+			path.suspend(t, srv, s, agent.ID)
+
+			require.Equal(t, string(state.PhaseSuspended), mustGetAgent(t, s, agent.ID).Phase)
+			assertGrantRevoked(t, s, current, revokeReasonAgentSuspended)
+			assertGrantRevoked(t, s, earlier, revokeReasonAgentSuspended)
+			assertGrantRevoked(t, s, unkeyed, revokeReasonAgentSuspended)
+		})
+	}
+}
+
+// The run key narrows only the suspend: a soft delete still revokes a
+// grant keyed to the agent's current run.
+func TestAgentDelegationLifecycle_SoftDeleteRevokesCurrentRunGrants(t *testing.T) {
+	srv, s, _, _ := engineTestServer(t)
+	srv.config.SoftDeleteRetention = time.Hour
+	ctx := context.Background()
+	agent := setupBrokerAgentInPhase(t, s, "adtlc-soft-run", state.PhaseRunning)
+	_, err := s.SetAgentRunID(ctx, agent.ID, "run-1", nil)
+	require.NoError(t, err)
+	agent = mustGetAgent(t, s, agent.ID)
+	lg := seedLifecycleGrantForRun(t, s, agent, lifecycleIssuer(t, s, "adtlc-soft-run").ID, "run-1")
+
+	softDeleteForTest(t, srv, agent.ID)
+
+	assertGrantRevoked(t, s, lg, revokeReasonAgentDeleted)
+}
+
+// Issuance keys the grant to the run of the locked agent row, not of the
+// snapshot the request read: a new run ID changes neither the state
+// version nor the generation the issuance re-checks.
+func TestAgentDelegationIssuance_KeysGrantToLockedRun(t *testing.T) {
+	srv, s, _, _ := engineTestServer(t)
+	ctx := context.Background()
+	agent := setupBrokerAgentInPhase(t, s, "adtlc-issue-run", state.PhaseRunning)
+	issuer := lifecycleIssuer(t, s, "adtlc-issue-run")
+	_, err := s.SetAgentRunID(ctx, agent.ID, "run-1", nil)
+	require.NoError(t, err)
+	snap := mustGetAgent(t, s, agent.ID)
+	_, err = s.SetAgentRunID(ctx, agent.ID, "run-2", nil)
+	require.NoError(t, err)
+
+	now := time.Now().UTC()
+	grant := &store.AgentDelegationGrant{
+		ID: uuid.NewString(), AgentID: snap.ID, AgentProjectID: snap.ProjectID, AgentGeneration: snap.Generation,
+		AgentStateVersion: snap.StateVersion, IssuerUserID: issuer.ID, BoundaryKind: "hub",
+		CeilingVersion: 1, CeilingPermissionIDs: []string{"agent.read"}, Name: "run-key",
+		MaxCredentialTTLSeconds: agentDelegationCredentialDefaultTTL, ExpiresAt: now.Add(time.Hour),
+		Created: now, IssuanceAuditID: uuid.NewString(),
+	}
+	require.NoError(t, srv.store.WithTx(ctx, func(tx store.Store) error {
+		return writeAgentDelegationGrantTx(ctx, tx, snap, grant, AuditActor{PrincipalKind: "user", PrincipalID: issuer.ID}, now)
+	}))
+
+	got, err := s.GetAgentDelegationGrant(ctx, grant.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "run-2", got.IssuedRunID)
+}
+
+func TestNewerRunStarted(t *testing.T) {
+	cases := []struct {
+		name    string
+		agent   *store.Agent
+		stopRun string
+		want    bool
+	}{
+		{"nil row", nil, "run-1", false},
+		{"same run", &store.Agent{RunID: "run-1", Phase: string(state.PhaseRunning)}, "run-1", false},
+		{"no run", &store.Agent{RunID: "", Phase: string(state.PhaseRunning)}, "run-1", false},
+		{"newer run starting", &store.Agent{RunID: "run-2", Phase: string(state.PhaseStarting)}, "run-1", true},
+		{"newer run running", &store.Agent{RunID: "run-2", Phase: string(state.PhaseRunning)}, "run-1", true},
+		{"newer run from no stopped run", &store.Agent{RunID: "run-2", Phase: string(state.PhaseRunning)}, "", true},
+		{"newer run still suspended", &store.Agent{RunID: "run-2", Phase: string(state.PhaseSuspended)}, "run-1", false},
+		{"newer run stopped", &store.Agent{RunID: "run-2", Phase: string(state.PhaseStopped)}, "run-1", false},
+		// A newer run that is stopping, failed or halted keeps its grants,
+		// as a stop or a crash does today; only suspend revokes.
+		{"newer run stopping", &store.Agent{RunID: "run-2", Phase: string(state.PhaseStopping)}, "run-1", true},
+		{"newer run in error", &store.Agent{RunID: "run-2", Phase: string(state.PhaseError)}, "run-1", true},
+		{"newer run halted", &store.Agent{RunID: "run-2", Phase: string(state.PhaseHalted)}, "run-1", true},
+		{"deleted", &store.Agent{RunID: "run-2", Phase: string(state.PhaseRunning), DeletedAt: time.Now()}, "run-1", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, newerRunStarted(tc.agent, tc.stopRun))
+		})
+	}
 }
 
 // A failed best-effort revocation never fails the suspend; the grant stays

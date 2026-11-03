@@ -389,6 +389,62 @@ func roleFitsCeiling(c store.EffectCeiling, role AgentRole) bool {
 	return true
 }
 
+// noUsableRoleMessage is the denial message for a defaulted role that fits
+// no role above none under c. For a bounded ceiling it names the UAT
+// selectors the readonly role, the smallest role above none, still needs:
+// for each non-optional readonly scope, every covered permission c does not
+// allow, as its registry UATScope. The names come from the static registry,
+// so the message reveals nothing about any principal. It falls back to
+// reasonNoUsableRole when no selector can be named.
+func noUsableRoleMessage(c store.EffectCeiling) string {
+	missing := missingRoleSelectors(c, AgentRoleReadOnly)
+	if len(missing) == 0 {
+		return reasonNoUsableRole
+	}
+	return "the token's scopes fit no usable agent role; the readonly role also needs the selectors " +
+		strings.Join(missing, ", ") + "; add them, request role=none explicitly, or create from a session"
+}
+
+// missingRoleSelectors returns, sorted, the UAT selectors whose permissions
+// a bounded ceiling c lacks for role's non-optional scopes, using the same
+// per-permission rule as ceilingAllowsScope (a self operation never
+// blocks). It returns nil for any other ceiling kind, and nil when a
+// selector cannot be named (a covered permission without a UAT selector,
+// or a required scope with no registry coverage), so the caller never
+// presents an incomplete list as the full set. c must be a hop ceiling:
+// noUsableRoleMessage's only caller passes uatHopEffectCeiling inline,
+// which TestUATIntrinsic_CeilingReadersUseHopCeiling enforces.
+func missingRoleSelectors(c store.EffectCeiling, role AgentRole) []string {
+	if c.Kind != store.EffectCeilingBounded {
+		return nil
+	}
+	frozen, ok := c.Frozen()
+	if !ok {
+		return nil
+	}
+	var selectors []string
+	for _, scope := range ScopesForRole(role) {
+		if ceilingOptionalRoleScopes[scope] {
+			continue
+		}
+		coverage := agentScopeCoverage([]AgentTokenScope{scope})
+		if len(coverage) == 0 {
+			return nil
+		}
+		for _, permID := range coverage {
+			if frozen.Allows(permID) || selfOperationSet[permID] {
+				continue
+			}
+			p, ok := registryPermission(permID)
+			if !ok || p.UATScope == "" {
+				return nil
+			}
+			selectors = append(selectors, p.UATScope)
+		}
+	}
+	return sortedUniqueIDs(selectors)
+}
+
 // childRoleWithinCeiling decides the child's stored role under the source's
 // frozen ceiling. roleExplicit is true when the request named a role.
 //   - an explicit role=none is always allowed;

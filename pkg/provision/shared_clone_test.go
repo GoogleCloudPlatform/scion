@@ -145,6 +145,7 @@ func TestProvisionShared_SharedPlain_FailedCloneWritesNoMarker(t *testing.T) {
 	bareRepo := initBareGitRepo(t)
 	hostPath := t.TempDir()
 	missing := filepath.Join(t.TempDir(), "missing.git")
+	AllowLocalCloneFixture(t, missing)
 
 	err := ProvisionShared(sharedPlainInput(hostPath, missing))
 	require.Error(t, err)

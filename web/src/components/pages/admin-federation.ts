@@ -49,10 +49,36 @@ import {
   renderSectionErrorSummary,
   settingsErrorStyles,
 } from '../shared/settings-error-views.js';
+import {
+  envBadgeStyles,
+  readOnlyFieldStyles,
+  renderEnvBadge,
+  renderEnvBadgeUnder,
+  renderEnvLockBadge,
+  renderKeysEnvBadge,
+} from '../shared/env-badge-views.js';
+import {
+  type EnvKeyValue,
+  envValueFor,
+  formatEnvValue,
+  hasInEffect,
+} from './admin-server-config-env-values.js';
 
 /** koanf prefix of the federation settings the page edits. */
 const FED = 'server.federation';
 const ISSUERS_KEY = `${FED}.trusted_issuers`;
+
+/** The primary value of a locked field whose environment value the GET does not report. */
+export const ENV_VALUE_NOT_REPORTED = 'Environment value not reported';
+
+/** The global federation fields (API names under server.federation). */
+type FedLeaf = 'enabled' | 'algorithms' | 'refresh_interval' | 'debounce_interval';
+const FED_LEAVES: readonly FedLeaf[] = [
+  'enabled',
+  'algorithms',
+  'refresh_interval',
+  'debounce_interval',
+];
 
 // ── Type definitions matching the Go API response ──
 
@@ -115,6 +141,13 @@ export class ScionPageAdminFederation extends LitElement {
   // leaves the keys it omits as stored (ptone/scion#3913).
   private loadedFederation: Record<string, unknown> = {};
 
+  // Environment overrides from the same GET (ptone/scion#3837): the keys a
+  // SCION_SERVER_* variable sets on the node that served the page, and per
+  // key its value and whether the hub runs with it.
+  @state() private envOverrides: string[] = [];
+  @state() private envValues: Record<string, EnvKeyValue> = {};
+  @state() private settingsTier: 'db' | 'file' | undefined = undefined;
+
   // Add/Edit dialog state
   @state() private dialogOpen = false;
   @state() private editingIssuer: TrustedIssuerConfig | null = null;
@@ -146,6 +179,8 @@ export class ScionPageAdminFederation extends LitElement {
 
   static override styles = css`
     ${settingsErrorStyles}
+    ${envBadgeStyles}
+    ${readOnlyFieldStyles}
 
     :host {
       display: block;
@@ -498,6 +533,8 @@ export class ScionPageAdminFederation extends LitElement {
           trusted_issuers?: TrustedIssuerConfig[];
         };
         settings_tier?: 'db' | 'file';
+        env_overrides?: string[];
+        env_values?: Record<string, EnvKeyValue>;
         section_metadata?: Record<string, { source?: string; revision?: number }>;
       };
       this.federationRevision =
@@ -513,6 +550,9 @@ export class ScionPageAdminFederation extends LitElement {
       this.refreshInterval = fed.refresh_interval ?? '1h';
       this.debounceInterval = fed.debounce_interval ?? '5s';
       this.issuers = fed.trusted_issuers ?? [];
+      this.settingsTier = data.settings_tier;
+      this.envOverrides = data.env_overrides ?? [];
+      this.envValues = data.env_values ?? {};
       this.loadedFederation = this.federationFormValues();
     } catch {
       this.error = 'Failed to connect to server';
@@ -538,7 +578,60 @@ export class ScionPageAdminFederation extends LitElement {
    * clears it on the hub.
    */
   private buildFederationPayload(): Record<string, unknown> {
-    return diffPayload(this.federationFormValues(), this.loadedFederation);
+    const payload = diffPayload(this.federationFormValues(), this.loadedFederation);
+    // A key whose environment value is in effect is read-only and never
+    // sent: the hub would store it, but would not run with it.
+    for (const leaf of FED_LEAVES) {
+      if (this.envLocked(leaf)) delete payload[leaf];
+    }
+    return payload;
+  }
+
+  /**
+   * Whether the environment value of a global federation field is the
+   * value the hub runs with on this node. Only then is the field read-only.
+   * The server reports it per key (in_effect). For an entry with no
+   * reported state, the tier decides: on a file-tier hub the environment
+   * wins over settings.yaml, while on a DB-backed hub federation is a
+   * Layer-1 section and the saved value wins.
+   */
+  private envLocked(leaf: FedLeaf): boolean {
+    const key = `${FED}.${leaf}`;
+    if (!this.envOverrides.includes(key)) return false;
+    const found = envValueFor(this.envValues, [key]);
+    if (found && hasInEffect(found.ev)) return found.ev.in_effect;
+    return this.settingsTier !== 'db';
+  }
+
+  /**
+   * A global federation field: its control, or, when the environment value
+   * is in effect, that value read-only (the stored value only as a
+   * secondary line, when one exists and differs). An editable field whose
+   * key the environment sets shows the badge and the environment value
+   * line, which says the saved value wins.
+   */
+  private renderFedField(
+    leaf: FedLeaf,
+    storedDisplay: string,
+    control: TemplateResult
+  ): TemplateResult {
+    const key = `${FED}.${leaf}`;
+    if (this.envLocked(leaf)) {
+      const found = envValueFor(this.envValues, [key]);
+      const ev = found?.ev;
+      // With no env_values entry the page has no environment value to show;
+      // the stored value is not it, so it is never shown as primary.
+      return html`${renderEnvLockBadge()}${renderEnvBadge()}<span
+          class="read-only-value env-value-primary"
+          >${ev ? formatEnvValue(ev) || '—' : ENV_VALUE_NOT_REPORTED}</span
+        >${ev?.saved_differs
+          ? html`<span class="hint env-value-saved"
+              >${this.settingsTier === 'db' ? 'Saved value' : 'settings.yaml value'}, not in effect
+              on this node: <code>${storedDisplay || '—'}</code></span
+            >`
+          : nothing}`;
+    }
+    return html`${renderKeysEnvBadge(this.envOverrides, this.envValues, [key])}${control}`;
   }
 
   private async save(): Promise<void> {
@@ -866,14 +959,18 @@ export class ScionPageAdminFederation extends LitElement {
         )}
 
         <div class="form-field mb-1">
-          <sl-switch
-            ?checked=${this.enabled}
-            @sl-change=${(e: Event) => {
-              this.enabled = (e.target as HTMLInputElement).checked;
-            }}
-          >
-            Enabled
-          </sl-switch>
+          ${this.renderFedField(
+            'enabled',
+            this.enabled ? 'Enabled' : 'Disabled',
+            html`<sl-switch
+              ?checked=${this.enabled}
+              @sl-change=${(e: Event) => {
+                this.enabled = (e.target as HTMLInputElement).checked;
+              }}
+            >
+              Enabled
+            </sl-switch>`
+          )}
           <span class="hint">Enable or disable federation authentication globally.</span>
           ${this.renderFedFieldErrors('enabled')}
         </div>
@@ -881,19 +978,23 @@ export class ScionPageAdminFederation extends LitElement {
         <div class="form-grid">
           <div class="form-field">
             <label>Algorithms</label>
-            <sl-select
-              multiple
-              .value=${this.algorithms.join(' ')}
-              @sl-change=${(e: Event) => {
-                const value = (e.target as HTMLSelectElement).value;
-                this.algorithms = Array.isArray(value)
-                  ? (value as string[])
-                  : value.split(' ').filter(Boolean);
-              }}
-            >
-              <sl-option value="RS256">RS256</sl-option>
-              <sl-option value="ES256">ES256</sl-option>
-            </sl-select>
+            ${this.renderFedField(
+              'algorithms',
+              this.algorithms.join(', '),
+              html`<sl-select
+                multiple
+                .value=${this.algorithms.join(' ')}
+                @sl-change=${(e: Event) => {
+                  const value = (e.target as HTMLSelectElement).value;
+                  this.algorithms = Array.isArray(value)
+                    ? (value as string[])
+                    : value.split(' ').filter(Boolean);
+                }}
+              >
+                <sl-option value="RS256">RS256</sl-option>
+                <sl-option value="ES256">ES256</sl-option>
+              </sl-select>`
+            )}
             <span class="hint">Allowed JWT signing algorithms.</span>
             ${this.renderFedFieldErrors('algorithms')}
           </div>
@@ -904,25 +1005,33 @@ export class ScionPageAdminFederation extends LitElement {
           <div class="cache-row">
             <div class="form-field">
               <label>Refresh Interval</label>
-              <sl-input
-                .value=${this.refreshInterval}
-                placeholder="1h"
-                @sl-change=${(e: Event) => {
-                  this.refreshInterval = (e.target as HTMLInputElement).value;
-                }}
-              ></sl-input>
+              ${this.renderFedField(
+                'refresh_interval',
+                this.refreshInterval,
+                html`<sl-input
+                  .value=${this.refreshInterval}
+                  placeholder="1h"
+                  @sl-change=${(e: Event) => {
+                    this.refreshInterval = (e.target as HTMLInputElement).value;
+                  }}
+                ></sl-input>`
+              )}
               <span class="hint">How often to refresh JWKS keys (e.g. 1h, 30m).</span>
               ${this.renderFedFieldErrors('refresh_interval')}
             </div>
             <div class="form-field">
               <label>Debounce Interval</label>
-              <sl-input
-                .value=${this.debounceInterval}
-                placeholder="5s"
-                @sl-change=${(e: Event) => {
-                  this.debounceInterval = (e.target as HTMLInputElement).value;
-                }}
-              ></sl-input>
+              ${this.renderFedField(
+                'debounce_interval',
+                this.debounceInterval,
+                html`<sl-input
+                  .value=${this.debounceInterval}
+                  placeholder="5s"
+                  @sl-change=${(e: Event) => {
+                    this.debounceInterval = (e.target as HTMLInputElement).value;
+                  }}
+                ></sl-input>`
+              )}
               <span class="hint">Minimum delay between JWKS fetches (e.g. 5s).</span>
               ${this.renderFedFieldErrors('debounce_interval')}
             </div>
@@ -948,6 +1057,7 @@ export class ScionPageAdminFederation extends LitElement {
           this.fieldErrors.filter((e) => this.isIssuerError(e)),
           'trusted_issuers'
         )}
+        ${renderEnvBadgeUnder(this.envOverrides, this.envValues, ISSUERS_KEY)}
         ${this.issuers.length === 0
           ? html`
               <div class="empty-state">

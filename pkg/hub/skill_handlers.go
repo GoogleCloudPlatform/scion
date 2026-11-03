@@ -1525,7 +1525,12 @@ func (s *Server) handleSkillFinalize(w http.ResponseWriter, r *http.Request, ski
 		if writeInvalidFilePathError(w, err) {
 			return
 		}
-		ValidationError(w, err.Error(), nil)
+		var notFound *fileNotFoundError
+		if errors.As(err, &notFound) {
+			ValidationError(w, err.Error(), nil)
+			return
+		}
+		writeErrorFromErr(w, err, "")
 		return
 	}
 

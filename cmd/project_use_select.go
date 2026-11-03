@@ -158,6 +158,11 @@ type useLookup struct {
 	failed []useHubFailure
 	// searched are hubs that answered the lookup.
 	searched []useHub
+	// searchedUAT is true when a hub in searched was searched with a user
+	// access token: an empty result there most likely means the token
+	// lacks project:list, so notFoundError adds that hint
+	// (ptone/scion#5294).
+	searchedUAT bool
 }
 
 // useCandidateHubs returns the hubs to search: only the hub given with
@@ -288,32 +293,42 @@ func (l *useLookup) verify(m *useMatch) (useVerdict, string) {
 // lookupOn looks the reference up on one hub. A reference that matches
 // nothing is no error; several projects with the name are all returned. In
 // a fan-out the hub gets only a credential bound to it (see hubClientFor).
-func (l *useLookup) lookupOn(hub useHub, fanOut bool) ([]hubclient.Project, error) {
-	client, err := hubClientFor(l.settings, hub.Endpoint, fanOut)
+// uat reports that the lookup was made with a user access token, which only
+// the credential hubClientForEndpoint chooses can be: a fan-out sends the
+// hub-bound credential.
+func (l *useLookup) lookupOn(hub useHub, fanOut bool) (projects []hubclient.Project, uat bool, err error) {
+	var client hubclient.Client
+	if fanOut {
+		client, err = hubClientFor(l.settings, hub.Endpoint, true)
+	} else {
+		var source string
+		client, source, err = hubClientAndAuthSourceForEndpoint(l.settings, hub.Endpoint)
+		uat = authSourceIsUserAccessToken(source)
+	}
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	ctx, cancel := context.WithTimeout(l.ctx, useHubTimeout)
 	defer cancel()
 	if util.IsGitURL(l.ref) {
 		resp, err := client.Projects().List(ctx, &hubclient.ListProjectsOptions{GitRemote: util.NormalizeGitRemote(l.ref)})
 		if err != nil {
-			return nil, err
+			return nil, uat, err
 		}
-		return resp.Projects, nil
+		return resp.Projects, uat, nil
 	}
 	p, err := hubsync.ResolveProjectOnHub(ctx, client, l.ref)
 	var notFound *hubsync.ProjectNotFoundError
 	var ambiguous *hubsync.AmbiguousProjectError
 	switch {
 	case errors.As(err, &notFound):
-		return nil, nil
+		return nil, uat, nil
 	case errors.As(err, &ambiguous):
-		return ambiguous.Projects, nil
+		return ambiguous.Projects, uat, nil
 	case err != nil:
-		return nil, err
+		return nil, uat, err
 	}
-	return []hubclient.Project{*p}, nil
+	return []hubclient.Project{*p}, uat, nil
 }
 
 // search looks the reference up on hubs in parallel, each within
@@ -325,6 +340,7 @@ func (l *useLookup) lookupOn(hub useHub, fanOut bool) ([]hubclient.Project, erro
 func (l *useLookup) search(hubs []useHub) []useMatch {
 	type result struct {
 		projects []hubclient.Project
+		uat      bool
 		err      error
 		skipped  bool
 	}
@@ -339,8 +355,8 @@ func (l *useLookup) search(hubs []useHub) []useMatch {
 		wg.Add(1)
 		go func(i int, h useHub, fanOut bool) {
 			defer wg.Done()
-			projects, err := l.lookupOn(h, fanOut)
-			results[i].projects, results[i].err = withoutHubGlobalProjects(projects), err
+			projects, uat, err := l.lookupOn(h, fanOut)
+			results[i].projects, results[i].uat, results[i].err = withoutHubGlobalProjects(projects), uat, err
 		}(i, h, fanOut)
 	}
 	wg.Wait()
@@ -361,6 +377,7 @@ func (l *useLookup) search(hubs []useHub) []useMatch {
 			l.failed = append(l.failed, useHubFailure{Hub: h, Reason: fmt.Sprintf("unreachable: %v", hubclient.HintProxyError(r.err))})
 		default:
 			l.searched = append(l.searched, h)
+			l.searchedUAT = l.searchedUAT || r.uat
 			l.remember(h, r.projects...)
 			for _, p := range r.projects {
 				matches = append(matches, useMatch{Hub: h, ID: p.ID, Slug: p.Slug, Name: p.Name})
@@ -391,7 +408,10 @@ func (l *useLookup) skipped() string {
 // notFoundError is the error when no searched hub has the project. It
 // names the hubs that were searched and those that could not be: the
 // project may be on one of those. It ends with the login command for each
-// hub that was skipped for want of a login or refused it.
+// hub that was skipped for want of a login or refused it. When a hub was
+// searched with a user access token it adds the scoped-token hint
+// (hubsync.ScopedTokenProjectLookupEmptyError), which reads the same whether
+// or not the project exists.
 func (l *useLookup) notFoundError() error {
 	var names []string
 	for _, h := range l.searched {
@@ -416,6 +436,9 @@ func (l *useLookup) notFoundError() error {
 			b.WriteString("\n")
 		}
 		fmt.Fprintf(&b, "\nLog in with: scion hub auth login --hub %s", h.label())
+	}
+	if l.searchedUAT {
+		return fmt.Errorf("%s\n\n%w", b.String(), hubsync.ScopedTokenProjectLookupEmptyError(l.ref))
 	}
 	return errors.New(b.String())
 }

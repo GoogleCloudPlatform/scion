@@ -172,7 +172,8 @@ func (s *AgentStore) RunLaunchReaperTick(ctx context.Context, p store.ReaperPara
 
 	txClient := newTxClient(dialectName, tx)
 
-	result, err := s.runLaunchReaperTickBody(tickCtx, tx, txClient, isPG, p)
+	rl := &reapLifecycle{obs: s.lifecycle.load()}
+	result, err := s.runLaunchReaperTickBody(tickCtx, tx, txClient, isPG, p, rl)
 	if err != nil {
 		// Tick-level failure: roll back (nothing from the tick persists),
 		// then best-effort disarm on a fresh context/connection.
@@ -198,7 +199,16 @@ func (s *AgentStore) RunLaunchReaperTick(ctx context.Context, p store.ReaperPara
 		return store.ReaperTickResult{Outcome: store.ReaperTickFailed}, nil
 	}
 	committed = true
+	rl.hooks.run()
 	return result, nil
+}
+
+// reapLifecycle carries the lifecycle observer through a reaper tick: each
+// reaped row is observed in its savepoint, and the post-commit hooks of the
+// rows whose savepoint was released run after the tick commits.
+type reapLifecycle struct {
+	obs   store.AgentWriteObserver
+	hooks commitHooks
 }
 
 // tryAdvisoryXactLock issues `SELECT pg_try_advisory_xact_lock($1)` on tx:
@@ -215,7 +225,7 @@ func tryAdvisoryXactLock(ctx context.Context, tx *sql.Tx) (bool, error) {
 // selection, and per-row reaping. A returned error means the tick failed
 // (design §3.7 step 6: an error in a tick-level statement); per-row errors
 // are handled internally via savepoints and never surface here.
-func (s *AgentStore) runLaunchReaperTickBody(ctx context.Context, tx *sql.Tx, txClient *ent.Client, isPG bool, p store.ReaperParams) (store.ReaperTickResult, error) {
+func (s *AgentStore) runLaunchReaperTickBody(ctx context.Context, tx *sql.Tx, txClient *ent.Client, isPG bool, p store.ReaperParams, rl *reapLifecycle) (store.ReaperTickResult, error) {
 	now, err := storeNow(ctx, tx, isPG)
 	if err != nil {
 		return store.ReaperTickResult{}, err
@@ -293,7 +303,7 @@ func (s *AgentStore) runLaunchReaperTickBody(ctx context.Context, tx *sql.Tx, tx
 	var reaped []store.Agent
 	rowErrors := 0
 	for id, reason := range seen {
-		updated, rowErrored, err := s.reapOneRowInSavepoint(ctx, tx, txClient, isPG, id, reason, now, p)
+		updated, rowErrored, err := s.reapOneRowInSavepoint(ctx, tx, txClient, isPG, id, reason, now, p, rl)
 		if err != nil {
 			// SAVEPOINT/ROLLBACK TO SAVEPOINT/RELEASE failures are
 			// tick-level: the transaction may already be gone.
@@ -390,7 +400,7 @@ func armLaunchReaper(ctx context.Context, txClient *ent.Client, isPG bool, now t
 // which returns (nil, false, nil). The returned error is non-nil only for a
 // SAVEPOINT/ROLLBACK TO SAVEPOINT/RELEASE failure, which is tick-level: the
 // transaction may already be gone.
-func (s *AgentStore) reapOneRowInSavepoint(ctx context.Context, tx *sql.Tx, txClient *ent.Client, isPG bool, id uuid.UUID, reason reapReason, now time.Time, p store.ReaperParams) (updated *store.Agent, rowErrored bool, err error) {
+func (s *AgentStore) reapOneRowInSavepoint(ctx context.Context, tx *sql.Tx, txClient *ent.Client, isPG bool, id uuid.UUID, reason reapReason, now time.Time, p store.ReaperParams, rl *reapLifecycle) (updated *store.Agent, rowErrored bool, err error) {
 	const savepoint = "launch_reap_row"
 	if _, err := tx.ExecContext(ctx, "SAVEPOINT "+savepoint); err != nil {
 		return nil, false, fmt.Errorf("launch reaper: SAVEPOINT: %w", err)
@@ -399,7 +409,14 @@ func (s *AgentStore) reapOneRowInSavepoint(ctx context.Context, tx *sql.Tx, txCl
 		return nil, false, fmt.Errorf("launch reaper: SAVEPOINT: %w", err)
 	}
 
-	updated, rowErr := reapRow(ctx, txClient, isPG, id, reason, now, p)
+	// The row's lifecycle hooks are kept only if its savepoint is
+	// released: a rolled-back reap emits nothing (design 2.3).
+	var rowHooks commitHooks
+	var obs store.AgentWriteObserver
+	if rl != nil {
+		obs = rl.obs
+	}
+	updated, rowErr := reapRow(ctx, txClient, isPG, id, reason, now, p, obs, &rowHooks)
 	if rowErr != nil {
 		if _, err := tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT "+savepoint); err != nil {
 			return nil, false, fmt.Errorf("launch reaper: ROLLBACK TO SAVEPOINT: %w", err)
@@ -416,6 +433,9 @@ func (s *AgentStore) reapOneRowInSavepoint(ctx context.Context, tx *sql.Tx, txCl
 	if err := injectFailure("release_savepoint"); err != nil {
 		return nil, false, fmt.Errorf("launch reaper: RELEASE SAVEPOINT: %w", err)
 	}
+	if rl != nil {
+		rl.hooks.fns = append(rl.hooks.fns, rowHooks.fns...)
+	}
 	return updated, false, nil
 }
 
@@ -423,7 +443,7 @@ func (s *AgentStore) reapOneRowInSavepoint(ctx context.Context, tx *sql.Tx, txCl
 // (a no-op lock on SQLite, which has one writer) and applies the reap write
 // if the predicate still holds. Returns (nil, nil) on a benign skip (locked
 // elsewhere, or a racing write already resolved the row).
-func reapRow(ctx context.Context, txClient *ent.Client, isPG bool, id uuid.UUID, reason reapReason, now time.Time, p store.ReaperParams) (*store.Agent, error) {
+func reapRow(ctx context.Context, txClient *ent.Client, isPG bool, id uuid.UUID, reason reapReason, now time.Time, p store.ReaperParams, obs store.AgentWriteObserver, hooks *commitHooks) (*store.Agent, error) {
 	q := txClient.Agent.Query().Where(agent.IDEQ(id))
 	if isPG {
 		q = q.ForUpdate(entsql.WithLockAction(entsql.SkipLocked))
@@ -463,7 +483,8 @@ func reapRow(ctx context.Context, txClient *ent.Client, isPG bool, id uuid.UUID,
 		if err := releaseBrokerQuotaTx(ctx, txClient, row, now); err != nil {
 			return nil, err
 		}
-		return entAgentToStore(updated), nil
+		return observeReap(ctx, obs, txClient, hooks, row, updated, now,
+			store.LaunchEndHint{Reason: store.LaunchEndReasonTimedOut, Code: store.LaunchErrorLaunchTimeout})
 
 	case reapStaleness:
 		if row.LaunchLastReportAt == nil || !row.LaunchLastReportAt.Before(now.Add(-8*p.KeepaliveInterval)) || !isInFlightPhase(row.Phase) {
@@ -483,7 +504,8 @@ func reapRow(ctx context.Context, txClient *ent.Client, isPG bool, id uuid.UUID,
 		if err := releaseBrokerQuotaTx(ctx, txClient, row, now); err != nil {
 			return nil, err
 		}
-		return entAgentToStore(updated), nil
+		return observeReap(ctx, obs, txClient, hooks, row, updated, now,
+			store.LaunchEndHint{Reason: store.LaunchEndReasonLost, Code: store.LaunchErrorBrokerLost})
 
 	case reapWindDown:
 		if row.LaunchLastReportAt == nil || !row.LaunchLastReportAt.Before(now.Add(-8*p.KeepaliveInterval)) || !isWindDownPhase(row.Phase) {
@@ -518,9 +540,26 @@ func reapRow(ctx context.Context, txClient *ent.Client, isPG bool, id uuid.UUID,
 		if err != nil {
 			return nil, err
 		}
-		return entAgentToStore(updated), nil
+		// A wind-down reap ends an attempt the stop cancelled: no run
+		// reached running, so no launch_id; nothing when the run's
+		// segment is open (the stop closes it). Slice 2 ruling Q4.
+		return observeReap(ctx, obs, txClient, hooks, row, updated, now,
+			store.LaunchEndHint{Reason: store.LifecycleEndReasonCancelled, Code: newErr, OmitLaunchID: true, SkipIfOpen: true})
 	}
 	return nil, fmt.Errorf("launch reaper: unknown reap reason %d", reason)
+}
+
+// observeReap observes one reap in the tick's transaction (savepoint);
+// the observer's post-commit hooks go to hooks.
+func observeReap(ctx context.Context, obs store.AgentWriteObserver, txClient *ent.Client, hooks *commitHooks, row, updated *ent.Agent, now time.Time, end store.LaunchEndHint) (*store.Agent, error) {
+	after := entAgentToStore(updated)
+	if err := observeAgentWriteDeferred(ctx, obs, txClient, hooks, store.AgentWrite{
+		Op: store.AgentWriteLaunch, Before: entAgentToStore(row), After: after, Now: now,
+		Hints: store.AgentWriteHints{LaunchEnd: &end},
+	}); err != nil {
+		return nil, err
+	}
+	return after, nil
 }
 
 func isInFlightPhase(phase string) bool {

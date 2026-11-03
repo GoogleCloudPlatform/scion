@@ -341,16 +341,17 @@ func runConversationList(cmd *cobra.Command, args []string) error {
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "ID\tKIND\tSURFACE\tNAME\tDEFAULT AGENT\tLAST ACTIVITY")
+	// IDs are printed in full so a listed ID can be passed back as
+	// conv:<id> (ptone/scion#7131).
 	for _, conv := range result.Conversations {
-		shortID := truncateRunes(conv.ID, 12, false)
 		name := truncateRunes(conversationListName(conv), 20, true)
 		defaultAgent := ""
 		if conv.DefaultAgentID != nil {
-			defaultAgent = truncateRunes(*conv.DefaultAgentID, 12, false)
+			defaultAgent = *conv.DefaultAgentID
 		}
 		lastActivity := clitime.Ago(conv.LastActivityAt)
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			shortID, conv.Kind, conv.Surface, name, defaultAgent, lastActivity)
+			conv.ID, conv.Kind, conv.Surface, name, defaultAgent, lastActivity)
 	}
 	return tw.Flush()
 }
@@ -582,8 +583,7 @@ func writeConversationGetParticipants(w io.Writer, participants []hubclient.Conv
 	_, _ = fmt.Fprintln(tw, "  KIND\tID\tROLE\tMSG MODE")
 	restricted := false
 	for _, p := range participants {
-		shortID := truncateRunes(p.PrincipalID, 12, false)
-		_, _ = fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n", p.PrincipalKind, shortID, p.Role, participantModeCell(p))
+		_, _ = fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n", p.PrincipalKind, p.PrincipalID, p.Role, participantModeCell(p))
 		switch p.MessageMode {
 		case "", "project", "hub":
 		default:

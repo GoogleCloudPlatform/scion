@@ -1497,7 +1497,7 @@ type resolvedTemplate struct {
 // dir for provisioning, launch (Start's harness.Resolve) and the runtime
 // broker's policy gate.
 func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessConfig, projectPath, projectDir, profileName string, settings *config.VersionedSettings, inlineCfg *api.ScionConfig) (*resolvedTemplate, error) {
-	chain, err := config.GetTemplateChainInProject(templateName, projectPath)
+	chain, err := templateChainFor(templateName, projectPath, settings)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load template: %w", err)
 	}
@@ -1610,6 +1610,19 @@ func PreflightResolve(ctx context.Context, opts api.StartOptions) error {
 	// template environment keys; stay quiet here so each is reported once.
 	_, err = resolveTemplateAndHarnessConfig(withQuietTemplateEnvWarnings(ctx), templateName, opts.HarnessConfig, opts.ProjectPath, projectDir, profileName, settings, inlineCfg)
 	return err
+}
+
+// templateChainFor resolves the template chain for name. A name equal to the
+// operator's settings default_template is an operator value and may be a
+// remote source (config.GetOperatorTemplateChainInProject); any other name
+// (from a request or an agent's records) resolves through
+// config.GetTemplateChainInProject, which never fetches a remote source and
+// accepts an absolute directory only from the broker's own template cache.
+func templateChainFor(name, projectPath string, settings *config.VersionedSettings) ([]*config.Template, error) {
+	if settings != nil && settings.DefaultTemplate != "" && name == settings.DefaultTemplate {
+		return config.GetOperatorTemplateChainInProject(name, projectPath)
+	}
+	return config.GetTemplateChainInProject(name, projectPath)
 }
 
 // plainProjectWorkspaceSource is the directory a plain non-git project's
@@ -4766,6 +4779,14 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 		templateRecord = &api.AgentInfo{Template: provenance.Template, TemplateHash: provenance.TemplateHash}
 	case provErr == nil:
 		templateRecord = agentInfo
+		// agent-info.json is in the agent home, which the agent can write:
+		// its template is used only when it is a template slug, never as a
+		// host directory or a remote source.
+		if agentInfo != nil && agentInfo.Template != "" && !transfer.IsContentHash(agentInfo.Template) && !config.IsTemplateSlug(agentInfo.Template) {
+			// The value is not logged: the agent wrote it.
+			slog.Warn("Ignoring the template recorded in agent-info.json: not a template name", "agent", agentName)
+			templateRecord = &api.AgentInfo{TemplateHash: agentInfo.TemplateHash}
+		}
 	}
 
 	// A template recorded as loaded from a content-addressed cache (a
@@ -4800,7 +4821,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	if hydratedTemplate {
 		err = config.NewTemplateNotFoundError(effectiveTemplate, fmt.Sprintf("template %q was loaded from a content-addressed cache (%s)", effectiveTemplate, templateRecord.TemplateHash))
 	} else {
-		chain, err = config.GetTemplateChainInProject(effectiveTemplate, projectPath)
+		chain, err = templateChainFor(effectiveTemplate, projectPath, vs)
 	}
 	if err != nil {
 		util.Debugf("GetAgent: template chain for %q not found: %v, returning agentCfg only (harness=%q image=%q)",

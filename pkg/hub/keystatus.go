@@ -466,14 +466,13 @@ func LocalKeyStatus(ctx context.Context, k *keyring.Keyring, c *secret.ValueCiph
 
 // CheckKeyringFile applies the keyring-file checks a starting Hub applies
 // to a loaded file beyond the loader's own validation (validateKeyringFile,
-// the same implementation validateKeyringConfig uses, without the session
-// secret, which `scion server keys check` does not have). Errors name no
+// the same implementation validateKeyringConfig uses). Errors name no
 // key material.
 func CheckKeyringFile(k *keyring.Keyring) error {
 	if k == nil || k.Source() != keyring.SourceFile {
 		return errors.New("keyring file: not loaded from a keyring file")
 	}
-	return validateKeyringFile(k, nil)
+	return validateKeyringFile(k)
 }
 
 // handleAdminKeyStatus serves GET /api/v1/admin/keys/status. The route
