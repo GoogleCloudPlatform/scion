@@ -54,8 +54,12 @@ const (
 // stripNeverCarry (the runtime binds the agent's private copy of .git/config),
 // a key that names a command or a hook location is not refused in
 // <commonDir>/config: the copy leaves it out. It is still refused in both
-// config.worktree layers, which are bound raw. The git calls below run with
-// the HostGitArgs pins, so no such key in the real file runs anything. Then the parsed
+// config.worktree layers, which are bound raw. Such a key in the real file
+// runs nothing here: the only git calls the seed makes are config --list and
+// ls-files --stage, with no work tree, output read through a pipe (never a
+// TTY), and no remote. The HostGitArgs pins also turn off hooksPath, fsmonitor
+// and pager; the other keys (editors, aliases, filters, diff drivers, ssh and
+// proxy commands) are inert only because those two commands never reach them. Then the parsed
 // entries of all files are cross-checked against git's own listing
 // (crossCheckAgainstGit), run with GIT_DIR and GIT_COMMON_DIR set explicitly so
 // git never resolves a work-tree gitfile, and with no global or system config.

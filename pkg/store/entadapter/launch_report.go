@@ -446,6 +446,15 @@ func (s *AgentStore) applyLaunchReportPreRunning(ctx context.Context, ltx *launc
 			SetLaunchLastReportAt(now).
 			SetStateVersion(current.StateVersion + 1)
 		applySucceededAgentInfo(upd, current, r)
+		// A succeeded report's message is a notice about the start (for
+		// example the repository git config keys left out of the agent's
+		// private copy); it becomes the agent's status message. Only here,
+		// on the first running write: a succeeded report that arrives once
+		// the agent already reports its own status (running or
+		// running_observed) leaves that message alone.
+		if r.Message != "" && r.Message != current.Message {
+			upd.SetMessage(r.Message)
+		}
 		withStartEndClearsMemory(upd, current)
 		if ownerToSet != "" {
 			upd.SetLaunchOwner(ownerToSet)
@@ -617,12 +626,6 @@ func failedAfterRunningObservedApplies(current *ent.Agent, r store.LaunchReport,
 // (no AppliedConfig, as on the sync path) or not valid JSON keeps it
 // untouched.
 func applySucceededAgentInfo(upd *ent.AgentUpdateOne, current *ent.Agent, r store.LaunchReport) {
-	// A succeeded report's message is a notice about the start (for example
-	// the repository git config keys left out of the agent's private copy);
-	// it becomes the agent's status message.
-	if r.Message != "" && r.Message != current.Message {
-		upd.SetMessage(r.Message)
-	}
 	a := store.Agent{
 		Template:              current.Template,
 		Runtime:               current.Runtime,

@@ -52,3 +52,23 @@ func TestReport_SucceededMessageBecomesAgentMessage(t *testing.T) {
 	assert.Equal(t, "running", updated2.Phase)
 	assert.Equal(t, before, updated2.Message)
 }
+
+// A succeeded report that arrives after the agent already reports running (a late or resent report) does not
+// replace the agent's own status message with its notice.
+func TestReport_LateSucceededDoesNotReplaceRunningMessage(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a, launchID := beginTestLaunch(t, ctx, s, projectID, "notice-late")
+	uid, err := parseUUID(a.ID)
+	require.NoError(t, err)
+	_, err = s.client.Agent.UpdateOneID(uid).SetPhase("running").SetMessage("working on the task").Save(ctx)
+	require.NoError(t, err)
+
+	_, updated, err := s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, store.LaunchReport{
+		LaunchID: launchID, InstanceID: "i1", State: store.LaunchReportStateSucceeded,
+		Message: "agent git config: left out core.editor from the agent's copy of .git/config",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "running", updated.Phase)
+	assert.Equal(t, "working on the task", updated.Message, "a succeeded report on a running agent must not replace its status message")
+}
