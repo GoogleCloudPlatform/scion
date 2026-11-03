@@ -255,7 +255,7 @@ func hubEndpointFromProjectSettings(projectPath string) string {
 				"path", ignored, "settings_dir", settingsDir)
 		}
 	}
-	projectSettings, err := config.LoadSettingsFromDir(settingsDir)
+	projectSettings, err := config.LoadProjectSettingsFromDir(settingsDir)
 	if err != nil {
 		return ""
 	}

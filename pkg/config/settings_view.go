@@ -76,10 +76,10 @@ func loadSettingsView(projectPath string, ignoreEnvProjectID bool) (*Settings, e
 // the same layer conversion as the settings loaders (a legacy-format file
 // becomes the v1 shape), so the view's fields mean what they mean in
 // LoadSettings. A missing file is an empty view.
-func loadSingleDirSettingsView(dir string) (*Settings, error) {
+func loadSingleDirSettingsView(dir string, projectTier bool) (*Settings, error) {
 	k := koanf.New(".")
 	legacy := &legacyLayerState{}
-	if _, err := loadSettingsFileConverting(k, dir, legacy); err != nil {
+	if _, err := loadSettingsFileConverting(k, dir, legacy, projectTier); err != nil {
 		return nil, err
 	}
 	res := &versionedLoadResult{

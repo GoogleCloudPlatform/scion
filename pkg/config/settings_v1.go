@@ -3561,7 +3561,9 @@ func loadVersionedLayers(projectPath string, opts versionedLoadOptions) (*versio
 	// coming from label and the file's path.
 	fileLayer := func(label, dir string) (bool, error) {
 		touched = touched[:0]
-		migrated, err := loadSettingsFileConverting(k, dir, legacy)
+		// Only the project layer gates its settings file against a
+		// symbolic link (loadSettingsFileConverting's projectTier).
+		migrated, err := loadSettingsFileConverting(k, dir, legacy, label == "project")
 		if err == nil {
 			setSource(label+" "+GetSettingsPath(dir), touched)
 		}

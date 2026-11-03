@@ -995,7 +995,9 @@ func (m *AgentManager) finishProvision(opts api.StartOptions, agentDir, agentHom
 		}
 		cfgData, marshalErr := json.MarshalIndent(persisted, "", "  ")
 		if marshalErr == nil {
-			_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), cfgData, 0644)
+			if err := WriteAgentConfigFile(agentDir, cfgData); err != nil {
+				slog.Warn("agent config not updated with the harness auth override", "agent_dir", agentDir, "error", err)
+			}
 		}
 	}
 	return nil
@@ -1849,14 +1851,17 @@ func provisionAgentStateDir(ctx context.Context, opts api.StartOptions) (string,
 }
 
 // agentStateProvisioned reports whether agentDir holds a provisioned agent:
-// the directory exists and has a scion-agent.json. A directory that cannot be
+// the directory exists and has a scion-agent config entry. A directory that cannot be
 // read counts as provisioned, so a caller does not treat an unreadable agent
 // as one to provision again.
 func agentStateProvisioned(agentDir string) bool {
 	if _, err := os.Stat(agentDir); err != nil {
 		return !os.IsNotExist(err)
 	}
-	return config.GetScionAgentConfigPath(agentDir) != ""
+	// A config entry that is refused (a link, a hard link, not a regular
+	// file) counts as provisioned, so it is never provisioned over; the start
+	// then fails on the refused read.
+	return config.AgentConfigEntryExists(agentDir)
 }
 
 // CheckAgentDirContained is the exported form of checkAgentDirContained, for
@@ -2880,7 +2885,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if err != nil {
 		return "", "", nil, fmt.Errorf("failed to marshal agent config: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), agentCfgData, 0644); err != nil {
+	if err := WriteAgentConfigFile(agentDir, agentCfgData); err != nil {
 		return "", "", nil, fmt.Errorf("failed to write agent config: %w", err)
 	}
 	// Record each image input at its own tier (ptone/scion#1799), so Start
@@ -3753,8 +3758,14 @@ func handleAgentDirWithoutConfigGuarded(g *agentFilesGuard, agentName, agentDir,
 	if _, err := os.Stat(agentDir); err != nil {
 		return nil
 	}
-	if config.GetScionAgentConfigPath(agentDir) != "" {
+	switch config.AgentConfigEntryState(agentDir) {
+	case config.AgentConfigRegular:
 		return nil
+	case config.AgentConfigRefused:
+		// A config entry that is a symbolic link (dangling or not), a hard
+		// link or not a regular file is present, not absent: nothing is
+		// written, removed or re-provisioned because of it.
+		return fmt.Errorf("%w: agent %q state directory kept: its scion-agent config file is not a plain regular file; replace it with a regular file, or delete and re-create the agent", config.ErrAgentStateConflict, agentName)
 	}
 
 	homes := []string{agentHome}
@@ -3788,7 +3799,7 @@ func handleAgentDirWithoutConfigGuarded(g *agentFilesGuard, agentName, agentDir,
 		if err != nil {
 			return fmt.Errorf("failed to marshal agent config: %w", err)
 		}
-		if err := os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), data, 0644); err != nil {
+		if err := WriteAgentConfigFile(agentDir, data); err != nil {
 			return fmt.Errorf("failed to write agent config: %w", err)
 		}
 		// The dir is live again: a marker from an earlier keep no longer

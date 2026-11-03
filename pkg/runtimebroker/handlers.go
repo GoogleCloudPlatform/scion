@@ -4359,7 +4359,9 @@ func readAgentScionConfig(agentName, projectPath string, sharedWorkspace bool) (
 		return loadedAgentConfig{stage: "resolve"}, err
 	}
 	cfgPath := filepath.Join(config.GetAgentDir(projectDir, agentName, sharedWorkspace), "scion-agent.json")
-	data, err := os.ReadFile(cfgPath)
+	// Read without following a symbolic link (a plain single-link regular
+	// file only); the write back goes through agent.WriteAgentConfigFile.
+	data, err := agent.ReadAgentConfigFile(filepath.Dir(cfgPath))
 	if err != nil {
 		return loadedAgentConfig{projectDir: projectDir, path: cfgPath, stage: "read"}, err
 	}
@@ -4431,7 +4433,7 @@ func (s *Server) applyInlineConfigUpdate(ctx context.Context, agentName, project
 		s.agentLifecycleLog.Warn("applyInlineConfigUpdate: failed to marshal updated config", "agent", agentName, "error", err)
 		return
 	}
-	if err := os.WriteFile(cfgPath, updated, 0644); err != nil {
+	if err := agent.WriteAgentConfigFile(filepath.Dir(cfgPath), updated); err != nil {
 		s.agentLifecycleLog.Warn("applyInlineConfigUpdate: failed to write scion-agent.json", "agent", agentName, "error", err)
 		return
 	}

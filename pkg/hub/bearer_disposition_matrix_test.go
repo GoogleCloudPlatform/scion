@@ -688,6 +688,13 @@ func TestBearerDispositionMatrix_CatalogEntryPoints(t *testing.T) {
 			if rec.Code == http.StatusNotFound {
 				t.Errorf("%s: the admitting token got 404, so the seeded target is not reached: %s", label, rec.Body.String())
 			}
+			// A row listed in bearerMatrixPositivePinned gets exactly that
+			// status and error code from the admitting token.
+			if want, ok := bearerMatrixPositivePinned[e.key()]; ok {
+				if rec.Code != want.Status || bearerMatrixErrorCode(rec) != want.Code {
+					t.Errorf("%s: the admitting token got %d %q, want %d %q (%s): %s", label, rec.Code, bearerMatrixErrorCode(rec), want.Status, want.Code, want.Reason, rec.Body.String())
+				}
+			}
 			// A positive 5xx is expected only on the rows listed in
 			// bearerMatrixPositiveServerErrors, with exactly that status,
 			// and never carries an authorization or credential error code.
@@ -749,6 +756,23 @@ type bearerMatrixPositiveServerError struct {
 	Reason string
 }
 
+// bearerMatrixPositivePinnedResult is the exact status and error code an
+// admit row's admitting token gets, and why.
+type bearerMatrixPositivePinnedResult struct {
+	Status int
+	Code   string
+	Reason string
+}
+
+// bearerMatrixPositivePinned lists admit rows whose admitting token gets a
+// fixed client error after its authorization check passes.
+var bearerMatrixPositivePinned = map[liveInventoryKey]bearerMatrixPositivePinnedResult{
+	{"template.update", http.MethodPut, "/api/v1/templates/{id}"}: {
+		http.StatusBadRequest, "validation_error", "the empty update body has an empty name, refused before the store write"},
+	{"harnessconfig.update", http.MethodPut, "/api/v1/harness-configs/{id}"}: {
+		http.StatusBadRequest, "validation_error", "the empty update body has an empty name, refused before the store write"},
+}
+
 // bearerMatrixPositiveServerErrors lists every admit row whose admitting
 // token gets a 5xx in the test server, with the status and the reason the
 // handler fails after its authorization check.
@@ -761,10 +785,6 @@ var bearerMatrixPositiveServerErrors = map[liveInventoryKey]bearerMatrixPositive
 		http.StatusServiceUnavailable, "the test server configures no agent dispatcher"},
 	{"agent.lifecycle.exec", http.MethodPost, "/api/v1/projects/{projectId}/agents/{id}/exec"}: {
 		http.StatusServiceUnavailable, "the test server configures no agent dispatcher"},
-	{"template.update", http.MethodPut, "/api/v1/templates/{id}"}: {
-		http.StatusInternalServerError, "the empty update body fails at the store write"},
-	{"harnessconfig.update", http.MethodPut, "/api/v1/harness-configs/{id}"}: {
-		http.StatusInternalServerError, "the empty update body fails at the store write"},
 	{"project.messagelogs.read", http.MethodGet, "/api/v1/projects/{id}/message-logs"}: {
 		http.StatusNotImplemented, "the test server configures no log query service"},
 	{"project.metrics.read", http.MethodGet, "/api/v1/projects/{id}/metrics"}: {

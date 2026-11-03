@@ -2653,7 +2653,11 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	// Read this project's own settings in isolation (without global merge) to
 	// determine whether hub.projectId was explicitly set for THIS project, rather
 	// than inherited from global settings via the koanf merge chain.
-	localSettings, _ := config.LoadSettingsFromDir(resolvedPath)
+	loadOwn := config.LoadProjectSettingsFromDir
+	if isGlobal {
+		loadOwn = config.LoadSettingsFromDir
+	}
+	localSettings, _ := loadOwn(resolvedPath)
 	localHubProjectID := ""
 	if localSettings != nil {
 		localHubProjectID = localSettings.GetHubProjectID()

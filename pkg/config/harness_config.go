@@ -22,11 +22,13 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"gopkg.in/yaml.v3"
 )
@@ -117,7 +119,15 @@ const (
 //     global directories (then the synthetic "generic" entry).
 //
 // The returned directory's Source records which branch resolved it.
+//
+// A non-empty name must be exactly one path component (checkLookupName); any
+// other name is refused with ErrInvalidResourceName. The empty name loads the
+// hydrated copy on that branch (it is loaded whatever name resolves) and
+// finds nothing on the other.
 func ResolveHarnessConfigDir(hydratedPath, name, projectPath string, templatePaths ...string) (*HarnessConfigDir, error) {
+	if err := checkLookupName(name); err != nil {
+		return nil, err
+	}
 	if hydratedPath != "" {
 		hcDir, err := LoadHarnessConfigDir(hydratedPath)
 		if err != nil {
@@ -295,7 +305,19 @@ func ParseHarnessConfigYAML(data []byte) (HarnessConfigEntry, error) {
 // Optional templatePaths specify template directories whose harness-configs/
 // subdirectories are checked first (highest precedence), per the harness-agnostic
 // template design (§3.4).
+//
+// A non-empty name must be exactly one path component (checkLookupName); any
+// other name is refused with ErrInvalidResourceName before anything is looked
+// up. The empty name finds nothing (no tier holds it).
+// Each tier's directory is opened from a trusted root (the project's .scion
+// directory, the global directory, or for a template elsewhere the
+// template's parent; templateTierRoot) and walked, with its files read,
+// without following a symbolic link (loadHarnessConfigTier).
 func FindHarnessConfigDir(name string, projectPath string, templatePaths ...string) (*HarnessConfigDir, error) {
+	if err := checkLookupName(name); err != nil {
+		return nil, err
+	}
+
 	// Track which directories were searched so the error message is actionable.
 	var searched []string
 
@@ -303,13 +325,11 @@ func FindHarnessConfigDir(name string, projectPath string, templatePaths ...stri
 	// If the directory exists but is invalid (e.g. missing config.yaml),
 	// fall through to project/global rather than returning an error.
 	for _, tplPath := range templatePaths {
-		tplHarnessConfigDir := filepath.Join(tplPath, harnessConfigsDirName, name)
-		searched = append(searched, tplHarnessConfigDir)
-		if info, err := os.Stat(tplHarnessConfigDir); err == nil && info.IsDir() {
-			if hcDir, err := LoadHarnessConfigDir(tplHarnessConfigDir); err == nil {
-				hcDir.Source = HarnessConfigSourceTemplateBundled
-				return hcDir, nil
-			}
+		searched = append(searched, filepath.Join(tplPath, harnessConfigsDirName, name))
+		root, rel := templateTierRoot(tplPath, projectPath)
+		if hcDir := loadHarnessConfigTier(root, rel, name, "template"); hcDir != nil {
+			hcDir.Source = HarnessConfigSourceTemplateBundled
+			return hcDir, nil
 		}
 	}
 
@@ -317,26 +337,20 @@ func FindHarnessConfigDir(name string, projectPath string, templatePaths ...stri
 	// entry has no project tier: its own harness-configs/ is workspace
 	// content.
 	if projectPath != "" && !isHubWorkspaceRootWithoutScion(projectPath) {
-		projectHarnessConfigDir := filepath.Join(projectPath, harnessConfigsDirName, name)
-		searched = append(searched, projectHarnessConfigDir)
-		if info, err := os.Stat(projectHarnessConfigDir); err == nil && info.IsDir() {
-			if hcDir, err := LoadHarnessConfigDir(projectHarnessConfigDir); err == nil {
-				hcDir.Source = HarnessConfigSourceBrokerLocal
-				return hcDir, nil
-			}
+		searched = append(searched, filepath.Join(projectPath, harnessConfigsDirName, name))
+		if hcDir := loadHarnessConfigTier(projectPath, "", name, "project"); hcDir != nil {
+			hcDir.Source = HarnessConfigSourceBrokerLocal
+			return hcDir, nil
 		}
 	}
 
 	// Check global directory
 	globalDir, err := GetGlobalDir()
 	if err == nil {
-		globalHarnessConfigDir := filepath.Join(globalDir, harnessConfigsDirName, name)
-		searched = append(searched, globalHarnessConfigDir)
-		if info, err := os.Stat(globalHarnessConfigDir); err == nil && info.IsDir() {
-			if hcDir, err := LoadHarnessConfigDir(globalHarnessConfigDir); err == nil {
-				hcDir.Source = HarnessConfigSourceBrokerLocal
-				return hcDir, nil
-			}
+		searched = append(searched, filepath.Join(globalDir, harnessConfigsDirName, name))
+		if hcDir := loadHarnessConfigTier(globalDir, "", name, "global"); hcDir != nil {
+			hcDir.Source = HarnessConfigSourceBrokerLocal
+			return hcDir, nil
 		}
 	}
 
@@ -818,4 +832,104 @@ func SeedHarnessConfigFromFS(targetDir string, embedsFS embed.FS, basePath, conf
 
 		return seedHarnessConfigFile(embedsFS, basePath, relPath, targetPath, force)
 	})
+}
+
+// maxHarnessConfigFileBytes bounds a file read from an on-disk
+// harness-config directory by loadHarnessConfigTier (config.yaml, the agent
+// plugins sidecar).
+const maxHarnessConfigFileBytes = 4 << 20
+
+// templateTierRoot returns the trusted root and the relative path below it
+// from which FindHarnessConfigDir walks the template directory tplPath: the
+// project's template root (the resolved .scion directory) or the global
+// directory when tplPath lies below one of them, so neither the templates
+// directory nor the template directory may be a symbolic link; otherwise
+// the template directory's parent, so the template directory itself may
+// not be one (as Template.openDir opens a template).
+func templateTierRoot(tplPath, projectPath string) (root, rel string) {
+	absTpl, err := filepath.Abs(tplPath)
+	if err != nil {
+		return filepath.Dir(tplPath), filepath.Base(tplPath)
+	}
+	var roots []string
+	if projectPath != "" {
+		if r := projectTemplatesRoot(projectPath); r != "" {
+			roots = append(roots, r)
+		}
+	}
+	if g, err := GetGlobalDir(); err == nil {
+		roots = append(roots, g)
+	}
+	for _, r := range roots {
+		absRoot, err := filepath.Abs(r)
+		if err != nil {
+			continue
+		}
+		if rel, err := filepath.Rel(absRoot, absTpl); err == nil && filepath.IsLocal(rel) {
+			return absRoot, rel
+		}
+	}
+	return filepath.Dir(absTpl), filepath.Base(absTpl)
+}
+
+// loadHarnessConfigTier loads the harness-config name from one tier of
+// FindHarnessConfigDir: the directory <rel>/harness-configs/<name> below
+// root (rel may be empty). Every component below root is opened without
+// following a symbolic link (agenthome.OpenBelow), and config.yaml and the
+// sidecar are read through it without following a link at the file either
+// (regular, single-link files only). It returns nil when the tier has no
+// usable directory: missing, invalid, or refused because of a
+// link, which is logged with the tier only, never a path or the name.
+// name must already have passed checkLookupName; the empty name finds nothing.
+func loadHarnessConfigTier(root, rel, name, tier string) *HarnessConfigDir {
+	if root == "" || name == "" {
+		return nil
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return nil
+	}
+	below := harnessConfigsDirName + "/" + name
+	if rel != "" {
+		below = filepath.ToSlash(rel) + "/" + below
+	}
+	home, err := agenthome.OpenBelow(absRoot, below)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			warnHarnessConfigTierRefused(tier, err)
+		}
+		return nil
+	}
+	defer func() { _ = home.Close() }()
+	var refused error
+	read := func(file string) ([]byte, error) {
+		data, err := home.ReadFile(file, maxHarnessConfigFileBytes)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) && refused == nil {
+			refused = err
+		}
+		return data, err
+	}
+	hcDir, err := LoadHarnessConfigFromFiles(name, filepath.Join(absRoot, filepath.FromSlash(below)), read)
+	if refused != nil {
+		warnHarnessConfigTierRefused(tier, refused)
+		return nil
+	}
+	if err != nil {
+		return nil
+	}
+	return hcDir
+}
+
+// warnHarnessConfigTierRefused logs that a harness-config directory in tier
+// was skipped because a component or file on its path is a symbolic link or
+// not a plain file. The message names the tier only.
+func warnHarnessConfigTierRefused(tier string, err error) {
+	reason := "a file in the directory is not a plain regular file"
+	switch {
+	case errors.Is(err, agenthome.ErrLinkComponent):
+		reason = "a directory on its path is a symbolic link"
+	case errors.Is(err, agenthome.ErrNotDirectory):
+		reason = "a component of its path is not a directory"
+	}
+	slog.Warn("harness-config directory skipped", "tier", tier, "reason", reason)
 }

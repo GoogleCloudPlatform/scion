@@ -1617,6 +1617,11 @@ func (s *Server) createAgentInProject(
 		ValidationError(w, templateRefRefusal, nil)
 		return
 	}
+	// Likewise the request's harness-config names: one path component each.
+	if !createRequestHarnessConfigAllowed(&req) {
+		ValidationError(w, harnessConfigNameRefusal, nil)
+		return
+	}
 
 	// Verify project exists and get its configuration
 	project, err := s.store.GetProject(ctx, projectID)
