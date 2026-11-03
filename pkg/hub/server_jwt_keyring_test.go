@@ -354,8 +354,8 @@ func (f *p3Fixture) aliasValue(t *testing.T, name string) []byte {
 }
 
 // config is a replica's ServerConfig: the shared counting store and
-// backend, the keyring, and the legacy entry as SharedSigningSecret (the
-// other purposes still use it).
+// backend and the keyring. Only the legacy adapter (legacy mode) carries
+// the legacy secret as SharedSigningSecret; a keyring file needs none.
 func (f *p3Fixture) config(k *keyring.Keyring, configured bool) ServerConfig {
 	cfg := testServerConfig()
 	cfg.HubID = p3HubID
@@ -363,8 +363,10 @@ func (f *p3Fixture) config(k *keyring.Keyring, configured bool) ServerConfig {
 	cfg.Keyring = k
 	cfg.KeyringConfigured = configured
 	cfg.KeyringNow = f.clk.now
-	if legacy, ok := k.Signing().LegacySecret(); ok {
-		cfg.SharedSigningSecret = legacy
+	if k != nil && k.Source() == keyring.SourceLegacy {
+		if legacy, ok := k.Signing().LegacySecret(); ok {
+			cfg.SharedSigningSecret = legacy
+		}
 	}
 	return cfg
 }
@@ -385,11 +387,11 @@ func (f *p3Fixture) start(t *testing.T, cfg ServerConfig) (*Server, error) {
 func allowVersionedJWTRings(t *testing.T) {
 	t.Helper()
 	prev := keyringReleaseCheck
-	keyringReleaseCheck = func(k *keyring.Keyring, cfg *ServerConfig) error {
+	keyringReleaseCheck = func(k *keyring.Keyring) error {
 		if k.Signing().Emit() == keyring.EmitVersioned {
 			return nil
 		}
-		return prev(k, cfg)
+		return prev(k)
 	}
 	t.Cleanup(func() { keyringReleaseCheck = prev })
 }
@@ -470,7 +472,7 @@ func TestP3_ManagedStartupRefusesWithoutAliasReads(t *testing.T) {
 		{"active generation absent (keyring only)", func(f *p3Fixture) ServerConfig { return f.config(&keyring.Keyring{}, false) }},
 		// (c) incomplete required signing material.
 		{"no legacy entry", func(f *p3Fixture) ServerConfig { return f.config(noLegacy, true) }},
-		{"shared secret not the legacy entry", func(f *p3Fixture) ServerConfig {
+		{"shared secret set in keyring mode", func(f *p3Fixture) ServerConfig {
 			cfg := f.config(good, true)
 			cfg.SharedSigningSecret = p3StaleAliasSecret
 			return cfg
@@ -686,7 +688,7 @@ func verifiesOnlyUnder(t *testing.T, tok, name string) []string {
 	parsed, err := jwt.ParseSigned(tok, []jose.SignatureAlgorithm{jose.HS256})
 	require.NoError(t, err)
 	var out []string
-	for id, s := range map[string]string{"legacy": jkLegacySecret, "gen2": jkGen2Secret} {
+	for id, s := range map[string]string{"legacy": jkLegacySecret, "gen1": jkGen1Secret, "gen2": jkGen2Secret} {
 		var c jwt.Claims
 		if parsed.Claims(deriveSharedSigningKey(s, name), &c) == nil {
 			out = append(out, id)

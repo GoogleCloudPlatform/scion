@@ -92,16 +92,6 @@ func serverSigningRingFromFile() *keyring.SigningRing {
 	return nil
 }
 
-// keyringLegacySecret returns the keyring file's "legacy" signing entry,
-// which every purpose not yet on the signing ring still uses in this
-// release, or false without a keyring file.
-func keyringLegacySecret() (string, bool) {
-	if k := serverKeyringFromFile(); k != nil {
-		return k.Signing().LegacySecret()
-	}
-	return "", false
-}
-
 // legacySessionSecretConfigured reports whether a legacy session secret
 // input is present: --session-secret, or either env name (read by
 // scrubServerSecretEnv before it unset them). It reads no keyring.

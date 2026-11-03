@@ -295,11 +295,14 @@ func TestNoDirectScalarCipherCallers(t *testing.T) {
 //     old signing generation can be retired.
 //   - consumerReleaseGate: the release refusal that requires the "legacy"
 //     entry until task T10 lifts it.
+//   - consumerRingGuard: reached in managed ring mode only to refuse a
+//     value (an emptiness check); it reads no key.
 const (
 	consumerOnRing          = "on-ring"
 	consumerLegacyOnly      = "legacy-only"
 	consumerRingLegacyEntry = "ring-mode legacy-entry reader"
 	consumerReleaseGate     = "release gate"
+	consumerRingGuard       = "ring-mode guard"
 )
 
 // legacyEntryNames are the names the census tracks: the shared signing
@@ -311,6 +314,8 @@ var legacyEntryNames = []string{
 	"resolveSessionSecret",
 	"sessionSecretValue",
 	"keyringLegacySecret",
+	"hostedHALegacySecret",
+	"testModeSharedSecretSet",
 	"LegacySecret",
 	"ensureSigningKey",
 	"deriveSharedSigningKey",
@@ -332,50 +337,48 @@ type legacyEntryConsumer struct {
 var legacyEntryConsumers = map[string]legacyEntryConsumer{
 	// The keyring "legacy" entry and the cmd resolvers that return it in
 	// ring mode: the root of every cmd ring-mode dependence below.
-	"LegacySecret@cmd/server_keyring.go:keyringLegacySecret": {1, consumerRingLegacyEntry,
-		"returns the keyring file's legacy signing entry to resolveSessionSecret and sessionSecretValue"},
-	"keyringLegacySecret@cmd/server_foreground.go:resolveSessionSecret": {1, consumerRingLegacyEntry,
-		"with a keyring file the session secret is the legacy entry; every caller below reads it"},
-	"keyringLegacySecret@cmd/server_foreground.go:sessionSecretValue": {1, consumerRingLegacyEntry,
-		"with a keyring file the session secret value is the legacy entry"},
 
 	// Startup configuration and validation.
-	"resolveSessionSecret@cmd/server_foreground.go:buildHubServerConfig": {2, consumerRingLegacyEntry,
-		"sets hub.ServerConfig.SharedSigningSecret to the legacy entry (:2899); the second reference feeds webSessionKeySource, which ignores it with a keyring file (:2902)"},
-	"SharedSigningSecret@pkg/hub/keyring.go:releaseKeyringCheck": {1, consumerReleaseGate,
-		"release refusal behind the keyringReleaseCheck seam: at startup SharedSigningSecret must equal the legacy entry until the release limits are lifted"},
-	"LegacySecret@pkg/hub/keyring.go:releaseKeyringCheck": {1, consumerReleaseGate,
-		"release refusal behind the keyringReleaseCheck seam: reads the legacy entry for the SharedSigningSecret comparison until the release limits are lifted"},
+	"resolveSessionSecret@cmd/server_foreground.go:buildHubServerConfig": {2, consumerLegacyOnly,
+		"resolveSessionSecret is \"\" with a keyring file, so SharedSigningSecret is empty in ring mode (validateKeyringConfig refuses any other value); webSessionKeySource ignores the second reference with a keyring file"},
 	"LegacySecret@pkg/keyring/load.go:(*Keyring).CheckSessionPilot": {1, consumerReleaseGate,
 		"release refusal: requires the legacy entry until the release limits are lifted"},
 	"DeriveLegacyEncryptionKey@pkg/keyring/load.go:(*Keyring).CheckSessionPilot": {1, consumerReleaseGate,
 		"release refusal: active encryption key must equal the key derived from the legacy entry until the release limits are lifted"},
-	"resolveSessionSecret@cmd/server_foreground.go:validateHostedBasic": {1, consumerRingLegacyEntry,
-		"hosted warning keyed on a non-empty session secret; without a legacy entry it would warn in ring mode"},
-	"resolveSessionSecret@cmd/server_foreground.go:validateHostedHAPreflight": {1, consumerRingLegacyEntry,
-		"hosted HA preflight refuses an empty session secret; without a legacy entry it would refuse ring mode"},
-	"SharedSigningSecret@cmd/server_foreground.go:initHubServer": {1, consumerRingLegacyEntry,
-		"hosted warning keyed on an empty SharedSigningSecret"},
+	"SharedSigningSecret@pkg/hub/keyring.go:validateKeyringConfig": {1, consumerRingGuard,
+		"keyring mode refuses a non-empty SharedSigningSecret (an emptiness check; no secret is compared)"},
+	"resolveSessionSecret@cmd/server_foreground.go:hostedHALegacySessionSecret": {1, consumerLegacyOnly,
+		"hosted HA present-key check in legacy mode only; with a keyring file the check asks the signing ring"},
+	"SharedSigningSecret@cmd/server_test_admin_gate.go:sharedSigningSecretSet": {1, consumerLegacyOnly,
+		"G7 legacy-mode reader; testModeInputsFor calls it only when no keyring is configured"},
+	"hostedHALegacySecret@cmd/server_foreground.go:hostedHASigningKeyPresent": {1, consumerLegacyOnly,
+		"called only after the keyring-mode branch has returned (legacy mode)"},
+	"testModeSharedSecretSet@cmd/server_test_admin_gate.go:testModeInputsFor": {1, consumerLegacyOnly,
+		"called only when no keyring is configured (KeyringSigning false)"},
+	"resolveSessionSecret@cmd/server_foreground.go:validateHostedBasic": {1, consumerLegacyOnly,
+		"ring mode returns before the session secret is read"},
+	"SharedSigningSecret@cmd/server_foreground.go:initHubServer": {1, consumerLegacyOnly,
+		"hosted warning; ring mode (hubCfg.Keyring set) short-circuits before the read"},
 
 	// Relay-peer auth: the signer comes from the ring (SigningRing), but the
 	// PeerSecret inequality check compares against the legacy entry only
 	// (Obl 6 wants every generation).
-	"resolveSessionSecret@cmd/server_conduit.go:conduitPeerAuthOptions": {1, consumerRingLegacyEntry,
-		"ConduitPeerAuthOptions.SharedSecret = legacy entry; relay.NewConduitPeerAuth compares PeerSecret against it only (conduit_peerauth.go:149)"},
-	"sessionSecretValue@cmd/server_conduit.go:externalPeerAuthOptions": {1, consumerRingLegacyEntry,
-		"external relay mode: SharedSecret = legacy entry for the PeerSecret inequality check"},
-	"sessionSecretValue@cmd/server_foreground.go:validateServerPreflight": {1, consumerRingLegacyEntry,
-		"validateConduitPeerSecret compares the peer secret against the legacy entry only (server_conduit.go:483)"},
+	"resolveSessionSecret@cmd/server_conduit.go:conduitPeerAuthOptions": {1, consumerLegacyOnly,
+		"\"\" with a keyring file: relay-peer keys come from SigningRing"},
+	"sessionSecretValue@cmd/server_conduit.go:externalPeerAuthOptions": {1, consumerLegacyOnly,
+		"\"\" with a keyring file: NewConduitPeerAuth checks PeerSecret against every ring generation (CheckPeerSecretNotInRing)"},
+	"sessionSecretValue@cmd/server_foreground.go:validateServerPreflight": {1, consumerLegacyOnly,
+		"\"\" with a keyring file: validateConduitPeerSecret compares the peer secret with every ring generation"},
 
 	// Test admin tier G7: refuses a non-empty SharedSigningSecret, which in
 	// ring mode is the legacy entry (signing_keys_hub_local also refuses the
 	// keyring source; T7 keeps the refusal without the legacy entry).
-	"SharedSigningSecret@cmd/server_test_admin_gate.go:testModeInputsFor": {1, consumerRingLegacyEntry,
-		"G7 input: SharedSigningSecret presence"},
-	"SharedSigningSecret@cmd/server_test_admin_gate.go:resolveTestMode": {1, consumerRingLegacyEntry,
-		"G7 refusal on SharedSigningSecret presence (testModeInputs bool)"},
-	"SharedSigningSecret@pkg/hub/test_admin_gate.go:validateTestAdminGateConfig": {1, consumerRingLegacyEntry,
-		"G7 re-check at construction on SharedSigningSecret presence"},
+	"SharedSigningSecret@cmd/server_test_admin_gate.go:testModeInputsFor": {1, consumerLegacyOnly,
+		"G7 input set only when no keyring is configured (KeyringSigning refuses first)"},
+	"SharedSigningSecret@cmd/server_test_admin_gate.go:resolveTestMode": {1, consumerLegacyOnly,
+		"G7 refusal on the shared secret, reached only when KeyringSigning is false"},
+	"SharedSigningSecret@pkg/hub/test_admin_gate.go:validateTestAdminGateConfig": {1, consumerLegacyOnly,
+		"G7 re-check; managedSigning refuses first in keyring mode"},
 
 	// Session cookies: on the ring in ring mode (WebServerConfig.SigningRing);
 	// SessionSecret is used only when the ring is nil (web.go:733-745).
@@ -476,7 +479,7 @@ func TestRingModeLegacyEntryCensus(t *testing.T) {
 	for _, v := range legacyEntryCensusViolations(legacyEntrySites(t), legacyEntryConsumers) {
 		t.Error(v)
 	}
-	valid := map[string]bool{consumerOnRing: true, consumerLegacyOnly: true, consumerRingLegacyEntry: true, consumerReleaseGate: true}
+	valid := map[string]bool{consumerOnRing: true, consumerLegacyOnly: true, consumerRingLegacyEntry: true, consumerReleaseGate: true, consumerRingGuard: true}
 	for key, c := range legacyEntryConsumers {
 		if !valid[c.class] || c.why == "" || c.refs < 1 {
 			t.Errorf("%s: class %q, refs %d, reason %q: want a known class, refs >= 1 and a reason", key, c.class, c.refs, c.why)
