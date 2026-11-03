@@ -17,7 +17,6 @@
 package hub
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -95,16 +94,6 @@ func TestEffectiveFileGCPIdentity(t *testing.T) {
 
 	got = effectiveFileGCPIdentity(nil, merged)
 	require.Equal(t, "assign", got.DefaultGCPIdentityMode)
-}
-
-// putWarnings returns the warnings[] of a settings PUT response.
-func putWarnings(t *testing.T, rr *httptest.ResponseRecorder) []string {
-	t.Helper()
-	var body struct {
-		Warnings []string `json:"warnings"`
-	}
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &body))
-	return body.Warnings
 }
 
 // TestPutServerConfigFile_HubDefaultGCPIdentity_PinWarning: a save that is
