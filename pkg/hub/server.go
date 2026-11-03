@@ -2442,6 +2442,10 @@ type Server struct {
 	// startAsyncStartGateRefresher, taken (and cleared) by
 	// stopAsyncStartGateRefresher. Guarded by mu.
 	asyncStartGateRefresherStop *asyncStartGateRefresherStop
+	// asyncStartGateRefresherStopped is set by stopAsyncStartGateRefresher;
+	// a later startAsyncStartGateRefresher then starts nothing (cleanup
+	// racing startup). Guarded by mu.
+	asyncStartGateRefresherStopped bool
 
 	// onListening runs once Start has bound the hub API listener
 	// (SetOnListening; guarded by mu).

@@ -413,6 +413,64 @@ func TestAsyncStartGate_RefresherStopsOnCancel(t *testing.T) {
 	assert.Equal(t, reads, st.reads.Load(), "no read after the loop exited")
 }
 
+// TestAsyncStartGate_RecoveryAfterLoggedFailureIsLogged pins that once a
+// failed read has been logged, the return to the last logged answer is
+// logged again (once), so the log never ends on "disabled" while the gate
+// is enabled.
+func TestAsyncStartGate_RecoveryAfterLoggedFailureIsLogged(t *testing.T) {
+	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	advance := fakeAsyncStartGateClock(t, now)
+	good := []store.HubInstance{hubRow(t, "a", now, time.Second, false, api.HubInstanceFeatureAsyncStartV1)}
+	h := &countingHandler{substr: "async start"}
+	st := &hubInstanceListStore{now: now, rows: good}
+	srv := &Server{store: st, agentLifecycleLog: slog.New(h)}
+	setAsyncStartExperiment(t, srv, true)
+	ctx := context.Background()
+
+	srv.asyncStartGateRefreshTick(ctx)
+	warns, infos := h.counts()
+	require.Equal(t, 0, warns)
+	require.Equal(t, 1, infos, "enabled is logged")
+
+	st.set(nil, errors.New("db down"))
+	advance(asyncStartGateRefreshInterval)
+	srv.asyncStartGateRefreshTick(ctx)
+	warns, infos = h.counts()
+	require.Equal(t, 1, warns, "the failed read is logged")
+	require.Equal(t, 1, infos)
+
+	st.set(good, nil)
+	for range 3 {
+		advance(asyncStartGateRefreshInterval)
+		srv.asyncStartGateRefreshTick(ctx)
+	}
+	warns, infos = h.counts()
+	assert.Equal(t, 1, warns)
+	assert.Equal(t, 2, infos, "the recovery is logged once, then nothing")
+	assert.True(t, srv.asyncStartAllowed())
+}
+
+// TestAsyncStartGate_NoStartAfterStop pins the cleanup-before-startup
+// race: once stopAsyncStartGateRefresher has run, a later
+// startAsyncStartGateRefresher starts no loop (it would never be joined).
+func TestAsyncStartGate_NoStartAfterStop(t *testing.T) {
+	now := time.Now()
+	st := &hubInstanceListStore{now: now, rows: []store.HubInstance{hubRow(t, "a", now, time.Second, false, api.HubInstanceFeatureAsyncStartV1)}}
+	srv := &Server{store: st}
+	setAsyncStartExperiment(t, srv, true)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv.stopAsyncStartGateRefresher()
+	srv.startAsyncStartGateRefresher(ctx)
+	srv.mu.RLock()
+	h := srv.asyncStartGateRefresherStop
+	srv.mu.RUnlock()
+	assert.Nil(t, h, "no loop is started after the stop")
+	time.Sleep(50 * time.Millisecond)
+	assert.Equal(t, int32(0), st.reads.Load(), "no tick ran")
+}
+
 // TestAsyncStartGate_StopCancelsLoopOwnContext pins that the refresh loop
 // runs on its own child context: stopAsyncStartGateRefresher ends it while
 // the server context is still live (CleanupBackgroundResources stops it
@@ -456,7 +514,8 @@ func TestAsyncStartGate_StopCancelsLoopOwnContext(t *testing.T) {
 // failure, whose error text differs on every read, warns once per
 // hubInstanceWarnEvery rather than on every refresh, that recovery is
 // logged once, and that a registry flapping between failed and good reads
-// logs nothing more: the good answer equals the last one logged.
+// logs at most one recovery per emitted warning: a suppressed failed read
+// does not make the next good read log again.
 func TestAsyncStartGate_ReadErrorWarnRateLimited(t *testing.T) {
 	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
 	advance := fakeAsyncStartGateClock(t, now)
@@ -508,7 +567,7 @@ func TestAsyncStartGate_ReadErrorWarnRateLimited(t *testing.T) {
 	}
 	warns, infos = h.counts()
 	assert.Equal(t, 3, warns, "the flapping reads warn once more, when the 5-minute window reopens (the 10th failed read)")
-	assert.Equal(t, 1, infos, "a recovery to the last logged answer is not logged again")
+	assert.Equal(t, 2, infos, "one recovery is logged, after the one failed read that warned; none after the suppressed ones")
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	assert.Equal(t, "", g.reason)
@@ -573,6 +632,7 @@ func TestAsyncStartGate_RefreshPanicFailsClosed(t *testing.T) {
 	advance(asyncStartGateRefreshInterval)
 	srv.asyncStartGateRefreshTick(ctx)
 	require.True(t, srv.asyncStartAllowed())
+	require.Len(t, rec.at(slog.LevelInfo), 2, "enabled, then the recovery after the logged read error")
 
 	// A panic on the loop.
 	st.panicNext.Store(true)
@@ -589,6 +649,7 @@ func TestAsyncStartGate_RefreshPanicFailsClosed(t *testing.T) {
 	advance(asyncStartGateRefreshInterval)
 	srv.asyncStartGateRefreshTick(ctx)
 	assert.True(t, srv.asyncStartAllowed(), "the next tick refreshed: inFlight was cleared")
+	assert.Len(t, rec.at(slog.LevelInfo), 3, "the recovery after the logged panic is logged")
 
 	// A panic on a start's background refresh (no loop tick), within
 	// hubInstanceWarnEvery of the first: not logged again.
@@ -600,6 +661,7 @@ func TestAsyncStartGate_RefreshPanicFailsClosed(t *testing.T) {
 	advance(asyncStartGateRefreshInterval)
 	srv.asyncStartGateRefreshTick(ctx)
 	assert.True(t, srv.asyncStartAllowed(), "inFlight was cleared after the background panic")
+	assert.Len(t, rec.at(slog.LevelInfo), 3, "no recovery line after a suppressed panic")
 
 	// After the window, a panic is logged again with the suppressed count.
 	advance(hubInstanceWarnEvery)

@@ -93,9 +93,11 @@ type asyncStartGate struct {
 	reason string
 	// loggedValue and loggedReason are the last answer logged by the
 	// once-per-change rule (logged is false until the first). Read errors
-	// and panics have their own rate limits below and do not update them,
-	// so an answer that returns after a failed read (a flapping registry)
-	// is not logged again unless it differs from the last one logged.
+	// and panics have their own rate limits below. A suppressed read-error
+	// or panic line leaves them alone, so a registry flapping inside one
+	// rate-limit window logs no recovery; an emitted one clears logged, so
+	// the next answer is logged (the recovery after an outage), at most once
+	// per emitted read-error or panic line.
 	loggedValue  bool
 	loggedReason string
 	logged       bool
@@ -206,6 +208,7 @@ func (s *Server) refreshAsyncStartGate(ctx context.Context) {
 			"panic", fmt.Sprint(recovered),
 			"suppressed_since_last_log", suppressed,
 			"stack", string(stack))
+		g.logged = false
 	case readFailed:
 		if !g.readFailWarnedAt.IsZero() && now.Sub(g.readFailWarnedAt) < hubInstanceWarnEvery {
 			g.readFailSuppressed++
@@ -215,6 +218,7 @@ func (s *Server) refreshAsyncStartGate(ctx context.Context) {
 		g.readFailSuppressed = 0
 		g.readFailWarnedAt = now
 		log.Warn("async start disabled: "+reason, "suppressed_since_last_log", suppressed)
+		g.logged = false
 	case g.logged && g.loggedValue == value && g.loggedReason == reason:
 		// Unchanged since the last answer logged by this rule.
 	default:
@@ -248,15 +252,21 @@ type asyncStartGateRefresherStop struct {
 // ctx (the server-lifetime context) and records its stop handle on the
 // server, so CleanupBackgroundResources can stop and join the loop
 // (stopAsyncStartGateRefresher) before the registry row is marked stopped.
-// See startAsyncStartGateRefresherEvery.
+// It starts nothing once stopAsyncStartGateRefresher has run: cleanup can
+// race startup, and a loop started after it would never be joined. Both
+// run under s.mu, so either the stop sees the handle or the start sees the
+// stop. See startAsyncStartGateRefresherEvery.
 func (s *Server) startAsyncStartGateRefresher(ctx context.Context) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.asyncStartGateRefresherStopped {
+		return
+	}
 	loopCtx, cancel := context.WithCancel(ctx)
 	done := s.startAsyncStartGateRefresherEvery(loopCtx, func() time.Duration {
 		return jitteredInterval(asyncStartGateRefreshInterval)
 	})
-	s.mu.Lock()
 	s.asyncStartGateRefresherStop = &asyncStartGateRefresherStop{cancel: cancel, done: done}
-	s.mu.Unlock()
 }
 
 // stopAsyncStartGateRefresher cancels the refresh loop's context and waits
@@ -265,11 +275,12 @@ func (s *Server) startAsyncStartGateRefresher(ctx context.Context) {
 // registry row stopped, so a tick cannot read the registry during shutdown
 // (a lone replica would then see no live row and warn), and before the
 // store closes. It is a no-op when the loop was never started, and safe to
-// call twice.
+// call twice; after it, startAsyncStartGateRefresher starts nothing.
 func (s *Server) stopAsyncStartGateRefresher() {
 	s.mu.Lock()
 	h := s.asyncStartGateRefresherStop
 	s.asyncStartGateRefresherStop = nil
+	s.asyncStartGateRefresherStopped = true
 	s.mu.Unlock()
 	if h == nil {
 		return
