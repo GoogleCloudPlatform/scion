@@ -52,3 +52,5 @@ alwaysAuthorized
 require_NoError
 waitClosed
 nullSpokeEventBus
+# Closure of nullSpokeEventBus.Subscribe; its other users are all !no_sqlite.
+nullSub
