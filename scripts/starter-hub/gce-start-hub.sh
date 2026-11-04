@@ -155,7 +155,7 @@ fi
 # the registry that takes effect must not be a loopback address.
 if $FULL_DEPLOY; then
     if ! registry_is_valid "${IMAGE_REGISTRY}"; then
-        echo "Error: IMAGE_REGISTRY '${IMAGE_REGISTRY}' is not a registry path (for example localhost/scion or us-docker.pkg.dev/<project>/<repo>)."
+        echo "Error: IMAGE_REGISTRY '${IMAGE_REGISTRY}' is not a registry path (for example localhost/scion or us-docker.pkg.dev/<project>/<repo>)." >&2
         exit 1
     fi
     require_gke_reachable_registry

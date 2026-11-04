@@ -208,11 +208,18 @@ else
     # The starter scripts do not build agent images (see hub-config.sh). With
     # ENABLE_GKE=true the registry that takes effect must not be loopback:
     # GKE nodes cannot pull from the VM's local store.
-    val=$(get_env_value SCION_IMAGE_REGISTRY "${HUB_ENV_FILE}")
+    # hub.env is read with hub_env_value, as --full and systemd read it (last
+    # assignment wins, spaces around "=" and a trailing CR allowed), so this
+    # check predicts --full. IMAGE_REGISTRY is checked on every run, because
+    # --full always writes it to settings.yaml.
+    if ! registry_is_valid "${IMAGE_REGISTRY}"; then
+        check_fail "IMAGE_REGISTRY '${IMAGE_REGISTRY}' is not a registry path" \
+            "Use letters, digits and . _ : / - only, for example us-docker.pkg.dev/<project>/<repo>"
+    fi
+    val=$(hub_env_value SCION_IMAGE_REGISTRY)
     if [[ -z "$val" ]]; then
         if ! registry_is_valid "${IMAGE_REGISTRY}"; then
-            check_fail "IMAGE_REGISTRY '${IMAGE_REGISTRY}' is not a registry path" \
-                "Use letters, digits and . _ : / - only, for example us-docker.pkg.dev/<project>/<repo>"
+            : # reported above
         elif [[ "${ENABLE_GKE}" == "true" ]] && registry_is_loopback "${IMAGE_REGISTRY}"; then
             check_fail "ENABLE_GKE=true, but the image registry ${IMAGE_REGISTRY} is a loopback address GKE nodes cannot pull from" \
                 "Set SCION_IMAGE_REGISTRY in ${HUB_ENV_FILE} (or IMAGE_REGISTRY) to a registry the cluster can pull from"

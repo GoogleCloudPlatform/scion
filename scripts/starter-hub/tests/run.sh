@@ -400,6 +400,34 @@ test_preflight_registry_gke_refuses_loopback() {
     assert_contains "$PLAIN" "[PASS] SCION_IMAGE_REGISTRY not set; settings.yaml uses image_registry us-docker.pkg.dev/acme/scion" "reachable IMAGE_REGISTRY passes with GKE"
 }
 
+# The preflight reads hub.env as --full and systemd do (hub_env_value): a
+# spaced assignment counts and the last assignment wins, so both agree.
+test_preflight_registry_reads_hub_env_like_full() {
+    local gke=(ENABLE_GKE=true IMAGE_REGISTRY=us-docker.pkg.dev/acme/scion)
+
+    preflight_registry $'SCION_IMAGE_REGISTRY = localhost:5000/scion\n' "${gke[@]}"
+    assert_contains "$PLAIN" "[FAIL] ENABLE_GKE=true, but SCION_IMAGE_REGISTRY localhost:5000/scion is a loopback address" "spaced key is read"
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" "${gke[@]}" "HUB_ENV_FILE=${STATE_DIR}/hub.env")
+    run_script gce-start-hub.sh --full
+    assert_eq 1 "$RC" "--full also refuses the spaced key"
+
+    preflight_registry $'SCION_IMAGE_REGISTRY=us-docker.pkg.dev/acme/first\nSCION_IMAGE_REGISTRY=localhost/scion\n' "${gke[@]}"
+    assert_contains "$PLAIN" "[FAIL] ENABLE_GKE=true, but SCION_IMAGE_REGISTRY localhost/scion is a loopback address" "last assignment wins (loopback last)"
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" "${gke[@]}" "HUB_ENV_FILE=${STATE_DIR}/hub.env")
+    run_script gce-start-hub.sh --full
+    assert_eq 1 "$RC" "--full also refuses when the loopback value is last"
+
+    preflight_registry $'SCION_IMAGE_REGISTRY=localhost/scion\nSCION_IMAGE_REGISTRY=us-docker.pkg.dev/acme/last\n' "${gke[@]}"
+    assert_contains "$PLAIN" "[PASS] SCION_IMAGE_REGISTRY"$'\n' "last assignment wins (reachable last)"
+    assert_not_contains "$PLAIN" "[FAIL] ENABLE_GKE=true" "no GKE refusal when the reachable value is last"
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" "${gke[@]}" "HUB_ENV_FILE=${STATE_DIR}/hub.env")
+    run_script gce-start-hub.sh --full
+    assert_eq 0 "$RC" "--full also accepts when the reachable value is last"
+
+    preflight_registry $'SCION_IMAGE_REGISTRY=us-docker.pkg.dev/acme/scion\n' 'IMAGE_REGISTRY=bad registry'
+    assert_contains "$PLAIN" "[FAIL] IMAGE_REGISTRY 'bad registry' is not a registry path" "IMAGE_REGISTRY is checked even when hub.env sets a registry"
+}
+
 test_full_no_tls_needs_https_base_url() {
     local mode
     for mode in flag env; do

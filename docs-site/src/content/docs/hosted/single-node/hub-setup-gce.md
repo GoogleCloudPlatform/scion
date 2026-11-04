@@ -75,6 +75,8 @@ The starter scripts do not build agent images, so agents cannot start until the 
 sudo bash image-build/scripts/build-images.sh --builder local-docker --registry localhost/scion --target all
 ```
 
+`--target all` also builds the Hub image and every catalog harness. To build less, build `core-base`, then `scion-base`, then `harnesses` or a single harness step ID such as `scion-claude`, with the same `--builder` and `--registry` flags.
+
 or set `SCION_IMAGE_REGISTRY` in `hub.env` to a registry that already holds the images. With `ENABLE_GKE=true`, GKE nodes cannot pull from the VM's local store, so `gce-demo-preflight.sh` and `gce-start-hub.sh --full` refuse a loopback registry (`localhost`, `127.*`, `0.0.0.0` or `::1`, with or without a port). Set `SCION_IMAGE_REGISTRY` or `IMAGE_REGISTRY` to a registry the cluster can pull from.
 
 :::note[Internal or private deployments]
