@@ -22,6 +22,10 @@ Scion now requires TLS off loopback between the Hub and Runtime Brokers (`server
 
 [Read the full release notes for this week ->](/scion/release-notes/2026-10-26/)
 
+## Hub-scoped secrets reach agents only as always-mode environment secrets
+
+The Hub now delivers a Hub-scoped secret to agents only when its type is `environment` and its injection mode is `always`. **Hub-scoped `file` and `variable` secrets, and Hub-scoped `environment` secrets with the `as_needed` mode, are no longer delivered to agents** at create, start, restart or `as_needed` resolution. A Runtime Broker-scoped secret with the same name now applies in their place. The telemetry credential file (`scion-telemetry-gcp-credentials`, type `file`, target `~/.scion/telemetry-gcp-credentials.json`) is still delivered. Hub-scoped environment variables and secrets at User, Project and Runtime Broker scope are unchanged. Before upgrading, move any Hub-scoped secret that agents need as a file, a variable or an `as_needed` value to Project or User scope, or set an `environment` secret to `always`. See [Hub-Scoped Secrets](/scion/hosted/user/secrets/#hub-scoped-secrets).
+
 ## Kubernetes agent pods no longer mount a Kubernetes API token
 
 Kubernetes agent pods no longer mount a Kubernetes API token. Restart running agents to apply this to them. To list agent pods that still have a token across all namespaces, see [Agent pod identity](/scion/hosted/ha/kubernetes/#agent-pod-identity).
