@@ -550,6 +550,12 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID st
 			if s.SecretType == store.SecretTypeInternal {
 				continue
 			}
+			// Hub-scope rows are held to HubSecretDeliverable before their
+			// value is read, so an excluded row never shadows a broker-scope
+			// row of the same key.
+			if sc.scope == store.ScopeHub && !hubRowDeliverable(&s) {
+				continue
+			}
 			// The owner path: a user-scope row of userID is held to the
 			// caller's UserScopeCheck before its value is read. A rejected
 			// row is skipped, so a lower-scope row with the same key stays
