@@ -81,6 +81,8 @@ func TestFailingFixtures(t *testing.T) {
 		{"aliasundeclared", []string{"alias file pkg/hub/zz_alias_c_test.go imports pkg/hub/c, which dag.txt does not declare"}},
 		{"prodimport", []string{"example.com/m/pkg/x imports testsupport ts in non-test code (x.go)"}},
 		{"prodimporttagged", []string{"example.com/m/pkg/x imports testsupport ts in non-test code (x_integration.go)"}},
+		// The head of a testsupport chain is still testsupport: production may not import it.
+		{"prodimportchain", []string{"example.com/m/pkg/x imports testsupport ts2 in non-test code (x.go)"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			code, stdout, stderr := runFixture(t, tc.name)
