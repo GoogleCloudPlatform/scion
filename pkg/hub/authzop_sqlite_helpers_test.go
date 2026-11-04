@@ -1175,6 +1175,7 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/runtime-brokers/{id}/settings":                            {"id": f.runtimeBroker},
 		"/api/v1/runtime-brokers/{id}/heartbeat":                           {"id": f.runtimeBroker},
 		"/api/v1/runtime-brokers/{id}/projects":                            {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/conversion-plan":                     {"id": f.runtimeBroker},
 		"/api/v1/runtime-brokers/{id}/env":                                 {"id": f.runtimeBroker},
 		"/api/v1/runtime-brokers/{id}/env/{key}":                           {"id": f.runtimeBroker, "key": f.brokerEnvKey},
 		"/api/v1/runtime-brokers/{id}/secrets":                             {"id": f.runtimeBroker},

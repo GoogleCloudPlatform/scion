@@ -1236,6 +1236,21 @@ type RuntimeBroker struct {
 	PresentationSeq      *int64     `json:"-"`
 	PresentationFencedAt *time.Time `json:"-"`
 
+	// ConversionPlanPresentation is the publishable conversion plan a
+	// legacy Runtime Broker last reported (api.ConversionPlanPresentation).
+	// Display data only. Nil means none was reported. It and the two
+	// fields below are written only by SetRuntimeBrokerConversionPlan and
+	// removed only by deleting the row. They are never serialized with the
+	// broker: GET /api/v1/runtime-brokers/{id}/conversion-plan is the one
+	// reader.
+	ConversionPlanPresentation *api.ConversionPlanPresentation `json:"-"`
+	// ConversionPlanObservedAt is the Hub time the stored plan was last
+	// written or confirmed, refreshed at most every
+	// PresentationObservedRefresh while unchanged.
+	ConversionPlanObservedAt *time.Time `json:"-"`
+	// ConversionPlanHash is the Hub-computed hash of the stored plan.
+	ConversionPlanHash string `json:"-"`
+
 	// Metadata
 	Labels      map[string]string `json:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`

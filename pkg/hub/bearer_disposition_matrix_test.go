@@ -47,6 +47,10 @@ type bearerMatrixExclusion struct {
 // TestBearerMatrixExclusions_NotStaleAndPinned keeps every key live and
 // every Pin declared.
 var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
+	{OperationID: "broker.read", Method: "GET", Pattern: "/api/v1/runtime-brokers/{id}/conversion-plan"}: {
+		Reason: "the route answers 404 while the hub.flat_runtime_brokers experiment is off, as in this fixture, and for a Runtime Broker that never reported a conversion plan, so the admitting token cannot reach a target here. The dedicated test enables the experiment, stores a plan from the broker's heartbeat and drives the route with a broker:read token and a token without it",
+		Pin:    "TestConversionPlanGet_ScopedTokens",
+	},
 	{OperationID: "project.membership.add", Method: "POST", Pattern: "/api/v1/projects/{id}/members"}: {
 		Reason: "a token acts on membership only through its holder's project role, and the fixture super-admin holds no role in the fixture project; a grant also needs selectors for every permission of the granted role (CanDelegate). The dedicated test drives the route with real tokens on both boundaries and with the holder's session",
 		Pin:    "TestMembershipToken_SelectorAndBoundaryPerRoute",

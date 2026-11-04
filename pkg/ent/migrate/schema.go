@@ -2707,6 +2707,9 @@ var (
 		{Name: "presentation_seq", Type: field.TypeInt64, Nullable: true},
 		{Name: "presentation_fenced_at", Type: field.TypeTime, Nullable: true},
 		{Name: "presentation_observed_at", Type: field.TypeTime, Nullable: true},
+		{Name: "conversion_plan_presentation", Type: field.TypeString, Nullable: true},
+		{Name: "conversion_plan_presentation_hash", Type: field.TypeString, Nullable: true},
+		{Name: "conversion_plan_observed_at", Type: field.TypeTime, Nullable: true},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "updated", Type: field.TypeTime},
 	}

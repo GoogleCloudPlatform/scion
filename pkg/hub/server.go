@@ -1931,6 +1931,11 @@ type Server struct {
 	// reads that failed (the startup repair then counts the broker as
 	// present), exported on the same counter with cause=broker_record_read.
 	brokerPresenceRecordReadFallbacks atomic.Int64
+	// conversionPlanDrops counts conversion plan snapshots dropped for
+	// being over a cap or not decoding (conversion_plan.go), exported as
+	// scion.hub.broker.conversion_plan_dropped. It counts only; no
+	// snapshot content is kept.
+	conversionPlanDrops atomic.Int64
 	// conduitStreamRenewer is the renewal path of relay-held streams
 	// (conduit_renewal.go); nil until StartConduitExternal installs it.
 	conduitStreamRenewer atomic.Pointer[conduitStreamRenewer]

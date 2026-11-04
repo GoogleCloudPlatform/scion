@@ -1746,6 +1746,16 @@ type RuntimeBrokerStore interface {
 	// broker. p must not be nil.
 	SetRuntimeBrokerPresentation(ctx context.Context, brokerID, targetID string, p *api.RuntimeTargetPresentation, hash string, epoch, seq int64, observedAt time.Time) (PresentationOutcome, error)
 
+	// SetRuntimeBrokerConversionPlan stores a legacy Runtime Broker's
+	// reported conversion plan with one conditional update bound to the
+	// row and to its having no runtime target. A flat row is refused
+	// (ErrRuntimeBrokerNotLegacy). When hash differs from the stored hash
+	// it writes p, hash and observed-at (PresentationWritten); when it is
+	// equal it writes only observed-at, and only when that is older than
+	// PresentationObservedRefresh (PresentationConfirmed). hash is computed
+	// by the caller (the Hub) over p. p must not be nil.
+	SetRuntimeBrokerConversionPlan(ctx context.Context, brokerID string, p *api.ConversionPlanPresentation, hash string, observedAt time.Time) (PresentationOutcome, error)
+
 	// UpdateRuntimeBroker updates an existing runtime broker.
 	// Returns ErrNotFound if the broker doesn't exist.
 	UpdateRuntimeBroker(ctx context.Context, broker *RuntimeBroker) error

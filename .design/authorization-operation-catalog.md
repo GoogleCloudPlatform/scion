@@ -12386,6 +12386,7 @@
 | http_route | GET | `/api/v1/runtime-brokers/{id}` |
 | http_route | GET | `/api/v1/runtime-brokers/{id}/settings` |
 | http_route | GET | `/api/v1/runtime-brokers/{id}/projects` |
+| http_route | GET | `/api/v1/runtime-brokers/{id}/conversion-plan` |
 
 **Principals:** `user`
 
