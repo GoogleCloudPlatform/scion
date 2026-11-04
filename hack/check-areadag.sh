@@ -11,12 +11,15 @@
 #   - a declared package imports pkg/hub itself;
 #   - a leaf lists an area that itself imports pkg/hub packages;
 #   - any package of the module imports a testsupport package from non-test
-#     code (testsupport packages may import each other);
+#     code (testsupport packages may import each other); everything at or
+#     under a dag.txt testsupport path is testsupport;
+#   - any package main reaches a testsupport package through non-test imports;
 #   - a pkg/hub zz_alias_*.go file imports an undeclared pkg/hub subpackage.
-# Files of other build tag sets and platforms (go list IgnoredGoFiles) are
-# parsed too. Undeclared pkg/hub subpackages are not checked themselves. The
-# rules are documented in hack/areadag/main.go, the file format in
-# hack/areadag/dag/dag.go.
+# Files of every build tag set and platform count: go list IgnoredGoFiles are
+# parsed, and the module root is walked for directories go list does not list
+# (every file tagged). Undeclared pkg/hub subpackages are not checked
+# themselves. The rules are documented in hack/areadag/main.go, the file
+# format in hack/areadag/dag/dag.go.
 #
 # SELF-TEST
 #   ./hack/check-areadag.sh --self-test
@@ -24,7 +27,8 @@
 # clean fixtures that must pass, and vacuous inputs that must not pass).
 #
 # SEVERITY: guard-grade. A zero input count (no packages, no declarations, no
-# testsupport declaration, no alias file, no edge) fails the run.
+# testsupport declaration, no alias file, no edge), a stale declaration or a
+# testsupport package main fails the run.
 #
 # EXIT CODES
 #   0  analysed, no violations
@@ -60,7 +64,7 @@ if ! go build -buildvcs=false -o "$tmp/areadag" ./hack/areadag; then
 fi
 
 set +e
-"$tmp/areadag" -dag hack/areadag/dag.txt -list "$tmp/list.json"
+"$tmp/areadag" -dag hack/areadag/dag.txt -list "$tmp/list.json" -root .
 rc=$?
 set -e
 case "$rc" in

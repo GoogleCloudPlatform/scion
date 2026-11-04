@@ -17,48 +17,61 @@
 // metadata of the module (`hack/check-areadag.sh`).
 //
 // Input: the JSON stream of `go list -deps=false -json ./...` run at the
-// module root (metadata only: no -export, no -compiled, so nothing compiles).
-// The pkg/hub packages are the subset whose import path is pkg/hub or below it.
+// module root (metadata only: no -export, no -compiled, so nothing compiles),
+// and the module root itself (-root). The pkg/hub packages are the subset
+// whose import path is pkg/hub or below it.
 //
-// Imports of a package are its go list Imports (non-test) and TestImports plus
-// XTestImports (test), plus the imports of its IgnoredGoFiles, parsed here and
-// classed by the _test.go suffix. The ignored files are the ones another build
-// tag set or platform compiles (integration, no_sqlite, windows, ...), so the
-// rules hold for every tag set, not only the default build.
+// Imports of a listed package are its go list Imports (non-test) and
+// TestImports plus XTestImports (test), plus the imports of its
+// IgnoredGoFiles, parsed here and classed by the _test.go suffix. go list
+// drops a directory none of whose files match the default build (every file
+// behind a tag such as integration, tzcontract or windows), so areadag also
+// walks the module root, skipping what go skips (names starting with . or _,
+// testdata, vendor, directories with their own go.mod), and parses every Go
+// file of each directory go list did not list. The union covers every build
+// tag set and platform: a file counts whatever its constraint.
+//
+// The testsupport class comes only from dag.txt: a package is testsupport
+// when its path is a testsupport entry or lies under one (prefix match), so a
+// subpackage of a testsupport directory is testsupport even when undeclared.
+// No name or directory convention elsewhere makes a package testsupport.
 //
 // Rules:
 //
 //  1. A declared package (leaf, area or testsupport) imports, in non-test or
 //     test code, only declared leaves plus the areas listed on its line.
-//     A testsupport package may also import other testsupport packages, and
-//     any declared package may import testsupport packages from its tests
-//     (rule 4 owns testsupport imports). Any other pkg/hub subpackage is a
+//     Imports of testsupport packages are rule 4's (allowed from tests, and
+//     from testsupport non-test code). Any other pkg/hub subpackage is a
 //     violation, declared or not.
 //  2. No declared package imports pkg/hub itself.
 //  3. An area listed on a leaf's line imports no pkg/hub package in non-test
 //     code, so a leaf can never reach the rest of pkg/hub through it.
 //  4. (C2) Over EVERY package of the module, a testsupport package appears only
 //     in test imports, never in non-test imports. The only exception is a
-//     testsupport importer: it is itself only reachable from tests. The
-//     testsupport class comes only from dag.txt; no name or directory
-//     convention makes a package testsupport.
+//     testsupport importer: it is itself only reachable from tests.
 //  5. Every pkg/hub subpackage imported by an alias file (zz_alias_*.go,
 //     test or not) in the pkg/hub directory is declared, so a package move
 //     cannot skip the DAG. pkgmove and hubshard extract both write alias files
 //     under that name; the name, not the header marker, is the key.
+//  6. (C2) No testsupport package is in the non-test import closure of any
+//     package main of the module. With rule 4 this is implied; it is checked
+//     on its own so that a production package mislabelled testsupport in
+//     dag.txt still fails once any binary links it.
 //
 // Undeclared pkg/hub subpackages are not checked under rules 1-3 (feature
-// packages carry no DAG obligation); they are still subject to rule 4, and
-// importing one from a declared package violates rule 1.
+// packages carry no DAG obligation); they are still subject to rules 4 and 6,
+// and importing one from a declared package violates rule 1.
 //
-// Every declared package must exist. The run fails as unusable (exit 2), not
-// clean, when any input count is zero: no module packages, no pkg/hub
-// packages, no declarations, no testsupport declarations, no alias files, or
-// no import edges examined.
+// The run fails as unusable (exit 2), not clean, when a declared package does
+// not exist, when a testsupport package is a package main, or when any input
+// count is zero: no module packages, no pkg/hub packages, no declarations, no
+// testsupport declarations, no alias files, or no import edges examined.
 //
 // Usage:
 //
-//	areadag -dag hack/areadag/dag.txt -list FILE [-hub IMPORTPATH]
+//	areadag -dag hack/areadag/dag.txt -list FILE [-root DIR] [-hub IMPORTPATH]
+//
+// -root defaults to the directory of the list file.
 //
 // Exit codes: 0 clean, 1 violations, 2 usage error, unreadable or malformed
 // input, or an input count of zero.
@@ -72,6 +85,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -90,6 +104,7 @@ func main() {
 // listPkg holds the go list -json fields areadag reads.
 type listPkg struct {
 	ImportPath     string
+	Name           string
 	Dir            string
 	GoFiles        []string
 	CgoFiles       []string
@@ -100,11 +115,14 @@ type listPkg struct {
 	Error          *struct{ Err string }
 }
 
-// pkgImports is one package's non-test and test import sets, keyed by import
-// path. The importing file is looked up only for a rule 4 violation message.
-type pkgImports struct {
+// pkgInfo is one package's name and its non-test and test import sets, keyed
+// by import path, from go list (listed) or from parsing a directory go list
+// did not list.
+type pkgInfo struct {
 	path    string
+	name    string
 	dir     string
+	listed  bool
 	nonTest map[string]bool
 	test    map[string]bool
 	// srcFiles are the non-test files to search when naming a violating file.
@@ -116,15 +134,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	dagFile := flags.String("dag", "", "the DAG declaration file (hack/areadag/dag.txt)")
 	listFile := flags.String("list", "", "output of `go list -deps=false -json ./...` at the module root")
+	root := flags.String("root", "", "the module root to walk for directories go list did not list (default: the list file's directory)")
 	hub := flags.String("hub", defaultHub, "import path of pkg/hub")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
 	if *dagFile == "" || *listFile == "" || flags.NArg() != 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: areadag -dag FILE -list FILE [-hub IMPORTPATH]")
+		_, _ = fmt.Fprintln(stderr, "usage: areadag -dag FILE -list FILE [-root DIR] [-hub IMPORTPATH]")
 		return 2
 	}
-	violations, summary, err := check(*dagFile, *listFile, *hub)
+	if *root == "" {
+		*root = filepath.Dir(*listFile)
+	}
+	violations, summary, err := check(*dagFile, *listFile, *root, *hub)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "areadag: %v\n", err)
 		return 2
@@ -143,7 +165,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 // check runs every rule and returns the violations (sorted) and a one-line
 // summary of the input counts. An error means the input was unusable.
-func check(dagFile, listFile, hub string) ([]string, string, error) {
+func check(dagFile, listFile, root, hub string) ([]string, string, error) {
 	d, err := dag.ReadFile(dagFile)
 	if err != nil {
 		return nil, "", err
@@ -152,43 +174,85 @@ func check(dagFile, listFile, hub string) ([]string, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
+	if len(pkgs) == 0 {
+		return nil, "", fmt.Errorf("%s: no packages (nothing to check)", listFile)
+	}
 
-	byPath := map[string]*pkgImports{}
+	all := map[string]*pkgInfo{}
+	listedDirs := map[string]bool{}
 	var hubDir string
-	nHub := 0
 	for _, p := range pkgs {
 		if p.Error != nil {
 			return nil, "", fmt.Errorf("%s: go list reported an error for %s: %s", listFile, p.ImportPath, p.Error.Err)
 		}
-		if _, dup := byPath[p.ImportPath]; dup {
+		if _, dup := all[p.ImportPath]; dup {
 			return nil, "", fmt.Errorf("%s: %s is listed twice", listFile, p.ImportPath)
 		}
 		pi, err := collect(p, listFile)
 		if err != nil {
 			return nil, "", err
 		}
-		byPath[p.ImportPath] = pi
-		if p.ImportPath == hub || strings.HasPrefix(p.ImportPath, hub+"/") {
-			nHub++
-		}
+		all[p.ImportPath] = pi
+		listedDirs[pi.dir] = true
 		if p.ImportPath == hub {
 			hubDir = pi.dir
 		}
 	}
+	if hubDir == "" {
+		return nil, "", fmt.Errorf("%s: %s is not in the list (run go list at the module root, or pass -hub)", listFile, hub)
+	}
+
+	// The module path follows from where pkg/hub sits under the root.
+	rootDir := realDir(root)
+	hubRel, err := filepath.Rel(rootDir, hubDir)
+	if err != nil || hubRel == "." || strings.HasPrefix(hubRel, "..") {
+		return nil, "", fmt.Errorf("-root %s does not contain %s (%s)", root, hub, hubDir)
+	}
+	modPath, ok := strings.CutSuffix(hub, "/"+filepath.ToSlash(hubRel))
+	if !ok || modPath == "" {
+		return nil, "", fmt.Errorf("-root %s is not the module root: %s is at %s below it", root, hub, filepath.ToSlash(hubRel))
+	}
+	walked, err := walkUnlisted(rootDir, modPath, listedDirs)
+	if err != nil {
+		return nil, "", err
+	}
+	for _, pi := range walked {
+		if _, dup := all[pi.path]; dup {
+			return nil, "", fmt.Errorf("%s: directory %s maps to listed package %s", root, pi.dir, pi.path)
+		}
+		all[pi.path] = pi
+	}
+	nHub := 0
+	for path := range all {
+		if path == hub || strings.HasPrefix(path, hub+"/") {
+			nHub++
+		}
+	}
 
 	switch {
-	case len(pkgs) == 0:
-		return nil, "", fmt.Errorf("%s: no packages (nothing to check)", listFile)
-	case hubDir == "":
-		return nil, "", fmt.Errorf("%s: %s is not in the list (run go list at the module root, or pass -hub)", listFile, hub)
 	case len(d.Entries) == 0:
 		return nil, "", fmt.Errorf("%s: no declarations", dagFile)
 	case d.Count(dag.TestSupport) == 0:
-		return nil, "", fmt.Errorf("%s: no testsupport declarations, so the testsupport rule would check nothing", dagFile)
+		return nil, "", fmt.Errorf("%s: no testsupport declarations, so the testsupport rules would check nothing", dagFile)
 	}
 	for _, e := range d.Entries {
-		if _, ok := byPath[hub+"/"+e.Rel]; !ok {
-			return nil, "", fmt.Errorf("%s:%d: declared %s %s is not a package in the list (stale declaration?)", dagFile, e.Line, e.Kind, e.Rel)
+		if _, ok := all[hub+"/"+e.Rel]; !ok {
+			return nil, "", fmt.Errorf("%s:%d: declared %s %s is not a package of the module (stale declaration?)", dagFile, e.Line, e.Kind, e.Rel)
+		}
+	}
+
+	supportRels := d.Rels(dag.TestSupport)
+	isSupport := func(path string) bool {
+		for _, rel := range supportRels {
+			if path == hub+"/"+rel || strings.HasPrefix(path, hub+"/"+rel+"/") {
+				return true
+			}
+		}
+		return false
+	}
+	for _, path := range sortedKeys(all) {
+		if isSupport(path) && all[path].name == "main" {
+			return nil, "", fmt.Errorf("testsupport %s is a package main; a testsupport package must be a library imported by tests", strings.TrimPrefix(path, hub+"/"))
 		}
 	}
 
@@ -197,7 +261,7 @@ func check(dagFile, listFile, hub string) ([]string, string, error) {
 
 	// Rules 1-3: declared packages.
 	for _, e := range d.Entries {
-		pi := byPath[hub+"/"+e.Rel]
+		pi := all[hub+"/"+e.Rel]
 		listed := map[string]bool{}
 		for _, a := range e.Areas {
 			listed[a] = true
@@ -205,8 +269,7 @@ func check(dagFile, listFile, hub string) ([]string, string, error) {
 		for _, side := range []struct {
 			name string
 			imps map[string]bool
-			test bool
-		}{{"non-test", pi.nonTest, false}, {"test", pi.test, true}} {
+		}{{"non-test", pi.nonTest}, {"test", pi.test}} {
 			for _, imp := range sortedKeys(side.imps) {
 				if imp == pi.path {
 					continue // an external test package importing its own package
@@ -219,15 +282,16 @@ func check(dagFile, listFile, hub string) ([]string, string, error) {
 					violations = append(violations, fmt.Sprintf("%s %s imports pkg/hub in %s code (no declared package may import pkg/hub)", e.Kind, e.Rel, side.name))
 					continue
 				}
+				if isSupport(imp) {
+					// Allowed from tests, and from testsupport non-test code;
+					// a production import is reported once, under rule 4.
+					continue
+				}
 				rel := strings.TrimPrefix(imp, hub+"/")
 				t, ok := d.Lookup(rel)
 				switch {
 				case !ok:
 					violations = append(violations, fmt.Sprintf("%s %s imports undeclared pkg/hub/%s in %s code (declare it in dag.txt, or drop the import)", e.Kind, e.Rel, rel, side.name))
-				case t.Kind == dag.Leaf:
-				case t.Kind == dag.TestSupport:
-					// Allowed from tests, and from testsupport non-test code;
-					// a production import is reported once, under rule 4.
 				case t.Kind == dag.Area && !listed[rel]:
 					violations = append(violations, fmt.Sprintf("%s %s imports area %s in %s code, which its dag.txt line does not list", e.Kind, e.Rel, rel, side.name))
 				}
@@ -235,7 +299,7 @@ func check(dagFile, listFile, hub string) ([]string, string, error) {
 		}
 		if e.Kind == dag.Leaf {
 			for _, a := range e.Areas {
-				for _, imp := range sortedKeys(byPath[hub+"/"+a].nonTest) {
+				for _, imp := range sortedKeys(all[hub+"/"+a].nonTest) {
 					if imp == hub || strings.HasPrefix(imp, hub+"/") {
 						violations = append(violations, fmt.Sprintf("leaf %s lists area %s, but %s imports %s in non-test code (an area a leaf may import must import no pkg/hub package)", e.Rel, a, a, strings.TrimPrefix(imp, hub+"/")))
 					}
@@ -245,17 +309,13 @@ func check(dagFile, listFile, hub string) ([]string, string, error) {
 	}
 
 	// Rule 4 (C2): testsupport is imported only by tests, module-wide.
-	support := map[string]bool{}
-	for _, rel := range d.Rels(dag.TestSupport) {
-		support[hub+"/"+rel] = true
-	}
-	for _, path := range sortedKeys(byPath) {
-		if support[path] {
+	for _, path := range sortedKeys(all) {
+		if isSupport(path) {
 			continue
 		}
-		pi := byPath[path]
+		pi := all[path]
 		for _, imp := range sortedKeys(pi.nonTest) {
-			if !support[imp] {
+			if !isSupport(imp) {
 				continue
 			}
 			files, err := filesImporting(pi.dir, pi.srcFiles, imp)
@@ -263,6 +323,18 @@ func check(dagFile, listFile, hub string) ([]string, string, error) {
 				return nil, "", err
 			}
 			violations = append(violations, fmt.Sprintf("%s imports testsupport %s in non-test code (%s); testsupport packages may be imported only by _test.go files", path, strings.TrimPrefix(imp, hub+"/"), strings.Join(files, ", ")))
+		}
+	}
+
+	// Rule 6 (C2): no package main reaches testsupport through non-test imports.
+	mains := 0
+	for _, path := range sortedKeys(all) {
+		if all[path].name != "main" {
+			continue
+		}
+		mains++
+		for _, chain := range supportReach(path, all, isSupport) {
+			violations = append(violations, fmt.Sprintf("package main %s reaches testsupport %s through non-test imports (%s); a binary must not link test support", path, strings.TrimPrefix(chain[len(chain)-1], hub+"/"), strings.Join(chain, " -> ")))
 		}
 	}
 
@@ -276,7 +348,7 @@ func check(dagFile, listFile, hub string) ([]string, string, error) {
 	}
 	sort.Strings(aliases)
 	for _, f := range aliases {
-		imps, err := fileImports(f)
+		imps, _, err := parseImports(f)
 		if err != nil {
 			return nil, "", err
 		}
@@ -296,9 +368,140 @@ func check(dagFile, listFile, hub string) ([]string, string, error) {
 		return nil, "", errors.New("no pkg/hub import edges examined, so nothing was checked")
 	}
 	sort.Strings(violations)
-	summary := fmt.Sprintf("%d module packages, %d pkg/hub packages, %d declared (%d leaf, %d area, %d testsupport), %d alias files, %d pkg/hub edges checked",
-		len(pkgs), nHub, len(d.Entries), d.Count(dag.Leaf), d.Count(dag.Area), d.Count(dag.TestSupport), len(aliases), edges)
+	summary := fmt.Sprintf("%d module packages (%d from go list, %d tag-only directories parsed), %d pkg/hub packages, %d declared (%d leaf, %d area, %d testsupport), %d alias files, %d pkg/hub edges checked, %d package main closures checked",
+		len(all), len(pkgs), len(walked), nHub, len(d.Entries), d.Count(dag.Leaf), d.Count(dag.Area), d.Count(dag.TestSupport), len(aliases), edges, mains)
 	return violations, summary, nil
+}
+
+// supportReach returns, for each testsupport package reachable from start
+// through non-test imports of module packages, one shortest import chain
+// (start first). The search does not continue past a testsupport package.
+func supportReach(start string, all map[string]*pkgInfo, isSupport func(string) bool) [][]string {
+	parent := map[string]string{start: ""}
+	queue := []string{start}
+	var hits []string
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		pi, ok := all[cur]
+		if !ok {
+			continue // outside the module
+		}
+		for _, imp := range sortedKeys(pi.nonTest) {
+			if _, seen := parent[imp]; seen {
+				continue
+			}
+			parent[imp] = cur
+			if isSupport(imp) {
+				hits = append(hits, imp)
+				continue
+			}
+			queue = append(queue, imp)
+		}
+	}
+	sort.Strings(hits)
+	var out [][]string
+	for _, h := range hits {
+		var chain []string
+		for n := h; n != ""; n = parent[n] {
+			chain = append([]string{n}, chain...)
+		}
+		out = append(out, chain)
+	}
+	return out
+}
+
+// walkUnlisted parses every directory under root that holds Go files but is
+// not a listed package directory, skipping what the go command skips for
+// ./...: names starting with . or _, testdata, vendor, and directories with
+// their own go.mod. Symlinked directories are not followed (go ignores them).
+func walkUnlisted(root, modPath string, listed map[string]bool) ([]*pkgInfo, error) {
+	var out []*pkgInfo
+	err := filepath.WalkDir(root, func(dir string, de fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !de.IsDir() {
+			return nil
+		}
+		if dir != root {
+			name := de.Name()
+			if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") || name == "testdata" || name == "vendor" {
+				return filepath.SkipDir
+			}
+			if fi, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil && !fi.IsDir() {
+				return filepath.SkipDir
+			}
+		}
+		if listed[dir] {
+			return nil
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, dir)
+		if err != nil {
+			return err
+		}
+		path := modPath
+		if rel != "." {
+			path += "/" + filepath.ToSlash(rel)
+		}
+		pi := &pkgInfo{path: path, dir: dir, nonTest: map[string]bool{}, test: map[string]bool{}}
+		files := 0
+		for _, e := range entries {
+			name := e.Name()
+			if !e.Type().IsRegular() || !strings.HasSuffix(name, ".go") || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
+				continue
+			}
+			files++
+			if err := addFile(pi, name); err != nil {
+				return err
+			}
+		}
+		if files > 0 {
+			out = append(out, pi)
+		}
+		return nil
+	})
+	return out, err
+}
+
+// addFile parses one file of pi's directory and adds its imports to the test
+// or non-test set by the _test.go suffix. A non-test file declaring package
+// main makes pi a package main.
+func addFile(pi *pkgInfo, name string) error {
+	imps, pkgName, err := parseImports(filepath.Join(pi.dir, name))
+	if err != nil {
+		return err
+	}
+	target := pi.test
+	if !strings.HasSuffix(name, "_test.go") {
+		target = pi.nonTest
+		pi.srcFiles = append(pi.srcFiles, name)
+		if pkgName == "main" || pi.name == "" {
+			pi.name = pkgName
+		}
+	}
+	for _, imp := range imps {
+		target[imp] = true
+	}
+	return nil
+}
+
+// realDir returns dir as an absolute path with symlinks resolved, or as an
+// absolute path when it cannot be resolved (a fixture directory that holds no
+// file).
+func realDir(dir string) string {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return filepath.Clean(dir)
+	}
+	if r, err := filepath.EvalSymlinks(abs); err == nil {
+		return r
+	}
+	return abs
 }
 
 // readList decodes a go list -json stream.
@@ -326,15 +529,15 @@ func readList(file string) ([]listPkg, error) {
 	}
 }
 
-// collect builds a package's import sets. A relative Dir (used by the test
-// fixtures; go list always writes an absolute one) is resolved against the
-// directory of the list file.
-func collect(p listPkg, listFile string) (*pkgImports, error) {
+// collect builds a listed package's import sets. A relative Dir (used by the
+// test fixtures; go list always writes an absolute one) is resolved against
+// the directory of the list file.
+func collect(p listPkg, listFile string) (*pkgInfo, error) {
 	dir := p.Dir
 	if !filepath.IsAbs(dir) {
 		dir = filepath.Join(filepath.Dir(listFile), filepath.FromSlash(dir))
 	}
-	pi := &pkgImports{path: p.ImportPath, dir: dir, nonTest: map[string]bool{}, test: map[string]bool{}}
+	pi := &pkgInfo{path: p.ImportPath, name: p.Name, dir: realDir(dir), listed: true, nonTest: map[string]bool{}, test: map[string]bool{}}
 	for _, imp := range p.Imports {
 		pi.nonTest[imp] = true
 	}
@@ -342,49 +545,41 @@ func collect(p listPkg, listFile string) (*pkgImports, error) {
 		pi.test[imp] = true
 	}
 	pi.srcFiles = append(append([]string{}, p.GoFiles...), p.CgoFiles...)
-	for _, name := range p.IgnoredGoFiles {
-		if !strings.HasSuffix(name, ".go") {
+	name := pi.name
+	for _, f := range p.IgnoredGoFiles {
+		if !strings.HasSuffix(f, ".go") {
 			continue
 		}
-		imps, err := fileImports(filepath.Join(dir, name))
-		if err != nil {
+		if err := addFile(pi, f); err != nil {
 			return nil, err
 		}
-		target := pi.nonTest
-		if strings.HasSuffix(name, "_test.go") {
-			target = pi.test
-		} else {
-			pi.srcFiles = append(pi.srcFiles, name)
-		}
-		for _, imp := range imps {
-			target[imp] = true
-		}
 	}
+	pi.name = name // go list's Name is authoritative for a listed package
 	return pi, nil
 }
 
-// fileImports parses only the import block of a Go file.
-func fileImports(file string) ([]string, error) {
+// parseImports parses only the package clause and import block of a Go file.
+func parseImports(file string) ([]string, string, error) {
 	f, err := parser.ParseFile(token.NewFileSet(), file, nil, parser.ImportsOnly)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	var out []string
 	for _, s := range f.Imports {
 		p, err := strconv.Unquote(s.Path.Value)
 		if err != nil {
-			return nil, fmt.Errorf("%s: bad import path %s", file, s.Path.Value)
+			return nil, "", fmt.Errorf("%s: bad import path %s", file, s.Path.Value)
 		}
 		out = append(out, p)
 	}
-	return out, nil
+	return out, f.Name.Name, nil
 }
 
 // filesImporting names the files among names (in dir) that import imp.
 func filesImporting(dir string, names []string, imp string) ([]string, error) {
 	var out []string
 	for _, name := range names {
-		imps, err := fileImports(filepath.Join(dir, name))
+		imps, _, err := parseImports(filepath.Join(dir, name))
 		if err != nil {
 			return nil, err
 		}

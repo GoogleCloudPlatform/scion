@@ -41,7 +41,7 @@ func runFixture(t *testing.T, name string) (int, string, string) {
 	return code, stdout.String(), stderr.String()
 }
 
-var okLine = regexp.MustCompile(`^areadag: OK: ([1-9][0-9]*) module packages, ([1-9][0-9]*) pkg/hub packages, ([1-9][0-9]*) declared \(\d+ leaf, \d+ area, ([1-9][0-9]*) testsupport\), ([1-9][0-9]*) alias files, ([1-9][0-9]*) pkg/hub edges checked\n$`)
+var okLine = regexp.MustCompile(`^areadag: OK: ([1-9][0-9]*) module packages \(([1-9][0-9]*) from go list, (\d+) tag-only directories parsed\), ([1-9][0-9]*) pkg/hub packages, ([1-9][0-9]*) declared \(\d+ leaf, \d+ area, ([1-9][0-9]*) testsupport\), ([1-9][0-9]*) alias files, ([1-9][0-9]*) pkg/hub edges checked, ([1-9][0-9]*) package main closures checked\n$`)
 
 // TestPassingFixtures: each fixture is clean, and the OK line reports a
 // nonzero count for every input, so a pass is never vacuous.
@@ -56,8 +56,13 @@ func TestPassingFixtures(t *testing.T) {
 			if code != 0 {
 				t.Fatalf("exit %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
 			}
-			if !okLine.MatchString(stdout) {
+			m := okLine.FindStringSubmatch(stdout)
+			if m == nil {
 				t.Fatalf("stdout %q does not match the OK line with nonzero counts", stdout)
+			}
+			// ok also holds a directory go list does not list: the walk must parse it.
+			if name == "ok" && m[3] != "1" {
+				t.Fatalf("ok: %s tag-only directories parsed, want 1", m[3])
 			}
 		})
 	}
@@ -83,7 +88,26 @@ func TestFailingFixtures(t *testing.T) {
 		{"prodimporttagged", []string{"example.com/m/pkg/x imports testsupport ts in non-test code (x_integration.go)"}},
 		// The head of a testsupport chain is still testsupport: production may not import it.
 		{"prodimportchain", []string{"example.com/m/pkg/x imports testsupport ts2 in non-test code (x.go)"}},
-		{"prodimportcmd", []string{"example.com/m/cmd/tool imports testsupport ts in non-test code (main.go)"}},
+		{"prodimportcmd", []string{
+			"example.com/m/cmd/tool imports testsupport ts in non-test code (main.go)",
+			"package main example.com/m/cmd/tool reaches testsupport ts through non-test imports (example.com/m/cmd/tool -> example.com/m/pkg/hub/ts)",
+		}},
+		// A package go list does not list (every file tagged) is walked and parsed.
+		{"prodimportalltagged", []string{"example.com/m/pkg/x imports testsupport ts in non-test code (x_integration.go)"}},
+		// Production importers inside pkg/hub, the only ones Go's internal rule
+		// admits for an internal testsupport package.
+		{"prodimportdeclared", []string{"example.com/m/pkg/hub/a imports testsupport ts in non-test code (a.go)"}},
+		{"prodimporthub", []string{
+			"example.com/m/pkg/hub imports testsupport ts in non-test code (hub.go)",
+			"example.com/m/pkg/hub/feature imports testsupport ts in non-test code (feature.go)",
+		}},
+		// Everything at or under a testsupport path is testsupport.
+		{"tssubpkg", []string{"example.com/m/pkg/x imports testsupport ts/fakes in non-test code (x.go)"}},
+		// A production package mislabelled testsupport fails once a binary links it.
+		{"mainclosure", []string{
+			"example.com/m/pkg/lib imports testsupport mislabelled in non-test code (lib.go)",
+			"package main example.com/m/cmd/tool reaches testsupport mislabelled through non-test imports (example.com/m/cmd/tool -> example.com/m/pkg/lib -> example.com/m/pkg/hub/mislabelled)",
+		}},
 		// The testsupport class comes only from dag.txt: a test-like name or
 		// directory does not grant the testsupport-to-testsupport exemption.
 		{"selfclaimed", []string{
@@ -124,7 +148,9 @@ func TestUnusableInputs(t *testing.T) {
 	for _, tc := range []struct{ name, want string }{
 		{"nosupport", "no testsupport declarations"},
 		{"noalias", "no zz_alias_*.go files"},
-		{"stale", "declared area gone is not a package in the list"},
+		{"stale", "declared area gone is not a package of the module"},
+		{"emptydag", "no declarations"},
+		{"tsmain", "testsupport ts is a package main"},
 		{"emptylist", "no packages"},
 		{"nohub", "example.com/m/pkg/hub is not in the list"},
 		{"noedges", "no pkg/hub import edges examined"},
