@@ -60,6 +60,13 @@ loopback request, or a request from a TLS-terminating proxy it trusts. See
      `conduit`) check unhealthy. The Hub's health summary then shows the
      broker as online but unable to receive commands.
 
+### `hub.async_agent_start` (multi-node upgrade and downgrade)
+
+The `hub.async_agent_start` [experiment](/scion/reference/experiments/#server-experiments-with-notes) is on by default (see [Asynchronous agent start](/scion/reference/server-config/#asynchronous-agent-start)). During a rolling upgrade between versions that write the `hub_instances` registry, starts stay synchronous automatically while any live Hub replica lacks `async_start_v1`.
+
+- **Multi-node upgrade from a version before the `hub_instances` registry:** replicas on a version that does not register in `hub_instances` are not visible to that capability check. Set an explicit override turning `hub.async_agent_start` **off** before upgrading the first replica (`scion hub experiments disable hub.async_agent_start` or in **Admin -> Server Config -> Experiments**), upgrade every Hub replica, and then reset the override (`scion hub experiments reset hub.async_agent_start`). Single-node Hubs need no extra step.
+- **Before downgrading a Hub node:** turn `hub.async_agent_start` **off** and wait `launch_timeout` (`server.hub.async_launch.launch_timeout`, default `2m` or `5m` for Kubernetes) plus 15 seconds so every in-flight asynchronous start settles before an older binary runs.
+
 ## What a newer build rewrites one way
 
 | Stored data | What startup does | Effect on an older binary |
