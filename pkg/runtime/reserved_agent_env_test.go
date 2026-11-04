@@ -21,6 +21,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 )
@@ -31,6 +32,27 @@ import (
 var reservedEnvProbe = []string{
 	stagedsecrets.HubTokenStagedEnvVar + "=1",
 	"ORDINARY_CONTROL=keep",
+}
+
+// reservedEnvProbeMap is reservedEnvProbe as a map, for the sources that
+// supply env as a map: resolved auth and the harness.
+func reservedEnvProbeMap() map[string]string {
+	return map[string]string{
+		stagedsecrets.HubTokenStagedEnvVar: "1",
+		"ORDINARY_CONTROL":                 "keep",
+	}
+}
+
+// envFromRunArgs returns the "-e" entries of container CLI run arguments.
+func envFromRunArgs(args []string) map[string]string {
+	env := map[string]string{}
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "-e" {
+			k, v, _ := strings.Cut(args[i+1], "=")
+			env[k] = v
+		}
+	}
+	return env
 }
 
 // assertReservedDropped checks an environment (name -> value) for the
@@ -73,6 +95,34 @@ func TestReservedAgentEnvName_DroppedFromNonSecretEnvOnEveryRuntime(t *testing.T
 		assertReservedDropped(t, "docker", env)
 	})
 
+	// Resolved auth and harness env are merged after config.Env.
+	t.Run("docker-resolved-auth", func(t *testing.T) {
+		args, err := buildCommonRunArgs(RunConfig{
+			Harness:      &mockHarness{command: []string{"echo"}, env: map[string]string{}},
+			Name:         "test-agent",
+			UnixUsername: "scion",
+			Image:        "scion-agent:latest",
+			ResolvedAuth: &api.ResolvedAuth{EnvVars: reservedEnvProbeMap()},
+		})
+		if err != nil {
+			t.Fatalf("buildCommonRunArgs: %v", err)
+		}
+		assertReservedDropped(t, "docker", envFromRunArgs(args))
+	})
+
+	t.Run("docker-harness-env", func(t *testing.T) {
+		args, err := buildCommonRunArgs(RunConfig{
+			Harness:      &mockHarness{command: []string{"echo"}, env: reservedEnvProbeMap()},
+			Name:         "test-agent",
+			UnixUsername: "scion",
+			Image:        "scion-agent:latest",
+		})
+		if err != nil {
+			t.Fatalf("buildCommonRunArgs: %v", err)
+		}
+		assertReservedDropped(t, "docker", envFromRunArgs(args))
+	})
+
 	t.Run("kubernetes", func(t *testing.T) {
 		rt, _, _ := newTestK8sRuntime()
 		pod, err := rt.buildPod("default", RunConfig{
@@ -108,6 +158,25 @@ func TestReservedAgentEnvName_DroppedFromNonSecretEnvOnEveryRuntime(t *testing.T
 	t.Run("cloudrun-sandbox", func(t *testing.T) {
 		h := newSandboxSecretsHarness(t)
 		h.cfg.Env = append([]string(nil), reservedEnvProbe...)
+		if _, err := h.rt.Run(context.Background(), h.cfg); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		assertReservedDropped(t, "cloudrun-sandbox", h.runEnv(t))
+	})
+
+	// Resolved auth is merged after config.Env and the harness env.
+	t.Run("cloudrun-sandbox-resolved-auth", func(t *testing.T) {
+		h := newSandboxSecretsHarness(t)
+		h.cfg.ResolvedAuth = &api.ResolvedAuth{EnvVars: reservedEnvProbeMap()}
+		if _, err := h.rt.Run(context.Background(), h.cfg); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		assertReservedDropped(t, "cloudrun-sandbox", h.runEnv(t))
+	})
+
+	t.Run("cloudrun-sandbox-harness-env", func(t *testing.T) {
+		h := newSandboxSecretsHarness(t)
+		h.cfg.Harness = &mockHarness{command: []string{"gemini"}, env: reservedEnvProbeMap()}
 		if _, err := h.rt.Run(context.Background(), h.cfg); err != nil {
 			t.Fatalf("Run: %v", err)
 		}

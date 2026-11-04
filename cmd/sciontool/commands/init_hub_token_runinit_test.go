@@ -191,7 +191,12 @@ func TestRunInit_StagedHubToken_CrashKeepsRefreshedTokenForRestart(t *testing.T)
 	if _, err := os.Lstat(f.tokenPath); !os.IsNotExist(err) {
 		t.Errorf("token file not removed after the restart's clean exit (err %v)", err)
 	}
-	if out := f.readLog(); strings.Contains(out, refreshed) || strings.Contains(out, createTime) {
+	out = f.readLog()
+	// Control: the restart's own removal line is in the same log.
+	if !strings.Contains(out, "Removed the staged hub credential file") {
+		t.Error("log lacks the restart's removal line")
+	}
+	if strings.Contains(out, refreshed) || strings.Contains(out, createTime) {
 		t.Error("log carries a credential value after the restart")
 	}
 }
