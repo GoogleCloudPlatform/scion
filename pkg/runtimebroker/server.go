@@ -601,6 +601,10 @@ type Server struct {
 	// earlier reports.
 	presentationSeq atomic.Int64
 
+	// conversionPlan caches a legacy server's publishable conversion plan
+	// (conversion_plan.go), recomputed only when its settings change.
+	conversionPlan conversionPlanCache
+
 	// NFS mount reconciler (nil when backend != "nfs")
 	nfsMountReconciler *NFSMountReconciler
 	// storageOverrides caches the StorageOverridesCheck result for /healthz.

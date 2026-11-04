@@ -225,6 +225,38 @@ Status codes: `400` for an unknown key or an invalid value (`maxAgents` must be 
 It never deletes the old bindings — they are shadowed by the new setting per the precedence above, and their IDs are logged at migration time so an operator can find and remove them. **Removing them matters**: if the migrated `maxAgents` setting is later cleared ("use hub default"), the precedence rule falls through to the entitlement engine, and any leftover binding the entitlement engine matches (a user binding with `subjectId` equal to the broker ID, or a `system_default` binding with an empty subject — i.e. the shapes the migration actually inherited enforcement from) becomes live again. The never-enforced shapes described above stay inert either way. Clearing the setting does not by itself restore the hub-wide default if a matching binding is still there. Legacy broker-scoped bindings can still be deleted (`DELETE /entitlements/:id`) or read normally; they just can't be created fresh or edited while staying broker-scoped — see the 400 below.
 Because of this, creating a **new** broker-scoped binding on `max_agents_per_broker`, or editing an existing one while keeping it broker-scoped (`POST` on `/limits/:id/entitlements`, or `PUT` on `/entitlements/:id` with `scopeType: "broker"`), now returns `400` with the message `per-broker agent caps are set via PUT /api/v1/runtime-brokers/{id}/settings`. System-scoped bindings for this limit are unaffected and continue to work as the hub-wide override.
 
+#### Conversion Plan (`/api/v1/runtime-brokers/:id/conversion-plan`)
+
+A legacy Runtime Broker computes a plan for moving its host to flat Runtime Broker instances from its own settings, and reports a publishable form of it on every heartbeat (`conversionPlanPresentation`). The Hub stores the plan read-only, and only from a heartbeat the Runtime Broker sends with its own credentials. A heartbeat that omits the field keeps the stored plan. A plan with an unknown `schemaVersion` is not stored. The plan carries only the publishable presentation of each proposed instance, the profile map, and the findings as `code`, `severity`, settings key `path` and `profiles`. It never carries a settings value or the converter's message. For the full plan, including the settings block, run `scion runtime-broker convert --plan` on the host.
+
+The Hub caps a reported plan at 64 KiB encoded, 64 instances, 512 findings, 256 profile map entries and 256 bytes per string. A plan over any cap is dropped: the stored plan is kept and the drop is counted, with no content. The Runtime Broker applies the same caps before sending. It drops whole entries (notice findings first, then blocking findings, then instances) and adds a blocking `plan_truncated` finding.
+
+- `GET /:id/conversion-plan`: Read the stored plan, plus what the Hub computes itself. GET only (`405` for any other method). Requires `broker.read` and the `hub.flat_runtime_brokers` experiment; with the experiment off the route answers `404`.
+  - `agents`: the non-terminal agents bound to the Runtime Broker that the caller can read, each with the instance its profile maps to. `terminalCount` counts the readable agents in a terminal phase; `hiddenCount` counts the ones the caller cannot read.
+  - `projects`: the projects the Runtime Broker provides that the caller can read, with their `activeProfile` and the profile keys of their per-profile default service accounts, each with its mapped instance. `hiddenCount` counts the projects the caller cannot read; nothing else about them is returned.
+  - `capacity`: the proposed per-instance `maxAgents` split of the Runtime Broker's `max_agents_per_broker` limit, planned with the Hub's values (the broker's own `maxAgents`, the inherited limit, enforcement and active reservations). Allocations are keyed by the proposed instance keys.
+
+Response shape:
+
+```json
+{
+  "brokerId": "…",
+  "observedAt": "2026-11-03T12:00:00Z",
+  "plan": {
+    "schemaVersion": 1,
+    "instances": [{ "schemaVersion": 1, "key": "docker-local", "name": "docker-local", "target": { "type": "docker" } }],
+    "profileMap": { "local": "docker-local" },
+    "findings": [{ "code": "unsupported_flat_target_type", "severity": "blocking", "path": "profiles.pod.runtime", "profiles": ["pod"] }],
+    "computedAt": "2026-11-03T11:59:00Z"
+  },
+  "agents": { "items": [], "hiddenCount": 0, "terminalCount": 0 },
+  "projects": { "items": [], "hiddenCount": 0 },
+  "capacity": { "outcome": "operator_decision_required", "reasons": ["…"] }
+}
+```
+
+Status codes: `404` if the Runtime Broker doesn't exist or the caller cannot read it; `404 conversion_plan_not_reported` if it has never reported a plan (upgrade the Runtime Broker); `409 runtime_broker_not_legacy` for a flat Runtime Broker.
+
 #### Artifacts (`/api/v1/artifacts`)
 Published files and bundles with stable, versioned `scion://artifact/<id>[@<seq>]` references: single-file publish (`POST /?name=<file>`), two-step publish (`POST /` or `POST /:id/versions` with a manifest, `PUT /:id/versions/:seq/files/:path`, `POST /:id/versions/:seq/finalize`), the caller's list (`GET /?mine=1`, optionally narrowed to one project with `scope=<project-id>`, which adds `canCreate` for the caller, or to what is shared with the caller with `shared=1`), metadata (`GET /:id`, `GET /:id/versions` (ready versions plus `discarded` ones, with only number, state, reason and the time the number was taken; a page can hold fewer than `limit` ready versions, so clients follow `nextBefore`), `GET /:id/versions/:seq`; `GET /:id` and `GET /:id/versions/:seq` carry `canManage`, `canShare`, `canRetire`, `canPublish`, `canReview` and `canGrantReview` for the caller, and `scopeDeleted` when the home project was deleted), file bytes (`GET /:id/files/:path`, `GET /:id/versions/:seq/files/:path`, with `?resolve=clean|accept` for a review's text with its CriticMarkup marks resolved), reviews (a version of kind `review`, checked at finalize), views of HTML bundles (`POST /:id/versions/:seq/view`, `GET /view/:capability/:path`), grants (`GET`, `POST /:id/grants`, `DELETE /:id/grants/:grantId`; on an artifact owned by an agent, the agent's delegating user and a home-project admin may also add a review grant for a user who can already read it through the home project or a grant to one of their projects; a review grant allows review versions only and gives no read access of its own), expiry and moving (`PATCH /:id`), and share links (`POST /:id/links`, `GET /:id/links` (with the hub's `defaultTtlHours` and `maxTtlHours`), `DELETE /:id/links/:linkId`, and `GET /shared/:token[/files/:path]`, which needs no credentials). Behind the `hub.artifacts` experiment (off by default): while it is off every route answers `404`. See [Artifacts](/scion/reference/artifacts/) for access rules, status codes and delivery headers.
 

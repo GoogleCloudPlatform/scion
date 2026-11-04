@@ -336,6 +336,13 @@ type BrokerHeartbeat struct {
 	// older process can never overwrite a newer one's snapshot.
 	PresentationEpoch int64 `json:"presentationEpoch,omitempty"`
 	PresentationSeq   int64 `json:"presentationSeq,omitempty"`
+	// ConversionPlanPresentation is a legacy Runtime Broker's publishable
+	// plan for moving to flat Runtime Broker instances
+	// (brokerconvert.Presentation), sent on every heartbeat as a snapshot
+	// of the plan last computed from the broker's settings. The Hub stores
+	// it read-only, only from the broker's own credentials. A flat instance
+	// and an older broker omit it; the Hub then keeps the stored value.
+	ConversionPlanPresentation *api.ConversionPlanPresentation `json:"conversionPlanPresentation,omitempty"`
 }
 
 // StartInFlight identifies one agent start running on a broker.

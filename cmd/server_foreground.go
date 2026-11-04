@@ -3086,6 +3086,9 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 	if err := hubSrv.RegisterBrokerPresenceMetrics(mp); err != nil {
 		log.Printf("WARNING: hub broker presence metrics disabled: %v", err)
 	}
+	if err := hubSrv.RegisterConversionPlanMetrics(mp); err != nil {
+		log.Printf("WARNING: hub conversion plan metrics disabled: %v", err)
+	}
 
 	if drainRec, err := hub.NewOTelConduitIngressDrainMetrics(mp); err != nil {
 		log.Printf("WARNING: hub conduit ingress drain metrics disabled: %v", err)

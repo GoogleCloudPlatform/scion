@@ -836,6 +836,9 @@ func entBrokerToStore(b *ent.RuntimeBroker) *store.RuntimeBroker {
 	unmarshalRawJSON(b.RuntimeTargetPresentation, &sb.RuntimeTargetPresentation)
 	sb.RuntimeTargetPresentationHash = b.RuntimeTargetPresentationHash
 	sb.RuntimeTargetPresentationObservedAt = b.PresentationObservedAt
+	unmarshalRawJSON(b.ConversionPlanPresentation, &sb.ConversionPlanPresentation)
+	sb.ConversionPlanHash = b.ConversionPlanPresentationHash
+	sb.ConversionPlanObservedAt = b.ConversionPlanObservedAt
 	sb.PresentationEpoch = b.PresentationEpoch
 	sb.PresentationSeq = b.PresentationSeq
 	sb.PresentationFencedAt = b.PresentationFencedAt
@@ -1019,7 +1022,9 @@ func (s *ProjectStore) UpdateRuntimeBroker(ctx context.Context, b *store.Runtime
 		// presentation_epoch, presentation_seq, presentation_fenced_at,
 		// presentation_observed_at): only SetRuntimeBrokerPresentation
 		// writes them, so a write-back of a copy read before a presentation
-		// write cannot roll it back. Do not add them to this list.
+		// write cannot roll it back. Do not add them to this list. The
+		// same holds for the three conversion plan columns, written only
+		// by SetRuntimeBrokerConversionPlan.
 		profiles, defaultProfile := b.Profiles, b.DefaultProfile
 		if cur.RuntimeTargetID != nil && *cur.RuntimeTargetID != "" {
 			if len(profiles) > 0 || defaultProfile != "" {

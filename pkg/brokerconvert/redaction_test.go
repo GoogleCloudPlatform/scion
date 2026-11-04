@@ -148,3 +148,26 @@ func TestFindingText_EveryCodeHasFixedText(t *testing.T) {
 	assert.Len(t, findingTexts, 8, "one text per frozen converter code")
 	assert.NotEmpty(t, FindingText("some_new_code"))
 }
+
+// TestRedaction_PresentationCarriesNoSettingsValue extends the redaction
+// test to the snapshot a legacy Runtime Broker publishes to the Hub: no
+// planted settings value appears anywhere in it, findings carry no text,
+// and every path is the converter's key path.
+func TestRedaction_PresentationCarriesNoSettingsValue(t *testing.T) {
+	p := plantedPlan(t)
+	pres := Presentation(p, testComputedAt)
+	b, err := json.Marshal(pres)
+	require.NoError(t, err)
+	out := string(b)
+	for _, v := range []string{plantedEnvA, plantedEnvB, plantedKubeconfig, plantedProfileEnv, plantedContext} {
+		assert.NotContains(t, out, v)
+	}
+	findings, err := json.Marshal(pres.Findings)
+	require.NoError(t, err)
+	assert.NotContains(t, string(findings), plantedPrefix, "findings never quote a value")
+	require.Len(t, pres.Findings, len(p.Findings))
+	for i, f := range pres.Findings {
+		assert.Equal(t, p.Findings[i].Path, f.Path)
+		assert.NotContains(t, out, p.Findings[i].Text)
+	}
+}
