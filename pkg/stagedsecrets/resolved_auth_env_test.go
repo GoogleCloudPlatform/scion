@@ -41,13 +41,32 @@ func realTempDir(t *testing.T) string {
 
 func TestReservedResolvedAuthEnvName(t *testing.T) {
 	for _, name := range []string{EnvVar, HubTokenStagedEnvVar, ResolvedAuthStagedEnvVar, "SCION_HOST_UID", "SCION_HOST_GID",
-		"SCION_STARTUP_LISTENER_PORT", "SCION_HARNESS_SECRETS_DIR", "SCION_HARNESS_OUTPUTS_DIR"} {
+		"SCION_STARTUP_LISTENER_PORT", "SCION_HARNESS_SECRETS_DIR", "SCION_HARNESS_OUTPUTS_DIR",
+		"PORT", "SCION_TRANSPORT_TOKEN", "SCION_TRANSPORT_TOKEN_EXPIRY", "SCION_EXTRA_PATH", "SCION_NATIVE_TELEMETRY_POLICY"} {
 		if !ReservedResolvedAuthEnvName(name) {
 			t.Errorf("%s is not reserved", name)
 		}
 	}
 	if ReservedResolvedAuthEnvName("ANTHROPIC_API_KEY") {
 		t.Error("control: ANTHROPIC_API_KEY is reserved")
+	}
+}
+
+// Every name init removes from the harness environment is reserved, and
+// the returned list is a copy.
+func TestHarnessStrippedEnvNamesReserved(t *testing.T) {
+	names := HarnessStrippedEnvNames()
+	if len(names) == 0 {
+		t.Fatal("control: HarnessStrippedEnvNames is empty")
+	}
+	for _, name := range names {
+		if !ReservedResolvedAuthEnvName(name) {
+			t.Errorf("%s is removed from the harness environment but not reserved", name)
+		}
+	}
+	names[0] = "CHANGED_BY_CALLER"
+	if HarnessStrippedEnvNames()[0] == "CHANGED_BY_CALLER" {
+		t.Error("HarnessStrippedEnvNames returned the package slice, not a copy")
 	}
 }
 

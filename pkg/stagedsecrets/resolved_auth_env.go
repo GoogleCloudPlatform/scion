@@ -77,20 +77,46 @@ func NewResolvedAuthNonce() (string, error) {
 // owner refusal.
 var resolvedAuthEnvOwner = func() (uid, gid int) { return os.Getuid(), os.Getgid() }
 
-// reservedResolvedAuthEnvNames are the names a resolved-auth entry in the
-// staged blob may never set: the names sciontool init reads from its own
-// environment (the staged blob and the staged-token marker) and the names
-// a runtime sets on the instance itself (the Cloud Run runtime keys).
-var reservedResolvedAuthEnvNames = map[string]bool{
-	EnvVar:                        true,
-	HubTokenStagedEnvVar:          true,
-	ResolvedAuthStagedEnvVar:      true,
-	"SCION_HOST_UID":              true,
-	"SCION_HOST_GID":              true,
-	"SCION_STARTUP_LISTENER_PORT": true,
-	"SCION_HARNESS_SECRETS_DIR":   true,
-	"SCION_HARNESS_OUTPUTS_DIR":   true,
+// harnessStrippedEnvNames are the names sciontool init removes from the
+// environment the harness inherits (os.Unsetenv in cmd/sciontool/commands,
+// removeEnvVar in pkg/sciontool/supervisor). A test in
+// cmd/sciontool/commands ties this list to those calls.
+var harnessStrippedEnvNames = []string{
+	EnvVar,
+	HubTokenStagedEnvVar,
+	ResolvedAuthStagedEnvVar,
+	"PORT",
+	"SCION_TRANSPORT_TOKEN",
+	"SCION_TRANSPORT_TOKEN_EXPIRY",
+	"SCION_EXTRA_PATH",
+	"SCION_NATIVE_TELEMETRY_POLICY",
 }
+
+// HarnessStrippedEnvNames returns a copy of the names sciontool init
+// removes from the environment the harness inherits. Each is reserved for
+// resolved-auth entries (ReservedResolvedAuthEnvName).
+func HarnessStrippedEnvNames() []string {
+	return append([]string(nil), harnessStrippedEnvNames...)
+}
+
+// reservedResolvedAuthEnvNames are the names a resolved-auth entry in the
+// staged blob may never set: the names sciontool init removes from the
+// harness environment (harnessStrippedEnvNames, which include the names
+// init reads from its own environment) and the names a runtime sets on the
+// instance itself (the Cloud Run runtime keys).
+var reservedResolvedAuthEnvNames = func() map[string]bool {
+	m := map[string]bool{
+		"SCION_HOST_UID":              true,
+		"SCION_HOST_GID":              true,
+		"SCION_STARTUP_LISTENER_PORT": true,
+		"SCION_HARNESS_SECRETS_DIR":   true,
+		"SCION_HARNESS_OUTPUTS_DIR":   true,
+	}
+	for _, name := range harnessStrippedEnvNames {
+		m[name] = true
+	}
+	return m
+}()
 
 // ReservedResolvedAuthEnvName reports whether name may not be set by a
 // resolved-auth entry carried in the staged blob. The broker drops such an

@@ -531,6 +531,29 @@ func TestReservedResolvedAuthEnvName_CoversCloudRunRuntimeKeys(t *testing.T) {
 	}
 }
 
+// A resolved-auth entry named like an entry sciontool init removes from the
+// harness environment is never staged: the broker split drops it, and Run
+// serializes no such entry into the staged blob.
+func TestCloudRunRun_ResolvedAuthDropsHarnessStrippedNames(t *testing.T) {
+	names := []string{"PORT", "SCION_TRANSPORT_TOKEN", "SCION_TRANSPORT_TOKEN_EXPIRY", "SCION_EXTRA_PATH", "SCION_NATIVE_TELEMETRY_POLICY"}
+	env := map[string]string{"EXAMPLE_AUTH_CONTROL": "keep"}
+	for _, name := range names {
+		env[name] = "placeholder-stripped-name-value"
+	}
+	_, split := splitResolvedAuthEnv(&api.ResolvedAuth{EnvVars: env}, nil)
+	_, staged := cloudRunRunFor(t, RunConfig{ResolvedAuth: &api.ResolvedAuth{EnvVars: env}})
+	for where, got := range map[string]map[string]string{"split": split, "Run staged blob": staged} {
+		for _, name := range names {
+			if _, ok := got[name]; ok {
+				t.Errorf("%s: resolved-auth entry %s is staged", where, name)
+			}
+		}
+		if got["EXAMPLE_AUTH_CONTROL"] != "keep" {
+			t.Errorf("%s: control: an ordinary resolved-auth entry is not staged", where)
+		}
+	}
+}
+
 // The resolved-auth staged marker is reserved like the staged-token
 // marker: no container environment carries it on Docker or Cloud Run, and
 // no staged resolved-auth entry sets it.

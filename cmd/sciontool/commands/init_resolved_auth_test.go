@@ -83,6 +83,11 @@ func TestTakeResolvedAuthEnv_DropsReservedNamesAtInit(t *testing.T) {
 		stagedsecrets.EnvVar:               "left-over",
 		"SCION_HOST_UID":                   "0",
 		"SCION_HARNESS_SECRETS_DIR":        "/left-over",
+		"PORT":                             "1",
+		"SCION_TRANSPORT_TOKEN":            "left-over",
+		"SCION_TRANSPORT_TOKEN_EXPIRY":     "left-over",
+		"SCION_EXTRA_PATH":                 "/left-over",
+		"SCION_NATIVE_TELEMETRY_POLICY":    "left-over",
 		"EXAMPLE_API_KEY":                  resolvedAuthCanary,
 	}); err != nil {
 		t.Fatalf("WriteResolvedAuthEnv: %v", err)
@@ -91,7 +96,8 @@ func TestTakeResolvedAuthEnv_DropsReservedNamesAtInit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("takeResolvedAuthEnv: %v", err)
 	}
-	for _, name := range []string{stagedsecrets.HubTokenStagedEnvVar, stagedsecrets.EnvVar, "SCION_HOST_UID", "SCION_HARNESS_SECRETS_DIR"} {
+	for _, name := range []string{stagedsecrets.HubTokenStagedEnvVar, stagedsecrets.EnvVar, "SCION_HOST_UID", "SCION_HARNESS_SECRETS_DIR",
+		"PORT", "SCION_TRANSPORT_TOKEN", "SCION_TRANSPORT_TOKEN_EXPIRY", "SCION_EXTRA_PATH", "SCION_NATIVE_TELEMETRY_POLICY"} {
 		if _, ok := got[name]; ok {
 			t.Errorf("reserved name %s reached the harness env entries", name)
 		}
