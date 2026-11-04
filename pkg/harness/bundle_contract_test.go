@@ -339,8 +339,6 @@ func readJSONFile(t *testing.T, path string) map[string]interface{} {
 	return result
 }
 
-// assertJSONSubset checks that every key in want exists in got with the same value.
-// This allows the actual output to contain additional keys (forward-compatible).
 // assertJSONSubset checks that got holds every key of want with an equal
 // value. With redact set (env.json, whose values can be credentials) a
 // mismatch reports the key and the value lengths only, never a value.

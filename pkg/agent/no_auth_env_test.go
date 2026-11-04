@@ -63,6 +63,7 @@ func TestApplyNoAuthEnv_ReservedNamesDropped(t *testing.T) {
 		"GCE_METADATA_HOST",
 		"TZ",
 		api.EnvGitTokenRemote,
+		"SCION_GIT_CLONE_URL",
 	}
 	cfg := &config.HarnessNoAuthConfig{Behavior: "drop-to-shell", Env: map[string]string{
 		"DBUS_SESSION_BUS_ADDRESS": testNoSessionBus,

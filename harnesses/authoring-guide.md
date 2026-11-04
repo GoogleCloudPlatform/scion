@@ -480,7 +480,9 @@ names to literal values. Scion adds them to the container only when the agent
 runs in no-auth mode (the bundle needs a `no_auth` block), never for a start
 with credentials. An entry never replaces env set by settings, the agent or
 the hub, and names reserved for scion (`SCION_*`, `GCE_METADATA_*`, hub-only
-keys) are ignored with a warning, as is an invalid file. Like
+keys) and entries with an empty value are ignored with a warning, as is an
+invalid file; an entry whose name is empty or contains `=` is ignored without a
+warning. Like
 `agent-plugins.yaml`, it is kept out of `config.yaml` so older binaries can
 still validate `config.yaml`; they ignore the file. Copilot uses it to run
 without a session bus:
