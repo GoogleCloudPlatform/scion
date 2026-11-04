@@ -499,11 +499,8 @@ common CLI flows need:
 | `scion delete` | `project:read`, `agent:delete` |
 | `scion project service-accounts list`, `scion service-accounts list` | `project:read` (a project's accounts) |
 
-A token without `project:read` gets `404 Not Found` on a direct project lookup, and a token
-without `project:read` and `project:list` gets an empty list when the CLI resolves a project by
-its slug, name, or git remote URL. In both cases the CLI reports the likely missing
-`project:read` and `project:list` scopes (noting that `project:manage` does not include them)
-and stops instead of suggesting `scion hub link`. A user access token cannot register a new
+A token without `project:read` gets `404 Not Found` on the project lookup. The CLI reports this
+as a likely missing `project:read` scope and stops. A user access token cannot register a new
 project, so the CLI does not try to link or register the project under one. Link the project
 once with an interactive login (`scion hub link`), then use the token.
 
