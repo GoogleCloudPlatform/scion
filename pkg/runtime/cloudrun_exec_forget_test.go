@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // forgettingExecConnector records Forget calls; its exec methods are unused.
@@ -41,6 +43,9 @@ func TestCloudRunTeardown_ForgetsExecKey(t *testing.T) {
 		{"Delete", &fakeInstancesClient{}, func(rt *CloudRunRuntime) error { return rt.Delete(context.Background(), RunRef{ID: id}) }},
 		{"Stop error", &fakeInstancesClient{stopErr: errors.New("boom")}, func(rt *CloudRunRuntime) error { return rt.Stop(context.Background(), RunRef{ID: id}) }},
 		{"Delete error", &fakeInstancesClient{deleteErr: errors.New("boom")}, func(rt *CloudRunRuntime) error { return rt.Delete(context.Background(), RunRef{ID: id}) }},
+		{"DeleteResource", &fakeInstancesClient{getInstance: ciInstance(ciRunA)}, func(rt *CloudRunRuntime) error {
+			return rt.DeleteResource(context.Background(), api.ResourceHandle{Kind: api.ResourceKindCloudRunInstance, Namespace: ciParent, Name: id, UID: ciRunA})
+		}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -52,6 +57,43 @@ func TestCloudRunTeardown_ForgetsExecKey(t *testing.T) {
 
 			if len(conn.forgotten) != 1 || conn.forgotten[0] != want {
 				t.Errorf("Forget calls = %q, want [%q]", conn.forgotten, want)
+			}
+		})
+	}
+}
+
+// A handle DeleteResource refuses before any call is not this runtime's
+// instance, so it keeps the exec key. The config is resolved first, so a
+// forget deferred before the refusal checks would be recorded.
+func TestCloudRunDeleteResource_RefusedHandleKeepsExecKey(t *testing.T) {
+	const id = "agent-foo-0123456789"
+	own := api.ResourceHandle{Kind: api.ResourceKindCloudRunInstance, Namespace: ciParent, Name: id, UID: ciRunA}
+
+	tests := []struct {
+		name   string
+		handle func(h api.ResourceHandle) api.ResourceHandle
+	}{
+		{"wrong namespace", func(h api.ResourceHandle) api.ResourceHandle {
+			h.Namespace = "projects/other-project/locations/us-central1"
+			return h
+		}},
+		{"wrong kind", func(h api.ResourceHandle) api.ResourceHandle { h.Kind = "other-kind"; return h }},
+		{"empty UID", func(h api.ResourceHandle) api.ResourceHandle { h.UID = ""; return h }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := newFakeCloudRunRuntime(t, &fakeInstancesClient{getInstance: ciInstance(ciRunA)})
+			conn := &forgettingExecConnector{}
+			rt.exec = conn
+			if err := rt.resolveConfig(context.Background()); err != nil {
+				t.Fatalf("resolveConfig: %v", err)
+			}
+
+			if err := rt.DeleteResource(context.Background(), tc.handle(own)); err == nil {
+				t.Errorf("DeleteResource = nil, want an error")
+			}
+			if len(conn.forgotten) != 0 {
+				t.Errorf("Forget calls = %q, want none", conn.forgotten)
 			}
 		})
 	}
