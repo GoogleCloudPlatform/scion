@@ -382,8 +382,8 @@ severity:
 | HIGH | a staying var initialiser that calls a moved func or a method of a moved type. This includes calls inside immediately-invoked func literals and calls through staying helpers that reach moved code (a static call graph over the package). Moved package state is now initialised before every source initialiser; for example, a registry filled by a staying initialiser looks empty to a moved initialiser |
 | HIGH | TestMain separation: moved tests leave a package that has a `TestMain` (see [TestMain](#testmain)), including into an existing target whose own `TestMain` differs |
 | HIGH | source-scanning test does not cover the target: a test file of the source package (staying or moved) imports `go/parser` or `go/packages` and enumerates files (`os.ReadDir`, `filepath.Glob`, `WalkDir`, `os.Getwd`, `parser.ParseDir`, `packages.Load`, ...). Such guard tests silently stop scanning the moved files and still pass. A file with a [`pkgmove:scan-covers`](#declaring-scan-coverage-pkgmovescan-covers) marker that covers the target gets the INFO below instead |
-| HIGH | outside reference to a moved file: a string literal in any other Go file of the module (the source package's staying files included) names a moved file by its repo path (`"pkg/hub/x.go"`), by its path elements (`filepath.Join("pkg", "hub", "x.go")`) or by its base name (`"x.go"`, `"x.go:fn"`), or a line of `hack/**/*.sh`, `hack/**/*.txt`, the root `Makefile` or `.github/workflows/*.yml` does. After the move it silently stops matching (see [Outside references](#outside-references-to-moved-files-pkgmoveref-ok)). A `pkgmove:ref-ok` comment on the line above gets the INFO below instead; with `-rewrite-outrefs`, an exact repo-path form is rewritten and gets the other INFO below |
-| HIGH | Function field next to a rewritten File field not rewritten (-rewrite-outrefs): the field is not a string literal, names a function the move renames in another file, or is ambiguous (see [Outside references](#outside-references-to-moved-files-pkgmoveref-ok)) |
+| HIGH | outside reference to a moved file: a string literal in any other Go file of the module (the source package's staying files included) names a moved file by its repo path (`"pkg/hub/x.go"`), by its path elements (`filepath.Join("pkg", "hub", "x.go")`) or by its base name (`"x.go"`, `"x.go:fn"`), or a line of `hack/**/*.sh`, `hack/**/*.txt` (outside `testdata`), the root `Makefile` or `.github/workflows/*.yml` does. After the move it silently stops matching (see [Outside references](#outside-references-to-moved-files-pkgmoveref-ok)). A `pkgmove:ref-ok` comment on the line above gets the INFO below instead; with `-rewrite-outrefs`, an exact repo-path form is rewritten and gets the other INFO below |
+| HIGH | Function field next to a rewritten File field not rewritten (-rewrite-outrefs): the field is not a string literal, names a function the move renames in another file, is ambiguous, or the moved file was not type-checked (see [Outside references](#outside-references-to-moved-files-pkgmoveref-ok)) |
 | WARN | a staying var initialiser that makes dynamic calls (through func values or interfaces), directly or through helpers, when the moved files have package-level state |
 | WARN | each moved func or method whose value is taken, plus exported funcs (var aliases): `runtime.FuncForPC` names and panic traces show the new package path |
 | WARN | a wrapper alias used as a func value in a moved file: the moved file now uses the target func, whose identity differs from staying uses of the wrapper |
@@ -587,10 +587,16 @@ pkgmove scans the module for each moved file (and each moved file asset):
   `"src/x.go"`, which names another file of the same name) is a *base name*
   reference. A file that does not parse is matched as text.
 - **Text files:** `hack/**/*.sh`, `hack/**/*.txt` (baselines and allowlists
-  such as `hack/hub-store-reassign-baseline.txt` and
-  `hack/winsec-unprotected.txt`), the root `Makefile` and
+  such as `hack/hub-store-reassign-baseline.txt`,
+  `hack/winsec-unprotected.txt`, `hack/store-delete-callers-allowlist.txt`
+  and `hack/time-literals-allowlist.txt`), the root `Makefile` and
   `.github/workflows/*.yml` (and `.yaml`), matched line by line for the repo
-  path or the base name (same rule), comments included.
+  path or the base name (same rule), comments included. `.txt` files under a
+  `testdata` directory are skipped: fixture and golden text (pkgmove's own
+  `testdata/*/want/` trees) cannot carry a marker without changing what it
+  pins. Base-name hits in live `hack` text files (for example
+  `hack/hubshard/extract/bulk-keep.txt` and the extract family lists) are
+  reported on purpose, as HIGH, like any other base-name reference.
 - **Skipped:** directories named `.design`, `docs-site`, `node_modules` or
   `vendor`, other dot directories except `.github`, and Markdown files.
   `testdata` directories are scanned: a fixture that names a moved path is
@@ -628,16 +634,23 @@ file's new path, and lists each one as an INFO (and in the plan, under
   and `Scope` fields);
 - a `hack/**/*.txt` line that starts with the repo path, optionally followed
   by a colon and an identifier, and then a blank or the end of the line
-  (`pkg/hub/x.go | 3`, `pkg/hub/x.go unprotected`).
+  (`pkg/hub/x.go | 3`, `pkg/hub/x.go unprotected`). A line whose remainder
+  names an identifier the move renames (a function column, as in
+  `pkg/hub/x.go | createProject | 2`) is not rewritten: the HIGH says which
+  name, since the path alone would leave the entry stale.
 
-When the move renames the identifier (an export, `-rename` included), the
-identifier is rewritten too: `"pkg/hub/x.go:authorizeAgentCreate"` becomes
+The identifier is looked up among the objects of that name declared in, or
+used from, the named file (type information). When the move renames them
+(an export, `-rename` included) to one new name, the identifier is rewritten
+too: `"pkg/hub/x.go:authorizeAgentCreate"` becomes
 `"pkg/hub/area/x.go:AuthorizeAgentCreate"`. The reference then names the same
 file and the same symbol as before, so a check that reads the file and looks
-for the symbol (`assertEnforcementReferenceExists`: `../../<path>` and
-`strings.Contains(symbol)`) passes exactly when it passed before the move. An
-identifier the move makes ambiguous (renamed for one moved object, kept or
-renamed differently for another) is not rewritten, and the HIGH says why.
+for the symbol as a whole identifier (`assertEnforcementReferenceExists`:
+`../../<path>` and `strings.Contains(symbol)`) passes after the move when it
+passed before. The identifier is not rewritten, and the HIGH says why, when it
+is ambiguous in that file (renamed for one object, kept or renamed differently
+for another), when the move renames that name only in other files, or when the
+named file was not type-checked and the move renames the name somewhere.
 
 **`Function` next to `File`** (the authzop catalog, keyed by file and
 enclosing function): when `-rewrite-outrefs` rewrites the `File` field of a

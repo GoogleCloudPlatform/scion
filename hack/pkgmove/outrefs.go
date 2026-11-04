@@ -171,6 +171,10 @@ func (a *analysis) outsideRefFindings() {
 		var text bool
 		switch {
 		case strings.HasSuffix(rel, ".go"):
+		case strings.HasPrefix(rel, "hack/") && strings.HasSuffix(rel, ".txt") && strings.Contains("/"+rel, "/testdata/"):
+			// Fixture and golden text (pkgmove's own want/ trees) cannot carry a
+			// ref-ok marker without changing what it fixes; Go testdata stays in scope.
+			return nil
 		case strings.HasPrefix(rel, "hack/") && (strings.HasSuffix(rel, ".sh") || strings.HasSuffix(rel, ".txt")),
 			rel == "Makefile",
 			path.Dir(rel) == ".github/workflows" && (strings.HasSuffix(rel, ".yml") || strings.HasSuffix(rel, ".yaml")):
@@ -467,7 +471,7 @@ func (a *analysis) outRefRewrite(r outsideRef) (text, shown, why string) {
 			if !ok || !token.IsIdentifier(name) {
 				return "", "", ""
 			}
-			n, why := a.outRefName(name)
+			n, why := a.outRefName(name, m)
 			if why != "" {
 				return "", "", why
 			}
@@ -494,7 +498,7 @@ func (a *analysis) outRefRewrite(r outsideRef) (text, shown, why string) {
 			if !token.IsIdentifier(after[:k]) {
 				return "", "", ""
 			}
-			n, why := a.outRefName(after[:k])
+			n, why := a.outRefName(after[:k], m)
 			if why != "" {
 				return "", "", why
 			}
@@ -506,6 +510,14 @@ func (a *analysis) outRefRewrite(r outsideRef) (text, shown, why string) {
 		}
 		if containsPathElem(rest, m.repo) {
 			return "", "", " (not rewritten: the line names the path more than once)"
+		}
+		// A column naming a function (store-delete-callers-allowlist.txt,
+		// time-literals-allowlist.txt: "<path> | <function> | ...") would go
+		// stale if the move renames it.
+		for _, tok := range strings.FieldsFunc(rest, func(c rune) bool { return c >= utf8.RuneSelf || !isIdentByte(byte(c)) }) {
+			if news := a.renamesOf(tok); len(news) > 0 {
+				return "", "", fmt.Sprintf(" (not rewritten: the line also names %s, which the move renames to %s)", tok, strings.Join(news, " or "))
+			}
 		}
 		line := head + rest
 		return line, strconv.Quote(shortenRef(strings.TrimSpace(line))), ""
@@ -565,19 +577,8 @@ func (a *analysis) rewriteFunctionField(r outsideRef) {
 		return
 	}
 	if len(news) == 0 {
-		var where []string
-		for _, ren := range []map[types.Object]string{a.pkgRename, a.memberRename} {
-			for obj := range ren {
-				if obj.Name() == fn.value {
-					if hf := a.home(obj); hf != nil {
-						where = append(where, a.rel(hf.Path))
-					}
-				}
-			}
-		}
-		if len(where) > 0 {
-			sort.Strings(where)
-			high(fmt.Sprintf("%s is not declared in %s; the move renames it in %s", fn.value, r.moved.repo, strings.Join(dedupStrings(where), ", ")))
+		if where := a.renamedFiles(fn.value); len(where) > 0 {
+			high(fmt.Sprintf("%s is not declared in %s; the move renames it in %s", fn.value, r.moved.repo, strings.Join(where, ", ")))
 		}
 		return
 	}
@@ -608,34 +609,49 @@ func (a *analysis) rewriteFunctionField(r outsideRef) {
 }
 
 // outRefName returns the name an identifier of a "path:name" reference has
-// after the move: its new name when the move renames a moved package-level
-// object or member of that name, else itself. why is set (and the reference
-// is not rewritten) when the name is ambiguous: renamed to more than one new
-// name, or renamed for one object and kept for another moved package-level
-// object.
-func (a *analysis) outRefName(name string) (string, string) {
-	news := map[string]bool{}
-	for obj, n := range a.pkgRename {
-		if obj.Name() == name {
-			news[n] = true
+// after the move. Only the objects of that name declared in, or used from,
+// the named moved file count (type information of the checked unit): their
+// single new name, or the name itself when none of them is renamed. why is
+// set, and the reference is not rewritten, when the name is ambiguous there
+// (renamed for one object and kept, or renamed differently, for another),
+// when the move renames the name only in other files, or when the named file
+// was not type-checked (build tags, external test) and the move renames the
+// name somewhere.
+func (a *analysis) outRefName(name string, m *movedRef) (string, string) {
+	renamedAt := a.renamedFiles(name)
+	f := a.byPath[filepath.Join(a.cfg.SrcDir, m.base)]
+	checked := false
+	for _, c := range a.checked {
+		if c == f {
+			checked = true
+			break
 		}
 	}
-	for obj, n := range a.memberRename {
-		if obj.Name() == name {
-			news[n] = true
+	if f == nil || !checked {
+		if len(renamedAt) > 0 {
+			return "", fmt.Sprintf(" (not rewritten: %s was not type-checked, and the move renames %s in %s)", m.repo, name, strings.Join(renamedAt, ", "))
 		}
-	}
-	if len(news) == 0 {
 		return name, ""
 	}
-	if len(news) == 1 {
-		if obj := a.pkg.Scope().Lookup(name); obj != nil {
-			if f := a.home(obj); f != nil && f.Moved {
-				if _, renamed := a.pkgRename[obj]; !renamed {
-					news[name] = true
-				}
-			}
+	news := map[string]bool{}
+	for _, u := range a.uses {
+		if u.file != f || u.obj == nil || u.id.Name != name {
+			continue
 		}
+		n, renamed := a.pkgRename[u.obj]
+		if !renamed {
+			n, renamed = a.memberRename[u.obj]
+		}
+		if !renamed {
+			n = name
+		}
+		news[n] = true
+	}
+	if len(news) == 0 {
+		if len(renamedAt) > 0 {
+			return "", fmt.Sprintf(" (not rewritten: %s is renamed in %s, not in %s)", name, strings.Join(renamedAt, ", "), m.repo)
+		}
+		return name, ""
 	}
 	if len(news) > 1 {
 		var all []string
@@ -649,6 +665,42 @@ func (a *analysis) outRefName(name string) (string, string) {
 		return n, ""
 	}
 	return name, ""
+}
+
+// renamesOf returns the sorted new names the move gives objects named name
+// (package-level objects and members, in any file).
+func (a *analysis) renamesOf(name string) []string {
+	set := map[string]bool{}
+	for _, ren := range []map[types.Object]string{a.pkgRename, a.memberRename} {
+		for obj, n := range ren {
+			if obj.Name() == name && n != name {
+				set[n] = true
+			}
+		}
+	}
+	var out []string
+	for n := range set {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// renamedFiles returns the sorted module-relative files declaring an object
+// named name that the move renames.
+func (a *analysis) renamedFiles(name string) []string {
+	var where []string
+	for _, ren := range []map[types.Object]string{a.pkgRename, a.memberRename} {
+		for obj, n := range ren {
+			if obj.Name() == name && n != name {
+				if hf := a.home(obj); hf != nil {
+					where = append(where, a.rel(hf.Path))
+				}
+			}
+		}
+	}
+	sort.Strings(where)
+	return dedupStrings(where)
 }
 
 // addOutRefEdit records a -rewrite-outrefs edit: through the file edits for
