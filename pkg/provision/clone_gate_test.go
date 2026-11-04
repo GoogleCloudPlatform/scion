@@ -77,7 +77,10 @@ func TestProvisionShared_RefusesHostCloneURLWhenAlreadyProvisioned(t *testing.T)
 	origin := initBareGitRepo(t)
 	hostPath := t.TempDir()
 	require.NoError(t, ProvisionShared(sharedPlainInput(hostPath, origin)))
-	require.FileExists(t, filepath.Join(hostPath, ProvisionSentinelFile))
+	// The sentinel is kept in the project's provisioning state directory
+	// (sharedPlainInput's SentinelDir), never in the workspace root (AC-L3).
+	require.FileExists(t, filepath.Join(ProjectStateDir(hostPath), ProvisionSentinelFile))
+	assert.NoFileExists(t, filepath.Join(hostPath, ProvisionSentinelFile), "no sentinel in the workspace root (AC-L3)")
 
 	for name, cloneURL := range refusedCloneURLs(t) {
 		t.Run(name, func(t *testing.T) {
