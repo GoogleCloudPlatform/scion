@@ -326,8 +326,9 @@ run next.
 
 This lets you launch an agent, log in to the harness interactively (e.g. `claude setup-token`,
 `copilot login`, `hermes setup`, `agy`), and then capture the resulting credentials for reuse
-(see below). Every bundle declares `no_auth.behavior: drop-to-shell` along with the harness's
-login command and message.
+(see below). Every bundle declares `no_auth.behavior: drop-to-shell` along with a message, and
+optionally a login command to run first. Copilot runs no command: it starts a shell with sign-in
+instructions.
 
 The fallback applies only to **automatic** resolution. If you selected an auth type via the
 [Explicit Path](#the-explicit-path), the fallback is disabled — the required credentials must be

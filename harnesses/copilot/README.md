@@ -45,8 +45,9 @@ Token precedence: `COPILOT_GITHUB_TOKEN` > `GH_TOKEN` > `GITHUB_TOKEN`.
 
 ### Interactive Login (No-Auth Fallback)
 
-If no token is provided, the agent drops to a shell. Run `copilot login` to
-authenticate via browser-based OAuth device flow, then capture credentials:
+If no token is provided, the agent starts a shell with sign-in instructions;
+it does not sign in automatically. Run `copilot login` to authenticate via
+browser-based OAuth device flow, then capture credentials:
 
 ```bash
 python3 /home/scion/.scion/harness/capture_auth.py

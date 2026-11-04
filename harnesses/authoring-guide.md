@@ -470,6 +470,9 @@ the host from your `required_files` declarations) and stores each credential
 as a project secret via `sciontool secret set` — so the next agent starts
 authenticated.
 
+`command` is optional: without it the agent starts the shell with the message
+only.
+
 ### MCP (declarative mapping)
 
 If your tool's MCP registry is a JSON file with per-server entries that match

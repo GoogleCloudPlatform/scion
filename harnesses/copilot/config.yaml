@@ -98,7 +98,8 @@ capabilities:
 
 no_auth:
   behavior: drop-to-shell
-  command: copilot login
+  # No automatic sign-in: the agent starts a shell with the instructions
+  # below.
   message: |
     This agent started without credentials.
     Run: copilot login
