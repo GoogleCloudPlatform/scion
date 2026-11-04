@@ -30,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/keymaterial"
 	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret/secretenvelope"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -67,10 +68,16 @@ type EncryptionAudit struct {
 	// Scanned counts every row; ReferenceOnly the empty rows with a
 	// backend reference, which hold no local payload and are not read.
 	Scanned, ReferenceOnly, Readable int
-	// ByFormat counts readable and unreadable payloads by envelope format
-	// ("plaintext", "v1", "v2", "invalid").
+	// EmptyNoRef counts rows with an empty value and no backend
+	// reference; they are read as plaintext like any other row (so a
+	// managed cipher reports them unreadable).
+	EmptyNoRef int
+	// ByFormat counts readable payloads by the format they authenticated
+	// in ("plaintext", "v1", "v2"); unreadable payloads are only in
+	// Unreadable.
 	ByFormat map[string]int
-	// ByKID counts v2 payloads by key ID.
+	// ByKID counts readable v2 payloads by the key ID that authenticated
+	// them (never the envelope label alone).
 	ByKID map[string]int
 	// Unreadable lists every record that failed, infrastructure included.
 	Unreadable []AuditRecord
@@ -200,57 +207,45 @@ func checkEncryptionPolicy(ctx context.Context, st store.SecretEncryptionStore, 
 	return nil
 }
 
-// runEncryptionAudit authenticates every stored payload with c and
-// validates the infrastructure backups. Reference-only rows (empty value,
-// non-empty ref) hold no local payload and are skipped. A scan failure is
-// returned; record failures are reported in the result.
+// runEncryptionAudit aggregates the authenticating scan (encryption_scan.go)
+// of every stored payload with c. Reference-only rows (empty value,
+// non-empty ref) hold no local payload and are never decrypted. Formats
+// and key IDs are those of the key that authenticated a row, so only
+// readable rows are counted by format and key ID; unreadable rows are
+// listed with their failure kind. A scan failure is returned; record
+// failures are reported in the result.
 func runEncryptionAudit(ctx context.Context, st store.SecretStore, c *secret.ValueCipher) (EncryptionAudit, error) {
 	a := EncryptionAudit{Done: true, ByFormat: map[string]int{}, ByKID: map[string]int{}}
-	after := ""
-	for {
-		page, err := st.ScanSecretPayloads(ctx, after, store.MaxSecretPayloadScan)
-		if err != nil {
-			return EncryptionAudit{}, fmt.Errorf("scanning stored secret payloads: %w", err)
+	n, err := scanSecretPayloads(ctx, st, c, func(row ScanRow) error {
+		cl := row.Class
+		if cl.ReferenceOnly {
+			a.ReferenceOnly++
+			return nil
 		}
-		for _, p := range page {
-			a.Scanned++
-			if p.EncryptedValue == "" && p.SecretRef != "" {
-				a.ReferenceOnly++
-				continue
-			}
-			format := "invalid"
-			if env, err := c.Inspect(p.EncryptedValue); err == nil {
-				format = env.Format.String()
-				if env.KID != "" {
-					a.ByKID[env.KID]++
-				}
-			}
-			a.ByFormat[format]++
-			kind := ""
-			plain, err := c.Decrypt(p.EncryptedValue)
-			if err != nil {
-				kind = secret.DecryptFailureKind(err)
-			} else if v, ok := infraPayloadValidators[p.Key]; ok && p.Scope == store.ScopeHub {
-				if v(plain) != nil {
-					kind = auditKindInvalidPayload
-				}
-			}
-			if kind == "" {
-				a.Readable++
-				continue
-			}
-			rec := AuditRecord{ID: p.ID, Key: p.Key, Scope: p.Scope, ScopeID: p.ScopeID, Kind: kind}
-			a.Unreadable = append(a.Unreadable, rec)
-			if isInfraBackup(p.Key, p.Scope) {
-				a.BackupUnreadable = append(a.BackupUnreadable, rec)
-			}
+		if cl.EmptyNoRef {
+			a.EmptyNoRef++
 		}
-		if len(page) < store.MaxSecretPayloadScan {
-			a.At = time.Now().UTC()
-			return a, nil
+		if cl.Readable() {
+			a.Readable++
+			a.ByFormat[cl.Format]++
+			if cl.Format == secretenvelope.FormatV2.String() {
+				a.ByKID[cl.KID]++
+			}
+			return nil
 		}
-		after = page[len(page)-1].ID
+		rec := AuditRecord{ID: row.ID, Key: row.Key, Scope: row.Scope, ScopeID: row.ScopeID, Kind: cl.Failure}
+		a.Unreadable = append(a.Unreadable, rec)
+		if isInfraBackup(row.Key, row.Scope) {
+			a.BackupUnreadable = append(a.BackupUnreadable, rec)
+		}
+		return nil
+	})
+	if err != nil {
+		return EncryptionAudit{}, err
 	}
+	a.Scanned = n
+	a.At = time.Now().UTC()
+	return a, nil
 }
 
 // startupEncryptionChecks runs the policy check and the audit in New,

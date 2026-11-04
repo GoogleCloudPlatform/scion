@@ -360,9 +360,15 @@ func TestEnsureNFSAgentWorkspaceLeaf(t *testing.T) {
 	resolved := resolveTestNFSWorkspace(t, mountRoot)
 	ws := filepath.Join(nfsTestAgentDir(mountRoot, "agent-1"), provision.AgentWorkspaceDir)
 
-	ok, err := ensureNFSAgentWorkspaceLeaf("docker", testNFSWorkspaceProjectID, resolved, runtime.NFSPodShare{ClaimName: "ws-pv"}, nil, "agent-1")
-	require.NoError(t, err)
+	// A local container runtime creates the agent's own directory through
+	// the same helper (no pod share needed), so an export that is not
+	// mounted on the broker refuses it, with the local remedy.
+	ok, err := ensureNFSAgentWorkspaceLeaf("docker", testNFSWorkspaceProjectID, resolved, runtime.NFSPodShare{}, nil, "agent-1")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrProjectShareNotMounted), "err = %v", err)
+	assert.Contains(t, ProjectShareClientText(err), "auto_mount")
 	assert.False(t, ok)
+	assert.NoDirExists(t, mountRoot)
 
 	require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share-1"), 0o755))
 	ok, err = ensureNFSAgentWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, resolved, runtime.NFSPodShare{ClaimName: "ws-pv"}, nil, "agent-1")

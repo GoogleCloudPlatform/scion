@@ -451,3 +451,88 @@ func assertNoLeak(t *testing.T, msg, stored string) {
 		t.Fatal("error text echoes the stored value")
 	}
 }
+
+// DecryptAuthenticated reports the key whose authenticated decryption
+// succeeded, not the envelope label: for v1 (no label) the legacy reader
+// that opened it, whatever its position in legacy_v1_read_ids.
+func TestValueCipher_DecryptAuthenticatedReportsOpeningKey(t *testing.T) {
+	tests := []struct {
+		name   string
+		c      *secret.ValueCipher
+		in     string
+		format secretenvelope.Format
+		kid    string
+	}{
+		{"v1 under the second legacy reader",
+			ciphertest.Cipher(t, ciphertest.Ring{Active: "k2", IDs: []string{"k2", "old", keyring.LegacyID}, V1Readers: []string{"old", keyring.LegacyID}}),
+			goldenV1, secretenvelope.FormatV1, keyring.LegacyID},
+		{"v1 under the first legacy reader",
+			ciphertest.Cipher(t, ciphertest.Ring{Active: "k2", IDs: []string{"k2", "old", keyring.LegacyID}, V1Readers: []string{keyring.LegacyID, "old"}}),
+			goldenV1, secretenvelope.FormatV1, keyring.LegacyID},
+		{"v2 under its named key", ciphertest.Cipher(t, v2Ring("k1", "k1", "k2")), goldenV2, secretenvelope.FormatV2, "k2"},
+		{"legacy plaintext", ciphertest.Legacy(), "fake-legacy-plaintext", secretenvelope.FormatPlaintext, ""},
+		{"disabled plaintext", secret.NewLegacyValueCipher(""), "fake-legacy-plaintext", secretenvelope.FormatPlaintext, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pt, auth, err := tc.c.DecryptAuthenticated(tc.in)
+			if err != nil {
+				t.Fatalf("DecryptAuthenticated: %v", err)
+			}
+			if auth.Format != tc.format || auth.KID != tc.kid {
+				t.Fatalf("authentication = {%s %q}, want {%s %q}", auth.Format, auth.KID, tc.format, tc.kid)
+			}
+			want, err := tc.c.Decrypt(tc.in)
+			if err != nil || pt != want {
+				t.Fatal("DecryptAuthenticated and Decrypt disagree on the plaintext")
+			}
+		})
+	}
+}
+
+// Every failure of DecryptAuthenticated is Decrypt's typed failure, with
+// no value and a zero Authentication. A value labelled with a held key
+// but sealed under another one (a key-ID label lie) fails: no other key
+// is tried.
+func TestValueCipher_DecryptAuthenticatedFailsLikeDecrypt(t *testing.T) {
+	// The ring holds at most three keys; v1 is readable only by "old",
+	// which did not seal goldenV1.
+	c := ciphertest.Cipher(t, ciphertest.Ring{Active: "k1", IDs: []string{"k1", "k2", "old"}, V1Readers: []string{"old"}})
+	raw, _ := base64.StdEncoding.DecodeString(strings.TrimPrefix(goldenV2, "enc:v2:k2:"))
+	tampered := append([]byte{}, raw...)
+	tampered[len(tampered)-1] ^= 0x01
+	tests := []struct {
+		name string
+		in   string
+		want error
+	}{
+		{"label lie", strings.Replace(goldenV2, "enc:v2:k2:", "enc:v2:k1:", 1), secret.ErrDecrypt},
+		{"unknown label", strings.Replace(goldenV2, "enc:v2:k2:", "enc:v2:k9:", 1), secret.ErrUnknownKeyID},
+		{"tampered tag", secretenvelope.FormatV2Value("k2", tampered), secret.ErrDecrypt},
+		{"truncated", "enc:v2:k2:" + base64.StdEncoding.EncodeToString(raw[:10]), secretenvelope.ErrMalformed},
+		{"v1 under a key that is not a legacy reader", goldenV1, secret.ErrDecrypt},
+		{"managed plaintext", "fake-legacy-plaintext", secret.ErrPlaintextNotAdmitted},
+		{"managed empty", "", secret.ErrPlaintextNotAdmitted},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pt, auth, err := c.DecryptAuthenticated(tc.in)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+			if pt != "" || auth != (secret.Authentication{}) {
+				t.Fatal("a failure returned a value or an authentication")
+			}
+			_, derr := c.Decrypt(tc.in)
+			if derr == nil || derr.Error() != err.Error() {
+				t.Fatalf("Decrypt err = %v, DecryptAuthenticated err = %v", derr, err)
+			}
+			assertNoLeak(t, err.Error(), tc.in)
+		})
+	}
+	var unconfigured *secret.ValueCipher
+	_, auth, err := unconfigured.DecryptAuthenticated(goldenV2)
+	if !errors.Is(err, secret.ErrCipherNotConfigured) || auth != (secret.Authentication{}) {
+		t.Fatalf("nil cipher: %v, %+v", err, auth)
+	}
+}

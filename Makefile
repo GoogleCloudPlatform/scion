@@ -646,7 +646,12 @@ HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock
 	TestHubInternal_ReplayAcrossHubReplicas \
 	TestChatRetention_Postgres_CascadeAndReplicaRace \
 	TestChatRetention_Postgres_DeletedConversationsAndAttachments \
-	TestProjectQuota_TwoHubReplicasPostgres_OneAdmission
+	TestProjectQuota_TwoHubReplicasPostgres_OneAdmission \
+	TestEncryptionScan_ClassifiesByAuthenticatingKey \
+	TestEncryptionScan_PagesCoverEveryRow \
+	TestEncryptionAudit_CountsAuthenticatedKeysOnly \
+	TestVerifyEncryption_PolicyAllowedSet \
+	TestVerifyEncryption_AllV2Passes
 
 ## test-hub-postgres: Run the pkg/hub Postgres tests of shard SHARD=K (SHARD=all: every shard holding one)
 # Requires SCION_TEST_POSTGRES_URL (integration tests) and

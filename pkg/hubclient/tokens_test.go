@@ -102,3 +102,41 @@ func TestCreateTokenRequest_HubBoundaryJSON(t *testing.T) {
 		t.Errorf("boundary present in a project shorthand request: %s", data)
 	}
 }
+
+func TestTokenInfo_BoundaryKind(t *testing.T) {
+	tests := []struct {
+		name string
+		info TokenInfo
+		want string
+	}{
+		{name: "hub boundary", info: TokenInfo{Boundary: &TokenBoundary{Kind: BoundaryHub}}, want: BoundaryHub},
+		{name: "project boundary", info: TokenInfo{ProjectID: "p1", Boundary: &TokenBoundary{Kind: BoundaryProject, ProjectID: "p1"}}, want: BoundaryProject},
+		{name: "hub reports projectId only", info: TokenInfo{ProjectID: "p1"}, want: BoundaryProject},
+		{name: "neither is unknown, never hub", info: TokenInfo{}, want: ""},
+		{name: "empty boundary kind falls back to projectId", info: TokenInfo{ProjectID: "p1", Boundary: &TokenBoundary{}}, want: BoundaryProject},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.info.BoundaryKind(); got != tt.want {
+				t.Errorf("BoundaryKind() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTokenInfo_JSONOmitsEmptyProjectID(t *testing.T) {
+	data, err := json.Marshal(TokenInfo{ID: "t1", Boundary: &TokenBoundary{Kind: BoundaryHub}})
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("Unmarshal back failed: %v", err)
+	}
+	if _, ok := m["projectId"]; ok {
+		t.Errorf("projectId present for a hub-boundary token: %s", data)
+	}
+	if b, _ := m["boundary"].(map[string]interface{}); b["kind"] != BoundaryHub {
+		t.Errorf("boundary = %v, want kind hub", m["boundary"])
+	}
+}

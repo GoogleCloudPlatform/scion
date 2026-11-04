@@ -263,6 +263,9 @@ func (s *Server) execDispatchStart(ctx context.Context, d store.BrokerDispatch) 
 		opts.Kind = args.Kind
 		opts.PriorPhase = args.PriorPhase
 	}
+	// The warning for secrets the start goes without is worded for the
+	// requester, recorded on the row as its initiator (skippedSecretAudienceIsOwner).
+	ctx = withDispatchRowInitiator(ctx, &d)
 	ctx, warns := withDispatchWarnings(ctx)
 	// A dispatcher that takes start options gets the intent's options (and
 	// may return an accepted launch); any other runs the synchronous start
@@ -425,6 +428,9 @@ func (s *Server) execDispatchRestart(ctx context.Context, d store.BrokerDispatch
 	if dispatcher == nil {
 		return "", fmt.Errorf("no dispatcher available")
 	}
+	// The warning for secrets the restart goes without is worded for the
+	// requester, recorded on the row as its initiator (skippedSecretAudienceIsOwner).
+	ctx = withDispatchRowInitiator(ctx, &d)
 	ctx, warns := withDispatchWarnings(ctx)
 	if err := dispatcher.DispatchAgentRestart(ctx, agent); err != nil {
 		return "", fmt.Errorf("dispatch restart: %w", err)

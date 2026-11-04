@@ -168,6 +168,7 @@ func TestDispatchHalted_CreatorFallback(t *testing.T) {
 		require.Len(t, notifs, 1)
 		assert.Equal(t, "HALTED", notifs[0].Status)
 		assert.Equal(t, store.CreatorFallbackSubscriptionID, notifs[0].SubscriptionID)
+		assertHaltedFallbackNamesAgent(t, notifs[0], e.watched.ID)
 	})
 
 	t.Run("agent creator", func(t *testing.T) {
@@ -178,6 +179,10 @@ func TestDispatchHalted_CreatorFallback(t *testing.T) {
 		require.Len(t, calls, 1, "the creating agent gets one message")
 		assert.Equal(t, e.subscriber.ID, calls[0].Agent.ID)
 		assert.Equal(t, []string{"HALTED"}, e.statuses(t, store.SubscriberTypeAgent, e.subscriber.Slug))
+		notifs, err := e.store.GetNotifications(ctx, store.SubscriberTypeAgent, e.subscriber.Slug, false)
+		require.NoError(t, err)
+		require.Len(t, notifs, 1)
+		assertHaltedFallbackNamesAgent(t, notifs[0], e.watched.ID)
 	})
 
 	t.Run("creator with a HALTED subscription gets exactly one", func(t *testing.T) {
@@ -436,4 +441,17 @@ func TestLifecycleHook_CreateHaltedTriggerAndFire(t *testing.T) {
 	calls := exec.getCalls()
 	require.Len(t, calls, 1, "the halted hook fires once")
 	assert.Equal(t, hook.ID, calls[0].HookID)
+}
+
+// assertHaltedFallbackNamesAgent checks that a HALTED creator-fallback
+// notification, which carries the nil SubscriptionID, still names the real
+// halted agent and sets no kind or resource (ptone/scion#5145): a
+// notification GC selects rows by AgentID, never by Kind.
+func assertHaltedFallbackNamesAgent(t *testing.T, n store.Notification, agentID string) {
+	t.Helper()
+	assert.Equal(t, agentID, n.AgentID)
+	assert.NotEqual(t, store.CreatorFallbackSubscriptionID, n.AgentID, "the halted agent's id, never the nil UUID")
+	assert.Empty(t, n.Kind)
+	assert.Empty(t, n.ResourceType)
+	assert.Empty(t, n.ResourceID)
 }

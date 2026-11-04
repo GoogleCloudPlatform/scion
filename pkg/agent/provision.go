@@ -1174,7 +1174,7 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 			return nil, fmt.Errorf("%w: agent %q has no existing git clone at %s; reincarnate does not create or recreate the workspace", ErrReprovisionRefused, opts.Name, agentWorkspace)
 		}
 	} else if opts.EmptyPerAgentWorkspace {
-		dir, err := reprovisionEmptyPerAgentPreflight(projectDir, opts.Name, m.Runtime)
+		dir, err := reprovisionEmptyPerAgentPreflight(ctx, projectDir, opts.Name, m.Runtime)
 		if err != nil {
 			return nil, err
 		}
@@ -1307,11 +1307,14 @@ func writeReprovisionPrompt(agentDir, task string) error {
 
 // reprovisionEmptyPerAgentPreflight runs Reprovision's empty-per-agent
 // preconditions (miller79/scion#167) and returns the agent's directory. The
-// agent's private <agentDir>/workspace is reused in place, so it must
-// already exist as a real directory: every check here runs before
-// ProvisionAgent, whose MkdirAll would otherwise create a missing workspace.
-// All refusals wrap ErrReprovisionRefused (409 at the broker).
-func reprovisionEmptyPerAgentPreflight(projectDir, agentName string, rt runtime.Runtime) (string, error) {
+// agent's private workspace is reused in place, so it must already exist as
+// a real directory: every check here runs before ProvisionAgent, whose
+// MkdirAll would otherwise create a missing workspace. The workspace is
+// <agentDir>/workspace, or on a shared Layout the agent's directory on the
+// share (sharedLayoutAgentWorkspace, with ctx's runtime), where Start placed
+// it and ProvisionAgent checks it. All refusals wrap ErrReprovisionRefused
+// (409 at the broker).
+func reprovisionEmptyPerAgentPreflight(ctx context.Context, projectDir, agentName string, rt runtime.Runtime) (string, error) {
 	agentDir, err := CheckAgentDirContained(projectDir, agentName, false)
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrReprovisionRefused, err)
@@ -1320,6 +1323,13 @@ func reprovisionEmptyPerAgentPreflight(projectDir, agentName string, rt runtime.
 		return "", fmt.Errorf("%w: agent %q was not created empty-per-agent", ErrReprovisionRefused, agentName)
 	}
 	agentWorkspace := filepath.Join(agentDir, "workspace")
+	sharedWS, err := sharedLayoutAgentWorkspace(ctx, nil, projectDir, agentName, agentDir)
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", ErrReprovisionRefused, err)
+	}
+	if sharedWS != "" {
+		agentWorkspace = sharedWS
+	}
 	info, statErr := os.Lstat(agentWorkspace)
 	if statErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return "", fmt.Errorf("%w: agent %q workspace missing or not a real directory at %s; reincarnate never recreates it", ErrReprovisionRefused, agentName, agentWorkspace)

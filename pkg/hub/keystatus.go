@@ -49,8 +49,11 @@ import (
 // record identifiers.
 
 // KeyStatusReportVersion is the report_version of KeyStatusReport. A
-// consumer refuses a version it does not know.
-const KeyStatusReportVersion = 1
+// consumer refuses a version it does not know. Version 2: audit.by_format
+// and audit.by_kid count readable payloads by the key that authenticated
+// them (version 1 counted every payload by its envelope label, unreadable
+// ones included, with an "invalid" format), and audit.empty_no_ref is new.
+const KeyStatusReportVersion = 2
 
 // KeyStatusInstanceSource values: who built the report.
 const (
@@ -193,8 +196,15 @@ type KeyStatusAudit struct {
 	ReferenceOnly int        `json:"reference_only"`
 	Readable      int        `json:"readable"`
 	Unreadable    int        `json:"unreadable"`
-	// ByFormat counts payloads by envelope format (plaintext, v1, v2,
-	// invalid); ByKID counts v2 payloads by envelope key ID.
+	// EmptyNoRef counts rows with an empty value and no backend reference.
+	// They are not reference-only, so they are read as plaintext (a
+	// managed keyring-file instance counts them unreadable,
+	// plaintext_not_admitted). They are included in the other counts too.
+	EmptyNoRef int `json:"empty_no_ref"`
+	// ByFormat counts READABLE payloads by the format they authenticated
+	// in (plaintext, v1, v2); ByKID counts readable v2 payloads by the key
+	// ID that authenticated them, never by the envelope label alone.
+	// Unreadable payloads appear only in UnreadableByKind.
 	ByFormat map[string]int `json:"by_format"`
 	ByKID    map[string]int `json:"by_kid"`
 	// UnreadableByKind counts unreadable records by failure kind.
@@ -331,6 +341,7 @@ func keyStatusAudit(a EncryptionAudit, scope string) KeyStatusAudit {
 		ReferenceOnly:    a.ReferenceOnly,
 		Readable:         a.Readable,
 		Unreadable:       len(a.Unreadable),
+		EmptyNoRef:       a.EmptyNoRef,
 		ByFormat:         map[string]int{},
 		ByKID:            map[string]int{},
 		UnreadableByKind: map[string]int{},

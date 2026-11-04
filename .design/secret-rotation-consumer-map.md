@@ -129,7 +129,7 @@ In ring mode, every stored Hub ciphertext goes through the one shared `secret.Va
 | `pkg/hub/server.go:3807,3864` (Decrypt), `:4053` (Encrypt) | Hub signing-key backups (legacy-mode resolution and the backup re-save) |
 | `pkg/hub/oidckeys.go:481,690,770` (Decrypt), `:577,644,735` (Encrypt) | OIDC key and keyset backups |
 | `pkg/hub/conduit_grants.go:179` (Decrypt), `:198` (Encrypt) | Conduit grant ring |
-| `pkg/hub/encryption_audit.go:223` (Inspect), `:231,362` (Decrypt) | Startup audit and the backup-readability check |
+| `pkg/hub/encryption_scan.go:94` (DecryptAuthenticated), `pkg/hub/internal/keymaterial/keymaterial.go:73` (Decrypt, via `guardOverwrite`) | Authenticating payload scan (startup audit, key status, `keys verify`) and the backup-readability check |
 
 There is one plaintext path, `pkg/hub/hub_secrets.go:41` (`setHubSecret` with no secret backend, Obl 8). It writes no ciphertext and uses no key. It is T12's scope, not a legacy-entry reader.
 

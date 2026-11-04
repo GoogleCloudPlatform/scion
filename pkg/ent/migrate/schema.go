@@ -2268,6 +2268,9 @@ var (
 		{Name: "dispatch_outcome", Type: field.TypeString, Default: ""},
 		{Name: "dispatch_reason", Type: field.TypeString, Default: ""},
 		{Name: "next_attempt_at", Type: field.TypeTime, Nullable: true},
+		{Name: "kind", Type: field.TypeString, Default: ""},
+		{Name: "resource_type", Type: field.TypeString, Default: ""},
+		{Name: "resource_id", Type: field.TypeString, Default: ""},
 		{Name: "created", Type: field.TypeTime},
 	}
 	// NotificationsTable holds the schema information for the "notifications" table.
@@ -2289,7 +2292,7 @@ var (
 			{
 				Name:    "notification_subscriber_type_created",
 				Unique:  false,
-				Columns: []*schema.Column{NotificationsColumns[4], NotificationsColumns[14]},
+				Columns: []*schema.Column{NotificationsColumns[4], NotificationsColumns[17]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "dispatched = false",
 				},

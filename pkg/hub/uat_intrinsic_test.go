@@ -586,7 +586,7 @@ func TestUATIntrinsic_LaunchMaterialStrictWalk(t *testing.T) {
 			k := "LG_ENV_" + strings.ToUpper(scope)
 			assert.NotEmpty(t, env[k], "%s: %s delivered", purpose, k)
 		}
-		selected, err := m.d.selectDeliverySecrets(ctx, newDeliverySelector(m.authz, m.agent, purpose), m.agent)
+		selected, _, err := m.d.selectDeliverySecrets(ctx, newDeliverySelector(m.authz, m.agent, purpose), m.agent)
 		require.NoError(t, err)
 		for _, scope := range []string{store.ScopeProject, store.ScopeHub, store.ScopeRuntimeBroker} {
 			k := "LG_SECRET_" + strings.ToUpper(scope)

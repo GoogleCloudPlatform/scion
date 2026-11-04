@@ -38,3 +38,9 @@ func readTokenAt(dirFd int, leaf, path string) (string, error) {
 func readTokenAtStat(dirFd int, leaf, path string) (string, dirfd.Stat, error) {
 	return "", dirfd.Stat{}, fmt.Errorf("read token file %s: %w on this platform", path, errors.ErrUnsupported)
 }
+
+// RemoveUnreadableRegularTokenFile is unsupported on this platform; it
+// removes nothing (fails closed).
+func RemoveUnreadableRegularTokenFile() error {
+	return fmt.Errorf("remove token file: %w on this platform", errors.ErrUnsupported)
+}

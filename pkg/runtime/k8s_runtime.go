@@ -2290,7 +2290,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 
 			for _, s := range config.ResolvedSecrets {
 				if s.Type == "environment" {
-					if _, collides := envVarNames[s.Target]; collides {
+					if _, collides := envVarNames[s.Target]; collides || reservedSecretEnvTarget(s.Target) {
 						continue
 					}
 					envVars = append(envVars, corev1.EnvVar{
@@ -2317,7 +2317,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			// volume projects only the file keys, not the env values.
 			for _, s := range config.ResolvedSecrets {
 				if s.Type == "environment" {
-					if _, collides := envVarNames[s.Target]; collides {
+					if _, collides := envVarNames[s.Target]; collides || reservedSecretEnvTarget(s.Target) {
 						continue
 					}
 					envVars = append(envVars, corev1.EnvVar{

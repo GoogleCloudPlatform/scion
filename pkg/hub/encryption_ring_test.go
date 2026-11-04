@@ -387,7 +387,7 @@ func TestRestartMixedFormatDatabase(t *testing.T) {
 		assert.Equal(t, "HUB_PLAIN", audit.Unreadable[0].Key)
 		assert.Equal(t, secret.FailurePlaintextNotAdmitted, audit.Unreadable[0].Kind)
 		assert.Equal(t, 1, audit.ByFormat["v1"])
-		assert.Equal(t, 1, audit.ByFormat["plaintext"])
+		assert.Zero(t, audit.ByFormat["plaintext"], "an unreadable payload is not counted by format")
 		assert.GreaterOrEqual(t, audit.ByKID["k1"], 1)
 		_, reason := readyz(t, srv)
 		assert.NotEqual(t, readyReasonBackupUnreadable, reason)

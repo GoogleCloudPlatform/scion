@@ -17,6 +17,7 @@ package runtime
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path"
 	"path/filepath"
 	"slices"
@@ -104,11 +105,28 @@ type nfsBindScope struct {
 
 // newNFSBindScope returns the bind check for cfg, or nil when its
 // workspace is not on NFS project storage. The share's host base is not
-// in the run config: pkg/agent places an nfs-backend workspace at exactly
-// <host base>/<subpath root>/<project ID>/workspace on these runtimes (the
-// project workspace; per-agent workspaces on the share are
-// Kubernetes-only), so the host base is the workspace with that suffix
-// removed, and any other workspace is refused.
+// in the run config: pkg/agent places an nfs-backend workspace on these
+// runtimes at exactly one of two leaves, so the host base is the workspace
+// with that leaf's suffix removed, and any other workspace is refused:
+//
+//   - <host base>/<subpath root>/<project ID>/workspace, the project
+//     workspace, when cfg.NFSAgentDirName is empty;
+//   - <host base>/<subpath root>/<project ID>/agents/<NFSAgentDirName>/workspace,
+//     the starting agent's own workspace (clone-per-agent or
+//     empty-per-agent on a shared layout, ptone/scion#7224), when
+//     cfg.NFSAgentDirName is set. pkg/agent sets it only from the agent's
+//     own validated slug; NFSAgentDirSubPath checks it again here, so it is
+//     always one path segment. Another agent's leaf, agents/ itself and any
+//     nested path are refused.
+//
+// The workspace must be absolute, clean (filepath.Clean leaves it as it is)
+// and without a ".." component, and must resolve
+// (pathcanon.Resolve) to exactly the leaf below the resolved host base: no
+// component from the host base down may be a symlink. A link above the host
+// base (the share's own mount path) is allowed; both sides are resolved. The
+// agent's own leaf must also exist (pkg/agent creates it, without following
+// links, before the run), so a bind never creates it. A component replaced
+// after this check, before the runtime binds it, is not covered.
 func newNFSBindScope(cfg RunConfig) (*nfsBindScope, error) {
 	if cfg.WorkspaceBackendName != "nfs" {
 		return nil, nil
@@ -123,11 +141,30 @@ func newNFSBindScope(cfg RunConfig) (*nfsBindScope, error) {
 	if cfg.ProjectID == "" || strings.ContainsAny(cfg.ProjectID, `/\`) || cfg.Workspace == "" {
 		return nil, refuse(fmt.Sprintf("cannot be checked against project ID %q", cfg.ProjectID))
 	}
-	suffix := "/" + path.Join(filepath.ToSlash(root), cfg.ProjectID, projectfs.ProjectWorkspaceDirName)
+	leaf := path.Join(filepath.ToSlash(root), cfg.ProjectID, projectfs.ProjectWorkspaceDirName)
+	what := fmt.Sprintf("project %s's workspace", cfg.ProjectID)
+	if cfg.NFSAgentDirName != "" {
+		agentDir, err := NFSAgentDirSubPath(filepath.FromSlash(leaf), cfg.NFSAgentDirName)
+		if err != nil {
+			return nil, refuse(fmt.Sprintf("cannot be checked (%v)", err))
+		}
+		leaf = path.Join(filepath.ToSlash(agentDir), projectfs.ProjectWorkspaceDirName)
+		what = fmt.Sprintf("agent %s's own workspace in project %s", cfg.NFSAgentDirName, cfg.ProjectID)
+	}
+	if !filepath.IsAbs(cfg.Workspace) || slices.Contains(strings.Split(filepath.ToSlash(cfg.Workspace), "/"), "..") {
+		return nil, refuse("is not an absolute path without \"..\"")
+	}
+	// Clean already: no doubled separator, "." component or trailing
+	// separator (both sides slash-normalised, so a native Windows path
+	// compares as itself).
+	if filepath.ToSlash(filepath.Clean(cfg.Workspace)) != filepath.ToSlash(cfg.Workspace) {
+		return nil, refuse("is not a clean path")
+	}
+	suffix := "/" + leaf
 	ws := filepath.ToSlash(filepath.Clean(cfg.Workspace))
 	base, ok := strings.CutSuffix(ws, suffix)
-	if !ok || !filepath.IsAbs(cfg.Workspace) {
-		return nil, refuse(fmt.Sprintf("is not project %s's workspace on NFS project storage (<share>%s)", cfg.ProjectID, suffix))
+	if !ok {
+		return nil, refuse(fmt.Sprintf("is not %s on NFS project storage (<share>%s)", what, suffix))
 	}
 	native := filepath.FromSlash(base)
 	native = volumeRooted(native, filepath.VolumeName(native), filepath.Separator)
@@ -136,6 +173,18 @@ func newNFSBindScope(cfg RunConfig) (*nfsBindScope, error) {
 	hostBase, err := pathcanon.Resolve(native)
 	if err != nil {
 		return nil, refuse(fmt.Sprintf("is on a share that cannot be resolved (%v)", err))
+	}
+	resolved, err := pathcanon.Resolve(cfg.Workspace)
+	if err != nil {
+		return nil, refuse(fmt.Sprintf("cannot be resolved (%v)", err))
+	}
+	if want := filepath.Join(hostBase, filepath.FromSlash(leaf)); resolved != want {
+		return nil, refuse(fmt.Sprintf("resolves to %q, not %s on the share (%q): a component below the share is a link", resolved, what, want))
+	}
+	if cfg.NFSAgentDirName != "" {
+		if info, err := os.Lstat(resolved); err != nil || !info.IsDir() {
+			return nil, refuse(fmt.Sprintf("is not an existing directory (%v)", err))
+		}
 	}
 	return &nfsBindScope{hostBase: hostBase, subPathRoot: root, projectID: cfg.ProjectID}, nil
 }
