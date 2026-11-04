@@ -1,0 +1,2 @@
+{"ImportPath":"example.com/m/pkg/hub","Dir":"pkg/hub","GoFiles":["zz_alias_a.go"],"Imports":["strings"]}
+{"ImportPath":"example.com/m/pkg/hub/ts","Dir":"pkg/hub/ts","Imports":["testing"]}

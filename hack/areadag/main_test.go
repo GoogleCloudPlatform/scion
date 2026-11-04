@@ -118,6 +118,7 @@ func TestUnusableInputs(t *testing.T) {
 		{"stale", "declared area gone is not a package in the list"},
 		{"emptylist", "no packages"},
 		{"nohub", "example.com/m/pkg/hub is not in the list"},
+		{"noedges", "no pkg/hub import edges examined"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			code, stdout, stderr := runFixture(t, tc.name)
