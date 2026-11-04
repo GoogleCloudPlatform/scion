@@ -50,7 +50,7 @@ type aliasInfo struct {
 	pkgName   string       // its package name
 	name      string       // the target object's name
 	file      *srcFile
-	generated bool // declared in a pkgmove-generated alias file
+	generated bool // declared in a generated alias file (pkgmove or hubshard extract)
 
 	// Declaration nodes, for removal (-rewrite-aliases).
 	gen  *ast.GenDecl  // enclosing GenDecl of a type/const/var spec
@@ -63,12 +63,20 @@ func (al *aliasInfo) target() string { return al.path + "." + al.name }
 
 // isGeneratedAliasFile reports whether f is an alias file written by pkgmove
 // or by hack/hubshard/extract export.
+// The marker must be in a comment: a string literal or other code that
+// quotes it does not count.
 func isGeneratedAliasFile(f *srcFile) bool {
-	if !strings.HasPrefix(f.Name, "zz_alias_") {
+	if !strings.HasPrefix(f.Name, "zz_alias_") || f.AST == nil {
 		return false
 	}
-	src := string(f.Src)
-	return strings.Contains(src, generatedAliasMarker) || strings.Contains(src, extractAliasMarker)
+	for _, cg := range f.AST.Comments {
+		for _, c := range cg.List {
+			if strings.Contains(c.Text, generatedAliasMarker) || strings.Contains(c.Text, extractAliasMarker) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // qualifiedObj resolves expr when it is exactly pkg.Name, a package-level
@@ -198,7 +206,7 @@ func (a *analysis) collectAliases() {
 								continue
 							}
 							if !gen {
-								a.unresolvedWhy[obj] = "var " + obj.Name() + " forwards to " + al.target() + " but is not in a pkgmove-generated alias file (a hand-written var may be a hook)"
+								a.unresolvedWhy[obj] = "var " + obj.Name() + " forwards to " + al.target() + " but is not in a generated alias file (pkgmove or hubshard extract) (a hand-written var may be a hook)"
 								continue
 							}
 							al.kind = "var"
@@ -214,7 +222,7 @@ func (a *analysis) collectAliases() {
 				obj := a.info.Defs[d.Name]
 				al := &aliasInfo{obj: obj, kind: "func", path: pn.Imported().Path(), pkgName: pn.Imported().Name(), name: fn.Name(), file: f, generated: gen, fn: d}
 				if !gen {
-					a.unresolvedWhy[obj] = "func " + obj.Name() + " forwards to " + al.target() + " but is not in a pkgmove-generated alias file (a hand-written wrapper is not resolved: the target may call recover() or inspect its call stack)"
+					a.unresolvedWhy[obj] = "func " + obj.Name() + " forwards to " + al.target() + " but is not in a generated alias file (pkgmove or hubshard extract) (a hand-written wrapper is not resolved: the target may call recover() or inspect its call stack)"
 					continue
 				}
 				if helper >= 0 {
@@ -397,9 +405,10 @@ func (a *analysis) helperTargetWhy(fn *types.Func, param int) string {
 }
 
 // targetFuncDecl returns the declaration of the package-level func fn of
-// another package of the module, parsed from that package's Go files as the
-// module listing selects them (the analysis build tags), or nil when the
-// module has no such package or declaration.
+// another package of the module, parsed from that package's GoFiles in the
+// module listing (the analysis build tags; CgoFiles are not read, so a cgo
+// target is "not found"), or nil when the module has no such package or
+// declaration.
 func (a *analysis) targetFuncDecl(fn *types.Func) (*ast.FuncDecl, error) {
 	path := fn.Pkg().Path()
 	if decls, ok := a.targetDecls[path]; ok {
