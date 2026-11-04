@@ -2089,10 +2089,11 @@ func TestExtractAliasWrappers(t *testing.T) {
 		}
 	})
 
-	// A reference from a file the analysis tags exclude keeps its entry.
+	// A reference from a file the analysis tags exclude keeps its entry, and
+	// an entry used by a kept entry is kept too (stubGit keeps gitStub).
 	t.Run("rewrite-prune", func(t *testing.T) {
 		dir, out := rewrite(t, map[string]string{
-			"hub/integ_test.go": "//go:build integration\n\npackage hub\n\nimport \"testing\"\n\nfunc TestInteg(t *testing.T) { _ = rawText(t, nil, \"q\") }\n",
+			"hub/integ_test.go": "//go:build integration\n\npackage hub\n\nimport \"testing\"\n\nfunc TestInteg(t *testing.T) { _ = rawText(t, nil, \"q\"); _ = stubGit(t) }\n",
 		})
 		wantAll(t, out,
 			"Alias references resolved to their targets (10):",
@@ -2100,10 +2101,11 @@ func TestExtractAliasWrappers(t *testing.T) {
 			"hub/seed_test.go:5: seed -> hubtestutil.Seed",
 			"hub/safe_test.go:6: safeGo -> hubtestutil.SafeGo",
 			"hub/stub_test.go:5: stubGit -> hubtestutil.StubGit",
-			"Alias entries removed (10):",
-			// An entry used only by another removed entry goes too.
-			"type gitStub = example.com/fx/hubtestutil.GitStub",
-			"func stubGit = example.com/fx/hubtestutil.StubGit",
+			"Alias entries removed (8):",
+			// stubGit is named in the tag-excluded file, so it stays, and so
+			// does gitStub, which only stubGit uses.
+			"their entries are kept): rawText, stubGit",
+			"gitStub: used by the kept alias entry stubGit",
 			"const conversationsTableDDL = example.com/fx/hubtestutil.ConversationsTableDDL",
 			"func getTopicConvID = example.com/fx/hubtestutil.GetTopicConvID",
 			"func requirePostgresDSN = example.com/fx/hubtestutil.RequirePostgresDSN",
@@ -2116,6 +2118,9 @@ func TestExtractAliasWrappers(t *testing.T) {
 		)
 		if strings.Contains(out, "func rawText = ") || strings.Contains(out, "Files deleted") {
 			t.Errorf("rawText (named in a tag-excluded file) must be kept, and no file deleted:\n%s", out)
+		}
+		if strings.Contains(out, "func stubGit = ") || strings.Contains(out, "type gitStub = ") {
+			t.Errorf("stubGit (named in a tag-excluded file) and gitStub (used by stubGit) must be kept:\n%s", out)
 		}
 		b, err := os.ReadFile(filepath.Join(dir, "hub", "zz_alias_hubtestutil_chatdb_test.go"))
 		if err != nil {
