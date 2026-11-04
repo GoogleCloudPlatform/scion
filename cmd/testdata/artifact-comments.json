@@ -1,0 +1,113 @@
+{
+  "schemaVersion": 1,
+  "artifact": "scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d",
+  "ref": "scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d@2",
+  "seq": 2,
+  "author": {
+    "kind": "user",
+    "ref": "user-1"
+  },
+  "createdAt": "2026-11-02T09:30:00Z",
+  "note": "Two questions.\nOtherwise fine.",
+  "entries": [
+    {
+      "kind": "suggestion",
+      "change": "replace",
+      "file": "plan.md",
+      "line": 3,
+      "column": 4,
+      "start": 11,
+      "end": 29,
+      "anchor": "ship",
+      "comment": "",
+      "suggestion": "launch",
+      "author": {
+        "kind": "user",
+        "ref": "user-1"
+      },
+      "createdAt": "2026-11-02T09:30:00Z"
+    },
+    {
+      "kind": "comment",
+      "file": "plan.md",
+      "line": 3,
+      "column": 29,
+      "start": 36,
+      "end": 47,
+      "anchor": "",
+      "comment": "date?",
+      "suggestion": "",
+      "author": {
+        "kind": "user",
+        "ref": "user-1"
+      },
+      "createdAt": "2026-11-02T09:30:00Z"
+    },
+    {
+      "kind": "suggestion",
+      "change": "insert",
+      "file": "plan.md",
+      "line": 4,
+      "column": 1,
+      "start": 48,
+      "end": 63,
+      "anchor": "",
+      "comment": "",
+      "suggestion": "New line.",
+      "author": {
+        "kind": "user",
+        "ref": "user-1"
+      },
+      "createdAt": "2026-11-02T09:30:00Z"
+    },
+    {
+      "kind": "suggestion",
+      "change": "delete",
+      "file": "plan.md",
+      "line": 4,
+      "column": 22,
+      "start": 69,
+      "end": 79,
+      "anchor": "this",
+      "comment": "",
+      "suggestion": "",
+      "author": {
+        "kind": "user",
+        "ref": "user-1"
+      },
+      "createdAt": "2026-11-02T09:30:00Z"
+    },
+    {
+      "kind": "highlight",
+      "file": "plan.md",
+      "line": 5,
+      "column": 1,
+      "start": 81,
+      "end": 93,
+      "anchor": "Owners",
+      "comment": "",
+      "suggestion": "",
+      "author": {
+        "kind": "user",
+        "ref": "user-1"
+      },
+      "createdAt": "2026-11-02T09:30:00Z"
+    },
+    {
+      "kind": "comment",
+      "file": "plan.md",
+      "line": 5,
+      "column": 20,
+      "start": 100,
+      "end": 117,
+      "anchor": "",
+      "comment": "which\nteam?",
+      "suggestion": "",
+      "author": {
+        "kind": "user",
+        "ref": "user-1"
+      },
+      "createdAt": "2026-11-02T09:30:00Z"
+    }
+  ]
+}
