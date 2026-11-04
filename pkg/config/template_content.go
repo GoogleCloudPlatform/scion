@@ -183,6 +183,24 @@ func TemplateHasContentFile(t *Template, name string) bool {
 	return found && err == nil
 }
 
+// placeholderSystemPrompt is the content of the system-prompt.md the default
+// template ships (embeds/templates/default). It stands for "no system prompt".
+const placeholderSystemPrompt = "# placeholder"
+
+// IsPlaceholderSystemPrompt reports whether content is not a real system prompt:
+// empty once trimmed, or exactly the default template's "# Placeholder"
+// (case-insensitive). A prompt that only starts with that heading is real.
+// The default template is first in every chain, so a template without its
+// own system-prompt.md resolves to the placeholder; passing it on would
+// replace the harness's own prompt (claude --system-prompt).
+//
+// Keep this rule identical to _is_meaningful_system_prompt in
+// harnesses/gemini-cli/provision.py, which applies it in the container.
+func IsPlaceholderSystemPrompt(content []byte) bool {
+	trimmed := strings.TrimSpace(string(content))
+	return trimmed == "" || strings.EqualFold(trimmed, placeholderSystemPrompt)
+}
+
 // ErrAgentConfigRefused is wrapped by the error of a scion-agent config read
 // (Template.LoadConfig) that is refused: the file or a directory on its path
 // is a symbolic link, or the file is not a plain single-link regular file or

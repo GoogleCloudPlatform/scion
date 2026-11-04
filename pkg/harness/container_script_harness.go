@@ -262,10 +262,14 @@ func (c *ContainerScriptHarness) readSystemPrompt() string {
 		if err != nil {
 			continue
 		}
-		content := strings.TrimSpace(string(data))
-		if content != "" {
-			return content
+		// A placeholder-only file (the default template's, staged by an
+		// agent provisioned before provisioning dropped it) is no prompt.
+		// Inline content that is literally the placeholder is dropped here
+		// too, an accepted edge.
+		if config.IsPlaceholderSystemPrompt(data) {
+			continue
 		}
+		return strings.TrimSpace(string(data))
 	}
 	return ""
 }
