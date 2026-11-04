@@ -22,6 +22,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -59,6 +60,9 @@ func resolvedAuthRunRoot(t *testing.T) (root, secretsDir string) {
 	return root, secretsDir
 }
 
+// nonceHexRE is the form of a staging pass's nonce (NewResolvedAuthNonce).
+var nonceHexRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
 // carryGone reports whether the carry file is absent from root.
 func carryGone(root string) bool {
 	_, err := os.Lstat(filepath.Join(root, stagedsecrets.ResolvedAuthEnvFile))
@@ -72,13 +76,13 @@ func TestTakeResolvedAuthEnv_DropsReservedNamesAtInit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Written directly, bypassing the broker-side filter, as a planted or
+	// Written directly, bypassing the broker-side filter, as a left-over or
 	// faulty blob would arrive.
 	if err := stagedsecrets.WriteResolvedAuthEnv(root, filepath.Join(root, "harness", "secrets"), initTestNonce, map[string]string{
 		stagedsecrets.HubTokenStagedEnvVar: "1",
-		stagedsecrets.EnvVar:               "planted",
+		stagedsecrets.EnvVar:               "left-over",
 		"SCION_HOST_UID":                   "0",
-		"SCION_HARNESS_SECRETS_DIR":        "/planted",
+		"SCION_HARNESS_SECRETS_DIR":        "/left-over",
 		"EXAMPLE_API_KEY":                  resolvedAuthCanary,
 	}); err != nil {
 		t.Fatalf("WriteResolvedAuthEnv: %v", err)
@@ -107,8 +111,8 @@ func TestTakeResolvedAuthEnv_UnstagedFileDiscarded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := stagedsecrets.WriteResolvedAuthEnv(root, filepath.Join(root, "harness", "secrets"), "planted-nonce", map[string]string{
-		"ANTHROPIC_BASE_URL": "https://planted.invalid",
+	if err := stagedsecrets.WriteResolvedAuthEnv(root, filepath.Join(root, "harness", "secrets"), "other-start-nonce", map[string]string{
+		"ANTHROPIC_BASE_URL": "https://left.invalid",
 	}); err != nil {
 		t.Fatalf("WriteResolvedAuthEnv: %v", err)
 	}
@@ -148,17 +152,7 @@ func TestTakeResolvedAuthEnv_NothingStaged(t *testing.T) {
 // the carry file is gone after the run; no value is logged.
 func TestRunInit_StagedResolvedAuthEnvReachesHarnessOnly(t *testing.T) {
 	f := newRunInitStagedFixture(t)
-	root, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	prevRoot := resolvedAuthEnvRoot
-	resolvedAuthEnvRoot = root
-	t.Cleanup(func() { resolvedAuthEnvRoot = prevRoot })
-	t.Cleanup(hooks.SetHarnessDirsRootForTest(root))
-	t.Setenv(hooks.HarnessSecretsDirEnv, filepath.Join(root, "harness", "secrets"))
-	t.Setenv("EXAMPLE_RESOLVED_AUTH", "")
-	_ = os.Unsetenv("EXAMPLE_RESOLVED_AUTH")
+	root, _ := resolvedAuthRunRoot(t)
 
 	data, err := json.Marshal(stagedsecrets.Staged{ResolvedAuthEnv: map[string]string{
 		"EXAMPLE_RESOLVED_AUTH":            resolvedAuthCanary,
@@ -168,8 +162,6 @@ func TestRunInit_StagedResolvedAuthEnvReachesHarnessOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv(stagedsecrets.EnvVar, base64.StdEncoding.EncodeToString(data))
-	t.Setenv(transportauth.EnvTransportToken, "")
-	t.Setenv(transportauth.EnvTransportTokenFile, "")
 
 	out := filepath.Join(t.TempDir(), "child-env")
 	script := `printf '%s|%s' "${EXAMPLE_RESOLVED_AUTH:-absent}" "${SCION_HUB_TOKEN_STAGED:-absent}" > "$2"; sleep 0.5`
@@ -193,27 +185,18 @@ func TestRunInit_StagedResolvedAuthEnvReachesHarnessOnly(t *testing.T) {
 }
 
 // End to end through RunInit: a resolved-auth marker inherited from the
-// environment is dropped by the staging pass, so a carry file planted
+// environment is dropped by the staging pass, so a carry file left
 // before the start (for example by an earlier run in the same pod) is
 // removed unread and never reaches the harness child.
-func TestRunInit_InheritedResolvedAuthMarkerDoesNotExportPlantedFile(t *testing.T) {
+func TestRunInit_InheritedResolvedAuthMarkerDoesNotExportLeftFile(t *testing.T) {
 	f := newRunInitStagedFixture(t)
-	root, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	prevRoot := resolvedAuthEnvRoot
-	resolvedAuthEnvRoot = root
-	t.Cleanup(func() { resolvedAuthEnvRoot = prevRoot })
-	t.Cleanup(hooks.SetHarnessDirsRootForTest(root))
-	secretsDir := filepath.Join(root, "harness", "secrets")
-	t.Setenv(hooks.HarnessSecretsDirEnv, secretsDir)
-	t.Setenv("EXAMPLE_PLANTED", "")
-	_ = os.Unsetenv("EXAMPLE_PLANTED")
+	root, secretsDir := resolvedAuthRunRoot(t)
+	t.Setenv("EXAMPLE_LEFT", "")
+	_ = os.Unsetenv("EXAMPLE_LEFT")
 	// The inherited marker carries the SAME value as the file's nonce, so
 	// only the staging pass dropping the marker keeps the file unread.
-	if err := stagedsecrets.WriteResolvedAuthEnv(root, secretsDir, resolvedAuthLeftNonce, map[string]string{"EXAMPLE_PLANTED": resolvedAuthCanary}); err != nil {
-		t.Fatalf("plant the carry file: %v", err)
+	if err := stagedsecrets.WriteResolvedAuthEnv(root, secretsDir, resolvedAuthLeftNonce, map[string]string{"EXAMPLE_LEFT": resolvedAuthCanary}); err != nil {
+		t.Fatalf("write the left carry file: %v", err)
 	}
 	t.Setenv(envResolvedAuthStaged, resolvedAuthLeftNonce)
 
@@ -224,23 +207,21 @@ func TestRunInit_InheritedResolvedAuthMarkerDoesNotExportPlantedFile(t *testing.
 		t.Fatal(err)
 	}
 	t.Setenv(stagedsecrets.EnvVar, base64.StdEncoding.EncodeToString(data))
-	t.Setenv(transportauth.EnvTransportToken, "")
-	t.Setenv(transportauth.EnvTransportTokenFile, "")
 
 	out := filepath.Join(t.TempDir(), "child-env")
-	script := `printf '%s|%s' "${EXAMPLE_PLANTED:-absent}" "${SCION_RESOLVED_AUTH_STAGED:-absent}" > "$2"; sleep 0.5`
+	script := `printf '%s|%s' "${EXAMPLE_LEFT:-absent}" "${SCION_RESOLVED_AUTH_STAGED:-absent}" > "$2"; sleep 0.5`
 	if got := f.run(t, script, out); got != 0 {
 		t.Fatalf("RunInit() = %d, want 0", got)
 	}
 	if got := readFileString(t, out); got != "absent|absent" {
-		t.Errorf("harness child: planted entry absent %v, marker absent %v; want true, true",
+		t.Errorf("harness child: left entry absent %v, marker absent %v; want true, true",
 			strings.HasPrefix(got, "absent|"), strings.HasSuffix(got, "|absent"))
 	}
 	if os.Getenv(envResolvedAuthStaged) != "" {
 		t.Error("the inherited resolved-auth marker was not cleared")
 	}
 	if _, err := os.Lstat(filepath.Join(root, stagedsecrets.ResolvedAuthEnvFile)); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("planted carry file still present after RunInit (lstat err=%v)", err)
+		t.Errorf("left carry file still present after RunInit (lstat err=%v)", err)
 	}
 }
 
@@ -292,7 +273,7 @@ func TestRunInit_NoMarkerLinkedMemRootStartSucceeds(t *testing.T) {
 	if err := os.Mkdir(real, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := stagedsecrets.WriteResolvedAuthEnv(real, filepath.Join(real, "harness", "secrets"), "planted-nonce", map[string]string{"EXAMPLE_PLANTED": resolvedAuthCanary}); err != nil {
+	if err := stagedsecrets.WriteResolvedAuthEnv(real, filepath.Join(real, "harness", "secrets"), "other-start-nonce", map[string]string{"EXAMPLE_LEFT": resolvedAuthCanary}); err != nil {
 		t.Fatal(err)
 	}
 	linked := filepath.Join(base, "linked-mem")
@@ -302,8 +283,8 @@ func TestRunInit_NoMarkerLinkedMemRootStartSucceeds(t *testing.T) {
 	prevRoot := resolvedAuthEnvRoot
 	resolvedAuthEnvRoot = linked
 	t.Cleanup(func() { resolvedAuthEnvRoot = prevRoot })
-	t.Setenv("EXAMPLE_PLANTED", "")
-	_ = os.Unsetenv("EXAMPLE_PLANTED")
+	t.Setenv("EXAMPLE_LEFT", "")
+	_ = os.Unsetenv("EXAMPLE_LEFT")
 	t.Setenv(envResolvedAuthStaged, "")
 	_ = os.Unsetenv(envResolvedAuthStaged)
 	t.Setenv(stagedsecrets.EnvVar, "")
@@ -312,7 +293,7 @@ func TestRunInit_NoMarkerLinkedMemRootStartSucceeds(t *testing.T) {
 	t.Setenv(transportauth.EnvTransportTokenFile, "")
 
 	out := filepath.Join(t.TempDir(), "child-env")
-	script := `printf '%s' "${EXAMPLE_PLANTED:-absent}" > "$2"; sleep 0.5`
+	script := `printf '%s' "${EXAMPLE_LEFT:-absent}" > "$2"; sleep 0.5`
 	if got := f.run(t, script, out); got != 0 {
 		t.Fatalf("RunInit() = %d, want 0 (the no-marker path must not fail the start)", got)
 	}
@@ -362,8 +343,8 @@ func TestRunInit_ResolvedAuthMarkerHandoffAcrossReExec(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("re-exec reached %d times, want 1", calls)
 	}
-	if len(markerAtReExec) != 64 || markerAtReExec != fileNonce {
-		t.Errorf("at the re-exec: marker length %d, equals the carry file's nonce %v; want 64, true", len(markerAtReExec), markerAtReExec == fileNonce)
+	if !nonceHexRE.MatchString(markerAtReExec) || markerAtReExec != fileNonce {
+		t.Errorf("at the re-exec: marker is 64 lowercase hex %v, equals the carry file's nonce %v; want true, true", nonceHexRE.MatchString(markerAtReExec), markerAtReExec == fileNonce)
 	}
 	if readFileString(t, out) != resolvedAuthCanary {
 		t.Error("the staged resolved-auth entry did not reach the harness child")
