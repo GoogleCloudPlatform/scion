@@ -187,8 +187,8 @@ func TestWarnIfIntermediateUnsafe_GroupOtherWritable_WarnsOnce(t *testing.T) {
 	require.NoError(t, os.Chmod(dir, 0o777))
 	fd := openDirFd(t, dir)
 
-	warnIfIntermediateUnsafe(fd, "unsafe-comp")
-	warnIfIntermediateUnsafe(fd, "unsafe-comp")
+	warnIfIntermediateUnsafe(fd, "unsafe-comp", Owner{})
+	warnIfIntermediateUnsafe(fd, "unsafe-comp", Owner{})
 
 	require.Len(t, *records, 1, "must warn exactly once regardless of call count")
 	msg := (*records)[0].Message
@@ -207,7 +207,7 @@ func TestWarnIfIntermediateUnsafe_SelfOwnedSafeMode_NoWarn(t *testing.T) {
 	require.NoError(t, os.Chmod(dir, 0o755))
 	fd := openDirFd(t, dir)
 
-	warnIfIntermediateUnsafe(fd, "safe-comp")
+	warnIfIntermediateUnsafe(fd, "safe-comp", Owner{})
 
 	assert.Empty(t, *records, "a safe-mode, self-owned intermediate must not warn")
 }
@@ -234,7 +234,7 @@ func TestWarnIfIntermediateUnsafe_NotSelfOwned_WarnsEvenWithSafeMode(t *testing.
 	require.NoError(t, os.Chmod(dir, 0o755))
 	fd := openDirFd(t, dir)
 
-	warnIfIntermediateUnsafe(fd, "not-self-owned")
+	warnIfIntermediateUnsafe(fd, "not-self-owned", Owner{})
 
 	require.Len(t, *records, 1, "a safe mode does not excuse a mismatched owner")
 	assertRecordHasAttr(t, (*records)[0], "component", "not-self-owned")

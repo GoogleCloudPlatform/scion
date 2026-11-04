@@ -95,6 +95,16 @@ func ProjectShareClientText(err error) string {
 	return runtime.ProjectShareUnavailableText(runtime.ProjectShareMountPathField, true)
 }
 
+// resolvedLeafOwner is the share's configured nfs uid and gid as the nfs
+// backend resolved them from settings (ResolvedWorkspace OwnerUID and
+// OwnerGID), never read from a directory. The leaf helpers pass it to
+// shareddirs.EnsureLeafExpecting, which only checks existing upper
+// directories against it and chowns nothing. A workspace another backend
+// resolved gives the zero Owner.
+func resolvedLeafOwner(resolved runtime.ResolvedWorkspace) shareddirs.Owner {
+	return shareddirs.Owner{UID: resolved.OwnerUID, GID: resolved.OwnerGID}
+}
+
 // ensureNFSWorkspaceLeaf makes sure the project's NFS workspace directory
 // (<subpath_root>/<projectID>/workspace), its provisioning state directory
 // (<subpath_root>/<projectID>/provision, see runtime.NFSProvisionStateSubPath),
@@ -299,7 +309,7 @@ func ensureNFSWorkspaceLeavesClaim(runtimeName, projectID string, resolved runti
 
 	prepared = true
 	for _, leaf := range leaves {
-		ok, created, err := ensureNFSLeafClaim(resolvedHostBase, leaf)
+		ok, created, err := ensureNFSLeafClaim(resolvedHostBase, leaf, resolvedLeafOwner(resolved))
 		if created && agentName != "" && leaf == agentDirLeaf {
 			agentDirCreated = true
 		}

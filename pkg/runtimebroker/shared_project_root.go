@@ -417,15 +417,17 @@ func (s *Server) applySharedBootstrap(ctx context.Context, ws, rel string, apply
 // workspace leaf wsRel and its provisioning state directory stateRel below
 // base with the broker's leaf contract (shareddirs.EnsureLeaf). A root
 // broker gives the workspace leaf, which agents use, the Layout's owner
-// (shareddirs.EnsureLeafOwned). The provisioning state directory keeps the
-// zero owner: it holds the provisioning locks and sentinel, only Scion
-// components write it, and it must never be agent-writable.
+// (shareddirs.EnsureLeafOwned). The provisioning state directory is not
+// given that owner: it holds the provisioning locks and sentinel, only
+// Scion components write it, and it must never be agent-writable. Its walk
+// only checks existing upper directories against the owner
+// (shareddirs.EnsureLeafExpecting).
 func ensureWorkspaceAndStateLeaves(base, wsRel, stateRel string, owner shareddirs.Owner) error {
 	for _, leaf := range []struct {
-		rel   string
-		owner shareddirs.Owner
-	}{{wsRel, owner}, {stateRel, shareddirs.Owner{}}} {
-		fd, _, err := shareddirs.EnsureLeafOwned(base, leaf.rel, leaf.owner)
+		rel    string
+		ensure func(hostBase, rel string, owner shareddirs.Owner) (int, bool, error)
+	}{{wsRel, shareddirs.EnsureLeafOwned}, {stateRel, shareddirs.EnsureLeafExpecting}} {
+		fd, _, err := leaf.ensure(base, leaf.rel, owner)
 		if err != nil {
 			return fmt.Errorf("create %s: %w", filepath.Base(leaf.rel), err)
 		}

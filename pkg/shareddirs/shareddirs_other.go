@@ -36,6 +36,11 @@ func EnsureLeaf(hostBase, rel string) (leafFd int, alreadyExisted bool, err erro
 	return -1, false, unsupported("EnsureLeaf", rel)
 }
 
+// EnsureLeafExpecting is unsupported on this platform.
+func EnsureLeafExpecting(hostBase, rel string, expected Owner) (leafFd int, alreadyExisted bool, err error) {
+	return -1, false, unsupported("EnsureLeafExpecting", rel)
+}
+
 // EnsureLeafOwned is unsupported on this platform.
 func EnsureLeafOwned(hostBase, rel string, owner Owner) (leafFd int, alreadyExisted bool, err error) {
 	return -1, false, unsupported("EnsureLeafOwned", rel)

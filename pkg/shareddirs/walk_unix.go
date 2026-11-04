@@ -57,7 +57,18 @@ import (
 // Returns the leaf's open fd (caller must close via CloseFd) and whether it
 // already existed before this call.
 func EnsureLeaf(hostBase, rel string) (leafFd int, alreadyExisted bool, err error) {
-	return EnsureLeafOwned(hostBase, rel, Owner{})
+	return ensureLeaf(hostBase, rel, Owner{}, Owner{})
+}
+
+// EnsureLeafExpecting is EnsureLeaf for a caller that knows the share's
+// configured nfs uid and gid (expected) but does not give new leaves that
+// owner: nothing is chowned. expected only lets the walk recognise an
+// existing upper directory that has the expected shared layout (setgid,
+// the share's group, not other-writable, owned by this process or the nfs
+// uid) and not warn about it (warnIfIntermediateUnsafe). The zero Owner
+// makes it EnsureLeaf.
+func EnsureLeafExpecting(hostBase, rel string, expected Owner) (leafFd int, alreadyExisted bool, err error) {
+	return ensureLeaf(hostBase, rel, Owner{}, expected)
 }
 
 // EnsureLeafOwned is EnsureLeaf that, when the caller runs as root and
@@ -69,9 +80,18 @@ func EnsureLeaf(hostBase, rel string) (leafFd int, alreadyExisted bool, err erro
 // them, and an agent-owned upper directory would let one project's agents
 // rename or unlink other projects' trees. A directory that already existed
 // is never changed. A failed chown of a leaf this call created removes the
-// leaf, as a failed chmod does.
+// leaf, as a failed chmod does. owner is also the expected owner of
+// EnsureLeafExpecting.
 func EnsureLeafOwned(hostBase, rel string, owner Owner) (leafFd int, alreadyExisted bool, err error) {
-	parentFd, leafName, fd, existed, created, walkErr := createViaComponentWalk(hostBase, rel, 0o2755, 0o775, owner)
+	return ensureLeaf(hostBase, rel, owner, owner)
+}
+
+// ensureLeaf implements EnsureLeaf, EnsureLeafExpecting and
+// EnsureLeafOwned: owner is given to a leaf this call creates (Owner
+// chownsCreated), expected is only checked against existing upper
+// directories.
+func ensureLeaf(hostBase, rel string, owner, expected Owner) (leafFd int, alreadyExisted bool, err error) {
+	parentFd, leafName, fd, existed, created, walkErr := createViaComponentWalk(hostBase, rel, 0o2755, 0o775, owner, expected)
 	if walkErr != nil {
 		return -1, false, walkErr
 	}
@@ -120,7 +140,7 @@ func EnsurePrivateDir(hostBase, rel string) (leafFd int, alreadyExisted bool, er
 	// The leaf is created at 0755, so it never has a group-write window.
 	// A private directory always keeps the creator's ownership: only Scion
 	// components write it.
-	parentFd, leafName, fd, existed, _, walkErr := createViaComponentWalk(hostBase, rel, 0o2755, 0o755, Owner{})
+	parentFd, leafName, fd, existed, _, walkErr := createViaComponentWalk(hostBase, rel, 0o2755, 0o755, Owner{}, Owner{})
 	if walkErr != nil {
 		return -1, false, walkErr
 	}
@@ -216,8 +236,10 @@ func SetLeafFinalizationHooksForTest(chmod func(fd int, mode uint32) error, acl 
 // mkdirat succeeded), which the caller then gives owner. Intermediates are
 // never chowned; when owner applies (agents will traverse them to reach
 // the leaf), an existing intermediate without o+x is warned about, never
-// changed.
-func createViaComponentWalk(hostBase, rel string, intermediateMode, leafCreateMode uint32, owner Owner) (parentFd int, leafName string, leafFd int, alreadyExisted, leafCreated bool, err error) {
+// changed. expected is the share's configured owner an existing
+// intermediate is checked against (warnIfIntermediateUnsafe); it changes
+// nothing.
+func createViaComponentWalk(hostBase, rel string, intermediateMode, leafCreateMode uint32, owner, expected Owner) (parentFd int, leafName string, leafFd int, alreadyExisted, leafCreated bool, err error) {
 	baseFd, err := unix.Open(hostBase, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return -1, "", -1, false, false, fmt.Errorf("open host base %q: %w", hostBase, err)
@@ -225,6 +247,13 @@ func createViaComponentWalk(hostBase, rel string, intermediateMode, leafCreateMo
 
 	parts := strings.Split(filepath.ToSlash(rel), "/")
 	currentFd := baseFd
+	expectedLayout := 0
+	defer func() {
+		if expectedLayout > 0 {
+			slog.Debug("NFS directory walk: existing upper directories have the expected shared layout (setgid, the share's group, not other-writable, owned by the broker or the nfs uid); not warned",
+				"count", expectedLayout)
+		}
+	}()
 	for _, comp := range parts[:len(parts)-1] {
 		// Intermediates are created with NO group/other write bit from the
 		// moment they exist (0o755, not 0o775), closing the window between
@@ -243,7 +272,9 @@ func createViaComponentWalk(hostBase, rel string, intermediateMode, leafCreateMo
 				return -1, "", -1, false, false, fmt.Errorf("chmod path component %q: %w", comp, chmodErr)
 			}
 		} else {
-			warnIfIntermediateUnsafe(nextFd, comp)
+			if warnIfIntermediateUnsafe(nextFd, comp, expected) {
+				expectedLayout++
+			}
 			if owner.chownsCreated() {
 				warnIfIntermediateNotTraversable(nextFd, comp)
 			}
@@ -297,19 +328,52 @@ var geteuid = unix.Geteuid
 // (mode 0o2775, no group-write hardening) or anything else that predates
 // this walk; fixing them is the documented, symlink-safe manual recipe (see
 // docs/deploy/hybrid-tier.md), not something this call does automatically.
-func warnIfIntermediateUnsafe(fd int, comp string) {
+//
+// An intermediate with the expected shared layout is not warned about
+// either, and the call reports true for it: expected names the share's
+// configured gid (and nfs uid), and the directory is not other-writable
+// (sticky or not), has the setgid bit and that group, and is owned by this
+// process or the nfs uid. A zero expected gid never matches.
+func warnIfIntermediateUnsafe(fd int, comp string, expected Owner) (expectedLayout bool) {
 	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil {
-		return
+		return false
 	}
 	if st.Mode&0o022 == 0 && int(st.Uid) == geteuid() {
-		return
+		return false
+	}
+	if hasExpectedSharedLayout(st, expected) {
+		return true
 	}
 	intermediateUnsafeWarnOnce.Do(func() {
 		slog.Warn("NFS directory walk: an existing upper directory is group/other-writable or not owned by this broker; "+
 			"the leaf modes/ACL hardening does not apply retroactively -- see the manual fix-up recipe in docs/deploy/hybrid-tier.md",
 			"component", comp, "mode", fmt.Sprintf("%#o", st.Mode&0o7777), "uid", st.Uid)
 	})
+	return false
+}
+
+// hasExpectedSharedLayout reports whether an existing upper directory has
+// the layout an operator sets up for a shared tree: not other-writable,
+// the setgid bit, the share's configured gid (expected.GID, non-zero) as
+// its group, and this process or the configured nfs uid (expected.UID,
+// non-zero) as its owner.
+func hasExpectedSharedLayout(st unix.Stat_t, expected Owner) bool {
+	if expected.GID <= 0 {
+		return false
+	}
+	return st.Mode&0o002 == 0 &&
+		int(st.Gid) == expected.GID &&
+		st.Mode&unix.S_ISGID != 0 &&
+		(int(st.Uid) == geteuid() || (expected.UID > 0 && int(st.Uid) == expected.UID))
+}
+
+// ResetWalkWarningsForTest makes the next walk log its once-per-process
+// warnings again, so a test in another package (pkg/agent) can observe
+// whether a walk warns. Production code never calls this.
+func ResetWalkWarningsForTest() {
+	intermediateUnsafeWarnOnce = sync.Once{}
+	intermediateTraverseWarnOnce = sync.Once{}
 }
 
 // openOrCreateDirNoFollow opens the directory component `comp` under the

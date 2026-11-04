@@ -204,6 +204,12 @@ type ResolvedWorkspace struct {
 	// Backend identifies which backend produced this resolution: "local",
 	// "nfs", "cloudrun-volume" or "gke-shared-volume".
 	Backend string
+
+	// OwnerUID and OwnerGID are the nfs backend's configured nfs uid and
+	// gid (unset meaning the default 1000, DefaultOwnerID). Directory
+	// creators only check existing upper directories against them; they
+	// never chown with them. Zero for every other backend.
+	OwnerUID, OwnerGID int
 }
 
 // ResolvedSharedDir holds path resolution for a single shared directory.
