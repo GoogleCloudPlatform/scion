@@ -950,12 +950,13 @@ func TestCloudRunRun_HarnessParentNotDirectoryRefused(t *testing.T) {
 func TestCloudRunRun_OwnExistingInstanceGetsHome(t *testing.T) {
 	for _, startFails := range []bool{false, true} {
 		t.Run(fmt.Sprintf("startFails=%v", startFails), func(t *testing.T) {
-			own := &runpb.Instance{Name: "x", Labels: map[string]string{sanitizeGCPLabelKey(api.LabelRunID): "run-1"}}
-			fake := &fakeInstancesClient{getInstance: own}
+			fake := &fakeInstancesClient{}
 			if startFails {
 				fake.startErr = errors.New("start refused")
 			}
 			rt, cfg, leaf := crHomeRun(t, fake)
+			// This run's instance, with the spec this start computes.
+			fake.getInstance = computedCloudRunInstance(t, rt, cfg)
 			out := filepath.Join(leaf, filepath.FromSlash(harnessBundleOutputsRel), "x")
 			if err := os.MkdirAll(filepath.Dir(out), 0o700); err != nil {
 				t.Fatal(err)

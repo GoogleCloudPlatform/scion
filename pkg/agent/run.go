@@ -2939,6 +2939,14 @@ authDone:
 	allAgents, err := m.listRuntime(ctx, map[string]string{"scion.name": slug})
 	if err == nil {
 		for _, a := range allAgents {
+			// An entry of another run is never this start's container, so
+			// it is neither reported, failed nor deleted here
+			// (ptone/scion#7289): a runtime with a deterministic instance
+			// name (Cloud Run) can still list the previous run's stopped
+			// or soft-deleted entry under the same name and ID.
+			if !postRunEntryOfRun(a, runID) {
+				continue
+			}
 			matched := a.ContainerID == id || strings.EqualFold(a.Name, opts.Name)
 			// An owned (flat instance) manager matches by name only within
 			// the agent's project, never another project's same-named agent.
@@ -3770,6 +3778,15 @@ func filterWorkspaceVolume(volumes []api.VolumeMount) []api.VolumeMount {
 		}
 	}
 	return filtered
+}
+
+// postRunEntryOfRun reports whether a, an entry Start lists right after
+// Run, may be the container of run runID: an entry of runID, or a legacy
+// entry that carries no run ID (it matches by name and ID alone). An entry
+// of any other run belongs to an earlier start and is skipped. It reads
+// only the entry, so it applies the same to every runtime.
+func postRunEntryOfRun(a api.AgentInfo, runID string) bool {
+	return a.RunID == "" || a.RunID == runID
 }
 
 // matchAgentProject reports whether the agent belongs to the given project.

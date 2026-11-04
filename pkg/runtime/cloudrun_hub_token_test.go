@@ -403,13 +403,18 @@ func TestReservedSecretEnvTarget_HubTokenStagedMarker(t *testing.T) {
 	}
 }
 
-// The existing-instance path (no update API) keeps the instance's
-// creation-time payload; it says so instead of dropping the credential
-// silently, and the credential never reaches the log or the error.
-func TestCloudRunRun_ExistingInstanceWarnsCredentialNotRedelivered(t *testing.T) {
-	wantName := "projects/test-project/locations/us-central1/instances/" + cloudRunInstanceID("agent-1")
-	fake := &fakeInstancesClient{getInstance: &runpb.Instance{Name: wantName}}
+// The Instances API has no update, so an existing instance created
+// without this start's hub credential differs in its staged secrets
+// (cloudRunSpecDiff) and is recreated with the credential, never started
+// with its creation-time blob; the credential never reaches the log or
+// the error.
+func TestCloudRunRun_ExistingInstanceWithoutCredentialRecreated(t *testing.T) {
+	fake := &fakeInstancesClient{}
 	rt := newFakeCloudRunRuntime(t, fake)
+	existing := computedCloudRunInstance(t, rt, runConfigForTest())
+	// Run's read, then gone after the delete (by name: no run ID).
+	fake.getSeq = []fakeGetResult{{inst: existing}, {err: notFoundErr()}}
+	fake.getErr = notFoundErr()
 	logs := captureRuntimeLog(t)
 
 	cfg := runConfigForTest()
@@ -420,12 +425,21 @@ func TestCloudRunRun_ExistingInstanceWarnsCredentialNotRedelivered(t *testing.T)
 		}
 		t.Fatalf("Run on an existing instance failed (error length %d)", len(err.Error()))
 	}
-	if len(fake.startReqs) != 1 || len(fake.createReqs) != 0 {
-		t.Fatalf("start/create calls = %d/%d, want 1/0", len(fake.startReqs), len(fake.createReqs))
+	if len(fake.startReqs) != 0 || len(fake.deleteReqs) != 1 || len(fake.createReqs) != 1 {
+		t.Fatalf("start/delete/create calls = %d/%d/%d, want 0/1/1", len(fake.startReqs), len(fake.deleteReqs), len(fake.createReqs))
+	}
+	staged := false
+	for _, ev := range fake.createReqs[0].GetInstance().GetContainers()[0].GetEnv() {
+		if ev.GetName() == stagedsecrets.EnvVar {
+			staged = true
+		}
+	}
+	if !staged {
+		t.Error("the recreated instance carries no staged blob")
 	}
 	out := logs.String()
-	if !strings.Contains(out, "keeps its creation-time staged secrets, including the hub credential") {
-		t.Errorf("no warning on the reuse path (log length %d)", len(out))
+	if !strings.Contains(out, "changed_fields=secret_env") {
+		t.Errorf("no recreate log naming the staged secrets (log length %d)", len(out))
 	}
 	if strings.Contains(out, crHubTokenCanary) {
 		t.Error("log carries the credential")

@@ -50,6 +50,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/cloudrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/startuplistener"
+	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/googleapis/gax-go/v2"
 	"google.golang.org/api/iterator"
@@ -88,6 +89,10 @@ type CloudRunRuntime struct {
 	// may act as the instance service account. Nil in production
 	// (testActAsIAM); tests inject a stub.
 	testActAs actAsTester
+	// readyBoundsForTest overrides the bounds and clock of the wait for an
+	// instance after a create or start. Nil in production
+	// (defaultCloudRunReadyBounds); tests inject a fake clock.
+	readyBoundsForTest *cloudRunReadyBounds
 
 	// resolveMu protects the resolution of GCP metadata. When ProjectID
 	// and Location are both empty (auto-detected Cloud Run environment),
@@ -342,7 +347,7 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	// Done before any provisioning so an oversized blob fails fast; its
 	// error names only the largest field class. The blob's sizes (never
 	// names or values) are logged at every start.
-	_, sizes, err := applyStagedSecretsToEnvExtras(&cfg, cloudRunEnvLimit, stagedExtras{
+	secretEnvTargets, sizes, err := applyStagedSecretsToEnvExtras(&cfg, cloudRunEnvLimit, stagedExtras{
 		HubToken:         hubToken,
 		HarnessSecrets:   harnessSecrets,
 		ResolvedAuthEnv:  resolvedAuthStaged,
@@ -406,6 +411,19 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	}
 	defer func() { _ = c.Close() }()
 
+	// The instance this start computes. It is built before the read, so an
+	// existing instance is reused only when it matches (ptone/scion#7297).
+	inst := r.buildCloudRunInstance(cfg, uid, gid, nfsPaths)
+	inst.Containers[0].Resources = resources
+	secretEnv := map[string]bool{stagedsecrets.EnvVar: true}
+	for _, name := range secretEnvTargets {
+		secretEnv[name] = true
+	}
+	runID := cfg.Labels[api.LabelRunID]
+	runKey := sanitizeGCPLabelKey(api.LabelRunID)
+	want := sanitizeGCPLabelValue(runID)
+	bounds := r.readyBounds()
+
 	// Check if the instance already exists
 	getReq := &runpb.GetInstanceRequest{
 		Name: fmt.Sprintf("%s/instances/%s", parent, instanceID),
@@ -424,62 +442,21 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 		// UpdateInstance, so an instance's labels change only by recreating
 		// it, and reusing another run's instance would serve this run under
 		// that run's label: refuse it with ErrRunConflict (ptone/scion#2550).
-		// An instance of this run is started. So is a legacy instance with
-		// no run label, left unstamped: it keeps reporting no run ID, and
-		// the legacy rule lets this run's stop or delete still target it.
-		// Either start carries the read's etag, meant to keep an instance
-		// replaced after the read from being started. Whether the API
-		// enforces it on a start is unverified; it does not on a delete
-		// (ptone/scion#4760).
-		runKey := sanitizeGCPLabelKey(api.LabelRunID)
-		want := sanitizeGCPLabelValue(cfg.Labels[api.LabelRunID])
 		run := existing.GetLabels()[runKey]
-		if want != "" && run != "" && run != want {
+		if want != "" && run != "" && run != want && existing.GetDeleteTime() == nil {
 			runtimeLog().Info("Cloud Run instance of another run holds the agent's instance ID; not reusing it",
 				"instance", instanceID, "run_id", want, "instance_run_id", run)
 			return "", fmt.Errorf("instance %s belongs to run %q, not %q: %w", instanceID, run, want, ErrRunConflict)
 		}
-		if err := hooks.checkpoint(ctx, CheckpointStepInstanceStart); err != nil {
-			return "", err
-		}
-		// This run's own instance (or a legacy one with no run label): the
-		// home is provisioned before it is started.
-		if err := deliverHome(); err != nil {
-			return "", err
-		}
-		// Only this run's own instance is reported: a legacy instance with
-		// no run label is not this launch's to clean up (DeleteResource
-		// would skip it anyway).
-		if want != "" && run == want {
-			hooks.created(api.ResourceHandle{Kind: api.ResourceKindCloudRunInstance, Namespace: parent, Name: instanceID, UID: cfg.Labels[api.LabelRunID]})
-		}
-		// The Instances API has no update, so a started existing instance
-		// keeps the staged secrets it was created with, including the hub
-		// credential; the one this start read is not delivered. When a
-		// crash or kill left a newer token file in the instance's home,
-		// sciontool init keeps it (its iat rule) over the creation-time one.
-		if hubToken != "" {
-			runtimeLog().Warn("Cloud Run start: reusing the existing instance; it keeps its creation-time staged secrets, including the hub credential",
-				"instance", instanceID, "agent_id", agentID)
-		}
-		if len(harnessSecrets) > 0 {
-			runtimeLog().Warn("Cloud Run start: reusing the existing instance; it keeps its creation-time staged secrets and volumes, including the harness secrets",
-				"instance", instanceID, "agent_id", agentID)
-		}
-		startReq := &runpb.StartInstanceRequest{
-			Name: getReq.Name,
-			Etag: existing.GetEtag(),
-		}
-		op, err := c.StartInstance(ctx, startReq, defaultCallOpts...)
+		reuse, err := r.reuseOrClearExisting(ctx, c, cfg, getReq.Name, existing, inst, secretEnv, want, bounds, hooks)
 		if err != nil {
-			return "", fmt.Errorf("failed to start existing instance: %w", err)
+			return "", err
 		}
-		if _, err := op.Wait(ctx); err != nil {
-			return "", fmt.Errorf("wait for start operation failed: %w", err)
+		if reuse {
+			return r.startExistingInstance(ctx, c, parent, getReq.Name, existing, runID, want, run, deliverHome, hubToken != "", len(harnessSecrets) > 0, bounds, hooks)
 		}
-		return instanceID, nil
-	}
-	if status.Code(err) != codes.NotFound {
+		// The existing instance is gone: create this start's below.
+	} else if status.Code(err) != codes.NotFound {
 		return "", fmt.Errorf("failed to get instance %s: %w", instanceID, err)
 	}
 
@@ -490,8 +467,6 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 		nfsPaths.rollbackCreated(err)
 		return "", err
 	}
-	inst := r.buildCloudRunInstance(cfg, uid, gid, nfsPaths)
-	inst.Containers[0].Resources = resources
 	logCloudRunResources(instanceID, resources, cfg.Resources)
 
 	req := &runpb.CreateInstanceRequest{
@@ -512,14 +487,27 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	// delete. With the hooks active the create starts in doubt: until it
 	// is observed, DeleteResource re-polls a NotFound instead of treating
 	// it as gone (cloudRunCreatesInDoubt).
-	runID := cfg.Labels[api.LabelRunID]
 	if hooks.active() {
 		markCloudRunCreateInDoubt(ctx, getReq.Name, runID)
 	}
 	hooks.created(api.ResourceHandle{Kind: api.ResourceKindCloudRunInstance, Namespace: parent, Name: instanceID, UID: runID})
 
+	// CreateInstance is issued at most once per Run; nothing below
+	// re-issues it.
+	var first *runpb.Instance
 	op, err := c.CreateInstance(ctx, req, defaultCallOpts...)
-	if err != nil {
+	switch {
+	case err != nil && status.Code(err) == codes.AlreadyExists && ctx.Err() == nil:
+		// An instance holds the ID (a client retry of a create that had
+		// landed, or another start racing this one). It is adopted only
+		// when it is this run's and matches this start's spec.
+		clearCloudRunCreateInDoubt(getReq.Name, runID)
+		adopted, aerr := adoptCloudRunInstance(ctx, c, getReq.Name, inst, secretEnv, want, err)
+		if aerr != nil {
+			return "", aerr
+		}
+		first = adopted
+	case err != nil:
 		if cloudRunServerRejected(ctx, err) {
 			clearCloudRunCreateInDoubt(getReq.Name, runID)
 			// The server refused the create (for example a missing actAs
@@ -527,19 +515,195 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 			// directories this start created are removed again. A create
 			// that may still land keeps them.
 			nfsPaths.rollbackCreated(err)
+			return "", fmt.Errorf("failed to create instance (not retried): %w", err)
 		}
 		return "", fmt.Errorf("failed to create instance: %w", err)
+	default:
+		created, err := op.Wait(ctx)
+		if err != nil {
+			return "", fmt.Errorf("wait for create operation failed: %w", err)
+		}
+		// The create has finished, so it cannot appear later. That is not
+		// proof the instance exists: the operation succeeds even when the
+		// instance was deleted while it ran (ptone/scion#4760). The wait
+		// below reads it.
+		clearCloudRunCreateInDoubt(getReq.Name, runID)
+		first = created
 	}
 
-	if _, err := op.Wait(ctx); err != nil {
-		return "", fmt.Errorf("wait for create operation failed: %w", err)
+	target := cloudRunReadyTarget{name: getReq.Name, runID: want, created: true}
+	if _, err := waitCloudRunInstance(ctx, c, target, first, bounds, hooks); err != nil {
+		r.deleteOwnAfterFailedWait(ctx, c, getReq.Name, runID, err)
+		return "", err
 	}
-	// The create has finished, so it can no longer appear later. That is
-	// not proof the instance exists: the operation succeeds even when the
-	// instance was deleted while it ran (ptone/scion#4760).
-	clearCloudRunCreateInDoubt(getReq.Name, runID)
-
 	return instanceID, nil
+}
+
+// reuseOrClearExisting decides what Run does with existing, the instance
+// read under the agent's instance ID, which is not another run's live
+// instance. It reports true when existing is reused as is: this run's own
+// instance (or any instance, for a start with no run ID) whose spec
+// matches inst (cloudRunSpecDiff). A start with no run ID refuses a
+// labelled instance that differs. Otherwise it removes existing and waits
+// until it is gone, so Run creates a fresh instance:
+//   - an instance being deleted (delete_time set) is only waited for;
+//   - a legacy instance with no run label, or this run's instance with a
+//     differing spec, is deleted run-checked (another run's instance is
+//     never deleted) and then waited for.
+func (r *CloudRunRuntime) reuseOrClearExisting(ctx context.Context, c cloudrun.InstancesAPI, cfg RunConfig, name string, existing, inst *runpb.Instance, secretEnv map[string]bool, want string, bounds cloudRunReadyBounds, hooks launchHooks) (bool, error) {
+	short := cloudRunShortInstanceID(name)
+	if existing.GetDeleteTime() != nil {
+		runtimeLog().Info("Cloud Run instance is being deleted; waiting for it before the create",
+			"instance", short, "run_id", want)
+		// The instance created next has the same name, so the exec key
+		// cached for the one being deleted is dropped.
+		r.forgetExecKey(short)
+		return false, waitCloudRunInstanceGone(ctx, c, name, bounds)
+	}
+	run := existing.GetLabels()[sanitizeGCPLabelKey(api.LabelRunID)]
+	diff := cloudRunSpecDiff(existing, inst, secretEnv)
+	if (run == want || want == "") && len(diff) == 0 {
+		if want == "" && run != "" {
+			// A start with no run ID reuses a matching instance labelled
+			// with a run; it is not adopted silently. Names and state only.
+			runtimeLog().Info("Cloud Run start with no run ID: reusing a matching instance labelled with a run",
+				"instance", short, "instance_run_id", run, "state", describeCloudRunInstance(existing))
+		}
+		return true, nil
+	}
+	if want == "" && run != "" {
+		// Without a run ID the delete could not be run-checked, so a
+		// labelled instance is never deleted here.
+		return false, fmt.Errorf("instance %s of run %q differs from this start's spec (%s), and a start with no run ID does not recreate it: %w",
+			short, run, strings.Join(diff, ", "), ErrRunConflict)
+	}
+	// Only field names and the run IDs are logged, never values.
+	runtimeLog().Info("Cloud Run start: recreating the existing instance",
+		"instance", short, "run_id", want, "instance_run_id", run, "legacy", run == "",
+		"changed_fields", strings.Join(diff, ","))
+	// The delete is by the deterministic instance ID, so an async launch
+	// checkpoints first, as Start's pre-clean does.
+	if err := hooks.checkpoint(ctx, CheckpointStepPreClean); err != nil {
+		return false, err
+	}
+	ref := RunRef{ID: short, RunID: cfg.Labels[api.LabelRunID]}
+	err := r.instanceOpWith(ctx, c, ref, "delete", false, func(c cloudrun.InstancesAPI, name, etag string) (cloudrun.InstanceOperation, error) {
+		return c.DeleteInstance(ctx, &runpb.DeleteInstanceRequest{Name: name, Etag: etag}, defaultCallOpts...)
+	})
+	// The recreated instance has the same name, so the exec key cached for
+	// the deleted one is dropped, also after a failed delete, as Delete does.
+	r.forgetExecKey(short)
+	if err != nil {
+		return false, fmt.Errorf("cloudrun: failed to remove instance %s before recreating it: %w", short, err)
+	}
+	return false, waitCloudRunInstanceGone(ctx, c, name, bounds)
+}
+
+// startExistingInstance starts existing, this run's own matching instance
+// (reuseOrClearExisting), and waits until it is ready. Its home is
+// provisioned before it is started.
+func (r *CloudRunRuntime) startExistingInstance(ctx context.Context, c cloudrun.InstancesAPI, parent, name string, existing *runpb.Instance, runID, want, run string, deliverHome func() error, hubTokenStaged, harnessSecretsStaged bool, bounds cloudRunReadyBounds, hooks launchHooks) (string, error) {
+	instanceID := cloudRunShortInstanceID(name)
+	if err := hooks.checkpoint(ctx, CheckpointStepInstanceStart); err != nil {
+		return "", err
+	}
+	if err := deliverHome(); err != nil {
+		return "", err
+	}
+	// Only this run's own instance is reported: a legacy instance with
+	// no run label is not this launch's to clean up (DeleteResource
+	// would skip it anyway).
+	if want != "" && run == want {
+		hooks.created(api.ResourceHandle{Kind: api.ResourceKindCloudRunInstance, Namespace: parent, Name: instanceID, UID: runID})
+	}
+	// The instance matches this start's secret-backed env
+	// (cloudRunSpecDiff), so its staged secrets are the ones this start
+	// computed. When a crash or kill left a newer token file in the
+	// instance's home, sciontool init keeps it (its iat rule).
+	if hubTokenStaged || harnessSecretsStaged {
+		runtimeLog().Info("Cloud Run start: reusing the existing instance; its staged secrets match this start's",
+			"instance", instanceID)
+	}
+	// The start carries the read's etag, meant to keep an instance
+	// replaced after the read from being started. Whether the API
+	// enforces it on a start is unverified; it does not on a delete
+	// (ptone/scion#4760). A start refused while the instance settles (a
+	// stop still in progress) is retried within the wait's bounds
+	// (startCloudRunInstanceSettled).
+	op, read, bounds, err := startCloudRunInstanceSettled(ctx, c, name, existing, want, bounds)
+	if err != nil {
+		return "", err
+	}
+	started, err := op.Wait(ctx)
+	if err != nil {
+		return "", fmt.Errorf("wait for start operation failed: %w", err)
+	}
+	target := cloudRunReadyTarget{name: name, runID: want, legacyOK: true, minGeneration: read.GetGeneration()}
+	if _, err := waitCloudRunInstance(ctx, c, target, started, bounds, hooks); err != nil {
+		r.deleteOwnAfterFailedWait(ctx, c, name, want, err)
+		return "", err
+	}
+	return instanceID, nil
+}
+
+// adoptCloudRunInstance reads the instance a create found already
+// present (AlreadyExists) and returns it when it may be adopted: this
+// run's instance (want, never "" here), not being deleted, whose spec
+// matches inst. Any other instance is refused with a clear error and
+// left as it is: another run's, a legacy one with no run label, one being
+// deleted, or this run's with a differing spec. Each refusal wraps
+// createErr, the create's AlreadyExists. The create is never re-issued.
+func adoptCloudRunInstance(ctx context.Context, c cloudrun.InstancesAPI, name string, inst *runpb.Instance, secretEnv map[string]bool, want string, createErr error) (*runpb.Instance, error) {
+	short := cloudRunShortInstanceID(name)
+	got, err := c.GetInstance(ctx, &runpb.GetInstanceRequest{Name: name}, defaultCallOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("cloudrun: create of instance %s found it present (%w), and reading it failed: %w", short, createErr, err)
+	}
+	if got == nil {
+		return nil, fmt.Errorf("cloudrun: create of instance %s found it present, and GetInstance returned no instance: %w", short, createErr)
+	}
+	run := got.GetLabels()[sanitizeGCPLabelKey(api.LabelRunID)]
+	if want == "" || run != want {
+		runtimeLog().Info("Cloud Run create found an instance of another run; not adopting it",
+			"instance", short, "run_id", want, "instance_run_id", run)
+		return nil, fmt.Errorf("instance %s already exists under run %q, not %q; not adopted: %w: %w", short, run, want, ErrRunConflict, createErr)
+	}
+	if got.GetDeleteTime() != nil {
+		return nil, fmt.Errorf("cloudrun: instance %s of this run already exists and is being deleted; not adopted: %w", short, createErr)
+	}
+	if diff := cloudRunSpecDiff(got, inst, secretEnv); len(diff) > 0 {
+		runtimeLog().Info("Cloud Run create found this run's instance with a different spec; not adopting it",
+			"instance", short, "run_id", want, "changed_fields", strings.Join(diff, ","))
+		return nil, fmt.Errorf("cloudrun: instance %s of this run already exists with different %s; not adopted: %w", short, strings.Join(diff, ", "), createErr)
+	}
+	runtimeLog().Info("Cloud Run create found this run's own instance; adopting it", "instance", short, "run_id", want)
+	return got, nil
+}
+
+// deleteOwnAfterFailedWait removes this run's instance name after its
+// wait ended without a ready instance because it ended or the cap was
+// reached. The delete is strict and run-checked (instanceOpWith), so
+// another run's or a legacy instance is never touched. Other wait errors
+// (a refusal, another run's instance, a deleted instance, ctx ending)
+// delete nothing: the launch's cleanup holds the created handle. A failed
+// delete is logged; the wait's error is what Run returns.
+func (r *CloudRunRuntime) deleteOwnAfterFailedWait(ctx context.Context, c cloudrun.InstancesAPI, name, runID string, waitErr error) {
+	if runID == "" || ctx.Err() != nil {
+		return
+	}
+	if !errors.Is(waitErr, errCloudRunInstanceEnded) && !errors.Is(waitErr, errCloudRunReadyCap) {
+		return
+	}
+	short := cloudRunShortInstanceID(name)
+	err := r.instanceOpWith(ctx, c, RunRef{ID: short, RunID: runID}, "delete", true, func(c cloudrun.InstancesAPI, name, etag string) (cloudrun.InstanceOperation, error) {
+		return c.DeleteInstance(ctx, &runpb.DeleteInstanceRequest{Name: name, Etag: etag}, defaultCallOpts...)
+	})
+	// As Delete does, the deleted instance's cached exec key is dropped.
+	r.forgetExecKey(short)
+	if err != nil {
+		runtimeLog().Warn("Cloud Run start failed and its instance was not removed; the launch cleanup or the next start removes it",
+			"instance", short, "run_id", runID, "error", err)
+	}
 }
 
 func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfsPaths *cloudRunNFSProvisionPaths) *runpb.Instance {
