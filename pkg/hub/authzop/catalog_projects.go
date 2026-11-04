@@ -1143,7 +1143,7 @@ var projectOperations = []OperationSpec{
 		BasePermission:        "artifact.manage",
 		Effects:               []SecurityEffect{EffectGrantAuthority},
 		DelegationKind:        DelegationNonAmplification,
-		DelegationDescription: "A manager (the owner or an admin grantee) grants at most admin, the level it holds, and admin is never given to the home project's grant; a steward grants at most write (no stored admin grant can outlive its computed authority), decided from roles and the delegation chain (StewardClause), never from grants the caller holds; the review path gives only the review level, which allows review versions and no read of its own, decided by the host's review-grant authority (MayGrantReview) rather than by grants the caller holds",
+		DelegationDescription: "A manager (the owner or an admin grantee) grants at most admin, the level it holds, and admin is never given to the home project's grant; a steward grants at most write (no stored admin grant can outlive its computed authority), decided from roles, the delegating user recorded on the artifact and, when none is recorded, the delegation chain (StewardClause), never from grants the caller holds; the review path gives only the review level, which allows review versions and no read of its own, decided by the host's review-grant authority (MayGrantReview) rather than by grants the caller holds",
 		AuthorityEval:         AuthorityEvalNone,
 		// grant_created and grant_changed are written in the same
 		// transaction as the grant (pkg/artifacts/store_grants.go).
