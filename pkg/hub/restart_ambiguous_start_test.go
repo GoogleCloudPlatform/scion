@@ -29,6 +29,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -240,7 +242,23 @@ func TestRestartAmbiguousStartLeg_SuspendedThenReportsRunning(t *testing.T) {
 	got := assertRestartHeld(t, f, code, a.ID, "the hold's reservation outlives an ambiguous start")
 	require.Equal(t, string(state.PhaseStopped), got.Phase, "an ambiguous restart rests at stopped")
 
-	selfReport(t, f.srv, got, state.PhaseRunning)
+	// The new container's report carries the run its start recorded: a
+	// restart's start leg records the new run (beginRun) before it sends,
+	// which this test's dispatcher does not do, so the run is recorded here.
+	// A report of the pre-restart run, or a run-less agent token, is dropped
+	// while the restart claim is held (ptone/scion#1956 item 5b).
+	_, err := f.s.SetAgentRunID(context.Background(), a.ID, "run-after-restart", nil)
+	require.NoError(t, err)
+	runTok, _, err := f.srv.GetAgentTokenService().SignAgentToken(AgentTokenGrant{AgentID: a.ID, ProjectID: a.ProjectID,
+		Scopes: []AgentTokenScope{ScopeAgentStatusUpdate}}, "run-after-restart")
+	require.NoError(t, err)
+	req, err := http.NewRequest(http.MethodPost, "/api/v1/agents/"+a.ID+"/status", strings.NewReader(`{"phase":"`+string(state.PhaseRunning)+`"}`))
+	require.NoError(t, err)
+	req.Header.Set("X-Scion-Agent-Token", runTok)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	f.heartbeat(completeInventory(), a.Slug)
 	f.srv.reapStartClaims(context.Background())
 
