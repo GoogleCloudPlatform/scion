@@ -30,16 +30,6 @@ import (
 
 const testNoSessionBus = "unix:path=/home/scion/.scion/harness/no-session-bus"
 
-// envValue returns the value of key in a KEY=VALUE list and whether it is set.
-func envValue(env []string, key string) (string, bool) {
-	for _, kv := range env {
-		if k, v, ok := strings.Cut(kv, "="); ok && k == key {
-			return v, true
-		}
-	}
-	return "", false
-}
-
 func TestNoAuthModeActive(t *testing.T) {
 	cases := []struct {
 		name   string
