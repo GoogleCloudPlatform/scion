@@ -26,31 +26,27 @@ import (
 )
 
 // TestBuildEnvGatherResponse_HubScopeSecretWarning is a regression test for #721.
-//
-// When a broker reports a needed key (e.g., GEMINI_API_KEY) and the Hub has a
-// hub-scope secret for that key, buildEnvGatherResponse should emit a warning
-// indicating the key exists at hub scope. Currently, the cross-check at
-// handlers_agents_core.go:1172-1209 only checks user and project scope for
-// both env vars and secrets, missing hub-scope entirely.
-//
-// This test SHOULD PASS once the fix is applied. With the current code it will
-// FAIL because the hub-scope check is missing.
+// When a broker reports a needed key and the Hub has a hub-scope secret that
+// is delivered to agents (environment type, injection mode "always") for that
+// key, buildEnvGatherResponse emits a warning naming the key at hub scope. A
+// hub-scope secret that is never delivered (here an as-needed one) is not
+// named: its name is not disclosed through this response.
 func TestBuildEnvGatherResponse_HubScopeSecretWarning(t *testing.T) {
 	srv, st := testServer(t)
 	ctx := context.Background()
 
-	// Create a hub-scope secret for GEMINI_API_KEY
-	if err := st.CreateSecret(ctx, &store.Secret{
-		ID:             tid("sec-hubscope-gemini"),
-		Key:            "GEMINI_API_KEY",
-		EncryptedValue: "encrypted-gemini-key",
-		SecretType:     store.SecretTypeEnvironment,
-		Target:         "GEMINI_API_KEY",
-		Scope:          store.ScopeHub,
-		ScopeID:        "test-hub-id", // matches testServer's hub ID
-		InjectionMode:  store.InjectionModeAsNeeded,
-	}); err != nil {
-		t.Fatal(err)
+	for _, sec := range []*store.Secret{
+		{ID: tid("sec-hubscope-gemini"), Key: "GEMINI_API_KEY", InjectionMode: store.InjectionModeAsNeeded},
+		{ID: tid("sec-hubscope-always"), Key: "ALWAYS_HUB_KEY", InjectionMode: store.InjectionModeAlways},
+	} {
+		sec.EncryptedValue = "encrypted-" + sec.Key
+		sec.SecretType = store.SecretTypeEnvironment
+		sec.Target = sec.Key
+		sec.Scope = store.ScopeHub
+		sec.ScopeID = "test-hub-id" // matches testServer's hub ID
+		if err := st.CreateSecret(ctx, sec); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	// Set up the local secret backend so the cross-check can query it
@@ -64,33 +60,26 @@ func TestBuildEnvGatherResponse_HubScopeSecretWarning(t *testing.T) {
 		ProjectID: "some-project",
 	}
 
-	// Simulate broker response: GEMINI_API_KEY is required but not satisfied
 	brokerReqs := &RemoteEnvRequirementsResponse{
 		AgentID:  agent.ID,
-		Required: []string{"GEMINI_API_KEY"},
+		Required: []string{"GEMINI_API_KEY", "ALWAYS_HUB_KEY"},
 		HubHas:   []string{},
-		Needs:    []string{"GEMINI_API_KEY"},
+		Needs:    []string{"GEMINI_API_KEY", "ALWAYS_HUB_KEY"},
 	}
 
 	resp := srv.buildEnvGatherResponse(ctx, agent, brokerReqs)
 
-	// The cross-check should detect that GEMINI_API_KEY exists at hub scope
-	// and emit a warning. With the current code, no warning is emitted because
-	// only user and project scopes are checked.
-	if len(resp.HubWarnings) == 0 {
-		t.Error("expected HubWarnings for GEMINI_API_KEY (exists at hub scope but not dispatched); got none")
-	}
-
-	// Verify the warning mentions hub scope
 	found := false
 	for _, w := range resp.HubWarnings {
-		if strings.Contains(w, "GEMINI_API_KEY") && strings.Contains(w, "hub") {
+		if strings.Contains(w, "GEMINI_API_KEY") {
+			t.Errorf("warning names a hub-scope secret that is never delivered: %q", w)
+		}
+		if strings.Contains(w, "ALWAYS_HUB_KEY") && strings.Contains(w, "hub scope") {
 			found = true
-			break
 		}
 	}
-	if !found && len(resp.HubWarnings) > 0 {
-		t.Errorf("expected warning mentioning GEMINI_API_KEY at hub scope; got warnings: %v", resp.HubWarnings)
+	if !found {
+		t.Errorf("expected a warning naming ALWAYS_HUB_KEY at hub scope; got warnings: %v", resp.HubWarnings)
 	}
 }
 

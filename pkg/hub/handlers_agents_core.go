@@ -3418,12 +3418,18 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 					continue
 				}
 			}
-			// Check hub-scope secrets
+			// Check hub-scope secrets. Only a hub-scope secret that is
+			// delivered to agents (secret.HubSecretDeliverable) is named:
+			// any other hub-scope secret is never dispatched, and its name
+			// is not disclosed here.
 			if hubID := s.HubID(); hubID != "" {
 				metas, err := s.secretBackend.List(ctx, secret.Filter{Scope: "hub", ScopeID: hubID, Name: key})
-				if err == nil && len(metas) > 0 {
+				if err == nil && slices.ContainsFunc(metas, func(m secret.SecretMeta) bool {
+					m.Scope = store.ScopeHub
+					return secret.HubSecretDeliverable(m)
+				}) {
 					resp.HubWarnings = append(resp.HubWarnings,
-						fmt.Sprintf("%s is stored in Hub secrets (hub scope) but was not included in the dispatch — injection_mode may be as_needed", key))
+						fmt.Sprintf("%s is stored in Hub secrets (hub scope) but was not included in the dispatch — this may indicate a resolution issue", key))
 					continue
 				}
 			}
