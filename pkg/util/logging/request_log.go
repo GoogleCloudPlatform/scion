@@ -70,6 +70,13 @@ type RequestMeta struct {
 	// so a request auth rejects outright is logged too.
 	AuthType  string
 	AuthAttrs []slog.Attr
+
+	// deferToNested is set when the RequestLogMiddleware that installed this
+	// record was built with DeferToNestedRequestLog. nestedLogged is set by
+	// a RequestLogMiddleware nested directly inside that one once it has
+	// written its own line, so the deferring logger writes none.
+	deferToNested bool
+	nestedLogged  bool
 }
 
 // InstrumentedResponseWriter captures status code and bytes written.
@@ -314,18 +321,47 @@ func extractIDsFromPath(path string, patterns []PathPattern) (projectID, agentID
 // request is logged as slow when no explicit threshold is configured.
 const DefaultSlowRequestThreshold = 10 * time.Second
 
+// RequestLogOption configures RequestLogMiddleware.
+type RequestLogOption func(*requestLogOptions)
+
+type requestLogOptions struct {
+	deferToNested bool
+}
+
+// DeferToNestedRequestLog makes a RequestLogMiddleware write no line (and
+// no slow-request line) for a request that a RequestLogMiddleware nested
+// directly inside it has already logged. Use it on an outer chain that
+// mounts a handler with its own request logger (the web server mounting
+// the Hub API), so such a request is logged once, by the inner logger,
+// which sees the inner chain's auth attribution. A request the outer
+// chain answers without reaching an inner logger is still logged by the
+// outer one. Only the logger built with this option is ever suppressed,
+// and only by the logger directly inside it: two nested loggers without
+// it both log, each with its own request ID.
+func DeferToNestedRequestLog() RequestLogOption {
+	return func(o *requestLogOptions) { o.deferToNested = true }
+}
+
 // RequestLogMiddleware creates HTTP middleware that logs each request
 // to the dedicated request logger using the HttpRequest format.
 // slowThreshold controls when a request is logged as slow; zero uses
 // DefaultSlowRequestThreshold. Streaming responses (Content-Type:
 // text/event-stream) are exempt from the slow request check.
-func RequestLogMiddleware(logger *slog.Logger, component string, patterns []PathPattern, slowThreshold time.Duration) func(http.Handler) http.Handler {
+func RequestLogMiddleware(logger *slog.Logger, component string, patterns []PathPattern, slowThreshold time.Duration, opts ...RequestLogOption) func(http.Handler) http.Handler {
 	if slowThreshold <= 0 {
 		slowThreshold = DefaultSlowRequestThreshold
+	}
+	var o requestLogOptions
+	for _, opt := range opts {
+		opt(&o)
 	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
+
+			// The record of the request logger directly enclosing this
+			// one, if any; told below when this line is written.
+			enclosing := RequestMetaFromContext(r.Context())
 
 			// Extract and normalize trace ID from headers.
 			traceID := ExtractTraceIDFromHeaders(r)
@@ -343,6 +379,8 @@ func RequestLogMiddleware(logger *slog.Logger, component string, patterns []Path
 				RequestID: requestID,
 				TraceID:   traceID,
 				Component: component,
+
+				deferToNested: o.deferToNested,
 			}
 			ctx := ContextWithRequestMeta(r.Context(), meta)
 			r = r.WithContext(ctx)
@@ -374,7 +412,16 @@ func RequestLogMiddleware(logger *slog.Logger, component string, patterns []Path
 			finalBrokerID := meta.BrokerID
 			finalAuthType := meta.AuthType
 			finalAuthAttrs := append([]slog.Attr(nil), meta.AuthAttrs...)
+			nestedLogged := meta.nestedLogged
 			meta.mu.Unlock()
+
+			// A nested request logger already wrote this request's line.
+			if nestedLogged {
+				if aborted {
+					panic(http.ErrAbortHandler)
+				}
+				return
+			}
 
 			duration := time.Since(start)
 
@@ -448,6 +495,13 @@ func RequestLogMiddleware(logger *slog.Logger, component string, patterns []Path
 			}
 
 			logger.LogAttrs(ctx, level, "", attrs...)
+			if enclosing != nil {
+				enclosing.mu.Lock()
+				if enclosing.deferToNested {
+					enclosing.nestedLogged = true
+				}
+				enclosing.mu.Unlock()
+			}
 			if aborted {
 				panic(http.ErrAbortHandler)
 			}
