@@ -20,9 +20,9 @@ fired on every broker start.
   directories are counted and logged at Debug, once per walk, count only.
 - **Check-only owner.** `EnsureLeafExpecting(hostBase, rel, expected)`
   creates exactly as `EnsureLeaf` does and chowns nothing; `expected` only
-  feeds the check. `EnsureLeafOwned` checks against its own owner. Moving the
-  agent helpers to `EnsureLeafOwned` was rejected because it would `fchown`
-  new leaves when running as root.
+  feeds the check. `EnsureLeafOwned` checks against its own owner. The agent
+  helpers do not use `EnsureLeafOwned`, which would `fchown` new leaves when
+  running as root.
 - **Plumbing.** `provision.ResolvedWorkspace` has `OwnerUID`/`OwnerGID`,
   filled by `nfsBackend.Resolve` from the projectfs resolution (Layout UID and
   GID from `EffectiveWorkspaceStorage().NFS`, so `project_storage.nfs` or the
@@ -32,13 +32,13 @@ fired on every broker start.
   `resolved`; the removal path gets it as an added return of
   `nfsExportWorkspaceOnAnyRuntime`. The expected owner always comes from
   configuration, never from the directory being checked.
-- **Broker state leaf** (separate commit): `ensureWorkspaceAndStateLeaves`
+- **Broker state leaf**: `ensureWorkspaceAndStateLeaves`
   walks the provisioning-state leaf with `EnsureLeafExpecting(owner)`. Without
   this, the state walk (zero owner) right after the workspace walk would fire
   the warning on brokers.
 - Docs: one line in `reference/server-config.md` (NFS shared dirs section).
 
-## Tests and mutants
+## Tests
 
 - `TestHasExpectedSharedLayout`: synthetic `unix.Stat_t` table (no
   filesystem, geteuid seam), so it does not depend on the host's ids or on
@@ -46,11 +46,6 @@ fired on every broker start.
   the zero Owner") and the zero-uid guard ("uid 0 with expected uid 0").
 - `TestWarnIfIntermediateUnsafe_ExpectedSharedLayout` (filesystem table,
   includes a wrong-gid row for each accepted owner).
-- Mutants: M1 (drop the other-writable condition) is killed by the
-  `other-writable` and `other-writable_with_sticky` rows of both tables; M2
-  (drop the owner condition) by `foreign_owner` in both and
-  `uid_0_with_expected_uid_0` in the synthetic table; M3 (drop the zero-gid
-  guard) by `gid_0_with_the_zero_Owner` in the synthetic table.
 - `TestEnsureLeafExpecting_ExpectedLayoutThroughRealWalk`,
   `TestNFSResolve_Owner`, and the configured-owner tests for each plumbed
   path: `TestEnsureNFSWorkspaceLeaf_ConfiguredShareOwnerReachesWalk`,
@@ -76,5 +71,5 @@ their walks over a correctly set-up share:
 - `pkg/projectfs/open_unix.go` (`EnsurePrivateDir`)
 
 Accepted limit: members of the share group can replace an upper directory
-with another real directory between the walk and a later use (the window
-described in ptone/scion#7224).
+with another real directory between the walk and a later use (described in
+ptone/scion#7224).
