@@ -431,8 +431,9 @@ func TestCloudRunRun_ResolvedAuthCountsAgainstStagedCap(t *testing.T) {
 }
 
 // A resolved-auth name counts as set for the template fallback, as on
-// Docker: the fallback neither overrides the applied value nor adds a
-// second copy of the name.
+// Docker: the fallback neither overrides an applied plain value nor adds a
+// second copy of the name, and it does not set a name the staged data
+// carries (that name is never plain env either).
 func TestBuildCloudRunInstance_FallbackDoesNotOverrideResolvedAuth(t *testing.T) {
 	rt, err := NewCloudRunRuntime(&config.CloudRunConfig{ProjectID: "test-project", Location: "us-central1"})
 	if err != nil {
@@ -441,8 +442,8 @@ func TestBuildCloudRunInstance_FallbackDoesNotOverrideResolvedAuth(t *testing.T)
 	cfg := RunConfig{
 		Image:        "test-image:latest",
 		Labels:       map[string]string{"agent_id": "agent-1"},
-		ResolvedAuth: &api.ResolvedAuth{EnvVars: map[string]string{"CLOUD_ML_REGION": authFixtureRegion}},
-		FallbackEnv:  map[string]string{"CLOUD_ML_REGION": "template", "NEW_KEY": "from-template"},
+		ResolvedAuth: &api.ResolvedAuth{EnvVars: map[string]string{"CLOUD_ML_REGION": authFixtureRegion, "EXAMPLE_STAGED_AUTH": "from-resolved-auth"}},
+		FallbackEnv:  map[string]string{"CLOUD_ML_REGION": "template", "EXAMPLE_STAGED_AUTH": "template", "NEW_KEY": "from-template"},
 	}
 	inst := rt.buildCloudRunInstance(cfg, 1000, 1000, nil)
 	count := map[string]int{}
@@ -456,6 +457,9 @@ func TestBuildCloudRunInstance_FallbackDoesNotOverrideResolvedAuth(t *testing.T)
 	}
 	if env["CLOUD_ML_REGION"] != authFixtureRegion {
 		t.Errorf("CLOUD_ML_REGION = %q, want the resolved-auth value %q", env["CLOUD_ML_REGION"], authFixtureRegion)
+	}
+	if v, ok := env["EXAMPLE_STAGED_AUTH"]; ok {
+		t.Errorf("EXAMPLE_STAGED_AUTH is instance env (template value %v); a staged resolved-auth name must be neither plain env nor a fallback", v == "template")
 	}
 	if env["NEW_KEY"] != "from-template" {
 		t.Errorf("control: NEW_KEY = %q, want %q", env["NEW_KEY"], "from-template")

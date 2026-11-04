@@ -591,11 +591,16 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 	// secrets folded into it and the runtime keys above win, and an empty
 	// value is skipped. Without this the harness's env overlay supplies
 	// those names instead, with unexpanded ${VAR} placeholder text. The
-	// other resolved-auth entries are in the staged blob (Run).
-	plainAuth, _ := splitResolvedAuthEnv(cfg.ResolvedAuth, func(name string) bool { return emitted[name] })
+	// other resolved-auth entries are in the staged blob (Run); they count
+	// as set for the template fallback below, as on Docker, without being
+	// emitted here.
+	plainAuth, stagedAuth := splitResolvedAuthEnv(cfg.ResolvedAuth, func(name string) bool { return emitted[name] })
 	for _, e := range plainAuth {
 		k, v, _ := strings.Cut(e, "=")
 		envVars = append(envVars, &runpb.EnvVar{Name: k, Values: &runpb.EnvVar_Value{Value: v}})
+		emitted[k] = true
+	}
+	for k := range stagedAuth {
 		emitted[k] = true
 	}
 

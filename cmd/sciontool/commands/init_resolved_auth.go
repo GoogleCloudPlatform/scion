@@ -15,6 +15,8 @@
 package commands
 
 import (
+	"errors"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
@@ -31,26 +33,41 @@ var resolvedAuthEnvRoot = hooks.DefaultHarnessDirsRoot
 const envResolvedAuthStaged = stagedsecrets.ResolvedAuthStagedEnvVar
 
 // takeResolvedAuthEnv returns the resolved-auth entries the harness child
-// may receive. Only when staged is set (this init's staging pass wrote the
-// carry file) is the file read and removed (stagedsecrets.TakeResolvedAuthEnv),
+// may receive. nonce is the marker's value: the nonce of the carry file
+// this init's staging pass wrote, or "" when it wrote none.
+//
+// With a nonce, the file is read and removed (stagedsecrets.TakeResolvedAuthEnv)
 // and a reserved or invalid name is then dropped again
 // (stagedsecrets.ExportableResolvedAuthEnv), so an entry can never set the
-// staged-token marker or a runtime-owned name. Without staged, a file found
-// there was not written by this init: it is removed without being read.
-// It returns nil when nothing is exported. Only counts are logged, never a
-// value.
-func takeResolvedAuthEnv(root string, staged bool) (map[string]string, error) {
-	if !staged {
+// staged-token marker or a runtime-owned name. A file whose nonce differs
+// was not written by that pass: it is removed, nothing is exported and the
+// start continues.
+//
+// Without a nonce, a file found there was not written by this init: it is
+// removed without being read, and that path never fails the start (a
+// removal problem is logged), so a runtime that never stages entries
+// cannot be stopped by what it finds there.
+//
+// It returns nil when nothing is exported. Only counts and conditions are
+// logged, never a path, a value or the nonce.
+func takeResolvedAuthEnv(root, nonce string) (map[string]string, error) {
+	if nonce == "" {
 		removed, err := stagedsecrets.DiscardResolvedAuthEnv(root)
 		if err != nil {
-			return nil, err
+			_ = err // the error names a path; only the condition is logged
+			log.Error("Could not check or remove a resolved-auth carry file this init did not stage; it is not read and the start continues")
+			return nil, nil
 		}
 		if removed {
 			log.Error("Removed 1 resolved-auth carry file this init did not stage, without reading it")
 		}
 		return nil, nil
 	}
-	env, err := stagedsecrets.TakeResolvedAuthEnv(root)
+	env, err := stagedsecrets.TakeResolvedAuthEnv(root, nonce)
+	if errors.Is(err, stagedsecrets.ErrResolvedAuthEnvNonceMismatch) {
+		log.Error("Removed a resolved-auth carry file that does not belong to this start, without exporting it")
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}

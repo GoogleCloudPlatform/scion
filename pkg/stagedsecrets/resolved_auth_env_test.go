@@ -25,6 +25,9 @@ import (
 	"testing"
 )
 
+// testNonce stands in for a staging pass's nonce.
+const testNonce = "test-nonce-0123456789abcdef"
+
 // realTempDir is t.TempDir with symlinks resolved, so the no-follow walk
 // accepts it where the temp root is reached through a link (macOS /var).
 func realTempDir(t *testing.T) string {
@@ -91,7 +94,7 @@ func carryAbsent(t *testing.T, root, when string) {
 func TestWriteTakeResolvedAuthEnv(t *testing.T) {
 	root, secretsDir := memRoot(t)
 	env := map[string]string{"EXAMPLE_API_KEY": "placeholder-api-key"}
-	if err := WriteResolvedAuthEnv(root, secretsDir, env); err != nil {
+	if err := WriteResolvedAuthEnv(root, secretsDir, testNonce, env); err != nil {
 		t.Fatalf("WriteResolvedAuthEnv: %v", err)
 	}
 	st, err := os.Lstat(filepath.Join(root, ResolvedAuthEnvFile))
@@ -104,7 +107,7 @@ func TestWriteTakeResolvedAuthEnv(t *testing.T) {
 	if _, err := os.Lstat(secretsDir); !errors.Is(err, os.ErrNotExist) {
 		t.Error("the write created the harness secrets directory; the file belongs in the mem root")
 	}
-	got, err := TakeResolvedAuthEnv(root)
+	got, err := TakeResolvedAuthEnv(root, testNonce)
 	if err != nil {
 		t.Fatalf("TakeResolvedAuthEnv: %v", err)
 	}
@@ -112,7 +115,7 @@ func TestWriteTakeResolvedAuthEnv(t *testing.T) {
 		t.Errorf("TakeResolvedAuthEnv returned %d entries, want the one written", len(got))
 	}
 	carryAbsent(t, root, "after a successful take")
-	again, err := TakeResolvedAuthEnv(root)
+	again, err := TakeResolvedAuthEnv(root, testNonce)
 	if err != nil || again != nil {
 		t.Errorf("second Take = %d entries, err %v; want none", len(again), err)
 	}
@@ -123,10 +126,10 @@ func TestWriteResolvedAuthEnv_ReplacesStaleFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, ResolvedAuthEnvFile), []byte(`{"STALE":"x"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteResolvedAuthEnv(root, secretsDir, map[string]string{"EXAMPLE_API_KEY": "placeholder-api-key"}); err != nil {
+	if err := WriteResolvedAuthEnv(root, secretsDir, testNonce, map[string]string{"EXAMPLE_API_KEY": "placeholder-api-key"}); err != nil {
 		t.Fatalf("WriteResolvedAuthEnv over a stale file: %v", err)
 	}
-	got, err := TakeResolvedAuthEnv(root)
+	got, err := TakeResolvedAuthEnv(root, testNonce)
 	if err != nil {
 		t.Fatalf("TakeResolvedAuthEnv: %v", err)
 	}
@@ -138,7 +141,7 @@ func TestWriteResolvedAuthEnv_ReplacesStaleFile(t *testing.T) {
 func TestWriteResolvedAuthEnv_EmptyWritesNothing(t *testing.T) {
 	root, _ := memRoot(t)
 	// No entries: nothing is written, and no in-memory directory is needed.
-	if err := WriteResolvedAuthEnv(root, "", nil); err != nil {
+	if err := WriteResolvedAuthEnv(root, "", testNonce, nil); err != nil {
 		t.Fatalf("WriteResolvedAuthEnv(nil): %v", err)
 	}
 	carryAbsent(t, root, "for no entries")
@@ -149,19 +152,19 @@ func TestWriteResolvedAuthEnv_EmptyWritesNothing(t *testing.T) {
 func TestWriteResolvedAuthEnv_NoFallbackWithoutMemDirs(t *testing.T) {
 	root, _ := memRoot(t)
 	env := map[string]string{"EXAMPLE_API_KEY": "placeholder-api-key"}
-	if err := WriteResolvedAuthEnv(root, "", env); !errors.Is(err, ErrNoResolvedAuthEnvRoot) {
+	if err := WriteResolvedAuthEnv(root, "", testNonce, env); !errors.Is(err, ErrNoResolvedAuthEnvRoot) {
 		t.Errorf("no secrets dir: err = %v, want ErrNoResolvedAuthEnvRoot", err)
 	}
 	carryAbsent(t, root, "without a named in-memory directory")
-	if err := WriteResolvedAuthEnv(root, filepath.Join(realTempDir(t), "secrets"), env); err == nil {
+	if err := WriteResolvedAuthEnv(root, filepath.Join(realTempDir(t), "secrets"), testNonce, env); err == nil {
 		t.Error("a secrets dir outside the mem root was accepted")
 	}
 	carryAbsent(t, root, "with a secrets dir outside the mem root")
 	missing := filepath.Join(root, "not-mounted")
-	if err := WriteResolvedAuthEnv(missing, filepath.Join(missing, "secrets"), env); err == nil {
+	if err := WriteResolvedAuthEnv(missing, filepath.Join(missing, "secrets"), testNonce, env); err == nil {
 		t.Error("a missing mem root was accepted")
 	}
-	if got, err := TakeResolvedAuthEnv(missing); err != nil || got != nil {
+	if got, err := TakeResolvedAuthEnv(missing, testNonce); err != nil || got != nil {
 		t.Errorf("Take on a missing root = %d entries, err %v; want none", len(got), err)
 	}
 }
@@ -176,7 +179,7 @@ func TestResolvedAuthEnv_RefusesLinks(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := TakeResolvedAuthEnv(root); err == nil {
+	if _, err := TakeResolvedAuthEnv(root, testNonce); err == nil {
 		t.Error("read through a link at the carry file succeeded")
 	}
 	carryAbsent(t, root, "after a refused read of a link")
@@ -185,7 +188,7 @@ func TestResolvedAuthEnv_RefusesLinks(t *testing.T) {
 	}
 	// The write unlinks the planted link (never following it) and creates
 	// its own file.
-	if err := WriteResolvedAuthEnv(root, secretsDir, map[string]string{"EXAMPLE_API_KEY": "placeholder-api-key"}); err != nil {
+	if err := WriteResolvedAuthEnv(root, secretsDir, testNonce, map[string]string{"EXAMPLE_API_KEY": "placeholder-api-key"}); err != nil {
 		t.Fatalf("write over a planted link: %v", err)
 	}
 	if st, err := os.Lstat(link); err != nil || !st.Mode().IsRegular() {
@@ -199,21 +202,21 @@ func TestResolvedAuthEnv_RefusesLinks(t *testing.T) {
 	if err := os.Symlink(root, linkedRoot); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteResolvedAuthEnv(linkedRoot, filepath.Join(linkedRoot, "secrets"), map[string]string{"EXAMPLE_API_KEY": "placeholder-api-key"}); err == nil {
+	if err := WriteResolvedAuthEnv(linkedRoot, filepath.Join(linkedRoot, "secrets"), testNonce, map[string]string{"EXAMPLE_API_KEY": "placeholder-api-key"}); err == nil {
 		t.Error("write through a linked in-memory volume path succeeded")
 	}
 }
 
 func TestTakeResolvedAuthEnv_RefusesHardLink(t *testing.T) {
 	root, secretsDir := memRoot(t)
-	if err := WriteResolvedAuthEnv(root, secretsDir, map[string]string{"EXAMPLE_API_KEY": "placeholder-api-key"}); err != nil {
+	if err := WriteResolvedAuthEnv(root, secretsDir, testNonce, map[string]string{"EXAMPLE_API_KEY": "placeholder-api-key"}); err != nil {
 		t.Fatal(err)
 	}
 	other := filepath.Join(realTempDir(t), "second-link")
 	if err := os.Link(filepath.Join(root, ResolvedAuthEnvFile), other); err != nil {
 		t.Skipf("hard link not possible here: %v", err)
 	}
-	if _, err := TakeResolvedAuthEnv(root); err == nil {
+	if _, err := TakeResolvedAuthEnv(root, testNonce); err == nil {
 		t.Error("a carry file with two links was accepted")
 	}
 	carryAbsent(t, root, "after a refused read of a file with two links")
@@ -221,13 +224,13 @@ func TestTakeResolvedAuthEnv_RefusesHardLink(t *testing.T) {
 
 func TestTakeResolvedAuthEnv_RefusesWrongOwner(t *testing.T) {
 	root, secretsDir := memRoot(t)
-	if err := WriteResolvedAuthEnv(root, secretsDir, map[string]string{"EXAMPLE_API_KEY": "placeholder-api-key"}); err != nil {
+	if err := WriteResolvedAuthEnv(root, secretsDir, testNonce, map[string]string{"EXAMPLE_API_KEY": "placeholder-api-key"}); err != nil {
 		t.Fatal(err)
 	}
 	prev := resolvedAuthEnvOwner
 	resolvedAuthEnvOwner = func() (int, int) { return os.Getuid() + 1, os.Getgid() }
 	defer func() { resolvedAuthEnvOwner = prev }()
-	if _, err := TakeResolvedAuthEnv(root); err == nil {
+	if _, err := TakeResolvedAuthEnv(root, testNonce); err == nil {
 		t.Error("a carry file owned by another uid was accepted")
 	}
 	carryAbsent(t, root, "after a refused read of a file with the wrong owner")
@@ -242,14 +245,14 @@ func TestTakeResolvedAuthEnv_RefusesOversizeAndBadJSON(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, ResolvedAuthEnvFile), big, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := TakeResolvedAuthEnv(root); err == nil {
+	if _, err := TakeResolvedAuthEnv(root, testNonce); err == nil {
 		t.Error("an oversize carry file was accepted")
 	}
 	carryAbsent(t, root, "after a refused oversize read")
 	if err := os.WriteFile(filepath.Join(root, ResolvedAuthEnvFile), []byte("not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := TakeResolvedAuthEnv(root); err == nil {
+	if _, err := TakeResolvedAuthEnv(root, testNonce); err == nil {
 		t.Error("an undecodable carry file was accepted")
 	}
 	carryAbsent(t, root, "after a failed decode")
@@ -276,7 +279,7 @@ func TestDiscardResolvedAuthEnv(t *testing.T) {
 	if removed, err := DiscardResolvedAuthEnv(filepath.Join(root, "not-mounted")); err != nil || removed {
 		t.Errorf("no root: removed %v, err %v; want false, nil", removed, err)
 	}
-	if err := WriteResolvedAuthEnv(root, secretsDir, map[string]string{"EXAMPLE_API_KEY": "placeholder-api-key"}); err != nil {
+	if err := WriteResolvedAuthEnv(root, secretsDir, testNonce, map[string]string{"EXAMPLE_API_KEY": "placeholder-api-key"}); err != nil {
 		t.Fatal(err)
 	}
 	if removed, err := DiscardResolvedAuthEnv(root); err != nil || !removed {
@@ -296,5 +299,34 @@ func TestDiscardResolvedAuthEnv(t *testing.T) {
 	carryAbsent(t, root, "after discarding a link")
 	if data, err := os.ReadFile(target); err != nil || string(data) != "keep" {
 		t.Error("discarding a link touched its target")
+	}
+}
+
+// A carry file whose nonce is not the caller's (a stale or planted file)
+// is refused with ErrResolvedAuthEnvNonceMismatch and removed; an empty
+// nonce is refused outright.
+func TestTakeResolvedAuthEnv_NonceMismatch(t *testing.T) {
+	root, secretsDir := memRoot(t)
+	if err := WriteResolvedAuthEnv(root, secretsDir, "stale-nonce", map[string]string{"EXAMPLE_API_KEY": "placeholder-api-key"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := TakeResolvedAuthEnv(root, testNonce)
+	if !errors.Is(err, ErrResolvedAuthEnvNonceMismatch) || got != nil {
+		t.Errorf("stale nonce: %d entries, err %v; want none, ErrResolvedAuthEnvNonceMismatch", len(got), err)
+	}
+	carryAbsent(t, root, "after a nonce mismatch")
+	if err := WriteResolvedAuthEnv(root, secretsDir, testNonce, map[string]string{"EXAMPLE_API_KEY": "placeholder-api-key"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := TakeResolvedAuthEnv(root, ""); err == nil || got != nil {
+		t.Errorf("empty nonce: %d entries, err %v; want a refusal", len(got), err)
+	}
+	if err := WriteResolvedAuthEnv(root, secretsDir, "", map[string]string{"EXAMPLE_API_KEY": "x"}); err == nil {
+		t.Error("a carry file was written without a nonce")
+	}
+	a, err1 := NewResolvedAuthNonce()
+	b, err2 := NewResolvedAuthNonce()
+	if err1 != nil || err2 != nil || len(a) != 64 || a == b {
+		t.Errorf("NewResolvedAuthNonce: lengths %d/%d, equal %v, errs %v/%v", len(a), len(b), a == b, err1, err2)
 	}
 }

@@ -533,9 +533,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 		reportInitFailure(agentHome, err)
 		return 1
 	}
-	// resolvedAuthStagedThisPass is set when this pass wrote the
-	// resolved-auth carry file, for the path without a re-exec.
-	resolvedAuthStagedThisPass := false
+	// resolvedAuthNonceThisPass is the nonce of the resolved-auth carry
+	// file this pass wrote, for the path without a re-exec.
+	resolvedAuthNonceThisPass := ""
 	if encoded := os.Getenv(stagedsecrets.EnvVar); encoded != "" {
 		// Only this pass may set the staged-token and resolved-auth
 		// markers; ones inherited from the environment are dropped before
@@ -596,24 +596,27 @@ func RunInit(args []string, opts InitRunOptions) int {
 		// through a file on the in-memory volume (never this process's
 		// environment, the home or shared storage); with no in-memory
 		// harness directory the start fails. Counts only are logged.
+		// The marker carries this pass's nonce (never a credential), which
+		// the carry file also holds; it survives the re-exec below, so the
+		// next pass reads this carry file and no other.
 		resolvedAuthCount := len(staged.ResolvedAuthEnv)
-		if err := stagedsecrets.WriteResolvedAuthEnv(resolvedAuthEnvRoot, os.Getenv(hooks.HarnessSecretsDirEnv), staged.ResolvedAuthEnv); err != nil {
-			staged.ResolvedAuthEnv = nil
-			log.Error("Failed to stage the resolved-auth environment entries: %v", err)
-			reportInitFailure(agentHome, fmt.Errorf("failed to stage the resolved-auth environment entries: %w", err))
-			return 1
-		}
-		staged.ResolvedAuthEnv = nil
-		// The marker (not a value) survives the re-exec below, so the next
-		// pass reads this carry file and no other.
 		if resolvedAuthCount > 0 {
-			if err := os.Setenv(envResolvedAuthStaged, "1"); err != nil {
-				log.Error("Failed to mark the resolved-auth environment entries as staged: %v", err)
-				reportInitFailure(agentHome, fmt.Errorf("failed to mark the resolved-auth environment entries as staged: %w", err))
+			nonce, err := stagedsecrets.NewResolvedAuthNonce()
+			if err == nil {
+				err = stagedsecrets.WriteResolvedAuthEnv(resolvedAuthEnvRoot, os.Getenv(hooks.HarnessSecretsDirEnv), nonce, staged.ResolvedAuthEnv)
+			}
+			if err == nil {
+				err = os.Setenv(envResolvedAuthStaged, nonce)
+			}
+			if err != nil {
+				staged.ResolvedAuthEnv = nil
+				log.Error("Failed to stage the resolved-auth environment entries: %v", err)
+				reportInitFailure(agentHome, fmt.Errorf("failed to stage the resolved-auth environment entries: %w", err))
 				return 1
 			}
-			resolvedAuthStagedThisPass = true
+			resolvedAuthNonceThisPass = nonce
 		}
+		staged.ResolvedAuthEnv = nil
 		_ = os.Unsetenv(stagedsecrets.EnvVar)
 		log.Info("Staged %d file secret(s), %d variable secret(s), %d harness secret(s) and %d resolved-auth env entr(ies)",
 			len(staged.FileSecrets), len(staged.VariableSecrets), harnessSecretCount, resolvedAuthCount)
@@ -670,9 +673,12 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// go to the harness child's environment only (supervisor AuthEnv). A
 	// carry file without the marker was not written by this init and is
 	// removed unread.
-	resolvedAuthStaged := resolvedAuthStagedThisPass || os.Getenv(envResolvedAuthStaged) == "1"
+	resolvedAuthNonce := resolvedAuthNonceThisPass
+	if resolvedAuthNonce == "" {
+		resolvedAuthNonce = os.Getenv(envResolvedAuthStaged)
+	}
 	_ = os.Unsetenv(envResolvedAuthStaged)
-	resolvedAuthEnv, err := takeResolvedAuthEnv(resolvedAuthEnvRoot, resolvedAuthStaged)
+	resolvedAuthEnv, err := takeResolvedAuthEnv(resolvedAuthEnvRoot, resolvedAuthNonce)
 	if err != nil {
 		log.Error("Failed to read the staged resolved-auth environment entries: %v", err)
 		reportInitFailure(agentHome, fmt.Errorf("failed to read the staged resolved-auth environment entries: %w", err))

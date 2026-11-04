@@ -15,6 +15,9 @@
 package stagedsecrets
 
 import (
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,9 +36,10 @@ const ResolvedAuthEnvFile = ".resolved-auth-env.json"
 
 // ResolvedAuthStagedEnvVar is set by sciontool init, across its
 // environ-purge re-exec, when its staging pass wrote ResolvedAuthEnvFile,
-// so the next pass reads that file and no other. It carries no value. The
-// runtimes reserve the name: no container environment or staged entry
-// supplies it.
+// so the next pass reads that file and no other. Its value is the per-pass
+// nonce (NewResolvedAuthNonce) the file also carries; it carries no
+// credential. The runtimes reserve the name: no container environment or
+// staged entry supplies it.
 const ResolvedAuthStagedEnvVar = "SCION_RESOLVED_AUTH_STAGED"
 
 // maxResolvedAuthEnvFileBytes bounds the carry file; the staged blob it
@@ -46,6 +50,27 @@ const maxResolvedAuthEnvFileBytes = 32 * 1024
 // blob carries resolved-auth entries but the runtime named no in-memory
 // harness directory. They are never written anywhere else.
 var ErrNoResolvedAuthEnvRoot = errors.New("resolved-auth environment entries were staged but no in-memory harness directory is configured")
+
+// ErrResolvedAuthEnvNonceMismatch is returned by TakeResolvedAuthEnv when
+// the carry file's nonce is not the one the caller holds: the file was not
+// written by the pass that set the marker. It is refused and removed.
+var ErrResolvedAuthEnvNonceMismatch = errors.New("the resolved-auth carry file does not belong to this start")
+
+// resolvedAuthCarry is the carry file's content.
+type resolvedAuthCarry struct {
+	Nonce string            `json:"nonce"`
+	Env   map[string]string `json:"env"`
+}
+
+// NewResolvedAuthNonce returns a fresh random nonce (32 bytes, hex) for one
+// staging pass.
+func NewResolvedAuthNonce() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("failed to create the resolved-auth carry nonce: %w", err)
+	}
+	return hex.EncodeToString(b), nil
+}
 
 // resolvedAuthEnvOwner returns the uid and gid the carry file is owned by:
 // the calling process (sciontool init). A variable so tests can check the
@@ -109,8 +134,9 @@ func validEnvName(k string) bool {
 	return true
 }
 
-// WriteResolvedAuthEnv writes env as JSON to ResolvedAuthEnvFile directly
-// in root, the in-memory volume's mount point. harnessSecretsDir is the
+// WriteResolvedAuthEnv writes env and nonce (the staging pass's
+// NewResolvedAuthNonce) as JSON to ResolvedAuthEnvFile directly in root,
+// the in-memory volume's mount point. harnessSecretsDir is the
 // in-memory harness secrets directory the runtime named
 // (SCION_HARNESS_SECRETS_DIR); it must be set and below root, which is the
 // condition under which root is an in-memory volume. Nothing is written
@@ -121,9 +147,12 @@ func validEnvName(k string) bool {
 // O_CREAT|O_EXCL|O_NOFOLLOW mode 0600, fchowned to the calling process,
 // written and fsynced. Any error removes the partial file. Errors never
 // carry a value.
-func WriteResolvedAuthEnv(root, harnessSecretsDir string, env map[string]string) (err error) {
+func WriteResolvedAuthEnv(root, harnessSecretsDir, nonce string, env map[string]string) (err error) {
 	if len(env) == 0 {
 		return nil
+	}
+	if nonce == "" {
+		return fmt.Errorf("a resolved-auth carry file needs a nonce")
 	}
 	if harnessSecretsDir == "" {
 		return ErrNoResolvedAuthEnvRoot
@@ -136,7 +165,7 @@ func WriteResolvedAuthEnv(root, harnessSecretsDir string, env map[string]string)
 		return err
 	}
 	defer func() { _ = dir.Close() }()
-	data, err := json.Marshal(env)
+	data, err := json.Marshal(resolvedAuthCarry{Nonce: nonce, Env: env})
 	if err != nil {
 		return fmt.Errorf("failed to encode the resolved-auth environment entries")
 	}
@@ -171,13 +200,19 @@ func WriteResolvedAuthEnv(root, harnessSecretsDir string, env map[string]string)
 }
 
 // TakeResolvedAuthEnv reads ResolvedAuthEnvFile in root and returns its
-// entries, or nil when there is none. The file is opened O_NOFOLLOW and
-// must be a regular file with one link, owned by the calling process and
-// at most maxResolvedAuthEnvFileBytes; otherwise it is refused. It is
-// unlinked on every return path, so it never outlives this call. Callers
-// filter the entries (ExportableResolvedAuthEnv) before use. Errors never
-// carry a value.
-func TakeResolvedAuthEnv(root string) (env map[string]string, err error) {
+// entries, or nil when there is none. nonce is the value of the marker the
+// staging pass set; it must be non-empty, and the file's nonce must equal
+// it (compared in constant time), otherwise the file is refused with
+// ErrResolvedAuthEnvNonceMismatch. The file is opened O_NOFOLLOW and must
+// be a regular file with one link, owned by the calling process and at
+// most maxResolvedAuthEnvFileBytes; otherwise it is refused. Once root is
+// open the file is unlinked on every return path, so it never outlives
+// this call. Callers filter the entries (ExportableResolvedAuthEnv) before
+// use. Errors never carry a value or the nonce.
+func TakeResolvedAuthEnv(root, nonce string) (env map[string]string, err error) {
+	if nonce == "" {
+		return nil, fmt.Errorf("reading the resolved-auth carry file needs the staging pass's nonce")
+	}
 	dir, err := openResolvedAuthEnvRoot(root)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -203,10 +238,14 @@ func TakeResolvedAuthEnv(root string) (env map[string]string, err error) {
 	if uid, _ := resolvedAuthEnvOwner(); int64(st.Uid) != int64(uid) {
 		return nil, fmt.Errorf("refusing %s: not owned by uid %d", path, uid)
 	}
-	if err := json.Unmarshal(data, &env); err != nil {
+	var carry resolvedAuthCarry
+	if err := json.Unmarshal(data, &carry); err != nil {
 		return nil, fmt.Errorf("failed to decode %s", path)
 	}
-	return env, nil
+	if subtle.ConstantTimeCompare([]byte(carry.Nonce), []byte(nonce)) != 1 {
+		return nil, ErrResolvedAuthEnvNonceMismatch
+	}
+	return carry.Env, nil
 }
 
 // DiscardResolvedAuthEnv removes ResolvedAuthEnvFile from root without
