@@ -2373,13 +2373,14 @@ const stagedSecretWarnThreshold = 100 * 1024
 
 // reservedAgentEnvName reports whether name may not reach an agent
 // container's environment from any source, secret or not, on any runtime:
-// sciontool init reads it as its own marker
-// (stagedsecrets.HubTokenStagedEnvVar) and only init itself sets it, so a
-// value supplied from outside would make init treat a broker-provided
-// token file as one it staged. Each runtime drops it where it assembles
-// the container environment.
+// sciontool init reads it as its own marker and only init itself sets it.
+// A value supplied from outside would make init treat a broker-provided
+// token file as one it staged (stagedsecrets.HubTokenStagedEnvVar), or
+// read a resolved-auth carry file it did not write
+// (stagedsecrets.ResolvedAuthStagedEnvVar). Each runtime drops it where it
+// assembles the container environment.
 func reservedAgentEnvName(name string) bool {
-	return name == stagedsecrets.HubTokenStagedEnvVar
+	return name == stagedsecrets.HubTokenStagedEnvVar || name == stagedsecrets.ResolvedAuthStagedEnvVar
 }
 
 // dropReservedAgentEnv deletes the reservedAgentEnvName entries from an

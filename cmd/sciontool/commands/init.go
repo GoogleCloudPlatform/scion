@@ -533,10 +533,15 @@ func RunInit(args []string, opts InitRunOptions) int {
 		reportInitFailure(agentHome, err)
 		return 1
 	}
+	// resolvedAuthStagedThisPass is set when this pass wrote the
+	// resolved-auth carry file, for the path without a re-exec.
+	resolvedAuthStagedThisPass := false
 	if encoded := os.Getenv(stagedsecrets.EnvVar); encoded != "" {
-		// Only this pass may set the staged-token marker; one inherited
-		// from the environment is dropped before anything is staged.
+		// Only this pass may set the staged-token and resolved-auth
+		// markers; ones inherited from the environment are dropped before
+		// anything is staged.
 		_ = os.Unsetenv(envHubTokenStaged)
+		_ = os.Unsetenv(envResolvedAuthStaged)
 		staged, err := stagedsecrets.Decode(encoded)
 		if err != nil {
 			log.Error("Failed to decode staged secrets: %v", err)
@@ -599,6 +604,16 @@ func RunInit(args []string, opts InitRunOptions) int {
 			return 1
 		}
 		staged.ResolvedAuthEnv = nil
+		// The marker (not a value) survives the re-exec below, so the next
+		// pass reads this carry file and no other.
+		if resolvedAuthCount > 0 {
+			if err := os.Setenv(envResolvedAuthStaged, "1"); err != nil {
+				log.Error("Failed to mark the resolved-auth environment entries as staged: %v", err)
+				reportInitFailure(agentHome, fmt.Errorf("failed to mark the resolved-auth environment entries as staged: %w", err))
+				return 1
+			}
+			resolvedAuthStagedThisPass = true
+		}
 		_ = os.Unsetenv(stagedsecrets.EnvVar)
 		log.Info("Staged %d file secret(s), %d variable secret(s), %d harness secret(s) and %d resolved-auth env entr(ies)",
 			len(staged.FileSecrets), len(staged.VariableSecrets), harnessSecretCount, resolvedAuthCount)
@@ -633,9 +648,10 @@ func RunInit(args []string, opts InitRunOptions) int {
 			log.Info("RunInit embedded: skipping environ-purge re-exec")
 		}
 	} else if transportCleared {
-		// Only the staging pass above arms the staged-token marker; this
-		// re-exec carries none.
+		// Only the staging pass above arms the staged-token and
+		// resolved-auth markers; this re-exec carries neither.
 		_ = os.Unsetenv(envHubTokenStaged)
+		_ = os.Unsetenv(envResolvedAuthStaged)
 		// Restart init with the cleaned environment, as above. On the
 		// second pass the env var is absent and the file already exists,
 		// so this branch is not taken again. Skipped for an embedded
@@ -651,8 +667,12 @@ func RunInit(args []string, opts InitRunOptions) int {
 
 	// The resolved-auth entries the staging pass carried across the re-exec
 	// are read and their file removed now, before anything else runs; they
-	// go to the harness child's environment only (supervisor AuthEnv).
-	resolvedAuthEnv, err := takeResolvedAuthEnv(resolvedAuthEnvRoot)
+	// go to the harness child's environment only (supervisor AuthEnv). A
+	// carry file without the marker was not written by this init and is
+	// removed unread.
+	resolvedAuthStaged := resolvedAuthStagedThisPass || os.Getenv(envResolvedAuthStaged) == "1"
+	_ = os.Unsetenv(envResolvedAuthStaged)
+	resolvedAuthEnv, err := takeResolvedAuthEnv(resolvedAuthEnvRoot, resolvedAuthStaged)
 	if err != nil {
 		log.Error("Failed to read the staged resolved-auth environment entries: %v", err)
 		reportInitFailure(agentHome, fmt.Errorf("failed to read the staged resolved-auth environment entries: %w", err))

@@ -489,11 +489,12 @@ func TestResolvedAuthEnvEntries(t *testing.T) {
 // staged entries even when nothing else set it (taken nil).
 func TestSplitResolvedAuthEnv(t *testing.T) {
 	env := map[string]string{
-		"GOOGLE_CLOUD_PROJECT":             authFixtureProject,
-		"CLAUDE_CODE_USE_VERTEX":           "1",
-		"ANTHROPIC_API_KEY":                authCanaryAPIKey,
-		stagedsecrets.HubTokenStagedEnvVar: "1",
-		stagedsecrets.EnvVar:               "x",
+		"GOOGLE_CLOUD_PROJECT":                 authFixtureProject,
+		"CLAUDE_CODE_USE_VERTEX":               "1",
+		"ANTHROPIC_API_KEY":                    authCanaryAPIKey,
+		stagedsecrets.HubTokenStagedEnvVar:     "1",
+		stagedsecrets.ResolvedAuthStagedEnvVar: "1",
+		stagedsecrets.EnvVar:                   "x",
 	}
 	for _, k := range cloudRunRuntimeEnvKeys {
 		env[k] = "x"
@@ -523,5 +524,34 @@ func TestReservedResolvedAuthEnvName_CoversCloudRunRuntimeKeys(t *testing.T) {
 		if !stagedsecrets.ReservedResolvedAuthEnvName(name) {
 			t.Errorf("%s is set by the runtime or read by init but not reserved for staged resolved-auth entries", name)
 		}
+	}
+}
+
+// The resolved-auth staged marker is reserved like the staged-token
+// marker: no container environment carries it on Docker or Cloud Run, and
+// no staged resolved-auth entry sets it.
+func TestReservedAgentEnvName_ResolvedAuthStagedMarker(t *testing.T) {
+	if !reservedAgentEnvName(stagedsecrets.ResolvedAuthStagedEnvVar) {
+		t.Fatal("the resolved-auth staged marker is not a reserved agent env name")
+	}
+	cfg := RunConfig{
+		Env:          []string{stagedsecrets.ResolvedAuthStagedEnvVar + "=1", "ORDINARY_CONTROL=keep"},
+		ResolvedAuth: &api.ResolvedAuth{EnvVars: map[string]string{stagedsecrets.ResolvedAuthStagedEnvVar: "1", "EXAMPLE_AUTH_CONTROL": "keep"}},
+	}
+	docker := dockerEnvFor(t, cfg)
+	plain, staged := cloudRunRunFor(t, cfg)
+	for runtimeName, env := range map[string]map[string]string{"docker": docker, "cloudrun": plain} {
+		if _, ok := env[stagedsecrets.ResolvedAuthStagedEnvVar]; ok {
+			t.Errorf("%s: the resolved-auth staged marker reached the container environment", runtimeName)
+		}
+		if env["ORDINARY_CONTROL"] != "keep" {
+			t.Errorf("%s: control: an ordinary env entry did not reach the container environment", runtimeName)
+		}
+	}
+	if _, ok := staged[stagedsecrets.ResolvedAuthStagedEnvVar]; ok {
+		t.Error("cloudrun: the resolved-auth staged marker is a staged resolved-auth entry")
+	}
+	if staged["EXAMPLE_AUTH_CONTROL"] != "keep" {
+		t.Error("cloudrun: control: an ordinary resolved-auth entry is not staged")
 	}
 }

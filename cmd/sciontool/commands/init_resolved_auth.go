@@ -25,13 +25,31 @@ import (
 // so tests can point it at a temporary directory.
 var resolvedAuthEnvRoot = hooks.DefaultHarnessDirsRoot
 
-// takeResolvedAuthEnv reads and removes the resolved-auth carry file in
-// root (stagedsecrets.TakeResolvedAuthEnv) and returns the entries the
-// harness child may receive: a reserved or invalid name is dropped here
-// again (stagedsecrets.ExportableResolvedAuthEnv), so an entry can never
-// set the staged-token marker or a runtime-owned name. It returns nil when
-// nothing was staged. Only counts are logged, never a name's value.
-func takeResolvedAuthEnv(root string) (map[string]string, error) {
+// envResolvedAuthStaged marks, across init's environ-purge re-exec, that
+// this init's staging pass wrote the resolved-auth carry file. The
+// runtimes reserve the name (no container environment supplies it).
+const envResolvedAuthStaged = stagedsecrets.ResolvedAuthStagedEnvVar
+
+// takeResolvedAuthEnv returns the resolved-auth entries the harness child
+// may receive. Only when staged is set (this init's staging pass wrote the
+// carry file) is the file read and removed (stagedsecrets.TakeResolvedAuthEnv),
+// and a reserved or invalid name is then dropped again
+// (stagedsecrets.ExportableResolvedAuthEnv), so an entry can never set the
+// staged-token marker or a runtime-owned name. Without staged, a file found
+// there was not written by this init: it is removed without being read.
+// It returns nil when nothing is exported. Only counts are logged, never a
+// value.
+func takeResolvedAuthEnv(root string, staged bool) (map[string]string, error) {
+	if !staged {
+		removed, err := stagedsecrets.DiscardResolvedAuthEnv(root)
+		if err != nil {
+			return nil, err
+		}
+		if removed {
+			log.Error("Removed 1 resolved-auth carry file this init did not stage, without reading it")
+		}
+		return nil, nil
+	}
 	env, err := stagedsecrets.TakeResolvedAuthEnv(root)
 	if err != nil {
 		return nil, err

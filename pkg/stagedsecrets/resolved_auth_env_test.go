@@ -37,7 +37,7 @@ func realTempDir(t *testing.T) string {
 }
 
 func TestReservedResolvedAuthEnvName(t *testing.T) {
-	for _, name := range []string{EnvVar, HubTokenStagedEnvVar, "SCION_HOST_UID", "SCION_HOST_GID",
+	for _, name := range []string{EnvVar, HubTokenStagedEnvVar, ResolvedAuthStagedEnvVar, "SCION_HOST_UID", "SCION_HOST_GID",
 		"SCION_STARTUP_LISTENER_PORT", "SCION_HARNESS_SECRETS_DIR", "SCION_HARNESS_OUTPUTS_DIR"} {
 		if !ReservedResolvedAuthEnvName(name) {
 			t.Errorf("%s is not reserved", name)
@@ -263,5 +263,38 @@ func TestStaged_FormattingWithholdsResolvedAuthEnv(t *testing.T) {
 		if out := fmt.Sprintf(verb, s); strings.Contains(out, canary) {
 			t.Errorf("%s of Staged prints a resolved-auth value", verb)
 		}
+	}
+}
+
+// DiscardResolvedAuthEnv removes the carry file, or a link planted at its
+// name, without following it; nothing there is not an error.
+func TestDiscardResolvedAuthEnv(t *testing.T) {
+	root, secretsDir := memRoot(t)
+	if removed, err := DiscardResolvedAuthEnv(root); err != nil || removed {
+		t.Errorf("no file: removed %v, err %v; want false, nil", removed, err)
+	}
+	if removed, err := DiscardResolvedAuthEnv(filepath.Join(root, "not-mounted")); err != nil || removed {
+		t.Errorf("no root: removed %v, err %v; want false, nil", removed, err)
+	}
+	if err := WriteResolvedAuthEnv(root, secretsDir, map[string]string{"EXAMPLE_API_KEY": "placeholder-api-key"}); err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := DiscardResolvedAuthEnv(root); err != nil || !removed {
+		t.Errorf("file: removed %v, err %v; want true, nil", removed, err)
+	}
+	carryAbsent(t, root, "after a discard")
+	target := filepath.Join(root, "elsewhere")
+	if err := os.WriteFile(target, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(root, ResolvedAuthEnvFile)); err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := DiscardResolvedAuthEnv(root); err != nil || !removed {
+		t.Errorf("link: removed %v, err %v; want true, nil", removed, err)
+	}
+	carryAbsent(t, root, "after discarding a link")
+	if data, err := os.ReadFile(target); err != nil || string(data) != "keep" {
+		t.Error("discarding a link touched its target")
 	}
 }

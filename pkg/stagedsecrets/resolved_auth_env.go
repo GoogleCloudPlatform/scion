@@ -31,6 +31,13 @@ import (
 // environ-purge re-exec.
 const ResolvedAuthEnvFile = ".resolved-auth-env.json"
 
+// ResolvedAuthStagedEnvVar is set by sciontool init, across its
+// environ-purge re-exec, when its staging pass wrote ResolvedAuthEnvFile,
+// so the next pass reads that file and no other. It carries no value. The
+// runtimes reserve the name: no container environment or staged entry
+// supplies it.
+const ResolvedAuthStagedEnvVar = "SCION_RESOLVED_AUTH_STAGED"
+
 // maxResolvedAuthEnvFileBytes bounds the carry file; the staged blob it
 // comes from is capped at 32 KiB by the runtime that sets the field.
 const maxResolvedAuthEnvFileBytes = 32 * 1024
@@ -52,6 +59,7 @@ var resolvedAuthEnvOwner = func() (uid, gid int) { return os.Getuid(), os.Getgid
 var reservedResolvedAuthEnvNames = map[string]bool{
 	EnvVar:                        true,
 	HubTokenStagedEnvVar:          true,
+	ResolvedAuthStagedEnvVar:      true,
 	"SCION_HOST_UID":              true,
 	"SCION_HOST_GID":              true,
 	"SCION_STARTUP_LISTENER_PORT": true,
@@ -199,6 +207,28 @@ func TakeResolvedAuthEnv(root string) (env map[string]string, err error) {
 		return nil, fmt.Errorf("failed to decode %s", path)
 	}
 	return env, nil
+}
+
+// DiscardResolvedAuthEnv removes ResolvedAuthEnvFile from root without
+// reading it or following a link, for a pass that did not stage it. It
+// reports whether an entry was removed; a missing root or file is not an
+// error.
+func DiscardResolvedAuthEnv(root string) (bool, error) {
+	dir, err := openResolvedAuthEnvRoot(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = dir.Close() }()
+	if err := dirfd.UnlinkAt(int(dir.Fd()), ResolvedAuthEnvFile); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to remove %s: %w", filepath.Join(root, ResolvedAuthEnvFile), err)
+	}
+	return true, nil
 }
 
 // openResolvedAuthEnvRoot opens root O_DIRECTORY|O_NOFOLLOW without
