@@ -2516,6 +2516,13 @@ authDone:
 	// value any merged layer added is removed (see dispatchWorkspaceGit).
 	agentEnv = enforceWorkspaceGitEnv(agentEnv, dispatchWorkspaceGit, dispatchWorkspaceGitSet)
 
+	// In no-auth mode the harness config's no_auth.env joins the container
+	// env; api-key and auth-file starts never carry it.
+	noAuthActive := noAuthModeActive(opts.NoAuth, noAuthConfig)
+	var noAuthEnvWarnings []string
+	agentEnv, noAuthEnvWarnings = applyNoAuthEnv(agentEnv, noAuthConfig, noAuthActive, opts.Name)
+	warnings = append(warnings, noAuthEnvWarnings...)
+
 	// The template env layer is never part of agentEnv: it travels as
 	// RunConfig.FallbackEnv, which every runtime applies as the LAST step
 	// of its own env assembly, after auth env, harness env, telemetry env
@@ -2773,8 +2780,7 @@ authDone:
 		HomeStorageBackend: homeStorageBackend,
 		HomeStorage:        homeStorage,
 		BrokerMode:         opts.BrokerMode,
-		NoAuth: opts.NoAuth && noAuthConfig != nil &&
-			(noAuthConfig.Behavior == "drop-to-shell" || noAuthConfig.Behavior == "allow"),
+		NoAuth:             noAuthActive,
 		NoAuthMessage: func() string {
 			if opts.NoAuth && noAuthConfig != nil && noAuthConfig.Behavior == "drop-to-shell" {
 				return noAuthConfig.Message

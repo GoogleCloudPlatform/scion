@@ -3389,6 +3389,12 @@ type HarnessNoAuthConfig struct {
 	Behavior string `json:"behavior,omitempty" yaml:"behavior,omitempty" koanf:"behavior"`
 	Message  string `json:"message,omitempty" yaml:"message,omitempty" koanf:"message"`
 	Command  string `json:"command,omitempty" yaml:"command,omitempty" koanf:"command"`
+	// Env is read from the bundle's no-auth-env.yaml (NoAuthEnvSidecarFile),
+	// not from config.yaml. It is added to the container env only when the
+	// agent runs in no-auth mode; it never replaces env set by settings, the
+	// agent or the hub, and keys reserved for scion are ignored (see
+	// pkg/agent applyNoAuthEnv).
+	Env map[string]string `json:"-" yaml:"-" koanf:"-"`
 }
 
 // HarnessMCPConfig is the declarative mapping that lets a harness's

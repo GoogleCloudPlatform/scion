@@ -53,6 +53,11 @@ browser-based OAuth device flow, then capture credentials:
 python3 /home/scion/.scion/harness/capture_auth.py
 ```
 
+In no-auth mode Copilot runs with no session bus (`no-auth-env.yaml` sets
+`DBUS_SESSION_BUS_ADDRESS` to a path that never exists), and the sign-in is
+kept in `~/.copilot/config.json`, the file the capture script reads. Starts
+with a token or a captured credential file do not set it.
+
 ### Credential File (`COPILOT_CONFIG`)
 
 A captured `~/.copilot/config.json`, staged as the `COPILOT_CONFIG` file

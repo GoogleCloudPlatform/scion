@@ -328,7 +328,11 @@ This lets you launch an agent, log in to the harness interactively (e.g. `claude
 `copilot login`, `hermes setup`, `agy`), and then capture the resulting credentials for reuse
 (see below). Every bundle declares `no_auth.behavior: drop-to-shell` along with a message, and
 optionally a login command to run first. Copilot runs no command: it starts a shell with sign-in
-instructions.
+instructions. A harness-config can add environment variables for no-auth mode only, in a
+`no-auth-env.yaml` file next to its `config.yaml` with one `env` map. Copilot's sets
+`DBUS_SESSION_BUS_ADDRESS: unix:path=/home/scion/.scion/harness/no-session-bus`, so in that mode
+it runs with no session bus and keeps its sign-in in `~/.copilot/config.json`. Starts with
+credentials never get these variables.
 
 The fallback applies only to **automatic** resolution. If you selected an auth type via the
 [Explicit Path](#the-explicit-path), the fallback is disabled — the required credentials must be

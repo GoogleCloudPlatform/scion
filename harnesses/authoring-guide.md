@@ -52,6 +52,7 @@ list|show|upgrade|reset|sync|pull`.
   capture_auth.py    # thin shim: sys.exit(scion_harness.capture_auth_main())
   dialect.yaml       # optional — data-driven hook-event dialect
   agent-plugins.yaml # optional — native Agent Plugins support (see Capabilities)
+  no-auth-env.yaml   # optional — env added only in no-auth mode (see no_auth)
   home/              # seeded into the agent home at install time
     .bashrc
     .<tool>/...      # native client settings, hook wiring, notify scripts
@@ -62,7 +63,7 @@ list|show|upgrade|reset|sync|pull`.
 ```
 
 At install time, `provision.py`, `scion_harness.py`, `capture_auth.py`,
-`dialect.yaml`, `agent-plugins.yaml` (plus `schema/`, `examples/`, `tests/fixtures/`) stay at the
+`dialect.yaml`, `agent-plugins.yaml`, `no-auth-env.yaml` (plus `schema/`, `examples/`, `tests/fixtures/`) stay at the
 bundle root; everything under `home/` is copied into the harness-config's
 `home/` directory verbatim. `Dockerfile`, `cloudbuild.yaml`, `README.md`,
 `provision_test.py`, `.gitkeep`, and `init-firewall.sh` are not installed.
@@ -472,6 +473,23 @@ authenticated.
 
 `command` is optional: without it the agent starts the shell with the message
 only.
+
+**Env for no-auth mode goes in `no-auth-env.yaml`, not in `config.yaml`.** The
+file sits next to `config.yaml` and holds one key, `env`, a map of variable
+names to literal values. Scion adds them to the container only when the agent
+runs in no-auth mode (the bundle needs a `no_auth` block), never for a start
+with credentials. An entry never replaces env set by settings, the agent or
+the hub, and names reserved for scion (`SCION_*`, `GCE_METADATA_*`, hub-only
+keys) are ignored with a warning, as is an invalid file. Like
+`agent-plugins.yaml`, it is kept out of `config.yaml` so older binaries can
+still validate `config.yaml`; they ignore the file. Copilot uses it to run
+without a session bus:
+
+```yaml
+# harnesses/copilot/no-auth-env.yaml
+env:
+  DBUS_SESSION_BUS_ADDRESS: unix:path=/home/scion/.scion/harness/no-session-bus
+```
 
 ### MCP (declarative mapping)
 

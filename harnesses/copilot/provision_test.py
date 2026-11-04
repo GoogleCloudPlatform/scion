@@ -296,7 +296,9 @@ class CopilotConfigFileAuthTest(BaseTelemetryTest):
         self.assertEqual(self._provision({})["method"], "none")
 
     def test_no_auth_writes_no_token_and_logs_none(self) -> None:
-        # The shipped no_auth block: no login command.
+        # The shipped no_auth block: no login command. Its no-auth env
+        # (no-auth-env.yaml) is applied to the container env by the agent
+        # manager; it never reaches the provisioner manifest.
         with open(os.path.join(self.bundle, "inputs", "auth-candidates.json"), "w") as f:
             json.dump({"schema_version": 1}, f)
         manifest = {
