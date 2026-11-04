@@ -552,13 +552,25 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 		Values: &runpb.EnvVar_Value{Value: strconv.Itoa(startuplistener.Port)},
 	})
 
-	// The template env fallback (ptone/scion#4524) is the LAST env step:
-	// only names no source above set (env-type secrets are already folded
-	// into cfg.Env), never a suppressed key.
 	emitted := make(map[string]bool, len(envVars))
 	for _, ev := range envVars {
 		emitted[ev.GetName()] = true
 	}
+
+	// Resolved auth env (for example the claude vertex-ai variables) with
+	// the Docker rules: cfg.Env, the env-type secrets folded into it and
+	// the runtime keys above win, and an empty value is skipped. Without
+	// this the harness's env overlay supplies those names instead, with
+	// unexpanded ${VAR} placeholder text.
+	for _, e := range resolvedAuthEnvEntries(cfg.ResolvedAuth, func(name string) bool { return emitted[name] }) {
+		k, v, _ := strings.Cut(e, "=")
+		envVars = append(envVars, &runpb.EnvVar{Name: k, Values: &runpb.EnvVar_Value{Value: v}})
+		emitted[k] = true
+	}
+
+	// The template env fallback (ptone/scion#4524) is the LAST env step:
+	// only names no source above set (env-type secrets are already folded
+	// into cfg.Env), never a suppressed key.
 	for _, e := range FallbackEnvEntries(cfg.FallbackEnv, cfg.SuppressedFallbackKeys, emitted) {
 		k, v, _ := strings.Cut(e, "=")
 		envVars = append(envVars, &runpb.EnvVar{Name: k, Values: &runpb.EnvVar_Value{Value: v}})

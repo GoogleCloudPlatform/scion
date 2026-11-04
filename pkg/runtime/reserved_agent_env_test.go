@@ -155,6 +155,18 @@ func TestReservedAgentEnvName_DroppedFromNonSecretEnvOnEveryRuntime(t *testing.T
 		assertReservedDropped(t, "cloudrun", crInstanceEnv(t, fake))
 	})
 
+	// Resolved auth is merged after cfg.Env and the runtime keys.
+	t.Run("cloudrun-resolved-auth", func(t *testing.T) {
+		fake := &fakeInstancesClient{getErr: notFoundErr()}
+		rt := newFakeCloudRunRuntime(t, fake)
+		cfg := runConfigForTest()
+		cfg.ResolvedAuth = &api.ResolvedAuth{EnvVars: reservedEnvProbeMap()}
+		if _, err := rt.Run(context.Background(), cfg); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		assertReservedDropped(t, "cloudrun", crInstanceEnv(t, fake))
+	})
+
 	t.Run("cloudrun-sandbox", func(t *testing.T) {
 		h := newSandboxSecretsHarness(t)
 		h.cfg.Env = append([]string(nil), reservedEnvProbe...)

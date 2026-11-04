@@ -2209,8 +2209,10 @@ func BridgeExtraHosts(runtimeName string, env []string) []string {
 func applyResolvedAuth(config RunConfig, addEnv func(string, string), addVolume func(api.VolumeMount), registerMount func(string, string, bool, bool)) error {
 	ra := config.ResolvedAuth
 
-	// Inject env vars
-	for k, v := range ra.EnvVars {
+	// Inject env vars. Every later -e for the same name wins, so no name
+	// is taken yet here.
+	for _, e := range resolvedAuthEnvEntries(ra, nil) {
+		k, v, _ := strings.Cut(e, "=")
 		addEnv(k, v)
 	}
 
@@ -2264,6 +2266,38 @@ func applyResolvedAuth(config RunConfig, addEnv func(string, string), addVolume 
 	}
 
 	return nil
+}
+
+// resolvedAuthEnvEntries returns the env vars of ra that an agent container
+// receives, as KEY=VALUE entries sorted by name. It is the one place the
+// Docker rules for resolved-auth env are decided, shared by every runtime
+// that follows them:
+//   - an entry with an empty value is skipped (Docker's addEnv skips it);
+//   - an entry whose name taken reports is skipped, because a source that
+//     already set that name wins over resolved auth: config.Env (with the
+//     env-type secrets a runtime folded into it) and the runtime's own keys.
+//     Docker gets the same result by emitting resolved auth first and
+//     keeping the last -e for a name, so it passes a nil taken.
+//
+// Reserved names are not filtered here: the caller emits these entries
+// before the runtime's reserved-name drop, which covers every source.
+func resolvedAuthEnvEntries(ra *api.ResolvedAuth, taken func(name string) bool) []string {
+	if ra == nil || len(ra.EnvVars) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(ra.EnvVars))
+	for k, v := range ra.EnvVars {
+		if v == "" || (taken != nil && taken(k)) {
+			continue
+		}
+		names = append(names, k)
+	}
+	slices.Sort(names)
+	entries := make([]string, 0, len(names))
+	for _, k := range names {
+		entries = append(entries, k+"="+ra.EnvVars[k])
+	}
+	return entries
 }
 
 // copyFileIntoHome copies the host file src to rel in the agent home with
