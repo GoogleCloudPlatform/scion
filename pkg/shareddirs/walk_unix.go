@@ -250,7 +250,7 @@ func createViaComponentWalk(hostBase, rel string, intermediateMode, leafCreateMo
 	expectedLayout := 0
 	defer func() {
 		if expectedLayout > 0 {
-			slog.Debug("NFS directory walk: existing upper directories have the expected shared layout (setgid, the share's group, not other-writable); not warned",
+			slog.Debug("NFS directory walk: existing upper directories have the expected shared layout (setgid, the share's group, not other-writable, owned by the broker or the nfs uid); not warned",
 				"count", expectedLayout)
 		}
 	}()

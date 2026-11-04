@@ -40,16 +40,29 @@ fired on every broker start.
 
 ## Tests and mutants
 
-- `TestWarnIfIntermediateUnsafe_ExpectedSharedLayout` (table). Mutant M1
-  (drop the other-writable condition) is killed by `other-writable` and
-  `other-writable_with_sticky`. Mutant M2 (drop the owner condition) is killed
-  by `foreign_owner`.
+- `TestHasExpectedSharedLayout`: synthetic `unix.Stat_t` table (no
+  filesystem, geteuid seam), so it does not depend on the host's ids or on
+  the kernel keeping a setgid bit. It pins the zero-gid guard ("gid 0 with
+  the zero Owner") and the zero-uid guard ("uid 0 with expected uid 0").
+- `TestWarnIfIntermediateUnsafe_ExpectedSharedLayout` (filesystem table,
+  includes a wrong-gid row for each accepted owner).
+- Mutants: M1 (drop the other-writable condition) is killed by the
+  `other-writable` and `other-writable_with_sticky` rows of both tables; M2
+  (drop the owner condition) by `foreign_owner` in both and
+  `uid_0_with_expected_uid_0` in the synthetic table; M3 (drop the zero-gid
+  guard) by `gid_0_with_the_zero_Owner` in the synthetic table.
 - `TestEnsureLeafExpecting_ExpectedLayoutThroughRealWalk`,
-  `TestNFSResolve_Owner`,
-  `TestEnsureNFSWorkspaceLeaf_ConfiguredShareOwnerReachesWalk`,
+  `TestNFSResolve_Owner`, and the configured-owner tests for each plumbed
+  path: `TestEnsureNFSWorkspaceLeaf_ConfiguredShareOwnerReachesWalk`,
+  `TestEnsureNFSWorktreeLeaf_ConfiguredShareOwnerReachesWalk`,
+  `TestRemoveNFSWorktree_ConfiguredShareOwnerReachesWalk`,
   `TestEnsureWorkspaceAndStateLeaves_ExpectedLayoutNotWarned`.
-- Test directories get a non-zero owner and group (chowned to 4243:4242 when
-  the test runs as root), because a zero expected gid never matches.
+- Walk-warning assertions match the walk's own message, so the
+  once-per-process ACL warning on a filesystem without POSIX ACLs is not
+  counted.
+- Filesystem tests give directories a non-zero owner and group (chowned to
+  4243:4242 when the test runs as root), because a zero expected gid never
+  matches.
 
 ## Follow-ups
 

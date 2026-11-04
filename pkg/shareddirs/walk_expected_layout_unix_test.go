@@ -20,6 +20,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -49,11 +51,16 @@ func sharedTreeDir(t *testing.T, dir string, mode uint32) (uid, gid int) {
 	return int(st.Uid), int(st.Gid)
 }
 
-// warnRecords returns the records at level Warn.
+// walkWarnPrefix starts the walk's warning about an existing upper
+// directory; other warnings (such as the once-per-process ACL warning) are
+// not counted.
+const walkWarnPrefix = "NFS directory walk: an existing upper directory is group/other-writable"
+
+// warnRecords returns the walk's upper-directory warnings among records.
 func warnRecords(records []slog.Record) []slog.Record {
 	var out []slog.Record
 	for _, r := range records {
-		if r.Level == slog.LevelWarn {
+		if r.Level == slog.LevelWarn && strings.HasPrefix(r.Message, walkWarnPrefix) {
 			out = append(out, r)
 		}
 	}
@@ -68,7 +75,8 @@ func warnRecords(records []slog.Record) []slog.Record {
 //
 // Kill sets: dropping the other-writable condition fails "other-writable"
 // and "other-writable with sticky"; dropping the owner condition fails
-// "foreign owner".
+// "foreign owner". TestHasExpectedSharedLayout checks the same conditions,
+// and the zero-gid and zero-uid guards, without a filesystem.
 func TestWarnIfIntermediateUnsafe_ExpectedSharedLayout(t *testing.T) {
 	const (
 		self = iota
@@ -88,6 +96,7 @@ func TestWarnIfIntermediateUnsafe_ExpectedSharedLayout(t *testing.T) {
 		{name: "other-writable", mode: 0o2777, owner: self, wantWarn: true},
 		{name: "other-writable with sticky", mode: 0o3777, owner: self, wantWarn: true},
 		{name: "expected owner with the wrong gid", mode: 0o2775, owner: self, gidDelta: 1, wantWarn: true},
+		{name: "nfs-uid owner with the wrong gid", mode: 0o2775, owner: nfsUID, gidDelta: 1, wantWarn: true},
 		{name: "no setgid", mode: 0o0775, owner: self, wantWarn: true},
 		{name: "foreign owner", mode: 0o2775, owner: foreign, wantWarn: true},
 		{name: "zero Owner", mode: 0o2775, owner: self, noOwner: true, wantWarn: true},
@@ -190,4 +199,55 @@ func TestEnsureLeafExpecting_ExpectedLayoutThroughRealWalk(t *testing.T) {
 		require.Len(t, warns, 1)
 		assertRecordHasAttr(t, warns[0], "component", "projects")
 	})
+}
+
+// statFor returns a directory Stat_t with mode (a mode_t value), uid and
+// gid. Mode is set through reflection because its width differs between
+// platforms (uint32 on Linux, uint16 on Darwin and the BSDs).
+func statFor(mode uint32, uid, gid uint32) unix.Stat_t {
+	var st unix.Stat_t
+	reflect.ValueOf(&st).Elem().FieldByName("Mode").SetUint(uint64(unix.S_IFDIR | mode))
+	st.Uid, st.Gid = uid, gid
+	return st
+}
+
+// TestHasExpectedSharedLayout checks the expected-layout conditions on
+// synthetic stat results, so no row depends on the test host's ids or on
+// the kernel keeping a setgid bit. This process's effective uid is 1000
+// (the geteuid seam); the share is nfs uid 2000, gid 3000.
+//
+// Kill sets: dropping the other-writable condition fails "other-writable"
+// and "other-writable with sticky"; dropping the owner condition fails
+// "foreign owner" and "uid 0 with expected uid 0"; dropping the zero-gid
+// guard fails "gid 0 with the zero Owner"; dropping only the zero-uid guard
+// fails "uid 0 with expected uid 0".
+func TestHasExpectedSharedLayout(t *testing.T) {
+	oldEuid := geteuid
+	geteuid = func() int { return 1000 }
+	t.Cleanup(func() { geteuid = oldEuid })
+	share := Owner{UID: 2000, GID: 3000}
+
+	for _, tc := range []struct {
+		name     string
+		st       unix.Stat_t
+		expected Owner
+		want     bool
+	}{
+		{name: "owned by this process", st: statFor(0o2775, 1000, 3000), expected: share, want: true},
+		{name: "owned by the nfs uid", st: statFor(0o2775, 2000, 3000), expected: share, want: true},
+		{name: "not group-writable", st: statFor(0o2755, 2000, 3000), expected: share, want: true},
+		{name: "other-writable", st: statFor(0o2777, 1000, 3000), expected: share},
+		{name: "other-writable with sticky", st: statFor(0o3777, 1000, 3000), expected: share},
+		{name: "wrong gid", st: statFor(0o2775, 1000, 3001), expected: share},
+		{name: "nfs-uid owner with the wrong gid", st: statFor(0o2775, 2000, 3001), expected: share},
+		{name: "no setgid", st: statFor(0o0775, 1000, 3000), expected: share},
+		{name: "foreign owner", st: statFor(0o2775, 4000, 3000), expected: share},
+		{name: "gid 0 with the zero Owner", st: statFor(0o2775, 1000, 0), expected: Owner{}},
+		{name: "uid 0 with expected uid 0", st: statFor(0o2775, 0, 3000), expected: Owner{UID: 0, GID: 3000}},
+		{name: "negative expected gid", st: statFor(0o2775, 1000, 3000), expected: Owner{UID: 2000, GID: -1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, hasExpectedSharedLayout(tc.st, tc.expected))
+		})
+	}
 }

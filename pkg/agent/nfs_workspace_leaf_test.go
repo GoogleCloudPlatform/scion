@@ -960,3 +960,120 @@ func TestEnsureNFSWorkspaceLeaf_ConfiguredShareOwnerReachesWalk(t *testing.T) {
 		})
 	}
 }
+
+// sharedLayoutDirs gives each dir the expected shared layout: mode 2775 and
+// a non-zero owner and group (4243:4242 when the test runs as root, else
+// this process's own ids). It returns that uid and gid, and skips the test
+// when the directories cannot have that layout here.
+func sharedLayoutDirs(t *testing.T, dirs ...string) (uid, gid int) {
+	t.Helper()
+	for _, d := range dirs {
+		if unix.Geteuid() == 0 {
+			require.NoError(t, os.Chown(d, 4243, 4242))
+		}
+		require.NoError(t, unix.Chmod(d, 0o2775))
+		st := statMode(t, d)
+		if st.Uid == 0 || st.Gid == 0 || st.Mode&0o7777 != 0o2775 {
+			t.Skip("needs setgid directories with a non-zero owner and group")
+		}
+		uid, gid = int(st.Uid), int(st.Gid)
+	}
+	return uid, gid
+}
+
+// walkWarnings counts the walk's upper-directory warnings among records.
+func walkWarnings(records []slog.Record) int {
+	n := 0
+	for _, r := range records {
+		if r.Level == slog.LevelWarn && strings.HasPrefix(r.Message, "NFS directory walk: an existing upper directory is group/other-writable") {
+			n++
+		}
+	}
+	return n
+}
+
+// TestEnsureNFSWorktreeLeaf_ConfiguredShareOwnerReachesWalk: the configured
+// nfs uid and gid reach the worktree leaf's walk as they reach the workspace
+// leaf's, so existing upper directories with the expected shared layout are
+// not warned about; another configured gid keeps the warning.
+func TestEnsureNFSWorktreeLeaf_ConfiguredShareOwnerReachesWalk(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		gidDelta int
+		wantWarn bool
+	}{
+		{name: "configured gid matches"},
+		{name: "configured gid differs", gidDelta: 1, wantWarn: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mountRoot := t.TempDir()
+			ws := nfsTestWorkspaceDir(mountRoot)
+			stateDir := provision.ProjectStateDir(ws)
+			require.NoError(t, os.MkdirAll(ws, 0o755))
+			require.NoError(t, os.MkdirAll(stateDir, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(stateDir, provision.ProvisionSentinelFile), []byte("x"), 0o644))
+			projects := filepath.Join(mountRoot, "share-1", "projects")
+			uid, gid := sharedLayoutDirs(t, projects, filepath.Dir(ws), ws)
+
+			res, err := runtime.NewNFSBackend(&config.V1NFSConfig{
+				MountRoot: mountRoot,
+				Shares:    []config.V1NFSShare{{ID: "share-1", PVName: "ws-pv"}},
+				UID:       uid,
+				GID:       gid + tc.gidDelta,
+			}).Resolve(runtime.ResolveInput{ProjectID: testNFSWorkspaceProjectID})
+			require.NoError(t, err)
+
+			shareddirs.ResetWalkWarningsForTest()
+			t.Cleanup(shareddirs.ResetWalkWarningsForTest)
+			records := captureSlog(t)
+
+			ok, err := ensureNFSWorktreeLeaf("kubernetes", res, runtime.NFSPodShare{ClaimName: "ws-pv"}, "agent-1")
+			require.NoError(t, err)
+			assert.True(t, ok)
+			assert.DirExists(t, filepath.Join(ws, "worktrees", "agent-1"))
+			if tc.wantWarn {
+				assert.Equal(t, 1, walkWarnings(*records), "another gid keeps the warning")
+			} else {
+				assert.Zero(t, walkWarnings(*records), "the expected shared layout is not warned about")
+			}
+		})
+	}
+}
+
+// TestRemoveNFSWorktree_ConfiguredShareOwnerReachesWalk: the delete path's
+// walk to the provisioning state directory gets the configured nfs uid and
+// gid from the settings, so existing upper directories with the expected
+// shared layout are not warned about; another configured gid keeps the
+// warning.
+func TestRemoveNFSWorktree_ConfiguredShareOwnerReachesWalk(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		gidDelta int
+		wantWarn bool
+	}{
+		{name: "configured gid matches"},
+		{name: "configured gid differs", gidDelta: 1, wantWarn: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, ws := setupNFSWorktreeRemoval(t)
+			runPurgeInline(t)
+			mountRoot := filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(ws))))
+			require.NoError(t, os.RemoveAll(provision.ProjectStateDir(ws)))
+			uid, gid := sharedLayoutDirs(t, filepath.Join(mountRoot, "share-1", "projects"), filepath.Dir(ws))
+			f.writeGlobalSettings(t, fmt.Sprintf(nfsWorkspaceStartYAML, mountRoot)+fmt.Sprintf("      uid: %d\n      gid: %d\n", uid, gid+tc.gidDelta))
+
+			shareddirs.ResetWalkWarningsForTest()
+			t.Cleanup(shareddirs.ResetWalkWarningsForTest)
+			records := captureSlog(t)
+
+			path, err := kubernetesTestManager("kubernetes").RemoveNFSWorktree(context.Background(), f.projectScionDir, testNFSWorkspaceProjectID, "test-agent")
+			require.NoError(t, err)
+			assert.NoDirExists(t, path)
+			if tc.wantWarn {
+				assert.Equal(t, 1, walkWarnings(*records), "another gid keeps the warning")
+			} else {
+				assert.Zero(t, walkWarnings(*records), "the expected shared layout is not warned about")
+			}
+		})
+	}
+}
