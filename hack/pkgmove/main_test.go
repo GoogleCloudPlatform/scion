@@ -1405,6 +1405,33 @@ func Deferred(f func()) {
 }
 
 func handle() { _ = recover() }
+
+// FarCaller reaches a stack inspection in another file of the package,
+// which imports runtime under another name.
+func FarCaller(t *testing.T) string {
+	t.Helper()
+	return locateFar()
+}
+`,
+	"hubtestutil/where2.go": `package hubtestutil
+
+import rt "runtime"
+
+func locateFar() string {
+	_, file, _, _ := rt.Caller(2)
+	return file
+}
+`,
+	// A dot-import of runtime, in its own package (a dot-import in
+	// hubtestutil would clash with its Caller).
+	"dotrt/dotrt.go": `package dotrt
+
+import . "runtime"
+
+func DotRT() string {
+	_, file, _, _ := Caller(1)
+	return file
+}
 `,
 	// Targets a wrapper frame would change (recover, call-stack inspection).
 	"hubtestutil/hazard.go": `package hubtestutil
@@ -1490,6 +1517,12 @@ func (rec) locate() string {
 	_, file, _, _ := runtime.Caller(2)
 	return file
 }
+
+// rec2 has a hazard-free method of the same name, declared after rec's, so
+// every same-name method is followed, not only the last.
+type rec2 struct{}
+
+func (rec2) locate() string { return "" }
 
 func ViaMethod(t *testing.T) string {
 	t.Helper()
@@ -1587,6 +1620,7 @@ import (
 	"log"
 	"testing"
 
+	"example.com/fx/dotrt"
 	"example.com/fx/hubtestutil"
 )
 
@@ -1738,6 +1772,19 @@ func callerValueW() int {
 func dotLogW() {
 	hubtestutil.DotLog()
 }
+
+func farW(t *testing.T) string {
+	t.Helper()
+	return hubtestutil.FarCaller(t)
+}
+
+func dotRTW() string {
+	return dotrt.DotRT()
+}
+
+func condPlain(t *testing.T, ok bool) {
+	hubtestutil.Cond(t, ok)
+}
 `,
 	// Not generated: the marker is only quoted in a string literal.
 	"hub/zz_alias_quoted_test.go": `package hub
@@ -1841,6 +1888,9 @@ func TestNeg(t *testing.T) {
 	_ = callerValueW()
 	dotLogW()
 	_ = pmCaller(t)
+	_ = farW(t)
+	_ = dotRTW()
+	condPlain(t, true)
 }
 
 func BenchmarkNeg(b *testing.B) { bench(b) }
@@ -1983,6 +2033,12 @@ func TestExtractAliasWrappers(t *testing.T) {
 			// A hand-edited Helper wrapper in a pkgmove alias file.
 			uses("func", "pmCaller", "zz_alias_pm_test.go"),
 			"func pmCaller (a Helper wrapper in a pkgmove alias file) forwards to example.com/fx/hubtestutil.Caller, but the target inspects its call stack (runtime.Caller;",
+			// A callee in another file, which imports runtime under another
+			// name; a dot-import of runtime; Helper() only in a nested block
+			// of the target of a wrapper without Helper().
+			"func farW (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.FarCaller, but the target reaches locateFar, which inspects its call stack (runtime.Caller;",
+			"func dotRTW (a hubshard extract wrapper) forwards to example.com/fx/dotrt.DotRT, but the target is in a file that dot-imports runtime",
+			"func condPlain (a hubshard extract wrapper) forwards to example.com/fx/hubtestutil.Cond, but the target calls Helper() but the wrapper does not",
 		)
 		if strings.Contains(out, "Alias references resolved") {
 			t.Errorf("no reference should resolve:\n%s", out)
@@ -2001,10 +2057,10 @@ func TestExtractAliasWrappers(t *testing.T) {
 
 	t.Run("unmovable", func(t *testing.T) {
 		out, err := move(t, "chat_test.go", "zz_alias_hubtestutil_chatdb_test.go")
+		wantAll(t, out, "hub/zz_alias_hubtestutil_chatdb_test.go is a generated alias file (pkgmove or hubshard extract); it cannot be moved")
 		if !errors.Is(err, errPlan) {
 			t.Fatalf("want a plan error, got %v\n%s", err, out)
 		}
-		wantAll(t, out, "hub/zz_alias_hubtestutil_chatdb_test.go is a generated alias file (pkgmove or hubshard extract); it cannot be moved")
 	})
 
 	// A reference from a file the analysis tags exclude keeps its entry.
