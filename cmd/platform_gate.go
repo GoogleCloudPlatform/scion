@@ -85,6 +85,12 @@ var windowsAllowed = map[string]bool{
 	// 'scion project' alone is refused; 'scion project use' still runs.
 	"use":         true,
 	"project.use": true,
+	// Project settings on the Hub: Hub API calls only, no local writes. The
+	// parent 'project' stays gated, as for project.use.
+	"project.settings":       true,
+	"project.settings.get":   true,
+	"project.settings.set":   true,
+	"project.settings.unset": true,
 
 	"config":            true,
 	"config.list":       true,
