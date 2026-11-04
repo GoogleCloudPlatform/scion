@@ -20,6 +20,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"io/fs"
 	"os"
 	"path"
@@ -76,6 +77,20 @@ type outsideRef struct {
 	end   int
 	value string
 	quote byte
+	// fn is the sibling Function field when the literal is the File field of
+	// a keyed composite literal (the authzop catalog shape), else nil.
+	fn *fnField
+}
+
+// fnField is the Function field next to a File field in a composite
+// literal. lit is false when its value is not a string literal.
+type fnField struct {
+	lit        bool
+	line       int
+	start, end int
+	value      string
+	quote      byte
+	text       string // the value's source text, shortened
 }
 
 // outFileEdits are the -rewrite-outrefs edits of a file outside the source
@@ -218,6 +233,9 @@ func (a *analysis) outsideRefFindings() {
 				a.plan.OutRefRewrites = append(a.plan.OutRefRewrites, varRewrite{Pos: r.pos, Old: r.text, New: shown})
 				a.plan.add(levelInfo, "outside reference to a moved file rewritten (-rewrite-outrefs)", r.pos,
 					"%s %s names moved %s by its %s; rewritten to %s", how, r.text, r.moved.repo, r.form, shown)
+				if r.fn != nil {
+					a.rewriteFunctionField(r)
+				}
 				continue
 			}
 			note = why
@@ -303,6 +321,42 @@ func (a *analysis) goOutsideRefs(rel string, src []byte, cand []*movedRef) (refs
 		}
 		return true
 	})
+	// File fields of keyed composite literals and their Function siblings.
+	fnOf := map[*ast.BasicLit]*fnField{}
+	ast.Inspect(file, func(n ast.Node) bool {
+		cl, ok := n.(*ast.CompositeLit)
+		if !ok {
+			return true
+		}
+		var fileLit *ast.BasicLit
+		var fnExpr ast.Expr
+		for _, elt := range cl.Elts {
+			kv, ok := elt.(*ast.KeyValueExpr)
+			if !ok {
+				continue
+			}
+			key, ok := kv.Key.(*ast.Ident)
+			if !ok {
+				continue
+			}
+			switch key.Name {
+			case "File":
+				fileLit, _ = kv.Value.(*ast.BasicLit)
+			case "Function":
+				fnExpr = kv.Value
+			}
+		}
+		if fileLit == nil || fnExpr == nil {
+			return true
+		}
+		start, end := fset.Position(fnExpr.Pos()).Offset, fset.Position(fnExpr.End()).Offset
+		fn := &fnField{line: fset.Position(fnExpr.Pos()).Line, start: start, end: end, text: shortenRef(string(src[start:end]))}
+		if bl, v, ok := strLit(fnExpr); ok {
+			fn.lit, fn.value, fn.quote = true, v, bl.Value[0]
+		}
+		fnOf[fileLit] = fn
+		return true
+	})
 	ast.Inspect(file, func(n ast.Node) bool {
 		bl, ok := n.(*ast.BasicLit)
 		if !ok || consumed[bl] {
@@ -331,6 +385,7 @@ func (a *analysis) goOutsideRefs(rel string, src []byte, cand []*movedRef) (refs
 		if h.lit != nil {
 			r.start, r.end = fset.Position(h.lit.Pos()).Offset, fset.Position(h.lit.End()).Offset
 			r.value, r.quote = h.val, h.lit.Value[0]
+			r.fn = fnOf[h.lit]
 		}
 		if reason, has := markers[h.line-1]; has {
 			if reason != "" {
@@ -456,6 +511,100 @@ func (a *analysis) outRefRewrite(r outsideRef) (text, shown, why string) {
 		return line, strconv.Quote(shortenRef(strings.TrimSpace(line))), ""
 	}
 	return "", "", ""
+}
+
+// rewriteFunctionField handles the Function field next to a File field that
+// -rewrite-outrefs rewrote (the authzop catalog shape, keyed by file and
+// enclosing function). The value is rewritten only when it is a string
+// literal naming a function or method declared in the moved file that the
+// move renames, to one new name. A name the move does not rename there stays
+// as it is. Anything else that could leave the entry stale is a HIGH: a
+// value that is not a string literal, a name renamed only in another file,
+// an ambiguous name, or a moved file that was not type-checked.
+func (a *analysis) rewriteFunctionField(r outsideRef) {
+	fn := r.fn
+	pos := a.rel(r.path) + ":" + strconv.Itoa(fn.line)
+	high := func(why string) {
+		a.plan.add(levelHigh, "Function field next to a rewritten File field not rewritten (-rewrite-outrefs)", pos,
+			"Function %s of the entry whose File names moved %s: %s; check it by hand", fn.text, r.moved.repo, why)
+	}
+	if !fn.lit {
+		high("the value is not a string literal")
+		return
+	}
+	if !token.IsIdentifier(fn.value) {
+		return // not a function name; nothing the move renames
+	}
+	f := a.byPath[filepath.Join(a.cfg.SrcDir, r.moved.base)]
+	if f == nil || !f.Moved {
+		return // a moved asset, not a Go file
+	}
+	news := map[string]bool{}
+	unknown := false
+	for _, d := range f.AST.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok || fd.Name.Name != fn.value {
+			continue
+		}
+		obj := a.info.Defs[fd.Name]
+		if obj == nil {
+			unknown = true
+			continue
+		}
+		n, renamed := a.pkgRename[obj]
+		if !renamed {
+			n, renamed = a.memberRename[obj]
+		}
+		if !renamed {
+			n = fn.value
+		}
+		news[n] = true
+	}
+	if unknown {
+		high(fmt.Sprintf("%s in %s was not type-checked (build tags or an external test), so its rename is unknown", fn.value, r.moved.repo))
+		return
+	}
+	if len(news) == 0 {
+		var where []string
+		for _, ren := range []map[types.Object]string{a.pkgRename, a.memberRename} {
+			for obj := range ren {
+				if obj.Name() == fn.value {
+					if hf := a.home(obj); hf != nil {
+						where = append(where, a.rel(hf.Path))
+					}
+				}
+			}
+		}
+		if len(where) > 0 {
+			sort.Strings(where)
+			high(fmt.Sprintf("%s is not declared in %s; the move renames it in %s", fn.value, r.moved.repo, strings.Join(dedupStrings(where), ", ")))
+		}
+		return
+	}
+	if len(news) > 1 {
+		var all []string
+		for n := range news {
+			all = append(all, n)
+		}
+		sort.Strings(all)
+		high(fmt.Sprintf("%s is ambiguous after the move, it becomes %s", fn.value, strings.Join(all, " or ")))
+		return
+	}
+	var n string
+	for k := range news {
+		n = k
+	}
+	if n == fn.value {
+		return // not renamed
+	}
+	text := strconv.Quote(n)
+	if fn.quote == '`' {
+		text = "`" + n + "`"
+	}
+	a.addOutRefEdit(outsideRef{path: r.path, src: r.src, start: fn.start, end: fn.end}, text)
+	a.plan.OutRefRewrites = append(a.plan.OutRefRewrites, varRewrite{Pos: pos, Old: fn.text, New: text})
+	a.plan.add(levelInfo, "outside reference to a moved file rewritten (-rewrite-outrefs)", pos,
+		"Function %s of the entry whose File names moved %s; rewritten to %s (renamed by the move)", fn.text, r.moved.repo, text)
 }
 
 // outRefName returns the name an identifier of a "path:name" reference has

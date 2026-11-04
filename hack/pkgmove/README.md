@@ -383,6 +383,7 @@ severity:
 | HIGH | TestMain separation: moved tests leave a package that has a `TestMain` (see [TestMain](#testmain)), including into an existing target whose own `TestMain` differs |
 | HIGH | source-scanning test does not cover the target: a test file of the source package (staying or moved) imports `go/parser` or `go/packages` and enumerates files (`os.ReadDir`, `filepath.Glob`, `WalkDir`, `os.Getwd`, `parser.ParseDir`, `packages.Load`, ...). Such guard tests silently stop scanning the moved files and still pass. A file with a [`pkgmove:scan-covers`](#declaring-scan-coverage-pkgmovescan-covers) marker that covers the target gets the INFO below instead |
 | HIGH | outside reference to a moved file: a string literal in any other Go file of the module (the source package's staying files included) names a moved file by its repo path (`"pkg/hub/x.go"`), by its path elements (`filepath.Join("pkg", "hub", "x.go")`) or by its base name (`"x.go"`, `"x.go:fn"`), or a line of `hack/**/*.sh`, `hack/**/*.txt`, the root `Makefile` or `.github/workflows/*.yml` does. After the move it silently stops matching (see [Outside references](#outside-references-to-moved-files-pkgmoveref-ok)). A `pkgmove:ref-ok` comment on the line above gets the INFO below instead; with `-rewrite-outrefs`, an exact repo-path form is rewritten and gets the other INFO below |
+| HIGH | Function field next to a rewritten File field not rewritten (-rewrite-outrefs): the field is not a string literal, names a function the move renames in another file, or is ambiguous (see [Outside references](#outside-references-to-moved-files-pkgmoveref-ok)) |
 | WARN | a staying var initialiser that makes dynamic calls (through func values or interfaces), directly or through helpers, when the moved files have package-level state |
 | WARN | each moved func or method whose value is taken, plus exported funcs (var aliases): `runtime.FuncForPC` names and panic traces show the new package path |
 | WARN | a wrapper alias used as a func value in a moved file: the moved file now uses the target func, whose identity differs from staying uses of the wrapper |
@@ -413,7 +414,7 @@ severity:
 | INFO | test companions left behind |
 | INFO | source-scanning test declares coverage of the target: a source-scanning test file that carries a `pkgmove:scan-covers` marker covering the target (a directory, a `/...` parent, or a `guardScanSubdirs` list entry). The line names the marker's file:line (and the list entry) and echoes its reason line, so the reviewer can verify each one |
 | INFO | outside reference to a moved file accepted (pkgmove:ref-ok): the reference and the marker's reason |
-| INFO | outside reference to a moved file rewritten (-rewrite-outrefs): the reference and its new text |
+| INFO | outside reference to a moved file rewritten (-rewrite-outrefs): the reference and its new text, including a catalog `Function` field renamed with its `File` |
 | INFO | test-only move: the target's `TestMain` is equivalent to the source's |
 
 `-rewrite-aliases` reports: WARN for files excluded by build tags that name
@@ -638,13 +639,25 @@ for the symbol (`assertEnforcementReferenceExists`: `../../<path>` and
 identifier the move makes ambiguous (renamed for one moved object, kept or
 renamed differently for another) is not rewritten, and the HIGH says why.
 
+**`Function` next to `File`** (the authzop catalog, keyed by file and
+enclosing function): when `-rewrite-outrefs` rewrites the `File` field of a
+keyed composite literal, it also looks at a sibling `Function` field. The
+value is rewritten only when it is a string literal naming a function or
+method declared in that moved file which the move renames, to one new name
+(`{File: "pkg/hub/x.go", Function: "authorizeAgentCreate"}` becomes
+`{File: "pkg/hub/area/x.go", Function: "AuthorizeAgentCreate"}`). A name the
+move does not rename there stays as it is, silently. Every other case that
+could leave the entry stale is a HIGH ("Function field next to a rewritten
+File field not rewritten"), never a silent skip: a value that is not a string
+literal, a name declared only in another file that the move renames, a name
+that is ambiguous in the file (a renamed method and a kept function of the
+same name), or a moved file that was not type-checked.
+
 Everything else stays report-only: base names, path elements, a repo path
 inside a longer literal or line (`"../../pkg/hub/x.go"`,
 `"pkg/hub/x.go:fn:Callee"`, `# see pkg/hub/x.go`), a line that names the path
 twice, lines of shell scripts, the `Makefile` and workflows, Go files that do
-not parse, and references accepted with `pkgmove:ref-ok`. A field that names
-a symbol without the path (the catalog's `Function`) is not a file reference
-and is not rewritten; check it when the move renames that symbol. Rewritten Go
+not parse, and references accepted with `pkgmove:ref-ok`. Rewritten Go
 files are gofmt-ed; text lines keep their other bytes (a CRLF ending
 included). The edits are part of the move: staged with it, and rolled back
 with it on failure.
